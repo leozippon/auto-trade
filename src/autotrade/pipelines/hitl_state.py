@@ -92,7 +92,6 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "finalize_before_deadline_seconds": rolling_default("finalize_before_deadline_seconds"),
     "per_call_timeout_seconds": rolling_default("per_call_timeout_seconds"),
     "strategy_fit_timeout_seconds": rolling_default("strategy_fit_timeout_seconds"),
-    "disable_step_tree": False,
     "record_failed_attempts": rolling_default("record_failed_attempts"),
     "min_return": AcceptanceRules().min_return,
     "min_sharpe": AcceptanceRules().min_sharpe,

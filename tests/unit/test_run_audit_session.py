@@ -22,7 +22,6 @@ def _options(tmp_path: Path, **overrides: object) -> SimpleNamespace:
             ledger_path=tmp_path / "ledger.jsonl",
             schedule=object(),
             broker_profile=object(),
-            step_tree_enabled=True,
             research_directive="directive",
             max_llm_calls=800,
             max_research_minutes=20,

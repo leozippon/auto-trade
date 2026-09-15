@@ -312,6 +312,9 @@ def _budget_facts(
             # the authoritative device fact: a per-session GPU override moves
             # only the session's own container, never this number.
             "strategy_gpu_count": budgets.get("strategy_gpu_count"),
+            # The totals above are the arm's, spent across every attempt of
+            # its one session; what earlier attempts already used of them.
+            "used_before_this_attempt": budgets.get("used_before_this_attempt"),
             # CPU quota that same container is started with, and therefore the
             # value its OMP/MKL/OPENBLAS/NUMEXPR thread variables carry. Read
             # from the environment's own SandboxLimits, the single source the
@@ -363,7 +366,6 @@ def _artifact_contract_facts(
                 if acceptance
                 else None
             ),
-            "step_tree_enabled": manifest.get("step_tree_enabled"),
             "record_failed_attempts": manifest.get("record_failed_attempts"),
             "nl_failure_policy": manifest.get("nl_failure_policy"),
         }

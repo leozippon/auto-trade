@@ -197,6 +197,9 @@ class Developer:
                 request.validation.request(typed, schedule=CONFIG_SCHEDULE, broker_profile=CONFIG_PROFILE)
             )
             steps.append(StepResult(f"{request.session_key}_step_{number}", typed.revision_id, validation, span=request.validation.label))
+        # Like the real developer: the Validations earlier attempts recorded
+        # are this session's Steps too.
+        steps = [*request.steps_before, *steps]
         node_id = extra.get("node_id")
         if outcome == "freeze" and node_id is None:
             node_id = steps[extra.get("nominee", 0)].step_id
@@ -207,6 +210,7 @@ class Developer:
             node_id=node_id,
             reason=extra.get("reason", ""),
             finish_reason=extra.get("finish_reason", ""),
+            attempt=request.resume.attempt if request.resume is not None else 1,
         )
 
 
@@ -348,6 +352,140 @@ def test_no_edge_ends_the_arm_without_a_deliverable(tmp_path: Path):
     }
     with pytest.raises(RuntimeError, match="needs a frozen artifact"):
         pipeline.run_forward()
+
+
+def _interrupted_attempt(
+    pipeline, ledger, *, summary: str | None, replay_years: int, node: bool
+) -> str:
+    """Leave what an interrupted attempt leaves: an attempt_failed row, a
+    trace with budget checkpoints (and a compaction), a published tree node
+    with its host sidecar and its revision in the store."""
+
+    from autotrade.environment.runtime import agent_trace_path
+    from autotrade.environment.step_tree import StepTree
+    from autotrade.pipelines.session_resume import record_step_sidecar
+
+    def crash(_request):
+        raise RuntimeError("session container died")
+
+    keep = pipeline.developer
+    pipeline.developer = crash
+    with pytest.raises(RuntimeError):
+        pipeline.run_research_session()
+    pipeline.developer = keep
+    run_id = str(ledger.read()[-1]["run_id"])
+    trace = agent_trace_path(pipeline.config.experiment_dir / "artifacts", run_id)
+    trace.parent.mkdir(parents=True, exist_ok=True)
+    events = [
+        {"event_type": "session_start", "ts": "2026-09-15T01:00:00+00:00", "run_id": "run_ref_first"},
+        {
+            "event_type": "llm_call",
+            "ts": "2026-09-15T01:10:00+00:00",
+            "run_id": "run_ref_first",
+            "budget_used": {"inference_seconds": 600.0, "llm_calls": 7, "main_calls": 5, "subagent_calls": 2, "compact_calls": 0, "replay_years": replay_years, "null_controls": 1},
+        },
+    ]
+    if summary is not None:
+        events.append({"event_type": "context_compaction", "ts": "2026-09-15T01:20:00+00:00", "run_id": "run_ref_first", "status": "ok", "trigger": "agent", "summary": summary})
+    events.append({"event_type": "session_error", "ts": "2026-09-15T01:30:00+00:00", "run_id": "run_ref_first", "budget_used": {"inference_seconds": 900.0, "llm_calls": 9, "main_calls": 7, "subagent_calls": 2, "compact_calls": 0, "replay_years": replay_years, "null_controls": 1}})
+    trace.write_text("".join(json.dumps(event) + "\n" for event in events) + "{torn", encoding="utf-8")
+    if not node:
+        return run_id
+    source = pipeline.config.experiment_dir.parent / "candidates" / "earlier"
+    source.mkdir(parents=True)
+    (source / "main.py").write_text(f"{MAIN}# alpha=0.0011\n", encoding="utf-8")
+    revision = pipeline.artifacts.create_revision(source)
+    typed = ArtifactRevision(str(revision.revision_id), Path(revision.output_path))
+    validation = pipeline.evaluator.evaluate(
+        pipeline.developer.requests[0].validation.request(typed, schedule=CONFIG_SCHEDULE, broker_profile=CONFIG_PROFILE)
+        if pipeline.developer.requests
+        else _request_span(pipeline).request(typed, schedule=CONFIG_SCHEDULE, broker_profile=CONFIG_PROFILE)
+    )
+    node_id = StepTree(pipeline.config.experiment_dir / "steps").record_step(
+        typed.output_path,
+        epoch_id="research",
+        session_ref="session_ref_first",
+        run_id="run_ref_first",
+        result_name="valid_001",
+        revision_id="strategy_ref_first",
+        metrics={},
+        metadata={"span": "full"},
+    )
+    record_step_sidecar(
+        pipeline.config.experiment_dir,
+        StepResult(node_id, typed.revision_id, validation, span="full"),
+    )
+    return run_id
+
+
+def _request_span(pipeline):
+    _decision, years = pipeline.research_inputs()
+    from autotrade.pipelines.config import research_span
+
+    return research_span(years, FULL_SPAN)
+
+
+def test_a_resumed_attempt_continues_from_the_trace_and_the_recorded_node(tmp_path: Path):
+    """The next attempt of an interrupted session starts where it stopped: the
+    budget the trace last recorded, the last compaction summary, and the
+    Validation the interrupted attempt recorded (nominable, its revision kept)."""
+
+    pipeline, _snapshots, _evaluator, developer, ledger = _pipeline(
+        tmp_path, {1: ([0.0012], "freeze", {"nominee": 1})}
+    )
+    _interrupted_attempt(pipeline, ledger, summary="## 目标\n继续动量腿", replay_years=2, node=True)
+    revisions = pipeline.artifacts.root / "revisions"
+    assert len(list(revisions.iterdir())) == 1, "a failed attempt keeps its revisions"
+
+    record = pipeline.run_research_session()
+
+    request = developer.requests[-1]
+    assert request.resume is not None
+    assert (request.resume.attempt, request.resume.interrupted_at) == (2, "2026-09-15T01:30:00+00:00")
+    assert request.resume.error == "RuntimeError: session container died"
+    assert request.resume.compaction_summary == "## 目标\n继续动量腿"
+    assert request.resume.transcripts == ("run_ref_first.txt",)
+    assert request.budget_used.to_record() == {
+        "inference_seconds": 900.0, "llm_calls": 9, "main_calls": 7, "subagent_calls": 2,
+        "compact_calls": 0, "replay_years": 2, "null_controls": 1,
+    }
+    [earlier] = request.steps_before
+    assert earlier.span == "full" and earlier.validation.summary["order_count"] > 0
+    # Two full-span validations: the earlier node and this attempt's; the gate
+    # passes and the new node is frozen.
+    assert record["steps"][0]["step_id"] == earlier.step_id
+    assert record["attempts"] == 2 and record["trials_to_date"] == 2
+    assert record["freeze_gate"]["passed"] is True and record["frozen"] is not None
+    assert [row["record_type"] for row in ledger.read()] == ["attempt_failed", "research_session"]
+    assert list(revisions.iterdir()) == [], "the recorded session prunes its revisions"
+
+
+def test_a_resumed_attempt_without_a_summary_starts_from_the_note_alone(tmp_path: Path):
+    pipeline, _snapshots, _evaluator, developer, ledger = _pipeline(
+        tmp_path, {1: ([0.0], "no_edge", {"reason": "nothing survived the second look"})}
+    )
+    _interrupted_attempt(pipeline, ledger, summary=None, replay_years=0, node=False)
+    record = pipeline.run_research_session()
+    request = developer.requests[-1]
+    assert request.resume is not None and request.resume.compaction_summary is None
+    assert request.steps_before == () and request.budget_used.llm_calls == 9
+    assert record["attempts"] == 2 and record["arm_end"]["status"] == "no_deliverable"
+
+
+def test_a_complete_node_without_its_sidecar_fails_the_attempt(tmp_path: Path):
+    from autotrade.environment.step_tree import StepTree
+
+    pipeline, *_rest, ledger = _freezing(tmp_path)
+    output = tmp_path / "orphan"
+    output.mkdir()
+    (output / "main.py").write_text(MAIN, encoding="utf-8")
+    StepTree(pipeline.config.experiment_dir / "steps").record_step(
+        output, epoch_id="research", session_ref="session_ref_first", run_id="run_ref_first",
+        result_name="valid_001", revision_id="strategy_ref_first", metrics={},
+    )
+    with pytest.raises(RuntimeError, match="without its host sidecar"):
+        pipeline.run_research_session()
+    assert [row["record_type"] for row in ledger.read()] == []
 
 
 def test_an_exhausted_budget_ends_the_arm_without_a_deliverable(tmp_path: Path):

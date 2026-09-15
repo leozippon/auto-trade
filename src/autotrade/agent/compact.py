@@ -430,7 +430,7 @@ def _rebuild(
     non_summary = [message for message in messages[1:] if not is_compaction_message(message)]
     files = _merge_touched_files(_latest_compaction_files(messages), _touched_files(non_summary))
     recent = drop_leading_orphan_tools(non_summary[-keep_recent_messages:])
-    summary_message = _build_compaction_summary_message(
+    summary_message = compaction_summary_message(
         summary_text, files, kind=kind, trace_ref=trace_ref
     )
     # The system prompt is reused as the same object, never re-rendered.
@@ -703,24 +703,29 @@ def _extract_summary_text(response: ProviderResponse) -> str:
     return text
 
 
-def _build_compaction_summary_message(
+def compaction_summary_message(
     summary_text: str,
-    files: dict[str, list[str]],
+    files: dict[str, list[str]] | None = None,
     *,
     kind: str,
     trace_ref: str | None,
 ) -> ChatMessage:
+    """The one user message a compaction leaves in the conversation.
+
+    ``kind`` says who wrote the summary: ``agent`` (its own ``compact`` call),
+    ``model`` (the runtime compactor) or ``resume`` (an interrupted attempt's
+    last summary, handed to the attempt that continues it).
+    """
+
     payload: dict[str, object] = {
         "observation": "context_compaction",
-        # ``agent``: the summary is the Agent's own; ``model``: the runtime
-        # compactor wrote it at the threshold or because a request did not fit.
         "summary_kind": kind,
         "note": (
             "Older messages were replaced by this summary; the summary and the most "
             "recent messages are the retained context."
         ),
         "summary": summary_text,
-        "files": files,
+        "files": files if files is not None else {"read": [], "modified": []},
         "trace": {
             "root": "trace",
             "path": f"{trace_ref}.txt" if trace_ref else "<run_ref>.txt",

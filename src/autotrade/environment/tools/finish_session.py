@@ -116,14 +116,12 @@ class FinishSessionTool:
         tree: StepTree,
         *,
         session_ref: str,
-        run_ref: str,
         freeze_gate: FreezeGate,
         another_round_fits: Callable[[], bool] | None = None,
         budget_status: Callable[[], SessionBudgetStatus] | None = None,
     ) -> None:
         self.tree = tree
         self.session_ref = session_ref
-        self.run_ref = run_ref
         self._freeze_gate = freeze_gate
         self._another_round_fits = another_round_fits or (lambda: True)
         self._budget_status = budget_status
@@ -229,7 +227,7 @@ class FinishSessionTool:
         return [
             str(node["node_id"])
             for node in self.tree.nodes()
-            if node_in_session(node, session_ref=self.session_ref, run_id=self.run_ref)
+            if node_in_session(node, session_ref=self.session_ref)
             and node.get("complete_validation")
             and node.get("revision_id")
         ]
@@ -251,7 +249,7 @@ class FinishSessionTool:
             node = self.tree.get_node(node_id)
         except ValueError as exc:
             raise ToolError(f"finish_session: {node_id} is not a Step node") from exc
-        if not node_in_session(node, session_ref=self.session_ref, run_id=self.run_ref):
+        if not node_in_session(node, session_ref=self.session_ref):
             raise ToolError(f"finish_session: {node_id} is not a Step of this session")
         if not node.get("complete_validation") or not node.get("revision_id"):
             raise ToolError(f"finish_session: {node_id} is not a complete Validation")

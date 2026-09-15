@@ -70,6 +70,7 @@ def render() -> str:
         SESSION_PROHIBITIONS,
         SESSION_FACTS_SECTION,
         SESSION_FEEDBACK_SECTION,
+        STEP_TREE_SECTION,
     ), "SESSION_STATIC_SECTIONS order changed; update the snapshot layout"
 
     parts = [
@@ -95,7 +96,7 @@ def render() -> str:
         "",
         "## 1. 研究会话系统提示词",
         "",
-        "十一个稳定区块按「目的 → 协议 → 决策合同 → 证据 → 约束 → 事实 → 反馈」的顺序拼接；启用 Step 树时在其后追加 `STEP_TREE_SECTION`（见 §1.12），再接动态上下文。",
+        "十二个稳定区块按「目的 → 协议 → 决策合同 → 证据 → 约束 → 事实 → 反馈 → Step 树」的顺序拼接，再接动态上下文。",
         "",
         "### 1.1 身份与任务",
         "",
@@ -145,7 +146,7 @@ def render() -> str:
         "",
         "### 1.12 Step 产物树",
         "",
-        "`step_tree_enabled` 时追加 `STEP_TREE_SECTION`：",
+        "`STEP_TREE_SECTION`：",
         "",
         _block(STEP_TREE_SECTION),
         "",
@@ -217,7 +218,7 @@ def render() -> str:
         "",
         "## 6. 动态上下文结构",
         "",
-        "稳定系统提示词（及可选 Step 产物树区块）之后追加：",
+        "稳定系统提示词之后追加：",
         "",
         _block(
             f"{SESSION_DYNAMIC_CONTEXT_HEADER.strip()}\n\n"

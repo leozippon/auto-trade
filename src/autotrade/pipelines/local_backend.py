@@ -105,6 +105,7 @@ from .calendar import FULL_SPAN, yyyymmdd
 from .config import (
     AcceptanceRules,
     ArtifactRevision,
+    BudgetUsed,
     EvaluationBackend,
     EvaluationRequest,
     EvaluationResult,
@@ -123,8 +124,10 @@ from .experiment import (
     null_control_seed,
     research_step_record,
 )
-from .ledger import RESEARCH_STAGE, ExperimentLedger, research_records
+from .ledger import RESEARCH_STAGE, ExperimentLedger
+from .session_resume import record_step_sidecar
 from .skills import (
+    OPERATING_MEMORY_DIRNAME,
     SKILLS_INDEX_PATH,
     DeleteSkillTool,
     MemorySource,
@@ -422,6 +425,19 @@ class SessionCallBudget:
     @property
     def main_calls(self) -> int:
         return self._main_calls
+
+    @property
+    def compact_calls(self) -> int:
+        return self._compact_calls
+
+    def seed(self, used: BudgetUsed) -> None:
+        """Continue the counters from what earlier attempts of the session spent."""
+
+        with self._lock:
+            self.calls = int(used.llm_calls)
+            self._main_calls = int(used.main_calls)
+            self._subagent_calls = int(used.subagent_calls)
+            self._compact_calls = int(used.compact_calls)
 
     def claim(self, role: str = "main") -> None:
         if role not in SESSION_LLM_CALL_ROLES:
@@ -772,6 +788,11 @@ def install_agent_data_contract(
     summary and unit reference of its own mounted views, the session id opaqued
     so no calendar label leaks through them."""
 
+    for name in AGENT_DATA_CONTRACT_FILES:
+        # A resumed attempt rewrites the files its predecessor locked.
+        target = paths.artifacts / name
+        if target.is_file():
+            target.chmod(0o644)
     write_agent_data_summary(
         paths.data_summary, kind=kind, session_ref=session_ref, views=views
     )
@@ -871,6 +892,7 @@ class SessionValidations:
         ref_store: AgentRefStore,
         ledger: ExperimentLedger,
         manifest: RunManifest | None = None,
+        experiment_dir: Path | None = None,
     ) -> None:
         self.request = request
         self.output_dir = output_dir
@@ -884,10 +906,15 @@ class SessionValidations:
         self.ref_store = ref_store
         self.ledger = ledger
         self.manifest = manifest
-        self.replay_years_used = 0
+        # Where each recorded Validation is made durable at once: the
+        # experiment's step tree and its host-only sidecar, so an attempt that
+        # dies keeps the nodes it validated for the attempt that resumes it.
+        self.experiment_dir = experiment_dir
+        # Continued from the earlier attempts' spend and Validations.
+        self.replay_years_used = int(request.budget_used.replay_years)
+        self.steps: list[StepResult] = list(request.steps_before)
         # Candidates reserved so far, which names each result.
         self.candidates_started = 0
-        self.steps: list[StepResult] = []
 
     @property
     def replay_years_remaining(self) -> int:
@@ -989,7 +1016,7 @@ class SessionValidations:
         """Append one completed Validation to the step tree under the current
         position; ``batch_validate`` repositions the tree before each record so
         its candidates are siblings of one parent."""
-        return self.tree.record_step(
+        node_id = self.tree.record_step(
             revision.output_path,
             epoch_id=RESEARCH_STAGE,
             # The session id is opaqued like every other Agent-visible id.
@@ -1007,6 +1034,22 @@ class SessionValidations:
             attachments={VALIDATION_RESULT_ATTACHMENT: evaluation.result_ref},
             metadata=metadata,
         )
+        if self.experiment_dir is not None:
+            span = str((metadata or {}).get("span") or "")
+            if not span:
+                raise ValueError("a recorded Validation needs its span in metadata")
+            record_step_sidecar(
+                self.experiment_dir,
+                StepResult(node_id, revision.revision_id, evaluation, span=span),
+            )
+            self.publish_tree()
+        return node_id
+
+    def publish_tree(self) -> None:
+        """Publish the session's tree to the experiment, node snapshots included."""
+
+        if self.experiment_dir is not None and self.tree.tree_path.is_file():
+            link_copytree(self.tree.root, self.experiment_dir / "steps")
 
     def validation_request(
         self, revision: ArtifactRevision, span: ReplaySpan
@@ -1877,6 +1920,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
                 error=public_error,
                 metadata=metadata,
             )
+            self.backtest.publish_tree()
         self.backtest.append_manifest_summary(
             {
                 "result_name": result_name,
@@ -2212,7 +2256,6 @@ class LLMResearchDeveloper:
         command_runner_factory: Callable[[Path], CommandRunner] | None = None,
         # One completion ceiling for the parent conversation and its children.
         max_response_tokens: int = AGENT_MAX_OUTPUT_TOKENS,
-        step_tree_enabled: bool = True,
         research_directive: str = "",
         workspace_reference: str = "",
         operating_memory: str = "none",
@@ -2235,7 +2278,6 @@ class LLMResearchDeveloper:
         self.sandbox_spec = sandbox_spec or SandboxSpec()
         self.command_runner_factory = command_runner_factory
         self.max_response_tokens = max_response_tokens
-        self.step_tree_enabled = step_tree_enabled
         self.research_directive = research_directive
         self.workspace_reference = workspace_reference
         self.operating_memory = str(operating_memory)
@@ -2274,8 +2316,12 @@ class LLMResearchDeveloper:
         return int(limits.gpu_count)
 
     def __call__(self, request: ResearchSessionRequest) -> ResearchSessionResult:
-        from autotrade.agent.compact import ContextCompactor
-        from autotrade.agent.prompts import SESSION_DEFAULT_INSTRUCTION, build_system_prompt
+        from autotrade.agent.compact import ContextCompactor, compaction_summary_message
+        from autotrade.agent.prompts import (
+            SESSION_DEFAULT_INSTRUCTION,
+            build_resume_instruction,
+            build_system_prompt,
+        )
         from autotrade.agent.runner import (
             AgentSessionBudgetExhausted,
             AgentSessionConfig,
@@ -2287,9 +2333,19 @@ class LLMResearchDeveloper:
         )
         from autotrade.pipelines.agent_inbox import bind_session_inbox
 
-        root = self.runtime_root / request.run_id
-        if root.exists():
-            raise FileExistsError(f"session runtime already exists: {request.run_id}")
+        # One runtime root per session, reused by every attempt: the
+        # workspace, the working copy, the candidates and the step tree are
+        # simply still there when an interrupted attempt is resumed.
+        resume = request.resume
+        root = self.runtime_root / request.session_key
+        if root.exists() and resume is None:
+            raise FileExistsError(f"session runtime already exists: {root.name}")
+        if resume is not None and not (root / "agent" / "workspace" / "output" / "main.py").is_file():
+            raise RuntimeError(
+                "cannot resume the research session: the workspace of the interrupted "
+                f"attempt is missing under the session runtime root {root.name}"
+            )
+        used = request.budget_used
         session_ref = self.ref_store.get_or_create("session", request.session_key)
         run_ref = self.ref_store.get_or_create("run", request.run_id)
         # The Agent-readable transcript of every attempt, appended beside the
@@ -2325,7 +2381,6 @@ class LLMResearchDeveloper:
         # /mnt/artifacts/run_manifest.json. It is also where every backtest
         # summary accumulates. Research dates only: the forward period is
         # never known to a session.
-        records = self.ledger.read()
         manifest = RunManifest.create(
             paths.run_manifest,
             {
@@ -2359,14 +2414,14 @@ class LLMResearchDeveloper:
                     "decision_input": {"snapshot_id": request.snapshot.snapshot_id}
                 },
                 "start": start_record(),
-                "arm": arm_record(records),
+                "arm": arm_record(request.steps_before),
                 "modification_constraints": request.modification_constraints.to_record(),
                 "acceptance_rules": dict(request.acceptance_rules),
                 "schedule": self.schedule.to_record(),
                 "broker_profile": self.broker_profile.to_record(),
                 "nl_failure_policy": request.nl_failure_policy,
-                "step_tree_enabled": self.step_tree_enabled,
                 "record_failed_attempts": request.record_failed_attempts,
+                "attempt": resume.attempt if resume is not None else 1,
                 "finalize_before_deadline_seconds": request.finalize_before_deadline_seconds,
                 "sandbox_spec": sandbox_spec.to_record(),
                 "exploration_directive": self.research_directive.strip(),
@@ -2385,6 +2440,9 @@ class LLMResearchDeveloper:
                     # What ``fit`` may spend those wall clocks on: the formal
                     # strategy container's own GPU allocation.
                     "strategy_gpu_count": self.strategy_gpu_count,
+                    # The totals above are the arm's; what earlier attempts
+                    # already spent of them.
+                    "used_before_this_attempt": used.to_record(),
                 },
             },
             ref_store=self.ref_store,
@@ -2399,8 +2457,9 @@ class LLMResearchDeveloper:
             raise ValueError(
                 "baseline strategy file must be named main.py for research sessions"
             )
-        copy_artifact(source, output_dir)
-        copy_model_artifacts(source_models, models_dir)
+        if resume is None:
+            copy_artifact(source, output_dir)
+            copy_model_artifacts(source_models, models_dir)
         restore_working_artifacts_writable(output_dir, models_dir)
         # Pin the read-only contract files to what this session actually
         # received, and record it for the audit: an initial artifact seeds them
@@ -2408,7 +2467,9 @@ class LLMResearchDeveloper:
         # retroactively fail a session already running against the old bytes.
         seeded_readonly = readonly_baseline(output_dir)
         manifest.update(readonly_baseline=seeded_readonly)
-        inputs_dir.mkdir()
+        if inputs_dir.exists():
+            chmod_tree(inputs_dir, file_mode=0o644, dir_mode=0o755)
+        inputs_dir.mkdir(exist_ok=True)
         # Mount before the index is written: the curated entries and this
         # experiment's own skills reach the Agent through the same index.
         # Fixed at creation: a session mounts this experiment's snapshot and
@@ -2420,15 +2481,23 @@ class LLMResearchDeveloper:
             repo_root=self.repo_root,
             experiments_root=self.experiment_dir.parent,
         )
+        # The mounted memory and refs are re-copied on a resume (their content
+        # is fixed); the skills tree is the Agent's own work and stays.
+        _remove_mounted_tree(workspace_root / OPERATING_MEMORY_DIRNAME)
         mounted_memory = install_operating_memory(workspace_root, self.experiment_dir)
         manifest.update(
             operating_memory=_operating_memory_record(memory_snapshot, mounted_memory)
         )
-        skills_stats = install_workspace_skills(
-            request.skills_source_ref or None,
-            workspace_root,
-            index_path=inputs_dir / "skills_index.json",
-        )
+        if resume is None:
+            skills_stats = install_workspace_skills(
+                request.skills_source_ref or None,
+                workspace_root,
+                index_path=inputs_dir / "skills_index.json",
+            )
+        else:
+            skills_stats = write_skills_index(
+                workspace_root / "skills", inputs_dir / "skills_index.json"
+            )
         manifest.update(
             skills={
                 "index_path": SKILLS_INDEX_PATH,
@@ -2437,6 +2506,7 @@ class LLMResearchDeveloper:
                 "bytes": skills_stats.bytes,
             }
         )
+        _remove_mounted_tree(workspace_root / _WORKSPACE_REFS_DIR)
         install_workspace_reference(
             workspace_root,
             self.workspace_reference,
@@ -2456,6 +2526,7 @@ class LLMResearchDeveloper:
         search_roots = SearchRoots(safe, paths=paths, trace_root=transcripts)
         tree = self._install_step_tree(paths)
         sandbox: DockerSandbox | None = None
+        emit_event = trace.emit
         try:
             if self.command_runner_factory is not None:
                 command_runner = self.command_runner_factory(workspace_root)
@@ -2475,7 +2546,6 @@ class LLMResearchDeveloper:
                 command_runner = PersistentCommandRunner(sandbox)
             facts = self._session_facts(
                 request,
-                records,
                 manifest=manifest,
                 paths=paths,
                 models_dir=models_dir,
@@ -2491,11 +2561,15 @@ class LLMResearchDeveloper:
                 constraints=request.modification_constraints,
                 readonly_baseline=seeded_readonly,
             )
-            time_budget = InferenceTimeBudget(duration_seconds=request.deadline_seconds)
+            # The arm's budgets minus what earlier attempts spent: the clock
+            # holds only the remainder, the counters start from the spend.
+            attempt_seconds = max(request.deadline_seconds - used.inference_seconds, 0.001)
+            time_budget = InferenceTimeBudget(duration_seconds=attempt_seconds)
             shared_budget = SessionCallBudget(
                 max_calls=request.max_llm_calls,
                 time_budget=time_budget,
             )
+            shared_budget.seed(used)
             backtest = SessionValidations(
                 request=request,
                 output_dir=output_dir,
@@ -2509,6 +2583,7 @@ class LLMResearchDeveloper:
                 ref_store=self.ref_store,
                 ledger=self.ledger,
                 manifest=manifest,
+                experiment_dir=self.experiment_dir,
             )
             smoke = SmokeBacktestTool(
                 request=request,
@@ -2563,13 +2638,11 @@ class LLMResearchDeveloper:
                 else None
             )
             if null_control_tool is not None:
+                null_control_tool.used = int(used.null_controls)
                 tools.append(null_control_tool)
-            if self.step_tree_enabled:
-                tools.append(
-                    StepRollbackTool(
-                        tree, output_dir, models_dir, session_ref=session_ref, run_id=run_ref
-                    )
-                )
+            tools.append(
+                StepRollbackTool(tree, output_dir, models_dir, session_ref=session_ref)
+            )
             # Matches the opaque session ref the step tree stores, so the
             # current-session check compares like with like. One gate for the
             # session: ``finish_session`` refuses a failing nomination with it,
@@ -2578,11 +2651,31 @@ class LLMResearchDeveloper:
                 FinishSessionTool(
                     tree,
                     session_ref=session_ref,
-                    run_ref=run_ref,
                     freeze_gate=backtest.freeze_gate,
                     another_round_fits=lambda: another_batch_round_fits(backtest),
                     budget_status=lambda: session_budget_status(backtest),
                 )
+            )
+            def budget_used_now() -> dict[str, object]:
+                """The session's cumulative spend, as every budgeted trace event records it."""
+
+                return BudgetUsed(
+                    inference_seconds=used.inference_seconds
+                    + max(attempt_seconds - time_budget.remaining(), 0.0),
+                    llm_calls=shared_budget.calls,
+                    main_calls=shared_budget.main_calls,
+                    subagent_calls=shared_budget.subagent_calls,
+                    compact_calls=shared_budget.compact_calls,
+                    replay_years=backtest.replay_years_used,
+                    null_controls=(
+                        null_control_tool.used
+                        if null_control_tool is not None
+                        else int(used.null_controls)
+                    ),
+                ).to_record()
+
+            emit_event = _agent_event_sink(
+                trace, request.progress_hook, request.run_id, budget_used=budget_used_now
             )
             budgeted = SessionBudgetLLM(self.llm, budget=shared_budget, role="main")
             subagent_budgeted = SessionBudgetLLM(
@@ -2626,7 +2719,6 @@ class LLMResearchDeveloper:
                 system_prompt=build_system_prompt(
                     self.schedule,
                     experiment_facts=facts,
-                    step_tree_enabled=self.step_tree_enabled,
                     exploration_directive=self.research_directive,
                     session_directive=request.directive,
                 ),
@@ -2651,9 +2743,7 @@ class LLMResearchDeveloper:
                 ),
                 subagent=subagent,
                 time_budget=time_budget,
-                event_sink=_agent_event_sink(
-                    trace, request.progress_hook, request.run_id
-                ),
+                event_sink=emit_event,
                 inbox=bind_session_inbox(
                     self.experiment_dir,
                     session_key=request.session_key,
@@ -2662,8 +2752,50 @@ class LLMResearchDeveloper:
                 freeze_gate=backtest.freeze_gate,
                 trace_ref=run_ref,
             )
+            # The Validations earlier attempts recorded are this session's:
+            # nominable at the finish and listed in a hard finalization.
+            recorded_validations = [
+                {
+                    "node_id": step.step_id,
+                    "revision_id": self.ref_store.get_or_create("strategy", step.revision_id),
+                    "stats": batch_candidate_stats(step.validation.summary),
+                }
+                for step in request.steps_before
+            ]
+            if resume is None:
+                preamble: list[ChatMessage] = []
+                instruction = SESSION_DEFAULT_INSTRUCTION
+            else:
+                preamble = (
+                    [
+                        compaction_summary_message(
+                            resume.compaction_summary, kind="resume", trace_ref=run_ref
+                        )
+                    ]
+                    if resume.compaction_summary
+                    else []
+                )
+                instruction = build_resume_instruction(
+                    attempt=resume.attempt,
+                    interrupted_at=resume.interrupted_at,
+                    error=resume.error,
+                    has_summary=bool(resume.compaction_summary),
+                    transcripts=resume.transcripts,
+                    used=used.to_record(),
+                    totals={
+                        "inference_seconds": request.deadline_seconds,
+                        "llm_calls": request.max_llm_calls,
+                        "replay_years": request.max_replay_years,
+                        "null_controls": request.max_null_controls,
+                    },
+                )
             try:
-                result = runner.run(SESSION_DEFAULT_INSTRUCTION)
+                result = runner.run(
+                    instruction,
+                    preamble=preamble,
+                    complete_validations=recorded_validations,
+                    budget_total_seconds=request.deadline_seconds,
+                )
                 conversation_id = result.conversation_id
                 outcome, node_id, reason = _session_outcome(result.finish_value)
                 finish_reason = "llm_agent_finish_session"
@@ -2697,8 +2829,7 @@ class LLMResearchDeveloper:
                 selected_step_id=node_id,
                 finish_outcome=outcome,
             )
-            if self.step_tree_enabled and paths.steps.exists():
-                link_copytree(paths.steps, self.experiment_dir / "steps")
+            backtest.publish_tree()
             collected = local.collect_artifacts(
                 self.artifact_store.root.parent / request.run_id
             )
@@ -2719,9 +2850,11 @@ class LLMResearchDeveloper:
                 # the sandbox cleanup.
                 run_manifest_ref=str(collected / "run_manifest.json"),
                 skills_source_ref=str(collected / "workspace" / "skills"),
+                budget_used=BudgetUsed.from_record(budget_used_now()),
+                attempt=resume.attempt if resume is not None else 1,
             )
         except Exception as exc:
-            trace.emit(
+            emit_event(
                 "session_error",
                 {"status": "error", "error": f"{type(exc).__name__}: {exc}"},
             )
@@ -2733,13 +2866,11 @@ class LLMResearchDeveloper:
     def _install_step_tree(self, paths) -> StepTree:
         """Hand the experiment-level step tree to the session.
 
-        With the step tree disabled the session still records its own run
-        nodes -- ``finish_session`` selects one of them -- but the lineage is
-        not published back, so the ablation removes the memory the knob is
-        about.
+        A resumed attempt finds its predecessor's tree in the shared session
+        root and keeps it; a fresh session seeds from the experiment copy.
         """
         experiment_tree = self.experiment_dir / "steps"
-        if self.step_tree_enabled and experiment_tree.exists():
+        if not (paths.steps / "tree.json").is_file() and experiment_tree.exists():
             link_copytree(experiment_tree, paths.steps)
         return StepTree(paths.steps)
 
@@ -2753,6 +2884,9 @@ class LLMResearchDeveloper:
     ) -> None:
         source = Path(request.snapshot.decision_ref).resolve(strict=True)
         target = local.paths.current_snapshot
+        # The view is fixed for the session: a resumed attempt re-mounts the
+        # same decision view over the read-only one the interrupted attempt left.
+        _remove_mounted_tree(target)
         if source.is_dir():
             local.bind_snapshot_view(source)
         elif source.is_file():
@@ -2790,7 +2924,6 @@ class LLMResearchDeveloper:
     def _session_facts(
         self,
         request: ResearchSessionRequest,
-        records: Sequence[Mapping[str, object]],
         *,
         manifest: RunManifest,
         paths,
@@ -2865,26 +2998,19 @@ def start_record() -> dict[str, object]:
     return {"kind": "template", "template_ref": "agent_output_template"}
 
 
-def arm_record(records: Sequence[Mapping[str, object]]) -> dict[str, object]:
-    """The arm's selection state when the session starts.
+def arm_record(steps: Sequence[StepResult]) -> dict[str, object]:
+    """The arm's selection state when the attempt starts.
 
-    Trials are the distinct revisions the arm has validated, the pool the
-    freeze gate deflates over; a session only runs while nothing is frozen.
+    Trials are the distinct revisions the session's earlier attempts
+    validated, the pool the freeze gate deflates over; a session only runs
+    while nothing is frozen.
     """
 
-    rows = [
-        row
-        for record in research_records(records)
-        for row in (record.get("steps") or ())
-        if isinstance(row, Mapping)
-    ]
     return {
         "frozen": False,
         "freezes_per_arm": 1,
-        "trials_to_date": len({str(row.get("revision_id")) for row in rows}),
-        "full_span_validations_to_date": sum(
-            1 for row in rows if row.get("span") == FULL_SPAN
-        ),
+        "trials_to_date": len({step.revision_id for step in steps}),
+        "full_span_validations_to_date": sum(1 for step in steps if step.span == FULL_SPAN),
     }
 
 
@@ -2995,6 +3121,14 @@ def install_workspace_reference(
     chmod_tree(dest, file_mode=0o444, dir_mode=0o555)
 
 
+def _remove_mounted_tree(path: Path) -> None:
+    """Drop a read-only mount an earlier attempt left, so it can be re-copied."""
+
+    if path.exists():
+        chmod_tree(path, file_mode=0o644, dir_mode=0o755)
+        shutil.rmtree(path)
+
+
 def _skip_workspace_reference_name(name: str) -> bool:
     return name.startswith(".") or name in _REFERENCE_SKIP_NAMES
 
@@ -3059,12 +3193,21 @@ def _environment_phase(
         progress_hook(stage, {"run_id": run_id})
 
 
+# The events that carry the session's cumulative spend, so a resumed attempt
+# reads it off the last one an interrupted attempt wrote.
+BUDGET_EVENTS = frozenset({"llm_call", "tool_call", "session_end", "session_error"})
+
+
 def _agent_event_sink(
     trace: AgentTraceWriter,
     progress_hook,
     run_id: str,
+    *,
+    budget_used: Callable[[], dict[str, object]] | None = None,
 ):
     def emit(event_type: str, payload: dict[str, object]) -> None:
+        if budget_used is not None and event_type in BUDGET_EVENTS:
+            payload = {**payload, "budget_used": budget_used()}
         trace.emit(event_type, payload)
         if progress_hook is None:
             return

@@ -1168,7 +1168,7 @@ class TerminalToolWriteLockTest(unittest.TestCase):
             revision_id=new_revision_id("revision"),
             metrics={},
         )
-        finish = FinishSessionTool(tree, session_ref="session_ref_ab", run_ref="run_x", freeze_gate=_passing_gate)
+        finish = FinishSessionTool(tree, session_ref="session_ref_ab", freeze_gate=_passing_gate)
         return workspace, roots, finish, node_id
 
     def test_finish_locks_mutating_tools_and_leaves_reads_open(self) -> None:
@@ -1239,9 +1239,7 @@ class StepRollbackTest(unittest.TestCase):
             metrics={},
             models_root=paths.agent / "models",
         )
-        tool = StepRollbackTool(
-            tree, output, paths.agent / "models", session_ref="fold_a", run_id="run_a"
-        )
+        tool = StepRollbackTool(tree, output, paths.agent / "models", session_ref="fold_a")
         return output, node_id, ToolRegistry([tool])
 
     def test_rollback_restores_the_recorded_revision(self) -> None:

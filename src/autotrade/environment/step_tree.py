@@ -5,11 +5,10 @@ directory plus optional ``models/`` directory into
 ``/mnt/artifacts/steps/<node_id>/{output,models}/`` (validation attachments
 such as ``detailed_return.json`` sit at the node root) and appends a node
 (with a parent pointer) to ``steps/tree.json``. The tree accumulates across
-the research sessions of one Experiment: the Pipeline hands it to the next
-session's sandbox and positions ``current_node_id`` at its start node, so the Agent can read
-where it stands in the search history and branch from any validated node via
-the ``step_rollback`` tool. The feature is toggleable for ablations
-(``step_tree_enabled``).
+every attempt of the arm's research session: the Environment publishes it to
+the experiment after each recorded Validation and a resumed attempt continues
+it, so the Agent can read where it stands in the search history and branch
+from any validated node via the ``step_rollback`` tool.
 
 ``batch_validate`` appends one node per finished candidate under the current
 position and repositions the tree between records, so a round's candidates are
@@ -36,15 +35,15 @@ NODE_OUTPUT_DIR = "output"
 NODE_MODELS_DIR = "models"
 
 
-def node_in_session(node: Mapping[str, object], *, session_ref: str, run_id: str) -> bool:
-    """Whether a node was produced by this research session (session plus run identity).
+def node_in_session(node: Mapping[str, object], *, session_ref: str) -> bool:
+    """Whether a node was produced by this research session, in any of its attempts.
 
-    Single source for the Agent-facing rule that only the current session's,
-    current run's nodes can be restored or nominated; the nodes this tree
-    carries in from earlier sessions and earlier runs are read-only evidence.
+    Single source for the Agent-facing rule that only this session's nodes
+    can be restored or nominated. A resumed attempt shares the session ref
+    with the attempts before it, so their Validations stay nominable.
     """
 
-    return node.get("session_ref") == session_ref and node.get("run_id") == run_id
+    return node.get("session_ref") == session_ref
 
 
 class StepTree:

@@ -1,0 +1,162 @@
+"""What an interrupted research session leaves behind, read back for its next attempt.
+
+The trace is the single source: every ``llm_call``/``tool_call``/``session_end``/
+``session_error`` event of an attempt carries the cumulative ``budget_used``
+block, and every ``context_compaction`` event carries the summary that
+replaced the older history. The validations an attempt recorded survive in
+the experiment's step tree, whose nodes carry only opaque ids, plus a host-only
+sidecar per node holding the raw revision id, the span, the summary and the
+result reference the Pipeline needs to freeze it.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+
+from autotrade.environment.runtime import agent_trace_path, write_json_atomic
+from autotrade.environment.step_tree import StepTree
+
+from .config import BudgetUsed, EvaluationResult, SessionResume, StepResult
+from .ledger import RESEARCH_STAGE
+
+# Host-only, beside the run markers: never mounted and never Agent-visible.
+STEP_SIDECAR_DIR = ".host/steps"
+
+
+def record_step_sidecar(experiment_dir: str | Path, step: StepResult) -> Path:
+    """Persist what the step tree cannot carry about one recorded Validation."""
+
+    path = Path(experiment_dir) / STEP_SIDECAR_DIR / f"{step.step_id}.json"
+    path.parent.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.mkdir(exist_ok=True, mode=0o700)
+    write_json_atomic(
+        path,
+        {
+            "step_id": step.step_id,
+            "revision_id": step.revision_id,
+            "span": step.span,
+            "summary": dict(step.validation.summary),
+            "result_ref": step.validation.result_ref,
+        },
+    )
+    return path
+
+
+def load_recorded_steps(experiment_dir: str | Path) -> tuple[StepResult, ...]:
+    """The complete Validations the arm's research session recorded so far,
+    in tree order, rebuilt from the published tree and the sidecars.
+
+    A complete node without its sidecar is a validation the host cannot
+    account for, so it fails the attempt instead of silently narrowing the
+    trial pool the freeze gate deflates over.
+    """
+
+    directory = Path(experiment_dir)
+    tree_root = directory / "steps"
+    if not (tree_root / "tree.json").is_file():
+        return ()
+    steps: list[StepResult] = []
+    for node in StepTree(tree_root).nodes():
+        if node.get("epoch_id") != RESEARCH_STAGE or not node.get("complete_validation"):
+            continue
+        node_id = str(node["node_id"])
+        sidecar = directory / STEP_SIDECAR_DIR / f"{node_id}.json"
+        if not sidecar.is_file():
+            raise RuntimeError(
+                f"step node {node_id} is recorded without its host sidecar; the "
+                "session cannot resume with a validation it cannot account for"
+            )
+        record = json.loads(sidecar.read_text(encoding="utf-8"))
+        steps.append(
+            StepResult(
+                str(record["step_id"]),
+                str(record["revision_id"]),
+                EvaluationResult(dict(record["summary"]), str(record["result_ref"])),
+                span=str(record["span"]),
+            )
+        )
+    return tuple(steps)
+
+
+def resume_state(
+    experiment_dir: str | Path, records: Sequence[Mapping[str, object]]
+) -> SessionResume | None:
+    """How the research session's earlier attempts ended, or None on a fresh one.
+
+    Reads every failed research attempt's trace in ledger order: the last
+    ``budget_used`` block is the cumulative spend (each attempt seeds its
+    counters from the amounts before it), the last successful compaction's
+    summary is the checkpoint, and the last event's time is where it stopped.
+    """
+
+    attempts = [
+        record
+        for record in records
+        if record.get("record_type") == "attempt_failed"
+        and record.get("phase") == RESEARCH_STAGE
+    ]
+    if not attempts:
+        return None
+    budget = BudgetUsed()
+    summary: str | None = None
+    interrupted_at = ""
+    transcripts: list[str] = []
+    for attempt in attempts:
+        run_id = str(attempt.get("run_id") or "")
+        path = agent_trace_path(Path(experiment_dir) / "artifacts", run_id)
+        run_ref = ""
+        for event in _trace_events(path):
+            run_ref = str(event.get("run_id") or run_ref)
+            used = event.get("budget_used")
+            if isinstance(used, Mapping):
+                budget = BudgetUsed.from_record(used)
+            if (
+                event.get("event_type") == "context_compaction"
+                and event.get("status") == "ok"
+                and isinstance(event.get("summary"), str)
+                and event["summary"].strip()
+            ):
+                summary = str(event["summary"])
+            interrupted_at = str(event.get("ts") or interrupted_at)
+        if run_ref:
+            transcripts.append(f"{run_ref}.txt")
+    last = attempts[-1]
+    return SessionResume(
+        attempt=len(attempts) + 1,
+        interrupted_at=interrupted_at or str(last.get("recorded_at") or ""),
+        error=str(last.get("error") or ""),
+        compaction_summary=summary,
+        budget_used=budget,
+        transcripts=tuple(transcripts),
+    )
+
+
+def _trace_events(path: Path) -> list[dict[str, object]]:
+    """The events of one attempt's trace; a run that never wrote one has none."""
+
+    if not path.is_file():
+        return []
+    events: list[dict[str, object]] = []
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                # A torn last line of a killed run is not evidence of anything.
+                continue
+            if isinstance(event, dict):
+                events.append(event)
+    return events
+
+
+__all__ = [
+    "STEP_SIDECAR_DIR",
+    "load_recorded_steps",
+    "record_step_sidecar",
+    "resume_state",
+]

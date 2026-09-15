@@ -27,7 +27,7 @@ RUN = "run_x"
 REASON = "neutralized excess is negative in three of four research years; the null percentile is 0.48"
 
 
-def _node(tree: StepTree, root: Path, marker: str, *, session: str = SESSION) -> str:
+def _node(tree: StepTree, root: Path, marker: str, *, session: str = SESSION, run: str = RUN) -> str:
     output = root / f"cand_{marker}"
     output.mkdir(parents=True, exist_ok=True)
     (output / "main.py").write_text(
@@ -38,7 +38,7 @@ def _node(tree: StepTree, root: Path, marker: str, *, session: str = SESSION) ->
         output,
         epoch_id="research",
         session_ref=session,
-        run_id=RUN,
+        run_id=run,
         result_name=f"valid_{marker}",
         revision_id=new_revision_id("revision"),
         metrics={},
@@ -71,7 +71,7 @@ class _Gate:
 
 
 def _tool(tree: StepTree, gate: _Gate, **kwargs: object) -> FinishSessionTool:
-    return FinishSessionTool(tree, session_ref=SESSION, run_ref=RUN, freeze_gate=gate, **kwargs)  # type: ignore[arg-type]
+    return FinishSessionTool(tree, session_ref=SESSION, freeze_gate=gate, **kwargs)  # type: ignore[arg-type]
 
 
 def test_every_outcome_maps_to_the_pipeline_outcome_it_names(tmp_path: Path):
@@ -151,6 +151,14 @@ def test_only_a_complete_node_of_this_session_can_be_named(tmp_path: Path):
     with pytest.raises(ToolError, match="requires node_id") as ambiguous:
         finish.invoke({"outcome": "freeze"})
     assert len(ambiguous.value.details["candidates"]) == 2
+    # A Validation an interrupted attempt of this session recorded is this
+    # session's Step: nominable, and counted when a freeze must name one.
+    resumed = _node(tree, tmp_path, "resumed", run="run_before")
+    with pytest.raises(ToolError, match="requires node_id") as three:
+        finish.invoke({"outcome": "freeze"})
+    assert resumed in three.value.details["candidates"]
+    result = _tool(tree, _Gate({resumed})).invoke({"outcome": "freeze", "node_id": resumed})
+    assert result.value["node_id"] == resumed
 
 
 def test_an_early_freeze_must_say_why_while_another_batch_fits(tmp_path: Path):

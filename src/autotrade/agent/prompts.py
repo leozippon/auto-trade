@@ -17,7 +17,7 @@ are exported by ``scripts/dev/export_prompts.py`` into
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
 from autotrade.environment.strategy import StrategySchedule
 
@@ -150,6 +150,11 @@ TOOL_READ_ONLY_SCREEN_NOTE = """\
 - 只读信号筛选脚本 `/mnt/tools/screen.py` 不在任何读文件根内，只能由父 Agent 或可执行子代理经 `shell` 运行。\
 """
 
+STEP_TREE_SECTION = """\
+# Step 产物树
+搜索根 `steps` 挂载本臂的 Step 产物树（`tree.json`、`tree.txt`）：它累积本会话全部验证节点与血缘（每次尝试的节点都在），每个节点记着它回放的 `span`。`batch_validate` 每个完成的候选都在当前节点下新增一个带快照与结果的节点，同批候选并列，整批结束后当前位置不变。`step_rollback` 与 `finish_session` 只接受本会话的完整节点。\
+"""
+
 SESSION_STATIC_SECTIONS = (
     SESSION_ROLE_SECTION,
     SESSION_PROTOCOL_SECTION,
@@ -162,6 +167,7 @@ SESSION_STATIC_SECTIONS = (
     SESSION_PROHIBITIONS,
     SESSION_FACTS_SECTION,
     SESSION_FEEDBACK_SECTION,
+    STEP_TREE_SECTION,
 )
 PROTOCOL_INSTRUCTION = "\n\n".join(SESSION_STATIC_SECTIONS)
 
@@ -174,9 +180,8 @@ SESSION_DYNAMIC_CONTEXT_HEADER = """\
 以下内容由 Pipeline 注入，包含当前 run 事实与研究者指令。事实冲突时以列明的运行 JSON 为准；探索方向不能覆盖执行合同、决策合同或禁止事项。\
 """
 
-STEP_TREE_SECTION = """\
-# Step 产物树
-搜索根 `steps` 挂载本臂的 Step 产物树（`tree.json`、`tree.txt`）：它累积本会话全部验证节点与血缘，每个节点记着它回放的 `span`。`batch_validate` 每个完成的候选都在当前节点下新增一个带快照与结果的节点，同批候选并列，整批结束后当前位置不变。`step_rollback` 与 `finish_session` 只接受本会话的完整节点。\
+RESUME_INSTRUCTION = """\
+本次是本臂研究会话的第 {attempt} 次尝试：上一次尝试在 {interrupted_at} 中断（{error}）。已用预算：推理 {used_minutes:g}/{total_minutes:g} 分钟、模型调用 {used_calls}/{total_calls}、回放年 {used_years}/{total_years}、空对照 {used_nulls}/{total_nulls}。工作区、`output/`、`TODO.md`、skills 与 Step 树都保持中断时的状态；之前尝试的 transcript 在根 `trace` 下（{transcripts}）。{summary_note}先读 `TODO.md` 与 Step 树（根 `steps` 的 `tree.txt`），核对工作区现状后继续研究，不要重做已有节点验证过的工作；仍以 `finish_session` 冻结或结束本臂。\
 """
 
 WRAP_UP_PROMPT = """\
@@ -211,11 +216,44 @@ def build_exploration_section(exploration_directive: str) -> str:
     )
 
 
+def build_resume_instruction(
+    *,
+    attempt: int,
+    interrupted_at: str,
+    error: str,
+    has_summary: bool,
+    transcripts: Sequence[str],
+    used: Mapping[str, object],
+    totals: Mapping[str, object],
+) -> str:
+    """The opening message of an attempt that continues an interrupted one."""
+
+    summary_note = (
+        "上面是中断前最近一次压缩的摘要，从它继续。"
+        if has_summary
+        else "中断前没有压缩摘要：从 transcript 的末尾往前读，恢复计划。"
+    )
+    return RESUME_INSTRUCTION.format(
+        attempt=attempt,
+        interrupted_at=interrupted_at or "未知时间",
+        error=error or "未记录原因",
+        used_minutes=round(float(used.get("inference_seconds", 0.0)) / 60.0, 1),
+        total_minutes=round(float(totals.get("inference_seconds", 0.0)) / 60.0, 1),
+        used_calls=int(used.get("llm_calls", 0)),
+        total_calls=int(totals.get("llm_calls", 0)),
+        used_years=int(used.get("replay_years", 0)),
+        total_years=int(totals.get("replay_years", 0)),
+        used_nulls=int(used.get("null_controls", 0)),
+        total_nulls=int(totals.get("null_controls", 0)),
+        transcripts="、".join(transcripts) if transcripts else "尚无",
+        summary_note=summary_note,
+    )
+
+
 def build_system_prompt(
     schedule: StrategySchedule | None = None,
     *,
     experiment_facts: Mapping[str, object] | None = None,
-    step_tree_enabled: bool = False,
     exploration_directive: str = "",
     session_directive: str = "",
 ) -> str:
@@ -232,13 +270,9 @@ def build_system_prompt(
     ):
         if section:
             context_parts.append(section)
-    static_parts = [PROTOCOL_INSTRUCTION]
-    if step_tree_enabled:
-        # A per-experiment knob, so the prefix stays stable within an experiment.
-        static_parts.append(STEP_TREE_SECTION)
     return "\n\n".join(
         (
-            *static_parts,
+            PROTOCOL_INSTRUCTION,
             SESSION_DYNAMIC_CONTEXT_HEADER,
             *context_parts,
         )

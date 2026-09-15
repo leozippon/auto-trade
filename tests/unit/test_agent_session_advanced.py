@@ -81,7 +81,7 @@ def finish_session_tool(root: Path) -> tuple[FinishSessionTool, str]:
         revision_id=new_revision_id("revision"),
         metrics={"total_return": 0.01},
     )
-    return FinishSessionTool(tree, session_ref="session_ref_ab", run_ref="run_x", freeze_gate=_passing_gate), node_id
+    return FinishSessionTool(tree, session_ref="session_ref_ab", freeze_gate=_passing_gate), node_id
 
 
 class DeclaredReadOnlyShell:
@@ -297,6 +297,39 @@ def test_the_agent_compacts_its_own_context_and_is_pointed_at_the_trace(tmp_path
     tool_events = [payload for event, payload in events if event == "tool_call" and payload["tool"] == "compact"]
     assert tool_events[0]["result"]["value"] == {"status": "compacted", "summary_chars": len(SUMMARY)}
     assert not any(event == "context_notice" for event, _payload in events)
+
+
+def test_a_resumed_attempt_opens_with_its_preamble_and_seeded_candidates(tmp_path: Path):
+    """The runner accepts the interrupted attempt's summary as a preamble and
+    the Validations it recorded as finalization candidates."""
+
+    from autotrade.agent.compact import compaction_summary_message
+
+    finish, node_id = finish_session_tool(tmp_path)
+    llm = ScriptedLLM([_finish_call(node_id)])
+    events: list[tuple[str, dict[str, object]]] = []
+    runner = AgentSessionRunner(
+        llm=llm,
+        tools=ToolRegistry([finish]),
+        system_prompt="inspect",
+        config=AgentSessionConfig(max_llm_calls=4),
+        event_sink=lambda event, payload: events.append((event, payload)),
+        freeze_gate=_passing_gate,
+    )
+    checkpoint = compaction_summary_message(SUMMARY, kind="resume", trace_ref="run_ref_first")
+    result = runner.run(
+        "continue from the note",
+        preamble=[checkpoint],
+        complete_validations=[{"node_id": node_id, "revision_id": "strategy_ref_1", "stats": {"sharpe": 1.2}}],
+    )
+    assert result.status == "finished"
+    [system, summary, note] = llm.calls[0]["messages"]
+    assert (system.role, summary.role, note.role) == ("system", "user", "user")
+    assert json.loads(summary.content)["summary_kind"] == "resume"
+    assert note.content == "continue from the note"
+    start = next(payload for event, payload in events if event == "session_start")
+    assert start["preamble"] == [checkpoint.content]
+    assert [candidate["node_id"] for candidate in runner._finalization_candidates()] == [node_id]
 
 
 def test_a_short_summary_is_refused_and_nothing_is_compacted(tmp_path: Path):
@@ -1022,7 +1055,6 @@ def test_compaction_keeps_the_session_system_prompt_byte_identical(tmp_path: Pat
     finish, node_id = finish_session_tool(tmp_path)
     system_prompt = build_system_prompt(
         experiment_facts={"experiment_id": "exp_x", "session_ref": "session_ref_ab"},
-        step_tree_enabled=True,
         session_directive="check the volume filter",
     )
     compact_llm = ScriptedLLM(

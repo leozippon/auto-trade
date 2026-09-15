@@ -82,7 +82,6 @@ def retired_vocabulary(text: str) -> list[str]:
 def _full_prompt() -> str:
     return prompts.build_system_prompt(
         experiment_facts={"identity": {"session_kind": "research"}},
-        step_tree_enabled=True,
         exploration_directive="长期方向",
         session_directive="本会话指令",
     )

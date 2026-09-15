@@ -20,7 +20,7 @@
 
 ## 1. 研究会话系统提示词
 
-十一个稳定区块按「目的 → 协议 → 决策合同 → 证据 → 约束 → 事实 → 反馈」的顺序拼接；启用 Step 树时在其后追加 `STEP_TREE_SECTION`（见 §1.12），再接动态上下文。
+十二个稳定区块按「目的 → 协议 → 决策合同 → 证据 → 约束 → 事实 → 反馈 → Step 树」的顺序拼接，再接动态上下文。
 
 ### 1.1 身份与任务
 
@@ -151,11 +151,11 @@
 
 ### 1.12 Step 产物树
 
-`step_tree_enabled` 时追加 `STEP_TREE_SECTION`：
+`STEP_TREE_SECTION`：
 
 ```text
 # Step 产物树
-搜索根 `steps` 挂载本臂的 Step 产物树（`tree.json`、`tree.txt`）：它累积本会话全部验证节点与血缘，每个节点记着它回放的 `span`。`batch_validate` 每个完成的候选都在当前节点下新增一个带快照与结果的节点，同批候选并列，整批结束后当前位置不变。`step_rollback` 与 `finish_session` 只接受本会话的完整节点。
+搜索根 `steps` 挂载本臂的 Step 产物树（`tree.json`、`tree.txt`）：它累积本会话全部验证节点与血缘（每次尝试的节点都在），每个节点记着它回放的 `span`。`batch_validate` 每个完成的候选都在当前节点下新增一个带快照与结果的节点，同批候选并列，整批结束后当前位置不变。`step_rollback` 与 `finish_session` 只接受本会话的完整节点。
 ```
 
 ### 1.13 默认用户指令
@@ -306,7 +306,7 @@ The text retrieval budget for this NL Sub Agent task is exhausted. Return your f
 
 ## 6. 动态上下文结构
 
-稳定系统提示词（及可选 Step 产物树区块）之后追加：
+稳定系统提示词之后追加：
 
 ```text
 # 本会话动态上下文

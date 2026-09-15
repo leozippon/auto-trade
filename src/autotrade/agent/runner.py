@@ -407,17 +407,41 @@ class AgentSessionRunner:
             self.subagent.attach_cancel_event(self._cancelled)
         self._validate_capability_boundary()
 
-    def run(self, instruction: str) -> AgentSessionResult:
+    def run(
+        self,
+        instruction: str,
+        *,
+        preamble: Sequence[ChatMessage] = (),
+        complete_validations: Sequence[Mapping[str, object]] = (),
+        budget_total_seconds: float | None = None,
+    ) -> AgentSessionResult:
+        """Drive the conversation to its finish.
+
+        ``preamble`` is inserted between the system prompt and the instruction:
+        a resumed attempt puts the interrupted one's compaction summary there.
+        ``complete_validations`` are the Validations earlier attempts recorded,
+        seeded as finalization candidates so the resumed session can nominate
+        them.
+        ``budget_total_seconds`` is the whole session budget the time-budget
+        notices are measured against; a resumed attempt hands over the arm
+        total while its time budget only holds what is left of it.
+        """
+
         if not instruction.strip():
             raise ValueError("Agent instruction cannot be empty")
         time_budget = self.time_budget or InferenceTimeBudget(
             duration_seconds=self.config.deadline_seconds
         )
-        budget_total = max(time_budget.remaining(), 0.0)
+        budget_total = (
+            float(budget_total_seconds)
+            if budget_total_seconds is not None
+            else max(time_budget.remaining(), 0.0)
+        )
         notice_index = 0
         backtests = dict.fromkeys(_BACKTEST_TOOLS, 0)
         messages = [
             ChatMessage("system", self.system_prompt),
+            *(_copy_chat_message(message) for message in preamble),
             ChatMessage("user", instruction.strip()),
         ]
         self._usage = _new_token_totals()
@@ -431,6 +455,8 @@ class AgentSessionRunner:
         malformed_reissue_used = False
         context_overflow_recovery_used = False
         self._complete_validation_nodes = []
+        for row in complete_validations:
+            self._record_complete_validation(row)
         self._hard_finalization = False
         self._hard_finalization_context_initialized = False
         self._wrap_up_sent = False
@@ -446,6 +472,11 @@ class AgentSessionRunner:
             {
                 "system_prompt": self.system_prompt,
                 "instruction": instruction.strip(),
+                **(
+                    {"preamble": [message.content or "" for message in preamble]}
+                    if preamble
+                    else {}
+                ),
             },
         )
 

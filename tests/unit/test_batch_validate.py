@@ -204,6 +204,7 @@ class _Session:
         deadline_seconds: float = 600.0,
         readonly_template: bool = False,
         trace: list[tuple[str, dict[str, object]]] | None = None,
+        experiment_dir: Path | None = None,
     ) -> None:
         self.root = root
         self.trace_events = trace
@@ -264,6 +265,7 @@ class _Session:
             time_budget=InferenceTimeBudget(duration_seconds=deadline_seconds),
             ref_store=AgentRefStore(root / "experiment"),
             ledger=ExperimentLedger(root / "ledger.jsonl"),
+            experiment_dir=experiment_dir,
         )
         self.workspace = SafeWorkspace(self.workspace_root)
         self.batch = BatchValidateTool(
@@ -281,12 +283,10 @@ class _Session:
             self.output,
             self.models,
             session_ref=self.backtest.ref_store.get_or_create("session", "research"),
-            run_id=self.backtest.ref_store.get_or_create("run", "run_batch"),
         )
         self.finish = FinishSessionTool(
             self.tree,
             session_ref=self.backtest.ref_store.get_or_create("session", "research"),
-            run_ref=self.backtest.ref_store.get_or_create("run", "run_batch"),
             freeze_gate=self.backtest.freeze_gate,
             another_round_fits=lambda: another_batch_round_fits(self.backtest),
             budget_status=lambda: session_budget_status(self.backtest),
@@ -1192,3 +1192,30 @@ class AnotherRoundFitsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RecordedValidationDurabilityTest(unittest.TestCase):
+    """Every recorded Validation is made durable at once: the experiment's
+    tree carries the node, a host-only sidecar carries what the Pipeline needs
+    to freeze it, so an attempt that dies keeps them for its resumed attempt."""
+
+    def test_a_recorded_validation_is_published_with_its_host_sidecar(self) -> None:
+        from autotrade.pipelines.session_resume import load_recorded_steps
+
+        with TemporaryDirectory() as tmp:
+            experiment = Path(tmp) / "experiment"
+            session = _Session(Path(tmp), experiment_dir=experiment)
+            session.candidate("a", _strategy("1"))
+            session.candidate("b", _strategy("22"))
+            result = session.call("a", "b")
+            nodes = [row["node_id"] for row in result.value["candidates"]]
+            published = json.loads((experiment / "steps" / "tree.json").read_text(encoding="utf-8"))
+            self.assertEqual([node["node_id"] for node in published["nodes"]], nodes)
+            self.assertTrue(all((experiment / "steps" / node / "output" / "main.py").is_file() for node in nodes))
+            steps = load_recorded_steps(experiment)
+            self.assertEqual([step.step_id for step in steps], nodes)
+            self.assertEqual({step.span for step in steps}, {"full"})
+            self.assertEqual([step.revision_id for step in steps], [step.revision_id for step in session.backtest.steps])
+            self.assertTrue(all(Path(step.validation.result_ref).is_file() for step in steps))
+            # Host-only: the sidecars sit beside the run markers, never in a mount.
+            self.assertTrue((experiment / ".host" / "steps").is_dir())

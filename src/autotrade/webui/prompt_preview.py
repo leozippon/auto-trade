@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 from autotrade.agent.experiment_facts import build_experiment_facts
 from autotrade.agent.prompts import SESSION_DEFAULT_INSTRUCTION, build_system_prompt
 from autotrade.environment.identity import AgentRefStore
+from autotrade.pipelines.config import BudgetUsed
 from autotrade.pipelines.hitl_state import (
     CONTROL_NAME,
     HITL_DIR_NAME,
@@ -149,14 +150,14 @@ def _research_prompt(
         ),
         "snapshot_config": context.options.snapshot_config.to_record(),
         "start": start_record(),
-        "arm": arm_record(context.records),
+        "arm": arm_record(()),
         "modification_constraints": rolling.step_constraints.to_record(),
         "acceptance_rules": rolling.acceptance.to_record(),
         "schedule": rolling.schedule.to_record(),
         "broker_profile": rolling.broker_profile.to_record(),
         "nl_failure_policy": rolling.nl_failure_policy,
-        "step_tree_enabled": rolling.step_tree_enabled,
         "record_failed_attempts": rolling.record_failed_attempts,
+        "attempt": 1,
         "finalize_before_deadline_seconds": rolling.finalize_before_deadline_seconds,
         "sandbox_spec": (
             context.options.agent_sandbox.to_record()
@@ -172,6 +173,7 @@ def _research_prompt(
             "strategy_inference_timeout_seconds": limits.timeout_seconds,
             "strategy_fit_timeout_seconds": limits.fit_timeout_seconds,
             "strategy_gpu_count": limits.gpu_count,
+            "used_before_this_attempt": BudgetUsed().to_record(),
         },
     }
     # The blocks LLMResearchDeveloper._session_facts adds beside the shared
@@ -193,7 +195,6 @@ def _research_prompt(
     return build_system_prompt(
         rolling.schedule,
         experiment_facts=facts,
-        step_tree_enabled=rolling.step_tree_enabled,
         exploration_directive=rolling.research_directive,
         session_directive=directive,
     )

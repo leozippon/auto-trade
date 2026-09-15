@@ -423,10 +423,8 @@ _FIELDS: list[dict[str, object]] = [
      "help": "Agent 主对话单次模型 API 调用的硬超时；默认 3600 秒，与本机网关非流式读超时一致。"},
     {"key": "strategy_fit_timeout_seconds", "group": "预算与验收", "label": "单次策略 fit 超时（秒）", "type": "int", "advanced": True,
      "help": "正式策略可选 fit(context) 单次调用的墙钟上限：回放开始前先训练一次模型，之后按 REFIT_PERIOD 在新周期首个决策日重训；超时或异常即整场回测失败。generate_orders 的单日推断上限（`strategy_inference_timeout_seconds`，代码默认 360 秒）不受影响。"},
-    {"key": "disable_step_tree", "group": "预算与验收", "label": "禁用 Step 产物树", "type": "bool", "advanced": True,
-     "help": "关闭跨会话的 Step 谱系树（仅用于消融实验）。"},
     {"key": "record_failed_attempts", "group": "预算与验收", "label": "记录失败尝试节点", "type": "bool", "advanced": True,
-     "help": "Step 树中记录未通过验证的轻量 [failed] 节点，提示后续会话避开死路。"},
+     "help": "Step 树中记录未通过验证的轻量 [failed] 节点，提示会话避开死路。"},
     # Broker 账户
     {"key": "initial_cash", "group": "Broker 账户", "label": "初始资金（元）", "type": "float",
      "help": "long-only 现金账户初始资金，也是组合的初始权益。"},

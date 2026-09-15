@@ -50,6 +50,7 @@ from .calendar import FULL_SPAN, Slot
 from .config import (
     ArtifactRevision,
     ArtifactStore,
+    BudgetUsed,
     EvaluationBackend,
     EvaluationRequest,
     EvaluationResult,
@@ -83,6 +84,7 @@ from .ledger import (
     research_records,
 )
 from .pit_views_seed import FORWARD_PHASE, RESEARCH_PHASE
+from .session_resume import load_recorded_steps, resume_state
 from .skills import (
     ExperimentSkillsStore,
     SkillsPublication,
@@ -266,7 +268,10 @@ class RollingExperimentPipeline:
         or ending the arm. A freeze passes only the freeze gate; a nomination
         the gate refuses, ``no_edge`` and an exhausted budget all end the arm
         without a deliverable, so the record always carries ``frozen`` or
-        ``arm_end`` and research is over once it is written.
+        ``arm_end`` and research is over once it is written. An attempt that
+        failed before that record is continued, not repeated: the next attempt
+        starts from the budget, the compaction summary and the Validations the
+        interrupted ones left in the trace and the step tree.
         """
 
         records = self.ledger.read()
@@ -275,6 +280,8 @@ class RollingExperimentPipeline:
             raise RuntimeError("research is over; no further research session runs")
         if research_records(records):
             raise RuntimeError("the arm's research session is already recorded")
+        resume = resume_state(self.config.experiment_dir, records)
+        steps_before = load_recorded_steps(self.config.experiment_dir)
         run_started = time.monotonic()
         run_id = f"run_{uuid.uuid4().hex}"
         context = dict(session_context or {})
@@ -323,6 +330,9 @@ class RollingExperimentPipeline:
                     skills_source_ref=(
                         str(current_skills.root) if current_skills.root is not None else ""
                     ),
+                    budget_used=resume.budget_used if resume is not None else BudgetUsed(),
+                    steps_before=steps_before,
+                    resume=resume,
                 )
             )
             spent = sum(research_span(years, step.span).slots for step in session.steps)
@@ -408,6 +418,8 @@ class RollingExperimentPipeline:
                     "decision": decision.snapshot_id,
                     "research_span": years[0].snapshot.snapshot_id,
                 },
+                "attempts": session.attempt,
+                "budget_used": session.budget_used.to_record(),
                 **_session_timing(context, run_started),
             }
             self.ledger.append(record)
@@ -415,6 +427,16 @@ class RollingExperimentPipeline:
             expire_experiment_session_inbox(
                 self.config.experiment_dir, RESEARCH_SESSION_KEY, expired_by=run_id
             )
+            # Candidate revisions are discarded only once the session is
+            # recorded: a failed attempt's revisions are what its resumed
+            # attempt freezes.
+            prune = getattr(self.artifacts, "prune_transient", None)
+            if callable(prune):
+                prune(
+                    keep_frozen_ids=_keep_frozen_artifact_ids(
+                        self.ledger.read(), extra_id=frozen_id
+                    )
+                )
             return record
         except BaseException as exc:
             # BaseException, not Exception: a terminated worker unwinds this
@@ -437,13 +459,6 @@ class RollingExperimentPipeline:
             # it stays for the next worker start to record.
             if wrote_ledger_record:
                 self.run_markers.finish(run_id)
-            prune = getattr(self.artifacts, "prune_transient", None)
-            if callable(prune):
-                prune(
-                    keep_frozen_ids=_keep_frozen_artifact_ids(
-                        self.ledger.read(), extra_id=frozen_id
-                    )
-                )
 
     def _freeze(
         self,

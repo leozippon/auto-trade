@@ -37,13 +37,11 @@ class StepRollbackTool:
         models_dir: str | Path | None = None,
         *,
         session_ref: str,
-        run_id: str,
     ) -> None:
         self.tree = tree
         self.output_dir = Path(output_dir)
         self.models_dir = Path(models_dir) if models_dir is not None else None
         self.session_ref = session_ref
-        self.run_id = run_id
 
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
         node_id = str(arguments["node_id"])
@@ -56,10 +54,10 @@ class StepRollbackTool:
         # Same session rule as finish_session: the tree carries earlier
         # sessions' nodes as read-only evidence, and restoring one would rebase
         # this session's work copy and lineage onto a node it may not select.
-        if not node_in_session(node, session_ref=self.session_ref, run_id=self.run_id):
+        if not node_in_session(node, session_ref=self.session_ref):
             raise ToolError(
                 "step_rollback can restore only a Step of the current session; "
-                "another session's or run's node is evidence only"
+                "another session's node is evidence only"
             )
         if not node.get("complete_validation") or not node.get("revision_id"):
             raise ToolError("only a fully evaluated Step revision can be restored")

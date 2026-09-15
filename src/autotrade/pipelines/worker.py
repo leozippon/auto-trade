@@ -157,7 +157,6 @@ _ALLOWED_PARAMS = {
     "research_directive",
     "workspace_reference",
     "operating_memory",
-    "disable_step_tree",
     "record_failed_attempts",
     "nl_failure_policy",
     "finalize_before_deadline_seconds",
@@ -621,9 +620,6 @@ def resolve_worker_options(
             params.get("workspace_reference"), repository
         ),
         operating_memory=resolve_operating_memory(params.get("operating_memory")),
-        step_tree_enabled=not _strict_bool(
-            params.get("disable_step_tree", False), "disable_step_tree"
-        ),
         record_failed_attempts=_strict_bool(
             knob("record_failed_attempts"), "record_failed_attempts"
         ),
@@ -868,7 +864,6 @@ def build_experiment_pipeline(
             command_runner_factory=command_runner_factory,
             # One ceiling for the parent conversation and its children.
             max_response_tokens=options.llm.max_tokens_for("main"),
-            step_tree_enabled=options.rolling.step_tree_enabled,
             research_directive=options.rolling.research_directive,
             workspace_reference=options.rolling.workspace_reference,
             operating_memory=options.rolling.operating_memory,

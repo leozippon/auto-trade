@@ -441,7 +441,7 @@ def test_the_llm_research_session_mounts_only_the_research_end_view_and_freezes(
     assert research_row["agent_trace_ref"].endswith(f"{research_row['run_id']}.jsonl")
 
     research_anchor = decision_anchor(GEOMETRY["research_end"]).isoformat()
-    root = options.work_root / options.experiment_id / str(research_row["run_id"])
+    root = options.work_root / options.experiment_id / "research"
     view = json.loads((root / "runtime" / "current_snapshot" / "manifest.json").read_text(encoding="utf-8"))
     assert (view["kind"], view["decision_time"]) == ("decision_input", research_anchor)
     assert not (root / "snapshots").exists()
@@ -463,6 +463,137 @@ def test_the_llm_research_session_mounts_only_the_research_end_view_and_freezes(
     assert retired_vocabulary(read) == []
     for later in ("20240701", "2024-07-01", GEOMETRY["forward_end"], GEOMETRY["heldout_end"], RELEASE_END):
         assert later not in read
+
+
+def _resume_script_summary() -> str:
+    return (
+        "## 策略现状\noutput/ 是模板策略，已完成一次完整研究期验证（working_copy）。\n## 决定\n"
+        "- 该验证的中性化超额为正，作为冻结门的第一个完整研究期验证保留；节点 id 见 trace 第 1 次调用的 "
+        "batch_validate 结果。\n## 线索\n- 下一步再验证一次 working_copy 补足冻结门要求的两个完整研究期验证，"
+        "然后提名冻结。\n## trace\n- grep 'working_copy' 可找回节点 id 与读数。"
+    )
+
+
+def test_an_interrupted_llm_session_resumes_with_its_summary_budget_and_nodes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synthetic_provider
+):
+    """The real worker, twice. The first attempt validates the working copy,
+    compacts its context and then loses its model (the script runs out):
+    the attempt is recorded as failed, its node, revision, workspace and
+    transcript stay. The second worker start resumes the same session: it
+    starts from the compaction summary and a note, continues the budget,
+    validates once more and freezes; the record carries both attempts' steps."""
+
+    from autotrade.environment.llm import ProviderResponse, ToolCall
+    from tests.unit.test_interactive_worker_local import (
+        LAST_WORKING_COPY_NODE,
+        VALIDATE_WORKING_COPY,
+        _agent_then,
+        _NominatingLLM,
+        _NoShellRunner,
+    )
+
+    repo, experiment = make_arm(
+        tmp_path, developer_mode="llm", max_replay_years=2, session_max_attempts=1, max_llm_calls=40
+    )
+    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
+    options = load_worker_options(experiment, repo_root=repo)
+    summary = _resume_script_summary()
+    first_llm = _NominatingLLM(
+        [
+            *_agent_then(VALIDATE_WORKING_COPY, roles=()),
+            ProviderResponse(tool_calls=(ToolCall("c", "compact", {"summary": summary}),)),
+            # The script ends: three consecutive model failures end the attempt.
+        ]
+    )
+    with pytest.raises(RuntimeError, match="language model unavailable"):
+        run_local_interactive_worker(
+            options, llm=first_llm, command_runner_factory=lambda _workspace: _NoShellRunner()
+        )
+    ledger = ExperimentLedger(options.rolling.ledger_path)
+    [failed] = ledger.read()
+    assert failed["record_type"] == "attempt_failed" and failed["session_key"] == "research"
+    session_root = options.work_root / options.experiment_id / "research"
+    assert (session_root / "agent" / "workspace" / "output" / "main.py").is_file()
+    tree = json.loads((experiment / "steps" / "tree.json").read_text(encoding="utf-8"))
+    [node] = [item for item in tree["nodes"] if item.get("complete_validation")]
+    assert (experiment / ".host" / "steps" / f"{node['node_id']}.json").is_file()
+    assert len(list((experiment / "artifacts" / "strategy" / "revisions").iterdir())) == 1
+    transcripts = sorted((experiment / "artifacts" / "transcripts").glob("run_ref_*.txt"))
+    assert len(transcripts) == 1 and "compact" in transcripts[0].read_text(encoding="utf-8")
+
+    second_llm = _NominatingLLM(
+        [
+            ProviderResponse(tool_calls=(VALIDATE_WORKING_COPY,)),
+            ProviderResponse(
+                tool_calls=(
+                    ToolCall("finish", "finish_session", {"outcome": "freeze", "node_id": LAST_WORKING_COPY_NODE}),
+                )
+            ),
+        ]
+    )
+    result = run_local_interactive_worker(
+        load_worker_options(experiment, repo_root=repo),
+        llm=second_llm,
+        command_runner_factory=lambda _workspace: _NoShellRunner(),
+    )
+
+    records = ledger.read()
+    assert [row["record_type"] for row in records] == ["attempt_failed", "research_session", "forward"]
+    record = records[1]
+    assert record["attempts"] == 2 and record["outcome"] == "freeze"
+    assert record["steps"][0]["step_id"] == node["node_id"]
+    assert record["trials_to_date"] == 2 and record["freeze_gate"]["passed"] is True
+    assert record["budget_used"]["replay_years"] == 2
+    # The calls of both attempts: the first spent five (two scripted, three failed).
+    assert record["budget_used"]["llm_calls"] == 5 + len(second_llm.calls)
+    assert result["verdict"]["status"] == "graduated"
+    # The resumed attempt opened with the interrupted one's summary, then the note.
+    opening = second_llm.calls[0]["messages"]
+    assert opening[0].role == "system"
+    checkpoint = json.loads(opening[1].content)
+    assert checkpoint["observation"] == "context_compaction"
+    assert checkpoint["summary_kind"] == "resume" and checkpoint["summary"] == summary
+    assert checkpoint["trace"]["root"] == "trace"
+    note = opening[2].content
+    assert "第 2 次尝试" in note and "language model unavailable" in note
+    assert "回放年 1/2" in note and transcripts[0].name in note
+    assert "上面是中断前最近一次压缩的摘要" in note
+    facts = json.loads(opening[0].content.split("```json\n", 1)[1].split("\n```", 1)[0])
+    assert facts["arm"] == {"frozen": False, "freezes_per_arm": 1, "trials_to_date": 1, "full_span_validations_to_date": 1}
+    assert facts["budgets"]["used_before_this_attempt"]["replay_years"] == 1
+    assert facts["budgets"]["used_before_this_attempt"]["llm_calls"] == 5
+    # One session root, two transcripts, and the revisions pruned once recorded.
+    assert sorted(path.name for path in (experiment / "artifacts" / "transcripts").glob("run_ref_*.txt")) != [transcripts[0].name]
+    assert list((experiment / "artifacts" / "strategy" / "revisions").iterdir()) == []
+
+
+def test_a_resume_without_the_interrupted_workspace_fails_the_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synthetic_provider
+):
+    from autotrade.environment.llm import ProviderResponse, ToolCall
+    from autotrade.pipelines.local_backend import _remove_mounted_tree
+    from tests.unit.test_interactive_worker_local import _NominatingLLM, _NoShellRunner
+
+    repo, experiment = make_arm(tmp_path, developer_mode="llm", max_replay_years=2, session_max_attempts=1)
+    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
+    options = load_worker_options(experiment, repo_root=repo)
+    with pytest.raises(RuntimeError, match="language model unavailable"):
+        run_local_interactive_worker(
+            options, llm=_NominatingLLM([]), command_runner_factory=lambda _workspace: _NoShellRunner()
+        )
+    _remove_mounted_tree(options.work_root / options.experiment_id / "research")
+
+    with pytest.raises(RuntimeError, match="workspace of the interrupted attempt is missing"):
+        run_local_interactive_worker(
+            load_worker_options(experiment, repo_root=repo),
+            llm=_NominatingLLM([ProviderResponse(tool_calls=(ToolCall("f", "finish_session", {"outcome": "no_edge", "reason": "x" * 60}),))]),
+            command_runner_factory=lambda _workspace: _NoShellRunner(),
+        )
+    rows = ExperimentLedger(options.rolling.ledger_path).read()
+    assert [row["record_type"] for row in rows] == ["attempt_failed", "attempt_failed"]
+    assert "workspace of the interrupted attempt is missing" in rows[-1]["error"]
+    assert read_status(experiment / "hitl" / "status.json")["state"] == "failed"
 
 
 def _model_input(llm) -> str:

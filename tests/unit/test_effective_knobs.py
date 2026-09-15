@@ -2,7 +2,7 @@
 
 Half this repository's defects were parameters that existed and did nothing —
 ``image_keep``, ``record_failed_attempts``,
-``step_tree_enabled``, the ``ModificationConstraints`` that never reached the
+the ``ModificationConstraints`` that never reached the
 tool. A test asserting a knob is accepted is the bug; each test here changes
 the knob and asserts the observable difference.
 """
@@ -249,21 +249,9 @@ class RecordFailedAttemptsTest(unittest.TestCase):
     def test_the_config_default_records_them(self) -> None:
         config = RollingExperimentConfig("exp", Path("/tmp/experiments"))
         self.assertTrue(config.record_failed_attempts)
-        self.assertTrue(config.step_tree_enabled)
 
 
-class StepTreeAblationTest(unittest.TestCase):
-    """With the step tree off there is no cross-fold lineage, no published
-    tree and no rollback tool — the ablation is real, not cosmetic."""
-
-    def test_the_prompt_section_follows_the_knob(self) -> None:
-        from autotrade.agent.prompts import build_system_prompt
-
-        enabled = build_system_prompt(step_tree_enabled=True, experiment_facts={})
-        disabled = build_system_prompt(step_tree_enabled=False, experiment_facts={})
-        self.assertIn("Step 产物树", enabled)
-        self.assertNotIn("Step 产物树", disabled)
-
+class StepTreeNodeTest(unittest.TestCase):
     def test_a_recorded_node_is_addressable_by_its_revision(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

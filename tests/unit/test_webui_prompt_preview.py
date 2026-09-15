@@ -137,7 +137,6 @@ def test_research_preview_carries_every_current_prompt_section(tmp_path: Path):
     prompt = str(_preview(tmp_path)["prompt"])
     for section in SESSION_STATIC_SECTIONS:
         assert section.strip() in prompt
-    # Enabled by default, so the lineage rules must be in the preview too.
     assert STEP_TREE_SECTION.strip() in prompt
     assert SESSION_DYNAMIC_CONTEXT_HEADER.strip() in prompt
     # The opening user message the session is actually started with.
@@ -174,6 +173,15 @@ def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path)
         "max_replay_years_note": REPLAY_YEARS_NOTE,
         "max_null_controls": rolling_default("max_null_controls"),
         "max_llm_calls": rolling_default("max_llm_calls"),
+        "used_before_this_attempt": {
+            "inference_seconds": 0.0,
+            "llm_calls": 0,
+            "main_calls": 0,
+            "subagent_calls": 0,
+            "compact_calls": 0,
+            "replay_years": 0,
+            "null_controls": 0,
+        },
         "strategy_fit_timeout_seconds": float(
             rolling_default("strategy_fit_timeout_seconds")
         ),
@@ -189,7 +197,7 @@ def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path)
     assert geometry["decision_time"] == GEOMETRY.research_decision_time.isoformat()
     assert [year["label"] for year in geometry["years"]] == ["Y1", "Y2", "Y3", "Y4"]
     assert "session" not in facts["identity"]
-    assert facts["artifact_contract"]["step_tree_enabled"] is True
+    assert facts["budgets"]["used_before_this_attempt"]["replay_years"] == 0
     # Runtime-only facts are marked, never invented.
     assert facts["identity"]["run_id"] == RUNTIME_PLACEHOLDER
     assert facts["visible_timeline"]["execution_policy"]["text_available"] == RUNTIME_PLACEHOLDER
@@ -206,7 +214,7 @@ def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path)
 
 
 @pytest.mark.parametrize(
-    "section", ("PROTOCOL_INSTRUCTION", "STEP_TREE_SECTION", "SESSION_DYNAMIC_CONTEXT_HEADER")
+    "section", ("PROTOCOL_INSTRUCTION", "SESSION_DYNAMIC_CONTEXT_HEADER")
 )
 def test_prompt_section_edits_reach_the_preview(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, section: str
@@ -232,7 +240,6 @@ def test_preview_follows_the_experiment_parameters(tmp_path: Path):
             max_research_minutes=90,
             max_replay_years=7,
             max_llm_calls=123,
-            disable_step_tree=True,
             research_directive="以截面因子为主线",
         )["prompt"]
     )
@@ -242,7 +249,6 @@ def test_preview_follows_the_experiment_parameters(tmp_path: Path):
     assert facts["budgets"]["deadline_seconds"] == session_deadline_seconds(
         90, DEFAULT_DEADLINE_GRACE_MINUTES
     )
-    assert STEP_TREE_SECTION.strip() not in prompt
     assert "以截面因子为主线" in prompt
     assert directive in prompt
 

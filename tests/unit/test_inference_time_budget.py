@@ -223,7 +223,7 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
         tools=ToolRegistry(
             [
                 batch,
-                FinishSessionTool(tree, session_ref=fold_ref, run_ref=run_ref, freeze_gate=_passing_gate),
+                FinishSessionTool(tree, session_ref=fold_ref, freeze_gate=_passing_gate),
             ]
         ),
         system_prompt="repair a failed validation and finish",
@@ -366,9 +366,8 @@ def test_complete_node_enters_hard_finalization_without_compaction_or_research(
                     output,
                     models,
                     session_ref="session_ref_current",
-                    run_id="run_current",
                 ),
-                FinishSessionTool(tree, session_ref="session_ref_current", run_ref="run_current", freeze_gate=_passing_gate),
+                FinishSessionTool(tree, session_ref="session_ref_current", freeze_gate=_passing_gate),
             ]
         ),
         system_prompt="research before finishing",
@@ -480,7 +479,7 @@ def test_a_validation_completing_inside_the_grace_keeps_the_conversation(
         tools=ToolRegistry(
             [
                 SlowValidation(),
-                FinishSessionTool(tree, session_ref="fold_grace", run_ref="run_grace", freeze_gate=_passing_gate),
+                FinishSessionTool(tree, session_ref="fold_grace", freeze_gate=_passing_gate),
             ]
         ),
         system_prompt="fold system prompt",
@@ -903,12 +902,8 @@ def test_hard_finalization_labels_every_candidate_with_its_freeze_gate_verdict(
         tools=ToolRegistry(
             [
                 TwoValidations(),
-                StepRollbackTool(
-                    tree, output, models, session_ref="session_ref_current", run_id="run_current"
-                ),
-                FinishSessionTool(
-                    tree, session_ref="session_ref_current", run_ref="run_current", freeze_gate=gate
-                ),
+                StepRollbackTool(tree, output, models, session_ref="session_ref_current"),
+                FinishSessionTool(tree, session_ref="session_ref_current", freeze_gate=gate),
             ]
         ),
         system_prompt="finish this session",
@@ -1143,9 +1138,8 @@ def test_the_parent_stops_waiting_for_a_child_at_the_finalization_boundary(
                     output,
                     models,
                     session_ref="session_ref_current",
-                    run_id="run_current",
                 ),
-                FinishSessionTool(tree, session_ref="session_ref_current", run_ref="run_current", freeze_gate=_passing_gate),
+                FinishSessionTool(tree, session_ref="session_ref_current", freeze_gate=_passing_gate),
             ]
         ),
         system_prompt="fold",

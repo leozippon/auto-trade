@@ -378,14 +378,12 @@ class PromptCompositionTest(unittest.TestCase):
 
     MARKER = "# 本会话动态上下文"
 
-    def test_the_step_tree_section_is_a_per_experiment_knob(self) -> None:
-        without = build_system_prompt()
-        self.assertNotIn("# Step 产物树", without)
-        with_tree = build_system_prompt(step_tree_enabled=True)
-        self.assertIn("# Step 产物树", with_tree)
-        self.assertIn("step_rollback", with_tree)
-        self.assertIn("finish_session", with_tree)
-        self.assertLess(with_tree.index("# Step 产物树"), with_tree.index(self.MARKER))
+    def test_the_step_tree_section_is_part_of_the_static_contract(self) -> None:
+        prompt = build_system_prompt()
+        self.assertIn("# Step 产物树", prompt)
+        self.assertIn("step_rollback", prompt)
+        self.assertIn("finish_session", prompt)
+        self.assertLess(prompt.index("# Step 产物树"), prompt.index(self.MARKER))
 
     def test_the_session_directive_is_optional_and_framed_as_a_hypothesis(self) -> None:
         without = build_system_prompt()

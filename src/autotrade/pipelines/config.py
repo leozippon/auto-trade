@@ -301,8 +301,6 @@ class RollingExperimentConfig:
     # the curated repository library alone, plus the skills of every graduated
     # experiment, or nothing.
     operating_memory: str = DEFAULT_OPERATING_MEMORY
-    # Step artifact tree (lineage across sessions); toggleable for ablations.
-    step_tree_enabled: bool = True
     # Also record failed validation attempts as lightweight dead-end nodes
     # (no output snapshot) so later sessions can see what was already tried.
     record_failed_attempts: bool = True
@@ -572,6 +570,70 @@ class StepResult:
     span: str
 
 
+@dataclass(frozen=True)
+class BudgetUsed:
+    """What the research session has consumed, cumulative over its attempts.
+
+    Recorded on the trace with every model call and tool result, so a new
+    attempt continues the counters from the last block the interrupted one
+    wrote rather than from zero.
+    """
+
+    inference_seconds: float = 0.0
+    llm_calls: int = 0
+    main_calls: int = 0
+    subagent_calls: int = 0
+    compact_calls: int = 0
+    replay_years: int = 0
+    null_controls: int = 0
+
+    def to_record(self) -> dict[str, object]:
+        return {
+            "inference_seconds": round(float(self.inference_seconds), 1),
+            "llm_calls": int(self.llm_calls),
+            "main_calls": int(self.main_calls),
+            "subagent_calls": int(self.subagent_calls),
+            "compact_calls": int(self.compact_calls),
+            "replay_years": int(self.replay_years),
+            "null_controls": int(self.null_controls),
+        }
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, object]) -> BudgetUsed:
+        def number(key: str, kind: type) -> object:
+            value = record.get(key, 0)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+                raise ValueError(f"budget_used.{key} must be a non-negative number")
+            return kind(value)
+
+        return cls(
+            inference_seconds=number("inference_seconds", float),  # type: ignore[arg-type]
+            llm_calls=number("llm_calls", int),  # type: ignore[arg-type]
+            main_calls=number("main_calls", int),  # type: ignore[arg-type]
+            subagent_calls=number("subagent_calls", int),  # type: ignore[arg-type]
+            compact_calls=number("compact_calls", int),  # type: ignore[arg-type]
+            replay_years=number("replay_years", int),  # type: ignore[arg-type]
+            null_controls=number("null_controls", int),  # type: ignore[arg-type]
+        )
+
+
+@dataclass(frozen=True)
+class SessionResume:
+    """The interrupted attempts a new attempt of the research session continues."""
+
+    # 1-based number of the attempt about to start.
+    attempt: int
+    # When and why the last attempt stopped (its last trace event, its error).
+    interrupted_at: str
+    error: str
+    # The last successful compaction's summary, the checkpoint the new attempt
+    # starts from; None when the interrupted attempts never compacted.
+    compaction_summary: str | None
+    budget_used: BudgetUsed
+    # Transcript file names of the earlier attempts under the ``trace`` root.
+    transcripts: tuple[str, ...]
+
+
 # How the research session ended. ``freeze`` nominates a node for the freeze
 # gate, ``no_edge`` ends the arm without a deliverable, and ``deadline`` is a
 # session whose budget (the wrap-up grace or the model-call budget) ran out
@@ -627,6 +689,13 @@ class ResearchSessionRequest:
     # The sandbox adapter copies it to workspace/skills but never exposes this
     # host path through Agent-visible facts or manifests.
     skills_source_ref: str = ""
+    # What the session's earlier attempts consumed and recorded: the live
+    # counters continue from these amounts, the freeze gate and the finish
+    # tool see these Validations, and ``resume`` says how the last attempt
+    # stopped. All empty on a first attempt.
+    budget_used: BudgetUsed = field(default_factory=BudgetUsed)
+    steps_before: tuple[StepResult, ...] = ()
+    resume: SessionResume | None = None
 
     @property
     def validation(self) -> ReplaySpan:
@@ -656,6 +725,9 @@ class ResearchSessionResult:
     # Null-control blocks the session already computed, keyed by step id; the
     # Pipeline reuses the frozen node's block instead of drawing it again.
     null_controls: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
+    # The session's cumulative spend at its end, and which attempt ended it.
+    budget_used: BudgetUsed = field(default_factory=BudgetUsed)
+    attempt: int = 1
 
     def __post_init__(self) -> None:
         if self.outcome not in SESSION_OUTCOMES:
@@ -676,6 +748,7 @@ __all__ = [
     "AcceptanceRules",
     "ArtifactRevision",
     "ArtifactStore",
+    "BudgetUsed",
     "EvaluationBackend",
     "EvaluationRequest",
     "EvaluationResult",
@@ -686,6 +759,7 @@ __all__ = [
     "ResearchSessionRequest",
     "ResearchSessionResult",
     "RollingExperimentConfig",
+    "SessionResume",
     "SnapshotBundle",
     "SnapshotProvider",
     "StepResult",

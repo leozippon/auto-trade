@@ -489,7 +489,7 @@ def _agent_visible_manifest(
             "acceptance_rules",
             "broker_profile",
             "nl_failure_policy",
-            "step_tree_enabled",
+            "attempt",
             "record_failed_attempts",
             "budgets",
             "finalize_before_deadline_seconds",

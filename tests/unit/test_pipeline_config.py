@@ -524,7 +524,6 @@ RESTORED_CONSOLE_PARAMETERS = (
     "per_call_timeout_seconds",
     "record_failed_attempts",
     "finalize_before_deadline_seconds",
-    "disable_step_tree",
     "max_total_holdings",
     "max_single_name_weight",
 )
@@ -612,7 +611,6 @@ class ConsoleParameterSurfaceTest(unittest.TestCase):
             "per_call_timeout_seconds": 120,
             "record_failed_attempts": False,
             "finalize_before_deadline_seconds": 60,
-            "disable_step_tree": True,
             "max_total_holdings": 12,
             "max_single_name_weight": 0.15,
         }

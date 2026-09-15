@@ -39,9 +39,7 @@ def test_step_revision_can_be_selected_and_restored(tmp_path: Path):
     work_models.mkdir()
     (work / "main.py").write_text("broken", encoding="utf-8")
     (work_models / "weights.bin").write_bytes(b"broken")
-    rollback = StepRollbackTool(
-        tree, work, work_models, session_ref="fold_2026Q1", run_id="run_a"
-    )
+    rollback = StepRollbackTool(tree, work, work_models, session_ref="fold_2026Q1")
     restored = rollback.invoke({"node_id": node})
     assert restored.ok
     assert "generate_orders" in (work / "main.py").read_text(encoding="utf-8")
@@ -52,12 +50,12 @@ def test_step_revision_can_be_selected_and_restored(tmp_path: Path):
     assert stat.S_IMODE((work_models / "weights.bin").stat().st_mode) == 0o666
     assert stat.S_IMODE(tree.node_models_dir(node).stat().st_mode) == 0o555
     assert stat.S_IMODE((tree.node_models_dir(node) / "weights.bin").stat().st_mode) == 0o444
-    finished = FinishSessionTool(tree, session_ref="fold_2026Q1", run_ref="run_a", freeze_gate=_passing_gate).invoke({"outcome": "freeze"})
+    finished = FinishSessionTool(tree, session_ref="fold_2026Q1", freeze_gate=_passing_gate).invoke({"outcome": "freeze"})
     assert finished.finish and finished.value["revision_id"] == "revision_a"
 
 
 def test_step_rollback_refuses_a_node_outside_the_current_session(tmp_path: Path):
-    """Another session's or run's node is evidence only, exactly as finish_session treats it.
+    """Another session's node is evidence only, exactly as finish_session treats it; an earlier attempt's is this session's.
 
     The experiment-level tree is handed whole to every session, so a foreign
     ``node_id`` is readable; restoring one would rebase this session's work
@@ -93,22 +91,20 @@ def test_step_rollback_refuses_a_node_outside_the_current_session(tmp_path: Path
     (work / "main.py").write_text("current work copy", encoding="utf-8")
     registry = ToolRegistry(
         [
-            StepRollbackTool(tree, work, session_ref="fold_2026Q1", run_id="run_a"),
-            FinishSessionTool(tree, session_ref="fold_2026Q1", run_ref="run_a", freeze_gate=_passing_gate),
+            StepRollbackTool(tree, work, session_ref="fold_2026Q1"),
+            FinishSessionTool(tree, session_ref="fold_2026Q1", freeze_gate=_passing_gate),
         ]
     )
     position = tree.current_node_id
 
-    for node_id in (foreign_fold, earlier_run):
-        result = registry.invoke("step_rollback", {"node_id": node_id})
-        assert not result.ok
-        assert "current session" in result.error
-        assert (work / "main.py").read_text(encoding="utf-8") == "current work copy"
-        assert StepTree(tmp_path / "steps").current_node_id == position
-        finished = registry.invoke("finish_session", {"outcome": "freeze", "node_id": node_id})
-        assert not finished.ok
-        assert "not a Step of this session" in finished.error
-
+    result = registry.invoke("step_rollback", {"node_id": foreign_fold})
+    assert not result.ok
+    assert "current session" in result.error
+    assert (work / "main.py").read_text(encoding="utf-8") == "current work copy"
+    assert StepTree(tmp_path / "steps").current_node_id == position
+    finished = registry.invoke("finish_session", {"outcome": "freeze", "node_id": foreign_fold})
+    assert not finished.ok
+    assert "not a Step of this session" in finished.error
     # An absent node is shaped like its finish_session sibling: a typed tool error
     # the model can act on, not an untyped ValueError leaking through.
     for tool, arguments in (
@@ -119,6 +115,12 @@ def test_step_rollback_refuses_a_node_outside_the_current_session(tmp_path: Path
         assert not absent.ok, tool
         assert absent.value["error_type"] == "tool_error", tool
         assert "absent Step" in absent.error or "not a Step node" in absent.error, tool
+
+    # A node an interrupted attempt of this session recorded is this
+    # session's: the resumed attempt may restore and nominate it.
+    assert registry.invoke("step_rollback", {"node_id": earlier_run}).ok
+    assert "generate_orders" in (work / "main.py").read_text(encoding="utf-8")
+    assert registry.invoke("finish_session", {"outcome": "freeze", "node_id": earlier_run}).ok
 
 
 def test_modification_check_keeps_daily_json_entry(tmp_path: Path):
