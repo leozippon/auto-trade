@@ -19,7 +19,7 @@ from autotrade.agent.compact import (
 )
 from autotrade.agent.experiment_facts import build_experiment_facts
 from autotrade.agent.prompts import (
-    FOLD_STATIC_SECTIONS,
+    SESSION_STATIC_SECTIONS,
     build_system_prompt,
 )
 from autotrade.environment.artifacts import new_revision_id
@@ -42,7 +42,7 @@ from autotrade.environment.llm import (
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.environment.tools import (
-    FinishFoldTool,
+    FinishSessionTool,
     ReadFileTool,
     SafeWorkspace,
     SearchRoots,
@@ -53,11 +53,16 @@ from autotrade.environment.tools import (
 )
 from autotrade.pipelines.local_backend import SessionBudgetLLM, SessionCallBudget
 
+def _passing_gate(node_id: str) -> dict[str, object]:
+    """A freeze gate every node passes: these tests are about the Runner."""
+    return {"passed": True, "reasons": []}
 
-def finish_fold_tool(root: Path) -> tuple[FinishFoldTool, str]:
+
+
+def finish_session_tool(root: Path) -> tuple[FinishSessionTool, str]:
     """A terminal tool over a real step tree carrying one validated node.
 
-    ``finish_fold`` is the Fold session's terminal tool; these are generic
+    ``finish_session`` is the Fold session's terminal tool; these are generic
     session-runner tests, so what matters is that a terminal tool ends the
     session and cancels later mutating calls in the same turn."""
     output = root / "output"
@@ -69,13 +74,13 @@ def finish_fold_tool(root: Path) -> tuple[FinishFoldTool, str]:
     node_id = tree.record_step(
         output,
         epoch_id="epoch_001",
-        fold_id="fold_ref_ab",
+        session_ref="session_ref_ab",
         run_id="run_x",
         result_name="valid_000",
         revision_id=new_revision_id("revision"),
         metrics={"total_return": 0.01},
     )
-    return FinishFoldTool(tree, fold_id="fold_ref_ab", run_id="run_x"), node_id
+    return FinishSessionTool(tree, session_ref="session_ref_ab", run_ref="run_x", freeze_gate=_passing_gate), node_id
 
 
 class DeclaredReadOnlyShell:
@@ -403,12 +408,12 @@ def test_context_token_estimate_includes_reasoning_content():
     )
 
 
-def test_fold_session_tracks_calls_and_finish_value(tmp_path: Path):
-    finish, node_id = finish_fold_tool(tmp_path)
+def test_session_tracks_calls_and_finish_value(tmp_path: Path):
+    finish, node_id = finish_session_tool(tmp_path)
     llm = ScriptedLLM(
         [
             ProviderResponse(
-                tool_calls=(ToolCall("f", "finish_fold", {"node_id": node_id}),)
+                tool_calls=(ToolCall("f", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
             )
         ]
     )
@@ -421,29 +426,31 @@ def test_fold_session_tracks_calls_and_finish_value(tmp_path: Path):
     result = runner.run("finish the validated strategy")
     assert result.status == "finished"
     assert result.finish_value["node_id"] == node_id
-    assert result.finish_value["status"] == "fold_finished"
-    # Finishing only nominates; the Pipeline freezes.
-    assert result.finish_value["fold_status"] == "pending_pipeline_review"
-    assert result.finish_value["write_locked"] is True
+    assert result.finish_value["status"] == "session_finished"
+    assert result.finish_value["outcome"] == "freeze"
     assert result.llm_calls == 1
 
 
 def test_session_end_counts_the_parents_failed_tool_calls(tmp_path: Path):
     """A summary-only audit reads ``session_end``; a failed tool call is
     counted there, and the finish payload rides along."""
-    finish, node_id = finish_fold_tool(tmp_path)
+    finish, node_id = finish_session_tool(tmp_path)
     events: list[tuple[str, dict]] = []
     llm = ScriptedLLM(
         [
             ProviderResponse(
-                tool_calls=(ToolCall("bad", "finish_fold", {"node_id": "missing"}),)
+                tool_calls=(ToolCall("bad", "finish_session", {"outcome": "freeze", "node_id": "missing"}),)
             ),
             ProviderResponse(
                 tool_calls=(
                     ToolCall(
                         "f",
-                        "finish_fold",
-                        {"node_id": node_id, "reason": "H2 untestable here: the events domain is empty in this window"},
+                        "finish_session",
+                        {
+                            "outcome": "freeze",
+                            "node_id": node_id,
+                            "reason": "H2 untestable here: the events domain is empty in this window",
+                        },
                     ),
                 )
             ),
@@ -474,7 +481,7 @@ def test_session_end_tool_failures_include_the_childrens(tmp_path: Path):
     workspace = tmp_path / "agent"
     (workspace / "output").mkdir(parents=True)
     (workspace / "output" / "README.md").write_text("contract\n", encoding="utf-8")
-    finish, node_id = finish_fold_tool(tmp_path)
+    finish, node_id = finish_session_tool(tmp_path)
     events: list[tuple[str, dict]] = []
     subagent = SubAgentEngine(
         llm=ScriptedLLM(
@@ -507,10 +514,10 @@ def test_session_end_tool_failures_include_the_childrens(tmp_path: Path):
                 ),
                 ProviderResponse(content="等子代理返回。"),
                 ProviderResponse(
-                    tool_calls=(ToolCall("bad", "finish_fold", {"node_id": "missing"}),)
+                    tool_calls=(ToolCall("bad", "finish_session", {"outcome": "freeze", "node_id": "missing"}),)
                 ),
                 ProviderResponse(
-                    tool_calls=(ToolCall("f", "finish_fold", {"node_id": node_id}),)
+                    tool_calls=(ToolCall("f", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
                 ),
             ]
         ),
@@ -534,12 +541,12 @@ def test_session_end_tool_failures_include_the_childrens(tmp_path: Path):
 
 
 def test_fold_session_nudges_text_only_turn_then_requires_finish(tmp_path: Path):
-    finish, node_id = finish_fold_tool(tmp_path)
+    finish, node_id = finish_session_tool(tmp_path)
     llm = ScriptedLLM(
         [
             ProviderResponse(content="I should act next."),
             ProviderResponse(
-                tool_calls=(ToolCall("f", "finish_fold", {"node_id": node_id}),)
+                tool_calls=(ToolCall("f", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
             ),
         ]
     )
@@ -557,7 +564,7 @@ def test_fold_session_nudges_text_only_turn_then_requires_finish(tmp_path: Path)
 
 
 def test_fold_session_replays_reasoning_with_tool_call_on_next_round(tmp_path: Path):
-    finish, node_id = finish_fold_tool(tmp_path)
+    finish, node_id = finish_session_tool(tmp_path)
     shell = DeclaredReadOnlyShell()
     llm = ScriptedLLM(
         [
@@ -566,7 +573,7 @@ def test_fold_session_replays_reasoning_with_tool_call_on_next_round(tmp_path: P
                 reasoning_content="inspect before finishing",
             ),
             ProviderResponse(
-                tool_calls=(ToolCall("f", "finish_fold", {"node_id": node_id}),)
+                tool_calls=(ToolCall("f", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
             ),
         ]
     )
@@ -589,7 +596,7 @@ def test_fold_session_replays_reasoning_with_tool_call_on_next_round(tmp_path: P
 def test_fold_session_edits_huge_recent_tool_result_below_min_message_count(
     tmp_path: Path,
 ):
-    finish, node_id = finish_fold_tool(tmp_path)
+    finish, node_id = finish_session_tool(tmp_path)
     shell = LongResultShell()
     llm = ScriptedLLM(
         [
@@ -597,7 +604,7 @@ def test_fold_session_edits_huge_recent_tool_result_below_min_message_count(
                 tool_calls=(ToolCall("shell-1", "shell", {"argv": ["rg", "x"]}),)
             ),
             ProviderResponse(
-                tool_calls=(ToolCall("finish-1", "finish_fold", {"node_id": node_id}),)
+                tool_calls=(ToolCall("finish-1", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
             ),
         ],
         context_window_tokens=3_000,
@@ -650,7 +657,7 @@ def test_fold_session_edits_huge_recent_tool_result_below_min_message_count(
 def test_fold_session_recovers_one_provider_context_overflow_without_blind_repeat(
     tmp_path: Path,
 ):
-    finish, _node_id = finish_fold_tool(tmp_path)
+    finish, _node_id = finish_session_tool(tmp_path)
     shell = LongResultShell()
 
     class AlwaysOverflowAfterTool:
@@ -710,7 +717,7 @@ def test_fold_session_reissues_one_malformed_tool_call_without_repeating_the_ana
     again. A second failure in the same streak drops back to the generic
     llm_error handling instead of replaying the analysis a second time."""
 
-    finish, node_id = finish_fold_tool(tmp_path)
+    finish, node_id = finish_session_tool(tmp_path)
 
     class MalformedThenFinish:
         provider = "vllm"
@@ -725,14 +732,14 @@ def test_fold_session_reissues_one_malformed_tool_call_without_repeating_the_ana
             self.calls.append(tuple(messages))
             if len(self.calls) <= 2:
                 raise MalformedToolCallError(
-                    "provider returned a malformed tool call (tool=finish_fold: "
+                    "provider returned a malformed tool call (tool=finish_session: "
                     "Expecting value: line 1 column 9 (char 8)); no call from "
                     "this response was executed",
                     content="换手率已压到 12%，可以收官。",
                     reasoning_content="先复核 Validation",
                 )
             return ProviderResponse(
-                tool_calls=(ToolCall("f", "finish_fold", {"node_id": node_id}),)
+                tool_calls=(ToolCall("f", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
             )
 
     llm = MalformedThenFinish()
@@ -756,7 +763,7 @@ def test_fold_session_reissues_one_malformed_tool_call_without_repeating_the_ana
     assert second[-2].tool_calls == ()
     observation = json.loads(second[-1].content or "{}")
     assert observation["observation"] == "malformed_tool_call"
-    assert "tool=finish_fold" in observation["error"]
+    assert "tool=finish_session" in observation["error"]
     third = llm.calls[2]
     assert json.loads(third[-1].content or "{}")["observation"] == "llm_error"
     assert sum(1 for message in third if message.role == "assistant") == 1
@@ -771,7 +778,7 @@ def test_fold_session_reissues_one_malformed_tool_call_without_repeating_the_ana
 def test_fold_session_keeps_long_history_without_proactive_clear_or_trim(
     tmp_path: Path,
 ):
-    finish, node_id = finish_fold_tool(tmp_path)
+    finish, node_id = finish_session_tool(tmp_path)
 
     class MarkedResultShell(DeclaredReadOnlyShell):
         def invoke(self, arguments):
@@ -791,7 +798,7 @@ def test_fold_session_keeps_long_history_without_proactive_clear_or_trim(
     ]
     responses.append(
         ProviderResponse(
-            tool_calls=(ToolCall("f", "finish_fold", {"node_id": node_id}),)
+            tool_calls=(ToolCall("f", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
         )
     )
     llm = ScriptedLLM(responses)
@@ -828,7 +835,7 @@ def test_fold_session_keeps_long_history_without_proactive_clear_or_trim(
 
 
 def test_fold_session_triggers_semantic_compact_on_threshold(tmp_path: Path):
-    finish, node_id = finish_fold_tool(tmp_path)
+    finish, node_id = finish_session_tool(tmp_path)
     compact_llm = ScriptedLLM(
         [
             ProviderResponse(
@@ -851,7 +858,7 @@ def test_fold_session_triggers_semantic_compact_on_threshold(tmp_path: Path):
                 tool_calls=(ToolCall("s3", "shell", {"argv": ["rg", "c"]}),)
             ),
             ProviderResponse(
-                tool_calls=(ToolCall("f", "finish_fold", {"node_id": node_id}),)
+                tool_calls=(ToolCall("f", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
             ),
         ]
     )
@@ -906,14 +913,12 @@ def test_compaction_keeps_the_session_system_prompt_byte_identical(tmp_path: Pat
     Compaction rewrites history; it must not re-render or re-place the system
     prompt, both because the session contract has to stay identical and
     because a byte-stable prefix is what the provider's cache keys on."""
-    finish, node_id = finish_fold_tool(tmp_path)
+    finish, node_id = finish_session_tool(tmp_path)
     system_prompt = build_system_prompt(
-        mode="fold",
-        experiment_facts={"experiment_id": "exp_x", "fold_id": "fold_ref_ab"},
-        phase="exploration",
+        experiment_facts={"experiment_id": "exp_x", "session_ref": "session_ref_ab"},
         step_tree_enabled=True,
         prior_prompt="# PRIOR\n- keep the momentum direction",
-        fold_directive="check the volume filter",
+        session_directive="check the volume filter",
     )
     compact_llm = ScriptedLLM(
         [ProviderResponse(content="## 目标\ncontinue\n\n## 下一步\n- finish")] * 4
@@ -927,7 +932,7 @@ def test_compaction_keeps_the_session_system_prompt_byte_identical(tmp_path: Pat
         ]
         + [
             ProviderResponse(
-                tool_calls=(ToolCall("f", "finish_fold", {"node_id": node_id}),)
+                tool_calls=(ToolCall("f", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
             )
         ]
     )
@@ -976,7 +981,7 @@ def test_compaction_keeps_the_session_system_prompt_byte_identical(tmp_path: Pat
 
 
 def test_disabled_compact_fails_closed_without_dropping_history(tmp_path: Path):
-    finish, _node_id = finish_fold_tool(tmp_path)
+    finish, _node_id = finish_session_tool(tmp_path)
     events: list[tuple[str, dict[str, object]]] = []
     llm = ScriptedLLM([], context_window_tokens=200)
     runner = AgentSessionRunner(
@@ -1001,13 +1006,13 @@ def test_disabled_compact_fails_closed_without_dropping_history(tmp_path: Path):
 
 
 def test_terminal_tool_cancels_later_mutation_in_same_turn(tmp_path: Path):
-    finish, node_id = finish_fold_tool(tmp_path)
+    finish, node_id = finish_session_tool(tmp_path)
     workspace = SafeWorkspace(tmp_path)
     llm = ScriptedLLM(
         [
             ProviderResponse(
                 tool_calls=(
-                    ToolCall("f", "finish_fold", {"node_id": node_id}),
+                    ToolCall("f", "finish_session", {"outcome": "freeze", "node_id": node_id}),
                     ToolCall(
                         "w",
                         "write_file",
@@ -1128,7 +1133,7 @@ def test_sessions_reject_tools_outside_their_positive_contracts():
                 config=AgentSessionConfig(),
             )
 
-    with pytest.raises(ValueError, match="batch_validate requires finish_fold"):
+    with pytest.raises(ValueError, match="batch_validate requires finish_session"):
         AgentSessionRunner(
             llm=ScriptedLLM([]),
             tools=ToolRegistry([StubTool("batch_validate")]),
@@ -1140,36 +1145,36 @@ def test_sessions_reject_tools_outside_their_positive_contracts():
 def test_prompt_and_facts_encode_daily_json_and_hidden_stage_boundaries(
     tmp_path: Path,
 ):
-    prompt = build_system_prompt(mode="fold", experiment_facts={"fold": "visible"})
+    prompt = build_system_prompt(experiment_facts={"identity": {"session_kind": "research"}})
     assert "generate_orders(context)" in prompt
     assert "严格 JSON 往返的订单数组" in prompt
     assert "策略执行时钟" in prompt
     assert "不能假定 `context.bars` 含完整历史" in prompt
     assert "实际挂载清单、schema、单位引用" in prompt
-    assert "Test" in prompt and "Held-out" in prompt
+    assert "Held-out" in prompt
     # The prohibition list carries the item-6 execution-model rules.
     prohibitions = prompt[prompt.index("# 禁止事项") :]
     for rule in (
-        "读取当前或未来 Test、Held-out",
+        "读取研究期末之后的任何数据、前推期或 Held-out",
         "绕过 `available_at`",
         "把历史分钟、竞价或事件时间当成策略执行时钟",
         "伪造工具结果",
     ):
         assert rule in prohibitions
     facts = build_experiment_facts(
-        manifest={"kind": "fold", "experiment_id": "exp"},
+        manifest={"kind": "research", "experiment_id": "exp"},
         ref_store=AgentRefStore(tmp_path / "experiment"),
         runtime_env={"sandbox_spec": {"network": "none"}},
     )
-    assert facts["visibility_policy"]["test_visible"] is False
-    assert facts["visibility_policy"]["heldout_visible"] is False
+    assert facts["visibility_policy"]["research_period_visible"] is True
+    assert "不进入任何会话" in facts["visibility_policy"]["after_research_end"]
 
 
-def test_fold_prompt_keeps_hard_boundaries_and_leaves_how_tos_mounted():
-    prompt = build_system_prompt(mode="fold", experiment_facts={})
+def test_session_prompt_keeps_hard_boundaries_and_leaves_how_tos_mounted():
+    prompt = build_system_prompt(experiment_facts={})
     for rule in (
-        "自由检查已挂载的事实",
-        "从日期、路径、元数据和模型常识推断隐藏行情",
+        "已挂载的事实、数据、起点产物、参考材料与 PRIOR 都是待检验输入",
+        "从日期、路径、元数据和模型常识推断它们的行情",
         "正式回测不能由自建回放替代",
         "不得用它修改策略产物、启动后台任务、sleep/等待包装或轮询状态",
     ):
@@ -1206,7 +1211,7 @@ def _export_prompts_module():
 def test_prompt_audit_snapshot_is_byte_exact():
     """PROMPTS.md is generated, so the freshness contract is byte equality.
 
-    A substring check over FOLD_STATIC_SECTIONS only sees the fold sections —
+    A substring check over SESSION_STATIC_SECTIONS only sees the fold sections —
     which is exactly why a changed Meta prompt and a relocated NL prompt both
     landed silently. Byte equality additionally catches a reordered section, a
     dropped section, a changed heading and a hand-edit of the snapshot."""
@@ -1230,7 +1235,7 @@ def test_prompt_audit_snapshot_check_fails_on_a_hand_edit(tmp_path: Path):
     )
     assert stale.read_text(encoding="utf-8") != rendered
     # And every fold section still rides in the snapshot as a fenced block.
-    for section in FOLD_STATIC_SECTIONS:
+    for section in SESSION_STATIC_SECTIONS:
         assert f"```text\n{section.strip()}\n```" in rendered
 
 
@@ -1283,7 +1288,7 @@ def test_every_tool_named_in_a_prompt_is_registrable_in_that_session():
     This is the class of defect that left the Fold prompt pointing at
     `nl_query` / `finish` after the authoring stack was deleted: the prompt and
     the registry drifted apart with nothing comparing them."""
-    from autotrade.agent.runner import _FOLD_TOOLS
+    from autotrade.agent.runner import _SESSION_TOOLS
     from autotrade.environment.nl.engine import (
         SUB_AGENT_SYSTEM_PROMPT,
         TEXT_RETRIEVE_TOOL,
@@ -1291,10 +1296,10 @@ def test_every_tool_named_in_a_prompt_is_registrable_in_that_session():
 
     registrable = _all_registrable_tool_names()
     # Every allowlisted name must correspond to a tool that exists.
-    assert _FOLD_TOOLS <= registrable
+    assert _SESSION_TOOLS <= registrable
 
     sessions = (
-        ("fold", build_system_prompt(mode="fold", experiment_facts={}), _FOLD_TOOLS),
+        ("fold", build_system_prompt(experiment_facts={}), _SESSION_TOOLS),
         ("nl_sub_agent", SUB_AGENT_SYSTEM_PROMPT, {TEXT_RETRIEVE_TOOL}),
     )
     for name, prompt, allowed in sessions:
@@ -1308,17 +1313,17 @@ def test_every_tool_named_in_a_prompt_is_registrable_in_that_session():
 
 def test_the_prompt_tool_check_fails_on_a_tool_the_session_cannot_register():
     """The mutation proves the check above can fail."""
-    from autotrade.agent.runner import _FOLD_TOOLS
+    from autotrade.agent.runner import _SESSION_TOOLS
 
     registrable = _all_registrable_tool_names()
     # `text_retrieve` exists, but only the NL sub-agent may register it.
     assert "text_retrieve" in registrable
     mutated = (
-        build_system_prompt(mode="fold", experiment_facts={})
+        build_system_prompt(experiment_facts={})
         + "\n- 用 `text_retrieve` 检索证据。"
     )
     referenced = _prompt_tool_tokens(mutated) & registrable
-    assert sorted(referenced - set(_FOLD_TOOLS)) == ["text_retrieve"]
+    assert sorted(referenced - set(_SESSION_TOOLS)) == ["text_retrieve"]
 
 
 def _context_runner(llm: ScriptedLLM, **config) -> AgentSessionRunner:

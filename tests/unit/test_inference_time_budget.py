@@ -26,7 +26,7 @@ from autotrade.environment.step_tree import StepTree
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.environment.tools import (
-    FinishFoldTool,
+    FinishSessionTool,
     SafeWorkspace,
     StepRollbackTool,
     ToolRegistry,
@@ -42,7 +42,7 @@ from autotrade.pipelines.config import (
 from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.pipelines.local_backend import (
     BatchValidateTool,
-    FoldBacktestTool,
+    SessionValidations,
     SessionBudgetLLM,
     SessionCallBudget,
     session_role_quotas,
@@ -50,6 +50,11 @@ from autotrade.pipelines.local_backend import (
 
 from .fixtures_sandbox import PassingModificationCheck
 from .test_batch_validate import _write_style_sidecar
+
+def _passing_gate(node_id: str) -> dict[str, object]:
+    """A freeze gate every node passes: these tests are about the Runner."""
+    return {"passed": True, "reasons": []}
+
 
 
 class FakeClock:
@@ -124,10 +129,9 @@ def _research_request() -> ResearchSessionRequest:
         start=None,
         snapshot=snapshot,
         decision_time=moment,
-        validation=ReplaySpan("full", "valid", "20220701", "20250630", snapshot),
+        research_years=(ReplaySpan("Y1", "valid", "20240701", "20250630", snapshot),),
         input_window_start="20230701",
-        max_steps=3,
-        max_backtests=3,
+        max_replay_years=3,
         max_llm_calls=3,
         deadline_seconds=2.0,
         record_failed_attempts=False,
@@ -149,7 +153,7 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
     )
     tree = StepTree(tmp_path / "steps")
     ref_store = AgentRefStore(tmp_path / "experiment")
-    fold_ref = ref_store.get_or_create("fold", request.session_id)
+    fold_ref = ref_store.get_or_create("session", request.session_id)
     run_ref = ref_store.get_or_create("run", request.run_id)
 
     class FailThenPassEvaluator:
@@ -168,7 +172,7 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
             )
 
     evaluator = FailThenPassEvaluator()
-    backtest = FoldBacktestTool(
+    backtest = SessionValidations(
         request=request,
         output_dir=output,
         models_dir=models,
@@ -197,8 +201,9 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
                 tool_calls=(
                     ToolCall(
                         "done",
-                        "finish_fold",
+                        "finish_session",
                         {
+                            "outcome": "freeze",
                             "node_id": (
                                 "research__"
                                 f"{fold_ref}__"
@@ -218,11 +223,7 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
         tools=ToolRegistry(
             [
                 batch,
-                FinishFoldTool(
-                    tree,
-                    fold_id=fold_ref,
-                    run_id=run_ref,
-                ),
+                FinishSessionTool(tree, session_ref=fold_ref, run_ref=run_ref, freeze_gate=_passing_gate),
             ]
         ),
         system_prompt="repair a failed validation and finish",
@@ -297,7 +298,7 @@ def test_complete_node_enters_hard_finalization_without_compaction_or_research(
     node_id = tree.record_step(
         snapshot,
         epoch_id="epoch_001",
-        fold_id="fold_ref_current",
+        session_ref="session_ref_current",
         run_id="run_current",
         result_name="valid_001",
         revision_id="revision_current",
@@ -332,7 +333,7 @@ def test_complete_node_enters_hard_finalization_without_compaction_or_research(
                 )
             ),
             ProviderResponse(
-                tool_calls=(ToolCall("finish", "finish_fold", {"node_id": node_id}),)
+                tool_calls=(ToolCall("finish", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
             ),
         ]
     )
@@ -364,10 +365,10 @@ def test_complete_node_enters_hard_finalization_without_compaction_or_research(
                     tree,
                     output,
                     models,
-                    fold_id="fold_ref_current",
+                    session_ref="session_ref_current",
                     run_id="run_current",
                 ),
-                FinishFoldTool(tree, fold_id="fold_ref_current", run_id="run_current"),
+                FinishSessionTool(tree, session_ref="session_ref_current", run_ref="run_current", freeze_gate=_passing_gate),
             ]
         ),
         system_prompt="research before finishing",
@@ -396,7 +397,7 @@ def test_complete_node_enters_hard_finalization_without_compaction_or_research(
     # nomination names the node's revision, which is what freezes.
     assert (output / "main.py").read_text(encoding="utf-8") == "workspace drift\n"
     final_tools = {item["function"]["name"] for item in scripted.calls[1]["tools"]}
-    assert final_tools == {"finish_fold"}
+    assert final_tools == {"finish_session"}
     assert len(scripted.calls[1]["messages"]) == 2
     final_payload = json.loads(scripted.calls[1]["messages"][1].content or "{}")
     assert final_payload["complete_validation_candidates"][0]["node_id"] == node_id
@@ -438,7 +439,7 @@ def test_a_validation_completing_inside_the_grace_keeps_the_conversation(
     node_id = tree.record_step(
         output,
         epoch_id="epoch_001",
-        fold_id="fold_grace",
+        session_ref="fold_grace",
         run_id="run_grace",
         result_name="valid_001",
         revision_id="revision_grace",
@@ -469,7 +470,7 @@ def test_a_validation_completing_inside_the_grace_keeps_the_conversation(
     scripted = ScriptedLLM(
         [
             ProviderResponse(tool_calls=(ToolCall("b1", "batch_validate", {}),)),
-            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {"node_id": node_id}),)),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {"outcome": "freeze", "node_id": node_id}),)),
         ],
         context_window_tokens=128_000,
     )
@@ -479,7 +480,7 @@ def test_a_validation_completing_inside_the_grace_keeps_the_conversation(
         tools=ToolRegistry(
             [
                 SlowValidation(),
-                FinishFoldTool(tree, fold_id="fold_grace", run_id="run_grace"),
+                FinishSessionTool(tree, session_ref="fold_grace", run_ref="run_grace", freeze_gate=_passing_gate),
             ]
         ),
         system_prompt="fold system prompt",
@@ -710,7 +711,7 @@ def test_runner_rejects_mismatched_backtest_budget(tmp_path: Path) -> None:
         def evaluate(self, _request):
             raise AssertionError("budget mismatch must fail before evaluation")
 
-    backtest = FoldBacktestTool(
+    backtest = SessionValidations(
         request=_research_request(),
         output_dir=output,
         models_dir=models,
@@ -829,40 +830,12 @@ def _no_op_strategy(path: Path) -> Path:
     return path
 
 
-def _drawdown_rules():
-    """A stand-in for the Pipeline's hard rules: metrics -> reject reasons.
-
-    Hard finalization annotates candidates with whatever the injected callable
-    returns; the Pipeline's own hard rule (a non-finite metric) cannot be
-    staged in a recorded node, since tree.json refuses to serialize one, so
-    this keeps the same shape with a rule that can be. That the real wiring
-    builds a callable is asserted here; which rules it makes hard belongs to
-    test_pipeline_config.
-    """
-
-    from autotrade.pipelines.local_backend import acceptance_hard_rule_check
-
-    assert acceptance_hard_rule_check({"max_drawdown": 0.25}) is not None
-
-    def check(metrics: dict[str, object]) -> list[str]:
-        drawdown = metrics.get("max_drawdown")
-        if isinstance(drawdown, (int, float)) and abs(float(drawdown)) > 0.25:
-            return ["max_drawdown_exceeded"]
-        return []
-
-    return check
-
-
-def test_hard_finalization_offers_parent_control_with_its_acceptance_verdict(
+def test_hard_finalization_labels_every_candidate_with_its_freeze_gate_verdict(
     tmp_path: Path,
 ) -> None:
-    """Keeping the parent means selecting the host's control node.
-
-    A reviewed Fold reached hard finalization intending to keep the parent and
-    could not: the candidate list was built only from the session's own
-    recorded Validations. The list now leads with ``parent_control`` and every
-    entry says whether the Pipeline's hard rules would accept it.
-    """
+    """The choice made in the finalize window is not blind to the gate: each
+    listed node says whether a freeze of it would pass, and the node_id enum
+    covers exactly the session's complete Validations."""
 
     clock = FakeClock()
     time_budget = InferenceTimeBudget(duration_seconds=10.0, clock=clock)
@@ -870,82 +843,75 @@ def test_hard_finalization_offers_parent_control_with_its_acceptance_verdict(
     models = tmp_path / "models"
     models.mkdir()
     tree = StepTree(tmp_path / "steps")
-    control_id = tree.record_step(
-        _no_op_strategy(tmp_path / "control"),
-        epoch_id="epoch_001",
-        fold_id="fold_ref_current",
-        run_id="run_current",
-        result_name="parent_control",
-        revision_id="revision_control",
-        metrics={"total_return": -0.02, "max_drawdown": 0.11, "sharpe": -0.1},
-    )
-    challenger_id = tree.record_step(
-        _no_op_strategy(tmp_path / "challenger"),
-        epoch_id="epoch_001",
-        fold_id="fold_ref_current",
+    weak_id = tree.record_step(
+        _no_op_strategy(tmp_path / "weak"),
+        epoch_id="research",
+        session_ref="session_ref_current",
         run_id="run_current",
         result_name="valid_001",
-        revision_id="revision_challenger",
-        metrics={"total_return": 0.03, "max_drawdown": 0.41, "sharpe": 0.2},
+        revision_id="revision_weak",
+        metrics={"total_return": -0.02, "max_drawdown": 0.11, "sharpe": -0.1},
+    )
+    strong_id = tree.record_step(
+        _no_op_strategy(tmp_path / "strong"),
+        epoch_id="research",
+        session_ref="session_ref_current",
+        run_id="run_current",
+        result_name="valid_002",
+        revision_id="revision_strong",
+        metrics={"total_return": 0.3, "max_drawdown": 0.08, "sharpe": 1.4},
     )
 
-    class BreachingValidation:
+    class TwoValidations:
         spec = ToolSpec(
             "batch_validate",
-            "return one completed current-run validation",
+            "return two completed current-run validations",
             {"type": "object", "properties": {}, "required": []},
         )
 
         def invoke(self, _arguments):
             return ToolResult(
                 True,
-                value={"candidates": [{
-                    "node_id": challenger_id,
-                    "revision_id": "revision_challenger",
-                    "stats": {
-                        "total_return": 0.03,
-                        "max_drawdown": 0.41,
-                        "sharpe": 0.2,
-                    },
-                }]},
+                value={
+                    "candidates": [
+                        {"node_id": weak_id, "revision_id": "revision_weak", "stats": {"sharpe": -0.1}},
+                        {"node_id": strong_id, "revision_id": "revision_strong", "stats": {"sharpe": 1.4}},
+                    ]
+                },
             )
+
+    def gate(node_id: str) -> dict[str, object]:
+        if node_id == strong_id:
+            return {"passed": True, "reasons": []}
+        return {"passed": False, "reasons": ["freeze_deflated_sharpe_below_threshold"]}
 
     scripted = ScriptedLLM(
         [
             ProviderResponse(tool_calls=(ToolCall("valid", "batch_validate", {}),)),
             ProviderResponse(
                 tool_calls=(
-                    ToolCall("finish", "finish_fold", {"node_id": control_id}),
+                    ToolCall("finish", "finish_session", {"outcome": "freeze", "node_id": strong_id}),
                 )
             ),
         ]
     )
     shared = SessionCallBudget(max_calls=4, time_budget=time_budget)
-    main = SessionBudgetLLM(
-        ScheduledTimedLLM(scripted, clock, [5.0, 0.1]), budget=shared
-    )
+    main = SessionBudgetLLM(ScheduledTimedLLM(scripted, clock, [5.0, 0.1]), budget=shared)
     events: list[tuple[str, dict[str, object]]] = []
     runner = AgentSessionRunner(
         llm=main,
         tools=ToolRegistry(
             [
-                BreachingValidation(),
+                TwoValidations(),
                 StepRollbackTool(
-                    tree,
-                    output,
-                    models,
-                    fold_id="fold_ref_current",
-                    run_id="run_current",
+                    tree, output, models, session_ref="session_ref_current", run_id="run_current"
                 ),
-                FinishFoldTool(
-                    tree,
-                    fold_id="fold_ref_current",
-                    run_id="run_current",
-                    hard_rule_check=_drawdown_rules(),
+                FinishSessionTool(
+                    tree, session_ref="session_ref_current", run_ref="run_current", freeze_gate=gate
                 ),
             ]
         ),
-        system_prompt="finish this fold",
+        system_prompt="finish this session",
         config=AgentSessionConfig(
             max_llm_calls=2,
             deadline_seconds=10.0,
@@ -955,42 +921,33 @@ def test_hard_finalization_offers_parent_control_with_its_acceptance_verdict(
         ),
         time_budget=time_budget,
         event_sink=lambda event, payload: events.append((event, payload)),
-        control_validation_node={
-            "node_id": control_id,
-            "revision_id": "revision_control",
-            "result_name": "parent_control",
-            "stats": {"total_return": -0.02, "max_drawdown": 0.11, "sharpe": -0.1},
-        },
-        hard_rule_check=_drawdown_rules(),
+        freeze_gate=gate,
     )
 
     result = runner.run("finish")
 
     assert result.status == "finished"
-    assert result.finish_value["node_id"] == control_id
+    assert result.finish_value["node_id"] == strong_id
     payload = json.loads(scripted.calls[1]["messages"][1].content or "{}")
+    assert payload["observation"] == "session_hard_finalization"
     candidates = payload["complete_validation_candidates"]
-    assert [candidate["node_id"] for candidate in candidates] == [
-        control_id,
-        challenger_id,
-    ]
-    assert candidates[0]["result_name"] == "parent_control"
-    assert candidates[0]["passes_hard_rules"] is True
-    assert candidates[1]["passes_hard_rules"] is False
-    assert candidates[1]["hard_reject_reasons"] == ["max_drawdown_exceeded"]
-    # The node_id enum the model may answer with covers the control node too.
+    assert [candidate["node_id"] for candidate in candidates] == [weak_id, strong_id]
+    assert candidates[0]["passes_freeze_gate"] is False
+    assert candidates[0]["freeze_gate_reasons"] == ["freeze_deflated_sharpe_below_threshold"]
+    assert candidates[1]["passes_freeze_gate"] is True
+    assert "freeze_gate_reasons" not in candidates[1]
     finish_schema = next(
         item
         for item in scripted.calls[1]["tools"]
-        if item["function"]["name"] == "finish_fold"
+        if item["function"]["name"] == "finish_session"
     )
     assert finish_schema["function"]["parameters"]["properties"]["node_id"]["enum"] == [
-        control_id,
-        challenger_id,
+        weak_id,
+        strong_id,
     ]
     assert any(
         event == "hard_finalization_started"
-        and payload["candidate_node_ids"] == [control_id, challenger_id]
+        and payload["candidate_node_ids"] == [weak_id, strong_id]
         for event, payload in events
     )
 
@@ -1113,7 +1070,7 @@ def test_the_parent_stops_waiting_for_a_child_at_the_finalization_boundary(
     node_id = tree.record_step(
         _no_op_strategy(tmp_path / "snapshot"),
         epoch_id="epoch_001",
-        fold_id="fold_ref_current",
+        session_ref="session_ref_current",
         run_id="run_current",
         result_name="valid_001",
         revision_id="revision_current",
@@ -1162,7 +1119,7 @@ def test_the_parent_stops_waiting_for_a_child_at_the_finalization_boundary(
             # A turn of pure text while the child is still running: the trap.
             ProviderResponse(content="等子代理返回后再收尾"),
             ProviderResponse(
-                tool_calls=(ToolCall("finish", "finish_fold", {"node_id": node_id}),)
+                tool_calls=(ToolCall("finish", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
             ),
         ]
     )
@@ -1185,10 +1142,10 @@ def test_the_parent_stops_waiting_for_a_child_at_the_finalization_boundary(
                     tree,
                     output,
                     models,
-                    fold_id="fold_ref_current",
+                    session_ref="session_ref_current",
                     run_id="run_current",
                 ),
-                FinishFoldTool(tree, fold_id="fold_ref_current", run_id="run_current"),
+                FinishSessionTool(tree, session_ref="session_ref_current", run_ref="run_current", freeze_gate=_passing_gate),
             ]
         ),
         system_prompt="fold",

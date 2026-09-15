@@ -92,6 +92,7 @@ RUNTIME_CACHE_SUFFIXES = (".pyc", ".pyo")
 AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS = (
     "result_name",
     "mode",
+    "span",
     "status",
     "complete_validation",
     "error",
@@ -103,9 +104,8 @@ AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS = (
     "order_lifecycle",
     "reject_counts",
     "benchmark",
-    # Overfitting tell: turnover cost can drive the held-out loss while the
-    # development metrics still look healthy, so every Validation carries it
-    # into the compact Fold history a later Fold and Meta read back.
+    # Overfitting tell: turnover cost can drive a forward loss while the
+    # research metrics still look healthy, so every Validation carries it.
     "turnover",
     # Net-of-cost robustness and how few trades/names carried the gains: an
     # excess that dies at twice the modelled slippage, or a return one name
@@ -114,9 +114,6 @@ AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS = (
     "pnl_concentration",
     "strategy_exit_fill_count",
     "trade_count",
-    # Selection evidence the Fold tool layer writes beside the replay block:
-    # this candidate minus the Fold's own parent control on the same window.
-    "vs_parent",
     "decision_calls",
     "started_at",
     "finished_at",
@@ -479,29 +476,21 @@ def _agent_visible_manifest(
             "epoch_id",
             "run_id",
             "kind",
+            "session",
             "runtime_env_ref",
             "data_summary_ref",
-            "fold_period",
-            "validation_periods",
+            "research",
             "schedule",
             "snapshot_config",
-            "valid_decision_time",
-            "is_initial_artifact",
-            "parent_strategy_artifact_id",
-            "template_ref",
+            "start",
+            "arm",
             "modification_constraints",
             "acceptance_rules",
             "broker_profile",
             "nl_failure_policy",
             "step_tree_enabled",
             "record_failed_attempts",
-            "epoch_index",
-            "phase",
             "budgets",
-            "max_steps",
-            "max_backtests_per_fold",
-            "deadline_seconds",
-            "fold_deadline_at",
             "finalize_before_deadline_seconds",
             "per_call_timeout_seconds",
             "sandbox_spec",
@@ -509,7 +498,7 @@ def _agent_visible_manifest(
             "prior_prompt",
             "operating_memory",
             "skills",
-            "fold_exploration_directive",
+            "exploration_directive",
             "created_at",
         )
         if key in record
@@ -517,15 +506,8 @@ def _agent_visible_manifest(
     if record.get("run_id"):
         public["run_id"] = ref_store.get_or_create("run", str(record["run_id"]))
     if record.get("fold_id"):
-        public["fold_id"] = ref_store.get_or_create("fold", str(record["fold_id"]))
-    # Artifact ids embed the raw fold label (strategy_<epoch>_fold_<period>), so they
-    # must be projected exactly like the ledger view does.
-    if public.get("parent_strategy_artifact_id"):
-        public["parent_strategy_artifact_id"] = ref_store.get_or_create(
-            "strategy", str(public["parent_strategy_artifact_id"])
-        )
-    if isinstance(record.get("fold"), dict):
-        public["fold"] = _agent_visible_fold_record(record["fold"], ref_store)
+        # The host records link on the raw session id; the Agent reads its ref.
+        public["session_ref"] = ref_store.get_or_create("session", str(record["fold_id"]))
     if isinstance(record.get("snapshots"), dict):
         public["snapshots"] = _agent_visible_snapshots(record["snapshots"])
     if isinstance(record.get("backtest_summaries"), list):
@@ -534,21 +516,6 @@ def _agent_visible_manifest(
             for item in record["backtest_summaries"]
             if isinstance(item, dict) and item.get("mode") == "valid"
         ]
-    return public
-
-
-def _agent_visible_fold_record(
-    record: dict[str, object], ref_store: AgentRefStore
-) -> dict[str, object]:
-    public = {
-        key: record[key]
-        for key in ("input_window", "validation_period", "valid_decision_time")
-        if key in record
-    }
-    if record.get("fold_id"):
-        public["fold_id"] = ref_store.get_or_create(
-            "fold", str(record["fold_id"])
-        )
     return public
 
 

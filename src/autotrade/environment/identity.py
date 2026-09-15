@@ -19,11 +19,10 @@ from typing import Iterator, Mapping
 
 AGENT_REF_SCHEMA_VERSION = 1
 AGENT_REF_PREFIXES: Mapping[str, str] = {
-    "fold": "fold_ref",
+    "session": "session_ref",
     "strategy": "strategy_ref",
     "run": "run_ref",
     "trace": "trace_ref",
-    "meta": "meta_ref",
 }
 LEGACY_EXPERIMENT_MESSAGE = "legacy experiment is read-only; start a new experiment"
 

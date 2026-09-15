@@ -1,6 +1,6 @@
 """Step-tree console view: lineage, node metrics, and source export.
 
-The Agent-visible tree stores the session as an opaque ``fold_ref_*`` token.
+The Agent-visible tree stores the session as an opaque ``session_ref_*`` token.
 The console is the researcher's trusted surface, so it resolves the token back
 to the plan key (``s1``, ``s2``, ...) for display, and marks the node the arm
 froze from the ledger's frozen record.
@@ -32,11 +32,11 @@ def public_step_node(
     if identity is not None:
         return identity.public_record(node)
     public = dict(node)
-    fold_ref = public.pop("fold_id", None)
+    session_ref = public.pop("session_ref", None)
     run_ref = public.pop("run_id", None)
     revision_ref = public.pop("revision_id", None)
-    if fold_ref:
-        public["fold_ref"] = fold_ref
+    if session_ref:
+        public["session_ref"] = session_ref
     if run_ref:
         public["run_ref"] = run_ref
     if revision_ref:
@@ -60,14 +60,14 @@ def step_tree_view(experiment_dir: Path) -> dict[str, object]:
     nodes: list[dict[str, object]] = []
     for node in tree.nodes():
         node_id = str(node["node_id"])
-        fold_ref = str(node.get("fold_id") or "")
+        session_ref = str(node.get("session_ref") or "")
         raw_metrics = node.get("metrics")
         raw_attachments = node.get("attachments")
         public = public_step_node(
             {
                 "node_id": node_id,
                 "parent_node_id": node.get("parent_node_id"),
-                "fold_id": fold_ref,
+                "session_ref": session_ref,
                 "run_id": node.get("run_id"),
                 "result_name": node.get("result_name"),
                 "complete_validation": bool(node.get("complete_validation")),
@@ -85,9 +85,9 @@ def step_tree_view(experiment_dir: Path) -> dict[str, object]:
             },
             identity=identity,
         )
-        if identity is not None and fold_ref:
+        if identity is not None and session_ref:
             try:
-                public["session_key"] = identity.store.resolve("fold", fold_ref)
+                public["session_key"] = identity.store.resolve("session", session_ref)
             except (KeyError, ValueError):
                 public["session_key"] = None
         nodes.append(public)

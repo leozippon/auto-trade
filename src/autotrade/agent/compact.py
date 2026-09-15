@@ -270,7 +270,7 @@ class ContextCompactor(SessionTimeBudgetAware):
                 max_tokens=self.config.max_response_tokens,
             )
             summary_text = _extract_summary_text(response)
-        except Exception as exc:  # noqa: BLE001 - compaction failure must not kill a Fold
+        except Exception as exc:  # noqa: BLE001 - compaction failure must not kill a session
             self._consecutive_failures += 1
             event = {
                 **decision,

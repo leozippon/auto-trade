@@ -342,9 +342,9 @@ def test_llm_research_sessions_mount_only_the_research_end_view_and_hand_off_pri
 ):
     """Two scripted Agent sessions through the real Agent adapter.
 
-    The first validates the working copy, leaves a PRIOR.md and finishes
-    without an edge; the second reads that PRIOR, validates again and
-    nominates its node, which freezes and runs forward. Each session's
+    The first validates the working copy, leaves a PRIOR.md and continues;
+    the second reads that PRIOR, validates again and freezes its node through
+    the gate, which then runs forward. Each session's
     ``/mnt/snapshot`` is the decision view at research end, the two snapshot
     slot mounts stay empty, and no replay slot appears anywhere in the
     session's runtime tree. A graduated sibling experiment's skills are
@@ -362,7 +362,7 @@ def test_llm_research_sessions_mount_only_the_research_end_view_and_hand_off_pri
     )
     from tests.unit.test_operating_memory import GRADUATED_SKILL, _experiment_with_skill
 
-    repo, experiment = make_arm(tmp_path, developer_mode="llm", max_backtests_per_fold=1)
+    repo, experiment = make_arm(tmp_path, developer_mode="llm", max_replay_years_per_session=1)
     _experiment_with_skill(repo / "experiments", "adopted")
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     # The console's per-session GPU allocation, one-shot, for s1 only.
@@ -376,9 +376,9 @@ def test_llm_research_sessions_mount_only_the_research_end_view_and_hand_off_pri
                 VALIDATE_WORKING_COPY,
                 ToolCall(
                     "finish",
-                    "finish_fold",
+                    "finish_session",
                     {
-                        "outcome": "no_edge",
+                        "outcome": "continue",
                         "reason": "本会话只完成了一次整个研究期的验证，边际是否稳定还需要下一会话独立复核同一机制后再判断，因此不在本会话冻结。",
                     },
                 ),
@@ -386,7 +386,13 @@ def test_llm_research_sessions_mount_only_the_research_end_view_and_hand_off_pri
             ),
             *_agent_then(VALIDATE_WORKING_COPY, roles=()),
             ProviderResponse(
-                tool_calls=(ToolCall("finish", "finish_fold", {"node_id": LAST_WORKING_COPY_NODE}),)
+                tool_calls=(
+                    ToolCall(
+                        "finish",
+                        "finish_session",
+                        {"outcome": "freeze", "node_id": LAST_WORKING_COPY_NODE},
+                    ),
+                )
             ),
         ]
     )
@@ -415,10 +421,16 @@ def test_llm_research_sessions_mount_only_the_research_end_view_and_hand_off_pri
     received = _facts(next(prompt for prompt in reversed(second_prompts) if handoff in prompt))
     previewed = _facts(str(build_prompt_preview(experiment, "s2", "", repo_root=repo)["prompt"]))
     assert set(previewed) == set(received)
-    for block in ("budgets", "research_scope", "visibility_policy", "broker_replay"):
+    for block in ("budgets", "research_scope", "visibility_policy", "broker_replay", "arm"):
         assert set(previewed[block]) == set(received[block]), block
     assert previewed["research_scope"] == received["research_scope"]
-    assert previewed["visible_timeline"]["current_decision_time"] == received["visible_timeline"]["current_decision_time"]
+    assert previewed["research_geometry"] == received["research_geometry"]
+    assert previewed["identity"]["session"] == received["identity"]["session"]
+    # s1 continued without naming a node, so s2 starts from the template too.
+    assert {key: value for key, value in previewed["artifact_contract"]["start"].items() if key != "model_artifacts_empty"} == {
+        key: value for key, value in received["artifact_contract"]["start"].items() if key != "model_artifacts_empty"
+    } == {"kind": "template", "template_ref": "agent_output_template"}
+    assert previewed["earlier_sessions"] == received["earlier_sessions"]
     assert {key: value for key, value in previewed["budgets"].items() if key != "context_compaction"} == {
         key: value for key, value in received["budgets"].items() if key != "context_compaction"
     }

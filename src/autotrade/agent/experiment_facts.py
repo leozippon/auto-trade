@@ -14,7 +14,7 @@ from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.replay.style import NEUTRALIZATION_METHOD
 from autotrade.environment.sandbox import SCREENING_TOOL_MOUNT, SandboxLimits
 
-EXPERIMENT_FACTS_SCHEMA_VERSION = 1
+EXPERIMENT_FACTS_SCHEMA_VERSION = 2
 
 # Agent-visible clock contract for ``budgets.deadline_seconds``, read from the
 # injected facts; every replay tool pauses the clock,
@@ -35,6 +35,19 @@ BATCH_VALIDATE_FIT_TIMEOUT_NOTE = (
     "因为并发是环境引入的、不该记到策略头上；单个候选的调用两者都用基准值。"
 )
 
+# How ``budgets.max_replay_years`` is spent.
+REPLAY_YEARS_NOTE = (
+    "一个候选按其 span 覆盖的研究年份计 replay-year：一年的 span 计 1，完整研究期计研究年数；"
+    "一批的花费是候选数乘年数，开跑前整批预留；`smoke_backtest` 与 `run_null_control` 不计。"
+)
+
+# What a session knows about the periods after research end: that they exist
+# and are sealed, never their dates, slots or results.
+SEALED_PERIODS_NOTE = (
+    "研究期末之后是前推期与 Held-out：冻结产物在那里被连续回放一次并裁决是否毕业；"
+    "它们的日期、数据、回放槽与结果不进入任何会话。"
+)
+
 
 def build_experiment_facts(
     *,
@@ -48,16 +61,13 @@ def build_experiment_facts(
 ) -> dict[str, object]:
     """Build the short Agent-visible operational-facts projection.
 
-    This is a convenience index, not a security boundary. It intentionally
-    omits test/held-out schedule fields; exact trusted details remain in the
-    referenced JSON files.
+    This is a convenience index, not a security boundary. It carries research
+    dates only; exact trusted details remain in the referenced JSON files.
     """
 
     runtime_env = runtime_env or {}
     data_summary = data_summary or {}
-    kind = str(manifest.get("kind") or "fold")
     snapshot_config = _as_mapping(manifest.get("snapshot_config"))
-    fold_period = manifest.get("fold_period")
 
     facts: dict[str, object] = {
         "identity": compact_mapping(
@@ -69,17 +79,15 @@ def build_experiment_facts(
                     if manifest.get("run_id")
                     else None
                 ),
-                "epoch_id": manifest.get("epoch_id"),
-                "session_kind": kind,
-                "fold_sequence_or_opaque_id": _opaque_fold_ref(
-                    manifest.get("fold_id"), ref_store=ref_store
+                "session_kind": manifest.get("kind"),
+                "session_ref": (
+                    ref_store.get_or_create("session", str(manifest["fold_id"]))
+                    if manifest.get("fold_id")
+                    else None
                 ),
-                "phase": manifest.get("phase"),
-                # Stated on every Fold, false included: an absent flag was
-                # read as "this is a confirmation Fold" (XR1 A6).
-                "confirmation_fold": (
-                    bool(manifest.get("confirmation_fold")) if kind == "fold" else None
-                ),
+                # Stated on every session, last included: whether a session
+                # follows decides whether ``continue`` is an outcome at all.
+                "session": _as_mapping(manifest.get("session")) or None,
             }
         ),
         "source_refs": {
@@ -108,26 +116,21 @@ def build_experiment_facts(
             ),
         },
         "visibility_policy": {
-            "train_visible": True,
-            "valid_visible": True,
-            "test_visible": False,
-            # Only the post-Held-out deployment adjustment replays a window
-            # that includes the Held-out; every development session never does.
-            "heldout_visible": kind == "deployment_adjustment",
-            "hidden_schedule_redacted": True,
+            "research_period_visible": True,
+            "after_research_end": SEALED_PERIODS_NOTE,
             "formal_strategy_read_roots": ["snapshot_dir", "asof_dir"],
         },
+        "research_geometry": _as_mapping(manifest.get("research")) or None,
         "visible_timeline": _visible_timeline(
-            manifest=manifest,
-            data_summary=data_summary,
-            snapshot_config=snapshot_config,
-            fold_period=fold_period,
+            data_summary=data_summary, snapshot_config=snapshot_config
         ),
         "research_scope": _research_scope(
-            manifest=manifest,
-            snapshot_config=snapshot_config,
-            fold_period=fold_period,
+            manifest=manifest, snapshot_config=snapshot_config
         ),
+        # The arm's selection state at session start: nothing frozen yet, and
+        # the trial pool the freeze gate deflates over before this session.
+        # ``False`` and zero counts are facts, not absences.
+        "arm": dict(_as_mapping(manifest.get("arm"))) or None,
         "budgets": _budget_facts(
             manifest,
             max_llm_calls=max_llm_calls,
@@ -139,14 +142,12 @@ def build_experiment_facts(
         # the fixed mount layout) — building always-dropped sections was shaping
         # work with no reader.
         "artifact_contract": _artifact_contract_facts(
-            manifest,
-            ref_store=ref_store,
-            model_artifacts_empty=model_artifacts_empty,
+            manifest, model_artifacts_empty=model_artifacts_empty
         ),
         "broker_replay": _broker_replay_facts(manifest),
         # The caliber every ``neutralized_excess_return`` in this session was
         # computed under. One constant sentence: stating it here keeps it out
-        # of every backtest summary of every fold in development_history.
+        # of every backtest summary.
         "neutralized_excess_method": NEUTRALIZATION_METHOD,
         "runtime_tools": _runtime_tool_facts(runtime_env, manifest=manifest),
     }
@@ -155,60 +156,40 @@ def build_experiment_facts(
 
 def _visible_timeline(
     *,
-    manifest: Mapping[str, object],
     data_summary: Mapping[str, object],
     snapshot_config: Mapping[str, object],
-    fold_period: object,
 ) -> dict[str, object]:
-    execution_policy = _execution_policy(data_summary)
     snapshot_windows = _snapshot_windows(snapshot_config)
-    parameters = manifest
-    timeline = {
-        "fold_period": fold_period,
-        # Cadence periods per Validation window: 1 is the Fold's own period,
-        # N > 1 the trailing N ending at it, only the last of which is new.
-        "validation_periods": parameters.get("validation_periods"),
-        "snapshot_windows": snapshot_windows,
-        "decision_snapshot_intraday_lookback_trade_days": snapshot_windows.get("intraday_trade_days"),
-        "validation_intraday_scope": "historical_pit_features_and_exact_execution_prices",
-        "execution_policy": execution_policy,
-    }
-    fold = _as_mapping(manifest.get("fold"))
-    timeline.update(
+    return compact_mapping(
         {
-            "current_decision_time": manifest.get("valid_decision_time")
-            or fold.get("valid_decision_time"),
-            "visible_input_window": fold.get("input_window"),
-            "visible_validation_replay_period": fold.get("validation_period"),
+            "snapshot_windows": snapshot_windows,
+            "decision_snapshot_intraday_lookback_trade_days": snapshot_windows.get(
+                "intraday_trade_days"
+            ),
+            "validation_intraday_scope": "historical_pit_features_and_exact_execution_prices",
+            "execution_policy": _execution_policy(data_summary),
         }
     )
-    return compact_mapping(timeline)
 
 
 def _research_scope(
     *,
     manifest: Mapping[str, object],
     snapshot_config: Mapping[str, object],
-    fold_period: object,
 ) -> dict[str, object]:
-    """One sentence each on the development window, the universe and the cadence."""
-    fold = _as_mapping(manifest.get("fold"))
-    window = fold.get("validation_period")
-    if manifest.get("test_stage") is False:
-        development = (
-            f"This Fold's validation period is {window}. The development window is "
-            f"split into one Fold per {fold_period or 'period'}, developed in "
-            "chronological order with a Meta-learning session between Folds; there "
-            "is no frozen Test stage, and the frozen strategy is judged only by the "
-            "automatic Held-out replay."
-        )
-    elif manifest.get("test_stage") is True:
-        development = (
-            f"This Fold's development window is its validation period {window}; "
-            "development rolls period by period inside the configured window."
-        )
-    else:
-        development = f"The development window of this session is {window}."
+    """One sentence each on the research period, the universe and the cadence."""
+    research = _as_mapping(manifest.get("research"))
+    session = _as_mapping(manifest.get("session"))
+    period = research.get("research_period")
+    research_sentence = (
+        f"Every session of this arm researches the same period {period}, one "
+        "July-June year per label; this is session "
+        f"{session.get('index')} of {session.get('of')}. A session ends by "
+        "continuing, freezing one full-period node through the freeze gate, or "
+        "ending the arm; the frozen artifact is judged only on later, sealed data."
+        if period
+        else None
+    )
     screen = _as_mapping(snapshot_config.get("universe_screen"))
     active = {
         key: value
@@ -217,7 +198,7 @@ def _research_scope(
     }
     if active:
         universe = (
-            "The universe is screened at the decision anchor "
+            "The universe is screened when the decision view is built "
             f"({', '.join(f'{key}={value}' for key, value in active.items())}); "
             "the strategy may filter further."
         )
@@ -228,12 +209,12 @@ def _research_scope(
             "own universe filters."
         )
     schedule = _as_mapping(manifest.get("schedule"))
-    period = str(schedule.get("period") or "day")
+    period_name = str(schedule.get("period") or "day")
     inference_time = schedule.get("inference_time")
     when = (
         "every trading day"
-        if period == "day"
-        else f"on the first available trading day of each {period}"
+        if period_name == "day"
+        else f"on the first available trading day of each {period_name}"
     )
     cadence = (
         f"generate_orders is called {when} at {inference_time}; the strategy chooses "
@@ -242,7 +223,7 @@ def _research_scope(
     )
     return compact_mapping(
         {
-            "development_window": development,
+            "research": research_sentence,
             "universe": universe,
             "strategy_cadence": cadence,
         }
@@ -308,19 +289,18 @@ def _budget_facts(
             # the split a session plans against a deadline that is already
             # ``deadline_grace_seconds`` later than the one its directive and
             # wrap-up prompt talk about.
-            "deadline_seconds": manifest.get("deadline_seconds") or budgets.get("deadline_seconds"),
+            "deadline_seconds": budgets.get("deadline_seconds"),
             "deadline_seconds_note": DEADLINE_SECONDS_NOTE,
             "deadline_grace_seconds": budgets.get("deadline_grace_seconds"),
             "finalize_before_deadline_seconds": manifest.get("finalize_before_deadline_seconds"),
-            "max_steps": manifest.get("max_steps") or budgets.get("max_steps"),
-            "max_llm_calls": max_llm_calls
-            or manifest.get("max_llm_calls")
-            or budgets.get("max_llm_calls"),
-            "max_backtests_per_fold": manifest.get("max_backtests_per_fold")
-            or budgets.get("max_backtests"),
+            "max_llm_calls": max_llm_calls or budgets.get("max_llm_calls"),
+            "max_replay_years": budgets.get("max_replay_years"),
+            "max_replay_years_note": (
+                REPLAY_YEARS_NOTE if budgets.get("max_replay_years") is not None else None
+            ),
             # Host null controls the session may request before it selects,
             # minutes of replay each; every run_null_control result says what is left.
-            "max_null_controls_per_fold": budgets.get("max_null_controls_per_fold"),
+            "max_null_controls": budgets.get("max_null_controls"),
             # The formal executor's per-trading-day inference wall clock; a
             # slower generate_orders fails the whole backtest.
             "strategy_inference_timeout_seconds": budgets.get(
@@ -358,69 +338,20 @@ def _budget_facts(
     )
 
 
-def _parent_control_available(
-    manifest: Mapping[str, object], *, is_initial: bool
-) -> bool:
-    """Whether this session has a ``parent_control`` Step node to select.
-
-    The Fold manifest records the pre-session control outcome directly. A
-    manifest that carries no such field — an older Fold manifest, a Meta
-    session, or the console's prompt preview, which runs before any control
-    exists — falls back to "an inherited parent exists".
-    """
-
-    recorded = manifest.get("parent_control_available")
-    if recorded is None:
-        return not is_initial
-    return bool(recorded)
-
-
 def _artifact_contract_facts(
     manifest: Mapping[str, object],
     *,
-    ref_store: AgentRefStore,
     model_artifacts_empty: bool | None,
 ) -> dict[str, object]:
     # Local import: the pipelines package imports this module, so binding the
     # acceptance rules at module scope would close an import cycle.
     from autotrade.pipelines.config import AcceptanceRules
 
-    is_initial = bool(manifest.get("is_initial_artifact", manifest.get("template_ref") is not None))
-    parent_id = manifest.get("parent_strategy_artifact_id") or manifest.get("parent_artifact_id")
-    parent = {
-        "kind": "initial_template" if is_initial else "frozen_artifact",
-        # Artifact ids embed the raw fold label (strategy_<epoch>_fold_<period>);
-        # project them like every other agent-visible surface.
-        "id": (
-            ref_store.get_or_create("strategy", str(parent_id)) if parent_id else None
-        ),
-        # Whether the host seeded a ``parent_control`` Step node for this
-        # session, which the run manifest records as the outcome of the
-        # pre-session parent replay: an inherited parent whose control replay
-        # failed leaves no node. Stating the absence is not optional prose:
-        # four first-Fold sessions read the missing ``parent_control`` block as
-        # a pipeline fault and either spent a backtest reproducing the template
-        # or silently redefined their baseline. False must survive compaction,
-        # so it is a bool.
-        "parent_control_available": _parent_control_available(
-            manifest, is_initial=is_initial
-        ),
-        # And why, when the host's replay is what failed -- always the
-        # parent's own exception, since any other failure fails the attempt
-        # before a session starts. The submit contract asks for a minimal
-        # repair of exactly that error; the manifest already carries the
-        # bounded, host-path-free text.
-        **(
-            {"parent_control_error": error}
-            if (error := manifest.get("parent_control_error"))
-            else {}
-        ),
-        "model_artifacts_empty": model_artifacts_empty,
-    }
-    # What freezes this Fold and what graduates the experiment, both derived
-    # from the run's own rules: the freeze block marks every rule hard or warn,
-    # and the graduation block names the Held-out bar the session is really
-    # optimizing toward.
+    start = dict(_as_mapping(manifest.get("start")))
+    start["model_artifacts_empty"] = model_artifacts_empty
+    # The freeze gate the finish tool enforces and the graduation rules the
+    # frozen artifact is judged by later, both derived from the run's own
+    # rules. Rules only: no date after research end.
     acceptance = _as_mapping(manifest.get("acceptance_rules"))
     return compact_mapping(
         {
@@ -429,12 +360,12 @@ def _artifact_contract_facts(
             "strategy_return_contract": "strict_json_order_array",
             "model_artifacts_allowed": True,
             "workspace_frozen": False,
-            "parent": compact_mapping(parent),
+            "start": compact_mapping(start),
             "modification_constraints": manifest.get("modification_constraints"),
             "acceptance_rules": (
-                None
-                if not acceptance
-                else AcceptanceRules.from_record(acceptance).agent_facts()
+                AcceptanceRules.from_record(acceptance).agent_facts()
+                if acceptance
+                else None
             ),
             "step_tree_enabled": manifest.get("step_tree_enabled"),
             "record_failed_attempts": manifest.get("record_failed_attempts"),
@@ -530,12 +461,6 @@ def _populated_file_names(data_summary: Mapping[str, object]) -> set[str]:
             if path and isinstance(rows, int) and rows > 0:
                 names.add(path.rsplit("/", 1)[-1])
     return names
-
-
-def _opaque_fold_ref(value: object, *, ref_store: AgentRefStore) -> str | None:
-    if value is None or str(value) == "":
-        return None
-    return ref_store.get_or_create("fold", str(value))
 
 
 def _as_mapping(value: object) -> dict[str, object]:

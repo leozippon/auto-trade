@@ -182,7 +182,7 @@ class Tool(Protocol):
 
 # The tool whose calls must run in order even though its spec is not mutating:
 # it finishes the session.
-SEQUENTIAL_TOOL_NAMES = frozenset({"finish_fold"})
+SEQUENTIAL_TOOL_NAMES = frozenset({"finish_session"})
 
 
 def is_sequential_tool(spec: ToolSpec | None) -> bool:
@@ -274,7 +274,7 @@ class ToolRegistry:
             return ToolResult(
                 False,
                 error=(
-                    f"tool is unavailable in the current session phase: {name}; "
+                    f"tool is unavailable at this point of the session: {name}; "
                     f"available now: {available}"
                 ),
             )

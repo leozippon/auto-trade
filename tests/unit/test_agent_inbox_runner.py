@@ -21,7 +21,7 @@ from autotrade.environment.artifacts import new_revision_id
 from autotrade.environment.llm import ChatMessage, ProviderResponse, ScriptedLLM, ToolCall
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools import (
-    FinishFoldTool,
+    FinishSessionTool,
     ToolRegistry,
     ToolResult,
     ToolSpec,
@@ -61,6 +61,11 @@ class FakeInbox:
     def push(self, notice: FakeNotice) -> None:
         self.items.append(notice)
 
+def _passing_gate(node_id: str) -> dict[str, object]:
+    """A freeze gate every node passes: these tests are about the Runner."""
+    return {"passed": True, "reasons": []}
+
+
 
 class RecordingTool:
     def __init__(self, name: str, *, mutating: bool = False, on_invoke=None):
@@ -80,7 +85,7 @@ class RecordingTool:
         return ToolResult(True, value={"name": self.spec.name})
 
 
-def _finish_tool(root: Path) -> tuple[FinishFoldTool, str]:
+def _finish_tool(root: Path) -> tuple[FinishSessionTool, str]:
     output = root / "output"
     output.mkdir(parents=True, exist_ok=True)
     (output / "main.py").write_text(
@@ -90,13 +95,13 @@ def _finish_tool(root: Path) -> tuple[FinishFoldTool, str]:
     node_id = tree.record_step(
         output,
         epoch_id="epoch_001",
-        fold_id="fold_ref_ab",
+        session_ref="session_ref_ab",
         run_id="run_x",
         result_name="valid_000",
         revision_id=new_revision_id("revision"),
         metrics={"total_return": 0.01},
     )
-    return FinishFoldTool(tree, fold_id="fold_ref_ab", run_id="run_x"), node_id
+    return FinishSessionTool(tree, session_ref="session_ref_ab", run_ref="run_x", freeze_gate=_passing_gate), node_id
 
 
 def _user_texts(messages: list[ChatMessage]) -> list[str]:
@@ -114,7 +119,7 @@ def test_before_llm_applies_guidance_without_system_or_manifest(tmp_path: Path) 
     llm = ScriptedLLM(
         [
             ProviderResponse(
-                tool_calls=(ToolCall("f", "finish_fold", {"node_id": node_id}),)
+                tool_calls=(ToolCall("f", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
             )
         ]
     )
@@ -157,11 +162,11 @@ def test_interrupt_after_llm_skips_unstarted_tools_with_pairing(tmp_path: Path) 
             ProviderResponse(
                 tool_calls=(
                     ToolCall("w", "write_file", {"path": "output/main.py"}),
-                    ToolCall("f", "finish_fold", {"node_id": node_id}),
+                    ToolCall("f", "finish_session", {"outcome": "freeze", "node_id": node_id}),
                 )
             ),
             ProviderResponse(
-                tool_calls=(ToolCall("done", "finish_fold", {"node_id": node_id}),)
+                tool_calls=(ToolCall("done", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
             ),
         ]
     )
@@ -185,7 +190,7 @@ def test_interrupt_after_llm_skips_unstarted_tools_with_pairing(tmp_path: Path) 
         assert payload["observation"] == "interrupted_by_user"
         assert payload["error"] == "interrupted_by_user"
     skipped = [payload for event, payload in events if event == "tool_skipped"]
-    assert [item["tool"] for item in skipped] == ["write_file", "finish_fold"]
+    assert [item["tool"] for item in skipped] == ["write_file", "finish_session"]
     assert all(item["reason"] == "interrupted_by_user" for item in skipped)
     assert all(item["safe_point"] == INBOX_SAFE_AFTER_LLM_BEFORE_TOOLS for item in skipped)
     user_events = [payload for event, payload in events if event == "user_message"]
@@ -220,11 +225,11 @@ def test_started_mutating_tool_is_not_killed(tmp_path: Path) -> None:
                 tool_calls=(
                     ToolCall("w", "write_file", {}),
                     ToolCall("g", "grep", {}),
-                    ToolCall("f", "finish_fold", {"node_id": node_id}),
+                    ToolCall("f", "finish_session", {"outcome": "freeze", "node_id": node_id}),
                 )
             ),
             ProviderResponse(
-                tool_calls=(ToolCall("done", "finish_fold", {"node_id": node_id}),)
+                tool_calls=(ToolCall("done", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
             ),
         ]
     )
@@ -249,7 +254,7 @@ def test_started_mutating_tool_is_not_killed(tmp_path: Path) -> None:
     assert by_id["g"]["error"] == "interrupted_by_user"
     assert by_id["f"]["ok"] is False
     skipped = [payload for event, payload in events if event == "tool_skipped"]
-    assert [item["tool"] for item in skipped] == ["grep", "finish_fold"]
+    assert [item["tool"] for item in skipped] == ["grep", "finish_session"]
     assert skipped[0]["safe_point"] == INBOX_SAFE_BETWEEN_SERIAL_TOOLS
 
 
@@ -268,7 +273,7 @@ def test_non_interrupt_after_llm_waits_for_tool_pairing(tmp_path: Path) -> None:
         [
             ProviderResponse(tool_calls=(ToolCall("g", "grep", {}),)),
             ProviderResponse(
-                tool_calls=(ToolCall("f", "finish_fold", {"node_id": node_id}),)
+                tool_calls=(ToolCall("f", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
             ),
         ]
     )
@@ -306,7 +311,7 @@ def test_after_parallel_readonly_applies_before_next_llm(tmp_path: Path) -> None
                 tool_calls=(ToolCall("a", "glob", {}), ToolCall("b", "grep", {}))
             ),
             ProviderResponse(
-                tool_calls=(ToolCall("f", "finish_fold", {"node_id": node_id}),)
+                tool_calls=(ToolCall("f", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
             ),
         ]
     )
@@ -350,7 +355,7 @@ def test_subagent_does_not_consume_inbox_until_parent_returns(tmp_path: Path) ->
                 )
             ),
             ProviderResponse(
-                tool_calls=(ToolCall("f", "finish_fold", {"node_id": node_id}),)
+                tool_calls=(ToolCall("f", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
             ),
         ]
     )
@@ -386,7 +391,7 @@ def test_session_inbox_hook_isolates_sessions_and_run_ids(tmp_path: Path) -> Non
     llm = ScriptedLLM(
         [
             ProviderResponse(
-                tool_calls=(ToolCall("f", "finish_fold", {"node_id": node_id}),)
+                tool_calls=(ToolCall("f", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
             )
         ]
     )

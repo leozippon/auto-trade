@@ -79,7 +79,7 @@ class ModificationConstraintsReachTheToolTest(unittest.TestCase):
 class RecordFailedAttemptsTest(unittest.TestCase):
     """With the knob off, a failed validation leaves no dead-end node.
 
-    Driven through the real ``FoldBacktestTool``: the gate lives at its
+    Driven through the real ``SessionValidations``: the gate lives at its
     exception path, and asserting the knob's value would prove nothing."""
 
     def _tool(
@@ -101,7 +101,7 @@ class RecordFailedAttemptsTest(unittest.TestCase):
         )
         from autotrade.pipelines.local_backend import (
             BatchValidateTool,
-            FoldBacktestTool,
+            SessionValidations,
         )
 
         output = _artifact(root / "output")
@@ -118,10 +118,9 @@ class RecordFailedAttemptsTest(unittest.TestCase):
             start=None,
             snapshot=snapshot,
             decision_time=datetime(2025, 6, 30, 23, 59, 59, tzinfo=UTC),
-            validation=ReplaySpan("full", "valid", "20210701", "20250630", snapshot),
+            research_years=(ReplaySpan("Y1", "valid", "20210701", "20220630", snapshot),),
             input_window_start="20230701",
-            max_steps=10,
-            max_backtests=30,
+            max_replay_years=30,
             max_llm_calls=200,
             deadline_seconds=1200.0,
             record_failed_attempts=record_failed_attempts,
@@ -135,7 +134,7 @@ class RecordFailedAttemptsTest(unittest.TestCase):
             def evaluate(self, _request):
                 raise raised
 
-        backtest = FoldBacktestTool(
+        backtest = SessionValidations(
             request=request,
             output_dir=output,
             models_dir=models,
@@ -257,30 +256,6 @@ class RecordFailedAttemptsTest(unittest.TestCase):
         self.assertTrue(config.step_tree_enabled)
 
 
-class ConvergencePhaseTest(unittest.TestCase):
-    """``convergence_start_epoch`` decides the phase, and the phase changes the
-    prompt the Fold Agent receives."""
-
-    @staticmethod
-    def _phase(epoch_index: int, start: int) -> str:
-        return "convergence" if epoch_index >= start else "exploration"
-
-    def test_the_boundary_epoch_switches_the_phase_and_the_prompt(self) -> None:
-        from autotrade.agent.prompts import build_system_prompt
-
-        self.assertEqual(self._phase(1, 3), "exploration")
-        self.assertEqual(self._phase(2, 3), "exploration")
-        self.assertEqual(self._phase(3, 3), "convergence")
-        self.assertEqual(self._phase(2, 2), "convergence")
-
-        exploration = build_system_prompt(mode="fold", phase="exploration", experiment_facts={})
-        convergence = build_system_prompt(mode="fold", phase="convergence", experiment_facts={})
-        self.assertIn("探索期", exploration)
-        self.assertNotIn("收敛期", exploration)
-        self.assertIn("收敛期", convergence)
-        self.assertNotEqual(exploration, convergence)
-
-
 class StepTreeAblationTest(unittest.TestCase):
     """With the step tree off there is no cross-fold lineage, no published
     tree and no rollback tool — the ablation is real, not cosmetic."""
@@ -288,8 +263,8 @@ class StepTreeAblationTest(unittest.TestCase):
     def test_the_prompt_section_follows_the_knob(self) -> None:
         from autotrade.agent.prompts import build_system_prompt
 
-        enabled = build_system_prompt(mode="fold", step_tree_enabled=True, experiment_facts={})
-        disabled = build_system_prompt(mode="fold", step_tree_enabled=False, experiment_facts={})
+        enabled = build_system_prompt(step_tree_enabled=True, experiment_facts={})
+        disabled = build_system_prompt(step_tree_enabled=False, experiment_facts={})
         self.assertIn("Step 产物树", enabled)
         self.assertNotIn("Step 产物树", disabled)
 
@@ -302,7 +277,7 @@ class StepTreeAblationTest(unittest.TestCase):
             node_id = tree.record_step(
                 output,
                 epoch_id="epoch_001",
-                fold_id="fold_ref_ab",
+                session_ref="session_ref_ab",
                 run_id="run_x",
                 result_name="valid_000",
                 revision_id=revision,

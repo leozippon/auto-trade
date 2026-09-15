@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import KW_ONLY, MISSING, dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
@@ -16,7 +16,7 @@ from autotrade.environment.sandbox import SandboxConfig, SandboxLimits
 from autotrade.environment.strategy import StrategySchedule
 
 from . import verdict
-from .calendar import ResearchGeometry
+from .calendar import FULL_SPAN, ResearchGeometry
 from .skills import DEFAULT_OPERATING_MEMORY
 
 ExecutionMode = Literal["sandbox", "trusted"]
@@ -90,9 +90,9 @@ class StrategyExperimentConfig:
 
 @dataclass(frozen=True)
 class AcceptanceRules:
-    """The arm's round parameters for the nomination check and the verdict.
+    """The arm's round parameters for the freeze nomination and the verdict.
 
-    A nominated research node is refused only for a non-finite metric
+    A nominated research node fails the freeze gate on a non-finite metric
     (``evaluate``); the return, Sharpe and drawdown targets there only warn.
     ``max_drawdown`` and ``cost_stress_multiplier`` decide the forward and
     Held-out verdict (``pipelines/verdict.py``), whose remaining thresholds are
@@ -140,43 +140,33 @@ class AcceptanceRules:
         forward or Held-out date appears here."""
 
         return {
-            "fold_freeze": {
-                "finite_metrics": {
-                    "enforcement": "hard",
-                    "rule": "total_return/max_drawdown/sharpe must be finite",
-                },
-                "max_drawdown": {"enforcement": "warn", "target": self.max_drawdown},
-                "min_return": {
-                    "enforcement": "warn",
-                    "target": self.min_return,
-                    "role": "informational_absolute_target_not_a_selection_criterion",
-                },
-                "min_sharpe": {
-                    "enforcement": "warn",
-                    "target": self.min_sharpe,
-                    "role": "informational_absolute_target_not_a_selection_criterion",
-                },
-                "order_count": {
-                    "enforcement": "warn",
-                    "rule": "order_count=0 records no_orders",
-                },
+            "freeze_gate": {
+                "span": f"the nominee replayed the whole research period (span={FULL_SPAN})",
+                "finite_metrics": "total_return/max_drawdown/sharpe must be finite",
+                "full_span_validations": (
+                    f">= {verdict.FREEZE_MIN_FULL_SPAN_VALIDATIONS} in the arm, the "
+                    "nominee included"
+                ),
+                "deflated_sharpe_probability": (
+                    f">= {verdict.FREEZE_MIN_DSR_PROBABILITY} for the nominee's "
+                    "research-period neutralized IR; trials = distinct revisions "
+                    "validated in the arm on any span"
+                ),
+                "freezes_per_arm": 1,
+            },
+            "targets": {
+                "role": "warnings on a nomination, not selection criteria",
+                "max_drawdown": self.max_drawdown,
+                "min_return": self.min_return,
+                "min_sharpe": self.min_sharpe,
+                "no_orders": "order_count=0 warns no_orders",
             },
             "graduation": {
                 "evaluated_on": (
-                    "one continuous replay of the frozen artifact over the forward "
-                    "period and then Held-out, both after research ends"
+                    "one continuous replay of the frozen artifact over the twelve "
+                    "months after research end and then Held-out; no session sees "
+                    "either period"
                 ),
-                "freeze_gate": {
-                    "full_span_validations": (
-                        f">= {verdict.FREEZE_MIN_FULL_SPAN_VALIDATIONS} in the arm"
-                    ),
-                    "deflated_sharpe_probability": (
-                        f">= {verdict.FREEZE_MIN_DSR_PROBABILITY} for the nominee's "
-                        "research-period neutralized IR; trials = distinct revisions "
-                        "validated in the arm"
-                    ),
-                    "freezes_per_arm": 1,
-                },
                 "forward": {
                     "lower_bound": (
                         f"{verdict.FORWARD_CONFIDENCE:.0%} one-sided block-bootstrap "
@@ -195,6 +185,11 @@ class AcceptanceRules:
                     ),
                     "mean_gross": f">= {verdict.MIN_MEAN_GROSS}",
                     "strategy_error": "none",
+                    "minimum_detectable_excess": (
+                        "about 2.12 x research tracking error / sqrt(years of forward "
+                        "data): a lower residual tracking error is what makes a "
+                        "real edge detectable"
+                    ),
                 },
                 "heldout": {
                     "neutralized_excess": (
@@ -265,17 +260,19 @@ class RollingExperimentConfig:
     # decision view is the most history every domain carries.
     window_months: int = 24
     # Per-session budgets. The host's forward replay is charged to none of them.
-    max_steps_per_fold: int = 30
-    max_backtests_per_fold: int = 30
+    # One replay-year is one research year replayed for one candidate: a batch
+    # of three candidates on a two-year span costs six, and a full-period
+    # validation costs as many as the research period has years.
+    max_replay_years_per_session: int = 24
     # Host-side random-portfolio null controls (K=500 replays, minutes each)
     # a research session may request through ``run_null_control``; the frozen
     # node's block is reused at freeze. 0 leaves the tool out.
-    max_null_controls_per_fold: int = 3
+    max_null_controls_per_session: int = 3
     max_llm_calls: int = 1600
     # Attempts of one session or of the forward replay before the experiment
     # fails with the last error.
     session_max_attempts: int = 3
-    max_fold_minutes: int = 720
+    max_session_minutes: int = 720
     # Trailing wrap-up grace added to the session budget and forwarded on
     # ResearchSessionRequest.deadline_grace_seconds. Implementation default only.
     deadline_grace_minutes: int = DEFAULT_DEADLINE_GRACE_MINUTES
@@ -320,11 +317,10 @@ class RollingExperimentConfig:
         for name in (
             "research_sessions",
             "window_months",
-            "max_steps_per_fold",
-            "max_backtests_per_fold",
+            "max_replay_years_per_session",
             "max_llm_calls",
             "session_max_attempts",
-            "max_fold_minutes",
+            "max_session_minutes",
             "per_call_timeout_seconds",
             "strategy_fit_timeout_seconds",
         ):
@@ -332,7 +328,7 @@ class RollingExperimentConfig:
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
         for name in (
-            "max_null_controls_per_fold",
+            "max_null_controls_per_session",
             "deadline_grace_minutes",
             "finalize_before_deadline_seconds",
         ):
@@ -366,12 +362,12 @@ def rolling_default(name: str) -> object:
     return field_obj.default
 
 
-def fold_session_deadline_seconds(
-    max_fold_minutes: float,
+def session_deadline_seconds(
+    max_session_minutes: float,
     deadline_grace_minutes: float = DEFAULT_DEADLINE_GRACE_MINUTES,
 ) -> float:
     """Total session budget: main deadline plus trailing wrap-up grace."""
-    return float(max_fold_minutes) * 60.0 + float(deadline_grace_minutes) * 60.0
+    return float(max_session_minutes) * 60.0 + float(deadline_grace_minutes) * 60.0
 
 
 @dataclass(frozen=True)
@@ -476,6 +472,12 @@ class ReplaySpan:
     snapshot: SnapshotBundle
     continuation: tuple[str, ...] = ()
 
+    @property
+    def slots(self) -> int:
+        """Replay slots the span covers; for a research span, its years."""
+
+        return 1 + len(self.continuation)
+
     def request(
         self,
         revision: ArtifactRevision,
@@ -493,6 +495,51 @@ class ReplaySpan:
             broker_profile=broker_profile,
             continuation=self.continuation,
         )
+
+
+_YEAR_SPAN = re.compile(r"Y(\d+)(?:\.\.Y(\d+))?")
+
+
+def research_span(years: Sequence[ReplaySpan], label: str) -> ReplaySpan:
+    """The span ``label`` names over the research years, replayed as one book.
+
+    ``full`` is every year, ``Yk`` one year and ``Yi..Yj`` the contiguous years
+    i through j. The span opens on its first year's slot and decision view and
+    continues through the rest; a span covering every year is labelled
+    ``full`` however it was named. Any other label, or a year the research
+    period does not have, is refused, so no span reaches past research end.
+    """
+
+    count = len(years)
+    text = str(label).strip()
+    match = _YEAR_SPAN.fullmatch(text)
+    if text == FULL_SPAN:
+        first, last = 1, count
+    elif match:
+        first = int(match.group(1))
+        last = int(match.group(2) or first)
+    else:
+        first = last = 0
+    if not 1 <= first <= last <= count:
+        raise ValueError(
+            f"span must be {FULL_SPAN}, one research year Y1..Y{count} or contiguous "
+            f"years such as Y1..Y{count}; got {label!r}"
+        )
+    chosen = years[first - 1 : last]
+    if (first, last) == (1, count):
+        canonical = FULL_SPAN
+    elif first == last:
+        canonical = f"Y{first}"
+    else:
+        canonical = f"Y{first}..Y{last}"
+    return ReplaySpan(
+        label=canonical,
+        mode=chosen[0].mode,
+        start=chosen[0].start,
+        end=chosen[-1].end,
+        snapshot=chosen[0].snapshot,
+        continuation=tuple(year.snapshot.replay_ref for year in chosen[1:]),
+    )
 
 
 @dataclass(frozen=True)
@@ -542,13 +589,16 @@ class ResearchSessionRequest:
     # at ``decision_time``.
     snapshot: SnapshotBundle
     decision_time: datetime
-    # The whole research period, the span every Validation replays.
-    validation: ReplaySpan
+    # The research years in order, one single-slot span each (labels Y1..Yn):
+    # every span a Validation may replay is resolved from them
+    # (``research_span``).
+    research_years: tuple[ReplaySpan, ...]
     # First day of the decision view's history window (``window_months``
     # before research end), the Agent-visible input window.
     input_window_start: str
-    max_steps: int
-    max_backtests: int
+    # Replay-years the session may spend on Validations (see
+    # ``RollingExperimentConfig.max_replay_years_per_session``).
+    max_replay_years: int
     max_llm_calls: int
     deadline_seconds: float
     # Trailing wrap-up grace reserved from deadline_seconds.
@@ -568,8 +618,8 @@ class ResearchSessionRequest:
     nl_failure_policy: str = "return_error_with_audit"
     finalize_before_deadline_seconds: int = 300
     # Cap on the session's own ``run_null_control`` calls; the experiment default
-    # is the single source (RollingExperimentConfig.max_null_controls_per_fold).
-    max_null_controls: int = RollingExperimentConfig.max_null_controls_per_fold
+    # is the single source (RollingExperimentConfig.max_null_controls_per_session).
+    max_null_controls: int = RollingExperimentConfig.max_null_controls_per_session
     progress_hook: Callable[[str, dict[str, object] | None], None] | None = field(
         default=None,
         repr=False,
@@ -580,6 +630,12 @@ class ResearchSessionRequest:
     # The sandbox adapter copies it to workspace/skills but never exposes this
     # host path through Agent-visible facts or manifests.
     skills_source_ref: str = ""
+
+    @property
+    def validation(self) -> ReplaySpan:
+        """The whole research period as one span."""
+
+        return research_span(self.research_years, FULL_SPAN)
 
 
 @dataclass(frozen=True)
@@ -637,6 +693,7 @@ __all__ = [
     "SnapshotProvider",
     "StepResult",
     "StrategyExperimentConfig",
-    "fold_session_deadline_seconds",
+    "research_span",
     "rolling_default",
+    "session_deadline_seconds",
 ]

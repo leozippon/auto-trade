@@ -3,8 +3,8 @@
 Trace audits keep finding sessions that correctly diagnose a real problem with
 the environment, a trusted tool's output, the mounted data, or the mounted
 documentation — and that knowledge dies in the trace until a human rereads it.
-``report_issue`` is the first-class return path: the Fold and Meta parent
-sessions (never sub-agents) append one redacted JSON line per report to the
+``report_issue`` is the first-class return path: the research session's parent
+(never a sub-agent) appends one redacted JSON line per report to the
 experiment's ``ledgers/issue_reports.jsonl``, where the console lists them for
 the researcher.
 

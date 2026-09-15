@@ -142,7 +142,7 @@ def _analysis(result_ref: str) -> dict[str, object]:
 def _step(experiment_dir: Path, session: str, index: int, *, edge: float, seed: int, span: str = FULL_SPAN) -> dict[str, object]:
     ref = write_result(experiment_dir, "valid", start="20240701", days=120, edge=edge, seed=seed)
     return {
-        "step_id": f"research__fold_ref_{session}__run_ref_{session}__valid_{index:03d}",
+        "step_id": f"research__session_ref_{session}__run_ref_{session}__valid_{index:03d}",
         "revision_id": f"revision_{session}_{index}",
         "span": span,
         "summary": {"total_return": 0.1 + edge, "sharpe": 1.0, "max_drawdown": 0.05},

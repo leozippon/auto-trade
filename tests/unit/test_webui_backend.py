@@ -162,8 +162,7 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
     for key in (
         "research_sessions",
         "window_months",
-        "max_steps_per_fold",
-        "max_backtests_per_fold",
+        "max_replay_years_per_session",
         "max_llm_calls",
     ):
         assert not fields[key].get("advanced", False)

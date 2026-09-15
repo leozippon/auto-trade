@@ -1,16 +1,16 @@
 """Agent session runner: the main conversation loop for one research session.
 
 docs/agent-design.md plus docs/environment-design.md §2.2 define the Agent
-session and tool-entrypoint contract: one Agent session per Fold (one
-conversation_id), Steps share the session, only documented tools are
-callable, and the fold deadline is the master constraint. The session budget
+session and tool-entrypoint contract: one Agent session per research session
+(one conversation_id), Steps share the session, only documented tools are
+callable, and the session deadline is the master constraint. The session budget
 the pipeline hands over includes a trailing wrap-up grace window
 (``deadline_grace_seconds``): reaching the main deadline never interrupts the
 model — with no complete Validation a single wrap-up prompt is injected and the
 session keeps its full autonomy through the grace window; when the grace window
 is exhausted the session closes gracefully (``session_end`` with status
-``deadline_exceeded``) and the Pipeline records a no-candidate Fold instead of
-failing the run. Inside the finalize window a current-run complete Validation
+``deadline_exceeded``) and the Pipeline records a ``deadline`` session instead
+of failing the run. Inside the finalize window a current-run complete Validation
 instead switches to the restricted hard-finalization capability view. Main
 conversation calls and semantic compactions are logged in agent_trace.jsonl
 (docs/environment-design.md §2.4 and §4.2).
@@ -73,7 +73,6 @@ from .subagent import (
 )
 from .prompts import (
     HARD_FINALIZATION_SYSTEM_PROMPT,
-    STEP_WRAP_UP_PROMPT,
     WRAP_UP_PROMPT,
 )
 
@@ -89,7 +88,7 @@ DEFAULT_DEADLINE_GRACE_SECONDS = 600.0
 
 
 class AgentSessionDeadlineExceeded(SessionInterrupt):
-    """The fold deadline and its wrap-up grace window were both exhausted.
+    """The session deadline and its wrap-up grace window were both exhausted.
 
     Control flow, not an error: the session has already emitted
     ``session_end{status: deadline_exceeded}``; the Pipeline converts this into
@@ -110,8 +109,8 @@ class AgentSessionDeadlineExceeded(SessionInterrupt):
         self.llm_calls = llm_calls
 
 
-_TERMINAL_TOOLS = frozenset({"finish_fold"})
-_FOLD_FINALIZATION_TOOLS = frozenset({"finish_fold"})
+_TERMINAL_TOOLS = frozenset({"finish_session"})
+_FINALIZATION_TOOLS = frozenset({"finish_session"})
 # The tool that produces complete Validation nodes: one per finished candidate.
 _VALIDATION_TOOLS = frozenset({"batch_validate"})
 # A completed Validation can switch the session into hard finalization, and
@@ -123,12 +122,12 @@ _PHASE_GATE_TOOLS = _VALIDATION_TOOLS
 # writer barrier: the null control is a multi-minute host replay of a recorded
 # result, dispatched in order and never beside a child still writing.
 _WRITER_BARRIER_TOOLS = _PHASE_GATE_TOOLS | frozenset({"run_null_control"})
-_FOLD_TOOLS = frozenset(
+_SESSION_TOOLS = frozenset(
     {
         "batch_validate",
         "run_null_control",
         "agent",
-        "finish_fold",
+        "finish_session",
         "glob",
         "grep",
         "modification_check",
@@ -159,8 +158,8 @@ _OWN_WORK_TOOLS = frozenset(
     {"read_file", "grep", "glob", "shell", "write_file", "edit_file"}
 )
 # Elapsed fractions of the session's inference time budget at which one
-# ``time_budget_notice`` observation states the remaining minutes and, for a
-# Fold, how many backtests have run so far.
+# ``time_budget_notice`` observation states the remaining minutes and how many
+# backtests have run so far.
 TIME_BUDGET_NOTICE_FRACTIONS = (0.5, 0.75, 0.9)
 _BACKTEST_TOOLS = ("smoke_backtest", "batch_validate")
 # The trace events that carry one tool outcome. The session_end tool_failures
@@ -187,10 +186,9 @@ def _candidate_entry(
 ) -> dict[str, object] | None:
     """One selectable Validation node as the finalization list carries it.
 
-    Shared by the session's own Validations and by the host's parent control
-    so both reach the model in the same shape. ``stats`` keeps only bounded
-    scalars: the finalization context replaces the conversation, so it must
-    not be able to grow with the size of a backtest summary.
+    ``stats`` keeps only bounded scalars: the finalization context replaces
+    the conversation, so it must not be able to grow with the size of a
+    backtest summary.
     """
 
     node_id = value.get("node_id")
@@ -210,12 +208,9 @@ def _candidate_entry(
     entry: dict[str, object] = {
         "node_id": node_id,
         "revision_id": revision_id,
+        "validation_index": index,
         "stats": stats,
     }
-    if index > 0:
-        # The host's parent control is not one of the session's Validations
-        # and carries no index; the session's own are numbered from one.
-        entry["validation_index"] = index
     result_name = value.get("result_name")
     if isinstance(result_name, str) and result_name:
         entry["result_name"] = result_name
@@ -239,7 +234,6 @@ class AgentSessionConfig:
     # reaching it never interrupts the model; exhausting the budget does.
     deadline_grace_seconds: float = DEFAULT_DEADLINE_GRACE_SECONDS
     max_llm_calls: int = 200
-    max_steps: int = 10
     deadline_seconds: float = 1_200.0
     # Completion-token safety ceiling shared with the sub-agents; see
     # ``AGENT_MAX_OUTPUT_TOKENS``.
@@ -248,7 +242,6 @@ class AgentSessionConfig:
     def __post_init__(self) -> None:
         for name in (
             "max_llm_calls",
-            "max_steps",
             "deadline_seconds",
             "max_response_tokens",
         ):
@@ -311,8 +304,7 @@ class AgentSessionRunner:
         conversation_id: str | None = None,
         event_sink: Callable[[str, dict[str, object]], None] | None = None,
         inbox: AgentInboxHook | None = None,
-        control_validation_node: Mapping[str, object] | None = None,
-        hard_rule_check: Callable[[Mapping[str, object]], Sequence[str]] | None = None,
+        freeze_gate: Callable[[str], Mapping[str, object]] | None = None,
     ) -> None:
         self.llm = llm
         self.tools = tools
@@ -356,18 +348,10 @@ class AgentSessionRunner:
         self.event_sink = event_sink
         self.inbox = inbox
         self._complete_validation_nodes: list[dict[str, object]] = []
-        # The host's pre-session parent control, when it recorded one. It is
-        # not one of the session's own Validations (it charges no Step and no
-        # backtest), but it is a selectable node of this run: keeping the
-        # parent is done by selecting it, so hard finalization has to offer it.
-        self._control_validation_node = (
-            _candidate_entry(control_validation_node, index=0)
-            if control_validation_node is not None
-            else None
-        )
-        # The Pipeline's hard acceptance rules, wired in as metrics -> reasons
-        # so each enumerated candidate says whether the Pipeline would freeze it.
-        self._hard_rule_check = hard_rule_check
+        # The freeze gate as the Pipeline reads a node now, wired in as
+        # node id -> verdict so each enumerated candidate says whether a
+        # freeze of it would pass.
+        self._freeze_gate = freeze_gate
         self._hard_finalization = False
         self._hard_finalization_context_initialized = False
         self._wrap_up_sent = False
@@ -408,7 +392,6 @@ class AgentSessionRunner:
         self._subagent_totals = None
         llm_calls = 0
         accepted_steps = 0
-        step_wrap_up_sent = False
         llm_failure_streak = 0
         malformed_reissue_used = False
         context_overflow_recovery_used = False
@@ -753,9 +736,6 @@ class AgentSessionRunner:
                     steps_used=accepted_steps,
                 )
             messages = self._apply_inbox(messages, safe_point=apply_point)
-            if accepted_steps >= self.config.max_steps and not step_wrap_up_sent:
-                messages.append(ChatMessage("user", STEP_WRAP_UP_PROMPT))
-                step_wrap_up_sent = True
 
         self._close_session(
             {
@@ -803,7 +783,7 @@ class AgentSessionRunner:
             f"至今 smoke_backtest {backtests['smoke_backtest']} 次、"
             f"batch_validate {backtests['batch_validate']} 次、"
             f"完整 Validation {complete} 个。"
-            "完整 Validation 的耗时随 Validation 区间的交易日数增长，为仍要跑的正式回测预留时间；"
+            "一次验证的耗时随其 span 覆盖的研究年数增长，为仍要跑的正式回测预留时间；"
             "到达主截止时宿主另行注入收尾提示。"
         )
         messages.append(ChatMessage("user", json.dumps(payload, ensure_ascii=False)))
@@ -832,7 +812,7 @@ class AgentSessionRunner:
                 for candidate in self._finalization_candidates()
             ]
             for record in records:
-                # node_id stays optional: finish_fold may also abstain here.
+                # node_id stays optional: continue and no_edge name no node.
                 record["function"]["parameters"]["properties"]["node_id"]["enum"] = (
                     candidate_ids
                 )
@@ -846,36 +826,27 @@ class AgentSessionRunner:
 
     def _finalization_tool_names(self) -> frozenset[str]:
         registered = {spec.name for spec in self.tools.specs()}
-        if "finish_fold" not in registered:
-            raise RuntimeError("Fold hard finalization requires finish_fold")
-        return frozenset(registered.intersection(_FOLD_FINALIZATION_TOOLS))
+        if "finish_session" not in registered:
+            raise RuntimeError("hard finalization requires finish_session")
+        return frozenset(registered.intersection(_FINALIZATION_TOOLS))
 
     def _finalization_call_error(self, call: ToolCall) -> str:
         if not self._hard_finalization:
             return ""
         if call.name not in self._active_tool_names():
-            return f"tool is unavailable in the current session phase: {call.name}"
+            return f"tool is unavailable at this point of the session: {call.name}"
         node_id = call.arguments.get("node_id")
-        if (
-            call.name == "finish_fold"
-            and call.arguments.get("outcome") in ("no_edge", "terminate")
-            and not node_id
-        ):
-            # Abstaining (or terminating the arm) is a legal finish in the
-            # finalize window too: the tool itself records why nothing is frozen.
+        if call.arguments.get("outcome") in ("continue", "no_edge") and not node_id:
+            # Continuing or ending the arm names no node, and is a legal
+            # finish in the finalize window too.
             return ""
         candidates = {
             str(candidate["node_id"]) for candidate in self._finalization_candidates()
         }
         if not isinstance(node_id, str) or node_id not in candidates:
             return (
-                f"{call.name} requires one node_id from the current run's "
-                "complete Validation candidates"
-                + (
-                    ' (or outcome="no_edge" with a reason)'
-                    if call.name == "finish_fold"
-                    else ""
-                )
+                f"{call.name} requires one node_id from the current run's complete "
+                'Validation candidates (or outcome="continue"/"no_edge" with a reason)'
             )
         return ""
 
@@ -908,34 +879,30 @@ class AgentSessionRunner:
             self._complete_validation_nodes.append(entry)
 
     def _finalization_candidates(self) -> list[dict[str, object]]:
-        """The nodes hard finalization may select, with their acceptance verdict.
+        """The nodes hard finalization may name, with their freeze-gate verdict.
 
-        The host's ``parent_control`` node leads the list when the session has
-        one. Enumerating only the session's own Validations left a reviewed
-        Fold unable to nominate the node its own degradation plan had chosen —
-        selecting ``parent_control`` is the documented way to keep the parent.
-        Each entry says whether the Pipeline's hard rules would accept it, so
-        the selection is not made blind to the freeze decision that follows.
+        Each entry says whether a freeze of it would pass the gate, so the
+        choice between freezing, continuing and ending the arm is not made
+        blind to the gate.
         """
 
         candidates = list(self._complete_validation_nodes)
-        if self._control_validation_node is not None:
-            candidates.insert(0, self._control_validation_node)
-        check = self._hard_rule_check
-        if check is None:
+        gate = self._freeze_gate
+        if gate is None:
             return candidates
         annotated: list[dict[str, object]] = []
         for candidate in candidates:
-            stats = candidate.get("stats")
-            reasons = [
-                str(reason)
-                for reason in check(stats if isinstance(stats, Mapping) else {})
-            ]
+            verdict = gate(str(candidate["node_id"]))
+            passed = bool(verdict.get("passed"))
             annotated.append(
                 {
                     **candidate,
-                    "passes_hard_rules": not reasons,
-                    **({"hard_reject_reasons": reasons} if reasons else {}),
+                    "passes_freeze_gate": passed,
+                    **(
+                        {"freeze_gate_reasons": [str(item) for item in verdict.get("reasons") or ()]}
+                        if not passed
+                        else {}
+                    ),
                 }
             )
         return annotated
@@ -986,17 +953,15 @@ class AgentSessionRunner:
     def _hard_finalization_messages(self, remaining: float) -> list[ChatMessage]:
         self._hard_finalization_context_initialized = True
         payload = {
-            "observation": "fold_hard_finalization",
+            "observation": "session_hard_finalization",
             "remaining_inference_seconds": round(max(remaining, 0.0), 6),
             "selection_contract": (
-                "Choose one listed complete Validation node yourself, or finish "
-                'with outcome="no_edge" and a reason when no listed node proved '
-                "an edge (nothing is frozen; the parent, when there is one, stays "
-                "the lineage head). The Runner does not rank or auto-submit "
-                "candidates. Call finish_fold with its node_id. "
-                "passes_hard_rules=false means the Pipeline will not freeze that "
-                "node; the parent_control entry, when listed, is how this Fold "
-                "keeps the parent."
+                "Decide yourself: finish_session with outcome=\"freeze\" and a "
+                "listed node_id whose passes_freeze_gate is true, outcome="
+                "\"continue\" (optionally with a listed node_id as the next "
+                "session's start; not in the last session) or outcome=\"no_edge\", "
+                "both with a reason. The Runner does not rank or auto-submit "
+                "candidates; a node with passes_freeze_gate=false cannot be frozen."
             ),
             "complete_validation_candidates": self._finalization_candidates(),
             "available_tools": sorted(self._finalization_tool_names()),
@@ -1503,8 +1468,8 @@ class AgentSessionRunner:
         """The tail of the session budget that belongs to the parent alone.
 
         The finalize reserve plus the wrap-up grace: the window in which the
-        parent has to enter hard finalization, pick a node and call
-        finish_fold. Nothing else may consume it — neither the parent's own
+        parent has to enter hard finalization, pick an outcome and call
+        finish_session. Nothing else may consume it — neither the parent's own
         wait for a child nor the child's own loop, which the engine bounds with
         the same figure.
         """
@@ -1537,7 +1502,7 @@ class AgentSessionRunner:
         """Remaining seconds at which the parent stops waiting for a child.
 
         ``None`` means it must not wait at all: once the wrap-up prompt is out
-        or hard finalization is active, what is left is finishing time. A Fold
+        or hard finalization is active, what is left is finishing time. A session
         with three complete Validations spent 55 minutes inside one such wait,
         crossed the finalize window, the main deadline and the whole grace
         without ever reaching the loop top, and ended selecting none of them.
@@ -1895,12 +1860,12 @@ class AgentSessionRunner:
         """Fail closed on any tool outside the session's documented set."""
 
         names = {spec.name for spec in self.tools.specs()}
-        unsupported = sorted(names - _FOLD_TOOLS)
+        unsupported = sorted(names - _SESSION_TOOLS)
         if unsupported:
             raise ValueError(f"Agent session received unsupported tools: {unsupported}")
         producing = sorted(names & _VALIDATION_TOOLS)
-        if producing and "finish_fold" not in names:
-            raise ValueError(f"a session with {producing[0]} requires finish_fold")
+        if producing and "finish_session" not in names:
+            raise ValueError(f"a session with {producing[0]} requires finish_session")
 
     def _locked_event_sink(self, event: str, payload: dict[str, object]) -> None:
         with self._event_lock:

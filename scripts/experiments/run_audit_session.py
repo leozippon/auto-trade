@@ -64,7 +64,7 @@ def main() -> int:
     add_calendar_arguments(parser)
     add_schedule_arguments(parser)
     add_snapshot_window_arguments(parser)
-    parser.add_argument("--max-fold-minutes", type=int, default=20)
+    parser.add_argument("--max-session-minutes", type=int, default=20)
     add_model_arguments(parser)
     parser.add_argument("--local-dev", action="store_true", help="Use the trusted executor; audit default is real Docker.")
     parser.add_argument("--sandbox-image", help="Optional Docker image override for this audit session.")

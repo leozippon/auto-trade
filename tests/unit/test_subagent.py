@@ -31,7 +31,7 @@ from autotrade.agent.subagent import (
 )
 from autotrade.agent import subagent as subagent_module
 from autotrade.agent.prompts import (
-    FOLD_WORKFLOW_SECTION,
+    SESSION_WORKFLOW_SECTION,
     TOOL_PATH_CHEAT_SHEET,
     TOOL_WRITE_CHEAT_SHEET,
     build_system_prompt,
@@ -69,7 +69,7 @@ from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.pipelines.local_backend import (
     SessionBudgetLLM,
     SessionCallBudget,
-    build_fold_subagent_tools,
+    build_subagent_tools,
 )
 
 _STRATEGY = "def generate_orders(context):\n    return []\n"
@@ -213,7 +213,7 @@ def test_subagent_rejects_nested_agent_and_fold_control_specs() -> None:
     for name in (
         "agent",
         "batch_validate",
-        "finish_fold",
+        "finish_session",
         "step_rollback",
         "unknown_tool",
     ):
@@ -615,7 +615,7 @@ def test_fold_subagent_tools_are_writable_shell_contract(tmp_path: Path) -> None
     workspace.mkdir()
     (workspace / "output").mkdir()
     safe = SafeWorkspace(workspace)
-    tools = build_fold_subagent_tools(
+    tools = build_subagent_tools(
         SearchRoots(safe),
         safe,
         _UnusedRunner(),
@@ -666,12 +666,12 @@ class _FinishStub:
         return ToolResult(True, value={"status": "done"}, finish=True)
 
 
-def test_finish_fold_allows_zero_subagent_and_emits_empty_trace_stats() -> None:
-    finish = _FinishStub("finish_fold")
+def test_finish_session_allows_zero_subagent_and_emits_empty_trace_stats() -> None:
+    finish = _FinishStub("finish_session")
     events: list[tuple[str, dict[str, object]]] = []
     runner = AgentSessionRunner(
         llm=ScriptedLLM(
-            [ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),))]
+            [ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),))]
         ),
         tools=ToolRegistry([finish]),
         system_prompt="fold",
@@ -696,7 +696,7 @@ def test_finish_fold_allows_zero_subagent_and_emits_empty_trace_stats() -> None:
 
 
 def test_failed_subagent_attempt_counts_for_its_role() -> None:
-    finish = _FinishStub("finish_fold")
+    finish = _FinishStub("finish_session")
     subagent = SubAgentEngine(
         llm=ScriptedLLM(
             [
@@ -725,7 +725,7 @@ def test_failed_subagent_attempt_counts_for_its_role() -> None:
                         ),
                     )
                 ),
-                ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+                ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),)),
             ]
         ),
         tools=ToolRegistry([finish]),
@@ -740,14 +740,14 @@ def test_failed_subagent_attempt_counts_for_its_role() -> None:
 
 
 def test_subagent_attempt_counter_resets_on_new_run() -> None:
-    finish = _FinishStub("finish_fold")
+    finish = _FinishStub("finish_session")
     subagent = SubAgentEngine(
         llm=ScriptedLLM([ProviderResponse(content="unused")]),
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
     )
     runner = AgentSessionRunner(
         llm=ScriptedLLM(
-            [ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),))]
+            [ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),))]
         ),
         tools=ToolRegistry([finish]),
         system_prompt="fold",
@@ -769,7 +769,7 @@ def test_zero_subagent_enters_hard_finalization() -> None:
     )
     runner = AgentSessionRunner(
         llm=ScriptedLLM([]),
-        tools=ToolRegistry([_FinishStub("finish_fold")]),
+        tools=ToolRegistry([_FinishStub("finish_session")]),
         system_prompt="fold",
         config=_fold_config(
             finalize_before_deadline_seconds=300.0,
@@ -786,10 +786,10 @@ def test_zero_subagent_enters_hard_finalization() -> None:
 
 
 def test_sessions_without_subagent_still_finish() -> None:
-    finish = _FinishStub("finish_fold")
+    finish = _FinishStub("finish_session")
     runner = AgentSessionRunner(
         llm=ScriptedLLM(
-            [ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),))]
+            [ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),))]
         ),
         tools=ToolRegistry([finish]),
         system_prompt="fold",
@@ -800,12 +800,12 @@ def test_sessions_without_subagent_still_finish() -> None:
 
 def test_fold_and_subagent_prompts_keep_roles() -> None:
     # The pyright how-to assertion lives in test_sandbox_pyright.py.
-    fold = build_system_prompt(mode="fold", experiment_facts={})
+    fold = build_system_prompt(experiment_facts={})
     for role in ("`Explore`", "`general-purpose`"):
         assert role in fold
     assert "保持自己的上下文精简" in fold
     assert "`write_file`" in fold
-    assert "`finish_fold`" in fold
+    assert "`finish_session`" in fold
     assert "通常优先" not in fold
     for stale in (
         "data_audit",
@@ -863,15 +863,15 @@ def test_session_config_has_no_required_subagent_role_gate() -> None:
 
 
 def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
-    from autotrade.agent.runner import _FOLD_TOOLS
+    from autotrade.agent.runner import _SESSION_TOOLS
 
-    assert "write_file" in _FOLD_TOOLS
-    assert "edit_file" in _FOLD_TOOLS
+    assert "write_file" in _SESSION_TOOLS
+    assert "edit_file" in _SESSION_TOOLS
     workspace = tmp_path / "agent"
     workspace.mkdir()
     (workspace / "output").mkdir()
     safe = SafeWorkspace(workspace)
-    tools = build_fold_subagent_tools(
+    tools = build_subagent_tools(
         SearchRoots(safe),
         safe,
         _UnusedRunner(),
@@ -903,10 +903,10 @@ def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
         "write_file",
         "write_skill",
     }
-    assert impl == _FOLD_TOOLS - {
+    assert impl == _SESSION_TOOLS - {
         "agent",
         "batch_validate",
-        "finish_fold",
+        "finish_session",
         # Children report findings to the parent, the parent files defect
         # reports with the operators.
         "report_issue",
@@ -934,7 +934,7 @@ def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
 
 
 def test_subagent_calls_still_track_attempts_and_roles() -> None:
-    finish = _FinishStub("finish_fold")
+    finish = _FinishStub("finish_session")
     subagent = SubAgentEngine(
         llm=ScriptedLLM(
             [
@@ -969,7 +969,7 @@ def test_subagent_calls_still_track_attempts_and_roles() -> None:
                         ),
                     )
                 ),
-                ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+                ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),)),
             ]
         ),
         tools=ToolRegistry([finish]),
@@ -1003,7 +1003,7 @@ def test_subagent_calls_still_track_attempts_and_roles() -> None:
 
 
 def test_single_subagent_role_can_finish() -> None:
-    finish = _FinishStub("finish_fold")
+    finish = _FinishStub("finish_session")
     subagent = SubAgentEngine(
         llm=ScriptedLLM([ProviderResponse(content="summary")]),
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
@@ -1020,7 +1020,7 @@ def test_single_subagent_role_can_finish() -> None:
                         ),
                     )
                 ),
-                ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+                ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),)),
             ]
         ),
         tools=ToolRegistry([finish]),
@@ -1120,9 +1120,9 @@ def test_subagent_defaults_are_xhigh_thinking_and_six_concurrent() -> None:
         in AGENT_TOOL_SPEC.description
     )
     assert "可写的子代理同样可以并行" in AGENT_TOOL_SPEC.description
-    assert "subagent_completed" in FOLD_WORKFLOW_SECTION
-    assert "不要用工具轮询" in FOLD_WORKFLOW_SECTION
-    assert "Sleep" not in FOLD_WORKFLOW_SECTION
+    assert "subagent_completed" in SESSION_WORKFLOW_SECTION
+    assert "不要用工具轮询" in SESSION_WORKFLOW_SECTION
+    assert "Sleep" not in SESSION_WORKFLOW_SECTION
 
 
 def test_subagent_inherit_context_prepends_parent_digest() -> None:
@@ -1331,7 +1331,7 @@ class _TaskGatedLLM:
 def test_parent_session_continues_before_subagent_finishes() -> None:
     started = threading.Event()
     release = threading.Event()
-    finish = _FinishStub("finish_fold")
+    finish = _FinishStub("finish_session")
     inner = ScriptedLLM(
         [
             ProviderResponse(
@@ -1343,7 +1343,7 @@ def test_parent_session_continues_before_subagent_finishes() -> None:
                     ),
                 )
             ),
-            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),)),
         ]
     )
     parent_calls = {"n": 0}
@@ -1381,7 +1381,7 @@ def test_parent_text_only_waits_for_pending_subagent_then_resumes() -> None:
     started = threading.Event()
     release = threading.Event()
     call2_returned = threading.Event()
-    finish = _FinishStub("finish_fold")
+    finish = _FinishStub("finish_session")
     inner = ScriptedLLM(
         [
             ProviderResponse(
@@ -1394,7 +1394,7 @@ def test_parent_text_only_waits_for_pending_subagent_then_resumes() -> None:
                 )
             ),
             ProviderResponse(content="waiting for subagent"),
-            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),)),
         ]
     )
     parent_calls = {"n": 0}
@@ -1447,11 +1447,11 @@ def test_parent_text_only_waits_for_pending_subagent_then_resumes() -> None:
 
 
 def test_parent_text_only_without_pending_subagent_still_nudges() -> None:
-    finish = _FinishStub("finish_fold")
+    finish = _FinishStub("finish_session")
     llm = ScriptedLLM(
         [
             ProviderResponse(content="I should act next."),
-            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),)),
         ]
     )
     runner = AgentSessionRunner(
@@ -1480,7 +1480,7 @@ def test_parent_text_only_wakes_on_first_completed_subagent() -> None:
     slow_started = threading.Event()
     slow_release = threading.Event()
     call2_returned = threading.Event()
-    finish = _FinishStub("finish_fold")
+    finish = _FinishStub("finish_session")
     inner = ScriptedLLM(
         [
             ProviderResponse(
@@ -1498,7 +1498,7 @@ def test_parent_text_only_wakes_on_first_completed_subagent() -> None:
                 )
             ),
             ProviderResponse(content="waiting for first subagent"),
-            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),)),
         ]
     )
     parent_calls = {"n": 0}
@@ -1565,7 +1565,7 @@ def test_parent_text_only_pending_subagent_deadline_does_not_deadlock(
     monkeypatch.setattr(runner_module, "SUBAGENT_TEARDOWN_WAIT_SECONDS", 0.2)
     started = threading.Event()
     release = threading.Event()
-    finish = _FinishStub("finish_fold")
+    finish = _FinishStub("finish_session")
     inner = ScriptedLLM(
         [
             ProviderResponse(
@@ -1741,7 +1741,7 @@ def test_runner_close_cancels_subagent_without_infinite_wait(
     started = threading.Event()
     release = threading.Event()
     shell = DeclaredReadOnlyShell()
-    finish = _FinishStub("finish_fold")
+    finish = _FinishStub("finish_session")
 
     class BlockingChild:
         model = "child"
@@ -1770,7 +1770,7 @@ def test_runner_close_cancels_subagent_without_infinite_wait(
                     ),
                 )
             ),
-            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),)),
         ]
     )
 
@@ -1840,7 +1840,7 @@ def test_terminal_tool_stops_refusing_once_the_deadline_is_at_hand() -> None:
     def session_runner(duration: float) -> AgentSessionRunner:
         return AgentSessionRunner(
             llm=ScriptedLLM([]),
-            tools=ToolRegistry([_FinishStub("finish_fold")]),
+            tools=ToolRegistry([_FinishStub("finish_session")]),
             system_prompt="session",
             config=_fold_config(),
             subagent=SubAgentEngine(
@@ -1876,7 +1876,7 @@ def test_terminal_tool_stops_refusing_once_the_deadline_is_at_hand() -> None:
 def test_terminal_tool_is_refused_while_a_launched_child_still_runs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """finish_fold must not discard the children of its own turn.
+    """finish_session must not discard the children of its own turn.
 
     A session launched three sub-agents and finished in the same turn; all
     three were cancelled and their reports were lost.
@@ -1890,7 +1890,7 @@ def test_terminal_tool_is_refused_while_a_launched_child_still_runs(
     started = threading.Event()
     release = threading.Event()
     shell = DeclaredReadOnlyShell()
-    finish = _FinishStub("finish_fold")
+    finish = _FinishStub("finish_session")
 
     class BlockingChild:
         model = "child"
@@ -1917,7 +1917,7 @@ def test_terminal_tool_is_refused_while_a_launched_child_still_runs(
         results, _ = runner._dispatch_tool_calls(
             (
                 ToolCall("e1", "agent", {"agent": "general-purpose", "task": "slow"}),
-                ToolCall("f1", "finish_fold", {}),
+                ToolCall("f1", "finish_session", {}),
             ),
             InferenceTimeBudget(duration_seconds=600),
         )
@@ -1984,7 +1984,7 @@ def test_parallel_safe_batch_runs_concurrently_and_mutating_batch_in_order() -> 
     read = _ProbeTool("read_file", probe)
     grep = _ProbeTool("grep", probe)
     write = _ProbeTool("write_file", probe, mutating=True)
-    finish = _FinishStub("finish_fold")
+    finish = _FinishStub("finish_session")
     llm = ScriptedLLM(
         [
             ProviderResponse(
@@ -2001,7 +2001,7 @@ def test_parallel_safe_batch_runs_concurrently_and_mutating_batch_in_order() -> 
                     ToolCall("r3", "read_file", {}),
                 )
             ),
-            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),)),
         ]
     )
 
@@ -2037,7 +2037,7 @@ def test_subagent_launches_beyond_the_cap_queue_instead_of_failing() -> None:
         f"task-{index}": (threading.Event(), threading.Event(), f"summary-{index}")
         for index in range(3)
     }
-    finish = _FinishStub("finish_fold")
+    finish = _FinishStub("finish_session")
     inner = ScriptedLLM(
         [
             ProviderResponse(
@@ -2047,7 +2047,7 @@ def test_subagent_launches_beyond_the_cap_queue_instead_of_failing() -> None:
                 )
             ),
             ProviderResponse(content="waiting"),
-            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),)),
         ]
     )
     parent_calls = {"n": 0}
@@ -2106,7 +2106,7 @@ def test_backtest_gate_keeps_its_batch_in_order_regardless_of_spec() -> None:
     read = _NamedTool("read_file")
     runner = AgentSessionRunner(
         llm=ScriptedLLM([]),
-        tools=ToolRegistry([backtest, read, _FinishStub("finish_fold")]),
+        tools=ToolRegistry([backtest, read, _FinishStub("finish_session")]),
         system_prompt="fold",
         config=_fold_config(),
     )
@@ -2122,7 +2122,7 @@ def test_backtest_gate_keeps_its_batch_in_order_regardless_of_spec() -> None:
 def test_unfinished_session_end_still_reports_token_usage() -> None:
     runner = AgentSessionRunner(
         llm=ScriptedLLM([ProviderResponse(content="thinking aloud")]),
-        tools=ToolRegistry([_FinishStub("finish_fold")]),
+        tools=ToolRegistry([_FinishStub("finish_session")]),
         system_prompt="fold",
         config=_fold_config(max_llm_calls=1),
     )
@@ -2183,7 +2183,7 @@ class _BoomTool:
 
 
 def test_tool_exception_in_a_parallel_batch_keeps_sibling_results() -> None:
-    finish = _FinishStub("finish_fold")
+    finish = _FinishStub("finish_session")
     llm = ScriptedLLM(
         [
             ProviderResponse(
@@ -2192,7 +2192,7 @@ def test_tool_exception_in_a_parallel_batch_keeps_sibling_results() -> None:
                     ToolCall("r", "read_file", {}),
                 )
             ),
-            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),)),
         ]
     )
     runner = AgentSessionRunner(
@@ -2235,14 +2235,14 @@ def test_batch_validate_waits_for_running_subagent() -> None:
             )
             return ToolResult(True, value={"status": "probe"})
 
-    finish = _FinishStub("finish_fold")
+    finish = _FinishStub("finish_session")
     llm = ScriptedLLM(
         [
             ProviderResponse(
                 tool_calls=(ToolCall("e1", "agent", {"agent": "general-purpose", "task": "slow"}),)
             ),
             ProviderResponse(tool_calls=(ToolCall("b1", "batch_validate", {}),)),
-            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),)),
         ]
     )
     runner = AgentSessionRunner(
@@ -2297,12 +2297,12 @@ def test_a_backtest_does_not_wait_for_a_read_only_child(role: str) -> None:
                 tool_calls=(ToolCall("a", "agent", {"agent": role, "task": "audit"}),)
             ),
             ProviderResponse(tool_calls=(ToolCall("b", "batch_validate", {}),)),
-            ProviderResponse(tool_calls=(ToolCall("f", "finish_fold", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("f", "finish_session", {}),)),
         ]
     )
     runner = AgentSessionRunner(
         llm=llm,
-        tools=ToolRegistry([_Backtest(), _FinishStub("finish_fold")]),
+        tools=ToolRegistry([_Backtest(), _FinishStub("finish_session")]),
         system_prompt="fold",
         config=_fold_config(),
         subagent=SubAgentEngine(llm=_Child(), tools=ToolRegistry()),
@@ -2311,7 +2311,7 @@ def test_a_backtest_does_not_wait_for_a_read_only_child(role: str) -> None:
         assert runner.run("go").status == "finished"
     finally:
         release.set()
-    # The backtest ran while the auditor was still pending; finish_fold then
+    # The backtest ran while the auditor was still pending; finish_session then
     # waited for it as before.
     assert seen == [False]
 
@@ -2457,14 +2457,14 @@ def test_resume_refuses_unknown_running_or_mismatched_children() -> None:
 
 def test_delegation_reminder_fires_once_after_eight_own_calls() -> None:
     read = _NamedTool("read_file")
-    finish = _FinishStub("finish_fold")
+    finish = _FinishStub("finish_session")
     llm = ScriptedLLM(
         [
             *(
                 ProviderResponse(tool_calls=(ToolCall(f"r{index}", "read_file", {}),))
                 for index in range(9)
             ),
-            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),)),
         ]
     )
     events: list[tuple[str, dict[str, object]]] = []
@@ -2493,7 +2493,7 @@ def test_delegation_reminder_rearms_per_streak_and_counts_writes() -> None:
     whether or not a launch happened in between."""
     read = _NamedTool("read_file")
     write = _NamedTool("write_file")
-    finish = _FinishStub("finish_fold")
+    finish = _FinishStub("finish_session")
     llm = ScriptedLLM(
         [
             ProviderResponse(
@@ -2515,7 +2515,7 @@ def test_delegation_reminder_rearms_per_streak_and_counts_writes() -> None:
                 ProviderResponse(tool_calls=(ToolCall(f"w{index}", "write_file", {}),))
                 for index in range(8)
             ),
-            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),)),
         ]
     )
     events: list[tuple[str, dict[str, object]]] = []
@@ -2558,7 +2558,7 @@ def test_delegation_reminder_waits_for_a_running_child_to_finish() -> None:
             return super().invoke(arguments)
 
     read = ReleasingRead()
-    finish = _FinishStub("finish_fold")
+    finish = _FinishStub("finish_session")
     llm = ScriptedLLM(
         [
             ProviderResponse(
@@ -2570,7 +2570,7 @@ def test_delegation_reminder_waits_for_a_running_child_to_finish() -> None:
             ),
             ProviderResponse(content="waiting"),
             ProviderResponse(tool_calls=(ToolCall("r9", "read_file", {}),)),
-            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),)),
         ]
     )
     events: list[tuple[str, dict[str, object]]] = []
@@ -2613,7 +2613,7 @@ def test_agent_description_states_role_capabilities_and_thinking_tiers() -> None
     thinking_field = AGENT_TOOL_SPEC.input_schema["properties"]["thinking"]["description"]
     assert "均为 xhigh" in thinking_field and continuations in thinking_field
     assert "显式给 low/medium" in thinking_field
-    for prompt in (FOLD_WORKFLOW_SECTION,):
+    for prompt in (SESSION_WORKFLOW_SECTION,):
         assert "action=message" in prompt
         assert "xhigh 只给纯文本" not in prompt
         assert "优先 `resume`" not in prompt
@@ -2751,14 +2751,14 @@ def test_a_full_round_of_writable_children_runs_concurrently() -> None:
 
 def test_delegation_reminder_carries_the_live_picture() -> None:
     read = _NamedTool("read_file")
-    finish = _FinishStub("finish_fold")
+    finish = _FinishStub("finish_session")
     llm = ScriptedLLM(
         [
             *(
                 ProviderResponse(tool_calls=(ToolCall(f"r{index}", "read_file", {}),))
                 for index in range(9)
             ),
-            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),)),
         ]
     )
     runner = AgentSessionRunner(
@@ -2971,7 +2971,7 @@ def test_child_turns_default_to_48_with_grace_wrap_up() -> None:
     # bounded parallel children still beat one long serial child.
     assert "自己模型的完整上下文窗口" in AGENT_TOOL_DESCRIPTION
     assert "并行的有界子代理仍好过一个很长的串行子代理" in AGENT_TOOL_DESCRIPTION
-    assert "并行的有界子代理仍好过一个很长的串行子代理" in FOLD_WORKFLOW_SECTION
+    assert "并行的有界子代理仍好过一个很长的串行子代理" in SESSION_WORKFLOW_SECTION
 
     busy = ScriptedLLM(
         [
@@ -3174,7 +3174,7 @@ def test_child_ends_on_context_overflow_instead_of_retrying() -> None:
 
 
 def test_parent_thinking_only_truncated_turn_gets_a_forced_continuation() -> None:
-    finish = _FinishStub("finish_fold")
+    finish = _FinishStub("finish_session")
     llm = ScriptedLLM(
         [
             ProviderResponse(
@@ -3182,7 +3182,7 @@ def test_parent_thinking_only_truncated_turn_gets_a_forced_continuation() -> Non
                 reasoning_content="12k tokens of thinking",
                 usage={"prompt_tokens": 10, "completion_tokens": 500, "total_tokens": 510},
             ),
-            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),)),
         ]
     )
     events: list[tuple[str, dict[str, object]]] = []
@@ -3207,7 +3207,7 @@ def test_parent_thinking_only_truncated_turn_gets_a_forced_continuation() -> Non
 def test_subagent_completed_surfaces_truncation_and_rounds() -> None:
     from autotrade.agent.subagent import OUTPUT_TRUNCATED_MARKER
 
-    finish = _FinishStub("finish_fold")
+    finish = _FinishStub("finish_session")
     child = ScriptedLLM(
         [
             ProviderResponse(
@@ -3221,7 +3221,7 @@ def test_subagent_completed_surfaces_truncation_and_rounds() -> None:
         [
             ProviderResponse(tool_calls=(ToolCall("a1", "agent", {"agent": "Explore", "task": "audit"}),)),
             ProviderResponse(content="waiting"),
-            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),)),
         ]
     )
     runner = AgentSessionRunner(
@@ -3333,12 +3333,12 @@ def test_child_llm_error_is_traced_and_a_recovered_child_is_not_an_error() -> No
     assert "invalid stream" in traced[0]["llm_error"]
     assert "error_type" not in traced[0]
     # The runner's observation forwards the counter so the parent sees it.
-    finish = _FinishStub("finish_fold")
+    finish = _FinishStub("finish_session")
     llm = ScriptedLLM(
         [
             ProviderResponse(tool_calls=(ToolCall("a1", "agent", {"agent": "Explore", "task": "look"}),)),
             ProviderResponse(content="waiting"),
-            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),)),
         ]
     )
     runner = AgentSessionRunner(
@@ -3407,7 +3407,7 @@ def test_child_cut_short_by_worker_shutdown_is_cancelled_not_failed(monkeypatch)
     assert ended["status"] == "cancelled"
 
     # What the parent, the trace projection and the console see.
-    finish = _FinishStub("finish_fold")
+    finish = _FinishStub("finish_session")
     llm = ScriptedLLM(
         [
             ProviderResponse(
@@ -3416,7 +3416,7 @@ def test_child_cut_short_by_worker_shutdown_is_cancelled_not_failed(monkeypatch)
                 )
             ),
             ProviderResponse(content="waiting"),
-            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),)),
         ]
     )
     attempts: list[dict[str, object]] = []
@@ -3547,7 +3547,7 @@ def test_exhausted_child_reports_what_the_empty_finalize_left_behind() -> None:
     )
 
     # What the parent receives: the degraded report, the status unchanged, not ok.
-    finish = _FinishStub("finish_fold")
+    finish = _FinishStub("finish_session")
     llm = ScriptedLLM(
         [
             ProviderResponse(
@@ -3556,7 +3556,7 @@ def test_exhausted_child_reports_what_the_empty_finalize_left_behind() -> None:
                 )
             ),
             ProviderResponse(content="waiting"),
-            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),)),
         ]
     )
     attempts: list[dict[str, object]] = []
@@ -3693,7 +3693,7 @@ def test_time_budget_notice_states_remaining_minutes_and_backtests() -> None:
             ProviderResponse(tool_calls=(ToolCall("r1", "read_file", {}),)),
             ProviderResponse(tool_calls=(ToolCall("s1", "smoke_backtest", {}),)),
             ProviderResponse(tool_calls=(ToolCall("r2", "read_file", {}),)),
-            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),)),
         ],
         clock,
         [55_000.0, 80_000.0, 95_000.0],
@@ -3701,7 +3701,7 @@ def test_time_budget_notice_states_remaining_minutes_and_backtests() -> None:
     events: list[tuple[str, dict[str, object]]] = []
     runner = AgentSessionRunner(
         llm=llm,
-        tools=ToolRegistry([_NamedTool("read_file"), _NamedTool("smoke_backtest"), _FinishStub("finish_fold")]),
+        tools=ToolRegistry([_NamedTool("read_file"), _NamedTool("smoke_backtest"), _FinishStub("finish_session")]),
         system_prompt="fold",
         config=_fold_config(),
         time_budget=budget,
@@ -3721,8 +3721,8 @@ def test_time_budget_notice_states_remaining_minutes_and_backtests() -> None:
     assert len(delivered) == 3
     assert "smoke_backtest 1 次" in delivered[1]["message"]
     # The notice reports the budget; it is not a wrap-up cue. A Fold that read
-    # "finish_fold" at 50% finished with 280 minutes and 7 backtests unused.
-    assert all("finish_fold" not in item["message"] for item in delivered)
+    # "finish_session" at 50% finished with 280 minutes and 7 backtests unused.
+    assert all("finish_session" not in item["message"] for item in delivered)
     assert all("收尾提示" in item["message"] for item in delivered)
 
     # Crossing several fractions at once yields one notice.
@@ -3731,7 +3731,7 @@ def test_time_budget_notice_states_remaining_minutes_and_backtests() -> None:
     llm = _ClockedLLM(
         [
             ProviderResponse(tool_calls=(ToolCall("r1", "read_file", {}),)),
-            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),)),
         ],
         clock,
         [80_000.0],
@@ -3739,7 +3739,7 @@ def test_time_budget_notice_states_remaining_minutes_and_backtests() -> None:
     events = []
     runner = AgentSessionRunner(
         llm=llm,
-        tools=ToolRegistry([_NamedTool("read_file"), _FinishStub("finish_fold")]),
+        tools=ToolRegistry([_NamedTool("read_file"), _FinishStub("finish_session")]),
         system_prompt="session",
         config=_fold_config(),
         time_budget=budget,
@@ -3856,12 +3856,12 @@ def test_long_child_report_is_clipped_inline_and_spilled_for_read_back(tmp_path:
     report = "\n".join(f"第{index}行 证据与结论" for index in range(700))
     assert len(report) > SUBAGENT_REPORT_MAX_CHARS
     roots = SearchRoots(SafeWorkspace(tmp_path))
-    finish = _FinishStub("finish_fold")
+    finish = _FinishStub("finish_session")
     llm = ScriptedLLM(
         [
             ProviderResponse(tool_calls=(ToolCall("a1", "agent", {"agent": "Explore", "task": "audit"}),)),
             ProviderResponse(content="waiting"),
-            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),)),
         ]
     )
     events: list[tuple[str, dict[str, object]]] = []
@@ -3936,12 +3936,12 @@ def test_short_child_report_is_delivered_whole_and_no_store_is_explicit() -> Non
     assert "not persisted" in clipped["result_hint"]
 
     # Through the runner without search tools: the clip is still visible.
-    finish = _FinishStub("finish_fold")
+    finish = _FinishStub("finish_session")
     llm = ScriptedLLM(
         [
             ProviderResponse(tool_calls=(ToolCall("a1", "agent", {"agent": "Explore", "task": "audit"}),)),
             ProviderResponse(content="waiting"),
-            ProviderResponse(tool_calls=(ToolCall("f1", "finish_fold", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),)),
         ]
     )
     runner = AgentSessionRunner(
@@ -3965,13 +3965,13 @@ def test_short_child_report_is_delivered_whole_and_no_store_is_explicit() -> Non
 
 
 def test_prompts_carry_the_todo_convention_and_per_launch_knobs() -> None:
-    fold = build_system_prompt(mode="fold", experiment_facts={})
-    for prompt, finish in ((fold, "finish_fold"),):
+    fold = build_system_prompt(experiment_facts={})
+    for prompt, finish in ((fold, "finish_session"),):
         assert "`TODO.md`（用 `write_file`/`edit_file` 维护）" in prompt
         assert "每个任务一行，写明负责方、状态和一句话结果" in prompt
         assert "上下文被压缩后它是恢复计划的依据" in prompt
         assert f"`{finish}` 前核对全部条目" in prompt
-    assert "`thinking` 与 `max_turns` 由你按次决定" in FOLD_WORKFLOW_SECTION
+    assert "`thinking` 与 `max_turns` 由你按次决定" in SESSION_WORKFLOW_SECTION
 
 
 class _RecordingLLM:

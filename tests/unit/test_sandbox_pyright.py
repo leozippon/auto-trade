@@ -70,7 +70,7 @@ def test_pyrightconfig_is_basic_and_excludes_pit_roots() -> None:
 
 
 def test_agent_prompts_leave_pyright_how_to_out_of_system_text() -> None:
-    fold = build_system_prompt(mode="fold", experiment_facts={})
+    fold = build_system_prompt(experiment_facts={})
     # The writing child is the one that would be tempted to type-check.
     child = subagent_system_prompt("general-purpose")
     assert COMMAND not in fold

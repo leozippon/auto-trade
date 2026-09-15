@@ -363,7 +363,7 @@ def test_continue_hands_the_next_session_its_node_and_prior(tmp_path: Path):
     node_id = StepTree(tree_root).record_step(
         node_source,
         epoch_id="research",
-        fold_id="ref",
+        session_ref="ref",
         run_id="run_ref",
         result_name="valid_001",
         revision_id="strategy_ref",
@@ -637,7 +637,7 @@ def test_an_unreadable_run_marker_becomes_one_attempt_failed_and_is_cleared(tmp_
 def test_session_budgets_honor_nondefault_deadline_grace(tmp_path: Path):
     config = replace(
         RollingExperimentConfig(experiment_id="arm", experiments_root=tmp_path),
-        max_fold_minutes=60,
+        max_session_minutes=60,
         deadline_grace_minutes=5,
     )
     budgets = _session_budgets(config, None)

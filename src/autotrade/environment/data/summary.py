@@ -82,7 +82,7 @@ def write_agent_data_summary(
     output_path: str | Path,
     *,
     kind: str,
-    fold_id: str | None,
+    session_ref: str | None,
     views: Mapping[str, tuple[Path, str]],
 ) -> dict[str, object]:
     """Write `/mnt/artifacts/data_summary.json` before Agent starts.
@@ -99,7 +99,7 @@ def write_agent_data_summary(
     summary: dict[str, object] = {
         "generated_at": utc_now_iso(),
         "kind": kind,
-        "fold_id": fold_id,
+        "session_ref": session_ref,
         "unit_contract": AGENT_UNIT_CONTRACT,
         "large_table_guidance": list(LARGE_TABLE_GUIDANCE),
         "views": {},

@@ -25,7 +25,7 @@ def _options(tmp_path: Path, **overrides: object) -> SimpleNamespace:
             step_tree_enabled=True,
             fold_exploration_directive="directive",
             max_llm_calls=800,
-            max_fold_minutes=20,
+            max_session_minutes=20,
             strategy_fit_timeout_seconds=1800,
             nl_failure_policy="fail",
             workspace_reference="configs/workspace_refs/pack",
@@ -77,7 +77,7 @@ def test_the_audit_entrypoint_assembles_through_the_shared_builder() -> None:
     source = Path(run_audit_session.__file__).read_text(encoding="utf-8")
     assert "build_experiment_pipeline(" in source
     for name in (
-        "LLMFoldDeveloper",
+        "LLMResearchDeveloper",
         "LLMMetaLearner",
         "RollingExperimentPipeline",
         "ResearchPITSnapshotProvider",
@@ -113,7 +113,7 @@ def test_the_compaction_gateway_is_built_without_provider_retries(
         ),
     )
     monkeypatch.setattr(
-        worker_module, "LLMFoldDeveloper", lambda **kwargs: SimpleNamespace(**kwargs)
+        worker_module, "LLMResearchDeveloper", lambda **kwargs: SimpleNamespace(**kwargs)
     )
     monkeypatch.setattr(
         worker_module,
@@ -161,7 +161,7 @@ def test_the_assembled_session_mounts_the_image_refs_and_memory_it_was_given(
             trading_days=["20240102"], sandbox=kwargs.get("sandbox")
         ),
     )
-    monkeypatch.setattr(worker_module, "LLMFoldDeveloper", capture("developer"))
+    monkeypatch.setattr(worker_module, "LLMResearchDeveloper", capture("developer"))
     monkeypatch.setattr(
         worker_module,
         "RollingExperimentPipeline",

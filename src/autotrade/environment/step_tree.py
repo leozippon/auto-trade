@@ -5,8 +5,8 @@ directory plus optional ``models/`` directory into
 ``/mnt/artifacts/steps/<node_id>/{output,models}/`` (validation attachments
 such as ``detailed_return.json`` sit at the node root) and appends a node
 (with a parent pointer) to ``steps/tree.json``. The tree accumulates across
-Folds of one Experiment: the Pipeline hands it to the next Fold's sandbox and
-positions ``current_node_id`` at the parent artifact, so the Agent can read
+the research sessions of one Experiment: the Pipeline hands it to the next
+session's sandbox and positions ``current_node_id`` at its start node, so the Agent can read
 where it stands in the search history and branch from any validated node via
 the ``step_rollback`` tool. The feature is toggleable for ablations
 (``step_tree_enabled``).
@@ -36,15 +36,15 @@ NODE_OUTPUT_DIR = "output"
 NODE_MODELS_DIR = "models"
 
 
-def node_in_session(node: Mapping[str, object], *, fold_id: str, run_id: str) -> bool:
-    """Whether a node was produced by this Fold session (fold plus run identity).
+def node_in_session(node: Mapping[str, object], *, session_ref: str, run_id: str) -> bool:
+    """Whether a node was produced by this research session (session plus run identity).
 
-    Single source for the Agent-facing rule that only the current Fold's,
-    current run's nodes can be restored or submitted; the nodes this tree
-    carries in from earlier Folds and earlier runs are read-only evidence.
+    Single source for the Agent-facing rule that only the current session's,
+    current run's nodes can be restored or nominated; the nodes this tree
+    carries in from earlier sessions and earlier runs are read-only evidence.
     """
 
-    return node.get("fold_id") == fold_id and node.get("run_id") == run_id
+    return node.get("session_ref") == session_ref and node.get("run_id") == run_id
 
 
 class StepTree:
@@ -63,7 +63,7 @@ class StepTree:
         output_root: str | Path,
         *,
         epoch_id: str,
-        fold_id: str,
+        session_ref: str,
         run_id: str,
         result_name: str,
         revision_id: str,
@@ -73,9 +73,9 @@ class StepTree:
         metadata: Mapping[str, object] | None = None,
     ) -> str:
         # result_name (valid_NNN) is only unique within one run's results dir;
-        # the same fold re-executed (rerun_fold / post-rollback) starts again at
-        # valid_000, so the run id must be part of the node identity.
-        node_id = f"{epoch_id}__{fold_id}__{run_id}__{result_name}"
+        # the same session re-executed (a retried attempt) starts again at
+        # valid_001, so the run id must be part of the node identity.
+        node_id = f"{epoch_id}__{session_ref}__{run_id}__{result_name}"
         if any(node["node_id"] == node_id for node in self.data["nodes"]):
             raise ValueError(f"step tree node already exists: {node_id}")
         node_dir = self.root / node_id
@@ -96,7 +96,7 @@ class StepTree:
             # never the host's absolute workspace path.
             copied_attachments[str(rel)] = str(Path(node_id) / rel)
         # A recorded node is immutable evidence: lock the snapshot directories so
-        # a later Fold cannot silently edit the artifact it branched from.
+        # a later session cannot silently edit the artifact it branched from.
         chmod_tree(node_dir / NODE_OUTPUT_DIR, file_mode=0o444, dir_mode=0o555)
         if (node_dir / NODE_MODELS_DIR).is_dir():
             chmod_tree(node_dir / NODE_MODELS_DIR, file_mode=0o444, dir_mode=0o555)
@@ -105,7 +105,7 @@ class StepTree:
                 "node_id": node_id,
                 "parent_node_id": self.data.get("current_node_id"),
                 "epoch_id": epoch_id,
-                "fold_id": fold_id,
+                "session_ref": session_ref,
                 "run_id": run_id,
                 "result_name": result_name,
                 "revision_id": revision_id,
@@ -129,20 +129,20 @@ class StepTree:
         self,
         *,
         epoch_id: str,
-        fold_id: str,
+        session_ref: str,
         run_id: str,
         result_name: str,
         error: str,
         metrics: dict[str, object] | None = None,
         metadata: Mapping[str, object] | None = None,
     ) -> str:
-        """Append a lightweight failed-attempt node so later folds see dead-ends.
+        """Append a lightweight failed-attempt node so later sessions see dead-ends.
 
         Unlike ``record_step`` this copies no ``output/`` snapshot and, crucially,
         leaves ``current_node_id`` unchanged: a failed attempt must never become
         the working position or a parent candidate.
         """
-        node_id = f"{epoch_id}__{fold_id}__{run_id}__{result_name}"
+        node_id = f"{epoch_id}__{session_ref}__{run_id}__{result_name}"
         if any(node["node_id"] == node_id for node in self.data["nodes"]):
             raise ValueError(f"step tree node already exists: {node_id}")
         self.data["nodes"].append(
@@ -150,7 +150,7 @@ class StepTree:
                 "node_id": node_id,
                 "parent_node_id": self.data.get("current_node_id"),
                 "epoch_id": epoch_id,
-                "fold_id": fold_id,
+                "session_ref": session_ref,
                 "run_id": run_id,
                 "result_name": result_name,
                 "revision_id": None,
@@ -180,7 +180,7 @@ class StepTree:
         A frozen artifact records the node it was frozen from, so the branch
         point is resolved by node identity. Returns ``None`` when the node is
         not in this tree — an inherited seed, or a node a rollback pruned —
-        so such a parent starts a new root instead of failing the fold.
+        so such a start begins a new root instead of failing the session.
         """
         for node in reversed(self.data["nodes"]):
             if not node.get("complete_validation"):
@@ -192,9 +192,9 @@ class StepTree:
     def save(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         safe_data = sanitize_for_log(self.data)
-        # Write through a NEW inode (tmp + rename): the fold-level tree is a
+        # Write through a NEW inode (tmp + rename): the session-level tree is a
         # hardlinked copy of the experiment-level tree, so an in-place write
-        # would mutate the experiment copy mid-fold and an aborted fold could
+        # would mutate the experiment copy mid-session and an aborted session could
         # leave it referencing node snapshots that were never copied back.
         write_json_atomic(self.tree_path, safe_data)
         # Always refresh the human/Agent-readable rendering alongside the JSON.

@@ -92,7 +92,10 @@ BASE_EXPECTED_DEFAULTS: dict[str, object] = {
     "screen_max_circ_mv_yi": None,
     # Both the packs and the directives promise the Agent this many host null
     # controls per research session.
-    "max_null_controls_per_fold": 3,
+    "max_null_controls_per_session": 3,
+    # Replay-years one research session may spend on validations; the packs
+    # size their rounds against it.
+    "max_replay_years_per_session": 24,
     # Derived from SandboxLimits.fit_timeout_seconds; packs promise the Agent a
     # fit budget of this size.
     "strategy_fit_timeout_seconds": 3600,
@@ -136,7 +139,7 @@ BASE_OVERRIDES: dict[str, object] = {
     "max_drawdown": 0.25,
     "cost_stress_multiplier": 2.0,
     # Per research session.
-    "max_fold_minutes": 600,
+    "max_session_minutes": 600,
     "max_llm_calls": 1600,
 }
 
@@ -159,11 +162,10 @@ ROUND_REPORT_KEYS: tuple[str, ...] = (
     "text_datasets",
     "include_intraday",
     "operating_memory",
-    "max_fold_minutes",
-    "max_steps_per_fold",
-    "max_backtests_per_fold",
+    "max_session_minutes",
+    "max_replay_years_per_session",
     "max_llm_calls",
-    "max_null_controls_per_fold",
+    "max_null_controls_per_session",
     "strategy_fit_timeout_seconds",
     "initial_cash",
     "max_drawdown",

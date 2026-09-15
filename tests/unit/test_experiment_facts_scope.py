@@ -1,6 +1,7 @@
-"""The run facts a session is told: development window, universe policy and
-strategy call cadence — one sentence each, with Held-out invisible as ever —
-plus the budgets and decision-input windows the same object publishes."""
+"""The run facts a session is told: the research period and the session's
+place in the arm, universe policy and strategy call cadence — one sentence
+each, with every date after research end absent — plus the budgets and
+decision-input windows the same object publishes."""
 
 from __future__ import annotations
 
@@ -25,16 +26,16 @@ def _facts(
     manifest: dict[str, object] = {
         "experiment_id": "exp",
         "run_id": "run_x",
-        "epoch_id": "epoch_001",
-        "fold_id": "fold_2022",
-        "kind": "fold",
-        "fold": {
-            "input_window": "20200101..20211231",
-            "validation_period": "20220101..20221231",
-            "valid_decision_time": "2021-12-31T23:59:59+08:00",
+        "epoch_id": "research",
+        "fold_id": "s4",
+        "kind": "research",
+        "session": {"index": 4, "of": 4, "last": True},
+        "research": {
+            "decision_time": "2025-06-30T23:59:59+08:00",
+            "input_window": "20230701..20250630",
+            "research_period": "20210701..20250630",
+            "years": [{"label": "Y1", "start": "20210701", "end": "20220630"}],
         },
-        "fold_period": "year",
-        "test_stage": False,
         "schedule": {"period": "day", "inference_time": "08:30"},
         "snapshot_config": SnapshotConfig().to_record(),
     }
@@ -63,37 +64,24 @@ def _data_summary(rows: dict[str, int]) -> dict[str, object]:
     }
 
 
-def test_every_fold_states_whether_it_is_a_confirmation_fold() -> None:
-    """False is stated, not implied by absence: an Agent read a missing flag as
-    a confirmation Fold and left most of its budget unspent (XR1 A6)."""
-
-    assert _facts()["identity"]["confirmation_fold"] is False
-    assert _facts(confirmation_fold=True)["identity"]["confirmation_fold"] is True
-    # The flag belongs to development Folds only.
-    assert "confirmation_fold" not in _facts(kind="deployment_adjustment")["identity"]
-
-
-def test_regular_fold_facts_name_the_yearly_folds_and_the_meta_between_them() -> None:
+def test_the_session_facts_state_the_research_period_and_the_session_place() -> None:
     facts = _facts()
     scope = facts["research_scope"]
-    assert scope["development_window"].startswith(
-        "This Fold's validation period is 20220101..20221231."
-    )
-    assert "one Fold per year" in scope["development_window"]
-    assert "Meta-learning session between Folds" in scope["development_window"]
-    assert "no frozen Test stage" in scope["development_window"]
-    assert "Held-out" in scope["development_window"]
+    assert "same period 20210701..20250630" in scope["research"]
+    assert "session 4 of 4" in scope["research"]
+    assert "sealed data" in scope["research"]
     assert scope["universe"].startswith("The universe is unfiltered")
     assert "ST names included" in scope["universe"]
     assert "every trading day at 08:30" in scope["strategy_cadence"]
     assert "own rebalance cadence" in scope["strategy_cadence"]
-    # The cadence is public research scope; Held-out stays invisible.
-    assert facts["visible_timeline"]["fold_period"] == "year"
-    assert facts["visibility_policy"]["heldout_visible"] is False
-    assert facts["visibility_policy"]["test_visible"] is False
+    # The last session is stated as such: continue is not an outcome there.
+    assert facts["identity"]["session"] == {"index": 4, "of": 4, "last": True}
+    assert facts["visibility_policy"]["research_period_visible"] is True
+    assert "不进入任何会话" in facts["visibility_policy"]["after_research_end"]
     rendered = json.dumps(facts, ensure_ascii=False)
-    assert "2026" not in rendered
-    assert "fold_2022" not in rendered
+    for later in ("2026", "202507", "2025-07"):
+        assert later not in rendered
+    assert '"s4"' not in rendered
 
 
 def test_the_signal_screen_path_is_a_fact_only_where_the_mount_exists() -> None:
@@ -119,32 +107,19 @@ def test_the_signal_screen_path_is_a_fact_only_where_the_mount_exists() -> None:
     assert "signal_screen_ref" not in local_fold["source_refs"]
 
 
-def test_rolling_facts_keep_the_cadence_and_a_screened_universe_is_described() -> None:
+def test_a_screened_universe_and_a_monthly_cadence_are_described() -> None:
     screened = SnapshotConfig(
         screen_exclude_st=True, screen_exclude_new_listed_days=180, screen_boards=("main",)
     ).to_record()
     facts = _facts(
-        test_stage=True,
-        fold={
-            "input_window": "20200101..20211231",
-            "validation_period": "20220101..20221231",
-            "valid_decision_time": "2021-12-31T23:59:59+08:00",
-        },
         snapshot_config=screened,
         schedule={"period": "month", "inference_time": "09:00"},
     )
     scope = facts["research_scope"]
-    assert facts["visible_timeline"]["fold_period"] == "year"
-    assert "rolls period by period" in scope["development_window"]
     assert scope["universe"].startswith("The universe is screened")
     assert "exclude_st=True" in scope["universe"]
     assert "boards=['main']" in scope["universe"]
     assert "first available trading day of each month at 09:00" in scope["strategy_cadence"]
-
-
-def test_the_validation_window_length_is_a_fold_fact() -> None:
-    assert _facts(validation_periods=4)["visible_timeline"]["validation_periods"] == 4
-    assert "validation_periods" not in _facts()["visible_timeline"]
 
 
 def test_both_strategy_wall_clocks_reach_the_session() -> None:
@@ -196,62 +171,30 @@ def test_the_session_is_told_deadline_seconds_is_pausable_effective_time() -> No
     assert fold["budgets"]["deadline_seconds_note"] == expected
     for name in ("shell", "subagent", "sub-agent", "子代理"):
         assert name not in fold["budgets"]["deadline_seconds_note"]
-    assert expected in build_system_prompt(mode="fold", experiment_facts=fold)
+    assert expected in build_system_prompt(experiment_facts=fold)
 
 
-def test_the_facts_say_whether_a_parent_control_baseline_exists() -> None:
-    """An initial template is a mounted starting point, not a parent artifact.
+def test_the_facts_say_where_the_session_started() -> None:
+    """The template and a handed-on node are both stated; a later session
+    sees the node id its working copy was seeded from."""
 
-    The host seeds a ``parent_control`` node only when the pre-session parent
-    replay produced a result, and records that outcome on the run manifest.
-    Left implicit, four first-Fold sessions read the missing block as a fault
-    and either spent a backtest reproducing the template or silently redefined
-    their baseline, so the absence is a stated fact.
-    """
-
-    inherited = _facts(
-        is_initial_artifact=False,
-        parent_control_available=True,
-        parent_strategy_artifact_id="strategy_epoch_001_fold_2022",
-    )["artifact_contract"]["parent"]
-    assert inherited["kind"] == "frozen_artifact"
-    assert inherited["parent_control_available"] is True
-
-    template = _facts(
-        is_initial_artifact=True,
-        parent_control_available=False,
-        template_ref="agent_output_template",
-    )["artifact_contract"]["parent"]
-    assert template["kind"] == "initial_template"
-    # False, not absent: compact_mapping drops empty values, so the fact has to
-    # survive as a bool for the submit contract's clause to have a referent.
-    assert template["parent_control_available"] is False
-
-    # A parent whose pre-session control replay failed: the artifact is still
-    # inherited (kind stays frozen_artifact) but no parent_control node exists,
-    # and the submit contract tells the Agent to select that node by id.
-    # Because that contract also makes this the one case worth re-replaying the
-    # parent on the session's own budget, the reason is published with it --
-    # the confirm arm spent three slots re-replaying a parent it could not see
-    # the failure of.
-    failed = _facts(
-        is_initial_artifact=False,
-        parent_control_available=False,
-        parent_control_error="BacktestError: window shape cannot be larger",
-        parent_strategy_artifact_id="strategy_epoch_001_fold_2022",
-    )["artifact_contract"]["parent"]
-    assert failed["kind"] == "frozen_artifact"
-    assert failed["parent_control_available"] is False
-    assert failed["parent_control_error"] == (
-        "BacktestError: window shape cannot be larger"
+    template = _facts(start={"kind": "template", "template_ref": "agent_output_template"})
+    assert template["artifact_contract"]["start"]["kind"] == "template"
+    node = _facts(
+        start={"kind": "step_node", "node_id": "research__session_ref_a__run_ref_b__valid_002"},
     )
-    # Nothing failed, nothing to explain.
-    assert "parent_control_error" not in inherited
+    assert node["artifact_contract"]["start"] == {
+        "kind": "step_node",
+        "node_id": "research__session_ref_a__run_ref_b__valid_002",
+    }
 
-    # Manifests written before the field fall back to "an inherited parent
-    # exists".
-    legacy = _facts(is_initial_artifact=False)["artifact_contract"]["parent"]
-    assert legacy["parent_control_available"] is True
+
+def test_the_replay_year_budget_travels_with_how_it_is_spent() -> None:
+    budgets = _facts(budgets={"max_replay_years": 24, "max_null_controls": 3})["budgets"]
+    assert budgets["max_replay_years"] == 24
+    assert budgets["max_null_controls"] == 3
+    assert "replay-year" in budgets["max_replay_years_note"]
+    assert "max_replay_years_note" not in _facts(budgets={})["budgets"]
 
 
 def test_the_intraday_lookback_is_named_only_when_minutes_are_built() -> None:
@@ -337,4 +280,4 @@ def test_the_facts_publish_the_strategy_containers_cpu_quota_and_batch_width() -
     # The width alone would mislead: the fit clock the batch is judged against
     # scales with it, so the rule travels with the number.
     assert fold["batch_validate_fit_timeout_note"] == BATCH_VALIDATE_FIT_TIMEOUT_NOTE
-    assert "strategy_cpus" in build_system_prompt(mode="fold", experiment_facts=_facts())
+    assert "strategy_cpus" in build_system_prompt(experiment_facts=_facts())

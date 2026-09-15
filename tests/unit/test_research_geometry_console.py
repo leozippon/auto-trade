@@ -124,9 +124,8 @@ def test_the_create_form_is_seeded_with_the_research_geometry(tmp_path: Path):
     for key, value in (
         ("research_sessions", 4),
         ("window_months", 24),
-        ("max_fold_minutes", 720),
-        ("max_steps_per_fold", 30),
-        ("max_backtests_per_fold", 30),
+        ("max_session_minutes", 720),
+        ("max_replay_years_per_session", 24),
         ("max_llm_calls", 1600),
         ("screen_exclude_st", False),
         ("screen_exclude_new_listed_days", 0),

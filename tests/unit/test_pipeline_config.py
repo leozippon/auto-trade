@@ -51,11 +51,10 @@ _CONSOLE_CREATE_PRESET: dict[str, object] = {
     "inference_time": "08:30",
     "initial_cash": 1_000_000.0,
     "initial_control_mode": "auto",
-    # Per-session budgets for a research-period Validation with batch_validate.
-    "max_backtests_per_fold": 30,
-    "max_fold_minutes": 720,
+    # Per-session budgets: replay-years of batch_validate, minutes and calls.
+    "max_replay_years_per_session": 24,
+    "max_session_minutes": 720,
     "max_llm_calls": 1600,
-    "max_steps_per_fold": 30,
     "model": LOCAL_QWEN_MODEL,
     # The universe reaches the agent unfiltered; the strategy filters itself.
     "screen_boards": (),
@@ -189,24 +188,17 @@ class AcceptanceRulesTest(unittest.TestCase):
         own rules, and no date of any period appears in it."""
 
         facts = AcceptanceRules(max_drawdown=0.2, cost_stress_multiplier=3.0).agent_facts()
-        freeze = facts["fold_freeze"]
-        self.assertEqual(freeze["finite_metrics"]["enforcement"], "hard")
-        self.assertEqual(
-            {name: rule["enforcement"] for name, rule in freeze.items() if name != "finite_metrics"},
-            {name: "warn" for name in ("max_drawdown", "min_return", "min_sharpe", "order_count")},
-        )
-        for name in ("min_return", "min_sharpe"):
-            self.assertEqual(
-                freeze[name]["role"],
-                "informational_absolute_target_not_a_selection_criterion",
-            )
+        freeze = facts["freeze_gate"]
+        self.assertIn("span=full", freeze["span"])
+        self.assertIn("finite", freeze["finite_metrics"])
+        self.assertIn(str(verdict.FREEZE_MIN_DSR_PROBABILITY), freeze["deflated_sharpe_probability"])
+        self.assertIn(str(verdict.FREEZE_MIN_FULL_SPAN_VALIDATIONS), freeze["full_span_validations"])
+        self.assertEqual(freeze["freezes_per_arm"], 1)
+        targets = facts["targets"]
+        self.assertEqual(targets["max_drawdown"], 0.2)
+        self.assertIn("not selection criteria", targets["role"])
         graduation = facts["graduation"]
-        self.assertIn(str(verdict.FREEZE_MIN_DSR_PROBABILITY), graduation["freeze_gate"]["deflated_sharpe_probability"])
-        self.assertIn(
-            str(verdict.FREEZE_MIN_FULL_SPAN_VALIDATIONS),
-            graduation["freeze_gate"]["full_span_validations"],
-        )
-        self.assertEqual(graduation["freeze_gate"]["freezes_per_arm"], 1)
+        self.assertIn("tracking error", graduation["forward"]["minimum_detectable_excess"])
         self.assertEqual(graduation["forward"]["max_drawdown"], "<= 0.2")
         self.assertIn("3.0", graduation["forward"]["excess_at_cost_stress"])
         self.assertEqual(graduation["heldout"]["max_drawdown"], "<= 0.2")
@@ -232,10 +224,10 @@ class RollingExperimentConfigValidationTest(unittest.TestCase):
         self.assertEqual(config.geometry, DEFAULT_RESEARCH_GEOMETRY)
         self.assertEqual((config.research_sessions, config.session_max_attempts), (4, 3))
         self.assertEqual(config.fold_exploration_directive, "")
-        self.assertEqual(config.max_fold_minutes, 720)
+        self.assertEqual(config.max_session_minutes, 720)
         self.assertEqual(
-            (config.max_steps_per_fold, config.max_backtests_per_fold, config.max_llm_calls),
-            (30, 30, 1600),
+            (config.max_replay_years_per_session, config.max_llm_calls),
+            (24, 1600),
         )
         self.assertEqual(config.experiment_dir, Path("/tmp/experiments/exp"))
         self.assertEqual(
@@ -248,10 +240,9 @@ class RollingExperimentConfigValidationTest(unittest.TestCase):
             "research_sessions",
             "session_max_attempts",
             "window_months",
-            "max_steps_per_fold",
-            "max_backtests_per_fold",
+            "max_replay_years_per_session",
             "max_llm_calls",
-            "max_fold_minutes",
+            "max_session_minutes",
         ):
             for value in (0, -1, 1.5, True, math.nan):
                 with self.subTest(field=name, value=value):
@@ -262,7 +253,7 @@ class RollingExperimentConfigValidationTest(unittest.TestCase):
 
     def test_non_negative_int_knobs_accept_zero_but_not_negatives(self) -> None:
         for name in (
-            "max_null_controls_per_fold",
+            "max_null_controls_per_session",
             "deadline_grace_minutes",
             "finalize_before_deadline_seconds",
         ):
@@ -439,14 +430,14 @@ class DefaultsDriftTest(unittest.TestCase):
         )
         moved = {
             "model": "deepseek-v4-pro",
-            "max_steps_per_fold": 7,
+            "max_replay_years_per_session": 7,
             "screen_boards": ("gem", "star"),
             "research_start": "20190701",
         }
         with patch.dict(WEB_CREATE_DEFAULTS, moved):
             after = rendered()
         self.assertEqual(after["model"], "deepseek-v4-pro")
-        self.assertEqual(after["max_steps_per_fold"], 7)
+        self.assertEqual(after["max_replay_years_per_session"], 7)
         self.assertEqual(after["screen_boards"], ["gem", "star"])
         self.assertEqual(after["research_start"], "20190701")
         self.assertEqual(rendered(), baseline, "the schema retained a mutated default")

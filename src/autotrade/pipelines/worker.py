@@ -84,7 +84,7 @@ from .ledger import (
 )
 from .local_backend import (
     DeterministicBaselineDeveloper,
-    LLMFoldDeveloper,
+    LLMResearchDeveloper,
     LocalDailyEvaluationBackend,
     LocalDailySnapshotProvider,
 )
@@ -144,12 +144,11 @@ _ALLOWED_PARAMS = {
     "max_intraday_row_group_rows",
     "developer_mode",
     "window_months",
-    "max_steps_per_fold",
-    "max_backtests_per_fold",
-    "max_null_controls_per_fold",
+    "max_replay_years_per_session",
+    "max_null_controls_per_session",
     "max_llm_calls",
     "session_max_attempts",
-    "max_fold_minutes",
+    "max_session_minutes",
     "min_return",
     "min_sharpe",
     "max_drawdown",
@@ -590,20 +589,19 @@ def resolve_worker_options(
             knob("research_sessions"), "research_sessions"
         ),
         window_months=_positive_int(knob("window_months"), "window_months"),
-        max_steps_per_fold=_positive_int(
-            knob("max_steps_per_fold"), "max_steps_per_fold"
+        max_replay_years_per_session=_positive_int(
+            knob("max_replay_years_per_session"), "max_replay_years_per_session"
         ),
-        max_backtests_per_fold=_positive_int(
-            knob("max_backtests_per_fold"), "max_backtests_per_fold"
-        ),
-        max_null_controls_per_fold=_nonnegative_int(
-            knob("max_null_controls_per_fold"), "max_null_controls_per_fold"
+        max_null_controls_per_session=_nonnegative_int(
+            knob("max_null_controls_per_session"), "max_null_controls_per_session"
         ),
         max_llm_calls=_positive_int(knob("max_llm_calls"), "max_llm_calls"),
         session_max_attempts=_positive_int(
             knob("session_max_attempts"), "session_max_attempts"
         ),
-        max_fold_minutes=_positive_int(knob("max_fold_minutes"), "max_fold_minutes"),
+        max_session_minutes=_positive_int(
+            knob("max_session_minutes"), "max_session_minutes"
+        ),
         fold_exploration_directive=str(
             params.get("fold_exploration_directive") or ""
         ),
@@ -841,7 +839,7 @@ def build_experiment_pipeline(
             )
         if main_gateway is None:
             raise ValueError("developer_mode=llm requires an initialized LLM gateway")
-        developer = LLMFoldDeveloper(
+        developer = LLMResearchDeveloper(
             llm=main_gateway,
             subagent_llm=subagent_gateway,
             compact_llm=compact_gateway,

@@ -24,7 +24,7 @@ class StepTreeTest(unittest.TestCase):
             tree = StepTree(tmp / "steps")
             node1 = tree.record_step(
                 artifact,
-                fold_id="fold_ref_ab",
+                session_ref="session_ref_ab",
                 result_name="valid_000",
                 revision_id=revision,
                 metrics={"total_return": 0.01},
@@ -32,7 +32,7 @@ class StepTreeTest(unittest.TestCase):
             )
             node2 = tree.record_step(
                 artifact,
-                fold_id="fold_ref_ab",
+                session_ref="session_ref_ab",
                 result_name="valid_001",
                 revision_id=revision,
                 metrics={"total_return": 0.02},
@@ -51,7 +51,7 @@ class StepTreeTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "already exists"):
                 reloaded.record_step(
                     artifact,
-                    fold_id="fold_ref_ab",
+                    session_ref="session_ref_ab",
                     result_name="valid_000",
                     revision_id=revision,
                     metrics={},
@@ -67,7 +67,7 @@ class StepTreeTest(unittest.TestCase):
             tree = StepTree(tmp / "steps")
             kwargs = dict(
                 epoch_id="epoch_001",
-                fold_id="fold_ref_ab",
+                session_ref="session_ref_ab",
                 result_name="valid_000",
                 revision_id=new_revision_id("revision"),
                 metrics={},
@@ -75,7 +75,7 @@ class StepTreeTest(unittest.TestCase):
             node1 = tree.record_step(artifact, run_id="run_x", **kwargs)
             node2 = tree.record_step(artifact, run_id="run_y", **kwargs)
             self.assertNotEqual(node1, node2)
-            self.assertEqual(node1, "epoch_001__fold_ref_ab__run_x__valid_000")
+            self.assertEqual(node1, "epoch_001__session_ref_ab__run_x__valid_000")
             with self.assertRaisesRegex(ValueError, "already exists"):
                 tree.record_step(artifact, run_id="run_y", **kwargs)
 
@@ -85,7 +85,7 @@ class StepTreeTest(unittest.TestCase):
             artifact = write_artifact(tmp / "artifact")
             tree = StepTree(tmp / "steps")
             kwargs = dict(
-                fold_id="fold_ref_ab",
+                session_ref="session_ref_ab",
                 run_id="run_x",
                 result_name="valid_000",
                 revision_id=new_revision_id("revision"),
@@ -112,7 +112,7 @@ class StepTreeTest(unittest.TestCase):
             tree = StepTree(tmp / "steps")
             good = tree.record_step(
                 artifact,
-                fold_id="fold_ref_ab",
+                session_ref="session_ref_ab",
                 result_name="valid_000",
                 revision_id=new_revision_id("revision"),
                 metrics={"total_return": 0.01},
@@ -120,7 +120,7 @@ class StepTreeTest(unittest.TestCase):
             )
             failed = tree.record_failed_attempt(
                 epoch_id="epoch_001",
-                fold_id="fold_ref_ab",
+                session_ref="session_ref_ab",
                 run_id="run_x",
                 result_name="failed_abc",
                 error="boom",
@@ -143,7 +143,7 @@ class StepTreeTest(unittest.TestCase):
             tree = StepTree(tmp / "steps")
             tree.record_step(
                 artifact,
-                fold_id="fold_ref_ab",
+                session_ref="session_ref_ab",
                 result_name="valid_000",
                 revision_id=new_revision_id("revision"),
                 metrics={"total_return": 0.01, "sharpe": 1.5},
@@ -151,7 +151,7 @@ class StepTreeTest(unittest.TestCase):
             )
             tree.record_failed_attempt(
                 epoch_id="epoch_001",
-                fold_id="fold_ref_ab",
+                session_ref="session_ref_ab",
                 run_id="run_x",
                 result_name="failed_abc",
                 error="boom",
@@ -173,7 +173,7 @@ class StepTreeTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "shadow"):
                 tree.record_step(
                     artifact,
-                    fold_id="fold_ref_ab",
+                    session_ref="session_ref_ab",
                     result_name="valid_000",
                     revision_id=new_revision_id("revision"),
                     metrics={},
@@ -184,7 +184,7 @@ class StepTreeTest(unittest.TestCase):
                 with self.subTest(relpath=relpath), self.assertRaisesRegex(ValueError, "invalid step attachment"):
                     tree.record_step(
                         artifact,
-                        fold_id="fold_ref_ab",
+                        session_ref="session_ref_ab",
                         result_name="valid_escape",
                         revision_id=new_revision_id("revision"),
                         metrics={},
@@ -193,7 +193,7 @@ class StepTreeTest(unittest.TestCase):
                     )
             node_id = tree.record_step(
                 artifact,
-                fold_id="fold_ref_ab",
+                session_ref="session_ref_ab",
                 result_name="valid_001",
                 revision_id=new_revision_id("revision"),
                 metrics={},
@@ -210,7 +210,7 @@ class StepTreeTest(unittest.TestCase):
             tree = StepTree(tmp / "steps")
             tree.record_failed_attempt(
                 epoch_id="epoch_001",
-                fold_id="fold_ref_ab",
+                session_ref="session_ref_ab",
                 run_id="run_x",
                 result_name="failed_secret",
                 error="failed Authorization: Bearer secret-token-abc",
@@ -221,41 +221,51 @@ class StepTreeTest(unittest.TestCase):
             self.assertIn("redacted", payload["nodes"][0]["error"].lower())
 
 
-class PhasePromptTest(unittest.TestCase):
+RESEARCH_MANIFEST = {
+    "experiment_id": "exp",
+    "run_id": "run_x",
+    "epoch_id": "research",
+    "fold_id": "s2",
+    "kind": "research",
+    "session": {"index": 2, "of": 4, "last": False},
+    "research": {
+        "decision_time": "2025-06-30T23:59:59+08:00",
+        "input_window": "20230701..20250630",
+        "research_period": "20210701..20250630",
+        "years": [
+            {"label": "Y1", "start": "20210701", "end": "20220630"},
+            {"label": "Y2", "start": "20220701", "end": "20230630"},
+            {"label": "Y3", "start": "20230701", "end": "20240630"},
+            {"label": "Y4", "start": "20240701", "end": "20250630"},
+        ],
+        "spans": "full (every year), one year such as Y1, or contiguous years such as Y1..Y4",
+    },
+    "start": {"kind": "step_node", "node_id": "research__session_ref_x__run_ref_y__valid_003"},
+    "arm": {"frozen": False, "freezes_per_arm": 1, "trials_to_date": 5, "full_span_validations_to_date": 2},
+    "snapshot_config": {
+        "decision_windows": {
+            "daily_months": 24,
+            "fundamentals_months": 24,
+            "events_months": 24,
+            "macro_months": 24,
+            "text_months": 24,
+            "intraday_trade_days": 21,
+        }
+    },
+    "acceptance_rules": {"min_return": 0.0},
+    "budgets": {"max_replay_years": 24, "max_null_controls": 3, "deadline_seconds": 43800.0},
+}
+
+
+class SessionFactsTest(unittest.TestCase):
     def setUp(self) -> None:
         self._refs_tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._refs_tmp.cleanup)
         self.ref_store = AgentRefStore(Path(self._refs_tmp.name) / "experiment")
 
-    def test_experiment_facts_replace_raw_fold_schedule(self):
-        manifest = {
-            "experiment_id": "exp",
-            "run_id": "run_x",
-            "epoch_id": "epoch_001",
-            "fold_id": "fold_2022Q1",
-            "kind": "fold",
-            "fold": {
-                "input_window": "20200101..20210930",
-                "validation_period": "20211001..20211231",
-                "test_period": "20220101..20220331",
-                "test_decision_time": "2022-01-04T09:25:00+08:00",
-            },
-            "fold_period": "quarter",
-            "valid_decision_time": "2021-10-08T09:25:00+08:00",
-            "snapshot_config": {
-                "decision_windows": {
-                    "daily_months": 21,
-                    "fundamentals_months": 21,
-                    "events_months": 21,
-                    "macro_months": 21,
-                    "text_months": 21,
-                    "intraday_trade_days": 21,
-                }
-            },
-            "acceptance_rules": {"min_return": 0.0},
-        }
+    def test_facts_carry_the_research_geometry_and_the_arm_but_no_later_date(self):
         facts = build_experiment_facts(
-            manifest=manifest,
+            manifest=RESEARCH_MANIFEST,
             ref_store=self.ref_store,
             runtime_env={"python": {"version": "3.11"}, "tools": {"rg": {"available": True}}},
             data_summary={"views": {"snapshot": {"mount_path": "/mnt/snapshot", "files": []}}},
@@ -263,97 +273,82 @@ class PhasePromptTest(unittest.TestCase):
             context_compaction={"enabled": True, "token_threshold": 200000, "max_calls": 8},
             model_artifacts_empty=True,
         )
-
-        prompt = build_system_prompt(
-            fold_info=manifest["fold"],
-            acceptance_rules={"min_return": 0.0},
-            experiment_facts=facts,
-        )
+        prompt = build_system_prompt(experiment_facts=facts)
 
         self.assertIn("当前实验事实", prompt)
-        self.assertIn("hidden_schedule_redacted", prompt)
-        self.assertIn("fold_ref_", prompt)
-        self.assertNotIn("fold_2022Q1", prompt)
-        self.assertNotIn("test_period", prompt)
-        self.assertNotIn("test_decision_time", prompt)
-        self.assertNotIn("20220101..20220331", prompt)
+        self.assertEqual(facts["research_geometry"], RESEARCH_MANIFEST["research"])
+        self.assertEqual(facts["identity"]["session"], {"index": 2, "of": 4, "last": False})
+        self.assertTrue(facts["identity"]["session_ref"].startswith("session_ref_"))
+        self.assertNotIn('"s2"', prompt)
+        self.assertEqual(facts["arm"]["trials_to_date"], 5)
+        self.assertIs(facts["arm"]["frozen"], False)
+        self.assertEqual(facts["budgets"]["max_replay_years"], 24)
+        self.assertIn("replay-year", facts["budgets"]["max_replay_years_note"])
+        self.assertEqual(
+            facts["artifact_contract"]["start"],
+            {
+                "kind": "step_node",
+                "node_id": "research__session_ref_x__run_ref_y__valid_003",
+                "model_artifacts_empty": True,
+            },
+        )
+        self.assertIn("freeze_gate", facts["artifact_contract"]["acceptance_rules"])
+        self.assertIn("20210701..20250630", facts["research_scope"]["research"])
+        self.assertIn("session 2 of 4", facts["research_scope"]["research"])
+        # The periods after research end exist and are sealed: no date of them.
+        for later in ("2025-07", "202507", "2026", "20260630", "20260930"):
+            self.assertNotIn(later, prompt)
         execution = facts["visible_timeline"]["execution_policy"]
         self.assertEqual(execution["strategy_clock"], "configured_schedule_only")
         self.assertFalse(execution["historical_minutes_drive_strategy"])
         self.assertEqual(execution["missing_exact_price"], "reject")
 
-    def test_unit_contract_and_test_visibility_are_explicit_by_agent_kind(self):
-        unit_contract = {
-            "daily.parquet": {"pct_chg_turnover_dv": "decimal; 5%=0.05"},
-            "events.parquet": {"moneyflow.*_amount": "10k_CNY; CNY 5m=500"},
-        }
-        fold_facts = build_experiment_facts(
-            manifest={"kind": "fold", "fold_id": "fold_x"},
-            ref_store=self.ref_store,
-            data_summary={"unit_contract": unit_contract},
-        )
+    def test_no_fact_key_names_a_fold_a_parent_or_a_hidden_stage(self):
+        facts = build_experiment_facts(manifest=RESEARCH_MANIFEST, ref_store=self.ref_store)
 
-        # The facts builder no longer produces the always-dropped data-profile
-        # / paths sections (the unit contract reaches the Agent via
-        # data_summary.json, not via prompt facts).
-        self.assertNotIn("data_profile", fold_facts)
-        self.assertNotIn("paths", fold_facts)
-        self.assertFalse(fold_facts["visibility_policy"]["test_visible"])
-        self.assertFalse(fold_facts["visibility_policy"]["heldout_visible"])
+        def keys(value):
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    yield str(key)
+                    yield from keys(item)
+            elif isinstance(value, list):
+                for item in value:
+                    yield from keys(item)
 
-    def test_fold_facts_opaque_parent_artifact_id(self):
-        # Frozen artifact ids embed the raw fold label of the fold that produced
-        # them (strategy_<epoch>_fold_<period>), so the facts must project them.
-        facts = build_experiment_facts(
-            ref_store=self.ref_store,
-            manifest={
-                "experiment_id": "exp",
-                "run_id": "run_2",
-                "epoch_id": "epoch_001",
-                "fold_id": "fold_2022Q2",
-                "kind": "fold",
-                "is_initial_artifact": False,
-                "parent_strategy_artifact_id": "strategy_epoch_001_fold_2022Q1",
-            }
-        )
-        rendered = json.dumps(facts, ensure_ascii=False, sort_keys=True)
-        parent = facts["artifact_contract"]["parent"]
-        self.assertTrue(str(parent["id"]).startswith("strategy_ref_"))
-        self.assertNotIn("fold_2022Q1", rendered)
-        self.assertNotIn("fold_2022Q2", rendered)
+        names = set(keys(facts))
+        for retired in (
+            "fold",
+            "fold_period",
+            "validation_periods",
+            "parent",
+            "parent_control_available",
+            "confirmation_fold",
+            "test_visible",
+            "heldout_visible",
+            "development_window",
+            "max_backtests_per_fold",
+            "max_steps",
+        ):
+            self.assertNotIn(retired, names)
+        self.assertNotIn("data_profile", facts)
+        self.assertNotIn("paths", facts)
 
-    def test_run_manifest_public_view_redacts_test_schedule(self):
+    def test_run_manifest_public_view_keeps_research_keys_and_drops_the_rest(self):
         with tempfile.TemporaryDirectory() as tmp:
             public_path = Path(tmp) / "artifacts" / "run_manifest.json"
             manifest = RunManifest.create(
                 public_path,
                 {
-                    "kind": "fold",
-                    "fold": {
-                        "fold_id": "fold_2022Q1",
-                        "input_window": "20200101..20210930",
-                        "validation_period": "20211001..20211231",
-                        "test_period": "20220101..20220331",
-                        "test_decision_time": "2022-01-04T09:25:00+08:00",
-                    },
-                    "test_decision_time": "2022-01-04T09:25:00+08:00",
-                    "max_backtests_per_fold": 30,
+                    **RESEARCH_MANIFEST,
+                    "test_decision_time": "2025-07-04T09:25:00+08:00",
                     "snapshots": {
-                        "valid_decision_input": {"snapshot_id": "valid"},
-                        "valid_replay": {"snapshot_id": "valid_replay"},
-                        "test_decision_input": {"snapshot_id": "test"},
-                        "test_replay": {"snapshot_id": "test_replay"},
+                        "decision_input": {"snapshot_id": "decision"},
+                        "heldout_replay": {"snapshot_id": "heldout_replay"},
                     },
-                    "experiment_parameters": {
-                        "fold_period": "quarter",
-                        "epochs": 3,
-                        "periods": {"first_test_period": "2022Q1", "heldout_first_period": "2025Q1"},
-                        "test_first_period": "2022Q1",
-                        "heldout_periods": ["2025Q1", "2025Q2"],
-                    },
+                    "experiment_parameters": {"heldout_end": "20260930"},
                     "backtest_summaries": [
-                        {"mode": "valid", "total_return": 0.1},
-                        {"mode": "frozen_test", "total_return": 0.2},
+                        {"mode": "valid", "span": "Y2", "total_return": 0.1},
+                        {"mode": "heldout", "total_return": 0.2},
                     ],
                 },
                 ref_store=AgentRefStore(Path(tmp) / "experiment"),
@@ -363,108 +358,81 @@ class PhasePromptTest(unittest.TestCase):
             host = json.loads(manifest.host_path.read_text(encoding="utf-8"))
 
             self.assertNotIn("test_decision_time", public)
-            self.assertNotIn("test_period", public["fold"])
-            self.assertNotIn("test_decision_input", public["snapshots"])
-            self.assertNotIn("test_replay", public["snapshots"])
-            self.assertEqual([item["mode"] for item in public["backtest_summaries"]], ["valid"])
-            # The raw fold label never crosses either, only its opaque ref.
-            self.assertNotIn("fold_2022Q1", json.dumps(public, ensure_ascii=False))
-            # The experiment parameters are not an Agent-visible manifest key.
             self.assertNotIn("experiment_parameters", public)
-            self.assertEqual(host["experiment_parameters"]["test_first_period"], "2022Q1")
-            self.assertEqual(host["fold"]["test_period"], "20220101..20220331")
-            self.assertIn("test_replay", host["snapshots"])
-            # Budget config is pure (no test/held-out leak) and is asserted in the
-            # prompt facts, so it must survive into the agent-visible manifest too.
-            self.assertEqual(public["max_backtests_per_fold"], manifest.data["max_backtests_per_fold"])
+            self.assertNotIn("heldout_replay", public["snapshots"])
+            self.assertEqual(public["backtest_summaries"], [{"mode": "valid", "span": "Y2", "total_return": 0.1}])
+            for key in ("research", "session", "start", "arm", "budgets"):
+                self.assertEqual(public[key], RESEARCH_MANIFEST[key], key)
+            # The raw session id never crosses, only its opaque ref.
+            self.assertTrue(str(public["session_ref"]).startswith("session_ref_"))
+            self.assertEqual(host["fold_id"], "s2")
+            self.assertEqual(host["experiment_parameters"]["heldout_end"], "20260930")
 
 
 class PromptCompositionTest(unittest.TestCase):
-    """The Fold prompt is assembled from a stable contract plus per-run context.
+    """The session prompt is assembled from a stable contract plus per-run context.
 
     The split matters for provider prompt caching and for the Agent's own
-    reading of what is fixed versus what changed this Fold, so each injectable
-    is asserted to appear, to be omitted when empty, and to sit in the right
-    half of the prompt.
+    reading of what is fixed versus what changed this session, so each
+    injectable is asserted to appear, to be omitted when empty, and to sit in
+    the right half of the prompt.
     """
 
-    BASE = dict(fold_info={"fold_id": "f"}, acceptance_rules={}, experiment_facts={})
+    MARKER = "# 本会话动态上下文"
 
-    def test_phase_and_step_tree_sections(self) -> None:
-        exploration = build_system_prompt(**self.BASE)
-        self.assertIn("探索期", exploration)
-        self.assertNotIn("收敛期", exploration)
-        self.assertNotIn("Step 产物树", exploration)
+    def test_the_step_tree_section_is_a_per_experiment_knob(self) -> None:
+        without = build_system_prompt()
+        self.assertNotIn("# Step 产物树", without)
+        with_tree = build_system_prompt(step_tree_enabled=True)
+        self.assertIn("# Step 产物树", with_tree)
+        self.assertIn("step_rollback", with_tree)
+        self.assertIn("finish_session", with_tree)
+        self.assertLess(with_tree.index("# Step 产物树"), with_tree.index(self.MARKER))
 
-        convergence = build_system_prompt(**self.BASE, phase="convergence", step_tree_enabled=True)
-        self.assertIn("收敛期", convergence)
-        self.assertNotIn("探索期", convergence)
-        self.assertIn("Step 产物树", convergence)
-        self.assertIn("step_rollback", convergence)
-        self.assertIn("finish_fold", convergence)
-
-    def test_fold_directive_is_optional_and_framed_as_a_hypothesis(self) -> None:
-        without = build_system_prompt(**self.BASE)
-        self.assertNotIn("研究者本 Fold 指令", without)
-        with_directive = build_system_prompt(
-            **self.BASE, fold_directive="优先检验行业中性化后的动量残差。"
-        )
-        self.assertIn("研究者本 Fold 指令", with_directive)
+    def test_the_session_directive_is_optional_and_framed_as_a_hypothesis(self) -> None:
+        without = build_system_prompt()
+        self.assertNotIn("研究者本会话指令", without)
+        with_directive = build_system_prompt(session_directive="优先检验行业中性化后的动量残差。")
+        self.assertIn("研究者本会话指令", with_directive)
         self.assertIn("优先检验行业中性化后的动量残差。", with_directive)
         # A directive never relaxes the hard contract; it enters as a hypothesis
         # inside the dynamic half.
-        dynamic_index = with_directive.index("# 本 Fold 动态上下文")
-        self.assertGreater(with_directive.index("研究者本 Fold 指令"), dynamic_index)
+        self.assertGreater(with_directive.index("研究者本会话指令"), with_directive.index(self.MARKER))
         # Whitespace-only directives collapse to the no-section prompt.
-        self.assertEqual(build_system_prompt(**self.BASE, fold_directive="  \n"), without)
+        self.assertEqual(build_system_prompt(session_directive="  \n"), without)
 
     def test_the_experiment_level_exploration_direction_is_additive(self) -> None:
         prompt = build_system_prompt(
-            **self.BASE,
-            fold_exploration_directive="持续检验事件冲击的图传播。",
-            fold_directive="本 Fold 先做行业边消融。",
+            exploration_directive="持续检验事件冲击的图传播。",
+            session_directive="本会话先做行业边消融。",
         )
-        self.assertIn("持续检验事件冲击的图传播。", prompt)
-        self.assertIn("本 Fold 先做行业边消融。", prompt)
-        # The standing experiment direction precedes the per-Fold hypothesis.
-        self.assertLess(
-            prompt.index("持续检验事件冲击的图传播。"), prompt.index("本 Fold 先做行业边消融。")
-        )
-        self.assertEqual(
-            build_system_prompt(**self.BASE, fold_exploration_directive="   "),
-            build_system_prompt(**self.BASE),
-        )
+        # The standing experiment direction precedes the per-session hypothesis.
+        self.assertLess(prompt.index("持续检验事件冲击的图传播。"), prompt.index("本会话先做行业边消融。"))
+        self.assertEqual(build_system_prompt(exploration_directive="   "), build_system_prompt())
 
-    def test_the_static_contract_is_byte_identical_across_two_different_folds(self) -> None:
-        marker = "# 本 Fold 动态上下文"
+    def test_the_static_contract_is_byte_identical_across_two_different_sessions(self) -> None:
         first = build_system_prompt(
-            fold_info={"fold_id": "first"},
-            acceptance_rules={"min_return": 0.0},
             experiment_facts={"identity": {"run_id": "run_1"}},
             prior_prompt="方向 A",
-            fold_exploration_directive="长期假设 A",
-            fold_directive="当前假设 A",
+            exploration_directive="长期假设 A",
+            session_directive="当前假设 A",
         )
         second = build_system_prompt(
-            fold_info={"fold_id": "second"},
-            acceptance_rules={"min_return": 0.1},
             experiment_facts={"identity": {"run_id": "run_2"}},
-            phase="convergence",
             prior_prompt="方向 B",
-            fold_exploration_directive="长期假设 B",
-            fold_directive="当前假设 B",
+            exploration_directive="长期假设 B",
+            session_directive="当前假设 B",
         )
-        first_prefix, first_context = first.split(marker, 1)
-        second_prefix, second_context = second.split(marker, 1)
+        first_prefix, first_context = first.split(self.MARKER, 1)
+        second_prefix, second_context = second.split(self.MARKER, 1)
         self.assertEqual(first_prefix, second_prefix)
         self.assertNotEqual(first_context, second_context)
-        # And the fixed half really is the contract, in order.
-        # Purpose, protocol, decision contract, evidence, constraints,
-        # facts, feedback -- then the per-run context.
+        # Purpose, protocol, decision contract, evidence, constraints, facts,
+        # feedback -- then the per-run context.
         order = [
             first.index("# 身份与任务"),
             first.index("# 研究协议"),
-            first.index("# 提交合同"),
+            first.index("# 决策合同"),
             first.index("# 证据标准"),
             first.index("# 原则"),
             first.index("# 工具与工作方式"),
@@ -473,17 +441,13 @@ class PromptCompositionTest(unittest.TestCase):
             first.index("# 禁止事项"),
             first.index("# 预算与事实"),
             first.index("# 反馈通道"),
-            first.index(marker),
+            first.index(self.MARKER),
         ]
         self.assertEqual(order, sorted(order))
 
     def test_the_prior_rides_in_its_own_section_not_in_the_facts_blob(self) -> None:
-        prompt = build_system_prompt(**self.BASE, prior_prompt="偏好小步修改")
-        self.assertIn("偏好小步修改", prompt)
-        dynamic = prompt.split("# 本 Fold 动态上下文", 1)[1]
+        prompt = build_system_prompt(prior_prompt="偏好小步修改")
+        prefix, dynamic = prompt.split(self.MARKER, 1)
         self.assertIn("偏好小步修改", dynamic)
-        self.assertNotIn("偏好小步修改", prompt.split("# 本 Fold 动态上下文", 1)[0])
-
-    def test_an_unknown_mode_is_refused(self) -> None:
-        with self.assertRaisesRegex(ValueError, "mode must be fold or deployment_adjustment"):
-            build_system_prompt(mode="authoring")
+        self.assertNotIn("偏好小步修改", prefix)
+        self.assertIn("上一会话的交接", dynamic)

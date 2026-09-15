@@ -5,9 +5,14 @@ from pathlib import Path
 
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools import ToolRegistry
-from autotrade.environment.tools.finish_fold import FinishFoldTool
+from autotrade.environment.tools.finish_session import FinishSessionTool
 from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.environment.tools.step_rollback import StepRollbackTool
+
+
+def _passing_gate(node_id: str) -> dict[str, object]:
+    """A freeze gate every node passes."""
+    return {"passed": True, "reasons": []}
 
 
 def test_step_revision_can_be_selected_and_restored(tmp_path: Path):
@@ -21,7 +26,7 @@ def test_step_revision_can_be_selected_and_restored(tmp_path: Path):
     node = tree.record_step(
         revision,
         epoch_id="epoch_001",
-        fold_id="fold_2026Q1",
+        session_ref="fold_2026Q1",
         run_id="run_a",
         result_name="valid_000",
         revision_id="revision_a",
@@ -35,7 +40,7 @@ def test_step_revision_can_be_selected_and_restored(tmp_path: Path):
     (work / "main.py").write_text("broken", encoding="utf-8")
     (work_models / "weights.bin").write_bytes(b"broken")
     rollback = StepRollbackTool(
-        tree, work, work_models, fold_id="fold_2026Q1", run_id="run_a"
+        tree, work, work_models, session_ref="fold_2026Q1", run_id="run_a"
     )
     restored = rollback.invoke({"node_id": node})
     assert restored.ok
@@ -47,16 +52,16 @@ def test_step_revision_can_be_selected_and_restored(tmp_path: Path):
     assert stat.S_IMODE((work_models / "weights.bin").stat().st_mode) == 0o666
     assert stat.S_IMODE(tree.node_models_dir(node).stat().st_mode) == 0o555
     assert stat.S_IMODE((tree.node_models_dir(node) / "weights.bin").stat().st_mode) == 0o444
-    finished = FinishFoldTool(tree, fold_id="fold_2026Q1", run_id="run_a").invoke({})
+    finished = FinishSessionTool(tree, session_ref="fold_2026Q1", run_ref="run_a", freeze_gate=_passing_gate).invoke({"outcome": "freeze"})
     assert finished.finish and finished.value["revision_id"] == "revision_a"
 
 
-def test_step_rollback_refuses_a_node_outside_the_current_fold_session(tmp_path: Path):
-    """Another Fold's or run's node is evidence only, exactly as finish_fold treats it.
+def test_step_rollback_refuses_a_node_outside_the_current_session(tmp_path: Path):
+    """Another session's or run's node is evidence only, exactly as finish_session treats it.
 
-    The experiment-level tree is handed whole to every Fold, so a foreign
-    ``node_id`` is readable; restoring one would rebase this Fold's work copy
-    and lineage onto an artifact it may not submit.
+    The experiment-level tree is handed whole to every session, so a foreign
+    ``node_id`` is readable; restoring one would rebase this session's work
+    copy and lineage onto a node it may not submit.
     """
 
     revision = tmp_path / "revision"
@@ -68,7 +73,7 @@ def test_step_rollback_refuses_a_node_outside_the_current_fold_session(tmp_path:
     foreign_fold = tree.record_step(
         revision,
         epoch_id="epoch_001",
-        fold_id="fold_2025Q4",
+        session_ref="fold_2025Q4",
         run_id="run_old",
         result_name="valid_000",
         revision_id="revision_old",
@@ -77,7 +82,7 @@ def test_step_rollback_refuses_a_node_outside_the_current_fold_session(tmp_path:
     earlier_run = tree.record_step(
         revision,
         epoch_id="epoch_001",
-        fold_id="fold_2026Q1",
+        session_ref="fold_2026Q1",
         run_id="run_crashed",
         result_name="valid_000",
         revision_id="revision_crashed",
@@ -88,8 +93,8 @@ def test_step_rollback_refuses_a_node_outside_the_current_fold_session(tmp_path:
     (work / "main.py").write_text("current work copy", encoding="utf-8")
     registry = ToolRegistry(
         [
-            StepRollbackTool(tree, work, fold_id="fold_2026Q1", run_id="run_a"),
-            FinishFoldTool(tree, fold_id="fold_2026Q1", run_id="run_a"),
+            StepRollbackTool(tree, work, session_ref="fold_2026Q1", run_id="run_a"),
+            FinishSessionTool(tree, session_ref="fold_2026Q1", run_ref="run_a", freeze_gate=_passing_gate),
         ]
     )
     position = tree.current_node_id
@@ -97,20 +102,23 @@ def test_step_rollback_refuses_a_node_outside_the_current_fold_session(tmp_path:
     for node_id in (foreign_fold, earlier_run):
         result = registry.invoke("step_rollback", {"node_id": node_id})
         assert not result.ok
-        assert "current Fold session" in result.error
+        assert "current session" in result.error
         assert (work / "main.py").read_text(encoding="utf-8") == "current work copy"
         assert StepTree(tmp_path / "steps").current_node_id == position
-        finished = registry.invoke("finish_fold", {"node_id": node_id})
+        finished = registry.invoke("finish_session", {"outcome": "freeze", "node_id": node_id})
         assert not finished.ok
-        assert "current Fold session" in finished.error
+        assert "not a Step of this session" in finished.error
 
-    # An absent node is shaped like its finish_fold sibling: a typed tool error
+    # An absent node is shaped like its finish_session sibling: a typed tool error
     # the model can act on, not an untyped ValueError leaking through.
-    for tool in ("step_rollback", "finish_fold"):
-        absent = registry.invoke(tool, {"node_id": "step_missing"})
+    for tool, arguments in (
+        ("step_rollback", {"node_id": "step_missing"}),
+        ("finish_session", {"outcome": "freeze", "node_id": "step_missing"}),
+    ):
+        absent = registry.invoke(tool, arguments)
         assert not absent.ok, tool
         assert absent.value["error_type"] == "tool_error", tool
-        assert "absent Step" in absent.error, tool
+        assert "absent Step" in absent.error or "not a Step node" in absent.error, tool
 
 
 def test_modification_check_keeps_daily_json_entry(tmp_path: Path):

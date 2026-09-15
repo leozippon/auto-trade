@@ -89,10 +89,9 @@ def _tool(
         start=None,
         snapshot=snapshot,
         decision_time=datetime(2025, 9, 30, 23, 59, 59, tzinfo=UTC),
-        validation=ReplaySpan("full", "valid", DAYS[0], DAYS[-1], snapshot),
+        research_years=(ReplaySpan("Y1", "valid", DAYS[0], DAYS[-1], snapshot),),
         input_window_start="20240101",
-        max_steps=10,
-        max_backtests=15,
+        max_replay_years=15,
         max_llm_calls=200,
         deadline_seconds=1200.0,
     )
@@ -191,7 +190,7 @@ def test_smoke_is_outside_every_official_accounting_surface(tmp_path: Path) -> N
     value = tool.invoke({}).value
 
     assert value["official"] is False
-    assert value["counts_against_backtest_budget"] is False
+    assert value["counts_against_replay_budget"] is False
     # No revision was committed and no result survived for a ledger or a freeze
     # to pick up: the tool owns no artifact store and no step tree at all.
     assert not hasattr(tool, "tree")
@@ -210,7 +209,7 @@ def test_a_failing_strategy_returns_the_exact_exception_text(tmp_path: Path) -> 
     assert result.value["status"] == "failed"
     assert "AccountSnapshot" in str(result.value["error"])
     assert "not subscriptable" in str(result.value["error"])
-    assert result.value["counts_against_backtest_budget"] is False
+    assert result.value["counts_against_replay_budget"] is False
 
 
 def test_days_argument_is_bounded(tmp_path: Path) -> None:
@@ -312,14 +311,14 @@ def test_a_rehearsal_does_not_spend_the_session_thinking_clock(tmp_path: Path) -
     assert result.ok
     assert result.value["status"] == "failed"
     assert "fit exceeded 3600s" in str(result.value["error"])
-    assert result.value["counts_against_backtest_budget"] is False
+    assert result.value["counts_against_replay_budget"] is False
 
 
 def test_smoke_backtest_is_registered_for_fold_sessions() -> None:
-    from autotrade.agent.runner import _FOLD_TOOLS
+    from autotrade.agent.runner import _SESSION_TOOLS
 
     assert SmokeBacktestTool.spec.name == "smoke_backtest"
-    assert SmokeBacktestTool.spec.name in _FOLD_TOOLS
+    assert SmokeBacktestTool.spec.name in _SESSION_TOOLS
     # mutating: it must dispatch in order with write/check/backtest, never in a
     # read-only parallel batch alongside an edit.
     assert SmokeBacktestTool.spec.mutating is True

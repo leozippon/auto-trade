@@ -117,7 +117,7 @@ OUTPUT_TRUNCATED_MARKER = "[输出在 {limit} token 上限被截断]"
 # tool call) gets a forced concise continuation — the same observation the
 # parent conversation receives — at most this many times per child before the
 # launch is reported as failed instead of terminated as ``completed``. One:
-# at the 12k cap 1-3 rounds per Fold were cut and the single observed
+# at the 12k cap 1-3 rounds per session were cut and the single observed
 # continuation succeeded at once; at the 32k ceiling a cut round is rare and
 # costs ~15 min, so a second consecutive all-reasoning round after an explicit
 # "be concise" instruction is a stuck loop, not an unfinished answer.
@@ -136,12 +136,12 @@ SUBAGENT_DEGRADED_SUMMARY_ERROR = (
     "Sub-agent rounds exhausted; summary recovered without a final report"
 )
 
-_FOLD_READ_TOOLS = frozenset({"glob", "grep", "read_file"})
-# The parent's Fold surface minus what it keeps by design: the formal
+_READ_TOOLS = frozenset({"glob", "grep", "read_file"})
+# The parent's session surface minus what it keeps by design: the formal
 # backtest (Validation quota and Step tree), finish, rollback and nesting. The unofficial ``smoke_backtest`` is included so a child verifies
 # its implementation on the real replay path instead of hand-rolling a shell
 # smoke test.
-_FOLD_WRITE_TOOLS = frozenset(
+_WRITE_TOOLS = frozenset(
     {
         "edit_file",
         "glob",
@@ -199,13 +199,13 @@ SUBAGENT_ROLE_TABLE: tuple[SubAgentRole, ...] = (
     SubAgentRole(
         "general-purpose",
         "读写执行：跑 Python、实现、计算与写策略、模型和 skills",
-        _FOLD_WRITE_TOOLS,
+        _WRITE_TOOLS,
         mission="完成一个有界的实现、计算或检查任务",
     ),
     SubAgentRole(
         "Explore",
         "只读调查：定位与核对文件、数据、单位、代码和证据",
-        _FOLD_READ_TOOLS,
+        _READ_TOOLS,
         mission="调查委托问题并核对它的证据边界",
     ),
 )
@@ -239,13 +239,14 @@ def _role_schema_text() -> str:
         )
     return "；".join(lines) + "。"
 
-_FOLD_WRITE_PROMPT = """\
+
+_WRITE_PROMPT = """\
 # 身份
-你是 Fold 的一级 `{role}` sub-agent：{mission}。你可用已注入工具修改共享策略、模型或 skills，但父 Agent 独占正式回测、候选选择、验收和结束。
+你是研究会话的一级 `{role}` sub-agent：{mission}。你可用已注入工具修改共享策略、模型或 skills，但父 Agent 独占正式回测、候选选择、验收和结束。
 
 # 边界
 - 先读 `inputs/skills_index.json`，再从已挂载数据、单位引用、制品和参考材料中自主发现任务所需证据；skill 脚本不自动执行。把有复用价值的知识写入 skill，而不是堆入策略或汇报。
-- 只完成父任务；不得再委托子代理、读取 Test/Held-out、改变权威 PRIOR、安装依赖、替父 Agent 提问或伪造结果。分钟和竞价不是策略时钟。
+- 只完成父任务；不得再委托子代理、读取研究期末之后的数据、改写 PRIOR.md、安装依赖、替父 Agent 提问或伪造结果。分钟和竞价不是策略时钟。
 - 实现或评估候选时严格按 task 给定的机制、股票池、持有与证伪条件做：不得静默回退、换机制或改预登记条件，做不到就如实汇报；汇报里的数据事实（行数、字段、统计量、错误原文）逐字给出，不只给概括。
 {tool_calls}
 - 工具 schema 决定实际能力。同一轮的只读调用并发执行；写、检查与 shell 按因果顺序分轮调用。shell 只做有界前台工作，不启动后台任务、sleep/等待包装、轮询状态或隐藏错误；shell 写入工作区的文件会保留。全市场逐股或全历史的计算先在抽样上验证脚本，再分块运行并把中间结果落盘，每块都要在 shell 超时内完成。
@@ -256,14 +257,14 @@ _FOLD_WRITE_PROMPT = """\
 用简洁中文说明结论、实际修改、关键证据和剩余风险，然后停止。\
 """
 
-_FOLD_READ_PROMPT = """\
+_READ_PROMPT = """\
 # 身份
-你是 Fold 的一级只读 `{role}` sub-agent：{mission}。只调查父任务并返回证据；不能写策略、models、skills 或 PRIOR，也不能回测、验收或结束会话。
+你是研究会话的一级只读 `{role}` sub-agent：{mission}。只调查父任务并返回证据；不能写策略、models、skills 或 PRIOR，也不能回测、验收或结束会话。
 
 # 边界
 - 先读 `inputs/skills_index.json`，再从已挂载数据、单位引用、制品和参考材料中自主发现任务所需证据；skill 脚本不自动执行。
 {tool_calls}
-- 工具 schema 决定实际能力；同一轮的多个只读调用并发执行。不得再委托子代理、读取 Test/Held-out、安装依赖或伪造结果；分钟和竞价不是策略时钟。
+- 工具 schema 决定实际能力；同一轮的多个只读调用并发执行。不得再委托子代理、读取研究期末之后的数据、安装依赖或伪造结果；分钟和竞价不是策略时钟。
 - 运行中收到以 `[父代理指令]` 开头的消息时，它是父 Agent 的补充要求，优先于原 task。
 
 # 返回
@@ -466,10 +467,10 @@ def subagent_system_prompt(role: str) -> str:
     # read-only role sees the path lines and who runs the screen script, a
     # writing role the write and shell lines as well.
     if spec.shell:
-        template = _FOLD_WRITE_PROMPT
+        template = _WRITE_PROMPT
         tool_calls = f"{TOOL_PATH_CHEAT_SHEET}\n{TOOL_WRITE_CHEAT_SHEET}"
     else:
-        template = _FOLD_READ_PROMPT
+        template = _READ_PROMPT
         tool_calls = f"{TOOL_PATH_CHEAT_SHEET}\n{TOOL_READ_ONLY_SCREEN_NOTE}"
     return template.format(role=role, mission=spec.mission, tool_calls=tool_calls)
 

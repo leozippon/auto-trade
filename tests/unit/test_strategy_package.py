@@ -30,7 +30,6 @@ from autotrade.environment.strategy_loader import (
     validate_strategy_source,
 )
 from autotrade.environment.tools import ToolError
-from autotrade.environment.tools.finish_fold import executable_output_structure
 from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.pipelines.config import rolling_default
 from autotrade.pipelines.experiment import (
@@ -258,20 +257,15 @@ def test_package_shadowing_a_library_and_missing_entry_are_rejected(tmp_path: Pa
         validate_strategy_package(tmp_path / "absent" / "main.py")
 
 
-def test_fingerprint_and_executable_structure_cover_sibling_modules(tmp_path: Path):
+def test_the_fingerprint_covers_sibling_modules(tmp_path: Path):
     root = tmp_path / "output"
     _write_package(root)
     before_fingerprint = artifact_fingerprint(root)
-    before_structure = executable_output_structure(root)
 
     (root / "lib" / "features.py").write_text(
         "# a comment only\n" + HELPER.format(scale=2), encoding="utf-8"
     )
     assert artifact_fingerprint(root) != before_fingerprint
-    assert executable_output_structure(root) == before_structure
-
-    (root / "lib" / "features.py").write_text(HELPER.format(scale=3), encoding="utf-8")
-    assert executable_output_structure(root) != before_structure
 
 
 def test_library_imports_and_booster_files_follow_the_rooted_io_rule():
@@ -315,21 +309,19 @@ def test_budgets_come_from_one_source_each():
         None, fit_timeout_seconds=rolling_default("strategy_fit_timeout_seconds")
     )
     assert strategy_config.limits == limits
-    for name in ("max_fold_minutes", "max_backtests_per_fold", "max_steps_per_fold", "max_llm_calls"):
+    for name in ("max_session_minutes", "max_replay_years_per_session", "max_llm_calls"):
         assert WEB_CREATE_DEFAULTS[name] == rolling_default(name)
     assert (
-        rolling_default("max_fold_minutes"),
-        rolling_default("max_backtests_per_fold"),
-        rolling_default("max_steps_per_fold"),
+        rolling_default("max_session_minutes"),
+        rolling_default("max_replay_years_per_session"),
         rolling_default("max_llm_calls"),
-    ) == (720, 30, 30, 1600)
-    assert _MAX_DEADLINE_OVERRIDE_MINUTES == 2 * rolling_default("max_fold_minutes") == 1440
+    ) == (720, 24, 1600)
+    assert _MAX_DEADLINE_OVERRIDE_MINUTES == 2 * rolling_default("max_session_minutes") == 1440
 
     config = SimpleNamespace(
-        max_steps_per_fold=rolling_default("max_steps_per_fold"),
-        max_backtests_per_fold=rolling_default("max_backtests_per_fold"),
+        max_replay_years_per_session=rolling_default("max_replay_years_per_session"),
         max_llm_calls=rolling_default("max_llm_calls"),
-        max_fold_minutes=rolling_default("max_fold_minutes"),
+        max_session_minutes=rolling_default("max_session_minutes"),
         deadline_grace_minutes=rolling_default("deadline_grace_minutes"),
     )
     budgets = _session_budgets(config, {"deadline_seconds": _MAX_DEADLINE_OVERRIDE_MINUTES * 60})

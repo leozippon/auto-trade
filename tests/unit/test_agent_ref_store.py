@@ -51,15 +51,15 @@ def test_store_is_restart_stable_experiment_scoped_and_namespaced(tmp_path: Path
     first_dir = tmp_path / "exp_a"
     second_dir = tmp_path / "exp_b"
     first = AgentRefStore(first_dir)
-    fold_ref = first.get_or_create("fold", "fold_2026Q1")
+    fold_ref = first.get_or_create("session", "fold_2026Q1")
 
-    assert AgentRefStore(first_dir).get_or_create("fold", "fold_2026Q1") == fold_ref
-    assert AgentRefStore(second_dir).get_or_create("fold", "fold_2026Q1") != fold_ref
+    assert AgentRefStore(first_dir).get_or_create("session", "fold_2026Q1") == fold_ref
+    assert AgentRefStore(second_dir).get_or_create("session", "fold_2026Q1") != fold_ref
     assert first.get_or_create("trace", "fold_2026Q1") != fold_ref
     assert "2026Q1" not in fold_ref
-    parsed = uuid.UUID(fold_ref.removeprefix("fold_ref_"))
+    parsed = uuid.UUID(fold_ref.removeprefix("session_ref_"))
     assert parsed.version == 4
-    assert first.resolve("fold", fold_ref) == "fold_2026Q1"
+    assert first.resolve("session", fold_ref) == "fold_2026Q1"
     with pytest.raises(AgentRefStoreError):
         first.resolve("trace", fold_ref)
 
@@ -67,7 +67,7 @@ def test_store_is_restart_stable_experiment_scoped_and_namespaced(tmp_path: Path
 def test_get_or_create_is_multiprocess_singleton(tmp_path: Path) -> None:
     experiment = tmp_path / "parallel"
     AgentRefStore(experiment)
-    args = [(str(experiment), "fold", "fold_2026Q1")] * 16
+    args = [(str(experiment), "session", "fold_2026Q1")] * 16
     context = multiprocessing.get_context("spawn")
     with context.Pool(8) as pool:
         refs = pool.map(_create_ref, args)
@@ -96,14 +96,14 @@ def test_store_permissions_are_private(tmp_path: Path) -> None:
             Path("exp"),
             [
                 {
-                    "namespace": "fold",
+                    "namespace": "session",
                     "source": "fold_a",
-                    "ref": "fold_ref_00000000-0000-4000-8000-000000000001",
+                    "ref": "session_ref_00000000-0000-4000-8000-000000000001",
                 },
                 {
-                    "namespace": "fold",
+                    "namespace": "session",
                     "source": "fold_a",
-                    "ref": "fold_ref_00000000-0000-4000-8000-000000000002",
+                    "ref": "session_ref_00000000-0000-4000-8000-000000000002",
                 },
             ],
         ),
@@ -111,9 +111,9 @@ def test_store_permissions_are_private(tmp_path: Path) -> None:
             Path("exp"),
             [
                 {
-                    "namespace": "fold",
+                    "namespace": "session",
                     "source": "fold_a",
-                    "ref": "fold_ref_00000000-0000-5000-8000-000000000001",
+                    "ref": "session_ref_00000000-0000-5000-8000-000000000001",
                 }
             ],
         ),
@@ -146,7 +146,7 @@ def test_write_failure_never_returns_or_persists_new_ref(
 
     monkeypatch.setattr(os, "replace", fail_replace)
     with pytest.raises(OSError, match="injected"):
-        store.get_or_create("fold", "fold_2026Q1")
+        store.get_or_create("session", "fold_2026Q1")
     monkeypatch.setattr(os, "replace", original)
 
     payload = json.loads(store.path.read_text(encoding="utf-8"))
@@ -187,7 +187,7 @@ def test_legacy_web_audit_remains_readable_but_mutations_and_preview_fail(
     tree = StepTree(experiment / "steps")
     tree.record_failed_attempt(
         epoch_id="epoch_001",
-        fold_id="fold_ref_deadbeef00",
+        session_ref="session_ref_deadbeef00",
         run_id="run_old",
         result_name="valid_001",
         error="old failure",
@@ -214,7 +214,7 @@ def test_legacy_web_audit_remains_readable_but_mutations_and_preview_fail(
     audit = step_tree_view(experiment)
     # No ref store: the tree still projects, with no session resolved.
     assert "session_key" not in audit["nodes"][0]
-    assert audit["nodes"][0]["fold_ref"] == "fold_ref_deadbeef00"
+    assert audit["nodes"][0]["session_ref"] == "session_ref_deadbeef00"
     assert "fold_id" not in audit["nodes"][0]
     assert "fold_2024Q1" not in str(audit)
 

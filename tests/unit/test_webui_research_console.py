@@ -301,7 +301,7 @@ def test_the_step_tree_names_sessions_and_the_frozen_node(tmp_path: Path) -> Non
     node_id = tree.record_step(
         output,
         epoch_id="research",
-        fold_id=refs.get_or_create("fold", "s2"),
+        session_ref=refs.get_or_create("session", "s2"),
         run_id=refs.get_or_create("run", "run_s2"),
         result_name="valid_000",
         revision_id=refs.get_or_create("strategy", "revision_s2_0"),
@@ -314,4 +314,4 @@ def test_the_step_tree_names_sessions_and_the_frozen_node(tmp_path: Path) -> Non
     [node] = step_tree_view(directory)["nodes"]
     assert node["session_key"] == "s2"
     assert node["frozen"] is True
-    assert node["fold_ref"].startswith("fold_ref_")
+    assert node["session_ref"].startswith("session_ref_")

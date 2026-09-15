@@ -21,7 +21,7 @@ from .base import (
     is_sequential_tool,
 )
 from .files import EditFileTool, WriteFileTool
-from .finish_fold import FinishFoldTool
+from .finish_session import FinishSessionTool
 from .modification_check import ModificationCheckTool
 from .report_issue import ReportIssueTool
 from .search import SEARCH_ROOTS, GlobTool, GrepTool, ReadFileTool, SearchRoots
@@ -33,7 +33,7 @@ __all__ = [
     "CommandResult",
     "CommandRunner",
     "EditFileTool",
-    "FinishFoldTool",
+    "FinishSessionTool",
     "GlobTool",
     "GrepTool",
     "ModificationCheckTool",

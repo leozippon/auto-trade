@@ -39,7 +39,7 @@ _STRATEGY_ID_KEYS = frozenset(
     }
 )
 # Opaque references a projection may carry through unchanged.
-_PUBLIC_REF_PREFIXES = ("fold_ref_", "run_ref_", "strategy_ref_", "trace_ref_")
+_PUBLIC_REF_PREFIXES = ("session_ref_", "run_ref_", "strategy_ref_", "trace_ref_")
 _ALLOWED_PUBLIC_PATH_PREFIXES = (
     "/api",
     "/mnt/agent",
@@ -211,9 +211,9 @@ class PublicIdentity:
                     out["run_ref"] = item if item.startswith("run_ref_") else self.run_ref(item)
                     continue
                 if name == "fold_id" and isinstance(item, str) and item:
-                    # Session refs the Agent sees (``fold_ref_…``) pass through;
-                    # a raw ledger ``fold_id`` is the public session key.
-                    out["fold_ref" if item.startswith("fold_ref_") else "session_key"] = item
+                    # A raw ledger ``fold_id`` is the public session key; the
+                    # session refs the Agent sees ride under ``session_ref``.
+                    out["session_key"] = item
                     continue
                 if name in _STRATEGY_ID_KEYS and isinstance(item, str) and item:
                     out[_strategy_ref_key(name)] = (

@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from autotrade.agent.experiment_facts import build_experiment_facts
-from autotrade.agent.prompts import FOLD_DEFAULT_INSTRUCTION, build_system_prompt
+from autotrade.agent.prompts import SESSION_DEFAULT_INSTRUCTION, build_system_prompt
 from autotrade.environment.identity import AgentRefStore
 from autotrade.pipelines.hitl_state import (
     CONTROL_NAME,
@@ -74,8 +74,8 @@ def build_prompt_preview(
     entry = _session_entry(directory, session_key)
     options = load_worker_options(directory, repo_root=repo_root)
     control = read_control(directory / HITL_DIR_NAME / CONTROL_NAME)
-    records = read_ledger_records(directory)
     index = int(entry.get("index") or 0)
+    records = _ledger_before_session(read_ledger_records(directory), index)
     done = research_records(records)
     # The node this session starts from: the template for the first session,
     # the node its predecessor handed on once that one is recorded.
@@ -93,13 +93,14 @@ def build_prompt_preview(
         session_key=session_key,
         index=index,
         is_initial=start is None,
+        start=start,
     )
     system = _research_prompt(
         context,
         directive=directive,
         resource_override=control.resource_overrides.get(session_key),
     )
-    prompt = f"{_SYSTEM_BANNER}\n{system}\n\n{_USER_BANNER}\n{FOLD_DEFAULT_INSTRUCTION}"
+    prompt = f"{_SYSTEM_BANNER}\n{system}\n\n{_USER_BANNER}\n{SESSION_DEFAULT_INSTRUCTION}"
     return {"prompt": prompt, "note": PREVIEW_NOTE}
 
 
@@ -112,6 +113,7 @@ class _SessionContext:
     session_key: str
     index: int
     is_initial: bool
+    start: object
 
     @property
     def rolling(self):
@@ -148,34 +150,31 @@ def _research_prompt(
 ) -> str:
     from autotrade.pipelines.experiment import _months_before, _session_budgets
     from autotrade.pipelines.local_backend import (
-        FOLD_FORBIDDEN,
-        fold_workspace_map,
-        research_history,
+        arm_record,
+        research_geometry_record,
+        session_fact_blocks,
+        session_position_record,
+        start_record,
     )
 
     rolling = context.rolling
     geometry = rolling.geometry
     budgets = _session_budgets(rolling, resource_override)
     limits = context.strategy_limits
-    decision_time = geometry.research_decision_time.isoformat()
     manifest: dict[str, object] = {
         "experiment_id": rolling.experiment_id,
         "epoch_id": "research",
         "fold_id": context.session_key,
-        "kind": "fold",
-        "session_index": context.index,
-        "sessions_total": rolling.research_sessions,
-        "fold": {
-            "input_window": (
-                f"{_months_before(geometry.research_end, rolling.window_months)}.."
-                f"{geometry.research_end}"
-            ),
-            "validation_period": f"{geometry.research_start}..{geometry.research_end}",
-        },
-        "valid_decision_time": decision_time,
+        "kind": "research",
+        "session": session_position_record(context.index, rolling.research_sessions),
+        "research": research_geometry_record(
+            geometry.research_years,
+            input_window_start=_months_before(geometry.research_end, rolling.window_months),
+            decision_time=geometry.research_decision_time.isoformat(),
+        ),
         "snapshot_config": context.options.snapshot_config.to_record(),
-        "is_initial_artifact": context.is_initial,
-        "template_ref": "agent_output_template" if context.is_initial else None,
+        "start": start_record(None if context.is_initial else str(context.start)),
+        "arm": arm_record(context.records),
         "modification_constraints": rolling.step_constraints.to_record(),
         "acceptance_rules": rolling.acceptance.to_record(),
         "schedule": rolling.schedule.to_record(),
@@ -183,9 +182,6 @@ def _research_prompt(
         "nl_failure_policy": rolling.nl_failure_policy,
         "step_tree_enabled": rolling.step_tree_enabled,
         "record_failed_attempts": rolling.record_failed_attempts,
-        "max_steps": budgets["max_steps"],
-        "max_backtests_per_fold": budgets["max_backtests"],
-        "deadline_seconds": budgets["deadline_seconds"],
         "finalize_before_deadline_seconds": rolling.finalize_before_deadline_seconds,
         "sandbox_spec": (
             context.options.agent_sandbox.to_record()
@@ -193,9 +189,8 @@ def _research_prompt(
             else None
         ),
         "budgets": {
-            "max_steps": budgets["max_steps"],
-            "max_backtests": budgets["max_backtests"],
-            "max_null_controls_per_fold": rolling.max_null_controls_per_fold,
+            "max_replay_years": budgets["max_replay_years"],
+            "max_null_controls": rolling.max_null_controls_per_session,
             "max_llm_calls": budgets["max_llm_calls"],
             "deadline_seconds": budgets["deadline_seconds"],
             "deadline_grace_seconds": budgets["deadline_grace_seconds"],
@@ -204,12 +199,14 @@ def _research_prompt(
             "strategy_gpu_count": limits.gpu_count,
         },
     }
-    workspace = fold_workspace_map(Path("/nonexistent/prompt-preview-workspace"))
-    if rolling.workspace_reference:
-        workspace["refs"] = "refs/"
-    # The blocks LLMFoldDeveloper._fold_facts adds beside the shared
+    # The blocks LLMResearchDeveloper._session_facts adds beside the shared
     # projection: the earlier sessions' outcomes and the fixed
     # workspace/boundary index.
+    blocks = session_fact_blocks(
+        context.records, Path("/nonexistent/prompt-preview-workspace")
+    )
+    if rolling.workspace_reference:
+        blocks["workspace"]["refs"] = "refs/"  # type: ignore[index]
     facts: dict[str, object] = {
         **build_experiment_facts(
             manifest=manifest,
@@ -218,22 +215,36 @@ def _research_prompt(
             context_compaction=context.context_compaction,
             model_artifacts_empty=True if context.is_initial else None,
         ),
-        "development_history": research_history(context.records),
-        "workspace": workspace,
-        "forbidden": FOLD_FORBIDDEN,
+        **blocks,
     }
     _mark_runtime_only(facts)
     if not context.is_initial:
         _mark_runtime_start(facts)
     return build_system_prompt(
         rolling.schedule,
-        mode="fold",
         experiment_facts=facts,
         step_tree_enabled=rolling.step_tree_enabled,
         prior_prompt=context.prior,
-        fold_exploration_directive=rolling.fold_exploration_directive,
-        fold_directive=directive,
+        exploration_directive=rolling.fold_exploration_directive,
+        session_directive=directive,
     )
+
+
+def _ledger_before_session(
+    records: list[dict[str, object]], index: int
+) -> list[dict[str, object]]:
+    """The ledger as session ``index`` found it when it started: everything
+    before the first record of that session or a later one, so a preview of a
+    session that already ran shows the PRIOR, arm state and earlier sessions it
+    read, not its own outcome."""
+
+    for position, record in enumerate(records):
+        if (
+            record.get("record_type") == "research_session"
+            and int(record.get("session_index") or 0) >= index
+        ):
+            return records[:position]
+    return records
 
 
 def _session_entry(experiment_dir: Path, session_key: str) -> dict[str, object]:
@@ -268,11 +279,9 @@ def _mark_runtime_only(facts: dict[str, object]) -> None:
 
 
 def _mark_runtime_start(facts: dict[str, object]) -> None:
-    """Which node the session starts from is the session's own fact, so only
-    its presence is stated ahead of time."""
+    """Whether the start node carries model artifacts is known only once the
+    session copies it, so only that fact is left to the session."""
     contract = facts.get("artifact_contract")
-    parent = contract.get("parent") if isinstance(contract, dict) else None
-    if not isinstance(parent, dict):
-        return
-    parent["id"] = RUNTIME_PLACEHOLDER
-    parent["model_artifacts_empty"] = RUNTIME_PLACEHOLDER
+    start = contract.get("start") if isinstance(contract, dict) else None
+    if isinstance(start, dict):
+        start["model_artifacts_empty"] = RUNTIME_PLACEHOLDER

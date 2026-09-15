@@ -457,19 +457,19 @@ def test_evaluation_summary_carries_the_whole_agent_visible_field_set(
     )
 
     summary = result.summary
-    # result_name/mode/status/complete_validation/error and vs_parent (this
-    # candidate against the Fold's parent control) belong to the Fold tool
-    # layer, which adds them when it appends the manifest entry; benchmark
-    # depends on the slot carrying index rows, which this one deliberately does
-    # not (see test_style_analysis for the producer/report round trip).
+    # result_name/mode/span/status/complete_validation/error belong to the
+    # session tool layer, which adds them when it appends the manifest entry;
+    # benchmark depends on the slot carrying index rows, which this one
+    # deliberately does not (see test_style_analysis for the producer/report
+    # round trip).
     conditional = {
         "result_name",
         "mode",
+        "span",
         "status",
         "complete_validation",
         "error",
         "benchmark",
-        "vs_parent",
     }
     expected = set(AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS) - conditional
     assert expected <= set(summary), sorted(expected - set(summary))

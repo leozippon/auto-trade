@@ -45,7 +45,7 @@ _FOLD_DELEGATION_ROLES = ("Explore", "general-purpose")
 
 
 def _experiment(
-    tmp_path: Path, *, developer_mode: str = "baseline", max_backtests: int = 1
+    tmp_path: Path, *, developer_mode: str = "baseline", max_replay_years: int = 1
 ) -> tuple[Path, Path]:
     repo = tmp_path / "repo"
     experiment = repo / "experiments" / "smoke"
@@ -82,7 +82,7 @@ def _experiment(
                 "strategy_period": "day",
                 "inference_time": "08:30",
                 "initial_cash": 100_000,
-                "max_backtests_per_fold": max_backtests,
+                "max_replay_years_per_session": max_replay_years,
             }
         ),
         encoding="utf-8",
@@ -963,11 +963,10 @@ _REMOVED_BROWSER_BOUNDS = (
     ),
     ("screen_min_price", -1.0, "screen_min_price must be a non-negative finite number"),
     ("screen_max_price", -1.0, "screen_max_price must be a non-negative finite number"),
-    ("max_fold_minutes", 0, "max_fold_minutes must be a positive integer"),
+    ("max_session_minutes", 0, "max_session_minutes must be a positive integer"),
     ("max_drawdown", 1.5, "max_drawdown must be between 0.0 and 1.0"),
     ("max_drawdown", -0.5, "max_drawdown must be a non-negative finite number"),
-    ("max_steps_per_fold", 0, "max_steps_per_fold must be a positive integer"),
-    ("max_backtests_per_fold", 0, "max_backtests_per_fold must be a positive integer"),
+    ("max_replay_years_per_session", 0, "max_replay_years_per_session must be a positive integer"),
     ("max_llm_calls", 0, "max_llm_calls must be a positive integer"),
     ("initial_cash", 0.0, "initial_cash must be a positive finite number"),
     (

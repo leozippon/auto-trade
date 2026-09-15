@@ -972,7 +972,7 @@ class UnitRegistryProjectionTest(unittest.TestCase):
             write_agent_data_summary(
                 Path(tmp) / "data_summary.json",
                 kind="decision",
-                fold_id=None,
+                session_ref=None,
                 views={"snapshot": (view, "/mnt/snapshot")},
             )
             payload = json.loads(
@@ -1053,7 +1053,7 @@ class UnitRegistryProjectionTest(unittest.TestCase):
             summary = write_agent_data_summary(
                 Path(tmp) / "data_summary.json",
                 kind="decision",
-                fold_id=None,
+                session_ref=None,
                 views={"snapshot": (view, "/mnt/snapshot")},
             )
             payload = json.loads(
@@ -1120,7 +1120,7 @@ class UnitRegistryProjectionTest(unittest.TestCase):
             write_agent_data_summary(
                 Path(tmp) / "data_summary.json",
                 kind="decision",
-                fold_id=None,
+                session_ref=None,
                 views={"snapshot": (view, "/mnt/snapshot")},
             )
             return json.loads((Path(tmp) / "unit_reference.json").read_text(encoding="utf-8"))

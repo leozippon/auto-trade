@@ -7,7 +7,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
-from autotrade.pipelines.local_backend import fold_workspace_map, install_workspace_reference
+from autotrade.pipelines.local_backend import session_workspace_map, install_workspace_reference
 from autotrade.webui.manager import _reclaim_sandbox_containers
 
 
@@ -71,14 +71,14 @@ class InstallWorkspaceReferenceTest(unittest.TestCase):
             seed.mkdir()
             self.assertEqual(_optional_workspace_reference("seed", repo), "seed")
 
-    def test_fold_facts_include_refs_only_when_the_directory_exists(self) -> None:
+    def test_session_facts_include_refs_only_when_the_directory_exists(self) -> None:
         with TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"
             workspace.mkdir()
-            mapping = fold_workspace_map(workspace)
+            mapping = session_workspace_map(workspace)
             self.assertNotIn("refs", mapping)
             (workspace / "refs").mkdir()
-            mapping = fold_workspace_map(workspace)
+            mapping = session_workspace_map(workspace)
             self.assertEqual(mapping["refs"], "refs/")
             self.assertEqual(mapping["strategy"], "output/main.py")
 

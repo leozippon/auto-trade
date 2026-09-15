@@ -79,11 +79,9 @@ from autotrade.environment.tools.base import (
     ToolSpec,
 )
 from autotrade.environment.tools.files import EditFileTool, WriteFileTool
-from autotrade.environment.tools.finish_fold import (
-    FinishFoldTool,
-    FoldBudgetStatus,
-    HardRuleCheck,
-    executable_output_structure,
+from autotrade.environment.tools.finish_session import (
+    FinishSessionTool,
+    SessionBudgetStatus,
 )
 from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.environment.tools.report_issue import (
@@ -101,7 +99,7 @@ from autotrade.environment.tools.step_rollback import StepRollbackTool
 from autotrade.environment.tools.workspace import SafeWorkspace
 
 from .agent_views import NULL_CONTROL_KEYS, allowed_keys
-from .calendar import yyyymmdd
+from .calendar import FULL_SPAN, yyyymmdd
 from .config import (
     AcceptanceRules,
     ArtifactRevision,
@@ -109,11 +107,13 @@ from .config import (
     EvaluationRequest,
     EvaluationResult,
     FrozenArtifact,
+    ReplaySpan,
     ResearchSessionRequest,
     ResearchSessionResult,
     SnapshotBundle,
     StepResult,
     StrategyExperimentConfig,
+    research_span,
 )
 from .experiment import (
     DailyStrategyPipeline,
@@ -335,7 +335,7 @@ class DeterministicBaselineDeveloper:
         # Step ids reach the Agent-facing projections, so they carry the same
         # opaque refs every agent-visible surface uses.
         step_id = (
-            f"baseline_{self.ref_store.get_or_create('fold', request.session_id)}__"
+            f"baseline_{self.ref_store.get_or_create('session', request.session_id)}__"
             f"{self.ref_store.get_or_create('run', request.run_id)}"
         )
         last = request.session_index == request.sessions_total
@@ -552,15 +552,15 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
 
     It is deliberately NOT an evaluation: no revision is committed, no step-tree
     node is written, nothing here can be selected at freeze time, and it does
-    not consume the Fold's backtest budget.
+    not consume the session's replay-year budget.
 
     Like every other replay tool it pauses the session's thinking clock. A
     5-day rehearsal is dominated by the same full ``fit`` a Validation runs,
     so charging it to the one budget the session cannot refill priced the
     cheap rehearsal the prompt requires before every batch in the scarce
     currency while the expensive verdict stayed free: 9.5 h across 48 audited
-    folds, three hour-long smokes dying at the fit cap costing one fold ~3 h
-    of its 10.17 h. The rehearsal still costs real host wall clock; it no
+    sessions, three hour-long smokes dying at the fit cap costing one session
+    ~3 h of its 10.17 h. The rehearsal still costs real host wall clock; it no
     longer costs the Agent its time to think. A sub-agent shares this tool
     object and this budget, so a smoke it starts pauses the parent's clock
     too -- the same union-of-pauses semantics an in-flight sub-agent already
@@ -570,14 +570,14 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
     spec = ToolSpec(
         "smoke_backtest",
         "UNOFFICIAL smoke run of the CURRENT output/ over the first few trading "
-        "days of the validation window, on the real replay path: real rolling "
+        "days of the research period, on the real replay path: real rolling "
         "as-of view (each context.asof_dir/<domain>/ is a DIRECTORY of parquet "
         "parts, read it with pd.read_parquet(directory)), real AccountSnapshot "
         "object, same sandbox executor and per-decision timeout as "
         "a Validation replay. Returns per-day strategy and as-of seconds, order "
         "counts, the as-of domain directory names, and the exact exception text "
         "on failure. It commits no revision, creates no Step, cannot be frozen, "
-        "and does not consume the backtest budget. Use it before batch_validate "
+        "and consumes no replay-years. Use it before batch_validate "
         "instead of hand-writing a shell smoke test against /mnt/snapshot.",
         {
             "type": "object",
@@ -587,7 +587,7 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
                     "minimum": 1,
                     "maximum": SMOKE_BACKTEST_MAX_DAYS,
                     "description": (
-                        "Trading days from the start of the validation window "
+                        "Trading days from the start of the research period "
                         f"(default {SMOKE_BACKTEST_DEFAULT_DAYS})."
                     ),
                 }
@@ -680,7 +680,7 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
                     "status": "failed",
                     "days_requested": days,
                     "official": False,
-                    "counts_against_backtest_budget": False,
+                    "counts_against_replay_budget": False,
                     "error": _public_error_text(exc),
                     "hint": _SMOKE_LAYOUT_HINT,
                 },
@@ -730,7 +730,7 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
         return {
             "status": "ok",
             "official": False,
-            "counts_against_backtest_budget": False,
+            "counts_against_replay_budget": False,
             "days_requested": days,
             "replayed_trade_days": replayed,
             "decision_calls": summary.get("decision_calls"),
@@ -762,14 +762,16 @@ def install_agent_data_contract(
     paths,
     *,
     kind: str,
-    fold_id: str,
+    session_ref: str,
     views: Mapping[str, tuple[Path, str]],
 ) -> None:
     """Publish the data contract a session's run manifest advertises: the
     summary and unit reference of its own mounted views, the session id opaqued
     so no calendar label leaks through them."""
 
-    write_agent_data_summary(paths.data_summary, kind=kind, fold_id=fold_id, views=views)
+    write_agent_data_summary(
+        paths.data_summary, kind=kind, session_ref=session_ref, views=views
+    )
     for name in AGENT_DATA_CONTRACT_FILES:
         target = paths.artifacts / name
         if target.is_file():
@@ -803,7 +805,7 @@ VALIDATION_RESULT_ATTACHMENT = "validation/result.json"
 STEP_TREE_SEARCH_ROOT = "steps"
 # Summary blocks whose size scales with the replay: one row per closed position
 # and one per week of the window. An inline copy is therefore not a fixed-cost
-# observation — an audited Fold shipped 427 KB of ``per_stock`` into the
+# observation — an audited session shipped 427 KB of ``per_stock`` into the
 # conversation and forced a 174 s compaction plus twelve recovery calls. They
 # stay in the referenced result.json; every other metric is O(1) and rides
 # inline.
@@ -824,11 +826,8 @@ def manifest_backtest_stats(summary: Mapping[str, object]) -> dict[str, object]:
 
     Scalars are cheap enough to keep wholesale for host audit; structured
     values only earn their place when the Agent-visible projection actually
-    carries them. Every completed Validation of a Fold projects through this
-    one function -- the host's parent control included -- so no row is missing
-    a block its siblings carry. A parent-control row that silently lost its
-    ``benchmark`` block once left the next Meta session reading the selected
-    challenger's neutralized excess as the parent's baseline.
+    carries them. Every completed Validation of a session projects through
+    this one function, so no row is missing a block its siblings carry.
     """
     return {
         key: value
@@ -845,12 +844,13 @@ SELECTION_STATISTICS_NOTE = (
 )
 
 
-class FoldBacktestTool:
+class SessionValidations:
     """The research session's Validation engine: one budget, one Step list, one tree.
 
     Not an Agent tool: ``batch_validate`` commits and replays every candidate
     through it, so no Validation can overspend or bypass the ledger behind
-    another's back.
+    another's back. The budget is counted in replay-years: a candidate costs
+    one per research year its span covers.
     """
 
     def __init__(
@@ -881,20 +881,52 @@ class FoldBacktestTool:
         self.ref_store = ref_store
         self.ledger = ledger
         self.manifest = manifest
-        self.backtests = 0
+        self.replay_years_used = 0
+        # Candidates reserved so far, which names each result.
+        self.candidates_started = 0
         self.steps: list[StepResult] = []
 
-    def selection_statistics(self, step: StepResult) -> dict[str, object]:
-        """The provisional freeze-gate reading one candidate row carries.
+    @property
+    def replay_years_remaining(self) -> int:
+        return max(self.request.max_replay_years - self.replay_years_used, 0)
+
+    def span(self, label: object) -> ReplaySpan:
+        """The research span ``label`` names, or a schema error naming the valid ones."""
+
+        try:
+            return research_span(self.request.research_years, str(label))
+        except ValueError as exc:
+            raise ToolError(
+                str(exc), error_type="schema_error", blocked_target="span"
+            ) from exc
+
+    def freeze_gate(self, node_id: str) -> dict[str, object]:
+        """The freeze gate as the Pipeline would read one Step of this session now.
 
         The Pipeline's own gate (``experiment.freeze_gate_for``) over the arm's
-        recorded Steps and this session's completed ones, so the Agent reads
-        the figure a freeze of this node would be judged on today.
+        recorded Steps and this session's completed ones, with the hard
+        nomination rules of the run, so the Agent reads the verdict a freeze of
+        this node would get today. A node that is not a Step of this session
+        does not pass.
         """
 
         rows = [research_step_record(item) for item in self.steps]
-        nominee = next(row for row in rows if row["step_id"] == step.step_id)
-        gate = freeze_gate_for(self.ledger.read(), rows, nominee)
+        nominee = next((row for row in rows if row["step_id"] == node_id), None)
+        if nominee is None:
+            return {"passed": False, "reasons": ["freeze_needs_a_step_of_this_session"]}
+        hard = (
+            AcceptanceRules.from_record(self.request.acceptance_rules).evaluate(
+                dict(nominee["summary"])  # type: ignore[arg-type]
+            )[0]
+            if self.request.acceptance_rules
+            else []
+        )
+        return freeze_gate_for(self.ledger.read(), rows, nominee, hard_reasons=hard)
+
+    def selection_statistics(self, step: StepResult) -> dict[str, object]:
+        """The provisional freeze-gate reading one candidate row carries."""
+
+        gate = self.freeze_gate(step.step_id)
         dsr = gate.get("deflated_sharpe")
         return {
             "freeze_gate_passed": gate["passed"],
@@ -958,7 +990,7 @@ class FoldBacktestTool:
             revision.output_path,
             epoch_id=RESEARCH_STAGE,
             # The session id is opaqued like every other Agent-visible id.
-            fold_id=self.ref_store.get_or_create("fold", self.request.session_id),
+            session_ref=self.ref_store.get_or_create("session", self.request.session_id),
             run_id=self.ref_store.get_or_create("run", self.request.run_id),
             result_name=result_name,
             revision_id=self.ref_store.get_or_create(
@@ -974,79 +1006,72 @@ class FoldBacktestTool:
         )
 
     def validation_request(
-        self, revision: ArtifactRevision
+        self, revision: ArtifactRevision, span: ReplaySpan
     ) -> EvaluationRequest:
-        """The session's Validation replay of the research span, for any
-        revision it accepted."""
-        return self.request.validation.request(
+        """The Validation replay of ``span`` for a revision the session accepted."""
+        return span.request(
             revision, schedule=self.schedule, broker_profile=self.broker_profile
         )
 
-    def reserve_validations(self, count: int) -> list[str]:
-        """Claim ``count`` Validation slots and name their results.
+    def reserve(self, count: int, span: ReplaySpan) -> list[str]:
+        """Claim the replay-years of ``count`` candidates on ``span`` and name their results.
 
-        One Fold session has one Validation budget and one Step list. A batch
-        claims every slot before it commits anything, so a batch that does not
-        fit is refused whole instead of half-run.
+        A batch claims every replay-year before it commits anything, so a batch
+        that does not fit is refused whole instead of half-run.
         """
-        remaining_backtests = self.request.max_backtests - self.backtests
-        if count > remaining_backtests:
+        cost = count * span.slots
+        remaining = self.replay_years_remaining
+        if cost > remaining:
             raise ToolError(
-                "Fold Validation backtest budget exhausted"
-                if remaining_backtests <= 0
-                else f"Fold Validation backtest budget has {remaining_backtests} "
-                f"left and {count} were requested"
-            )
-        remaining_steps = self.request.max_steps - len(self.steps)
-        if count > remaining_steps:
-            raise ToolError(
-                "Fold Step budget exhausted"
-                if remaining_steps <= 0
-                else f"Fold Step budget has {remaining_steps} left and {count} "
-                "were requested"
+                "the replay-year budget is spent"
+                if remaining <= 0
+                else f"the replay-year budget has {remaining} left and this batch "
+                f"needs {cost} ({count} candidate(s) x {span.slots} year(s) of "
+                f"span {span.label})",
+                error_type="budget_exhausted",
             )
         names = [
-            f"valid_{self.backtests + offset + 1:03d}" for offset in range(count)
+            f"valid_{self.candidates_started + offset + 1:03d}" for offset in range(count)
         ]
-        self.backtests += count
+        self.replay_years_used += cost
+        self.candidates_started += count
         return names
 
-    def release_validations(self, count: int) -> None:
-        """Refund slots for attempts whose snapshot never held (no replay ran)."""
-        self.backtests = max(0, self.backtests - count)
+    def release(self, count: int, span: ReplaySpan) -> None:
+        """Refund candidates whose snapshot never held (no replay ran)."""
+        self.replay_years_used = max(0, self.replay_years_used - count * span.slots)
+        self.candidates_started = max(0, self.candidates_started - count)
 
-    def charge_validation_slot(self) -> bool:
-        """Spend one Validation slot on something that produced no Step.
+    def charge_replay_year(self) -> bool:
+        """Spend one replay-year on something that produced no Step.
 
         The only caller is ``batch_validate``'s repeated-rejection breaker, and
         it is the whole bounding mechanism there: a refused batch is otherwise
-        free, so the budget is the only clock a retry loop can run down. No
-        Step is created, so the Step budget is not consulted. False means the
-        backtest budget is already spent and there is nothing left to charge.
+        free, so the budget is the only clock a retry loop can run down. False
+        means the budget is already spent and there is nothing left to charge.
         """
 
-        if self.backtests >= self.request.max_backtests:
+        if self.replay_years_remaining <= 0:
             return False
-        self.backtests += 1
+        self.replay_years_used += 1
         return True
 
     def check_deadline(self) -> None:
         try:
             self.time_budget.check()
         except TimeoutError as exc:
-            raise TimeoutError("Fold deadline exceeded") from exc
+            raise TimeoutError("research session deadline exceeded") from exc
 
 
 # ``batch_validate``: one formal step that fans out a pre-registered candidate
-# set over the same Validation window. Audited folds reached at most two formal
-# Validations each and carried the parent forward whenever a single quarter
-# could not separate a challenger from it — one candidate per serial step, each
-# branching off the last, is what made the evidence per decision too thin. A
-# batch fixes the parent for every candidate, so their numbers are comparable,
-# and pre-registers each hypothesis before any result exists. One candidate is
-# a round too: the hypothesis is the same binding pre-registration at any width.
+# set over one span. Audited sessions reached at most two formal Validations
+# each when every candidate was its own serial step, each branching off the
+# last, which made the evidence per decision too thin. A batch fixes the parent
+# and the span for every candidate, so their numbers are comparable, and
+# pre-registers each hypothesis before any result exists. One candidate is a
+# round too: the hypothesis is the same binding pre-registration at any width.
 BATCH_VALIDATE_MIN_CANDIDATES = 1
-# The Fold's own configured budget is the real limit and is checked per call;
+# The session's replay-year budget is the real limit and is checked per call;
 # this cap only bounds what one observation may carry, and six screening
 # candidates already make a wide round.
 BATCH_VALIDATE_MAX_CANDIDATES = 6
@@ -1070,13 +1095,13 @@ _BATCH_RESERVED_ROOTS = frozenset({"output", "models", "inputs", "skills", "refs
 _BATCH_WORKING_COPY = "output"
 # Repeated identical rejections. A refused batch is free by design — nothing is
 # committed and no slot is spent — which is also why nothing bounded the retry
-# loop: one audited Fold spent 3.89 h of a 10.17-h session on 128 consecutive
+# loop: one audited session spent 3.89 h of 10.17 h on 128 consecutive
 # rejections carrying the same error, 393 parent LLM calls apart. A rejection is
 # counted per session by its signature (error type plus the target it names,
 # never the message text, which carries digests and so changes with the file);
 # the third identical one says so and names the recovery for that signature, and
-# from the seventh on each identical attempt consumes one Validation slot, so
-# the loop is bounded by the Fold's backtest budget instead of by nothing.
+# from the seventh on each identical attempt consumes one replay-year, so the
+# loop is bounded by the session's replay budget instead of by nothing.
 BATCH_REJECTION_ESCALATE_AT = 3
 BATCH_REJECTION_CHARGE_AFTER = 6
 # The per-candidate projection an observation carries: a batch multiplies the
@@ -1103,13 +1128,12 @@ BATCH_CANDIDATE_SUMMARY_KEYS = (
     "pnl_concentration",
     "sub_windows",
 )
-# A multi-year Validation window has one sub-window row per quarter, and a
-# batch multiplies that by the number of candidates. A row keeps the columns a
+# A multi-year span has one sub-window row per July-June year, and a batch
+# multiplies that by the number of candidates. A row keeps the columns a
 # screening comparison is made on; the node's result.json keeps the full table.
-# ``neutralized_excess_return`` rides with the raw one because a walk-forward
-# transition is graded on the new quarter's neutralized figure: a screening
-# comparison made on the raw column alone reads a different number than the
-# gate will.
+# ``neutralized_excess_return`` rides with the raw one because the freeze gate
+# and the verdict read the neutralized figure: a comparison made on the raw
+# column alone reads a different number than they will.
 BATCH_SUB_WINDOW_KEYS = (
     "label",
     "return",
@@ -1146,7 +1170,7 @@ def _batch_replay_timeouts(evaluator: object, workers: int) -> Iterator[None]:
     ``generate_orders(context)`` take longer without the strategy doing
     anything different, so a fixed cap makes the verdict depend on how many
     siblings a candidate happened to be batched with — the failure mode that
-    cost explore_github four Validation slots to fits solo reruns finished in
+    cost one arm four Validations to fits solo reruns finished in
     1,550-2,027 s. Scaling both caps by ``workers`` keeps the guards (a
     runaway fit or decision still dies) while removing that dependence.
 
@@ -1157,10 +1181,10 @@ def _batch_replay_timeouts(evaluator: object, workers: int) -> Iterator[None]:
     candidate measured at ~2.0 s/day over 243 serial decision days died at
     ``strategy inference exceeded 180s`` on one rebalance day inside a 2-way
     batch. Both caps bound ONE call, so both are equally distorted by the
-    fan-out, and the whole-replay runaway is bounded elsewhere (the backtest
+    fan-out, and the whole-replay runaway is bounded elsewhere (the replay-year
     budget and the session's own deadline).
 
-    The batch owns the evaluator for the pool's lifetime — a Fold session runs
+    The batch owns the evaluator for the pool's lifetime — a session runs
     one tool at a time — so mutating and restoring the shared config here is
     safe. An evaluator without sandbox limits (trusted mode, test doubles) has
     no clock to scale and is left alone.
@@ -1197,57 +1221,70 @@ class BatchValidateTool(SessionTimeBudgetAware):
     """The one Validation tool: pre-registered candidates as sibling Steps.
 
     Every candidate gets its own ``modification_check``, its own immutable
-    revision, one full replay over the session's Validation window and one
-    Step node, and costs one backtest slot. The candidates of a call share one
-    parent node, so a round's numbers are comparable and each hypothesis is
-    registered before any result exists, at every width from one to six.
+    revision, one replay over the batch's span and one Step node, and costs one
+    replay-year per research year of that span. The candidates of a call share
+    one parent node and one span, so a round's numbers are comparable and each
+    hypothesis is registered before any result exists, at every width from one
+    to six.
 
     Selection is never automatic: the Agent reads the table and nominates a
-    winner with ``finish_fold``.
+    winner with ``finish_session``.
     """
 
     spec = ToolSpec(
         "batch_validate",
-        "Run the Validation replay over this session's Validation window on "
+        "Replay "
         f"{BATCH_VALIDATE_MIN_CANDIDATES}-{BATCH_VALIDATE_MAX_CANDIDATES} "
-        "PRE-REGISTERED candidates in one call; this is the only way to create "
-        "a selectable node. Each candidate is {name, hypothesis, path}: path is "
-        "a workspace directory laid out like output/ (main.py plus its sibling "
-        "modules; the read-only template files such as README.md are supplied "
-        "for you; models/ is shared with the working copy), or output itself to "
-        "validate the working copy as it stands, and hypothesis is the "
-        "falsifiable statement you register BEFORE any result exists. Each candidate consumes one backtest "
-        "of the Fold budget and, once its Validation completes, becomes its own "
-        "immutable revision and Step node under the CURRENT node as shared "
-        "parent, consuming one Step; a candidate whose replay fails consumes no "
-        "Step and has no result_ref, and, while record_failed_attempts is on, "
-        "is recorded as a dead-end node rather than a Step, so later Folds see "
-        "what was already tried. The "
-        "returned backtests_used/backtests_remaining/steps_used are the "
-        "authoritative counters. The whole batch is refused before anything runs if "
-        "it does not fit the budget, if two candidates are byte-identical, if "
-        "one has the parent strategy's executable structure, or if one fails "
-        "modification_check. A refusal is free the first times, but the same "
-        "refusal repeated is not: the third identical one states the recovery "
-        f"for it, and from the {BATCH_REJECTION_CHARGE_AFTER + 1}th on each "
-        "identical attempt consumes one backtest of the Fold budget, so fix "
-        "what the error names instead of calling again unchanged. "
-        "The call waits briefly for background sub-agents "
-        "that can write and is refused while one is still running; read-only "
-        "audits keep running while the candidates replay concurrently on the same "
-        "Validation window. Returns one row per candidate: node id, headline "
-        "metrics, the per-period return/excess/Sharpe of sub_windows, the "
-        "provisional selection_statistics (the freeze gate as it would read "
-        "this node now, which the freeze recomputes), "
-        "and wall seconds; a failed candidate's row carries its exact failure text "
-        "instead of those fields — one failure never hides the others. Each "
-        "completed row's result_ref reads back that candidate's full replay "
-        "record. Selection stays yours: finish_fold(node_id) nominates a row "
-        "as it is, and step_rollback(node_id) restores one as the working copy "
-        "to build on.",
+        "PRE-REGISTERED candidates over one span of the research period in one "
+        "call; this is the only way to create a selectable node. span is full (the "
+        "whole research period, the default), one research year such as Y2, or "
+        "contiguous years such as Y2..Y4, as the research_geometry fact lists them; "
+        "each span is replayed as one continuous book from the decision view at "
+        "its first year. Each candidate is {name, hypothesis, path}: path is a "
+        "workspace directory laid out like output/ (main.py plus its sibling "
+        "modules; the read-only template files such as README.md are supplied for "
+        "you; models/ is shared with the working copy), or output itself to "
+        "validate the working copy as it stands, and hypothesis is the falsifiable "
+        "statement you register BEFORE any result exists. The batch costs one "
+        "replay-year per candidate per year of the span, reserved before anything "
+        "runs; a candidate whose replay completes becomes its own immutable "
+        "revision and Step node under the CURRENT node as shared parent, recorded "
+        "with its span. A candidate whose replay fails keeps its cost, has no "
+        "result_ref and, while record_failed_attempts is on, is recorded as a "
+        "dead-end node, so later sessions see what was already tried. The returned "
+        "replay_years_used/replay_years_remaining are the authoritative counters. "
+        "The whole batch is refused before anything runs if the span is not one of "
+        "the research years, if it does not fit the budget, if two candidates are "
+        "byte-identical, or if one fails modification_check. A refusal is free the "
+        "first times, but the same refusal repeated is not: the third identical one "
+        "states the recovery for it, and from the "
+        f"{BATCH_REJECTION_CHARGE_AFTER + 1}th on each identical attempt consumes "
+        "one replay-year, so fix what the error names instead of calling again "
+        "unchanged. The call waits briefly for background sub-agents that can "
+        "write and is refused while one is still running; read-only audits keep "
+        "running while the candidates replay concurrently. Returns one row per "
+        "candidate: node id, headline metrics, the per-year return/excess/"
+        "neutralized excess/Sharpe of sub_windows, the provisional "
+        "selection_statistics (the freeze gate as it would read this node now, "
+        "which the freeze recomputes), and wall seconds; a failed candidate's row "
+        "carries its exact failure text instead — one failure never hides the "
+        "others. Each completed row's result_ref reads back that candidate's full "
+        "replay record. Selection stays yours: finish_session nominates a row as it "
+        "is, and step_rollback(node_id) restores one as the working copy to build "
+        "on.",
         {
             "type": "object",
             "properties": {
+                "span": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 20,
+                    "description": (
+                        "full (default), one research year Yk, or contiguous years "
+                        "Yi..Yj. Iterate on years; a freeze needs a full-span "
+                        "validation."
+                    ),
+                },
                 "candidates": {
                     "type": "array",
                     "minItems": BATCH_VALIDATE_MIN_CANDIDATES,
@@ -1285,35 +1322,35 @@ class BatchValidateTool(SessionTimeBudgetAware):
                         "required": ["name", "hypothesis", "path"],
                         "additionalProperties": False,
                     },
-                }
+                },
             },
             "required": ["candidates"],
             "additionalProperties": False,
         },
         mutating=True,
         example={
+            "span": "Y3..Y4",
             "candidates": [
                 {
                     "name": "value_quality",
-                    "hypothesis": "T-1 估值+质量 4 因子等权打分优于父本动量排序",
+                    "hypothesis": "T-1 估值+质量 4 因子等权打分的中性化超额在两个年份都为正",
                     "path": "candidates/value_quality",
                 },
                 {
                     "name": "reversal",
-                    "hypothesis": "21 日反转单因子优于父本动量排序",
+                    "hypothesis": "21 日反转单因子的中性化超额在两个年份都为正",
                     "path": "candidates/reversal",
                 },
-            ]
+            ],
         },
     )
 
     def __init__(
         self,
         *,
-        backtest: FoldBacktestTool,
+        backtest: SessionValidations,
         workspace: SafeWorkspace,
         modification_check_factory: Callable[[Path], ModificationCheckTool],
-        parent_main_py: str | Path | None = None,
         trace_emit: Callable[[str, dict[str, object]], object] | None = None,
     ) -> None:
         self.backtest = backtest
@@ -1323,17 +1360,6 @@ class BatchValidateTool(SessionTimeBudgetAware):
         # Per-session rejection counter, keyed by signature. Not persisted:
         # the loop it bounds is one session's retry loop.
         self._rejections: dict[tuple[str, str], int] = {}
-        self._parent_structure: str | None = None
-        if parent_main_py is not None:
-            # The parent package is the directory holding its main.py; the
-            # comparison covers every module, exactly as finish_fold's does.
-            path = Path(parent_main_py)
-            try:
-                self._parent_structure = executable_output_structure(path.parent)
-            except (OSError, SyntaxError) as exc:
-                raise ValueError(
-                    f"parent strategy structure is invalid: {exc}"
-                ) from exc
 
     @property
     def session_time_budget(self) -> InferenceTimeBudget:
@@ -1345,11 +1371,12 @@ class BatchValidateTool(SessionTimeBudgetAware):
             return self._invoke_exempt(arguments)
 
     def _invoke_exempt(self, arguments: Mapping[str, object]) -> ToolResult:
-        # Everything that can refuse the batch runs before a single slot is
-        # spent, so a rejected batch costs nothing and the Agent can fix the
-        # offending candidate and call again. Because it costs nothing, the
-        # same rejection can also repeat forever: ``_rejected`` counts it.
+        # Everything that can refuse the batch runs before a single
+        # replay-year is spent, so a rejected batch costs nothing and the Agent
+        # can fix the offending input and call again. Because it costs nothing,
+        # the same rejection can also repeat forever: ``_rejected`` counts it.
         try:
+            span = self.backtest.span(arguments.get("span", FULL_SPAN))
             candidates = self._parse(arguments)
             self._supply_readonly_files(candidates)
             checks = self._precheck(candidates)
@@ -1358,15 +1385,15 @@ class BatchValidateTool(SessionTimeBudgetAware):
             if escalated is exc:
                 raise
             raise escalated from exc
-        result_names = self.backtest.reserve_validations(len(candidates))
+        result_names = self.backtest.reserve(len(candidates), span)
         batch_id = uuid.uuid4().hex[:12]
         parent_node_id = self.backtest.tree.current_node_id
-        revisions = self._commit(candidates, checks, count=len(candidates))
-        outcomes = self._replay(revisions)
-        # Unlike a single backtest, a batch does not re-check the deadline here:
-        # every replay is already paid for, and dropping N completed Validations
-        # because the clock ran out during them would destroy real evidence. The
-        # session deadline is enforced at the next dispatch and LLM call.
+        revisions = self._commit(candidates, checks, span)
+        outcomes = self._replay(revisions, span)
+        # A batch does not re-check the deadline here: every replay is already
+        # paid for, and dropping N completed Validations because the clock ran
+        # out during them would destroy real evidence. The session deadline is
+        # enforced at the next dispatch and LLM call.
         rows: list[dict[str, object]] = []
         recorded: list[tuple[dict[str, object], StepResult]] = []
         try:
@@ -1386,7 +1413,9 @@ class BatchValidateTool(SessionTimeBudgetAware):
                 }
                 if evaluation is None:
                     row.update(
-                        self._record_failure(candidate, result_name, error, batch_id)
+                        self._record_failure(
+                            candidate, result_name, error, batch_id=batch_id, span=span
+                        )
                     )
                 else:
                     row.update(
@@ -1396,6 +1425,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
                             evaluation,
                             result_name=result_name,
                             batch_id=batch_id,
+                            span=span,
                         )
                     )
                     recorded.append((row, self.backtest.steps[-1]))
@@ -1413,7 +1443,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
         if not recorded:
             raise ToolError(
                 f"batch_validate: all {len(rows)} candidates failed their "
-                "Validation; each still consumed one backtest slot",
+                "Validation; each still consumed its replay-years",
                 error_type="validation_failed",
                 details={"batch_id": batch_id, "candidates": rows},
             )
@@ -1425,16 +1455,21 @@ class BatchValidateTool(SessionTimeBudgetAware):
                     "run", self.backtest.request.run_id
                 ),
                 "parent_node_id": parent_node_id,
+                "span": {
+                    "label": span.label,
+                    "start": span.start,
+                    "end": span.end,
+                    "years": span.slots,
+                },
                 "candidates": rows,
                 "complete_validations": len(recorded),
                 "failed": len(rows) - len(recorded),
-                "backtests_used": self.backtest.backtests,
-                "backtests_remaining": (
-                    self.backtest.request.max_backtests - self.backtest.backtests
-                ),
-                "steps_used": len(self.backtest.steps),
+                "replay_years_used": self.backtest.replay_years_used,
+                "replay_years_remaining": self.backtest.replay_years_remaining,
                 "result_root": STEP_TREE_SEARCH_ROOT,
-                "select_hint": self._select_hint(rows),
+                "select_hint": batch_select_hint(
+                    rows, replay_years_remaining=self.backtest.replay_years_remaining
+                ),
             },
         )
 
@@ -1543,10 +1578,8 @@ class BatchValidateTool(SessionTimeBudgetAware):
                     ) from exc
 
     def _precheck(self, candidates: Sequence[_BatchCandidate]) -> list[dict[str, object]]:
-        """Static gate for every candidate, plus the two batch-only rules:
-        no two candidates may be the same bytes, and none may be the parent
-        strategy's executable structure — ``finish_fold`` could not select
-        that node, so replaying it would burn a Validation for nothing."""
+        """Static gate for every candidate, plus the batch-only rule that no
+        two candidates may be the same bytes."""
 
         checks: list[dict[str, object]] = []
         fingerprints: dict[str, str] = {}
@@ -1578,42 +1611,13 @@ class BatchValidateTool(SessionTimeBudgetAware):
                     blocked_target=candidate.path,
                 )
             fingerprints[fingerprint] = candidate.name
-            self._reject_parent_structure(candidate)
             checks.append(value)
         return checks
-
-    def _reject_parent_structure(self, candidate: _BatchCandidate) -> None:
-        if self._parent_structure is None:
-            return
-        try:
-            structure = executable_output_structure(candidate.directory)
-        except PermissionError as exc:
-            raise ToolError(
-                f"candidate {candidate.name} ({candidate.path}) has a module "
-                f"this session cannot read: {_public_error_text(exc)}",
-                error_type="permission_denied",
-                blocked_target=candidate.path,
-            ) from exc
-        except (OSError, SyntaxError) as exc:
-            raise ToolError(
-                f"candidate {candidate.name} has an unreadable module: "
-                f"{_public_error_text(exc)}",
-                error_type="modification_check_failed",
-                blocked_target=candidate.path,
-            ) from exc
-        if structure == self._parent_structure:
-            raise ToolError(
-                f"candidate {candidate.name} has the parent strategy's "
-                "executable logic (comment-only changes do not count), and "
-                "finish_fold could not select it; batch distinct hypotheses",
-                error_type="parent_structure",
-                blocked_target=candidate.path,
-            )
 
     # ---- repeated rejections ----
 
     def _rejected(self, exc: ToolError) -> ToolError:
-        """Count one pre-slot rejection and escalate a repeating signature.
+        """Count one pre-reservation rejection and escalate a repeating signature.
 
         A first-time rejection is returned untouched: nothing about the free,
         fix-and-retry path changes. Only repetition is treated as evidence that
@@ -1626,23 +1630,23 @@ class BatchValidateTool(SessionTimeBudgetAware):
         if count < BATCH_REJECTION_ESCALATE_AT:
             return exc
         charged = (
-            self.backtest.charge_validation_slot()
+            self.backtest.charge_replay_year()
             if count > BATCH_REJECTION_CHARGE_AFTER
             else False
         )
-        remaining = self.backtest.request.max_backtests - self.backtest.backtests
+        remaining = self.backtest.replay_years_remaining
         if count > BATCH_REJECTION_CHARGE_AFTER:
             cost = (
-                f"This attempt consumed one Validation slot ({remaining} left); "
+                f"This attempt consumed one replay-year ({remaining} left); "
                 "so does every further identical one."
                 if charged
-                else "The Validation budget is already spent; nothing is left "
+                else "The replay-year budget is already spent; nothing is left "
                 "to charge and no further batch can run."
             )
         else:
             cost = (
                 f"From the {BATCH_REJECTION_CHARGE_AFTER + 1}th identical "
-                "attempt on, each one consumes a Validation slot."
+                "attempt on, each one consumes a replay-year."
             )
         recovery = _rejection_recovery(exc.error_type)
         message = (
@@ -1658,16 +1662,16 @@ class BatchValidateTool(SessionTimeBudgetAware):
                     "error_type": exc.error_type,
                     "blocked_target": signature[1],
                     "repeat_count": count,
-                    "charged_backtest": charged,
-                    "backtests_used": self.backtest.backtests,
+                    "charged_replay_year": charged,
+                    "replay_years_used": self.backtest.replay_years_used,
                 },
             )
         details = dict(exc.details)
         details.update(
             {
                 "repeat_count": count,
-                "charged_backtest": charged,
-                "backtests_remaining": remaining,
+                "charged_replay_year": charged,
+                "replay_years_remaining": remaining,
             }
         )
         return ToolError(
@@ -1685,8 +1689,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
         self,
         candidates: Sequence[_BatchCandidate],
         checks: Sequence[Mapping[str, object]],
-        *,
-        count: int,
+        span: ReplaySpan,
     ) -> list[ArtifactRevision]:
         revisions: list[ArtifactRevision] = []
         try:
@@ -1702,10 +1705,10 @@ class BatchValidateTool(SessionTimeBudgetAware):
             raise
         except Exception as exc:
             # No replay ran, so the batch is infrastructure, not a Validation:
-            # every revision and every reserved slot goes back.
+            # every revision and every reserved replay-year goes back.
             for revision in revisions:
                 self.backtest.artifact_store.discard_revision(revision.revision_id)
-            self.backtest.release_validations(count)
+            self.backtest.release(len(candidates), span)
             public_error = _public_error_text(exc)
             # Recorded as what it was: every attempt reaches the run manifest.
             self.backtest.append_manifest_summary(
@@ -1713,6 +1716,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
                     "mode": "valid",
                     "status": "infrastructure_error",
                     "complete_validation": False,
+                    "span": span.label,
                     "error": public_error,
                 }
             )
@@ -1729,9 +1733,9 @@ class BatchValidateTool(SessionTimeBudgetAware):
         return revisions
 
     def _replay(
-        self, revisions: Sequence[ArtifactRevision]
+        self, revisions: Sequence[ArtifactRevision], span: ReplaySpan
     ) -> list[tuple[EvaluationResult | None, Exception | None, float]]:
-        """Replay every committed revision, bounded-concurrently.
+        """Replay every committed revision over ``span``, bounded-concurrently.
 
         Each evaluation owns its result directory, its as-of view and its
         strategy container; the shared Timeview stash serializes part
@@ -1747,7 +1751,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
             started = time.perf_counter()
             try:
                 evaluation = self.backtest.evaluator.evaluate(
-                    self.backtest.validation_request(revisions[index])
+                    self.backtest.validation_request(revisions[index], span)
                 )
             except SessionInterrupt:
                 raise
@@ -1791,6 +1795,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
         *,
         result_name: str,
         batch_id: str,
+        span: ReplaySpan,
     ) -> dict[str, object]:
         node_id = self.backtest.record_validation(
             revision,
@@ -1801,15 +1806,11 @@ class BatchValidateTool(SessionTimeBudgetAware):
                 "candidate": candidate.name,
                 "hypothesis": candidate.hypothesis,
                 "source_path": candidate.path,
+                "span": span.label,
             },
         )
         self.backtest.steps.append(
-            StepResult(
-                node_id,
-                revision.revision_id,
-                evaluation,
-                span=self.backtest.request.validation.label,
-            )
+            StepResult(node_id, revision.revision_id, evaluation, span=span.label)
         )
         self.backtest.append_manifest_summary(
             {
@@ -1820,6 +1821,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
                 "batch_id": batch_id,
                 "candidate": candidate.name,
                 "hypothesis": candidate.hypothesis,
+                "span": span.label,
                 **manifest_backtest_stats(evaluation.summary),
             }
         )
@@ -1844,29 +1846,33 @@ class BatchValidateTool(SessionTimeBudgetAware):
         candidate: _BatchCandidate,
         result_name: str,
         error: Exception | None,
+        *,
         batch_id: str,
+        span: ReplaySpan,
     ) -> dict[str, object]:
         public_error = _public_validation_error(
             error if error is not None else RuntimeError("unknown replay failure")
         )
         request = self.backtest.request
+        metadata = {
+            "batch_id": batch_id,
+            "candidate": candidate.name,
+            "hypothesis": candidate.hypothesis,
+            "source_path": candidate.path,
+            "span": span.label,
+        }
         if request.record_failed_attempts:
             # record_failed_attempt leaves the tree position alone by design,
             # so a dead end never becomes anybody's parent.
             self.backtest.tree.record_failed_attempt(
                 epoch_id=RESEARCH_STAGE,
-                fold_id=self.backtest.ref_store.get_or_create(
-                    "fold", request.session_id
+                session_ref=self.backtest.ref_store.get_or_create(
+                    "session", request.session_id
                 ),
                 run_id=self.backtest.ref_store.get_or_create("run", request.run_id),
                 result_name=result_name,
                 error=public_error,
-                metadata={
-                    "batch_id": batch_id,
-                    "candidate": candidate.name,
-                    "hypothesis": candidate.hypothesis,
-                    "source_path": candidate.path,
-                },
+                metadata=metadata,
             )
         self.backtest.append_manifest_summary(
             {
@@ -1874,26 +1880,23 @@ class BatchValidateTool(SessionTimeBudgetAware):
                 "mode": "valid",
                 "status": "failed",
                 "complete_validation": False,
-                "batch_id": batch_id,
-                "candidate": candidate.name,
-                "hypothesis": candidate.hypothesis,
+                **{key: metadata[key] for key in ("batch_id", "candidate", "hypothesis", "span")},
                 "error": public_error,
             }
         )
         return {"status": "failed", "error": public_error}
 
-    def _select_hint(self, rows: Sequence[Mapping[str, object]]) -> str:
-        return batch_select_hint(rows)
 
-
-def batch_select_hint(rows: Sequence[Mapping[str, object]]) -> str:
+def batch_select_hint(
+    rows: Sequence[Mapping[str, object]], *, replay_years_remaining: int
+) -> str:
     """Name the row leading on the design's tie-breaker; select nothing.
 
     The neutralized excess is the figure the guidance ranks candidates on, so
     the hint says which row leads on it and on nothing else. A winning round
-    is the starting point of the next pre-registered round, not the end of
-    the session: the hint never instructs ``finish_fold``, it states when
-    finishing is warranted.
+    is the starting point of the next pre-registered round, not the end of the
+    session; once no batch fits the replay-year budget, the hint says the
+    session is left with finishing.
     """
 
     ranked = [
@@ -1908,11 +1911,18 @@ def batch_select_hint(rows: Sequence[Mapping[str, object]]) -> str:
         if leading[1] is not None and math.isfinite(leading[0])
         else "no row carries a neutralized excess figure; "
     )
+    if replay_years_remaining < 1:
+        return (
+            f"{lead}read every row yourself (whole span AND sub_windows) — nothing "
+            "is selected for you. The replay-year budget is spent, so no further "
+            "batch can run: write PRIOR.md and finish_session."
+        )
     return (
-        f"{lead}read every row yourself (whole window AND sub_windows) — nothing "
+        f"{lead}read every row yourself (whole span AND sub_windows) — nothing "
         "is selected for you. A winning round is the start of the next "
         "pre-registered round: step_rollback(node_id=<chosen>) restores it as "
-        "the working copy; finish_fold is warranted only once the pre-registered "
+        "the working copy; a freeze needs a full-span validation that passes the "
+        "freeze gate, and finish_session is warranted only once the pre-registered "
         "hypotheses are resolved or the remaining budget no longer fits another "
         "round."
     )
@@ -1931,46 +1941,25 @@ def _batch_row_neutralized_excess(row: Mapping[str, object]) -> float:
     return float(value) if math.isfinite(value) else float("-inf")
 
 
-def another_batch_round_fits(backtest: FoldBacktestTool) -> bool:
+def another_batch_round_fits(backtest: SessionValidations) -> bool:
     """Whether the session could still run one more ``batch_validate`` round.
 
-    ``finish_fold`` asks for an early-stop reason, and refuses a nomination the
-    Pipeline would reject while a sibling passes, only while this is true. It
-    stops being true inside the deadline window — the finalize reserve before
-    the main deadline, and the wrap-up grace behind it, where the Runner itself
-    asks the session to finish — and once the Step or backtest budget has fewer
-    slots left than the smallest batch.
+    ``finish_session`` asks an early freeze for a reason only while this is
+    true. It stops being true inside the deadline window — the finalize reserve
+    before the main deadline, and the wrap-up grace behind it, where the Runner
+    itself asks the session to finish — and once the replay-year budget cannot
+    hold the smallest batch, one candidate on one year.
     """
 
     request = backtest.request
     main_remaining = backtest.time_budget.remaining() - request.deadline_grace_seconds
     if main_remaining <= request.finalize_before_deadline_seconds:
         return False
-    if request.max_backtests - backtest.backtests < BATCH_VALIDATE_MIN_CANDIDATES:
-        return False
-    return request.max_steps - len(backtest.steps) >= BATCH_VALIDATE_MIN_CANDIDATES
+    return backtest.replay_years_remaining >= 1
 
 
-def acceptance_hard_rule_check(
-    acceptance_rules: Mapping[str, object],
-) -> HardRuleCheck | None:
-    """The Pipeline's hard acceptance rules as one metrics -> reasons callable.
-
-    ``finish_fold`` checks its nomination against the same rules the freeze
-    decision applies, without the Environment importing the Pipeline: the rules
-    are rebuilt here from the run's own record and handed over as a callable,
-    like the budget counters. A request that carries no rules gets no check
-    rather than a guessed one.
-    """
-
-    if not acceptance_rules:
-        return None
-    rules = AcceptanceRules.from_record(acceptance_rules)
-    return lambda metrics: rules.evaluate(dict(metrics))[0]
-
-
-def fold_budget_status(backtest: FoldBacktestTool) -> FoldBudgetStatus:
-    """What this Fold session still has when ``finish_fold`` is called.
+def session_budget_status(backtest: SessionValidations) -> SessionBudgetStatus:
+    """What this session still has when ``finish_session`` is called.
 
     The inference time is the same main-window figure ``another_batch_round_fits``
     reasons about: the grace reserve behind the deadline is wrap-up time, not
@@ -1978,11 +1967,9 @@ def fold_budget_status(backtest: FoldBacktestTool) -> FoldBudgetStatus:
     """
 
     request = backtest.request
-    return FoldBudgetStatus(
-        backtests_remaining=max(request.max_backtests - backtest.backtests, 0),
-        backtests_total=request.max_backtests,
-        steps_remaining=max(request.max_steps - len(backtest.steps), 0),
-        steps_total=request.max_steps,
+    return SessionBudgetStatus(
+        replay_years_remaining=backtest.replay_years_remaining,
+        replay_years_total=request.max_replay_years,
         inference_seconds_remaining=(
             backtest.time_budget.remaining() - request.deadline_grace_seconds
         ),
@@ -2000,10 +1987,11 @@ class NullControlTool(SessionTimeBudgetAware):
 
     The same K=500 null control the Pipeline runs for the frozen node at
     freeze (``experiment._null_control``), drawn with the same seed through
-    the same backend, so the figure the Agent reads before selecting is the
-    figure the ledger records: the block is cached per node and handed to the
-    Pipeline, which reuses it for the frozen node instead of drawing again.
-    Each call is minutes of host replay, hence the per-Fold cap.
+    the same backend over the node's own span, so the figure the Agent reads
+    before selecting is the figure the ledger records: the block is cached per
+    node and handed to the Pipeline, which reuses it for the frozen node
+    instead of drawing again. Each call is minutes of host replay, hence the
+    per-session cap.
     """
 
     spec = ToolSpec(
@@ -2026,7 +2014,7 @@ class NullControlTool(SessionTimeBudgetAware):
         example={"node_id": "<complete Validation node_id>"},
     )
 
-    def __init__(self, backtest: FoldBacktestTool, *, max_calls: int) -> None:
+    def __init__(self, backtest: SessionValidations, *, max_calls: int) -> None:
         if isinstance(max_calls, bool) or not isinstance(max_calls, int) or max_calls <= 0:
             raise ValueError("run_null_control max_calls must be a positive integer")
         self.backtest = backtest
@@ -2037,22 +2025,22 @@ class NullControlTool(SessionTimeBudgetAware):
         self.spec = ToolSpec(
             self.spec.name,
             "Rank one complete Validation node of this session against K=500 host "
-            "replays of its own trade skeleton with random same-size names: the "
-            "same null control the Pipeline runs for the frozen node at freeze. "
-            "Returns the null_control block the ledger will carry (observed_excess, "
-            "excess_percentile — near 0.5 means the names added nothing the timing "
-            "and sizing did not — the null's mean and p05/p95, rejects_mean, "
-            "dropped_trips_mean). Costs minutes of host replay per call (about "
-            "1.5 min on a one-year window; the session clock pauses like a formal "
-            f"backtest) and is capped at {max_calls} per Fold "
-            "(max_null_controls_per_fold in the run facts; every result reports "
-            "null_controls_remaining); a node's block is cached, and the frozen "
-            "node's block is reused at freeze instead of being drawn again. Use it "
-            "on the finalists before finish_fold, not on every candidate. Refused for a node "
-            "that is not a complete Validation of this session, once the cap is "
-            "spent, and while a background sub-agent that can write is still "
-            "running; it is also unavailable once the session enters hard "
-            "finalization, so rank the finalists before that, not while finishing.",
+            "replays of its own trade skeleton with random same-size names over the "
+            "node's own span: the same null control the Pipeline runs for the frozen "
+            "node at freeze. Returns the null_control block the ledger will carry "
+            "(observed_excess, excess_percentile — near 0.5 means the names added "
+            "nothing the timing and sizing did not — the null's mean and p05/p95, "
+            "rejects_mean, dropped_trips_mean). Costs minutes of host replay per call "
+            "(about 1.5 min per research year; the session clock pauses like a formal "
+            f"backtest), consumes no replay-years and is capped at {max_calls} per "
+            "session (max_null_controls in the budgets fact; every result reports "
+            "null_controls_remaining); a node's block is cached, and the frozen node's "
+            "block is reused at freeze instead of being drawn again. Use it on "
+            "full-span finalists before finish_session, not on every candidate. "
+            "Refused for a node that is not a complete Validation of this session, "
+            "once the cap is spent, and while a background sub-agent that can write "
+            "is still running; it is also unavailable once the session enters hard "
+            "finalization, so rank the finalists before that.",
             self.spec.input_schema,
             mutating=True,
             example=self.spec.example,
@@ -2076,16 +2064,15 @@ class NullControlTool(SessionTimeBudgetAware):
             return ToolResult(True, value=self._report(node_id, self.blocks[node_id], cached=True))
         if self.used >= self.max_calls:
             raise ToolError(
-                f"run_null_control budget exhausted: {self.max_calls} per Fold "
-                "(max_null_controls_per_fold). The frozen node's null control "
-                "still runs at freeze and reaches the next Fold and Meta through "
-                "development_history.",
+                f"run_null_control budget exhausted: {self.max_calls} per session "
+                "(max_null_controls). The frozen node's null control still runs at "
+                "freeze.",
                 error_type="null_control_budget_exhausted",
             )
         runner = getattr(self.backtest.evaluator, "null_control", None)
         if not callable(runner):
             raise ToolError("run_null_control is not available on this evaluation backend")
-        span = self.backtest.request.validation
+        span = research_span(self.backtest.request.research_years, step.span)
         # The attempt is charged before it runs: the compute is spent either way.
         self.used += 1
         with self.backtest.time_budget.pause():
@@ -2174,15 +2161,15 @@ def _batch_text(
     return text
 
 
-def build_fold_subagent_tools(
+def build_subagent_tools(
     search_roots: SearchRoots,
     workspace: SafeWorkspace,
     command_runner: CommandRunner,
     modification: ModificationCheckTool,
     smoke: Tool,
 ) -> list[Tool]:
-    """Tools handed to Fold ``SubAgentEngine``: the parent's research and
-    write surface plus the unofficial smoke run; no formal backtest."""
+    """Tools handed to the session's ``SubAgentEngine``: the parent's research
+    and write surface plus the unofficial smoke run; no formal backtest."""
     return [
         ReadFileTool(search_roots),
         GrepTool(search_roots),
@@ -2197,8 +2184,8 @@ def build_fold_subagent_tools(
     ]
 
 
-class LLMFoldDeveloper:
-    """Adapter from the native Agent loop to ``FoldDeveloper``."""
+class LLMResearchDeveloper:
+    """Adapter from the native Agent loop to ``ResearchDeveloper``."""
 
     def __init__(
         self,
@@ -2275,7 +2262,7 @@ class LLMFoldDeveloper:
         Read from the evaluator's own limits, so it is the number ``fit`` and
         ``generate_orders`` will actually see rather than a second derivation
         of the experiment request. It can differ from this session's container
-        (``runtime_env.json``'s ``sandbox_spec``), which a per-Fold HITL
+        (``runtime_env.json``'s ``sandbox_spec``), which a per-session HITL
         override may move on its own.
         """
 
@@ -2285,7 +2272,7 @@ class LLMFoldDeveloper:
 
     def __call__(self, request: ResearchSessionRequest) -> ResearchSessionResult:
         from autotrade.agent.compact import ContextCompactor
-        from autotrade.agent.prompts import FOLD_DEFAULT_INSTRUCTION, build_system_prompt
+        from autotrade.agent.prompts import SESSION_DEFAULT_INSTRUCTION, build_system_prompt
         from autotrade.agent.runner import (
             AgentSessionConfig,
             AgentSessionDeadlineExceeded,
@@ -2300,15 +2287,14 @@ class LLMFoldDeveloper:
         root = self.runtime_root / request.run_id
         if root.exists():
             raise FileExistsError(f"session runtime already exists: {request.run_id}")
-        session_ref = self.ref_store.get_or_create("fold", request.session_id)
+        session_ref = self.ref_store.get_or_create("session", request.session_id)
         run_ref = self.ref_store.get_or_create("run", request.run_id)
-        span = request.validation
         trace = AgentTraceWriter(
             agent_trace_path(self.artifact_store.root.parent, request.run_id),
             ids={
                 "experiment_id": request.experiment_id,
                 "epoch_id": RESEARCH_STAGE,
-                "fold_id": session_ref,
+                "session_ref": session_ref,
                 "run_id": run_ref,
                 "session_kind": RESEARCH_STAGE,
             },
@@ -2332,20 +2318,22 @@ class LLMFoldDeveloper:
         # /mnt/artifacts/run_manifest.json. It is also where every backtest
         # summary accumulates. Research dates only: the forward period is
         # never known to a session.
+        records = self.ledger.read()
         manifest = RunManifest.create(
             paths.run_manifest,
             {
                 "experiment_id": request.experiment_id,
                 "epoch_id": RESEARCH_STAGE,
-                # Raw on the host manifest; RunManifest's Agent-visible view and
-                # build_experiment_facts both project it through the experiment
-                # reference store.
+                # Raw on the host manifest (issue reports link on it);
+                # RunManifest's Agent-visible view and build_experiment_facts
+                # both project it through the experiment reference store.
                 "fold_id": request.session_id,
                 "run_id": request.run_id,
                 "session_key": request.session_key,
-                "kind": "fold",
-                "session_index": request.session_index,
-                "sessions_total": request.sessions_total,
+                "kind": RESEARCH_STAGE,
+                "session": session_position_record(
+                    request.session_index, request.sessions_total
+                ),
                 "llm": {
                     "provider": str(getattr(self.llm, "provider", "")),
                     "model": str(getattr(self.llm, "model", "")),
@@ -2357,24 +2345,17 @@ class LLMFoldDeveloper:
                 "conversation_id": request.run_id,
                 "runtime_env_ref": "/mnt/artifacts/runtime_env.json",
                 "data_summary_ref": "/mnt/artifacts/data_summary.json",
-                "fold": {
-                    "fold_id": request.session_id,
-                    "input_window": f"{request.input_window_start}..{span.end}",
-                    "validation_period": f"{span.start}..{span.end}",
-                    "valid_decision_time": request.decision_time.isoformat(),
-                },
+                "research": research_geometry_record(
+                    request.research_years,
+                    input_window_start=request.input_window_start,
+                    decision_time=request.decision_time.isoformat(),
+                ),
                 "snapshot_config": dict(request.snapshot_config),
                 "snapshots": {
-                    "valid_decision_input": {
-                        "snapshot_id": request.snapshot.snapshot_id
-                    }
+                    "decision_input": {"snapshot_id": request.snapshot.snapshot_id}
                 },
-                "valid_decision_time": request.decision_time.isoformat(),
-                "is_initial_artifact": start is None,
-                "parent_strategy_artifact_id": (
-                    start.artifact_id if start is not None else None
-                ),
-                "template_ref": None if start is not None else "agent_output_template",
+                "start": start_record(start.source_step_id if start is not None else None),
+                "arm": arm_record(records),
                 "modification_constraints": request.modification_constraints.to_record(),
                 "acceptance_rules": dict(request.acceptance_rules),
                 "schedule": self.schedule.to_record(),
@@ -2382,17 +2363,13 @@ class LLMFoldDeveloper:
                 "nl_failure_policy": request.nl_failure_policy,
                 "step_tree_enabled": self.step_tree_enabled,
                 "record_failed_attempts": request.record_failed_attempts,
-                "max_steps": request.max_steps,
-                "max_backtests_per_fold": request.max_backtests,
-                "deadline_seconds": request.deadline_seconds,
                 "finalize_before_deadline_seconds": request.finalize_before_deadline_seconds,
                 "sandbox_spec": sandbox_spec.to_record(),
                 "prior_prompt": request.prior,
-                "fold_exploration_directive": self.fold_exploration_directive.strip(),
+                "exploration_directive": self.fold_exploration_directive.strip(),
                 "budgets": {
-                    "max_steps": request.max_steps,
-                    "max_backtests": request.max_backtests,
-                    "max_null_controls_per_fold": request.max_null_controls,
+                    "max_replay_years": request.max_replay_years,
+                    "max_null_controls": request.max_null_controls,
                     "max_llm_calls": request.max_llm_calls,
                     # deadline_seconds is the whole session wall clock;
                     # the grace is the trailing wrap-up slice of it, so
@@ -2463,13 +2440,12 @@ class LLMFoldDeveloper:
             self.workspace_reference,
             repo_root=self.repo_root,
         )
-        history = research_history(self.ledger.read())
         _environment_phase(request.progress_hook, "pit_view", request.run_id)
         self._install_snapshot_view(
             local,
             request,
             start=request.input_window_start,
-            end=span.end,
+            end=request.validation.end,
         )
         safe = SafeWorkspace(workspace_root)
         # Read-only exploration reaches the PIT view, the start node's
@@ -2500,14 +2476,14 @@ class LLMFoldDeveloper:
             # own for the next one. The system prompt carries the seed.
             prior_text = request.prior.strip()
             prior_path.write_text(prior_text + ("\n" if prior_text else ""), encoding="utf-8")
-            facts = self._fold_facts(
+            facts = self._session_facts(
                 request,
-                history,
+                records,
                 manifest=manifest,
                 paths=paths,
                 models_dir=models_dir,
             )
-            write_json_atomic(inputs_dir / "fold_context.json", facts)
+            write_json_atomic(inputs_dir / SESSION_CONTEXT_NAME, facts)
             chmod_tree(inputs_dir, file_mode=0o444, dir_mode=0o555)
 
             modification = ModificationCheckTool(
@@ -2523,7 +2499,7 @@ class LLMFoldDeveloper:
                 max_calls=request.max_llm_calls,
                 time_budget=time_budget,
             )
-            backtest = FoldBacktestTool(
+            backtest = SessionValidations(
                 request=request,
                 output_dir=output_dir,
                 models_dir=models_dir,
@@ -2551,12 +2527,6 @@ class LLMFoldDeveloper:
                 scratch_root=paths.runtime / "smoke",
                 time_budget=time_budget,
             )
-            parent_main_py = (source / "main.py") if start is not None else None
-            # One rule check for the session: ``finish_fold`` refuses or annotates
-            # a nomination with it, and the Runner labels every hard-finalization
-            # candidate with it, so the two never disagree about which node the
-            # Pipeline would accept.
-            hard_rule_check = acceptance_hard_rule_check(request.acceptance_rules)
             tools: list[Tool] = [
                 ReadFileTool(search_roots),
                 GrepTool(search_roots),
@@ -2585,7 +2555,6 @@ class LLMFoldDeveloper:
                         constraints=request.modification_constraints,
                         readonly_baseline=seeded_readonly,
                     ),
-                    parent_main_py=parent_main_py,
                     trace_emit=trace.emit,
                 ),
             ]
@@ -2599,25 +2568,22 @@ class LLMFoldDeveloper:
             if self.step_tree_enabled:
                 tools.append(
                     StepRollbackTool(
-                        tree, output_dir, models_dir, fold_id=session_ref, run_id=run_ref
+                        tree, output_dir, models_dir, session_ref=session_ref, run_id=run_ref
                     )
                 )
             # Matches the opaque session ref the step tree stores, so the
-            # current-session check compares like with like.
+            # current-session check compares like with like. One gate for the
+            # session: ``finish_session`` refuses a failing nomination with it,
+            # and the Runner labels every hard-finalization candidate with it.
             tools.append(
-                FinishFoldTool(
+                FinishSessionTool(
                     tree,
-                    fold_id=session_ref,
-                    run_id=run_ref,
-                    parent_main_py=parent_main_py,
+                    session_ref=session_ref,
+                    run_ref=run_ref,
+                    freeze_gate=backtest.freeze_gate,
+                    last_session=request.session_index == request.sessions_total,
                     another_round_fits=lambda: another_batch_round_fits(backtest),
-                    budget_status=lambda: fold_budget_status(backtest),
-                    hard_rule_check=hard_rule_check,
-                    null_controls=(
-                        (lambda: null_control_tool.blocks)
-                        if null_control_tool is not None
-                        else None
-                    ),
+                    budget_status=lambda: session_budget_status(backtest),
                 )
             )
             budgeted = SessionBudgetLLM(self.llm, budget=shared_budget, role="main")
@@ -2634,7 +2600,7 @@ class LLMFoldDeveloper:
                 else None
             )
             subagent_tools = ToolRegistry(
-                build_fold_subagent_tools(
+                build_subagent_tools(
                     search_roots, safe, command_runner, modification, smoke
                 )
             )
@@ -2660,12 +2626,11 @@ class LLMFoldDeveloper:
                 tools=ToolRegistry(tools),
                 system_prompt=build_system_prompt(
                     self.schedule,
-                    mode="fold",
                     experiment_facts=facts,
                     step_tree_enabled=self.step_tree_enabled,
                     prior_prompt=prior_text,
-                    fold_exploration_directive=self.fold_exploration_directive,
-                    fold_directive=request.directive,
+                    exploration_directive=self.fold_exploration_directive,
+                    session_directive=request.directive,
                 ),
                 config=AgentSessionConfig(
                     finalize_before_deadline_seconds=(
@@ -2673,7 +2638,6 @@ class LLMFoldDeveloper:
                     ),
                     deadline_grace_seconds=request.deadline_grace_seconds,
                     max_llm_calls=request.max_llm_calls,
-                    max_steps=request.max_steps,
                     deadline_seconds=request.deadline_seconds,
                     max_response_tokens=self.max_response_tokens,
                 ),
@@ -2698,10 +2662,10 @@ class LLMFoldDeveloper:
                     session_key=request.session_key,
                     run_id=request.run_id,
                 ),
-                hard_rule_check=hard_rule_check,
+                freeze_gate=backtest.freeze_gate,
             )
             try:
-                result = runner.run(FOLD_DEFAULT_INSTRUCTION)
+                result = runner.run(SESSION_DEFAULT_INSTRUCTION)
                 conversation_id = result.conversation_id
                 outcome, node_id, reason = _session_outcome(result.finish_value)
             except AgentSessionDeadlineExceeded as exc:
@@ -2725,7 +2689,7 @@ class LLMFoldDeveloper:
             steps = tuple(backtest.steps)
             if outcome == "freeze" and node_id not in {step.step_id for step in steps}:
                 raise RuntimeError(
-                    "finish_fold nominated a node absent from this session's Validations"
+                    "finish_session nominated a node absent from this session's Validations"
                 )
             manifest.update(
                 conversation_id=conversation_id,
@@ -2744,7 +2708,9 @@ class LLMFoldDeveloper:
                 outcome,
                 node_id=node_id,
                 reason=reason,
-                finish_reason="deadline_grace_exhausted" if outcome == "deadline" else "llm_agent_finish_fold",
+                finish_reason=(
+                    "deadline_grace_exhausted" if outcome == "deadline" else "llm_agent_finish_session"
+                ),
                 prior=prior,
                 # The nulls the session already drew, for the freeze to reuse.
                 null_controls=(
@@ -2771,7 +2737,7 @@ class LLMFoldDeveloper:
         """Hand the experiment-level step tree to the session and mark the start node.
 
         With the step tree disabled the session still records its own run
-        nodes -- ``finish_fold`` selects one of them -- but the lineage is not
+        nodes -- ``finish_session`` selects one of them -- but the lineage is not
         inherited from earlier sessions and is not published back, so the
         ablation removes the cross-session memory the knob is about.
         """
@@ -2824,15 +2790,15 @@ class LLMFoldDeveloper:
             )
         install_agent_data_contract(
             local.paths,
-            kind="fold",
-            fold_id=self.ref_store.get_or_create("fold", request.session_id),
+            kind=RESEARCH_STAGE,
+            session_ref=self.ref_store.get_or_create("session", request.session_id),
             views={"snapshot": (target, "/mnt/snapshot")},
         )
 
-    def _fold_facts(
+    def _session_facts(
         self,
         request: ResearchSessionRequest,
-        history: list[dict[str, object]],
+        records: Sequence[Mapping[str, object]],
         *,
         manifest: RunManifest,
         paths,
@@ -2860,10 +2826,21 @@ class LLMFoldDeveloper:
                     not any(models_dir.iterdir()) if models_dir.exists() else True
                 ),
             ),
-            "development_history": history,
-            "workspace": fold_workspace_map(paths.workspace),
-            "forbidden": FOLD_FORBIDDEN,
+            **session_fact_blocks(records, paths.workspace),
         }
+
+
+def session_fact_blocks(
+    records: Sequence[Mapping[str, object]], workspace: str | Path
+) -> dict[str, object]:
+    """The facts a session gets beside the manifest projection: the earlier
+    sessions' outcomes, the workspace index and the forbidden list."""
+
+    return {
+        "earlier_sessions": research_history(records),
+        "workspace": session_workspace_map(workspace),
+        "forbidden": SESSION_FORBIDDEN,
+    }
 
 
 def research_history(records: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
@@ -2873,24 +2850,110 @@ def research_history(records: Sequence[Mapping[str, object]]) -> list[dict[str, 
     compacted, so a row does not grow with how many candidates a session ran.
     """
 
-    return [
-        {
-            "session": record.get("session_id"),
-            "outcome": record.get("outcome"),
-            "reason": record.get("reason"),
-            "validations": len(record.get("steps") or ()),
-        }
+    rows: list[dict[str, object]] = []
+    for record in research_records(records):
+        gate = record.get("freeze_gate")
+        dsr = gate.get("deflated_sharpe") if isinstance(gate, Mapping) else None
+        rows.append(
+            {
+                "session": record.get("session_id"),
+                "outcome": record.get("outcome"),
+                "reason": record.get("reason"),
+                "validations": len(record.get("steps") or ()),
+                "next_start_node_id": record.get("next_start_node_id"),
+                "freeze_gate": (
+                    {
+                        "nominated_step_id": record.get("nominated_step_id"),
+                        "passed": gate.get("passed"),
+                        "reasons": gate.get("reasons"),
+                        "deflated_sharpe_probability": (
+                            dsr.get("deflated_sharpe_probability")
+                            if isinstance(dsr, Mapping)
+                            else None
+                        ),
+                    }
+                    if isinstance(gate, Mapping)
+                    else None
+                ),
+            }
+        )
+    return rows
+
+
+def session_position_record(index: int, total: int) -> dict[str, object]:
+    """Which research session this is, and whether another follows it."""
+
+    return {"index": index, "of": total, "last": index == total}
+
+
+def research_geometry_record(
+    years: Sequence[object], *, input_window_start: str, decision_time: str
+) -> dict[str, object]:
+    """The research period as a session may know it: research dates only.
+
+    ``years`` are the research years in order, anything with ``label``,
+    ``start`` and ``end``. The periods after research end exist and are
+    sealed; neither their dates nor their slots are named anywhere a session
+    can read.
+    """
+
+    first, last = years[0], years[-1]
+    return {
+        "decision_time": decision_time,
+        "input_window": f"{input_window_start}..{last.end}",  # type: ignore[attr-defined]
+        "research_period": f"{first.start}..{last.end}",  # type: ignore[attr-defined]
+        "years": [
+            {"label": year.label, "start": year.start, "end": year.end}  # type: ignore[attr-defined]
+            for year in years
+        ],
+        "spans": (
+            f"{FULL_SPAN} (every year), one year such as Y1, or contiguous years such "
+            f"as Y1..Y{len(years)}"
+        ),
+    }
+
+
+def start_record(node_id: str | None) -> dict[str, object]:
+    """Where the session's working copy was seeded from."""
+
+    if node_id is None:
+        return {"kind": "template", "template_ref": "agent_output_template"}
+    return {"kind": "step_node", "node_id": node_id}
+
+
+def arm_record(records: Sequence[Mapping[str, object]]) -> dict[str, object]:
+    """The arm's selection state when a session starts.
+
+    Trials are the distinct revisions validated in earlier sessions, the pool
+    the freeze gate deflates over before this session adds its own; a session
+    only runs while nothing is frozen.
+    """
+
+    rows = [
+        row
         for record in research_records(records)
+        for row in (record.get("steps") or ())
+        if isinstance(row, Mapping)
     ]
+    return {
+        "frozen": False,
+        "freezes_per_arm": 1,
+        "trials_to_date": len({str(row.get("revision_id")) for row in rows}),
+        "full_span_validations_to_date": sum(
+            1 for row in rows if row.get("span") == FULL_SPAN
+        ),
+    }
 
 
 # The session's writable handoff file, at the workspace root.
 PRIOR_WORKSPACE_NAME = "PRIOR.md"
+# The read-only facts file of a session, under ``workspace/inputs``.
+SESSION_CONTEXT_NAME = "session_context.json"
 
 # The ``forbidden`` fact of a research session.
-FOLD_FORBIDDEN = [
-    "current_test",
-    "future_data",
+SESSION_FORBIDDEN = [
+    "data_after_research_end",
+    "forward_period",
     "heldout",
     "external_network",
     "host_control",
@@ -2898,23 +2961,16 @@ FOLD_FORBIDDEN = [
 
 
 def _session_outcome(finish: Mapping[str, object]) -> tuple[str, str | None, str]:
-    """``finish_fold``'s finish as the research session's outcome.
+    """``finish_session``'s finish as the research session's outcome."""
 
-    A nomination asks for the freeze; ``no_edge`` nominates nothing and
-    research continues from where this session started; ``terminate`` ends the
-    arm without a deliverable.
-    """
-
-    outcome = str(finish.get("outcome") or "select")
+    outcome = str(finish.get("outcome") or "")
     reason = str(finish.get("reason") or "")
-    if outcome == "no_edge":
-        return "continue", None, reason
-    if outcome == "terminate":
-        return "no_edge", None, reason
-    node_id = str(finish.get("node_id") or "")
-    if not node_id:
-        raise RuntimeError("research session Agent did not nominate a validated node")
-    return "freeze", node_id, reason
+    node_id = str(finish.get("node_id") or "") or None
+    if outcome == "freeze" and node_id is None:
+        raise RuntimeError("research session Agent froze without naming a node")
+    if outcome not in ("continue", "freeze", "no_edge"):
+        raise RuntimeError(f"research session Agent finished with {outcome!r}")
+    return outcome, node_id if outcome != "no_edge" else None, reason
 
 
 _WORKSPACE_REFS_DIR = "refs"
@@ -2922,12 +2978,12 @@ _REFERENCE_SKIP_NAMES = frozenset({".git", "__pycache__", "node_modules", ".venv
 _REFERENCE_PDF_MAX_BYTES = 256 * 1024
 
 
-def fold_workspace_map(workspace: str | Path) -> dict[str, str]:
+def session_workspace_map(workspace: str | Path) -> dict[str, str]:
     """Agent-visible workspace index. ``refs`` is omitted when the directory is absent."""
     mapping = {
         "strategy": "output/main.py",
         "models": "models/",
-        "fold_context": "inputs/fold_context.json",
+        "session_context": f"inputs/{SESSION_CONTEXT_NAME}",
         "data_summary": "/mnt/artifacts/data_summary.json",
         "snapshot_in_sandbox": "/mnt/snapshot",
         "prior": PRIOR_WORKSPACE_NAME,
@@ -2967,7 +3023,7 @@ def install_workspace_reference(
 
     An empty ``workspace_reference`` is a no-op. A set path must exist and be a
     directory, otherwise this fails immediately. The copy writes only ``refs/``,
-    never ``output/``, ``models/``, or ``inputs/``. Each Fold/Meta session has a
+    never ``output/``, ``models/``, or ``inputs/``. Each research session has a
     fresh workspace, so later sessions see the notes only because this hook runs
     again.
     """
@@ -3115,8 +3171,8 @@ def _read_json_if_exists(path: Path) -> dict[str, object]:
 __all__ = [
     "DeterministicBaselineDeveloper",
     "FilesystemArtifactStore",
-    "fold_workspace_map",
-    "LLMFoldDeveloper",
+    "session_workspace_map",
+    "LLMResearchDeveloper",
     "LocalDailyEvaluationBackend",
     "LocalDailySnapshotProvider",
     "SessionBudgetLLM",

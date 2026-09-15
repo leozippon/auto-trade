@@ -62,7 +62,8 @@ from .config import (
     SnapshotProvider,
     StepResult,
     StrategyExperimentConfig,
-    fold_session_deadline_seconds,
+    research_span,
+    session_deadline_seconds,
 )
 from .hitl_state import research_session_key
 from .ledger import (
@@ -106,7 +107,7 @@ from .verdict import (
 
 # A per-session deadline override may raise the session deadline above the
 # configured maximum, bounded by this absolute ceiling in minutes: twice the
-# default session budget (config.max_fold_minutes), enough headroom for one
+# default session budget (config.max_session_minutes), enough headroom for one
 # slow session without letting it run unattended for days.
 _MAX_DEADLINE_OVERRIDE_MINUTES = 1440
 
@@ -217,12 +218,15 @@ class RollingExperimentPipeline:
 
     # ---- research ------------------------------------------------------
 
-    def research_inputs(self) -> tuple[SnapshotBundle, ReplaySpan]:
-        """The decision view at research end and the whole research span.
+    def research_inputs(self) -> tuple[SnapshotBundle, tuple[ReplaySpan, ...]]:
+        """The decision view at research end and the research years.
 
-        Prepared from the research geometry alone: every slot ends by research
-        end and every anchor is at or before its decision time, so no row
-        stamped after research end reaches a research session.
+        Each year is a one-slot span over its slot and the decision view at its
+        anchor; the spans a Validation replays are resolved from them
+        (``config.research_span``). Prepared from the research geometry alone:
+        every slot ends by research end and every anchor is at or before its
+        decision time, so no row stamped after research end reaches a research
+        session.
         """
 
         geometry = self.config.geometry
@@ -248,15 +252,16 @@ class RollingExperimentPipeline:
         decision = self.snapshots.prepare_decision(
             decision_time=geometry.research_decision_time
         )
-        span = ReplaySpan(
-            label=FULL_SPAN,
-            mode=RESEARCH_PHASE,
-            start=years[0].start,
-            end=years[-1].end,
-            snapshot=bundles[0],
-            continuation=tuple(bundle.replay_ref for bundle in bundles[1:]),
+        return decision, tuple(
+            ReplaySpan(
+                label=slot.label,
+                mode=RESEARCH_PHASE,
+                start=slot.start,
+                end=slot.end,
+                snapshot=bundle,
+            )
+            for slot, bundle in zip(years, bundles, strict=True)
         )
-        return decision, span
 
     def run_research_session(
         self, index: int, *, session_context: dict[str, object] | None = None
@@ -313,7 +318,7 @@ class RollingExperimentPipeline:
         self.run_markers.begin(attempt)
         try:
             _publish_progress(progress, "pit_snapshot", run_id=run_id, phase=RESEARCH_STAGE)
-            decision, span = self.research_inputs()
+            decision, years = self.research_inputs()
             session = self.developer(
                 ResearchSessionRequest(
                     experiment_id=self.config.experiment_id,
@@ -324,13 +329,12 @@ class RollingExperimentPipeline:
                     start=start,
                     snapshot=decision,
                     decision_time=self.config.geometry.research_decision_time,
-                    validation=span,
+                    research_years=years,
                     input_window_start=_months_before(
                         self.config.geometry.research_end, self.config.window_months
                     ),
                     prior=previous_prior,
-                    max_steps=int(budgets["max_steps"]),
-                    max_backtests=int(budgets["max_backtests"]),
+                    max_replay_years=int(budgets["max_replay_years"]),
                     max_llm_calls=int(budgets["max_llm_calls"]),
                     deadline_seconds=budgets["deadline_seconds"],
                     deadline_grace_seconds=budgets["deadline_grace_seconds"],
@@ -342,7 +346,7 @@ class RollingExperimentPipeline:
                     record_failed_attempts=self.config.record_failed_attempts,
                     nl_failure_policy=self.config.nl_failure_policy,
                     finalize_before_deadline_seconds=self.config.finalize_before_deadline_seconds,
-                    max_null_controls=self.config.max_null_controls_per_fold,
+                    max_null_controls=self.config.max_null_controls_per_session,
                     progress_hook=progress,
                     session_key=session_id,
                     skills_source_ref=(
@@ -350,8 +354,12 @@ class RollingExperimentPipeline:
                     ),
                 )
             )
-            if len(session.steps) > budgets["max_steps"]:
-                raise RuntimeError("research session exceeded the Step budget")
+            spent = sum(research_span(years, step.span).slots for step in session.steps)
+            if spent > budgets["max_replay_years"]:
+                raise RuntimeError(
+                    f"research session replayed {spent} replay-years, over its budget "
+                    f"of {budgets['max_replay_years']}"
+                )
             step_rows = [research_step_record(step) for step in session.steps]
             last = index == self.config.research_sessions
             next_start = start_node_id
@@ -437,7 +445,7 @@ class RollingExperimentPipeline:
                 "agent_trace_ref": str(trace) if trace.exists() else None,
                 "snapshot_ids": {
                     "decision": decision.snapshot_id,
-                    "research_span": span.snapshot.snapshot_id,
+                    "research_span": years[0].snapshot.snapshot_id,
                 },
                 **_session_timing(context, run_started),
             }
@@ -958,7 +966,7 @@ def artifact_from_step_node(experiment_dir: Path, node_id: str) -> FrozenArtifac
         path=output_dir,
         model_path=models_dir if models_dir.is_dir() else None,
         source_run_id=str(node.get("run_id") or ""),
-        source_fold_id=str(node.get("fold_id") or ""),
+        source_fold_id=str(node.get("session_ref") or ""),
         source_step_id=node_id,
         revision_id=str(node.get("revision_id") or ""),
     )
@@ -1181,10 +1189,9 @@ def _session_budgets(
     config: RollingExperimentConfig, override: object
 ) -> dict[str, int | float]:
     limits: dict[str, int | float] = {
-        "max_steps": config.max_steps_per_fold,
-        "max_backtests": config.max_backtests_per_fold,
+        "max_replay_years": config.max_replay_years_per_session,
         "max_llm_calls": config.max_llm_calls,
-        "deadline_seconds": config.max_fold_minutes * 60,
+        "deadline_seconds": config.max_session_minutes * 60,
     }
     if override not in (None, {}):
         if not isinstance(override, dict):
@@ -1215,7 +1222,7 @@ def _session_budgets(
     # Grace is not a resource_override key: add it after the override check so
     # the session budget and the runner reservation share one config source.
     main_minutes = float(limits["deadline_seconds"]) / 60.0
-    limits["deadline_seconds"] = fold_session_deadline_seconds(
+    limits["deadline_seconds"] = session_deadline_seconds(
         main_minutes, config.deadline_grace_minutes
     )
     limits["deadline_grace_seconds"] = float(config.deadline_grace_minutes) * 60.0

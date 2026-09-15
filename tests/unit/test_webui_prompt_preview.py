@@ -19,11 +19,12 @@ from autotrade.agent import prompts
 from autotrade.agent.experiment_facts import (
     BATCH_VALIDATE_FIT_TIMEOUT_NOTE,
     DEADLINE_SECONDS_NOTE,
+    REPLAY_YEARS_NOTE,
 )
 from autotrade.agent.prompts import (
-    FOLD_DEFAULT_INSTRUCTION,
-    FOLD_DYNAMIC_CONTEXT_HEADER,
-    FOLD_STATIC_SECTIONS,
+    SESSION_DEFAULT_INSTRUCTION,
+    SESSION_DYNAMIC_CONTEXT_HEADER,
+    SESSION_STATIC_SECTIONS,
     STEP_TREE_SECTION,
 )
 from autotrade.environment.identity import AgentRefStore
@@ -31,8 +32,8 @@ from autotrade.environment.sandbox import SandboxLimits
 from autotrade.pipelines.config import (
     DEFAULT_DEADLINE_GRACE_MINUTES,
     DEFAULT_RESEARCH_GEOMETRY,
-    fold_session_deadline_seconds,
     rolling_default,
+    session_deadline_seconds,
 )
 from autotrade.pipelines.hitl_state import build_session_plan
 from autotrade.pipelines.local_backend import BATCH_VALIDATE_MAX_CONCURRENCY
@@ -136,20 +137,20 @@ def _preview_of(directory: Path, repo: Path, session_key: str) -> str:
 
 def test_research_preview_carries_every_current_prompt_section(tmp_path: Path):
     prompt = str(_preview(tmp_path)["prompt"])
-    for section in FOLD_STATIC_SECTIONS:
+    for section in SESSION_STATIC_SECTIONS:
         assert section.strip() in prompt
     # Enabled by default, so the lineage rules must be in the preview too.
     assert STEP_TREE_SECTION.strip() in prompt
-    assert FOLD_DYNAMIC_CONTEXT_HEADER.strip() in prompt
+    assert SESSION_DYNAMIC_CONTEXT_HEADER.strip() in prompt
     # The opening user message the session is actually started with.
-    assert FOLD_DEFAULT_INSTRUCTION.strip() in prompt
+    assert SESSION_DEFAULT_INSTRUCTION.strip() in prompt
     for tool in (
         "batch_validate",
         "report_issue",
         "modification_check",
         "smoke_backtest",
         "step_rollback",
-        "finish_fold",
+        "finish_session",
         "write_skill",
     ):
         assert f"`{tool}`" in prompt
@@ -163,18 +164,18 @@ def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path)
     limits = SandboxLimits()
     assert facts["budgets"] == {
         "context_compaction": facts["budgets"]["context_compaction"],
-        "deadline_seconds": fold_session_deadline_seconds(
-            rolling_default("max_fold_minutes"), DEFAULT_DEADLINE_GRACE_MINUTES
+        "deadline_seconds": session_deadline_seconds(
+            rolling_default("max_session_minutes"), DEFAULT_DEADLINE_GRACE_MINUTES
         ),
         "deadline_seconds_note": DEADLINE_SECONDS_NOTE,
         "deadline_grace_seconds": DEFAULT_DEADLINE_GRACE_MINUTES * 60.0,
         "finalize_before_deadline_seconds": rolling_default(
             "finalize_before_deadline_seconds"
         ),
-        "max_backtests_per_fold": rolling_default("max_backtests_per_fold"),
-        "max_null_controls_per_fold": rolling_default("max_null_controls_per_fold"),
+        "max_replay_years": rolling_default("max_replay_years_per_session"),
+        "max_replay_years_note": REPLAY_YEARS_NOTE,
+        "max_null_controls": rolling_default("max_null_controls_per_session"),
         "max_llm_calls": rolling_default("max_llm_calls"),
-        "max_steps": rolling_default("max_steps_per_fold"),
         "strategy_fit_timeout_seconds": float(
             rolling_default("strategy_fit_timeout_seconds")
         ),
@@ -185,23 +186,21 @@ def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path)
         "batch_validate_fit_timeout_note": BATCH_VALIDATE_FIT_TIMEOUT_NOTE,
     }
     # The whole research period, read at research end.
-    assert facts["research_scope"]["development_window"].endswith(
-        f"{GEOMETRY.research_start}..{GEOMETRY.research_end}."
-    )
-    assert (
-        facts["visible_timeline"]["current_decision_time"]
-        == GEOMETRY.research_decision_time.isoformat()
-    )
+    geometry = facts["research_geometry"]
+    assert geometry["research_period"] == f"{GEOMETRY.research_start}..{GEOMETRY.research_end}"
+    assert geometry["decision_time"] == GEOMETRY.research_decision_time.isoformat()
+    assert [year["label"] for year in geometry["years"]] == ["Y1", "Y2", "Y3", "Y4"]
+    assert facts["identity"]["session"] == {"index": 1, "of": 2, "last": False}
     assert facts["artifact_contract"]["step_tree_enabled"] is True
     # Runtime-only facts are marked, never invented.
     assert facts["identity"]["run_id"] == RUNTIME_PLACEHOLDER
     assert facts["visible_timeline"]["execution_policy"]["text_available"] == RUNTIME_PLACEHOLDER
     assert (
         facts["budgets"]["deadline_seconds"] - facts["budgets"]["deadline_grace_seconds"]
-        == rolling_default("max_fold_minutes") * 60.0
+        == rolling_default("max_session_minutes") * 60.0
     )
     # The first session starts from the template.
-    assert facts["artifact_contract"]["parent"]["kind"] == "initial_template"
+    assert facts["artifact_contract"]["start"]["kind"] == "template"
     # No date after research end appears anywhere in the prompt.
     for day in (GEOMETRY.forward_start, GEOMETRY.forward_end, GEOMETRY.heldout_start, GEOMETRY.heldout_end):
         assert day not in prompt
@@ -209,7 +208,7 @@ def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path)
 
 
 @pytest.mark.parametrize(
-    "section", ("PROTOCOL_INSTRUCTION", "STEP_TREE_SECTION", "FOLD_DYNAMIC_CONTEXT_HEADER")
+    "section", ("PROTOCOL_INSTRUCTION", "STEP_TREE_SECTION", "SESSION_DYNAMIC_CONTEXT_HEADER")
 )
 def test_prompt_section_edits_reach_the_preview(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, section: str
@@ -232,19 +231,17 @@ def test_preview_follows_the_experiment_parameters(tmp_path: Path):
             tmp_path,
             FIRST_KEY,
             directive,
-            max_fold_minutes=90,
-            max_steps_per_fold=7,
-            max_backtests_per_fold=5,
+            max_session_minutes=90,
+            max_replay_years_per_session=7,
             max_llm_calls=123,
             disable_step_tree=True,
             fold_exploration_directive="以截面因子为主线",
         )["prompt"]
     )
     facts = _facts(prompt)
-    assert facts["budgets"]["max_steps"] == 7
-    assert facts["budgets"]["max_backtests_per_fold"] == 5
+    assert facts["budgets"]["max_replay_years"] == 7
     assert facts["budgets"]["max_llm_calls"] == 123
-    assert facts["budgets"]["deadline_seconds"] == fold_session_deadline_seconds(
+    assert facts["budgets"]["deadline_seconds"] == session_deadline_seconds(
         90, DEFAULT_DEADLINE_GRACE_MINUTES
     )
     assert STEP_TREE_SECTION.strip() not in prompt
@@ -254,10 +251,11 @@ def test_preview_follows_the_experiment_parameters(tmp_path: Path):
 
 def test_a_later_session_shows_the_handoff_without_inventing_its_start(tmp_path: Path):
     """Before the first session is recorded, the second one's start node is a
-    runtime fact; once it is, the PRIOR that session left reaches the preview."""
+    runtime fact; once it is, the node and the PRIOR that session left reach
+    the preview."""
     directory, repo = _experiment(tmp_path)
     waiting = _facts(_preview_of(directory, repo, SECOND_KEY))
-    assert waiting["artifact_contract"]["parent"]["id"] == RUNTIME_PLACEHOLDER
+    assert waiting["artifact_contract"]["start"]["node_id"] == RUNTIME_PLACEHOLDER
     handoff = "动量腿在研究期稳定，下一会话复核同一机制。"
     ledger = directory / "ledgers" / "experiment_ledger.jsonl"
     ledger.parent.mkdir(parents=True)
@@ -273,7 +271,7 @@ def test_a_later_session_shows_the_handoff_without_inventing_its_start(tmp_path:
                 "session_id": "s1",
                 "outcome": "continue",
                 "reason": "",
-                "next_start_node_id": "research__fold_ref_x__run_ref_y__valid_001",
+                "next_start_node_id": "research__session_ref_x__run_ref_y__valid_001",
                 "steps": [],
                 "prior": handoff,
             }
@@ -284,8 +282,13 @@ def test_a_later_session_shows_the_handoff_without_inventing_its_start(tmp_path:
     prompt = _preview_of(directory, repo, SECOND_KEY)
     assert handoff in prompt
     facts = _facts(prompt)
-    assert facts["artifact_contract"]["parent"]["id"] == RUNTIME_PLACEHOLDER
-    assert "research__fold_ref_x__run_ref_y__valid_001" not in prompt
+    start = facts["artifact_contract"]["start"]
+    assert start == {
+        "kind": "step_node",
+        "node_id": "research__session_ref_x__run_ref_y__valid_001",
+        "model_artifacts_empty": RUNTIME_PLACEHOLDER,
+    }
+    assert facts["earlier_sessions"][0]["outcome"] == "continue"
 
 
 def test_unknown_and_forward_sessions_are_rejected(tmp_path: Path):

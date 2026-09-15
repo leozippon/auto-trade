@@ -362,7 +362,7 @@ def _build_worker_params(
         "research_sessions": args.research_sessions,
         "strategy_period": args.strategy_period,
         "inference_time": args.inference_time,
-        "max_fold_minutes": args.max_fold_minutes,
+        "max_session_minutes": args.max_session_minutes,
         "window_months": args.window_months,
         "intraday_trade_days": args.intraday_trade_days,
         "include_events": args.include_events,

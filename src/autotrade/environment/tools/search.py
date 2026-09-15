@@ -70,7 +70,7 @@ SEARCH_ROOTS = (
 )
 GREP_OUTPUT_MODES = ("content", "files", "count")
 # Read-only mounts populated before the session starts: offered only when
-# non-empty (a Meta session mounts no snapshot). ``artifacts``/``steps`` fill
+# non-empty (a local session may mount no snapshot). ``artifacts``/``steps`` fill
 # during the session and are offered whenever they exist.
 _MOUNTED_ROOTS = frozenset({"snapshot", "train", "valid", "parent_output", "parent_models"})
 # Roots that live outside the writable workspace tree; resolved from the
@@ -121,8 +121,8 @@ class SearchRoots:
     @property
     def names(self) -> tuple[str, ...]:
         """Root names offered to the Agent: allowlisted, present on disk and,
-        for the mounted read-only roots, non-empty (a Meta session mounts no
-        snapshot, so an empty ``snapshot`` root is not offered)."""
+        for the mounted read-only roots, non-empty (an empty ``snapshot`` root
+        is not offered)."""
         available = tuple(
             name
             for name, base in self._roots.items()

@@ -242,8 +242,8 @@ class InteractiveExperimentRunner:
                         ids={
                             "experiment_id": self.experiment_id,
                             "epoch_id": session.kind,
-                            "fold_id": self.ref_store.get_or_create(
-                                "fold", session.session_key
+                            "session_ref": self.ref_store.get_or_create(
+                                "session", session.session_key
                             ),
                             "run_id": self.ref_store.get_or_create("run", run_id),
                             "session_kind": session.kind,

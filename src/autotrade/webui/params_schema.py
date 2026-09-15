@@ -100,7 +100,7 @@ _FIELDS: list[dict[str, object]] = [
     {
         "key": "forward_end",
         "group": "基本与排程",
-        "label": "前向测试终点",
+        "label": "前推期终点",
         "type": "string",
         "required": True,
         "help": "YYYYMMDD，必须是研究期终点之后第 12 个月的 6 月 30 日。冻结产物从研究期终点次日起连续回放到这里，再接着回放 Held-out。",
@@ -111,7 +111,7 @@ _FIELDS: list[dict[str, object]] = [
         "label": "Held-out 终点",
         "type": "string",
         "required": True,
-        "help": "YYYYMMDD，晚于前向测试终点；回放截到已固定发布的最后一个交易日，截断会记在前向记录里。",
+        "help": "YYYYMMDD，晚于前推期终点；回放截到已固定发布的最后一个交易日，截断会记在前推记录里。",
     },
     {
         "key": "research_sessions",
@@ -392,7 +392,7 @@ _FIELDS: list[dict[str, object]] = [
         "help": "剔除锚点收盘价高于该值的股票；留空不限制。",
     },
     # 预算与验收
-    {"key": "max_fold_minutes", "group": "预算与验收", "label": "单会话推理时长（分钟）", "type": "int",
+    {"key": "max_session_minutes", "group": "预算与验收", "label": "单会话推理时长（分钟）", "type": "int",
      "help": "每个研究会话的推理墙钟上限；回测耗时独立计算并回补。"},
     {"key": "min_return", "group": "预算与验收", "label": "验收目标验证收益", "type": "float",
      "help": "验证总收益目标值：低于只记警告，不阻止冻结（AcceptanceRules.min_return；冻结的硬校验只剩非有限指标与完整验证）。"},
@@ -403,20 +403,18 @@ _FIELDS: list[dict[str, object]] = [
         "group": "预算与验收",
         "label": "验收最大回撤",
         "type": "float",
-        "help": "回撤上限（0.25 = 25%）：研究期超限只记警告；毕业裁决要求前向与 Held-out 两段的回撤都不超过它。",
+        "help": "回撤上限（0.25 = 25%）：研究期超限只记警告；毕业裁决要求前推与 Held-out 两段的回撤都不超过它。",
     },
     {
         "key": "cost_stress_multiplier",
         "group": "预算与验收",
         "label": "毕业成本压力倍数",
         "type": "float",
-        "help": "毕业裁决的成本压力：前向段中性化超额在滑点放大到该倍数后仍须为正（按该段换手定价）。",
+        "help": "毕业裁决的成本压力：前推段中性化超额在滑点放大到该倍数后仍须为正（按该段换手定价）。",
     },
-    {"key": "max_steps_per_fold", "group": "预算与验收", "label": "单会话 Step 数上限", "type": "int",
-     "help": "单个研究会话完整验证回测驱动的 Step 数上限。"},
-    {"key": "max_backtests_per_fold", "group": "预算与验收", "label": "单会话回测次数上限", "type": "int",
-     "help": "回测独立计时（墙钟回补推理 deadline），该值限制其总次数。"},
-    {"key": "max_null_controls_per_fold", "group": "预算与验收", "label": "单会话按需空对照次数上限", "type": "int",
+    {"key": "max_replay_years_per_session", "group": "预算与验收", "label": "单会话回放预算（replay-year）", "type": "int",
+     "help": "一个候选在其验证区间覆盖的每个研究年份计 1：完整研究期计研究年数，一批按候选数乘年数预留；回测独立计时（墙钟回补推理 deadline）。"},
+    {"key": "max_null_controls_per_session", "group": "预算与验收", "label": "单会话按需空对照次数上限", "type": "int",
      "help": "研究会话内 run_null_control 工具的调用上限（冻结节点复用其结果）；0 表示不注册该工具。"},
     {"key": "max_llm_calls", "group": "预算与验收", "label": "单会话模型调用上限", "type": "int",
      "help": "每个研究会话的模型调用总次数上限；主循环、子代理与上下文压缩共享同一计数。"},
@@ -460,7 +458,7 @@ _FIELDS: list[dict[str, object]] = [
         "help": (
             "把跨实验知识只读挂载进每个研究会话工作区："
             f"策展层是仓库里人工维护的 {len(_OPERATING_MEMORY_ENTRIES)} 条运行经验；"
-            "毕业层是前向与 Held-out 判定为 graduated 的实验自己写下的 skills，"
+            "毕业层是前推与 Held-out 判定为 graduated 的实验自己写下的 skills，"
             "带来源实验与判定标记，由 Agent 自行取舍。会话不能改写或删除挂载内容。"
         ),
     },

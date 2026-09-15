@@ -42,7 +42,7 @@ SHELL_ARGV_MAX_CHARS = 4000
 # more than the capture cap loses the rest, explicitly.
 DEFAULT_SHELL_OUTPUT_CHARS = 40_000
 SHELL_CAPTURE_MAX_CHARS = 1_000_000
-# Trace audits show the same argv shapes recurring in every Fold, mostly on a
+# Trace audits show the same argv shapes recurring in every session, mostly on a
 # fresh sub-agent's first shell call: the command under ``cmd``/``command``,
 # the whole command line as one string (bare, or as the single element of a
 # one-element array), a JSON-encoded array, and a long ``python -c`` script
