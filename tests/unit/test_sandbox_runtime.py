@@ -29,6 +29,7 @@ from autotrade.environment.artifacts import (
 from autotrade.environment.executor import (
     DockerStrategyExecutor,
     ExecResult,
+    GpuMemoryContention,
     PersistentCommandRunner,
     StrategyExecutionError,
     StrategyRaised,
@@ -128,6 +129,7 @@ def _executor_for_process(
     executor.context_models_dir = ""
     executor._state_writable = False
     executor._fit_worker = None
+    executor.gpu_indices = []
     executor._reset_transport_state()
     if drain_stderr:
         thread = threading.Thread(target=executor._drain_stderr, daemon=True)
@@ -1421,6 +1423,65 @@ def test_a_worker_error_reply_is_the_strategys_own_exception():
         executor.close()
 
 
+# PyTorch's own report of a CUDA out-of-memory error, as captured in the sandbox
+# image with another container holding 38 GiB of the same L20.
+_CUDA_OOM = (
+    "CUDA out of memory. Tried to allocate 8.00 GiB. GPU 0 has a total capacity of 44.39 GiB "
+    "of which {free} is free. Process 786062 has 38.28 GiB memory in use. Process 788217 has "
+    "3.28 GiB memory in use. Of the allocated memory {own} is allocated by PyTorch, and 0 bytes "
+    "is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try "
+    "setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation."
+)
+
+
+@pytest.mark.parametrize(
+    ("text", "gpu_indices", "environment"),
+    [
+        # The card was taken: 2.82 GiB free plus 3 GiB of its own is below the floor.
+        (_CUDA_OOM.format(free="2.82 GiB", own="3.00 GiB"), [3], True),
+        # The strategy had 30 GiB and still ran out: its own error.
+        (_CUDA_OOM.format(free="1.20 GiB", own="29.00 GiB"), [3], False),
+        # Without a device the same text cannot be contention.
+        (_CUDA_OOM.format(free="2.82 GiB", own="3.00 GiB"), [], False),
+        # Another library's wording is not judged.
+        ("xgboost: out of memory on device 0", [3], False),
+    ],
+)
+def test_a_cuda_out_of_memory_reply_on_a_taken_card_is_an_environment_failure(
+    text: str, gpu_indices: list[int], environment: bool
+):
+    """An out-of-memory error is the strategy's only when it had the promised
+    free-memory floor to work with; below it the shared card failed the call,
+    and the attempt must fail and retry instead of scoring the strategy."""
+    reply = {"type": "error", "sequence": 0, "error": text}
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import json,sys,time; sys.stdin.readline(); "
+                f"print(json.dumps({reply!r}), flush=True); time.sleep(60)"
+            ),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    executor = _executor_for_process(process, drain_stderr=True)
+    executor.gpu_indices = gpu_indices
+    try:
+        with (
+            patch.object(executor, "_remove_container"),
+            pytest.raises(StrategyExecutionError) as failed,
+        ):
+            executor.execute(_context())
+        assert isinstance(failed.value, GpuMemoryContention) is environment
+        assert raised_by_strategy(failed.value) is not environment
+        assert text in str(failed.value)
+    finally:
+        executor.close()
+
+
 def test_request_write_timeout_aborts_worker_that_does_not_read_stdin():
     limits = SandboxLimits(timeout_seconds=0.05)
     process = subprocess.Popen(
@@ -1596,12 +1657,38 @@ def test_select_gpus_ranks_matching_devices_by_free_memory():
         # has the most free memory of all.
         assert select_gpus(1, require_name="L20") == [1]
         assert select_gpus(2, require_name="L20") == [1, 5]
-        assert select_gpus(3, require_name="L20") == [1, 5, 0]
         assert select_gpus(1) == [2]
         with pytest.raises(GpuUnavailableError, match="requested 4 GPU"):
             select_gpus(4, require_name="L20")
         with pytest.raises(GpuUnavailableError, match="available matching GPUs: none"):
             select_gpus(1, require_name="H100")
+
+
+def test_select_gpus_never_hands_out_a_card_below_the_free_memory_floor():
+    """The cards are shared with services outside the project: a device the
+    floor rules out is refused even when it is the only match, and the refusal
+    names every matching card's free memory."""
+    from autotrade.environment.gpu import (
+        MIN_FREE_GPU_MEMORY_MIB,
+        GpuUnavailableError,
+        select_gpus,
+    )
+
+    with patch("autotrade.environment.gpu.list_gpus", return_value=_GPU_ROSTER):
+        # GPU 0 matches L20 but has 8,000 MiB free.
+        assert 8_000 < MIN_FREE_GPU_MEMORY_MIB
+        with pytest.raises(GpuUnavailableError, match="2 qualify") as refused:
+            select_gpus(3, require_name="L20")
+        assert "0:NVIDIA L20 8000 MiB free" in str(refused.value)
+    taken = [{**_GPU_ROSTER[0], "memory_free_mib": MIN_FREE_GPU_MEMORY_MIB - 1}]
+    with (
+        patch("autotrade.environment.gpu.list_gpus", return_value=taken),
+        pytest.raises(GpuUnavailableError, match="0 qualify"),
+    ):
+        select_gpus(1, require_name="L20")
+    enough = [{**_GPU_ROSTER[0], "memory_free_mib": MIN_FREE_GPU_MEMORY_MIB}]
+    with patch("autotrade.environment.gpu.list_gpus", return_value=enough):
+        assert select_gpus(1, require_name="L20") == [0]
 
 
 def test_persistent_sandbox_start_pins_the_selected_gpus_on_the_container(tmp_path: Path):

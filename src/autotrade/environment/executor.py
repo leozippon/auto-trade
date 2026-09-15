@@ -21,7 +21,7 @@ from .contract_fingerprint import (
     SandboxImageContractMismatch,
     assert_image_contract_current,
 )
-from .gpu import device_request, select_gpus
+from .gpu import device_request, gpu_memory_contention, select_gpus
 from .runtime import chmod_tree
 from .sandbox import DockerSandbox, SandboxConfig, SandboxLimits, container_thread_env
 from .strategy import BarTable, FitSchedule, StrategyContext, StrategyFunction
@@ -61,6 +61,15 @@ class StrategyRaised(StrategyExecutionError):
     the only executor failure that is: a timeout, a broken pipe, a worker that
     never started or broke protocol stays a plain ``StrategyExecutionError``,
     because it measured the environment, not the strategy.
+    """
+
+
+class GpuMemoryContention(StrategyExecutionError):
+    """A strategy call ran out of GPU memory because the device was taken.
+
+    The strategy had less than the promised free-memory floor to work with
+    (``environment.gpu.gpu_memory_contention``), so the failure measured the
+    shared card, not the strategy: an environment failure like a timeout.
     """
 
 
@@ -412,7 +421,11 @@ class DockerStrategyExecutor:
                     return message.get("orders")
                 if message_type == "error":
                     # The worker's reply to a call whose strategy code raised.
-                    raise StrategyRaised(str(message.get("error") or "strategy worker failed"))
+                    text = str(message.get("error") or "strategy worker failed")
+                    contention = gpu_memory_contention(text) if self.gpu_indices else None
+                    if contention is not None:
+                        raise GpuMemoryContention(f"{contention}; strategy error: {text}")
+                    raise StrategyRaised(text)
                 raise StrategyExecutionError(f"unexpected strategy worker message: {message_type!r}")
         except (TimeoutError, BrokenPipeError, OSError, ValueError, json.JSONDecodeError) as exc:
             self._abort()
@@ -1018,6 +1031,7 @@ __all__ = [
     "DockerStrategyExecutor",
     "ExecResult",
     "FittableStrategyExecutor",
+    "GpuMemoryContention",
     "PersistentCommandRunner",
     "StrategyExecutionError",
     "StrategyExecutor",
