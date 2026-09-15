@@ -216,6 +216,8 @@ def test_missing_and_damaged_book_files_degrade_per_panel(tmp_path: Path):
     for projection in (trading.signal_payload, trading.history_payload, trading.performance_payload):
         assert projection(tmp_path, BOOK)["state"] == "absent", projection.__name__
     assert trading.book_status(tmp_path, BOOK)["state"] == "no_snapshot"
+    # Created, never run: nothing has settled, so the card counts no holdings.
+    assert trading.books_payload(tmp_path)["books"][0]["position_count"] is None
     root = engine_book(tmp_path, "20260105", "20260106")
     (root / ".paper_state.json").write_text("{broken", encoding="utf-8")
     for projection in (trading.book_payload, trading.signal_payload, trading.history_payload):
@@ -293,6 +295,12 @@ def test_the_overview_has_one_row_per_book_read_off_its_panels(tmp_path: Path):
     # The card names where the candidate came from and draws the book's own
     # curve; the drawdown the day count still gates has no tile.
     assert (alpha["candidate_source"], alpha["max_drawdown"]) == ("graduated", None)
+    # 持仓 is the one figure every settled book has: the lines its own 当前持仓
+    # panel lists, absent rather than zero before the first snapshot.
+    assert alpha["position_count"] == len(snapshot["positions"])
+    assert trading.books_payload(tmp_path)["books"][1]["position_count"] == len(
+        trading.snapshot_payload(tmp_path, "beta")["snapshot"]["positions"]
+    )
     assert alpha["curve"]["series"][0]["dates"] == performance_chart["account"]["dates"]
     # A book whose first decision has not settled yet has no return to show.
     assert (beta["total_return"], beta["order_count"]) == (None, 1)

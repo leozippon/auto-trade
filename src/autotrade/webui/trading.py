@@ -514,6 +514,9 @@ def books_payload(repo_root: Path, env: str = "paper") -> dict[str, object]:
         statistics = performance["statistics"] or {}
         chart = performance["chart"]
         account = snapshot_payload(repo_root, book, env)["snapshot"] or {}
+        # The lines the book's own 当前持仓 panel lists; absent, not zero, when
+        # no snapshot has been written yet.
+        positions = account.get("positions")
         status = book_status(repo_root, book, env)
         rows.append({
             "book_id": book,
@@ -523,6 +526,7 @@ def books_payload(repo_root: Path, env: str = "paper") -> dict[str, object]:
             "start_date": identity["start_date"],
             "initial_cash": (identity["book"] or {}).get("initial_cash"),
             "equity": account.get("equity"),
+            "position_count": len(positions) if positions is not None else None,
             "total_return": statistics.get("total_return"),
             "excess_return": statistics.get("excess_return"),
             "max_drawdown": statistics.get("max_drawdown"),

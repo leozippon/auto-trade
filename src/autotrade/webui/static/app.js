@@ -5988,7 +5988,7 @@ function mountedMemorySection(detail, payload) {
     return el(
       "div",
       { class: "hint" },
-      `已挂载记忆 · 挂载模式 ${payload.mode || "—"} · 还没有快照，下一次会话启动时补建`,
+      `已挂载记忆 · ${payload.mode || "—"} · 快照待会话启动时补建`,
     );
   const sources = snapshot.sources || [];
   const count = (origin) =>
@@ -6003,28 +6003,21 @@ function mountedMemorySection(detail, payload) {
   const graduated = count("graduated");
   const summary = [
     "已挂载记忆",
-    `挂载模式 ${snapshot.mode || payload.mode || "—"}`,
-    `快照 ${fmtTs(snapshot.created_at)}`,
-    `精选 ${curated} 条 · 毕业 ${graduated} 条`,
+    snapshot.mode || payload.mode || "—",
+    `精选 ${curated} · 毕业 ${graduated}`,
   ].join(" · ");
   const fold = el(
     "details",
     { class: "fold" },
-    el("summary", { class: "panel-summary" }, summary),
+    el("summary", {}, summary),
     el(
       "table",
       { class: "kv section-gap" },
       kvRow("快照时间", fmtTs(snapshot.created_at)),
-      kvRow("挂载模式", snapshot.mode || payload.mode || "—"),
       kvRow("已运行会话", `${payload.sessions_seen ?? 0} 个`),
       snapshot.created_from === "first_session"
         ? kvRow("快照来源", "由首个会话补建")
         : null,
-    ),
-    el(
-      "div",
-      { class: "hint" },
-      "本实验创建时的快照；库的后续改动作用于之后创建的实验。",
     ),
     curated + graduated
       ? mountedEntriesList(detail.experiment_id, sources)
@@ -6166,6 +6159,12 @@ function bookCard(row) {
   const tiles = presentTiles([
     { label: "总资产", value: row.equity, fmt: fmtAmount },
     { label: "累计收益", value: row.total_return, fmt: fmtPct, signed: true },
+    {
+      label: "持仓",
+      value: row.position_count,
+      fmt: (count) => `${count} 只`,
+      title: "最近一次结算收盘时的持仓只数",
+    },
     { label: "超额 vs 沪深300", value: row.excess_return, fmt: fmtPct, signed: true },
     { label: "最大回撤", value: row.max_drawdown, fmt: fmtPct },
     {
