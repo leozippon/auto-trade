@@ -10,6 +10,9 @@ exploding at the serializer.
 from __future__ import annotations
 
 import json
+import re
+import shutil
+import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -501,3 +504,46 @@ def test_degraded_states_raise_a_banner_and_skipped_lines_raise_a_chip():
     assert "行无法解析" in script
     # The unmapped flag reaches the researcher rather than sitting in the payload.
     assert "无法映射" in script
+
+
+def _js_top_level(script: str, opening: str) -> str:
+    """One top-level declaration of app.js, up to the next one."""
+    start = script.index(opening)
+    ends = [
+        index
+        for marker in ("\nfunction ", "\nasync function ", "\nconst ", "\n/*")
+        if (index := script.find(marker, start + 1)) != -1
+    ]
+    return script[start : min(ends)]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node required for the JS formatters")
+def test_prices_keep_their_cents_and_only_large_amounts_abbreviate():
+    """A per-share price is never a money amount: the amount formatter rounded a
+    38.389185 fill to ¥38. Prices print at cent resolution, and an amount below
+    ¥10,000 keeps its cents, as the Paper orders sheet prints both."""
+    script = _app_js()
+    harness = "\n".join(
+        [
+            _js_top_level(script, "const CENTS_FMT ="),
+            _js_top_level(script, "function fmtAmount("),
+            _js_top_level(script, "function fmtPrice("),
+            _js_top_level(script, "function fmtAmountOpt("),
+            "console.log(JSON.stringify(["
+            "fmtPrice(38.389185), fmtPrice(1450.123456), fmtPrice(0), fmtPrice(null),"
+            " fmtPrice(undefined), fmtPrice('n/a'), fmtAmount(5922), fmtAmount(43.5),"
+            " fmtAmount(-881.4), fmtAmount(146250), fmtAmount(2.5e8), fmtAmountOpt(null)]));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", harness], capture_output=True, text=True, timeout=60, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == [
+        "38.39", "1,450.12", "0.00", "—", "—", "—",
+        "¥5,922.00", "¥43.50", "¥-881.40", "¥14.6万", "¥2.50亿", "—",
+    ]
+    # Every price column goes through the price formatter.
+    for name in ("paperPositionsPanel", "paperDealsPanel", "paperOrdersPanel", "ordersNode"):
+        assert "fmtPrice(" in _js_top_level(script, f"function {name}("), name
+    assert not re.search(r"fmtAmount(Opt)?\(row\.(price|average_cost|last_price|reference_price)\)", script)

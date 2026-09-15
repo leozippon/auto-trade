@@ -819,11 +819,28 @@ function barPath(x, zeroY, valueY, w) {
   return `M${x},${zeroY} L${x + w},${zeroY} L${x + w},${y - r} Q${x + w},${y} ${x + w - r},${y} L${x + r},${y} Q${x},${y} ${x},${y - r} Z`;
 }
 
+/* Two decimals with thousands separators: the cent resolution the Paper orders
+   sheet prints (paper/orders.py `_money`, `_price`). */
+const CENTS_FMT = new Intl.NumberFormat("en-US", {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
+/* A money amount: 万 and 亿 abbreviate the large ones, anything below ¥10,000
+   keeps its cents. Never used for a per-share price, which is fmtPrice. */
 function fmtAmount(value) {
   const n = Number(value) || 0;
   if (Math.abs(n) >= 1e8) return `¥${(n / 1e8).toFixed(2)}亿`;
   if (Math.abs(n) >= 1e4) return `¥${(n / 1e4).toFixed(1)}万`;
-  return `¥${n.toFixed(0)}`;
+  return `¥${CENTS_FMT.format(n)}`;
+}
+
+/* A per-share price, whatever its size; "—" when the value is missing. */
+function fmtPrice(value) {
+  const number = Number(value);
+  return value === null || value === undefined || !Number.isFinite(number)
+    ? "—"
+    : CENTS_FMT.format(number);
 }
 
 /* Single-series bar chart (no legend needed for one series); direct value
@@ -841,7 +858,12 @@ function singleSeriesBarChart(
     return el("div", { class: "hint" }, "暂无数据");
   const signed = values.some((v) => v < 0);
   const maxAbs = niceCeil(Math.max(1e-9, ...values.map(Math.abs)));
-  const padL = 56,
+  const gridFracs = signed ? [-1, -0.5, 0.5, 1] : [0.5, 1];
+  // The left pad fits the widest axis label (11px text, about 6.5px a glyph).
+  const padL = Math.max(
+      56,
+      12 + 6.5 * Math.max(...gridFracs.map((frac) => fmt(frac * maxAbs).length)),
+    ),
     padR = 10,
     padB = 30,
     padT = signed ? 8 : 18;
@@ -851,7 +873,7 @@ function singleSeriesBarChart(
   const scale = signed ? plotH / 2 : plotH;
   const yOf = (v) => zeroY - (v / maxAbs) * scale;
   const svg = [];
-  for (const frac of signed ? [-1, -0.5, 0.5, 1] : [0.5, 1]) {
+  for (const frac of gridFracs) {
     const y = yOf(frac * maxAbs);
     svg.push(
       `<line x1="${padL}" y1="${y}" x2="${width - padR}" y2="${y}" stroke="${INK.grid}" stroke-width="1"/>`,
@@ -4760,9 +4782,10 @@ function ordersNode(experimentId, result) {
                 "tr",
                 {},
                 ...ORDER_TABLE_COLUMNS.map(([key]) => {
-                  let value = fmtOrderCell(key, row[key]);
-                  if (key === "price" && value !== null && value !== undefined)
-                    value = Number(value).toFixed(3);
+                  const value =
+                    key === "price"
+                      ? fmtPrice(row[key])
+                      : fmtOrderCell(key, row[key]);
                   return el(
                     "td",
                     {},
@@ -6156,8 +6179,8 @@ function paperPositionsPanel(account) {
             el("td", {}, row.symbol || "—"),
             el("td", {}, String(row.quantity ?? "—")),
             el("td", {}, String(row.available_quantity ?? "—")),
-            el("td", {}, fmtAmountOpt(row.average_cost)),
-            el("td", {}, fmtAmountOpt(row.last_price)),
+            el("td", {}, fmtPrice(row.average_cost)),
+            el("td", {}, fmtPrice(row.last_price)),
             el("td", {}, fmtAmountOpt(marketValue)),
             el("td", { class: numClass(pnl) }, fmtAmountOpt(pnl)),
           );
@@ -6244,7 +6267,7 @@ function paperDealsPanel(payload) {
             el("td", {}, row.symbol || "—"),
             actionCell(row.action),
             el("td", {}, String(row.quantity ?? "—")),
-            el("td", {}, fmtAmountOpt(row.price)),
+            el("td", {}, fmtPrice(row.price)),
             el("td", {}, row.status || "—"),
             el("td", {}, row.reason || "—"),
           ),
@@ -6303,13 +6326,7 @@ function paperOrdersPanel(payload) {
               el("td", {}, row.name || "—"),
               actionCell(row.action),
               el("td", {}, String(row.quantity ?? "—")),
-              el(
-                "td",
-                {},
-                row.reference_price == null
-                  ? "—"
-                  : Number(row.reference_price).toFixed(2),
-              ),
+              el("td", {}, fmtPrice(row.reference_price)),
               el(
                 "td",
                 {},
