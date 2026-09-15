@@ -129,6 +129,11 @@ class PublicIdentity:
         self._text_replacements[raw] = public
         return public
 
+    def raw_strategy_id(self, public_ref: str) -> str:
+        raw = self.store.resolve("strategy", public_ref)
+        self._text_replacements[raw] = public_ref
+        return raw
+
     def raw_run_id(self, public_ref: str) -> str:
         if public_ref.startswith("run_ref_"):
             raw = self.store.resolve("run", public_ref)

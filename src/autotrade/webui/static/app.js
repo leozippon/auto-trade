@@ -4760,15 +4760,79 @@ function toolRowsNode(tools) {
    inline download on every node with a snapshot. */
 function stepTreePanel(detail) {
   const host = el("div", {});
-  api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/steps`)
-    .then((payload) => {
-      if ((payload.nodes || []).length)
-        host.append(stepTreeSection(detail, payload));
-    })
-    .catch(() => {
-      /* no tree for this experiment */
-    });
+  const id = encodeURIComponent(detail.experiment_id);
+  // The tree and the artifact lineage are two reads of the same session; each
+  // renders on its own, so a store that cannot be read never costs the tree.
+  Promise.all([
+    api(`/api/experiments/${id}/steps`).catch(() => ({ nodes: [] })),
+    api(`/api/experiments/${id}/revisions`).catch(() => ({ revisions: [] })),
+  ]).then(([tree, history]) => {
+    if ((tree.nodes || []).length) host.append(stepTreeSection(detail, tree));
+    if ((history.revisions || []).length)
+      host.append(revisionLineageSection(detail, tree, history));
+  });
   return host;
+}
+
+/* Depth-first walk of one lineage, emitting each row with the rails that
+   attach it to its parent. Lineage chains dominate these trees (each row
+   parents on the previous one; measured trees run 16+ ancestors deep with <=6
+   forks), so columns advance ONLY at forks — a chain renders as a straight
+   vertical rail, and every parent-child edge is drawn explicitly: "tee"/"last"
+   elbows attach fork children, "chain" rails attach an only child to the row
+   above, and open sibling rails run past nested subtrees. The caller decides
+   which children are visible and which subtrees are collapsed; the Step tree
+   and the revision lineage share the rails so the two read as one vocabulary. */
+function walkLineage(roots, childrenOf, emit, collapsedOf = () => false) {
+  const walk = (siblings, guides, forked, inheritedOpen, hasParent) => {
+    siblings.forEach((node, index) => {
+      const isLast = index === siblings.length - 1;
+      const children = childrenOf(node);
+      const collapsed = collapsedOf(node);
+      // Does this row's rail column stay live below its own row? Either a
+      // later sibling branch still hangs below (fork siblings), the ancestor
+      // fork's rail passes through (inherited along a chain), or the chain
+      // itself continues with an only child.
+      const open = forked ? !isLast : inheritedOpen;
+      const continues = !collapsed && children.length === 1;
+      emit(node, {
+        guides,
+        connector: !hasParent
+          ? ""
+          : forked
+            ? open || continues
+              ? "tee"
+              : "last"
+            : open || continues
+              ? "chain"
+              : "chain end",
+        childCount: children.length,
+        collapsed,
+      });
+      if (collapsed) return;
+      const childForked = children.length > 1;
+      // A fork opens a new column; this row's column keeps its rail through
+      // the nested subtree while `open` (sibling/ancestor rail).
+      walk(
+        children,
+        childForked && hasParent ? [...guides, open] : guides,
+        childForked,
+        open,
+        true,
+      );
+    });
+  };
+  walk(roots, [], false, false, false);
+}
+
+/* The rail columns of one row, as the elements every lineage row starts with. */
+function lineageRails(guides, connector) {
+  return [
+    ...guides.map((open) =>
+      el("span", { class: `step-rail${open ? " open" : ""}` }),
+    ),
+    connector ? el("span", { class: `step-rail ${connector}` }) : null,
+  ];
 }
 
 function stepTreeSection(detail, payload) {
@@ -4818,43 +4882,17 @@ function stepTreeSection(detail, payload) {
         }
       }
     }
-    // Connector-rail layout. Lineage chains dominate this tree (each Step
-    // parents on the previous one; measured trees run 16+ ancestors deep with
-    // <=6 forks), so columns advance ONLY at forks — a chain renders as a
-    // straight vertical rail, and every parent-child edge is drawn explicitly:
-    // "tee"/"last" elbows attach fork children, "chain" rails attach an only
-    // child to the row above, and open sibling rails run past nested subtrees.
-    const walk = (parentKey, guides, forked, inheritedOpen) => {
-      const siblings = (byParent.get(parentKey) || []).filter((node) =>
-        visible.has(node.node_id),
+    const childrenOf = (node) =>
+      (byParent.get(node.node_id) || []).filter((child) =>
+        visible.has(child.node_id),
       );
-      siblings.forEach((node, index) => {
-        const isLast = index === siblings.length - 1;
-        const children = (byParent.get(node.node_id) || []).filter((child) =>
-          visible.has(child.node_id),
-        );
-        // A filter overrides manual collapse: hits must never be hidden.
-        const collapsed = !query && state.collapsed.has(node.node_id);
-        // Does this node's rail column stay live below its own row? Either a
-        // later sibling branch still hangs below (fork siblings), the ancestor
-        // fork's rail passes through (inherited along a chain), or the chain
-        // itself continues with an only child.
-        const open = forked ? !isLast : inheritedOpen;
-        const continues = !collapsed && children.length === 1;
+    walkLineage(
+      (byParent.get("") || []).filter((node) => visible.has(node.node_id)),
+      childrenOf,
+      (node, rails) =>
         rows.append(
           stepTreeRow(detail, payload, node, {
-            guides,
-            connector: parentKey
-              ? forked
-                ? open || continues
-                  ? "tee"
-                  : "last"
-                : open || continues
-                  ? "chain"
-                  : "chain end"
-              : "",
-            childCount: children.length,
-            collapsed,
+            ...rails,
             toggle: () => {
               if (state.collapsed.has(node.node_id))
                 state.collapsed.delete(node.node_id);
@@ -4862,21 +4900,10 @@ function stepTreeSection(detail, payload) {
               render();
             },
           }),
-        );
-        if (!collapsed) {
-          const childForked = children.length > 1;
-          // A fork opens a new column; this node's column keeps its rail
-          // through the nested subtree while `open` (sibling/ancestor rail).
-          walk(
-            node.node_id,
-            childForked && parentKey ? [...guides, open] : guides,
-            childForked,
-            open,
-          );
-        }
-      });
-    };
-    walk("", [], false, false);
+        ),
+      // A filter overrides manual collapse: hits must never be hidden.
+      (node) => !query && state.collapsed.has(node.node_id),
+    );
     if (!rows.children.length)
       rows.append(el("div", { class: "empty" }, "没有命中的节点"));
     const failed = nodes.length - validated;
@@ -4981,10 +5008,7 @@ function stepTreeRow(
     },
     // Lineage rails: ancestor columns (open = a later sibling still hangs
     // below), then this row's own connector to its parent.
-    ...guides.map((open) =>
-      el("span", { class: `step-rail${open ? " open" : ""}` }),
-    ),
-    connector ? el("span", { class: `step-rail ${connector}` }) : null,
+    ...lineageRails(guides, connector),
     childCount
       ? el(
           "button",
@@ -5116,6 +5140,265 @@ function openStepNodeModal(detail, payload, node) {
   if (node.has_snapshot)
     buttons.push(el("a", { class: "btn", href: zipUrl }, "下载源码 + 结果"));
   showModal("Step 节点详情", body, buttons);
+}
+
+/* ---------------- 版本谱系 ----------------
+
+   The arm keeps every revision a Validation recorded, so the strategy artifact
+   has a history of its own: each revision names the one it descends from, which
+   is not the Step tree's parent (a failed attempt leaves a node and no
+   revision). It reads under the tree because it is the same session seen as the
+   artifact rather than as the search. A revision written before the store was
+   content-addressed has no recorded parent, so it stands as its own root. */
+const REVISION_CHANGE_LABEL = {
+  added: "新增",
+  removed: "删除",
+  modified: "修改",
+};
+
+function revisionLabel(revision, nodes) {
+  const node = revision.node_id ? nodes.get(revision.node_id) : null;
+  if (node)
+    return [
+      node.session_key ? sessionLabel(node.session_key) : null,
+      node.result_name || node.node_id,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+  return revision.node_id || "未记录节点";
+}
+
+function revisionLineageSection(detail, tree, history) {
+  const base = `/api/experiments/${encodeURIComponent(detail.experiment_id)}/revisions`;
+  const nodes = new Map((tree.nodes || []).map((node) => [node.node_id, node]));
+  const revisions = history.revisions;
+  const refs = new Set(revisions.map((revision) => revision.strategy_ref));
+  const byParent = new Map();
+  for (const revision of revisions) {
+    // A parent the store no longer holds (an arm that pruned under the older
+    // code) starts a root rather than a dangling edge.
+    const key =
+      revision.parent_strategy_ref && refs.has(revision.parent_strategy_ref)
+        ? revision.parent_strategy_ref
+        : "";
+    if (!byParent.has(key)) byParent.set(key, []);
+    byParent.get(key).push(revision);
+  }
+  // At most two picks, in the order they were made: the first is the left side
+  // of the diff.
+  let picked = [];
+  const rows = el("div", { class: "step-tree" });
+  const diffHost = el("div", { class: "revision-diff" });
+  const summary = el("span", { class: "hint flush push-right" });
+
+  const loadDiff = () => {
+    diffHost.innerHTML = "";
+    if (picked.length < 2) {
+      if (picked.length === 1)
+        diffHost.append(el("div", { class: "hint" }, "再选一个版本查看差异。"));
+      return;
+    }
+    const [left, right] = picked;
+    diffHost.append(el("div", { class: "empty" }, "正在比较…"));
+    api(`${base}/diff?a=${encodeURIComponent(left)}&b=${encodeURIComponent(right)}`)
+      .then((payload) => {
+        diffHost.innerHTML = "";
+        diffHost.append(revisionDiffView(payload));
+      })
+      .catch((error) => {
+        diffHost.innerHTML = "";
+        diffHost.append(
+          el("div", { class: "empty" }, `差异不可读：${error.message}`),
+        );
+      });
+  };
+
+  const pick = (next) => {
+    picked = next;
+    render();
+    loadDiff();
+  };
+  const toggle = (ref) =>
+    pick(
+      picked.includes(ref)
+        ? picked.filter((item) => item !== ref)
+        : picked.length < 2
+          ? [...picked, ref]
+          : [ref],
+    );
+
+  const render = () => {
+    rows.innerHTML = "";
+    walkLineage(
+      byParent.get("") || [],
+      (revision) => byParent.get(revision.strategy_ref) || [],
+      (revision, rails) => {
+        const parent = revision.parent_strategy_ref;
+        rows.append(
+          revisionRow(
+            revision,
+            rails,
+            nodes,
+            picked,
+            toggle,
+            refs.has(parent)
+              ? () => pick([parent, revision.strategy_ref])
+              : null,
+          ),
+        );
+      },
+    );
+    summary.textContent = picked.length
+      ? `已选 ${picked.length} / 2`
+      : `${revisions.length} 个版本`;
+  };
+  render();
+  return el(
+    "div",
+    { class: "panel section-gap" },
+    el("h4", {}, "版本谱系"),
+    el(
+      "div",
+      { class: "step-toolbar" },
+      el("span", { class: "hint flush" }, "点两个版本比较，或用「对比上一版」。"),
+      el("button", { class: "btn small", onclick: () => pick([]) }, "清除选择"),
+      summary,
+    ),
+    rows,
+    diffHost,
+  );
+}
+
+function revisionRow(
+  revision,
+  { guides, connector },
+  nodes,
+  picked,
+  toggle,
+  compare,
+) {
+  const ref = revision.strategy_ref;
+  const index = picked.indexOf(ref);
+  const metrics =
+    (revision.node_id && nodes.get(revision.node_id)?.metrics) || {};
+  return el(
+    "div",
+    {
+      class: `step-node${index >= 0 ? " picked" : ""}`,
+      title: ref,
+      onclick: () => toggle(ref),
+    },
+    ...lineageRails(guides, connector),
+    el("span", { class: "step-toggle leaf" }, index >= 0 ? "AB"[index] : "·"),
+    el("span", { class: "step-label" }, revisionLabel(revision, nodes)),
+    Number.isFinite(metrics.total_return)
+      ? el(
+          "span",
+          { class: `step-chip ${signCls(metrics.total_return)}` },
+          fmtPct(metrics.total_return),
+        )
+      : null,
+    Number.isFinite(metrics.sharpe)
+      ? el("span", { class: "step-chip" }, `S ${fmtSharpe(metrics.sharpe)}`)
+      : null,
+    el(
+      "span",
+      { class: "step-chip", title: `${revision.file_count} 个文件` },
+      fmtBytes(revision.total_bytes),
+    ),
+    revision.layout === "legacy"
+      ? el("span", { class: "badge state-created" }, "旧版布局")
+      : null,
+    el("span", { class: "step-time" }, fmtTs(revision.created_at)),
+    el(
+      "span",
+      { class: "step-actions" },
+      compare
+        ? el(
+            "button",
+            {
+              class: "btn small",
+              title: "与它所继承的版本比较",
+              onclick: (event) => {
+                event.stopPropagation();
+                compare();
+              },
+            },
+            "对比上一版",
+          )
+        : null,
+    ),
+  );
+}
+
+/* One unified diff: a header per file, then the body in a block that scrolls
+   on its own so a long line never widens the page. */
+function revisionDiffView(payload) {
+  const files = payload.files || [];
+  if (!files.length) return el("div", { class: "empty" }, "无差异");
+  const host = el(
+    "div",
+    {},
+    el(
+      "div",
+      { class: "hint" },
+      `新增 ${payload.added} · 删除 ${payload.removed} · 修改 ${payload.modified}`,
+    ),
+  );
+  for (const file of files) {
+    host.append(
+      el(
+        "div",
+        { class: "revision-file" },
+        el(
+          "div",
+          { class: "revision-file-head" },
+          el("span", { class: "step-label" }, file.path),
+          el(
+            "span",
+            { class: `badge change-${file.change}` },
+            REVISION_CHANGE_LABEL[file.change] || file.change,
+          ),
+          el("span", { class: "step-chip" }, revisionSizeText(file)),
+        ),
+        revisionDiffBody(file),
+      ),
+    );
+  }
+  return host;
+}
+
+function revisionSizeText(file) {
+  if (file.change === "added") return fmtBytes(file.size_after);
+  if (file.change === "removed") return fmtBytes(file.size_before);
+  return `${fmtBytes(file.size_before)} → ${fmtBytes(file.size_after)}`;
+}
+
+function revisionDiffBody(file) {
+  if (file.diff_omitted)
+    return el("div", { class: "hint" }, "二进制或过大，未显示差异");
+  const lines = String(file.diff || "").split("\n");
+  if (lines.length === 1 && !lines[0])
+    return el("div", { class: "hint" }, "逐行内容相同，字节不同");
+  const body = el("pre", { class: "code-view revision-diff-body" });
+  for (const line of lines) {
+    const kind = line.startsWith("+++") || line.startsWith("---") || line.startsWith("@@")
+      ? "meta"
+      : line.startsWith("+")
+        ? "add"
+        : line.startsWith("-")
+          ? "del"
+          : "";
+    body.append(el("span", { class: kind }, `${line}\n`));
+  }
+  return el(
+    "div",
+    {},
+    body,
+    file.diff_truncated
+      ? el("div", { class: "hint" }, "差异过长，已截断")
+      : null,
+  );
 }
 
 function kvRow(key, value) {

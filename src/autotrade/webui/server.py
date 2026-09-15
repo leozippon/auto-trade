@@ -26,6 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
 from autotrade.environment.data.contracts import RAW_GENERATION_FILENAME
+from autotrade.environment.identity import AgentRefStoreError
 from autotrade.environment.llm.model_profiles import model_profile
 from autotrade.pipelines.hitl_state import (
     HITL_DIR_NAME,
@@ -473,6 +474,36 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         except (OSError, ValueError) as exc:
             raise HTTPException(
                 status_code=409, detail="experiment identity state is unreadable"
+            ) from exc
+
+    # The arm's retained strategy revisions: the artifact lineage the Step tree
+    # panel draws beside the validated nodes, and the diff between any two.
+    @app.get("/api/experiments/{experiment_id}/revisions")
+    def get_revisions(experiment_id: str) -> dict[str, object]:
+        directory, identity = _public_identity(experiment_id)
+        try:
+            return steps.revision_lineage_view(directory, identity)
+        except (OSError, ValueError, KeyError) as exc:
+            raise HTTPException(
+                status_code=409, detail="experiment revision store is unreadable"
+            ) from exc
+
+    @app.get("/api/experiments/{experiment_id}/revisions/diff")
+    def get_revision_diff(
+        experiment_id: str,
+        a: str = Query(...),
+        b: str = Query(...),
+    ) -> dict[str, object]:
+        directory, identity = _public_identity(experiment_id)
+        try:
+            return steps.revision_diff_view(directory, identity, a, b)
+        except (AgentRefStoreError, KeyError) as exc:
+            raise HTTPException(
+                status_code=404, detail="unknown strategy revision"
+            ) from exc
+        except (OSError, ValueError) as exc:
+            raise HTTPException(
+                status_code=409, detail="experiment revision store is unreadable"
             ) from exc
 
     @app.get("/api/experiments/{experiment_id}/steps/{node_id}/source.zip")

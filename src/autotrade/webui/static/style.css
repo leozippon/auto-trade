@@ -2529,6 +2529,63 @@ details.advanced .form-grid {
  flex: none;
 }
 
+/* ---- 版本谱系: the artifact's own lineage, on the Step tree's rails ---- */
+.step-node.picked {
+ background: var(--accent-soft);
+}
+.step-node.picked .step-toggle {
+ color: var(--accent);
+ font-weight: 600;
+}
+.badge.change-added {
+ background: var(--ok-soft);
+ color: var(--ok);
+}
+.badge.change-removed {
+ background: var(--bad-soft);
+ color: var(--bad);
+}
+.badge.change-modified {
+ background: var(--warn-soft);
+ color: var(--warn);
+}
+.revision-diff {
+ margin-top: var(--space-3);
+}
+.revision-file {
+ padding-top: var(--space-3);
+}
+.revision-file + .revision-file {
+ border-top: 1px solid var(--row-border);
+}
+.revision-file-head {
+ display: flex;
+ align-items: center;
+ gap: 0.5rem;
+ flex-wrap: wrap;
+}
+/* The path may be long and must stay readable on a phone; only the diff body
+    below is allowed its own horizontal scroll. */
+.revision-file-head .step-label {
+ white-space: normal;
+ overflow-wrap: anywhere;
+}
+pre.code-view.revision-diff-body {
+ margin: var(--space-2) 0 0;
+ max-width: 100%;
+ max-height: 44vh;
+ font-size: 0.8rem;
+}
+.revision-diff-body .add {
+ color: var(--ok);
+}
+.revision-diff-body .del {
+ color: var(--bad);
+}
+.revision-diff-body .meta {
+ color: var(--muted);
+}
+
 /* ---------------- 运行记忆 ----------------
    One pattern for every section: a heading with an optional one-line note,
    then the panels. Inside 记忆条目 those panels
