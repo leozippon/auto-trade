@@ -4238,31 +4238,24 @@ function runningSubagentDock(blocks, detail, runRef) {
   return el(
     "div",
     { class: "trace-subagent-dock" },
-    ...running.map((block) =>
-      subagentOpenButton(
-        block,
-        detail,
-        runRef,
-        "trace-block subagent running trace-dock-block",
-      ),
-    ),
+    ...running.map((block) => subagentDockBlock(block, detail, runRef)),
   );
 }
 
-/* A child's readout as one control: the card at the call position and the
-   dock's pinned block are the same button over the same block, and either
-   click opens that child's own Trace. */
-function subagentOpenButton(block, detail, runRef, className) {
+/* The dock's pinned block is one button over the child's whole readout; the
+   card at the call position instead makes its own head row the control, so
+   the card keeps its progress line as plain text. Either click opens that
+   child's own Trace. */
+function subagentDockBlock(block, detail, runRef) {
   return el(
     "button",
     {
       type: "button",
-      class: className,
-      title: "查看该子代理的详细 Trace",
+      class: "trace-block subagent running trace-dock-block",
+      title: "打开子代理 Trace",
       onclick: () => openSubagentTrace(detail, runRef, block),
     },
     subagentSummaryNode(block, detail),
-    el("span", { class: "subagent-open-hint" }, "详细 Trace ↗"),
   );
 }
 
@@ -4530,8 +4523,9 @@ function subagentHeadMetaNode(block, detail) {
    and the ticking clock on the head, then the progress line — rounds, model
    calls, tools, tokens, latest tool. The card at the call position and the
    dock's pinned block share it, so they can never disagree. Spans
-   throughout, so the dock can wrap it in a button. */
-function subagentSummaryNode(block, detail) {
+   throughout, so the dock can wrap the whole readout in a button; ``open``
+   instead makes the head row itself the button, for the card. */
+function subagentSummaryNode(block, detail, open = null) {
   const status = String(block.status || block.phase || "started");
   const phase = String(block.phase || "");
   const running = isRunningSubagent(block);
@@ -4543,23 +4537,33 @@ function subagentSummaryNode(block, detail) {
     ...subagentProgressParts(block),
     subagentLastToolLabel(block),
   ].filter(Boolean);
+  const headChildren = [
+    running ? el("span", { class: "live-dot", "aria-hidden": "true" }) : null,
+    el(
+      "span",
+      { class: `type subagent ${status}` },
+      `🧩 ${String(block.role || "子代理")} · ${statusLabel}`,
+    ),
+    block.description
+      ? el("span", { class: "subagent-task" }, String(block.description))
+      : null,
+    subagentHeadMetaNode(block, detail),
+  ];
   const wrap = el(
     "span",
     { class: "subagent-summary" },
-    el(
-      "span",
-      { class: "head" },
-      running ? el("span", { class: "live-dot", "aria-hidden": "true" }) : null,
-      el(
-        "span",
-        { class: `type subagent ${status}` },
-        `🧩 ${String(block.role || "子代理")} · ${statusLabel}`,
-      ),
-      block.description
-        ? el("span", { class: "subagent-task" }, String(block.description))
-        : null,
-      subagentHeadMetaNode(block, detail),
-    ),
+    open
+      ? el(
+          "button",
+          {
+            type: "button",
+            class: "head subagent-head",
+            title: "打开子代理 Trace",
+            onclick: open,
+          },
+          ...headChildren,
+        )
+      : el("span", { class: "head" }, ...headChildren),
   );
   if (progress.length)
     wrap.append(
@@ -4578,10 +4582,15 @@ function subagentSummaryNode(block, detail) {
 /* A child's one card at the call that launched it. While it runs the card
    carries the accent, a live dot and its progress, redrawn in place as the
    projection updates the block; finished, it drops the accent and keeps the
-   compact card. The card is the control that opens the child's own Trace. */
+   compact card. Its head row is the control that opens the child's own
+   Trace. */
 function renderSubagentBlock(node, block, detail, runRef) {
   node.classList.toggle("running", isRunningSubagent(block));
-  node.append(subagentOpenButton(block, detail, runRef, "subagent-open"));
+  node.append(
+    subagentSummaryNode(block, detail, () =>
+      openSubagentTrace(detail, runRef, block),
+    ),
+  );
   if (block.error) node.append(el("div", { class: "hint warn" }, `错误：${block.error}`));
 }
 

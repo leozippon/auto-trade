@@ -1572,23 +1572,26 @@ def test_subagent_trace_route_projects_redacts_and_guards(tmp_path: Path) -> Non
 
 def test_the_running_dock_pins_a_block_per_child_and_opens_its_trace() -> None:
     """A running child is pinned at the bottom edge of the trace box as a
-    block reading exactly like its card, and both open the child's own Trace
-    through the one control, never a second readout of their own."""
+    block reading exactly like its card, and both open the child's own Trace —
+    the dock as one button over the whole readout, the card through its head
+    row, and neither through a label of its own."""
 
     script = APP_JS.read_text(encoding="utf-8")
     dock = script.split("function runningSubagentDock(", 1)[1].split("\nfunction ", 1)[0]
     assert "filter(isRunningSubagent)" in dock
-    assert '"trace-block subagent running trace-dock-block"' in dock
-    assert "subagentOpenButton(" in dock
-    control = script.split("function subagentOpenButton(", 1)[1].split("\nfunction ", 1)[0]
+    assert "subagentDockBlock(block, detail, runRef)" in dock
+    control = script.split("function subagentDockBlock(", 1)[1].split("\nfunction ", 1)[0]
+    assert '"trace-block subagent running trace-dock-block"' in control
     assert "subagentSummaryNode(block, detail)" in control
     assert "openSubagentTrace(detail, runRef, block)" in control
-    assert "详细 Trace ↗" in control
+    # The label the cards used to carry is gone, styles included.
+    style = STYLE_CSS.read_text(encoding="utf-8")
+    assert "详细 Trace" not in script
+    assert "subagent-open" not in script and "subagent-open" not in style
     render = script.split("function renderTraceBlocks(", 1)[1].split("\nfunction ", 1)[0]
     assert "fragment.append(scroll)" in render
     assert "runningSubagentDock(blocks, detail, runRef)" in render
     # The chip strip and the inline fold it replaced are gone, styles included.
-    style = STYLE_CSS.read_text(encoding="utf-8")
     assert "trace-running" not in script and "trace-running" not in style
     assert "subagentInlineTrace" not in script and "subagent-inline" not in style
 
@@ -1602,12 +1605,21 @@ def test_subagent_trace_opens_as_a_modal_over_the_parent_and_follows_it() -> Non
     assert "async function openSubagentTrace(detail, runRef, block)" in script
     assert "/trace/subagents/${encodeURIComponent(taskId)}" in script
     card = script.split("function renderSubagentBlock(", 1)[1].split("\nfunction ", 1)[0]
-    assert 'subagentOpenButton(block, detail, runRef, "subagent-open")' in card
+    # The card's own head row is the control: no label, and the card body
+    # below it stays selectable text.
+    assert "openSubagentTrace(detail, runRef, block)" in card
+    assert "subagentSummaryNode(block, detail, () =>" in card
     # A running child's card carries the accent and the live dot; a finished
     # one is the compact card.
     assert 'node.classList.toggle("running", isRunningSubagent(block))' in card
     summary = script.split("function subagentSummaryNode(", 1)[1].split("\nfunction ", 1)[0]
     assert 'running ? el("span", { class: "live-dot"' in summary
+    # Given an opener the head row becomes a real button, so Enter and Space
+    # reach it; without one (the dock, which wraps the whole readout) it stays
+    # a span, because a button inside a button is not a control.
+    assert 'class: "head subagent-head"' in summary
+    assert 'title: "打开子代理 Trace"' in summary
+    assert 'el("span", { class: "head" }, ...headChildren)' in summary
     opener = script.split("async function openSubagentTrace(", 1)[1].split("\nfunction ", 1)[0]
     # The child's records go through the same renderer as the parent's, and
     # one box for the modal's lifetime keeps the folds the reader opened.
@@ -1775,7 +1787,9 @@ tickAll(pinned);
 const summary = pinned.children[0];
 console.log(nodeText(summary.children[0]));
 console.log(nodeText(summary.children[1]));
-console.log(nodeText(pinned.children[1]));
+console.log(pinned.children.length);
+const head = subagentSummaryNode(blocks[2], detail, () => {}).children[0];
+console.log(`${head.tag} ${head.attrs.class} ${head.attrs.title} ${typeof head.attrs.onclick}`);
 console.log(String(runningSubagentDock(blocks.slice(0, 2), detail, "run_1")));
 """
     lines = _run_app_js_snippet(
@@ -1798,7 +1812,7 @@ console.log(String(runningSubagentDock(blocks.slice(0, 2), detail, "run_1")));
             "function subagentUsageTitle(",
             "function subagentLastToolLabel(",
             "function subagentSummaryNode(",
-            "function subagentOpenButton(",
+            "function subagentDockBlock(",
             "function runningSubagentDock(",
         ),
     ).splitlines()
@@ -1813,5 +1827,8 @@ console.log(String(runningSubagentDock(blocks.slice(0, 2), detail, "run_1")));
         lines[2],
     ), lines[2]
     assert lines[3] == "4 轮 · 模型 4 次 · 工具 6 次 · Σ 17 k tokens · 最近工具 shell · 进行中"
-    assert lines[4] == "详细 Trace ↗"
-    assert lines[5] == "null"
+    # The pinned block is the readout and nothing else — no label beside it.
+    assert lines[4] == "1"
+    # The card's head row is a button carrying the same action.
+    assert lines[5] == "button head subagent-head 打开子代理 Trace function"
+    assert lines[6] == "null"
