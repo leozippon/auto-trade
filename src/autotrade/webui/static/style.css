@@ -426,11 +426,6 @@ main {
  margin-top: 0;
  margin-bottom: 0;
 }
-/* The title row sits one step further from the content than the content's own
-   groups sit from each other. */
-.card > h3 {
- margin-bottom: var(--space-1);
-}
 .card.clickable {
  cursor: pointer;
  transition:
@@ -441,8 +436,10 @@ main {
  box-shadow: var(--shadow-lift);
  transform: translateY(-1px);
 }
+/* The title reads as a header over the card body: its own margin lands the gap
+   below it two steps up the scale from the gap between the body's groups. */
 .card h3 {
- margin: 0;
+ margin: 0 0 var(--space-3);
  font-size: 1.03rem;
  display: flex;
  align-items: center;
