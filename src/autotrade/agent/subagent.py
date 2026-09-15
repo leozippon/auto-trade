@@ -44,6 +44,7 @@ from autotrade.environment.time_budget import (
     TimeBudgetBinding,
     validate_time_budget_bindings,
 )
+from autotrade.environment.tools.search import trace_read_stub
 from autotrade.environment.tools.base import (
     SessionInterrupt,
     ToolError,
@@ -1042,7 +1043,9 @@ class SubAgentEngine(SessionTimeBudgetAware):
                             "round": rounds,
                             "tool": call.name,
                             "arguments": _traced_arguments(call.arguments),
-                            "result": sanitize_for_log(record),
+                            "result": sanitize_for_log(
+                                trace_read_stub(call.name, call.arguments, record)
+                            ),
                             "parent_call_id": parent_call_id,
                         },
                     )

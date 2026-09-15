@@ -906,6 +906,8 @@ def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
     assert impl == _SESSION_TOOLS - {
         "agent",
         "batch_validate",
+        # The parent's own context compaction.
+        "compact",
         "finish_session",
         # Children report findings to the parent, the parent files defect
         # reports with the operators.

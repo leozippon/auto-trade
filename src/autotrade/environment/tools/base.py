@@ -182,7 +182,9 @@ class Tool(Protocol):
 
 # The tool whose calls must run in order even though its spec is not mutating:
 # it finishes the session.
-SEQUENTIAL_TOOL_NAMES = frozenset({"finish_session"})
+# Tools that must run in order even though their spec is not mutating: the
+# finish ends the turn and ``compact`` rebuilds the conversation after it.
+SEQUENTIAL_TOOL_NAMES = frozenset({"finish_session", "compact"})
 
 
 def is_sequential_tool(spec: ToolSpec | None) -> bool:

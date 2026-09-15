@@ -33,7 +33,7 @@ from pathlib import Path
 
 from autotrade.agent.runner import AgentSessionBudgetExhausted
 from autotrade.environment.identity import AgentRefStore
-from autotrade.environment.runtime import AgentTraceWriter
+from autotrade.environment.runtime import AgentTraceWriter, agent_transcript_dir
 from autotrade.environment.tools.base import SessionInterrupt
 
 from .hitl_state import (
@@ -235,10 +235,9 @@ class InteractiveExperimentRunner:
                     values["run_id"] = run_id
                     if self.ref_store is None:
                         raise RuntimeError("interactive trace publishing requires AgentRefStore")
+                    artifacts = self.status.path.parent.parent / "artifacts"
                     trace = AgentTraceWriter(
-                        self.status.path.parent.parent
-                        / "artifacts/traces"
-                        / f"{run_id}.jsonl",
+                        artifacts / "traces" / f"{run_id}.jsonl",
                         ids={
                             "experiment_id": self.experiment_id,
                             "epoch_id": session.kind,
@@ -248,6 +247,9 @@ class InteractiveExperimentRunner:
                             "run_id": self.ref_store.get_or_create("run", run_id),
                             "session_kind": session.kind,
                         },
+                        transcript_dir=(
+                            agent_transcript_dir(artifacts) if session.kind == "research" else None
+                        ),
                     )
                     trace.emit(
                         "environment_stage",

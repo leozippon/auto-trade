@@ -90,6 +90,7 @@ def _full_prompt() -> str:
 
 def _tool_descriptions() -> dict[str, str]:
     from autotrade.environment.tools import (
+        CompactTool,
         EditFileTool,
         FinishSessionTool,
         GlobTool,
@@ -116,6 +117,7 @@ def _tool_descriptions() -> dict[str, str]:
     specs.extend(
         cls.spec
         for cls in (
+            CompactTool,
             EditFileTool,
             WriteFileTool,
             SandboxShellTool,
@@ -172,8 +174,11 @@ def test_retired_tools_are_absent_from_every_role() -> None:
     for surface, names in surfaces.items():
         for retired in RETIRED_TOOLS:
             assert retired not in names, (surface, retired)
-    assert _TERMINAL_TOOLS == _FINALIZATION_TOOLS == SEQUENTIAL_TOOL_NAMES == {"finish_session"}
-    # Sub-agents never finish, validate or roll back.
+    assert _TERMINAL_TOOLS == _FINALIZATION_TOOLS == {"finish_session"}
+    # The finish and the Agent's own compaction rebuild or end the turn, so
+    # neither runs beside other calls.
+    assert SEQUENTIAL_TOOL_NAMES == {"finish_session", "compact"}
+    # Sub-agents never finish, validate, roll back or compact the parent.
     for role in SUBAGENT_ROLES:
         assert not allowed_subagent_tools(role) & {
             "finish_session",
@@ -181,6 +186,7 @@ def test_retired_tools_are_absent_from_every_role() -> None:
             "run_null_control",
             "step_rollback",
             "agent",
+            "compact",
         }
     import autotrade.environment.tools as tools_package
 

@@ -20,11 +20,20 @@ from .base import (
     ToolSpec,
     is_sequential_tool,
 )
+from .compact import CompactTool
 from .files import EditFileTool, WriteFileTool
 from .finish_session import FinishSessionTool
 from .modification_check import ModificationCheckTool
 from .report_issue import ReportIssueTool
-from .search import SEARCH_ROOTS, GlobTool, GrepTool, ReadFileTool, SearchRoots
+from .search import (
+    SEARCH_ROOTS,
+    TRACE_ROOT,
+    GlobTool,
+    GrepTool,
+    ReadFileTool,
+    SearchRoots,
+    trace_read_stub,
+)
 from .shell import SandboxShellTool
 from .step_rollback import StepRollbackTool
 from .workspace import SafeWorkspace
@@ -32,6 +41,7 @@ from .workspace import SafeWorkspace
 __all__ = [
     "CommandResult",
     "CommandRunner",
+    "CompactTool",
     "EditFileTool",
     "FinishSessionTool",
     "GlobTool",
@@ -41,6 +51,7 @@ __all__ = [
     "ReportIssueTool",
     "SEARCH_ROOTS",
     "SEQUENTIAL_TOOL_NAMES",
+    "TRACE_ROOT",
     "SafeWorkspace",
     "SandboxShellTool",
     "SearchRoots",
@@ -57,6 +68,7 @@ __all__ = [
     "WriteSkillTool",
     "DeleteSkillTool",
     "is_sequential_tool",
+    "trace_read_stub",
 ]
 
 

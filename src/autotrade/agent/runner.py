@@ -38,6 +38,7 @@ from autotrade.environment.llm import (
     clamp_requested_max_tokens,
     context_overflow_error,
     context_request_fits,
+    estimate_chat_request_tokens,
     is_context_overflow_error,
     malformed_tool_call_messages,
 )
@@ -54,9 +55,13 @@ from autotrade.environment.tools.base import (
     ToolRegistry,
     is_sequential_tool,
 )
+from autotrade.environment.tools.search import trace_read_stub
 
 from .compact import (
+    DEFAULT_COMPACTION_TOKEN_THRESHOLD,
+    ContextCompactionConfig,
     ContextCompactor,
+    compact_with_summary,
     fit_tool_results_to_context,
     safe_error_summary,
 )
@@ -120,6 +125,13 @@ class AgentSessionBudgetExhausted(SessionInterrupt):
 
 _TERMINAL_TOOLS = frozenset({"finish_session"})
 _FINALIZATION_TOOLS = frozenset({"finish_session"})
+# The Agent's own compaction: the tool validates the summary, the runner
+# rebuilds the conversation once the turn's tool results are in.
+_COMPACT_TOOL = "compact"
+# The estimated request size, as a share of the runtime compaction threshold,
+# at which the Agent is told once to compact itself; re-armed by every
+# compaction, so a long session hears it once per context window.
+COMPACT_ADVISORY_FRACTION = 0.75
 # The tool that produces complete Validation nodes: one per finished candidate.
 _VALIDATION_TOOLS = frozenset({"batch_validate"})
 # A completed Validation can switch the session into hard finalization, and
@@ -136,6 +148,7 @@ _SESSION_TOOLS = frozenset(
         "batch_validate",
         "run_null_control",
         "agent",
+        "compact",
         "finish_session",
         "glob",
         "grep",
@@ -314,6 +327,7 @@ class AgentSessionRunner:
         event_sink: Callable[[str, dict[str, object]], None] | None = None,
         inbox: AgentInboxHook | None = None,
         freeze_gate: Callable[[str], Mapping[str, object]] | None = None,
+        trace_ref: str | None = None,
     ) -> None:
         self.llm = llm
         self.tools = tools
@@ -321,6 +335,15 @@ class AgentSessionRunner:
         self.config = config or AgentSessionConfig()
         self.compactor = compactor
         self.subagent = subagent
+        # The run's opaque ref: the transcript file the compaction summary
+        # points the Agent at.
+        self.trace_ref = trace_ref
+        # Compaction bookkeeping: the main-loop call count as the events read
+        # it, the call the last compaction reached, and whether the advisory
+        # went out since then.
+        self._llm_calls = 0
+        self._compacted_through_call = 0
+        self._context_notice_sent = False
         self._event_lock = threading.Lock()
         self._subagent_lock = threading.Lock()
         # The tool call id of the invocation running on the current thread;
@@ -400,6 +423,9 @@ class AgentSessionRunner:
         self._usage = _new_token_totals()
         self._subagent_totals = None
         llm_calls = 0
+        self._llm_calls = 0
+        self._compacted_through_call = 0
+        self._context_notice_sent = False
         accepted_steps = 0
         llm_failure_streak = 0
         malformed_reissue_used = False
@@ -460,6 +486,7 @@ class AgentSessionRunner:
                 messages, _ = self._compact_if_needed(
                     messages, remaining, provider_tools
                 )
+                messages = self._context_notice(messages, provider_tools)
             messages = self._append_subagent_observations(messages)
             messages = self._apply_inbox(
                 messages, safe_point=INBOX_SAFE_BEFORE_LLM
@@ -488,10 +515,12 @@ class AgentSessionRunner:
                     max_tokens=self.config.max_response_tokens,
                 )
                 llm_calls += 1
+                self._llm_calls = llm_calls
                 llm_failure_streak = 0
                 malformed_reissue_used = False
             except Exception as exc:
                 llm_calls += 1
+                self._llm_calls = llm_calls
                 llm_failure_streak += 1
                 error = safe_error_summary(exc)
                 malformed = isinstance(exc, MalformedToolCallError)
@@ -681,9 +710,14 @@ class AgentSessionRunner:
                         "tool_call_id": call.id,
                         "tool": call.name,
                         "arguments": sanitize_for_log(traced_arguments),
-                        "result": sanitize_for_log(record),
+                        # A read of the trace is logged as the call and its
+                        # size, never as the content it would re-log.
+                        "result": sanitize_for_log(
+                            trace_read_stub(call.name, call.arguments, record)
+                        ),
                     },
                 )
+            messages = self._compact_on_request(messages, results)
             accepted_steps = len(self._complete_validation_nodes)
             for call, _record in results:
                 if call.name in backtests:
@@ -1758,16 +1792,102 @@ class AgentSessionRunner:
             messages,
             tools=provider_tools,
             remaining_seconds=remaining,
-            step_id=None,
             force=force,
         )
         if result is None:
             return messages, False
-        self._emit("context_compaction", result.event)
         progressed = result.event.get("status") == "ok" and tuple(
             result.messages
         ) != tuple(messages)
+        self._record_compaction("runtime", result.event, progressed=progressed)
         return list(result.messages), progressed
+
+    def _compact_on_request(
+        self,
+        messages: list[ChatMessage],
+        results: Sequence[tuple[ToolCall, dict[str, object]]],
+    ) -> list[ChatMessage]:
+        """Rebuild the conversation around the summary a ``compact`` call handed in.
+
+        Runs once the turn's tool results are appended, so the tail keeps the
+        protocol pairs of that turn; the last accepted call of a turn wins.
+        """
+
+        summaries = [
+            str(call.arguments.get("summary") or "")
+            for call, record in results
+            if call.name == _COMPACT_TOOL and record.get("ok") is True
+        ]
+        if not summaries:
+            return messages
+        result = compact_with_summary(
+            messages,
+            summaries[-1],
+            keep_recent_messages=self._compact_keep_recent_messages(),
+            trace_ref=self.trace_ref,
+        )
+        self._record_compaction("agent", result.event, progressed=True)
+        return list(result.messages)
+
+    def _record_compaction(
+        self, trigger: str, event: Mapping[str, object], *, progressed: bool
+    ) -> None:
+        """One ``context_compaction`` event for either trigger, locating the
+        calls whose messages it replaced so the trace doubles as the
+        compaction checkpoint a resume starts from."""
+
+        payload: dict[str, object] = {
+            "trigger": trigger,
+            "call_index": self._llm_calls,
+            "replaced_call_range": [self._compacted_through_call + 1, self._llm_calls],
+            **event,
+        }
+        self._emit("context_compaction", payload)
+        if progressed:
+            self._compacted_through_call = self._llm_calls
+            self._context_notice_sent = False
+
+    def _compact_keep_recent_messages(self) -> int:
+        # One tail length for both triggers: the runtime compactor's, when one
+        # is wired, else the dataclass default.
+        if self.compactor is not None:
+            return self.compactor.config.keep_recent_messages
+        return ContextCompactionConfig().keep_recent_messages
+
+    def _context_notice(
+        self,
+        messages: list[ChatMessage],
+        provider_tools: tuple[dict[str, object], ...],
+    ) -> list[ChatMessage]:
+        """Tell the Agent once per context window that it is time to compact."""
+
+        if self._context_notice_sent:
+            return messages
+        threshold = (
+            self.compactor.config.token_threshold
+            if self.compactor is not None
+            else DEFAULT_COMPACTION_TOKEN_THRESHOLD
+        )
+        estimated = estimate_chat_request_tokens(messages, tools=provider_tools)
+        if estimated < COMPACT_ADVISORY_FRACTION * threshold:
+            return messages
+        self._context_notice_sent = True
+        payload = {
+            "observation": "context_notice",
+            "estimated_tokens": estimated,
+            "token_threshold": threshold,
+            "message": (
+                f"上下文估算已达到压缩阈值的 {COMPACT_ADVISORY_FRACTION:.0%}。请在当前一轮结果消化完后"
+                "调用 compact(summary=...)：把策略现状、已做的决定与被否定的方向（带读数与节点 id）、"
+                "未完成的线索与 trace 里的定位写进摘要；达到阈值仍未压缩时宿主用压缩模型代劳。"
+            ),
+        }
+        messages.append(ChatMessage("user", json.dumps(payload, ensure_ascii=False)))
+        self._emit(
+            "context_notice",
+            {key: value for key, value in payload.items() if key not in ("observation", "message")},
+        )
+        return messages
 
     def _prepare_context_request(
         self,

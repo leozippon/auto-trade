@@ -94,7 +94,7 @@
 - `read_file`/`grep`/`glob` 在授权根内有界读取与搜索；`write_file`/`edit_file` 写工作区文本——正式代码写 `output/`，随产物交付的静态资产写 `models/`，草稿与笔记写工作区根；`shell` 是一次有界前台命令，用于 debug 与数据验收，不得用它修改策略产物、启动后台任务、sleep/等待包装或轮询状态。
 - `modification_check` 是每次回放前都会自动运行的静态产物检查，单独调用不花回放；`smoke_backtest` 在真实回放路径上短回放，确认 ABI、订单合同和单日耗时，不产生节点也不计 replay-year；`batch_validate` 是唯一的正式验证，只有它产生可选择的节点，一次调用（1–6 个候选、一个 `span`，`output` 本身也可以作候选路径）就是一轮且不做任何选择，正式回测不能由自建回放替代；`run_null_control` 对本会话一个完整节点在它自己的 span 上跑随机组合零假设（暂停时钟，次数见 `budgets`）；`step_rollback` 恢复到本会话一个完整节点并从它分支；`write_skill`/`delete_skill` 维护共享 skills；`finish_session` 见决策合同。
 - `agent` 启动一层后台子代理，完成后结果以 `subagent_completed` 消息送回，不要用工具轮询：等待期间做互不冲突的工作，没有时以文本回复结束本轮。你自己的上下文和串行轮次最稀缺：把工作拆成能独立完成的块（数据与单位核查、特征与统计、实现、审计）在同一轮并行启动，它们运行时你继续设计与启动下一块；几个并行的有界子代理仍好过一个很长的串行子代理，任务很简单时也可以自己做。task 写进路径、约束与期望返回格式，构建或评估某个候选时再写进它的假设与证伪条件——子代理只看到 task；`thinking` 与 `max_turns` 由你按次决定，只在确实需要其已有上下文时 `resume`，改范围或提前收尾用 `action=message`。并行子代理范围互斥：一轮预登记的候选就在同一轮各起一个可写子代理，各自只写自己的 `candidates/<name>/`，由你整合与验收——子代理的汇报描述意图而非结果，验收其写入后再依赖。只读审计不在验证的关键路径上：冒烟过关的一轮候选立即提交 `batch_validate`（正式回测只等仍在写入的子代理），结论不影响本轮决策的审计给有界的 `max_turns` 并降低 `thinking`。
-- 上下文达到阈值时较早消息会被压缩成摘要，子代理同样如此。计划记在工作区根的 `TODO.md`（用 `write_file`/`edit_file` 维护）：每个任务一行，写明负责方、状态和一句话结果，规划完成后建立，每个子代理完成后更新，`finish_session` 前核对全部条目；上下文被压缩后它是恢复计划的依据。从 `inputs/skills_index.json` 起步按需读取 skill 正文、事实、数据摘要与单位引用；skill 脚本不会自动执行。
+- 上下文由你自己压缩：宿主在估算上下文达到压缩阈值的 75% 时注入一次 `context_notice`，收到后（或一轮结果消化完、下一轮开始前）调用 `compact(summary=...)`，摘要写给自己——`output/` 与各候选的现状、已做的决定与被否定的方向（带读数与节点 id）、未完成的线索与下一步、以及 trace 里的定位（调用序号或可 grep 的关键词）；调用后对话只剩系统提示、这份摘要与最近的消息。达到阈值仍未压缩时宿主用压缩模型代劳，子代理同样如此。你的全部历史（含子代理与之前的尝试）以文本 transcript 在根 `trace` 下可读（`read_file`/`grep`，文件 `<run_ref>.txt`，过长时分 `.partN.txt`）：被压缩掉的工具输出、代码与数字从那里取回，不要凭记忆重算。计划记在工作区根的 `TODO.md`（用 `write_file`/`edit_file` 维护）：每个任务一行，写明负责方、状态和一句话结果，规划完成后建立，每个子代理完成后更新，`finish_session` 前核对全部条目；上下文被压缩后它是恢复计划的依据。从 `inputs/skills_index.json` 起步按需读取 skill 正文、事实、数据摘要与单位引用；skill 脚本不会自动执行。
 ```
 
 ### 1.7 角色与写权
@@ -215,7 +215,7 @@
 - 先读 `inputs/skills_index.json`，再从已挂载数据、单位引用、制品和参考材料中自主发现任务所需证据；skill 脚本不自动执行。把有复用价值的知识写入 skill，而不是堆入策略或汇报。
 - 只完成父任务；不得再委托子代理、读取研究期末之后的数据、安装依赖、替父 Agent 提问或伪造结果。分钟和竞价不是策略时钟。
 - 实现或评估候选时严格按 task 给定的机制、股票池、持有与证伪条件做：不得静默回退、换机制或改预登记条件，做不到就如实汇报；汇报里的数据事实（行数、字段、统计量、错误原文）逐字给出，不只给概括。
-- 读：`read_file`/`grep`/`glob` 用根名加相对路径，如 {"root": "artifacts", "path": "data_summary.json"}；不接受 `/mnt/...` 绝对路径，根名以 schema 列出的为准。
+- 读：`read_file`/`grep`/`glob` 用根名加相对路径，如 {"root": "artifacts", "path": "data_summary.json"}；不接受 `/mnt/...` 绝对路径，根名以 schema 列出的为准。根 `trace` 是本会话的 transcript（`<run_ref>.txt`，只读，含之前的尝试与子代理）。
 - 前缀：读写工具把前导 `workspace/` 读作根名（`workspace/notes/x.md` 即 root=`workspace`、path=`notes/x.md`）；`shell` 按字面理解路径，脚本路径不带这个前缀。
 - 写：`write_file`/`edit_file` 只写 `workspace`/`output`/`models`，如 {"root": "workspace", "path": "notes/probe.py", "content": "..."}；草稿与中间结果放工作区根下 `notes/<topic>/`；同一文件在同一轮只 `edit_file` 一次，第二次编辑必须匹配前一次编辑之后的内容。
 - `shell`：{"argv": ["python", "notes/probe.py"], "cwd": "."}——argv 直接执行，没有 shell：数组或一行命令字符串都可（按 POSIX 词法切分），带管道、重定向的命令行会被拒绝，要写成 `["bash", "-lc", "..."]`；超过一行的脚本先 `write_file` 写成文件再按路径运行，不把脚本正文当参数传；只读信号筛选脚本 `/mnt/tools/screen.py` 不在任何读文件根内，只能这样经 `shell` 运行。
@@ -237,7 +237,7 @@
 
 # 边界
 - 先读 `inputs/skills_index.json`，再从已挂载数据、单位引用、制品和参考材料中自主发现任务所需证据；skill 脚本不自动执行。
-- 读：`read_file`/`grep`/`glob` 用根名加相对路径，如 {"root": "artifacts", "path": "data_summary.json"}；不接受 `/mnt/...` 绝对路径，根名以 schema 列出的为准。
+- 读：`read_file`/`grep`/`glob` 用根名加相对路径，如 {"root": "artifacts", "path": "data_summary.json"}；不接受 `/mnt/...` 绝对路径，根名以 schema 列出的为准。根 `trace` 是本会话的 transcript（`<run_ref>.txt`，只读，含之前的尝试与子代理）。
 - 前缀：读写工具把前导 `workspace/` 读作根名（`workspace/notes/x.md` 即 root=`workspace`、path=`notes/x.md`）；`shell` 按字面理解路径，脚本路径不带这个前缀。
 - 只读信号筛选脚本 `/mnt/tools/screen.py` 不在任何读文件根内，只能由父 Agent 或可执行子代理经 `shell` 运行。
 - 工具 schema 决定实际能力；同一轮的多个只读调用并发执行。不得再委托子代理、读取研究期末之后的数据、安装依赖或伪造结果；分钟和竞价不是策略时钟。
@@ -254,7 +254,7 @@
 `COMPACT_SYSTEM_PROMPT`：
 
 ```text
-You are a context compaction assistant for a quantitative-strategy coding Agent. Write a Markdown continuation summary with exactly these headings, in this order: ## 目标 / ## 约束与偏好 / ## 进展 / ### 已完成 / ### 进行中 / ### 受阻 / ## 关键决定 / ## 下一步 / ## 关键上下文. Keep exact file paths, commands, error strings, artifact ids, node ids, user constraints, numbers, and next steps; drop obsolete details; do not invent facts. When a previous summary is given, update it: keep everything still relevant, move finished items under 已完成, and add only what the new messages establish. The system prompt (contract, run facts, PRIOR, directive) is never dropped by compaction; do not restate it. Record only session state: rounds, node ids, results, decisions, open work. Do not call tools, do not output JSON or commentary, and do not mention that messages were compacted.
+You are a context compaction assistant for a quantitative-strategy coding Agent. Write a Markdown continuation summary with exactly these headings, in this order: ## 目标 / ## 约束与偏好 / ## 进展 / ### 已完成 / ### 进行中 / ### 受阻 / ## 关键决定 / ## 下一步 / ## 关键上下文. Keep exact file paths, commands, error strings, artifact ids, node ids, user constraints, numbers, and next steps; drop obsolete details; do not invent facts. When a previous summary is given, update it: keep everything still relevant, move finished items under 已完成, and add only what the new messages establish. The system prompt (contract, run facts, directive) is never dropped by compaction; do not restate it. Record only session state: rounds, node ids, results, decisions, open work. Do not call tools, do not output JSON or commentary, and do not mention that messages were compacted.
 ```
 
 压缩输入包含上一份结构化摘要与其后的新增消息。输出至少需要包含所请求的继续执行字段之一；非法 JSON、空摘要或模型错误不会替换原会话。主 Runner 仍保存最近完整轮次，并可使用确定性工具观察摘要继续控制上下文规模。确定性工具结果缩写保留省略说明、`original_chars`、`head`、`tail`和可用的`retained_fields`，并明确标记`source_omitted=true`；不生成内容指纹。

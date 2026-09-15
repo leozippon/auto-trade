@@ -15,7 +15,7 @@ import os
 import re
 import threading
 import uuid
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -132,6 +132,23 @@ AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS = (
 )
 TRACE_MAX_BYTES = 32 * 1024 * 1024
 TRACE_MAX_EVENT_BYTES = 256 * 1024
+# The Agent-readable transcript beside the JSONL trace: one text block per
+# event, every field clipped to the content preview size, rotated into parts
+# under ``read_file``'s 10 MiB cap so every part stays readable.
+TRANSCRIPT_PART_MAX_BYTES = 8 * 1024 * 1024
+_TRANSCRIPT_TEXT_FIELDS = ("instruction", "content", "message", "summary", "task", "text", "error")
+_TRANSCRIPT_JSON_FIELDS = ("arguments", "result", "value", "report", "compaction", "context_edit", "usage")
+_TRANSCRIPT_HEADER_FIELDS = (
+    ("call", "call_index"),
+    ("tool", "tool"),
+    ("id", "tool_call_id"),
+    ("status", "status"),
+    ("task", "task_id"),
+    ("round", "round"),
+)
+# Fields the transcript leaves out: the system prompt is the Agent's own
+# context already, and the event ids are host-side bookkeeping.
+_TRANSCRIPT_OMITTED = frozenset({"system_prompt", "event_type", "ts", "event_id"})
 # What an over-sized event keeps. Identity plus these named fields survive
 # verbatim; ``content`` (a model reply) keeps its own preview because the trace
 # views read it back, and everything else — a ``tool_call``'s ``arguments`` and
@@ -529,6 +546,76 @@ def agent_trace_path(artifacts_root: str | Path, run_id: str) -> Path:
     return Path(artifacts_root) / "traces" / f"{run_id}.jsonl"
 
 
+def agent_transcript_dir(artifacts_root: str | Path) -> Path:
+    """The Agent-readable transcripts of an experiment's research attempts.
+
+    One text file per attempt, named by the run's opaque ref, appended by the
+    same writer as the JSONL trace; the session's ``trace`` read root.
+    """
+    return Path(artifacts_root) / "transcripts"
+
+
+def _transcript_target(directory: Path, run_ref: str) -> Path:
+    """The transcript part to append to: a new part once the last one is full."""
+
+    part = 1
+    while True:
+        name = f"{run_ref}.txt" if part == 1 else f"{run_ref}.part{part}.txt"
+        candidate = directory / name
+        try:
+            size = candidate.stat().st_size
+        except FileNotFoundError:
+            return candidate
+        if size < TRANSCRIPT_PART_MAX_BYTES:
+            return candidate
+        part += 1
+
+
+def _clip_transcript_text(text: str) -> str:
+    if len(text) <= TRACE_CONTENT_PREVIEW_CHARS:
+        return text
+    omitted = len(text) - TRACE_CONTENT_PREVIEW_CHARS
+    return f"{text[:TRACE_CONTENT_PREVIEW_CHARS]}\n[... {omitted} more characters in the host trace]"
+
+
+def render_transcript_block(record: Mapping[str, object], *, omit: Collection[str] = ()) -> str:
+    """One event as the Agent reads it: a header line, then its fields.
+
+    Text fields are printed verbatim, structured fields as indented JSON so
+    ``read_file``'s line paging and ``grep -C`` land on individual values, and
+    whatever is left travels on one ``meta`` line. Every field is clipped at
+    the trace's content preview size.
+    """
+
+    header = f"=== {record.get('ts', '')} {record.get('event_type', '')}"
+    for label, key in _TRANSCRIPT_HEADER_FIELDS:
+        value = record.get(key)
+        if value not in (None, ""):
+            header += f" {label}={value}"
+    lines = [header]
+    skipped = set(_TRANSCRIPT_OMITTED) | set(omit) | {key for _label, key in _TRANSCRIPT_HEADER_FIELDS}
+    meta: dict[str, object] = {}
+    for key, value in record.items():
+        if key in skipped:
+            continue
+        if key in _TRANSCRIPT_TEXT_FIELDS and isinstance(value, str):
+            text = _clip_transcript_text(value)
+            lines.append(f"{key}:\n{text}" if "\n" in text else f"{key}: {text}")
+        elif key in _TRANSCRIPT_JSON_FIELDS and value is not None:
+            rendered = json.dumps(value, ensure_ascii=False, indent=1, default=str)
+            lines.append(f"{key}:\n{_clip_transcript_text(rendered)}")
+        else:
+            meta[key] = value
+    if meta:
+        lines.append(
+            "meta: "
+            + _clip_transcript_text(
+                json.dumps(meta, ensure_ascii=False, sort_keys=True, default=str)
+            )
+        )
+    return "\n".join(lines) + "\n\n"
+
+
 def _trace_payload_head(payload: dict[str, object]) -> str | None:
     """Clipped JSON of the payload fields the truncation stub does not keep."""
 
@@ -551,6 +638,7 @@ class AgentTraceWriter:
         path: str | Path,
         *,
         ids: dict[str, str],
+        transcript_dir: str | Path | None = None,
         max_bytes: int = TRACE_MAX_BYTES,
         max_event_bytes: int = TRACE_MAX_EVENT_BYTES,
     ) -> None:
@@ -558,6 +646,11 @@ class AgentTraceWriter:
             raise ValueError("trace size limits are invalid")
         self.path = Path(path)
         self.ids = dict(ids)
+        # Where the Agent-readable transcript of this run goes, if anywhere;
+        # its file is named by the run's opaque ref carried in ``ids``.
+        self.transcript_dir = Path(transcript_dir) if transcript_dir is not None else None
+        if self.transcript_dir is not None and not self.ids.get("run_id"):
+            raise ValueError("a transcript needs the run's opaque ref in ids['run_id']")
         self.max_bytes = max_bytes
         self.max_event_bytes = max_event_bytes
         key = str(self.path.resolve())
@@ -609,6 +702,7 @@ class AgentTraceWriter:
             if len(encoded) > self.max_event_bytes:
                 raise ValueError("trace identifiers exceed the per-event size limit")
         with self._lock:
+            self._append_transcript(record)
             self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             self.path.parent.chmod(0o700)
             current = self.path.stat().st_size if self.path.exists() else 0
@@ -635,4 +729,13 @@ class AgentTraceWriter:
                 os.fsync(handle.fileno())
             self.path.chmod(0o600)
         return record
+
+    def _append_transcript(self, record: dict[str, object]) -> None:
+        if self.transcript_dir is None:
+            return
+        self.transcript_dir.mkdir(parents=True, exist_ok=True)
+        target = _transcript_target(self.transcript_dir, str(self.ids["run_id"]))
+        block = render_transcript_block(record, omit=self.ids)
+        with target.open("a", encoding="utf-8") as handle:
+            handle.write(block)
 

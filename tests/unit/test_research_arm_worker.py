@@ -431,6 +431,15 @@ def test_the_llm_research_session_mounts_only_the_research_end_view_and_freezes(
     assert {"source": "adopted", "origin": "graduated", "entries": [GRADUATED_SKILL]} in memory["sources"]
     assert read_control(experiment / "hitl" / "control.json").gpu_counts == {}
 
+    # The session's transcript, named by the run's opaque ref, carries what
+    # the Agent did and nothing host-side; the JSONL trace stays under traces/.
+    [transcript] = (experiment / "artifacts" / "transcripts").glob("run_ref_*.txt")
+    transcript_text = transcript.read_text(encoding="utf-8")
+    assert "tool_call call=" in transcript_text and "batch_validate" in transcript_text
+    assert str(research_row["run_id"]) not in transcript_text
+    assert "/Data2" not in transcript_text and str(options.work_root) not in transcript_text
+    assert research_row["agent_trace_ref"].endswith(f"{research_row['run_id']}.jsonl")
+
     research_anchor = decision_anchor(GEOMETRY["research_end"]).isoformat()
     root = options.work_root / options.experiment_id / str(research_row["run_id"])
     view = json.loads((root / "runtime" / "current_snapshot" / "manifest.json").read_text(encoding="utf-8"))

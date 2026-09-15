@@ -51,6 +51,7 @@ from autotrade.environment.runtime import (
     AgentTraceWriter,
     RunManifest,
     agent_trace_path,
+    agent_transcript_dir,
     chmod_tree,
     utc_now_iso,
     write_json_atomic,
@@ -78,6 +79,7 @@ from autotrade.environment.tools.base import (
     ToolResult,
     ToolSpec,
 )
+from autotrade.environment.tools.compact import CompactTool
 from autotrade.environment.tools.files import EditFileTool, WriteFileTool
 from autotrade.environment.tools.finish_session import (
     FinishSessionTool,
@@ -2290,6 +2292,10 @@ class LLMResearchDeveloper:
             raise FileExistsError(f"session runtime already exists: {request.run_id}")
         session_ref = self.ref_store.get_or_create("session", request.session_key)
         run_ref = self.ref_store.get_or_create("run", request.run_id)
+        # The Agent-readable transcript of every attempt, appended beside the
+        # host trace and offered to the session as the ``trace`` read root.
+        transcripts = agent_transcript_dir(self.artifact_store.root.parent)
+        transcripts.mkdir(parents=True, exist_ok=True)
         trace = AgentTraceWriter(
             agent_trace_path(self.artifact_store.root.parent, request.run_id),
             ids={
@@ -2299,6 +2305,7 @@ class LLMResearchDeveloper:
                 "run_id": run_ref,
                 "session_kind": RESEARCH_STAGE,
             },
+            transcript_dir=transcripts,
         )
         _environment_phase(request.progress_hook, "sandbox_layout", request.run_id)
         local = LocalSandbox(root)
@@ -2444,9 +2451,9 @@ class LLMResearchDeveloper:
         )
         safe = SafeWorkspace(workspace_root)
         # Read-only exploration reaches the PIT view, the start node's
-        # artifacts, the backtest results and the step lineage, not just the
-        # writable workspace.
-        search_roots = SearchRoots(safe, paths=paths)
+        # artifacts, the backtest results, the step lineage and the session's
+        # own transcript, not just the writable workspace.
+        search_roots = SearchRoots(safe, paths=paths, trace_root=transcripts)
         tree = self._install_step_tree(paths)
         sandbox: DockerSandbox | None = None
         try:
@@ -2529,6 +2536,8 @@ class LLMResearchDeveloper:
                 # Parent-only: sub-agents report findings to their parent, the
                 # parent files the report (a wrong mounted memory entry too).
                 ReportIssueTool(issue_reports_path(self.experiment_dir), manifest),
+                # Parent-only: the Agent's own context compaction.
+                CompactTool(),
                 modification,
                 smoke,
                 BatchValidateTool(
@@ -2605,6 +2614,7 @@ class LLMResearchDeveloper:
                         compact_budgeted,
                         self.subagent_compaction,
                         result_store=search_roots,
+                        trace_ref=run_ref,
                     )
                     if compact_budgeted is not None
                     else None
@@ -2633,9 +2643,8 @@ class LLMResearchDeveloper:
                     ContextCompactor(
                         compact_budgeted,
                         self.context_compaction,
-                        # Dropped messages are archived under the session's own
-                        # logs and read back with the search tools.
                         result_store=search_roots,
+                        trace_ref=run_ref,
                     )
                     if compact_budgeted is not None
                     else None
@@ -2651,6 +2660,7 @@ class LLMResearchDeveloper:
                     run_id=request.run_id,
                 ),
                 freeze_gate=backtest.freeze_gate,
+                trace_ref=run_ref,
             )
             try:
                 result = runner.run(SESSION_DEFAULT_INSTRUCTION)

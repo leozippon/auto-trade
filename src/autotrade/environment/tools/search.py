@@ -56,6 +56,10 @@ MAX_SKIPPED_LISTED = 20
 # directory; the overflow is counted, not named.
 MAX_HINT_ENTRIES = 20
 VCS_DIRS = (".git", ".hg", ".svn", ".bzr", ".jj", ".sl")
+# The session's own transcript, every attempt of the arm: an Agent-readable
+# text rendering of the Agent trace, one file per attempt named by the run's
+# opaque ref (``<run_ref>.txt``, ``<run_ref>.partN.txt`` once it is long).
+TRACE_ROOT = "trace"
 SEARCH_ROOTS = (
     "workspace",
     "output",
@@ -65,6 +69,7 @@ SEARCH_ROOTS = (
     "parent_output",
     "parent_models",
     "steps",
+    TRACE_ROOT,
 )
 GREP_OUTPUT_MODES = ("content", "files", "count")
 # Read-only mounts populated before the session starts: offered only when
@@ -92,7 +97,13 @@ class SearchRoots:
     caller has no layout, so a root is only ever offered when it exists.
     """
 
-    def __init__(self, workspace: SafeWorkspace, *, paths: object | None = None) -> None:
+    def __init__(
+        self,
+        workspace: SafeWorkspace,
+        *,
+        paths: object | None = None,
+        trace_root: str | Path | None = None,
+    ) -> None:
         self.workspace = workspace
         roots: dict[str, Path] = {
             "workspace": workspace.root,
@@ -104,6 +115,8 @@ class SearchRoots:
                 base = getattr(paths, attribute, None)
                 if base is not None:
                     roots[name] = Path(base)
+        if trace_root is not None:
+            roots[TRACE_ROOT] = Path(trace_root)
         self._roots = {name: roots[name] for name in SEARCH_ROOTS if name in roots}
         # Oversized results spill under the artifacts logs (or the workspace
         # when there is no layout) and are referenced back through that root.
@@ -261,8 +274,40 @@ def _has_entries(directory: Path) -> bool:
 _ROOT_HINT = (
     " Default `workspace`, whose `inputs/` holds the session facts "
     "(e.g. root='workspace', path='inputs/skills_index.json'); formal strategy "
-    "files are root='output', path='main.py'."
+    "files are root='output', path='main.py'; `trace` is this session's own "
+    "transcript (`<run_ref>.txt`, `<run_ref>.partN.txt` when long), every attempt "
+    "included."
 )
+
+
+_TRACE_READ_CONTENT_KEYS = ("content", "filenames", "lines")
+
+
+def trace_read_stub(
+    tool: str, arguments: Mapping[str, object], record: Mapping[str, object]
+) -> dict[str, object]:
+    """The trace record of a read of the trace itself: the call and its size.
+
+    Re-logging the content would write the transcript back into the trace and
+    let one read double the file, so a ``read_file``/``grep``/``glob`` on the
+    ``trace`` root keeps its paging and status fields and replaces the content
+    with how much of it there was. The conversation still gets the full result.
+    """
+
+    if tool not in ("read_file", "grep", "glob") or arguments.get("root") != TRACE_ROOT:
+        return dict(record)
+    value = record.get("value")
+    if not isinstance(value, Mapping):
+        return dict(record)
+    stub = {key: item for key, item in value.items() if key not in _TRACE_READ_CONTENT_KEYS}
+    content = value.get("content")
+    listed = value.get("filenames") if "filenames" in value else value.get("lines")
+    stub["trace_read"] = {
+        "content_chars": len(content) if isinstance(content, str) else 0,
+        "items": len(listed) if isinstance(listed, (list, tuple)) else 0,
+        "note": "content read from the trace is not re-logged",
+    }
+    return {**record, "value": stub}
 
 
 def _root_field(roots: SearchRoots, description: str) -> dict[str, object]:

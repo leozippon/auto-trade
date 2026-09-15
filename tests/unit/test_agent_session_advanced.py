@@ -42,6 +42,7 @@ from autotrade.environment.llm import (
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.environment.tools import (
+    CompactTool,
     FinishSessionTool,
     ReadFileTool,
     SafeWorkspace,
@@ -201,8 +202,8 @@ def test_compactor_bounds_one_huge_recent_tool_result_before_local_request():
 def _spill_roots(tmp_path: Path) -> SearchRoots:
     """A real spill store over a temporary workspace.
 
-    Without a sandbox layout the search roots spill under the workspace, so an
-    archive reference is ``root='workspace'`` plus a relative path — the same
+    Without a sandbox layout the search roots spill under the workspace, so a
+    spilled reference is ``root='workspace'`` plus a relative path — the same
     ``root`` + ``path`` pair a session reads back with ``read_file``."""
 
     workspace = tmp_path / "workspace"
@@ -210,132 +211,237 @@ def _spill_roots(tmp_path: Path) -> SearchRoots:
     return SearchRoots(SafeWorkspace(workspace))
 
 
-def _read_archive(roots: SearchRoots, reference: dict) -> list[dict]:
-    result = ReadFileTool(roots).invoke(
-        {"root": reference["root"], "path": reference["path"], "limit": 5_000}
+def _shell_turns(count: int, *, prefix: str = "s") -> list[ProviderResponse]:
+    return [
+        ProviderResponse(tool_calls=(ToolCall(f"{prefix}{index}", "shell", {"argv": ["rg", str(index)]}),))
+        for index in range(count)
+    ]
+
+
+SUMMARY = (
+    "## 策略现状\noutput/ 是动量腿 v2（20 日收益排序、每周复核、15 只等权），候选 candidates/v3 加了 60 日"
+    "波动过滤，待冒烟。\n## 决定\n- 否定 60 日反转：Y2 中性化超额 -1.2%，空对照分位 0.48，"
+    "节点 research__session_ref_ab__run_ref_x__valid_002。\n- 保留 v2 作为当轮基准：完整研究期中性化超额 +2.1%，"
+    "四个研究年里三个为正。\n## 线索\n- 下一轮预登记 v3 与对照 c1（去掉波动过滤的同一载体），span=full。\n"
+    "## trace\n- 第 3 次调用的 shell 输出有分位数表；grep 'ic=' 可找回筛选读数。"
+)
+
+
+def _compact_call(summary: str = SUMMARY) -> ProviderResponse:
+    return ProviderResponse(tool_calls=(ToolCall("c", "compact", {"summary": summary}),))
+
+
+def _finish_call(node_id: str) -> ProviderResponse:
+    return ProviderResponse(
+        tool_calls=(ToolCall("f", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
     )
-    assert result.ok
-    lines = str(result.value["content"]).splitlines()
-    # ``read_file`` numbers lines cat -n style; the archive itself is JSON lines.
-    return [json.loads(line.split("\t", 1)[1]) for line in lines]
 
 
-def test_compaction_archives_dropped_messages_and_the_agent_can_read_them_back(
+def _compaction_payloads(messages) -> list[dict]:
+    return [
+        json.loads(message.content)
+        for message in messages
+        if message.role == "user" and "context_compaction" in (message.content or "")
+    ]
+
+
+def test_the_agent_compacts_its_own_context_and_is_pointed_at_the_trace(tmp_path: Path):
+    """``compact`` rebuilds the conversation around the Agent's own summary:
+    system prompt, one summary message naming the transcript, and the recent
+    tail with its protocol pairs; the event locates the replaced calls."""
+
+    finish, node_id = finish_session_tool(tmp_path)
+    llm = ScriptedLLM([*_shell_turns(3), _compact_call(), *_shell_turns(1, prefix="t"), _finish_call(node_id)])
+    events: list[tuple[str, dict[str, object]]] = []
+    time_budget = InferenceTimeBudget(duration_seconds=120.0)
+    shared = SessionCallBudget(max_calls=40, time_budget=time_budget)
+    runner = AgentSessionRunner(
+        llm=SessionBudgetLLM(llm, budget=shared, role="main"),
+        tools=ToolRegistry([DeclaredReadOnlyShell(), CompactTool(), finish]),
+        system_prompt="inspect",
+        config=AgentSessionConfig(max_llm_calls=8),
+        compactor=ContextCompactor(
+            SessionBudgetLLM(ScriptedLLM([]), budget=shared, role="compact"),
+            ContextCompactionConfig(token_threshold=10**9, keep_recent_messages=2),
+        ),
+        time_budget=time_budget,
+        event_sink=lambda event, payload: events.append((event, payload)),
+        trace_ref="run_ref_x",
+    )
+
+    assert runner.run("inspect then finish").status == "finished"
+
+    # The request after the compaction: system prompt, the Agent's summary,
+    # then the last two messages (the compact turn and its result).
+    after = llm.calls[4]["messages"]
+    assert after[0].role == "system" and after[0].content == "inspect"
+    [payload] = _compaction_payloads(after)
+    assert payload["summary_kind"] == "agent" and payload["summary"] == SUMMARY
+    assert payload["trace"] == {
+        "root": "trace",
+        "path": "run_ref_x.txt",
+        "hint": payload["trace"]["hint"],
+    }
+    assert "grep or read_file" in payload["trace"]["hint"]
+    assert [message.role for message in after[2:]] == ["assistant", "tool"]
+    assert after[2].tool_calls[0].name == "compact" and after[3].tool_call_id == "c"
+    assert len(after) == 4
+    [compaction] = [payload for event, payload in events if event == "context_compaction"]
+    assert compaction["trigger"] == "agent" and compaction["status"] == "ok"
+    assert compaction["call_index"] == 4 and compaction["replaced_call_range"] == [1, 4]
+    # System prompt, instruction, the wrap-up prompt (the test budget sits
+    # inside the default grace), three shell turns and the compact turn.
+    assert (compaction["messages_before"], compaction["messages_after"]) == (11, 4)
+    assert compaction["summary"] == SUMMARY
+    # The tool result itself is a plain acknowledgement.
+    tool_events = [payload for event, payload in events if event == "tool_call" and payload["tool"] == "compact"]
+    assert tool_events[0]["result"]["value"] == {"status": "compacted", "summary_chars": len(SUMMARY)}
+    assert not any(event == "context_notice" for event, _payload in events)
+
+
+def test_a_short_summary_is_refused_and_nothing_is_compacted(tmp_path: Path):
+    finish, node_id = finish_session_tool(tmp_path)
+    llm = ScriptedLLM([*_shell_turns(2), _compact_call("too short"), _finish_call(node_id)])
+    events: list[tuple[str, dict[str, object]]] = []
+    runner = AgentSessionRunner(
+        llm=llm,
+        tools=ToolRegistry([DeclaredReadOnlyShell(), CompactTool(), finish]),
+        system_prompt="inspect",
+        config=AgentSessionConfig(max_llm_calls=8),
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+    assert runner.run("inspect then finish").status == "finished"
+    refused = next(payload for event, payload in events if event == "tool_call" and payload["tool"] == "compact")
+    assert refused["result"]["ok"] is False and "summary" in refused["result"]["error"]
+    assert not any(event == "context_compaction" for event, _payload in events)
+    # Every message is still there: the history was not rebuilt.
+    assert len(llm.calls[-1]["messages"]) == 2 + 3 * 2
+
+
+def test_the_context_notice_arrives_at_the_advisory_fraction_and_rearms_after_a_compaction(
     tmp_path: Path,
 ):
-    roots = _spill_roots(tmp_path)
+    finish, node_id = finish_session_tool(tmp_path)
+    llm = ScriptedLLM(
+        [*_shell_turns(3), _compact_call(), *_shell_turns(3, prefix="t"), _finish_call(node_id)]
+    )
+    events: list[tuple[str, dict[str, object]]] = []
+    time_budget = InferenceTimeBudget(duration_seconds=120.0)
+    shared = SessionCallBudget(max_calls=40, time_budget=time_budget)
+    # A threshold the runtime compactor never reaches (its message floor is
+    # high) while three shell turns cross 75% of it.
+    runner = AgentSessionRunner(
+        llm=SessionBudgetLLM(llm, budget=shared, role="main"),
+        tools=ToolRegistry([DeclaredReadOnlyShell(), CompactTool(), finish]),
+        system_prompt="inspect",
+        config=AgentSessionConfig(max_llm_calls=12),
+        compactor=ContextCompactor(
+            SessionBudgetLLM(ScriptedLLM([]), budget=shared, role="compact"),
+            ContextCompactionConfig(token_threshold=260, min_messages=100, keep_recent_messages=2),
+        ),
+        time_budget=time_budget,
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+
+    assert runner.run("inspect then finish").status == "finished"
+
+    notices = [index for index, (event, _payload) in enumerate(events) if event == "context_notice"]
+    compactions = [index for index, (event, _payload) in enumerate(events) if event == "context_compaction"]
+    # One notice before the Agent compacted, one after the window filled again.
+    assert len(notices) == 2 and len(compactions) == 1
+    assert notices[0] < compactions[0] < notices[1]
+    notice = events[notices[0]][1]
+    assert notice["token_threshold"] == 260 and notice["estimated_tokens"] >= 195
+    observation = next(
+        json.loads(message.content)
+        for call in llm.calls
+        for message in call["messages"]
+        if message.role == "user" and "context_notice" in (message.content or "")
+    )
+    assert observation["observation"] == "context_notice" and "compact(summary=...)" in observation["message"]
+
+
+def test_a_runtime_compaction_updates_the_agents_own_summary(tmp_path: Path):
+    """The safety net treats the Agent's summary as the previous summary it
+    updates, so the two triggers keep one continuous checkpoint."""
+
+    finish, node_id = finish_session_tool(tmp_path)
+    compact_llm = ScriptedLLM([ProviderResponse(content="## 目标\nupdated\n\n## 下一步\n- finish")])
+    llm = ScriptedLLM([*_shell_turns(2), _compact_call(), *_shell_turns(3, prefix="t"), _finish_call(node_id)])
+    time_budget = InferenceTimeBudget(duration_seconds=120.0)
+    shared = SessionCallBudget(max_calls=40, time_budget=time_budget)
+    events: list[tuple[str, dict[str, object]]] = []
+    runner = AgentSessionRunner(
+        llm=SessionBudgetLLM(llm, budget=shared, role="main"),
+        tools=ToolRegistry([DeclaredReadOnlyShell(), CompactTool(), finish]),
+        system_prompt="inspect",
+        config=AgentSessionConfig(max_llm_calls=12),
+        compactor=ContextCompactor(
+            SessionBudgetLLM(compact_llm, budget=shared, role="compact"),
+            # The floor sits above the history before the Agent's own
+            # compaction, so the safety net fires only on the window after it.
+            ContextCompactionConfig(
+                token_threshold=1, min_messages=10, keep_recent_messages=2, min_remaining_seconds=0
+            ),
+            trace_ref="run_ref_x",
+        ),
+        time_budget=time_budget,
+        event_sink=lambda event, payload: events.append((event, payload)),
+        trace_ref="run_ref_x",
+    )
+
+    assert runner.run("inspect then finish").status == "finished"
+
+    triggers = [payload["trigger"] for event, payload in events if event == "context_compaction"]
+    assert triggers == ["agent", "runtime"]
+    request = compact_llm.calls[0]["messages"][1].content
+    assert "## 上一份摘要" in request and SUMMARY.splitlines()[0] in request
+    runtime = [payload for event, payload in events if event == "context_compaction"][1]
+    assert runtime["replaced_call_range"] == [4, runtime["call_index"]]
+    [payload] = _compaction_payloads(llm.calls[-1]["messages"])
+    assert payload["summary_kind"] == "model" and payload["summary"].startswith("## 目标\nupdated")
+    assert payload["trace"]["path"] == "run_ref_x.txt"
+
+
+def test_a_read_of_the_trace_root_is_traced_as_a_stub(tmp_path: Path):
+    finish, node_id = finish_session_tool(tmp_path)
+    transcripts = tmp_path / "transcripts"
+    transcripts.mkdir()
+    (transcripts / "run_ref_x.txt").write_text("=== event\ncontent: secret numbers\n", encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "note.txt").write_text("plain note\n", encoding="utf-8")
+    roots = SearchRoots(SafeWorkspace(workspace), trace_root=transcripts)
+    assert "trace" in roots.names
     llm = ScriptedLLM(
         [
-            ProviderResponse(content="## 目标\nfirst"),
-            ProviderResponse(content="## 目标\nsecond"),
+            ProviderResponse(
+                tool_calls=(
+                    ToolCall("r1", "read_file", {"root": "trace", "path": "run_ref_x.txt"}),
+                    ToolCall("r2", "read_file", {"root": "workspace", "path": "note.txt"}),
+                )
+            ),
+            _finish_call(node_id),
         ]
     )
-    compactor = ContextCompactor(
-        llm,
-        ContextCompactionConfig(
-            token_threshold=1, min_messages=5, keep_recent_messages=2
-        ),
-        result_store=roots,
+    events: list[tuple[str, dict[str, object]]] = []
+    runner = AgentSessionRunner(
+        llm=llm,
+        tools=ToolRegistry([ReadFileTool(roots), finish]),
+        system_prompt="inspect",
+        config=AgentSessionConfig(max_llm_calls=4),
+        event_sink=lambda event, payload: events.append((event, payload)),
     )
-    messages = [ChatMessage("system", "system")]
-    messages.extend(ChatMessage("user", f"message {index}") for index in range(6))
-
-    first = compactor.compact(messages)
-
-    assert first is not None and first.event["status"] == "ok"
-    payload = json.loads(first.messages[1].content or "{}")
-    reference = payload["archives"][0]
-    assert reference["compaction_index"] == 1
-    assert reference["messages"] == reference["dropped_messages"] == 4
-    assert "grep or read_file" in payload["archive_hint"]
-    assert first.event["archive"] == reference
-    # The four dropped messages are archived in conversation order, and the two
-    # kept as recent raw turns are not duplicated into the archive.
-    archived = _read_archive(roots, reference)
-    assert [record["content"] for record in archived] == [
-        f"message {index}" for index in range(4)
-    ]
-    assert [record["position"] for record in archived] == [1, 2, 3, 4]
-    assert [message.content for message in first.messages[2:]] == [
-        "message 4",
-        "message 5",
-    ]
-
-    # A second compaction drops the first summary as well, so its archive
-    # reference has to travel forward or the earlier content becomes
-    # unreachable.
-    continued = [*first.messages]
-    continued.extend(ChatMessage("user", f"later {index}") for index in range(4))
-    second = compactor.compact(continued)
-
-    assert second is not None and second.event["status"] == "ok"
-    trail = json.loads(second.messages[1].content or "{}")["archives"]
-    assert [item["compaction_index"] for item in trail] == [1, 2]
-    assert trail[0] == reference
-    assert _read_archive(roots, trail[0])[0]["content"] == "message 0"
-    assert any(
-        record["content"] == "later 0" for record in _read_archive(roots, trail[1])
-    )
-
-
-def test_compaction_archive_size_cap_keeps_the_newest_dropped_messages(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    monkeypatch.setattr(compact_module, "_ARCHIVE_MAX_CHARS", 900)
-    roots = _spill_roots(tmp_path)
-    compactor = ContextCompactor(
-        ScriptedLLM([ProviderResponse(content="## 目标\ncapped")]),
-        ContextCompactionConfig(
-            token_threshold=1, min_messages=5, keep_recent_messages=1
-        ),
-        result_store=roots,
-    )
-    messages = [ChatMessage("system", "system")]
-    messages.extend(ChatMessage("user", f"{index}" * 400) for index in range(6))
-
-    result = compactor.compact(messages)
-
-    assert result is not None
-    reference = result.event["archive"]
-    assert reference["dropped_messages"] == 5
-    assert 0 < reference["messages"] < 5
-    archived = _read_archive(roots, reference)
-    assert len(archived) == reference["messages"]
-    # The archive is bounded and keeps the turns nearest the retained window.
-    assert archived[-1]["position"] == 5
-    assert archived[-1]["content"] == "4" * 400
-    spilled = next((tmp_path / "workspace" / "logs").rglob("archive.txt"))
-    assert spilled.stat().st_size <= 900
-
-
-def test_compaction_archive_skips_one_oversized_message_and_keeps_the_others(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    """One huge tool result must not cost the Agent every older message."""
-
-    monkeypatch.setattr(compact_module, "_ARCHIVE_MAX_CHARS", 900)
-    roots = _spill_roots(tmp_path)
-    compactor = ContextCompactor(
-        ScriptedLLM([ProviderResponse(content="## 目标\nskipped")]),
-        ContextCompactionConfig(
-            token_threshold=1, min_messages=5, keep_recent_messages=1
-        ),
-        result_store=roots,
-    )
-    messages = [ChatMessage("system", "system")]
-    messages.extend(ChatMessage("user", f"small {index}") for index in range(4))
-    # The newest dropped message alone exceeds the whole archive budget.
-    messages.append(ChatMessage("user", "huge" * 400))
-    messages.append(ChatMessage("user", "kept recent"))
-
-    result = compactor.compact(messages)
-
-    assert result is not None
-    reference = result.event["archive"]
-    assert reference["dropped_messages"] == 5 and reference["messages"] == 4
-    assert [record["content"] for record in _read_archive(roots, reference)] == [
-        f"small {index}" for index in range(4)
-    ]
+    assert runner.run("read then finish").status == "finished"
+    traced = {payload["tool_call_id"]: payload["result"] for event, payload in events if event == "tool_call"}
+    assert "content" not in traced["r1"]["value"]
+    assert traced["r1"]["value"]["trace_read"]["content_chars"] > 0
+    assert traced["r1"]["value"]["line_count"] == 2
+    assert "secret numbers" not in json.dumps(traced["r1"])
+    assert "plain note" in traced["r2"]["value"]["content"]
+    # The conversation itself still carries what was read.
+    tool_messages = [message for message in llm.calls[1]["messages"] if message.role == "tool"]
+    assert any("secret numbers" in (message.content or "") for message in tool_messages)
 
 
 def test_emergency_tool_result_summary_spills_the_body_it_removes(tmp_path: Path):
@@ -945,9 +1051,12 @@ def test_compaction_keeps_the_session_system_prompt_byte_identical(tmp_path: Pat
         config=AgentSessionConfig(max_llm_calls=6),
         compactor=ContextCompactor(
             SessionBudgetLLM(compact_llm, budget=shared, role="compact"),
+            # A floor of eight: with the wrap-up prompt and the compaction
+            # advisory in the history, the window fills every other turn, so
+            # the request lengths below really rise and fall.
             ContextCompactionConfig(
                 token_threshold=1,
-                min_messages=6,
+                min_messages=8,
                 keep_recent_messages=2,
                 min_remaining_seconds=0,
             ),
