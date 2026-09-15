@@ -739,8 +739,7 @@ def _strategy_sandbox_from_spec(
 
     The experiment's GPU request travels with it: ``fit(context)`` is where a
     model is trained, and it runs in the strategy container of every formal
-    replay (Validation, parent control, frozen Test, Held-out), not in the
-    session. The request is the experiment-level one — a per-session HITL
+    replay (validation and forward alike), not in the session. The request is the experiment-level one — a per-session HITL
     ``sandbox_gpu_count`` override moves only that session's own container.
     The strategy container always uses the free-memory selector, so a spec that
     pins explicit device indexes is honoured as a device count, not as those

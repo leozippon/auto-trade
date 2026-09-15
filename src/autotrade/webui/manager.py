@@ -706,15 +706,6 @@ class ExperimentManager:
         except InboxError as exc:
             raise ManagerError(str(exc)) from exc
 
-    def _live_worker_status(self, directory: Path, *, action: str) -> Mapping[str, object]:
-        state = experiment_state(directory)
-        if not state.get("worker_alive"):
-            raise ManagerError(f"{action} requires a live worker")
-        status = state.get("status")
-        if not isinstance(status, Mapping):
-            raise ManagerError(f"{action} requires a live worker")
-        return status
-
     def _apply_control_action(
         self,
         directory: Path,
