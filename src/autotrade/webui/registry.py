@@ -250,6 +250,7 @@ def _forward_view(
         return None
     null = _mapping(record.get("null_control"))
     return {
+        "recorded_at": record.get("recorded_at"),
         "error": identity.public_text(str(record.get("error") or "")) or None,
         "replay": dict(_mapping(record.get("replay"))),
         "result": _result_name(record.get("result_ref")),
@@ -626,6 +627,7 @@ def _research_session_view(
     run_id = str(record.get("run_id") or "")
     return {
         "outcome": record.get("outcome"),
+        "recorded_at": record.get("recorded_at"),
         # Agent-authored: through the same projection as every traced string.
         "reason": identity.public_text(str(record.get("reason") or "")) or None,
         "finish_reason": record.get("finish_reason"),
@@ -691,6 +693,24 @@ def _frozen_view(
     }
 
 
+def _failed_attempts(
+    identity: PublicIdentity, records: Sequence[Mapping[str, object]], phase: str
+) -> dict[str, object]:
+    """How many attempts of ``phase`` failed before their record, and the last
+    failure's reason: the retries the verdict view accounts for."""
+
+    failed = [
+        row
+        for row in records
+        if row.get("record_type") == "attempt_failed" and row.get("phase") == phase
+    ]
+    last = failed[-1] if failed else None
+    return {
+        "failed": len(failed),
+        "last_error": identity.public_text(str(last.get("error") or "")) or None if last else None,
+    }
+
+
 def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
     directory = resolve_experiment_dir(root, experiment_id)
     detail = summarize_experiment(directory)
@@ -737,6 +757,7 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
         ),
         "sessions": sessions,
         "frozen": _frozen_view(identity, records),
+        "replay_attempts": _failed_attempts(identity, records, FORWARD_PHASE),
     }
 
 

@@ -1233,7 +1233,7 @@ function fmtMonth(yyyymmdd) {
 
 /* A calendar range as a bar, with segments filled inside it and tick labels
    under it. Null when the range has no two dates. */
-function spanBar(start, end, segments, ticks, { mini = false, pending = false } = {}) {
+function spanBar(start, end, segments, ticks, { mini = false, pending = false, progress = null } = {}) {
   const from = dayIndex(start),
     to = dayIndex(end);
   if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) return null;
@@ -1251,6 +1251,14 @@ function spanBar(start, end, segments, ticks, { mini = false, pending = false } 
           title: segment.title || null,
         }),
       ),
+      // How far a running replay has got, over the whole range.
+      Number.isFinite(progress)
+        ? el("span", {
+            class: "span-progress",
+            style: `width:${(Math.max(0, Math.min(1, progress)) * 100).toFixed(1)}%`,
+            title: `回放进度 ${Math.round(Math.max(0, Math.min(1, progress)) * 100)}%`,
+          })
+        : null,
     ),
     el(
       "span",
@@ -2466,152 +2474,281 @@ const SLICE_ROWS = [
   ["mean_gross", "平均仓位", fmtPct],
 ];
 
-function sliceTable(forward) {
-  const slices = forward.slices || {};
-  const columns = [
-    ["forward", "前推"],
-    ["heldout", "Held-out"],
-  ].filter(([key]) => slices[key]);
-  if (!columns.length) return null;
-  const present = (value) => value !== null && value !== undefined;
-  const rows = SLICE_ROWS.filter(([field]) =>
-    columns.some(([key]) => present(slices[key][field])),
+// The statistics each stage view lists of its own slice.
+const FORWARD_STAT_FIELDS = [
+  "days",
+  "neutralized_excess",
+  "lower_bound",
+  "recency_neutralized_excess",
+  "max_drawdown",
+  "excess_at_cost_stress",
+  "round_trips",
+  "mean_gross",
+];
+const HELDOUT_STAT_FIELDS = ["days", "neutralized_excess", "tolerance", "max_drawdown", "mean_gross"];
+
+/* One slice's statistics, the rows it carries only. Null before the record. */
+function sliceStats(slice, fields) {
+  if (!slice) return null;
+  const rows = SLICE_ROWS.filter(
+    ([field]) => fields.includes(field) && slice[field] !== null && slice[field] !== undefined,
   );
+  if (!rows.length) return null;
   return dataTable(
-    [{ label: "" }, ...columns.map(([, label]) => ({ label, num: true }))],
+    [{ label: "" }, { label: "", num: true }],
     rows.map(([field, label, fmt, signed]) => [
       label,
-      ...columns.map(([key]) => {
-        const value = slices[key][field];
-        return {
-          value: present(value) ? fmt(value) : "—",
-          cls: signed ? signCls(value) : "",
-        };
-      }),
+      { value: fmt(slice[field]), cls: signed ? signCls(slice[field]) : "" },
     ]),
     { fit: true, box: "section-gap" },
   );
 }
 
-/* The graduation criteria (pipelines/verdict.py F1–F6, H1–H4) as a
-   checklist. Before the replay: the criteria and the thresholds they will be
-   held to, unmarked. After it: the measured figure of each slice against the
-   threshold the record carries, with its pass or fail mark; a slice the
-   strategy's error left unmeasured shows its criteria unmarked and the error
-   itself as the failed one. */
-function graduationChecklist(forward, verdict, thresholds) {
-  const failed = new Set((verdict || {}).reasons || []);
-  const t = thresholds || {};
-  const slices = (forward || {}).slices || {};
-  const f = slices.forward,
-    h = slices.heldout;
-  const item = (token, slice, value, threshold) => ({
+/* One graduation criterion (pipelines/verdict.py): before the record the
+   threshold alone, unmarked; after it the measured figure with its pass or
+   fail mark. A slice the strategy's error left unmeasured stays unmarked. */
+function criterion(token, slice, value, threshold, failed) {
+  return {
     ok: slice ? !failed.has(token) : null,
     label: reasonLabel(token),
     value: slice ? value : null,
     threshold,
-  });
-  const drawdown = t.max_drawdown === undefined || t.max_drawdown === null ? "" : `≤ ${fmtPct(t.max_drawdown)}`;
-  const exposure = t.min_mean_gross === undefined ? "" : `≥ ${fmtPct(t.min_mean_gross)}`;
+  };
+}
+
+function failedReasons(verdict) {
+  return new Set((verdict || {}).reasons || []);
+}
+
+/* F1–F6 over the forward slice. */
+function forwardChecklist(f, verdict, thresholds) {
+  const failed = failedReasons(verdict);
+  const t = thresholds || {};
   return checklist([
-    ...["forward", "heldout"]
-      .filter((where) => failed.has(`${where}_strategy_error`))
-      .map((where) => ({ ok: false, label: reasonLabel(`${where}_strategy_error`), value: forward.error })),
-    item("forward_lower_bound_not_positive", f, fmtPct(f && f.lower_bound), "> 0"),
-    item("forward_recency_negative", f, fmtPct(f && f.recency_neutralized_excess), "≥ 0"),
-    item("forward_max_drawdown_exceeded", f, fmtPct(f && f.max_drawdown), drawdown),
-    item(
+    ...(failed.has("forward_strategy_error")
+      ? [{ ok: false, label: reasonLabel("forward_strategy_error"), value: null }]
+      : []),
+    criterion("forward_lower_bound_not_positive", f, fmtPct(f && f.lower_bound), "> 0", failed),
+    criterion("forward_recency_negative", f, fmtPct(f && f.recency_neutralized_excess), "≥ 0", failed),
+    criterion(
+      "forward_max_drawdown_exceeded",
+      f,
+      fmtPct(f && f.max_drawdown),
+      t.max_drawdown === undefined || t.max_drawdown === null ? "" : `≤ ${fmtPct(t.max_drawdown)}`,
+      failed,
+    ),
+    criterion(
       "forward_not_positive_at_cost_stress",
       f,
       fmtPct(f && f.excess_at_cost_stress),
       t.cost_stress_multiplier ? `> 0（滑点 ×${t.cost_stress_multiplier}）` : "> 0",
+      failed,
     ),
-    item(
+    criterion(
       "forward_too_few_round_trips",
       f,
       f && f.round_trips,
       t.min_round_trips === undefined || t.min_round_trips === null ? "" : `≥ ${t.min_round_trips}`,
+      failed,
     ),
-    item("forward_exposure_below_floor", f, fmtPct(f && f.mean_gross), exposure),
-    item(
+    criterion(
+      "forward_exposure_below_floor",
+      f,
+      fmtPct(f && f.mean_gross),
+      t.min_mean_gross === undefined ? "" : `≥ ${fmtPct(t.min_mean_gross)}`,
+      failed,
+    ),
+  ]);
+}
+
+/* H1–H4 over the Held-out slice. */
+function heldoutChecklist(h, verdict, thresholds) {
+  const failed = failedReasons(verdict);
+  const t = thresholds || {};
+  return checklist([
+    ...(failed.has("heldout_strategy_error")
+      ? [{ ok: false, label: reasonLabel("heldout_strategy_error"), value: null }]
+      : []),
+    criterion(
       "heldout_excess_below_tolerance",
       h,
       fmtPct(h && h.neutralized_excess),
       h ? `≥ ${fmtPct(h.tolerance)}` : t.heldout_tolerance_z ? `≥ −${t.heldout_tolerance_z} × 前推跟踪误差 / √年` : "",
+      failed,
     ),
-    item("heldout_max_drawdown_exceeded", h, fmtPct(h && h.max_drawdown), drawdown),
-    item("heldout_exposure_below_floor", h, fmtPct(h && h.mean_gross), exposure),
+    criterion(
+      "heldout_max_drawdown_exceeded",
+      h,
+      fmtPct(h && h.max_drawdown),
+      t.max_drawdown === undefined || t.max_drawdown === null ? "" : `≤ ${fmtPct(t.max_drawdown)}`,
+      failed,
+    ),
+    criterion(
+      "heldout_exposure_below_floor",
+      h,
+      fmtPct(h && h.mean_gross),
+      t.min_mean_gross === undefined ? "" : `≥ ${fmtPct(t.min_mean_gross)}`,
+      failed,
+    ),
   ]);
 }
 
-/* The one continuous replay and its verdict, opened by the 前推回放, Held-out
-   and 裁决 rows alike with the selected slice lit on the span. Before the
-   replay ran: the span as outlines and the criteria with their thresholds.
-   After the record: the checklist with measured values, the slice statistics,
-   the style attribution, the trades, and the Paper command for a graduate. A
-   research that froze nothing has only its verdict. */
-function replayPanel(detail, focus) {
-  const verdict = detail.verdict || {};
+/* The thresholds the verdict holds a replay to, as chips. */
+function thresholdChips(t) {
+  if (!t) return null;
+  return chipsRow([
+    t.forward_confidence ? chip(`下界置信 ${Math.round(t.forward_confidence * 100)}%`) : null,
+    t.recency_months ? chip(`最近 ${t.recency_months} 个月`) : null,
+    t.max_drawdown === undefined || t.max_drawdown === null ? null : chip(`回撤 ≤ ${fmtPct(t.max_drawdown)}`),
+    t.cost_stress_multiplier ? chip(`滑点 ×${t.cost_stress_multiplier}`) : null,
+    t.min_round_trips === undefined || t.min_round_trips === null ? null : chip(`平仓 ≥ ${t.min_round_trips}`),
+    t.min_mean_gross === undefined ? null : chip(`仓位 ≥ ${fmtPct(t.min_mean_gross)}`),
+    t.heldout_tolerance_z ? chip(`Held-out 容忍 z ${t.heldout_tolerance_z}`) : null,
+  ]);
+}
+
+/* What the three replay stages share: the plan's replay span, the thresholds
+   (the record's own once it exists), and how far a running replay has got. */
+function replayContext(detail) {
   const forward = detail.forward;
   const session = (detail.sessions || []).find((entry) => entry.kind === "forward") || {};
-  const replay = (forward || {}).replay || session.replay || {};
-  const step = pipelineTailSteps(detail).find(
-    (row) => row.key === (focus === "verdict" ? "verdict" : "forward"),
-  );
-  const head = panelHead(
-    "前推与 Held-out",
-    verdict.status ? verdictBadge(verdict) : el("span", { class: "badge kind" }, step.status),
-  );
-  if (verdict.status === "no_deliverable")
-    return el(
-      "div",
-      { class: "panel section-gap" },
-      head,
-      el("div", { class: "meta-line" }, (verdict.reasons || []).map(reasonLabel).join("；")),
-    );
-  const thresholds = forward ? (forward.verdict || {}).thresholds : session.thresholds;
-  const refits = (forward || {}).refits_executed || {};
-  const result = (forward || {}).result;
+  const status = detail.status || {};
+  const progress = status.environment_progress || {};
+  const done = Number(progress.completed ?? progress.day_index);
+  const total = Number(progress.total ?? progress.total_days);
+  const replaying = detail.worker_alive && status.session_key === "forward";
+  return {
+    forward,
+    replay: (forward || {}).replay || session.replay || {},
+    thresholds: forward ? (forward.verdict || {}).thresholds : session.thresholds,
+    progress: replaying && Number.isFinite(done) && Number.isFinite(total) && total > 0 ? done / total : null,
+  };
+}
+
+function stageHead(key, detail) {
+  const step = pipelineTailSteps(detail).find((row) => row.key === key);
+  return panelHead(STEP_LABELS[key], el("span", { class: "badge kind" }, step.status));
+}
+
+/* 前推回放: the forward slice alone — its span (progress while replaying),
+   F1–F6 and, once recorded, the slice's own statistics. */
+function forwardStagePanel(detail) {
+  const { forward, replay, thresholds, progress } = replayContext(detail);
+  const f = ((forward || {}).slices || {}).forward;
   return el(
     "div",
     { class: "panel section-gap" },
-    head,
-    replaySpanBar(replay, focus === "verdict" ? null : focus, { pending: !forward }),
-    forward && replay.truncation_reason
-      ? el("div", { class: "meta-line" }, `请求至 ${fmtDate(replay.requested_end)} · 截至发布末日`)
-      : null,
+    stageHead("forward", detail),
+    replaySpanBar(replay, "forward", { pending: !forward, progress }),
+    forward && forward.error ? el("div", { class: "hint warn" }, `策略报错：${forward.error}`) : null,
     el(
       "div",
       { class: "section-gap" },
-      el("h4", { class: "subsection-title" }, forward ? "毕业条件" : "毕业条件 · 阈值"),
-      graduationChecklist(forward, verdict, thresholds),
+      el("h4", { class: "subsection-title" }, forward ? "前推条件 F1–F6" : "前推条件 F1–F6 · 阈值"),
+      forwardChecklist(f, detail.verdict, thresholds),
     ),
-    forward && forward.error ? el("div", { class: "hint warn" }, `策略报错：${forward.error}`) : null,
-    forward ? sliceTable(forward) : null,
-    chipsRow([
-      Number.isFinite(refits.forward) && Number.isFinite(refits.heldout)
-        ? chip(`重训 前推 ${refits.forward} · Held-out ${refits.heldout}`)
-        : null,
-      !forward || forward.null_percentile === null || forward.null_percentile === undefined
-        ? null
-        : chip(`前推 null 分位 ${fmtSharpe(forward.null_percentile)}`, "前推期超额在随机名单回放中的分位"),
-    ]),
-    result ? styleCard(detail.experiment_id, result) : null,
-    result
+    sliceStats(f, FORWARD_STAT_FIELDS),
+    forward && forward.result ? styleCard(detail.experiment_id, forward.result) : null,
+    forward && forward.result
       ? Object.assign(
-          lazyDetails("交易明细", () => ordersNode(detail.experiment_id, result)),
+          lazyDetails("交易明细", () => ordersNode(detail.experiment_id, forward.result)),
           { className: "fold section-gap" },
         )
       : null,
-    detail.paper_candidate
-      ? el(
-          "h4",
-          { class: "subsection-title section-gap", title: "在仓库根目录运行；Paper 不会自动启动" },
-          "Paper 建簿",
-        )
-      : null,
-    detail.paper_candidate ? el("pre", { class: "code-view" }, detail.paper_candidate.command) : null,
   );
+}
+
+/* Held-out: the tail of the same replay — its span, H1–H4 and its statistics. */
+function heldoutStagePanel(detail) {
+  const { forward, replay, thresholds, progress } = replayContext(detail);
+  const h = ((forward || {}).slices || {}).heldout;
+  return el(
+    "div",
+    { class: "panel section-gap" },
+    stageHead("heldout", detail),
+    replaySpanBar(replay, "heldout", { pending: !forward, progress }),
+    el("div", { class: "meta-line" }, "与前推是同一次连续回放的尾段，同一个裁决"),
+    el(
+      "div",
+      { class: "section-gap" },
+      el("h4", { class: "subsection-title" }, forward ? "Held-out 条件 H1–H4" : "Held-out 条件 H1–H4 · 阈值"),
+      heldoutChecklist(h, detail.verdict, thresholds),
+    ),
+    sliceStats(h, HELDOUT_STAT_FIELDS),
+  );
+}
+
+/* 裁决: the verdict itself — its badge, the failed criteria in the order the
+   ledger records them, the thresholds, the attempts it took, when it was
+   recorded, and the Paper handoff. Before it exists, the rule and 待判定. */
+function verdictStagePanel(detail) {
+  const verdict = detail.verdict || {};
+  const { forward, thresholds } = replayContext(detail);
+  const research = ((detail.sessions || []).find((entry) => entry.kind === "research") || {}).record;
+  const attempts = detail.replay_attempts || {};
+  const badge = verdict.status
+    ? verdictBadge(verdict)
+    : detail.state === "failed"
+      ? stateBadge("failed")
+      : el("span", { class: "badge kind" }, STEP_STATUS_LABELS.undecided);
+  const reasons = (verdict.reasons || []).filter(Boolean);
+  const recordedAt = forward ? forward.recorded_at : research && research.arm_end ? research.recorded_at : null;
+  return el(
+    "div",
+    { class: "panel section-gap" },
+    panelHead(STEP_LABELS.verdict, badge),
+    verdict.status
+      ? reasons.length
+        ? checklist(reasons.map((token) => ({ ok: false, label: reasonLabel(token), value: null })))
+        : el("div", { class: "meta-line" }, "前推 F1–F6 与 Held-out H1–H4 全部通过")
+      : el(
+          "div",
+          { class: "meta-line" },
+          "前推 F1–F6 与 Held-out H1–H4 全部通过才 graduated；策略异常记为 discarded，其他失败按上限重试",
+        ),
+    thresholdChips(thresholds),
+    chipsRow([
+      research && Number(research.attempts) > 1 ? chip(`研究 ${research.attempts} 次尝试`) : null,
+      attempts.failed ? chip(`回放失败 ${attempts.failed} 次`, attempts.last_error || null) : null,
+      recordedAt ? chip(`记录于 ${fmtTs(recordedAt)}`) : null,
+    ]),
+    attempts.last_error ? el("div", { class: "hint warn" }, `最近一次回放失败：${attempts.last_error}`) : null,
+    paperHandoff(detail),
+  );
+}
+
+// The one trading environment with a backend (docs/deployment-documentation.md).
+const PAPER_ENV = "paper";
+
+/* The Paper handoff: a graduate's candidate artifact with the command that
+   opens its book, and the book itself once one exists. */
+function paperHandoff(detail) {
+  const candidate = detail.paper_candidate;
+  if (!candidate) return null;
+  const host = el(
+    "div",
+    { class: "section-gap" },
+    el("h4", { class: "subsection-title", title: "在仓库根目录运行；Paper 不会自动启动" }, "Paper 建簿"),
+    el("div", { class: "meta-line" }, `候选产物 ${candidate.artifact_id}`),
+    el("pre", { class: "code-view" }, candidate.command),
+  );
+  api(`/api/trading/${PAPER_ENV}/books`)
+    .then((payload) => {
+      const books = (payload.books || []).filter((row) => row.experiment_id === detail.experiment_id);
+      if (books.length)
+        host.append(
+          el(
+            "div",
+            { class: "meta-line" },
+            "账簿：",
+            ...books.map((row) => el("a", { href: bookHash(PAPER_ENV, row.book_id) }, row.book_id)),
+          ),
+        );
+    })
+    .catch(() => {
+      /* the Paper roster is not readable; the command still stands */
+    });
+  return host;
 }
 
 /* The frozen artifact and the research statistics it was frozen on. */
@@ -2979,7 +3116,7 @@ function stepPlaceholder(detail, key, title) {
 
 /* The right pane of the process grid: whichever step the reader selected. The
    research session has its own panel, the freeze opens the frozen artifact,
-   and 前推回放, Held-out and 裁决 open the one replay panel. */
+   and 前推回放, Held-out and 裁决 each open their own stage view. */
 function sessionDetailPanel(detail, selectedKey) {
   // Flex column with a uniform card gap: whichever cards are present, the
   // first one's top aligns with the process list in the left grid column.
@@ -2995,8 +3132,16 @@ function sessionDetailPanel(detail, selectedKey) {
     panel.append(frozenPanel(detail) || stepPlaceholder(detail, "frozen", "冻结产物"));
     return panel;
   }
-  if (selectedKey !== "research") {
-    panel.append(replayPanel(detail, selectedKey));
+  if (selectedKey === "forward") {
+    panel.append(forwardStagePanel(detail));
+    return panel;
+  }
+  if (selectedKey === "heldout") {
+    panel.append(heldoutStagePanel(detail));
+    return panel;
+  }
+  if (selectedKey === "verdict") {
+    panel.append(verdictStagePanel(detail));
     return panel;
   }
   const status = detail.status || {};

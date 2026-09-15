@@ -854,6 +854,14 @@ progress.progress.done::-moz-progress-bar {
 .span-fill.dim {
  background: var(--input-border);
 }
+/* How far a running replay has got: a stronger fill from the start. */
+.span-progress {
+ position: absolute;
+ top: 0;
+ bottom: 0;
+ left: 0;
+ background: color-mix(in srgb, var(--accent) 45%, transparent);
+}
 .span-ticks {
  position: relative;
  display: block;

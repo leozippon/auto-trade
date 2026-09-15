@@ -338,7 +338,9 @@ def test_no_page_appends_a_renderer_that_can_return_nothing() -> None:
         "armEquityHost",
         "runningStrip",
         "frozenPanel",
-        "sliceTable",
+        "sliceStats",
+        "thresholdChips",
+        "paperHandoff",
         "subWindowSection",
         "elapsedClockNode",
         "subagentClockNode",
@@ -474,22 +476,28 @@ def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) ->
         ("researchSessionPanel", reads("researchSessionPanel", "best"), best),
         ("researchSessionPanel", reads("researchSessionPanel", "row"), validation),
         ("freezeGateChecklist", reads("freezeGateChecklist", "gate"), gate),
-        ("replayPanel", reads("replayPanel", "forward"), forward),
-        ("graduationChecklist", reads("graduationChecklist", "forward"), forward),
-        ("graduationChecklist", reads("graduationChecklist", "f") | reads("graduationChecklist", "h"), slice_fields),
-        ("graduationChecklist", reads("graduationChecklist", "t"), set(detail["forward"]["verdict"]["thresholds"])),
+        ("forwardStagePanel", reads("forwardStagePanel", "forward"), forward),
+        ("replayContext", reads("replayContext", "forward"), forward),
+        ("verdictStagePanel", reads("verdictStagePanel", "forward"), forward),
+        ("forwardChecklist", reads("forwardChecklist", "f"), set(slices["forward"])),
+        ("heldoutChecklist", reads("heldoutChecklist", "h"), set(slices["heldout"])),
+        ("forwardChecklist", reads("forwardChecklist", "t") | reads("heldoutChecklist", "t") | reads("thresholdChips", "t"), set(detail["forward"]["verdict"]["thresholds"])),
         # The same threshold keys are served before the replay, from the plan.
-        ("graduationChecklist", reads("graduationChecklist", "t"), set(replay["thresholds"])),
+        ("thresholdChips", reads("forwardChecklist", "t") | reads("heldoutChecklist", "t") | reads("thresholdChips", "t"), set(replay["thresholds"])),
+        ("verdictStagePanel", reads("verdictStagePanel", "attempts"), set(detail["replay_attempts"])),
+        ("verdictStagePanel", reads("verdictStagePanel", "research"), record),
         ("replaySpanBar", reads("replaySpanBar", "replay"), set(replay["replay"])),
         ("armEquityHost", reads("armEquityHost", "item"), set(detail)),
         ("stepper", {step for step in re.findall(r'^  (\w+): "', _js_literal("const STEP_LABELS = {", "\n};"), re.MULTILINE)}, {"research", "frozen", "forward", "heldout", "verdict"}),
     ):
         assert read, name
         assert read <= served, (name, sorted(read - served))
-    # The slice table's rows are statistics the verdict slices carry.
+    # The stage views' statistics rows are statistics their own slice carries.
     assert set(re.findall(r'^  \["([a-z_]+)",', _js_literal("const SLICE_ROWS = [", "\n];"), re.MULTILINE)) <= slice_fields
+    assert set(re.findall(r'"([a-z_]+)"', _js_literal("const FORWARD_STAT_FIELDS = [", "\n];"))) <= set(slices["forward"])
+    assert set(re.findall(r'"([a-z_]+)"', _js_literal("const HELDOUT_STAT_FIELDS = [", "];"))) <= set(slices["heldout"])
     # Every criterion the pipeline can fail is a line of the checklist.
-    checked = set(re.findall(r'"((?:forward|heldout)_[a-z_]+)"', _js_function_body("graduationChecklist")))
+    checked = set(re.findall(r'"((?:forward|heldout)_[a-z_]+)"', _js_function_body("forwardChecklist") + _js_function_body("heldoutChecklist")))
     checked |= {f"{where}_strategy_error" for where in ("forward", "heldout")}
     assert {token for token in _reason_tokens() if not token.startswith("freeze_")} <= checked
     # The budget bars read the keys both the totals and the usage block carry.
