@@ -1436,7 +1436,7 @@ function route(forceRefresh = false) {
   liveTimers = [];
   for (const source of liveSources) source.close();
   liveSources = [];
-  document.querySelectorAll(".modal-mask").forEach((node) => node.remove());
+  closeModal();
   setActiveNav(
     qmtMatch
       ? "qmt"
@@ -2236,6 +2236,8 @@ function collectParams(inputs) {
 
 /* ---------------- modal helpers ---------------- */
 
+/* One modal at a time, over a page that cannot scroll behind it: the close
+   button, a click on the backdrop and Escape all close it. */
 function showModal(title, body, footerButtons, modalClass = "") {
   closeModal();
   const mask = el("div", {
@@ -2259,10 +2261,18 @@ function showModal(title, body, footerButtons, modalClass = "") {
     ),
   );
   $modalRoot.append(mask);
+  document.body.classList.add("modal-open");
+  document.addEventListener("keydown", modalEscape);
+}
+
+function modalEscape(event) {
+  if (event.key === "Escape") closeModal();
 }
 
 function closeModal() {
   $modalRoot.innerHTML = "";
+  document.body.classList.remove("modal-open");
+  document.removeEventListener("keydown", modalEscape);
 }
 
 /* ---------------- detail page ---------------- */
@@ -3931,11 +3941,7 @@ function liveTracePanel(detail, session) {
   );
   const statsHost = el("div", {});
   const box = el("div", { class: "trace-box" });
-  const auto = el("input", {
-    type: "checkbox",
-    class: "trace-follow",
-    checked: "checked",
-  });
+  const auto = el("input", { type: "checkbox", checked: "checked" });
   panel.append(
     el(
       "div",
@@ -4225,55 +4231,61 @@ function subagentLastToolLabel(block) {
    above the dock, so the latest entry is never covered, and each block is
    the same readout as that child's card — drawn from the same per-task
    block, so the two never disagree. It goes when no child runs. */
-function runningSubagentDock(box, blocks, detail) {
+function runningSubagentDock(blocks, detail, runRef) {
   const running = (blocks || []).filter(isRunningSubagent);
   if (!running.length) return null;
   return el(
     "div",
     { class: "trace-subagent-dock" },
     ...running.map((block) =>
-      el(
-        "button",
-        {
-          type: "button",
-          class: "trace-block subagent running trace-dock-block",
-          title: "打开该子代理的 Trace",
-          onclick: () => openSubagentCardTrace(box, block.task_id),
-        },
-        subagentSummaryNode(block, detail),
+      subagentOpenButton(
+        block,
+        detail,
+        runRef,
+        "trace-block subagent running trace-dock-block",
       ),
     ),
   );
 }
 
-/* The child's own Trace is the fold under its card, so the dock opens that
-   one view and scrolls to it. Following the tail would scroll straight back
-   off it, so the click also stops the auto-scroll. */
-function openSubagentCardTrace(box, taskId) {
-  const card = box.querySelector(
-    `.trace-box-scroll .trace-block.subagent[data-task-id="${CSS.escape(String(taskId))}"]`,
+/* A child's readout as one control: the card at the call position and the
+   dock's pinned block are the same button over the same block, and either
+   click opens that child's own Trace. */
+function subagentOpenButton(block, detail, runRef, className) {
+  return el(
+    "button",
+    {
+      type: "button",
+      class: className,
+      title: "查看该子代理的详细 Trace",
+      onclick: () => openSubagentTrace(detail, runRef, block),
+    },
+    subagentSummaryNode(block, detail),
+    el("span", { class: "subagent-open-hint" }, "详细 Trace ↗"),
   );
-  if (!card) return;
-  const follow = box.parentElement
-    ? box.parentElement.querySelector("input.trace-follow")
-    : null;
-  if (follow) follow.checked = false;
-  const fold = card.querySelector("details");
-  if (fold) fold.open = true;
-  card.scrollIntoView({ block: "center", behavior: "smooth" });
 }
 
-/* The child's own Trace under its card, opened by the card's fold: its
-   rounds, tool calls, wrap-up and final report in the block model the parent
-   renders. One box for the fold's lifetime, so a refresh keeps the folds the
-   reader opened; while the child runs the records refresh every five seconds
-   and the clocks every second, and both stop when it ends or the fold goes. */
-function subagentInlineTrace(detail, runRef, block) {
+/* The child's own Trace, opened from its card or from the dock's pinned
+   block: its rounds, tool calls, wrap-up and final report, rendered by the
+   same block renderer as the parent trace. It is a modal over the parent —
+   the parent's scroll position and open folds stay exactly as they were, and
+   closing returns to them. One box for the modal's lifetime, so a refresh
+   keeps the folds the reader opened; while the child runs the records
+   refresh every five seconds and the clocks every second, and both stop when
+   it ends or the modal closes. */
+async function openSubagentTrace(detail, runRef, block) {
   const taskId = String((block && block.task_id) || "");
+  if (!taskId || !detail || !detail.experiment_id) return;
   const query = runRef ? `?run_id=${encodeURIComponent(runRef)}` : "";
   const head = el("div", {}, el("div", { class: "loading" }, "加载子代理 Trace…"));
-  const box = el("div", { class: "trace-box subagent-inline" });
+  const box = el("div", { class: "trace-box subagent-trace-box" });
   const body = el("div", { class: "subagent-trace" }, head, box);
+  showModal(
+    `🧩 子代理 Trace · ${String(block.role || "子代理")}`,
+    body,
+    [el("button", { class: "btn", onclick: closeModal }, "关闭")],
+    "subagent-modal",
+  );
   let previousBlocks = "";
   const load = async () => {
     if (!body.isConnected) return false;
@@ -4295,25 +4307,18 @@ function subagentInlineTrace(detail, runRef, block) {
       box.replaceChildren(el("div", { class: "empty" }, "该子代理尚未产生可展示的轮次。"));
     return isRunningSubagent(payload.header || block);
   };
-  // The fold appends this body right after building it, so the first load
-  // waits one tick for the body to be in the document.
-  Promise.resolve()
-    .then(load)
-    .then((running) => {
-      if (!running) return;
-      const clock = setInterval(() => {
-        if (body.isConnected) tickElapsedClocks(body);
-        else clearInterval(clock);
-      }, 1000);
-      const poll = setInterval(async () => {
-        if (!body.isConnected || !(await load())) {
-          clearInterval(poll);
-          clearInterval(clock);
-        }
-      }, 5000);
-      liveTimers.push(clock, poll);
-    });
-  return body;
+  if (!(await load())) return;
+  const clock = setInterval(() => {
+    if (body.isConnected) tickElapsedClocks(body);
+    else clearInterval(clock);
+  }, 1000);
+  const poll = setInterval(async () => {
+    if (!body.isConnected || !(await load())) {
+      clearInterval(poll);
+      clearInterval(clock);
+    }
+  }, 5000);
+  liveTimers.push(clock, poll);
 }
 
 function subagentTraceHead(payload, detail) {
@@ -4383,7 +4388,7 @@ function renderTraceBlocks(box, blocks, { truncated, eof, previous, detail, runR
   (blocks || []).forEach((block, index) => appendNode(scroll, block, index));
   if (eof) scroll.append(el("div", { class: "hint" }, "—— trace 结束 ——"));
   fragment.append(scroll);
-  const dock = runningSubagentDock(box, blocks, detail);
+  const dock = runningSubagentDock(blocks, detail, runRef);
   if (dock) fragment.append(dock);
   box.replaceChildren(fragment);
   tickElapsedClocks(box);
@@ -4393,8 +4398,6 @@ function renderTraceBlocks(box, blocks, { truncated, eof, previous, detail, runR
 function traceBlockNode(block, index, detail, runRef) {
   const kind = String((block && block.kind) || "");
   const node = el("div", { class: `trace-block ${kind}` });
-  if (kind === "subagent" && block && block.task_id)
-    node.dataset.taskId = String(block.task_id);
   try {
     if (kind === "agent_output") renderAgentOutputBlock(node, block, detail);
     else if (kind === "tool_group") renderToolGroupBlock(node, block, index);
@@ -4574,13 +4577,11 @@ function subagentSummaryNode(block, detail) {
 /* A child's one card at the call that launched it. While it runs the card
    carries the accent, a live dot and its progress, redrawn in place as the
    projection updates the block; finished, it drops the accent and keeps the
-   compact card. The fold opens the child's own Trace inline. */
+   compact card. The card is the control that opens the child's own Trace. */
 function renderSubagentBlock(node, block, detail, runRef) {
-  const key = `sub:${block.task_id || ""}`;
   node.classList.toggle("running", isRunningSubagent(block));
-  node.append(subagentSummaryNode(block, detail));
+  node.append(subagentOpenButton(block, detail, runRef, "subagent-open"));
   if (block.error) node.append(el("div", { class: "hint warn" }, `错误：${block.error}`));
-  node.append(lazyDetails("详细 Trace", () => subagentInlineTrace(detail, runRef, block), key));
 }
 
 /* A line the trace writer could not encode, or one that exceeded the

@@ -1200,12 +1200,18 @@ details.fold.history-day.idle > summary {
  flex-wrap: wrap;
  margin: 0.2rem 0 0.35rem;
 }
-/* The child's trace under its card: its own scroller, shorter than the
-   parent's, so the page keeps the parent's tail in view. */
-.trace-box.subagent-inline {
- max-height: 40vh;
- margin-top: 0.4rem;
- padding: 0;
+/* The child's own Trace as a window over the parent: wide, and its records
+   scroll inside the modal body. At phone width the modal is already a
+   full-screen sheet, so the box just takes what the sheet leaves. */
+.modal.subagent-modal {
+ width: min(1180px, 96vw);
+ max-height: 94vh;
+}
+.modal.subagent-modal .body {
+ flex: 1;
+}
+.trace-box.subagent-trace-box {
+ max-height: 68vh;
 }
 .trace-tool-call {
  border-left: 2px solid var(--border);
@@ -1750,11 +1756,42 @@ pre.code-view.pre-wrap {
  gap: 0.2rem;
  min-width: 0;
 }
+/* Card and pinned block are the same button over the child's readout: the
+   card's is a bare click surface inside the trace block, the dock's carries
+   the trace block's own frame. */
+.subagent-open,
+.trace-dock-block {
+ appearance: none;
+ -webkit-appearance: none;
+ display: block;
+ width: 100%;
+ margin: 0;
+ text-align: left;
+ cursor: pointer;
+}
+.subagent-open {
+ border: 0;
+ padding: 0;
+ background: none;
+ font: inherit;
+ color: inherit;
+}
+.subagent-open-hint {
+ display: block;
+ margin-top: 0.15rem;
+ color: var(--accent);
+ font-size: 0.8rem;
+}
+.subagent-open:hover .subagent-open-hint,
+.subagent-open:focus-visible .subagent-open-hint,
+.trace-dock-block:hover .subagent-open-hint,
+.trace-dock-block:focus-visible .subagent-open-hint {
+ text-decoration: underline;
+}
 /* Running children pinned at the bottom edge of the box, one block each and
    scrollable when several run: the trace's scroll shrinks above them, so the
-   latest entry is never covered. Each block reads as its card does and opens
-   that card's Trace fold, so the task title ellipsizes rather than growing
-   the dock. */
+   latest entry is never covered. Each block reads as its card does, and the
+   task title ellipsizes rather than growing the dock. */
 .trace-subagent-dock {
  flex: none;
  display: flex;
@@ -1767,16 +1804,9 @@ pre.code-view.pre-wrap {
  background: var(--panel);
 }
 .trace-dock-block {
- appearance: none;
- -webkit-appearance: none;
- display: block;
- width: 100%;
- margin: 0;
  font-family: inherit;
  line-height: inherit;
  color: inherit;
- text-align: left;
- cursor: pointer;
 }
 /* Specific enough to win over the running card's own border colour. */
 .trace-subagent-dock .trace-dock-block:hover,
@@ -1945,6 +1975,11 @@ pre.code-view {
 }
 
 /* modal */
+/* The page is the scroller behind the mask; while a modal is open it holds
+   still, so a wheel or an arrow key works on the modal, not the page. */
+body.modal-open #app {
+ overflow: hidden;
+}
 .modal-mask {
  position: fixed;
  inset: 0;
