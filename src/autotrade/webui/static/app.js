@@ -3928,7 +3928,11 @@ function liveTracePanel(detail, session) {
   );
   const statsHost = el("div", {});
   const box = el("div", { class: "trace-box" });
-  const auto = el("input", { type: "checkbox", checked: "checked" });
+  const auto = el("input", {
+    type: "checkbox",
+    class: "trace-follow",
+    checked: "checked",
+  });
   panel.append(
     el(
       "div",
@@ -4213,41 +4217,47 @@ function subagentLastToolLabel(block) {
   return `最近工具 ${name}${status ? ` · ${status}` : ""}`;
 }
 
-/* One line per running child, pinned under the trace's scroll so the
-   header's count has a visible counterpart while the card that owns the
-   child sits far above the auto-scrolled tail. It is built from the same
-   per-task block the card is drawn from, so the two never disagree, and it
-   goes when no child runs. A click scrolls to the child's card. */
-function runningStrip(box, blocks) {
+/* One block per running child, pinned at the bottom edge of the trace box
+   while its card sits far above the auto-scrolled tail. The scroll shrinks
+   above the dock, so the latest entry is never covered, and each block is
+   the same readout as that child's card — drawn from the same per-task
+   block, so the two never disagree. It goes when no child runs. */
+function runningSubagentDock(box, blocks, detail) {
   const running = (blocks || []).filter(isRunningSubagent);
   if (!running.length) return null;
   return el(
     "div",
-    { class: "trace-running" },
+    { class: "trace-subagent-dock" },
     ...running.map((block) =>
       el(
         "button",
         {
           type: "button",
-          class: "trace-running-chip",
-          title: "定位到该子代理的卡片",
-          onclick: () => revealSubagentCard(box, block.task_id),
+          class: "trace-block subagent running trace-dock-block",
+          title: "打开该子代理的 Trace",
+          onclick: () => openSubagentCardTrace(box, block.task_id),
         },
-        el("span", { class: "live-dot", "aria-hidden": "true" }),
-        el("span", { class: "trace-running-role" }, `🧩 ${block.role || "子代理"}`),
-        block.description ? el("span", { class: "trace-running-task" }, String(block.description)) : null,
-        subagentClockNode(block, "trace-running-clock"),
+        subagentSummaryNode(block, detail),
       ),
     ),
   );
 }
 
-function revealSubagentCard(box, taskId) {
-  const card = box.querySelector(`.trace-block.subagent[data-task-id="${CSS.escape(String(taskId))}"]`);
+/* The child's own Trace is the fold under its card, so the dock opens that
+   one view and scrolls to it. Following the tail would scroll straight back
+   off it, so the click also stops the auto-scroll. */
+function openSubagentCardTrace(box, taskId) {
+  const card = box.querySelector(
+    `.trace-box-scroll .trace-block.subagent[data-task-id="${CSS.escape(String(taskId))}"]`,
+  );
   if (!card) return;
+  const follow = box.parentElement
+    ? box.parentElement.querySelector("input.trace-follow")
+    : null;
+  if (follow) follow.checked = false;
+  const fold = card.querySelector("details");
+  if (fold) fold.open = true;
   card.scrollIntoView({ block: "center", behavior: "smooth" });
-  card.classList.add("flash");
-  setTimeout(() => card.classList.remove("flash"), 1600);
 }
 
 /* The child's own Trace under its card, opened by the card's fold: its
@@ -4337,10 +4347,11 @@ function subagentTraceHead(payload, detail) {
   return wrap;
 }
 
-/* The trace, one node per block. A running sub-agent is its one card at the
-   call that launched it: the projection updates that block in place as the
-   child's events arrive, so a re-render draws it once, with its latest
-   counters and tool, wherever it stands. */
+/* The trace, one node per block. A sub-agent's card stands at the call that
+   launched it: the projection updates that block in place as the child's
+   events arrive, so a re-render draws it with its latest counters and tool
+   wherever it stands, and while the child runs the dock pins that same block
+   at the bottom edge. */
 function renderTraceBlocks(box, blocks, { truncated, eof, previous, detail, runRef } = {}) {
   const serialized = JSON.stringify({
     blocks: blocks || [],
@@ -4369,8 +4380,8 @@ function renderTraceBlocks(box, blocks, { truncated, eof, previous, detail, runR
   (blocks || []).forEach((block, index) => appendNode(scroll, block, index));
   if (eof) scroll.append(el("div", { class: "hint" }, "—— trace 结束 ——"));
   fragment.append(scroll);
-  const strip = runningStrip(box, blocks);
-  if (strip) fragment.append(strip);
+  const dock = runningSubagentDock(box, blocks, detail);
+  if (dock) fragment.append(dock);
   box.replaceChildren(fragment);
   tickElapsedClocks(box);
   return serialized;
@@ -4508,12 +4519,12 @@ function subagentHeadMetaNode(block, detail) {
   return line.childNodes.length ? line : null;
 }
 
-/* A child's one card at the call that launched it. While it runs the card
-   carries the accent, a live dot and its progress (rounds, calls, tokens,
-   latest tool, elapsed), redrawn in place as the projection updates the
-   block; finished, it drops the accent and keeps the compact card. The fold
-   opens the child's own Trace inline. */
-function renderSubagentBlock(node, block, detail, runRef) {
+/* What a child reads as, from its one block: role · 状态, task, launch meta
+   and the ticking clock on the head, then the progress line — rounds, model
+   calls, tools, tokens, latest tool. The card at the call position and the
+   dock's pinned block share it, so they can never disagree. Spans
+   throughout, so the dock can wrap it in a button. */
+function subagentSummaryNode(block, detail) {
   const status = String(block.status || block.phase || "started");
   const phase = String(block.phase || "");
   const running = isRunningSubagent(block);
@@ -4521,33 +4532,50 @@ function renderSubagentBlock(node, block, detail, runRef) {
     phase === "ended" || TERMINAL_SUBAGENT_STATUS.has(status)
       ? SUBAGENT_STATUS_LABELS.get(status) || status
       : SUBAGENT_STATUS_LABELS.get(status) || "进行中";
-  const role = String(block.role || "子代理");
-  const key = `sub:${block.task_id || ""}`;
-  const progress = subagentProgressParts(block);
-  const lastTool = subagentLastToolLabel(block);
-  node.classList.toggle("running", running);
-  node.append(
+  const progress = [
+    ...subagentProgressParts(block),
+    subagentLastToolLabel(block),
+  ].filter(Boolean);
+  const wrap = el(
+    "span",
+    { class: "subagent-summary" },
     el(
-      "div",
+      "span",
       { class: "head" },
       running ? el("span", { class: "live-dot", "aria-hidden": "true" }) : null,
       el(
         "span",
         { class: `type subagent ${status}` },
-        `🧩 ${role} · ${statusLabel}`,
+        `🧩 ${String(block.role || "子代理")} · ${statusLabel}`,
       ),
-      block.description ? el("span", {}, String(block.description)) : null,
+      block.description
+        ? el("span", { class: "subagent-task" }, String(block.description))
+        : null,
       subagentHeadMetaNode(block, detail),
     ),
   );
-  if (progress.length || lastTool)
-    node.append(
+  if (progress.length)
+    wrap.append(
       el(
-        "div",
-        { class: `hint${running ? " subagent-progress" : ""}`, title: subagentUsageTitle(block) || null },
-        [...progress, lastTool].filter(Boolean).join(" · "),
+        "span",
+        {
+          class: `hint${running ? " subagent-progress" : ""}`,
+          title: subagentUsageTitle(block) || null,
+        },
+        progress.join(" · "),
       ),
     );
+  return wrap;
+}
+
+/* A child's one card at the call that launched it. While it runs the card
+   carries the accent, a live dot and its progress, redrawn in place as the
+   projection updates the block; finished, it drops the accent and keeps the
+   compact card. The fold opens the child's own Trace inline. */
+function renderSubagentBlock(node, block, detail, runRef) {
+  const key = `sub:${block.task_id || ""}`;
+  node.classList.toggle("running", isRunningSubagent(block));
+  node.append(subagentSummaryNode(block, detail));
   if (block.error) node.append(el("div", { class: "hint warn" }, `错误：${block.error}`));
   node.append(lazyDetails("详细 Trace", () => subagentInlineTrace(detail, runRef, block), key));
 }

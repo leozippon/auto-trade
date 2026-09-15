@@ -22,6 +22,7 @@ from autotrade.webui.traces import (
 )
 
 APP_JS = Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
+STYLE_CSS = Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/style.css"
 INDEX_HTML = Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/index.html"
 
 
@@ -242,7 +243,7 @@ def test_trace_stats_last_main_llm_prompt_ignores_subagent_calls(
 
 def test_subagent_trace_card_shows_model_thinking_and_context() -> None:
     script = APP_JS.read_text(encoding="utf-8")
-    source = script.split("function renderSubagentBlock(", 1)[1].split(
+    source = script.split("function subagentSummaryNode(", 1)[1].split(
         "\nfunction ", 1
     )[0]
     assert "🧩" in source
@@ -254,10 +255,6 @@ def test_subagent_trace_card_shows_model_thinking_and_context() -> None:
     assert "if (block.task)" not in script
     assert "block.task ||" not in script
     assert "trace-box-scroll" in script
-    # A running child is its one card at the call position, never a second
-    # card docked at the bottom of the trace.
-    assert "trace-subagent-dock" not in script
-    assert "runningSubagentChip" not in script
     # Launch metadata is spelled out once, in subagentMetaLine.
     meta = script.split("function subagentMetaLine(", 1)[1].split("\nfunction ", 1)[0]
     assert "block.model" in meta
@@ -1573,21 +1570,33 @@ def test_subagent_trace_route_projects_redacts_and_guards(tmp_path: Path) -> Non
     assert "etc" not in bad.text
 
 
-def test_the_running_strip_is_pinned_under_the_trace_and_targets_the_card() -> None:
-    """A running child is its one card at the call position; the strip under
-    the scroll lists it from the same block, and a click scrolls to the card."""
+def test_the_running_dock_pins_a_block_per_child_and_opens_its_trace() -> None:
+    """A running child is pinned at the bottom edge of the trace box as a
+    block reading exactly like its card, and a click opens that card's own
+    Trace fold instead of drawing the child's records a second time."""
 
     script = APP_JS.read_text(encoding="utf-8")
-    strip = script.split("function runningStrip(", 1)[1].split("\nfunction ", 1)[0]
-    assert "filter(isRunningSubagent)" in strip
-    assert "subagentClockNode(block" in strip and '"live-dot"' in strip
-    assert "revealSubagentCard(box, block.task_id)" in strip
-    reveal = script.split("function revealSubagentCard(", 1)[1].split("\nfunction ", 1)[0]
-    assert "data-task-id" in reveal and "scrollIntoView" in reveal and '"flash"' in reveal
+    dock = script.split("function runningSubagentDock(", 1)[1].split("\nfunction ", 1)[0]
+    assert "filter(isRunningSubagent)" in dock
+    # The pinned block is a trace block drawn from the same projection block
+    # the card is drawn from, never a second readout of its own.
+    assert 'class: "trace-block subagent running trace-dock-block"' in dock
+    assert "subagentSummaryNode(block, detail)" in dock
+    assert "openSubagentCardTrace(box, block.task_id)" in dock
+    opener = script.split("function openSubagentCardTrace(", 1)[1].split("\nfunction ", 1)[0]
+    assert "data-task-id" in opener and "scrollIntoView" in opener
+    assert 'card.querySelector("details")' in opener and "fold.open = true" in opener
+    # Following the tail would scroll straight back off the child's trace.
+    assert "follow.checked = false" in opener
+    assert 'class: "trace-follow"' in script
     render = script.split("function renderTraceBlocks(", 1)[1].split("\nfunction ", 1)[0]
-    assert "fragment.append(scroll)" in render and "runningStrip(box, blocks)" in render
-    # The card carries the id the strip targets.
+    assert "fragment.append(scroll)" in render
+    assert "runningSubagentDock(box, blocks, detail)" in render
+    # The card carries the id the dock targets.
     assert "node.dataset.taskId = String(block.task_id);" in script
+    # The chip strip it replaced is gone, styles included.
+    assert "trace-running" not in script
+    assert "trace-running" not in STYLE_CSS.read_text(encoding="utf-8")
 
 
 def test_subagent_drawer_opens_the_child_trace_inline_and_follows_it() -> None:
@@ -1597,8 +1606,10 @@ def test_subagent_drawer_opens_the_child_trace_inline_and_follows_it() -> None:
     assert 'lazyDetails("详细 Trace", () => subagentInlineTrace(detail, runRef, block), key)' in card
     # A running child's card carries the accent and the live dot; a finished
     # one is the compact card.
-    assert 'node.classList.toggle("running", running)' in card
-    assert 'running ? el("span", { class: "live-dot"' in card
+    assert 'node.classList.toggle("running", isRunningSubagent(block))' in card
+    assert "subagentSummaryNode(block, detail)" in card
+    summary = script.split("function subagentSummaryNode(", 1)[1].split("\nfunction ", 1)[0]
+    assert 'running ? el("span", { class: "live-dot"' in summary
     opener = script.split("function subagentInlineTrace(", 1)[1].split("\nfunction ", 1)[0]
     # One box for the fold's lifetime: a live refresh must not collapse the
     # folds the reader opened, and it must stop when the child ends.
@@ -1725,3 +1736,71 @@ console.log(subagentLastToolLabel(block));
     ), lines[0]
     assert lines[1] == "4 轮 · 模型 4 次 · 工具 6 次 · Σ 17 k tokens"
     assert lines[2] == "最近工具 shell · 进行中"
+
+
+def test_the_dock_pins_one_block_per_running_child(tmp_path: Path) -> None:
+    """Rendered: one pinned block per running child, reading as its card does
+    — role · 状态, task, launch meta with the ticking clock, then the progress
+    line. A finished child is not pinned, and with nothing running there is no
+    dock at all."""
+
+    body = """
+const detail = { params: { reasoning_effort: "xhigh" } };
+const started = new Date(Date.now() - 188000).toISOString();
+const blocks = [
+  { kind: "subagent", phase: "ended", status: "completed", role: "reader",
+    task_id: "agent_0", description: "读文档", ts: started, started_at: started,
+    ended_at: new Date().toISOString(), rounds: 2, llm_calls: 2 },
+  { kind: "agent_output", text: "继续" },
+  { kind: "subagent", phase: "started", status: "running", role: "developer",
+    task_id: "agent_1", description: "因子实现", model: "qwen-3.8-27b-fp8",
+    thinking: "medium", inherit_context: false, ts: started, started_at: started,
+    rounds: 4, llm_calls: 4, tool_calls: 6,
+    usage: { prompt_tokens: 16414, completion_tokens: 444, total_tokens: 16858 },
+    last_tool: { name: "shell", status: "running" } },
+];
+const dock = runningSubagentDock({}, blocks, detail);
+console.log(dock.children.length);
+const pinned = dock.children[0];
+console.log(`${pinned.tag} ${pinned.attrs.class} ${typeof pinned.attrs.onclick}`);
+tickAll(pinned);
+const summary = pinned.children[0];
+console.log(nodeText(summary.children[0]));
+console.log(nodeText(summary.children[1]));
+console.log(String(runningSubagentDock({}, blocks.slice(0, 2), detail)));
+"""
+    lines = _run_app_js_snippet(
+        tmp_path,
+        body,
+        heads=(
+            "function fmtDuration(",
+            "function fmtTokens(",
+            "function fmtTsTime(",
+            "function parentReasoningLabel(",
+            "function isRunningSubagent(",
+            "function elapsedClockNode(",
+            "function tickElapsedClocks(",
+            "function subagentClockNode(",
+            "function subagentThinkingLabel(",
+            "function subagentContextLabel(",
+            "function subagentMetaLine(",
+            "function subagentHeadMetaNode(",
+            "function subagentProgressParts(",
+            "function subagentUsageTitle(",
+            "function subagentLastToolLabel(",
+            "function subagentSummaryNode(",
+            "function runningSubagentDock(",
+        ),
+    ).splitlines()
+    # Only the running child, drawn as a clickable trace block.
+    assert lines[0] == "1"
+    assert lines[1] == (
+        "button trace-block subagent running trace-dock-block function"
+    )
+    assert re.fullmatch(
+        r"🧩 developer · 进行中因子实现qwen-3\.8-27b-fp8 · 推理 medium · "
+        r"独立上下文 ⏱ 3:08 · \d\d-\d\d \d\d:\d\d:\d\d",
+        lines[2],
+    ), lines[2]
+    assert lines[3] == "4 轮 · 模型 4 次 · 工具 6 次 · Σ 17 k tokens · 最近工具 shell · 进行中"
+    assert lines[4] == "null"

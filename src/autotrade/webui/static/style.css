@@ -1658,8 +1658,9 @@ pre.code-view.pre-wrap {
 .trace-block .type.subagent.error {
  color: var(--bad);
 }
-/* A running child: its card carries the accent and a live dot, its progress
-   line reads in the text ink; finished, the card is the compact one. */
+/* A running child: its card and its pinned dock block carry the accent and a
+   live dot, and the progress line reads in the text ink; finished, the card
+   is the compact one. */
 .live-dot {
  flex: none;
  width: 0.55rem;
@@ -1685,67 +1686,51 @@ pre.code-view.pre-wrap {
  color: var(--text);
  font-variant-numeric: tabular-nums;
 }
-/* Running children as accent chips pinned under the scroll: the scroll
-   shrinks above them, so the latest block is never hidden. */
-.trace-running {
+.subagent-summary {
+ display: flex;
+ flex-direction: column;
+ gap: 0.2rem;
+ min-width: 0;
+}
+/* Running children pinned at the bottom edge of the box, one block each and
+   scrollable when several run: the trace's scroll shrinks above them, so the
+   latest entry is never covered. Each block reads as its card does and opens
+   that card's Trace fold, so the task title ellipsizes rather than growing
+   the dock. */
+.trace-subagent-dock {
  flex: none;
  display: flex;
- flex-wrap: wrap;
- gap: 0.35rem;
- padding: 0.45rem 0.15rem 0.1rem;
+ flex-direction: column;
+ gap: 0.45rem;
+ max-height: 30vh;
+ overflow: auto;
+ padding: 0.5rem 0.15rem 0.15rem;
  border-top: 1px solid var(--border);
  background: var(--panel);
 }
-.trace-running-chip {
+.trace-dock-block {
  appearance: none;
  -webkit-appearance: none;
- display: inline-flex;
- align-items: center;
- gap: 0.45rem;
- max-width: 100%;
- min-width: 0;
+ display: block;
+ width: 100%;
  margin: 0;
- padding: 0.2rem 0.7rem 0.2rem 0.55rem;
- border: 1px solid var(--run);
- border-radius: 999px;
- background: var(--accent-soft);
- color: var(--run);
- font: inherit;
- font-size: 0.82rem;
- font-weight: 600;
+ font-family: inherit;
+ line-height: inherit;
+ color: inherit;
  text-align: left;
  cursor: pointer;
 }
-.trace-running-chip:hover,
-.trace-running-chip:focus-visible {
- background: color-mix(in srgb, var(--accent-soft) 60%, var(--panel));
+/* Specific enough to win over the running card's own border colour. */
+.trace-subagent-dock .trace-dock-block:hover,
+.trace-subagent-dock .trace-dock-block:focus-visible {
+ border-color: var(--accent);
  outline: none;
 }
-.trace-running-chip .live-dot {
- box-shadow: 0 0 0 2px var(--panel);
-}
-.trace-running-role {
- flex: none;
-}
-.trace-running-task {
- flex: 0 1 auto;
+.trace-subagent-dock .subagent-task {
  min-width: 0;
- max-width: 16rem;
  overflow: hidden;
  text-overflow: ellipsis;
  white-space: nowrap;
- font-weight: 500;
- color: var(--text);
-}
-.trace-running-clock {
- flex: none;
- font-weight: 500;
- font-variant-numeric: tabular-nums;
-}
-/* The card a strip line scrolled to, lit for a moment. */
-.trace-block.flash {
- box-shadow: 0 0 0 2px var(--accent);
- transition: box-shadow 0.6s;
 }
 .subagent-meta,
 .subagent-clock {
@@ -1820,8 +1805,7 @@ pre.code-view.pre-wrap {
  color: var(--muted);
  font-size: 0.845rem;
 }
-.trace-tool-list,
-.trace-subagent-detail {
+.trace-tool-list {
  display: flex;
  flex-direction: column;
  gap: 0.35rem;

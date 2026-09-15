@@ -336,7 +336,7 @@ def test_no_page_appends_a_renderer_that_can_return_nothing() -> None:
         "cardEquityNode",
         "verdictBadge",
         "armEquityHost",
-        "runningStrip",
+        "runningSubagentDock",
         "frozenPanel",
         "sliceStats",
         "thresholdChips",
