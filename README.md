@@ -76,6 +76,6 @@ python -m pytest -q tests/unit
 
 ## Documentation
 
-`AGENTS.md` is the tracked contract for anyone — human or agent — working in this repository: development principles, documentation rules, resource checks and the rules for multi-agent work.
+`AGENTS.md` is the contract for anyone — human or agent — working in this repository: development principles, documentation rules, resource checks and the rules for multi-agent work.
 
-The design documentation lives in `docs/` and the logbooks in `LOGBOOK.md` and `docs/logbook/`. Both are deliberately kept local and are excluded from version control, so a fresh clone will not contain them. Five documents are authoritative, each owning one area: data sources and PIT rules, agent-visible inputs and protocol, the environment and broker, the research pipeline, and deployment. The rest are derived: a quick reference for parameter defaults, and a unit table generated from the code.
+The design documentation lives in `docs/` and the logbooks in `LOGBOOK.md` and `docs/logbook/`. All of these, `AGENTS.md` included, are deliberately kept local and are excluded from version control, so a fresh clone will not contain them. Five documents are authoritative, each owning one area: data sources and PIT rules, agent-visible inputs and protocol, the environment and broker, the research pipeline, and deployment. The rest are derived: a quick reference for parameter defaults, and a unit table generated from the code.
