@@ -1046,6 +1046,12 @@ progress.progress.done::-moz-progress-bar {
  font-size: 0.9rem;
  color: var(--text);
 }
+/* A worker with nothing to report leaves this host empty, and an empty flex
+   item still takes a gap on each side — the row's chips would sit twice as far
+   apart as anywhere else. Out of the layout it is out of the gap count too. */
+.control-activity:empty {
+ display: none;
+}
 /* The Agent's own words for how the session ended. */
 blockquote.quote {
  margin: var(--space-3) 0 0;
