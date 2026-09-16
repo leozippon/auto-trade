@@ -6641,6 +6641,48 @@ function actionCell(action) {
   );
 }
 
+// When the operator has to declare an order by hand, keyed by the window the
+// engine wrote on the row (paper/orders.py order_window): an order that fills
+// at the session's open is matched by the opening call auction, so it has to
+// be declared before 09:25; anything else is declared once continuous trading
+// opens. One wording for the badge and for the copied text.
+const ORDER_WINDOW_LABELS = {
+  open_auction: "集合竞价（09:15–09:25）",
+  continuous: "连续竞价（09:30 起）",
+};
+
+function orderWindowLabel(orderWindow) {
+  return ORDER_WINDOW_LABELS[String(orderWindow || "")] || orderWindow || "—";
+}
+
+/* One order's declaration window as a badge. It rides on every row because a
+   sheet can mix the two, and the deadline is the operator's, not the book's. */
+function windowCell(orderWindow) {
+  const normalized = String(orderWindow || "");
+  if (!ORDER_WINDOW_LABELS[normalized]) return orderWindow || "—";
+  return el("span", { class: "order-window" }, ORDER_WINDOW_LABELS[normalized]);
+}
+
+/* Whether the session ahead already has its order sheet, worded the same on the
+   overview card and on the book page. Ready says when the sheet was written
+   (UTC+8); not ready is the ordinary state before the morning run, not a
+   fault, so it stays muted and carries no deadline of its own. */
+function todayChip(today) {
+  if (!today) return null;
+  if (!today.ready)
+    return el(
+      "span",
+      { class: "stat-chip muted", title: today.trade_date ? `最新一张是 ${fmtDate(today.trade_date)} 的订单单` : null },
+      "今日订单未生成",
+    );
+  const clock = fmtClock(today.decided_at);
+  return el(
+    "span",
+    { class: "stat-chip" },
+    clock === "—" ? "今日订单已就绪" : `今日订单已就绪 · ${clock}`,
+  );
+}
+
 /* A damaged journal line is counted by the reader, not fatal; surface the count
    so a truncated journal is visible rather than a silently shorter table. */
 function skippedChip(skipped) {
@@ -6745,6 +6787,8 @@ function bookCard(row) {
       experimentBadges(tradingBadge(row.state, row.error)),
     ),
   );
+  const ready = todayChip(row.today);
+  if (ready) card.append(el("div", { class: "stats-chips" }, ready));
   if (tiles.length) card.append(statTilesRow(tiles));
   if (row.curve)
     card.append(bookCurveChart(row.curve, row.source, { width: 420, height: 130, mini: true }));
@@ -6806,13 +6850,15 @@ function renderBookBundle(bundle) {
   );
 }
 
-/* The book's frozen identity as one wrapping line of chips: what it trades,
-   where the candidate came from, and where its calendar stands. The 建账户 note
-   is prose the reader rarely needs, so it waits whole behind a fold instead of
-   pushing the day's orders down the page. */
+/* One wrapping line of chips under the title: whether today's sheet is in
+   hand, then the book's frozen identity — what it trades, where the candidate
+   came from, and where its calendar stands. The 建账户 note is prose the reader
+   rarely needs, so it waits whole behind a fold instead of pushing the day's
+   orders down the page. */
 function paperHead(status, payload) {
   const book = payload.book || {};
   const facts = [
+    todayChip(status.today),
     // The book is named after its experiment unless init said otherwise.
     book.artifact_id
       ? el(
@@ -6874,6 +6920,7 @@ function paperOrdersTable(sheet) {
   return dataTable(
     [
       { label: "方向" },
+      { label: "窗口", title: "这一笔要在哪个竞价窗口申报" },
       { label: "代码" },
       { label: "名称" },
       { label: "股数", num: true },
@@ -6884,6 +6931,7 @@ function paperOrdersTable(sheet) {
     [
       ...sheet.orders.map((row) => [
         actionCell(row.action),
+        windowCell(row.window),
         row.symbol,
         row.name,
         fmtShares(row.quantity),
@@ -6891,7 +6939,7 @@ function paperOrdersTable(sheet) {
         fmtAmountOpt(row.notional),
         weightCell(weights.has(row.symbol) ? weights.get(row.symbol) : 0, largest),
       ]),
-      ["", "现金", "", "", "", fmtAmountOpt(sheet.cash_after), weightCell(sheet.cash_weight, largest)],
+      ["", "", "现金", "", "", "", fmtAmountOpt(sheet.cash_after), weightCell(sheet.cash_weight, largest)],
     ],
   );
 }
@@ -6948,6 +6996,7 @@ function orderClipboardText(orders) {
         actionLabel(row.action),
         fmtShares(row.quantity),
         fmtPrice(row.reference_price),
+        orderWindowLabel(row.window),
       ].join("\t"),
     )
     .join("\n");
@@ -6983,7 +7032,7 @@ function copyOrdersButton(orders) {
     "button",
     {
       class: "btn small copy-orders",
-      title: "代码、名称、方向、股数、参考价，一行一笔",
+      title: "代码、名称、方向、股数、参考价、下单窗口，一行一笔",
       onclick: async (event) => {
         const button = event.currentTarget;
         if (!(await copyToClipboard(orderClipboardText(orders)))) {

@@ -814,3 +814,99 @@ def test_today_and_every_past_day_render_through_one_order_sheet_renderer():
     script = _app_js()
     for name in ("paperSignalPanel", "paperHistoryDay"):
         assert "paperSheetBody(" in _js_top_level(script, f"function {name}("), name
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node required for the JS formatters")
+def test_the_chip_says_whether_the_session_ahead_has_its_order_sheet():
+    """The page answers the operator's first question before they read a number:
+    is today's sheet in hand, and when was it written (UTC+8). Not ready is the
+    ordinary state before the morning run, so it is muted and quotes no
+    deadline; a decision the engine took before it stamped one still reads as
+    ready. The overview card and the book page say it with the same chip."""
+    script = _app_js()
+    harness = "\n".join(
+        [
+            (
+                "const el = (tag, attrs, ...kids) => ({ class: attrs.class, title: attrs.title || null,"
+                " text: kids.filter((kid) => kid !== null && kid !== undefined).join('') });"
+            ),
+            _js_top_level(script, "function fmtDate("),
+            _js_top_level(script, "const TS_FMT ="),
+            _js_top_level(script, "function fmtTs("),
+            _js_top_level(script, "function fmtClock("),
+            _js_top_level(script, "function todayChip("),
+            (
+                "console.log(JSON.stringify(["
+                "todayChip({ trade_date: '20260916', decided_at: '2026-09-16T00:32:00Z', ready: true }),"
+                "todayChip({ trade_date: '20260916', decided_at: null, ready: true }),"
+                "todayChip({ trade_date: '20260915', decided_at: '2026-09-15T00:32:00Z', ready: false }),"
+                "todayChip({ trade_date: null, decided_at: null, ready: false }),"
+                "todayChip(null)]));"
+            ),
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", harness], capture_output=True, text=True, timeout=60, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    stamped, unstamped, stale, fresh, absent = json.loads(result.stdout)
+    assert stamped == {"class": "stat-chip", "title": None, "text": "今日订单已就绪 · 08:32"}
+    assert unstamped["text"] == "今日订单已就绪"
+    assert stale == {
+        "class": "stat-chip muted",
+        "title": "最新一张是 2026-09-15 的订单单",
+        "text": "今日订单未生成",
+    }
+    assert (fresh["text"], fresh["title"]) == ("今日订单未生成", None)
+    assert absent is None
+    for name in ("bookCard", "paperHead"):
+        assert "todayChip(" in _js_top_level(script, f"function {name}("), name
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node required for the JS formatters")
+def test_every_order_row_names_the_window_that_declares_it():
+    """One sheet can mix an opening-auction order with a continuous-trading one,
+    and the two have different deadlines, so the window rides on the row rather
+    than in a heading. The badge and the copied text read it off one wording,
+    and every row of the table fills every column the header declares."""
+    script = _app_js()
+    harness = "\n".join(
+        [
+            _js_top_level(script, "const ORDER_WINDOW_LABELS ="),
+            _js_top_level(script, "function orderWindowLabel("),
+            _js_top_level(script, "function largestWeight("),
+            _js_top_level(script, "function paperOrdersTable("),
+            "const actionCell = (v) => v, windowCell = (v) => v, weightCell = (v) => v;",
+            "const fmtShares = (v) => v, fmtPrice = (v) => v, fmtAmountOpt = (v) => v;",
+            (
+                "const dataTable = (columns, rows) => ({ columns: columns.map((c) => c.label),"
+                " widths: rows.map((row) => row.length) });"
+            ),
+            (
+                "const sheet = { orders: ["
+                "{ symbol: '000001.SZ', name: 'A', action: 'buy', quantity: 100, reference_price: 10,"
+                " notional: 1000, window: 'open_auction' },"
+                "{ symbol: '000002.SZ', name: 'B', action: 'sell', quantity: 200, reference_price: 20,"
+                " notional: 4000, window: 'continuous' }],"
+                " target: [{ symbol: '000001.SZ', weight: 0.5 }], cash_after: 1, cash_weight: 0.5 };"
+            ),
+            (
+                "console.log(JSON.stringify([paperOrdersTable(sheet),"
+                " orderWindowLabel('open_auction'), orderWindowLabel('continuous'),"
+                " orderWindowLabel('')]));"
+            ),
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", harness], capture_output=True, text=True, timeout=60, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    table, auction, continuous, unknown = json.loads(result.stdout)
+    assert "窗口" in table["columns"]
+    # Orders and the closing cash line alike: one cell per declared column.
+    assert set(table["widths"]) == {len(table["columns"])}
+    assert (auction, continuous) == ("集合竞价（09:15–09:25）", "连续竞价（09:30 起）")
+    assert unknown == "—"
+    assert "windowCell(row.window)" in _js_top_level(script, "function paperOrdersTable(")
+    # The copied text carries the same wording, from the same table.
+    assert "orderWindowLabel(row.window)" in _js_top_level(script, "function orderClipboardText(")

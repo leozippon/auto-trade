@@ -595,6 +595,16 @@ progress.progress.done::-moz-progress-bar {
  background: var(--ok-soft);
  color: var(--loss);
 }
+/* The declaration window of one order, on every row of the sheet. */
+.order-window {
+ display: inline-block;
+ border: 1px solid var(--row-border);
+ border-radius: 999px;
+ padding: 0.05rem 0.55rem;
+ font-size: 0.82rem;
+ white-space: nowrap;
+ color: var(--muted);
+}
 /* The clipboard fallback's textarea: selectable, never seen. */
 .copy-fallback {
  position: fixed;
@@ -1638,6 +1648,10 @@ pre.code-view.pre-wrap {
  color: var(--warn);
  border-color: var(--warn);
  background: var(--warn-soft);
+}
+/* A chip for something that simply has not happened yet, not a problem. */
+.stat-chip.muted {
+ color: var(--muted);
 }
 /* An identifier as a chip: long ids break inside it instead of pushing the
    line off a narrow screen. */
@@ -3196,6 +3210,7 @@ details.issue-evidence > summary:hover {
  .gpu-pick-badge,
  .stat-chip,
  .order-side,
+ .order-window,
  .tile-label,
  .budget-row,
  .budget-bars.mini .budget-row,
