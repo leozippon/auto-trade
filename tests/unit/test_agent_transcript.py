@@ -108,6 +108,34 @@ def test_long_fields_are_clipped_and_the_transcript_rotates_into_readable_parts(
     assert block.count("y") == runtime.TRACE_CONTENT_PREVIEW_CHARS
 
 
+def test_the_trace_and_its_transcript_stop_together_at_the_session_cap(tmp_path: Path):
+    """One bounded record: the JSONL stops at ``max_bytes`` with its terminal
+    marker, and the transcript ends on the same marker instead of growing on
+    with events no host reader will ever see."""
+
+    writer = _writer(tmp_path, max_bytes=6_000, max_event_bytes=3_000)
+    for index in range(12):
+        writer.emit("llm_call", {"call_index": index, "content": f"turn {index} " + "x" * 500})
+
+    jsonl = (tmp_path / "artifacts" / "traces" / "run_raw.jsonl").read_text(encoding="utf-8")
+    events = [json.loads(line) for line in jsonl.splitlines()]
+    assert events[-1]["event_type"] == "trace_limit_reached"
+    assert events[-1]["max_bytes"] == 6_000
+    recorded = [event["call_index"] for event in events if event["event_type"] == "llm_call"]
+    assert 0 < len(recorded) < 12, "the cap must actually cut this run short"
+
+    parts = sorted((tmp_path / "artifacts" / "transcripts").glob("run_ref_x*.txt"))
+    text = "".join(part.read_text(encoding="utf-8") for part in parts)
+    assert text.count("=== ") == len(recorded) + 1
+    assert "trace_limit_reached" in text
+    assert f"turn {recorded[-1]} " in text
+    assert f"turn {recorded[-1] + 1} " not in text
+    # The marker is written once: later events change neither record.
+    writer.emit("session_end", {"status": "ok"})
+    assert (tmp_path / "artifacts" / "traces" / "run_raw.jsonl").read_text(encoding="utf-8") == jsonl
+    assert "".join(part.read_text(encoding="utf-8") for part in parts) == text
+
+
 def test_the_session_reads_its_transcript_through_the_trace_root(tmp_path: Path):
     writer = _writer(tmp_path)
     writer.emit("tool_call", {"call_index": 7, "tool": "batch_validate", "result": {"neutralized_excess": 0.041}})

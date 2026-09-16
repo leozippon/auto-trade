@@ -3,10 +3,14 @@
 The trace is the single source: every ``llm_call``/``tool_call``/``session_end``/
 ``session_error`` event of an attempt carries the cumulative ``budget_used``
 block, and every ``context_compaction`` event carries the summary that
-replaced the older history. The validations an attempt recorded survive in
-the experiment's step tree, whose nodes carry only opaque ids, plus a host-only
-sidecar per node holding the raw revision id, the span, the summary and the
-result reference the Pipeline needs to freeze it.
+replaced the older history. An attempt whose trace hit its size cap stopped
+recording before it ended, so what it last wrote is not its spend; such a
+trace is refused rather than resumed from.
+
+The validations an attempt recorded survive in the experiment's step tree,
+whose nodes carry only opaque ids, plus a host-only sidecar per node holding
+the raw revision id, the span, the summary and the result reference the
+Pipeline needs to freeze it.
 """
 
 from __future__ import annotations
@@ -93,6 +97,10 @@ def resume_state(
     ``budget_used`` block is the cumulative spend (each attempt seeds its
     counters from the amounts before it), the last successful compaction's
     summary is the checkpoint, and the last event's time is where it stopped.
+
+    A trace that reached ``TRACE_MAX_BYTES`` stopped at its marker while the
+    attempt kept spending, so seeding from it would let the arm run past its
+    own budget; that is refused here instead.
     """
 
     attempts = [
@@ -112,6 +120,12 @@ def resume_state(
         path = agent_trace_path(Path(experiment_dir) / "artifacts", run_id)
         run_ref = ""
         for event in _trace_events(path):
+            if event.get("event_type") == "trace_limit_reached":
+                raise RuntimeError(
+                    f"attempt trace {run_id} reached its size cap; the spend it "
+                    "records is not what the attempt actually used, so the "
+                    "session cannot resume from it"
+                )
             run_ref = str(event.get("run_id") or run_ref)
             used = event.get("budget_used")
             if isinstance(used, Mapping):

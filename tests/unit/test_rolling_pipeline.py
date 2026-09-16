@@ -355,11 +355,14 @@ def test_no_edge_ends_the_arm_without_a_deliverable(tmp_path: Path):
 
 
 def _interrupted_attempt(
-    pipeline, ledger, *, summary: str | None, replay_years: int, node: bool
+    pipeline, ledger, *, summary: str | None, replay_years: int, node: bool, capped: bool = False
 ) -> str:
     """Leave what an interrupted attempt leaves: an attempt_failed row, a
     trace with budget checkpoints (and a compaction), a published tree node
-    with its host sidecar and its revision in the store."""
+    with its host sidecar and its revision in the store.
+
+    ``capped`` leaves instead what an attempt that filled its trace leaves:
+    the terminal marker, and nothing of what it spent afterwards."""
 
     from autotrade.environment.runtime import agent_trace_path
     from autotrade.environment.step_tree import StepTree
@@ -389,7 +392,10 @@ def _interrupted_attempt(
     ]
     if summary is not None:
         events.append({"event_type": "context_compaction", "ts": "2026-09-15T01:20:00+00:00", "run_id": "run_ref_first", "status": "ok", "trigger": "agent", "summary": summary})
-    events.append({"event_type": "session_error", "ts": "2026-09-15T01:30:00+00:00", "run_id": "run_ref_first", "budget_used": {"inference_seconds": 900.0, "llm_calls": 9, "main_calls": 7, "subagent_calls": 2, "compact_calls": 0, "replay_years": replay_years, "null_controls": 1}})
+    if capped:
+        events.append({"event_type": "trace_limit_reached", "ts": "2026-09-15T01:25:00+00:00", "run_id": "run_ref_first", "max_bytes": 33554432})
+    else:
+        events.append({"event_type": "session_error", "ts": "2026-09-15T01:30:00+00:00", "run_id": "run_ref_first", "budget_used": {"inference_seconds": 900.0, "llm_calls": 9, "main_calls": 7, "subagent_calls": 2, "compact_calls": 0, "replay_years": replay_years, "null_controls": 1}})
     trace.write_text("".join(json.dumps(event) + "\n" for event in events) + "{torn", encoding="utf-8")
     if not node:
         return run_id
@@ -473,6 +479,21 @@ def test_a_resumed_attempt_without_a_summary_starts_from_the_note_alone(tmp_path
     assert request.resume is not None and request.resume.compaction_summary is None
     assert request.steps_before == () and request.budget_used.llm_calls == 9
     assert record["attempts"] == 2 and record["arm_end"]["status"] == "no_deliverable"
+
+
+def test_a_resume_refuses_a_trace_that_stopped_at_its_size_cap(tmp_path: Path):
+    """The trace stops at the cap while the attempt keeps spending, so its last
+    budget block understates the arm's use; a resume that seeded from it would
+    hand the next attempt budget the arm no longer has."""
+
+    pipeline, _snapshots, _evaluator, developer, ledger = _pipeline(
+        tmp_path, {1: ([0.0012], "freeze", {"nominee": 1})}
+    )
+    _interrupted_attempt(pipeline, ledger, summary=None, replay_years=2, node=False, capped=True)
+    with pytest.raises(RuntimeError, match="reached its size cap"):
+        pipeline.run_research_session()
+    assert developer.requests == []
+    assert [row["record_type"] for row in ledger.read()] == ["attempt_failed"]
 
 
 def test_a_complete_node_without_its_sidecar_fails_the_attempt(tmp_path: Path):

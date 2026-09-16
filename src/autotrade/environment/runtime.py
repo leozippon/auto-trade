@@ -636,7 +636,14 @@ def _trace_payload_head(payload: dict[str, object]) -> str | None:
 
 
 class AgentTraceWriter:
-    """Bounded, redacted JSONL event stream for one Agent session."""
+    """Bounded, redacted JSONL event stream for one Agent session.
+
+    The session cap bounds one record, not two: once the JSONL is full it
+    writes the ``trace_limit_reached`` marker and stops, and the Agent-readable
+    transcript ends on the same marker. A trace that stopped there no longer
+    carries the attempt's own spend, so a resume refuses to seed from it
+    (:func:`autotrade.pipelines.session_resume.resume_state`).
+    """
 
     def __init__(
         self,
@@ -707,7 +714,6 @@ class AgentTraceWriter:
             if len(encoded) > self.max_event_bytes:
                 raise ValueError("trace identifiers exceed the per-event size limit")
         with self._lock:
-            self._append_transcript(record)
             self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             self.path.parent.chmod(0o700)
             current = self.path.stat().st_size if self.path.exists() else 0
@@ -726,6 +732,10 @@ class AgentTraceWriter:
                             handle.write(raw)
                             handle.flush()
                             os.fsync(handle.fileno())
+                    # The transcript ends on the same marker: one bounded
+                    # record of the attempt, not a host half and an Agent half
+                    # that stop at different events.
+                    self._append_transcript(marker)
                 self._full = True
                 return record
             with self.path.open("ab") as handle:
@@ -733,6 +743,7 @@ class AgentTraceWriter:
                 handle.flush()
                 os.fsync(handle.fileno())
             self.path.chmod(0o600)
+            self._append_transcript(record)
         return record
 
     def _append_transcript(self, record: dict[str, object]) -> None:
