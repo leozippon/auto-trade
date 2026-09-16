@@ -1766,7 +1766,15 @@ function evidenceTiles(item) {
       label: "冻结门 去偏 Sharpe 概率",
       value: best.deflated_sharpe_probability,
       fmt: fmtSharpe,
-      title: `试验 ${best.trials ?? "—"} 个`,
+    },
+    // The gate's own two counts, so the card reads the candidate's evidence the
+    // way the research session panel does: how many full-span validations it
+    // was chosen out of, against every revision the arm has validated.
+    {
+      label: "验证 / 累计试验",
+      value: best.full_span_validations,
+      fmt: (count) => `${count} / ${best.trials}`,
+      title: "冻结门口径：全臂全区间验证次数 / 已验证的策略版本数",
     },
   ]);
   return tiles.length ? statTilesRow(tiles) : null;

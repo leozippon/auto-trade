@@ -424,8 +424,18 @@ def test_the_listing_carries_the_freeze_and_the_best_candidate_so_far(
     best = rows["frozen"]["research_best"]
     assert best["session_key"] == "research"
     session_best = experiment_detail(tmp_path, "frozen")["sessions"][0]["record"]["best"]
-    for field in ("step_id", "neutralized_excess", "information_ratio", "deflated_sharpe_probability"):
+    # The card's four evidence tiles, the last one a pair: a measurable
+    # candidate carries every figure, so the card never draws a partial row.
+    evidence = (
+        "neutralized_excess",
+        "information_ratio",
+        "deflated_sharpe_probability",
+        "full_span_validations",
+        "trials",
+    )
+    for field in ("step_id", *evidence):
         assert best[field] == session_best[field], field
+        assert best[field] is not None, field
 
 
 @pytest.mark.parametrize(
