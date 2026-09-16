@@ -40,7 +40,16 @@ from autotrade.pipelines.verdict import (
     neutralized_statistics,
 )
 
-STAGES = ("created", "research", "sealed", "graduated", "discarded", "no_deliverable")
+STAGES = (
+    "created",
+    "research",
+    "sealed",
+    "graduated",
+    "discarded",
+    "no_deliverable",
+    "deadline",
+    "broken",
+)
 GEOMETRY = DEFAULT_RESEARCH_GEOMETRY
 # Worker-accepted parameters of a console-created arm.
 PARAMS: dict[str, object] = {
@@ -243,10 +252,44 @@ def build_arm(root: Path, experiment_id: str, stage: str, *, alive: bool = False
                 outcome="no_edge",
                 steps=[],
                 trials_to_date=0,
+                reason="没有候选值得冻结。三年都测过了，最好的一个也只有 +0.3%/年。",
                 arm_end={"status": "no_deliverable", "reason": "no_edge: nothing survived"},
             )
         )
         current = ""
+    elif stage == "deadline":
+        records.append(
+            _session_record(
+                experiment_id,
+                outcome="deadline",
+                finish_reason="llm_call_budget_exhausted",
+                steps=[],
+                trials_to_date=0,
+                reason=None,
+                arm_end={
+                    "status": "no_deliverable",
+                    "reason": "research budget exhausted without a freeze (llm_call_budget_exhausted)",
+                },
+            )
+        )
+        current = ""
+    elif stage == "broken":
+        # The worker exhausted its attempts: the ledger records the failures,
+        # status.json carries the error that stopped the run.
+        records.extend(
+            {
+                "record_type": "attempt_failed",
+                "experiment_id": experiment_id,
+                "epoch_id": "research",
+                "fold_id": "research",
+                "run_id": f"run_research_{attempt}",
+                "session_key": "research",
+                "phase": "research",
+                "error": f"RuntimeError: sandbox image is gone\n  attempt {attempt}",
+            }
+            for attempt in (1, 2, 3)
+        )
+        current = "research"
     for record in records:
         ledger.append(record)
     if stage == "sealed":
@@ -298,8 +341,11 @@ def build_arm(root: Path, experiment_id: str, stage: str, *, alive: bool = False
         )
         current = ""
     status: dict[str, object] = {"schema_version": 1, "pid": 999_999_999, "state": "stopped"}
-    if stage in ("graduated", "discarded", "no_deliverable"):
+    if stage in ("graduated", "discarded", "no_deliverable", "deadline"):
         status["state"] = "completed"
+    elif stage == "broken":
+        status["state"] = "failed"
+        status["error"] = "RuntimeError: sandbox image is gone\n  attempt 3"
     elif alive:
         status = {
             "schema_version": 1,

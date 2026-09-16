@@ -20,6 +20,7 @@ from autotrade.environment.step_tree import StepTree
 from autotrade.pipelines.config import DEFAULT_RESEARCH_GEOMETRY
 from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.webui.registry import (
+    ENDING_STATES,
     best_experiment,
     experiment_detail,
     list_experiments,
@@ -177,6 +178,73 @@ def test_a_research_that_froze_nothing_has_a_verdict_and_no_replay(tmp_path: Pat
     assert detail["forward"] is None
     assert detail["sessions"][0]["record"]["arm_end"]["status"] == "no_deliverable"
     assert detail["sessions"][0]["record"]["best"] is None
+
+
+def test_every_way_an_arm_can_end_reads_as_one_ending_with_a_reason(tmp_path: Path) -> None:
+    """The console shows an arm's ending in one vocabulary, so the projection
+    must classify every ending the pipeline can produce and give each its own
+    reason; an arm that can still run has none at all."""
+
+    for experiment_id, stage in (
+        ("graduated", "graduated"),
+        ("rejected", "discarded"),
+        ("no_edge", "no_deliverable"),
+        ("budget_exhausted", "deadline"),
+        ("broken", "broken"),
+        ("running", "research"),
+    ):
+        build_arm(tmp_path, experiment_id, stage)
+    rows = {row["experiment_id"]: row for row in list_experiments(tmp_path)}
+    assert rows["running"]["ending"] is None
+    endings = {name: rows[name]["ending"] for name in ENDING_STATES}
+    assert {name: ending["state"] for name, ending in endings.items()} == {
+        name: name for name in ENDING_STATES
+    }
+    # A graduate is named by the two numbers that carried it, a refusal by the
+    # criteria it failed, and the three endings no replay decided by what the
+    # record says: the Agent's first sentence, the budget, the error's first line.
+    forward = rows["graduated"]["forward"]["slices"]
+    assert endings["graduated"]["reason"] == (
+        f"前推 80% 下界 {forward['forward']['lower_bound'] * 100:+.2f}%"
+        f" · Held-out 超额 {forward['heldout']['neutralized_excess'] * 100:+.2f}%"
+    )
+    assert endings["rejected"]["reason"].split(" · ")[0] == "F2"
+    assert endings["no_edge"]["reason"] == "没有候选值得冻结"
+    assert endings["budget_exhausted"]["reason"] == "模型调用次数用尽"
+    assert endings["broken"]["reason"] == "RuntimeError: sandbox image is gone"
+    # The homepage lists what can still run first, then the endings in order.
+    listed = [row["experiment_id"] for row in list_experiments(tmp_path)]
+    assert listed[-len(ENDING_STATES) :] == list(ENDING_STATES)
+    assert "running" in listed[: -len(ENDING_STATES)]
+    # The detail page reads the same projection as the card.
+    assert experiment_detail(tmp_path, "no_edge")["ending"] == endings["no_edge"]
+
+
+def test_an_arm_whose_nomination_the_freeze_gate_refused_reads_as_rejected(
+    tmp_path: Path,
+) -> None:
+    """The gate refusing a nomination ends the arm without a replay. It is not
+    the Agent's own "no candidate was worth freezing", so it reads as the
+    refusal it is rather than as 无边际."""
+
+    directory = build_arm(tmp_path, "arm", "research")
+    ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl").append(
+        _session_record(
+            "arm",
+            outcome="freeze",
+            steps=[],
+            trials_to_date=1,
+            freeze_gate={"passed": False, "reasons": ["freeze_deflated_sharpe_below_threshold"]},
+            arm_end={
+                "status": "no_deliverable",
+                "reason": "freeze refused by the gate (freeze_deflated_sharpe_below_threshold)",
+            },
+        )
+    )
+    assert summarize_experiment(directory)["ending"] == {
+        "state": "rejected",
+        "reason": "提名未通过冻结门",
+    }
 
 
 def test_the_listing_carries_the_budget_and_the_research_outcome(tmp_path: Path) -> None:
@@ -356,7 +424,7 @@ def _lower_bound(row: dict[str, object]) -> float:
     return row["forward"]["slices"]["forward"]["lower_bound"]  # type: ignore[index]
 
 
-def test_the_best_experiment_is_ranked_on_the_forward_verdict_only(tmp_path: Path) -> None:
+def test_only_a_graduate_is_the_best_experiment(tmp_path: Path) -> None:
     for experiment_id, stage in (
         ("discarded", "discarded"),
         ("researching", "research"),
@@ -366,11 +434,10 @@ def test_the_best_experiment_is_ranked_on_the_forward_verdict_only(tmp_path: Pat
         build_arm(tmp_path, experiment_id, stage)
     rows = list_experiments(tmp_path)
     assert best_experiment(rows) == {"experiment_id": "graduated"}
-    # Without a graduate, another verdict-bearing arm ranks by the same number;
-    # an arm whose verdict carries none has nothing to rank by.
+    # Every other ending is an arm the pipeline refused: with no graduate the
+    # homepage crowns nobody, whatever bound the refused arm carries.
     without_graduate = [row for row in rows if row["experiment_id"] != "graduated"]
-    assert best_experiment(without_graduate)["experiment_id"] == "discarded"
-    # A graduate always outranks a discarded arm, whatever the bounds.
+    assert best_experiment(without_graduate) is None
     graduated = next(row for row in rows if row["experiment_id"] == "graduated")
     discarded = next(row for row in rows if row["experiment_id"] == "discarded")
     discarded["forward"]["slices"]["forward"]["lower_bound"] = _lower_bound(graduated) + 1

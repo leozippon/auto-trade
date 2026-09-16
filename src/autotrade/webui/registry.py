@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
 
+from autotrade.agent.runner import DEADLINE_GRACE_EXHAUSTED, LLM_CALL_BUDGET_EXHAUSTED
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME, STYLE_SCHEMA_VERSION
 from autotrade.pipelines.agent_inbox import INBOX_NAME, inbox_public_view
 from autotrade.pipelines.calendar import FULL_SPAN
@@ -87,6 +88,36 @@ _RESULT_MODES = frozenset({RESEARCH_PHASE, FORWARD_PHASE})
 # Arm stages, in order: researching, frozen with the forward replay pending or
 # running (sealed), verdict recorded.
 STAGES = ("research", "forward", "verdict")
+# How an arm ended, in the order the homepage lists them. The console says an
+# ending in this one vocabulary wherever it says it at all, so the ledger's own
+# words (``graduated``/``discarded``/``no_deliverable``, the session outcomes)
+# never have to be read twice into the same three blurred endings.
+ENDING_STATES = ("graduated", "rejected", "no_edge", "budget_exhausted", "broken")
+_ENDING_ORDER = {state: index for index, state in enumerate(ENDING_STATES)}
+# Which graduation criterion each failed verdict token is, as
+# docs/pipeline-design.md §3.2 numbers them: a rejected arm's reason names the
+# criteria that refused it. F6 and H4 each cover two recorded conditions.
+_CRITERION_CODES = {
+    "forward_strategy_error": "F1",
+    "forward_lower_bound_not_positive": "F2",
+    "forward_recency_negative": "F3",
+    "forward_max_drawdown_exceeded": "F4",
+    "forward_not_positive_at_cost_stress": "F5",
+    "forward_too_few_round_trips": "F6",
+    "forward_exposure_below_floor": "F6",
+    "heldout_strategy_error": "H1",
+    "heldout_excess_below_tolerance": "H2",
+    "heldout_max_drawdown_exceeded": "H3",
+    "heldout_exposure_below_floor": "H4",
+}
+# The two budgets a research session can run out of, named as the reason line.
+_BUDGET_EXHAUSTED = {
+    DEADLINE_GRACE_EXHAUSTED: "研究时长用尽",
+    LLM_CALL_BUDGET_EXHAUSTED: "模型调用次数用尽",
+}
+# Sentence enders of an Agent-authored reason, whose first sentence is the line
+# the console shows.
+_SENTENCE_END = re.compile(r"[。！？!?\n]")
 
 
 class UnsupportedParamsError(ValueError):
@@ -229,6 +260,90 @@ def arm_stage(records: Sequence[Mapping[str, object]]) -> str:
     return "research"
 
 
+def _reason_line(text: str, limit: int = 80) -> str:
+    """One line of an Agent-authored reason: its first sentence, cut to
+    ``limit`` characters with an ellipsis."""
+
+    head = _SENTENCE_END.split(text.strip(), maxsplit=1)[0].strip()
+    return head if len(head) <= limit else head[: limit - 1] + "…"
+
+
+def _percent(value: object) -> str:
+    """One signed percentage of the ending's reason line."""
+
+    number = _number(value)
+    return "—" if number is None else f"{number * 100:+.2f}%"
+
+
+def _attempt_failures(
+    records: Sequence[Mapping[str, object]], phase: str | None = None
+) -> list[Mapping[str, object]]:
+    """The recorded failed attempts, of one phase or of the whole arm."""
+
+    return [
+        row
+        for row in records
+        if row.get("record_type") == "attempt_failed"
+        and (phase is None or row.get("phase") == phase)
+    ]
+
+
+def arm_ending(
+    identity: PublicIdentity,
+    records: Sequence[Mapping[str, object]],
+    state: Mapping[str, object],
+) -> dict[str, str] | None:
+    """How the arm ended — one of :data:`ENDING_STATES` and a one-line reason —
+    or ``None`` while it can still run.
+
+    Every ending the console shows comes from here, so no page classifies one
+    for itself. A worker the host or the environment broke ended the process
+    rather than the research, so its state is read before the ledger. Otherwise
+    the verdict decides: a graduate is named by the two numbers that carried
+    it, a replay that refused one by the criteria it failed, and an arm that
+    never reached a replay by how its research session ended — the Agent's own
+    ``no_edge``, an exhausted budget, or a nomination the freeze gate refused.
+    """
+
+    if str(state.get("state") or "") == "failed":
+        error = str(_mapping(state.get("status")).get("error") or "")
+        if not error:
+            failures = _attempt_failures(records)
+            error = str(failures[-1].get("error") or "") if failures else ""
+        line = identity.public_text(error).splitlines()
+        return {"state": "broken", "reason": line[0] if line else ""}
+    verdict = experiment_verdict(records)
+    if verdict is None:
+        return None
+    if verdict["status"] == "graduated":
+        slices = _mapping(_mapping(forward_record(records)).get("slices"))
+        forward = _mapping(slices.get("forward"))
+        heldout = _mapping(slices.get("heldout"))
+        return {
+            "state": "graduated",
+            "reason": (
+                f"前推 80% 下界 {_percent(forward.get('lower_bound'))}"
+                f" · Held-out 超额 {_percent(heldout.get('neutralized_excess'))}"
+            ),
+        }
+    if verdict["status"] == "discarded":
+        codes = dict.fromkeys(
+            _CRITERION_CODES.get(str(token), str(token))
+            for token in verdict.get("reasons") or ()
+        )
+        return {"state": "rejected", "reason": " · ".join(codes)}
+    session = _mapping(
+        next((row for row in research_records(records) if row.get("arm_end")), None)
+    )
+    if session.get("outcome") == "no_edge":
+        reason = identity.public_text(str(session.get("reason") or ""))
+        return {"state": "no_edge", "reason": _reason_line(reason)}
+    if session.get("outcome") == "deadline":
+        finish = str(session.get("finish_reason") or "")
+        return {"state": "budget_exhausted", "reason": _BUDGET_EXHAUSTED.get(finish, finish)}
+    return {"state": "rejected", "reason": "提名未通过冻结门"}
+
+
 def _result_name(reference: object) -> str | None:
     """Public name of one replay result: its result directory's name."""
 
@@ -315,6 +430,7 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                 "budget": _budget_totals(params),
                 "budget_used": _budget_used(directory, records, raw_status),
                 "verdict": experiment_verdict(records),
+                "ending": arm_ending(identity, records, state),
                 "forward": _forward_view(identity, forward_record(records)),
                 "paper_candidate": _paper_candidate_view(directory, records),
             }
@@ -382,7 +498,19 @@ def research_budget_used(directory: Path) -> dict[str, object] | None:
     return _budget_used(directory, records, experiment_state(directory).get("status"))
 
 
+def _ending_rank(row: Mapping[str, object]) -> int:
+    """Listing order: the arms that can still run, then the ended ones in
+    :data:`ENDING_STATES` order."""
+
+    ending = _mapping(row.get("ending"))
+    if not ending:
+        return 0
+    return 1 + _ENDING_ORDER.get(str(ending.get("state")), len(ENDING_STATES))
+
+
 def list_experiments(root: Path) -> list[dict[str, object]]:
+    """Every experiment, newest first inside each :func:`_ending_rank` group."""
+
     root = Path(root)
     if not root.is_dir():
         return []
@@ -391,32 +519,33 @@ def list_experiments(root: Path) -> list[dict[str, object]]:
         for path in root.iterdir()
         if path.is_dir() and not path.name.startswith(".")
     ]
-    return sorted(rows, key=lambda row: str(row.get("created_at") or ""), reverse=True)
+    rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+    rows.sort(key=_ending_rank)
+    return rows
 
 
 def best_experiment(rows: Sequence[Mapping[str, object]]) -> dict[str, object] | None:
-    """The homepage's best experiment, on out-of-sample evidence only.
+    """The homepage's best experiment: the graduate with the highest forward
+    bootstrap lower bound.
 
-    Graduated arms first, then the other arms with a verdict, both by the
-    forward slice's bootstrap lower bound. An arm whose verdict carries none —
-    no freeze, or a strategy error — has nothing to rank by, and an arm still
-    researching has no out-of-sample evidence at all, so with nothing ranked
-    the homepage names no best experiment rather than crowning a running arm on
-    how far it has got. Research-period numbers never rank. Ties keep the
-    listing order.
+    Only a graduate is offered. Every other ending is an arm the pipeline
+    refused, and an arm still researching has no out-of-sample evidence at all,
+    so with no graduate the homepage names no best experiment rather than
+    crowning the least bad ending. Research-period numbers never rank. Ties
+    keep the listing order.
     """
 
-    ranked: list[tuple[tuple[float, float], int, Mapping[str, object]]] = []
+    ranked: list[tuple[float, int, Mapping[str, object]]] = []
     for position, row in enumerate(rows):
-        verdict = _mapping(row.get("verdict"))
+        if _mapping(row.get("ending")).get("state") != "graduated":
+            continue
         forward = _mapping(_mapping(_mapping(row.get("forward")).get("slices")).get("forward"))
         bound = _number(forward.get("lower_bound"))
-        if verdict and bound is not None:
-            tier = 0.0 if verdict.get("status") == "graduated" else 1.0
-            ranked.append(((tier, -bound), position, row))
+        if bound is not None:
+            ranked.append((-bound, position, row))
     if not ranked:
         return None
-    _rank, _position, row = min(ranked, key=lambda item: (item[0], item[1]))
+    _bound, _position, row = min(ranked, key=lambda item: (item[0], item[1]))
     return {"experiment_id": row["experiment_id"]}
 
 
@@ -700,11 +829,7 @@ def _failed_attempts(
     """How many attempts of ``phase`` failed before their record, and the last
     failure's reason: the retries the verdict view accounts for."""
 
-    failed = [
-        row
-        for row in records
-        if row.get("record_type") == "attempt_failed" and row.get("phase") == phase
-    ]
+    failed = _attempt_failures(records, phase)
     last = failed[-1] if failed else None
     return {
         "failed": len(failed),

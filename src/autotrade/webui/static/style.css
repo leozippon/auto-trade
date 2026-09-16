@@ -399,6 +399,36 @@ main {
  color: var(--muted);
  font-weight: 500;
 }
+/* How an arm ended: a graduate reads as the one good outcome, a refusal and a
+   broken worker as failures, and the two endings nobody decided stay quiet. */
+.badge.ending-graduated {
+ background: var(--ok-soft);
+ color: var(--ok);
+}
+.badge.ending-rejected,
+.badge.ending-broken {
+ background: var(--bad-soft);
+ color: var(--bad);
+}
+.badge.ending-no_edge,
+.badge.ending-budget_exhausted {
+ background: var(--chip-bg);
+ color: var(--muted);
+}
+/* The ending's reason: one quiet line under the badge. On a card and in a page
+   heading it belongs to the title above it, so it closes the gap the layout
+   puts between groups and sits one step under the badge instead. */
+.ending-reason {
+ color: var(--muted);
+ font-size: 0.875rem;
+ line-height: 1.55;
+}
+.card > .ending-reason {
+ margin-top: calc(var(--space-1) - var(--space-3) - var(--space-4));
+}
+.page-head > .ending-reason {
+ flex-basis: 100%;
+}
 
 /* Panels and cards: one surface. A card is a panel that stacks its lines on
    the scale and, when clickable, lifts on hover. */

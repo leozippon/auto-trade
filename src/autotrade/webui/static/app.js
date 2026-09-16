@@ -10,7 +10,6 @@ const STATE_LABELS = {
   initializing: "初始化中",
   running_session: "运行中",
   paused: "已暂停",
-  completed: "已完成",
   stopped: "已停止",
   failed: "失败",
   interrupted: "已中断",
@@ -19,16 +18,23 @@ const STATE_LABELS = {
   unreadable: "不可解析",
   unknown: "未知",
 };
-// How the research session ended (pipelines/config.py SESSION_OUTCOMES).
+// How the research session ended (pipelines/config.py SESSION_OUTCOMES). A
+// session that ended the arm says it in the arm's own ending word below.
 const OUTCOME_LABELS = {
   freeze: "提名冻结",
   no_edge: "无边际",
-  deadline: "到时",
+  deadline: "预算耗尽",
 };
-const VERDICT_LABELS = {
-  graduated: "graduated",
-  discarded: "discarded",
-  no_deliverable: "无交付",
+// How an arm ended (webui/registry.py ENDING_STATES). The server classifies
+// the ending and writes its one-line reason; the console only words it, and
+// words it the same way on the card, the page header, the process list, the
+// 裁决 view and Paper's 候选来源.
+const ENDING_LABELS = {
+  graduated: "毕业",
+  rejected: "未通过",
+  no_edge: "无边际",
+  budget_exhausted: "预算耗尽",
+  broken: "失败",
 };
 // The conditions of the freeze gate and of the forward and Held-out verdict
 // (pipelines/verdict.py), keyed by the token the pipeline records when one
@@ -1528,6 +1534,8 @@ function researchStep(item) {
       state: item.frozen_session ? "done" : "failed",
       status: OUTCOME_LABELS[item.research_outcome] || item.research_outcome,
     };
+  // The worker broke before the session could record an outcome at all.
+  if (item.ending) return { ...step, state: "failed", status: endingLabel(item.ending) };
   if (item.worker_alive && status.session_key === "research")
     return item.state === "paused"
       ? { ...step, state: "waiting", status: STEP_STATUS_LABELS.paused }
@@ -1541,7 +1549,6 @@ function pipelineTailSteps(item) {
   const status = item.status || {};
   const researchOver = item.stage !== "research";
   const frozen = item.frozen_session;
-  const verdict = item.verdict || {};
   const freeze = frozen
     ? { state: "done", status: STEP_STATUS_LABELS.frozen }
     : researchOver
@@ -1560,10 +1567,12 @@ function pipelineTailSteps(item) {
       : researchOver
         ? { state: "skipped", status: STEP_STATUS_LABELS.not_replayed }
         : { state: "pending", status: STEP_STATUS_LABELS.awaiting_freeze };
-  const decided = verdict.status
+  // The last step is the arm's ending, whatever ended it: the replay's verdict
+  // for an arm that got that far, the way research ended for one that did not.
+  const decided = item.ending
     ? {
-        state: verdict.status === "graduated" ? "done" : "failed",
-        status: VERDICT_LABELS[verdict.status] || verdict.status,
+        state: item.ending.state === "graduated" ? "done" : "failed",
+        status: endingLabel(item.ending),
       }
     : { state: "pending", status: STEP_STATUS_LABELS.undecided };
   return [
@@ -1695,7 +1704,7 @@ function heroSignature(item) {
   return [
     item.experiment_id,
     item.state,
-    (item.verdict || {}).status,
+    (item.ending || {}).state,
     item.research_result,
     (item.forward || {}).result,
   ].join("|");
@@ -1705,17 +1714,36 @@ function experimentGrid(rows) {
   return el("div", { class: "grid" }, ...rows.map(experimentCard));
 }
 
-function verdictBadge(verdict) {
-  if (!verdict || !verdict.status) return null;
-  const graduated = verdict.status === "graduated";
+function endingLabel(ending) {
+  const state = (ending || {}).state || "";
+  return ENDING_LABELS[state] || state;
+}
+
+/* A Paper book records the ending that made its artifact a candidate
+   (paper/book.py); the book says it in the same word. */
+function candidateSourceLabel(source) {
+  return ENDING_LABELS[source] || source;
+}
+
+/* The ending as one badge; null while the arm can still run. */
+function endingBadge(ending) {
+  if (!ending || !ending.state) return null;
   return el(
     "span",
-    {
-      class: `badge state-${graduated ? "completed" : "failed"}`,
-      title: (verdict.reasons || []).map(reasonLabel).join("；") || null,
-    },
-    VERDICT_LABELS[verdict.status] || verdict.status,
+    { class: `badge ending-${ending.state}`, title: ending.reason || null },
+    endingLabel(ending),
   );
+}
+
+/* The one badge an arm wears: how it ended once it has, else where it is. */
+function armBadge(item) {
+  return item.ending ? endingBadge(item.ending) : stateBadge(item.state);
+}
+
+/* The ending's reason, one quiet line under the badge. */
+function endingReason(item) {
+  const reason = (item.ending || {}).reason;
+  return reason ? el("div", { class: "ending-reason" }, reason) : null;
 }
 
 /* A long experiment id must not reflow the heading: the name takes one
@@ -1811,8 +1839,9 @@ function experimentCard(item) {
       "h3",
       { title: `创建 ${fmtTs(item.created_at)}` },
       experimentName(item.experiment_id),
-      experimentBadges(stateBadge(item.state), verdictBadge(item.verdict)),
+      experimentBadges(armBadge(item)),
     ),
+    endingReason(item),
     item.error ? el("div", { class: "meta-line" }, item.error) : null,
     readable ? pipelineStepper(item) : null,
     readable && item.worker_alive
@@ -1882,9 +1911,10 @@ function heroPanel(item) {
         el("span", { "aria-hidden": "true", title: "最佳实验：按前推超额 80% 下界" }, "🏆"),
         experimentName(item.experiment_id),
       ),
-      stateBadge(item.state),
-      verdictBadge(item.verdict),
+      armBadge(item),
     ),
+    // No reason line: only a graduate is the hero, and its reason is the two
+    // numbers the tiles below already give in full.
     forwardTiles(item),
   );
   panel.__signature = heroSignature(item);
@@ -2318,11 +2348,11 @@ async function renderDetailPage(experimentId, selectedKey) {
       {},
       el("a", { class: "exp-back", href: "#/" }, "← 实验"),
       experimentName(detail.experiment_id, { link: false }),
-      experimentBadges(stateBadge(detail.state), verdictBadge(detail.verdict)),
+      experimentBadges(armBadge(detail)),
     ),
   );
   // Progress and the current stage ride on the control row; the head keeps
-  // only errors.
+  // the ending's reason and any error.
   const errors = [
     detail.state === "unreadable" && detail.error ? detail.error : null,
     status.error ? `错误：${status.error}` : null,
@@ -2335,6 +2365,8 @@ async function renderDetailPage(experimentId, selectedKey) {
         "创建参数",
       ),
     );
+  const reason = endingReason(detail);
+  if (reason) head.append(reason);
   if (errors.length) head.append(el("div", { class: "sub" }, errors.join(" ｜ ")));
   const container = el("div", {}, head);
   let barHost = null;
@@ -2687,24 +2719,21 @@ function heldoutStagePanel(detail) {
   );
 }
 
-/* 裁决: the verdict itself — its badge, then the criteria that decided it, as
-   the same F1–F6 and H1–H4 rows the two slice views draw, so all three stages
-   read in one vocabulary; then what the arm cost and when it was recorded, and
-   the Paper handoff. A verdict no replay decided (研究 ended with nothing to
-   deliver) keeps its own recorded reason. Before it exists, the rule and
-   待判定. */
+/* 裁决: how the arm ended — its ending badge and reason, then the criteria
+   that decided it, as the same F1–F6 and H1–H4 rows the two slice views draw,
+   so all three stages read in one vocabulary; then what the arm cost and when
+   it was recorded, and the Paper handoff. An ending no replay decided (研究
+   delivered nothing, or the worker broke) has the reason alone. Before it
+   exists, the rule and 待判定. */
 function verdictStagePanel(detail) {
   const verdict = detail.verdict || {};
   const { forward, thresholds } = replayContext(detail);
   const slices = forward ? forward.slices || {} : {};
   const research = ((detail.sessions || []).find((entry) => entry.kind === "research") || {}).record;
   const attempts = detail.replay_attempts || {};
-  const badge = verdict.status
-    ? verdictBadge(verdict)
-    : detail.state === "failed"
-      ? stateBadge("failed")
-      : el("span", { class: "badge kind" }, STEP_STATUS_LABELS.undecided);
-  const reasons = (verdict.reasons || []).filter(Boolean);
+  const badge =
+    endingBadge(detail.ending) ||
+    el("span", { class: "badge kind" }, STEP_STATUS_LABELS.undecided);
   const recordedAt = forward ? forward.recorded_at : research && research.arm_end ? research.recorded_at : null;
   const facts = [
     research && Number(research.attempts) > 1 ? kvRow("研究尝试", `${research.attempts} 次`) : null,
@@ -2717,17 +2746,16 @@ function verdictStagePanel(detail) {
     "div",
     { class: "panel section-gap" },
     panelHead(STEP_LABELS.verdict, badge),
-    verdict.status
-      ? forward
-        ? checklist([
-            ...forwardCriteria(slices.forward, verdict, thresholds),
-            ...heldoutCriteria(slices.heldout, verdict, thresholds),
-          ])
-        : checklist(reasons.map((token) => ({ ok: false, label: reasonLabel(token), value: null })))
-      : el(
+    forward
+      ? checklist([
+          ...forwardCriteria(slices.forward, verdict, thresholds),
+          ...heldoutCriteria(slices.heldout, verdict, thresholds),
+        ])
+      : endingReason(detail) ||
+        el(
           "div",
           { class: "meta-line" },
-          "前推 F1–F6 与 Held-out H1–H4 全部通过才 graduated；策略异常记为 discarded，其他失败按上限重试",
+          "前推 F1–F6 与 Held-out H1–H4 全部通过才毕业；策略异常直接未通过，其他失败按上限重试",
         ),
     facts.length ? el("table", { class: "kv section-gap" }, ...facts) : null,
     paperHandoff(detail),
@@ -2925,7 +2953,7 @@ function controlPanel(detail) {
     { class: "panel section-gap" },
     controlBar(
       detail,
-      stateBadge(detail.state),
+      armBadge(detail),
       activityHost,
       skills ? el("span", { class: "stat-chip", title: "本实验发布的 skills" }, `📚 Skills ${skills}`) : null,
     ),
@@ -5964,7 +5992,8 @@ function candidateAsideReason(row) {
   if (row.admitted === null || row.admitted === undefined)
     return el("span", { class: "hint warn" }, "无法解析");
   if (!row.verdict) return el("span", { class: "hint" }, "无裁决");
-  if (row.verdict !== "graduated") return verdictBadge({ status: row.verdict });
+  // Why the tier declines it, not how it ended: that word is on its own page.
+  if (row.verdict !== "graduated") return el("span", { class: "hint" }, "未毕业");
   return el("span", { class: "hint" }, "无已发布 skill 条目");
 }
 
@@ -6690,7 +6719,7 @@ function bookCard(row) {
       "div",
       { class: "meta-line" },
       [
-        row.candidate_source,
+        candidateSourceLabel(row.candidate_source),
         row.artifact_id,
         row.start_date ? `${fmtDate(row.start_date)} 起` : null,
         row.initial_cash === null || row.initial_cash === undefined
@@ -6785,7 +6814,9 @@ function paperHead(status, payload) {
       : null,
     // One vocabulary for the row: the status badge lives in the title, every
     // fact under it is the same labelled chip.
-    book.candidate_source ? chip(`候选来源 ${book.candidate_source}`) : null,
+    book.candidate_source
+      ? chip(`候选来源 ${candidateSourceLabel(book.candidate_source)}`)
+      : null,
     payload.start_date ? chip(`起始 ${fmtDate(payload.start_date)}`) : null,
     book.initial_cash === null || book.initial_cash === undefined
       ? null
