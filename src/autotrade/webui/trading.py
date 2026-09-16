@@ -427,7 +427,7 @@ def performance_payload(repo_root: Path, book: str, env: str = "paper") -> dict[
         "state": "ok",
         "error": None,
         "chart": {
-            "series": [curve_entry("strategy", "账簿", [(anchor, 0.0), *returns])],
+            "series": [curve_entry("strategy", "模拟账户", [(anchor, 0.0), *returns])],
             "benchmark": benchmark,
             "account": {
                 "dates": [anchor, *(row["trade_date"] for row in curve)],

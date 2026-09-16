@@ -410,7 +410,7 @@ def test_static_console_keeps_macro_style_surfaces_without_closed_capabilities(
         "实验流程",
         "Step 产物树",
         "冻结产物",
-        "Paper 建簿",
+        "Paper 建账户",
     ):
         assert label in script
     # The Fold-era console is gone.

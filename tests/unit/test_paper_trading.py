@@ -323,7 +323,7 @@ def test_the_order_sheet_matches_the_journal(tmp_path: Path):
     assert "| 09:30 | 000001.SZ | 平安银行 | 卖出 | 100 | 12.50 | ¥1,250.00 |" in text
     assert "下单窗口：全部 1 笔以当日开盘价成交，请在集合竞价（09:15–09:25）内申报。" in text
     assert "## 成交后目标持仓（0 只）" in text
-    assert "重放此前决策 2 次，其中 2 次与账簿记录的订单一致" in text
+    assert "重放此前决策 2 次，其中 2 次与模拟账户记录的订单一致" in text
     idle = render_orders(sheet_book, "20260106")
     # An old sheet still renders from its own morning's record (20260105 close: 11.50).
     assert "今日无订单，持仓不变。" in idle and "| 000001.SZ | 平安银行 | 100 | 11.50 | ¥1,150.00 |" in idle

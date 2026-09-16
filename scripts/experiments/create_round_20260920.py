@@ -149,7 +149,7 @@ ARMS: dict[str, dict[str, object]] = {
     "open_research_20260921": {
         "workspace_reference": "configs/workspace_refs/open_research_20260920",
         "research_directive": (
-            "本臂是开放方向的臂：不指定机制家族，在研究期上找一个只做多、15–30 只、有经济解释并在书本"
+            "本臂是开放方向的臂：不指定机制家族，在研究期上找一个只做多、15–30 只、有经济解释并在组合"
             "尺度上成立的日频策略。先读 refs/README.md 与 refs/standards.md——证据标准、每个候选都要比的"
             "对照、提名条件与收尾规则只以 standards.md 为准。refs/starter 的 o1 只是能跑的基线，不是推荐"
             "的机制：先 smoke_backtest；方向筛选在离线做（refs/exploration-plan.md），回放只用来确认。"

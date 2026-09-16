@@ -243,7 +243,7 @@ def render() -> str:
         "| `visible_timeline` | 快照窗口、日级时钟与历史研究域可用性 |",
         "| `research_scope` | 研究期与会话结局、股票池和调用节奏各一句 |",
         "| `arm` | 本臂尚未冻结、至多冻结一次，以及至今的试验数与完整研究期验证数 |",
-        "| `budgets` | deadline、replay-year、空对照、模型调用、策略容器超时与资源、压缩预算 |",
+        "| `budgets` | deadline、replay-year、随机组合对照、模型调用、策略容器超时与资源、压缩预算 |",
         "| `artifact_contract` | 必需入口、订单返回合同、起点、修改约束、冻结门与毕业条件 |",
         "| `broker_replay` | 资金、费用、手数、T+1、调度与精确执行价格来源 |",
         "| `runtime_tools` | Python、已装依赖、可用本地工具、网络模式和安装策略，以及各读文件根在 `shell` 里的挂载路径 |",

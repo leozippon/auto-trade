@@ -3210,7 +3210,13 @@ def research_geometry_record(
 
 
 def start_record() -> dict[str, object]:
-    """Where the session's working copy was seeded from: the template."""
+    """Which template seeded the session's working copy and its contract files.
+
+    A reference pack that ships ``starter/`` is then overlaid onto ``output/``
+    (:func:`seed_output_from_starter`), so this names the template the contract
+    files and ``output/README.md`` come from, not necessarily the strategy code
+    the session starts reading.
+    """
 
     return {"kind": "template", "template_ref": "agent_output_template"}
 

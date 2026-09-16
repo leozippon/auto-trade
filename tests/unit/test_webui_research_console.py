@@ -225,7 +225,7 @@ def test_an_arm_whose_nomination_the_freeze_gate_refused_reads_as_rejected(
 ) -> None:
     """The gate refusing a nomination ends the arm without a replay. It is not
     the Agent's own "no candidate was worth freezing", so it reads as the
-    refusal it is rather than as 无边际."""
+    refusal it is rather than as 未发现超额."""
 
     directory = build_arm(tmp_path, "arm", "research")
     ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl").append(
@@ -481,14 +481,14 @@ def test_the_card_and_the_research_panel_name_the_same_four_figures() -> None:
     script = (
         Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
     ).read_text(encoding="utf-8")
-    labels = ("中性化超额", "IR", "去偏 Sharpe 概率", "累计试验")
+    labels = ("中性化超额", "IR", "DSR", "累计试验")
     for opening in ("function evidenceTiles(", "function researchSessionPanel("):
         body = script.split(opening, 1)[1].split("\nfunction ", 1)[0]
         found = [label for label in labels if f'label: "{label}"' in body or f'"最佳候选{label}"' in body]
         assert found == list(labels), opening
         assert "DSR_GATE_TITLE" in body and "TRIALS_TITLE" in body, opening
     # The gate's own criteria keep their measured values in the checklist.
-    assert 'const DSR_GATE_TITLE = "冻结门要求 ≥ 0.5";' in script
+    assert 'const DSR_GATE_TITLE = "去膨胀夏普概率（DSR）：冻结门要求 ≥ 0.5";' in script
     assert "全区间验证次数" in script.split("const REASON_LABELS", 1)[1]
 
 

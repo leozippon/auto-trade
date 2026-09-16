@@ -407,9 +407,9 @@ _FIELDS: list[dict[str, object]] = [
         "type": "float",
         "help": "毕业裁决的成本压力：前推段中性化超额在滑点放大到该倍数后仍须为正（按该段换手定价）。",
     },
-    {"key": "max_replay_years", "group": "预算与验收", "label": "研究会话回放预算（replay-year）", "type": "int",
+    {"key": "max_replay_years", "group": "预算与验收", "label": "研究会话回测预算（年）", "type": "int",
      "help": "一个候选在其验证区间覆盖的每个研究年份计 1：完整研究期计研究年数，一批按候选数乘年数预留；回测独立计时（墙钟回补推理 deadline）。"},
-    {"key": "max_null_controls", "group": "预算与验收", "label": "按需空对照次数上限", "type": "int",
+    {"key": "max_null_controls", "group": "预算与验收", "label": "按需随机对照次数上限", "type": "int",
      "help": "研究会话内 run_null_control 工具的调用上限（冻结节点复用其结果）；0 表示不注册该工具。"},
     {"key": "max_llm_calls", "group": "预算与验收", "label": "研究会话模型调用上限", "type": "int",
      "help": "研究会话的模型调用总次数上限，跨续跑累计；主循环、子代理与上下文压缩共享同一计数。"},
@@ -445,12 +445,12 @@ _FIELDS: list[dict[str, object]] = [
         "choices": list(OPERATING_MEMORY_MODES),
         "choice_labels": {
             "none": "不挂载",
-            "curated": "只挂载策展条目",
-            "curated+graduated": "策展条目 + 毕业实验的 skills",
+            "curated": "只挂载精选条目",
+            "curated+graduated": "精选条目 + 毕业实验的 skills",
         },
         "help": (
             "把跨实验知识只读挂载进每个研究会话工作区："
-            f"策展层是仓库里人工维护的 {len(_OPERATING_MEMORY_ENTRIES)} 条运行经验；"
+            f"精选库是仓库里人工维护的 {len(_OPERATING_MEMORY_ENTRIES)} 条运行经验；"
             "毕业层是前推与 Held-out 判定为 graduated 的实验自己写下的 skills，"
             "带来源实验与判定标记，由 Agent 自行取舍。会话不能改写或删除挂载内容。"
         ),

@@ -21,7 +21,7 @@ from .storage import read_json, read_jsonl
 WEEKDAYS = "一二三四五六日"
 LATEST_NAME = "latest_orders.md"
 DISCLAIMER = (
-    "参考价为前一交易日收盘价；账簿按当日开盘价撮合，涨跌停、停牌或资金不足时订单会被拒，"
+    "参考价为前一交易日收盘价；模拟账户按当日开盘价撮合，涨跌停、停牌或资金不足时订单会被拒，"
     "金额与现金均为估算，未计佣金、印花税与滑点。"
 )
 # When the operator has to declare an order by hand. An order that fills at the
@@ -133,7 +133,7 @@ def render_orders(book: Book, trade_date: str) -> str:
         lines += [f"> {book.note}", ""]
     lines += [
         (
-            f"- 账簿：{book.experiment_id} / {book.artifact_id}（{book.candidate_source}），"
+            f"- 模拟账户：{book.experiment_id} / {book.artifact_id}（{book.candidate_source}），"
             f"{_day(str(state.get('start_date') or trade_date))} 起，初始资金 {_money(book.profile.initial_cash)}"
         ),
         (
@@ -141,7 +141,7 @@ def render_orders(book: Book, trade_date: str) -> str:
             f"（发布 {str(decision['generation_id'])[:12]}）"
             + _fit_note(decision, str(state.get("last_fit_date") or ""))
         ),
-        f"- 重放此前决策 {decision['replayed_calls']} 次，其中 {decision['replayed_matching_journal']} 次与账簿记录的订单一致",
+        f"- 重放此前决策 {decision['replayed_calls']} 次，其中 {decision['replayed_matching_journal']} 次与模拟账户记录的订单一致",
         (
             f"- 账户（{_day(str(state.get('settled_through') or decision['data_through']))} 收盘估值）："
             f"总资产 {_money(equity)}，现金 {_money(cash)}，持仓 {sheet['held_count']} 只"
@@ -201,7 +201,7 @@ def render_failure(book: Book, trade_date: str, error: BaseException) -> str:
         "",
         (
             "修复原因后重跑同一命令（已完成的结算不会重复）："
-            f"`python scripts/paper/run_paper.py run --trade-date {trade_date}`。不要手工修改账簿文件。"
+            f"`python scripts/paper/run_paper.py run --trade-date {trade_date}`。不要手工修改模拟账户文件。"
         ),
         "",
     ]

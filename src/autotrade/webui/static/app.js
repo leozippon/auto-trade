@@ -22,7 +22,7 @@ const STATE_LABELS = {
 // session that ended the arm says it in the arm's own ending word below.
 const OUTCOME_LABELS = {
   freeze: "提名冻结",
-  no_edge: "无边际",
+  no_edge: "未发现超额",
   deadline: "预算耗尽",
 };
 // How an arm ended (webui/registry.py ENDING_STATES). The server classifies
@@ -32,7 +32,7 @@ const OUTCOME_LABELS = {
 const ENDING_LABELS = {
   graduated: "毕业",
   rejected: "未通过",
-  no_edge: "无边际",
+  no_edge: "未发现超额",
   budget_exhausted: "预算耗尽",
   broken: "失败",
 };
@@ -43,8 +43,8 @@ const ENDING_LABELS = {
 const REASON_LABELS = {
   freeze_needs_full_span_validation: "提名节点为全区间验证",
   freeze_too_few_full_span_validations: "全区间验证次数",
-  freeze_deflated_sharpe_unavailable: "去偏 Sharpe 概率可算",
-  freeze_deflated_sharpe_below_threshold: "去偏 Sharpe 概率",
+  freeze_deflated_sharpe_unavailable: "DSR 可算",
+  freeze_deflated_sharpe_below_threshold: "DSR",
   freeze_unmeasurable: "研究期统计可算",
   forward_strategy_error: "前推期策略无报错",
   heldout_strategy_error: "Held-out 期策略无报错",
@@ -52,7 +52,7 @@ const REASON_LABELS = {
   forward_recency_negative: "前推最近 6 个月超额",
   forward_max_drawdown_exceeded: "前推回撤",
   forward_not_positive_at_cost_stress: "前推加倍滑点后超额",
-  forward_too_few_round_trips: "前推平仓次数",
+  forward_too_few_round_trips: "前推回合数",
   forward_exposure_below_floor: "前推平均仓位",
   heldout_excess_below_tolerance: "Held-out 超额",
   heldout_max_drawdown_exceeded: "Held-out 回撤",
@@ -62,8 +62,8 @@ const REASON_LABELS = {
 // experiment card and the research session panel say the same thing. The
 // measured values and the "全区间验证次数 ≥ 2" criterion stay in the freeze
 // gate checklist, which draws them from the record.
-const DSR_GATE_TITLE = "冻结门要求 ≥ 0.5";
-const TRIALS_TITLE = "去偏 Sharpe 概率据以折减的试验数：本臂验证过的不同策略版本";
+const DSR_GATE_TITLE = "去膨胀夏普概率（DSR）：冻结门要求 ≥ 0.5";
+const TRIALS_TITLE = "DSR 据以折减的试验数：本臂验证过的不同策略版本";
 
 function reasonLabel(reason) {
   return REASON_LABELS[reason] || String(reason);
@@ -82,7 +82,7 @@ const ENVIRONMENT_STAGE_LABELS = {
   agent_complete: "Agent 推理完成",
   freezing: "冻结策略",
   forward_replay: "前推与 Held-out 连续回放",
-  verdict: "判定毕业",
+  verdict: "裁决",
   publishing: "结果落盘",
   session_retry: "会话失败重试",
 };
@@ -1194,7 +1194,7 @@ const BUDGET_ROWS = [
   ["inference_seconds", "时间", fmtDuration],
   ["llm_calls", "模型调用", String],
   ["replay_years", "回测（年）", String],
-  ["null_controls", "空对照", String],
+  ["null_controls", "随机对照", String],
 ];
 
 /* The research budget as one block per limit — its name and used percentage on
@@ -1819,7 +1819,7 @@ function evidenceTiles(item) {
     },
     { label: "IR", value: best.information_ratio, fmt: fmtSharpe, signed: true },
     {
-      label: "去偏 Sharpe 概率",
+      label: "DSR",
       value: best.deflated_sharpe_probability,
       fmt: fmtSharpe,
       title: DSR_GATE_TITLE,
@@ -2460,7 +2460,7 @@ function processRows(detail) {
       ? best
         ? el(
             "span",
-            { title: "IR 最高的全区间验证：研究期中性化超额与去偏 Sharpe 概率" },
+            { title: "IR 最高的全区间验证：研究期中性化超额与 DSR" },
             `最佳候选 ${fmtPct(best.neutralized_excess)} · DSR ${fmtSharpe(best.deflated_sharpe_probability)}`,
           )
         : `验证 ${record.validations.length} 次 · 无全区间`
@@ -2542,7 +2542,7 @@ const SLICE_ROWS = [
   ["information_ratio", "IR", fmtSharpe, true],
   ["max_drawdown", "最大回撤", fmtPct],
   ["excess_at_cost_stress", "加倍滑点后超额", fmtPct, true],
-  ["round_trips", "平仓次数", String],
+  ["round_trips", "回合数", String],
   ["mean_gross", "平均仓位", fmtPct],
 ];
 
@@ -2792,7 +2792,7 @@ function paperHandoff(detail) {
   const host = el(
     "div",
     { class: "section-gap" },
-    el("h4", { class: "subsection-title", title: "在仓库根目录运行；Paper 不会自动启动" }, "Paper 建簿"),
+    el("h4", { class: "subsection-title", title: "在仓库根目录运行；Paper 不会自动启动" }, "Paper 建账户"),
     el("div", { class: "meta-line" }, `候选产物 ${candidate.artifact_id}`),
     el("pre", { class: "code-view" }, candidate.command),
   );
@@ -2804,7 +2804,7 @@ function paperHandoff(detail) {
           el(
             "div",
             { class: "meta-line" },
-            "账簿：",
+            "模拟账户：",
             ...books.map((row) => el("a", { href: bookHash(PAPER_ENV, row.book_id) }, row.book_id)),
           ),
         );
@@ -2840,7 +2840,7 @@ function frozenPanel(detail) {
         { label: "残差跟踪误差", value: frozen.tracking_error, fmt: fmtPct },
         { label: "IR", value: frozen.information_ratio, fmt: fmtSharpe, signed: true },
         {
-          label: "去偏 Sharpe 概率",
+          label: "DSR",
           value: frozen.deflated_sharpe_probability,
           fmt: fmtSharpe,
           title:
@@ -3310,7 +3310,7 @@ function researchSessionPanel(detail, session) {
         },
         { label: "IR", value: best.information_ratio, fmt: fmtSharpe, signed: true },
         {
-          label: "去偏 Sharpe 概率",
+          label: "DSR",
           value: best.deflated_sharpe_probability,
           fmt: fmtSharpe,
           title: DSR_GATE_TITLE,
@@ -6760,14 +6760,14 @@ function renderBooksOverview(payload) {
       el(
         "div",
         { class: "page-head" },
-        el("h2", {}, "模拟交易", el("span", { class: "mode-note" }, `${books.length} 本账簿`)),
+        el("h2", {}, "模拟交易", el("span", { class: "mode-note" }, `${books.length} 个模拟账户`)),
       ),
       payload.state === "unreadable"
         ? el("div", { class: "banner bad" }, payload.error)
         : null,
       books.length
         ? el("div", { class: "grid" }, ...books.map(bookCard))
-        : el("div", { class: "empty" }, "暂无账簿"),
+        : el("div", { class: "empty" }, "暂无模拟账户"),
     ),
   );
 }
@@ -6807,7 +6807,7 @@ function renderBookBundle(bundle) {
 }
 
 /* The book's frozen identity as one wrapping line of chips: what it trades,
-   where the candidate came from, and where its calendar stands. The 建簿 note
+   where the candidate came from, and where its calendar stands. The 建账户 note
    is prose the reader rarely needs, so it waits whole behind a fold instead of
    pushing the day's orders down the page. */
 function paperHead(status, payload) {
@@ -6844,7 +6844,7 @@ function paperHead(status, payload) {
     el(
       "h2",
       {},
-      el("a", { class: "exp-back", href: `#/trading/${tradingView.env}` }, "← 账簿"),
+      el("a", { class: "exp-back", href: `#/trading/${tradingView.env}` }, "← 模拟账户"),
       el("span", { class: "exp-name" }, status.book_id),
       tradingBadge(status.state),
     ),
@@ -7159,7 +7159,7 @@ function bookCurveChart(chart, source, opts) {
     {
       // One strategy across two regimes: the legend says so, and the account
       // pane stays the book's own (the experiment has no account).
-      series: joined.series.map((entry) => ({ ...entry, label: "源实验 → 账簿" })),
+      series: joined.series.map((entry) => ({ ...entry, label: "源实验 → 模拟账户" })),
       benchmark: joined.benchmark,
       account: chart.account,
     },
@@ -7189,7 +7189,7 @@ function paperEquityPanel(payload) {
   const stats = payload.statistics;
   const head = panelHead(
     "收益曲线",
-    stats ? el("span", { class: "mode-note" }, `账簿 ${stats.days} 个交易日`) : null,
+    stats ? el("span", { class: "mode-note" }, `模拟账户 ${stats.days} 个交易日`) : null,
   );
   if (payload.state !== "ok")
     return el(

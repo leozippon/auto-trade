@@ -115,7 +115,7 @@ ARMS: dict[str, dict[str, object]] = {
             "策略，按信息比率与回撤提名，不按整窗超额提名。先读 refs/README.md 与 refs/standards.md——"
             "证据标准、已关闭家族表、每个候选都要比的对照、提名条件与收尾规则只以 standards.md 为准。"
             "筛子与叠加规则和排序分数一样是一等候选。每个方向在花任何回放预算之前，必须先离线读出它"
-            "在 15 只与 30 只上的逐研究年书本尺度读数（refs/exploration-plan.md）。refs/starter 的 o1 "
+            "在 15 只与 30 只上的逐研究年组合尺度读数（refs/exploration-plan.md）。refs/starter 的 o1 "
             "只是能跑的基线，不是推荐的机制：先 smoke_backtest。standards.md 点名禁止的家族不得重开，"
             "其中包括 Alpha158 一类的日频价量排序器与序列网络。预算用尽前仍没有候选满足提名条件时以 "
             "no_edge 结束。"
