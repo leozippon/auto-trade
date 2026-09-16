@@ -147,7 +147,7 @@ def test_the_extractor_finds_the_routes_the_console_really_calls():
         "/api/experiments/{}/results/{}/equity",
         "/api/experiments/{}/results/{}/style",
         "/api/experiments/{}/trace/initial-prompt",
-        # 运行记忆: the page bundle, one entry's body, one experiment's mounts,
+        # 演化: the page bundle, one entry's body, one experiment's mounts,
         # and the curated writes the page issues (create, edit, delete, promote).
         "/api/memory",
         "/api/memory/curated",

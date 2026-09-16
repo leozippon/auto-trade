@@ -5412,7 +5412,7 @@ function ordersNode(experimentId, result) {
   return body;
 }
 
-/* ---------------- 运行记忆 ----------------
+/* ---------------- 演化 ----------------
    One stable two-pane layout. The left pane is the whole catalogue — the
    curated 精选库 above, the 毕业层候选 the tier admits below — and the right
    pane is a single viewer/editor surface with a fixed head, toolbar and body,
@@ -5450,7 +5450,7 @@ function sameSelection(left, right) {
 async function renderMemoryPage() {
   const hash = location.hash;
   memoryView = null;
-  $main.innerHTML = '<div class="loading">加载运行记忆…</div>';
+  $main.innerHTML = '<div class="loading">加载演化…</div>';
   $topbarRight.replaceChildren();
   let payload;
   try {
@@ -5496,7 +5496,7 @@ async function renderMemoryPage() {
       el(
         "div",
         { class: "page-head" },
-        el("h2", {}, "运行记忆"),
+        el("h2", {}, "演化"),
         el(
           "div",
           { class: "sub", title: "改动作用于此后创建的实验" },
@@ -5968,7 +5968,7 @@ function candidateAsideReason(row) {
   return el("span", { class: "hint" }, "无已发布 skill 条目");
 }
 
-/* In-page moves are guarded; leaving the 运行记忆 route entirely drops the
+/* In-page moves are guarded; leaving the 演化 route entirely drops the
    draft, as every other unsubmitted editor in the console does. */
 function guardUnsavedMemory(proceed) {
   if (!memoryView || !memoryView.dirty) {
@@ -6052,7 +6052,7 @@ function memoryPaneView() {
   const selection = memoryView.selection;
   if (!selection)
     return {
-      title: "运行记忆条目",
+      title: "记忆条目",
       meta: "",
       buttons: [],
       body: [

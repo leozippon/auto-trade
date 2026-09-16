@@ -2541,7 +2541,7 @@ details.advanced .form-grid {
  flex: none;
 }
 
-/* ---------------- 运行记忆 ----------------
+/* ---------------- 演化 ----------------
    One pattern for every section: a heading with an optional one-line note,
    then the panels. Inside 记忆条目 those panels
    are the shared .detail grid — the catalogue scrolls inside the left pane, and
@@ -2889,7 +2889,7 @@ details.issue-evidence > summary:hover {
  .budget-bars {
   grid-template-columns: 1fr;
  }
- /* One column: the 运行记忆 catalogue sits directly above the pane it
+ /* One column: the 演化 catalogue sits directly above the pane it
     navigates, so its own scroller would trap a touch drag in a small box. */
  .memory-nav .session-list {
   max-height: none;

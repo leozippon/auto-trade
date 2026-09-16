@@ -1001,7 +1001,7 @@ def test_a_curated_body_crosses_the_route_unchanged(tmp_path: Path) -> None:
 
 
 def test_the_memory_page_is_attached_only_once_its_inboxes_have_answered() -> None:
-    """Navigating to 运行记忆 painted the two feedback sections as loading boxes
+    """Navigating to 演化 painted the two feedback sections as loading boxes
     and then shrank them onto their answers. Both inboxes now fill their still
     detached hosts before the page is attached, so it opens at its own height
     and nothing re-renders them afterwards."""
