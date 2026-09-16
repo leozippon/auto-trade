@@ -425,6 +425,27 @@ def test_the_card_and_the_research_panel_name_the_same_four_figures() -> None:
     assert "全区间验证次数" in script.split("const REASON_LABELS", 1)[1]
 
 
+def test_the_three_replay_stage_views_speak_one_criteria_vocabulary() -> None:
+    """前推回放, Held-out and 裁决 draw the criteria the same way: every view
+    renders the shared F1–F6 / H1–H4 rows as a checklist, so a threshold is
+    spelled once and the verdict cannot drift back into a chip row of its own
+    that states the same limits differently."""
+
+    script = (
+        Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
+    ).read_text(encoding="utf-8")
+    bodies = {
+        name: script.split(f"function {name}(", 1)[1].split("\nfunction ", 1)[0]
+        for name in ("forwardStagePanel", "heldoutStagePanel", "verdictStagePanel")
+    }
+    assert "checklist(forwardCriteria(" in bodies["forwardStagePanel"]
+    assert "checklist(heldoutCriteria(" in bodies["heldoutStagePanel"]
+    verdict = bodies["verdictStagePanel"]
+    assert "forwardCriteria(" in verdict and "heldoutCriteria(" in verdict
+    # The thresholds reach the verdict as those rows' own threshold column.
+    assert "chip" not in verdict and "thresholdChips" not in script
+
+
 def test_the_listing_carries_the_freeze_and_the_best_candidate_so_far(
     tmp_path: Path,
 ) -> None:

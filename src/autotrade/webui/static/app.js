@@ -2541,11 +2541,13 @@ function failedReasons(verdict) {
   return new Set((verdict || {}).reasons || []);
 }
 
-/* F1–F6 over the forward slice. */
-function forwardChecklist(f, verdict, thresholds) {
+/* F1–F6 over the forward slice, as criterion rows: the 前推回放 view draws
+   them alone, 裁决 draws them ahead of H1–H4, and neither restates a
+   threshold the other spells differently. */
+function forwardCriteria(f, verdict, thresholds) {
   const failed = failedReasons(verdict);
   const t = thresholds || {};
-  return checklist([
+  return [
     ...(failed.has("forward_strategy_error")
       ? [{ ok: false, label: reasonLabel("forward_strategy_error"), value: null }]
       : []),
@@ -2579,14 +2581,14 @@ function forwardChecklist(f, verdict, thresholds) {
       t.min_mean_gross === undefined ? "" : `≥ ${fmtPct(t.min_mean_gross)}`,
       failed,
     ),
-  ]);
+  ];
 }
 
-/* H1–H4 over the Held-out slice. */
-function heldoutChecklist(h, verdict, thresholds) {
+/* H1–H4 over the Held-out slice, the same rows for the same two views. */
+function heldoutCriteria(h, verdict, thresholds) {
   const failed = failedReasons(verdict);
   const t = thresholds || {};
-  return checklist([
+  return [
     ...(failed.has("heldout_strategy_error")
       ? [{ ok: false, label: reasonLabel("heldout_strategy_error"), value: null }]
       : []),
@@ -2611,21 +2613,7 @@ function heldoutChecklist(h, verdict, thresholds) {
       t.min_mean_gross === undefined ? "" : `≥ ${fmtPct(t.min_mean_gross)}`,
       failed,
     ),
-  ]);
-}
-
-/* The thresholds the verdict holds a replay to, as chips. */
-function thresholdChips(t) {
-  if (!t) return null;
-  return chipsRow([
-    t.forward_confidence ? chip(`下界置信 ${Math.round(t.forward_confidence * 100)}%`) : null,
-    t.recency_months ? chip(`最近 ${t.recency_months} 个月`) : null,
-    t.max_drawdown === undefined || t.max_drawdown === null ? null : chip(`回撤 ≤ ${fmtPct(t.max_drawdown)}`),
-    t.cost_stress_multiplier ? chip(`滑点 ×${t.cost_stress_multiplier}`) : null,
-    t.min_round_trips === undefined || t.min_round_trips === null ? null : chip(`平仓 ≥ ${t.min_round_trips}`),
-    t.min_mean_gross === undefined ? null : chip(`仓位 ≥ ${fmtPct(t.min_mean_gross)}`),
-    t.heldout_tolerance_z ? chip(`Held-out 容忍 z ${t.heldout_tolerance_z}`) : null,
-  ]);
+  ];
 }
 
 /* What the three replay stages share: the plan's replay span, the thresholds
@@ -2666,7 +2654,7 @@ function forwardStagePanel(detail) {
       "div",
       { class: "section-gap" },
       el("h4", { class: "subsection-title" }, forward ? "前推条件 F1–F6" : "前推条件 F1–F6 · 阈值"),
-      forwardChecklist(f, detail.verdict, thresholds),
+      checklist(forwardCriteria(f, detail.verdict, thresholds)),
     ),
     sliceStats(f, FORWARD_STAT_FIELDS),
     forward && forward.result ? styleCard(detail.experiment_id, forward.result) : null,
@@ -2693,18 +2681,22 @@ function heldoutStagePanel(detail) {
       "div",
       { class: "section-gap" },
       el("h4", { class: "subsection-title" }, forward ? "Held-out 条件 H1–H4" : "Held-out 条件 H1–H4 · 阈值"),
-      heldoutChecklist(h, detail.verdict, thresholds),
+      checklist(heldoutCriteria(h, detail.verdict, thresholds)),
     ),
     sliceStats(h, HELDOUT_STAT_FIELDS),
   );
 }
 
-/* 裁决: the verdict itself — its badge, the failed criteria in the order the
-   ledger records them, the thresholds, the attempts it took, when it was
-   recorded, and the Paper handoff. Before it exists, the rule and 待判定. */
+/* 裁决: the verdict itself — its badge, then the criteria that decided it, as
+   the same F1–F6 and H1–H4 rows the two slice views draw, so all three stages
+   read in one vocabulary; then what the arm cost and when it was recorded, and
+   the Paper handoff. A verdict no replay decided (研究 ended with nothing to
+   deliver) keeps its own recorded reason. Before it exists, the rule and
+   待判定. */
 function verdictStagePanel(detail) {
   const verdict = detail.verdict || {};
   const { forward, thresholds } = replayContext(detail);
+  const slices = forward ? forward.slices || {} : {};
   const research = ((detail.sessions || []).find((entry) => entry.kind === "research") || {}).record;
   const attempts = detail.replay_attempts || {};
   const badge = verdict.status
@@ -2714,26 +2706,30 @@ function verdictStagePanel(detail) {
       : el("span", { class: "badge kind" }, STEP_STATUS_LABELS.undecided);
   const reasons = (verdict.reasons || []).filter(Boolean);
   const recordedAt = forward ? forward.recorded_at : research && research.arm_end ? research.recorded_at : null;
+  const facts = [
+    research && Number(research.attempts) > 1 ? kvRow("研究尝试", `${research.attempts} 次`) : null,
+    attempts.failed
+      ? kvRow("回放失败", `${attempts.failed} 次${attempts.last_error ? ` · ${attempts.last_error}` : ""}`)
+      : null,
+    recordedAt ? kvRow("记录于", fmtTs(recordedAt)) : null,
+  ].filter(Boolean);
   return el(
     "div",
     { class: "panel section-gap" },
     panelHead(STEP_LABELS.verdict, badge),
     verdict.status
-      ? reasons.length
-        ? checklist(reasons.map((token) => ({ ok: false, label: reasonLabel(token), value: null })))
-        : el("div", { class: "meta-line" }, "前推 F1–F6 与 Held-out H1–H4 全部通过")
+      ? forward
+        ? checklist([
+            ...forwardCriteria(slices.forward, verdict, thresholds),
+            ...heldoutCriteria(slices.heldout, verdict, thresholds),
+          ])
+        : checklist(reasons.map((token) => ({ ok: false, label: reasonLabel(token), value: null })))
       : el(
           "div",
           { class: "meta-line" },
           "前推 F1–F6 与 Held-out H1–H4 全部通过才 graduated；策略异常记为 discarded，其他失败按上限重试",
         ),
-    thresholdChips(thresholds),
-    chipsRow([
-      research && Number(research.attempts) > 1 ? chip(`研究 ${research.attempts} 次尝试`) : null,
-      attempts.failed ? chip(`回放失败 ${attempts.failed} 次`, attempts.last_error || null) : null,
-      recordedAt ? chip(`记录于 ${fmtTs(recordedAt)}`) : null,
-    ]),
-    attempts.last_error ? el("div", { class: "hint warn" }, `最近一次回放失败：${attempts.last_error}`) : null,
+    facts.length ? el("table", { class: "kv section-gap" }, ...facts) : null,
     paperHandoff(detail),
   );
 }

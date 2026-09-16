@@ -341,7 +341,6 @@ def test_no_page_appends_a_renderer_that_can_return_nothing() -> None:
         "runningSubagentDock",
         "frozenPanel",
         "sliceStats",
-        "thresholdChips",
         "paperHandoff",
         "subWindowSection",
         "elapsedClockNode",
@@ -481,11 +480,11 @@ def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) ->
         ("forwardStagePanel", reads("forwardStagePanel", "forward"), forward),
         ("replayContext", reads("replayContext", "forward"), forward),
         ("verdictStagePanel", reads("verdictStagePanel", "forward"), forward),
-        ("forwardChecklist", reads("forwardChecklist", "f"), set(slices["forward"])),
-        ("heldoutChecklist", reads("heldoutChecklist", "h"), set(slices["heldout"])),
-        ("forwardChecklist", reads("forwardChecklist", "t") | reads("heldoutChecklist", "t") | reads("thresholdChips", "t"), set(detail["forward"]["verdict"]["thresholds"])),
+        ("forwardCriteria", reads("forwardCriteria", "f"), set(slices["forward"])),
+        ("heldoutCriteria", reads("heldoutCriteria", "h"), set(slices["heldout"])),
+        ("criteria thresholds", reads("forwardCriteria", "t") | reads("heldoutCriteria", "t"), set(detail["forward"]["verdict"]["thresholds"])),
         # The same threshold keys are served before the replay, from the plan.
-        ("thresholdChips", reads("forwardChecklist", "t") | reads("heldoutChecklist", "t") | reads("thresholdChips", "t"), set(replay["thresholds"])),
+        ("plan thresholds", reads("forwardCriteria", "t") | reads("heldoutCriteria", "t"), set(replay["thresholds"])),
         ("verdictStagePanel", reads("verdictStagePanel", "attempts"), set(detail["replay_attempts"])),
         ("verdictStagePanel", reads("verdictStagePanel", "research"), record),
         ("replaySpanBar", reads("replaySpanBar", "replay"), set(replay["replay"])),
@@ -499,7 +498,7 @@ def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) ->
     assert set(re.findall(r'"([a-z_]+)"', _js_literal("const FORWARD_STAT_FIELDS = [", "\n];"))) <= set(slices["forward"])
     assert set(re.findall(r'"([a-z_]+)"', _js_literal("const HELDOUT_STAT_FIELDS = [", "];"))) <= set(slices["heldout"])
     # Every criterion the pipeline can fail is a line of the checklist.
-    checked = set(re.findall(r'"((?:forward|heldout)_[a-z_]+)"', _js_function_body("forwardChecklist") + _js_function_body("heldoutChecklist")))
+    checked = set(re.findall(r'"((?:forward|heldout)_[a-z_]+)"', _js_function_body("forwardCriteria") + _js_function_body("heldoutCriteria")))
     checked |= {f"{where}_strategy_error" for where in ("forward", "heldout")}
     assert {token for token in _reason_tokens() if not token.startswith("freeze_")} <= checked
     # The budget bars read the keys both the totals and the usage block carry.
