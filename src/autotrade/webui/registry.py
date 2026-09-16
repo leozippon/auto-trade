@@ -480,7 +480,7 @@ def _best_candidate(
         **_step_view(best),
         "result": _result_name(best.get("validation_result_ref")),
         "deflated_sharpe_probability": _number(dsr.get("deflated_sharpe_probability")),
-        "full_span_validations": _number(gate.get("full_span_validations")),
+        "full_span_validations": gate.get("full_span_validations"),
         "trials": dsr.get("trials"),
     }
 
