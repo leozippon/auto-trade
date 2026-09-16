@@ -3169,6 +3169,10 @@ function sessionDetailPanel(detail, selectedKey) {
   const status = detail.status || {};
   const isCurrent = status.session_key === session.key && detail.worker_alive;
   const running = isCurrent && LIVE_RUN_STATES.has(detail.state);
+  // The search so far opens the pane: the Step tree is what the research
+  // sessions have built, the live Trace below it is what is happening in the
+  // current one, and the reader's own message box closes the column.
+  panel.append(stepTreePanel(detail));
   if (session.record) panel.append(researchSessionPanel(detail, session));
   else if (isCurrent) {
     // Before the Agent speaks (PIT, Sandbox) there is no trace to follow;
@@ -3187,9 +3191,6 @@ function sessionDetailPanel(detail, selectedKey) {
       ),
     );
   }
-  // The Step tree is what the research sessions built, so it reads under them
-  // rather than as a loose panel at the foot of the page.
-  panel.append(stepTreePanel(detail));
   return panel;
 }
 
@@ -4958,13 +4959,9 @@ function stepTreeSection(detail, payload) {
     summary,
   );
   render();
-  return el(
-    "div",
-    { class: "panel section-gap" },
-    el("h4", {}, "Step 产物树"),
-    toolbar,
-    rows,
-  );
+  // No section-gap: the tree opens the pane, whose flex gap is the only
+  // spacing between its cards.
+  return el("div", { class: "panel" }, el("h4", {}, "Step 产物树"), toolbar, rows);
 }
 
 function stepTreeRow(
