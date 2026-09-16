@@ -5478,6 +5478,13 @@ async function renderMemoryPage() {
     toolbarHost: el("div", { class: "control-bar memory-toolbar" }),
     bodyHost: el("div", { class: "memory-pane-body" }),
   };
+  // The two inboxes are their own reads, so they fill their hosts while those
+  // hosts are still detached: the page is attached once with every section at
+  // its own height, instead of painting loading boxes and shrinking onto the
+  // answers a moment later. A filter change later fills them in place, where
+  // the placeholder is the honest answer.
+  await Promise.all([renderFeedback("issue"), renderFeedback("skill")]);
+  if (navigatedAway(hash)) return;
   $main.replaceChildren(
     el(
       "div",
@@ -5515,8 +5522,6 @@ async function renderMemoryPage() {
   renderMemoryList();
   renderMemoryCandidates();
   renderMemoryPane();
-  renderFeedback("issue");
-  renderFeedback("skill");
 }
 
 /* One pattern for every section on this page: a heading, a tooltip for its

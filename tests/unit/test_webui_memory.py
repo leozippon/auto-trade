@@ -998,3 +998,18 @@ def test_a_curated_body_crosses_the_route_unchanged(tmp_path: Path) -> None:
         ).json()
         assert served["content"] == body
         assert "redacted" not in served
+
+
+def test_the_memory_page_is_attached_only_once_its_inboxes_have_answered() -> None:
+    """Navigating to 运行记忆 painted the two feedback sections as loading boxes
+    and then shrank them onto their answers. Both inboxes now fill their still
+    detached hosts before the page is attached, so it opens at its own height
+    and nothing re-renders them afterwards."""
+
+    app_js = (
+        Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
+    ).read_text(encoding="utf-8")
+    body = app_js.split("async function renderMemoryPage(", 1)[1].split("\n}", 1)[0]
+    awaited = 'await Promise.all([renderFeedback("issue"), renderFeedback("skill")]);'
+    assert body.index(awaited) < body.rindex("$main.replaceChildren(")
+    assert body.count("renderFeedback(") == 2
