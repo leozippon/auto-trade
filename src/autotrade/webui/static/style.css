@@ -483,8 +483,8 @@ main {
 /* A chip row right under the title is part of the header, not the body: it
    gives back the card's column gap and the title's own margin. */
 .card h3 + .stats-chips {
- margin-top: calc(var(--space-2) - var(--space-3) - var(--space-4));
- margin-bottom: calc(var(--space-2) - var(--space-4));
+ margin-top: calc(-1 * var(--space-4));
+ margin-bottom: calc(var(--space-3) - var(--space-4));
 }
 a.exp-name,
 a.exp-name:hover {
