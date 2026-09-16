@@ -147,7 +147,7 @@ def run_null_control(
     """Replay ``k`` random-name copies of ``result``'s skeleton and rank it.
 
     ``benchmark`` maps ``YYYYMMDD`` to the benchmark's daily return (see
-    ``style._slot_benchmark``); the window's benchmark return is compounded over
+    ``style.slot_benchmark``); the window's benchmark return is compounded over
     the trading days the replay actually covers, so it is the same constant for
     the observed run and every null run. ``schedule`` contributes the decision
     clock the replayed strategy used — the null's orders are drawn up front, so

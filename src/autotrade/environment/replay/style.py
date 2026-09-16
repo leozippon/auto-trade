@@ -63,7 +63,7 @@ def _date_text(value: object) -> str:
         return str(value)
 
 
-def _slot_benchmark(replay_dir: Path | Sequence[Path] | None) -> dict[str, float]:
+def slot_benchmark(replay_dir: Path | Sequence[Path] | None) -> dict[str, float]:
     """CSI 300 daily returns of one replay slot, or of every slot of a span.
 
     Consecutive slots partition their rows, so a span's series is the union.
@@ -71,7 +71,7 @@ def _slot_benchmark(replay_dir: Path | Sequence[Path] | None) -> dict[str, float
     if replay_dir is None:
         return {}
     if not isinstance(replay_dir, (str, Path)):
-        return {day: value for slot in replay_dir for day, value in _slot_benchmark(slot).items()}
+        return {day: value for slot in replay_dir for day, value in slot_benchmark(slot).items()}
     path = Path(replay_dir) / "macro.parquet"
     if not path.is_file():
         return {}
@@ -446,7 +446,7 @@ def replay_style_analysis(
     """
 
     strategy = daily_returns_from_curve(replay.equity_curve)
-    benchmark = _slot_benchmark(replay_dir)
+    benchmark = slot_benchmark(replay_dir)
     regression = _benchmark_regression(strategy, benchmark)
     size = _size_factor(replay_daily)
     neutralized = _neutralized_excess(strategy, benchmark, size)
@@ -585,6 +585,7 @@ __all__ = [
     "benchmark_summary_block",
     "daily_returns_from_curve",
     "replay_style_analysis",
+    "slot_benchmark",
     "window_neutralized_excess",
     "write_style_rollup",
 ]

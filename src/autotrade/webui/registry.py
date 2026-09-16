@@ -26,7 +26,7 @@ from pathlib import Path
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME, STYLE_SCHEMA_VERSION
 from autotrade.pipelines.agent_inbox import INBOX_NAME, inbox_public_view
 from autotrade.pipelines.calendar import FULL_SPAN
-from autotrade.pipelines.experiment import _neutralized, freeze_gate_for
+from autotrade.pipelines.experiment import freeze_gate_for, neutralized
 from autotrade.pipelines.hitl_state import (
     CONTROL_NAME,
     HITL_DIR_NAME,
@@ -535,7 +535,7 @@ def _live_steps(directory: Path) -> list[dict[str, object]]:
     """The research session's Validations recorded so far, from the host
     sidecars ``session_resume.record_step_sidecar`` writes, shaped like the
     ledger's step rows with the neutralised figures the Pipeline records
-    (``experiment._neutralized``), so the same selection applies to both."""
+    (``experiment.neutralized``), so the same selection applies to both."""
 
     root = directory / STEP_SIDECAR_DIR
     if not root.is_dir():
@@ -548,7 +548,7 @@ def _live_steps(directory: Path) -> list[dict[str, object]]:
             record = read_json(path)
             reference = str(record.get("result_ref") or "")
             try:
-                neutralized = _neutralized(reference)
+                figures = neutralized(reference)
             except OSError:
                 # The replay's style file is written before its sidecar; a
                 # node whose files are not readable yet is read next time.
@@ -559,7 +559,7 @@ def _live_steps(directory: Path) -> list[dict[str, object]]:
                 "span": record.get("span"),
                 "summary": dict(_mapping(record.get("summary"))),
                 "validation_result_ref": reference,
-                "neutralized": neutralized,
+                "neutralized": figures,
             }
             _LIVE_STEP_CACHE[key] = row
         rows.append(row)

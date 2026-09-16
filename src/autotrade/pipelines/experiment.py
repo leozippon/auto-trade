@@ -859,7 +859,7 @@ def research_step_record(step: StepResult) -> dict[str, object]:
         "span": step.span,
         "summary": step.validation.summary,
         "validation_result_ref": step.validation.result_ref,
-        "neutralized": _neutralized(step.validation.result_ref),
+        "neutralized": neutralized(step.validation.result_ref),
     }
 
 
@@ -932,10 +932,15 @@ def _arm_revisions(
     }
 
 
-def _neutralized(result_ref: str) -> dict[str, object] | None:
-    # Every successful replay writes its style sidecar, so a missing or
-    # unreadable one raises: dropping the row would silently narrow the
-    # freeze gate's IR dispersion. Only an unmeasurable span is None.
+def neutralized(result_ref: str) -> dict[str, object] | None:
+    """One validation's neutralised excess, tracking error and IR.
+
+    Every successful replay writes its style sidecar, so a missing or
+    unreadable one raises: dropping the row would silently narrow the freeze
+    gate's IR dispersion. Only an unmeasurable span is None. The console's
+    live step listing reads its rows through this same function.
+    """
+
     path = Path(result_ref).parent / STYLE_ARTIFACT_NAME
     analysis = json.loads(path.read_text(encoding="utf-8"))
     try:
@@ -1166,6 +1171,7 @@ __all__ = [
     "DailyStrategyPipeline",
     "RollingExperimentPipeline",
     "freeze_gate_for",
+    "neutralized",
     "null_control_seed",
     "research_step_record",
 ]

@@ -56,9 +56,9 @@ from autotrade.environment.replay.stats import (
     finalize_summary_timing,
 )
 from autotrade.environment.replay.style import (
-    _slot_benchmark,
     benchmark_summary_block,
     replay_style_analysis,
+    slot_benchmark,
     write_style_rollup,
 )
 from autotrade.environment.replay.timeview import Timeview
@@ -980,7 +980,7 @@ class PITDailyEvaluationBackend:
                 pending_orders=(),
             ),
             _span_daily(replay_dirs, start, end),
-            _slot_benchmark(replay_dirs),
+            slot_benchmark(replay_dirs),
             profile,
             schedule,
             k=k,

@@ -38,8 +38,8 @@ from autotrade.environment.replay.curve import curve_entry
 from autotrade.environment.replay.stats import ReplayResult, compute_return_stats
 from autotrade.environment.replay.style import (
     BENCHMARK_LABEL,
-    _slot_benchmark,
     daily_returns_from_curve,
+    slot_benchmark,
 )
 from autotrade.environment.strategy import CN_TZ
 from autotrade.paper.book import (
@@ -303,7 +303,7 @@ def _benchmark(root: Path) -> tuple[dict[str, float], str | None]:
     if slot is None:
         return {}, None
     try:
-        daily = _slot_benchmark(slot)
+        daily = slot_benchmark(slot)
     except (OSError, ValueError, pa.ArrowException) as exc:  # a damaged cache file degrades the benchmark only
         return {}, f"{type(exc).__name__}: {exc}"
     # A slot that carries no index row at all is a broken read, not an empty
