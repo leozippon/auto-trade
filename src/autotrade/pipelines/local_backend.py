@@ -1309,11 +1309,6 @@ BATCH_CANDIDATE_SUMMARY_KEYS = (
     "cost_sensitivity",
     "pnl_concentration",
     "sub_windows",
-    # What the replay cost its container against the limits it ran under: the
-    # peak memory and the per-fit seconds beside the ceilings this batch's own
-    # concurrency put them under. Two arms sized a batch from the session
-    # container's limits instead and lost 20 replay-years to timeouts.
-    "resources",
 )
 # A multi-year span has one sub-window row per July-June year, and a batch
 # multiplies that by the number of candidates. A row keeps the columns a
@@ -1345,6 +1340,22 @@ def batch_candidate_stats(summary: Mapping[str, object]) -> dict[str, object]:
             if isinstance(row, Mapping)
         ]
     return stats
+
+
+def batch_candidate_resources(summary: Mapping[str, object]) -> dict[str, object]:
+    """A row's container telemetry, which rides beside its metrics, not in them.
+
+    What the replay cost its container against the limits it ran under: the
+    peak memory and the per-fit seconds beside the ceilings this batch's own
+    concurrency put them under. Two arms sized a batch from the session
+    container's limits instead and lost 20 replay-years to timeouts. A failed
+    candidate has no metrics but carries the same block from its exception, so
+    every row keeps it in the one place — its own top level. Absent when the
+    replay measured nothing.
+    """
+
+    resources = summary.get("resources")
+    return {"resources": resources} if resources else {}
 
 
 @contextmanager
@@ -2053,6 +2064,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
                 "strategy", revision.revision_id
             ),
             "stats": batch_candidate_stats(evaluation.summary),
+            **batch_candidate_resources(evaluation.summary),
             "result_ref": public_result_ref,
         }
 
@@ -2116,9 +2128,10 @@ class BatchValidateTool(SessionTimeBudgetAware):
             "cause": cause,
             "error": public_error,
         }
-        # A failed candidate has no stats block, and it is the row whose
-        # resources matter most: a fit that ran out of clock or a card that was
-        # taken says so here, measured in the container it actually ran in.
+        # The failed row's telemetry comes off the exception — there is no
+        # result to carry it — and lands where a successful row keeps its own:
+        # a fit that ran out of clock or a card that was taken says so here,
+        # measured in the container it actually ran in.
         resources = strategy_resources_of(error)
         if resources:
             row["resources"] = resources
@@ -2956,6 +2969,7 @@ class LLMResearchDeveloper:
                     "node_id": step.step_id,
                     "revision_id": self.ref_store.get_or_create("strategy", step.revision_id),
                     "stats": batch_candidate_stats(step.validation.summary),
+                    **batch_candidate_resources(step.validation.summary),
                 }
                 for step in request.steps_before
             ]

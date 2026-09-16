@@ -788,13 +788,14 @@ class BatchValidateRunTest(unittest.TestCase):
             self.assertEqual(len(session.backtest.steps), 2)
 
     def test_every_row_says_what_the_replay_cost_its_container(self) -> None:
-        """Completed and failed rows alike carry the container telemetry.
+        """Completed and failed rows alike carry the container telemetry, in
+        the same place: the row's own top level, beside ``stats`` rather than
+        inside it, because a failed row has no ``stats`` at all.
 
         Two arms sized a batch from the session container's 8 GiB limit and
         from a 3-day smoke, lost 20 replay-years to fits that ran past the
         concurrency-scaled cap, and then reasoned about swapping in a container
-        that has 32 GiB. The failed row is the one that has no stats block at
-        all, so it is the one this has to reach.
+        that has 32 GiB.
         """
 
         usage = {
@@ -810,7 +811,8 @@ class BatchValidateRunTest(unittest.TestCase):
             session.candidate("slow", _strategy("999"))
             result = session.call("good", "slow", span="Y1")
             rows = {row["name"]: row for row in result.value["candidates"]}
-            self.assertEqual(rows["good"]["stats"]["resources"], usage)
+            self.assertEqual(rows["good"]["resources"], usage)
+            self.assertNotIn("resources", rows["good"]["stats"])
             self.assertEqual(rows["slow"]["status"], "failed")
             self.assertNotIn("stats", rows["slow"])
             self.assertEqual(rows["slow"]["resources"], usage)
@@ -826,7 +828,7 @@ class BatchValidateRunTest(unittest.TestCase):
                 row["name"]: row
                 for row in session.call("good", "bad", span="Y1").value["candidates"]
             }
-            self.assertNotIn("resources", rows["good"]["stats"])
+            self.assertNotIn("resources", rows["good"])
             self.assertNotIn("resources", rows["bad"])
 
     def test_a_wholly_failed_batch_reports_the_failure_not_a_success(self) -> None:
