@@ -29,6 +29,9 @@ from autotrade.pipelines.ledger import ExperimentLedger
 from .fixtures_sandbox import PassingModificationCheck
 
 VALID_MAIN = "def generate_orders(context):\n    return []\n"
+# A real host path: the redaction recognises the roots the host keeps its files
+# under, and a pytest temp directory is not one of them.
+HOST_RESULT_PATH = f"{Path(__file__).resolve().parents[2]}/experiments/arm/private/result.json"
 
 
 def _artifact(root: Path, *, extra_lines: int = 0) -> Path:
@@ -122,9 +125,7 @@ class RecordFailedAttemptsTest(unittest.TestCase):
             record_failed_attempts=record_failed_attempts,
         )
 
-        raised = error or RuntimeError(
-            f"validation blew up at {root / 'private/result.json'}"
-        )
+        raised = error or RuntimeError(f"validation blew up at {HOST_RESULT_PATH}")
 
         class ExplodingEvaluator:
             def evaluate(self, _request):
@@ -235,7 +236,7 @@ class RecordFailedAttemptsTest(unittest.TestCase):
             tool, tree = self._tool(
                 root,
                 record_failed_attempts=True,
-                error=RuntimeError(f"replay failed at {root / 'secret.json'}"),
+                error=RuntimeError(f"replay failed at {HOST_RESULT_PATH}"),
             )
             with self.assertRaises(ToolError) as caught:
                 tool()

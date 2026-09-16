@@ -22,6 +22,8 @@ from autotrade.environment.runtime import (
 )
 from autotrade.environment.tools import GrepTool, ReadFileTool, SafeWorkspace, SearchRoots, ToolRegistry
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
 IDS = {
     "experiment_id": "exp",
     "epoch_id": "research",
@@ -175,7 +177,9 @@ def test_host_paths_never_reach_the_transcript_and_its_files_stay_private(tmp_pa
     import stat
 
     writer = _writer(tmp_path)
-    host_path = f"{tmp_path}/experiments/exp/artifacts/run_raw/result.json"
+    # A real host path, under a root the host actually keeps its files under:
+    # a pytest temp directory is not one, and would prove nothing.
+    host_path = f"{REPO_ROOT}/experiments/exp/artifacts/run_raw/result.json"
     writer.emit(
         "session_error",
         {"status": "error", "error": f"FileNotFoundError: [Errno 2] No such file or directory: '{host_path}'"},
@@ -192,10 +196,49 @@ def test_host_paths_never_reach_the_transcript_and_its_files_stay_private(tmp_pa
     )
     transcript = tmp_path / "artifacts" / "transcripts" / "run_ref_x.txt"
     text = transcript.read_text(encoding="utf-8")
-    assert str(tmp_path) not in text
+    assert host_path not in text
+    assert str(REPO_ROOT) not in text
     assert "[host_path]" in text
     assert "/mnt/agent/workspace/output/main.py" in text
     # The host trace is untouched evidence.
     assert host_path in (tmp_path / "artifacts" / "traces" / "run_raw.jsonl").read_text(encoding="utf-8")
     assert stat.S_IMODE(transcript.parent.stat().st_mode) == 0o700
     assert stat.S_IMODE(transcript.stat().st_mode) == 0o600
+
+
+def test_the_transcript_returns_the_agents_own_code_and_shell_verbatim(tmp_path: Path):
+    """The transcript is what the Agent reads compacted work back from, so the
+    redaction must not touch anything that merely contains a slash: division,
+    globs, relative paths and ``2>/dev/null`` all came back as ``[host_path]``
+    until the pattern required a real host root."""
+
+    writer = _writer(tmp_path)
+    code = (
+        "score = (2.0 * C - H - L) / O\n"
+        "ocf_ta = n_cashflow_act / total_assets\n"
+        'np.save(context.state_dir + "/ranker.npz", w)\n'
+        "pd.read_parquet(context.asof_dir + \"/daily\")\n"
+    )
+    shell = "grep -n 'def ' candidates/*/lib/*.py refs/starter/lib/*.py 2>/dev/null"
+    writer.emit(
+        "tool_call",
+        {
+            "call_index": 1,
+            "tool_call_id": "call_1",
+            "tool": "write_file",
+            "arguments": {"root": "output", "path": "lib/face.py", "content": code},
+            "result": {"ok": True, "stdout": shell},
+        },
+    )
+    text = (tmp_path / "artifacts" / "transcripts" / "run_ref_x.txt").read_text(encoding="utf-8")
+    assert "[host_path]" not in text
+    # ``arguments`` renders as JSON, so the code reads back through the quoting
+    # the Agent's own ``read_file`` undoes; every slash-bearing token survives.
+    for fragment in (
+        "(2.0 * C - H - L) / O",
+        "n_cashflow_act / total_assets",
+        "/ranker.npz",
+        "/daily",
+    ):
+        assert fragment in text, fragment
+    assert shell in text

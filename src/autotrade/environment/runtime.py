@@ -69,9 +69,42 @@ ARTIFACT_TOP_LEVEL = (
     "logs",
 )
 # Absolute host paths must never reach a model: the Agent sees only sandbox
-# mounts under /mnt. Shared by the data summary, error summaries and tool
-# tracebacks.
-HOST_PATH_RE = re.compile(r"(?<![\w.:\-/])/(?!mnt/)(?:[^\s'\";|,)]*)")
+# mounts under /mnt. Shared by the data summary, error summaries, tool
+# tracebacks and the Agent-readable transcript.
+#
+# A match has to look like a path — a top-level directory this host keeps its
+# files under, then at least one more segment of ordinary path characters.
+# Redacting every ``/`` at a token boundary instead rewrote the transcript the
+# Agent reads its own work back from: 464 substitutions in one audited arm,
+# nearly all of them division, backquoted names, ``2>/dev/null`` and
+# ``<domain>/part_0000.parquet``.
+
+
+def _host_path_prefixes() -> tuple[str, ...]:
+    """The top-level directories an absolute host path can start with.
+
+    The home directories plus the top of this checkout: the data, snapshot,
+    experiment and sandbox work roots all live inside the repository, so one
+    prefix covers every host tree a session could name. ``/Data2`` is named
+    outright because that is where the worker runs from, and the derived one
+    keeps this correct for a checkout elsewhere. ``/mnt``, ``/tmp``, ``/opt``
+    and ``/usr`` are the Agent's view of its own sandbox, never host paths, so
+    they can never become a prefix.
+    """
+
+    tops = {"/Data2", "/home", "/root"}
+    repo = Path(__file__).resolve().parents[3]
+    if len(repo.parts) > 1:
+        tops.add("/" + repo.parts[1])
+    return tuple(sorted(tops - {"/mnt", "/tmp", "/opt", "/usr"}))
+
+
+HOST_PATH_PREFIXES = _host_path_prefixes()
+HOST_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9_.\-/])(?:"
+    + "|".join(re.escape(prefix) for prefix in HOST_PATH_PREFIXES)
+    + r")(?:/[A-Za-z0-9._\-+@~%]+)+"
+)
 
 
 def redact_host_paths(text: str) -> str:

@@ -354,6 +354,10 @@ def test_no_edge_ends_the_arm_without_a_deliverable(tmp_path: Path):
         pipeline.run_forward()
 
 
+# The host tree a dead session container is named after, as the worker sees it.
+HOST_WORK_ROOT = f"{Path(__file__).resolve().parents[2]}/.runtime/sandboxes/arm/research"
+
+
 def _interrupted_attempt(
     pipeline, ledger, *, summary: str | None, replay_years: int, node: bool, capped: bool = False
 ) -> str:
@@ -370,8 +374,10 @@ def _interrupted_attempt(
 
     def crash(_request):
         # An environment failure names host paths; the ledger keeps them, the
-        # Agent's resume note must not.
-        raise RuntimeError(f"session container died: {pipeline.config.experiment_dir}/runtime")
+        # Agent's resume note must not. The path has to be one the host really
+        # uses -- the sandbox work root under the repository -- because that is
+        # what the redaction recognises; a pytest temp directory is not.
+        raise RuntimeError(f"session container died: {HOST_WORK_ROOT}")
 
     keep = pipeline.developer
     pipeline.developer = crash
@@ -451,7 +457,7 @@ def test_a_resumed_attempt_continues_from_the_trace_and_the_recorded_node(tmp_pa
     assert request.resume is not None
     assert (request.resume.attempt, request.resume.interrupted_at) == (2, "2026-09-15T01:30:00+00:00")
     assert request.resume.error == "RuntimeError: session container died: [host_path]"
-    assert str(pipeline.config.experiment_dir) in str(ledger.read()[0]["error"])
+    assert HOST_WORK_ROOT in str(ledger.read()[0]["error"])
     assert request.resume.compaction_summary == "## 目标\n继续动量腿"
     assert request.resume.transcripts == ("run_ref_first.txt",)
     assert request.budget_used.to_record() == {
