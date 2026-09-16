@@ -17,6 +17,7 @@ import re
 import tempfile
 import unittest
 import zipfile
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1468,6 +1469,42 @@ class HitlControlActionTest(unittest.TestCase):
         queued = self._post(action="inject_message", session_key="research", text="先看回撤")
         self.assertEqual(queued.status_code, 200, queued.text)
         self.assertEqual(queued.json()["session_key"], "research")
+
+    def test_the_control_projection_is_dated_by_the_file_not_by_the_read(self) -> None:
+        """`updated_at` says when the control was last written.
+
+        The projection serialises a state read off disk, and the serialiser
+        stamped the current time, so every read dated the control to the
+        moment it was fetched while the file it claimed to project said
+        something else — and nothing rewrote the file to agree.
+        """
+
+        path = self.directory / "hitl/control.json"
+        before = json.loads(path.read_text(encoding="utf-8"))
+        detail = self.client.get("/api/experiments/exp_ctl").json()
+        self.assertEqual(detail["control"]["updated_at"], before["updated_at"])
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")), before)
+        # A control action is a write: it re-dates the file and returns that
+        # same stamp.
+        changed = self._post(
+            action="set_directive", session_key="research", directive="控制回撤"
+        )
+        written = json.loads(path.read_text(encoding="utf-8"))["updated_at"]
+        self.assertGreater(
+            datetime.fromisoformat(written), datetime.fromisoformat(before["updated_at"])
+        )
+        self.assertEqual(changed.json()["control"]["updated_at"], written)
+        # A file that carries no stamp is dated by nothing at all.
+        write_json_atomic(
+            path,
+            {
+                key: value
+                for key, value in json.loads(path.read_text(encoding="utf-8")).items()
+                if key != "updated_at"
+            },
+        )
+        reread = self.client.get("/api/experiments/exp_ctl").json()
+        self.assertIsNone(reread["control"]["updated_at"])
 
     def test_set_gpu_count_round_trips_and_refuses_everything_else(self) -> None:
         allocated = self._post(action="set_gpu_count", session_key="research", directive="2")

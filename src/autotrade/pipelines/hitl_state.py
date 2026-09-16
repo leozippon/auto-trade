@@ -184,6 +184,11 @@ class ControlState:
     # whose latest ledger record has not absorbed this id yet.
     rerun_sessions: dict[str, str] = field(default_factory=dict)
     test_revealed: bool = False
+    # When this state was last written, as the file recorded it; None for a
+    # state that has not been written yet. Only ``write_control`` stamps it,
+    # so a projection of the file dates the control from the file and not
+    # from the moment it was read.
+    updated_at: str | None = None
 
     def to_record(self) -> dict[str, object]:
         if self.mode not in CONTROL_MODES:
@@ -201,7 +206,7 @@ class ControlState:
             "gpu_counts": dict(self.gpu_counts),
             "rerun_sessions": dict(self.rerun_sessions),
             "test_revealed": self.test_revealed,
-            "updated_at": _now(),
+            "updated_at": self.updated_at,
         }
 
 
@@ -226,10 +231,14 @@ def read_control(path: str | Path) -> ControlState:
         gpu_counts=_int_map(payload.get("gpu_counts")),
         rerun_sessions=_string_map(payload.get("rerun_sessions")),
         test_revealed=bool(payload.get("test_revealed")),
+        updated_at=str(payload["updated_at"]) if payload.get("updated_at") else None,
     )
 
 
 def write_control(path: str | Path, state: ControlState) -> None:
+    """Write the control file, stamping the state with this write's time."""
+
+    state.updated_at = _now()
     _write_json(Path(path), state.to_record())
 
 
