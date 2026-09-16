@@ -1,14 +1,9 @@
-"""Step-tree console view: lineage, node metrics, source export, and revisions.
+"""Step-tree console view: lineage, node metrics and source export.
 
 The Agent-visible tree stores the session as an opaque ``session_ref_*`` token.
 The console is the researcher's trusted surface, so it resolves the token back
 to the plan key (``research``) for display, and marks the node the arm froze
 from the ledger's frozen record.
-
-The same panel reads the arm's retained strategy revisions, which are the
-artifact's own lineage beside the tree of validated nodes. Raw revision ids stay
-on the host: they are projected as ``strategy_ref``/``parent_strategy_ref`` here
-and resolved back here when a diff names two of them.
 """
 
 from __future__ import annotations
@@ -18,7 +13,6 @@ from pathlib import Path
 from autotrade.environment.identity import LegacyExperimentError
 from autotrade.environment.step_tree import NODE_OUTPUT_DIR, StepTree
 from autotrade.pipelines.ledger import frozen_record
-from autotrade.pipelines.revision_history import revision_diff, revision_history
 
 from .public_identity import PublicIdentity
 from .registry import read_ledger_records
@@ -98,62 +92,6 @@ def step_tree_view(experiment_dir: Path) -> dict[str, object]:
                 public["session_key"] = None
         nodes.append(public)
     return {"current_node_id": tree.current_node_id, "nodes": nodes}
-
-
-def revision_lineage_view(
-    experiment_dir: Path, identity: PublicIdentity
-) -> dict[str, object]:
-    """Every retained revision of the arm, oldest first, past the host boundary.
-
-    ``node_id`` is a Step node id, which the tree already publishes as it is;
-    the revision ids are not, so they and the parent pointer become opaque
-    strategy refs. A revision the older layout left behind carries ``legacy``
-    and no parent, because its lineage was never recorded.
-    """
-
-    revisions = []
-    for row in revision_history(experiment_dir)["revisions"]:
-        parent = row["parent_revision_id"]
-        revisions.append(
-            {
-                "strategy_ref": identity.strategy_ref(row["revision_id"]),
-                "parent_strategy_ref": (
-                    identity.strategy_ref(parent) if parent else None
-                ),
-                "created_at": row["created_at"],
-                "fingerprint": row["fingerprint"],
-                "layout": row["layout"],
-                "node_id": row["node_id"],
-                "file_count": row["file_count"],
-                "total_bytes": row["total_bytes"],
-            }
-        )
-    return {"revisions": revisions}
-
-
-def revision_diff_view(
-    experiment_dir: Path, identity: PublicIdentity, ref_a: str, ref_b: str
-) -> dict[str, object]:
-    """The diff between two revisions named by their public strategy refs.
-
-    The bodies are the Agent's own strategy files, so nothing in them is
-    redacted; the manifests carry relative paths only, so the file entries pass
-    through as the store wrote them.
-    """
-
-    diff = revision_diff(
-        experiment_dir,
-        identity.raw_strategy_id(ref_a),
-        identity.raw_strategy_id(ref_b),
-    )
-    return {
-        "strategy_ref_a": ref_a,
-        "strategy_ref_b": ref_b,
-        "added": diff["added"],
-        "removed": diff["removed"],
-        "modified": diff["modified"],
-        "files": diff["files"],
-    }
 
 
 def node_export_dir(experiment_dir: Path, node_id: str) -> Path:
