@@ -43,7 +43,7 @@
 
 ## 每个候选必须汇报的读数
 
-除标准结果块外，写进结果笔记：逐年分块的中性化超额；与 `c_lgbm` 的整窗与逐年差；最好 15 只的持仓来源（`per_stock`、`pnl_concentration`）；年换手、拒单率与费用；规模与 β 倾斜（`style_analysis.json`）；每次 `fit` 的墙钟（`phase_seconds.fit` ÷ 重训次数）与显存峰值；三个种子的验证 IC。缺任何一项的结果不作为提名依据。
+除标准结果块外，写进结果笔记：逐年分块的中性化超额；与 `c_lgbm` 的整窗与逐年差；最好 15 只的持仓来源（`per_stock`、`pnl_concentration`）；年换手、拒单率与费用；规模与 β 倾斜（`benchmark.size_tilt`、`benchmark.beta`）；每次 `fit` 的墙钟（`phase_seconds.fit` ÷ 重训次数）与显存峰值；三个种子的验证 IC。缺任何一项的结果不作为提名依据。
 
 ## Validation 否证（任何一条命中，结果无效，不讨论收益）
 

@@ -44,7 +44,7 @@
 
 每个候选按 `families.md` 的「硬门」与「什么会杀死它」逐条读，不看整窗总收益；本文不复述判据。另外三点读法：
 
-- 本臂的原始超额在宽幅高波动的上涨年份（探针里 2021 形态）会接近零，这是防御型篮子的构造性质：读 `benchmark.neutralized_excess_return` 与 `style_analysis.json` 的规模倾斜一起读，不把这类研究年单独当作证伪或证据。
+- 本臂的原始超额在宽幅高波动的上涨年份（探针里 2021 形态）会接近零，这是防御型篮子的构造性质：读 `benchmark.neutralized_excess_return` 与 `benchmark.size_tilt` 一起读，不把这类研究年单独当作证伪或证据。
 - 中性化是机制定义的一部分，不是可删的降噪：低波腿不对规模、`vol_20`、`max_20` 中性化就不再是本包登记的那条腿。
 - `null_control.excess_percentile` 用 `run_null_control(node_id)` 只给决赛候选算；`selection_statistics.deflated_sharpe_probability` 是冻结门此刻对该节点的读数，已按本臂的试验数 `trials` 打折。
 
