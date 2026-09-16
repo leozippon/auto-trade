@@ -415,16 +415,13 @@ main {
  background: var(--chip-bg);
  color: var(--muted);
 }
-/* The ending's reason: one quiet line under the badge. On a card and in a page
-   heading it belongs to the title above it, so it closes the gap the layout
-   puts between groups and sits one step under the badge instead. */
+/* The ending's reason: one quiet line under the badge on the experiment page.
+   In the page heading it belongs to the title above it, so it takes a row of
+   its own under the badge instead of closing the heading's gap. */
 .ending-reason {
  color: var(--muted);
  font-size: 0.875rem;
  line-height: 1.55;
-}
-.card > .ending-reason {
- margin-top: calc(var(--space-1) - var(--space-3) - var(--space-4));
 }
 .page-head > .ending-reason {
  flex-basis: 100%;

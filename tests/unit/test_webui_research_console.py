@@ -492,6 +492,23 @@ def test_the_card_and_the_research_panel_name_the_same_four_figures() -> None:
     assert "全区间验证次数" in script.split("const REASON_LABELS", 1)[1]
 
 
+def test_an_experiment_card_wears_the_ending_as_a_badge_alone() -> None:
+    """The homepage grid stays scannable: a card says how the arm ended in one
+    badge and keeps the reason in that badge's tooltip. The sentence itself is
+    drawn only on the experiment page — its header and the 裁决 view."""
+
+    script = (
+        Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
+    ).read_text(encoding="utf-8")
+    card = script.split("function experimentCard(", 1)[1].split("\nfunction ", 1)[0]
+    badge = script.split("function endingBadge(", 1)[1].split("\nfunction ", 1)[0]
+    assert "armBadge(item)" in card
+    assert "endingReason" not in card
+    assert "title: ending.reason || null" in badge
+    # The definition and its two call sites, and no third page.
+    assert script.count("endingReason(") == 3
+
+
 def test_the_three_replay_stage_views_speak_one_criteria_vocabulary() -> None:
     """前推回放, Held-out and 裁决 draw the criteria the same way: every view
     renders the shared F1–F6 / H1–H4 rows as a checklist, so a threshold is

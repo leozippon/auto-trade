@@ -1758,7 +1758,9 @@ function armBadge(item) {
   return item.ending ? endingBadge(item.ending) : stateBadge(item.state);
 }
 
-/* The ending's reason, one quiet line under the badge. */
+/* The ending's reason, one quiet line. The homepage cards wear the badge alone
+   and keep the reason in its tooltip, so the grid stays scannable; the sentence
+   itself belongs to the experiment page — its header and 裁决. */
 function endingReason(item) {
   const reason = (item.ending || {}).reason;
   return reason ? el("div", { class: "ending-reason" }, reason) : null;
@@ -1859,7 +1861,6 @@ function experimentCard(item) {
       experimentName(item.experiment_id),
       experimentBadges(armBadge(item)),
     ),
-    endingReason(item),
     item.error ? el("div", { class: "meta-line" }, item.error) : null,
     readable ? pipelineStepper(item) : null,
     readable && item.worker_alive
@@ -1931,8 +1932,6 @@ function heroPanel(item) {
       ),
       armBadge(item),
     ),
-    // No reason line: only a graduate is the hero, and its reason is the two
-    // numbers the tiles below already give in full.
     forwardTiles(item),
   );
   panel.__signature = heroSignature(item);
