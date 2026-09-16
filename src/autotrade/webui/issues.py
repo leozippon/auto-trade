@@ -9,9 +9,8 @@ every other projection, Agent-authored text leaves the host through
 rather than silently dropped.
 
 A report the researcher has answered (``scripts/experiments/resolve_issue.py``
-appends the resolution line) carries its outcome and note here. Resolved
-reports leave the default page: what is still open is the working list, and the
-resolved count says how much the toggle would add back.
+appends the resolution line) carries its outcome and note here; the listing
+itself follows the one rule in :mod:`autotrade.webui.feedback_page`.
 """
 
 from __future__ import annotations
@@ -24,8 +23,8 @@ from autotrade.environment.tools.report_issue import (
     read_issue_reports,
 )
 
+from .feedback_page import feedback_page
 from .public_identity import PublicIdentity
-from .registry import resolve_experiment_dir
 
 # One bounded page, newest first, is the whole surface. It is a real cut, not a
 # formality: at 16 reports per session, a round of five experiments running
@@ -88,53 +87,17 @@ def issue_reports(
     include_resolved: bool = False,
     limit: int = MAX_ISSUE_REPORTS_PAGE,
 ) -> dict[str, object]:
-    """Reports across experiments (or one), newest first, bounded to one page.
+    """This channel's page of :func:`feedback_page`."""
 
-    ``total`` counts what the listing is drawn from, so it follows the resolved
-    filter; ``resolved`` counts the resolved reports in scope either way, which
-    is what tells an empty open list apart from an experiment that never filed
-    anything.
-    """
-
-    if not 1 <= limit <= MAX_ISSUE_REPORTS_PAGE:
-        raise ValueError(f"limit must be between 1 and {MAX_ISSUE_REPORTS_PAGE}")
-    root = Path(experiments_root)
-    reports: list[dict[str, object]] = []
-    unreadable: list[dict[str, object]] = []
-    if experiment_id is not None:
-        directories = [resolve_experiment_dir(root, experiment_id)]
-    elif root.is_dir():
-        directories = sorted(
-            (
-                directory
-                for directory in root.iterdir()
-                if directory.is_dir() and not directory.name.startswith(".")
-            ),
-            key=lambda path: path.name,
-        )
-    else:
-        directories = []
-    for directory in directories:
-        try:
-            reports.extend(_experiment_reports(directory))
-        except (OSError, TypeError, ValueError) as exc:
-            unreadable.append(
-                {
-                    "experiment_id": directory.name,
-                    "error": f"{type(exc).__name__}: {_UNREADABLE_REPORTS}",
-                }
-            )
-    reports.sort(key=lambda item: str(item.get("recorded_at")), reverse=True)
-    resolved = sum(1 for item in reports if item["outcome"])
-    if not include_resolved:
-        reports = [item for item in reports if not item["outcome"]]
-    return {
-        "reports": reports[:limit],
-        "total": len(reports),
-        "resolved": resolved,
-        "limit": limit,
-        "unreadable": unreadable,
-    }
+    return feedback_page(
+        experiments_root,
+        project=_experiment_reports,
+        unreadable_error=_UNREADABLE_REPORTS,
+        experiment_id=experiment_id,
+        include_resolved=include_resolved,
+        limit=limit,
+        max_limit=MAX_ISSUE_REPORTS_PAGE,
+    )
 
 
 __all__ = ["MAX_ISSUE_REPORTS_PAGE", "issue_reports"]

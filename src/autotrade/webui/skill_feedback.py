@@ -9,9 +9,8 @@ and an experiment whose log cannot be read is named rather than silently
 dropped.
 
 A report the researcher has answered (``scripts/experiments/resolve_skill_feedback.py``
-appends the resolution line) carries its outcome and note here. Resolved reports
-leave the default page: what is still open is the working list, and the resolved
-count says how much the toggle would add back.
+appends the resolution line) carries its outcome and note here; the listing
+itself follows the one rule in :mod:`autotrade.webui.feedback_page`.
 """
 
 from __future__ import annotations
@@ -25,8 +24,8 @@ from autotrade.environment.tools.skill_feedback import (
 )
 from autotrade.pipelines.skills import validate_memory_entry_ref
 
+from .feedback_page import feedback_page
 from .public_identity import PublicIdentity
-from .registry import resolve_experiment_dir
 
 # One bounded page, newest first, like the issue reports beside it. The channel
 # is far quieter — one report per mounted entry per session — so this cap is a
@@ -97,53 +96,17 @@ def skill_feedback(
     include_resolved: bool = False,
     limit: int = MAX_SKILL_FEEDBACK_PAGE,
 ) -> dict[str, object]:
-    """Reports across experiments (or one), newest first, bounded to one page.
+    """This channel's page of :func:`feedback_page`."""
 
-    ``total`` counts what the listing is drawn from, so it follows the resolved
-    filter; ``resolved`` counts the resolved reports in scope either way, which
-    is what tells an empty open list apart from an experiment that never filed
-    anything.
-    """
-
-    if not 1 <= limit <= MAX_SKILL_FEEDBACK_PAGE:
-        raise ValueError(f"limit must be between 1 and {MAX_SKILL_FEEDBACK_PAGE}")
-    root = Path(experiments_root)
-    reports: list[dict[str, object]] = []
-    unreadable: list[dict[str, object]] = []
-    if experiment_id is not None:
-        directories = [resolve_experiment_dir(root, experiment_id)]
-    elif root.is_dir():
-        directories = sorted(
-            (
-                directory
-                for directory in root.iterdir()
-                if directory.is_dir() and not directory.name.startswith(".")
-            ),
-            key=lambda path: path.name,
-        )
-    else:
-        directories = []
-    for directory in directories:
-        try:
-            reports.extend(_experiment_feedback(directory))
-        except (OSError, TypeError, ValueError) as exc:
-            unreadable.append(
-                {
-                    "experiment_id": directory.name,
-                    "error": f"{type(exc).__name__}: {_UNREADABLE_FEEDBACK}",
-                }
-            )
-    reports.sort(key=lambda item: str(item.get("recorded_at")), reverse=True)
-    resolved = sum(1 for item in reports if item["outcome"])
-    if not include_resolved:
-        reports = [item for item in reports if not item["outcome"]]
-    return {
-        "reports": reports[:limit],
-        "total": len(reports),
-        "resolved": resolved,
-        "limit": limit,
-        "unreadable": unreadable,
-    }
+    return feedback_page(
+        experiments_root,
+        project=_experiment_feedback,
+        unreadable_error=_UNREADABLE_FEEDBACK,
+        experiment_id=experiment_id,
+        include_resolved=include_resolved,
+        limit=limit,
+        max_limit=MAX_SKILL_FEEDBACK_PAGE,
+    )
 
 
 __all__ = ["MAX_SKILL_FEEDBACK_PAGE", "skill_feedback"]
