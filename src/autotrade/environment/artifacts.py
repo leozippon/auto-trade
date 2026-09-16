@@ -43,11 +43,6 @@ ARTIFACT_METADATA_FILES = frozenset({"manifest.json"})
 # carries its manifest next to the ``output``/``models`` trees it materialises.
 OBJECTS_DIR = "objects"
 REVISION_MANIFEST_FILE = "manifest.json"
-# Caps for the host-side revision diff. A side larger than the byte cap is
-# reported as changed without a body instead of being loaded; a longer diff is
-# truncated, because the console shows a diff, not a file dump.
-REVISION_DIFF_MAX_FILE_BYTES = 1024 * 1024
-REVISION_DIFF_MAX_LINES = 2000
 READONLY_FILES = frozenset({"README.md"})
 ALLOWED_SUFFIXES = frozenset({".py", ".json", ".md", ".txt", ".toml", ".yaml", ".yml"})
 # Deny-by-default allowlist for the frozen, inheritable ``models/`` directory.
@@ -266,52 +261,6 @@ class FilesystemArtifactStore:
                 for relpath in _revision_relpaths(directory)
             ],
             "layout": "legacy",
-        }
-
-    def diff_revisions(self, revision_a: str, revision_b: str) -> dict[str, object]:
-        """What changed between two revisions: paths plus unified diffs.
-
-        Sameness is decided on the manifests' digests, so an unchanged file is
-        never read. A changed text file gets a unified diff under the module's
-        caps; a side that is binary or over the byte cap is reported as changed
-        with no body rather than dumped into the response.
-        """
-
-        before = {
-            str(entry["path"]): entry
-            for entry in self.revision_manifest(revision_a)["files"]  # type: ignore[union-attr]
-        }
-        after = {
-            str(entry["path"]): entry
-            for entry in self.revision_manifest(revision_b)["files"]  # type: ignore[union-attr]
-        }
-        root_a = self._id_path(self.revisions_root, revision_a)
-        root_b = self._id_path(self.revisions_root, revision_b)
-        files: list[dict[str, object]] = []
-        for relpath in sorted(set(before) | set(after)):
-            left, right = before.get(relpath), after.get(relpath)
-            if left is not None and right is not None and left["sha256"] == right["sha256"]:
-                continue
-            files.append(
-                {
-                    "path": relpath,
-                    "change": "added" if left is None else "removed" if right is None else "modified",
-                    "size_before": left["size"] if left is not None else None,
-                    "size_after": right["size"] if right is not None else None,
-                    **_revision_diff_body(
-                        root_a / relpath if left is not None else None,
-                        root_b / relpath if right is not None else None,
-                        relpath,
-                    ),
-                }
-            )
-        return {
-            "revision_a": revision_a,
-            "revision_b": revision_b,
-            "added": sum(1 for item in files if item["change"] == "added"),
-            "removed": sum(1 for item in files if item["change"] == "removed"),
-            "modified": sum(1 for item in files if item["change"] == "modified"),
-            "files": files,
         }
 
     def _intern(self, directory: Path) -> list[dict[str, object]]:
@@ -929,43 +878,6 @@ def _revision_relpaths(directory: Path) -> list[str]:
             for relpath in sorted(_model_artifact_files(models, missing_ok=True))
         )
     return relpaths
-
-
-def _revision_diff_body(
-    before: Path | None, after: Path | None, relpath: str
-) -> dict[str, object]:
-    """The unified diff of one changed path, or a stated reason there is none."""
-
-    left, right = _diff_text(before), _diff_text(after)
-    if left is None or right is None:
-        return {"diff": None, "diff_omitted": "binary_or_too_large"}
-    lines = list(
-        difflib.unified_diff(
-            left.splitlines(),
-            right.splitlines(),
-            fromfile=f"a/{relpath}",
-            tofile=f"b/{relpath}",
-            lineterm="",
-        )
-    )
-    truncated = len(lines) > REVISION_DIFF_MAX_LINES
-    return {
-        "diff": "\n".join(lines[:REVISION_DIFF_MAX_LINES]),
-        "diff_truncated": truncated,
-    }
-
-
-def _diff_text(path: Path | None) -> str | None:
-    """One side's text: empty for an absent side, None when it cannot be shown."""
-
-    if path is None:
-        return ""
-    if path.stat().st_size > REVISION_DIFF_MAX_FILE_BYTES:
-        return None
-    try:
-        return path.read_text(encoding="utf-8")
-    except (UnicodeDecodeError, OSError):
-        return None
 
 
 def _replace_artifact_root(dest_root: Path) -> None:

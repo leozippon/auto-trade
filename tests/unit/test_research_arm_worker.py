@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from autotrade.environment.artifacts import FilesystemArtifactStore
 from autotrade.environment.runtime import append_versioned_jsonl
 from autotrade.pipelines import experiment as experiment_module
 from autotrade.pipelines import worker
@@ -27,7 +28,6 @@ from autotrade.pipelines.ledger import (
     paper_candidate,
     research_records,
 )
-from autotrade.pipelines.revision_history import revision_history
 from autotrade.pipelines.worker import load_worker_options, run_local_interactive_worker
 from tests.unit.synthetic_arm import (
     GEOMETRY,
@@ -566,11 +566,17 @@ def test_an_interrupted_llm_session_resumes_with_its_summary_budget_and_nodes(
     assert facts["budgets"]["used_before_this_attempt"]["llm_calls"] == 5
     # One session root, two transcripts, and both attempts' revisions kept as
     # the arm's artifact history: the resumed attempt's revision descends from
-    # the node it continued out of, and each is joined to the Step it validated.
+    # the one the node it continued out of was validated as.
     assert sorted(path.name for path in (experiment / "artifacts" / "transcripts").glob("run_ref_*.txt")) != [transcripts[0].name]
-    history = revision_history(experiment)["revisions"]
-    assert [row["parent_revision_id"] for row in history] == [None, history[0]["revision_id"]]
-    assert [row["node_id"] for row in history] == [node["node_id"], record["steps"][1]["step_id"]]
+    store = FilesystemArtifactStore(experiment / "artifacts" / "strategy")
+    manifests = sorted(
+        (store.revision_manifest(revision_id) for revision_id in store.revision_ids()),
+        key=lambda manifest: str(manifest["created_at"]),
+    )
+    assert [manifest["parent_revision_id"] for manifest in manifests] == [
+        None,
+        manifests[0]["revision_id"],
+    ]
 
 
 def test_an_interrupted_session_without_a_checkpoint_resumes_from_the_note_alone(

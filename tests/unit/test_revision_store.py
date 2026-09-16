@@ -2,20 +2,18 @@
 
 Every revision a Validation recorded is kept, so the conditions that must hold
 are retention, cheap storage (one copy of each distinct file), a lineage that
-survives on disk, a readable diff, and readability of the revisions the older
-layout left behind.
+survives on disk, and readability of the revisions the older layout left
+behind.
 """
 
 from __future__ import annotations
 
-import os
 import stat
 from pathlib import Path
 
 import pytest
 
 from autotrade.environment.artifacts import (
-    REVISION_DIFF_MAX_FILE_BYTES,
     REVISION_MANIFEST_FILE,
     FilesystemArtifactStore,
     artifact_fingerprint,
@@ -23,9 +21,6 @@ from autotrade.environment.artifacts import (
     copy_model_artifacts,
 )
 from autotrade.environment.runtime import chmod_tree
-from autotrade.pipelines.config import EvaluationResult, StepResult
-from autotrade.pipelines.revision_history import revision_diff, revision_history
-from autotrade.pipelines.session_resume import record_step_sidecar
 
 STRATEGY = "def generate_orders(context):\n    return []\n"
 HELPER = "\n".join(f"VALUE_{index} = {index}" for index in range(40)) + "\n"
@@ -198,66 +193,9 @@ def test_discarding_a_revision_leaves_the_bytes_it_shared_read_only(tmp_path: Pa
         assert stat.S_IMODE(path.stat().st_mode) & 0o222 == 0, path
 
 
-def test_a_diff_names_added_removed_and_modified_paths_with_unified_bodies(tmp_path: Path):
-    output, models = _working_artifact(tmp_path / "work")
-    store = FilesystemArtifactStore(tmp_path / "store")
-    before = store.create_revision(output, models_path=models, revision_id="revision_a")
-    (output / "main.py").write_text(STRATEGY.replace("return []", "return [1]"), encoding="utf-8")
-    (output / "lib" / "features.py").unlink()
-    (output / "lib" / "signals.py").write_text("SIGNAL = 1\n", encoding="utf-8")
-    after = store.create_revision(
-        output, models_path=models, revision_id="revision_b", parent_revision_id=before.revision_id
-    )
-
-    diff = store.diff_revisions(before.revision_id, after.revision_id)
-
-    assert (diff["added"], diff["removed"], diff["modified"]) == (1, 1, 1)
-    changes = {str(item["path"]): item for item in diff["files"]}
-    assert set(changes) == {
-        "output/lib/features.py",
-        "output/lib/signals.py",
-        "output/main.py",
-    }
-    assert changes["output/lib/signals.py"]["change"] == "added"
-    assert changes["output/lib/signals.py"]["size_before"] is None
-    assert "+SIGNAL = 1" in str(changes["output/lib/signals.py"]["diff"])
-    assert changes["output/lib/features.py"]["change"] == "removed"
-    assert changes["output/main.py"]["change"] == "modified"
-    body = str(changes["output/main.py"]["diff"])
-    assert body.startswith("--- a/output/main.py\n+++ b/output/main.py")
-    assert "-    return []" in body and "+    return [1]" in body
-    assert changes["output/main.py"]["diff_truncated"] is False
-    # Unchanged files are decided on digests and never appear.
-    assert "output/README.md" not in changes and "models/weights.npy" not in changes
-
-
-def test_a_diff_states_why_a_body_is_missing_instead_of_dumping_it(tmp_path: Path):
-    output, models = _working_artifact(tmp_path / "work")
-    store = FilesystemArtifactStore(tmp_path / "store")
-    before = store.create_revision(output, models_path=models, revision_id="revision_a")
-    (models / "weights.npy").write_bytes(b"\x93NUMPY" + os.urandom(64))
-    (output / "lib" / "features.py").write_text(
-        "X = 1\n" * (REVISION_DIFF_MAX_FILE_BYTES // 6 + 2), encoding="utf-8"
-    )
-    after = store.create_revision(
-        output, models_path=models, revision_id="revision_b", parent_revision_id=before.revision_id
-    )
-
-    changes = {
-        str(item["path"]): item
-        for item in store.diff_revisions(before.revision_id, after.revision_id)["files"]
-    }
-
-    assert changes["models/weights.npy"]["change"] == "modified"
-    assert changes["models/weights.npy"]["diff"] is None
-    assert changes["models/weights.npy"]["diff_omitted"] == "binary_or_too_large"
-    assert changes["output/lib/features.py"]["diff"] is None
-    assert changes["output/lib/features.py"]["diff_omitted"] == "binary_or_too_large"
-
-
 def test_a_revision_written_before_the_object_store_stays_readable(tmp_path: Path):
     """The arms that were running when the store changed left plain copied
-    revision directories behind. They keep their bytes and their diffs; what
+    revision directories behind. They keep their bytes and their digests; what
     they cannot have is a lineage that was never recorded."""
 
     output, models = _working_artifact(tmp_path / "work")
@@ -267,7 +205,7 @@ def test_a_revision_written_before_the_object_store_stays_readable(tmp_path: Pat
     copy_model_artifacts(models, legacy / "models")
     chmod_tree(legacy, file_mode=0o444, dir_mode=0o555)
     (output / "main.py").write_text(STRATEGY + "# newer\n", encoding="utf-8")
-    modern = store.create_revision(output, models_path=models, revision_id="revision_modern")
+    store.create_revision(output, models_path=models, revision_id="revision_modern")
 
     assert not (legacy / REVISION_MANIFEST_FILE).exists()
     manifest = store.revision_manifest("revision_legacy")
@@ -283,42 +221,6 @@ def test_a_revision_written_before_the_object_store_stays_readable(tmp_path: Pat
     assert store.revision("revision_legacy").output_path.joinpath("main.py").read_text(
         encoding="utf-8"
     ) == STRATEGY
-
-    diff = store.diff_revisions("revision_legacy", modern.revision_id)
-    assert [item["path"] for item in diff["files"]] == ["output/main.py"]
-    assert "+# newer" in str(diff["files"][0]["diff"])
-
-
-def test_revision_history_joins_each_revision_to_the_step_it_was_validated_as(
-    tmp_path: Path,
-):
-    experiment = tmp_path / "experiments" / "arm"
-    output, models = _working_artifact(tmp_path / "work")
-    store = FilesystemArtifactStore(experiment / "artifacts" / "strategy")
-    first = store.create_revision(output, models_path=models, revision_id="revision_a")
-    (output / "main.py").write_text(STRATEGY + "# second\n", encoding="utf-8")
-    second = store.create_revision(
-        output, models_path=models, revision_id="revision_b", parent_revision_id="revision_a"
-    )
-    record_step_sidecar(
-        experiment,
-        StepResult("node_1", first.revision_id, EvaluationResult({}, "ref_1"), span="full"),
-    )
-
-    history = revision_history(experiment)["revisions"]
-
-    assert [row["revision_id"] for row in history] == ["revision_a", "revision_b"]
-    assert [row["parent_revision_id"] for row in history] == [None, "revision_a"]
-    assert [row["node_id"] for row in history] == ["node_1", None]
-    assert [row["file_count"] for row in history] == [4, 4]
-    assert all(row["layout"] == "objects" for row in history)
-    assert history[0]["total_bytes"] == sum(
-        (first.output_path.parent / relpath).stat().st_size
-        for relpath in ("output/main.py", "output/README.md", "output/lib/features.py", "models/weights.npy")
-    )
-
-    diff = revision_diff(experiment, "revision_a", second.revision_id)
-    assert [item["path"] for item in diff["files"]] == ["output/main.py"]
 
 
 def test_an_unknown_revision_is_named_rather_than_guessed(tmp_path: Path):
