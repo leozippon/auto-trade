@@ -162,13 +162,15 @@ COPY src/autotrade/environment/strategy_worker.py /opt/autotrade/autotrade/envir
 COPY src/autotrade/environment/contract_fingerprint.py /opt/autotrade/autotrade/environment/contract_fingerprint.py
 COPY ops/docker/pyrightconfig.json /opt/autotrade/pyrightconfig.json
 
-# Build-time fingerprint of the Agent-facing strategy contract: the three
-# modules baked above plus the output template README the session mounts. The
-# host recomputes it from the same repository files before every strategy
-# container starts and refuses an image whose baked contract has drifted, so an
-# unrebuilt image can no longer enforce a rule the Agent was never told. The
-# sources are staged in repository layout only so both sides run the same
-# function, and are deleted again — the image keeps the digest, not the copies.
+# Build-time fingerprint of the full Agent-facing strategy contract: the three
+# modules baked above plus the output template README that states the same
+# rules to the Agent. A research session recomputes it from the same repository
+# files before every strategy container start and refuses a drifted image, so
+# an unrebuilt image can no longer enforce a rule the Agent was never told.
+# Only the README needs this record: what the container would really enforce is
+# digested from the modules baked above, which stay in the image. The sources
+# are staged in repository layout only so both sides run the same function, and
+# are deleted again — the image keeps the digest, not the copies.
 COPY src/autotrade/environment/strategy.py src/autotrade/environment/strategy_loader.py src/autotrade/environment/strategy_worker.py /opt/autotrade/contract/src/autotrade/environment/
 COPY configs/agent_output_template/README.md /opt/autotrade/contract/configs/agent_output_template/README.md
 RUN python -c 'from pathlib import Path; from autotrade.environment.contract_fingerprint import IMAGE_FINGERPRINT_PATH, compute_contract_fingerprint; Path(IMAGE_FINGERPRINT_PATH).write_text(compute_contract_fingerprint("/opt/autotrade/contract"), encoding="utf-8")' \

@@ -405,6 +405,11 @@ class DailyPaperEngine:
             asof_dir=view.asof_dir or None,
             models_dir=self.models_dir,
             state_dir=state_dir,
+            # The book replays a frozen strategy with no Agent and no contract
+            # text in the loop, so its pinned image has to bake this checkout's
+            # strategy runtime and nothing more: a README-only rebuild must not
+            # stop a book from deciding its session.
+            agent_contract=False,
         )
 
     def _journaled_orders(self, trade_date: str) -> list[dict[str, object]]:
