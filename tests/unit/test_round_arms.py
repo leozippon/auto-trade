@@ -201,6 +201,23 @@ def test_an_arm_requests_a_gpu_exactly_when_its_starter_needs_cuda(
     assert (int(params["gpu_count"]) >= 1) is needs_cuda, (experiment_id, params["gpu_count"])
 
 
+@pytest.mark.parametrize(("round_name", "experiment_id"), ARMS)
+def test_every_arm_mounts_a_checked_in_reference_pack(
+    round_name: str, experiment_id: str
+) -> None:
+    """An arm that names a pack must name one this repository holds.
+
+    The create-time pre-flight resolves `workspace_reference` against the
+    repository root, but the dry-run test above points that root at a synthetic
+    tree it populates from the round itself, so a mistyped or deleted pack
+    passes every other check here and first fails when the console mounts it.
+    """
+    reference = ROUNDS[round_name].request_params(experiment_id).get("workspace_reference")
+    if not reference:
+        return
+    assert (REPO_ROOT / str(reference) / "README.md").is_file(), (experiment_id, reference)
+
+
 @pytest.mark.parametrize("round_name", ROUND_IDS)
 def test_the_selection_matches_the_prebuilt_seed(round_name: str) -> None:
     """The round and the real tree its arms hardlink from agree, byte for byte.
