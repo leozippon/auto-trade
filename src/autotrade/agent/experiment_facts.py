@@ -35,10 +35,14 @@ BATCH_VALIDATE_FIT_TIMEOUT_NOTE = (
     "因为并发是环境引入的、不该记到策略头上；单个候选的调用两者都用基准值。"
 )
 
-# How ``budgets.max_replay_years`` is spent.
+# How ``budgets.max_replay_years`` is spent, including the one case a claimed
+# replay-year comes back (pipelines.local_backend.BatchValidateTool).
 REPLAY_YEARS_NOTE = (
     "一个候选按其 span 覆盖的研究年份计 replay-year：一年的 span 计 1，完整研究期计研究年数；"
     "一批的花费是候选数乘年数，开跑前整批预留；`smoke_backtest` 与 `run_null_control` 不计。"
+    "回放失败的候选按失败归属结算：策略自身抛错（行内 `cause: strategy`）照样花掉，"
+    "环境失败（行内 `cause: environment`，如策略超时、共享 GPU 被别的进程占走、沙箱没起来）退还其回放年，"
+    "因为它没有测出候选的任何信息——原样重投是合理的。"
 )
 
 # What a session knows about the periods after research end: that they exist

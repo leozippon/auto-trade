@@ -28,8 +28,14 @@ from autotrade.environment.artifacts import (
     ModificationConstraints,
     readonly_baseline,
 )
+from autotrade.environment.executor import (
+    GpuMemoryContention,
+    StrategyExecutionError,
+    StrategyRaised,
+)
 from autotrade.environment.identity import AgentRefStore
-from autotrade.environment.runtime import write_json_atomic
+from autotrade.environment.replay.engine import BacktestError
+from autotrade.environment.runtime import agent_trace_path, write_json_atomic
 from autotrade.environment.sandbox import SandboxConfig
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.time_budget import InferenceTimeBudget
@@ -40,6 +46,7 @@ from autotrade.environment.tools.step_rollback import StepRollbackTool
 from autotrade.environment.tools.workspace import SafeWorkspace
 from autotrade.pipelines.config import (
     BrokerProfile,
+    BudgetUsed,
     EvaluationResult,
     ReplaySpan,
     ResearchSessionRequest,
@@ -47,7 +54,7 @@ from autotrade.pipelines.config import (
     StrategySchedule,
 )
 from autotrade.pipelines.experiment import null_control_seed
-from autotrade.pipelines.ledger import ExperimentLedger
+from autotrade.pipelines.ledger import RESEARCH_STAGE, ExperimentLedger
 from autotrade.pipelines.local_backend import (
     BATCH_REJECTION_CHARGE_AFTER,
     BATCH_REJECTION_ESCALATE_AT,
@@ -60,6 +67,7 @@ from autotrade.pipelines.local_backend import (
     batch_select_hint,
     session_budget_status,
 )
+from autotrade.pipelines.session_resume import resume_state
 
 PARENT_SOURCE = "def generate_orders(context):\n    return []\n"
 # A four-year research period, one slot per July-June year.
@@ -106,12 +114,27 @@ def _summary(total_return: float) -> dict[str, object]:
     }
 
 
+def _replay_failure(message: str, cause: Exception) -> BacktestError:
+    """What the replay engine hands back: its own error over the executor's.
+
+    ``raised_by_strategy`` reads the chain, so a test failure has to carry one
+    to be classified the way a real one is.
+    """
+
+    error = BacktestError(message)
+    error.__cause__ = cause
+    return error
+
+
 class _Evaluator:
     """Replays a revision by reading its ``main.py`` marker.
 
-    ``fail_markers`` makes one named candidate blow up the way a real replay
-    does (a per-day timeout), which is what proves one failure does not sink
-    the batch.
+    The three marker tuples make one named candidate blow up the way a real
+    replay does, one per failure the environment actually produces: a strategy
+    clock that ran out and a shared card taken by another process are the host's
+    failures, while the strategy's own exception is a measurement of the
+    strategy. Which one it is decides whether the candidate keeps its
+    replay-years; any of them proves one failure does not sink the batch.
     """
 
     def __init__(
@@ -119,10 +142,14 @@ class _Evaluator:
         results_root: Path,
         *,
         fail_markers: tuple[str, ...] = (),
+        contention_markers: tuple[str, ...] = (),
+        strategy_fail_markers: tuple[str, ...] = (),
         rendezvous: int = 0,
     ) -> None:
         self.results_root = results_root
         self.fail_markers = fail_markers
+        self.contention_markers = contention_markers
+        self.strategy_fail_markers = strategy_fail_markers
         self.calls = 0
         self.active = 0
         self.peak = 0
@@ -160,7 +187,23 @@ class _Evaluator:
                 self._barrier.wait()
             for marker in self.fail_markers:
                 if marker in source:
-                    raise TimeoutError(f"generate_orders exceeded 30s ({marker})")
+                    raise _replay_failure(
+                        f"generate_orders exceeded 30s ({marker})",
+                        StrategyExecutionError("Docker generate_orders failed: timeout"),
+                    )
+            for marker in self.contention_markers:
+                if marker in source:
+                    contention = GpuMemoryContention(
+                        "CUDA out of memory with 6195 MiB available to the "
+                        "strategy: the device was taken by another process"
+                    )
+                    raise _replay_failure(f"fit failed ({marker}): {contention}", contention)
+            for marker in self.strategy_fail_markers:
+                if marker in source:
+                    raise _replay_failure(
+                        f"generate_orders raised ({marker})",
+                        StrategyRaised("KeyError: 'close'"),
+                    )
             summary = _summary(0.01 * len(source))
             target = self.results_root / f"valid_{call_index:03d}" / "result.json"
             write_json_atomic(target, {"stats": summary})
@@ -199,12 +242,15 @@ class _Session:
         *,
         max_replay_years: int = 48,
         fail_markers: tuple[str, ...] = (),
+        contention_markers: tuple[str, ...] = (),
+        strategy_fail_markers: tuple[str, ...] = (),
         rendezvous: int = 0,
         record_failed_attempts: bool = True,
         deadline_seconds: float = 600.0,
         readonly_template: bool = False,
         trace: list[tuple[str, dict[str, object]]] | None = None,
         experiment_dir: Path | None = None,
+        budget_used: BudgetUsed | None = None,
     ) -> None:
         self.root = root
         self.trace_events = trace
@@ -248,10 +294,15 @@ class _Session:
             finalize_before_deadline_seconds=30,
             record_failed_attempts=record_failed_attempts,
             acceptance_rules={"max_drawdown": 0.25},
+            budget_used=budget_used or BudgetUsed(),
         )
         self.tree = StepTree(root / "steps")
         self.evaluator = _Evaluator(
-            root / "results", fail_markers=fail_markers, rendezvous=rendezvous
+            root / "results",
+            fail_markers=fail_markers,
+            contention_markers=contention_markers,
+            strategy_fail_markers=strategy_fail_markers,
+            rendezvous=rendezvous,
         )
         self.backtest = SessionValidations(
             request=request,
@@ -675,7 +726,7 @@ class BatchValidateRunTest(unittest.TestCase):
 
     def test_one_failing_candidate_does_not_hide_the_others(self) -> None:
         with TemporaryDirectory() as tmp:
-            session = _Session(Path(tmp), fail_markers=("999",))
+            session = _Session(Path(tmp), strategy_fail_markers=("999",))
             session.candidate("good", _strategy("1"))
             session.candidate("bad", _strategy("999"))
             session.candidate("also_good", _strategy("2"))
@@ -685,7 +736,7 @@ class BatchValidateRunTest(unittest.TestCase):
             self.assertEqual(rows["good"]["status"], "ok")
             self.assertEqual(rows["also_good"]["status"], "ok")
             self.assertEqual(rows["bad"]["status"], "failed")
-            self.assertIn("generate_orders exceeded", rows["bad"]["error"])
+            self.assertIn("generate_orders raised", rows["bad"]["error"])
             # No node, no result_ref and no Step: exactly what the tool
             # description promises a failed candidate leaves behind.
             self.assertNotIn("node_id", rows["bad"])
@@ -693,7 +744,8 @@ class BatchValidateRunTest(unittest.TestCase):
             self.assertEqual(result.value["complete_validations"], 2)
             self.assertEqual(result.value["failed"], 1)
             # A failed attempt is recorded as a dead end and never becomes a
-            # parent, but it still cost its replay-years.
+            # parent, and the strategy's own exception still cost its
+            # replay-years.
             failed = [
                 node
                 for node in session.tree.nodes()
@@ -715,7 +767,7 @@ class BatchValidateRunTest(unittest.TestCase):
 
     def test_a_wholly_failed_batch_reports_the_failure_not_a_success(self) -> None:
         with TemporaryDirectory() as tmp:
-            session = _Session(Path(tmp), fail_markers=("1", "2"))
+            session = _Session(Path(tmp), strategy_fail_markers=("1", "2"))
             session.candidate("a", _strategy("1"))
             session.candidate("b", _strategy("2"))
             with self.assertRaises(ToolError) as caught:
@@ -724,9 +776,143 @@ class BatchValidateRunTest(unittest.TestCase):
             self.assertIn("all 2 candidates failed", str(error))
             rows = error.details["candidates"]
             self.assertEqual([row["status"] for row in rows], ["failed", "failed"])
-            # Honest accounting: the replays ran, so the replay-years are gone.
+            # Honest accounting: both strategies raised, so the replays measured
+            # them and the replay-years are gone. The counters ride back on the
+            # refusal, which is the only place this batch reports them.
             self.assertEqual(session.backtest.replay_years_used, 8)
+            self.assertEqual(error.details["replay_years_used"], 8)
+            self.assertEqual(error.details["replay_years_remaining"], 40)
             self.assertEqual(session.backtest.steps, [])
+
+    def test_an_environment_failure_gives_its_replay_years_back(self) -> None:
+        """A shared card taken by another process measured nothing."""
+
+        with TemporaryDirectory() as tmp:
+            session = _Session(Path(tmp), contention_markers=("999",))
+            session.candidate("gpu", _strategy("999"))
+            with self.assertRaises(ToolError) as caught:
+                session.call("gpu", span="Y2")
+            error = caught.exception
+            self.assertIn("1 failed on the environment", str(error))
+            row = error.details["candidates"][0]
+            self.assertEqual(row["cause"], "environment")
+            self.assertIn("taken by another process", row["error"])
+            self.assertEqual(session.backtest.replay_years_used, 0)
+            self.assertEqual(error.details["replay_years_used"], 0)
+            # The result name it spent is not reused: the dead end keeps it.
+            self.assertEqual(row["result_name"], "valid_001")
+            session.candidate("retry", _strategy("1"))
+            retried = session.call("retry", span="Y2")
+            self.assertTrue(retried.ok)
+            self.assertEqual(
+                retried.value["candidates"][0]["result_name"], "valid_002"
+            )
+            self.assertEqual(session.backtest.replay_years_used, 1)
+
+    def test_a_timeout_gives_its_replay_years_back(self) -> None:
+        with TemporaryDirectory() as tmp:
+            session = _Session(Path(tmp), fail_markers=("999",))
+            session.candidate("slow", _strategy("999"))
+            with self.assertRaises(ToolError):
+                session.call("slow", span="Y1")
+            self.assertEqual(session.backtest.replay_years_used, 0)
+
+    def test_a_mixed_batch_charges_only_what_it_measured(self) -> None:
+        """One completed, one strategy exception, one environment failure."""
+
+        with TemporaryDirectory() as tmp:
+            session = _Session(
+                Path(tmp),
+                strategy_fail_markers=("777",),
+                contention_markers=("999",),
+            )
+            session.candidate("good", _strategy("1"))
+            session.candidate("raised", _strategy("777"))
+            session.candidate("contended", _strategy("999"))
+            result = session.call("good", "raised", "contended")
+            self.assertTrue(result.ok)
+            rows = {row["name"]: row for row in result.value["candidates"]}
+            self.assertEqual(rows["good"]["status"], "ok")
+            self.assertNotIn("cause", rows["good"])
+            self.assertEqual(rows["raised"]["cause"], "strategy")
+            self.assertEqual(rows["contended"]["cause"], "environment")
+            # Reserved 12 for three full-span candidates, 4 refunded.
+            self.assertEqual(result.value["replay_years_used"], 8)
+            self.assertEqual(result.value["replay_years_remaining"], 40)
+            self.assertEqual(session.backtest.replay_years_used, 8)
+            # Both dead ends are still recorded, each carrying what it was.
+            dead_ends = {
+                node["metadata"]["candidate"]: node["metadata"]["cause"]
+                for node in session.tree.nodes()
+                if node.get("status") == "failed"
+            }
+            self.assertEqual(
+                dead_ends, {"raised": "strategy", "contended": "environment"}
+            )
+
+    def test_a_resumed_attempt_starts_from_the_refunded_counter(self) -> None:
+        """The refund is settled before the call returns, so the budget block
+        the trace writes for it already carries it, and the next attempt of an
+        interrupted session seeds from that block rather than from the reservation."""
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            experiment = root / "experiment_dir"
+            session = _Session(
+                root,
+                contention_markers=("999",),
+                strategy_fail_markers=("777",),
+            )
+            session.candidate("raised", _strategy("777"))
+            session.candidate("contended", _strategy("999"))
+            with self.assertRaises(ToolError):
+                session.call("raised", "contended", span="Y1..Y2")
+            # 4 reserved, the contended one's 2 given back.
+            self.assertEqual(session.backtest.replay_years_used, 2)
+            # What the attempt's trace carries: the cumulative block rides on
+            # the tool_call event, emitted after the tool settled.
+            trace = agent_trace_path(experiment / "artifacts", "run_batch")
+            trace.parent.mkdir(parents=True, exist_ok=True)
+            trace.write_text(
+                "".join(
+                    json.dumps(event) + "\n"
+                    for event in (
+                        {
+                            "event_type": "llm_call",
+                            "ts": "2026-09-15T01:00:00+00:00",
+                            "budget_used": BudgetUsed(
+                                llm_calls=1, replay_years=0
+                            ).to_record(),
+                        },
+                        {
+                            "event_type": "tool_call",
+                            "ts": "2026-09-15T01:40:00+00:00",
+                            "tool": "batch_validate",
+                            "budget_used": BudgetUsed(
+                                llm_calls=1,
+                                replay_years=session.backtest.replay_years_used,
+                            ).to_record(),
+                        },
+                    )
+                ),
+                encoding="utf-8",
+            )
+            resume = resume_state(
+                experiment,
+                [
+                    {
+                        "record_type": "attempt_failed",
+                        "phase": RESEARCH_STAGE,
+                        "run_id": "run_batch",
+                        "error": "RuntimeError: session container died",
+                    }
+                ],
+            )
+            assert resume is not None
+            self.assertEqual(resume.budget_used.replay_years, 2)
+            resumed = _Session(root / "next", budget_used=resume.budget_used)
+            self.assertEqual(resumed.backtest.replay_years_used, 2)
+            self.assertEqual(resumed.backtest.replay_years_remaining, 46)
 
     def test_each_row_carries_the_sub_window_table_and_a_readable_result_ref(
         self,

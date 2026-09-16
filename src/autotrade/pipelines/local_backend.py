@@ -32,7 +32,7 @@ from autotrade.environment.artifacts import (
     restore_working_artifacts_writable,
 )
 from autotrade.environment.data.summary import HOST_PATH_RE, write_agent_data_summary
-from autotrade.environment.executor import PersistentCommandRunner
+from autotrade.environment.executor import PersistentCommandRunner, raised_by_strategy
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm.model_profiles import AGENT_MAX_OUTPUT_TOKENS
 from autotrade.environment.replay.stats import (
@@ -1115,9 +1115,20 @@ class SessionValidations:
         self.candidates_started += count
         return names
 
+    def refund(self, count: int, span: ReplaySpan) -> None:
+        """Give back the replay-years of ``count`` candidates that measured nothing.
+
+        A replay-year buys evidence about a strategy. A replay that ended in an
+        environment failure -- a timeout, a shared card taken by another
+        process, a sandbox that never started -- produced none, so the budget it
+        claimed goes back. The result names it already spent stay spent: the
+        attempt is still recorded, and a name is never reused.
+        """
+        self.replay_years_used = max(0, self.replay_years_used - count * span.slots)
+
     def release(self, count: int, span: ReplaySpan) -> None:
         """Refund candidates whose snapshot never held (no replay ran)."""
-        self.replay_years_used = max(0, self.replay_years_used - count * span.slots)
+        self.refund(count, span)
         self.candidates_started = max(0, self.candidates_started - count)
 
     def charge_replay_year(self) -> bool:
@@ -1182,6 +1193,17 @@ _BATCH_WORKING_COPY = "output"
 # loop is bounded by the session's replay budget instead of by nothing.
 BATCH_REJECTION_ESCALATE_AT = 3
 BATCH_REJECTION_CHARGE_AFTER = 6
+# What a failed candidate's replay measured, which decides whether its
+# replay-years bought anything. ``StrategyRaised`` (``environment.executor``,
+# read off the whole cause chain by ``raised_by_strategy``) is the strategy's
+# own exception: the replay measured the strategy -- it cannot run on this data
+# -- and the charge stands. Every other failure measured the host: a strategy
+# clock that ran out, a shared card another process took, a sandbox that never
+# started or broke protocol. That produced no evidence about the candidate, so
+# the batch gives its replay-years back instead of charging research budget for
+# the environment's own trouble.
+BATCH_FAILURE_STRATEGY = "strategy"
+BATCH_FAILURE_ENVIRONMENT = "environment"
 # The per-candidate projection an observation carries: a batch multiplies the
 # fixed-size summary by N, so a row keeps what a screening decision is actually
 # made on and points at the node's full record for everything else.
@@ -1327,9 +1349,15 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "replay-year per candidate per year of the span, reserved before anything "
         "runs; a candidate whose replay completes becomes its own immutable "
         "revision and Step node under the CURRENT node as shared parent, recorded "
-        "with its span. A candidate whose replay fails keeps its cost, has no "
-        "result_ref and, while record_failed_attempts is on, is recorded as a "
-        "dead-end node, so later sessions see what was already tried. The returned "
+        "with its span. A candidate whose replay fails has no result_ref and, while "
+        "record_failed_attempts is on, is recorded as a dead-end node, so later "
+        "sessions see what was already tried; its row says which kind of failure it "
+        "was: cause strategy means your own code raised, so the replay measured the "
+        "strategy and keeps its replay-years, while cause environment means the host "
+        "failed it (a strategy clock that ran out, a shared GPU taken by another "
+        "process, a sandbox that never started or broke protocol), which measured "
+        "nothing and gets its replay-years back, so resubmitting that candidate "
+        "unchanged is a reasonable move. The returned "
         "replay_years_used/replay_years_remaining are the authoritative counters. "
         "The whole batch is refused before anything runs if the span is not one of "
         "the research years, if it does not fit the budget, if two candidates are "
@@ -1345,8 +1373,8 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "neutralized excess/Sharpe of sub_windows, the provisional "
         "selection_statistics (the freeze gate as it would read this node now, "
         "which the freeze recomputes), and wall seconds; a failed candidate's row "
-        "carries its exact failure text instead — one failure never hides the "
-        "others. Each completed row's result_ref reads back that candidate's full "
+        "carries its cause and its exact failure text instead — one failure never "
+        "hides the others. Each completed row's result_ref reads back that candidate's full "
         "replay record. Selection stays yours: finish_session nominates a row as it "
         "is, and step_rollback(node_id) restores one as the working copy to build "
         "on.",
@@ -1514,16 +1542,33 @@ class BatchValidateTool(SessionTimeBudgetAware):
             # the Agent moves it deliberately with step_rollback once it picks
             # a winner.
             self.backtest.tree.set_position(parent_node_id)
+        # The one place the batch settles its reservation. Every candidate was
+        # charged before anything ran; those whose replay measured the host and
+        # not the strategy bought no evidence, so their claim goes back here,
+        # before this call's result and its budget block reach the trace.
+        refunded = sum(
+            1 for row in rows if row.get("cause") == BATCH_FAILURE_ENVIRONMENT
+        )
+        if refunded:
+            self.backtest.refund(refunded, span)
         # Every row of the round deflates against the same trial pool: the
         # whole batch is complete by the time the table is returned.
         for row, step in recorded:
             row["selection_statistics"] = self.backtest.selection_statistics(step)
         if not recorded:
+            charged = len(rows) - refunded
             raise ToolError(
                 f"batch_validate: all {len(rows)} candidates failed their "
-                "Validation; each still consumed its replay-years",
+                f"Validation; {charged} of them raised in their own code and "
+                f"kept the replay-years, {refunded} failed on the environment "
+                "and got them back",
                 error_type="validation_failed",
-                details={"batch_id": batch_id, "candidates": rows},
+                details={
+                    "batch_id": batch_id,
+                    "candidates": rows,
+                    "replay_years_used": self.backtest.replay_years_used,
+                    "replay_years_remaining": self.backtest.replay_years_remaining,
+                },
             )
         return ToolResult(
             True,
@@ -1928,8 +1973,13 @@ class BatchValidateTool(SessionTimeBudgetAware):
         batch_id: str,
         span: ReplaySpan,
     ) -> dict[str, object]:
-        public_error = _public_validation_error(
-            error if error is not None else RuntimeError("unknown replay failure")
+        if error is None:
+            error = RuntimeError("unknown replay failure")
+        public_error = _public_validation_error(error)
+        cause = (
+            BATCH_FAILURE_STRATEGY
+            if raised_by_strategy(error)
+            else BATCH_FAILURE_ENVIRONMENT
         )
         request = self.backtest.request
         metadata = {
@@ -1938,6 +1988,9 @@ class BatchValidateTool(SessionTimeBudgetAware):
             "hypothesis": candidate.hypothesis,
             "source_path": candidate.path,
             "span": span.label,
+            # A later session reading this dead end needs to know whether the
+            # hypothesis was falsified or the host simply got in the way.
+            "cause": cause,
         }
         if request.record_failed_attempts:
             # record_failed_attempt leaves the tree position alone by design,
@@ -1959,11 +2012,14 @@ class BatchValidateTool(SessionTimeBudgetAware):
                 "mode": "valid",
                 "status": "failed",
                 "complete_validation": False,
-                **{key: metadata[key] for key in ("batch_id", "candidate", "hypothesis", "span")},
+                **{
+                    key: metadata[key]
+                    for key in ("batch_id", "candidate", "hypothesis", "span", "cause")
+                },
                 "error": public_error,
             }
         )
-        return {"status": "failed", "error": public_error}
+        return {"status": "failed", "cause": cause, "error": public_error}
 
 
 def batch_select_hint(
