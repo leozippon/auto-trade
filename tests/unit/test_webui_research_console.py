@@ -406,6 +406,25 @@ def test_a_running_arm_is_never_the_best_experiment(tmp_path: Path) -> None:
     assert "if (best)" in home and "heroPanel(best)" in home
 
 
+def test_the_card_and_the_research_panel_name_the_same_four_figures() -> None:
+    """One vocabulary for the arm's evidence: the experiment card and the
+    research session panel draw the same four tiles, in the same order, with
+    the gate threshold and the deflation denominator explained once."""
+
+    script = (
+        Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
+    ).read_text(encoding="utf-8")
+    labels = ("中性化超额", "IR", "去偏 Sharpe 概率", "累计试验")
+    for opening in ("function evidenceTiles(", "function researchSessionPanel("):
+        body = script.split(opening, 1)[1].split("\nfunction ", 1)[0]
+        found = [label for label in labels if f'label: "{label}"' in body or f'"最佳候选{label}"' in body]
+        assert found == list(labels), opening
+        assert "DSR_GATE_TITLE" in body and "TRIALS_TITLE" in body, opening
+    # The gate's own criteria keep their measured values in the checklist.
+    assert 'const DSR_GATE_TITLE = "冻结门要求 ≥ 0.5";' in script
+    assert "全区间验证次数" in script.split("const REASON_LABELS", 1)[1]
+
+
 def test_the_listing_carries_the_freeze_and_the_best_candidate_so_far(
     tmp_path: Path,
 ) -> None:
@@ -424,13 +443,12 @@ def test_the_listing_carries_the_freeze_and_the_best_candidate_so_far(
     best = rows["frozen"]["research_best"]
     assert best["session_key"] == "research"
     session_best = experiment_detail(tmp_path, "frozen")["sessions"][0]["record"]["best"]
-    # The card's four evidence tiles, the last one a pair: a measurable
-    # candidate carries every figure, so the card never draws a partial row.
+    # The card's four evidence tiles: a measurable candidate carries every
+    # figure, so the card never draws a partial row.
     evidence = (
         "neutralized_excess",
         "information_ratio",
         "deflated_sharpe_probability",
-        "full_span_validations",
         "trials",
     )
     for field in ("step_id", *evidence):

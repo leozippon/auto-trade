@@ -453,12 +453,12 @@ def _best_candidate(
     earlier: Sequence[Mapping[str, object]], steps: Sequence[Mapping[str, object]]
 ) -> dict[str, object] | None:
     """The session's full-span Validation with the highest neutralised IR, and
-    the freeze gate's counts and deflated Sharpe probability for it.
+    the deflated Sharpe probability the freeze gate would give it, with the
+    trials it was deflated against.
 
-    The gate figures come from the pipeline's own gate over the arm as it stood
-    when the session ended (``experiment.freeze_gate_for``), so they are the
-    numbers a nomination of this node would have been judged on: the arm's
-    full-span validations and the revisions validated in it. ``None`` when the
+    Both come from the pipeline's own gate over the arm as it stood when the
+    session ended (``experiment.freeze_gate_for``), so they are the numbers a
+    nomination of this node would have been judged on. ``None`` when the
     session ran no measurable full-span Validation.
     """
 
@@ -480,7 +480,6 @@ def _best_candidate(
         **_step_view(best),
         "result": _result_name(best.get("validation_result_ref")),
         "deflated_sharpe_probability": _number(dsr.get("deflated_sharpe_probability")),
-        "full_span_validations": gate.get("full_span_validations"),
         "trials": dsr.get("trials"),
     }
 

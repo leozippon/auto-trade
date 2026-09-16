@@ -52,6 +52,12 @@ const REASON_LABELS = {
   heldout_max_drawdown_exceeded: "Held-out 回撤",
   heldout_exposure_below_floor: "Held-out 平均仓位",
 };
+// The two evidence tiles a reader needs a sentence for, worded once so the
+// experiment card and the research session panel say the same thing. The
+// measured values and the "全区间验证次数 ≥ 2" criterion stay in the freeze
+// gate checklist, which draws them from the record.
+const DSR_GATE_TITLE = "冻结门要求 ≥ 0.5";
+const TRIALS_TITLE = "去偏 Sharpe 概率据以折减的试验数：本臂验证过的不同策略版本";
 
 function reasonLabel(reason) {
   return REASON_LABELS[reason] || String(reason);
@@ -1763,19 +1769,12 @@ function evidenceTiles(item) {
     },
     { label: "IR", value: best.information_ratio, fmt: fmtSharpe, signed: true },
     {
-      label: "冻结门 去偏 Sharpe 概率",
+      label: "去偏 Sharpe 概率",
       value: best.deflated_sharpe_probability,
       fmt: fmtSharpe,
+      title: DSR_GATE_TITLE,
     },
-    // The gate's own two counts, so the card reads the candidate's evidence the
-    // way the research session panel does: how many full-span validations it
-    // was chosen out of, against every revision the arm has validated.
-    {
-      label: "验证 / 累计试验",
-      value: best.full_span_validations,
-      fmt: (count) => `${count} / ${best.trials}`,
-      title: "冻结门口径：全臂全区间验证次数 / 已验证的策略版本数",
-    },
+    { label: "累计试验", value: best.trials, fmt: String, title: TRIALS_TITLE },
   ]);
   return tiles.length ? statTilesRow(tiles) : null;
 }
@@ -3249,8 +3248,8 @@ function researchSessionPanel(detail, session) {
         ? el("span", { class: "badge kind", title: "失败后原地续跑的尝试数" }, `${attempts} 次尝试`)
         : null,
     ),
-    statTilesRow([
-      ...presentTiles([
+    statTilesRow(
+      presentTiles([
         {
           label: "最佳候选中性化超额",
           value: best.neutralized_excess,
@@ -3259,13 +3258,22 @@ function researchSessionPanel(detail, session) {
           title: "本会话 IR 最高的全区间验证，研究期年化",
         },
         { label: "IR", value: best.information_ratio, fmt: fmtSharpe, signed: true },
-        { label: "去偏 Sharpe 概率", value: best.deflated_sharpe_probability, fmt: fmtSharpe },
+        {
+          label: "去偏 Sharpe 概率",
+          value: best.deflated_sharpe_probability,
+          fmt: fmtSharpe,
+          title: DSR_GATE_TITLE,
+        },
+        {
+          label: "累计试验",
+          // Without a measurable candidate no gate ran over one, so the
+          // session record's own count answers in its place.
+          value: best.trials ?? record.trials_to_date,
+          fmt: String,
+          title: TRIALS_TITLE,
+        },
       ]),
-      {
-        label: "验证 / 累计试验",
-        value: `${record.validations.length} / ${record.trials_to_date}`,
-      },
-    ]),
+    ),
     gate
       ? el(
           "div",
