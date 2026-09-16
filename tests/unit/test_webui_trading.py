@@ -657,6 +657,18 @@ def test_degraded_states_raise_a_banner_and_skipped_lines_raise_a_chip():
     assert "无法映射" in script
 
 
+def test_a_book_card_carries_a_writer_error_only_in_its_badge_tooltip():
+    """The overview lists books, so a card answers with its state badge and
+    keeps the reason in that badge's tooltip. The message itself belongs on the
+    book's own page, where the banner prints it whole."""
+
+    script = _app_js()
+    card = _js_top_level(script, "function bookCard(")
+    assert "tradingBadge(row.state, row.error)" in card
+    assert "row.error" not in card.replace("tradingBadge(row.state, row.error)", "")
+    assert "title: error || null" in _js_top_level(script, "function tradingBadge(")
+
+
 def _js_top_level(script: str, opening: str) -> str:
     """One top-level declaration of app.js, up to the next one."""
     start = script.index(opening)

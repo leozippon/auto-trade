@@ -6527,12 +6527,15 @@ function paperBanners(status) {
   return [];
 }
 
-function tradingBadge(state) {
+/* The state as one badge. On a card the reason rides in its tooltip: an
+   overview lists books, and a writer's error message belongs on the book's own
+   page, where paperBanners prints it whole. */
+function tradingBadge(state, error = null) {
   const [badgeState, label] = TRADING_STATE[state] || [
     "unknown",
     state || "未知",
   ];
-  return el("span", { class: `badge state-${badgeState}` }, label);
+  return el("span", { class: `badge state-${badgeState}`, title: error || null }, label);
 }
 
 function fmtAmountOpt(value) {
@@ -6672,7 +6675,7 @@ function bookCard(row) {
       "h3",
       {},
       el("a", { class: "exp-name", href, title: row.book_id }, row.book_id),
-      experimentBadges(tradingBadge(row.state)),
+      experimentBadges(tradingBadge(row.state, row.error)),
     ),
     el(
       "div",
@@ -6687,7 +6690,6 @@ function bookCard(row) {
       ]
         .filter(Boolean)
         .join(" · "),
-      row.error ? ` ｜ ${row.error}` : "",
     ),
   );
   if (tiles.length) card.append(statTilesRow(tiles));
