@@ -8,6 +8,7 @@ behind.
 
 from __future__ import annotations
 
+import json
 import stat
 from pathlib import Path
 
@@ -36,6 +37,13 @@ def _working_artifact(root: Path, *, strategy: str = STRATEGY) -> tuple[Path, Pa
     (output / "lib" / "features.py").write_text(HELPER, encoding="utf-8")
     (models / "weights.npy").write_bytes(b"\x93NUMPY parameters")
     return output, models
+
+
+def _manifest(store: FilesystemArtifactStore, revision_id: str) -> dict:
+    """The manifest the store wrote beside the revision; there is no read API."""
+
+    path = store.revisions_root / revision_id / REVISION_MANIFEST_FILE
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def test_two_revisions_sharing_a_file_store_its_bytes_once(tmp_path: Path):
@@ -86,11 +94,10 @@ def test_a_revision_manifest_records_its_parent_and_every_file_digest(tmp_path: 
         parent_revision_id=parent.revision_id,
     )
 
-    manifest = store.revision_manifest(child.revision_id)
+    manifest = _manifest(store, child.revision_id)
     assert manifest["parent_revision_id"] == "revision_parent"
     assert manifest["fingerprint"] == child.fingerprint == artifact_fingerprint(output, models)
     assert manifest["created_at"]
-    assert manifest["layout"] == "objects"
     assert [entry["path"] for entry in manifest["files"]] == [
         "output/README.md",
         "output/lib/features.py",
@@ -105,7 +112,7 @@ def test_a_revision_manifest_records_its_parent_and_every_file_digest(tmp_path: 
         ).stat().st_ino
         assert entry["size"] == object_path.stat().st_size
 
-    assert store.revision_manifest(parent.revision_id)["parent_revision_id"] is None
+    assert _manifest(store, parent.revision_id)["parent_revision_id"] is None
     assert store.revision_ids() == ["revision_child", "revision_parent"]
 
 
@@ -195,8 +202,9 @@ def test_discarding_a_revision_leaves_the_bytes_it_shared_read_only(tmp_path: Pa
 
 def test_a_revision_written_before_the_object_store_stays_readable(tmp_path: Path):
     """The arms that were running when the store changed left plain copied
-    revision directories behind. They keep their bytes and their digests; what
-    they cannot have is a lineage that was never recorded."""
+    revision directories behind. They have no manifest and therefore no
+    recorded lineage, but they are still the arm's history: listed with the
+    rest and holding their own bytes."""
 
     output, models = _working_artifact(tmp_path / "work")
     store = FilesystemArtifactStore(tmp_path / "store")
@@ -208,22 +216,13 @@ def test_a_revision_written_before_the_object_store_stays_readable(tmp_path: Pat
     store.create_revision(output, models_path=models, revision_id="revision_modern")
 
     assert not (legacy / REVISION_MANIFEST_FILE).exists()
-    manifest = store.revision_manifest("revision_legacy")
-    assert manifest["layout"] == "legacy"
-    assert manifest["parent_revision_id"] is None and manifest["created_at"] is None
-    assert [entry["path"] for entry in manifest["files"]] == [
-        "output/README.md",
-        "output/lib/features.py",
-        "output/main.py",
-        "models/weights.npy",
-    ]
     assert store.revision_ids() == ["revision_legacy", "revision_modern"]
-    assert store.revision("revision_legacy").output_path.joinpath("main.py").read_text(
-        encoding="utf-8"
-    ) == STRATEGY
+    record = store.revision("revision_legacy")
+    assert record.output_path.joinpath("main.py").read_text(encoding="utf-8") == STRATEGY
+    assert record.models_path == legacy / "models"
 
 
 def test_an_unknown_revision_is_named_rather_than_guessed(tmp_path: Path):
     store = FilesystemArtifactStore(tmp_path / "store")
     with pytest.raises(KeyError, match="unknown artifact revision"):
-        store.revision_manifest("revision_missing")
+        store.revision("revision_missing")

@@ -14,7 +14,10 @@ from pathlib import Path
 
 import pytest
 
-from autotrade.environment.artifacts import FilesystemArtifactStore
+from autotrade.environment.artifacts import (
+    REVISION_MANIFEST_FILE,
+    FilesystemArtifactStore,
+)
 from autotrade.environment.runtime import append_versioned_jsonl
 from autotrade.pipelines import experiment as experiment_module
 from autotrade.pipelines import worker
@@ -570,7 +573,12 @@ def test_an_interrupted_llm_session_resumes_with_its_summary_budget_and_nodes(
     assert sorted(path.name for path in (experiment / "artifacts" / "transcripts").glob("run_ref_*.txt")) != [transcripts[0].name]
     store = FilesystemArtifactStore(experiment / "artifacts" / "strategy")
     manifests = sorted(
-        (store.revision_manifest(revision_id) for revision_id in store.revision_ids()),
+        (
+            json.loads(
+                (store.revisions_root / revision_id / REVISION_MANIFEST_FILE).read_text(encoding="utf-8")
+            )
+            for revision_id in store.revision_ids()
+        ),
         key=lambda manifest: str(manifest["created_at"]),
     )
     assert [manifest["parent_revision_id"] for manifest in manifests] == [

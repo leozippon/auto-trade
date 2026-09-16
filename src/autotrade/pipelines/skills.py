@@ -12,7 +12,6 @@ and only the writable ``skills/`` tree is ever published as a generation.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -500,27 +499,6 @@ def operating_memory_snapshot_path(experiment_dir: str | Path) -> Path:
     return Path(experiment_dir) / "artifacts" / OPERATING_MEMORY_SNAPSHOT_NAME
 
 
-def _tree_digest(root: Path) -> str:
-    """Content hash of one tree: every file's relative path and bytes, in order.
-
-    Cheap here by construction — the curated library is bounded by the same
-    ``MAX_SKILLS_BYTES`` every skills tree is — and it is what lets a reader see
-    whether a snapshot predates a library change.
-    """
-
-    digest = hashlib.sha256()
-    if not root.is_dir():
-        return ""
-    for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
-        if not path.is_file():
-            continue
-        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(path.read_bytes())
-        digest.update(b"\0")
-    return digest.hexdigest()
-
-
 def _resolve_memory_sources(
     *,
     mode: str,
@@ -605,9 +583,6 @@ def create_operating_memory_snapshot(
         "mode": resolved,
         "created_at": utc_now_iso(),
         "created_from": created_from,
-        "curated_digest": _tree_digest(Path(repo_root) / OPERATING_MEMORY_LIBRARY)
-        if repo_root is not None
-        else "",
         "entries": [
             {"origin": source.origin, "source": source.source, "name": name}
             for source in sources

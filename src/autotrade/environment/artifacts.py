@@ -230,39 +230,6 @@ class FilesystemArtifactStore:
             if (directory / "output").is_dir()
         )
 
-    def revision_manifest(self, revision_id: str) -> dict[str, object]:
-        """One revision's lineage, creation time and per-file digests.
-
-        A revision written before the store was content-addressed has no
-        manifest on disk; it is rebuilt from that revision's materialised tree
-        on read and marked ``legacy`` (no parent, no creation time), so an
-        arm's earlier history stays readable without rewriting it.
-        """
-
-        directory = self._id_path(self.revisions_root, revision_id)
-        if not (directory / "output").is_dir():
-            raise KeyError(f"unknown artifact revision: {revision_id}")
-        path = directory / REVISION_MANIFEST_FILE
-        if path.is_file():
-            return {**json.loads(path.read_text(encoding="utf-8")), "layout": "objects"}
-        return {
-            "revision_id": revision_id,
-            "parent_revision_id": None,
-            "created_at": None,
-            "fingerprint": artifact_fingerprint(
-                directory / "output", directory / "models"
-            ),
-            "files": [
-                {
-                    "path": relpath,
-                    "sha256": _file_digest(directory / relpath),
-                    "size": (directory / relpath).stat().st_size,
-                }
-                for relpath in _revision_relpaths(directory)
-            ],
-            "layout": "legacy",
-        }
-
     def _intern(self, directory: Path) -> list[dict[str, object]]:
         """Store the revision's files by content hash and link the tree to them.
 

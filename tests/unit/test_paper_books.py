@@ -1,4 +1,4 @@
-"""Several Paper books under one state root: listing and the book-by-book run."""
+"""Paper books under one state root: creation, listing and the book-by-book run."""
 
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from autotrade.environment.artifacts import artifact_fingerprint
+from autotrade.paper.book import STRATEGY_COPY_NAME, create_book
 from autotrade.paper.books import (
     list_books,
     run_books,
@@ -21,6 +23,7 @@ from tests.unit.paper_book_fixture import (
     run_days,
     write_book_record,
 )
+from tests.unit.webui_research_arm import build_arm
 
 
 def _decided(root: Path) -> list[str]:
@@ -52,6 +55,29 @@ def test_one_failing_or_busy_book_does_not_stop_the_others(tmp_path: Path):
     assert isinstance(failures["busy"], PaperWriterBusy)
     assert _decided(root / "alpha") == _decided(root / "gamma") == ["20260105"]
     assert not (root / "busy" / ".paper_state.json").exists()
+
+
+def test_a_new_book_records_the_content_address_of_the_artifact_it_trades(tmp_path: Path):
+    """Creation copies the graduated artifact into the book and records what it
+    copied. The recorded fingerprint is the one content address the pipeline
+    uses for a strategy artifact, over the book's own copy, so the bytes the
+    book trades are named exactly as research named the artifact it approved."""
+
+    arm = build_arm(tmp_path / "experiments", "exp", "graduated")
+    book = create_book(
+        paper_root(tmp_path) / "exp",
+        experiment_dir=arm,
+        artifact_id="strategy_research_abc",
+        repo_root=tmp_path,
+        note="参考簿（观察中）",
+    )
+    record = json.loads((book.root / "book.json").read_text(encoding="utf-8"))
+    copy = book.root / STRATEGY_COPY_NAME
+    source = arm / "artifacts/strategy/frozen/strategy_research_abc"
+    assert book.strategy_path == copy / "output" / "main.py"
+    assert book.models_dir is None
+    assert record["artifact_fingerprint"] == artifact_fingerprint(copy / "output")
+    assert record["artifact_fingerprint"] == artifact_fingerprint(source / "output")
 
 
 def test_book_ids_are_single_path_segments():

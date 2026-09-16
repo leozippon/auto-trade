@@ -454,7 +454,7 @@ def test_two_sessions_mount_the_same_entries_after_the_library_changes(
     )
     assert record["created_from"] == "creation"
     assert [entry["name"] for entry in record["entries"]] == ["pit-read-budget"]
-    assert record["curated_digest"] and record["snapshot_id"]
+    assert record["snapshot_id"]
 
     first = tmp_path / "first"
     first.mkdir()

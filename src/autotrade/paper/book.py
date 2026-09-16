@@ -14,13 +14,12 @@ state root.
 
 from __future__ import annotations
 
-import hashlib
-import json
 import shutil
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
+from autotrade.environment.artifacts import artifact_fingerprint
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.nl import NLConfig
@@ -135,9 +134,7 @@ def create_book(
     if (source / "models").is_dir():
         shutil.copytree(source / "models", copy / "models")
         models = copy / "models"
-    fingerprint = _tree_fingerprint(source, ("output", "models"))
-    if _tree_fingerprint(copy, ("output", "models")) != fingerprint:
-        raise RuntimeError(f"artifact copy differs from its source: {source}")
+    fingerprint = artifact_fingerprint(copy / "output", models)
     validate_strategy_package(copy / "output" / "main.py")
     record = {
         "schema_version": BOOK_SCHEMA_VERSION,
@@ -280,18 +277,6 @@ def _tuples(record: dict[str, object]) -> dict[str, object]:
     """JSON arrays back to the tuples the frozen dataclasses hold."""
 
     return {key: tuple(value) if isinstance(value, list) else value for key, value in record.items()}
-
-
-def _tree_fingerprint(root: Path, names: tuple[str, ...]) -> str:
-    digest = hashlib.sha256()
-    for name in names:
-        base = root / name
-        if not base.is_dir():
-            continue
-        for path in sorted(item for item in base.rglob("*") if item.is_file()):
-            digest.update(json.dumps(str(path.relative_to(root))).encode())
-            digest.update(hashlib.sha256(path.read_bytes()).digest())
-    return digest.hexdigest()
 
 
 __all__ = [
