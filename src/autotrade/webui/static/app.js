@@ -6693,9 +6693,11 @@ function redrawTrading(payload, build) {
   $main.replaceChildren(build());
 }
 
-/* One card per book, in the research home's language: what the book trades,
-   the figures its own panels measured and its curve once two days settled.
-   A figure the book has not measured has no tile. */
+/* One card per book, in the research home's language: its name and state, the
+   figures its own panels measured and its curve once two days settled. A
+   figure the book has not measured has no tile, and the book's frozen identity
+   — candidate, artifact, start, initial cash — belongs to the page head that
+   spells it out in full. */
 function bookCard(row) {
   const href = bookHash(tradingView.env, row.book_id);
   const card = el("div", {
@@ -6739,20 +6741,6 @@ function bookCard(row) {
       {},
       el("a", { class: "exp-name", href, title: row.book_id }, row.book_id),
       experimentBadges(tradingBadge(row.state, row.error)),
-    ),
-    el(
-      "div",
-      { class: "meta-line" },
-      [
-        candidateSourceLabel(row.candidate_source),
-        row.artifact_id,
-        row.start_date ? `${fmtDate(row.start_date)} 起` : null,
-        row.initial_cash === null || row.initial_cash === undefined
-          ? null
-          : `初始资金 ${fmtAmount(row.initial_cash)}`,
-      ]
-        .filter(Boolean)
-        .join(" · "),
     ),
   );
   if (tiles.length) card.append(statTilesRow(tiles));

@@ -114,8 +114,11 @@ def test_the_signal_is_the_latest_order_sheet_and_history_keeps_every_earlier_da
     assert signal["cash_after"] == 100_000.0 - 1050.0
     assert target["weight"] + signal["cash_weight"] == pytest.approx(1.0)
     assert set(signal["orders"][0]) == {
-        "execute_at", "symbol", "name", "action", "quantity", "reference_price", "notional",
+        "execute_at", "window", "symbol", "name", "action", "quantity", "reference_price", "notional",
     }
+    # The fixture's orders fill at the open, so the operator declares them in
+    # the opening call auction.
+    assert signal["orders"][0]["window"] == "open_auction"
     # The strategy's own order metadata ("call") is writer content, never served.
     assert '"call"' not in json.dumps(signal)
     assert trading.history_payload(tmp_path, BOOK) == {"env": "paper", "state": "absent", "error": None, "days": []}
@@ -613,6 +616,36 @@ def test_environment_state_precedence_puts_the_worst_reader_first(tmp_path: Path
     assert trading.book_status(tmp_path, BOOK)["state"] == "unreadable"
 
 
+def test_the_status_says_whether_the_session_ahead_has_its_order_sheet(tmp_path: Path):
+    """The operator has to place the sheet's orders before the 09:25 auction
+    closes, so the page asks one question: does a decision for the current
+    Asia/Shanghai session exist, and when was it written. No deadline is
+    encoded — a book whose latest decision is an older session simply is not
+    ready."""
+    root = engine_book(tmp_path, "20260105")
+    earlier = trading.book_status(tmp_path, BOOK)["today"]
+    assert (earlier["trade_date"], earlier["ready"]) == ("20260105", False)
+    assert earlier["decided_at"].endswith("Z")
+
+    state = json.loads((root / ".paper_state.json").read_text(encoding="utf-8"))
+    state["decisions"][-1]["trade_date"] = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d")
+    (root / ".paper_state.json").write_text(json.dumps(state), encoding="utf-8")
+    current = trading.book_status(tmp_path, BOOK)["today"]
+    assert current["ready"] is True and current["decided_at"] == earlier["decided_at"]
+    # The overview card reads the same block, computed once.
+    assert trading.books_payload(tmp_path)["books"][0]["today"] == current
+
+    # A decision the engine took before it stamped one, and a book that has
+    # never run, both project instead of failing.
+    del state["decisions"][-1]["decided_at"]
+    (root / ".paper_state.json").write_text(json.dumps(state), encoding="utf-8")
+    assert trading.book_status(tmp_path, BOOK)["today"]["decided_at"] is None
+    write_book_record(paper_root(tmp_path) / "fresh")
+    assert trading.book_status(tmp_path, "fresh")["today"] == {
+        "trade_date": None, "decided_at": None, "ready": False,
+    }
+
+
 def test_the_status_and_health_carry_the_status_ladder(tmp_path: Path):
     _write_snapshot(tmp_path, age_seconds=1.0)
     status = trading.book_status(tmp_path, BOOK)
@@ -657,16 +690,22 @@ def test_degraded_states_raise_a_banner_and_skipped_lines_raise_a_chip():
     assert "无法映射" in script
 
 
-def test_a_book_card_carries_a_writer_error_only_in_its_badge_tooltip():
-    """The overview lists books, so a card answers with its state badge and
-    keeps the reason in that badge's tooltip. The message itself belongs on the
-    book's own page, where the banner prints it whole."""
+def test_a_book_card_is_a_name_a_badge_six_figures_and_a_curve():
+    """The overview is scanned, so a card carries only what distinguishes one
+    book from another: its name with a state badge — the writer's error in that
+    badge's tooltip alone — the six figures and the miniature curve. The book's
+    frozen identity and the error in full belong to its own page."""
 
     script = _app_js()
     card = _js_top_level(script, "function bookCard(")
     assert "tradingBadge(row.state, row.error)" in card
     assert "row.error" not in card.replace("tradingBadge(row.state, row.error)", "")
     assert "title: error || null" in _js_top_level(script, "function tradingBadge(")
+    # The identity line the page head draws as chips is not repeated here.
+    for field in ("candidate_source", "artifact_id", "start_date", "initial_cash"):
+        assert field not in card, field
+    assert "meta-line" not in card
+    assert "bookCurveChart(" in card
 
 
 def _js_top_level(script: str, opening: str) -> str:
