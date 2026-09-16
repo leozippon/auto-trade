@@ -613,9 +613,10 @@ progress.progress.done::-moz-progress-bar {
    the weight cell: small drawings the pages use where a sentence stood. */
 
 /* The pipeline stepper. One node per step; the dot's drawing is the state —
-   a tick when done, a cross when failed, a dash when skipped, a pulse while
-   running, a hollow ring while pending — and a rail joins the nodes. The
-   miniature runs across a card, the full one down the process panel. */
+   a tick when done, a cross when failed, a filled grey dot when the step
+   ended the arm without failing, a dash when skipped, a pulse while running,
+   a hollow ring while pending — and a rail joins the nodes. The miniature
+   runs across a card, the full one down the process panel. */
 .stepper {
  --stepper-dot: 0.95rem;
  display: flex;
@@ -652,6 +653,13 @@ progress.progress.done::-moz-progress-bar {
 }
 .failed > .stepper-dot::after {
  content: "✕";
+}
+/* A step that ended the arm without failing at its own job: the research that
+   delivered nothing, and the 裁决 no replay decided. Filled, so it reads as a
+   terminus, grey, so it is not read as a failure. */
+.ended > .stepper-dot {
+ background: var(--muted);
+ box-shadow: none;
 }
 .skipped > .stepper-dot {
  box-shadow: inset 0 0 0 1.5px var(--input-border);

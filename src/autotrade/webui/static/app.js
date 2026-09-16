@@ -813,8 +813,12 @@ function equityChart(payload, opts = {}) {
     svg.push(
       `<line x1="${x}" y1="${padT}" x2="${x}" y2="${hasPanes ? panesBottom : padT + mainH}" stroke="${INK.baseline}" stroke-width="1" stroke-dasharray="3 3"/>`,
     );
-    // A divider close to the right edge carries its label on its left, where
-    // the plot still has room: at the edge it was cut off mid-word.
+    // At card scale two dividers can fall within a few pixels of each other
+    // and their labels run together, so the mini chart keeps the lines alone;
+    // the page-size chart has the room to name them. A divider close to the
+    // right edge carries its label on its left, where the plot still has room:
+    // at the edge it was cut off mid-word.
+    if (mini) continue;
     const nearEnd = Number(x) > width - padR - 72;
     svg.push(
       `<text x="${Number(x) + (nearEnd ? -4 : 4)}" y="${padT + 11}"${nearEnd ? ' text-anchor="end"' : ""} font-size="11" fill="${INK.muted}">${escapeHtml(marker.label)}</text>`,
@@ -1523,6 +1527,17 @@ const STEP_STATUS_LABELS = {
   undecided: "待判定",
 };
 
+/* How an ending draws the 裁决 node. Only a replay that refused the artifact
+   is a failure of 裁决 itself; an ending nothing judged is a terminus, and a
+   broken worker wears its cross on the step that broke. */
+const ENDING_STEP_STATES = {
+  graduated: "done",
+  rejected: "failed",
+  no_edge: "ended",
+  budget_exhausted: "ended",
+  broken: "ended",
+};
+
 /* The research step: its recorded outcome once the session ended — a freeze
    is the step done, anything else ended the arm — else where the worker is. */
 function researchStep(item) {
@@ -1531,10 +1546,13 @@ function researchStep(item) {
   if (item.research_outcome)
     return {
       ...step,
-      state: item.frozen_session ? "done" : "failed",
+      // The session did its work even when it delivered nothing, so an arm it
+      // ended is a terminus here rather than a failed step.
+      state: item.frozen_session ? "done" : "ended",
       status: OUTCOME_LABELS[item.research_outcome] || item.research_outcome,
     };
-  // The worker broke before the session could record an outcome at all.
+  // The worker broke before the session could record an outcome at all: this
+  // is the step that broke, and the only one that wears the cross.
   if (item.ending) return { ...step, state: "failed", status: endingLabel(item.ending) };
   if (item.worker_alive && status.session_key === "research")
     return item.state === "paused"
@@ -1571,7 +1589,7 @@ function pipelineTailSteps(item) {
   // for an arm that got that far, the way research ended for one that did not.
   const decided = item.ending
     ? {
-        state: item.ending.state === "graduated" ? "done" : "failed",
+        state: ENDING_STEP_STATES[item.ending.state] || "ended",
         status: endingLabel(item.ending),
       }
     : { state: "pending", status: STEP_STATUS_LABELS.undecided };
@@ -2351,11 +2369,11 @@ async function renderDetailPage(experimentId, selectedKey) {
       experimentBadges(armBadge(detail)),
     ),
   );
-  // Progress and the current stage ride on the control row; the head keeps
-  // the ending's reason and any error.
+  // Progress, the current stage and the run's own error ride on the control
+  // row; the head keeps the ending's one-line reason, and the error of an
+  // experiment too broken to have a control row at all.
   const errors = [
     detail.state === "unreadable" && detail.error ? detail.error : null,
-    status.error ? `错误：${status.error}` : null,
   ].filter(Boolean);
   if (detail.params && Object.keys(detail.params).length)
     head.append(
@@ -2938,12 +2956,15 @@ async function openParamsModal(detail) {
   ]);
 }
 
-/* The control panel: the state badge, what the worker is doing, the skills it
-   published (only once there are any), any pending request, the controls,
-   and the research budget as bars. `__follow(status payload)` redraws the
-   activity and the budget in place between page rebuilds. */
+/* The control panel: the arm's badge, what the worker is doing, the skills it
+   published (only once there are any), any pending request, the controls, the
+   run's own error and the research budget as bars. The error lives here, with
+   the run it belongs to and in full — the page head carries only the ending's
+   one-line reason. `__follow(status payload)` redraws the activity, the error
+   and the budget in place between page rebuilds. */
 function controlPanel(detail) {
   const activityHost = el("span", { class: "control-activity" });
+  const errorHost = el("div", {});
   const budgetHost = el("div", {});
   const skills = Number(detail.skills && detail.skills.count) || 0;
   // The arm's one curve lives here, under the budget, not in any step's pane.
@@ -2957,12 +2978,17 @@ function controlPanel(detail) {
       activityHost,
       skills ? el("span", { class: "stat-chip", title: "本实验发布的 skills" }, `📚 Skills ${skills}`) : null,
     ),
+    errorHost,
     budgetHost,
     curve ? el("div", { class: "section-gap" }, curve) : null,
   );
   const follow = (fresh) => {
     const activity = fresh.worker_alive ? activityNode(fresh.status) : null;
     activityHost.replaceChildren(...(activity ? [activity] : []));
+    const error = (fresh.status || {}).error;
+    errorHost.replaceChildren(
+      ...(error ? [el("div", { class: "hint warn" }, `错误：${error}`)] : []),
+    );
     const bars = budgetBars(fresh.budget_used, detail.budget);
     budgetHost.replaceChildren(...(bars ? [bars] : []));
   };
