@@ -117,7 +117,7 @@ def test_a_session_interrupt_aborts_the_session_instead_of_reading_as_a_bad_stra
     from autotrade.environment.tools.base import SessionInterrupt
 
     class InterruptedEvaluator:
-        def evaluate(self, _request, max_days=None):
+        def evaluate(self, _request, max_days=None, start_day=None):
             raise SessionInterrupt("the session was interrupted")
 
     tool = _tool(tmp_path, WORKING_STRATEGY, evaluator=InterruptedEvaluator())
@@ -139,14 +139,14 @@ def test_the_rehearsal_replays_a_snapshot_the_agent_cannot_reach(
         def __init__(self, inner) -> None:
             self.inner = inner
 
-        def evaluate(self, request, max_days=None):
+        def evaluate(self, request, max_days=None, start_day=None):
             main = Path(request.revision.output_path) / "main.py"
             replayed.append(main.read_text(encoding="utf-8"))
             # The Agent keeps working while the rehearsal runs.
             (tmp_path / "output" / "main.py").write_text(
                 SUBSCRIPT_STRATEGY, encoding="utf-8"
             )
-            return self.inner.evaluate(request, max_days=max_days)
+            return self.inner.evaluate(request, max_days=max_days, start_day=start_day)
 
     daily = tmp_path / "daily.parquet"
     tool = _tool(tmp_path, WORKING_STRATEGY)
@@ -282,7 +282,7 @@ def test_a_rehearsal_does_not_spend_the_session_thinking_clock(tmp_path: Path) -
         def __init__(self, clock: FakeClock) -> None:
             self.clock = clock
 
-        def evaluate(self, _request, max_days=None):
+        def evaluate(self, _request, max_days=None, start_day=None):
             self.clock.advance(3600.0)
             raise RuntimeError("strategy fit exceeded 3600s")
 
@@ -330,3 +330,101 @@ def test_result_json_is_not_left_behind_for_a_ledger_to_find(tmp_path: Path) -> 
     leftovers = list((tmp_path / "results").rglob("result.json"))
     assert leftovers == [], f"smoke run left {leftovers} behind"
     assert json.dumps(tool.invoke({"days": 2}).value)  # strict-JSON serialisable
+
+
+def test_start_probes_a_later_window_inside_the_research_period(tmp_path: Path) -> None:
+    """A rehearsal at the start of the span does not size a fit deep inside it.
+
+    alpha158_lgbm read 335.7 s off a 3-day smoke at the start of a four-year
+    period and then lost 12 replay-years to fits that ran past the cap late in
+    the same period. ``start`` is how that reading is taken where it matters, so
+    the window really has to open there: asking for five days from the third-last
+    trading day can only return the days that are actually left.
+    """
+
+    tool = _tool(tmp_path, WORKING_STRATEGY)
+    value = tool.invoke({"days": 5, "start": DAYS[10]}).value
+
+    assert value["status"] == "ok", value
+    assert value["start"] == DAYS[10]
+    assert value["replayed_trade_days"] == 2
+    # The default window still opens at the start of the research period and
+    # says nothing about a probe date it was not given.
+    assert "start" not in tool.invoke({"days": 2}).value
+
+
+def test_start_outside_the_research_period_is_refused(tmp_path: Path) -> None:
+    """The session may measure a fit anywhere it researches, and nowhere else."""
+
+    tool = _tool(tmp_path, WORKING_STRATEGY)
+    for outside in ("20250101", "20260101"):
+        with pytest.raises(ToolError, match="outside the research period"):
+            tool.invoke({"start": outside})
+    with pytest.raises(ToolError, match="must be a YYYYMMDD string"):
+        tool.invoke({"start": 20251010})
+    with pytest.raises(ToolError, match="is not a date"):
+        tool.invoke({"start": "not-a-day"})
+
+
+def test_a_rehearsal_reports_what_it_cost_its_container(tmp_path: Path) -> None:
+    """The rehearsal is where a batch is sized, so it carries the telemetry.
+
+    The session Sandbox has a smaller memory limit than the strategy container,
+    and an arm that profiled its fit under ``shell`` concluded the replay was
+    swapping against a ceiling the strategy container does not have. Here the
+    numbers come from the container that actually ran the replay.
+    """
+
+    usage = {
+        "peak_memory_bytes": 7_883_149_312,
+        "memory_limit_bytes": 34_359_738_368,
+        "fit_seconds": [335.7],
+        "fit_timeout_seconds": 3600.0,
+        "decision_timeout_seconds": 360.0,
+    }
+
+    class MeasuredEvaluator:
+        def evaluate(self, _request, max_days=None, start_day=None):
+            del max_days, start_day
+            from autotrade.pipelines.config import EvaluationResult
+
+            return EvaluationResult(
+                {
+                    "replayed_trade_days": 2,
+                    "decision_calls": 2,
+                    "phase_seconds": {"strategy": 1.0, "data_view": 0.5},
+                    "resources": dict(usage),
+                },
+                str(tmp_path / "gone" / "result.json"),
+            )
+
+    tool = _tool(tmp_path, WORKING_STRATEGY, evaluator=MeasuredEvaluator())
+    assert tool.invoke({"days": 2}).value["resources"] == usage
+
+
+def test_a_failed_rehearsal_still_reports_what_it_was_using(tmp_path: Path) -> None:
+    """A fit that died on its clock is exactly the run worth measuring."""
+
+    from types import SimpleNamespace
+
+    from autotrade.environment.executor import attach_strategy_resources
+
+    usage = {"peak_memory_bytes": 30_064_771_072, "fit_timeout_seconds": 3600.0}
+
+    class FitCapEvaluator:
+        def evaluate(self, _request, max_days=None, start_day=None):
+            del max_days, start_day
+            error = RuntimeError("strategy fit exceeded 3600s")
+            attach_strategy_resources(
+                error, SimpleNamespace(resource_usage=lambda: dict(usage))
+            )
+            raise error
+
+    tool = _tool(tmp_path, WORKING_STRATEGY, evaluator=FitCapEvaluator())
+    value = tool.invoke({"days": 1}).value
+    assert value["status"] == "failed"
+    assert value["resources"] == usage
+    # A replay that reported nothing carries no empty block.
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert "resources" not in _tool(plain, WORKING_STRATEGY).invoke({"days": 1}).value

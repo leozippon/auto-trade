@@ -339,7 +339,7 @@ The text retrieval budget for this NL Sub Agent task is exhausted. Return your f
 | `budgets` | deadline、replay-year、空对照、模型调用、策略容器超时与资源、压缩预算 |
 | `artifact_contract` | 必需入口、订单返回合同、起点、修改约束、冻结门与毕业条件 |
 | `broker_replay` | 资金、费用、手数、T+1、调度与精确执行价格来源 |
-| `runtime_tools` | Python、已装依赖、可用本地工具、网络模式和安装策略 |
+| `runtime_tools` | Python、已装依赖、可用本地工具、网络模式和安装策略，以及各读文件根在 `shell` 里的挂载路径 |
 | `workspace` / `forbidden` | 工作区索引与禁止访问的范围 |
 
 动态事实只作为常用索引。Agent 不能把其中的日期、period、会话标识或资源元数据用作交易信号，也不能据此推断研究期末之后的行情。

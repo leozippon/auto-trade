@@ -45,6 +45,27 @@ REPLAY_YEARS_NOTE = (
     "因为它没有测出候选的任何信息——原样重投是合理的。"
 )
 
+# Why a rehearsal at the start of the research period does not size a batch.
+# alpha158_lgbm read 335.7 s off a 3-day smoke and then lost 12 replay-years to
+# fits that ran past the concurrency-scaled cap deep in the same span.
+SMOKE_PROBE_NOTE = (
+    "`smoke_backtest` 默认从研究期开头回放，训练窗随跨度增长的策略在研究期靠后要慢得多；"
+    "提交整期批次之前先用 `start` 指定研究期靠后的一个交易日再冒烟一次，"
+    "拿返回的 `resources.fit_seconds`、`peak_memory_bytes` 对照 `strategy_fit_timeout_seconds`"
+    "（并发放大见 `batch_validate_fit_timeout_note`）与 `strategy_memory_bytes`。"
+)
+
+# Where the read roots are in the Sandbox filesystem. The root names are a
+# file-tool convention, not paths: two arms read `steps` as a shell path,
+# failed, and concluded the tree was invisible to `shell`.
+SEARCH_ROOT_SHELL_NOTE = (
+    "`read_file`/`grep`/`glob` 的根名是工具约定而不是路径；`shell` 里同一批目录在各自的挂载点下："
+    "`workspace`/`output`/`models` 在 `/mnt/agent/workspace` 下，`snapshot` 是 `/mnt/snapshot`，"
+    "`artifacts` 是 `/mnt/artifacts`，`steps`、`parent_output`、`parent_models` 在它下面"
+    "（Step 产物树即 `/mnt/artifacts/steps`）。只有根 `trace` 在容器里没有路径，"
+    "transcript 只能用 `read_file`/`grep` 读。"
+)
+
 # What a session knows about the periods after research end: that they exist
 # and are sealed, never their dates, slots or results.
 SEALED_PERIODS_NOTE = (
@@ -327,6 +348,13 @@ def _budget_facts(
             # session that guessed low spent two backtest slots on fit
             # timeouts it had the cores to avoid.
             "strategy_cpus": SandboxLimits().cpus,
+            # The memory ceiling of that same container, in the unit a replay
+            # reports its measured peak in (``resources.peak_memory_bytes``).
+            # It is NOT the session container's own limit, which is smaller and
+            # is the one a session profiling its fit under `shell` measures
+            # against: one arm read a 7.34 GiB extrapolation as swapping and
+            # spent six hours on a cause the strategy container cannot have.
+            "strategy_memory_bytes": SandboxLimits().memory_bytes,
             # Replays one batch_validate call runs at once, each with its own
             # strategy container (two when the candidate declares fit). The
             # host is shared with the other running experiments, so wall clock
@@ -336,6 +364,7 @@ def _budget_facts(
             # scheduling or host contention to the strategy.
             "batch_validate_max_concurrency": BATCH_VALIDATE_MAX_CONCURRENCY,
             "batch_validate_fit_timeout_note": BATCH_VALIDATE_FIT_TIMEOUT_NOTE,
+            "smoke_backtest_probe_note": SMOKE_PROBE_NOTE,
             "context_compaction": context_compaction,
         }
     )
@@ -425,6 +454,7 @@ def _runtime_tool_facts(
             "network_install_policy": {
                 "session": "no_network_prebuilt_dependencies_only",
             },
+            "file_root_shell_paths": SEARCH_ROOT_SHELL_NOTE,
         }
     )
 

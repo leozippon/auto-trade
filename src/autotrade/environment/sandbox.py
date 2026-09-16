@@ -157,6 +157,27 @@ class SandboxLimits:
         if self.gpu_devices and len(self.gpu_devices) != self.gpu_count:
             raise ValueError("sandbox gpu_devices must pin exactly gpu_count devices")
 
+    @property
+    def memory_bytes(self) -> int:
+        """``memory`` as the byte count the container's cgroup will carry.
+
+        The same number a replay reports as ``memory_limit_bytes``, so the
+        session compares its measured peak against the ceiling in the same
+        unit instead of parsing a Docker suffix itself.
+        """
+
+        return _memory_limit_bytes(self.memory)
+
+
+_MEMORY_SUFFIX_BYTES = {"k": 1024, "m": 1024**2, "g": 1024**3}
+
+
+def _memory_limit_bytes(value: str) -> int:
+    suffix = value[-1].lower()
+    if suffix in _MEMORY_SUFFIX_BYTES:
+        return int(value[:-1]) * _MEMORY_SUFFIX_BYTES[suffix]
+    return int(value)
+
 
 # The label every container an experiment starts carries, so the console can
 # list and reclaim them by experiment: the session container and the strategy

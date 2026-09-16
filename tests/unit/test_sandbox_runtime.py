@@ -11,6 +11,7 @@ import time
 from collections import deque
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pandas as pd
@@ -26,6 +27,7 @@ from autotrade.environment.artifacts import (
     copy_model_artifacts,
     restore_working_artifacts_writable,
 )
+from autotrade.environment.container_stats import ContainerResourceMonitor
 from autotrade.environment.executor import (
     DockerStrategyExecutor,
     ExecResult,
@@ -34,8 +36,11 @@ from autotrade.environment.executor import (
     StrategyExecutionError,
     StrategyRaised,
     _run_limited_capture,
+    attach_strategy_resources,
     docker_available,
     raised_by_strategy,
+    strategy_resource_usage,
+    strategy_resources_of,
 )
 from autotrade.environment.gpu import GpuUnavailableError
 from autotrade.environment.replay import DailyMarketData
@@ -132,6 +137,9 @@ def _executor_for_process(
     executor._state_writable = False
     executor._fit_worker = None
     executor.gpu_indices = []
+    executor.gpu_free_at_start_mib = None
+    executor._fit_seconds = []
+    executor._monitor = ContainerResourceMonitor(executor.container_name)
     executor._reset_transport_state()
     if drain_stderr:
         thread = threading.Thread(target=executor._drain_stderr, daemon=True)
@@ -816,7 +824,10 @@ def test_strategy_container_attaches_only_a_requested_gpu(tmp_path: Path):
     strategy = _strategy(tmp_path)
     with (
         patch.object(DockerStrategyExecutor, "_start"),
-        patch("autotrade.environment.executor.select_gpus", return_value=[2]) as select,
+        patch(
+            "autotrade.environment.executor.select_gpus_with_free_memory",
+            return_value=[(2, 20000)],
+        ) as select,
     ):
         executor = DockerStrategyExecutor(
             strategy,
@@ -831,7 +842,10 @@ def test_strategy_container_attaches_only_a_requested_gpu(tmp_path: Path):
 
     with (
         patch.object(DockerStrategyExecutor, "_start"),
-        patch("autotrade.environment.executor.select_gpus", return_value=[0, 1]),
+        patch(
+            "autotrade.environment.executor.select_gpus_with_free_memory",
+            return_value=[(0, 20000), (1, 19000)],
+        ),
     ):
         two = DockerStrategyExecutor(
             strategy, SandboxConfig(limits=SandboxLimits(gpu_count=2))
@@ -841,7 +855,7 @@ def test_strategy_container_attaches_only_a_requested_gpu(tmp_path: Path):
 
     with (
         patch.object(DockerStrategyExecutor, "_start"),
-        patch("autotrade.environment.executor.select_gpus") as unused,
+        patch("autotrade.environment.executor.select_gpus_with_free_memory") as unused,
     ):
         cpu_only = DockerStrategyExecutor(strategy)
     assert "--gpus" not in cpu_only.docker_command()
@@ -859,7 +873,7 @@ def test_strategy_container_gpu_request_fails_instead_of_falling_back_to_cpu(
     with (
         patch.object(DockerStrategyExecutor, "_start") as start,
         patch(
-            "autotrade.environment.executor.select_gpus",
+            "autotrade.environment.executor.select_gpus_with_free_memory",
             side_effect=GpuUnavailableError("requested 1 GPU(s), available matching GPUs: none"),
         ),
         pytest.raises(GpuUnavailableError, match="available matching GPUs: none"),
@@ -1882,3 +1896,103 @@ def test_a_worker_whose_strategy_import_fails_is_reported_as_a_startup_failure(
         ),
     ):
         _started_executor(strategy, _worker_argv(strategy), SandboxLimits())
+
+
+def test_container_peak_memory_is_reported_only_where_it_was_measured(tmp_path: Path):
+    """The monitor reports what the cgroup said, and nothing it did not read.
+
+    A strategy container runs with ``--rm``, so this reading has to be taken
+    while it still exists; a container whose cgroup cannot be resolved must
+    leave the fields out instead of reporting a zero nobody measured.
+    """
+
+    cgroup = tmp_path / "cgroup"
+    cgroup.mkdir()
+    (cgroup / "memory.peak").write_text("7883149312\n", encoding="utf-8")
+    (cgroup / "memory.max").write_text("34359738368\n", encoding="utf-8")
+    monitor = ContainerResourceMonitor("test-container")
+    monitor._cgroup = cgroup
+    monitor.stop()
+    assert monitor.record() == {
+        "peak_memory_bytes": 7883149312,
+        "memory_limit_bytes": 34359738368,
+    }
+    # stop() is idempotent: an executor that aborts and then closes reads once.
+    (cgroup / "memory.peak").write_text("1\n", encoding="utf-8")
+    monitor.stop()
+    assert monitor.record()["peak_memory_bytes"] == 7883149312
+
+    # An unlimited container states no limit rather than a parsed "max".
+    unlimited = ContainerResourceMonitor("test-container")
+    unlimited._cgroup = cgroup
+    (cgroup / "memory.max").write_text("max\n", encoding="utf-8")
+    unlimited.stop()
+    assert "memory_limit_bytes" not in unlimited.record()
+
+    # Nothing resolved, nothing reported — and no GPU sampler was ever started.
+    absent = ContainerResourceMonitor("autotrade-strategy-does-not-exist")
+    absent.start()
+    absent.stop()
+    assert absent.record() == {}
+
+
+def test_container_gpu_peak_counts_only_this_containers_own_processes(tmp_path: Path):
+    """Shared cards carry other tenants, so the peak is attributed by pid.
+
+    A card the strategy was admitted to can hold several processes at once; the
+    sample that becomes the peak is the sum over the pids this container's own
+    cgroup lists, and a sample that matches none of them is not a measurement
+    of zero.
+    """
+
+    cgroup = tmp_path / "cgroup"
+    cgroup.mkdir()
+    (cgroup / "memory.peak").write_text("1\n", encoding="utf-8")
+    (cgroup / "cgroup.procs").write_text("4242\n4243\n", encoding="utf-8")
+    monitor = ContainerResourceMonitor("test-container", sample_gpu=True)
+    monitor._cgroup = cgroup
+
+    with patch(
+        "autotrade.environment.container_stats.compute_app_memory_bytes",
+        return_value={9999: 40 * 1024**3},
+    ):
+        monitor._sample_gpu_once()
+    assert "peak_gpu_memory_bytes" not in monitor.record()
+
+    with patch(
+        "autotrade.environment.container_stats.compute_app_memory_bytes",
+        return_value={4242: 6 * 1024**3, 4243: 3 * 1024**3, 9999: 40 * 1024**3},
+    ):
+        monitor._sample_gpu_once()
+    assert monitor.record()["peak_gpu_memory_bytes"] == 9 * 1024**3
+
+    # A later, smaller sample does not lower the high-water mark.
+    with patch(
+        "autotrade.environment.container_stats.compute_app_memory_bytes",
+        return_value={4242: 1024**3},
+    ):
+        monitor._sample_gpu_once()
+    assert monitor.record()["peak_gpu_memory_bytes"] == 9 * 1024**3
+
+
+def test_a_failed_replay_carries_its_container_telemetry_to_the_row(tmp_path: Path):
+    """The measurement has to survive the exception that ends the replay.
+
+    A failed candidate has no result to put it in, and a fit that ran out of
+    clock is exactly the run whose peak and ceiling the session needs, so the
+    block rides on the error and is read off the whole cause chain the way the
+    strategy/environment classification is.
+    """
+
+    usage = {"peak_memory_bytes": 7883149312, "fit_timeout_seconds": 10800.0}
+    executor = SimpleNamespace(resource_usage=lambda: dict(usage))
+    inner = StrategyExecutionError("Docker strategy fit failed: timeout")
+    attach_strategy_resources(inner, executor)
+    outer = RuntimeError("fit failed at 2022-10-10T08:30")
+    outer.__cause__ = inner
+
+    assert strategy_resources_of(outer) == usage
+    # An executor with nothing to report attaches nothing, and an error that
+    # carries nothing reads as empty rather than as a block of zeros.
+    assert strategy_resource_usage(object()) == {}
+    assert strategy_resources_of(RuntimeError("plain")) == {}

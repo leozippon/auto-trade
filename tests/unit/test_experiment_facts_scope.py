@@ -11,6 +11,8 @@ from pathlib import Path
 
 from autotrade.agent.experiment_facts import (
     BATCH_VALIDATE_FIT_TIMEOUT_NOTE,
+    SEARCH_ROOT_SHELL_NOTE,
+    SMOKE_PROBE_NOTE,
     build_experiment_facts,
 )
 from autotrade.agent.prompts import build_system_prompt
@@ -279,3 +281,39 @@ def test_the_facts_publish_the_strategy_containers_cpu_quota_and_batch_width() -
     # scales with it, so the rule travels with the number.
     assert budgets["batch_validate_fit_timeout_note"] == BATCH_VALIDATE_FIT_TIMEOUT_NOTE
     assert "strategy_cpus" in build_system_prompt(experiment_facts=_facts())
+
+
+def test_the_facts_publish_the_strategy_containers_memory_ceiling() -> None:
+    """The container the replay runs in is not the one the session lives in.
+
+    An arm extrapolated a 7.34 GiB fit, read it against the session Sandbox's
+    own limit, concluded the replay was swapping, and spent hours on a cause
+    the strategy container cannot have. The ceiling it should have compared
+    against is published here, in the same unit a replay reports its measured
+    peak in.
+    """
+
+    from autotrade.environment.sandbox import SandboxLimits
+
+    budgets = _facts()["budgets"]
+    assert budgets["strategy_memory_bytes"] == SandboxLimits().memory_bytes
+    assert budgets["strategy_memory_bytes"] == 32 * 1024**3
+    # And why a rehearsal at the start of the span does not size a batch.
+    assert budgets["smoke_backtest_probe_note"] == SMOKE_PROBE_NOTE
+    assert "start" in SMOKE_PROBE_NOTE
+
+
+def test_the_facts_place_every_read_root_in_the_shell_filesystem() -> None:
+    """Root names are a tool convention, not paths.
+
+    Two arms read ``steps`` as a shell path, failed, and concluded the Step
+    tree was invisible to ``shell``; it is mounted, under /mnt/artifacts. The
+    fact states where each root really is, and that ``trace`` is the one with
+    no path in the container.
+    """
+
+    note = _facts()["runtime_tools"]["file_root_shell_paths"]
+    assert note == SEARCH_ROOT_SHELL_NOTE
+    for path in ("/mnt/artifacts/steps", "/mnt/snapshot", "/mnt/agent/workspace"):
+        assert path in note
+    assert "trace" in note

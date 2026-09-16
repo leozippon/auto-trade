@@ -461,7 +461,8 @@ def test_evaluation_summary_carries_the_whole_agent_visible_field_set(
     # session tool layer, which adds them when it appends the manifest entry;
     # benchmark depends on the slot carrying index rows, which this one
     # deliberately does not (see test_style_analysis for the producer/report
-    # round trip).
+    # round trip); resources is the strategy container's own telemetry and this
+    # replay runs the strategy in-process, with no container to measure.
     conditional = {
         "result_name",
         "mode",
@@ -470,10 +471,12 @@ def test_evaluation_summary_carries_the_whole_agent_visible_field_set(
         "complete_validation",
         "error",
         "benchmark",
+        "resources",
     }
     expected = set(AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS) - conditional
     assert expected <= set(summary), sorted(expected - set(summary))
     assert "benchmark" not in summary
+    assert "resources" not in summary
 
     assert summary["replayed_trade_days"] == 2
     assert summary["decision_calls"] == 2
@@ -1805,9 +1808,9 @@ def generate_orders(context):
         encoding="utf-8",
     )
 
-    def _run(max_days):
+    def _run(max_days, start_day=None):
         return PITDailyEvaluationBackend(
-            tmp_path / f"results_{max_days}", execution_mode="trusted"
+            tmp_path / f"results_{max_days}_{start_day}", execution_mode="trusted"
         ).evaluate(
             EvaluationRequest(
                 ArtifactRevision("revision_layout", revision),
@@ -1824,6 +1827,7 @@ def generate_orders(context):
                 BrokerProfile(initial_cash=100_000),
             ),
             max_days=max_days,
+            start_day=start_day,
         )
 
     full = _run(None)
@@ -1837,6 +1841,15 @@ def generate_orders(context):
     short = _run(1)
     assert short.summary["replayed_trade_days"] == 1
     assert short.summary["decision_calls"] == 1
+
+    # The same truncation from the other end: a probe that opens late replays
+    # the days from there on, through the same rolling as-of view, and the
+    # record says which day it actually covered.
+    late = _run(None, start_day="20240103")
+    assert late.summary["replayed_trade_days"] == 1
+    assert late.summary["decision_calls"] == 1
+    late_record = json.loads(Path(late.result_ref).read_text(encoding="utf-8"))
+    assert [row["trade_date"] for row in late_record["equity_curve"]] == ["20240103"]
 
     for days in (0, -1):
         with pytest.raises(ValueError, match="max_days must be a positive integer"):

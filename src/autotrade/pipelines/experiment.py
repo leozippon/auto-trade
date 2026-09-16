@@ -14,6 +14,7 @@ import math
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -30,7 +31,9 @@ from autotrade.environment.executor import (
     DockerStrategyExecutor,
     StrategyExecutor,
     TrustedStrategyExecutor,
+    attach_strategy_resources,
     raised_by_strategy,
+    strategy_resource_usage,
 )
 from autotrade.environment.replay import (
     ContextDataProvider,
@@ -146,19 +149,28 @@ class DailyStrategyPipeline:
         state_dir.chmod(0o777)
         try:
             executor = self._create_executor(state_dir)
+            # The executor's own telemetry has to be read while its container
+            # still exists, so it is closed before the usage is taken — on the
+            # failing path too, where the peak and the clock that ran out are
+            # exactly what the failure needs to report.
             try:
-                return run_daily_replay(
-                    daily=frame,
-                    strategy=executor,
-                    schedule=self.config.schedule,
-                    profile=self.config.broker_profile,
-                    nl_query=self.nl_query,
-                    context_data=self.context_data,
-                    execution_price=self.execution_price,
-                    corporate_actions=corporate_actions,
-                )
-            finally:
-                executor.close()
+                try:
+                    replay = run_daily_replay(
+                        daily=frame,
+                        strategy=executor,
+                        schedule=self.config.schedule,
+                        profile=self.config.broker_profile,
+                        nl_query=self.nl_query,
+                        context_data=self.context_data,
+                        execution_price=self.execution_price,
+                        corporate_actions=corporate_actions,
+                    )
+                finally:
+                    executor.close()
+            except BaseException as exc:
+                attach_strategy_resources(exc, executor)
+                raise
+            return replace(replay, resources=strategy_resource_usage(executor))
         finally:
             # The trusted executor leaves the tree read-only between fits.
             chmod_tree(state_dir, file_mode=0o644, dir_mode=0o755)

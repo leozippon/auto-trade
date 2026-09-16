@@ -17,11 +17,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, Self, runtime_checkable
 
+from .container_stats import ContainerResourceMonitor
 from .contract_fingerprint import (
     SandboxImageContractMismatch,
     assert_image_contract_current,
 )
-from .gpu import device_request, gpu_memory_contention, select_gpus
+from .gpu import device_request, gpu_memory_contention, select_gpus_with_free_memory
 from .runtime import chmod_tree
 from .sandbox import DockerSandbox, SandboxConfig, SandboxLimits, container_thread_env
 from .strategy import BarTable, FitSchedule, StrategyContext, StrategyFunction
@@ -88,6 +89,48 @@ def raised_by_strategy(exc: BaseException) -> bool:
         seen.add(id(current))
         current = current.__cause__ or current.__context__
     return False
+
+
+# Where a failed replay carries its container telemetry. A replay that raises
+# produces no result to put it in, and a fit that died on its clock or on a
+# shared card is exactly the run whose peak memory and headroom are worth
+# reading, so the measurement rides on the exception to the row that reports it.
+_STRATEGY_RESOURCES = "strategy_resources"
+
+
+def strategy_resource_usage(executor: object) -> dict[str, object]:
+    """Container telemetry of one replay's executor; empty when it has none.
+
+    A trusted in-process executor and the test doubles run no container and
+    report nothing, which is not a failure: the block simply stays out.
+    """
+
+    usage = getattr(executor, "resource_usage", None)
+    return dict(usage()) if callable(usage) else {}
+
+
+def attach_strategy_resources(exc: BaseException, executor: object) -> None:
+    usage = strategy_resource_usage(executor)
+    if usage:
+        setattr(exc, _STRATEGY_RESOURCES, usage)
+
+
+def strategy_resources_of(exc: BaseException) -> dict[str, object]:
+    """Telemetry carried by ``exc`` or by anything it was raised from.
+
+    Replay layers wrap an executor failure, so the block is read off the whole
+    chain for the same reason ``raised_by_strategy`` is.
+    """
+
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        usage = getattr(current, _STRATEGY_RESOURCES, None)
+        if isinstance(usage, Mapping):
+            return dict(usage)
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return {}
 
 
 @runtime_checkable
@@ -246,8 +289,20 @@ class DockerStrategyExecutor:
         # Resolved before the container exists and rendered into its run
         # arguments below. An unsatisfiable request fails right here, so a
         # replay never silently trains on CPU instead of the GPU it asked for.
-        self.gpu_indices: list[int] = _select_strategy_gpus(self.config.limits)
+        self.gpu_indices, self.gpu_free_at_start_mib = _select_strategy_gpus(
+            self.config.limits
+        )
         self.container_name = f"autotrade-strategy-{uuid.uuid4().hex}"
+        # Host-side telemetry of this container: what it actually cost, beside
+        # the limits it was started with. Bound once the container is up.
+        self._monitor = ContainerResourceMonitor(
+            self.container_name,
+            docker_executable=self.config.docker_executable,
+            sample_gpu=bool(self.gpu_indices),
+        )
+        # Wall clock of each completed ``fit`` roundtrip, measured on the same
+        # clock ``fit_timeout_seconds`` bounds.
+        self._fit_seconds: list[float] = []
         self._process: subprocess.Popen[bytes] | None = None
         self._stdout_buffer = bytearray()
         self._stderr_tail: deque[bytes] = deque()
@@ -374,6 +429,9 @@ class DockerStrategyExecutor:
         self._active_limit = f"{label} exceeded {timeout_seconds:g}s"
         expected = "fitted" if kind == "fit" else "orders"
         consumed = 0
+        # Host NL waits extend the deadline, so they are not the strategy's
+        # clock and must not land in the fit timing either.
+        nl_seconds = 0.0
         try:
             # Materializing and validating the request is the host's own work on
             # host-owned PIT data; only what happens from the hand-over onwards
@@ -381,7 +439,8 @@ class DockerStrategyExecutor:
             request, last_available_at = self._prepare_execute(context)
             request["type"] = kind
             sequence = request["sequence"]
-            deadline = time.monotonic() + timeout_seconds
+            started = time.monotonic()
+            deadline = started + timeout_seconds
             self._send(request, deadline)
             while True:
                 message, size = self._read_message(deadline)
@@ -420,10 +479,16 @@ class DockerStrategyExecutor:
                                 "result": dict(response),
                             }
                     finally:
-                        deadline += time.monotonic() - nl_started
+                        waited = time.monotonic() - nl_started
+                        deadline += waited
+                        nl_seconds += waited
                     self._send(payload, deadline)
                     continue
                 if message_type == expected:
+                    if kind == "fit":
+                        self._fit_seconds.append(
+                            round(time.monotonic() - started - nl_seconds, 1)
+                        )
                     self._transport_sequence = sequence
                     self._transport_inference_at = context.inference_at
                     self._transport_bars = context.bars
@@ -514,7 +579,45 @@ class DockerStrategyExecutor:
             record[name] = target
         return record
 
+    def resource_usage(self) -> dict[str, object]:
+        """What this evaluation's strategy containers actually cost.
+
+        Read once at container end (``ContainerResourceMonitor``) and reported
+        beside the limits that were in force, so a replay that died on a clock
+        or a shared card says how close it was to which ceiling instead of
+        leaving the session to reconstruct it from a different container. A fit
+        strategy runs two containers; the peaks are the higher of the two,
+        because they are the same evaluation and the same host.
+
+        Only measured values appear: a figure the host could not read is left
+        out rather than reported as zero.
+        """
+
+        limits = self.config.limits
+        record: dict[str, object] = dict(self._monitor.record())
+        worker = self._fit_worker
+        if worker is not None:
+            for name, value in worker._monitor.record().items():
+                current = record.get(name)
+                record[name] = (
+                    max(int(current), value) if isinstance(current, int) else value
+                )
+        fit_seconds = list(self._fit_seconds) + (
+            list(worker._fit_seconds) if worker is not None else []
+        )
+        if fit_seconds:
+            record["fit_seconds"] = fit_seconds
+        if self.fit_schedule is not None:
+            record["fit_timeout_seconds"] = limits.fit_timeout_seconds
+        record["decision_timeout_seconds"] = limits.timeout_seconds
+        if self.gpu_free_at_start_mib is not None:
+            record["gpu_free_at_start_bytes"] = (
+                self.gpu_free_at_start_mib * 1024 * 1024
+            )
+        return record
+
     def close(self) -> None:
+        self._monitor.stop()
         if self._fit_worker is not None:
             self._fit_worker.close()
         if self._closed and self._process is None:
@@ -566,6 +669,10 @@ class DockerStrategyExecutor:
         self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
         self._stderr_thread.start()
         self._await_ready()
+        # Only now is the container certainly up, so this is where its cgroup
+        # can be resolved; a container that never became ready has no usage to
+        # report anyway.
+        self._monitor.start()
 
     def _await_ready(self) -> None:
         """Block until the container's worker loop can answer, or fail explicitly.
@@ -693,6 +800,9 @@ class DockerStrategyExecutor:
         return b"".join(self._stderr_tail).decode("utf-8", errors="replace").strip()
 
     def _abort(self) -> None:
+        # Before the container is removed: its cgroup is the only place the
+        # peak of a run that just died on a clock or a card still exists.
+        self._monitor.stop()
         self._closed = True
         if self._fit_worker is not None and self._fit_worker is not self:
             self._fit_worker._abort()
@@ -974,8 +1084,8 @@ def _existing_dir(value: str | Path | None, name: str) -> Path | None:
     return path
 
 
-def _select_strategy_gpus(limits: SandboxLimits) -> list[int]:
-    """Device indexes this strategy container attaches; empty when none is asked.
+def _select_strategy_gpus(limits: SandboxLimits) -> tuple[list[int], int | None]:
+    """Device indexes this strategy container attaches, and their free memory.
 
     Already-selected devices (``gpu_devices``, how the fit worker inherits the
     inference container's allocation) are used as they are. Otherwise the Agent
@@ -985,13 +1095,22 @@ def _select_strategy_gpus(limits: SandboxLimits) -> list[int]:
     device the experiment did not get would be a different computation reported
     as the same result, so an unsatisfiable request raises
     ``GpuUnavailableError`` instead.
+
+    The second element is the free video memory the admission probe measured
+    across the selected devices, which is the headroom the strategy started
+    with on a shared card. It is ``None`` when no probe ran: no device was
+    asked for, or this is the fit worker reusing the allocation the inference
+    container already made.
     """
 
     if limits.gpu_count <= 0:
-        return []
+        return [], None
     if limits.gpu_devices:
-        return list(limits.gpu_devices)
-    return select_gpus(limits.gpu_count, require_name=limits.gpu_name_filter)
+        return list(limits.gpu_devices), None
+    selected = select_gpus_with_free_memory(
+        limits.gpu_count, require_name=limits.gpu_name_filter
+    )
+    return [index for index, _free in selected], sum(free for _index, free in selected)
 
 
 def _require_local_image(config: SandboxConfig, *, agent_contract: bool) -> str:
@@ -1052,6 +1171,9 @@ __all__ = [
     "StrategyExecutor",
     "StrategyRaised",
     "TrustedStrategyExecutor",
+    "attach_strategy_resources",
     "docker_available",
     "raised_by_strategy",
+    "strategy_resource_usage",
+    "strategy_resources_of",
 ]

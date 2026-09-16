@@ -17,9 +17,11 @@ from __future__ import annotations
 import json
 import threading
 import unittest
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -32,6 +34,7 @@ from autotrade.environment.executor import (
     GpuMemoryContention,
     StrategyExecutionError,
     StrategyRaised,
+    attach_strategy_resources,
 )
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.replay.engine import BacktestError
@@ -114,15 +117,22 @@ def _summary(total_return: float) -> dict[str, object]:
     }
 
 
-def _replay_failure(message: str, cause: Exception) -> BacktestError:
+def _replay_failure(
+    message: str, cause: Exception, resources: Mapping[str, object] | None = None
+) -> BacktestError:
     """What the replay engine hands back: its own error over the executor's.
 
     ``raised_by_strategy`` reads the chain, so a test failure has to carry one
-    to be classified the way a real one is.
+    to be classified the way a real one is, and so does the container telemetry
+    the pipeline attaches on the way out.
     """
 
     error = BacktestError(message)
     error.__cause__ = cause
+    if resources is not None:
+        attach_strategy_resources(
+            error, SimpleNamespace(resource_usage=lambda: dict(resources))
+        )
     return error
 
 
@@ -145,8 +155,10 @@ class _Evaluator:
         contention_markers: tuple[str, ...] = (),
         strategy_fail_markers: tuple[str, ...] = (),
         rendezvous: int = 0,
+        resources: Mapping[str, object] | None = None,
     ) -> None:
         self.results_root = results_root
+        self.resources = resources
         self.fail_markers = fail_markers
         self.contention_markers = contention_markers
         self.strategy_fail_markers = strategy_fail_markers
@@ -190,6 +202,7 @@ class _Evaluator:
                     raise _replay_failure(
                         f"generate_orders exceeded 30s ({marker})",
                         StrategyExecutionError("Docker generate_orders failed: timeout"),
+                        self.resources,
                     )
             for marker in self.contention_markers:
                 if marker in source:
@@ -197,14 +210,21 @@ class _Evaluator:
                         "CUDA out of memory with 6195 MiB available to the "
                         "strategy: the device was taken by another process"
                     )
-                    raise _replay_failure(f"fit failed ({marker}): {contention}", contention)
+                    raise _replay_failure(
+                        f"fit failed ({marker}): {contention}",
+                        contention,
+                        self.resources,
+                    )
             for marker in self.strategy_fail_markers:
                 if marker in source:
                     raise _replay_failure(
                         f"generate_orders raised ({marker})",
                         StrategyRaised("KeyError: 'close'"),
+                        self.resources,
                     )
             summary = _summary(0.01 * len(source))
+            if self.resources is not None:
+                summary["resources"] = dict(self.resources)
             target = self.results_root / f"valid_{call_index:03d}" / "result.json"
             write_json_atomic(target, {"stats": summary})
             _write_style_sidecar(target.parent, alpha=0.0005 * len(source), seed=call_index)
@@ -251,6 +271,7 @@ class _Session:
         trace: list[tuple[str, dict[str, object]]] | None = None,
         experiment_dir: Path | None = None,
         budget_used: BudgetUsed | None = None,
+        resources: Mapping[str, object] | None = None,
     ) -> None:
         self.root = root
         self.trace_events = trace
@@ -303,6 +324,7 @@ class _Session:
             contention_markers=contention_markers,
             strategy_fail_markers=strategy_fail_markers,
             rendezvous=rendezvous,
+            resources=resources,
         )
         self.backtest = SessionValidations(
             request=request,
@@ -764,6 +786,48 @@ class BatchValidateRunTest(unittest.TestCase):
             self.assertEqual(failed[0]["metadata"]["span"], "full")
             self.assertEqual(session.backtest.replay_years_used, 12)
             self.assertEqual(len(session.backtest.steps), 2)
+
+    def test_every_row_says_what_the_replay_cost_its_container(self) -> None:
+        """Completed and failed rows alike carry the container telemetry.
+
+        Two arms sized a batch from the session container's 8 GiB limit and
+        from a 3-day smoke, lost 20 replay-years to fits that ran past the
+        concurrency-scaled cap, and then reasoned about swapping in a container
+        that has 32 GiB. The failed row is the one that has no stats block at
+        all, so it is the one this has to reach.
+        """
+
+        usage = {
+            "peak_memory_bytes": 7_883_149_312,
+            "memory_limit_bytes": 34_359_738_368,
+            "fit_seconds": [335.7, 1204.2],
+            "fit_timeout_seconds": 10_800.0,
+            "decision_timeout_seconds": 1_080.0,
+        }
+        with TemporaryDirectory() as tmp:
+            session = _Session(Path(tmp), fail_markers=("999",), resources=usage)
+            session.candidate("good", _strategy("1"))
+            session.candidate("slow", _strategy("999"))
+            result = session.call("good", "slow", span="Y1")
+            rows = {row["name"]: row for row in result.value["candidates"]}
+            self.assertEqual(rows["good"]["stats"]["resources"], usage)
+            self.assertEqual(rows["slow"]["status"], "failed")
+            self.assertNotIn("stats", rows["slow"])
+            self.assertEqual(rows["slow"]["resources"], usage)
+
+    def test_a_row_without_telemetry_carries_no_empty_resources_block(self) -> None:
+        """A replay that ran no container reports nothing, not zeros."""
+
+        with TemporaryDirectory() as tmp:
+            session = _Session(Path(tmp), strategy_fail_markers=("999",))
+            session.candidate("good", _strategy("1"))
+            session.candidate("bad", _strategy("999"))
+            rows = {
+                row["name"]: row
+                for row in session.call("good", "bad", span="Y1").value["candidates"]
+            }
+            self.assertNotIn("resources", rows["good"]["stats"])
+            self.assertNotIn("resources", rows["bad"])
 
     def test_a_wholly_failed_batch_reports_the_failure_not_a_success(self) -> None:
         with TemporaryDirectory() as tmp:

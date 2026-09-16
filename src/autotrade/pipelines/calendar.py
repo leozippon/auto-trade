@@ -46,6 +46,31 @@ def yyyymmdd(value: object) -> str:
     return pd.Timestamp(str(value).strip()).strftime("%Y%m%d")
 
 
+def replay_window(
+    trade_days: Sequence[str],
+    *,
+    start: str | None = None,
+    max_days: int | None = None,
+) -> list[str]:
+    """The trading days a truncated replay actually covers.
+
+    One definition for both evaluation backends. An unofficial rehearsal runs a
+    short window of a span it must not be able to pass off as a full
+    Validation: ``start`` moves its first day to the first trading day at or
+    after that date and ``max_days`` caps how many days follow. Neither can
+    reach outside the span's own days, and both are applied after the slot
+    identity check, never before it.
+    """
+
+    days = sorted(str(day) for day in trade_days)
+    if start is not None:
+        anchor = yyyymmdd(start)
+        days = [day for day in days if day >= anchor]
+    if max_days is not None:
+        days = days[:max_days]
+    return days
+
+
 def load_sse_trading_days(raw_dir: str | Path) -> list[str]:
     calendar_dir = Path(raw_dir) / "trade_cal" / "exchange=SSE"
     if not calendar_dir.exists():
@@ -210,5 +235,6 @@ __all__ = [
     "Slot",
     "anchor_before",
     "load_sse_trading_days",
+    "replay_window",
     "yyyymmdd",
 ]

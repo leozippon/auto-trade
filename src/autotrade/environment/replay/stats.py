@@ -70,6 +70,10 @@ class ReplayResult:
     # evaluation backend, which is the only component that sees them.
     wall_seconds: float = 0.0
     phase_seconds: Mapping[str, float] = field(default_factory=dict)
+    # Host-side container telemetry of the run (peak memory, the limits in
+    # force, per-fit seconds), filled in by the pipeline that owned the
+    # executor. Empty for an in-process replay, which has no container.
+    resources: Mapping[str, object] = field(default_factory=dict)
 
     def to_record(self, *, start: str = "", end: str = "") -> dict[str, object]:
         return {
@@ -186,7 +190,7 @@ def compute_return_stats(
         "replay_days": len(exposure_series),
     }
 
-    return {
+    stats: dict[str, object] = {
         "initial_cash": initial,
         "final_equity": values[-1] if values else initial,
         "total_return": total_return,
@@ -219,6 +223,10 @@ def compute_return_stats(
         "replayed_trade_days": len(curve),
         "phase_seconds": dict(result.phase_seconds),
     }
+    # What the run cost the container it ran in, when a container ran it.
+    if result.resources:
+        stats["resources"] = dict(result.resources)
+    return stats
 
 
 def window_activity(

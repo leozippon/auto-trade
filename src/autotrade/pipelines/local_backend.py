@@ -32,7 +32,11 @@ from autotrade.environment.artifacts import (
     restore_working_artifacts_writable,
 )
 from autotrade.environment.data.summary import HOST_PATH_RE, write_agent_data_summary
-from autotrade.environment.executor import PersistentCommandRunner, raised_by_strategy
+from autotrade.environment.executor import (
+    PersistentCommandRunner,
+    raised_by_strategy,
+    strategy_resources_of,
+)
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm.model_profiles import AGENT_MAX_OUTPUT_TOKENS
 from autotrade.environment.replay.stats import (
@@ -106,7 +110,7 @@ from autotrade.environment.tools.step_rollback import StepRollbackTool
 from autotrade.environment.tools.workspace import SafeWorkspace
 
 from .agent_views import NULL_CONTROL_KEYS, allowed_keys
-from .calendar import FULL_SPAN, yyyymmdd
+from .calendar import FULL_SPAN, replay_window, yyyymmdd
 from .config import (
     AcceptanceRules,
     ArtifactRevision,
@@ -219,9 +223,13 @@ class LocalDailyEvaluationBackend:
         ].copy()
 
     def evaluate(
-        self, request: EvaluationRequest, *, max_days: int | None = None
+        self,
+        request: EvaluationRequest,
+        *,
+        max_days: int | None = None,
+        start_day: str | None = None,
     ) -> EvaluationResult:
-        """``max_days`` truncates the replay to its first N trading days.
+        """``start_day``/``max_days`` truncate the replay (``calendar.replay_window``).
 
         Same contract as the PIT backend: an unofficial smoke run gets the real
         replay path over a short window, never a short window dressed up as a
@@ -241,12 +249,16 @@ class LocalDailyEvaluationBackend:
         timer = PhaseTimer()
         with timer.phase("replay_frames"):
             frame = self.frame_between(request.start, request.end)
+            replay_start = str(request.start)
             replay_end = str(request.end)
-            if max_days is not None:
-                kept = sorted(set(frame["trade_date"]))[:max_days]
+            if max_days is not None or start_day is not None:
+                kept = replay_window(
+                    set(frame["trade_date"]), start=start_day, max_days=max_days
+                )
                 frame = frame[frame["trade_date"].isin(set(kept))].copy()
-                # A truncated replay must not claim it covered the last quarter.
-                replay_end = str(kept[-1]) if kept else replay_end
+                # A truncated replay must not claim it covered the whole span.
+                if kept:
+                    replay_start, replay_end = kept[0], kept[-1]
         if frame.empty:
             raise ValueError(
                 f"daily replay is empty for {request.start}..{request.end}"
@@ -262,7 +274,7 @@ class LocalDailyEvaluationBackend:
             config,
             executor_factory=self.executor_factory,
         ).run(frame)
-        record = replay.to_record(start=str(request.start), end=replay_end)
+        record = replay.to_record(start=replay_start, end=replay_end)
         with timer.phase("style_analysis"):
             style = replay_style_analysis(
                 replay,
@@ -594,16 +606,24 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
 
     spec = ToolSpec(
         "smoke_backtest",
-        "UNOFFICIAL smoke run of the CURRENT output/ over the first few trading "
-        "days of the research period, on the real replay path: real rolling "
+        "UNOFFICIAL smoke run of the CURRENT output/ over a few trading days of "
+        "the research period, on the real replay path: real rolling "
         "as-of view (each context.asof_dir/<domain>/ is a DIRECTORY of parquet "
         "parts, read it with pd.read_parquet(directory)), real AccountSnapshot "
         "object, same sandbox executor and per-decision timeout as "
-        "a Validation replay. Returns per-day strategy and as-of seconds, order "
-        "counts, the as-of domain directory names, and the exact exception text "
-        "on failure. It commits no revision, creates no Step, cannot be frozen, "
-        "and consumes no replay-years. Use it before batch_validate "
-        "instead of hand-writing a shell smoke test against /mnt/snapshot.",
+        "a Validation replay. It starts at the research period's first trading "
+        "day unless start names a later one, which is how you measure a fit "
+        "where a real batch will run it: a fit whose training window grows with "
+        "the span is far slower late in the research period than on day one, so "
+        "probe a data-dense late window BEFORE spending replay-years on a "
+        "full-span batch. Returns per-day strategy and as-of seconds, order "
+        "counts, the as-of domain directory names, the container resources block "
+        "(peak memory against the container limit, per-fit seconds against the "
+        "fit timeout in force, and GPU memory for a GPU strategy), and the exact "
+        "exception text on failure. It commits no revision, creates no Step, "
+        "cannot be frozen, and consumes no replay-years. Use it before "
+        "batch_validate instead of hand-writing a shell smoke test against "
+        "/mnt/snapshot.",
         {
             "type": "object",
             "properties": {
@@ -612,15 +632,27 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
                     "minimum": 1,
                     "maximum": SMOKE_BACKTEST_MAX_DAYS,
                     "description": (
-                        "Trading days from the start of the research period "
+                        "Trading days to replay from the window's first day "
                         f"(default {SMOKE_BACKTEST_DEFAULT_DAYS})."
                     ),
-                }
+                },
+                "start": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 10,
+                    "description": (
+                        "YYYYMMDD (or YYYY-MM-DD) inside the research period: "
+                        "the window opens at the first trading day at or after "
+                        "it, instead of at the start of the research period. A "
+                        "date outside the research period is refused."
+                    ),
+                },
             },
             "required": [],
             "additionalProperties": False,
         },
         mutating=True,
+        example={"days": 2, "start": "20241008"},
     )
 
     def __init__(
@@ -655,10 +687,11 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
         # Argument validation is the Agent's own mistake and stays on its
         # clock; the replay itself does not.
         days = self._days(arguments)
+        start = self._start(arguments)
         with self.time_budget.pause():
-            return self._invoke_exempt(days)
+            return self._invoke_exempt(days, start)
 
-    def _invoke_exempt(self, days: int) -> ToolResult:
+    def _invoke_exempt(self, days: int, start: str | None = None) -> ToolResult:
         self.runs += 1
         check = self.modification_check.invoke({})
         if not check.ok:
@@ -695,6 +728,7 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
                     revision, schedule=self.schedule, broker_profile=self.broker_profile
                 ),
                 max_days=days,
+                start_day=start,
             )
         except SessionInterrupt:
             raise
@@ -708,13 +742,23 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
                     "counts_against_replay_budget": False,
                     "error": _public_error_text(exc),
                     "hint": _SMOKE_LAYOUT_HINT,
+                    **({"start": start} if start is not None else {}),
+                    # A rehearsal that died on a clock or on a shared card says
+                    # what it was using when it did.
+                    **(
+                        {"resources": resources}
+                        if (resources := strategy_resources_of(exc))
+                        else {}
+                    ),
                 },
             )
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
         result_dir = Path(evaluation.result_ref).parent
         try:
-            return ToolResult(True, value=self._report(evaluation, result_dir, days))
+            return ToolResult(
+                True, value=self._report(evaluation, result_dir, days, start)
+            )
         finally:
             # A smoke run leaves no result behind for the ledger or the Agent to
             # mistake for a Validation.
@@ -735,8 +779,37 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
             )
         return raw
 
+    def _start(self, arguments: Mapping[str, object]) -> str | None:
+        """The probe date, refused unless it is inside the research period.
+
+        The session may measure a fit anywhere in the period it researches, and
+        nowhere else: a date past research end would replay sealed data, and a
+        date before it has no slot.
+        """
+
+        raw = arguments.get("start")
+        if raw is None:
+            return None
+        if not isinstance(raw, str):
+            raise ToolError("smoke_backtest start must be a YYYYMMDD string")
+        try:
+            day = yyyymmdd(raw)
+        except ValueError as exc:
+            raise ToolError(f"smoke_backtest start is not a date: {raw}") from exc
+        span = self.request.validation
+        if not span.start <= day <= span.end:
+            raise ToolError(
+                f"smoke_backtest start {day} is outside the research period "
+                f"{span.start}..{span.end}"
+            )
+        return day
+
     def _report(
-        self, evaluation: EvaluationResult, result_dir: Path, days: int
+        self,
+        evaluation: EvaluationResult,
+        result_dir: Path,
+        days: int,
+        start: str | None,
     ) -> dict[str, object]:
         summary = dict(evaluation.summary)
         phases = summary.get("phase_seconds")
@@ -752,7 +825,7 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
             if replayed
             else {}
         )
-        return {
+        report: dict[str, object] = {
             "status": "ok",
             "official": False,
             "counts_against_replay_budget": False,
@@ -768,6 +841,15 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
             "asof_domains": _smoke_asof_domains(result_dir),
             "hint": _SMOKE_LAYOUT_HINT,
         }
+        if start is not None:
+            report["start"] = start
+        # What the rehearsal cost its container against the limits in force, so
+        # the Agent sizes a batch on a measurement of the real replay container
+        # instead of on the session container it can see from the inside.
+        resources = summary.get("resources")
+        if resources:
+            report["resources"] = resources
+        return report
 
 
 _SMOKE_LAYOUT_HINT = (
@@ -1227,6 +1309,11 @@ BATCH_CANDIDATE_SUMMARY_KEYS = (
     "cost_sensitivity",
     "pnl_concentration",
     "sub_windows",
+    # What the replay cost its container against the limits it ran under: the
+    # peak memory and the per-fit seconds beside the ceilings this batch's own
+    # concurrency put them under. Two arms sized a batch from the session
+    # container's limits instead and lost 20 replay-years to timeouts.
+    "resources",
 )
 # A multi-year span has one sub-window row per July-June year, and a batch
 # multiplies that by the number of candidates. A row keeps the columns a
@@ -1374,7 +1461,12 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "selection_statistics (the freeze gate as it would read this node now, "
         "which the freeze recomputes), and wall seconds; a failed candidate's row "
         "carries its cause and its exact failure text instead — one failure never "
-        "hides the others. Each completed row's result_ref reads back that candidate's full "
+        "hides the others. Every row, failed ones included, also carries resources: "
+        "what the replay cost the strategy container it ran in (peak memory against "
+        "that container's own limit, the seconds of each fit against the fit timeout "
+        "this batch's concurrency put in force, and for a GPU strategy its peak video "
+        "memory and the free memory it was admitted with). "
+        "Each completed row's result_ref reads back that candidate's full "
         "replay record. Selection stays yours: finish_session nominates a row as it "
         "is, and step_rollback(node_id) restores one as the working copy to build "
         "on.",
@@ -2019,7 +2111,18 @@ class BatchValidateTool(SessionTimeBudgetAware):
                 "error": public_error,
             }
         )
-        return {"status": "failed", "cause": cause, "error": public_error}
+        row: dict[str, object] = {
+            "status": "failed",
+            "cause": cause,
+            "error": public_error,
+        }
+        # A failed candidate has no stats block, and it is the row whose
+        # resources matter most: a fit that ran out of clock or a card that was
+        # taken says so here, measured in the container it actually ran in.
+        resources = strategy_resources_of(error)
+        if resources:
+            row["resources"] = resources
+        return row
 
 
 def batch_select_hint(

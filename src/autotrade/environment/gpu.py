@@ -77,13 +77,23 @@ def list_gpus() -> list[dict[str, object]]:
 
 
 def select_gpus(count: int = 1, *, require_name: str | None = None) -> list[int]:
-    """GPU indexes sorted by descending free memory.
+    """GPU indexes sorted by descending free memory."""
+
+    return [index for index, _free in select_gpus_with_free_memory(count, require_name=require_name)]
+
+
+def select_gpus_with_free_memory(
+    count: int = 1, *, require_name: str | None = None
+) -> list[tuple[int, int]]:
+    """``(index, free MiB)`` of the selected devices, sorted by descending free memory.
 
     ``require_name`` restricts selection to devices whose name contains the
     substring (case-insensitive); ``None`` allows any visible NVIDIA GPU. Only
     devices with at least ``MIN_FREE_GPU_MEMORY_MIB`` free are offered; when
     fewer than ``count`` qualify the request fails with every matching
-    device's free memory in the message.
+    device's free memory in the message. The free memory is the admission
+    probe's own reading, which is what a replay reports as the headroom its
+    strategy started with.
     """
     if count <= 0:
         raise ValueError(f"count must be positive: {count}")
@@ -102,7 +112,7 @@ def select_gpus(count: int = 1, *, require_name: str | None = None) -> list[int]
             f"{len(eligible)} qualify; matching GPUs: {roster}"
         )
     selected = sorted(eligible, key=lambda gpu: int(gpu["memory_free_mib"]), reverse=True)[:count]
-    return [int(gpu["index"]) for gpu in selected]
+    return [(int(gpu["index"]), int(gpu["memory_free_mib"])) for gpu in selected]
 
 
 _SIZE_UNITS_MIB = {"bytes": 1 / 2**20, "B": 1 / 2**20, "KiB": 1 / 2**10, "MiB": 1.0, "GiB": 2**10, "TiB": 2**20}

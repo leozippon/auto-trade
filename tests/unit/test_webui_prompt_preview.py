@@ -20,6 +20,7 @@ from autotrade.agent.experiment_facts import (
     BATCH_VALIDATE_FIT_TIMEOUT_NOTE,
     DEADLINE_SECONDS_NOTE,
     REPLAY_YEARS_NOTE,
+    SMOKE_PROBE_NOTE,
 )
 from autotrade.agent.prompts import (
     SESSION_DEFAULT_INSTRUCTION,
@@ -189,8 +190,10 @@ def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path)
         "strategy_inference_timeout_seconds": limits.timeout_seconds,
         "strategy_gpu_count": limits.gpu_count,
         "strategy_cpus": limits.cpus,
+        "strategy_memory_bytes": limits.memory_bytes,
         "batch_validate_max_concurrency": BATCH_VALIDATE_MAX_CONCURRENCY,
         "batch_validate_fit_timeout_note": BATCH_VALIDATE_FIT_TIMEOUT_NOTE,
+        "smoke_backtest_probe_note": SMOKE_PROBE_NOTE,
     }
     # The whole research period, read at research end.
     geometry = facts["research_geometry"]

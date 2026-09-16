@@ -372,7 +372,10 @@ def test_fit_worker_shares_the_inference_container_gpu_devices(tmp_path: Path):
     with (
         patch.object(DockerStrategyExecutor, "_start"),
         patch.object(DockerStrategyExecutor, "_roundtrip") as roundtrip,
-        patch("autotrade.environment.executor.select_gpus", return_value=[3]) as select,
+        patch(
+            "autotrade.environment.executor.select_gpus_with_free_memory",
+            return_value=[(3, 18000)],
+        ) as select,
     ):
         executor = DockerStrategyExecutor(path, config, state_dir=state)
         executor.fit(context)

@@ -443,6 +443,61 @@ def test_a_fit_strategy_without_its_models_fails_explicitly(tmp_path: Path):
         DailyStrategyPipeline(config).run(_daily())
 
 
+def test_the_pipeline_carries_container_telemetry_off_both_paths(tmp_path: Path):
+    """The executor's usage is read after its container is closed, either way.
+
+    A replay that completes puts it in the result's stats; a replay that dies
+    puts it on the exception, because a failed candidate has no result and is
+    the row whose peak and ceiling the session most needs. Both readings have
+    to happen after ``close()``, which is where the cgroup peak is taken and
+    the last moment the container still exists.
+    """
+
+    from autotrade.environment.executor import strategy_resources_of
+    from autotrade.environment.replay.stats import compute_return_stats
+
+    usage = {"peak_memory_bytes": 7883149312, "memory_limit_bytes": 34359738368}
+
+    class _MeasuredExecutor:
+        def __init__(self, *, fail: bool) -> None:
+            self.fail = fail
+            self.closed = False
+            self.read_after_close = False
+
+        def execute(self, _context):
+            if self.fail:
+                raise RuntimeError("strategy fit exceeded 3600s")
+            return []
+
+        def close(self) -> None:
+            self.closed = True
+
+        def resource_usage(self) -> dict[str, object]:
+            self.read_after_close = self.closed
+            return dict(usage)
+
+    path = tmp_path / "main.py"
+    path.write_text("def generate_orders(context):\n    return []\n", encoding="utf-8")
+    config = StrategyExperimentConfig(strategy_path=path, execution_mode="trusted")
+
+    completed = _MeasuredExecutor(fail=False)
+    result = DailyStrategyPipeline(
+        config, executor_factory=lambda _cfg: completed
+    ).run(_daily())
+    assert completed.read_after_close
+    assert compute_return_stats(result)["resources"] == usage
+
+    failed = _MeasuredExecutor(fail=True)
+    with pytest.raises(BacktestError) as caught:
+        DailyStrategyPipeline(config, executor_factory=lambda _cfg: failed).run(_daily())
+    assert failed.read_after_close
+    assert strategy_resources_of(caught.value) == usage
+
+    # A replay with no container to measure reports no block at all.
+    plain = DailyStrategyPipeline(config).run(_daily())
+    assert "resources" not in compute_return_stats(plain)
+
+
 def test_strategy_failure_is_explicit():
     def generate_orders(_context):
         return [{"symbol": "x"}]

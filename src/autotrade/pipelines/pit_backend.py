@@ -72,7 +72,7 @@ from autotrade.environment.sandbox import SandboxConfig
 from autotrade.environment.strategy import CN_TZ, StrategySchedule
 from autotrade.environment.strategy_loader import validate_strategy_package
 
-from .calendar import yyyymmdd
+from .calendar import replay_window, yyyymmdd
 from .config import (
     SNAPSHOT_CACHE_FORMAT_VERSION,
     EvaluationRequest,
@@ -725,7 +725,11 @@ class PITDailyEvaluationBackend:
         self._result_replay_dirs: dict[str, tuple[Path, ...]] = {}
 
     def evaluate(
-        self, request: EvaluationRequest, *, max_days: int | None = None
+        self,
+        request: EvaluationRequest,
+        *,
+        max_days: int | None = None,
+        start_day: str | None = None,
     ) -> EvaluationResult:
         """Replay one revision over its slot, or over a span of slots.
 
@@ -736,11 +740,14 @@ class PITDailyEvaluationBackend:
         to ``request.end`` (the last slot's end), and a slot is decoded only
         once the replay reaches it.
 
-        ``max_days`` truncates the replay to the first N trading days of the
-        window AFTER the slot identity check, so an unofficial smoke run gets
-        the real as-of view, ABI and executor without being able to pass off a
-        short window as a full Validation (the caller decides what the result
-        is allowed to become; see ``SmokeBacktestTool``).
+        ``start_day`` and ``max_days`` truncate the replay to a window inside
+        the span (``calendar.replay_window``) AFTER the slot identity check, so
+        an unofficial smoke run gets the real as-of view, ABI and executor
+        without being able to pass off a short window as a full Validation (the
+        caller decides what the result is allowed to become; see
+        ``SmokeBacktestTool``). A window that opens late still reads the same
+        rolling as-of view the whole span would have built by then: the view
+        decodes every slot up to the first decision it is asked for.
         """
         started_at = utc_now_iso()
         timer = PhaseTimer()
@@ -789,13 +796,17 @@ class PITDailyEvaluationBackend:
             # Broker-side ex-date truth only: it is not a Timeview domain and
             # never reaches the strategy.
             corporate_actions = _span_corporate_actions(replay_dirs, replay_manifests)
+            replay_start = yyyymmdd(request.start)
             replay_end = yyyymmdd(request.end)
             trade_days = sorted(set(_trade_date_keys(daily)))
-            if max_days is not None:
-                trade_days = trade_days[:max_days]
+            if max_days is not None or start_day is not None:
+                trade_days = replay_window(
+                    trade_days, start=start_day, max_days=max_days
+                )
                 daily = daily[_trade_date_keys(daily).isin(set(trade_days))].copy()
-                # A truncated replay must not claim it covered the last quarter.
-                replay_end = trade_days[-1] if trade_days else replay_end
+                # A truncated replay must not claim it covered the whole span.
+                if trade_days:
+                    replay_start, replay_end = trade_days[0], trade_days[-1]
         if daily.empty:
             raise ValueError(f"PIT daily replay is empty for {request.start}..{request.end}")
 
@@ -874,9 +885,7 @@ class PITDailyEvaluationBackend:
                     execution_price=span.price_at if span.minute_sources else None,
                     executor_factory=executor_factory,
                 ).run(daily, corporate_actions=corporate_actions)
-                record = replay.to_record(
-                    start=yyyymmdd(request.start), end=replay_end
-                )
+                record = replay.to_record(start=replay_start, end=replay_end)
             finally:
                 nl_service.close()
                 lock.lock()
