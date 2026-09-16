@@ -344,6 +344,11 @@ class DailyPaperEngine:
         state["decisions"] = [*state["decisions"], {
             "trade_date": trade_date,
             "inference_at": inference_at.isoformat(),
+            # When the run actually wrote this decision, as opposed to the
+            # scheduled PIT instant above: the console reads it to say whether
+            # the session's sheet exists yet. A same-date rerun returns before
+            # deciding, so it is written once.
+            "decided_at": datetime.now(CN_TZ).isoformat(),
             "data_through": prior,
             "generation_id": data.generation_id,
             "cash": cash,

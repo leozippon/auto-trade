@@ -3,7 +3,8 @@
 Books sit side by side under the Paper state root, one directory each
 (``paper.books``). ``books_payload`` is the overview, one row per book. A book's
 page reads it through six projections, each from the book's own files:
-``book_status`` (the status ladder), ``book_payload`` (identity, ``book.json``),
+``book_status`` (the status ladder, and whether the session ahead already has
+its order sheet), ``book_payload`` (identity, ``book.json``),
 ``signal_payload`` (the latest decision's order sheet), ``history_payload``
 (every earlier day's order sheet and fills), ``performance_payload`` (return against
 CSI 300, equity and cash tracks, statistics, and the source experiment's
@@ -144,13 +145,33 @@ def _mapping(value: object) -> dict[str, object]:
     return value if isinstance(value, dict) else {}
 
 
-def _decision_dates(state: dict[str, object] | None) -> list[str]:
+def _decisions(state: dict[str, object] | None) -> list[dict[str, object]]:
     decisions = (state or {}).get("decisions")
     return [
-        str(row["trade_date"])
+        row
         for row in (decisions if isinstance(decisions, list) else ())
         if isinstance(row, dict) and isinstance(row.get("trade_date"), str)
     ]
+
+
+def _decision_dates(state: dict[str, object] | None) -> list[str]:
+    return [str(row["trade_date"]) for row in _decisions(state)]
+
+
+def _today(state: dict[str, object] | None) -> dict[str, object]:
+    """The sheet the operator places at the next open.
+
+    The book decides a session on that session's own morning, so a decision for
+    the current Asia/Shanghai calendar day is the sheet for the session ahead.
+    ``ready`` is that record's existence and nothing else: no deadline, no
+    judgement about how long a run may still take. ``decided_at`` is absent for
+    a decision the engine took before it recorded one."""
+    latest = ([*_decisions(state)] or [{}])[-1]
+    return {
+        "trade_date": _text(latest.get("trade_date")),
+        "decided_at": _utc_iso(_to_utc(latest.get("decided_at"))),
+        "ready": latest.get("trade_date") == datetime.now(CN_TZ).strftime("%Y%m%d"),
+    }
 
 
 # ---------------------------------------------------------------- book
@@ -199,6 +220,9 @@ def _sheet(root: Path, state: dict[str, object], trade_date: str) -> dict[str, o
         "orders": [
             {
                 "execute_at": _text(row["execute_at"]),
+                # Where the operator declares it: the opening call auction that
+                # produces the fill price, or continuous trading.
+                "window": _text(row["window"]),
                 "symbol": _text(row["symbol"]),
                 "name": _text(row["name"]),
                 "action": _text(row["action"]),
@@ -541,7 +565,7 @@ def _environment_state(snapshot: str, state_error: str | None, latest: str | Non
 def book_status(repo_root: Path, book: str, env: str = "paper") -> dict[str, object]:
     root = book_dir(repo_root, book, env)
     snapshot = snapshot_payload(repo_root, book, env)
-    _state, state_error = _read_json(root / PAPER_STATE_NAME)
+    state, state_error = _read_json(root / PAPER_STATE_NAME)
     latest = max([*_dates(root, "orders_")[-1:], *_dates(root, "executions_")[-1:]], default=None)
     return {
         "env": env,
@@ -550,6 +574,9 @@ def book_status(repo_root: Path, book: str, env: str = "paper") -> dict[str, obj
         "error": snapshot["error"] or state_error,
         "generated_at": snapshot["generated_at"],
         "age_seconds": snapshot["age_seconds"],
+        # Whether the session ahead already has its order sheet, and when it
+        # was written; the page shows it before the operator's own deadline.
+        "today": _today(state),
         # Exported so the SPA can quote the alert threshold without
         # duplicating the constant client-side.
         "stale_threshold_seconds": STALE_SNAPSHOT_ALERT_SECONDS,
@@ -593,6 +620,7 @@ def books_payload(repo_root: Path, env: str = "paper") -> dict[str, object]:
             "source": performance["source"],
             "signal_date": signal["trade_date"] if signal else None,
             "order_count": len(signal["orders"]) if signal else None,
+            "today": status["today"],
             "state": status["state"],
             "error": status["error"],
         })

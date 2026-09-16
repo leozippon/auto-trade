@@ -14,7 +14,7 @@
 2. `pit-field-map.md`：逐表可见时点、单位、去重规则与陷阱（唯一权威表述）。
 3. `exploration-plan.md`：不占预算的普查、首轮批次、判定分支、后续轮次。
 4. `sources.md`：本地探针的方法、研究期末以前的逐年读数与复现命令、冒烟实测、诚实的限制。
-5. `starter/`：合同内的最小可运行包（`main.py` + `lib/face.py` + `lib/surprise_control.py` + `lib/trade.py`），**不是**候选本身。它通过 `validate_strategy_package`，并在沙箱镜像里以真实 as-of 布局跑通了「读取 → 波动与报表 → 合成 → 中性化 → 出单」全链路（读数见 `sources.md`）；正式回放的第一步仍然是 `smoke_backtest`。`main.py` 的 `CANDIDATE` 常量在六条腿之间切换，六者除这一行外必须逐字相同。
+5. `starter/`：合同内的最小可运行包（`main.py` + `lib/face.py` + `lib/surprise_control.py` + `lib/trade.py`），**不是**候选本身。它通过 `validate_strategy_package`，并在沙箱镜像里以真实 as-of 布局跑通了「读取 → 波动与报表 → 合成 → 中性化 → 出单」全链路（读数见 `sources.md`）；正式回放的第一步仍然是 `smoke_backtest`。`main.py` 的 `CANDIDATE` 常量在六条腿之间切换，六者除这一行外必须逐字相同。**会话开始时 `output/` 就是这份代码**，`refs/starter/` 只是同一份的只读参考副本。
 
 ## 为什么这是一个新机制家族，以及它有意重开了什么
 
@@ -32,7 +32,7 @@
 - 沙箱无网络。不要写死 `/mnt/agent/workspace`。先核对本轮 `data_summary.json` 与 `unit_reference.json`，再经 `context.asof_dir` 读数，每次读取都给 `columns=`、`filters=` 与日期窗口；as-of 域读失败**不得**回退 `snapshot_dir`。
 - 每一行输入必须 `available_at <= context.inference_at`；判可见只看 `available_at`。逐表规则见 `pit-field-map.md`。
 - 执行时点只用 09:30 与 15:00（本臂不挂分钟域）。Broker 负责 T+1、费用、涨跌停与成交；策略只发订单草图。
-- 不要把 refs 拷进 `output`。
+- 会话开始时 `output/` 已经是 `starter/` 的内容，不必移植；`refs/` 是只读参考，不要再把其中任何文件拷进 `output`。
 
 ## 研究流程与账户
 

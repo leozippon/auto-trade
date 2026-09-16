@@ -14,7 +14,7 @@
 2. `pit-field-map.md`：本轮可用的数据、逐域可见时点、单位与陷阱（唯一权威表述）。
 3. `exploration-plan.md`：不占预算的普查与离线筛选、首轮批次、回放预算。
 4. `sources.md`：对照读数与出处、起步包的沙箱冒烟实测、诚实的限制。
-5. `starter/`（候选名 `o1`）：合同内的最小可运行包（`main.py` + `lib/composite.py` + `lib/trade.py`）：四个信息家族各一条秩腿——现金流盈利质量、60 日残差低波、20 日反转、价值——等权合成、对规模中性化，月度复核的 20 只篮子。它通过 `validate_strategy_package`，并在沙箱镜像里以真实 as-of 路径跑通了「读取 → 合成 → 中性化 → 出单」（读数见 `sources.md`）。**它只是一个能跑的基线，不是推荐的机制**：可以改任何部分，也可以整个换掉；正式回放的第一步仍然是 `smoke_backtest`。
+5. `starter/`（候选名 `o1`）：合同内的最小可运行包（`main.py` + `lib/composite.py` + `lib/trade.py`）：四个信息家族各一条秩腿——现金流盈利质量、60 日残差低波、20 日反转、价值——等权合成、对规模中性化，月度复核的 20 只篮子。它通过 `validate_strategy_package`，并在沙箱镜像里以真实 as-of 路径跑通了「读取 → 合成 → 中性化 → 出单」（读数见 `sources.md`）。**它只是一个能跑的基线，不是推荐的机制**：可以改任何部分，也可以整个换掉；正式回放的第一步仍然是 `smoke_backtest`。**会话开始时 `output/` 就是这份代码**，`refs/starter/` 只是同一份的只读参考副本。
 
 ## 最重要的教训
 
@@ -35,7 +35,7 @@
 - 正式 import 只允许：纯计算标准库、`numpy`、`pandas`、`scipy`、`sklearn`、`lightgbm`、`xgboost`、`statsmodels`、`torch` 及其子模块，以及 `output/` 内自己的模块。本臂 `gpu_count=0`：任何训练都在容器 CPU 上完成，一次 `fit` 不超过 `budgets.strategy_fit_timeout_seconds`（3,600 秒）。
 - 沙箱无网络。不要写死 `/mnt/agent/workspace`。先核对本轮 `data_summary.json` 与 `unit_reference.json`，再经 `context.asof_dir` 读数，每次读取都给 `columns=`、`filters=` 与日期窗口；as-of 域读失败**不得**回退 `snapshot_dir`。
 - 每一行输入必须在推断时点可见；逐域规则见 `pit-field-map.md`。执行时点只用 09:30 与 15:00。Broker 负责 T+1、费用、涨跌停与成交；策略只发订单草图。
-- 不要把 refs 拷进 `output`。
+- 会话开始时 `output/` 已经是 `starter/` 的内容，不必移植；`refs/` 是只读参考，不要再把其中任何文件拷进 `output`。
 
 ## 研究流程与账户
 

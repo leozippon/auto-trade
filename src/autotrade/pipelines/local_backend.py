@@ -28,6 +28,7 @@ from autotrade.environment.artifacts import (
     copy_artifact,
     copy_artifact_snapshot,
     copy_model_artifacts,
+    overlay_artifact,
     readonly_baseline,
     restore_working_artifacts_writable,
 )
@@ -2664,6 +2665,11 @@ class LLMResearchDeveloper:
         if resume is None:
             copy_artifact(source, output_dir)
             copy_model_artifacts(source_models, models_dir)
+            # A reference pack that ships a runnable starter is what the arm
+            # starts from; the template supplies the contract files it keeps.
+            seed_output_from_starter(
+                output_dir, self.workspace_reference, repo_root=self.repo_root
+            )
         restore_working_artifacts_writable(output_dir, models_dir)
         # Pin the read-only contract files to what this session actually
         # received, and record it for the audit: an initial artifact seeds them
@@ -3252,6 +3258,7 @@ def _session_outcome(finish: Mapping[str, object]) -> tuple[str, str | None, str
 
 
 _WORKSPACE_REFS_DIR = "refs"
+_WORKSPACE_STARTER_DIR = "starter"
 _REFERENCE_SKIP_NAMES = frozenset({".git", "__pycache__", "node_modules", ".venv"})
 _REFERENCE_PDF_MAX_BYTES = 256 * 1024
 
@@ -3290,23 +3297,20 @@ def _operating_memory_record(
     }
 
 
-def install_workspace_reference(
-    workspace: str | Path,
+def _resolve_workspace_reference(
     workspace_reference: str | Path | None,
-    *,
     repo_root: str | Path | None = None,
-) -> None:
-    """Copy optional operator notes into ``workspace/refs/`` before sandbox start.
+) -> Path | None:
+    """The reference pack directory, or ``None`` when the parameter is unset.
 
-    An empty ``workspace_reference`` is a no-op. A set path must exist and be a
-    directory, otherwise this fails immediately. The copy writes only ``refs/``,
-    never ``output/``, ``models/``, or ``inputs/``. Each research session has a
-    fresh workspace, so later sessions see the notes only because this hook runs
-    again.
+    One resolution for both things a pack supplies: the read-only ``refs/``
+    tree and the starter that seeds ``output/``. An empty value is a no-op; a
+    set path must exist, be a directory and stay inside the repository,
+    otherwise this fails immediately.
     """
     raw = str(workspace_reference or "").strip()
     if not raw:
-        return
+        return None
     seed = Path(raw)
     if not seed.is_absolute():
         if repo_root is None:
@@ -3324,12 +3328,60 @@ def install_workspace_reference(
         root = Path(repo_root).resolve()
         if seed != root and root not in seed.parents:
             raise ValueError("workspace_reference must stay inside the repository")
+    return seed
+
+
+def install_workspace_reference(
+    workspace: str | Path,
+    workspace_reference: str | Path | None,
+    *,
+    repo_root: str | Path | None = None,
+) -> None:
+    """Copy the optional reference pack into ``workspace/refs/`` before sandbox start.
+
+    The whole pack is installed read-only, ``starter/`` included: the starter
+    that seeds ``output/`` stays here as the reference copy the Agent can diff
+    its working code against, and a read-only copy cannot drift from the pack
+    the arm was created with. The copy writes only ``refs/``, never ``models/``
+    or ``inputs/``; ``output/`` is seeded separately by
+    :func:`seed_output_from_starter`. Each research session has a fresh
+    workspace, so later sessions see the pack only because this hook runs again.
+    """
+    seed = _resolve_workspace_reference(workspace_reference, repo_root)
+    if seed is None:
+        return
     dest = Path(workspace) / _WORKSPACE_REFS_DIR
     if dest.exists():
         raise FileExistsError(f"workspace refs directory already exists: {dest}")
     dest.mkdir()
     _copy_workspace_reference_tree(seed, dest, seed_root=seed)
     chmod_tree(dest, file_mode=0o444, dir_mode=0o555)
+
+
+def seed_output_from_starter(
+    output_dir: str | Path,
+    workspace_reference: str | Path | None,
+    *,
+    repo_root: str | Path | None = None,
+) -> tuple[str, ...]:
+    """Seed a session's ``output/`` from the reference pack's starter package.
+
+    A pack that ships ``starter/main.py`` ships a runnable strategy, so the
+    working copy starts as that package rather than as the bare template: every
+    arm otherwise spent its first substantive turn hand-porting the same files,
+    and the copies it made from the read-only ``refs/`` tree came out
+    unwritable. The template's read-only contract files are not overwritten —
+    ``output/README.md`` remains the strategy contract, whatever the pack
+    carries. Returns the relative paths seeded, empty when there is no pack or
+    the pack ships no starter.
+    """
+    seed = _resolve_workspace_reference(workspace_reference, repo_root)
+    if seed is None:
+        return ()
+    starter = seed / _WORKSPACE_STARTER_DIR
+    if not (starter / "main.py").is_file():
+        return ()
+    return overlay_artifact(starter, output_dir)
 
 
 def _remove_mounted_tree(path: Path) -> None:

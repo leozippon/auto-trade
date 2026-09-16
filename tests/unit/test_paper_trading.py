@@ -16,6 +16,7 @@ from autotrade.paper import DailyPaperEngine, PaperEngineError
 from autotrade.paper.engine import PaperDataNotReady
 from autotrade.paper.orders import (
     LATEST_NAME,
+    order_sheet,
     render_failure,
     render_orders,
     write_orders,
@@ -138,6 +139,16 @@ class _Book:
         return json.loads((self.root / ".paper_state.json").read_text(encoding="utf-8"))
 
 
+def _sheet_book(book: _Book, note: str = "") -> object:
+    """The frozen identity ``render_orders`` reads beside the book's own files."""
+
+    return type("SheetBook", (), {
+        "root": book.root.resolve(), "note": note,
+        "experiment_id": "exp", "artifact_id": "art", "candidate_source": "graduated",
+        "profile": PROFILE, "schedule": StrategySchedule(),
+    })()
+
+
 def test_orders_exist_before_the_session_bars_and_fill_on_the_next_run(tmp_path: Path):
     book = _Book(tmp_path, COUNTER_STRATEGY, sessions=("20260102", *SESSIONS))
     first = book.run("20260105")
@@ -148,9 +159,16 @@ def test_orders_exist_before_the_session_bars_and_fill_on_the_next_run(tmp_path:
     assert first["pending_order_count"] == 1 and first["position_count"] == 0
     assert book.built[-1].closed
 
-    # Idempotent: a decided session is answered from the state alone.
+    # The wall clock the decision was written at, beside the scheduled PIT
+    # instant: an Asia/Shanghai stamp, as every writer's stamp is.
+    decided_at = book.state()["decisions"][-1]["decided_at"]
+    assert decided_at.endswith("+08:00")
+
+    # Idempotent: a decided session is answered from the state alone, so the
+    # later runs of the same morning never re-decide or re-stamp it.
     assert book.engine.run_day("20260105") == first
     assert len(book.built) == 1
+    assert book.state()["decisions"][-1]["decided_at"] == decided_at
 
     book.run("20260106")
     [fill] = book.journal("executions_20260105.jsonl")
@@ -296,17 +314,14 @@ def test_the_order_sheet_matches_the_journal(tmp_path: Path):
     book.run("20260105")
     book.run("20260106")
     book.run("20260107")
-    sheet_book = type("SheetBook", (), {
-        "root": book.root.resolve(), "note": "参考簿（观察中）：graduated, unconfirmed — monitor",
-        "experiment_id": "exp", "artifact_id": "art", "candidate_source": "graduated",
-        "profile": PROFILE, "schedule": StrategySchedule(),
-    })()
+    sheet_book = _sheet_book(book, note="参考簿（观察中）：graduated, unconfirmed — monitor")
     text = render_orders(sheet_book, "20260107")
     assert text.startswith("# Paper 订单 · 2026-01-07（周三）\n\n> 参考簿（观察中）：graduated, unconfirmed — monitor")
     assert "数据截至 2026-01-06（周二） 收盘" in text
     # A held name is quoted at the close the account was marked with (20260106: 12.50).
     assert "总资产 ¥100,149.89，现金 ¥98,899.89，持仓 1 只" in text
     assert "| 09:30 | 000001.SZ | 平安银行 | 卖出 | 100 | 12.50 | ¥1,250.00 |" in text
+    assert "下单窗口：全部 1 笔以当日开盘价成交，请在集合竞价（09:15–09:25）内申报。" in text
     assert "## 成交后目标持仓（0 只）" in text
     assert "重放此前决策 2 次，其中 2 次与账簿记录的订单一致" in text
     idle = render_orders(sheet_book, "20260106")
@@ -317,6 +332,30 @@ def test_the_order_sheet_matches_the_journal(tmp_path: Path):
     assert path.read_text(encoding="utf-8") == (tmp_path / "logs" / LATEST_NAME).read_text(encoding="utf-8") == text
     failure = render_failure(sheet_book, "20260108", PaperDataNotReady("committed data ends at 20260106"))
     assert "未生成" in failure and "PaperDataNotReady: committed data ends at 20260106" in failure
+
+
+def test_the_sheet_says_where_each_order_is_declared(tmp_path: Path):
+    """The operator places these orders by hand, so each one names its window:
+    an order filling at the open is matched by the 09:15-09:25 call auction,
+    any other execute_at is declared once continuous trading opens."""
+
+    source = """def generate_orders(context):
+    day = context.inference_at.strftime("%Y-%m-%d")
+    return [
+        {"symbol": "000001.SZ", "action": "buy", "quantity": 100, "execute_at": day + "T09:30:00+08:00"},
+        {"symbol": "000001.SZ", "action": "buy", "quantity": 100, "execute_at": day + "T14:00:00+08:00"},
+    ]
+"""
+    book = _Book(tmp_path, source, sessions=("20260102", *SESSIONS))
+    book.run("20260105")
+    assert [row["window"] for row in order_sheet(book.root, "20260105")["orders"]] == [
+        "open_auction", "continuous",
+    ]
+    text = render_orders(_sheet_book(book), "20260105")
+    assert (
+        "下单窗口：09:30 成交的 1 笔请在集合竞价（09:15–09:25）内申报，"
+        "其余 1 笔在连续竞价（09:30 起）按各自时间下单。"
+    ) in text
 
 
 def test_a_pre_open_book_reads_a_real_pit_window_without_the_session_bars(tmp_path: Path):

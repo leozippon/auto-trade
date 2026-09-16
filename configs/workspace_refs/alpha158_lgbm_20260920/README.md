@@ -10,7 +10,7 @@
 2. `pit-field-map.md`：逐表可见时点、单位、去重规则与陷阱（唯一权威表述）。
 3. `exploration-plan.md`：不占预算的普查、首轮批次、判定分支与回放预算。
 4. `sources.md`：方向研究的研究期读数与复现命令、沙箱冒烟实测、诚实的限制。
-5. `starter/`：合同内的最小可运行包，**就是**主候选 `l1`：`main.py` + `lib/data.py`（面板与特征，训练与决策共用）、`lib/features.py`（Alpha158）、`lib/vipf2.py`、`lib/mfflow.py`、`lib/newage.py`、`lib/labels.py`、`lib/common.py`、`lib/score_lgbm.py`（训练与打分）、`lib/trade.py`（周度篮子）。它通过 `validate_strategy_package`，并在沙箱镜像里以真实 as-of 路径跑通了「读取 → 训练 → 打分 → 出单」与一次季度重训（读数见 `sources.md`）；正式回放的第一步仍然是 `smoke_backtest`。每个变体只改 `main.py` 文档串里列出的一个常量。
+5. `starter/`：合同内的最小可运行包，**就是**主候选 `l1`：`main.py` + `lib/data.py`（面板与特征，训练与决策共用）、`lib/features.py`（Alpha158）、`lib/vipf2.py`、`lib/mfflow.py`、`lib/newage.py`、`lib/labels.py`、`lib/common.py`、`lib/score_lgbm.py`（训练与打分）、`lib/trade.py`（周度篮子）。它通过 `validate_strategy_package`，并在沙箱镜像里以真实 as-of 路径跑通了「读取 → 训练 → 打分 → 出单」与一次季度重训（读数见 `sources.md`）；正式回放的第一步仍然是 `smoke_backtest`。每个变体只改 `main.py` 文档串里列出的一个常量。**会话开始时 `output/` 就是这份代码**，`refs/starter/` 只是同一份的只读参考副本。
 
 ## 机制
 
@@ -26,7 +26,7 @@
 - 一次 `fit` 必须在 `budgets.strategy_fit_timeout_seconds`（3,600 秒）内完成，一次复核决策在单次推断上限内完成；起步包的实测见 `sources.md`，加特征或加长窗口时先在冒烟里量。
 - 沙箱无网络。不要写死 `/mnt/agent/workspace`。先核对本轮 `data_summary.json` 与 `unit_reference.json`，再经 `context.asof_dir` 读数，每次读取都给 `columns=`、`filters=` 与日期窗口；as-of 域读失败**不得**回退 `snapshot_dir`。
 - 每一行输入必须在推断时点可见；逐表规则见 `pit-field-map.md`。执行时点只用 09:30 与 15:00。Broker 负责 T+1、费用、涨跌停与成交；策略只发订单草图。
-- 不要把 refs 拷进 `output`。
+- 会话开始时 `output/` 已经是 `starter/` 的内容，不必移植；`refs/` 是只读参考，不要再把其中任何文件拷进 `output`。
 
 ## 研究流程与账户
 

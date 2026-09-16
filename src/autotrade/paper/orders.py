@@ -11,6 +11,9 @@ from collections.abc import Iterable, Mapping
 from datetime import date, datetime
 from pathlib import Path
 
+from autotrade.environment.replay.engine import MARKET_OPEN
+from autotrade.environment.strategy import CN_TZ
+
 from .book import Book
 from .engine import PAPER_STATE_NAME, REFERENCE_KEY
 from .storage import read_json, read_jsonl
@@ -21,10 +24,27 @@ DISCLAIMER = (
     "参考价为前一交易日收盘价；账簿按当日开盘价撮合，涨跌停、停牌或资金不足时订单会被拒，"
     "金额与现金均为估算，未计佣金、印花税与滑点。"
 )
+# When the operator has to declare an order by hand. An order that fills at the
+# session's open is matched by the 09:15-09:25 opening call auction, whose
+# result is that day's open price, so it has to be declared before 09:25; every
+# other ``execute_at`` is declared from 09:30, once continuous trading opens.
+OPEN_AUCTION = "open_auction"
+CONTINUOUS = "continuous"
 
 
 def orders_file_name(trade_date: str) -> str:
     return f"{trade_date}_orders.md"
+
+
+def order_window(execute_at: datetime) -> str:
+    """One order's declaration window, from the time it asks to fill at.
+
+    The same comparison the fill model makes (``resolve_execution_price``):
+    exactly 09:30 is the day's open, anything else is an intraday or closing
+    timestamp the operator declares during continuous trading.
+    """
+
+    return OPEN_AUCTION if execute_at.astimezone(CN_TZ).time() == MARKET_OPEN else CONTINUOUS
 
 
 def order_sheet(
@@ -69,7 +89,8 @@ def order_sheet(
         if notional is not None:
             flows[action] += notional
         orders.append({
-            "execute_at": str(row["execute_at"]), "symbol": symbol, "name": name(symbol), "action": action,
+            "execute_at": str(row["execute_at"]), "window": order_window(datetime.fromisoformat(str(row["execute_at"]))),
+            "symbol": symbol, "name": name(symbol), "action": action,
             "quantity": quantity, "reference_price": quote, "notional": notional,
         })
     target = []
@@ -130,6 +151,8 @@ def render_orders(book: Book, trade_date: str) -> str:
     if rows:
         lines += [
             f"## 订单（{len(rows)} 笔）",
+            "",
+            _window_note(rows),
             "",
             "| 时间 | 代码 | 名称 | 方向 | 股数 | 参考价 | 约计金额 |",
             "| --- | --- | --- | --- | ---: | ---: | ---: |",
@@ -198,6 +221,22 @@ def write_orders(orders_dir: str | Path, trade_date: str, text: str) -> Path:
     return target
 
 
+def _window_note(orders: Iterable[Mapping[str, object]]) -> str:
+    """One line telling the operator when to declare this sheet's orders."""
+
+    windows = [order["window"] for order in orders]
+    auction = windows.count(OPEN_AUCTION)
+    continuous = len(windows) - auction
+    if not continuous:
+        return f"下单窗口：全部 {auction} 笔以当日开盘价成交，请在集合竞价（09:15–09:25）内申报。"
+    if not auction:
+        return f"下单窗口：全部 {continuous} 笔在连续竞价（09:30 起）按各自时间下单。"
+    return (
+        f"下单窗口：09:30 成交的 {auction} 笔请在集合竞价（09:15–09:25）内申报，"
+        f"其余 {continuous} 笔在连续竞价（09:30 起）按各自时间下单。"
+    )
+
+
 def _positions_after(positions: Mapping[str, int], orders: Iterable[Mapping[str, object]]) -> dict[str, int]:
     """Holdings once every order fills in full."""
 
@@ -227,4 +266,14 @@ def _price(value: float | None) -> str:
     return "—" if value is None else f"{value:.2f}"
 
 
-__all__ = ["LATEST_NAME", "order_sheet", "orders_file_name", "render_failure", "render_orders", "write_orders"]
+__all__ = [
+    "CONTINUOUS",
+    "LATEST_NAME",
+    "OPEN_AUCTION",
+    "order_sheet",
+    "order_window",
+    "orders_file_name",
+    "render_failure",
+    "render_orders",
+    "write_orders",
+]

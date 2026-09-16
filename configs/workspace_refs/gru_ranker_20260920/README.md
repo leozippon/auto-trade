@@ -10,7 +10,7 @@
 2. `pit-field-map.md`：逐表可见时点、单位与陷阱（唯一权威表述）。
 3. `exploration-plan.md`：不占预算的普查、首轮批次、判定分支与回放预算。
 4. `sources.md`：方向研究的研究期读数与复现命令、文献与出处、沙箱冒烟实测、诚实的限制。
-5. `starter/`：合同内的最小可运行包（`main.py` + `lib/panel.py`、`lib/model.py`、`lib/tree.py`、`lib/alpha158.py`、`lib/trade.py`），**不是**候选本身。它通过 `validate_strategy_package`，并在沙箱镜像里以 `gpu_count=1` 走真实 as-of 路径跑通了「读取 → 训练 → 打分 → 出单」与一次季度重训（读数见 `sources.md`）；正式回放的第一步仍然是 `smoke_backtest`。`main.py` 的 `CANDIDATE` 常量在 `g1`、`c_lgbm`、`v_ens` 之间切换，三者除这一行外必须逐字相同。
+5. `starter/`：合同内的最小可运行包（`main.py` + `lib/panel.py`、`lib/model.py`、`lib/tree.py`、`lib/alpha158.py`、`lib/trade.py`），**不是**候选本身。它通过 `validate_strategy_package`，并在沙箱镜像里以 `gpu_count=1` 走真实 as-of 路径跑通了「读取 → 训练 → 打分 → 出单」与一次季度重训（读数见 `sources.md`）；正式回放的第一步仍然是 `smoke_backtest`。`main.py` 的 `CANDIDATE` 常量在 `g1`、`c_lgbm`、`v_ens` 之间切换，三者除这一行外必须逐字相同。**会话开始时 `output/` 就是这份代码**，`refs/starter/` 只是同一份的只读参考副本。
 
 ## 机制与它为什么可能在漂移下留住边际
 
@@ -28,7 +28,7 @@
 - 沙箱无网络。不要写死 `/mnt/agent/workspace`。先核对本轮 `data_summary.json` 与 `unit_reference.json`，再经 `context.asof_dir` 读数，每次读取都给 `columns=`、`filters=` 与日期窗口；as-of 域读失败**不得**回退 `snapshot_dir`。
 - 每一行输入必须在推断时点可见；逐表规则见 `pit-field-map.md`。执行时点只用 09:30 与 15:00。Broker 负责 T+1、费用、涨跌停与成交；策略只发订单草图。
 - 固定种子：三个 GRU 种子与 LightGBM 种子写死在代码里。cuDNN 的 GRU 内核在重复回放之间仍可能有细小差异，逐位复现不保证，读数以同批比较为准。
-- 不要把 refs 拷进 `output`。
+- 会话开始时 `output/` 已经是 `starter/` 的内容，不必移植；`refs/` 是只读参考，不要再把其中任何文件拷进 `output`。
 
 ## 研究流程与账户
 

@@ -15,16 +15,28 @@ CRON_TZ=Asia/Shanghai
 REPO_ROOT=/Data2/lzp/ADMCubeQuant
 QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 
-# 05:40, after the nightly chain has committed the previous session: the
-# evening update (23:35, visible from 03:05), the intraday-flow build (02:45),
-# the PIT event build (03:35, about 30 min), the revision sentinel (04:00) and
-# the text audit (05:00). Each book takes its PIT build (about 10 min), the
-# replay of its earlier decisions and one decision; on a refit day the fit adds
-# 10-40 min, capped at the fit timeout init froze into that book's book.json
-# from its experiment's strategy_fit_timeout_seconds (7200 s for the book in
-# place today). Books run one after another, so a few books still end before
-# 08:30. 07:40 is the retry for a morning whose data landed late: flock skips
-# it while the first run is still working, and it is a no-op re-render for
-# every book whose session is already decided.
+# The operator declares the sheet's orders by hand: an at-open order goes into
+# the 09:15-09:25 call auction, everything else from 09:30. The three runs
+# therefore all have to land before 09:15.
+#
+# 05:40 is the first, after the nightly chain has committed the previous
+# session: the evening update (23:35, visible from 03:05), the intraday-flow
+# build (02:45), the PIT event build (03:35), the revision sentinel (04:00) and
+# the text audit (05:00). Each book takes its PIT build, the replay of its
+# earlier decisions and one decision -- 8-13 min measured on a quiet host, 42
+# min with four research arms on the box; on a refit day the fit adds 10-40
+# min, capped at the fit timeout init froze into that book's book.json from its
+# experiment's strategy_fit_timeout_seconds (7200 s for the book in place
+# today). Books run one after another.
+#
+# 07:40 and 08:35 are retries for a morning whose data landed late or whose
+# first run was slow: flock skips a retry while an earlier run is still
+# working, and a book whose session is already decided is a no-op re-render,
+# never a second decision. 08:35 is the last one that still leaves the sheet in
+# the operator's hands before the auction closes. The PIT event build is the
+# part of the chain that can push past 05:40 under load (03:35-05:32 on a quiet
+# night, 03:35-07:14 on 2026-09-16 with four arms running); a night where it
+# runs past 08:35 needs the arms throttled, not another retry.
 40 5 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && flock -n .runtime/paper/cron.lock $QUANT_PYTHON scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1
 40 7 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && flock -n .runtime/paper/cron.lock $QUANT_PYTHON scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1
+35 8 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && flock -n .runtime/paper/cron.lock $QUANT_PYTHON scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1

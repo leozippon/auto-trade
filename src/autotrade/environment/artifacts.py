@@ -419,6 +419,27 @@ def copy_artifact(source_root: str | Path, dest_root: str | Path) -> None:
     )
 
 
+def overlay_artifact(source_root: str | Path, dest_root: str | Path) -> tuple[str, ...]:
+    """Copy one strategy artifact's files onto another, keeping the contract.
+
+    Unlike :func:`copy_artifact` the destination is not replaced: the read-only
+    contract files it was seeded with stay as the template wrote them, and any
+    other file it already carries survives. This is how a session's ``output/``
+    starts as the reference pack's runnable starter package instead of the bare
+    template. Returns the relative paths copied.
+    """
+    source_root = Path(source_root)
+    dest_root = Path(dest_root)
+    relpaths = tuple(
+        sorted(_artifact_files(source_root, reject_runtime_cache=False) - READONLY_FILES)
+    )
+    for relpath in relpaths:
+        target = dest_root / relpath
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_root / relpath, target)
+    return relpaths
+
+
 def copy_model_artifacts(source_root: str | Path | None, dest_root: str | Path) -> None:
     """Copy optional model artifact directories, replacing any existing copy.
 
