@@ -151,7 +151,7 @@ a:hover {
  font-size: 0.75rem;
  line-height: 1.4;
  color: var(--muted);
- padding: 0.55rem 1rem 0.7rem;
+ padding: 0.55rem 1rem calc(0.7rem + env(safe-area-inset-bottom, 0px));
  border-top: 1px solid var(--border);
  background: var(--panel);
 }
@@ -182,7 +182,9 @@ a:hover {
  border-bottom: 1px solid var(--border);
  padding: 0.8rem max(1rem, env(safe-area-inset-right, 0px))
   0.8rem max(1rem, env(safe-area-inset-left, 0px));
- padding-top: max(0.8rem, env(safe-area-inset-top, 0px));
+ /* The bar owns the notch: its inset is added to its padding, so the brand row
+    clears the status bar instead of being pushed under it. */
+ padding-top: calc(0.8rem + env(safe-area-inset-top, 0px));
  position: fixed;
  top: 0;
  left: 0;
@@ -2950,17 +2952,38 @@ details.issue-evidence > summary:hover {
  #trading-page .card .tiles {
   grid-template-columns: repeat(2, 1fr);
  }
+ /* The trace keeps its own scroll inside a box the viewport bounds — dvh, so a
+    phone's collapsing address bar cannot push its foot off the screen. */
  .trace-box {
-  max-height: 50vh;
+  max-height: 60dvh;
+ }
+ .trace-subagent-dock {
+  max-height: 30dvh;
  }
  .modal-mask {
   padding: 0;
  }
- .modal {
+ /* Every modal is a full-screen sheet here, the two wide ones included; its
+    header and footer carry the notch and the home indicator, so the close
+    button and the actions stay inside the safe area. */
+ .modal,
+ .modal.subagent-modal,
+ .modal.prompt-modal {
   width: 100%;
   max-height: 100dvh;
   height: 100dvh;
   border-radius: 0;
+ }
+ .modal header {
+  padding-top: calc(1rem + env(safe-area-inset-top, 0px));
+ }
+ .modal footer {
+  padding-bottom: calc(0.85rem + env(safe-area-inset-bottom, 0px));
+ }
+ /* One scroller in the sheet: the child's trace grows to its content and the
+    modal body scrolls it, instead of a short box scrolling inside a scroll. */
+ .trace-box.subagent-trace-box {
+  max-height: none;
  }
  .charts-row {
   grid-template-columns: 1fr;
@@ -2991,10 +3014,30 @@ details.issue-evidence > summary:hover {
 }
 @media (max-width: 560px) {
  .topbar {
-  padding: 0.6rem 0.75rem;
+  padding: 0.6rem max(0.75rem, env(safe-area-inset-right, 0px)) 0.6rem
+   max(0.75rem, env(safe-area-inset-left, 0px));
+  padding-top: calc(0.6rem + env(safe-area-inset-top, 0px));
  }
  .brand {
   font-size: 1.1rem;
+ }
+ /* The four destinations keep one row of their own and scroll sideways rather
+    than wrapping the bar to a third row; the scrollbar itself would be a rule
+    across the bar, so it is hidden. A phone scales the interface through its
+    own browser, so the zoom selector goes with it. */
+ .topnav {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+ }
+ .topnav::-webkit-scrollbar {
+  display: none;
+ }
+ .topnav a {
+  flex: none;
+ }
+ .zoom-select {
+  display: none;
  }
  main {
   margin-top: 0.9rem;
@@ -3003,15 +3046,58 @@ details.issue-evidence > summary:hover {
  .card {
   padding: var(--space-3);
  }
- /* comfortable touch targets */
- .btn {
-  min-height: 2.6rem;
+ /* Touch targets: a fingertip is 44px wherever it lands, so these minimums are
+    in px — unlike type and spacing, they must not follow the zoom selector
+    down. Everything that acts on a tap holds the floor: buttons, the
+    navigation, chips, and the rows of every list that opens something. */
+ .btn,
+ .stepper-row,
+ .session-item,
+ .memory-aside-row,
+ .step-node,
+ .stepper.mini .stepper-node,
+ .trace-replay-toggle {
+  min-height: 44px;
  }
- .btn.small {
-  min-height: 2.2rem;
+ .topnav a,
+ .file-chip,
+ label.check-item,
+ label.issue-filter,
+ .trace-tools label {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+ }
+ /* A disclosure keeps its marker, so it grows by its own padding rather than
+    by becoming a flex box. */
+ details.fold > summary,
+ details.advanced > summary,
+ details.memory-aside > summary,
+ details.issue-evidence > summary,
+ .compaction-fold > summary,
+ .trace-block details > summary {
+  min-height: 44px;
+  padding-top: 0.75rem;
+  padding-bottom: 0.75rem;
  }
  .control-bar {
   gap: 0.45rem;
+ }
+ /* The run's controls take the row's whole width with room to miss between
+    them, and the one that kills the worker drops to a line of its own below
+    the three that only ask it to stop. */
+ .control-actions {
+  width: 100%;
+  margin-left: 0;
+  gap: var(--space-3) var(--space-2);
+ }
+ .control-actions > .btn {
+  flex: 1 1 auto;
+ }
+ .control-actions > .btn.danger {
+  order: 1;
+  flex-basis: 100%;
+  margin-top: var(--space-2);
  }
  #toast-root {
   left: 0.75rem;
@@ -3068,5 +3154,70 @@ details.issue-evidence > summary:hover {
  }
  .memory-section {
   margin-top: 1.2rem;
+ }
+ /* A data table still scrolls sideways rather than wrapping its cells, so the
+    first column — the code, the direction, the time — stays put and the reader
+    keeps the key of the row being read at the far end of it. */
+ table.data th:first-child,
+ table.data td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--panel);
+  border-right: 1px solid var(--row-border);
+ }
+ table.data th,
+ table.data td {
+  padding-top: 0.7rem;
+  padding-bottom: 0.7rem;
+ }
+ /* The day's orders are executed by hand elsewhere, so the one button that
+    carries them out of the page spans the panel head. */
+ .copy-orders {
+  flex: 1 1 100%;
+ }
+ /* Form controls at 16px: below it a phone browser zooms the page in on focus
+    and leaves the reader scrolled sideways in a field. */
+ .field input[type="text"],
+ .field input[type="time"],
+ .field input[type="number"],
+ .field select,
+ .field textarea,
+ .control-bar select,
+ .input,
+ textarea.directive,
+ textarea.directive.skill-editor {
+  font-size: 16px;
+ }
+ /* The root is 14px here, so the smallest steps of the desktop scale would
+    land near 10px. Captions hold a 12px floor instead. */
+ .site-footer,
+ .badge,
+ .gpu-pick-badge,
+ .stat-chip,
+ .order-side,
+ .tile-label,
+ .budget-row,
+ .budget-bars.mini .budget-row,
+ .span-bar,
+ .card .chart-legend,
+ .issue-meta,
+ .issue-count,
+ .inject-count,
+ .inject-queue,
+ .step-chip,
+ .field .help {
+  font-size: 12px;
+ }
+}
+/* Too narrow for five names under five dots: the stepper keeps the dots, which
+   carry the shape of the pipeline, and only the step the arm is on is named. */
+@media (max-width: 360px) {
+ .stepper.mini .stepper-label {
+  display: none;
+ }
+ .stepper.mini .stepper-node.running .stepper-label,
+ .stepper.mini .stepper-node.waiting .stepper-label {
+  display: block;
  }
 }

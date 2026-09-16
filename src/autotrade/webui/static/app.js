@@ -657,9 +657,11 @@ function fmtDateTick(date, withYear) {
 
 /* A chart draws into a fixed viewBox that scales to its box, so a viewBox far
    wider than a phone shrinks its text below legibility; on a narrow viewport
-   the chart is drawn about as wide as the screen instead. */
+   the chart is drawn about as wide as the box it lands in — the screen less
+   the page gutter and the panel's own padding — so its ticks keep the size
+   they were drawn at. */
 function fitChartWidth(width) {
-  return Math.min(width, Math.max(360, window.innerWidth));
+  return Math.min(width, Math.max(320, window.innerWidth - 48));
 }
 
 function equityChart(payload, opts = {}) {
@@ -6110,7 +6112,7 @@ function memoryPaneView() {
       meta: "",
       buttons: [],
       body: [
-        el("div", { class: "empty compact" }, "从左侧选择一个条目"),
+        el("div", { class: "empty compact" }, "从目录中选择一个条目"),
       ],
     };
   const label = selection.kind === "curated" ? selection.name : selection.skill;
@@ -6980,7 +6982,7 @@ function copyOrdersButton(orders) {
   return el(
     "button",
     {
-      class: "btn small",
+      class: "btn small copy-orders",
       title: "代码、名称、方向、股数、参考价，一行一笔",
       onclick: async (event) => {
         const button = event.currentTarget;
