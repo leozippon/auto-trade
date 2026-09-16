@@ -159,14 +159,14 @@ def _decision_dates(state: dict[str, object] | None) -> list[str]:
 
 
 def _today(state: dict[str, object] | None) -> dict[str, object]:
-    """The sheet the operator places at the next open.
+    """The book's latest order sheet, and whether it is the session ahead's.
 
     The book decides a session on that session's own morning, so a decision for
-    the current Asia/Shanghai calendar day is the sheet for the session ahead.
-    ``ready`` is that record's existence and nothing else: no deadline, no
-    judgement about how long a run may still take. ``decided_at`` is absent for
-    a decision the engine took before it recorded one."""
-    latest = ([*_decisions(state)] or [{}])[-1]
+    the current Asia/Shanghai calendar day is the sheet the operator places at
+    the next open. ``ready`` is that record's existence and nothing else: no
+    deadline, no judgement about how long a run may still take. ``decided_at``
+    is absent for a decision the engine took before it recorded one."""
+    latest = (_decisions(state) or [{}])[-1]
     return {
         "trade_date": _text(latest.get("trade_date")),
         "decided_at": _utc_iso(_to_utc(latest.get("decided_at"))),
