@@ -78,7 +78,7 @@
 | 3 逐年 | 四个研究年的中性化超额**全部为正**（4/4，不是 3/4） | `stats.sub_windows` |
 | 4 回撤 | 完整研究期最大回撤 ≤ **22 %** | `stats.max_drawdown` |
 | 5 行业集中度 | `stats.benchmark.top_industry_weight` ≤ **0.30** | `stats.benchmark` |
-| 6 规模与 β | `abs(stats.benchmark.size_tilt)` ≤ **0.30**，且 `stats.benchmark.beta` 落在 **[0.7, 1.2]** | `stats.benchmark` |
+| 6 规模与 β | `abs(stats.benchmark.size_tilt)` ≤ **0.70**，且 `stats.benchmark.beta` ≤ **1.2** | `stats.benchmark` |
 | 7 成本 | `cost_sensitivity.excess_at_2x_slippage > 0` | `stats.cost_sensitivity` |
 | 8 活动量 | 完整研究期平均每年完成的回合数 ≥ **12**；意图买单拒单率 ≤ 30 %；平均总仓位 ≥ 0.5 | `stats.trade_count` ÷ 研究年数、`stats.order_count` 与执行明细、`stats.exposure.avg_gross` |
 | 9 实现底线 | 每个复核日第 2 步之后可选名字 ≥ 200；每张买单的 `tercile_cover` = 3；多日回放上每次决策的**平均**墙钟 < 30 秒 | 第 0 轮普查与 `smoke_backtest` |

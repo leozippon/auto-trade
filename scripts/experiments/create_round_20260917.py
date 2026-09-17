@@ -122,6 +122,30 @@ decides how much each forward verdict is worth.
 
 - pv_exposure_budget_20260917: 本臂**按设计就是被污染的，它的前推裁决是一次流水线校准，不是独立证据**。这个家族承自旧流程的一个冻结产物，那条谱系的选择用到过研究期之后的数据，运营方已经部分知道它此后的样子，而 `alpha158_lgbm_20260921` 此刻正在同一个前推窗口上跑同一个家族。选择在这里测敞口预算，还是在看过两条冻结产物都因一次规模与板块摆动而前推失败之后做出的。本臂仍能干净回答的是一个研究期问题：在本项目唯一一个研究期信息比率超过 1 的构造上，一层敞口预算要付多少信息比率与换手代价。这个包必须写成「那个答案不依赖前推裁决」的样子。
 
+Exposure-budget amendment, 2026-09-17, after every arm below had been created.
+Two of the budget's three bounds are relaxed in all four packs and in the
+directives above: `|size_tilt|` moves from 0.30 to 0.70 and the beta band
+[0.7, 1.2] becomes `beta <= 1.2`. `top_industry_weight <= 0.30` is unchanged --
+it is the one bound with a mechanism the verdict statistic cannot see, and
+every diversified book on record sits at 0.09-0.15 against it.
+
+The amendment was decided from evidence outside the running arms, not from
+anything they produced: every scored book this repository has ever measured
+reads `size_tilt` above 0.30, so the bound excluded the whole record rather
+than a demonstrated failure; the two frozen books that read 0.44 and 0.447 had
+opposite forward outcomes, so at that level the statistic separates nothing;
+and the loading that moves the verdict -- the size beta -- is already regressed
+out of every figure the freeze gate and the forward test read, which is why a
+book's own size position is a money question rather than a verdict question.
+The beta floor guarded the same already-regressed-out quantity; `mean_gross >=
+0.5` still blocks a closet-cash book, and the 1.2 ceiling still guards a raw
+drawdown.
+
+The four arms created before the amendment were sent the pre-amendment
+directive, which their `hitl/params.json` keeps as the record of what they were
+told; each was given the new numbers through an operator message and reads the
+amended pack text in `refs/` after its restart.
+
 Usage:
   PYTHONPATH=src ~/miniconda3/envs/quant/bin/python \\
       scripts/experiments/create_round_20260917.py <port> [--dry-run] [--fill] [experiment_id ...]
@@ -168,7 +192,7 @@ ARMS: dict[str, dict[str, object]] = {
             "三个对照必须同批同跨度跑：同分数同池但不设桶的 c_uncapped（机制归因）、同样的桶换成固定随机分数的 "
             "c_rand（证明桶本身不是边际）、无分数的等距池篮子 c_pool（组合尺度底线）。提名硬门包括完整研究期"
             "信息比率 ≥ 0.95、四个研究年的中性化超额全为正、最大回撤 ≤ 22 %、stats.benchmark.top_industry_weight "
-            "≤ 0.30、|stats.benchmark.size_tilt| ≤ 0.30，并且在信息比率上严格高于三个对照——判据、变体轴与本臂"
+            "≤ 0.30、|stats.benchmark.size_tilt| ≤ 0.70，并且在信息比率上严格高于三个对照——判据、变体轴与本臂"
             "终止规则只以 refs/families.md 为准，先读它与 refs/README.md。会话开始时 output/ 就是 refs/starter "
             "这份代码，直接在它上面改（四条腿只差 main.py 的 CANDIDATE 一行），先 smoke_backtest，再按 "
             "refs/exploration-plan.md 做完整研究期验证。families.md 的禁止表逐条带着关掉它的研究期读数，不得重开；"
@@ -185,7 +209,7 @@ ARMS: dict[str, dict[str, object]] = {
             "不筛的同一个篮子 c_noscreen（机制归因）、把筛子换成同样比例永久随机排除的 c_placebo"
             "（证明要紧的是被剔掉的那些名字而不是选择集变小）、无分数的等距池篮子 c_pool。提名硬门包括"
             "完整研究期信息比率 ≥ 0.95、四个研究年的中性化超额全为正、最大回撤 ≤ 22 % 且严格低于 "
-            "c_noscreen、stats.benchmark.top_industry_weight ≤ 0.30、|stats.benchmark.size_tilt| ≤ 0.30，"
+            "c_noscreen、stats.benchmark.top_industry_weight ≤ 0.30、|stats.benchmark.size_tilt| ≤ 0.70，"
             "在信息比率上严格高于三个对照，并且每个筛子每次复核剔除 < 筛前池的 15 %——判据、变体轴与"
             "本臂终止规则只以 refs/families.md 为准，先读它与 refs/README.md；三个面的可见时点、单位与"
             "去重陷阱只以 refs/pit-field-map.md 为准。诚实的先验是弱的：包里带着本仓库同形状筛子的反向"
@@ -203,7 +227,7 @@ ARMS: dict[str, dict[str, object]] = {
             "尺度上成立的日频策略。先读 refs/README.md 与 refs/standards.md——证据标准、已关闭家族表、"
             "每个候选都要比的对照、敞口预算、提名条件与收尾规则只以 standards.md 为准：完整研究期信息"
             "比率 ≥ 0.95、四个研究年的中性化超额全为正、单一申万一级行业时间加权权重 ≤ 0.30、"
-            "|size_tilt| ≤ 0.30、β ∈ [0.7, 1.2] 都是硬门，空对照只作诊断。筛子与叠加规则和排序分数"
+            "|size_tilt| ≤ 0.70、β ≤ 1.2 都是硬门，空对照只作诊断。筛子与叠加规则和排序分数"
             "一样是一等候选。每个方向在花任何回放预算之前，必须先离线读出它在 15 只与 30 只上的逐研究年"
             "组合尺度读数（refs/exploration-plan.md）。refs/starter 的 o1 只是能跑的基线，不是推荐的"
             "机制：先 smoke_backtest。standards.md 点名禁止的家族不得重开，其中包括 Alpha158 一类的"
@@ -217,7 +241,7 @@ ARMS: dict[str, dict[str, object]] = {
             "尺度上成立的日频策略。先读 refs/README.md 与 refs/standards.md——证据标准、已关闭家族表、"
             "每个候选都要比的对照、敞口预算、提名条件与收尾规则只以 standards.md 为准：完整研究期信息"
             "比率 ≥ 0.95、四个研究年的中性化超额全为正、单一申万一级行业时间加权权重 ≤ 0.30、"
-            "|size_tilt| ≤ 0.30、β ∈ [0.7, 1.2] 都是硬门，空对照只作诊断。筛子与叠加规则和排序分数"
+            "|size_tilt| ≤ 0.70、β ≤ 1.2 都是硬门，空对照只作诊断。筛子与叠加规则和排序分数"
             "一样是一等候选。每个方向在花任何回放预算之前，必须先离线读出它在 15 只与 30 只上的逐研究年"
             "组合尺度读数（refs/exploration-plan.md）。refs/starter 的 o1 只是能跑的基线，不是推荐的"
             "机制：先 smoke_backtest。standards.md 点名禁止的家族不得重开，其中包括 Alpha158 一类的"
@@ -231,7 +255,7 @@ ARMS: dict[str, dict[str, object]] = {
             "尺度上成立的日频策略。先读 refs/README.md 与 refs/standards.md——证据标准、已关闭家族表、"
             "每个候选都要比的对照、敞口预算、提名条件与收尾规则只以 standards.md 为准：完整研究期信息"
             "比率 ≥ 0.95、四个研究年的中性化超额全为正、单一申万一级行业时间加权权重 ≤ 0.30、"
-            "|size_tilt| ≤ 0.30、β ∈ [0.7, 1.2] 都是硬门，空对照只作诊断。筛子与叠加规则和排序分数"
+            "|size_tilt| ≤ 0.70、β ≤ 1.2 都是硬门，空对照只作诊断。筛子与叠加规则和排序分数"
             "一样是一等候选。每个方向在花任何回放预算之前，必须先离线读出它在 15 只与 30 只上的逐研究年"
             "组合尺度读数（refs/exploration-plan.md）。refs/starter 的 o1 只是能跑的基线，不是推荐的"
             "机制：先 smoke_backtest。standards.md 点名禁止的家族不得重开，其中包括 Alpha158 一类的"
@@ -248,8 +272,8 @@ ARMS: dict[str, dict[str, object]] = {
             "同跨度跑：去掉桶的同分数篮子 c_uncapped（机制归因）、同样的桶换成固定随机分数的 c_rand"
             "（证明赢的不是分散化）、无分数的等权池篮子 c_pool；c_rand 与 c_pool 不训练，要把 fit 与 "
             "REFIT_PERIOD 整段删掉。提名硬门包括完整研究期信息比率 ≥ 0.95、四个研究年的中性化超额全为正、"
-            "stats.benchmark.top_industry_weight ≤ 0.30、|stats.benchmark.size_tilt| ≤ 0.30、"
-            "β ∈ [0.7, 1.2]、2 倍滑点后超额 > 0，在信息比率上严格高于三个对照，并且换手不得超过 "
+            "stats.benchmark.top_industry_weight ≤ 0.30、|stats.benchmark.size_tilt| ≤ 0.70、"
+            "β ≤ 1.2、2 倍滑点后超额 > 0，在信息比率上严格高于三个对照，并且换手不得超过 "
             "c_uncapped 的 1.5 倍；回撤门取流水线自己的 25 %，因为本臂的机制作用在集中度上而不是回撤上"
             "——判据、变体轴与本臂终止规则只以 refs/families.md 为准，先读它与 refs/README.md。fit 在"
             "容器 CPU 上完成，失败或样本不足直接报错，不设退路打分器；提交任何整期批次之前，必须按运行"

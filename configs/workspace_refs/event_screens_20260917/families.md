@@ -63,7 +63,7 @@
 | 3 逐年 | 四个研究年的中性化超额**全部为正**（4/4，不是 3/4） | `stats.sub_windows` |
 | 4 回撤 | 完整研究期 `stats.max_drawdown` ≤ **22 %**，**并且严格低于 `c_noscreen`** | `stats.max_drawdown` 与同批对照行 |
 | 5 行业集中度 | `stats.benchmark.top_industry_weight` ≤ **0.30** | `stats.benchmark` |
-| 6 规模与 β | `abs(stats.benchmark.size_tilt)` ≤ **0.30**，且 `stats.benchmark.beta` 落在 **[0.7, 1.2]** | `stats.benchmark` |
+| 6 规模与 β | `abs(stats.benchmark.size_tilt)` ≤ **0.70**，且 `stats.benchmark.beta` ≤ **1.2** | `stats.benchmark` |
 | 7 成本 | `cost_sensitivity.excess_at_2x_slippage > 0` | `stats.cost_sensitivity` |
 | 8 活动量 | 完整研究期平均每年完成的回合数 ≥ **12**；意图买单拒单率 ≤ 30 %；平均总仓位 ≥ 0.5 | `stats.trade_count` ÷ 研究年数、`stats.order_count` 与执行明细、`stats.exposure.avg_gross` |
 | 9 实现底线 | **每个筛子在每个复核日剔除的名字 < 筛前池的 15 %**；每个复核日第 ③ 步之后可选名字 ≥ 200；每张买单的 `tercile_cover` = 3；多日回放上每次决策的**平均**墙钟 < 30 秒 | 每张买单的 `screen_hits`、第 0 轮普查与 `smoke_backtest` |
@@ -72,7 +72,7 @@
 
 **门 5 与门 6 过了不构成证据**：它们是借来的桶买下的东西，与本臂的筛子无关。证据只有门 1、门 2 与门 4。反过来，**门 5 的字段在结果里读不到时该候选不可提名**——核对不了的门不得当作通过。
 
-**门 6 读的 `size_tilt` 不是中性化回归的规模 beta。** 它是持仓加权的截面流通市值分位，界的是**篮子自己站在哪个规模格**；同一份宿主旁文件里，一条腿可以同时读到 `size_tilt` −0.026 与 `neutralized_excess.size_beta` 0.974。会话只看得见前者，门就设在前者上，结果笔记里也只能按前者的含义写，不得说成「本臂把 SMB 载荷压在了 0.30 以内」。
+**门 6 读的 `size_tilt` 不是中性化回归的规模 beta。** 它是持仓加权的截面流通市值分位，界的是**篮子自己站在哪个规模格**；同一份宿主旁文件里，一条腿可以同时读到 `size_tilt` −0.026 与 `neutralized_excess.size_beta` 0.974。会话只看得见前者，门就设在前者上，结果笔记里也只能按前者的含义写，不得说成「本臂把 SMB 载荷压在了 0.70 以内」。
 
 门 9 的每次决策墙钟按多日回放的**平均**读，不按单日探针读：单日冷回放在宿主争用下可以读到 20 秒以上，而同一份代码在 68 日回放上的平均是 7 秒左右（`sources.md`）。
 

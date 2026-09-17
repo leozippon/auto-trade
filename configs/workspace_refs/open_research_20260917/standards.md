@@ -71,10 +71,10 @@
 
 裁决统计量把日度策略收益对沪深 300 与**一条**规模价差做二元 OLS，截距年化就是中性化超额（口径字符串在每个结果的 `stats.benchmark.neutralized_excess_method` 里，会话可以自己读）。**它看不见行业。** 三条研究期读数说明这不是理论顾虑，全写在 `sources.md`：一条完整研究期验证读到 IR 1.29 而 82.5 % 的权重压在单一行业上；一个不成形的质量 15 只篮子读到 45.4 % 压在单一行业上，而它的分数在分数层已经对行业哑变量残差化过；一个完全无信息的等权池篮子在研究首年首个决策日就有 3 只落在同一个行业里。**分数层的行业中性化不阻止篮子层的行业集中。**
 
-因此新增两条硬门，加上一条 β 区间：
+因此新增两条硬门，加上一条 β 上界：
 
 - `stats.benchmark.top_industry_weight` ≤ **0.30**（时间加权的单一申万一级行业权重）。
-- `abs(stats.benchmark.size_tilt)` ≤ **0.30**，且 `stats.benchmark.beta` ∈ **[0.7, 1.2]**。
+- `abs(stats.benchmark.size_tilt)` ≤ **0.70**，且 `stats.benchmark.beta` ≤ **1.2**。
 
 三个字段都在结果的 `stats.benchmark` 块里，与 `excess_return`、`neutralized_excess_return` 同一块。**字段缺失即不可提名——核对不了的门不算过。**
 
