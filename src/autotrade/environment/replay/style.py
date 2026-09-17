@@ -50,8 +50,8 @@ _STYLE_COLUMNS = ("circ_mv", "pb", "turnover_rate")
 _SIZE_FACTOR_QUANTILE = 0.3
 _SIZE_FACTOR_MIN_NAMES = 30
 NEUTRALIZATION_METHOD = (
-    "日度策略收益对沪深300收益与规模因子（本回放槽按前一交易日流通市值分组："
-    "最小 30% 等权减最大 30% 等权）"
+    "日度策略收益对沪深300收益与规模因子（本回放槽全市场截面、不是本臂股票池，"
+    "按前一交易日流通市值分组：最小 30% 等权减最大 30% 等权）"
     f"的二元 OLS，截距按 {TRADING_DAYS_PER_YEAR} 个交易日年化"
 )
 

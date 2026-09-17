@@ -423,6 +423,7 @@ def _broker_replay_facts(manifest: Mapping[str, object]) -> dict[str, object]:
             ),
             "slippage_bps": profile.get("slippage_bps"),
             "t_plus_one": True,
+            "ex_date_settlement": "pre_close_reset_cash_dividend_credited",
             "order_lot_size": 100,
             "price_limit_enforced": True,
             "suspension_enforced": True,
