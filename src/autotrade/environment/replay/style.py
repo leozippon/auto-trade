@@ -362,6 +362,7 @@ def _empty_style(reason: str) -> dict[str, object]:
         "days": 0,
         "tilts": None,
         "industries": [],
+        "top_industry_weight": None,
         "avg_names": None,
         "avg_long_gross": None,
         "avg_short_gross": None,
@@ -419,6 +420,12 @@ def _style_exposures(
         "reason": None,
         "days": days,
         "tilts": {key: round(total / days, 3) for key, total in tilt_sums.items()},
+        # The largest single SW L1 industry's share of the book, averaged over
+        # decision days. The neutralization regresses on CSI 300 and size only,
+        # so a single-sector book scores as alpha; the only frozen artifact that
+        # cleared every gate was 82.5 % banks. ``industries`` stays host-side,
+        # so this one scalar is what the compact block carries to the Agent.
+        "top_industry_weight": round(max(industry_sums.values()) / days, 3),
         "industries": sorted(
             (
                 {"name": name, "weight": round(total / days, 3)}
@@ -483,6 +490,7 @@ def replay_style_analysis(
             "beta": regression.get("beta"),
             "n_days": regression.get("n_days"),
             "size_tilt": tilts.get("size") if isinstance(tilts, Mapping) else None,
+            "top_industry_weight": style.get("top_industry_weight"),
         },
         "created_at": utc_now_iso(),
     }

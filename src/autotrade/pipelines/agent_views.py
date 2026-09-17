@@ -52,8 +52,12 @@ def metrics(summary: dict[str, object] | None) -> dict[str, object] | None:
 # The benchmark fields one compact metric block keeps. Raw excess alone cannot
 # separate real edge from a small-cap or high-beta tilt, so the size/beta
 # neutralized excess -- the tie-breaker the research guidance names
-# -- and the caliber it was computed under ride beside it. Descriptive
-# attribution only: nothing here is forward or Held-out evidence.
+# -- and the caliber it was computed under ride beside it.
+# ``top_industry_weight`` rides along because the neutralization sees market
+# and size only: a single-sector book scores as alpha and the Agent could not
+# otherwise read its own concentration, which lives in the host-side style
+# sidecar. Descriptive attribution only: nothing here is forward or Held-out
+# evidence.
 _BENCHMARK_TEXT_KEYS = frozenset({"label", "neutralized_excess_method"})
 _BENCHMARK_KEYS = (
     "label",
@@ -62,6 +66,7 @@ _BENCHMARK_KEYS = (
     "beta",
     "n_days",
     "size_tilt",
+    "top_industry_weight",
     "neutralized_excess_return",
     "neutralized_excess_method",
 )

@@ -1069,10 +1069,11 @@ def test_subagent_prompts_carry_the_path_and_argv_contract() -> None:
         assert "/mnt/tools/screen.py" in prompt
     assert TOOL_WRITE_CHEAT_SHEET in writer
     assert '{"argv": ["python", "notes/probe.py"], "cwd": "."}' in writer
-    # argv also accepts one command string (POSIX-split, no shell): the cheat
-    # sheet names what is still refused and gives the bash -lc recipe.
-    assert "整行命令字符串会被拒绝" not in writer
-    assert '`["bash", "-lc", "..."]`' in writer
+    # Since a bare command string runs through bash -lc, the cheat sheet is
+    # directional: it says which shape does what, not which one is refused.
+    assert "会被拒绝" not in writer
+    assert '整行命令字符串按 `["bash", "-lc", "<该命令行>"]` 执行' in writer
+    assert "管道、重定向、通配、`&&` 与 `$VAR` 照写生效" in writer
     assert "先 `write_file` 写成文件再按路径运行" in writer
     assert "`notes/<topic>/`" in writer
     assert "第二次编辑必须匹配前一次编辑之后的内容" in writer

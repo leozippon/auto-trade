@@ -113,13 +113,19 @@ class AcceptanceRulesTest(unittest.TestCase):
         rules = AcceptanceRules()
         ok = {"total_return": 0.02, "sharpe": 0.5, "max_drawdown": 0.1}
         self.assertEqual(rules.evaluate(ok), ([], []))
-        # A drawdown breach WARNS, sign-independent: the fold still freezes its
-        # validated work and the cap decides at graduation instead.
+        # A drawdown breach is a HARD reject, sign-independent: F4/H3 enforce
+        # the same limit forward, so freezing a book that already breached it
+        # spends a forward test on a candidate the verdict must reject.
         for drawdown in (0.30, -0.30):
             with self.subTest(drawdown=drawdown):
                 hard, warnings = rules.evaluate({**ok, "max_drawdown": drawdown})
-                self.assertEqual(hard, [])
-                self.assertIn("drawdown_above_target", warnings)
+                self.assertEqual(hard, ["max_drawdown_above_limit"])
+                self.assertEqual(warnings, [])
+        # It is the round's own limit, not a constant.
+        self.assertEqual(
+            AcceptanceRules(max_drawdown=0.35).evaluate({**ok, "max_drawdown": 0.30}),
+            ([], []),
+        )
         # Return/Sharpe shortfalls only WARN: the fold freezes instead of resetting.
         hard, warnings = rules.evaluate(
             {"total_return": -0.01, "sharpe": -0.2, "max_drawdown": 0.1}
@@ -195,8 +201,12 @@ class AcceptanceRulesTest(unittest.TestCase):
         self.assertIn(str(verdict.FREEZE_MIN_DSR_PROBABILITY), freeze["deflated_sharpe_probability"])
         self.assertIn(str(verdict.FREEZE_MIN_FULL_SPAN_VALIDATIONS), freeze["full_span_validations"])
         self.assertEqual(freeze["freezes_per_arm"], 1)
+        # The drawdown limit is the gate's, stated once and from the same field
+        # the forward and Held-out conditions below quote.
+        self.assertIn("0.2", freeze["max_drawdown"])
+        self.assertEqual(facts["graduation"]["forward"]["max_drawdown"], "<= 0.2")
         targets = facts["targets"]
-        self.assertEqual(targets["max_drawdown"], 0.2)
+        self.assertNotIn("max_drawdown", targets)
         self.assertIn("not selection criteria", targets["role"])
         graduation = facts["graduation"]
         self.assertIn("tracking error", graduation["forward"]["minimum_detectable_excess"])

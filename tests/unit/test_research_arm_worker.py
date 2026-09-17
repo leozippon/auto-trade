@@ -561,7 +561,7 @@ def test_an_interrupted_llm_session_resumes_with_its_summary_budget_and_nodes(
     assert checkpoint["trace"]["root"] == "trace"
     note = opening[2].content
     assert "第 2 次尝试" in note and "language model unavailable" in note
-    assert "回放年 1/2" in note and transcripts[0].name in note
+    assert "回测（年）1/2" in note and transcripts[0].name in note
     assert "上面是中断前最近一次压缩的摘要" in note
     facts = json.loads(opening[0].content.split("```json\n", 1)[1].split("\n```", 1)[0])
     assert facts["arm"] == {"frozen": False, "freezes_per_arm": 1, "trials_to_date": 1, "full_span_validations_to_date": 1}

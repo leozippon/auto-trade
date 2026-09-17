@@ -99,11 +99,12 @@ class StrategyExperimentConfig:
 class AcceptanceRules:
     """The arm's round parameters for the freeze nomination and the verdict.
 
-    A nominated research node fails the freeze gate on a non-finite metric
-    (``evaluate``); the return, Sharpe and drawdown targets there only warn.
-    ``max_drawdown`` and ``cost_stress_multiplier`` decide the forward and
-    Held-out verdict (``pipelines/verdict.py``), whose remaining thresholds are
-    that module's constants.
+    A nominated research node fails the freeze gate on a non-finite metric or a
+    research-period drawdown over ``max_drawdown`` (``evaluate``); the return
+    and Sharpe targets there only warn. ``max_drawdown`` and
+    ``cost_stress_multiplier`` decide the forward and Held-out verdict
+    (``pipelines/verdict.py``), whose remaining thresholds are that module's
+    constants.
     """
 
     min_return: float = 0.0
@@ -150,6 +151,10 @@ class AcceptanceRules:
             "freeze_gate": {
                 "span": f"the nominee replayed the whole research period (span={FULL_SPAN})",
                 "finite_metrics": "total_return/max_drawdown/sharpe must be finite",
+                "max_drawdown": (
+                    f"<= {self.max_drawdown} over the research period, the same "
+                    "limit the forward and Held-out verdict enforce"
+                ),
                 "full_span_validations": (
                     f">= {verdict.FREEZE_MIN_FULL_SPAN_VALIDATIONS} in the arm, the "
                     "nominee included"
@@ -163,7 +168,6 @@ class AcceptanceRules:
             },
             "targets": {
                 "role": "warnings on a nomination, not selection criteria",
-                "max_drawdown": self.max_drawdown,
                 "min_return": self.min_return,
                 "min_sharpe": self.min_sharpe,
                 "no_orders": "order_count=0 warns no_orders",
@@ -211,15 +215,22 @@ class AcceptanceRules:
         }
 
     def evaluate(self, summary: dict[str, object]) -> tuple[list[str], list[str]]:
-        """(hard_reasons, warnings). The only hard rejects are integrity
-        failures: non-finite metrics (every IEEE comparison against NaN is
-        False, so a NaN metric would otherwise pass all thresholds). Drawdown,
-        return and Sharpe shortfalls are warnings. A zero ``order_count`` warns
-        the same way: it clears every threshold without ever placing an order,
-        so the warning is the only thing distinguishing it from a real result
-        (``trade_count`` counts closed round trips and is 0 for buy-and-hold).
-        Only a summary from a completed evaluation reaches here; an aborted
-        replay never produces one."""
+        """(hard_reasons, warnings) of a nomination; the hard ones are the
+        freeze gate's (``experiment.freeze_gate_for``).
+
+        Two hard rejects. Non-finite metrics, because every IEEE comparison
+        against NaN is False, so a NaN metric would otherwise pass every
+        threshold. And a research-period drawdown over ``max_drawdown``, the
+        same limit F4/H3 enforce forward: freezing a book that already breached
+        it spends a forward test on a candidate the verdict must reject.
+
+        Return and Sharpe shortfalls stay warnings -- they are targets, and an
+        arm may honestly freeze a modest but real edge. A zero ``order_count``
+        warns the same way: it clears every threshold without ever placing an
+        order, so the warning is the only thing distinguishing it from a real
+        result (``trade_count`` counts closed round trips and is 0 for
+        buy-and-hold). Only a summary from a completed evaluation reaches here;
+        an aborted replay never produces one."""
         hard: list[str] = []
         warnings: list[str] = []
         values: dict[str, float] = {}
@@ -244,7 +255,7 @@ class AcceptanceRules:
             else:
                 values["sharpe"] = float(sharpe)
         if abs(values.get("max_drawdown", 0.0)) > self.max_drawdown:
-            warnings.append("drawdown_above_target")
+            hard.append("max_drawdown_above_limit")
         if values.get("total_return", float("-inf")) < self.min_return:
             warnings.append("return_below_target")
         if "sharpe" in values and values["sharpe"] < self.min_sharpe:

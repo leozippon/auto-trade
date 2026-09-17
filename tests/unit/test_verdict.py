@@ -259,10 +259,20 @@ def test_deflated_sharpe_reproduces_the_design_example():
     assert verdict.forward_mde(0.13, TRADING_DAYS_PER_YEAR) == pytest.approx(0.2756)
 
 
-def test_freeze_gate_needs_a_deflated_probability_of_one_half_over_two_validations():
+def test_freeze_gate_needs_the_deflated_probability_its_threshold_names():
+    """The threshold is deliberately not 0.5.
+
+    At 0.5 the deflated Sharpe's ``√(T−1)/√(variance_term)`` factor cancels and
+    the gate degenerates into ``IR > SR*`` — a point comparison the two arms
+    that were actually frozen cleared at a research IR of 0.11–0.13, while the
+    forward verdict they then failed needed about 0.9.
+    """
+
     rng = np.random.default_rng(71)
     research = _weekdays("20210701", "20250630")
-    analysis = _analysis(_segment(research, 0.10, rng))
+    # A research IR near 1.2: below roughly 0.7 no deflation at all clears the
+    # threshold over four years, which is the point of raising it.
+    analysis = _analysis(_segment(research, 0.16, rng, exact=True))
     information_ratio = verdict.neutralized_statistics(analysis)["information_ratio"]
     trials = 10
     gamma, normal = 0.5772156649015329, NormalDist()
@@ -270,24 +280,47 @@ def test_freeze_gate_needs_a_deflated_probability_of_one_half_over_two_validatio
         1 - 1 / trials
     ) + gamma * normal.inv_cdf(1 - 1 / (trials * math.e))
 
-    def gate(sharpe_star_ratio, irs=None):
-        spread = information_ratio * sharpe_star_ratio / expected_max
+    def gate(sharpe_star, irs=None):
         if irs is None:
+            spread = sharpe_star / expected_max
             irs = [information_ratio, information_ratio - math.sqrt(2) * spread]
         return verdict.freeze_gate(analysis, trials=trials, full_span_irs=irs)
 
-    passing = gate(0.98)
+    # The SR* that puts the probability exactly at the threshold, solved from
+    # the formula on this analysis' own skew, kurtosis and measured days.
+    reading = gate(0.0)["deflated_sharpe"]
+    sharpe = information_ratio / SCALE
+    variance_term = (
+        1.0
+        - reading["return_skew"] * sharpe
+        + (reading["return_kurtosis"] - 1.0) / 4.0 * sharpe**2
+    )
+    boundary = information_ratio - normal.inv_cdf(
+        verdict.FREEZE_MIN_DSR_PROBABILITY
+    ) * math.sqrt(variance_term) * SCALE / math.sqrt(reading["return_days"] - 1)
+
+    passing = gate(0.98 * boundary)
     assert passing["passed"] and passing["reasons"] == []
     assert passing["information_ratio"] == pytest.approx(information_ratio)
-    assert passing["deflated_sharpe"]["sharpe_star"] == pytest.approx(
-        information_ratio * 0.98
+    assert passing["deflated_sharpe"]["sharpe_star"] == pytest.approx(0.98 * boundary)
+    assert (
+        passing["deflated_sharpe"]["deflated_sharpe_probability"]
+        > verdict.FREEZE_MIN_DSR_PROBABILITY
     )
-    assert passing["deflated_sharpe"]["deflated_sharpe_probability"] > 0.5
 
-    failing = gate(1.02)
+    failing = gate(1.02 * boundary)
     assert not failing["passed"]
     assert failing["reasons"] == ["freeze_deflated_sharpe_below_threshold"]
-    assert failing["deflated_sharpe"]["deflated_sharpe_probability"] < 0.5
+    assert (
+        failing["deflated_sharpe"]["deflated_sharpe_probability"]
+        < verdict.FREEZE_MIN_DSR_PROBABILITY
+    )
+
+    # Merely beating the deflation is not enough any more: an IR a hair above
+    # SR* still reads above 0.5 and the gate refuses it.
+    barely = gate(0.98 * information_ratio)
+    assert barely["deflated_sharpe"]["deflated_sharpe_probability"] > 0.5
+    assert barely["reasons"] == ["freeze_deflated_sharpe_below_threshold"]
 
     alone = gate(0.0, irs=[information_ratio])
     assert alone["reasons"] == [

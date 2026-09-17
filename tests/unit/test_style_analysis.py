@@ -18,6 +18,7 @@ from autotrade.environment.replay.style import (
     replay_style_analysis,
     write_style_rollup,
 )
+from autotrade.pipelines.agent_views import agent_visible_metrics
 
 
 def _replay(days: list[str], *, with_holdings: bool = True) -> ReplayResult:
@@ -101,6 +102,65 @@ def test_daily_style_uses_replay_positions_and_frozen_slot_inputs(tmp_path: Path
     written = json.loads(target.read_text(encoding="utf-8"))
     assert target.name == "style_analysis.json"
     assert written["compact"]["beta"] == 2.0
+
+
+def test_the_agent_reads_its_own_sector_concentration_beside_the_size_tilt(tmp_path: Path):
+    """The neutralization regresses on CSI 300 and size only, so a single-sector
+    book scores as alpha — the one artifact that cleared every gate was 82.5 %
+    banks. ``industries`` stays host-side, so the compact block carries the top
+    industry's weight, and the Agent-visible projection must keep it."""
+
+    days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2024-01-02", periods=10)]
+    replay_dir = tmp_path / "replay"
+    snapshot_dir = tmp_path / "snapshot"
+    replay_dir.mkdir()
+    snapshot_dir.mkdir()
+    pd.DataFrame(
+        [
+            {
+                "dataset": "index_daily",
+                "ts_code": BENCHMARK_TS_CODE,
+                "trade_date": day,
+                "pct_chg": (-0.25 if index % 2 == 0 else 0.5),
+            }
+            for index, day in enumerate(days)
+        ]
+    ).to_parquet(replay_dir / "macro.parquet", index=False)
+    pd.DataFrame(
+        {"ts_code": ["000001.SZ", "000003.SZ"], "l1_name": ["银行", "电子"]}
+    ).to_parquet(snapshot_dir / "universe.parquet", index=False)
+    # 100 shares at 10 元 of a bank against 100 at 30 元 of the other name.
+    equity = 100_000.0
+    curve = []
+    for index, day in enumerate(days):
+        equity *= 1.0 + (0.01 if index % 2 else -0.005)
+        curve.append(
+            {
+                "trade_date": day,
+                "initial_equity": 100_000.0,
+                "equity": equity,
+                "cash": equity - 4_000.0,
+                "positions": {"000001.SZ": 100, "000003.SZ": 100},
+            }
+        )
+
+    payload = replay_style_analysis(
+        ReplayResult(tuple(curve), (), (), ()),
+        _daily(days),
+        replay_dir=replay_dir,
+        snapshot_dir=snapshot_dir,
+        mode="valid",
+    )
+
+    # The share of the largest industry, averaged over decision days — the same
+    # number the host-side listing leads with, not a recomputation of it.
+    assert payload["style"]["top_industry_weight"] == 0.75
+    assert payload["style"]["industries"][0] == {"name": "电子", "weight": 0.75}
+    block = benchmark_summary_block(payload)
+    assert block["top_industry_weight"] == 0.75
+    visible = agent_visible_metrics({"total_return": 0.1, "benchmark": block})
+    assert visible["benchmark"]["top_industry_weight"] == 0.75
+    assert "size_tilt" in visible["benchmark"]
 
 
 def test_style_records_structured_unavailable_values(tmp_path: Path):

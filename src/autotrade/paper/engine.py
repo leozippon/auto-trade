@@ -618,9 +618,6 @@ class DailyPaperEngine:
             "source": PAPER_SOURCE, "ok": ok,
             "trade_date": decisions[-1]["trade_date"] if decisions else None,
             "settled_through": state.get("settled_through") or None,
-            # The latest decided session's orders wait for its bars.
-            "day_complete": False,
-            "phase": "decided" if decisions else "not_started",
             "strategy_revision": self.strategy_revision, "cash": broker.cash,
             "equity": broker.equity(), "positions": [asdict(position) for _, position in sorted(broker.positions.items())],
             "pending_order_count": len(state.get("pending_orders") or []),

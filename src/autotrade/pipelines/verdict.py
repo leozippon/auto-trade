@@ -32,8 +32,15 @@ import numpy as np
 from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR, _max_drawdown
 from autotrade.environment.replay.style import _series_pairs, window_neutralized_excess
 
-# Freeze gate (PL1 §4.1).
-FREEZE_MIN_DSR_PROBABILITY = 0.5
+# Freeze gate (PL1 §4.1). At a threshold of 0.5 the deflated Sharpe's
+# ``√(T−1)/√(variance_term)`` factor cancels and the gate degenerates into
+# ``SR >= SR*`` -- a point comparison that knew nothing about the estimate's
+# sampling error and, at the observed trial-Sharpe spreads, asked for a
+# research IR of only 0.11-0.13 while the forward verdict needs about 0.9.
+# 0.90 asks the nominee's IR to clear SR* by 1.28 standard errors, i.e. a
+# research IR near 0.76 at the same spreads, which is the bar the reference
+# packs already pre-register for themselves.
+FREEZE_MIN_DSR_PROBABILITY = 0.90
 FREEZE_MIN_FULL_SPAN_VALIDATIONS = 2
 # Forward verdict (PL1 §4.2).
 FORWARD_CONFIDENCE = 0.80
@@ -46,7 +53,9 @@ MIN_MEAN_GROSS = 0.5
 # errors, the standard error taken from the forward slice's tracking error.
 HELDOUT_TOLERANCE_Z = 1.28
 # Minimum detectable annualised neutralised excess at 80 % power and one-sided
-# 10 % (PL1 §2.1), in standard errors.
+# 10 % (PL1 §2.1), in standard errors: Φ⁻¹(0.90) + Φ⁻¹(0.80) = 2.12. F2 itself
+# is a one-sided 20 % bound, so this is a deliberately conservative planning
+# figure (about 1.26 × the 1.68 the applied gate would give), not F2's own bar.
 FORWARD_MDE_Z = 2.12
 
 _EULER_MASCHERONI = 0.5772156649015329
@@ -264,8 +273,11 @@ def freeze_gate(
     ``trials`` counts the distinct revisions with a completed validation
     anywhere in the arm; ``full_span_irs`` holds the neutralised IR of every
     full-span validation in the arm, the nominee's included. The gate passes
-    when there are at least two of them and the deflated Sharpe probability of
-    the nominee's IR, over its daily neutralised series, is at least 0.5.
+    when there are at least ``FREEZE_MIN_FULL_SPAN_VALIDATIONS`` of them and the
+    deflated Sharpe probability of the nominee's IR, over its daily neutralised
+    series, is at least ``FREEZE_MIN_DSR_PROBABILITY``. The nominee's drawdown
+    is the caller's hard nomination rule (``config.AcceptanceRules.evaluate``),
+    which holds the round's ``max_drawdown``.
     """
 
     if isinstance(trials, bool) or not isinstance(trials, int) or trials < 1:

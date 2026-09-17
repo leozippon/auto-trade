@@ -1076,6 +1076,41 @@ class UnitRegistryProjectionTest(unittest.TestCase):
         self.assertEqual(payload["coverage"], AGENT_UNIT_CONTRACT["coverage"])
         self.assertIn("text_library/", payload["coverage"])
 
+    def test_a_broken_snapshot_manifest_fails_instead_of_summarizing_nothing(self):
+        """Every view reaching the summary is a built snapshot, so an unreadable
+        manifest is a broken view. Substituting an empty mapping published an
+        Agent-visible data_summary.json with a null kind, no decision time and
+        no domains -- a silently degraded data contract in place of a failure."""
+
+        from autotrade.environment.data.summary import write_agent_data_summary
+
+        def build(manifest: str | None) -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                view = Path(tmp) / "decision"
+                view.mkdir()
+                pd.DataFrame(
+                    {"ts_code": ["000957.SZ"], "trade_date": ["20200102"], "close": [6.73]}
+                ).to_parquet(view / "daily.parquet", index=False)
+                if manifest is not None:
+                    (view / "manifest.json").write_text(manifest, encoding="utf-8")
+                write_agent_data_summary(
+                    Path(tmp) / "data_summary.json",
+                    kind="decision",
+                    session_ref=None,
+                    views={"snapshot": (view, "/mnt/snapshot")},
+                )
+
+        for manifest in (None, "", '{"kind": "decision"', "not json at all"):
+            with self.subTest(manifest=manifest), self.assertRaises(RuntimeError) as caught:
+                build(manifest)
+            self.assertIn("manifest is unreadable", str(caught.exception))
+        # A JSON document that is not an object cannot carry a manifest either.
+        for manifest in ("[]", '"decision"', "null"):
+            with self.subTest(manifest=manifest), self.assertRaises(TypeError):
+                build(manifest)
+        # The same view with a readable manifest still builds.
+        build('{"kind": "decision"}')
+
     def test_is_suspended_record_states_what_the_flag_marks(self):
         """`daily.is_suspended` is set from a suspend_d halt row (suspend_type
         "S"), so on a daily bar it marks an intraday halt only — never a

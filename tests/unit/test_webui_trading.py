@@ -440,8 +440,6 @@ def _write_snapshot(
         "error": error,
         "source": "paper_engine",
         "trade_date": "20260102",
-        "day_complete": True,
-        "phase": "closed",
         "strategy_revision": "revision_001",
         "cash": 400_000.0,
         "equity": 1_000_000.0,
