@@ -20,7 +20,7 @@ import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from functools import partial
 from pathlib import Path
@@ -487,11 +487,15 @@ class HistoricalMinuteSource:
 
 @dataclass(frozen=True)
 class _SpanSlot:
-    """One replay slot of a span: its directory, manifest and bound as-of stash."""
+    """One replay slot of a span: its directory, manifest and bound as-of stash.
+
+    ``stash_dir`` is None for a replay whose part stream is not the span's, so
+    its parts are written into its own as-of tree and never published.
+    """
 
     replay_dir: Path
     manifest: dict[str, object]
-    stash_dir: Path
+    stash_dir: Path | None
 
 
 class _ReplaySpanView:
@@ -798,15 +802,26 @@ class PITDailyEvaluationBackend:
             corporate_actions = _span_corporate_actions(replay_dirs, replay_manifests)
             replay_start = yyyymmdd(request.start)
             replay_end = yyyymmdd(request.end)
-            trade_days = sorted(set(_trade_date_keys(daily)))
+            span_days = sorted(set(_trade_date_keys(daily)))
+            trade_days = span_days
             if max_days is not None or start_day is not None:
                 trade_days = replay_window(
-                    trade_days, start=start_day, max_days=max_days
+                    span_days, start=start_day, max_days=max_days
                 )
                 daily = daily[_trade_date_keys(daily).isin(set(trade_days))].copy()
                 # A truncated replay must not claim it covered the whole span.
                 if trade_days:
                     replay_start, replay_end = trade_days[0], trade_days[-1]
+                # The stash names a part by its position in the part stream a
+                # replay of the whole span writes, so only a replay opening on
+                # the span's first day writes that stream. One opening later
+                # publishes every row accumulated before it as a single first
+                # part, under names the span means for other slices, so it gets
+                # no stash: its parts land in its own throwaway as-of tree. A
+                # window truncated only at the end still writes the span's own
+                # prefix and keeps the stash.
+                if trade_days and trade_days[0] != span_days[0]:
+                    slots = tuple(replace(slot, stash_dir=None) for slot in slots)
         if daily.empty:
             raise ValueError(f"PIT daily replay is empty for {request.start}..{request.end}")
 

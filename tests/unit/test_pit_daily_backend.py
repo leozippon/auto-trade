@@ -2230,6 +2230,51 @@ def test_a_span_of_slots_is_one_book_equal_to_one_long_slot(tmp_path: Path) -> N
     assert len(style[0]["benchmark_daily"]) == 4
 
 
+def test_a_late_opening_window_never_publishes_the_spans_parts(tmp_path: Path) -> None:
+    """A replay that opens inside the span writes a different part stream.
+
+    An unofficial window given a ``start_day`` decodes every slot up to its
+    first decision WITHOUT refreshing, so that first decision publishes
+    everything accumulated before it as one part, numbered from the beginning.
+    The span's own replay numbers the same slot's parts on from where the
+    preceding slots left off. Both streams are right views of their own
+    instants, but only the span's may be published: where a domain wrote no
+    part before the opening slot -- ``auction``, whose rows start inside a
+    later slot of the real four-year span -- both streams claim ``part_0001``
+    and the span's replay dies hours in on the footer row-count check.
+    """
+
+    snapshot, slots = _write_span_release(tmp_path)
+    revision = _span_revision(tmp_path)
+    request = _span_request(snapshot, slots["a"], slots["b"], revision=revision)
+
+    late = PITDailyEvaluationBackend(tmp_path / "results_late", execution_mode="trusted").evaluate(
+        request, start_day="20240103"
+    )
+    assert late.summary["replayed_trade_days"] == 3
+    assert _span_stash_parts(snapshot, slots["a"], slots["b"]) == {}
+
+    # Truncated only at the end, the window IS the span's own prefix: it keeps
+    # the stash, so a rehearsal from day one still costs the span nothing.
+    head = PITDailyEvaluationBackend(tmp_path / "results_head", execution_mode="trusted").evaluate(
+        request, max_days=1
+    )
+    assert head.summary["replayed_trade_days"] == 1
+    prefix = _span_stash_parts(snapshot, slots["a"], slots["b"])
+    assert prefix
+
+    full = PITDailyEvaluationBackend(tmp_path / "results_full", execution_mode="trusted").evaluate(request)
+    assert full.summary["replayed_trade_days"] == 4
+    parts = _span_stash_parts(snapshot, slots["a"], slots["b"])
+    assert {key: parts[key] for key in prefix} == prefix
+    # The stash the late window ran against still holds exactly the parts one
+    # long slot writes.
+    PITDailyEvaluationBackend(tmp_path / "results_long", execution_mode="trusted").evaluate(
+        _span_request(snapshot, slots["ab"], revision=revision)
+    )
+    assert parts == _span_stash_parts(snapshot, slots["ab"])
+
+
 def test_a_span_holds_one_decoded_slot_at_a_time(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
