@@ -271,3 +271,28 @@ def test_every_reference_pack_is_readable_and_its_starter_loads(pack: Path) -> N
         text = path.read_text(encoding="utf-8")
         assert not any(literal in text for literal in ("/mnt/", "/Data2", "/home/")), path
         assert "snapshot_dir" not in text, path
+
+
+# The import allowlist lives in configs/agent_output_template/README.md, which
+# every session mounts read-only as output/README.md. Packs used to re-copy it
+# verbatim; a line naming four or more of these libraries is that copy coming
+# back, and it goes stale silently the moment the contract's list moves.
+ALLOWED_IMPORT_MARKERS = (
+    "numpy",
+    "pandas",
+    "scipy",
+    "sklearn",
+    "lightgbm",
+    "xgboost",
+    "statsmodels",
+    "torch",
+)
+
+
+@pytest.mark.parametrize("pack", PACKS, ids=lambda path: path.name)
+def test_no_reference_pack_restates_the_import_allowlist(pack: Path) -> None:
+    """A pack states the arm's deltas and defers the contract to output/README.md."""
+    for path in sorted(pack.glob("*.md")):
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            named = [marker for marker in ALLOWED_IMPORT_MARKERS if marker in line]
+            assert len(named) < 4, (path.name, number, named)

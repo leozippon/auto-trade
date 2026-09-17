@@ -27,7 +27,7 @@
 | `s_lowvol` | `lowvol` | 消融，可提名 | 低波腿单独的边际 |
 | `c_vol20` | `1 − rank(vol_20)`（中性化去掉 `vol_20`、`max_20`） | 门 1 对照，不得提名 | 60 日残差波动是否只是 `factor_cs` 已关闭的 20 日低波/彩票腿的换皮 |
 | `c_growth` | `rank(yoy_np)`（中性化去掉 `yoy_np`） | 门 2 对照，不得提名 | 质量腿是否只是成长（`explore_github` 的 `vipF2` 轴） |
-| `c_es` | 盈利意外包的复合分数：年度实际对一致预期的缺口与季度盈利变化的新鲜度加权 z 均值，按 `earnings_surprise_20260918/starter/lib/surprise.py` 的规则逐字重建（`lib/surprise_control.py`） | 门 2 对照，不得提名 | 质量腿是否只是盈利意外的信息 |
+| `c_es` | 盈利意外包的复合分数：年度实际对一致预期的缺口与季度盈利变化的新鲜度加权 z 均值，规则与常量见 `starter/lib/surprise_control.py`（沿用已退役的盈利意外臂的逐字实现） | 门 2 对照，不得提名 | 质量腿是否只是盈利意外的信息 |
 
 六条腿在 `main.py` 里只差 `CANDIDATE` 一行。
 

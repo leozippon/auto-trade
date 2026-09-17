@@ -29,24 +29,18 @@
 - **适应写在产物里。** 冻结之后没有人再改它：学习型模型用 `fit` 与 `REFIT_PERIOD` 在最近 2–3 年上滚动重训（季度；20 日标签且重训很快时可以月度），规则型篮子每次决策重算自己的滚动估计。在最近几周上增量微调在本仓库里是有害的。`state_dir` 在每次回放开始时为空。
 - **研究期整窗读数好看不等于前推成立。** 不要把提名条件当作目标函数去逼近：逐年分块、机制归因对照与空对照分位是同等的硬门，任何一项塌了，整窗读数就不再是证据。
 
-## 硬合同
+## 本臂的执行边界
 
-- 正式策略写在 `output/` 包内：入口固定为 `output/main.py` 的 `generate_orders(context)`，返回严格 JSON 订单数组；可选 `fit(context)` 与 `REFIT_PERIOD`。辅助模块放在 `output/` 下并用绝对导入，每个 `.py` 受同一套静态检查。
-- 正式 import 只允许：纯计算标准库、`numpy`、`pandas`、`scipy`、`sklearn`、`lightgbm`、`xgboost`、`statsmodels`、`torch` 及其子模块，以及 `output/` 内自己的模块。本臂 `gpu_count=0`：任何训练都在容器 CPU 上完成，一次 `fit` 不超过 `budgets.strategy_fit_timeout_seconds`（3,600 秒）。
-- 沙箱无网络。不要写死 `/mnt/agent/workspace`。先核对本轮 `data_summary.json` 与 `unit_reference.json`，再经 `context.asof_dir` 读数，每次读取都给 `columns=`、`filters=` 与日期窗口；as-of 域读失败**不得**回退 `snapshot_dir`。
-- 每一行输入必须在推断时点可见；逐域规则见 `pit-field-map.md`。执行时点只用 09:30 与 15:00。Broker 负责 T+1、费用、涨跌停与成交；策略只发订单草图。
-- 会话开始时 `output/` 已经是 `starter/` 的内容，不必移植；`refs/` 是只读参考，不要再把其中任何文件拷进 `output`。
+执行合同——入口与订单、允许的 import、文件 I/O、`available_at` 与 PIT 读法、不写死宿主路径、沙箱无网络——以只读 `output/README.md` 与系统提示为准，本包不复述。本臂只在以下几点上更具体：
 
-## 研究流程与账户
+- 本臂 `gpu_count=0`：任何训练都在容器 CPU 上完成，一次 `fit` 不超过 `budgets.strategy_fit_timeout_seconds`。
+- 本臂不挂分钟域（运行事实 `execution_policy`），执行时点只有 09:30 与 15:00。
+- 不要把 `refs/` 里的文件拷进 `output/`：整棵包是只读的，`cp` 会把权限一起带过去；会话开始时 `output/` 已经是 `starter/` 的内容，不必移植。
 
-研究期由若干整的七月至次年六月研究年组成，本臂只有一个研究会话，在这个研究期上开发与验证；决策视图定在研究期末，输入窗口从那里往前数。精确窗口与研究年标签以运行事实为准，本包不复述。预算按臂计、跨尝试累计：**2,400 分钟推理时间、96 个回放年、6,400 次模型调用、12 次空对照**（以运行事实 `budgets` 为准；一次尝试失败后原地续跑，接着花同一份预算）。完整研究期验证带逐年分块（`sub_windows`，每个研究年一行），只有完整研究期节点可以提名冻结，冻结门按本臂验证过的全部 revision 给提名的去偏 Sharpe 打折——开放方向的臂试得越多，打折越重，对照与失败的候选同样计入试验数。
+## 账户与成本
 
-会话以 `finish_session` 的一种结局收尾：`freeze` 冻结本臂唯一的交付并结束研究，`no_edge` 按 `standards.md` 的收尾规则结束本臂；没有下一个会话可以交接，推理时间或模型调用预算先用尽时流水线记 `deadline` 结束本臂。上下文接近上限时用 `compact(summary=...)` 把对话换成自己的摘要；压掉的读数、节点编号与代码都留在只读根 `trace` 里，用 `read_file`/`grep` 读回，不要重算。冻结产物随后在研究期之后的连续前推期与 Held-out 上回放一次并由流水线裁决：那段数据没有会话看得到，也没有 Agent 参与，前推不过即本臂结束，没有第二次冻结。
+研究期几何、预算、冻结门与毕业条件以运行事实为准，会话流程见系统提示，本包不复述；本臂以 `no_edge` 结束的条件见 `standards.md` 的收尾规则。开放方向的臂试得越多，冻结门对提名的去偏 Sharpe 打折越重——对照与失败的候选同样计入试验数，所以用回放做筛选是直接把冻结门的分母变大。
 
-账户是 10 万元真实资金：佣金万一、最低 5 元/笔，过户费 0.1 bp，卖出印花税按成交日切换，方向滑点 5 bp，整手成交、涨跌停与停牌拒单。
+账户与费率以运行事实 `broker_replay` 为准。
 
 规模与 β 的读数只在 `stats.benchmark` 里：`size_tilt`（持仓加权的截面规模倾斜）与 `beta`（对沪深 300 的回归斜率），和 `excess_return`、`neutralized_excess_return` 同一块。`style_analysis.json` 是宿主侧的旁文件，会话读不到它，不要去找。
-
-## 反馈通道
-
-跨实验的运行教训不重复写在参考包里：默认挂载的运行记忆在工作区 `memory/<来源>/` 下只读可读，索引见 `inputs/skills_index.json` 的 `operating_memory` 一节。挂载条目与本轮实测冲突时用 `skill_feedback(skill, claim, evidence)` 报告（只收 `outdated`/`wrong`，必须带证据，同一条目每次 run 只受理一条）；工具与数据本身的缺陷用 `report_issue`。

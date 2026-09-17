@@ -1,7 +1,7 @@
-"""The running earnings-surprise arm's composite, rebuilt as this arm's control.
+"""The retired earnings-surprise arm's composite, rebuilt as this arm's control.
 
-Rules copied from `configs/workspace_refs/earnings_surprise_20260918/starter/lib/surprise.py`
-so that `c_es` scores exactly what that arm trades:
+Rules copied verbatim from the retired earnings-surprise arm's starter package
+so that `c_es` scores exactly what that arm traded:
 
     sue_c  annual actual (first of income_vip annual / express_vip) minus the FY
            consensus -- mean over brokers of each broker's latest report_rc.np

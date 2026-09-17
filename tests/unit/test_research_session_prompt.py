@@ -215,7 +215,7 @@ def test_the_prompt_states_the_research_session_contract() -> None:
         "迭代用子区间，结论用全期",
         '`span="full"`',
         "冻结只接受完整研究期节点",
-        "`run_null_control` 的随机同名组合零假设",
+        "`run_null_control` 的随机同名组合对照",
         "`source_refs.signal_screen_ref`",
         "机制家族指收益来源的经济解释",
         "同一特征集换个估计器不算",

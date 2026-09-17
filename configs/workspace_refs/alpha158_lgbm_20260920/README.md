@@ -18,21 +18,21 @@
 
 为什么它可能在漂移下留住边际（推断，不是证据）：模型每季度在最近三年上重训，衰减研究给出的 IC 半衰期约 2.7–4.8 年，支持的正是这种训练窗口与刷新节奏。反面同样要写清：同类价量学习信号在业界拥挤，2024 年 2 月的小盘踩踏正是这类信号的风险；方向研究里三个随机种子之间的整窗读数相差 4 个百分点/年，小于这个量级的差异不是证据。
 
-## 硬合同
+## 本臂的执行边界
 
-- 正式策略写在 `output/` 包内：入口固定为 `output/main.py` 的 `generate_orders(context)`，返回严格 JSON 订单数组；本包声明 `fit(context)` 与 `REFIT_PERIOD = "quarter"`。辅助模块放在 `output/` 下并用绝对导入，每个 `.py` 受同一套静态检查。
-- 正式 import 只允许：纯计算标准库、`numpy`、`pandas`、`scipy`、`sklearn`、`lightgbm`、`xgboost`、`statsmodels`、`torch` 及其子模块，以及 `output/` 内自己的模块。本臂 `gpu_count=0`：LightGBM 在容器的 CPU 上训练。
-- 训练写在 `fit` 里，助推器只经 `save_model` 写进 `context.state_dir`、在复核日经 `lgb.Booster(model_file=...)` 读回。`state_dir` 在每次回放开始时为空，每次回放都重训。`fit` 失败或样本不足时直接报错，打分读不到状态时同样报错——**不设退路打分器**：回放失败好过悄悄交易另一套策略。
-- 一次 `fit` 必须在 `budgets.strategy_fit_timeout_seconds`（3,600 秒）内完成，一次复核决策在单次推断上限内完成；起步包的实测见 `sources.md`，加特征或加长窗口时先在冒烟里量。
-- 沙箱无网络。不要写死 `/mnt/agent/workspace`。先核对本轮 `data_summary.json` 与 `unit_reference.json`，再经 `context.asof_dir` 读数，每次读取都给 `columns=`、`filters=` 与日期窗口；as-of 域读失败**不得**回退 `snapshot_dir`。
-- 每一行输入必须在推断时点可见；逐表规则见 `pit-field-map.md`。执行时点只用 09:30 与 15:00。Broker 负责 T+1、费用、涨跌停与成交；策略只发订单草图。
-- 会话开始时 `output/` 已经是 `starter/` 的内容，不必移植；`refs/` 是只读参考，不要再把其中任何文件拷进 `output`。
+执行合同——入口与订单、允许的 import、文件 I/O、`available_at` 与 PIT 读法、不写死宿主路径、沙箱无网络——以只读 `output/README.md` 与系统提示为准，本包不复述。本臂只在以下几点上更具体：
 
-## 研究流程与账户
+- 本包声明 `fit(context)` 与 `REFIT_PERIOD = "quarter"`；本臂 `gpu_count=0`，LightGBM 在容器的 CPU 上训练。
+- 助推器只经 `save_model` 写进 `context.state_dir`、在复核日经 `lgb.Booster(model_file=...)` 读回。`fit` 失败或样本不足时直接报错，打分读不到状态时同样报错——**不设退路打分器**：回放失败好过悄悄交易另一套策略。
+- 一次 `fit` 必须在 `budgets.strategy_fit_timeout_seconds` 内完成（并发放大规则见运行事实）；起步包的实测见 `sources.md`，加特征或加长窗口时先按 `smoke_backtest_probe_note` 在研究期靠后的一天冒烟量一次。
+- 本臂不挂分钟域（运行事实 `execution_policy`），执行时点只有 09:30 与 15:00。
+- 不要把 `refs/` 里的文件拷进 `output/`：整棵包是只读的，`cp` 会把权限一起带过去；会话开始时 `output/` 已经是 `starter/` 的内容，不必移植。
 
-研究期由若干整的七月至次年六月研究年组成，本臂只有一个研究会话，在这个研究期上开发与验证；决策视图定在研究期末，输入窗口从那里往前数。精确窗口、研究年标签、预算、冻结门与毕业条件以运行事实为准，本包不复述。完整研究期验证带逐年分块（`sub_windows`，每个研究年一行），只有完整研究期节点可以提名冻结，冻结门按本臂验证过的全部 revision 给提名的去偏 Sharpe 打折。会话以 `finish_session` 的一种结局收尾：`freeze` 冻结本臂唯一的交付并结束研究，`no_edge` 按 `families.md` 的终止规则结束本臂；没有下一个会话可以交接，推理时间或模型调用预算先用尽时流水线记 `deadline` 结束本臂。上下文接近上限时用 `compact(summary=...)` 把对话换成自己的摘要；压掉的读数、节点编号与代码都留在只读根 `trace` 里，用 `read_file`/`grep` 读回，不要重算。冻结产物随后在研究期之后的连续前推期与 Held-out 上回放一次并由流水线裁决：那段数据没有会话看得到，也没有 Agent 参与，前推不过即本臂结束，没有第二次冻结。
+## 账户与成本
 
-账户是 10 万元真实资金：佣金万一、最低 5 元/笔，过户费 0.1 bp，卖出印花税按成交日切换，方向滑点 5 bp。15 只等权、97% 仓位时单只预算约 6,300 元，最低佣金即 7.9 bp/边，一次往返约 25–35 bp。10 日标签的学习信号需要**每周复核**：方向研究里同一分数改成月度复核后，15 只与 30 只篮子的中性化超额都落到 0 附近。起步节奏是每周复核、2 倍保留带、每次最多换 2 只（被迫卖出先算）；方向研究里同类规则的年换手约 6.3–6.6 倍、年成本约 1.9–2.0%。
+研究期几何、预算、冻结门与毕业条件以运行事实为准，会话流程见系统提示，本包不复述；本臂以 `no_edge` 结束的条件见 `families.md` 的终止规则。
+
+账户与费率以运行事实 `broker_replay` 为准。按本臂的 15 只等权、97% 仓位，单只预算约 6,300 元，最低佣金即 7.9 bp/边，一次往返约 25–35 bp。10 日标签的学习信号需要**每周复核**：方向研究里同一分数改成月度复核后，15 只与 30 只篮子的中性化超额都落到 0 附近。起步节奏是每周复核、2 倍保留带、每次最多换 2 只（被迫卖出先算）；方向研究里同类规则的年换手约 6.3–6.6 倍、年成本约 1.9–2.0%。
 
 ## 「没有边际」的读法
 
@@ -41,7 +41,7 @@
 - 读 `benchmark.neutralized_excess_return` 与逐年分块，不读原始超额：研究期内沪深 300 下跌，所有低 β 篮子的原始超额都很大。
 - 第一个研究年的训练窗口里，成长、预告与资金流列只覆盖后一半左右（`pit-field-map.md` 的「数据下限」）：第一年的读数更接近纯 Alpha158 模型，单独汇报，不据此增删特征组。
 - 池内 IC 高不等于 15 只篮子挣钱（方向研究里控制后 IC t ≈ 5 的学习型分数，最好 15 只可以为负）：候选只按篮子回放的读数裁决，离线 IC 只作诊断。
-- `null_control.excess_percentile` 用 `run_null_control(node_id)` 只给决赛候选算；`selection_statistics.deflated_sharpe_probability` 是冻结门此刻对该节点的读数，已按本臂的试验数 `trials` 打折。
+- `run_null_control` 只给完整研究期的决赛候选算（次数见 `budgets`）；`selection_statistics.deflated_sharpe_probability` 是冻结门此刻对该节点的读数，已按本臂的试验数打折。
 
 没有候选证明边际时，不冻结是正当结果：按 `families.md` 的终止规则以 `no_edge` 携读数结束本臂。
 
@@ -49,6 +49,6 @@
 
 本包的候选形态只有 `families.md` 登记的 LightGBM 排序器及其变体。不得加入四组之外的新数据源或手写打分作为特征，不得换成序列网络或其他学习器，也不得把篮子改成手写因子排序：本臂的价值在于它是那条谱系本身，改了家族就不再是基线。
 
-## 运行教训
+## 本包的硬要求
 
-跨实验的运行教训不重复写在参考包里：默认挂载的运行记忆在工作区 `memory/<来源>/` 下只读可读，索引见 `inputs/skills_index.json` 的 `operating_memory` 一节。本包只指一条硬要求：**训练面板与决策截面必须由同一套函数构建**（`starter/lib/data.py` 的 `build_fit_samples` 与 `decision_features` 共用同一组算子、同一份点时列构造与同一个截面 z 分数）。
+跨实验的运行教训不写在参考包里（见 `inputs/skills_index.json` 的运行记忆）。本包只指一条硬要求：**训练面板与决策截面必须由同一套函数构建**（`starter/lib/data.py` 的 `build_fit_samples` 与 `decision_features` 共用同一组算子、同一份点时列构造与同一个截面 z 分数）。
