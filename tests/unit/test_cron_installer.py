@@ -83,6 +83,32 @@ class CronInstallerTest(unittest.TestCase):
         self.assertIn("$ROUND", jobs[0])
         self.assertTrue((installer.REPO_ROOT / round_file).is_file(), round_file)
 
+    def test_removing_a_block_keeps_every_other_entry_and_is_idempotent(self) -> None:
+        """Pausing one managed job -- the research fill, while a stop window
+        rebuilds the sandbox image -- must not touch the Paper or TuShare
+        jobs, and must leave nothing behind for the next install to duplicate."""
+
+        _, begin, end = installer.BLOCKS["research"]
+        paper = installer.build_managed_block(*installer.BLOCKS["paper"])
+        research = installer.build_managed_block(*installer.BLOCKS["research"])
+        installed = installer.replace_managed_block(
+            f"0 1 * * * unrelated\n\n{paper}", research, begin=begin, end=end
+        )
+        removed = installer.strip_managed_block(installed, begin=begin, end=end)
+        self.assertNotIn(begin, removed)
+        self.assertNotIn(end, removed)
+        self.assertIn("0 1 * * * unrelated", removed)
+        self.assertIn(paper, removed)
+        # Removing again changes nothing, and reinstalling restores exactly one pair.
+        self.assertEqual(installer.strip_managed_block(removed, begin=begin, end=end), removed)
+        restored = installer.replace_managed_block(removed, research, begin=begin, end=end)
+        self.assertEqual(restored.count(begin), 1)
+        self.assertIn(paper, restored)
+        # The removal's own verification: markers gone is the expected state.
+        installer.verify_installed_crontab(removed, removed, begin=begin, end=end, required=False)
+        with self.assertRaisesRegex(RuntimeError, "missing managed cron markers"):
+            installer.verify_installed_crontab(removed, removed, begin=begin, end=end)
+
     def test_backup_permissions_are_private(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "cron_backups" / "crontab.bak"
