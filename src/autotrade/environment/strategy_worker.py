@@ -215,7 +215,17 @@ def run(strategy_path: str | Path) -> int:
                 protocol._active_sequence = None
             protocol.write({"type": _CALL_KINDS[kind], "sequence": sequence, **response})
         except Exception as exc:  # noqa: BLE001 - isolate each untrusted strategy call
-            error: dict[str, object] = {"type": "error", "error": str(exc)}
+            # Two failures share this wire and they are not the same
+            # measurement. An exception out of strategy code is a reading of
+            # the strategy; a message this worker cannot speak to was built by
+            # the host, so it reads the environment. They travel as distinct
+            # types because the host cannot tell them apart from the text, and
+            # charging the second one to the candidate costs it a replay year
+            # for a failure it did not cause.
+            error: dict[str, object] = {
+                "type": "protocol_error" if isinstance(exc, WorkerProtocolError) else "error",
+                "error": str(exc),
+            }
             if isinstance(message, Mapping):
                 sequence = message.get("sequence")
                 if isinstance(sequence, int) and not isinstance(sequence, bool):

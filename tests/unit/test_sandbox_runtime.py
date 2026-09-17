@@ -1482,6 +1482,92 @@ def test_a_worker_error_reply_is_the_strategys_own_exception():
         executor.close()
 
 
+def test_a_worker_protocol_error_reply_is_an_environment_failure():
+    """The other half of the same wire: the worker answers a message it cannot
+    speak to with ``protocol_error``. The host built that message, so the
+    failure measures the environment and the replay year is refunded instead
+    of being charged to a candidate whose code never ran."""
+    reply = {
+        "type": "protocol_error",
+        "sequence": 0,
+        "error": "execute context has missing or unsupported fields",
+    }
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import json,sys,time; sys.stdin.readline(); "
+                f"print(json.dumps({reply!r}), flush=True); time.sleep(60)"
+            ),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    executor = _executor_for_process(process, drain_stderr=True)
+    try:
+        with (
+            patch.object(executor, "_remove_container"),
+            pytest.raises(StrategyExecutionError) as failed,
+        ):
+            executor.execute(_context())
+        assert not isinstance(failed.value, StrategyRaised)
+        assert not raised_by_strategy(failed.value)
+        assert "missing or unsupported fields" in str(failed.value)
+    finally:
+        executor.close()
+
+
+def test_the_worker_answers_a_host_protocol_violation_and_a_strategy_raise_apart(
+    tmp_path: Path,
+):
+    """The worker's side of that boundary, on the real worker: a message it
+    cannot speak to -- the readiness probe included -- is answered with
+    ``protocol_error``, while an exception out of strategy code stays
+    ``error`` and is charged to the candidate."""
+    strategy = _strategy(
+        tmp_path,
+        """def generate_orders(context):
+    raise KeyError("close")
+""",
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-m", "autotrade.environment.strategy_worker", str(strategy)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+
+    def exchange(message: dict[str, object]) -> dict[str, object]:
+        process.stdin.write(json.dumps(message) + "\n")  # type: ignore[union-attr]
+        process.stdin.flush()  # type: ignore[union-attr]
+        return json.loads(process.stdout.readline())  # type: ignore[union-attr]
+
+    # The readiness probe is an unknown message type, and the handshake still
+    # reads the echoed sequence off the reply.
+    ready = exchange({"type": "ready", "sequence": -1})
+    assert ready["type"] == "protocol_error"
+    assert ready["sequence"] == -1
+
+    malformed = _wire_request(_context())
+    malformed["total_count"] = 99
+    rejected = exchange(malformed)
+    assert rejected["type"] == "protocol_error"
+    assert rejected["sequence"] == 0
+
+    raised = exchange(_wire_request(_context()))
+    assert raised["type"] == "error"
+    assert "close" in str(raised["error"])
+
+    process.stdin.write('{"type":"close"}\n')
+    process.stdin.flush()
+    assert process.wait(timeout=5) == 0
+
+
 # PyTorch's own report of a CUDA out-of-memory error, as captured in the sandbox
 # image with another container holding 38 GiB of the same L20.
 _CUDA_OOM = (

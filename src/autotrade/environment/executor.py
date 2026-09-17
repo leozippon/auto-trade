@@ -35,12 +35,17 @@ _HOST_TIMEOUT_BUFFER_SECONDS = 15.0
 _PROCESS_STOP_TIMEOUT_SECONDS = 2.0
 # Readiness handshake sequence. Request sequences are non-negative, so a worker
 # that echoes this one is answering the probe and nothing else. The worker
-# rejects the unknown message type and echoes the sequence with its error; that
+# rejects the unknown message type as a protocol error and echoes the
+# sequence with it; that
 # reply is the proof that the container is up, the interpreter is running and
 # the strategy module finished importing. The one reply the worker emits
 # *before* reading anything is its import failure, which carries no sequence —
 # that is how a dead worker is told apart from a ready one.
 _READY_SEQUENCE = -1
+# The worker's two failure replies. Both may arrive without a sequence (an
+# import failure before the first read, a line the worker could not parse at
+# all), so neither is held to the sequence check that every other message is.
+_WORKER_ERROR_TYPES = frozenset({"error", "protocol_error"})
 # Container-side path of the read-only strategy package (the directory that
 # holds main.py), and of the read-only data roots and the per-replay state
 # directory, which is read-only for generate_orders and read-write for fit.
@@ -449,7 +454,7 @@ class DockerStrategyExecutor:
                     raise StrategyExecutionError("strategy protocol output exceeded max_output_chars")
                 message_type = message.get("type")
                 response_sequence = message.get("sequence")
-                if (message_type != "error" or "sequence" in message) and (
+                if (message_type not in _WORKER_ERROR_TYPES or "sequence" in message) and (
                     isinstance(response_sequence, bool)
                     or not isinstance(response_sequence, int)
                     or response_sequence != sequence
@@ -495,6 +500,16 @@ class DockerStrategyExecutor:
                     self._transport_table = context._bars_table
                     self._transport_last_available_at = last_available_at
                     return message.get("orders")
+                if message_type == "protocol_error":
+                    # The worker could not speak to the message this host sent
+                    # it. That measures the environment exactly as a timeout
+                    # does, so the replay year is refunded rather than charged
+                    # to a candidate whose code never ran.
+                    detail = str(message.get("error") or "no detail")
+                    raise StrategyExecutionError(
+                        f"Docker {label} failed: strategy worker rejected the host "
+                        f"protocol: {detail}"
+                    )
                 if message_type == "error":
                     # The worker's reply to a call whose strategy code raised.
                     text = str(message.get("error") or "strategy worker failed")

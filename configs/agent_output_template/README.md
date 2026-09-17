@@ -182,12 +182,6 @@ Submodules of these libraries (`scipy.stats`, `sklearn.linear_model`, `torch.nn`
 
 The default executor uses network-disabled, read-only Docker containers with bounded CPU, memory, process count, inference time, fit time, protocol output, and temporary storage; a strategy with `fit` gets a second identical container whose only difference is the writable state mount. If the container boundary cannot be established, execution fails instead of changing modes.
 
-## Session context and the trace
-
-- `compact(summary=...)`: replace your conversation with your own summary once the host's `context_notice` says the context is 75% full, or at a round boundary. Afterwards you see the system prompt, that summary and the most recent messages only, so write into it the state of `output/` and the candidates, every decision and rejected direction with its numbers and node ids, the open threads, and where in the trace the details are.
-- Root `trace`: the transcript of this session, every attempt and sub-agent included, as `<run_ref>.txt` (`.partN.txt` once long); `read_file`/`grep` it for the tool output, numbers or code you compacted away instead of recomputing them.
-- `finish_session`: `freeze` a full-span node that passes the gate, or `no_edge` with the evidence. No other session follows; an exhausted time or model-call budget ends the arm as `deadline`.
-
 ## Default strategy
 
 The shipped `main.py` is a deliberately small working baseline. `fit` reads a bounded window of the PIT `daily` domain, builds cross-sectionally standardized 5-day and 20-day adjusted returns, fits a ridge regression against the realized 5-day forward return, and saves the three coefficients as `ridge_coef.npy` under `context.state_dir` (all zeros when fewer than 200 samples are visible, which makes the ranking flat and alphabetical). `generate_orders`, while flat, loads those coefficients, scores the latest visible cross-section, and submits strict JSON buy orders for up to ten top-ranked symbols with an equal-budget basket and a cash buffer at the next same-day daily price timestamp: `09:30` before the open or `15:00` before the close. An after-close invocation emits no order because the strategy does not receive a future trading calendar. Replace the features with a mechanism-backed PIT signal and add an explicit exit/rebalance lifecycle before treating it as a research strategy.
