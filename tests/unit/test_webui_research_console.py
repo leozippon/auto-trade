@@ -492,6 +492,33 @@ def test_the_card_and_the_research_panel_name_the_same_four_figures() -> None:
     assert "全区间验证次数" in script.split("const REASON_LABELS", 1)[1]
 
 
+def test_a_figure_whose_label_does_not_read_itself_is_glossed_once() -> None:
+    """IR is an acronym over a formula, 中性化超额 and 残差跟踪误差 name what was
+    regressed out, and the 下界 is a bootstrap percentile: none of the four can
+    be read off its own label. IR sat bare on all four of its sites while the
+    DSR beside it was fully explained. Each gloss is one shared constant, so no
+    site can drift, and it hangs on the same `title` hover the console uses
+    everywhere else — including on a checklist row, which had no slot for one.
+    """
+
+    script = (
+        Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
+    ).read_text(encoding="utf-8")
+    assert 'const IR_TITLE = "中性化超额 ÷ 残差跟踪误差";' in script
+    for opening, glosses in (
+        ("function evidenceTiles(", ("IR_TITLE",)),
+        ("function forwardTiles(", ("LOWER_BOUND_TITLE", "NEUTRALIZED_EXCESS_TITLE")),
+        ("function researchSessionPanel(", ("IR_TITLE", "NEUTRALIZED_EXCESS_TITLE")),
+        ("function frozenPanel(", ("IR_TITLE", "NEUTRALIZED_EXCESS_TITLE", "TRACKING_ERROR_TITLE")),
+        ("function freezeGateChecklist(", ("DSR_GATE_TITLE",)),
+        ("function forwardCriteria(", ("LOWER_BOUND_TITLE",)),
+    ):
+        body = script.split(opening, 1)[1].split("\nfunction ", 1)[0]
+        for gloss in glosses:
+            assert gloss in body, (opening, gloss)
+    assert "title: item.title || null" in script.split("function checklist(", 1)[1]
+
+
 def test_an_experiment_card_wears_the_ending_as_a_badge_alone() -> None:
     """The homepage grid stays scannable: a card says how the arm ended in one
     badge and keeps the reason in that badge's tooltip. The sentence itself is

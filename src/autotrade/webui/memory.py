@@ -289,13 +289,6 @@ def experiment_memory_entry(
 
 # ---- curated library writes ----------------------------------------------
 
-# Every write says this, because it is the one thing the researcher cannot see
-# in the resulting listing: the mount happens at session start.
-CURATED_WRITE_NOTE = (
-    "the library is mounted at session start, so this applies to sessions "
-    "started afterwards; running sessions keep the read-only copy they mounted"
-)
-
 
 def _library_dir(repo_root: Path) -> Path:
     return Path(repo_root) / OPERATING_MEMORY_LIBRARY
@@ -397,7 +390,6 @@ def _write_result(repo_root: Path, name: str, action: str) -> dict[str, object]:
     return {
         "name": name,
         "action": action,
-        "note": CURATED_WRITE_NOTE,
         "curated": curated_library(repo_root),
     }
 
@@ -560,7 +552,6 @@ def memory_overview(repo_root: Path, experiments_root: Path) -> dict[str, object
 
 
 __all__ = [
-    "CURATED_WRITE_NOTE",
     "create_curated_entry",
     "curated_entry",
     "curated_library",

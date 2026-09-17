@@ -448,6 +448,34 @@ def test_every_reason_the_pipeline_records_has_a_console_label() -> None:
     assert set(SESSION_OUTCOMES) <= outcomes, sorted(set(SESSION_OUTCOMES) - outcomes)
 
 
+def test_a_criterion_that_names_a_threshold_words_it_from_the_record() -> None:
+    """A creation parameter must not be frozen into a Chinese label. 毕业成本压力倍数
+    is per-experiment, so an arm run at ×3 used to read "前推加倍滑点后超额"
+    beside a threshold column that correctly said ×3 — a reproducible mislabel.
+    The three labels that name a threshold are functions of the `thresholds`
+    block, and the multiplier is now stated in the name alone, not twice."""
+
+    labels = _js_literal("const REASON_LABELS = {", "\n};")
+    for token, key in (
+        ("forward_lower_bound_not_positive", "forward_confidence"),
+        ("forward_recency_negative", "recency_months"),
+        ("forward_not_positive_at_cost_stress", "cost_stress_multiplier"),
+    ):
+        [line] = [row for row in labels.splitlines() if row.strip().startswith(f"{token}:")]
+        assert "(t) =>" in line and f"t.{key}" in line, token
+        # A missing threshold reads as the console's own dash, not as a default.
+        assert "fmtPct(" in line or '?? "—"' in line, token
+    assert "加倍" not in labels + _js_literal("const SLICE_ROWS = [", "\n];")
+    assert "滑点 ×" not in _js_function_body("forwardCriteria")
+    # The home card's tile and the best-experiment trophy name the confidence in
+    # plain text: the listing does not carry the block, and the constant is a
+    # pipeline one. They must still read as the constant the pipeline uses.
+    from autotrade.pipelines.verdict import FORWARD_CONFIDENCE
+
+    written = set(re.findall(r"(\d+)% 下界", APP_JS.read_text(encoding="utf-8")))
+    assert written == {f"{FORWARD_CONFIDENCE:.0%}"[:-1]}, sorted(written)
+
+
 def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) -> None:
     """The panels read the registry's arm projections by field name; a renamed
     field would render an empty cell instead of failing. Checked against a
@@ -472,6 +500,18 @@ def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) ->
     def reads(name: str, var: str) -> set[str]:
         return set(re.findall(rf"\b{var}\.([a-z_]+)", _js_function_body(name)))
 
+    # A criterion or a statistics row whose own name states a threshold reads it
+    # from the same block, so its wording cannot freeze at today's defaults.
+    labelled = set(
+        re.findall(
+            r"\bt\.([a-z_]+)",
+            _js_literal("const REASON_LABELS = {", "\n};")
+            + _js_literal("const SLICE_ROWS = [", "\n];"),
+        )
+    )
+    assert "cost_stress_multiplier" in labelled
+    criteria_thresholds = reads("forwardCriteria", "t") | reads("heldoutCriteria", "t") | labelled
+
     for name, read, served in (
         ("frozenPanel", reads("frozenPanel", "frozen"), frozen),
         ("researchSessionPanel", reads("researchSessionPanel", "record"), record),
@@ -483,9 +523,9 @@ def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) ->
         ("verdictStagePanel", reads("verdictStagePanel", "forward"), forward),
         ("forwardCriteria", reads("forwardCriteria", "f"), set(slices["forward"])),
         ("heldoutCriteria", reads("heldoutCriteria", "h"), set(slices["heldout"])),
-        ("criteria thresholds", reads("forwardCriteria", "t") | reads("heldoutCriteria", "t"), set(detail["forward"]["verdict"]["thresholds"])),
+        ("criteria thresholds", criteria_thresholds, set(detail["forward"]["verdict"]["thresholds"])),
         # The same threshold keys are served before the replay, from the plan.
-        ("plan thresholds", reads("forwardCriteria", "t") | reads("heldoutCriteria", "t"), set(replay["thresholds"])),
+        ("plan thresholds", criteria_thresholds, set(replay["thresholds"])),
         ("verdictStagePanel", reads("verdictStagePanel", "attempts"), set(detail["replay_attempts"])),
         ("verdictStagePanel", reads("verdictStagePanel", "research"), record),
         ("replaySpanBar", reads("replaySpanBar", "replay"), set(replay["replay"])),
@@ -494,10 +534,16 @@ def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) ->
     ):
         assert read, name
         assert read <= served, (name, sorted(read - served))
-    # The stage views' statistics rows are statistics their own slice carries.
-    assert set(re.findall(r'^  \["([a-z_]+)",', _js_literal("const SLICE_ROWS = [", "\n];"), re.MULTILINE)) <= slice_fields
-    assert set(re.findall(r'"([a-z_]+)"', _js_literal("const FORWARD_STAT_FIELDS = [", "\n];"))) <= set(slices["forward"])
-    assert set(re.findall(r'"([a-z_]+)"', _js_literal("const HELDOUT_STAT_FIELDS = [", "];"))) <= set(slices["heldout"])
+    # The stage views' statistics rows are statistics their own slice carries,
+    # and every row defined is one a view selects: two rows (残差跟踪误差, IR)
+    # sat in the table definition that neither stage ever drew.
+    slice_rows = set(re.findall(r'^  \["([a-z_]+)",', _js_literal("const SLICE_ROWS = [", "\n];"), re.MULTILINE))
+    forward_rows = set(re.findall(r'"([a-z_]+)"', _js_literal("const FORWARD_STAT_FIELDS = [", "\n];")))
+    heldout_rows = set(re.findall(r'"([a-z_]+)"', _js_literal("const HELDOUT_STAT_FIELDS = [", "];")))
+    assert slice_rows <= slice_fields
+    assert forward_rows <= set(slices["forward"])
+    assert heldout_rows <= set(slices["heldout"])
+    assert slice_rows == forward_rows | heldout_rows, sorted(slice_rows ^ (forward_rows | heldout_rows))
     # Every criterion the pipeline can fail is a line of the checklist.
     checked = set(re.findall(r'"((?:forward|heldout)_[a-z_]+)"', _js_function_body("forwardCriteria") + _js_function_body("heldoutCriteria")))
     checked |= {f"{where}_strategy_error" for where in ("forward", "heldout")}
@@ -508,6 +554,9 @@ def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) ->
 
 
 def _reason_tokens() -> set[str]:
+    """Every labelled criterion token. A label is a string, or a function of the
+    thresholds when its own wording states one."""
+
     return set(
-        re.findall(r'^  ([a-z_]+): "', _js_literal("const REASON_LABELS = {", "\n};"), re.MULTILINE)
+        re.findall(r"^  ([a-z_]+): ", _js_literal("const REASON_LABELS = {", "\n};"), re.MULTILINE)
     )

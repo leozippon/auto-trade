@@ -39,7 +39,11 @@ const ENDING_LABELS = {
 // The conditions of the freeze gate and of the forward and Held-out verdict
 // (pipelines/verdict.py), keyed by the token the pipeline records when one
 // fails, worded as the criterion so a checklist reads them with a pass or fail
-// mark. A token not listed renders as written.
+// mark. A token not listed renders as written. A criterion whose name states a
+// threshold is a function of the `thresholds` block the record carries, not a
+// frozen phrase: the cost-stress multiplier is a creation parameter, so "加倍"
+// mislabels every experiment run at another multiple. A threshold the record
+// does not carry reads as "—", so the gap shows instead of today's default.
 const REASON_LABELS = {
   freeze_needs_full_span_validation: "提名节点为全区间验证",
   freeze_too_few_full_span_validations: "全区间验证次数",
@@ -48,25 +52,36 @@ const REASON_LABELS = {
   freeze_unmeasurable: "研究期统计可算",
   forward_strategy_error: "前推期策略无报错",
   heldout_strategy_error: "Held-out 期策略无报错",
-  forward_lower_bound_not_positive: "前推超额 80% 下界",
-  forward_recency_negative: "前推最近 6 个月超额",
+  forward_lower_bound_not_positive: (t) => `前推超额 ${fmtPct(t.forward_confidence, 0)} 下界`,
+  forward_recency_negative: (t) => `前推最近 ${t.recency_months ?? "—"} 个月超额`,
   forward_max_drawdown_exceeded: "前推回撤",
-  forward_not_positive_at_cost_stress: "前推加倍滑点后超额",
+  forward_not_positive_at_cost_stress: (t) => `前推滑点 ×${t.cost_stress_multiplier ?? "—"} 后超额`,
   forward_too_few_round_trips: "前推回合数",
   forward_exposure_below_floor: "前推平均仓位",
   heldout_excess_below_tolerance: "Held-out 超额",
   heldout_max_drawdown_exceeded: "Held-out 回撤",
   heldout_exposure_below_floor: "Held-out 平均仓位",
 };
-// The two evidence tiles a reader needs a sentence for, worded once so the
-// experiment card and the research session panel say the same thing. The
-// measured values and the "全区间验证次数 ≥ 2" criterion stay in the freeze
+// The figures whose name does not already say what they are, each worded once
+// so every tile, column and criterion row that draws one says the same thing.
+// The measured values and the "全区间验证次数 ≥ 2" criterion stay in the freeze
 // gate checklist, which draws them from the record.
 const DSR_GATE_TITLE = "去膨胀夏普概率（DSR）：冻结门要求 ≥ 0.5";
 const TRIALS_TITLE = "DSR 据以折减的试验数：本臂验证过的不同策略版本";
+// The three neutralised figures the panels draw side by side, as
+// pipelines/verdict.py measures them: the excess is the intercept of the daily
+// regression on 沪深300 and the size factor, the tracking error is that
+// regression's residual standard deviation annualised, and IR is their ratio.
+const NEUTRALIZED_EXCESS_TITLE = "剔除沪深300与规模暴露后的年化超额";
+const TRACKING_ERROR_TITLE = "中性化残差收益的年化标准差";
+const IR_TITLE = "中性化超额 ÷ 残差跟踪误差";
+// How the forward bound is drawn (verdict.py `_bootstrap_lower_bound`).
+const LOWER_BOUND_TITLE = "中性化超额的移动块自助法单侧下界";
 
-function reasonLabel(reason) {
-  return REASON_LABELS[reason] || String(reason);
+function reasonLabel(reason, thresholds) {
+  const label = REASON_LABELS[reason];
+  if (typeof label === "function") return label(thresholds || {});
+  return label || String(reason);
 }
 
 const ENVIRONMENT_STAGE_LABELS = {
@@ -1325,7 +1340,9 @@ function chipsRow(chips) {
 }
 
 /* Criteria as one line each: a pass or fail mark, the criterion, the measured
-   value and the threshold it is held to. `ok: null` is an unmeasured one. */
+   value and the threshold it is held to. `ok: null` is an unmeasured one. A
+   row whose rule is not readable from its own three cells carries it in
+   `title`, the same hover the tiles use. */
 function checklist(items) {
   return el(
     "div",
@@ -1333,7 +1350,10 @@ function checklist(items) {
     ...items.map((item) =>
       el(
         "div",
-        { class: `check-row ${item.ok === null ? "na" : item.ok ? "ok" : "fail"}` },
+        {
+          class: `check-row ${item.ok === null ? "na" : item.ok ? "ok" : "fail"}`,
+          title: item.title || null,
+        },
         el("span", { class: "check-mark", "aria-hidden": "true" }, item.ok === null ? "–" : item.ok ? "✓" : "✕"),
         el("span", { class: "check-label" }, item.label),
         item.value === null || item.value === undefined
@@ -1789,13 +1809,26 @@ function forwardTiles(item) {
   const f = slices.forward || {};
   const h = slices.heldout || {};
   const tiles = presentTiles([
-    { label: "前推超额 80% 下界", value: f.lower_bound, fmt: fmtPct, signed: true },
-    { label: "前推中性化超额", value: f.neutralized_excess, fmt: fmtPct, signed: true },
+    {
+      label: "前推超额 80% 下界",
+      value: f.lower_bound,
+      fmt: fmtPct,
+      signed: true,
+      title: LOWER_BOUND_TITLE,
+    },
+    {
+      label: "前推中性化超额",
+      value: f.neutralized_excess,
+      fmt: fmtPct,
+      signed: true,
+      title: NEUTRALIZED_EXCESS_TITLE,
+    },
     {
       label: "Held-out 中性化超额",
       value: h.neutralized_excess,
       fmt: fmtPct,
       signed: true,
+      title: NEUTRALIZED_EXCESS_TITLE,
     },
     { label: "前推回撤", value: f.max_drawdown, fmt: fmtPct },
   ]);
@@ -1817,7 +1850,7 @@ function evidenceTiles(item) {
       signed: true,
       title: `${sessionLabel(best.session_key)} 中 IR 最高的全区间验证，研究期年化`,
     },
-    { label: "IR", value: best.information_ratio, fmt: fmtSharpe, signed: true },
+    { label: "IR", value: best.information_ratio, fmt: fmtSharpe, signed: true, title: IR_TITLE },
     {
       label: "DSR",
       value: best.deflated_sharpe_probability,
@@ -2531,17 +2564,17 @@ function processListPanel(detail, selectedKey) {
   );
 }
 
-// One row per statistic of the forward and Held-out slices (verdict.py).
+// One row per statistic of the forward and Held-out slices (verdict.py). A row
+// whose name states a threshold reads it from the same `thresholds` block the
+// criteria do, so the table and the checklist above it never disagree.
 const SLICE_ROWS = [
   ["days", "交易日", String],
   ["neutralized_excess", "中性化超额（年化）", fmtPct, true],
-  ["lower_bound", "80% 下界", fmtPct, true],
-  ["recency_neutralized_excess", "最近 6 个月中性化超额", fmtPct, true],
+  ["lower_bound", (t) => `${fmtPct(t.forward_confidence, 0)} 下界`, fmtPct, true],
+  ["recency_neutralized_excess", (t) => `最近 ${t.recency_months ?? "—"} 个月中性化超额`, fmtPct, true],
   ["tolerance", "容忍线", fmtPct],
-  ["tracking_error", "残差跟踪误差", fmtPct],
-  ["information_ratio", "IR", fmtSharpe, true],
   ["max_drawdown", "最大回撤", fmtPct],
-  ["excess_at_cost_stress", "加倍滑点后超额", fmtPct, true],
+  ["excess_at_cost_stress", (t) => `滑点 ×${t.cost_stress_multiplier ?? "—"} 后超额`, fmtPct, true],
   ["round_trips", "回合数", String],
   ["mean_gross", "平均仓位", fmtPct],
 ];
@@ -2560,8 +2593,9 @@ const FORWARD_STAT_FIELDS = [
 const HELDOUT_STAT_FIELDS = ["days", "neutralized_excess", "tolerance", "max_drawdown", "mean_gross"];
 
 /* One slice's statistics, the rows it carries only. Null before the record. */
-function sliceStats(slice, fields) {
+function sliceStats(slice, fields, thresholds) {
   if (!slice) return null;
+  const t = thresholds || {};
   const rows = SLICE_ROWS.filter(
     ([field]) => fields.includes(field) && slice[field] !== null && slice[field] !== undefined,
   );
@@ -2569,23 +2603,27 @@ function sliceStats(slice, fields) {
   return dataTable(
     [{ label: "" }, { label: "", num: true }],
     rows.map(([field, label, fmt, signed]) => [
-      label,
+      typeof label === "function" ? label(t) : label,
       { value: fmt(slice[field]), cls: signed ? signCls(slice[field]) : "" },
     ]),
     { fit: true, box: "section-gap" },
   );
 }
 
-/* One graduation criterion (pipelines/verdict.py): before the record the
-   threshold alone, unmarked; after it the measured figure with its pass or
-   fail mark. A slice the strategy's error left unmeasured stays unmarked. */
-function criterion(token, slice, value, threshold, failed) {
-  return {
+/* One slice's graduation criteria (pipelines/verdict.py), as rows: before the
+   record the threshold alone, unmarked; after it the measured figure with its
+   pass or fail mark. A slice the strategy's error left unmeasured stays
+   unmarked. Every row of a slice is worded against the same thresholds, so
+   they are bound once and each row names only its token, figure, threshold
+   and — when the rule is not readable from those — its hover. */
+function criteriaRow(slice, failed, thresholds) {
+  return (token, value, threshold, title) => ({
     ok: slice ? !failed.has(token) : null,
-    label: reasonLabel(token),
+    label: reasonLabel(token, thresholds),
     value: slice ? value : null,
     threshold,
-  };
+    title,
+  });
 }
 
 function failedReasons(verdict) {
@@ -2598,39 +2636,28 @@ function failedReasons(verdict) {
 function forwardCriteria(f, verdict, thresholds) {
   const failed = failedReasons(verdict);
   const t = thresholds || {};
+  const row = criteriaRow(f, failed, t);
   return [
     ...(failed.has("forward_strategy_error")
       ? [{ ok: false, label: reasonLabel("forward_strategy_error"), value: null }]
       : []),
-    criterion("forward_lower_bound_not_positive", f, fmtPct(f && f.lower_bound), "> 0", failed),
-    criterion("forward_recency_negative", f, fmtPct(f && f.recency_neutralized_excess), "≥ 0", failed),
-    criterion(
+    row("forward_lower_bound_not_positive", fmtPct(f && f.lower_bound), "> 0", LOWER_BOUND_TITLE),
+    row("forward_recency_negative", fmtPct(f && f.recency_neutralized_excess), "≥ 0"),
+    row(
       "forward_max_drawdown_exceeded",
-      f,
       fmtPct(f && f.max_drawdown),
       t.max_drawdown === undefined || t.max_drawdown === null ? "" : `≤ ${fmtPct(t.max_drawdown)}`,
-      failed,
     ),
-    criterion(
-      "forward_not_positive_at_cost_stress",
-      f,
-      fmtPct(f && f.excess_at_cost_stress),
-      t.cost_stress_multiplier ? `> 0（滑点 ×${t.cost_stress_multiplier}）` : "> 0",
-      failed,
-    ),
-    criterion(
+    row("forward_not_positive_at_cost_stress", fmtPct(f && f.excess_at_cost_stress), "> 0"),
+    row(
       "forward_too_few_round_trips",
-      f,
       f && f.round_trips,
       t.min_round_trips === undefined || t.min_round_trips === null ? "" : `≥ ${t.min_round_trips}`,
-      failed,
     ),
-    criterion(
+    row(
       "forward_exposure_below_floor",
-      f,
       fmtPct(f && f.mean_gross),
       t.min_mean_gross === undefined ? "" : `≥ ${fmtPct(t.min_mean_gross)}`,
-      failed,
     ),
   ];
 }
@@ -2639,30 +2666,30 @@ function forwardCriteria(f, verdict, thresholds) {
 function heldoutCriteria(h, verdict, thresholds) {
   const failed = failedReasons(verdict);
   const t = thresholds || {};
+  const row = criteriaRow(h, failed, t);
+  // How the tolerance is drawn. It is the threshold until the slice is
+  // measured; after that the row states the resolved figure and keeps the
+  // rule behind it, which is otherwise nowhere on the page.
+  const tolerance = t.heldout_tolerance_z ? `−${t.heldout_tolerance_z} × 前推跟踪误差 / √年` : "";
   return [
     ...(failed.has("heldout_strategy_error")
       ? [{ ok: false, label: reasonLabel("heldout_strategy_error"), value: null }]
       : []),
-    criterion(
+    row(
       "heldout_excess_below_tolerance",
-      h,
       fmtPct(h && h.neutralized_excess),
-      h ? `≥ ${fmtPct(h.tolerance)}` : t.heldout_tolerance_z ? `≥ −${t.heldout_tolerance_z} × 前推跟踪误差 / √年` : "",
-      failed,
+      h ? `≥ ${fmtPct(h.tolerance)}` : tolerance && `≥ ${tolerance}`,
+      h ? tolerance || null : null,
     ),
-    criterion(
+    row(
       "heldout_max_drawdown_exceeded",
-      h,
       fmtPct(h && h.max_drawdown),
       t.max_drawdown === undefined || t.max_drawdown === null ? "" : `≤ ${fmtPct(t.max_drawdown)}`,
-      failed,
     ),
-    criterion(
+    row(
       "heldout_exposure_below_floor",
-      h,
       fmtPct(h && h.mean_gross),
       t.min_mean_gross === undefined ? "" : `≥ ${fmtPct(t.min_mean_gross)}`,
-      failed,
     ),
   ];
 }
@@ -2707,7 +2734,7 @@ function forwardStagePanel(detail) {
       el("h4", { class: "subsection-title" }, forward ? "前推条件 F1–F6" : "前推条件 F1–F6 · 阈值"),
       checklist(forwardCriteria(f, detail.verdict, thresholds)),
     ),
-    sliceStats(f, FORWARD_STAT_FIELDS),
+    sliceStats(f, FORWARD_STAT_FIELDS, thresholds),
     forward && forward.result ? styleCard(detail.experiment_id, forward.result) : null,
     forward && forward.result
       ? Object.assign(
@@ -2734,7 +2761,7 @@ function heldoutStagePanel(detail) {
       el("h4", { class: "subsection-title" }, forward ? "Held-out 条件 H1–H4" : "Held-out 条件 H1–H4 · 阈值"),
       checklist(heldoutCriteria(h, detail.verdict, thresholds)),
     ),
-    sliceStats(h, HELDOUT_STAT_FIELDS),
+    sliceStats(h, HELDOUT_STAT_FIELDS, thresholds),
   );
 }
 
@@ -2836,22 +2863,30 @@ function frozenPanel(detail) {
     ),
     statTilesRow(
       presentTiles([
-        { label: "研究期中性化超额（年化）", value: frozen.neutralized_excess, fmt: fmtPct, signed: true },
-        { label: "残差跟踪误差", value: frozen.tracking_error, fmt: fmtPct },
-        { label: "IR", value: frozen.information_ratio, fmt: fmtSharpe, signed: true },
+        {
+          label: "研究期中性化超额（年化）",
+          value: frozen.neutralized_excess,
+          fmt: fmtPct,
+          signed: true,
+          title: NEUTRALIZED_EXCESS_TITLE,
+        },
+        { label: "残差跟踪误差", value: frozen.tracking_error, fmt: fmtPct, title: TRACKING_ERROR_TITLE },
+        { label: "IR", value: frozen.information_ratio, fmt: fmtSharpe, signed: true, title: IR_TITLE },
         {
           label: "DSR",
           value: frozen.deflated_sharpe_probability,
           fmt: fmtSharpe,
-          title:
-            [
-              frozen.trials === null || frozen.trials === undefined ? null : `试验 ${frozen.trials} 个`,
-              frozen.sharpe_star === null || frozen.sharpe_star === undefined
-                ? null
-                : `SR* ${fmtSharpe(frozen.sharpe_star)}`,
-            ]
-              .filter(Boolean)
-              .join(" · ") || null,
+          // The same gloss the other DSR tiles carry, then what this
+          // nomination's probability was deflated against.
+          title: [
+            DSR_GATE_TITLE,
+            frozen.trials === null || frozen.trials === undefined ? null : `试验 ${frozen.trials} 个`,
+            frozen.sharpe_star === null || frozen.sharpe_star === undefined
+              ? null
+              : `SR* ${fmtSharpe(frozen.sharpe_star)}`,
+          ]
+            .filter(Boolean)
+            .join(" · "),
         },
         {
           label: "前推可检出超额",
@@ -3268,6 +3303,7 @@ function freezeGateChecklist(gate) {
       label: reasonLabel("freeze_deflated_sharpe_below_threshold"),
       value: fmtSharpe(gate.deflated_sharpe_probability),
       threshold: "≥ 0.5",
+      title: DSR_GATE_TITLE,
     },
   ]);
 }
@@ -3308,7 +3344,7 @@ function researchSessionPanel(detail, session) {
           signed: true,
           title: "本会话 IR 最高的全区间验证，研究期年化",
         },
-        { label: "IR", value: best.information_ratio, fmt: fmtSharpe, signed: true },
+        { label: "IR", value: best.information_ratio, fmt: fmtSharpe, signed: true, title: IR_TITLE },
         {
           label: "DSR",
           value: best.deflated_sharpe_probability,
@@ -3355,8 +3391,8 @@ function researchSessionPanel(detail, session) {
           { label: "收益", num: true },
           { label: "Sharpe", num: true },
           { label: "回撤", num: true },
-          { label: "中性化超额", num: true },
-          { label: "IR", num: true },
+          { label: "中性化超额", num: true, title: NEUTRALIZED_EXCESS_TITLE },
+          { label: "IR", num: true, title: IR_TITLE },
         ],
         record.validations.map((row) => [
           {
@@ -5316,7 +5352,7 @@ function styleCard(expId, result) {
           chipsRow([
             chip(`持仓 ${style.days} 日`, "有持仓的交易日数"),
             chip(`日均 ${style.avg_names} 只`),
-            chip(`日均多头 ${fmtAmount(style.avg_long_gross)}`),
+            chip(`日均多头 ${fmtAmount(style.avg_long_gross)}`, "日均多头持仓市值"),
             ...(style.industries || []).map((row) =>
               chip(`${row.name} ${(row.weight * 100).toFixed(0)}%`, "行业净权重（申万一级）"),
             ),
@@ -6398,8 +6434,8 @@ const MEMORY_ACTION_LABELS = {
 };
 
 /* Every write answers with the refreshed listing, so the page never guesses
-   what the library now holds. The response also carries the mount-timing note;
-   the page states that once, persistently, instead of in every toast. */
+   what the library now holds. The mount-timing rule is not repeated per write:
+   the page head states it once, persistently, instead of in every toast. */
 function applyCuratedResult(result) {
   if (!memoryView) return; // the page was left while the write was in flight
   memoryView.payload.curated = result.curated || memoryView.payload.curated;

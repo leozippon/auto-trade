@@ -656,7 +656,6 @@ def test_a_created_entry_is_readable_by_the_mount_and_listed_back(
         tmp_path, "cash-buffer-rule", "# 现金缓冲\n\n留出一天的申赎缓冲。\n"
     )
     assert result["action"] == "created"
-    assert "sessions started afterwards" in str(result["note"])
     assert _entry_names(result) == [
         "cash-buffer-rule",
         "output-dir-hygiene",
@@ -740,16 +739,15 @@ def test_editing_an_absent_entry_is_a_missing_entry_not_a_create(
     assert not (tmp_path / OPERATING_MEMORY_LIBRARY / "not-curated").exists()
 
 
-def test_a_delete_removes_the_whole_item_and_says_what_it_does_not_touch(
+def test_a_delete_removes_the_whole_item_and_leaves_running_sessions_alone(
     tmp_path: Path,
 ) -> None:
     """Running sessions hold their own read-only copy, so the delete is allowed
-    while they run; the response is where that is said."""
+    while they run and takes the whole item, staging included."""
 
     _library(tmp_path)
     result = memory.delete_curated_entry(tmp_path, "pit-read-budget")
     assert result["action"] == "deleted"
-    assert "running sessions keep" in str(result["note"])
     assert _entry_names(result) == ["output-dir-hygiene"]
     assert not (tmp_path / OPERATING_MEMORY_LIBRARY / "pit-read-budget").exists()
     assert _staging_leftovers(tmp_path) == []
@@ -869,7 +867,7 @@ def test_the_curated_write_routes_carry_one_crud_cycle(tmp_path: Path) -> None:
         json={"name": "cash-buffer-rule", "content": "# 现金缓冲\n\n留出缓冲。\n"},
     )
     assert created.status_code == 200
-    assert {"name", "action", "note", "curated"} <= created.json().keys()
+    assert {"name", "action", "curated"} <= created.json().keys()
     assert "cash-buffer-rule" in _entry_names(created.json())
 
     edited = client.put(
