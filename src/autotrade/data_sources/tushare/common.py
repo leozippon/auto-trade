@@ -1913,6 +1913,24 @@ def finalize_revision_event(
     event["event_id"] = revision_event_id()
     return normalize_revision_event(event)
 
+class BlockedOverwriteError(RuntimeError):
+    """The revision guard refused a destructive overwrite of an existing partition.
+
+    Raised by `write_parquet_revision_aware` itself so every download loop --
+    present and future -- fails loudly instead of folding the refusal into its
+    own "written" counter. Accepting a genuine source retraction means deleting
+    the named partition per the shrink-guard runbook and re-running the covering
+    job; `fina_mainbz_vip` has the preset repair job
+    `manual_fundamental_restatement_repair`.
+
+    Two callers catch it, each with a documented outcome for the refusal: the
+    share_float complete download turns it into a per-day guard retention so its
+    ts_code rescue stays reachable, then still fails the run for every day the
+    rescue cannot explain; the evening stk_auction recheck keeps the committed
+    morning capture, because refusing a correction that would drop rows is that
+    pass's intended result. Every other caller lets it end the run.
+    """
+
 def write_parquet_revision_aware(
     path: Path,
     df: pd.DataFrame,
@@ -2000,7 +2018,7 @@ def write_parquet_revision_aware(
                 append_jsonl_unique(Path(revision_ledger), record, key="event_id")
             print(f"{api_name} {path} returned zero rows for existing nonempty partition; skipped_empty_revision_overwrite")
             return False
-        if write_action == "skipped_key_removal_overwrite":
+        if write_action in ("skipped_key_removal_overwrite", "blocked_shrink_overwrite"):
             if revision_ledger and event:
                 record = finalize_revision_event(
                     event,
@@ -2009,25 +2027,24 @@ def write_parquet_revision_aware(
                     allow_empty_revision_overwrite=allow_empty_revision_overwrite,
                 )
                 append_jsonl_unique(Path(revision_ledger), record, key="event_id")
-            print(
-                f"{api_name} {path} new pull removes {removed_count} existing keys; "
-                "skipped_key_removal_overwrite (delete the partition to accept a source retraction)"
+            remedy = (
+                f"new pull removes {removed_count} existing keys; {write_action} "
+                "(delete the partition to accept a source retraction)"
+                if write_action == "skipped_key_removal_overwrite"
+                else f"new pull would remove {removed_count} of {old_key_count} existing keys; {write_action} "
+                "(kept the old partition; delete it to accept a mass retraction)"
             )
-            return False
-        if write_action == "blocked_shrink_overwrite":
-            if revision_ledger and event:
-                record = finalize_revision_event(
-                    event,
-                    write_id=None,
-                    write_action=write_action,
-                    allow_empty_revision_overwrite=allow_empty_revision_overwrite,
-                )
-                append_jsonl_unique(Path(revision_ledger), record, key="event_id")
-            print(
-                f"{api_name} {path} new pull would remove a disproportionate share of existing keys; "
-                "blocked_shrink_overwrite (kept the old partition; delete it to accept a mass retraction)"
+            message = (
+                f"{api_name} {path} {remedy}: the revision guard refused this destructive "
+                "overwrite; review the revision ledger before retrying"
             )
-            return False
+            # The old partition is kept AND the run stops here. Reporting the
+            # refusal as an ordinary skip froze fina_mainbz_vip at a stale
+            # vintage for months while every job reported ok, so the alarm is
+            # raised where it is detected instead of relying on each download
+            # loop to notice and re-raise it.
+            print(message)
+            raise BlockedOverwriteError(message)
     metadata = dict(extra_metadata or {})
     previous_availability = old_meta.get("availability")
     if previous_availability and "availability" not in metadata:

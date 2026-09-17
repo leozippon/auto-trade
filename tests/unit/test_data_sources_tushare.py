@@ -1364,7 +1364,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             {"ts_code": "000003.SZ", "ann_date": "20260516", "amount": 30},
         ])
 
-        rows = download.write_window_merged_partition(
+        did_write, rows = download.write_window_merged_partition(
             path,
             refreshed,
             api_name="repurchase",
@@ -1379,6 +1379,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         )
 
         merged = pd.read_parquet(path).sort_values("ts_code").reset_index(drop=True)
+        self.assertTrue(did_write)
         self.assertEqual(rows, 3)
         self.assertEqual(merged["ts_code"].tolist(), ["000001.SZ", "000002.SZ", "000003.SZ"])
         self.assertEqual(merged["amount"].tolist(), [1, 20, 30])
@@ -1522,8 +1523,11 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         ledger = self.root / "removal_revision_events.jsonl"
 
         output = io.StringIO()
-        with redirect_stdout(output):
-            did_write = common.write_parquet_revision_aware(
+        # The refusal is the writer's own alarm: it names the dataset and
+        # partition and stops the caller instead of returning a value each
+        # download loop has to remember to check.
+        with redirect_stdout(output), self.assertRaises(common.BlockedOverwriteError) as ctx:
+            common.write_parquet_revision_aware(
                 path,
                 truncated,
                 api_name="forecast_vip",
@@ -1533,15 +1537,17 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 revision_ledger=ledger,
             )
 
-        self.assertFalse(did_write)
+        self.assertIn("skipped_key_removal_overwrite", str(ctx.exception))
+        self.assertIn("forecast_vip", str(ctx.exception))
+        self.assertIn("ann_month=202001", str(ctx.exception))
         self.assertIn("skipped_key_removal_overwrite", output.getvalue())
         self.assertTrue(pd.read_parquet(path).equals(original))
         event = json.loads(ledger.read_text(encoding="utf-8").splitlines()[0])
         self.assertEqual(event["write_action"], "skipped_key_removal_overwrite")
         self.assertEqual(event["removed_keys"], 1)
 
-        with redirect_stdout(io.StringIO()):
-            self.assertFalse(common.write_parquet_revision_aware(
+        with redirect_stdout(io.StringIO()), self.assertRaises(common.BlockedOverwriteError):
+            common.write_parquet_revision_aware(
                 path,
                 truncated,
                 api_name="forecast_vip",
@@ -1549,7 +1555,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 fields=list(truncated.columns),
                 key_columns=["ts_code", "ann_date", "type"],
                 revision_ledger=ledger,
-            ))
+            )
         self.assertEqual(len(ledger.read_text(encoding="utf-8").splitlines()), 1)
 
         with redirect_stdout(io.StringIO()):
@@ -1577,8 +1583,8 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         ledger = self.root / "shrink_revision_events.jsonl"
 
         output = io.StringIO()
-        with redirect_stdout(output):
-            did_write = common.write_parquet_revision_aware(
+        with redirect_stdout(output), self.assertRaises(common.BlockedOverwriteError) as ctx:
+            common.write_parquet_revision_aware(
                 path,
                 truncated,
                 api_name="repurchase",
@@ -1588,7 +1594,8 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 revision_ledger=ledger,
                 allow_key_removal_overwrite=True,
             )
-        self.assertFalse(did_write)
+        self.assertIn("blocked_shrink_overwrite", str(ctx.exception))
+        self.assertIn("month=202001", str(ctx.exception))
         self.assertIn("blocked_shrink_overwrite", output.getvalue())
         self.assertTrue(pd.read_parquet(path).equals(original))
         event = json.loads(ledger.read_text(encoding="utf-8").splitlines()[0])
@@ -1679,8 +1686,8 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         ledger = self.root / "retraction_revision_events.jsonl"
 
         output = io.StringIO()
-        with redirect_stdout(output):
-            did_write = common.write_parquet_revision_aware(
+        with redirect_stdout(output), self.assertRaises(common.BlockedOverwriteError):
+            common.write_parquet_revision_aware(
                 path,
                 truncated,
                 api_name="disclosure_date",
@@ -1690,7 +1697,6 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 revision_ledger=ledger,
                 allow_key_removal_overwrite=True,
             )
-        self.assertFalse(did_write)
         self.assertIn("blocked_shrink_overwrite", output.getvalue())
         self.assertTrue(pd.read_parquet(path).equals(original))
 
@@ -3912,8 +3918,11 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 fields=list(original.columns),
             )
             output = io.StringIO()
-            with redirect_stdout(output):
-                zero_skipped = download.download_trade_date_dataset(
+            # A forced re-pull that drops existing keys used to be counted as a
+            # zero-row partition, which reported the wrong cause (and said
+            # nothing at all for a zero_rows_ok dataset).
+            with redirect_stdout(output), self.assertRaises(common.BlockedOverwriteError) as ctx:
+                download.download_trade_date_dataset(
                     DailyMarketClient(),
                     self.raw_dir,
                     common.DAILY_SPECS[dataset],
@@ -3923,8 +3932,8 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                     ledger,
                     False,
                 )
-            self.assertEqual(zero_skipped, 1, dataset)
-            self.assertIn("skipped_key_removal_overwrite", output.getvalue())
+            self.assertIn("skipped_key_removal_overwrite", str(ctx.exception), dataset)
+            self.assertIn(dataset, str(ctx.exception))
             kept = pd.read_parquet(path)
             self.assertEqual(set(kept["ts_code"]), {"000001.SZ", "000002.SZ"}, dataset)
 
@@ -4304,6 +4313,225 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(len(ledger), 1)
         self.assertEqual(json.loads(ledger[0])["removed_keys"], 1)
 
+    @staticmethod
+    def _shrinking_client(api_name: str, keep: int, keyed_columns: dict[str, list[str]]):
+        """A client whose response for `api_name` keeps only `keep` of the keys
+        the partition already holds -- the transient-truncation shape the
+        destructive-shrink guard exists for."""
+
+        class ShrinkingClient(EmptyTradeDateClient):
+            def query(self, name, params=None, fields="", retries=5):
+                self.calls.append((name, dict(params or {})))
+                if name != api_name:
+                    return super().query(name, params, fields, retries)
+                columns = fields.split(",")
+                rows = [
+                    [keyed_columns.get(column, [""] * keep)[index] if column in keyed_columns else "1"
+                     for column in columns]
+                    for index in range(keep)
+                ]
+                return common.ApiResult(columns, rows)
+
+        return ShrinkingClient()
+
+    def _seed_shrinkable_partition(self, path: Path, columns: dict[str, list[str]], api_name: str) -> pd.DataFrame:
+        original = pd.DataFrame(columns)
+        common.write_parquet(path, original, api_name=api_name, params={}, fields=list(original.columns))
+        return original
+
+    def test_board_trading_blocked_shrink_fails_the_run(self):
+        # The board tier tracked nothing at all: a refused destructive overwrite
+        # was added straight into `written` and the job still exited 0, with two
+        # of these datasets (limit_list_d, kpl_list) in every default snapshot.
+        self._write_trade_cal("20200102")
+        path = self.raw_dir / "limit_list_d" / "trade_date=20200102.parquet"
+        original = self._seed_shrinkable_partition(
+            path,
+            {
+                "trade_date": ["20200102"] * 30,
+                "ts_code": [f"{index:06d}.SZ" for index in range(30)],
+                "limit": ["U"] * 30,
+            },
+            "limit_list_d",
+        )
+        client = self._shrinking_client("limit_list_d", 2, {
+            "trade_date": ["20200102"] * 2,
+            "ts_code": ["000000.SZ", "000001.SZ"],
+            "limit": ["U", "U"],
+        })
+        args = argparse.Namespace(
+            raw_dir=str(self.raw_dir),
+            start_date="20200102",
+            end_date="20200102",
+            datasets=["limit_list_d"],
+            revision_ledger=str(self.root / "board_revision_events.jsonl"),
+            allow_empty_revision_overwrite=False,
+            force=True,
+            page_limit=10000,
+            min_interval_seconds=0,
+            timeout_seconds=1,
+        )
+
+        with (
+            patch.object(download, "load_token", return_value="token"),
+            patch.object(download, "TuShareClient", return_value=client),
+            redirect_stdout(io.StringIO()),
+            self.assertRaises(common.BlockedOverwriteError) as ctx,
+        ):
+            download.download_board_trading(args)
+
+        self.assertIn("limit_list_d", str(ctx.exception))
+        self.assertIn("trade_date=20200102", str(ctx.exception))
+        self.assertTrue(pd.read_parquet(path).equals(original))
+        ledger = (self.root / "board_revision_events.jsonl").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(json.loads(ledger[0])["write_action"], "blocked_shrink_overwrite")
+
+    def test_zero_rows_ok_event_dataset_blocked_shrink_fails_the_run(self):
+        # The event/flow escalation used to be gated on `zero_rows_ok`, an
+        # unrelated flag, which exempted nine of the thirteen trade-date event
+        # datasets from the alarm. Tolerating an EMPTY day says nothing about
+        # tolerating a refused destructive overwrite.
+        self.assertTrue(common.EVENT_FLOW_SPECS["cyq_perf"].zero_rows_ok)
+        self._write_trade_cal("20200102")
+        path = self.raw_dir / "cyq_perf" / "trade_date=20200102.parquet"
+        original = self._seed_shrinkable_partition(
+            path,
+            {
+                "trade_date": ["20200102"] * 30,
+                "ts_code": [f"{index:06d}.SZ" for index in range(30)],
+                "winner_rate": ["1"] * 30,
+            },
+            "cyq_perf",
+        )
+        client = self._shrinking_client("cyq_perf", 2, {
+            "trade_date": ["20200102"] * 2,
+            "ts_code": ["000000.SZ", "000001.SZ"],
+        })
+        args = argparse.Namespace(
+            raw_dir=str(self.raw_dir),
+            start_date="20200102",
+            end_date="20200102",
+            datasets=["cyq_perf"],
+            revision_ledger=str(self.root / "cyq_revision_events.jsonl"),
+            allow_empty_revision_overwrite=False,
+            force=True,
+            page_limit=None,
+            min_interval_seconds=0,
+            timeout_seconds=1,
+            zero_rows_not_ready=True,
+        )
+
+        with (
+            patch.object(download, "load_token", return_value="token"),
+            patch.object(download, "TuShareClient", return_value=client),
+            redirect_stdout(io.StringIO()),
+            self.assertRaises(common.BlockedOverwriteError) as ctx,
+        ):
+            download.download_event_flow(args)
+
+        self.assertIn("cyq_perf", str(ctx.exception))
+        self.assertTrue(pd.read_parquet(path).equals(original))
+
+    def test_event_range_month_blocked_shrink_fails_the_run(self):
+        # range_month had no blocked tracking at all.
+        path = self.raw_dir / "repurchase" / "month=202001.parquet"
+        original = self._seed_shrinkable_partition(
+            path,
+            {
+                "ts_code": [f"{index:06d}.SZ" for index in range(30)],
+                "ann_date": ["20200115"] * 30,
+                "end_date": [""] * 30,
+                "proc": [""] * 30,
+                "exp_date": [""] * 30,
+            },
+            "repurchase",
+        )
+        client = self._shrinking_client("repurchase", 2, {
+            "ts_code": ["000000.SZ", "000001.SZ"],
+            "ann_date": ["20200115", "20200115"],
+            "end_date": ["", ""],
+            "proc": ["", ""],
+            "exp_date": ["", ""],
+        })
+
+        with redirect_stdout(io.StringIO()), self.assertRaises(common.BlockedOverwriteError) as ctx:
+            download.download_event_range_month(
+                client,
+                self.raw_dir,
+                common.EVENT_FLOW_SPECS["repurchase"],
+                [("20200101", "20200131", "202001")],
+                True,
+                5000,
+                str(self.root / "range_month_revision_events.jsonl"),
+            )
+
+        self.assertIn("repurchase", str(ctx.exception))
+        self.assertIn("month=202001", str(ctx.exception))
+        self.assertTrue(pd.read_parquet(path).equals(original))
+
+    def test_event_range_month_counts_only_partitions_it_wrote(self):
+        # `written` decides the event/flow no-mutation exit contract, so a
+        # partition the writer kept must never be counted as a mutation.
+        spec = common.EVENT_FLOW_SPECS["repurchase"]
+        fresh = self.raw_dir / "repurchase" / "month=202002.parquet"
+        with redirect_stdout(io.StringIO()):
+            written = download.download_event_range_month(
+                EmptyTradeDateClient(), self.raw_dir, spec,
+                [("20200201", "20200229", "202002")], True, 5000,
+                str(self.root / "range_month_counts.jsonl"),
+            )
+        # An empty response on a NEW partition is a real write: the empty
+        # partition is what the lake now carries.
+        self.assertEqual(written, 1)
+        self.assertTrue(fresh.exists())
+
+        self._seed_shrinkable_partition(
+            self.raw_dir / "repurchase" / "month=202003.parquet",
+            {
+                "ts_code": ["000001.SZ"],
+                "ann_date": ["20200315"],
+                "end_date": [""],
+                "proc": [""],
+                "exp_date": [""],
+            },
+            "repurchase",
+        )
+        with redirect_stdout(io.StringIO()):
+            written = download.download_event_range_month(
+                EmptyTradeDateClient(), self.raw_dir, spec,
+                [("20200301", "20200331", "202003")], True, 5000,
+                str(self.root / "range_month_counts.jsonl"),
+            )
+        # The same empty response over an existing non-empty partition is
+        # refused by the empty guard and is NOT a mutation.
+        self.assertEqual(written, 0)
+
+    def test_bak_basic_blocked_shrink_fails_the_run(self):
+        # download_bak_basic discarded the writer's answer entirely.
+        path = self.raw_dir / "bak_basic" / "trade_date=20200102.parquet"
+        original = self._seed_shrinkable_partition(
+            path,
+            {
+                "trade_date": ["20200102"] * 30,
+                "ts_code": [f"{index:06d}.SZ" for index in range(30)],
+                "name": ["x"] * 30,
+            },
+            "bak_basic",
+        )
+        client = self._shrinking_client("bak_basic", 2, {
+            "trade_date": ["20200102"] * 2,
+            "ts_code": ["000000.SZ", "000001.SZ"],
+        })
+
+        with redirect_stdout(io.StringIO()), self.assertRaises(common.BlockedOverwriteError) as ctx:
+            download.download_bak_basic(
+                client, self.raw_dir, ["20200102"], "20200102", True,
+                self.root / "bak_basic_revision_events.jsonl", False,
+            )
+
+        self.assertIn("bak_basic", str(ctx.exception))
+        self.assertTrue(pd.read_parquet(path).equals(original))
+
     def test_revision_aware_writer_empty_guard_does_not_depend_on_ledger(self):
         path = self.raw_dir / "limit_list_d" / "trade_date=20200102.parquet"
         original = pd.DataFrame([{"trade_date": "20200102", "ts_code": "000001.SZ", "limit": "U"}])
@@ -4405,7 +4633,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         )
         # A covering non-force run must not skip the committed partial day.
         client = EmptyTradeDateClient()
-        written, zero_skipped, _blocked = download.download_event_trade_date_dataset(
+        written, zero_skipped = download.download_event_trade_date_dataset(
             client, self.raw_dir, common.EVENT_FLOW_SPECS["margin"], ["20260529"], False, None
         )
         self.assertEqual((written, zero_skipped), (0, 1))
@@ -4455,7 +4683,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 row = ["20260529" if col == "trade_date" else "600000.SH" if col == "ts_code" else "1.0" for col in columns]
                 return common.ApiResult(columns, [row])
 
-        written, zero_skipped, _ = download.download_event_trade_date_dataset(
+        written, zero_skipped = download.download_event_trade_date_dataset(
             ShOnlyDetailClient(), self.raw_dir, common.EVENT_FLOW_SPECS["margin_detail"], ["20260529"], True, None
         )
         self.assertEqual((written, zero_skipped), (0, 1))
@@ -4468,7 +4696,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             detail_dir / "trade_date=20260529.parquet", index=False
         )
         client = EmptyTradeDateClient()
-        written, zero_skipped, _ = download.download_event_trade_date_dataset(
+        written, zero_skipped = download.download_event_trade_date_dataset(
             client, self.raw_dir, common.EVENT_FLOW_SPECS["margin_detail"], ["20260529"], False, None
         )
         self.assertEqual((written, zero_skipped), (0, 1))
@@ -4512,7 +4740,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 ]
                 return common.ApiResult(columns, rows)
 
-        written, zero_skipped, _ = download.download_event_trade_date_dataset(
+        written, zero_skipped = download.download_event_trade_date_dataset(
             NoBseSecsClient(), self.raw_dir, common.EVENT_FLOW_SPECS["margin_secs"], ["20260529"], True, None
         )
         self.assertEqual((written, zero_skipped), (0, 1))
@@ -4525,7 +4753,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             {"trade_date": ["20260529"] * 2, "ts_code": ["600000.SH", "000001.SZ"], "exchange": ["SSE", "SZSE"]}
         ).to_parquet(secs_dir / "trade_date=20260529.parquet", index=False)
         client = EmptyTradeDateClient()
-        written, zero_skipped, _ = download.download_event_trade_date_dataset(
+        written, zero_skipped = download.download_event_trade_date_dataset(
             client, self.raw_dir, common.EVENT_FLOW_SPECS["margin_secs"], ["20260529"], False, None
         )
         self.assertEqual((written, zero_skipped), (0, 1))
@@ -4693,11 +4921,12 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         # The guard keeps the old partition AND the run must fail loudly:
         # swallowing the refusal froze fina_mainbz_vip at a stale vintage.
-        with self.assertRaises(RuntimeError) as ctx:
+        with self.assertRaises(common.BlockedOverwriteError) as ctx:
             download.download_fundamental_ts_code_dataset(
                 ShrunkClient(), self.raw_dir, spec, ["000001.SZ"], True, 5000,
             )
         self.assertIn("revision guard refused", str(ctx.exception))
+        self.assertIn("ts_code=000001.SZ", str(ctx.exception))
         self.assertEqual(len(pd.read_parquet(d / "ts_code=000001.SZ.parquet")), 40)
 
     def test_event_skip_reattempts_partition_without_intact_sidecar(self):
@@ -4722,7 +4951,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 return common.ApiResult(columns, rows)
 
         client = ThreeExchangeSecsClient()
-        written, zero_skipped, _ = download.download_event_trade_date_dataset(
+        written, zero_skipped = download.download_event_trade_date_dataset(
             client, self.raw_dir, common.EVENT_FLOW_SPECS["margin_secs"], ["20260601"], False, None
         )
         self.assertEqual([api for api, _ in client.calls], ["margin_secs"])
@@ -4731,7 +4960,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         # Once the pair is intact, the same covering run skips it.
         client.calls.clear()
-        written, zero_skipped, _ = download.download_event_trade_date_dataset(
+        written, zero_skipped = download.download_event_trade_date_dataset(
             client, self.raw_dir, common.EVENT_FLOW_SPECS["margin_secs"], ["20260601"], False, None
         )
         self.assertEqual(client.calls, [])
@@ -5030,9 +5259,11 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=ShrunkMarginClient()):
             output = io.StringIO()
-            with redirect_stdout(output):
-                with self.assertRaisesRegex(RuntimeError, "overwrite was blocked"):
-                    download.download_event_flow(args)
+            with (
+                redirect_stdout(output),
+                self.assertRaisesRegex(common.BlockedOverwriteError, "revision guard refused"),
+            ):
+                download.download_event_flow(args)
 
         self.assertTrue(pd.read_parquet(path).equals(original))
 

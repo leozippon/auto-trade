@@ -1362,7 +1362,7 @@ def audit_stock_universe_semantics(raw_dir: Path, all_codes: dict[str, set[str]]
     add("warning" if has_diff else "info", "stock_universe_semantics", "North-board, delisted, stock_company, daily, and industry-member coverage differences", details)
 
 def audit_pit_availability(raw_dir: Path, add) -> None:
-    dataset_columns = {dataset: latest_parquet_schema(raw_dir, dataset) for dataset in ("daily", "daily_basic", "adj_factor", "stk_limit", "bak_basic", "namechange")}
+    dataset_columns = {dataset: latest_parquet_schema(raw_dir, dataset) for dataset in ("daily", "daily_basic", "adj_factor", "stk_limit", "suspend_d", "bak_basic", "namechange")}
     row_available_at = {dataset: "available_at" in columns for dataset, columns in dataset_columns.items()}
     sidecar_has_fetched_at: dict[str, bool] = {}
     for dataset in dataset_columns:
@@ -1380,6 +1380,7 @@ def audit_pit_availability(raw_dir: Path, add) -> None:
             "daily": "officially loaded after market close around 15:00-16:00; do not use same-day values for 09:25 decisions",
             "daily_basic": "officially updated around 15:00-17:00; do not use same-day values for 09:25 decisions",
             "stk_limit": "officially around 08:40 and covers A/B shares and funds; keep explicit available_at in PIT layer",
+            "suspend_d": "released around 08:45 as a trading constraint; zero rows mean no suspended names that day, not a missing partition",
             "adj_factor": "officially around 09:15-09:20, but raw trade_date alone is not enough for PIT-safe joins",
             "namechange": "use ann_date or a derived available_at; start_date can be a future effective date",
         },

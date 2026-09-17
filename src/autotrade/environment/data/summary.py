@@ -131,7 +131,7 @@ def write_unit_reference(path: Path, views: Mapping[str, tuple[Path, str]]) -> N
     column_map: dict[tuple[str, str | None], list[str]] = {}
     for view_dir, _mount in views.values():
         view_dir = Path(view_dir)
-        manifest = _read_json(view_dir / "manifest.json")
+        manifest = _read_manifest(view_dir)
         for key, columns in snapshot_column_map(view_dir, manifest).items():
             merged = dict.fromkeys(column_map.get(key, []))
             merged.update(dict.fromkeys(columns))
@@ -159,7 +159,7 @@ def write_unit_reference(path: Path, views: Mapping[str, tuple[Path, str]]) -> N
 
 
 def _snapshot_view_summary(view_dir: Path, mount_path: str, *, detailed: bool = True) -> dict[str, object]:
-    manifest = _read_json(view_dir / "manifest.json")
+    manifest = _read_manifest(view_dir)
     files = [
         _parquet_file_summary(path, view_dir, mount_path, detailed=detailed)
         for path in sorted(view_dir.rglob("*.parquet"))
@@ -305,10 +305,20 @@ def _compact_domains(domains: object) -> dict[str, dict[str, object]]:
     return compact
 
 
-def _read_json(path: Path) -> dict[str, object]:
-    if not path.exists():
-        return {}
+def _read_manifest(view_dir: Path) -> dict[str, object]:
+    """Read a published view's manifest, failing loudly when it cannot be read.
+
+    Every view reaching this module is a built snapshot whose builder wrote the
+    manifest, so a missing or unparseable one is a broken view. Substituting an
+    empty mapping published an Agent-visible data_summary.json with a null kind,
+    no decision time and no domains -- a silently degraded data contract in place
+    of an obvious failure.
+    """
+    path = view_dir / "manifest.json"
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"snapshot view manifest is unreadable: {path}: {exc}") from exc
+    if not isinstance(manifest, dict):
+        raise TypeError(f"snapshot view manifest is not a JSON object: {path}")
+    return manifest

@@ -56,6 +56,7 @@ from .common import (
     TEXT_FETCHABLE_DATASETS,
     TEXT_SPECS,
     TRADE_DATE_PAGE_LIMIT,
+    BlockedOverwriteError,
     BoardTradingDataset,
     EventDataset,
     FundamentalDataset,
@@ -494,7 +495,7 @@ def download_index_weight(
             meta_params = dict(params)
             meta_params["pagination"] = {"page_limit": INDEX_WEIGHT_PAGE_LIMIT, "pages": pages}
             df = frame(result)
-            total_rows += write_window_merged_partition(
+            did_write, rows = write_window_merged_partition(
                 path,
                 df,
                 api_name="index_weight",
@@ -507,7 +508,9 @@ def download_index_weight(
                 revision_ledger=revision_ledger,
                 allow_empty_revision_overwrite=allow_empty_revision_overwrite,
             )
-            written += 1
+            if did_write:
+                written += 1
+                total_rows += rows
     print(f"index_weight done codes={len(DEFAULT_CN_INDEX_CODES)} skipped={skipped} written={written} rows_written={total_rows}")
 
 
@@ -893,21 +896,31 @@ def _recheck_stk_auction_day(args: argparse.Namespace, repo_root: Path, raw_dir:
             **outcome, "status": "recheck_unchanged", "rows": int(len(candidate)),
         }, ensure_ascii=False, sort_keys=True))
         return 0
-    wrote, landed_at = _publish_auction_frame(
-        raw_dir,
-        repo_root,
-        trade_date,
-        candidate,
-        result,
-        pages,
-        args.page_limit,
-        getattr(args, "landing_job", "cn_evening_auction_backfill"),
-        getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
-    )
-    if not wrote:
-        # The key-removal/shrink guards kept the existing partition and have
-        # already recorded the blocked revision in the ledger.
+    try:
+        wrote, landed_at = _publish_auction_frame(
+            raw_dir,
+            repo_root,
+            trade_date,
+            candidate,
+            result,
+            pages,
+            args.page_limit,
+            getattr(args, "landing_job", "cn_evening_auction_backfill"),
+            getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+        )
+    except BlockedOverwriteError:
+        # The second sanctioned catch (see BlockedOverwriteError): this pass is
+        # a best-effort evening CORRECTION of an already-committed morning
+        # capture, and refusing a correction that would drop auction rows is its
+        # intended outcome, not an integrity alarm -- the authoritative morning
+        # partition stays on disk and the refusal is in the revision ledger. A
+        # truncated response large enough to matter is already rejected upstream
+        # by the completeness validation, and per this function's contract an
+        # unusable read must not poison the batch's other datasets.
         print(json.dumps({**outcome, "status": "recheck_blocked_kept_existing"}, ensure_ascii=False, sort_keys=True))
+        return 0
+    if not wrote:
+        print(json.dumps({**outcome, "status": "recheck_empty_kept_existing"}, ensure_ascii=False, sort_keys=True))
         return 0
     print(json.dumps({
         **outcome,
@@ -962,7 +975,14 @@ def write_window_merged_partition(
     end_date: str,
     revision_ledger: Path | str | None,
     allow_empty_revision_overwrite: bool,
-) -> int:
+) -> tuple[bool, int]:
+    """Merge the refreshed window into the partition. Returns (did_write, rows).
+
+    A caller must not infer the write from the row count: a partition legitimately
+    written with zero rows and one kept because the response was empty both report
+    zero rows, and counting the latter as written overstated the lake mutations the
+    event/flow no-mutation contract is decided on.
+    """
     df = refreshed
     meta_params = dict(params)
     if path.exists() and (not refreshed.empty or allow_empty_revision_overwrite):
@@ -986,7 +1006,7 @@ def write_window_merged_partition(
         allow_empty_revision_overwrite=allow_empty_revision_overwrite,
         allow_key_removal_overwrite=True,
     )
-    return len(df) if written else 0
+    return bool(written), len(df) if written else 0
 
 def download_trade_date_dataset(
     client: TuShareClient,
@@ -1180,7 +1200,7 @@ def download_macro_month_loop(client: TuShareClient, raw_dir: Path, spec: MacroD
         meta_params = {**params, **coverage_params}
         result = client.query(spec.api_name, params, spec.fields)
         df = augment_macro_frame(frame(result), spec)
-        total_rows += write_window_merged_partition(
+        did_write, rows = write_window_merged_partition(
             path,
             df,
             api_name=spec.api_name,
@@ -1193,7 +1213,9 @@ def download_macro_month_loop(client: TuShareClient, raw_dir: Path, spec: MacroD
             revision_ledger=revision_ledger,
             allow_empty_revision_overwrite=allow_empty_revision_overwrite,
         )
-        written += 1
+        if did_write:
+            written += 1
+            total_rows += rows
         if index % 24 == 0:
             print(f"{spec.api_name} months {index}/{len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
     print(f"{spec.api_name} done months={len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
@@ -1279,7 +1301,7 @@ def download_macro_date_year(client: TuShareClient, raw_dir: Path, spec: MacroDa
         meta_params = dict(params)
         meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
         df = augment_macro_frame(frame(result), spec)
-        total_rows += write_window_merged_partition(
+        did_write, rows = write_window_merged_partition(
             path,
             df,
             api_name=spec.api_name,
@@ -1292,7 +1314,9 @@ def download_macro_date_year(client: TuShareClient, raw_dir: Path, spec: MacroDa
             revision_ledger=revision_ledger,
             allow_empty_revision_overwrite=allow_empty_revision_overwrite,
         )
-        written += 1
+        if did_write:
+            written += 1
+            total_rows += rows
     print(f"{spec.api_name} done years={int(end_date[:4]) - int(start_date[:4]) + 1} skipped={skipped} written={written} rows_written={total_rows}")
 
 def download_macro_date_year_by_ts_code(
@@ -1326,7 +1350,7 @@ def download_macro_date_year_by_ts_code(
             meta_params = dict(params)
             meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
             df = augment_macro_frame(frame(result), spec)
-            total_rows += write_window_merged_partition(
+            did_write, rows = write_window_merged_partition(
                 path,
                 df,
                 api_name=spec.api_name,
@@ -1339,7 +1363,9 @@ def download_macro_date_year_by_ts_code(
                 revision_ledger=revision_ledger,
                 allow_empty_revision_overwrite=allow_empty_revision_overwrite,
             )
-            written += 1
+            if did_write:
+                written += 1
+                total_rows += rows
             if task_index % 25 == 0:
                 print(f"{spec.api_name} {task_index}/{total_tasks} skipped={skipped} written={written} rows_written={total_rows}")
     print(f"{spec.api_name} done tasks={total_tasks} skipped={skipped} written={written} rows_written={total_rows}")
@@ -1416,7 +1442,7 @@ def download_macro_eco_cal_month(
                         "pagination": {"page_limit": page_limit, "pages": pages_total, "day_windows": day_windows},
                     })
                     df = augment_macro_frame(combined, spec)
-                    total_rows += write_window_merged_partition(
+                    did_write, rows = write_window_merged_partition(
                         path,
                         df,
                         api_name=spec.api_name,
@@ -1429,7 +1455,9 @@ def download_macro_eco_cal_month(
                         revision_ledger=revision_ledger,
                         allow_empty_revision_overwrite=allow_empty_revision_overwrite,
                     )
-                    written += 1
+                    if did_write:
+                        written += 1
+                        total_rows += rows
                     if task_index % 24 == 0:
                         print(f"{spec.api_name} {task_index}/{total_tasks} skipped={skipped} written={written} rows_written={total_rows}")
     print(f"{spec.api_name} done tasks={total_tasks} skipped={skipped} written={written} rows_written={total_rows}")
@@ -1476,7 +1504,6 @@ def download_event_flow(args: argparse.Namespace) -> int:
             allow_empty=True,
         )
     required_zero_skipped: list[str] = []
-    blocked_overwrites: list[str] = []
     # trade_cal coverage refresh IS a lake write: it must veto the exit-75
     # no-mutation contract even when every dataset response was empty.
     total_written = 1 if trade_cal_refreshed else 0
@@ -1485,7 +1512,7 @@ def download_event_flow(args: argparse.Namespace) -> int:
         start_date = max(args.start_date, spec.start_date)
         if spec.strategy == "trade_date":
             dates = [d for d in trade_dates if start_date <= d <= trade_end_date]
-            written, zero_skipped, blocked_skipped = download_event_trade_date_dataset(
+            written, zero_skipped = download_event_trade_date_dataset(
                 client,
                 raw_dir,
                 spec,
@@ -1498,8 +1525,6 @@ def download_event_flow(args: argparse.Namespace) -> int:
             total_written += written
             if zero_skipped and not spec.zero_rows_ok:
                 required_zero_skipped.append(f"{spec.api_name}:{zero_skipped}")
-            if blocked_skipped and not spec.zero_rows_ok:
-                blocked_overwrites.append(f"{spec.api_name}:{blocked_skipped}")
         elif spec.strategy == "range_month":
             windows = month_windows(args.start_date, args.end_date)
             dataset_windows = [(s, e, m) for s, e, m in windows if e >= start_date]
@@ -1516,13 +1541,6 @@ def download_event_flow(args: argparse.Namespace) -> int:
             )
         else:
             raise RuntimeError(f"unsupported event/flow strategy {spec.strategy} for {dataset}")
-    if blocked_overwrites:
-        # Non-empty responses whose overwrite the revision guard refused
-        # (destructive shrink): a data-integrity alarm, never "not ready".
-        raise RuntimeError(
-            "required event/flow partitions had non-empty responses whose overwrite was blocked; "
-            f"review the revision ledger before retrying: {blocked_overwrites}"
-        )
     if required_zero_skipped:
         if getattr(args, "zero_rows_not_ready", False):
             # Pre-open attempts hit the source before T-1 margin publication;
@@ -1569,12 +1587,11 @@ def download_event_trade_date_dataset(
     page_limit: int | None,
     revision_ledger: Path | str | None = None,
     allow_empty_revision_overwrite: bool = False,
-) -> tuple[int, int, int]:
+) -> tuple[int, int]:
     page_limit = page_limit or spec.page_limit
     written = 0
     skipped = 0
     zero_skipped = 0
-    blocked_skipped = 0
     total_rows = 0
     total_pages = 0
     for index, trade_date in enumerate(trade_dates, start=1):
@@ -1629,14 +1646,12 @@ def download_event_trade_date_dataset(
             total_rows += len(df)
             written += 1
         else:
-            # Non-empty response refused by the revision guard (destructive
-            # shrink): distinct from an empty/not-published response.
-            blocked_skipped += 1
+            zero_skipped += 1
         total_pages += pages
         if index % 250 == 0:
             print(f"{spec.api_name} {index}/{len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
-    print(f"{spec.api_name} done dates={len(trade_dates)} skipped={skipped} written={written} zero_skipped={zero_skipped} blocked_skipped={blocked_skipped} rows_written={total_rows} pages={total_pages}")
-    return written, zero_skipped, blocked_skipped
+    print(f"{spec.api_name} done dates={len(trade_dates)} skipped={skipped} written={written} zero_skipped={zero_skipped} rows_written={total_rows} pages={total_pages}")
+    return written, zero_skipped
 
 def download_event_range_month(
     client: TuShareClient,
@@ -1665,7 +1680,7 @@ def download_event_range_month(
         meta_params["month"] = month
         meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
         df = augment_event_frame(frame(result), spec, trading_dates=trading_dates)
-        rows = write_window_merged_partition(
+        did_write, rows = write_window_merged_partition(
             path,
             df,
             api_name=spec.api_name,
@@ -1678,8 +1693,9 @@ def download_event_range_month(
             revision_ledger=revision_ledger,
             allow_empty_revision_overwrite=allow_empty_revision_overwrite,
         )
-        total_rows += rows
-        written += 1 if rows or not (path.exists() and parquet_rows(path) > 0 and df.empty) else 0
+        if did_write:
+            written += 1
+            total_rows += rows
         total_pages += pages
         if index % 24 == 0:
             print(f"{spec.api_name} months {index}/{len(windows)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
@@ -1919,17 +1935,30 @@ def query_share_float_to_path(
     meta_params["download_path"] = source
     meta_params["row_limit"] = SHARE_FLOAT_ROW_LIMIT
     df = augment_event_frame(frame(result), EVENT_FLOW_SPECS["share_float"])
-    did_write = write_parquet_revision_aware(
-        path,
-        df,
-        api_name="share_float",
-        params=meta_params,
-        fields=list(df.columns),
-        key_columns=list(EVENT_FLOW_SPECS["share_float"].key_columns),
-        revision_ledger=revision_ledger,
-        allow_empty_revision_overwrite=allow_empty_revision_overwrite,
-        allow_key_removal_overwrite=True,
-    )
+    try:
+        did_write = write_parquet_revision_aware(
+            path,
+            df,
+            api_name="share_float",
+            params=meta_params,
+            fields=list(df.columns),
+            key_columns=list(EVENT_FLOW_SPECS["share_float"].key_columns),
+            revision_ledger=revision_ledger,
+            allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+            allow_key_removal_overwrite=True,
+        )
+        guard_retained = False
+    except BlockedOverwriteError:
+        # A guard decision is NOT a fetch failure: the writer deliberately kept
+        # the old partition and recorded a revision event. Letting the alarm
+        # abort the run mid-loop made the ts_code rescue below unreachable -- so
+        # a capped partition (the exact case the rescue exists for) could never
+        # be repaired and every attempt ended with the lake left dirty. The
+        # alarm is not dropped: the caller still ends the run non-zero for every
+        # day the rescue cannot explain (capped -> rescue by ts_code, otherwise
+        # a mass retraction an operator must rule on).
+        did_write = False
+        guard_retained = True
     rows = len(df) if did_write else parquet_rows(path) if path.exists() else 0
     return {
         "path": str(path),
@@ -1942,14 +1971,7 @@ def query_share_float_to_path(
         # early-evening partition, then the vendor's late fill pushed the day
         # past the cap) into an "unrescuable retraction" run failure.
         "source_cap_risk": max(rows, len(df)) >= SHARE_FLOAT_ROW_LIMIT,
-        # A guard decision is NOT a fetch failure: the writer deliberately kept
-        # the old partition and recorded a revision event. Raising here aborted
-        # the whole run mid-loop, which made the ts_code rescue below
-        # unreachable -- so a capped partition (the exact case the rescue
-        # exists for) could never be repaired and every attempt ended with the
-        # lake left dirty. The caller decides what a retention means: capped ->
-        # rescue by ts_code, otherwise a mass retraction an operator must rule on.
-        "guard_retained": not did_write and not df.empty,
+        "guard_retained": guard_retained,
     }
 
 def download_share_float_ann_dates(client: TuShareClient, raw_dir: Path, args: argparse.Namespace, report: dict[str, Any]) -> list[str]:
@@ -2698,7 +2720,6 @@ def download_fundamental_period_dataset(
     written = 0
     skipped = 0
     total_rows = 0
-    blocked: list[str] = []
     for index, period in enumerate(periods, start=1):
         path = raw_dir / spec.api_name / f"period={period}.parquet"
         if not force and period not in force_periods and committed_partition_intact(path):
@@ -2723,12 +2744,9 @@ def download_fundamental_period_dataset(
         if did_write:
             written += 1
             total_rows += len(df)
-        elif not df.empty:
-            blocked.append(period)
         if index % 16 == 0:
             print(f"{spec.api_name} periods {index}/{len(periods)} skipped={skipped} written={written} rows_written={total_rows}")
-    print(f"{spec.api_name} done periods={len(periods)} skipped={skipped} written={written} rows_written={total_rows} blocked={len(blocked)}")
-    raise_on_blocked_fundamental_overwrites(spec.api_name, blocked)
+    print(f"{spec.api_name} done periods={len(periods)} skipped={skipped} written={written} rows_written={total_rows}")
 
 def download_fundamental_ann_month_dataset(
     client: TuShareClient,
@@ -2745,7 +2763,6 @@ def download_fundamental_ann_month_dataset(
     written = 0
     skipped = 0
     total_rows = 0
-    blocked: list[str] = []
     for index, (start_date, end_date, ann_month) in enumerate(windows, start=1):
         path = raw_dir / spec.api_name / f"ann_month={ann_month}.parquet"
         params = {"start_date": start_date, "end_date": end_date}
@@ -2776,24 +2793,9 @@ def download_fundamental_ann_month_dataset(
         if did_write:
             written += 1
             total_rows += len(df)
-        elif not df.empty:
-            blocked.append(ann_month)
         if index % 24 == 0:
             print(f"{spec.api_name} months {index}/{len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
-    print(f"{spec.api_name} done months={len(windows)} skipped={skipped} written={written} rows_written={total_rows} blocked={len(blocked)}")
-    raise_on_blocked_fundamental_overwrites(spec.api_name, blocked)
-
-def raise_on_blocked_fundamental_overwrites(api_name: str, blocked: list[str]) -> None:
-    """Non-empty responses the revision guard refused are a data-integrity
-    alarm, never a quiet counter: swallowing them froze fina_mainbz_vip at a
-    stale vintage for months while every job reported ok. Review the revision
-    ledger; if the restatement is genuine, delete the affected partitions per
-    the shrink-guard runbook and re-run the covering job."""
-    if blocked:
-        raise RuntimeError(
-            f"{api_name}: the revision guard refused non-empty overwrites for {len(blocked)} partition(s) "
-            f"(destructive shrink); review the revision ledger before retrying: {blocked[:10]}"
-        )
+    print(f"{spec.api_name} done months={len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
 
 def download_fundamental_ts_code_dataset(
     client: TuShareClient,
@@ -2810,7 +2812,6 @@ def download_fundamental_ts_code_dataset(
     written = 0
     skipped = 0
     total_rows = 0
-    blocked: list[str] = []
     for index, ts_code in enumerate(stock_codes, start=1):
         path = raw_dir / spec.api_name / f"ts_code={ts_code}.parquet"
         if not force and ts_code not in force_codes and committed_partition_intact(path):
@@ -2837,12 +2838,9 @@ def download_fundamental_ts_code_dataset(
         if did_write:
             written += 1
             total_rows += len(df)
-        elif not df.empty:
-            blocked.append(ts_code)
         if index % 500 == 0:
             print(f"{spec.api_name} codes {index}/{len(stock_codes)} skipped={skipped} written={written} rows_written={total_rows}")
-    print(f"{spec.api_name} done codes={len(stock_codes)} skipped={skipped} written={written} rows_written={total_rows} blocked={len(blocked)}")
-    raise_on_blocked_fundamental_overwrites(spec.api_name, blocked)
+    print(f"{spec.api_name} done codes={len(stock_codes)} skipped={skipped} written={written} rows_written={total_rows}")
 
 def download_intraday(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
@@ -2970,6 +2968,7 @@ def write_stk_mins_by_date(
 def compact_intraday_by_date(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
     raw_dir = (repo_root / args.raw_dir).resolve()
+    revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
     output_dataset = args.output_dataset
     trade_dates = load_sse_open_dates(raw_dir, args.start_date, args.end_date)
     month_to_dates: dict[str, list[str]] = {}
@@ -3040,6 +3039,7 @@ def compact_intraday_by_date(args: argparse.Namespace) -> int:
                 trade_date=trade_date,
                 source="compact_from_stock_year",
                 params=params,
+                revision_ledger=revision_ledger,
             )
             written += 1
             total_rows += len(normalized)
@@ -3257,7 +3257,7 @@ def download_text_range_month(client: TuShareClient, raw_dir: Path, spec: TextDa
         meta_params["month"] = month
         meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
         df = augment_text_frame(frame(result), spec)
-        rows = write_window_merged_partition(
+        did_write, rows = write_window_merged_partition(
             path,
             df,
             api_name=spec.api_name,
@@ -3274,8 +3274,9 @@ def download_text_range_month(client: TuShareClient, raw_dir: Path, spec: TextDa
             revision_ledger=revision_ledger,
             allow_empty_revision_overwrite=allow_empty_revision_overwrite,
         )
-        written += 1
-        total_rows += rows
+        if did_write:
+            written += 1
+            total_rows += rows
         if index % 24 == 0:
             print(f"{spec.api_name} months {index}/{len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
     print(f"{spec.api_name} done months={len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
@@ -3310,7 +3311,7 @@ def download_text_time_range_month(
             meta_params["month"] = month
             meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
             df = augment_text_frame(frame(result), spec)
-            rows = write_window_merged_partition(
+            did_write, rows = write_window_merged_partition(
                 path,
                 df,
                 api_name=spec.api_name,
@@ -3323,8 +3324,9 @@ def download_text_time_range_month(
                 revision_ledger=revision_ledger,
                 allow_empty_revision_overwrite=allow_empty_revision_overwrite,
             )
-            written += 1
-            total_rows += rows
+            if did_write:
+                written += 1
+                total_rows += rows
             if index % 24 == 0:
                 print(f"{spec.api_name}/{source_suffix} months {index}/{len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
         print(f"{spec.api_name}/{source_suffix} done months={len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
