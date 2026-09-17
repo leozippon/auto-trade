@@ -1038,7 +1038,7 @@ class SessionValidations:
         hard = (
             AcceptanceRules.from_record(self.request.acceptance_rules).evaluate(
                 dict(nominee["summary"])  # type: ignore[arg-type]
-            )[0]
+            )
             if self.request.acceptance_rules
             else []
         )

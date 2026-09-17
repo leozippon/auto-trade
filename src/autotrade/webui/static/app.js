@@ -64,9 +64,10 @@ const REASON_LABELS = {
 };
 // The figures whose name does not already say what they are, each worded once
 // so every tile, column and criterion row that draws one says the same thing.
-// The measured values and the "全区间验证次数 ≥ 2" criterion stay in the freeze
-// gate checklist, which draws them from the record.
-const DSR_GATE_TITLE = "去膨胀夏普概率（DSR）：冻结门要求 ≥ 0.5";
+// A gloss states no threshold: the freeze gate's own limits are carried by the
+// gate record, and the checklist draws both the measured value and the limit
+// from there.
+const DSR_TITLE = "去膨胀夏普概率（DSR）：按本臂试验数折减后，研究期 IR 仍高于 SR* 的概率";
 const TRIALS_TITLE = "DSR 据以折减的试验数：本臂验证过的不同策略版本";
 // The three neutralised figures the panels draw side by side, as
 // pipelines/verdict.py measures them: the excess is the intercept of the daily
@@ -1855,7 +1856,7 @@ function evidenceTiles(item) {
       label: "DSR",
       value: best.deflated_sharpe_probability,
       fmt: fmtSharpe,
-      title: DSR_GATE_TITLE,
+      title: DSR_TITLE,
     },
     { label: "累计试验", value: best.trials, fmt: String, title: TRIALS_TITLE },
   ]);
@@ -2626,6 +2627,12 @@ function criteriaRow(slice, failed, thresholds) {
   });
 }
 
+/* A criterion's threshold cell. A figure the record does not carry leaves the
+   cell empty, so the row shows no limit rather than today's default. */
+function thresholdCell(mark, value, fmt = fmtPct) {
+  return value === undefined || value === null ? "" : `${mark} ${fmt(value)}`;
+}
+
 function failedReasons(verdict) {
   return new Set((verdict || {}).reasons || []);
 }
@@ -2643,22 +2650,10 @@ function forwardCriteria(f, verdict, thresholds) {
       : []),
     row("forward_lower_bound_not_positive", fmtPct(f && f.lower_bound), "> 0", LOWER_BOUND_TITLE),
     row("forward_recency_negative", fmtPct(f && f.recency_neutralized_excess), "≥ 0"),
-    row(
-      "forward_max_drawdown_exceeded",
-      fmtPct(f && f.max_drawdown),
-      t.max_drawdown === undefined || t.max_drawdown === null ? "" : `≤ ${fmtPct(t.max_drawdown)}`,
-    ),
+    row("forward_max_drawdown_exceeded", fmtPct(f && f.max_drawdown), thresholdCell("≤", t.max_drawdown)),
     row("forward_not_positive_at_cost_stress", fmtPct(f && f.excess_at_cost_stress), "> 0"),
-    row(
-      "forward_too_few_round_trips",
-      f && f.round_trips,
-      t.min_round_trips === undefined || t.min_round_trips === null ? "" : `≥ ${t.min_round_trips}`,
-    ),
-    row(
-      "forward_exposure_below_floor",
-      fmtPct(f && f.mean_gross),
-      t.min_mean_gross === undefined ? "" : `≥ ${fmtPct(t.min_mean_gross)}`,
-    ),
+    row("forward_too_few_round_trips", f && f.round_trips, thresholdCell("≥", t.min_round_trips, String)),
+    row("forward_exposure_below_floor", fmtPct(f && f.mean_gross), thresholdCell("≥", t.min_mean_gross)),
   ];
 }
 
@@ -2681,16 +2676,8 @@ function heldoutCriteria(h, verdict, thresholds) {
       h ? `≥ ${fmtPct(h.tolerance)}` : tolerance && `≥ ${tolerance}`,
       h ? tolerance || null : null,
     ),
-    row(
-      "heldout_max_drawdown_exceeded",
-      fmtPct(h && h.max_drawdown),
-      t.max_drawdown === undefined || t.max_drawdown === null ? "" : `≤ ${fmtPct(t.max_drawdown)}`,
-    ),
-    row(
-      "heldout_exposure_below_floor",
-      fmtPct(h && h.mean_gross),
-      t.min_mean_gross === undefined ? "" : `≥ ${fmtPct(t.min_mean_gross)}`,
-    ),
+    row("heldout_max_drawdown_exceeded", fmtPct(h && h.max_drawdown), thresholdCell("≤", t.max_drawdown)),
+    row("heldout_exposure_below_floor", fmtPct(h && h.mean_gross), thresholdCell("≥", t.min_mean_gross)),
   ];
 }
 
@@ -2879,7 +2866,7 @@ function frozenPanel(detail) {
           // The same gloss the other DSR tiles carry, then what this
           // nomination's probability was deflated against.
           title: [
-            DSR_GATE_TITLE,
+            DSR_TITLE,
             frozen.trials === null || frozen.trials === undefined ? null : `试验 ${frozen.trials} 个`,
             frozen.sharpe_star === null || frozen.sharpe_star === undefined
               ? null
@@ -3283,6 +3270,7 @@ function sessionDetailPanel(detail, selectedKey) {
    criteria always, a failed precondition only when it failed. */
 function freezeGateChecklist(gate) {
   const failed = new Set(gate.reasons || []);
+  const t = gate.thresholds || {};
   const preconditions = [
     "freeze_needs_full_span_validation",
     "freeze_unmeasurable",
@@ -3294,7 +3282,7 @@ function freezeGateChecklist(gate) {
       ok: !failed.has("freeze_too_few_full_span_validations"),
       label: reasonLabel("freeze_too_few_full_span_validations"),
       value: gate.full_span_validations ?? "—",
-      threshold: "≥ 2",
+      threshold: `≥ ${t.min_full_span_validations ?? "—"}`,
     },
     {
       ok: failed.has("freeze_deflated_sharpe_unavailable")
@@ -3302,8 +3290,8 @@ function freezeGateChecklist(gate) {
         : !failed.has("freeze_deflated_sharpe_below_threshold"),
       label: reasonLabel("freeze_deflated_sharpe_below_threshold"),
       value: fmtSharpe(gate.deflated_sharpe_probability),
-      threshold: "≥ 0.5",
-      title: DSR_GATE_TITLE,
+      threshold: `≥ ${t.min_deflated_sharpe_probability ?? "—"}`,
+      title: DSR_TITLE,
     },
   ]);
 }
@@ -3349,7 +3337,7 @@ function researchSessionPanel(detail, session) {
           label: "DSR",
           value: best.deflated_sharpe_probability,
           fmt: fmtSharpe,
-          title: DSR_GATE_TITLE,
+          title: DSR_TITLE,
         },
         {
           label: "累计试验",

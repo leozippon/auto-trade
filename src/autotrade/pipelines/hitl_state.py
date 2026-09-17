@@ -93,8 +93,6 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "per_call_timeout_seconds": rolling_default("per_call_timeout_seconds"),
     "strategy_fit_timeout_seconds": rolling_default("strategy_fit_timeout_seconds"),
     "record_failed_attempts": rolling_default("record_failed_attempts"),
-    "min_return": AcceptanceRules().min_return,
-    "min_sharpe": AcceptanceRules().min_sharpe,
     "max_drawdown": AcceptanceRules().max_drawdown,
     "cost_stress_multiplier": AcceptanceRules().cost_stress_multiplier,
     "initial_cash": 1_000_000.0,

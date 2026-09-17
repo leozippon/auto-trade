@@ -389,10 +389,6 @@ _FIELDS: list[dict[str, object]] = [
     # 预算与验收
     {"key": "max_research_minutes", "group": "预算与验收", "label": "研究会话推理时长（分钟）", "type": "int",
      "help": "研究会话的有效推理时间上限，跨中断后的续跑累计；回测耗时独立计算并回补。"},
-    {"key": "min_return", "group": "预算与验收", "label": "验收目标验证收益", "type": "float",
-     "help": "验证总收益目标值：低于只记警告，不阻止冻结（AcceptanceRules.min_return；冻结的硬校验只剩非有限指标与完整验证）。"},
-    {"key": "min_sharpe", "group": "预算与验收", "label": "验收目标 Sharpe", "type": "float",
-     "help": "验证 Sharpe 目标值：低于只记警告，不阻止冻结。"},
     {
         "key": "max_drawdown",
         "group": "预算与验收",

@@ -369,9 +369,7 @@ class RollingExperimentPipeline:
                     records,
                     step_rows,
                     nominee,
-                    hard_reasons=self.config.acceptance.evaluate(
-                        dict(nominee["summary"])
-                    )[0],
+                    hard_reasons=self.config.acceptance.evaluate(dict(nominee["summary"])),
                 )
                 if gate["passed"]:
                     _publish_progress(progress, "freezing", run_id=run_id)

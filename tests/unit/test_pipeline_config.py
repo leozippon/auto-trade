@@ -95,78 +95,52 @@ class AcceptanceRulesTest(unittest.TestCase):
         # guard a NaN total_return would pass acceptance outright.
         rules = AcceptanceRules()
         summary = {"total_return": math.nan, "sharpe": 1.0, "max_drawdown": 0.1}
-        hard, warnings = rules.evaluate(summary)
-        self.assertIn("non_finite_total_return", hard)
-        # The finite Sharpe is above target, so nothing may claim otherwise.
-        self.assertNotIn("sharpe_below_target", warnings)
+        self.assertEqual(rules.evaluate(summary), ["non_finite_total_return"])
         for key in ("sharpe", "max_drawdown"):
             with self.subTest(key=key):
                 broken = {**summary, "total_return": 0.02, key: math.inf}
-                self.assertIn(f"non_finite_{key}", rules.evaluate(broken)[0])
+                self.assertIn(f"non_finite_{key}", rules.evaluate(broken))
         # A boolean is not a metric, however happily it compares.
         self.assertIn(
             "non_finite_total_return",
-            rules.evaluate({**summary, "total_return": True})[0],
+            rules.evaluate({**summary, "total_return": True}),
         )
 
     def test_finite_metrics_keep_threshold_semantics(self) -> None:
         rules = AcceptanceRules()
         ok = {"total_return": 0.02, "sharpe": 0.5, "max_drawdown": 0.1}
-        self.assertEqual(rules.evaluate(ok), ([], []))
+        self.assertEqual(rules.evaluate(ok), [])
         # A drawdown breach is a HARD reject, sign-independent: F4/H3 enforce
         # the same limit forward, so freezing a book that already breached it
         # spends a forward test on a candidate the verdict must reject.
         for drawdown in (0.30, -0.30):
             with self.subTest(drawdown=drawdown):
-                hard, warnings = rules.evaluate({**ok, "max_drawdown": drawdown})
-                self.assertEqual(hard, ["max_drawdown_above_limit"])
-                self.assertEqual(warnings, [])
+                self.assertEqual(
+                    rules.evaluate({**ok, "max_drawdown": drawdown}),
+                    ["max_drawdown_above_limit"],
+                )
         # It is the round's own limit, not a constant.
         self.assertEqual(
-            AcceptanceRules(max_drawdown=0.35).evaluate({**ok, "max_drawdown": 0.30}),
-            ([], []),
+            AcceptanceRules(max_drawdown=0.35).evaluate({**ok, "max_drawdown": 0.30}), []
         )
-        # Return/Sharpe shortfalls only WARN: the fold freezes instead of resetting.
-        hard, warnings = rules.evaluate(
-            {"total_return": -0.01, "sharpe": -0.2, "max_drawdown": 0.1}
-        )
-        self.assertEqual(hard, [])
-        self.assertEqual(warnings, ["return_below_target", "sharpe_below_target"])
-
-    def test_a_zero_trade_replay_freezes_with_a_warning_not_in_silence(self) -> None:
-        """The observed silent-success case: a strategy that submits no order
-        scores 0.0 everywhere, so both soft targets pass (0.0 < 0.0 is False)
-        and the fold used to freeze with an empty warning list."""
-
-        rules = AcceptanceRules()
-        flat = {
-            "total_return": 0.0,
-            "sharpe": 0.0,
-            "max_drawdown": 0.0,
-            "turnover": 0.0,
-            "order_count": 0,
-            "trade_count": 0,
-        }
-        hard, warnings = rules.evaluate(flat)
-        # Still warn-only: the fold freezes what it honestly found.
-        self.assertEqual(hard, [])
-        self.assertEqual(warnings, ["no_orders"])
-        # One filled order is a result, however small; it must not warn. A
-        # buy-and-hold book has orders but no closed round trip, so
-        # trade_count stays 0 and must not be the trigger.
-        traded = {**flat, "order_count": 1, "total_return": 0.01, "sharpe": 0.1}
-        self.assertEqual(rules.evaluate(traded), ([], []))
+        # A modest or negative result is not refused here: how much edge is
+        # enough is the deflated Sharpe's question, asked by the gate itself.
+        # A book that never traded is finite at 0.0 everywhere and passes the
+        # same way -- it fails the gate, which has no IR to deflate.
+        for summary in (
+            {"total_return": -0.01, "sharpe": -0.2, "max_drawdown": 0.1},
+            {"total_return": 0.0, "sharpe": 0.0, "max_drawdown": 0.0, "order_count": 0},
+        ):
+            with self.subTest(summary=summary):
+                self.assertEqual(rules.evaluate(summary), [])
 
     def test_absent_sharpe_is_not_an_integrity_failure(self) -> None:
-        rules = AcceptanceRules()
-        hard, warnings = rules.evaluate({"total_return": 0.02, "max_drawdown": 0.1})
-        self.assertEqual(hard, [])
-        self.assertEqual(warnings, [])
+        self.assertEqual(
+            AcceptanceRules().evaluate({"total_return": 0.02, "max_drawdown": 0.1}), []
+        )
 
     def test_rule_values_must_be_finite_and_ranged(self) -> None:
         for kwargs in (
-            {"min_return": math.nan},
-            {"min_sharpe": math.inf},
             {"max_drawdown": math.nan},
             {"max_drawdown": 1.5},
             {"max_drawdown": -0.1},
@@ -175,19 +149,19 @@ class AcceptanceRulesTest(unittest.TestCase):
                 AcceptanceRules(**kwargs)
 
     def test_record_round_trips_every_threshold(self) -> None:
-        rules = AcceptanceRules(
-            min_return=0.01, min_sharpe=0.2, max_drawdown=0.3, cost_stress_multiplier=3.0
-        )
+        rules = AcceptanceRules(max_drawdown=0.3, cost_stress_multiplier=3.0)
         self.assertEqual(
-            rules.to_record(),
-            {
-                "min_return": 0.01,
-                "min_sharpe": 0.2,
-                "max_drawdown": 0.3,
-                "cost_stress_multiplier": 3.0,
-            },
+            rules.to_record(), {"max_drawdown": 0.3, "cost_stress_multiplier": 3.0}
         )
         self.assertEqual(AcceptanceRules.from_record(rules.to_record()), rules)
+        # Every params.json and run manifest on disk still carries the retired
+        # targets; a record naming them must rebuild the rules it does name.
+        self.assertEqual(
+            AcceptanceRules.from_record(
+                {"min_return": 0.01, "min_sharpe": 0.2, **rules.to_record()}
+            ),
+            rules,
+        )
 
     def test_the_agent_facts_state_the_rules_from_their_single_sources(self) -> None:
         """The ``acceptance_rules`` fact is derived, never retyped: the freeze
@@ -205,9 +179,8 @@ class AcceptanceRulesTest(unittest.TestCase):
         # the forward and Held-out conditions below quote.
         self.assertIn("0.2", freeze["max_drawdown"])
         self.assertEqual(facts["graduation"]["forward"]["max_drawdown"], "<= 0.2")
-        targets = facts["targets"]
-        self.assertNotIn("max_drawdown", targets)
-        self.assertIn("not selection criteria", targets["role"])
+        # The gate states every rule it enforces and no rule it does not.
+        self.assertEqual(sorted(facts), ["freeze_gate", "graduation"])
         graduation = facts["graduation"]
         self.assertIn("tracking error", graduation["forward"]["minimum_detectable_excess"])
         self.assertEqual(graduation["forward"]["max_drawdown"], "<= 0.2")
@@ -305,12 +278,7 @@ class DefaultsDriftTest(unittest.TestCase):
                 continue
             self.assertEqual(WEB_CREATE_DEFAULTS[key], getattr(profile, key), key)
         rules = AcceptanceRules()
-        for key in (
-            "min_return",
-            "min_sharpe",
-            "max_drawdown",
-            "cost_stress_multiplier",
-        ):
+        for key in ("max_drawdown", "cost_stress_multiplier"):
             self.assertEqual(WEB_CREATE_DEFAULTS[key], getattr(rules, key), key)
         for key, value in DEFAULT_RESEARCH_GEOMETRY.to_record().items():
             self.assertEqual(WEB_CREATE_DEFAULTS[key], value, key)
@@ -568,6 +536,21 @@ class ConsoleParameterSurfaceTest(unittest.TestCase):
                 self.assertIn(key, _ALLOWED_PARAMS, f"the worker would reject {key}")
                 self.assertTrue(fields[key].get("label"))
                 self.assertTrue(fields[key].get("help"), f"{key} has no help text")
+
+    def test_a_retired_parameter_is_accepted_but_offered_nowhere(self) -> None:
+        """The acceptance targets set warnings no run ever recorded, so they are
+        gone from the rules and from the create form. Every params.json on disk
+        still names them, and rejecting a key the console itself wrote would
+        make those arms unreadable to the listing and unresumable."""
+
+        from autotrade.pipelines.worker import _ALLOWED_PARAMS, RETIRED_PARAMS
+
+        fields = self._schema_fields()
+        for key in RETIRED_PARAMS:
+            with self.subTest(key=key):
+                self.assertIn(key, _ALLOWED_PARAMS)
+                self.assertNotIn(key, fields)
+                self.assertNotIn(key, WEB_CREATE_DEFAULTS)
 
     def test_every_rendered_field_is_a_parameter_the_worker_accepts(self) -> None:
         from autotrade.pipelines.worker import _ALLOWED_PARAMS

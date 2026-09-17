@@ -95,27 +95,36 @@ class StrategyExperimentConfig:
             object.__setattr__(self, "models_dir", models)
 
 
+def _finite_metric(value: object) -> float | None:
+    """One replay metric as a float, or ``None`` when it is not a finite number.
+
+    ``bool`` is an ``int`` in Python, so ``True`` would otherwise read as a
+    total return of 1.0.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if math.isfinite(value) else None
+
+
 @dataclass(frozen=True)
 class AcceptanceRules:
     """The arm's round parameters for the freeze nomination and the verdict.
 
     A nominated research node fails the freeze gate on a non-finite metric or a
-    research-period drawdown over ``max_drawdown`` (``evaluate``); the return
-    and Sharpe targets there only warn. ``max_drawdown`` and
-    ``cost_stress_multiplier`` decide the forward and Held-out verdict
-    (``pipelines/verdict.py``), whose remaining thresholds are that module's
-    constants.
+    research-period drawdown over ``max_drawdown`` (``evaluate``).
+    ``max_drawdown`` and ``cost_stress_multiplier`` decide the forward and
+    Held-out verdict (``pipelines/verdict.py``), whose remaining thresholds are
+    that module's constants. Every field here is a limit something enforces.
     """
 
-    min_return: float = 0.0
-    min_sharpe: float = 0.0
     max_drawdown: float = 0.25
     # The forward neutralised excess must stay positive after paying this
     # multiple of the profile's slippage (verdict F5).
     cost_stress_multiplier: float = 2.0
 
     def __post_init__(self) -> None:
-        for name in ("min_return", "min_sharpe", "max_drawdown", "cost_stress_multiplier"):
+        for name in ("max_drawdown", "cost_stress_multiplier"):
             if not math.isfinite(float(getattr(self, name))):
                 raise ValueError(f"{name} must be finite")
         if not 0 <= self.max_drawdown <= 1:
@@ -125,8 +134,6 @@ class AcceptanceRules:
 
     def to_record(self) -> dict[str, object]:
         return {
-            "min_return": self.min_return,
-            "min_sharpe": self.min_sharpe,
             "max_drawdown": self.max_drawdown,
             "cost_stress_multiplier": self.cost_stress_multiplier,
         }
@@ -135,8 +142,10 @@ class AcceptanceRules:
     def from_record(cls, record: Mapping[str, object]) -> AcceptanceRules:
         """These rules from a ``to_record`` mapping, ignoring unknown keys.
 
-        Run manifests are read back long after they were written, so a record
-        that carries a retired key must still rebuild the rules it does name.
+        Run manifests and ``hitl/params.json`` are read back long after they
+        were written, so a record that carries a retired key (the former
+        ``min_return``/``min_sharpe`` targets) must still rebuild the rules it
+        does name.
         """
 
         allowed = set(cls().to_record())
@@ -165,12 +174,6 @@ class AcceptanceRules:
                     "validated in the arm on any span"
                 ),
                 "freezes_per_arm": 1,
-            },
-            "targets": {
-                "role": "warnings on a nomination, not selection criteria",
-                "min_return": self.min_return,
-                "min_sharpe": self.min_sharpe,
-                "no_orders": "order_count=0 warns no_orders",
             },
             "graduation": {
                 "evaluated_on": (
@@ -214,55 +217,31 @@ class AcceptanceRules:
             },
         }
 
-    def evaluate(self, summary: dict[str, object]) -> tuple[list[str], list[str]]:
-        """(hard_reasons, warnings) of a nomination; the hard ones are the
-        freeze gate's (``experiment.freeze_gate_for``).
+    def evaluate(self, summary: dict[str, object]) -> list[str]:
+        """The hard reasons a nomination is refused (``experiment.freeze_gate_for``).
 
-        Two hard rejects. Non-finite metrics, because every IEEE comparison
-        against NaN is False, so a NaN metric would otherwise pass every
-        threshold. And a research-period drawdown over ``max_drawdown``, the
-        same limit F4/H3 enforce forward: freezing a book that already breached
-        it spends a forward test on a candidate the verdict must reject.
+        Two of them. Non-finite metrics, because every IEEE comparison against
+        NaN is False, so a NaN metric would otherwise pass every threshold. And
+        a research-period drawdown over ``max_drawdown``, the same limit F4/H3
+        enforce forward: freezing a book that already breached it spends a
+        forward test on a candidate the verdict must reject.
 
-        Return and Sharpe shortfalls stay warnings -- they are targets, and an
-        arm may honestly freeze a modest but real edge. A zero ``order_count``
-        warns the same way: it clears every threshold without ever placing an
-        order, so the warning is the only thing distinguishing it from a real
-        result (``trade_count`` counts closed round trips and is 0 for
-        buy-and-hold). Only a summary from a completed evaluation reaches here;
-        an aborted replay never produces one."""
-        hard: list[str] = []
-        warnings: list[str] = []
-        values: dict[str, float] = {}
-        for key in ("total_return", "max_drawdown"):
-            value = summary.get(key)
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, (int, float))
-                or not math.isfinite(float(value))
-            ):
-                hard.append(f"non_finite_{key}")
-            else:
-                values[key] = float(value)
-        sharpe = summary.get("sharpe")
-        if sharpe is not None:
-            if (
-                isinstance(sharpe, bool)
-                or not isinstance(sharpe, (int, float))
-                or not math.isfinite(float(sharpe))
-            ):
-                hard.append("non_finite_sharpe")
-            else:
-                values["sharpe"] = float(sharpe)
-        if abs(values.get("max_drawdown", 0.0)) > self.max_drawdown:
+        Nothing else is judged here. ``sharpe`` is read only for finiteness --
+        an arm may honestly freeze a modest but real edge, and how much edge is
+        enough is the deflated Sharpe's question, asked by the gate itself.
+        Only a summary from a completed evaluation reaches here; an aborted
+        replay never produces one."""
+        hard = [
+            f"non_finite_{key}"
+            for key in ("total_return", "max_drawdown")
+            if _finite_metric(summary.get(key)) is None
+        ]
+        if summary.get("sharpe") is not None and _finite_metric(summary["sharpe"]) is None:
+            hard.append("non_finite_sharpe")
+        drawdown = _finite_metric(summary.get("max_drawdown"))
+        if drawdown is not None and abs(drawdown) > self.max_drawdown:
             hard.append("max_drawdown_above_limit")
-        if values.get("total_return", float("-inf")) < self.min_return:
-            warnings.append("return_below_target")
-        if "sharpe" in values and values["sharpe"] < self.min_sharpe:
-            warnings.append("sharpe_below_target")
-        if summary.get("order_count") == 0:
-            warnings.append("no_orders")
-        return hard, warnings
+        return hard
 
 
 @dataclass(frozen=True)

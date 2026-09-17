@@ -100,6 +100,12 @@ from .pit_backend import (
 from .pit_views_seed import assert_seed_snapshot_config
 from .skills import latest_skills_snapshot, resolve_operating_memory
 
+# Knobs no longer read by anything. They stay accepted, and only accepted, so
+# every experiment created before their removal keeps launching and keeps
+# listing: rejecting a key the console itself wrote would make those arms
+# unreadable. The acceptance targets set warnings no run ever recorded.
+RETIRED_PARAMS = ("min_return", "min_sharpe")
+
 _ALLOWED_PARAMS = {
     "experiment_id",
     *GEOMETRY_PARAMETERS,
@@ -151,8 +157,6 @@ _ALLOWED_PARAMS = {
     "max_llm_calls",
     "session_max_attempts",
     "max_research_minutes",
-    "min_return",
-    "min_sharpe",
     "max_drawdown",
     "cost_stress_multiplier",
     "research_directive",
@@ -193,6 +197,7 @@ _ALLOWED_PARAMS = {
     "agent_sandbox_memory",
     "agent_sandbox_pids",
     "agent_sandbox_tmpfs",
+    *RETIRED_PARAMS,
 }
 
 # Single source for the NL budget defaults advertised to experiment parameters.
@@ -636,12 +641,6 @@ def resolve_worker_options(
             knob("strategy_fit_timeout_seconds"), "strategy_fit_timeout_seconds"
         ),
         acceptance=AcceptanceRules(
-            min_return=_finite_float(
-                params.get("min_return", AcceptanceRules().min_return), "min_return"
-            ),
-            min_sharpe=_finite_float(
-                params.get("min_sharpe", AcceptanceRules().min_sharpe), "min_sharpe"
-            ),
             max_drawdown=_bounded_float(
                 params.get("max_drawdown", AcceptanceRules().max_drawdown),
                 "max_drawdown",

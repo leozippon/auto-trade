@@ -486,9 +486,11 @@ def test_the_card_and_the_research_panel_name_the_same_four_figures() -> None:
         body = script.split(opening, 1)[1].split("\nfunction ", 1)[0]
         found = [label for label in labels if f'label: "{label}"' in body or f'"最佳候选{label}"' in body]
         assert found == list(labels), opening
-        assert "DSR_GATE_TITLE" in body and "TRIALS_TITLE" in body, opening
-    # The gate's own criteria keep their measured values in the checklist.
-    assert 'const DSR_GATE_TITLE = "去膨胀夏普概率（DSR）：冻结门要求 ≥ 0.5";' in script
+        assert "DSR_TITLE" in body and "TRIALS_TITLE" in body, opening
+    # The gloss says what the figure is; the gate's own limits and measured
+    # values stay in the checklist, which reads both from the record.
+    [dsr_gloss] = [row for row in script.splitlines() if row.startswith("const DSR_TITLE")]
+    assert "≥" not in dsr_gloss, dsr_gloss
     assert "全区间验证次数" in script.split("const REASON_LABELS", 1)[1]
 
 
@@ -504,19 +506,20 @@ def test_a_figure_whose_label_does_not_read_itself_is_glossed_once() -> None:
     script = (
         Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
     ).read_text(encoding="utf-8")
-    assert 'const IR_TITLE = "中性化超额 ÷ 残差跟踪误差";' in script
+    for name in ("IR_TITLE", "NEUTRALIZED_EXCESS_TITLE", "TRACKING_ERROR_TITLE", "LOWER_BOUND_TITLE"):
+        assert script.count(f"const {name} = ") == 1, name
     for opening, glosses in (
         ("function evidenceTiles(", ("IR_TITLE",)),
         ("function forwardTiles(", ("LOWER_BOUND_TITLE", "NEUTRALIZED_EXCESS_TITLE")),
         ("function researchSessionPanel(", ("IR_TITLE", "NEUTRALIZED_EXCESS_TITLE")),
         ("function frozenPanel(", ("IR_TITLE", "NEUTRALIZED_EXCESS_TITLE", "TRACKING_ERROR_TITLE")),
-        ("function freezeGateChecklist(", ("DSR_GATE_TITLE",)),
+        ("function freezeGateChecklist(", ("DSR_TITLE",)),
         ("function forwardCriteria(", ("LOWER_BOUND_TITLE",)),
     ):
         body = script.split(opening, 1)[1].split("\nfunction ", 1)[0]
         for gloss in glosses:
             assert gloss in body, (opening, gloss)
-    assert "title: item.title || null" in script.split("function checklist(", 1)[1]
+    assert "item.title" in script.split("function checklist(", 1)[1]
 
 
 def test_an_experiment_card_wears_the_ending_as_a_badge_alone() -> None:

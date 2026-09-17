@@ -230,6 +230,7 @@ def test_the_prompt_states_the_research_session_contract() -> None:
         "之后没有别的会话接手",
         "`deadline`",
         "`acceptance_rules.freeze_gate`",
+        "研究期最大回撤不超过上限",
         "本臂至少两个完整研究期验证",
         "任何 span、任何尝试、对照都算",
         "一条臂至多冻结一次",
@@ -253,7 +254,6 @@ def test_the_prompt_states_the_research_session_contract() -> None:
     assert "留给后来者的只有两处" in feedback
     # Each shared rule has one home.
     assert prompt.count("三分之一") == 1
-    assert prompt.count("不是选择标准") == 1
     # Enforced limits and mount paths sit in the schema and the facts.
     assert "500 字符" not in prompt
     assert "/mnt/tools/screen.py" not in prompt.split("# 本会话动态上下文")[0].split("# 工具与工作方式")[0]

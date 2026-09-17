@@ -776,6 +776,15 @@ def _research_session_view(
                     _mapping(gate.get("deflated_sharpe")).get("deflated_sharpe_probability")
                 ),
                 "full_span_validations": _number(gate.get("full_span_validations")),
+                # The limits this nomination was actually judged against, so a
+                # later change to either one does not restate the arm's gate.
+                "thresholds": {
+                    key: _number(_mapping(gate.get("thresholds")).get(key))
+                    for key in (
+                        "min_full_span_validations",
+                        "min_deflated_sharpe_probability",
+                    )
+                },
             }
             if gate
             else None

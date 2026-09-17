@@ -474,6 +474,12 @@ def test_a_criterion_that_names_a_threshold_words_it_from_the_record() -> None:
 
     written = set(re.findall(r"(\d+)% 下界", APP_JS.read_text(encoding="utf-8")))
     assert written == {f"{FORWARD_CONFIDENCE:.0%}"[:-1]}, sorted(written)
+    # The freeze gate is worded the same way: its record carries both limits, so
+    # raising either one cannot leave the checklist quoting the old number.
+    gate = _js_function_body("freezeGateChecklist")
+    for key in ("min_full_span_validations", "min_deflated_sharpe_probability"):
+        assert f"t.{key}" in gate, key
+    assert not re.search(r"≥ [0-9]", gate), gate
 
 
 def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) -> None:
