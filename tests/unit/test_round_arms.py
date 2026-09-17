@@ -175,6 +175,102 @@ def test_a_round_without_arms_is_never_posted() -> None:
         Round().main(["launcher", "0"])
 
 
+# --fill reads the arm list as a queue against the live console, so these are
+# the only tests here that fake it: the health record it reads and the create
+# request it sends.
+FILL_ARMS = ("fill_first", "fill_second", "fill_third")
+
+
+def _fill_round(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    running: int,
+    created: tuple[str, ...] = (),
+    accepted: bool = True,
+) -> tuple[Round, list[str]]:
+    """A three-arm round on a finished seed, with the console's two calls faked.
+
+    ``running`` is how many of the console's four slots are in use, ``created``
+    the arms whose experiment directory already exists. The returned list
+    records, in order, the ids a create request was actually sent for.
+    """
+    rnd = Round(arms={arm: {} for arm in FILL_ARMS}, pit_views_seed="data/seed_probe")
+    _synthetic_repo(tmp_path, monkeypatch, rnd)
+    for experiment_id in created:
+        (tmp_path / "experiments" / experiment_id).mkdir(parents=True)
+    monkeypatch.setattr(
+        _round,
+        "health",
+        lambda port: {
+            "max_running_experiments": 4,
+            "running": [f"other_{index}" for index in range(running)],
+        },
+    )
+    posted: list[str] = []
+
+    def fake_post(port: int, params: dict[str, object]) -> bool:
+        posted.append(str(params["experiment_id"]))
+        return accepted
+
+    monkeypatch.setattr(_round, "post", fake_post)
+    return rnd, posted
+
+
+def test_a_fill_creates_pending_arms_in_queue_order_up_to_the_free_slots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One free slot, one arm already created: the next pending arm takes it and
+    the one behind it waits."""
+    rnd, posted = _fill_round(tmp_path, monkeypatch, running=3, created=("fill_first",))
+    assert rnd.main(["launcher", "0", "--fill"]) == 0
+    assert posted == ["fill_second"]
+    out = capsys.readouterr().out
+    assert "fill_first: created already, skipped" in out
+    assert "fill_third: pending, waits for a free slot" in out
+
+
+@pytest.mark.parametrize(
+    ("running", "created"),
+    [(4, ()), (0, FILL_ARMS)],
+    ids=["no slot free", "nothing pending"],
+)
+def test_a_fill_with_nothing_to_do_is_the_steady_state(
+    running: int, created: tuple[str, ...], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mode runs on a timer, so an idle fill exits 0 and sends nothing."""
+    rnd, posted = _fill_round(tmp_path, monkeypatch, running=running, created=created)
+    assert rnd.main(["launcher", "0", "--fill"]) == 0
+    assert posted == []
+
+
+def test_a_fill_reports_a_creation_the_console_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rnd, posted = _fill_round(tmp_path, monkeypatch, running=2, accepted=False)
+    assert rnd.main(["launcher", "0", "--fill"]) == 1
+    assert posted == ["fill_first", "fill_second"]
+    assert "not created: fill_first, fill_second" in capsys.readouterr().err
+
+
+def test_a_fill_dry_run_plans_without_creating(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rnd, posted = _fill_round(tmp_path, monkeypatch, running=3)
+    assert rnd.main(["launcher", "0", "--fill", "--dry-run"]) == 0
+    assert posted == []
+    assert "fill_first: pending, takes a free slot" in capsys.readouterr().out
+
+
+def test_a_fill_never_takes_an_experiment_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Naming an arm would be silently ignored: the queue decides the selection."""
+    rnd, _ = _fill_round(tmp_path, monkeypatch, running=0)
+    with pytest.raises(SystemExit, match="reads the queue itself"):
+        rnd.main(["launcher", "0", "--fill", "fill_first"])
+
+
 @pytest.mark.parametrize(("round_name", "experiment_id"), ARMS)
 def test_every_arm_directive_is_usable(round_name: str, experiment_id: str) -> None:
     """A directive is copied into every research session of the arm and must

@@ -36,6 +36,14 @@ what every arm shares goes through the same pre-flight, so the geometry and the
 seed contract are read even for a round that has no arms yet. Such a round can
 be dry-run but not created.
 
+`--fill` reads the arm list as an ordered queue and keeps the console's running
+slots occupied: it asks /api/health how many are free, skips the arms whose
+experiment directory already exists -- running, completed and failed alike, the
+console's own rule -- and creates the next pending ones in file order through
+the same validation and POST path. Nothing pending or nothing free is the
+steady state and exits 0, so the mode is idempotent and safe on a timer; only a
+creation that was attempted and refused exits non-zero.
+
 RETIRED_IDS records the experiment ids that have been used and archived, so a
 new round cannot quietly reuse one. `logs/archive/` is not part of the
 repository, which is why the list is checked in rather than read from disk;
@@ -296,6 +304,21 @@ def post(port: int, params: dict[str, object]) -> bool:
     return False
 
 
+def health(port: int) -> dict[str, object]:
+    """The console's running roster and its parallel cap.
+
+    Read rather than assumed: the cap is the console's constant and the roster
+    changes under the operator's hands, so a fill that cannot read them refuses
+    instead of creating blind against a cap it guessed.
+    """
+    url = f"http://127.0.0.1:{port}/api/health"
+    try:
+        with urllib.request.urlopen(url, timeout=60) as response:
+            return json.loads(response.read())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"console health unreadable at {url}: {exc}") from exc
+
+
 @dataclass(frozen=True)
 class Round:
     """One round definition: its arms and what it decides differently.
@@ -431,11 +454,37 @@ class Round:
             " still staging and checks that release is published and reaches Held-out."
         )
 
+    def fill(self, port: int) -> list[str]:
+        """The arms to create now: the pending ones, in order, up to the free slots.
+
+        The queue is the arm order of the round file. An arm whose experiment
+        directory exists has been created already -- the console refuses a
+        second one whatever state it reached -- so only the rest are pending,
+        and only as many of them as the console has slots free right now.
+        """
+        record = health(port)
+        running = sorted(str(name) for name in record["running"])
+        cap = int(record["max_running_experiments"])
+        free = cap - len(running)
+        print(f"console: {len(running)}/{cap} slots in use ({', '.join(running) or 'none'})")
+        chosen: list[str] = []
+        for experiment_id in self.arms:
+            if (EXPERIMENTS_ROOT / experiment_id).exists():
+                print(f"{experiment_id}: created already, skipped")
+            elif len(chosen) < free:
+                chosen.append(experiment_id)
+                print(f"{experiment_id}: pending, takes a free slot")
+            else:
+                print(f"{experiment_id}: pending, waits for a free slot")
+        return chosen
+
     def main(self, argv: list[str], usage: str | None = None) -> int:
-        """`<port> [--dry-run] [experiment_id ...]`, shared by every round file."""
+        """`<port> [--dry-run] [--fill] [experiment_id ...]`, shared by every round file."""
         # A mistyped flag must never fall through to the real POST path: without
         # this, --dryrun is read as an experiment-id filter and creates the round.
-        mistyped = [arg for arg in argv[1:] if arg.startswith("--") and arg != "--dry-run"]
+        mistyped = [
+            arg for arg in argv[1:] if arg.startswith("--") and arg not in ("--dry-run", "--fill")
+        ]
         if mistyped:
             print("unknown option: " + ", ".join(mistyped), file=sys.stderr)
             return 2
@@ -443,10 +492,13 @@ class Round:
             raise SystemExit(usage or self.main.__doc__)
         port = int(argv[1])
         dry_run = "--dry-run" in argv
+        fill = "--fill" in argv
         wanted = {arg for arg in argv[2:] if not arg.startswith("--")}
         unknown_ids = sorted(wanted - set(self.arms))
         if unknown_ids:
             raise SystemExit("not in this round: " + ", ".join(unknown_ids))
+        if fill and wanted:
+            raise SystemExit("--fill reads the queue itself; name no experiment id")
         if not dry_run and not self.arms:
             raise SystemExit("this round has no arms to create; --dry-run validates its geometry and seed")
         self.check_console_defaults()
@@ -458,6 +510,12 @@ class Round:
             return 1
         if dry_run:
             print(json.dumps({key: shared[key] for key in ROUND_REPORT_KEYS}, ensure_ascii=False))
+        if fill:
+            # The queue decides the selection; --dry-run still decides whether
+            # anything is sent.
+            wanted = set(self.fill(port))
+            if not wanted:
+                return 0
         failed: list[str] = []
         for experiment_id in self.arms:
             if wanted and experiment_id not in wanted:

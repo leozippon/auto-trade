@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install or refresh one managed ADM-Cube cron block (TuShare updates or the Paper book)."""
+"""Install or refresh one managed ADM-Cube cron block (see BLOCKS)."""
 
 from __future__ import annotations
 
@@ -19,6 +19,11 @@ TEMPLATE = REPO_ROOT / "ops/cron/tushare_update.cron"
 BLOCKS = {
     "tushare": (TEMPLATE, BEGIN, END),
     "paper": (REPO_ROOT / "ops/cron/paper.cron", "# BEGIN ADM-Cube Paper book", "# END ADM-Cube Paper book"),
+    "research": (
+        REPO_ROOT / "ops/cron/research_fill.cron",
+        "# BEGIN ADM-Cube research fill",
+        "# END ADM-Cube research fill",
+    ),
 }
 BACKUP_DIR = REPO_ROOT / ".runtime" / "crontab"
 CRONTAB_LOCK = REPO_ROOT / ".runtime" / "crontab.lock"

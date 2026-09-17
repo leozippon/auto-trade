@@ -60,6 +60,29 @@ class CronInstallerTest(unittest.TestCase):
             self.assertIn("flock -n .runtime/paper/cron.lock", job)
             self.assertIn("scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1", job)
 
+    def test_the_research_fill_block_installs_beside_the_paper_block(self) -> None:
+        template, begin, end = installer.BLOCKS["research"]
+        paper = installer.build_managed_block(*installer.BLOCKS["paper"])
+        research = installer.build_managed_block(template, begin, end)
+        current = f"0 1 * * * unrelated\n\n{paper}"
+        once = installer.replace_managed_block(current, research, begin=begin, end=end)
+        twice = installer.replace_managed_block(once, research, begin=begin, end=end)
+        self.assertEqual(once, twice)
+        self.assertIn(paper, twice)
+        self.assertEqual(twice.count(begin), 1)
+        lines = template.read_text(encoding="utf-8").splitlines()
+        jobs = [line for line in lines if "--fill" in line and not line.startswith("#")]
+        self.assertEqual(len(jobs), 1)
+        # Every ten minutes, every day, under its own lock and its own log.
+        self.assertEqual(jobs[0].split()[:5], ["*/10", "*", "*", "*", "*"])
+        self.assertIn("flock -n .runtime/research/cron.lock", jobs[0])
+        self.assertIn("--fill >> logs/research/cron.log 2>&1", jobs[0])
+        # The queue it fills has to be a round file this repository holds:
+        # a mistyped one would fail every ten minutes instead of once.
+        round_file = next(line.split("=", 1)[1] for line in lines if line.startswith("ROUND="))
+        self.assertIn("$ROUND", jobs[0])
+        self.assertTrue((installer.REPO_ROOT / round_file).is_file(), round_file)
+
     def test_backup_permissions_are_private(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "cron_backups" / "crontab.bak"

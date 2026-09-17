@@ -1,0 +1,24 @@
+# ADM-Cube research arm fill: keep the console's running slots occupied.
+# Install or refresh with: /home/lzp/miniconda3/envs/quant/bin/python ops/cron/install_tushare_cron.py --block research
+#
+# The round file below is the arm queue. `--fill` asks /api/health how many of
+# the console's slots are free, skips the arms whose experiment directory
+# already exists and creates the next pending ones in file order, through the
+# same validation the operator gets from `--dry-run`. Nothing pending or
+# nothing free is the steady state and exits 0; a refused creation exits
+# non-zero with its reason in the log. The operator tops the queue up by
+# appending arms and their reference packs to that file.
+
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+CRON_TZ=Asia/Shanghai
+REPO_ROOT=/Data2/lzp/ADMCubeQuant
+QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
+# Repointed at whichever round file is the current queue.
+ROUND=scripts/experiments/create_round_20260917.py
+
+# Every ten minutes, all day: a slot that frees up stays empty for at most that
+# long, and research arms end at no particular hour. One run takes seconds
+# unless it creates, and `flock -n` skips a run while an earlier one is still
+# creating, so two fills can never take the same slot.
+*/10 * * * * cd $REPO_ROOT && mkdir -p logs/research .runtime/research && flock -n .runtime/research/cron.lock $QUANT_PYTHON $ROUND 38888 --fill >> logs/research/cron.log 2>&1
