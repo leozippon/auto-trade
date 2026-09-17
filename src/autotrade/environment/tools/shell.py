@@ -53,15 +53,14 @@ ARGV_STRING_NOTE = (
     "argv arrived as a JSON-encoded string and was parsed into an array; "
     "send argv as a real JSON array of strings, not a string containing one"
 )
-ARGV_SPLIT_NOTE = (
-    "argv arrived as one command string and was split into an array the way a "
-    "POSIX shell splits words (quotes honoured, nothing else): no shell ran "
-    "it, so send argv as a JSON array of strings"
+ARGV_SHELL_NOTE = (
+    "argv arrived as one command string, so it was run as "
+    '["bash", "-lc", "<that command line>"] -- pipes, redirections, globs, '
+    "`&&` and $VAR are the shell's, and an argv array is what runs without one"
 )
 ARGV_ONE_ELEMENT_NOTE = (
     "argv held a single element that was itself a whole command line, so the "
-    "one-element array was unwrapped; send each word of the command as its "
-    "own argv element"
+    "one-element array was unwrapped"
 )
 ARGV_ALIAS_NOTE = "the command arrived under `{key}`; this tool's command field is argv"
 ARGV_TOO_LONG_HINT = (
@@ -69,17 +68,15 @@ ARGV_TOO_LONG_HINT = (
     "script to a file with write_file (e.g. notes/probe.py) and run "
     '["python", "notes/probe.py"] instead of inlining it after -c'
 )
-SHELL_PIPELINE_HINT = (
-    "this tool runs argv directly, with no shell: run a pipeline, a "
-    "redirection or a glob through one explicitly, as "
-    '["bash", "-lc", "<the whole command line>"]'
-)
+# The shell a command string is handed to: the same form this tool's own
+# description names, so a repaired call and an explicit one run identically.
+COMMAND_STRING_SHELL = ("bash", "-lc")
 # Keys an Agent reaches for instead of ``argv``; the value is the same command.
 _COMMAND_ALIASES = ("cmd", "command")
 FORBIDDEN_WAIT = "forbidden_wait"
 _WAIT_COMMANDS = frozenset({"sleep", "usleep"})
 _WAIT_WRAPPERS = frozenset({"env", "timeout", "nice", "stdbuf", "nohup", "time"})
-_WAIT_SHELLS = frozenset({"sh", "bash", "dash"})
+_SHELLS = frozenset({"sh", "bash", "dash"})
 _DURATION_RE = re.compile(r"\d+(?:\.\d+)?[smhd]?")
 _ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 _SHELL_SEPARATORS = frozenset({";", "&&", "||", "|", "&", "|&"})
@@ -149,17 +146,14 @@ def _shell_description(
     timeout_seconds: float, max_timeout_seconds: float, max_output_chars: int
 ) -> str:
     return (
-        "Run one bounded foreground argv command in the injected network-disabled "
-        "Agent sandbox. `argv` is a JSON array of strings, e.g. "
-        '["python", "-c", "print(1)"] or ["bash", "-lc", "ls output"]. Three other '
-        "shapes are repaired rather than refused, and the result names the repair: "
-        "that array sent as one JSON-encoded string, one command string (split into "
-        "the array the way a POSIX shell splits words, quotes honoured), and a "
-        "one-element array whose only element contains whitespace, which is read as "
-        "that command string and split the same way. No shell ever runs any of "
-        "them: pipes, "
-        "redirections, globs, `&&` and $VAR are not interpreted, so a command line "
-        'that needs them must be sent as ["bash", "-lc", "<the command line>"]. '
+        "Run one bounded foreground command in the injected network-disabled "
+        "Agent sandbox. Send `argv` either as a JSON array of strings, which runs "
+        'directly with no shell (["python", "-c", "print(1)"]), or as one command '
+        'string, which runs as ["bash", "-lc", "<that command line>"] so pipes, '
+        "redirections, globs, `&&` and $VAR work as written "
+        '("ls output | wc -l"). A one-element array holding a whole command line, '
+        "and the array sent as one JSON-encoded string, are read the same way; the "
+        "result names whichever repair was applied. "
         "Each argv element is at most "
         f"{SHELL_ARGV_MAX_CHARS} chars: put longer code in a file with write_file "
         '(e.g. notes/probe.py) and run ["python", "notes/probe.py"]. '
@@ -246,10 +240,12 @@ class SandboxShellTool:
         command line and that command line wrapped in a one-element array are
         the same command in a different wrapper: each is rewritten into the
         argv array and the repair is reported back in the result, so the next
-        call can be the canonical shape. What stays refused is what cannot be
-        rewritten faithfully: an element over the per-element cap (refused with
-        the write_file recipe instead of a bare length error) and a command
-        line carrying a shell operator, which nothing here would interpret.
+        call can be the canonical shape. A command line is handed to
+        ``bash -lc`` rather than word-split, because that is what the Agent
+        meant by writing one; what stays refused is what cannot be rewritten
+        faithfully: an element over the per-element cap (refused with the
+        write_file recipe instead of a bare length error) and a malformed
+        JSON array, which nothing can reconstruct.
         """
 
         self._repair.note = None
@@ -429,55 +425,29 @@ def _argv_from_string(value: str) -> tuple[list[str], str]:
     """The argv array one string form holds, and the note naming the repair.
 
     A JSON-encoded array is the same command with one layer of quoting too
-    many; anything else is a command line and is split the way a POSIX shell
-    splits words. A value that already looks like JSON but is not an array of
-    non-empty strings is refused instead of split, because splitting it would
-    suggest nonsense (``"[1, 2]"`` -> ``["[1,", "2]"]``).
+    many. Anything else is a command line, and a command line is what a shell
+    reads: word-splitting it here instead would hand `|`, `&&`, `2>` or `$VAR`
+    to the program as literal words, so it goes to ``bash -lc`` whole -- the
+    very form this tool's description names. What is still refused is a value
+    that looks like JSON but is not an array of non-empty strings: it is a
+    mis-encoded array, not a command line, and running it would report a
+    shell syntax error instead of what actually went wrong.
     """
 
     parsed = _json_string_argv(value)
     if parsed is not None:
         return parsed, ARGV_STRING_NOTE
     text = value.strip()
+    if not text:
+        raise ToolSchemaError("argv is empty")
     if text.startswith(("[", "{")):
         raise ToolSchemaError(
-            "argv must be an array of separate strings, or one command string "
-            "this tool can split; this value parses as neither, so send a real "
-            "JSON array whose elements are all non-empty strings"
+            "argv looks like a JSON array or object but does not parse as an "
+            "array of non-empty strings, so it cannot be reconstructed: send a "
+            "real JSON array of strings, or send the command line itself as one "
+            "plain string (no JSON), which this tool runs with bash -lc"
         )
-    try:
-        tokens = shlex.split(value, posix=True)
-    except ValueError as exc:
-        raise ToolSchemaError(
-            f"argv arrived as a command string that cannot be split ({exc}); "
-            "send argv as a JSON array of strings",
-            retry_hint=SHELL_PIPELINE_HINT,
-        ) from exc
-    if not tokens:
-        raise ToolSchemaError("argv is empty")
-    operator = _shell_operator_token(tokens)
-    if operator is not None:
-        raise ToolSchemaError(
-            f"argv arrived as a command string carrying the shell operator "
-            f"`{operator}`, which this tool would pass to the command as a "
-            "literal argument",
-            retry_hint=SHELL_PIPELINE_HINT,
-        )
-    return tokens, ARGV_SPLIT_NOTE
-
-
-def _shell_operator_token(tokens: Sequence[str]) -> str | None:
-    """The shell operator a split command line still carries, if any.
-
-    argv is executed directly, so an operator that survived the split would
-    become a literal word of the command: refusing says what happened, while
-    running the mangled command does not.
-    """
-
-    for token in tokens:
-        if token in _SHELL_SEPARATORS or token == "<" or token.startswith((">", "1>", "2>", "&>")):
-            return token
-    return None
+    return [*COMMAND_STRING_SHELL, value], ARGV_SHELL_NOTE
 
 
 def _reject_long_argv_elements(argv: Sequence[object]) -> None:
@@ -527,7 +497,7 @@ def _argv_waits(tokens: list[str]) -> bool:
     name = _basename(tokens[0]).lower()
     if name in _WAIT_COMMANDS:
         return True
-    if name in _WAIT_SHELLS:
+    if name in _SHELLS:
         script = _shell_c_script(tokens)
         if script is None:
             return False
@@ -632,7 +602,17 @@ def _skip_duration(args: list[str]) -> list[str]:
 
 
 def _classify_command(tokens: Sequence[str]) -> str:
-    """Best-effort audit label only; permissions are enforced by Docker/filesystem."""
+    """Best-effort audit label only; permissions are enforced by Docker/filesystem.
+
+    A command line runs as ``bash -lc <script>``, whether the Agent wrote that
+    array or this tool built it from a command string, so the label comes from
+    the script's first command; labelling every such call by its shell would
+    say nothing about what ran.
+    """
+    if tokens and _basename(str(tokens[0])).lower() in _SHELLS:
+        script = _shell_c_script(tokens)
+        if script is not None:
+            tokens = _first_command_tokens(script)
     words = [_basename(token) for token in tokens if token and not token.startswith("-")]
     if not words:
         return "unknown"
@@ -668,16 +648,16 @@ def _basename(token: str) -> str:
 __all__ = [
     "ARGV_ALIAS_NOTE",
     "ARGV_ONE_ELEMENT_NOTE",
-    "ARGV_SPLIT_NOTE",
+    "ARGV_SHELL_NOTE",
     "ARGV_STRING_NOTE",
     "ARGV_TOO_LONG_HINT",
+    "COMMAND_STRING_SHELL",
     "DEFAULT_SHELL_OUTPUT_CHARS",
     "DEFAULT_SHELL_TIMEOUT_SECONDS",
     "FORBIDDEN_WAIT",
     "MAX_SHELL_TIMEOUT_SECONDS",
     "SHELL_ARGV_MAX_CHARS",
     "SHELL_CAPTURE_MAX_CHARS",
-    "SHELL_PIPELINE_HINT",
     "SandboxShellTool",
     "argv_is_forbidden_wait",
     "reject_forbidden_wait",

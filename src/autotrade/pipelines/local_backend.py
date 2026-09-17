@@ -23,6 +23,8 @@ from autotrade.agent.compact import ContextCompactionConfig, safe_error_summary
 from autotrade.agent.experiment_facts import build_experiment_facts
 from autotrade.environment.artifacts import (
     READONLY_FILES,
+    WORKSPACE_DIR_MODE,
+    WORKSPACE_FILE_MODE,
     ArtifactSnapshotUnstable,
     FilesystemArtifactStore,
     copy_artifact,
@@ -1443,7 +1445,9 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "workspace directory laid out like output/ (main.py plus its sibling "
         "modules; the read-only template files such as README.md are supplied for "
         "you; models/ is shared with the working copy), or output itself to "
-        "validate the working copy as it stands, and hypothesis is the falsifiable "
+        "validate the working copy as it stands; build such a directory by copying "
+        "output/, the code you have been editing, not refs/, which only holds the "
+        "pack this arm started from. hypothesis is the falsifiable "
         "statement you register BEFORE any result exists. The batch costs one "
         "replay-year per candidate per year of the span, reserved before anything "
         "runs; a candidate whose replay completes becomes its own immutable "
@@ -3345,13 +3349,17 @@ def install_workspace_reference(
 ) -> None:
     """Copy the optional reference pack into ``workspace/refs/`` before sandbox start.
 
-    The whole pack is installed read-only, ``starter/`` included: the starter
-    that seeds ``output/`` stays here as the reference copy the Agent can diff
-    its working code against, and a read-only copy cannot drift from the pack
-    the arm was created with. The copy writes only ``refs/``, never ``models/``
-    or ``inputs/``; ``output/`` is seeded separately by
-    :func:`seed_output_from_starter`. Each research session has a fresh
-    workspace, so later sessions see the pack only because this hook runs again.
+    The pack lands writable like everything else under the Agent's workspace
+    mount. It was installed 0o444/0o555 once, to keep the reference copy from
+    drifting; what that actually bought was a papercut in every arm, because
+    ``cp`` reproduces the source's mode and the copies it seeds -- a candidate
+    directory, a working file under ``output/`` -- came out unwritable for the
+    typed writers, which run as the host user and cannot chmod a file the
+    sandbox user owns. Drift costs nothing instead: every session start removes
+    this tree and re-copies it from the checked-in pack.
+
+    The copy writes only ``refs/``, never ``models/`` or ``inputs/``;
+    ``output/`` is seeded separately by :func:`seed_output_from_starter`.
     """
     seed = _resolve_workspace_reference(workspace_reference, repo_root)
     if seed is None:
@@ -3361,7 +3369,7 @@ def install_workspace_reference(
         raise FileExistsError(f"workspace refs directory already exists: {dest}")
     dest.mkdir()
     _copy_workspace_reference_tree(seed, dest, seed_root=seed)
-    chmod_tree(dest, file_mode=0o444, dir_mode=0o555)
+    chmod_tree(dest, file_mode=WORKSPACE_FILE_MODE, dir_mode=WORKSPACE_DIR_MODE)
 
 
 def seed_output_from_starter(

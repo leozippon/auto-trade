@@ -189,7 +189,7 @@ RUN useradd --create-home --uid 61000 agent
 # at /mnt/snapshot.
 RUN mkdir -p /mnt/snapshot \
         /mnt/artifacts /mnt/agent/workspace \
-        /mnt/runtime /strategy /strategy-data \
+        /strategy /strategy-data \
     && chown root:root /mnt
 
 # Image default user stays root (the build never switches away); the executor

@@ -44,6 +44,17 @@ ARTIFACT_METADATA_FILES = frozenset({"manifest.json"})
 OBJECTS_DIR = "objects"
 REVISION_MANIFEST_FILE = "manifest.json"
 READONLY_FILES = frozenset({"README.md"})
+# Every file and directory under the Agent's writable workspace mount carries
+# these modes, with no exception. ``shell`` runs as the container's ``agent``
+# user while the typed writers run as the host project user, and neither can
+# chmod what the other owns, so a mode that denies one of them can only be
+# cleared from the side that set it -- and a mode-protected file propagates
+# into every ``cp`` the Agent makes from it. The read-only contract files are
+# held to the digests the session was seeded with (:func:`readonly_baseline`,
+# enforced by ``modification_check`` before every replay) and refused by path
+# in the typed writers; neither protection needs a mode bit.
+WORKSPACE_FILE_MODE = 0o666
+WORKSPACE_DIR_MODE = 0o777
 ALLOWED_SUFFIXES = frozenset({".py", ".json", ".md", ".txt", ".toml", ".yaml", ".yml"})
 # Deny-by-default allowlist for the frozen, inheritable ``models/`` directory.
 # Covers mainstream parameter/weight/serialization formats; executables, shared
@@ -85,14 +96,15 @@ MODEL_ARTIFACT_ALLOWED_SUFFIXES = frozenset(
     }
 )
 
-# Mount paths a formal strategy must never hardcode. "/mnt/snapshots/" (plural,
-# the staged alias root) is not mounted into the formal run. "/mnt/runtime/"
-# subpaths ARE mounted there, but they are per-run ephemeral host-managed paths
-# reachable only via the context surfaces, so hardcoding them must fail fast
-# just the same. "/mnt/tools" is the Agent session's research tooling (the
-# signal screen), never mounted into the strategy worker. The singular
-# "/mnt/snapshot" is intentionally absent: it is the legitimate formal read
-# root (see sandbox.py formal_strategy_read_roots).
+# Mount paths a formal strategy must never hardcode. None of them exists in the
+# replay container: it mounts the strategy package at /strategy and its data
+# roots under /strategy-data/ (executor.CONTAINER_*), which the strategy reaches
+# only through the context surfaces. "/mnt/snapshots/" (plural) is the staged
+# alias root, "/mnt/runtime/" the per-run host-managed tree behind those data
+# roots, "/mnt/artifacts" and "/mnt/agent/workspace" the Agent session's own
+# mounts, and "/mnt/tools" its research tooling (the signal screen). The
+# singular "/mnt/snapshot" is intentionally absent: it is the Agent session's
+# own decision view, which its exploration scripts legitimately read.
 FORBIDDEN_CODE_REFERENCES = (
     "/mnt/snapshots/",
     "/mnt/runtime/",
@@ -567,19 +579,21 @@ def restore_working_artifacts_writable(
     output_root: str | Path,
     models_root: str | Path | None = None,
 ) -> None:
-    """Normalize copied session artifacts for the unprivileged Agent workspace."""
+    """Normalize copied session artifacts for the unprivileged Agent workspace.
+
+    The contract files keep no mode of their own (see ``WORKSPACE_FILE_MODE``):
+    a 0o444 ``README.md`` travelled into every candidate directory the Agent
+    copied out of ``output/`` and locked the typed writers out of it, while the
+    protection that matters is the seeded digest ``modification_check`` holds
+    it to before any replay.
+    """
 
     output = Path(output_root)
     models = Path(models_root) if models_root is not None else None
-    chmod_tree(output, file_mode=0o666, dir_mode=0o777)
+    chmod_tree(output, file_mode=WORKSPACE_FILE_MODE, dir_mode=WORKSPACE_DIR_MODE)
+    _assert_working_tree_permissions(output)
     if models is not None:
-        chmod_tree(models, file_mode=0o666, dir_mode=0o777)
-    for relpath in READONLY_FILES:
-        target = output / relpath
-        if target.exists():
-            target.chmod(0o444)
-    _assert_working_tree_permissions(output, readonly_files=READONLY_FILES)
-    if models is not None:
+        chmod_tree(models, file_mode=WORKSPACE_FILE_MODE, dir_mode=WORKSPACE_DIR_MODE)
         _assert_working_tree_permissions(models)
 
 
@@ -1016,18 +1030,14 @@ def _assert_readonly_tree(root: Path) -> None:
             raise ArtifactError(f"frozen artifact is writable: {path.relative_to(root) or '.'}")
 
 
-def _assert_working_tree_permissions(
-    root: Path,
-    *,
-    readonly_files: frozenset[str] = frozenset(),
-) -> None:
+def _assert_working_tree_permissions(root: Path) -> None:
     if not root.is_dir():
         raise ArtifactError(f"working artifact directory is missing: {root}")
     for path in (root, *root.rglob("*")):
         if path.is_symlink():
             raise ArtifactError(f"working artifact must not contain symlinks: {path.relative_to(root)}")
         relative = path.relative_to(root).as_posix() if path != root else "."
-        expected = 0o777 if path.is_dir() else (0o444 if relative in readonly_files else 0o666)
+        expected = WORKSPACE_DIR_MODE if path.is_dir() else WORKSPACE_FILE_MODE
         actual = stat.S_IMODE(path.stat().st_mode)
         if actual != expected:
             raise ArtifactError(

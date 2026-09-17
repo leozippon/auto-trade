@@ -25,6 +25,8 @@ from autotrade.environment.artifacts import (
     artifact_fingerprint,
     copy_artifact,
     copy_model_artifacts,
+    modification_delta,
+    readonly_baseline,
     restore_working_artifacts_writable,
 )
 from autotrade.environment.container_stats import ContainerResourceMonitor
@@ -573,7 +575,10 @@ def test_frozen_artifacts_copy_to_writable_fold_workspace_without_mutating_sourc
 
     assert stat.S_IMODE(output.stat().st_mode) == 0o777
     assert stat.S_IMODE((output / "main.py").stat().st_mode) == 0o666
-    assert stat.S_IMODE((output / "README.md").stat().st_mode) == 0o444
+    # The contract file too: a 0o444 anywhere under the Agent's workspace is
+    # reproduced by every `cp` out of it and locks the typed writers out of the
+    # copy, while what actually holds the file is its seeded digest.
+    assert stat.S_IMODE((output / "README.md").stat().st_mode) == 0o666
     assert stat.S_IMODE(work_models.stat().st_mode) == 0o777
     assert stat.S_IMODE((work_models / "weights.bin").stat().st_mode) == 0o666
     assert stat.S_IMODE(Path(frozen.path).stat().st_mode) == 0o555
@@ -633,6 +638,7 @@ def test_real_inherited_fold_workspace_is_writable_only_inside_agent_boundary(tm
     copy_artifact(frozen.path, output)
     copy_model_artifacts(frozen.model_path, models)
     restore_working_artifacts_writable(output, models)
+    baseline = readonly_baseline(output)
     sandbox = DockerSandbox(
         local,
         SandboxSpec(
@@ -655,11 +661,12 @@ def test_real_inherited_fold_workspace_is_writable_only_inside_agent_boundary(tm
                     "assert os.geteuid() == 61000; "
                     "Path('output/main.py').write_text('def generate_orders(context):\\n    return [1]\\n'); "
                     "Path('models/weights.bin').write_bytes(b'child'); "
+                    "Path('output/README.md').write_text('tampered\\n'); "
                     "denied = 0; "
-                    "\nfor path in (Path('output/README.md'), Path('../escape.txt'), Path('/mnt/artifacts/runtime_env.json')):\n"
+                    "\nfor path in (Path('../escape.txt'), Path('/mnt/artifacts/runtime_env.json')):\n"
                     "    try: path.write_text('forbidden')\n"
                     "    except OSError: denied += 1\n"
-                    "assert denied == 3"
+                    "assert denied == 2"
                 ),
             ],
             timeout_seconds=15,
@@ -670,6 +677,13 @@ def test_real_inherited_fold_workspace_is_writable_only_inside_agent_boundary(tm
 
     assert "return [1]" in (output / "main.py").read_text(encoding="utf-8")
     assert (models / "weights.bin").read_bytes() == b"child"
+    # The workspace mount grants no file a mode of its own, so the contract
+    # file is reachable from `shell` as well; what refuses the edit is the
+    # seeded digest every replay checks first, not the filesystem.
+    violations = modification_delta(
+        Path(frozen.path), output, readonly_baseline=baseline
+    ).readonly_violations
+    assert any("README.md" in violation for violation in violations), violations
     assert (Path(frozen.path) / "main.py").read_text(encoding="utf-8") == original_strategy
     assert (Path(frozen.path) / "README.md").read_text(encoding="utf-8") == "read only\n"
     assert (Path(frozen.model_path) / "weights.bin").read_bytes() == b"parent"

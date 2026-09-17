@@ -15,18 +15,17 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 
-from autotrade.environment.artifacts import READONLY_FILES, readonly_copy_hint
+from autotrade.environment.artifacts import (
+    READONLY_FILES,
+    WORKSPACE_DIR_MODE,
+    WORKSPACE_FILE_MODE,
+    readonly_copy_hint,
+)
 
 from .base import ToolError, ToolResult, ToolSpec
 from .workspace import ROOT_RELATIVE_PATH_RULE, SafeWorkspace
 
 MAX_WRITE_CHARS = 200_000
-# Everything the host-side writers create must stay writable by the sandbox
-# user that runs ``shell``: the workspace root is world-writable, but a
-# default-umask mkdir or write from the host user would lock the sandbox out
-# of its own scratch tree (files could then only travel through the model).
-_SANDBOX_DIR_MODE = 0o777
-_SANDBOX_FILE_MODE = 0o666
 _PATH = {"type": "string", "minLength": 1, "maxLength": 500}
 # The same root convention as the search tools, restricted to the writable
 # tree: `workspace` is the workspace root, `output`/`models` its formal
@@ -100,7 +99,7 @@ class _WorkspaceWriteTool:
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             for directory in created:
-                directory.chmod(_SANDBOX_DIR_MODE)
+                directory.chmod(WORKSPACE_DIR_MODE)
             target.write_text(content, encoding="utf-8")
         except PermissionError as exc:
             # Not a host bug: the Agent copied this path out of a locked Step
@@ -113,7 +112,7 @@ class _WorkspaceWriteTool:
                 retry_hint=readonly_copy_hint(relative.split("/", 1)[0]),
             ) from exc
         try:
-            target.chmod(_SANDBOX_FILE_MODE)
+            target.chmod(WORKSPACE_FILE_MODE)
         except PermissionError:
             # A file the sandbox user created is not ours to chmod; it already
             # carries that user's own mode, which is what this write preserves.
@@ -190,7 +189,25 @@ class EditFileTool(_WorkspaceWriteTool):
         target = self._resolve(
             str(arguments["path"]), root=arguments.get("root"), must_exist=True
         )
-        current = target.read_text(encoding="utf-8", errors="replace")
+        relative = self.workspace.relative(target)
+        try:
+            current = target.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            # This is a read-modify-write: a tolerant decode would rewrite every
+            # invalid byte in the file as U+FFFD -- including bytes the requested
+            # edit never touches -- and report success. Refuse the whole edit
+            # instead of silently changing what was not asked for.
+            raise ToolError(
+                f"{relative} is not valid UTF-8 text, so editing it would "
+                f"corrupt the bytes this edit does not touch ({exc.reason} at "
+                f"byte {exc.start})",
+                error_type="not_utf8",
+                blocked_target=relative,
+                retry_hint=(
+                    "edit_file rewrites UTF-8 text only: change this file with "
+                    "shell (python/sed), or replace it whole with write_file"
+                ),
+            ) from exc
         old = str(arguments["old_text"])
         replace_all = bool(arguments.get("replace_all"))
         count = current.count(old)
@@ -212,7 +229,7 @@ class EditFileTool(_WorkspaceWriteTool):
             raise ToolError(f"resulting file exceeds {MAX_WRITE_CHARS} chars", error_type="too_large")
         self._write(target, updated)
         return ToolResult(True, value={
-            "path": self.workspace.relative(target),
+            "path": relative,
             "changed": True,
             "replacements": count if replace_all else 1,
             "bytes_written": len(updated.encode("utf-8")),

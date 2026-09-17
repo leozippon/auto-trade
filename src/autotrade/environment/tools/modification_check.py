@@ -39,7 +39,10 @@ _ASOF_FLAT_READ = re.compile(
 class ModificationCheckTool:
     spec = ToolSpec(
         "modification_check",
-        "Validate the daily JSON strategy and bounded artifact changes.",
+        "Validate the daily JSON strategy and bounded artifact changes. "
+        "smoke_backtest and batch_validate run this check themselves before they "
+        "replay anything, so call it to read the current state early, not to "
+        "clear a replay.",
         {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
     )
 
@@ -68,7 +71,6 @@ class ModificationCheckTool:
         # The researcher-configured limits, not literals: the same constraint
         # set the run manifest publishes is the one enforced here.
         self.constraints = constraints or ModificationConstraints()
-        self.check_index = 0
 
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
         del arguments
@@ -125,11 +127,9 @@ class ModificationCheckTool:
                     else None
                 ),
             )
-        self.check_index += 1
         return ToolResult(
             True,
             value={
-                "check_index": self.check_index,
                 "strategy_entry": "generate_orders",
                 # The optional fit(context) entry as statically declared: None
                 # when main.py has none, else its REFIT_PERIOD (None = once).

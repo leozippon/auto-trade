@@ -35,7 +35,7 @@ from autotrade.environment.tools import (
 from autotrade.environment.tools.shell import (
     ARGV_ALIAS_NOTE,
     ARGV_ONE_ELEMENT_NOTE,
-    ARGV_SPLIT_NOTE,
+    ARGV_SHELL_NOTE,
     ARGV_STRING_NOTE,
     ARGV_TOO_LONG_HINT,
     DEFAULT_SHELL_TIMEOUT_SECONDS,
@@ -267,7 +267,7 @@ class ShellToolTest(unittest.TestCase):
             self.assertTrue(plain.ok, plain.error)
             self.assertNotIn("argv_normalized", plain.value)
 
-    def test_shell_splits_a_command_string_and_names_the_repair(self) -> None:
+    def test_shell_runs_a_command_string_through_the_shell_and_names_the_repair(self) -> None:
         """The command line and the command under `cmd` are the same call in a
         different wrapper: both run, and the result says what was rewritten."""
 
@@ -277,13 +277,17 @@ class ShellToolTest(unittest.TestCase):
             registry = ToolRegistry([SandboxShellTool(workspace, runner)])
             result = registry.invoke("shell", {"argv": "grep -n 'a b' notes.txt"})
             self.assertTrue(result.ok, result.error)
-            self.assertEqual(runner.calls[0][0], ("grep", "-n", "a b", "notes.txt"))
-            self.assertEqual(result.value["argv_normalized"], ARGV_SPLIT_NOTE)
+            self.assertEqual(
+                runner.calls[0][0], ("bash", "-lc", "grep -n 'a b' notes.txt")
+            )
+            self.assertEqual(result.value["argv_normalized"], ARGV_SHELL_NOTE)
+            # The label still names what ran, not the shell that ran it.
+            self.assertEqual(result.value["command_kind"], "search")
             aliased = registry.invoke("shell", {"cmd": "ls -la output"})
             self.assertTrue(aliased.ok, aliased.error)
-            self.assertEqual(runner.calls[1][0], ("ls", "-la", "output"))
+            self.assertEqual(runner.calls[1][0], ("bash", "-lc", "ls -la output"))
             self.assertIn(ARGV_ALIAS_NOTE.format(key="cmd"), aliased.value["argv_normalized"])
-            self.assertIn(ARGV_SPLIT_NOTE, aliased.value["argv_normalized"])
+            self.assertIn(ARGV_SHELL_NOTE, aliased.value["argv_normalized"])
             listed = registry.invoke("shell", {"command": ["ls", "output"]})
             self.assertTrue(listed.ok, listed.error)
             self.assertEqual(runner.calls[2][0], ("ls", "output"))
@@ -295,8 +299,8 @@ class ShellToolTest(unittest.TestCase):
 
     def test_shell_unwraps_a_command_line_sent_as_a_one_element_array(self) -> None:
         """`["python -c 'print(1)'"]` names no executable, so the element can
-        only be a command line: it is split, and the guards that follow
-        normalization still see the array that will actually run."""
+        only be a command line: it runs through the shell, and the guards that
+        follow normalization still see the array that will actually run."""
 
         with tempfile.TemporaryDirectory() as tmp:
             _, _, workspace = build_sandbox(Path(tmp))
@@ -304,51 +308,73 @@ class ShellToolTest(unittest.TestCase):
             registry = ToolRegistry([SandboxShellTool(workspace, runner)])
             result = registry.invoke("shell", {"argv": ["python -c 'print(1)'"]})
             self.assertTrue(result.ok, result.error)
-            self.assertEqual(runner.calls[0][0], ("python", "-c", "print(1)"))
+            self.assertEqual(
+                runner.calls[0][0], ("bash", "-lc", "python -c 'print(1)'")
+            )
             self.assertIn(ARGV_ONE_ELEMENT_NOTE, result.value["argv_normalized"])
-            self.assertIn(ARGV_SPLIT_NOTE, result.value["argv_normalized"])
+            self.assertIn(ARGV_SHELL_NOTE, result.value["argv_normalized"])
             # A lone program name is a real one-element argv, not a command line.
             bare = registry.invoke("shell", {"argv": ["pwd"]})
             self.assertTrue(bare.ok, bare.error)
             self.assertEqual(runner.calls[1][0], ("pwd",))
             self.assertNotIn("argv_normalized", bare.value)
-            # The wait guard runs on the normalized argv, not the wrapper.
+            # The wait guard runs on the normalized argv, not the wrapper, and
+            # reaches the wait through the shell the repair introduced.
             waited = registry.invoke("shell", {"argv": ["sleep 30"]})
             self.assertFalse(waited.ok)
             self.assertEqual(waited.value["error_type"], FORBIDDEN_WAIT)
-            # So does the per-element cap, and the operator refusal.
+            waited_pipeline = registry.invoke(
+                "shell", {"argv": "sleep 180 && ls notes"}
+            )
+            self.assertFalse(waited_pipeline.ok)
+            self.assertEqual(waited_pipeline.value["error_type"], FORBIDDEN_WAIT)
+            # So does the per-element cap: the command line is one element.
             long_element = registry.invoke(
                 "shell", {"argv": [f"python -c {'x' * (SHELL_ARGV_MAX_CHARS + 1)}"]}
             )
             self.assertFalse(long_element.ok)
             self.assertIn("argv[2] is too long", long_element.error)
-            piped = registry.invoke("shell", {"argv": ["ls output | wc -l"]})
-            self.assertFalse(piped.ok)
-            self.assertIn("shell operator `|`", piped.error)
             self.assertEqual(len(runner.calls), 2)
+
+    def test_shell_runs_a_command_line_that_needs_a_shell(self) -> None:
+        """The friction this removes: every one of these shapes used to be
+        refused for carrying a shell operator, and each is exactly what the
+        Agent meant to run."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _, _, workspace = build_sandbox(Path(tmp))
+            runner = FakeRunner(CommandResult(0, stdout="ok"))
+            registry = ToolRegistry([SandboxShellTool(workspace, runner)])
+            commands = (
+                "ls output | wc -l",
+                "python probe.py > out.txt",
+                "mkdir a && mkdir b",
+                "for c in a b; do mkdir -p candidates/$c; done",
+            )
+            for index, command in enumerate(commands):
+                result = registry.invoke("shell", {"argv": command})
+                self.assertTrue(result.ok, result.error)
+                self.assertEqual(runner.calls[index][0], ("bash", "-lc", command))
+                self.assertEqual(result.value["argv_normalized"], ARGV_SHELL_NOTE)
+            # Hiding stderr stays advisory, as it is for an explicit bash -lc.
+            hushed = registry.invoke("shell", {"command": "python probe.py 2>/dev/null"})
+            self.assertTrue(hushed.ok, hushed.error)
+            self.assertIn("stderr", hushed.value["stderr_suppression_reminder"])
+            # An unbalanced quote is the shell's own error to report, not a
+            # pre-flight refusal: it reaches bash as written.
+            unbalanced = registry.invoke("shell", {"argv": "echo 'unbalanced"})
+            self.assertTrue(unbalanced.ok, unbalanced.error)
+            self.assertEqual(runner.calls[-1][0], ("bash", "-lc", "echo 'unbalanced"))
 
     def test_shell_refuses_a_command_string_it_cannot_run_faithfully(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             _, _, workspace = build_sandbox(Path(tmp))
             runner = FakeRunner()
             registry = ToolRegistry([SandboxShellTool(workspace, runner)])
-            # No shell is involved, so an operator would become a literal word.
-            for command, operator in (
-                ("ls output | wc -l", "|"),
-                ("python probe.py > out.txt", ">"),
-                ("python probe.py 2>/dev/null", "2>/dev/null"),
-                ("mkdir a && mkdir b", "&&"),
-            ):
-                refused = registry.invoke("shell", {"argv": command})
-                self.assertFalse(refused.ok, command)
-                self.assertIn(f"shell operator `{operator}`", refused.error)
-                self.assertIn('["bash", "-lc"', refused.value["retry_hint"])
-            unbalanced = registry.invoke("shell", {"argv": "echo 'unbalanced"})
-            self.assertFalse(unbalanced.ok)
-            self.assertIn("cannot be split", unbalanced.error)
-            # A JSON array of anything but non-empty strings is not repairable,
-            # and splitting it as a command line would suggest nonsense, so the
-            # refusal states what the array must hold instead.
+            # A JSON array of anything but non-empty strings is a mis-encoded
+            # array, not a command line: reconstructing it would guess, and
+            # handing it to the shell would report a syntax error instead of
+            # what actually went wrong.
             for argv in (
                 '["ls", 3]',
                 "[]",
@@ -361,11 +387,15 @@ class ShellToolTest(unittest.TestCase):
                 # The whole arguments object leaked into argv: the leading array
                 # parses, but running it would silently drop the rest.
                 '["python", "probe.py"], "cwd": "notes"}',
+                # The two shapes the traces actually carry: a doubled closing
+                # quote, and the call's other fields appended inside the array.
+                '["bash", "-lc", "python probe.py; echo EXIT=$?""]',
+                '["bash", "-lc", "echo done", "cwd": "."]',
             ):
                 refused = registry.invoke("shell", {"argv": argv})
                 self.assertFalse(refused.ok, argv)
-                self.assertIn("array of separate strings", refused.error)
-                self.assertIn("elements are all non-empty strings", refused.error)
+                self.assertIn("does not parse as an array", refused.error)
+                self.assertIn("one plain string", refused.error)
             self.assertEqual(runner.calls, [])
 
     def test_shell_answers_an_over_long_argv_element_with_the_file_recipe(self) -> None:
@@ -947,6 +977,30 @@ class ArtifactIOToolTest(unittest.TestCase):
             self.assertEqual(stale.value["error_type"], "stale")
             self.assertTrue(stale.value["retry_hint"])
 
+    def test_edit_refuses_a_file_that_is_not_utf8_instead_of_corrupting_it(self) -> None:
+        """An edit is a read-modify-write: a tolerant decode would rewrite every
+        invalid byte in the file as U+FFFD, including bytes far from the edit,
+        and report success. The file must come back byte for byte."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, registry = self._registry(Path(tmp))
+            target = paths.agent / "notes" / "capture.txt"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            original = b"old_marker_to_replace\nraw \xff byte\n"
+            target.write_bytes(original)
+            refused = registry.invoke(
+                "edit_file",
+                {
+                    "path": "notes/capture.txt",
+                    "old_text": "old_marker_to_replace",
+                    "new_text": "new_marker",
+                },
+            )
+            self.assertFalse(refused.ok)
+            self.assertEqual(refused.value["error_type"], "not_utf8")
+            self.assertIn("write_file", refused.value["retry_hint"])
+            self.assertEqual(target.read_bytes(), original)
+
     def test_edit_ambiguous_requires_replace_all(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             _, registry = self._registry(Path(tmp))
@@ -1252,10 +1306,12 @@ class StepRollbackTest(unittest.TestCase):
             self.assertEqual(restored.value["node_id"], node_id)
             self.assertEqual((output / "main.py").read_text(encoding="utf-8"), "VERSION = 1\n")
             self.assertTrue((output / "lib" / "__init__.py").exists())
-            # The restored copy is writable again, README.md excepted.
+            # The restored copy comes back out of a 0o444/0o555 Step snapshot
+            # writable throughout, contract files included: nothing under the
+            # Agent's workspace carries a mode a copy could inherit.
             self.assertEqual((output / "lib").stat().st_mode & 0o777, 0o777)
             self.assertEqual((output / "main.py").stat().st_mode & 0o777, 0o666)
-            self.assertEqual((output / "README.md").stat().st_mode & 0o777, 0o444)
+            self.assertEqual((output / "README.md").stat().st_mode & 0o777, 0o666)
 
     def test_a_work_copy_the_host_cannot_unlock_is_refused_before_any_deletion(self) -> None:
         # The real condition is a work copy owned by the container user: the
@@ -1659,7 +1715,7 @@ class ToolResultContractTest(unittest.TestCase):
             _, _, workspace = build_sandbox(Path(tmp + "/shell"))
             registry = ToolRegistry([*registry._tools.values(), SandboxShellTool(workspace, FakeRunner())])
             for name, arguments, needle in (
-                ("shell", {"argv": "ls -la | wc -l"}, '"argv": ["python", "-c", "print(1)"]'),
+                ("shell", {"argv": '["ls", "-la"'}, '"argv": ["python", "-c", "print(1)"]'),
                 ("shell", {"argv": ["python", "-c", "x" * (SHELL_ARGV_MAX_CHARS + 1)]}, "argv[2] is too long; correct call example"),
                 ("shell", {"argv": ["ls"], "timeout_seconds": 900}, "above its maximum; correct call example"),
                 ("edit_file", {"path": "output/main.py", "old_text": "a", "new_text": "b", "offset": 3}, "unknown argument(s): ['offset']; correct call example: {\"path\": \"output/main.py\""),
@@ -1899,7 +1955,7 @@ def _fold_backtest_tool(
         backtest=backtest,
         workspace=SafeWorkspace(paths.agent),
         modification_check_factory=lambda directory: PassingModificationCheck(
-            directory, models, check_index=1, changed_lines=3
+            directory, models, changed_lines=3
         ),
     )
     return paths, tool, summary

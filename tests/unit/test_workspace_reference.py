@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import stat
 import unittest
 from pathlib import Path
@@ -14,7 +15,10 @@ from autotrade.environment.artifacts import (
     readonly_baseline,
     restore_working_artifacts_writable,
 )
+from autotrade.environment.tools.base import ToolError
+from autotrade.environment.tools.files import EditFileTool
 from autotrade.environment.tools.modification_check import ModificationCheckTool
+from autotrade.environment.tools.workspace import SafeWorkspace
 from autotrade.pipelines.local_backend import (
     install_workspace_reference,
     seed_output_from_starter,
@@ -183,24 +187,58 @@ class SeedOutputFromStarterTest(unittest.TestCase):
             )
             self.assertEqual(seed_output_from_starter(output, None), ())
 
-    def test_the_seeded_copy_is_writable_while_the_reference_copy_stays_read_only(self) -> None:
-        """The whole point: the Agent edits ``output/``, and ``refs/starter/``
-        stays a read-only reference it never has to copy out of."""
+    def test_nothing_under_the_workspace_is_mode_protected(self) -> None:
+        """Every arm that fanned candidates out of a copy hit "is not writable"
+        and recovered with the same ``chmod -R a+w``: ``cp`` reproduces the
+        source's mode, so one 0o444 file anywhere under the workspace locks the
+        typed writers out of every copy made from it. Nothing there carries a
+        mode of its own -- the contract README included, which is held to its
+        seeded digest instead."""
 
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             pack = _pack(root, starter=True)
             workspace = root / "workspace"
-            output, _baseline = _seed_session_workspace(workspace, pack)
+            output, baseline = _seed_session_workspace(workspace, pack)
             install_workspace_reference(workspace, pack)
-            self.assertEqual(stat.S_IMODE((output / "main.py").stat().st_mode), 0o666)
-            self.assertEqual(stat.S_IMODE((output / "lib").stat().st_mode), 0o777)
-            reference = workspace / "refs" / "starter" / "main.py"
-            self.assertEqual(reference.read_text(encoding="utf-8"), STARTER_MAIN)
-            self.assertEqual(stat.S_IMODE(reference.stat().st_mode), 0o444)
+            for path in (workspace / "refs", output):
+                for child in (path, *path.rglob("*")):
+                    expected = 0o777 if child.is_dir() else 0o666
+                    self.assertEqual(
+                        stat.S_IMODE(child.stat().st_mode),
+                        expected,
+                        child.relative_to(workspace),
+                    )
             self.assertEqual(
-                stat.S_IMODE((workspace / "refs" / "README.md").stat().st_mode), 0o444
+                (workspace / "refs" / "starter" / "main.py").read_text(encoding="utf-8"),
+                STARTER_MAIN,
             )
+            # The fan-out the arms actually run: copy2 reproduces the source
+            # mode exactly as `cp` does under the sandbox's zero umask.
+            candidate = workspace / "candidates" / "c_v15"
+            (candidate / "lib").mkdir(parents=True)
+            for relative in ("main.py", "lib/pick.py"):
+                shutil.copy2(workspace / "refs" / "starter" / relative, candidate / relative)
+            writer = EditFileTool(SafeWorkspace(workspace))
+            edited = writer.invoke(
+                {
+                    "path": "candidates/c_v15/main.py",
+                    "old_text": "return first(context)",
+                    "new_text": "return first(context)[:15]",
+                }
+            )
+            self.assertTrue(edited.ok, edited.error)
+            # The README the Agent may not edit is refused by path, and the
+            # session is still held to the bytes it was seeded with.
+            with self.assertRaises(ToolError) as refused:
+                writer.invoke({"path": "output/README.md", "old_text": "#", "new_text": "##"})
+            self.assertEqual(refused.exception.error_type, "readonly")
+            (output / "README.md").write_text("tampered\n", encoding="utf-8")
+            check = ModificationCheckTool(
+                output, parent_dir=TEMPLATE_DIR, readonly_baseline=baseline
+            )
+            with self.assertRaisesRegex(ToolError, "readonly files modified"):
+                check.invoke({})
 
     def test_a_freshly_seeded_workspace_passes_the_smoke_backtest_gate(self) -> None:
         """``smoke_backtest`` runs ``modification_check`` before it replays, and
