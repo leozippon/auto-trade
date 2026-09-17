@@ -33,7 +33,6 @@ from autotrade.environment.tools import (
     WriteFileTool,
 )
 from autotrade.environment.tools.shell import (
-    ARGV_ALIAS_NOTE,
     ARGV_ONE_ELEMENT_NOTE,
     ARGV_SHELL_NOTE,
     ARGV_STRING_NOTE,
@@ -268,8 +267,10 @@ class ShellToolTest(unittest.TestCase):
             self.assertNotIn("argv_normalized", plain.value)
 
     def test_shell_runs_a_command_string_through_the_shell_and_names_the_repair(self) -> None:
-        """The command line and the command under `cmd` are the same call in a
-        different wrapper: both run, and the result says what was rewritten."""
+        """A command line is the same call as the argv array in a different
+        wrapper: it runs, and the result says what was rewritten. The command
+        sent under another key is a different thing -- a wrong field name --
+        and the schema answers it with the fields this tool has."""
 
         with tempfile.TemporaryDirectory() as tmp:
             _, _, workspace = build_sandbox(Path(tmp))
@@ -283,19 +284,12 @@ class ShellToolTest(unittest.TestCase):
             self.assertEqual(result.value["argv_normalized"], ARGV_SHELL_NOTE)
             # The label still names what ran, not the shell that ran it.
             self.assertEqual(result.value["command_kind"], "search")
-            aliased = registry.invoke("shell", {"cmd": "ls -la output"})
-            self.assertTrue(aliased.ok, aliased.error)
-            self.assertEqual(runner.calls[1][0], ("bash", "-lc", "ls -la output"))
-            self.assertIn(ARGV_ALIAS_NOTE.format(key="cmd"), aliased.value["argv_normalized"])
-            self.assertIn(ARGV_SHELL_NOTE, aliased.value["argv_normalized"])
-            listed = registry.invoke("shell", {"command": ["ls", "output"]})
-            self.assertTrue(listed.ok, listed.error)
-            self.assertEqual(runner.calls[2][0], ("ls", "output"))
-            # An alias that does not resolve the call on its own keeps the
-            # schema's own error, which names the fields this tool has.
-            ambiguous = registry.invoke("shell", {"cmd": "ls", "command": "ls"})
-            self.assertFalse(ambiguous.ok)
-            self.assertIn("command", ambiguous.error)
+            for arguments in ({"cmd": "ls -la output"}, {"command": ["ls", "output"]}):
+                misnamed = registry.invoke("shell", arguments)
+                self.assertFalse(misnamed.ok, arguments)
+                self.assertIn("argv", misnamed.error)
+                self.assertIn('"argv": ["python", "-c", "print(1)"]', misnamed.error)
+            self.assertEqual(len(runner.calls), 1)
 
     def test_shell_unwraps_a_command_line_sent_as_a_one_element_array(self) -> None:
         """`["python -c 'print(1)'"]` names no executable, so the element can
@@ -357,7 +351,7 @@ class ShellToolTest(unittest.TestCase):
                 self.assertEqual(runner.calls[index][0], ("bash", "-lc", command))
                 self.assertEqual(result.value["argv_normalized"], ARGV_SHELL_NOTE)
             # Hiding stderr stays advisory, as it is for an explicit bash -lc.
-            hushed = registry.invoke("shell", {"command": "python probe.py 2>/dev/null"})
+            hushed = registry.invoke("shell", {"argv": "python probe.py 2>/dev/null"})
             self.assertTrue(hushed.ok, hushed.error)
             self.assertIn("stderr", hushed.value["stderr_suppression_reminder"])
             # An unbalanced quote is the shell's own error to report, not a

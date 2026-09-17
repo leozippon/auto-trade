@@ -1923,12 +1923,9 @@ class BlockedOverwriteError(RuntimeError):
     job; `fina_mainbz_vip` has the preset repair job
     `manual_fundamental_restatement_repair`.
 
-    Two callers catch it, each with a documented outcome for the refusal: the
-    share_float complete download turns it into a per-day guard retention so its
-    ts_code rescue stays reachable, then still fails the run for every day the
-    rescue cannot explain; the evening stk_auction recheck keeps the committed
-    morning capture, because refusing a correction that would drop rows is that
-    pass's intended result. Every other caller lets it end the run.
+    Two callers catch it, each stating at its own catch site why a refusal is
+    that pass's intended outcome rather than an alarm. Every other caller lets
+    it end the run.
     """
 
 def write_parquet_revision_aware(
@@ -2027,16 +2024,18 @@ def write_parquet_revision_aware(
                     allow_empty_revision_overwrite=allow_empty_revision_overwrite,
                 )
                 append_jsonl_unique(Path(revision_ledger), record, key="event_id")
-            remedy = (
-                f"new pull removes {removed_count} existing keys; {write_action} "
-                "(delete the partition to accept a source retraction)"
-                if write_action == "skipped_key_removal_overwrite"
-                else f"new pull would remove {removed_count} of {old_key_count} existing keys; {write_action} "
-                "(kept the old partition; delete it to accept a mass retraction)"
+            # What the two refusals differ in is the reading that triggered
+            # them; the outcome and the remedy are one sentence for both.
+            reading = (
+                f"would remove {removed_count} of {old_key_count} existing keys"
+                if write_action == "blocked_shrink_overwrite"
+                else f"removes {removed_count} existing keys"
             )
             message = (
-                f"{api_name} {path} {remedy}: the revision guard refused this destructive "
-                "overwrite; review the revision ledger before retrying"
+                f"{api_name} {path} new pull {reading}: the revision guard refused "
+                f"this destructive overwrite ({write_action}) and kept the old "
+                "partition; review the revision ledger, and delete the partition to "
+                "accept a genuine source retraction, before retrying"
             )
             # The old partition is kept AND the run stops here. Reporting the
             # refusal as an ordinary skip froze fina_mainbz_vip at a stale

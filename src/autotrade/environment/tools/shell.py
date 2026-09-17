@@ -43,12 +43,15 @@ SHELL_ARGV_MAX_CHARS = 4000
 DEFAULT_SHELL_OUTPUT_CHARS = 40_000
 SHELL_CAPTURE_MAX_CHARS = 1_000_000
 # Trace audits show the same argv shapes recurring in every session, mostly on a
-# fresh sub-agent's first shell call: the command under ``cmd``/``command``,
-# the whole command line as one string (bare, or as the single element of a
-# one-element array), a JSON-encoded array, and a long ``python -c`` script
-# inlined as one element. All but the last are the same command in a different
-# wrapper, so they are repaired here and the repair is named in the result;
-# only the over-long element is refused, with the recipe that replaces it.
+# fresh sub-agent's first shell call: the whole command line as one string
+# (bare, or as the single element of a one-element array), a JSON-encoded
+# array, and a long ``python -c`` script inlined as one element. All but the
+# last are the same command in a different wrapper, so they are repaired here
+# and the repair is named in the result; only the over-long element is refused,
+# with the recipe that replaces it. A command sent under another key is not a
+# wrapper of the command but a wrong field name: the schema names ``argv`` and
+# answers with a correct call example, which costs one round and teaches the
+# field, so this tool guesses no key.
 ARGV_STRING_NOTE = (
     "argv arrived as a JSON-encoded string and was parsed into an array; "
     "send argv as a real JSON array of strings, not a string containing one"
@@ -62,7 +65,6 @@ ARGV_ONE_ELEMENT_NOTE = (
     "argv held a single element that was itself a whole command line, so the "
     "one-element array was unwrapped"
 )
-ARGV_ALIAS_NOTE = "the command arrived under `{key}`; this tool's command field is argv"
 ARGV_TOO_LONG_HINT = (
     f"each argv element is at most {SHELL_ARGV_MAX_CHARS} chars: write the "
     "script to a file with write_file (e.g. notes/probe.py) and run "
@@ -71,8 +73,6 @@ ARGV_TOO_LONG_HINT = (
 # The shell a command string is handed to: the same form this tool's own
 # description names, so a repaired call and an explicit one run identically.
 COMMAND_STRING_SHELL = ("bash", "-lc")
-# Keys an Agent reaches for instead of ``argv``; the value is the same command.
-_COMMAND_ALIASES = ("cmd", "command")
 FORBIDDEN_WAIT = "forbidden_wait"
 _WAIT_COMMANDS = frozenset({"sleep", "usleep"})
 _WAIT_WRAPPERS = frozenset({"env", "timeout", "nice", "stdbuf", "nohup", "time"})
@@ -234,23 +234,21 @@ class SandboxShellTool:
         self._repair = threading.local()
 
     def normalize_arguments(self, arguments: Mapping[str, object]) -> Mapping[str, object]:
-        """Repair or refuse the call shape before the schema sees it.
+        """Repair or refuse the shape of ``argv`` before the schema sees it.
 
-        The command under ``cmd``/``command``, a JSON-encoded array, a plain
-        command line and that command line wrapped in a one-element array are
-        the same command in a different wrapper: each is rewritten into the
-        argv array and the repair is reported back in the result, so the next
-        call can be the canonical shape. A command line is handed to
-        ``bash -lc`` rather than word-split, because that is what the Agent
-        meant by writing one; what stays refused is what cannot be rewritten
-        faithfully: an element over the per-element cap (refused with the
-        write_file recipe instead of a bare length error) and a malformed
-        JSON array, which nothing can reconstruct.
+        A JSON-encoded array, a plain command line and that command line
+        wrapped in a one-element array are the same command in a different
+        wrapper: each is rewritten into the argv array and the repair is
+        reported back in the result, so the next call can be the canonical
+        shape. A command line is handed to ``bash -lc`` rather than word-split,
+        because that is what the Agent meant by writing one; what stays refused
+        is what cannot be rewritten faithfully: an element over the per-element
+        cap (refused with the write_file recipe instead of a bare length error)
+        and a malformed JSON array, which nothing can reconstruct.
         """
 
         self._repair.note = None
         notes: list[str] = []
-        arguments = _canonical_command_key(arguments, notes)
         argv = arguments.get("argv")
         if isinstance(argv, str):
             argv, note = _argv_from_string(argv)
@@ -381,28 +379,6 @@ def _json_string_argv(value: str) -> list[str] | None:
     ):
         return parsed
     return None
-
-
-def _canonical_command_key(
-    arguments: Mapping[str, object], notes: list[str]
-) -> Mapping[str, object]:
-    """Move a command sent under ``cmd``/``command`` to ``argv``.
-
-    Only the unambiguous case is repaired: no ``argv`` of its own, and an
-    alias that actually holds a command. Anything left over -- a second alias,
-    an unusable value -- reaches the schema, whose error names the fields this
-    tool has.
-    """
-
-    if "argv" in arguments:
-        return arguments
-    for alias in _COMMAND_ALIASES:
-        value = arguments.get(alias)
-        if isinstance(value, str) or (isinstance(value, list) and value):
-            notes.append(ARGV_ALIAS_NOTE.format(key=alias))
-            rest = {key: item for key, item in arguments.items() if key != alias}
-            return {**rest, "argv": value}
-    return arguments
 
 
 def _lone_command_line(argv: object) -> str | None:
@@ -646,7 +622,6 @@ def _basename(token: str) -> str:
 
 
 __all__ = [
-    "ARGV_ALIAS_NOTE",
     "ARGV_ONE_ELEMENT_NOTE",
     "ARGV_SHELL_NOTE",
     "ARGV_STRING_NOTE",
