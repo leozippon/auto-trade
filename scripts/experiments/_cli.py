@@ -288,18 +288,6 @@ def add_research_directive_arguments(parser: argparse.ArgumentParser) -> None:
 
 def add_acceptance_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "--min-return",
-        type=float,
-        default=0.0,
-        help="Minimum validation total return.",
-    )
-    parser.add_argument(
-        "--min-sharpe",
-        type=float,
-        default=0.0,
-        help="Minimum validation Sharpe.",
-    )
-    parser.add_argument(
         "--max-drawdown",
         type=float,
         default=0.25,
@@ -382,8 +370,6 @@ def _build_worker_params(
         "compact_keep_recent_messages": args.compact_keep_recent_messages,
         "compact_max_tokens": args.compact_max_tokens,
         "compact_max_calls": args.compact_max_calls,
-        "min_return": args.min_return,
-        "min_sharpe": args.min_sharpe,
         "max_drawdown": args.max_drawdown,
         "research_directive": research_directive,
     }

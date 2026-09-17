@@ -119,7 +119,8 @@ def test_a_round_dry_runs_against_its_seed_contract(
     for arm in rnd.arms.values():
         reference = arm.get("workspace_reference")
         if reference:
-            (tmp_path / str(reference)).mkdir(parents=True)
+            # Arms that are independent seeds of one search share a pack.
+            (tmp_path / str(reference)).mkdir(parents=True, exist_ok=True)
     assert rnd.main(["launcher", "0", "--dry-run"]) == 0
     out = capsys.readouterr().out.splitlines()
     assert "release synthetic, which every arm pins" in out[0]
