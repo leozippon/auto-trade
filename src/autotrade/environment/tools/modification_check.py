@@ -13,6 +13,7 @@ from autotrade.environment.artifacts import (
     model_artifact_delta,
     modification_delta,
     reject_forbidden_code_references,
+    restore_readonly_baseline,
 )
 from autotrade.environment.replay.timeview import ASOF_DOMAIN_NAMES
 from autotrade.environment.strategy_loader import (
@@ -55,6 +56,7 @@ class ModificationCheckTool:
         parent_models_dir: str | Path | None = None,
         constraints: ModificationConstraints | None = None,
         readonly_baseline: Mapping[str, str] | None = None,
+        readonly_seed: str | Path | None = None,
     ) -> None:
         self.output_dir = Path(output_dir)
         self.parent_dir = Path(parent_dir) if parent_dir is not None else None
@@ -68,6 +70,15 @@ class ModificationCheckTool:
         self.readonly_baseline = (
             dict(readonly_baseline) if readonly_baseline is not None else None
         )
+        # Where the read-only files were seeded from, given only for the tree
+        # the host itself seeded: the session's working copy. A lost or
+        # rewritten contract file is restored from there instead of blocking
+        # every replay behind bytes the Agent is not allowed to produce. A
+        # candidate directory gets no seed -- it is the Agent's own layout of
+        # the artifact it asks to freeze, batch_validate supplies the file
+        # where it is absent, and a candidate carrying different bytes must
+        # still be refused rather than corrected.
+        self.readonly_seed = Path(readonly_seed) if readonly_seed is not None else None
         # The researcher-configured limits, not literals: the same constraint
         # set the run manifest publishes is the one enforced here.
         self.constraints = constraints or ModificationConstraints()
@@ -75,6 +86,18 @@ class ModificationCheckTool:
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
         del arguments
         constraints = self.constraints
+        # First, so the file counts, the fingerprint and the delta below all
+        # read one tree: a host-owned contract file this session lost or
+        # overwrote is rewritten from the seed it was given.
+        restored = (
+            restore_readonly_baseline(
+                self.output_dir, self.readonly_seed, self.readonly_baseline
+            )
+            if self.readonly_seed is not None
+            and self.readonly_baseline is not None
+            and self.output_dir.is_dir()
+            else ()
+        )
         files = _formal_files(self.output_dir)
         main = self.output_dir / "main.py"
         if main not in files:
@@ -127,26 +150,32 @@ class ModificationCheckTool:
                     else None
                 ),
             )
-        return ToolResult(
-            True,
-            value={
-                "strategy_entry": "generate_orders",
-                # The optional fit(context) entry as statically declared: None
-                # when main.py has none, else its REFIT_PERIOD (None = once).
-                "fit": fit_schedule.to_record() if fit_schedule is not None else None,
-                # Content address of exactly what this check read. A formal
-                # call snapshots the artifact and refuses to replay a snapshot
-                # whose fingerprint is not this one, so an approval cannot be
-                # transferred to bytes written after it.
-                "fingerprint": artifact_fingerprint(self.output_dir, self.models_dir),
-                "file_count": len(files),
-                "total_bytes": total_bytes,
-                "changed_lines": delta.diff_lines,
-                "constraints": constraints.to_record(),
-                "delta": delta.to_record(),
-                "model_delta": model_delta.to_record() if model_delta is not None else None,
-            },
-        )
+        value: dict[str, object] = {
+            "strategy_entry": "generate_orders",
+            # The optional fit(context) entry as statically declared: None
+            # when main.py has none, else its REFIT_PERIOD (None = once).
+            "fit": fit_schedule.to_record() if fit_schedule is not None else None,
+            # Content address of exactly what this check read. A formal
+            # call snapshots the artifact and refuses to replay a snapshot
+            # whose fingerprint is not this one, so an approval cannot be
+            # transferred to bytes written after it.
+            "fingerprint": artifact_fingerprint(self.output_dir, self.models_dir),
+            "file_count": len(files),
+            "total_bytes": total_bytes,
+            "changed_lines": delta.diff_lines,
+            "constraints": constraints.to_record(),
+            "delta": delta.to_record(),
+            "model_delta": model_delta.to_record() if model_delta is not None else None,
+        }
+        if restored:
+            # Explicit, never silent: the Agent is told its tree changed under
+            # it and why, so it does not go looking for the file it lost.
+            value["restored_readonly"] = (
+                f"{', '.join(restored)}: absent or altered, and the host rewrote it "
+                "from the bytes this session was seeded with. It is the host's "
+                "read-only contract copy; nothing else in your tree was touched."
+            )
+        return ToolResult(True, value=value)
 
 
 def _reject_flat_asof_reads(files: list[Path], root: Path) -> None:

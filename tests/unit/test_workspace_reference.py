@@ -258,6 +258,72 @@ class SeedOutputFromStarterTest(unittest.TestCase):
             self.assertEqual(result.value["delta"]["readonly_violations"], [])
             self.assertIn("lib/pick.py", result.value["delta"]["changed_files"])
 
+    def test_the_host_restores_the_contract_file_a_session_lost(self) -> None:
+        """One flattened ``rm -rf`` took ``output/`` down with the seeded
+        README, and nothing in the session could write that file back: the
+        typed writers refuse it by path and the check only compared digests,
+        so every replay stayed blocked. The host owns those bytes, so the
+        host restores them -- and says so in the result."""
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pack = _pack(root, starter=True)
+            workspace = root / "workspace"
+            output, baseline = _seed_session_workspace(workspace, pack)
+            seeded_text = (output / "README.md").read_text(encoding="utf-8")
+            check = ModificationCheckTool(
+                output,
+                parent_dir=TEMPLATE_DIR,
+                readonly_baseline=baseline,
+                readonly_seed=TEMPLATE_DIR,
+            )
+
+            (output / "README.md").unlink()
+            result = check.invoke({})
+            self.assertTrue(result.ok, result.error)
+            self.assertEqual((output / "README.md").read_text(encoding="utf-8"), seeded_text)
+            self.assertIn("README.md", str(result.value["restored_readonly"]))
+            # One tree: the restored file is inside the counts and the address
+            # the formal replay is pinned to.
+            self.assertEqual(result.value["fingerprint"], artifact_fingerprint(output))
+            self.assertEqual(result.value["delta"]["readonly_violations"], [])
+            self.assertEqual(stat.S_IMODE((output / "README.md").stat().st_mode), 0o666)
+
+            (output / "README.md").write_text("rewritten contract\n", encoding="utf-8")
+            overwritten = check.invoke({})
+            self.assertTrue(overwritten.ok, overwritten.error)
+            self.assertEqual((output / "README.md").read_text(encoding="utf-8"), seeded_text)
+            self.assertIn("README.md", str(overwritten.value["restored_readonly"]))
+
+            # Nothing to restore, nothing reported.
+            self.assertNotIn("restored_readonly", check.invoke({}).value)
+
+    def test_a_contract_file_is_not_restored_from_a_seed_that_has_moved(self) -> None:
+        """The seed of an initial artifact is the live repository template,
+        which a maintainer may edit while the session runs. Writing those
+        bytes would swap the contract the session was seeded with, so a moved
+        seed restores nothing and the violation is reported as before."""
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pack = _pack(root, starter=True)
+            workspace = root / "workspace"
+            output, baseline = _seed_session_workspace(workspace, pack)
+            moved = root / "moved_template"
+            copy_artifact(TEMPLATE_DIR, moved)
+            (moved / "README.md").write_text("a new contract section\n", encoding="utf-8")
+
+            (output / "README.md").unlink()
+            check = ModificationCheckTool(
+                output,
+                parent_dir=TEMPLATE_DIR,
+                readonly_baseline=baseline,
+                readonly_seed=moved,
+            )
+            with self.assertRaisesRegex(ToolError, "readonly files modified"):
+                check.invoke({})
+            self.assertFalse((output / "README.md").exists())
+
 
 class ReclaimSandboxContainersTest(unittest.TestCase):
     def test_reclaim_filters_adm_experiment_label(self) -> None:

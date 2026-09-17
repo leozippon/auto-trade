@@ -616,6 +616,50 @@ def readonly_baseline(output_root: str | Path) -> dict[str, str]:
     }
 
 
+def restore_readonly_baseline(
+    work_root: str | Path, seed_root: str | Path, baseline: Mapping[str, str]
+) -> tuple[str, ...]:
+    """Rewrite the read-only contract files a workspace no longer holds.
+
+    These files are the host's own: it seeds them, the typed writers refuse
+    them by path and the Agent may not edit them. A session that lost its copy
+    -- one ``rm -rf`` of ``output/`` is how it happened -- had nothing to
+    restore it from, so every replay stayed blocked on a file whose only
+    correct bytes the host already owns. Rewriting it enforces the invariant
+    the seeded digest states; it hides no strategy defect, because no strategy
+    content lives in these files.
+
+    A file is rewritten only from a seed that still carries the seeded digest.
+    An initial artifact's seed is the live repository template, which
+    maintainers edit while sessions run, and writing those bytes would silently
+    swap the contract the session was seeded with; where the seed has moved,
+    the mismatch is left to :func:`modification_delta` to report.
+
+    Returns the relative paths restored.
+    """
+
+    work_root = Path(work_root)
+    seed_root = Path(seed_root)
+    restored: list[str] = []
+    for relpath in sorted(READONLY_FILES):
+        seeded = baseline.get(relpath)
+        if seeded is None or _optional_digest(work_root / relpath) == seeded:
+            continue
+        source = seed_root / relpath
+        if not source.is_file() or _file_digest(source) != seeded:
+            continue
+        target = work_root / relpath
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # Replaced rather than written through: a copy the Agent left behind
+        # belongs to the sandbox user, and the restored file carries the one
+        # workspace mode like everything else in the mount.
+        target.unlink(missing_ok=True)
+        shutil.copyfile(source, target)
+        target.chmod(WORKSPACE_FILE_MODE)
+        restored.append(relpath)
+    return tuple(restored)
+
+
 @dataclass(frozen=True)
 class ModificationDelta:
     changed_files: tuple[str, ...]

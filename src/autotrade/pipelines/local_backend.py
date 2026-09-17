@@ -1783,8 +1783,9 @@ class BatchValidateTool(SessionTimeBudgetAware):
         its strategy modules alone would be refused for "modifying" a file it
         never touched. The working copy's own read-only files are copied in
         where absent; a candidate that carries a different one is still
-        refused by ``modification_check``. Only the read-only template names
-        are touched — never a sibling module of the package.
+        refused by ``modification_check``, which restores only the working copy
+        the host itself seeded. Only the read-only template names are touched
+        — never a sibling module of the package.
         """
 
         for candidate in candidates:
@@ -2773,6 +2774,11 @@ class LLMResearchDeveloper:
                 parent_models_dir=source_models,
                 constraints=request.modification_constraints,
                 readonly_baseline=seeded_readonly,
+                # The host seeded this tree, so the host restores the contract
+                # file it owns there: a session that deleted or overwrote it
+                # cannot write it back, and without this every replay stayed
+                # blocked on bytes only the host may produce.
+                readonly_seed=source,
             )
             # The arm's budgets minus what earlier attempts spent: the clock
             # holds only the remainder, the counters start from the spend.
@@ -2848,6 +2854,12 @@ class LLMResearchDeveloper:
                         parent_models_dir=source_models,
                         constraints=request.modification_constraints,
                         readonly_baseline=seeded_readonly,
+                        # Restored only in the tree the host seeded. A
+                        # candidate directory is the Agent's own layout of the
+                        # artifact it asks to freeze: the file is supplied
+                        # there when absent, and one carrying different bytes
+                        # is refused rather than silently corrected.
+                        readonly_seed=source if directory == output_dir else None,
                     ),
                     trace_emit=trace.emit,
                 ),
