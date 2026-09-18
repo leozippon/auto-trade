@@ -66,6 +66,7 @@ _BENCHMARK_KEYS = (
     "beta",
     "n_days",
     "size_tilt",
+    "size_beta",
     "top_industry_weight",
     "neutralized_excess_return",
     "neutralized_excess_method",

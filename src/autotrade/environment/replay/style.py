@@ -490,6 +490,12 @@ def replay_style_analysis(
             "beta": regression.get("beta"),
             "n_days": regression.get("n_days"),
             "size_tilt": tilts.get("size") if isinstance(tilts, Mapping) else None,
+            # ``size_tilt`` says which rung of the cap ladder the book stands
+            # on; ``size_beta`` is the loading the neutralization actually
+            # divides out. Across measured books the two move in opposite
+            # directions, so a budget written on the tilt cannot reach the
+            # loading that produces a size-driven drawdown.
+            "size_beta": neutralized.get("size_beta"),
             "top_industry_weight": style.get("top_industry_weight"),
         },
         "created_at": utc_now_iso(),

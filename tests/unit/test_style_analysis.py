@@ -362,6 +362,52 @@ def test_neutralized_excess_removes_the_market_and_size_contributions(tmp_path: 
     assert compact["neutralized_excess_return"] != compact["excess_return"]
 
 
+def test_the_agent_reads_the_size_loading_the_neutralization_divides_out(tmp_path: Path):
+    """``size_tilt`` says which rung of the cap ladder the book stands on;
+    ``size_beta`` is its loading on the size spread — the quantity the
+    neutralization divides out and the one that produced the 2024-01 drawdown.
+    The two move in opposite directions across measured books, so a budget
+    written on the visible tilt cannot reach the loading. It therefore rides in
+    the compact block and through the Agent-visible whitelist."""
+
+    days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2024-01-02", periods=20)]
+    replay_dir, daily = _neutralization_inputs(tmp_path, days)
+    analysis = replay_style_analysis(
+        _replay(days),
+        daily,
+        replay_dir=replay_dir,
+        snapshot_dir=None,
+        mode="valid",
+    )
+
+    size_beta = analysis["neutralized_excess"]["size_beta"]
+    assert isinstance(size_beta, float)
+    block = benchmark_summary_block(analysis)
+    # Projected from the one computation point, not recomputed beside it, and
+    # not the tilt under another name.
+    assert block["size_beta"] == size_beta
+    assert block["size_beta"] != block["size_tilt"]
+    visible = agent_visible_metrics({"total_return": 0.1, "benchmark": block})
+    assert visible["benchmark"]["size_beta"] == size_beta
+
+    # Same slot, a cross-section carrying no returns: the size factor cannot be
+    # built, so the loading is absent from what the Agent reads rather than
+    # standing there as a zero it could gate on.
+    unmeasured = replay_style_analysis(
+        _replay(days),
+        _daily(days),
+        replay_dir=replay_dir,
+        snapshot_dir=None,
+        mode="valid",
+    )
+    assert unmeasured["neutralized_excess"]["size_beta"] is None
+    unmeasured_block = benchmark_summary_block(unmeasured)
+    assert unmeasured_block["size_beta"] is None
+    assert "size_beta" not in agent_visible_metrics(
+        {"total_return": 0.1, "benchmark": unmeasured_block}
+    )["benchmark"]
+
+
 def test_size_beta_is_measured_on_the_decimal_pct_chg_scale(tmp_path: Path):
     """A hand-built panel with a known size beta pins the factor's unit.
 
