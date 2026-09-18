@@ -20,7 +20,7 @@ import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import partial
 from pathlib import Path
@@ -489,13 +489,14 @@ class HistoricalMinuteSource:
 class _SpanSlot:
     """One replay slot of a span: its directory, manifest and bound as-of stash.
 
-    ``stash_dir`` is None for a replay whose part stream is not the span's, so
-    its parts are written into its own as-of tree and never published.
+    A replay whose part stream is not the span's binds its own stash, keyed by
+    the day its window opens on, so the span's stash holds only the span's
+    parts.
     """
 
     replay_dir: Path
     manifest: dict[str, object]
-    stash_dir: Path | None
+    stash_dir: Path
 
 
 class _ReplaySpanView:
@@ -636,6 +637,7 @@ def _bind_span_stashes(
     phase: str,
     generation_id: str,
     decision_manifest: dict[str, object],
+    window_start: str = "",
 ) -> tuple[_SpanSlot, ...]:
     """Bind every slot's as-of stash; a later slot's parts depend on the slots before it."""
 
@@ -652,6 +654,7 @@ def _bind_span_stashes(
                 decision_manifest=decision_manifest,
                 replay_manifest=manifest,
                 preceding_replay_slots=tuple(path.name for path in replay_dirs[:index]),
+                window_start=window_start,
             ),
         )
         for index, (replay_dir, manifest) in enumerate(
@@ -816,12 +819,24 @@ class PITDailyEvaluationBackend:
                 # replay of the whole span writes, so only a replay opening on
                 # the span's first day writes that stream. One opening later
                 # publishes every row accumulated before it as a single first
-                # part, under names the span means for other slices, so it gets
-                # no stash: its parts land in its own throwaway as-of tree. A
-                # window truncated only at the end still writes the span's own
-                # prefix and keeps the stash.
+                # part, under names the span means for other slices, so it
+                # binds a stash of its own, keyed by the day it opens on: the
+                # span's stash keeps holding exactly the span's parts, while a
+                # probe repeated on that window hardlinks the four years of
+                # accumulated rows instead of decoding and encoding them again.
+                # A window truncated only at the end still writes the span's
+                # own prefix and keeps the span's stash.
                 if trade_days and trade_days[0] != span_days[0]:
-                    slots = tuple(replace(slot, stash_dir=None) for slot in slots)
+                    slots = _bind_span_stashes(
+                        snapshot_dir=snapshot_dir,
+                        replay_dirs=replay_dirs,
+                        replay_manifests=replay_manifests,
+                        schedule=request.schedule,
+                        phase=request.mode,
+                        generation_id=request.snapshot.generation_id,
+                        decision_manifest=decision_manifest,
+                        window_start=trade_days[0],
+                    )
         if daily.empty:
             raise ValueError(f"PIT daily replay is empty for {request.start}..{request.end}")
 
@@ -1143,6 +1158,7 @@ def _asof_stash_dir(
     replay_dir: Path,
     schedule: StrategySchedule,
     phase: str,
+    window_start: str = "",
 ) -> Path:
     """Return the complete semantic stash hierarchy for one scheduled replay.
 
@@ -1150,6 +1166,13 @@ def _asof_stash_dir(
     region is a hardlink of the single unphased store, so the as-of parts they
     produce for a given decision snapshot and schedule are identical and are
     encoded once.
+
+    The replay window is not part of the key either, because a replay of the
+    span writes the same parts whatever day it stops on -- except when it opens
+    late: a part is named by its position in the part stream, and a window
+    opening after the span's first trading day publishes everything accumulated
+    before it as one first part. That stream is its own, so it hangs under
+    ``window/start=<day>`` instead, beside the span's rather than inside it.
     """
 
     snapshot = Path(snapshot_dir).resolve()
@@ -1178,6 +1201,9 @@ def _asof_stash_dir(
     hour = _safe_path_component(hour, label="inference hour")
     minute = _safe_path_component(minute, label="inference minute")
     root = snapshot.parent.parent / "asof_stash"
+    if window_start:
+        start = _safe_path_component(window_start, label="replay window start")
+        root = root / "window" / f"start={start}"
     target = (
         root
         / "decision"
@@ -1205,6 +1231,7 @@ def _bind_asof_stash_contract(
     decision_manifest: dict[str, object],
     replay_manifest: dict[str, object],
     preceding_replay_slots: Sequence[str] = (),
+    window_start: str = "",
 ) -> Path:
     """Bind a part stash to complete, directly-comparable PIT semantics.
 
@@ -1217,13 +1244,15 @@ def _bind_asof_stash_contract(
     same region, or by the offline seed prebuild that experiments hardlink.
     A slot replayed after others in one span continues their as-of tree, so
     its parts also depend on those slots, which its contract names
-    (``preceding_replay_slots``, absent for a span's first slot).
+    (``preceding_replay_slots``, absent for a span's first slot). A window that
+    opens inside the span writes its own part stream and names the day it opens
+    on (``window_start``, absent for a replay of the span itself).
     The manifests are still verified against the requested release here; a part
     is additionally row-count checked against a fresh slice before it is
     reused.
     """
 
-    stash_dir = _asof_stash_dir(snapshot_dir, replay_dir, schedule, phase)
+    stash_dir = _asof_stash_dir(snapshot_dir, replay_dir, schedule, phase, window_start)
     cache_root = Path(snapshot_dir).resolve().parent.parent
     provider_record = _read_json(cache_root / "provider.json")
     expected_provider_keys = {
@@ -1277,6 +1306,8 @@ def _bind_asof_stash_contract(
     }
     if preceding_replay_slots:
         contract["preceding_replay_slots"] = list(preceding_replay_slots)
+    if window_start:
+        contract["window_start"] = window_start
     contract_path = stash_dir / "contract.json"
     lock_path = stash_dir.parent / f".{stash_dir.name}.contract.lock"
     with _exclusive_lock(lock_path):

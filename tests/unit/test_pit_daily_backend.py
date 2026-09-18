@@ -21,6 +21,7 @@ from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.executor import docker_available, raised_by_strategy
 from autotrade.environment.nl import NLConfig
+from autotrade.environment.replay import timeview as timeview_module
 from autotrade.environment.replay.engine import BacktestError
 from autotrade.environment.replay.timeview import Timeview
 from autotrade.environment.runtime import (
@@ -2154,12 +2155,34 @@ def _span_request(snapshot: Path, *replay_dirs: Path, revision: Path) -> Evaluat
     )
 
 
-def _span_stash_parts(snapshot: Path, *replay_dirs: Path) -> dict[str, bytes]:
-    """Every as-of part a replay published, by domain and part name, over its slots' stashes."""
+class _CountingParquet:
+    """``pyarrow.parquet`` as the Timeview sees it, recording each part it encodes."""
+
+    def __init__(self) -> None:
+        self.written: list[str] = []
+
+    def write_table(self, table: pa.Table, where: object, **kwargs: object) -> None:
+        self.written.append(Path(str(where)).name)
+        pq.write_table(table, where, **kwargs)  # type: ignore[arg-type]
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(pq, name)
+
+
+def _span_stash_parts(
+    snapshot: Path, *replay_dirs: Path, window_start: str = ""
+) -> dict[str, bytes]:
+    """Every as-of part a replay published, by domain and part name, over its slots' stashes.
+
+    ``window_start`` reads the stash a window opening on that day keys for
+    itself instead of the span's own.
+    """
 
     parts: dict[str, bytes] = {}
     for replay_dir in replay_dirs:
-        stash = _asof_stash_dir(snapshot, replay_dir, _SPAN_SCHEDULE, "valid")
+        stash = _asof_stash_dir(snapshot, replay_dir, _SPAN_SCHEDULE, "valid", window_start)
+        if not stash.is_dir():
+            continue
         for path in sorted(stash.rglob("*.parquet")):
             key = str(path.relative_to(stash))
             assert key not in parts, key
@@ -2273,6 +2296,62 @@ def test_a_late_opening_window_never_publishes_the_spans_parts(tmp_path: Path) -
         _span_request(snapshot, slots["ab"], revision=revision)
     )
     assert parts == _span_stash_parts(snapshot, slots["ab"])
+
+
+def test_a_late_opening_window_reuses_the_stash_it_keys_by_its_opening_day(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Its stream is its own, but it is the same stream every time.
+
+    Rebuilding it means decoding every slot before the opening day and encoding
+    everything accumulated since the span's start -- 2 h 41 min on the real
+    four-year span, against 165 s for the same three-day probe from day one. So
+    the window binds a stash keyed by the day it opens on: the span's stash
+    still holds only the span's parts, a probe repeated on that window encodes
+    nothing at all, and a probe opening on another day builds its own.
+    """
+
+    snapshot, slots = _write_span_release(tmp_path)
+    revision = _span_revision(tmp_path)
+    request = _span_request(snapshot, slots["a"], slots["b"], revision=revision)
+
+    first = PITDailyEvaluationBackend(tmp_path / "results_first", execution_mode="trusted").evaluate(
+        request, start_day="20240103"
+    )
+    assert first.summary["replayed_trade_days"] == 3
+    assert _span_stash_parts(snapshot, slots["a"], slots["b"]) == {}
+    window = _span_stash_parts(snapshot, slots["a"], slots["b"], window_start="20240103")
+    assert window
+    contract = json.loads(
+        (
+            _asof_stash_dir(snapshot, slots["a"], _SPAN_SCHEDULE, "valid", "20240103")
+            / "contract.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert contract["window_start"] == "20240103"
+
+    counter = _CountingParquet()
+    monkeypatch.setattr(timeview_module, "pq", counter)
+    again = PITDailyEvaluationBackend(tmp_path / "results_again", execution_mode="trusted").evaluate(
+        request, start_day="20240103"
+    )
+    # Every part of the second probe was hardlinked out of the window's stash:
+    # no slot was re-encoded, and the replay is the same book.
+    assert counter.written == []
+    assert again.summary["total_return"] == first.summary["total_return"]
+    assert again.summary["order_count"] == first.summary["order_count"]
+    assert _span_stash_parts(snapshot, slots["a"], slots["b"]) == {}
+    assert _span_stash_parts(snapshot, slots["a"], slots["b"], window_start="20240103") == window
+
+    # A window opening on another day is another stream: it must not read this
+    # one's parts, so the opening day is part of the key, not a label on it.
+    monkeypatch.undo()
+    PITDailyEvaluationBackend(tmp_path / "results_other", execution_mode="trusted").evaluate(
+        request, start_day="20240104"
+    )
+    later = _span_stash_parts(snapshot, slots["a"], slots["b"], window_start="20240104")
+    assert later and later != window
+    assert _span_stash_parts(snapshot, slots["a"], slots["b"]) == {}
 
 
 def test_a_span_holds_one_decoded_slot_at_a_time(
