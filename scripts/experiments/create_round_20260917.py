@@ -19,9 +19,10 @@ Two things about that order are decisions rather than accidents:
 it shares an information family with `alpha158_lgbm_20260921`, which is still
 running, and the three open arms ahead of it take a slot that frees early for an
 unconstrained search. The open seeds appended below it were appended after it had
-been created, so none of them delayed it; the slot reserved between
-`open_research_20260917d` and `open_research_20260917e` is where the thesis arm
-`sleeve_blend_20260918` goes, ahead of the two open seeds behind it.
+been created, so none of them delayed it. `sleeve_blend_20260918` was inserted
+between `open_research_20260917d` and `open_research_20260917e` rather than
+appended: it registers the one lever measured to lift the information ratio, and
+an open seed is cheap to keep waiting.
 
 `open_research_20260917` and its `b`, `c`, `d`, `e` and `f` seeds are six
 independent seeds of one search, not six variants of one design: they share a
@@ -51,6 +52,16 @@ main candidate, so the two cross-check each other.
 step of the one construction whose research-period information ratio passes 1:
 fifteen seats filled inside industry and size buckets rather than taken off the
 whole ranking.
+
+`sleeve_blend_20260918` registers THE DENOMINATOR of the information ratio, not
+another ranking score: two long-only legs whose residuals are nearly orthogonal,
+held in one account at fixed capital weights. Every book this repository has
+measured reads a residual tracking error of 12.3-15.7 %/yr against an alpha of
+7-12 %/yr, and about half of that tracking error is a component three unrelated
+signals share, so the arm buys the denominator instead of hunting alpha. Its
+`c_pv` control is the better leg alone, and `c_wide30` is the shape the open
+pack's closed table bans -- one score spread over thirty names -- which ends the
+arm if it wins.
 
 The six open arms register NO FAMILY. Each looks for a long-only 15-30 name
 daily strategy on the research period under the refreshed evidence standard of
@@ -156,6 +167,8 @@ The four arms created before the amendment were sent the pre-amendment
 directive, which their `hitl/params.json` keeps as the record of what they were
 told; each was given the new numbers through an operator message and reads the
 amended pack text in `refs/` after its restart.
+
+- sleeve_blend_20260918: sleeve 乙是 `alpha158_lgbm_20260921` 的研究节点 `valid_009`，而那条臂的前推与 Held-out 裁决运营方已经读过，它**冻结**的还是另一个更弱、在前推下界上失败的节点。这里的选择只用了研究期读数——967 个研究期交易日上的残差相关 0.561、两条腿的研究期 α、逐年符号、以及一次研究期内的权重扫描——前推知识没有改动任何数据集、节奏、篮子大小、池底或权重。但仍然成立的是：这个家族承自一条其早期选择用过研究期之后行的谱系，而本臂逐字复用了那条谱系的分数，**所以它的前推裁决部分地是一次流水线校准，不是独立证据**。本包因此写成这样一个样子：它的研究期问题——两条残差相关 0.56 的 sleeve 能不能买到恒等式预测的那点跟踪误差、代价是多少佣金——不依赖前推裁决也能成立。敞口预算与「四年逐年为正」这两条是在运营方看过两次前推裁决之后的更早一轮里定下的，两者都能只用研究期读数复现，本包原样沿用。**本包里没有任何东西是因为 2025-06-30 之后发生的事而选的。**
 
 Standards amendment, 2026-09-17, to the open pack only; the gates themselves are
 unchanged. Two changes, decided from the three ended open seeds' own
@@ -340,9 +353,20 @@ ARMS: dict[str, dict[str, object]] = {
             "日频价量排序器与序列网络。预算用尽前仍没有候选满足提名条件时以 no_edge 结束。"
         ),
     },
-    # The thesis arm `sleeve_blend_20260918` belongs here, ahead of the two open
-    # seeds below: it registers the one lever measured to lift the information
-    # ratio, and an open seed is cheap to keep waiting.
+    "sleeve_blend_20260918": {
+        "workspace_reference": "configs/workspace_refs/sleeve_blend_20260918",
+        "research_directive": (
+            "本臂是固定方向的臂，登记的机制是信息比率的分母，不是又一个排序分数：把两条残差近乎正交的"
+            "只做多腿按固定资金权重装进同一个账户——不训练的四腿秩复合（月度复核、池内流通市值下限）"
+            "与一条借来的、固定不动的日频量价学习型排序器（周度复核）——检验合成买到的是跟踪误差，"
+            "还是只是一次「挑错腿」的对冲。三个对照必须同批同跨度跑：较好那条腿单独的 c_pv（机制归因）、"
+            "另一条腿单独的 c_comp、同一分数铺到 30 只的 c_wide30（这正是禁止表关掉的形状，它赢了就关臂）。"
+            "判据看完整研究期的信息比率与最大回撤，并把 30 个持仓上最低佣金的抬升当作硬约束——提名硬门、"
+            "变体轴与本臂终止规则只以 refs/families.md 为准，先读它与 refs/README.md。会话开始时 output/ "
+            "就是 refs/starter 这份代码，先 smoke_backtest，再按 refs/exploration-plan.md 做完整研究期"
+            "验证。没有候选满足提名硬门时按 families.md 以 no_edge 结束，不换家族。"
+        ),
+    },
     "open_research_20260917e": {
         "workspace_reference": "configs/workspace_refs/open_research_20260917",
         "research_directive": (
