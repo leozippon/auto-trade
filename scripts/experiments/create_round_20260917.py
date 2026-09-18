@@ -15,16 +15,19 @@ many running slots are free, skips the arms it has already created and creates
 the next pending ones in the order written here; the operator keeps the slots
 occupied by appending arms and their reference packs to the end of the list.
 Two things about that order are decisions rather than accidents:
-`pv_exposure_budget_20260917` is last because it shares an information family
-with `alpha158_lgbm_20260921`, which is still running, and the three open arms
-sit ahead of it so that a slot freeing early goes to an unconstrained search.
+`pv_exposure_budget_20260917` is last of the arms the round opened with because
+it shares an information family with `alpha158_lgbm_20260921`, which is still
+running, and the three open arms ahead of it take a slot that frees early for an
+unconstrained search. The open seeds appended below it were appended after it had
+been created, so nothing waits behind it.
 
-`open_research_20260917`, `open_research_20260917b` and `open_research_20260917c`
-are three independent seeds of one search, not three variants of one design:
-they share a single reference pack and a single directive and differ only in
-their experiment id, because what an open session finds depends on which branch
-it takes first. The pack names none of them, so each session reads as the only
-one.
+`open_research_20260917` and its `b`, `c`, `d` and `e` seeds are five
+independent seeds of one search, not five variants of one design: they share a
+single reference pack and a single directive and differ only in their experiment
+id, because what an open session finds depends on which branch it takes first.
+The pack names none of them, so each session reads as the only one. `d` and `e`
+were appended once `b` and `c` had ended `no_edge` and the queue had run dry:
+they run under the same pack and the same standards, unchanged.
 
 What `lowvol_bucketed_20260917` registers is a CONSTRUCTION, not a data face. Its ranking column
 -- 60-day residual volatility -- is the one the sibling arm
@@ -44,7 +47,7 @@ step of the one construction whose research-period information ratio passes 1:
 fifteen seats filled inside industry and size buckets rather than taken off the
 whole ranking.
 
-The three open arms register NO FAMILY. Each looks for a long-only 15-30 name
+The five open arms register NO FAMILY. Each looks for a long-only 15-30 name
 daily strategy on the research period under the refreshed evidence standard of
 its pack -- information ratio 0.95, four of four positive research years, and
 an exposure budget as a hard gate rather than a reading.
@@ -104,8 +107,9 @@ decides how much each forward verdict is worth.
   persist. The pack's own research-period census already shows the screens move two or three names of fifteen,
   and that the audit screen alone moves none.
 
-- open_research_20260917, open_research_20260917b, open_research_20260917c (one
-  shared pack): This direction was queued after the operator had read the forward and Held-out verdicts of both
+- open_research_20260917, open_research_20260917b, open_research_20260917c,
+  open_research_20260917d, open_research_20260917e (one shared pack): This
+  direction was queued after the operator had read the forward and Held-out verdicts of both
   frozen arms. The exposure budget and the 4/4-year condition were added after the reviewer had
   seen both forward verdicts, and the reviewer knows which style reversed. Both are reproducible
   from research-period readings alone: the previous open arm's five full-span validations sat at
@@ -115,9 +119,9 @@ decides how much each forward verdict is worth.
   closure rests on later rows keep the prohibition without the number. No dataset, cadence,
   basket size or mechanism in this pack was chosen because of what happened after 2025-06-30.
 
-  The three open arms share one `workspace_reference` and differ only in their experiment id:
+  The five open arms share one `workspace_reference` and differ only in their experiment id:
   they are independent seeds of a search whose outcome depends on which branch the Agent takes
-  first, not three variants of one design. The pack names none of them and says nothing about
+  first, not five variants of one design. The pack names none of them and says nothing about
   the others, so each session reads as the only one.
 
 - pv_exposure_budget_20260917: 本臂**按设计就是被污染的，它的前推裁决是一次流水线校准，不是独立证据**。这个家族承自旧流程的一个冻结产物，那条谱系的选择用到过研究期之后的数据，运营方已经部分知道它此后的样子，而 `alpha158_lgbm_20260921` 此刻正在同一个前推窗口上跑同一个家族。选择在这里测敞口预算，还是在看过两条冻结产物都因一次规模与板块摆动而前推失败之后做出的。本臂仍能干净回答的是一个研究期问题：在本项目唯一一个研究期信息比率超过 1 的构造上，一层敞口预算要付多少信息比率与换手代价。这个包必须写成「那个答案不依赖前推裁决」的样子。
@@ -281,6 +285,34 @@ ARMS: dict[str, dict[str, object]] = {
             "refs/starter 这份代码，先 smoke_backtest，再按 refs/exploration-plan.md 做完整研究期验证。"
             "本臂的前推裁决只用来校准流水线，交付物是研究期上那个代价读数；没有候选满足提名硬门时按 "
             "families.md 以 no_edge 结束，不换家族。"
+        ),
+    },
+    "open_research_20260917d": {
+        "workspace_reference": "configs/workspace_refs/open_research_20260917",
+        "research_directive": (
+            "本臂是开放方向的臂：不指定机制家族，在研究期上找一个只做多、15–30 只、有经济解释并在组合"
+            "尺度上成立的日频策略。先读 refs/README.md 与 refs/standards.md——证据标准、已关闭家族表、"
+            "每个候选都要比的对照、敞口预算、提名条件与收尾规则只以 standards.md 为准：完整研究期信息"
+            "比率 ≥ 0.95、四个研究年的中性化超额全为正、单一申万一级行业时间加权权重 ≤ 0.30、"
+            "|size_tilt| ≤ 0.70、β ≤ 1.2 都是硬门，空对照只作诊断。筛子与叠加规则和排序分数"
+            "一样是一等候选。每个方向在花任何回放预算之前，必须先离线读出它在 15 只与 30 只上的逐研究年"
+            "组合尺度读数（refs/exploration-plan.md）。refs/starter 的 o1 只是能跑的基线，不是推荐的"
+            "机制：先 smoke_backtest。standards.md 点名禁止的家族不得重开，其中包括 Alpha158 一类的"
+            "日频价量排序器与序列网络。预算用尽前仍没有候选满足提名条件时以 no_edge 结束。"
+        ),
+    },
+    "open_research_20260917e": {
+        "workspace_reference": "configs/workspace_refs/open_research_20260917",
+        "research_directive": (
+            "本臂是开放方向的臂：不指定机制家族，在研究期上找一个只做多、15–30 只、有经济解释并在组合"
+            "尺度上成立的日频策略。先读 refs/README.md 与 refs/standards.md——证据标准、已关闭家族表、"
+            "每个候选都要比的对照、敞口预算、提名条件与收尾规则只以 standards.md 为准：完整研究期信息"
+            "比率 ≥ 0.95、四个研究年的中性化超额全为正、单一申万一级行业时间加权权重 ≤ 0.30、"
+            "|size_tilt| ≤ 0.70、β ≤ 1.2 都是硬门，空对照只作诊断。筛子与叠加规则和排序分数"
+            "一样是一等候选。每个方向在花任何回放预算之前，必须先离线读出它在 15 只与 30 只上的逐研究年"
+            "组合尺度读数（refs/exploration-plan.md）。refs/starter 的 o1 只是能跑的基线，不是推荐的"
+            "机制：先 smoke_backtest。standards.md 点名禁止的家族不得重开，其中包括 Alpha158 一类的"
+            "日频价量排序器与序列网络。预算用尽前仍没有候选满足提名条件时以 no_edge 结束。"
         ),
     },
 }
