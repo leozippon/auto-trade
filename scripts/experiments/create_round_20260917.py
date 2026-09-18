@@ -19,15 +19,20 @@ Two things about that order are decisions rather than accidents:
 it shares an information family with `alpha158_lgbm_20260921`, which is still
 running, and the three open arms ahead of it take a slot that frees early for an
 unconstrained search. The open seeds appended below it were appended after it had
-been created, so nothing waits behind it.
+been created, so none of them delayed it; the slot reserved between
+`open_research_20260917d` and `open_research_20260917e` is where the thesis arm
+`sleeve_blend_20260918` goes, ahead of the two open seeds behind it.
 
-`open_research_20260917` and its `b`, `c`, `d` and `e` seeds are five
-independent seeds of one search, not five variants of one design: they share a
-single reference pack and a single directive and differ only in their experiment
-id, because what an open session finds depends on which branch it takes first.
-The pack names none of them, so each session reads as the only one. `d` and `e`
-were appended once `b` and `c` had ended `no_edge` and the queue had run dry:
-they run under the same pack and the same standards, unchanged.
+`open_research_20260917` and its `b`, `c`, `d`, `e` and `f` seeds are six
+independent seeds of one search, not six variants of one design: they share a
+single reference pack, because what an open session finds depends on which
+branch it takes first. The pack names none of them, so each session reads as the
+only one. The first four carry the same directive byte for byte. `e` and `f`
+carry one extra sentence each -- an opening family to start from -- because the
+three seeds that have ended all started from the pack's starter composite and
+spent their rounds on the same three construction axes. The opening family is
+where a session begins, not where it must stay: the amended standards tell it to
+pivot to the next pre-registered direction while budget remains.
 
 What `lowvol_bucketed_20260917` registers is a CONSTRUCTION, not a data face. Its ranking column
 -- 60-day residual volatility -- is the one the sibling arm
@@ -47,10 +52,12 @@ step of the one construction whose research-period information ratio passes 1:
 fifteen seats filled inside industry and size buckets rather than taken off the
 whole ranking.
 
-The five open arms register NO FAMILY. Each looks for a long-only 15-30 name
+The six open arms register NO FAMILY. Each looks for a long-only 15-30 name
 daily strategy on the research period under the refreshed evidence standard of
 its pack -- information ratio 0.95, four of four positive research years, and
-an exposure budget as a hard gate rather than a reading.
+an exposure budget as a hard gate rather than a reading. `e` and `f` name an
+opening family only to keep two seeds from re-deriving a third seed's closed
+ground.
 
 An arm is one entry of ARMS:
 
@@ -108,8 +115,8 @@ decides how much each forward verdict is worth.
   and that the audit screen alone moves none.
 
 - open_research_20260917, open_research_20260917b, open_research_20260917c,
-  open_research_20260917d, open_research_20260917e (one shared pack): This
-  direction was queued after the operator had read the forward and Held-out verdicts of both
+  open_research_20260917d, open_research_20260917e, open_research_20260917f (one shared pack):
+  This direction was queued after the operator had read the forward and Held-out verdicts of both
   frozen arms. The exposure budget and the 4/4-year condition were added after the reviewer had
   seen both forward verdicts, and the reviewer knows which style reversed. Both are reproducible
   from research-period readings alone: the previous open arm's five full-span validations sat at
@@ -119,10 +126,10 @@ decides how much each forward verdict is worth.
   closure rests on later rows keep the prohibition without the number. No dataset, cadence,
   basket size or mechanism in this pack was chosen because of what happened after 2025-06-30.
 
-  The five open arms share one `workspace_reference` and differ only in their experiment id:
-  they are independent seeds of a search whose outcome depends on which branch the Agent takes
-  first, not five variants of one design. The pack names none of them and says nothing about
-  the others, so each session reads as the only one.
+  The six open arms share one `workspace_reference`: they are independent seeds of a search
+  whose outcome depends on which branch the Agent takes first, not six variants of one design.
+  The pack names none of them and says nothing about the others, so each session reads as the
+  only one.
 
 - pv_exposure_budget_20260917: 本臂**按设计就是被污染的，它的前推裁决是一次流水线校准，不是独立证据**。这个家族承自旧流程的一个冻结产物，那条谱系的选择用到过研究期之后的数据，运营方已经部分知道它此后的样子，而 `alpha158_lgbm_20260921` 此刻正在同一个前推窗口上跑同一个家族。选择在这里测敞口预算，还是在看过两条冻结产物都因一次规模与板块摆动而前推失败之后做出的。本臂仍能干净回答的是一个研究期问题：在本项目唯一一个研究期信息比率超过 1 的构造上，一层敞口预算要付多少信息比率与换手代价。这个包必须写成「那个答案不依赖前推裁决」的样子。
 
@@ -149,6 +156,38 @@ The four arms created before the amendment were sent the pre-amendment
 directive, which their `hitl/params.json` keeps as the record of what they were
 told; each was given the new numbers through an operator message and reads the
 amended pack text in `refs/` after its restart.
+
+Standards amendment, 2026-09-17, to the open pack only; the gates themselves are
+unchanged. Two changes, decided from the three ended open seeds' own
+research-period readings and from an operator-side recomputation over the same
+period. First, the closing rule: a direction closed with budget remaining means
+pivoting to the next pre-registered direction -- offline screen, then one
+full-span batch -- and `no_edge` is the ending only when no direction with a
+plausible prior remains untried or the budget is spent. Second, the
+closed-family table absorbs what `open_research_20260917`, `...b` and `...c`
+closed: the starter's four-leg composite as a direction, the non-equal-weight
+and pool-geometry grids, the slower-than-quarterly cadences, and the first
+seed's bare single legs under the exposure budget. A directional section records
+what the readings say -- tracking error is the binding constraint, more names
+and slower cadence and volatility targeting are falsified, inverse-vol weights
+and an in-pool float-cap floor are real increments, and cross-family blending,
+the one lever measured to lift the information ratio, is registered by a
+separate thesis arm, so an open seed should look for a new orthogonal family
+rather than re-blend the same legs. `open_research_20260917d` was created before
+the amendment and started from the previous text; it was told through one
+operator message and reads the amended pack in `refs/` at its next resume.
+
+Why `e` and `f` open on a named family. All three ended seeds built on the
+starter's four-leg composite and explored the same three axes the pack listed,
+so two of them spent about sixty replay-years re-deriving a sibling's already
+closed ground and both still stopped with most of their budget unspent. `e`
+opens on the vendor order-size money flow (`moneyflow`) as a screen and a
+shaping rule -- the closed-family table closes that face only as a main ranking
+score -- and `f` on the day-end limit-up, unsealing and re-sealing labels
+(`limit_list_d`, `kpl_list`) as pool membership and executability, where the
+table closes the consecutive-limit ladder as a score, not the day-end label face
+as a screen. Both faces are mounted this round and carry row-level
+`available_at`. Neither seed is confined to its opening family.
 
 Usage:
   PYTHONPATH=src ~/miniconda3/envs/quant/bin/python \\
@@ -301,18 +340,34 @@ ARMS: dict[str, dict[str, object]] = {
             "日频价量排序器与序列网络。预算用尽前仍没有候选满足提名条件时以 no_edge 结束。"
         ),
     },
+    # The thesis arm `sleeve_blend_20260918` belongs here, ahead of the two open
+    # seeds below: it registers the one lever measured to lift the information
+    # ratio, and an open seed is cheap to keep waiting.
     "open_research_20260917e": {
         "workspace_reference": "configs/workspace_refs/open_research_20260917",
         "research_directive": (
             "本臂是开放方向的臂：不指定机制家族，在研究期上找一个只做多、15–30 只、有经济解释并在组合"
-            "尺度上成立的日频策略。先读 refs/README.md 与 refs/standards.md——证据标准、已关闭家族表、"
-            "每个候选都要比的对照、敞口预算、提名条件与收尾规则只以 standards.md 为准：完整研究期信息"
-            "比率 ≥ 0.95、四个研究年的中性化超额全为正、单一申万一级行业时间加权权重 ≤ 0.30、"
-            "|size_tilt| ≤ 0.70、β ≤ 1.2 都是硬门，空对照只作诊断。筛子与叠加规则和排序分数"
-            "一样是一等候选。每个方向在花任何回放预算之前，必须先离线读出它在 15 只与 30 只上的逐研究年"
-            "组合尺度读数（refs/exploration-plan.md）。refs/starter 的 o1 只是能跑的基线，不是推荐的"
-            "机制：先 smoke_backtest。standards.md 点名禁止的家族不得重开，其中包括 Alpha158 一类的"
-            "日频价量排序器与序列网络。预算用尽前仍没有候选满足提名条件时以 no_edge 结束。"
+            "尺度上成立的日频策略。判据、已关闭家族表、对照、敞口预算、提名条件与收尾规则只以 "
+            "refs/standards.md 为准（完整研究期信息比率 ≥ 0.95、四个研究年的中性化超额全为正、敞口三项"
+            "都是硬门），先读它与 refs/README.md。开局方向：把供应商分档资金流 moneyflow 当作筛子与"
+            "成形规则——已关闭表关掉的只是它作主排序分数；假说是「涨幅由小单净买撑起、同期大单净流出」"
+            "的名字带的风险不被收益补偿，机制归因对照是不筛。这只是开局：每个方向在花回放预算之前先按 "
+            "refs/exploration-plan.md 做离线筛选，一个方向被证伪而预算还有余量时换下一个预登记方向，"
+            "构造、筛子与新的信息家族都可以开，不要提前以 no_edge 收尾。"
+        ),
+    },
+    "open_research_20260917f": {
+        "workspace_reference": "configs/workspace_refs/open_research_20260917",
+        "research_directive": (
+            "本臂是开放方向的臂：不指定机制家族，在研究期上找一个只做多、15–30 只、有经济解释并在组合"
+            "尺度上成立的日频策略。判据、已关闭家族表、对照、敞口预算、提名条件与收尾规则只以 "
+            "refs/standards.md 为准（完整研究期信息比率 ≥ 0.95、四个研究年的中性化超额全为正、敞口三项"
+            "都是硬门），先读它与 refs/README.md。开局方向：把打板面的日终涨跌停、炸板与回封标签"
+            "（limit_list_d、kpl_list）当作股票池成员资格与可成交性的筛子——已关闭表关掉的是连板梯队"
+            "作排序分数，不是这张日终标签面作筛子；假说是封板与炸板留下的排队痕迹标出一类「买得进、"
+            "卖不掉」的名字，机制归因对照是不筛。这只是开局：每个方向在花回放预算之前先按 "
+            "refs/exploration-plan.md 做离线筛选，一个方向被证伪而预算还有余量时换下一个预登记方向，"
+            "构造、筛子与新的信息家族都可以开，不要提前以 no_edge 收尾。"
         ),
     },
 }
