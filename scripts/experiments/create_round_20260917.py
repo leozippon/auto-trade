@@ -24,16 +24,18 @@ between `open_research_20260917d` and `open_research_20260917e` rather than
 appended: it registers the one lever measured to lift the information ratio, and
 an open seed is cheap to keep waiting.
 
-`open_research_20260917` and its `b`, `c`, `d`, `e` and `f` seeds are six
-independent seeds of one search, not six variants of one design: they share a
+`open_research_20260917` and its `b` through `h` seeds are eight independent
+seeds of one search, not eight variants of one design: they share a
 single reference pack, because what an open session finds depends on which
 branch it takes first. The pack names none of them, so each session reads as the
-only one. The first four carry the same directive byte for byte. `e` and `f`
+only one. The first four carry the same directive byte for byte. `e` through `h`
 carry one extra sentence each -- an opening family to start from -- because the
 three seeds that have ended all started from the pack's starter composite and
-spent their rounds on the same three construction axes. The opening family is
-where a session begins, not where it must stay: the amended standards tell it to
-pivot to the next pre-registered direction while budget remains.
+spent their rounds on the same three construction axes. Each opening family is a
+different data face, and none is one the closed table closes in the form the
+seed is asked to try. The opening family is where a session begins, not where it
+must stay: the amended standards tell it to pivot to the next pre-registered
+direction while budget remains.
 
 What `lowvol_bucketed_20260917` registers is a CONSTRUCTION, not a data face. Its ranking column
 -- 60-day residual volatility -- is the one the sibling arm
@@ -63,12 +65,11 @@ signals share, so the arm buys the denominator instead of hunting alpha. Its
 pack's closed table bans -- one score spread over thirty names -- which ends the
 arm if it wins.
 
-The six open arms register NO FAMILY. Each looks for a long-only 15-30 name
+The eight open arms register NO FAMILY. Each looks for a long-only 15-30 name
 daily strategy on the research period under the refreshed evidence standard of
 its pack -- information ratio 0.95, four of four positive research years, and
-an exposure budget as a hard gate rather than a reading. `e` and `f` name an
-opening family only to keep two seeds from re-deriving a third seed's closed
-ground.
+an exposure budget as a hard gate rather than a reading. `e` through `h` name an
+opening family only to keep the seeds from re-deriving a sibling's closed ground.
 
 An arm is one entry of ARMS:
 
@@ -126,7 +127,8 @@ decides how much each forward verdict is worth.
   and that the audit screen alone moves none.
 
 - open_research_20260917, open_research_20260917b, open_research_20260917c,
-  open_research_20260917d, open_research_20260917e, open_research_20260917f (one shared pack):
+  open_research_20260917d, open_research_20260917e, open_research_20260917f,
+  open_research_20260917g, open_research_20260917h (one shared pack):
   This direction was queued after the operator had read the forward and Held-out verdicts of both
   frozen arms. The exposure budget and the 4/4-year condition were added after the reviewer had
   seen both forward verdicts, and the reviewer knows which style reversed. Both are reproducible
@@ -137,8 +139,8 @@ decides how much each forward verdict is worth.
   closure rests on later rows keep the prohibition without the number. No dataset, cadence,
   basket size or mechanism in this pack was chosen because of what happened after 2025-06-30.
 
-  The six open arms share one `workspace_reference`: they are independent seeds of a search
-  whose outcome depends on which branch the Agent takes first, not six variants of one design.
+  The eight open arms share one `workspace_reference`: they are independent seeds of a search
+  whose outcome depends on which branch the Agent takes first, not eight variants of one design.
   The pack names none of them and says nothing about the others, so each session reads as the
   only one.
 
@@ -201,6 +203,21 @@ score -- and `f` on the day-end limit-up, unsealing and re-sealing labels
 table closes the consecutive-limit ladder as a score, not the day-end label face
 as a screen. Both faces are mounted this round and carry row-level
 `available_at`. Neither seed is confined to its opening family.
+
+`g` and `h` were appended when `event_screens_20260917` and
+`lowvol_bucketed_20260917` ended `no_edge` and the queue ran dry behind
+`sleeve_blend_20260918`, and the same closed-table reading picked their families.
+`g` opens on future share-unlock supply (`share_float_complete`) as a
+cross-sectional ranking score, where the table now closes that face only as pool
+membership -- the exclusion form moved two to four names a rebalance and lost to
+a random-exclusion placebo, and the ranking form has never been measured. `h`
+opens on the company's own guidance and express reports (`forecast_vip`,
+`express_vip`) as a downgrade and loss-warning exclusion screen, where the table
+closes sell-side consensus surprise as a ranking score; the self-disclosed face
+covers far more of the market than sell-side coverage does and has never been
+read as a screen. The open pack's field map now also carries the unlock face's
+double-counting rule, which a per-row sum reads as up to 169.9 % of shares
+outstanding.
 
 Usage:
   PYTHONPATH=src ~/miniconda3/envs/quant/bin/python \\
@@ -392,6 +409,36 @@ ARMS: dict[str, dict[str, object]] = {
             "卖不掉」的名字，机制归因对照是不筛。这只是开局：每个方向在花回放预算之前先按 "
             "refs/exploration-plan.md 做离线筛选，一个方向被证伪而预算还有余量时换下一个预登记方向，"
             "构造、筛子与新的信息家族都可以开，不要提前以 no_edge 收尾。"
+        ),
+    },
+    "open_research_20260917g": {
+        "workspace_reference": "configs/workspace_refs/open_research_20260917",
+        "research_directive": (
+            "本臂是开放方向的臂：不指定机制家族，在研究期上找一个只做多、15–30 只、有经济解释并在组合"
+            "尺度上成立的日频策略。判据、已关闭家族表、对照、敞口预算、提名条件与收尾规则只以 "
+            "refs/standards.md 为准（完整研究期信息比率 ≥ 0.95、四个研究年的中性化超额全为正、敞口三项"
+            "都是硬门），先读它与 refs/README.md。开局方向：把未来解禁供给（share_float_complete）做成"
+            "一条截面排序分数与保留带，而不是排除筛子——已关闭表关掉的是它作池的成员资格（每次复核只换"
+            "两三只名字、还输给随机排除的安慰剂），排序形态从来没有被量过；假说是解禁公告与实际上市流通"
+            "之间的供给压力没有被充分定价，持有压力最轻的一端。可见时点与那张面的重复计数规则先读 "
+            "refs/pit-field-map.md，机制归因对照是同一个池不按它排序。这只是开局：每个方向在花回放预算"
+            "之前先按 refs/exploration-plan.md 做离线筛选，一个方向被证伪而预算还有余量时换下一个预登记"
+            "方向，构造、筛子与新的信息家族都可以开，不要提前以 no_edge 收尾。"
+        ),
+    },
+    "open_research_20260917h": {
+        "workspace_reference": "configs/workspace_refs/open_research_20260917",
+        "research_directive": (
+            "本臂是开放方向的臂：不指定机制家族，在研究期上找一个只做多、15–30 只、有经济解释并在组合"
+            "尺度上成立的日频策略。判据、已关闭家族表、对照、敞口预算、提名条件与收尾规则只以 "
+            "refs/standards.md 为准（完整研究期信息比率 ≥ 0.95、四个研究年的中性化超额全为正、敞口三项"
+            "都是硬门），先读它与 refs/README.md。开局方向：把公司自己披露的业绩预告与快报"
+            "（forecast_vip、express_vip）做成一个下修与亏损预警的排除筛子——已关闭表关掉的是卖方一致"
+            "预期的盈利意外作排序分数，不是这张自披露面作筛子；假说是负面自披露之后仍有持续的下行风险"
+            "不被收益补偿，而自披露的覆盖面远宽于卖方覆盖。淡季没有新公告时的持仓政策要写在代码里，"
+            "机制归因对照是不筛。这只是开局：每个方向在花回放预算之前先按 refs/exploration-plan.md 做"
+            "离线筛选，一个方向被证伪而预算还有余量时换下一个预登记方向，构造、筛子与新的信息家族都"
+            "可以开，不要提前以 no_edge 收尾。"
         ),
     },
 }
