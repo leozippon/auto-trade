@@ -313,6 +313,19 @@ def freeze_gate(
     }
 
 
+# Refit the draws in batches holding at most this many bytes of resampled rows.
+# Every reduction in ``_fit`` runs within one draw, so the batched bound is the
+# same float as a single batch; only the peak footprint differs. It has to: one
+# batch of all 2,000 draws is a ~12 MB resample plus ~25 MB of elementwise
+# temporaries, and blocks that large are handed back to the kernel when freed,
+# so every verdict faults them in again. On a loaded host that fault path costs
+# far more than the arithmetic it feeds -- 30 forward bootstraps measured 0.9 s
+# of user time against 108 s of system time. Staying under glibc's default
+# 128 KiB mmap/trim threshold keeps the batch inside the allocator's arena,
+# where it is reused instead: the same 30 bootstraps then take 0.7 s in total.
+_BOOTSTRAP_BATCH_BYTES = 128 * 1024
+
+
 def _bootstrap_lower_bound(rows: np.ndarray, seed_key: str) -> float:
     """One-sided ``FORWARD_CONFIDENCE`` lower bound of the annualised intercept.
 
@@ -320,7 +333,8 @@ def _bootstrap_lower_bound(rows: np.ndarray, seed_key: str) -> float:
     blocks of ``BOOTSTRAP_BLOCK_DAYS`` consecutive days, the regression refit
     on each, the bound read as the percentile. The generator is seeded from a
     SHA-256 of ``seed_key`` (the frozen artifact id), so one artifact always
-    gets the same bound.
+    gets the same bound. The refits run in batches of ``_BOOTSTRAP_BATCH_BYTES``
+    worth of draws, which does not move the bound.
     """
 
     days = len(rows)
@@ -336,10 +350,13 @@ def _bootstrap_lower_bound(rows: np.ndarray, seed_key: str) -> float:
     starts = generator.integers(
         0, days - BOOTSTRAP_BLOCK_DAYS + 1, size=(BOOTSTRAP_DRAWS, blocks)
     )
-    index = (starts[:, :, None] + np.arange(BOOTSTRAP_BLOCK_DAYS)).reshape(
-        BOOTSTRAP_DRAWS, -1
-    )[:, :days]
-    intercepts, _market, _size = _fit(rows[index])
+    offsets = np.arange(BOOTSTRAP_BLOCK_DAYS)
+    batch = max(1, _BOOTSTRAP_BATCH_BYTES // (days * rows.shape[1] * rows.itemsize))
+    intercepts = np.empty(BOOTSTRAP_DRAWS)
+    for first in range(0, BOOTSTRAP_DRAWS, batch):
+        drawn = starts[first : first + batch]
+        index = (drawn[:, :, None] + offsets).reshape(len(drawn), -1)[:, :days]
+        intercepts[first : first + len(drawn)] = _fit(rows[index])[0]
     return (
         float(np.quantile(intercepts, 1.0 - FORWARD_CONFIDENCE)) * TRADING_DAYS_PER_YEAR
     )

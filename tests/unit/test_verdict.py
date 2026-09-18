@@ -113,7 +113,7 @@ def test_statistics_match_the_style_regression():
     )
 
 
-def test_bootstrap_bound_is_fixed_by_the_artifact_id():
+def test_bootstrap_bound_is_fixed_by_the_artifact_id(monkeypatch):
     rng = np.random.default_rng(12)
     analysis = _analysis(_segment(FORWARD_DAYS, 0.05, rng))
 
@@ -121,6 +121,12 @@ def test_bootstrap_bound_is_fixed_by_the_artifact_id():
     assert _forward(analysis, seed_key="artifact-1")["lower_bound"] == first
     assert _forward(analysis, seed_key="artifact-2")["lower_bound"] != first
     assert first < window_neutralized_excess(analysis)
+
+    # The refits are batched only to bound the resample's footprint, and every
+    # reduction stays inside one draw, so the batch size must not move a frozen
+    # artifact's bound by even one ULP. One draw per batch is the extreme.
+    monkeypatch.setattr(verdict, "_BOOTSTRAP_BATCH_BYTES", 1)
+    assert _forward(analysis, seed_key="artifact-1")["lower_bound"] == first
 
 
 def test_forward_pass_rates_match_the_design_simulation():
