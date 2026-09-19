@@ -42,6 +42,35 @@ class CronInstallerTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "differs from requested content"):
             installer.verify_installed_crontab(expected, expected.replace("unrelated", "changed"))
 
+    def test_the_weekly_sweep_chains_the_jobs_that_must_follow_it(self) -> None:
+        """The audit and the PIT rebuild that follow the weekly fundamental
+        sweep are sequenced by the sweep itself, not by a clock. On 2026-09-19
+        the sweep held the updater lock for four hours and all three
+        follow-ups, then scheduled 60-90 minutes after it, died on lock
+        timeout: a generation was committed with sweep-mutated fundamentals,
+        no rebuilt PIT events and no audit."""
+        follow_ups = ["cn_weekly_deep_audit", "cn_nightly_full_audit", "cn_nightly_pit_event_build"]
+        lines = [
+            line
+            for line in installer.TEMPLATE.read_text(encoding="utf-8").splitlines()
+            if line[:1].isdigit()
+        ]
+        saturday = [line for line in lines if line.split()[4] == "6"]
+        chained = [line for line in saturday if "--job cn_weekly_fundamental_deep" in line]
+        self.assertEqual(len(chained), 1)
+        fields = chained[0].split()
+        self.assertEqual(
+            [fields[index + 1] for index, field in enumerate(fields) if field == "--then"],
+            follow_ups,
+        )
+        # Nothing follows the sweep on a clock of its own any more, and the
+        # runner forces a follow-up because it follows a mutation.
+        for line in saturday:
+            if line is not chained[0]:
+                for job in follow_ups:
+                    self.assertNotIn(job, line)
+            self.assertNotIn("--force-run", line)
+
     def test_the_paper_block_installs_beside_the_tushare_block(self) -> None:
         template, begin, end = installer.BLOCKS["paper"]
         tushare = installer.build_managed_block()

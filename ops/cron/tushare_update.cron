@@ -101,17 +101,20 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 
 # Weekly deep sweeps (Saturday, market closed; end date resolves to Friday):
 # slow-moving per-code reference loops and the 90-day fundamental/dividend
-# correction window, moved off the nightly critical path. The 15:30 deep audit
-# re-fetches a large historical sample across the daily/board/flat-event tiers
-# and diffs it against the lake, so a massive retroactive vendor update is
-# caught within a week instead of waiting for the nightly 12-date sample.
+# correction window, moved off the nightly critical path.
 35 12 * * 6 cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_weekly_reference_deep
-0 14 * * 6 cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_weekly_fundamental_deep
-30 15 * * 6 cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_weekly_deep_audit
 
-# The deep sweeps mutate raw fundamentals AFTER Saturday's 02:30 audit and
-# 03:35 PIT rebuild, and Sunday/Monday nightly invocations skip (unchanged
-# trading window). These forced Saturday-evening runs are the audit and PIT
-# rebuild that follow the sweeps, keeping "audit follows mutation" intact.
-30 16 * * 6 cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_full_audit --force-run
-45 17 * * 6 cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_pit_event_build --force-run
+# The fundamental sweep mutates raw fundamentals AFTER Saturday's 02:30 audit
+# and 03:35 PIT rebuild, and Sunday/Monday nightly invocations skip (unchanged
+# trading window), so the deep audit, the full audit and the PIT rebuild have
+# to run again once the sweep is done. --then runs them in that order in the
+# same invocation, each taking and releasing the updater lock on its own, so
+# "audit follows mutation" holds by construction: the 2026-09-19 sweep ran for
+# four hours and all three, then scheduled 90 minutes apart, died on lock
+# timeout. The deep audit re-fetches a large historical sample across the
+# daily/board/flat-event tiers and diffs it against the lake, so a massive
+# retroactive vendor update is caught within a week instead of waiting for the
+# nightly 12-date sample. A sweep that fails skips all three (its failure
+# fences the lake; rerun the sweep itself), a follow-up that fails does not
+# stop the next one, and the invocation exits non-zero either way.
+0 14 * * 6 cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_weekly_fundamental_deep --then cn_weekly_deep_audit --then cn_nightly_full_audit --then cn_nightly_pit_event_build

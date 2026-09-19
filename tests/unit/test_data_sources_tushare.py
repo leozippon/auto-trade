@@ -2685,6 +2685,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             end_date="20260712",
             dry_run=False,
             force_run=False,
+            then=[],
         )
         jobs_root = self.root / "runtime" / "jobs"
         with (
@@ -2742,6 +2743,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             end_date="20260713",
             dry_run=False,
             force_run=False,
+            then=[],
         )
 
         class FakeLock:
@@ -2804,6 +2806,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             end_date=end_date,
             dry_run=False,
             force_run=False,
+            then=[],
         )
 
         class FakeLock:
@@ -2940,6 +2943,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             end_date="20260713",
             dry_run=False,
             force_run=False,
+            then=[],
         )
 
         class FakeLock:
@@ -6099,6 +6103,7 @@ class CronFailureRecordingTest(unittest.TestCase):
             config=str(config_path), job="evening",
             start_date="20260623", end_date="20260723",
             dry_run=False, force_run=False,
+            then=[],
         )
 
     def tearDown(self) -> None:
@@ -6151,6 +6156,132 @@ class CronFailureRecordingTest(unittest.TestCase):
         generation = json.loads((self.raw_dir / ".raw_generation.json").read_text(encoding="utf-8"))
         self.assertEqual(generation["state"], "dirty")
 
+
+
+class CronFollowUpChainTest(unittest.TestCase):
+    """A job that mutates the lake and the jobs that must follow it run as one
+    invocation.
+
+    On 2026-09-19 the weekly fundamental sweep held the updater lock from
+    06:13Z to 10:15Z and all three follow-ups, scheduled 60-90 minutes after
+    it, died on lock timeout: the generation was committed with sweep-mutated
+    fundamentals, no rebuilt PIT events and no audit. The chain has to hold by
+    construction -- follow-ups start when the primary is done, each takes the
+    lock itself, and one failure never starves the next step."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.raw_dir = self.root / "raw"
+        self.raw_dir.mkdir(parents=True)
+        cron_update.write_raw_generation(self.raw_dir)
+        self.jobs_root = self.root / "runtime" / "jobs"
+        self.config_path = self.root / "schedule.json"
+        self.config_path.write_text(json.dumps({
+            "schema_version": 1,
+            "timezone": "Asia/Shanghai",
+            "repo_root": str(self.root),
+            "python": "/env/python",
+            "default_raw_dir": "raw",
+            "default_start_date": "20200101",
+            "jobs": {
+                # The sweep mutates; its audits only read.
+                "sweep": {"operation": "update"},
+                "deep_audit": {"operation": "revision_sentinel"},
+                "rebuild": {"operation": "revision_sentinel"},
+            },
+        }), encoding="utf-8")
+        self.locks = {"acquired": 0, "released": 0}
+        self.ran: list[str] = []
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _args(self, then: list[str]) -> argparse.Namespace:
+        return argparse.Namespace(
+            config=str(self.config_path), job="sweep",
+            start_date="20260601", end_date="20260919",
+            dry_run=False, force_run=False, then=then,
+        )
+
+    def _lock(self, name: str, wait_seconds: int):
+        chain = self
+        self.locks["acquired"] += 1
+
+        class _CountedLock:
+            fd = 7
+
+            def release(self) -> None:
+                chain.locks["released"] += 1
+
+        return _CountedLock()
+
+    def _run_main(self, then: list[str], codes: dict[str, int] | None = None) -> int:
+        codes = codes or {}
+
+        def fake_run_update(ctx, commands, log_path, lock_fd=None):
+            # The lock must be held while a step works and released before the
+            # next one starts.
+            self.assertEqual(self.locks["acquired"] - self.locks["released"], 1)
+            self.ran.append(ctx.job_name)
+            return codes.get(ctx.job_name, 0)
+
+        with (
+            patch.object(cron_update, "parse_args", return_value=self._args(then)),
+            patch.object(cron_update.os, "chdir"),
+            patch.object(cron_update, "prune_run_logs"),
+            patch.object(cron_update, "JOB_STATE_ROOT", self.jobs_root),
+            patch.object(cron_update, "RUN_LOG_ROOT", self.root / "logs" / "cron"),
+            patch.object(cron_update, "acquire_lock", side_effect=self._lock),
+            patch.object(cron_update, "run_update", side_effect=fake_run_update),
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            code = cron_update.main()
+        self.output = output.getvalue()
+        return code
+
+    def test_follow_ups_run_in_order_and_ignore_their_own_already_ok_state(self) -> None:
+        self.assertEqual(self._run_main(["deep_audit", "rebuild"]), 0)
+        self.assertEqual(self.ran, ["sweep", "deep_audit", "rebuild"])
+        # Three steps, three lock acquisitions, none held between them.
+        self.assertEqual(self.locks, {"acquired": 3, "released": 3})
+        for job in ("sweep", "deep_audit", "rebuild"):
+            record = json.loads((self.jobs_root / f"{job}.json").read_text(encoding="utf-8"))
+            self.assertEqual(record["status"], "ok")
+
+        # A second invocation: the primary skips on its own ok state, but a
+        # follow-up exists because the lake changed under it, so it is forced.
+        self.ran.clear()
+        self.assertEqual(self._run_main(["deep_audit", "rebuild"]), 0)
+        self.assertEqual(self.ran, ["deep_audit", "rebuild"])
+
+    def test_a_failing_follow_up_does_not_starve_the_ones_after_it(self) -> None:
+        # An audit reports findings through a non-zero exit; the PIT rebuild
+        # behind it must still run, and the invocation must still fail loudly.
+        self.assertEqual(self._run_main(["deep_audit", "rebuild"], {"deep_audit": 1}), 1)
+        self.assertEqual(self.ran, ["sweep", "deep_audit", "rebuild"])
+        reported = [json.loads(line) for line in self.output.splitlines()]
+        failed = [item for item in reported if item.get("follow_up") == "deep_audit"]
+        self.assertEqual(failed[-1]["status"], "error")
+        self.assertEqual(failed[-1]["after"], "sweep")
+
+    def test_a_failed_primary_leaves_its_follow_ups_unrun(self) -> None:
+        self.assertEqual(self._run_main(["deep_audit", "rebuild"], {"sweep": 1}), 1)
+        self.assertEqual(self.ran, ["sweep"])
+        skipped = [
+            json.loads(line)
+            for line in self.output.splitlines()
+            if json.loads(line).get("status") == "follow_ups_skipped"
+        ]
+        self.assertEqual(skipped[0]["follow_ups"], ["deep_audit", "rebuild"])
+        # The failure fenced the lake; the recovery is to rerun this same job.
+        generation = json.loads((self.raw_dir / ".raw_generation.json").read_text(encoding="utf-8"))
+        self.assertEqual(generation["state"], "dirty")
+
+    def test_an_unknown_follow_up_is_refused_before_the_primary_runs(self) -> None:
+        with self.assertRaisesRegex(KeyError, "unknown --then job"):
+            self._run_main(["deep_audit", "typo"])
+        self.assertEqual(self.ran, [])
 
 
 class FailureSummaryTest(unittest.TestCase):

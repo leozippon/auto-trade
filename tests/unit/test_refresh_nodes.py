@@ -102,6 +102,11 @@ TIER_DATASETS = {
 _CRON_LINE = re.compile(r"^\s*(\d{1,2})\s+(\d{1,2})\s+\*\s+\*\s+[\d*/,-]+\s+.*--job\s+(\S+)")
 
 
+# A job chained to the line of the job it must follow: it starts when that one
+# has finished, so it is installed but has no clock launch of its own.
+_CRON_FOLLOW_UP = re.compile(r"--then\s+(\S+)")
+
+
 def _crontab_job_times() -> dict[str, time]:
     times: dict[str, time] = {}
     for line in CRONTAB.read_text(encoding="utf-8").splitlines():
@@ -111,6 +116,15 @@ def _crontab_job_times() -> dict[str, time]:
             launch = time(hour, minute)
             times[name] = min(times.get(name, launch), launch)
     return times
+
+
+def _crontab_follow_up_jobs() -> set[str]:
+    return {
+        name
+        for line in CRONTAB.read_text(encoding="utf-8").splitlines()
+        if _CRON_LINE.match(line)
+        for name in _CRON_FOLLOW_UP.findall(line)
+    }
 
 
 class RefreshNodeDriftGuardTest(unittest.TestCase):
@@ -188,7 +202,7 @@ class RefreshNodeDriftGuardTest(unittest.TestCase):
     def test_every_landing_job_has_a_node(self) -> None:
         # The crontab and the JSON schedule must list the same jobs, and every job
         # that lands data (not audit-only) must have a Timeview refresh node.
-        cron_jobs = set(_crontab_job_times())
+        cron_jobs = set(_crontab_job_times()) | _crontab_follow_up_jobs()
         schedule_jobs = _cron_jobs()
         self.assertEqual(
             cron_jobs,

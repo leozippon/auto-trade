@@ -68,6 +68,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--end-date", help="Override update end date. Defaults to job offset from current Asia/Shanghai date.")
     parser.add_argument("--dry-run", action="store_true", help="Print the computed command without running it.")
     parser.add_argument("--force-run", action="store_true", help="Run even if this job/date already has an ok state.")
+    parser.add_argument(
+        "--then",
+        action="append",
+        default=[],
+        metavar="JOB",
+        help="Job that must run once --job has finished; repeatable, run in the order given. Each one takes the updater lock on its own and runs forced. Skipped when --job did not succeed.",
+    )
     return parser.parse_args()
 
 
@@ -1018,8 +1025,69 @@ def _run(args: argparse.Namespace) -> int:
         lock.release()
 
 
+def run_follow_ups(args: argparse.Namespace) -> int:
+    """Run every ``--then`` job in order, each as its own locked run.
+
+    A job that mutates the lake and the audit and PIT rebuild that must follow
+    it used to be separate cron lines 60-90 minutes apart. On 2026-09-19 the
+    weekly fundamental sweep held the updater lock for four hours and all
+    three of its follow-ups died waiting for it, so a generation was committed
+    with sweep-mutated fundamentals, no rebuilt PIT events and no audit.
+    Sequencing them here makes "audit follows mutation" hold by construction
+    rather than by clock arithmetic: the follow-up starts when the primary job
+    has finished and released the lock, and takes the lock itself, so nothing
+    is held between steps.
+
+    A follow-up is forced because it exists in answer to a mutation: its own
+    same-day ``ok`` state describes the lake as it was before. One that fails
+    -- an audit reports its findings through a non-zero exit -- must not
+    starve the ones after it, which is the failure this whole chain exists to
+    prevent, so each step is run and reported and the chain returns the first
+    failure.
+    """
+    outcome = 0
+    for job_name in args.then:
+        step = argparse.Namespace(**{**vars(args), "job": job_name, "then": [], "force_run": True})
+        error = ""
+        try:
+            code = _run(step)
+        except Exception as exc:  # noqa: BLE001 - one step must not starve the rest
+            code, error = 1, str(exc)[:1000]
+        record = {
+            "status": "ok" if code == 0 else "error",
+            "follow_up": job_name,
+            "after": args.job,
+            "returncode": code,
+        }
+        if error:
+            record["error"] = error
+        print(json.dumps(record, ensure_ascii=False))
+        outcome = outcome or code
+    return outcome
+
+
 def main() -> int:
-    return _run(parse_args())
+    args = parse_args()
+    if args.then:
+        # A mistyped follow-up must fail now, not after a four-hour primary.
+        jobs = load_config(Path(args.config)).get("jobs", {})
+        unknown = sorted(name for name in args.then if name not in jobs)
+        if unknown:
+            raise KeyError(f"unknown --then job(s) {unknown}; available={sorted(jobs)}")
+    returncode = _run(args)
+    if not args.then:
+        return returncode
+    if returncode != 0:
+        # Nothing was committed, so nothing has to follow: the failure already
+        # fenced the lake, and the recovery is to rerun this same job.
+        print(json.dumps({
+            "status": "follow_ups_skipped",
+            "after": args.job,
+            "returncode": returncode,
+            "follow_ups": args.then,
+        }, ensure_ascii=False))
+        return returncode
+    return run_follow_ups(args)
 
 
 if __name__ == "__main__":
