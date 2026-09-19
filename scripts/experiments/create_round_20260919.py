@@ -60,21 +60,32 @@ decides how much each forward verdict is worth.
   readings only, and explicitly permits reopening any of them inside the new
   universe with a pre-registration.
 
-One decision is still the operator's, and both arms run with it open. The
-exposure budget's `|size_tilt| <= 0.70` cannot be satisfied by ANY book built
-inside the CSI 300, because `size_tilt` is the holding-weighted whole-market cap
-rank and the constituents ARE the largest names in that market: measured on the
-research-year decision views, an equal-weight all-constituent book reads 0.906 /
-0.922 / 0.929, the nine sandbox smoke legs read 0.893-0.954 — both zero-skill
-controls included — and even a book of the fifteen smallest constituents reads
-0.628-0.673. So on this universe the gate rejects every candidate, carries no
-information about any of them, and inverts: the only way under it is the
-small-cap corner of the index, which is what the gate exists to stop. The pack
-does not touch an operator-set gate: it states the gate verbatim, requires the
-candidate's and both controls' `size_tilt` to be reported side by side every
-round, and forbids closing the arm on that gate alone. Ruling wanted, and the
-evidence supports a same-batch relative form (candidate within +/-0.10 of
-`c_rand`) that keeps what the gate was for; the pack names it as NOT in force.
+Exposure-budget amendment, 2026-09-19, this pack only. The absolute
+`|size_tilt| <= 0.70` was calibrated on the all-market pool. Inside the CSI 300
+it measures the universe rather than the book, because `size_tilt` is the
+holding-weighted whole-market cap rank and the constituents ARE the largest
+names in that market: on the research-year decision views an equal-weight
+all-constituent book reads 0.906 / 0.922 / 0.929, the nine sandbox smoke legs
+read 0.893-0.954 — both zero-skill controls included — and only a book of the
+fifteen smallest constituents falls under (0.628-0.673), which is the very bet
+the gate exists to stop. So it could not discriminate and would have made
+nomination impossible.
+
+The operator therefore replaced it, for this pack alone, with a same-batch
+relative form: a candidate's `size_tilt` must lie within +/-0.10 of the same
+batch's `c_rand` control, `benchmark.size_beta` (the loading the neutralization
+divides out, Agent-visible since `eb0b19a`) is reported beside it for the
+candidate and BOTH controls, and `top_industry_weight <= 0.30` and `beta <= 1.2`
+are unchanged. Decided from the smoke evidence BEFORE either arm had run a
+full-span batch, so no candidate reading influenced it. Every other pack keeps
+the absolute gate: their universe is the whole market, where `size_tilt` really
+does measure the book. The two arms already running were told by operator
+message; `refs/` carries the amended text on their next resume.
+
+The third arm exists because the operator held idle slots until this structural
+change landed. It runs the same account as the second, and differs only in the
+family its directive opens on, so the three seeds diverge instead of re-deriving
+one starting point three times.
 
 Usage:
   PYTHONPATH=src ~/miniconda3/envs/quant/bin/python \\
@@ -146,6 +157,21 @@ ARMS: dict[str, dict[str, object]] = {
             "同只数的等权随机成分书与本账户最大只数的等权成分书；候选要在信息比率上按预登记裕度赢过前者，"
             "否则没有技能可言。这个账户几乎买得起整个指数，所以门在分子上：更多只数会把对照这条地板一起抬高。"
             "一个方向被证伪而预算还有余量时，换下一个预登记方向，不要就此收尾。"
+        ),
+    },
+    # Same account as the arm above, a different opening family: the two seeds
+    # would otherwise start from the same composite baseline.
+    "index_relative_1m_b_20260919": {
+        "workspace_reference": PACK,
+        "initial_cash": 1_000_000,
+        "research_directive": (
+            "本臂是指数内相对基准的开放方向臂，开局家族与同包另外两条臂不同：从**日频量价截面排序器**做起，"
+            "在沪深 300 成分内部打分。股票池就是决策日当天可见的成分，按时点从宏观域读出来，不得回退全市场池。"
+            "账户 100 万元，篮子只数在 30 到 50 之间由你选定并写进预登记。先读 refs/README.md 与 refs/families.md——"
+            "提名硬门（规模界按同批对照的相对口径）、两个必跑对照与终止规则只以 families.md 为准；"
+            "学习型候选的 fit 成本纪律与可照搬的参考实现见 refs/references/fit-cost.md，"
+            "整期批次之前必须先在研究期靠后的槽上量一次 fit。先 smoke_backtest，再按 refs/exploration-plan.md "
+            "做完整研究期验证。这一族被证伪而预算还有余量时，换下一个预登记方向，不要就此收尾。"
         ),
     },
 }

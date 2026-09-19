@@ -328,7 +328,13 @@ def test_an_arm_may_run_its_own_account_and_an_arm_that_states_none_inherits() -
         for experiment_id, value in accounts.items()
         if experiment_id.startswith("index_relative_")
     }
-    assert sorted(paired.values()) == [100_000.0, 1_000_000.0], paired
+    # The id names the account, and the group really does run more than one.
+    assert len(set(paired.values())) > 1, paired
+    for experiment_id, value in paired.items():
+        assert value == (100_000.0 if "_100k_" in experiment_id else 1_000_000.0), (
+            experiment_id,
+            value,
+        )
 
 
 @pytest.mark.parametrize(("round_name", "experiment_id"), ARMS)
