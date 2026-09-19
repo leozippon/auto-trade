@@ -60,6 +60,7 @@ from autotrade.pipelines.config import (
 from autotrade.pipelines.experiment import null_control_seed
 from autotrade.pipelines.ledger import RESEARCH_STAGE, ExperimentLedger
 from autotrade.pipelines.local_backend import (
+    BATCH_HYPOTHESIS_MAX_CHARS,
     BATCH_REJECTION_CHARGE_AFTER,
     BATCH_REJECTION_ESCALATE_AT,
     BATCH_VALIDATE_MAX_CANDIDATES,
@@ -487,6 +488,37 @@ class BatchValidateRefusalTest(unittest.TestCase):
             with self.assertRaises(ToolError):
                 session.call(*[f"c{index}" for index in range(BATCH_VALIDATE_MAX_CANDIDATES + 1)])
             self.assertEqual(session.backtest.replay_years_used, 0)
+
+    def test_a_hypothesis_over_the_cap_is_refused_and_the_schema_states_it(self) -> None:
+        field = BatchValidateTool.spec.input_schema["properties"]["candidates"]["items"][
+            "properties"
+        ]["hypothesis"]
+        # The cap has to hold a pre-registration with its falsification clause.
+        self.assertEqual(BATCH_HYPOTHESIS_MAX_CHARS, 1_000)
+        self.assertEqual(field["maxLength"], BATCH_HYPOTHESIS_MAX_CHARS)
+        self.assertIn(f"{BATCH_HYPOTHESIS_MAX_CHARS} characters", field["description"])
+        with TemporaryDirectory() as tmp:
+            session = _Session(Path(tmp))
+            session.candidate("a", _strategy("5"))
+            with self.assertRaises(ToolError) as caught:
+                session.batch.invoke(
+                    {
+                        "candidates": [
+                            {
+                                "name": "one",
+                                "hypothesis": "h" * (BATCH_HYPOTHESIS_MAX_CHARS + 1),
+                                "path": "candidates/a",
+                            }
+                        ]
+                    }
+                )
+            self.assertIn(
+                f"hypothesis exceeds {BATCH_HYPOTHESIS_MAX_CHARS} characters",
+                str(caught.exception),
+            )
+            self.assertEqual(caught.exception.error_type, "schema_error")
+            self.assertEqual(session.backtest.replay_years_used, 0)
+            self.assertEqual(session.evaluator.calls, 0)
 
     def test_a_duplicate_path_is_refused(self) -> None:
         with TemporaryDirectory() as tmp:

@@ -1260,7 +1260,11 @@ BATCH_VALIDATE_MAX_CANDIDATES = 6
 # how many siblings happened to share the host.
 BATCH_VALIDATE_MAX_CONCURRENCY = 3
 BATCH_NAME_MAX_CHARS = 40
-BATCH_HYPOTHESIS_MAX_CHARS = 500
+# A pre-registration is only binding if the falsification clause fits with it:
+# signal, holding, control, and what would refute the claim. Three trace
+# reviews found sessions writing against a 500-character cap and dropping that
+# clause, so the bound is what one such statement needs, not what one line is.
+BATCH_HYPOTHESIS_MAX_CHARS = 1_000
 BATCH_PATH_MAX_CHARS = 200
 # Workspace roots a candidate may not sit under: they are the working copy's
 # own trees or not strategy trees at all. ``output`` itself is a valid path --
