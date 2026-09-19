@@ -1,14 +1,11 @@
 from __future__ import annotations
 
 import errno
-import gc
+import io
 import json
 import os
-import shutil
 import stat
 import threading
-import time
-import weakref
 from datetime import datetime
 from pathlib import Path
 
@@ -46,8 +43,6 @@ from autotrade.pipelines.pit_backend import (
     _asof_stash_dir,
     _AsOfReadOnlyView,
     _bind_asof_stash_contract,
-    _load_replay_frames,
-    _ReplayFrameCache,
     prebuild_asof_stash,
 )
 
@@ -1122,147 +1117,6 @@ def test_historical_minutes_resolve_only_the_exact_pit_price(tmp_path: Path) -> 
     assert source.price_at(
         "000001.SZ", datetime.fromisoformat("2024-01-02T10:02:00+08:00")
     ) is None
-
-
-def test_load_replay_frames_reuses_cached_parquets(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    replay = tmp_path / "replay"
-    replay.mkdir()
-    pd.DataFrame({"trade_date": ["20240102"], "close": [1.0]}).to_parquet(
-        replay / "daily.parquet", index=False
-    )
-    pd.DataFrame({"trade_date": ["20240102"]}).to_parquet(
-        replay / "events.parquet", index=False
-    )
-    manifest = {
-        "snapshot_id": "replay_one",
-        "kind": "replay_slot",
-        "raw_generation": {"generation_id": "generation_one"},
-    }
-    cache = _ReplayFrameCache()
-    calls = {"n": 0}
-    real_read = pd.read_parquet
-
-    def counting_read_parquet(path, *args, **kwargs):
-        calls["n"] += 1
-        return real_read(path, *args, **kwargs)
-
-    monkeypatch.setattr(pd, "read_parquet", counting_read_parquet)
-    first = _load_replay_frames(
-        replay,
-        generation_id="generation_one",
-        replay_manifest=manifest,
-        cache=cache,
-    )
-    first_reads = calls["n"]
-    assert first_reads >= 1
-    first["daily"].loc[:, "close"] = 99.0
-    second = _load_replay_frames(
-        replay,
-        generation_id="generation_one",
-        replay_manifest=manifest,
-        cache=cache,
-    )
-    assert calls["n"] == first_reads
-    assert second["daily"] is not first["daily"]
-    assert list(second["daily"]["close"]) == [1.0]
-    assert second["events"] is first["events"]
-
-
-def test_replay_frame_cache_reloads_rebuilt_path_for_new_generation(tmp_path: Path) -> None:
-    replay = tmp_path / "replay"
-    replay.mkdir()
-    pd.DataFrame({"trade_date": ["20240102"], "close": [1.0]}).to_parquet(
-        replay / "daily.parquet", index=False
-    )
-    cache = _ReplayFrameCache()
-    first = _load_replay_frames(
-        replay,
-        generation_id="generation_one",
-        replay_manifest={"raw_generation": {"generation_id": "generation_one"}},
-        cache=cache,
-    )
-    assert first["daily"]["close"].tolist() == [1.0]
-
-    shutil.rmtree(replay)
-    replay.mkdir()
-    pd.DataFrame({"trade_date": ["20240102"], "close": [2.0]}).to_parquet(
-        replay / "daily.parquet", index=False
-    )
-    second = _load_replay_frames(
-        replay,
-        generation_id="generation_two",
-        replay_manifest={"raw_generation": {"generation_id": "generation_two"}},
-        cache=cache,
-    )
-    assert second["daily"]["close"].tolist() == [2.0]
-
-
-def test_replay_frame_cache_keeps_the_most_recent_slots_and_frees_before_decoding() -> None:
-    decoded: list[str] = []
-    alive_at_decode: dict[str, list[str]] = {}
-    alive: dict[str, weakref.ref] = {}
-
-    def decoder(key: str):
-        def decode() -> dict[str, pd.DataFrame]:
-            gc.collect()
-            # Every slot the bound pushed out is already gone when the next
-            # decode starts, so a worker never holds both at the decode peak.
-            alive_at_decode[key] = [name for name, ref in alive.items() if ref() is not None]
-            decoded.append(key)
-            frame = pd.DataFrame({"slot": [key]})
-            alive[key] = weakref.ref(frame)
-            return {"daily": frame}
-
-        return decode
-
-    identity = {"generation_id": "g"}
-    single = _ReplayFrameCache()
-    single.load("a", identity, decoder("a"))
-    single.load("a", identity, decoder("a"))
-    single.load("b", identity, decoder("b"))
-    assert decoded == ["a", "b"]
-    assert alive_at_decode["b"] == []  # "a" was dropped before "b" decoded
-
-    decoded.clear()
-    alive.clear()
-    pair = _ReplayFrameCache(max_slots=2)
-    for key in ("a", "b", "a", "c", "a", "b"):
-        pair.load(key, identity, decoder(key))
-    # "a" was touched after "b", so "c" pushes out "b" and "b" pushes out "c".
-    assert decoded == ["a", "b", "c", "b"]
-    assert alive_at_decode["c"] == ["a"] and alive_at_decode["b"] == ["a"]
-
-    # A rebuilt path under a new generation is decoded again, not reused, and
-    # its stale frames are gone before the decode starts.
-    pair.load("a", {"generation_id": "g2"}, decoder("a"))
-    assert decoded[-1] == "a" and alive_at_decode["a"] == ["b"]
-
-
-def test_replay_frame_cache_decodes_a_concurrent_miss_once() -> None:
-    calls = {"n": 0}
-    start = threading.Barrier(3)
-
-    def decode() -> dict[str, pd.DataFrame]:
-        calls["n"] += 1
-        time.sleep(0.2)  # long enough for the other requests to arrive mid-decode
-        return {"daily": pd.DataFrame({"close": [1.0]})}
-
-    cache = _ReplayFrameCache()
-    results: list[dict[str, pd.DataFrame]] = []
-
-    def request() -> None:
-        start.wait()
-        results.append(cache.load("slot", {"generation_id": "g"}, decode))
-
-    threads = [threading.Thread(target=request) for _ in range(3)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-    assert calls["n"] == 1
-    assert len(results) == 3 and all(result is results[0] for result in results)
 
 
 def test_asof_stash_uses_complete_schedule_hierarchy(tmp_path: Path) -> None:
@@ -2354,43 +2208,54 @@ def test_a_late_opening_window_reuses_the_stash_it_keys_by_its_opening_day(
     assert _span_stash_parts(snapshot, slots["a"], slots["b"]) == {}
 
 
-def test_a_span_holds_one_decoded_slot_at_a_time(
+def test_a_span_opens_a_slot_at_its_first_decision_and_reads_only_the_rows_it_publishes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Slot B is decoded at its first decision, after slot A's frames are let go.
+    """Slot B is opened at its first decision, and no slot is ever decoded whole.
 
-    A's two decisions have refreshed the view by then, so what A still holds is
-    only the rows that had not become visible, copied out of its frames.
+    A's two decisions have refreshed the view by then. What each domain reads
+    from a slot's file is exactly the rows its parts publish -- the rows a
+    stash hit would not read at all -- never the domain.
     """
 
     snapshot, slots = _write_span_release(tmp_path)
     revision = _span_revision(tmp_path)
-    real_decode = pit_backend._decode_replay_frames
+    real_open = pit_backend._open_replay_rows
     real_refresh = Timeview.refresh
+    real_take = timeview_module.ReplayRows.take
     refreshes: list[pd.Timestamp] = []
-    alive: dict[str, weakref.ref] = {}
-    at_decode: dict[str, tuple[int, list[str]]] = {}
+    at_open: dict[str, int] = {}
+    taken: dict[str, int] = {}
 
     def counting_refresh(self: Timeview, when: pd.Timestamp) -> tuple[str, str]:
         refreshes.append(when)
         return real_refresh(self, when)
 
-    def tracking_decode(replay_dir: Path) -> dict[str, pd.DataFrame]:
-        gc.collect()
-        at_decode[replay_dir.name] = (
-            len(refreshes),
-            [name for name, ref in alive.items() if ref() is not None],
-        )
-        frames = real_decode(replay_dir)
-        alive[replay_dir.name] = weakref.ref(frames["events"])
-        return frames
+    def tracking_open(replay_dir: Path) -> dict[str, timeview_module.ReplayRows]:
+        at_open[replay_dir.name] = len(refreshes)
+        return real_open(replay_dir)
+
+    def counting_take(self: timeview_module.ReplayRows, indices):
+        for table in real_take(self, indices):
+            taken[self.path.stem] = taken.get(self.path.stem, 0) + table.num_rows
+            yield table
 
     monkeypatch.setattr(Timeview, "refresh", counting_refresh)
-    monkeypatch.setattr(pit_backend, "_decode_replay_frames", tracking_decode)
+    monkeypatch.setattr(pit_backend, "_open_replay_rows", tracking_open)
+    monkeypatch.setattr(timeview_module.ReplayRows, "take", counting_take)
     PITDailyEvaluationBackend(tmp_path / "results", execution_mode="trusted").evaluate(
         _span_request(snapshot, slots["a"], slots["b"], revision=revision)
     )
-    assert at_decode == {slots["a"].name: (0, []), slots["b"].name: (2, [])}
+    assert at_open == {slots["a"].name: 0, slots["b"].name: 2}
+    published: dict[str, int] = {}
+    for key, content in _span_stash_parts(snapshot, slots["a"], slots["b"]).items():
+        domain = key.split("/")[0]
+        if domain != "text_library":
+            published[domain] = published.get(domain, 0) + pq.ParquetFile(io.BytesIO(content)).metadata.num_rows
+    assert taken == {domain: rows for domain, rows in published.items() if rows and domain != "intraday_1min"}
+    assert taken["events"] < sum(
+        pq.ParquetFile(slots[key] / "events.parquet").metadata.num_rows for key in ("a", "b")
+    )
 
 
 def test_a_strategy_exception_in_a_later_slot_is_the_strategys_own(tmp_path: Path) -> None:

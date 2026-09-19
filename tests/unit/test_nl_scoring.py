@@ -107,6 +107,18 @@ class TextRetrieverRollingTest(unittest.TestCase):
         self.addCleanup(retriever.close)
         return retriever
 
+    def test_the_connection_is_bounded_instead_of_sized_to_the_host(self):
+        index = self._write_index([("t1", "news", "000001.SZ", "title", "2024-01-02T08:00:00+08:00")])
+        threads, memory_limit = self._retriever(index)._connection.execute(
+            "SELECT current_setting('threads'), current_setting('memory_limit')"
+        ).fetchone()
+        self.assertEqual(threads, 4)
+        # DuckDB prints the limit it parsed ("4GB" is 3.7 GiB); unconfigured it
+        # would be 80 % of host memory.
+        unit = memory_limit.split()[-1]
+        self.assertEqual(unit, "GiB")
+        self.assertLess(float(memory_limit.split()[0]), 4.0)
+
     def test_rows_appear_only_once_their_available_at_has_passed(self):
         index = self._write_index(
             [

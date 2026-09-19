@@ -11,11 +11,13 @@ from threading import Barrier
 from unittest import mock
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
-from autotrade.environment.replay.timeview import Timeview
+from autotrade.environment.replay.timeview import ReplayRows, Timeview
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
 TS = "000001.SZ"
@@ -105,6 +107,16 @@ def _replay_frames() -> dict[str, pd.DataFrame]:
     return {"daily": daily, "events": events, "fundamentals": fundamentals, "text_index": text_index}
 
 
+def _replay_rows(root: Path, frames: dict[str, pd.DataFrame] | None = None) -> dict[str, ReplayRows]:
+    """The replay frames as the PIT backend hands them over: slot files opened for the roll."""
+    rows: dict[str, ReplayRows] = {}
+    for name, frame in (_replay_frames() if frames is None else frames).items():
+        path = root / "replay" / f"{name}.parquet"
+        _write(path, frame)
+        rows[name] = ReplayRows(path)
+    return rows
+
+
 class TimeviewTest(unittest.TestCase):
     def _build(self, root: Path) -> Timeview:
         replay_library = root / "replay" / "text_library"
@@ -120,7 +132,7 @@ class TimeviewTest(unittest.TestCase):
         return Timeview(
             host_dir=root / "asof",
             snapshot_dir=_frozen_snapshot(root),
-            replay_frames=_replay_frames(),
+            replay=_replay_rows(root),
             replay_text_library_dir=replay_library,
         )
 
@@ -160,7 +172,7 @@ class TimeviewTest(unittest.TestCase):
             }])
             tv = Timeview(
                 host_dir=root / "asof",
-                snapshot_dir=snapshot, replay_frames={"events": replay},
+                snapshot_dir=snapshot, replay=_replay_rows(root, {"events": replay}),
             )
             with warnings.catch_warnings():
                 warnings.simplefilter("error", RuntimeWarning)
@@ -186,7 +198,7 @@ class TimeviewTest(unittest.TestCase):
             }])
             tv = Timeview(
                 host_dir=root / "asof",
-                snapshot_dir=snapshot, replay_frames={"daily": replay},
+                snapshot_dir=snapshot, replay=_replay_rows(root, {"daily": replay}),
             )
             asof, _ = tv.refresh(_when("2022-01-05 09:10:00"))
             part = pq.ParquetFile(Path(asof) / "daily" / "part_0001.parquet")
@@ -216,7 +228,7 @@ class TimeviewTest(unittest.TestCase):
                 warnings.simplefilter("always")
                 Timeview(
                     host_dir=root / "asof",
-                    snapshot_dir=snapshot, replay_frames={"daily": replay},
+                    snapshot_dir=snapshot, replay=_replay_rows(root, {"daily": replay}),
                 )
             runtime = [w for w in caught if issubclass(w.category, RuntimeWarning)]
             self.assertEqual(len(runtime), 1, [str(w.message) for w in caught])
@@ -262,12 +274,12 @@ class TimeviewTest(unittest.TestCase):
             eager = Timeview(
                 host_dir=root / "eager",
                 snapshot_dir=snapshot,
-                replay_frames={"intraday_1min": pd.concat([day1, day2], ignore_index=True)},
+                replay=_replay_rows(root, {"intraday_1min": pd.concat([day1, day2], ignore_index=True)}),
             )
             incremental = Timeview(
                 host_dir=root / "incremental",
                 snapshot_dir=snapshot,
-                replay_frames={},
+                replay={},
                 incremental_domains={"intraday_1min"},
             )
 
@@ -404,7 +416,7 @@ class TimeviewTest(unittest.TestCase):
                 Timeview(
                     host_dir=root / "asof",
                     snapshot_dir=_frozen_snapshot(root),
-                    replay_frames=_replay_frames(),
+                    replay=_replay_rows(root),
                     stash_dir=stash,
                 )
 
@@ -425,7 +437,7 @@ class TimeviewTest(unittest.TestCase):
                 view = Timeview(
                     host_dir=root / f"asof_{index}",
                     snapshot_dir=snapshot,
-                    replay_frames=_replay_frames(),
+                    replay=_replay_rows(root / f"slot_{index}"),
                     stash_dir=stash,
                 )
                 barrier.wait()
@@ -469,7 +481,7 @@ class TimeviewTest(unittest.TestCase):
         view = Timeview(
             host_dir=root / name,
             snapshot_dir=_frozen_snapshot(root),
-            replay_frames=_replay_frames(),
+            replay=_replay_rows(root / name),
             replay_text_library_dir=self._text_replay_library(root),
             stash_dir=stash,
         )
@@ -601,7 +613,7 @@ class TimeviewTest(unittest.TestCase):
             tv = Timeview(
                 host_dir=root / "asof",
                 snapshot_dir=snapshot,
-                replay_frames=frames,
+                replay=_replay_rows(root, frames),
             )
 
             asof, before = tv.refresh(_when("2022-01-04 09:28:30"))
@@ -645,7 +657,7 @@ class TimeviewMacroDatasetGatingTest(unittest.TestCase):
                     {"dataset": "index_global", "ts_code": "SPX", "available_at": saturday_eod},
                 ]),
             }
-            tv = Timeview(host_dir=root / "asof", snapshot_dir=snap, replay_frames=replay)
+            tv = Timeview(host_dir=root / "asof", snapshot_dir=snap, replay=_replay_rows(root, replay))
 
             # Sunday, after the Sunday-evening global landing completed: the
             # global row is visible, the domestic row must not be.
@@ -688,7 +700,7 @@ class TimeviewIntradaySchemaTest(unittest.TestCase):
                 # Replay intraday keeps available_at as the row-level Timeview gate.
                 "intraday_1min": self._minute("20220104", available_at="2022-01-04T09:30:00+08:00"),
             }
-            tv = Timeview(host_dir=root / "asof", snapshot_dir=snap, replay_frames=replay)
+            tv = Timeview(host_dir=root / "asof", snapshot_dir=snap, replay=_replay_rows(root, replay))
             # After the 20220104 evening node completes (fallback ~03:05 on 0105) the replay bar rolls in.
             asof, _ = tv.refresh(_when("2022-01-05 09:10:00"))
             intraday = pd.read_parquet(Path(asof) / "intraday_1min")
@@ -710,10 +722,189 @@ def test_timeview_releases_auction_only_at_row_availability(tmp_path: Path) -> N
     view = Timeview(
         host_dir=tmp_path / "asof",
         snapshot_dir=tmp_path / "snapshot",
-        replay_frames={"auction": replay},
+        replay=_replay_rows(tmp_path, {"auction": replay}),
     )
     _, before = view.refresh(pd.Timestamp("2024-01-02T09:28:00+08:00"))
     assert before == "0"
     _, after = view.refresh(pd.Timestamp("2024-01-02T09:29:00+08:00"))
     assert int(after) > 0
     assert len(pd.read_parquet(tmp_path / "asof" / "auction")) == 1
+
+
+def _events_slot(days: list[str], *, scores: bool) -> pd.DataFrame:
+    """One events slot laid out by dataset, as the builder writes it.
+
+    A day's two rows therefore sit far apart in the file. ``note`` has no
+    value on any morning roll (a string column the slice makes null-typed),
+    ``flag`` is a bool column with nulls, and ``score`` has no value anywhere
+    in a slot without ``scores`` (a null-typed file column) but values in one
+    with them.
+    """
+
+    rows = []
+    for dataset, clock, note in (("margin_secs", "09:00:00", None), ("block_trade", "21:00:00", "late")):
+        for number, day in enumerate(days):
+            rows.append(
+                {
+                    "dataset": dataset,
+                    "ts_code": TS,
+                    "trade_date": day,
+                    "available_at": f"{day[:4]}-{day[4:6]}-{day[6:]}T{clock}+08:00",
+                    "note": note,
+                    "flag": [True, False, None][number % 3],
+                    "score": float(number) if scores else None,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _events_snapshot(root: Path) -> Path:
+    snapshot = root / "snapshot"
+    _write(
+        snapshot / "events.parquet",
+        pd.DataFrame(
+            [{
+                "dataset": "block_trade", "ts_code": TS, "trade_date": "20211231",
+                "available_at": "2021-12-31T21:00:00+08:00", "note": "frozen", "flag": True, "score": 0.5,
+            }]
+        ),
+    )
+    return snapshot
+
+
+def _events_rows(root: Path, name: str, frame: pd.DataFrame) -> dict[str, ReplayRows]:
+    path = root / name / "events.parquet"
+    path.parent.mkdir(parents=True)
+    # Two-row row groups: every day's rows span row groups, and a part from
+    # two slots spans files.
+    pq.write_table(pa.Table.from_pandas(frame, preserve_index=False), path, row_group_size=2)
+    return {"events": ReplayRows(path)}
+
+
+def _roll_events_across_a_boundary(root: Path, host: str) -> dict[str, bytes]:
+    """Parts of slot A's rows, then of a part mixing A's evening rows with B's morning rows."""
+
+    view = Timeview(
+        host_dir=root / host,
+        snapshot_dir=_events_snapshot(root),
+        replay=_events_rows(root, f"{host}_a", _events_slot(["20220104", "20220105"], scores=False)),
+    )
+    for instant in ("2022-01-04 09:10:00", "2022-01-05 03:10:00", "2022-01-05 09:10:00"):
+        view.refresh(_when(instant))
+    view.continue_into(
+        lambda: _events_rows(root, f"{host}_b", _events_slot(["20220106", "20220107"], scores=True)),
+        replay_text_library_dir=None,
+        stash_dir=None,
+    )
+    for instant in ("2022-01-06 09:10:00", "2022-01-07 03:10:00"):
+        view.refresh(_when(instant))
+    parts = sorted((root / host / "events").glob("part_*.parquet"))
+    assert [path.name for path in parts] == [f"part_{index:04d}.parquet" for index in range(6)]
+    return {path.name: path.read_bytes() for path in parts}
+
+
+def test_parts_are_byte_identical_to_slices_of_the_decoded_frame(tmp_path: Path, monkeypatch) -> None:
+    """The row groups a roll takes encode exactly what a slice of the whole decoded frame did.
+
+    The eager reference decodes each slot whole and slices it, as the view
+    used to; the rows it never reads are the whole point of the lazy path.
+    """
+
+    lazy = _roll_events_across_a_boundary(tmp_path, "lazy")
+
+    def eager_take(self: ReplayRows, indices):
+        yield pa.Table.from_pandas(pd.read_parquet(self.path).iloc[indices], preserve_index=False)
+
+    monkeypatch.setattr(ReplayRows, "take", eager_take)
+    assert _roll_events_across_a_boundary(tmp_path, "eager") == lazy
+    morning = pq.read_table(tmp_path / "lazy" / "events" / "part_0001.parquet")
+    assert morning.schema.field("note").type == pa.null()  # a slice with no value stays null-typed
+    boundary = pq.read_table(tmp_path / "lazy" / "events" / "part_0004.parquet")
+    assert boundary["trade_date"].to_pylist() == ["20220105", "20220106"]  # A's evening row first
+    assert boundary.schema.field("score").type == pa.float64()  # A's null column took B's type
+
+
+def test_slices_of_two_slots_unify_as_their_decoded_frames_concatenate(tmp_path: Path) -> None:
+    a = _events_rows(tmp_path, "a", _events_slot(["20220104"], scores=False))["events"]
+    b = _events_rows(tmp_path, "b", _events_slot(["20220105"], scores=True))["events"]
+    lazy = pa.concat_tables([*a.take(np.array([1])), *b.take(np.array([0]))], promote_options="default")
+    with warnings.catch_warnings():
+        # The reference is the legacy pandas concat, all-NA columns included.
+        warnings.simplefilter("ignore", FutureWarning)
+        eager = pa.Table.from_pandas(
+            pd.concat([pd.read_parquet(a.path).iloc[[1]], pd.read_parquet(b.path).iloc[[0]]], ignore_index=True),
+            preserve_index=False,
+        )
+    assert lazy.schema.remove_metadata() == eager.schema.remove_metadata()
+    assert lazy.to_pylist() == eager.to_pylist()
+
+
+def test_a_stash_hit_reads_no_replay_rows(tmp_path: Path, monkeypatch) -> None:
+    stash = tmp_path / "stash"
+    stash.mkdir()
+    (stash / "contract.json").write_text(json.dumps({"validated": True}), encoding="utf-8")
+    frames = {name: frame for name, frame in _replay_frames().items() if name != "text_index"}
+
+    def rolled(host: str) -> dict[str, int]:
+        view = Timeview(
+            host_dir=tmp_path / host,
+            snapshot_dir=_frozen_snapshot(tmp_path),
+            replay=_replay_rows(tmp_path / host, frames),
+            stash_dir=stash,
+        )
+        asof, _ = view.refresh(_when("2022-01-06 09:10:00"))
+        return {
+            str(path.relative_to(asof)): path.stat().st_ino
+            for path in sorted(Path(asof).rglob("part_*.parquet"))
+        }
+
+    first = rolled("first")
+    assert any(key.startswith("events/part_") for key in first)
+
+    def refuse(self: ReplayRows, indices):
+        raise AssertionError(f"a stash hit read {self.path.name}")
+
+    monkeypatch.setattr(ReplayRows, "take", refuse)
+    assert rolled("second") == first  # the same inodes: hardlinked, never re-encoded
+
+
+def test_an_incremental_domain_takes_partitions_only(tmp_path: Path) -> None:
+    replay = _replay_rows(
+        tmp_path,
+        {"intraday_1min": pd.DataFrame([{"ts_code": TS, "close": 1.0, "available_at": "2022-01-04T15:00:00+08:00"}])},
+    )
+    with pytest.raises(ValueError, match="incremental and takes partitions only"):
+        Timeview(
+            host_dir=tmp_path / "asof",
+            snapshot_dir=tmp_path / "snapshot",
+            replay=replay,
+            incremental_domains={"intraday_1min"},
+        )
+
+
+def test_a_part_larger_than_a_row_group_streams_into_the_row_groups_one_write_would_cut(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The streamed file is the file ``write_table`` writes for the whole part."""
+
+    from autotrade.environment.replay import timeview as module
+
+    monkeypatch.setattr(module, "_PART_ROW_GROUP_ROWS", 3)
+    frame = _events_slot(["20220104", "20220105", "20220106", "20220107"], scores=True)
+    view = Timeview(
+        host_dir=tmp_path / "asof",
+        snapshot_dir=_events_snapshot(tmp_path),
+        replay=_events_rows(tmp_path, "slot", frame),
+    )
+    asof, _ = view.refresh(_when("2022-01-08 03:10:00"))  # every row of the slot in one part
+    part = Path(asof) / "events" / "part_0001.parquet"
+    assert pq.ParquetFile(part).metadata.num_row_groups == 3  # 8 rows as 3 + 3 + 2
+    whole = pa.Table.from_pandas(pd.read_parquet(tmp_path / "slot" / "events.parquet"), preserve_index=False)
+    columns = pq.ParquetFile(tmp_path / "snapshot" / "events.parquet").schema_arrow.names
+    reference = tmp_path / "reference.parquet"
+    pq.write_table(
+        pa.Table.from_arrays([whole[name] for name in columns], schema=pa.schema([whole.schema.field(name) for name in columns])),
+        reference,
+        row_group_size=3,
+    )
+    assert part.read_bytes() == reference.read_bytes()

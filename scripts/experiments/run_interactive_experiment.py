@@ -16,6 +16,21 @@ import signal
 import sys
 from pathlib import Path
 
+# Process-level settings of a research worker, read by glibc, pyarrow and the
+# numerical libraries at start or import, so they precede every other import.
+# Arrow's default pool (mimalloc) kept about 8 GiB of freed replay buffers
+# resident per idle worker; the system pool hands them back once a replay
+# releases them -- provided glibc serves them by mmap: its dynamic threshold
+# otherwise rises to 32 MiB after the first large free, and the row-group
+# buffers then fragment a heap that malloc_trim cannot return (measured 4.8
+# GiB kept after one replay of a year's parts, 0.2 GiB with the threshold
+# fixed). OpenBLAS otherwise starts one thread per host core (192 on the
+# shared host) for the light host-side arithmetic a worker does.
+os.environ.setdefault("ARROW_DEFAULT_MEMORY_POOL", "system")
+os.environ.setdefault("MALLOC_MMAP_THRESHOLD_", "131072")
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "4")
+
 _SCRIPTS = Path(__file__).resolve().parents[1]
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))

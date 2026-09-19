@@ -22,6 +22,11 @@ from autotrade.environment.data.pit import to_cn_timestamps
 
 MAX_PATTERN_CHARS = 256
 _CANDIDATE_CACHE_SIZE = 128
+# One retriever's DuckDB connection, sized for the bounded candidate scans it
+# runs: unconfigured, DuckDB takes one thread per host core (192 on the shared
+# host, per replay) and 80 % of host memory as its limit.
+DUCKDB_THREADS = 4
+DUCKDB_MEMORY_LIMIT = "4GB"
 
 
 @dataclass
@@ -87,7 +92,9 @@ class TextRetriever:
         self.snippet_chars = snippet_chars
         self.as_of = as_of
         self._query_lock = threading.Lock()
-        self._connection = duckdb.connect()
+        self._connection = duckdb.connect(
+            config={"threads": DUCKDB_THREADS, "memory_limit": DUCKDB_MEMORY_LIMIT}
+        )
         self._snippets: dict[tuple[str, str], str] = {}
         self._candidate_cache: OrderedDict[tuple[str, ...], _CandidateCorpus] = OrderedDict()
         self._index_signature: tuple[tuple[str, int, int], ...] = ()

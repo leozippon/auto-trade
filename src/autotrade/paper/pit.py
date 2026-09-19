@@ -36,7 +36,7 @@ from autotrade.pipelines.pit_backend import (
     ResearchPITSnapshotProvider,
     _AsOfReadOnlyView,
     _discard_ephemeral_asof,
-    _load_replay_frames,
+    _open_replay_rows,
     _require_read_only_tree,
     load_slot_corporate_actions,
     required_release_raw_datasets,
@@ -134,14 +134,10 @@ class BookPITData:
         replay_dir = Path(bundle.replay_ref).resolve(strict=True)
         _require_read_only_tree(self.snapshot_dir)
         manifest = load_snapshot_manifest(replay_dir)
-        frames = _load_replay_frames(
-            replay_dir,
-            generation_id=provider.release.generation_id,
-            replay_manifest=manifest,
-            cache=provider._replay_frame_cache,
-        )
-        self.market = DailyMarketData(frames["daily"], load_slot_corporate_actions(replay_dir, manifest))
-        self._daily = frames["daily"]
+        replay = _open_replay_rows(replay_dir)
+        daily = pd.read_parquet(replay_dir / "daily.parquet")
+        self.market = DailyMarketData(daily, load_slot_corporate_actions(replay_dir, manifest))
+        self._daily = daily
         runtime = generation_dir / "runtime" / trade_date
         if runtime.exists():
             _remove_tree(runtime)
@@ -156,7 +152,7 @@ class BookPITData:
         self.timeview = Timeview(
             host_dir=self.asof_dir,
             snapshot_dir=self.snapshot_dir,
-            replay_frames=frames,
+            replay=replay,
             replay_text_library_dir=replay_dir / "text_library",
             incremental_domains={"intraday_1min"} if self.minute_source is not None else None,
             # Paper inference timestamps come from the live calendar, so no

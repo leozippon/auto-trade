@@ -30,6 +30,11 @@ One view can run on across consecutive replay slots (``continue_into``): each
 domain keeps one segment per slot, and a part that lands after a slot boundary
 lists the earlier slot's rows first. Slots partition rows by ``available_at``,
 so the parts are those one long slot laid out in slot order would write.
+
+Replay rows stay in the slot's parquet files (``ReplayRows``): a domain reads
+only its gating columns to build its cursors and reads the row groups holding
+a part's rows when it encodes that part, so a stash hit reads nothing and no
+decoded slot is ever resident.
 """
 
 from __future__ import annotations
@@ -39,7 +44,7 @@ import os
 import shutil
 import uuid
 import warnings
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
@@ -64,6 +69,10 @@ from autotrade.environment.data.pit import to_cn_timestamps
 
 _EMPTY_INDICES = np.array([], dtype=np.int64)
 _ROW_AVAILABLE_AT = "row_available_at"
+# Rows per row group of a written part: pyarrow's ``write_table`` default, so
+# a part streamed row group by row group is byte for byte the file one
+# ``write_table`` call over the whole part produces.
+_PART_ROW_GROUP_ROWS = 1 << 20
 
 
 @dataclass
@@ -112,12 +121,52 @@ class _SortedCursor:
     def next_key(self) -> np.datetime64 | None:
         return self.keys[self.pos] if self.has_pending() else None
 
-    def pending_indices(self) -> np.ndarray:
-        return self.indices[self.pos:]
 
-    def remapped(self, kept_rows: np.ndarray) -> _SortedCursor:
-        """This cursor's pending rows, renumbered into ``frame.iloc[kept_rows]``."""
-        return _SortedCursor(np.searchsorted(kept_rows, self.pending_indices()), self.keys[self.pos:])
+class ReplayRows:
+    """One replay domain's rows, left on disk until a roll takes them.
+
+    Building the cursors needs only the gating columns (``available_at`` and,
+    for dataset-gated domains, ``dataset``), so those are all that is read up
+    front. The rows a part publishes are read from the row groups that hold
+    them when that part is encoded -- never on a stash hit -- and each row
+    group's rows take the same pandas round trip a slice of the whole decoded
+    frame took, so a part is byte-identical to one cut from that frame (a
+    string column with no value in the slice still becomes a null column)
+    without the decoded slot (21-24 GiB as pandas for one year of events)
+    ever being resident.
+    """
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+        self._file = pq.ParquetFile(self.path)
+        metadata = self._file.metadata
+        self.columns: list[str] = list(self._file.schema_arrow.names)
+        self.num_rows = int(metadata.num_rows)
+        self._row_group_ends = np.cumsum(
+            [metadata.row_group(index).num_rows for index in range(metadata.num_row_groups)]
+        )
+
+    @property
+    def empty(self) -> bool:
+        return self.num_rows == 0
+
+    def column(self, name: str) -> pd.Series:
+        """One column of every row, as the decoded frame's column."""
+        return self._file.read(columns=[name]).to_pandas()[name]
+
+    def take(self, indices: np.ndarray) -> Iterator[pa.Table]:
+        """The rows at ``indices`` (ascending), one table per row group holding them.
+
+        Each table is what ``frame.iloc[rows]`` of the decoded file would
+        encode; one row group is the most decoded at once. The tables unify on
+        the types their round trips inferred (a null column beside a typed one
+        takes its type), which is what the whole slice would have inferred.
+        """
+        groups = np.searchsorted(self._row_group_ends, indices, side="right")
+        for group in np.unique(groups):
+            first = int(self._row_group_ends[group - 1]) if group else 0
+            rows = self._file.read_row_group(int(group)).take(pa.array(indices[groups == group] - first))
+            yield pa.Table.from_pandas(rows.to_pandas(), preserve_index=False)
 
 
 @dataclass
@@ -129,32 +178,15 @@ class _ReplaySegment:
     the slot's text body library (text index segments only).
     """
 
-    frame: pd.DataFrame
+    rows: ReplayRows
     cursor: _SortedCursor | None
     cursors: dict[str, _SortedCursor]
     library_dir: Path | None = None
 
-    def pending_only(self) -> _ReplaySegment | None:
-        """The rows no refresh has published yet, copied out of ``frame``.
-
-        None when every row is out, so the segment can be dropped. Row order
-        and each cursor's order are kept, so the rest of the roll is unchanged.
-        """
+    def has_pending(self) -> bool:
+        """Whether any row of the slot still waits for its refresh node."""
         live = [self.cursor] if self.cursor is not None else list(self.cursors.values())
-        waiting = [cursor.pending_indices() for cursor in live if cursor.has_pending()]
-        if not waiting:
-            return None
-        kept = np.sort(np.concatenate(waiting))
-        return _ReplaySegment(
-            frame=self.frame.iloc[kept].reset_index(drop=True),
-            cursor=self.cursor.remapped(kept) if self.cursor is not None else None,
-            cursors={
-                name: cursor.remapped(kept)
-                for name, cursor in self.cursors.items()
-                if cursor.has_pending()
-            },
-            library_dir=self.library_dir,
-        )
+        return any(cursor.has_pending() for cursor in live)
 
 
 def _range_indexed(frame: pd.DataFrame) -> pd.DataFrame:
@@ -219,7 +251,7 @@ class Timeview:
         *,
         host_dir: Path,
         snapshot_dir: Path,
-        replay_frames: dict[str, pd.DataFrame],
+        replay: Mapping[str, ReplayRows],
         replay_text_library_dir: Path | None = None,
         incremental_domains: set[str] | frozenset[str] | None = None,
         stash_dir: Path | None = None,
@@ -245,13 +277,12 @@ class Timeview:
         stash_root = _validated_stash_root(stash_dir)
         incremental = frozenset(incremental_domains or ())
         for name, filename, cutoff_key in _DOMAINS:
-            replay = replay_frames.get(name)
             self._domains[name] = _DomainView(
                 name=name,
                 cutoff_key=cutoff_key,
                 out_dir=self.host_dir / name,
                 frozen_file=self.snapshot_dir / filename,
-                replay=replay if replay is not None else pd.DataFrame(),
+                replay=replay.get(name),
                 incremental=name in incremental,
                 stash_dir=(stash_root / name) if stash_root is not None else None,
             )
@@ -260,7 +291,7 @@ class Timeview:
             out_library_dir=self.host_dir / "text_library",
             frozen_index_file=self.snapshot_dir / "text_index.parquet",
             frozen_library_dir=self.snapshot_dir / "text_library",
-            replay_index=replay_frames.get("text_index", pd.DataFrame()),
+            replay_index=replay.get("text_index"),
             replay_library_dir=Path(replay_text_library_dir) if replay_text_library_dir is not None else None,
             stash_index_dir=(stash_root / "text_index") if stash_root is not None else None,
             stash_library_dir=(stash_root / "text_library") if stash_root is not None else None,
@@ -286,7 +317,7 @@ class Timeview:
 
     def continue_into(
         self,
-        load_frames: Callable[[], dict[str, pd.DataFrame]],
+        open_slot: Callable[[], Mapping[str, ReplayRows]],
         *,
         replay_text_library_dir: Path | None,
         stash_dir: Path | None,
@@ -294,25 +325,24 @@ class Timeview:
         """Run this view on into the next consecutive replay slot.
 
         The caller guarantees the slot continues the earlier ones: every row it
-        holds becomes available after every row they hold. First every domain
-        drops what it has already published and copies out only the rows still
-        waiting for their refresh node; only then does ``load_frames`` decode
-        the next slot, so a span holds one decoded slot plus those waiting rows
-        rather than every slot it has passed. Parts keep their numbering and
-        from here on publish under the next slot's ``stash_dir``.
+        holds becomes available after every row they hold. Every domain first
+        drops the slots it has published entirely, then ``open_slot`` opens the
+        next slot's domains, which read only their gating columns. Parts keep
+        their numbering and from here on publish under the next slot's
+        ``stash_dir``.
         """
         stash_root = _validated_stash_root(stash_dir)
         for view in self._domains.values():
             view.release_published()
         self._text.release_published()
-        frames = load_frames()
+        replay = open_slot()
         for name, _filename, _key in _DOMAINS:
             self._domains[name].continue_slot(
-                frames.get(name, pd.DataFrame()),
+                replay.get(name),
                 stash_dir=(stash_root / name) if stash_root is not None else None,
             )
         self._text.continue_slot(
-            frames.get("text_index", pd.DataFrame()),
+            replay.get("text_index"),
             library_dir=Path(replay_text_library_dir) if replay_text_library_dir is not None else None,
             stash_index_dir=(stash_root / "text_index") if stash_root is not None else None,
             stash_library_dir=(stash_root / "text_library") if stash_root is not None else None,
@@ -353,7 +383,7 @@ class _DomainView:
         cutoff_key: str | None,
         out_dir: Path,
         frozen_file: Path,
-        replay: pd.DataFrame,
+        replay: ReplayRows | None,
         incremental: bool = False,
         stash_dir: Path | None = None,
     ) -> None:
@@ -373,38 +403,36 @@ class _DomainView:
         self._columns = self._init_frozen_part(frozen_file)
         self.continue_slot(replay, stash_dir=stash_dir)
 
-    def continue_slot(self, replay: pd.DataFrame, *, stash_dir: Path | None) -> None:
+    def continue_slot(self, rows: ReplayRows | None, *, stash_dir: Path | None) -> None:
         """Add one replay slot's rows; parts from here on publish under ``stash_dir``."""
         self._stash_dir = stash_dir
-        if self.incremental:
-            self.append_replay_partition(replay)
+        if rows is None or rows.empty:
             return
-        replay = _range_indexed(replay)
-        # A replay frame can only roll if it carries the row-level available_at the
+        if self.incremental:
+            raise ValueError(f"Timeview domain {self.name} is incremental and takes partitions only")
+        # A replay domain can only roll if it carries the row-level available_at the
         # node gate needs; without it the domain stays frozen-only (conservative).
-        if replay.empty or "available_at" not in replay.columns:
+        if "available_at" not in rows.columns:
             return
         # The agent-facing schema drops the gating-only available_at unless the
         # frozen domain already carries it (events/macro/fundamentals do; daily
         # does not).
         if not self._columns:
-            self._columns = [column for column in replay.columns if column != "available_at"]
-        self._require_schema_covers(replay)
-        available_at = to_cn_timestamps(replay["available_at"])
+            self._columns = [column for column in rows.columns if column != "available_at"]
+        self._require_schema_covers(rows.columns)
+        available_at = to_cn_timestamps(rows.column("available_at"))
         valid = np.flatnonzero(available_at.notna().to_numpy())  # NaT rows never become visible
         keys = _utc_ns(available_at)
         if self.cutoff_key is not None:
-            self._segments.append(_ReplaySegment(replay, _SortedCursor(valid, keys[valid]), {}))
-        elif "dataset" in replay.columns:
-            cursors = _dataset_cursors(replay["dataset"].astype(str).to_numpy(), valid, keys)
-            self._segments.append(_ReplaySegment(replay, None, cursors))
+            self._segments.append(_ReplaySegment(rows, _SortedCursor(valid, keys[valid]), {}))
+        elif "dataset" in rows.columns:
+            cursors = _dataset_cursors(rows.column("dataset").astype(str).to_numpy(), valid, keys)
+            self._segments.append(_ReplaySegment(rows, None, cursors))
         self._segments_changed()
 
     def release_published(self) -> None:
-        """Keep only the replay rows no refresh has published yet."""
-        self._segments = [
-            kept for segment in self._segments if (kept := segment.pending_only()) is not None
-        ]
+        """Drop the slots whose every row a refresh has published."""
+        self._segments = [segment for segment in self._segments if segment.has_pending()]
         self._segments_changed()
 
     def _segments_changed(self) -> None:
@@ -431,11 +459,11 @@ class _DomainView:
             keys = keys_all
         if not self._columns:
             self._columns = [column for column in frame.columns if column != "available_at"]
-        self._require_schema_covers(frame)
+        self._require_schema_covers(list(frame.columns))
         self._pending.append(_PendingReplayPartition(frame=frame, keys=keys))
         self._last_signature = object()
 
-    def _require_schema_covers(self, replay: pd.DataFrame) -> None:
+    def _require_schema_covers(self, columns: Sequence[str]) -> None:
         """Surface replay columns the roll's projection will drop.
 
         The canonical schema is fixed by the frozen part (parts must share one
@@ -443,7 +471,7 @@ class _DomainView:
         domains can legitimately carry replay-only columns when a dataset has
         rows only inside the replay window — so this warns loudly instead of
         failing, but never drops silently."""
-        if replay is None or replay.empty or not self._columns:
+        if not columns or not self._columns:
             return
         # available_at / available_at_rule are gating annotations, not strategy
         # data — the frozen schema drops them by design (intraday replay rows
@@ -451,9 +479,7 @@ class _DomainView:
         # otherwise). Warn once per domain: the schema cannot change mid-replay.
         if getattr(self, "_schema_drop_warned", False):
             return
-        extra = sorted(
-            set(replay.columns) - set(self._columns) - {"available_at", "available_at_rule"}
-        )
+        extra = sorted(set(columns) - set(self._columns) - {"available_at", "available_at_rule"})
         if extra:
             self._schema_drop_warned = True
             warnings.warn(
@@ -505,17 +531,19 @@ class _DomainView:
         if signature == self._last_signature:
             return False  # this domain's covering node(s) have not advanced
         self._last_signature = signature
-        slices: list[pd.DataFrame] = []
+        taken: list[tuple[_ReplaySegment, np.ndarray]] = []
         for segment in self._segments:
             newly = self._newly_visible(segment, when)
             if newly.size:
                 newly.sort()  # original frame order: parts read back exactly as the frame slice
-                slices.append(segment.frame.iloc[newly])
-        if not slices:
+                taken.append((segment, newly))
+        if not taken:
             return False
+        # The rows are read only if the part has to be encoded: a stash hit
+        # hardlinks the part and touches no row group.
         self._write_part(
-            sum(len(rows) for rows in slices),
-            lambda: self._project(_concat_slices(slices)),
+            sum(int(newly.size) for _segment, newly in taken),
+            lambda: (table for segment, newly in taken for table in segment.rows.take(newly)),
         )
         return True
 
@@ -551,43 +579,92 @@ class _DomainView:
         if not newly:
             return False
 
-        def build() -> pa.Table:
-            parts = [self._project(frame) for frame in newly]
-            return parts[0] if len(parts) == 1 else pa.concat_tables(parts)
-
-        self._write_part(sum(len(frame) for frame in newly), build)
+        self._write_part(
+            sum(len(frame) for frame in newly),
+            lambda: (pa.Table.from_pandas(frame, preserve_index=False) for frame in newly),
+        )
         return True
 
-    def _project(self, frame: pd.DataFrame) -> pa.Table:
-        """Project one slice onto the canonical part schema.
+    def _part_schema(self, unified: pa.Schema) -> pa.Schema:
+        """The canonical part schema, typed by the slices where they carry a column.
 
-        ``DataFrame.reindex(columns=...)`` rebuilds every block of the slice.
-        On one day of minute bars (~700k rows over seven object columns) that
-        copy measured 18-73 s and was 95 % of replay wall, against 0.3 s for
-        the same projection in Arrow, which reuses the converted buffers.
+        Canonical columns the slices lack take the frozen part's type: every
+        part in the directory has to unify with part 0.
         """
-        table = pa.Table.from_pandas(frame, preserve_index=False)
         fields: list[pa.Field] = []
-        arrays: list[object] = []
         for name in self._columns:
-            index = table.schema.get_field_index(name)
+            index = unified.get_field_index(name)
             if index >= 0:
-                fields.append(table.schema.field(index))
-                arrays.append(table.column(index))
+                fields.append(unified.field(index))
                 continue
             if self._frozen_schema is None:
                 raise RuntimeError(
                     f"Timeview domain {self.name!r}: replay slice has no column {name!r} and "
                     "no frozen part fixes its type"
                 )
-            field = self._frozen_schema.field(self._frozen_schema.get_field_index(name))
-            fields.append(field)
-            arrays.append(pa.nulls(table.num_rows, type=field.type))
-        # Rebuilt without the pandas metadata of the source frame: it still
-        # describes the dropped gating columns.
-        return pa.Table.from_arrays(arrays, schema=pa.schema(fields))
+            fields.append(self._frozen_schema.field(self._frozen_schema.get_field_index(name)))
+        # Without the pandas metadata of the source: it still describes the
+        # dropped gating columns.
+        return pa.schema(fields)
 
-    def _write_part(self, row_count: int, build: Callable[[], pa.Table]) -> None:
+    @staticmethod
+    def _project(table: pa.Table, schema: pa.Schema) -> pa.Table:
+        """One slice on the part schema.
+
+        In Arrow: ``DataFrame.reindex(columns=...)`` rebuilt every block of
+        the slice, 18-73 s on one day of minute bars (~700k rows over seven
+        object columns) and 95 % of replay wall, against 0.3 s for selecting
+        the converted arrays.
+        """
+        arrays = [
+            table.column(name).cast(field.type)
+            if name in table.column_names
+            else pa.nulls(table.num_rows, type=field.type)
+            for name, field in zip(schema.names, schema, strict=True)
+        ]
+        return pa.Table.from_arrays(arrays, schema=schema)
+
+    def _write_slices(self, slices: Callable[[], Iterator[pa.Table]], row_count: int, path: Path) -> None:
+        """Encode one part from its slices, one row group resident at a time.
+
+        A part's schema is what the whole slice infers -- a column null in
+        one slice and typed in another is typed -- and the writer needs it
+        before the first row group. A part within one row group is unified
+        and written whole. A larger one (a window opening years into a span
+        publishes everything before it as its first part, tens of millions
+        of rows) is converted twice, once for its schema and once for its
+        rows, and written in the row groups one ``write_table`` call would
+        cut, so the file is byte-identical without the part ever being
+        resident. Every table is written with one chunk per column, as the
+        whole slice was: the writer cuts its pages on chunk boundaries too,
+        so a column chunked by row group encodes to different bytes.
+        """
+        if row_count <= _PART_ROW_GROUP_ROWS:
+            unified = pa.concat_tables(list(slices()), promote_options="default")
+            pq.write_table(self._project(unified, self._part_schema(unified.schema)).combine_chunks(), path)
+            return
+        schema = self._part_schema(
+            pa.unify_schemas([table.schema for table in slices()], promote_options="default")
+        )
+        with pq.ParquetWriter(path, schema) as writer:
+            buffered: list[pa.Table] = []
+            rows = 0
+            for table in slices():
+                buffered.append(self._project(table, schema))
+                rows += table.num_rows
+                while rows >= _PART_ROW_GROUP_ROWS:
+                    whole = pa.concat_tables(buffered)
+                    writer.write_table(
+                        whole.slice(0, _PART_ROW_GROUP_ROWS).combine_chunks(),
+                        row_group_size=_PART_ROW_GROUP_ROWS,
+                    )
+                    rest = whole.slice(_PART_ROW_GROUP_ROWS)
+                    buffered = [rest] if rest.num_rows else []
+                    rows = rest.num_rows
+            if buffered:
+                writer.write_table(pa.concat_tables(buffered).combine_chunks(), row_group_size=_PART_ROW_GROUP_ROWS)
+
+    def _write_part(self, row_count: int, slices: Callable[[], Iterator[pa.Table]]) -> None:
         """Write the next part, reusing the run-level stash when one is present.
 
         The PIT backend has already bound the stash to the exact semantic
@@ -601,8 +678,9 @@ class _DomainView:
         """
         name = f"part_{self._part_seq:04d}.parquet"
         out = self.out_dir / name
+        write = partial(self._write_slices, slices, row_count)
         if self._stash_dir is None:
-            pq.write_table(build(), out)
+            write(out)
         else:
             self._stash_dir.mkdir(parents=True, exist_ok=True)
             with _exclusive_part_lock(self._stash_dir / f".{name}.lock"):
@@ -610,7 +688,7 @@ class _DomainView:
                     self._stash_dir / name,
                     out,
                     row_count=row_count,
-                    build=build,
+                    write=write,
                     label=f"domain {self.name!r} {name}",
                 )
         self._part_seq += 1
@@ -696,7 +774,7 @@ class _TextView:
         out_library_dir: Path,
         frozen_index_file: Path,
         frozen_library_dir: Path,
-        replay_index: pd.DataFrame,
+        replay_index: ReplayRows | None,
         replay_library_dir: Path | None,
         stash_index_dir: Path | None = None,
         stash_library_dir: Path | None = None,
@@ -720,7 +798,7 @@ class _TextView:
 
     def continue_slot(
         self,
-        replay_index: pd.DataFrame | None,
+        rows: ReplayRows | None,
         *,
         library_dir: Path | None,
         stash_index_dir: Path | None,
@@ -732,19 +810,16 @@ class _TextView:
         self._stash_index_dir = stash_index_dir
         self._stash_library_dir = stash_library_dir
         required = {"available_at", "dataset", "text_id"}
-        if replay_index is not None and not replay_index.empty and required.issubset(replay_index.columns):
-            index = _range_indexed(replay_index)
-            available_at = to_cn_timestamps(index["available_at"])
+        if rows is not None and not rows.empty and required.issubset(rows.columns):
+            available_at = to_cn_timestamps(rows.column("available_at"))
             valid = np.flatnonzero(available_at.notna().to_numpy())
-            cursors = _dataset_cursors(index["dataset"].astype(str).to_numpy(), valid, _utc_ns(available_at))
-            self._segments.append(_ReplaySegment(index, None, cursors, library_dir))
+            cursors = _dataset_cursors(rows.column("dataset").astype(str).to_numpy(), valid, _utc_ns(available_at))
+            self._segments.append(_ReplaySegment(rows, None, cursors, library_dir))
         self._segments_changed()
 
     def release_published(self) -> None:
-        """Keep only the index rows no refresh has published yet."""
-        self._segments = [
-            kept for segment in self._segments if (kept := segment.pending_only()) is not None
-        ]
+        """Drop the slots whose every index row a refresh has published."""
+        self._segments = [segment for segment in self._segments if segment.has_pending()]
         self._segments_changed()
 
     def _segments_changed(self) -> None:
@@ -779,7 +854,7 @@ class _TextView:
             if parts:
                 newly = np.concatenate(parts)
                 newly.sort()  # original frame order: parts read back exactly as the frame slice
-                visible.append((segment, segment.frame.iloc[newly]))
+                visible.append((segment, pa.concat_tables(list(segment.rows.take(newly))).to_pandas()))
         if not visible:
             return False
         rows = _concat_slices([index_rows for _segment, index_rows in visible]).copy()
@@ -812,14 +887,8 @@ class _TextView:
         index_name = f"part_{self._part_seq:04d}.parquet"
         if self._stash_index_dir is None or self._stash_library_dir is None:
             for dataset, group in groups:
-                pq.write_table(
-                    self._body_table(dataset, group),
-                    self.out_library_dir / f"{dataset}{suffix}",
-                )
-            pq.write_table(
-                pa.Table.from_pandas(rows, preserve_index=False),
-                self.out_index_dir / index_name,
-            )
+                self._write_bodies(dataset, group, self.out_library_dir / f"{dataset}{suffix}")
+            _write_frame(rows, self.out_index_dir / index_name)
         else:
             self._publish_roll(rows, groups, index_name=index_name, suffix=suffix)
         self._part_seq += 1
@@ -854,13 +923,13 @@ class _TextView:
                 _publish_part(
                     stash_library / name,
                     self.out_library_dir / name,
-                    build=partial(self._body_table, dataset, group),
+                    write=partial(self._write_bodies, dataset, group),
                 )
             _publish_checked_part(
                 stash_index / index_name,
                 self.out_index_dir / index_name,
                 row_count=len(rows),
-                build=partial(pa.Table.from_pandas, rows, preserve_index=False),
+                write=partial(_write_frame, rows),
                 label=f"text index {index_name}",
             )
 
@@ -875,10 +944,10 @@ class _TextView:
         ]
         return min(map(_cutoff_ns, boundaries)) if boundaries else None
 
-    def _body_table(
-        self, dataset: str, sources: list[tuple[Path | None, set[str]]]
-    ) -> pa.Table:
-        """The visible body rows one dataset contributes to one roll."""
+    def _write_bodies(
+        self, dataset: str, sources: list[tuple[Path | None, set[str]]], path: Path
+    ) -> None:
+        """Write the visible body rows one dataset contributes to one roll."""
 
         bodies = [
             rows
@@ -890,7 +959,7 @@ class _TextView:
             body = pd.DataFrame(columns=["text_id", "body"])
         else:
             body = body[[c for c in ("text_id", "body") if c in body.columns]]
-        return pa.Table.from_pandas(body, preserve_index=False)
+        _write_frame(body, path)
 
     @staticmethod
     def _read_body_rows(
@@ -911,7 +980,11 @@ class _TextView:
             return body.loc[body["text_id"].astype(str).isin(text_ids)]
 
 
-def _publish_part(stash: Path, out: Path, *, build: Callable[[], pa.Table]) -> None:
+def _write_frame(frame: pd.DataFrame, path: Path) -> None:
+    pq.write_table(pa.Table.from_pandas(frame, preserve_index=False), path)
+
+
+def _publish_part(stash: Path, out: Path, *, write: Callable[[Path], None]) -> None:
     """Materialise ``stash`` if it is absent and hardlink it to ``out``.
 
     The caller holds the publication lock. A part already in the stash was
@@ -922,7 +995,7 @@ def _publish_part(stash: Path, out: Path, *, build: Callable[[], pa.Table]) -> N
     if not stash.exists():
         tmp = stash.parent / f".{stash.name}.{uuid.uuid4().hex}.tmp"
         try:
-            pq.write_table(build(), tmp)
+            write(tmp)
             os.replace(tmp, stash)
         finally:
             if tmp.exists():
@@ -935,7 +1008,7 @@ def _publish_checked_part(
     out: Path,
     *,
     row_count: int,
-    build: Callable[[], pa.Table],
+    write: Callable[[Path], None],
     label: str,
 ) -> None:
     """Publish one stash part whose newly-visible row count is known.
@@ -951,7 +1024,7 @@ def _publish_checked_part(
                 f"Timeview stash mismatch for {label}: stashed {stashed_rows} rows, "
                 f"expected {row_count}"
             )
-    _publish_part(stash, out, build=build)
+    _publish_part(stash, out, write=write)
 
 
 @contextmanager

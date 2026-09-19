@@ -15,9 +15,7 @@ import math
 import os
 import shutil
 import stat
-import threading
 import uuid
-from collections import OrderedDict
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -27,6 +25,7 @@ from pathlib import Path
 from time import perf_counter
 
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 from autotrade.environment.broker import BrokerProfile
@@ -61,7 +60,7 @@ from autotrade.environment.replay.style import (
     slot_benchmark,
     write_style_rollup,
 )
-from autotrade.environment.replay.timeview import Timeview
+from autotrade.environment.replay.timeview import ReplayRows, Timeview
 from autotrade.environment.runtime import (
     chmod_tree,
     new_id,
@@ -140,7 +139,6 @@ class ResearchPITSnapshotProvider:
         )
         self.cache_root = Path(cache_root).resolve() if cache_root is not None else self.experiment_dir / "pit_views"
         self.cache_root.mkdir(parents=True, exist_ok=True)
-        self._replay_frame_cache = _ReplayFrameCache()
         record = self._bind_cache_contract()
         if pit_views_seed is not None:
             seed_pit_views(
@@ -505,10 +503,10 @@ class _ReplaySpanView:
 
     A span is one book, so one Timeview tree runs across all of its slots. Every
     row of a slot becomes available only after the slot's anchor, so the next
-    slot is decoded at the first decision later than that anchor -- no earlier
-    decision could see any of it -- and only after the view has let go of what
-    the slots before it already published (``Timeview.continue_into``). Minute
-    prices come from each slot's own file, row group by row group.
+    slot is opened at the first decision later than that anchor -- no earlier
+    decision could see any of it -- and only after the view has let go of the
+    slots before it that it has published entirely (``Timeview.continue_into``).
+    Minute prices come from each slot's own file, row group by row group.
     """
 
     def __init__(
@@ -517,15 +515,15 @@ class _ReplaySpanView:
         host_dir: Path,
         snapshot_dir: Path,
         slots: Sequence[_SpanSlot],
-        load_frames: Callable[[_SpanSlot], dict[str, pd.DataFrame]],
+        open_slot: Callable[[_SpanSlot], Mapping[str, ReplayRows]],
         max_intraday_row_group_rows: int,
         timer: PhaseTimer,
     ) -> None:
         self._slots = tuple(slots)
-        self._load_frames = load_frames
+        self._open_slot = open_slot
         self._timer = timer
         with timer.phase("replay_frames"):
-            frames = load_frames(self._slots[0])
+            replay = open_slot(self._slots[0])
         with timer.phase("timeview_init"):
             self.minute_sources = tuple(
                 HistoricalMinuteSource(path, max_row_group_rows=max_intraday_row_group_rows)
@@ -536,7 +534,7 @@ class _ReplaySpanView:
             self.timeview = Timeview(
                 host_dir=host_dir,
                 snapshot_dir=snapshot_dir,
-                replay_frames=frames,
+                replay=replay,
                 replay_text_library_dir=self._slots[0].replay_dir / "text_library",
                 incremental_domains={"intraday_1min"} if self.minute_sources else None,
                 stash_dir=self._slots[0].stash_dir,
@@ -550,7 +548,7 @@ class _ReplaySpanView:
                 break
             with self._timer.phase("replay_frames"):
                 self.timeview.continue_into(
-                    partial(self._load_frames, slot),
+                    partial(self._open_slot, slot),
                     replay_text_library_dir=slot.replay_dir / "text_library",
                     stash_dir=slot.stash_dir,
                 )
@@ -725,7 +723,6 @@ class PITDailyEvaluationBackend:
         self.nl_config = nl_config or NLConfig()
         self.nl_failure_policy = nl_failure_policy
         self.max_intraday_row_group_rows = int(max_intraday_row_group_rows)
-        self._replay_frame_cache = _ReplayFrameCache()
         # Host-side slots of each completed result, by ``result.json`` path. The
         # Agent-readable record names its slots opaquely, so the null control
         # takes the replay directories from the bundle this backend evaluated
@@ -745,7 +742,7 @@ class PITDailyEvaluationBackend:
         ``request.snapshot.replay_ref``. The whole span is one book: one
         Broker, one strategy process with one ``state_dir`` and fit schedule,
         and one as-of tree run from ``request.start`` (the first slot's start)
-        to ``request.end`` (the last slot's end), and a slot is decoded only
+        to ``request.end`` (the last slot's end), and a slot is opened only
         once the replay reaches it.
 
         ``start_day`` and ``max_days`` truncate the replay to a window inside
@@ -755,7 +752,7 @@ class PITDailyEvaluationBackend:
         caller decides what the result is allowed to become; see
         ``SmokeBacktestTool``). A window that opens late still reads the same
         rolling as-of view the whole span would have built by then: the view
-        decodes every slot up to the first decision it is asked for.
+        rolls every slot up to the first decision it is asked for.
         """
         started_at = utc_now_iso()
         timer = PhaseTimer()
@@ -845,12 +842,7 @@ class PITDailyEvaluationBackend:
             host_dir=asof_dir,
             snapshot_dir=snapshot_dir,
             slots=slots,
-            load_frames=lambda slot: _load_replay_frames(
-                slot.replay_dir,
-                generation_id=request.snapshot.generation_id,
-                replay_manifest=slot.manifest,
-                cache=self._replay_frame_cache,
-            ),
+            open_slot=lambda slot: _open_replay_rows(slot.replay_dir),
             max_intraday_row_group_rows=self.max_intraday_row_group_rows,
             timer=timer,
         )
@@ -873,7 +865,7 @@ class PITDailyEvaluationBackend:
             refreshed.add(key)
             # Sub-phases of data_view: the as-of build dominated replay wall on
             # real runs, and "which of the three" is the whole diagnosis. A
-            # later slot's decode lands in replay_frames, inside data_view.
+            # later slot's opening lands in replay_frames, inside data_view.
             with timer.phase("asof_unlock"):
                 lock.unlock_directories()
             try:
@@ -920,6 +912,9 @@ class PITDailyEvaluationBackend:
             finally:
                 nl_service.close()
                 lock.lock()
+                # The row groups this replay decoded are freed; hand their
+                # pages back to the OS instead of keeping them in the pool.
+                pa.default_memory_pool().release_unused()
             record["pit"] = {
                 "snapshot_id": request.snapshot.snapshot_id,
                 "generation_id": request.snapshot.generation_id,
@@ -1410,7 +1405,7 @@ def prebuild_asof_stash(
             host_dir=host,
             snapshot_dir=snapshot,
             slots=slots,
-            load_frames=lambda slot: _decode_replay_frames(slot.replay_dir),
+            open_slot=lambda slot: _open_replay_rows(slot.replay_dir),
             max_intraday_row_group_rows=2_000_000,
             timer=PhaseTimer(),
         )
@@ -1515,53 +1510,15 @@ def _require_record_shape(
             raise TypeError(f"{label}.{key} must be an array")
 
 
-# Decoded replay slots one cache keeps. A decoded full-year slot holds about
-# 16 GiB, most of it ``events``, and a replay that spans several slots moves
-# through them in order and does not go back to one it has left (measured under
-# the earlier one-slot-per-stage layout: 167 replays over 72 h, 28 slot changes,
-# no return).
-_REPLAY_FRAME_CACHE_SLOTS = 1
+def _open_replay_rows(replay_dir: Path) -> dict[str, ReplayRows]:
+    """Every agent-readable domain of one slot, opened for the Timeview to roll.
 
-
-class _ReplayFrameCache:
-    """The most recently used decoded replay slots of one backend or provider.
-
-    Unbounded, it grew a long-lived worker by one slot per stage (one worker held
-    69 GiB with four slots). A miss drops the least recently used slots BEFORE
-    it decodes, so once no replay still holds them their pages are reused for
-    the new slot instead of the process holding both at the decode peak. The decode runs under the lock:
-    ``batch_validate`` replays that miss together decode the slot once and
-    share its frames, which every caller treats as read-only.
+    Only the footer is read here, and the Timeview reads only each domain's
+    gating columns; a domain's rows are read from its row groups at the rolls
+    that publish them (``ReplayRows``), so no slot is ever decoded whole.
     """
 
-    def __init__(self, max_slots: int = _REPLAY_FRAME_CACHE_SLOTS) -> None:
-        self._max_slots = max_slots
-        self._slots: OrderedDict[
-            str, tuple[dict[str, object], dict[str, pd.DataFrame]]
-        ] = OrderedDict()
-        self._lock = threading.Lock()
-
-    def load(
-        self,
-        key: str,
-        identity: dict[str, object],
-        decode: Callable[[], dict[str, pd.DataFrame]],
-    ) -> dict[str, pd.DataFrame]:
-        with self._lock:
-            if key in self._slots and self._slots[key][0] == identity:
-                self._slots.move_to_end(key)
-                return self._slots[key][1]
-            # A rebuilt path under a new generation replaces its stale entry.
-            self._slots.pop(key, None)
-            while len(self._slots) >= self._max_slots:
-                self._slots.popitem(last=False)
-            frames = decode()
-            self._slots[key] = (identity, frames)
-            return frames
-
-
-def _decode_replay_frames(replay_dir: Path) -> dict[str, pd.DataFrame]:
-    frames: dict[str, pd.DataFrame] = {}
+    rows: dict[str, ReplayRows] = {}
     for name, filename in (
         ("daily", "daily.parquet"),
         ("events", "events.parquet"),
@@ -1572,32 +1529,10 @@ def _decode_replay_frames(replay_dir: Path) -> dict[str, pd.DataFrame]:
     ):
         path = replay_dir / filename
         if path.exists():
-            frames[name] = pd.read_parquet(path)
+            rows[name] = ReplayRows(path)
         elif name == "daily":
             raise FileNotFoundError(f"replay slot has no daily.parquet: {replay_dir}")
-        else:
-            frames[name] = pd.DataFrame()
-    return frames
-
-
-def _load_replay_frames(
-    replay_dir: Path,
-    *,
-    generation_id: str,
-    replay_manifest: dict[str, object],
-    cache: _ReplayFrameCache,
-) -> dict[str, pd.DataFrame]:
-    identity: dict[str, object] = {
-        "generation_id": generation_id,
-        "replay_manifest": replay_manifest,
-    }
-    cached = cache.load(
-        str(replay_dir.resolve()), identity, lambda: _decode_replay_frames(replay_dir)
-    )
-    frames = dict(cached)
-    # The one frame every replay filters and hands on; the others are shared.
-    frames["daily"] = cached["daily"].copy()
-    return frames
+    return rows
 
 
 def load_slot_corporate_actions(

@@ -1120,7 +1120,7 @@ class SnapshotBuilderTest(unittest.TestCase):
         from datetime import datetime as dt
         from zoneinfo import ZoneInfo
 
-        from autotrade.environment.replay.timeview import Timeview
+        from autotrade.environment.replay.timeview import ReplayRows, Timeview
 
         with tempfile.TemporaryDirectory() as tmp:
             raw = Path(tmp) / "raw"
@@ -1146,7 +1146,7 @@ class SnapshotBuilderTest(unittest.TestCase):
             timeview = Timeview(
                 host_dir=Path(tmp) / "asof",
                 snapshot_dir=snapshot,
-                replay_frames={"events": pd.read_parquet(slot / "events.parquet")},
+                replay={"events": ReplayRows(slot / "events.parquet")},
             )
             asof_dir, _ = timeview.refresh(pd.Timestamp("2021-10-12 08:30", tz="Asia/Shanghai"))
             events_dir = Path(asof_dir) / "events"
@@ -1351,7 +1351,7 @@ class SnapshotBuilderTest(unittest.TestCase):
         # the rolling parts; that residual is documented, not hidden.
         from datetime import datetime as dt
 
-        from autotrade.environment.replay.timeview import Timeview
+        from autotrade.environment.replay.timeview import ReplayRows, Timeview
 
         with tempfile.TemporaryDirectory() as tmp:
             raw = Path(tmp) / "raw"
@@ -1376,7 +1376,7 @@ class SnapshotBuilderTest(unittest.TestCase):
             timeview = Timeview(
                 host_dir=Path(tmp) / "asof",
                 snapshot_dir=snapshot_a,
-                replay_frames={"macro": pd.read_parquet(slot / "macro.parquet")},
+                replay={"macro": ReplayRows(slot / "macro.parquet")},
             )
 
             def index_dates(asof_dir: str) -> list[str]:
