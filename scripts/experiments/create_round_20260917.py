@@ -24,16 +24,17 @@ between `open_research_20260917d` and `open_research_20260917e` rather than
 appended: it registers the one lever measured to lift the information ratio, and
 an open seed is cheap to keep waiting.
 
-`open_research_20260917` and its `b` through `h` seeds are eight independent
-seeds of one search, not eight variants of one design: they share a
+`open_research_20260917` and its `b` through `j` seeds are ten independent
+seeds of one search, not ten variants of one design: they share a
 single reference pack, because what an open session finds depends on which
 branch it takes first. The pack names none of them, so each session reads as the
-only one. The first four carry the same directive byte for byte. `e` through `h`
+only one. The first four carry the same directive byte for byte. `e` through `j`
 carry one extra sentence each -- an opening family to start from -- because the
 three seeds that have ended all started from the pack's starter composite and
 spent their rounds on the same three construction axes. Each opening family is a
-different data face, and none is one the closed table closes in the form the
-seed is asked to try. The opening family is where a session begins, not where it
+different data face -- `j` a construction instead, once the mounted faces ran
+out -- and none is one the closed table closes in the form the seed is asked to
+try. The opening family is where a session begins, not where it
 must stay: the amended standards tell it to pivot to the next pre-registered
 direction while budget remains.
 
@@ -65,10 +66,10 @@ signals share, so the arm buys the denominator instead of hunting alpha. Its
 pack's closed table bans -- one score spread over thirty names -- which ends the
 arm if it wins.
 
-The eight open arms register NO FAMILY. Each looks for a long-only 15-30 name
+The ten open arms register NO FAMILY. Each looks for a long-only 15-30 name
 daily strategy on the research period under the refreshed evidence standard of
 its pack -- information ratio 0.95, four of four positive research years, and
-an exposure budget as a hard gate rather than a reading. `e` through `h` name an
+an exposure budget as a hard gate rather than a reading. `e` through `j` name an
 opening family only to keep the seeds from re-deriving a sibling's closed ground.
 
 An arm is one entry of ARMS:
@@ -128,7 +129,8 @@ decides how much each forward verdict is worth.
 
 - open_research_20260917, open_research_20260917b, open_research_20260917c,
   open_research_20260917d, open_research_20260917e, open_research_20260917f,
-  open_research_20260917g, open_research_20260917h (one shared pack):
+  open_research_20260917g, open_research_20260917h, open_research_20260917i,
+  open_research_20260917j (one shared pack):
   This direction was queued after the operator had read the forward and Held-out verdicts of both
   frozen arms. The exposure budget and the 4/4-year condition were added after the reviewer had
   seen both forward verdicts, and the reviewer knows which style reversed. Both are reproducible
@@ -139,7 +141,7 @@ decides how much each forward verdict is worth.
   closure rests on later rows keep the prohibition without the number. No dataset, cadence,
   basket size or mechanism in this pack was chosen because of what happened after 2025-06-30.
 
-  The eight open arms share one `workspace_reference`: they are independent seeds of a search
+  The ten open arms share one `workspace_reference`: they are independent seeds of a search
   whose outcome depends on which branch the Agent takes first, not eight variants of one design.
   The pack names none of them and says nothing about the others, so each session reads as the
   only one.
@@ -218,6 +220,34 @@ covers far more of the market than sell-side coverage does and has never been
 read as a screen. The open pack's field map now also carries the unlock face's
 double-counting rule, which a per-row sum reads as up to 169.9 % of shares
 outstanding.
+
+`i` and `j` were appended when `pv_exposure_budget_20260917` ended `no_edge` and
+the queue ran dry behind the three arms still running, and the closed table
+picked them by elimination rather than by preference. Of the faces this round
+mounts with a row-level `available_at`, the table already closes margin balances
+and the marginable list, block trades, IPOs, holder counts and top-ten float
+holders, chip distribution, the dragon-board lists, dividends, the audit opinion,
+segment concentration and the whole sell-side consensus and revision family; `d`
+through `h` hold five more; minute bars, the opening auction, northbound flow,
+`intraday_flow` and `index_weight` are not mounted at all; and the one sell-side
+column nobody has read -- the target price -- is populated on 0.4 % (`max_price`)
+and 25 % (`min_price`) of rows in the months sampled, too thin to carry a book.
+So `i` opens on the monthly funding cycle (`sf_month`, `cn_m`, `shibor`,
+`shibor_lpr`) as a CROSS-SECTIONAL sensitivity score, where the table closes
+macro state only as a timing gate whose null control cannot judge it; it is also
+the last information family on the mount that is plausibly orthogonal to price
+volume, quality, value and low volatility, which is what the pack's own
+directional section asks an open seed to look for. `j` opens on a CONSTRUCTION
+instead of a data face, which the pack's standards make a first-class candidate:
+capital split permanently across staggered rebalance dates -- three cohorts of
+five names, one rotating each month -- against the same score on one rebalance
+date. The table closes staging into one target basket over several days, wider
+baskets and slower cadences; it has never measured the dispersion of the
+rebalance date itself, and this repository has read the same executable on the
+same quarter at +7 % and at -19 %, which is the variance that gates 1 and 2 keep
+failing on. The open pack's field map now also carries the monthly macro face's
+units and its month-end-plus-31-days visibility, which a `month`-column filter
+would turn into a full month of look-ahead.
 
 Usage:
   PYTHONPATH=src ~/miniconda3/envs/quant/bin/python \\
@@ -439,6 +469,37 @@ ARMS: dict[str, dict[str, object]] = {
             "机制归因对照是不筛。这只是开局：每个方向在花回放预算之前先按 refs/exploration-plan.md 做"
             "离线筛选，一个方向被证伪而预算还有余量时换下一个预登记方向，构造、筛子与新的信息家族都"
             "可以开，不要提前以 no_edge 收尾。"
+        ),
+    },
+    "open_research_20260917i": {
+        "workspace_reference": "configs/workspace_refs/open_research_20260917",
+        "research_directive": (
+            "本臂是开放方向的臂：不指定机制家族，在研究期上找一个只做多、15–30 只、有经济解释并在组合"
+            "尺度上成立的日频策略。判据、已关闭家族表、对照、敞口预算、提名条件与收尾规则只以 "
+            "refs/standards.md 为准（完整研究期信息比率 ≥ 0.95、四个研究年的中性化超额全为正、敞口三项"
+            "都是硬门），先读它与 refs/README.md。开局方向：把宏观资金面（社融 sf_month、货币 cn_m、"
+            "短端利率 shibor 与 shibor_lpr）做成一条截面敏感度排序分数，持有最不依赖融资周期的那一端——"
+            "已关闭表关掉的是宏观状态作择时门，截面形态从来没有被量过，它也是本轮挂载的面里少数几条可能"
+            "与价量、质量、价值、低波都正交的信息；篮子任何时候都满仓，退化成择时即证伪。月度宏观面的"
+            "单位与可见性先读 refs/pit-field-map.md，机制归因对照是同一个池不按它排序。这只是开局：每个"
+            "方向在花回放预算之前先按 refs/exploration-plan.md 做离线筛选，一个方向被证伪而预算还有余量"
+            "时换下一个预登记方向，构造、筛子与新的信息家族都可以开，不要提前以 no_edge 收尾。"
+        ),
+    },
+    "open_research_20260917j": {
+        "workspace_reference": "configs/workspace_refs/open_research_20260917",
+        "research_directive": (
+            "本臂是开放方向的臂：不指定机制家族，在研究期上找一个只做多、15–30 只、有经济解释并在组合"
+            "尺度上成立的日频策略。判据、已关闭家族表、对照、敞口预算、提名条件与收尾规则只以 "
+            "refs/standards.md 为准（完整研究期信息比率 ≥ 0.95、四个研究年的中性化超额全为正、敞口三项"
+            "都是硬门），先读它与 refs/README.md。开局方向：把复核时点本身分散开——资金常驻地分成几组、"
+            "各组在错开的复核日独立选名并各持一整段（例如三组各 5 只、每月轮换一组，整书仍是 15 只、"
+            "年换手与单一复核日的同一本书相当），检验逐年符号与回撤是不是被一个复核日的运气主导；已关闭"
+            "表关掉的是同一个目标篮子分多日建仓、放宽只数与更慢的复核，没有一条测过把资金常驻地分给错开"
+            "的复核日，而本仓库同一份可执行文件在同一个季度上读到过 +7 % 与 −19 %。机制归因对照是同一个"
+            "分数、同一个只数、单一复核日。这只是开局：每个方向在花回放预算之前先按 "
+            "refs/exploration-plan.md 做离线筛选，一个方向被证伪而预算还有余量时换下一个预登记方向，"
+            "构造、筛子与新的信息家族都可以开，不要提前以 no_edge 收尾。"
         ),
     },
 }

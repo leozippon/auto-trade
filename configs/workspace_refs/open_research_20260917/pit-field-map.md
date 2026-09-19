@@ -46,6 +46,9 @@ fund  = pd.read_parquet(context.asof_dir + "/fundamentals", columns=["dataset", 
 | `daily.vol`、`amount`、`circ_mv`、`total_mv` | 股、元、元、元（已从原始湖的手、千元、万元归一） |
 | `daily.pct_chg`、`turnover_rate` | 小数 |
 | `macro.index_daily.pct_chg` | **百分数**（0.68 = 0.68%），÷ 100 |
+| `macro.sf_month` 的 `inc_month`/`inc_cumval` | **亿元**；`stk_endval` 是**万亿元** |
+| `macro.cn_m` 的 `m0`/`m1`/`m2` | **亿元**；`*_yoy`、`*_mom` 是百分数 |
+| `macro.shibor`、`macro.shibor_lpr` | 百分数（3.0 = 3.0 %） |
 | `events.moneyflow` 的 `*_amount` | **万元** |
 | `events.report_rc.np` | **万元**；`quarter` 是财年标签，不是季度 |
 | `fundamentals` 的报表金额 | 元，年初至今累计（资产负债表是时点值） |
@@ -62,5 +65,6 @@ fund  = pd.read_parquet(context.asof_dir + "/fundamentals", columns=["dataset", 
 - **印花税在研究期内切换**（卖出 10 bp → 5 bp），早期研究年的往返成本更高。
 - **`n_income` 含少数股东损益**，归母净利润是 `n_income_attr_p`。
 - **解禁面会把同一笔解禁重复计数**：逐年重复公告（股数按股本变动重述、日期有时挪一天）与两次下载并集里的重复行，逐行相加能把单个持有人的一笔持仓读成总股本的 169.9 %。规则是「一个持有人在窗口里只算一行」——取最新公告，其中股数最大，并列取比例最小。
+- **月度宏观面整整滞后一个月才可见**：`sf_month`、`cn_m` 与 `cn_cpi`/`cn_ppi`/`cn_pmi`/`cn_gdp` 的行级 `available_at` 按「月末 + 31 天」保守盖章，某个月的数要到次月末之后才进得了决策截面；按 `month` 列推可见性会把整整一个月的前视带进来。这些序列在同一个决策日对全池取同一个值，截面上只能通过各个名字各自的敏感度或暴露产生区分度。
 - **`circ_mv` 在原始湖里是万元**，快照里已归一为元：离线普查直接读原始湖会差 1 万倍，而它通常同时是池的截取列与规模中性化列，一处错会静默地把两件事同时弄反。
 - **对照不得对自己的面中性化**；训练面板与决策截面必须由同一个函数构建。
