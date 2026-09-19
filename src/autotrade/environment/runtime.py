@@ -13,9 +13,10 @@ import fcntl
 import json
 import os
 import re
+import shutil
 import threading
 import uuid
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -326,6 +327,42 @@ def chmod_tree(root: Path, *, file_mode: int, dir_mode: int) -> None:
         root.chmod(dir_mode if root.is_dir() else file_mode)
     except OSError:
         pass
+
+
+def rmtree_keeping_file_modes(root: Path) -> None:
+    """Remove a tree whose files may be hardlinks this caller does not own.
+
+    Only the directories are made writable. Unlinking a child needs write
+    permission on the directory holding it and never on the child itself,
+    while a file's mode belongs to its inode: chmod'ing a payload file on the
+    way out would also unfreeze every other link to it. PIT staging trees are
+    hardlink copies of published views, so one such chmod turns every
+    experiment's decision snapshot writable at once. Single source for the
+    PIT cache's staging and slot removals; :func:`chmod_tree`'s tolerant
+    per-path policy applies to the directories for the same reason it does
+    there."""
+
+    root = Path(root)
+    if not root.exists():
+        return
+    for directory in _tree_directories(root):
+        try:
+            directory.chmod(0o755)
+        except OSError:
+            pass
+    shutil.rmtree(root)
+
+
+def _tree_directories(root: Path) -> Iterator[Path]:
+    """``root`` and every real directory under it, parents before children."""
+
+    yield root
+    for directory, dirnames, _filenames in os.walk(root):
+        base = Path(directory)
+        for name in dirnames:
+            child = base / name
+            if not child.is_symlink():
+                yield child
 
 
 @dataclass

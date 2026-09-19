@@ -15,7 +15,7 @@ import pytest
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.runtime import chmod_tree
 from autotrade.environment.strategy import StrategySchedule
-from autotrade.pipelines import pit_backend
+from autotrade.pipelines import pit_backend, pit_views_seed
 from autotrade.pipelines.calendar import ResearchGeometry
 from autotrade.pipelines.config import (
     DEFAULT_RESEARCH_GEOMETRY,
@@ -202,6 +202,55 @@ def test_seeded_tree_is_indistinguishable_from_a_cold_build(tmp_path: Path) -> N
         (staging / "manifest.json").write_text("{}", encoding="utf-8")
         os.replace(staging, fresh)
     assert (fresh / "manifest.json").is_file()
+
+
+def test_losing_the_publication_race_does_not_unfreeze_the_view_that_won(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A discarded staging copy must not change the mode of anything it links.
+
+    The staging tree is a hardlink copy, so its files ARE the seed's files and
+    the files of every experiment already seeded from them. Unlocking the
+    payload to remove the copy unfroze all of them at once, and from then on
+    every formal replay on the host died in ``_require_read_only_tree`` with
+    ``decision snapshot is not read-only`` until the next seeding re-locked
+    them. Only the directories may be opened on the way out.
+    """
+
+    seed = tmp_path / "seed"
+    dest = tmp_path / "exp" / "pit_views"
+    record = _record(tmp_path / "raw")
+    _write_seed(seed, record)
+    _freeze_seed(seed)
+
+    target = dest / "decision" / SEED_DECISION_KEY
+    source = seed / "decision" / SEED_DECISION_KEY
+    real_chmod_tree = pit_views_seed.chmod_tree
+
+    def chmod_tree_then_lose_the_race(root: Path, **modes: int) -> None:
+        real_chmod_tree(root, **modes)
+        if not root.name.startswith(f".{SEED_DECISION_KEY}") or target.exists():
+            return
+        # The rival writer publishes between this lock and the rename below,
+        # exactly as it would: a complete, read-only, hardlinked view. The
+        # rename then fails because the destination is a non-empty directory.
+        target.mkdir(parents=True)
+        for child in sorted(source.iterdir()):
+            os.link(child, target / child.name)
+        real_chmod_tree(target, file_mode=0o444, dir_mode=0o555)
+
+    monkeypatch.setattr(pit_views_seed, "chmod_tree", chmod_tree_then_lose_the_race)
+
+    assert seed_pit_views(dest, seed, expected_provider=record) is True
+
+    # The winner stands and nothing of the discarded copy is left beside it.
+    assert (target / "daily.parquet").read_bytes() == b"decision-bytes"
+    assert not [path for path in dest.rglob("*") if ".tmp" in path.name]
+    # Every shared inode is still frozen: the seed's own tree, the view that
+    # won, and therefore every other experiment linked to the same files.
+    for tree in (source, target):
+        for path in sorted(tree.rglob("*")):
+            assert stat.S_IMODE(path.stat().st_mode) == 0o444, path
 
 
 def test_reseeding_an_already_seeded_experiment_changes_nothing(tmp_path: Path) -> None:

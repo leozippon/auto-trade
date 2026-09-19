@@ -65,6 +65,7 @@ from autotrade.environment.replay.timeview import Timeview
 from autotrade.environment.runtime import (
     chmod_tree,
     new_id,
+    rmtree_keeping_file_modes,
     utc_now_iso,
     write_json_atomic,
 )
@@ -288,12 +289,12 @@ class ResearchPITSnapshotProvider:
                         )
                 except Exception:
                     if target.exists():
-                        _rmtree_replay_staging(target)
+                        rmtree_keeping_file_modes(target)
                     raise
                 return target
             finally:
                 if staging.exists():
-                    _rmtree_replay_staging(staging)
+                    rmtree_keeping_file_modes(staging)
 
     def _replay_source(self, start: str, end: str, decision: datetime) -> Path:
         """The single unphased store behind every phase view of one window.
@@ -336,7 +337,7 @@ class ResearchPITSnapshotProvider:
                 return target
             finally:
                 if staging.exists():
-                    _rmtree_replay_staging(staging)
+                    rmtree_keeping_file_modes(staging)
 
 
 @dataclass(frozen=True)
@@ -1719,17 +1720,6 @@ def _hardlink_replay_entry(source: Path, dest: Path) -> None:
                 "hardlink is required and copy is refused"
             ) from exc
         raise
-
-
-def _rmtree_replay_staging(staging: Path) -> None:
-    # Payload files may be hardlinks of an immutable unphased slot. Only
-    # directories need to be writable so children can be unlinked.
-    for path in [staging, *(item for item in staging.rglob("*") if item.is_dir())]:
-        try:
-            path.chmod(0o755)
-        except OSError:
-            pass
-    shutil.rmtree(staging)
 
 
 def _replay_manifest_matches(

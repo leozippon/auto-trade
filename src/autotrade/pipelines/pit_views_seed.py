@@ -20,7 +20,6 @@ from __future__ import annotations
 import errno
 import json
 import os
-import shutil
 import stat
 import uuid
 from collections.abc import Mapping, Sequence
@@ -29,7 +28,7 @@ from datetime import datetime
 from pathlib import Path
 
 from autotrade.environment.data.snapshot import SnapshotConfig
-from autotrade.environment.runtime import chmod_tree
+from autotrade.environment.runtime import chmod_tree, rmtree_keeping_file_modes
 from autotrade.pipelines.calendar import ResearchGeometry, Slot
 from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION
 
@@ -236,7 +235,16 @@ def seed_pit_views(
 def _publish_seed_entry(
     source: Path, seed: Path, dest_root: Path, *, dir_mode: int
 ) -> None:
-    """Hardlink one seed entry into place, or leave an existing one alone."""
+    """Hardlink one seed entry into place, or leave an existing one alone.
+
+    The staging tree is a hardlink copy, so its files are the seed's files and
+    the files of every experiment already seeded from them. Locking it to
+    0444/``dir_mode`` before the rename is what publishes the view read-only;
+    discarding it must therefore touch the directories only
+    (:func:`rmtree_keeping_file_modes`). Unlocking the payload on the way out
+    unfroze the shared inodes instead, and every decision snapshot on the host
+    failed ``_require_read_only_tree`` until the next seeding re-locked them.
+    """
 
     target = dest_root / source.relative_to(seed)
     _assert_inside(target, dest_root)
@@ -252,12 +260,13 @@ def _publish_seed_entry(
         try:
             staging.replace(target)
         except OSError:
+            # Another writer published this view first; its tree is the one
+            # that stands and this staging copy is simply discarded.
             if not target.exists():
                 raise
     finally:
         if staging.exists():
-            chmod_tree(staging, file_mode=0o644, dir_mode=0o755)
-            shutil.rmtree(staging)
+            rmtree_keeping_file_modes(staging)
 
 
 def _completed_seed_views(seed: Path) -> list[Path]:
