@@ -715,6 +715,27 @@ class UnitRegistryProjectionTest(unittest.TestCase):
             else:
                 self.assertIsNone(record["source_unit"], record)
 
+    def test_index_weight_is_a_percentage_read_by_the_full_column_identity(self):
+        from autotrade.environment.data.units import resolve_field
+
+        # One column name, two meanings: the constituent's share of an index
+        # and an annualized repo rate. Both are percent-numbers, and a book
+        # built on index_weight is wrong by 100x if the share is read as a
+        # fraction, so the registry states it per (file, dataset, column).
+        share = resolve_field("macro.parquet", "index_weight", "weight")
+        self.assertEqual(share["source_unit"], "percent")
+        self.assertNotIn("factor", share)
+        self.assertIn("4.64 = 4.64%", str(share["note"]))
+        self.assertEqual(
+            resolve_field("macro.parquet", "repo_daily", "weight")["source_unit"], "percent"
+        )
+        # The constituent and the index it belongs to are identifiers, not
+        # stock codes: the per-stock universe screen never touches these rows.
+        for column in ("index_code", "con_code"):
+            record = resolve_field("macro.parquet", "index_weight", column)
+            self.assertEqual(record["semantic_type"], "identifier", column)
+            self.assertIsNone(record["source_unit"], column)
+
     def test_registry_structure_and_selectable_dataset_coverage(self):
         from autotrade.environment.data.snapshot import SELECTABLE_DATASETS
         from autotrade.environment.data.units import (

@@ -6919,4 +6919,16 @@ class FullPortContractTest(unittest.TestCase):
             set(SELECTABLE_DATASETS["macro"]),
             set(inventory["macro.parquet"]),
         )
-        self.assertTrue(set(SELECTABLE_DATASETS["macro"]).issubset(common.MACRO_SPECS))
+        # Every selectable macro dataset has a download contract. Almost all
+        # are macro-tier series; `index_weight` is the exception, a reference
+        # table the macro domain reads (month-end index constituents), landed
+        # by the reference sweep inside the same evening job, hence the same
+        # refresh node. A name in neither tier would be selectable with nothing
+        # keeping it up to date.
+        self.assertTrue(
+            set(SELECTABLE_DATASETS["macro"])
+            <= set(common.MACRO_SPECS) | set(common.REFERENCE_DATASETS)
+        )
+        self.assertEqual(
+            set(SELECTABLE_DATASETS["macro"]) - set(common.MACRO_SPECS), {"index_weight"}
+        )

@@ -341,7 +341,16 @@ class RefreshNodeDriftGuardTest(unittest.TestCase):
         launch = REFRESH_NODES[EVENING_NODE].start
         for dataset, contract in MACRO_DATASET_CONTRACTS.items():
             with self.subTest(dataset=dataset):
-                self.assertIn(dataset, MACRO_REGIME_DEFAULT_DATASETS)
+                # index_weight is the one reference table the macro domain
+                # reads. The evening job's reference sweep is unconditional
+                # (--refresh-reference-datasets only FORCES a re-request, and
+                # no flag can narrow the sweep), so a month-end cross-section
+                # lands that same night, exactly like a macro-tier series.
+                if dataset in REFERENCE_DATASETS:
+                    self.assertEqual(dataset, "index_weight")
+                    self.assertNotIn("--reference-datasets", evening["extra_args"])
+                else:
+                    self.assertIn(dataset, MACRO_REGIME_DEFAULT_DATASETS)
                 self.assertNotIn(dataset, MACRO_DATASET_REFRESH_NODES)
                 self.assertEqual(contract.available_time, daily_close)
                 self.assertLess(contract.available_time, launch)

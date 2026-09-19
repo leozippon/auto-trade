@@ -204,6 +204,16 @@ def default_tushare_contracts() -> dict[str, DatasetContract]:
 # releases (monthly/quarterly statistics, broker_recommend), announcement
 # tables keyed by ann_date (cb_call) and the global tier (its data date closes
 # after the evening launch and lands a night later) keep the adapter's stamp.
+#
+# index_weight is the one month-end table in the family: one cross-section per
+# index per month, stamped on the last trading day of that month and carrying
+# no available_at of its own. It takes the same close stamp for the same
+# reason -- the file describes that day's close and is a function of it, index
+# reviews are announced ahead of their effective date, and the reference sweep
+# inside the same evening job lands it -- so a cross-section dated T is first
+# readable at T+1 pre-open like every other row here. A decision day between
+# two cross-sections therefore reads the latest one dated at or before it; what
+# that implies for membership is a documented risk (data docs §4).
 MACRO_DATASET_CONTRACTS: dict[str, DatasetContract] = {
     dataset: DatasetContract(
         dataset=dataset,
@@ -231,6 +241,7 @@ MACRO_DATASET_CONTRACTS: dict[str, DatasetContract] = {
         ("opt_daily", "trade_date"),
         ("cb_basic", "list_date"),
         ("cb_daily", "trade_date"),
+        ("index_weight", "trade_date"),
     )
 }
 

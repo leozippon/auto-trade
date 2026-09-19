@@ -69,6 +69,7 @@ COMMON_FIELD_SEMANTICS: tuple[tuple[str, str], ...] = (
     ("leading_code", "identifier"),
     ("bz_code", "identifier"),
     ("l1_code", "identifier"),
+    ("index_code", "identifier"),
     ("pcode", "identifier"),
     ("symbol", "identifier"),
     ("text_id", "identifier"),
@@ -582,6 +583,12 @@ FIELD_RULES: tuple[FieldRule, ...] = (
               source_unit="percent", evidence="median 2.4 at percent scale"),
     FieldRule("macro.parquet", "index_dailybasic", ("pe", "pe_ttm", "pb"),
               source_unit="multiple"),
+    FieldRule("macro.parquet", "index_weight", ("weight",), source_unit="percent",
+              status="verified",
+              evidence="every one of the 554 cross-sections in the lake sums to "
+                       "99.956-100.049 (2026-09 full scan, 316,524 rows)",
+              note="the constituent's share of the index, 4.64 = 4.64%; divide by 100 "
+                   "before using it as a portfolio weight"),
     FieldRule("macro.parquet", "sw_daily",
               ("open", "low", "high", "close", "change"), source_unit="index_points"),
     FieldRule("macro.parquet", "sw_daily", ("pct_change",), source_unit="percent"),

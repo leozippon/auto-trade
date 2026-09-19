@@ -246,6 +246,24 @@
     "holder_num",
     "ts_code"
    ],
+   "stk_holdertrade": [
+    "after_ratio",
+    "after_share",
+    "ann_date",
+    "available_at",
+    "available_at_rule",
+    "avg_price",
+    "begin_date",
+    "change_ratio",
+    "change_vol",
+    "close_date",
+    "dataset",
+    "holder_name",
+    "holder_type",
+    "in_de",
+    "total_share",
+    "ts_code"
+   ],
    "top10_holders": [
     "ann_date",
     "available_at",
@@ -303,24 +321,6 @@
     "pe",
     "price",
     "sub_code",
-    "ts_code"
-   ],
-   "stk_holdertrade": [
-    "after_ratio",
-    "after_share",
-    "ann_date",
-    "available_at",
-    "available_at_rule",
-    "avg_price",
-    "begin_date",
-    "change_ratio",
-    "change_vol",
-    "close_date",
-    "dataset",
-    "holder_name",
-    "holder_type",
-    "in_de",
-    "total_share",
     "ts_code"
    ],
    "share_float_complete": [
@@ -702,6 +702,19 @@
     "month",
     "stk_endval"
    ],
+   "eco_cal": [
+    "available_at",
+    "available_at_rule",
+    "country",
+    "currency",
+    "dataset",
+    "date",
+    "event",
+    "fore_value",
+    "pre_value",
+    "time",
+    "value"
+   ],
    "shibor": [
     "1m",
     "1w",
@@ -747,35 +760,22 @@
     "dataset",
     "date"
    ],
-   "eco_cal": [
-    "available_at",
-    "available_at_rule",
-    "country",
-    "currency",
-    "dataset",
-    "date",
-    "event",
-    "fore_value",
-    "pre_value",
-    "time",
-    "value"
-   ],
-   "index_global": [
+   "repo_daily": [
     "amount",
     "available_at",
     "available_at_rule",
-    "change",
     "close",
     "dataset",
     "high",
     "low",
+    "num",
     "open",
-    "pct_chg",
     "pre_close",
-    "swing",
+    "repo_maturity",
     "trade_date",
     "ts_code",
-    "vol"
+    "weight",
+    "weight_r"
    ],
    "index_daily": [
     "amount",
@@ -830,6 +830,13 @@
     "ts_code",
     "vol"
    ],
+   "index_weight": [
+    "con_code",
+    "dataset",
+    "index_code",
+    "trade_date",
+    "weight"
+   ],
    "ci_daily": [
     "amount",
     "available_at",
@@ -844,6 +851,23 @@
     "pre_close",
     "trade_date",
     "ts_code",
+    "vol"
+   ],
+   "ths_daily": [
+    "available_at",
+    "available_at_rule",
+    "avg_price",
+    "change",
+    "close",
+    "dataset",
+    "high",
+    "low",
+    "open",
+    "pct_change",
+    "pre_close",
+    "trade_date",
+    "ts_code",
+    "turnover_rate",
     "vol"
    ],
    "daily_info": [
@@ -908,21 +932,21 @@
     "name",
     "ts_code"
    ],
-   "ths_daily": [
+   "index_global": [
+    "amount",
     "available_at",
     "available_at_rule",
-    "avg_price",
     "change",
     "close",
     "dataset",
     "high",
     "low",
     "open",
-    "pct_change",
+    "pct_chg",
     "pre_close",
+    "swing",
     "trade_date",
     "ts_code",
-    "turnover_rate",
     "vol"
    ],
    "fx_daily": [
@@ -940,23 +964,6 @@
     "tick_qty",
     "trade_date",
     "ts_code"
-   ],
-   "repo_daily": [
-    "amount",
-    "available_at",
-    "available_at_rule",
-    "close",
-    "dataset",
-    "high",
-    "low",
-    "num",
-    "open",
-    "pre_close",
-    "repo_maturity",
-    "trade_date",
-    "ts_code",
-    "weight",
-    "weight_r"
    ],
    "us_tycr": [
     "available_at",
@@ -1248,9 +1255,9 @@
     "reser_insur_liab",
     "revenue",
     "sell_exp",
-    "source_write_id",
     "source_path",
     "source_row_id",
+    "source_write_id",
     "t_compr_income",
     "total_cogs",
     "total_profit",
@@ -1402,9 +1409,9 @@
     "rsrv_insur_cont",
     "sett_rsrv",
     "sold_for_repur_fa",
-    "source_write_id",
     "source_path",
     "source_row_id",
+    "source_write_id",
     "special_rese",
     "specific_payables",
     "st_bonds_payable",
@@ -1525,9 +1532,9 @@
     "prov_depr_assets",
     "recp_tax_rends",
     "report_type",
-    "source_write_id",
     "source_path",
     "source_row_id",
+    "source_write_id",
     "st_cash_out_act",
     "stot_cash_in_fnc_act",
     "stot_cashout_fnc_act",
@@ -1640,9 +1647,9 @@
     "roe_yoy",
     "roic",
     "saleexp_to_gr",
-    "source_write_id",
     "source_path",
     "source_row_id",
+    "source_write_id",
     "surplus_rese_ps",
     "tangasset_to_intdebt",
     "tangible_asset",
@@ -1672,9 +1679,9 @@
     "net_profit_min",
     "p_change_max",
     "p_change_min",
-    "source_write_id",
     "source_path",
     "source_row_id",
+    "source_write_id",
     "summary",
     "ts_code",
     "type",
@@ -1697,9 +1704,9 @@
     "operate_profit",
     "perf_summary",
     "revenue",
-    "source_write_id",
     "source_path",
     "source_row_id",
+    "source_write_id",
     "total_assets",
     "total_hldr_eqy_exc_min_int",
     "total_profit",
@@ -1723,9 +1730,9 @@
     "imp_ann_date",
     "pay_date",
     "record_date",
-    "source_write_id",
     "source_path",
     "source_row_id",
+    "source_write_id",
     "stk_bo_rate",
     "stk_co_rate",
     "stk_div",
@@ -1743,9 +1750,9 @@
     "business_key",
     "dataset",
     "end_date",
-    "source_write_id",
     "source_path",
     "source_row_id",
+    "source_write_id",
     "ts_code"
    ],
    "fina_mainbz_vip": [
@@ -1761,9 +1768,9 @@
     "curr_type",
     "dataset",
     "end_date",
-    "source_write_id",
     "source_path",
     "source_row_id",
+    "source_write_id",
     "ts_code"
    ],
    "disclosure_date": [
@@ -1776,9 +1783,9 @@
     "dataset",
     "end_date",
     "pre_date",
-    "source_write_id",
     "source_path",
     "source_row_id",
+    "source_write_id",
     "ts_code"
    ]
   }

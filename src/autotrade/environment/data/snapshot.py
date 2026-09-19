@@ -279,6 +279,14 @@ SELECTABLE_DATASETS: dict[str, tuple[str, ...]] = {
         "index_daily",
         "index_dailybasic",
         "sw_daily",
+        # Month-end constituents and weights of the seven core indices. The
+        # only face in this domain that is per-stock rather than per-series:
+        # one row per (index, constituent, month-end trade date), keyed on
+        # ``con_code``, so a strategy can build and measure a book inside a
+        # benchmark instead of against it. Opt-in and never default — it is
+        # useless to a book built off the whole pool, and the SSE-composite
+        # cross-section alone is ~2,250 rows a month.
+        "index_weight",
         "ci_daily",
         "ths_daily",
         # exchange aggregates and market-level money flow

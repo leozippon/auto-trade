@@ -161,6 +161,33 @@ def write_index_daily(raw: Path, trade_dates: tuple[str, ...]) -> None:
     )
 
 
+# One CSI300 rebalance story in three month-end cross-sections: 600000 stays,
+# 000001 is replaced by 000002 at the September review and by 000004 at the
+# October one.
+INDEX_WEIGHT_REVIEWS: dict[str, dict[str, float]] = {
+    "20210831": {"600000.SH": 60.0, "000001.SZ": 40.0},
+    "20210930": {"600000.SH": 55.0, "000002.SZ": 45.0},
+    "20211029": {"600000.SH": 50.0, "000004.SZ": 50.0},
+}
+
+
+def write_index_weight(raw: Path, cross_sections: dict[str, dict[str, float]]) -> None:
+    """CSI300 month-end constituent weights: ``{trade_date: {con_code: weight}}``.
+
+    The raw layout is the lake's own (one partition per index per year) and the
+    rows carry no ``available_at`` — the snapshot stamps them from the dataset
+    contract, which is exactly what these tests exercise.
+    """
+    write(
+        raw / "index_weight" / "index_code=000300.SH" / "year=2021.parquet",
+        pd.DataFrame([
+            {"index_code": "000300.SH", "con_code": con_code, "trade_date": trade_date, "weight": weight}
+            for trade_date, members in cross_sections.items()
+            for con_code, weight in members.items()
+        ]),
+    )
+
+
 def build_fundamental_events(root: Path) -> None:
     write(
         root / "income_vip" / "available_month=202109.parquet",
@@ -1396,6 +1423,128 @@ class SnapshotBuilderTest(unittest.TestCase):
             frozen = pd.read_parquet(snapshot_b / "macro.parquet")
             self.assertEqual(sorted(frozen[frozen["dataset"] == "index_daily"]["trade_date"]), ["20210930", "20211008"])
             self.assertIn("2021Q3", set(frozen[frozen["dataset"] == "cn_gdp"]["quarter"]))  # the documented residual
+
+    # ---- index_weight: month-end constituents and weights ------------------
+
+    def _index_weight_snapshot(self, tmp: Path, decision: datetime) -> pd.DataFrame:
+        raw = tmp / "raw"
+        events_root = tmp / "fund_events"
+        if not raw.exists():
+            build_raw(raw)
+            build_fundamental_events(events_root)
+            write_fundamental_status(tmp / "fundamental_events_status.json")
+            write_index_weight(raw, INDEX_WEIGHT_REVIEWS)
+        config = replace(
+            CONFIG,
+            macro_datasets=("cn_gdp", "index_weight"),
+            include_intraday=False,
+            replay_include_minutes=False,
+        )
+        out = tmp / f"snap_{decision:%Y%m%d_%H%M}"
+        builder = SnapshotBuilder(raw, events_root, tmp / "fundamental_events_status.json")
+        manifest = builder.build_decision_snapshot(decision, out, config)
+        self.assertEqual(
+            manifest["domains"]["macro"]["availability_rules"]["index_weight"],
+            "contract_1730_from:trade_date",
+        )
+        macro = pd.read_parquet(out / "macro.parquet")
+        return macro[macro["dataset"] == "index_weight"]
+
+    @staticmethod
+    def _members_as_of(weights: pd.DataFrame, decision_day: str) -> dict[str, float]:
+        """What a strategy reads: the latest cross-section dated <= the day."""
+        visible = weights[weights["trade_date"] <= decision_day]
+        latest = visible[visible["trade_date"] == visible["trade_date"].max()]
+        return dict(zip(latest["con_code"], latest["weight"]))
+
+    def test_index_weight_cross_sections_gate_on_the_month_end_close_contract(self):
+        # A cross-section is stamped at 17:30 of its own month-end trade date,
+        # so it is invisible at that morning's 09:25 decision and visible from
+        # the next pre-open. Between two cross-sections the decision day reads
+        # the latest one dated at or before it, and the constituent that left
+        # at the previous review is gone from that reading even though its rows
+        # are still in the file.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # 2021-10-08 09:25: the September review has rolled in, October's
+            # has not been published yet.
+            october = self._index_weight_snapshot(root, DECISION)
+            self.assertEqual(sorted(set(october["trade_date"])), ["20210831", "20210930"])
+            self.assertEqual(
+                sorted(set(october["available_at"])),
+                ["2021-08-31 17:30:00+08:00", "2021-09-30 17:30:00+08:00"],
+            )
+            self.assertEqual(set(october["available_at_rule"]), {"contract_1730_from:trade_date"})
+            self.assertEqual(
+                self._members_as_of(october, DECISION.strftime("%Y%m%d")),
+                {"600000.SH": 55.0, "000002.SZ": 45.0},
+            )
+
+            # The morning of the October review: its own cross-section is still
+            # behind the 17:30 stamp, so the book is still built on September's.
+            morning = self._index_weight_snapshot(root, datetime(2021, 10, 29, 9, 25, tzinfo=CN_TZ))
+            self.assertNotIn("20211029", set(morning["trade_date"]))
+            self.assertEqual(
+                self._members_as_of(morning, "20211029"),
+                {"600000.SH": 55.0, "000002.SZ": 45.0},
+            )
+
+            # After that close it is readable, and the membership moves.
+            evening = self._index_weight_snapshot(
+                root, datetime(2021, 10, 29, 23, 59, 59, tzinfo=CN_TZ)
+            )
+            self.assertEqual(
+                self._members_as_of(evening, "20211029"),
+                {"600000.SH": 50.0, "000004.SZ": 50.0},
+            )
+
+    def test_index_weight_reviews_roll_into_a_replay_at_the_evening_node(self):
+        # A replay spanning a review must see the new cross-section from the
+        # first pre-open after it: the frozen decision snapshot alone would
+        # hold the membership of its own anchor for the whole slot, which is
+        # what makes a benchmark-relative book drift out of its benchmark.
+        from autotrade.environment.replay.timeview import ReplayRows, Timeview
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw = root / "raw"
+            events_root = root / "fund_events"
+            status_path = root / "fundamental_events_status.json"
+            build_raw(raw)
+            build_fundamental_events(events_root)
+            write_fundamental_status(status_path)
+            write_index_weight(raw, INDEX_WEIGHT_REVIEWS)
+            config = replace(
+                CONFIG,
+                macro_datasets=("cn_gdp", "index_weight"),
+                include_intraday=False,
+                replay_include_minutes=False,
+            )
+            builder = SnapshotBuilder(raw, events_root, status_path)
+            anchor = datetime(2021, 10, 7, 23, 59, 59, tzinfo=CN_TZ)
+            snapshot_dir = root / "decision"
+            slot = root / "replay"
+            builder.build_decision_snapshot(anchor, snapshot_dir, config)
+            builder.build_replay_slot(
+                "20211008", "20211101", slot, label="valid", config=config, available_from=anchor
+            )
+            timeview = Timeview(
+                host_dir=root / "asof",
+                snapshot_dir=snapshot_dir,
+                replay={"macro": ReplayRows(slot / "macro.parquet")},
+            )
+
+            def members(asof_dir: str, decision_day: str) -> dict[str, float]:
+                macro = pd.read_parquet(Path(asof_dir) / "macro")
+                return self._members_as_of(macro[macro["dataset"] == "index_weight"], decision_day)
+
+            # The morning of the October review, before that evening's job: the
+            # slot still shows the September membership the anchor was frozen on.
+            before, _ = timeview.refresh(pd.Timestamp("2021-10-29 08:30", tz="Asia/Shanghai"))
+            self.assertEqual(members(before, "20211029"), {"600000.SH": 55.0, "000002.SZ": 45.0})
+            # The next pre-open, after cn_evening_full landed it.
+            after, _ = timeview.refresh(pd.Timestamp("2021-11-01 08:30", tz="Asia/Shanghai"))
+            self.assertEqual(members(after, "20211101"), {"600000.SH": 50.0, "000004.SZ": 50.0})
 
     def test_fundamental_event_reader_filters_partitions_by_min_available_at(self):
         with tempfile.TemporaryDirectory() as tmp:
