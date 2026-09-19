@@ -42,6 +42,16 @@ _DECILES = 10
 _DIGITS = 6
 
 
+class NullControlSetupError(RuntimeError):
+    """The null control could not be set up, so it drew and measured nothing.
+
+    Raised strictly before the first draw: the result's replay slots could not
+    be resolved, or the tables they hold could not be read. A caller that
+    charges a budget for the host compute a null control spends gives that
+    charge back on this error, because none of it was spent.
+    """
+
+
 @dataclass(frozen=True)
 class RoundTrip:
     """One FIFO-paired entry and its exit; ``exit_at`` is None when still open."""
@@ -457,6 +467,7 @@ def _cn_datetime(value: object) -> datetime:
 
 __all__ = [
     "MATCHING",
+    "NullControlSetupError",
     "RoundTrip",
     "run_null_control",
     "trade_skeleton",

@@ -20,6 +20,7 @@ from autotrade.environment.executor import docker_available, raised_by_strategy
 from autotrade.environment.nl import NLConfig
 from autotrade.environment.replay import timeview as timeview_module
 from autotrade.environment.replay.engine import BacktestError
+from autotrade.environment.replay.null_control import NullControlSetupError
 from autotrade.environment.replay.timeview import Timeview
 from autotrade.environment.runtime import (
     AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS,
@@ -36,6 +37,7 @@ from autotrade.pipelines.config import (
     SnapshotBundle,
 )
 from autotrade.pipelines.pit_backend import (
+    REPLAY_SLOTS_SIDECAR,
     REPLAY_SOURCE_LABEL,
     HistoricalMinuteSource,
     PITDailyEvaluationBackend,
@@ -633,17 +635,31 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
     assert action["cash_credit"] == pytest.approx(50.0)
     assert "corporate_actions" not in record["pit"]["asof_domains"]
 
-    # The null control replays its draws through the same slot table.
-    block = backend.null_control(
-        result.result_ref,
-        start="20240102",
-        end="20240103",
-        profile=BrokerProfile(initial_cash=100_000),
-        schedule=StrategySchedule("day", "09:28"),
-        seed=1,
-        k=1,
-    )
+    # The null control replays its draws through the same slot table, and it
+    # finds that table on disk: the backend instance that evaluated the result
+    # is gone by the time a restarted worker ranks the node it recorded.
+    restarted = PITDailyEvaluationBackend(tmp_path / "results", execution_mode="trusted")
+    null_control_call = {
+        "start": "20240102",
+        "end": "20240103",
+        "profile": BrokerProfile(initial_cash=100_000),
+        "schedule": StrategySchedule("day", "09:28"),
+        "seed": 1,
+        "k": 1,
+    }
+    block = restarted.null_control(result.result_ref, **null_control_call)
     assert block["k"] == 1 and block["rejects_mean"] == 0.0
+    # Where the slots live stays host-only: the Agent-readable record names
+    # them and nothing more, so the two say the same slots in two ways.
+    sidecar = Path(result.result_ref).parent / REPLAY_SLOTS_SIDECAR
+    slots = json.loads(sidecar.read_text(encoding="utf-8"))["replay_slots"]
+    assert [Path(slot).name for slot in slots] == record["pit"]["replay_slots"]
+    assert HOST_PATH_RE.search(json.dumps(record)) is None
+    # A result whose slots cannot be resolved is refused before it draws
+    # anything, so the caller knows it measured nothing and owes nothing.
+    sidecar.unlink()
+    with pytest.raises(NullControlSetupError, match="replay slots are unknown"):
+        restarted.null_control(result.result_ref, **null_control_call)
 
     (replay / "corporate_actions.parquet").unlink()
     with pytest.raises(FileNotFoundError, match="declares corporate_actions"):

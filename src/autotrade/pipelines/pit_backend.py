@@ -46,7 +46,10 @@ from autotrade.environment.executor import (
 )
 from autotrade.environment.nl import NLConfig, NLService
 from autotrade.environment.replay.engine import StrategyDataView
-from autotrade.environment.replay.null_control import run_null_control
+from autotrade.environment.replay.null_control import (
+    NullControlSetupError,
+    run_null_control,
+)
 from autotrade.environment.replay.stats import (
     PhaseTimer,
     ReplayResult,
@@ -87,6 +90,13 @@ _PHASES = frozenset({"valid", "heldout", "paper"})
 # Manifest label of the unphased replay store. Never a phase, so a store can
 # never be handed to an evaluation as if it were a phase view.
 REPLAY_SOURCE_LABEL = "replay_source"
+# Host-only companion of a completed ``result.json``. That record names its
+# replay slots opaquely, because it is copied verbatim into the Agent-readable
+# Step attachment, so WHERE those slots are is written beside it instead. It is
+# what keeps a result's null control runnable after the process that evaluated
+# it is gone: a restarted worker resumes in place and still ranks the nodes it
+# validated before.
+REPLAY_SLOTS_SIDECAR = "replay_slots.json"
 _CORE_RAW_DATASETS = ("daily", "daily_basic", "adj_factor", "stk_limit", "suspend_d")
 
 
@@ -723,11 +733,6 @@ class PITDailyEvaluationBackend:
         self.nl_config = nl_config or NLConfig()
         self.nl_failure_policy = nl_failure_policy
         self.max_intraday_row_group_rows = int(max_intraday_row_group_rows)
-        # Host-side slots of each completed result, by ``result.json`` path. The
-        # Agent-readable record names its slots opaquely, so the null control
-        # takes the replay directories from the bundle this backend evaluated
-        # rather than reading a host path back out of an Agent-visible file.
-        self._result_replay_dirs: dict[str, tuple[Path, ...]] = {}
 
     def evaluate(
         self,
@@ -957,8 +962,14 @@ class PITDailyEvaluationBackend:
                 nl_counters=nl_service.counters(),
             )
             target = result_dir / "result.json"
+            # The host-only slot list goes first: a completed record never
+            # exists without it, so a null control of this result can always
+            # find what to replay through.
+            write_json_atomic(
+                result_dir / REPLAY_SLOTS_SIDECAR,
+                {"replay_slots": [str(path) for path in replay_dirs]},
+            )
             write_json_atomic(target, record)
-            self._result_replay_dirs[str(target)] = replay_dirs
             write_style_rollup(result_dir, style)
             keep_result_dir = True
             return EvaluationResult(dict(summary), str(target))
@@ -985,19 +996,27 @@ class PITDailyEvaluationBackend:
         Replays ``k`` random-name copies of the result's own trade skeleton
         through the same slots, Broker and window, and ranks the observed excess
         inside them (``replay/null_control.py``). Host-side and read-only: the
-        slots are the ones THIS backend evaluated the result against, and only
-        their bars, benchmark and ex-date tables are read, so no snapshot is
-        rebuilt or decoded. Informational — nothing gates on it.
+        slots are the ones the result was evaluated against, named by the
+        host-only record beside it rather than by this process's memory, and
+        only their bars, benchmark and ex-date tables are read, so no snapshot
+        is rebuilt or decoded. Informational — nothing gates on it.
         """
 
         result_json = _result_json(result_path)
-        replay_dirs = self._result_replay_dirs.get(str(result_json))
-        if replay_dirs is None:
-            raise ValueError(
-                f"result was not evaluated by this backend, so its PIT replay "
-                f"slot is unknown: {result_path}"
+        try:
+            replay_dirs = _result_replay_slots(result_json)
+            record = _read_json(result_json)
+            daily = _span_daily(replay_dirs, start, end)
+            benchmark = slot_benchmark(replay_dirs)
+            corporate_actions = _span_corporate_actions(
+                replay_dirs, [load_snapshot_manifest(path) for path in replay_dirs]
             )
-        record = _read_json(result_json)
+        except Exception as exc:
+            # Everything above is setup: not one draw has been replayed, so the
+            # caller has been handed no measurement and owes nothing for it.
+            raise NullControlSetupError(
+                f"null control setup failed for {result_json}: {exc}"
+            ) from exc
         return run_null_control(
             ReplayResult(
                 equity_curve=tuple(record.get("equity_curve") or ()),
@@ -1005,16 +1024,14 @@ class PITDailyEvaluationBackend:
                 inference_dates=(),
                 pending_orders=(),
             ),
-            _span_daily(replay_dirs, start, end),
-            slot_benchmark(replay_dirs),
+            daily,
+            benchmark,
             profile,
             schedule,
             k=k,
             seed=seed,
             step=step,
-            corporate_actions=_span_corporate_actions(
-                replay_dirs, [load_snapshot_manifest(path) for path in replay_dirs]
-            ),
+            corporate_actions=corporate_actions,
         )
 
     @staticmethod
@@ -1696,6 +1713,25 @@ def _result_json(result_ref: str | Path) -> Path:
     return path / "result.json" if path.is_dir() else path
 
 
+def _result_replay_slots(result_json: Path) -> tuple[Path, ...]:
+    """The replay slots a completed result was evaluated against.
+
+    Read from the host-only sidecar written with the record, so ranking a node
+    never depends on the backend instance that produced it still being alive.
+    """
+
+    sidecar = result_json.parent / REPLAY_SLOTS_SIDECAR
+    if not sidecar.is_file():
+        raise FileNotFoundError(
+            f"completed result has no {REPLAY_SLOTS_SIDECAR}, so its PIT replay "
+            f"slots are unknown: {result_json}"
+        )
+    slots = _read_json(sidecar).get("replay_slots")
+    if not isinstance(slots, list) or not slots:
+        raise ValueError(f"{sidecar} names no PIT replay slot")
+    return tuple(Path(str(slot)).resolve(strict=True) for slot in slots)
+
+
 def _read_json(path: Path) -> dict[str, object]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -1718,6 +1754,7 @@ def _exclusive_lock(path: Path) -> Iterator[None]:
 
 
 __all__ = [
+    "REPLAY_SLOTS_SIDECAR",
     "REPLAY_SOURCE_LABEL",
     "HistoricalMinuteSource",
     "PITDailyEvaluationBackend",

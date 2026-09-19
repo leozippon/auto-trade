@@ -42,6 +42,7 @@ from autotrade.environment.executor import (
 )
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm.model_profiles import AGENT_MAX_OUTPUT_TOKENS
+from autotrade.environment.replay.null_control import NullControlSetupError
 from autotrade.environment.replay.stats import (
     PhaseTimer,
     attach_cost_sensitivity,
@@ -2297,7 +2298,9 @@ class NullControlTool(SessionTimeBudgetAware):
             "Refused for a node that is not a complete Validation of this session, "
             "once the cap is spent, and while a background sub-agent that can write "
             "is still running; it is also unavailable once the session enters hard "
-            "finalization, so rank the finalists before that.",
+            "finalization, so rank the finalists before that. A call the host "
+            "cannot even set up — it replays nothing and reports no block — costs "
+            "no budget, so the counters it returns are the ones still available.",
             self.spec.input_schema,
             mutating=True,
             example=self.spec.example,
@@ -2345,6 +2348,11 @@ class NullControlTool(SessionTimeBudgetAware):
             except SessionInterrupt:
                 raise
             except Exception as exc:
+                if isinstance(exc, NullControlSetupError):
+                    # It never reached its first draw, so none of the host
+                    # compute the charge stands for was spent: give the call
+                    # back, as batch_validate refunds an environment failure.
+                    self.used -= 1
                 raise ToolError(
                     "run_null_control failed: " + _public_error_text(exc),
                     error_type="null_control_failed",

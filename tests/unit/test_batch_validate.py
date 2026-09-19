@@ -38,6 +38,7 @@ from autotrade.environment.executor import (
 )
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.replay.engine import BacktestError
+from autotrade.environment.replay.null_control import NullControlSetupError
 from autotrade.environment.runtime import agent_trace_path, write_json_atomic
 from autotrade.environment.sandbox import SandboxConfig
 from autotrade.environment.step_tree import StepTree
@@ -1379,6 +1380,46 @@ class NullControlToolTest(unittest.TestCase):
             self.assertEqual(failed.exception.details["null_controls_remaining"], 0)
             # A failure is not a result the freeze may reuse.
             self.assertNotIn(node, tool.blocks)
+
+    def test_a_null_control_that_drew_nothing_costs_no_call(self) -> None:
+        """A host that cannot set the null control up has measured nothing.
+
+        The charge stands for minutes of replay. A call refused before its
+        first draw spent none of them, so the budget comes back and the node
+        can still be ranked once the host can resolve what it was validated
+        against -- the same rule batch_validate applies to an environment
+        failure.
+        """
+
+        with TemporaryDirectory() as tmp:
+            session = _Session(Path(tmp))
+
+            def unresolved(result_ref, **kwargs):
+                raise NullControlSetupError(
+                    f"null control setup failed for {result_ref}: no replay slots"
+                )
+
+            session.evaluator.null_control = unresolved
+            node = session.validate_one("n", _strategy("7"))["node_id"]
+            tool = NullControlTool(session.backtest, max_calls=1)
+            with self.assertRaises(ToolError) as refused:
+                tool.invoke({"node_id": node})
+            self.assertEqual(refused.exception.error_type, "null_control_failed")
+            self.assertEqual(
+                refused.exception.details,
+                {"null_controls_used": 0, "null_controls_remaining": 1},
+            )
+            self.assertEqual(tool.used, 0)
+            self.assertNotIn(node, tool.blocks)
+            # And the cap it did not spend is still there to be spent.
+            calls: list[dict[str, object]] = []
+            session.evaluator.null_control = _canned_null(calls)
+            ranked = tool.invoke({"node_id": node}).value
+            self.assertEqual(
+                (ranked["null_controls_used"], ranked["null_controls_remaining"]),
+                (1, 0),
+            )
+            self.assertEqual(len(calls), 1)
 
     def test_the_tool_is_sequential_and_behind_the_writer_barrier(self) -> None:
         from autotrade.agent.runner import (
