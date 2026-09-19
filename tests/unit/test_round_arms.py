@@ -22,6 +22,7 @@ from autotrade.pipelines.config import (
     DEFAULT_RESEARCH_GEOMETRY,
     SNAPSHOT_CACHE_FORMAT_VERSION,
 )
+from autotrade.pipelines.hitl_state import WEB_CLOSED_PARAMS, WEB_CREATE_DEFAULTS
 from autotrade.pipelines.pit_backend import required_release_raw_datasets
 from autotrade.pipelines.pit_views_seed import pit_cache_provider_record
 from autotrade.pipelines.worker import _snapshot_config
@@ -296,6 +297,38 @@ def test_an_arm_requests_a_gpu_exactly_when_its_starter_needs_cuda(
         "torch.cuda" in path.read_text(encoding="utf-8") for path in starter.rglob("*.py")
     )
     assert (int(params["gpu_count"]) >= 1) is needs_cuda, (experiment_id, params["gpu_count"])
+
+
+def test_an_arm_may_run_its_own_account_and_an_arm_that_states_none_inherits() -> None:
+    """The account is a per-arm parameter, not only a per-round one.
+
+    Two arms of the 2026-09-19 round mount one pack and differ in the account
+    they research on, because at CNY 100k a constituent book is cost-feasible
+    to about 30 names and at CNY 1M to 50. That only works while `initial_cash`
+    stays an open create parameter the arm entry may override: a closed or
+    unknown key would be refused before anything is sent, and an ignored one
+    would run both arms on the same account while the round file claimed
+    otherwise. Stated as the two relations that must hold.
+    """
+    assert "initial_cash" in WEB_CREATE_DEFAULTS
+    assert "initial_cash" not in WEB_CLOSED_PARAMS
+    rnd = Round(
+        arms={"states_it": {"initial_cash": 250_000}, "states_none": {}},
+        overrides={"initial_cash": 100_000},
+    )
+    assert rnd.request_params("states_it")["initial_cash"] == 250_000
+    assert rnd.request_params("states_none")["initial_cash"] == 100_000
+    accounts = {
+        experiment_id: float(ROUNDS[name].request_params(experiment_id)["initial_cash"])
+        for name, experiment_id in ARMS
+    }
+    assert all(value > 0 for value in accounts.values()), accounts
+    paired = {
+        experiment_id: value
+        for experiment_id, value in accounts.items()
+        if experiment_id.startswith("index_relative_")
+    }
+    assert sorted(paired.values()) == [100_000.0, 1_000_000.0], paired
 
 
 @pytest.mark.parametrize(("round_name", "experiment_id"), ARMS)
