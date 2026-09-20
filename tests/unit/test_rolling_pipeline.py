@@ -31,7 +31,7 @@ from autotrade.pipelines.config import (
     RollingExperimentConfig,
     SnapshotBundle,
     StepResult,
-    default_acceptance,
+    acceptance_for,
 )
 from autotrade.pipelines.experiment import (
     RollingExperimentPipeline,
@@ -218,6 +218,10 @@ class Developer:
 _DEFAULT = RollingExperimentConfig(experiment_id="arm", experiments_root=Path("unused"))
 CONFIG_SCHEDULE = _DEFAULT.schedule
 CONFIG_PROFILE = _DEFAULT.broker_profile
+# A mandated arm end to end. The operator named a tracking_error_cap at
+# creation, which is the only thing that turns the mandate on, and the limits
+# paired with it come with it.
+CONFIG_ACCEPTANCE = acceptance_for({"tracking_error_cap": 0.08})
 
 
 def _pipeline(tmp_path: Path, plan, *, evaluator_error: BaseException | None = None):
@@ -225,6 +229,7 @@ def _pipeline(tmp_path: Path, plan, *, evaluator_error: BaseException | None = N
         experiment_id="arm",
         experiments_root=tmp_path / "experiments",
         geometry=GEOMETRY,
+        acceptance=CONFIG_ACCEPTANCE,
     )
     store = FilesystemArtifactStore(config.experiment_dir / "artifacts" / "strategy")
     evaluator = Evaluator(config.experiment_dir / "artifacts" / "results", raise_with=evaluator_error)
@@ -281,10 +286,10 @@ def test_a_freeze_passes_only_the_gate_and_records_the_frozen_block(tmp_path: Pa
     assert gate["passed"] is True
     assert gate["full_span_validations"] == 2
     assert gate["deflated_sharpe"]["trials"] == 2 == record["trials_to_date"]
-    # The gate is judged under the arm's own rules -- here the defaults its
-    # CNY 1,000,000 derives, tracking mandate included -- over the research
-    # years of its geometry, and the record states the account and the rules.
-    rules = default_acceptance(CONFIG_PROFILE.initial_cash)
+    # The gate is judged under the arm's own rules -- here a tracking mandate,
+    # because the arm was created with a cap -- over the research years of its
+    # geometry, and the record states the account and the rules.
+    rules = CONFIG_ACCEPTANCE
     assert rules.tracking_error_cap == 0.08
     assert record["initial_cash"] == CONFIG_PROFILE.initial_cash
     assert record["acceptance_rules"] == rules.to_record()
@@ -610,7 +615,7 @@ def test_the_forward_replay_is_one_span_from_forward_start_to_the_release(tmp_pa
     # The Held-out tolerance is scaled by the forward slice's tracking error.
     assert heldout["tolerance"] < 0
     # The verdict is held to the arm's own rules and its record states them.
-    rules = default_acceptance(CONFIG_PROFILE.initial_cash).to_record()
+    rules = CONFIG_ACCEPTANCE.to_record()
     assert record["initial_cash"] == CONFIG_PROFILE.initial_cash
     assert record["acceptance_rules"] == rules
     assert {key: record["verdict"]["thresholds"][key] for key in rules} == rules

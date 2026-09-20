@@ -305,20 +305,22 @@ def test_the_listing_names_the_research_curve_and_the_replay_its_thresholds(tmp_
     assert rows["frozen"]["research_best"]["result"] == rows["frozen"]["research_result"]
 
     preview = experiment_detail(tmp_path, "researching")["sessions"][1]["thresholds"]
-    # This arm's params.json was written before an account's capital derived
-    # its limits: it names none of them, and the console attributes none to it.
+    # This arm's params.json was written before the five limits reached the
+    # create form: it names none of them, and the console attributes none to it.
     assert preview["max_drawdown"] is None
     assert not {"active_max_drawdown", "tracking_error_cap"} & set(preview)
     assert preview["cost_stress_multiplier"] == pytest.approx(WEB_CREATE_DEFAULTS["cost_stress_multiplier"])
-    # One created since states all five, as null where it overrides nothing,
-    # and is listed with what its capital derives and what it overrides.
+    # One created since states all five, and the console lists the rules that
+    # arm's own parameters resolve to -- a mandate only where it named a cap.
     path = tmp_path / "researching/hitl/params.json"
     params = json.loads(path.read_text(encoding="utf-8"))
-    derived = dict.fromkeys(
-        ("max_drawdown", "active_max_drawdown", "tracking_error_cap", "beta_min", "beta_max")
-    )
+    stated_keys = ("max_drawdown", "active_max_drawdown", "tracking_error_cap", "beta_min", "beta_max")
+    derived = dict.fromkeys(stated_keys)
     path.write_text(
-        json.dumps({**params, **derived, "initial_cash": 1_000_000, "max_drawdown": 0.3}),
+        json.dumps(
+            {**params, **derived, "initial_cash": 1_000_000,
+             "tracking_error_cap": 0.08, "max_drawdown": 0.3}
+        ),
         encoding="utf-8",
     )
     stated = experiment_detail(tmp_path, "researching")["sessions"][1]["thresholds"]
@@ -329,10 +331,13 @@ def test_the_listing_names_the_research_curve_and_the_replay_its_thresholds(tmp_
         "beta_min": 0.85,
         "beta_max": 1.15,
     }
-    path.write_text(json.dumps({**params, **derived, "initial_cash": 100_000}), encoding="utf-8")
-    small = experiment_detail(tmp_path, "researching")["sessions"][1]["thresholds"]
-    assert (small["max_drawdown"], small["active_max_drawdown"]) == (0.45, 0.30)
-    assert small["tracking_error_cap"] is None
+    # The same arm without a cap: no mandate, on the very same capital.
+    path.write_text(
+        json.dumps({**params, **derived, "initial_cash": 1_000_000}), encoding="utf-8"
+    )
+    untracked = experiment_detail(tmp_path, "researching")["sessions"][1]["thresholds"]
+    assert (untracked["max_drawdown"], untracked["active_max_drawdown"]) == (0.45, 0.30)
+    assert untracked["tracking_error_cap"] is None
     path.write_text(json.dumps(params), encoding="utf-8")
     assert (preview["min_round_trips"], preview["min_mean_gross"], preview["recency_months"]) == (12, 0.5, 6)
     # The record's own block carries the same keys; its parameter-derived

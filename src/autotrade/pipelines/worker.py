@@ -645,13 +645,13 @@ def resolve_worker_options(
         strategy_fit_timeout_seconds=_positive_int(
             knob("strategy_fit_timeout_seconds"), "strategy_fit_timeout_seconds"
         ),
-        # Absent or null takes the default the account's capital derives.
+        # A tracking mandate exactly where the request named a cap; every
+        # limit absent or null takes its default (``config.acceptance_for``).
         acceptance=acceptance_for(
-            initial_cash,
             {
                 name: None if params.get(name) is None else _finite_float(params[name], name)
                 for name in AcceptanceRules().to_record()
-            },
+            }
         ),
         schedule=schedule,
         broker_profile=BrokerProfile(

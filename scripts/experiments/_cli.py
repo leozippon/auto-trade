@@ -287,12 +287,12 @@ def add_research_directive_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def add_acceptance_arguments(parser: argparse.ArgumentParser) -> None:
-    # Unset takes the default the account's capital derives
-    # (autotrade.pipelines.config.default_acceptance).
+    # Unset takes the default of autotrade.pipelines.config.acceptance_for:
+    # a tracking mandate only where --tracking-error-cap is given.
     for flag, text in (
         ("--max-drawdown", "Equity drawdown limit of the freeze gate and the verdict."),
         ("--active-max-drawdown", "Drawdown limit of the active series (strategy minus zero-skill panel)."),
-        ("--tracking-error-cap", "Tracking mandate: residual tracking error cap against CSI 300; 0 switches the mandate off."),
+        ("--tracking-error-cap", "Tracking mandate: residual tracking error cap against CSI 300; giving it turns the mandate on for this arm."),
         ("--beta-min", "Tracking mandate: lower end of the market beta band."),
         ("--beta-max", "Tracking mandate: upper end of the market beta band."),
     ):

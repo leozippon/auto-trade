@@ -24,10 +24,10 @@ from autotrade.pipelines import verdict
 from autotrade.pipelines.calendar import ResearchGeometry
 from autotrade.pipelines.config import (
     DEFAULT_RESEARCH_GEOMETRY,
+    MANDATED_DEFAULTS,
     AcceptanceRules,
     RollingExperimentConfig,
     acceptance_for,
-    default_acceptance,
 )
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
 from tests.unit.gpu_probe import stubbed_gpu_probe
@@ -192,19 +192,11 @@ class AcceptanceRulesTest(unittest.TestCase):
         self.assertEqual(old, AcceptanceRules(max_drawdown=0.25))
         self.assertIsNone(old.tracking_error_cap)
 
-    def test_the_capital_derives_the_default_rules_and_a_request_overrides_them(self) -> None:
-        """One switch, the capital: from CNY 150,000 an account can hold the
-        index and is asked to track it; below it cannot, and tracking error is
-        reported only."""
+    def test_the_tracking_mandate_is_set_by_hand_and_never_by_the_capital(self) -> None:
+        """One switch, and it is the operator's: naming a ``tracking_error_cap``
+        is what turns the mandate on. No account size appears in the rule, so
+        the same request gives the same gates on any capital."""
 
-        tracking = {
-            "max_drawdown": 0.35,
-            "cost_stress_multiplier": 2.0,
-            "active_max_drawdown": 0.15,
-            "tracking_error_cap": 0.08,
-            "beta_min": 0.85,
-            "beta_max": 1.15,
-        }
         free = {
             "max_drawdown": 0.45,
             "cost_stress_multiplier": 2.0,
@@ -213,40 +205,39 @@ class AcceptanceRulesTest(unittest.TestCase):
             "beta_min": None,
             "beta_max": None,
         }
-        for cash, expected in (
-            (100_000, free),
-            (149_999, free),
-            (150_000, tracking),
-            (1_000_000, tracking),
-        ):
+        tracking = {**free, "tracking_error_cap": 0.08, **MANDATED_DEFAULTS}
+        # No cap: no mandate, whatever the request says about the account.
+        self.assertEqual(acceptance_for({}).to_record(), free)
+        self.assertEqual(AcceptanceRules().to_record(), free)
+        for cash in (0, 100_000, 149_999, 150_000, 1_000_000, 10_000_000):
             with self.subTest(cash=cash):
-                self.assertEqual(default_acceptance(cash).to_record(), expected)
-                # A request that names nothing, or names nulls, keeps them.
-                self.assertEqual(acceptance_for(cash, {}).to_record(), expected)
+                self.assertEqual(acceptance_for({"initial_cash": cash}).to_record(), free)
                 self.assertEqual(
-                    acceptance_for(cash, dict.fromkeys(expected)).to_record(), expected
+                    acceptance_for({"initial_cash": cash, "tracking_error_cap": 0.08}).to_record(),
+                    tracking,
                 )
-        self.assertEqual(default_acceptance(100_000), AcceptanceRules())
-        # Every field overrides alone; a cap of 0 switches the mandate off, and
-        # a cap on an account without one takes the default band.
+        # A request that names the limits as nulls keeps the same defaults.
+        self.assertEqual(acceptance_for(dict.fromkeys(free)).to_record(), free)
+        # A cap brings the band and the tracker's drawdowns; each of them is
+        # still overridable on its own.
         self.assertEqual(
-            acceptance_for(1_000_000, {"max_drawdown": 0.3, "beta_min": 0.9}).to_record(),
+            acceptance_for({"tracking_error_cap": 0.08, "max_drawdown": 0.3, "beta_min": 0.9}).to_record(),
             {**tracking, "max_drawdown": 0.3, "beta_min": 0.9},
         )
         self.assertEqual(
-            acceptance_for(1_000_000, {"tracking_error_cap": 0}).to_record(),
-            {**free, "max_drawdown": 0.35, "active_max_drawdown": 0.15},
+            acceptance_for({"max_drawdown": 0.3, "active_max_drawdown": 0.2}).to_record(),
+            {**free, "max_drawdown": 0.3, "active_max_drawdown": 0.2},
         )
-        self.assertEqual(
-            acceptance_for(100_000, {"tracking_error_cap": 0.1}).to_record(),
-            {**free, "tracking_error_cap": 0.1, "beta_min": 0.85, "beta_max": 1.15},
-        )
-        for cash, overrides in (
-            (1_000_000, {"tracking_error_cap": 0, "beta_min": 0.9}),
-            (100_000, {"beta_min": 0.9, "beta_max": 1.1}),
+        # A band without a cap is refused, and so is a cap of zero: absence is
+        # how the mandate is switched off, not a magic value.
+        for overrides in (
+            {"beta_min": 0.9, "beta_max": 1.1},
+            {"beta_min": 0.9},
+            {"tracking_error_cap": 0},
+            {"tracking_error_cap": 0, "beta_min": 0.9},
         ):
             with self.subTest(overrides=overrides), self.assertRaises(ValueError):
-                acceptance_for(cash, overrides)
+                acceptance_for(overrides)
 
     def test_the_agent_facts_state_the_rules_from_their_single_sources(self) -> None:
         """The ``acceptance_rules`` fact is derived, never retyped: the freeze
@@ -268,7 +259,9 @@ class AcceptanceRulesTest(unittest.TestCase):
         # No mandate is said in words; a mandate states its two limits and that
         # meeting them is not evidence.
         self.assertIn("reported, not graded", freeze["tracking_mandate"])
-        mandate = default_acceptance(1_000_000).agent_facts()["freeze_gate"]["tracking_mandate"]
+        mandate = acceptance_for({"tracking_error_cap": 0.08}).agent_facts()["freeze_gate"][
+            "tracking_mandate"
+        ]
         self.assertIn("<= 0.08", mandate["tracking_error"])
         self.assertIn("0.85..1.15", mandate["market_beta"])
         self.assertIn("not evidence", mandate["role"])
@@ -432,15 +425,12 @@ class DefaultsDriftTest(unittest.TestCase):
                     field_obj.default,
                     field_obj.name,
                 )
-        # The acceptance rules have no fixed default: the loader and the
-        # dataclass both derive them from the account's capital.
-        self.assertEqual(
-            options.rolling.acceptance,
-            default_acceptance(options.rolling.broker_profile.initial_cash),
-        )
+        # A request that names no limit gets the rules' own defaults, mandate
+        # off, on whatever capital the Broker profile carries.
+        self.assertEqual(options.rolling.acceptance, AcceptanceRules())
         self.assertEqual(
             RollingExperimentConfig("demo", Path("experiments")).acceptance,
-            default_acceptance(BrokerProfile().initial_cash),
+            AcceptanceRules(),
         )
 
     def test_the_geometry_and_gate_knobs_reach_the_configuration(self) -> None:
@@ -479,15 +469,10 @@ class DefaultsDriftTest(unittest.TestCase):
             )
         self.assertEqual(options.rolling.geometry, geometry)
         self.assertEqual(options.rolling.max_research_minutes, 300)
-        # The two the request names, on the defaults of the capital it left at
-        # the Broker profile's CNY 1,000,000.
+        # The two the request names; it named no cap, so no tracking mandate.
         self.assertEqual(
             options.rolling.acceptance,
-            replace(
-                default_acceptance(1_000_000),
-                max_drawdown=0.2,
-                cost_stress_multiplier=3.0,
-            ),
+            replace(AcceptanceRules(), max_drawdown=0.2, cost_stress_multiplier=3.0),
         )
 
     def test_the_console_create_form_is_seeded_with_the_research_preset(self) -> None:

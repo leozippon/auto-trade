@@ -107,17 +107,6 @@ def _finite_metric(value: object) -> float | None:
     return float(value) if math.isfinite(value) else None
 
 
-# The capital from which an account can hold a CSI 300 book that tracks it, so
-# from which the tracking mandate is an arm's default
-# (``default_acceptance``). Two arithmetic conditions meet there: residual
-# tracking error of a zero-skill constituent book falls under 8 % only from 20
-# seats, and a seat buys 70 % of the index by weight only from about 6,900 CNY,
-# which at 97 % deployed is 20 x 6,900 / 0.97 = 142,000; the measured grid first
-# satisfies the whole mandate at 150,000 (20 seats: tracking error 7.76 %, beta
-# 0.98, 70.8 % of index weight buyable).
-TRACKING_MANDATE_MIN_CASH = 150_000.0
-
-
 @dataclass(frozen=True)
 class AcceptanceRules:
     """The arm's round parameters for the freeze nomination and the verdict.
@@ -127,8 +116,8 @@ class AcceptanceRules:
     here decide the rest of the freeze gate and the forward and Held-out
     verdict together with the constants of ``pipelines/verdict.py``. Every
     field is a limit something enforces. The field defaults are the rules of an
-    account too small for the tracking mandate; ``default_acceptance`` derives
-    an arm's defaults from its capital.
+    arm without a tracking mandate; ``acceptance_for`` applies an arm's
+    create-time parameters to them.
     """
 
     # Equity drawdown, over the research period, forward and Held-out alike.
@@ -215,7 +204,7 @@ class AcceptanceRules:
 
         if self.tracking_error_cap is None:
             mandate: object = (
-                "none for this account: benchmark.tracking_error and "
+                "none for this arm: benchmark.tracking_error and "
                 "benchmark.market_beta are reported, not graded"
             )
         else:
@@ -351,54 +340,44 @@ class AcceptanceRules:
         return hard
 
 
-def default_acceptance(initial_cash: float) -> AcceptanceRules:
-    """An arm's acceptance rules when its create request overrides none of them.
+# What a tracking mandate brings with it, applied exactly when the create
+# request names a ``tracking_error_cap`` and overridable one limit at a time.
+# The beta band is not optional: a cap alone is cheapest to meet by dropping
+# beta, and every constituent book on record sat between 0.51 and 0.84. The
+# drawdown pair is the tracker's -- CSI 300 itself drew down 39.6 % over the
+# research period and a book tracking it at 5 % about 31 %, so the equity limit
+# is 35 % and the limit that means something for a tracker is the active one,
+# 15 % (zero skill reads 7.9 %).
+MANDATED_DEFAULTS: Mapping[str, float] = {
+    "max_drawdown": 0.35,
+    "active_max_drawdown": 0.15,
+    "beta_min": 0.85,
+    "beta_max": 1.15,
+}
 
-    One switch, the capital. From ``TRACKING_MANDATE_MIN_CASH`` the account can
-    hold the index, so it is asked to: tracking error against CSI 300 at most
-    8 % with beta inside 0.85-1.15. CSI 300 itself drew down 39.6 % over the
-    research period and a book tracking it at 5 % about 31 %, so the equity
-    limit is 35 % and the limit that means something for a tracker is the
-    active one, 15 % (zero skill reads 7.9 %). Below it the account cannot buy
-    the index -- at CNY 100k and 30 seats 40 % of it by weight is out of reach
-    -- so tracking error is reported only, and the limits are 45 % and 30 %:
-    zero skill in the shapes such an account can hold already draws down 39 %
-    of equity and 20 % active.
+
+def acceptance_for(params: Mapping[str, object]) -> AcceptanceRules:
+    """An arm's acceptance rules from its own create-time parameters.
+
+    The tracking mandate is a manual setting and no capital anywhere turns it
+    on: it exists exactly when ``params`` names a ``tracking_error_cap``, and
+    the limits it travels with then default to ``MANDATED_DEFAULTS``. Without a
+    cap the strategy's tracking error and beta are still measured and reported,
+    just not graded, and the drawdown limits keep the rules' own defaults of
+    45 % equity and 30 % active -- zero skill in the shapes a small account can
+    hold already draws down 39 % of equity and 20 % active.
+
+    Only the rules' own keys are read; one that is absent or ``None`` takes the
+    default, and a beta band named without a cap is refused by
+    ``AcceptanceRules`` itself.
     """
 
-    if initial_cash >= TRACKING_MANDATE_MIN_CASH:
-        return AcceptanceRules(
-            max_drawdown=0.35,
-            active_max_drawdown=0.15,
-            tracking_error_cap=0.08,
-            beta_min=0.85,
-            beta_max=1.15,
-        )
-    return AcceptanceRules()
-
-
-def acceptance_for(initial_cash: float, params: Mapping[str, object]) -> AcceptanceRules:
-    """``default_acceptance`` with an arm's create-time overrides applied.
-
-    ``params`` is the arm's parameter mapping; only the rules' own keys are
-    read. A key that is absent or ``None`` keeps the capital-derived default. A
-    ``tracking_error_cap`` of 0 switches the mandate off for an account that
-    would default to it, and a cap set on an account that would not takes the
-    default band unless the request names its own.
-    """
-
-    mandated = default_acceptance(TRACKING_MANDATE_MIN_CASH)
-    rules = default_acceptance(initial_cash).to_record()
-    overrides = {key: params[key] for key in rules if params.get(key) is not None}
-    rules.update(overrides)
-    if rules["tracking_error_cap"] == 0:
-        if overrides.get("beta_min") is not None or overrides.get("beta_max") is not None:
-            raise ValueError("a beta band needs a tracking_error_cap above zero")
-        rules.update(tracking_error_cap=None, beta_min=None, beta_max=None)
-    elif rules["tracking_error_cap"] is not None:
-        for key in ("beta_min", "beta_max"):
-            if rules[key] is None:
-                rules[key] = getattr(mandated, key)
+    rules = AcceptanceRules().to_record()
+    rules.update({key: params[key] for key in rules if params.get(key) is not None})
+    if rules["tracking_error_cap"] is not None:
+        for key, value in MANDATED_DEFAULTS.items():
+            if params.get(key) is None:
+                rules[key] = value
     return AcceptanceRules(**rules)  # type: ignore[arg-type]
 
 
@@ -454,17 +433,14 @@ class RollingExperimentConfig:
     record_failed_attempts: bool = True
     schedule: StrategySchedule = field(default_factory=StrategySchedule)
     broker_profile: BrokerProfile = field(default_factory=BrokerProfile)
-    # None takes the rules the account's capital derives (``default_acceptance``).
-    acceptance: AcceptanceRules | None = None
+    # The arm's effective rules (``acceptance_for``): a tracking mandate only
+    # when the create request named a ``tracking_error_cap``.
+    acceptance: AcceptanceRules = field(default_factory=AcceptanceRules)
     step_constraints: ModificationConstraints = field(
         default_factory=ModificationConstraints
     )
 
     def __post_init__(self) -> None:
-        if self.acceptance is None:
-            object.__setattr__(
-                self, "acceptance", default_acceptance(self.broker_profile.initial_cash)
-            )
         if not re.fullmatch(r"[A-Za-z0-9_-]+", self.experiment_id):
             raise ValueError(
                 "experiment_id must contain only letters, digits, underscore, or dash"

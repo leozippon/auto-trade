@@ -145,8 +145,9 @@ BASE_OVERRIDES: dict[str, object] = {
     # sizes are a real cost rather than a rounding error.
     "initial_cash": 100_000,
     # The forward verdict's cost stress. The drawdown limits and the tracking
-    # mandate are not stated here: each arm's capital derives them
-    # (config.default_acceptance), and an arm entry that overrides one says so.
+    # mandate are not stated here: an arm gets a mandate only by naming its own
+    # `tracking_error_cap` (config.acceptance_for), and an arm entry that
+    # overrides any of the limits says so.
     "cost_stress_multiplier": 2.0,
     # The one research session's budgets, spent across every attempt.
     "max_research_minutes": 2400,
@@ -540,9 +541,9 @@ class Round:
                 }
                 directive = str(merged["research_directive"])
                 print(json.dumps(own, ensure_ascii=False))
-                # The gates this arm would be judged by: its capital's defaults
-                # with whatever the arm overrides.
-                rules = acceptance_for(float(merged["initial_cash"]), merged)  # type: ignore[arg-type]
+                # The gates this arm would be judged by: the defaults with
+                # whatever the arm names, mandate included.
+                rules = acceptance_for(merged)
                 print("  acceptance:", json.dumps(rules.to_record(), ensure_ascii=False))
                 print(f"  directive: {len(directive.splitlines())} lines, {len(directive)} chars")
                 for line in directive.splitlines():

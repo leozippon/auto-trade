@@ -20,7 +20,7 @@ from pathlib import Path
 
 from autotrade.environment.data.snapshot import DEFAULT_DATASETS, SELECTABLE_DATASETS
 from autotrade.environment.llm.model_profiles import MODEL_CHOICES
-from autotrade.pipelines.config import TRACKING_MANDATE_MIN_CASH, default_acceptance
+from autotrade.pipelines.config import MANDATED_DEFAULTS, AcceptanceRules
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
 from autotrade.pipelines.skills import (
     OPERATING_MEMORY_LIBRARY,
@@ -390,17 +390,25 @@ _FIELDS: list[dict[str, object]] = [
     # 预算与验收
     {"key": "max_research_minutes", "group": "预算与验收", "label": "研究会话推理时长（分钟）", "type": "int",
      "help": "研究会话的有效推理时间上限，跨中断后的续跑累计；回测耗时独立计算并回补。"},
-    # The five limits an account's capital derives (config.default_acceptance).
-    # Left empty the arm takes that default, which the form shows as the
-    # placeholder for the capital entered; a value overrides it for this arm.
+    # The tracking mandate's switch and the four limits paired with it
+    # (config.acceptance_for). Filling the cap turns the mandate on for this
+    # arm and moves the paired defaults; each one is still overridable alone.
+    {
+        "key": "tracking_error_cap",
+        "group": "预算与验收",
+        "label": "跟踪误差上限（对沪深300）",
+        "type": "float",
+        "optional": True,
+        "help": "跟踪授权的开关：填入即为本臂设定跟踪授权——策略自身对沪深300的残差跟踪误差上限（0.08 = 8%/年），研究期与前推期都要满足，同时把下面四项切换到带授权的默认值。留空即不设授权，跟踪误差与 β 只报告、不评级。",
+    },
     {
         "key": "max_drawdown",
         "group": "预算与验收",
         "label": "权益最大回撤",
         "type": "float",
         "optional": True,
-        "capital_default": True,
-        "help": "权益回撤上限（0.35 = 35%），冻结门、前推与 Held-out 三段都不得超过。留空按初始资金推导：15 万元及以上 0.35，以下 0.45。",
+        "mandate_paired": True,
+        "help": "权益回撤上限（0.35 = 35%），冻结门、前推与 Held-out 三段都不得超过。留空取默认值：设了跟踪授权 0.35，未设 0.45。",
     },
     {
         "key": "active_max_drawdown",
@@ -408,17 +416,8 @@ _FIELDS: list[dict[str, object]] = [
         "label": "主动序列最大回撤",
         "type": "float",
         "optional": True,
-        "capital_default": True,
-        "help": "主动序列（策略日收益减零技能面板合成收益）累计净值的回撤上限，同样约束三段。留空按初始资金推导：15 万元及以上 0.15，以下 0.30。",
-    },
-    {
-        "key": "tracking_error_cap",
-        "group": "预算与验收",
-        "label": "跟踪误差上限（对沪深300）",
-        "type": "float",
-        "optional": True,
-        "capital_default": True,
-        "help": "跟踪授权：策略自身对沪深300的残差跟踪误差上限（0.08 = 8%/年），研究期与前推期都要满足。留空按初始资金推导：15 万元及以上 0.08，以下不设（只报告、不评级）；填 0 表示本臂不设跟踪授权。",
+        "mandate_paired": True,
+        "help": "主动序列（策略日收益减零技能面板合成收益）累计净值的回撤上限，同样约束三段。留空取默认值：设了跟踪授权 0.15，未设 0.30。",
     },
     {
         "key": "beta_min",
@@ -427,8 +426,8 @@ _FIELDS: list[dict[str, object]] = [
         "type": "float",
         "optional": True,
         "advanced": True,
-        "capital_default": True,
-        "help": "跟踪授权的 β 区间下限，仅在设有跟踪误差上限时生效；留空取 0.85。",
+        "mandate_paired": True,
+        "help": "跟踪授权的 β 区间下限，只在设有跟踪误差上限时生效（没有上限却填区间会被拒绝）；留空取 0.85。",
     },
     {
         "key": "beta_max",
@@ -437,8 +436,8 @@ _FIELDS: list[dict[str, object]] = [
         "type": "float",
         "optional": True,
         "advanced": True,
-        "capital_default": True,
-        "help": "跟踪授权的 β 区间上限，仅在设有跟踪误差上限时生效；留空取 1.15。",
+        "mandate_paired": True,
+        "help": "跟踪授权的 β 区间上限，只在设有跟踪误差上限时生效（没有上限却填区间会被拒绝）；留空取 1.15。",
     },
     {
         "key": "cost_stress_multiplier",
@@ -621,14 +620,14 @@ def parameter_schema() -> dict[str, object]:
         entry["default"] = default
         groups[str(entry.pop("group"))].append(entry)
     return {
-        "schema_version": 4,
-        # What each ``capital_default`` field defaults to on either side of the
-        # capital switch, from the rule itself, so the form can show the value
-        # the capital entered would derive.
-        "capital_defaults": {
-            "min_cash": TRACKING_MANDATE_MIN_CASH,
-            "below": default_acceptance(TRACKING_MANDATE_MIN_CASH - 1).to_record(),
-            "from": default_acceptance(TRACKING_MANDATE_MIN_CASH).to_record(),
+        "schema_version": 5,
+        # What each ``mandate_paired`` field defaults to on either side of the
+        # tracking mandate's switch, from the rules themselves, so the form
+        # shows the default the operator's own choice gives it. A ``null``
+        # means the field has no default without a cap -- the beta band.
+        "acceptance_defaults": {
+            "mandated": dict(MANDATED_DEFAULTS),
+            "unmandated": {key: getattr(AcceptanceRules(), key) for key in MANDATED_DEFAULTS},
         },
         "groups": [{"name": name, "fields": entries} for name, entries in groups.items() if entries],
     }

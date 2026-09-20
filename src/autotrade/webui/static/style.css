@@ -2236,7 +2236,7 @@ textarea.directive:focus {
  background-color: var(--panel);
  box-shadow: 0 0 0 3px var(--accent-soft);
 }
-/* A limit the account's capital would derive, overridden for this arm. */
+/* A limit that has a default of its own, overridden for this arm. */
 .field input.overridden {
  border-color: var(--accent);
 }

@@ -2073,7 +2073,7 @@ async function openCreateModal() {
     }
     body.append(section);
   }
-  bindCapitalDefaults(schema.capital_defaults, inputs);
+  bindMandateDefaults(schema.acceptance_defaults, inputs);
   showModal("新建实验", body, [
     el("button", { class: "btn", onclick: closeModal }, "取消"),
     el(
@@ -2108,24 +2108,27 @@ async function openCreateModal() {
   ]);
 }
 
-/* The limits an account's capital derives: an empty field shows, as its
-   placeholder, the default the capital entered would give it, and a field
-   holding a value is marked as overriding that default. */
-function bindCapitalDefaults(rule, inputs) {
-  const cash = inputs.get("initial_cash");
-  if (!rule || !cash) return;
-  const bound = [...inputs.values()].filter((entry) => entry.field.capital_default);
+/* The tracking mandate is a manual setting: filling the tracking-error cap
+   turns it on, and the four limits paired with it then show, as placeholders,
+   the defaults that choice gives them. A field holding a value is marked as
+   overriding its default. Nothing here reads the account's capital. */
+function bindMandateDefaults(rule, inputs) {
+  const cap = inputs.get("tracking_error_cap");
+  if (!rule || !cap) return;
+  const bound = [...inputs.values()].filter((entry) => entry.field.mandate_paired);
   const refresh = () => {
-    const amount = parseFloat(cash.input.value);
-    const defaults = amount >= rule.min_cash ? rule.from : rule.below;
+    const mandated = cap.input.value.trim() !== "";
+    const defaults = mandated ? rule.mandated : rule.unmandated;
     for (const { field, input } of bound) {
-      const value = Number.isNaN(amount) ? null : defaults[field.key];
+      const value = defaults[field.key];
       input.placeholder =
-        value === null || value === undefined ? "留空：按资金推导为不设" : `留空：按资金推导为 ${value}`;
+        value === null || value === undefined
+          ? "需先填跟踪误差上限"
+          : `留空：${value}`;
       input.classList.toggle("overridden", input.value !== "");
     }
   };
-  cash.input.addEventListener("input", refresh);
+  cap.input.addEventListener("input", refresh);
   for (const { input } of bound) input.addEventListener("input", refresh);
   refresh();
 }

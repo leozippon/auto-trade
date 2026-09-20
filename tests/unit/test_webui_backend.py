@@ -30,7 +30,11 @@ from autotrade.environment.runtime import (
     AgentTraceWriter,
     write_json_atomic,
 )
-from autotrade.pipelines.config import DEFAULT_RESEARCH_GEOMETRY
+from autotrade.pipelines.config import (
+    DEFAULT_RESEARCH_GEOMETRY,
+    AcceptanceRules,
+    acceptance_for,
+)
 from autotrade.pipelines.hitl_state import (
     WEB_CREATE_DEFAULTS,
     StatusReporter,
@@ -82,7 +86,7 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
         field["key"]: field for group in schema["groups"] for field in group["fields"]
     }
     assert "fields" not in schema
-    assert schema["schema_version"] == 4
+    assert schema["schema_version"] == 5
     assert [group["name"] for group in schema["groups"]] == [
         "基本与排程",
         "数据窗口",
@@ -1267,6 +1271,46 @@ class WebuiBackendTest(unittest.TestCase):
                 },
             )
         self.assertEqual(created.status_code, 200, created.text)
+
+    def test_creation_stamps_the_arms_resolved_acceptance_rules(self) -> None:
+        """The gates an arm is judged by live in the arm's own params.json.
+
+        They are resolved once, at creation, and stamped in like every other
+        default, so a restart re-reads the arm's own rules instead of deriving
+        them again: a later change to the defaults, or to the limits the
+        tracking mandate brings with it, cannot move an arm that exists.
+        """
+
+        manager = ExperimentManager(self.repo_root, self.experiments_root)
+        for experiment_id, request in (
+            ("exp_untracked", {}),
+            ("exp_tracked", {"tracking_error_cap": 0.08}),
+        ):
+            expected = acceptance_for(request).to_record()
+            with (
+                patch.object(manager, "_preflight"),
+                patch.object(manager, "start_worker", return_value={"spawned": False}),
+            ):
+                manager.create_experiment(
+                    {
+                        "experiment_id": experiment_id,
+                        **DEFAULT_RESEARCH_GEOMETRY.to_record(),
+                        **request,
+                    }
+                )
+            written = json.loads(
+                (self.experiments_root / experiment_id / "hitl/params.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            with self.subTest(experiment=experiment_id):
+                self.assertEqual({key: written[key] for key in expected}, expected)
+                # Re-resolving the written file is what a worker restart does.
+                self.assertEqual(acceptance_for(written).to_record(), expected)
+        # The default capital is CNY 1,000,000 and buys no mandate at all.
+        self.assertEqual(
+            acceptance_for({}).to_record(), AcceptanceRules().to_record()
+        )
 
     def test_running_cap_allows_last_slot_and_blocks_overflow(self) -> None:
         manager = ExperimentManager(self.repo_root, self.experiments_root)

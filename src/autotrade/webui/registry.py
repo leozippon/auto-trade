@@ -743,12 +743,12 @@ def _verdict_thresholds(
 
     effective = {**WEB_CREATE_DEFAULTS, **params}
     months = _months_between(replay.get("start"), replay.get("forward_end"))
-    # An arm created since its capital derives its limits states all of them,
-    # as null where it overrides nothing; an earlier arm's params.json carries
-    # its equity drawdown limit alone, and that is all it is held to.
+    # An arm created since the five limits reached the create form states all
+    # of them; an earlier arm's params.json carries its equity drawdown limit
+    # alone, and that is all it is held to.
     limits: dict[str, object] = {"max_drawdown": _number(effective.get("max_drawdown"))}
     if "active_max_drawdown" in params:
-        rules = acceptance_for(float(effective["initial_cash"]), effective).to_record()  # type: ignore[arg-type]
+        rules = acceptance_for(effective).to_record()
         limits = {key: value for key, value in rules.items() if key != "cost_stress_multiplier"}
     return {
         "forward_confidence": FORWARD_CONFIDENCE,
