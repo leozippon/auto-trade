@@ -82,7 +82,7 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
         field["key"]: field for group in schema["groups"] for field in group["fields"]
     }
     assert "fields" not in schema
-    assert schema["schema_version"] == 3
+    assert schema["schema_version"] == 4
     assert [group["name"] for group in schema["groups"]] == [
         "基本与排程",
         "数据窗口",
