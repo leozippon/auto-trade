@@ -219,8 +219,8 @@ _DEFAULT = RollingExperimentConfig(experiment_id="arm", experiments_root=Path("u
 CONFIG_SCHEDULE = _DEFAULT.schedule
 CONFIG_PROFILE = _DEFAULT.broker_profile
 # A mandated arm end to end. The operator named a tracking_error_cap at
-# creation, which is the only thing that turns the mandate on, and the limits
-# paired with it come with it.
+# creation, which is the only thing that turns the mandate on; a blank beta
+# band is filled, drawdowns stay the rules' own 0.45 / 0.30.
 CONFIG_ACCEPTANCE = acceptance_for({"tracking_error_cap": 0.08})
 
 
@@ -297,8 +297,24 @@ def test_a_freeze_passes_only_the_gate_and_records_the_frozen_block(tmp_path: Pa
     assert gate["thresholds"]["min_positive_years"] == 2
     assert {
         key: gate["thresholds"][key]
-        for key in ("active_max_drawdown", "tracking_error_cap", "beta_min", "beta_max")
-    } == {key: value for key, value in rules.to_record().items() if key in gate["thresholds"]}
+        for key in (
+            "active_max_drawdown",
+            "tracking_error_cap",
+            "beta_min",
+            "beta_max",
+            "min_full_span_validations",
+        )
+    } == {
+        key: rules.to_record()[key]
+        for key in (
+            "active_max_drawdown",
+            "tracking_error_cap",
+            "beta_min",
+            "beta_max",
+            "min_full_span_validations",
+        )
+    }
+    assert gate["thresholds"]["min_information_ratio"] == rules.min_active_ir
     assert gate["mandate"]["market_beta"] == pytest.approx(0.9, abs=0.05)
     assert record["arm_end"] is None
     frozen = record["frozen"]
@@ -618,7 +634,21 @@ def test_the_forward_replay_is_one_span_from_forward_start_to_the_release(tmp_pa
     rules = CONFIG_ACCEPTANCE.to_record()
     assert record["initial_cash"] == CONFIG_PROFILE.initial_cash
     assert record["acceptance_rules"] == rules
-    assert {key: record["verdict"]["thresholds"][key] for key in rules} == rules
+    graduation_keys = (
+        "max_drawdown",
+        "active_max_drawdown",
+        "tracking_error_cap",
+        "beta_min",
+        "beta_max",
+        "cost_stress_multiplier",
+        "forward_confidence",
+        "recency_months",
+        "min_mean_gross",
+        "heldout_tolerance_z",
+    )
+    assert {key: record["verdict"]["thresholds"][key] for key in graduation_keys} == {
+        key: rules[key] for key in graduation_keys
+    }
     assert set(forward["mandate"]) == {"tracking_error", "market_beta"}
     assert record["refits_executed"] == {"forward": 0, "heldout": 0}
     assert record["verdict"]["status"] in {"graduated", "discarded"}

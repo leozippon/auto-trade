@@ -86,7 +86,26 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
         field["key"]: field for group in schema["groups"] for field in group["fields"]
     }
     assert "fields" not in schema
-    assert schema["schema_version"] == 5
+    assert schema["schema_version"] == 6
+    assert set(schema["acceptance_defaults"]["mandated"]) == {"beta_min", "beta_max"}
+    assert set(schema["acceptance_defaults"]["unmandated"]) == {"beta_min", "beta_max"}
+    assert fields["max_drawdown"]["placeholder"] == "留空：0.45"
+    assert fields["active_max_drawdown"]["placeholder"] == "留空：0.30"
+    assert "mandate_paired" not in fields["max_drawdown"]
+    assert fields["beta_min"]["mandate_paired"] is True
+    for key in (
+        "min_active_ir",
+        "min_dsr_probability",
+        "min_positive_year_share",
+        "min_full_span_validations",
+        "forward_confidence",
+        "recency_months",
+        "min_mean_gross",
+        "min_round_trips_per_month",
+        "heldout_tolerance_z",
+    ):
+        assert key in fields
+        assert fields[key]["default"] == WEB_CREATE_DEFAULTS[key]
     assert [group["name"] for group in schema["groups"]] == [
         "基本与排程",
         "数据窗口",
@@ -1285,6 +1304,7 @@ class WebuiBackendTest(unittest.TestCase):
         for experiment_id, request in (
             ("exp_untracked", {}),
             ("exp_tracked", {"tracking_error_cap": 0.08}),
+            ("exp_tight_ir", {"min_active_ir": 1.1}),
         ):
             expected = acceptance_for(request).to_record()
             with (

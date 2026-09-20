@@ -107,17 +107,46 @@ def _finite_metric(value: object) -> float | None:
     return float(value) if math.isfinite(value) else None
 
 
+def _finite_number(value: object, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be finite")  # noqa: TRY004
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"{name} must be finite")
+    return number
+
+
+def _whole_int(value: object, name: str) -> int:
+    """A JSON-safe integer: ``2`` or ``2.0``, never ``2.5`` and never a bool."""
+
+    number = _finite_number(value, name)
+    integer = int(number)
+    if number != integer:
+        raise ValueError(f"{name} must be an integer")
+    return integer
+
+
+def _open_unit(value: object, name: str, *, include_one: bool) -> float:
+    """A probability-like knob: ``(0, 1]`` or ``(0, 1)``."""
+
+    number = _finite_number(value, name)
+    ok = 0 < number <= 1 if include_one else 0 < number < 1
+    if not ok:
+        raise ValueError(f"{name} must be in {'(0, 1]' if include_one else '(0, 1)'}")
+    return number
+
+
 @dataclass(frozen=True)
 class AcceptanceRules:
-    """The arm's round parameters for the freeze nomination and the verdict.
+    """The arm's create-time gates for the freeze nomination and the verdict.
 
     A nominated research node fails the freeze gate on a non-finite metric or a
-    research-period drawdown over ``max_drawdown`` (``evaluate``); the limits
-    here decide the rest of the freeze gate and the forward and Held-out
-    verdict together with the constants of ``pipelines/verdict.py``. Every
-    field is a limit something enforces. The field defaults are the rules of an
-    arm without a tracking mandate; ``acceptance_for`` applies an arm's
-    create-time parameters to them.
+    research-period drawdown over ``max_drawdown`` (``evaluate``). Every other
+    freeze, forward and Held-out threshold is a field here, stamped into
+    ``params.json`` at creation so a later change to the defaults cannot move
+    an arm that already exists. Statistical definitions (the DSR formula, the
+    bootstrap, the panel) stay in ``pipelines/verdict.py``. Every field is a
+    limit something enforces.
     """
 
     # Equity drawdown, over the research period, forward and Held-out alike.
@@ -136,6 +165,19 @@ class AcceptanceRules:
     tracking_error_cap: float | None = None
     beta_min: float | None = None
     beta_max: float | None = None
+    # Freeze-gate statistical bars. Defaults are today's verdict constants so a
+    # record that omits them is judged the same way it was before these fields
+    # existed.
+    min_active_ir: float = verdict.FREEZE_MIN_ACTIVE_IR
+    min_dsr_probability: float = verdict.FREEZE_MIN_DSR_PROBABILITY
+    min_positive_year_share: float = verdict.FREEZE_MIN_POSITIVE_YEAR_SHARE
+    min_full_span_validations: int = verdict.FREEZE_MIN_FULL_SPAN_VALIDATIONS
+    # Forward and Held-out bars. Same compatibility default as above.
+    forward_confidence: float = verdict.FORWARD_CONFIDENCE
+    recency_months: int = verdict.RECENCY_MONTHS
+    min_mean_gross: float = verdict.MIN_MEAN_GROSS
+    min_round_trips_per_month: float = verdict.MIN_ROUND_TRIPS_PER_MONTH
+    heldout_tolerance_z: float = verdict.HELDOUT_TOLERANCE_Z
 
     def __post_init__(self) -> None:
         mandate = (self.tracking_error_cap, self.beta_min, self.beta_max)
@@ -144,13 +186,49 @@ class AcceptanceRules:
             (self.max_drawdown, self.cost_stress_multiplier, self.active_max_drawdown),
             strict=True,
         ):
-            if isinstance(value, bool) or not math.isfinite(float(value)):
-                raise ValueError(f"{name} must be finite")
+            _finite_number(value, name)
         for name in ("max_drawdown", "active_max_drawdown"):
             if not 0 <= getattr(self, name) <= 1:
                 raise ValueError(f"{name} must be between zero and one")
         if self.cost_stress_multiplier < 1:
             raise ValueError("cost_stress_multiplier must be at least one")
+        _finite_number(self.min_active_ir, "min_active_ir")
+        object.__setattr__(
+            self,
+            "min_dsr_probability",
+            _open_unit(self.min_dsr_probability, "min_dsr_probability", include_one=True),
+        )
+        object.__setattr__(
+            self,
+            "min_positive_year_share",
+            _open_unit(self.min_positive_year_share, "min_positive_year_share", include_one=True),
+        )
+        object.__setattr__(
+            self,
+            "min_full_span_validations",
+            _whole_int(self.min_full_span_validations, "min_full_span_validations"),
+        )
+        if self.min_full_span_validations < 1:
+            raise ValueError("min_full_span_validations must be an integer >= 1")
+        object.__setattr__(
+            self,
+            "forward_confidence",
+            _open_unit(self.forward_confidence, "forward_confidence", include_one=False),
+        )
+        object.__setattr__(self, "recency_months", _whole_int(self.recency_months, "recency_months"))
+        if self.recency_months < 1:
+            raise ValueError("recency_months must be an integer >= 1")
+        object.__setattr__(
+            self, "min_mean_gross", _open_unit(self.min_mean_gross, "min_mean_gross", include_one=True)
+        )
+        trips = _finite_number(self.min_round_trips_per_month, "min_round_trips_per_month")
+        if trips < 0:
+            raise ValueError("min_round_trips_per_month must be at least zero")
+        object.__setattr__(self, "min_round_trips_per_month", trips)
+        z_score = _finite_number(self.heldout_tolerance_z, "heldout_tolerance_z")
+        if not z_score > 0:
+            raise ValueError("heldout_tolerance_z must be positive")
+        object.__setattr__(self, "heldout_tolerance_z", z_score)
         if any(value is None for value in mandate):
             if any(value is not None for value in mandate):
                 raise ValueError(
@@ -172,6 +250,15 @@ class AcceptanceRules:
             "tracking_error_cap": self.tracking_error_cap,
             "beta_min": self.beta_min,
             "beta_max": self.beta_max,
+            "min_active_ir": self.min_active_ir,
+            "min_dsr_probability": self.min_dsr_probability,
+            "min_positive_year_share": self.min_positive_year_share,
+            "min_full_span_validations": self.min_full_span_validations,
+            "forward_confidence": self.forward_confidence,
+            "recency_months": self.recency_months,
+            "min_mean_gross": self.min_mean_gross,
+            "min_round_trips_per_month": self.min_round_trips_per_month,
+            "heldout_tolerance_z": self.heldout_tolerance_z,
         }
 
     @property
@@ -197,11 +284,20 @@ class AcceptanceRules:
         allowed = set(cls().to_record())
         return cls(**{key: record[key] for key in allowed if key in record})  # type: ignore[arg-type]
 
-    def agent_facts(self) -> dict[str, object]:
-        """The ``acceptance_rules`` run fact, derived from these rules and the
-        verdict constants so no prompt restates a threshold. Rules only: no
-        forward or Held-out date appears here."""
+    def agent_facts(self, *, research_years: int | None = None) -> dict[str, object]:
+        """The ``acceptance_rules`` run fact, derived from these rules so no
+        prompt restates a threshold. Rules only: no forward or Held-out date
+        appears here. ``research_years`` is the arm's own year count when the
+        caller has it; otherwise the default research geometry's."""
 
+        years = (
+            research_years
+            if research_years is not None
+            else len(DEFAULT_RESEARCH_GEOMETRY.research_years)
+        )
+        if isinstance(years, bool) or not isinstance(years, int) or years < 1:
+            raise ValueError("research_years must be a positive integer")
+        needed_positive = math.ceil(self.min_positive_year_share * years)
         if self.tracking_error_cap is None:
             mandate: object = (
                 "none for this arm: benchmark.tracking_error and "
@@ -240,17 +336,17 @@ class AcceptanceRules:
             "freeze_gate": {
                 "span": f"the nominee replayed the whole research period (span={FULL_SPAN})",
                 "finite_metrics": "total_return/max_drawdown/sharpe must be finite",
-                "active_information_ratio": f">= {verdict.FREEZE_MIN_ACTIVE_IR}",
+                "active_information_ratio": f">= {self.min_active_ir}",
                 "deflated_sharpe_probability": (
-                    f">= {verdict.FREEZE_MIN_DSR_PROBABILITY} for the nominee's "
+                    f">= {self.min_dsr_probability} for the nominee's "
                     "research-period active IR; trials = distinct revisions "
                     "validated in the arm on any span, dispersion = the arm's "
                     "full-span active IRs"
                 ),
                 "positive_years": (
                     "active neutralized excess > 0 in at least "
-                    f"{verdict.FREEZE_MIN_POSITIVE_YEAR_SHARE:.0%} of the research years, "
-                    "rounded up (3 of 4)"
+                    f"{self.min_positive_year_share:.0%} of the research years, "
+                    f"rounded up ({needed_positive} of {years})"
                 ),
                 "active_max_drawdown": (
                     f"<= {self.active_max_drawdown}: drawdown of the cumulative active "
@@ -261,7 +357,7 @@ class AcceptanceRules:
                 ),
                 "tracking_mandate": mandate,
                 "full_span_validations": (
-                    f">= {verdict.FREEZE_MIN_FULL_SPAN_VALIDATIONS} in the arm, the "
+                    f">= {self.min_full_span_validations} in the arm, the "
                     "nominee included"
                 ),
                 "freezes_per_arm": 1,
@@ -275,12 +371,12 @@ class AcceptanceRules:
                 ),
                 "forward": {
                     "lower_bound": (
-                        f"{verdict.FORWARD_CONFIDENCE:.0%} one-sided block-bootstrap "
+                        f"{self.forward_confidence:.0%} one-sided block-bootstrap "
                         "lower bound of annualized active neutralized excess > 0"
                     ),
                     "recency": (
                         "active neutralized excess of the last "
-                        f"{verdict.RECENCY_MONTHS} months >= 0"
+                        f"{self.recency_months} months >= 0"
                     ),
                     "max_drawdown": f"<= {self.max_drawdown}",
                     "active_max_drawdown": f"<= {self.active_max_drawdown}",
@@ -289,9 +385,9 @@ class AcceptanceRules:
                         f"{self.cost_stress_multiplier} on the strategy's own turnover"
                     ),
                     "round_trips": (
-                        f">= {verdict.MIN_ROUND_TRIPS_PER_MONTH} per month"
+                        f">= {self.min_round_trips_per_month} per month"
                     ),
-                    "mean_gross": f">= {verdict.MIN_MEAN_GROSS}",
+                    "mean_gross": f">= {self.min_mean_gross}",
                     "tracking_mandate": "as in freeze_gate, over the forward months",
                     "strategy_error": "none",
                     "minimum_detectable_excess": (
@@ -302,15 +398,51 @@ class AcceptanceRules:
                 },
                 "heldout": {
                     "neutralized_excess": (
-                        f"active, >= -{verdict.HELDOUT_TOLERANCE_Z} x forward active "
+                        f"active, >= -{self.heldout_tolerance_z} x forward active "
                         "tracking error / sqrt(years)"
                     ),
                     "max_drawdown": f"<= {self.max_drawdown}",
                     "active_max_drawdown": f"<= {self.active_max_drawdown}",
-                    "mean_gross": f">= {verdict.MIN_MEAN_GROSS}",
+                    "mean_gross": f">= {self.min_mean_gross}",
                     "strategy_error": "none",
                 },
             },
+        }
+
+    def freeze_gate_kwargs(self) -> dict[str, object]:
+        """Keyword arguments ``verdict.freeze_gate`` takes from these rules."""
+
+        return {
+            "active_max_drawdown": self.active_max_drawdown,
+            **self.mandate,
+            "min_active_ir": self.min_active_ir,
+            "min_dsr_probability": self.min_dsr_probability,
+            "min_positive_year_share": self.min_positive_year_share,
+            "min_full_span_validations": self.min_full_span_validations,
+        }
+
+    def forward_slice_kwargs(self) -> dict[str, object]:
+        """Keyword arguments ``verdict.forward_slice`` takes from these rules."""
+
+        return {
+            "max_drawdown": self.max_drawdown,
+            "active_max_drawdown": self.active_max_drawdown,
+            **self.mandate,
+            "cost_stress_multiplier": self.cost_stress_multiplier,
+            "forward_confidence": self.forward_confidence,
+            "recency_months": self.recency_months,
+            "min_mean_gross": self.min_mean_gross,
+            "min_round_trips_per_month": self.min_round_trips_per_month,
+        }
+
+    def heldout_slice_kwargs(self) -> dict[str, object]:
+        """Keyword arguments ``verdict.heldout_slice`` takes from these rules."""
+
+        return {
+            "max_drawdown": self.max_drawdown,
+            "active_max_drawdown": self.active_max_drawdown,
+            "min_mean_gross": self.min_mean_gross,
+            "heldout_tolerance_z": self.heldout_tolerance_z,
         }
 
     def evaluate(self, summary: dict[str, object]) -> list[str]:
@@ -340,17 +472,11 @@ class AcceptanceRules:
         return hard
 
 
-# What a tracking mandate brings with it, applied exactly when the create
-# request names a ``tracking_error_cap`` and overridable one limit at a time.
-# The beta band is not optional: a cap alone is cheapest to meet by dropping
-# beta, and every constituent book on record sat between 0.51 and 0.84. The
-# drawdown pair is the tracker's -- CSI 300 itself drew down 39.6 % over the
-# research period and a book tracking it at 5 % about 31 %, so the equity limit
-# is 35 % and the limit that means something for a tracker is the active one,
-# 15 % (zero skill reads 7.9 %).
+# The beta band that travels with a tracking mandate when the create request
+# names a cap and leaves the band blank. A cap alone is cheapest to meet by
+# dropping beta. Drawdowns are not here: they stay the rules' own 45 % / 30 %
+# unless the request names them.
 MANDATED_DEFAULTS: Mapping[str, float] = {
-    "max_drawdown": 0.35,
-    "active_max_drawdown": 0.15,
     "beta_min": 0.85,
     "beta_max": 1.15,
 }
@@ -360,16 +486,15 @@ def acceptance_for(params: Mapping[str, object]) -> AcceptanceRules:
     """An arm's acceptance rules from its own create-time parameters.
 
     The tracking mandate is a manual setting and no capital anywhere turns it
-    on: it exists exactly when ``params`` names a ``tracking_error_cap``, and
-    the limits it travels with then default to ``MANDATED_DEFAULTS``. Without a
+    on: it exists exactly when ``params`` names a ``tracking_error_cap``. A cap
+    without a beta band takes ``MANDATED_DEFAULTS``. Drawdowns stay the rules'
+    own 45 % equity and 30 % active unless the request names them. Without a
     cap the strategy's tracking error and beta are still measured and reported,
-    just not graded, and the drawdown limits keep the rules' own defaults of
-    45 % equity and 30 % active -- zero skill in the shapes a small account can
-    hold already draws down 39 % of equity and 20 % active.
+    just not graded.
 
     Only the rules' own keys are read; one that is absent or ``None`` takes the
-    default, and a beta band named without a cap is refused by
-    ``AcceptanceRules`` itself.
+    field default (today's verdict constants for the statistical bars), and a
+    beta band named without a cap is refused by ``AcceptanceRules`` itself.
     """
 
     rules = AcceptanceRules().to_record()

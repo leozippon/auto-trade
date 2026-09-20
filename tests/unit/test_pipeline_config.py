@@ -156,6 +156,18 @@ class AcceptanceRulesTest(unittest.TestCase):
             {**band, "beta_min": 1.15},
             {**band, "tracking_error_cap": 0.0},
             {**band, "tracking_error_cap": math.inf},
+            {"min_active_ir": math.nan},
+            {"min_dsr_probability": 0.0},
+            {"min_dsr_probability": 1.5},
+            {"min_positive_year_share": 0.0},
+            {"min_full_span_validations": 0},
+            {"min_full_span_validations": 2.5},
+            {"forward_confidence": 0.0},
+            {"forward_confidence": 1.0},
+            {"recency_months": 0},
+            {"min_mean_gross": 0.0},
+            {"min_round_trips_per_month": -0.1},
+            {"heldout_tolerance_z": 0.0},
         ):
             with self.subTest(**kwargs), self.assertRaises(ValueError):
                 AcceptanceRules(**kwargs)
@@ -173,6 +185,7 @@ class AcceptanceRulesTest(unittest.TestCase):
         self.assertEqual(
             rules.to_record(),
             {
+                **AcceptanceRules().to_record(),
                 "max_drawdown": 0.3,
                 "cost_stress_multiplier": 3.0,
                 "active_max_drawdown": 0.12,
@@ -191,20 +204,28 @@ class AcceptanceRulesTest(unittest.TestCase):
         )
         self.assertEqual(old, AcceptanceRules(max_drawdown=0.25))
         self.assertIsNone(old.tracking_error_cap)
+        # A params.json written before the statistical bars were fields still
+        # resolves to today's defaults, so the arm is judged as it was.
+        self.assertEqual(old.min_active_ir, verdict.FREEZE_MIN_ACTIVE_IR)
+        self.assertEqual(old.min_dsr_probability, verdict.FREEZE_MIN_DSR_PROBABILITY)
+        self.assertEqual(old.min_positive_year_share, verdict.FREEZE_MIN_POSITIVE_YEAR_SHARE)
+        self.assertEqual(old.min_full_span_validations, verdict.FREEZE_MIN_FULL_SPAN_VALIDATIONS)
+        self.assertEqual(old.forward_confidence, verdict.FORWARD_CONFIDENCE)
+        self.assertEqual(old.recency_months, verdict.RECENCY_MONTHS)
+        self.assertEqual(old.min_mean_gross, verdict.MIN_MEAN_GROSS)
+        self.assertEqual(old.min_round_trips_per_month, verdict.MIN_ROUND_TRIPS_PER_MONTH)
+        self.assertEqual(old.heldout_tolerance_z, verdict.HELDOUT_TOLERANCE_Z)
+        self.assertEqual(
+            acceptance_for({"max_drawdown": 0.25}).freeze_gate_kwargs(),
+            AcceptanceRules(max_drawdown=0.25).freeze_gate_kwargs(),
+        )
 
     def test_the_tracking_mandate_is_set_by_hand_and_never_by_the_capital(self) -> None:
         """One switch, and it is the operator's: naming a ``tracking_error_cap``
         is what turns the mandate on. No account size appears in the rule, so
         the same request gives the same gates on any capital."""
 
-        free = {
-            "max_drawdown": 0.45,
-            "cost_stress_multiplier": 2.0,
-            "active_max_drawdown": 0.30,
-            "tracking_error_cap": None,
-            "beta_min": None,
-            "beta_max": None,
-        }
+        free = AcceptanceRules().to_record()
         tracking = {**free, "tracking_error_cap": 0.08, **MANDATED_DEFAULTS}
         # No cap: no mandate, whatever the request says about the account.
         self.assertEqual(acceptance_for({}).to_record(), free)
@@ -216,10 +237,11 @@ class AcceptanceRulesTest(unittest.TestCase):
                     acceptance_for({"initial_cash": cash, "tracking_error_cap": 0.08}).to_record(),
                     tracking,
                 )
+                self.assertEqual(tracking["max_drawdown"], 0.45)
+                self.assertEqual(tracking["active_max_drawdown"], 0.30)
         # A request that names the limits as nulls keeps the same defaults.
         self.assertEqual(acceptance_for(dict.fromkeys(free)).to_record(), free)
-        # A cap brings the band and the tracker's drawdowns; each of them is
-        # still overridable on its own.
+        # A cap fills a blank beta band; drawdowns stay 0.45 / 0.30 unless named.
         self.assertEqual(
             acceptance_for({"tracking_error_cap": 0.08, "max_drawdown": 0.3, "beta_min": 0.9}).to_record(),
             {**tracking, "max_drawdown": 0.3, "beta_min": 0.9},
@@ -253,6 +275,11 @@ class AcceptanceRulesTest(unittest.TestCase):
         self.assertIn("benchmark.active_information_ratio", facts["graded_series"])
         self.assertIn(str(verdict.FREEZE_MIN_ACTIVE_IR), freeze["active_information_ratio"])
         self.assertIn("75%", freeze["positive_years"])
+        self.assertIn("3 of 4", freeze["positive_years"])
+        tighter = AcceptanceRules(min_active_ir=1.1, min_positive_year_share=0.5)
+        tight_facts = tighter.agent_facts(research_years=4)["freeze_gate"]
+        self.assertIn("1.1", tight_facts["active_information_ratio"])
+        self.assertIn("2 of 4", tight_facts["positive_years"])
         self.assertIn("0.11", freeze["active_max_drawdown"])
         self.assertEqual(facts["graduation"]["forward"]["active_max_drawdown"], "<= 0.11")
         self.assertEqual(facts["graduation"]["heldout"]["active_max_drawdown"], "<= 0.11")
@@ -376,10 +403,19 @@ class DefaultsDriftTest(unittest.TestCase):
         self.assertEqual(
             WEB_CREATE_DEFAULTS["cost_stress_multiplier"], rules.cost_stress_multiplier
         )
-        # The limits the account's capital derives are offered empty, so the
-        # form never pins one side of the capital switch onto every arm.
-        for key in rules.to_record():
-            if key != "cost_stress_multiplier":
+        # Drawdowns and the mandate switch stay empty so the form does not pin
+        # a mandate onto every arm. Statistical bars show today's stamp defaults.
+        optional = {
+            "max_drawdown",
+            "active_max_drawdown",
+            "tracking_error_cap",
+            "beta_min",
+            "beta_max",
+        }
+        for key, value in rules.to_record().items():
+            if key == "cost_stress_multiplier" or key not in optional:
+                self.assertEqual(WEB_CREATE_DEFAULTS[key], value, key)
+            else:
                 self.assertIsNone(WEB_CREATE_DEFAULTS[key], key)
         for key, value in DEFAULT_RESEARCH_GEOMETRY.to_record().items():
             self.assertEqual(WEB_CREATE_DEFAULTS[key], value, key)

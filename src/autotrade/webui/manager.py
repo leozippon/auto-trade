@@ -408,8 +408,8 @@ class ExperimentManager:
             # The acceptance rules are resolved once, here, and stamped in
             # like every other default this table merges: an arm's gates then
             # live in its own params.json, and a later change to the defaults
-            # or to the mandate's paired limits cannot move an arm that has
-            # already been created.
+            # or to the beta band that travels with a cap cannot move an arm
+            # that has already been created.
             merged.update(acceptance_for(merged).to_record())
             merged["_created_at"] = utc_now_iso()
             write_json_atomic(hitl / "params.json", merged)

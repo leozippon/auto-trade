@@ -722,10 +722,7 @@ class RollingExperimentPipeline:
             start=forward.start,
             end=forward.end,
             seed_key=artifact.artifact_id,
-            max_drawdown=acceptance.max_drawdown,
-            active_max_drawdown=acceptance.active_max_drawdown,
-            **acceptance.mandate,
-            cost_stress_multiplier=acceptance.cost_stress_multiplier,
+            **acceptance.forward_slice_kwargs(),
             slippage_bps=self.config.broker_profile.slippage_bps,
             turnover=float(forward_activity["turnover"]),  # type: ignore[arg-type]
             round_trips=int(forward_activity["round_trips"]),  # type: ignore[arg-type]
@@ -736,8 +733,7 @@ class RollingExperimentPipeline:
             start=heldout.start,
             end=heldout.end,
             forward_tracking_error=float(forward_block["tracking_error"]),  # type: ignore[arg-type]
-            max_drawdown=acceptance.max_drawdown,
-            active_max_drawdown=acceptance.active_max_drawdown,
+            **acceptance.heldout_slice_kwargs(),
             mean_gross=float(heldout_activity["mean_gross"]),  # type: ignore[arg-type]
         )
         fit = validate_strategy_package(artifact.path / "main.py")
@@ -929,10 +925,7 @@ def freeze_gate_for(
             trials=len(_arm_revisions(records, session_rows)),
             full_span_irs=irs,
             years=years,
-            active_max_drawdown=(
-                acceptance.active_max_drawdown if acceptance is not None else None
-            ),
-            **(acceptance.mandate if acceptance is not None else {}),
+            **(acceptance.freeze_gate_kwargs() if acceptance is not None else {}),
         )
     except ValueError as exc:
         return {"passed": False, "reasons": ["freeze_unmeasurable"], "error": str(exc)}

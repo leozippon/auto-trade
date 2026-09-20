@@ -288,15 +288,36 @@ def add_research_directive_arguments(parser: argparse.ArgumentParser) -> None:
 
 def add_acceptance_arguments(parser: argparse.ArgumentParser) -> None:
     # Unset takes the default of autotrade.pipelines.config.acceptance_for:
-    # a tracking mandate only where --tracking-error-cap is given.
+    # a tracking mandate only where --tracking-error-cap is given; drawdowns
+    # stay 0.45 / 0.30 unless named; the statistical bars default to today's
+    # constants.
     for flag, text in (
         ("--max-drawdown", "Equity drawdown limit of the freeze gate and the verdict."),
         ("--active-max-drawdown", "Drawdown limit of the active series (strategy minus zero-skill panel)."),
         ("--tracking-error-cap", "Tracking mandate: residual tracking error cap against CSI 300; giving it turns the mandate on for this arm."),
         ("--beta-min", "Tracking mandate: lower end of the market beta band."),
         ("--beta-max", "Tracking mandate: upper end of the market beta band."),
+        ("--min-active-ir", "Freeze gate: minimum research-period active information ratio."),
+        ("--min-dsr-probability", "Freeze gate: minimum deflated Sharpe probability of that IR."),
+        ("--min-positive-year-share", "Freeze gate: share of research years whose active excess must be positive."),
+        ("--forward-confidence", "Forward verdict: one-sided block-bootstrap confidence."),
+        ("--min-mean-gross", "Forward and Held-out: minimum mean gross exposure."),
+        ("--min-round-trips-per-month", "Forward verdict: minimum completed round trips per month."),
+        ("--heldout-tolerance-z", "Held-out: tolerated shortfall in standard errors of forward tracking error."),
     ):
         parser.add_argument(flag, type=float, default=None, help=text)
+    parser.add_argument(
+        "--min-full-span-validations",
+        type=int,
+        default=None,
+        help="Freeze gate: minimum measurable full-span validations in the arm.",
+    )
+    parser.add_argument(
+        "--recency-months",
+        type=int,
+        default=None,
+        help="Forward verdict: trailing calendar months whose active excess must be non-negative.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -382,6 +403,15 @@ def _build_worker_params(
                 "tracking_error_cap",
                 "beta_min",
                 "beta_max",
+                "min_active_ir",
+                "min_dsr_probability",
+                "min_positive_year_share",
+                "min_full_span_validations",
+                "forward_confidence",
+                "recency_months",
+                "min_mean_gross",
+                "min_round_trips_per_month",
+                "heldout_tolerance_z",
             )
         },
         "research_directive": research_directive,

@@ -275,13 +275,19 @@ def test_a_fill_never_takes_an_experiment_id(
 
 def test_an_arm_is_tracked_only_when_it_names_a_tracking_error_cap() -> None:
     """A round states the account and nothing about the gates: the request
-    carries the five limits as null, and a null cap is no mandate at any
-    account size. An arm that wants one names the cap, which brings the beta
-    band and the tracker's drawdowns with it; anything it names itself wins."""
+    carries the optional drawdown and mandate limits as null, and a null cap
+    is no mandate at any account size. An arm that wants one names the cap,
+    which fills a blank beta band; drawdowns stay 0.45 / 0.30 unless named."""
     from autotrade.pipelines.config import AcceptanceRules, acceptance_for
 
-    limits = [key for key in AcceptanceRules().to_record() if key != "cost_stress_multiplier"]
-    assert all(key in WEB_CREATE_DEFAULTS and key not in BASE_OVERRIDES for key in limits)
+    optional = (
+        "max_drawdown",
+        "active_max_drawdown",
+        "tracking_error_cap",
+        "beta_min",
+        "beta_max",
+    )
+    assert all(key in WEB_CREATE_DEFAULTS and key not in BASE_OVERRIDES for key in optional)
     rnd = Round(
         arms={
             "large": {"initial_cash": 1_000_000},
@@ -297,7 +303,7 @@ def test_an_arm_is_tracked_only_when_it_names_a_tracking_error_cap() -> None:
     def rules(experiment_id: str) -> dict[str, object]:
         return acceptance_for(rnd.request_params(experiment_id)).to_record()
 
-    assert [rnd.request_params("large")[key] for key in limits] == [None] * len(limits)
+    assert [rnd.request_params("large")[key] for key in optional] == [None] * len(optional)
     # The account decides nothing: two arms an order of magnitude apart, both
     # silent about the mandate, are judged by exactly the same rules.
     assert rules("large") == rules("small") == AcceptanceRules().to_record()
@@ -307,7 +313,67 @@ def test_an_arm_is_tracked_only_when_it_names_a_tracking_error_cap() -> None:
         0.85,
         1.15,
     )
-    assert (tracked["max_drawdown"], tracked["active_max_drawdown"]) == (0.4, 0.15)
+    assert (tracked["max_drawdown"], tracked["active_max_drawdown"]) == (0.4, 0.30)
+
+
+def test_the_20260921_mandated_arms_keep_unmandated_drawdowns() -> None:
+    """Those 1M arms named only a cap. Drawdowns stay 0.45 / 0.30; the cap
+    still fills the default beta band."""
+    from autotrade.pipelines.config import acceptance_for
+
+    rnd = ROUNDS["create_round_20260921"]
+    for experiment_id in (
+        "capital_aware_1m_enhanced_20260921",
+        "capital_aware_1m_riskmodel_20260921",
+    ):
+        rules = acceptance_for(rnd.request_params(experiment_id)).to_record()
+        assert (rules["max_drawdown"], rules["active_max_drawdown"]) == (0.45, 0.30)
+        assert rules["tracking_error_cap"] == 0.08
+        assert (rules["beta_min"], rules["beta_max"]) == (0.85, 1.15)
+
+
+def test_the_20260921b_arms_name_their_graduation_bars() -> None:
+    """The b-round records a create-time choice for every bar, not a hidden
+    pair of packages. Mandated arms keep the 35/15 drawdowns they named;
+    un-mandated arms keep 45/30; statistical bars are today's defaults."""
+    from autotrade.pipelines.config import AcceptanceRules, acceptance_for
+
+    rnd = ROUNDS["create_round_20260921b"]
+    defaults = AcceptanceRules().to_record()
+    statistical = (
+        "min_active_ir",
+        "min_dsr_probability",
+        "min_positive_year_share",
+        "min_full_span_validations",
+        "forward_confidence",
+        "recency_months",
+        "min_mean_gross",
+        "min_round_trips_per_month",
+        "heldout_tolerance_z",
+    )
+    mandated = (
+        "fullcash_overlay_1m_20260921b",
+        "indneutral_value_1m_20260921b",
+    )
+    unmandated = (
+        "resid_momentum_100k_20260921b",
+        "eyield_concentrated_100k_20260921b",
+    )
+    for experiment_id in (*mandated, *unmandated):
+        request = rnd.request_params(experiment_id)
+        rules = acceptance_for(request).to_record()
+        for key in statistical:
+            assert request[key] == defaults[key], (experiment_id, key)
+            assert rules[key] == defaults[key], (experiment_id, key)
+    for experiment_id in mandated:
+        rules = acceptance_for(rnd.request_params(experiment_id)).to_record()
+        assert (rules["max_drawdown"], rules["active_max_drawdown"]) == (0.35, 0.15)
+        assert rules["tracking_error_cap"] == 0.08
+        assert (rules["beta_min"], rules["beta_max"]) == (0.85, 1.15)
+    for experiment_id in unmandated:
+        rules = acceptance_for(rnd.request_params(experiment_id)).to_record()
+        assert (rules["max_drawdown"], rules["active_max_drawdown"]) == (0.45, 0.30)
+        assert rules["tracking_error_cap"] is None
 
 
 @pytest.mark.parametrize(("round_name", "experiment_id"), ARMS)
@@ -430,7 +496,11 @@ def test_mounting_index_weight_leaves_every_other_round_byte_for_byte() -> None:
     carrying = {
         name for name, record in records.items() if "index_weight" in record["datasets"]["macro"]
     }
-    assert carrying == {"create_round_20260919", "create_round_20260921"}, sorted(carrying)
+    assert carrying == {
+        "create_round_20260919",
+        "create_round_20260921",
+        "create_round_20260921b",
+    }, sorted(carrying)
     base = records["create_round_20260920"]
     for name in sorted(carrying):
         benchmark = records[name]

@@ -235,7 +235,7 @@ def test_the_prompt_states_the_research_session_contract() -> None:
         "主动信息比率",
         "主动超额为正的研究年数",
         "那是约束，不是技能的证据",
-        "本臂至少两个完整研究期验证",
+        "本臂完整研究期验证数达到该节写明的下限",
         "任何 span、任何尝试、对照都算",
         "一条臂至多冻结一次",
         "`finish_session` 之后不能再写",

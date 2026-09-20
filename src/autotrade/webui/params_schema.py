@@ -390,16 +390,15 @@ _FIELDS: list[dict[str, object]] = [
     # 预算与验收
     {"key": "max_research_minutes", "group": "预算与验收", "label": "研究会话推理时长（分钟）", "type": "int",
      "help": "研究会话的有效推理时间上限，跨中断后的续跑累计；回测耗时独立计算并回补。"},
-    # The tracking mandate's switch and the four limits paired with it
-    # (config.acceptance_for). Filling the cap turns the mandate on for this
-    # arm and moves the paired defaults; each one is still overridable alone.
+    # The tracking mandate's switch. Filling the cap turns the mandate on and
+    # fills a blank beta band; drawdowns stay 0.45 / 0.30 unless named.
     {
         "key": "tracking_error_cap",
         "group": "预算与验收",
         "label": "跟踪误差上限（对沪深300）",
         "type": "float",
         "optional": True,
-        "help": "跟踪授权的开关：填入即为本臂设定跟踪授权——策略自身对沪深300的残差跟踪误差上限（0.08 = 8%/年），研究期与前推期都要满足，同时把下面四项切换到带授权的默认值。留空即不设授权，跟踪误差与 β 只报告、不评级。",
+        "help": "跟踪授权的开关：填入即为本臂设定跟踪授权——策略自身对沪深300的残差跟踪误差上限（0.08 = 8%/年），研究期与前推期都要满足。留空即不设授权，跟踪误差与 β 只报告、不评级。没有上限却填 β 区间会被拒绝。",
     },
     {
         "key": "max_drawdown",
@@ -407,8 +406,8 @@ _FIELDS: list[dict[str, object]] = [
         "label": "权益最大回撤",
         "type": "float",
         "optional": True,
-        "mandate_paired": True,
-        "help": "权益回撤上限（0.35 = 35%），冻结门、前推与 Held-out 三段都不得超过。留空取默认值：设了跟踪授权 0.35，未设 0.45。",
+        "placeholder": "留空：0.45",
+        "help": "权益回撤上限（0.45 = 45%），冻结门、前推与 Held-out 三段都不得超过。留空取 0.45，与有没有跟踪授权无关。",
     },
     {
         "key": "active_max_drawdown",
@@ -416,8 +415,8 @@ _FIELDS: list[dict[str, object]] = [
         "label": "主动序列最大回撤",
         "type": "float",
         "optional": True,
-        "mandate_paired": True,
-        "help": "主动序列（策略日收益减零技能面板合成收益）累计净值的回撤上限，同样约束三段。留空取默认值：设了跟踪授权 0.15，未设 0.30。",
+        "placeholder": "留空：0.30",
+        "help": "主动序列（策略日收益减零技能面板合成收益）累计净值的回撤上限，同样约束三段。留空取 0.30，与有没有跟踪授权无关。",
     },
     {
         "key": "beta_min",
@@ -427,7 +426,7 @@ _FIELDS: list[dict[str, object]] = [
         "optional": True,
         "advanced": True,
         "mandate_paired": True,
-        "help": "跟踪授权的 β 区间下限，只在设有跟踪误差上限时生效（没有上限却填区间会被拒绝）；留空取 0.85。",
+        "help": "跟踪授权的 β 区间下限，只在设有跟踪误差上限时生效（没有上限却填区间会被拒绝）；有上限而留空取 0.85。无上限时 β 只报告、不评级。",
     },
     {
         "key": "beta_max",
@@ -437,7 +436,7 @@ _FIELDS: list[dict[str, object]] = [
         "optional": True,
         "advanced": True,
         "mandate_paired": True,
-        "help": "跟踪授权的 β 区间上限，只在设有跟踪误差上限时生效（没有上限却填区间会被拒绝）；留空取 1.15。",
+        "help": "跟踪授权的 β 区间上限，只在设有跟踪误差上限时生效（没有上限却填区间会被拒绝）；有上限而留空取 1.15。",
     },
     {
         "key": "cost_stress_multiplier",
@@ -445,6 +444,71 @@ _FIELDS: list[dict[str, object]] = [
         "label": "毕业成本压力倍数",
         "type": "float",
         "help": "毕业裁决的成本压力：前推段中性化超额在滑点放大到该倍数后仍须为正（按该段换手定价）。",
+    },
+    {
+        "key": "min_active_ir",
+        "group": "预算与验收",
+        "label": "冻结门最低主动信息比率",
+        "type": "float",
+        "help": "提名节点研究期主动信息比率下限。创建时写入本臂，盖章后不随默认值漂移。",
+    },
+    {
+        "key": "min_dsr_probability",
+        "group": "预算与验收",
+        "label": "冻结门最低 DSR 概率",
+        "type": "float",
+        "help": "提名节点研究期主动信息比率的去膨胀夏普概率下限，须在 (0, 1]。",
+    },
+    {
+        "key": "min_positive_year_share",
+        "group": "预算与验收",
+        "label": "冻结门主动正数年比例",
+        "type": "float",
+        "help": "主动中性化超额为正的研究年数不少于研究年数乘以该比例、向上取整。须在 (0, 1]。",
+    },
+    {
+        "key": "min_full_span_validations",
+        "group": "预算与验收",
+        "label": "冻结门最少完整研究期验证数",
+        "type": "int",
+        "min": 1,
+        "help": "本臂可测的完整研究期验证数下限（提名计入），整数且至少为 1。",
+    },
+    {
+        "key": "forward_confidence",
+        "group": "预算与验收",
+        "label": "前推下界置信度",
+        "type": "float",
+        "help": "前推期年化主动中性化超额单侧块自助下界的置信度，须在 (0, 1)。",
+    },
+    {
+        "key": "recency_months",
+        "group": "预算与验收",
+        "label": "前推近月窗口（月）",
+        "type": "int",
+        "min": 1,
+        "help": "前推期最后该数个日历月的主动中性化超额不得为负，整数且至少为 1。",
+    },
+    {
+        "key": "min_mean_gross",
+        "group": "预算与验收",
+        "label": "最低平均总仓位",
+        "type": "float",
+        "help": "前推期与 Held-out 平均总仓位下限，须在 (0, 1]。",
+    },
+    {
+        "key": "min_round_trips_per_month",
+        "group": "预算与验收",
+        "label": "前推每月最少回合数",
+        "type": "float",
+        "help": "前推期完成回合数按月计的下限；0 表示不要求交易次数。",
+    },
+    {
+        "key": "heldout_tolerance_z",
+        "group": "预算与验收",
+        "label": "Held-out 超额容差（标准误倍数）",
+        "type": "float",
+        "help": "Held-out 主动中性化超额不得低于 −该值 × 前推期主动跟踪误差 / √年数，须为正。",
     },
     {"key": "max_replay_years", "group": "预算与验收", "label": "研究会话回测预算（年）", "type": "int",
      "help": "一个候选在其验证区间覆盖的每个研究年份计 1：完整研究期计研究年数，一批按候选数乘年数预留；回测独立计时（墙钟回补推理 deadline）。"},
@@ -620,11 +684,10 @@ def parameter_schema() -> dict[str, object]:
         entry["default"] = default
         groups[str(entry.pop("group"))].append(entry)
     return {
-        "schema_version": 5,
+        "schema_version": 6,
         # What each ``mandate_paired`` field defaults to on either side of the
-        # tracking mandate's switch, from the rules themselves, so the form
-        # shows the default the operator's own choice gives it. A ``null``
-        # means the field has no default without a cap -- the beta band.
+        # tracking mandate's switch. Only the beta band travels with the cap;
+        # drawdowns keep a static placeholder and are not in this map.
         "acceptance_defaults": {
             "mandated": dict(MANDATED_DEFAULTS),
             "unmandated": {key: getattr(AcceptanceRules(), key) for key in MANDATED_DEFAULTS},

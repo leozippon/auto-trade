@@ -384,6 +384,9 @@ def _artifact_contract_facts(
     # frozen artifact is judged by later, both derived from the run's own
     # rules. Rules only: no date after research end.
     acceptance = _as_mapping(manifest.get("acceptance_rules"))
+    research = _as_mapping(manifest.get("research"))
+    year_rows = research.get("years")
+    research_years = len(year_rows) if isinstance(year_rows, list) and year_rows else None
     return compact_mapping(
         {
             "required_entry": "output/main.py",
@@ -394,7 +397,9 @@ def _artifact_contract_facts(
             "start": compact_mapping(start),
             "modification_constraints": manifest.get("modification_constraints"),
             "acceptance_rules": (
-                AcceptanceRules.from_record(acceptance).agent_facts()
+                AcceptanceRules.from_record(acceptance).agent_facts(
+                    research_years=research_years
+                )
                 if acceptance
                 else None
             ),

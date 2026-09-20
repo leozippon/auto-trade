@@ -52,13 +52,6 @@ from autotrade.pipelines.ledger import (
 from autotrade.pipelines.pit_views_seed import FORWARD_PHASE, RESEARCH_PHASE
 from autotrade.pipelines.session_resume import STEP_SIDECAR_DIR
 from autotrade.pipelines.skills import latest_skills_snapshot
-from autotrade.pipelines.verdict import (
-    FORWARD_CONFIDENCE,
-    HELDOUT_TOLERANCE_Z,
-    MIN_MEAN_GROSS,
-    MIN_ROUND_TRIPS_PER_MONTH,
-    RECENCY_MONTHS,
-)
 from autotrade.pipelines.worker import _ALLOWED_PARAMS
 
 from .public_identity import PublicIdentity
@@ -737,27 +730,40 @@ def _verdict_thresholds(
     params: Mapping[str, object], replay: Mapping[str, object]
 ) -> dict[str, object]:
     """The graduation thresholds the replay will be held to, from the arm's
-    effective parameters and the verdict's constants, so the console lists
-    the criteria before the replay has run. The forward record's own block
-    replaces them once it exists."""
+    own stamped rules, so the console lists the criteria before the replay
+    has run. The forward record's own block replaces them once it exists."""
 
     effective = {**WEB_CREATE_DEFAULTS, **params}
     months = _months_between(replay.get("start"), replay.get("forward_end"))
+    rules = acceptance_for(effective)
     # An arm created since the five limits reached the create form states all
     # of them; an earlier arm's params.json carries its equity drawdown limit
-    # alone, and that is all it is held to.
+    # alone, and that is all it is held to. Statistical bars always resolve
+    # (missing keys take today's defaults) so the listing matches the worker.
+    # Freeze-gate knobs stay off this preview: they are not forward criteria.
     limits: dict[str, object] = {"max_drawdown": _number(effective.get("max_drawdown"))}
     if "active_max_drawdown" in params:
-        rules = acceptance_for(effective).to_record()
-        limits = {key: value for key, value in rules.items() if key != "cost_stress_multiplier"}
+        record = rules.to_record()
+        limits = {
+            key: record[key]
+            for key in (
+                "max_drawdown",
+                "active_max_drawdown",
+                "tracking_error_cap",
+                "beta_min",
+                "beta_max",
+            )
+        }
     return {
-        "forward_confidence": FORWARD_CONFIDENCE,
-        "recency_months": RECENCY_MONTHS,
+        "forward_confidence": rules.forward_confidence,
+        "recency_months": rules.recency_months,
         **limits,
-        "cost_stress_multiplier": _number(effective.get("cost_stress_multiplier")),
-        "min_round_trips": MIN_ROUND_TRIPS_PER_MONTH * months if months else None,
-        "min_mean_gross": MIN_MEAN_GROSS,
-        "heldout_tolerance_z": HELDOUT_TOLERANCE_Z,
+        "cost_stress_multiplier": rules.cost_stress_multiplier,
+        "min_round_trips": (
+            rules.min_round_trips_per_month * months if months else None
+        ),
+        "min_mean_gross": rules.min_mean_gross,
+        "heldout_tolerance_z": rules.heldout_tolerance_z,
     }
 
 

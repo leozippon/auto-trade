@@ -2109,9 +2109,10 @@ async function openCreateModal() {
 }
 
 /* The tracking mandate is a manual setting: filling the tracking-error cap
-   turns it on, and the four limits paired with it then show, as placeholders,
-   the defaults that choice gives them. A field holding a value is marked as
-   overriding its default. Nothing here reads the account's capital. */
+   turns it on, and the beta band then shows 0.85 / 1.15 as placeholders.
+   Drawdown placeholders stay 0.45 / 0.30 and do not jump with the cap.
+   A field holding a value is marked as overriding its default. Nothing
+   here reads the account's capital. */
 function bindMandateDefaults(rule, inputs) {
   const cap = inputs.get("tracking_error_cap");
   if (!rule || !cap) return;
@@ -2229,7 +2230,7 @@ function fieldNode(field, inputs) {
     if (field.min !== undefined) input.setAttribute("min", String(field.min));
     if (field.max !== undefined) input.setAttribute("max", String(field.max));
     input.value = field.default ?? "";
-    if (field.optional) input.placeholder = "留空使用默认";
+    if (field.optional) input.placeholder = field.placeholder || "留空使用默认";
     if (field.type === "int" || field.type === "float") {
       // Focused number inputs change value on mouse wheel (browser default) —
       // an easy silent mis-edit while scrolling the form. Block the spin but

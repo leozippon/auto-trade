@@ -94,14 +94,26 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "strategy_fit_timeout_seconds": rolling_default("strategy_fit_timeout_seconds"),
     "record_failed_attempts": rolling_default("record_failed_attempts"),
     # ``tracking_error_cap`` is the tracking mandate's switch: naming it turns
-    # the mandate on for this arm and gives the other four their mandated
-    # defaults, leaving it null leaves the mandate off (``config.acceptance_for``).
+    # the mandate on for this arm and, if the beta band is left blank, fills
+    # it from ``config.MANDATED_DEFAULTS``. Drawdowns stay the rules' own
+    # 0.45 / 0.30 unless the request names them. The statistical bars are
+    # filled with today's defaults so the form shows the values an empty
+    # request would stamp (``config.acceptance_for``).
     "max_drawdown": None,
     "active_max_drawdown": None,
     "tracking_error_cap": None,
     "beta_min": None,
     "beta_max": None,
     "cost_stress_multiplier": AcceptanceRules().cost_stress_multiplier,
+    "min_active_ir": AcceptanceRules().min_active_ir,
+    "min_dsr_probability": AcceptanceRules().min_dsr_probability,
+    "min_positive_year_share": AcceptanceRules().min_positive_year_share,
+    "min_full_span_validations": AcceptanceRules().min_full_span_validations,
+    "forward_confidence": AcceptanceRules().forward_confidence,
+    "recency_months": AcceptanceRules().recency_months,
+    "min_mean_gross": AcceptanceRules().min_mean_gross,
+    "min_round_trips_per_month": AcceptanceRules().min_round_trips_per_month,
+    "heldout_tolerance_z": AcceptanceRules().heldout_tolerance_z,
     "initial_cash": 1_000_000.0,
     "max_total_holdings": None,
     "max_single_name_weight": None,

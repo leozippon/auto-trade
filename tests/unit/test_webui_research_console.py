@@ -326,7 +326,7 @@ def test_the_listing_names_the_research_curve_and_the_replay_its_thresholds(tmp_
     stated = experiment_detail(tmp_path, "researching")["sessions"][1]["thresholds"]
     assert {key: stated[key] for key in derived} == {
         "max_drawdown": 0.3,
-        "active_max_drawdown": 0.15,
+        "active_max_drawdown": 0.30,
         "tracking_error_cap": 0.08,
         "beta_min": 0.85,
         "beta_max": 1.15,

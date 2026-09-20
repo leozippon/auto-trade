@@ -146,8 +146,8 @@ BASE_OVERRIDES: dict[str, object] = {
     "initial_cash": 100_000,
     # The forward verdict's cost stress. The drawdown limits and the tracking
     # mandate are not stated here: an arm gets a mandate only by naming its own
-    # `tracking_error_cap` (config.acceptance_for), and an arm entry that
-    # overrides any of the limits says so.
+    # `tracking_error_cap` (config.acceptance_for). Unnamed drawdowns stay
+    # 0.45 / 0.30; an arm that wants other bars names them.
     "cost_stress_multiplier": 2.0,
     # The one research session's budgets, spent across every attempt.
     "max_research_minutes": 2400,

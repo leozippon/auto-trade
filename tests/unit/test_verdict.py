@@ -522,6 +522,16 @@ def test_the_freeze_gate_refuses_zero_skill_an_uneven_edge_and_a_broken_mandate(
     with pytest.raises(ValueError, match="beta band"):
         gate(steady, tracking_error_cap=0.08)
 
+    # Create-time bars move the gate: a missing key is today's default, an
+    # override is the arm's own.
+    assert gate(book([0.10, 0.10, 0.10, 0.10], seed=111))["passed"]
+    assert "freeze_information_ratio_below_threshold" in gate(
+        book([0.10, 0.10, 0.10, 0.10], seed=111), min_active_ir=3.0
+    )["reasons"]
+    two_of_four = book([0.30, 0.22, -0.06, -0.06], seed=113)
+    assert gate(two_of_four)["reasons"] == ["freeze_too_few_positive_years"]
+    assert gate(two_of_four, min_positive_year_share=0.5)["passed"]
+
 
 def test_the_forward_mandate_and_active_drawdown_fail_at_their_boundaries():
     rng = np.random.default_rng(121)
@@ -546,6 +556,10 @@ def test_the_forward_mandate_and_active_drawdown_fail_at_their_boundaries():
         "reasons"
     ] == ["forward_beta_outside_band"]
     assert base["thresholds"]["tracking_error_cap"] is None
+    assert _forward(book, mean_gross=0.6)["reasons"] == []
+    assert _forward(book, mean_gross=0.6, min_mean_gross=0.7)["reasons"] == [
+        "forward_exposure_below_floor"
+    ]
 
 
 def test_graduation_lists_every_failed_condition_and_a_strategy_error_discards():
@@ -571,6 +585,17 @@ def test_graduation_lists_every_failed_condition_and_a_strategy_error_discards()
     assert graduated["status"] == "graduated" and graduated["reasons"] == []
     assert graduated["thresholds"]["forward_confidence"] == 0.8
     assert graduated["thresholds"]["heldout_tolerance_z"] == 1.28
+    tight_heldout = verdict.heldout_slice(
+        analysis,
+        start=HELDOUT_START,
+        end=HELDOUT_END,
+        forward_tracking_error=forward["tracking_error"],
+        max_drawdown=1.0,
+        active_max_drawdown=1.0,
+        mean_gross=0.6,
+        min_mean_gross=0.7,
+    )
+    assert "heldout_exposure_below_floor" in tight_heldout["reasons"]
 
     weak_forward = _forward(analysis, round_trips=0, mean_gross=0.1)
     discarded = verdict.graduation_verdict(forward=weak_forward, heldout=heldout(0.2))

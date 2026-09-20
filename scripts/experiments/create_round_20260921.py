@@ -22,16 +22,16 @@ An arm is one entry of ARMS:
         "tracking_error_cap": <only on a mandated arm>,
     }
 
-`initial_cash` and the five acceptance limits are ordinary create parameters,
+`initial_cash` and the acceptance limits are ordinary create parameters,
 so an arm entry overrides the round's value for that arm alone
 (`_round.Round.request_params` merges the arm last). **The tracking mandate is
 a manual setting and no capital turns it on**: it exists exactly where an arm
-names `tracking_error_cap`, and the limits that travel with it then default to
-beta 0.85-1.15 and drawdown 0.35 absolute / 0.15 active
-(`config.MANDATED_DEFAULTS`). The two arms without a cap keep the rules' own
-0.45 / 0.30 and have their tracking error measured and reported, not graded.
-No arm states any other acceptance field, so `--dry-run` prints exactly two
-distinct acceptance records.
+names `tracking_error_cap`. A cap without a beta band takes 0.85 / 1.15;
+drawdowns stay 0.45 / 0.30 unless an arm names them. The two 1M arms name
+only the cap, so `--dry-run` prints 0.45 / 0.30 plus the cap and default
+beta. The two arms without a cap have their tracking error measured and
+reported, not graded. Statistical bars that no arm names take today's
+create-time defaults.
 
 One experiment, one account, one strategy: each arm runs a single account and
 the artifact it freezes serves that account alone.
@@ -51,11 +51,11 @@ recoverable inside each arm for four replay-years, because the pack already
 requires a same-batch mechanism control and here that control is literally
 "the same score, unconstrained, equal cash at the same seats".
 
-The binding gate on a mandated arm is the absolute 35 % drawdown, not the
-information ratio: CSI 300 itself fell 39.6 % over the research period, and of
-twenty zero-skill benchmark-weight books 40 % breach 35 % at 50 seats, 15 % at
-80 and none at 100. The operator keeps 35 %, so both mandated directives steer
-to the safe seat range rather than the limit being raised.
+CSI 300 itself fell 39.6 % over the research period, and of twenty zero-skill
+benchmark-weight books 40 % breach 35 % at 50 seats, 15 % at 80 and none at
+100. These two mandated arms do not name a tighter equity limit, so they are
+held to the rules' 45 %; the directives still steer toward the safer seat
+range because a full-beta tracker remains a large absolute drawdown.
 
 Contamination, per arm. Operator-side only: the pack carries no reading from
 after research end, so none of this reaches the Agent, but it decides how much
