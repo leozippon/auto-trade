@@ -14,9 +14,11 @@ large the 5 CNY commission floor is in basis points, and how coarse whole-lot
 rounding is. `SEAT_CASH_MIN` is 6,900 CNY because that is the seat cash at which
 one lot still reaches about 70 % of the CSI 300 by index weight (48.5 % at
 3,333, 64.5 % at 5,000, 76.7 % at 10,000) and the floor is 7.2 bp a side.
-`SEATS_MAX` is 80 because a benchmark-weight zero-skill book's tracking error
-has flattened by there (4.65 % at 80 seats against 4.59 % at 100) while the
-floor keeps climbing (4.0 bp a side at 80, 5.0 at 100). The readings are in
+`SEATS_MAX` is 100 because that is where a zero-skill benchmark-weight book
+stops breaching the 35 % absolute drawdown a tracking mandate travels with:
+40 % of such books breach it at 50 seats, 15 % at 80 and 0 % at 100, while
+their own tracking error reads 5.5 / 4.7 / 4.6 %. Past 100 the commission floor
+keeps climbing for tracking error that has stopped falling. The readings are in
 `references/capital-arithmetic.md`. Set `SEATS` to a positive integer to pin the
 count instead: the rule is a default, not a constraint.
 
@@ -53,7 +55,7 @@ measured reading to fix, not a recommendation (`sources.md`).
 Affordability, which is where the account decides the book. A seat is
 `book value / seats` and one 100-share lot can cost more than that: at 100k and
 14 seats a seat is about 6,900 CNY, so nothing priced above 69 CNY can fill one,
-and at 1M and 80 seats the limit is about 121 CNY. Ranking runs over every
+and at 1M and 100 seats the limit is about 97 CNY. Ranking runs over every
 tradable name -- an unaffordable HOLDING is never force-sold -- while only
 affordable names may fill a free seat, and `unbuyable_share` is reported on
 every buy. In the index book a name's target money is its index weight rather
@@ -85,7 +87,7 @@ BOOK = "pool"                # "pool" (affordable whole-market pool) | "index" (
 SEATS = 0                    # 0 derives the seat count from equity; a positive int pins it
 SEAT_CASH_MIN = 6_900.0      # CNY per seat: one lot still reaches ~70 % of the index by weight
 SEATS_MIN = 12
-SEATS_MAX = 80
+SEATS_MAX = 100
 
 KEEP_BAND = 2.0              # a holding ranked inside seats * KEEP_BAND is kept
 MAX_REPLACE = 10             # discretionary swaps per monthly review

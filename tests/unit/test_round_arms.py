@@ -416,10 +416,12 @@ def test_mounting_index_weight_leaves_every_other_round_byte_for_byte() -> None:
     A round's snapshot configuration IS the contract its prebuilt seed and the
     arms hardlinking that tree were built under, so adding a dataset to a round
     with running arms would make their seed unusable. Stated as the relation
-    that has to hold: only the benchmark round carries `index_weight`, its
-    macro selection is the 2026-09-20 one plus that name, and the two records
-    are otherwise identical byte for byte. The tree those arms actually read is
-    compared separately, above, against its own provider.json.
+    that has to hold: `index_weight` reaches exactly the rounds built on the
+    benchmark round's selection -- the one that introduced it and whichever
+    later rounds import it -- each of their macro selections is the 2026-09-20
+    one plus that name, and each record is otherwise identical to it byte for
+    byte. The tree those arms actually read is compared separately, above,
+    against its own provider.json.
     """
     records = {
         name: _snapshot_config(ROUNDS[name].request_params(PROBE_ID)).to_record()
@@ -428,12 +430,14 @@ def test_mounting_index_weight_leaves_every_other_round_byte_for_byte() -> None:
     carrying = {
         name for name, record in records.items() if "index_weight" in record["datasets"]["macro"]
     }
-    assert carrying == {"create_round_20260919"}, sorted(carrying)
-    benchmark, base = records["create_round_20260919"], records["create_round_20260920"]
-    assert benchmark["datasets"]["macro"] == [*base["datasets"]["macro"], "index_weight"]
-    assert json.dumps({**benchmark, "datasets": base["datasets"]}, sort_keys=True) == json.dumps(
-        base, sort_keys=True
-    )
+    assert carrying == {"create_round_20260919", "create_round_20260921"}, sorted(carrying)
+    base = records["create_round_20260920"]
+    for name in sorted(carrying):
+        benchmark = records[name]
+        assert benchmark["datasets"]["macro"] == [*base["datasets"]["macro"], "index_weight"], name
+        assert json.dumps(
+            {**benchmark, "datasets": base["datasets"]}, sort_keys=True
+        ) == json.dumps(base, sort_keys=True), name
     # The pin-time check reads the same selection: a round that does not select
     # the dataset must not start requiring its raw directory either.
     for name, record in records.items():
