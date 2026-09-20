@@ -70,6 +70,15 @@ _BENCHMARK_KEYS = (
     "top_industry_weight",
     "neutralized_excess_return",
     "neutralized_excess_method",
+    # What a tracking mandate limits, and what the freeze gate and the verdict
+    # grade: the node's return minus the zero-skill panel of its own book.
+    "tracking_error",
+    "market_beta",
+    "active_neutralized_excess",
+    "active_tracking_error",
+    "active_information_ratio",
+    "panel_neutralized_excess",
+    "panel_draws",
 )
 
 
@@ -122,8 +131,9 @@ def agent_visible_metrics(summary: dict[str, object] | None) -> dict[str, object
 # is a weaker comparison, ``status``/``reason`` because a failed or unavailable
 # null (a result with no filled trade) must not read as a missing one, and the
 # null's own centre and spread over its ``k`` draws because a percentile alone
-# does not say how far the observed excess sits from them. Informational:
-# nothing in the pipeline gates on it.
+# does not say how far the observed excess sits from them. Informational: the
+# pipeline gates on the active series against the panel each validation draws,
+# never on this percentile.
 NULL_CONTROL_KEYS = (
     "status",
     "reason",

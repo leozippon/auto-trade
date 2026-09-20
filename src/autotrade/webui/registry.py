@@ -27,6 +27,7 @@ from autotrade.agent.runner import DEADLINE_GRACE_EXHAUSTED, LLM_CALL_BUDGET_EXH
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME, STYLE_SCHEMA_VERSION
 from autotrade.pipelines.agent_inbox import INBOX_NAME, inbox_public_view
 from autotrade.pipelines.calendar import FULL_SPAN
+from autotrade.pipelines.config import acceptance_for
 from autotrade.pipelines.experiment import freeze_gate_for, neutralized
 from autotrade.pipelines.hitl_state import (
     CONTROL_NAME,
@@ -102,12 +103,16 @@ _CRITERION_CODES = {
     "forward_lower_bound_not_positive": "F2",
     "forward_recency_negative": "F3",
     "forward_max_drawdown_exceeded": "F4",
+    "forward_active_drawdown_exceeded": "F4",
     "forward_not_positive_at_cost_stress": "F5",
     "forward_too_few_round_trips": "F6",
     "forward_exposure_below_floor": "F6",
+    "forward_tracking_error_above_cap": "F7",
+    "forward_beta_outside_band": "F7",
     "heldout_strategy_error": "H1",
     "heldout_excess_below_tolerance": "H2",
     "heldout_max_drawdown_exceeded": "H3",
+    "heldout_active_drawdown_exceeded": "H3",
     "heldout_exposure_below_floor": "H4",
 }
 # The two budgets a research session can run out of, named as the reason line.
@@ -575,6 +580,9 @@ def _step_view(row: Mapping[str, object]) -> dict[str, object]:
         "max_drawdown": _number(summary.get("max_drawdown")),
         "neutralized_excess": _number(neutral.get("neutralized_excess")),
         "information_ratio": _number(neutral.get("information_ratio")),
+        # ``active`` when the figures are of the node's return minus its
+        # zero-skill panel; absent on a node recorded before panels existed.
+        "series": neutral.get("series"),
     }
 
 
@@ -735,10 +743,17 @@ def _verdict_thresholds(
 
     effective = {**WEB_CREATE_DEFAULTS, **params}
     months = _months_between(replay.get("start"), replay.get("forward_end"))
+    # An arm created since its capital derives its limits states all of them,
+    # as null where it overrides nothing; an earlier arm's params.json carries
+    # its equity drawdown limit alone, and that is all it is held to.
+    limits: dict[str, object] = {"max_drawdown": _number(effective.get("max_drawdown"))}
+    if "active_max_drawdown" in params:
+        rules = acceptance_for(float(effective["initial_cash"]), effective).to_record()  # type: ignore[arg-type]
+        limits = {key: value for key, value in rules.items() if key != "cost_stress_multiplier"}
     return {
         "forward_confidence": FORWARD_CONFIDENCE,
         "recency_months": RECENCY_MONTHS,
-        "max_drawdown": _number(effective.get("max_drawdown")),
+        **limits,
         "cost_stress_multiplier": _number(effective.get("cost_stress_multiplier")),
         "min_round_trips": MIN_ROUND_TRIPS_PER_MONTH * months if months else None,
         "min_mean_gross": MIN_MEAN_GROSS,
@@ -776,14 +791,21 @@ def _research_session_view(
                     _mapping(gate.get("deflated_sharpe")).get("deflated_sharpe_probability")
                 ),
                 "full_span_validations": _number(gate.get("full_span_validations")),
-                # The limits this nomination was actually judged against, so a
-                # later change to either one does not restate the arm's gate.
+                "series": gate.get("series"),
+                "information_ratio": _number(gate.get("information_ratio")),
+                "positive_years": _number(gate.get("positive_years")),
+                "active_max_drawdown": _number(gate.get("active_max_drawdown")),
+                "mandate": {
+                    key: _number(value)
+                    for key, value in _mapping(gate.get("mandate")).items()
+                },
+                # The limits this nomination was actually judged against, as
+                # its own record states them, so a later change to any of them
+                # does not restate the arm's gate and a limit the record does
+                # not carry is not drawn.
                 "thresholds": {
-                    key: _number(_mapping(gate.get("thresholds")).get(key))
-                    for key in (
-                        "min_full_span_validations",
-                        "min_deflated_sharpe_probability",
-                    )
+                    key: _number(value)
+                    for key, value in _mapping(gate.get("thresholds")).items()
                 },
             }
             if gate

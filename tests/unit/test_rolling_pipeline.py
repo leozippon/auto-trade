@@ -31,6 +31,7 @@ from autotrade.pipelines.config import (
     RollingExperimentConfig,
     SnapshotBundle,
     StepResult,
+    default_acceptance,
 )
 from autotrade.pipelines.experiment import (
     RollingExperimentPipeline,
@@ -280,6 +281,20 @@ def test_a_freeze_passes_only_the_gate_and_records_the_frozen_block(tmp_path: Pa
     assert gate["passed"] is True
     assert gate["full_span_validations"] == 2
     assert gate["deflated_sharpe"]["trials"] == 2 == record["trials_to_date"]
+    # The gate is judged under the arm's own rules -- here the defaults its
+    # CNY 1,000,000 derives, tracking mandate included -- over the research
+    # years of its geometry, and the record states the account and the rules.
+    rules = default_acceptance(CONFIG_PROFILE.initial_cash)
+    assert rules.tracking_error_cap == 0.08
+    assert record["initial_cash"] == CONFIG_PROFILE.initial_cash
+    assert record["acceptance_rules"] == rules.to_record()
+    assert gate["thresholds"]["research_years"] == len(GEOMETRY.research_years) == 2
+    assert gate["thresholds"]["min_positive_years"] == 2
+    assert {
+        key: gate["thresholds"][key]
+        for key in ("active_max_drawdown", "tracking_error_cap", "beta_min", "beta_max")
+    } == {key: value for key, value in rules.to_record().items() if key in gate["thresholds"]}
+    assert gate["mandate"]["market_beta"] == pytest.approx(0.9, abs=0.05)
     assert record["arm_end"] is None
     frozen = record["frozen"]
     assert frozen["artifact_id"].startswith("strategy_research_")
@@ -320,7 +335,12 @@ def test_a_nominee_below_the_deflated_sharpe_threshold_is_not_frozen(tmp_path: P
         tmp_path, {1: ([0.0012, -0.0004], "freeze", {"nominee": 1})}
     )
     record = pipeline.run_research_session()
-    assert record["freeze_gate"]["reasons"] == ["freeze_deflated_sharpe_below_threshold"]
+    assert record["freeze_gate"]["reasons"] == [
+        "freeze_information_ratio_below_threshold",
+        "freeze_deflated_sharpe_below_threshold",
+        "freeze_too_few_positive_years",
+        "freeze_active_drawdown_exceeded",
+    ]
     assert record["frozen"] is None
     assert record["arm_end"]["status"] == "no_deliverable"
     assert "freeze_deflated_sharpe_below_threshold" in record["arm_end"]["reason"]
@@ -589,6 +609,12 @@ def test_the_forward_replay_is_one_span_from_forward_start_to_the_release(tmp_pa
     assert forward["activity"]["round_trips"] > 0
     # The Held-out tolerance is scaled by the forward slice's tracking error.
     assert heldout["tolerance"] < 0
+    # The verdict is held to the arm's own rules and its record states them.
+    rules = default_acceptance(CONFIG_PROFILE.initial_cash).to_record()
+    assert record["initial_cash"] == CONFIG_PROFILE.initial_cash
+    assert record["acceptance_rules"] == rules
+    assert {key: record["verdict"]["thresholds"][key] for key in rules} == rules
+    assert set(forward["mandate"]) == {"tracking_error", "market_beta"}
     assert record["refits_executed"] == {"forward": 0, "heldout": 0}
     assert record["verdict"]["status"] in {"graduated", "discarded"}
     assert experiment_verdict(ledger.read())["status"] == record["verdict"]["status"]

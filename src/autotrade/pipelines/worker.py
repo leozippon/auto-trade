@@ -61,6 +61,7 @@ from .config import (
     DEFAULT_PIT_VIEWS_SEED,
     AcceptanceRules,
     RollingExperimentConfig,
+    acceptance_for,
     rolling_default,
 )
 from .experiment import RollingExperimentPipeline
@@ -158,6 +159,10 @@ _ALLOWED_PARAMS = {
     "session_max_attempts",
     "max_research_minutes",
     "max_drawdown",
+    "active_max_drawdown",
+    "tracking_error_cap",
+    "beta_min",
+    "beta_max",
     "cost_stress_multiplier",
     "research_directive",
     "workspace_reference",
@@ -640,19 +645,13 @@ def resolve_worker_options(
         strategy_fit_timeout_seconds=_positive_int(
             knob("strategy_fit_timeout_seconds"), "strategy_fit_timeout_seconds"
         ),
-        acceptance=AcceptanceRules(
-            max_drawdown=_bounded_float(
-                params.get("max_drawdown", AcceptanceRules().max_drawdown),
-                "max_drawdown",
-                0.0,
-                1.0,
-            ),
-            cost_stress_multiplier=_finite_float(
-                params.get(
-                    "cost_stress_multiplier", AcceptanceRules().cost_stress_multiplier
-                ),
-                "cost_stress_multiplier",
-            ),
+        # Absent or null takes the default the account's capital derives.
+        acceptance=acceptance_for(
+            initial_cash,
+            {
+                name: None if params.get(name) is None else _finite_float(params[name], name)
+                for name in AcceptanceRules().to_record()
+            },
         ),
         schedule=schedule,
         broker_profile=BrokerProfile(

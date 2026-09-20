@@ -273,6 +273,33 @@ def test_a_fill_never_takes_an_experiment_id(
         rnd.main(["launcher", "0", "--fill", "fill_first"])
 
 
+def test_an_arms_capital_derives_its_gates_unless_the_arm_overrides_them() -> None:
+    """A round states the account and nothing about the gates: the request
+    carries the five limits as null, which the worker resolves from the arm's
+    own capital, so two arms of one round can sit on either side of the
+    tracking mandate. An arm that overrides one sends that value alone."""
+    from autotrade.pipelines.config import AcceptanceRules, acceptance_for
+
+    limits = [key for key in AcceptanceRules().to_record() if key != "cost_stress_multiplier"]
+    assert all(key in WEB_CREATE_DEFAULTS and key not in BASE_OVERRIDES for key in limits)
+    rnd = Round(
+        arms={
+            "large": {"initial_cash": 1_000_000},
+            "small": {"initial_cash": 100_000},
+            "untracked": {"initial_cash": 1_000_000, "tracking_error_cap": 0, "max_drawdown": 0.4},
+        }
+    )
+
+    def rules(experiment_id: str) -> dict[str, object]:
+        params = rnd.request_params(experiment_id)
+        return acceptance_for(float(params["initial_cash"]), params).to_record()
+
+    assert [rnd.request_params("large")[key] for key in limits] == [None] * len(limits)
+    assert (rules("large")["tracking_error_cap"], rules("large")["active_max_drawdown"]) == (0.08, 0.15)
+    assert (rules("small")["tracking_error_cap"], rules("small")["max_drawdown"]) == (None, 0.45)
+    assert (rules("untracked")["tracking_error_cap"], rules("untracked")["max_drawdown"]) == (None, 0.4)
+
+
 @pytest.mark.parametrize(("round_name", "experiment_id"), ARMS)
 def test_every_arm_directive_is_usable(round_name: str, experiment_id: str) -> None:
     """A directive is copied into every research session of the arm and must

@@ -47,6 +47,7 @@ from autotrade.environment.executor import (
 from autotrade.environment.nl import NLConfig, NLService
 from autotrade.environment.replay.engine import StrategyDataView
 from autotrade.environment.replay.null_control import (
+    PANEL_DRAWS,
     NullControlSetupError,
     run_null_control,
 )
@@ -61,6 +62,7 @@ from autotrade.environment.replay.style import (
     benchmark_summary_block,
     replay_style_analysis,
     slot_benchmark,
+    slot_membership,
     write_style_rollup,
 )
 from autotrade.environment.replay.timeview import ReplayRows, Timeview
@@ -83,7 +85,7 @@ from .config import (
     SnapshotBundle,
     StrategyExperimentConfig,
 )
-from .experiment import DailyStrategyPipeline
+from .experiment import DailyStrategyPipeline, null_control_seed
 from .pit_views_seed import pit_cache_provider_record, seed_pit_views
 
 _PHASES = frozenset({"valid", "heldout", "paper"})
@@ -939,6 +941,27 @@ class PITDailyEvaluationBackend:
                 if asof_dir.is_dir()
                 else [],
             }
+            # The zero-skill panel the verdict grades this replay against, drawn
+            # from its completed executions once it is over: every draw runs
+            # through a Broker of its own, so nothing here reaches the record
+            # above. A truncated smoke run is not a Validation and gets none.
+            panel = None
+            if max_days is None and start_day is None:
+                with timer.phase("zero_skill_panel"):
+                    panel = run_null_control(
+                        replay,
+                        daily,
+                        slot_benchmark(replay_dirs),
+                        request.broker_profile,
+                        request.schedule,
+                        seed=null_control_seed(
+                            f"{request.revision.revision_id}:{replay_start}:{replay_end}",
+                            "panel",
+                        ),
+                        corporate_actions=corporate_actions,
+                        membership=slot_membership((snapshot_dir, *replay_dirs)),
+                        panel=True,
+                    )
             with timer.phase("style_analysis"):
                 style = replay_style_analysis(
                     replay,
@@ -946,6 +969,7 @@ class PITDailyEvaluationBackend:
                     replay_dir=replay_dirs,
                     snapshot_dir=snapshot_dir,
                     mode=request.mode,
+                    panel=panel,
                 )
             summary = record.get("stats")
             if not isinstance(summary, dict):
@@ -967,7 +991,10 @@ class PITDailyEvaluationBackend:
             # find what to replay through.
             write_json_atomic(
                 result_dir / REPLAY_SLOTS_SIDECAR,
-                {"replay_slots": [str(path) for path in replay_dirs]},
+                {
+                    "decision_slot": str(snapshot_dir),
+                    "replay_slots": [str(path) for path in replay_dirs],
+                },
             )
             write_json_atomic(target, record)
             write_style_rollup(result_dir, style)
@@ -989,7 +1016,7 @@ class PITDailyEvaluationBackend:
         schedule: StrategySchedule,
         seed: int,
         step: tuple[str, str] | None = None,
-        k: int = 500,
+        k: int = PANEL_DRAWS,
     ) -> dict[str, object]:
         """Random-portfolio null control for one completed evaluation.
 
@@ -998,16 +1025,21 @@ class PITDailyEvaluationBackend:
         inside them (``replay/null_control.py``). Host-side and read-only: the
         slots are the ones the result was evaluated against, named by the
         host-only record beside it rather than by this process's memory, and
-        only their bars, benchmark and ex-date tables are read, so no snapshot
-        is rebuilt or decoded. Informational — nothing gates on it.
+        only their bars, benchmark, membership and ex-date tables are read, so
+        no snapshot is rebuilt or decoded. The percentile is informational; the
+        panel a verdict grades against is the one ``evaluate`` stored with the
+        result.
         """
 
         result_json = _result_json(result_path)
         try:
-            replay_dirs = _result_replay_slots(result_json)
+            decision_dir, replay_dirs = _result_replay_slots(result_json)
             record = _read_json(result_json)
             daily = _span_daily(replay_dirs, start, end)
             benchmark = slot_benchmark(replay_dirs)
+            membership = slot_membership(
+                replay_dirs if decision_dir is None else (decision_dir, *replay_dirs)
+            )
             corporate_actions = _span_corporate_actions(
                 replay_dirs, [load_snapshot_manifest(path) for path in replay_dirs]
             )
@@ -1032,6 +1064,7 @@ class PITDailyEvaluationBackend:
             seed=seed,
             step=step,
             corporate_actions=corporate_actions,
+            membership=membership,
         )
 
     @staticmethod
@@ -1713,11 +1746,12 @@ def _result_json(result_ref: str | Path) -> Path:
     return path / "result.json" if path.is_dir() else path
 
 
-def _result_replay_slots(result_json: Path) -> tuple[Path, ...]:
-    """The replay slots a completed result was evaluated against.
+def _result_replay_slots(result_json: Path) -> tuple[Path | None, tuple[Path, ...]]:
+    """The decision view and the replay slots a result was evaluated against.
 
     Read from the host-only sidecar written with the record, so ranking a node
     never depends on the backend instance that produced it still being alive.
+    A sidecar written before the decision view was recorded names none.
     """
 
     sidecar = result_json.parent / REPLAY_SLOTS_SIDECAR
@@ -1726,10 +1760,15 @@ def _result_replay_slots(result_json: Path) -> tuple[Path, ...]:
             f"completed result has no {REPLAY_SLOTS_SIDECAR}, so its PIT replay "
             f"slots are unknown: {result_json}"
         )
-    slots = _read_json(sidecar).get("replay_slots")
+    record = _read_json(sidecar)
+    slots = record.get("replay_slots")
     if not isinstance(slots, list) or not slots:
         raise ValueError(f"{sidecar} names no PIT replay slot")
-    return tuple(Path(str(slot)).resolve(strict=True) for slot in slots)
+    decision = record.get("decision_slot")
+    return (
+        Path(str(decision)).resolve(strict=True) if decision else None,
+        tuple(Path(str(slot)).resolve(strict=True) for slot in slots),
+    )
 
 
 def _read_json(path: Path) -> dict[str, object]:

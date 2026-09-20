@@ -589,7 +589,8 @@ _REJECTED_CREATES = (
     ({"max_research_minutes": 0}, "max_research_minutes must be a positive integer"),
     ({"max_replay_years": 0}, "max_replay_years must be a positive integer"),
     ({"initial_cash": 0}, "initial_cash must be a positive finite number"),
-    ({"max_drawdown": 1.5}, "max_drawdown must be between 0.0 and 1.0"),
+    ({"max_drawdown": 1.5}, "max_drawdown must be between zero and one"),
+    ({"tracking_error_cap": 0.08, "beta_min": 1.2}, "beta_min must be below beta_max"),
     ({"compact_max_calls": -1}, "compact_max_calls must be a non-negative integer"),
     ({"window_months": 0}, "window_months must be a positive integer"),
     # Range, not availability: a GPU-less host must still see this message.

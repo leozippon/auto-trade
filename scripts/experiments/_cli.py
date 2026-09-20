@@ -287,12 +287,16 @@ def add_research_directive_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def add_acceptance_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--max-drawdown",
-        type=float,
-        default=0.25,
-        help="Maximum validation drawdown.",
-    )
+    # Unset takes the default the account's capital derives
+    # (autotrade.pipelines.config.default_acceptance).
+    for flag, text in (
+        ("--max-drawdown", "Equity drawdown limit of the freeze gate and the verdict."),
+        ("--active-max-drawdown", "Drawdown limit of the active series (strategy minus zero-skill panel)."),
+        ("--tracking-error-cap", "Tracking mandate: residual tracking error cap against CSI 300; 0 switches the mandate off."),
+        ("--beta-min", "Tracking mandate: lower end of the market beta band."),
+        ("--beta-max", "Tracking mandate: upper end of the market beta band."),
+    ):
+        parser.add_argument(flag, type=float, default=None, help=text)
 
 
 # ---------------------------------------------------------------------------
@@ -370,7 +374,16 @@ def _build_worker_params(
         "compact_keep_recent_messages": args.compact_keep_recent_messages,
         "compact_max_tokens": args.compact_max_tokens,
         "compact_max_calls": args.compact_max_calls,
-        "max_drawdown": args.max_drawdown,
+        **{
+            name: getattr(args, name)
+            for name in (
+                "max_drawdown",
+                "active_max_drawdown",
+                "tracking_error_cap",
+                "beta_min",
+                "beta_max",
+            )
+        },
         "research_directive": research_directive,
     }
     for window in ("daily", "fundamentals", "events", "macro", "text"):

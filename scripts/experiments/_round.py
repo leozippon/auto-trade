@@ -11,7 +11,7 @@ point.
 
 Two decisions are shared rather than per-round because the console runs rounds
 side by side and their verdicts only compare while they agree: BASE_OVERRIDES
-carries the research geometry, the account, the verdict parameters and the
+carries the research geometry, the account, the cost stress and the
 per-session budgets, and BASE_EXPECTED_DEFAULTS pins the console creation
 defaults every round relies on -- above all the model roles, which no round
 overrides, so a rename of the local model must stop the launcher rather than
@@ -68,7 +68,7 @@ from _bootstrap import add_repo_src
 
 REPO_ROOT = add_repo_src(__file__)
 
-from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION
+from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION, acceptance_for
 from autotrade.pipelines.hitl_state import (
     WEB_CLOSED_PARAMS,
     WEB_CREATE_DEFAULTS,
@@ -144,8 +144,9 @@ BASE_OVERRIDES: dict[str, object] = {
     # The researcher's real account, where the CNY 5 minimum commission and lot
     # sizes are a real cost rather than a rounding error.
     "initial_cash": 100_000,
-    # The forward verdict's drawdown limit and cost stress.
-    "max_drawdown": 0.25,
+    # The forward verdict's cost stress. The drawdown limits and the tracking
+    # mandate are not stated here: each arm's capital derives them
+    # (config.default_acceptance), and an arm entry that overrides one says so.
     "cost_stress_multiplier": 2.0,
     # The one research session's budgets, spent across every attempt.
     "max_research_minutes": 2400,
@@ -176,7 +177,6 @@ ROUND_REPORT_KEYS: tuple[str, ...] = (
     "max_null_controls",
     "strategy_fit_timeout_seconds",
     "initial_cash",
-    "max_drawdown",
     "cost_stress_multiplier",
     "gpu_count",
     "reasoning_effort",
@@ -540,6 +540,10 @@ class Round:
                 }
                 directive = str(merged["research_directive"])
                 print(json.dumps(own, ensure_ascii=False))
+                # The gates this arm would be judged by: its capital's defaults
+                # with whatever the arm overrides.
+                rules = acceptance_for(float(merged["initial_cash"]), merged)  # type: ignore[arg-type]
+                print("  acceptance:", json.dumps(rules.to_record(), ensure_ascii=False))
                 print(f"  directive: {len(directive.splitlines())} lines, {len(directive)} chars")
                 for line in directive.splitlines():
                     print("   |", line)

@@ -18,6 +18,11 @@ Every replay writes one ``style_analysis.json`` beside its result
 ends), which is what the console serves — the web layer performs no
 attribution computation and touches no raw data.
 
+A formal replay's sidecar also carries its zero-skill panel
+(``null_control.run_null_control``): the composite's daily return beside the
+strategy's own, and the same attribution run on the active series (strategy
+minus composite), which is what ``pipelines/verdict.py`` grades.
+
 Everything degrades to None/empty blocks when inputs are missing —
 attribution is advisory and must never fail a backtest.
 """
@@ -30,6 +35,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 
 from autotrade.environment.runtime import utc_now_iso, write_json_atomic
 
@@ -103,6 +109,34 @@ def slot_benchmark(replay_dir: Path | Sequence[Path] | None) -> dict[str, float]
             # macro.parquet's index_daily keeps pct_chg in percent (no snapshot
             # factor), unlike daily.parquet's already-decimal pct_chg.
             result[_date_text(date)] = value / 100.0
+    return result
+
+
+def slot_membership(slots: Sequence[Path]) -> dict[str, frozenset[str]]:
+    """CSI 300 constituents by cross-section date, over the given slots.
+
+    ``index_weight`` rides in ``macro.parquet``: a replay slot carries the
+    month-end cross-sections dated inside it and the decision view the history
+    before its anchor, so a span's table is the union over both. Empty when no
+    slot mounts the dataset -- it is a per-arm selection.
+    """
+
+    columns = ["dataset", "index_code", "trade_date", "con_code"]
+    result: dict[str, frozenset[str]] = {}
+    for slot in slots:
+        path = Path(slot) / "macro.parquet"
+        if not path.is_file() or not set(columns).issubset(pq.read_schema(path).names):
+            continue
+        frame = pd.read_parquet(
+            path,
+            columns=columns,
+            filters=[
+                ("dataset", "==", "index_weight"),
+                ("index_code", "==", BENCHMARK_TS_CODE),
+            ],
+        )
+        for date, group in frame.groupby("trade_date"):
+            result[_date_text(date)] = frozenset(group["con_code"].astype(str))
     return result
 
 
@@ -277,6 +311,8 @@ def _neutralized_excess(
         "method": NEUTRALIZATION_METHOD,
         "n_days": days,
         "neutralized_excess_return": None,
+        "tracking_error": None,
+        "information_ratio": None,
         "market_beta": None,
         "size_beta": None,
         "r2": None,
@@ -300,10 +336,16 @@ def _neutralized_excess(
     size_beta = (s11 * s2y - s12 * s1y) / determinant
     alpha_daily = mean_y - market_beta * mean_1 - size_beta * mean_2
     residual = syy - market_beta * s1y - size_beta * s2y
+    excess = round(alpha_daily * TRADING_DAYS_PER_YEAR, 4)
+    # The residual standard deviation the verdict calls tracking error: three
+    # fitted coefficients, annualized by the square root of the trading year.
+    tracking_error = math.sqrt(max(residual, 0.0) / (days - 3) * TRADING_DAYS_PER_YEAR)
     result.update(
         available=True,
         reason=None,
-        neutralized_excess_return=round(alpha_daily * TRADING_DAYS_PER_YEAR, 4),
+        neutralized_excess_return=excess,
+        tracking_error=round(tracking_error, 4),
+        information_ratio=round(excess / tracking_error, 4) if tracking_error > 0 else None,
         market_beta=round(market_beta, 3),
         size_beta=round(size_beta, 3),
         r2=round(1.0 - residual / syy, 3) if syy > 0 else None,
@@ -446,10 +488,16 @@ def replay_style_analysis(
     replay_dir: Path | Sequence[Path] | None,
     snapshot_dir: Path | None,
     mode: str,
+    panel: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Compute one result sidecar from the just-finished daily replay.
 
     ``replay_dir`` is the replay's slot, or the slots of a span in order.
+    ``panel`` is the replay's zero-skill panel block
+    (``null_control.run_null_control(..., panel=True)``): its two daily series
+    are stored beside the strategy's, and the same attribution is run on the
+    composite and on the active series (strategy minus composite), which is
+    the series the verdict grades. A truncated smoke replay passes none.
     """
 
     strategy = daily_returns_from_curve(replay.equity_curve)
@@ -457,6 +505,37 @@ def replay_style_analysis(
     regression = _benchmark_regression(strategy, benchmark)
     size = _size_factor(replay_daily)
     neutralized = _neutralized_excess(strategy, benchmark, size)
+    panel_blocks: dict[str, object] = {}
+    panel_compact: dict[str, object] = {}
+    if panel is not None:
+        composite = _series_pairs(panel.get("panel_daily"))
+        graded = active_analysis(
+            {"strategy_daily": strategy, "panel_daily": panel.get("panel_daily")}
+        )
+        active = _neutralized_excess(
+            _series_pairs(graded["strategy_daily"]) if graded else [], benchmark, size
+        )
+        zero_skill = _neutralized_excess(composite, benchmark, size)
+        panel_blocks = {
+            "panel": {
+                key: value
+                for key, value in panel.items()
+                if key not in ("panel_daily", "panel_draw_sd")
+            },
+            "panel_daily": panel.get("panel_daily"),
+            "panel_draw_sd": panel.get("panel_draw_sd"),
+            "active_neutralized_excess": active,
+            "panel_neutralized_excess": zero_skill,
+        }
+        panel_compact = {
+            # What the freeze gate and the verdict grade: the strategy's daily
+            # return minus the zero-skill panel composite of its own book.
+            "active_neutralized_excess": active.get("neutralized_excess_return"),
+            "active_tracking_error": active.get("tracking_error"),
+            "active_information_ratio": active.get("information_ratio"),
+            "panel_neutralized_excess": zero_skill.get("neutralized_excess_return"),
+            "panel_draws": panel.get("k"),
+        }
     style = _style_exposures(replay_daily, replay.equity_curve, _snapshot_industry(snapshot_dir))
     total_return = total_return_from_curve(replay.equity_curve)
     benchmark_return = regression.get("benchmark_return")
@@ -479,6 +558,7 @@ def replay_style_analysis(
         "strategy_daily": [[date, value] for date, value in strategy],
         "benchmark_daily": [[date, benchmark[date]] for date, _ in strategy if date in benchmark],
         "size_factor_daily": [[date, size[date]] for date, _ in strategy if date in size],
+        **panel_blocks,
         "compact": {
             "benchmark_return": benchmark_return,
             "excess_return": excess_return,
@@ -487,6 +567,11 @@ def replay_style_analysis(
             # wherever the raw one is read.
             "neutralized_excess_return": neutralized.get("neutralized_excess_return"),
             "neutralized_excess_method": NEUTRALIZATION_METHOD,
+            # The two figures a tracking mandate limits: the residual standard
+            # deviation of that regression and its loading on CSI 300.
+            "tracking_error": neutralized.get("tracking_error"),
+            "market_beta": neutralized.get("market_beta"),
+            **panel_compact,
             "beta": regression.get("beta"),
             "n_days": regression.get("n_days"),
             "size_tilt": tilts.get("size") if isinstance(tilts, Mapping) else None,
@@ -520,6 +605,31 @@ def _series_pairs(value: object) -> list[tuple[str, float]]:
         except (TypeError, ValueError):
             continue
     return rows
+
+
+def active_analysis(analysis: Mapping[str, object]) -> dict[str, object] | None:
+    """The analysis with the strategy's series replaced by its ACTIVE series.
+
+    Active is the strategy's daily return minus the zero-skill panel composite
+    of the same day, so every reader of ``strategy_daily`` -- the sub-span
+    regression below, the verdict's bootstrap and drawdown -- measures the
+    active series through the code that measures the strategy's own. ``None``
+    when the sidecar carries no panel (a truncated smoke replay, or a replay
+    recorded before panels existed). A panel that misses one of the strategy's
+    days raises: a day graded against nothing would read as pure skill.
+    """
+
+    composite = dict(_series_pairs(analysis.get("panel_daily")))
+    if not composite:
+        return None
+    strategy = _series_pairs(analysis.get("strategy_daily"))
+    missing = [date for date, _value in strategy if date not in composite]
+    if missing:
+        raise ValueError(f"zero-skill panel has no return for {missing[0]}")
+    return {
+        **analysis,
+        "strategy_daily": [[date, value - composite[date]] for date, value in strategy],
+    }
 
 
 def window_neutralized_excess(
@@ -596,10 +706,12 @@ __all__ = [
     "NEUTRALIZATION_METHOD",
     "STYLE_ARTIFACT_NAME",
     "STYLE_SCHEMA_VERSION",
+    "active_analysis",
     "benchmark_summary_block",
     "daily_returns_from_curve",
     "replay_style_analysis",
     "slot_benchmark",
+    "slot_membership",
     "window_neutralized_excess",
     "write_style_rollup",
 ]

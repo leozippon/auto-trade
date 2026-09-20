@@ -51,6 +51,7 @@ from autotrade.environment.strategy_loader import validate_strategy_package
 from .agent_inbox import expire_experiment_session_inbox
 from .calendar import FULL_SPAN, Slot
 from .config import (
+    AcceptanceRules,
     ArtifactRevision,
     ArtifactStore,
     BudgetUsed,
@@ -370,6 +371,11 @@ class RollingExperimentPipeline:
                     step_rows,
                     nominee,
                     hard_reasons=self.config.acceptance.evaluate(dict(nominee["summary"])),
+                    acceptance=self.config.acceptance,
+                    years=[
+                        (slot.start, slot.end)
+                        for slot in self.config.geometry.research_years
+                    ],
                 )
                 if gate["passed"]:
                     _publish_progress(progress, "freezing", run_id=run_id)
@@ -415,6 +421,7 @@ class RollingExperimentPipeline:
                 "nominated_step_id": session.node_id if session.outcome == "freeze" else None,
                 "steps": step_rows,
                 "trials_to_date": len(_arm_revisions(records, step_rows)),
+                **self._account_record(),
                 "freeze_gate": gate,
                 "frozen": frozen,
                 "arm_end": arm_end,
@@ -512,6 +519,10 @@ class RollingExperimentPipeline:
             "source_step_id": nominee.step_id,
             "revision_id": nominee.revision_id,
             "research_result_ref": nominee.validation.result_ref,
+            # Which series the figures below are of: ``active`` is the
+            # nominee's return minus its zero-skill panel composite.
+            "series": gate["series"],
+            "mandate": gate["mandate"],
             "days": gate["days"],
             "neutralized_excess": gate["neutralized_excess"],
             "tracking_error": gate["tracking_error"],
@@ -592,6 +603,7 @@ class RollingExperimentPipeline:
                 **{key: attempt[key] for key in ("experiment_id", "epoch_id", "fold_id", "run_id")},
                 "session_key": FORWARD_SESSION_KEY,
                 "artifact_id": artifact.artifact_id,
+                **self._account_record(),
                 "replay": {
                     "start": forward.start,
                     "forward_end": forward.end,
@@ -711,6 +723,8 @@ class RollingExperimentPipeline:
             end=forward.end,
             seed_key=artifact.artifact_id,
             max_drawdown=acceptance.max_drawdown,
+            active_max_drawdown=acceptance.active_max_drawdown,
+            **acceptance.mandate,
             cost_stress_multiplier=acceptance.cost_stress_multiplier,
             slippage_bps=self.config.broker_profile.slippage_bps,
             turnover=float(forward_activity["turnover"]),  # type: ignore[arg-type]
@@ -723,6 +737,7 @@ class RollingExperimentPipeline:
             end=heldout.end,
             forward_tracking_error=float(forward_block["tracking_error"]),  # type: ignore[arg-type]
             max_drawdown=acceptance.max_drawdown,
+            active_max_drawdown=acceptance.active_max_drawdown,
             mean_gross=float(heldout_activity["mean_gross"]),  # type: ignore[arg-type]
         )
         fit = validate_strategy_package(artifact.path / "main.py")
@@ -776,6 +791,15 @@ class RollingExperimentPipeline:
 
     # ---- shared --------------------------------------------------------
 
+    def _account_record(self) -> dict[str, object]:
+        """The account and the effective acceptance rules a stage was judged
+        under, defaulted and overridden alike, so the ledger states its gates."""
+
+        return {
+            "initial_cash": self.config.broker_profile.initial_cash,
+            "acceptance_rules": self.config.acceptance.to_record(),
+        }
+
     def _null_control(
         self,
         result_ref: str,
@@ -789,10 +813,11 @@ class RollingExperimentPipeline:
 
         Informational evidence beside the return: it says whether the excess
         came from WHICH names were picked or only from the timing, sizing and
-        exposure the skeleton already fixed. The null is not part of any
-        verdict, so a backend that cannot run it (the local development
-        backend) leaves the block absent and a failure is recorded rather than
-        raised.
+        exposure the skeleton already fixed. This percentile is not part of any
+        verdict -- what a verdict grades against is the panel the evaluation
+        stored with the result -- so a backend that cannot run it (the local
+        development backend) leaves the block absent and a failure is recorded
+        rather than raised.
         """
 
         runner = getattr(self.evaluator, "null_control", None)
@@ -846,9 +871,11 @@ class RollingExperimentPipeline:
 def research_step_record(step: StepResult) -> dict[str, object]:
     """One completed Validation as the ledger's ``steps[]`` row.
 
-    ``neutralized`` carries the span's neutralised excess, residual tracking
-    error and IR from the replay's own style sidecar (``None`` when they cannot
-    be measured), the figures the freeze gate counts.
+    ``neutralized`` carries the graded series' neutralised excess, residual
+    tracking error and IR over the span, from the replay's own style sidecar
+    (``None`` when they cannot be measured): the figures the freeze gate
+    counts. ``series`` inside it says whether that is the active series (the
+    replay carries a zero-skill panel) or the strategy's own.
     """
 
     return {
@@ -867,6 +894,8 @@ def freeze_gate_for(
     nominee: Mapping[str, object],
     *,
     hard_reasons: Sequence[str] = (),
+    acceptance: AcceptanceRules | None = None,
+    years: Sequence[tuple[str, str]] = (),
 ) -> dict[str, object]:
     """The freeze gate of one nominated Step against the whole arm (PL1 §4.1).
 
@@ -874,7 +903,9 @@ def freeze_gate_for(
     sessions' recorded Steps and this session's alike; the IR dispersion is
     taken over every measurable full-span validation. A nominee that did not
     replay the full research period, fails a hard nomination rule, or whose
-    statistics cannot be measured does not pass.
+    statistics cannot be measured does not pass. ``acceptance`` and ``years``
+    are the arm's rules and research years; the console leaves them out when it
+    only reads the deflated Sharpe of an arm's best node.
     """
 
     reasons = list(hard_reasons)
@@ -894,7 +925,14 @@ def freeze_gate_for(
     )
     try:
         return freeze_gate(
-            analysis, trials=len(_arm_revisions(records, session_rows)), full_span_irs=irs
+            analysis,
+            trials=len(_arm_revisions(records, session_rows)),
+            full_span_irs=irs,
+            years=years,
+            active_max_drawdown=(
+                acceptance.active_max_drawdown if acceptance is not None else None
+            ),
+            **(acceptance.mandate if acceptance is not None else {}),
         )
     except ValueError as exc:
         return {"passed": False, "reasons": ["freeze_unmeasurable"], "error": str(exc)}

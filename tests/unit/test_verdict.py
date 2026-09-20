@@ -26,7 +26,7 @@ FORWARD_DAYS = _weekdays(FORWARD_START, FORWARD_END)
 HELDOUT_DAYS = _weekdays(HELDOUT_START, HELDOUT_END)
 
 
-def _segment(days, alpha, rng, *, te=0.13, exact=False):
+def _segment(days, alpha, rng, *, te=0.13, exact=False, beta=0.8):
     """A book with annualised neutralised excess ``alpha`` on CSI 300 and size.
 
     ``exact`` projects the noise off the design, so the segment's own OLS
@@ -40,7 +40,7 @@ def _segment(days, alpha, rng, *, te=0.13, exact=False):
     if exact:
         design = np.column_stack([np.ones(n), benchmark, size])
         noise -= design @ np.linalg.lstsq(design, noise, rcond=None)[0]
-    strategy = alpha / TRADING_DAYS_PER_YEAR + 0.8 * benchmark + 0.3 * size + noise
+    strategy = alpha / TRADING_DAYS_PER_YEAR + beta * benchmark + 0.3 * size + noise
     return list(days), strategy, benchmark, size
 
 
@@ -63,6 +63,7 @@ def _forward(analysis, **overrides):
         "end": FORWARD_END,
         "seed_key": "artifact-1",
         "max_drawdown": 1.0,
+        "active_max_drawdown": 1.0,
         "cost_stress_multiplier": 2.0,
         "slippage_bps": 10.0,
         "turnover": 0.0,
@@ -236,6 +237,7 @@ def test_heldout_tolerates_noise_but_not_a_collapse():
             "end": HELDOUT_END,
             "forward_tracking_error": forward_te,
             "max_drawdown": 1.0,
+            "active_max_drawdown": 1.0,
             "mean_gross": 1.0,
         }
         arguments.update(overrides)
@@ -248,6 +250,9 @@ def test_heldout_tolerates_noise_but_not_a_collapse():
     assert heldout(tolerance - 0.0003)["reasons"] == ["heldout_excess_below_tolerance"]
     assert heldout(0.0, max_drawdown=0.0)["reasons"] == [
         "heldout_max_drawdown_exceeded"
+    ]
+    assert heldout(0.0, active_max_drawdown=0.0)["reasons"] == [
+        "heldout_active_drawdown_exceeded"
     ]
     assert heldout(0.0, mean_gross=0.49)["reasons"] == ["heldout_exposure_below_floor"]
 
@@ -339,6 +344,210 @@ def test_freeze_gate_needs_the_deflated_probability_its_threshold_names():
     )
 
 
+RESEARCH_YEARS = [
+    ("20210701", "20220630"),
+    ("20220701", "20230630"),
+    ("20230701", "20240630"),
+    ("20240701", "20250630"),
+]
+
+
+def _with_panel(analysis, panel):
+    return {
+        **analysis,
+        "panel_daily": [
+            [day, float(value)]
+            for (day, _own), value in zip(analysis["strategy_daily"], panel, strict=True)
+        ],
+    }
+
+
+def test_a_zero_panel_reproduces_the_ungraded_figures_exactly():
+    """Grading subtracts the panel and changes nothing else: against a panel of
+    zeros every statistic, bound and reason is the float it was without one,
+    and only ``series`` tells the two records apart."""
+    rng = np.random.default_rng(101)
+    research = _weekdays("20210701", "20250630")
+    analysis = _analysis(_segment(research, 0.16, rng))
+    forward = _analysis(
+        _segment(FORWARD_DAYS, 0.10, rng), _segment(HELDOUT_DAYS, 0.02, rng, te=0.05)
+    )
+
+    def without_series(block):
+        return {key: value for key, value in block.items() if key != "series"}
+
+    def heldout(sidecar):
+        return verdict.heldout_slice(
+            sidecar,
+            start=HELDOUT_START,
+            end=HELDOUT_END,
+            forward_tracking_error=0.1,
+            max_drawdown=0.2,
+            active_max_drawdown=0.2,
+            mean_gross=1.0,
+        )
+
+    def gate(sidecar):
+        return verdict.freeze_gate(
+            sidecar,
+            trials=6,
+            full_span_irs=[1.2, 0.9, 0.7],
+            years=RESEARCH_YEARS,
+            active_max_drawdown=0.3,
+        )
+
+    for read in (gate, _forward, heldout, verdict.neutralized_statistics):
+        sidecar = analysis if read is gate else forward
+        zeros = _with_panel(sidecar, np.zeros(len(sidecar["strategy_daily"])))
+        own, graded = read(sidecar), read(zeros)
+        assert (own["series"], graded["series"]) == ("absolute", "active")
+        assert without_series(own) == without_series(graded)
+
+
+def test_the_graded_series_is_the_strategy_minus_its_panel():
+    """The return statistics are those of the active series, measured by the
+    code that measures any series; the mandate's tracking error and beta stay
+    the strategy's own, which the panel must not move."""
+    rng = np.random.default_rng(102)
+    research = _weekdays("20210701", "20250630")
+    days, active, benchmark, size = _segment(research, 0.06, rng, te=0.05, beta=0.05)
+    _days, panel, _b, _s = _segment(research, 0.04, np.random.default_rng(103), beta=0.9)
+    # The panel rides the same factors as the book it was drawn from.
+    panel = panel - _b * 0.9 - _s * 0.3 + benchmark * 0.9 + size * 0.3
+    book = _with_panel(_analysis((days, active + panel, benchmark, size)), panel)
+    alone = _analysis((days, active, benchmark, size))
+
+    graded = verdict.neutralized_statistics(book)
+    assert graded["series"] == "active"
+    for key in ("days", "neutralized_excess"):
+        assert graded[key] == verdict.neutralized_statistics(alone)[key]
+    assert graded["tracking_error"] == pytest.approx(
+        verdict.neutralized_statistics(alone)["tracking_error"], rel=1e-9
+    )
+
+    gate = verdict.freeze_gate(
+        book, trials=2, full_span_irs=[1.0, 0.8], years=RESEARCH_YEARS, active_max_drawdown=1.0
+    )
+    own = verdict.neutralized_statistics({**book, "panel_daily": []})
+    assert gate["mandate"] == {
+        "tracking_error": own["tracking_error"],
+        "market_beta": own["market_beta"],
+    }
+    assert gate["mandate"]["market_beta"] == pytest.approx(0.95, abs=0.03)
+    assert gate["active_max_drawdown"] == pytest.approx(
+        verdict._max_slice_drawdown(alone, "", ""), rel=1e-9
+    )
+
+    # A day the panel does not cover would be graded against nothing.
+    short = {**book, "panel_daily": book["panel_daily"][:-1]}
+    with pytest.raises(ValueError, match="zero-skill panel has no return"):
+        verdict.neutralized_statistics(short)
+
+
+def test_the_freeze_gate_refuses_zero_skill_an_uneven_edge_and_a_broken_mandate():
+    research = _weekdays("20210701", "20250630")
+
+    def year_days(index):
+        start, end = RESEARCH_YEARS[index]
+        return [day for day in research if start <= day <= end]
+
+    def book(alphas, *, seed, te=0.05, beta=1.0, panel_alpha=0.03):
+        rng = np.random.default_rng(seed)
+        segments = [
+            _segment(year_days(index), alpha, rng, te=te, exact=True, beta=0.0)
+            for index, alpha in enumerate(alphas)
+        ]
+        active = np.concatenate([segment[1] - 0.3 * segment[3] for segment in segments])
+        benchmark = np.concatenate([segment[2] for segment in segments])
+        size = np.concatenate([segment[3] for segment in segments])
+        panel = panel_alpha / TRADING_DAYS_PER_YEAR + beta * benchmark
+        return _with_panel(_analysis((research, active + panel, benchmark, size)), panel)
+
+    def gate(sidecar, **limits):
+        arguments = {"years": RESEARCH_YEARS, "active_max_drawdown": 0.30, **limits}
+        return verdict.freeze_gate(sidecar, trials=4, full_span_irs=[0.6, 0.7, 0.8, 0.9], **arguments)
+
+    skilled = gate(book([0.10, 0.10, 0.10, 0.10], seed=111))
+    assert skilled["passed"] and skilled["series"] == "active"
+    assert skilled["information_ratio"] == pytest.approx(2.0, abs=0.05)
+    assert skilled["positive_years"] == 4
+    assert skilled["thresholds"] == {
+        "min_information_ratio": 0.75,
+        "min_deflated_sharpe_probability": 0.90,
+        "min_full_span_validations": 2,
+        "min_positive_years": 3,
+        "research_years": 4,
+        "active_max_drawdown": 0.30,
+        "tracking_error_cap": None,
+        "beta_min": None,
+        "beta_max": None,
+        "panel_draws": 20,
+    }
+
+    # Zero skill: the whole +3 %/yr of the book is what its panel earned.
+    lottery = gate(book([0.0, 0.0, 0.0, 0.0], seed=112))
+    assert "freeze_information_ratio_below_threshold" in lottery["reasons"]
+    assert "freeze_too_few_positive_years" in lottery["reasons"]
+    assert verdict.neutralized_statistics({**book([0.0] * 4, seed=112), "panel_daily": []})[
+        "neutralized_excess"
+    ] == pytest.approx(0.03, abs=1e-4)
+
+    # The same total edge earned in two years of four.
+    uneven = gate(book([0.30, 0.22, -0.06, -0.06], seed=113))
+    assert uneven["information_ratio"] > 0.75 and uneven["positive_years"] == 2
+    assert uneven["reasons"] == ["freeze_too_few_positive_years"]
+    assert gate(book([0.30, 0.10, 0.06, -0.06], seed=113))["positive_years"] == 3
+
+    steady = book([0.10, 0.10, 0.10, 0.10], seed=114)
+    drawdown = gate(steady)["active_max_drawdown"]
+    assert gate(steady, active_max_drawdown=drawdown)["passed"]
+    assert gate(steady, active_max_drawdown=drawdown - 1e-9)["reasons"] == [
+        "freeze_active_drawdown_exceeded"
+    ]
+
+    # The tracking mandate reads the strategy's own series: a skilled book that
+    # carries the frozen d2's shape (tracking error 11.4 %, beta 0.71) is refused.
+    mandate = {"tracking_error_cap": 0.08, "beta_min": 0.85, "beta_max": 1.15}
+    assert gate(steady, **mandate)["passed"]
+    like_d2 = gate(book([0.12] * 4, seed=115, te=0.114, beta=0.71), **mandate)
+    assert like_d2["mandate"]["tracking_error"] == pytest.approx(0.114, abs=0.002)
+    assert like_d2["mandate"]["market_beta"] == pytest.approx(0.71, abs=0.01)
+    assert like_d2["reasons"] == [
+        "freeze_tracking_error_above_cap",
+        "freeze_beta_outside_band",
+    ]
+    assert gate(steady, tracking_error_cap=0.04, beta_min=0.85, beta_max=1.15)["reasons"] == [
+        "freeze_tracking_error_above_cap"
+    ]
+    with pytest.raises(ValueError, match="beta band"):
+        gate(steady, tracking_error_cap=0.08)
+
+
+def test_the_forward_mandate_and_active_drawdown_fail_at_their_boundaries():
+    rng = np.random.default_rng(121)
+    days, active, benchmark, size = _segment(FORWARD_DAYS, 0.30, rng, te=0.05, beta=0.0)
+    panel = 1.0 * benchmark
+    book = _with_panel(_analysis((days, active + panel, benchmark, size)), panel)
+    base = _forward(book)
+
+    assert base["reasons"] == [] and base["series"] == "active"
+    assert base["max_drawdown"] != base["active_max_drawdown"]
+    assert _forward(book, active_max_drawdown=base["active_max_drawdown"])["reasons"] == []
+    assert _forward(book, active_max_drawdown=base["active_max_drawdown"] - 1e-9)[
+        "reasons"
+    ] == ["forward_active_drawdown_exceeded"]
+    band = {"beta_min": 0.85, "beta_max": 1.15}
+    own_te = base["mandate"]["tracking_error"]
+    assert _forward(book, tracking_error_cap=own_te, **band)["reasons"] == []
+    assert _forward(book, tracking_error_cap=own_te - 1e-9, **band)["reasons"] == [
+        "forward_tracking_error_above_cap"
+    ]
+    assert _forward(book, tracking_error_cap=own_te, beta_min=1.05, beta_max=1.15)[
+        "reasons"
+    ] == ["forward_beta_outside_band"]
+    assert base["thresholds"]["tracking_error_cap"] is None
+
+
 def test_graduation_lists_every_failed_condition_and_a_strategy_error_discards():
     rng = np.random.default_rng(81)
     analysis = _analysis(
@@ -354,6 +563,7 @@ def test_graduation_lists_every_failed_condition_and_a_strategy_error_discards()
             end=HELDOUT_END,
             forward_tracking_error=forward["tracking_error"],
             max_drawdown=1.0,
+            active_max_drawdown=1.0,
             mean_gross=mean_gross,
         )
 

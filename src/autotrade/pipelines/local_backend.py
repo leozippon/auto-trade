@@ -42,7 +42,7 @@ from autotrade.environment.executor import (
 )
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm.model_profiles import AGENT_MAX_OUTPUT_TOKENS
-from autotrade.environment.replay.null_control import NullControlSetupError
+from autotrade.environment.replay.null_control import PANEL_DRAWS, NullControlSetupError
 from autotrade.environment.replay.stats import (
     PhaseTimer,
     attach_cost_sensitivity,
@@ -1036,14 +1036,23 @@ class SessionValidations:
         nominee = next((row for row in rows if row["step_id"] == node_id), None)
         if nominee is None:
             return {"passed": False, "reasons": ["freeze_needs_a_step_of_this_session"]}
-        hard = (
-            AcceptanceRules.from_record(self.request.acceptance_rules).evaluate(
-                dict(nominee["summary"])  # type: ignore[arg-type]
-            )
+        rules = (
+            AcceptanceRules.from_record(self.request.acceptance_rules)
             if self.request.acceptance_rules
-            else []
+            else None
         )
-        return freeze_gate_for(self.ledger.read(), rows, nominee, hard_reasons=hard)
+        return freeze_gate_for(
+            self.ledger.read(),
+            rows,
+            nominee,
+            hard_reasons=(
+                rules.evaluate(dict(nominee["summary"]))  # type: ignore[arg-type]
+                if rules is not None
+                else []
+            ),
+            acceptance=rules,
+            years=[(year.start, year.end) for year in self.request.research_years],
+        )
 
     def selection_statistics(self, step: StepResult) -> dict[str, object]:
         """The provisional freeze-gate reading one candidate row carries."""
@@ -1053,6 +1062,12 @@ class SessionValidations:
         return {
             "freeze_gate_passed": gate["passed"],
             "freeze_gate_reasons": gate["reasons"],
+            # The graded series and the two figures the gate reads off it
+            # beside the deflated Sharpe: absent on a span the gate refuses
+            # before measuring.
+            "series": gate.get("series"),
+            "information_ratio": gate.get("information_ratio"),
+            "positive_years": gate.get("positive_years"),
             "deflated_sharpe_probability": (
                 dsr.get("deflated_sharpe_probability") if isinstance(dsr, Mapping) else None
             ),
@@ -1321,14 +1336,16 @@ BATCH_CANDIDATE_SUMMARY_KEYS = (
 # A multi-year span has one sub-window row per July-June year, and a batch
 # multiplies that by the number of candidates. A row keeps the columns a
 # screening comparison is made on; the node's result.json keeps the full table.
-# ``neutralized_excess_return`` rides with the raw one because the freeze gate
-# and the verdict read the neutralized figure: a comparison made on the raw
-# column alone reads a different number than they will.
+# The neutralized figures ride with the raw one because the freeze gate and the
+# verdict read them, the active one above all -- it is the series they grade:
+# a comparison made on the raw column alone reads a different number than they
+# will.
 BATCH_SUB_WINDOW_KEYS = (
     "label",
     "return",
     "excess_return",
     "neutralized_excess_return",
+    "active_neutralized_excess_return",
     "sharpe",
 )
 
@@ -2152,9 +2169,10 @@ class BatchValidateTool(SessionTimeBudgetAware):
 def batch_select_hint(
     rows: Sequence[Mapping[str, object]], *, replay_years_remaining: int
 ) -> str:
-    """Name the row leading on the design's tie-breaker; select nothing.
+    """Name the row leading on the graded figure; select nothing.
 
-    The neutralized excess is the figure the guidance ranks candidates on, so
+    The active information ratio -- the row's return minus its zero-skill panel,
+    neutralized, over its residual risk -- is what the freeze gate grades, so
     the hint says which row leads on it and on nothing else. A winning round
     is the starting point of the next pre-registered round, not the end of the
     session; once no batch fits the replay-year budget, the hint says the
@@ -2162,16 +2180,16 @@ def batch_select_hint(
     """
 
     ranked = [
-        (_batch_row_neutralized_excess(row), row)
+        (_batch_row_active_ir(row), row)
         for row in rows
         if row.get("status") == "ok"
     ]
     leading = max(ranked, key=lambda item: item[0], default=(float("-inf"), None))
     lead = (
-        f"leading on neutralized excess: {leading[1].get('name')} "
+        f"leading on active information ratio: {leading[1].get('name')} "
         f"(node_id={leading[1].get('node_id')}); "
         if leading[1] is not None and math.isfinite(leading[0])
-        else "no row carries a neutralized excess figure; "
+        else "no row carries an active information ratio; "
     )
     if replay_years_remaining < 1:
         return (
@@ -2190,11 +2208,11 @@ def batch_select_hint(
     )
 
 
-def _batch_row_neutralized_excess(row: Mapping[str, object]) -> float:
+def _batch_row_active_ir(row: Mapping[str, object]) -> float:
     stats = row.get("stats")
     benchmark = stats.get("benchmark") if isinstance(stats, Mapping) else None
     value = (
-        benchmark.get("neutralized_excess_return")
+        benchmark.get("active_information_ratio")
         if isinstance(benchmark, Mapping)
         else None
     )
@@ -2240,20 +2258,22 @@ def session_budget_status(backtest: SessionValidations) -> SessionBudgetStatus:
 
 NULL_CONTROL_NOTE = (
     "descriptive only: excess_percentile near 0.5 means the names carried no "
-    "information the timing and sizing did not; nothing gates on it"
+    "information the timing and sizing did not. The percentile gates nothing; "
+    "what the gate grades is the node's active series against the panel its own "
+    "validation drew (benchmark.active_*)"
 )
 
 
 class NullControlTool(SessionTimeBudgetAware):
     """Rank one complete Validation against random-name replays of its trades.
 
-    The same K=500 null control the Pipeline runs for the frozen node at
-    freeze (``experiment._null_control``), drawn with the same seed through
-    the same backend over the node's own span, so the figure the Agent reads
-    before selecting is the figure the ledger records: the block is cached per
-    node and handed to the Pipeline, which reuses it for the frozen node
-    instead of drawing again. Each call is minutes of host replay, hence the
-    per-session cap.
+    The same null control the Pipeline runs for the frozen node at freeze
+    (``experiment._null_control``), drawn with the same seed through the same
+    backend over the node's own span, so the figure the Agent reads before
+    selecting is the figure the ledger records: the block is cached per node
+    and handed to the Pipeline, which reuses it for the frozen node instead of
+    drawing again. Each call is host replay the session does not pay for, hence
+    the per-session cap.
     """
 
     spec = ToolSpec(
@@ -2286,15 +2306,20 @@ class NullControlTool(SessionTimeBudgetAware):
         self.blocks: dict[str, dict[str, object]] = {}
         self.spec = ToolSpec(
             self.spec.name,
-            "Rank one complete Validation node of this session against K=500 host "
-            "replays of its own trade skeleton with random same-size names over the "
-            "node's own span: the same null control the Pipeline runs for the frozen "
-            "node at freeze. Returns the null_control block the ledger will carry "
-            "(observed_excess, excess_percentile — near 0.5 means the names added "
-            "nothing the timing and sizing did not — the null's mean and p05/p95, "
-            "rejects_mean, dropped_trips_mean). Costs minutes of host replay per call "
-            "(about 1.5 min per research year; the session clock pauses like a formal "
-            f"backtest), consumes no replay-years and is capped at {max_calls} per "
+            f"Rank one complete Validation node of this session against K={PANEL_DRAWS} "
+            "host replays of its own trade skeleton over the node's own span, every "
+            "name replaced by a random one that one board lot of the same money could "
+            "buy on the same side of CSI 300 membership (the float-cap decile when "
+            "index_weight is not mounted): the same null control the Pipeline runs "
+            "for the frozen node at freeze. Returns the null_control block the ledger "
+            "will carry (observed_excess, excess_percentile — near 0.5 means the names "
+            "added nothing the timing and sizing did not — the null's mean and p05/p95, "
+            "rejects_mean, dropped_trips_mean). Every formal validation already "
+            "reports the node against a panel of the same construction "
+            "(benchmark.active_*), which is what the freeze gate grades; this "
+            "percentile is a second, descriptive reading of it. Costs well under a "
+            "minute of host replay per research year (the session clock pauses like a "
+            f"formal backtest), consumes no replay-years and is capped at {max_calls} per "
             "session (max_null_controls in the budgets fact; every result reports "
             "null_controls_remaining); a node's block is cached, and the frozen node's "
             "block is reused at freeze instead of being drawn again. Use it on "

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -581,3 +582,125 @@ def test_neutralized_excess_reports_missing_factors_instead_of_zero(tmp_path: Pa
     assert block["reason"] == "factors_unavailable"
     assert block["neutralized_excess_return"] is None
     assert benchmark_summary_block(analysis) is None
+
+
+def test_the_sidecar_carries_the_panel_and_the_active_figures_the_verdict_grades(tmp_path: Path):
+    """A formal replay's zero-skill panel is stored beside the strategy's own
+    series, and the figures the Agent reads off it are the ones the verdict
+    measures: same regression, same tracking error, on strategy minus panel."""
+    from autotrade.environment.replay.stats import attach_sub_window_benchmark
+    from autotrade.pipelines.verdict import neutralized_statistics
+
+    rng = np.random.default_rng(7)
+    days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2024-01-02", periods=60)]
+    replay_dir = tmp_path / "replay"
+    replay_dir.mkdir()
+    pd.DataFrame(
+        {
+            "dataset": "index_daily",
+            "ts_code": BENCHMARK_TS_CODE,
+            "trade_date": days,
+            "pct_chg": rng.normal(0.0, 1.0, len(days)),
+        }
+    ).to_parquet(replay_dir / "macro.parquet", index=False)
+    daily = pd.DataFrame(
+        [
+            {"trade_date": day, "ts_code": f"{slot:06d}.SZ", "close": 10.0,
+             "circ_mv": 100.0 * (slot + 1), "pb": 1.0, "turnover_rate": 1.0,
+             "pct_chg": float(rng.normal(0.0, 0.01))}
+            for day in days
+            for slot in range(40)
+        ]
+    )
+    equity = 100_000.0 * np.cumprod(1.0 + rng.normal(0.001, 0.01, len(days)))
+    replay = ReplayResult(
+        tuple(
+            {"trade_date": day, "initial_equity": 100_000.0, "equity": float(value)}
+            for day, value in zip(days, equity)
+        ),
+        (), (), (),
+    )
+    panel = {
+        "k": 20,
+        "seed": 5,
+        "matched": "index_membership+affordability",
+        "dropped_trips_mean": 0.0,
+        "panel_daily": [[day, float(value)] for day, value in zip(days, rng.normal(0.0005, 0.008, len(days)))],
+        "panel_draw_sd": [[day, 0.004] for day in days],
+    }
+
+    def analyse(block):
+        return replay_style_analysis(
+            replay, daily, replay_dir=replay_dir, snapshot_dir=None, mode="valid", panel=block
+        )
+
+    graded, bare = analyse(panel), analyse(None)
+
+    assert graded["panel_daily"] == panel["panel_daily"]
+    assert graded["panel_draw_sd"] == panel["panel_draw_sd"]
+    assert graded["panel"] == {
+        "k": 20, "seed": 5, "matched": "index_membership+affordability", "dropped_trips_mean": 0.0,
+    }
+    assert graded["strategy_daily"] == bare["strategy_daily"]
+    compact = benchmark_summary_block(graded)
+    active = neutralized_statistics(graded)
+    own = neutralized_statistics(bare)
+    assert (active["series"], own["series"]) == ("active", "absolute")
+    assert compact["active_neutralized_excess"] == active["neutralized_excess"]
+    assert compact["active_tracking_error"] == round(active["tracking_error"], 4)
+    assert compact["active_information_ratio"] == round(active["information_ratio"], 4)
+    assert compact["tracking_error"] == round(own["tracking_error"], 4)
+    assert compact["market_beta"] == round(own["market_beta"], 3)
+    assert compact["panel_draws"] == 20
+    assert compact["panel_neutralized_excess"] == graded["panel_neutralized_excess"][
+        "neutralized_excess_return"
+    ]
+    # A replay without a panel states none of it, and nothing else moved.
+    unpanelled = benchmark_summary_block(bare)
+    assert set(compact) - set(unpanelled) == {
+        "active_neutralized_excess",
+        "active_tracking_error",
+        "active_information_ratio",
+        "panel_neutralized_excess",
+        "panel_draws",
+    }
+    assert {key: compact[key] for key in unpanelled} == unpanelled
+    visible = agent_visible_metrics({"total_return": 0.1, "benchmark": compact})
+    assert visible["benchmark"]["active_information_ratio"] == compact["active_information_ratio"]
+    assert visible["benchmark"]["tracking_error"] == compact["tracking_error"]
+
+    def year_rows(analysis):
+        summary = {"sub_windows": [{"start": days[0], "end": days[-1], "return": 0.05}]}
+        return attach_sub_window_benchmark(summary, analysis)["sub_windows"]
+
+    [with_panel], [without] = year_rows(graded), year_rows(bare)
+    assert with_panel["active_neutralized_excess_return"] == active["neutralized_excess"]
+    assert "active_neutralized_excess_return" not in without
+    assert with_panel["neutralized_excess_return"] == without["neutralized_excess_return"]
+
+
+def test_membership_is_read_from_the_decision_view_and_every_slot(tmp_path: Path):
+    from autotrade.environment.replay.style import slot_membership
+
+    def slot(name: str, rows: list[dict[str, object]]) -> Path:
+        directory = tmp_path / name
+        directory.mkdir()
+        pd.DataFrame(rows).to_parquet(directory / "macro.parquet", index=False)
+        return directory
+
+    def weight(day: str, index: str, code: str) -> dict[str, object]:
+        return {"dataset": "index_weight", "trade_date": day, "index_code": index, "con_code": code}
+
+    decision = slot("decision", [weight("20240531", BENCHMARK_TS_CODE, "000001.SZ"),
+                                 weight("20240531", "000905.SH", "000009.SZ")])
+    replay = slot("replay", [weight("20240628", BENCHMARK_TS_CODE, "000001.SZ"),
+                             weight("20240628", BENCHMARK_TS_CODE, "000002.SZ")])
+    # An arm that did not select index_weight has no such rows, or columns.
+    plain = slot("plain", [{"dataset": "index_daily", "ts_code": BENCHMARK_TS_CODE,
+                            "trade_date": "20240628", "pct_chg": 0.1}])
+
+    assert slot_membership([decision, replay, plain, tmp_path / "absent"]) == {
+        "20240531": frozenset({"000001.SZ"}),
+        "20240628": frozenset({"000001.SZ", "000002.SZ"}),
+    }
+    assert slot_membership([plain]) == {}

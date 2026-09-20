@@ -93,7 +93,14 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "per_call_timeout_seconds": rolling_default("per_call_timeout_seconds"),
     "strategy_fit_timeout_seconds": rolling_default("strategy_fit_timeout_seconds"),
     "record_failed_attempts": rolling_default("record_failed_attempts"),
-    "max_drawdown": AcceptanceRules().max_drawdown,
+    # None takes the rule the account's capital derives
+    # (``config.default_acceptance``); a value overrides it for this arm, and a
+    # ``tracking_error_cap`` of 0 switches the tracking mandate off.
+    "max_drawdown": None,
+    "active_max_drawdown": None,
+    "tracking_error_cap": None,
+    "beta_min": None,
+    "beta_max": None,
     "cost_stress_multiplier": AcceptanceRules().cost_stress_multiplier,
     "initial_cash": 1_000_000.0,
     "max_total_holdings": None,

@@ -1,21 +1,30 @@
-"""Random-portfolio null control for one replay result.
+"""Random-portfolio null control for one replay result, and its zero-skill panel.
 
 The question: is a window's excess return due to WHICH names the strategy
 picked, or only to its timing, sizing and exposure? The null keeps the trade
 skeleton — the same entry and exit instants, the same money per round trip —
-and replaces every name with a random one of comparable size, then replays the
-script through the same Broker. If the observed excess sits inside the null
-distribution, the name selection carried no information the timing did not
-already carry.
+and replaces every name with a random one the same money could have bought on
+the same side of the benchmark's membership, then replays the script through
+the same Broker. If the observed excess sits inside the null distribution, the
+name selection carried no information the timing did not already carry.
+
+The draws' equal-weight mean daily return is the zero-skill panel composite:
+what the account earns in the candidate's own shape — its review calendar, its
+seats, its money per seat, its costs — with no skill in the names. The verdict
+grades a strategy on its daily return minus that composite
+(``pipelines/verdict.py``); the percentile beside it stays descriptive.
 
 Everything here is host-side and pure: the caller supplies the result, the
-replay slot's daily frame, the benchmark series and the Broker profile; no
-sandbox, no I/O, no raw data lake. The null is informational and gates nothing.
+replay slot's daily frame, the benchmark series, the benchmark membership and
+the Broker profile; no sandbox, no I/O, no raw data lake. Every draw replays
+through a Broker of its own after the graded replay has finished, so nothing
+here can reach the result it measures.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from bisect import bisect_left
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -34,10 +43,18 @@ from autotrade.environment.strategy import CN_TZ, StrategyContext, StrategySched
 from .engine import run_daily_replay
 from .market import DailyMarketData
 from .stats import ReplayResult, total_return_from_curve
+from .style import daily_returns_from_curve
 
-# How a replacement name is drawn: uniformly inside the original's circulating
-# market-cap decile of the entry day's own cross-section.
-MATCHING = "circ_mv_decile"
+# Draws of one null control. Twenty put the composite's standard error at
+# 1.4-3.2 pp/yr against the 4-11 pp/yr active returns it is subtracted from,
+# at a twenty-fifth of what a percentile-grade 500 would cost on every replay.
+PANEL_DRAWS = 20
+# How a replacement name is drawn: uniformly among the entry day's names that
+# one board lot of this round trip's own money can buy and that sit on the
+# original's side of the benchmark's membership. Without a membership table the
+# side is the original's circulating market-cap decile of that day instead.
+MATCHED_MEMBERSHIP = "index_membership+affordability"
+MATCHED_DECILE = "circ_mv_decile+affordability"
 _DECILES = 10
 _DIGITS = 6
 
@@ -149,10 +166,12 @@ def run_null_control(
     profile: BrokerProfile,
     schedule: StrategySchedule,
     *,
-    k: int = 500,
+    k: int = PANEL_DRAWS,
     seed: int,
     step: tuple[str, str] | None = None,
     corporate_actions: pd.DataFrame | None = None,
+    membership: Mapping[str, Collection[str]] | None = None,
+    panel: bool = False,
 ) -> dict[str, object]:
     """Replay ``k`` random-name copies of ``result``'s skeleton and rank it.
 
@@ -166,6 +185,17 @@ def run_null_control(
     slot's ex-date table, so a null holding is settled through the same
     ex-dates as the observed one; a formal slot always passes it, and None is
     only for synthetic frames in unit tests.
+
+    ``membership`` maps a cross-section date (``YYYYMMDD``) to the benchmark's
+    constituents published on it; a round trip is matched on the latest one
+    dated before its entry day, which is the one its decision could read. None
+    or empty means the table is not mounted, and the draw falls back to the
+    float-cap decile; ``matched`` records which rule applied.
+
+    ``panel`` adds the draws' daily return series to the block: ``panel_daily``
+    is their equal-weight mean per trading day and ``panel_draw_sd`` the
+    cross-draw standard deviation. A result that never filled a trade has an
+    idle cash account as its zero-skill copy, so its panel is zero every day.
     """
 
     if k < 1:
@@ -174,21 +204,28 @@ def run_null_control(
     market = DailyMarketData(frame, corporate_actions)
     if tuple(dates) != market.trade_dates:
         raise ValueError("result equity curve and replay frame cover different trading days")
+    members = _Membership(membership) if membership else None
+    matched = MATCHED_DECILE if members is None else MATCHED_MEMBERSHIP
     skeleton, unpaired_sell_shares = trade_skeleton(result.executions)
     if not skeleton:
         # Nothing was ever filled: every random-name replay would be the same
         # idle cash account, and the right-inclusive percentile would read 1.0
         # for a result that picked no names at all.
-        return {
+        idle: dict[str, object] = {
             "status": "unavailable",
             "reason": "no_filled_trades",
             "k": 0,
             "seed": seed,
-            "matched": MATCHING,
+            "matched": matched,
             "excess_percentile": None,
         }
+        if panel:
+            returns = daily_returns_from_curve(result.equity_curve)
+            idle["panel_daily"] = [[date, 0.0] for date, _value in returns]
+            idle["panel_draw_sd"] = [[date, 0.0] for date, _value in returns]
+        return idle
     universe = _Universe(frame)
-    pools = [_candidate_pool(trip, universe) for trip in skeleton]
+    pools = [_candidate_pool(trip, universe, members) for trip in skeleton]
     rng = np.random.default_rng(seed)
 
     window_benchmark = _benchmark_return(dates, benchmark)
@@ -210,6 +247,7 @@ def run_null_control(
     step_excesses: list[float] = []
     rejects: list[int] = []
     dropped: list[int] = []
+    series: list[list[tuple[str, float]]] = []
     for _ in range(k):
         orders, dropped_trips = _orders_from_pools(skeleton, pools, rng)
         dropped.append(dropped_trips)
@@ -221,6 +259,8 @@ def run_null_control(
         )
         excesses.append(total_return_from_curve(run.equity_curve) - window_benchmark)
         rejects.append(sum(1 for record in run.executions if record["status"] != "filled"))
+        if panel:
+            series.append(daily_returns_from_curve(run.equity_curve))
         if bounds is not None:
             step_excesses.append(
                 _sub_window_return(run.equity_curve, start, end) - step_benchmark
@@ -229,12 +269,13 @@ def run_null_control(
     block: dict[str, object] = {
         "k": k,
         "seed": seed,
-        "matched": MATCHING,
+        "matched": matched,
         **_distribution(observed, excesses),
         "rejects_mean": round(sum(rejects) / k, 3),
-        # Round trips the draw could not deploy: the replacement's price made
-        # this trip's share of the money smaller than one board lot, so the
-        # null ran with less capital than the result it is compared against.
+        "round_trips": len(skeleton),
+        # Round trips no draw could deploy: not one matched name had a board
+        # lot this trip's money could buy, so the null ran with less capital
+        # than the result it is compared against.
         "dropped_trips_mean": round(sum(dropped) / k, 3),
         # Sold shares no filled buy accounts for: created by the observed
         # run's ex-date settlements, so the skeleton carries only the bought
@@ -247,7 +288,42 @@ def run_null_control(
             "end": end,
             **_distribution(observed_step, step_excesses),
         }
+    if panel:
+        days = [date for date, _value in series[0]]
+        if any([date for date, _value in draw] != days for draw in series):
+            raise ValueError("null draws cover different trading days")
+        values = np.asarray([[value for _date, value in draw] for draw in series])
+        spread = values.std(axis=0, ddof=1) if k > 1 else np.zeros(len(days))
+        block["panel_daily"] = [
+            [date, float(value)] for date, value in zip(days, values.mean(axis=0), strict=True)
+        ]
+        block["panel_draw_sd"] = [
+            [date, float(value)] for date, value in zip(days, spread, strict=True)
+        ]
     return block
+
+
+class _Membership:
+    """The benchmark's constituent cross-sections, read by entry day."""
+
+    def __init__(self, membership: Mapping[str, Collection[str]]) -> None:
+        self._dates = sorted(_date_text(date) for date in membership)
+        self._members = {
+            _date_text(date): frozenset(str(code) for code in codes)
+            for date, codes in membership.items()
+        }
+
+    def before(self, date: str) -> frozenset[str]:
+        """The latest cross-section dated before ``date``.
+
+        A cross-section is published after its own close, so the one a
+        decision could read is dated strictly before the day it trades on.
+        """
+
+        position = bisect_left(self._dates, date)
+        if position == 0:
+            raise ValueError(f"no benchmark membership is dated before {date}")
+        return self._members[self._dates[position - 1]]
 
 
 class _Universe:
@@ -276,6 +352,8 @@ class _Universe:
         # A name without a usable opening price cannot be sized, so it is not a
         # candidate on that day at all.
         rows = rows[np.isfinite(rows["open"]) & (rows["open"] > 0)]
+        boards = {symbol: _board(symbol) for symbol in rows["symbol"].unique()}
+        rows = rows.assign(board=rows["symbol"].map(boards))
         self._days = {
             date: group.set_index("symbol")
             for date, group in rows.groupby("trade_date", sort=False)
@@ -306,46 +384,59 @@ class _Universe:
         return cached
 
 
-def _candidate_pool(trip: RoundTrip, universe: _Universe) -> tuple[tuple[str, float], ...]:
-    """Replacement names for one round trip, with their entry-day open price."""
+def _candidate_pool(
+    trip: RoundTrip, universe: _Universe, members: _Membership | None = None
+) -> tuple[tuple[str, int], ...]:
+    """Replacement names for one round trip, with the shares its money buys.
+
+    Affordability belongs to the pool, not to the draw: a name whose board lot
+    this trip's money cannot buy was never a candidate, so drawing it and then
+    dropping the trip would run the null with less capital than the result.
+    Sized from the entry day's open only: the null learns nothing the original
+    position did not already know when it was opened.
+    """
 
     entry = universe.day(trip.entry_date)
-    deciles = universe.deciles(trip.entry_date)
-    code = deciles.get(trip.symbol)
-    names = entry.index if code is None else deciles.index[deciles.to_numpy() == int(code)]
+    if members is None:
+        deciles = universe.deciles(trip.entry_date)
+        code = deciles.get(trip.symbol)
+        names = entry.index if code is None else deciles.index[deciles.to_numpy() == int(code)]
+    else:
+        constituents = members.before(trip.entry_date)
+        inside = entry.index.isin(constituents)
+        names = entry.index[inside == (trip.symbol in constituents)]
     if trip.exit_date is not None:
         names = names.intersection(universe.day(trip.exit_date).index)
     names = names.drop(trip.symbol, errors="ignore")
-    if names.empty:
-        raise ValueError(
-            f"no replacement name for {trip.symbol} entered {trip.entry_date}"
-            f" and exited {trip.exit_date}"
-        )
-    return tuple(zip(names.tolist(), entry.loc[names, "open"].tolist(), strict=True))
+    bars = entry.loc[names]
+    shares = np.floor_divide(trip.notional, bars["open"].to_numpy()).astype(int)
+    quantities = _lot_quantities(shares, bars["board"].to_numpy())
+    return tuple(
+        (symbol, int(quantity))
+        for symbol, quantity in zip(names.tolist(), quantities, strict=True)
+        if quantity > 0
+    )
 
 
 def _orders_from_pools(
     skeleton: Sequence[RoundTrip],
-    pools: Sequence[tuple[tuple[str, float], ...]],
+    pools: Sequence[tuple[tuple[str, int], ...]],
     rng: np.random.Generator,
 ) -> tuple[dict[str, list[dict[str, object]]], int]:
     """One draw, and how many round trips it could not deploy.
 
-    A trip whose money cannot buy one board lot of its replacement is dropped;
-    the count travels with the draw so an under-deployed null is reported
-    instead of silently shrinking the null distribution.
+    A trip with an empty pool is dropped; the count travels with the draw so
+    an under-deployed null is reported instead of silently shrinking the null
+    distribution.
     """
 
     orders: dict[str, list[dict[str, object]]] = {}
     dropped = 0
     for trip, pool in zip(skeleton, pools, strict=True):
-        symbol, entry_open = pool[int(rng.integers(len(pool)))]
-        # Sized from the entry day's open only: the null learns nothing the
-        # original position did not already know when it was opened.
-        quantity = _lot_quantity(symbol, int(trip.notional // entry_open))
-        if quantity <= 0:
+        if not pool:
             dropped += 1
             continue
+        symbol, quantity = pool[int(rng.integers(len(pool)))]
         _queue(orders, symbol, "buy", quantity, trip.entry_at)
         if trip.exit_at is not None:
             _queue(orders, symbol, "sell", quantity, trip.exit_at)
@@ -373,14 +464,25 @@ def _queue(
     )
 
 
-def _lot_quantity(symbol: str, shares: int) -> int:
-    """``shares`` rounded down to what that board lets a buy declare."""
+_STAR, _BSE, _MAIN = "star", "bse", "main"
 
+
+def _board(symbol: str) -> str:
     if is_star_market(symbol):
-        return shares if shares >= STAR_MIN_LOT_SIZE else 0
-    if is_bse_market(symbol):
-        return shares if shares >= LOT_SIZE else 0
-    return shares - shares % LOT_SIZE
+        return _STAR
+    return _BSE if is_bse_market(symbol) else _MAIN
+
+
+def _lot_quantities(shares: np.ndarray, boards: np.ndarray) -> np.ndarray:
+    """``shares`` rounded down to what each name's board lets a buy declare.
+
+    STAR takes any size from 200 shares and BSE any size from 100; every other
+    board takes whole lots of 100. Zero where not one declaration fits.
+    """
+
+    declared = np.where(boards == _MAIN, shares - shares % LOT_SIZE, shares)
+    minimum = np.where(boards == _STAR, STAR_MIN_LOT_SIZE, LOT_SIZE)
+    return np.where(shares >= minimum, declared, 0)
 
 
 def _scripted_strategy(
@@ -466,7 +568,9 @@ def _cn_datetime(value: object) -> datetime:
 
 
 __all__ = [
-    "MATCHING",
+    "MATCHED_DECILE",
+    "MATCHED_MEMBERSHIP",
+    "PANEL_DRAWS",
     "NullControlSetupError",
     "RoundTrip",
     "run_null_control",

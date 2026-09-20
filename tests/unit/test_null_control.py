@@ -1,8 +1,9 @@
 """Random-portfolio null control: skeleton pairing, matched draws, replay block.
 
 The synthetic market is five names over 20 trading days in two size groups, so
-a replacement is always drawn from the original's own ``circ_mv`` decile and
-never from the other group.
+without a membership table a replacement is always drawn from the original's
+own ``circ_mv`` decile and never from the other group; with one, the side of
+the benchmark's membership takes the decile's place.
 """
 
 from __future__ import annotations
@@ -16,9 +17,12 @@ import pytest
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.replay import run_daily_replay
 from autotrade.environment.replay.null_control import (
+    MATCHED_DECILE,
+    MATCHED_MEMBERSHIP,
     RoundTrip,
     _candidate_pool,
     _distribution,
+    _Membership,
     _orders_from_pools,
     _Universe,
     run_null_control,
@@ -95,6 +99,12 @@ def _observed_result():
         schedule=StrategySchedule("day", "08:30"),
         profile=BrokerProfile(),
     )
+
+
+def _pools(skeleton, frame: pd.DataFrame, membership=None):
+    universe = _Universe(frame)
+    members = _Membership(membership) if membership else None
+    return [_candidate_pool(trip, universe, members) for trip in skeleton]
 
 
 def _expected_quantity(frame: pd.DataFrame, symbol: str, day: str, notional: float) -> int:
@@ -200,10 +210,13 @@ def test_null_quantities_follow_the_star_declaration_ladder():
         RoundTrip("000001.SZ", 20, 500.0, _at(DAYS[1], "09:30"), _at(DAYS[2], "15:00")),
     ]
 
-    orders = _sample_null_orders(skeleton, pd.DataFrame(rows), np.random.default_rng(3))
+    frame = pd.DataFrame(rows)
+    orders = _sample_null_orders(skeleton, frame, np.random.default_rng(3))
 
     # 10 000 / 50 = 200 shares clears the STAR minimum declaration; the second
-    # trip buys at 100 and its 100 shares do not, so it places no order at all.
+    # trip would buy at 100 and its 100 shares do not, so the name is not in
+    # that trip's pool at all and the trip places no order.
+    assert [len(pool) for pool in _pools(skeleton, frame)] == [1, 0]
     assert orders[DAYS[0]] == [
         {
             "symbol": "688001.SH",
@@ -260,9 +273,70 @@ def test_a_round_trip_too_small_to_buy_a_lot_is_counted_not_hidden():
     )
 
     # Both replacements in the decile open above 000001.SZ, so the 100-share
-    # tail (about 1 020 CNY) never reaches one lot: one trip of two is dropped
-    # in every draw.
+    # tail (about 1 020 CNY) reaches one lot of neither: its pool is empty and
+    # one trip of two is dropped in every draw.
+    assert block["round_trips"] == 2
     assert block["dropped_trips_mean"] == 1.0
+
+
+def test_affordability_is_settled_in_the_pool_so_an_expensive_name_drops_no_trip():
+    """The defect this replaces: a replacement was drawn first and the trip
+    dropped when one lot of it cost more than the trip's money, so a book of
+    cheap names ran its null with a quarter of its trips missing. A name the
+    money cannot buy is never a candidate, so the trip always deploys."""
+    rows = []
+    for day in DAYS[:6]:
+        for symbol, price in (("000001.SZ", 10.0), ("000002.SZ", 11.0), ("000003.SZ", 900.0)):
+            rows.append(
+                {
+                    "ts_code": symbol,
+                    "trade_date": day,
+                    "open": price,
+                    "close": price,
+                    "up_limit": price * 1.5,
+                    "down_limit": price * 0.5,
+                    "is_suspended": False,
+                    "circ_mv": 1.0e9,
+                }
+            )
+    frame = pd.DataFrame(rows)
+    skeleton = [RoundTrip("000001.SZ", 1000, 10.0, _at(DAYS[1], "09:30"), _at(DAYS[4], "15:00"))]
+
+    # One lot of 000003.SZ costs 90 000 against the trip's 10 000.
+    assert _pools(skeleton, frame) == [(("000002.SZ", 900),)]
+    rng = np.random.default_rng(5)
+    for _ in range(20):
+        orders, dropped = _orders_from_pools(skeleton, _pools(skeleton, frame), rng)
+        assert dropped == 0
+        assert orders[DAYS[1]][0]["symbol"] == "000002.SZ"
+
+
+def test_membership_matches_a_name_to_its_own_side_of_the_benchmark():
+    """With the benchmark's membership mounted a replacement comes from the
+    original's side of it as the cross-section dated before the entry day
+    states it, whatever its float-cap decile; the membership of a later
+    cross-section is not read."""
+    frame = _frame()
+    membership = {
+        DAYS[0]: {"000001.SZ", "600001.SH"},
+        # Published on the entry day's own close: not readable that morning.
+        DAYS[2]: {"000002.SZ", "000003.SZ", "600002.SH"},
+    }
+    skeleton = [
+        RoundTrip("000001.SZ", 1000, 10.2, _at(DAYS[2], "09:30"), _at(DAYS[9], "15:00")),
+        RoundTrip("000002.SZ", 1000, 12.2, _at(DAYS[2], "09:30"), _at(DAYS[9], "15:00")),
+    ]
+
+    inside, outside = _pools(skeleton, frame, membership)
+
+    assert {symbol for symbol, _quantity in inside} == {"600001.SH"}
+    assert {symbol for symbol, _quantity in outside} == {"000003.SZ", "600002.SH"}
+    with pytest.raises(ValueError, match="no benchmark membership is dated before"):
+        _pools(
+            [RoundTrip("000001.SZ", 1000, 10.0, _at(DAYS[0], "09:30"), None)],
+            frame,
+            membership,
+        )
 
 
 def test_excess_percentile_is_the_share_of_null_runs_at_or_below_the_observed():
@@ -296,7 +370,7 @@ def test_run_null_control_replays_scripted_nulls_and_reports_one_block():
 
     assert block["k"] == 3
     assert block["seed"] == 17
-    assert block["matched"] == "circ_mv_decile"
+    assert block["matched"] == MATCHED_DECILE
     assert block["observed_excess"] == pytest.approx(
         result.equity_curve[-1]["equity"] / 1_000_000.0 - 1.0 - benchmark_return, abs=1e-6
     )
@@ -306,6 +380,7 @@ def test_run_null_control_replays_scripted_nulls_and_reports_one_block():
     assert block["dropped_trips_mean"] == 0.0
     assert block["unpaired_sell_shares"] == 0
     assert "step" not in block
+    assert "panel_daily" not in block
 
     assert (
         run_null_control(
@@ -342,6 +417,41 @@ def test_run_null_control_replays_scripted_nulls_and_reports_one_block():
     assert step["observed_excess"] == pytest.approx(
         equity[DAYS[19]] / equity[DAYS[9]] - 1.0 - (1.001**10 - 1.0), abs=1e-6
     )
+
+
+def test_the_panel_is_the_draws_mean_daily_return_and_leaves_the_result_alone():
+    """``panel`` keeps what the percentile throws away: every draw's daily
+    return, as their equal-weight mean and cross-draw spread per trading day.
+    The draws replay through Brokers of their own, so the graded result is the
+    same object before and after."""
+    frame = _frame()
+    result = _observed_result()
+    before = (result.equity_curve, result.executions)
+    arguments = (result, frame, BENCHMARK, BrokerProfile(), StrategySchedule("day", "08:30"))
+
+    block = run_null_control(
+        *arguments, k=4, seed=17, membership={"20251231": set(SMALL)}, panel=True
+    )
+
+    assert (result.equity_curve, result.executions) == before
+    assert block["matched"] == MATCHED_MEMBERSHIP
+    assert [date for date, _value in block["panel_daily"]] == list(DAYS)
+    assert [date for date, _value in block["panel_draw_sd"]] == list(DAYS)
+    draws = [
+        run_null_control(*arguments, k=1, seed=seed, membership={"20251231": set(SMALL)}, panel=True)
+        for seed in range(40)
+    ]
+    # One draw's panel is that draw itself, so no two seeds need agree, and the
+    # composite of four is flat before the first entry and moves after it.
+    assert len({tuple(value for _date, value in draw["panel_daily"]) for draw in draws}) > 1
+    values = np.asarray([value for _date, value in block["panel_daily"]])
+    assert np.all(values[:2] == 0.0) and np.any(values[2:] != 0.0)
+    assert all(value >= 0.0 for _date, value in block["panel_draw_sd"])
+    # The percentile block is the same with or without the series.
+    plain = run_null_control(*arguments, k=4, seed=17, membership={"20251231": set(SMALL)})
+    assert plain == {
+        key: value for key, value in block.items() if key not in ("panel_daily", "panel_draw_sd")
+    }
 
 
 def test_run_null_control_rejects_a_frame_from_another_window():
@@ -388,9 +498,16 @@ def test_a_result_with_no_filled_trade_has_no_null_and_runs_no_replay(monkeypatc
         "reason": "no_filled_trades",
         "k": 0,
         "seed": 3,
-        "matched": "circ_mv_decile",
+        "matched": MATCHED_DECILE,
         "excess_percentile": None,
     }
+    # The zero-skill copy of a book that never traded is an idle cash account.
+    idle = run_null_control(
+        result, _frame(), BENCHMARK, BrokerProfile(), StrategySchedule("day", "08:30"),
+        seed=3, panel=True,
+    )
+    assert idle["panel_daily"] == [[day, 0.0] for day in DAYS]
+    assert idle["panel_draw_sd"] == [[day, 0.0] for day in DAYS]
 
 
 def _fill(

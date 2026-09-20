@@ -13,7 +13,7 @@ import json
 import math
 import re
 import unittest
-from dataclasses import MISSING, fields
+from dataclasses import MISSING, fields, replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -26,6 +26,8 @@ from autotrade.pipelines.config import (
     DEFAULT_RESEARCH_GEOMETRY,
     AcceptanceRules,
     RollingExperimentConfig,
+    acceptance_for,
+    default_acceptance,
 )
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
 from tests.unit.gpu_probe import stubbed_gpu_probe
@@ -107,7 +109,7 @@ class AcceptanceRulesTest(unittest.TestCase):
         )
 
     def test_finite_metrics_keep_threshold_semantics(self) -> None:
-        rules = AcceptanceRules()
+        rules = AcceptanceRules(max_drawdown=0.25)
         ok = {"total_return": 0.02, "sharpe": 0.5, "max_drawdown": 0.1}
         self.assertEqual(rules.evaluate(ok), [])
         # A drawdown breach is a HARD reject, sign-independent: F4/H3 enforce
@@ -140,36 +142,136 @@ class AcceptanceRulesTest(unittest.TestCase):
         )
 
     def test_rule_values_must_be_finite_and_ranged(self) -> None:
+        band = {"tracking_error_cap": 0.08, "beta_min": 0.85, "beta_max": 1.15}
         for kwargs in (
             {"max_drawdown": math.nan},
             {"max_drawdown": 1.5},
             {"max_drawdown": -0.1},
+            {"active_max_drawdown": 1.5},
+            {"active_max_drawdown": math.nan},
+            # The band is set exactly when the cap is, and is a band.
+            {"tracking_error_cap": 0.08},
+            {"beta_min": 0.85, "beta_max": 1.15},
+            {**band, "beta_max": None},
+            {**band, "beta_min": 1.15},
+            {**band, "tracking_error_cap": 0.0},
+            {**band, "tracking_error_cap": math.inf},
         ):
             with self.subTest(**kwargs), self.assertRaises(ValueError):
                 AcceptanceRules(**kwargs)
+        self.assertEqual(AcceptanceRules(**band).mandate, band)
 
     def test_record_round_trips_every_threshold(self) -> None:
-        rules = AcceptanceRules(max_drawdown=0.3, cost_stress_multiplier=3.0)
+        rules = AcceptanceRules(
+            max_drawdown=0.3,
+            cost_stress_multiplier=3.0,
+            active_max_drawdown=0.12,
+            tracking_error_cap=0.06,
+            beta_min=0.9,
+            beta_max=1.1,
+        )
         self.assertEqual(
-            rules.to_record(), {"max_drawdown": 0.3, "cost_stress_multiplier": 3.0}
+            rules.to_record(),
+            {
+                "max_drawdown": 0.3,
+                "cost_stress_multiplier": 3.0,
+                "active_max_drawdown": 0.12,
+                "tracking_error_cap": 0.06,
+                "beta_min": 0.9,
+                "beta_max": 1.1,
+            },
         )
         self.assertEqual(AcceptanceRules.from_record(rules.to_record()), rules)
-        # Every params.json and run manifest on disk still carries the retired
-        # targets; a record naming them must rebuild the rules it does name.
-        self.assertEqual(
-            AcceptanceRules.from_record(
-                {"min_return": 0.01, "min_sharpe": 0.2, **rules.to_record()}
-            ),
-            rules,
+        # Every params.json and run manifest written before the active series
+        # was graded names the equity limit and the cost stress alone, and many
+        # still carry the retired targets: such a record rebuilds the rules it
+        # does name, with no tracking mandate.
+        old = AcceptanceRules.from_record(
+            {"min_return": 0.01, "min_sharpe": 0.2, "max_drawdown": 0.25, "cost_stress_multiplier": 2.0}
         )
+        self.assertEqual(old, AcceptanceRules(max_drawdown=0.25))
+        self.assertIsNone(old.tracking_error_cap)
+
+    def test_the_capital_derives_the_default_rules_and_a_request_overrides_them(self) -> None:
+        """One switch, the capital: from CNY 150,000 an account can hold the
+        index and is asked to track it; below it cannot, and tracking error is
+        reported only."""
+
+        tracking = {
+            "max_drawdown": 0.35,
+            "cost_stress_multiplier": 2.0,
+            "active_max_drawdown": 0.15,
+            "tracking_error_cap": 0.08,
+            "beta_min": 0.85,
+            "beta_max": 1.15,
+        }
+        free = {
+            "max_drawdown": 0.45,
+            "cost_stress_multiplier": 2.0,
+            "active_max_drawdown": 0.30,
+            "tracking_error_cap": None,
+            "beta_min": None,
+            "beta_max": None,
+        }
+        for cash, expected in (
+            (100_000, free),
+            (149_999, free),
+            (150_000, tracking),
+            (1_000_000, tracking),
+        ):
+            with self.subTest(cash=cash):
+                self.assertEqual(default_acceptance(cash).to_record(), expected)
+                # A request that names nothing, or names nulls, keeps them.
+                self.assertEqual(acceptance_for(cash, {}).to_record(), expected)
+                self.assertEqual(
+                    acceptance_for(cash, dict.fromkeys(expected)).to_record(), expected
+                )
+        self.assertEqual(default_acceptance(100_000), AcceptanceRules())
+        # Every field overrides alone; a cap of 0 switches the mandate off, and
+        # a cap on an account without one takes the default band.
+        self.assertEqual(
+            acceptance_for(1_000_000, {"max_drawdown": 0.3, "beta_min": 0.9}).to_record(),
+            {**tracking, "max_drawdown": 0.3, "beta_min": 0.9},
+        )
+        self.assertEqual(
+            acceptance_for(1_000_000, {"tracking_error_cap": 0}).to_record(),
+            {**free, "max_drawdown": 0.35, "active_max_drawdown": 0.15},
+        )
+        self.assertEqual(
+            acceptance_for(100_000, {"tracking_error_cap": 0.1}).to_record(),
+            {**free, "tracking_error_cap": 0.1, "beta_min": 0.85, "beta_max": 1.15},
+        )
+        for cash, overrides in (
+            (1_000_000, {"tracking_error_cap": 0, "beta_min": 0.9}),
+            (100_000, {"beta_min": 0.9, "beta_max": 1.1}),
+        ):
+            with self.subTest(overrides=overrides), self.assertRaises(ValueError):
+                acceptance_for(cash, overrides)
 
     def test_the_agent_facts_state_the_rules_from_their_single_sources(self) -> None:
         """The ``acceptance_rules`` fact is derived, never retyped: the freeze
         gate and verdict thresholds come from ``verdict`` and this experiment's
         own rules, and no date of any period appears in it."""
 
-        facts = AcceptanceRules(max_drawdown=0.2, cost_stress_multiplier=3.0).agent_facts()
+        rules = AcceptanceRules(
+            max_drawdown=0.2, cost_stress_multiplier=3.0, active_max_drawdown=0.11
+        )
+        facts = rules.agent_facts()
         freeze = facts["freeze_gate"]
+        self.assertIn(str(verdict.PANEL_DRAWS), facts["graded_series"])
+        self.assertIn("benchmark.active_information_ratio", facts["graded_series"])
+        self.assertIn(str(verdict.FREEZE_MIN_ACTIVE_IR), freeze["active_information_ratio"])
+        self.assertIn("75%", freeze["positive_years"])
+        self.assertIn("0.11", freeze["active_max_drawdown"])
+        self.assertEqual(facts["graduation"]["forward"]["active_max_drawdown"], "<= 0.11")
+        self.assertEqual(facts["graduation"]["heldout"]["active_max_drawdown"], "<= 0.11")
+        # No mandate is said in words; a mandate states its two limits and that
+        # meeting them is not evidence.
+        self.assertIn("reported, not graded", freeze["tracking_mandate"])
+        mandate = default_acceptance(1_000_000).agent_facts()["freeze_gate"]["tracking_mandate"]
+        self.assertIn("<= 0.08", mandate["tracking_error"])
+        self.assertIn("0.85..1.15", mandate["market_beta"])
+        self.assertIn("not evidence", mandate["role"])
         self.assertIn("span=full", freeze["span"])
         self.assertIn("finite", freeze["finite_metrics"])
         self.assertIn(str(verdict.FREEZE_MIN_DSR_PROBABILITY), freeze["deflated_sharpe_probability"])
@@ -180,7 +282,7 @@ class AcceptanceRulesTest(unittest.TestCase):
         self.assertIn("0.2", freeze["max_drawdown"])
         self.assertEqual(facts["graduation"]["forward"]["max_drawdown"], "<= 0.2")
         # The gate states every rule it enforces and no rule it does not.
-        self.assertEqual(sorted(facts), ["freeze_gate", "graduation"])
+        self.assertEqual(sorted(facts), ["freeze_gate", "graded_series", "graduation"])
         graduation = facts["graduation"]
         self.assertIn("tracking error", graduation["forward"]["minimum_detectable_excess"])
         self.assertEqual(graduation["forward"]["max_drawdown"], "<= 0.2")
@@ -278,8 +380,14 @@ class DefaultsDriftTest(unittest.TestCase):
                 continue
             self.assertEqual(WEB_CREATE_DEFAULTS[key], getattr(profile, key), key)
         rules = AcceptanceRules()
-        for key in ("max_drawdown", "cost_stress_multiplier"):
-            self.assertEqual(WEB_CREATE_DEFAULTS[key], getattr(rules, key), key)
+        self.assertEqual(
+            WEB_CREATE_DEFAULTS["cost_stress_multiplier"], rules.cost_stress_multiplier
+        )
+        # The limits the account's capital derives are offered empty, so the
+        # form never pins one side of the capital switch onto every arm.
+        for key in rules.to_record():
+            if key != "cost_stress_multiplier":
+                self.assertIsNone(WEB_CREATE_DEFAULTS[key], key)
         for key, value in DEFAULT_RESEARCH_GEOMETRY.to_record().items():
             self.assertEqual(WEB_CREATE_DEFAULTS[key], value, key)
         schedule = StrategySchedule()
@@ -316,7 +424,7 @@ class DefaultsDriftTest(unittest.TestCase):
                 preflight=True,
             )
         for field_obj in fields(RollingExperimentConfig):
-            if field_obj.default is MISSING:
+            if field_obj.default is MISSING or field_obj.name == "acceptance":
                 continue
             with self.subTest(field=field_obj.name):
                 self.assertEqual(
@@ -324,6 +432,16 @@ class DefaultsDriftTest(unittest.TestCase):
                     field_obj.default,
                     field_obj.name,
                 )
+        # The acceptance rules have no fixed default: the loader and the
+        # dataclass both derive them from the account's capital.
+        self.assertEqual(
+            options.rolling.acceptance,
+            default_acceptance(options.rolling.broker_profile.initial_cash),
+        )
+        self.assertEqual(
+            RollingExperimentConfig("demo", Path("experiments")).acceptance,
+            default_acceptance(BrokerProfile().initial_cash),
+        )
 
     def test_the_geometry_and_gate_knobs_reach_the_configuration(self) -> None:
         """A knob accepted and never forwarded is the defect class here."""
@@ -361,9 +479,15 @@ class DefaultsDriftTest(unittest.TestCase):
             )
         self.assertEqual(options.rolling.geometry, geometry)
         self.assertEqual(options.rolling.max_research_minutes, 300)
+        # The two the request names, on the defaults of the capital it left at
+        # the Broker profile's CNY 1,000,000.
         self.assertEqual(
             options.rolling.acceptance,
-            AcceptanceRules(max_drawdown=0.2, cost_stress_multiplier=3.0),
+            replace(
+                default_acceptance(1_000_000),
+                max_drawdown=0.2,
+                cost_stress_multiplier=3.0,
+            ),
         )
 
     def test_the_console_create_form_is_seeded_with_the_research_preset(self) -> None:

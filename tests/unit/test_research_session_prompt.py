@@ -230,7 +230,11 @@ def test_the_prompt_states_the_research_session_contract() -> None:
         "之后没有别的会话接手",
         "`deadline`",
         "`acceptance_rules.freeze_gate`",
-        "研究期最大回撤不超过上限",
+        "`acceptance_rules.graded_series`",
+        "研究期权益回撤与主动回撤都不超过上限",
+        "主动信息比率",
+        "主动超额为正的研究年数",
+        "那是约束，不是技能的证据",
         "本臂至少两个完整研究期验证",
         "任何 span、任何尝试、对照都算",
         "一条臂至多冻结一次",
@@ -241,7 +245,7 @@ def test_the_prompt_states_the_research_session_contract() -> None:
     evidence = prompt[prompt.index("# 证据标准") : prompt.index("# 原则")]
     for clause in (
         "中性化超额约为 0",
-        "半数以上研究年份的中性化超额为负",
+        "半数以上研究年份的主动中性化超额为负",
         "`excess_percentile` 在 0.5 附近",
         "`selection_statistics.deflated_sharpe_probability`",
         "`acceptance_rules.graduation.forward.minimum_detectable_excess`",

@@ -424,17 +424,20 @@ def attach_sub_window_benchmark(
     window carries, re-run on the year's own days
     (``style.window_neutralized_excess``): the raw excess of a single year
     cannot separate an edge from a size or beta tilt any better than a whole
-    window's can.
+    window's can. A replay that carries a zero-skill panel gets the same figure
+    for its active series beside it, which is the one the freeze gate counts
+    positive years on.
     """
 
     # Deferred: ``style`` imports this module for the trading-day constant and
     # the equity-curve helpers, so the attribution function it owns can only be
     # reached from here at call time.
-    from .style import window_neutralized_excess
+    from .style import active_analysis, window_neutralized_excess
 
     rows = summary.get("sub_windows")
     if not isinstance(rows, list):
         return summary
+    active = active_analysis(style_analysis)
     daily: dict[str, float] = {}
     series = style_analysis.get("benchmark_daily")
     if isinstance(series, Sequence) and not isinstance(series, (str, bytes)):
@@ -472,6 +475,10 @@ def attach_sub_window_benchmark(
         row["neutralized_excess_return"] = window_neutralized_excess(
             style_analysis, start=start, end=end
         )
+        if active is not None:
+            row["active_neutralized_excess_return"] = window_neutralized_excess(
+                active, start=start, end=end
+            )
     return summary
 
 

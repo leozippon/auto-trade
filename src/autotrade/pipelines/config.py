@@ -107,35 +107,92 @@ def _finite_metric(value: object) -> float | None:
     return float(value) if math.isfinite(value) else None
 
 
+# The capital from which an account can hold a CSI 300 book that tracks it, so
+# from which the tracking mandate is an arm's default
+# (``default_acceptance``). Two arithmetic conditions meet there: residual
+# tracking error of a zero-skill constituent book falls under 8 % only from 20
+# seats, and a seat buys 70 % of the index by weight only from about 6,900 CNY,
+# which at 97 % deployed is 20 x 6,900 / 0.97 = 142,000; the measured grid first
+# satisfies the whole mandate at 150,000 (20 seats: tracking error 7.76 %, beta
+# 0.98, 70.8 % of index weight buyable).
+TRACKING_MANDATE_MIN_CASH = 150_000.0
+
+
 @dataclass(frozen=True)
 class AcceptanceRules:
     """The arm's round parameters for the freeze nomination and the verdict.
 
     A nominated research node fails the freeze gate on a non-finite metric or a
-    research-period drawdown over ``max_drawdown`` (``evaluate``).
-    ``max_drawdown`` and ``cost_stress_multiplier`` decide the forward and
-    Held-out verdict (``pipelines/verdict.py``), whose remaining thresholds are
-    that module's constants. Every field here is a limit something enforces.
+    research-period drawdown over ``max_drawdown`` (``evaluate``); the limits
+    here decide the rest of the freeze gate and the forward and Held-out
+    verdict together with the constants of ``pipelines/verdict.py``. Every
+    field is a limit something enforces. The field defaults are the rules of an
+    account too small for the tracking mandate; ``default_acceptance`` derives
+    an arm's defaults from its capital.
     """
 
-    max_drawdown: float = 0.25
+    # Equity drawdown, over the research period, forward and Held-out alike.
+    max_drawdown: float = 0.45
     # The forward neutralised excess must stay positive after paying this
     # multiple of the profile's slippage (verdict F5).
     cost_stress_multiplier: float = 2.0
+    # Drawdown of the cumulative active series (strategy minus the zero-skill
+    # panel composite), over the same three slices.
+    active_max_drawdown: float = 0.30
+    # The tracking mandate: the strategy's own residual tracking error against
+    # CSI 300 and its market beta, over the research period and again forward.
+    # ``None`` means no mandate: both are measured and reported, not graded.
+    # The band is set exactly when the cap is -- a cap alone is cheapest to
+    # meet by dropping beta.
+    tracking_error_cap: float | None = None
+    beta_min: float | None = None
+    beta_max: float | None = None
 
     def __post_init__(self) -> None:
-        for name in ("max_drawdown", "cost_stress_multiplier"):
-            if not math.isfinite(float(getattr(self, name))):
+        mandate = (self.tracking_error_cap, self.beta_min, self.beta_max)
+        for name, value in zip(
+            ("max_drawdown", "cost_stress_multiplier", "active_max_drawdown"),
+            (self.max_drawdown, self.cost_stress_multiplier, self.active_max_drawdown),
+            strict=True,
+        ):
+            if isinstance(value, bool) or not math.isfinite(float(value)):
                 raise ValueError(f"{name} must be finite")
-        if not 0 <= self.max_drawdown <= 1:
-            raise ValueError("max_drawdown must be between zero and one")
+        for name in ("max_drawdown", "active_max_drawdown"):
+            if not 0 <= getattr(self, name) <= 1:
+                raise ValueError(f"{name} must be between zero and one")
         if self.cost_stress_multiplier < 1:
             raise ValueError("cost_stress_multiplier must be at least one")
+        if any(value is None for value in mandate):
+            if any(value is not None for value in mandate):
+                raise ValueError(
+                    "tracking_error_cap, beta_min and beta_max are set together or not at all"
+                )
+            return
+        if any(isinstance(value, bool) or not math.isfinite(float(value)) for value in mandate):
+            raise ValueError("tracking_error_cap, beta_min and beta_max must be finite")
+        if not self.tracking_error_cap > 0:
+            raise ValueError("tracking_error_cap must be positive")
+        if not self.beta_min < self.beta_max:
+            raise ValueError("beta_min must be below beta_max")
 
     def to_record(self) -> dict[str, object]:
         return {
             "max_drawdown": self.max_drawdown,
             "cost_stress_multiplier": self.cost_stress_multiplier,
+            "active_max_drawdown": self.active_max_drawdown,
+            "tracking_error_cap": self.tracking_error_cap,
+            "beta_min": self.beta_min,
+            "beta_max": self.beta_max,
+        }
+
+    @property
+    def mandate(self) -> dict[str, float | None]:
+        """The tracking mandate as the verdict functions take it."""
+
+        return {
+            "tracking_error_cap": self.tracking_error_cap,
+            "beta_min": self.beta_min,
+            "beta_max": self.beta_max,
         }
 
     @classmethod
@@ -156,61 +213,111 @@ class AcceptanceRules:
         verdict constants so no prompt restates a threshold. Rules only: no
         forward or Held-out date appears here."""
 
+        if self.tracking_error_cap is None:
+            mandate: object = (
+                "none for this account: benchmark.tracking_error and "
+                "benchmark.market_beta are reported, not graded"
+            )
+        else:
+            mandate = {
+                "tracking_error": (
+                    f"<= {self.tracking_error_cap}: the node's own residual tracking "
+                    "error against CSI 300 (benchmark.tracking_error)"
+                ),
+                "market_beta": (
+                    f"within {self.beta_min}..{self.beta_max} "
+                    "(benchmark.market_beta)"
+                ),
+                "role": (
+                    "a constraint the book must satisfy over the research period "
+                    "and again forward; meeting it is not evidence of skill"
+                ),
+            }
         return {
+            "graded_series": (
+                "every return statistic below is measured on the ACTIVE series: the "
+                "node's daily return minus the host's zero-skill panel composite, the "
+                f"equal-weight mean of {verdict.PANEL_DRAWS} random-name copies of the "
+                "node's own filled trades (same entry and exit instants, same money per "
+                "round trip, same Broker and costs; each name replaced by one on the "
+                "same side of CSI 300 membership that one board lot of that money could "
+                "buy). Every formal validation reports it as "
+                "benchmark.active_neutralized_excess, benchmark.active_tracking_error and "
+                "benchmark.active_information_ratio, and per research year as "
+                "sub_windows[].active_neutralized_excess_return; "
+                "benchmark.panel_neutralized_excess is what zero skill earned in the "
+                "node's own shape. The strategy exposes nothing for this beyond its orders"
+            ),
             "freeze_gate": {
                 "span": f"the nominee replayed the whole research period (span={FULL_SPAN})",
                 "finite_metrics": "total_return/max_drawdown/sharpe must be finite",
-                "max_drawdown": (
-                    f"<= {self.max_drawdown} over the research period, the same "
-                    "limit the forward and Held-out verdict enforce"
+                "active_information_ratio": f">= {verdict.FREEZE_MIN_ACTIVE_IR}",
+                "deflated_sharpe_probability": (
+                    f">= {verdict.FREEZE_MIN_DSR_PROBABILITY} for the nominee's "
+                    "research-period active IR; trials = distinct revisions "
+                    "validated in the arm on any span, dispersion = the arm's "
+                    "full-span active IRs"
                 ),
+                "positive_years": (
+                    "active neutralized excess > 0 in at least "
+                    f"{verdict.FREEZE_MIN_POSITIVE_YEAR_SHARE:.0%} of the research years, "
+                    "rounded up (3 of 4)"
+                ),
+                "active_max_drawdown": (
+                    f"<= {self.active_max_drawdown}: drawdown of the cumulative active "
+                    "series over the research period"
+                ),
+                "max_drawdown": (
+                    f"<= {self.max_drawdown}: equity drawdown over the research period"
+                ),
+                "tracking_mandate": mandate,
                 "full_span_validations": (
                     f">= {verdict.FREEZE_MIN_FULL_SPAN_VALIDATIONS} in the arm, the "
                     "nominee included"
-                ),
-                "deflated_sharpe_probability": (
-                    f">= {verdict.FREEZE_MIN_DSR_PROBABILITY} for the nominee's "
-                    "research-period neutralized IR; trials = distinct revisions "
-                    "validated in the arm on any span"
                 ),
                 "freezes_per_arm": 1,
             },
             "graduation": {
                 "evaluated_on": (
                     "one continuous replay of the frozen artifact over the twelve "
-                    "months after research end and then Held-out; no session sees "
-                    "either period"
+                    "months after research end and then Held-out, graded on its "
+                    "active series against a panel drawn from that replay; no "
+                    "session sees either period"
                 ),
                 "forward": {
                     "lower_bound": (
                         f"{verdict.FORWARD_CONFIDENCE:.0%} one-sided block-bootstrap "
-                        "lower bound of annualized neutralized excess > 0"
+                        "lower bound of annualized active neutralized excess > 0"
                     ),
                     "recency": (
-                        f"neutralized excess of the last {verdict.RECENCY_MONTHS} "
-                        "months >= 0"
+                        "active neutralized excess of the last "
+                        f"{verdict.RECENCY_MONTHS} months >= 0"
                     ),
                     "max_drawdown": f"<= {self.max_drawdown}",
+                    "active_max_drawdown": f"<= {self.active_max_drawdown}",
                     "excess_at_cost_stress": (
-                        f"> 0 with slippage multiplied by {self.cost_stress_multiplier}"
+                        "active neutralized excess > 0 with slippage multiplied by "
+                        f"{self.cost_stress_multiplier} on the strategy's own turnover"
                     ),
                     "round_trips": (
                         f">= {verdict.MIN_ROUND_TRIPS_PER_MONTH} per month"
                     ),
                     "mean_gross": f">= {verdict.MIN_MEAN_GROSS}",
+                    "tracking_mandate": "as in freeze_gate, over the forward months",
                     "strategy_error": "none",
                     "minimum_detectable_excess": (
-                        "about 2.12 x research tracking error / sqrt(years of forward "
-                        "data): a lower residual tracking error is what makes a "
+                        "about 2.12 x research active tracking error / sqrt(years of "
+                        "forward data): a lower active tracking error is what makes a "
                         "real edge detectable"
                     ),
                 },
                 "heldout": {
                     "neutralized_excess": (
-                        f">= -{verdict.HELDOUT_TOLERANCE_Z} x forward tracking error "
-                        "/ sqrt(years)"
+                        f"active, >= -{verdict.HELDOUT_TOLERANCE_Z} x forward active "
+                        "tracking error / sqrt(years)"
                     ),
                     "max_drawdown": f"<= {self.max_drawdown}",
+                    "active_max_drawdown": f"<= {self.active_max_drawdown}",
                     "mean_gross": f">= {verdict.MIN_MEAN_GROSS}",
                     "strategy_error": "none",
                 },
@@ -244,6 +351,57 @@ class AcceptanceRules:
         return hard
 
 
+def default_acceptance(initial_cash: float) -> AcceptanceRules:
+    """An arm's acceptance rules when its create request overrides none of them.
+
+    One switch, the capital. From ``TRACKING_MANDATE_MIN_CASH`` the account can
+    hold the index, so it is asked to: tracking error against CSI 300 at most
+    8 % with beta inside 0.85-1.15. CSI 300 itself drew down 39.6 % over the
+    research period and a book tracking it at 5 % about 31 %, so the equity
+    limit is 35 % and the limit that means something for a tracker is the
+    active one, 15 % (zero skill reads 7.9 %). Below it the account cannot buy
+    the index -- at CNY 100k and 30 seats 40 % of it by weight is out of reach
+    -- so tracking error is reported only, and the limits are 45 % and 30 %:
+    zero skill in the shapes such an account can hold already draws down 39 %
+    of equity and 20 % active.
+    """
+
+    if initial_cash >= TRACKING_MANDATE_MIN_CASH:
+        return AcceptanceRules(
+            max_drawdown=0.35,
+            active_max_drawdown=0.15,
+            tracking_error_cap=0.08,
+            beta_min=0.85,
+            beta_max=1.15,
+        )
+    return AcceptanceRules()
+
+
+def acceptance_for(initial_cash: float, params: Mapping[str, object]) -> AcceptanceRules:
+    """``default_acceptance`` with an arm's create-time overrides applied.
+
+    ``params`` is the arm's parameter mapping; only the rules' own keys are
+    read. A key that is absent or ``None`` keeps the capital-derived default. A
+    ``tracking_error_cap`` of 0 switches the mandate off for an account that
+    would default to it, and a cap set on an account that would not takes the
+    default band unless the request names its own.
+    """
+
+    mandated = default_acceptance(TRACKING_MANDATE_MIN_CASH)
+    rules = default_acceptance(initial_cash).to_record()
+    overrides = {key: params[key] for key in rules if params.get(key) is not None}
+    rules.update(overrides)
+    if rules["tracking_error_cap"] == 0:
+        if overrides.get("beta_min") is not None or overrides.get("beta_max") is not None:
+            raise ValueError("a beta band needs a tracking_error_cap above zero")
+        rules.update(tracking_error_cap=None, beta_min=None, beta_max=None)
+    elif rules["tracking_error_cap"] is not None:
+        for key in ("beta_min", "beta_max"):
+            if rules[key] is None:
+                rules[key] = getattr(mandated, key)
+    return AcceptanceRules(**rules)  # type: ignore[arg-type]
+
+
 @dataclass(frozen=True)
 class RollingExperimentConfig:
     experiment_id: str
@@ -259,9 +417,9 @@ class RollingExperimentConfig:
     # three candidates on a two-year span costs six, and a full-period
     # validation costs as many as the research period has years.
     max_replay_years: int = DEFAULT_MAX_REPLAY_YEARS
-    # Host-side random-portfolio null controls (K=500 replays, minutes each)
-    # the session may request through ``run_null_control``; the frozen node's
-    # block is reused at freeze. 0 leaves the tool out.
+    # Host-side random-portfolio null controls the session may request through
+    # ``run_null_control`` (``null_control.PANEL_DRAWS`` replays each); the
+    # frozen node's block is reused at freeze. 0 leaves the tool out.
     max_null_controls: int = DEFAULT_MAX_NULL_CONTROLS
     max_llm_calls: int = DEFAULT_MAX_LLM_CALLS
     # Attempts of the research session or of the forward replay before the
@@ -296,12 +454,17 @@ class RollingExperimentConfig:
     record_failed_attempts: bool = True
     schedule: StrategySchedule = field(default_factory=StrategySchedule)
     broker_profile: BrokerProfile = field(default_factory=BrokerProfile)
-    acceptance: AcceptanceRules = field(default_factory=AcceptanceRules)
+    # None takes the rules the account's capital derives (``default_acceptance``).
+    acceptance: AcceptanceRules | None = None
     step_constraints: ModificationConstraints = field(
         default_factory=ModificationConstraints
     )
 
     def __post_init__(self) -> None:
+        if self.acceptance is None:
+            object.__setattr__(
+                self, "acceptance", default_acceptance(self.broker_profile.initial_cash)
+            )
         if not re.fullmatch(r"[A-Za-z0-9_-]+", self.experiment_id):
             raise ValueError(
                 "experiment_id must contain only letters, digits, underscore, or dash"

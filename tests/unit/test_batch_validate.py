@@ -237,11 +237,12 @@ class _Evaluator:
 
 
 def _write_style_sidecar(directory: Path, *, alpha: float, seed: int) -> None:
-    """The daily series the freeze gate reads: 60 days of a return that is
-    ``alpha`` plus benchmark and size exposure plus noise."""
+    """The daily series the freeze gate reads: 60 days, fifteen in each of the
+    four research years the gate counts, of a return that is ``alpha`` plus
+    benchmark and size exposure plus noise."""
 
     rng = np.random.default_rng(seed)
-    days = [f"2022{index // 20 + 1:02d}{index % 20 + 1:02d}" for index in range(60)]
+    days = [f"{2021 + index // 15}09{index % 15 + 1:02d}" for index in range(60)]
     benchmark = rng.normal(0.0003, 0.01, len(days))
     size = rng.normal(0.0, 0.004, len(days))
     strategy = alpha + 0.9 * benchmark + 0.2 * size + rng.normal(0.0, 0.004, len(days))
@@ -1081,18 +1082,19 @@ class BatchValidateRunTest(unittest.TestCase):
 
 
 class BatchSelectHintTest(unittest.TestCase):
-    """The hint names the row leading on the neutralized excess and selects nothing."""
+    """The hint names the row leading on the active information ratio -- the figure the
+    freeze gate grades -- and selects nothing."""
 
-    def test_names_the_leader_on_the_neutralized_excess(self) -> None:
+    def test_names_the_leader_on_the_active_information_ratio(self) -> None:
         rows = [
             {"name": "a", "node_id": "n_a", "status": "ok",
-             "stats": {"benchmark": {"neutralized_excess_return": 0.12}}},
+             "stats": {"benchmark": {"neutralized_excess_return": 0.02, "active_information_ratio": 0.9}}},
             {"name": "b", "node_id": "n_b", "status": "ok",
-             "stats": {"benchmark": {"neutralized_excess_return": float("nan")}}},
+             "stats": {"benchmark": {"neutralized_excess_return": 0.30, "active_information_ratio": float("nan")}}},
             {"name": "c", "node_id": "n_c", "status": "failed", "error": "boom"},
         ]
         hint = batch_select_hint(rows, replay_years_remaining=8)
-        self.assertIn("leading on neutralized excess: a (node_id=n_a)", hint)
+        self.assertIn("leading on active information ratio: a (node_id=n_a)", hint)
         self.assertIn("step_rollback(node_id=<chosen>)", hint)
         self.assertIn("a freeze needs a full-span validation", hint)
         self.assertNotIn("finish_session(", hint)
@@ -1101,7 +1103,7 @@ class BatchSelectHintTest(unittest.TestCase):
     def test_names_nobody_when_no_row_carries_the_figure(self) -> None:
         rows = [{"name": "a", "node_id": "n_a", "status": "ok", "stats": {"total_return": 0.2}}]
         hint = batch_select_hint(rows, replay_years_remaining=8)
-        self.assertIn("no row carries a neutralized excess figure", hint)
+        self.assertIn("no row carries an active information ratio", hint)
         self.assertNotIn("leading on", hint)
 
     def test_a_spent_budget_leaves_only_the_handoff_and_the_finish(self) -> None:

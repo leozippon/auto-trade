@@ -525,7 +525,7 @@ def test_evaluation_summary_carries_the_whole_agent_visible_field_set(
 
 
 def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The formal replay settles both ex-date legs from the slot.
 
@@ -634,6 +634,42 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
     assert action["cash_per_share"] == 0.5
     assert action["cash_credit"] == pytest.approx(50.0)
     assert "corporate_actions" not in record["pit"]["asof_domains"]
+
+    # A formal replay carries the zero-skill panel the verdict grades it
+    # against: twenty draws of its own skeleton, the one other name standing
+    # in, matched on the float-cap decile because this slot mounts no
+    # index_weight. The smoke window below is not a Validation and has none.
+    style = json.loads(
+        (Path(result.result_ref).parent / "style_analysis.json").read_text(encoding="utf-8")
+    )
+    assert style["panel"]["k"] == 20 and style["panel"]["round_trips"] == 1
+    assert style["panel"]["matched"] == "circ_mv_decile+affordability"
+    assert style["panel"]["dropped_trips_mean"] == 0.0
+    assert [day for day, _value in style["panel_daily"]] == ["20240102", "20240103"]
+    assert [day for day, _value in style["panel_draw_sd"]] == ["20240102", "20240103"]
+    smoke = backend.evaluate(request, max_days=1)
+    assert "panel_daily" not in json.loads(
+        (Path(smoke.result_ref).parent / "style_analysis.json").read_text(encoding="utf-8")
+    )
+    # The panel is drawn after the replay it grades and through Brokers of its
+    # own, so that replay's record is the same bytes with or without it; only
+    # wall-clock fields differ between two runs.
+    monkeypatch.setattr(
+        "autotrade.pipelines.pit_backend.run_null_control",
+        lambda *_args, **_kwargs: {"k": 0, "panel_daily": [], "panel_draw_sd": []},
+    )
+    bare = json.loads(Path(backend.evaluate(request).result_ref).read_text(encoding="utf-8"))
+    monkeypatch.undo()
+
+    def without_clock(payload: dict[str, object]) -> str:
+        stats = {
+            key: value
+            for key, value in payload["stats"].items()  # type: ignore[union-attr]
+            if key not in ("phase_seconds", "replay_wall_seconds", "started_at", "finished_at")
+        }
+        return json.dumps({**payload, "stats": stats}, sort_keys=True)
+
+    assert without_clock(bare) == without_clock(record)
 
     # The null control replays its draws through the same slot table, and it
     # finds that table on disk: the backend instance that evaluated the result

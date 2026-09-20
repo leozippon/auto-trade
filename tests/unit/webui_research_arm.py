@@ -306,6 +306,7 @@ def build_arm(root: Path, experiment_id: str, stage: str, *, alive: bool = False
             end=REPLAY["forward_end"],
             seed_key="strategy_research_abc",
             max_drawdown=0.9,
+            active_max_drawdown=0.9,
             cost_stress_multiplier=2.0,
             slippage_bps=5.0,
             turnover=2.0,
@@ -318,6 +319,7 @@ def build_arm(root: Path, experiment_id: str, stage: str, *, alive: bool = False
             end=REPLAY["replay_end"],
             forward_tracking_error=float(forward["tracking_error"]),
             max_drawdown=0.9,
+            active_max_drawdown=0.9,
             mean_gross=0.9,
         )
         ledger.append(

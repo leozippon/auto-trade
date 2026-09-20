@@ -246,6 +246,9 @@ def make_arm(tmp_path: Path, **params: object) -> tuple[Path, Path]:
                 "execution_mode": "trusted",
                 "developer_mode": "baseline",
                 "initial_cash": 1_000_000,
+                # A one-name book cannot track CSI 300, and this capital would
+                # default to the tracking mandate: the arm switches it off.
+                "tracking_error_cap": 0,
                 "include_fundamentals": False,
                 "include_macro": False,
                 "include_events": False,

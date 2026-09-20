@@ -49,19 +49,33 @@ const REASON_LABELS = {
   freeze_too_few_full_span_validations: "全区间验证次数",
   freeze_deflated_sharpe_unavailable: "DSR 可算",
   freeze_deflated_sharpe_below_threshold: "DSR",
+  freeze_information_ratio_below_threshold: "研究期主动 IR",
+  freeze_too_few_positive_years: "主动超额为正的研究年数",
+  freeze_active_drawdown_exceeded: "研究期主动回撤",
+  freeze_tracking_error_above_cap: "研究期对沪深300跟踪误差",
+  freeze_beta_outside_band: "研究期市场 β",
   freeze_unmeasurable: "研究期统计可算",
   forward_strategy_error: "前推期策略无报错",
   heldout_strategy_error: "Held-out 期策略无报错",
   forward_lower_bound_not_positive: (t) => `前推超额 ${fmtPct(t.forward_confidence, 0)} 下界`,
   forward_recency_negative: (t) => `前推最近 ${t.recency_months ?? "—"} 个月超额`,
   forward_max_drawdown_exceeded: "前推回撤",
+  forward_active_drawdown_exceeded: "前推主动回撤",
   forward_not_positive_at_cost_stress: (t) => `前推滑点 ×${t.cost_stress_multiplier ?? "—"} 后超额`,
   forward_too_few_round_trips: "前推回合数",
   forward_exposure_below_floor: "前推平均仓位",
+  forward_tracking_error_above_cap: "前推对沪深300跟踪误差",
+  forward_beta_outside_band: "前推市场 β",
   heldout_excess_below_tolerance: "Held-out 超额",
   heldout_max_drawdown_exceeded: "Held-out 回撤",
+  heldout_active_drawdown_exceeded: "Held-out 主动回撤",
   heldout_exposure_below_floor: "Held-out 平均仓位",
 };
+// An arm judged on its active series -- its daily return minus the zero-skill
+// panel the host drew from its own book -- records `series: "active"`; an arm
+// judged before panels existed records nothing, and its figures are its own.
+const SERIES_LABELS = { active: "主动（策略 − 零技能面板）", absolute: "策略自身" };
+const ACTIVE_TITLE = "策略日收益减去零技能面板合成收益后的序列；面板由宿主按该策略自己的成交骨架随机换名回放得到";
 // The figures whose name does not already say what they are, each worded once
 // so every tile, column and criterion row that draws one says the same thing.
 // A gloss states no threshold: the freeze gate's own limits are carried by the
@@ -2059,6 +2073,7 @@ async function openCreateModal() {
     }
     body.append(section);
   }
+  bindCapitalDefaults(schema.capital_defaults, inputs);
   showModal("新建实验", body, [
     el("button", { class: "btn", onclick: closeModal }, "取消"),
     el(
@@ -2091,6 +2106,28 @@ async function openCreateModal() {
       "创建并启动",
     ),
   ]);
+}
+
+/* The limits an account's capital derives: an empty field shows, as its
+   placeholder, the default the capital entered would give it, and a field
+   holding a value is marked as overriding that default. */
+function bindCapitalDefaults(rule, inputs) {
+  const cash = inputs.get("initial_cash");
+  if (!rule || !cash) return;
+  const bound = [...inputs.values()].filter((entry) => entry.field.capital_default);
+  const refresh = () => {
+    const amount = parseFloat(cash.input.value);
+    const defaults = amount >= rule.min_cash ? rule.from : rule.below;
+    for (const { field, input } of bound) {
+      const value = Number.isNaN(amount) ? null : defaults[field.key];
+      input.placeholder =
+        value === null || value === undefined ? "留空：按资金推导为不设" : `留空：按资金推导为 ${value}`;
+      input.classList.toggle("overridden", input.value !== "");
+    }
+  };
+  cash.input.addEventListener("input", refresh);
+  for (const { input } of bound) input.addEventListener("input", refresh);
+  refresh();
 }
 
 function fieldGrid(fields, inputs) {
@@ -2569,12 +2606,14 @@ function processListPanel(detail, selectedKey) {
 // whose name states a threshold reads it from the same `thresholds` block the
 // criteria do, so the table and the checklist above it never disagree.
 const SLICE_ROWS = [
+  ["series", "评分序列", (value) => SERIES_LABELS[value] || String(value)],
   ["days", "交易日", String],
   ["neutralized_excess", "中性化超额（年化）", fmtPct, true],
   ["lower_bound", (t) => `${fmtPct(t.forward_confidence, 0)} 下界`, fmtPct, true],
   ["recency_neutralized_excess", (t) => `最近 ${t.recency_months ?? "—"} 个月中性化超额`, fmtPct, true],
   ["tolerance", "容忍线", fmtPct],
   ["max_drawdown", "最大回撤", fmtPct],
+  ["active_max_drawdown", "主动回撤", fmtPct],
   ["excess_at_cost_stress", (t) => `滑点 ×${t.cost_stress_multiplier ?? "—"} 后超额`, fmtPct, true],
   ["round_trips", "回合数", String],
   ["mean_gross", "平均仓位", fmtPct],
@@ -2582,16 +2621,26 @@ const SLICE_ROWS = [
 
 // The statistics each stage view lists of its own slice.
 const FORWARD_STAT_FIELDS = [
+  "series",
   "days",
   "neutralized_excess",
   "lower_bound",
   "recency_neutralized_excess",
   "max_drawdown",
+  "active_max_drawdown",
   "excess_at_cost_stress",
   "round_trips",
   "mean_gross",
 ];
-const HELDOUT_STAT_FIELDS = ["days", "neutralized_excess", "tolerance", "max_drawdown", "mean_gross"];
+const HELDOUT_STAT_FIELDS = [
+  "series",
+  "days",
+  "neutralized_excess",
+  "tolerance",
+  "max_drawdown",
+  "active_max_drawdown",
+  "mean_gross",
+];
 
 /* One slice's statistics, the rows it carries only. Null before the record. */
 function sliceStats(slice, fields, thresholds) {
@@ -2637,6 +2686,32 @@ function failedReasons(verdict) {
   return new Set((verdict || {}).reasons || []);
 }
 
+/* The criteria an arm is held to only when its own thresholds state them: the
+   active-series drawdown, and the tracking mandate's two limits. `measured` is
+   the slice or gate record carrying the figures; a threshold the record does
+   not carry draws no row, so an arm judged before these existed reads as it
+   was judged. */
+function activeDrawdownRows(token, measured, row, t) {
+  if (t.active_max_drawdown === undefined || t.active_max_drawdown === null) return [];
+  return [
+    row(
+      token,
+      fmtPct(measured && measured.active_max_drawdown),
+      thresholdCell("≤", t.active_max_drawdown),
+      ACTIVE_TITLE,
+    ),
+  ];
+}
+
+function mandateRows(capToken, bandToken, measured, row, t) {
+  if (t.tracking_error_cap === undefined || t.tracking_error_cap === null) return [];
+  const mandate = (measured && measured.mandate) || {};
+  return [
+    row(capToken, fmtPct(mandate.tracking_error), thresholdCell("≤", t.tracking_error_cap)),
+    row(bandToken, fmtSharpe(mandate.market_beta), `${fmtSharpe(t.beta_min)} – ${fmtSharpe(t.beta_max)}`),
+  ];
+}
+
 /* F1–F6 over the forward slice, as criterion rows: the 前推回放 view draws
    them alone, 裁决 draws them ahead of H1–H4, and neither restates a
    threshold the other spells differently. */
@@ -2654,6 +2729,8 @@ function forwardCriteria(f, verdict, thresholds) {
     row("forward_not_positive_at_cost_stress", fmtPct(f && f.excess_at_cost_stress), "> 0"),
     row("forward_too_few_round_trips", f && f.round_trips, thresholdCell("≥", t.min_round_trips, String)),
     row("forward_exposure_below_floor", fmtPct(f && f.mean_gross), thresholdCell("≥", t.min_mean_gross)),
+    ...activeDrawdownRows("forward_active_drawdown_exceeded", f, row, t),
+    ...mandateRows("forward_tracking_error_above_cap", "forward_beta_outside_band", f, row, t),
   ];
 }
 
@@ -2678,6 +2755,7 @@ function heldoutCriteria(h, verdict, thresholds) {
     ),
     row("heldout_max_drawdown_exceeded", fmtPct(h && h.max_drawdown), thresholdCell("≤", t.max_drawdown)),
     row("heldout_exposure_below_floor", fmtPct(h && h.mean_gross), thresholdCell("≥", t.min_mean_gross)),
+    ...activeDrawdownRows("heldout_active_drawdown_exceeded", h, row, t),
   ];
 }
 
@@ -3271,6 +3349,7 @@ function sessionDetailPanel(detail, selectedKey) {
 function freezeGateChecklist(gate) {
   const failed = new Set(gate.reasons || []);
   const t = gate.thresholds || {};
+  const row = criteriaRow(gate, failed, t);
   const preconditions = [
     "freeze_needs_full_span_validation",
     "freeze_unmeasurable",
@@ -3293,6 +3372,16 @@ function freezeGateChecklist(gate) {
       threshold: `≥ ${t.min_deflated_sharpe_probability ?? "—"}`,
       title: DSR_TITLE,
     },
+    // The conditions a gate recorded since the active series is graded states
+    // in its own thresholds; an earlier gate states none and draws none.
+    ...(t.min_information_ratio === undefined || t.min_information_ratio === null
+      ? []
+      : [
+          row("freeze_information_ratio_below_threshold", fmtSharpe(gate.information_ratio), `≥ ${t.min_information_ratio}`, ACTIVE_TITLE),
+          row("freeze_too_few_positive_years", gate.positive_years ?? "—", `≥ ${t.min_positive_years ?? "—"}`),
+        ]),
+    ...activeDrawdownRows("freeze_active_drawdown_exceeded", gate, row, t),
+    ...mandateRows("freeze_tracking_error_above_cap", "freeze_beta_outside_band", gate, row, t),
   ]);
 }
 
