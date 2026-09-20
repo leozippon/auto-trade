@@ -22,7 +22,7 @@ from autotrade.environment.executor import (
     TrustedStrategyExecutor,
     docker_available,
 )
-from autotrade.environment.sandbox import SandboxLimits
+from autotrade.environment.sandbox import SandboxLimits, SandboxSpec
 from autotrade.environment.strategy import CN_TZ, AccountSnapshot, StrategyContext
 from autotrade.environment.strategy_loader import (
     StrategyLoadError,
@@ -300,7 +300,11 @@ def test_library_imports_and_booster_files_follow_the_rooted_io_rule():
 
 def test_budgets_come_from_one_source_each():
     limits = SandboxLimits()
-    assert (limits.cpus, limits.memory, limits.pids) == (16.0, "32g", 256)
+    assert (limits.cpus, limits.memory, limits.pids) == (8.0, "8g", 256)
+    # One CPU and memory boundary for both containers, so a session that
+    # profiles its fit under `shell` measures against the ceiling the formal
+    # replay enforces instead of extrapolating across two of them.
+    assert (limits.cpus, limits.memory) == (SandboxSpec().cpus, SandboxSpec().memory)
     assert (limits.timeout_seconds, limits.fit_timeout_seconds) == (360.0, 3600.0)
     # The pipeline knob defaults to the executor's fit wall clock and the
     # WebUI defaults read the pipeline dataclass.

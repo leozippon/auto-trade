@@ -826,15 +826,14 @@ class BatchValidateRunTest(unittest.TestCase):
         the same place: the row's own top level, beside ``stats`` rather than
         inside it, because a failed row has no ``stats`` at all.
 
-        Two arms sized a batch from the session container's 8 GiB limit and
-        from a 3-day smoke, lost 20 replay-years to fits that ran past the
-        concurrency-scaled cap, and then reasoned about swapping in a container
-        that has 32 GiB.
+        Two arms sized a batch from a 3-day smoke and lost 20 replay-years to
+        fits that ran past the concurrency-scaled cap, reasoning about a
+        ceiling neither of them had measured.
         """
 
         usage = {
             "peak_memory_bytes": 7_883_149_312,
-            "memory_limit_bytes": 34_359_738_368,
+            "memory_limit_bytes": 8_589_934_592,
             "fit_seconds": [335.7, 1204.2],
             "fit_timeout_seconds": 10_800.0,
             "decision_timeout_seconds": 1_080.0,

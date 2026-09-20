@@ -79,7 +79,7 @@
 
 ## 起步包的沙箱冒烟实测（真实路径，`gpu_count=0`）
 
-命令（仓库根）：`smoke.py lowvol_bucketed_20260917 configs/workspace_refs/lowvol_bucketed_20260917 Y1 <天数> [CANDIDATE]`，脚本与前几个包的同一份（只换导入的轮次文件）。它把本臂的 arm 参数送进控制台同一个创建前检查与 `resolve_worker_options`，用 `worker._strategy_sandbox_from_spec` 得到策略容器的边界（16 核、32 GiB、`gpu_count=0`、单次决策 360 秒）；视图经 `ResearchPITSnapshotProvider` 从研究种子硬链接进临时缓存，再由 `PITDailyEvaluationBackend.evaluate(request, max_days=N)` 在沙箱镜像里回放第一个研究年的开头——与 `smoke_backtest` 同一条路径。容器内存每 2 秒采样一次。
+命令（仓库根）：`smoke.py lowvol_bucketed_20260917 configs/workspace_refs/lowvol_bucketed_20260917 Y1 <天数> [CANDIDATE]`，脚本与前几个包的同一份（只换导入的轮次文件）。它把本臂的 arm 参数送进控制台同一个创建前检查与 `resolve_worker_options`，用 `worker._strategy_sandbox_from_spec` 得到策略容器的边界（8 核、8 GiB、`gpu_count=0`、单次决策 360 秒）；视图经 `ResearchPITSnapshotProvider` 从研究种子硬链接进临时缓存，再由 `PITDailyEvaluationBackend.evaluate(request, max_days=N)` 在沙箱镜像里回放第一个研究年的开头——与 `smoke_backtest` 同一条路径。容器内存每 2 秒采样一次。
 
 | `CANDIDATE` | 决策日 | 订单（成交 / 拒单） | 策略段秒数 | 每次决策 | 容器内存峰值 | 整体墙钟 |
 |---|---|---|---|---|---|---|

@@ -54,7 +54,7 @@
 
 ## 起步包的沙箱冒烟实测（真实路径，`gpu_count=0`）
 
-命令（仓库根）：`smoke.py pv_exposure_budget_20260917 configs/workspace_refs/pv_exposure_budget_20260917 <Y1|Y4> <天数> <CANDIDATE>`，脚本与前几个包的同一份。它把本臂的 arm 参数送进控制台同一个创建前检查与 `resolve_worker_options`，用 `worker._strategy_sandbox_from_spec` 得到策略容器的边界（16 核、32 GiB、`gpu_count=0`、单次决策 360 秒）；视图经 `ResearchPITSnapshotProvider` 从研究种子硬链接进临时缓存，再由 `PITDailyEvaluationBackend.evaluate(request, max_days=N)` 在沙箱镜像里回放——与 `smoke_backtest` 同一条路径。容器内存每 2 秒采样一次。两条不训练的对照按登记的编辑（删掉 `fit` 与 `REFIT_PERIOD`）跑。
+命令（仓库根）：`smoke.py pv_exposure_budget_20260917 configs/workspace_refs/pv_exposure_budget_20260917 <Y1|Y4> <天数> <CANDIDATE>`，脚本与前几个包的同一份。它把本臂的 arm 参数送进控制台同一个创建前检查与 `resolve_worker_options`，用 `worker._strategy_sandbox_from_spec` 得到策略容器的边界（8 核、8 GiB、`gpu_count=0`、单次决策 360 秒）；视图经 `ResearchPITSnapshotProvider` 从研究种子硬链接进临时缓存，再由 `PITDailyEvaluationBackend.evaluate(request, max_days=N)` 在沙箱镜像里回放——与 `smoke_backtest` 同一条路径。容器内存每 2 秒采样一次。两条不训练的对照按登记的编辑（删掉 `fit` 与 `REFIT_PERIOD`）跑。
 
 | 槽 / 腿 | 决策日 | `fit` 秒数 | 策略段秒数 | 订单（成交 / 拒单） | 容器内存峰值 | 整体墙钟 |
 |---|---|---|---|---|---|---|
@@ -64,7 +64,7 @@
 | Y1 `c_pool` | 1 | 无 `fit` | 3.9 | 15（15 / 0） | 推断 0.51 GiB | 53 秒 |
 | **Y4 `s_pvb`（研究期靠后的探针）** | 1 | **304.2** | 5.6 | 15（13 / 2 涨跌停） | fit **4.33 GiB**，推断 1.34 GiB | 367 秒 |
 
-**这张表里最要紧的一行是最后一行。** 研究期靠后那一天、训练窗口完全落在数据下限之后时，一次 `fit` 是 **304 秒**——`strategy_fit_timeout_seconds` 基准值的不到十分之一，三路并发放大之后的不到三十分之一；容器峰值 4.33 GiB，远在 `strategy_memory_bytes` 之内。哪怕再乘上一个把同一份 `fit` 拖慢将近一个数量级的宿主争用，它仍留在基准上限之内。起步包的训练规模就是按这条线定的。
+**这张表里最要紧的一行是最后一行。** 研究期靠后那一天、训练窗口完全落在数据下限之后时，一次 `fit` 是 **304 秒**（读数取自当时的 16 核容器，现在是 8 核，只会更慢）——`strategy_fit_timeout_seconds` 基准值的不到十分之一，三路并发放大之后的不到三十分之一；容器峰值 4.33 GiB，已经占掉 `strategy_memory_bytes`（8 GiB）的一半以上。哪怕再乘上一个把同一份 `fit` 拖慢将近一个数量级的宿主争用，它仍留在基准上限之内。起步包的训练规模就是按这条线定的。
 
 两条对照都读到 `fit` 不存在、而且只起了一个容器：登记的那条编辑（删掉 `fit` 与 `REFIT_PERIOD`）在真实路径上成立，`c_rand` 与 `c_pool` 不会白起一个 fit 容器。
 

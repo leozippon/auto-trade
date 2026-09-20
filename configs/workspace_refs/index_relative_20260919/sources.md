@@ -65,7 +65,7 @@
 
 ## 沙箱冒烟实测（真实路径，`gpu_count = 0`，两个账户各三条腿）
 
-路径：arm 参数经控制台同一个创建前检查（`_round.normalize`，含**按臂设定的 `initial_cash`**）与 `resolve_worker_options`，由 `worker._strategy_sandbox_from_spec` 得到策略容器边界（`gpu_count = 0`、单次决策 360 秒、容器内存 32 GiB）；视图经 `ResearchPITSnapshotProvider` 从本轮研究种子硬链接，再由 `PITDailyEvaluationBackend.evaluate(request, max_days=N)` 在沙箱镜像里回放——与 `smoke_backtest` 同一条路径。
+路径：arm 参数经控制台同一个创建前检查（`_round.normalize`，含**按臂设定的 `initial_cash`**）与 `resolve_worker_options`，由 `worker._strategy_sandbox_from_spec` 得到策略容器边界（`gpu_count = 0`、单次决策 360 秒、容器 8 核 / 8 GiB 内存）；视图经 `ResearchPITSnapshotProvider` 从本轮研究种子硬链接，再由 `PITDailyEvaluationBackend.evaluate(request, max_days=N)` 在沙箱镜像里回放——与 `smoke_backtest` 同一条路径。
 
 | 槽 / 腿 | 账户 | 座位 | 决策日 | 订单（成交 / 拒单） | 策略段 秒 | 每次决策 | 容器峰值 GiB | 墙钟 秒 |
 |---|---|---|---|---|---|---|---|---|
@@ -78,7 +78,7 @@
 | **Y4 `s_idx`（靠后窗口探针）** | 10 万 | 15 | 1 | 15（15 / 0） | 1.03 | 1.03 | 0.75 | 24.8 |
 | **Y4 `s_idx`（靠后窗口探针）** | 100 万 | 30 | 1 | 30（30 / 0） | 1.04 | 1.04 | 0.75 | 25.2 |
 
-**一次拒单都没有**（指数成分在 09:30/15:00 都能成交，没有涨跌停锁死），容器峰值不到 32 GiB 上限的 4 %，每次决策 0.29 秒远在 360 秒之内。本包不训练，没有 `fit`。
+**一次拒单都没有**（指数成分在 09:30/15:00 都能成交，没有涨跌停锁死），容器峰值最高 1.06 GiB，约为 8 GiB 上限的八分之一，每次决策 0.29 秒远在 360 秒之内。本包不训练，没有 `fit`。
 
 ### 60 日回放的节奏与成分滚入（研究首年 2021-07-01..2021-09-24）
 

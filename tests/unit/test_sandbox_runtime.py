@@ -797,10 +797,10 @@ def test_docker_command_has_fail_closed_boundary(tmp_path: Path):
     assert "--cpus" in command
     assert "--memory" in command
     assert "--pids-limit" in command
-    assert command[command.index("--cpus") + 1] == "16"
-    assert command[command.index("--memory") + 1] == "32g"
+    assert command[command.index("--cpus") + 1] == "8"
+    assert command[command.index("--memory") + 1] == "8g"
     assert command[command.index("--pids-limit") + 1] == "256"
-    # Scratch large enough for the 16 CPUs the container is given: a 64 MB
+    # Scratch large enough for the 8 CPUs the container is given: a 64 MB
     # /tmp and Docker's 64 MB default /dev/shm rule out multi-process training
     # inside fit() whatever else the boundary allows. Both are charged to the
     # container's own memory cap.
@@ -814,10 +814,10 @@ def test_docker_command_has_fail_closed_boundary(tmp_path: Path):
         if value == "--env"
     ]
     assert env_pairs == [
-        "MKL_NUM_THREADS=16",
-        "NUMEXPR_NUM_THREADS=16",
-        "OMP_NUM_THREADS=16",
-        "OPENBLAS_NUM_THREADS=16",
+        "MKL_NUM_THREADS=8",
+        "NUMEXPR_NUM_THREADS=8",
+        "OMP_NUM_THREADS=8",
+        "OPENBLAS_NUM_THREADS=8",
     ]
     # Exactly the strategy package directory is bound, never its parent.
     mount = command[command.index("--mount") + 1]

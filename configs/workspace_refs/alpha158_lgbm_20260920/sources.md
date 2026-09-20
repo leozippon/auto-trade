@@ -26,13 +26,13 @@
 
 信号诊断（池内、每 10 个交易日一个不重叠的信号日，共 96 个）：LightGBM 池内 rank IC +0.109（t 8.3）；控制规模、20 日动量、5 日反转、20 日换手、20 日波动、20 日最大涨幅的截面秩与申万一级哑变量后 +0.035（t 6.3），逐年 +0.031 / +0.039 / +0.024 / +0.047；最好 15 只相对池均值每 10 日 +0.47%、最好 30 只 +0.39%。
 
-训练成本（方向研究，沙箱镜像 16 核）：2.4–3.2 百万行 × 158 列、16 线程的一次单点训练中位 60 秒（21–141 秒）；不含读取与特征构建。
+训练成本（方向研究，读数取自当时的 16 核沙箱镜像）：2.4–3.2 百万行 × 158 列、16 线程的一次单点训练中位 60 秒（21–141 秒）；不含读取与特征构建。容器现在是 8 核 / 8 GiB，线程上限也是 8，同一份训练只会更慢。
 
 复现（仓库根，研究全文 §8 有完整顺序）：`logs/notes/review_20260915/na1/na1_panel.py` → `na1_tensor.py` → `na1_states.py` → `na1_cfq.py` → `na1_docker.sh none na1_lgbm.py`（`NA1_SEED=1|2` 为种子噪声）→ `na1_books.py`。
 
 ## 沙箱冒烟实测（真实路径，`gpu_count=0`）
 
-命令（仓库根，脚本全文在 `logs/notes/review_20260915/ARMS2_build.md`）：`smoke.py alpha158_lgbm_20260920 configs/workspace_refs/alpha158_lgbm_20260920 Y1 <天数>`。脚本把本臂的 arm 参数送进控制台同一个创建前检查（`_round.normalize`）与 `resolve_worker_options`，用 `worker._strategy_sandbox_from_spec` 得到策略容器的边界（16 核、32 GiB、`gpu_count=0`、单次决策 360 秒、`fit` 3,600 秒）；视图经 `ResearchPITSnapshotProvider` 从研究种子 `data/pit_views_seed_research_20260920` 硬链接进临时缓存，再由 `PITDailyEvaluationBackend.evaluate(request, max_days=N)` 在沙箱镜像里回放第一个研究年的开头（滚动 as-of 视图、真实账户快照、推断容器与 fit worker）。容器内存每 2 秒采样一次。
+命令（仓库根，脚本全文在 `logs/notes/review_20260915/ARMS2_build.md`）：`smoke.py alpha158_lgbm_20260920 configs/workspace_refs/alpha158_lgbm_20260920 Y1 <天数>`。脚本把本臂的 arm 参数送进控制台同一个创建前检查（`_round.normalize`）与 `resolve_worker_options`，用 `worker._strategy_sandbox_from_spec` 得到策略容器的边界（8 核、8 GiB、`gpu_count=0`、单次决策 360 秒、`fit` 3,600 秒）；视图经 `ResearchPITSnapshotProvider` 从研究种子 `data/pit_views_seed_research_20260920` 硬链接进临时缓存，再由 `PITDailyEvaluationBackend.evaluate(request, max_days=N)` 在沙箱镜像里回放第一个研究年的开头（滚动 as-of 视图、真实账户快照、推断容器与 fit worker）。容器内存每 2 秒采样一次。
 
 | 决策日 | `fit` 次数与秒数 | 策略段秒数 | 订单（成交 / 拒单） | 容器内存峰值 | 整体墙钟 |
 |---|---|---|---|---|---|

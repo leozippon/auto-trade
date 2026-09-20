@@ -284,20 +284,20 @@ def test_the_facts_publish_the_strategy_containers_cpu_quota_and_batch_width() -
 
 
 def test_the_facts_publish_the_strategy_containers_memory_ceiling() -> None:
-    """The container the replay runs in is not the one the session lives in.
+    """The ceiling a fit is measured against, published in the replay's unit.
 
-    An arm extrapolated a 7.34 GiB fit, read it against the session Sandbox's
-    own limit, concluded the replay was swapping, and spent hours on a cause
-    the strategy container cannot have. The ceiling it should have compared
-    against is published here, in the same unit a replay reports its measured
-    peak in.
+    An arm extrapolated a 7.34 GiB fit, compared it against a ceiling it had
+    guessed, concluded the replay was swapping and spent hours on it. The
+    strategy container now carries the same limit as the session Sandbox, and
+    the fact states it in the unit a replay reports its measured peak in, so
+    the comparison needs no extrapolation at all.
     """
 
     from autotrade.environment.sandbox import SandboxLimits
 
     budgets = _facts()["budgets"]
     assert budgets["strategy_memory_bytes"] == SandboxLimits().memory_bytes
-    assert budgets["strategy_memory_bytes"] == 32 * 1024**3
+    assert budgets["strategy_memory_bytes"] == 8 * 1024**3
     # And why a rehearsal at the start of the span does not size a batch.
     assert budgets["smoke_backtest_probe_note"] == SMOKE_PROBE_NOTE
     assert "start" in SMOKE_PROBE_NOTE

@@ -68,8 +68,14 @@ def container_thread_env(cpus: float) -> dict[str, str]:
 class SandboxLimits:
     """Per-container resources and per-inference protocol limits."""
 
-    cpus: float = 16.0
-    memory: str = "32g"
+    # The same CPU and memory boundary the Agent session container runs under
+    # (``SandboxSpec``). One size for both means a session that profiles its
+    # ``fit`` under ``shell`` measures against the very ceiling the formal
+    # replay enforces, instead of extrapolating from its own container to a
+    # larger one; the pair is published as the run facts ``budgets.strategy_cpus``
+    # and ``budgets.strategy_memory_bytes``.
+    cpus: float = 8.0
+    memory: str = "8g"
     # A fork-bomb guard, not a budget: one worker with torch, LightGBM and
     # XGBoost thread pools at the CPU-derived thread cap plus PyArrow's own
     # pool needs well over the 64 the single-threaded NumPy era allowed.
@@ -99,7 +105,7 @@ class SandboxLimits:
     # ``fit`` altogether -- a torch ``DataLoader(num_workers>0)`` and joblib's
     # memmapped parallel backend both fail on a 64 MB ``/dev/shm``, and any
     # spill or intermediate parquet fails on a 64 MB ``/tmp``. They are charged
-    # to the container's own ``memory`` cap, so 2 GB each is 4 GB of the 32 GB
+    # to the container's own ``memory`` cap, so 2 GB each is 4 GB of the 8 GB
     # a strategy container may use, and only what it actually writes.
     tmpfs_size: str = "2g"
     shm_size: str = "2g"

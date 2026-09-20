@@ -350,10 +350,9 @@ def _budget_facts(
             "strategy_cpus": SandboxLimits().cpus,
             # The memory ceiling of that same container, in the unit a replay
             # reports its measured peak in (``resources.peak_memory_bytes``).
-            # It is NOT the session container's own limit, which is smaller and
-            # is the one a session profiling its fit under `shell` measures
-            # against: one arm read a 7.34 GiB extrapolation as swapping and
-            # spent six hours on a cause the strategy container cannot have.
+            # The session container carries the same ceiling, so a fit profiled
+            # under `shell` is measured against the number the formal replay
+            # will enforce rather than extrapolated across two boundaries.
             "strategy_memory_bytes": SandboxLimits().memory_bytes,
             # Replays one batch_validate call runs at once, each with its own
             # strategy container (two when the candidate declares fit). The

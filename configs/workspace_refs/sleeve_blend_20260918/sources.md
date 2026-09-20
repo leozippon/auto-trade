@@ -79,7 +79,7 @@
 
 ## 起步包的沙箱冒烟实测（真实路径，`gpu_count = 0`）
 
-路径：arm 参数经控制台同一个创建前检查（`_round.normalize`）与 `resolve_worker_options`，由 `worker._strategy_sandbox_from_spec` 得到策略容器边界（16 核、32 GiB、`gpu_count = 0`、单次决策 360 秒、单次 `fit` 3,600 秒）；视图经 `ResearchPITSnapshotProvider` 从研究种子硬链接，再由 `PITDailyEvaluationBackend.evaluate(request, max_days=N)` 在沙箱镜像里回放——与 `smoke_backtest` 同一条路径。容器内存每 2 秒采样。全程宿主上另有两条在跑臂的策略容器。
+路径：arm 参数经控制台同一个创建前检查（`_round.normalize`）与 `resolve_worker_options`，由 `worker._strategy_sandbox_from_spec` 得到策略容器边界（8 核、8 GiB、`gpu_count = 0`、单次决策 360 秒、单次 `fit` 3,600 秒）；视图经 `ResearchPITSnapshotProvider` 从研究种子硬链接，再由 `PITDailyEvaluationBackend.evaluate(request, max_days=N)` 在沙箱镜像里回放——与 `smoke_backtest` 同一条路径。容器内存每 2 秒采样。全程宿主上另有两条在跑臂的策略容器。
 
 | 槽 / 腿 | 决策日 | `fit` 秒 | 策略段 秒 | 每次决策 | 订单（成交 / 拒单） | 容器峰值 GiB | 墙钟 秒 |
 |---|---|---|---|---|---|---|---|
@@ -89,7 +89,7 @@
 | Y1 `c_wide30` | 1 | 176.9 | 9.6 | 9.6 | 29（29 / 0） | fit 3.49 / 推断 1.03 | 220.9 |
 | **Y4 `s_blend`（`fit` 成本探针）** | 1 | **228.9** | 13.5 | 13.5 | 30（29 / 1 涨跌停） | fit **4.15** / 推断 1.73 | 274.5 |
 
-**`fit` 的预算余量（门 9 的硬要求）**：研究期靠后的探针读 **228.9 秒、容器峰值 4.15 GiB**，对 `strategy_fit_timeout_seconds` = 3,600 秒不到十五分之一，对容器内存上限 32 GiB 约八分之一。这条余量不是可有可无的：同家族更大的形态（173 列配三年窗口）在整期批次里两次撞上并发放大后的 `fit` 上限、赔掉 24 个回放年。本包的 `TRAIN_YEARS = 2` 与那个节点相同，四点网格也相同，唯一的护栏是**整期批次之前必须先在研究期靠后的槽上量一次**。
+**`fit` 的预算余量（门 9 的硬要求）**：研究期靠后的探针读 **228.9 秒、容器峰值 4.15 GiB**（秒数取自当时的 16 核容器，现在是 8 核，只会更慢），对 `strategy_fit_timeout_seconds` = 3,600 秒不到十五分之一，而 4.15 GiB 已经占掉 8 GiB 容器内存上限的一半。这条余量不是可有可无的：同家族更大的形态（173 列配三年窗口）在整期批次里两次撞上并发放大后的 `fit` 上限、赔掉 24 个回放年。本包的 `TRAIN_YEARS = 2` 与那个节点相同，四点网格也相同，唯一的护栏是**整期批次之前必须先在研究期靠后的槽上量一次**。
 
 `validate_strategy_package`：主候选返回 `FitSchedule(refit_period='quarter')`，按登记编辑删掉 `fit` 的 `c_comp` 返回 `None`。`ruff check` 对整个 starter 全通过。
 

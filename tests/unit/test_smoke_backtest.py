@@ -369,15 +369,14 @@ def test_start_outside_the_research_period_is_refused(tmp_path: Path) -> None:
 def test_a_rehearsal_reports_what_it_cost_its_container(tmp_path: Path) -> None:
     """The rehearsal is where a batch is sized, so it carries the telemetry.
 
-    The session Sandbox has a smaller memory limit than the strategy container,
-    and an arm that profiled its fit under ``shell`` concluded the replay was
-    swapping against a ceiling the strategy container does not have. Here the
-    numbers come from the container that actually ran the replay.
+    An arm that profiled its fit under ``shell`` concluded the replay was
+    swapping against a ceiling it had guessed at. Here the numbers come from
+    the container that actually ran the replay.
     """
 
     usage = {
         "peak_memory_bytes": 7_883_149_312,
-        "memory_limit_bytes": 34_359_738_368,
+        "memory_limit_bytes": 8_589_934_592,
         "fit_seconds": [335.7],
         "fit_timeout_seconds": 3600.0,
         "decision_timeout_seconds": 360.0,

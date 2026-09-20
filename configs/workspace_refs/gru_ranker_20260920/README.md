@@ -23,7 +23,7 @@
 执行合同——入口与订单、允许的 import、文件 I/O、`available_at` 与 PIT 读法、不写死宿主路径、沙箱无网络——以只读 `output/README.md` 与系统提示为准，本包不复述。本臂只在以下几点上更具体：
 
 - 本包声明 `fit(context)` 与 `REFIT_PERIOD = "quarter"`；权重只经 `torch.save`/`torch.load` 读写 `context.state_dir`，LightGBM 用 `save_model`/`Booster(model_file=...)`。
-- **本臂 `gpu_count=1`，策略必须在 CUDA 上训练和打分，不写 CPU 路径。** 容器 16 核上训练一次三种子的 GRU 约需 8.5 小时，远超 `fit` 的超时上限；没有 CUDA 时 `fit` 与复核直接报错，而不是悄悄换成另一种计算。这与模板 README「保留 CPU 路径」的通用建议不同，本臂以本条为准。`c_lgbm` 是 CPU 上的 LightGBM，不用 CUDA。
+- **本臂 `gpu_count=1`，策略必须在 CUDA 上训练和打分，不写 CPU 路径。** 容器 CPU 上训练一次三种子的 GRU 约需 8.5 小时（读数取自当时的 16 核容器，现在是 8 核，只会更久），远超 `fit` 的超时上限；没有 CUDA 时 `fit` 与复核直接报错，而不是悄悄换成另一种计算。这与模板 README「保留 CPU 路径」的通用建议不同，本臂以本条为准。`c_lgbm` 是 CPU 上的 LightGBM，不用 CUDA。
 - **显存预算**：一次 `fit` 的显存峰值必须低于 12 GiB。执行器只把空闲显存不低于 12 GiB 的卡分给容器；策略可用显存低于这条线时的 CUDA 显存不足记为环境失败，高于这条线仍不足就是策略自己的错误。卡在批次内共享：`batch_validate` 的三路回放可能落在同一张卡上，每路都不能假定独占整卡。起步包在一次季度重训里实测卡上峰值约 9.8 GiB（推断容器与 fit worker 合计，训练批次缓存为 float16），加长序列或加特征时先在冒烟里量峰值。
 - 固定种子：三个 GRU 种子与 LightGBM 种子写死在代码里。cuDNN 的 GRU 内核在重复回放之间仍可能有细小差异，逐位复现不保证，读数以同批比较为准。
 - 本臂不挂分钟域（运行事实 `execution_policy`），执行时点只有 09:30 与 15:00。

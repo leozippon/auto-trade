@@ -50,7 +50,7 @@ from .registry import experiment_state, read_ledger_records, worker_log_ref
 # Parallel-run ceiling for the console: a create or a resume past this is
 # refused. Host memory is what binds, not the model gateway: six arms held
 # ~308 GiB of runner RSS between them, and with their strategy containers
-# (8-32 GiB each) and the resident vLLM on top the 503 GiB host went 245 GiB
+# (8 GiB each) and the resident vLLM on top the 503 GiB host went 245 GiB
 # into swap and stayed there. That is not a slowdown the experiments absorb
 # quietly -- 28 slot-bearing backtest calls across five arms died at the fit
 # or inference cap in one day, so host contention was being billed to the

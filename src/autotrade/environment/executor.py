@@ -343,7 +343,7 @@ class DockerStrategyExecutor:
             # Shared memory for multi-process training inside fit(context):
             # without it Docker's 64 MB default makes a torch DataLoader with
             # workers or a joblib memmapped backend fail on a container that
-            # otherwise has 16 CPUs to use.
+            # otherwise has 8 CPUs to use.
             "--shm-size",
             limits.shm_size,
             "--cpus",
