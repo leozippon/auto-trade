@@ -3,17 +3,17 @@
 The account arrives as `context.account` -- cash plus the T-1 value of the
 holdings -- and two things follow from it: how many seats the book has, and
 which names one lot of a seat can buy. What the book IS does not follow from
-it: `BOOK` says that, and the session sets it after reading its run facts.
+it: `BOOK` says that, and the session sets it after reading its run facts:
 
-    BOOK = "gp_overlay"      default. CSI 300, 80-100 seats, monthly,
-                             nearly fully invested. Gross-profit tilt on
-                             benchmark weights. No industry / name box.
-    BOOK = "cma_overlay"     same shape; −asset year-over-year growth
-    BOOK = "noa_index"       CSI 300, 12 seats, monthly. Seats follow
-                             index L1 weights; −NOA / lagged TA inside
-    BOOK = "cashdiv_pool"    whole-market affordable pool, 12 seats,
-                             monthly, trailing cash dividend / close,
-                             at most 2 names per SW L1
+    "gp_overlay"      default. CSI 300, 80-100 seats, monthly,
+                      nearly fully invested. Gross-profit tilt on
+                      benchmark weights. No industry / name box.
+    "cma_overlay"     same shape; −asset year-over-year growth
+    "noa_index"       CSI 300, 12 seats, monthly. Seats follow
+                      index L1 weights; −NOA / lagged TA inside
+    "cashdiv_pool"    whole-market affordable pool, 12 seats,
+                      monthly, trailing cash dividend / close,
+                      at most 2 names per SW L1
 
 Seats, when SEATS is 0: clip(equity x CASH_BUFFER / SEAT_CASH_MIN) into the
 shape's own min/max. Pin SEATS to a positive integer to override.
