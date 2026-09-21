@@ -16,11 +16,13 @@ parameters already exist.
 from __future__ import annotations
 
 import argparse
+from dataclasses import fields
 from pathlib import Path
 
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.runtime import write_json_atomic
 from autotrade.pipelines.calendar import GEOMETRY_PARAMETERS
+from autotrade.pipelines.config import AcceptanceRules
 from autotrade.pipelines.hitl_state import MODEL_CHOICES, WEB_CREATE_DEFAULTS
 from autotrade.pipelines.worker import (
     NON_PERSISTABLE_PARAMS,
@@ -293,6 +295,7 @@ def add_acceptance_arguments(parser: argparse.ArgumentParser) -> None:
     # constants.
     for flag, text in (
         ("--max-drawdown", "Equity drawdown limit of the freeze gate and the verdict."),
+        ("--cost-stress-multiplier", "Forward verdict: multiple of the profile's slippage the neutralised excess must survive."),
         ("--active-max-drawdown", "Drawdown limit of the active series (strategy minus zero-skill panel)."),
         ("--tracking-error-cap", "Tracking mandate: residual tracking error cap against CSI 300; giving it turns the mandate on for this arm."),
         ("--beta-min", "Tracking mandate: lower end of the market beta band."),
@@ -395,24 +398,11 @@ def _build_worker_params(
         "compact_keep_recent_messages": args.compact_keep_recent_messages,
         "compact_max_tokens": args.compact_max_tokens,
         "compact_max_calls": args.compact_max_calls,
+        # Every create-time gate, read off the rules themselves: a field the
+        # parser does not expose raises here instead of pinning the arm at a
+        # default the operator asked to change.
         **{
-            name: getattr(args, name)
-            for name in (
-                "max_drawdown",
-                "active_max_drawdown",
-                "tracking_error_cap",
-                "beta_min",
-                "beta_max",
-                "min_active_ir",
-                "min_dsr_probability",
-                "min_positive_year_share",
-                "min_full_span_validations",
-                "forward_confidence",
-                "recency_months",
-                "min_mean_gross",
-                "min_round_trips_per_month",
-                "heldout_tolerance_z",
-            )
+            rule.name: getattr(args, rule.name) for rule in fields(AcceptanceRules)
         },
         "research_directive": research_directive,
     }

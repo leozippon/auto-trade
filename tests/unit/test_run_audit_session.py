@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import argparse
+from dataclasses import fields
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from scripts.experiments import run_audit_session
+from scripts.experiments._cli import add_acceptance_arguments
 from autotrade.environment.sandbox import SandboxSpec
 from autotrade.pipelines import worker as worker_module
+from autotrade.pipelines.config import AcceptanceRules
 
 
 class _ProviderConstructed(RuntimeError):
@@ -85,6 +89,20 @@ def test_the_audit_entrypoint_assembles_through_the_shared_builder() -> None:
         "LocalDailyEvaluationBackend",
     ):
         assert name not in source, name
+
+
+def test_the_audit_parser_exposes_every_create_time_gate() -> None:
+    """The acceptance rules are stamped into ``params.json`` when the arm is
+    created and nothing can move them afterwards, so a field the parser does
+    not expose pins every audited arm at its default. The parameter renderer
+    reads the fields themselves, so a missing flag can only fail loudly here
+    and at the entrypoint, never silently."""
+
+    parser = argparse.ArgumentParser()
+    add_acceptance_arguments(parser)
+    assert set(vars(parser.parse_args([]))) == {
+        rule.name for rule in fields(AcceptanceRules)
+    }
 
 
 def test_the_compaction_gateway_is_built_without_provider_retries(
