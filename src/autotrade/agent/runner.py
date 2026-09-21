@@ -18,6 +18,7 @@ Agent trace (docs/environment-design.md §2.4 and §4.2).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import threading
 import time
@@ -404,6 +405,9 @@ class AgentSessionRunner:
         self._live_messages: list[ChatMessage] = []
         # Set only when the session closes; children poll it to stop early.
         self._cancelled = threading.Event()
+        # Whether the session has already been closed: the teardown runs once,
+        # whether the loop closed it itself or ``run`` is leaving on a failure.
+        self._session_closed = False
         if self.subagent is not None:
             self.subagent.attach_cancel_event(self._cancelled)
         self._validate_capability_boundary()
@@ -426,7 +430,34 @@ class AgentSessionRunner:
         ``budget_total_seconds`` is the whole session budget the time-budget
         notices are measured against; a resumed attempt hands over the arm
         total while its time budget only holds what is left of it.
+
+        However the conversation ends — a finish, an exhausted budget, an
+        interrupt raised through tool dispatch, a trace sink that failed or an
+        unexpected bug — the session is closed exactly once: the children are
+        cancelled, their pool is shut down and the failure reaches the caller
+        unchanged.
         """
+
+        try:
+            return self._run_conversation(
+                instruction,
+                preamble=preamble,
+                complete_validations=complete_validations,
+                budget_total_seconds=budget_total_seconds,
+            )
+        except BaseException as exc:
+            self._abort_session(exc)
+            raise
+
+    def _run_conversation(
+        self,
+        instruction: str,
+        *,
+        preamble: Sequence[ChatMessage] = (),
+        complete_validations: Sequence[Mapping[str, object]] = (),
+        budget_total_seconds: float | None = None,
+    ) -> AgentSessionResult:
+        """The conversation loop itself; ``run`` owns the session's teardown."""
 
         if not instruction.strip():
             raise ValueError("Agent instruction cannot be empty")
@@ -468,6 +499,7 @@ class AgentSessionRunner:
         self._live_messages = []
         own_work_streak = 0
         self._cancelled.clear()
+        self._session_closed = False
         self._emit(
             "session_start",
             {
@@ -1789,26 +1821,49 @@ class AgentSessionRunner:
             )
 
     def _close_session(self, payload: dict[str, object]) -> None:
+        if self._session_closed:
+            return
+        self._session_closed = True
         self._cancelled.set()
         if self.subagent is not None:
             self.subagent.cancel()
-        # Bound the wait; do not abort an in-flight LLM or tool invoke.
-        # After an uncancelable LLM returns, the child checks this event and
-        # exits without dispatching. Pending (not started) jobs are cancelled.
-        self._collect_finished_subagents(
-            wait=True, timeout=SUBAGENT_TEARDOWN_WAIT_SECONDS
-        )
-        self._cancel_pending_subagents()
-        payload = dict(payload)
-        payload.setdefault(
-            "token_usage", _token_usage_summary(self._usage, self._subagent_totals)
-        )
-        payload.setdefault("tool_failures", self._tool_failures)
-        self._emit("session_end", payload)
-        pool = self._subagent_pool
-        self._subagent_pool = None
-        if pool is not None:
-            pool.shutdown(wait=False, cancel_futures=True)
+        try:
+            # Bound the wait; do not abort an in-flight LLM or tool invoke.
+            # After an uncancelable LLM returns, the child checks this event and
+            # exits without dispatching. Pending (not started) jobs are cancelled.
+            self._collect_finished_subagents(
+                wait=True, timeout=SUBAGENT_TEARDOWN_WAIT_SECONDS
+            )
+            self._cancel_pending_subagents()
+            payload = dict(payload)
+            payload.setdefault(
+                "token_usage", _token_usage_summary(self._usage, self._subagent_totals)
+            )
+            payload.setdefault("tool_failures", self._tool_failures)
+            self._emit("session_end", payload)
+        finally:
+            # Collecting a child and writing the terminal event both touch the
+            # trace sink and the result store; a failure there still leaves the
+            # pool this session owns to release.
+            pool = self._subagent_pool
+            self._subagent_pool = None
+            if pool is not None:
+                pool.shutdown(wait=False, cancel_futures=True)
+
+    def _abort_session(self, exc: BaseException) -> None:
+        """Close a session ``run`` is leaving on an exception.
+
+        A session that already closed itself — a finish, an exhausted budget —
+        is done; any other exit still has to cancel its children and shut their
+        pool down. The terminal event names the failure that is on its way out,
+        and a sink that cannot record it does not get to replace it.
+        """
+
+        if self._session_closed:
+            return
+        # The original failure must propagate, whatever the teardown hits.
+        with contextlib.suppress(Exception):
+            self._close_session({"status": "error", "error": safe_error_summary(exc)})
 
     def _compact_if_needed(
         self,

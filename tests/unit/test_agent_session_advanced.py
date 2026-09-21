@@ -1252,6 +1252,46 @@ def test_compaction_failure_keeps_history_and_opens_failure_circuit():
     assert compactor.compact(messages) is None
 
 
+def test_an_error_payload_answered_as_a_summary_fails_the_compaction():
+    """A compaction replaces the conversation, so what it keeps must be the
+    summary that was asked for.
+
+    Observed live: a gateway answered an over-sized compaction request with a
+    normal completion whose content was its own error envelope, and it was
+    recorded as a successful compaction and became the whole retained context.
+    """
+
+    envelope = json.dumps(
+        {
+            "error": {
+                "message": (
+                    "Your request is over the maximum allowed context size. "
+                    "Please minimize or reduce the prompts used."
+                ),
+                "type": "invalid_request_error",
+            }
+        },
+        ensure_ascii=False,
+    )
+    compactor = ContextCompactor(
+        ScriptedLLM([ProviderResponse(content=envelope)]),
+        ContextCompactionConfig(
+            token_threshold=1, min_messages=4, keep_recent_messages=2
+        ),
+    )
+    messages = [ChatMessage("system", "system")]
+    messages.extend(ChatMessage("user", f"m{index}") for index in range(5))
+    result = compactor.compact(messages)
+    assert result is not None
+    assert result.event["status"] == "error"
+    assert "summary" not in result.event
+    # The failure names what came back, so the trace shows the real cause.
+    assert "maximum allowed context size" in str(result.event["error"])
+    # History is kept: the caller falls back to in-place tool-result fitting.
+    assert result.messages == tuple(messages)
+    assert compactor.compaction_count == 0
+
+
 def test_sessions_reject_tools_outside_their_positive_contracts():
     class StubTool:
         def __init__(self, name):

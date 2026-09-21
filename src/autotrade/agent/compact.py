@@ -696,9 +696,24 @@ def _merge_touched_files(
 
 
 def _extract_summary_text(response: ProviderResponse) -> str:
+    """The continuation summary a compaction response carries, or a failure.
+
+    A compaction replaces the conversation, so what comes back has to be the
+    summary that was asked for. A gateway that answers an over-sized request
+    with its own error envelope as a normal completion (observed in a live
+    session) would otherwise become the whole retained context under a
+    ``status: "ok"`` record; an answer that carries none of the requested
+    headings is not a summary, and the compaction fails instead — the caller
+    keeps the history and falls back to in-place tool-result fitting.
+    """
+
     text = _THINK_BLOCK.sub("", response.content or "", count=1).strip()
     if not text:
         raise ValueError("compaction response is empty")
+    if not any(heading in text for heading in COMPACT_SUMMARY_HEADINGS):
+        raise ValueError(
+            "compaction response is not a continuation summary: " + text[:200]
+        )
     return text
 
 
@@ -741,7 +756,7 @@ def compaction_summary_message(
     )
 
 
-def safe_error_summary(exc: Exception, max_chars: int = 500) -> str:
+def safe_error_summary(exc: BaseException, max_chars: int = 500) -> str:
     text = f"{type(exc).__name__}: {exc}"
     text = re.sub(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [redacted]", text)
     text = re.sub(r"(?i)(authorization\s*[:=]\s*)[^\s,;]+", r"\1[redacted]", text)

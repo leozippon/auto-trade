@@ -1820,6 +1820,157 @@ def test_runner_close_cancels_subagent_without_infinite_wait(
     assert shell.calls == []
 
 
+class _InterruptingTool:
+    """A tool that raises through dispatch instead of failing its own call.
+
+    Tool dispatch re-raises a ``SessionInterrupt`` rather than turning it into
+    an error observation, and a batch holding one sequential call takes the
+    in-order branch — so this is the session's unguarded exit.
+    """
+
+    def __init__(self, name: str = "read_file") -> None:
+        self.spec = ToolSpec(
+            name,
+            "raises a session interrupt",
+            {"type": "object", "properties": {}, "required": []},
+        )
+
+    def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
+        del arguments
+        raise SessionInterrupt("stop requested")
+
+
+def _session_interrupted_in_tool_dispatch(
+    *,
+    event_sink,
+    shell: DeclaredReadOnlyShell,
+    release: threading.Event,
+) -> AgentSessionRunner:
+    """One session: first turn launches a child that blocks, second turn calls
+    a tool that raises out of tool dispatch."""
+
+    started = threading.Event()
+
+    class BlockingChild:
+        model = "child"
+        provider = "test"
+        context_window_tokens = 128000
+
+        def complete(self, messages, **kwargs):
+            del messages, kwargs
+            started.set()
+            release.wait(5)
+            return ProviderResponse(
+                tool_calls=(ToolCall("s1", "shell", {"argv": ["echo", "late"]}),)
+            )
+
+    inner = ScriptedLLM(
+        [
+            ProviderResponse(
+                tool_calls=(
+                    ToolCall(
+                        "e1", "agent", {"agent": "general-purpose", "task": "slow"}
+                    ),
+                )
+            ),
+            ProviderResponse(tool_calls=(ToolCall("r1", "read_file", {}),)),
+        ]
+    )
+    parent_calls = {"n": 0}
+
+    class Parent:
+        model = "parent"
+        provider = "test"
+        context_window_tokens = 128000
+
+        def complete(self, messages, **kwargs):
+            parent_calls["n"] += 1
+            if parent_calls["n"] == 2:
+                # The child is running when the interrupt lands.
+                assert started.wait(3)
+            return inner.complete(messages, **kwargs)
+
+    return AgentSessionRunner(
+        llm=Parent(),
+        tools=ToolRegistry([_InterruptingTool()]),
+        system_prompt="research",
+        config=_session_config(),
+        subagent=SubAgentEngine(
+            llm=BlockingChild(),
+            tools=ToolRegistry([shell]),
+        ),
+        event_sink=event_sink,
+        time_budget=InferenceTimeBudget(duration_seconds=600.0),
+    )
+
+
+def test_an_exception_from_tool_dispatch_still_closes_the_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whatever ends the session, its children and their pool are released.
+
+    Only the model call is guarded inside the loop, so an exception raised
+    through tool dispatch used to leave the sub-agent pool running against a
+    sandbox the caller was already tearing down, with no terminal event.
+    """
+
+    from autotrade.agent import runner as runner_module
+
+    monkeypatch.setattr(runner_module, "SUBAGENT_TEARDOWN_WAIT_SECONDS", 0.2)
+    events: list[tuple[str, dict[str, object]]] = []
+    shell = DeclaredReadOnlyShell()
+    release = threading.Event()
+    runner = _session_interrupted_in_tool_dispatch(
+        event_sink=lambda event, payload: events.append((event, payload)),
+        shell=shell,
+        release=release,
+    )
+
+    with pytest.raises(SessionInterrupt, match="stop requested"):
+        runner.run("go")
+
+    assert runner._cancelled.is_set()
+    assert runner._subagent_pool is None
+    [end] = [payload for event, payload in events if event == "session_end"]
+    assert end["status"] == "error" and "stop requested" in str(end["error"])
+    release.set()
+    time.sleep(0.2)
+    # The cancelled child returned after the close and dispatched nothing.
+    assert shell.calls == []
+
+
+def test_a_failing_trace_sink_at_close_does_not_replace_the_session_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The terminal event is attempted, never at the cost of the real failure."""
+
+    from autotrade.agent import runner as runner_module
+
+    monkeypatch.setattr(runner_module, "SUBAGENT_TEARDOWN_WAIT_SECONDS", 0.2)
+    events: list[str] = []
+    release = threading.Event()
+
+    def sink(event: str, payload: dict[str, object]) -> None:
+        del payload
+        events.append(event)
+        if event == "session_end":
+            raise OSError("trace sink failed")
+
+    runner = _session_interrupted_in_tool_dispatch(
+        event_sink=sink, shell=DeclaredReadOnlyShell(), release=release
+    )
+
+    with pytest.raises(SessionInterrupt, match="stop requested"):
+        runner.run("go")
+
+    assert "session_end" in events
+    # The sink failed after the children were cancelled; the pool is still
+    # released, and the caller sees the interrupt, not the sink's error.
+    assert runner._cancelled.is_set()
+    assert runner._subagent_pool is None
+    release.set()
+
+
 def test_terminal_tool_stops_refusing_once_the_deadline_is_at_hand() -> None:
     """Refusing the finish for as long as a child runs would hold the session
     to its deadline, so the refusal lifts once the remaining time is inside
