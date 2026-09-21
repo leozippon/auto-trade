@@ -376,6 +376,61 @@ def test_the_20260921b_arms_name_their_graduation_bars() -> None:
         assert rules["tracking_error_cap"] is None
 
 
+def test_the_20260921c_arms_name_their_graduation_bars() -> None:
+    """The c-round records a create-time choice for every bar, not a hidden
+    pair of packages. Mandated arms keep the 35/15 drawdowns they named;
+    un-mandated arms keep 45/30; statistical bars are today's defaults.
+    `--fill` takes the first four and queues the last two."""
+    from autotrade.pipelines.config import AcceptanceRules, acceptance_for
+
+    rnd = ROUNDS["create_round_20260921c"]
+    defaults = AcceptanceRules().to_record()
+    statistical = (
+        "min_active_ir",
+        "min_dsr_probability",
+        "min_positive_year_share",
+        "min_full_span_validations",
+        "forward_confidence",
+        "recency_months",
+        "min_mean_gross",
+        "min_round_trips_per_month",
+        "heldout_tolerance_z",
+    )
+    assert list(rnd.arms) == [
+        "quality_overlay_1m_20260921c",
+        "pacc_index_100k_20260921c",
+        "high52_overlay_1m_20260921c",
+        "lottery_reverse_100k_20260921c",
+        "rmax_overlay_1m_20260921c",
+        "net_issuance_100k_20260921c",
+    ]
+    mandated = (
+        "quality_overlay_1m_20260921c",
+        "high52_overlay_1m_20260921c",
+        "rmax_overlay_1m_20260921c",
+    )
+    unmandated = (
+        "pacc_index_100k_20260921c",
+        "lottery_reverse_100k_20260921c",
+        "net_issuance_100k_20260921c",
+    )
+    for experiment_id in (*mandated, *unmandated):
+        request = rnd.request_params(experiment_id)
+        rules = acceptance_for(request).to_record()
+        for key in statistical:
+            assert request[key] == defaults[key], (experiment_id, key)
+            assert rules[key] == defaults[key], (experiment_id, key)
+    for experiment_id in mandated:
+        rules = acceptance_for(rnd.request_params(experiment_id)).to_record()
+        assert (rules["max_drawdown"], rules["active_max_drawdown"]) == (0.35, 0.15)
+        assert rules["tracking_error_cap"] == 0.08
+        assert (rules["beta_min"], rules["beta_max"]) == (0.85, 1.15)
+    for experiment_id in unmandated:
+        rules = acceptance_for(rnd.request_params(experiment_id)).to_record()
+        assert (rules["max_drawdown"], rules["active_max_drawdown"]) == (0.45, 0.30)
+        assert rules["tracking_error_cap"] is None
+
+
 @pytest.mark.parametrize(("round_name", "experiment_id"), ARMS)
 def test_every_arm_directive_is_usable(round_name: str, experiment_id: str) -> None:
     """A directive is copied into every research session of the arm and must
@@ -500,6 +555,7 @@ def test_mounting_index_weight_leaves_every_other_round_byte_for_byte() -> None:
         "create_round_20260919",
         "create_round_20260921",
         "create_round_20260921b",
+        "create_round_20260921c",
     }, sorted(carrying)
     base = records["create_round_20260920"]
     for name in sorted(carrying):
