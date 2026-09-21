@@ -13,8 +13,13 @@ import pytest
 
 from autotrade.environment.artifacts import new_revision_id
 from autotrade.environment.step_tree import StepTree
-from autotrade.environment.tools.base import ToolError, ToolRegistry
+from autotrade.environment.tools.base import (
+    AGENT_JUSTIFICATION_MAX_CHARS,
+    ToolError,
+    ToolRegistry,
+)
 from autotrade.environment.tools.finish_session import (
+    REASON_MAX_CHARS,
     REASON_MIN_CHARS,
     FinishSessionTool,
     SessionBudgetStatus,
@@ -134,6 +139,32 @@ def test_no_edge_names_no_node_and_needs_a_reason_and_a_validation(tmp_path: Pat
     result = empty.invoke({"outcome": "no_edge", "reason": REASON})
     assert result.value["candidates_evaluated"] == 1
     assert "no forward test" in result.value["pipeline_outcome"]
+
+
+def test_the_reason_is_bounded_like_every_other_written_justification(tmp_path: Path):
+    """The reason carries the gate readouts and the directions that were
+    closed, the same account a pre-registered hypothesis carries, so it gets
+    the same bound from the same constant -- and the bound the Agent is told
+    up front, in the description and in the parameter, is the one enforced."""
+
+    assert REASON_MAX_CHARS == AGENT_JUSTIFICATION_MAX_CHARS
+    reason_schema = FinishSessionTool.spec.input_schema["properties"]["reason"]
+    assert reason_schema["maxLength"] == REASON_MAX_CHARS
+    assert f"{REASON_MIN_CHARS}-{REASON_MAX_CHARS}" in reason_schema["description"]
+    assert f"{REASON_MIN_CHARS}-{REASON_MAX_CHARS}" in FinishSessionTool.spec.description
+
+    tree = StepTree(tmp_path / "steps")
+    _node(tree, tmp_path, "a")
+    registry = ToolRegistry([_tool(tree, _Gate(set()))])
+    at_cap = registry.invoke(
+        "finish_session", {"outcome": "no_edge", "reason": "e" * REASON_MAX_CHARS}
+    )
+    assert at_cap.ok and at_cap.finish
+    over = registry.invoke(
+        "finish_session", {"outcome": "no_edge", "reason": "e" * (REASON_MAX_CHARS + 1)}
+    )
+    assert not over.ok
+    assert f"limit {REASON_MAX_CHARS}" in over.error
 
 
 def test_only_a_complete_node_of_this_session_can_be_named(tmp_path: Path):

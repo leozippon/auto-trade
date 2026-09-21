@@ -1,16 +1,20 @@
 """What an interrupted research session leaves behind, read back for its next attempt.
 
-The trace is the single source: every ``llm_call``/``tool_call``/``session_end``/
-``session_error`` event of an attempt carries the cumulative ``budget_used``
-block, and every ``context_compaction`` event carries the summary that
-replaced the older history. An attempt whose trace hit its size cap stopped
-recording before it ended, so what it last wrote is not its spend; such a
-trace is refused rather than resumed from.
+The trace is the source for the spend: every ``llm_call``/``tool_call``/
+``session_end``/``session_error`` event of an attempt carries the cumulative
+``budget_used`` block, and every ``context_compaction`` event carries the
+summary that replaced the older history. An attempt whose trace hit its size
+cap stopped recording before it ended, so what it last wrote is not its spend;
+such a trace is refused rather than resumed from.
 
 The validations an attempt recorded survive in the experiment's step tree,
 whose nodes carry only opaque ids, plus a host-only sidecar per node holding
 the raw revision id, the span, the summary and the result reference the
-Pipeline needs to freeze it.
+Pipeline needs to freeze it. A Step is durable from the moment it is recorded,
+while the budget block only rides on the event that settles its tool call, so
+the two records can disagree over an attempt that died inside a batch; the
+recorded Validations are the floor their replay-years can never fall below
+(``ResearchSessionRequest.replay_years_spent``).
 """
 
 from __future__ import annotations

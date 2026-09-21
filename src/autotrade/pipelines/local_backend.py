@@ -80,6 +80,7 @@ from autotrade.environment.time_budget import (
     SessionTimeBudgetAware,
 )
 from autotrade.environment.tools.base import (
+    AGENT_JUSTIFICATION_MAX_CHARS,
     CommandRunner,
     SessionInterrupt,
     Tool,
@@ -620,7 +621,14 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
         "where a real batch will run it: a fit whose training window grows with "
         "the span is far slower late in the research period than on day one, so "
         "probe a data-dense late window BEFORE spending replay-years on a "
-        "full-span batch. Returns per-day strategy and as-of seconds, order "
+        "full-span batch. Returns seconds_per_day.strategy (the only figure "
+        "that scales with the days replayed), window_build_seconds (the host "
+        "side as-of view: on a late start it is almost all the one-off opening "
+        "of that window, minutes of host wall clock paid once and reused by a "
+        "later probe at the same start, so never multiply it by days; a "
+        "full-span batch opens at the period start and does not pay it), "
+        "phase_seconds (raw instrumentation whose phases overlap -- data_view "
+        "wraps the as-of sub-phases, so they do not add up), order "
         "counts, the as-of domain directory names, the container resources block "
         "(peak memory against the container limit, per-fit seconds against the "
         "fit timeout in force, and GPU memory for a GPU strategy), and the exact "
@@ -820,13 +828,15 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
         phases = dict(phases) if isinstance(phases, dict) else {}
         replayed = summary.get("replayed_trade_days")
         replayed = int(replayed) if isinstance(replayed, int) else 0
+        # Only the cost that actually scales with decision days. ``data_view``
+        # is the outer phase around the as-of view, and on a late ``start`` it
+        # is almost entirely the one-off window opening on the window's first
+        # day (minutes, then ~0.1 s a day): dividing it by the probe's days
+        # reported a per-day rate an audited session extrapolated to a full
+        # span. It is reported below as the whole-run figure it is.
         per_day = (
-            {
-                name: round(phases[name] / replayed, 3)
-                for name in ("strategy", "data_view")
-                if name in phases
-            }
-            if replayed
+            {"strategy": round(phases["strategy"] / replayed, 3)}
+            if replayed and "strategy" in phases
             else {}
         )
         report: dict[str, object] = {
@@ -840,6 +850,11 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
             "order_lifecycle": summary.get("order_lifecycle"),
             "reject_counts": summary.get("reject_counts"),
             "seconds_per_day": per_day,
+            **(
+                {"window_build_seconds": round(float(phases["data_view"]), 3)}
+                if "data_view" in phases
+                else {}
+            ),
             "phase_seconds": phases,
             "nl_calls": summary.get("nl_calls"),
             "asof_domains": _smoke_asof_domains(result_dir),
@@ -1002,8 +1017,10 @@ class SessionValidations:
         # experiment's step tree and its host-only sidecar, so an attempt that
         # dies keeps the nodes it validated for the attempt that resumes it.
         self.experiment_dir = experiment_dir
-        # Continued from the earlier attempts' spend and Validations.
-        self.replay_years_used = int(request.budget_used.replay_years)
+        # Continued from the earlier attempts' spend and Validations, which the
+        # request reconciles: a resume never gets back the replay-years its
+        # recorded Validations already cost.
+        self.replay_years_used = request.replay_years_spent
         self.steps: list[StepResult] = list(request.steps_before)
         # Candidates reserved so far, which names each result.
         self.candidates_started = 0
@@ -1276,10 +1293,10 @@ BATCH_VALIDATE_MAX_CANDIDATES = 6
 BATCH_VALIDATE_MAX_CONCURRENCY = 3
 BATCH_NAME_MAX_CHARS = 40
 # A pre-registration is only binding if the falsification clause fits with it:
-# signal, holding, control, and what would refute the claim. Three trace
-# reviews found sessions writing against a 500-character cap and dropping that
-# clause, so the bound is what one such statement needs, not what one line is.
-BATCH_HYPOTHESIS_MAX_CHARS = 1_000
+# signal, holding, control, and what would refute the claim. It is bounded like
+# every other Agent-written justification, by what one such statement needs
+# rather than by what one line is.
+BATCH_HYPOTHESIS_MAX_CHARS = AGENT_JUSTIFICATION_MAX_CHARS
 BATCH_PATH_MAX_CHARS = 200
 # Workspace roots a candidate may not sit under: they are the working copy's
 # own trees or not strategy trees at all. ``output`` itself is a valid path --

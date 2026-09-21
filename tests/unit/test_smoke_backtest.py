@@ -175,8 +175,9 @@ def test_smoke_runs_the_real_replay_over_a_short_window(tmp_path: Path) -> None:
     assert value["decision_calls"] == 3
     assert value["days_requested"] == 3
     assert value["order_count"] >= 1
-    # Per-day timing is the number the 30 s per-decision cap is judged against.
-    assert set(value["seconds_per_day"]) == {"strategy", "data_view"}
+    # Per-day timing is the number the 30 s per-decision cap is judged against,
+    # and only the strategy's own cost scales with the days a span replays.
+    assert set(value["seconds_per_day"]) == {"strategy"}
     assert all(seconds >= 0.0 for seconds in value["seconds_per_day"].values())
     assert "asof_dir" in value["hint"] and "snapshot_dir" in value["hint"]
 
@@ -364,6 +365,44 @@ def test_start_outside_the_research_period_is_refused(tmp_path: Path) -> None:
         tool.invoke({"start": 20251010})
     with pytest.raises(ToolError, match="is not a date"):
         tool.invoke({"start": "not-a-day"})
+
+
+def test_the_one_off_window_build_is_never_reported_per_day(tmp_path: Path) -> None:
+    """Opening a late window publishes the whole as-of prefix once, on the
+    window's first day, and costs minutes of host wall clock. Divided by the
+    probe's days it reads as a per-day rate, and an audited session sized a
+    full span on that number: it is reported as the whole-run figure it is,
+    and the per-day block carries only what scales with the days replayed."""
+
+    class LateWindowEvaluator:
+        def evaluate(self, _request, max_days=None, start_day=None):
+            del max_days, start_day
+            from autotrade.pipelines.config import EvaluationResult
+
+            return EvaluationResult(
+                {
+                    "replayed_trade_days": 3,
+                    "decision_calls": 3,
+                    # A cold late window: 279 s of the 335 s is day one.
+                    "phase_seconds": {
+                        "strategy": 4.5,
+                        "data_view": 335.7,
+                        "timeview_refresh": 279.3,
+                    },
+                },
+                str(tmp_path / "gone" / "result.json"),
+            )
+
+    value = _tool(tmp_path, WORKING_STRATEGY, evaluator=LateWindowEvaluator()).invoke(
+        {"days": 3, "start": "20251015"}
+    ).value
+    assert value["seconds_per_day"] == {"strategy": 1.5}
+    assert value["window_build_seconds"] == 335.7
+    # The raw instrumentation is still there, and the sub-phase it wraps is
+    # never added to it.
+    assert value["phase_seconds"]["timeview_refresh"] == 279.3
+    description = SmokeBacktestTool.spec.description
+    assert "window_build_seconds" in description and "never multiply it by days" in description
 
 
 def test_a_rehearsal_reports_what_it_cost_its_container(tmp_path: Path) -> None:

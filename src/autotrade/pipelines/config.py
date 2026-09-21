@@ -957,6 +957,30 @@ class ResearchSessionRequest:
 
         return research_span(self.research_years, FULL_SPAN)
 
+    @property
+    def replay_years_spent(self) -> int:
+        """Replay-years the earlier attempts spent, the counter a resume continues.
+
+        The two records an interrupted attempt leaves behind are durable at
+        different moments: a Validation lands in the step tree as
+        ``batch_validate`` records it, while the cumulative budget block only
+        rides on the ``tool_call`` event the tool emits once it settles. An
+        attempt killed inside a batch — after a candidate was recorded, before
+        the call returned — therefore leaves a trace that predates the batch it
+        charged. Those replay-years are spent whatever the trace says, so the
+        recorded Validations set the floor and the trace supplies the rest: the
+        candidates that failed in their own code, the refunds and the rejection
+        charges, none of which leave a Step. A candidate the same kill charged
+        but never recorded leaves neither record and its years are lost with it;
+        the floor bounds the loss to what one batch can hold.
+        """
+
+        recorded = sum(
+            research_span(self.research_years, step.span).slots
+            for step in self.steps_before
+        )
+        return max(int(self.budget_used.replay_years), recorded)
+
 
 @dataclass(frozen=True)
 class ResearchSessionResult:

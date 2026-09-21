@@ -55,6 +55,7 @@ from autotrade.pipelines.config import (
     ReplaySpan,
     ResearchSessionRequest,
     SnapshotBundle,
+    StepResult,
     StrategySchedule,
 )
 from autotrade.pipelines.experiment import null_control_seed
@@ -72,7 +73,7 @@ from autotrade.pipelines.local_backend import (
     batch_select_hint,
     session_budget_status,
 )
-from autotrade.pipelines.session_resume import resume_state
+from autotrade.pipelines.session_resume import load_recorded_steps, resume_state
 
 PARENT_SOURCE = "def generate_orders(context):\n    return []\n"
 # A four-year research period, one slot per July-June year.
@@ -274,6 +275,7 @@ class _Session:
         trace: list[tuple[str, dict[str, object]]] | None = None,
         experiment_dir: Path | None = None,
         budget_used: BudgetUsed | None = None,
+        steps_before: tuple[StepResult, ...] = (),
         resources: Mapping[str, object] | None = None,
     ) -> None:
         self.root = root
@@ -319,6 +321,7 @@ class _Session:
             record_failed_attempts=record_failed_attempts,
             acceptance_rules={"max_drawdown": 0.25},
             budget_used=budget_used or BudgetUsed(),
+            steps_before=steps_before,
         )
         self.tree = StepTree(root / "steps")
         self.evaluator = _Evaluator(
@@ -1010,6 +1013,71 @@ class BatchValidateRunTest(unittest.TestCase):
             assert resume is not None
             self.assertEqual(resume.budget_used.replay_years, 2)
             resumed = _Session(root / "next", budget_used=resume.budget_used)
+            self.assertEqual(resumed.backtest.replay_years_used, 2)
+            self.assertEqual(resumed.backtest.replay_years_remaining, 46)
+
+    def test_a_resume_keeps_the_replay_years_of_a_validation_the_trace_never_saw(
+        self,
+    ) -> None:
+        """A batch records its candidates one at a time and each one is durable
+        at once, while the cumulative budget block only reaches the trace when
+        the whole call settles. An attempt killed between the two leaves Steps
+        the trace does not account for, and the session that resumes it must
+        still treat their replay-years as spent instead of handing them back."""
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            experiment = root / "experiment_dir"
+            session = _Session(root, experiment_dir=experiment)
+            session.candidate("a", _strategy("1"))
+            session.candidate("b", _strategy("22"))
+            record_validation = session.backtest.record_validation
+            recorded: list[str] = []
+
+            def killed_after_the_first_record(*args: object, **kwargs: object) -> str:
+                if recorded:
+                    raise MemoryError("the attempt was killed inside batch_validate")
+                recorded.append(record_validation(*args, **kwargs))
+                return recorded[-1]
+
+            session.backtest.record_validation = killed_after_the_first_record
+            with self.assertRaises(MemoryError):
+                session.call("a", "b", span="Y1..Y2")
+            # Four replay-years were reserved and one candidate is durable.
+            self.assertEqual(session.backtest.replay_years_used, 4)
+            steps = load_recorded_steps(experiment)
+            self.assertEqual([step.span for step in steps], ["Y1..Y2"])
+            # The trace of a killed attempt stops at its last settled call, so
+            # the batch it charged is nowhere in it.
+            trace = agent_trace_path(experiment / "artifacts", "run_batch")
+            trace.parent.mkdir(parents=True, exist_ok=True)
+            trace.write_text(
+                json.dumps(
+                    {
+                        "event_type": "llm_call",
+                        "ts": "2026-09-15T01:00:00+00:00",
+                        "budget_used": BudgetUsed(llm_calls=1).to_record(),
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            resume = resume_state(
+                experiment,
+                [
+                    {
+                        "record_type": "attempt_failed",
+                        "phase": RESEARCH_STAGE,
+                        "run_id": "run_batch",
+                        "error": "the run marker of a killed attempt",
+                    }
+                ],
+            )
+            assert resume is not None
+            self.assertEqual(resume.budget_used.replay_years, 0)
+            resumed = _Session(
+                root / "next", budget_used=resume.budget_used, steps_before=steps
+            )
             self.assertEqual(resumed.backtest.replay_years_used, 2)
             self.assertEqual(resumed.backtest.replay_years_remaining, 46)
 

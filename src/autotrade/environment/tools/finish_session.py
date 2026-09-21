@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass
 
 from autotrade.environment.step_tree import StepTree, node_in_session
 
-from .base import ToolError, ToolResult, ToolSpec
+from .base import AGENT_JUSTIFICATION_MAX_CHARS, ToolError, ToolResult, ToolSpec
 
 # The outcomes the Agent may state; the Pipeline's SESSION_OUTCOMES adds the
 # host-recorded ``deadline``.
@@ -18,9 +18,10 @@ FINISH_OUTCOMES = ("freeze", "no_edge")
 EARLY_FINISH_BUDGET_FRACTION = 1 / 3
 # One ``reason`` serves every justification -- the evidence behind ending the
 # arm, and the account of an early freeze -- and a one-word reason is none of
-# them.
+# them. Its upper bound is the shared one every Agent-written justification
+# gets, so the reason and a candidate's hypothesis cannot drift apart.
 REASON_MIN_CHARS = 40
-REASON_MAX_CHARS = 500
+REASON_MAX_CHARS = AGENT_JUSTIFICATION_MAX_CHARS
 
 # The freeze gate as the Pipeline would read one node of this session now:
 # ``passed``, ``reasons`` (named in ``pipelines/verdict.py``) and the gate's
