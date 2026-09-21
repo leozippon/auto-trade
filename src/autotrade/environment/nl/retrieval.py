@@ -160,10 +160,21 @@ class TextRetriever:
             self.index_path.is_dir() and any(self.index_path.glob("*.parquet"))
         )
 
-    def visible_index(self) -> pd.DataFrame:
-        """Index rows whose ``available_at`` has passed at ``self.as_of``."""
+    def _refresh_index(self) -> None:
+        """Re-read a directory index the Timeview has appended shards to.
+
+        Every entry point that reads the index runs this first: a retriever
+        lives for the whole replay, so an entry point that skipped it would
+        keep answering from the shard set of the first ``ctx.nl()`` call and
+        silently lose the evidence that became visible afterwards. Re-reading
+        clears the candidate caches, so no answer mixes two index generations.
+        """
         if self.index_path.is_dir() and self._shard_signature() != self._index_signature:
             self._load_index()
+
+    def visible_index(self) -> pd.DataFrame:
+        """Index rows whose ``available_at`` has passed at ``self.as_of``."""
+        self._refresh_index()
         if self._index_source_exists() and "available_at" not in self.index.columns:
             raise ValueError(f"text index has no available_at column: {self.index_path}")
         if self.index.empty or self.as_of is None:
@@ -267,6 +278,7 @@ class TextRetriever:
         """
         if not str(ts_code or "").strip():
             raise ValueError("candidate_evidence_state requires a non-empty ts_code")
+        self._refresh_index()
         key = self._candidate_key(ts_code, company_terms)
         corpus = self._candidate_corpus(key)
         visible = self._visible_candidate_index(corpus, lookback_days=lookback_days)

@@ -305,6 +305,41 @@ class TextRetrieverRollingTest(unittest.TestCase):
             {"f1", "later"},
         )
 
+    def test_the_event_filter_path_picks_up_shards_appended_mid_run(self):
+        """``context.nl(event_filter=...)`` never reaches ``search``: the gate
+        reads the corpus through ``candidate_evidence_state``, which must see
+        the shards the Timeview appends as the replay clock advances and must
+        still hide rows whose ``available_at`` has not passed."""
+
+        index_dir = self._write_index(
+            [("f1", "anns_d", "000001.SZ", "First announcement", "2021-10-01T18:00:00+08:00")],
+            directory=True,
+        )
+        self._write_bodies("anns_d", {"f1": "first body", "later": "later body"})
+        retriever = self._retriever(index_dir)
+        retriever.as_of = datetime(2022, 1, 4, 12, 0, tzinfo=CN_TZ)
+        first = retriever.candidate_evidence_state(
+            "000001.SZ", patterns=("announcement",), lookback_days=3660, max_results=5
+        )
+        self.assertEqual([item["text_id"] for item in first.evidence], ["f1"])
+        # The Timeview appends a shard carrying a row the clock has not reached.
+        self._write_index(
+            [("later", "anns_d", "000001.SZ", "Later announcement", "2022-01-04T18:00:00+08:00")],
+            directory=True,
+        )
+        pending = retriever.candidate_evidence_state(
+            "000001.SZ", patterns=("announcement",), lookback_days=3660, max_results=5
+        )
+        self.assertEqual(pending.match_count, 1)
+        self.assertEqual(pending.revision, first.revision)
+        # Once its available_at has passed, the appended row is evidence.
+        retriever.as_of = datetime(2022, 1, 5, 9, 0, tzinfo=CN_TZ)
+        visible = retriever.candidate_evidence_state(
+            "000001.SZ", patterns=("announcement",), lookback_days=3660, max_results=5
+        )
+        self.assertEqual({item["text_id"] for item in visible.evidence}, {"f1", "later"})
+        self.assertEqual(visible.match_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()
