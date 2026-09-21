@@ -2181,9 +2181,6 @@ function fieldNode(field, inputs) {
         return option;
       }),
     );
-  } else if (field.type === "period") {
-    // Options are cadence-dependent; repopulatePeriodSelects fills them.
-    input = el("select", { class: "period-select" });
   } else if (field.type === "multi") {
     // Checkbox group: multi-selects require ctrl-click and mis-toggle easily.
     const boxes = field.choices.map((choice) => {
@@ -5378,6 +5375,12 @@ function styleCard(expId, result) {
   )
     .then((payload) => {
       host.querySelector(".hint").remove();
+      // The result exists but carries no style artifact: an expected state the
+      // backend states outright, not a load failure.
+      if (payload.available === false) {
+        host.append(el("div", { class: "hint" }, "无风格归因数据"));
+        return;
+      }
       const reg = payload.benchmark_regression || {};
       const style = payload.style || {};
       const tiles = presentTiles([
@@ -5451,10 +5454,8 @@ function styleCard(expId, result) {
       }
     })
     .catch((error) => {
-      const missing = /没有已落盘|404/.test(error.message);
-      host.append(
-        el("div", { class: "hint" }, missing ? "无风格归因数据" : `加载失败：${error.message}`),
-      );
+      host.querySelector(".hint")?.remove();
+      host.append(el("div", { class: "hint" }, `加载失败：${error.message}`));
     });
   return host;
 }

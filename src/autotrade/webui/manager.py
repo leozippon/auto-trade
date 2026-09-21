@@ -49,19 +49,15 @@ from .public_identity import PublicIdentity
 from .registry import experiment_state, read_ledger_records, worker_log_ref
 
 # Parallel-run ceiling for the console: a create or a resume past this is
-# refused. Host memory is what binds, not the model gateway: six arms held
-# ~308 GiB of runner RSS between them, and with their strategy containers
-# (8 GiB each) and the resident vLLM on top the 503 GiB host went 245 GiB
-# into swap and stayed there. That is not a slowdown the experiments absorb
-# quietly -- 28 slot-bearing backtest calls across five arms died at the fit
-# or inference cap in one day, so host contention was being billed to the
-# strategies as Validation verdicts. Four arms also fit the model service: in
-# production its aggregate generation throughput levels off at about 8
-# concurrent requests (~150 tok/s), while four parent conversations with their
-# sub-agent fan-out (at most 4 concurrent each) run 3-5 requests at a time
-# (p50/p90) and use about half of that throughput, so the gateway is not what
-# binds at four. The operator holds concurrency at four;
-# a new direction therefore replaces the weakest running arm rather than adding one.
+# refused. Runner memory no longer binds (four runners hold 1-3 GiB each
+# since evaluation slots stream instead of decoding whole); what four arms
+# share is the local model service and the host's page cache and IO. In
+# production the service's aggregate generation throughput levels off at about
+# 8 concurrent requests (~150 tok/s), while four parent conversations with
+# their sub-agent fan-out (at most 4 concurrent each) run 3-5 requests at a
+# time (p50/p90) and use about half of that. The operator holds concurrency at
+# four; a new direction therefore replaces the weakest running arm rather than
+# adding one. Measured rationale: docs/deployment-documentation.md.
 MAX_RUNNING_EXPERIMENTS = 4
 # SIGTERM graces before the worker's process group is SIGKILLed. Terminate is
 # an explicit stop, so it stays short; restart has to outwait the in-flight

@@ -596,7 +596,7 @@ class DefaultsDriftTest(unittest.TestCase):
                 actual = field["default"]
                 if isinstance(expected, tuple):
                     expected = list(expected)
-                if field.get("type") in {"string", "period", "time", "text"}:
+                if field.get("type") in {"string", "time", "text"}:
                     # A text field with no console default renders as an empty box.
                     expected = expected or ""
                     actual = actual or ""

@@ -129,6 +129,35 @@ def test_a_frozen_arm_is_sealed_until_its_verdict_exists(tmp_path: Path) -> None
     assert (directory / "artifacts/results" / running).is_dir()
 
 
+def test_a_result_without_a_style_sidecar_is_not_an_unknown_result(tmp_path: Path) -> None:
+    """"This result has no style artifact" is an expected state of a real
+    result -- one recorded before style analysis existed, one written under an
+    older schema -- and the console has to tell it from "no such result". The
+    two must differ in the payload, never only in the wording of an error."""
+
+    directory = build_arm(tmp_path, "arm", "graduated")
+    client = TestClient(create_app(tmp_path, tmp_path))
+    name = experiment_detail(tmp_path, "arm")["frozen"]["result"]
+    present = client.get(f"/api/experiments/arm/results/{name}/style")
+    assert present.status_code == 200
+    assert present.json()["available"] is True
+
+    sidecar = directory / "artifacts/results" / name / "style_analysis.json"
+    sidecar.unlink()
+    absent = client.get(f"/api/experiments/arm/results/{name}/style")
+    assert absent.status_code == 200
+    assert absent.json() == {"available": False, "reason": "no_style_artifact"}
+
+    sidecar.write_text(json.dumps({"schema_version": 0, "mode": "valid"}), encoding="utf-8")
+    stale = client.get(f"/api/experiments/arm/results/{name}/style")
+    assert stale.status_code == 200
+    assert stale.json() == {"available": False, "reason": "no_style_artifact"}
+
+    unknown = client.get("/api/experiments/arm/results/valid_absent/style")
+    assert unknown.status_code == 404
+    assert unknown.json()["detail"] == "unknown result: valid_absent"
+
+
 @pytest.mark.parametrize("status", ["graduated", "discarded"])
 def test_the_verdict_opens_the_forward_replay(tmp_path: Path, status: str) -> None:
     build_arm(tmp_path, "arm", status)

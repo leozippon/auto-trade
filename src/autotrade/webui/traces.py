@@ -25,6 +25,10 @@ _BLOCK_ERROR_CHARS = 240
 _BLOCK_ARGUMENT_CHARS = 600
 _BLOCK_RESULT_CHARS = 1_200
 SUBAGENT_TASK_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+# What a dead writer's unterminated trailing bytes are reported as. They are
+# never decoded: a torn record is not an event, and passing it through
+# ``_decode_event`` would present whatever parses as one.
+_TRUNCATED_TAIL = "<truncated final event: {count} bytes>"
 _TERMINAL_SUBAGENT = frozenset(
     {"completed", "exhausted", "timeout", "error", "cancelled"}
 )
@@ -67,13 +71,32 @@ def read_initial_prompt(path: Path) -> dict[str, object]:
     raise KeyError("trace contains no initial prompt")
 
 
+def trace_writer_alive(experiment_dir: Path) -> bool:
+    """Whether the process that owns this experiment's trace is still writing.
+
+    The same liveness the SSE tail ends on, so a paginating client and a
+    streaming one agree on when a trace can no longer grow.
+    """
+
+    return status_pid_alive(read_status(Path(experiment_dir) / "hitl/status.json"))
+
+
 def read_trace_page(
     path: Path,
     *,
     offset: int = 0,
     max_bytes: int = DEFAULT_PAGE_BYTES,
+    writer_alive: bool = True,
 ) -> dict[str, object]:
-    """Read complete events from a byte offset; leave a partial live tail unread."""
+    """Read complete events from a byte offset; leave a partial live tail unread.
+
+    ``writer_alive`` is the liveness of the process that owns the trace. While
+    it writes, trailing bytes with no terminator are an event in flight, so the
+    page reports no progress and the caller polls again. Once that process is
+    gone the bytes will never be terminated — a write torn by ENOSPC or a kill
+    mid-``write`` leaves exactly this — so the page must end instead of letting
+    a client poll a dead file forever.
+    """
 
     path = Path(path)
     size = path.stat().st_size
@@ -96,6 +119,12 @@ def read_trace_page(
                         "eof": next_offset >= size,
                     }
     if consumed <= 0:
+        if chunk and not writer_alive:
+            return {
+                "events": [{"raw": _TRUNCATED_TAIL.format(count=size - offset)}],
+                "next_offset": size,
+                "eof": True,
+            }
         return {
             "events": [],
             "next_offset": offset,
@@ -111,8 +140,14 @@ def read_trace_tail(
     *,
     max_events: int,
     max_bytes: int = MAX_TAIL_BYTES,
+    writer_alive: bool = True,
 ) -> dict[str, object]:
-    """Return a bounded tail plus the byte offset where live tailing can resume."""
+    """Return a bounded tail plus the byte offset where live tailing can resume.
+
+    ``writer_alive`` carries the same meaning as in :func:`read_trace_page`: a
+    dead writer's unterminated trailing bytes end the read as a marked
+    truncation instead of holding the resume offset short of EOF forever.
+    """
 
     path = Path(path)
     size = path.stat().st_size
@@ -134,6 +169,10 @@ def read_trace_tail(
     selected = lines[-max(1, int(max_events)) :]
     events = [_decode_event(line) for line in selected if line.strip()]
     next_offset = start + complete_bytes
+    torn = len(blob) - complete_bytes
+    if torn and not writer_alive:
+        events.append({"raw": _TRUNCATED_TAIL.format(count=torn)})
+        next_offset = size
     return {
         "events": events,
         "next_offset": next_offset,
@@ -148,11 +187,12 @@ def read_trace_blocks(
     offset: int = 0,
     max_bytes: int | None = None,
     tail_events: int | None = None,
+    writer_alive: bool = True,
 ) -> dict[str, object]:
     """Project a page or tail of raw events into display blocks. JSONL is unchanged."""
 
     if tail_events is not None:
-        page = read_trace_tail(path, max_events=tail_events)
+        page = read_trace_tail(path, max_events=tail_events, writer_alive=writer_alive)
     else:
         size = Path(path).stat().st_size
         remaining = max(size - max(0, int(offset)), 0)
@@ -161,7 +201,9 @@ def read_trace_blocks(
         else:
             window = max(1, int(max_bytes))
         window = min(window, MAX_BLOCK_READ_BYTES)
-        page = read_trace_page(path, offset=offset, max_bytes=window)
+        page = read_trace_page(
+            path, offset=offset, max_bytes=window, writer_alive=writer_alive
+        )
     events = page.get("events")
     if not isinstance(events, list):
         events = []

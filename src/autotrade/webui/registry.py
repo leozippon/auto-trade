@@ -977,15 +977,25 @@ def ledger_result(root: Path, experiment_id: str, name: str) -> Path:
 
 
 def result_style(root: Path, experiment_id: str, name: str) -> dict[str, object]:
-    """The canonical style sidecar of one ledger-named result."""
+    """The canonical style sidecar of one ledger-named result.
+
+    A name no ledger record carries raises ``KeyError`` and the route answers
+    404. A named result that carries no usable sidecar — one recorded before
+    style analysis existed, or written under an older schema — is an expected
+    state, not a failure, so it answers ``available: false`` the way the
+    sidecar's own sections report an unavailable figure. The console can then
+    tell "nothing to show" from "no such result" without reading an error
+    message.
+    """
 
     sidecar = ledger_result(root, experiment_id, name).parent / STYLE_ARTIFACT_NAME
     try:
         payload = read_json(sidecar)
-    except (OSError, TypeError, ValueError) as exc:
-        raise KeyError("该结果没有已落盘的风格归因") from exc
+    except (OSError, TypeError, ValueError):
+        return {"available": False, "reason": "no_style_artifact"}
     if payload.get("schema_version") != STYLE_SCHEMA_VERSION or payload.get("mode") not in _RESULT_MODES:
-        raise KeyError("该结果没有已落盘的风格归因")
+        return {"available": False, "reason": "no_style_artifact"}
+    payload["available"] = True
     return payload
 
 

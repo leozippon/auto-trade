@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -12,6 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from autotrade.environment.identity import AgentRefStore
+from autotrade.pipelines.hitl_state import proc_start_ticks
 from autotrade.webui import traces
 from autotrade.webui.public_identity import PublicIdentity
 from autotrade.webui.server import create_app
@@ -1018,6 +1020,63 @@ def test_trace_blocks_api_guards_invalid_experiment_and_run(tmp_path: Path) -> N
         params={"run_id": identity.run_ref("run_missing")},
     )
     assert missing_run.status_code == 404
+
+
+def _claim_writer(experiment_dir: Path, *, alive: bool) -> None:
+    """Own the trace from this process, or from nobody at all."""
+
+    status: dict[str, object] = {"schema_version": 1, "state": "running"}
+    if alive:
+        status["pid"] = os.getpid()
+        status["pid_start_ticks"] = proc_start_ticks(os.getpid())
+    (experiment_dir / "hitl" / "status.json").write_text(
+        json.dumps(status), encoding="utf-8"
+    )
+
+
+def test_a_torn_tail_ends_pagination_once_its_writer_is_gone(tmp_path: Path) -> None:
+    """Trailing bytes with no newline mean "an event is still being written"
+    only while the writer lives. A write torn by ENOSPC or a kill leaves the
+    same bytes forever, so a dead run's page must reach EOF instead of
+    answering zero progress to every poll -- and the fragment is reported as a
+    truncation, never decoded into an event."""
+
+    events = [{"event_type": "llm_call", "content": "one"}]
+    identity = _experiment_with_trace(tmp_path, events)
+    root = tmp_path / "experiments" / "demo"
+    trace = root / "artifacts" / "traces" / "run_001.jsonl"
+    complete = trace.stat().st_size
+    with trace.open("a", encoding="utf-8") as handle:
+        handle.write('{"event_type": "llm_call", "content": "tor')
+    size = trace.stat().st_size
+    marker = f"<truncated final event: {size - complete} bytes>"
+
+    live = traces.read_trace_page(trace, offset=complete, writer_alive=True)
+    assert live == {"events": [], "next_offset": complete, "eof": False}
+    live_tail = traces.read_trace_tail(trace, max_events=10, writer_alive=True)
+    assert live_tail["next_offset"] == complete and live_tail["eof"] is False
+    assert [event.get("content") for event in live_tail["events"]] == ["one"]
+
+    dead = traces.read_trace_page(trace, offset=complete, writer_alive=False)
+    assert dead == {"events": [{"raw": marker}], "next_offset": size, "eof": True}
+    dead_tail = traces.read_trace_tail(trace, max_events=10, writer_alive=False)
+    assert dead_tail["next_offset"] == size and dead_tail["eof"] is True
+    assert [event.get("content") for event in dead_tail["events"]] == ["one", None]
+    assert dead_tail["events"][-1] == {"raw": marker}
+    assert "tor" not in json.dumps(dead_tail["events"], ensure_ascii=False)
+
+    # The route decides liveness the way the SSE tail does, from hitl/status.json.
+    client = TestClient(create_app(tmp_path))
+    params = {"run_id": identity.trace_ref("run_001"), "offset": complete}
+    _claim_writer(root, alive=True)
+    running = client.get("/api/experiments/demo/trace/blocks", params=params).json()
+    assert running["eof"] is False and running["next_offset"] == complete
+    assert running["blocks"] == []
+    _claim_writer(root, alive=False)
+    ended = client.get("/api/experiments/demo/trace/blocks", params=params).json()
+    assert ended["eof"] is True and ended["next_offset"] == size
+    assert [block["kind"] for block in ended["blocks"]] == ["raw"]
+    assert ended["blocks"][0]["text"] == marker
 
 
 def test_project_subagent_running_card_accumulates_progress() -> None:
