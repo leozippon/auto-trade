@@ -46,6 +46,10 @@ _READY_SEQUENCE = -1
 # import failure before the first read, a line the worker could not parse at
 # all), so neither is held to the sequence check that every other message is.
 _WORKER_ERROR_TYPES = frozenset({"error", "protocol_error"})
+# What ``docker run`` reports when the container's main process was SIGKILLed.
+# With swap pinned to the memory cap (``SandboxLimits.memory``) that is what
+# the container's own memory boundary looks like from here.
+_SIGKILL_EXIT_CODE = 137
 # Container-side path of the read-only strategy package (the directory that
 # holds main.py), and of the read-only data roots and the per-replay state
 # directory, which is read-only for generate_orders and read-write for fit.
@@ -348,7 +352,11 @@ class DockerStrategyExecutor:
             limits.shm_size,
             "--cpus",
             f"{limits.cpus:g}",
+            # Swap ceiling equal to the memory cap: see ``SandboxLimits.memory``
+            # for why the two are the same number.
             "--memory",
+            limits.memory,
+            "--memory-swap",
             limits.memory,
             "--pids-limit",
             str(limits.pids),
@@ -794,6 +802,21 @@ class DockerStrategyExecutor:
                 chunk = os.read(fd, min(4096, self.config.limits.max_output_chars + 1))
                 if not chunk:
                     code = process.poll()
+                    if code == _SIGKILL_EXIT_CODE:
+                        # Name the boundary instead of a bare signal number: in
+                        # a container with no network and no capabilities, whose
+                        # host side only kills it on a deadline it has already
+                        # reported, the memory cap is what kills a worker this
+                        # way. The cgroup goes with the container (``--rm``), so
+                        # this run also has no peak to read -- say so, rather
+                        # than leave the session comparing its fit against the
+                        # surviving container's figure.
+                        raise BrokenPipeError(
+                            f"strategy worker was killed before a response (exit {code}, "
+                            f"SIGKILL): the container's {self.config.limits.memory} memory "
+                            "cap is what kills a worker this way, and its cgroup is gone "
+                            "with the container, so this run reports no peak memory"
+                        )
                     raise BrokenPipeError(f"strategy worker exited before a response (code={code})")
                 self._stdout_buffer.extend(chunk)
 

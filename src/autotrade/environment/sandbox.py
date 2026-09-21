@@ -74,6 +74,12 @@ class SandboxLimits:
     # replay enforces, instead of extrapolating from its own container to a
     # larger one; the pair is published as the run facts ``budgets.strategy_cpus``
     # and ``budgets.strategy_memory_bytes``.
+    # Both containers also pass ``memory`` as ``--memory-swap``, which is what
+    # makes the cap a boundary rather than a slope: Docker's default grants a
+    # container as much swap again, and it then pages instead of failing. Two
+    # session sandboxes measured on 2026-09-21 sat at exactly 8 GiB of
+    # ``memory.peak`` with 4.4 and 1.4 GiB swapped out over thousands of
+    # reclaim events, neither of them OOM-killed.
     cpus: float = 8.0
     memory: str = "8g"
     # A fork-bomb guard, not a budget: one worker with torch, LightGBM and
@@ -416,7 +422,10 @@ class DockerSandbox:
             self.spec.docker_executable, "run", "--pull", "never", "--detach", "--init",
             "--name", self.container, "--network", "none", "--user", self.spec.user,
             "--read-only", "--tmpfs", f"/tmp:rw,nosuid,nodev,size={self.spec.tmpfs_size}",
+            # Swap ceiling equal to the memory cap: see ``SandboxLimits.memory``
+            # for why the two are the same number.
             "--cpus", f"{self.spec.cpus:g}", "--memory", self.spec.memory,
+            "--memory-swap", self.spec.memory,
             "--pids-limit", str(self.spec.pids_limit), "--ulimit", "core=0:0",
             "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
         ]

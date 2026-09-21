@@ -211,6 +211,33 @@ def test_both_containers_cap_numeric_threads_from_the_same_cpu_quota(tmp_path: P
     assert tiny["OMP_NUM_THREADS"] == "1"
 
 
+def test_both_containers_pin_swap_to_their_memory_cap(tmp_path: Path):
+    """Docker's default grants a container as much swap again as its memory
+    cap, and the cap then degrades into paging: two live session sandboxes were
+    measured sitting at exactly their 8 GiB peak with GiB of anonymous memory
+    swapped out and no OOM kill. The published cap has to be the boundary, so
+    both containers pass it as ``--memory-swap`` as well -- the same value, not
+    a second literal that can drift from it."""
+
+    local = LocalSandbox(tmp_path / "session")
+    local.prepare_layout()
+    session = DockerSandbox(local, SandboxSpec(memory="3g", gpu=None)).docker_command()
+    assert session[session.index("--memory") + 1] == "3g"
+    assert session[session.index("--memory-swap") + 1] == "3g"
+
+    package = tmp_path / "package"
+    package.mkdir()
+    strategy = _strategy(package)
+    with patch.object(DockerStrategyExecutor, "_start"):
+        executor = DockerStrategyExecutor(
+            strategy, SandboxConfig(limits=SandboxLimits(memory="5g"))
+        )
+    command = executor.docker_command()
+    assert command[command.index("--memory") + 1] == "5g"
+    assert command[command.index("--memory-swap") + 1] == "5g"
+    executor.close()
+
+
 def test_persistent_sandbox_renders_a_quoted_device_list(tmp_path: Path):
     """Docker parses an unquoted ``device=0,1`` as one id plus a device count
     and refuses the request; the quotes are part of the argument."""
@@ -1717,6 +1744,32 @@ def test_worker_exit_before_response_is_reaped_and_cleared():
     assert executor._stderr_thread is None
     assert all(pipe is not None and pipe.closed for pipe in pipes)
     remove.assert_called_once()
+
+
+def test_a_worker_killed_before_a_response_names_the_memory_cap():
+    """Exit 137 is what the container's memory boundary looks like from the
+    host once swap is pinned to the cap. A bare signal number would leave the
+    session guessing, and ``--rm`` takes the cgroup with the container, so the
+    failure is also the only place that says this run has no peak to read."""
+
+    process = subprocess.Popen(
+        [sys.executable, "-c", "raise SystemExit(137)"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert process.wait(timeout=30) == 137
+    executor = _executor_for_process(process, limits=SandboxLimits(memory="5g"))
+    try:
+        with pytest.raises(BrokenPipeError) as error:
+            executor._read_line(time.monotonic() + 5)
+        message = str(error.value)
+        assert "killed before a response (exit 137, SIGKILL)" in message
+        assert "5g memory cap" in message
+        assert "no peak memory" in message
+    finally:
+        with patch.object(executor, "_remove_container"):
+            executor.close()
 
 
 def test_close_reaps_worker_closes_pipes_and_is_idempotent():

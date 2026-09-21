@@ -53,6 +53,8 @@ SMOKE_PROBE_NOTE = (
     "提交整期批次之前先用 `start` 指定研究期靠后的一个交易日再冒烟一次，"
     "拿返回的 `resources.fit_seconds`、`peak_memory_bytes` 对照 `strategy_fit_timeout_seconds`"
     "（并发放大见 `batch_validate_fit_timeout_note`）与 `strategy_memory_bytes`。"
+    "内存上限没有 swap 余量：越界即容器被 OOM kill（exit 137），该次调用显式失败、"
+    "也拿不到峰值读数，所以峰值要留余量而不是贴着上限跑。"
 )
 
 # Where the read roots are in the Sandbox filesystem. The root names are a
