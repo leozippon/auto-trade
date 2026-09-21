@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -106,6 +107,30 @@ from .common import (
 from autotrade.data_quality import build_quality_report, write_quality_report
 from autotrade.environment.data.auction import AuctionCorrectionConfig, market_bucket
 from autotrade.environment.data.units import column_source_units, dataset_rules_records, rules_for
+
+# The one-line summary every audit prints last, and the pattern the cron runner
+# reads it back by (``cron_update.summarize_failure_from_log``, which imports
+# the pattern from here so the two cannot drift). The shape is one token naming
+# the audit, the head below, the status, then ``key=value`` fields with the
+# integer counters first: the failure summary keeps the head and those counters
+# and stops at the first non-integer field, so output paths stay out of the
+# operator-facing message persisted in the job state. Every producer goes
+# through ``audit_summary_line`` so no audit can print a line that summary
+# cannot read -- an unreadable one degrades the job state to a bare return code.
+_AUDIT_SUMMARY_HEAD = "audit status="
+AUDIT_SUMMARY_RE = re.compile(
+    rf"^\S+ {_AUDIT_SUMMARY_HEAD}\S+(?: [a-z_]+=\d+)*", re.MULTILINE
+)
+
+
+def audit_summary_line(name: str, status: str, **fields: object) -> str:
+    """Format one audit's final summary line. ``name`` must be a single token."""
+
+    if not name or name.split() != [name]:
+        raise ValueError(f"audit summary name must be a single token: {name!r}")
+    tail = "".join(f" {key}={value}" for key, value in fields.items())
+    return f"{name} {_AUDIT_SUMMARY_HEAD}{status}{tail}"
+
 
 # Consecutive zero-row partitions at the tail of a zero-tolerant dataset that
 # suggest the feed itself stopped publishing (~3 months of trading days).
@@ -363,7 +388,18 @@ def audit_revision_sentinel(args: argparse.Namespace) -> int:
     status = report["status"]
     has_error = status == "error"
     write_quality_report(output, report)
-    print(f"revision sentinel status={status} events={len(events)} errors={total_errors} remote_zero={total_remote_zero} no_effective_checks={total_no_effective_checks} output={output} ledger={ledger}")
+    print(
+        audit_summary_line(
+            "revision_sentinel",
+            status,
+            events=len(events),
+            errors=total_errors,
+            remote_zero=total_remote_zero,
+            no_effective_checks=total_no_effective_checks,
+            output=output,
+            ledger=ledger,
+        )
+    )
     return 1 if has_error or (events and args.fail_on_revision) else 0
 
 def audit_intraday_by_date(args: argparse.Namespace) -> int:
@@ -470,7 +506,7 @@ def audit_intraday_by_date(args: argparse.Namespace) -> int:
     counts = report["finding_counts"]
     status = report["status"]
     write_quality_report(output, report)
-    print(f"intraday by-date audit status={status} errors={counts['error']} warnings={counts['warning']} output={output}")
+    print(audit_summary_line("intraday_by_date", status, errors=counts["error"], warnings=counts["warning"], output=output))
     return 1 if counts["error"] else 0
 
 def numeric_ratio(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
@@ -597,7 +633,7 @@ def audit_auction_alignment(args: argparse.Namespace) -> int:
     counts = report["finding_counts"]
     status = report["status"]
     write_quality_report(output, report)
-    print(f"auction alignment audit status={status} errors={counts['error']} warnings={counts['warning']} output={output}")
+    print(audit_summary_line("auction_alignment", status, errors=counts["error"], warnings=counts["warning"], output=output))
     return 1 if counts["error"] else 0
 
 def expected_stk_mins_paths(raw_dir: Path, args: argparse.Namespace) -> set[Path]:
@@ -1916,7 +1952,7 @@ def audit_text_only(args: argparse.Namespace) -> int:
     counts = report["finding_counts"]
     status = report["status"]
     write_quality_report(output, report)
-    print(f"text audit status={status} errors={counts['error']} warnings={counts['warning']} output={output}")
+    print(audit_summary_line("text", status, errors=counts["error"], warnings=counts["warning"], output=output))
     return 1 if counts["error"] else 0
 
 def selected_audit_macro_datasets(args: argparse.Namespace) -> list[str]:
@@ -2109,7 +2145,7 @@ def audit_macro_only(args: argparse.Namespace) -> int:
     counts = report["finding_counts"]
     status = report["status"]
     write_quality_report(output, report)
-    print(f"macro audit status={status} errors={counts['error']} warnings={counts['warning']} output={output}")
+    print(audit_summary_line("macro", status, errors=counts["error"], warnings=counts["warning"], output=output))
     return 1 if counts["error"] else 0
 
 def expected_event_paths(raw_dir: Path, spec: EventDataset, start_date: str, end_date: str) -> set[Path]:
@@ -2427,7 +2463,7 @@ def audit_event_flow_only(args: argparse.Namespace) -> int:
     counts = report["finding_counts"]
     status = report["status"]
     write_quality_report(output, report)
-    print(f"event_flow audit status={status} errors={counts['error']} warnings={counts['warning']} output={output}")
+    print(audit_summary_line("event_flow", status, errors=counts["error"], warnings=counts["warning"], output=output))
     return 1 if counts["error"] else 0
 
 def expected_board_paths(raw_dir: Path, spec: BoardTradingDataset, start_date: str, end_date: str, args: argparse.Namespace) -> set[Path]:
@@ -2568,7 +2604,7 @@ def audit_board_trading_only(args: argparse.Namespace) -> int:
     counts = report["finding_counts"]
     status = report["status"]
     write_quality_report(output, report)
-    print(f"board_trading audit status={status} errors={counts['error']} warnings={counts['warning']} output={output}")
+    print(audit_summary_line("board_trading", status, errors=counts["error"], warnings=counts["warning"], output=output))
     return 1 if counts["error"] else 0
 
 def audit_daily_direct(raw_dir: Path, args: argparse.Namespace, add) -> set[str]:
@@ -2668,7 +2704,7 @@ def audit_core_market(args: argparse.Namespace) -> int:
     counts = report["finding_counts"]
     status = report["status"]
     write_quality_report(output, report)
-    print(f"core_market audit status={status} errors={counts['error']} warnings={counts['warning']} output={output}")
+    print(audit_summary_line("core_market", status, errors=counts["error"], warnings=counts["warning"], output=output))
     return 1 if counts["error"] else 0
 
 
@@ -2720,7 +2756,7 @@ def audit_fundamental_raw(args: argparse.Namespace) -> int:
     counts = report["finding_counts"]
     status = report["status"]
     write_quality_report(output, report)
-    print(f"fundamental_raw audit status={status} errors={counts['error']} warnings={counts['warning']} output={output}")
+    print(audit_summary_line("fundamental_raw", status, errors=counts["error"], warnings=counts["warning"], output=output))
     return 1 if counts["error"] else 0
 
 def audit_intraday_only(args: argparse.Namespace) -> int:
@@ -2769,7 +2805,7 @@ def audit_intraday_only(args: argparse.Namespace) -> int:
     counts = report["finding_counts"]
     status = report["status"]
     write_quality_report(output, report)
-    print(f"intraday audit status={status} errors={counts['error']} warnings={counts['warning']} output={output}")
+    print(audit_summary_line("intraday", status, errors=counts["error"], warnings=counts["warning"], output=output))
     return 1 if counts["error"] else 0
 
 

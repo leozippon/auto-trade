@@ -3,12 +3,14 @@
 
 # Source: test_tushare_download_update_guards.py
 import argparse
+import importlib.util
 import io
 import json
 import os
 import sys
 import tempfile
 import threading
+import traceback
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta
@@ -6319,6 +6321,99 @@ class FailureSummaryTest(unittest.TestCase):
                 cron_update.summarize_failure_from_log(Path(tmp) / "missing.log", 7),
                 "job_returncode=7",
             )
+
+    def test_every_producers_own_summary_line_is_read_back(self) -> None:
+        """Written with the producers' own formatter, not look-alikes: the
+        summaries that used to be dropped are the ones whose name is two words
+        or whose counters are not errors/warnings, and dropping them left the
+        operator with a bare return code on the two jobs that fail most."""
+
+        lines = [
+            audit.audit_summary_line(
+                "core_market", "warning", errors=0, warnings=7, output="/s/core.json"
+            ),
+            audit.audit_summary_line(
+                "intraday_by_date", "error", errors=1, warnings=0, output="/s/intraday.json"
+            ),
+            audit.audit_summary_line(
+                "revision_sentinel",
+                "error",
+                events=27,
+                errors=0,
+                remote_zero=0,
+                no_effective_checks=0,
+                output="/s/revision.json",
+                ledger="/s/revision.jsonl",
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "run.log"
+            log.write_text("started_at=x\n" + "\n".join(lines) + "\n", encoding="utf-8")
+            summary = cron_update.summarize_failure_from_log(log, 1)
+        self.assertIn("core_market audit status=warning errors=0 warnings=7", summary)
+        self.assertIn("intraday_by_date audit status=error errors=1 warnings=0", summary)
+        self.assertIn(
+            "revision_sentinel audit status=error events=27 errors=0 remote_zero=0"
+            " no_effective_checks=0",
+            summary,
+        )
+        # Paths belong in the log, not in the one line a job state persists.
+        self.assertNotIn("output=", summary)
+        self.assertNotIn("ledger=", summary)
+
+    def test_an_audit_name_of_two_words_is_refused_at_the_formatter(self) -> None:
+        with self.assertRaisesRegex(ValueError, "single token"):
+            audit.audit_summary_line("intraday by-date", "ok", errors=0, warnings=0)
+
+    def test_the_pit_event_entrypoint_lets_its_failure_reach_the_log(self) -> None:
+        """The nightly PIT event job prints no audit summary, so its failures
+        can only reach the job state as the exception line a traceback ends on.
+        Catching every exception and reprinting it as one-line JSON hid that
+        line and left the operator with a bare return code."""
+
+        spec = importlib.util.spec_from_file_location(
+            "build_pit_events_failure_path", Path("scripts/data/build_pit_events.py")
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as tmp:
+            argv = [
+                "build_pit_events.py",
+                "build-fundamental-events",
+                "--raw-dir",
+                str(Path(tmp) / "raw"),
+                "--output-root",
+                str(Path(tmp) / "events"),
+                "--start-date",
+                "20200101",
+                "--end-date",
+                "20200131",
+            ]
+            failure = RuntimeError("refusing to replace the window with an empty build")
+            with (
+                patch.object(module, "run_build_fundamental_events", side_effect=failure),
+                patch.object(sys, "argv", argv),
+                self.assertRaises(RuntimeError),
+            ):
+                module.main()
+            log = Path(tmp) / "run.log"
+            log.write_text(
+                "".join(traceback.format_exception(failure)), encoding="utf-8"
+            )
+            self.assertEqual(
+                cron_update.summarize_failure_from_log(log, 1),
+                "RuntimeError: refusing to replace the window with an empty build",
+            )
+
+    def test_no_audit_hand_formats_its_own_summary_line(self) -> None:
+        """One contract, one formatter. A producer that builds the line itself
+        is how the summary became unreadable in the first place."""
+
+        source = Path(audit.__file__).read_text(encoding="utf-8")
+        self.assertEqual(
+            [line.strip() for line in source.splitlines() if "audit status=" in line],
+            ['_AUDIT_SUMMARY_HEAD = "audit status="'],
+        )
 
 
 class CorruptSidecarTest(unittest.TestCase):

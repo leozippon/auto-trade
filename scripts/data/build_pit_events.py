@@ -58,11 +58,12 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
     _refuse_manual_production_write(args)
-    try:
-        result = args.handler(args)
-    except Exception as exc:  # noqa: BLE001
-        print(json.dumps({"status": "error", "message": str(exc)}, ensure_ascii=False), file=sys.stderr)
-        return 1
+    # A failure is not caught and reprinted here. The cron runner summarizes a
+    # failed job from its own log by the exception line a traceback ends on
+    # (data_sources/tushare/cron_update.py), and rewriting the exception as a
+    # one-line JSON object hid both that line and the stack from it, leaving
+    # the persisted job state with nothing but a return code.
+    result = args.handler(args)
     print(json.dumps({"status": "ok", **result}, ensure_ascii=False, sort_keys=True, default=str))
     return 0
 

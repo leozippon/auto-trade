@@ -24,6 +24,7 @@ from autotrade.environment.data.contracts import (
     RAW_GENERATION_FILENAME,
 )
 
+from .audit import AUDIT_SUMMARY_RE
 from .common import (
     MUTATED_NOT_READY_RETRY_EXIT_CODE,
     NO_MUTATION_RETRY_EXIT_CODE,
@@ -732,11 +733,13 @@ def log_outcome(log_path: Path, record: dict) -> None:
         log.write(line + "\n")
 
 
-# One line per finished audit domain (tushare_audit.py's summary print), and
-# the final "SomeError: ..." line of a traceback. Both are matched against the
-# run's own log so the persisted job state can tell "the audit completed and
-# found data errors" apart from "the tool crashed".
-_AUDIT_SUMMARY_RE = re.compile(r"^\S+ audit status=\S+ errors=\d+ warnings=\d+", re.MULTILINE)
+# One line per finished audit domain (audit.py's summary print, whose format
+# and pattern are defined there so producer and parser cannot drift), and the
+# final "SomeError: ..." line of a traceback. Both are matched against the run's
+# own log so the persisted job state can tell "the audit completed and found
+# data errors" apart from "the tool crashed". A command that prints neither is
+# what leaves an operator with a bare return code, so every job's tooling must
+# end on one of the two.
 _EXCEPTION_LINE_RE = re.compile(r"^[\w.]*(?:Error|Exception): .*$", re.MULTILINE)
 
 
@@ -746,7 +749,7 @@ def summarize_failure_from_log(log_path: Path, returncode: int) -> str:
         text = log_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return f"job_returncode={returncode}"
-    summaries = _AUDIT_SUMMARY_RE.findall(text)
+    summaries = AUDIT_SUMMARY_RE.findall(text)
     if summaries:
         return "; ".join(summaries)[:600]
     exceptions = _EXCEPTION_LINE_RE.findall(text)
