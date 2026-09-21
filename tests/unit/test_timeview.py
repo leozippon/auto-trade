@@ -793,6 +793,7 @@ def _roll_events_across_a_boundary(root: Path, host: str) -> dict[str, bytes]:
         view.refresh(_when(instant))
     view.continue_into(
         lambda: _events_rows(root, f"{host}_b", _events_slot(["20220106", "20220107"], scores=True)),
+        universe_file=None,  # this snapshot family has no universe domain
         replay_text_library_dir=None,
         stash_dir=None,
     )
@@ -880,6 +881,103 @@ def test_an_incremental_domain_takes_partitions_only(tmp_path: Path) -> None:
             replay=replay,
             incremental_domains={"intraday_1min"},
         )
+
+
+# Two universe vintages a year apart, as the decision snapshots of two
+# consecutive slots carry them: one rename into ST, one industry
+# reclassification, one code listed inside the first slot.
+_VINTAGE_A = [
+    {"ts_code": TS, "name": "平安银行", "l1_name": "银行"},
+    {"ts_code": "600705.SH", "name": "中航资本", "l1_name": "非银金融"},
+]
+_VINTAGE_B = [
+    {"ts_code": TS, "name": "*ST平安", "l1_name": "银行"},
+    {"ts_code": "600705.SH", "name": "中航资本", "l1_name": "综合"},
+    {"ts_code": "301263.SZ", "name": "泰恩康", "l1_name": "医药生物"},
+]
+
+
+def _vintage(path: Path, rows: list[dict[str, object]]) -> Path:
+    _write(path, pd.DataFrame(rows))
+    return path
+
+
+def _universe_view(root: Path, host: str = "asof") -> tuple[Timeview, Path]:
+    """A view over slot A whose snapshot carries vintage A, plus vintage B on disk."""
+
+    snapshot = _events_snapshot(root)
+    _vintage(snapshot / "universe.parquet", _VINTAGE_A)
+    view = Timeview(
+        host_dir=root / host,
+        snapshot_dir=snapshot,
+        replay=_events_rows(root, f"{host}_a", _events_slot(["20220104", "20220105"], scores=False)),
+    )
+    return view, _vintage(root / f"{host}_b" / "universe.parquet", _VINTAGE_B)
+
+
+def _continue(view: Timeview, root: Path, host: str, universe_file: Path | None) -> None:
+    view.continue_into(
+        lambda: _events_rows(root, f"{host}_next", _events_slot(["20220106"], scores=True)),
+        universe_file=universe_file,
+        replay_text_library_dir=None,
+        stash_dir=None,
+    )
+
+
+def test_the_universe_rolls_to_the_vintage_of_the_slot_being_opened(tmp_path: Path) -> None:
+    """Crossing a slot boundary shows the names, ST flags, industries and
+    listings of that slot's anchor -- as one vintage, not two concatenated."""
+
+    view, vintage_b = _universe_view(tmp_path)
+    asof, before = view.refresh(_when("2022-01-05 09:10:00"))
+    frozen = pd.read_parquet(Path(asof) / "universe")
+    assert list(frozen["ts_code"]) == [TS, "600705.SH"]
+    assert frozen.loc[frozen["ts_code"] == TS, "name"].item() == "平安银行"
+
+    _continue(view, tmp_path, "asof", vintage_b)
+    asof, after = view.refresh(_when("2022-01-06 09:10:00"))
+    rolled = pd.read_parquet(Path(asof) / "universe")
+    assert list(rolled["ts_code"]) == [TS, "600705.SH", "301263.SZ"]  # listed inside slot A
+    assert rolled.loc[rolled["ts_code"] == TS, "name"].item() == "*ST平安"  # renamed inside slot A
+    assert rolled.loc[rolled["ts_code"] == "600705.SH", "l1_name"].item() == "综合"  # reclassified
+    assert len(list((Path(asof) / "universe").glob("*.parquet"))) == 1  # replaced, not appended
+    assert int(after) > int(before)  # a feature cached on the old names is invalidated
+
+
+def test_no_refresh_shows_a_universe_vintage_its_slot_has_not_reached(tmp_path: Path) -> None:
+    """Only opening the next slot publishes that slot's vintage.
+
+    The later vintage is already on disk here; every refresh inside slot A must
+    still show slot A's anchor and nothing dated after it.
+    """
+
+    view, _vintage_b = _universe_view(tmp_path)
+    for instant in ("2022-01-04 09:10:00", "2022-01-05 03:10:00", "2022-01-05 09:10:00", "2022-01-06 09:10:00"):
+        asof, _version = view.refresh(_when(instant))
+        visible = pd.read_parquet(Path(asof) / "universe")
+        assert list(visible["ts_code"]) == [TS, "600705.SH"]
+        assert set(visible["name"]) == {"平安银行", "中航资本"}
+        assert set(visible["l1_name"]) == {"银行", "非银金融"}
+
+
+def test_a_slot_without_a_usable_universe_vintage_is_refused(tmp_path: Path) -> None:
+    """A view that exposes the domain never keeps the previous slot's vintage."""
+
+    view, vintage_b = _universe_view(tmp_path)
+    view.refresh(_when("2022-01-05 09:10:00"))
+    with pytest.raises(ValueError, match="stale names"):
+        _continue(view, tmp_path, "asof", None)
+    with pytest.raises(FileNotFoundError, match="universe vintage is missing"):
+        _continue(view, tmp_path, "asof", tmp_path / "absent" / "universe.parquet")
+    thin = _vintage(tmp_path / "thin" / "universe.parquet", [{"ts_code": TS, "name": "平安银行"}])
+    with pytest.raises(RuntimeError, match=r"drops published columns \['l1_name'\]"):
+        _continue(view, tmp_path, "asof", thin)
+    # The refused rolls left the published vintage untouched.
+    asof, _version = view.refresh(_when("2022-01-05 09:20:00"))
+    assert list(pd.read_parquet(Path(asof) / "universe")["ts_code"]) == [TS, "600705.SH"]
+    _continue(view, tmp_path, "asof", vintage_b)  # and a good vintage still rolls
+    asof, _version = view.refresh(_when("2022-01-06 09:10:00"))
+    assert "301263.SZ" in set(pd.read_parquet(Path(asof) / "universe")["ts_code"])
 
 
 def test_a_part_larger_than_a_row_group_streams_into_the_row_groups_one_write_would_cut(

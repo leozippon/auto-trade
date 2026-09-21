@@ -1855,6 +1855,18 @@ _SPAN_PRICES = {
         "20240105": (5.0, 5.0, 5.3),
     },
 }
+# The as-of universe each decision anchor carries: a vintage table, not an
+# event stream. Between the two anchors 000001.SZ is renamed into ST and
+# 000003.SZ lists, so a replay that never rolls it judges 2024-01-04 on
+# 2023-12-31 names.
+_SPAN_UNIVERSE = {
+    "20231231T235959+0800": (("000001.SZ", "平安银行"), ("000002.SZ", "万科A")),
+    "20240103T235959+0800": (
+        ("000001.SZ", "*ST平安"),
+        ("000002.SZ", "万科A"),
+        ("000003.SZ", "新上市"),
+    ),
+}
 _SPAN_STRATEGY = '''import numpy as np
 import pandas as pd
 
@@ -1886,6 +1898,8 @@ def generate_orders(context):
         seen[name] = len(frame)
     if any(pd.Timestamp(bar["available_at"]) > now for bar in context.bars):
         raise RuntimeError("a future bar is visible")
+    universe = pd.read_parquet(context.asof_dir + "/universe")
+    vintage = sorted(universe["ts_code"] + ":" + universe["name"])
     day = context.inference_at.strftime("%Y%m%d")
     symbol, action, quantity, hour = TRADES[day]
     return [
@@ -1901,6 +1915,7 @@ def generate_orders(context):
             "quantity": 100,
             "execute_at": "2099-01-01T09:30:00+08:00",
             "seen": seen,
+            "universe": vintage,
             "bars": len(context.bars),
             "fits": int(len(np.load(context.state_dir + "/fits.npy"))),
             "cash": context.account.cash,
@@ -1913,6 +1928,13 @@ def generate_orders(context):
 
 def _stamp(day: str, clock: str) -> str:
     return f"{day[:4]}-{day[4:6]}-{day[6:]}T{clock}+08:00"
+
+
+def _write_span_universe(decision_dir: Path, vintage: tuple[tuple[str, str], ...]) -> None:
+    decision_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(list(vintage), columns=["ts_code", "name"]).to_parquet(
+        decision_dir / "universe.parquet", index=False
+    )
 
 
 def _span_frames(days: tuple[str, ...]) -> dict[str, pd.DataFrame]:
@@ -1995,7 +2017,7 @@ def _write_span_release(root: Path) -> tuple[Path, dict[str, Path]]:
                 frame.to_parquet(target / f"{name}.parquet", index=False)
 
     write_frames(snapshot, _span_frames(("20231229",)), minute_groups=None)
-    pd.DataFrame({"ts_code": list(_SPAN_PRICES)}).to_parquet(snapshot / "universe.parquet", index=False)
+    _write_span_universe(snapshot, _SPAN_UNIVERSE[_SPAN_DECISION])
     (snapshot / "manifest.json").write_text(
         json.dumps(
             {
@@ -2008,6 +2030,13 @@ def _write_span_release(root: Path) -> tuple[Path, dict[str, Path]]:
         encoding="utf-8",
     )
     chmod_tree(snapshot, file_mode=0o444, dir_mode=0o555)
+    # Every slot is prepared beside the decision view of its own anchor, and
+    # that view's universe is the vintage the rolling view publishes for the
+    # slot. B's anchor falls inside A, so it already carries the rename and the
+    # listing that happened there.
+    for anchor, vintage in _SPAN_UNIVERSE.items():
+        if anchor != _SPAN_DECISION:
+            _write_span_universe(cache_root / "decision" / anchor, vintage)
     slots: dict[str, Path] = {}
     for key, (start, end, anchor, days) in _SPAN_SLOTS.items():
         slot = cache_root / "replay" / "valid" / f"{start}_{end}_{anchor}"
@@ -2096,6 +2125,60 @@ def _span_stash_parts(
     return parts
 
 
+def _without_universe(orders: list[dict[str, object]]) -> list[dict[str, object]]:
+    """The strategy's observations without the two things a vintage roll moves."""
+
+    dropped = {"universe", "asof_version"}
+    return [{key: value for key, value in order.items() if key not in dropped} for order in orders]
+
+
+def _visible_universes(record: dict[str, object]) -> list[list[str]]:
+    """The universe each decision of a replay actually read, in order."""
+
+    return [row["universe"] for row in record["pending_orders"] if "universe" in row]
+
+
+def test_a_span_rolls_the_universe_to_each_slots_own_vintage(tmp_path: Path) -> None:
+    """Each slot shows the vintage of its own anchor -- never a later one.
+
+    A's two decisions run on the 2023-12-31 view although B's decision view is
+    already on disk; B's first decision picks up the rename and the listing
+    that happened inside A. One long slot over the same days has only its own
+    anchor, so it never sees them.
+    """
+
+    snapshot, slots = _write_span_release(tmp_path)
+    revision = _span_revision(tmp_path)
+    chain = PITDailyEvaluationBackend(tmp_path / "results_chain", execution_mode="trusted").evaluate(
+        _span_request(snapshot, slots["a"], slots["b"], revision=revision)
+    )
+    single = PITDailyEvaluationBackend(tmp_path / "results_single", execution_mode="trusted").evaluate(
+        _span_request(snapshot, slots["ab"], revision=revision)
+    )
+    base = ["000001.SZ:平安银行", "000002.SZ:万科A"]
+    rolled = ["000001.SZ:*ST平安", "000002.SZ:万科A", "000003.SZ:新上市"]
+    chain_record, single_record = (
+        json.loads(Path(result.result_ref).read_text(encoding="utf-8")) for result in (chain, single)
+    )
+    # 20240102, 20240103 | 20240104, 20240105
+    assert _visible_universes(chain_record) == [base, base, rolled, rolled]
+    assert _visible_universes(single_record) == [base] * 4
+    # The rolled read is one vintage, not two concatenated (that would repeat
+    # 000001.SZ), and the roll is a new global view: a feature cached on the
+    # old names is invalidated.
+    versions = [int(row["asof_version"]) for row in chain_record["pending_orders"] if "universe" in row]
+    assert versions[2] > versions[1]
+
+
+def test_a_span_refuses_a_slot_whose_anchor_has_no_decision_universe(tmp_path: Path) -> None:
+    snapshot, slots = _write_span_release(tmp_path)
+    (snapshot.parent / _SPAN_SLOTS["b"][2] / "universe.parquet").unlink()
+    with pytest.raises(FileNotFoundError, match="has no decision-view universe"):
+        PITDailyEvaluationBackend(tmp_path / "results", execution_mode="trusted").evaluate(
+            _span_request(snapshot, slots["a"], slots["b"], revision=_span_revision(tmp_path))
+        )
+
+
 def test_a_span_of_slots_is_one_book_equal_to_one_long_slot(tmp_path: Path) -> None:
     """Account, positions, fit state and the as-of view carry across a slot boundary.
 
@@ -2118,8 +2201,15 @@ def test_a_span_of_slots_is_one_book_equal_to_one_long_slot(tmp_path: Path) -> N
     chain_record, single_record = (
         json.loads(Path(result.result_ref).read_text(encoding="utf-8")) for result in (chain, single)
     )
-    for key in ("equity_curve", "executions", "corporate_actions", "inference_dates", "pending_orders"):
+    for key in ("equity_curve", "executions", "corporate_actions", "inference_dates"):
         assert chain_record[key] == single_record[key], key
+    # Everything the strategy saw is equal except the universe vintage and the
+    # version that its roll bumps: the chain has one decision anchor per slot
+    # and rolls to B's at B's first decision, while one long slot only ever has
+    # its own anchor's (test_a_span_rolls_the_universe_to_each_slots_own_vintage).
+    assert _without_universe(chain_record["pending_orders"]) == _without_universe(
+        single_record["pending_orders"]
+    )
     for key in ("total_return", "max_drawdown", "turnover", "trade_count", "sub_windows", "benchmark"):
         assert chain.summary[key] == single.summary[key], key
     assert chain_record["pit"]["replay_slots"] == [slots["a"].name, slots["b"].name]

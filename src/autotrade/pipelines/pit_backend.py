@@ -102,6 +102,12 @@ REPLAY_SLOTS_SIDECAR = "replay_slots.json"
 _CORE_RAW_DATASETS = ("daily", "daily_basic", "adj_factor", "stk_limit", "suspend_d")
 
 
+def _decision_key(decision: datetime) -> str:
+    """The cache path component one decision view is published under."""
+
+    return decision.strftime("%Y%m%dT%H%M%S%z")
+
+
 def required_release_raw_datasets(config: SnapshotConfig) -> tuple[str, ...]:
     """Raw directories that the exact snapshot configuration can consume."""
 
@@ -183,7 +189,7 @@ class ResearchPITSnapshotProvider:
         end_key = yyyymmdd(end)
         if start_key > end_key:
             raise ValueError("PIT snapshot phase start cannot be after end")
-        decision_key = decision.strftime("%Y%m%dT%H%M%S%z")
+        decision_key = _decision_key(decision)
         decision_dir = self.cache_root / "decision" / decision_key
         replay_dir = (
             self.cache_root
@@ -209,9 +215,7 @@ class ResearchPITSnapshotProvider:
         """
 
         decision = _cn_datetime(decision_time)
-        decision_dir = (
-            self.cache_root / "decision" / decision.strftime("%Y%m%dT%H%M%S%z")
-        )
+        decision_dir = self.cache_root / "decision" / _decision_key(decision)
         manifest = self._decision_view(decision_dir, decision)
         return SnapshotBundle(
             snapshot_id=str(manifest.get("snapshot_id") or ""),
@@ -315,7 +319,7 @@ class ResearchPITSnapshotProvider:
         what makes publishing a phase view and hardlinking a seed cheap.
         """
 
-        decision_key = decision.strftime("%Y%m%dT%H%M%S%z")
+        decision_key = _decision_key(decision)
         target = self.cache_root / "replay" / f"{start}_{end}_{decision_key}"
         if target.is_symlink():
             raise RuntimeError(f"replay source must be a real directory: {target}")
@@ -502,12 +506,15 @@ class _SpanSlot:
 
     A replay whose part stream is not the span's binds its own stash, keyed by
     the day its window opens on, so the span's stash holds only the span's
-    parts.
+    parts. ``universe_file`` is the as-of universe vintage the rolling view
+    publishes while this slot runs: the one its own anchor decision view
+    carries.
     """
 
     replay_dir: Path
     manifest: dict[str, object]
     stash_dir: Path
+    universe_file: Path
 
 
 class _ReplaySpanView:
@@ -561,6 +568,7 @@ class _ReplaySpanView:
             with self._timer.phase("replay_frames"):
                 self.timeview.continue_into(
                     partial(self._open_slot, slot),
+                    universe_file=slot.universe_file,
                     replay_text_library_dir=slot.replay_dir / "text_library",
                     stash_dir=slot.stash_dir,
                 )
@@ -639,6 +647,28 @@ def _universe_screened(manifest: Mapping[str, object]) -> bool:
     return isinstance(screen, Mapping) and bool(screen.get("active"))
 
 
+def _slot_universe(snapshot_dir: Path, replay_manifest: Mapping[str, object]) -> Path:
+    """The as-of universe vintage a CONTINUING slot runs on.
+
+    Every slot is prepared beside the decision view of its own anchor
+    (``prepare``), and that view's ``universe.parquet`` is the names, ST flags,
+    industry membership and listed set in force at the anchor -- the latest
+    vintage no decision inside the slot could fail to know. A slot whose
+    decision view is missing must fail here: silently keeping the previous
+    slot's vintage is how a four-year replay ended up judging 2025 on 2021
+    names. The span's first slot is not resolved this way: its vintage is the
+    base snapshot the view is built on.
+    """
+
+    anchor = _slot_anchor(replay_manifest)
+    path = Path(snapshot_dir).resolve().parent / _decision_key(anchor) / "universe.parquet"
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"replay slot anchored at {anchor.isoformat()} has no decision-view universe: {path}"
+        )
+    return path
+
+
 def _bind_span_stashes(
     *,
     snapshot_dir: Path,
@@ -667,6 +697,9 @@ def _bind_span_stashes(
                 preceding_replay_slots=tuple(path.name for path in replay_dirs[:index]),
                 window_start=window_start,
             ),
+            snapshot_dir / "universe.parquet"
+            if index == 0
+            else _slot_universe(snapshot_dir, manifest),
         )
         for index, (replay_dir, manifest) in enumerate(
             zip(replay_dirs, replay_manifests, strict=True)

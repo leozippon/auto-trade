@@ -39,7 +39,7 @@ members = sec[sec["trade_date"] == latest]            # con_code 就是成分的
 | 域 | 数据集 | 行级 `available_at` |
 |---|---|---|
 | `daily` | 日线、每日指标、复权因子、涨跌停价、停牌（合成一张 30 列的表） | 无列，可见性由 as-of 视图给定 |
-| `universe` | 股票基本信息与申万一级成员（`name`、`list_date`、`l1_code`、`l1_name`） | 无列，决策日冻结 |
+| `universe` | 股票基本信息与申万一级成员（`name`、`list_date`、`l1_code`、`l1_name`） | 无列，整表按决策日口径；回放中逐槽换到该槽锚点的口径 |
 | `fundamentals` | `income_vip`、`balancesheet_vip`、`cashflow_vip`、`fina_indicator_vip`、`forecast_vip`、`express_vip`、`dividend`、`fina_audit`、`fina_mainbz_vip`、`disclosure_date` | 有 |
 | `macro` | `cn_gdp`、`cn_cpi`、`cn_ppi`、`cn_pmi`、`cn_m`、`sf_month`、`shibor`、`shibor_lpr`、`index_daily`、`index_dailybasic`、`sw_daily`、`index_weight`、`fut_*`、`opt_*`、`cb_*` | 有 |
 | `events` | `margin*`、`moneyflow`、`cyq_perf`、`bak_daily`、`block_trade`、`stk_holdernumber`、`stk_holdertrade`、`new_share`、`share_float_complete`、`top_list`、`top_inst`、`limit_list_d`、`kpl_list`、`top10_floatholders`、`report_rc` | 有 |
@@ -69,6 +69,15 @@ fund  = pd.read_parquet(context.asof_dir + "/fundamentals", columns=["dataset", 
 - **一级行业的个数与名字在研究期内会变**。每个决策日在当天的截面上重算行业，普查表按决策日分别列；**跨决策日比较行业名单是错的**。
 - `l1_name` 为空的名字落在 `未分类` 这一个桶里。宿主侧的行业归因用的是同一列与同一个标签，所以你在篮子里数出来的行业构成与 `stats.benchmark.top_industry_weight` 说的是同一件事——只差后者是**时间加权**的，复核间隔之内的价格漂移会把两只同业名字的权重推到 `2/N` 之上，所以想靠名额满足那道要求要留余量。
 - 申万成分历史由供应商回填，纳入日期可能异常，**不能当作可靠的行业变更日**；只用「决策日归属」。
+
+## `snapshot` 只有一个时点口径
+
+会话挂的 `snapshot`（`/mnt/snapshot`、`context.snapshot_dir`）是**研究期末那一天**的决策视图，只有这一个口径：`universe.parquet` 里的 `name`、ST 状态、`l1_name` 与在册名单都是那一天的，不是历史上每一天的。
+
+- **不要拿它离线重建历史某一天的决策**：那会把后来的更名、ST、退市与行业重分类灌回过去（幸存者偏差），离线读数被系统性抬高。已有实测：其余全部不变、只把这一个文件换成当天口径，重建出的首日持仓与宿主回放的一致度就从 5/12 变成 12/12，而用期末口径的那次离线年化被抬高了约 13 个百分点。
+- 宿主回放不受影响：回放里 `asof_dir/universe` 用的是该折决策日的口径，并按回放槽的锚点逐槽换版（槽内不变，槽内新上市的代码在该槽里没有行）。
+- `/mnt/tools/screen.py` 扫全历史时读的也是这一个口径，名称与行业相关的筛选结果同样不是当时的口径。
+- 离线重建只能用来查构造完整性与相对量级，**不作绝对水平的判断**。
 
 ## 单位（最容易错的几处）
 

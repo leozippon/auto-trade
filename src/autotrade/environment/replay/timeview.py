@@ -31,6 +31,16 @@ domain keeps one segment per slot, and a part that lands after a slot boundary
 lists the earlier slot's rows first. Slots partition rows by ``available_at``,
 so the parts are those one long slot laid out in slot order would write.
 
+``universe`` (listed codes, the name in force, SW level-1 membership) is a
+vintage table rather than an event stream: a newer vintage restates every row,
+so it is published as the domain's single part and REPLACED, never appended to
+-- two vintages concatenated would double every code. Its refresh cadence is
+the replay slot: each slot publishes the universe its own anchor decision
+snapshot carries, linked in when ``continue_into`` opens the slot, so the view
+holds information as of that anchor and never later. Within a slot it does not
+change, so a listing, rename, ST flag or industry reclassification that happens
+inside a slot becomes visible only at the next slot's anchor.
+
 Replay rows stay in the slot's parquet files (``ReplayRows``): a domain reads
 only its gating columns to build its cursors and reads the row groups holding
 a part's rows when it encodes that part, so a stash hit reads nothing and no
@@ -296,13 +306,38 @@ class Timeview:
             stash_index_dir=(stash_root / "text_index") if stash_root is not None else None,
             stash_library_dir=(stash_root / "text_library") if stash_root is not None else None,
         )
-        # The universe never rolls. Expose it as a parts directory so
-        # ``asof_dir + "/universe"`` matches every other domain.
+        # The base slot's vintage. Exposed as a parts directory so
+        # ``asof_dir + "/universe"`` matches every other domain; a snapshot
+        # without the domain exposes no directory at all.
         universe = self.snapshot_dir / "universe.parquet"
         if universe.exists():
-            universe_dir = self.host_dir / "universe"
-            universe_dir.mkdir(parents=True, exist_ok=True)
-            _link_or_copy(universe, universe_dir / "part_0000.parquet")
+            self._publish_universe(universe)
+
+    def _publish_universe(self, source: Path) -> None:
+        """Publish one as-of universe vintage as the domain's only part.
+
+        The vintage replaces the part instead of adding one: readers
+        concatenate a domain's parts, and a universe restates every code it
+        already carried. A vintage that drops a published column would change
+        the agent-facing schema mid-replay, which is a broken view cache, not a
+        legitimate union -- the rolling domains warn about such a divergence
+        because a union domain can genuinely gain columns, but this one has a
+        single part and must fail.
+        """
+        if not source.is_file():
+            raise FileNotFoundError(f"as-of universe vintage is missing: {source}")
+        part = self.host_dir / "universe" / "part_0000.parquet"
+        if part.exists():
+            missing = sorted(
+                set(pq.ParquetFile(part).schema_arrow.names)
+                - set(pq.ParquetFile(source).schema_arrow.names)
+            )
+            if missing:
+                raise RuntimeError(
+                    f"as-of universe vintage {source} drops published columns {missing}"
+                )
+        part.parent.mkdir(parents=True, exist_ok=True)
+        _link_or_copy(source, part)
 
     def append_replay_partition(self, domain: str, replay: pd.DataFrame) -> None:
         """Add one bounded source partition to an incremental replay domain."""
@@ -319,19 +354,35 @@ class Timeview:
         self,
         open_slot: Callable[[], Mapping[str, ReplayRows]],
         *,
+        universe_file: Path | None,
         replay_text_library_dir: Path | None,
         stash_dir: Path | None,
     ) -> None:
         """Run this view on into the next consecutive replay slot.
 
         The caller guarantees the slot continues the earlier ones: every row it
-        holds becomes available after every row they hold. Every domain first
-        drops the slots it has published entirely, then ``open_slot`` opens the
-        next slot's domains, which read only their gating columns. Parts keep
-        their numbering and from here on publish under the next slot's
-        ``stash_dir``.
+        holds becomes available after every row they hold, and this runs once
+        the simulation clock has passed the slot's anchor -- so the slot's own
+        as-of ``universe_file`` (the vintage its anchor decision snapshot
+        carries) is information the decision being served may already see.
+        ``universe_file`` is ``None`` only for a view that exposes no universe
+        domain at all. Every domain first drops the slots it has published
+        entirely, then ``open_slot`` opens the next slot's domains, which read
+        only their gating columns. Parts keep their numbering and from here on
+        publish under the next slot's ``stash_dir``.
         """
         stash_root = _validated_stash_root(stash_dir)
+        if universe_file is not None:
+            self._publish_universe(Path(universe_file))
+            # The whole view's version: a strategy caching on asof_version must
+            # see the new names, industries and listings.
+            self._version += 1
+        elif (self.host_dir / "universe").exists():
+            raise ValueError(
+                "this view exposes a universe domain, so the slot continuing it must "
+                "name its own as-of universe vintage; keeping the previous slot's "
+                "vintage would show stale names, ST flags and industries"
+            )
         for view in self._domains.values():
             view.release_published()
         self._text.release_published()
