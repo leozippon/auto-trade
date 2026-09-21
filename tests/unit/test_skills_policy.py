@@ -51,6 +51,32 @@ class ForwardFigureLeakTest(unittest.TestCase):
         for line in self.ORDINARY:
             self.assertEqual(strict_transferable_content_violation(line), "", line)
 
+    def test_a_forward_figure_split_across_two_lines_is_still_refused(self) -> None:
+        """The proximity bound is a distance inside one statement, and a
+        statement wraps across lines: neither line below names both halves,
+        and together they report exactly the figure the gate refuses."""
+
+        for text in (
+            "前推期看着不错。\n年化 12.4%。\n",
+            "The forward period looked promising.\nIts annualized return was 12.4%.\n",
+        ):
+            self.assertIn(
+                "forward-period figure", strict_transferable_content_violation(text), text
+            )
+
+    def test_separate_markdown_blocks_stay_separate_statements(self) -> None:
+        """The other half of the same rule: a skill is mostly lists, and two
+        items that never put a stage and a figure together are ordinary
+        methodology prose, not a leak."""
+
+        for text in (
+            "- 冻结产物会在前推期被连续回放一次\n- 研究期夏普 1.35，滚动重拟合要写进 fit\n",
+            "# 前推期\n\n研究期夏普 1.35，全部在研究期内。\n",
+            "| 阶段 | 说明 |\n| --- | --- |\n| 前推期 | 冻结后连续回放一次 |\n| 研究期 | 夏普 1.35 |\n",
+            "\n".join(self.ORDINARY),
+        ):
+            self.assertEqual(strict_transferable_content_violation(text), "", text)
+
     def test_shared_skills_reject_a_figure_written_before_the_stage(self) -> None:
         self.assertIn(
             "forward-period figure",

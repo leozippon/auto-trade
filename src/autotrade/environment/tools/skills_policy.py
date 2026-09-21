@@ -66,6 +66,43 @@ _STRICT_BOUNDARY_LINE_RE = re.compile(
 )
 
 
+# A line that opens a Markdown block: a heading, a list item, a table row, a
+# quote or a fence. Everything else continues the statement above it.
+_BLOCK_START_RE = re.compile(r"(?:[-*+]\s|\d+[.)]\s|#{1,6}\s|>|\||```|~~~)")
+
+
+def _statements(text: str) -> list[tuple[int, str]]:
+    """The runs of lines that read as one statement, with where each starts.
+
+    The two proximity checks bound the distance between a stage reference and
+    the figure or the choice built on it, which is a distance inside a
+    statement -- and a statement wraps across lines. Checking one line at a
+    time let "前推期看着不错。" / "年化 12.4%。" through, neither line naming
+    both halves. A Markdown block marker starts a new statement, so two list
+    items stay two statements and prose that never put the two together is not
+    refused for standing next to a figure.
+    """
+
+    statements: list[tuple[int, str]] = []
+    start, run = 0, []
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        # An allowlisted boundary rule is not part of any statement, and a
+        # blank line or a new block ends the one above it.
+        skipped = not stripped or bool(_STRICT_BOUNDARY_LINE_RE.fullmatch(stripped))
+        if (skipped or _BLOCK_START_RE.match(stripped)) and run:
+            statements.append((start, " ".join(run)))
+            run = []
+        if skipped:
+            continue
+        if not run:
+            start = lineno
+        run.append(stripped)
+    if run:
+        statements.append((start, " ".join(run)))
+    return statements
+
+
 def strict_transferable_content_violation(text: str) -> str:
     """Fail closed on sealed-stage content while allowing a pure boundary rule."""
 
@@ -75,16 +112,18 @@ def strict_transferable_content_violation(text: str) -> str:
             continue
         if _HELDOUT_MENTION_RE.search(stripped):
             return f"line {lineno} leaks Held-out into shared skills"
-        figure = _FORWARD_FIGURE_RE.search(stripped)
+    for lineno, statement in _statements(text):
+        figure = _FORWARD_FIGURE_RE.search(statement)
         if figure:
-            # Name the matched span: the check is a same-line pattern, not a
-            # reading of the sentence, so the fix is only obvious once the
-            # Agent can see which words tripped it.
+            # Name the matched span: the check is a pattern over the statement,
+            # not a reading of it, so the fix is only obvious once the Agent can
+            # see which words tripped it. The line is where the statement
+            # starts, which is not always the line the span ends on.
             return (
                 f"line {lineno} contains a forward-period figure in shared skills: "
                 f"{figure.group(0)[:60]!r}"
             )
-        if _FORWARD_SELECTION_RE.search(stripped):
+        if _FORWARD_SELECTION_RE.search(statement):
             return f"line {lineno} uses the forward period to choose shared skill content"
     return ""
 
