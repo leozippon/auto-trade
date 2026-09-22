@@ -1719,6 +1719,8 @@
     "available_at",
     "available_at_rule",
     "available_month",
+    "base_date",
+    "base_share",
     "business_key",
     "cash_div",
     "cash_div_tax",

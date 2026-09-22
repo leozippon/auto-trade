@@ -715,6 +715,40 @@ class UnitRegistryProjectionTest(unittest.TestCase):
             else:
                 self.assertIsNone(record["source_unit"], record)
 
+    def test_dividend_vendor_schema_stays_fully_classified(self):
+        from autotrade.environment.data.units import (
+            UnresolvedUnitError,
+            build_unit_reference,
+            resolve_field,
+        )
+
+        # Fundamentals are requested with the vendor's whole field set, so a
+        # column the vendor adds reaches the raw lake the same night and the
+        # snapshot the next morning. On 2026-09-21 `dividend` gained
+        # base_date/base_share and the unit gate stopped every build that
+        # loads the dataset — the Paper book produced no orders for 20260922.
+        # The committed inventory is the recorded vendor schema: all of it
+        # must classify.
+        columns = self._inventory_column_map()[("fundamentals.parquet", "dividend")]
+        self.assertTrue({"base_date", "base_share"}.issubset(columns), columns)
+        build_unit_reference({("fundamentals.parquet", "dividend"): columns})
+        base_share = resolve_field("fundamentals.parquet", "dividend", "base_share")
+        self.assertEqual(base_share["source_unit"], "10k_shares")
+        # Only the normalized single-schema files convert on load; a factor on
+        # a union file would multiply every same-named column of every dataset.
+        self.assertNotIn("factor", base_share)
+        self.assertEqual(
+            resolve_field("fundamentals.parquet", "dividend", "base_date")["semantic_type"],
+            "datetime",
+        )
+        # Negative path: the next unregistered vendor column must still stop
+        # the build and name itself, never load without unit metadata.
+        with self.assertRaises(UnresolvedUnitError) as ctx:
+            build_unit_reference(
+                {("fundamentals.parquet", "dividend"): [*columns, "base_ratio"]}
+            )
+        self.assertIn("fundamentals.parquet:dividend:base_ratio", str(ctx.exception))
+
     def test_index_weight_is_a_percentage_read_by_the_full_column_identity(self):
         from autotrade.environment.data.units import resolve_field
 

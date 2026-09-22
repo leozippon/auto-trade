@@ -806,6 +806,15 @@ FIELD_RULES: tuple[FieldRule, ...] = (
     FieldRule("fundamentals.parquet", "dividend",
               ("stk_div", "stk_bo_rate", "stk_co_rate"), source_unit="shares_per_share",
               note="bonus/transfer proportions per held share"),
+    FieldRule("fundamentals.parquet", "dividend", ("base_share",),
+              source_unit="10k_shares",
+              status="verified",
+              evidence="scan 2026-09: equals daily_basic.total_share of the same ts_code on "
+                       "base_date (median ratio 1.0000, p99 1.0000, 99.5% at or below 1.0, "
+                       "n=2,841 rows with base_date from 2025)",
+              note="share base the plan is declared on, at the vendor's 10k-share scale; "
+                   "it is the capital of base_date and can sit a few percent below total "
+                   "share capital when part of it does not take part in the distribution"),
     FieldRule("fundamentals.parquet", "fina_audit", ("audit_fees",), source_unit="CNY",
               status="inferred", evidence="median 4e5 at audit-fee scale"),
     FieldRule("fundamentals.parquet", "fina_mainbz_vip",
