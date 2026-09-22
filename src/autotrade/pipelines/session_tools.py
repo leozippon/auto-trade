@@ -1004,12 +1004,16 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "a placebo): it replays and costs replay-years like any candidate, but it "
         "is not a trial of the freeze gate and can never be nominated or frozen, so "
         "a real candidate registered as a control forfeits its nomination. "
-        "offline_trials declares, for the whole batch, how many candidate "
-        "configurations you screened offline on research-period data to decide "
-        "what this batch submits (a pack's screening gate, a grid, a probe script; "
-        "0 when nothing was screened): the freeze gate adds it to the arm's trial "
-        "count, summed over batches, so declare it honestly -- an undercount "
-        "understates the search the gate corrects for. The batch costs one "
+        "offline_trials declares, for the whole batch, the number of candidate "
+        "configurations whose offline research-period reading (a pack's screening "
+        "gate, a grid, a probe script) influenced what this batch submits and that "
+        "are NOT themselves submitted in this batch (rejected or deferred): a "
+        "submitted candidate counts as a host trial once validated and is not "
+        "declared, controls never count, each configuration is declared once, in "
+        "the first batch after its screen, and 0 only if nothing was screened. The "
+        "freeze gate adds it to the arm's trial count, summed over batches, so "
+        "declare it honestly -- an undercount understates the search the gate "
+        "corrects for. The batch costs one "
         "replay-year per candidate per year of the span, reserved before anything "
         "runs; a candidate whose replay completes becomes its own immutable "
         "revision and Step node under the CURRENT node as shared parent, recorded "
@@ -1114,8 +1118,11 @@ class BatchValidateTool(SessionTimeBudgetAware):
                     "maximum": BATCH_OFFLINE_TRIALS_MAX,
                     "description": (
                         "Candidate configurations screened offline on "
-                        "research-period data to choose this batch; 0 if none. "
-                        "Added to the arm's freeze-gate trial count."
+                        "research-period data whose reading shaped this batch "
+                        "and that this batch does NOT submit; each declared "
+                        "once, in the first batch after its screen; controls "
+                        "never count; 0 only if nothing was screened. Added "
+                        "to the arm's freeze-gate trial count."
                     ),
                 },
             },
@@ -1998,8 +2005,10 @@ def _batch_offline_trials(arguments: Mapping[str, object]) -> int:
         raise ToolError(
             "batch_validate needs offline_trials: the whole number (0 to "
             f"{BATCH_OFFLINE_TRIALS_MAX}) of candidate configurations screened "
-            "offline on research-period data to choose this batch, 0 when none "
-            f"were; got {value!r}. It is added to the arm's freeze-gate trial count",
+            "offline on research-period data whose reading shaped this batch and "
+            "that this batch does not submit, each declared once, 0 only if "
+            f"nothing was screened; got {value!r}. It is added to the arm's "
+            "freeze-gate trial count",
             error_type="schema_error",
             blocked_target="offline_trials",
         )

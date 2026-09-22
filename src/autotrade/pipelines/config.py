@@ -849,8 +849,9 @@ class StepResult:
     # trial of the freeze gate (``experiment.trial_family``).
     control: bool = False
     # The ``batch_validate`` call that recorded it, and the candidate
-    # configurations that call declared screening offline before it. ``None``
-    # on a Validation recorded before batches declared them; it reads as 0.
+    # configurations that call declared as screened offline but not submitted.
+    # ``None`` on a Validation recorded before batches declared them; it reads
+    # as 0.
     batch_id: str | None = None
     offline_trials: int | None = None
 

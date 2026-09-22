@@ -752,6 +752,10 @@ class ControlsAndOfflineScreensTest(unittest.TestCase):
     ) -> None:
         schema = BatchValidateTool.spec.input_schema
         self.assertIn("offline_trials", schema["required"])
+        # A configuration screened offline and then submitted counts once, as
+        # the host trial it becomes.
+        self.assertIn("NOT themselves submitted", BatchValidateTool.spec.description)
+        self.assertIn("does NOT submit", schema["properties"]["offline_trials"]["description"])
         self.assertIn("control", schema["properties"]["candidates"]["items"]["required"])
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))

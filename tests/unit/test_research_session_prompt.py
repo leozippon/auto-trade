@@ -240,6 +240,9 @@ def test_the_prompt_states_the_research_session_contract() -> None:
         "本臂完整研究期验证数达到该节写明的下限",
         "全部非对照 revision（任何 span、任何尝试）",
         "`offline_trials` 必须如实申报",
+        # A configuration screened offline and then validated counts once.
+        "但本批**没有**提交的候选配置数",
+        "不重复申报",
         "`selection_statistics.information_ratio_bar`",
         "一条臂至多冻结一次",
         "`finish_session` 之后不能再写",
