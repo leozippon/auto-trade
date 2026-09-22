@@ -17,6 +17,7 @@ from pathlib import Path
 import pandas as pd
 
 from autotrade.environment.broker import BrokerProfile
+from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.replay.stats import (
     ReplayResult,
     attach_cost_sensitivity,
@@ -190,7 +191,7 @@ class EveryEvaluationBackendPricesTheBlockTest(unittest.TestCase):
             (revision / "main.py").write_text(self.STRATEGY, encoding="utf-8")
 
             result = LocalDailyEvaluationBackend(
-                daily, root / "results", execution_mode="trusted"
+                daily, root / "results", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX
             ).evaluate(
                 EvaluationRequest(
                     ArtifactRevision("revision_cost", revision),

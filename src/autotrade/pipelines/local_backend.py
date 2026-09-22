@@ -186,11 +186,15 @@ class LocalDailyEvaluationBackend:
         results_root: str | Path,
         *,
         execution_mode: str,
+        benchmark_index: str,
         sandbox: SandboxConfig | None = None,
         executor_factory=None,
     ) -> None:
         if execution_mode not in {"sandbox", "trusted"}:
             raise ValueError("execution_mode must be sandbox or trusted")
+        # The arm's benchmark, which the style sidecar records; a plain daily
+        # file carries no index series, so nothing is regressed against it.
+        self.benchmark_index = benchmark_index
         self.daily_path = Path(daily_path).resolve(strict=True)
         self.results_root = Path(results_root).resolve()
         self.execution_mode = execution_mode
@@ -270,8 +274,9 @@ class LocalDailyEvaluationBackend:
                 replay,
                 frame,
                 replay_dir=None,
-                snapshot_dir=None,
+                universes=(),
                 mode=request.mode,
+                benchmark_index=self.benchmark_index,
             )
         summary = record.get("stats")
         if not isinstance(summary, dict):
@@ -724,7 +729,9 @@ class LLMResearchDeveloper:
                 "cannot resume the research session: the workspace of the interrupted "
                 f"attempt is missing under the session runtime root {root.name}"
             )
-        used = request.budget_used
+        # The replay-years the counter continues from, not the trace's figure
+        # alone: the facts and the resume note show what the session has left.
+        used = replace(request.budget_used, replay_years=request.replay_years_spent)
         session_ref = self.ref_store.get_or_create("session", request.session_key)
         run_ref = self.ref_store.get_or_create("run", request.run_id)
         # The Agent-readable transcript of every attempt, appended beside the

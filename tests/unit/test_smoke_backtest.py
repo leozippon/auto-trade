@@ -17,6 +17,7 @@ import pandas as pd
 import pytest
 
 from autotrade.environment.broker import BrokerProfile
+from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.environment.tools import ToolError
@@ -90,6 +91,7 @@ def _tool(
         max_replay_years=15,
         max_llm_calls=200,
         deadline_seconds=1200.0,
+        benchmark_index=DEFAULT_BENCHMARK_INDEX,
     )
     return SmokeBacktestTool(
         request=request,
@@ -98,7 +100,7 @@ def _tool(
         modification_check=check or ModificationCheckTool(output, models_dir=models),
         evaluator=evaluator
         or LocalDailyEvaluationBackend(
-            daily, root / "results", execution_mode="trusted"
+            daily, root / "results", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX
         ),
         schedule=StrategySchedule("day", "09:00"),
         broker_profile=BrokerProfile(initial_cash=100_000),
@@ -151,7 +153,7 @@ def test_the_rehearsal_replays_a_snapshot_the_agent_cannot_reach(
     daily = tmp_path / "daily.parquet"
     tool = _tool(tmp_path, WORKING_STRATEGY)
     tool.evaluator = RecordingEvaluator(
-        LocalDailyEvaluationBackend(daily, tmp_path / "results", execution_mode="trusted")
+        LocalDailyEvaluationBackend(daily, tmp_path / "results", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX)
     )
     result = tool.invoke({"days": 2})
 

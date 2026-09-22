@@ -18,6 +18,7 @@ from autotrade.agent.runner import (
 )
 from autotrade.environment.artifacts import FilesystemArtifactStore
 from autotrade.environment.broker import BrokerProfile
+from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm import (
     ChatMessage,
@@ -137,6 +138,7 @@ def _research_request() -> ResearchSessionRequest:
         max_llm_calls=3,
         deadline_seconds=2.0,
         record_failed_attempts=False,
+        benchmark_index=DEFAULT_BENCHMARK_INDEX,
     )
 
 

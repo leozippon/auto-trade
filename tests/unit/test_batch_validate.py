@@ -30,16 +30,22 @@ from autotrade.environment.artifacts import (
     ModificationConstraints,
     readonly_baseline,
 )
+from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.executor import (
     GpuMemoryContention,
     StrategyExecutionError,
+    StrategyMemoryExceeded,
     StrategyRaised,
     attach_strategy_resources,
 )
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.replay.engine import BacktestError
 from autotrade.environment.replay.null_control import NullControlSetupError
-from autotrade.environment.runtime import agent_trace_path, write_json_atomic
+from autotrade.environment.runtime import (
+    agent_trace_path,
+    utc_now_iso,
+    write_json_atomic,
+)
 from autotrade.environment.sandbox import SandboxConfig
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.time_budget import InferenceTimeBudget
@@ -54,6 +60,7 @@ from autotrade.pipelines.config import (
     EvaluationResult,
     ReplaySpan,
     ResearchSessionRequest,
+    SessionResume,
     SnapshotBundle,
     StepResult,
     StrategySchedule,
@@ -157,6 +164,7 @@ class _Evaluator:
         fail_markers: tuple[str, ...] = (),
         contention_markers: tuple[str, ...] = (),
         strategy_fail_markers: tuple[str, ...] = (),
+        memory_kill_markers: tuple[str, ...] = (),
         rendezvous: int = 0,
         resources: Mapping[str, object] | None = None,
     ) -> None:
@@ -165,6 +173,7 @@ class _Evaluator:
         self.fail_markers = fail_markers
         self.contention_markers = contention_markers
         self.strategy_fail_markers = strategy_fail_markers
+        self.memory_kill_markers = memory_kill_markers
         self.calls = 0
         self.active = 0
         self.peak = 0
@@ -225,6 +234,14 @@ class _Evaluator:
                         StrategyRaised("KeyError: 'close'"),
                         self.resources,
                     )
+            for marker in self.memory_kill_markers:
+                if marker in source:
+                    killed = StrategyMemoryExceeded(
+                        "Docker strategy fit failed: strategy worker was killed before a "
+                        "response (exit 137, SIGKILL): the container's 16g memory cap is "
+                        "what kills a worker this way"
+                    )
+                    raise _replay_failure(f"fit failed ({marker}): {killed}", killed)
             summary = _summary(0.01 * len(source))
             if self.resources is not None:
                 summary["resources"] = dict(self.resources)
@@ -268,6 +285,7 @@ class _Session:
         fail_markers: tuple[str, ...] = (),
         contention_markers: tuple[str, ...] = (),
         strategy_fail_markers: tuple[str, ...] = (),
+        memory_kill_markers: tuple[str, ...] = (),
         rendezvous: int = 0,
         record_failed_attempts: bool = True,
         deadline_seconds: float = 600.0,
@@ -276,6 +294,7 @@ class _Session:
         experiment_dir: Path | None = None,
         budget_used: BudgetUsed | None = None,
         steps_before: tuple[StepResult, ...] = (),
+        resume: SessionResume | None = None,
         resources: Mapping[str, object] | None = None,
     ) -> None:
         self.root = root
@@ -322,6 +341,8 @@ class _Session:
             acceptance_rules={"max_drawdown": 0.25},
             budget_used=budget_used or BudgetUsed(),
             steps_before=steps_before,
+            resume=resume,
+            benchmark_index=DEFAULT_BENCHMARK_INDEX,
         )
         self.tree = StepTree(root / "steps")
         self.evaluator = _Evaluator(
@@ -329,6 +350,7 @@ class _Session:
             fail_markers=fail_markers,
             contention_markers=contention_markers,
             strategy_fail_markers=strategy_fail_markers,
+            memory_kill_markers=memory_kill_markers,
             rendezvous=rendezvous,
             resources=resources,
         )
@@ -952,6 +974,22 @@ class BatchValidateRunTest(unittest.TestCase):
                 dead_ends, {"raised": "strategy", "contended": "environment"}
             )
 
+    def test_a_memory_cap_kill_is_charged_like_a_strategy_exception(self) -> None:
+        """The memory cap is a budget the session was told about, with swap
+        pinned to it, so a candidate killed there measured itself: no refund."""
+
+        with TemporaryDirectory() as tmp:
+            session = _Session(Path(tmp), memory_kill_markers=("888",))
+            session.candidate("good", _strategy("1"))
+            session.candidate("big", _strategy("888"))
+            result = session.call("good", "big", span="Y1")
+            self.assertTrue(result.ok)
+            rows = {row["name"]: row for row in result.value["candidates"]}
+            self.assertEqual(rows["big"]["cause"], "strategy")
+            self.assertIn("16g memory cap", rows["big"]["error"])
+            self.assertEqual(result.value["replay_years_used"], 2)
+            self.assertEqual(session.backtest.replay_years_used, 2)
+
     def test_a_resumed_attempt_starts_from_the_refunded_counter(self) -> None:
         """The refund is settled before the call returns, so the budget block
         the trace writes for it already carries it, and the next attempt of an
@@ -1075,11 +1113,132 @@ class BatchValidateRunTest(unittest.TestCase):
             )
             assert resume is not None
             self.assertEqual(resume.budget_used.replay_years, 0)
+            self.assertEqual(resume.unseen_step_ids, (steps[0].step_id,))
             resumed = _Session(
-                root / "next", budget_used=resume.budget_used, steps_before=steps
+                root / "next",
+                budget_used=resume.budget_used,
+                steps_before=steps,
+                resume=resume,
             )
             self.assertEqual(resumed.backtest.replay_years_used, 2)
             self.assertEqual(resumed.backtest.replay_years_remaining, 46)
+
+    def test_a_resume_adds_the_unseen_validations_to_what_the_trace_counted(
+        self,
+    ) -> None:
+        """The trace's last block holds every charge up to the last settled
+        call, the ones that leave no Step included, and the batch the attempt
+        died inside recorded a Step after it. The resumed counter is the block
+        plus that Step: taking the larger of the block and the recorded Steps
+        would hand the dying batch's years back whenever an earlier candidate
+        failed in its own code. A block written after the Step already counts
+        it, so it is never charged twice."""
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            experiment = root / "experiment_dir"
+            session = _Session(
+                root, experiment_dir=experiment, strategy_fail_markers=("777",)
+            )
+            session.candidate("a", _strategy("1"))
+            session.candidate("raised", _strategy("777"))
+            self.assertTrue(session.call("a", "raised", span="Y1..Y2").ok)
+            # Both candidates' years stay spent; only one of them left a Step.
+            self.assertEqual(session.backtest.replay_years_used, 4)
+            settled = {
+                "event_type": "tool_call",
+                "ts": utc_now_iso(),
+                "tool": "batch_validate",
+                "budget_used": BudgetUsed(llm_calls=2, replay_years=4).to_record(),
+            }
+            session.candidate("b", _strategy("22"))
+            session.candidate("c", _strategy("333"))
+            record_validation = session.backtest.record_validation
+            recorded: list[str] = []
+
+            def killed_after_the_first_record(*args: object, **kwargs: object) -> str:
+                if recorded:
+                    raise MemoryError("the attempt was killed inside batch_validate")
+                recorded.append(record_validation(*args, **kwargs))
+                return recorded[-1]
+
+            session.backtest.record_validation = killed_after_the_first_record
+            with self.assertRaises(MemoryError):
+                session.call("b", "c", span="Y1..Y2")
+            self.assertEqual(session.backtest.replay_years_used, 8)
+            steps = load_recorded_steps(experiment)
+            self.assertEqual(len(steps), 2)
+            trace = agent_trace_path(experiment / "artifacts", "run_batch")
+            trace.parent.mkdir(parents=True, exist_ok=True)
+            failed = [
+                {
+                    "record_type": "attempt_failed",
+                    "phase": RESEARCH_STAGE,
+                    "run_id": "run_batch",
+                    "error": "the run marker of a killed attempt",
+                }
+            ]
+
+            def resumed(name: str, *events: Mapping[str, object]) -> _Session:
+                trace.write_text(
+                    "".join(json.dumps(event) + "\n" for event in events),
+                    encoding="utf-8",
+                )
+                resume = resume_state(experiment, failed)
+                assert resume is not None
+                return _Session(
+                    root / name,
+                    budget_used=resume.budget_used,
+                    steps_before=steps,
+                    resume=resume,
+                )
+
+            # Killed outright: the trace ends at the settled batch, whose 4
+            # include the own-code failure, and b's 2 come on top.
+            killed = resumed("killed", settled)
+            self.assertEqual(killed.backtest.request.resume.unseen_step_ids, (steps[1].step_id,))
+            self.assertEqual(killed.backtest.replay_years_used, 6)
+            self.assertEqual(killed.backtest.replay_years_remaining, 42)
+            # Unwound instead: the error block written after b already holds
+            # it with the whole reservation, and nothing is added.
+            unwound = resumed(
+                "unwound",
+                settled,
+                {
+                    "event_type": "session_error",
+                    "ts": utc_now_iso(),
+                    "budget_used": BudgetUsed(llm_calls=2, replay_years=8).to_record(),
+                },
+            )
+            self.assertEqual(unwound.backtest.request.resume.unseen_step_ids, ())
+            self.assertEqual(unwound.backtest.replay_years_used, 8)
+
+    def test_a_budget_block_without_a_time_refuses_the_resume(self) -> None:
+        """Without the block's time the resume cannot tell which recorded
+        Validations it already counts, so it refuses rather than guess."""
+
+        with TemporaryDirectory() as tmp:
+            experiment = Path(tmp) / "experiment_dir"
+            trace = agent_trace_path(experiment / "artifacts", "run_batch")
+            trace.parent.mkdir(parents=True, exist_ok=True)
+            trace.write_text(
+                json.dumps(
+                    {"event_type": "llm_call", "budget_used": BudgetUsed().to_record()}
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(RuntimeError, "no aware ISO time"):
+                resume_state(
+                    experiment,
+                    [
+                        {
+                            "record_type": "attempt_failed",
+                            "phase": RESEARCH_STAGE,
+                            "run_id": "run_batch",
+                        }
+                    ],
+                )
 
     def test_each_row_carries_the_sub_window_table_and_a_readable_result_ref(
         self,

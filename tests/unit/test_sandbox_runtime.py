@@ -36,6 +36,7 @@ from autotrade.environment.executor import (
     GpuMemoryContention,
     PersistentCommandRunner,
     StrategyExecutionError,
+    StrategyMemoryExceeded,
     StrategyRaised,
     _run_limited_capture,
     attach_strategy_resources,
@@ -1735,9 +1736,11 @@ def test_worker_exit_before_response_is_reaped_and_cleared():
     pipes = (process.stdin, process.stdout, process.stderr)
     with (
         patch.object(executor, "_remove_container") as remove,
-        pytest.raises(StrategyExecutionError, match="worker exited before a response"),
+        pytest.raises(StrategyExecutionError, match="worker exited before a response") as error,
     ):
         executor.execute(_context())
+    # Any exit but the memory cap's measured the host, not the strategy.
+    assert not raised_by_strategy(error.value)
     assert process.returncode == 7
     assert executor._closed is True
     assert executor._process is None
@@ -1750,15 +1753,19 @@ def test_a_worker_killed_before_a_response_names_the_memory_cap():
     """Exit 137 is what the container's memory boundary looks like from the
     host once swap is pinned to the cap. A bare signal number would leave the
     session guessing, and ``--rm`` takes the cgroup with the container, so the
-    failure is also the only place that says this run has no peak to read."""
+    failure is also the only place that says this run has no peak to read.
+
+    ``docker run``'s stdout closes as it exits, a moment before its status can
+    be collected, so the worker here closes the pipe first and exits later:
+    the read has to wait for that status rather than report a killed worker as
+    one that merely exited."""
 
     process = subprocess.Popen(
-        [sys.executable, "-c", "raise SystemExit(137)"],
+        [sys.executable, "-c", "import os, time; os.close(1); time.sleep(0.5); os._exit(137)"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    assert process.wait(timeout=30) == 137
     executor = _executor_for_process(process, limits=SandboxLimits(memory="5g"))
     try:
         with pytest.raises(BrokenPipeError) as error:
@@ -1770,6 +1777,53 @@ def test_a_worker_killed_before_a_response_names_the_memory_cap():
     finally:
         with patch.object(executor, "_remove_container"):
             executor.close()
+
+
+def test_a_call_killed_at_the_memory_cap_is_the_strategys_own_failure():
+    """The cap is a budget published to the session with swap pinned to it, so
+    a worker killed there mid-call measured the strategy: it is charged like an
+    exception the strategy raised, through every layer that wraps it."""
+
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stdin.readline(); raise SystemExit(137)"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    executor = _executor_for_process(
+        process, limits=SandboxLimits(memory="5g"), drain_stderr=True
+    )
+    with (
+        patch.object(executor, "_remove_container"),
+        pytest.raises(StrategyMemoryExceeded) as error,
+    ):
+        executor.execute(_context())
+    message = str(error.value)
+    assert message.startswith("Docker strategy inference failed: strategy worker was killed")
+    assert "5g memory cap" in message
+    assert "no peak memory" in message
+    replay_failure = RuntimeError("generate_orders failed")
+    replay_failure.__cause__ = error.value
+    assert raised_by_strategy(replay_failure)
+    assert executor._process is None
+
+
+def test_a_worker_killed_while_starting_stays_a_startup_failure(tmp_path: Path):
+    """The readiness handshake (container start and module import, an import
+    failure included) is the host's side of the contract, so a kill there
+    stays that startup failure and does not ride the chain as the strategy's."""
+
+    strategy = _strategy(tmp_path)
+    with (
+        patch.object(DockerStrategyExecutor, "_remove_container"),
+        pytest.raises(StrategyExecutionError, match="did not become ready.*exit 137") as error,
+    ):
+        _started_executor(
+            strategy,
+            [sys.executable, "-c", "import sys; sys.stdin.readline(); raise SystemExit(137)"],
+            SandboxLimits(),
+        )
+    assert not raised_by_strategy(error.value)
 
 
 def test_close_reaps_worker_closes_pipes_and_is_idempotent():

@@ -872,6 +872,7 @@ def build_experiment_pipeline(
             options.daily_path,
             options.experiment_dir / "artifacts" / "results",
             execution_mode=options.execution_mode,
+            benchmark_index=options.rolling.benchmark_index,
             sandbox=strategy_sandbox,
         )
         trading_days = evaluator.trading_days

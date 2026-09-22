@@ -62,7 +62,6 @@ from autotrade.environment.replay.stats import (
     finalize_summary_timing,
 )
 from autotrade.environment.replay.style import (
-    BENCHMARK_TS_CODE,
     benchmark_summary_block,
     replay_style_analysis,
     slot_benchmark,
@@ -762,7 +761,7 @@ class PITDailyEvaluationBackend:
         nl_config: NLConfig | None = None,
         nl_failure_policy: str = "return_error_with_audit",
         max_intraday_row_group_rows: int = 2_000_000,
-        benchmark_index: str = BENCHMARK_TS_CODE,
+        benchmark_index: str,
     ) -> None:
         if execution_mode not in {"sandbox", "trusted"}:
             raise ValueError("execution_mode must be sandbox or trusted")
@@ -1014,7 +1013,11 @@ class PITDailyEvaluationBackend:
                     replay,
                     daily,
                     replay_dir=replay_dirs,
-                    snapshot_dir=snapshot_dir,
+                    # The vintage each slot's view published, from its first day.
+                    universes=[
+                        (str(slot.manifest["period_start"]), slot.universe_file)
+                        for slot in slots
+                    ],
                     mode=request.mode,
                     panel=panel,
                     benchmark_index=self.benchmark_index,

@@ -86,8 +86,9 @@ def test_daily_style_uses_replay_positions_and_frozen_slot_inputs(tmp_path: Path
         _replay(days),
         _daily(days),
         replay_dir=replay_dir,
-        snapshot_dir=snapshot_dir,
+        universes=[(days[0], snapshot_dir / "universe.parquet")],
         mode="valid",
+        benchmark_index=BENCHMARK_TS_CODE,
     )
 
     assert payload["schema_version"] == 1 and payload["mode"] == "valid"
@@ -149,8 +150,9 @@ def test_the_agent_reads_its_own_sector_concentration_beside_the_size_tilt(tmp_p
         ReplayResult(tuple(curve), (), (), ()),
         _daily(days),
         replay_dir=replay_dir,
-        snapshot_dir=snapshot_dir,
+        universes=[(days[0], snapshot_dir / "universe.parquet")],
         mode="valid",
+        benchmark_index=BENCHMARK_TS_CODE,
     )
 
     # The share of the largest industry, averaged over decision days — the same
@@ -162,6 +164,52 @@ def test_the_agent_reads_its_own_sector_concentration_beside_the_size_tilt(tmp_p
     visible = agent_visible_metrics({"total_return": 0.1, "benchmark": block})
     assert visible["benchmark"]["top_industry_weight"] == 0.75
     assert "size_tilt" in visible["benchmark"]
+
+
+def test_a_span_classifies_each_day_under_its_own_slots_universe_vintage(tmp_path: Path):
+    """Every slot of a span runs on its own anchor's universe vintage, so a name
+    reclassified between two slots and a name listed after the first anchor
+    are read under the vintage in force on each day -- not the first slot's
+    for the whole span, which would keep the old class and leave the late
+    listing unclassified."""
+
+    days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2024-01-02", periods=10)]
+    first, second = tmp_path / "anchor_1", tmp_path / "anchor_2"
+    first.mkdir()
+    second.mkdir()
+    pd.DataFrame({"ts_code": ["000001.SZ"], "l1_name": ["电子"]}).to_parquet(
+        first / "universe.parquet", index=False
+    )
+    pd.DataFrame(
+        {"ts_code": ["000001.SZ", "000003.SZ"], "l1_name": ["计算机", "计算机"]}
+    ).to_parquet(second / "universe.parquet", index=False)
+    # The second slot opens on days[4]; the late listing is held from then on.
+    curve = [
+        {
+            "trade_date": day,
+            "initial_equity": 100_000.0,
+            "equity": 100_000.0 * (1.0 + 0.001 * index),
+            "cash": 90_000.0,
+            "positions": {"000001.SZ": 100, **({"000003.SZ": 100} if index >= 4 else {})},
+        }
+        for index, day in enumerate(days)
+    ]
+
+    style = replay_style_analysis(
+        ReplayResult(tuple(curve), (), (), ()),
+        _daily(days),
+        replay_dir=None,
+        universes=[(days[0], first / "universe.parquet"), (days[4], second / "universe.parquet")],
+        mode="valid",
+        benchmark_index=BENCHMARK_TS_CODE,
+    )["style"]
+
+    # Four days wholly 电子, six wholly 计算机; nothing falls to 未分类.
+    assert style["industries"] == [
+        {"name": "计算机", "weight": 0.6},
+        {"name": "电子", "weight": 0.4},
+    ]
+    assert style["top_industry_weight"] == 0.6
 
 
 def test_style_records_structured_unavailable_values(tmp_path: Path):
@@ -180,8 +228,9 @@ def test_style_records_structured_unavailable_values(tmp_path: Path):
         _replay(days, with_holdings=False),
         _daily(days),
         replay_dir=replay_dir,
-        snapshot_dir=tmp_path / "missing-decision-snapshot",
+        universes=[(days[0], tmp_path / "missing-decision-snapshot" / "universe.parquet")],
         mode="valid",
+        benchmark_index=BENCHMARK_TS_CODE,
     )
 
     regression = payload["benchmark_regression"]
@@ -203,8 +252,9 @@ def test_style_records_structured_unavailable_values(tmp_path: Path):
         _replay(days),
         _daily(days).drop(columns=["circ_mv"]),
         replay_dir=tmp_path / "missing-replay-slot",
-        snapshot_dir=None,
+        universes=(),
         mode="valid",
+        benchmark_index=BENCHMARK_TS_CODE,
     )
     assert no_columns["benchmark_regression"]["reason"] == "benchmark_unavailable"
     assert no_columns["style"]["reason"] == "style_columns_unavailable"
@@ -276,8 +326,9 @@ def test_benchmark_block_restates_the_replay_benchmark(tmp_path: Path):
         _replay(days),
         _daily(days),
         replay_dir=replay_dir,
-        snapshot_dir=None,
+        universes=(),
         mode="heldout",
+        benchmark_index=BENCHMARK_TS_CODE,
     )
     block = benchmark_summary_block(analysis)
     assert block is not None
@@ -289,7 +340,7 @@ def test_benchmark_block_restates_the_replay_benchmark(tmp_path: Path):
 def test_benchmark_block_is_absent_when_the_slot_has_no_benchmark(tmp_path: Path):
     days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2024-01-02", periods=6)]
     analysis = replay_style_analysis(
-        _replay(days), _daily(days), replay_dir=None, snapshot_dir=None, mode="valid"
+        _replay(days), _daily(days), replay_dir=None, universes=(), mode="valid", benchmark_index=BENCHMARK_TS_CODE
     )
     # No fabricated zero: a slot without index rows carries no benchmark at all,
     # and the report keeps reporting missing coverage truthfully.
@@ -342,8 +393,9 @@ def test_neutralized_excess_removes_the_market_and_size_contributions(tmp_path: 
         _replay(days),
         daily,
         replay_dir=replay_dir,
-        snapshot_dir=None,
+        universes=(),
         mode="valid",
+        benchmark_index=BENCHMARK_TS_CODE,
     )
     block = analysis["neutralized_excess"]
     assert block["available"] is True
@@ -377,8 +429,9 @@ def test_the_agent_reads_the_size_loading_the_neutralization_divides_out(tmp_pat
         _replay(days),
         daily,
         replay_dir=replay_dir,
-        snapshot_dir=None,
+        universes=(),
         mode="valid",
+        benchmark_index=BENCHMARK_TS_CODE,
     )
 
     size_beta = analysis["neutralized_excess"]["size_beta"]
@@ -398,8 +451,9 @@ def test_the_agent_reads_the_size_loading_the_neutralization_divides_out(tmp_pat
         _replay(days),
         _daily(days),
         replay_dir=replay_dir,
-        snapshot_dir=None,
+        universes=(),
         mode="valid",
+        benchmark_index=BENCHMARK_TS_CODE,
     )
     assert unmeasured["neutralized_excess"]["size_beta"] is None
     unmeasured_block = benchmark_summary_block(unmeasured)
@@ -477,8 +531,9 @@ def test_size_beta_is_measured_on_the_decimal_pct_chg_scale(tmp_path: Path):
         ReplayResult(tuple(curve), (), (), ()),
         daily,
         replay_dir=replay_dir,
-        snapshot_dir=None,
+        universes=(),
         mode="valid",
+        benchmark_index=BENCHMARK_TS_CODE,
     )
 
     # The published factor series is the raw decimal spread, not a percent. It
@@ -574,8 +629,9 @@ def test_neutralized_excess_reports_missing_factors_instead_of_zero(tmp_path: Pa
         _replay(days),
         daily,
         replay_dir=replay_dir,
-        snapshot_dir=None,
+        universes=(),
         mode="valid",
+        benchmark_index=BENCHMARK_TS_CODE,
     )
     block = analysis["neutralized_excess"]
     assert block["available"] is False
@@ -631,7 +687,7 @@ def test_the_sidecar_carries_the_panel_and_the_active_figures_the_verdict_grades
 
     def analyse(block):
         return replay_style_analysis(
-            replay, daily, replay_dir=replay_dir, snapshot_dir=None, mode="valid", panel=block
+            replay, daily, replay_dir=replay_dir, universes=(), mode="valid", panel=block, benchmark_index=BENCHMARK_TS_CODE
         )
 
     graded, bare = analyse(panel), analyse(None)
@@ -699,8 +755,8 @@ def test_membership_is_read_from_the_decision_view_and_every_slot(tmp_path: Path
     plain = slot("plain", [{"dataset": "index_daily", "ts_code": BENCHMARK_TS_CODE,
                             "trade_date": "20240628", "pct_chg": 0.1}])
 
-    assert slot_membership([decision, replay, plain, tmp_path / "absent"]) == {
+    assert slot_membership([decision, replay, plain, tmp_path / "absent"], benchmark_index=BENCHMARK_TS_CODE) == {
         "20240531": frozenset({"000001.SZ"}),
         "20240628": frozenset({"000001.SZ", "000002.SZ"}),
     }
-    assert slot_membership([plain]) == {}
+    assert slot_membership([plain], benchmark_index=BENCHMARK_TS_CODE) == {}

@@ -897,6 +897,10 @@ class SessionResume:
     # starts from; None when the interrupted attempts never compacted.
     compaction_summary: str | None
     budget_used: BudgetUsed
+    # Step ids of the recorded Validations newer than that last budget block:
+    # an attempt killed inside a batch recorded them after its trace last
+    # counted replay-years (``ResearchSessionRequest.replay_years_spent``).
+    unseen_step_ids: tuple[str, ...]
     # Transcript file names of the earlier attempts under the ``trace`` root.
     transcripts: tuple[str, ...]
 
@@ -928,12 +932,13 @@ class ResearchSessionRequest:
     max_replay_years: int
     max_llm_calls: int
     deadline_seconds: float
-    # Trailing wrap-up grace reserved from deadline_seconds.
-    deadline_grace_seconds: float = DEFAULT_DEADLINE_GRACE_MINUTES * 60.0
     # The arm's benchmark index (``RollingExperimentConfig.benchmark_index``),
     # published to the session through the run manifest so the Agent grades
-    # itself against the index the host grades it on.
-    benchmark_index: str = DEFAULT_BENCHMARK_INDEX
+    # itself against the index the host grades it on. Required: a request that
+    # omitted it would tell the Agent the default index whatever the arm's is.
+    benchmark_index: str
+    # Trailing wrap-up grace reserved from deadline_seconds.
+    deadline_grace_seconds: float = DEFAULT_DEADLINE_GRACE_MINUTES * 60.0
     directive: str = ""
     # Per-session HITL override of the experiment's default sandbox GPU count;
     # None keeps the experiment default. The "auto" selector still picks which
@@ -981,22 +986,31 @@ class ResearchSessionRequest:
         The two records an interrupted attempt leaves behind are durable at
         different moments: a Validation lands in the step tree as
         ``batch_validate`` records it, while the cumulative budget block only
-        rides on the ``tool_call`` event the tool emits once it settles. An
-        attempt killed inside a batch — after a candidate was recorded, before
-        the call returned — therefore leaves a trace that predates the batch it
-        charged. Those replay-years are spent whatever the trace says, so the
-        recorded Validations set the floor and the trace supplies the rest: the
-        candidates that failed in their own code, the refunds and the rejection
-        charges, none of which leave a Step. A candidate the same kill charged
-        but never recorded leaves neither record and its years are lost with it;
-        the floor bounds the loss to what one batch can hold.
+        rides on the ``tool_call`` event the tool emits once it settles, and no
+        budgeted event is emitted between a batch's reservation and that one.
+        An attempt killed inside a batch -- after a candidate was recorded,
+        before the call returned -- therefore leaves Steps newer than its last
+        block, which that block never counted. The counter is the block (every
+        charge up to it, the ones that leave no Step included: candidates that
+        failed in their own code, refunds, rejection charges) plus the span
+        cost of those unseen Steps; without an earlier attempt every recorded
+        Step is unseen. A candidate the same kill charged but never recorded
+        leaves neither record and its years are lost with it, at most the rest
+        of one batch.
         """
 
-        recorded = sum(
-            research_span(self.research_years, step.span).slots
-            for step in self.steps_before
+        unseen = (
+            self.steps_before
+            if self.resume is None
+            else tuple(
+                step
+                for step in self.steps_before
+                if step.step_id in self.resume.unseen_step_ids
+            )
         )
-        return max(int(self.budget_used.replay_years), recorded)
+        return int(self.budget_used.replay_years) + sum(
+            research_span(self.research_years, step.span).slots for step in unseen
+        )
 
 
 @dataclass(frozen=True)

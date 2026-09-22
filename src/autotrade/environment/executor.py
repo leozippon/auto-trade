@@ -67,10 +67,30 @@ class StrategyExecutionError(RuntimeError):
 class StrategyRaised(StrategyExecutionError):
     """The strategy's own code raised inside a ``fit`` or ``generate_orders`` call.
 
-    That is a measurement of the strategy -- it cannot run on this data -- and
-    the only executor failure that is: a timeout, a broken pipe, a worker that
-    never started or broke protocol stays a plain ``StrategyExecutionError``,
-    because it measured the environment, not the strategy.
+    That is a measurement of the strategy -- it cannot run on this data -- and,
+    with ``StrategyMemoryExceeded`` below, the only executor failure that is: a
+    timeout, a broken pipe, a worker that never started or broke protocol stays
+    a plain ``StrategyExecutionError``, because it measured the environment,
+    not the strategy.
+    """
+
+
+class StrategyMemoryExceeded(StrategyRaised):
+    """A ``fit`` or ``generate_orders`` call outgrew the container's memory cap.
+
+    The cap is a budget published to the session (``budgets.strategy_memory_bytes``)
+    with swap pinned to it (``SandboxLimits.memory``), so the kernel killing the
+    worker there measured the strategy on this data exactly as an exception
+    its own code raised does, and is charged the same way.
+    """
+
+
+class _WorkerKilled(BrokenPipeError):
+    """The worker died of SIGKILL before replying, which is the memory cap.
+
+    A dead pipe like any other while the container is still starting, so the
+    readiness handshake keeps it a startup failure; only a strategy call turns
+    it into ``StrategyMemoryExceeded``.
     """
 
 
@@ -530,7 +550,13 @@ class DockerStrategyExecutor:
             self._abort()
             detail = self._stderr_text()
             suffix = f"; worker stderr: {detail}" if detail else ""
-            raise StrategyExecutionError(f"Docker {label} failed: {exc}{suffix}") from exc
+            # Killed at the memory cap mid-call: the strategy outgrew a budget
+            # it was told about, so this one failure is its own; every other
+            # dead pipe, clock or bad line here measured the host.
+            failure = (
+                StrategyMemoryExceeded if isinstance(exc, _WorkerKilled) else StrategyExecutionError
+            )
+            raise failure(f"Docker {label} failed: {exc}{suffix}") from exc
         except StrategyExecutionError:
             self._abort()
             raise
@@ -801,7 +827,13 @@ class DockerStrategyExecutor:
                     raise TimeoutError(self._timeout_message())
                 chunk = os.read(fd, min(4096, self.config.limits.max_output_chars + 1))
                 if not chunk:
-                    code = process.poll()
+                    # The pipe closes while ``docker run`` exits, a moment
+                    # before its status can be collected, so a bare poll() can
+                    # still read None for a worker that was just killed.
+                    try:
+                        code = process.wait(timeout=_PROCESS_STOP_TIMEOUT_SECONDS)
+                    except subprocess.TimeoutExpired:
+                        code = None
                     if code == _SIGKILL_EXIT_CODE:
                         # Name the boundary instead of a bare signal number: in
                         # a container with no network and no capabilities, whose
@@ -811,7 +843,7 @@ class DockerStrategyExecutor:
                         # this run also has no peak to read -- say so, rather
                         # than leave the session comparing its fit against the
                         # surviving container's figure.
-                        raise BrokenPipeError(
+                        raise _WorkerKilled(
                             f"strategy worker was killed before a response (exit {code}, "
                             f"SIGKILL): the container's {self.config.limits.memory} memory "
                             "cap is what kills a worker this way, and its cgroup is gone "
@@ -1207,6 +1239,7 @@ __all__ = [
     "PersistentCommandRunner",
     "StrategyExecutionError",
     "StrategyExecutor",
+    "StrategyMemoryExceeded",
     "StrategyRaised",
     "TrustedStrategyExecutor",
     "attach_strategy_resources",

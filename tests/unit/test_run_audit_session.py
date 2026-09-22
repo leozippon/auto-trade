@@ -9,6 +9,7 @@ import pytest
 
 from scripts.experiments import run_audit_session
 from scripts.experiments._cli import add_acceptance_arguments
+from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.sandbox import SandboxSpec
 from autotrade.pipelines import worker as worker_module
 from autotrade.pipelines.config import AcceptanceRules
@@ -33,6 +34,7 @@ def _options(tmp_path: Path, **overrides: object) -> SimpleNamespace:
             nl_failure_policy="fail",
             workspace_reference="configs/workspace_refs/pack",
             operating_memory="curated+graduated",
+            benchmark_index=DEFAULT_BENCHMARK_INDEX,
         ),
         experiment_dir=tmp_path / "experiments" / "audit",
         experiment_id="audit",

@@ -10,8 +10,9 @@ Agent actually saw):
 - cross-sectional style ranks: the replay slot's ``daily.parquet``;
 - benchmark: the arm's ``benchmark_index`` rows of ``index_daily`` inside
   the replay slot's ``macro.parquet``;
-- SW L1 industry: the decision snapshot's ``universe.parquet`` (as-of the
-  decision day — membership drift within a replay window is negligible).
+- SW L1 industry: each replay slot's as-of ``universe.parquet``, the vintage
+  the strategy's view publishes while that slot runs, so a span classifies each
+  day's holdings under the membership in force on that day.
 
 Every replay writes one ``style_analysis.json`` beside its result
 (validation and forward replays alike; the forward replay runs after research
@@ -45,8 +46,10 @@ from autotrade.environment.runtime import utc_now_iso, write_json_atomic
 
 from .stats import TRADING_DAYS_PER_YEAR, ReplayResult, total_return_from_curve
 
-# The benchmark an arm takes when its create request names none. The effective
-# value is the arm's ``benchmark_index`` and travels with every call below.
+# The benchmark an arm takes when its create request names none, and the one a
+# legacy sidecar or book that records none is read under. Every call below takes
+# the arm's ``benchmark_index`` explicitly, so none can grade against this one
+# by omission.
 BENCHMARK_TS_CODE = DEFAULT_BENCHMARK_INDEX
 BENCHMARK_LABEL = benchmark_index_label(BENCHMARK_TS_CODE)
 _MIN_REGRESSION_DAYS = 8
@@ -63,7 +66,7 @@ _SIZE_FACTOR_QUANTILE = 0.3
 _SIZE_FACTOR_MIN_NAMES = 30
 
 
-def neutralization_method(benchmark_index: str = BENCHMARK_TS_CODE) -> str:
+def neutralization_method(benchmark_index: str) -> str:
     """The caliber sentence every ``neutralized_excess_return`` is computed under.
 
     Names the arm's own benchmark: the market leg is index-specific, the size
@@ -88,7 +91,7 @@ def _date_text(value: object) -> str:
 def slot_benchmark(
     replay_dir: Path | Sequence[Path] | None,
     *,
-    benchmark_index: str = BENCHMARK_TS_CODE,
+    benchmark_index: str,
 ) -> dict[str, float]:
     """Benchmark daily returns of one replay slot, or of every slot of a span.
 
@@ -138,7 +141,7 @@ def slot_benchmark(
 
 
 def slot_membership(
-    slots: Sequence[Path], *, benchmark_index: str = BENCHMARK_TS_CODE
+    slots: Sequence[Path], *, benchmark_index: str
 ) -> dict[str, frozenset[str]]:
     """The benchmark's constituents by cross-section date, over the given slots.
 
@@ -167,20 +170,24 @@ def slot_membership(
     return result
 
 
-def _snapshot_industry(snapshot_dir: Path | None) -> dict[str, str]:
-    if snapshot_dir is None:
-        return {}
-    path = Path(snapshot_dir) / "universe.parquet"
-    if not path.is_file():
-        return {}
-    frame = pd.read_parquet(path)
-    if not {"ts_code", "l1_name"}.issubset(frame.columns):
-        return {}
-    return {
-        str(code): str(name)
-        for code, name in zip(frame["ts_code"], frame["l1_name"])
-        if isinstance(name, str) and name
-    }
+def _industry_vintages(
+    universes: Sequence[tuple[str, Path]],
+) -> list[tuple[str, dict[str, str]]]:
+    """Each slot's first day with the SW L1 membership of its universe vintage, in day order."""
+
+    vintages: list[tuple[str, dict[str, str]]] = []
+    for day, path in universes:
+        path = Path(path)
+        industry: dict[str, str] = {}
+        if path.is_file() and {"ts_code", "l1_name"}.issubset(pq.read_schema(path).names):
+            frame = pd.read_parquet(path, columns=["ts_code", "l1_name"])
+            industry = {
+                str(code): str(name)
+                for code, name in zip(frame["ts_code"], frame["l1_name"])
+                if isinstance(name, str) and name
+            }
+        vintages.append((_date_text(day), industry))
+    return sorted(vintages, key=lambda item: item[0])
 
 
 def daily_returns_from_curve(
@@ -314,8 +321,6 @@ def _neutralized_excess(
     strategy: list[tuple[str, float]],
     benchmark: Mapping[str, float],
     size: Mapping[str, float],
-    *,
-    benchmark_index: str = BENCHMARK_TS_CODE,
 ) -> dict[str, object]:
     """Excess return left after the market-beta and size contributions.
 
@@ -337,7 +342,6 @@ def _neutralized_excess(
     result: dict[str, object] = {
         "available": False,
         "reason": "factors_unavailable" if not days else "insufficient_overlapping_days",
-        "method": neutralization_method(benchmark_index),
         "n_days": days,
         "neutralized_excess_return": None,
         "tracking_error": None,
@@ -443,7 +447,7 @@ def _empty_style(reason: str) -> dict[str, object]:
 def _style_exposures(
     replay_daily: pd.DataFrame,
     curve: Sequence[Mapping[str, object]],
-    industry_by_code: Mapping[str, str],
+    industry_vintages: Sequence[tuple[str, Mapping[str, str]]],
 ) -> dict[str, object]:
     symbol_column = _symbol_column(replay_daily)
     required = {symbol_column, "trade_date", "close", *_STYLE_COLUMNS}
@@ -464,6 +468,10 @@ def _style_exposures(
     names = 0.0
     long_gross = 0.0
     for date, holdings in sorted(positions.items()):
+        # The vintage of the slot this day belongs to: the last one started by it.
+        industry_by_code = next(
+            (industry for day, industry in reversed(industry_vintages) if day <= date), {}
+        )
         valued: list[tuple[str, float, float, float, float]] = []
         for code, quantity in holdings:
             item = basics.get(date, {}).get(code)
@@ -515,14 +523,17 @@ def replay_style_analysis(
     replay_daily: pd.DataFrame,
     *,
     replay_dir: Path | Sequence[Path] | None,
-    snapshot_dir: Path | None,
+    universes: Sequence[tuple[str, Path]],
     mode: str,
     panel: Mapping[str, object] | None = None,
-    benchmark_index: str = BENCHMARK_TS_CODE,
+    benchmark_index: str,
 ) -> dict[str, object]:
     """Compute one result sidecar from the just-finished daily replay.
 
     ``replay_dir`` is the replay's slot, or the slots of a span in order.
+    ``universes`` pairs each slot's first day with the as-of universe file the
+    strategy's view published while that slot ran; a day's holdings are
+    classified under the industry membership of the vintage in force that day.
     ``benchmark_index`` is the arm's benchmark: the sidecar records it beside
     the series it was measured on, so a stored result can never be read without
     knowing what it was graded against.
@@ -534,13 +545,13 @@ def replay_style_analysis(
     """
 
     label = benchmark_index_label(benchmark_index)
+    # The caliber every neutralized block below is labelled with.
+    method = neutralization_method(benchmark_index)
     strategy = daily_returns_from_curve(replay.equity_curve)
     benchmark = slot_benchmark(replay_dir, benchmark_index=benchmark_index)
     regression = _benchmark_regression(strategy, benchmark)
     size = _size_factor(replay_daily)
-    neutralized = _neutralized_excess(
-        strategy, benchmark, size, benchmark_index=benchmark_index
-    )
+    neutralized = {"method": method, **_neutralized_excess(strategy, benchmark, size)}
     panel_blocks: dict[str, object] = {}
     panel_compact: dict[str, object] = {}
     if panel is not None:
@@ -548,15 +559,15 @@ def replay_style_analysis(
         graded = active_analysis(
             {"strategy_daily": strategy, "panel_daily": panel.get("panel_daily")}
         )
-        active = _neutralized_excess(
-            _series_pairs(graded["strategy_daily"]) if graded else [],
-            benchmark,
-            size,
-            benchmark_index=benchmark_index,
-        )
-        zero_skill = _neutralized_excess(
-            composite, benchmark, size, benchmark_index=benchmark_index
-        )
+        active = {
+            "method": method,
+            **_neutralized_excess(
+                _series_pairs(graded["strategy_daily"]) if graded else [],
+                benchmark,
+                size,
+            ),
+        }
+        zero_skill = {"method": method, **_neutralized_excess(composite, benchmark, size)}
         panel_blocks = {
             "panel": {
                 key: value
@@ -577,7 +588,9 @@ def replay_style_analysis(
             "panel_neutralized_excess": zero_skill.get("neutralized_excess_return"),
             "panel_draws": panel.get("k"),
         }
-    style = _style_exposures(replay_daily, replay.equity_curve, _snapshot_industry(snapshot_dir))
+    style = _style_exposures(
+        replay_daily, replay.equity_curve, _industry_vintages(universes)
+    )
     total_return = total_return_from_curve(replay.equity_curve)
     benchmark_return = regression.get("benchmark_return")
     excess_return = (
@@ -607,7 +620,7 @@ def replay_style_analysis(
             # high-beta tilt, so the neutralized figure rides beside it
             # wherever the raw one is read.
             "neutralized_excess_return": neutralized.get("neutralized_excess_return"),
-            "neutralized_excess_method": neutralization_method(benchmark_index),
+            "neutralized_excess_method": method,
             # The two figures a tracking mandate limits: the residual standard
             # deviation of that regression and its loading on the benchmark.
             "tracking_error": neutralized.get("tracking_error"),

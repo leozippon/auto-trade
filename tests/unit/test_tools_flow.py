@@ -18,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
+from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.runtime import SandboxPaths
 from autotrade.environment.tools import (
     CommandResult,
@@ -1930,6 +1931,7 @@ def _fold_backtest_tool(
         max_replay_years=3,
         max_llm_calls=3,
         deadline_seconds=600.0,
+        benchmark_index=DEFAULT_BENCHMARK_INDEX,
     )
     backtest = SessionValidations(
         request=request,

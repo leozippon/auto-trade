@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 
 from autotrade.environment.artifacts import FilesystemArtifactStore
-from autotrade.environment.executor import StrategyRaised
+from autotrade.environment.executor import StrategyMemoryExceeded, StrategyRaised
 from autotrade.environment.replay.engine import BacktestError
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
 from autotrade.environment.strategy import CN_TZ
@@ -658,14 +658,23 @@ def test_the_forward_replay_is_one_span_from_forward_start_to_the_release(tmp_pa
         pipeline.run_forward()
 
 
-def test_a_strategy_error_names_the_slice_it_raised_in_and_discards(tmp_path: Path):
+# A kill at the published memory cap is the strategy's own failure exactly as
+# an exception its code raised is: a verdict, not a rerun of the attempt.
+@pytest.mark.parametrize(
+    "cause",
+    [StrategyRaised("boom"), StrategyMemoryExceeded("killed at the 16g memory cap")],
+    ids=["raised", "memory_cap"],
+)
+def test_a_strategy_error_names_the_slice_it_raised_in_and_discards(
+    tmp_path: Path, cause: StrategyRaised
+):
     pipeline, _snapshots, evaluator, _developer, ledger = _freezing(tmp_path)
     pipeline.run_research_session()
     failure = BacktestError(
-        "generate_orders failed at 2025-07-02T08:30:00+08:00: boom",
+        f"generate_orders failed at 2025-07-02T08:30:00+08:00: {cause}",
         inference_at=datetime(2025, 7, 2, 8, 30, tzinfo=CN_TZ),
     )
-    failure.__cause__ = StrategyRaised("boom")
+    failure.__cause__ = cause
     evaluator.raise_with = failure
 
     record = pipeline.run_forward()

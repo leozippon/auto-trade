@@ -20,6 +20,7 @@ from autotrade.environment.artifacts import (
     copy_artifact,
     new_revision_id,
 )
+from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools import ModificationCheckTool, ToolRegistry
@@ -123,6 +124,7 @@ class RecordFailedAttemptsTest(unittest.TestCase):
             max_llm_calls=200,
             deadline_seconds=1200.0,
             record_failed_attempts=record_failed_attempts,
+            benchmark_index=DEFAULT_BENCHMARK_INDEX,
         )
 
         raised = error or RuntimeError(f"validation blew up at {HOST_RESULT_PATH}")

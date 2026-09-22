@@ -12,15 +12,16 @@ whose nodes carry only opaque ids, plus a host-only sidecar per node holding
 the raw revision id, the span, the summary and the result reference the
 Pipeline needs to freeze it. A Step is durable from the moment it is recorded,
 while the budget block only rides on the event that settles its tool call, so
-the two records can disagree over an attempt that died inside a batch; the
-recorded Validations are the floor their replay-years can never fall below
-(``ResearchSessionRequest.replay_years_spent``).
+an attempt that died inside a batch leaves Steps newer than its last block;
+the resume names them by recorded time so their replay-years are added to the
+block's (``ResearchSessionRequest.replay_years_spent``).
 """
 
 from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from pathlib import Path
 
 from autotrade.environment.runtime import (
@@ -66,13 +67,8 @@ def load_recorded_steps(experiment_dir: str | Path) -> tuple[StepResult, ...]:
     """
 
     directory = Path(experiment_dir)
-    tree_root = directory / "steps"
-    if not (tree_root / "tree.json").is_file():
-        return ()
     steps: list[StepResult] = []
-    for node in StepTree(tree_root).nodes():
-        if node.get("epoch_id") != RESEARCH_STAGE or not node.get("complete_validation"):
-            continue
+    for node in _recorded_nodes(directory):
         node_id = str(node["node_id"])
         sidecar = directory / STEP_SIDECAR_DIR / f"{node_id}.json"
         if not sidecar.is_file():
@@ -92,6 +88,19 @@ def load_recorded_steps(experiment_dir: str | Path) -> tuple[StepResult, ...]:
     return tuple(steps)
 
 
+def _recorded_nodes(experiment_dir: Path) -> list[Mapping[str, object]]:
+    """The complete research Validations of the arm's published step tree."""
+
+    tree_root = experiment_dir / "steps"
+    if not (tree_root / "tree.json").is_file():
+        return []
+    return [
+        node
+        for node in StepTree(tree_root).nodes()
+        if node.get("epoch_id") == RESEARCH_STAGE and node.get("complete_validation")
+    ]
+
+
 def resume_state(
     experiment_dir: str | Path, records: Sequence[Mapping[str, object]]
 ) -> SessionResume | None:
@@ -101,6 +110,8 @@ def resume_state(
     ``budget_used`` block is the cumulative spend (each attempt seeds its
     counters from the amounts before it), the last successful compaction's
     summary is the checkpoint, and the last event's time is where it stopped.
+    The recorded Validations created after that last block are the ones its
+    replay-years never counted.
 
     A trace that reached ``TRACE_MAX_BYTES`` stopped at its marker while the
     attempt kept spending, so seeding from it would let the arm run past its
@@ -116,6 +127,7 @@ def resume_state(
     if not attempts:
         return None
     budget = BudgetUsed()
+    budget_at: datetime | None = None
     summary: str | None = None
     interrupted_at = ""
     transcripts: list[str] = []
@@ -134,6 +146,7 @@ def resume_state(
             used = event.get("budget_used")
             if isinstance(used, Mapping):
                 budget = BudgetUsed.from_record(used)
+                budget_at = _moment(event.get("ts"), f"a budget event of trace {run_id}")
             if (
                 event.get("event_type") == "context_compaction"
                 and event.get("status") == "ok"
@@ -152,8 +165,29 @@ def resume_state(
         error=redact_host_paths(str(last.get("error") or "")),
         compaction_summary=summary,
         budget_used=budget,
+        unseen_step_ids=tuple(
+            str(node["node_id"])
+            for node in _recorded_nodes(Path(experiment_dir))
+            if budget_at is None
+            or _moment(node.get("created_at"), f"step node {node['node_id']}") > budget_at
+        ),
         transcripts=tuple(transcripts),
     )
+
+
+def _moment(value: object, what: str) -> datetime:
+    """The aware time a trace event or a step node was written."""
+
+    try:
+        moment = datetime.fromisoformat(str(value))
+    except ValueError:
+        moment = None
+    if moment is None or moment.tzinfo is None:
+        raise RuntimeError(
+            f"{what} carries no aware ISO time ({value!r}); the resumed replay-year "
+            "counter cannot tell which recorded Validations it already counts"
+        )
+    return moment
 
 
 def _trace_events(path: Path) -> list[dict[str, object]]:

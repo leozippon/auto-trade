@@ -787,12 +787,13 @@ BATCH_REJECTION_CHARGE_AFTER = 6
 # What a failed candidate's replay measured, which decides whether its
 # replay-years bought anything. ``StrategyRaised`` (``environment.executor``,
 # read off the whole cause chain by ``raised_by_strategy``) is the strategy's
-# own exception: the replay measured the strategy -- it cannot run on this data
-# -- and the charge stands. Every other failure measured the host: a strategy
-# clock that ran out, a shared card another process took, a sandbox that never
-# started or broke protocol. That produced no evidence about the candidate, so
-# the batch gives its replay-years back instead of charging research budget for
-# the environment's own trouble.
+# own failure -- its code raised, or (``StrategyMemoryExceeded``) its container
+# was killed at the published memory cap: the replay measured the strategy --
+# it cannot run on this data -- and the charge stands. Every other failure
+# measured the host: a strategy clock that ran out, a shared card another
+# process took, a sandbox that never started or broke protocol. That produced
+# no evidence about the candidate, so the batch gives its replay-years back
+# instead of charging research budget for the environment's own trouble.
 BATCH_FAILURE_STRATEGY = "strategy"
 BATCH_FAILURE_ENVIRONMENT = "environment"
 # The per-candidate projection an observation carries: a batch multiplies the
@@ -963,8 +964,10 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "with its span. A candidate whose replay fails has no result_ref and, while "
         "record_failed_attempts is on, is recorded as a dead-end node, so later "
         "sessions see what was already tried; its row says which kind of failure it "
-        "was: cause strategy means your own code raised, so the replay measured the "
-        "strategy and keeps its replay-years, while cause environment means the host "
+        "was: cause strategy means your own code raised or the strategy container "
+        "was killed at its memory cap (budgets.strategy_memory_bytes; exit 137, no "
+        "peak reading), so the replay measured the strategy and keeps its "
+        "replay-years, while cause environment means the host "
         "failed it (a strategy clock that ran out, a shared GPU taken by another "
         "process, a sandbox that never started or broke protocol), which measured "
         "nothing and gets its replay-years back, so resubmitting that candidate "
