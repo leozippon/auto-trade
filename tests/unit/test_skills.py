@@ -9,7 +9,6 @@ from pathlib import Path
 import pytest
 
 from autotrade.environment.tools import SafeWorkspace, ToolRegistry, WriteFileTool
-from autotrade.pipelines.local_backend import _assert_skills_absent_from_formal
 from autotrade.pipelines.skills import (
     MAX_SKILL_CHARS,
     MAX_SKILL_FILE_BYTES,
@@ -17,6 +16,7 @@ from autotrade.pipelines.skills import (
     ExperimentSkillsStore,
     SkillsSnapshot,
     WriteSkillTool,
+    _assert_skills_absent_from_formal,
     build_skills_index,
     install_workspace_skills,
     latest_skills_snapshot,

@@ -102,7 +102,7 @@ class RecordFailedAttemptsTest(unittest.TestCase):
             ResearchSessionRequest,
             SnapshotBundle,
         )
-        from autotrade.pipelines.local_backend import (
+        from autotrade.pipelines.session_tools import (
             BatchValidateTool,
             SessionValidations,
         )

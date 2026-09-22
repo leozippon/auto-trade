@@ -28,7 +28,7 @@ DEADLINE_SECONDS_NOTE = (
 
 # Agent-visible rule for the two strategy clocks under batch fan-out. The
 # environment, not the strategy, creates the contention a batch adds, so both
-# caps move with it (pipelines.local_backend._batch_replay_timeouts).
+# caps move with it (pipelines.session_tools._batch_replay_timeouts).
 BATCH_VALIDATE_FIT_TIMEOUT_NOTE = (
     "`batch_validate` 并发回放期间，`strategy_fit_timeout_seconds` 与单次推断上限"
     "`strategy_inference_timeout_seconds` 都按本批实际并发路数成倍放大（并发 3 路即 3 倍），"
@@ -36,7 +36,7 @@ BATCH_VALIDATE_FIT_TIMEOUT_NOTE = (
 )
 
 # How ``budgets.max_replay_years`` is spent, including the one case a claimed
-# replay-year comes back (pipelines.local_backend.BatchValidateTool).
+# replay-year comes back (pipelines.session_tools.BatchValidateTool).
 REPLAY_YEARS_NOTE = (
     "一个候选按其 span 覆盖的研究年份计 replay-year：一年的 span 计 1，完整研究期计研究年数；"
     "一批的花费是候选数乘年数，开跑前整批预留；`smoke_backtest` 与 `run_null_control` 不计。"
@@ -302,7 +302,7 @@ def _budget_facts(
 ) -> dict[str, object]:
     # Local import: the pipelines package imports this module, so binding the
     # batch cap at module scope would close an import cycle.
-    from autotrade.pipelines.local_backend import BATCH_VALIDATE_MAX_CONCURRENCY
+    from autotrade.pipelines.session_tools import BATCH_VALIDATE_MAX_CONCURRENCY
 
     budgets = _as_mapping(manifest.get("budgets"))
     return compact_mapping(

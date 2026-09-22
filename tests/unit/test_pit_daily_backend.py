@@ -506,7 +506,7 @@ def test_evaluation_summary_carries_the_whole_agent_visible_field_set(
     record = json.loads(attachment)
     assert record["stats"]["phase_seconds"] == phases
     # This file IS the Step attachment the Agent reads through the mounted
-    # `steps` root (local_backend.VALIDATION_RESULT_ATTACHMENT), so the host
+    # `steps` root (session_tools.VALIDATION_RESULT_ATTACHMENT), so the host
     # layout must not appear anywhere in it. The slots are named opaquely.
     assert HOST_PATH_RE.search(attachment) is None, attachment
     assert str(tmp_path) not in attachment

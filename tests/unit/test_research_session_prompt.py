@@ -104,7 +104,7 @@ def _tool_descriptions() -> dict[str, str]:
         StepRollbackTool,
         WriteFileTool,
     )
-    from autotrade.pipelines.local_backend import (
+    from autotrade.pipelines.session_tools import (
         BatchValidateTool,
         NullControlTool,
         SmokeBacktestTool,

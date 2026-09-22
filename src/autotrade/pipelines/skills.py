@@ -736,6 +736,27 @@ def skills_trees_equal(left: str | Path, right: str | Path) -> bool:
     return all(left_files[name].read_bytes() == right_files[name].read_bytes() for name in left_files)
 
 
+def _assert_skills_absent_from_formal(
+    output_dir: str | Path, models_dir: str | Path | None = None
+) -> None:
+    """Keep the shared knowledge tree out of every formal strategy revision."""
+
+    roots = (("output", Path(output_dir)),)
+    if models_dir is not None:
+        roots += (("models", Path(models_dir)),)
+    for label, root in roots:
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if (path.is_dir() and path.name == "skills") or (
+                path.is_file() and path.name == "SKILL.md"
+            ):
+                relative = path.relative_to(root).as_posix()
+                raise ValueError(
+                    f"shared skills cannot enter formal {label}: {label}/{relative}"
+                )
+
+
 class ExperimentSkillsStore:
     """Immutable generations; the experiment ledger is the only reachable head."""
 

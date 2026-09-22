@@ -272,7 +272,7 @@ def test_the_facts_publish_the_strategy_containers_cpu_quota_and_batch_width() -
     """
 
     from autotrade.environment.sandbox import SandboxLimits
-    from autotrade.pipelines.local_backend import BATCH_VALIDATE_MAX_CONCURRENCY
+    from autotrade.pipelines.session_tools import BATCH_VALIDATE_MAX_CONCURRENCY
 
     budgets = _facts()["budgets"]
     assert budgets["strategy_cpus"] == SandboxLimits().cpus

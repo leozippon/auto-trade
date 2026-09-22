@@ -37,7 +37,7 @@ from autotrade.pipelines.config import (
     session_deadline_seconds,
 )
 from autotrade.pipelines.hitl_state import build_session_plan
-from autotrade.pipelines.local_backend import BATCH_VALIDATE_MAX_CONCURRENCY
+from autotrade.pipelines.session_tools import BATCH_VALIDATE_MAX_CONCURRENCY
 from autotrade.webui.prompt_preview import RUNTIME_PLACEHOLDER, build_prompt_preview
 
 SESSION_KEY = "research"

@@ -26,9 +26,9 @@ from autotrade.pipelines.config import (
     ResearchSessionRequest,
     SnapshotBundle,
 )
-from autotrade.pipelines.local_backend import (
+from autotrade.pipelines.local_backend import LocalDailyEvaluationBackend
+from autotrade.pipelines.session_tools import (
     SMOKE_BACKTEST_MAX_DAYS,
-    LocalDailyEvaluationBackend,
     SmokeBacktestTool,
 )
 

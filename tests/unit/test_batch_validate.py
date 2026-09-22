@@ -60,7 +60,8 @@ from autotrade.pipelines.config import (
 )
 from autotrade.pipelines.experiment import null_control_seed
 from autotrade.pipelines.ledger import RESEARCH_STAGE, ExperimentLedger
-from autotrade.pipelines.local_backend import (
+from autotrade.pipelines.session_resume import load_recorded_steps, resume_state
+from autotrade.pipelines.session_tools import (
     BATCH_HYPOTHESIS_MAX_CHARS,
     BATCH_REJECTION_CHARGE_AFTER,
     BATCH_REJECTION_ESCALATE_AT,
@@ -73,7 +74,6 @@ from autotrade.pipelines.local_backend import (
     batch_select_hint,
     session_budget_status,
 )
-from autotrade.pipelines.session_resume import load_recorded_steps, resume_state
 
 PARENT_SOURCE = "def generate_orders(context):\n    return []\n"
 # A four-year research period, one slot per July-June year.

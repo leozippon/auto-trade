@@ -1409,7 +1409,7 @@ class SequentialDispatchClassificationTest(unittest.TestCase):
             SEQUENTIAL_TOOL_NAMES,
             is_sequential_tool,
         )
-        from autotrade.pipelines.local_backend import BatchValidateTool
+        from autotrade.pipelines.session_tools import BatchValidateTool
 
         self.assertTrue(BatchValidateTool.spec.mutating)
         self.assertTrue(is_sequential_tool(BatchValidateTool.spec))
@@ -1877,7 +1877,7 @@ def _fold_backtest_tool(
         StrategySchedule,
     )
     from autotrade.pipelines.ledger import ExperimentLedger
-    from autotrade.pipelines.local_backend import BatchValidateTool, SessionValidations
+    from autotrade.pipelines.session_tools import BatchValidateTool, SessionValidations
 
     from .test_batch_validate import _write_style_sidecar
 

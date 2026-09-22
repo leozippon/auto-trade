@@ -1435,7 +1435,7 @@ def _all_registrable_tool_names() -> set[str]:
     from autotrade.environment.nl.engine import TEXT_RETRIEVE_TOOL
     from autotrade.environment.tools import SafeWorkspace, SearchRoots
     from autotrade.environment.tools.search import GlobTool, GrepTool, ReadFileTool
-    from autotrade.pipelines.local_backend import (
+    from autotrade.pipelines.session_tools import (
         BatchValidateTool,
         NullControlTool,
         SmokeBacktestTool,
