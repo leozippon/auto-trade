@@ -10,11 +10,13 @@ such a trace is refused rather than resumed from.
 The validations an attempt recorded survive in the experiment's step tree,
 whose nodes carry only opaque ids, plus a host-only sidecar per node holding
 the raw revision id, the span, the summary and the result reference the
-Pipeline needs to freeze it. A Step is durable from the moment it is recorded,
-while the budget block only rides on the event that settles its tool call, so
-an attempt that died inside a batch leaves Steps newer than its last block;
-the resume names them by recorded time so their replay-years are added to the
-block's (``ResearchSessionRequest.replay_years_spent``).
+Pipeline needs to freeze it, and the control flag, batch id and declared
+offline screens the freeze gate's trial family reads. A Step is durable from
+the moment it is recorded, while the budget block only rides on the event that
+settles its tool call, so an attempt that died inside a batch leaves Steps
+newer than its last block; the resume names them by recorded time so their
+replay-years are added to the block's
+(``ResearchSessionRequest.replay_years_spent``).
 """
 
 from __future__ import annotations
@@ -52,6 +54,9 @@ def record_step_sidecar(experiment_dir: str | Path, step: StepResult) -> Path:
             "span": step.span,
             "summary": dict(step.validation.summary),
             "result_ref": step.validation.result_ref,
+            "control": step.control,
+            "batch_id": step.batch_id,
+            "offline_trials": step.offline_trials,
         },
     )
     return path
@@ -83,6 +88,11 @@ def load_recorded_steps(experiment_dir: str | Path) -> tuple[StepResult, ...]:
                 str(record["revision_id"]),
                 EvaluationResult(dict(record["summary"]), str(record["result_ref"])),
                 span=str(record["span"]),
+                # A sidecar written before batches registered controls and
+                # declared offline screens has neither: no control, undeclared.
+                control=record.get("control") is True,
+                batch_id=record.get("batch_id"),
+                offline_trials=record.get("offline_trials"),
             )
         )
     return tuple(steps)

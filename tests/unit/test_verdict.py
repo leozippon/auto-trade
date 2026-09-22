@@ -262,7 +262,7 @@ def test_deflated_sharpe_reproduces_the_design_example():
 
     returns = np.random.default_rng(61).normal(0.0, 0.01, 968)
     block = verdict.deflated_sharpe(
-        observed_sharpe=0.6, trials=20, trial_sharpe_std=0.3, returns=returns
+        observed_sharpe=0.6, effective_trials=20, trial_sharpe_std=0.3, returns=returns
     )
 
     assert block["sharpe_star"] == pytest.approx(0.57, abs=0.005)
@@ -270,78 +270,203 @@ def test_deflated_sharpe_reproduces_the_design_example():
     assert verdict.forward_mde(0.13, TRADING_DAYS_PER_YEAR) == pytest.approx(0.2756)
 
 
-def test_freeze_gate_needs_the_deflated_probability_its_threshold_names():
-    """The threshold is deliberately not 0.5.
+def _expected_max(trials):
+    """The Bailey-López de Prado expected maximum, written out independently."""
 
-    At 0.5 the deflated Sharpe's ``√(T−1)/√(variance_term)`` factor cancels and
-    the gate degenerates into ``IR > SR*`` — a point comparison the two arms
-    that were actually frozen cleared at a research IR of 0.11–0.13, while the
-    forward verdict they then failed needed about 0.9.
-    """
+    gamma, normal = 0.5772156649015329, NormalDist()
+    return (1 - gamma) * normal.inv_cdf(1 - 1 / trials) + gamma * normal.inv_cdf(
+        1 - 1 / (trials * math.e)
+    )
+
+
+def test_the_expected_maximum_is_the_formula_floored_at_one_trial():
+    for trials in (2, 3, 5, 10, 15, 100):
+        assert verdict.expected_max_sharpe(trials) == pytest.approx(_expected_max(trials))
+    # Below N ≈ 1.3 the approximation turns negative; one trial's maximum is 0.
+    assert _expected_max(1.1) < 0
+    assert verdict.expected_max_sharpe(1.1) == verdict.expected_max_sharpe(1) == 0.0
+    counts = [1, 1.1, 1.3, 1.5, 2, 2.5, 3, 5, 10]
+    readings = [verdict.expected_max_sharpe(count) for count in counts]
+    assert readings == sorted(readings)
+
+
+def test_the_bar_over_four_research_years_is_the_documented_table():
+    """√V = √(244/T): the IR the default 0.975 threshold asks for at N_eff
+    1/2/3/5 over four research years (976 days), for normal returns -- and the
+    former 0.90 threshold's, for comparison."""
+
+    null = verdict.null_sharpe_std(4 * TRADING_DAYS_PER_YEAR)
+    assert null == pytest.approx(0.5)
+    assert verdict.FREEZE_MIN_DSR_PROBABILITY == 0.975
+    for threshold, expected in (
+        (verdict.FREEZE_MIN_DSR_PROBABILITY, [0.98, 1.24, 1.41, 1.58]),
+        (0.90, [0.64, 0.90, 1.07, 1.24]),
+    ):
+        z = NormalDist().inv_cdf(threshold)
+        bars = [null * (verdict.expected_max_sharpe(n) + z) for n in (1, 2, 3, 5)]
+        assert bars == pytest.approx(expected, abs=0.005)
+    with pytest.raises(ValueError, match="days must be an integer >= 2"):
+        verdict.null_sharpe_std(1)
+
+
+def test_the_freeze_gate_deflates_by_the_null_sampling_error_at_the_trial_count():
+    """SR* is the zero-skill sampling error of an IR over the nominee's own
+    days times the expected maximum of the trial count; 0.90 then asks the IR
+    to clear SR* by 1.28 of those errors, not merely to beat it (at a
+    threshold of 0.5 the ``√(T−1)/√(variance_term)`` factor cancels and the
+    gate degenerates into a point comparison)."""
 
     rng = np.random.default_rng(71)
     research = _weekdays("20210701", "20250630")
-    # A research IR near 1.2: below roughly 0.7 no deflation at all clears the
-    # threshold over four years, which is the point of raising it.
     analysis = _analysis(_segment(research, 0.16, rng, exact=True))
-    information_ratio = verdict.neutralized_statistics(analysis)["information_ratio"]
-    trials = 10
-    gamma, normal = 0.5772156649015329, NormalDist()
-    expected_max = (1 - gamma) * normal.inv_cdf(
-        1 - 1 / trials
-    ) + gamma * normal.inv_cdf(1 - 1 / (trials * math.e))
+    statistics = verdict.neutralized_statistics(analysis)
+    information_ratio = statistics["information_ratio"]
+    null = math.sqrt(TRADING_DAYS_PER_YEAR / statistics["days"])
 
-    def gate(sharpe_star, irs=None):
-        if irs is None:
-            spread = sharpe_star / expected_max
-            irs = [information_ratio, information_ratio - math.sqrt(2) * spread]
-        return verdict.freeze_gate(analysis, trials=trials, full_span_irs=irs)
+    def gate(trials, offline=0):
+        return verdict.freeze_gate(
+            analysis, trials=trials, offline_trials=offline, full_span_validations=2
+        )
 
-    # The SR* that puts the probability exactly at the threshold, solved from
-    # the formula on this analysis' own skew, kurtosis and measured days.
-    reading = gate(0.0)["deflated_sharpe"]
-    sharpe = information_ratio / SCALE
-    variance_term = (
-        1.0
-        - reading["return_skew"] * sharpe
-        + (reading["return_kurtosis"] - 1.0) / 4.0 * sharpe**2
-    )
-    boundary = information_ratio - normal.inv_cdf(
-        verdict.FREEZE_MIN_DSR_PROBABILITY
-    ) * math.sqrt(variance_term) * SCALE / math.sqrt(reading["return_days"] - 1)
+    for trials in (1, 2, 5, 20):
+        block = gate(trials)["deflated_sharpe"]
+        # No trial series given: nothing to correlate, so N_eff is M itself.
+        assert (block["trial_correlation"], block["trial_correlation_pairs"]) == (0.0, 0)
+        assert block["effective_trials"] == block["trials"] == trials
+        assert block["trial_sharpe_std"] == pytest.approx(null)
+        assert block["sharpe_star"] == pytest.approx(
+            null * (_expected_max(trials) if trials > 1 else 0.0)
+        )
+        sharpe = information_ratio / SCALE
+        variance_term = (
+            1.0
+            - block["return_skew"] * sharpe
+            + (block["return_kurtosis"] - 1.0) / 4.0 * sharpe**2
+        )
+        assert block["deflated_sharpe_probability"] == pytest.approx(
+            NormalDist().cdf(
+                (sharpe - block["sharpe_star"] / SCALE)
+                * math.sqrt(block["return_days"] - 1)
+                / math.sqrt(variance_term)
+            )
+        )
 
-    passing = gate(0.98 * boundary)
+    passing = gate(1)
     assert passing["passed"] and passing["reasons"] == []
-    assert passing["information_ratio"] == pytest.approx(information_ratio)
-    assert passing["deflated_sharpe"]["sharpe_star"] == pytest.approx(0.98 * boundary)
-    assert (
-        passing["deflated_sharpe"]["deflated_sharpe_probability"]
-        > verdict.FREEZE_MIN_DSR_PROBABILITY
+    assert passing["deflated_sharpe"]["information_ratio_bar"] < information_ratio
+    # Declared offline screens are trials: the same nominee at 2 host trials
+    # and 18 screened offline is judged as at 20.
+    failing = gate(2, offline=18)
+    assert failing["deflated_sharpe"]["deflated_sharpe_probability"] == pytest.approx(
+        gate(20)["deflated_sharpe"]["deflated_sharpe_probability"]
     )
-
-    failing = gate(1.02 * boundary)
-    assert not failing["passed"]
+    assert (
+        failing["deflated_sharpe"]["host_trials"],
+        failing["deflated_sharpe"]["offline_trials"],
+        failing["deflated_sharpe"]["trials"],
+    ) == (2, 18, 20)
     assert failing["reasons"] == ["freeze_deflated_sharpe_below_threshold"]
-    assert (
-        failing["deflated_sharpe"]["deflated_sharpe_probability"]
-        < verdict.FREEZE_MIN_DSR_PROBABILITY
-    )
+    # Beating SR* is not enough: the probability reads above 0.5 and fails.
+    assert failing["deflated_sharpe"]["sharpe_star"] < information_ratio
+    assert failing["deflated_sharpe"]["deflated_sharpe_probability"] > 0.5
+    assert failing["deflated_sharpe"]["information_ratio_bar"] > information_ratio
 
-    # Merely beating the deflation is not enough any more: an IR a hair above
-    # SR* still reads above 0.5 and the gate refuses it.
-    barely = gate(0.98 * information_ratio)
-    assert barely["deflated_sharpe"]["deflated_sharpe_probability"] > 0.5
-    assert barely["reasons"] == ["freeze_deflated_sharpe_below_threshold"]
+    alone = verdict.freeze_gate(analysis, trials=1, full_span_validations=1)
+    assert alone["reasons"] == ["freeze_too_few_full_span_validations"]
+    for arguments in (
+        {"trials": 0, "full_span_validations": 2},
+        {"trials": 1, "offline_trials": -1, "full_span_validations": 2},
+        {"trials": 1, "full_span_validations": True},
+    ):
+        with pytest.raises(ValueError, match="must be an integer"):
+            verdict.freeze_gate(analysis, **arguments)
 
-    alone = gate(0.0, irs=[information_ratio])
-    assert alone["reasons"] == [
-        "freeze_too_few_full_span_validations",
-        "freeze_deflated_sharpe_unavailable",
+
+def test_the_dispersion_does_not_depend_on_what_else_the_arm_validated():
+    """Two controls far below the nominee and two near-copies of it: the
+    trials' IR spreads differ tenfold, their series correlate identically, and
+    the gate reads the nominee the same -- controls no longer tax a candidate
+    and padding no longer helps it."""
+
+    research = _weekdays("20210701", "20250630")
+    nominee = _analysis(_segment(research, 0.13, np.random.default_rng(81), exact=True))
+    # Noise projected off the design: each trial's IR is exactly its drift / TE.
+    noise = [
+        _segment(research, 0.0, np.random.default_rng(82 + k), exact=True) for k in range(2)
     ]
-    assert (
-        alone["deflated_sharpe"]["unavailable_reason"]
-        == "fewer_than_two_full_span_validations"
+
+    def family(alphas):
+        return [
+            _analysis(
+                (days, strategy + alpha / TRADING_DAYS_PER_YEAR, benchmark, size)
+            )
+            for alpha, (days, strategy, benchmark, size) in zip(alphas, noise, strict=True)
+        ]
+
+    controls, copies = family([0.02, 0.0]), family([0.125, 0.12])
+    spreads = [
+        np.std(
+            [verdict.neutralized_statistics(item)["information_ratio"] for item in (nominee, *group)],
+            ddof=1,
+        )
+        for group in (controls, copies)
+    ]
+    assert spreads[0] > 10 * spreads[1]
+    readings = [
+        verdict.freeze_gate(
+            nominee, trials=3, trial_analyses=[nominee, *group], full_span_validations=3
+        )["deflated_sharpe"]
+        for group in (controls, copies)
+    ]
+    assert readings[0] == pytest.approx(readings[1])
+
+
+def test_the_effective_trial_count_reads_the_correlation_of_the_trials_series():
+    research = _weekdays("20210701", "20250630")
+    rng = np.random.default_rng(91)
+    days, _own, benchmark, size = _segment(research, 0.0, rng)
+    common = rng.normal(0.0, 0.10 / SCALE, len(days))
+
+    def trial(loading, seed, own_days=days):
+        noise = np.random.default_rng(seed).normal(0.0, 0.10 / SCALE, len(days))
+        series = 0.1 / TRADING_DAYS_PER_YEAR + 0.8 * benchmark + loading * common
+        series = series + math.sqrt(1 - loading**2) * noise
+        keep = [index for index, day in enumerate(days) if day in set(own_days)]
+        return _analysis(
+            (own_days, series[keep], benchmark[keep], size[keep])
+        )
+
+    # Pairwise correlation 0.6 through one shared component.
+    shared = [trial(math.sqrt(0.6), seed) for seed in (1, 2, 3)]
+    correlation, pairs = verdict.trial_correlation(shared)
+    assert pairs == 3 and correlation == pytest.approx(0.6, abs=0.08)
+    block = verdict.freeze_gate(
+        shared[0], trials=3, trial_analyses=shared, full_span_validations=3
+    )["deflated_sharpe"]
+    assert block["trial_correlation"] == correlation
+    assert block["effective_trials"] == pytest.approx(correlation + (1 - correlation) * 3)
+    assert block["sharpe_star"] == pytest.approx(
+        block["trial_sharpe_std"] * _expected_max(block["effective_trials"])
     )
+
+    # Identical trials are one trial; opposite ones are not fewer than two.
+    assert verdict.trial_correlation([shared[0], shared[0]]) == (1.0, 1)
+    assert verdict.effective_trials(4, 1.0) == 1.0
+    mirrored = {
+        **shared[0],
+        "strategy_daily": [[day, -value] for day, value in shared[0]["strategy_daily"]],
+    }
+    assert verdict.trial_correlation([shared[0], mirrored]) == (0.0, 1)
+    assert verdict.effective_trials(2, 0.0) == 2.0
+    # A sub-span trial is correlated over the years it shares; trials that
+    # share no day add no pair, and one trial alone leaves N_eff = M.
+    first_year = [day for day in days if day <= "20220630"]
+    last_year = [day for day in days if day >= "20240701"]
+    year_one = trial(math.sqrt(0.6), 1, first_year)
+    correlation, pairs = verdict.trial_correlation([shared[0], year_one])
+    assert pairs == 1 and correlation > 0.9
+    assert verdict.trial_correlation([year_one, trial(0.0, 5, last_year)]) == (0.0, 0)
+    assert verdict.trial_correlation([shared[0]]) == (0.0, 0)
 
 
 RESEARCH_YEARS = [
@@ -391,7 +516,7 @@ def test_a_zero_panel_reproduces_the_ungraded_figures_exactly():
         return verdict.freeze_gate(
             sidecar,
             trials=6,
-            full_span_irs=[1.2, 0.9, 0.7],
+            full_span_validations=3,
             years=RESEARCH_YEARS,
             active_max_drawdown=0.3,
         )
@@ -426,7 +551,7 @@ def test_the_graded_series_is_the_strategy_minus_its_panel():
     )
 
     gate = verdict.freeze_gate(
-        book, trials=2, full_span_irs=[1.0, 0.8], years=RESEARCH_YEARS, active_max_drawdown=1.0
+        book, trials=2, full_span_validations=2, years=RESEARCH_YEARS, active_max_drawdown=1.0
     )
     own = verdict.neutralized_statistics({**book, "panel_daily": []})
     assert gate["mandate"] == {
@@ -465,7 +590,7 @@ def test_the_freeze_gate_refuses_zero_skill_an_uneven_edge_and_a_broken_mandate(
 
     def gate(sidecar, **limits):
         arguments = {"years": RESEARCH_YEARS, "active_max_drawdown": 0.30, **limits}
-        return verdict.freeze_gate(sidecar, trials=4, full_span_irs=[0.6, 0.7, 0.8, 0.9], **arguments)
+        return verdict.freeze_gate(sidecar, trials=4, full_span_validations=4, **arguments)
 
     skilled = gate(book([0.10, 0.10, 0.10, 0.10], seed=111))
     assert skilled["passed"] and skilled["series"] == "active"
@@ -473,7 +598,7 @@ def test_the_freeze_gate_refuses_zero_skill_an_uneven_edge_and_a_broken_mandate(
     assert skilled["positive_years"] == 4
     assert skilled["thresholds"] == {
         "min_information_ratio": 0.75,
-        "min_deflated_sharpe_probability": 0.90,
+        "min_deflated_sharpe_probability": 0.975,
         "min_full_span_validations": 2,
         "min_positive_years": 3,
         "research_years": 4,
@@ -509,7 +634,7 @@ def test_the_freeze_gate_refuses_zero_skill_an_uneven_edge_and_a_broken_mandate(
     # carries the frozen d2's shape (tracking error 11.4 %, beta 0.71) is refused.
     mandate = {"tracking_error_cap": 0.08, "beta_min": 0.85, "beta_max": 1.15}
     assert gate(steady, **mandate)["passed"]
-    like_d2 = gate(book([0.12] * 4, seed=115, te=0.114, beta=0.71), **mandate)
+    like_d2 = gate(book([0.20] * 4, seed=115, te=0.114, beta=0.71), **mandate)
     assert like_d2["mandate"]["tracking_error"] == pytest.approx(0.114, abs=0.002)
     assert like_d2["mandate"]["market_beta"] == pytest.approx(0.71, abs=0.01)
     assert like_d2["reasons"] == [

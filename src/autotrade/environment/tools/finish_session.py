@@ -307,6 +307,8 @@ def _gate_record(gate: Mapping[str, object]) -> dict[str, object]:
         "reasons": [str(item) for item in gate.get("reasons") or ()],
         "deflated_sharpe_probability": dsr.get("deflated_sharpe_probability"),
         "trials": dsr.get("trials"),
+        "effective_trials": dsr.get("effective_trials"),
+        "information_ratio_bar": dsr.get("information_ratio_bar"),
         "full_span_validations": gate.get("full_span_validations"),
         "information_ratio": gate.get("information_ratio"),
         "neutralized_excess": gate.get("neutralized_excess"),
@@ -323,8 +325,10 @@ def _gate_numbers(gate: Mapping[str, object]) -> str:
         for name in (
             "deflated_sharpe_probability",
             "trials",
+            "effective_trials",
             "full_span_validations",
             "information_ratio",
+            "information_ratio_bar",
         )
         if name in record
     ]

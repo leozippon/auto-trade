@@ -1958,7 +1958,10 @@ def _fold_backtest_tool(
 
 
 WORKING_COPY = {
-    "candidates": [{"name": "working_copy", "hypothesis": "h", "path": "output"}]
+    "offline_trials": 0,
+    "candidates": [
+        {"name": "working_copy", "hypothesis": "h", "path": "output", "control": False}
+    ],
 }
 
 

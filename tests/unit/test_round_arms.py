@@ -347,11 +347,13 @@ def test_the_20260921_mandated_arms_keep_unmandated_drawdowns() -> None:
 def test_the_20260921b_arms_name_their_graduation_bars() -> None:
     """The b-round records a create-time choice for every bar, not a hidden
     pair of packages. Mandated arms keep the 35/15 drawdowns they named;
-    un-mandated arms keep 45/30; statistical bars are today's defaults."""
+    un-mandated arms keep 45/30; statistical bars are the defaults of their day."""
     from autotrade.pipelines.config import AcceptanceRules, acceptance_for
 
     rnd = ROUNDS["create_round_20260921b"]
-    defaults = AcceptanceRules().to_record()
+    # The defaults these arms were created under: DSR1 later raised
+    # min_dsr_probability to 0.975, and a round file is the record of its day.
+    defaults = {**AcceptanceRules().to_record(), "min_dsr_probability": 0.90}
     statistical = (
         "min_active_ir",
         "min_dsr_probability",
@@ -391,12 +393,14 @@ def test_the_20260921b_arms_name_their_graduation_bars() -> None:
 def test_the_20260921c_arms_name_their_graduation_bars() -> None:
     """The c-round records a create-time choice for every bar, not a hidden
     pair of packages. Mandated arms keep the 35/15 drawdowns they named;
-    un-mandated arms keep 45/30; statistical bars are today's defaults.
+    un-mandated arms keep 45/30; statistical bars are the defaults of their day.
     `--fill` takes the first four and queues the last two."""
     from autotrade.pipelines.config import AcceptanceRules, acceptance_for
 
     rnd = ROUNDS["create_round_20260921c"]
-    defaults = AcceptanceRules().to_record()
+    # The defaults these arms were created under: DSR1 later raised
+    # min_dsr_probability to 0.975, and a round file is the record of its day.
+    defaults = {**AcceptanceRules().to_record(), "min_dsr_probability": 0.90}
     statistical = (
         "min_active_ir",
         "min_dsr_probability",
@@ -446,12 +450,14 @@ def test_the_20260921c_arms_name_their_graduation_bars() -> None:
 def test_the_20260921d_arms_name_their_graduation_bars() -> None:
     """The d-round records a create-time choice for every bar, not a hidden
     pair of packages. Mandated arms keep the 35/15 drawdowns they named;
-    un-mandated arms keep 45/30; statistical bars are today's defaults.
+    un-mandated arms keep 45/30; statistical bars are the defaults of their day.
     Four arms in file order: an empty slot takes the first."""
     from autotrade.pipelines.config import AcceptanceRules, acceptance_for
 
     rnd = ROUNDS["create_round_20260921d"]
-    defaults = AcceptanceRules().to_record()
+    # The defaults these arms were created under: DSR1 later raised
+    # min_dsr_probability to 0.975, and a round file is the record of its day.
+    defaults = {**AcceptanceRules().to_record(), "min_dsr_probability": 0.90}
     statistical = (
         "min_active_ir",
         "min_dsr_probability",
@@ -622,6 +628,7 @@ def test_mounting_index_weight_leaves_every_other_round_byte_for_byte() -> None:
         "create_round_20260921d",
         "create_round_20260922",
         "create_round_20260923",
+        "create_round_20260924",
     }, sorted(carrying)
     base = records["create_round_20260920"]
     for name in sorted(carrying):

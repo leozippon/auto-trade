@@ -557,7 +557,15 @@ class SessionValidations:
             "deflated_sharpe_probability": (
                 dsr.get("deflated_sharpe_probability") if isinstance(dsr, Mapping) else None
             ),
+            # M, what it counts as independently, and the IR the gate's DSR
+            # threshold asks for at that count.
             "trials": dsr.get("trials") if isinstance(dsr, Mapping) else None,
+            "effective_trials": (
+                dsr.get("effective_trials") if isinstance(dsr, Mapping) else None
+            ),
+            "information_ratio_bar": (
+                dsr.get("information_ratio_bar") if isinstance(dsr, Mapping) else None
+            ),
             "full_span_validations": gate.get("full_span_validations"),
             "note": SELECTION_STATISTICS_NOTE,
         }
@@ -654,12 +662,9 @@ class SessionValidations:
             metadata=metadata,
         )
         if self.experiment_dir is not None:
-            span = str((metadata or {}).get("span") or "")
-            if not span:
-                raise ValueError("a recorded Validation needs its span in metadata")
             record_step_sidecar(
                 self.experiment_dir,
-                StepResult(node_id, revision.revision_id, evaluation, span=span),
+                recorded_step(node_id, revision.revision_id, evaluation, metadata or {}),
             )
             self.publish_tree()
         return node_id
@@ -739,6 +744,29 @@ class SessionValidations:
             raise TimeoutError("research session deadline exceeded") from exc
 
 
+def recorded_step(
+    node_id: str,
+    revision_id: str,
+    evaluation: EvaluationResult,
+    metadata: Mapping[str, object],
+) -> StepResult:
+    """The Step a recorded Validation is, from the metadata its node carries."""
+
+    span = str(metadata.get("span") or "")
+    if not span:
+        raise ValueError("a recorded Validation needs its span in metadata")
+    offline = metadata.get("offline_trials")
+    return StepResult(
+        node_id,
+        revision_id,
+        evaluation,
+        span=span,
+        control=metadata.get("control") is True,
+        batch_id=str(metadata["batch_id"]) if metadata.get("batch_id") else None,
+        offline_trials=offline if isinstance(offline, int) else None,
+    )
+
+
 # ``batch_validate``: one formal step that fans out a pre-registered candidate
 # set over one span. Audited sessions reached at most two formal Validations
 # each when every candidate was its own serial step, each branching off the
@@ -767,6 +795,10 @@ BATCH_NAME_MAX_CHARS = 40
 # rather than by what one line is.
 BATCH_HYPOTHESIS_MAX_CHARS = AGENT_JUSTIFICATION_MAX_CHARS
 BATCH_PATH_MAX_CHARS = 200
+# A declared offline screen is a count of candidate configurations; beyond
+# this the freeze gate's bar already exceeds any IR on record (about 2.5 over
+# four years), so a larger figure is a typo, not a screen.
+BATCH_OFFLINE_TRIALS_MAX = 10_000
 # Workspace roots a candidate may not sit under: they are the working copy's
 # own trees or not strategy trees at all. ``output`` itself is a valid path --
 # the working copy validated as it stands; every revision is a snapshot
@@ -796,6 +828,15 @@ BATCH_REJECTION_CHARGE_AFTER = 6
 # instead of charging research budget for the environment's own trouble.
 BATCH_FAILURE_STRATEGY = "strategy"
 BATCH_FAILURE_ENVIRONMENT = "environment"
+# What every attempt's run-manifest row keeps of its candidate's registration.
+_BATCH_MANIFEST_KEYS = (
+    "batch_id",
+    "candidate",
+    "hypothesis",
+    "control",
+    "offline_trials",
+    "span",
+)
 # The per-candidate projection an observation carries: a batch multiplies the
 # fixed-size summary by N, so a row keeps what a screening decision is actually
 # made on and points at the node's full record for everything else.
@@ -925,6 +966,7 @@ class _BatchCandidate:
     hypothesis: str
     path: str
     directory: Path
+    control: bool
 
 
 class BatchValidateTool(SessionTimeBudgetAware):
@@ -950,14 +992,24 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "whole research period, the default), one research year such as Y2, or "
         "contiguous years such as Y2..Y4, as the research_geometry fact lists them; "
         "each span is replayed as one continuous book from the decision view at "
-        "its first year. Each candidate is {name, hypothesis, path}: path is a "
+        "its first year. Each candidate is {name, hypothesis, path, control}: path is a "
         "workspace directory laid out like output/ (main.py plus its sibling "
         "modules; the read-only template files such as README.md are supplied for "
         "you; models/ is shared with the working copy), or output itself to "
         "validate the working copy as it stands; build such a directory by copying "
         "output/, the code you have been editing, not refs/, which only holds the "
         "pack this arm started from. hypothesis is the falsifiable "
-        "statement you register BEFORE any result exists. The batch costs one "
+        "statement you register BEFORE any result exists. control registers the "
+        "candidate as a comparison leg (a baseline, the mechanism-removed carrier, "
+        "a placebo): it replays and costs replay-years like any candidate, but it "
+        "is not a trial of the freeze gate and can never be nominated or frozen, so "
+        "a real candidate registered as a control forfeits its nomination. "
+        "offline_trials declares, for the whole batch, how many candidate "
+        "configurations you screened offline on research-period data to decide "
+        "what this batch submits (a pack's screening gate, a grid, a probe script; "
+        "0 when nothing was screened): the freeze gate adds it to the arm's trial "
+        "count, summed over batches, so declare it honestly -- an undercount "
+        "understates the search the gate corrects for. The batch costs one "
         "replay-year per candidate per year of the span, reserved before anything "
         "runs; a candidate whose replay completes becomes its own immutable "
         "revision and Step node under the CURRENT node as shared parent, recorded "
@@ -1043,28 +1095,49 @@ class BatchValidateTool(SessionTimeBudgetAware):
                                     "like output/, e.g. candidates/value."
                                 ),
                             },
+                            "control": {
+                                "type": "boolean",
+                                "description": (
+                                    "true for a registered comparison leg: "
+                                    "not a freeze-gate trial, never "
+                                    "nominatable; false for a candidate."
+                                ),
+                            },
                         },
-                        "required": ["name", "hypothesis", "path"],
+                        "required": ["name", "hypothesis", "path", "control"],
                         "additionalProperties": False,
                     },
                 },
+                "offline_trials": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": BATCH_OFFLINE_TRIALS_MAX,
+                    "description": (
+                        "Candidate configurations screened offline on "
+                        "research-period data to choose this batch; 0 if none. "
+                        "Added to the arm's freeze-gate trial count."
+                    ),
+                },
             },
-            "required": ["candidates"],
+            "required": ["candidates", "offline_trials"],
             "additionalProperties": False,
         },
         mutating=True,
         example={
             "span": "Y3..Y4",
+            "offline_trials": 4,
             "candidates": [
                 {
                     "name": "value_quality",
                     "hypothesis": "T-1 估值+质量 4 因子等权打分的中性化超额在两个年份都为正",
                     "path": "candidates/value_quality",
+                    "control": False,
                 },
                 {
-                    "name": "reversal",
-                    "hypothesis": "21 日反转单因子的中性化超额在两个年份都为正",
-                    "path": "candidates/reversal",
+                    "name": "c_base",
+                    "hypothesis": "对照：同一池等权持有，不用打分；读数是 value_quality 的归因基线",
+                    "path": "candidates/c_base",
+                    "control": True,
                 },
             ],
         },
@@ -1102,6 +1175,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
         # the same rejection can also repeat forever: ``_rejected`` counts it.
         try:
             span = self.backtest.span(arguments.get("span", FULL_SPAN))
+            offline_trials = _batch_offline_trials(arguments)
             candidates = self._parse(arguments)
             self._supply_readonly_files(candidates)
             checks = self._precheck(candidates)
@@ -1133,24 +1207,25 @@ class BatchValidateTool(SessionTimeBudgetAware):
                     "name": candidate.name,
                     "hypothesis": candidate.hypothesis,
                     "path": candidate.path,
+                    "control": candidate.control,
                     "result_name": result_name,
                     "wall_seconds": round(seconds, 1),
                 }
+                metadata = {
+                    "batch_id": batch_id,
+                    "candidate": candidate.name,
+                    "hypothesis": candidate.hypothesis,
+                    "control": candidate.control,
+                    "offline_trials": offline_trials,
+                    "source_path": candidate.path,
+                    "span": span.label,
+                }
                 if evaluation is None:
-                    row.update(
-                        self._record_failure(
-                            candidate, result_name, error, batch_id=batch_id, span=span
-                        )
-                    )
+                    row.update(self._record_failure(result_name, error, metadata))
                 else:
                     row.update(
                         self._record_success(
-                            candidate,
-                            revision,
-                            evaluation,
-                            result_name=result_name,
-                            batch_id=batch_id,
-                            span=span,
+                            revision, evaluation, result_name=result_name, metadata=metadata
                         )
                     )
                     recorded.append((row, self.backtest.steps[-1]))
@@ -1203,6 +1278,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
                     "end": span.end,
                     "years": span.slots,
                 },
+                "offline_trials": offline_trials,
                 "candidates": rows,
                 "complete_validations": len(recorded),
                 "failed": len(rows) - len(recorded),
@@ -1241,11 +1317,11 @@ class BatchValidateTool(SessionTimeBudgetAware):
             if not isinstance(item, dict):
                 raise ToolError(
                     f"candidate {index} must be an object with name, "
-                    "hypothesis and path",
+                    "hypothesis, path and control",
                     error_type="schema_error",
                     blocked_target=str(index),
                 )
-            unknown = sorted(set(item) - {"name", "hypothesis", "path"})
+            unknown = sorted(set(item) - {"name", "hypothesis", "path", "control"})
             if unknown:
                 raise ToolError(
                     f"candidate {index} has unknown field(s): {unknown}",
@@ -1257,6 +1333,15 @@ class BatchValidateTool(SessionTimeBudgetAware):
                 item, "hypothesis", index, BATCH_HYPOTHESIS_MAX_CHARS
             )
             path = _batch_text(item, "path", index, BATCH_PATH_MAX_CHARS)
+            control = item.get("control")
+            if not isinstance(control, bool):
+                raise ToolError(
+                    f"candidate {index} needs control: true for a registered "
+                    "comparison leg (never a freeze-gate trial, never "
+                    "nominatable) or false for a candidate",
+                    error_type="schema_error",
+                    blocked_target="control",
+                )
             if name in names:
                 raise ToolError(
                     f"duplicate candidate name: {name}",
@@ -1283,7 +1368,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
                     blocked_target=path,
                 )
             directories.add(str(directory))
-            parsed.append(_BatchCandidate(name, hypothesis, path, directory))
+            parsed.append(_BatchCandidate(name, hypothesis, path, directory, control))
         return parsed
 
     def _supply_readonly_files(self, candidates: Sequence[_BatchCandidate]) -> None:
@@ -1532,28 +1617,17 @@ class BatchValidateTool(SessionTimeBudgetAware):
 
     def _record_success(
         self,
-        candidate: _BatchCandidate,
         revision: ArtifactRevision,
         evaluation: EvaluationResult,
         *,
         result_name: str,
-        batch_id: str,
-        span: ReplaySpan,
+        metadata: Mapping[str, object],
     ) -> dict[str, object]:
         node_id = self.backtest.record_validation(
-            revision,
-            evaluation,
-            result_name=result_name,
-            metadata={
-                "batch_id": batch_id,
-                "candidate": candidate.name,
-                "hypothesis": candidate.hypothesis,
-                "source_path": candidate.path,
-                "span": span.label,
-            },
+            revision, evaluation, result_name=result_name, metadata=metadata
         )
         self.backtest.steps.append(
-            StepResult(node_id, revision.revision_id, evaluation, span=span.label)
+            recorded_step(node_id, revision.revision_id, evaluation, metadata)
         )
         self.backtest.append_manifest_summary(
             {
@@ -1561,10 +1635,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
                 "mode": "valid",
                 "status": "ok",
                 "complete_validation": True,
-                "batch_id": batch_id,
-                "candidate": candidate.name,
-                "hypothesis": candidate.hypothesis,
-                "span": span.label,
+                **{key: metadata[key] for key in _BATCH_MANIFEST_KEYS},
                 **manifest_backtest_stats(evaluation.summary),
             }
         )
@@ -1587,12 +1658,9 @@ class BatchValidateTool(SessionTimeBudgetAware):
 
     def _record_failure(
         self,
-        candidate: _BatchCandidate,
         result_name: str,
         error: Exception | None,
-        *,
-        batch_id: str,
-        span: ReplaySpan,
+        batch_metadata: Mapping[str, object],
     ) -> dict[str, object]:
         if error is None:
             error = RuntimeError("unknown replay failure")
@@ -1604,11 +1672,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
         )
         request = self.backtest.request
         metadata = {
-            "batch_id": batch_id,
-            "candidate": candidate.name,
-            "hypothesis": candidate.hypothesis,
-            "source_path": candidate.path,
-            "span": span.label,
+            **batch_metadata,
             # A later session reading this dead end needs to know whether the
             # hypothesis was falsified or the host simply got in the way.
             "cause": cause,
@@ -1633,10 +1697,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
                 "mode": "valid",
                 "status": "failed",
                 "complete_validation": False,
-                **{
-                    key: metadata[key]
-                    for key in ("batch_id", "candidate", "hypothesis", "span", "cause")
-                },
+                **{key: metadata[key] for key in (*_BATCH_MANIFEST_KEYS, "cause")},
                 "error": public_error,
             }
         )
@@ -1923,6 +1984,26 @@ def _rejection_recovery(error_type: str) -> str:
         "Recovery: read the error text above and change the input it names; "
         "the call shape is not the problem."
     )
+
+
+def _batch_offline_trials(arguments: Mapping[str, object]) -> int:
+    """The batch's declared offline screens: a whole number, never assumed."""
+
+    value = arguments.get("offline_trials")
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value <= BATCH_OFFLINE_TRIALS_MAX
+    ):
+        raise ToolError(
+            "batch_validate needs offline_trials: the whole number (0 to "
+            f"{BATCH_OFFLINE_TRIALS_MAX}) of candidate configurations screened "
+            "offline on research-period data to choose this batch, 0 when none "
+            f"were; got {value!r}. It is added to the arm's freeze-gate trial count",
+            error_type="schema_error",
+            blocked_target="offline_trials",
+        )
+    return value
 
 
 def _batch_text(

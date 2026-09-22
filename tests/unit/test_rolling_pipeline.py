@@ -286,6 +286,14 @@ def test_a_freeze_passes_only_the_gate_and_records_the_frozen_block(tmp_path: Pa
     assert gate["passed"] is True
     assert gate["full_span_validations"] == 2
     assert gate["deflated_sharpe"]["trials"] == 2 == record["trials_to_date"]
+    # These Steps carry no control flag or offline declaration, as an arm's
+    # Validations recorded before either existed: every revision is a trial,
+    # nothing was screened offline, and the record says both rows declared none.
+    assert {
+        key: gate["deflated_sharpe"][key]
+        for key in ("controls", "offline_trials", "undeclared_offline_validations")
+    } == {"controls": 0, "offline_trials": 0, "undeclared_offline_validations": 2}
+    assert [row["control"] for row in record["steps"]] == [False, False]
     # The gate is judged under the arm's own rules -- here a tracking mandate,
     # because the arm was created with a cap -- over the research years of its
     # geometry, and the record states the account and the rules.

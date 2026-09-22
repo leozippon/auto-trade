@@ -654,13 +654,15 @@ VALIDATE_WORKING_COPY = ToolCall(
     "valid",
     "batch_validate",
     {
+        "offline_trials": 0,
         "candidates": [
             {
                 "name": "working_copy",
                 "hypothesis": "the implemented working copy beats its baseline",
                 "path": "output",
+                "control": False,
             }
-        ]
+        ],
     },
 )
 

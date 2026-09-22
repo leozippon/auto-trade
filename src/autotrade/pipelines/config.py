@@ -170,9 +170,10 @@ class AcceptanceRules:
     tracking_error_cap: float | None = None
     beta_min: float | None = None
     beta_max: float | None = None
-    # Freeze-gate statistical bars. Defaults are today's verdict constants so a
-    # record that omits them is judged the same way it was before these fields
-    # existed.
+    # Freeze-gate statistical bars. Defaults are today's verdict constants; an
+    # arm records its own at creation. ``min_dsr_probability`` moved from 0.90
+    # to 0.975 with the DSR1 recalibration, and only arms that ended before
+    # the field was recorded omit it.
     min_active_ir: float = verdict.FREEZE_MIN_ACTIVE_IR
     min_dsr_probability: float = verdict.FREEZE_MIN_DSR_PROBABILITY
     min_positive_year_share: float = verdict.FREEZE_MIN_POSITIVE_YEAR_SHARE
@@ -346,9 +347,18 @@ class AcceptanceRules:
                 "active_information_ratio": f">= {self.min_active_ir}",
                 "deflated_sharpe_probability": (
                     f">= {self.min_dsr_probability} for the nominee's "
-                    "research-period active IR; trials = distinct revisions "
-                    "validated in the arm on any span, dispersion = the arm's "
-                    "full-span active IRs"
+                    "research-period active IR. Trials M = distinct non-control "
+                    "revisions validated in the arm on any span plus every "
+                    "batch's declared offline_trials; they count as "
+                    "rho + (1 - rho) * M independent trials, rho the mean "
+                    "pairwise correlation of the non-control revisions' daily "
+                    "graded series; the dispersion is the zero-skill sampling "
+                    "error of an annualized IR over the nominee's days, "
+                    f"sqrt({verdict.TRADING_DAYS_PER_YEAR} / days), about 0.5 over "
+                    "four years. A control "
+                    "(control: true in batch_validate) is no trial and can never "
+                    "be nominated. selection_statistics.information_ratio_bar is "
+                    "the IR this asks for now"
                 ),
                 "positive_years": (
                     "active neutralized excess > 0 in at least "
@@ -365,7 +375,7 @@ class AcceptanceRules:
                 "tracking_mandate": mandate,
                 "full_span_validations": (
                     f">= {self.min_full_span_validations} in the arm, the "
-                    "nominee included"
+                    "nominee and controls included"
                 ),
                 "freezes_per_arm": 1,
             },
@@ -835,6 +845,14 @@ class StepResult:
     validation: EvaluationResult
     # The ``ReplaySpan.label`` the validation replayed.
     span: str
+    # Registered by the Agent as a comparison leg: never nominated, and not a
+    # trial of the freeze gate (``experiment.trial_family``).
+    control: bool = False
+    # The ``batch_validate`` call that recorded it, and the candidate
+    # configurations that call declared screening offline before it. ``None``
+    # on a Validation recorded before batches declared them; it reads as 0.
+    batch_id: str | None = None
+    offline_trials: int | None = None
 
 
 @dataclass(frozen=True)

@@ -190,7 +190,10 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
         ledger=ExperimentLedger(tmp_path / "ledger.jsonl"),
     )
     working_copy = {
-        "candidates": [{"name": "working_copy", "hypothesis": "h", "path": "output"}]
+        "offline_trials": 0,
+        "candidates": [
+            {"name": "working_copy", "hypothesis": "h", "path": "output", "control": False}
+        ],
     }
     batch = BatchValidateTool(
         backtest=backtest,

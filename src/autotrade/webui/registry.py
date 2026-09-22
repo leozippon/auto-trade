@@ -596,6 +596,8 @@ def _best_candidate(
         row
         for row in steps
         if row.get("span") == FULL_SPAN
+        # A control can never be nominated, so it is never the arm's best.
+        and row.get("control") is not True
         and _number(_mapping(row.get("neutralized")).get("information_ratio")) is not None
     ]
     if not full:
@@ -690,6 +692,12 @@ def _live_steps(directory: Path) -> list[dict[str, object]]:
                 "summary": dict(_mapping(record.get("summary"))),
                 "validation_result_ref": reference,
                 "neutralized": figures,
+                # What the freeze gate's trial family reads; absent (no
+                # control, undeclared) on a sidecar written before them.
+                **{
+                    name: record.get(name)
+                    for name in ("control", "batch_id", "offline_trials")
+                },
             }
             _LIVE_STEP_CACHE[key] = row
         rows.append(row)

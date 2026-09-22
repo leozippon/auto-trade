@@ -421,7 +421,9 @@ class RollingExperimentPipeline:
                 "reason": session.reason or None,
                 "nominated_step_id": session.node_id if session.outcome == "freeze" else None,
                 "steps": step_rows,
-                "trials_to_date": len(_arm_revisions(records, step_rows)),
+                "trials_to_date": trial_family([*_recorded_steps(records), *step_rows])[
+                    "trials"
+                ],
                 **self._account_record(),
                 "freeze_gate": gate,
                 "frozen": frozen,
@@ -865,6 +867,18 @@ class RollingExperimentPipeline:
         )
 
 
+def trial_fields(step: StepResult) -> dict[str, object]:
+    """The fields of one Step the trial family reads (:func:`trial_family`)."""
+
+    return {
+        "step_id": step.step_id,
+        "revision_id": step.revision_id,
+        "control": step.control,
+        "batch_id": step.batch_id,
+        "offline_trials": step.offline_trials,
+    }
+
+
 def research_step_record(step: StepResult) -> dict[str, object]:
     """One completed Validation as the ledger's ``steps[]`` row.
 
@@ -872,16 +886,50 @@ def research_step_record(step: StepResult) -> dict[str, object]:
     tracking error and IR over the span, from the replay's own style sidecar
     (``None`` when they cannot be measured): the figures the freeze gate
     counts. ``series`` inside it says whether that is the active series (the
-    replay carries a zero-skill panel) or the strategy's own.
+    replay carries a zero-skill panel) or the strategy's own. ``control``,
+    ``batch_id`` and ``offline_trials`` are what the trial family reads.
     """
 
     return {
-        "step_id": step.step_id,
-        "revision_id": step.revision_id,
+        **trial_fields(step),
         "span": step.span,
         "summary": step.validation.summary,
         "validation_result_ref": step.validation.result_ref,
         "neutralized": neutralized(step.validation.result_ref),
+    }
+
+
+def trial_family(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
+    """The trials the freeze gate deflates over, from the arm's Validation rows.
+
+    A trial is a distinct revision validated anywhere in the arm, on any span,
+    in any attempt -- unless it was registered as a control: a control is a
+    comparison leg, not one of the configurations the nominee was selected
+    among, so it is left out (and can never be nominated). The candidate
+    configurations a batch declared screening offline before it ran
+    (``offline_trials``) are trials too, counted once per batch. A row
+    recorded before batches declared them carries no ``offline_trials`` and
+    reads as 0; ``undeclared_offline_validations`` counts such rows so the
+    record says so. ``trials`` is M, the host trials plus the offline ones.
+    """
+
+    controls = {str(row["revision_id"]) for row in rows if row.get("control") is True}
+    revisions = {str(row["revision_id"]) for row in rows} - controls
+    declared: dict[str, int] = {}
+    undeclared = 0
+    for row in rows:
+        count = row.get("offline_trials")
+        if count is None:
+            undeclared += 1
+        else:
+            declared[str(row.get("batch_id") or row["step_id"])] = int(count)  # type: ignore[call-overload]
+    offline = sum(declared.values())
+    return {
+        "trials": len(revisions) + offline,
+        "revisions": sorted(revisions),
+        "controls": len(controls),
+        "offline_trials": offline,
+        "undeclared_offline_validations": undeclared,
     }
 
 
@@ -896,40 +944,63 @@ def freeze_gate_for(
 ) -> dict[str, object]:
     """The freeze gate of one nominated Step against the whole arm (PL1 §4.1).
 
-    Trials are the distinct revisions validated anywhere in the arm, earlier
-    sessions' recorded Steps and this session's alike; the IR dispersion is
-    taken over every measurable full-span validation. A nominee that did not
-    replay the full research period, fails a hard nomination rule, or whose
-    statistics cannot be measured does not pass. ``acceptance`` and ``years``
-    are the arm's rules and research years; the console leaves them out when it
-    only reads the deflated Sharpe of an arm's best node.
+    The trial family is :func:`trial_family` over earlier sessions' recorded
+    Steps and this session's alike; ρ̄ is read off one sidecar per non-control
+    revision (its full-span validation when it has one). The count of
+    full-span validations takes every measurable one, controls included. A
+    nominee that did not replay the full research period, was registered as a
+    control, fails a hard nomination rule, or whose statistics cannot be
+    measured does not pass. ``acceptance`` and ``years`` are the arm's rules
+    and research years; the console leaves them out when it only reads the
+    deflated Sharpe of an arm's best node.
     """
 
     reasons = list(hard_reasons)
     if nominee.get("span") != FULL_SPAN:
         reasons.append("freeze_needs_full_span_validation")
+    if nominee.get("control") is True:
+        reasons.append("freeze_nominee_is_control")
     if reasons:
         return {"passed": False, "reasons": reasons}
     rows = [*_recorded_steps(records), *session_rows]
-    irs = [
-        float(row["neutralized"]["information_ratio"])  # type: ignore[index]
-        for row in rows
-        if row.get("span") == FULL_SPAN and _finite_ir(row.get("neutralized"))
-    ]
-    result_ref = Path(str(nominee["validation_result_ref"]))
-    analysis = json.loads(
-        (result_ref.parent / STYLE_ARTIFACT_NAME).read_text(encoding="utf-8")
-    )
+    family = trial_family(rows)
+    representative: dict[str, Mapping[str, object]] = {}
+    for row in rows:
+        revision = str(row["revision_id"])
+        if revision not in representative or row.get("span") == FULL_SPAN:
+            representative[revision] = row
     try:
-        return freeze_gate(
-            analysis,
-            trials=len(_arm_revisions(records, session_rows)),
-            full_span_irs=irs,
+        gate = freeze_gate(
+            _style_analysis(nominee),
+            trials=len(family["revisions"]),  # type: ignore[arg-type]
+            offline_trials=family["offline_trials"],  # type: ignore[arg-type]
+            trial_analyses=[
+                _style_analysis(representative[revision])
+                for revision in family["revisions"]  # type: ignore[union-attr]
+            ],
+            full_span_validations=sum(
+                1
+                for row in rows
+                if row.get("span") == FULL_SPAN and _finite_ir(row.get("neutralized"))
+            ),
             years=years,
             **(acceptance.freeze_gate_kwargs() if acceptance is not None else {}),
         )
     except ValueError as exc:
         return {"passed": False, "reasons": ["freeze_unmeasurable"], "error": str(exc)}
+    gate["deflated_sharpe"] = {
+        **gate["deflated_sharpe"],  # type: ignore[dict-item]
+        "controls": family["controls"],
+        "undeclared_offline_validations": family["undeclared_offline_validations"],
+    }
+    return gate
+
+
+def _style_analysis(row: Mapping[str, object]) -> dict[str, object]:
+    """The style sidecar beside one Validation row's result."""
+
+    result_ref = Path(str(row["validation_result_ref"]))
+    return json.loads((result_ref.parent / STYLE_ARTIFACT_NAME).read_text(encoding="utf-8"))
 
 
 def null_control_seed(key: str, role: str) -> int:
@@ -952,14 +1023,6 @@ def _recorded_steps(records: Sequence[Mapping[str, object]]) -> list[Mapping[str
         for row in (record.get("steps") or ())
         if isinstance(row, Mapping)
     ]
-
-
-def _arm_revisions(
-    records: Sequence[Mapping[str, object]], session_rows: Sequence[Mapping[str, object]]
-) -> set[str]:
-    return {
-        str(row["revision_id"]) for row in (*_recorded_steps(records), *session_rows)
-    }
 
 
 def neutralized(result_ref: str) -> dict[str, object] | None:
@@ -1204,4 +1267,6 @@ __all__ = [
     "neutralized",
     "null_control_seed",
     "research_step_record",
+    "trial_family",
+    "trial_fields",
 ]

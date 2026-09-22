@@ -34,6 +34,7 @@ off a number that was not measured.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import math
 from collections.abc import Mapping, Sequence
 from statistics import NormalDist
@@ -50,24 +51,27 @@ from autotrade.environment.replay.style import (
 )
 
 # Freeze gate (PL1 §4.1), calibrated on its zero-skill pass rate and its power,
-# not on the record of earlier freezes: measured through the panel on two real
-# books' skeletons, zero skill passes the statistical conditions together 3-4 %
-# of the time and a true active IR of 1.0 about 69 %. The forward test alone
-# passes zero skill about 15 % of the time, so an arm's protection against a
-# false graduate when several arms share one forward window is this gate.
+# not on the record of earlier freezes (``scripts/dev/dsr_recalibration.py``).
+# The forward test alone passes zero skill about 15 % of the time, so an arm's
+# protection against a false graduate when several arms share one forward
+# window is this gate.
 FREEZE_MIN_ACTIVE_IR = 0.75
 # Active neutralised excess positive in three of four research years; another
 # research length keeps the share, rounded up.
 FREEZE_MIN_POSITIVE_YEAR_SHARE = 0.75
 # At a threshold of 0.5 the deflated Sharpe's
 # ``√(T−1)/√(variance_term)`` factor cancels and the gate degenerates into
-# ``SR >= SR*`` -- a point comparison that knew nothing about the estimate's
-# sampling error and, at the observed trial-Sharpe spreads, asked for a
-# research IR of only 0.11-0.13 while the forward verdict needs about 0.9.
-# 0.90 asks the nominee's IR to clear SR* by 1.28 standard errors, i.e. a
-# research IR near 0.76 at the same spreads, which is the bar the reference
-# packs already pre-register for themselves.
-FREEZE_MIN_DSR_PROBABILITY = 0.90
+# ``SR >= SR*`` -- a point comparison that knows nothing about the estimate's
+# sampling error. 0.975 asks the nominee's IR to clear SR* by 1.96 of its
+# zero-skill standard errors: over four research years (standard error ≈ 0.5)
+# an IR of about 0.98 at one effective trial, 1.24 at two, 1.41 at three and
+# 1.58 at five. Recalibrated on 42 arms' own series (DSR1): with the arm's
+# best non-control trial nominated, zero skill passes the gate's statistical
+# conditions 2.6 % of the time and a true active IR of 1.0 about 61 %, against
+# 4.0 % and 44 % for the former rule at 0.90 and 7.5 % and 73 % for this rule
+# at 0.90; the record's failure mode is false positives (six freezes, all
+# discarded forward).
+FREEZE_MIN_DSR_PROBABILITY = 0.975
 FREEZE_MIN_FULL_SPAN_VALIDATIONS = 2
 # Forward verdict (PL1 §4.2).
 FORWARD_CONFIDENCE = 0.80
@@ -123,19 +127,27 @@ def _strategy_returns(
     ]
 
 
-def _regression_rows(
+def _regression_join(
     analysis: Mapping[str, object], start: str, end: str
-) -> np.ndarray:
-    """``(strategy, benchmark, size)`` rows of the slice, joined exactly as
-    ``style.window_neutralized_excess`` joins them."""
+) -> list[tuple[str, float, float, float]]:
+    """``(date, strategy, benchmark, size)`` of every day of the slice, joined
+    exactly as ``style.window_neutralized_excess`` joins them."""
 
     benchmark = dict(_series_pairs(analysis.get("benchmark_daily")))
     size = dict(_series_pairs(analysis.get("size_factor_daily")))
-    rows = [
-        (value, benchmark[date], size[date])
+    return [
+        (date, value, benchmark[date], size[date])
         for date, value in _strategy_returns(analysis, start, end)
         if date in benchmark and date in size
     ]
+
+
+def _regression_rows(
+    analysis: Mapping[str, object], start: str, end: str
+) -> np.ndarray:
+    """``(strategy, benchmark, size)`` rows of the slice (:func:`_regression_join`)."""
+
+    rows = [row[1:] for row in _regression_join(analysis, start, end)]
     return np.asarray(rows, dtype=float).reshape(-1, 3)
 
 
@@ -255,22 +267,110 @@ def forward_mde(tracking_error: float, forward_days: int) -> float:
     )
 
 
+def expected_max_sharpe(trials: float) -> float:
+    """Expected maximum of ``trials`` independent standard normal draws.
+
+    Bailey & López de Prado (2014)'s approximation
+    ``(1−γ)·Φ⁻¹(1 − 1/N) + γ·Φ⁻¹(1 − 1/(N·e))`` with γ the Euler-Mascheroni
+    constant, for a real N: an effective trial count need not be whole. The
+    approximation turns negative below N ≈ 1.3, where it is floored at 0, the
+    expectation of one draw -- the maximum of a few near-identical trials is no
+    lower than that of one.
+    """
+
+    if trials <= 1.0:
+        return 0.0
+    normal = NormalDist()
+    value = (1.0 - _EULER_MASCHERONI) * normal.inv_cdf(
+        1.0 - 1.0 / trials
+    ) + _EULER_MASCHERONI * normal.inv_cdf(1.0 - 1.0 / (trials * math.e))
+    return max(value, 0.0)
+
+
+def null_sharpe_std(days: int) -> float:
+    """Sampling standard deviation of an annualised Sharpe (IR) estimated from
+    ``days`` daily returns of zero skill: √(``TRADING_DAYS_PER_YEAR`` / days).
+
+    The dispersion √V of the False-Strategy null the deflated Sharpe tests:
+    under zero skill the trials' IRs scatter by their estimation error alone,
+    so √V is a property of the span, not of which trials an arm happened to
+    run (≈ 0.5 over four research years).
+    """
+
+    if isinstance(days, bool) or not isinstance(days, int) or days < 2:
+        raise ValueError(f"days must be an integer >= 2, got {days!r}")
+    return math.sqrt(TRADING_DAYS_PER_YEAR / days)
+
+
+def _neutral_daily(analysis: Mapping[str, object]) -> dict[str, float]:
+    """The daily neutralised graded series of a whole sidecar, by date: the
+    series whose annualised mean over its residual risk is the trial's IR."""
+
+    graded, _series = _graded(analysis)
+    dates = [row[0] for row in _regression_join(graded, "", "")]
+    _statistics, _rows, neutral = _measured(graded, "", "")
+    return dict(zip(dates, (float(value) for value in neutral), strict=True))
+
+
+def trial_correlation(analyses: Sequence[Mapping[str, object]]) -> tuple[float, int]:
+    """Mean pairwise correlation ρ̄ of the trials' daily graded series, and the
+    number of pairs it averages.
+
+    One analysis per trial (its validation sidecar). Each series is the daily
+    neutralised graded series (:func:`_neutral_daily`), so ρ̄ is the correlation
+    of the very estimates the trials' IRs are. A pair is correlated over the
+    days both measured -- a sub-span trial against a full-span one over its own
+    years; a pair sharing fewer than three days (two points correlate ±1 by
+    construction) or flat over its overlap, and a trial whose span is
+    unmeasurable, add no pair. The mean is clipped into [0, 1]: M trials that
+    hedge each other are not more than M independent ones. ``(0.0, 0)`` when no
+    pair is measured (one trial, or none measurable), which makes the effective
+    count the raw one.
+    """
+
+    series: list[dict[str, float]] = []
+    for analysis in analyses:
+        try:
+            series.append(_neutral_daily(analysis))
+        except ValueError:
+            continue
+    correlations: list[float] = []
+    for first, second in itertools.combinations(series, 2):
+        common = sorted(first.keys() & second.keys())
+        if len(common) < 3:
+            continue
+        x = np.fromiter((first[date] for date in common), dtype=float)
+        y = np.fromiter((second[date] for date in common), dtype=float)
+        if not (x.std() > 0 and y.std() > 0):
+            continue
+        correlations.append(float(np.corrcoef(x, y)[0, 1]))
+    if not correlations:
+        return 0.0, 0
+    return min(max(float(np.mean(correlations)), 0.0), 1.0), len(correlations)
+
+
+def effective_trials(trials: int, correlation: float) -> float:
+    """Bailey & López de Prado (2014, App. A.3, eq. 9): ``trials`` trials with
+    mean pairwise correlation ρ̄ count as ρ̄ + (1 − ρ̄)·``trials`` independent
+    ones -- one when they are identical, all of them when independent."""
+
+    return correlation + (1.0 - correlation) * trials
+
+
 def deflated_sharpe(
     *,
     observed_sharpe: float | None,
-    trials: int,
-    trial_sharpe_std: float | None,
+    effective_trials: float,
+    trial_sharpe_std: float,
     returns: np.ndarray,
 ) -> dict[str, object]:
-    """Deflated Sharpe ratio of one selected series out of ``trials`` trials.
+    """Deflated Sharpe ratio of one selected series among ``effective_trials``
+    independent trials.
 
-    Bailey & López de Prado (2014), with the trial count N and the dispersion
-    √V of the trial Sharpes given separately (PL1 §3.3: N counts every revision
-    validated in the arm, V is measured on full-span validations only).
-    Sharpes are annualised; the formula runs per period. With γ the
-    Euler-Mascheroni constant,
+    Bailey & López de Prado (2014). Sharpes are annualised; the formula runs
+    per period. With E[max_N] of :func:`expected_max_sharpe`,
 
-        SR* = √V · [ (1−γ)·Φ⁻¹(1 − 1/N) + γ·Φ⁻¹(1 − 1/(N·e)) ]
+        SR* = √V · E[max_N]
         P   = Φ[ (SR − SR*)·√(T−1) / √(1 − γ₃·SR + (γ₄−1)/4·SR²) ]
 
     with γ₃ the skew and γ₄ the (normal = 3) kurtosis of the T returns.
@@ -279,11 +379,12 @@ def deflated_sharpe(
     """
 
     scale = math.sqrt(TRADING_DAYS_PER_YEAR)
+    sharpe_star = trial_sharpe_std * expected_max_sharpe(effective_trials)
     block: dict[str, object] = {
         "deflated_sharpe_probability": None,
-        "trials": trials,
+        "effective_trials": effective_trials,
         "trial_sharpe_std": trial_sharpe_std,
-        "sharpe_star": None,
+        "sharpe_star": sharpe_star,
         "observed_sharpe": observed_sharpe,
         "return_days": len(returns),
         "return_skew": None,
@@ -293,18 +394,6 @@ def deflated_sharpe(
     if observed_sharpe is None:
         block["unavailable_reason"] = "no_observed_sharpe"
         return block
-    if trials < 2:
-        block["unavailable_reason"] = "fewer_than_two_trials"
-        return block
-    if trial_sharpe_std is None:
-        block["unavailable_reason"] = "fewer_than_two_full_span_validations"
-        return block
-    normal = NormalDist()
-    sharpe_star = trial_sharpe_std * (
-        (1.0 - _EULER_MASCHERONI) * normal.inv_cdf(1.0 - 1.0 / trials)
-        + _EULER_MASCHERONI * normal.inv_cdf(1.0 - 1.0 / (trials * math.e))
-    )
-    block["sharpe_star"] = sharpe_star
     centered = returns - returns.mean()
     second = float(np.mean(centered**2))
     if second <= 0:
@@ -324,15 +413,23 @@ def deflated_sharpe(
         * math.sqrt(len(returns) - 1)
         / math.sqrt(variance_term)
     )
-    block["deflated_sharpe_probability"] = normal.cdf(statistic)
+    block["deflated_sharpe_probability"] = NormalDist().cdf(statistic)
     return block
+
+
+def _count(value: object, name: str, minimum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise ValueError(f"{name} must be an integer >= {minimum}, got {value!r}")
+    return value
 
 
 def freeze_gate(
     analysis: Mapping[str, object],
     *,
     trials: int,
-    full_span_irs: Sequence[float],
+    full_span_validations: int,
+    offline_trials: int = 0,
+    trial_analyses: Sequence[Mapping[str, object]] = (),
     years: Sequence[tuple[str, str]] = (),
     active_max_drawdown: float | None = None,
     tracking_error_cap: float | None = None,
@@ -345,36 +442,62 @@ def freeze_gate(
 ) -> dict[str, object]:
     """Freeze gate of one nominee (PL1 §4.1).
 
-    ``analysis`` is the nominee's full-span validation sidecar, read whole;
-    ``trials`` counts the distinct revisions with a completed validation
-    anywhere in the arm; ``full_span_irs`` holds the graded IR of every
-    full-span validation in the arm, the nominee's included; ``years`` are the
-    research years' ``(start, end)`` bounds. On the graded series the gate
-    asks for an IR of at least ``min_active_ir``, a deflated Sharpe probability
-    of that IR of at least ``min_dsr_probability`` with at least
-    ``min_full_span_validations`` validations behind its trial dispersion, a
-    positive neutralised excess in ``min_positive_year_share`` of the research
-    years, and a drawdown within ``active_max_drawdown``; on the strategy's own
-    series, for the tracking mandate when one is set. The equity drawdown is
-    the caller's hard nomination rule (``config.AcceptanceRules.evaluate``).
-    The statistical bars default to the module constants so a caller that
-    omits them (the console reading an arm's best-node DSR) judges as today.
-    A drawdown or mandate left at ``None`` is not judged.
+    ``analysis`` is the nominee's full-span validation sidecar, read whole.
+    The deflated Sharpe deflates over the arm's trial family: ``trials``
+    distinct non-control revisions validated anywhere in the arm (the nominee
+    among them) plus the ``offline_trials`` its batches declared screening
+    offline, M in all, counted at their effective number ρ̄ + (1 − ρ̄)·M, where
+    ρ̄ is :func:`trial_correlation` over ``trial_analyses`` (one sidecar per
+    non-control revision). The dispersion √V is the zero-skill sampling error
+    of an IR over the nominee's own measured days (:func:`null_sharpe_std`), so
+    neither controls nor near-copies of the nominee move the bar through it.
+    ``information_ratio_bar`` is the research IR at which the probability
+    reaches ``min_dsr_probability`` for normal returns, √V·(E[max] + Φ⁻¹(p));
+    the nominee's own skew and kurtosis move the applied bar by hundredths.
+
+    ``full_span_validations`` counts the arm's measurable full-span
+    validations, controls included; ``years`` are the research years'
+    ``(start, end)`` bounds. On the graded series the gate asks for an IR of at
+    least ``min_active_ir``, a deflated Sharpe probability of at least
+    ``min_dsr_probability``, at least ``min_full_span_validations`` full-span
+    validations, a positive neutralised excess in ``min_positive_year_share``
+    of the research years, and a drawdown within ``active_max_drawdown``; on
+    the strategy's own series, for the tracking mandate when one is set. The
+    equity drawdown is the caller's hard nomination rule
+    (``config.AcceptanceRules.evaluate``). The statistical bars default to the
+    module constants so a caller that omits them (the console reading an arm's
+    best-node DSR) judges as today. A drawdown or mandate left at ``None`` is
+    not judged.
     """
 
-    if isinstance(trials, bool) or not isinstance(trials, int) or trials < 1:
-        raise ValueError(f"trials must be a positive integer, got {trials!r}")
-    irs = [float(value) for value in full_span_irs]
-    if not all(math.isfinite(value) for value in irs):
-        raise ValueError("full_span_irs must all be finite")
+    trials = _count(trials, "trials", 1)
+    offline_trials = _count(offline_trials, "offline_trials", 0)
+    full_span_validations = _count(full_span_validations, "full_span_validations", 0)
     graded, series = _graded(analysis)
     statistics, _rows, neutral = _measured(graded, "", "")
-    dsr = deflated_sharpe(
-        observed_sharpe=statistics["information_ratio"],
-        trials=trials,
-        trial_sharpe_std=float(np.std(irs, ddof=1)) if len(irs) >= 2 else None,
-        returns=neutral,
-    )
+    correlation, pairs = trial_correlation(trial_analyses)
+    total = trials + offline_trials
+    effective = effective_trials(total, correlation)
+    dispersion = null_sharpe_std(int(statistics["days"]))
+    dsr = {
+        "trials": total,
+        "host_trials": trials,
+        "offline_trials": offline_trials,
+        "trial_correlation": correlation,
+        "trial_correlation_pairs": pairs,
+        **deflated_sharpe(
+            observed_sharpe=statistics["information_ratio"],
+            effective_trials=effective,
+            trial_sharpe_std=dispersion,
+            returns=neutral,
+        ),
+        "information_ratio_bar": (
+            dispersion
+            * (expected_max_sharpe(effective) + NormalDist().inv_cdf(min_dsr_probability))
+            if min_dsr_probability < 1.0
+            else None
+        ),
+    }
     year_excess = [
         window_neutralized_excess(graded, start=start, end=end)
         for start, end in (_span(*year) for year in years)
@@ -391,7 +514,7 @@ def freeze_gate(
         beta_max=beta_max,
     )
     reasons: list[str] = []
-    if len(irs) < min_full_span_validations:
+    if full_span_validations < min_full_span_validations:
         reasons.append("freeze_too_few_full_span_validations")
     ratio = statistics["information_ratio"]
     if ratio is None or not ratio >= min_active_ir:
@@ -415,7 +538,7 @@ def freeze_gate(
         "positive_years": positive_years,
         "active_max_drawdown": active_drawdown,
         "mandate": mandate,
-        "full_span_validations": len(irs),
+        "full_span_validations": full_span_validations,
         "deflated_sharpe": dsr,
         "thresholds": {
             "min_information_ratio": min_active_ir,

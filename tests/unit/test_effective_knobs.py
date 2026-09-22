@@ -155,7 +155,12 @@ class RecordFailedAttemptsTest(unittest.TestCase):
         )
         return (
             lambda: batch.invoke(
-                {"candidates": [{"name": "wc", "hypothesis": "h", "path": "output"}]}
+                {
+                    "offline_trials": 0,
+                    "candidates": [
+                        {"name": "wc", "hypothesis": "h", "path": "output", "control": False}
+                    ],
+                }
             ),
             tree,
         )

@@ -112,7 +112,7 @@ from .config import (
     StepResult,
     StrategyExperimentConfig,
 )
-from .experiment import DailyStrategyPipeline
+from .experiment import DailyStrategyPipeline, trial_family, trial_fields
 from .ledger import RESEARCH_STAGE, ExperimentLedger
 from .session_tools import (
     BatchValidateTool,
@@ -363,6 +363,8 @@ class DeterministicBaselineDeveloper:
                     typed_revision.revision_id,
                     validation,
                     span=request.validation.label,
+                    # The host's own deterministic replay: nothing was screened.
+                    offline_trials=0,
                 )
             )
         return ResearchSessionResult(
@@ -1420,15 +1422,18 @@ def start_record() -> dict[str, object]:
 def arm_record(steps: Sequence[StepResult]) -> dict[str, object]:
     """The arm's selection state when the attempt starts.
 
-    Trials are the distinct revisions the session's earlier attempts
-    validated, the pool the freeze gate deflates over; a session only runs
-    while nothing is frozen.
+    Trials are the freeze gate's trial family over the session's earlier
+    attempts (``experiment.trial_family``): non-control revisions plus the
+    offline screens their batches declared; controls are counted apart. A
+    session only runs while nothing is frozen.
     """
 
+    family = trial_family([trial_fields(step) for step in steps])
     return {
         "frozen": False,
         "freezes_per_arm": 1,
-        "trials_to_date": len({step.revision_id for step in steps}),
+        "trials_to_date": family["trials"],
+        "controls_to_date": family["controls"],
         "full_span_validations_to_date": sum(1 for step in steps if step.span == FULL_SPAN),
     }
 

@@ -564,7 +564,13 @@ def test_an_interrupted_llm_session_resumes_with_its_summary_budget_and_nodes(
     assert "回测（年）1/2" in note and transcripts[0].name in note
     assert "上面是中断前最近一次压缩的摘要" in note
     facts = json.loads(opening[0].content.split("```json\n", 1)[1].split("\n```", 1)[0])
-    assert facts["arm"] == {"frozen": False, "freezes_per_arm": 1, "trials_to_date": 1, "full_span_validations_to_date": 1}
+    assert facts["arm"] == {
+        "frozen": False,
+        "freezes_per_arm": 1,
+        "trials_to_date": 1,
+        "controls_to_date": 0,
+        "full_span_validations_to_date": 1,
+    }
     assert facts["budgets"]["used_before_this_attempt"]["replay_years"] == 1
     assert facts["budgets"]["used_before_this_attempt"]["llm_calls"] == 5
     # One session root, two transcripts, and both attempts' revisions kept as
@@ -713,11 +719,13 @@ def test_the_llm_session_validates_a_multi_year_span_is_refused_by_the_gate_and_
             "batch_validate",
             {
                 "span": span,
+                "offline_trials": 0,
                 "candidates": [
                     {
                         "name": "working_copy",
                         "hypothesis": f"the working copy earns a positive neutralized excess over {span}",
                         "path": "output",
+                        "control": False,
                     }
                 ],
             },
