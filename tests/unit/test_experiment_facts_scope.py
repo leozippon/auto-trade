@@ -297,7 +297,7 @@ def test_the_facts_publish_the_strategy_containers_memory_ceiling() -> None:
 
     budgets = _facts()["budgets"]
     assert budgets["strategy_memory_bytes"] == SandboxLimits().memory_bytes
-    assert budgets["strategy_memory_bytes"] == 8 * 1024**3
+    assert budgets["strategy_memory_bytes"] == 16 * 1024**3
     # And why a rehearsal at the start of the span does not size a batch.
     assert budgets["smoke_backtest_probe_note"] == SMOKE_PROBE_NOTE
     assert "start" in SMOKE_PROBE_NOTE

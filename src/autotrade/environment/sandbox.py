@@ -76,12 +76,20 @@ class SandboxLimits:
     # and ``budgets.strategy_memory_bytes``.
     # Both containers also pass ``memory`` as ``--memory-swap``, which is what
     # makes the cap a boundary rather than a slope: Docker's default grants a
-    # container as much swap again, and it then pages instead of failing. Two
-    # session sandboxes measured on 2026-09-21 sat at exactly 8 GiB of
-    # ``memory.peak`` with 4.4 and 1.4 GiB swapped out over thousands of
-    # reclaim events, neither of them OOM-killed.
+    # container as much swap again, and the container then pages instead of
+    # failing. With swap pinned there is no headroom above the cap at all, so
+    # the cap has to be sized for what a ``fit`` actually needs rather than for
+    # what today's arms happen to use. Measured over the replays on record:
+    # rule-based arms peak at 3.8 GiB (48% of the former 8 GiB cap), but the
+    # two fit-bearing ML arms (``alpha158_lgbm``, ``gru_ranker``) peaked
+    # 6.70-7.60 GiB, i.e. 85-95% of it -- a model only slightly larger would be
+    # an OOM kill rather than a slow replay. 16 GiB gives that class of arm
+    # room; the host carries it, since the worst case of four experiments each
+    # running one session plus three concurrent validation containers is
+    # 4 x 4 x 16 = 256 GiB against ~446 GiB available. CPU stays at 8: strategy
+    # containers use ~1.1 of the 8 cores and host CPU PSI is 0.
     cpus: float = 8.0
-    memory: str = "8g"
+    memory: str = "16g"
     # A fork-bomb guard, not a budget: one worker with torch, LightGBM and
     # XGBoost thread pools at the CPU-derived thread cap plus PyArrow's own
     # pool needs well over the 64 the single-threaded NumPy era allowed.
@@ -111,7 +119,7 @@ class SandboxLimits:
     # ``fit`` altogether -- a torch ``DataLoader(num_workers>0)`` and joblib's
     # memmapped parallel backend both fail on a 64 MB ``/dev/shm``, and any
     # spill or intermediate parquet fails on a 64 MB ``/tmp``. They are charged
-    # to the container's own ``memory`` cap, so 2 GB each is 4 GB of the 8 GB
+    # to the container's own ``memory`` cap, so 2 GB each is 4 GB of the 16 GB
     # a strategy container may use, and only what it actually writes.
     tmpfs_size: str = "2g"
     shm_size: str = "2g"
@@ -233,8 +241,10 @@ class SandboxSpec:
     build_generation_id: str = ""
     user: str = "61000:61000"
     network: str = "none"
+    # One boundary with the strategy container: both must stay equal to
+    # ``SandboxLimits.cpus``/``memory``, whose rationale carries the sizing.
     cpus: float = 8.0
-    memory: str = "8g"
+    memory: str = "16g"
     pids_limit: int = 512
     tmpfs_size: str = "1g"
     # "auto" allocates gpu_count matching GPUs with the most free memory at

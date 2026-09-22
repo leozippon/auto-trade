@@ -214,7 +214,7 @@ def test_both_containers_cap_numeric_threads_from_the_same_cpu_quota(tmp_path: P
 def test_both_containers_pin_swap_to_their_memory_cap(tmp_path: Path):
     """Docker's default grants a container as much swap again as its memory
     cap, and the cap then degrades into paging: two live session sandboxes were
-    measured sitting at exactly their 8 GiB peak with GiB of anonymous memory
+    measured sitting at exactly their then-8 GiB cap with GiB of anonymous memory
     swapped out and no OOM kill. The published cap has to be the boundary, so
     both containers pass it as ``--memory-swap`` as well -- the same value, not
     a second literal that can drift from it."""
@@ -825,7 +825,7 @@ def test_docker_command_has_fail_closed_boundary(tmp_path: Path):
     assert "--memory" in command
     assert "--pids-limit" in command
     assert command[command.index("--cpus") + 1] == "8"
-    assert command[command.index("--memory") + 1] == "8g"
+    assert command[command.index("--memory") + 1] == "16g"
     assert command[command.index("--pids-limit") + 1] == "256"
     # Scratch large enough for the 8 CPUs the container is given: a 64 MB
     # /tmp and Docker's 64 MB default /dev/shm rule out multi-process training

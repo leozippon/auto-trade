@@ -836,7 +836,7 @@ class BatchValidateRunTest(unittest.TestCase):
 
         usage = {
             "peak_memory_bytes": 7_883_149_312,
-            "memory_limit_bytes": 8_589_934_592,
+            "memory_limit_bytes": 17_179_869_184,
             "fit_seconds": [335.7, 1204.2],
             "fit_timeout_seconds": 10_800.0,
             "decision_timeout_seconds": 1_080.0,

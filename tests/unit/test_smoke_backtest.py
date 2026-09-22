@@ -415,7 +415,7 @@ def test_a_rehearsal_reports_what_it_cost_its_container(tmp_path: Path) -> None:
 
     usage = {
         "peak_memory_bytes": 7_883_149_312,
-        "memory_limit_bytes": 8_589_934_592,
+        "memory_limit_bytes": 17_179_869_184,
         "fit_seconds": [335.7],
         "fit_timeout_seconds": 3600.0,
         "decision_timeout_seconds": 360.0,
