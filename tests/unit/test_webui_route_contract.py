@@ -224,7 +224,8 @@ def test_paper_bundle_serves_the_key_names_the_console_reads(tmp_path: Path):
     )
     performance = client.get("/api/trading/paper/books/exp/performance").json()
     assert {
-        "state", "error", "chart", "statistics", "min_days", "benchmark_error", "source", "source_error",
+        "state", "error", "chart", "statistics", "min_days", "benchmark_label", "benchmark_error",
+        "source", "source_error",
     } <= performance.keys()
     assert "snapshot" in client.get("/api/trading/paper/books/exp/snapshot").json()
     status = client.get("/api/trading/paper/books/exp/status").json()
@@ -235,9 +236,18 @@ def test_paper_bundle_serves_the_key_names_the_console_reads(tmp_path: Path):
     for key in (
         "book_id", "experiment_id", "artifact_id", "candidate_source", "start_date",
         "initial_cash", "equity", "cash", "position_count", "total_return", "excess_return",
-        "curve", "source", "signal_date", "order_count", "state", "error",
+        "benchmark_label", "curve", "source", "signal_date", "order_count", "state", "error",
     ):
         assert key in row, key
+
+
+def test_the_paper_page_names_each_books_own_benchmark() -> None:
+    """A book is measured against the index it froze, which the payloads name;
+    no Paper tile or note may name a fixed index in its place."""
+    for name, payload in (("bookCard", "row"), ("paperEquityPanel", "payload")):
+        body = _js_function_body(name)
+        assert "沪深300" not in body, name
+        assert f"{payload}.benchmark_label" in body, name
 
 
 @pytest.mark.parametrize("route", PAPER_PANEL_ROUTES)

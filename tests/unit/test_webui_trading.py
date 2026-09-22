@@ -196,6 +196,19 @@ def test_performance_keys_return_equity_cash_and_csi300_by_the_same_settled_days
     assert partial["statistics"]["benchmark_return"] is None and partial["statistics"]["excess_return"] is None
 
 
+def test_a_book_names_the_index_it_froze_wherever_the_benchmark_is_spoken_of(tmp_path: Path):
+    """A book is measured against its source arm's index, so its tiles, notes
+    and curve all name that index; none of them may say CSI 300 for it."""
+    root = engine_book(tmp_path, "20260105", "20260106", "20260107")
+    write_book_record(root, benchmark_index="000905.SH")
+    _csi300_slot(root, "20260102_20260108_20251231T235959+0800", {"20260105": 1.0, "20260106": 1.0})
+    payload = trading.performance_payload(tmp_path, BOOK)
+    assert payload["benchmark_label"] == payload["chart"]["benchmark"]["label"] == "中证500"
+    # The slot carries 中证500 on one of the two settled days: a partial cover.
+    assert payload["benchmark_days"] == 1 and payload["statistics"]["excess_return"] is None
+    assert trading.books_payload(tmp_path)["books"][0]["benchmark_label"] == "中证500"
+
+
 def _forward_result(experiment: Path) -> str:
     record = forward_record(ExperimentLedger(experiment / "ledgers/experiment_ledger.jsonl").read())
     return Path(str(record["result_ref"])).parent.name

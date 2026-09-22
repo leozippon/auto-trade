@@ -985,14 +985,16 @@ def result_style(root: Path, experiment_id: str, name: str) -> dict[str, object]
     state, not a failure, so it answers ``available: false`` the way the
     sidecar's own sections report an unavailable figure. The console can then
     tell "nothing to show" from "no such result" without reading an error
-    message.
+    message. A sidecar that is there but cannot be read or parsed answers
+    ``available: false`` with reason ``unreadable``, so a load failure is not
+    shown as a result that never had one.
     """
 
     sidecar = ledger_result(root, experiment_id, name).parent / STYLE_ARTIFACT_NAME
     try:
         payload = read_json(sidecar)
     except (OSError, TypeError, ValueError):
-        return {"available": False, "reason": "no_style_artifact"}
+        return {"available": False, "reason": "unreadable"}
     if payload.get("schema_version") != STYLE_SCHEMA_VERSION or payload.get("mode") not in _RESULT_MODES:
         return {"available": False, "reason": "no_style_artifact"}
     payload["available"] = True

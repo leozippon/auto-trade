@@ -320,13 +320,13 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         tail_events: int | None = Query(None, ge=1, le=500),
     ) -> dict[str, object]:
         directory, _unused_identity = _public_identity(experiment_id)
-        path, _raw_run_id, _trace_ref, identity = _trace_target(experiment_id, run_id)
+        path, raw_run_id, _trace_ref, identity = _trace_target(experiment_id, run_id)
         blocks = traces.read_trace_blocks(
             path,
             offset=offset,
             max_bytes=max_bytes,
             tail_events=tail_events,
-            writer_alive=traces.trace_writer_alive(directory),
+            writer_alive=traces.trace_writer_alive(directory, raw_run_id),
         )
         return _public_trace_blocks(blocks, identity)
 

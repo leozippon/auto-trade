@@ -415,7 +415,7 @@ def performance_payload(repo_root: Path, book: str, env: str = "paper") -> dict[
         state = "unreadable" if error else "absent"
         return {
             **base, "state": state, "error": error, "chart": None, "statistics": None,
-            "benchmark_error": None, "source": source, "source_error": source_error,
+            "benchmark_label": None, "benchmark_error": None, "source": source, "source_error": source_error,
         }
     returns = daily_returns_from_curve(curve)
     daily, benchmark_error = _benchmark(root)
@@ -424,12 +424,9 @@ def performance_payload(repo_root: Path, book: str, env: str = "paper") -> dict[
     # before its first settled day — opens the curve, so one settled day is
     # already a segment and the benchmark starts at zero beside it.
     anchor = _day_before(str(curve[0]["trade_date"]))
+    label = benchmark_index_label(_book_benchmark_index(root))
     benchmark = (
-        curve_entry(
-            "benchmark",
-            benchmark_index_label(_book_benchmark_index(root)),
-            [(anchor, 0.0), *benchmark_rows],
-        )
+        curve_entry("benchmark", label, [(anchor, 0.0), *benchmark_rows])
         if benchmark_rows
         else None
     )
@@ -454,6 +451,9 @@ def performance_payload(repo_root: Path, book: str, env: str = "paper") -> dict[
                 "cash": [initial, *(row["cash"] for row in curve)],
             },
         },
+        # The book's own index by name, for the tiles and notes that speak of
+        # it even when no benchmark row was read.
+        "benchmark_label": label,
         "benchmark_days": len(benchmark_rows),
         "benchmark_error": benchmark_error,
         # The artifact's forward and Held-out replay, copied into the book when
@@ -632,6 +632,7 @@ def books_payload(repo_root: Path, env: str = "paper") -> dict[str, object]:
             "position_count": len(positions) if positions is not None else None,
             "total_return": statistics.get("total_return"),
             "excess_return": statistics.get("excess_return"),
+            "benchmark_label": performance.get("benchmark_label"),
             # The card's miniature of the book's own return curve, the same
             # series its performance panel draws and absent on the same rule.
             "curve": {"series": chart["series"], "benchmark": chart["benchmark"]} if chart else None,

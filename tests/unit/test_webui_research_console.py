@@ -153,6 +153,13 @@ def test_a_result_without_a_style_sidecar_is_not_an_unknown_result(tmp_path: Pat
     assert stale.status_code == 200
     assert stale.json() == {"available": False, "reason": "no_style_artifact"}
 
+    # A sidecar that is there but cannot be parsed is a load failure, and says
+    # so rather than reading as a result that never had one.
+    sidecar.write_text('{"schema_version": ', encoding="utf-8")
+    corrupt = client.get(f"/api/experiments/arm/results/{name}/style")
+    assert corrupt.status_code == 200
+    assert corrupt.json() == {"available": False, "reason": "unreadable"}
+
     unknown = client.get("/api/experiments/arm/results/valid_absent/style")
     assert unknown.status_code == 404
     assert unknown.json()["detail"] == "unknown result: valid_absent"

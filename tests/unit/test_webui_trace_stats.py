@@ -1022,10 +1022,11 @@ def test_trace_blocks_api_guards_invalid_experiment_and_run(tmp_path: Path) -> N
     assert missing_run.status_code == 404
 
 
-def _claim_writer(experiment_dir: Path, *, alive: bool) -> None:
-    """Own the trace from this process, or from nobody at all."""
+def _claim_writer(experiment_dir: Path, *, alive: bool, run_id: str | None = None) -> None:
+    """Own the trace from this process, or from nobody at all; ``run_id`` is
+    the run the status names as the one being written."""
 
-    status: dict[str, object] = {"schema_version": 1, "state": "running"}
+    status: dict[str, object] = {"schema_version": 1, "state": "running", "run_id": run_id}
     if alive:
         status["pid"] = os.getpid()
         status["pid_start_ticks"] = proc_start_ticks(os.getpid())
@@ -1077,6 +1078,59 @@ def test_a_torn_tail_ends_pagination_once_its_writer_is_gone(tmp_path: Path) -> 
     assert ended["eof"] is True and ended["next_offset"] == size
     assert [block["kind"] for block in ended["blocks"]] == ["raw"]
     assert ended["blocks"][0]["text"] == marker
+
+
+def test_a_dead_runs_torn_tail_ends_every_page_that_reaches_it(tmp_path: Path) -> None:
+    """The replay loader re-reads from offset 0 with a growing window, so the
+    torn tail must end the trace on whichever page reaches it, not only on a
+    page that starts at it. Liveness is the requested run's: a finished run
+    is dead while the worker writes a newer run of the same experiment."""
+
+    events = [
+        {"event_type": "llm_call", "content": "one"},
+        {"event_type": "llm_call", "content": "two"},
+    ]
+    identity = _experiment_with_trace(tmp_path, events)
+    root = tmp_path / "experiments" / "demo"
+    trace = root / "artifacts" / "traces" / "run_001.jsonl"
+    second = len(json.dumps(events[0]).encode()) + 1
+    complete = trace.stat().st_size
+    with trace.open("a", encoding="utf-8") as handle:
+        handle.write('{"event_type": "llm_call", "content": "tor')
+    size = trace.stat().st_size
+    marker = {"raw": f"<truncated final event: {size - complete} bytes>"}
+
+    for offset, expected in ((0, events), (second, events[1:])):
+        dead = traces.read_trace_page(trace, offset=offset, writer_alive=False)
+        assert dead == {"events": [*expected, marker], "next_offset": size, "eof": True}
+        assert "tor" not in json.dumps(dead["events"])
+        live = traces.read_trace_page(trace, offset=offset, writer_alive=True)
+        assert live == {"events": expected, "next_offset": complete, "eof": False}
+    # A window that stops short of the tail is an ordinary page.
+    short = traces.read_trace_page(trace, offset=0, max_bytes=second, writer_alive=False)
+    assert short == {"events": events[:1], "next_offset": second, "eof": False}
+
+    client = TestClient(create_app(tmp_path))
+    params = {"run_id": identity.trace_ref("run_001"), "offset": 0}
+
+    def page() -> dict[str, object]:
+        return client.get("/api/experiments/demo/trace/blocks", params=params).json()
+
+    _claim_writer(root, alive=True, run_id="run_001")
+    assert traces.trace_writer_alive(root, "run_001")
+    running = page()
+    assert running["eof"] is False and running["next_offset"] == complete
+    assert "raw" not in [block["kind"] for block in running["blocks"]]
+    # The same worker has moved on to a newer run: this one can no longer grow.
+    _claim_writer(root, alive=True, run_id="run_002")
+    assert not traces.trace_writer_alive(root, "run_001")
+    superseded = page()
+    _claim_writer(root, alive=False, run_id="run_001")
+    crashed = page()
+    for ended in (superseded, crashed):
+        assert ended["eof"] is True and ended["next_offset"] == size
+        last = ended["blocks"][-1]
+        assert (last["kind"], last["text"]) == ("raw", marker["raw"])
 
 
 def test_project_subagent_running_card_accumulates_progress() -> None:

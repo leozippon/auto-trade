@@ -71,14 +71,19 @@ def read_initial_prompt(path: Path) -> dict[str, object]:
     raise KeyError("trace contains no initial prompt")
 
 
-def trace_writer_alive(experiment_dir: Path) -> bool:
-    """Whether the process that owns this experiment's trace is still writing.
+def trace_writer_alive(experiment_dir: Path, run_id: str) -> bool:
+    """Whether a live worker is still writing this run's trace.
 
-    The same liveness the SSE tail ends on, so a paginating client and a
-    streaming one agree on when a trace can no longer grow.
+    A worker writes only the run its status names, so an older run of the same
+    experiment is finished even while a newer one runs. An empty status
+    ``run_id`` is a session that has not published its run yet and is not read
+    as another run. The SSE tail ends on this same answer, so a paginating
+    client and a streaming one agree on when a trace can no longer grow.
     """
 
-    return status_pid_alive(read_status(Path(experiment_dir) / "hitl/status.json"))
+    status = read_status(Path(experiment_dir) / "hitl/status.json")
+    current = str(status.get("run_id") or "")
+    return status_pid_alive(status) and current in {"", run_id}
 
 
 def read_trace_page(
@@ -92,10 +97,11 @@ def read_trace_page(
 
     ``writer_alive`` is the liveness of the process that owns the trace. While
     it writes, trailing bytes with no terminator are an event in flight, so the
-    page reports no progress and the caller polls again. Once that process is
+    page stops before them and the caller polls again. Once that process is
     gone the bytes will never be terminated — a write torn by ENOSPC or a kill
-    mid-``write`` leaves exactly this — so the page must end instead of letting
-    a client poll a dead file forever.
+    mid-``write`` leaves exactly this — so whichever page reaches them, from
+    whatever offset it started, reports them as a truncation and ends the
+    trace instead of letting a client poll a dead file forever.
     """
 
     path = Path(path)
@@ -118,20 +124,14 @@ def read_trace_page(
                         "next_offset": next_offset,
                         "eof": next_offset >= size,
                     }
-    if consumed <= 0:
-        if chunk and not writer_alive:
-            return {
-                "events": [{"raw": _TRUNCATED_TAIL.format(count=size - offset)}],
-                "next_offset": size,
-                "eof": True,
-            }
-        return {
-            "events": [],
-            "next_offset": offset,
-            "eof": offset + len(chunk) >= size and not chunk,
-        }
     events = [_decode_event(line) for line in chunk[:consumed].splitlines() if line.strip()]
     next_offset = offset + consumed
+    # Everything from ``next_offset`` to EOF is unterminated when this read
+    # reached EOF, or when the scan above found no terminator before it.
+    unterminated = consumed <= 0 or offset + len(chunk) >= size
+    if not writer_alive and unterminated and next_offset < size:
+        events.append({"raw": _TRUNCATED_TAIL.format(count=size - next_offset)})
+        next_offset = size
     return {"events": events, "next_offset": next_offset, "eof": next_offset >= size}
 
 
@@ -610,7 +610,7 @@ def trace_stats(path: Path) -> dict[str, object]:
 
 async def stream_trace(
     experiment_dir: Path,
-    run_id: str | None,
+    run_id: str,
     *,
     offset: int = 0,
 ) -> AsyncIterator[str]:
@@ -634,9 +634,7 @@ async def stream_trace(
                 yield f'id: {position}\ndata: {{"offset": {position}}}\n\n'
                 idle = 0
                 continue
-        status = read_status(directory / "hitl/status.json")
-        current = str(status.get("run_id") or "")
-        if not status_pid_alive(status) or (run_id is not None and current not in {"", run_id}):
+        if not trace_writer_alive(directory, run_id):
             yield f'event: eof\ndata: {{"offset": {position}}}\n\n'
             return
         if path is None:

@@ -5375,10 +5375,15 @@ function styleCard(expId, result) {
   )
     .then((payload) => {
       host.querySelector(".hint").remove();
-      // The result exists but carries no style artifact: an expected state the
-      // backend states outright, not a load failure.
+      // The result exists but carries no usable style artifact: an expected
+      // state the backend states outright, unless the sidecar is there and
+      // could not be read, which is said as the load failure it is.
       if (payload.available === false) {
-        host.append(el("div", { class: "hint" }, "无风格归因数据"));
+        host.append(
+          payload.reason === "unreadable"
+            ? el("div", { class: "hint warn" }, "风格归因数据读取失败")
+            : el("div", { class: "hint" }, "无风格归因数据"),
+        );
         return;
       }
       const reg = payload.benchmark_regression || {};
@@ -6885,7 +6890,7 @@ function bookCard(row) {
           value: row.excess_return,
           fmt: fmtPct,
           signed: true,
-          title: "同一批已结算交易日上对沪深300 的超额",
+          title: `同一批已结算交易日上对${row.benchmark_label} 的超额`,
         },
         { label: "现金", value: row.cash, fmt: fmtAmount, title: "最近一次结算收盘时的现金" },
         {
@@ -7354,9 +7359,9 @@ function bookCurveChart(chart, source, opts) {
 
 /* The book's return: the tiles it has measured, one chart continuing the
    source experiment's out-of-sample replay into the book's own days, and what
-   the trading cost. The statistics the day count still gates, and a CSI 300
+   the trading cost. The statistics the day count still gates, and a benchmark
    that does not cover the book, say so in one caption instead of leaving a
-   dash behind. */
+   dash behind; the benchmark is always named as the book froze it. */
 function paperEquityPanel(payload) {
   const stats = payload.statistics;
   const head = panelHead(
@@ -7375,13 +7380,14 @@ function paperEquityPanel(payload) {
   if (stats.days < payload.min_days)
     head.querySelector(".mode-note").title =
       `年化、Sharpe 与最大回撤自第 ${payload.min_days} 个交易日起给出`;
+  const benchmark = payload.benchmark_label;
   const notes = [
     payload.benchmark_error
-      ? `沪深300 读取失败：${payload.benchmark_error}`
+      ? `${benchmark} 读取失败：${payload.benchmark_error}`
       : !payload.benchmark_days
-        ? "无沪深300 数据"
+        ? `无${benchmark} 数据`
         : payload.benchmark_days < stats.days
-          ? `沪深300 覆盖 ${payload.benchmark_days}/${stats.days} 日`
+          ? `${benchmark} 覆盖 ${payload.benchmark_days}/${stats.days} 日`
           : null,
     payload.source_error
       ? `源实验历史读取失败：${payload.source_error}`
@@ -7396,7 +7402,7 @@ function paperEquityPanel(payload) {
   ].filter(Boolean);
   const tiles = presentTiles([
     { label: "累计收益", value: stats.total_return, fmt: fmtPct, signed: true },
-    { label: "沪深300", value: stats.benchmark_return, fmt: fmtPct, signed: true },
+    { label: benchmark, value: stats.benchmark_return, fmt: fmtPct, signed: true },
     { label: "超额", value: stats.excess_return, fmt: fmtPct, signed: true },
     { label: "年化", value: stats.annualized_return, fmt: fmtPct, signed: true },
     { label: "Sharpe", value: stats.sharpe, fmt: fmtSharpe, signed: true },
