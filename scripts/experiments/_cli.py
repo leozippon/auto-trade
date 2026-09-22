@@ -19,6 +19,7 @@ import argparse
 from dataclasses import fields
 from pathlib import Path
 
+from autotrade.environment.data.contracts import BENCHMARK_INDEXES
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.runtime import write_json_atomic
 from autotrade.pipelines.calendar import GEOMETRY_PARAMETERS
@@ -103,6 +104,16 @@ def add_schedule_arguments(parser: argparse.ArgumentParser) -> None:
         default="08:30",
         metavar="HH:MM",
         help="Fixed Asia/Shanghai inference time-of-day; any valid 24-hour HH:MM.",
+    )
+    parser.add_argument(
+        "--benchmark-index",
+        choices=tuple(BENCHMARK_INDEXES),
+        default=str(WEB_CREATE_DEFAULTS["benchmark_index"]),
+        help=(
+            "The index this arm is measured against: the benchmark leg of the style "
+            "attribution and the verdict's neutralization, and the membership the "
+            "zero-skill panel draws replacements from."
+        ),
     )
 
 
@@ -297,7 +308,7 @@ def add_acceptance_arguments(parser: argparse.ArgumentParser) -> None:
         ("--max-drawdown", "Equity drawdown limit of the freeze gate and the verdict."),
         ("--cost-stress-multiplier", "Forward verdict: multiple of the profile's slippage the neutralised excess must survive."),
         ("--active-max-drawdown", "Drawdown limit of the active series (strategy minus zero-skill panel)."),
-        ("--tracking-error-cap", "Tracking mandate: residual tracking error cap against CSI 300; giving it turns the mandate on for this arm."),
+        ("--tracking-error-cap", "Tracking mandate: residual tracking error cap against the arm's benchmark index; giving it turns the mandate on for this arm."),
         ("--beta-min", "Tracking mandate: lower end of the market beta band."),
         ("--beta-max", "Tracking mandate: upper end of the market beta band."),
         ("--min-active-ir", "Freeze gate: minimum research-period active information ratio."),
@@ -372,6 +383,7 @@ def _build_worker_params(
         **{name: getattr(args, name) for name in GEOMETRY_PARAMETERS},
         "strategy_period": args.strategy_period,
         "inference_time": args.inference_time,
+        "benchmark_index": args.benchmark_index,
         "max_research_minutes": args.max_research_minutes,
         "window_months": args.window_months,
         "intraday_trade_days": args.intraday_trade_days,

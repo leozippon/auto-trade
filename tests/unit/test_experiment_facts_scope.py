@@ -197,6 +197,19 @@ def test_the_replay_year_budget_travels_with_how_it_is_spent() -> None:
     assert "max_replay_years_note" not in _facts(budgets={})["budgets"]
 
 
+def test_the_session_is_told_which_index_it_is_measured_against() -> None:
+    """``benchmark_index`` is the key a reference pack reads instead of
+    restating an index, and the neutralization caliber names the same one."""
+
+    facts = _facts(benchmark_index="000905.SH")
+    assert facts["benchmark_index"] == "000905.SH"
+    assert "中证500" in facts["neutralized_excess_method"]
+    # A manifest written before the parameter existed reads as the default,
+    # which is the index those arms actually ran on.
+    assert _facts()["benchmark_index"] == "000300.SH"
+    assert "沪深300" in _facts()["neutralized_excess_method"]
+
+
 def test_the_intraday_lookback_is_named_only_when_minutes_are_built() -> None:
     """Without minute bars the execution policy reports none available, so no
     minute lookback window may be advertised either."""

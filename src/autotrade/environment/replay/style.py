@@ -8,8 +8,8 @@ Agent actually saw):
 - strategy daily returns: the window's own ``equity_curve``;
 - holdings: the replay result's end-of-day position snapshots;
 - cross-sectional style ranks: the replay slot's ``daily.parquet``;
-- CSI 300 benchmark: ``index_daily`` rows inside the replay slot's
-  ``macro.parquet``;
+- benchmark: the arm's ``benchmark_index`` rows of ``index_daily`` inside
+  the replay slot's ``macro.parquet``;
 - SW L1 industry: the decision snapshot's ``universe.parquet`` (as-of the
   decision day — membership drift within a replay window is negligible).
 
@@ -37,12 +37,18 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
+from autotrade.environment.data.contracts import (
+    DEFAULT_BENCHMARK_INDEX,
+    benchmark_index_label,
+)
 from autotrade.environment.runtime import utc_now_iso, write_json_atomic
 
 from .stats import TRADING_DAYS_PER_YEAR, ReplayResult, total_return_from_curve
 
-BENCHMARK_LABEL = "沪深300"
-BENCHMARK_TS_CODE = "000300.SH"
+# The benchmark an arm takes when its create request names none. The effective
+# value is the arm's ``benchmark_index`` and travels with every call below.
+BENCHMARK_TS_CODE = DEFAULT_BENCHMARK_INDEX
+BENCHMARK_LABEL = benchmark_index_label(BENCHMARK_TS_CODE)
 _MIN_REGRESSION_DAYS = 8
 STYLE_ARTIFACT_NAME = "style_analysis.json"
 STYLE_SCHEMA_VERSION = 1
@@ -55,11 +61,21 @@ _STYLE_COLUMNS = ("circ_mv", "pb", "turnover_rate")
 # Fama-French factor and the result says so in ``method``.
 _SIZE_FACTOR_QUANTILE = 0.3
 _SIZE_FACTOR_MIN_NAMES = 30
-NEUTRALIZATION_METHOD = (
-    "日度策略收益对沪深300收益与规模因子（本回放槽全市场截面、不是本臂股票池，"
-    "按前一交易日流通市值分组：最小 30% 等权减最大 30% 等权）"
-    f"的二元 OLS，截距按 {TRADING_DAYS_PER_YEAR} 个交易日年化"
-)
+
+
+def neutralization_method(benchmark_index: str = BENCHMARK_TS_CODE) -> str:
+    """The caliber sentence every ``neutralized_excess_return`` is computed under.
+
+    Names the arm's own benchmark: the market leg is index-specific, the size
+    leg is built from the replay's own cross-section whatever the benchmark is.
+    """
+
+    return (
+        f"日度策略收益对{benchmark_index_label(benchmark_index)}收益与规模因子"
+        "（本回放槽全市场截面、不是本臂股票池，"
+        "按前一交易日流通市值分组：最小 30% 等权减最大 30% 等权）"
+        f"的二元 OLS，截距按 {TRADING_DAYS_PER_YEAR} 个交易日年化"
+    )
 
 
 def _date_text(value: object) -> str:
@@ -69,15 +85,24 @@ def _date_text(value: object) -> str:
         return str(value)
 
 
-def slot_benchmark(replay_dir: Path | Sequence[Path] | None) -> dict[str, float]:
-    """CSI 300 daily returns of one replay slot, or of every slot of a span.
+def slot_benchmark(
+    replay_dir: Path | Sequence[Path] | None,
+    *,
+    benchmark_index: str = BENCHMARK_TS_CODE,
+) -> dict[str, float]:
+    """Benchmark daily returns of one replay slot, or of every slot of a span.
 
-    Consecutive slots partition their rows, so a span's series is the union.
+    ``benchmark_index`` is the arm's own benchmark. Consecutive slots partition
+    their rows, so a span's series is the union.
     """
     if replay_dir is None:
         return {}
     if not isinstance(replay_dir, (str, Path)):
-        return {day: value for slot in replay_dir for day, value in slot_benchmark(slot).items()}
+        return {
+            day: value
+            for slot in replay_dir
+            for day, value in slot_benchmark(slot, benchmark_index=benchmark_index).items()
+        }
     path = Path(replay_dir) / "macro.parquet"
     if not path.is_file():
         return {}
@@ -88,7 +113,7 @@ def slot_benchmark(replay_dir: Path | Sequence[Path] | None) -> dict[str, float]
             columns=list(required),
             filters=[
                 ("dataset", "==", "index_daily"),
-                ("ts_code", "==", BENCHMARK_TS_CODE),
+                ("ts_code", "==", benchmark_index),
             ],
         )
     except Exception:
@@ -97,7 +122,7 @@ def slot_benchmark(replay_dir: Path | Sequence[Path] | None) -> dict[str, float]
         return {}
     rows = frame[
         frame["dataset"].astype(str).eq("index_daily")
-        & frame["ts_code"].astype(str).eq(BENCHMARK_TS_CODE)
+        & frame["ts_code"].astype(str).eq(benchmark_index)
     ]
     result: dict[str, float] = {}
     for date, raw in zip(rows["trade_date"], rows["pct_chg"]):
@@ -112,8 +137,10 @@ def slot_benchmark(replay_dir: Path | Sequence[Path] | None) -> dict[str, float]
     return result
 
 
-def slot_membership(slots: Sequence[Path]) -> dict[str, frozenset[str]]:
-    """CSI 300 constituents by cross-section date, over the given slots.
+def slot_membership(
+    slots: Sequence[Path], *, benchmark_index: str = BENCHMARK_TS_CODE
+) -> dict[str, frozenset[str]]:
+    """The benchmark's constituents by cross-section date, over the given slots.
 
     ``index_weight`` rides in ``macro.parquet``: a replay slot carries the
     month-end cross-sections dated inside it and the decision view the history
@@ -132,7 +159,7 @@ def slot_membership(slots: Sequence[Path]) -> dict[str, frozenset[str]]:
             columns=columns,
             filters=[
                 ("dataset", "==", "index_weight"),
-                ("index_code", "==", BENCHMARK_TS_CODE),
+                ("index_code", "==", benchmark_index),
             ],
         )
         for date, group in frame.groupby("trade_date"):
@@ -287,6 +314,8 @@ def _neutralized_excess(
     strategy: list[tuple[str, float]],
     benchmark: Mapping[str, float],
     size: Mapping[str, float],
+    *,
+    benchmark_index: str = BENCHMARK_TS_CODE,
 ) -> dict[str, object]:
     """Excess return left after the market-beta and size contributions.
 
@@ -308,7 +337,7 @@ def _neutralized_excess(
     result: dict[str, object] = {
         "available": False,
         "reason": "factors_unavailable" if not days else "insufficient_overlapping_days",
-        "method": NEUTRALIZATION_METHOD,
+        "method": neutralization_method(benchmark_index),
         "n_days": days,
         "neutralized_excess_return": None,
         "tracking_error": None,
@@ -463,7 +492,7 @@ def _style_exposures(
         "days": days,
         "tilts": {key: round(total / days, 3) for key, total in tilt_sums.items()},
         # The largest single SW L1 industry's share of the book, averaged over
-        # decision days. The neutralization regresses on CSI 300 and size only,
+        # decision days. The neutralization regresses on the benchmark and size only,
         # so a single-sector book scores as alpha; the only frozen artifact that
         # cleared every gate was 82.5 % banks. ``industries`` stays host-side,
         # so this one scalar is what the compact block carries to the Agent.
@@ -489,10 +518,14 @@ def replay_style_analysis(
     snapshot_dir: Path | None,
     mode: str,
     panel: Mapping[str, object] | None = None,
+    benchmark_index: str = BENCHMARK_TS_CODE,
 ) -> dict[str, object]:
     """Compute one result sidecar from the just-finished daily replay.
 
     ``replay_dir`` is the replay's slot, or the slots of a span in order.
+    ``benchmark_index`` is the arm's benchmark: the sidecar records it beside
+    the series it was measured on, so a stored result can never be read without
+    knowing what it was graded against.
     ``panel`` is the replay's zero-skill panel block
     (``null_control.run_null_control(..., panel=True)``): its two daily series
     are stored beside the strategy's, and the same attribution is run on the
@@ -500,11 +533,14 @@ def replay_style_analysis(
     the series the verdict grades. A truncated smoke replay passes none.
     """
 
+    label = benchmark_index_label(benchmark_index)
     strategy = daily_returns_from_curve(replay.equity_curve)
-    benchmark = slot_benchmark(replay_dir)
+    benchmark = slot_benchmark(replay_dir, benchmark_index=benchmark_index)
     regression = _benchmark_regression(strategy, benchmark)
     size = _size_factor(replay_daily)
-    neutralized = _neutralized_excess(strategy, benchmark, size)
+    neutralized = _neutralized_excess(
+        strategy, benchmark, size, benchmark_index=benchmark_index
+    )
     panel_blocks: dict[str, object] = {}
     panel_compact: dict[str, object] = {}
     if panel is not None:
@@ -513,9 +549,14 @@ def replay_style_analysis(
             {"strategy_daily": strategy, "panel_daily": panel.get("panel_daily")}
         )
         active = _neutralized_excess(
-            _series_pairs(graded["strategy_daily"]) if graded else [], benchmark, size
+            _series_pairs(graded["strategy_daily"]) if graded else [],
+            benchmark,
+            size,
+            benchmark_index=benchmark_index,
         )
-        zero_skill = _neutralized_excess(composite, benchmark, size)
+        zero_skill = _neutralized_excess(
+            composite, benchmark, size, benchmark_index=benchmark_index
+        )
         panel_blocks = {
             "panel": {
                 key: value
@@ -551,7 +592,7 @@ def replay_style_analysis(
     return {
         "schema_version": STYLE_SCHEMA_VERSION,
         "mode": mode,
-        "benchmark": {"ts_code": BENCHMARK_TS_CODE, "label": BENCHMARK_LABEL},
+        "benchmark": {"ts_code": benchmark_index, "label": label},
         "benchmark_regression": regression,
         "neutralized_excess": neutralized,
         "style": style,
@@ -566,9 +607,9 @@ def replay_style_analysis(
             # high-beta tilt, so the neutralized figure rides beside it
             # wherever the raw one is read.
             "neutralized_excess_return": neutralized.get("neutralized_excess_return"),
-            "neutralized_excess_method": NEUTRALIZATION_METHOD,
+            "neutralized_excess_method": neutralization_method(benchmark_index),
             # The two figures a tracking mandate limits: the residual standard
-            # deviation of that regression and its loading on CSI 300.
+            # deviation of that regression and its loading on the benchmark.
             "tracking_error": neutralized.get("tracking_error"),
             "market_beta": neutralized.get("market_beta"),
             **panel_compact,
@@ -672,20 +713,23 @@ def benchmark_summary_block(analysis: Mapping[str, object]) -> dict[str, object]
 
     The sidecar is the single computation point; this is the same numbers in the
     shape the ledger and the Agent-visible metric projection read
-    (``label`` + ``benchmark_return`` at minimum). Returns None when the slot had
-    no usable benchmark, so a missing block stays a truthful "not measured"
-    instead of a fabricated zero.
+    (``label`` + ``benchmark_return`` at minimum), and the index is the one the
+    sidecar itself recorded rather than a restated default. Returns None when
+    the slot had no usable benchmark, so a missing block stays a truthful "not
+    measured" instead of a fabricated zero — the sidecar beside the result still
+    names the benchmark the replay ran against.
     """
 
     compact = analysis.get("compact")
-    if not isinstance(compact, Mapping):
+    benchmark = analysis.get("benchmark")
+    if not isinstance(compact, Mapping) or not isinstance(benchmark, Mapping):
         return None
     benchmark_return = compact.get("benchmark_return")
     if not isinstance(benchmark_return, (int, float)) or isinstance(benchmark_return, bool):
         return None
     return {
-        "ts_code": BENCHMARK_TS_CODE,
-        "label": BENCHMARK_LABEL,
+        "ts_code": benchmark.get("ts_code"),
+        "label": benchmark.get("label"),
         **{key: value for key, value in compact.items()},
     }
 
@@ -703,12 +747,12 @@ def write_style_rollup(result_dir: Path, payload: Mapping[str, object]) -> Path:
 __all__ = [
     "BENCHMARK_LABEL",
     "BENCHMARK_TS_CODE",
-    "NEUTRALIZATION_METHOD",
     "STYLE_ARTIFACT_NAME",
     "STYLE_SCHEMA_VERSION",
     "active_analysis",
     "benchmark_summary_block",
     "daily_returns_from_curve",
+    "neutralization_method",
     "replay_style_analysis",
     "slot_benchmark",
     "slot_membership",

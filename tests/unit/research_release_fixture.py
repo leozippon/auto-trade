@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from autotrade.environment.data.contracts import BENCHMARK_INDEXES
 from autotrade.environment.data.research_release import (
     ResearchRelease,
     pin_research_release,
@@ -33,12 +34,17 @@ def publish_release(
     *,
     datasets: Iterable[str],
     trading_days: Sequence[str] = HELDOUT_REACHING_DAYS,
+    benchmark_indexes: Sequence[str] = tuple(BENCHMARK_INDEXES),
 ) -> ResearchRelease:
     """Commit ``generation_id`` in the live lake and publish its release.
 
     ``datasets`` get one parquet partition each and ``trading_days`` are both
-    the SSE calendar's open days and the daily partitions. A later call commits
-    a newer generation over the same lake, as the nightly chain does.
+    the SSE calendar's open days and the daily partitions. ``index_daily`` and
+    ``index_weight`` always get their per-index partitions, because every real
+    release carries them and an arm's ``benchmark_index`` is checked against
+    them at create time; ``benchmark_indexes`` narrows that set to model a
+    release published before an index existed. A later call commits a newer
+    generation over the same lake, as the nightly chain does.
     """
 
     raw = repo_root / RAW_DIR
@@ -50,6 +56,9 @@ def publish_release(
     lock.touch()
     for name in datasets:
         _write_pair(raw / name / "part.parquet")
+    for code in benchmark_indexes:
+        _write_pair(raw / "index_daily" / f"ts_code={code}" / "year=2020.parquet")
+        _write_pair(raw / "index_weight" / f"index_code={code}" / "year=2020.parquet")
     for day in trading_days:
         _write_pair(raw / "daily" / f"trade_date={day}.parquet")
     for year in sorted({day[:4] for day in trading_days}):

@@ -555,6 +555,7 @@ def _agent_visible_manifest(
             "data_summary_ref",
             "research",
             "schedule",
+            "benchmark_index",
             "snapshot_config",
             "start",
             "arm",

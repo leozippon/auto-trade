@@ -95,6 +95,42 @@ LEGACY_STATUS_REPORT_TYPES: dict[str, str] = {
     "base_research_status.json": "base_research",
 }
 
+# The A-share benchmark indexes the lake carries, code to display label. The
+# ingest adapter downloads exactly these for `index_daily` (partitioned by
+# `ts_code`) and `index_weight` (by `index_code`), and an arm's
+# `benchmark_index` picks one of them: it decides the benchmark series the
+# style attribution and the verdict's neutralization regress on, and the
+# membership the zero-skill panel draws replacements from. One table, so the
+# download scope and the choices a create request may name cannot drift.
+BENCHMARK_INDEXES: dict[str, str] = {
+    "000001.SH": "上证指数",
+    "000016.SH": "上证50",
+    "000300.SH": "沪深300",
+    "000905.SH": "中证500",
+    "000852.SH": "中证1000",
+    "399006.SZ": "创业板指",
+    "000688.SH": "科创50",
+}
+DEFAULT_BENCHMARK_INDEX = "000300.SH"
+
+
+def benchmark_index_label(ts_code: str) -> str:
+    """Display label of one benchmark index; an unknown code is refused.
+
+    Every layer that is handed a benchmark index resolves its label through
+    here, so a code the lake does not carry fails where it is named instead of
+    silently producing an empty benchmark series at replay end.
+    """
+
+    label = BENCHMARK_INDEXES.get(ts_code)
+    if label is None:
+        raise ValueError(
+            f"unknown benchmark_index {ts_code!r}; the lake carries "
+            + ", ".join(BENCHMARK_INDEXES)
+        )
+    return label
+
+
 # Datasets forming the board-trading (打板) research domain in the raw lake.
 # This is the DOWNLOAD and AUDIT scope, not a selectability list: `hm_list` is
 # still fetched and audited even though it can never enter a snapshot (it has no

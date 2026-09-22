@@ -24,6 +24,7 @@ import pandas as pd
 # STK_AUCTION_PRICE_ABS_TOLERANCE is re-exported: download.py reads it from
 # this hub, like the .io re-exports below.
 from autotrade.environment.data.contracts import (  # noqa: F401
+    BENCHMARK_INDEXES,
     BOARD_TRADING_DATASETS,
     DOMAIN_STATUS_FILES,
     STK_AUCTION_PRICE_ABS_TOLERANCE,
@@ -314,18 +315,12 @@ GLOBAL_CONTEXT_DEFAULT_DATASETS = [
 
 DEFAULT_GLOBAL_INDEX_CODES = ["XIN9", "HSI", "HKTECH", "DJI", "SPX", "IXIC", "FTSE", "GDAXI", "N225", "RUT"]
 
-# Core A-share benchmark indexes for `index_daily` (上证指数、上证50、沪深300、
-# 中证500、中证1000、创业板指、科创50): market timing, beta management, and
-# relative-strength context for the Agent, plus the host-side CSI300 benchmark.
-DEFAULT_CN_INDEX_CODES = [
-    "000001.SH",
-    "000016.SH",
-    "000300.SH",
-    "000905.SH",
-    "000852.SH",
-    "399006.SZ",
-    "000688.SH",
-]
+# Core A-share benchmark indexes for `index_daily` and `index_weight`: market
+# timing, beta management and relative-strength context for the Agent, plus the
+# host-side benchmark an arm's `benchmark_index` selects. The environment owns
+# the table (BENCHMARK_INDEXES), so what is downloaded and what a create
+# request may name are the same set.
+DEFAULT_CN_INDEX_CODES = list(BENCHMARK_INDEXES)
 
 # The index_weight source clamps every call to 7,000 rows regardless of the
 # requested limit and rejects offsets beyond ~150k, so a whole-history pull

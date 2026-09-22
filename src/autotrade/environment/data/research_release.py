@@ -29,6 +29,7 @@ from autotrade.environment.data.contracts import (
     DOMAIN_STATUS_FILES,
     LEGACY_STATUS_REPORT_TYPES,
     RAW_GENERATION_FILENAME,
+    benchmark_index_label,
     require_committed_generation,
 )
 
@@ -77,6 +78,41 @@ def _require_raw_datasets(raw_dir: Path, required: tuple[str, ...], *, context: 
             f"{context} lacks configured raw datasets {missing}: the release predates these datasets; "
             "recreate the experiment while the updater is idle (a fresh release will include them), "
             "or exclude the datasets from the experiment config"
+        )
+
+
+_BENCHMARK_INDEX_PARTITION_KEYS = {"index_daily": "ts_code", "index_weight": "index_code"}
+
+
+def require_benchmark_index(
+    raw_dir: str | Path, benchmark_index: str, *, datasets: tuple[str, ...]
+) -> None:
+    """Refuse a ``benchmark_index`` the pinned release cannot key a replay on.
+
+    The parameter selects one partition of the benchmark's daily bars and one
+    of its constituent table, and both are read only at replay end, where a
+    missing one degrades to an unmeasured benchmark and an unmeasurable
+    verdict. A release that predates an index therefore has to be refused where
+    the arm names it. Only the datasets the arm actually consumes are checked
+    (``datasets`` is its ``required_release_raw_datasets``): an arm that mounts
+    no ``index_weight`` draws its zero-skill panel on the float-cap decile, and
+    one that mounts no macro domain has no benchmark series by its own
+    configuration -- neither is this parameter's doing.
+    """
+
+    label = benchmark_index_label(benchmark_index)
+    root = Path(raw_dir)
+    missing = [
+        f"{dataset}/{key}={benchmark_index}"
+        for dataset, key in _BENCHMARK_INDEX_PARTITION_KEYS.items()
+        if dataset in datasets
+        and not _dataset_dir_populated(root / dataset / f"{key}={benchmark_index}")
+    ]
+    if missing:
+        raise ValueError(
+            f"benchmark_index {benchmark_index} ({label}) is absent from research release "
+            f"{root}: {missing}; pick an index the release carries or recreate the "
+            "experiment on a release that includes it"
         )
 
 

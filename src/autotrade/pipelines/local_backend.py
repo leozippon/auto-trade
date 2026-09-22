@@ -788,6 +788,10 @@ class LLMResearchDeveloper:
                     input_window_start=request.input_window_start,
                     decision_time=request.decision_time.isoformat(),
                 ),
+                # The index this arm is graded against; the Agent-visible facts
+                # publish it so a session designs against the same benchmark
+                # the host measures it on.
+                "benchmark_index": request.benchmark_index,
                 "snapshot_config": dict(request.snapshot_config),
                 "snapshots": {
                     "decision_input": {"snapshot_id": request.snapshot.snapshot_id}

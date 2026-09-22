@@ -147,6 +147,10 @@ def create_book(
         "strategy_path": str((copy / "output" / "main.py").relative_to(root)),
         "models_dir": str(models.relative_to(root)) if models is not None else None,
         "schedule": options.rolling.schedule.to_record(),
+        # The index the source arm was graded against, so the book's own page
+        # continues the copied out-of-sample curve against the same benchmark
+        # instead of splicing two different indexes into one line.
+        "benchmark_index": options.rolling.benchmark_index,
         "profile": asdict(options.rolling.broker_profile),
         "sandbox": {
             "image": sandbox.image,

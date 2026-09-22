@@ -53,6 +53,7 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "strategy_period": "day",
     "inference_time": "08:30",
     "initial_control_mode": "auto",
+    "benchmark_index": rolling_default("benchmark_index"),
     "window_months": rolling_default("window_months"),
     "daily_window_months": None,
     "fundamentals_window_months": None,

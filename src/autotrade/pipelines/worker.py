@@ -17,9 +17,11 @@ from autotrade.environment.artifacts import (
     FilesystemArtifactStore,
 )
 from autotrade.environment.broker import BrokerProfile
+from autotrade.environment.data.contracts import benchmark_index_label
 from autotrade.environment.data.research_release import (
     pin_research_release,
     published_research_release,
+    require_benchmark_index,
 )
 from autotrade.environment.data.snapshot import (
     DEFAULT_DATASETS,
@@ -152,6 +154,7 @@ _ALLOWED_PARAMS = {
     "nl_deadline_seconds",
     "max_intraday_row_group_rows",
     "developer_mode",
+    "benchmark_index",
     "window_months",
     "max_replay_years",
     "max_null_controls",
@@ -518,6 +521,10 @@ def resolve_worker_options(
     if initial_control_mode not in CONTROL_MODES:
         raise ValueError(f"initial_control_mode must be one of {CONTROL_MODES}")
     snapshot_config = _snapshot_config(params)
+    # The arm's benchmark: refused here if it is not an index the lake carries,
+    # and checked against the pinned release's partitions below.
+    benchmark_index = str(knob("benchmark_index"))
+    benchmark_index_label(benchmark_index)
     raw_dir = (
         repo_dir(repository, params.get("raw_dir", "data/raw"), "raw_dir")
         if data_backend == "pit"
@@ -576,9 +583,10 @@ def resolve_worker_options(
             and events_status is not None
         )
         required_raw_datasets = required_release_raw_datasets(snapshot_config)
+        release_raw_dir: Path | None = None
         if seed_release is not None:
             assert pit_views_seed is not None
-            trading_days = _seed_release_trading_days(
+            release_raw_dir, trading_days = _seed_release_trading_days(
                 pit_views_seed,
                 seed_release,
                 experiment_dir=directory,
@@ -596,7 +604,15 @@ def resolve_worker_options(
                 fundamental_events_status=events_status,
                 required_raw_datasets=required_raw_datasets,
             )
+            release_raw_dir = release.raw_dir
             trading_days = load_sse_trading_days(release.raw_dir)
+        # The benchmark the arm will be graded against has to exist in the
+        # release it pins, and a create request is the last place that can say
+        # so: by replay end the missing series is only an unmeasured verdict.
+        if release_raw_dir is not None:
+            require_benchmark_index(
+                release_raw_dir, benchmark_index, datasets=required_raw_datasets
+            )
     if trading_days is not None and not trading_days:
         raise ValueError("daily Parquet has no trading days")
     default_geometry = rolling_default("geometry")
@@ -621,6 +637,7 @@ def resolve_worker_options(
         experiment_id=experiment_id,
         experiments_root=directory.parent,
         geometry=geometry,
+        benchmark_index=benchmark_index,
         window_months=_positive_int(knob("window_months"), "window_months"),
         max_replay_years=_positive_int(knob("max_replay_years"), "max_replay_years"),
         max_null_controls=_nonnegative_int(
@@ -844,6 +861,7 @@ def build_experiment_pipeline(
             nl_failure_policy=options.rolling.nl_failure_policy,
             max_intraday_row_group_rows=options.max_intraday_row_group_rows,
             sandbox=strategy_sandbox,
+            benchmark_index=options.rolling.benchmark_index,
         )
         trading_days = snapshots.trading_days
     else:
@@ -1391,8 +1409,8 @@ def _seed_release_trading_days(
     fundamental_events_status: Path,
     required_raw_datasets: tuple[str, ...],
     preflight: bool,
-) -> list[str]:
-    """Bind a named seed's research release and return its trading days.
+) -> tuple[Path, list[str]]:
+    """Bind a named seed's research release; return its raw dir and trading days.
 
     The seed's views were built from one release, so that release is this
     experiment's: the worker pins it rather than the newest generation, and a
@@ -1431,7 +1449,7 @@ def _seed_release_trading_days(
             f"pit_views_seed {seed} records release raw dir {seed_raw_dir}, but research "
             f"release {generation_id} is at {release.raw_dir} in this repository"
         )
-    return trading_days
+    return release.raw_dir, trading_days
 
 
 def _optional_workspace_reference(value: object, repo_root: Path) -> str:

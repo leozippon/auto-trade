@@ -10,8 +10,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.identity import AgentRefStore
-from autotrade.environment.replay.style import NEUTRALIZATION_METHOD
+from autotrade.environment.replay.style import neutralization_method
 from autotrade.environment.sandbox import SCREENING_TOOL_MOUNT, SandboxLimits
 
 EXPERIMENT_FACTS_SCHEMA_VERSION = 2
@@ -95,6 +96,7 @@ def build_experiment_facts(
     runtime_env = runtime_env or {}
     data_summary = data_summary or {}
     snapshot_config = _as_mapping(manifest.get("snapshot_config"))
+    benchmark_index = str(manifest.get("benchmark_index") or DEFAULT_BENCHMARK_INDEX)
 
     facts: dict[str, object] = {
         "identity": compact_mapping(
@@ -169,10 +171,15 @@ def build_experiment_facts(
             manifest, model_artifacts_empty=model_artifacts_empty
         ),
         "broker_replay": _broker_replay_facts(manifest),
+        # The index this arm is measured against: the benchmark leg of every
+        # neutralized excess below, and the membership the zero-skill panel
+        # draws its replacement names from. A manifest written before the
+        # parameter existed reads as the default, which is what those arms ran.
+        "benchmark_index": benchmark_index,
         # The caliber every ``neutralized_excess_return`` in this session was
-        # computed under. One constant sentence: stating it here keeps it out
-        # of every backtest summary.
-        "neutralized_excess_method": NEUTRALIZATION_METHOD,
+        # computed under. One sentence, naming that benchmark: stating it here
+        # keeps it out of every backtest summary.
+        "neutralized_excess_method": neutralization_method(benchmark_index),
         "runtime_tools": _runtime_tool_facts(runtime_env, manifest=manifest),
     }
     return compact_mapping(facts)

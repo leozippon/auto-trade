@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from autotrade.environment.data.contracts import BENCHMARK_INDEXES
 from autotrade.environment.data.snapshot import DEFAULT_DATASETS, SELECTABLE_DATASETS
 from autotrade.environment.llm.model_profiles import MODEL_CHOICES
 from autotrade.pipelines.config import MANDATED_DEFAULTS, AcceptanceRules
@@ -133,6 +134,22 @@ _FIELDS: list[dict[str, object]] = [
         "type": "time",
         "required": True,
         "help": "Asia/Shanghai 24 小时制 HH:MM。",
+    },
+    {
+        "key": "benchmark_index",
+        "group": "基本与排程",
+        "type": "choice",
+        "label": "基准指数",
+        "choices": list(BENCHMARK_INDEXES),
+        "choice_labels": {
+            code: f"{label}（{code}）" for code, label in BENCHMARK_INDEXES.items()
+        },
+        "help": (
+            "本臂被度量的基准：风格归因与裁决中性化的基准腿，以及零技能对照组"
+            "按成分股替换选名的成分表。创建时校验该指数在本臂固定的数据发布中"
+            "确实有 index_daily 与 index_weight 分区；成分股本身仍需在 macro "
+            "数据集里选上 index_weight 才能被策略读到。"
+        ),
     },
     # 数据窗口
     {
@@ -395,10 +412,10 @@ _FIELDS: list[dict[str, object]] = [
     {
         "key": "tracking_error_cap",
         "group": "预算与验收",
-        "label": "跟踪误差上限（对沪深300）",
+        "label": "跟踪误差上限（对基准指数）",
         "type": "float",
         "optional": True,
-        "help": "跟踪授权的开关：填入即为本臂设定跟踪授权——策略自身对沪深300的残差跟踪误差上限（0.08 = 8%/年），研究期与前推期都要满足。留空即不设授权，跟踪误差与 β 只报告、不评级。没有上限却填 β 区间会被拒绝。",
+        "help": "跟踪授权的开关：填入即为本臂设定跟踪授权——策略自身对本臂基准指数的残差跟踪误差上限（0.08 = 8%/年），研究期与前推期都要满足。留空即不设授权，跟踪误差与 β 只报告、不评级。没有上限却填 β 区间会被拒绝。",
     },
     {
         "key": "max_drawdown",

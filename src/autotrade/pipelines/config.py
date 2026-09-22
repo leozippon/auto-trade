@@ -12,6 +12,10 @@ from typing import Literal, Protocol
 
 from autotrade.environment.artifacts import ModificationConstraints
 from autotrade.environment.broker import BrokerProfile
+from autotrade.environment.data.contracts import (
+    DEFAULT_BENCHMARK_INDEX,
+    benchmark_index_label,
+)
 from autotrade.environment.sandbox import SandboxConfig, SandboxLimits
 from autotrade.environment.strategy import StrategySchedule
 
@@ -158,7 +162,8 @@ class AcceptanceRules:
     # panel composite), over the same three slices.
     active_max_drawdown: float = 0.30
     # The tracking mandate: the strategy's own residual tracking error against
-    # CSI 300 and its market beta, over the research period and again forward.
+    # the arm's benchmark and its market beta, over the research period and
+    # again forward.
     # ``None`` means no mandate: both are measured and reported, not graded.
     # The band is set exactly when the cap is -- a cap alone is cheapest to
     # meet by dropping beta.
@@ -307,7 +312,8 @@ class AcceptanceRules:
             mandate = {
                 "tracking_error": (
                     f"<= {self.tracking_error_cap}: the node's own residual tracking "
-                    "error against CSI 300 (benchmark.tracking_error)"
+                    "error against the arm's benchmark_index "
+                    "(benchmark.tracking_error)"
                 ),
                 "market_beta": (
                     f"within {self.beta_min}..{self.beta_max} "
@@ -325,7 +331,8 @@ class AcceptanceRules:
                 f"equal-weight mean of {verdict.PANEL_DRAWS} random-name copies of the "
                 "node's own filled trades (same entry and exit instants, same money per "
                 "round trip, same Broker and costs; each name replaced by one on the "
-                "same side of CSI 300 membership that one board lot of that money could "
+                "same side of the arm's benchmark_index membership that one board lot "
+                "of that money could "
                 "buy). Every formal validation reports it as "
                 "benchmark.active_neutralized_excess, benchmark.active_tracking_error and "
                 "benchmark.active_information_ratio, and per research year as "
@@ -515,6 +522,11 @@ class RollingExperimentConfig:
     # The macro data floor is 2020-01, so 24 months before a July 2022
     # decision view is the most history every domain carries.
     window_months: int = 24
+    # The index this arm is measured against: the benchmark leg of the style
+    # attribution and of the verdict's neutralization, and the membership the
+    # zero-skill panel draws its replacements from. One of
+    # ``contracts.BENCHMARK_INDEXES``.
+    benchmark_index: str = DEFAULT_BENCHMARK_INDEX
     # The research session's budgets, spent across every attempt of the arm's
     # one session. The host's forward replay is charged to none of them. One
     # replay-year is one research year replayed for one candidate: a batch of
@@ -592,6 +604,7 @@ class RollingExperimentConfig:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} must be a non-negative integer")
+        benchmark_index_label(self.benchmark_index)
         object.__setattr__(self, "experiments_root", Path(self.experiments_root))
 
     @property
@@ -917,6 +930,10 @@ class ResearchSessionRequest:
     deadline_seconds: float
     # Trailing wrap-up grace reserved from deadline_seconds.
     deadline_grace_seconds: float = DEFAULT_DEADLINE_GRACE_MINUTES * 60.0
+    # The arm's benchmark index (``RollingExperimentConfig.benchmark_index``),
+    # published to the session through the run manifest so the Agent grades
+    # itself against the index the host grades it on.
+    benchmark_index: str = DEFAULT_BENCHMARK_INDEX
     directive: str = ""
     # Per-session HITL override of the experiment's default sandbox GPU count;
     # None keeps the experiment default. The "auto" selector still picks which

@@ -978,6 +978,44 @@ class PitViewsSeedParameterTest(unittest.TestCase):
             self.assertIn("fut_daily", message)
             self.assertIn("sw_daily", message)
 
+    def test_a_benchmark_index_the_release_cannot_key_fails_the_create(self) -> None:
+        """An arm is refused where it names its benchmark, not at replay end.
+
+        The parameter selects the benchmark's own bars and its constituent
+        table out of the release the arm pins; a release published before an
+        index carries neither, and a replay would only report an unmeasured
+        benchmark hours later. An index the lake does not carry at all is
+        refused before any release is read.
+        """
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "experiments").mkdir()
+            with self.assertRaisesRegex(ValueError, "399905.SZ"):
+                self._resolve(repo_root, {"benchmark_index": "399905.SZ"})
+            # A release published before CSI 1000 was downloaded: the code is a
+            # valid index, its partitions are not there.
+            self._seed(
+                repo_root,
+                "pit_views_seed_partial",
+                {"macro_datasets": ["index_daily", "index_weight"]},
+                benchmark_indexes=("000300.SH", "000905.SH"),
+            )
+            named = {
+                "macro_datasets": ["index_daily", "index_weight"],
+                "pit_views_seed": "data/pit_views_seed_partial",
+            }
+            with self.assertRaises(ValueError) as caught:
+                self._resolve(repo_root, {**named, "benchmark_index": "000852.SH"})
+            message = str(caught.exception)
+            self.assertIn("000852.SH", message)
+            self.assertIn("index_daily/ts_code=000852.SH", message)
+            self.assertIn("index_weight/index_code=000852.SH", message)
+            # An index the same release does carry is accepted and forwarded.
+            options = self._resolve(repo_root, {**named, "benchmark_index": "000905.SH"})
+            self.assertEqual(options.rolling.benchmark_index, "000905.SH")
+
     def test_a_named_seed_binds_the_release_it_was_built_from(self) -> None:
         """The nightly chain commits a new generation every night. An experiment
         naming a seed pins the release that seed was built from, so the worker

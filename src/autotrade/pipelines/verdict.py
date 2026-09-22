@@ -2,7 +2,7 @@
 
 Pure functions over frozen replay data (PL1 §3.3 and §4). Every return figure
 is the neutralised excess of ``environment/replay/style.py``: a daily return
-series regressed on CSI 300 and the replay size factor, the intercept annualised
+series regressed on the arm's benchmark and the replay size factor, the intercept annualised
 over ``TRADING_DAYS_PER_YEAR``. The inputs are the daily series a
 ``style_analysis.json`` sidecar stores, sliced by ``YYYYMMDD`` dates, so the
 forward and Held-out slices of one continuous replay are read from one sidecar.
@@ -12,7 +12,7 @@ zero-skill panel composite the host drew from the strategy's own realized book
 (``environment/replay/null_control.py``). What zero skill earns in an account's
 own shape is a property of the window and the pool -- between -4 and +8 %/yr
 across the measured shapes -- so grading the strategy's own series grades that
-and not the strategy. Tracking error against CSI 300 and the market beta are
+and not the strategy. Tracking error against that benchmark and the market beta are
 read off the strategy's own series, where a tracking mandate limits them. A
 sidecar written before replays carried a panel has none, and its statistics
 keep their former meaning: they are the strategy's own, and ``series`` says so.
@@ -126,7 +126,7 @@ def _strategy_returns(
 def _regression_rows(
     analysis: Mapping[str, object], start: str, end: str
 ) -> np.ndarray:
-    """``(strategy, CSI 300, size)`` rows of the slice, joined exactly as
+    """``(strategy, benchmark, size)`` rows of the slice, joined exactly as
     ``style.window_neutralized_excess`` joins them."""
 
     benchmark = dict(_series_pairs(analysis.get("benchmark_daily")))
@@ -156,7 +156,7 @@ def _fit(rows: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     s2y = (size * y).sum(axis=-1)
     determinant = s11 * s22 - s12 * s12
     if not np.all(determinant > 0):
-        raise ValueError("CSI 300 and size factor are collinear in the slice")
+        raise ValueError("benchmark and size factor are collinear in the slice")
     market_beta = (s22 * s1y - s12 * s2y) / determinant
     size_beta = (s11 * s2y - s12 * s1y) / determinant
     intercept = means[..., 0] - market_beta * means[..., 1] - size_beta * means[..., 2]
@@ -167,7 +167,7 @@ def _measured(
     analysis: Mapping[str, object], start: str, end: str
 ) -> tuple[dict[str, Any], np.ndarray, np.ndarray]:
     """:func:`neutralized_statistics` of a span, with its regression rows and
-    daily neutralised series (strategy − β·CSI 300 − s·size, intercept included)."""
+    daily neutralised series (strategy − β·benchmark − s·size, intercept included)."""
 
     excess = window_neutralized_excess(analysis, start=start, end=end)
     if excess is None:
@@ -226,7 +226,7 @@ def _mandate(
     beta_min: float | None,
     beta_max: float | None,
 ) -> tuple[dict[str, object], list[str]]:
-    """The strategy's own tracking error and beta against CSI 300 over a span,
+    """The strategy's own tracking error and beta against its benchmark over a span,
     and which limits of a tracking mandate they break (none when no cap is set:
     the two figures are then reported, not graded)."""
 

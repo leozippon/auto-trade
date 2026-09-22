@@ -1,4 +1,4 @@
-"""One replay result as a daily curve: cumulative return, CSI 300, exposure.
+"""One replay result as a daily curve: cumulative return, benchmark, exposure.
 
 The research console draws an experiment's result through these functions, and
 a Paper book copies its source experiment's curve through the same ones when it
@@ -73,7 +73,7 @@ def result_exposures(payload: dict[str, object]) -> list[tuple[str, float]]:
 
 
 def benchmark_returns(result_file: Path) -> list[tuple[str, float]]:
-    """CSI 300 daily returns from the result's own style sidecar."""
+    """Benchmark daily returns from the result's own style sidecar."""
 
     sidecar = read_result(Path(result_file).parent / STYLE_ARTIFACT_NAME)
     rows: dict[str, float] = {}
@@ -83,6 +83,19 @@ def benchmark_returns(result_file: Path) -> list[tuple[str, float]]:
             if value is not None:
                 rows.setdefault(str(item[0]), value)
     return sorted(rows.items())
+
+
+def benchmark_label(result_file: Path) -> str:
+    """Which benchmark this result was graded against, from its own sidecar.
+
+    The sidecar records the arm's ``benchmark_index``; a result written before
+    the parameter existed carries the default, which is what those arms ran on.
+    """
+
+    sidecar = read_result(Path(result_file).parent / STYLE_ARTIFACT_NAME)
+    benchmark = sidecar.get("benchmark")
+    label = benchmark.get("label") if isinstance(benchmark, dict) else None
+    return str(label) if label else BENCHMARK_LABEL
 
 
 def curve_entry(key: str, label: str, rows: list[tuple[str, float]]) -> dict[str, object]:
@@ -107,8 +120,8 @@ def curve_entry(key: str, label: str, rows: list[tuple[str, float]]) -> dict[str
 
 
 def result_curve(result_file: Path) -> dict[str, object]:
-    """The strategy's cumulative curve, CSI 300 on the strategy's own days so
-    both start at zero together, and the daily position weight."""
+    """The strategy's cumulative curve, its benchmark on the strategy's own days
+    so both start at zero together, and the daily position weight."""
 
     payload = read_result(result_file)
     returns = result_returns(payload)
@@ -117,7 +130,11 @@ def result_curve(result_file: Path) -> dict[str, object]:
     exposure = result_exposures(payload)
     return {
         "series": [curve_entry("strategy", STRATEGY_LABEL, returns)] if returns else [],
-        "benchmark": curve_entry("benchmark", BENCHMARK_LABEL, benchmark) if benchmark else None,
+        "benchmark": (
+            curve_entry("benchmark", benchmark_label(result_file), benchmark)
+            if benchmark
+            else None
+        ),
         "exposure": {
             "strategy": {
                 "dates": [day for day, _value in exposure],
@@ -131,6 +148,7 @@ def result_curve(result_file: Path) -> dict[str, object]:
 
 __all__ = [
     "STRATEGY_LABEL",
+    "benchmark_label",
     "benchmark_returns",
     "curve_entry",
     "read_result",

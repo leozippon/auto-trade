@@ -330,6 +330,7 @@ class RollingExperimentPipeline:
                     max_llm_calls=int(budgets["max_llm_calls"]),
                     deadline_seconds=budgets["deadline_seconds"],
                     deadline_grace_seconds=budgets["deadline_grace_seconds"],
+                    benchmark_index=self.config.benchmark_index,
                     directive=str(context.get("directive") or ""),
                     sandbox_gpu_count=_optional_gpu_count(context.get("sandbox_gpu_count")),
                     acceptance_rules=self.config.acceptance.to_record(),

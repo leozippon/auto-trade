@@ -2240,13 +2240,113 @@ def test_a_span_of_slots_is_one_book_equal_to_one_long_slot(tmp_path: Path) -> N
     ]
     assert "preceding_replay_slots" not in contracts[0]
     assert contracts[1]["preceding_replay_slots"] == [slots["a"].name]
-
     style = [
         json.loads((Path(result.result_ref).parent / "style_analysis.json").read_text(encoding="utf-8"))
         for result in (chain, single)
     ]
     assert style[0]["benchmark_daily"] == style[1]["benchmark_daily"]
     assert len(style[0]["benchmark_daily"]) == 4
+
+
+def _append_macro(path: Path, rows: list[dict[str, object]]) -> None:
+    frame = pd.read_parquet(path)
+    pd.concat([frame, pd.DataFrame(rows)], ignore_index=True).to_parquet(path, index=False)
+
+
+def _mount_second_index(
+    snapshot: Path, slots: tuple[Path, ...], *, pct_chg: float, members: tuple[str, ...]
+) -> None:
+    """Add a second benchmark index to the span's macro tables.
+
+    Its ``index_daily`` bars ride in every replay slot beside 000300.SH's, and
+    its one ``index_weight`` cross-section in the decision view, which is where
+    a real span carries the sections dated before its anchor. The other index
+    keeps its bars and gets no cross-section, so which of the two a replay
+    reads is observable in both legs.
+    """
+
+    for slot in slots:
+        path = slot / "macro.parquet"
+        _append_macro(
+            path,
+            [
+                {
+                    "dataset": "index_daily", "ts_code": "000905.SH", "trade_date": day,
+                    "pct_chg": pct_chg, "available_at": _stamp(day, "23:59:59"),
+                }
+                for day in sorted(set(pd.read_parquet(path)["trade_date"].astype(str)))
+            ],
+        )
+    chmod_tree(snapshot, file_mode=0o644, dir_mode=0o755)
+    _append_macro(
+        snapshot / "macro.parquet",
+        [
+            {
+                "dataset": "index_weight", "index_code": "000905.SH", "con_code": code,
+                "trade_date": "20231229", "available_at": _stamp("20231229", "23:59:59"),
+            }
+            for code in members
+        ],
+    )
+    chmod_tree(snapshot, file_mode=0o444, dir_mode=0o555)
+
+
+def test_an_arm_replays_grades_and_records_its_own_benchmark_index(tmp_path: Path) -> None:
+    """``benchmark_index`` keys the benchmark series, the panel and the record.
+
+    The same slots, the same revision, two arms: the default one is measured
+    against CSI 300 and its panel falls back to the float-cap decile because
+    CSI 300 has no cross-section here, while the CSI 500 arm regresses on the
+    000905.SH series and draws its zero-skill replacements from 000905.SH
+    membership. Both results carry the index they were graded against, so
+    neither can be read without knowing its benchmark.
+    """
+
+    snapshot, slots = _write_span_release(tmp_path)
+    _mount_second_index(
+        snapshot,
+        (slots["a"], slots["b"], slots["ab"]),
+        pct_chg=-1.25,
+        members=("000001.SZ", "000002.SZ"),
+    )
+    revision = _span_revision(tmp_path)
+    request = _span_request(snapshot, slots["ab"], revision=revision)
+
+    def analysis_of(result) -> dict:
+        return json.loads(
+            (Path(result.result_ref).parent / "style_analysis.json").read_text(encoding="utf-8")
+        )
+
+    csi500 = PITDailyEvaluationBackend(
+        tmp_path / "results_csi500", execution_mode="trusted", benchmark_index="000905.SH"
+    ).evaluate(request)
+    default = PITDailyEvaluationBackend(
+        tmp_path / "results_default", execution_mode="trusted"
+    ).evaluate(request)
+
+    graded, plain = analysis_of(csi500), analysis_of(default)
+    assert graded["benchmark"] == {"ts_code": "000905.SH", "label": "中证500"}
+    assert plain["benchmark"] == {"ts_code": "000300.SH", "label": "沪深300"}
+    # The benchmark leg is the arm's own series, not the other index's.
+    assert {value for _day, value in graded["benchmark_daily"]} == {-0.0125}
+    assert {value for _day, value in plain["benchmark_daily"]} == {0.005}
+    assert "中证500" in graded["neutralized_excess"]["method"]
+    assert "沪深300" in plain["neutralized_excess"]["method"]
+    # The panel draws replacements from the arm's own membership; the default
+    # arm's index has no cross-section here, so it falls back to the decile.
+    assert graded["panel"]["matched"] == "index_membership+affordability"
+    assert plain["panel"]["matched"] == "circ_mv_decile+affordability"
+    # The result record itself names the benchmark beside its figures.
+    record = json.loads(Path(csi500.result_ref).read_text(encoding="utf-8"))
+    benchmark = record["stats"]["benchmark"]
+    assert (benchmark["ts_code"], benchmark["label"]) == ("000905.SH", "中证500")
+
+
+def test_an_unknown_benchmark_index_never_reaches_a_replay(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="399905.SZ"):
+        PITDailyEvaluationBackend(
+            tmp_path / "results", execution_mode="trusted", benchmark_index="399905.SZ"
+        )
 
 
 def test_a_late_opening_window_never_publishes_the_spans_parts(tmp_path: Path) -> None:

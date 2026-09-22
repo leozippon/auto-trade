@@ -148,6 +148,7 @@ def _research_prompt(
             input_window_start=_months_before(geometry.research_end, rolling.window_months),
             decision_time=geometry.research_decision_time.isoformat(),
         ),
+        "benchmark_index": rolling.benchmark_index,
         "snapshot_config": context.options.snapshot_config.to_record(),
         "start": start_record(),
         "arm": arm_record(()),

@@ -52,7 +52,7 @@ const REASON_LABELS = {
   freeze_information_ratio_below_threshold: "研究期主动 IR",
   freeze_too_few_positive_years: "主动超额为正的研究年数",
   freeze_active_drawdown_exceeded: "研究期主动回撤",
-  freeze_tracking_error_above_cap: "研究期对沪深300跟踪误差",
+  freeze_tracking_error_above_cap: "研究期对基准指数跟踪误差",
   freeze_beta_outside_band: "研究期市场 β",
   freeze_unmeasurable: "研究期统计可算",
   forward_strategy_error: "前推期策略无报错",
@@ -64,7 +64,7 @@ const REASON_LABELS = {
   forward_not_positive_at_cost_stress: (t) => `前推滑点 ×${t.cost_stress_multiplier ?? "—"} 后超额`,
   forward_too_few_round_trips: "前推回合数",
   forward_exposure_below_floor: "前推平均仓位",
-  forward_tracking_error_above_cap: "前推对沪深300跟踪误差",
+  forward_tracking_error_above_cap: "前推对基准指数跟踪误差",
   forward_beta_outside_band: "前推市场 β",
   heldout_excess_below_tolerance: "Held-out 超额",
   heldout_max_drawdown_exceeded: "Held-out 回撤",
@@ -85,9 +85,9 @@ const DSR_TITLE = "去膨胀夏普概率（DSR）：按本臂试验数折减后�
 const TRIALS_TITLE = "DSR 据以折减的试验数：本臂验证过的不同策略版本";
 // The three neutralised figures the panels draw side by side, as
 // pipelines/verdict.py measures them: the excess is the intercept of the daily
-// regression on 沪深300 and the size factor, the tracking error is that
+// regression on the arm's benchmark index and the size factor, the tracking error is that
 // regression's residual standard deviation annualised, and IR is their ratio.
-const NEUTRALIZED_EXCESS_TITLE = "剔除沪深300与规模暴露后的年化超额";
+const NEUTRALIZED_EXCESS_TITLE = "剔除基准指数与规模暴露后的年化超额";
 const TRACKING_ERROR_TITLE = "中性化残差收益的年化标准差";
 const IR_TITLE = "中性化超额 ÷ 残差跟踪误差";
 // How the forward bound is drawn (verdict.py `_bootstrap_lower_bound`).
@@ -5322,7 +5322,7 @@ function kvRow(key, value) {
 
 /* Per July-June year breakdown of one replay (stats.sub_windows): the same
    figures as the whole window, one row per year. "部分" marks a year the
-   window does not span end to end; 超额 is against 沪深300. */
+   window does not span end to end; 超额 is against the arm's benchmark. */
 function subWindowSection(title, rows) {
   if (!Array.isArray(rows) || !rows.length) return null;
   return el(
@@ -5333,7 +5333,7 @@ function subWindowSection(title, rows) {
       [
         { label: "年度" },
         { label: "收益", num: true, title: "年度开盘权益起算的区间收益" },
-        { label: "超额", num: true, title: "相对沪深300的超额收益" },
+        { label: "超额", num: true, title: "相对本臂基准指数的超额收益" },
         { label: "Sharpe", num: true, title: "年度内日收益的年化 Sharpe" },
         { label: "回撤", num: true, title: "年度内峰谷回撤" },
         { label: "换手", num: true, title: "成交名义额 / 初始资金" },
@@ -5361,7 +5361,7 @@ function subWindowSection(title, rows) {
   );
 }
 
-/* Barra-lite style validation card: CSI300 alpha/beta regression + holdings
+/* Barra-lite style validation card: benchmark alpha/beta regression + holdings
    style tilts (signed percentile deviation, [-1,1]) + SW industry weights. */
 function styleCard(expId, result) {
   const host = el(
@@ -5384,7 +5384,12 @@ function styleCard(expId, result) {
       const reg = payload.benchmark_regression || {};
       const style = payload.style || {};
       const tiles = presentTiles([
-        { label: "β（vs 沪深300）", value: reg.beta, fmt: fmtSharpe },
+        {
+          // The arm's own benchmark, as its sidecar recorded it.
+          label: `β（vs ${payload.benchmark?.label || "基准"}）`,
+          value: reg.beta,
+          fmt: fmtSharpe,
+        },
         { label: "年化 α", value: reg.alpha_annualized, fmt: fmtPct, signed: true },
         { label: "R²", value: reg.r2, fmt: fmtSharpe },
         { label: "样本天数", value: reg.n_days, fmt: String },
@@ -5463,17 +5468,17 @@ function styleCard(expId, result) {
 /* Why a style figure is absent, as a label on the chip and the full reason
    in its tooltip (environment/replay/style.py). */
 const STYLE_REASON_LABELS = {
-  benchmark_unavailable: "无同窗沪深300",
+  benchmark_unavailable: "无同窗基准指数",
   insufficient_overlapping_days: "重叠交易日不足 8 天",
-  benchmark_variance_zero: "沪深300 无波动",
+  benchmark_variance_zero: "基准指数无波动",
   style_columns_unavailable: "缺市值 / PB / 换手截面",
   no_holdings: "无持仓",
   no_valued_holdings: "持仓无收盘价",
 };
 const STYLE_REASON_TITLES = {
-  benchmark_unavailable: "回放槽中没有可用的沪深300同窗数据，基准回归为空",
-  insufficient_overlapping_days: "与沪深300重叠的交易日不足 8 天，β、α 与 R² 不计算",
-  benchmark_variance_zero: "同窗沪深300收益没有可回归的波动，β、α 与 R² 不计算",
+  benchmark_unavailable: "回放槽中没有可用的基准指数同窗数据，基准回归为空",
+  insufficient_overlapping_days: "与基准指数重叠的交易日不足 8 天，β、α 与 R² 不计算",
+  benchmark_variance_zero: "同窗基准指数收益没有可回归的波动，β、α 与 R² 不计算",
   style_columns_unavailable: "回放槽缺少市值、PB 或换手截面，风格暴露为空",
   no_holdings: "该回放没有持仓，风格暴露为空",
   no_valued_holdings: "该回放的持仓没有可用收盘价，风格暴露为空",

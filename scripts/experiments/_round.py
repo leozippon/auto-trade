@@ -161,6 +161,7 @@ ROUND_REPORT_KEYS: tuple[str, ...] = (
     "forward_end",
     "heldout_end",
     "pit_views_seed",
+    "benchmark_index",
     "window_months",
     "include_fundamentals",
     "fundamental_datasets",

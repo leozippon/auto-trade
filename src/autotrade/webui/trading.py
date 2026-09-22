@@ -7,7 +7,7 @@ page reads it through six projections, each from the book's own files:
 its order sheet), ``book_payload`` (identity, ``book.json``),
 ``signal_payload`` (the latest decision's order sheet), ``history_payload``
 (every earlier day's order sheet and fills), ``performance_payload`` (return against
-CSI 300, equity and cash tracks, statistics, and the source experiment's
+the book's benchmark, equity and cash tracks, statistics, and the source experiment's
 out-of-sample curve the book copied at creation) and ``snapshot_payload``
 (account and positions). ``health_payload`` is the external probe over every book.
 
@@ -17,7 +17,7 @@ Redaction is whitelist projection — payloads are assembled from named scalar
 fields only, so nothing the writer happens to add can leak through. Each
 figure is computed once, by the code that already defines it: the order sheet
 by ``paper.orders.order_sheet``, returns and statistics by the replay reducer,
-the CSI 300 series by the style sidecar's slot reader.
+the benchmark series by the style sidecar's slot reader.
 
 Timestamps: the Paper engine persists Asia/Shanghai stamps (frozen contract).
 This module is the single normalization boundary for the snapshot clock — a
@@ -35,10 +35,11 @@ from pathlib import Path
 
 import pyarrow as pa
 
+from autotrade.environment.data.contracts import benchmark_index_label
 from autotrade.environment.replay.curve import curve_entry
 from autotrade.environment.replay.stats import ReplayResult, compute_return_stats
 from autotrade.environment.replay.style import (
-    BENCHMARK_LABEL,
+    BENCHMARK_TS_CODE,
     daily_returns_from_curve,
     slot_benchmark,
 )
@@ -320,20 +321,34 @@ def _day_before(yyyymmdd: str) -> str:
     return (date(int(yyyymmdd[:4]), int(yyyymmdd[4:6]), int(yyyymmdd[6:8])) - timedelta(days=1)).strftime("%Y%m%d")
 
 
+def _book_benchmark_index(root: Path) -> str:
+    """The index this book is measured against, from its own record.
+
+    Frozen at creation from the source arm's ``benchmark_index``; a book
+    created before the parameter existed carries none and reads as the
+    default, which is the index those arms ran on.
+    """
+    record, _error = _read_json(root / BOOK_NAME)
+    code = _mapping(record).get("benchmark_index")
+    return str(code) if isinstance(code, str) and code else BENCHMARK_TS_CODE
+
+
 def _benchmark(root: Path) -> tuple[dict[str, float], str | None]:
-    """CSI 300 daily returns from the release the book's latest run pinned:
-    the replay slot of that run, read as the research style sidecar reads it."""
+    """The book's benchmark daily returns from the release its latest run
+    pinned: the replay slot of that run, read as the research style sidecar
+    reads it, keyed on the book's own index."""
     slot = newest_replay_slot(root)
     if slot is None:
         return {}, None
+    index = _book_benchmark_index(root)
     try:
-        daily = slot_benchmark(slot)
+        daily = slot_benchmark(slot, benchmark_index=index)
     except (OSError, ValueError, pa.ArrowException) as exc:  # a damaged cache file degrades the benchmark only
         return {}, f"{type(exc).__name__}: {exc}"
     # A slot that carries no index row at all is a broken read, not an empty
     # book: say so instead of leaving the panel to guess "no data".
     if not daily:
-        return {}, f"replay slot {slot.name} carries no {BENCHMARK_LABEL} rows"
+        return {}, f"replay slot {slot.name} carries no {benchmark_index_label(index)} rows"
     return daily, None
 
 
@@ -379,7 +394,7 @@ def _source_history(root: Path) -> tuple[dict[str, object] | None, str | None]:
 
 
 def performance_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str, object]:
-    """The book's return against CSI 300 over the same settled days, its
+    """The book's return against its benchmark over the same settled days, its
     end-of-day equity and cash on those days, the replay statistics, and the
     source experiment's out-of-sample curve the book's own days continue."""
     root = book_dir(repo_root, book, env)
@@ -410,7 +425,11 @@ def performance_payload(repo_root: Path, book: str, env: str = "paper") -> dict[
     # already a segment and the benchmark starts at zero beside it.
     anchor = _day_before(str(curve[0]["trade_date"]))
     benchmark = (
-        curve_entry("benchmark", BENCHMARK_LABEL, [(anchor, 0.0), *benchmark_rows])
+        curve_entry(
+            "benchmark",
+            benchmark_index_label(_book_benchmark_index(root)),
+            [(anchor, 0.0), *benchmark_rows],
+        )
         if benchmark_rows
         else None
     )

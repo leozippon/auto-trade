@@ -29,7 +29,10 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from autotrade.environment.broker import BrokerProfile
-from autotrade.environment.data.contracts import domain_visible_cutoff
+from autotrade.environment.data.contracts import (
+    benchmark_index_label,
+    domain_visible_cutoff,
+)
 from autotrade.environment.data.pit import PITDataStore, to_cn_timestamps
 from autotrade.environment.data.research_release import (
     ResearchRelease,
@@ -59,6 +62,7 @@ from autotrade.environment.replay.stats import (
     finalize_summary_timing,
 )
 from autotrade.environment.replay.style import (
+    BENCHMARK_TS_CODE,
     benchmark_summary_block,
     replay_style_analysis,
     slot_benchmark,
@@ -758,11 +762,18 @@ class PITDailyEvaluationBackend:
         nl_config: NLConfig | None = None,
         nl_failure_policy: str = "return_error_with_audit",
         max_intraday_row_group_rows: int = 2_000_000,
+        benchmark_index: str = BENCHMARK_TS_CODE,
     ) -> None:
         if execution_mode not in {"sandbox", "trusted"}:
             raise ValueError("execution_mode must be sandbox or trusted")
         self.results_root = Path(results_root).resolve()
         self.execution_mode = execution_mode
+        # The arm's benchmark, for every replay this backend runs: the series
+        # the attribution and the verdict regress on, and the membership the
+        # zero-skill panel draws replacements from. Refused here if the lake
+        # does not carry it, so a wrong code cannot reach a replay.
+        benchmark_index_label(benchmark_index)
+        self.benchmark_index = benchmark_index
         self.sandbox = sandbox or SandboxConfig()
         self.nl_llm = nl_llm
         self.nl_config = nl_config or NLConfig()
@@ -984,7 +995,7 @@ class PITDailyEvaluationBackend:
                     panel = run_null_control(
                         replay,
                         daily,
-                        slot_benchmark(replay_dirs),
+                        slot_benchmark(replay_dirs, benchmark_index=self.benchmark_index),
                         request.broker_profile,
                         request.schedule,
                         seed=null_control_seed(
@@ -992,7 +1003,10 @@ class PITDailyEvaluationBackend:
                             "panel",
                         ),
                         corporate_actions=corporate_actions,
-                        membership=slot_membership((snapshot_dir, *replay_dirs)),
+                        membership=slot_membership(
+                            (snapshot_dir, *replay_dirs),
+                            benchmark_index=self.benchmark_index,
+                        ),
                         panel=True,
                     )
             with timer.phase("style_analysis"):
@@ -1003,6 +1017,7 @@ class PITDailyEvaluationBackend:
                     snapshot_dir=snapshot_dir,
                     mode=request.mode,
                     panel=panel,
+                    benchmark_index=self.benchmark_index,
                 )
             summary = record.get("stats")
             if not isinstance(summary, dict):
@@ -1069,9 +1084,10 @@ class PITDailyEvaluationBackend:
             decision_dir, replay_dirs = _result_replay_slots(result_json)
             record = _read_json(result_json)
             daily = _span_daily(replay_dirs, start, end)
-            benchmark = slot_benchmark(replay_dirs)
+            benchmark = slot_benchmark(replay_dirs, benchmark_index=self.benchmark_index)
             membership = slot_membership(
-                replay_dirs if decision_dir is None else (decision_dir, *replay_dirs)
+                replay_dirs if decision_dir is None else (decision_dir, *replay_dirs),
+                benchmark_index=self.benchmark_index,
             )
             corporate_actions = _span_corporate_actions(
                 replay_dirs, [load_snapshot_manifest(path) for path in replay_dirs]
