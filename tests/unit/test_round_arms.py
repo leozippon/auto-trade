@@ -608,6 +608,7 @@ def test_mounting_index_weight_leaves_every_other_round_byte_for_byte() -> None:
         "create_round_20260921b",
         "create_round_20260921c",
         "create_round_20260921d",
+        "create_round_20260922",
     }, sorted(carrying)
     base = records["create_round_20260920"]
     for name in sorted(carrying):
