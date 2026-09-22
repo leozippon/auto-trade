@@ -44,10 +44,13 @@ note has to defend.
 
 Visibility, per dataset, from the snapshot's own rules (`pit-field-map.md`):
 `limit_list_d` stamps 16:00 of its own trade date, `top_list` and `top_inst`
-20:00 of theirs, `kpl_list` 08:30 of the NEXT day. All four are therefore
-readable at the next morning's 08:30 decision -- `kpl_list` exactly on the
-boundary, which is why round 0 has to confirm the run fact `inference_time` is
-08:30 before believing this block's most recent day.
+20:00 of theirs, so all three are readable at the next morning's 08:30
+decision. `kpl_list` stamps 08:30 of the NEXT day, and the as-of view also
+cuts each event dataset at its refresh job: `kpl_list` lands with the 08:50
+pre-open backfill, so a 08:30 decision sees only what the previous evening's
+23:35 refresh held. Its newest visible list is therefore T-2 at a
+Tuesday-to-Friday decision and the prior Friday's at a Monday decision -- one
+day more lag than the stamp suggests, the same as in live trading.
 
 Duplicate business keys. `top_list` and `top_inst` can carry several rows for
 one (name, day): the same day is listed under several reasons, and one reason

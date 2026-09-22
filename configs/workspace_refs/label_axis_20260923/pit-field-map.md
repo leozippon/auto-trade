@@ -59,7 +59,7 @@ members = sec[sec["trade_date"] == latest]            # con_code 就是成分的
 | `daily` | `vol` / `amount` | **股** / **元** | 同上 | Alpha158 的量与成交均价（`amount/vol`，复权因子在比值里约掉） |
 | `macro.index_daily` | `open` / `close` | 指数点 | 有，`contract_1730_from:trade_date` | 三种 timing 的基准腿、β 的回归自变量 |
 | `macro.index_weight` | `weight` | **百分数** | 有，同上 | 成员资格与覆盖度报告 |
-| `universe` | `name` / `l1_name` | — | 无列，整表按决策日口径 | ST/退过滤、`l_ind` 的行业均值、P2 |
+| `universe` | `name` / `l1_name` | — | 无列，整表按回放槽锚点口径（槽内不变） | ST/退过滤、`l_ind` 的行业均值、P2 |
 
 本包**不读** `events` 与 `fundamentals`：毕业谱系的 `vipf2` / `mfflow` / `newage` 三组点时列不在本包里，加回它们就是改主模型的特征族，`families.md` 禁止。把任何新数据域拉进**标签**同样被点名禁止（那是换家族，不是标签工程）。
 
@@ -91,7 +91,7 @@ daily = pd.read_parquet(context.asof_dir + "/daily", columns=[...],
 会话挂的 `snapshot`（`/mnt/snapshot`、`context.snapshot_dir`）是**研究期末那一天**的决策视图，只有这一个口径：`universe.parquet` 里的 `name`、ST 状态、`l1_name` 与在册名单都是那一天的，不是历史上每一天的。
 
 - **不要拿它离线重建历史某一天的决策**：那会把后来的更名、ST、退市与行业重分类灌回过去（幸存者偏差），离线读数被系统性抬高。已有实测：其余全部不变、只把这一个文件换成当天口径，重建出的首日持仓与宿主回放的一致度就从 5/12 变成 12/12，而用期末口径的那次离线年化被抬高了约 13 个百分点。
-- 宿主回放不受影响：回放里 `asof_dir/universe` 用的是该折决策日的口径，并按回放槽的锚点逐槽换版（槽内不变，槽内新上市的代码在该槽里没有行）。
+- 宿主回放逐槽换版，但槽内不变：回放里 `asof_dir/universe` 是该回放槽锚点那一天的口径（四年研究回放按年分槽），槽内的上市、更名、ST 与行业重分类要到下一个槽的锚点才可见，槽内新上市的代码在该槽里没有行。实测四年回放期末月仍有 107 个在交易的代码没有 universe 行（`name` 为空、行业落在 `未分类`），所以回放里按名称或行业做的过滤也只准到槽锚点那一天。
 - `/mnt/tools/screen.py` 扫全历史时读的也是这一个口径，名称与行业相关的筛选结果同样不是当时的口径。
 - 离线重建只能用来查构造完整性与相对量级，**不作绝对水平的判断**。
 

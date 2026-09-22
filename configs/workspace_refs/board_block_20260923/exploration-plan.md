@@ -9,7 +9,7 @@
 用 `shell` 在研究期末的决策视图上跑，不启动回放。任一条不合格就在第 1 轮的 `hypothesis` 里声明，不要硬凑。
 
 1. **运行事实核对（最先做的一件事）**：`broker_replay.initial_cash`、**`benchmark_index`**、`acceptance_rules` 里有没有跟踪授权及其上限与区间、两个回撤上限、`budgets`（含 `strategy_fit_timeout_seconds`）与 `max_replay_years`。本包按 100 万元不带授权写成，50 席；不符就改登记，不要静默沿用。`benchmark_index` 与 `lib/index.py` 的 `INDEX_CODE` 不一致时**改常量去对齐运行事实**。
-2. **数据核对**：`index_weight`、`index_daily` 在不在；**`events` 里有没有 `limit_list_d`、`kpl_list`、`top_list`、`top_inst` 这四张**；`universe` 带不带 `l1_name`；**以及 `inference_time` 是不是 08:30**（`kpl_list` 的可见时点正好落在这个边界上，`pit-field-map.md`）。少一张表就是少一组列，这时**不要用剩下的凑一块继续跑**——那是另一个登记。
+2. **数据核对**：`index_weight`、`index_daily` 在不在；**`events` 里有没有 `limit_list_d`、`kpl_list`、`top_list`、`top_inst` 这四张**；`universe` 带不带 `l1_name`；**以及 `kpl_list` 的滞后**：在一个周二到周五的决策日，视图里最新的 `kpl_list` 行应是 T-2，在一个周一决策日应是上周五（事件视图按它 08:50 的落地作业截断，`pit-field-map.md`），读到别的先查清再往下走。少一张表就是少一组列，这时**不要用剩下的凑一块继续跑**——那是另一个登记。
 3. **块的非零占比普查（本轮特有，第一优先，也是本臂最重要的一件事）**：逐研究年报三个数——逐日口径下成分里当天有 `limit_list_d` / `top_list`∪`top_inst` / `kpl_list` 行的比例；60 日窗口下至少有过一行的比例；整块 `board_any_x` 为 1 的比例。参考读数在 `families.md` 的表里（逐日 0.2–1.2 % / 0.0–0.4 % / 2.7–6.3 %，60 日窗口 12–35 % / 8–19 % / 35–57 %，起步包实测整块非零 28.4–40.4 %）。**逐年摆动很大是已知的**，所以这张表要先有，再读任何消融结论；读到与参考值明显不同就先查是不是表没挂上。
 4. **账户算术表（直接对着 P3）**：用本臂的资金，在 30 / 50 / 80 席上算座位金额、买得起的成分占比、5 元最低佣金的 bp/边、一次往返总成本，以及在 `cost_stress_multiplier` 下 α 要付掉多少（公式在 `references/capital-arithmetic.md`）。
 5. **换手实测（本轮特有，P3 的硬要求）**：月度复核是本轮登记的构造选择，而同谱系上一轮在周度复核下实测 14.2×/年、越过 12× 上限。**用 `smoke_backtest` 在研究期靠后的槽上跑一段跨过至少两次复核的窗口，读 `turnover` 与 `fees_paid`，扣掉首日建仓再年化**，写进结果笔记。不得引用包里的估算。
