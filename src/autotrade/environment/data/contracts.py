@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -190,6 +190,11 @@ INTRADAY_FLOW_CONTRACT = DatasetContract(
     available_time=CLOSE_PUBLISHED_TIME,
     pit_notes="Derived from the trade date's own minute bars; lands with the evening minute job, so rows roll in from the next pre-open like daily.",
 )
+
+# The second minute-derived dataset (``intraday_stats.py``: realized moments and
+# the intraday return/volume profile) is reduced from the same session by the
+# same build, so it takes the flow contract rather than restating it.
+INTRADAY_STATS_CONTRACT = replace(INTRADAY_FLOW_CONTRACT, dataset="intraday_stats")
 
 
 def default_tushare_contracts() -> dict[str, DatasetContract]:
@@ -404,10 +409,10 @@ EVENT_DATASET_REFRESH_NODES: dict[str, tuple[str, ...]] = {
     "limit_cpt_list": (EVENING_NODE, "cn_preopen_board_backfill_0850"),
     # limit_list_ths / ths_hot / dc_hot / hm_detail / hm_list land in the
     # evening window only — the default node is already correct for them.
-    # intraday_flow keeps the default node too: it is derived from the minute
-    # partitions cn_evening_full lands, and its own build runs inside that
-    # night's window (ops/cron/tushare_update.cron), so its rows become
-    # queryable on the same boundary as the minutes they summarise.
+    # intraday_flow and intraday_stats keep the default node too: they are
+    # derived from the minute partitions cn_evening_full lands, and their build
+    # runs inside that night's window (ops/cron/tushare_update.cron), so their
+    # rows become queryable on the same boundary as the minutes they summarise.
     # Ann-date disclosure tables land via their own natural-day job (weekend
     # announcements become visible the following pre-open, matching live).
     "top10_holders": ("cn_nightly_disclosure_full",),

@@ -39,7 +39,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from autotrade.environment.data.contracts import INTRADAY_FLOW_CONTRACT
+from autotrade.environment.data.contracts import INTRADAY_FLOW_CONTRACT, DatasetContract
 
 INTRADAY_FLOW_DATASET = "intraday_flow"
 MINUTE_DATASET = "stk_mins_1min_by_date"
@@ -121,16 +121,15 @@ def aggregate_intraday_flow(minutes: pd.DataFrame) -> pd.DataFrame:
     out["sealed_limit"] = out["zero_share"] >= SEALED_LIMIT_ZERO_SHARE
     out["nret"] = out["nret"].astype("int32")
     out = out.sort_values(["ts_code", "trade_date"], kind="stable").reset_index(drop=True)
-    return stamp_available_at(out)[list(INTRADAY_FLOW_COLUMNS)]
+    return stamp_available_at(out, INTRADAY_FLOW_CONTRACT)[list(INTRADAY_FLOW_COLUMNS)]
 
 
-def stamp_available_at(frame: pd.DataFrame) -> pd.DataFrame:
-    """Write the dataset's PIT stamp from :data:`INTRADAY_FLOW_CONTRACT`.
+def stamp_available_at(frame: pd.DataFrame, contract: DatasetContract) -> pd.DataFrame:
+    """Write a minute-derived dataset's PIT stamp from its ``contract``.
 
     The events domain reads a raw ``available_at`` column, so the contract is
     applied once here at build time and never restated by a reader.
     """
-    contract = INTRADAY_FLOW_CONTRACT
     clock = contract.available_time
     dates = pd.to_datetime(frame[contract.partition_key].astype(str), format="%Y%m%d")
     stamped = dates + pd.Timedelta(

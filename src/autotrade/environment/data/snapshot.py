@@ -229,6 +229,11 @@ SELECTABLE_DATASETS: dict[str, tuple[str, ...]] = {
         # default: it duplicates no vendor series but only pays for itself in a
         # strategy that actually models order flow.
         "intraday_flow",
+        # its sibling from the same minute bars and build: realized variance,
+        # skewness, kurtosis and signed jumps plus the open/mid/close return
+        # and volume profile of one stock-day. Opt-in likewise: it pays for
+        # itself only in a strategy that models intraday dynamics.
+        "intraday_stats",
         # shareholder structure and share supply
         "stk_holdernumber",
         "stk_holdertrade",

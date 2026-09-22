@@ -375,7 +375,7 @@
       "skip_if_already_ok": false
     },
     "manual_intraday_minutes": {
-      "description": "Manual (not scheduled): land the 1-minute by-date layer on its own, for every trading day in the window whose partition is missing or invalid. stk_mins enforces a per-token daily request quota (answer: '您今日stk_min额定额度已用完，请明日再试'), so the downloader asks for STK_MINS_BATCH_CODES codes per request and stops on the quota answer instead of retrying it; a stopped run keeps every day it wrote and the next run resumes. Run scripts/data/build_intraday_flow.py after it.",
+      "description": "Manual (not scheduled): land the 1-minute by-date layer on its own, for every trading day in the window whose partition is missing or invalid. stk_mins enforces a per-token daily request quota (answer: '您今日stk_min额定额度已用完，请明日再试'), so the downloader asks for STK_MINS_BATCH_CODES codes per request and stops on the quota answer instead of retrying it; a stopped run keeps every day it wrote and the next run resumes. Run scripts/data/build_minute_derived.py after it.",
       "operation": "intraday_by_date",
       "end_date_offset_days": 1,
       "end_date_mode": "sse_open_on_or_before",
@@ -957,10 +957,19 @@
     {
       "dataset": "intraday_flow",
       "derived_from": "stk_mins_1min_by_date",
-      "builder": "scripts/data/build_intraday_flow.py",
+      "builder": "scripts/data/build_minute_derived.py",
       "domain": "event_flow",
       "frequency": "trade_date",
       "official_update": "日频订单流（派生）；本地派生表，没有供应商接口和官方入库时刻；构建在分钟数据落地之后运行。",
+      "cron_policy": "derived_build_after_manual_minute_job"
+    },
+    {
+      "dataset": "intraday_stats",
+      "derived_from": "stk_mins_1min_by_date",
+      "builder": "scripts/data/build_minute_derived.py",
+      "domain": "event_flow",
+      "frequency": "trade_date",
+      "official_update": "日内收益统计（派生）；本地派生表，没有供应商接口和官方入库时刻；与日频订单流同一构建，在分钟数据落地之后运行。",
       "cron_policy": "derived_build_after_manual_minute_job"
     },
     {

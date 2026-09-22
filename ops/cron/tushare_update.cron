@@ -53,11 +53,12 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 30 2 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_full_audit
 
 # Reduce whatever minute partitions have landed (manual_intraday_minutes) to
-# the derived daily order-flow table (data/raw/intraday_flow). Not a TuShare
-# job: it fetches nothing and only reads the lake, so it is a plain line rather
-# than a runner job. It is incremental (existing trade dates are skipped, a new
-# one costs about a second), so a night without new minutes is a no-op.
-45 2 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/build_intraday_flow.py
+# the derived stock-day tables (data/raw/intraday_flow, data/raw/intraday_stats).
+# Not a TuShare job: it fetches nothing and only reads the lake, so it is a
+# plain line rather than a runner job. It is incremental (existing trade dates
+# are skipped, a new one costs about two seconds), so a night without new
+# minutes is a no-op.
+45 2 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/build_minute_derived.py
 
 # Rebuild and audit ALL PIT-ready financial event availability partitions
 # after raw status refresh. Snapshot construction uses this layer to enforce

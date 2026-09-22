@@ -392,7 +392,7 @@ class RefreshNodeDriftGuardTest(unittest.TestCase):
             INTRADAY_FLOW_CONTRACT.available_time, REFRESH_NODES[EVENING_NODE].start
         )
         self.assertIn(
-            "scripts/data/build_intraday_flow.py",
+            "scripts/data/build_minute_derived.py",
             CRONTAB.read_text(encoding="utf-8"),
         )
         stamp = INTRADAY_FLOW_CONTRACT.available_at(date(2022, 1, 5))

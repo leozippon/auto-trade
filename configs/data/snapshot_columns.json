@@ -237,6 +237,25 @@
     "ts_code",
     "zero_share"
    ],
+   "intraday_stats": [
+    "available_at",
+    "available_at_rule",
+    "dataset",
+    "n_bars",
+    "ret_close30",
+    "ret_mid",
+    "ret_open30",
+    "rku",
+    "rsk",
+    "rv",
+    "rv_down_share",
+    "sjv",
+    "trade_date",
+    "ts_code",
+    "vol_close30_share",
+    "vol_open30_share",
+    "vwap_dev"
+   ],
    "stk_holdernumber": [
     "ann_date",
     "available_at",

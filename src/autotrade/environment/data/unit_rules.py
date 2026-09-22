@@ -309,6 +309,37 @@ FIELD_RULES: tuple[FieldRule, ...] = (
     FieldRule("events.parquet", "intraday_flow", ("sealed_limit",), semantic="categorical",
               note="True where zero_share >= 0.5: a sealed limit board, whose "
                    "imbalance is a queue artefact rather than order flow"),
+    # Locally derived from the minute lake (intraday_stats.py holds the exact
+    # definitions): 1-minute log returns from the opening price, so variances
+    # are squared decimal returns and the segment returns are decimal fractions.
+    FieldRule("events.parquet", "intraday_stats", ("rv", "sjv"), source_unit="decimal_squared",
+              note="rv = sum of squared 1-minute log returns (0.01^2 = 1e-4); "
+                   "sjv = upside minus downside part of rv"),
+    FieldRule("events.parquet", "intraday_stats", ("rsk", "rku"),
+              source_unit="dimensionless_ratio",
+              note="realized skewness sqrt(N)*sum r^3/rv^1.5 and kurtosis N*sum r^4/rv^2; "
+                   "null when rv == 0"),
+    FieldRule("events.parquet", "intraday_stats",
+              ("rv_down_share", "vol_open30_share", "vol_close30_share"),
+              source_unit="dimensionless_ratio",
+              note="downside share of rv (null when rv == 0); volume share of bars "
+                   "09:30-10:00 / 14:31-15:00 in the day's session volume"),
+    FieldRule("events.parquet", "intraday_stats", ("ret_open30", "ret_mid", "ret_close30"),
+              source_unit="decimal",
+              status="verified",
+              evidence="(1+ret_open30)(1+ret_mid)(1+ret_close30) equals daily close/open on 99.03% "
+                       "of the 7,639,286 stock-days built from 20200102-20260821; the rest start "
+                       "from a vendor minute open off the daily open (median 0.25%, p99 2.1%)",
+              note="simple returns open->10:00, 10:00->14:30, 14:30->close"),
+    FieldRule("events.parquet", "intraday_stats", ("vwap_dev",), source_unit="decimal",
+              status="verified",
+              evidence="equals close/(daily amount*10/vol)-1 within 1.1e-7 at the 99.9th "
+                       "percentile over the 20200102-20260821 build",
+              note="close / session VWAP - 1"),
+    FieldRule("events.parquet", "intraday_stats", ("n_bars",), source_unit="count",
+              status="verified",
+              evidence="241 on every one of the 7,639,286 stock-days built from 20200102-20260821",
+              note="session-grid bars present; a complete day has 241"),
     FieldRule("events.parquet", "cyq_perf",
               ("his_low", "his_high", "cost_5pct", "cost_15pct", "cost_50pct",
                "cost_85pct", "cost_95pct", "weight_avg"),
