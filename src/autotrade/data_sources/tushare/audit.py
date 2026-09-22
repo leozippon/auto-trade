@@ -106,7 +106,14 @@ from .common import (
 
 from autotrade.data_quality import build_quality_report, write_quality_report
 from autotrade.environment.data.auction import AuctionCorrectionConfig, market_bucket
-from autotrade.environment.data.units import column_source_units, dataset_rules_records, rules_for
+from autotrade.environment.data.snapshot import SELECTABLE_DATASETS
+from autotrade.environment.data.units import (
+    UnresolvedUnitError,
+    column_source_units,
+    dataset_rules_records,
+    resolve_field,
+    rules_for,
+)
 
 # The one-line summary every audit prints last, and the pattern the cron runner
 # reads it back by (``cron_update.summarize_failure_from_log``, which imports
@@ -1327,6 +1334,49 @@ def audit_daily_cross_coverage(raw_dir: Path, trade_dates: set[str], args: argpa
     add("warning" if stk_limit_details["right_only_rows"] else "info", "stk_limit_vs_daily_coverage", "stk_limit covers A/B shares and funds, so rows can exceed daily", stk_limit_details)
     return all_codes
 
+def audit_snapshot_unit_coverage(raw_dir: Path, file: str, add) -> int:
+    """Every raw column of every SELECTABLE snapshot dataset of ``file`` must
+    classify in the unit registry. Returns the unresolved count.
+
+    The snapshot build unions a dataset's partitions and refuses to publish a
+    view holding a column with no rule (``validate_snapshot_units``), so a
+    column the vendor adds tonight breaks tomorrow morning's build — the Paper
+    book is normally the first to run one. This asks the same resolver, over
+    partition SCHEMAS only (no table is loaded), so the evening audit names the
+    column the night it lands. The scope is every selectable dataset, not the
+    audit's current selection: the registry is fail-closed, so a dataset an
+    experiment may opt into has to stay covered too.
+    """
+
+    unresolved: list[str] = []
+    checked = 0
+    datasets = SELECTABLE_DATASETS[file.removesuffix(".parquet")]
+    for dataset in sorted(datasets):
+        columns: set[str] = set()
+        for path in (raw_dir / dataset).rglob("*.parquet"):
+            columns.update(pq.read_schema(path).names)
+        checked += len(columns)
+        for column in sorted(columns):
+            try:
+                resolve_field(file, dataset, column)
+            except UnresolvedUnitError:
+                unresolved.append(f"{file}:{dataset}:{column}")
+    add(
+        "error" if unresolved else "info",
+        "snapshot_unit_coverage",
+        f"snapshot columns with no unit rule: {', '.join(unresolved[:20])}"
+        if unresolved
+        else f"every raw column of the {file} datasets resolves in the unit registry",
+        {
+            "file": file,
+            "datasets": len(datasets),
+            "columns_checked": checked,
+            "unresolved_columns": unresolved[:50],
+        },
+    )
+    return len(unresolved)
+
+
 def audit_unit_schema(raw_dir: Path, add) -> None:
     daily_schema = latest_parquet_schema(raw_dir, "daily")
     daily_basic_schema = latest_parquet_schema(raw_dir, "daily_basic")
@@ -2114,6 +2164,7 @@ def audit_macro_only(args: argparse.Namespace) -> int:
     datasets = selected_audit_macro_datasets(args)
     audit_integrated_filesystem(raw_dir, datasets, add)
     audit_macro_completeness(raw_dir, args, add)
+    unresolved_columns = audit_snapshot_unit_coverage(raw_dir, "macro.parquet", add)
     report = build_quality_report(
         report_type="macro_context",
         scope={
@@ -2145,7 +2196,7 @@ def audit_macro_only(args: argparse.Namespace) -> int:
     counts = report["finding_counts"]
     status = report["status"]
     write_quality_report(output, report)
-    print(audit_summary_line("macro", status, errors=counts["error"], warnings=counts["warning"], output=output))
+    print(audit_summary_line("macro", status, errors=counts["error"], warnings=counts["warning"], unresolved_columns=unresolved_columns, output=output))
     return 1 if counts["error"] else 0
 
 def expected_event_paths(raw_dir: Path, spec: EventDataset, start_date: str, end_date: str) -> set[Path]:
@@ -2435,6 +2486,7 @@ def audit_event_flow_only(args: argparse.Namespace) -> int:
     if "share_float" in datasets:
         audit_share_float_complete_union(raw_dir, add)
     audit_full_market_coverage(raw_dir, datasets, add)
+    unresolved_columns = audit_snapshot_unit_coverage(raw_dir, "events.parquet", add)
 
     report = build_quality_report(
         report_type="event_flow",
@@ -2463,7 +2515,7 @@ def audit_event_flow_only(args: argparse.Namespace) -> int:
     counts = report["finding_counts"]
     status = report["status"]
     write_quality_report(output, report)
-    print(audit_summary_line("event_flow", status, errors=counts["error"], warnings=counts["warning"], output=output))
+    print(audit_summary_line("event_flow", status, errors=counts["error"], warnings=counts["warning"], unresolved_columns=unresolved_columns, output=output))
     return 1 if counts["error"] else 0
 
 def expected_board_paths(raw_dir: Path, spec: BoardTradingDataset, start_date: str, end_date: str, args: argparse.Namespace) -> set[Path]:
@@ -2725,6 +2777,7 @@ def audit_fundamental_raw(args: argparse.Namespace) -> int:
     audit_integrated_filesystem(raw_dir, datasets, add)
     audit_fundamental_completeness(raw_dir, args, add)
     audit_fundamental_unit_and_pit_semantics(raw_dir, add)
+    unresolved_columns = audit_snapshot_unit_coverage(raw_dir, "fundamentals.parquet", add)
 
     report = build_quality_report(
         report_type="fundamental_raw",
@@ -2756,7 +2809,7 @@ def audit_fundamental_raw(args: argparse.Namespace) -> int:
     counts = report["finding_counts"]
     status = report["status"]
     write_quality_report(output, report)
-    print(audit_summary_line("fundamental_raw", status, errors=counts["error"], warnings=counts["warning"], output=output))
+    print(audit_summary_line("fundamental_raw", status, errors=counts["error"], warnings=counts["warning"], unresolved_columns=unresolved_columns, output=output))
     return 1 if counts["error"] else 0
 
 def audit_intraday_only(args: argparse.Namespace) -> int:

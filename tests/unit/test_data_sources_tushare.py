@@ -6866,6 +6866,78 @@ class FundamentalAuditTest(unittest.TestCase):
         self.assertEqual(keys["details"]["missing_key_column_files"], 1)
 
 
+class SnapshotUnitCoverageAuditTest(unittest.TestCase):
+    """The evening audit, not the next morning's Paper run, is where a column
+    the vendor added is supposed to surface."""
+
+    @staticmethod
+    def _inventory(file: str) -> dict[str, list[str]]:
+        root = Path(__file__).resolve().parents[2]
+        return json.loads(
+            (root / "configs/data/snapshot_columns.json").read_text(encoding="utf-8")
+        )["files"][file]
+
+    def _run(self, raw: Path, file: str) -> tuple[int, dict]:
+        findings: list[dict] = []
+
+        def add(severity, check, message, details=None):
+            findings.append({"severity": severity, "check": check, "message": message, "details": details or {}})
+
+        count = audit.audit_snapshot_unit_coverage(raw, file, add)
+        self.assertEqual(len(findings), 1)
+        return count, findings[0]
+
+    def test_current_vendor_columns_resolve_and_an_added_one_is_an_error(self):
+        inventory = self._inventory("fundamentals.parquet")
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp)
+            for dataset, columns in inventory.items():
+                directory = raw / dataset
+                directory.mkdir(parents=True)
+                pd.DataFrame([{column: "" for column in columns}]).to_parquet(
+                    directory / "ts_code=000001.SZ.parquet", index=False
+                )
+
+            # The real committed column lists of every selectable fundamentals
+            # dataset must classify: this is the condition the snapshot build
+            # enforces, checked here from schemas alone.
+            count, finding = self._run(raw, "fundamentals.parquet")
+            self.assertEqual(count, 0)
+            self.assertEqual(finding["severity"], "info")
+            self.assertEqual(finding["check"], "snapshot_unit_coverage")
+            self.assertEqual(finding["details"]["datasets"], 10)
+            self.assertGreater(finding["details"]["columns_checked"], 300)
+            self.assertEqual(finding["details"]["unresolved_columns"], [])
+            # base_share is the 2026-09-21 vendor addition; it must resolve now.
+            self.assertIn("base_share", inventory["dividend"])
+
+            # Negative path: the next unregistered vendor column is an error
+            # naming itself, the evening its partition lands.
+            pd.DataFrame(
+                [{column: "" for column in [*inventory["dividend"], "base_ratio"]}]
+            ).to_parquet(raw / "dividend" / "ts_code=000002.SZ.parquet", index=False)
+            count, finding = self._run(raw, "fundamentals.parquet")
+            self.assertEqual(count, 1)
+            self.assertEqual(finding["severity"], "error")
+            self.assertIn("fundamentals.parquet:dividend:base_ratio", finding["message"])
+            self.assertEqual(
+                finding["details"]["unresolved_columns"],
+                ["fundamentals.parquet:dividend:base_ratio"],
+            )
+
+    def test_summary_line_carries_the_count_the_job_state_reads_back(self):
+        # The cron runner keeps the head and the integer fields of the summary
+        # line, so the failing job state has to distinguish this from the
+        # standing partition errors of the same audit.
+        line = audit.audit_summary_line(
+            "fundamental_raw", "error", errors=1, warnings=0, unresolved_columns=1, output="x.json"
+        )
+        self.assertEqual(
+            audit.AUDIT_SUMMARY_RE.findall(line),
+            ["fundamental_raw audit status=error errors=1 warnings=0 unresolved_columns=1"],
+        )
+
+
 class UuidCommitIdentityTest(unittest.TestCase):
     """One UUID identity shared by a Parquet footer and its sidecar."""
 
