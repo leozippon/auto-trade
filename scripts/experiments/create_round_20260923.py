@@ -7,6 +7,8 @@ the rounds that mount it cannot drift apart by a typo. Every arm needs it:
 each universe is a decision day's visible index section, and the host's
 zero-skill panel matches its replacements on constituent membership, so an arm
 without the section would be graded against a different floor than it trades.
+One arm, `flow_block`, also selects the events dataset `intraday_flow`, so it
+names its own seed, prebuilt from the same release for exactly that selection.
 Minute data stays unmounted; `include_intraday` keeps the console default
 `False`, which `check_console_defaults` pins for every round.
 
@@ -17,9 +19,9 @@ was the required Alpha158 + LightGBM control (active +4.30 %/yr, active IR
 0.4642, 3/4 years; +1.59 %/yr and 0.18 on another arm). Both readings are below
 the 0.75 freeze bar. The carrier is real and the edge is short, so this round
 holds the carrier fixed and moves one lever per arm: the INFORMATION it reads
-(`board_block`), the LABEL it is asked to predict (`label_axis`), and the INDEX
-whose section it is drawn from (`csi500_shape`). Nothing else differs, which is
-what makes each arm's own control a control.
+(`board_block`, `flow_block`), the LABEL it is asked to predict (`label_axis`),
+and the INDEX whose section it is drawn from (`csi500_shape`). Nothing else
+differs, which is what makes each arm's own control a control.
 
 `benchmark_index` is a create-time parameter as of 6708efb (console default
 `000300.SH`), so it is stated on every arm rather than inherited: the arm that
@@ -73,6 +75,11 @@ Contamination, per arm. Operator-side only.
   evidence, never an in-batch control -- an arm has one `benchmark_index`, and
   a CSI 300 leg inside this arm would be graded against the CSI 500 benchmark
   and panel, which is the mismatch the packs name as forbidden.
+- `flow_block_1m_20260923`. `intraday_flow` has never been selected into any
+  arm's snapshot, so no forward reading exists for it. Minute OFI as a
+  standalone score and vendor money flow as the main signal are closed families
+  the pack forbids reopening; the block is priced only as the increment over
+  `c_base`, and the carrier statement is `board_block`'s.
 
 Usage:
   PYTHONPATH=src ~/miniconda3/envs/quant/bin/python \\
@@ -176,20 +183,29 @@ ARMS: dict[str, dict[str, object]] = {
             "离线登记同一载体在 300 与 500 成分上的秩 IC 对比，并在量出中证 500 的零技能地板之前不解释任何绝对读数。"
         ),
     },
-    # --- FOURTH ARM, NOT YET APPENDED ---------------------------------------
-    # `flow_block_1m_20260923` (pack `configs/workspace_refs/flow_block_20260923`)
-    # belongs at the end of this table, but it needs a different snapshot
-    # selection from the three above: `events_datasets` becomes
-    # `[*EVENTS_DATASETS, "intraday_flow"]` and `pit_views_seed` becomes
-    # `data/pit_views_seed_research_20260923_flow`, both stated on the arm so
-    # the three arms above keep the 2026-09-19 tree they pin.
-    #
-    # DO NOT add the entry before that seed directory exists. A round's
-    # snapshot configuration is the contract its prebuilt seed was built under,
-    # so the create pre-flight refuses an arm whose selection does not match a
-    # staged tree -- and a refused creation inside a `--fill` run exits
-    # non-zero, which would abort the fill for the arms that are ready.
-    # ------------------------------------------------------------------------
+    # Lever: information, the second block. The one arm with its own snapshot
+    # selection: `intraday_flow` joins the events domain, so the arm names the
+    # seed prebuilt from the same release for exactly that selection, and the
+    # three arms above keep the 2026-09-19 tree they pin.
+    "flow_block_1m_20260923": {
+        "workspace_reference": "configs/workspace_refs/flow_block_20260923",
+        "initial_cash": 1_000_000,
+        "benchmark_index": CSI300,
+        "gpu_count": 0,
+        "events_datasets": [*EVENTS_DATASETS, "intraday_flow"],
+        "pit_views_seed": "data/pit_views_seed_research_20260923_flow",
+        "max_drawdown": 0.45,
+        "active_max_drawdown": 0.30,
+        **GATES,
+        "research_directive": (
+            "本臂是消融臂：载体 Alpha158 + LightGBM 在沪深 300 成分上一个字不改，只在特征矩阵末尾加 14 列带符号订单流——"
+            "`intraday_flow` 逐股日 OFI 的当日值、5 日与 20 日均值、z 值与金额加权均值，两列通道质量，五列 `moneyflow` 分档资金，"
+            "以及两列跨方法分歧（tick 规则定符号 vs `moneyflow` 按单量定符号）。c_base 永远是同批第一条腿、永不可提名，f_only 只作诊断。"
+            "先过离线 G-INC2 消融门——Δ ≤ 0 或这 14 列的真实拟合增益占比低于 5 % 就不开整期批次；起步包实测增益占比 15 %、覆盖 99.9 %，"
+            "但占比高只说明树用了它，不是收益读数。100 万元 50 席、月频复核、每次最多换 8 只，第 0 轮必须实测年换手；"
+            "复核节奏改回周度是违规不是结果，也不得把本块或其中任何一列单独做成排序分数。"
+        ),
+    },
 }
 
 ROUND = Round(

@@ -60,27 +60,39 @@ ARMS = [(name, arm) for name, rnd in sorted(ROUNDS.items()) for arm in rnd.arms]
 
 
 def _synthetic_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rnd: Round) -> Path:
-    """A repository root holding a finished seed prebuilt for ``rnd``'s selection.
+    """A repository root holding a finished seed for every tree ``rnd`` names.
 
-    The contract is what the prebuild writes to ``provider.json``, over the
-    published release it names, which reaches the round's Held-out; the tree
-    needs nothing else for the create-time pre-flight to accept it.
+    Each tree is prebuilt for the selection of the first request naming it --
+    the round's shared part first, then its arms -- so an arm that names its
+    own tree gets one for its own selection, while an arm that names the
+    round's tree with another selection is still refused. The contract is what
+    the prebuild writes to ``provider.json``, over the one published release
+    they all name, which reaches the round's Held-out; a tree needs nothing
+    else for the create-time pre-flight to accept it. Returns the round's tree.
     """
     monkeypatch.setattr(_round, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(_round, "EXPERIMENTS_ROOT", tmp_path / "experiments")
-    config = _snapshot_config(rnd.request_params(PROBE_ID))
+    configs = {}
+    for experiment_id in (PROBE_ID, *rnd.arms):
+        params = rnd.request_params(experiment_id)
+        configs.setdefault(str(params["pit_views_seed"]), _snapshot_config(params))
     release = publish_release(
-        tmp_path, "synthetic", datasets=required_release_raw_datasets(config)
+        tmp_path,
+        "synthetic",
+        datasets=dict.fromkeys(
+            name for config in configs.values() for name in required_release_raw_datasets(config)
+        ),
     )
-    seed = tmp_path / rnd.pit_views_seed
-    seed.mkdir(parents=True)
-    record = pit_cache_provider_record(
-        generation_id=release.generation_id,
-        release_raw_dir=release.raw_dir,
-        snapshot_config=config,
-    )
-    (seed / "provider.json").write_text(json.dumps(record), encoding="utf-8")
-    return seed
+    for name, config in configs.items():
+        seed = tmp_path / name
+        seed.mkdir(parents=True)
+        record = pit_cache_provider_record(
+            generation_id=release.generation_id,
+            release_raw_dir=release.raw_dir,
+            snapshot_config=config,
+        )
+        (seed / "provider.json").write_text(json.dumps(record), encoding="utf-8")
+    return tmp_path / rnd.pit_views_seed
 
 
 @pytest.mark.parametrize("round_name", ROUND_IDS)
