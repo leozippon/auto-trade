@@ -84,7 +84,7 @@
 
 ## 去膨胀 Sharpe 的那张门表怎么来的
 
-`families.md` 里那张「√V × trials → DSR ≥ 0.90 所需主动 IR」的表，是用**本仓库自己的** `src/autotrade/pipelines/verdict.py:deflated_sharpe` 反解出来的：4 个研究年 = 976 个交易日，正态收益（实测 skew −0.0、kurtosis 2.97），对每个 (√V, trials) 二分搜索出使 DSR 恰好等于 0.90 的年化主动 IR。它与流水线文档自己的标定一致（「4 年窗口、√V 0.11–0.13 时，真实 IR 1.0 只在研究期 IR 约 0.75–0.77 时过门」）。**本页不引用任何外部数值。**
+`families.md` 里那张「N_eff → 所需主动 IR」的表按现行口径算（√V = √(244/T) ≈ 0.5、阈值 0.975，`information_ratio_bar` 的正态公式）；下面这段记的是它取代的旧表（「√V × trials → DSR ≥ 0.90」）的来历，在跑的 20260923 臂仍按那套运行。旧表是用**本仓库自己的** `src/autotrade/pipelines/verdict.py:deflated_sharpe` 反解出来的：4 个研究年 = 976 个交易日，正态收益（实测 skew −0.0、kurtosis 2.97），对每个 (√V, trials) 二分搜索出使 DSR 恰好等于 0.90 的年化主动 IR。它与流水线文档自己的标定一致（「4 年窗口、√V 0.11–0.13 时，真实 IR 1.0 只在研究期 IR 约 0.75–0.77 时过门」）。**本页不引用任何外部数值。**
 
 ## 诚实的限制
 
