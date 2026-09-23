@@ -279,10 +279,8 @@ class ContextCompactor(SessionTimeBudgetAware):
 
         self._consecutive_failures = 0
         self.compaction_count += 1
-        # ``_fit_compact_request`` only replaces message contents in place, so
-        # the fitted copies both feed the summarizer and stay in the tail.
         compacted_messages, files = _rebuild(
-            compact_messages,
+            messages,
             summary_text,
             keep_recent_messages=self.config.keep_recent_messages,
             kind="model",

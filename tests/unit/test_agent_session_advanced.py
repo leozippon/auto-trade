@@ -149,7 +149,7 @@ def test_compactor_replaces_old_messages_and_keeps_recent_tool_turns():
         compactor.compact(messages[1:])
 
 
-def test_compactor_bounds_one_huge_recent_tool_result_before_local_request():
+def test_compactor_bounds_a_huge_recent_tool_result_only_in_its_own_request():
     llm = ScriptedLLM(
         [ProviderResponse(content="## 目标\ncontinue\n\n## 下一步\n- finish")],
         context_window_tokens=3_000,
@@ -159,7 +159,7 @@ def test_compactor_bounds_one_huge_recent_tool_result_before_local_request():
         ContextCompactionConfig(
             token_threshold=1,
             min_messages=5,
-            keep_recent_messages=2,
+            keep_recent_messages=3,
             max_response_tokens=500,
         ),
     )
@@ -197,6 +197,10 @@ def test_compactor_bounds_one_huge_recent_tool_result_before_local_request():
     }
     fits, _, _ = context_request_fits(llm, request, max_tokens=500)
     assert fits is True
+    # The stub only fits the summarizer's window. The retained tail is the
+    # original messages, exactly as an Agent-written compaction keeps them;
+    # fitting the session's own next request is the Runner's job.
+    assert result.messages[2:] == tuple(messages[2:])
 
 
 def _spill_roots(tmp_path: Path) -> SearchRoots:
