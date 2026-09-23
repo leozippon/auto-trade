@@ -460,6 +460,36 @@ def test_a_recorded_node_is_read_once_across_listings(tmp_path: Path) -> None:
     assert summarize_experiment(directory)["research_best"]["step_id"] == second["step_id"]
 
 
+def test_a_recorded_session_is_gated_once_across_listings_and_pages(tmp_path: Path) -> None:
+    """A recorded research session is an immutable ledger row: the freeze gate
+    behind its best candidate is computed on the first read and shared by
+    every later listing poll and experiment page, so a poll of many ended arms
+    costs no replay statistics at all. The home poll keeps one listing in
+    flight, so a slow listing cannot stack requests on the server either."""
+
+    directory = build_arm(tmp_path, "arm", "sealed")
+    before = summarize_experiment(directory)["research_best"]
+    assert before["deflated_sharpe_probability"] is not None
+    for row in _records(directory)[0]["steps"]:
+        (Path(str(row["validation_result_ref"])).parent / "style_analysis.json").unlink()
+    assert summarize_experiment(directory)["research_best"] == before
+    record = experiment_detail(tmp_path, "arm")["sessions"][0]["record"]
+    assert {"session_key": "research", **record["best"]} == before
+
+    script = (
+        Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
+    ).read_text(encoding="utf-8")
+    home = script.split("async function renderHomePage(", 1)[1].split("\nfunction ", 1)[0]
+    poll = home.split("pollTimer = setInterval", 1)[1].split("}, 5000);", 1)[0]
+    assert (
+        poll.index("if (polling) return;")
+        < poll.index("polling = true;")
+        < poll.index("await refreshHomePage();")
+        < poll.index("finally {")
+        < poll.index("polling = false;")
+    )
+
+
 def test_an_arm_with_no_plan_yet_lists_as_created(tmp_path: Path) -> None:
     build_arm(tmp_path, "arm", "created")
     row = summarize_experiment(tmp_path / "arm")

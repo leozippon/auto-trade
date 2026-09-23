@@ -1701,13 +1701,21 @@ async function renderHomePage() {
     ),
   );
   $main.replaceChildren(homeView(payload));
+  // One listing in flight per tab: a tick that lands while the last poll is
+  // still unanswered is skipped, so a slow listing cannot pile requests up
+  // on the server and starve every other page's reads.
+  let polling = false;
   pollTimer = setInterval(async () => {
+    if (polling) return;
     if (location.hash && location.hash !== "#/" && location.hash !== "#")
       return;
+    polling = true;
     try {
       await refreshHomePage();
     } catch {
       /* keep last view */
+    } finally {
+      polling = false;
     }
   }, 5000);
 }

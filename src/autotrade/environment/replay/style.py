@@ -30,6 +30,7 @@ attribution is advisory and must never fail a backtest.
 
 from __future__ import annotations
 
+import functools
 import math
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -82,10 +83,17 @@ def neutralization_method(benchmark_index: str) -> str:
 
 
 def _date_text(value: object) -> str:
+    return _parsed_date_text(str(value))
+
+
+# Every stored series repeats the same trading days, so each distinct text is
+# parsed once: a verdict or a console listing reads millions of points.
+@functools.cache
+def _parsed_date_text(text: str) -> str:
     try:
-        return pd.Timestamp(str(value)).strftime("%Y%m%d")
+        return pd.Timestamp(text).strftime("%Y%m%d")
     except (TypeError, ValueError):
-        return str(value)
+        return text
 
 
 def slot_benchmark(

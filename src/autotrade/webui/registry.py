@@ -644,8 +644,7 @@ def _research_best(
 
     research = research_records(records)
     for position in reversed(range(len(research))):
-        steps = [row for row in research[position].get("steps") or () if isinstance(row, Mapping)]
-        best = _best_candidate(research[:position], steps)
+        best = _recorded_best(directory, research[:position], research[position])
         if best is not None:
             return {"session_key": research[position].get("session_key"), **best}
     if research:
@@ -658,9 +657,13 @@ def _research_best(
 # are read once per node and kept for the process lifetime, and the best
 # candidate (with the freeze gate the Pipeline computes for it) is kept per
 # node set, so a listing poll of a running arm re-reads nothing until the
-# session records another node.
+# session records another node. A recorded research session is an append-only
+# ledger row with its own run id, so its best candidate is kept per chain of
+# run ids (it and the earlier sessions whose steps join its trial family): the
+# gate is computed once per process, not on every poll of every ended arm.
 _LIVE_STEP_CACHE: dict[tuple[str, str], dict[str, object]] = {}
 _LIVE_BEST_CACHE: dict[tuple[str, tuple[str, ...]], dict[str, object] | None] = {}
+_RECORDED_BEST_CACHE: dict[tuple[str, ...], dict[str, object] | None] = {}
 
 
 def _live_steps(directory: Path) -> list[dict[str, object]]:
@@ -710,6 +713,21 @@ def _live_best(directory: Path) -> dict[str, object] | None:
     if key not in _LIVE_BEST_CACHE:
         _LIVE_BEST_CACHE[key] = _best_candidate([], steps)
     return _LIVE_BEST_CACHE[key]
+
+
+def _recorded_best(
+    directory: Path,
+    earlier: Sequence[Mapping[str, object]],
+    record: Mapping[str, object],
+) -> dict[str, object] | None:
+    """:func:`_best_candidate` of one recorded research session, shared by
+    the listing and the experiment page."""
+
+    key = (str(directory), *(str(row.get("run_id")) for row in (*earlier, record)))
+    if key not in _RECORDED_BEST_CACHE:
+        steps = [row for row in record.get("steps") or () if isinstance(row, Mapping)]
+        _RECORDED_BEST_CACHE[key] = _best_candidate(earlier, steps)
+    return _RECORDED_BEST_CACHE[key]
 
 
 def _research_result(
@@ -830,7 +848,7 @@ def _research_session_view(
         if isinstance(record.get("arm_end"), Mapping)
         else None,
         "validations": [_step_view(row) for row in steps],
-        "best": _best_candidate(earlier, steps),
+        "best": _recorded_best(directory, earlier, record),
         "attempts": record.get("attempts"),
         "budget_used": _mapping(record.get("budget_used")) or None,
     }
