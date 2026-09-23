@@ -1,0 +1,38 @@
+[Unit]
+Description=ADM-Cube loopback login gateway
+After=network.target
+
+[Service]
+Type=simple
+User=admcube-login
+Group=admcube-login
+SupplementaryGroups=www-data
+# The origins must be exactly the HTTPS origins Nginx admits
+# (ops/nginx/aliyun/admcube-http-limits.conf). The live unit may list them in
+# another order; compare with `systemctl cat admcube-login` before installing.
+ExecStart=/usr/bin/python3.11 /opt/admcube-login/gateway.py --public-origin https://121.41.5.179 --extra-public-origin https://admcubequant.tj.cn --htpasswd /etc/nginx/admcube-users --audit-log /var/log/admcube-login/audit.jsonl --session-store /var/lib/admcube-login/sessions.json --session-days 30
+Restart=on-failure
+RestartSec=2s
+UMask=0027
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ReadWritePaths=/var/log/admcube-login
+StateDirectory=admcube-login
+StateDirectoryMode=0700
+RestrictAddressFamilies=AF_INET AF_UNIX
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+IPAddressDeny=any
+IPAddressAllow=localhost
+
+[Install]
+WantedBy=multi-user.target
