@@ -126,7 +126,7 @@ def _research_prompt(
     directive: str,
     resource_override: object,
 ) -> str:
-    from autotrade.pipelines.experiment import _months_before, _session_budgets
+    from autotrade.pipelines.experiment import _session_budgets
     from autotrade.pipelines.local_backend import (
         arm_record,
         research_geometry_record,
@@ -145,7 +145,7 @@ def _research_prompt(
         "kind": "research",
         "research": research_geometry_record(
             geometry.research_years,
-            input_window_start=_months_before(geometry.research_end, rolling.window_months),
+            window_months=rolling.window_months,
             decision_time=geometry.research_decision_time.isoformat(),
         ),
         "benchmark_index": rolling.benchmark_index,

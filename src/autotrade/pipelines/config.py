@@ -943,9 +943,10 @@ class ResearchSessionRequest:
     # every span a Validation may replay is resolved from them
     # (``research_span``).
     research_years: tuple[ReplaySpan, ...]
-    # First day of the decision view's history window (``window_months``
-    # before research end), the Agent-visible input window.
-    input_window_start: str
+    # Months of history every decision view carries up to its anchor
+    # (``RollingExperimentConfig.window_months``): the research-end view the
+    # session reads and the view each research year's replay starts from.
+    window_months: int
     # Replay-years the session may spend on Validations (see
     # ``RollingExperimentConfig.max_replay_years``).
     max_replay_years: int

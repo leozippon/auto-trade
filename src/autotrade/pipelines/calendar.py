@@ -90,6 +90,13 @@ def anchor_before(start: str) -> datetime:
     return datetime.combine(day, RESEARCH_ANCHOR_TIME, tzinfo=CN_TZ)
 
 
+def months_before(end: str, months: int) -> str:
+    """The first day of the ``months``-long window that ends on ``end``."""
+
+    stamp = pd.Timestamp(end) - pd.DateOffset(months=months) + pd.Timedelta(days=1)
+    return stamp.strftime("%Y%m%d")
+
+
 def _next_day(day: str) -> str:
     return (date.fromisoformat(day) + timedelta(days=1)).strftime("%Y%m%d")
 

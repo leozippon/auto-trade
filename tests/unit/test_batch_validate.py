@@ -335,7 +335,7 @@ class _Session:
                 )
                 for label, start, end in YEARS
             ),
-            input_window_start="20200701",
+            window_months=60,
             max_replay_years=max_replay_years,
             max_llm_calls=10,
             deadline_seconds=deadline_seconds,

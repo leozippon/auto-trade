@@ -119,7 +119,7 @@ class RecordFailedAttemptsTest(unittest.TestCase):
             snapshot=snapshot,
             decision_time=datetime(2025, 6, 30, 23, 59, 59, tzinfo=UTC),
             research_years=(ReplaySpan("Y1", "valid", "20210701", "20220630", snapshot),),
-            input_window_start="20230701",
+            window_months=24,
             max_replay_years=30,
             max_llm_calls=200,
             deadline_seconds=1200.0,
@@ -166,15 +166,17 @@ class RecordFailedAttemptsTest(unittest.TestCase):
         )
 
     def test_a_failed_validation_records_a_dead_end_only_when_enabled(self) -> None:
+        from autotrade.environment.tools.base import ToolError
+
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             off_tool, off_tree = self._tool(root / "off", record_failed_attempts=False)
-            with self.assertRaises(Exception):
+            with self.assertRaises(ToolError):
                 off_tool()
             self.assertEqual(off_tree.nodes(), [])
 
             on_tool, on_tree = self._tool(root / "on", record_failed_attempts=True)
-            with self.assertRaises(Exception):
+            with self.assertRaises(ToolError):
                 on_tool()
             nodes = on_tree.nodes()
             self.assertEqual([node["status"] for node in nodes], ["failed"])

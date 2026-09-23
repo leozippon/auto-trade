@@ -87,7 +87,7 @@ def _tool(
         snapshot=snapshot,
         decision_time=datetime(2025, 9, 30, 23, 59, 59, tzinfo=UTC),
         research_years=(ReplaySpan("Y1", "valid", DAYS[0], DAYS[-1], snapshot),),
-        input_window_start="20240101",
+        window_months=24,
         max_replay_years=15,
         max_llm_calls=200,
         deadline_seconds=1200.0,

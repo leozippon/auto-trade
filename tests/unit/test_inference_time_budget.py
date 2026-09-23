@@ -10,12 +10,12 @@ import pytest
 
 from autotrade.agent.compact import ContextCompactionConfig, ContextCompactor
 from autotrade.agent.prompts import WRAP_UP_PROMPT
-from autotrade.agent.subagent import SubAgentEngine
 from autotrade.agent.runner import (
     AgentSessionBudgetExhausted,
     AgentSessionConfig,
     AgentSessionRunner,
 )
+from autotrade.agent.subagent import SubAgentEngine
 from autotrade.environment.artifacts import FilesystemArtifactStore
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
@@ -57,6 +57,7 @@ from autotrade.pipelines.session_tools import (
 
 from .fixtures_sandbox import PassingModificationCheck
 from .test_batch_validate import _write_style_sidecar
+
 
 def _passing_gate(node_id: str) -> dict[str, object]:
     """A freeze gate every node passes: these tests are about the Runner."""
@@ -133,7 +134,7 @@ def _research_request() -> ResearchSessionRequest:
         snapshot=snapshot,
         decision_time=moment,
         research_years=(ReplaySpan("Y1", "valid", "20240701", "20250630", snapshot),),
-        input_window_start="20230701",
+        window_months=24,
         max_replay_years=3,
         max_llm_calls=3,
         deadline_seconds=2.0,

@@ -797,6 +797,20 @@ def test_the_llm_session_validates_a_multi_year_span_is_refused_by_the_gate_and_
     assert facts["artifact_contract"]["start"]["kind"] == "template"
     assert [year["label"] for year in facts["research_geometry"]["years"]] == ["Y1", "Y2"]
     assert facts["research_geometry"]["research_period"] == "20220701..20240630"
+    # Each year names the history of the view its replay starts from: the
+    # arm's window_months (24) ending on the anchor that view was prepared at,
+    # not the research-end view's window.
+    anchors = {
+        start: decision.strftime("%Y%m%d")
+        for phase, start, _end, decision in synthetic_provider.requests
+        if phase == "valid"
+    }
+    assert anchors == {"20220701": "20220630", "20230701": "20230630"}
+    assert [(year["start"], year["input_window"]) for year in facts["research_geometry"]["years"]] == [
+        ("20220701", "20200701..20220630"),
+        ("20230701", "20210701..20230630"),
+    ]
+    assert facts["research_geometry"]["input_window"] == "20220701..20240630"
     assert facts["arm"]["trials_to_date"] == 0 and facts["arm"]["full_span_validations_to_date"] == 0
 
     read = _model_input(llm)

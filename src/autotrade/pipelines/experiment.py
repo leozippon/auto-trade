@@ -323,9 +323,7 @@ class RollingExperimentPipeline:
                     snapshot=decision,
                     decision_time=self.config.geometry.research_decision_time,
                     research_years=years,
-                    input_window_start=_months_before(
-                        self.config.geometry.research_end, self.config.window_months
-                    ),
+                    window_months=self.config.window_months,
                     max_replay_years=int(budgets["max_replay_years"]),
                     max_llm_calls=int(budgets["max_llm_calls"]),
                     deadline_seconds=budgets["deadline_seconds"],
@@ -1083,13 +1081,6 @@ def _failure_day(error: BaseException) -> str:
 
 def _error_text(error: BaseException) -> str:
     return f"{type(error).__name__}: {error}"
-
-
-def _months_before(end: str, months: int) -> str:
-    """The first day of the ``months``-long window that ends on ``end``."""
-
-    stamp = pd.Timestamp(end) - pd.DateOffset(months=months) + pd.Timedelta(days=1)
-    return stamp.strftime("%Y%m%d")
 
 
 def _keep_frozen_artifact_ids(

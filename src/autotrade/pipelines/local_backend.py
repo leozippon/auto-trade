@@ -57,10 +57,10 @@ from autotrade.environment.runtime import (
     write_json_atomic,
 )
 from autotrade.environment.sandbox import (
-    SandboxLimits,
     DockerSandbox,
     LocalSandbox,
     SandboxConfig,
+    SandboxLimits,
     SandboxSpec,
     experiment_container_labels,
     link_copytree,
@@ -98,14 +98,13 @@ from autotrade.environment.tools.skill_feedback import (
 from autotrade.environment.tools.step_rollback import StepRollbackTool
 from autotrade.environment.tools.workspace import SafeWorkspace
 
-from .calendar import FULL_SPAN, replay_window, yyyymmdd
+from .calendar import FULL_SPAN, anchor_before, months_before, replay_window, yyyymmdd
 from .config import (
     ArtifactRevision,
     BudgetUsed,
     EvaluationBackend,
     EvaluationRequest,
     EvaluationResult,
-    FrozenArtifact,
     ResearchSessionRequest,
     ResearchSessionResult,
     SnapshotBundle,
@@ -794,7 +793,7 @@ class LLMResearchDeveloper:
                 "data_summary_ref": "/mnt/artifacts/data_summary.json",
                 "research": research_geometry_record(
                     request.research_years,
-                    input_window_start=request.input_window_start,
+                    window_months=request.window_months,
                     decision_time=request.decision_time.isoformat(),
                 ),
                 # The index this arm is graded against; the Agent-visible facts
@@ -913,7 +912,7 @@ class LLMResearchDeveloper:
         self._install_snapshot_view(
             local,
             request,
-            start=request.input_window_start,
+            start=months_before(request.validation.end, request.window_months),
             end=request.validation.end,
         )
         safe = SafeWorkspace(workspace_root)
@@ -1381,23 +1380,36 @@ def session_fact_blocks(workspace: str | Path) -> dict[str, object]:
 
 
 def research_geometry_record(
-    years: Sequence[object], *, input_window_start: str, decision_time: str
+    years: Sequence[object], *, window_months: int, decision_time: str
 ) -> dict[str, object]:
     """The research period as a session may know it: research dates only.
 
     ``years`` are the research years in order, anything with ``label``,
-    ``start`` and ``end``. The periods after research end exist and are
-    sealed; neither their dates nor their slots are named anywhere a session
-    can read.
+    ``start`` and ``end``. Every decision view carries the ``window_months``
+    of history that end on its anchor day: ``input_window`` is the research-end
+    view's, and each year's ``input_window`` is that of the view its replay
+    starts from, anchored the day before the year starts. The periods after
+    research end exist and are sealed; neither their dates nor their slots are
+    named anywhere a session can read.
     """
+
+    def input_window(end: str) -> str:
+        return f"{months_before(end, window_months)}..{end}"
 
     first, last = years[0], years[-1]
     return {
         "decision_time": decision_time,
-        "input_window": f"{input_window_start}..{last.end}",  # type: ignore[attr-defined]
+        "input_window": input_window(last.end),  # type: ignore[attr-defined]
         "research_period": f"{first.start}..{last.end}",  # type: ignore[attr-defined]
         "years": [
-            {"label": year.label, "start": year.start, "end": year.end}  # type: ignore[attr-defined]
+            {
+                "label": year.label,  # type: ignore[attr-defined]
+                "start": year.start,  # type: ignore[attr-defined]
+                "end": year.end,  # type: ignore[attr-defined]
+                "input_window": input_window(
+                    anchor_before(year.start).strftime("%Y%m%d")  # type: ignore[attr-defined]
+                ),
+            }
             for year in years
         ],
         "spans": (
@@ -1707,11 +1719,11 @@ def _read_json_if_exists(path: Path) -> dict[str, object]:
 __all__ = [
     "DeterministicBaselineDeveloper",
     "FilesystemArtifactStore",
-    "session_workspace_map",
     "LLMResearchDeveloper",
     "LocalDailyEvaluationBackend",
     "LocalDailySnapshotProvider",
     "SessionBudgetLLM",
     "SessionCallBudget",
     "session_role_quotas",
+    "session_workspace_map",
 ]

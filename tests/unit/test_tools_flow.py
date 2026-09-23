@@ -33,6 +33,7 @@ from autotrade.environment.tools import (
     ToolRegistry,
     WriteFileTool,
 )
+from autotrade.environment.tools import search as search_module
 from autotrade.environment.tools.shell import (
     ARGV_ONE_ELEMENT_NOTE,
     ARGV_SHELL_NOTE,
@@ -44,7 +45,6 @@ from autotrade.environment.tools.shell import (
     SHELL_ARGV_MAX_CHARS,
     argv_is_forbidden_wait,
 )
-from autotrade.environment.tools import search as search_module
 
 from .fixtures_sandbox import PassingModificationCheck
 
@@ -1360,7 +1360,11 @@ class StrategyOrderContractTest(unittest.TestCase):
     it returns is revalidated on the trusted side before it reaches the Broker."""
 
     def test_a_sandbox_payload_with_an_invalid_action_is_rejected(self) -> None:
-        from autotrade.environment.strategy import CN_TZ, StrategyContractError, validate_order_payload
+        from autotrade.environment.strategy import (
+            CN_TZ,
+            StrategyContractError,
+            validate_order_payload,
+        )
 
         inference_at = datetime(2026, 1, 2, 8, 30, tzinfo=CN_TZ)
         payload = [
@@ -1931,7 +1935,7 @@ def _fold_backtest_tool(
         snapshot=snapshot,
         decision_time=datetime(2021, 12, 31, 23, 59, 59, tzinfo=UTC),
         research_years=(ReplaySpan("Y1", "valid", "20210701", "20220630", snapshot),),
-        input_window_start="20200101",
+        window_months=24,
         max_replay_years=3,
         max_llm_calls=3,
         deadline_seconds=600.0,
