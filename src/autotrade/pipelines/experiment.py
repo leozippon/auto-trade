@@ -908,7 +908,9 @@ def trial_family(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
     among, so it is left out (and can never be nominated). The candidate
     configurations a batch declared as screened offline and not submitted
     (``offline_trials``; a submitted one is a host trial, each configuration
-    is declared once) are trials too, counted once per batch. A row
+    is declared once) are trials too, counted once per batch. A batch whose
+    candidates all failed leaves no row, so its declaration is not counted and
+    ``batch_validate`` asks for it again in the next batch. A row
     recorded before batches declared them carries no ``offline_trials`` and
     reads as 0; ``undeclared_offline_validations`` counts such rows so the
     record says so. ``trials`` is M, the host trials plus the offline ones.

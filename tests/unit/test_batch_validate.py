@@ -747,6 +747,24 @@ class ControlsAndOfflineScreensTest(unittest.TestCase):
             )
             self.assertEqual(gate["deflated_sharpe"]["trial_correlation_pairs"], 3)
 
+    def test_a_wholly_failed_batch_s_screens_count_once_when_declared_again(self) -> None:
+        """No Step, no declaration: the next batch repeats it and M holds it once."""
+
+        with TemporaryDirectory() as tmp:
+            session = _Session(Path(tmp), strategy_fail_markers=("9" * 5,))
+            session.candidate("bad", _strategy("9" * 5))
+            with self.assertRaises(ToolError) as caught:
+                session.call("bad", offline_trials=5)
+            self.assertIs(caught.exception.details["offline_trials_recorded"], False)
+            self.assertEqual(session.backtest.steps, [])
+            session.candidate("good", _strategy("2" * 60))
+            row = session.call("good", offline_trials=5).value["candidates"][0]
+            dsr = session.backtest.freeze_gate(str(row["node_id"]))["deflated_sharpe"]
+            self.assertEqual(
+                (dsr["host_trials"], dsr["offline_trials"], dsr["trials"]), (1, 5, 6)
+            )
+            self.assertEqual(row["selection_statistics"]["trials"], 6)
+
     def test_an_undeclared_or_malformed_registration_is_refused_before_anything_runs(
         self,
     ) -> None:
@@ -1000,9 +1018,14 @@ class BatchValidateRunTest(unittest.TestCase):
             session.candidate("a", _strategy("1"))
             session.candidate("b", _strategy("2"))
             with self.assertRaises(ToolError) as caught:
-                session.call("a", "b")
+                session.call("a", "b", offline_trials=3)
             error = caught.exception
             self.assertIn("all 2 candidates failed", str(error))
+            # The declaration rides on recorded Validations, and there are
+            # none: the refusal says it was not counted and must be repeated.
+            self.assertIs(error.details["offline_trials_recorded"], False)
+            self.assertIn("offline_trials=3 was not counted", str(error))
+            self.assertIn("again in the next batch", str(error))
             rows = error.details["candidates"]
             self.assertEqual([row["status"] for row in rows], ["failed", "failed"])
             # Honest accounting: both strategies raised, so the replays measured

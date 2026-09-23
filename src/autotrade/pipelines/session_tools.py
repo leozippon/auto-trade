@@ -1010,8 +1010,9 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "are NOT themselves submitted in this batch (rejected or deferred): a "
         "submitted candidate counts as a host trial once validated and is not "
         "declared, controls never count, each configuration is declared once, in "
-        "the first batch after its screen, and 0 only if nothing was screened. The "
-        "freeze gate adds it to the arm's trial count, summed over batches, so "
+        "the first batch that records a Validation after its screen, and 0 only if "
+        "nothing was screened. The freeze gate adds it to the arm's trial count, "
+        "summed over batches, so "
         "declare it honestly -- an undercount understates the search the gate "
         "corrects for. The batch costs one "
         "replay-year per candidate per year of the span, reserved before anything "
@@ -1120,9 +1121,10 @@ class BatchValidateTool(SessionTimeBudgetAware):
                         "Candidate configurations screened offline on "
                         "research-period data whose reading shaped this batch "
                         "and that this batch does NOT submit; each declared "
-                        "once, in the first batch after its screen; controls "
-                        "never count; 0 only if nothing was screened. Added "
-                        "to the arm's freeze-gate trial count."
+                        "once, in the first batch that records a Validation "
+                        "after its screen; controls never count; 0 only if "
+                        "nothing was screened. Added to the arm's freeze-gate "
+                        "trial count."
                     ),
                 },
             },
@@ -1258,14 +1260,19 @@ class BatchValidateTool(SessionTimeBudgetAware):
             row["selection_statistics"] = self.backtest.selection_statistics(step)
         if not recorded:
             charged = len(rows) - refunded
+            # The trial family reads a batch's declaration from its recorded
+            # Validations, so a batch that recorded none counted none of it.
             raise ToolError(
                 f"batch_validate: all {len(rows)} candidates failed their "
                 f"Validation; {charged} of them raised in their own code and "
                 f"kept the replay-years, {refunded} failed on the environment "
-                "and got them back",
+                "and got them back. No Validation was recorded, so this batch's "
+                f"offline_trials={offline_trials} was not counted: declare those "
+                "configurations again in the next batch",
                 error_type="validation_failed",
                 details={
                     "batch_id": batch_id,
+                    "offline_trials_recorded": False,
                     "candidates": rows,
                     "replay_years_used": self.backtest.replay_years_used,
                     "replay_years_remaining": self.backtest.replay_years_remaining,
@@ -2006,7 +2013,8 @@ def _batch_offline_trials(arguments: Mapping[str, object]) -> int:
             "batch_validate needs offline_trials: the whole number (0 to "
             f"{BATCH_OFFLINE_TRIALS_MAX}) of candidate configurations screened "
             "offline on research-period data whose reading shaped this batch and "
-            "that this batch does not submit, each declared once, 0 only if "
+            "that this batch does not submit, each declared once, in the first "
+            "batch that records a Validation after its screen, 0 only if "
             f"nothing was screened; got {value!r}. It is added to the arm's "
             "freeze-gate trial count",
             error_type="schema_error",
