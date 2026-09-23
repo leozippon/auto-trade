@@ -7,11 +7,11 @@ the rounds that mount it cannot drift apart by a typo; the two fresh-book arms
 read exactly what `learner_axis_1m_20260924` read. Every arm needs it: each
 universe is a decision day's visible index section, and the host's zero-skill
 panel matches its replacements on constituent membership, so an arm without
-the section would be graded against a different floor than it trades. Neither
-arm below reads a dataset outside that selection; the third arm, once
-appended, selects one more events dataset and names its own seed. Minute data
-stays unmounted; `include_intraday` keeps the console default `False`, which
-`check_console_defaults` pins for every round.
+the section would be graded against a different floor than it trades. One
+arm, `northbound_holdings`, also selects the events dataset `top10_holders`,
+so it names its own seed, prebuilt from the same release for exactly that
+selection. Minute data stays unmounted; `include_intraday` keeps the console
+default `False`, which `check_console_defaults` pins for every round.
 
 What this round is. The 20260923 and 20260924 rounds held the Alpha158 +
 LightGBM carrier fixed and moved seven levers -- four feature blocks, the
@@ -44,10 +44,11 @@ The round's three arms:
 - `fresh_book_1m_20260925`: the construction test on CSI 300 constituents.
 - `fresh_book_csi500_1m_20260925`: the same design and starter on CSI 500
   constituents, graded against 000905.SH, with no CSI 300 leg in any batch.
-- `northbound_holdings_1m_20260925`, not yet appended (see ARMS): information
-  the repository has never read, in its most transparent form -- the
-  northbound (Stock Connect) row of the quarterly top-ten holders tables as a
-  standalone score on CSI 300 constituents. It waits for its own seed.
+- `northbound_holdings_1m_20260925`: information the repository has never
+  read, in its most transparent form -- the northbound (Stock Connect) row of
+  the quarterly top-ten holders tables as an untrained standalone score `n1`
+  on CSI 300 constituents, judged by the zero-skill panel alone, with a
+  same-score shuffle `c_shuf` as its control.
 
 The CSI 1000 column was read offline only: its top decile earns 1.85x CSI
 300's, but at t 1.39 it misses the slot condition (t >= 2), so it has no arm.
@@ -78,7 +79,12 @@ The fresh-book packs carry no offline gate. Their census readings are
 registered in `families.md` as facts: a session may re-verify them in round 0
 without counting a trial, must report a discrepancy, and does not re-derive or
 declare them. The first batch is the test itself, and it is also the one
-full-span validation `finish_session(no_edge)` needs.
+full-span validation `finish_session(no_edge)` needs. The northbound pack keeps
+an offline gate (`G-NB`), and the pack author's reading of it on the
+research-end view already hits its kill conditions K2 and K3; if the session's
+recomputation agrees, the registered path is one batch, `c_shuf` + `n1`, with
+the author's two screened configurations declared as `offline_trials`, and
+the arm closes `no_edge` unless `n1` clears K4.
 
 Contamination, per arm. Operator-side only.
 
@@ -99,8 +105,15 @@ Contamination, per arm. Operator-side only.
   section has carried one book, `csi500_shape_1m_20260923`, closed `no_edge`
   on research-period readings; no forward reading exists on this shape. The
   CSI 300 readings are evidence, never an in-batch control.
-
-The third arm states its own when it is appended.
+- `northbound_holdings_1m_20260925`. `top10_holders` has never been selected
+  into any arm's snapshot and no northbound column has entered any book, so no
+  forward reading exists for it. The sign, the expected magnitude and the kill
+  conditions were registered before any return-based reading; the pack author
+  then read the offline gate on the research-period, research-end view, and
+  the pack states that verdict. The literature is used for sign only. The
+  register's closed rows for an unmandated rule-scored CSI 300 book and for
+  holder counts and institutional holdings are named in the pack as priors;
+  a null here reinforces the first.
 
 Usage:
   PYTHONPATH=src ~/miniconda3/envs/quant/bin/python \\
@@ -193,26 +206,34 @@ ARMS: dict[str, dict[str, object]] = {
             "全臂 host trial ≤ 6、回放 ≤ 32 年，offline_trials 如实申报。"
         ),
     },
-    # --- THIRD ARM, NOT YET APPENDED ----------------------------------------
-    # `northbound_holdings_1m_20260925`
-    #     "workspace_reference": "configs/workspace_refs/northbound_holdings_20260925",
-    #     "initial_cash": 1_000_000,
-    #     "benchmark_index": CSI300,
-    #     "events_datasets": [*EVENTS_DATASETS, "top10_holders"],
-    #     "pit_views_seed": "data/pit_views_seed_research_20260925_holders",
-    # belongs at the end of this table with the same gpu_count, drawdowns and
-    # GATES as the arms above, its own directive, and its contamination
-    # statement in the module docstring. It needs a different snapshot
-    # selection from the two above and names its own seed so they keep the
-    # 2026-09-19 tree they pin.
-    #
-    # DO NOT add the entry before that seed's prebuild has finished for
-    # exactly that selection. A round's snapshot configuration is the contract
-    # its prebuilt seed was built under, so the create pre-flight refuses an
-    # arm whose selection does not match a finished tree -- and a refused
-    # creation inside a `--fill` run exits non-zero, which would abort the fill
-    # for the arms that are ready.
-    # ------------------------------------------------------------------------
+    # Information: the northbound row of the quarterly top-ten holders tables
+    # as a standalone score. The one arm with its own snapshot selection:
+    # `top10_holders` joins the events domain, so the arm names the seed
+    # prebuilt from the same release for exactly that selection, and the two
+    # arms above keep the 2026-09-19 tree they pin.
+    "northbound_holdings_1m_20260925": {
+        "workspace_reference": "configs/workspace_refs/northbound_holdings_20260925",
+        "initial_cash": 1_000_000,
+        "benchmark_index": CSI300,
+        "gpu_count": 0,
+        "events_datasets": [*EVENTS_DATASETS, "top10_holders"],
+        "pit_views_seed": "data/pit_views_seed_research_20260925_holders",
+        "max_drawdown": 0.45,
+        "active_max_drawdown": 0.30,
+        **GATES,
+        "research_directive": (
+            "本臂是固定方向的臂：北向持股——季度前十大股东表 top10_holders 与 top10_floatholders 的并集里"
+            "香港中央结算有限公司（不是代理人、不是 H 股）那一行——作一个不训练的独立分数 n1"
+            "（持股占流通股的截面秩与它相对自身过去四个季末均值变化的截面秩各半），在沪深 300 成分里建 50 席等额、"
+            "月度复核的书，由宿主零技能面板裁决，不以赢过 c_base 为条件；c_shuf（同分数日内打乱）与 c_base "
+            "登记 control: true、永不可提名。先按 pit-field-map.md 做股东表普查（两张表缺一张即停），"
+            "再按 references/offline-screen.md 重算离线门 G-NB；包作者的读数已命中 K2 与 K3，"
+            "重算一致就按 families.md 杀死条件第 1 条：唯一一批 c_shuf（control: true）+ n1（control: false）；"
+            "offline_trials = 2，即包作者筛过而没提交的只用持股水平与只用持股变化两个配置，"
+            "会话另筛的变体在其后第一个记下验证的批次加上；n1 主动 IR 低于 K4 的 0.64 就以 no_edge 携读数收尾，"
+            "越过才回到正常路径，不得改登记去追读数。"
+        ),
+    },
 }
 
 ROUND = Round(
