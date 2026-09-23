@@ -224,10 +224,16 @@ SHARE_FLOAT_UNLOCK_TITLE_PATTERN = re.compile(
     r"限售|解禁|上市流通|解除限售|限售股份上市|限售股上市|首次公开发行限售|非公开发行限售|定向增发限售"
 )
 
-# Macro range pulls (quarter_once/month_once) always retain history from at
-# least this floor so the canonical range file's coverage never shrinks with
-# a rolling cron window.
-MACRO_RETAINED_FLOOR = "20200101"
+# The research-history floor: the earliest date the lake keeps for the
+# datasets this repository, not the vendor, clamps -- index_weight, the macro
+# range files (quarter_once/month_once, whose canonical file therefore never
+# shrinks with a rolling cron window) and the board-trading tier. A backfill
+# run lowers it for the datasets it downloads with `download --history-floor`
+# (`history_floor`); the history it lands then carries itself: a range file is
+# never rewritten from a later start than the one it holds
+# (`retained_range_start`), and the index_weight audit expects every year from
+# the earliest one on disk.
+RESEARCH_HISTORY_FLOOR = "20200101"
 
 MACRO_DATASETS = [
     "cn_schedule",
@@ -327,7 +333,6 @@ DEFAULT_CN_INDEX_CODES = list(BENCHMARK_INDEXES)
 # per index truncates silently (most-recent-first). Downloads page inside
 # per-year windows per index code (largest universe ~28k rows/year).
 INDEX_WEIGHT_PAGE_LIMIT = 7000
-INDEX_WEIGHT_START_DATE = "20200101"
 INDEX_WEIGHT_FIELDS = "index_code,con_code,trade_date,weight"
 
 DEFAULT_FX_CODES = ["USDCNH.FXCM"]
@@ -610,7 +615,7 @@ class BoardTradingDataset:
     page_limit: int
     date_column: str = "trade_date"
     time_column: str = ""
-    start_date: str = "20200101"
+    start_date: str = RESEARCH_HISTORY_FLOOR
     zero_rows_ok: bool = True
     availability: AvailabilityRule | None = None
 
@@ -2273,6 +2278,42 @@ def yyyymmdd_to_quarter(value: str) -> str:
     parsed = parse_yyyymmdd(value)
     quarter = (parsed.month - 1) // 3 + 1
     return f"{parsed.year}Q{quarter}"
+
+def history_floor(floor: str, args: argparse.Namespace) -> str:
+    """``floor`` lowered to a backfill run's ``--history-floor``, never raised."""
+
+    lowered = getattr(args, "history_floor", None)
+    return min(floor, lowered) if lowered else floor
+
+def yyyymmdd_arg(value: str) -> str:
+    """argparse type of a YYYYMMDD calendar date."""
+
+    try:
+        parse_yyyymmdd(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a YYYYMMDD date, got {value!r}") from None
+    return value
+
+def retained_range_start(dataset_dir: Path, start_date: str) -> str:
+    """The first date a range dataset's canonical file must keep covering.
+
+    A quarter_once/month_once pull rewrites ONE canonical
+    ``range=<start>_latest`` file and prunes every other range file, so a
+    rewrite from a later start than the file on disk holds would delete the
+    history below it -- a backfill under the research-history floor included.
+    The retained start is therefore never later than the start of the
+    canonical file already there.
+    """
+
+    starts = [start_date]
+    for path in dataset_dir.glob("range=*_latest.parquet"):
+        token = path.name[len("range="):-len("_latest.parquet")]
+        quarter = re.fullmatch(r"(\d{4})Q([1-4])", token)
+        if quarter:
+            starts.append(f"{quarter.group(1)}{(int(quarter.group(2)) - 1) * 3 + 1:02d}01")
+        elif re.fullmatch(r"\d{6}", token):
+            starts.append(f"{token}01")
+    return min(starts)
 
 def quarter_end_date(value: str) -> str:
     match = re.fullmatch(r"(\d{4})Q([1-4])", str(value).strip())

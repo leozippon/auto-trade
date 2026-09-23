@@ -11,12 +11,15 @@ import time
 import unittest
 from pathlib import Path
 
+import pandas as pd
+
 from autotrade.data_quality import build_quality_report
 from autotrade.environment.data.research_release import (
     DOMAIN_REPORT_TYPES,
     DOMAIN_STATUS_FILES,
     pin_research_release,
     published_research_release,
+    require_benchmark_index,
 )
 
 
@@ -421,6 +424,63 @@ class ResearchReleaseTest(unittest.TestCase):
                 self.quality,
                 {"fundamental_events_status.json": "yes"},
                 "fundamental_events_status.json",
+            )
+
+
+class BenchmarkHistoryTest(unittest.TestCase):
+    """The create-time benchmark check reads how far back the release goes."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.raw = Path(self.tmp.name) / "raw"
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _year(self, dataset: str, key: str, year: int, dates: list[str]) -> None:
+        path = self.raw / dataset / f"{key}=000905.SH" / f"year={year}.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"trade_date": dates}, dtype=str).to_parquet(path, index=False)
+
+    def _check(self, research_start: str) -> None:
+        require_benchmark_index(
+            self.raw,
+            "000905.SH",
+            datasets=("daily", "index_daily", "index_weight"),
+            research_start=research_start,
+        )
+
+    def test_history_must_reach_before_research_start(self) -> None:
+        # A release whose benchmark history starts in 2020 grades a four-year
+        # arm (2021-07) but not an eight-year one (2017-07): its first research
+        # years would have no benchmark return and no membership.
+        self._year("index_daily", "ts_code", 2020, ["20200102", "20200103"])
+        self._year("index_weight", "index_code", 2020, ["20200123"])
+        self._check("20210701")
+        with self.assertRaises(ValueError) as caught:
+            self._check("20170701")
+        message = str(caught.exception)
+        self.assertIn("no history before research_start 20170701", message)
+        self.assertIn("'index_daily/ts_code=000905.SH': '20200102'", message)
+        self.assertIn("'index_weight/index_code=000905.SH': '20200123'", message)
+
+        # A zero-row year (an index before it launched) is no history; a
+        # section dated the day before research starts is.
+        self._year("index_daily", "ts_code", 2016, [])
+        self._year("index_daily", "ts_code", 2017, ["20170630", "20170703"])
+        self._year("index_weight", "index_code", 2017, ["20170630"])
+        self._check("20170701")
+        with self.assertRaisesRegex(ValueError, "'index_weight/index_code=000905.SH': '20170630'"):
+            self._check("20170630")
+
+    def test_an_unmounted_table_is_not_checked(self) -> None:
+        self._year("index_daily", "ts_code", 2020, ["20200102"])
+        require_benchmark_index(
+            self.raw, "000905.SH", datasets=("daily", "index_daily"), research_start="20210701"
+        )
+        with self.assertRaisesRegex(ValueError, "index_daily/ts_code=000905.SH"):
+            require_benchmark_index(
+                self.raw, "000905.SH", datasets=("index_daily",), research_start="20170701"
             )
 
 

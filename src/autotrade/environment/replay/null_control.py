@@ -63,7 +63,8 @@ class NullControlSetupError(RuntimeError):
     """The null control could not be set up, so it drew and measured nothing.
 
     Raised strictly before the first draw: the result's replay slots could not
-    be resolved, or the tables they hold could not be read. A caller that
+    be resolved, the tables they hold could not be read, or the benchmark
+    membership they mount has no section before a round trip's entry. A caller that
     charges a budget for the host compute a null control spends gives that
     charge back on this error, because none of it was spent.
     """
@@ -189,8 +190,11 @@ def run_null_control(
     ``membership`` maps a cross-section date (``YYYYMMDD``) to the benchmark's
     constituents published on it; a round trip is matched on the latest one
     dated before its entry day, which is the one its decision could read. None
-    or empty means the table is not mounted, and the draw falls back to the
-    float-cap decile; ``matched`` records which rule applied.
+    means the table is not mounted, and the draw falls back to the float-cap
+    decile; ``matched`` records which rule applied. A mounted table -- even an
+    empty one -- is never replaced by the decile: a round trip with no section
+    dated before its entry fails the whole call before the first draw
+    (``NullControlSetupError``).
 
     ``panel`` adds the draws' daily return series to the block: ``panel_daily``
     is their equal-weight mean per trading day and ``panel_draw_sd`` the
@@ -204,7 +208,7 @@ def run_null_control(
     market = DailyMarketData(frame, corporate_actions)
     if tuple(dates) != market.trade_dates:
         raise ValueError("result equity curve and replay frame cover different trading days")
-    members = _Membership(membership) if membership else None
+    members = None if membership is None else _Membership(membership)
     matched = MATCHED_DECILE if members is None else MATCHED_MEMBERSHIP
     skeleton, unpaired_sell_shares = trade_skeleton(result.executions)
     if not skeleton:
@@ -322,7 +326,18 @@ class _Membership:
 
         position = bisect_left(self._dates, date)
         if position == 0:
-            raise ValueError(f"no benchmark membership is dated before {date}")
+            # Drawing on the float-cap decile instead would grade this span
+            # against another panel than the arm's other spans, so nothing is
+            # drawn: the pools are built before the first draw.
+            raise NullControlSetupError(
+                f"no benchmark membership is dated before {date}: the arm mounts index_weight, "
+                + (
+                    f"but its first section of the benchmark is {self._dates[0]}"
+                    if self._dates
+                    else "but no section of the benchmark is in the replayed slots"
+                )
+                + "; the pinned release does not reach back far enough for this span"
+            )
         return self._members[self._dates[position - 1]]
 
 

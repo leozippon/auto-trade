@@ -31,12 +31,11 @@ from .common import (
     FUNDAMENTAL_SPECS,
     INDEX_WEIGHT_FIELDS,
     INDEX_WEIGHT_PAGE_LIMIT,
-    INDEX_WEIGHT_START_DATE,
-    MACRO_RETAINED_FLOOR,
     MACRO_SPECS,
     MUTATED_NOT_READY_RETRY_EXIT_CODE,
     NO_MUTATION_RETRY_EXIT_CODE,
     PHYSICAL_IDENTITY_COLUMNS,
+    RESEARCH_HISTORY_FLOOR,
     REVISION_EVENTS_PATH,
     SHARE_FLOAT_FIELDS,
     SHARE_FLOAT_ROW_LIMIT,
@@ -73,6 +72,7 @@ from .common import (
     date_range_days,
     format_yyyymmdd,
     frame,
+    history_floor,
     intraday_expected_codes_for_day,
     latest_sse_calendar_date,
     load_minute_universe,
@@ -94,6 +94,7 @@ from .common import (
     query_paged,
     read_many,
     resolve_revision_ledger,
+    retained_range_start,
     safe_partition_value,
     select_datasets,
     selected_board_dc_hot_markets,
@@ -210,6 +211,7 @@ def download_reference(args: argparse.Namespace) -> int:
         raw_dir,
         args.start_date,
         args.end_date,
+        history_floor(RESEARCH_HISTORY_FLOOR, args),
         should_force("index_weight"),
         revision_ledger,
         getattr(args, "allow_empty_revision_overwrite", False),
@@ -471,12 +473,14 @@ def download_index_weight(
     raw_dir: Path,
     start_date: str,
     end_date: str,
+    floor: str,
     force: bool,
     revision_ledger: Path | str | None,
     allow_empty_revision_overwrite: bool,
 ) -> None:
-    """Monthly core-index constituent weights, one partition per index per year."""
-    start_date = max(start_date, INDEX_WEIGHT_START_DATE)
+    """Monthly core-index constituent weights, one partition per index per year,
+    from the research-history ``floor`` on."""
+    start_date = max(start_date, floor)
     if end_date < start_date:
         return
     written = 0
@@ -1077,11 +1081,12 @@ def download_macro(args: argparse.Namespace) -> int:
     retained_start_date = getattr(args, "macro_start_date", None) or args.start_date
     for dataset in selected_macro_datasets(args):
         spec = MACRO_SPECS[dataset]
-        start_date = max(args.start_date, spec.start_date)
+        spec_floor = history_floor(spec.start_date, args)
+        start_date = max(args.start_date, spec_floor)
         if spec.strategy == "quarter_once":
-            download_macro_quarter_once(client, raw_dir, spec, max(retained_start_date, spec.start_date), args.end_date, args.force, revision_ledger, allow_empty_revision_overwrite)
+            download_macro_quarter_once(client, raw_dir, spec, max(retained_start_date, spec_floor), args.end_date, args.force, revision_ledger, allow_empty_revision_overwrite)
         elif spec.strategy == "month_once":
-            download_macro_month_once(client, raw_dir, spec, max(retained_start_date, spec.start_date), args.end_date, args.force, revision_ledger, allow_empty_revision_overwrite)
+            download_macro_month_once(client, raw_dir, spec, max(retained_start_date, spec_floor), args.end_date, args.force, revision_ledger, allow_empty_revision_overwrite)
         elif spec.strategy == "month_loop":
             download_macro_month_loop(client, raw_dir, spec, start_date, args.end_date, args.force, revision_ledger, allow_empty_revision_overwrite)
         elif spec.strategy == "trade_date":
@@ -1108,6 +1113,7 @@ def download_macro(args: argparse.Namespace) -> int:
     return 0
 
 def download_macro_quarter_once(client: TuShareClient, raw_dir: Path, spec: MacroDataset, start_date: str, end_date: str, force: bool, revision_ledger: Path | str | None = None, allow_empty_revision_overwrite: bool = False) -> None:
+    start_date = retained_range_start(raw_dir / spec.api_name, start_date)
     start_q = max(yyyymmdd_to_quarter(start_date), spec.start_quarter)
     end_q = yyyymmdd_to_quarter(end_date)
     path = raw_dir / spec.api_name / f"range={start_q}_latest.parquet"
@@ -1121,6 +1127,7 @@ def download_macro_quarter_once(client: TuShareClient, raw_dir: Path, spec: Macr
     print(f"{spec.api_name} quarters {start_q}-{end_q} rows={rows}")
 
 def download_macro_month_once(client: TuShareClient, raw_dir: Path, spec: MacroDataset, start_date: str, end_date: str, force: bool, revision_ledger: Path | str | None = None, allow_empty_revision_overwrite: bool = False) -> None:
+    start_date = retained_range_start(raw_dir / spec.api_name, start_date)
     start_m = max(yyyymmdd_to_month(start_date), spec.start_month)
     end_m = yyyymmdd_to_month(end_date)
     path = raw_dir / spec.api_name / f"range={start_m}_latest.parquet"
@@ -1724,7 +1731,7 @@ def download_board_trading(args: argparse.Namespace) -> int:
             print(f"board-trading trade-date datasets skipped: no SSE open dates for {args.start_date}-{trade_end_date}")
     for dataset in datasets:
         spec = BOARD_TRADING_SPECS[dataset]
-        start_date = max(args.start_date, spec.start_date)
+        start_date = max(args.start_date, history_floor(spec.start_date, args))
         dates = [trade_date for trade_date in trade_dates if start_date <= trade_date <= args.end_date]
         page_limit = spec_page_limit(spec, args.page_limit)
         if spec.strategy == "static_full":
@@ -3768,6 +3775,13 @@ def add_download_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--fundamental-dividend-probe-days", type=int, default=0)
     parser.add_argument("--force", action="store_true")
     parser.add_argument(
+        "--history-floor",
+        type=core.yyyymmdd_arg,
+        help="Backfill only: lower the research-history floor (RESEARCH_HISTORY_FLOOR, and the "
+        "tier's own per-dataset floors) to this date for the datasets this run downloads, so "
+        "--start-date can reach below it. Never raises a floor.",
+    )
+    parser.add_argument(
         "--zero-rows-not-ready",
         action="store_true",
         help="event_flow tier only: treat required zero-row responses as source-not-ready instead of failing. "
@@ -3852,7 +3866,7 @@ def add_update_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--global-datasets", nargs="+", choices=core.MACRO_DATASETS)
     parser.add_argument(
         "--macro-start-date",
-        default=MACRO_RETAINED_FLOOR,
+        default=RESEARCH_HISTORY_FLOOR,
         help="Retained lower bound for macro/global range-style datasets during rolling updates; prevents short-window range files from replacing full-context coverage.",
     )
     parser.add_argument("--event-datasets", nargs="+", choices=[dataset for dataset in core.EVENT_FLOW_DATASETS if dataset != "share_float"])

@@ -374,6 +374,36 @@
       "lock_wait_seconds": 1800,
       "skip_if_already_ok": false
     },
+    "manual_history_backfill_reference": {
+      "description": "Manual (not scheduled): lower the research-history floor to 20140701 for index_weight, the reference tier's only floor-clamped dataset, and land its missing years for the seven benchmark indexes. Run with --start-date 20140701 --end-date <the last trade date before the lake's current floor>; every other reference table and every covered year skips. Follow with cn_nightly_full_audit --force-run.",
+      "operation": "download_tier",
+      "tier": "reference",
+      "end_date_offset_days": 0,
+      "end_date_mode": "sse_open_on_or_before",
+      "extra_args": [
+        "--history-floor",
+        "20140701"
+      ],
+      "lock_wait_seconds": 1800,
+      "skip_if_already_ok": false
+    },
+    "manual_history_backfill_macro": {
+      "description": "Manual (not scheduled): lower the research-history floor to 20140701 for the benchmark and Shenwan series eight-year rule-score arms read (index_daily, index_dailybasic, sw_daily) and land their missing history. Run with --start-date 20140701 --end-date <the last trade date before the lake's current floor>; covered partitions skip. Follow with cn_nightly_full_audit --force-run.",
+      "operation": "download_tier",
+      "tier": "macro",
+      "end_date_offset_days": 0,
+      "end_date_mode": "sse_open_on_or_before",
+      "extra_args": [
+        "--history-floor",
+        "20140701",
+        "--datasets",
+        "index_daily",
+        "index_dailybasic",
+        "sw_daily"
+      ],
+      "lock_wait_seconds": 1800,
+      "skip_if_already_ok": false
+    },
     "manual_intraday_minutes": {
       "description": "Manual (not scheduled): land the 1-minute by-date layer on its own, for every trading day in the window whose partition is missing or invalid. stk_mins enforces a per-token daily request quota (answer: '您今日stk_min额定额度已用完，请明日再试'), so the downloader asks for STK_MINS_BATCH_CODES codes per request and stops on the quota answer instead of retrying it; a stopped run keeps every day it wrote and the next run resumes. Run scripts/data/build_minute_derived.py after it.",
       "operation": "intraday_by_date",

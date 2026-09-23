@@ -1410,6 +1410,52 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(cpi_calls[0]["start_m"], "202001")
         self.assertTrue((self.raw_dir / "cn_cpi" / "range=202001_latest.parquet").exists())
 
+    def test_rolling_rewrite_keeps_a_range_file_backfilled_below_the_floor(self):
+        # A backfill landed cn_cpi from 2014-07. The nightly rewrite asks from
+        # the 2020 floor, but must re-request the file's own start and keep its
+        # path: a rewrite from 202001 would prune the backfilled history away.
+        backfilled = self.raw_dir / "cn_cpi" / "range=201407_latest.parquet"
+        pd.DataFrame([{"month": "201407"}]).pipe(
+            lambda df: common.write_parquet(backfilled, df, api_name="cn_cpi", params={}, fields=list(df.columns))
+        )
+        args = argparse.Namespace(
+            raw_dir=str(self.raw_dir),
+            tier="macro",
+            start_date="20260504",
+            macro_start_date="20200101",
+            end_date="20260603",
+            datasets=["cn_cpi"],
+            force=True,
+            page_limit=None,
+            revision_ledger=str(self.root / "revision_events.jsonl"),
+            allow_empty_revision_overwrite=False,
+            min_interval_seconds=0,
+            timeout_seconds=1,
+        )
+        class RangeClient(CountingMacroClient):
+            # Answers the whole requested range, as the vendor does.
+            def query(self, api_name, params=None, fields="", retries=5):
+                result = super().query(api_name, params, fields, retries)
+                month = result.fields.index("month")
+                first = list(result.items[0])
+                first[month] = params["start_m"]
+                return common.ApiResult(result.fields, [first, *result.items])
+
+        client = RangeClient()
+
+        with redirect_stdout(io.StringIO()), patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=client):
+            self.assertEqual(download.download_macro(args), 0)
+
+        cpi_calls = [params for api_name, params in client.calls if api_name == "cn_cpi"]
+        self.assertEqual(cpi_calls[0]["start_m"], "201407")
+        remaining = sorted(path.name for path in (self.raw_dir / "cn_cpi").glob("range=*.parquet"))
+        self.assertEqual(remaining, ["range=201407_latest.parquet"])
+        # The audit expects the file the downloader keeps, not the floor's.
+        expected = audit.expected_macro_paths(
+            self.raw_dir, common.MACRO_SPECS["cn_cpi"], "20200101", "20260603", args
+        )
+        self.assertEqual(expected, {backfilled})
+
     def test_macro_range_once_prunes_stale_end_suffixed_files(self):
         stale = self.raw_dir / "cn_cpi" / "range=202001_202605.parquet"
         pd.DataFrame([{"month": "202001"}]).pipe(
@@ -2020,6 +2066,59 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             self.assertEqual(severity, "warning")
             self.assertEqual(details["legacy_flat_partitions"], 1)
 
+    def test_index_weight_audit_follows_a_backfill_below_the_floor(self):
+        # The expected years start at the earliest backfilled year, per code
+        # never before the index listed in the vendor catalog: CSI 1000 listed
+        # 2014-10, STAR 50 2020-07, whose pre-launch years hold zero rows.
+        def write_year(code, year, months):
+            path = self.raw_dir / "index_weight" / f"index_code={code}" / f"year={year}.parquet"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(
+                [{"index_code": code, "con_code": "000001.SZ", "trade_date": f"{year}{m:02d}28", "weight": 1.0} for m in months],
+                columns=["index_code", "con_code", "trade_date", "weight"],
+            ).to_parquet(path, index=False)
+
+        def run_audit():
+            findings = []
+            audit.audit_index_weight(self.raw_dir, "20221231", lambda *item: findings.append(item))
+            return findings[0]
+
+        catalog = self.raw_dir / "index_basic" / "catalog.parquet"
+        catalog.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(
+            {"ts_code": ["000300.SH", "000852.SH", "000688.SH"], "list_date": ["20050408", "20141017", "20200723"]}
+        ).to_parquet(catalog, index=False)
+        with patch.object(audit, "DEFAULT_CN_INDEX_CODES", ["000300.SH", "000852.SH", "000688.SH"]):
+            for year in range(2020, 2023):
+                write_year("000300.SH", year, range(1, 13))
+                write_year("000852.SH", year, range(1, 13))
+            write_year("000688.SH", 2020, range(7, 13))
+            for year in (2021, 2022):
+                write_year("000688.SH", year, range(1, 13))
+            severity, _, _, details = run_audit()
+            self.assertEqual((severity, details["first_year"]), ("info", 2020))
+
+            # Backfilled from 2014-07: the first year is short and exempt.
+            write_year("000300.SH", 2014, range(7, 13))
+            for year in range(2015, 2020):
+                write_year("000300.SH", year, range(1, 13))
+            write_year("000852.SH", 2014, range(10, 13))
+            for year in range(2015, 2019):
+                write_year("000852.SH", year, range(1, 13))
+            for year in range(2014, 2020):
+                write_year("000688.SH", year, ())
+            severity, _, _, details = run_audit()
+            self.assertEqual(severity, "error")  # 000852.SH year=2019 never landed
+            self.assertEqual(details["first_year"], 2014)
+            self.assertEqual(details["missing_year_partitions"], 1)
+            self.assertIn("index_code=000852.SH/year=2019.parquet", details["missing_sample"][0])
+            self.assertEqual(details["zero_row_year_partitions"], 0)
+
+            write_year("000852.SH", 2019, range(1, 13))
+            severity, _, _, details = run_audit()
+            self.assertEqual(severity, "info")
+            self.assertEqual(details["expected_files"], 9 + 9 + 3)
+
     def test_index_weight_download_pages_per_year_and_skips_covered_years(self):
         source_rows = {
             2020: 7005,  # forces two pages at the 7,000-row source clamp
@@ -2048,7 +2147,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         client = WeightClient()
         with patch.object(download, "DEFAULT_CN_INDEX_CODES", ["000300.SH"]):
             download.download_index_weight(
-                client, self.raw_dir, "20190101", "20211231", False, None, False
+                client, self.raw_dir, "20190101", "20211231", common.RESEARCH_HISTORY_FLOOR, False, None, False
             )
             base = self.raw_dir / "index_weight" / "index_code=000300.SH"
             # The 2019 window is floored away; both years land as partitions.
@@ -2062,16 +2161,74 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             # the open year.
             calls_before = len(client.calls)
             download.download_index_weight(
-                client, self.raw_dir, "20190101", "20211231", False, None, False
+                client, self.raw_dir, "20190101", "20211231", common.RESEARCH_HISTORY_FLOOR, False, None, False
             )
             self.assertEqual(len(client.calls), calls_before)
             source_rows[2022] = 3
             download.download_index_weight(
-                client, self.raw_dir, "20190101", "20221231", False, None, False
+                client, self.raw_dir, "20190101", "20221231", common.RESEARCH_HISTORY_FLOOR, False, None, False
             )
             new_calls = client.calls[calls_before:]
             self.assertEqual({c["start_date"] for c in new_calls}, {"20220101"})
             self.assertEqual(len(pd.read_parquet(base / "year=2022.parquet")), 3)
+
+            # A backfill run lowers the floor: the years below it land (from
+            # the run's own start, mid-year included), the covered ones skip.
+            source_rows[2018] = 4
+            source_rows[2019] = 5
+            calls_before = len(client.calls)
+            download.download_index_weight(
+                client, self.raw_dir, "20180701", "20191231", "20180701", False, None, False
+            )
+            new_calls = client.calls[calls_before:]
+            self.assertEqual({c["start_date"] for c in new_calls}, {"20180701", "20190101"})
+            self.assertEqual(len(pd.read_parquet(base / "year=2018.parquet")), 4)
+            self.assertEqual(len(pd.read_parquet(base / "year=2019.parquet")), 5)
+
+    def test_history_floor_is_lowered_only_by_an_explicit_backfill_flag(self):
+        plain = argparse.Namespace()
+        backfill = argparse.Namespace(history_floor="20140701")
+        self.assertEqual(common.history_floor(common.RESEARCH_HISTORY_FLOOR, plain), "20200101")
+        self.assertEqual(common.history_floor(common.RESEARCH_HISTORY_FLOOR, backfill), "20140701")
+        # Never raised: a spec floor already below the flag stays where it is.
+        self.assertEqual(common.history_floor("20100101", backfill), "20100101")
+        parser = argparse.ArgumentParser()
+        download.add_download_parser(parser.add_subparsers(dest="command"))
+        parsed = parser.parse_args(["download", "--tier", "macro", "--history-floor", "20140701"])
+        self.assertEqual(parsed.history_floor, "20140701")
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parser.parse_args(["download", "--tier", "macro", "--history-floor", "2014-07-01"])
+
+    def test_macro_backfill_lowers_the_spec_floor_of_the_named_datasets(self):
+        # index_dailybasic keeps its own 2019 floor in every run but one that
+        # names --history-floor; index_daily's 2010 spec floor is not raised.
+        def run(**extra):
+            args = argparse.Namespace(
+                raw_dir=str(self.raw_dir),
+                tier="macro",
+                start_date="20170701",
+                end_date="20171231",
+                datasets=["index_dailybasic", "index_daily"],
+                cn_index_code=["000905.SH"],
+                force=False,
+                page_limit=None,
+                revision_ledger=str(self.root / "revision_events.jsonl"),
+                allow_empty_revision_overwrite=False,
+                min_interval_seconds=0,
+                timeout_seconds=1,
+                **extra,
+            )
+            client = CountingMacroClient()
+            with redirect_stdout(io.StringIO()), patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=client):
+                self.assertEqual(download.download_macro(args), 0)
+            return sorted((api, params["start_date"]) for api, params in client.calls)
+
+        self.assertEqual(run(), [("index_daily", "20170701")])
+        self.assertEqual(
+            run(history_floor="20140701"),
+            [("index_dailybasic", "20170701")],  # index_daily's 2017 year is covered now
+        )
+        self.assertTrue((self.raw_dir / "index_dailybasic" / "ts_code=000905.SH" / "year=2017.parquet").exists())
 
     def test_write_raw_generation_publishes_atomic_stamp(self):
         raw = self.root / "genraw"
@@ -7063,8 +7220,16 @@ class FullPortContractTest(unittest.TestCase):
         root = Path(__file__).resolve().parents[2]
         config = json.loads((root / "configs/tushare_update_schedule.json").read_text(encoding="utf-8"))
         # 29 since cn_preopen_text_backfill_0855 was retired (2026-09-10); 30
-        # since the minute layer left cn_evening_full for its own manual job.
-        self.assertEqual(len(config["jobs"]), 30)
+        # since the minute layer left cn_evening_full for its own manual job;
+        # 32 with the two research-history backfill jobs (2026-09-24).
+        self.assertEqual(len(config["jobs"]), 32)
+        for name, tier in (
+            ("manual_history_backfill_reference", "reference"),
+            ("manual_history_backfill_macro", "macro"),
+        ):
+            job = config["jobs"][name]
+            self.assertEqual((job["operation"], job["tier"]), ("download_tier", tier))
+            self.assertEqual(job["extra_args"][:2], ["--history-floor", "20140701"])
         self.assertIn("--no-include-intraday", config["jobs"]["cn_evening_full"]["extra_args"])
         self.assertEqual(config["jobs"]["manual_intraday_minutes"]["operation"], "intraday_by_date")
         self.assertEqual(

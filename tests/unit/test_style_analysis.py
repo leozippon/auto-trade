@@ -754,9 +754,15 @@ def test_membership_is_read_from_the_decision_view_and_every_slot(tmp_path: Path
     # An arm that did not select index_weight has no such rows, or columns.
     plain = slot("plain", [{"dataset": "index_daily", "ts_code": BENCHMARK_TS_CODE,
                             "trade_date": "20240628", "pct_chg": 0.1}])
+    # A mounted index_weight keeps its columns where its window holds no row
+    # of the benchmark (here: only another index's section).
+    other = slot("other", [weight("20240531", "000905.SH", "000009.SZ")])
 
     assert slot_membership([decision, replay, plain, tmp_path / "absent"], benchmark_index=BENCHMARK_TS_CODE) == {
         "20240531": frozenset({"000001.SZ"}),
         "20240628": frozenset({"000001.SZ", "000002.SZ"}),
     }
-    assert slot_membership([plain], benchmark_index=BENCHMARK_TS_CODE) == {}
+    # Unmounted and mounted-but-empty are different answers: only the first
+    # lets the panel fall back to the float-cap decile.
+    assert slot_membership([plain], benchmark_index=BENCHMARK_TS_CODE) is None
+    assert slot_membership([plain, other], benchmark_index=BENCHMARK_TS_CODE) == {}

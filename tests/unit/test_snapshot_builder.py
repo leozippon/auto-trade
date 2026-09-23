@@ -2569,6 +2569,41 @@ class SnapshotBuilderTest(unittest.TestCase):
                     DECISION, Path(tmp) / "snap", config
                 )
 
+    def test_a_view_before_the_fundamental_history_builds_only_without_fundamentals(self):
+        # An eight-year arm's first decision views predate the PIT fundamental
+        # index (the lake's starts 2020-01). A selection carrying fundamentals
+        # is refused there by name; one carrying none is not touched by the
+        # fundamental gates and builds.
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            events_root = Path(tmp) / "fund_events"
+            status_path = Path(tmp) / "fundamental_events_status.json"
+            build_raw(raw)
+            write(
+                events_root / "income_vip" / "available_month=202112.parquet",
+                pd.DataFrame(
+                    [{"dataset": "income_vip", "ts_code": "000001.SZ", "available_at": "2021-12-10T18:00:00+08:00", "available_at_rule": "source:f_ann_date_or_ann_date", "available_month": "202112", "business_key": "k1", "source_path": "x", "source_write_id": "w", "source_row_id": 0}]
+                ),
+            )
+            write_fundamental_status(status_path)
+            bare = SnapshotConfig(
+                events_datasets=(),
+                macro_datasets=(),
+                text_datasets=(),
+                fundamental_datasets=(),
+                include_intraday=False,
+                include_industry=False,
+            )
+            builder = SnapshotBuilder(raw, events_root, status_path)
+
+            with self.assertRaisesRegex(FileNotFoundError, "at or before 202110 .* income_vip"):
+                builder.build_decision_snapshot(
+                    DECISION, Path(tmp) / "with", replace(bare, fundamental_datasets=("income_vip",))
+                )
+            manifest = builder.build_decision_snapshot(DECISION, Path(tmp) / "without", bare)
+            self.assertEqual(manifest["domains"]["fundamentals"]["rows"], 0)
+            self.assertEqual(manifest["domains"]["fundamentals"]["datasets"], [])
+
     def test_fundamental_event_audit_scope_must_cover_enabled_datasets(self):
         with tempfile.TemporaryDirectory() as tmp:
             raw = Path(tmp) / "raw"

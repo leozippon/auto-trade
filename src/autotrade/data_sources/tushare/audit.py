@@ -29,14 +29,13 @@ from .common import (
     EVENT_FLOW_STATUS_PATH,
     FUNDAMENTAL_DATASETS,
     FUNDAMENTAL_SPECS,
-    INDEX_WEIGHT_START_DATE,
     INTEGRATED_DOC_REFS,
     INTRADAY_MINUTES_STATUS_PATH,
     MACRO_CONTEXT_STATUS_PATH,
     MACRO_DATASETS,
-    MACRO_RETAINED_FLOOR,
     MACRO_SPECS,
     REFERENCE_DATASETS,
+    RESEARCH_HISTORY_FLOOR,
     REVISION_SUMMARY_PATH,
     SEMANTIC_DOC_REFS,
     SHARE_FLOAT_ROW_LIMIT,
@@ -79,6 +78,7 @@ from .common import (
     quarter_periods,
     query_paged,
     read_many,
+    retained_range_start,
     safe_partition_value,
     select_datasets,
     selected_board_dc_hot_markets,
@@ -1156,22 +1156,46 @@ def audit_index_member_history(raw_dir: Path, classify_sw2014: pd.DataFrame, add
     has_error = details["missing_l1_partitions"] or details["blank_con_code"] or not files
     add("error" if has_error else "info", "index_member", "SW2014 legacy member table checks", details)
 
+def index_launch_years(raw_dir: Path) -> dict[str, int]:
+    """Listing year of each index in the vendor's own catalog (``index_basic``).
+
+    An index has no constituent section before it launched (CSI 1000 listed
+    2014-10-17, STAR 50 2020-07-23), so no year before its listing year is
+    expected of it. A catalog that cannot be read exempts nothing."""
+    path = raw_dir / "index_basic" / "catalog.parquet"
+    if not path.exists():
+        return {}
+    catalog = pd.read_parquet(path, columns=["ts_code", "list_date"]).dropna()
+    return {
+        str(code): int(str(listed)[:4])
+        for code, listed in zip(catalog["ts_code"], catalog["list_date"])
+        if str(listed)[:4].isdigit()
+    }
+
 def audit_index_weight(raw_dir: Path, end_date: str, add) -> None:
     """Core-index monthly constituent weights: per-code/per-year partitions.
 
     The source clamps unpaginated calls to 7,000 rows (most-recent-first), so
     truncation shows up as missing year partitions or closed years with fewer
     than 12 distinct publication months — both checked here. A code's first
-    year with data is exempt from the month check (index launch ramp)."""
+    year with data is exempt from the month check (index launch ramp, or a
+    backfill that began mid-year). The expected years run from the research-
+    history floor, or from the earliest year a backfill landed below it, but
+    never from before a code's listing year."""
     dataset_dir = raw_dir / "index_weight"
     end_year = int(end_date[:4])
-    years = list(range(int(INDEX_WEIGHT_START_DATE[:4]), end_year + 1))
+    on_disk = [int(path.stem.split("=", 1)[1]) for path in dataset_dir.glob("index_code=*/year=*.parquet")]
+    first_year = min([int(RESEARCH_HISTORY_FLOOR[:4]), *on_disk])
+    launched = index_launch_years(raw_dir)
     missing: list[str] = []
     zero_rows: list[str] = []
     short_months: dict[str, int] = {}
     rows_total = 0
+    expected_files = 0
     for code in DEFAULT_CN_INDEX_CODES:
         first_data_year: int | None = None
+        years = range(max(first_year, launched.get(code, first_year)), end_year + 1)
+        expected_files += len(years)
         for year in years:
             path = dataset_dir / f"index_code={safe_partition_value(code)}" / f"year={year}.parquet"
             if not path.exists():
@@ -1191,7 +1215,8 @@ def audit_index_weight(raw_dir: Path, end_date: str, add) -> None:
     legacy = sorted(str(path) for path in dataset_dir.glob("index_code=*.parquet"))
     details = {
         "codes": len(DEFAULT_CN_INDEX_CODES),
-        "expected_files": len(DEFAULT_CN_INDEX_CODES) * len(years),
+        "first_year": first_year,
+        "expected_files": expected_files,
         "rows": rows_total,
         "missing_year_partitions": len(missing),
         "zero_row_year_partitions": len(zero_rows),
@@ -2013,8 +2038,11 @@ def expected_macro_paths(raw_dir: Path, spec: MacroDataset, start_date: str, end
     if spec.strategy in {"quarter_once", "month_once"}:
         # Mirrors the downloader's retained floor: range pulls always cover
         # [floor, latest] and land in ONE canonical file regardless of the
-        # audit window, so the expectation must not follow start/end_date.
-        retained = max(min(start_date, MACRO_RETAINED_FLOOR), spec.start_date)
+        # audit window, so the expectation must not follow start/end_date --
+        # and a file a backfill landed below the floor keeps its own start.
+        retained = retained_range_start(
+            raw_dir / spec.api_name, max(min(start_date, RESEARCH_HISTORY_FLOOR), spec.start_date)
+        )
         if spec.strategy == "quarter_once":
             start_q = max(yyyymmdd_to_quarter(retained), spec.start_quarter)
             return {raw_dir / spec.api_name / f"range={start_q}_latest.parquet"}

@@ -150,21 +150,25 @@ def slot_benchmark(
 
 def slot_membership(
     slots: Sequence[Path], *, benchmark_index: str
-) -> dict[str, frozenset[str]]:
+) -> dict[str, frozenset[str]] | None:
     """The benchmark's constituents by cross-section date, over the given slots.
 
     ``index_weight`` rides in ``macro.parquet``: a replay slot carries the
     month-end cross-sections dated inside it and the decision view the history
-    before its anchor, so a span's table is the union over both. Empty when no
-    slot mounts the dataset -- it is a per-arm selection.
+    before its anchor, so a span's table is the union over both. None when no
+    slot mounts the dataset -- it is a per-arm selection, and a mounted one
+    writes its columns even where its window holds no row -- so an arm that
+    mounts it but whose release has no section of this index in the span gets
+    an empty mapping, never the unmounted answer.
     """
 
     columns = ["dataset", "index_code", "trade_date", "con_code"]
-    result: dict[str, frozenset[str]] = {}
+    result: dict[str, frozenset[str]] | None = None
     for slot in slots:
         path = Path(slot) / "macro.parquet"
         if not path.is_file() or not set(columns).issubset(pq.read_schema(path).names):
             continue
+        result = {} if result is None else result
         frame = pd.read_parquet(
             path,
             columns=columns,

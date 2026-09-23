@@ -57,8 +57,13 @@ def publish_release(
     for name in datasets:
         _write_pair(raw / name / "part.parquet")
     for code in benchmark_indexes:
-        _write_pair(raw / "index_daily" / f"ts_code={code}" / "year=2020.parquet")
-        _write_pair(raw / "index_weight" / f"index_code={code}" / "year=2020.parquet")
+        # Real footers: the create-time check reads each benchmark partition's
+        # first trade_date against research_start.
+        for dataset, key in (("index_daily", "ts_code"), ("index_weight", "index_code")):
+            _write_pair(
+                raw / dataset / f"{key}={code}" / "year=2020.parquet",
+                pd.DataFrame({"trade_date": ["20200102"]}),
+            )
     for day in trading_days:
         _write_pair(raw / "daily" / f"trade_date={day}.parquet")
     for year in sorted({day[:4] for day in trading_days}):
@@ -92,9 +97,12 @@ def publish_release(
     )
 
 
-def _write_pair(parquet: Path) -> None:
+def _write_pair(parquet: Path, frame: pd.DataFrame | None = None) -> None:
     if parquet.exists():
         return
     parquet.parent.mkdir(parents=True, exist_ok=True)
-    parquet.write_bytes(b"fixture")
+    if frame is None:
+        parquet.write_bytes(b"fixture")
+    else:
+        frame.to_parquet(parquet, index=False)
     parquet.with_suffix(".parquet.meta.json").write_text("{}\n", encoding="utf-8")

@@ -19,6 +19,7 @@ from autotrade.environment.replay import run_daily_replay
 from autotrade.environment.replay.null_control import (
     MATCHED_DECILE,
     MATCHED_MEMBERSHIP,
+    NullControlSetupError,
     RoundTrip,
     _candidate_pool,
     _distribution,
@@ -103,7 +104,7 @@ def _observed_result():
 
 def _pools(skeleton, frame: pd.DataFrame, membership=None):
     universe = _Universe(frame)
-    members = _Membership(membership) if membership else None
+    members = None if membership is None else _Membership(membership)
     return [_candidate_pool(trip, universe, members) for trip in skeleton]
 
 
@@ -331,12 +332,33 @@ def test_membership_matches_a_name_to_its_own_side_of_the_benchmark():
 
     assert {symbol for symbol, _quantity in inside} == {"600001.SH"}
     assert {symbol for symbol, _quantity in outside} == {"000003.SZ", "600002.SH"}
-    with pytest.raises(ValueError, match="no benchmark membership is dated before"):
+    with pytest.raises(NullControlSetupError, match="no benchmark membership is dated before"):
         _pools(
             [RoundTrip("000001.SZ", 1000, 10.0, _at(DAYS[0], "09:30"), None)],
             frame,
             membership,
         )
+
+
+def test_a_mounted_membership_that_misses_the_span_fails_before_any_draw():
+    """An arm that mounts ``index_weight`` is graded on membership in every
+    span. Where its release holds no section before the span's entries -- an
+    eight-year arm on a release whose constituents start in 2020 -- the panel
+    must fail by name, never quietly draw the float-cap decile for this span
+    while the arm's other spans draw membership."""
+    arguments = (
+        _observed_result(),
+        _frame(),
+        BENCHMARK,
+        BrokerProfile(),
+        StrategySchedule("day", "08:30"),
+    )
+
+    with pytest.raises(NullControlSetupError, match="no section of the benchmark"):
+        run_null_control(*arguments, k=2, seed=3, membership={})
+    with pytest.raises(NullControlSetupError, match="first section of the benchmark is"):
+        run_null_control(*arguments, k=2, seed=3, membership={DAYS[3]: set(SMALL)})
+    assert run_null_control(*arguments, k=2, seed=3)["matched"] == MATCHED_DECILE
 
 
 def test_excess_percentile_is_the_share_of_null_runs_at_or_below_the_observed():

@@ -569,6 +569,13 @@ def resolve_worker_options(
         if data_backend == "pit"
         else (None, None)
     )
+    default_geometry = rolling_default("geometry")
+    geometry = ResearchGeometry(
+        **{
+            name: params.get(name, getattr(default_geometry, name))
+            for name in GEOMETRY_PARAMETERS
+        }
+    )
     # None: a pre-flight without a named seed reads no data (see the docstring).
     trading_days: list[str] | None = None
     if data_backend == "daily":
@@ -607,21 +614,18 @@ def resolve_worker_options(
             release_raw_dir = release.raw_dir
             trading_days = load_sse_trading_days(release.raw_dir)
         # The benchmark the arm will be graded against has to exist in the
-        # release it pins, and a create request is the last place that can say
-        # so: by replay end the missing series is only an unmeasured verdict.
+        # release it pins, from before the research period on, and a create
+        # request is the last place that can say so: by replay end the missing
+        # series is only an unmeasured verdict.
         if release_raw_dir is not None:
             require_benchmark_index(
-                release_raw_dir, benchmark_index, datasets=required_raw_datasets
+                release_raw_dir,
+                benchmark_index,
+                datasets=required_raw_datasets,
+                research_start=geometry.research_start,
             )
     if trading_days is not None and not trading_days:
         raise ValueError("daily Parquet has no trading days")
-    default_geometry = rolling_default("geometry")
-    geometry = ResearchGeometry(
-        **{
-            name: params.get(name, getattr(default_geometry, name))
-            for name in GEOMETRY_PARAMETERS
-        }
-    )
     if trading_days is not None:
         # The release must reach into Held-out; the forward replay clips the
         # Held-out slot to its last trading day.

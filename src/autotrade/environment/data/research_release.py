@@ -23,6 +23,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
+import pandas as pd
+import pyarrow.parquet as pq
+
 from autotrade.data_quality import read_quality_report
 from autotrade.environment.data.contracts import (
     DOMAIN_REPORT_TYPES,
@@ -84,8 +87,27 @@ def _require_raw_datasets(raw_dir: Path, required: tuple[str, ...], *, context: 
 _BENCHMARK_INDEX_PARTITION_KEYS = {"index_daily": "ts_code", "index_weight": "index_code"}
 
 
+def _first_trade_date(partition_dir: Path) -> str | None:
+    """Earliest ``trade_date`` held under one benchmark partition directory.
+
+    Its files are ``year=YYYY.parquet``: the earliest year with any row decides,
+    and zero-row years (an index before it launched) are skipped by their
+    footer alone.
+    """
+
+    for path in sorted(partition_dir.glob("year=*.parquet")):
+        if pq.ParquetFile(path).metadata.num_rows:
+            dates = pd.read_parquet(path, columns=["trade_date"])["trade_date"]
+            return str(dates.astype(str).str.replace("-", "").str[:8].min())
+    return None
+
+
 def require_benchmark_index(
-    raw_dir: str | Path, benchmark_index: str, *, datasets: tuple[str, ...]
+    raw_dir: str | Path,
+    benchmark_index: str,
+    *,
+    datasets: tuple[str, ...],
+    research_start: str,
 ) -> None:
     """Refuse a ``benchmark_index`` the pinned release cannot key a replay on.
 
@@ -93,26 +115,47 @@ def require_benchmark_index(
     of its constituent table, and both are read only at replay end, where a
     missing one degrades to an unmeasured benchmark and an unmeasurable
     verdict. A release that predates an index therefore has to be refused where
-    the arm names it. Only the datasets the arm actually consumes are checked
-    (``datasets`` is its ``required_release_raw_datasets``): an arm that mounts
-    no ``index_weight`` draws its zero-skill panel on the float-cap decile, and
-    one that mounts no macro domain has no benchmark series by its own
-    configuration -- neither is this parameter's doing.
+    the arm names it -- and so does one whose history of the index starts
+    inside the research period: without a bar before ``research_start`` the
+    first research year has no benchmark return to neutralize against, and
+    without a constituent section dated before it the zero-skill panel has no
+    membership to match the first entries on. Only the datasets the arm
+    actually consumes are checked (``datasets`` is its
+    ``required_release_raw_datasets``): an arm that mounts no ``index_weight``
+    draws its zero-skill panel on the float-cap decile, and one that mounts no
+    macro domain has no benchmark series by its own configuration -- neither is
+    this parameter's doing.
     """
 
     label = benchmark_index_label(benchmark_index)
     root = Path(raw_dir)
-    missing = [
-        f"{dataset}/{key}={benchmark_index}"
+    mounted = [
+        (dataset, root / dataset / f"{key}={benchmark_index}")
         for dataset, key in _BENCHMARK_INDEX_PARTITION_KEYS.items()
         if dataset in datasets
-        and not _dataset_dir_populated(root / dataset / f"{key}={benchmark_index}")
+    ]
+    missing = [
+        f"{partition.parent.name}/{partition.name}"
+        for _dataset, partition in mounted
+        if not _dataset_dir_populated(partition)
     ]
     if missing:
         raise ValueError(
             f"benchmark_index {benchmark_index} ({label}) is absent from research release "
             f"{root}: {missing}; pick an index the release carries or recreate the "
             "experiment on a release that includes it"
+        )
+    late = {
+        f"{dataset}/{partition.name}": first
+        for dataset, partition in mounted
+        if (first := _first_trade_date(partition)) is None or first >= research_start
+    }
+    if late:
+        raise ValueError(
+            f"benchmark_index {benchmark_index} ({label}) has no history before research_start "
+            f"{research_start} in research release {root}: earliest trade_date {late}; the first "
+            "research year could not be graded against it. Start research later, or recreate "
+            "the experiment on a release whose history of this index reaches back before it"
         )
 
 

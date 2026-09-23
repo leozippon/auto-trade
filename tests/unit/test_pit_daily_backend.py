@@ -2299,12 +2299,13 @@ def _mount_second_index(
 def test_an_arm_replays_grades_and_records_its_own_benchmark_index(tmp_path: Path) -> None:
     """``benchmark_index`` keys the benchmark series, the panel and the record.
 
-    The same slots, the same revision, two arms: the default one is measured
-    against CSI 300 and its panel falls back to the float-cap decile because
-    CSI 300 has no cross-section here, while the CSI 500 arm regresses on the
-    000905.SH series and draws its zero-skill replacements from 000905.SH
-    membership. Both results carry the index they were graded against, so
-    neither can be read without knowing its benchmark.
+    The same slots, the same revision, two arms: the CSI 500 arm regresses on
+    the 000905.SH series and draws its zero-skill replacements from 000905.SH
+    membership. The default arm is measured against CSI 300, and while the
+    mounted ``index_weight`` holds no CSI 300 cross-section its panel refuses
+    by name instead of falling back to the float-cap decile; once one is there
+    it draws from CSI 300 membership. Both results carry the index they were
+    graded against, so neither can be read without knowing its benchmark.
     """
 
     snapshot, slots = _write_span_release(tmp_path)
@@ -2325,9 +2326,24 @@ def test_an_arm_replays_grades_and_records_its_own_benchmark_index(tmp_path: Pat
     csi500 = PITDailyEvaluationBackend(
         tmp_path / "results_csi500", execution_mode="trusted", benchmark_index="000905.SH"
     ).evaluate(request)
-    default = PITDailyEvaluationBackend(
+    backend = PITDailyEvaluationBackend(
         tmp_path / "results_default", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX
-    ).evaluate(request)
+    )
+    with pytest.raises(NullControlSetupError, match="no section of the benchmark"):
+        backend.evaluate(request)
+    chmod_tree(snapshot, file_mode=0o644, dir_mode=0o755)
+    _append_macro(
+        snapshot / "macro.parquet",
+        [
+            {
+                "dataset": "index_weight", "index_code": DEFAULT_BENCHMARK_INDEX, "con_code": code,
+                "trade_date": "20231229", "available_at": _stamp("20231229", "23:59:59"),
+            }
+            for code in ("000003.SZ",)
+        ],
+    )
+    chmod_tree(snapshot, file_mode=0o444, dir_mode=0o555)
+    default = backend.evaluate(request)
 
     graded, plain = analysis_of(csi500), analysis_of(default)
     assert graded["benchmark"] == {"ts_code": "000905.SH", "label": "中证500"}
@@ -2337,10 +2353,9 @@ def test_an_arm_replays_grades_and_records_its_own_benchmark_index(tmp_path: Pat
     assert {value for _day, value in plain["benchmark_daily"]} == {0.005}
     assert "中证500" in graded["neutralized_excess"]["method"]
     assert "沪深300" in plain["neutralized_excess"]["method"]
-    # The panel draws replacements from the arm's own membership; the default
-    # arm's index has no cross-section here, so it falls back to the decile.
+    # The panel draws replacements from each arm's own membership.
     assert graded["panel"]["matched"] == "index_membership+affordability"
-    assert plain["panel"]["matched"] == "circ_mv_decile+affordability"
+    assert plain["panel"]["matched"] == "index_membership+affordability"
     # The result record itself names the benchmark beside its figures.
     record = json.loads(Path(csi500.result_ref).read_text(encoding="utf-8"))
     benchmark = record["stats"]["benchmark"]

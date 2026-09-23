@@ -1016,6 +1016,32 @@ class PitViewsSeedParameterTest(unittest.TestCase):
             options = self._resolve(repo_root, {**named, "benchmark_index": "000905.SH"})
             self.assertEqual(options.rolling.benchmark_index, "000905.SH")
 
+    def test_a_benchmark_history_that_starts_inside_research_fails_the_create(self) -> None:
+        """An eight-year arm is refused where it names a release whose
+        benchmark history starts after its research start, not graded with
+        unmeasured first years; the four-year geometry on the same release is
+        accepted."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "experiments").mkdir()
+            selection = {"macro_datasets": ["index_daily", "index_weight"]}
+            self._seed(repo_root, "pit_views_seed_bench", selection)  # history from 20200102
+            named = {
+                **selection,
+                "pit_views_seed": "data/pit_views_seed_bench",
+                "benchmark_index": "000905.SH",
+            }
+            with self.assertRaises(ValueError) as caught:
+                self._resolve(repo_root, {**named, "research_start": "20170701"})
+            message = str(caught.exception)
+            self.assertIn("no history before research_start 20170701", message)
+            self.assertIn("index_daily/ts_code=000905.SH", message)
+            self.assertIn("index_weight/index_code=000905.SH", message)
+            options = self._resolve(repo_root, named)
+            self.assertEqual(options.rolling.geometry.research_start, "20210701")
+
     def test_a_named_seed_binds_the_release_it_was_built_from(self) -> None:
         """The nightly chain commits a new generation every night. An experiment
         naming a seed pins the release that seed was built from, so the worker
