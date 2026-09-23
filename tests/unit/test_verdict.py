@@ -658,6 +658,27 @@ def test_the_freeze_gate_refuses_zero_skill_an_uneven_edge_and_a_broken_mandate(
     assert gate(two_of_four, min_positive_year_share=0.5)["passed"]
 
 
+def test_the_freeze_gate_names_a_deflated_sharpe_it_cannot_compute():
+    """A book identical to its zero-skill panel grades an all-zero active
+    series: no tracking error, so no IR and no deflated Sharpe probability. The
+    gate says the probability is unavailable rather than judging a ``None``."""
+
+    research = _weekdays("20210701", "20250630")
+    days, strategy, benchmark, size = _segment(research, 0.10, np.random.default_rng(116))
+    copy = _with_panel(_analysis((days, strategy, benchmark, size)), strategy)
+
+    gate = verdict.freeze_gate(copy, trials=2, full_span_validations=2)
+
+    assert gate["series"] == "active" and gate["information_ratio"] is None
+    assert gate["deflated_sharpe"]["deflated_sharpe_probability"] is None
+    assert gate["deflated_sharpe"]["unavailable_reason"] == "no_observed_sharpe"
+    assert not gate["passed"]
+    assert gate["reasons"] == [
+        "freeze_information_ratio_below_threshold",
+        "freeze_deflated_sharpe_unavailable",
+    ]
+
+
 def test_the_forward_mandate_and_active_drawdown_fail_at_their_boundaries():
     rng = np.random.default_rng(121)
     days, active, benchmark, size = _segment(FORWARD_DAYS, 0.30, rng, te=0.05, beta=0.0)

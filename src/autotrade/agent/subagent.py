@@ -68,8 +68,9 @@ from .prompts import (
 )
 
 SUBAGENT_THINKING_LEVELS = ("off", "low", "medium", "xhigh")
-# Read-compatible aliases from older traces and prompts; on the wire they were
-# never distinct from xhigh.
+# Read-compatible aliases from older traces and prompts, each mapped to the
+# level the gateway always sent for it (``_qwen_reasoning_effort``): minimal
+# was low on the wire, high and max were xhigh.
 _LEGACY_THINKING_ALIASES = {"minimal": "low", "high": "xhigh", "max": "xhigh"}
 # Children a parent may run at once; the rest queue in the same pool.
 # Six because the cap, not the model gateway, was the binding constraint:

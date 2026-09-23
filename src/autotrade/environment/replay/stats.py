@@ -493,9 +493,11 @@ def attach_cost_sensitivity(
     ``breakeven_extra_slippage_bps`` is how much worse execution the excess
     return survives and ``excess_at_2x_slippage`` is the excess left if the
     modelled slippage doubles. The block is always written — turnover and the
-    profile's slippage are always known — but the two excess-derived fields
-    stay ``None`` with a ``reason`` when they cannot be stated, rather than
-    reporting a fabricated zero. The evaluation backend owns the broker profile,
+    profile's slippage are always known — but a field that cannot be stated
+    stays ``None`` with a ``reason`` rather than a fabricated zero: both without
+    a benchmark excess, and only the break-even when the excess is not positive
+    or nothing traded (the 2x stress is then still stated; without turnover it
+    is the excess itself). The evaluation backend owns the broker profile,
     so it closes this block here, beside the benchmark join.
     """
 

@@ -1525,7 +1525,7 @@ class SnapshotBuilder:
             if writer is not None:
                 try:
                     writer.close()
-                except Exception:  # noqa: BLE001 - preserve the original build error
+                except Exception:  # noqa: BLE001, S110 - preserve the original build error
                     pass
             tmp.unlink(missing_ok=True)
 
