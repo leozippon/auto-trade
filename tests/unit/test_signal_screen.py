@@ -137,6 +137,38 @@ def test_planted_signal_is_recovered_and_noise_is_not(tmp_path: Path) -> None:
     assert abs(one["ic_mean"]) < 0.05 and abs(one["t_stat"]) < 2.5
 
 
+def test_top_excess_is_relative_to_the_scored_pool_not_the_market(tmp_path: Path) -> None:
+    """A pool that outruns the market is not top-decile skill; a predictive score within it still is."""
+    rng = np.random.default_rng(7)
+    days, names, pool = 90, 200, 100
+    dates = list(pd.bdate_range("2021-01-04", periods=days).strftime("%Y%m%d"))
+    codes = [f"{i:06d}.SZ" for i in range(1, names + 1)]
+    factor = rng.standard_normal((days, names))
+    returns = rng.standard_normal((days, names)) * 0.01
+    returns[1:] += 0.02 * factor[:-1]
+    returns[:, :pool] += 0.02  # the index pool the signal is defined on outruns the rest of the market
+    opens = 10.0 * np.cumprod(1.0 + np.vstack([np.zeros((1, names)), returns[:-1]]), axis=0)
+    view = tmp_path / "view"
+    _write_view(view, _panel_frame(opens, dates, codes))
+    keys = {"trade_date": np.repeat(dates, pool), "ts_code": np.tile(codes[:pool], days)}
+    pd.DataFrame({**keys, "score": rng.standard_normal(days * pool)}).to_parquet(tmp_path / "coin.parquet", index=False)
+    pd.DataFrame({**keys, "score": factor[:, :pool].ravel()}).to_parquet(tmp_path / "planted.parquet", index=False)
+
+    adj_open = screen.Panel(screen.Frames(view), None).adj_open
+    coin = _run(view, _reads_parquet(tmp_path / "coin.py", tmp_path / "coin.parquet"))
+    for row in coin["horizons"]:
+        ret = screen.forward_returns(adj_open, row["horizon"])
+        premium = float((ret.iloc[:, :pool].mean(axis=1) - ret.mean(axis=1)).dropna().mean())
+        # Against the whole market the same top set would read the pool premium as skill.
+        assert premium > 0.008
+        assert abs(row["ic_mean"]) < 0.05
+        assert abs(row["top_excess_mean"]) < 0.1 * premium
+
+    planted = _run(view, _reads_parquet(tmp_path / "planted.py", tmp_path / "planted.parquet"))
+    one = planted["horizons"][0]
+    assert one["ic_mean"] > 0.5 and one["top_excess_mean"] > 0.02 and one["top_excess_hit"] > 0.9
+
+
 def test_forward_returns_use_next_open_adjusted_and_skip_untradable_entries(tmp_path: Path) -> None:
     dates = ["20210104", "20210105", "20210106", "20210107", "20210108"]
     codes = ["A", "B", "C"]

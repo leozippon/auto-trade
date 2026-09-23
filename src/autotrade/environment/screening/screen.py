@@ -87,8 +87,11 @@ METRICS (per horizon h, over scored days within --start..--end)
                            cross-sectionally each day
   top_excess / top_hit     mean h-day return of the top --top-fraction names by
                            score that are tradable at the t+1 open, minus the
-                           equal-weight mean of all names with a return that
-                           day; hit = share of days with positive excess
+                           equal-weight mean return of the scored names (non-NaN
+                           score that day), the pool the IC ranks, not the whole
+                           market: a signal scored on one index pool is measured
+                           against that pool; hit = share of days with positive
+                           excess
   turnover                 share of the top set that is new versus the previous
                            day (daily rebalance); rank_autocorr =
                            Spearman(score(t), score(t-1))
@@ -490,7 +493,9 @@ def run_screen(
         ic = _summary(rank_ic(score, ret, min_names), horizon)
         marginal = _summary(rank_ic(score, forward_returns(panel.adj_open, horizon, previous).iloc[window], min_names), horizon)
         neutral_ic = _summary(rank_ic(neutral, ret, min_names), horizon)
-        excess = (ret.where(top).mean(axis=1) - ret.mean(axis=1)).where(usable & (top_count > 0))
+        # Benchmark = the scored names (the pool the IC ranks), not the market, so a
+        # signal defined on one index pool is not credited with that pool's premium.
+        excess = (ret.where(top).mean(axis=1) - ret.where(scored).mean(axis=1)).where(usable & (top_count > 0))
         top_stats = _summary(excess, horizon)
         horizon_reports.append(
             {
