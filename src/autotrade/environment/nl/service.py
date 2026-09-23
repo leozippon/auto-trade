@@ -405,6 +405,8 @@ class NLService:
         event_filter = _parse_event_filter(request.get("event_filter"), ts_code=ts_code)
         if event_filter is not None and mode != "answer":
             raise ValueError("event_filter applies only to mode=answer")
+        if event_filter is not None and self.llm is None:
+            raise ValueError("event_filter requires an NL model; none is configured for this evaluation")
         return query, mode, limit, ts_code, choices, event_filter  # type: ignore[return-value]
 
     def _snapshot_evidence(

@@ -523,6 +523,25 @@ def test_event_filter_validation_rejects_every_malformed_shape(tmp_path: Path):
     service.close()
 
 
+def test_event_filter_without_a_model_is_refused_before_the_budget(tmp_path: Path):
+    # A baseline-mode or model-less Paper evaluation cannot answer a declared
+    # predicate; it must refuse with a named reason, not charge a call that no
+    # outcome bucket explains.
+    service = NLService.from_snapshot(stock_snapshot(tmp_path / "snap"), llm=None)
+    with pytest.raises(ValueError, match="requires an NL model"):
+        service.query(
+            {
+                "query": "是否有减持",
+                "mode": "answer",
+                "ts_code": "000001.SZ",
+                "event_filter": {"patterns": ["减持"], "lookback_days": 400},
+            },
+            inference_at=NOW,
+        )
+    assert service.calls == 0
+    service.close()
+
+
 class _noop:
     def __enter__(self):
         return self
