@@ -773,6 +773,10 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     def trading_snapshot(env: str, book: str):
         return _trading_book(env, book, trading.snapshot_payload)
 
+    @app.get("/api/trading/{env}/books/{book}/pnl")
+    def trading_pnl(env: str, book: str):
+        return _trading_book(env, book, trading.pnl_payload)
+
     @app.get("/api/trading/{env}/health")
     def trading_health(env: str):
         return trading.health_payload(root, _trading_env(env))

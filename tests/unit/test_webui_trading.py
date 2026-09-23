@@ -22,9 +22,14 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
+from autotrade.environment.broker import BrokerProfile
+from autotrade.environment.replay.engine import StrategyDataView
+from autotrade.environment.replay.market import DailyMarketData
+from autotrade.paper import DailyPaperEngine
 from autotrade.paper.book import SOURCE_HISTORY_NAME, copy_source_history
 from autotrade.paper.orders import order_sheet
 from autotrade.paper.pit import newest_replay_slot
+from autotrade.paper.storage import read_jsonl
 from autotrade.pipelines.ledger import ExperimentLedger, forward_record
 from autotrade.webui import trading
 from autotrade.webui.equity import result_equity_payload
@@ -34,7 +39,7 @@ from tests.unit.webui_research_arm import REPLAY, build_arm
 
 BOOK = "exp"
 # The panels one book's page reads, each under /api/trading/<env>/books/<book>/.
-BOOK_ROUTES = ("status", "book", "signal", "history", "performance", "snapshot")
+BOOK_ROUTES = ("status", "book", "signal", "history", "performance", "snapshot", "pnl")
 
 
 def _jsonl(path: Path, *payloads: object) -> None:
@@ -311,14 +316,16 @@ def test_missing_and_damaged_book_files_degrade_per_panel(tmp_path: Path):
     with pytest.raises(KeyError):
         trading.signal_payload(tmp_path, BOOK)  # not a book under the root
     write_book_record(paper_root(tmp_path) / BOOK)  # created, never run
-    for projection in (trading.signal_payload, trading.history_payload, trading.performance_payload):
+    for projection in (
+        trading.signal_payload, trading.history_payload, trading.performance_payload, trading.pnl_payload,
+    ):
         assert projection(tmp_path, BOOK)["state"] == "absent", projection.__name__
     assert trading.book_status(tmp_path, BOOK)["state"] == "no_snapshot"
     # Created, never run: nothing has settled, so the card counts no holdings.
     assert trading.books_payload(tmp_path)["books"][0]["position_count"] is None
     root = engine_book(tmp_path, "20260105", "20260106")
     (root / ".paper_state.json").write_text("{broken", encoding="utf-8")
-    for projection in (trading.book_payload, trading.signal_payload, trading.history_payload):
+    for projection in (trading.book_payload, trading.signal_payload, trading.history_payload, trading.pnl_payload):
         payload = projection(tmp_path, BOOK)
         assert payload["state"] == "unreadable" and payload["error"], projection.__name__
     assert trading.book_status(tmp_path, BOOK)["state"] == "unreadable"
@@ -422,6 +429,172 @@ def test_the_overview_has_one_row_per_book_read_off_its_panels(tmp_path: Path):
     write_book_record(paper_root(tmp_path))
     assert trading.books_payload(tmp_path)["state"] == "unreadable"
     assert trading.health_payload(tmp_path)["ok"] is False
+
+
+# ---- profit and loss ---------------------------------------------------------
+
+PNL_SESSIONS = ("20260102", "20260105", "20260106", "20260107", "20260108")
+PNL_A, PNL_B = "000001.SZ", "000002.SZ"
+# Day one buys both names, day two sells part of A, and day three opens on B's
+# ex-date (0.50 CNY cash a share) and sells all of B: a partial sell, a
+# dividend and a closed position, every fill paying the default A-share costs.
+PNL_PLAN = {
+    "20260105": [(PNL_A, "buy", 1000), (PNL_B, "buy", 500)],
+    "20260106": [(PNL_A, "sell", 400)],
+    "20260107": [(PNL_B, "sell", 500)],
+}
+
+
+class _PnlData:
+    """Bars of both names and B's ex-date table through ``release_end``."""
+
+    def __init__(self, release_end: str) -> None:
+        rows = []
+        for symbol, closes, pre_closes in (
+            (PNL_A, (10.2, 10.5, 10.6, 10.4), (10.0, 10.2, 10.5, 10.6)),
+            # The ex-date resets the pre-close to the last close less the cash.
+            (PNL_B, (20.5, 21.0, 20.8, 20.9), (20.0, 20.5, 20.5, 20.8)),
+        ):
+            for day, close, pre_close in zip(PNL_SESSIONS[1:], closes, pre_closes, strict=True):
+                if day <= release_end:
+                    rows.append({
+                        "ts_code": symbol, "trade_date": day, "open": pre_close + 0.1, "close": close,
+                        "pre_close": pre_close, "up_limit": round(pre_close * 1.1, 2),
+                        "down_limit": round(pre_close * 0.9, 2),
+                    })
+        actions = pd.DataFrame([{"ts_code": PNL_B, "ex_date": "20260107", "cash_per_share": 0.5}])
+        columns = ["ts_code", "trade_date", "open", "close", "pre_close", "up_limit", "down_limit"]
+        self.market = DailyMarketData(pd.DataFrame(rows, columns=columns), actions)
+        self.sessions = PNL_SESSIONS
+        self.release_end = release_end
+        self.generation_id = release_end
+        self.nl_query = None
+
+    def context_data(self, inference_at):
+        return StrategyDataView()
+
+    def execution_price(self, symbol, when):
+        return None
+
+    def references(self, symbols, before):
+        return {symbol: {"name": {PNL_A: "平安银行", PNL_B: "万科A"}[symbol], "close": 10.0} for symbol in symbols}
+
+    def close(self) -> None:
+        pass
+
+
+class _Plan:
+    def execute(self, context):
+        at = context.inference_at.strftime("%Y-%m-%dT09:30:00+08:00")
+        plan = PNL_PLAN.get(context.inference_at.strftime("%Y%m%d"), [])
+        return [{"symbol": symbol, "action": action, "quantity": quantity, "execute_at": at} for symbol, action, quantity in plan]
+
+    def close(self) -> None:
+        pass
+
+
+def _pnl_book(repo_root: Path) -> Path:
+    """The book the real engine writes for ``PNL_PLAN``, settled through 20260107."""
+    root = paper_root(repo_root) / BOOK
+    write_book_record(root)
+    strategy = root / "strategy" / "main.py"
+    strategy.parent.mkdir(parents=True)
+    strategy.write_text("def generate_orders(context):\n    return []\n", encoding="utf-8")
+    engine = DailyPaperEngine(
+        strategy_path=strategy,
+        strategy_revision="revision_1",
+        state_root=root,
+        data_factory=lambda _start, day: _PnlData(max(session for session in PNL_SESSIONS if session < day)),
+        profile=BrokerProfile(initial_cash=100_000.0),
+        executor_factory=lambda *_mounts: _Plan(),
+    )
+    for day in PNL_SESSIONS[1:]:
+        engine.run_day(day)
+    return root
+
+
+def test_each_names_pnl_sums_to_the_account_total_of_a_real_book(tmp_path: Path):
+    root = _pnl_book(tmp_path)
+    payload = trading.pnl_payload(tmp_path, BOOK)
+    assert (payload["state"], payload["error"], payload["mark_date"]) == ("ok", None, "20260107")
+    # The account total is the account the other panels show, less the initial cash.
+    snapshot = trading.snapshot_payload(tmp_path, BOOK)["snapshot"]
+    statistics = trading.performance_payload(tmp_path, BOOK)["statistics"]
+    assert payload["equity"] == pytest.approx(snapshot["equity"], abs=1e-9)
+    assert payload["total_pnl"] == pytest.approx(snapshot["equity"] - 100_000.0, abs=1e-9)
+    assert payload["total_return"] == pytest.approx(statistics["total_return"], abs=1e-12)
+    # The identity: the names sum to the account total, to the cent and far below it.
+    rows = payload["instruments"]
+    assert payload["residual"] == 0.0
+    assert abs(payload["total_pnl"] - sum(row["total_pnl"] for row in rows)) < 1e-6
+    assert payload["instruments_pnl"] == pytest.approx(sum(row["total_pnl"] for row in rows), abs=1e-9)
+    assert [row["total_pnl"] for row in rows] == sorted((row["total_pnl"] for row in rows), reverse=True)
+
+    fills = [row for day in PNL_SESSIONS for row in read_jsonl(root / f"executions_{day}.jsonl")[0]]
+    assert [row["status"] for row in fills] == ["filled"] * 4
+
+    def cash_flows(symbol: str) -> tuple[float, float]:
+        """(buy outlay, sale proceeds) of one name, straight from its fills."""
+        mine = [row for row in fills if row["symbol"] == symbol]
+        outlay = sum(row["price"] * row["quantity"] + row["commission"] for row in mine if row["action"] == "buy")
+        proceeds = sum(
+            row["price"] * row["quantity"] - row["commission"] - row["stamp_duty"]
+            for row in mine if row["action"] == "sell"
+        )
+        return outlay, proceeds
+
+    a, b = (next(row for row in rows if row["symbol"] == symbol) for symbol in (PNL_A, PNL_B))
+    # A: 600 of 1000 shares still held, marked at the 20260107 close.
+    [sale] = [row for row in fills if row["symbol"] == PNL_A and row["action"] == "sell"]
+    assert (a["name"], a["quantity"], a["last_price"], a["market_value"]) == ("平安银行", 600, 10.6, 600 * 10.6)
+    assert a["unrealized_pnl"] == pytest.approx(600 * (10.6 - a["average_cost"]))
+    assert a["realized_pnl"] == sale["realized_pnl"]
+    assert a["commission"] == pytest.approx(sum(row["commission"] for row in fills if row["symbol"] == PNL_A))
+    assert a["stamp_duty"] == sale["stamp_duty"] > 0 and a["dividends"] == 0.0
+    # Checked against the fills' own cash, not the Broker's cost basis: the
+    # fees are inside the total once, not subtracted a second time.
+    outlay, proceeds = cash_flows(PNL_A)
+    assert a["total_pnl"] == pytest.approx(600 * 10.6 + proceeds - outlay)
+    # B: closed on its ex-date, so it shows realized P&L only, and the 250 CNY
+    # of dividend it collected is inside that figure rather than added to it.
+    assert (b["quantity"], b["average_cost"], b["last_price"], b["market_value"], b["unrealized_pnl"]) == (
+        0, None, None, None, None,
+    )
+    assert b["dividends"] == pytest.approx(250.0)
+    assert b["total_pnl"] == b["realized_pnl"]
+    outlay, proceeds = cash_flows(PNL_B)
+    assert b["total_pnl"] == pytest.approx(proceeds + 250.0 - outlay)
+    # Per-name costs add up to the totals the performance panel prints.
+    assert sum(row["commission"] for row in rows) == pytest.approx(statistics["fees"])
+    assert sum(row["stamp_duty"] for row in rows) == pytest.approx(statistics["stamp_duty"])
+
+    response = TestClient(create_app(tmp_path)).get(f"/api/trading/paper/books/{BOOK}/pnl")
+    assert response.status_code == 200 and response.json() == payload
+
+
+def test_a_per_name_view_that_cannot_be_read_whole_is_withheld_with_its_reason(tmp_path: Path):
+    root = _pnl_book(tmp_path)
+    total = trading.pnl_payload(tmp_path, BOOK)["total_pnl"]
+    journal = root / "executions_20260106.jsonl"
+    intact = journal.read_text(encoding="utf-8")
+    [sale] = [json.loads(line) for line in intact.splitlines()]
+    # A filled sell without its realized P&L would silently count as zero.
+    del sale["realized_pnl"]
+    for damaged in (json.dumps(sale) + "\n", intact + "{ truncated\n"):
+        journal.write_text(damaged, encoding="utf-8")
+        payload = trading.pnl_payload(tmp_path, BOOK)
+        assert (payload["state"], payload["total_pnl"]) == ("ok", total)
+        assert (payload["instruments"], payload["instruments_pnl"], payload["residual"]) == (None, None, None)
+        assert "executions_20260106.jsonl" in payload["instruments_error"]
+    # A checkpoint position without its cost leaves nothing to measure.
+    state = json.loads((root / ".paper_state.json").read_text(encoding="utf-8"))
+    state["account"]["positions"][0]["average_cost"] = None
+    (root / ".paper_state.json").write_text(json.dumps(state), encoding="utf-8")
+    payload = trading.pnl_payload(tmp_path, BOOK)
+    assert (payload["state"], payload["total_pnl"]) == ("unreadable", None) and payload["error"]
+    # A book that has decided its first session but settled none has no P&L yet.
+    engine_book(tmp_path, "20260105", book="fresh")
+    assert trading.pnl_payload(tmp_path, "fresh")["state"] == "absent"
 
 
 # ---- the snapshot state machine ---------------------------------------------
@@ -759,7 +932,9 @@ def test_prices_keep_their_cents_and_only_large_amounts_abbreviate():
         "¥5,922.00", "¥43.50", "¥-881.40", "¥14.6万", "¥2.50亿", "—",
     ]
     # Every price column goes through the price formatter.
-    for name in ("paperPositionsPanel", "paperSheetBody", "paperOrdersTable", "paperHistoryDay", "ordersNode"):
+    for name in (
+        "paperPositionsPanel", "paperPnlPanel", "paperSheetBody", "paperOrdersTable", "paperHistoryDay", "ordersNode",
+    ):
         assert "fmtPrice(" in _js_top_level(script, f"function {name}("), name
     assert not re.search(r"fmtAmount(Opt)?\(row\.(price|average_cost|last_price|reference_price)\)", script)
 
@@ -810,7 +985,7 @@ def test_the_book_page_leads_with_what_the_operator_acts_on():
     panels = _js_top_level(script, "function renderBookBundle(")
     order = [
         panels.index(f"{name}(bundle.")
-        for name in ("paperSignalPanel", "paperEquityPanel", "paperPositionsPanel", "paperHistoryPanel")
+        for name in ("paperSignalPanel", "paperEquityPanel", "paperPositionsPanel", "paperPnlPanel", "paperHistoryPanel")
     ]
     assert order == sorted(order)
     # The sheet is copyable as plain text, for a manual order entry screen.

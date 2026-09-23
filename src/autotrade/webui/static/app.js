@@ -6964,15 +6964,16 @@ function renderBooksOverview(payload) {
    Promise.all, so one missing route blanks the page. */
 async function fetchBookBundle(env, book) {
   const base = `/api/trading/${env}/books/${encodeURIComponent(book)}`;
-  const [status, identity, signal, history, performance, snapshot] = await Promise.all([
+  const [status, identity, signal, history, performance, snapshot, pnl] = await Promise.all([
     api(`${base}/status`),
     api(`${base}/book`),
     api(`${base}/signal`),
     api(`${base}/history`),
     api(`${base}/performance`),
     api(`${base}/snapshot`),
+    api(`${base}/pnl`),
   ]);
-  return { status, identity, signal, history, performance, snapshot };
+  return { status, identity, signal, history, performance, snapshot, pnl };
 }
 
 /* The snapshot age enters by the hour its banner quotes. */
@@ -6987,8 +6988,9 @@ function renderBookBundle(bundle) {
         paperHead(status, bundle.identity),
         ...paperBanners(status),
         paperSignalPanel(bundle.signal, bundle.identity),
-        paperEquityPanel(bundle.performance),
+        paperEquityPanel(bundle.performance, bundle.pnl),
         paperPositionsPanel(bundle.snapshot),
+        paperPnlPanel(bundle.pnl),
         paperHistoryPanel(bundle.history),
       ),
   );
@@ -7377,8 +7379,9 @@ function bookCurveChart(chart, source, opts) {
    source experiment's out-of-sample replay into the book's own days, and what
    the trading cost. The statistics the day count still gates, and a benchmark
    that does not cover the book, say so in one caption instead of leaving a
-   dash behind; the benchmark is always named as the book froze it. */
-function paperEquityPanel(payload) {
+   dash behind; the benchmark is always named as the book froze it. The first
+   tile is the same return in CNY, from the P&L panel's payload. */
+function paperEquityPanel(payload, pnl) {
   const stats = payload.statistics;
   const head = panelHead(
     "收益曲线",
@@ -7417,6 +7420,13 @@ function paperEquityPanel(payload) {
     `成交 ${stats.fills} 笔`,
   ].filter(Boolean);
   const tiles = presentTiles([
+    {
+      label: "累计盈亏",
+      value: pnl.total_pnl,
+      fmt: fmtAmount,
+      signed: true,
+      title: `总资产 − 初始资金，按 ${fmtDate(pnl.mark_date)} 收盘价计；账户没有出入金`,
+    },
     { label: "累计收益", value: stats.total_return, fmt: fmtPct, signed: true },
     { label: benchmark, value: stats.benchmark_return, fmt: fmtPct, signed: true },
     { label: "超额", value: stats.excess_return, fmt: fmtPct, signed: true },
@@ -7506,6 +7516,100 @@ function paperPositionsPanel(payload) {
           )
         : el("div", { class: "empty" }, "无持仓"),
     ].filter(Boolean),
+  );
+  return panel;
+}
+
+/* What the book has made or lost, in CNY, and each name it ever traded with
+   its share of it, best first. The figures are the Broker's own bookkeeping:
+   a name's total is its unrealized P&L against the average cost plus what its
+   sells realized. That cost carries the buy fees and is lowered by ex-date
+   cash, and a sale is realized net of its fees, so the fee and dividend
+   columns are already inside the total, as the caption says. The total leads,
+   next to the name it sorts, so a phone reads it without scrolling sideways.
+   The last line reconciles the names with the account; a gap there is a
+   warning. */
+function paperPnlPanel(payload) {
+  const head = panelHead(
+    "盈亏",
+    payload.mark_date
+      ? el("span", { class: "mode-note" }, `按 ${fmtDate(payload.mark_date)} 收盘价`)
+      : null,
+  );
+  const panel = el("div", { class: "panel section-gap" }, head);
+  if (payload.state !== "ok") {
+    panel.append(
+      payload.state === "unreadable"
+        ? el("div", { class: "hint warn" }, payload.error)
+        : el("div", { class: "empty" }, "暂无"),
+    );
+    return panel;
+  }
+  const signed = (value) => ({ value: fmtAmountOpt(value), cls: value ? signCls(value) : "" });
+  panel.append(
+    el(
+      "div",
+      { class: "meta-line" },
+      "账户累计盈亏 ",
+      el(
+        "span",
+        { class: signCls(payload.total_pnl) },
+        `${fmtAmount(payload.total_pnl)}（${fmtPct(payload.total_return)}）`,
+      ),
+      " · 总资产 − 初始资金，账户没有出入金",
+    ),
+  );
+  const rows = payload.instruments;
+  if (!rows) {
+    panel.append(el("div", { class: "hint warn" }, `分证券盈亏不可用：${payload.instruments_error}`));
+    return panel;
+  }
+  panel.append(
+    dataTable(
+      [
+        { label: "代码" },
+        { label: "名称" },
+        { label: "合计", num: true, title: "浮动盈亏 + 已实现" },
+        { label: "股数", num: true },
+        { label: "成本", num: true, title: "移动加权平均成本：含买入费用，扣除分红" },
+        { label: "最新价", num: true },
+        { label: "市值", num: true },
+        { label: "浮动盈亏", num: true },
+        { label: "已实现", num: true, title: "卖出部分对成本的盈亏，已扣卖出费用" },
+        { label: "佣金", num: true, title: "佣金与过户费，已含在盈亏里" },
+        { label: "印花税", num: true, title: "已含在盈亏里" },
+        { label: "分红", num: true, title: "除权除息日入账的现金，已从成本中扣除" },
+      ],
+      rows.map((row) => [
+        row.symbol,
+        row.name,
+        signed(row.total_pnl),
+        row.quantity ? fmtShares(row.quantity) : "已清仓",
+        fmtPrice(row.average_cost),
+        fmtPrice(row.last_price),
+        fmtAmountOpt(row.market_value),
+        signed(row.unrealized_pnl),
+        signed(row.realized_pnl),
+        fmtAmount(row.commission),
+        fmtAmount(row.stamp_duty),
+        fmtAmount(row.dividends),
+      ]),
+      { box: "limit section-gap" },
+    ),
+    el(
+      "div",
+      { class: "meta-line section-gap" },
+      "合计 = 浮动盈亏 + 已实现。成本含买入费用并扣除分红，已实现已扣卖出费用，所以佣金、印花税与分红都已含在盈亏里，单列只供参考。",
+    ),
+    el(
+      "div",
+      {
+        class: payload.residual ? "hint warn" : "meta-line",
+        title: "引擎没有利息等不归属到证券的现金项，差额只来自舍入",
+      },
+      `分证券合计 ${fmtAmount(payload.instruments_pnl)} · 与账户累计盈亏相差 ${fmtAmount(payload.residual)}`,
+      payload.residual ? " · 流水与账户不一致" : null,
+    ),
   );
   return panel;
 }

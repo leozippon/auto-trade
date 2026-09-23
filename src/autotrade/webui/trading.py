@@ -2,14 +2,16 @@
 
 Books sit side by side under the Paper state root, one directory each
 (``paper.books``). ``books_payload`` is the overview, one row per book. A book's
-page reads it through six projections, each from the book's own files:
+page reads it through seven projections, each from the book's own files:
 ``book_status`` (the status ladder, and whether the session ahead already has
 its order sheet), ``book_payload`` (identity, ``book.json``),
 ``signal_payload`` (the latest decision's order sheet), ``history_payload``
 (every earlier day's order sheet and fills), ``performance_payload`` (return against
 the book's benchmark, equity and cash tracks, statistics, and the source experiment's
-out-of-sample curve the book copied at creation) and ``snapshot_payload``
-(account and positions). ``health_payload`` is the external probe over every book.
+out-of-sample curve the book copied at creation), ``snapshot_payload``
+(account and positions) and ``pnl_payload`` (the account's profit and loss and
+each traded name's share of it). ``health_payload`` is the external probe over
+every book.
 
 Every function is total: degradation is a structured payload state
 (absent / no_snapshot / unreadable / export_error / stale / ok), never a 500.
@@ -50,7 +52,7 @@ from autotrade.paper.book import (
     SOURCE_HISTORY_SCHEMA_VERSION,
 )
 from autotrade.paper.books import BOOK_ID_PATTERN, list_books
-from autotrade.paper.engine import PAPER_STATE_NAME, SNAPSHOT_NAME
+from autotrade.paper.engine import PAPER_STATE_NAME, REFERENCE_KEY, SNAPSHOT_NAME
 from autotrade.paper.orders import order_sheet
 from autotrade.paper.pit import newest_replay_slot
 from autotrade.paper.storage import read_jsonl
@@ -560,6 +562,130 @@ def snapshot_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str
         "stale_threshold_seconds": STALE_SNAPSHOT_ALERT_SECONDS,
         "snapshot": _project_snapshot(raw) if isinstance(raw, dict) else None,
     }
+
+
+# ------------------------------------------------------------------ pnl
+
+# What a name's fills and ex-dates moved, summed per symbol from the journals.
+_FLOW_FIELDS = ("commission", "stamp_duty", "realized_pnl", "dividends")
+
+
+def _journal_rows(root: Path, prefix: str) -> list[tuple[str, dict[str, object]]]:
+    """Every row of one journal family, each with its file name. A damaged line
+    raises: here it would silently shorten one name's P&L, not just a list."""
+    rows = []
+    for day in _dates(root, prefix):
+        name = f"{prefix}{day}.jsonl"
+        records, skipped = read_jsonl(root / name)
+        if skipped:
+            raise ValueError(f"{name} has {skipped} unreadable line(s)")
+        rows.extend((name, record) for record in records)
+    return rows
+
+
+def _instrument_flows(root: Path) -> dict[str, dict[str, float]]:
+    """Per symbol: the fees and stamp duty its fills paid, the realized P&L its
+    sells journaled and the cash its ex-dates credited. Only a fill moves money;
+    a filled row without a money field raises instead of counting as zero."""
+    flows: dict[str, dict[str, float]] = {}
+
+    def add(name: str, row: dict[str, object], **amounts: float | None) -> None:
+        symbol = _text(row.get("symbol"))
+        if symbol is None or None in amounts.values():
+            raise ValueError(f"{name} has a row without its symbol or money fields")
+        entry = flows.setdefault(symbol, dict.fromkeys(_FLOW_FIELDS, 0.0))
+        for key, value in amounts.items():
+            entry[key] += value
+
+    for name, row in _journal_rows(root, "executions_"):
+        if row.get("status") != "filled":
+            continue
+        realized = _number(row.get("realized_pnl")) if row.get("action") == "sell" else 0.0
+        add(name, row, commission=_number(row.get("commission")),
+            stamp_duty=_number(row.get("stamp_duty")), realized_pnl=realized)
+    for name, row in _journal_rows(root, "corporate_actions_"):
+        add(name, row, dividends=_number(row.get("cash_credit")))
+    return flows
+
+
+def _names(root: Path) -> dict[str, str]:
+    """Security names from the reference quote on each order row: every name
+    the book ever traded was ordered first."""
+    names = {}
+    for day in _dates(root, "orders_"):
+        for row in read_jsonl(root / f"orders_{day}.jsonl")[0]:
+            symbol, name = _text(row.get("symbol")), _text(_mapping(row.get(REFERENCE_KEY)).get("name"))
+            if symbol and name:
+                names[symbol] = name
+    return names
+
+
+def pnl_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str, object]:
+    """The account's profit and loss since the book opened, and each traded
+    name's share of it, all from the Broker's own bookkeeping.
+
+    The account total is the checkpoint's equity — cash plus every holding at
+    the close of ``mark_date`` (a name with no bar that day keeps its last
+    close) — less the initial cash; the engine has no deposits or withdrawals.
+    A name's total is its unrealized P&L against the Broker's average cost plus
+    the realized P&L its sells journaled. That cost carries the buy fees and is
+    lowered by ex-date cash, and a sale's realized P&L is net of its fees, so
+    the fees, stamp duty and dividends listed per name are already inside the
+    total, and the names sum to the account total. ``residual`` is the cent
+    amount they do not reconcile by: the engine books no cash that belongs to
+    no name (no interest), so it is zero unless a journal and the checkpoint
+    disagree. A journal that cannot be read in full withholds the per-name view
+    with its reason; the account total does not depend on it."""
+    root = book_dir(repo_root, book, env)
+    record, error = _read_json(root / BOOK_NAME)
+    state, state_error = _read_json(root / PAPER_STATE_NAME)
+    initial = _number(_mapping(_mapping(record).get("profile")).get("initial_cash"))
+    mark_date = _text(_mapping(state).get("settled_through"))
+    base: dict[str, object] = {
+        "env": env, "state": "ok", "error": None, "mark_date": mark_date, "initial_cash": initial,
+        "equity": None, "total_pnl": None, "total_return": None,
+        "instruments": None, "instruments_error": None, "instruments_pnl": None, "residual": None,
+    }
+    if error or state_error:
+        return {**base, "state": "unreadable", "error": error or state_error}
+    if not mark_date:  # never run, or nothing settled yet: nothing to measure
+        return {**base, "state": "absent"}
+    account = _mapping(_mapping(state).get("account"))
+    cash, raw = _number(account.get("cash")), account.get("positions")
+    if initial is None or initial <= 0 or cash is None or not isinstance(raw, list):
+        return {**base, "state": "unreadable", "error": "no valid initial cash or account checkpoint"}
+    positions = {}
+    for item in raw:
+        row = _mapping(item)
+        symbol = _text(row.get("symbol"))
+        held = (_quantity(row.get("quantity")), _number(row.get("average_cost")), _number(row.get("last_price")))
+        if symbol is None or None in held:
+            return {**base, "state": "unreadable", "error": "the account checkpoint has an invalid position"}
+        positions[symbol] = held
+    equity = cash + sum(quantity * last for quantity, _cost, last in positions.values())
+    total = equity - initial
+    account_view = {**base, "equity": equity, "total_pnl": total, "total_return": total / initial}
+    try:
+        flows = _instrument_flows(root)
+    except ValueError as exc:
+        return {**account_view, "instruments_error": str(exc)}
+    names = _names(root)
+    rows = []
+    for symbol in sorted(positions.keys() | flows.keys()):
+        flow = flows.get(symbol) or dict.fromkeys(_FLOW_FIELDS, 0.0)
+        quantity, cost, last = positions.get(symbol) or (0, None, None)
+        # A closed name has realized P&L only: no cost, mark or holding left.
+        unrealized = quantity * (last - cost) if quantity else None
+        rows.append({
+            "symbol": symbol, "name": names.get(symbol), "quantity": quantity,
+            "average_cost": cost, "last_price": last,
+            "market_value": quantity * last if quantity else None, "unrealized_pnl": unrealized,
+            **flow, "total_pnl": (unrealized or 0.0) + flow["realized_pnl"],
+        })
+    rows.sort(key=lambda row: row["total_pnl"], reverse=True)
+    summed = sum(row["total_pnl"] for row in rows)
+    # + 0.0 turns round()'s -0.0 into 0.0, which the page prints unsigned.
+    return {**account_view, "instruments": rows, "instruments_pnl": summed, "residual": round(total - summed, 2) + 0.0}
 
 
 # --------------------------------------------------------------- status

@@ -176,7 +176,7 @@ def test_the_route_check_fails_on_a_renamed_route():
     assert sorted({"/api/trading/{}/executions"} - server) == ["/api/trading/{}/executions"]
 
 
-PAPER_PANEL_ROUTES = ("status", "book", "signal", "history", "performance", "snapshot")
+PAPER_PANEL_ROUTES = ("status", "book", "signal", "history", "performance", "snapshot", "pnl")
 
 
 def test_paper_bundle_serves_the_key_names_the_console_reads(tmp_path: Path):
@@ -228,6 +228,10 @@ def test_paper_bundle_serves_the_key_names_the_console_reads(tmp_path: Path):
         "source", "source_error",
     } <= performance.keys()
     assert "snapshot" in client.get("/api/trading/paper/books/exp/snapshot").json()
+    assert {
+        "state", "error", "mark_date", "total_pnl", "total_return", "instruments", "instruments_error",
+        "instruments_pnl", "residual",
+    } <= client.get("/api/trading/paper/books/exp/pnl").json().keys()
     status = client.get("/api/trading/paper/books/exp/status").json()
     for key in ("book_id", "state", "error", "age_seconds", "stale_threshold_seconds"):
         assert key in status, key
