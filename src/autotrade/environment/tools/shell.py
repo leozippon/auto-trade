@@ -7,7 +7,9 @@ import re
 import shlex
 import threading
 from collections.abc import Mapping, Sequence
+from pathlib import PurePosixPath
 
+from ..sandbox import SCREENING_TOOL_MOUNT
 from .base import (
     CommandRunner,
     ToolError,
@@ -16,8 +18,7 @@ from .base import (
     ToolSchemaError,
     ToolSpec,
 )
-from ..sandbox import SCREENING_TOOL_MOUNT
-from .workspace import SafeWorkspace
+from .workspace import FREE_SPACE_RECOVERY_COMMANDS, SafeWorkspace
 
 # Advisory (not enforced): nudge the Agent away from hiding stderr, which breaks audit.
 STDERR_SUPPRESSION_RE = re.compile(r"2\s*>\s*/dev/null|&>\s*/dev/null|/dev/null\s+2\s*>\s*&\s*1")
@@ -269,6 +270,8 @@ class SandboxShellTool:
             raise ToolError("argv must contain at least one argument")
         argv: Sequence[str] = tuple(str(item) for item in raw_argv)
         reject_forbidden_wait(argv)
+        if PurePosixPath(argv[0]).name not in FREE_SPACE_RECOVERY_COMMANDS:
+            self.workspace.require_free_space("shell")
         requested_cwd = str(arguments.get("cwd", "."))
         cwd = self.workspace.resolve(requested_cwd, must_exist=True, directory=True)
         requested_timeout = float(arguments.get("timeout_seconds", self.timeout_seconds))

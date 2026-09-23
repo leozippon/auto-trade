@@ -16,6 +16,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
@@ -44,6 +45,10 @@ from autotrade.environment.tools.shell import (
     MAX_SHELL_TIMEOUT_SECONDS,
     SHELL_ARGV_MAX_CHARS,
     argv_is_forbidden_wait,
+)
+from autotrade.environment.tools.workspace import (
+    LOW_DISK_SPACE,
+    WORKSPACE_MIN_FREE_BYTES,
 )
 
 from .fixtures_sandbox import PassingModificationCheck
@@ -216,6 +221,39 @@ class ShellToolTest(unittest.TestCase):
             result = SandboxShellTool(workspace, runner).invoke({"argv": ["false"]})
             self.assertEqual(result.value["exit_code"], 2)
             self.assertEqual(result.value["stderr"], "boom")
+
+    def test_shell_is_refused_below_the_free_space_floor_except_to_free_space(self) -> None:
+        """Below the floor nothing that could write runs, but the refusal's own
+        remedy -- find and delete intermediates -- still does."""
+
+        def free(nbytes: int):
+            usage = SimpleNamespace(total=4 * WORKSPACE_MIN_FREE_BYTES, used=0, free=nbytes)
+            return patch("autotrade.environment.tools.workspace.shutil.disk_usage", return_value=usage)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _, _, workspace = build_sandbox(Path(tmp))
+            runner = FakeRunner()
+            registry = ToolRegistry([SandboxShellTool(workspace, runner)])
+            with free(12 * 1024**3):
+                # A command string runs under bash, so it is refused even when
+                # it starts with rm.
+                for argv in (["python", "notes/probe.py"], "rm -r notes/big && ls"):
+                    refused = registry.invoke("shell", {"argv": argv})
+                    self.assertFalse(refused.ok, argv)
+                    self.assertEqual(refused.value["error_type"], LOW_DISK_SPACE)
+                    self.assertIn("12.0 GiB free, below the 50 GiB floor", refused.error)
+                    self.assertIn("delete intermediate files", refused.error)
+                    self.assertIn('["rm", "-r"', refused.value["retry_hint"])
+            with free(WORKSPACE_MIN_FREE_BYTES - 1):
+                self.assertFalse(registry.invoke("shell", {"argv": ["python", "x.py"]}).ok)
+                self.assertEqual(runner.calls, [])
+                for argv in (["du", "-sh", "notes"], ["ls", "notes"], ["rm", "-r", "notes/big"]):
+                    self.assertTrue(registry.invoke("shell", {"argv": argv}).ok, argv)
+                self.assertEqual(len(runner.calls), 3)
+            with free(WORKSPACE_MIN_FREE_BYTES):
+                result = registry.invoke("shell", {"argv": ["python", "notes/probe.py"]})
+                self.assertTrue(result.ok, result.error)
+                self.assertEqual(runner.calls[-1][0], ("python", "notes/probe.py"))
 
     def test_shell_rejects_a_cwd_outside_the_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

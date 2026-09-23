@@ -708,3 +708,43 @@ def test_no_reference_pack_restates_the_import_allowlist(pack: Path) -> None:
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             named = [marker for marker in ALLOWED_IMPORT_MARKERS if marker in line]
             assert len(named) < 4, (path.name, number, named)
+
+
+# Forward and Held-out results never enter a session (agent-design §1.2), yet in
+# round 20260926 other arms' forward readings reached refs/ through the packs'
+# closed-direction and prior tables: the tables whose header row names a
+# closure (关闭) or the register (登记册). Those tables cite the register row
+# and research-period readings only. Packs of earlier rounds are exempt: their
+# arms have run, and every attempt re-copies refs/ from the repository.
+FORWARD_PERIOD_MARKERS = ("前推", "held-out", "forward ir", "f2 下界")
+FORWARD_PERIOD_CHECK_FROM = 20260927
+PACK_ROUND_LABEL = re.compile(r"_(\d{8})[a-z]?$")
+
+
+def _forward_period_table_rows(pack: Path) -> list[str]:
+    """Every closed-direction or prior table row in ``pack`` naming the forward
+    period or Held-out, as ``file:line: row``."""
+    rows: list[str] = []
+    for path in sorted(pack.rglob("*.md")):
+        in_scope = False
+        previous = ""
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            row = line.strip()
+            if row.startswith("|"):
+                if not previous.startswith("|"):
+                    in_scope = "关闭" in row or "登记册" in row
+                if in_scope and any(marker in row.lower() for marker in FORWARD_PERIOD_MARKERS):
+                    rows.append(f"{path.relative_to(pack)}:{number}: {row}")
+            previous = row
+    return rows
+
+
+@pytest.mark.parametrize("pack", PACKS, ids=lambda path: path.name)
+def test_no_new_pack_table_quotes_the_forward_period(pack: Path) -> None:
+    """A pack of round 20260927 or later quotes no forward or Held-out reading."""
+    label = PACK_ROUND_LABEL.search(pack.name)
+    assert label, f"{pack.name} does not end in its round label _YYYYMMDD"
+    if int(label.group(1)) < FORWARD_PERIOD_CHECK_FROM:
+        return
+    rows = _forward_period_table_rows(pack)
+    assert not rows, f"{pack.name} quotes the forward period:\n" + "\n".join(rows)

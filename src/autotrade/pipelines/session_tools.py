@@ -1174,6 +1174,10 @@ class BatchValidateTool(SessionTimeBudgetAware):
 
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
         self.backtest.check_deadline()
+        # A host condition, not the Agent's input: refused before anything is
+        # reserved and outside the repeated-rejection counter, so it is never
+        # charged however often it repeats.
+        self.workspace.require_free_space("batch_validate")
         with self.backtest.time_budget.pause():
             return self._invoke_exempt(arguments)
 

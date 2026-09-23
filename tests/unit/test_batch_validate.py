@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
@@ -53,7 +54,11 @@ from autotrade.environment.tools.base import ToolError, ToolRegistry
 from autotrade.environment.tools.finish_session import FinishSessionTool
 from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.environment.tools.step_rollback import StepRollbackTool
-from autotrade.environment.tools.workspace import SafeWorkspace
+from autotrade.environment.tools.workspace import (
+    LOW_DISK_SPACE,
+    WORKSPACE_MIN_FREE_BYTES,
+    SafeWorkspace,
+)
 from autotrade.pipelines.config import (
     BrokerProfile,
     BudgetUsed,
@@ -457,6 +462,32 @@ class BatchValidateRefusalTest(unittest.TestCase):
             self.assertEqual(session.backtest.replay_years_used, 0)
             self.assertEqual(session.evaluator.calls, 0)
             self.assertEqual(session.tree.nodes(), [])
+
+    def test_a_batch_is_refused_below_the_free_space_floor_and_never_charged(self) -> None:
+        """A host condition, not the Agent's input: refused before anything is
+        reserved, however often it repeats, and lifted once space is back."""
+
+        def free(nbytes: int):
+            usage = SimpleNamespace(total=4 * WORKSPACE_MIN_FREE_BYTES, used=0, free=nbytes)
+            return patch("autotrade.environment.tools.workspace.shutil.disk_usage", return_value=usage)
+
+        with TemporaryDirectory() as tmp:
+            session = _Session(Path(tmp))
+            session.candidate("a", _strategy("low_disk"))
+            with free(WORKSPACE_MIN_FREE_BYTES - 1):
+                for _ in range(BATCH_REJECTION_CHARGE_AFTER + 2):
+                    with self.assertRaises(ToolError) as caught:
+                        session.call("a", span="Y1")
+                    self.assertEqual(caught.exception.error_type, LOW_DISK_SPACE)
+                    self.assertIn("GiB free, below the 50 GiB floor", str(caught.exception))
+                    self.assertIn("delete intermediate files", str(caught.exception))
+            self.assertEqual(session.backtest.replay_years_used, 0)
+            self.assertEqual(session.evaluator.calls, 0)
+            self.assertEqual(session.tree.nodes(), [])
+            with free(WORKSPACE_MIN_FREE_BYTES):
+                result = session.call("a", span="Y1")
+            self.assertTrue(result.ok, result.error)
+            self.assertEqual(session.backtest.replay_years_used, 1)
 
     def test_a_candidate_with_the_start_logic_is_a_legal_candidate(self) -> None:
         """A session may re-validate its start: on another span, or on the full

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path, PurePosixPath
 
 from .base import ToolError
@@ -22,6 +23,19 @@ ROOT_RELATIVE_PATH_RULE = (
     "resolve as a real directory, while shell always takes it literally, so leave it "
     "out: path='notes/probe.py' is what shell runs as ['python', 'notes/probe.py']."
 )
+
+# The workspace bind mount has no quota and shares one host filesystem with the
+# data lake, the experiment directories and the logs: one arm wrote 6.4 GB of
+# intermediates, and a naive full-market minute concatenation would need about
+# 490 GB. A full disk would fail the nightly data update, other arms' ledger
+# appends and the host's result writes at once, so the two calls that write in
+# bulk -- ``shell`` and ``batch_validate`` -- are refused below this floor.
+WORKSPACE_MIN_FREE_BYTES = 50 * 1024**3
+LOW_DISK_SPACE = "low_disk_space"
+# Below the floor ``shell`` still runs these, sent as an argv array (not as a
+# command string, which runs under bash): shell is the only tool that can
+# delete a file, so without them the refusal's own remedy could not be applied.
+FREE_SPACE_RECOVERY_COMMANDS = frozenset({"du", "ls", "rm"})
 
 
 def _relative_form_hint(pure: PurePosixPath) -> str:
@@ -124,5 +138,34 @@ class SafeWorkspace:
     def relative(self, path: Path) -> str:
         return path.resolve(strict=False).relative_to(self.root).as_posix()
 
+    def require_free_space(self, tool: str) -> None:
+        """Refuse ``tool`` while the filesystem holding the workspace is below
+        ``WORKSPACE_MIN_FREE_BYTES`` free."""
 
-__all__ = ["ROOT_RELATIVE_PATH_RULE", "WORKSPACE_MOUNT", "SafeWorkspace"]
+        free = shutil.disk_usage(self.root).free
+        if free >= WORKSPACE_MIN_FREE_BYTES:
+            return
+        raise ToolError(
+            f"{tool} refused: the disk holding the workspace has "
+            f"{free / 1024**3:.1f} GiB free, below the "
+            f"{WORKSPACE_MIN_FREE_BYTES / 1024**3:g} GiB floor that keeps the data "
+            "lake and the other runs on it writable; delete intermediate files you "
+            "no longer need, then call again",
+            error_type=LOW_DISK_SPACE,
+            retry_hint=(
+                'shell ["du", "-sh", "notes"] finds large intermediates and '
+                '["rm", "-r", "notes/<dir>"] removes them: du, ls and rm sent as an '
+                "argv array (not a command string) still run below the floor"
+            ),
+            details={"free_bytes": free, "floor_bytes": WORKSPACE_MIN_FREE_BYTES},
+        )
+
+
+__all__ = [
+    "FREE_SPACE_RECOVERY_COMMANDS",
+    "LOW_DISK_SPACE",
+    "ROOT_RELATIVE_PATH_RULE",
+    "WORKSPACE_MIN_FREE_BYTES",
+    "WORKSPACE_MOUNT",
+    "SafeWorkspace",
+]
