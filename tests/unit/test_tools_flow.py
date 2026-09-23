@@ -1712,7 +1712,11 @@ class ToolResultContractTest(unittest.TestCase):
             for name, arguments, needle in (
                 ("shell", {"argv": '["ls", "-la"'}, '"argv": ["python", "-c", "print(1)"]'),
                 ("shell", {"argv": ["python", "-c", "x" * (SHELL_ARGV_MAX_CHARS + 1)]}, "argv[2] is too long; correct call example"),
-                ("shell", {"argv": ["ls"], "timeout_seconds": 900}, "above its maximum; correct call example"),
+                # A numeric bound names the value sent and the bound, so the
+                # retry is not blind (grep context 30 -> 45 -> 30 in a real run).
+                ("shell", {"argv": ["ls"], "timeout_seconds": 900}, "timeout_seconds is 900, above its maximum 600; correct call example"),
+                ("grep", {"pattern": "x", "context": 30}, "context is 30, above its maximum 20; correct call example"),
+                ("grep", {"pattern": "x", "offset": -1}, "offset is -1, below its minimum 0; correct call example"),
                 ("edit_file", {"path": "output/main.py", "old_text": "a", "new_text": "b", "offset": 3}, "unknown argument(s): ['offset']; correct call example: {\"path\": \"output/main.py\""),
                 ("read_file", {"path": ""}, '"path": "inputs/skills_index.json"'),
             ):

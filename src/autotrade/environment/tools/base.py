@@ -409,14 +409,28 @@ def _validate_value(name: str, value: object, schema: Mapping[str, object]) -> o
                 f"{name} is too long: {len(value)} characters, limit {schema['maxLength']}"
             )
     if isinstance(value, (int, float)) and not isinstance(value, bool):
+        # Same reason as the string bounds: name the value and the bound, or
+        # the model retries blind (grep context 30, then 45, then 30 again).
         if "minimum" in schema and value < float(schema["minimum"]):
-            raise ToolSchemaError(f"{name} is below its minimum")
+            raise ToolSchemaError(
+                f"{name} is {_number(value)}, below its minimum {_number(schema['minimum'])}"
+            )
         if "maximum" in schema and value > float(schema["maximum"]):
-            raise ToolSchemaError(f"{name} is above its maximum")
+            raise ToolSchemaError(
+                f"{name} is {_number(value)}, above its maximum {_number(schema['maximum'])}"
+            )
     if isinstance(value, list) and isinstance(schema.get("items"), Mapping):
         for index, item in enumerate(value):
             value[index] = _validate_value(f"{name}[{index}]", item, schema["items"])  # type: ignore[arg-type]
     return value
+
+
+def _number(value: object) -> str:
+    """A schema number as the model wrote it: 600.0 reads as 600."""
+
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
 
 
 def _json_object(value: Mapping[str, object], *, name: str) -> dict[str, object]:
