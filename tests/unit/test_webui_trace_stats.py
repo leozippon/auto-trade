@@ -354,7 +354,7 @@ def test_live_trace_panel_claims_stream_before_await() -> None:
 def test_detail_poll_does_not_rebuild_on_environment_stage() -> None:
     script = APP_JS.read_text(encoding="utf-8")
     source = script.split("async function renderDetailPage(", 1)[1]
-    poll = source.split("pollTimer = setInterval", 1)[1].split("}, 4000);", 1)[0]
+    poll = source.split("pollTimer = setPollInterval", 1)[1].split("}, 4000);", 1)[0]
     assert "route(true)" in poll
     assert "environment_stage" not in poll
     assert "session_key" in poll

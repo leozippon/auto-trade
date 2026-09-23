@@ -395,6 +395,22 @@ async function api(path, options = {}) {
   return response.json();
 }
 
+/* setInterval for a tick that awaits the server. A tick that lands while the
+   previous one is still unanswered is skipped, so a slow endpoint cannot pile
+   requests up on the server and starve every other page's reads. */
+function setPollInterval(tick, ms) {
+  let busy = false;
+  return setInterval(async () => {
+    if (busy) return;
+    busy = true;
+    try {
+      await tick();
+    } finally {
+      busy = false;
+    }
+  }, ms);
+}
+
 function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
   for (const [key, value] of Object.entries(attrs)) {
@@ -1701,21 +1717,13 @@ async function renderHomePage() {
     ),
   );
   $main.replaceChildren(homeView(payload));
-  // One listing in flight per tab: a tick that lands while the last poll is
-  // still unanswered is skipped, so a slow listing cannot pile requests up
-  // on the server and starve every other page's reads.
-  let polling = false;
-  pollTimer = setInterval(async () => {
-    if (polling) return;
+  pollTimer = setPollInterval(async () => {
     if (location.hash && location.hash !== "#/" && location.hash !== "#")
       return;
-    polling = true;
     try {
       await refreshHomePage();
     } catch {
       /* keep last view */
-    } finally {
-      polling = false;
     }
   }, 5000);
 }
@@ -2496,7 +2504,7 @@ async function renderDetailPage(experimentId, selectedKey) {
   $main.replaceChildren(container);
   if (barHost)
     liveTimers.push(setInterval(() => tickElapsedClocks(barHost), 1000));
-  pollTimer = setInterval(async () => {
+  pollTimer = setPollInterval(async () => {
     if (hashExperimentId() !== experimentId) return;
     try {
       const fresh = await api(
@@ -4216,7 +4224,7 @@ function liveTracePanel(detail, session) {
   };
   liveTimers.push(
     setInterval(() => tickElapsedClocks(box), 1000),
-    setInterval(pollStats, 5000),
+    setPollInterval(pollStats, 5000),
   );
   pollStats();
   return panel;
@@ -4496,7 +4504,7 @@ async function openSubagentTrace(detail, runRef, block) {
     if (body.isConnected) tickElapsedClocks(body);
     else clearInterval(clock);
   }, 1000);
-  const poll = setInterval(async () => {
+  const poll = setPollInterval(async () => {
     if (!body.isConnected || !(await load())) {
       clearInterval(poll);
       clearInterval(clock);
@@ -6852,7 +6860,7 @@ async function renderTradingPage(env, book) {
   }
   if (navigatedAway(hash)) return;
   render(bundle);
-  pollTimer = setInterval(async () => {
+  pollTimer = setPollInterval(async () => {
     if (!tradingView || navigatedAway(hash)) return;
     try {
       const fresh = await load();

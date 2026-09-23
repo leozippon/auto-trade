@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+import threading
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -129,6 +130,32 @@ def curated_entry(repo_root: Path, name: str) -> dict[str, object]:
     return {**listed, "content": content}
 
 
+# The tier reads every experiment's ledger and validates every published skills
+# tree, which is most of a second on a full experiments root and several
+# seconds per visitor when visits overlap. Everything a row depends on hangs off
+# its experiment's ledger: the ledger is append-only (or atomically rewritten),
+# and the skills generation a row points at is published immutably before the
+# row names it. So the payload is kept while the experiment set and every
+# ledger's size and mtime are unchanged — one slot, the current state; the lock
+# makes overlapping misses compute it once.
+_TIER_LOCK = threading.Lock()
+_TIER_CACHE: dict[tuple[object, ...], dict[str, object]] = {}
+
+
+def _tier_key(root: Path) -> tuple[object, ...]:
+    key: list[object] = [str(root)]
+    for directory in sorted(root.iterdir(), key=lambda path: path.name):
+        if not directory.is_dir():
+            continue
+        try:
+            stat = (directory / "ledgers" / "experiment_ledger.jsonl").stat()
+        except OSError:
+            key.append((directory.name,))
+        else:
+            key.append((directory.name, stat.st_size, stat.st_mtime_ns))
+    return tuple(key)
+
+
 def graduated_tier(experiments_root: Path) -> dict[str, object]:
     """Every experiment's verdict, what the tier admits now, and what it holds.
 
@@ -139,9 +166,24 @@ def graduated_tier(experiments_root: Path) -> dict[str, object]:
     """
 
     root = Path(experiments_root)
-    payload: dict[str, object] = {"experiments": []}
     if not root.is_dir():
+        return {"experiments": []}
+    with _TIER_LOCK:
+        key = _tier_key(root)
+        if key in _TIER_CACHE:
+            return _TIER_CACHE[key]
+        payload = _graduated_tier(root)
+        rows: list[dict[str, object]] = payload["experiments"]  # type: ignore[assignment]
+        _TIER_CACHE.clear()
+        # An error may be a transient I/O failure the key cannot see, so it is
+        # read afresh on every request rather than kept.
+        if "error" not in payload and not any("error" in row for row in rows):
+            _TIER_CACHE[key] = payload
         return payload
+
+
+def _graduated_tier(root: Path) -> dict[str, object]:
+    payload: dict[str, object] = {"experiments": []}
     admitted: dict[str, list[str]] | None
     try:
         admitted = {

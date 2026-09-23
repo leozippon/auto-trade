@@ -19,6 +19,8 @@ collected session's ``host_run_manifest.json``.
 from __future__ import annotations
 
 import json
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -357,6 +359,63 @@ def test_a_tier_that_cannot_be_resolved_is_reported_not_hidden(tmp_path: Path) -
     assert str(tmp_path) not in payload["error"]
     assert [row["experiment_id"] for row in payload["experiments"]] == ["curated"]
     assert payload["experiments"][0]["admitted"] is None
+
+
+def test_the_tier_is_read_once_per_ledger_state_and_sees_every_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The page reads the tier on every visit, and re-parsing every ledger per
+    request (once per overlapping visitor) starved the console. The payload is
+    kept while no ledger moves, so a repeat or concurrent read re-reads
+    nothing — but a verdict landing or an experiment appearing is on the next
+    read, because a row can change only through its experiment's ledger."""
+
+    experiments = tmp_path / "experiments"
+    experiments.mkdir()
+    _experiment(experiments, "adopted")
+    arm = _experiment(experiments, "mid_forward", verdict=None)
+    reads: list[Path] = []
+    read = ExperimentLedger.read
+
+    def counted(self: ExperimentLedger, *args: object, **kwargs: object) -> list:
+        reads.append(self.path)
+        return read(self, *args, **kwargs)
+
+    monkeypatch.setattr(ExperimentLedger, "read", counted)
+    with ThreadPoolExecutor(4) as pool:
+        payloads = list(pool.map(lambda _: memory.graduated_tier(experiments), range(4)))
+    # One computation reads each ledger at most twice (admission and its row);
+    # four overlapping misses computing it independently would read it eight.
+    assert set(Counter(reads)) == {
+        experiments / name / "ledgers" / "experiment_ledger.jsonl"
+        for name in ("adopted", "mid_forward")
+    }
+    assert max(Counter(reads).values()) <= 2
+    assert all(payload == payloads[0] for payload in payloads)
+    first = len(reads)
+    assert memory.graduated_tier(experiments) == payloads[0]
+    assert len(reads) == first
+
+    ExperimentLedger(arm / "ledgers" / "experiment_ledger.jsonl").append(
+        {
+            "record_type": "forward",
+            "experiment_id": "mid_forward",
+            "epoch_id": "forward",
+            "fold_id": "forward",
+            "run_id": "run_mid_forward_forward",
+            "verdict": {"status": "graduated", "reasons": []},
+        }
+    )
+    _experiment(experiments, "late", verdict="discarded")
+    rows = {
+        row["experiment_id"]: row
+        for row in memory.graduated_tier(experiments)["experiments"]
+    }
+    assert rows["mid_forward"]["verdict"] == "graduated"
+    assert rows["mid_forward"]["admitted"] is True
+    assert rows["mid_forward"]["entries"] == ["same-window-parent-control"]
+    assert rows["late"]["verdict"] == "discarded"
+    assert rows["adopted"] == payloads[0]["experiments"][0]
 
 
 # ---- the snapshot one experiment froze -------------------------------------

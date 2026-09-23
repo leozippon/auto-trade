@@ -10,6 +10,7 @@ only, and refuse a create whose geometry the worker would refuse.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -464,7 +465,7 @@ def test_a_recorded_session_is_gated_once_across_listings_and_pages(tmp_path: Pa
     """A recorded research session is an immutable ledger row: the freeze gate
     behind its best candidate is computed on the first read and shared by
     every later listing poll and experiment page, so a poll of many ended arms
-    costs no replay statistics at all. The home poll keeps one listing in
+    costs no replay statistics at all. Every page poll keeps one request in
     flight, so a slow listing cannot stack requests on the server either."""
 
     directory = build_arm(tmp_path, "arm", "sealed")
@@ -479,15 +480,20 @@ def test_a_recorded_session_is_gated_once_across_listings_and_pages(tmp_path: Pa
     script = (
         Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
     ).read_text(encoding="utf-8")
-    home = script.split("async function renderHomePage(", 1)[1].split("\nfunction ", 1)[0]
-    poll = home.split("pollTimer = setInterval", 1)[1].split("}, 5000);", 1)[0]
+    helper = script.split("function setPollInterval(", 1)[1].split("\n}\n", 1)[0]
     assert (
-        poll.index("if (polling) return;")
-        < poll.index("polling = true;")
-        < poll.index("await refreshHomePage();")
-        < poll.index("finally {")
-        < poll.index("polling = false;")
+        helper.index("if (busy) return;")
+        < helper.index("busy = true;")
+        < helper.index("await tick();")
+        < helper.index("finally {")
+        < helper.rindex("busy = false;")
     )
+    # Every other timer is a synchronous clock: a callback that awaits the
+    # server (or is a named poll function) goes through the guard.
+    rest = script.replace(helper, "")
+    assert re.search(r"setInterval\((?!\(\) =>)", rest) is None
+    # The definition, then the home, status, trace, sub-agent and Paper polls.
+    assert rest.count("setPollInterval(") == 6
 
 
 def test_an_arm_with_no_plan_yet_lists_as_created(tmp_path: Path) -> None:
