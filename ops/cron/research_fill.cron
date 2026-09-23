@@ -15,7 +15,7 @@ CRON_TZ=Asia/Shanghai
 REPO_ROOT=/Data2/lzp/ADMCubeQuant
 QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # Repointed at whichever round file is the current queue.
-ROUND=scripts/experiments/create_round_20260925.py
+ROUND=scripts/experiments/create_round_20260926.py
 
 # Every ten minutes, all day: a slot that frees up stays empty for at most that
 # long, and research arms end at no particular hour. One run takes seconds
