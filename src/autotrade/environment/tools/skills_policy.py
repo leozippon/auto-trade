@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import re
 
-_HELDOUT_MENTION_RE = re.compile(r"held-?out|holdout|持有期外|隐藏区间", re.I)
+# A hyphen, a space or a line wrap may split the word; the letter bounds keep
+# "held outside" or "withheld output" from reading as the stage.
+_HELDOUT = r"(?<![A-Za-z])held[-\s]*outs?(?![A-Za-z])"
+_HELDOUT_MENTION_RE = re.compile(rf"{_HELDOUT}|holdout|持有期外|隐藏\s*区间", re.IGNORECASE)
 # What a leaked forward result actually looks like: a performance word next to
 # a number. Naming the forward period is ordinary knowledge (every session is
 # told it exists and is sealed), so only a figure or a selection built on it is
@@ -41,7 +44,7 @@ _FORWARD_SELECTION_RE = re.compile(
     rf"{_FORWARD_STAGE}.{{0,20}}(更好|更差|更优|更稳).{{0,16}}(所以|因此|于是|选择|保留)|"
     rf"(?:based on|according to).{{0,20}}{_FORWARD_STAGE}.{{0,20}}(?:select|choose|retain|reject|adopt)|"
     rf"{_FORWARD_STAGE}.{{0,20}}(?:better|worse|superior|stable).{{0,16}}(?:so|therefore|select|retain)",
-    re.I,
+    re.IGNORECASE,
 )
 # A shared skill leaks whether the figure precedes or follows the forward
 # reference, but it still has to be a figure. Held-out mentions are rejected
@@ -49,11 +52,11 @@ _FORWARD_SELECTION_RE = re.compile(
 _FORWARD_FIGURE_RE = re.compile(
     rf"{_FORWARD_STAGE}.{{0,24}}{_PERFORMANCE_FIGURE}|"
     rf"{_PERFORMANCE_FIGURE}.{{0,24}}{_FORWARD_STAGE}",
-    re.I,
+    re.IGNORECASE,
 )
 _SEALED_PAIR = (
-    rf"(?:{_FORWARD_STAGE}\s*(?:/|与|和|and)\s*held-?out"
-    rf"|held-?out\s*(?:/|与|和|and)\s*{_FORWARD_STAGE})"
+    rf"(?:{_FORWARD_STAGE}\s*(?:/|与|和|and)\s*{_HELDOUT}"
+    rf"|{_HELDOUT}\s*(?:/|与|和|and)\s*{_FORWARD_STAGE})"
 )
 _STRICT_BOUNDARY_LINE_RE = re.compile(
     rf"^(?:[-*]\s*)?(?:"
@@ -62,7 +65,7 @@ _STRICT_BOUNDARY_LINE_RE = re.compile(
     rf"(?:do not|must not|never)\s+(?:read|use|rely on|write|leak)\s+{_SEALED_PAIR}"
     rf"(?:\s*(?:data|results?|metrics?))?"
     rf")[。.!！]?$",
-    re.I,
+    re.IGNORECASE,
 )
 
 
@@ -76,11 +79,12 @@ def _statements(text: str) -> list[tuple[int, str]]:
 
     The two proximity checks bound the distance between a stage reference and
     the figure or the choice built on it, which is a distance inside a
-    statement -- and a statement wraps across lines. Checking one line at a
-    time let "前推期看着不错。" / "年化 12.4%。" through, neither line naming
-    both halves. A Markdown block marker starts a new statement, so two list
-    items stay two statements and prose that never put the two together is not
-    refused for standing next to a figure.
+    statement -- and a statement wraps across lines, as can a Held-out
+    mention itself. Checking one line at a time let "前推期看着不错。" /
+    "年化 12.4%。" through, neither line naming both halves. A Markdown block
+    marker starts a new statement, so two list items stay two statements and
+    prose that never put the two together is not refused for standing next to
+    a figure.
     """
 
     statements: list[tuple[int, str]] = []
@@ -106,13 +110,9 @@ def _statements(text: str) -> list[tuple[int, str]]:
 def strict_transferable_content_violation(text: str) -> str:
     """Fail closed on sealed-stage content while allowing a pure boundary rule."""
 
-    for lineno, line in enumerate(text.splitlines(), start=1):
-        stripped = line.strip()
-        if not stripped or _STRICT_BOUNDARY_LINE_RE.fullmatch(stripped):
-            continue
-        if _HELDOUT_MENTION_RE.search(stripped):
-            return f"line {lineno} leaks Held-out into shared skills"
     for lineno, statement in _statements(text):
+        if _HELDOUT_MENTION_RE.search(statement):
+            return f"line {lineno} leaks Held-out into shared skills"
         figure = _FORWARD_FIGURE_RE.search(statement)
         if figure:
             # Name the matched span: the check is a pattern over the statement,

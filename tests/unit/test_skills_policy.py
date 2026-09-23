@@ -93,3 +93,17 @@ class ForwardFigureLeakTest(unittest.TestCase):
         self.assertEqual(
             strict_transferable_content_violation("never use forward period/held-out data"), ""
         )
+
+    def test_a_wrapped_or_spaced_held_out_mention_is_still_refused(self) -> None:
+        for text in ("隐藏\n区间的夏普更高\n", "the held-\nout window\n", "the held out window\n"):
+            self.assertIn("Held-out", strict_transferable_content_violation(text), text)
+        self.assertEqual(
+            strict_transferable_content_violation("never use forward period/held out data"), ""
+        )
+        # Ordinary English that merely contains the letters is not the stage.
+        self.assertEqual(
+            strict_transferable_content_violation(
+                "Positions held outside the benchmark are capped at 5% of equity."
+            ),
+            "",
+        )
