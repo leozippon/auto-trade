@@ -26,6 +26,18 @@ FUNDAMENTAL_EVENTS_STATUS = "results/data_quality/fundamental_events_status.json
 # Two SSE trading days inside the default Held-out quarter, the least a
 # release must reach for an experiment on that geometry to start.
 HELDOUT_REACHING_DAYS = ("20250630", "20260630", "20260701", "20260702")
+# How far back benchmark history reaches in the backfilled lake (the 20140701
+# `download --history-floor` backfill), which an eight-year research period
+# needs; pass it as ``history_start``. Moving the floor is this one edit.
+BACKFILLED_HISTORY_START = "20140701"
+# Benchmark partitions whose vendor history starts after that floor, as the
+# backfilled release holds them: CSI 1000's first constituent section (listed
+# 2014-10-17), STAR 50's base-date bar and its first section.
+LATER_VENDOR_STARTS = {
+    ("index_weight", "000852.SH"): "20141031",
+    ("index_daily", "000688.SH"): "20191231",
+    ("index_weight", "000688.SH"): "20200731",
+}
 
 
 def publish_release(
@@ -35,6 +47,7 @@ def publish_release(
     datasets: Iterable[str],
     trading_days: Sequence[str] = HELDOUT_REACHING_DAYS,
     benchmark_indexes: Sequence[str] = tuple(BENCHMARK_INDEXES),
+    history_start: str = "20200102",
 ) -> ResearchRelease:
     """Commit ``generation_id`` in the live lake and publish its release.
 
@@ -43,8 +56,11 @@ def publish_release(
     ``index_weight`` always get their per-index partitions, because every real
     release carries them and an arm's ``benchmark_index`` is checked against
     them at create time; ``benchmark_indexes`` narrows that set to model a
-    release published before an index existed. A later call commits a newer
-    generation over the same lake, as the nightly chain does.
+    release published before an index existed. Each partition's first row is
+    dated ``history_start`` -- by default the first trading day of the 2020
+    research-history floor, the lake before its backfill -- or the index's
+    later vendor start. A later call commits a newer generation over the same
+    lake, as the nightly chain does.
     """
 
     raw = repo_root / RAW_DIR
@@ -60,9 +76,10 @@ def publish_release(
         # Real footers: the create-time check reads each benchmark partition's
         # first trade_date against research_start.
         for dataset, key in (("index_daily", "ts_code"), ("index_weight", "index_code")):
+            first = max(history_start, LATER_VENDOR_STARTS.get((dataset, code), history_start))
             _write_pair(
-                raw / dataset / f"{key}={code}" / "year=2020.parquet",
-                pd.DataFrame({"trade_date": ["20200102"]}),
+                raw / dataset / f"{key}={code}" / f"year={first[:4]}.parquet",
+                pd.DataFrame({"trade_date": [first]}),
             )
     for day in trading_days:
         _write_pair(raw / "daily" / f"trade_date={day}.parquet")

@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from autotrade.environment.data.contracts import BENCHMARK_INDEXES
 from autotrade.environment.llm.model_profiles import LOCAL_QWEN_MODEL
 from autotrade.environment.strategy_loader import validate_strategy_package
 from autotrade.pipelines.config import (
@@ -36,7 +37,10 @@ from scripts.experiments._round import (
     Round,
     archived_ids,
 )
-from tests.unit.research_release_fixture import publish_release
+from tests.unit.research_release_fixture import (
+    BACKFILLED_HISTORY_START,
+    publish_release,
+)
 
 MODEL_ROLES = ("model", "subagent_model", "nl_model", "compact_model")
 # A four-digit calendar year, the shape every literal date in a directive takes.
@@ -67,8 +71,10 @@ def _synthetic_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rnd: Round)
     own tree gets one for its own selection, while an arm that names the
     round's tree with another selection is still refused. The contract is what
     the prebuild writes to ``provider.json``, over the one published release
-    they all name, which reaches the round's Held-out; a tree needs nothing
-    else for the create-time pre-flight to accept it. Returns the round's tree.
+    they all name, which reaches the round's Held-out and holds benchmark
+    history back to the backfill floor, as the lake now does; a tree needs
+    nothing else for the create-time pre-flight to accept it. Returns the
+    round's tree.
     """
     monkeypatch.setattr(_round, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(_round, "EXPERIMENTS_ROOT", tmp_path / "experiments")
@@ -82,6 +88,7 @@ def _synthetic_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rnd: Round)
         datasets=dict.fromkeys(
             name for config in configs.values() for name in required_release_raw_datasets(config)
         ),
+        history_start=BACKFILLED_HISTORY_START,
     )
     for name, config in configs.items():
         seed = tmp_path / name
@@ -182,6 +189,73 @@ def test_the_dry_run_refuses_a_research_period_that_is_not_whole_years(
     shifted = Round(pit_views_seed=rnd.pit_views_seed, overrides={"research_end": "20250331"})
     assert shifted.main(["launcher", "0", "--dry-run"]) == 1
     assert "whole July-June years" in capsys.readouterr().err
+
+
+# The eight-year research period the backfilled lake opens: research from
+# 2017-07 on a 108-month window of index and Shenwan data alone, since the
+# fundamental, event and text history starts inside that window.
+EIGHT_YEAR = {
+    "research_start": "20170701",
+    "window_months": 108,
+    "include_fundamentals": False,
+    "include_events": False,
+    "include_text": False,
+    "macro_datasets": ["index_daily", "index_dailybasic", "sw_daily", "index_weight"],
+}
+STAR_50 = "000688.SH"
+
+
+def test_an_eight_year_round_dry_runs_on_the_backfilled_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Every benchmark but STAR 50 has history before 2017-07 in the backfilled
+    lake -- CSI 1000's constituents from their first section in 2014-10 -- so
+    an eight-year arm on any of them passes the create pre-flight."""
+    rnd = Round(
+        arms={
+            f"eight_year_{code[:6]}": {"benchmark_index": code}
+            for code in BENCHMARK_INDEXES
+            if code != STAR_50
+        },
+        overrides=EIGHT_YEAR,
+        pit_views_seed="data/seed_probe_8y",
+    )
+    _synthetic_repo(tmp_path, monkeypatch, rnd)
+    assert rnd.main(["launcher", "0", "--dry-run"]) == 0
+    report = json.loads(capsys.readouterr().out.splitlines()[1])
+    assert (report["research_start"], report["window_months"]) == ("20170701", 108)
+
+
+def test_an_eight_year_round_refuses_star_50_and_fundamentals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """STAR 50's history starts at its 2019-12-31 base date, inside the research
+    period, so its arm is refused naming how far back each table goes. An arm
+    adding fundamentals is refused here by the eight-year seed's contract; the
+    missing fundamental history itself (no PIT partition before the first
+    decision view) is refused only when that view is built, which no dry-run
+    reaches."""
+    rnd = Round(
+        arms={
+            "eight_year_star50": {"benchmark_index": STAR_50},
+            "eight_year_fundamentals": {"benchmark_index": "000905.SH", "include_fundamentals": True},
+        },
+        overrides=EIGHT_YEAR,
+        pit_views_seed="data/seed_probe_8y",
+    )
+    _synthetic_repo(tmp_path, monkeypatch, rnd)
+    assert rnd.main(["launcher", "0", "--dry-run"]) == 1
+    err = capsys.readouterr().err.splitlines()
+    reasons = {line.split(":", 1)[0]: line for line in err if line.startswith("eight_year_")}
+    assert "benchmark_index 000688.SH (科创50) has no history before research_start 20170701" in (
+        reasons["eight_year_star50"]
+    )
+    assert (
+        "{'index_daily/ts_code=000688.SH': '20191231', 'index_weight/index_code=000688.SH': '20200731'}"
+        in reasons["eight_year_star50"]
+    )
+    assert "different snapshot configuration" in reasons["eight_year_fundamentals"]
+    assert err[-1] == "refused: eight_year_star50, eight_year_fundamentals"
 
 
 def test_a_round_without_arms_is_never_posted() -> None:
@@ -608,10 +682,12 @@ def test_mounting_index_weight_leaves_every_other_round_byte_for_byte() -> None:
     with running arms would make their seed unusable. Stated as the relation
     that has to hold: `index_weight` reaches exactly the rounds built on the
     benchmark round's selection -- the one that introduced it and whichever
-    later rounds import it -- each of their macro selections is the 2026-09-20
-    one plus that name, and each record is otherwise identical to it byte for
-    byte. The tree those arms actually read is compared separately, above,
-    against its own provider.json.
+    later rounds import it -- and the eight-year round, which chose it for its
+    own seed. Each benchmark-lineage macro selection is the 2026-09-20 one plus
+    that name, and each record is otherwise identical to it byte for byte; the
+    eight-year selection draws only on that same menu. The tree each round's
+    arms actually read is compared separately, above, against its own
+    provider.json.
     """
     records = {
         name: _snapshot_config(ROUNDS[name].request_params(PROBE_ID)).to_record()
@@ -620,7 +696,7 @@ def test_mounting_index_weight_leaves_every_other_round_byte_for_byte() -> None:
     carrying = {
         name for name, record in records.items() if "index_weight" in record["datasets"]["macro"]
     }
-    assert carrying == {
+    lineage = {
         "create_round_20260919",
         "create_round_20260921",
         "create_round_20260921b",
@@ -631,9 +707,13 @@ def test_mounting_index_weight_leaves_every_other_round_byte_for_byte() -> None:
         "create_round_20260924",
         "create_round_20260925",
         "create_round_20260926",
-    }, sorted(carrying)
+    }
+    eight_year = {"create_round_20260927"}
+    assert carrying == lineage | eight_year, sorted(carrying)
     base = records["create_round_20260920"]
-    for name in sorted(carrying):
+    for name in sorted(eight_year):
+        assert set(records[name]["datasets"]["macro"]) <= {*base["datasets"]["macro"], "index_weight"}, name
+    for name in sorted(lineage):
         benchmark = records[name]
         assert benchmark["datasets"]["macro"] == [*base["datasets"]["macro"], "index_weight"], name
         assert json.dumps(
