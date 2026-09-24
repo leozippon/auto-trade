@@ -19,6 +19,7 @@ from autotrade.environment.broker import (
     EX_DATE_PRICE_TOLERANCE,
     BrokerProfile,
     DailyBroker,
+    Position,
 )
 from autotrade.environment.broker_core import (
     LOT_SIZE,
@@ -362,12 +363,13 @@ class BrokerAccountingTest(unittest.TestCase):
 class BrokerCorporateActionTest(unittest.TestCase):
     """Ex-dates are settled from the exchange's reference price (``pre_close``).
 
-    A held name whose ``pre_close`` differs from its last close is reset so the
-    account is worth at ``pre_close`` exactly what it was worth at the last
-    close: the cash dividend is credited, the share count follows the reset,
-    fractional shares are paid in cash, and created shares stay locked until
-    the next day. Without this, every bonus issue read as a loss and every cash
-    dividend vanished.
+    A held name whose ``pre_close`` falls below its last close by more than the
+    cash dividend is reset so the account is worth at ``pre_close`` exactly
+    what it was worth at the last close: the cash dividend is credited, the
+    share count follows the reset, fractional shares are paid in cash, and
+    created shares stay locked until the next day. A cash dividend alone keeps
+    every share and credits the declared cash. Without this, every bonus issue
+    read as a loss and every cash dividend vanished.
     """
 
     def _holding(self, quantity: int = 1000) -> DailyBroker:
@@ -464,6 +466,37 @@ class BrokerCorporateActionTest(unittest.TestCase):
         self.assertEqual(position.quantity, 1299)
         self.assertAlmostEqual(broker.cash, cash_before + 1000 * 12.35 - 1299 * 9.31, places=6)
         self.assertAlmostEqual(broker.cash + 1299 * 9.31, cash_before + 1000 * 12.35, places=6)
+
+    def test_a_reset_smaller_than_the_cash_dividend_keeps_every_share(self) -> None:
+        # 000538.SZ on 20210607: the table's gross cash is 3.90 but the
+        # exchange reset 127.27 to 123.42, a 3.85 gap quoted on a virtual
+        # per-share amount. The price-derived multiplier 0.99959 once floored
+        # 100 shares to 99 and raised on a one-share holding; both now keep
+        # their shares and are paid the declared cash.
+        for quantity in (1, 100):
+            with self.subTest(quantity=quantity):
+                broker = _broker(initial_cash=100_000)
+                broker.positions["000538.SZ"] = Position("000538.SZ", quantity, quantity, 127.27, 127.27)
+                cash_before = broker.cash
+                broker.open_day("20210607", {"000538.SZ": _bar(pre_close=123.42)}, {"000538.SZ": 3.9})
+                position = broker.positions["000538.SZ"]
+                self.assertEqual((position.quantity, position.available_quantity), (quantity, quantity))
+                self.assertAlmostEqual(broker.cash, cash_before + quantity * 3.9, places=6)
+                self.assertAlmostEqual(position.last_price, 123.42)
+                self.assertAlmostEqual(position.average_cost, 127.27 - 3.9, places=6)
+                [action] = broker.corporate_actions
+                self.assertEqual((action.quantity_before, action.quantity_after), (quantity, quantity))
+                self.assertAlmostEqual(action.cash_credit, quantity * 3.9, places=6)
+        # A bonus issue on the same name still moves the share count: 10 送 3
+        # with the same 3.90 cash resets 127.27 to (127.27 - 3.9) / 1.3 = 94.90.
+        broker = _broker(initial_cash=100_000)
+        broker.positions["000538.SZ"] = Position("000538.SZ", 100, 100, 127.27, 127.27)
+        cash_before = broker.cash
+        broker.open_day("20210607", {"000538.SZ": _bar(pre_close=94.9)}, {"000538.SZ": 3.9})
+        position = broker.positions["000538.SZ"]
+        self.assertEqual((position.quantity, position.available_quantity), (130, 100))
+        self.assertAlmostEqual(broker.cash, cash_before + 390.0, places=6)
+        self.assertAlmostEqual(broker.cash + 130 * 94.9, cash_before + 100 * 127.27, places=6)
 
     def test_a_day_without_a_reset_changes_nothing(self) -> None:
         broker = self._holding(1000)

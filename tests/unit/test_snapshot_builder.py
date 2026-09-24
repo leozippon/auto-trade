@@ -22,6 +22,7 @@ from autotrade.environment.data.fundamental_events import (
 from autotrade.environment.data.snapshot import (
     DEFAULT_DATASETS,
     SELECTABLE_DATASETS,
+    DividendHistoryError,
     SnapshotBuilder,
     SnapshotConfig,
     finalize_snapshot_dir,
@@ -1858,6 +1859,27 @@ class SnapshotBuilderTest(unittest.TestCase):
             meta = manifest["domains"]["corporate_actions"]
             self.assertEqual(meta["rows"], 1)
             self.assertEqual(meta["dropped"]["announced_after_ex_date"], 1)
+
+    def test_replay_refuses_a_dividend_store_that_does_not_precede_the_slot(self):
+        # The ex-date table is the Broker's only cash-dividend source. A store
+        # whose first month is the slot month (or later) would hide the
+        # announcement month before the first ex-dates, so the build names the
+        # real PIT rebuild entry instead of serving an empty table.
+        with tempfile.TemporaryDirectory() as tmp:
+            events_root = Path(tmp) / "fund_events"
+            write(
+                events_root / "dividend" / "available_month=201707.parquet",
+                pd.DataFrame({"dataset": ["dividend"]}),
+            )
+            builder = SnapshotBuilder(Path(tmp) / "raw", events_root)
+            with self.assertRaises(DividendHistoryError) as caught:
+                builder._build_corporate_actions(
+                    "20170701", "20180630", pd.Timestamp("2018-06-30", tz=CN_TZ)
+                )
+            message = str(caught.exception)
+            self.assertIn("cn_nightly_pit_event_build", message)
+            self.assertNotIn("manual_history_backfill_dividend_events", message)
+            self.assertIn("201707", message)
 
     def test_selectable_and_default_dataset_scopes(self):
         # Drift guard for the raw-coverage audit batch: board/sentiment events,

@@ -96,6 +96,15 @@ _BOARD_TRADING_DATASETS = frozenset(BOARD_TRADING_DATASETS)
 MACRO_REGISTRY_DATASETS = frozenset({"fut_basic", "opt_basic", "cb_basic"})
 _REGISTRY_WINDOW_FLOOR = pd.Timestamp("1990-01-01", tz=CN_TZ)
 
+
+class DividendHistoryError(ValueError):
+    """A replay slot starts before the PIT dividend store's history.
+
+    The slot's ex-date table is the Broker's only source of cash dividends, so
+    a slot outside the store would be served an empty or partial table and
+    settle every cash dividend as a bonus issue."""
+
+
 # Forward-scheduled event registries announce future events years ahead (IPO
 # lockup expiries), so the DECISION snapshot windows them on the event date as
 # well as announcement recency -- windowing on available_at alone silently
@@ -1336,7 +1345,25 @@ class SnapshotBuilder:
         a lower available_at bound (an ex-date can trail its 实施公告 by weeks), a
         row announced only after its own ex-date is dropped as a revision artifact,
         and same-day events for one code are summed (they share the record-date
-        share base)."""
+        share base).
+
+        The dividend store must reach back past the slot: its first month has
+        to precede the slot's, since an ex-date in the slot's first days is
+        announced in the month before. A slot outside it is refused with
+        ``DividendHistoryError`` rather than served an empty table."""
+        months = sorted(
+            path.stem.split("=", 1)[1]
+            for path in (self.fundamental_events_root / "dividend").glob("available_month=*.parquet")
+        )
+        if not months or months[0] >= start_key[:6]:
+            raise DividendHistoryError(
+                f"replay slot {start_key}..{end_key} is not covered by the PIT dividend store "
+                f"{self.fundamental_events_root / 'dividend'} (first month "
+                f"{months[0] if months else 'none'}; the slot needs one before {start_key[:6]}): "
+                "its ex-date table would be empty or partial and every cash dividend would settle "
+                "as a bonus issue. Rebuild the PIT dividend events through an earlier start "
+                "first (tushare_cron_update.py --job cn_nightly_pit_event_build --start-date <before the slot month>)."
+            )
         raw = read_fundamental_events(
             self.fundamental_events_root,
             period_end.isoformat(),

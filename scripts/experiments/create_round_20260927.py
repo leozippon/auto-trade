@@ -56,6 +56,11 @@ The arms, in queue order:
   `offline_trials` 17: N_eff 18 and an IR bar of 1.352, which the pack also
   makes a nomination condition, because a correlated `r2` would otherwise
   dilute those declared trials.
+- `dvy_csi300_8y_20260927`. Trailing dividend yield on CSI 300, queued only
+  after the dividend-event store and a new eight-year seed
+  (`data/pit_views_seed_research_8y_div_20260924`, release `55fc7fd8...`)
+  cover ex-dates from Y1. It overrides `pit_views_seed`; the range20 arms
+  stay on `data/pit_views_seed_research_8y_20260927`. `offline_trials` 0.
 
 Held, not queued: `range20_csi1000_8y_20260927`. Its pack is written and
 checked in and its entry is HELD below. It is appended to ARMS only if either
@@ -105,6 +110,10 @@ from scripts.experiments._round import Round
 
 # Built for exactly EIGHT_YEAR over release 41f74471aa754d5e80e52a6360711c5a.
 PIT_VIEWS_SEED = "data/pit_views_seed_research_8y_20260927"
+# Same geometry, release 55fc7fd82c3c4c77b752920ec4507609: dividend events from
+# 2016-01, so Y1 corporate actions are non-empty. Only the dividend-yield arm
+# pins this tree; the range20 arms stay on the seed they already ran.
+DIVIDEND_PIT_VIEWS_SEED = "data/pit_views_seed_research_8y_div_20260924"
 
 # The research geometry and dataset selection the seed was planned over; part
 # of its contract, so no arm may change one of them alone.
@@ -188,9 +197,33 @@ ARMS: dict[str, dict[str, object]] = {
             "提名还要主动 IR ≥ 1.352，按 refs/families.md 走。"
         ),
     },
+    # Trailing cash dividend yield on CSI 300. The last four research years are
+    # the selection risk; the first four are the test. This arm alone uses the
+    # dividend-complete seed.
+    "dvy_csi300_8y_20260927": {
+        "workspace_reference": "configs/workspace_refs/dvy_csi300_8y_20260927",
+        "initial_cash": 1_000_000,
+        "benchmark_index": CSI300,
+        "gpu_count": 0,
+        **EIGHT_YEAR,
+        "pit_views_seed": DIVIDEND_PIT_VIEWS_SEED,
+        "max_drawdown": 0.50,
+        "active_max_drawdown": 0.30,
+        **GATES,
+        "research_directive": (
+            "本臂是固定方向的规则分数臂：股息率 dvy（dv_ttm；两次年度派息之间滚动窗断档时取 dv_ratio；没有现金分红排最后），"
+            "在决策日在册的沪深 300 成分里建 50 席等额、月度复核、保留带前 100 名、每个申万一级至多 14 只的书，"
+            "不训练，由宿主零技能面板裁决；后四个研究年的红利与国企行情是挑选风险，前四年是检验。"
+            "benchmark_index 必须是 000300.SH、initial_cash 为 100 万，与 knobs 的 INDEX / CAPITAL / SCORE 一致，否则停。"
+            "按 refs/references/offline-screen.md 重算离线门、分两半报（只报不改登记）；"
+            "唯一一批 c_shuf（control: true，第一条）+ dvy（control: false），offline_trials = 0；"
+            "Y1–Y4 主动均值 ≤ 0、整期主动 IR 低于 0.4544、正年少于 6/8 或主动回撤超过 0.30 即 no_edge；"
+            "银行权重与每月完成回合逐次报；都没命中才跑登记的邻居 dv_ratio，按 refs/families.md 提名。"
+        ),
+    },
 }
 
-# Written, not queued: appended to ARMS only if either arm above reads a non-negative
+# Written, not queued: appended to ARMS only if either range20 arm above reads a non-negative
 # out-of-sample half (mean Y1-Y4 active neutralized excess >= 0) on the host. The small-cap end of
 # the pool curve on the same eight years; CSI 1000 drew down 48 % over them, hence the 0.55 cap.
 HELD: dict[str, dict[str, object]] = {

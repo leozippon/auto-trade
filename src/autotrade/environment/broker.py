@@ -196,11 +196,14 @@ class DailyBroker:
         ``bars`` is the day's market frame and ``cash_dividends`` maps a symbol
         to the cash dividend per share going ex on this day. The exchange's
         ex-rights reference price (the bar's ``pre_close``) is the truth for the
-        share leg: a held name whose ``pre_close`` differs from its last close
-        is reset so that its value at ``pre_close`` equals its value at the
-        last close, with the cash dividend credited and any fractional share
-        paid out in cash. Shares created on the ex-date stay locked until the
-        next day, exactly like a same-day buy.
+        share leg: a held name whose ``pre_close`` falls below its last close by
+        more than the cash dividend (a bonus issue or split) is reset so that
+        its value at ``pre_close`` equals its value at the last close, with the
+        cash dividend credited and any fractional share paid out in cash. A
+        cash dividend alone never changes the share count: the declared cash is
+        credited in full even where the exchange's reset is smaller. Shares
+        created on the ex-date stay locked until the next day, exactly like a
+        same-day buy.
         """
         if self._current_day == trade_date:
             return
@@ -243,17 +246,6 @@ class DailyBroker:
                 return
             quantity_after = quantity_before
             credit = quantity_before * cash_per_share
-        elif (
-            round(abs(pre_close - (last_close - cash_per_share)), 6)
-            <= EX_DATE_PRICE_TOLERANCE
-        ):
-            # A pure cash dividend: the reset is the dividend itself, quoted to
-            # a tick by the exchange. The multiplier is exactly one — flooring
-            # a price-derived 0.9997 would shave shares into cash on most
-            # dividends — so only the cash leg moves.
-            quantity_after = quantity_before
-            credit = quantity_before * cash_per_share
-            position.last_price = pre_close
         else:
             # pre_close = (last_close - cash) / (1 + r): the share multiplier is
             # recovered from the exchange's own reset, never from a ratio table.
@@ -263,18 +255,34 @@ class DailyBroker:
                     f"{symbol} on {day}: ex-date reset from {last_close} to {pre_close} with "
                     f"cash {cash_per_share} implies an invalid share multiplier {ratio!r}"
                 )
-            quantity_after = math.floor(round(quantity_before * ratio, 6))
-            if quantity_after <= 0:
-                raise ValueError(
-                    f"{symbol} on {day}: ex-date reset leaves no whole share of {quantity_before}"
-                )
-            # Whole shares only: the account is worth at pre_close exactly what
-            # it was worth at the last close once the dividend and the
-            # fractional share are paid in cash.
-            credit = quantity_before * last_close - quantity_after * pre_close
-            position.quantity = quantity_after
-            position.available_quantity = min(position.available_quantity, quantity_after)
-            position.last_price = pre_close
+            if (
+                cash_per_share > 0.0
+                and round(last_close - cash_per_share - pre_close, 6) <= EX_DATE_PRICE_TOLERANCE
+            ):
+                # A cash dividend without a bonus (multiplier at most one, to
+                # half a tick). The exchange quotes the reset on the dividend
+                # rounded to a tick, or on a smaller virtual per-share amount
+                # when treasury shares take none, yet every holder is paid the
+                # declared cash. A cash dividend never shrinks a holding --
+                # flooring a price-derived 0.9997 would shave a share off most
+                # of them, and leave a one-share holding with none -- so only
+                # the cash leg moves.
+                quantity_after = quantity_before
+                credit = quantity_before * cash_per_share
+                position.last_price = pre_close
+            else:
+                quantity_after = math.floor(round(quantity_before * ratio, 6))
+                if quantity_after <= 0:
+                    raise ValueError(
+                        f"{symbol} on {day}: ex-date reset leaves no whole share of {quantity_before}"
+                    )
+                # Whole shares only: the account is worth at pre_close exactly
+                # what it was worth at the last close once the dividend and
+                # the fractional share are paid in cash.
+                credit = quantity_before * last_close - quantity_after * pre_close
+                position.quantity = quantity_after
+                position.available_quantity = min(position.available_quantity, quantity_after)
+                position.last_price = pre_close
         # The cost basis carries over and the cash paid out is a return of
         # capital, so a later sale's realized P&L still closes the loop.
         position.average_cost = (
