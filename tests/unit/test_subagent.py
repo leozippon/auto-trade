@@ -20,6 +20,7 @@ from autotrade.agent.subagent import (
     SUBAGENT_DEGRADED_SUMMARY_ERROR,
     SUBAGENT_DEGRADED_SUMMARY_MARKER,
     SUBAGENT_DESCRIPTION_MAX_CHARS,
+    SUBAGENT_REPORT_MAX_CHARS,
     SUBAGENT_ROLES,
     SUBAGENT_STEER_MAX_CHARS,
     SUBAGENT_THINKING_LEVELS,
@@ -28,6 +29,7 @@ from autotrade.agent.subagent import (
     SubAgentEngine,
     subagent_system_prompt,
     normalize_subagent_thinking,
+    deliver_subagent_report,
 )
 from autotrade.agent import subagent as subagent_module
 from autotrade.agent.prompts import (
@@ -1050,6 +1052,25 @@ def test_general_prompts_explain_the_role() -> None:
     ):
         assert clause in writer
         assert clause not in subagent_system_prompt("Explore")
+
+
+def test_each_role_writes_its_report_within_the_inline_cap() -> None:
+    """44 % of one round's reports ran past an inline cap the child was never
+    told, each costing the parent a spill read: every role prompt states the
+    cap the parent receives, and where the long material goes instead."""
+
+    writer = subagent_system_prompt("general-purpose")
+    reader = subagent_system_prompt("Explore")
+    cap = f"前 {SUBAGENT_REPORT_MAX_CHARS} 个字符直接送到父 Agent"
+    assert cap in writer and cap in reader
+    assert "写进工作区 `notes/<topic>/` 下的文件" in writer
+    # A read-only role cannot write files: it cites sources instead of copying them.
+    assert "不抄录原文" in reader and "写进工作区" not in reader
+    # The cap a child is told is the one delivery enforces.
+    assert "summary_truncated" not in deliver_subagent_report("x" * SUBAGENT_REPORT_MAX_CHARS, None)
+    assert deliver_subagent_report("x" * (SUBAGENT_REPORT_MAX_CHARS + 1), None)[
+        "summary_truncated"
+    ]
 
 
 def test_subagent_prompts_carry_the_path_and_argv_contract() -> None:
@@ -2610,14 +2631,18 @@ def test_resume_refuses_unknown_running_or_mismatched_children() -> None:
     assert runner._subagent_attempts == 1
 
 
-def test_delegation_reminder_fires_once_after_eight_own_calls() -> None:
+def test_a_parent_working_alone_is_never_nudged_to_delegate() -> None:
+    """A delegation reminder after eight own calls provoked a sub-agent launch
+    65 times out of 156 in one round, trivial ones included, so the Runner
+    sends none: the prompt's delegation guidance is the only nudge, and the
+    agent tool stays available."""
     read = _NamedTool("read_file")
     finish = _FinishStub("finish_session")
     llm = ScriptedLLM(
         [
             *(
                 ProviderResponse(tool_calls=(ToolCall(f"r{index}", "read_file", {}),))
-                for index in range(9)
+                for index in range(17)
             ),
             ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),)),
         ]
@@ -2634,119 +2659,12 @@ def test_delegation_reminder_fires_once_after_eight_own_calls() -> None:
         event_sink=lambda event, payload: events.append((event, payload)),
     )
     assert runner.run("go").status == "finished"
-    reminders = [payload for event, payload in events if event == "delegation_reminder"]
-    assert len(reminders) == 1 and reminders[0]["own_work_calls"] == 8
-    ninth = llm.calls[8]["messages"]
-    assert sum('"observation": "delegation_reminder"' in (m.content or "") for m in ninth) == 1
-    last = llm.calls[-1]["messages"]
-    assert sum('"observation": "delegation_reminder"' in (m.content or "") for m in last) == 1
-
-
-def test_delegation_reminder_rearms_per_streak_and_counts_writes() -> None:
-    """The reminder is not a one-shot latch: every further streak of eight
-    own-work calls (reads or writes) with no child running fires it again,
-    whether or not a launch happened in between."""
-    read = _NamedTool("read_file")
-    write = _NamedTool("write_file")
-    finish = _FinishStub("finish_session")
-    llm = ScriptedLLM(
-        [
-            ProviderResponse(
-                tool_calls=(ToolCall("a1", "agent", {"agent": "Explore", "task": "look"}),)
-            ),
-            # Text only while the child runs: the parent yields until it ends.
-            ProviderResponse(content="waiting"),
-            # Streak one and two: the eighth and the sixteenth call fire.
-            *(
-                ProviderResponse(tool_calls=(ToolCall(f"r{index}", "read_file", {}),))
-                for index in range(18)
-            ),
-            ProviderResponse(
-                tool_calls=(ToolCall("a2", "agent", {"agent": "Explore", "task": "again"}),)
-            ),
-            ProviderResponse(content="waiting"),
-            # Streak three: self-implementation counts as own work too.
-            *(
-                ProviderResponse(tool_calls=(ToolCall(f"w{index}", "write_file", {}),))
-                for index in range(8)
-            ),
-            ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),)),
-        ]
-    )
-    events: list[tuple[str, dict[str, object]]] = []
-    runner = AgentSessionRunner(
-        llm=llm,
-        tools=ToolRegistry([read, write, finish]),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=SubAgentEngine(
-            llm=ScriptedLLM([ProviderResponse(content="seen")] * 2),
-            tools=ToolRegistry([DeclaredReadOnlyShell()]),
-        ),
-        event_sink=lambda event, payload: events.append((event, payload)),
-    )
-    assert runner.run("go").status == "finished"
-    reminders = [payload for event, payload in events if event == "delegation_reminder"]
-    assert [payload["own_work_calls"] for payload in reminders] == [8, 8, 8]
-    assert all(payload["running_children"] == [] for payload in reminders)
-    delivered = sum(
-        '"observation": "delegation_reminder"' in str(message.content or "")
+    assert not any(event == "delegation_reminder" for event, _payload in events)
+    assert not any(
+        "delegation_reminder" in str(message.content or "")
         for message in llm.calls[-1]["messages"]
     )
-    assert delivered == 3
-
-
-def test_delegation_reminder_waits_for_a_running_child_to_finish() -> None:
-    """Own work beside a running child is parallel work, not a reason to
-    nag; the streak fires once the parent is alone again."""
-    started, release = threading.Event(), threading.Event()
-
-    class ReleasingRead(_NamedTool):
-        def __init__(self) -> None:
-            super().__init__("read_file")
-            self.calls = 0
-
-        def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
-            self.calls += 1
-            if self.calls == 9:
-                release.set()
-            return super().invoke(arguments)
-
-    read = ReleasingRead()
-    finish = _FinishStub("finish_session")
-    llm = ScriptedLLM(
-        [
-            ProviderResponse(
-                tool_calls=(ToolCall("a1", "agent", {"agent": "Explore", "task": "slow look"}),)
-            ),
-            *(
-                ProviderResponse(tool_calls=(ToolCall(f"r{index}", "read_file", {}),))
-                for index in range(9)
-            ),
-            ProviderResponse(content="waiting"),
-            ProviderResponse(tool_calls=(ToolCall("r9", "read_file", {}),)),
-            ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),)),
-        ]
-    )
-    events: list[tuple[str, dict[str, object]]] = []
-    runner = AgentSessionRunner(
-        llm=llm,
-        tools=ToolRegistry([read, finish]),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=SubAgentEngine(
-            llm=_GateLLM(started, release),
-            tools=ToolRegistry([DeclaredReadOnlyShell()]),
-        ),
-        event_sink=lambda event, payload: events.append((event, payload)),
-    )
-    try:
-        assert runner.run("go").status == "finished"
-    finally:
-        release.set()
-    reminders = [payload for event, payload in events if event == "delegation_reminder"]
-    assert [payload["own_work_calls"] for payload in reminders] == [10]
-    assert reminders[0]["running_children"] == []
+    assert "agent" in {tool["function"]["name"] for tool in llm.calls[-1]["tools"]}
 
 
 def test_agent_description_states_role_capabilities_and_thinking_tiers() -> None:
@@ -2902,37 +2820,6 @@ def test_a_full_round_of_writable_children_runs_concurrently() -> None:
         for _started, release, _summary in gates.values():
             release.set()
     assert all(record["ok"] for record in runner._wait_subagent_jobs())
-
-
-def test_delegation_reminder_carries_the_live_picture() -> None:
-    read = _NamedTool("read_file")
-    finish = _FinishStub("finish_session")
-    llm = ScriptedLLM(
-        [
-            *(
-                ProviderResponse(tool_calls=(ToolCall(f"r{index}", "read_file", {}),))
-                for index in range(9)
-            ),
-            ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),)),
-        ]
-    )
-    runner = AgentSessionRunner(
-        llm=llm,
-        tools=ToolRegistry([read, finish]),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=SubAgentEngine(
-            llm=ScriptedLLM([]), tools=ToolRegistry([DeclaredReadOnlyShell()])
-        ),
-    )
-    assert runner.run("go").status == "finished"
-    reminder = next(
-        json.loads(str(message.content))
-        for message in llm.calls[8]["messages"]
-        if message.role == "user"
-        and '"observation": "delegation_reminder"' in str(message.content or "")
-    )
-    assert reminder["running_children"] == [] and reminder["queued_children"] == []
 
 
 def test_parent_and_child_output_budgets_share_the_safety_ceiling() -> None:

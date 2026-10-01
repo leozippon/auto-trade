@@ -256,7 +256,7 @@ _WRITE_PROMPT = """\
 - 运行中收到以 `[父代理指令]` 开头的消息时，它是父 Agent 的补充要求，优先于原 task。
 
 # 返回
-用简洁中文说明结论、实际修改、关键证据和剩余风险，然后停止。\
+用简洁中文说明结论、实际修改、关键证据和剩余风险，然后停止。汇报只有前 {report_cap} 个字符直接送到父 Agent，超出的部分它要另花一轮去读：表格、逐列清单、代码与日志写进工作区 `notes/<topic>/` 下的文件，汇报只给结论、关键数字和这些文件的路径。\
 """
 
 _READ_PROMPT = """\
@@ -270,7 +270,7 @@ _READ_PROMPT = """\
 - 运行中收到以 `[父代理指令]` 开头的消息时，它是父 Agent 的补充要求，优先于原 task。
 
 # 返回
-用简洁中文说明结论、关键证据、限制和建议，然后停止。\
+用简洁中文说明结论、关键证据、限制和建议，然后停止。汇报只有前 {report_cap} 个字符直接送到父 Agent，超出的部分它要另花一轮去读：不抄录原文，给结论、关键数字和出处（根名、路径与行号），父 Agent 需要时自己去读。\
 """
 
 # The single place the sub-agent mechanism is explained to the model; the
@@ -310,7 +310,7 @@ AGENT_TOOL_DESCRIPTION = (
     f"（{DEFAULT_SUBAGENT_THINKING}、{DEFAULT_SUBAGENT_MAX_ROUNDS} 轮）；生效值记入该子代理的 subagent_task 事件。\n"
     f"汇报：最多内联 {SUBAGENT_REPORT_MAX_CHARS} 字符，更长的汇报只内联开头（summary_truncated=true），"
     "全文落盘并以 result_root/result_ref 返回，用 read_file 从 resume_line 起分页读回（offset 是行号，不是字符数）；"
-    "要求子代理把长材料写进工作区文件而不是塞进汇报。"
+    "子代理的角色提示里写着这个上限：可写的子代理把长材料写进工作区文件、汇报给路径，只读的子代理给出处而不抄原文。"
 )
 
 AGENT_TOOL_SPEC = ToolSpec(
@@ -474,7 +474,14 @@ def subagent_system_prompt(role: str) -> str:
     else:
         template = _READ_PROMPT
         tool_calls = f"{TOOL_PATH_CHEAT_SHEET}\n{TOOL_READ_ONLY_SCREEN_NOTE}"
-    return template.format(role=role, mission=spec.mission, tool_calls=tool_calls)
+    # The child is told the inline cap its report is delivered under: 44 % of
+    # one round's reports ran past it unaware and cost the parent a spill read.
+    return template.format(
+        role=role,
+        mission=spec.mission,
+        tool_calls=tool_calls,
+        report_cap=SUBAGENT_REPORT_MAX_CHARS,
+    )
 
 
 def normalize_subagent_thinking(value: object, role: str | None = None) -> str:
