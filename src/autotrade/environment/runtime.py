@@ -418,11 +418,6 @@ class RunManifest:
     def get(self, key: str, default: object = None) -> object:
         return self.data.get(key, default)
 
-    def require(self, key: str) -> object:
-        if key not in self.data:
-            raise KeyError(f"run manifest missing required key: {key}")
-        return self.data[key]
-
 
 def _default_host_manifest_path(public_path: Path) -> Path:
     if public_path.parent.name == "artifacts":
