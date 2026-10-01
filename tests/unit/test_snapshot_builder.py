@@ -189,6 +189,30 @@ def write_index_weight(raw: Path, cross_sections: dict[str, dict[str, float]]) -
     )
 
 
+def write_dividend_history(root: Path) -> None:
+    """A PIT dividend store reaching back before every fixture replay slot.
+
+    A replay refuses a slot the store does not precede (DividendHistoryError).
+    The one implemented event went ex long before the slots, so their
+    corporate-action tables stay empty."""
+    write(
+        root / "dividend" / "available_month=202101.parquet",
+        pd.DataFrame(
+            [
+                {
+                    "dataset": "dividend", "ts_code": "000001.SZ", "end_date": "20191231",
+                    "div_proc": "实施", "ex_date": "20210120", "record_date": "20210119",
+                    "pay_date": "20210120", "div_listdate": None, "cash_div": 0.1,
+                    "cash_div_tax": 0.1, "stk_div": None, "stk_bo_rate": None, "stk_co_rate": None,
+                    "available_at": "2021-01-12T18:00:00+08:00",
+                    "available_at_rule": "source:imp_ann_date_or_ann_date", "available_month": "202101",
+                    "business_key": "d0", "source_path": "x", "source_write_id": "w", "source_row_id": 0,
+                },
+            ]
+        ),
+    )
+
+
 def build_fundamental_events(root: Path) -> None:
     write(
         root / "income_vip" / "available_month=202109.parquet",
@@ -198,6 +222,7 @@ def build_fundamental_events(root: Path) -> None:
             ]
         ),
     )
+    write_dividend_history(root)
 
 
 def write_quality_status(
@@ -1602,7 +1627,10 @@ class SnapshotBuilderTest(unittest.TestCase):
             raw = Path(tmp) / "raw"
             build_raw(raw)
             out = Path(tmp) / "replay"
-            builder = SnapshotBuilder(raw, Path(tmp) / "missing_events")
+            # Only the dividend history every replay's ex-date table needs.
+            events_root = Path(tmp) / "dividend_only_events"
+            write_dividend_history(events_root)
+            builder = SnapshotBuilder(raw, events_root)
             manifest = builder.build_replay_slot("20211007", "20211011", out, label="valid", config=CONFIG)
             daily = pd.read_parquet(out / "daily.parquet")
             self.assertEqual(sorted(daily["trade_date"].unique()), ["20211008"])
@@ -1618,8 +1646,8 @@ class SnapshotBuilderTest(unittest.TestCase):
             minutes = pd.read_parquet(out / "intraday_1min.parquet")
             self.assertEqual(len(minutes), 0)  # fixture minutes are outside the period
             # Macro and fundamentals domains are written even when empty for this period
-            # (cn_gdp rows fall outside, the events root is absent), so the Timeview
-            # always has a stable per-domain file to roll.
+            # (cn_gdp rows fall outside, the events root holds no income_vip), so the
+            # Timeview always has a stable per-domain file to roll.
             self.assertTrue((out / "macro.parquet").exists())
             self.assertEqual(len(pd.read_parquet(out / "macro.parquet")), 0)
             self.assertTrue((out / "fundamentals.parquet").exists())
@@ -1643,6 +1671,7 @@ class SnapshotBuilderTest(unittest.TestCase):
                 events_root / "income_vip" / "available_month=202110.parquet",
                 pd.DataFrame([{"dataset": "income_vip", "ts_code": "000001.SZ", "available_at": "2021-10-08T18:00:00+08:00", "available_at_rule": "source:f_ann_date_or_ann_date", "available_month": "202110", "business_key": "k2", "source_path": "x", "source_write_id": "w", "source_row_id": 0}]),
             )
+            write_dividend_history(events_root)
             out = Path(tmp) / "replay"
             builder = SnapshotBuilder(raw, events_root)
             builder.build_replay_slot("20211007", "20211011", out, label="valid", config=CONFIG)
