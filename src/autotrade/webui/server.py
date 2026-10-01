@@ -82,6 +82,14 @@ def _raw_generation_status(repo_root: Path) -> dict[str, object]:
     return info
 
 
+# Raw-lake states that leave health ok. ``updating`` is the nightly write in
+# progress, not a fault: no console path reads the live lake -- an arm pins an
+# already-published release (its seed's, or the last complete one while the
+# updater holds the lake) and Paper reads the newest committed one -- so it is
+# reported in ``raw_generation`` without degrading. ``dirty``, ``unreadable``
+# and any state this code does not know degrade.
+_HEALTHY_RAW_STATES = frozenset({"committed", "absent", "updating"})
+
 _UNREADABLE_HITL_HEALTH_ERROR = "HITL control plane is unreadable"
 
 
@@ -225,10 +233,10 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     def health() -> dict[str, object]:
         unreadable = _health_unreadable_experiments(manager.unreadable_experiments())
         raw_generation = _raw_generation_status(root)
-        # Honest status: degraded when the raw lake's last mutation did not
-        # commit (absent = dev/test roots without a lake), or when an
-        # experiment's control plane is unreadable.
-        healthy = raw_generation["state"] in ("committed", "absent") and not unreadable
+        # Honest status: degraded when the raw lake's last mutation failed or
+        # its stamp cannot be read (absent = dev/test roots without a lake), or
+        # when an experiment's control plane is unreadable.
+        healthy = raw_generation["state"] in _HEALTHY_RAW_STATES and not unreadable
         return {
             "status": "ok" if healthy else "degraded",
             "max_running_experiments": MAX_RUNNING_EXPERIMENTS,

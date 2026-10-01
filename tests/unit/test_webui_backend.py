@@ -1210,6 +1210,27 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(
             payload["raw_generation"]["completed_at"], "2026-07-28T04:00:00+00:00"
         )
+        # The nightly write in progress is reported, not a fault: creation
+        # pins a published release and never reads the live lake.
+        stamp.write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "state": "updating",
+                    "generation_id": "gen43",
+                    "updated_at": "2026-07-29T00:00:00+00:00",
+                }
+            ),
+            encoding="utf-8",
+        )
+        payload = self.client.get("/api/health").json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["raw_generation"]["state"], "updating")
+        # A state this code does not know is not vouched for.
+        stamp.write_text(
+            json.dumps({"schema_version": 2, "state": "migrating"}), encoding="utf-8"
+        )
+        self.assertEqual(self.client.get("/api/health").json()["status"], "degraded")
         # A dirty lake (aborted mutating cron) must degrade health — the
         # 6-day production outage stayed green behind the hardcoded literal.
         stamp.write_text(
