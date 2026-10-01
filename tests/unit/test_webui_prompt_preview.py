@@ -272,3 +272,28 @@ def _facts(prompt: str) -> dict:
     """The run-facts JSON block the preview embeds in the system prompt."""
     body = prompt.split("```json\n", 1)[1].split("\n```", 1)[0]
     return json.loads(body)
+
+
+def test_preview_shows_the_lineage_the_session_will_see(tmp_path: Path):
+    """An arm created with a lineage carries it in the ledger; the preview
+    projects the same ``arm.lineage`` fact the session is given, and an arm
+    without one shows none."""
+    from autotrade.pipelines.lineage import record_lineage
+
+    assert "lineage" not in _facts(str(_preview(tmp_path / "plain")["prompt"]))["arm"]
+
+    directory, repo = _experiment(tmp_path / "with")
+    arm = {
+        "experiment_id": "earlier",
+        "host_trials": 3,
+        "offline_trials": 2,
+        "controls": 1,
+        "undeclared_offline_validations": 0,
+    }
+    record = record_lineage(directory, {"arms": [arm], "series": []})
+    lineage = _facts(_preview_of(directory, repo, SESSION_KEY))["arm"]["lineage"]
+    assert lineage == {
+        "arms": ["earlier"],
+        "trials": 5,
+        "effective_trials": record["effective_trials"],
+    }

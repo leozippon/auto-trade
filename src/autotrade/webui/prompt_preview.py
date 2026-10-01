@@ -33,6 +33,7 @@ from autotrade.pipelines.hitl_state import (
     read_control,
     read_json,
 )
+from autotrade.pipelines.ledger import lineage_record
 
 from .registry import read_ledger_records
 
@@ -151,7 +152,7 @@ def _research_prompt(
         "benchmark_index": rolling.benchmark_index,
         "snapshot_config": context.options.snapshot_config.to_record(),
         "start": start_record(),
-        "arm": arm_record(()),
+        "arm": arm_record((), lineage_record(context.records)),
         "modification_constraints": rolling.step_constraints.to_record(),
         "acceptance_rules": rolling.acceptance.to_record(),
         "schedule": rolling.schedule.to_record(),
