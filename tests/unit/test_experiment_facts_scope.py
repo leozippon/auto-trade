@@ -330,3 +330,28 @@ def test_the_facts_place_every_read_root_in_the_shell_filesystem() -> None:
     for path in ("/mnt/artifacts/steps", "/mnt/snapshot", "/mnt/agent/workspace"):
         assert path in note
     assert "trace" in note
+
+
+def test_an_early_research_year_does_not_advertise_history_before_the_store() -> None:
+    from types import SimpleNamespace
+
+    from autotrade.pipelines.local_backend import research_geometry_record
+
+    record = research_geometry_record(
+        [SimpleNamespace(label="Y1", start="20170701", end="20180630")],
+        window_months=108,
+        decision_time="2025-06-30T23:59:59+08:00",
+    )
+    # 108 months before 2017-06-30 is 2008-07-01. Daily bars start in 2010.
+    assert record["years"][0]["input_window"] == "20100101..20170630"
+    # The macro floor is stated only for the backfilled series it is true of.
+    assert record["history_floors"] == {
+        "daily": "20100101",
+        "macro": dict.fromkeys(("index_daily", "index_dailybasic", "index_weight", "sw_daily"), "20140701"),
+    }
+    later = research_geometry_record(
+        [SimpleNamespace(label="Y1", start="20220701", end="20230630")],
+        window_months=24,
+        decision_time="2024-06-30T23:59:59+08:00",
+    )
+    assert later["years"][0]["input_window"] == "20200701..20220630"

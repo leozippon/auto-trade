@@ -97,6 +97,19 @@ def months_before(end: str, months: int) -> str:
     return stamp.strftime("%Y%m%d")
 
 
+# The research store holds no daily bars before DAILY_HISTORY_START, and none
+# of the index and Shenwan macro series backfilled for the eight-year arms
+# before MACRO_HISTORY_START. A requested input window is clipped to the daily
+# floor; ``history_floors`` names both. Other macro tables are not listed:
+# each starts at its own download floor. These mirror the lake's download
+# floors (docs/data-documentation.md) by hand. A view manifest's
+# ``coverage_start`` cannot stand in: the research-end view's window rarely
+# reaches the floor, and a year's replay view is built only when replayed.
+DAILY_HISTORY_START = "20100101"
+MACRO_HISTORY_START = "20140701"
+BACKFILLED_MACRO_DATASETS = ("index_daily", "index_dailybasic", "index_weight", "sw_daily")
+
+
 def _next_day(day: str) -> str:
     return (date.fromisoformat(day) + timedelta(days=1)).strftime("%Y%m%d")
 

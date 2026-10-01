@@ -98,7 +98,16 @@ from autotrade.environment.tools.skill_feedback import (
 from autotrade.environment.tools.step_rollback import StepRollbackTool
 from autotrade.environment.tools.workspace import SafeWorkspace
 
-from .calendar import FULL_SPAN, anchor_before, months_before, replay_window, yyyymmdd
+from .calendar import (
+    BACKFILLED_MACRO_DATASETS,
+    DAILY_HISTORY_START,
+    FULL_SPAN,
+    MACRO_HISTORY_START,
+    anchor_before,
+    months_before,
+    replay_window,
+    yyyymmdd,
+)
 from .config import (
     ArtifactRevision,
     BudgetUsed,
@@ -1394,12 +1403,19 @@ def research_geometry_record(
     """
 
     def input_window(end: str) -> str:
-        return f"{months_before(end, window_months)}..{end}"
+        # A 108-month window before 2017 asks for 2008. Daily history starts
+        # in 2010, so the unclipped date describes files the snapshot cannot hold.
+        start = max(months_before(end, window_months), DAILY_HISTORY_START)
+        return f"{start}..{end}"
 
     first, last = years[0], years[-1]
     return {
         "decision_time": decision_time,
         "input_window": input_window(last.end),  # type: ignore[attr-defined]
+        "history_floors": {
+            "daily": DAILY_HISTORY_START,
+            "macro": dict.fromkeys(BACKFILLED_MACRO_DATASETS, MACRO_HISTORY_START),
+        },
         "research_period": f"{first.start}..{last.end}",  # type: ignore[attr-defined]
         "years": [
             {
