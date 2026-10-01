@@ -1,0 +1,49 @@
+# 八年研究期的数据面：表、单位、可见时间与陷阱
+
+研究期 20170701..20250630、`history_floors` 为日线 20100101 与宏观 20140701、宏观只挂 `index_daily`/`index_dailybasic`/`index_weight`/`sw_daily` 的臂共用这份数据面。下面每条都在这份数据上实读或对照代码核对过，不必再派子代理重推一遍；先按运行事实、`data_summary.json` 与 `unit_reference.json` 确认本臂挂的是同一份，几何或数据集不同就先核对再用。
+
+## 视图与窗口
+
+- 会话的 `/mnt/snapshot` 是研究期末（2025-06-30 23:59:59）的决策视图：`daily`、`macro`、`universe` 各一个平铺文件，日线与四张宏观表自 20160701 起。它只供离线探查，正式回放读不到它。
+- 一次回放的 `context.snapshot_dir` 是该 span 第一年的决策视图（年初前一天 06-30 23:59:59），整场不变。`context.asof_dir/<域>/` 是 parts 目录：part 0 就是这个决策视图，之后随回放时钟逐日追加。多年 span 一路累加，从 Y1 起跑的整期回放到 Y8 时 `daily` 里是 2010 年起的全部行。
+- 每个研究年的决策视图窗口见 `research_geometry.years[].input_window`：年初前 108 个月，截到 `history_floors`。实读：Y1 视图日线 20100104..20170630、宏观自 2014-07；Y3 日线自 20100701；Y8 日线自 20150701、宏观自 2015-07。所以从 Y1、Y2 起跑时指数与申万序列只有 3、4 年历史，需要更长指数窗口的特征（多年 β、按指数算的残差标签、长期指数动量）在前两年取不满：缩短窗口，或在样本说明里写明。
+- 这份数据面没有财务、事件、文本与分钟；`auction` 只有 20250116 起的行，不能当全期特征。
+
+## 可见时间：08:30 的决策看到 T-1
+
+- 日线（含每日指标与涨跌停价列）和四张宏观表都按交易日 17:30 盖章，要等交易日晚间的落库任务（23:35 开始）之后才进入 as-of 视图。T 日 08:30 的决策最新只看到 T-1 的行（周一看到上周五），T 日的开盘价在决策时不可见。
+- as-of 的 `daily` 没有 `available_at` 列，视图已按落库节点放行。`macro` 保留 `available_at` 与 `available_at_rule`（`contract_1730_from:trade_date`）；`available_at` 是带时区的字符串（`2016-07-01 17:30:00+08:00`），与 `context.inference_at` 比较前用 `pd.to_datetime(..., utc=True)` 解析。
+
+## 日线 daily
+
+- 一行一个 (trade_date, ts_code)，合并了日线、每日指标与涨跌停价：open/high/low/close/pre_close/change/pct_chg/vol/amount、turnover_rate/turnover_rate_f/volume_ratio、pe/pe_ttm/pb/ps/ps_ttm/dv_ratio/dv_ttm、total_share/float_share/free_share、total_mv/circ_mv、up_limit/down_limit、adj_factor、is_suspended。
+- 单位已归一：价格 元/股，vol 股，amount 元，pct_chg/turnover_rate/turnover_rate_f/dv_ratio/dv_ttm 是小数（0.05 = 5%），股本 股，total_mv/circ_mv 元，估值是倍数。实读：amount ÷ (vol × close) 中位 0.9998，total_mv = close × total_share，circ_mv = close × float_share。亏损股的 pe/pe_ttm 是空值而不是负数（研究期末前一个月约四分之一为空、零个负值）。
+- 价格不复权，pre_close 是除权后的参考价。跨除权日的收益用 `close × adj_factor` 或 `pct_chg`（= close ÷ pre_close − 1），不能用相邻两天的 close：002667.SZ 在 2018-05-02 每股送转 0.7，两天 close 之比给出 −42.6%，复权收益与 pct_chg 都是 −2.3%。个别代码的 adj_factor 会回落，算复权收益时不要假定它逐日不降。
+- 回放里的除权由 Broker 结算：除权日把现金红利记入现金，股数变化按 pre_close 结算（运行事实 `broker_replay.ex_date_settlement`），持仓穿过除权日不需要策略自己记账。
+- 全日停牌当天没有行；`is_suspended=True` 只是盘中临时停牌，当天量额完整，Broker 会拒当天的委托。连续的 True 不构成停牌段：判断能否交易，看该股最近一根 bar 是不是视图里最新的交易日。
+- 研究期末视图的日线有 5,636 个代码，其中 216 个不在同一视图的 universe 里（在 2025-06-30 前已退市）。
+
+## universe：每个研究年换一个版本
+
+- 列：ts_code、exchange、list_date、market、name、l1_code、l1_name，没有日期列。每个决策视图里是那一天的版本：当天已上市且尚未退市的代码、当天生效的名称（ST 只能从 name 含 "ST" 判断）、当天的申万一级归属。
+- 回放中 `asof_dir/universe` 在跨入每个研究年（07-01）时整表换成该年锚点视图的版本，年内不变：年内的上市、改名、戴帽摘帽与行业调整要到下一个 07-01 才看得到。
+- 2021-06-30 及以前的版本是申万 2014 口径（28 个一级，含 801020.SI 采掘），2022-06-30 起是申万 2021 口径（31 个一级，新增 801950/801960/801970/801980.SI）。同一代码在 2017 与 2025 两个版本里一级归属不同的有 785/3,077。每个版本都有 l1_code 为空的代码（2017 版 146、2021 版 374、2025 版 3），要显式归入「未分类」，不要直接 groupby。
+- `/mnt/snapshot/universe.parquet` 只是 2025-06-30 这一个版本（5,420 行）。拿它给更早的决策日定股票池、行业或 ST，会混进之后的上市、改名与改分类，也会漏掉此前退市的名字（2017 版里有 202 个代码不在 2025 版）。离线复现历史决策只能当近似；策略里读 `context.asof_dir/universe`。
+
+## 宏观 macro：四张表纵向拼成的一张宽表
+
+- 先按 `dataset` 过滤、再取列：每张表只填自己的列。研究期末视图 158 万行，两个 row group 都横跨全期，不能按日期跳过。
+- `index_daily`：指数代码在 `ts_code`，`index_code` 整列为空，按 `index_code` 过滤取不到任何行情。7 只指数：000001.SH、000016.SH、000300.SH、000688.SH、000852.SH、000905.SH、399006.SZ。点位；`pct_chg` 是百分数（−0.35 = −0.35%，与日线的小数口径不同）；vol 手、amount 千元，未归一。
+- `index_weight`：指数在 `index_code`、成分在 `con_code`（与日线 ts_code 同格式），`ts_code` 整列为空。同样 7 只，每只每月一张截面，日期是当月最后一个交易日（000688.SH 自 2020-07 起）。000300/000905/000852 每张恰 300/500/1000 行、三者互不重叠，相邻两张最长隔 36 天。`weight` 是百分数（每张合计约 100），当组合权重先除以 100。
+- `index_dailybasic`：只有 6 只（没有 000688.SH）；000852.SH 在这份数据里 20181228 之后没有行，2019 年起取不到中证 1000 的指数换手与估值。total_mv/float_mv 元、股本 股（与日线每日指标的口径不同，不要混算），turnover_rate 百分数。
+- `sw_daily`：申万指数行情，研究期末视图 596 个代码，一级之外还有二级、三级与风格指数。正则 `801\d\d0\.SI` 匹配 37 个，比研究期末的 31 个一级多出 801020.SI 与 801250/801260/801270/801280/801300.SI；某一年的一级以那一年 universe 的 l1_code 为准。`pct_change` 是百分数，vol 万股，amount/float_mv/total_mv 万元（单位表标为 inferred）。行业名与 universe 不一致（801030.SI 在这里叫「化工」、universe 里叫「基础化工」），跨表一律按代码连接。2021-12-13 之前的点位是按申万 2021 口径回算的，与当时按申万 2014 划分的个股归属不是同一套。
+
+## 按时点读成分、行业与指数行情
+
+- T 日某股是否在指数 X 中：`dataset == "index_weight"`、`index_code == X`、`available_at <= inference_at`，取其中 trade_date 最大的那张截面的 con_code。T 日自己的截面 17:30 才盖章，08:30 看不到；月初第一个交易日读到的是上月末那张；两张之间的月中调整与临时剔除都看不到。日期回看 40 个自然日就能命中最新可见的一张。
+- 行业：读 `context.asof_dir/universe` 的 l1_code，再按代码连 `sw_daily`。
+- 指数行情：`dataset == "index_daily"`、`ts_code == X`。
+
+## 读取
+
+- 研究期末视图的日线约 923 万行、9 个按 trade_date 有序的 row group，整期回放的后几年 `asof_dir/daily` 更长。决策期一律 `pd.read_parquet(context.asof_dir + "/daily", columns=[...], filters=[("trade_date", ">=", start)])`，只读命中的行组；宏观同样带 `("dataset", "==", ...)` 过滤与列投影。universe 只有百余 KB，可以整读。
