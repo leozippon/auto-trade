@@ -14,10 +14,13 @@ One JSONL file per experiment. The pipeline writes three record types:
   marker (:class:`RunMarkers`) that the next worker start turns into the
   missing ``attempt_failed``.
 
-The console writes a fourth, at creation and only for an arm created with
-``lineage_arms``: ``lineage``, the earlier arms whose research-period trials
-join this arm's freeze-gate family, with a reference to the series it
-extracted from them (``pipelines/lineage.py``).
+An arm created with ``lineage_arms`` also gets ``lineage``: the earlier arms
+whose research-period trials join its freeze-gate family, with a reference to
+the series the console extracted from them at creation
+(``pipelines/lineage.py``). The pipeline appends it before the arm's research
+session, after the worker pinned its research release, so a created arm's
+ledger stays empty until the arm runs: an unpinned ledger with records is a
+legacy arm to the release pin and the identity store.
 
 Every record carries the link keys ``experiment_id``, ``epoch_id``, ``fold_id``
 and ``run_id``: ``epoch_id`` names the stage (``research`` or ``forward``) and
@@ -57,6 +60,8 @@ FORWARD_STAGE = "forward"
 RESEARCH_SESSION_KEY = "research"
 FORWARD_SESSION_KEY = "forward"
 LINEAGE_RECORD_TYPE = "lineage"
+# Beside the ledger: the lineage series the console extracts at creation.
+LINEAGE_SERIES_NAME = "lineage_series.json"
 PIPELINE_RECORD_TYPES = ("research_session", "forward", "attempt_failed", LINEAGE_RECORD_TYPE)
 FOLD_ERA_RECORD_TYPES = (
     "fold",

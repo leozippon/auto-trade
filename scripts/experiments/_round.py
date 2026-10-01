@@ -82,13 +82,14 @@ from autotrade.pipelines.config import (
     AcceptanceRules,
     acceptance_for,
 )
+from autotrade.pipelines.experiment import lineage_summary
 from autotrade.pipelines.hitl_state import (
     WEB_CLOSED_PARAMS,
     WEB_CREATE_DEFAULTS,
     WEB_INTERNAL_PARAMS,
     WEB_REQUIRED_PARAMS,
 )
-from autotrade.pipelines.lineage import extract_lineage, lineage_summary
+from autotrade.pipelines.lineage import extract_lineage
 from autotrade.pipelines.verdict import information_ratio_bar
 from autotrade.pipelines.worker import resolve_worker_options
 

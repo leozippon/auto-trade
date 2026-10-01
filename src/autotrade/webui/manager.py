@@ -44,7 +44,7 @@ from autotrade.pipelines.hitl_state import (
     write_control,
 )
 from autotrade.pipelines.ledger import research_over
-from autotrade.pipelines.lineage import extract_lineage, lineage_arm_ids, record_lineage
+from autotrade.pipelines.lineage import extract_lineage, lineage_arm_ids, write_lineage
 from autotrade.pipelines.skills import create_operating_memory_snapshot
 
 from .public_identity import PublicIdentity
@@ -374,10 +374,10 @@ class ExperimentManager:
                     repo_root=self.repo_root,
                     experiments_root=self.experiments_root,
                 )
-                # A lineage is read from the earlier arms here, once, into
-                # this arm's own ledger; the gate never reads them again.
+                # A lineage is read from the earlier arms here, once, into a
+                # file beside this arm's ledger; nothing reads them again.
                 if merged.get("lineage_arms"):
-                    record_lineage(
+                    write_lineage(
                         directory,
                         extract_lineage(
                             self.experiments_root,

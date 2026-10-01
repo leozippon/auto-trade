@@ -44,7 +44,7 @@ from autotrade.environment.replay import (
 from autotrade.environment.replay.engine import BacktestError
 from autotrade.environment.replay.stats import window_activity
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
-from autotrade.environment.runtime import agent_trace_path, chmod_tree
+from autotrade.environment.runtime import agent_trace_path, chmod_tree, utc_now_iso
 from autotrade.environment.strategy import NLQuery
 from autotrade.environment.strategy_loader import validate_strategy_package
 
@@ -73,6 +73,8 @@ from .config import (
 from .ledger import (
     FORWARD_SESSION_KEY,
     FORWARD_STAGE,
+    LINEAGE_RECORD_TYPE,
+    LINEAGE_SERIES_NAME,
     RESEARCH_SESSION_KEY,
     RESEARCH_STAGE,
     STRATEGY_ERROR,
@@ -98,12 +100,14 @@ from .skills import (
     resolve_collected_skills_source,
 )
 from .verdict import (
+    effective_trials,
     forward_mde,
     forward_slice,
     freeze_gate,
     graduation_verdict,
     heldout_slice,
     neutralized_statistics,
+    trial_correlation,
 )
 
 # A session deadline override may raise the research deadline above the
@@ -294,15 +298,19 @@ class RollingExperimentPipeline:
             raise RuntimeError("research is over; no further research session runs")
         if research_records(records):
             raise RuntimeError("the arm's research session is already recorded")
+        if self.config.lineage_arms and lineage_record(records) is None:
+            # The console extracted the lineage at creation; its ledger record
+            # is written here, after the worker pinned the research release.
+            self.ledger.append(lineage_ledger_record(self.config.experiment_dir))
+            records = self.ledger.read()
         recorded = lineage_record(records)
         recorded_arms = tuple(recorded["arms"]) if recorded is not None else ()  # type: ignore[arg-type]
         if recorded_arms != self.config.lineage_arms:
             # The gate reads the lineage the ledger holds; one the params name
-            # but creation never recorded would silently drop from the family.
+            # but the record does not would silently drop from the family.
             raise RuntimeError(
                 f"lineage_arms {list(self.config.lineage_arms)} do not match the "
-                f"lineage the ledger records ({list(recorded_arms)}); a lineage is "
-                "recorded only when the console creates the arm"
+                f"lineage the ledger records ({list(recorded_arms)})"
             )
         resume = resume_state(self.config.experiment_dir, records)
         steps_before = load_recorded_steps(self.config.experiment_dir)
@@ -1024,6 +1032,55 @@ def trial_representatives(
     return representative
 
 
+def lineage_summary(extraction: Mapping[str, object]) -> dict[str, object]:
+    """A lineage's own trial count and what it counts as independently, from
+    what ``lineage.extract_lineage`` read: the ledger record's figures, and
+    what a round's ``--dry-run`` prints."""
+
+    arms: Sequence[Mapping[str, object]] = extraction["arms"]  # type: ignore[assignment]
+    host = sum(int(arm["host_trials"]) for arm in arms)  # type: ignore[call-overload]
+    offline = sum(int(arm["offline_trials"]) for arm in arms)  # type: ignore[call-overload]
+    correlation, pairs = trial_correlation(
+        (),
+        [
+            {str(day): float(value) for day, value in item["daily"]}  # type: ignore[index]
+            for item in extraction["series"]  # type: ignore[attr-defined]
+        ],
+    )
+    return {
+        "arms": [str(arm["experiment_id"]) for arm in arms],
+        "trials": host + offline,
+        "host_trials": host,
+        "offline_trials": offline,
+        "controls": sum(int(arm["controls"]) for arm in arms),  # type: ignore[call-overload]
+        "trial_correlation": correlation,
+        "trial_correlation_pairs": pairs,
+        "effective_trials": effective_trials(host + offline, correlation),
+    }
+
+
+def lineage_ledger_record(experiment_dir: Path) -> dict[str, object]:
+    """The ``lineage`` ledger record of an arm created with ``lineage_arms``,
+    from the series file the console wrote beside its ledger at creation."""
+
+    path = Path(experiment_dir) / "ledgers" / LINEAGE_SERIES_NAME
+    if not path.is_file():
+        raise RuntimeError(
+            f"the arm names lineage_arms but its creation wrote no lineage series ({path})"
+        )
+    return {
+        "record_type": LINEAGE_RECORD_TYPE,
+        "experiment_id": Path(experiment_dir).name,
+        "epoch_id": RESEARCH_STAGE,
+        "fold_id": RESEARCH_SESSION_KEY,
+        # No run produced it: it carries what creation read from other arms.
+        "run_id": LINEAGE_RECORD_TYPE,
+        **lineage_summary(json.loads(path.read_text(encoding="utf-8"))),
+        "series_ref": str(path),
+        "recorded_at": utc_now_iso(),
+    }
+
+
 def recorded_lineage(
     records: Sequence[Mapping[str, object]],
 ) -> tuple[list[str], int, list[dict[str, float]]]:
@@ -1310,6 +1367,8 @@ __all__ = [
     "DailyStrategyPipeline",
     "RollingExperimentPipeline",
     "freeze_gate_for",
+    "lineage_ledger_record",
+    "lineage_summary",
     "neutralized",
     "null_control_seed",
     "recorded_lineage",

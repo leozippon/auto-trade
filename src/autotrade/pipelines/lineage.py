@@ -6,15 +6,16 @@ non-control research Validations and declared offline screens are trials of
 the selection this arm's nominee comes out of, so the deflated Sharpe counts
 them with the arm's own (``experiment.freeze_gate_for``).
 
-The lineage is read from the earlier arms once, when the arm is created, and
-kept in the arm's own ledger directory: a ``lineage`` ledger record with the
-counts, and a compact series file holding, for each measurable non-control
-revision, the daily neutralised graded series the gate correlates
-(``verdict.neutral_daily``) -- the same series and the same representative
-Validation (full span when there is one) the gate reads for the arm's own
-trials. From then on nothing reads the lineage arms' directories. Only their
-research sessions' Validations are read, never a forward or Held-out replay,
-and every extracted day must lie inside the research period.
+The lineage is read from the earlier arms once, when the console creates the
+arm, into a compact series file beside the arm's ledger holding the per-arm
+counts and, for each measurable non-control revision, the daily neutralised
+graded series the gate correlates (``verdict.neutral_daily``) -- the same
+series and the same representative Validation (full span when there is one)
+the gate reads for the arm's own trials. From then on nothing reads the
+lineage arms' directories. Only their research sessions' Validations are read,
+never a forward or Held-out replay, and every extracted day must lie inside the
+research period. The ``lineage`` ledger record is the pipeline's to write, from
+this file, before the research session (``experiment.lineage_ledger_record``).
 
 Which earlier arms informed a new one is the round author's declaration; the
 host cannot know it.
@@ -27,8 +28,6 @@ import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from autotrade.environment.runtime import utc_now_iso
-
 from .config import DEFAULT_RESEARCH_GEOMETRY
 from .experiment import (
     _recorded_steps,
@@ -37,16 +36,9 @@ from .experiment import (
     trial_representatives,
 )
 from .hitl_state import read_json
-from .ledger import (
-    LINEAGE_RECORD_TYPE,
-    RESEARCH_SESSION_KEY,
-    RESEARCH_STAGE,
-    ExperimentLedger,
-)
-from .verdict import effective_trials, neutral_daily, trial_correlation
+from .ledger import LINEAGE_SERIES_NAME, ExperimentLedger
+from .verdict import neutral_daily
 
-# Beside the ledger: host-only, never mounted into a session.
-LINEAGE_SERIES_NAME = "lineage_series.json"
 _ARM_ID = re.compile(r"[A-Za-z0-9_-]+")
 
 
@@ -141,41 +133,16 @@ def extract_lineage(
     return {"arms": extracted, "series": series}
 
 
-def lineage_summary(extraction: Mapping[str, object]) -> dict[str, object]:
-    """The lineage's own trial count and what it counts as independently:
-    the ledger record's figures, and what ``--dry-run`` prints."""
+def write_lineage(experiment_dir: str | Path, extraction: Mapping[str, object]) -> Path:
+    """Write the extracted lineage beside the arm's ledger, once, while the
+    console creates the arm; returns the file.
 
-    arms: Sequence[Mapping[str, object]] = extraction["arms"]  # type: ignore[assignment]
-    host = sum(int(arm["host_trials"]) for arm in arms)  # type: ignore[call-overload]
-    offline = sum(int(arm["offline_trials"]) for arm in arms)  # type: ignore[call-overload]
-    correlation, pairs = trial_correlation(
-        (),
-        [
-            {str(day): float(value) for day, value in item["daily"]}  # type: ignore[index]
-            for item in extraction["series"]  # type: ignore[attr-defined]
-        ],
-    )
-    return {
-        "arms": [str(arm["experiment_id"]) for arm in arms],
-        "trials": host + offline,
-        "host_trials": host,
-        "offline_trials": offline,
-        "controls": sum(int(arm["controls"]) for arm in arms),  # type: ignore[call-overload]
-        "trial_correlation": correlation,
-        "trial_correlation_pairs": pairs,
-        "effective_trials": effective_trials(host + offline, correlation),
-    }
-
-
-def record_lineage(experiment_dir: str | Path, extraction: Mapping[str, object]) -> dict[str, object]:
-    """Write the extracted series beside the arm's ledger and append its
-    ``lineage`` record; returns the record.
-
-    Called once, by the console, while it creates the arm.
+    Only this file: the ledger stays empty until the arm runs, since the
+    release pin and the identity store read a ledger with records and no pin
+    as a legacy arm that already ran.
     """
 
-    directory = Path(experiment_dir)
-    path = directory / "ledgers" / LINEAGE_SERIES_NAME
+    path = Path(experiment_dir) / "ledgers" / LINEAGE_SERIES_NAME
     path.parent.mkdir(parents=True, exist_ok=True)
     # Compact: indented, the per-day pairs would triple the file.
     staging = path.with_name(f".{path.name}.tmp")
@@ -184,25 +151,11 @@ def record_lineage(experiment_dir: str | Path, extraction: Mapping[str, object])
         encoding="utf-8",
     )
     staging.replace(path)
-    record = {
-        "record_type": LINEAGE_RECORD_TYPE,
-        "experiment_id": directory.name,
-        "epoch_id": RESEARCH_STAGE,
-        "fold_id": RESEARCH_SESSION_KEY,
-        # No run produced it: the console wrote it at creation.
-        "run_id": LINEAGE_RECORD_TYPE,
-        **lineage_summary(extraction),
-        "series_ref": str(path),
-        "recorded_at": utc_now_iso(),
-    }
-    ExperimentLedger(directory / "ledgers" / "experiment_ledger.jsonl").append(record)
-    return record
+    return path
 
 
 __all__ = [
-    "LINEAGE_SERIES_NAME",
     "extract_lineage",
     "lineage_arm_ids",
-    "lineage_summary",
-    "record_lineage",
+    "write_lineage",
 ]

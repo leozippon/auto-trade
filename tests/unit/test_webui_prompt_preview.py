@@ -275,14 +275,17 @@ def _facts(prompt: str) -> dict:
 
 
 def test_preview_shows_the_lineage_the_session_will_see(tmp_path: Path):
-    """An arm created with a lineage carries it in the ledger; the preview
-    projects the same ``arm.lineage`` fact the session is given, and an arm
-    without one shows none."""
-    from autotrade.pipelines.lineage import record_lineage
+    """An arm created with a lineage carries its creation-time series file and
+    an empty ledger until it runs; the preview projects the same ``arm.lineage``
+    fact the session is given, before and after the pipeline records it, and an
+    arm without one shows none."""
+    from autotrade.pipelines.experiment import lineage_ledger_record
+    from autotrade.pipelines.ledger import ExperimentLedger
+    from autotrade.pipelines.lineage import write_lineage
 
     assert "lineage" not in _facts(str(_preview(tmp_path / "plain")["prompt"]))["arm"]
 
-    directory, repo = _experiment(tmp_path / "with")
+    directory, repo = _experiment(tmp_path / "with", lineage_arms=["earlier"])
     arm = {
         "experiment_id": "earlier",
         "host_trials": 3,
@@ -290,10 +293,10 @@ def test_preview_shows_the_lineage_the_session_will_see(tmp_path: Path):
         "controls": 1,
         "undeclared_offline_validations": 0,
     }
-    record = record_lineage(directory, {"arms": [arm], "series": []})
-    lineage = _facts(_preview_of(directory, repo, SESSION_KEY))["arm"]["lineage"]
-    assert lineage == {
-        "arms": ["earlier"],
-        "trials": 5,
-        "effective_trials": record["effective_trials"],
-    }
+    write_lineage(directory, {"arms": [arm], "series": []})
+    expected = {"arms": ["earlier"], "trials": 5, "effective_trials": 5.0}
+    assert _facts(_preview_of(directory, repo, SESSION_KEY))["arm"]["lineage"] == expected
+    ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl").append(
+        lineage_ledger_record(directory)
+    )
+    assert _facts(_preview_of(directory, repo, SESSION_KEY))["arm"]["lineage"] == expected

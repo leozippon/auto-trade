@@ -127,7 +127,7 @@ def _research_prompt(
     directive: str,
     resource_override: object,
 ) -> str:
-    from autotrade.pipelines.experiment import _session_budgets
+    from autotrade.pipelines.experiment import _session_budgets, lineage_ledger_record
     from autotrade.pipelines.local_backend import (
         arm_record,
         research_geometry_record,
@@ -139,6 +139,11 @@ def _research_prompt(
     geometry = rolling.geometry
     budgets = _session_budgets(rolling, resource_override)
     limits = context.strategy_limits
+    # The pipeline records the lineage when the research session starts; until
+    # then the preview reads the same figures off the creation-time file.
+    lineage = lineage_record(context.records)
+    if lineage is None and rolling.lineage_arms:
+        lineage = lineage_ledger_record(context.options.experiment_dir)
     manifest: dict[str, object] = {
         "experiment_id": rolling.experiment_id,
         "epoch_id": "research",
@@ -152,7 +157,7 @@ def _research_prompt(
         "benchmark_index": rolling.benchmark_index,
         "snapshot_config": context.options.snapshot_config.to_record(),
         "start": start_record(),
-        "arm": arm_record((), lineage_record(context.records)),
+        "arm": arm_record((), lineage),
         "modification_constraints": rolling.step_constraints.to_record(),
         "acceptance_rules": rolling.acceptance.to_record(),
         "schedule": rolling.schedule.to_record(),

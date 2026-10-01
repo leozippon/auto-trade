@@ -22,12 +22,12 @@ from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
 from autotrade.environment.runtime import write_json_atomic
 from autotrade.pipelines import verdict
-from autotrade.pipelines.experiment import freeze_gate_for
+from autotrade.pipelines.experiment import freeze_gate_for, lineage_ledger_record
 from autotrade.pipelines.ledger import ExperimentLedger, lineage_record
 from autotrade.pipelines.lineage import (
     extract_lineage,
     lineage_arm_ids,
-    record_lineage,
+    write_lineage,
 )
 from autotrade.pipelines.local_backend import arm_record
 
@@ -143,6 +143,16 @@ def _analysis(row) -> dict[str, object]:
     return json.loads(
         (Path(str(row["validation_result_ref"])).parent / STYLE_ARTIFACT_NAME).read_text(encoding="utf-8")
     )
+
+
+def _record(arm: Path, extraction) -> dict[str, object]:
+    """What creation and the start of the research session write: the
+    console's series file, then the pipeline's ledger record read from it."""
+
+    write_lineage(arm, extraction)
+    record = lineage_ledger_record(arm)
+    ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl").append(record)
+    return record
 
 
 def _own_rows(directory: Path) -> list[dict[str, object]]:
@@ -263,7 +273,7 @@ def test_the_recorded_lineage_joins_the_family_and_outlives_its_arms(tmp_path: P
         "revision_second_1",
     ]
     assert max(day for item in extraction["series"] for day, _ in item["daily"]) <= RESEARCH_END
-    record = record_lineage(arm, extraction)
+    record = _record(arm, extraction)
     # 2 + 1 revisions and 2 + 1 declared screens; the two controls are not trials.
     assert (record["trials"], record["host_trials"], record["offline_trials"], record["controls"]) == (6, 3, 3, 2)
     correlation, _pairs = verdict.trial_correlation(lineage_analyses)
@@ -293,7 +303,7 @@ def test_the_recorded_lineage_joins_the_family_and_outlives_its_arms(tmp_path: P
         "effective_trials": record["effective_trials"],
     }
     with pytest.raises(ValueError, match="already records its lineage"):
-        record_lineage(arm, extraction)
+        ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl").append(lineage_ledger_record(arm))
 
 
 def test_a_lineage_arm_that_cannot_be_one_is_refused_by_name(tmp_path: Path) -> None:
@@ -330,16 +340,17 @@ def test_a_lineage_arm_that_cannot_be_one_is_refused_by_name(tmp_path: Path) -> 
 
 
 def test_the_research_session_gates_on_the_lineage_its_ledger_records(tmp_path: Path) -> None:
-    """End to end through the pipeline: an arm whose params name a lineage the
-    ledger does not hold refuses to start; once recorded, the session's freeze
-    gate counts it."""
+    """End to end through the pipeline: an arm whose params name a lineage its
+    creation never wrote refuses to start; one created with it starts from an
+    empty ledger, records the lineage itself and its freeze gate counts it."""
 
     from tests.unit.test_rolling_pipeline import GEOMETRY, _freezing
 
-    pipeline, *_rest = _freezing(tmp_path)
+    pipeline, *_rest, ledger = _freezing(tmp_path)
     pipeline.config = replace(pipeline.config, lineage_arms=("earlier",))
-    with pytest.raises(RuntimeError, match=re.escape("do not match the lineage the ledger records ([])")):
+    with pytest.raises(RuntimeError, match="its creation wrote no lineage series"):
         pipeline.run_research_session()
+    assert ledger.read() == []
     research = (GEOMETRY.research_start, GEOMETRY.research_end)
     span = [day for day in DAYS if research[0] <= day <= research[1]]
     _arm(
@@ -351,13 +362,15 @@ def test_the_research_session_gates_on_the_lineage_its_ledger_records(tmp_path: 
         ],
         research=research,
     )
-    record_lineage(
+    write_lineage(
         pipeline.config.experiment_dir,
         extract_lineage(tmp_path / "experiments", ["earlier"], research_start=research[0], research_end=research[1]),
     )
+    assert ledger.read() == []
     dsr = pipeline.run_research_session()["freeze_gate"]["deflated_sharpe"]
     assert (dsr["trials"], dsr["host_trials"], dsr["lineage_trials"]) == (8, 2, 6)
     assert dsr["lineage_arms"] == ["earlier"]
+    assert [record["record_type"] for record in ledger.read()] == ["lineage", "research_session"]
 
 
 def test_the_console_listing_counts_the_lineage_as_the_gate_does(tmp_path: Path) -> None:
@@ -370,9 +383,7 @@ def test_the_console_listing_counts_the_lineage_as_the_gate_does(tmp_path: Path)
     _arm(root, "first", [{"seed": 2, "loading": 0.6}, {"seed": 3, "loading": 0.6}])
     arm = _arm(root, "new_arm", [])
     own = _own_rows(arm)
-    record_lineage(
-        arm, extract_lineage(root, ["first"], research_start=RESEARCH_START, research_end=RESEARCH_END)
-    )
+    _record(arm, extract_lineage(root, ["first"], research_start=RESEARCH_START, research_end=RESEARCH_END))
     ledger = ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl")
     ledger.append(
         {

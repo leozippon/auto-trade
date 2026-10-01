@@ -1099,6 +1099,80 @@ class PitViewsSeedParameterTest(unittest.TestCase):
             )
             self.assertEqual(pin["generation_id"], "gen_newer")
 
+    def test_an_arm_created_with_a_lineage_pins_its_seed_release_at_worker_start(self) -> None:
+        """Console create with ``lineage_arms`` and a named seed, then the
+        worker's start: the create leaves the ledger empty (the lineage is a
+        file beside it), so the release pin finds no ledger records, pins the
+        seed's release and the worker proceeds -- also after the research
+        session has recorded the lineage. A ledger holding a research session
+        and no pin is still refused: that arm ran on a data generation nobody
+        recorded."""
+        import shutil
+        import tempfile
+
+        from autotrade.pipelines.experiment import lineage_ledger_record
+        from autotrade.pipelines.ledger import ExperimentLedger
+        from autotrade.pipelines.worker import load_worker_options
+        from autotrade.webui.manager import ExperimentManager
+        from tests.unit.test_lineage import _arm
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            experiments = repo_root / "experiments"
+            template = repo_root / "configs/agent_output_template/main.py"
+            template.parent.mkdir(parents=True)
+            template.write_text("def generate_orders(context):\n    return []\n", encoding="utf-8")
+            selection = {
+                "include_fundamentals": False,
+                "include_events": False,
+                "include_text": False,
+                "include_intraday": False,
+            }
+            self._seed(repo_root, "pit_views_seed_lineage", selection)
+            _arm(experiments, "earlier_arm", [{"seed": 1, "loading": 0.5}])
+            manager = ExperimentManager(repo_root, experiments)
+            with patch.object(manager, "start_worker", return_value={"spawned": False}):
+                manager.create_experiment(
+                    {
+                        "experiment_id": "heir",
+                        **DEFAULT_RESEARCH_GEOMETRY.to_record(),
+                        **selection,
+                        "pit_views_seed": "data/pit_views_seed_lineage",
+                        "lineage_arms": ["earlier_arm"],
+                        "gpu_count": 0,
+                    }
+                )
+            directory = experiments / "heir"
+            ledger = ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl")
+            self.assertEqual(ledger.read(), [])
+            # A worker start resolves the model gateway before it pins.
+            (repo_root / ".env").write_text("VLLM_API_KEY=placeholder\n", encoding="utf-8")
+            options = load_worker_options(directory, repo_root=repo_root)
+            pin = json.loads((directory / "research_release/manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(pin["generation_id"], "gen_seed")
+            self.assertEqual(options.rolling.lineage_arms, ("earlier_arm",))
+            # What the research session writes first; a later worker start resumes.
+            ledger.append(lineage_ledger_record(directory))
+            load_worker_options(directory, repo_root=repo_root)
+
+            ran = experiments / "ran_unpinned"
+            shutil.copytree(directory / "hitl", ran / "hitl")
+            params = json.loads((ran / "hitl/params.json").read_text(encoding="utf-8"))
+            params.update(experiment_id="ran_unpinned", lineage_arms=[])
+            (ran / "hitl/params.json").write_text(json.dumps(params), encoding="utf-8")
+            ExperimentLedger(ran / "ledgers/experiment_ledger.jsonl").append(
+                {
+                    "record_type": "research_session",
+                    "experiment_id": "ran_unpinned",
+                    "epoch_id": "research",
+                    "fold_id": "research",
+                    "run_id": "run_ran_unpinned",
+                    "steps": [],
+                }
+            )
+            with self.assertRaisesRegex(ValueError, "ledger records but no research-release pin"):
+                load_worker_options(ran, repo_root=repo_root)
+
     def test_a_named_seed_whose_release_cannot_serve_fails_the_create(self) -> None:
         import shutil
         import tempfile

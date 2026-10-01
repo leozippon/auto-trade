@@ -37,6 +37,7 @@ from autotrade.pipelines.config import (
     AcceptanceRules,
     acceptance_for,
 )
+from autotrade.pipelines.experiment import lineage_ledger_record
 from autotrade.pipelines.hitl_state import (
     WEB_CREATE_DEFAULTS,
     StatusReporter,
@@ -45,7 +46,7 @@ from autotrade.pipelines.hitl_state import (
     read_status,
     status_pid_alive,
 )
-from autotrade.pipelines.ledger import ExperimentLedger, lineage_record
+from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.webui.manager import (
     ARM_DISK_MARGIN_BYTES,
     MAX_RUNNING_EXPERIMENTS,
@@ -1358,7 +1359,8 @@ class WebuiBackendTest(unittest.TestCase):
 
     def test_create_records_the_lineage_into_the_new_arm_or_creates_nothing(self) -> None:
         """The lineage is read from the earlier arms once, while the arm is
-        created, into its own ledger; one that cannot be read leaves no arm."""
+        created, into a file beside its ledger, and the ledger stays empty
+        until the arm runs; one that cannot be read leaves no arm."""
 
         from tests.unit.test_lineage import _arm
 
@@ -1383,9 +1385,10 @@ class WebuiBackendTest(unittest.TestCase):
         directory = self.experiments_root / "exp_heir"
         params = json.loads((directory / "hitl/params.json").read_text(encoding="utf-8"))
         self.assertEqual(params["lineage_arms"], ["earlier_arm"])
-        record = lineage_record(
-            ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl").read()
+        self.assertEqual(
+            ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl").read(), []
         )
+        record = lineage_ledger_record(directory)
         self.assertEqual((record["arms"], record["trials"]), (["earlier_arm"], 1))
         self.assertTrue(Path(str(record["series_ref"])).is_relative_to(directory))
         self.assertFalse((self.experiments_root / "exp_orphan").exists())
