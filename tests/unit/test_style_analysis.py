@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pytest
 
 from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR, ReplayResult
@@ -17,6 +18,7 @@ from autotrade.environment.replay.style import (
     benchmark_summary_block,
     daily_returns_from_curve,
     replay_style_analysis,
+    slot_benchmark,
     write_style_rollup,
 )
 from autotrade.pipelines.session_tools import batch_candidate_stats
@@ -346,6 +348,33 @@ def test_benchmark_block_is_absent_when_the_slot_has_no_benchmark(tmp_path: Path
     # and the report keeps reporting missing coverage truthfully.
     assert analysis["benchmark_regression"]["reason"] == "benchmark_unavailable"
     assert benchmark_summary_block(analysis) is None
+
+
+def test_a_slot_benchmark_read_error_surfaces_instead_of_reading_as_no_benchmark(tmp_path: Path):
+    """Only a macro file without index columns means "no benchmark here"; a file
+    that has them but cannot be read as index rows is damaged and must say so,
+    not degrade into an unbenchmarked slot."""
+
+    no_index = tmp_path / "no_index"
+    no_index.mkdir()
+    pd.DataFrame({"dataset": ["cn_cpi"], "trade_date": ["20240102"]}).to_parquet(
+        no_index / "macro.parquet", index=False
+    )
+    assert slot_benchmark(no_index, benchmark_index=BENCHMARK_TS_CODE) == {}
+
+    mistyped = tmp_path / "mistyped"
+    mistyped.mkdir()
+    pd.DataFrame(
+        {"dataset": ["index_daily"], "ts_code": [300], "trade_date": ["20240102"], "pct_chg": [1.0]}
+    ).to_parquet(mistyped / "macro.parquet", index=False)
+    with pytest.raises(pa.ArrowException):
+        slot_benchmark(mistyped, benchmark_index=BENCHMARK_TS_CODE)
+
+    truncated = tmp_path / "truncated"
+    truncated.mkdir()
+    (truncated / "macro.parquet").write_bytes(b"PAR1")
+    with pytest.raises(pa.ArrowException):
+        slot_benchmark(truncated, benchmark_index=BENCHMARK_TS_CODE)
 
 
 def _neutralization_inputs(tmp_path: Path, days: list[str]) -> tuple[Path, pd.DataFrame]:

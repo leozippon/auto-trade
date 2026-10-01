@@ -122,19 +122,18 @@ def slot_benchmark(
     if not path.is_file():
         return {}
     required = {"dataset", "ts_code", "trade_date", "pct_chg"}
-    try:
-        frame = pd.read_parquet(
-            path,
-            columns=list(required),
-            filters=[
-                ("dataset", "==", "index_daily"),
-                ("ts_code", "==", benchmark_index),
-            ],
-        )
-    except Exception:
-        frame = pd.read_parquet(path)
-    if not required.issubset(frame.columns):
+    # A macro file without these columns carries no index rows: no benchmark
+    # for this slot. Any other read failure is a damaged file and surfaces.
+    if not required.issubset(pq.read_schema(path).names):
         return {}
+    frame = pd.read_parquet(
+        path,
+        columns=list(required),
+        filters=[
+            ("dataset", "==", "index_daily"),
+            ("ts_code", "==", benchmark_index),
+        ],
+    )
     rows = frame[
         frame["dataset"].astype(str).eq("index_daily")
         & frame["ts_code"].astype(str).eq(benchmark_index)
