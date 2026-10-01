@@ -237,52 +237,33 @@ class DailyBroker:
         cash_per_share = float(cash_per_share)
         last_close = position.last_price
         quantity_before = position.quantity
-        # Quotes are two-decimal, so the gap is compared at a precision well
-        # below a tick: binary noise (10.005 - 10.0 > 0.005) must not count.
-        if round(abs(pre_close - last_close), 6) <= EX_DATE_PRICE_TOLERANCE:
-            # No exchange price reset means no share change; a cash dividend
-            # the table records for today is still credited.
+        try:
+            ratio = ex_date_share_multiplier(last_close, pre_close, cash_per_share)
+        except ValueError as exc:
+            raise ValueError(f"{symbol} on {day}: {exc}") from None
+        if ratio is None:
+            # No share change: no exchange price reset, or a reset that is a
+            # cash dividend alone. A cash dividend the table records for today
+            # is credited in full either way.
             if cash_per_share == 0.0:
                 return
             quantity_after = quantity_before
             credit = quantity_before * cash_per_share
+            if _price_reset(last_close, pre_close):
+                position.last_price = pre_close
         else:
-            # pre_close = (last_close - cash) / (1 + r): the share multiplier is
-            # recovered from the exchange's own reset, never from a ratio table.
-            ratio = (last_close - cash_per_share) / pre_close
-            if not math.isfinite(ratio) or ratio <= 0.0:
+            quantity_after = ex_date_shares(quantity_before, ratio)
+            if quantity_after <= 0:
                 raise ValueError(
-                    f"{symbol} on {day}: ex-date reset from {last_close} to {pre_close} with "
-                    f"cash {cash_per_share} implies an invalid share multiplier {ratio!r}"
+                    f"{symbol} on {day}: ex-date reset leaves no whole share of {quantity_before}"
                 )
-            if (
-                cash_per_share > 0.0
-                and round(last_close - cash_per_share - pre_close, 6) <= EX_DATE_PRICE_TOLERANCE
-            ):
-                # A cash dividend without a bonus (multiplier at most one, to
-                # half a tick). The exchange quotes the reset on the dividend
-                # rounded to a tick, or on a smaller virtual per-share amount
-                # when treasury shares take none, yet every holder is paid the
-                # declared cash. A cash dividend never shrinks a holding --
-                # flooring a price-derived 0.9997 would shave a share off most
-                # of them, and leave a one-share holding with none -- so only
-                # the cash leg moves.
-                quantity_after = quantity_before
-                credit = quantity_before * cash_per_share
-                position.last_price = pre_close
-            else:
-                quantity_after = math.floor(round(quantity_before * ratio, 6))
-                if quantity_after <= 0:
-                    raise ValueError(
-                        f"{symbol} on {day}: ex-date reset leaves no whole share of {quantity_before}"
-                    )
-                # Whole shares only: the account is worth at pre_close exactly
-                # what it was worth at the last close once the dividend and
-                # the fractional share are paid in cash.
-                credit = quantity_before * last_close - quantity_after * pre_close
-                position.quantity = quantity_after
-                position.available_quantity = min(position.available_quantity, quantity_after)
-                position.last_price = pre_close
+            # Whole shares only: the account is worth at pre_close exactly
+            # what it was worth at the last close once the dividend and
+            # the fractional share are paid in cash.
+            credit = quantity_before * last_close - quantity_after * pre_close
+            position.quantity = quantity_after
+            position.available_quantity = min(position.available_quantity, quantity_after)
+            position.last_price = pre_close
         # The cost basis carries over and the cash paid out is a return of
         # capital, so a later sale's realized P&L still closes the loop.
         position.average_cost = (
@@ -470,6 +451,52 @@ def _price(value: object) -> float | None:
     return price if math.isfinite(price) and price > 0 else None
 
 
+def _price_reset(last_close: float, pre_close: float) -> bool:
+    # Quotes are two-decimal, so the gap is compared at a precision well
+    # below a tick: binary noise (10.005 - 10.0 > 0.005) must not count.
+    return round(abs(pre_close - last_close), 6) > EX_DATE_PRICE_TOLERANCE
+
+
+def ex_date_share_multiplier(
+    last_close: float, pre_close: float, cash_per_share: float
+) -> float | None:
+    """The share multiplier one day's opening reset applies to a holding, or
+    None when it changes no share count.
+
+    ``pre_close = (last_close - cash) / (1 + r)``: the multiplier is recovered
+    from the exchange's own reset, never from a ratio table. No reset changes
+    no share count, and neither does a cash dividend without a bonus (a reset
+    no larger than the cash, to half a tick): the exchange quotes the reset on
+    the dividend rounded to a tick, or on a smaller virtual per-share amount
+    when treasury shares take none, yet every holder is paid the declared cash.
+    A cash dividend never shrinks a holding -- flooring a price-derived 0.9997
+    would shave a share off most of them, and leave a one-share holding with
+    none. The one rule the Broker settles a holding by and the zero-skill
+    panel sizes its exits by.
+    """
+
+    if not _price_reset(last_close, pre_close):
+        return None
+    ratio = (last_close - cash_per_share) / pre_close
+    if not math.isfinite(ratio) or ratio <= 0.0:
+        raise ValueError(
+            f"ex-date reset from {last_close} to {pre_close} with cash "
+            f"{cash_per_share} implies an invalid share multiplier {ratio!r}"
+        )
+    if (
+        cash_per_share > 0.0
+        and round(last_close - cash_per_share - pre_close, 6) <= EX_DATE_PRICE_TOLERANCE
+    ):
+        return None
+    return ratio
+
+
+def ex_date_shares(quantity: int, ratio: float) -> int:
+    """The whole shares a holding of ``quantity`` becomes under ``ratio``."""
+
+    return math.floor(round(quantity * ratio, 6))
+
+
 def _price_limit_reject(action: str, price: float, bar: Mapping[str, object]) -> str | None:
     field = "up_limit" if action == "buy" else "down_limit"
     limit = _price(bar.get(field))
@@ -486,4 +513,6 @@ __all__ = [
     "DailyBroker",
     "Execution",
     "Position",
+    "ex_date_share_multiplier",
+    "ex_date_shares",
 ]

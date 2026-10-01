@@ -31,7 +31,11 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 
-from autotrade.environment.broker import BrokerProfile
+from autotrade.environment.broker import (
+    BrokerProfile,
+    ex_date_share_multiplier,
+    ex_date_shares,
+)
 from autotrade.environment.broker_core import (
     LOT_SIZE,
     STAR_MIN_LOT_SIZE,
@@ -264,7 +268,14 @@ def run_null_control(
     dropped: list[int] = []
     series: list[list[tuple[str, float]]] = []
     for _ in range(k):
-        orders, dropped_trips = _orders_from_pools(skeleton, pools, rng)
+        orders, dropped_trips = _orders_from_pools(
+            skeleton,
+            pools,
+            rng,
+            lambda trip, symbol, quantity: universe.sellable_at_exit(
+                trip, symbol, quantity, market.cash_dividends_for_day
+            ),
+        )
         dropped.append(dropped_trips)
         run = run_daily_replay(
             daily=market,
@@ -358,7 +369,9 @@ class _Universe:
     def __init__(self, frame: pd.DataFrame) -> None:
         symbol_column = "symbol" if "symbol" in frame.columns else "ts_code"
         missing = [
-            name for name in (symbol_column, "trade_date", "open") if name not in frame.columns
+            name
+            for name in (symbol_column, "trade_date", "open", "close", "pre_close")
+            if name not in frame.columns
         ]
         if missing:
             raise ValueError(f"replay frame missing columns: {missing}")
@@ -374,6 +387,9 @@ class _Universe:
                     else np.nan
                 ),
             }
+        )
+        self._resets = _price_resets(
+            rows["symbol"], rows["trade_date"], frame["close"], frame["pre_close"]
         )
         # A name without a usable opening price cannot be sized, so it is not a
         # candidate on that day at all.
@@ -408,6 +424,85 @@ class _Universe:
             cached = pd.Series(codes, index=values.index, dtype=int)
             self._deciles[date] = cached
         return cached
+
+    def sellable_at_exit(
+        self,
+        trip: RoundTrip,
+        symbol: str,
+        quantity: int,
+        cash_dividends: Callable[[str], Mapping[str, float]],
+    ) -> int:
+        """What a lot of ``quantity`` of ``symbol``, bought at the trip's entry,
+        can sell at its exit.
+
+        The null holds a replacement name through that name's own ex-dates, and
+        the Broker settles each one on the holding
+        (``broker.ex_date_share_multiplier``): a bonus issue or split grows the
+        lot, and selling only the bought quantity would strand the new shares
+        to the end of the window. Shares an ex-date creates stay locked through
+        that day, so an exit on the ex-date itself sells the lot as it was.
+        ``cash_dividends`` is the replay's own per-day table.
+        """
+
+        exit_date = trip.exit_date
+        held = quantity
+        for date, last_close, pre_close in self._resets.get(symbol, ()):
+            if exit_date is None or not trip.entry_date < date <= exit_date:
+                continue
+            ratio = ex_date_share_multiplier(
+                last_close, pre_close, cash_dividends(date).get(symbol, 0.0)
+            )
+            if ratio is None:
+                continue
+            settled = ex_date_shares(held, ratio)
+            held = min(held, settled) if date == exit_date else settled
+        return held
+
+
+def _price_resets(
+    symbols: pd.Series, dates: pd.Series, close: pd.Series, pre_close: pd.Series
+) -> dict[str, list[tuple[str, float, float]]]:
+    """Every name's days whose ``pre_close`` departs from the close a holding
+    carries into them: ``(trade_date, last_close, pre_close)`` in date order.
+
+    The Broker marks a holding at each usable close, so the last close a day
+    opens from is the name's latest usable close before it. Whether a reset
+    changes a share count is the Broker's rule, applied at the exit.
+    """
+
+    def usable(values: pd.Series) -> pd.Series:
+        numbers = pd.to_numeric(values, errors="coerce").to_numpy(dtype=float)
+        return pd.Series(
+            np.where(np.isfinite(numbers) & (numbers > 0), numbers, np.nan),
+            index=values.index,
+        )
+
+    rows = pd.DataFrame(
+        {
+            "symbol": symbols.to_numpy(),
+            "trade_date": dates.to_numpy(),
+            "close": usable(close).to_numpy(),
+            "pre_close": usable(pre_close).to_numpy(),
+        }
+    ).sort_values(["symbol", "trade_date"], kind="stable")
+    marked = rows.groupby("symbol", sort=False)["close"].ffill()
+    rows["last_close"] = marked.groupby(rows["symbol"], sort=False).shift(1)
+    resets = rows[
+        rows["pre_close"].notna()
+        & rows["last_close"].notna()
+        & (rows["pre_close"] != rows["last_close"])
+    ]
+    return {
+        str(symbol): list(
+            zip(
+                group["trade_date"].tolist(),
+                group["last_close"].tolist(),
+                group["pre_close"].tolist(),
+                strict=True,
+            )
+        )
+        for symbol, group in resets.groupby("symbol", sort=False)
+    }
 
 
 def _candidate_pool(
@@ -448,24 +543,49 @@ def _orders_from_pools(
     skeleton: Sequence[RoundTrip],
     pools: Sequence[tuple[tuple[str, int], ...]],
     rng: np.random.Generator,
+    sellable: Callable[[RoundTrip, str, int], int],
 ) -> tuple[dict[str, list[dict[str, object]]], int]:
     """One draw, and how many round trips it could not deploy.
 
     A trip with an empty pool is dropped; the count travels with the draw so
     an under-deployed null is reported instead of silently shrinking the null
-    distribution.
+    distribution. Each exit sells what its lot has become by then
+    (``sellable``, the Broker's own ex-date settlement of the drawn name).
     """
 
     orders: dict[str, list[dict[str, object]]] = {}
     dropped = 0
+    drawn: list[tuple[RoundTrip, str, int]] = []
+    holders: dict[str, list[RoundTrip]] = {}
     for trip, pool in zip(skeleton, pools, strict=True):
         if not pool:
             dropped += 1
             continue
         symbol, quantity = pool[int(rng.integers(len(pool)))]
+        drawn.append((trip, symbol, quantity))
+        holders.setdefault(symbol, []).append(trip)
+    for trip, symbol, quantity in drawn:
         _queue(orders, symbol, "buy", quantity, trip.entry_at)
-        if trip.exit_at is not None:
-            _queue(orders, symbol, "sell", quantity, trip.exit_at)
+        if trip.exit_at is None:
+            continue
+        shares = sellable(trip, symbol, quantity)
+        if (
+            shares % LOT_SIZE
+            and _board(symbol) == _MAIN
+            and any(
+                other is not trip
+                and other.entry_at < trip.exit_at
+                and (other.exit_at is None or other.exit_at > trip.entry_at)
+                for other in holders[symbol]
+            )
+        ):
+            # Another drawn lot of this name was held alongside this one, so
+            # their odd tails merged into one, and a main-board sale may carry
+            # an odd tail only as the whole of it: this exit sells whole lots
+            # and leaves its tail in the merged holding.
+            shares -= shares % LOT_SIZE
+        if shares > 0:
+            _queue(orders, symbol, "sell", shares, trip.exit_at)
     for day in orders.values():
         # Exits before entries at one instant, so a cash-bound null is not
         # rejected for money its own sales are about to release.

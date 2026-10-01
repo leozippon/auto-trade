@@ -16,6 +16,7 @@ import pytest
 
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.replay import run_daily_replay
+from autotrade.environment.replay.market import DailyMarketData
 from autotrade.environment.replay.null_control import (
     MATCHED_DECILE,
     MATCHED_MEMBERSHIP,
@@ -25,6 +26,7 @@ from autotrade.environment.replay.null_control import (
     _distribution,
     _Membership,
     _orders_from_pools,
+    _scripted_strategy,
     _Universe,
     run_null_control,
     trade_skeleton,
@@ -44,7 +46,14 @@ def _sample_null_orders(skeleton, frame: pd.DataFrame, rng) -> dict[str, list[di
 
     universe = _Universe(frame)
     pools = [_candidate_pool(trip, universe) for trip in skeleton]
-    return _orders_from_pools(skeleton, pools, rng)[0]
+    return _orders_from_pools(skeleton, pools, rng, _sellable(universe, frame))[0]
+
+
+def _sellable(universe, frame: pd.DataFrame, corporate_actions=None):
+    market = DailyMarketData(frame, corporate_actions)
+    return lambda trip, symbol, quantity: universe.sellable_at_exit(
+        trip, symbol, quantity, market.cash_dividends_for_day
+    )
 
 
 def _at(day: str, clock: str) -> datetime:
@@ -193,13 +202,18 @@ def test_null_draws_replace_each_name_inside_its_size_decile():
 def test_null_quantities_follow_the_star_declaration_ladder():
     rows = []
     for offset, day in enumerate(DAYS[:4]):
-        for symbol, price in (("000001.SZ", 500.0), ("688001.SH", 50.0 * (offset + 1))):
+        # The previous close: the STAR name rises every day, with no ex-date.
+        for symbol, price, previous in (
+            ("000001.SZ", 500.0, 500.0),
+            ("688001.SH", 50.0 * (offset + 1), 50.0 * max(offset, 1)),
+        ):
             rows.append(
                 {
                     "ts_code": symbol,
                     "trade_date": day,
                     "open": price,
                     "close": price,
+                    "pre_close": previous,
                     "up_limit": price * 1.5,
                     "down_limit": price * 0.5,
                     "is_suspended": False,
@@ -294,6 +308,7 @@ def test_affordability_is_settled_in_the_pool_so_an_expensive_name_drops_no_trip
                     "trade_date": day,
                     "open": price,
                     "close": price,
+                    "pre_close": price,
                     "up_limit": price * 1.5,
                     "down_limit": price * 0.5,
                     "is_suspended": False,
@@ -307,7 +322,9 @@ def test_affordability_is_settled_in_the_pool_so_an_expensive_name_drops_no_trip
     assert _pools(skeleton, frame) == [(("000002.SZ", 900),)]
     rng = np.random.default_rng(5)
     for _ in range(20):
-        orders, dropped = _orders_from_pools(skeleton, _pools(skeleton, frame), rng)
+        orders, dropped = _orders_from_pools(
+            skeleton, _pools(skeleton, frame), rng, _sellable(_Universe(frame), frame)
+        )
         assert dropped == 0
         assert orders[DAYS[1]][0]["symbol"] == "000002.SZ"
 
@@ -544,3 +561,74 @@ def _fill(
         "status": "filled",
         "price": price,
     }
+
+
+def _bonus_frame() -> pd.DataFrame:
+    """Two names in one decile; 000002.SZ goes ex a 3-for-10 bonus on DAYS[5]:
+    its 13.00 close resets to a 10.00 pre_close, a share multiplier of 1.3."""
+
+    rows = []
+    for offset, day in enumerate(DAYS):
+        for symbol in ("000001.SZ", "000002.SZ"):
+            price = 10.0 if symbol == "000002.SZ" and offset >= 5 else 13.0
+            rows.append(
+                {
+                    "ts_code": symbol,
+                    "trade_date": day,
+                    "open": price,
+                    "close": price,
+                    "pre_close": price,
+                    "up_limit": price * 1.1,
+                    "down_limit": price * 0.9,
+                    "is_suspended": False,
+                    "circ_mv": 1.0e9,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def test_a_null_exit_sells_the_bonus_shares_its_replacement_earned():
+    """The Broker grows a held lot of 100 to 130 shares on the bonus ex-date,
+    so the exit sells 130: selling the bought 100 would strand 30 shares to
+    the end of the window. Shares created on the ex-date are locked through
+    it, so an exit that day sells the lot as it was. A lot held alongside
+    another lot of the same name sells whole lots only: their odd tails merged,
+    and an odd tail is sold only whole."""
+
+    frame = _bonus_frame()
+    universe = _Universe(frame)
+    sellable = _sellable(universe, frame)
+
+    def replay(orders):
+        return run_daily_replay(
+            daily=frame,
+            strategy=_scripted_strategy(orders),
+            schedule=StrategySchedule("year", "08:30"),
+            profile=BrokerProfile(),
+        )
+
+    single = [RoundTrip("000001.SZ", 100, 13.0, _at(DAYS[2], "09:30"), _at(DAYS[8], "15:00"))]
+    pools = _pools(single, frame)
+    assert pools == [(("000002.SZ", 100),)]
+    orders, _ = _orders_from_pools(single, pools, np.random.default_rng(1), sellable)
+    assert [order["quantity"] for order in orders[DAYS[8]]] == [130]
+    run = replay(orders)
+    assert [record["status"] for record in run.executions] == ["filled", "filled"]
+    assert run.equity_curve[-1]["positions"] == {}
+
+    on_ex_date = RoundTrip("000001.SZ", 100, 13.0, _at(DAYS[2], "09:30"), _at(DAYS[5], "15:00"))
+    assert sellable(on_ex_date, "000002.SZ", 100) == 100
+
+    overlapping = [
+        *single,
+        RoundTrip("000001.SZ", 100, 13.0, _at(DAYS[3], "09:30"), _at(DAYS[10], "15:00")),
+    ]
+    orders, _ = _orders_from_pools(
+        overlapping, _pools(overlapping, frame), np.random.default_rng(1), sellable
+    )
+    assert [order["quantity"] for order in orders[DAYS[8]]] == [100]
+    assert [order["quantity"] for order in orders[DAYS[10]]] == [100]
+    run = replay(orders)
+    assert all(record["status"] == "filled" for record in run.executions)
+    # 200 shares became 260; the merged 60-share tail is what stays behind.
+    assert run.equity_curve[-1]["positions"] == {"000002.SZ": 60}
