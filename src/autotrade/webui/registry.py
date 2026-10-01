@@ -46,6 +46,7 @@ from autotrade.pipelines.ledger import (
     experiment_verdict,
     forward_record,
     frozen_record,
+    lineage_record,
     paper_candidate,
     research_records,
 )
@@ -679,12 +680,14 @@ def _research_best(
 
     research = research_records(records)
     for position in reversed(range(len(research))):
-        best = _recorded_best(directory, research[:position], research[position])
+        best = _recorded_best(
+            directory, _with_lineage(records, research[:position]), research[position]
+        )
         if best is not None:
             return {"session_key": research[position].get("session_key"), **best}
     if research:
         return None
-    best = _live_best(directory)
+    best = _live_best(directory, _with_lineage(records, []))
     return {"session_key": RESEARCH_SESSION_KEY, **best} if best is not None else None
 
 
@@ -742,11 +745,24 @@ def _live_steps(directory: Path) -> list[dict[str, object]]:
     return rows
 
 
-def _live_best(directory: Path) -> dict[str, object] | None:
+def _with_lineage(
+    records: Sequence[Mapping[str, object]], earlier: Sequence[Mapping[str, object]]
+) -> list[Mapping[str, object]]:
+    """``earlier`` plus the arm's lineage record, which the gate reads its
+    inherited trials from (``experiment.recorded_lineage``) as the Pipeline's
+    own call does with the whole ledger."""
+
+    lineage = lineage_record(records)
+    return [*earlier, *([lineage] if lineage is not None else [])]
+
+
+def _live_best(
+    directory: Path, earlier: Sequence[Mapping[str, object]]
+) -> dict[str, object] | None:
     steps = _live_steps(directory)
     key = (str(directory), tuple(sorted(str(row.get("step_id")) for row in steps)))
     if key not in _LIVE_BEST_CACHE:
-        _LIVE_BEST_CACHE[key] = _best_candidate([], steps)
+        _LIVE_BEST_CACHE[key] = _best_candidate(earlier, steps)
     return _LIVE_BEST_CACHE[key]
 
 
@@ -962,7 +978,10 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
         )
         if position is not None:
             entry["record"] = _research_session_view(
-                directory, identity, research[:position], research[position]
+                directory,
+                identity,
+                _with_lineage(records, research[:position]),
+                research[position],
             )
         if planned["kind"] == "forward":
             replay = dict(_mapping(planned.get("replay")))

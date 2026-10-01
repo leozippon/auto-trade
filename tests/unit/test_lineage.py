@@ -358,3 +358,38 @@ def test_the_research_session_gates_on_the_lineage_its_ledger_records(tmp_path: 
     dsr = pipeline.run_research_session()["freeze_gate"]["deflated_sharpe"]
     assert (dsr["trials"], dsr["host_trials"], dsr["lineage_trials"]) == (8, 2, 6)
     assert dsr["lineage_arms"] == ["earlier"]
+
+
+def test_the_console_listing_counts_the_lineage_as_the_gate_does(tmp_path: Path) -> None:
+    """The console's best node is deflated against the same trials, N_eff and
+    DSR ``freeze_gate_for`` gives, lineage included."""
+
+    from autotrade.webui.registry import _research_best
+
+    root = tmp_path / "experiments"
+    _arm(root, "first", [{"seed": 2, "loading": 0.6}, {"seed": 3, "loading": 0.6}])
+    arm = _arm(root, "new_arm", [])
+    own = _own_rows(arm)
+    record_lineage(
+        arm, extract_lineage(root, ["first"], research_start=RESEARCH_START, research_end=RESEARCH_END)
+    )
+    ledger = ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl")
+    ledger.append(
+        {
+            "record_type": "research_session",
+            "experiment_id": "new_arm",
+            "epoch_id": "research",
+            "fold_id": "research",
+            "run_id": "run_new_arm",
+            "session_key": "research",
+            "steps": own,
+            "arm_end": {"status": "no_deliverable", "reason": "no_edge"},
+            "frozen": None,
+        }
+    )
+    best = _research_best(arm, ledger.read())
+    dsr = freeze_gate_for(ledger.read(), own, own[1])["deflated_sharpe"]
+    assert dsr["lineage_trials"] == 2
+    assert best["step_id"] == own[1]["step_id"]
+    assert best["trials"] == dsr["trials"] == 5
+    assert best["deflated_sharpe_probability"] == pytest.approx(dsr["deflated_sharpe_probability"])
