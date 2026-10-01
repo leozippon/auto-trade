@@ -375,6 +375,10 @@ def test_the_llm_research_session_mounts_only_the_research_end_view_and_freezes(
     # The assertions below read the session tree. A finished arm otherwise deletes it.
     monkeypatch.setattr(worker, "release_finished_sandbox", lambda _options: None)
     _experiment_with_skill(repo / "experiments", "adopted")
+    # Graduated on a window that reaches past this arm's research end.
+    _experiment_with_skill(
+        repo / "experiments", "graded_on_our_window", heldout_end=GEOMETRY["heldout_end"]
+    )
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     # The console's GPU allocation for the research session, one-shot.
     write_control(experiment / "hitl" / "control.json", ControlState(mode="auto", gpu_counts={"research": 3}))
@@ -433,12 +437,27 @@ def test_the_llm_research_session_mounts_only_the_research_end_view_and_freezes(
     }
     assert previewed["identity"]["run_id"] == RUNTIME_PLACEHOLDER
 
-    spec = json.loads(
+    host_manifest = json.loads(
         (Path(research_row["run_manifest_ref"]).parent / "host_run_manifest.json").read_text(encoding="utf-8")
-    )["sandbox_spec"]
+    )
+    spec = host_manifest["sandbox_spec"]
     assert (spec["gpu_count"], spec["gpu"], spec["gpu_name_filter"]) == (3, "auto", "L20")
-    memory = json.loads(Path(research_row["run_manifest_ref"]).read_text(encoding="utf-8"))["operating_memory"]
+    agent_manifest_text = Path(research_row["run_manifest_ref"]).read_text(encoding="utf-8")
+    memory = json.loads(agent_manifest_text)["operating_memory"]
     assert {"source": "adopted", "origin": "graduated", "entries": [GRADUATED_SKILL]} in memory["sources"]
+    # The refused source is on the host record only; the session never learns it exists.
+    assert host_manifest["operating_memory_refused"] == [
+        {
+            "source": "graded_on_our_window",
+            "origin": "graduated",
+            "entries": [GRADUATED_SKILL],
+            "heldout_end": GEOMETRY["heldout_end"],
+        }
+    ]
+    assert "graded_on_our_window" not in agent_manifest_text
+    workspace = options.work_root / options.experiment_id / "research" / "agent" / "workspace"
+    assert not (workspace / "memory" / "graded_on_our_window").exists()
+    assert "graded_on_our_window" not in (workspace / "inputs" / "skills_index.json").read_text(encoding="utf-8")
     assert read_control(experiment / "hitl" / "control.json").gpu_counts == {}
 
     # The session's transcript, named by the run's opaque ref, carries what

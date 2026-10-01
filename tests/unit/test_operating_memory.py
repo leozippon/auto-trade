@@ -46,6 +46,9 @@ from .test_interactive_worker_local import _experiment
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LIBRARY = REPO_ROOT / OPERATING_MEMORY_LIBRARY
 GRADUATED_SKILL = "same-window-parent-control"
+# The mounting arm's research end, and a source Held-out end before it.
+RESEARCH_END = "20240630"
+ADMISSIBLE_HELDOUT_END = "20230930"
 
 
 def _experiment_with_skill(
@@ -56,8 +59,13 @@ def _experiment_with_skill(
     mutated: bool = False,
     skills: bool = True,
     extra_skill: str = "",
+    heldout_end: str | None = ADMISSIBLE_HELDOUT_END,
 ) -> Path:
-    """One finished experiment on disk: its skills generation and its ledger."""
+    """One finished experiment on disk: its skills generation and its ledger.
+
+    ``heldout_end`` is the last day its forward replay read; the default ends
+    before ``RESEARCH_END``, so the mount admits it.
+    """
 
     directory = root / name
     record: dict[str, object] = {
@@ -104,6 +112,8 @@ def _experiment_with_skill(
                 else {"status": "discarded", "reasons": ["forward_lower_bound_not_positive"]}
             ),
         }
+        if heldout_end is not None:
+            forward["replay"] = {"replay_end": heldout_end}
         if mutated:
             forward["state_changed_during_test"] = True
         ledger.append(forward)
@@ -117,6 +127,7 @@ def _workspace(
     repo_root: object = None,
     experiments_root: object = None,
     experiment_id: str = "current",
+    research_end: str = RESEARCH_END,
 ) -> tuple[Path, tuple[object, ...]]:
     """One session workspace with memory mounted the way a session gets it.
 
@@ -139,7 +150,9 @@ def _workspace(
     workspace = root / "workspace"
     workspace.mkdir()
     (workspace / "inputs").mkdir()
-    mounted = install_operating_memory(workspace, experiment_dir)
+    mounted, _refused = install_operating_memory(
+        workspace, experiment_dir, research_end=research_end
+    )
     install_workspace_skills(
         None, workspace, index_path=workspace / "inputs" / "skills_index.json"
     )
@@ -266,6 +279,75 @@ def test_both_tiers_mount_read_only_with_their_provenance(tmp_path: Path) -> Non
     assert stat.S_IMODE((workspace / "skills").stat().st_mode) & 0o222
 
 
+def test_a_graduated_source_mounts_only_if_its_heldout_ended_by_the_research_end(
+    tmp_path: Path,
+) -> None:
+    """Arms share the window after their research end, and each is graded on
+    it: a source whose verdict read any of that window is forward information
+    for the arm mounting it, and so is a source whose end cannot be known."""
+
+    experiments = tmp_path / "experiments"
+    experiments.mkdir()
+    _experiment_with_skill(experiments, "on_the_boundary", heldout_end=RESEARCH_END)
+    _experiment_with_skill(experiments, "graded_later", heldout_end="20240701")
+    _experiment_with_skill(experiments, "end_unknown", heldout_end=None)
+    experiment = experiments / "current"
+    experiment.mkdir()
+    record = create_operating_memory_snapshot(
+        experiment,
+        mode="curated+graduated",
+        repo_root=_repo_with_library(tmp_path),
+        experiments_root=experiments,
+    )
+    # The snapshot keeps every graduated source with the end the rule reads.
+    assert {
+        (entry["source"], entry["heldout_end"])
+        for entry in record["entries"]
+        if entry["origin"] == "graduated"
+    } == {
+        ("on_the_boundary", RESEARCH_END),
+        ("graded_later", "20240701"),
+        ("end_unknown", None),
+    }
+
+    workspace = tmp_path / "workspace"
+    (workspace / "inputs").mkdir(parents=True)
+    mounted, refused = install_operating_memory(
+        workspace, experiment, research_end=RESEARCH_END
+    )
+    assert [source.source for source in mounted] == [
+        CURATED_MEMORY_SOURCE,
+        "on_the_boundary",
+    ]
+    assert [(source.source, source.heldout_end) for source in refused] == [
+        ("end_unknown", None),
+        ("graded_later", "20240701"),
+    ]
+    assert sorted(
+        path.name for path in (workspace / OPERATING_MEMORY_DIRNAME).iterdir()
+    ) == [CURATED_MEMORY_SOURCE, "on_the_boundary"]
+    install_workspace_skills(
+        None, workspace, index_path=workspace / "inputs" / "skills_index.json"
+    )
+    index = json.loads(
+        (workspace / "inputs" / "skills_index.json").read_text(encoding="utf-8")
+    )
+    assert {entry["source"] for entry in index["operating_memory"]} == {
+        CURATED_MEMORY_SOURCE,
+        "on_the_boundary",
+    }
+
+    # A day earlier research end refuses the boundary source as well.
+    earlier = tmp_path / "earlier"
+    earlier.mkdir()
+    mounted, _ = install_operating_memory(earlier, experiment, research_end="20240629")
+    assert [source.source for source in mounted] == [CURATED_MEMORY_SOURCE]
+    with pytest.raises(ValueError, match="YYYYMMDD"):
+        install_operating_memory(
+            tmp_path / "malformed", experiment, research_end="2024-06-30"
+        )
+
+
 def test_curated_mode_leaves_other_experiments_out(tmp_path: Path) -> None:
     experiments = tmp_path / "experiments"
     experiments.mkdir()
@@ -312,14 +394,16 @@ def test_snapshotting_and_mounting_each_refuse_an_unusable_request(
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    install_operating_memory(workspace, experiment)
+    install_operating_memory(workspace, experiment, research_end=RESEARCH_END)
     with pytest.raises(FileExistsError, match="memory directory"):
-        install_operating_memory(workspace, experiment)
+        install_operating_memory(workspace, experiment, research_end=RESEARCH_END)
     # An experiment that never snapshotted cannot be mounted by guessing.
     other = tmp_path / "other"
     other.mkdir()
     with pytest.raises(FileNotFoundError, match="snapshot"):
-        install_operating_memory(other, tmp_path / "never-created")
+        install_operating_memory(
+            other, tmp_path / "never-created", research_end=RESEARCH_END
+        )
 
 
 def test_an_experiment_may_not_take_the_reserved_curated_name(tmp_path: Path) -> None:
@@ -462,7 +546,7 @@ def test_two_sessions_mount_the_same_entries_after_the_library_changes(
     first = tmp_path / "first"
     first.mkdir()
     (first / "workspace").mkdir()
-    install_operating_memory(first / "workspace", experiment)
+    install_operating_memory(first / "workspace", experiment, research_end=RESEARCH_END)
 
     # The library moves under the experiment: a new entry, and a rewritten one.
     library = repo / OPERATING_MEMORY_LIBRARY
@@ -476,7 +560,9 @@ def test_two_sessions_mount_the_same_entries_after_the_library_changes(
     second = tmp_path / "second"
     second.mkdir()
     (second / "workspace").mkdir()
-    mounted = install_operating_memory(second / "workspace", experiment)
+    mounted, _ = install_operating_memory(
+        second / "workspace", experiment, research_end=RESEARCH_END
+    )
     assert [source.entries for source in mounted] == [("pit-read-budget",)]
     body = (
         second
