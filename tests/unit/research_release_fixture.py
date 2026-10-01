@@ -23,9 +23,21 @@ from autotrade.environment.data.research_release import (
 RAW_DIR = "data/raw"
 FUNDAMENTAL_EVENTS_ROOT = "data/pit/fundamental_events"
 FUNDAMENTAL_EVENTS_STATUS = "results/data_quality/fundamental_events_status.json"
-# Two SSE trading days inside the default Held-out quarter, the least a
-# release must reach for an experiment on that geometry to start.
-HELDOUT_REACHING_DAYS = ("20250630", "20260630", "20260701", "20260702")
+# Eight SSE trading days inside the default Held-out quarter, the least a
+# release must reach for an experiment on that geometry to start: the
+# regression that grades Held-out needs that many (style.MIN_REGRESSION_DAYS).
+HELDOUT_REACHING_DAYS = (
+    "20250630",
+    "20260630",
+    "20260701",
+    "20260702",
+    "20260703",
+    "20260706",
+    "20260707",
+    "20260708",
+    "20260709",
+    "20260710",
+)
 # How far back benchmark history reaches in the backfilled lake (the 20140701
 # `download --history-floor` backfill), which an eight-year research period
 # needs; pass it as ``history_start``. Moving the floor is this one edit.
