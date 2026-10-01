@@ -449,6 +449,12 @@ SELECTION_STATISTICS_NOTE = (
     "provisional: the freeze gate as it would read this node now, over every "
     "revision the arm has validated so far; the freeze recomputes it"
 )
+GRADUATION_ACTIVITY_NOTE = (
+    "informational, not a freeze-gate condition: this node's research-period "
+    "readings of the activity conditions acceptance_rules.graduation.forward "
+    "applies to the frozen artifact (round trips per month, mean gross exposure) "
+    "beside their thresholds; the forward months are judged against these lines"
+)
 
 
 class SessionValidations:
@@ -590,7 +596,48 @@ class SessionValidations:
                 dsr.get("information_ratio_bar") if isinstance(dsr, Mapping) else None
             ),
             "full_span_validations": gate.get("full_span_validations"),
+            **(
+                {"graduation_activity": self.graduation_activity(step)}
+                if step.span == FULL_SPAN
+                else {}
+            ),
             "note": SELECTION_STATISTICS_NOTE,
+        }
+
+    def graduation_activity(self, step: StepResult) -> dict[str, object]:
+        """The research-period readings of the graduation's activity conditions.
+
+        A freeze is judged once on the forward months, where too few round
+        trips or too little exposure fails it whatever the excess; one frozen
+        arm traded 0.86 round trips a month over its research period and then
+        failed ``forward_too_few_round_trips``. The readings use the forward
+        slice's own definitions -- ``round_trips`` is the replay's realised
+        exits (``trade_count``), ``mean_gross`` its mean gross exposure
+        (``exposure.avg_gross``), and the round-trip floor is per calendar
+        month -- over the research period, beside the arm's thresholds. They
+        gate nothing.
+        """
+
+        summary = step.validation.summary
+        rules = (
+            AcceptanceRules.from_record(self.request.acceptance_rules)
+            if self.request.acceptance_rules
+            else AcceptanceRules()
+        )
+        # Research years are whole July-June years: twelve calendar months each.
+        months = 12 * len(self.request.research_years)
+        trips = summary.get("trade_count")
+        exposure = summary.get("exposure")
+        gross = exposure.get("avg_gross") if isinstance(exposure, Mapping) else None
+        return {
+            "round_trips": trips,
+            "round_trips_per_month": (
+                round(trips / months, 3) if isinstance(trips, int) else None
+            ),
+            "min_round_trips_per_month": rules.min_round_trips_per_month,
+            "mean_gross": round(gross, 3) if isinstance(gross, (int, float)) else None,
+            "min_mean_gross": rules.min_mean_gross,
+            "note": GRADUATION_ACTIVITY_NOTE,
         }
 
     def append_manifest_summary(self, summary: dict[str, object]) -> None:
@@ -1080,7 +1127,10 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "taking a node_id accepts), headline metrics, the per-year return/excess/"
         "neutralized excess/Sharpe of sub_windows, the provisional "
         "selection_statistics (the freeze gate as it would read this node now, "
-        "which the freeze recomputes), and wall seconds; a failed candidate's row "
+        "which the freeze recomputes; a full-span row adds graduation_activity, "
+        "its research-period round trips per month and mean gross exposure beside "
+        "the graduation's activity thresholds, which gate nothing at a freeze), "
+        "and wall seconds; a failed candidate's row "
         "carries its cause and its exact failure text instead — one failure never "
         "hides the others. Every row, failed ones included, also carries resources: "
         "what the replay cost the strategy container it ran in (peak memory against "

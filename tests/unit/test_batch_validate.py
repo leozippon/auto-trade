@@ -18,6 +18,7 @@ import json
 import threading
 import unittest
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -60,6 +61,7 @@ from autotrade.environment.tools.workspace import (
     SafeWorkspace,
 )
 from autotrade.pipelines.config import (
+    AcceptanceRules,
     BrokerProfile,
     BudgetUsed,
     EvaluationResult,
@@ -1472,6 +1474,51 @@ class BatchValidateRunTest(unittest.TestCase):
                 self.assertTrue(0.0 <= statistics["deflated_sharpe_probability"] <= 1.0)
                 self.assertIn("the freeze recomputes it", statistics["note"])
                 self.assertNotIn("vs_parent", row)
+
+    def test_a_full_span_row_reads_the_graduation_activity_beside_its_lines(
+        self,
+    ) -> None:
+        """A frozen arm that traded 0.86 round trips a month over research then
+        failed the forward floor of one a month: the session could not see that
+        margin. A full-span row now reads the forward slice's activity
+        conditions on its own replay -- realised exits per calendar month, mean
+        gross exposure -- beside the arm's thresholds, and gates nothing."""
+        with TemporaryDirectory() as tmp:
+            session = _Session(Path(tmp))
+            full = session.validate_one("full", _strategy("1"))
+            statistics = full["selection_statistics"]
+            activity = statistics["graduation_activity"]
+            rules = AcceptanceRules()
+            # The fixture's replay books 3 realised exits over four research years.
+            self.assertEqual(activity["round_trips"], 3)
+            self.assertEqual(activity["round_trips_per_month"], round(3 / 48, 3))
+            self.assertEqual(
+                activity["min_round_trips_per_month"], rules.min_round_trips_per_month
+            )
+            self.assertEqual(activity["min_mean_gross"], rules.min_mean_gross)
+            # The fixture reports no exposure block: unmeasured, not zero.
+            self.assertIsNone(activity["mean_gross"])
+            self.assertIn("not a freeze-gate condition", activity["note"])
+            # Far below the floor, yet no gate reason speaks of activity.
+            self.assertFalse(
+                any(
+                    "round_trip" in reason or "gross" in reason
+                    for reason in statistics["freeze_gate_reasons"]
+                )
+            )
+            # The mean gross is the replay's own exposure.avg_gross.
+            step = session.backtest.steps[0]
+            exposed = replace(
+                step,
+                validation=replace(
+                    step.validation,
+                    summary={**step.validation.summary, "exposure": {"avg_gross": 0.90586}},
+                ),
+            )
+            self.assertEqual(session.backtest.graduation_activity(exposed)["mean_gross"], 0.906)
+            # A sub-span row is no freeze candidate and carries no reading.
+            year = session.validate_one("year", _strategy("2"), span="Y1")
+            self.assertNotIn("graduation_activity", year["selection_statistics"])
 
     def test_nothing_selects_a_winner_on_the_agent_s_behalf(self) -> None:
         with TemporaryDirectory() as tmp:
