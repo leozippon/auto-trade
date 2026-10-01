@@ -329,7 +329,7 @@ def test_a_dry_run_reads_each_lineage_and_refuses_one_by_name(
     captured = capsys.readouterr()
     [line] = [line for line in captured.out.splitlines() if line.startswith("  lineage: ")]
     reading = json.loads(line.removeprefix("  lineage: "))
-    assert reading["arms"] == ["earlier_one", "earlier_two"]
+    assert '"lineage_arms": ["earlier_one", "earlier_two"]' in captured.out
     assert (reading["trials"], reading["host_trials"], reading["controls"]) == (2, 2, 2)
     assert 1.0 < reading["effective_trials"] <= 2.0
     assert reading["bar_days"] == len(DAYS)

@@ -317,7 +317,8 @@ def _lineage_reading(merged: Mapping[str, object], rules: AcceptanceRules) -> di
     summary = lineage_summary(extraction)
     days = max((len(item["daily"]) for item in extraction["series"]), default=0)  # type: ignore[attr-defined]
     return {
-        **summary,
+        # The arms themselves are on the line above, as `lineage_arms`.
+        **{key: value for key, value in summary.items() if key != "arms"},
         "information_ratio_bar_floor": (
             information_ratio_bar(
                 float(summary["effective_trials"]), days, rules.min_dsr_probability  # type: ignore[arg-type]
