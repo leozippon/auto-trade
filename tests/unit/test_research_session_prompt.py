@@ -244,6 +244,8 @@ def test_the_prompt_states_the_research_session_contract() -> None:
         "但本批**没有**提交的候选配置数",
         "不重复申报",
         "`selection_statistics.information_ratio_bar`",
+        # Earlier arms on the same research period join the trial family.
+        "运行事实里有 `arm.lineage` 时，试验族还包括其中所列、同一研究期上先前各臂的非对照试验",
         "一条臂至多冻结一次",
         # The arm's conclusion is the finish reason, not a skill.
         "本臂的结论与证据写进 `finish_session` 的 `reason`，不另写成 skill",
