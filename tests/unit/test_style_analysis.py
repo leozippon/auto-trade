@@ -19,7 +19,7 @@ from autotrade.environment.replay.style import (
     replay_style_analysis,
     write_style_rollup,
 )
-from autotrade.pipelines.agent_views import agent_visible_metrics
+from autotrade.pipelines.session_tools import batch_candidate_stats
 
 
 def _replay(days: list[str], *, with_holdings: bool = True) -> ReplayResult:
@@ -161,7 +161,7 @@ def test_the_agent_reads_its_own_sector_concentration_beside_the_size_tilt(tmp_p
     assert payload["style"]["industries"][0] == {"name": "电子", "weight": 0.75}
     block = benchmark_summary_block(payload)
     assert block["top_industry_weight"] == 0.75
-    visible = agent_visible_metrics({"total_return": 0.1, "benchmark": block})
+    visible = batch_candidate_stats({"total_return": 0.1, "benchmark": block})
     assert visible["benchmark"]["top_industry_weight"] == 0.75
     assert "size_tilt" in visible["benchmark"]
 
@@ -441,12 +441,12 @@ def test_the_agent_reads_the_size_loading_the_neutralization_divides_out(tmp_pat
     # not the tilt under another name.
     assert block["size_beta"] == size_beta
     assert block["size_beta"] != block["size_tilt"]
-    visible = agent_visible_metrics({"total_return": 0.1, "benchmark": block})
+    visible = batch_candidate_stats({"total_return": 0.1, "benchmark": block})
     assert visible["benchmark"]["size_beta"] == size_beta
 
     # Same slot, a cross-section carrying no returns: the size factor cannot be
-    # built, so the loading is absent from what the Agent reads rather than
-    # standing there as a zero it could gate on.
+    # built, so the loading reads as unmeasured (null) in what the Agent reads
+    # rather than standing there as a zero it could gate on.
     unmeasured = replay_style_analysis(
         _replay(days),
         _daily(days),
@@ -458,9 +458,9 @@ def test_the_agent_reads_the_size_loading_the_neutralization_divides_out(tmp_pat
     assert unmeasured["neutralized_excess"]["size_beta"] is None
     unmeasured_block = benchmark_summary_block(unmeasured)
     assert unmeasured_block["size_beta"] is None
-    assert "size_beta" not in agent_visible_metrics(
+    assert batch_candidate_stats(
         {"total_return": 0.1, "benchmark": unmeasured_block}
-    )["benchmark"]
+    )["benchmark"]["size_beta"] is None
 
 
 def test_size_beta_is_measured_on_the_decimal_pct_chg_scale(tmp_path: Path):
@@ -721,7 +721,7 @@ def test_the_sidecar_carries_the_panel_and_the_active_figures_the_verdict_grades
         "panel_draws",
     }
     assert {key: compact[key] for key in unpanelled} == unpanelled
-    visible = agent_visible_metrics({"total_return": 0.1, "benchmark": compact})
+    visible = batch_candidate_stats({"total_return": 0.1, "benchmark": compact})
     assert visible["benchmark"]["active_information_ratio"] == compact["active_information_ratio"]
     assert visible["benchmark"]["tracking_error"] == compact["tracking_error"]
 
