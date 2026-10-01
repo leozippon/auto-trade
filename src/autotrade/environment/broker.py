@@ -176,13 +176,6 @@ class DailyBroker:
         # Ex-date settlements, in order: the only way a quantity or the cash
         # balance changes without a fill, so they are kept as auditable records.
         self.corporate_actions: list[CorporateAction] = []
-        # Cost feedback for the return statistics: gross traded notional drives
-        # turnover, the fee totals separate cost from alpha, and the rejection
-        # tally names the failure modes a strategy has to fix.
-        self.traded_notional = 0.0
-        self.fees_paid = 0.0
-        self.stamp_duty_paid = 0.0
-        self.reject_counts: dict[str, int] = {}
         self._current_day: str | None = None
 
     def open_day(
@@ -354,11 +347,6 @@ class DailyBroker:
             position.last_price = fill_price
             if position.quantity == 0:
                 del self.positions[order.symbol]
-        # Counted only once the fill actually settles: a rejected order moves no
-        # notional and pays no fee.
-        self.traded_notional += notional
-        self.fees_paid += commission
-        self.stamp_duty_paid += stamp_duty
         return self._record(
             order,
             matched_at,
@@ -438,8 +426,6 @@ class DailyBroker:
             reason=reason,
             metadata=order.metadata,
         )
-        if reason is not None:
-            self.reject_counts[reason] = self.reject_counts.get(reason, 0) + 1
         self.executions.append(execution)
         return execution
 

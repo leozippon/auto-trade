@@ -31,6 +31,7 @@ from autotrade.environment.broker_core import (
     reduce_amount_reject,
     validate_buy_lot,
 )
+from autotrade.environment.replay.stats import ReplayResult, compute_return_stats
 from autotrade.environment.strategy import CN_TZ, StrategyOrder
 
 MATCHED_AT = datetime(2026, 1, 5, 9, 30, tzinfo=CN_TZ)
@@ -62,6 +63,21 @@ def _broker(**profile_fields: object) -> DailyBroker:
     broker = DailyBroker(BrokerProfile(**profile_fields))
     broker.open_day("20260105", {})
     return broker
+
+
+def _run_stats(broker: DailyBroker) -> dict[str, object]:
+    """The run statistics a replay reports, recomputed from the Broker's
+    execution records (one flat curve row stands in for the equity curve)."""
+
+    curve = ({
+        "trade_date": "20260105",
+        "initial_equity": broker.initial_equity,
+        "equity": broker.initial_equity,
+        "cash": broker.cash,
+        "positions": {},
+    },)
+    executions = tuple(execution.to_record() for execution in broker.executions)
+    return compute_return_stats(ReplayResult(curve, executions, (), ()))
 
 
 class BrokerEligibilityTest(unittest.TestCase):
@@ -332,17 +348,19 @@ class BrokerAccountingTest(unittest.TestCase):
         self.assertAlmostEqual(
             broker.cash, 100_000 - 2 * commission - sold.stamp_duty, places=6
         )
-        self.assertAlmostEqual(broker.traded_notional, 2_000.0)
-        self.assertAlmostEqual(broker.fees_paid, 2 * commission)
-        self.assertAlmostEqual(broker.stamp_duty_paid, sold.stamp_duty)
+        stats = _run_stats(broker)
+        self.assertAlmostEqual(stats["turnover"], 2_000.0 / 100_000)
+        self.assertAlmostEqual(stats["fees_paid"], 2 * commission)
+        self.assertAlmostEqual(stats["stamp_duty_paid"], sold.stamp_duty)
 
     def test_rejected_orders_move_no_money_and_are_counted_separately(self) -> None:
         broker = _broker(initial_cash=1_000)
         broker.execute(_order(quantity=1_000), _bar(), matched_at=MATCHED_AT, raw_price=10.0)
         self.assertEqual(broker.cash, 1_000)
-        self.assertEqual(broker.traded_notional, 0.0)
-        self.assertEqual(broker.fees_paid, 0.0)
-        self.assertEqual(broker.reject_counts, {"insufficient_cash": 1})
+        stats = _run_stats(broker)
+        self.assertEqual(stats["turnover"], 0.0)
+        self.assertEqual(stats["fees_paid"], 0.0)
+        self.assertEqual(stats["reject_counts"], {"insufficient_cash": 1})
 
     def test_equity_marks_to_the_latest_visible_close(self) -> None:
         broker = _broker(initial_cash=100_000, min_commission_cny=0, slippage_bps=0, transfer_fee_bps=0)
@@ -574,7 +592,7 @@ class PositionCapTest(unittest.TestCase):
         # Adding to an existing holding does not open a new name.
         top_up = broker.execute(_order(), _bar(), matched_at=MATCHED_AT, raw_price=10.0)
         self.assertEqual(top_up.status, "filled")
-        self.assertEqual(broker.reject_counts, {"max_holdings_reached": 1})
+        self.assertEqual(_run_stats(broker)["reject_counts"], {"max_holdings_reached": 1})
 
     def test_single_name_weight_cap_measures_against_initial_equity(self) -> None:
         # 200 shares at 10.0 = 2 000 notional; the cap is 0.001 * 1e6 = 1 000.
