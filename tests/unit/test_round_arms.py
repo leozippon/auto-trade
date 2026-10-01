@@ -914,3 +914,34 @@ def test_no_new_pack_table_quotes_the_forward_period(pack: Path) -> None:
         return
     rows = _forward_period_table_rows(pack)
     assert not rows, f"{pack.name} quotes the forward period:\n" + "\n".join(rows)
+
+
+# Round 20260927 copied the book into 225 starters in 38 variants, so a fixed
+# defect (a full book buying a 13th seat) kept shipping in the copies for 70
+# hours. From round 20261001 on a starter's book is the canonical file itself.
+STARTER_LIB = REPO_ROOT / "configs" / "starter_lib"
+CANONICAL_BOOK_FROM = 20261001
+CANONICAL_BOOK = {
+    path.name: path.read_bytes()
+    for path in STARTER_LIB.iterdir()
+    if path.is_file() and path.name != "README.md"
+}
+
+
+@pytest.mark.parametrize("pack", PACKS, ids=lambda path: path.name)
+def test_a_new_starter_carries_the_canonical_book_byte_for_byte(pack: Path) -> None:
+    """A starter file named like one in configs/starter_lib/ is that file."""
+    assert CANONICAL_BOOK, "configs/starter_lib/ holds no canonical module"
+    label = PACK_ROUND_LABEL.search(pack.name)
+    assert label, f"{pack.name} does not end in its round label _YYYYMMDD"
+    if int(label.group(1)) < CANONICAL_BOOK_FROM:
+        return
+    differing = [
+        str(path.relative_to(pack))
+        for path in sorted((pack / "starter").rglob("*"))
+        if path.name in CANONICAL_BOOK and path.read_bytes() != CANONICAL_BOOK[path.name]
+    ]
+    assert not differing, (
+        f"{pack.name} edits its copy of configs/starter_lib/ ({', '.join(differing)}): copy the "
+        "canonical file unchanged, or change it there first"
+    )
