@@ -46,7 +46,7 @@ DEFAULT_LOCK_WAIT_SECONDS = 900
 # generation on success; audit-only jobs must not churn snapshot cache keys.
 # The generation schema/state contract itself is owned by
 # autotrade.environment.data.contracts so writer and PIT consumers cannot drift.
-MUTATING_OPERATIONS = {"update", "download_tier", "download_event_flow", "intraday_by_date", "pit_event_pipeline", "auction_capture", "auction_recheck", "commit_identity_migration"}
+MUTATING_OPERATIONS = {"update", "download_tier", "download_event_flow", "intraday_by_date", "pit_event_pipeline", "auction_capture", "auction_recheck"}
 
 
 @dataclass
@@ -448,20 +448,6 @@ def build_job_commands(ctx: RunContext) -> list[list[str]]:
             ],
         ]
         return commands
-    if operation == "commit_identity_migration":
-        # Content-preserving, but it rewrites the parquet itself to stamp the
-        # footer write_id, so it takes the updater lock AND counts as a
-        # MUTATING_OPERATION: a consumer must not read the lake while the
-        # footer/sidecar pairs are being restamped, and a partial run leaves
-        # the lake in a state the next run of the same job must recover.
-        command = [
-            ctx.python,
-            "scripts/data/migrate_commit_identity.py",
-            "--raw-dir",
-            raw_dir,
-        ]
-        command.extend(ctx.job.get("extra_args", []))
-        return [command]
     if operation == "revision_sentinel":
         revision_config = ctx.config.get("revision_monitor", {})
         command = [

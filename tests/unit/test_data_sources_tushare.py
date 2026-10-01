@@ -7231,13 +7231,14 @@ class UuidCommitIdentityTest(unittest.TestCase):
 
 
 class FullPortContractTest(unittest.TestCase):
-    def test_schedule_retains_full_job_set_and_uuid_migration(self) -> None:
+    def test_schedule_retains_full_job_set(self) -> None:
         root = Path(__file__).resolve().parents[2]
         config = json.loads((root / "configs/tushare_update_schedule.json").read_text(encoding="utf-8"))
         # 29 since cn_preopen_text_backfill_0855 was retired (2026-09-10); 30
         # since the minute layer left cn_evening_full for its own manual job;
-        # 32 with the two research-history backfill jobs (2026-09-24).
-        self.assertEqual(len(config["jobs"]), 32)
+        # 32 with the two research-history backfill jobs (2026-09-24); 31 since
+        # the completed one-shot commit-identity migration job was retired.
+        self.assertEqual(len(config["jobs"]), 31)
         for name, tier in (
             ("manual_history_backfill_reference", "reference"),
             ("manual_history_backfill_macro", "macro"),
@@ -7247,26 +7248,6 @@ class FullPortContractTest(unittest.TestCase):
             self.assertEqual(job["extra_args"][:2], ["--history-floor", "20140701"])
         self.assertIn("--no-include-intraday", config["jobs"]["cn_evening_full"]["extra_args"])
         self.assertEqual(config["jobs"]["manual_intraday_minutes"]["operation"], "intraday_by_date")
-        self.assertEqual(
-            config["jobs"]["manual_commit_identity_migration"]["operation"],
-            "commit_identity_migration",
-        )
-
-    def test_commit_identity_job_uses_explicit_migration_script(self) -> None:
-        context = cron_update.RunContext(
-            config={"default_raw_dir": "raw"},
-            repo_root=Path("."),
-            python="python",
-            job_name="migration",
-            job={"operation": "commit_identity_migration"},
-            start_date="20240101",
-            end_date="20240102",
-            timezone_name="Asia/Shanghai",
-        )
-        self.assertEqual(
-            cron_update.build_job_commands(context),
-            [["python", "scripts/data/migrate_commit_identity.py", "--raw-dir", "raw"]],
-        )
 
     def test_minute_job_runs_the_by_date_updater_as_a_mutating_job(self) -> None:
         context = cron_update.RunContext(

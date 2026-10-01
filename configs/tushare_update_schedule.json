@@ -505,14 +505,6 @@
       ],
       "lock_wait_seconds": 1800,
       "skip_if_already_ok": false
-    },
-    "manual_commit_identity_migration": {
-      "description": "Manual (not scheduled): migrate legacy Parquet/sidecar pairs to the UUID footer identity and footer row-count commit protocol. Idempotent: already-valid pairs are skipped, so an interrupted run is finished by re-running it.",
-      "operation": "commit_identity_migration",
-      "end_date_offset_days": 0,
-      "end_date_mode": "sse_open_on_or_before",
-      "lock_wait_seconds": 1800,
-      "skip_if_already_ok": false
     }
   },
   "interfaces": [
