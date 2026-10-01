@@ -17,9 +17,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from autotrade.environment.identity import AgentRefStore
+from autotrade.environment.runtime import write_json_atomic
 from autotrade.environment.step_tree import StepTree
 from autotrade.pipelines.config import DEFAULT_RESEARCH_GEOMETRY
 from autotrade.pipelines.ledger import ExperimentLedger
+from autotrade.webui import registry
 from autotrade.webui.registry import (
     ENDING_STATES,
     best_experiment,
@@ -249,6 +251,42 @@ def test_every_way_an_arm_can_end_reads_as_one_ending_with_a_reason(tmp_path: Pa
     assert "running" in listed[: -len(ENDING_STATES)]
     # The detail page reads the same projection as the card.
     assert experiment_detail(tmp_path, "no_edge")["ending"] == endings["no_edge"]
+
+
+def test_the_listing_rederives_a_row_only_when_its_files_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The home page polls the listing every 5 s over every arm ever created:
+    an ended arm with no live worker is re-read only when its status, ledger,
+    params or identity map changes, while an arm with a live worker is re-read
+    on every poll."""
+
+    root = tmp_path / "experiments"
+    ended = build_arm(root, "ended", "no_deliverable")
+    build_arm(root, "running", "research", alive=True)
+    derived: list[str] = []
+    summarize = registry.summarize_experiment
+
+    def counting(directory: Path) -> dict[str, object]:
+        derived.append(directory.name)
+        return summarize(directory)
+
+    monkeypatch.setattr(registry, "summarize_experiment", counting)
+    first = {row["experiment_id"]: row for row in list_experiments(root)}
+    assert sorted(derived) == ["ended", "running"]
+    derived.clear()
+    second = {row["experiment_id"]: row for row in list_experiments(root)}
+    assert derived == ["running"]
+    assert second["ended"] == first["ended"]
+    # The status changing under the arm reaches the very next poll.
+    write_json_atomic(
+        ended / "hitl/status.json",
+        {"schema_version": 1, "pid": 999_999_999, "state": "failed", "error": "RuntimeError: boom"},
+    )
+    derived.clear()
+    third = {row["experiment_id"]: row for row in list_experiments(root)}
+    assert sorted(derived) == ["ended", "running"]
+    assert third["ended"]["ending"] == {"state": "broken", "reason": "RuntimeError: boom"}
 
 
 def test_an_arm_whose_nomination_the_freeze_gate_refused_reads_as_rejected(

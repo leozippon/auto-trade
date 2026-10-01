@@ -499,17 +499,59 @@ def _ending_rank(row: Mapping[str, object]) -> int:
     return 1 + _ENDING_ORDER.get(str(ending.get("state")), len(ENDING_STATES))
 
 
+# While no worker is alive a listing row is a function of a few files: the
+# status, the ledger, the params, the public-identity map and whether the
+# worker log exists. The home page polls the listing every 5 s over every
+# experiment ever created, so such a row is kept per process and re-derived
+# only when one of those files changes; a row with a live worker, or one still
+# launching (its state ages), is derived on every poll.
+_SUMMARY_SOURCES = (
+    f"{HITL_DIR_NAME}/{STATUS_NAME}",
+    "ledgers/experiment_ledger.jsonl",
+    f"{HITL_DIR_NAME}/{PARAMS_NAME}",
+    ".host/agent-refs.json",
+)
+_SUMMARY_CACHE: dict[Path, tuple[tuple[object, ...], dict[str, object]]] = {}
+
+
+def _summary_signature(directory: Path) -> tuple[object, ...]:
+    signature: list[object] = [bool(worker_log_for(directory))]
+    for relative in _SUMMARY_SOURCES:
+        try:
+            info = (directory / relative).stat()
+        except FileNotFoundError:
+            signature.append(None)
+        else:
+            signature.append((info.st_ino, info.st_mtime_ns, info.st_ctime_ns, info.st_size))
+    return tuple(signature)
+
+
+def _listing_row(directory: Path) -> dict[str, object]:
+    # Signed before reading, so a change racing the read only re-derives.
+    signature = _summary_signature(directory)
+    cached = _SUMMARY_CACHE.get(directory)
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+    row = summarize_experiment(directory)
+    if row.get("worker_alive") is False and row.get("state") not in ("launching", "unreadable"):
+        _SUMMARY_CACHE[directory] = (signature, row)
+    else:
+        _SUMMARY_CACHE.pop(directory, None)
+    return row
+
+
 def list_experiments(root: Path) -> list[dict[str, object]]:
     """Every experiment, newest first inside each :func:`_ending_rank` group."""
 
     root = Path(root)
     if not root.is_dir():
         return []
-    rows = [
-        summarize_experiment(path)
-        for path in root.iterdir()
-        if path.is_dir() and not path.name.startswith(".")
+    directories = [
+        path for path in root.iterdir() if path.is_dir() and not path.name.startswith(".")
     ]
+    rows = [_listing_row(path) for path in directories]
+    for gone in {path for path in _SUMMARY_CACHE if path.parent == root} - set(directories):
+        _SUMMARY_CACHE.pop(gone, None)
     rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
     rows.sort(key=_ending_rank)
     return rows
