@@ -70,6 +70,17 @@ class NullControlSetupError(RuntimeError):
     """
 
 
+class ZeroSkillPanelError(RuntimeError):
+    """Drawing the zero-skill panel failed after the candidate's own replay finished.
+
+    Always the host's failure, never a measurement of the candidate: the
+    panel's draws replay host-scripted orders. It is raised without a cause or
+    context, because the engine types any failure inside an in-process
+    strategy call as the strategy's own (``StrategyRaised``), and a chain to
+    that would classify the host's failure as the candidate's.
+    """
+
+
 @dataclass(frozen=True)
 class RoundTrip:
     """One FIFO-paired entry and its exit; ``exit_at`` is None when still open."""
@@ -588,6 +599,7 @@ __all__ = [
     "PANEL_DRAWS",
     "NullControlSetupError",
     "RoundTrip",
+    "ZeroSkillPanelError",
     "run_null_control",
     "trade_skeleton",
 ]

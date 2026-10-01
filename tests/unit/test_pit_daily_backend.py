@@ -21,7 +21,10 @@ from autotrade.environment.executor import docker_available, raised_by_strategy
 from autotrade.environment.nl import NLConfig
 from autotrade.environment.replay import timeview as timeview_module
 from autotrade.environment.replay.engine import BacktestError
-from autotrade.environment.replay.null_control import NullControlSetupError
+from autotrade.environment.replay.null_control import (
+    NullControlSetupError,
+    ZeroSkillPanelError,
+)
 from autotrade.environment.replay.timeview import Timeview
 from autotrade.environment.runtime import (
     AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS,
@@ -675,6 +678,22 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
         return json.dumps({**payload, "stats": stats}, sort_keys=True)
 
     assert without_clock(bare) == without_clock(record)
+
+    # Drawing the panel is the host's work: a failure there is never a
+    # measurement of the candidate, even when it comes through the engine
+    # wrapper the panel's scripted orders run in, which types anything raised
+    # inside a strategy call as StrategyRaised. It surfaces named and
+    # unchained, so every classifier reads it as an environment failure.
+    monkeypatch.setattr(
+        "autotrade.environment.replay.null_control._scripted_strategy",
+        lambda _orders: lambda _context: [{"symbol": "000001.SZ", "action": "hold"}],
+    )
+    with pytest.raises(ZeroSkillPanelError, match="candidate's own replay finished") as failure:
+        backend.evaluate(request)
+    assert "generate_orders failed" in str(failure.value)
+    assert failure.value.__cause__ is None and failure.value.__context__ is None
+    assert raised_by_strategy(failure.value) is False
+    monkeypatch.undo()
 
     # The null control replays its draws through the same slot table, and it
     # finds that table on disk: the backend instance that evaluated the result
@@ -2329,7 +2348,10 @@ def test_an_arm_replays_grades_and_records_its_own_benchmark_index(tmp_path: Pat
     backend = PITDailyEvaluationBackend(
         tmp_path / "results_default", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX
     )
-    with pytest.raises(NullControlSetupError, match="no section of the benchmark"):
+    # A Validation reports it as the panel's failure, the setup error in its text.
+    with pytest.raises(
+        ZeroSkillPanelError, match="NullControlSetupError: .*no section of the benchmark"
+    ):
         backend.evaluate(request)
     chmod_tree(snapshot, file_mode=0o644, dir_mode=0o755)
     _append_macro(

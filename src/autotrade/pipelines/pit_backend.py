@@ -52,6 +52,7 @@ from autotrade.environment.replay.engine import StrategyDataView
 from autotrade.environment.replay.null_control import (
     PANEL_DRAWS,
     NullControlSetupError,
+    ZeroSkillPanelError,
     run_null_control,
 )
 from autotrade.environment.replay.stats import (
@@ -990,23 +991,35 @@ class PITDailyEvaluationBackend:
             # above. A truncated smoke run is not a Validation and gets none.
             panel = None
             if max_days is None and start_day is None:
+                panel_failure: Exception | None = None
                 with timer.phase("zero_skill_panel"):
-                    panel = run_null_control(
-                        replay,
-                        daily,
-                        slot_benchmark(replay_dirs, benchmark_index=self.benchmark_index),
-                        request.broker_profile,
-                        request.schedule,
-                        seed=null_control_seed(
-                            f"{request.revision.revision_id}:{replay_start}:{replay_end}",
-                            "panel",
-                        ),
-                        corporate_actions=corporate_actions,
-                        membership=slot_membership(
-                            (snapshot_dir, *replay_dirs),
-                            benchmark_index=self.benchmark_index,
-                        ),
-                        panel=True,
+                    try:
+                        panel = run_null_control(
+                            replay,
+                            daily,
+                            slot_benchmark(replay_dirs, benchmark_index=self.benchmark_index),
+                            request.broker_profile,
+                            request.schedule,
+                            seed=null_control_seed(
+                                f"{request.revision.revision_id}:{replay_start}:{replay_end}",
+                                "panel",
+                            ),
+                            corporate_actions=corporate_actions,
+                            membership=slot_membership(
+                                (snapshot_dir, *replay_dirs),
+                                benchmark_index=self.benchmark_index,
+                            ),
+                            panel=True,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - every panel failure is the host's
+                        panel_failure = exc
+                if panel_failure is not None:
+                    # Raised outside the handler so it carries no context
+                    # either: see ZeroSkillPanelError.
+                    raise ZeroSkillPanelError(
+                        "the zero-skill panel failed after the candidate's own replay "
+                        "finished; the candidate was not measured against it: "
+                        f"{type(panel_failure).__name__}: {panel_failure}"
                     )
             with timer.phase("style_analysis"):
                 style = replay_style_analysis(
