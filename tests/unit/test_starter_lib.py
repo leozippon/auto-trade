@@ -18,6 +18,8 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+from autotrade.environment.strategy import CN_TZ
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CANONICAL_TRADE = REPO_ROOT / "configs" / "starter_lib" / "trade.py"
 SEATS = 3
@@ -89,7 +91,7 @@ def book(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 def _context(asof: Path, day: str, positions: dict[str, int], cash: float) -> SimpleNamespace:
     return SimpleNamespace(
-        inference_at=datetime.strptime(day + "0830", "%Y%m%d%H%M"),
+        inference_at=datetime(int(day[:4]), int(day[4:6]), int(day[6:]), 8, 30, tzinfo=CN_TZ),
         account=SimpleNamespace(positions=positions, cash=cash),
         asof_dir=str(asof),
     )
