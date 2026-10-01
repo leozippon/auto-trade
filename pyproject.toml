@@ -26,7 +26,62 @@ webui = [
 where = ["src"]
 
 [tool.ruff]
-extend-exclude = ["external_references"]
+# Run as `ruff check src scripts tests`. The target version comes from
+# requires-python.
+required-version = ">=0.16.0"
+# The wrap width of sorted imports (and of `ruff format`, which is not
+# enforced). Long lines -- prompt text, messages, tables -- are house style, so
+# E501 is not selected.
+line-length = 88
+# Never lint or fix these, even when a tool names them explicitly: reference
+# packs are immutable records, the starter lib is byte-copied into them, round
+# files are frozen queues, and the strategy contract modules and output
+# template are baked into the sandbox image (an edit forces a rebuild).
+force-exclude = true
+extend-exclude = [
+  "external_references",
+  "configs/workspace_refs",
+  "configs/starter_lib",
+  "configs/agent_output_template",
+  "src/autotrade/environment/strategy.py",
+  "src/autotrade/environment/strategy_loader.py",
+  "src/autotrade/environment/strategy_worker.py",
+  "scripts/experiments/create_round_*.py",
+  "ops/cron",
+]
+
+[tool.ruff.lint]
+select = [
+  "E4", "E7", "E9", "F", "W",  # pycodestyle errors, pyflakes
+  "I",  # import order
+  "UP",  # pyupgrade
+  "B",  # bugbear
+  "C4",  # comprehensions
+  "SIM",  # simplify
+  "PIE", "FURB", "ISC",  # misc. idioms, implicit string concatenation
+  "DTZ",  # naive datetimes
+  "BLE",  # blind except
+  "PLE", "YTT", "ASYNC", "LOG", "G", "PGH", "T10",
+  "RUF",
+]
+# Rules in those families the code deliberately does not follow.
+ignore = [
+  "B905",  # zip() without strict=
+  "C420",  # dict comprehension over dict.fromkeys
+  "SIM105",  # contextlib.suppress over try/except/pass
+  "SIM117",  # nested with blocks
+  "SIM300",  # constant-first comparisons (it reads UPPER_CASE names as literals)
+  "RUF001", "RUF002", "RUF003",  # full-width punctuation in Chinese text
+  "RUF005",  # collection literal concatenation
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Scripts put src on sys.path (the _bootstrap stanza) before importing autotrade.
+"scripts/**" = ["E402"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI declares request bodies as Body() parameter defaults.
+extend-immutable-calls = ["fastapi.Body"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
