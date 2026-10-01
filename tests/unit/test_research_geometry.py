@@ -112,15 +112,26 @@ def test_a_misaligned_or_disordered_geometry_is_refused(
         dataclasses.replace(DEFAULT_RESEARCH_GEOMETRY, **change)
 
 
-def test_heldout_is_clipped_to_the_release_and_refused_without_two_days() -> None:
+def test_heldout_is_clipped_to_the_release_and_refused_below_what_grading_reads() -> None:
+    from autotrade.environment.replay.style import MIN_REGRESSION_DAYS
+
     geometry = DEFAULT_RESEARCH_GEOMETRY
     whole = geometry.heldout(_weekdays("20261231"))
     assert (whole.end, whole.requested_end, whole.truncation_reason) == ("20260930", "20260930", None)
     clipped = geometry.heldout(_weekdays("20260911"))
     assert (clipped.end, clipped.truncation_reason) == ("20260911", "release_ends_20260911")
-    # One Held-out trading day, a release that stops inside the forward
-    # period, and no release at all cannot replay Held-out.
-    for release in (_weekdays("20260701"), _weekdays("20260615"), []):
+    # The verdict regresses Held-out on at least MIN_REGRESSION_DAYS days, so
+    # the slot needs that many trading days: 20260701..20260710 is eight.
+    assert MIN_REGRESSION_DAYS == 8
+    assert geometry.heldout(_weekdays("20260710")).end == "20260710"
+    # Seven Held-out trading days, one, a release that stops inside the
+    # forward period, and no release at all cannot be graded.
+    for release in (
+        _weekdays("20260709"),
+        _weekdays("20260701"),
+        _weekdays("20260615"),
+        [],
+    ):
         with pytest.raises(ValueError, match="Held-out|trading days"):
             geometry.heldout(release)
 

@@ -53,7 +53,11 @@ from .stats import TRADING_DAYS_PER_YEAR, ReplayResult, total_return_from_curve
 # by omission.
 BENCHMARK_TS_CODE = DEFAULT_BENCHMARK_INDEX
 BENCHMARK_LABEL = benchmark_index_label(BENCHMARK_TS_CODE)
-_MIN_REGRESSION_DAYS = 8
+# The fewest overlapping days the attribution regresses on: a span shorter than
+# this has no neutralised excess. The Held-out slot is refused below it
+# (``pipelines.calendar.ResearchGeometry.heldout``), so a verdict never waits
+# on a replay it cannot read.
+MIN_REGRESSION_DAYS = 8
 STYLE_ARTIFACT_NAME = "style_analysis.json"
 STYLE_SCHEMA_VERSION = 1
 _STYLE_COLUMNS = ("circ_mv", "pb", "turnover_rate")
@@ -247,7 +251,7 @@ def _benchmark_regression(
         "alpha_annualized": None,
         "r2": None,
     }
-    if days < _MIN_REGRESSION_DAYS:
+    if days < MIN_REGRESSION_DAYS:
         return result
     mean_strategy = sum(value for value, _ in paired) / days
     mean_benchmark = sum(value for _, value in paired) / days
@@ -362,7 +366,7 @@ def _neutralized_excess(
         "size_beta": None,
         "r2": None,
     }
-    if days < _MIN_REGRESSION_DAYS:
+    if days < MIN_REGRESSION_DAYS:
         return result
     mean_y = sum(row[0] for row in rows) / days
     mean_1 = sum(row[1] for row in rows) / days
@@ -772,6 +776,7 @@ def write_style_rollup(result_dir: Path, payload: Mapping[str, object]) -> Path:
 __all__ = [
     "BENCHMARK_LABEL",
     "BENCHMARK_TS_CODE",
+    "MIN_REGRESSION_DAYS",
     "STYLE_ARTIFACT_NAME",
     "STYLE_SCHEMA_VERSION",
     "active_analysis",

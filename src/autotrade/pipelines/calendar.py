@@ -29,12 +29,10 @@ from pathlib import Path
 import pandas as pd
 
 from autotrade.environment.data.contracts import CN_TZ
+from autotrade.environment.replay.style import MIN_REGRESSION_DAYS
 
 # Snapshot anchor time of day: close of business, not an intraday moment.
 RESEARCH_ANCHOR_TIME = time(23, 59, 59)
-# A replay region needs at least two trading days: one day is a one-point
-# equity curve with no daily return series behind it.
-MIN_REGION_TRADE_DAYS = 2
 # The span label of a replay over the whole research period, Y1 through the
 # last research year.
 FULL_SPAN = "full"
@@ -221,20 +219,21 @@ class ResearchGeometry:
 
         ``trading_days`` are the pinned release's daily dates. The clip is
         stated on the slot (``requested_end``, ``truncation_reason``) rather
-        than hidden in a shorter replay under the configured label. A release
-        that does not reach two trading days into Held-out cannot replay it --
-        and has not finished the forward period either -- so it is refused.
+        than hidden in a shorter replay under the configured label. Held-out
+        is graded by the attribution regression, so a release that leaves fewer
+        Held-out trading days than it needs (``MIN_REGRESSION_DAYS``) is refused
+        here, before the forward replay runs, not when the verdict reads it.
         """
 
         if not trading_days:
             raise ValueError("the Held-out slot needs the release's trading days")
         end = min(self.heldout_end, max(trading_days))
         count = sum(1 for day in trading_days if self.heldout_start <= day <= end)
-        if count < MIN_REGION_TRADE_DAYS:
+        if count < MIN_REGRESSION_DAYS:
             raise ValueError(
                 f"the release ends {max(trading_days)}, leaving {count} trading day(s) of "
-                f"Held-out {self.heldout_start}..{self.heldout_end}; a replay needs at "
-                f"least {MIN_REGION_TRADE_DAYS}"
+                f"Held-out {self.heldout_start}..{self.heldout_end}; grading Held-out "
+                f"needs at least {MIN_REGRESSION_DAYS}"
             )
         return Slot("H", self.heldout_start, end, self.heldout_end)
 
@@ -249,7 +248,6 @@ GEOMETRY_PARAMETERS: tuple[str, ...] = tuple(field.name for field in fields(Rese
 __all__ = [
     "FULL_SPAN",
     "GEOMETRY_PARAMETERS",
-    "MIN_REGION_TRADE_DAYS",
     "RESEARCH_ANCHOR_TIME",
     "ResearchGeometry",
     "Slot",
