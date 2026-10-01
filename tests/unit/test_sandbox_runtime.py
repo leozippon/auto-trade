@@ -309,12 +309,13 @@ def test_persistent_sandbox_start_records_tag_session_and_runtime_probe(tmp_path
         "session_id": sandbox.session_id,
         "runtime": {"python_version": "3.11.13"},
     }
-    allocation = sandbox.allocation_record()
-    assert allocation["session_id"] == sandbox.session_id
-    assert allocation["image_ref"] == sandbox.spec.image
-    assert allocation["build_generation_id"] == generation_id
-    assert "image_id" not in allocation
-    assert "image_repo_digests" not in allocation
+    # The spec record the run manifests carry names the image by tag and build
+    # generation, never by a host-local image id or digest.
+    spec_record = sandbox.spec.to_record()
+    assert spec_record["image_ref"] == sandbox.spec.image
+    assert spec_record["build_generation_id"] == generation_id
+    assert "image_id" not in spec_record
+    assert "image_repo_digests" not in spec_record
 
 
 def test_persistent_command_timeout_keeps_sandbox_for_followup_work():
@@ -1957,7 +1958,6 @@ def test_persistent_sandbox_start_pins_the_selected_gpus_on_the_container(tmp_pa
     assert sandbox.gpu_indices == [1, 5]
     command = run.call_args_list[0][0][0]
     assert command[command.index("--gpus") + 1] == '"device=1,5"'
-    assert sandbox.allocation_record()["allocated_gpu_indices"] == [1, 5]
 
 
 def test_a_cpu_only_sandbox_never_consults_the_gpu_selector(tmp_path: Path):

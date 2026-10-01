@@ -616,15 +616,6 @@ class DockerSandbox:
             *map(str, argv),
         ]
 
-    def allocation_record(self) -> dict[str, object]:
-        return {
-            "container": self.container,
-            "session_id": self.session_id,
-            "image_runtime": dict(self.image_runtime),
-            "allocated_gpu_indices": list(self.gpu_indices),
-            **self.spec.to_record(),
-        }
-
     def stop(self) -> None:
         if not self._started:
             return

@@ -277,10 +277,14 @@ class StepTreeNodeTest(unittest.TestCase):
                 revision_id=revision,
                 metrics={},
             )
-            # The item-5 replacement for closed's position_for_hash: a frozen
-            # artifact records its source step, so the branch point is a lookup.
-            self.assertEqual(tree.position_for_step(node_id), node_id)
-            self.assertIsNone(tree.position_for_step("unknown-node"))
+            # A frozen artifact records its source node, so the branch point is
+            # a lookup by node identity, and an unknown node is refused.
+            node = tree.get_node(node_id)
+            self.assertEqual(
+                (node["revision_id"], node["complete_validation"]), (revision, True)
+            )
+            with self.assertRaisesRegex(ValueError, "unknown step tree node"):
+                tree.get_node("unknown-node")
 
 
 if __name__ == "__main__":

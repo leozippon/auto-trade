@@ -242,21 +242,6 @@ class StepTree:
         self.data["current_node_id"] = node_id
         self.save()
 
-    def position_for_step(self, step_id: str) -> str | None:
-        """Most recent validated node carrying the given step id.
-
-        A frozen artifact records the node it was frozen from, so the branch
-        point is resolved by node identity. Returns ``None`` when the node is
-        not in this tree — an inherited seed, or a node a rollback pruned —
-        so such a start begins a new root instead of failing the session.
-        """
-        for node in reversed(self.data["nodes"]):
-            if not node.get("complete_validation"):
-                continue
-            if str(node.get("node_id")) == step_id:
-                return str(node["node_id"])
-        return None
-
     def save(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         safe_data = sanitize_for_log(self.data)
