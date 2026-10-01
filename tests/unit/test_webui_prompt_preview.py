@@ -51,11 +51,14 @@ GEOMETRY = DEFAULT_RESEARCH_GEOMETRY
 
 
 def _trading_days() -> list[str]:
-    """Two trading days a month across the fixture's whole calendar range."""
+    """Two trading days a month across the fixture's whole calendar range, and
+    five in each month of the Held-out quarter: grading Held-out needs eight
+    (``style.MIN_REGRESSION_DAYS``), so a release with fewer cannot start."""
     days: list[str] = []
     for year in range(2019, 2027):
         for month in range(1, 13):
-            for day in (5, 20):
+            heldout = year == 2026 and 7 <= month <= 9
+            for day in (5, 10, 15, 20, 25) if heldout else (5, 20):
                 days.append(f"{year}{month:02d}{day:02d}")
     return days
 
