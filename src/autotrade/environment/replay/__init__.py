@@ -40,7 +40,7 @@ __all__ = [
     "StrategyDataView",
     "compute_return_stats",
     "finalize_summary_timing",
+    "resolve_execution_price",
     "run_daily_replay",
     "run_null_control",
-    "resolve_execution_price",
 ]

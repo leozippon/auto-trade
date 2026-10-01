@@ -50,9 +50,12 @@ from autotrade.environment.strategy_loader import (
 )
 from autotrade.environment.tools import ToolError
 from autotrade.environment.tools.modification_check import ModificationCheckTool
-from autotrade.pipelines.config import ArtifactRevision, EvaluationRequest, SnapshotBundle
+from autotrade.pipelines.config import (
+    ArtifactRevision,
+    EvaluationRequest,
+    SnapshotBundle,
+)
 from autotrade.pipelines.pit_backend import PITDailyEvaluationBackend
-
 from tests.unit.fixtures_sandbox import docker_available
 from tests.unit.test_pit_daily_backend import (
     _pit_slot_paths,

@@ -44,7 +44,6 @@ from autotrade.environment.time_budget import (
     TimeBudgetBinding,
     validate_time_budget_bindings,
 )
-from autotrade.environment.tools.search import trace_read_stub
 from autotrade.environment.tools.base import (
     SessionInterrupt,
     ToolError,
@@ -54,6 +53,7 @@ from autotrade.environment.tools.base import (
     ToolSpec,
     is_sequential_tool,
 )
+from autotrade.environment.tools.search import trace_read_stub
 
 from .compact import (
     ContextCompactor,

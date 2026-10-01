@@ -1,18 +1,21 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, time
 from pathlib import Path
-import json
 
 import pandas as pd
 import pyarrow.parquet as pq
 
 from autotrade.data_quality import build_quality_report, write_quality_report
-
 from autotrade.environment.data.contracts import CN_TZ
-from autotrade.environment.data.pit import concat_rows, parquet_meta, to_cn_timestamps, yyyymmdd
-
+from autotrade.environment.data.pit import (
+    concat_rows,
+    parquet_meta,
+    to_cn_timestamps,
+    yyyymmdd,
+)
 
 # Provenance/PIT columns the store stamps onto every fundamental event row on
 # top of the raw vendor schema (single source; snapshot attribution and the

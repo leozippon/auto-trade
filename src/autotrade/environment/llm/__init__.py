@@ -1,9 +1,4 @@
 from .deepseek import DeepSeekConfig, DeepSeekProxy
-from .openai_compatible import (
-    OpenAICompatibleConfig,
-    OpenAICompatibleProxy,
-    load_env_value,
-)
 from .model_profiles import (
     AGENT_MAX_OUTPUT_TOKENS,
     DEFAULT_LLM_MAX_RETRIES,
@@ -17,7 +12,14 @@ from .model_profiles import (
     effective_max_output_tokens,
     model_profile,
 )
+from .openai_compatible import (
+    OpenAICompatibleConfig,
+    OpenAICompatibleProxy,
+    load_env_value,
+)
 from .proxy import (
+    CONTEXT_OUTPUT_MIN_TOKENS,
+    CONTEXT_OUTPUT_TOKEN_MARGIN,
     ChatMessage,
     LLMProxy,
     LLMProxyError,
@@ -25,8 +27,6 @@ from .proxy import (
     ProviderResponse,
     ScriptedLLM,
     ToolCall,
-    CONTEXT_OUTPUT_MIN_TOKENS,
-    CONTEXT_OUTPUT_TOKEN_MARGIN,
     clamp_requested_max_tokens,
     context_overflow_error,
     context_request_fits,
@@ -38,6 +38,8 @@ from .proxy import (
 
 __all__ = [
     "AGENT_MAX_OUTPUT_TOKENS",
+    "CONTEXT_OUTPUT_MIN_TOKENS",
+    "CONTEXT_OUTPUT_TOKEN_MARGIN",
     "DEFAULT_LLM_MAX_RETRIES",
     "DEFAULT_LLM_RETRY_BACKOFF_SECONDS",
     "LEGACY_LOCAL_QWEN_MODEL",
@@ -55,8 +57,6 @@ __all__ = [
     "ProviderResponse",
     "ScriptedLLM",
     "ToolCall",
-    "CONTEXT_OUTPUT_MIN_TOKENS",
-    "CONTEXT_OUTPUT_TOKEN_MARGIN",
     "build_model_gateway",
     "canonicalize_model_name",
     "clamp_requested_max_tokens",

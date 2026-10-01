@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from collections.abc import Iterable, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any
 from uuid import uuid4
-
 
 QUALITY_REPORT_SCHEMA_VERSION = 2
 QUALITY_REPORT_KEYS = frozenset(
@@ -250,7 +250,7 @@ def build_quality_report(
     report = {
         "schema_version": QUALITY_REPORT_SCHEMA_VERSION,
         "report_type": str(report_type),
-        "created_at": created_at or datetime.now(timezone.utc).isoformat(),
+        "created_at": created_at or datetime.now(UTC).isoformat(),
         "status": quality_status(counts),
         "scope": scope_record,
         "finding_counts": counts,

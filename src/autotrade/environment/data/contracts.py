@@ -460,7 +460,7 @@ def node_visible_cutoff(node: RefreshNode, when: datetime) -> datetime | None:
         when = when.replace(tzinfo=CN_TZ)
     base_day = when.astimezone(CN_TZ).date()
     active_weekdays = NODE_ACTIVE_WEEKDAYS.get(node.name)
-    for delta in range(0, 10):
+    for delta in range(10):
         day = base_day - timedelta(days=delta)
         if active_weekdays is not None and day.weekday() not in active_weekdays:
             continue

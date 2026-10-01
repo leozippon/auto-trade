@@ -38,8 +38,8 @@ import pyarrow.parquet as pq
 from autotrade.environment.data.unit_rules import (  # noqa: F401  (re-exported)
     COMMON_FIELD_SEMANTICS,
     FIELD_RULES,
-    FieldRule,
     NO_NUMERIC_DATASETS,
+    FieldRule,
 )
 
 

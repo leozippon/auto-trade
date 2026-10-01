@@ -1,11 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Mapping
 
 import numpy as np
 import pandas as pd
-
 
 SZ_MAIN_BOARD_AUCTION_FACTOR = 0.76
 SZ_GEM_AUCTION_FACTOR = 0.58

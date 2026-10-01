@@ -5312,8 +5312,9 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual({p.get("exchange") for _, p in client.calls}, set(spec.loop_values))
 
     def test_expected_macro_paths_cover_new_strategies(self):
-        from autotrade.data_sources.tushare import audit
         import argparse
+
+        from autotrade.data_sources.tushare import audit
 
         args = argparse.Namespace(datasets=None)
         static_paths = audit.expected_macro_paths(self.raw_dir, common.MACRO_SPECS["fut_basic"], "20240101", "20240110", args)
@@ -5329,8 +5330,9 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         # The producing job ends on the last SSE open date; a weekend month
         # boundary must not expect the new month's partition yet, while a
         # missing month containing an elapsed trading day still errors.
-        from autotrade.data_sources.tushare import audit
         import argparse
+
+        from autotrade.data_sources.tushare import audit
 
         cal_path = self.raw_dir / "trade_cal" / "exchange=SSE" / "year=2026.parquet"
         cal_path.parent.mkdir(parents=True, exist_ok=True)
@@ -6068,7 +6070,6 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 # Source: test_tushare_intraday_by_date.py
 import types
 import unittest
-
 
 
 def load_tushare_data_module():

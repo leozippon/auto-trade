@@ -21,7 +21,6 @@ from autotrade.data_sources.tushare.common import (
     TEXT_FETCHABLE_DATASETS,
     TEXT_SPECS,
 )
-
 from autotrade.environment.data.contracts import (
     DOMAIN_REFRESH_NODES,
     EVENING_NODE,

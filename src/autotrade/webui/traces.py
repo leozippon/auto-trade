@@ -771,7 +771,7 @@ def _as_str_list(value: object) -> list[str]:
 
 
 class _Call:
-    __slots__ = ("name", "key", "status", "summary", "ts")
+    __slots__ = ("key", "name", "status", "summary", "ts")
 
     def __init__(self, name: str, key: str, status: str, summary: str, ts: object) -> None:
         self.name = name

@@ -71,20 +71,20 @@ from .compact import (
     fit_tool_results_to_context,
     safe_error_summary,
 )
+from .prompts import (
+    HARD_FINALIZATION_SYSTEM_PROMPT,
+    WRAP_UP_PROMPT,
+)
 from .subagent import (
     OUTPUT_TRUNCATED_CONTINUATION,
-    SubAgentEngine,
     AgentTool,
+    SubAgentEngine,
     _copy_chat_message,
     _output_truncated,
     allowed_subagent_tools,
     deliver_subagent_report,
     normalize_subagent_thinking,
     resolve_subagent_max_turns,
-)
-from .prompts import (
-    HARD_FINALIZATION_SYSTEM_PROMPT,
-    WRAP_UP_PROMPT,
 )
 
 _LLM_FAILURE_CIRCUIT = 3

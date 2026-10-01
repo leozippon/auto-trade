@@ -17,11 +17,11 @@ import re
 import shutil
 import stat
 import uuid
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterator
 
 import pandas as pd
 import pyarrow.parquet as pq
@@ -865,7 +865,7 @@ def _write_json(path: Path, payload: dict[str, object]) -> None:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 @contextmanager

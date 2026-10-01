@@ -11,6 +11,19 @@ from pathlib import Path
 
 import pytest
 
+from autotrade.agent import subagent as subagent_module
+from autotrade.agent.prompts import (
+    SESSION_WORKFLOW_SECTION,
+    TOOL_PATH_CHEAT_SHEET,
+    TOOL_WRITE_CHEAT_SHEET,
+    build_system_prompt,
+)
+from autotrade.agent.runner import (
+    SUBAGENT_TEARDOWN_WAIT_SECONDS,
+    AgentSessionBudgetExhausted,
+    AgentSessionConfig,
+    AgentSessionRunner,
+)
 from autotrade.agent.subagent import (
     AGENT_TOOL_DESCRIPTION,
     AGENT_TOOL_SPEC,
@@ -25,25 +38,11 @@ from autotrade.agent.subagent import (
     SUBAGENT_STEER_MAX_CHARS,
     SUBAGENT_THINKING_LEVELS,
     SubAgentConfig,
-    allowed_subagent_tools,
     SubAgentEngine,
-    subagent_system_prompt,
-    normalize_subagent_thinking,
+    allowed_subagent_tools,
     deliver_subagent_report,
-)
-from autotrade.agent import subagent as subagent_module
-from autotrade.agent.prompts import (
-    SESSION_WORKFLOW_SECTION,
-    TOOL_PATH_CHEAT_SHEET,
-    TOOL_WRITE_CHEAT_SHEET,
-    build_system_prompt,
-)
-from autotrade.environment.tools.base import SessionInterrupt
-from autotrade.agent.runner import (
-    SUBAGENT_TEARDOWN_WAIT_SECONDS,
-    AgentSessionConfig,
-    AgentSessionBudgetExhausted,
-    AgentSessionRunner,
+    normalize_subagent_thinking,
+    subagent_system_prompt,
 )
 from autotrade.environment.llm import (
     ChatMessage,
@@ -52,6 +51,7 @@ from autotrade.environment.llm import (
     ScriptedLLM,
     ToolCall,
 )
+from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.environment.tools import (
     CommandResult,
     EditFileTool,
@@ -67,7 +67,7 @@ from autotrade.environment.tools import (
     ToolSpec,
     WriteFileTool,
 )
-from autotrade.environment.time_budget import InferenceTimeBudget
+from autotrade.environment.tools.base import SessionInterrupt
 from autotrade.pipelines.local_backend import (
     SessionBudgetLLM,
     SessionCallBudget,
@@ -3002,7 +3002,10 @@ def test_child_gets_the_parents_single_post_provider_overflow_recovery() -> None
 
 
 def test_child_turns_default_to_48_with_grace_wrap_up() -> None:
-    from autotrade.agent.subagent import DEFAULT_SUBAGENT_MAX_ROUNDS, SUBAGENT_GRACE_ROUNDS
+    from autotrade.agent.subagent import (
+        DEFAULT_SUBAGENT_MAX_ROUNDS,
+        SUBAGENT_GRACE_ROUNDS,
+    )
 
     assert DEFAULT_SUBAGENT_MAX_ROUNDS == 48 and SUBAGENT_GRACE_ROUNDS == 2
     assert SubAgentConfig().max_rounds == 48
@@ -3966,7 +3969,10 @@ def test_long_child_report_is_clipped_inline_and_spilled_for_read_back(tmp_path:
 
 
 def test_short_child_report_is_delivered_whole_and_no_store_is_explicit() -> None:
-    from autotrade.agent.subagent import SUBAGENT_REPORT_MAX_CHARS, deliver_subagent_report
+    from autotrade.agent.subagent import (
+        SUBAGENT_REPORT_MAX_CHARS,
+        deliver_subagent_report,
+    )
 
     assert ToolRegistry([DeclaredReadOnlyShell()]).result_store() is None
     whole = deliver_subagent_report("短汇报", None)

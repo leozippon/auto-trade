@@ -767,9 +767,7 @@ def model_artifact_delta(parent_root: str | Path, work_root: str | Path) -> Mode
     work_files = _model_artifact_files(work_root, missing_ok=True)
     changed: list[str] = []
     for relpath in sorted(parent_files | work_files):
-        if relpath not in parent_files or relpath not in work_files:
-            changed.append(relpath)
-        elif not _files_equal(parent_root / relpath, work_root / relpath):
+        if relpath not in parent_files or relpath not in work_files or not _files_equal(parent_root / relpath, work_root / relpath):
             changed.append(relpath)
     return ModelArtifactDelta(
         changed_files=tuple(changed),

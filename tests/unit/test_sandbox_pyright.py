@@ -6,8 +6,8 @@ import json
 import re
 from pathlib import Path
 
-from autotrade.agent.subagent import subagent_system_prompt
 from autotrade.agent.prompts import build_system_prompt
+from autotrade.agent.subagent import subagent_system_prompt
 
 REPO = Path(__file__).resolve().parents[2]
 DOCKERFILE = REPO / "ops/docker/sandbox.Dockerfile"

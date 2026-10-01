@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import unittest
 
-from autotrade.environment.tools.skills_policy import strict_transferable_content_violation
+from autotrade.environment.tools.skills_policy import (
+    strict_transferable_content_violation,
+)
 
 
 class ForwardFigureLeakTest(unittest.TestCase):

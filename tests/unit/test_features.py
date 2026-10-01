@@ -9,20 +9,20 @@ from pathlib import Path
 
 import pandas as pd
 
-from autotrade.environment.data import PITDataStore
 from autotrade.environment.data import (
     FundamentalEventsBuilder,
     FundamentalEventsConfig,
+    PITDataStore,
     audit_fundamental_events,
     month_aligned_replace_window,
 )
-from autotrade.environment.data.fundamental_events import read_fundamental_events
 from autotrade.environment.data.auction import (
     AuctionCorrectionConfig,
     apply_open_auction_correction,
     is_open_auction_time,
     market_bucket,
 )
+from autotrade.environment.data.fundamental_events import read_fundamental_events
 from autotrade.environment.data.pit import CorruptSidecarError, to_cn_timestamps
 
 
@@ -961,7 +961,10 @@ class UnitRegistryProjectionTest(unittest.TestCase):
             self.assertNotIn(tmp, str(ctx.exception))
 
     def test_unresolved_column_fails_fast_with_full_listing(self):
-        from autotrade.environment.data.units import UnresolvedUnitError, build_unit_reference
+        from autotrade.environment.data.units import (
+            UnresolvedUnitError,
+            build_unit_reference,
+        )
 
         with self.assertRaises(UnresolvedUnitError) as ctx:
             build_unit_reference({("events.parquet", "margin"): ["rzye", "made_up_a", "made_up_b"]})

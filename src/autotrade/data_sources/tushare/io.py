@@ -6,7 +6,7 @@ import json
 import os
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from fcntl import LOCK_EX, LOCK_NB, LOCK_SH, LOCK_UN, flock
 from pathlib import Path
 from typing import Any
@@ -16,8 +16,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 # The sidecar read contract is owned by the environment's PIT layer.
-from autotrade.environment.data.pit import CorruptSidecarError, concat_rows, parquet_meta
-
+from autotrade.environment.data.pit import (
+    CorruptSidecarError,
+    concat_rows,
+    parquet_meta,
+)
 
 _unique_jsonl_lock = threading.Lock()
 _unique_jsonl_state: dict[tuple[Path, str], tuple[int, int, int, set[str]]] = {}
@@ -102,12 +105,12 @@ def write_parquet(
     table = table.replace_schema_metadata(schema_metadata)
     tmp = path.with_name(f".{path.name}.{write_id}.tmp")
     pq.write_table(table, tmp)
-    fetched_at = datetime.now(timezone.utc).isoformat()
+    fetched_at = datetime.now(UTC).isoformat()
     meta = {
         "api_name": api_name,
         "params": dict(params),
         "fields": list(fields),
-        "row_count": int(len(df)),
+        "row_count": len(df),
         "write_id": write_id,
         "fetched_at": fetched_at,
         "format": "parquet",
@@ -129,7 +132,7 @@ def write_parquet(
             {
                 "available_at": fetched_at,
                 "rule": "observed:content_revision_fetch",
-                "row_count": int(len(df)),
+                "row_count": len(df),
             }
         )
         meta["availability"] = revised

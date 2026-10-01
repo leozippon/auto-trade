@@ -8,11 +8,11 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from autotrade.environment.runtime import redact_host_paths
 from autotrade.environment.time_budget import (
     SessionTimeBudgetAware,
     TimeBudgetBinding,
 )
-from autotrade.environment.runtime import redact_host_paths
 
 
 class SessionInterrupt(Exception):

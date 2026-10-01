@@ -82,7 +82,7 @@ class NLConfig:
         ):
             raise ValueError("max_total_calls must be a positive integer or None")
 
-    def for_replay(self, trading_days: int) -> "NLConfig":
+    def for_replay(self, trading_days: int) -> NLConfig:
         """Bind the total-call ceiling to the length of the replay about to run.
 
         A configured ``max_total_calls`` is kept as the operator's own ceiling.
@@ -373,7 +373,7 @@ class NLService:
 
     def _validate_request(
         self, request: Mapping[str, object]
-    ) -> tuple[str, NLMode, int, str, tuple[str, ...], "_EventFilter | None"]:
+    ) -> tuple[str, NLMode, int, str, tuple[str, ...], _EventFilter | None]:
         if not isinstance(request, Mapping):
             raise TypeError("NL request must be an object")
         unknown = sorted(
@@ -496,7 +496,7 @@ class NLService:
         ).to_record()
 
 
-def _parse_event_filter(raw: object, *, ts_code: str) -> "_EventFilter | None":
+def _parse_event_filter(raw: object, *, ts_code: str) -> _EventFilter | None:
     """The strategy's declared evidence-validity predicate for this call."""
     if raw is None:
         return None

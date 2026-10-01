@@ -40,9 +40,13 @@ from .step_rollback import StepRollbackTool
 from .workspace import SafeWorkspace
 
 __all__ = [
+    "SEARCH_ROOTS",
+    "SEQUENTIAL_TOOL_NAMES",
+    "TRACE_ROOT",
     "CommandResult",
     "CommandRunner",
     "CompactTool",
+    "DeleteSkillTool",
     "EditFileTool",
     "FinishSessionTool",
     "GlobTool",
@@ -50,9 +54,6 @@ __all__ = [
     "ModificationCheckTool",
     "ReadFileTool",
     "ReportIssueTool",
-    "SEARCH_ROOTS",
-    "SEQUENTIAL_TOOL_NAMES",
-    "TRACE_ROOT",
     "SafeWorkspace",
     "SandboxShellTool",
     "SearchRoots",
@@ -68,7 +69,6 @@ __all__ = [
     "ToolSpec",
     "WriteFileTool",
     "WriteSkillTool",
-    "DeleteSkillTool",
     "is_sequential_tool",
     "trace_read_stub",
 ]

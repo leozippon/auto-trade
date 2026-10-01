@@ -667,7 +667,7 @@ class SnapshotBuilder:
             started = time.perf_counter()
             daily, meta = self._build_daily(decision_time, daily_window_start)
             daily = self._apply_screen(daily, screened)
-            meta = {**meta, "rows": int(len(daily))}
+            meta = {**meta, "rows": len(daily)}
             profile = _write_with_profile(
                 output_dir / "daily.parquet", daily, build_seconds=time.perf_counter() - started
             )
@@ -679,7 +679,7 @@ class SnapshotBuilder:
                 daily_meta = completed["daily"][0]
                 intraday, meta = self._build_intraday(decision_time, daily_meta["trade_dates"], config)
                 intraday = self._apply_screen(intraday, screened)
-                meta = {**meta, "rows": int(len(intraday))}
+                meta = {**meta, "rows": len(intraday)}
             else:
                 intraday, meta = pd.DataFrame(), {"rows": 0, "datasets": [], "skipped": True}
             profile = _write_with_profile(
@@ -696,7 +696,7 @@ class SnapshotBuilder:
             if not auction.empty:
                 available_at = to_cn_timestamps(auction["available_at"])
                 auction = auction[available_at <= decision_time].reset_index(drop=True)
-                meta = {**meta, "rows": int(len(auction))}
+                meta = {**meta, "rows": len(auction)}
             profile = _write_with_profile(
                 output_dir / "auction.parquet", auction, build_seconds=time.perf_counter() - started
             )
@@ -729,7 +729,7 @@ class SnapshotBuilder:
                 build_seconds=time.perf_counter() - started,
             )
             meta: dict[str, object] = {
-                "rows": int(len(fundamentals)),
+                "rows": len(fundamentals),
                 "datasets": list(config.fundamental_datasets),
                 "units": "source",
                 "dataset_columns": dataset_columns,
@@ -746,7 +746,7 @@ class SnapshotBuilder:
                 events_window_start,
                 screen=screened,
             )
-            meta = {**meta, "rows": int(len(events))}
+            meta = {**meta, "rows": len(events)}
             profile = _write_with_profile(
                 output_dir / "events.parquet", events, build_seconds=time.perf_counter() - started
             )
@@ -777,7 +777,7 @@ class SnapshotBuilder:
             profile = _write_with_profile(
                 output_dir / "universe.parquet", universe, build_seconds=time.perf_counter() - started
             )
-            return {"rows": int(len(universe))}, profile
+            return {"rows": len(universe)}, profile
 
         # Ready tasks occupy worker slots in list order: text/macro before auction.
         tasks: list[DomainBuildTask] = [
@@ -1066,7 +1066,7 @@ class SnapshotBuilder:
             profile = _write_with_profile(
                 output_dir / "daily.parquet", daily, build_seconds=time.perf_counter() - started
             )
-            return {"rows": int(len(daily)), "unit_conversions": conversions}, profile
+            return {"rows": len(daily), "unit_conversions": conversions}, profile
 
         def build_macro(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
             started = time.perf_counter()
@@ -1108,7 +1108,7 @@ class SnapshotBuilder:
                 output_dir / "fundamentals.parquet", fundamentals, build_seconds=time.perf_counter() - started
             )
             meta: dict[str, object] = {
-                "rows": int(len(fundamentals)),
+                "rows": len(fundamentals),
                 "datasets": list(config.fundamental_datasets),
                 "dataset_columns": dataset_columns,
             }
@@ -1121,7 +1121,7 @@ class SnapshotBuilder:
             events, meta = self._build_available_at_domain(
                 config.events_datasets, period_end, window_floor, screen=screened
             )
-            meta = {**meta, "rows": int(len(events))}
+            meta = {**meta, "rows": len(events)}
             profile = _write_with_profile(
                 output_dir / "events.parquet", events, build_seconds=time.perf_counter() - started
             )
@@ -1156,7 +1156,7 @@ class SnapshotBuilder:
             started = time.perf_counter()
             auction, meta = self._build_auction(start_key, end_key)
             auction = self._apply_screen(auction, screened)
-            meta = {**meta, "rows": int(len(auction))}
+            meta = {**meta, "rows": len(auction)}
             profile = _write_with_profile(
                 output_dir / "auction.parquet", auction, build_seconds=time.perf_counter() - started
             )
@@ -1331,7 +1331,7 @@ class SnapshotBuilder:
             auction = auction.sort_values(["trade_date", "session", "ts_code"]).reset_index(drop=True)
         auction, conversions = normalize_auction_units(auction)
         metadata: dict[str, object] = {
-            "rows": int(len(auction)),
+            "rows": len(auction),
             "datasets": ["stk_auction"],
             "units": "unit_contract",
             "unit_conversions": conversions,
@@ -1444,7 +1444,7 @@ class SnapshotBuilder:
             )
             .sort_values(["ex_date", "ts_code"], ignore_index=True)
         )
-        meta["rows"] = int(len(out))
+        meta["rows"] = len(out)
         return out[list(self._CORPORATE_ACTION_COLUMNS)], meta
 
     def _minute_partition_paths(self, start_key: str, end_key: str) -> list[Path]:
@@ -1595,7 +1595,7 @@ class SnapshotBuilder:
         frame = self._daily_join(visible_dates[0], visible_dates[-1], visible_dates_by_dataset=visible_by_dataset)
         frame, conversions = normalize_daily_units(frame)
         meta = {
-            "rows": int(len(frame)),
+            "rows": len(frame),
             "datasets": list(daily_datasets),
             "coverage_start": visible_dates[0],
             "coverage_end": visible_dates[-1],
@@ -1692,7 +1692,7 @@ class SnapshotBuilder:
             minute = minute.drop(columns=["available_at", "available_at_rule"], errors="ignore")
         correction = AuctionCorrectionConfig()
         meta = {
-            "rows": int(len(minute)),
+            "rows": len(minute),
             "datasets": ["stk_mins_1min_by_date"],
             "trade_dates": recent,
             "availability_rule": "available_at=bar close time (trade_time)",
@@ -1814,7 +1814,7 @@ class SnapshotBuilder:
                 "duplicate_count": duplicate_count,
                 "profile": {
                     **read_profile,
-                    "rows_output": int(len(rows)),
+                    "rows_output": len(rows),
                     "duplicate_rows_dropped": duplicate_count,
                     "screen_rows_dropped": int(rows_before_screen - len(rows)),
                     "total_seconds": round(time.perf_counter() - dataset_started, 3),
@@ -1869,7 +1869,7 @@ class SnapshotBuilder:
         # the daily-domain unit contract does NOT extend to same-named fields
         # here (env docs §1.4; raw unit table in data docs §1.2).
         meta = {
-            "rows": int(len(merged)),
+            "rows": len(merged),
             "datasets": list(datasets),
             "units": "source",
             "availability_rules": rules,
@@ -1949,7 +1949,7 @@ class SnapshotBuilder:
         return merged, {
             "partition_files": len(paths),
             "source_rows": int(sum(source_rows for _, _, source_rows in results)),
-            "rows_after_visibility": int(len(merged)),
+            "rows_after_visibility": len(merged),
             "phases": {
                 "discover_seconds": round(discover_seconds, 3),
                 "read_filter_seconds": round(read_filter_seconds, 3),
@@ -2058,7 +2058,7 @@ class SnapshotBuilder:
         index = pd.concat(index_frames, ignore_index=True) if index_frames else pd.DataFrame(
             columns=["text_id", "dataset", "ts_codes", "title", "available_at", "library_file"]
         )
-        meta = {"rows": int(len(index)), "datasets": list(config.text_datasets), "library_dir": "text_library"}
+        meta = {"rows": len(index), "datasets": list(config.text_datasets), "library_dir": "text_library"}
         return index, meta
 
     _BOARD_PREFIXES = {
@@ -2488,9 +2488,9 @@ def _frame_profile(
 ) -> dict[str, object]:
     profile: dict[str, object] = {
         "file": path.name,
-        "rows": int(len(frame)),
+        "rows": len(frame),
         "size_bytes": int(path.stat().st_size) if path.exists() else 0,
-        "column_count": int(len(frame.columns)),
+        "column_count": len(frame.columns),
         "columns": [str(col) for col in frame.columns],
         "build_seconds": round(float(build_seconds), 3),
         "write_seconds": round(float(write_seconds), 3),

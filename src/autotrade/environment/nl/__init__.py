@@ -1,7 +1,12 @@
 """Point-in-time local natural-language evidence service."""
 
 from .context import CompanyContextStore
-from .engine import NLSubAgentConfig, NLSubAgentEngine, NLSubAgentResult, TextRetrieveTool
+from .engine import (
+    NLSubAgentConfig,
+    NLSubAgentEngine,
+    NLSubAgentResult,
+    TextRetrieveTool,
+)
 from .retrieval import TextRetriever
 from .service import NLConfig, NLMode, NLResult, NLService
 

@@ -14,20 +14,31 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import pyarrow.parquet as pq
 
+from autotrade.data_quality import build_quality_report, write_quality_report
+from autotrade.environment.data.auction import AuctionCorrectionConfig, market_bucket
+from autotrade.environment.data.snapshot import SELECTABLE_DATASETS
+from autotrade.environment.data.units import (
+    UnresolvedUnitError,
+    column_source_units,
+    dataset_rules_records,
+    resolve_field,
+    rules_for,
+)
+
 from . import common as core
 from .common import (
     BAK_BASIC_SPEC,
-    CORE_MARKET_STATUS_PATH,
-    FUNDAMENTAL_RAW_STATUS_PATH,
     BOARD_TRADING_DATASETS,
     BOARD_TRADING_SPECS,
     BOARD_TRADING_STATUS_PATH,
+    CORE_MARKET_STATUS_PATH,
     DAILY_REQUIRED_DATASETS,
     DAILY_SPECS,
     DEFAULT_CN_INDEX_CODES,
     EVENT_FLOW_SPECS,
     EVENT_FLOW_STATUS_PATH,
     FUNDAMENTAL_DATASETS,
+    FUNDAMENTAL_RAW_STATUS_PATH,
     FUNDAMENTAL_SPECS,
     INTEGRATED_DOC_REFS,
     INTRADAY_MINUTES_STATUS_PATH,
@@ -92,9 +103,9 @@ from .common import (
     selected_daily_datasets,
     selected_eco_filter_values,
     selected_event_flow_datasets,
+    selected_fundamental_datasets,
     selected_fx_codes,
     selected_index_codes,
-    selected_fundamental_datasets,
     selected_intraday_datasets,
     selected_news_sources,
     selected_text_datasets,
@@ -102,17 +113,6 @@ from .common import (
     validate_stk_mins_by_date_frame,
     yyyymmdd_to_month,
     yyyymmdd_to_quarter,
-)
-
-from autotrade.data_quality import build_quality_report, write_quality_report
-from autotrade.environment.data.auction import AuctionCorrectionConfig, market_bucket
-from autotrade.environment.data.snapshot import SELECTABLE_DATASETS
-from autotrade.environment.data.units import (
-    UnresolvedUnitError,
-    column_source_units,
-    dataset_rules_records,
-    resolve_field,
-    rules_for,
 )
 
 # The one-line summary every audit prints last, and the pattern the cron runner
@@ -526,7 +526,7 @@ def grouped_ratio_stats(df: pd.DataFrame, columns: list[str]) -> dict[str, dict[
         return {}
     result: dict[str, dict[str, float | int | None]] = {}
     for bucket, group in df.groupby("bucket", dropna=False):
-        item: dict[str, float | int | None] = {"rows": int(len(group))}
+        item: dict[str, float | int | None] = {"rows": len(group)}
         for column in columns:
             values = pd.to_numeric(group[column], errors="coerce").dropna()
             if values.empty:
@@ -578,9 +578,9 @@ def audit_auction_alignment(args: argparse.Namespace) -> int:
         )
         auction_day_stats.append({
             "trade_date": trade_date,
-            "minute_open_rows": int(len(open_bar)),
-            "stk_auction_rows": int(len(auction)),
-            "matched_rows": int(len(merged)),
+            "minute_open_rows": len(open_bar),
+            "stk_auction_rows": len(auction),
+            "matched_rows": len(merged),
             "bucket_stats": grouped_ratio_stats(merged, ["vol_ratio", "amount_ratio", "vol_ratio_after_factor", "amount_ratio_after_factor"]),
         })
 
@@ -596,7 +596,7 @@ def audit_auction_alignment(args: argparse.Namespace) -> int:
         daily_merge["minute_to_daily_amount_ratio"] = numeric_ratio(daily_merge["amount_minute_sum"], daily_merge["amount_daily"])
         daily_day_stats.append({
             "trade_date": trade_date,
-            "matched_rows": int(len(daily_merge)),
+            "matched_rows": len(daily_merge),
             "bucket_stats": grouped_ratio_stats(daily_merge, ["minute_to_daily_vol_ratio", "minute_to_daily_amount_ratio"]),
         })
 
@@ -899,7 +899,7 @@ def audit_business_payload(files: list[Path], api_name: str, check_name: str, ad
     severity = "error" if hollow else "warning" if missing_fields else "info"
     add(severity, check_name, f"{api_name} business payload checks", {
         "checked_partition": str(path),
-        "rows": int(len(df)),
+        "rows": len(df),
         "business_columns": len(business),
         "all_null_business_columns": all_null[:20],
         "missing_expected_fields": missing_fields,
@@ -1441,12 +1441,12 @@ def audit_stock_universe_semantics(raw_dir: Path, all_codes: dict[str, set[str]]
     bse_basic_codes = set(stock_basic.loc[stock_basic["exchange"].astype(str) == "BSE", "ts_code"].astype(str)) if not stock_basic.empty else set()
     bj_daily_codes = {code for code in daily_codes if code.endswith(".BJ")}
     details = {
-        "stock_basic_rows": int(len(stock_basic)),
+        "stock_basic_rows": len(stock_basic),
         "stock_basic_unique_codes": len(basic_codes),
         "stock_basic_status_counts": json_count_dict(stock_basic["list_status"]) if not stock_basic.empty else {},
         "stock_basic_exchange_counts": json_count_dict(stock_basic["exchange"]) if not stock_basic.empty else {},
         "stock_basic_market_counts": json_count_dict(stock_basic["market"]) if not stock_basic.empty else {},
-        "stock_company_rows": int(len(stock_company)),
+        "stock_company_rows": len(stock_company),
         "stock_company_missing_stock_basic_codes": len(basic_codes - company_codes),
         "stock_company_extra_codes_vs_stock_basic": len(company_codes - basic_codes),
         "stock_company_missing_sample": sorted(basic_codes - company_codes)[:20],
@@ -2412,7 +2412,7 @@ def audit_share_float_complete_union(raw_dir: Path, add) -> None:
             physical = ["ts_code", "float_date", "holder_name", "share_type"]
             datings = frame.groupby(physical, sort=False)["ann_date"].nunique()
             multi = datings[datings > 1]
-            details["cross_ann_date_identity_groups"] = int(len(multi))
+            details["cross_ann_date_identity_groups"] = len(multi)
             if len(multi):
                 affected = frame.merge(multi.reset_index()[physical], on=physical, how="inner")
                 newest = affected.groupby(physical, sort=False)["ann_date"].transform("max")

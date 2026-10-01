@@ -12,7 +12,6 @@ from autotrade.agent import (
     ContextCompactor,
     SubAgentEngine,
 )
-from autotrade.agent import compact as compact_module
 from autotrade.agent.compact import (
     fit_tool_results_to_context,
     summarize_tool_result_for_context,
@@ -53,6 +52,7 @@ from autotrade.environment.tools import (
     WriteFileTool,
 )
 from autotrade.pipelines.local_backend import SessionBudgetLLM, SessionCallBudget
+
 
 def _passing_gate(node_id: str) -> dict[str, object]:
     """A freeze gate every node passes: these tests are about the Runner."""

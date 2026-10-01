@@ -808,7 +808,7 @@ def _apply_paging(
 
 
 def _clean_rg_lines(lines: list[str]) -> list[str]:
-    return [line[2:] if line.startswith("./") else line for line in lines]
+    return [line.removeprefix("./") for line in lines]
 
 
 # ``rg: <path>: <reason> (os error N)`` is ripgrep's per-path I/O failure. The
@@ -990,9 +990,9 @@ def _has_hidden_part(path: Path, root: Path) -> bool:
 
 
 __all__ = [
+    "SEARCH_ROOTS",
     "GlobTool",
     "GrepTool",
     "ReadFileTool",
-    "SEARCH_ROOTS",
     "SearchRoots",
 ]

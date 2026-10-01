@@ -9,7 +9,8 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from autotrade.data_sources.tushare import audit, common as core
+from autotrade.data_sources.tushare import audit
+from autotrade.data_sources.tushare import common as core
 
 
 def limit_list_frame(rows):
@@ -43,7 +44,7 @@ class LimitListAvailableAtStampTest(unittest.TestCase):
                 names = fields.split(",") if fields else []
                 values = {"trade_date": (params or {}).get("trade_date", ""), "ts_code": "000001.SZ",
                           "close": 10.0, "limit": "U"}
-                return core.ApiResult(names, [[values.get(name, None) for name in names]])
+                return core.ApiResult(names, [[values.get(name) for name in names]])
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -54,7 +55,7 @@ class LimitListAvailableAtStampTest(unittest.TestCase):
             spec = core.BOARD_TRADING_SPECS["limit_list_d"]
             stamped = core.augment_board_frame(
                 pd.DataFrame([{name: {"trade_date": "20200102", "ts_code": "000001.SZ", "close": 10.0,
-                                      "limit": "U"}.get(name, None) for name in spec.fields.split(",")}]),
+                                      "limit": "U"}.get(name) for name in spec.fields.split(",")}]),
                 spec,
                 {"trade_date": "20200102"},
             )

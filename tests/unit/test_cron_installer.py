@@ -6,7 +6,6 @@ import unittest
 from pathlib import Path
 from stat import S_IMODE
 
-
 SCRIPT = Path(__file__).resolve().parents[2] / "ops" / "cron" / "install_tushare_cron.py"
 SPEC = importlib.util.spec_from_file_location("install_tushare_cron", SCRIPT)
 if SPEC is None or SPEC.loader is None:

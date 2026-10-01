@@ -7,18 +7,23 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from autotrade.agent.subagent import SubAgentEngine
 from autotrade.agent.runner import (
-    AgentSessionConfig,
-    AgentSessionRunner,
     INBOX_SAFE_AFTER_LLM_BEFORE_TOOLS,
     INBOX_SAFE_AFTER_PARALLEL_READONLY,
     INBOX_SAFE_AFTER_TOOLS_BEFORE_LLM,
     INBOX_SAFE_BEFORE_LLM,
     INBOX_SAFE_BETWEEN_SERIAL_TOOLS,
+    AgentSessionConfig,
+    AgentSessionRunner,
 )
+from autotrade.agent.subagent import SubAgentEngine
 from autotrade.environment.artifacts import new_revision_id
-from autotrade.environment.llm import ChatMessage, ProviderResponse, ScriptedLLM, ToolCall
+from autotrade.environment.llm import (
+    ChatMessage,
+    ProviderResponse,
+    ScriptedLLM,
+    ToolCall,
+)
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools import (
     FinishSessionTool,

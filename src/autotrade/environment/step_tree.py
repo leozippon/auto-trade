@@ -27,7 +27,12 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
 from autotrade.environment.artifacts import copy_artifact, copy_model_artifacts
-from autotrade.environment.runtime import chmod_tree, sanitize_for_log, utc_now_iso, write_json_atomic
+from autotrade.environment.runtime import (
+    chmod_tree,
+    sanitize_for_log,
+    utc_now_iso,
+    write_json_atomic,
+)
 
 TREE_FILE = "tree.json"
 # Node subdirectories reserved for the snapshot itself; attachments must not

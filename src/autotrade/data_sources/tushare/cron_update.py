@@ -13,7 +13,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -32,7 +32,6 @@ from .common import (
     read_many,
 )
 from .io import UPDATER_LOCK_FD_ENV
-
 
 DEFAULT_CONFIG = Path("configs/tushare_update_schedule.json")
 RUNTIME_ROOT = Path(".runtime/tushare")
@@ -582,12 +581,12 @@ def acquire_lock(lock_name: str, wait_seconds: int) -> FileLock:
                 ) from None
             time.sleep(min(15.0, remaining))
     os.ftruncate(fd, 0)
-    os.write(fd, f"pid={os.getpid()}\nstarted_at={utc_now()}\n".encode("utf-8"))
+    os.write(fd, f"pid={os.getpid()}\nstarted_at={utc_now()}\n".encode())
     return FileLock(lock, fd)
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def _read_raw_generation_file(raw_dir: Path) -> dict:

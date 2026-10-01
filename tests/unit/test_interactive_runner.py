@@ -29,9 +29,11 @@ from autotrade.pipelines.hitl_state import (
     read_status,
     write_control,
 )
-from autotrade.pipelines.interactive import ExperimentStopped, InteractiveExperimentRunner
+from autotrade.pipelines.interactive import (
+    ExperimentStopped,
+    InteractiveExperimentRunner,
+)
 from autotrade.pipelines.ledger import ExperimentLedger, FrozenArtifactMutated
-
 
 # The plan of record of every arm: the research session, then the forward replay.
 PLAN = planned_sessions()

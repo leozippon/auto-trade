@@ -2,20 +2,23 @@
 """Shared TuShare constants, schemas, client, and utility helpers."""
 
 from __future__ import annotations
+
 import argparse
-from bisect import bisect_right
 import calendar
 import json
 import os
 import re
 import time
 import uuid
+from bisect import bisect_right
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any
 from urllib.parse import quote
+
 import numpy as np
 import pandas as pd
 
@@ -30,10 +33,19 @@ from autotrade.environment.data.contracts import (  # noqa: F401
     STK_AUCTION_PRICE_ABS_TOLERANCE,
 )
 
-from .io import CorruptSidecarError, append_jsonl_unique, frames_content_equal, migrate_partition_identity, parquet_meta, parquet_rows, read_many, write_parquet
-from .io import committed_partition_intact  # noqa: F401 -- re-exported via this hub
-from .io import has_pagination_probe, inherited_updater_lock_fd  # noqa: F401 -- re-exported via this hub (audit.py imports has_pagination_probe, download.py imports inherited_updater_lock_fd from common)
-
+from .io import (  # noqa: F401 -- re-exported via this hub (audit.py imports has_pagination_probe, download.py imports inherited_updater_lock_fd from common)
+    CorruptSidecarError,
+    append_jsonl_unique,
+    committed_partition_intact,
+    frames_content_equal,
+    has_pagination_probe,
+    inherited_updater_lock_fd,
+    migrate_partition_identity,
+    parquet_meta,
+    parquet_rows,
+    read_many,
+    write_parquet,
+)
 
 DEFAULT_TUSHARE_RELAY_URL = "https://fast.xiaodefa.cn"
 
@@ -1671,8 +1683,8 @@ def compare_keyed_frames(old_df: pd.DataFrame, new_df: pd.DataFrame, key_columns
     schema_changed = old_columns != new_columns
     base: dict[str, Any] = {
         "key_columns": keys,
-        "old_rows": int(len(old_df)),
-        "new_rows": int(len(new_df)),
+        "old_rows": len(old_df),
+        "new_rows": len(new_df),
         "old_columns": old_columns,
         "new_columns": new_columns,
         "schema_changed": schema_changed,
@@ -1862,7 +1874,7 @@ def build_revision_event(
     )
     event = {
         "schema_version": REVISION_EVENT_SCHEMA_VERSION,
-        "detected_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "detected_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "source": source,
         "dataset": dataset,
         "partition": partition,
@@ -1979,8 +1991,8 @@ def write_parquet_revision_aware(
         if event and revision_comparison_old_df is not None:
             # The event diff is restricted to a caller-proven affected slice,
             # while partition row counts continue to describe the durable file.
-            event["old_rows"] = int(len(old_df))
-            event["new_rows"] = int(len(df))
+            event["old_rows"] = len(old_df)
+            event["new_rows"] = len(df)
         # A re-pull that DROPS existing keys is destructive (the ann_month
         # truncated-window class silently deleted announcements). Blocked by
         # default; accepting a genuine source retraction means deleting the
@@ -2050,9 +2062,9 @@ def write_parquet_revision_aware(
         metadata["availability"] = dict(previous_availability)
         if event:
             metadata["availability"].update(
-                available_at=datetime.now(timezone.utc).isoformat(),
+                available_at=datetime.now(UTC).isoformat(),
                 rule="observed:source_revision_fetch",
-                row_count=int(len(df)),
+                row_count=len(df),
             )
     commit = write_parquet(
         path,
@@ -2812,7 +2824,7 @@ def normalize_stk_mins_by_date_frame(df: pd.DataFrame, trade_date: str) -> tuple
 
 def intraday_day_time_details(df: pd.DataFrame) -> dict[str, Any]:
     if df.empty or "trade_time" not in df.columns:
-        return {"unique_times": 0, "has_0930": False, "has_1500": False, "invalid_time_rows": int(len(df))}
+        return {"unique_times": 0, "has_0930": False, "has_1500": False, "invalid_time_rows": len(df)}
     time_hhmm = df["trade_time"].astype(str).str.extract(r"(\d{2}:\d{2})", expand=False)
     valid = (
         (time_hhmm == "09:30")
@@ -2838,7 +2850,7 @@ def validate_stk_mins_by_date_frame(
     missing_columns = sorted(set(STK_MINS_REQUIRED_COLUMNS) - set(df.columns))
     details: dict[str, Any] = {
         "trade_date": trade_date,
-        "rows": int(len(df)),
+        "rows": len(df),
         "unique_codes": int(df["ts_code"].nunique()) if "ts_code" in df.columns else 0,
         "missing_columns": missing_columns,
         "duplicate_key_rows": 0,

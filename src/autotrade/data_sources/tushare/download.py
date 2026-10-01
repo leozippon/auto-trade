@@ -10,7 +10,7 @@ import math
 import os
 import re
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -19,9 +19,10 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
+from autotrade.environment.data.pit import concat_rows
+
 from . import common as core
 from .common import (
-    ApiResult,
     BAK_BASIC_SPEC,
     BOARD_TRADING_SPECS,
     DAILY_SPECS,
@@ -35,6 +36,7 @@ from .common import (
     MUTATED_NOT_READY_RETRY_EXIT_CODE,
     NO_MUTATION_RETRY_EXIT_CODE,
     PHYSICAL_IDENTITY_COLUMNS,
+    REFERENCE_PAGE_LIMIT,
     RESEARCH_HISTORY_FLOOR,
     REVISION_EVENTS_PATH,
     SHARE_FLOAT_FIELDS,
@@ -47,14 +49,13 @@ from .common import (
     STK_MINS_DATASET,
     STK_MINS_FIELDS,
     STK_MINS_FREQ,
-    REFERENCE_PAGE_LIMIT,
-    committed_partition_intact,
     STK_MINS_PAGE_LIMIT,
     STK_MINS_QUOTA_MARKER,
     STK_MINS_REQUIRED_COLUMNS,
     TEXT_FETCHABLE_DATASETS,
     TEXT_SPECS,
     TRADE_DATE_PAGE_LIMIT,
+    ApiResult,
     BlockedOverwriteError,
     BoardTradingDataset,
     EventDataset,
@@ -69,10 +70,12 @@ from .common import (
     augment_macro_frame,
     augment_stk_mins_frame,
     augment_text_frame,
+    committed_partition_intact,
     date_range_days,
     format_yyyymmdd,
     frame,
     history_floor,
+    inherited_updater_lock_fd,
     intraday_expected_codes_for_day,
     latest_sse_calendar_date,
     load_minute_universe,
@@ -115,19 +118,17 @@ from .common import (
     selected_news_sources,
     selected_text_datasets,
     spec_page_limit,
-    inherited_updater_lock_fd,
     stk_mins_by_date_path,
+    undated_duplicate_mask,
     validate_stk_mins_by_date_frame,
     write_board_result,
     write_macro_result,
     write_parquet,
-    undated_duplicate_mask,
     write_parquet_revision_aware,
     yyyymmdd_to_month,
     yyyymmdd_to_quarter,
 )
 
-from autotrade.environment.data.pit import concat_rows
 
 def write_reference_query_result(
     path: Path,
@@ -699,14 +700,14 @@ def _publish_auction_frame(
     # source response that only reorders rows must remain byte-identical and
     # keep the first observed availability instead of looking like a revision.
     captured = captured.sort_values(["trade_date", "ts_code"], kind="stable").reset_index(drop=True)
-    landed_at = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai")).isoformat()
+    landed_at = datetime.now(UTC).astimezone(ZoneInfo("Asia/Shanghai")).isoformat()
     path = raw_dir / "stk_auction" / f"trade_date={trade_date}.parquet"
     availability = {
         "matched_at": f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}T09:25:00+08:00",
         "available_at": landed_at,
         "rule": "observed:cn_open_auction_capture",
         "landing_job": landing_job,
-        "row_count": int(len(captured)),
+        "row_count": len(captured),
     }
     revision_ledger = resolve_revision_ledger(raw_dir, revision_ledger_arg, repo_root=repo_root)
     spec = DAILY_SPECS["stk_auction"]
@@ -897,7 +898,7 @@ def _recheck_stk_auction_day(args: argparse.Namespace, repo_root: Path, raw_dir:
         # availability and the original file untouched. A torn pair is rewritten
         # even when the payload matches, so the commit identity can self-heal.
         print(json.dumps({
-            **outcome, "status": "recheck_unchanged", "rows": int(len(candidate)),
+            **outcome, "status": "recheck_unchanged", "rows": len(candidate),
         }, ensure_ascii=False, sort_keys=True))
         return 0
     try:
@@ -930,7 +931,7 @@ def _recheck_stk_auction_day(args: argparse.Namespace, repo_root: Path, raw_dir:
         **outcome,
         "status": "recheck_published",
         "revised_existing": existed,
-        "rows": int(len(candidate)),
+        "rows": len(candidate),
         "available_at": landed_at,
     }, ensure_ascii=False, sort_keys=True))
     return 0
@@ -2464,7 +2465,7 @@ def download_share_float_complete(args: argparse.Namespace) -> int:
     args.revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
     report: dict[str, Any] = {
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
         "raw_dir": str(raw_dir),
         "row_limit": SHARE_FLOAT_ROW_LIMIT,
         "scope": {
@@ -3087,7 +3088,7 @@ def update_intraday_by_date(args: argparse.Namespace) -> int:
             ok, _ = validate_stk_mins_by_date_frame(
                 existing,
                 trade_date,
-                expected_codes=expected_codes if expected_codes else None,
+                expected_codes=expected_codes or None,
                 min_rows=args.min_rows_per_day,
                 allow_missing_codes=existing_allow_missing,
             )

@@ -13,9 +13,9 @@ import json
 import os
 import stat
 import uuid
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, Mapping
 
 AGENT_REF_SCHEMA_VERSION = 1
 AGENT_REF_PREFIXES: Mapping[str, str] = {
@@ -50,7 +50,7 @@ class AgentRefStore:
             self.initialize()
 
     @classmethod
-    def existing(cls, experiment_dir: str | Path) -> "AgentRefStore | None":
+    def existing(cls, experiment_dir: str | Path) -> AgentRefStore | None:
         """Return an existing store without creating one (trusted read paths)."""
         store = cls(experiment_dir, initialize=False)
         if not store.path.is_file():

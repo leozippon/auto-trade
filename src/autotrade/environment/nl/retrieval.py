@@ -300,7 +300,7 @@ class TextRetriever:
             evidence = tuple(self._evidence_records(selected))
         return CandidateEvidenceState(
             revision="rows:" + json.dumps(rows, ensure_ascii=False, separators=(",", ":")),
-            match_count=int(len(visible)),
+            match_count=len(visible),
             evidence=evidence,
         )
 

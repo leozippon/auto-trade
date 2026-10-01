@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
-
 # The null-control fields a tool result carries. ``rejects_mean`` rides along because a null whose orders are mostly rejected
 # is a weaker comparison, ``status``/``reason`` because a failed or unavailable
 # null (a result with no filled trade) must not read as a missing one, and the

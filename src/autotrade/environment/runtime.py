@@ -382,7 +382,7 @@ class RunManifest:
         initial: dict[str, object],
         *,
         ref_store: AgentRefStore,
-    ) -> "RunManifest":
+    ) -> RunManifest:
         path = Path(path)
         manifest = cls(
             path=path,

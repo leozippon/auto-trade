@@ -20,7 +20,13 @@ from autotrade.environment.runtime import (
     agent_transcript_dir,
     render_transcript_block,
 )
-from autotrade.environment.tools import GrepTool, ReadFileTool, SafeWorkspace, SearchRoots, ToolRegistry
+from autotrade.environment.tools import (
+    GrepTool,
+    ReadFileTool,
+    SafeWorkspace,
+    SearchRoots,
+    ToolRegistry,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 

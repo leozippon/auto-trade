@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Mapping
 
 from autotrade.environment.data.units import (
     AGENT_UNIT_CONTRACT,

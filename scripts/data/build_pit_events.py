@@ -122,7 +122,7 @@ def run_build_fundamental_events(args: argparse.Namespace) -> dict[str, object]:
         replace_datasets=tuple(args.dataset or FUNDAMENTAL_EVENT_DATASETS),
     )
     return {
-        "rows": int(len(events)),
+        "rows": len(events),
         "partitions": len(written),
         "output_dir": str(args.output_root),
         "first_partition": str(written[0]) if written else None,

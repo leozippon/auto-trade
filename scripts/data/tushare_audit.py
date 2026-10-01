@@ -16,6 +16,5 @@ add_repo_src(__file__)
 
 from autotrade.data_sources.tushare.audit import main
 
-
 if __name__ == "__main__":
     raise SystemExit(main())
