@@ -1508,7 +1508,11 @@ def _optional_workspace_reference(value: object, repo_root: Path) -> str:
     text = value.strip()
     if not text:
         return ""
-    # Config seed, not a data lake: existence is required even at create preflight.
+    # Config seed, not a data lake: existence is required even at create
+    # preflight, and its absence is a refused parameter like any other (the
+    # console and the round launcher report ValueError, not an OSError).
+    if not (repo_root / text).is_dir():
+        raise ValueError(f"workspace_reference {text} is not a directory in the repository")
     _repo_dir(repo_root, text, "workspace_reference")
     return text
 

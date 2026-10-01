@@ -122,7 +122,9 @@ class InstallWorkspaceReferenceTest(unittest.TestCase):
             repo = Path(tmp)
             self.assertEqual(_optional_workspace_reference("", repo), "")
             self.assertEqual(_optional_workspace_reference(None, repo), "")
-            with self.assertRaises(FileNotFoundError):
+            # A request parameter, refused as one: the console turns a
+            # ValueError into a 400 and the round launcher into a refusal line.
+            with self.assertRaisesRegex(ValueError, "workspace_reference missing_seed is not a directory"):
                 _optional_workspace_reference("missing_seed", repo)
             with self.assertRaisesRegex(ValueError, "must be a string"):
                 _optional_workspace_reference(["seed"], repo)
