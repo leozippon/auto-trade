@@ -1568,7 +1568,8 @@ class BatchSelectHintTest(unittest.TestCase):
         rows = [{"name": "a", "node_id": "n_a", "status": "ok", "stats": {}}]
         hint = batch_select_hint(rows, replay_years_remaining=0)
         self.assertIn("replay-year budget is spent", hint)
-        self.assertIn("write any skills and finish_session", hint)
+        self.assertIn("finish_session, with the arm's conclusion in its reason", hint)
+        self.assertNotIn("skill", hint)
 
 
 class BatchValidateContractTest(unittest.TestCase):

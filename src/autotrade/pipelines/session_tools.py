@@ -1853,7 +1853,7 @@ def batch_select_hint(
         return (
             f"{lead}read every row yourself (whole span AND sub_windows) — nothing "
             "is selected for you. The replay-year budget is spent, so no further "
-            "batch can run: write any skills and finish_session."
+            "batch can run: finish_session, with the arm's conclusion in its reason."
         )
     return (
         f"{lead}read every row yourself (whole span AND sub_windows) — nothing "

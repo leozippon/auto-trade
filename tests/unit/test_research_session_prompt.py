@@ -245,9 +245,17 @@ def test_the_prompt_states_the_research_session_contract() -> None:
         "不重复申报",
         "`selection_statistics.information_ratio_bar`",
         "一条臂至多冻结一次",
-        "`finish_session` 之后不能再写",
+        # The arm's conclusion is the finish reason, not a skill.
+        "本臂的结论与证据写进 `finish_session` 的 `reason`，不另写成 skill",
+        "结束不需要先写 skill",
     ):
         assert clause in contract, clause
+    # Round 20260927 wrote 296 skills, most re-deriving one data contract,
+    # because every finishing text asked for them first; none does now.
+    for surface in (prompt, prompts.SESSION_DEFAULT_INSTRUCTION, prompts.WRAP_UP_PROMPT):
+        assert "写好 skills" not in surface and "写进 skills" not in surface
+    feedback = prompt[prompt.index("# 反馈通道") : prompt.index("# Step 产物树")]
+    assert "只写挂载的运行记忆与数据引用里还没有的知识" in feedback
     assert "`continue`" not in contract and "PRIOR" not in prompt
     evidence = prompt[prompt.index("# 证据标准") : prompt.index("# 原则")]
     for clause in (
