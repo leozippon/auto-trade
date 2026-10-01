@@ -155,6 +155,10 @@ def test_an_arm_runs_research_freezes_once_and_replays_forward_and_heldout_in_on
     assert result["verdict"] == verdict
     assert result["final_strategy_artifact"] == frozen["artifact_id"]
     assert read_status(experiment / "hitl" / "status.json")["verdict"] == verdict
+    # The graduate opened its own Paper book on the frozen artifact.
+    assert (result["paper_book"], result.get("paper_book_error")) == (experiment.name, None)
+    book = json.loads((repo / "data/trading/paper" / experiment.name / "book.json").read_text(encoding="utf-8"))
+    assert book["artifact_id"] == frozen["artifact_id"]
     plan = json.loads((experiment / "hitl" / "schedule.json").read_text(encoding="utf-8"))
     assert [row["session_key"] for row in plan["sessions"]] == ["research", "forward"]
     assert plan["sessions"][-1]["replay"]["replay_end"] == RELEASE_END

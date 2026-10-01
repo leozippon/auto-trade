@@ -2006,6 +2006,36 @@ function heroPanel(item) {
   return panel;
 }
 
+function confirmDeleteBook(bookId) {
+  showModal(
+    "删除模拟账户",
+    el("p", {}, `此操作会永久删除模拟账户 ${bookId} 及其订单和缓存，不可恢复。`),
+    [
+      el("button", { class: "btn", onclick: closeModal }, "取消"),
+      el(
+        "button",
+        {
+          class: "btn danger",
+          onclick: async () => {
+            try {
+              await api(`/api/trading/${PAPER_ENV}/books/${encodeURIComponent(bookId)}`, {
+                method: "DELETE",
+              });
+              toast("已删除");
+              closeModal();
+              location.hash = "#/trading/paper";
+              renderTradingPage();
+            } catch (error) {
+              toast(error.message, true);
+            }
+          },
+        },
+        "删除",
+      ),
+    ],
+  );
+}
+
 function confirmDeleteExperiment(experimentId) {
   const input = el("input", { type: "text", placeholder: experimentId });
   showModal(
@@ -2893,33 +2923,55 @@ function verdictStagePanel(detail) {
 // The one trading environment with a backend (docs/deployment-documentation.md).
 const PAPER_ENV = "paper";
 
-/* The Paper handoff: a graduate's candidate artifact with the command that
-   opens its book, and the book itself once one exists. */
+/* The Paper handoff: a graduate's candidate, a button that opens its book,
+   and the book itself once one exists. Graduation opens the book on its own;
+   the button is the same action for a graduate that has none yet. */
 function paperHandoff(detail) {
   const candidate = detail.paper_candidate;
   if (!candidate) return null;
+  const button = el(
+    "button",
+    {
+      class: "btn",
+      onclick: async () => {
+        button.disabled = true;
+        try {
+          const opened = await api(`/api/trading/${PAPER_ENV}/books`, {
+            method: "POST",
+            body: JSON.stringify({ experiment_id: detail.experiment_id }),
+          });
+          toast("已建立模拟账户");
+          location.hash = bookHash(PAPER_ENV, opened.book_id);
+        } catch (error) {
+          button.disabled = false;
+          toast(error.message, true);
+        }
+      },
+    },
+    "建立模拟账户",
+  );
   const host = el(
     "div",
     { class: "section-gap" },
-    el("h4", { class: "subsection-title", title: "在仓库根目录运行；Paper 不会自动启动" }, "Paper 建账户"),
-    el("div", { class: "meta-line" }, `候选产物 ${candidate.artifact_id}`),
-    el("pre", { class: "code-view" }, candidate.command),
+    el("h4", { class: "subsection-title" }, "Paper 建账户"),
+    button,
   );
   api(`/api/trading/${PAPER_ENV}/books`)
     .then((payload) => {
       const books = (payload.books || []).filter((row) => row.experiment_id === detail.experiment_id);
-      if (books.length)
-        host.append(
-          el(
-            "div",
-            { class: "meta-line" },
-            "模拟账户：",
-            ...books.map((row) => el("a", { href: bookHash(PAPER_ENV, row.book_id) }, row.book_id)),
-          ),
-        );
+      if (!books.length) return;
+      button.remove();
+      host.append(
+        el(
+          "div",
+          { class: "meta-line" },
+          "模拟账户：",
+          ...books.map((row) => el("a", { href: bookHash(PAPER_ENV, row.book_id) }, row.book_id)),
+        ),
+      );
     })
     .catch(() => {
-      /* the Paper roster is not readable; the command still stands */
+      /* the roster is unreadable; the button still opens the book */
     });
   return host;
 }
@@ -6929,6 +6981,18 @@ function bookCard(row) {
       {},
       el("a", { class: "exp-name", href, title: row.book_id }, row.book_id),
       experimentBadges(tradingBadge(row.state, row.error)),
+      el(
+        "button",
+        {
+          class: "btn danger",
+          title: "删除这个模拟账户",
+          onclick: (event) => {
+            event.stopPropagation();
+            confirmDeleteBook(row.book_id);
+          },
+        },
+        "删除",
+      ),
     ),
   );
   const ready = todayChip(row.today);

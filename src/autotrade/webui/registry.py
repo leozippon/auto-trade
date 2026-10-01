@@ -382,18 +382,11 @@ def _forward_view(
 def _paper_candidate_view(
     directory: Path, records: list[dict[str, object]]
 ) -> dict[str, object] | None:
-    """The Paper candidate with the command that creates a book
-    (``scripts/paper/run_paper.py init``, run from the repository root)."""
+    """The frozen artifact a graduate's Paper book is opened from."""
     candidate = paper_candidate(records)
     if candidate is None:
         return None
-    return {
-        "artifact_id": candidate["artifact_id"],
-        "command": (
-            "python scripts/paper/run_paper.py init "
-            f"--experiment {directory.name} --artifact {candidate['artifact_id']}"
-        ),
-    }
+    return {"artifact_id": candidate["artifact_id"]}
 
 
 def summarize_experiment(directory: Path) -> dict[str, object]:

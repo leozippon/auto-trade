@@ -749,6 +749,40 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     def trading_books(env: str):
         return trading.books_payload(root, _trading_env(env))
 
+    @app.post("/api/trading/{env}/books")
+    def trading_open_book(env: str, payload: dict = Body(...)) -> dict[str, object]:
+        from autotrade.paper.books import open_graduated_book
+
+        _trading_env(env)
+        directory = _experiment_dir(str(payload.get("experiment_id") or ""))
+        try:
+            book_id = open_graduated_book(root, directory)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=redact_host_paths(str(exc))) from exc
+        except (ValueError, OSError, RuntimeError) as exc:
+            raise HTTPException(status_code=400, detail=redact_host_paths(str(exc))) from exc
+        return {"env": env, "book_id": book_id}
+
+    @app.delete("/api/trading/{env}/books/{book}")
+    def trading_delete_book(env: str, book: str) -> dict[str, object]:
+        from autotrade.paper.books import delete_book
+        from autotrade.paper.engine import PaperWriterBusy
+
+        state_root = trading.env_dir(root, _trading_env(env))
+        try:
+            delete_book(state_root, book)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except PaperWriterBusy as exc:
+            raise HTTPException(
+                status_code=409, detail=f"Paper book {book} is running; delete it after the run"
+            ) from exc
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=redact_host_paths(str(exc))) from exc
+        return {"env": env, "deleted": book}
+
     @app.get("/api/trading/{env}/books/{book}/status")
     def trading_book_status(env: str, book: str):
         return _trading_book(env, book, trading.book_status)

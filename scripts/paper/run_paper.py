@@ -40,6 +40,7 @@ from autotrade.paper.book import (
     write_source_history,
 )
 from autotrade.paper.books import (
+    PAPER_STATE_DIR,
     list_books,
     run_books,
     validate_book_id,
@@ -54,7 +55,7 @@ from autotrade.paper.pit import BookPITData
 from autotrade.pipelines.calendar import load_sse_trading_days
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_STATE_ROOT = Path("data/trading/paper")
+DEFAULT_STATE_ROOT = PAPER_STATE_DIR
 DEFAULT_ORDERS_DIR = Path("logs/paper")
 
 

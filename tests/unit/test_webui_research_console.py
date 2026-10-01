@@ -191,13 +191,7 @@ def test_the_verdict_opens_the_forward_replay(tmp_path: Path, status: str) -> No
     assert orders["row_count"] == 2
     if status == "graduated":
         assert detail["verdict"]["reasons"] == []
-        assert detail["paper_candidate"] == {
-            "artifact_id": "strategy_research_abc",
-            "command": (
-                "python scripts/paper/run_paper.py init --experiment arm "
-                "--artifact strategy_research_abc"
-            ),
-        }
+        assert detail["paper_candidate"] == {"artifact_id": "strategy_research_abc"}
     else:
         assert "forward_lower_bound_not_positive" in detail["verdict"]["reasons"]
         assert detail["paper_candidate"] is None

@@ -10,11 +10,18 @@ is reported for that book and never stops the others.
 from __future__ import annotations
 
 import re
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 
-from .book import BOOK_NAME
+from autotrade.environment.sandbox import remove_sandbox_tree
+from autotrade.pipelines.ledger import ExperimentLedger, paper_candidate
 
+from .book import BOOK_NAME, create_book
+from .engine import writer_lock
+
+# The Paper state root, relative to the repository root.
+PAPER_STATE_DIR = Path("data/trading/paper")
 # One path segment: experiment ids already satisfy it, so a book created from
 # an experiment is named after it by default.
 BOOK_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}")
@@ -62,4 +69,62 @@ def run_books(
     return failures
 
 
-__all__ = ["BOOK_ID_PATTERN", "list_books", "run_books", "validate_book_id"]
+def open_graduated_book(repo_root: str | Path, experiment_dir: str | Path) -> str:
+    """Create a graduate's Paper book when none exists yet; the book id.
+
+    The book is named after the experiment and trades its Paper candidate. A
+    book already on disk is left as it is.
+    """
+    repo_root = Path(repo_root).resolve()
+    experiment = Path(experiment_dir).resolve(strict=True)
+    book_id = validate_book_id(experiment.name)
+    state_root = repo_root / PAPER_STATE_DIR
+    if (state_root / book_id / BOOK_NAME).is_file():
+        return book_id
+    records = ExperimentLedger(experiment / "ledgers" / "experiment_ledger.jsonl").read()
+    candidate = paper_candidate(records)
+    if candidate is None:
+        raise ValueError(f"{book_id} has no Paper candidate: it did not graduate")
+    list_books(state_root)
+    create_book(
+        state_root / book_id,
+        experiment_dir=experiment,
+        artifact_id=str(candidate["artifact_id"]),
+        repo_root=repo_root,
+        note="graduated",
+    )
+    return book_id
+
+
+def delete_book(state_root: str | Path, book_id: str) -> None:
+    """Remove one Paper book whole, or leave it listed as it was.
+
+    An unknown id raises ``KeyError`` and a book a Paper run is writing raises
+    ``PaperWriterBusy``, both before anything changes. Under the book's writer
+    lock the directory leaves the roster in one rename to a hidden name, and
+    that tree is removed as a finished sandbox is: its read-only directories
+    (the frozen strategy copy) are unlocked, and files a strategy container
+    wrote are removed through the container. Files that still remain are
+    named in the error; the book itself is gone either way.
+    """
+    book_id = validate_book_id(book_id)
+    root = Path(state_root).resolve()
+    if book_id not in list_books(root):
+        raise KeyError(f"unknown Paper book: {book_id}")
+    path = root / book_id
+    with writer_lock(path):
+        removed = root / f".deleted-{book_id}-{uuid.uuid4().hex[:8]}"
+        path.rename(removed)
+        if not remove_sandbox_tree(removed):
+            raise OSError(f"Paper book {book_id} is deleted, but files remain under {removed}")
+
+
+__all__ = [
+    "BOOK_ID_PATTERN",
+    "PAPER_STATE_DIR",
+    "delete_book",
+    "list_books",
+    "open_graduated_book",
+    "run_books",
+    "validate_book_id",
+]

@@ -10,6 +10,7 @@ numbers degrading to null instead of exploding at the serializer.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import re
 import shutil
@@ -380,6 +381,33 @@ def test_env_and_book_whitelists_reject_everything_else(tmp_path: Path):
         with pytest.raises(KeyError):
             trading.book_dir(tmp_path, book)
     assert trading.book_dir(tmp_path, BOOK) == tmp_path / "data/trading/paper" / BOOK
+
+
+def test_the_console_opens_a_graduate_book_and_deletes_it_between_runs(tmp_path: Path):
+    experiments = tmp_path / "elsewhere"  # the console's experiments root
+    build_arm(experiments, "exp", "graduated")
+    build_arm(experiments, "loser", "discarded")
+    client = TestClient(create_app(tmp_path, experiments))
+
+    def open_book(experiment_id: str, env: str = "paper"):
+        return client.post(f"/api/trading/{env}/books", json={"experiment_id": experiment_id})
+
+    assert open_book("exp", env="live").status_code == 404
+    assert open_book("missing").status_code == 404
+    refused = open_book("loser")
+    assert refused.status_code == 400 and "did not graduate" in refused.json()["detail"]
+    assert open_book("exp").json() == {"env": "paper", "book_id": "exp"}
+    assert [row["book_id"] for row in client.get("/api/trading/paper/books").json()["books"]] == ["exp"]
+
+    book = paper_root(tmp_path) / "exp"
+    with (book / ".paper_engine.lock").open("a+b") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)  # a Paper run owns the book
+        busy = client.delete("/api/trading/paper/books/exp")
+    assert busy.status_code == 409 and (book / "book.json").is_file()
+    assert client.delete("/api/trading/live/books/exp").status_code == 404
+    assert client.delete("/api/trading/paper/books/exp").json() == {"env": "paper", "deleted": "exp"}
+    assert client.get("/api/trading/paper/books").json()["books"] == []
+    assert client.delete("/api/trading/paper/books/exp").status_code == 404
 
 
 def test_the_overview_has_one_row_per_book_read_off_its_panels(tmp_path: Path):

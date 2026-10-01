@@ -51,7 +51,7 @@ from autotrade.paper.book import (
     SOURCE_HISTORY_NAME,
     SOURCE_HISTORY_SCHEMA_VERSION,
 )
-from autotrade.paper.books import BOOK_ID_PATTERN, list_books
+from autotrade.paper.books import BOOK_ID_PATTERN, PAPER_STATE_DIR, list_books
 from autotrade.paper.engine import PAPER_STATE_NAME, REFERENCE_KEY, SNAPSHOT_NAME
 from autotrade.paper.orders import order_sheet
 from autotrade.paper.pit import newest_replay_slot
@@ -71,7 +71,7 @@ EQUITY_JOURNAL_NAME = "equity_daily.jsonl"
 
 def env_dir(repo_root: Path, env: str) -> Path:
     if env not in TRADING_ENVS: raise KeyError(f"unknown trading environment: {env}")
-    return Path(repo_root) / "data/trading/paper"
+    return Path(repo_root) / PAPER_STATE_DIR
 
 
 def book_dir(repo_root: Path, book: str, env: str = "paper") -> Path:

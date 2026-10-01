@@ -86,6 +86,25 @@ class PaperWriterBusy(PaperEngineError):
     """Another process holds this book's writer lock."""
 
 
+@contextmanager
+def writer_lock(state_root: Path):
+    """Hold the book's single-writer lock, or raise ``PaperWriterBusy``.
+
+    A run and a delete of one book take the same lock, so neither starts
+    while the other holds it.
+    """
+
+    with (Path(state_root) / PAPER_LOCK_NAME).open("a+b") as stream:
+        try:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise PaperWriterBusy("another Paper writer owns this account") from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
 class PaperData(Protocol):
     """One run's market and PIT inputs for the book window ``[start, D]``."""
 
@@ -163,7 +182,7 @@ class DailyPaperEngine:
             raise ValueError("trade_date must be YYYYMMDD")
         self.state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.state_root.chmod(0o700)
-        with self._exclusive_lock():
+        with writer_lock(self.state_root):
             try:
                 state = self._load_state()
                 self._reconcile_emissions(state)
@@ -480,19 +499,6 @@ class DailyPaperEngine:
 
     # ------------------------------------------------------------ storage
 
-    @contextmanager
-    def _exclusive_lock(self):
-        lock_path = self.state_root / PAPER_LOCK_NAME
-        with lock_path.open("a+b") as stream:
-            try:
-                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as exc:
-                raise PaperWriterBusy("another Paper writer owns this account") from exc
-            try:
-                yield
-            finally:
-                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
-
     def _new_state(self) -> dict[str, object]:
         return {
             "schema_version": PAPER_STATE_SCHEMA_VERSION,
@@ -679,4 +685,5 @@ __all__ = [
     "PaperDataNotReady",
     "PaperEngineError",
     "PaperWriterBusy",
+    "writer_lock",
 ]
