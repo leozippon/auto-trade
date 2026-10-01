@@ -86,42 +86,9 @@ _ACTIONS = {
 
 
 def _remove_sandbox_tree(path: Path) -> bool:
-    """Remove a per-experiment sandbox dir, escalating through docker when
-    plain rmtree leaves residue: under rootless docker the container agent's
-    files map to a host subuid, so directories it created cannot be removed
-    by the host user directly. A root-in-userns container maps those subuids
-    and can delete them. Returns True when the tree is gone."""
+    from autotrade.environment.sandbox import remove_sandbox_tree
 
-    shutil.rmtree(path, ignore_errors=True)
-    if not path.exists():
-        return True
-    try:
-        from autotrade.environment.sandbox import DEFAULT_IMAGE
-
-        subprocess.run(
-            [
-                "docker",
-                "run",
-                "--rm",
-                "--user",
-                "0",
-                "--network=none",
-                "-v",
-                f"{path}:/purge",
-                DEFAULT_IMAGE,
-                "sh",
-                "-c",
-                "rm -rf /purge/* /purge/.[!.]* /purge/..?*",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=300,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        pass
-    shutil.rmtree(path, ignore_errors=True)
-    return not path.exists()
+    return remove_sandbox_tree(path)
 
 
 def _remove_readonly_tree(path: Path) -> None:

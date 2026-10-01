@@ -368,6 +368,8 @@ def test_the_llm_research_session_mounts_only_the_research_end_view_and_freezes(
     from tests.unit.test_operating_memory import GRADUATED_SKILL, _experiment_with_skill
 
     repo, experiment = make_arm(tmp_path, developer_mode="llm", max_replay_years=2)
+    # The assertions below read the session tree. A finished arm otherwise deletes it.
+    monkeypatch.setattr(worker, "release_finished_sandbox", lambda _options: None)
     _experiment_with_skill(repo / "experiments", "adopted")
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     # The console's GPU allocation for the research session, one-shot.
@@ -654,6 +656,31 @@ def test_an_interrupted_session_without_a_checkpoint_resumes_from_the_note_alone
     facts = json.loads(opening[0].content.split("```json\n", 1)[1].split("\n```", 1)[0])
     assert facts["budgets"]["used_before_this_attempt"]["llm_calls"] == 3
     assert facts["arm"]["trials_to_date"] == 0
+    assert not (options.work_root / options.experiment_id).exists()
+
+
+def test_release_finished_sandbox_removes_only_that_experiment(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from autotrade.pipelines.worker import release_finished_sandbox
+
+    work = tmp_path / "sandboxes"
+    own = work / "arm_a" / "research"
+    own.mkdir(parents=True)
+    locked = own / "snapshot"
+    locked.mkdir(mode=0o555)
+    (own / "note.txt").write_text("x", encoding="utf-8")
+    sibling = work / "arm_b"
+    sibling.mkdir()
+    (sibling / "keep.txt").write_text("keep", encoding="utf-8")
+
+    release_finished_sandbox(SimpleNamespace(work_root=work, experiment_id="arm_a"))
+    assert not (work / "arm_a").exists()
+    assert (sibling / "keep.txt").read_text(encoding="utf-8") == "keep"
+
+    release_finished_sandbox(SimpleNamespace(work_root=work, experiment_id="arm_a"))
+    release_finished_sandbox(SimpleNamespace(work_root=work, experiment_id=""))
+    assert work.is_dir() and (sibling / "keep.txt").is_file()
 
 
 def test_a_resume_without_the_interrupted_workspace_fails_the_attempt(

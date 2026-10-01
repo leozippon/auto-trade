@@ -985,6 +985,7 @@ def run_local_interactive_worker(
         # before any snapshot, sandbox or gateway preparation.
         payload = _terminal_status(ledger, read_status(hitl / "status.json"))
         write_json_atomic(hitl / "status.json", payload)
+        release_finished_sandbox(options)
         return payload
     if (
         command_runner_factory is None
@@ -1035,6 +1036,7 @@ def run_local_interactive_worker(
         ledger, {"completed_at": utc_now_iso()}, developer_mode=developer_label
     )
     write_json_atomic(hitl / "status.json", payload)
+    release_finished_sandbox(options)
     return payload
 
 
@@ -1061,6 +1063,23 @@ def _write_session_plan(
     )
     write_json_atomic(hitl / SCHEDULE_NAME, plan)
     return planned_sessions()
+
+
+def release_finished_sandbox(options: InteractiveWorkerOptions) -> None:
+    """Remove the session workspace once this arm will not resume.
+
+    The ledger, frozen strategy and pit views stay in the experiment
+    directory. An interrupted attempt keeps the tree: the next start
+    continues in it.
+    """
+
+    root = options.work_root.resolve()
+    path = (options.work_root / options.experiment_id).resolve()
+    if path == root or root not in path.parents or not path.is_dir():
+        return
+    from autotrade.environment.sandbox import remove_sandbox_tree
+
+    remove_sandbox_tree(path)
 
 
 def _terminal_status(

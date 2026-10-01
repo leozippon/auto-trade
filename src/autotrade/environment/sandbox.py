@@ -27,6 +27,69 @@ from .runtime import (
 
 DEFAULT_IMAGE = "autotrade-sandbox:latest"
 
+
+def _unlock_owned_directories(path: Path) -> None:
+    """Make host-owned directories removable without changing file modes.
+
+    Snapshot directories are mode 0555. Unlinking their entries needs a
+    writable parent. File modes stay untouched: a payload may be a hard link
+    into a shared pit view, and chmod would change that shared inode.
+    """
+
+    for directory, _dirnames, _filenames in os.walk(path, topdown=False):
+        try:
+            os.chmod(directory, 0o700)
+        except OSError:
+            continue
+
+
+def remove_sandbox_tree(path: Path) -> bool:
+    """Remove one experiment's sandbox directory.
+
+    Host-owned directories are unlocked and removed first. Files the container
+    created belong to its subuid, so what remains is deleted from a
+    root-in-userns container that can see those ids. Returns True when the
+    tree is gone.
+    """
+
+    target = Path(path)
+
+    def drop() -> None:
+        if not target.exists():
+            return
+        _unlock_owned_directories(target)
+        shutil.rmtree(target, ignore_errors=True)
+
+    drop()
+    if not target.exists():
+        return True
+    try:
+        subprocess.run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--user",
+                "0",
+                "--network=none",
+                "-v",
+                f"{target}:/purge",
+                DEFAULT_IMAGE,
+                "sh",
+                "-c",
+                "rm -rf /purge/* /purge/.[!.]* /purge/..?*",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+    drop()
+    return not target.exists()
+
+
 # Trusted research tooling bind-mounted read-only into the Agent session: the
 # signal screen is a self-contained script (numpy/pandas/pyarrow, all in the
 # image), so shipping it is a mount, not an image rebuild. The mount path is
