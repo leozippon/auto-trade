@@ -84,6 +84,7 @@ from .ledger import (
     forward_record,
     frozen_record,
     is_frozen_artifact_mutation,
+    lineage_record,
     research_over,
     research_records,
 )
@@ -293,6 +294,16 @@ class RollingExperimentPipeline:
             raise RuntimeError("research is over; no further research session runs")
         if research_records(records):
             raise RuntimeError("the arm's research session is already recorded")
+        recorded = lineage_record(records)
+        recorded_arms = tuple(recorded["arms"]) if recorded is not None else ()  # type: ignore[arg-type]
+        if recorded_arms != self.config.lineage_arms:
+            # The gate reads the lineage the ledger holds; one the params name
+            # but creation never recorded would silently drop from the family.
+            raise RuntimeError(
+                f"lineage_arms {list(self.config.lineage_arms)} do not match the "
+                f"lineage the ledger records ({list(recorded_arms)}); a lineage is "
+                "recorded only when the console creates the arm"
+            )
         resume = resume_state(self.config.experiment_dir, records)
         steps_before = load_recorded_steps(self.config.experiment_dir)
         run_started = time.monotonic()
@@ -946,8 +957,10 @@ def freeze_gate_for(
     """The freeze gate of one nominated Step against the whole arm (PL1 §4.1).
 
     The trial family is :func:`trial_family` over earlier sessions' recorded
-    Steps and this session's alike; ρ̄ is read off one sidecar per non-control
-    revision (its full-span validation when it has one). The count of
+    Steps and this session's alike, plus the lineage the ledger records
+    (:func:`recorded_lineage`); ρ̄ is read off one sidecar per non-control
+    revision (its full-span validation when it has one) and the lineage's
+    extracted series. The count of
     full-span validations takes every measurable one, controls included. A
     nominee that did not replay the full research period, was registered as a
     control, fails a hard nomination rule, or whose statistics cannot be
@@ -965,11 +978,8 @@ def freeze_gate_for(
         return {"passed": False, "reasons": reasons}
     rows = [*_recorded_steps(records), *session_rows]
     family = trial_family(rows)
-    representative: dict[str, Mapping[str, object]] = {}
-    for row in rows:
-        revision = str(row["revision_id"])
-        if revision not in representative or row.get("span") == FULL_SPAN:
-            representative[revision] = row
+    representative = trial_representatives(rows)
+    lineage_arms, lineage_trials, lineage_series = recorded_lineage(records)
     try:
         gate = freeze_gate(
             _style_analysis(nominee),
@@ -979,6 +989,8 @@ def freeze_gate_for(
                 _style_analysis(representative[revision])
                 for revision in family["revisions"]  # type: ignore[union-attr]
             ],
+            lineage_trials=lineage_trials,
+            lineage_series=lineage_series,
             full_span_validations=sum(
                 1
                 for row in rows
@@ -993,8 +1005,48 @@ def freeze_gate_for(
         **gate["deflated_sharpe"],  # type: ignore[dict-item]
         "controls": family["controls"],
         "undeclared_offline_validations": family["undeclared_offline_validations"],
+        "lineage_arms": lineage_arms,
     }
     return gate
+
+
+def trial_representatives(
+    rows: Sequence[Mapping[str, object]],
+) -> dict[str, Mapping[str, object]]:
+    """The Validation whose series stands for each revision in ρ̄: its
+    full-span one when it has one, else the one it has."""
+
+    representative: dict[str, Mapping[str, object]] = {}
+    for row in rows:
+        revision = str(row["revision_id"])
+        if revision not in representative or row.get("span") == FULL_SPAN:
+            representative[revision] = row
+    return representative
+
+
+def recorded_lineage(
+    records: Sequence[Mapping[str, object]],
+) -> tuple[list[str], int, list[dict[str, float]]]:
+    """The lineage the ledger records: its arms, the trials they add and one
+    daily series per measurable lineage revision (``pipelines/lineage.py``).
+
+    Read from this arm's own files only -- the ledger record and the series
+    file it names, both written at creation -- never from the lineage arms.
+    ``([], 0, [])`` for an arm created without one.
+    """
+
+    record = lineage_record(records)
+    if record is None:
+        return [], 0, []
+    payload = json.loads(Path(str(record["series_ref"])).read_text(encoding="utf-8"))
+    return (
+        [str(arm) for arm in record["arms"]],  # type: ignore[union-attr]
+        int(record["trials"]),  # type: ignore[call-overload]
+        [
+            {str(date): float(value) for date, value in item["daily"]}
+            for item in payload["series"]
+        ],
+    )
 
 
 def _style_analysis(row: Mapping[str, object]) -> dict[str, object]:
@@ -1260,7 +1312,9 @@ __all__ = [
     "freeze_gate_for",
     "neutralized",
     "null_control_seed",
+    "recorded_lineage",
     "research_step_record",
     "trial_family",
     "trial_fields",
+    "trial_representatives",
 ]

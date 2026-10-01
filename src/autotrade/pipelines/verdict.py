@@ -302,9 +302,10 @@ def null_sharpe_std(days: int) -> float:
     return math.sqrt(TRADING_DAYS_PER_YEAR / days)
 
 
-def _neutral_daily(analysis: Mapping[str, object]) -> dict[str, float]:
+def neutral_daily(analysis: Mapping[str, object]) -> dict[str, float]:
     """The daily neutralised graded series of a whole sidecar, by date: the
-    series whose annualised mean over its residual risk is the trial's IR."""
+    series whose annualised mean over its residual risk is the trial's IR.
+    ``ValueError`` when the sidecar's span is not measurable."""
 
     graded, _series = _graded(analysis)
     dates = [row[0] for row in _regression_join(graded, "", "")]
@@ -312,30 +313,36 @@ def _neutral_daily(analysis: Mapping[str, object]) -> dict[str, float]:
     return dict(zip(dates, (float(value) for value in neutral), strict=True))
 
 
-def trial_correlation(analyses: Sequence[Mapping[str, object]]) -> tuple[float, int]:
+def trial_correlation(
+    analyses: Sequence[Mapping[str, object]],
+    series: Sequence[Mapping[str, float]] = (),
+) -> tuple[float, int]:
     """Mean pairwise correlation ρ̄ of the trials' daily graded series, and the
     number of pairs it averages.
 
-    One analysis per trial (its validation sidecar). Each series is the daily
-    neutralised graded series (:func:`_neutral_daily`), so ρ̄ is the correlation
-    of the very estimates the trials' IRs are. A pair is correlated over the
-    days both measured -- a sub-span trial against a full-span one over its own
-    years; a pair sharing fewer than three days (two points correlate ±1 by
-    construction) or flat over its overlap, and a trial whose span is
-    unmeasurable, add no pair. The mean is clipped into [0, 1]: M trials that
-    hedge each other are not more than M independent ones. ``(0.0, 0)`` when no
-    pair is measured (one trial, or none measurable), which makes the effective
-    count the raw one.
+    One analysis per trial (its validation sidecar), plus ``series``: trials
+    already reduced to that daily series (an arm's lineage, extracted at its
+    creation), which pair with the analyses and with each other alike. Each
+    series is the daily neutralised graded series (:func:`neutral_daily`), so
+    ρ̄ is the correlation of the very estimates the trials' IRs are. A pair is
+    correlated over the days both measured -- a sub-span trial against a
+    full-span one over its own years; a pair sharing fewer than three days (two
+    points correlate ±1 by construction) or flat over its overlap, and a trial
+    whose span is unmeasurable, add no pair. The mean is clipped into [0, 1]: M
+    trials that hedge each other are not more than M independent ones.
+    ``(0.0, 0)`` when no pair is measured (one trial, or none measurable), which
+    makes the effective count the raw one.
     """
 
-    series: list[dict[str, float]] = []
+    measured: list[Mapping[str, float]] = []
     for analysis in analyses:
         try:
-            series.append(_neutral_daily(analysis))
+            measured.append(neutral_daily(analysis))
         except ValueError:
             continue
+    measured.extend(series)
     correlations: list[float] = []
-    for first, second in itertools.combinations(series, 2):
+    for first, second in itertools.combinations(measured, 2):
         common = sorted(first.keys() & second.keys())
         if len(common) < 3:
             continue
@@ -417,6 +424,18 @@ def deflated_sharpe(
     return block
 
 
+def information_ratio_bar(effective: float, days: int, probability: float) -> float | None:
+    """The research IR at which the deflated Sharpe probability reaches
+    ``probability`` at ``effective`` trials over ``days``, for normal returns:
+    √V·(E[max] + Φ⁻¹(p)). ``None`` at p = 1, which no IR reaches."""
+
+    if probability >= 1.0:
+        return None
+    return null_sharpe_std(days) * (
+        expected_max_sharpe(effective) + NormalDist().inv_cdf(probability)
+    )
+
+
 def _count(value: object, name: str, minimum: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
         raise ValueError(f"{name} must be an integer >= {minimum}, got {value!r}")
@@ -430,6 +449,8 @@ def freeze_gate(
     full_span_validations: int,
     offline_trials: int = 0,
     trial_analyses: Sequence[Mapping[str, object]] = (),
+    lineage_trials: int = 0,
+    lineage_series: Sequence[Mapping[str, float]] = (),
     years: Sequence[tuple[str, str]] = (),
     active_max_drawdown: float | None = None,
     tracking_error_cap: float | None = None,
@@ -445,10 +466,12 @@ def freeze_gate(
     ``analysis`` is the nominee's full-span validation sidecar, read whole.
     The deflated Sharpe deflates over the arm's trial family: ``trials``
     distinct non-control revisions validated anywhere in the arm (the nominee
-    among them) plus the ``offline_trials`` its batches declared screening
-    offline, M in all, counted at their effective number ρ̄ + (1 − ρ̄)·M, where
-    ρ̄ is :func:`trial_correlation` over ``trial_analyses`` (one sidecar per
-    non-control revision). The dispersion √V is the zero-skill sampling error
+    among them), the ``offline_trials`` its batches declared screening offline
+    and the ``lineage_trials`` of the earlier arms it was created to inherit,
+    M in all, counted at their effective number ρ̄ + (1 − ρ̄)·M, where ρ̄ is
+    :func:`trial_correlation` over ``trial_analyses`` (one sidecar per
+    non-control revision) and ``lineage_series`` (one reduced series per
+    measurable lineage revision). The dispersion √V is the zero-skill sampling error
     of an IR over the nominee's own measured days (:func:`null_sharpe_std`), so
     neither controls nor near-copies of the nominee move the bar through it.
     ``information_ratio_bar`` is the research IR at which the probability
@@ -472,17 +495,19 @@ def freeze_gate(
 
     trials = _count(trials, "trials", 1)
     offline_trials = _count(offline_trials, "offline_trials", 0)
+    lineage_trials = _count(lineage_trials, "lineage_trials", 0)
     full_span_validations = _count(full_span_validations, "full_span_validations", 0)
     graded, series = _graded(analysis)
     statistics, _rows, neutral = _measured(graded, "", "")
-    correlation, pairs = trial_correlation(trial_analyses)
-    total = trials + offline_trials
+    correlation, pairs = trial_correlation(trial_analyses, lineage_series)
+    total = trials + offline_trials + lineage_trials
     effective = effective_trials(total, correlation)
     dispersion = null_sharpe_std(int(statistics["days"]))
     dsr = {
         "trials": total,
         "host_trials": trials,
         "offline_trials": offline_trials,
+        "lineage_trials": lineage_trials,
         "trial_correlation": correlation,
         "trial_correlation_pairs": pairs,
         **deflated_sharpe(
@@ -491,11 +516,8 @@ def freeze_gate(
             trial_sharpe_std=dispersion,
             returns=neutral,
         ),
-        "information_ratio_bar": (
-            dispersion
-            * (expected_max_sharpe(effective) + NormalDist().inv_cdf(min_dsr_probability))
-            if min_dsr_probability < 1.0
-            else None
+        "information_ratio_bar": information_ratio_bar(
+            effective, int(statistics["days"]), min_dsr_probability
         ),
     }
     year_excess = [

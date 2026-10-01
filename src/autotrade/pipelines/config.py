@@ -575,6 +575,11 @@ class RollingExperimentConfig:
     # the curated repository library alone, plus the skills of every graduated
     # experiment, or nothing.
     operating_memory: str = DEFAULT_OPERATING_MEMORY
+    # Earlier arms on the same research period whose non-control trials join
+    # this arm's freeze-gate family. Extracted into the arm's own ledger at
+    # creation (``pipelines/lineage.py``); the research session refuses to run
+    # when the ledger does not record exactly these.
+    lineage_arms: tuple[str, ...] = ()
     # Also record failed validation attempts as lightweight dead-end nodes
     # (no output snapshot) so later sessions can see what was already tried.
     record_failed_attempts: bool = True

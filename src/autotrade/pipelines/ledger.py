@@ -14,6 +14,11 @@ One JSONL file per experiment. The pipeline writes three record types:
   marker (:class:`RunMarkers`) that the next worker start turns into the
   missing ``attempt_failed``.
 
+The console writes a fourth, at creation and only for an arm created with
+``lineage_arms``: ``lineage``, the earlier arms whose research-period trials
+join this arm's freeze-gate family, with a reference to the series it
+extracted from them (``pipelines/lineage.py``).
+
 Every record carries the link keys ``experiment_id``, ``epoch_id``, ``fold_id``
 and ``run_id``: ``epoch_id`` names the stage (``research`` or ``forward``) and
 ``fold_id`` the session key (``research`` or ``forward``). Both keep their
@@ -51,7 +56,8 @@ FORWARD_STAGE = "forward"
 # research session and the forward replay.
 RESEARCH_SESSION_KEY = "research"
 FORWARD_SESSION_KEY = "forward"
-PIPELINE_RECORD_TYPES = ("research_session", "forward", "attempt_failed")
+LINEAGE_RECORD_TYPE = "lineage"
+PIPELINE_RECORD_TYPES = ("research_session", "forward", "attempt_failed", LINEAGE_RECORD_TYPE)
 FOLD_ERA_RECORD_TYPES = (
     "fold",
     "meta_learning",
@@ -166,6 +172,18 @@ def forward_record(records: Sequence[Mapping[str, object]]) -> dict[str, object]
     return rows[0] if rows else None
 
 
+def lineage_record(records: Sequence[Mapping[str, object]]) -> dict[str, object] | None:
+    """The arm's recorded lineage, or None for an arm created without one.
+
+    Written once, at creation; two are a corrupt ledger and raise.
+    """
+
+    rows = [dict(record) for record in records if record.get("record_type") == LINEAGE_RECORD_TYPE]
+    if len(rows) > 1:
+        raise ValueError("the ledger holds more than one lineage for one arm")
+    return rows[0] if rows else None
+
+
 def research_over(records: Sequence[Mapping[str, object]]) -> bool:
     """Whether research has ended: an artifact froze, or a session ended the arm."""
 
@@ -248,6 +266,8 @@ class ExperimentLedger:
             and forward_record(self.read()) is not None
         ):
             raise ValueError("the arm already has its forward verdict")
+        if record_type == LINEAGE_RECORD_TYPE and lineage_record(self.read()) is not None:
+            raise ValueError("the arm already records its lineage")
         append_versioned_jsonl(
             self.path, record, schema_version=LEDGER_RECORD_SCHEMA_VERSION
         )

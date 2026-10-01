@@ -50,6 +50,9 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "research_directive": rolling_default("research_directive"),
     "workspace_reference": rolling_default("workspace_reference"),
     "operating_memory": rolling_default("operating_memory"),
+    # Earlier arms on the same research period whose trials join this arm's
+    # freeze-gate family; read once, at creation (pipelines/lineage.py).
+    "lineage_arms": rolling_default("lineage_arms"),
     "strategy_period": "day",
     "inference_time": "08:30",
     "initial_control_mode": "auto",

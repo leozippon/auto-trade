@@ -34,7 +34,11 @@ and stay at POST time.
 `--dry-run` judges the round before its arms: a probe request carrying only
 what every arm shares goes through the same pre-flight, so the geometry and the
 seed contract are read even for a round that has no arms yet. Such a round can
-be dry-run but not created.
+be dry-run but not created. An arm that names `lineage_arms` passes the same
+pre-flight only when every one of them exists, researched the same period and
+recorded a non-control trial, and its dry-run reading adds a `lineage:` line:
+the trials and effective trials the console will record for it, and the IR bar
+at that count alone.
 
 `--fill` reads the arm list as an ordered queue and keeps the console's running
 slots occupied: it asks /api/health how many are free, skips the arms whose
@@ -73,13 +77,19 @@ from _bootstrap import add_repo_src
 
 REPO_ROOT = add_repo_src(__file__)
 
-from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION, acceptance_for
+from autotrade.pipelines.config import (
+    SNAPSHOT_CACHE_FORMAT_VERSION,
+    AcceptanceRules,
+    acceptance_for,
+)
 from autotrade.pipelines.hitl_state import (
     WEB_CLOSED_PARAMS,
     WEB_CREATE_DEFAULTS,
     WEB_INTERNAL_PARAMS,
     WEB_REQUIRED_PARAMS,
 )
+from autotrade.pipelines.lineage import extract_lineage, lineage_summary
+from autotrade.pipelines.verdict import information_ratio_bar
 from autotrade.pipelines.worker import resolve_worker_options
 
 # The console's own id rule; importing it keeps this module from growing a
@@ -287,6 +297,34 @@ def normalize(params: dict[str, object]) -> dict[str, object]:
         preflight=True,
     )
     return merged
+
+
+def _lineage_reading(merged: Mapping[str, object], rules: AcceptanceRules) -> dict[str, object]:
+    """What an arm's ``lineage_arms`` would add to its freeze gate.
+
+    The figures the console records when it creates the arm, and the IR bar at
+    the lineage's effective trial count over the longest lineage series: a
+    floor, since each trial of the arm's own can only raise it.
+    """
+    extraction = extract_lineage(
+        EXPERIMENTS_ROOT,
+        list(merged["lineage_arms"]),  # type: ignore[call-overload]
+        research_start=str(merged["research_start"]),
+        research_end=str(merged["research_end"]),
+    )
+    summary = lineage_summary(extraction)
+    days = max((len(item["daily"]) for item in extraction["series"]), default=0)  # type: ignore[attr-defined]
+    return {
+        **summary,
+        "information_ratio_bar_floor": (
+            information_ratio_bar(
+                float(summary["effective_trials"]), days, rules.min_dsr_probability  # type: ignore[arg-type]
+            )
+            if days >= 2
+            else None
+        ),
+        "bar_days": days,
+    }
 
 
 def _now() -> str:
@@ -562,6 +600,8 @@ class Round:
                 # whatever the arm names, mandate included.
                 rules = acceptance_for(merged)
                 print("  acceptance:", json.dumps(rules.to_record(), ensure_ascii=False))
+                if merged.get("lineage_arms"):
+                    print("  lineage:", json.dumps(_lineage_reading(merged, rules), ensure_ascii=False))
                 print(f"  directive: {len(directive.splitlines())} lines, {len(directive)} chars")
                 for line in directive.splitlines():
                     print("   |", line)

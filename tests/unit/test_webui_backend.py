@@ -45,7 +45,7 @@ from autotrade.pipelines.hitl_state import (
     read_status,
     status_pid_alive,
 )
-from autotrade.pipelines.ledger import ExperimentLedger
+from autotrade.pipelines.ledger import ExperimentLedger, lineage_record
 from autotrade.webui.manager import (
     ARM_DISK_MARGIN_BYTES,
     MAX_RUNNING_EXPERIMENTS,
@@ -1355,6 +1355,40 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(
             acceptance_for({}).to_record(), AcceptanceRules().to_record()
         )
+
+    def test_create_records_the_lineage_into_the_new_arm_or_creates_nothing(self) -> None:
+        """The lineage is read from the earlier arms once, while the arm is
+        created, into its own ledger; one that cannot be read leaves no arm."""
+
+        from tests.unit.test_lineage import _arm
+
+        _arm(
+            self.experiments_root,
+            "earlier_arm",
+            [{"seed": 1, "loading": 0.5, "control": True}, {"seed": 2, "loading": 0.5}],
+        )
+        manager = ExperimentManager(self.repo_root, self.experiments_root)
+        geometry = DEFAULT_RESEARCH_GEOMETRY.to_record()
+        with (
+            patch.object(manager, "_preflight"),
+            patch.object(manager, "start_worker", return_value={"spawned": False}),
+        ):
+            manager.create_experiment(
+                {"experiment_id": "exp_heir", **geometry, "lineage_arms": ["earlier_arm"]}
+            )
+            with self.assertRaisesRegex(ValueError, "lineage arm gone does not exist"):
+                manager.create_experiment(
+                    {"experiment_id": "exp_orphan", **geometry, "lineage_arms": ["gone"]}
+                )
+        directory = self.experiments_root / "exp_heir"
+        params = json.loads((directory / "hitl/params.json").read_text(encoding="utf-8"))
+        self.assertEqual(params["lineage_arms"], ["earlier_arm"])
+        record = lineage_record(
+            ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl").read()
+        )
+        self.assertEqual((record["arms"], record["trials"]), (["earlier_arm"], 1))
+        self.assertTrue(Path(str(record["series_ref"])).is_relative_to(directory))
+        self.assertFalse((self.experiments_root / "exp_orphan").exists())
 
     def test_running_cap_allows_last_slot_and_blocks_overflow(self) -> None:
         manager = ExperimentManager(self.repo_root, self.experiments_root)

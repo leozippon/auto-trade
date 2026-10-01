@@ -121,7 +121,7 @@ from .config import (
     StrategyExperimentConfig,
 )
 from .experiment import DailyStrategyPipeline, trial_family, trial_fields
-from .ledger import RESEARCH_STAGE, ExperimentLedger
+from .ledger import RESEARCH_STAGE, ExperimentLedger, lineage_record
 from .session_tools import (
     BatchValidateTool,
     NullControlTool,
@@ -828,7 +828,9 @@ class LLMResearchDeveloper:
                     "decision_input": {"snapshot_id": request.snapshot.snapshot_id}
                 },
                 "start": start_record(),
-                "arm": arm_record(request.steps_before),
+                "arm": arm_record(
+                    request.steps_before, lineage_record(self.ledger.read())
+                ),
                 "modification_constraints": request.modification_constraints.to_record(),
                 "acceptance_rules": dict(request.acceptance_rules),
                 "schedule": self.schedule.to_record(),
@@ -1472,23 +1474,32 @@ def start_record() -> dict[str, object]:
     return {"kind": "template", "template_ref": "agent_output_template"}
 
 
-def arm_record(steps: Sequence[StepResult]) -> dict[str, object]:
+def arm_record(
+    steps: Sequence[StepResult], lineage: Mapping[str, object] | None = None
+) -> dict[str, object]:
     """The arm's selection state when the attempt starts.
 
     Trials are the freeze gate's trial family over the session's earlier
     attempts (``experiment.trial_family``): non-control revisions plus the
     offline screens their batches declared; controls are counted apart. A
-    session only runs while nothing is frozen.
+    session only runs while nothing is frozen. ``lineage`` is the ledger's
+    ``lineage`` record of an arm created with one: the earlier arms whose
+    trials the gate adds to these, how many and what they count as.
     """
 
     family = trial_family([trial_fields(step) for step in steps])
-    return {
+    record: dict[str, object] = {
         "frozen": False,
         "freezes_per_arm": 1,
         "trials_to_date": family["trials"],
         "controls_to_date": family["controls"],
         "full_span_validations_to_date": sum(1 for step in steps if step.span == FULL_SPAN),
     }
+    if lineage is not None:
+        record["lineage"] = {
+            key: lineage[key] for key in ("arms", "trials", "effective_trials")
+        }
+    return record
 
 
 # The read-only facts file of a session, under ``workspace/inputs``.

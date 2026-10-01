@@ -258,6 +258,44 @@ def test_an_eight_year_round_refuses_star_50_and_fundamentals(
     assert err[-1] == "refused: eight_year_star50, eight_year_fundamentals"
 
 
+def test_a_dry_run_reads_each_lineage_and_refuses_one_by_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An arm names its lineage as a list of experiment ids. The dry-run reads
+    those arms through the console's own pre-flight and prints what they add
+    to the arm's freeze gate; a lineage arm that was never created refuses the
+    arm that names it, before anything is sent."""
+    from tests.unit.test_lineage import DAYS, _arm
+
+    rnd = Round(
+        arms={
+            "heir": {"lineage_arms": ["earlier_one", "earlier_two"]},
+            "orphan": {"lineage_arms": ["never_created"]},
+        },
+        pit_views_seed="data/seed_probe",
+    )
+    _synthetic_repo(tmp_path, monkeypatch, rnd)
+    for name, seed in (("earlier_one", 1), ("earlier_two", 2)):
+        _arm(
+            tmp_path / "experiments",
+            name,
+            [{"seed": seed, "loading": 0.5, "control": True}, {"seed": seed + 10, "loading": 0.5}],
+        )
+    assert rnd.main(["launcher", "0", "--dry-run"]) == 1
+    captured = capsys.readouterr()
+    [line] = [line for line in captured.out.splitlines() if line.startswith("  lineage: ")]
+    reading = json.loads(line.removeprefix("  lineage: "))
+    assert reading["arms"] == ["earlier_one", "earlier_two"]
+    assert (reading["trials"], reading["host_trials"], reading["controls"]) == (2, 2, 2)
+    assert 1.0 < reading["effective_trials"] <= 2.0
+    assert reading["bar_days"] == len(DAYS)
+    assert reading["information_ratio_bar_floor"] > 0.98
+    assert "orphan: parameters rejected, nothing was sent: lineage arm never_created does not exist" in (
+        captured.err
+    )
+    assert captured.err.splitlines()[-1] == "refused: orphan"
+
+
 def test_a_round_without_arms_is_never_posted() -> None:
     with pytest.raises(SystemExit, match="no arms to create"):
         Round().main(["launcher", "0"])
