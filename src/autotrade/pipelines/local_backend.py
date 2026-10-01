@@ -134,6 +134,7 @@ from .session_tools import (
 )
 from .skills import (
     OPERATING_MEMORY_DIRNAME,
+    SKILLS_DIRNAME,
     SKILLS_INDEX_PATH,
     DeleteSkillTool,
     MemorySource,
@@ -731,14 +732,27 @@ class LLMResearchDeveloper:
         # workspace, the working copy, the candidates and the step tree are
         # simply still there when an interrupted attempt is resumed.
         resume = request.resume
+        attempt = resume.attempt if resume is not None else 1
         root = self.runtime_root / request.session_key
         if root.exists() and resume is None:
             raise FileExistsError(f"session runtime already exists: {root.name}")
-        if resume is not None and not (root / "agent" / "workspace" / "output" / "main.py").is_file():
-            raise RuntimeError(
-                "cannot resume the research session: the workspace of the interrupted "
-                f"attempt is missing under the session runtime root {root.name}"
-            )
+        # What a resume continues from: the working copy and the skills tree,
+        # the two things seeding writes that a later attempt does not re-copy.
+        seeded = (root / "agent" / "workspace" / "output" / "main.py").is_file() and (
+            root / "agent" / "workspace" / SKILLS_DIRNAME
+        ).is_dir()
+        if resume is not None and not seeded:
+            if request.steps_before or request.budget_used != BudgetUsed():
+                raise RuntimeError(
+                    "cannot resume the research session: the workspace of the interrupted "
+                    f"attempt is missing under the session runtime root {root.name}"
+                )
+            # The earlier attempts failed before the workspace was seeded (while
+            # preparing the PIT view or laying out the runtime) and before they
+            # spent or recorded anything, so there is nothing to continue: this
+            # attempt seeds and opens the session as a first attempt does, over
+            # whatever partial layout they left.
+            resume = None
         # The replay-years the counter continues from, not the trace's figure
         # alone: the facts and the resume note show what the session has left.
         used = replace(request.budget_used, replay_years=request.replay_years_spent)
@@ -821,7 +835,7 @@ class LLMResearchDeveloper:
                 "broker_profile": self.broker_profile.to_record(),
                 "nl_failure_policy": request.nl_failure_policy,
                 "record_failed_attempts": request.record_failed_attempts,
-                "attempt": resume.attempt if resume is not None else 1,
+                "attempt": attempt,
                 "finalize_before_deadline_seconds": request.finalize_before_deadline_seconds,
                 "sandbox_spec": sandbox_spec.to_record(),
                 "exploration_directive": self.research_directive.strip(),
@@ -1285,7 +1299,7 @@ class LLMResearchDeveloper:
                 run_manifest_ref=str(collected / "run_manifest.json"),
                 skills_source_ref=str(collected / "workspace" / "skills"),
                 budget_used=BudgetUsed.from_record(budget_used_now()),
-                attempt=resume.attempt if resume is not None else 1,
+                attempt=attempt,
             )
         except Exception as exc:
             emit_event(

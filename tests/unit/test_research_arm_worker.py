@@ -734,6 +734,73 @@ def test_a_resume_without_the_interrupted_workspace_fails_the_attempt(
     assert read_status(experiment / "hitl" / "status.json")["state"] == "failed"
 
 
+def test_attempts_that_fail_before_the_workspace_is_seeded_leave_a_fresh_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synthetic_provider
+):
+    """One attempt dies preparing the PIT inputs (no runtime at all), the next
+    while laying out the workspace (a runtime without a working copy). Neither
+    spent or recorded anything, so the third opens the session as a first
+    attempt would instead of failing for a workspace that never existed."""
+
+    from autotrade.agent.prompts import SESSION_DEFAULT_INSTRUCTION
+    from autotrade.environment.llm import ProviderResponse, ToolCall
+    from autotrade.pipelines import local_backend
+    from tests.unit.test_interactive_worker_local import (
+        VALIDATE_WORKING_COPY,
+        _NominatingLLM,
+        _NoShellRunner,
+    )
+
+    repo, experiment = make_arm(tmp_path, developer_mode="llm", max_replay_years=2, session_max_attempts=1)
+    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
+    session_root = tmp_path / "unused"
+
+    def run(llm):
+        options = load_worker_options(experiment, repo_root=repo)
+        nonlocal session_root
+        session_root = options.work_root / options.experiment_id / "research"
+        return run_local_interactive_worker(
+            options, llm=llm, command_runner_factory=lambda _workspace: _NoShellRunner()
+        )
+
+    def interrupted(*_args, **_kwargs):
+        raise SystemExit("worker stopped")
+
+    pipeline = experiment_module.RollingExperimentPipeline
+    research_inputs = pipeline.research_inputs
+    monkeypatch.setattr(pipeline, "research_inputs", interrupted)
+    with pytest.raises(SystemExit):
+        run(_NominatingLLM([]))
+    assert not session_root.exists()
+    monkeypatch.setattr(pipeline, "research_inputs", research_inputs)
+
+    copy_artifact = local_backend.copy_artifact
+    monkeypatch.setattr(local_backend, "copy_artifact", interrupted)
+    with pytest.raises(SystemExit):
+        run(_NominatingLLM([]))
+    workspace = session_root / "agent" / "workspace"
+    assert workspace.is_dir() and not (workspace / "output" / "main.py").exists()
+    monkeypatch.setattr(local_backend, "copy_artifact", copy_artifact)
+
+    reason = "neutralized excess is negative in three of four research years; the null percentile is 0.48"
+    llm = _NominatingLLM(
+        [
+            ProviderResponse(tool_calls=(VALIDATE_WORKING_COPY,)),
+            ProviderResponse(
+                tool_calls=(ToolCall("finish", "finish_session", {"outcome": "no_edge", "reason": reason}),)
+            ),
+        ]
+    )
+    run(llm)
+    rows = ExperimentLedger(experiment / "ledgers" / "experiment_ledger.jsonl").read()
+    assert [row["record_type"] for row in rows] == ["attempt_failed", "attempt_failed", "research_session"]
+    assert rows[-1]["attempts"] == 3 and rows[-1]["outcome"] == "no_edge"
+    assert rows[-1]["budget_used"]["llm_calls"] == len(llm.calls)
+    opening = llm.calls[0]["messages"]
+    assert [message.role for message in opening] == ["system", "user"]
+    assert opening[1].content == SESSION_DEFAULT_INSTRUCTION
+
+
 def _model_input(llm) -> str:
     """Every message and tool schema a scripted model was sent, as one text."""
 
