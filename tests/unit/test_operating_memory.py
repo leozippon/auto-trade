@@ -160,6 +160,9 @@ def test_the_curated_library_is_a_valid_skill_tree_of_operational_entries() -> N
     assert set(entries) == {
         "artifact-hygiene",
         "grid-plateau-selection",
+        "refit-snapshot-rescore",
+        "replay-turnover-basis",
+        "residual-label-benchmark",
         "verify-own-measurements",
     }
 
