@@ -2655,7 +2655,7 @@ def recent_fundamental_event_codes(
     codes: set[str] = set()
     for dataset in period_datasets:
         for period in refresh_periods:
-            codes.update(read_partition_ts_codes(raw_dir / dataset / f"period={period}.parquet", start_date, end_date, require_date_match=True))
+            codes.update(read_partition_ts_codes(raw_dir / dataset / f"period={period}.parquet", start_date, end_date, require_date_match=True, date_columns=SCHEDULE_DATASET_EVENT_COLUMNS.get(dataset)))
     for dataset in ann_month_datasets:
         for month in refresh_months:
             codes.update(read_partition_ts_codes(raw_dir / dataset / f"ann_month={month}.parquet", start_date, end_date, require_date_match=False))
@@ -2665,17 +2665,23 @@ def recent_fundamental_event_codes(
 FUNDAMENTAL_EVENT_DATE_COLUMNS = ("f_ann_date", "ann_date", "first_ann_date", "imp_ann_date", "actual_date", "pre_date")
 
 
-def read_partition_ts_codes(path: Path, start_date: str | None = None, end_date: str | None = None, require_date_match: bool = False) -> set[str]:
+# disclosure_date is the vendor's disclosure schedule: ann_date and pre_date are
+# planned/refreshed dates that exist for every listed code as soon as a quarter
+# ends, so only actual_date marks a report that was really disclosed.
+SCHEDULE_DATASET_EVENT_COLUMNS = {"disclosure_date": ("actual_date",)}
+
+
+def read_partition_ts_codes(path: Path, start_date: str | None = None, end_date: str | None = None, require_date_match: bool = False, date_columns: tuple[str, ...] | None = None) -> set[str]:
     if not path.exists():
         return set()
     frame = pd.read_parquet(path)
     if "ts_code" not in frame.columns:
         return set()
     if start_date and end_date:
-        date_columns = [column for column in FUNDAMENTAL_EVENT_DATE_COLUMNS if column in frame.columns]
-        if date_columns:
+        present = [column for column in (date_columns or FUNDAMENTAL_EVENT_DATE_COLUMNS) if column in frame.columns]
+        if present:
             mask = pd.Series(False, index=frame.index)
-            for column in date_columns:
+            for column in present:
                 mask |= frame[column].map(lambda value: date_value_in_window(value, start_date, end_date))
             frame = frame[mask]
         elif require_date_match:

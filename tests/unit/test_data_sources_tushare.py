@@ -4271,6 +4271,21 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         self.assertEqual(codes, {"000001.SZ"})
 
+    def test_disclosure_schedule_rows_mark_codes_only_by_actual_disclosure(self):
+        path = self.raw_dir / "disclosure_date" / "period=20200930.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame([
+            {"ts_code": "000001.SZ", "ann_date": "20200930", "end_date": "20200930", "pre_date": "20201020", "actual_date": None},
+            {"ts_code": "000002.SZ", "ann_date": "20200930", "end_date": "20200930", "pre_date": "20201020", "actual_date": "20200602"},
+            {"ts_code": "000003.SZ", "ann_date": "20200930", "end_date": "20200930", "pre_date": "20201020", "actual_date": "20200301"},
+        ]).to_parquet(path, index=False)
+
+        codes = download.recent_fundamental_event_codes(
+            self.raw_dir, {"20200930"}, set(), ["disclosure_date"], [], "20200601", "20200930",
+        )
+
+        self.assertEqual(codes, {"000002.SZ"})
+
     def test_revision_sentinel_compares_without_overwriting_raw(self):
         self._write_trade_cal("20200102")
         path = self.raw_dir / "adj_factor" / "trade_date=20200102.parquet"
