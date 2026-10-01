@@ -763,11 +763,17 @@ class PITDailyEvaluationBackend:
         nl_failure_policy: str = "return_error_with_audit",
         max_intraday_row_group_rows: int = 2_000_000,
         benchmark_index: str,
+        experiment_id: str,
     ) -> None:
         if execution_mode not in {"sandbox", "trusted"}:
             raise ValueError("execution_mode must be sandbox or trusted")
+        if not str(experiment_id).strip():
+            raise ValueError("the PIT evaluation backend needs its arm's experiment_id")
         self.results_root = Path(results_root).resolve()
         self.execution_mode = execution_mode
+        # The arm whose replays this backend runs: with the span, the whole
+        # key of the zero-skill panel's seed.
+        self.experiment_id = str(experiment_id)
         # The arm's benchmark, for every replay this backend runs: the series
         # the attribution and the verdict regress on, and the membership the
         # zero-skill panel draws replacements from. Refused here if the lake
@@ -989,6 +995,10 @@ class PITDailyEvaluationBackend:
             # from its completed executions once it is over: every draw runs
             # through a Broker of its own, so nothing here reaches the record
             # above. A truncated smoke run is not a Validation and gets none.
+            # Seeded by the arm and the span, never the revision: identical
+            # trades on one span of one arm always meet the identical panel, so
+            # resubmitting a book cannot re-roll it, and the arm's candidates
+            # and controls on a span are graded against common draws.
             panel = None
             if max_days is None and start_day is None:
                 panel_failure: Exception | None = None
@@ -1001,7 +1011,7 @@ class PITDailyEvaluationBackend:
                             request.broker_profile,
                             request.schedule,
                             seed=null_control_seed(
-                                f"{request.revision.revision_id}:{replay_start}:{replay_end}",
+                                f"{self.experiment_id}:{replay_start}:{replay_end}",
                                 "panel",
                             ),
                             corporate_actions=corporate_actions,

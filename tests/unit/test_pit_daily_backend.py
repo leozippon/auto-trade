@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import errno
 import io
 import json
@@ -109,7 +110,7 @@ def generate_orders(context):
     result = PITDailyEvaluationBackend(
         tmp_path / "results",
         execution_mode="sandbox",
-        benchmark_index=DEFAULT_BENCHMARK_INDEX,
+        experiment_id="arm", benchmark_index=DEFAULT_BENCHMARK_INDEX,
     ).evaluate(
         EvaluationRequest(
             ArtifactRevision("revision_sandbox", revision),
@@ -208,7 +209,7 @@ def generate_orders(context):
         execution_mode="trusted",
         nl_config=NLConfig(max_calls_per_decision=1, max_total_calls=2),
         max_intraday_row_group_rows=1,
-        benchmark_index=DEFAULT_BENCHMARK_INDEX,
+        experiment_id="arm", benchmark_index=DEFAULT_BENCHMARK_INDEX,
     )
     result = backend.evaluate(
         EvaluationRequest(
@@ -357,7 +358,7 @@ def generate_orders(context):
     result = PITDailyEvaluationBackend(
         tmp_path / "results",
         execution_mode="trusted",
-        benchmark_index=DEFAULT_BENCHMARK_INDEX,
+        experiment_id="arm", benchmark_index=DEFAULT_BENCHMARK_INDEX,
     ).evaluate(
         EvaluationRequest(
             ArtifactRevision("revision_history", revision),
@@ -444,7 +445,7 @@ def test_evaluation_summary_carries_the_whole_agent_visible_field_set(
         tmp_path / "results",
         execution_mode="trusted",
         nl_config=NLConfig(),
-        benchmark_index=DEFAULT_BENCHMARK_INDEX,
+        experiment_id="arm", benchmark_index=DEFAULT_BENCHMARK_INDEX,
     ).evaluate(
         EvaluationRequest(
             ArtifactRevision("revision_timing", revision),
@@ -628,7 +629,7 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
         StrategySchedule("day", "09:28"),
         BrokerProfile(initial_cash=100_000),
     )
-    backend = PITDailyEvaluationBackend(tmp_path / "results", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX)
+    backend = PITDailyEvaluationBackend(tmp_path / "results", execution_mode="trusted", experiment_id="arm", benchmark_index=DEFAULT_BENCHMARK_INDEX)
     result = backend.evaluate(request)
 
     record = json.loads(Path(result.result_ref).read_text(encoding="utf-8"))
@@ -679,6 +680,33 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
 
     assert without_clock(bare) == without_clock(record)
 
+    # The panel is seeded by the arm and the span, never the revision: the
+    # same book resubmitted as a new revision meets the identical panel, so a
+    # resubmission cannot re-roll it; another arm draws its own.
+    def panel_of(result) -> dict:
+        return json.loads(
+            (Path(result.result_ref).parent / "style_analysis.json").read_text(encoding="utf-8")
+        )
+
+    resubmitted = panel_of(
+        backend.evaluate(
+            dataclasses.replace(
+                request, revision=ArtifactRevision("revision_resubmitted", revision)
+            )
+        )
+    )
+    assert resubmitted["panel"]["seed"] == style["panel"]["seed"]
+    assert resubmitted["panel_daily"] == style["panel_daily"]
+    other_arm = panel_of(
+        PITDailyEvaluationBackend(
+            tmp_path / "results_other_arm",
+            execution_mode="trusted",
+            experiment_id="other_arm",
+            benchmark_index=DEFAULT_BENCHMARK_INDEX,
+        ).evaluate(request)
+    )
+    assert other_arm["panel"]["seed"] != style["panel"]["seed"]
+
     # Drawing the panel is the host's work: a failure there is never a
     # measurement of the candidate, even when it comes through the engine
     # wrapper the panel's scripted orders run in, which types anything raised
@@ -698,7 +726,7 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
     # The null control replays its draws through the same slot table, and it
     # finds that table on disk: the backend instance that evaluated the result
     # is gone by the time a restarted worker ranks the node it recorded.
-    restarted = PITDailyEvaluationBackend(tmp_path / "results", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX)
+    restarted = PITDailyEvaluationBackend(tmp_path / "results", execution_mode="trusted", experiment_id="arm", benchmark_index=DEFAULT_BENCHMARK_INDEX)
     null_control_call = {
         "start": "20240102",
         "end": "20240103",
@@ -723,7 +751,7 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
 
     (replay / "corporate_actions.parquet").unlink()
     with pytest.raises(FileNotFoundError, match="declares corporate_actions"):
-        PITDailyEvaluationBackend(tmp_path / "results_missing", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
+        PITDailyEvaluationBackend(tmp_path / "results_missing", execution_mode="trusted", experiment_id="arm", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
             request
         )
     # A slot cached before ex-dates were settled declares no such domain: it
@@ -731,7 +759,7 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
     del replay_manifest["domains"]["corporate_actions"]
     (replay / "manifest.json").write_text(json.dumps(replay_manifest), encoding="utf-8")
     with pytest.raises(RuntimeError, match="must be rebuilt"):
-        PITDailyEvaluationBackend(tmp_path / "results_stale", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
+        PITDailyEvaluationBackend(tmp_path / "results_stale", execution_mode="trusted", experiment_id="arm", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
             request
         )
 
@@ -1741,7 +1769,7 @@ def generate_orders(context):
 
     def _run(max_days, start_day=None):
         return PITDailyEvaluationBackend(
-            tmp_path / f"results_{max_days}_{start_day}", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX
+            tmp_path / f"results_{max_days}_{start_day}", execution_mode="trusted", experiment_id="arm", benchmark_index=DEFAULT_BENCHMARK_INDEX
         ).evaluate(
             EvaluationRequest(
                 ArtifactRevision("revision_layout", revision),
@@ -2173,10 +2201,10 @@ def test_a_span_rolls_the_universe_to_each_slots_own_vintage(tmp_path: Path) -> 
 
     snapshot, slots = _write_span_release(tmp_path)
     revision = _span_revision(tmp_path)
-    chain = PITDailyEvaluationBackend(tmp_path / "results_chain", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
+    chain = PITDailyEvaluationBackend(tmp_path / "results_chain", execution_mode="trusted", experiment_id="arm", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
         _span_request(snapshot, slots["a"], slots["b"], revision=revision)
     )
-    single = PITDailyEvaluationBackend(tmp_path / "results_single", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
+    single = PITDailyEvaluationBackend(tmp_path / "results_single", execution_mode="trusted", experiment_id="arm", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
         _span_request(snapshot, slots["ab"], revision=revision)
     )
     base = ["000001.SZ:平安银行", "000002.SZ:万科A"]
@@ -2198,7 +2226,7 @@ def test_a_span_refuses_a_slot_whose_anchor_has_no_decision_universe(tmp_path: P
     snapshot, slots = _write_span_release(tmp_path)
     (snapshot.parent / _SPAN_SLOTS["b"][2] / "universe.parquet").unlink()
     with pytest.raises(FileNotFoundError, match="has no decision-view universe"):
-        PITDailyEvaluationBackend(tmp_path / "results", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
+        PITDailyEvaluationBackend(tmp_path / "results", execution_mode="trusted", experiment_id="arm", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
             _span_request(snapshot, slots["a"], slots["b"], revision=_span_revision(tmp_path))
         )
 
@@ -2216,10 +2244,10 @@ def test_a_span_of_slots_is_one_book_equal_to_one_long_slot(tmp_path: Path) -> N
 
     snapshot, slots = _write_span_release(tmp_path)
     revision = _span_revision(tmp_path)
-    chain = PITDailyEvaluationBackend(tmp_path / "results_chain", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
+    chain = PITDailyEvaluationBackend(tmp_path / "results_chain", execution_mode="trusted", experiment_id="arm", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
         _span_request(snapshot, slots["a"], slots["b"], revision=revision)
     )
-    single = PITDailyEvaluationBackend(tmp_path / "results_single", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
+    single = PITDailyEvaluationBackend(tmp_path / "results_single", execution_mode="trusted", experiment_id="arm", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
         _span_request(snapshot, slots["ab"], revision=revision)
     )
     chain_record, single_record = (
@@ -2343,10 +2371,10 @@ def test_an_arm_replays_grades_and_records_its_own_benchmark_index(tmp_path: Pat
         )
 
     csi500 = PITDailyEvaluationBackend(
-        tmp_path / "results_csi500", execution_mode="trusted", benchmark_index="000905.SH"
+        tmp_path / "results_csi500", execution_mode="trusted", experiment_id="arm", benchmark_index="000905.SH"
     ).evaluate(request)
     backend = PITDailyEvaluationBackend(
-        tmp_path / "results_default", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX
+        tmp_path / "results_default", execution_mode="trusted", experiment_id="arm", benchmark_index=DEFAULT_BENCHMARK_INDEX
     )
     # A Validation reports it as the panel's failure, the setup error in its text.
     with pytest.raises(
@@ -2387,7 +2415,7 @@ def test_an_arm_replays_grades_and_records_its_own_benchmark_index(tmp_path: Pat
 def test_an_unknown_benchmark_index_never_reaches_a_replay(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="399905.SZ"):
         PITDailyEvaluationBackend(
-            tmp_path / "results", execution_mode="trusted", benchmark_index="399905.SZ"
+            tmp_path / "results", execution_mode="trusted", experiment_id="arm", benchmark_index="399905.SZ"
         )
 
 
@@ -2437,7 +2465,7 @@ def test_a_late_opening_window_never_publishes_the_spans_parts(tmp_path: Path) -
     revision = _span_revision(tmp_path)
     request = _span_request(snapshot, slots["a"], slots["b"], revision=revision)
 
-    late = PITDailyEvaluationBackend(tmp_path / "results_late", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
+    late = PITDailyEvaluationBackend(tmp_path / "results_late", execution_mode="trusted", experiment_id="arm", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
         request, start_day="20240103"
     )
     assert late.summary["replayed_trade_days"] == 3
@@ -2445,20 +2473,20 @@ def test_a_late_opening_window_never_publishes_the_spans_parts(tmp_path: Path) -
 
     # Truncated only at the end, the window IS the span's own prefix: it keeps
     # the stash, so a rehearsal from day one still costs the span nothing.
-    head = PITDailyEvaluationBackend(tmp_path / "results_head", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
+    head = PITDailyEvaluationBackend(tmp_path / "results_head", execution_mode="trusted", experiment_id="arm", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
         request, max_days=1
     )
     assert head.summary["replayed_trade_days"] == 1
     prefix = _span_stash_parts(snapshot, slots["a"], slots["b"])
     assert prefix
 
-    full = PITDailyEvaluationBackend(tmp_path / "results_full", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(request)
+    full = PITDailyEvaluationBackend(tmp_path / "results_full", execution_mode="trusted", experiment_id="arm", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(request)
     assert full.summary["replayed_trade_days"] == 4
     parts = _span_stash_parts(snapshot, slots["a"], slots["b"])
     assert {key: parts[key] for key in prefix} == prefix
     # The stash the late window ran against still holds exactly the parts one
     # long slot writes.
-    PITDailyEvaluationBackend(tmp_path / "results_long", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
+    PITDailyEvaluationBackend(tmp_path / "results_long", execution_mode="trusted", experiment_id="arm", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
         _span_request(snapshot, slots["ab"], revision=revision)
     )
     assert parts == _span_stash_parts(snapshot, slots["ab"])
@@ -2481,7 +2509,7 @@ def test_a_late_opening_window_reuses_the_stash_it_keys_by_its_opening_day(
     revision = _span_revision(tmp_path)
     request = _span_request(snapshot, slots["a"], slots["b"], revision=revision)
 
-    first = PITDailyEvaluationBackend(tmp_path / "results_first", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
+    first = PITDailyEvaluationBackend(tmp_path / "results_first", execution_mode="trusted", experiment_id="arm", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
         request, start_day="20240103"
     )
     assert first.summary["replayed_trade_days"] == 3
@@ -2498,7 +2526,7 @@ def test_a_late_opening_window_reuses_the_stash_it_keys_by_its_opening_day(
 
     counter = _CountingParquet()
     monkeypatch.setattr(timeview_module, "pq", counter)
-    again = PITDailyEvaluationBackend(tmp_path / "results_again", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
+    again = PITDailyEvaluationBackend(tmp_path / "results_again", execution_mode="trusted", experiment_id="arm", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
         request, start_day="20240103"
     )
     # Every part of the second probe was hardlinked out of the window's stash:
@@ -2512,7 +2540,7 @@ def test_a_late_opening_window_reuses_the_stash_it_keys_by_its_opening_day(
     # A window opening on another day is another stream: it must not read this
     # one's parts, so the opening day is part of the key, not a label on it.
     monkeypatch.undo()
-    PITDailyEvaluationBackend(tmp_path / "results_other", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
+    PITDailyEvaluationBackend(tmp_path / "results_other", execution_mode="trusted", experiment_id="arm", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
         request, start_day="20240104"
     )
     later = _span_stash_parts(snapshot, slots["a"], slots["b"], window_start="20240104")
@@ -2555,7 +2583,7 @@ def test_a_span_opens_a_slot_at_its_first_decision_and_reads_only_the_rows_it_pu
     monkeypatch.setattr(Timeview, "refresh", counting_refresh)
     monkeypatch.setattr(pit_backend, "_open_replay_rows", tracking_open)
     monkeypatch.setattr(timeview_module.ReplayRows, "take", counting_take)
-    PITDailyEvaluationBackend(tmp_path / "results", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
+    PITDailyEvaluationBackend(tmp_path / "results", execution_mode="trusted", experiment_id="arm", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
         _span_request(snapshot, slots["a"], slots["b"], revision=revision)
     )
     assert at_open == {slots["a"].name: 0, slots["b"].name: 2}
@@ -2581,7 +2609,7 @@ def test_a_strategy_exception_in_a_later_slot_is_the_strategys_own(tmp_path: Pat
     revision = _span_revision(tmp_path, source)
     results = tmp_path / "results"
     with pytest.raises(BacktestError, match="no edge in slot two") as raised:
-        PITDailyEvaluationBackend(results, execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
+        PITDailyEvaluationBackend(results, execution_mode="trusted", experiment_id="arm", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
             _span_request(snapshot, slots["a"], slots["b"], revision=revision)
         )
     assert raised_by_strategy(raised.value)
@@ -2594,7 +2622,7 @@ def test_a_strategy_exception_in_a_later_slot_is_the_strategys_own(tmp_path: Pat
 def test_a_span_refuses_slots_that_do_not_partition_its_rows(tmp_path: Path) -> None:
     snapshot, slots = _write_span_release(tmp_path)
     revision = _span_revision(tmp_path)
-    backend = PITDailyEvaluationBackend(tmp_path / "results", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX)
+    backend = PITDailyEvaluationBackend(tmp_path / "results", execution_mode="trusted", experiment_id="arm", benchmark_index=DEFAULT_BENCHMARK_INDEX)
     manifest_path = slots["b"] / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
@@ -2619,7 +2647,7 @@ def test_a_span_refuses_slots_that_do_not_partition_its_rows(tmp_path: Path) -> 
 def test_a_span_prebuild_encodes_the_parts_its_replay_publishes(tmp_path: Path) -> None:
     snapshot, slots = _write_span_release(tmp_path / "prebuilt")
     replayed_snapshot, replayed_slots = _write_span_release(tmp_path / "replayed")
-    PITDailyEvaluationBackend(tmp_path / "results", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
+    PITDailyEvaluationBackend(tmp_path / "results", execution_mode="trusted", experiment_id="arm", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
         _span_request(
             replayed_snapshot, replayed_slots["a"], replayed_slots["b"], revision=_span_revision(tmp_path)
         )

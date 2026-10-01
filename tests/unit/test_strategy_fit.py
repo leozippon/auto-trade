@@ -590,7 +590,7 @@ def _pit_bundle(tmp_path: Path, replay_days: list[str]) -> tuple[Path, Path]:
 
 
 def _evaluate(tmp_path: Path, revision: Path, snapshot: Path, replay: Path, days: list[str], *, max_days=None):
-    backend = PITDailyEvaluationBackend(tmp_path / "results", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX)
+    backend = PITDailyEvaluationBackend(tmp_path / "results", execution_mode="trusted", experiment_id="arm", benchmark_index=DEFAULT_BENCHMARK_INDEX)
     result = backend.evaluate(
         EvaluationRequest(
             ArtifactRevision("revision_fit", revision, revision.parent / "models"),

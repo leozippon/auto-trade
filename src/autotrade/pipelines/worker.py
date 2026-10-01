@@ -866,6 +866,7 @@ def build_experiment_pipeline(
             max_intraday_row_group_rows=options.max_intraday_row_group_rows,
             sandbox=strategy_sandbox,
             benchmark_index=options.rolling.benchmark_index,
+            experiment_id=options.experiment_id,
         )
         trading_days = snapshots.trading_days
     else:
