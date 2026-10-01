@@ -98,6 +98,8 @@ from autotrade.webui.manager import _ID as EXPERIMENT_ID_RE
 
 EXPERIMENTS_ROOT = REPO_ROOT / "experiments"
 ARCHIVE_ROOT = REPO_ROOT / "logs" / "archive"
+# Where an arm's reference pack lives when the arm does not name one.
+PACKS_DIR = "configs/workspace_refs"
 # The id the round-level dry-run validates under. Never created: it only
 # carries the parameters every arm shares through the pre-flight.
 PROBE_ID = "round_dry_run_probe"
@@ -379,10 +381,12 @@ class Round:
     """One round definition: its arms and what it decides differently.
 
     ``arms`` maps experiment id to the per-arm part of the create request --
-    normally ``workspace_reference`` and ``research_directive``, plus
-    any parameter that arm alone changes. ``overrides`` is what the whole round
-    decides on top of BASE_OVERRIDES -- normally its dataset selection -- and
-    ``pit_views_seed`` the prebuilt view tree every arm hardlinks from.
+    normally ``research_directive`` (the pack defaults to the one named after
+    the arm, see :meth:`request_params`), plus any parameter that arm alone
+    changes. ``overrides`` is what the whole round decides on top of
+    BASE_OVERRIDES -- normally its dataset selection, and any default every arm
+    shares -- and ``pit_views_seed`` the prebuilt view tree every arm hardlinks
+    from.
     """
 
     arms: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
@@ -437,14 +441,19 @@ class Round:
         """The create request body: console defaults, the round's decisions, the id.
 
         ``PROBE_ID`` stands for the part every arm shares; any other id must be
-        one of the round's arms.
+        one of the round's arms. An arm's pack is the one named after it,
+        ``configs/workspace_refs/<id>``, unless the arm or the round names
+        another (``""`` for none); the pre-flight refuses one that is missing.
         """
         base = {
             key: (list(value) if isinstance(value, tuple) else value)
             for key, value in WEB_CREATE_DEFAULTS.items()
         }
+        common = self.common_overrides
         arm = {} if experiment_id == PROBE_ID else dict(self.arms[experiment_id])
-        return {**base, **self.common_overrides, **arm, "experiment_id": experiment_id}
+        if experiment_id != PROBE_ID and "workspace_reference" not in {*arm, *common}:
+            arm["workspace_reference"] = f"{PACKS_DIR}/{experiment_id}"
+        return {**base, **common, **arm, "experiment_id": experiment_id}
 
     def validated(self, experiment_id: str) -> tuple[dict[str, object] | None, str]:
         """params.json for one arm (or the probe), or ``(None, reason)``.

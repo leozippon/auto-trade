@@ -73,8 +73,9 @@ def _synthetic_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rnd: Round)
     the prebuild writes to ``provider.json``, over the one published release
     they all name, which reaches the round's Held-out and holds benchmark
     history back to the backfill floor, as the lake now does; a tree needs
-    nothing else for the create-time pre-flight to accept it. Returns the
-    round's tree.
+    nothing else for the create-time pre-flight to accept it. Every arm's
+    reference pack exists, as the repository holds them. Returns the round's
+    tree.
     """
     monkeypatch.setattr(_round, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(_round, "EXPERIMENTS_ROOT", tmp_path / "experiments")
@@ -82,6 +83,9 @@ def _synthetic_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rnd: Round)
     for experiment_id in (PROBE_ID, *rnd.arms):
         params = rnd.request_params(experiment_id)
         configs.setdefault(str(params["pit_views_seed"]), _snapshot_config(params))
+        if params["workspace_reference"]:
+            # Arms that are independent seeds of one search share a pack.
+            (tmp_path / str(params["workspace_reference"])).mkdir(parents=True, exist_ok=True)
     release = publish_release(
         tmp_path,
         "synthetic",
@@ -136,11 +140,6 @@ def test_a_round_dry_runs_against_its_seed_contract(
     and every arm passes after them."""
     rnd = ROUNDS[round_name]
     _synthetic_repo(tmp_path, monkeypatch, rnd)
-    for arm in rnd.arms.values():
-        reference = arm.get("workspace_reference")
-        if reference:
-            # Arms that are independent seeds of one search share a pack.
-            (tmp_path / str(reference)).mkdir(parents=True, exist_ok=True)
     assert rnd.main(["launcher", "0", "--dry-run"]) == 0
     out = capsys.readouterr().out.splitlines()
     assert "release synthetic, which every arm pins" in out[0]
@@ -256,6 +255,51 @@ def test_an_eight_year_round_refuses_star_50_and_fundamentals(
     )
     assert "different snapshot configuration" in reasons["eight_year_fundamentals"]
     assert err[-1] == "refused: eight_year_star50, eight_year_fundamentals"
+
+
+def test_an_arm_mounts_the_pack_named_after_it_unless_it_names_another(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An arm may leave out its pack when the pack is configs/workspace_refs/<id>.
+
+    Every checked-in arm that names exactly that path sends the same create
+    request byte for byte without it; an arm or a round that names another
+    pack, or "" for none, keeps it; and a default pack that is not there is
+    refused like a named one."""
+    for round_name, rnd in ROUNDS.items():
+        for experiment_id, arm in rnd.arms.items():
+            if arm.get("workspace_reference") != f"configs/workspace_refs/{experiment_id}":
+                continue
+            trimmed = Round(
+                arms={experiment_id: {k: v for k, v in arm.items() if k != "workspace_reference"}},
+                overrides=rnd.overrides,
+                pit_views_seed=rnd.pit_views_seed,
+            )
+            assert json.dumps(trimmed.request_params(experiment_id)) == json.dumps(
+                rnd.request_params(experiment_id)
+            ), (round_name, experiment_id)
+    rnd = Round(
+        arms={
+            "conventional": {},
+            "elsewhere": {"workspace_reference": "configs/workspace_refs/shared"},
+            "packless": {"workspace_reference": ""},
+        },
+        pit_views_seed="data/seed_probe",
+    )
+    assert {arm: rnd.request_params(arm)["workspace_reference"] for arm in rnd.arms} == {
+        "conventional": "configs/workspace_refs/conventional",
+        "elsewhere": "configs/workspace_refs/shared",
+        "packless": "",
+    }
+    assert rnd.request_params(PROBE_ID)["workspace_reference"] == WEB_CREATE_DEFAULTS["workspace_reference"]
+    shared = Round(arms={"seed_a": {}}, overrides={"workspace_reference": "configs/workspace_refs/shared"})
+    assert shared.request_params("seed_a")["workspace_reference"] == "configs/workspace_refs/shared"
+    _synthetic_repo(tmp_path, monkeypatch, rnd)
+    (tmp_path / "configs/workspace_refs/conventional").rmdir()
+    assert rnd.main(["launcher", "0", "--dry-run"]) == 1
+    err = capsys.readouterr().err
+    assert "conventional: parameters rejected" in err and "workspace_reference" in err
+    assert err.splitlines()[-1] == "refused: conventional"
 
 
 def test_a_dry_run_reads_each_lineage_and_refuses_one_by_name(
