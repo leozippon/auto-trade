@@ -137,9 +137,18 @@ def test_a_round_dry_runs_against_its_seed_contract(
 ) -> None:
     """What `--dry-run` reports on a finished seed for this round's selection:
     the shared parameters pass the console's own pre-flight, geometry included,
-    and every arm passes after them."""
+    and every arm passes after them. Each lineage arm a round names exists, as
+    the experiments it continues do."""
+    from tests.unit.test_lineage import _arm
+
     rnd = ROUNDS[round_name]
     _synthetic_repo(tmp_path, monkeypatch, rnd)
+    for experiment_id in rnd.arms:
+        params = rnd.request_params(experiment_id)
+        for seed, name in enumerate(params.get("lineage_arms") or ()):
+            if not (tmp_path / "experiments" / name).exists():
+                research = (str(params["research_start"]), str(params["research_end"]))
+                _arm(tmp_path / "experiments", name, [{"seed": seed, "loading": 0.5}], research=research)
     assert rnd.main(["launcher", "0", "--dry-run"]) == 0
     out = capsys.readouterr().out.splitlines()
     assert "release synthetic, which every arm pins" in out[0]
@@ -838,7 +847,7 @@ def test_mounting_index_weight_leaves_every_other_round_byte_for_byte() -> None:
         "create_round_20260925",
         "create_round_20260926",
     }
-    eight_year = {"create_round_20260927"}
+    eight_year = {"create_round_20260927", "create_round_20261001"}
     assert carrying == lineage | eight_year, sorted(carrying)
     base = records["create_round_20260920"]
     for name in sorted(eight_year):
