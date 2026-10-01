@@ -2188,6 +2188,34 @@ class SnapshotBuilderTest(unittest.TestCase):
             )
         self.assertIn("impai_ttm", str(ctx.exception))
 
+    def test_inventory_attributes_a_column_the_raw_sample_missed_to_its_sole_owner(self):
+        # The PIT union can carry a vendor column (dividend.base_share) that no
+        # sampled raw footer has. The committed inventory names its one owner;
+        # a column two datasets own, or none does, stays unattributed and the
+        # view's column map still refuses it.
+        from autotrade.environment.data.units import snapshot_column_map
+
+        sampled = {"dividend": ["dataset"], "income_vip": ["dataset"], "express_vip": ["dataset"]}
+        frame = pd.DataFrame([{"dataset": "dividend", "base_share": 1.0}])
+        attributed = snapshot_module._declare_present_inventory_columns(frame, sampled)
+        self.assertEqual(attributed["dividend"], ["dataset", "base_share"])
+        self.assertEqual(sampled["dividend"], ["dataset"])  # the sample itself is not mutated
+        for extra in ("diluted_eps", "not_a_vendor_column"):  # income_vip + express_vip; nobody
+            ambiguous = frame.assign(**{extra: 0.1})
+            columns = snapshot_module._declare_present_inventory_columns(ambiguous, sampled)
+            self.assertEqual(columns["dividend"], ["dataset", "base_share"])
+            self.assertNotIn(extra, columns["income_vip"] + columns["express_vip"])
+            with tempfile.TemporaryDirectory() as tmp:
+                write(Path(tmp) / "fundamentals.parquet", ambiguous)
+                with self.assertRaisesRegex(ValueError, f"does not attribute.*{extra}"):
+                    snapshot_column_map(Path(tmp), {"domains": {"fundamentals": {"dataset_columns": columns}}})
+        with tempfile.TemporaryDirectory() as tmp:
+            write(Path(tmp) / "fundamentals.parquet", frame)
+            column_map = snapshot_column_map(
+                Path(tmp), {"domains": {"fundamentals": {"dataset_columns": attributed}}}
+            )
+        self.assertEqual(column_map[("fundamentals.parquet", "dividend")], ["dataset", "base_share"])
+
     def test_available_at_union_keeps_dataset_order_when_datasets_load_in_parallel(self):
         with tempfile.TemporaryDirectory() as tmp:
             raw = Path(tmp) / "raw"

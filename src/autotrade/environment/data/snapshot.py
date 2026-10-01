@@ -706,6 +706,7 @@ class SnapshotBuilder:
                 fundamentals,
                 _fundamental_dataset_columns(self.raw_dir, tuple(config.fundamental_datasets)),
             )
+            dataset_columns = _declare_present_inventory_columns(fundamentals, dataset_columns)
             profile = _write_with_profile(
                 output_dir / "fundamentals.parquet",
                 fundamentals,
@@ -1078,6 +1079,7 @@ class SnapshotBuilder:
                 fundamentals,
                 _fundamental_dataset_columns(self.raw_dir, tuple(config.fundamental_datasets)),
             )
+            dataset_columns = _declare_present_inventory_columns(fundamentals, dataset_columns)
             profile = _write_with_profile(
                 output_dir / "fundamentals.parquet", fundamentals, build_seconds=time.perf_counter() - started
             )
@@ -2561,6 +2563,39 @@ def _write(path: Path, frame: pd.DataFrame) -> None:
     table = pa.Table.from_pandas(frame, preserve_index=False)
     pq.write_table(table, tmp)
     tmp.replace(path)
+
+
+def _declare_present_inventory_columns(
+    frame: pd.DataFrame, dataset_columns: dict[str, list[str]]
+) -> dict[str, list[str]]:
+    """Attribute physical columns the raw-schema sample missed.
+
+    A vendor column such as ``dividend.base_share`` can be present in the PIT
+    union (and therefore in ``fundamentals.parquet``) while none of the three
+    sampled raw footers has it: the PIT store keeps a column the sampled raw
+    schemas do not show. The committed inventory
+    names the dataset that owns the column; a column two datasets own, or none
+    does, is left unattributed, and ``units.snapshot_column_map`` refuses it.
+    """
+    declared = {column for columns in dataset_columns.values() for column in columns}
+    extra = [column for column in frame.columns if column not in declared]
+    if not extra:
+        return dataset_columns
+    inventory_path = Path(__file__).resolve().parents[4] / "configs" / "data" / "snapshot_columns.json"
+    if not inventory_path.is_file():
+        return dataset_columns
+    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    owned = inventory.get("files", {}).get("fundamentals.parquet", {})
+    out = {dataset: list(columns) for dataset, columns in dataset_columns.items()}
+    for column in extra:
+        owners = [
+            dataset
+            for dataset, columns in owned.items()
+            if isinstance(columns, list) and column in columns and dataset in out
+        ]
+        if len(owners) == 1:
+            out[owners[0]].append(column)
+    return out
 
 
 def _fundamental_dataset_columns(raw_dir: Path, datasets: tuple[str, ...]) -> dict[str, list[str]]:
