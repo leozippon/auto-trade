@@ -15,19 +15,33 @@ from autotrade.environment.runtime import chmod_tree
 from autotrade.environment.step_tree import StepTree, node_in_session
 
 from .base import ToolError, ToolResult, ToolSpec
+from .node_reference import (
+    NODE_REFERENCE_DESCRIPTION,
+    NODE_REFERENCE_EXAMPLE,
+    session_handle,
+    session_node_reference,
+)
 
 
 class StepRollbackTool:
     spec = ToolSpec(
         "step_rollback",
-        "Restore one fully evaluated Step revision and branch from it.",
+        "Restore one fully evaluated Step revision of this session and branch from it.",
         {
             "type": "object",
-            "properties": {"node_id": {"type": "string", "minLength": 1, "maxLength": 500}},
+            "properties": {
+                "node_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500,
+                    "description": NODE_REFERENCE_DESCRIPTION,
+                }
+            },
             "required": ["node_id"],
             "additionalProperties": False,
         },
         mutating=True,
+        example={"node_id": NODE_REFERENCE_EXAMPLE},
     )
 
     def __init__(
@@ -44,13 +58,14 @@ class StepRollbackTool:
         self.session_ref = session_ref
 
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
-        node_id = str(arguments["node_id"])
-        try:
-            node = self.tree.get_node(node_id)
-        except ValueError as exc:
-            # Same shaping as finish_session: a typed tool error carries an
-            # error_type the model can act on, an escaping ValueError does not.
-            raise ToolError("step_rollback cannot restore an absent Step") from exc
+        node_id = session_node_reference(
+            "step_rollback",
+            self.tree,
+            str(arguments["node_id"]),
+            session_ref=self.session_ref,
+            offered=self._restorable(),
+        )
+        node = self.tree.get_node(node_id)
         # Same session rule as finish_session: the tree carries earlier
         # sessions' nodes as read-only evidence, and restoring one would rebase
         # this session's work copy and lineage onto a node it may not select.
@@ -83,7 +98,23 @@ class StepRollbackTool:
             ) from exc
         restore_working_artifacts_writable(self.output_dir, self.models_dir)
         self.tree.set_position(node_id)
-        return ToolResult(True, value={"node_id": node_id, "revision_id": str(node["revision_id"])})
+        return ToolResult(
+            True,
+            value={
+                "node_id": node_id,
+                **session_handle(self.tree, node_id, session_ref=self.session_ref),
+                "revision_id": str(node["revision_id"]),
+            },
+        )
+
+    def _restorable(self) -> list[str]:
+        return [
+            str(node["node_id"])
+            for node in self.tree.nodes()
+            if node_in_session(node, session_ref=self.session_ref)
+            and node.get("complete_validation")
+            and node.get("revision_id")
+        ]
 
 
 def _unlock_for_replace(target: Path) -> None:

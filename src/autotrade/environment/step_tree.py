@@ -22,7 +22,8 @@ import json
 import os
 import shutil
 import uuid
-from collections.abc import Mapping
+from collections import Counter
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
 from autotrade.environment.artifacts import copy_artifact, copy_model_artifacts
@@ -44,6 +45,74 @@ def node_in_session(node: Mapping[str, object], *, session_ref: str) -> bool:
     """
 
     return node.get("session_ref") == session_ref
+
+
+def node_handle(node_id: str) -> str:
+    """A Step node's short handle: the result name its id ends with (``valid_002``).
+
+    A node id joins four opaque parts (``<epoch>__<session_ref>__<run_ref>__
+    <result name>``) and runs past a hundred characters, which the session's
+    model mistypes; the result name is the part that tells one Validation of
+    a session from another. Each attempt numbers its results from
+    ``valid_001``, so a resumed attempt can repeat an earlier attempt's handle
+    -- a handle names a node only where no other node of the session shares it.
+    """
+
+    return str(node_id).rsplit("__", 1)[-1]
+
+
+def unique_handles(node_ids: Iterable[str]) -> dict[str, str]:
+    """Node id -> short handle, for the ids whose handle no other id here shares."""
+
+    ids = list(node_ids)
+    counts = Counter(node_handle(node_id) for node_id in ids)
+    return {
+        node_id: node_handle(node_id)
+        for node_id in ids
+        if counts[node_handle(node_id)] == 1
+    }
+
+
+class NodeReferenceError(ValueError):
+    """A node reference that names no node of the session, or more than one."""
+
+    def __init__(self, message: str, *, offered: Sequence[str]) -> None:
+        super().__init__(message)
+        self.offered = list(offered)
+
+
+def resolve_node_reference(
+    reference: str, node_ids: Sequence[str], *, offered: Sequence[str]
+) -> str:
+    """The full node id ``reference`` names among one session's ``node_ids``.
+
+    A full id names itself; anything else must be the short handle of exactly
+    one of ``node_ids`` (every node of the session, failed ones included, so a
+    handle is never silently read as a different attempt's node). ``offered``
+    are the nodes the caller would act on; a refusal lists them, each by its
+    handle where that is unambiguous and by its full id otherwise.
+    """
+
+    if reference in node_ids:
+        return reference
+    matches = [node_id for node_id in node_ids if node_handle(node_id) == reference]
+    if len(matches) == 1:
+        return matches[0]
+    handles = unique_handles(node_ids)
+    named = [handles.get(node_id, node_id) for node_id in offered]
+    listing = ", ".join(named) if named else "none yet"
+    if matches:
+        message = (
+            f"{reference} is the short handle of {len(matches)} nodes of this session "
+            "(each attempt numbers its results from valid_001); name one by its full "
+            f"node_id: {', '.join(matches)}"
+        )
+    else:
+        message = (
+            f"{reference or '<empty>'} is neither a node_id nor the short handle of a "
+            f"node of this session; the nodes it can name: {listing}"
+        )
+    raise NodeReferenceError(message, offered=named)
 
 
 class StepTree:
@@ -217,6 +286,15 @@ class StepTree:
     def nodes(self) -> list[dict[str, object]]:
         return list(self.data["nodes"])
 
+    def session_node_ids(self, session_ref: str) -> list[str]:
+        """Every node one research session recorded, failed attempts included."""
+
+        return [
+            str(node["node_id"])
+            for node in self.data["nodes"]
+            if node_in_session(node, session_ref=session_ref)
+        ]
+
     def get_node(self, node_id: str) -> dict[str, object]:
         for node in self.data["nodes"]:
             if node["node_id"] == node_id:
@@ -230,10 +308,21 @@ class StepTree:
         return self.root / node_id / NODE_MODELS_DIR
 
     def render_ascii(self) -> str:
-        """Human/Agent-readable tree with the current position marked."""
+        """Human/Agent-readable tree with the current position marked.
+
+        Each node leads with its short handle in brackets where no other node
+        of its session shares it, so the tools' short form is read off here.
+        """
         children: dict[str | None, list[dict[str, object]]] = {}
+        by_session: dict[object, list[str]] = {}
         for node in self.data["nodes"]:
             children.setdefault(node.get("parent_node_id"), []).append(node)
+            by_session.setdefault(node.get("session_ref"), []).append(str(node["node_id"]))
+        handles = {
+            node_id: handle
+            for ids in by_session.values()
+            for node_id, handle in unique_handles(ids).items()
+        }
         lines: list[str] = []
 
         def walk(parent_id: str | None, depth: int) -> None:
@@ -249,7 +338,12 @@ class StepTree:
                     if isinstance(value, (int, float)):
                         parts.append(f"{label}={value:.4f}")
                 metrics_text = f" {' '.join(parts)}" if parts else ""
-                lines.append(f"{'  ' * depth}- {node['node_id']}{metrics_text}{failed_text}{marker}")
+                handle = handles.get(str(node["node_id"]))
+                handle_text = f"[{handle}] " if handle else ""
+                lines.append(
+                    f"{'  ' * depth}- {handle_text}{node['node_id']}"
+                    f"{metrics_text}{failed_text}{marker}"
+                )
                 walk(str(node["node_id"]), depth + 1)
 
         walk(None, 0)

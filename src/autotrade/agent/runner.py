@@ -44,6 +44,11 @@ from autotrade.environment.llm import (
     malformed_tool_call_messages,
 )
 from autotrade.environment.runtime import sanitize_for_log, utc_now_iso
+from autotrade.environment.step_tree import (
+    NodeReferenceError,
+    resolve_node_reference,
+    unique_handles,
+)
 from autotrade.environment.time_budget import (
     InferenceTimeBudget,
     SessionTimeBudgetAware,
@@ -932,9 +937,11 @@ class AgentSessionRunner:
             ]
             for record in records:
                 # node_id stays optional: continue and no_edge name no node.
-                record["function"]["parameters"]["properties"]["node_id"]["enum"] = (
-                    candidate_ids
-                )
+                # Each node may be named by its full id or its unique handle.
+                record["function"]["parameters"]["properties"]["node_id"]["enum"] = [
+                    *candidate_ids,
+                    *unique_handles(candidate_ids).values(),
+                ]
             return tuple(records)
         return self.tools.provider_tools()
 
@@ -959,13 +966,18 @@ class AgentSessionRunner:
             # Ending the arm names no node, and is a legal finish in the
             # finalize window too.
             return ""
-        candidates = {
+        candidates = [
             str(candidate["node_id"]) for candidate in self._finalization_candidates()
-        }
-        if not isinstance(node_id, str) or node_id not in candidates:
+        ]
+        try:
+            if not isinstance(node_id, str):
+                raise NodeReferenceError("node_id is not a string", offered=())
+            resolve_node_reference(node_id, candidates, offered=candidates)
+        except NodeReferenceError:
             return (
-                f"{call.name} requires one node_id from the session's complete "
-                'Validation candidates (or outcome="no_edge" with a reason)'
+                f"{call.name} requires one node_id (or its short handle) from the "
+                "session's complete Validation candidates (or outcome=\"no_edge\" "
+                "with a reason)"
             )
         return ""
 
@@ -1005,7 +1017,20 @@ class AgentSessionRunner:
         blind to the gate.
         """
 
-        candidates = list(self._complete_validation_nodes)
+        handles = unique_handles(
+            str(candidate["node_id"]) for candidate in self._complete_validation_nodes
+        )
+        candidates = [
+            {
+                **candidate,
+                **(
+                    {"handle": handles[str(candidate["node_id"])]}
+                    if str(candidate["node_id"]) in handles
+                    else {}
+                ),
+            }
+            for candidate in self._complete_validation_nodes
+        ]
         gate = self._freeze_gate
         if gate is None:
             return candidates

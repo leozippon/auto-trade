@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from autotrade.environment.artifacts import new_revision_id
-from autotrade.environment.step_tree import StepTree
+from autotrade.environment.step_tree import StepTree, node_handle
 from autotrade.environment.tools.base import (
     AGENT_JUSTIFICATION_MAX_CHARS,
     ToolError,
@@ -24,6 +24,7 @@ from autotrade.environment.tools.finish_session import (
     FinishSessionTool,
     SessionBudgetStatus,
 )
+from autotrade.environment.tools.step_rollback import StepRollbackTool
 from autotrade.pipelines.config import SESSION_OUTCOMES
 from autotrade.pipelines.local_backend import _session_outcome
 
@@ -117,8 +118,9 @@ def test_a_nomination_the_gate_rejects_is_refused_with_its_reasons_and_numbers(t
     assert refused.value.error_type == "freeze_gate_refused"
     assert "freeze_deflated_sharpe_below_threshold" in message
     assert "deflated_sharpe_probability=0.12" in message and "trials=5" in message
-    assert strong in message
-    assert refused.value.details["passing_nodes"] == [strong]
+    # Passing nodes are named the way the Agent can type them back.
+    assert node_handle(strong) in message
+    assert refused.value.details["passing_nodes"] == [node_handle(strong)]
     assert refused.value.details["freeze_gate"]["reasons"] == [
         "freeze_deflated_sharpe_below_threshold"
     ]
@@ -174,8 +176,11 @@ def test_only_a_complete_node_of_this_session_can_be_named(tmp_path: Path):
     finish = _tool(tree, _Gate({earlier, mine}))
     with pytest.raises(ToolError, match="not a Step of this session"):
         finish.invoke({"outcome": "freeze", "node_id": earlier})
-    with pytest.raises(ToolError, match="not a Step node"):
+    with pytest.raises(ToolError, match="neither a node_id nor the short handle") as unknown:
         finish.invoke({"outcome": "freeze", "node_id": "missing"})
+    # The refusal names what can be named, by handle, and never another session's node.
+    assert unknown.value.error_type == "unknown_node"
+    assert unknown.value.details["nodes"] == ["valid_mine"]
     # One own node: a freeze may omit node_id; with two it must name one.
     assert finish.invoke({"outcome": "freeze"}).value["node_id"] == mine
     _node(tree, tmp_path, "second")
@@ -187,9 +192,51 @@ def test_only_a_complete_node_of_this_session_can_be_named(tmp_path: Path):
     resumed = _node(tree, tmp_path, "resumed", run="run_before")
     with pytest.raises(ToolError, match="requires node_id") as three:
         finish.invoke({"outcome": "freeze"})
-    assert resumed in three.value.details["candidates"]
+    assert node_handle(resumed) in three.value.details["candidates"]
     result = _tool(tree, _Gate({resumed})).invoke({"outcome": "freeze", "node_id": resumed})
     assert result.value["node_id"] == resumed
+
+
+def test_a_node_is_named_by_its_short_handle_only_while_it_is_unambiguous(tmp_path: Path):
+    """The ~110-character ids are what the session's model mistypes, so a
+    node's result name names it too -- but never by guessing: each attempt
+    numbers its results afresh, and a handle two attempts share is refused
+    with the full ids it could mean, as is a handle no node carries."""
+
+    tree = StepTree(tmp_path / "steps")
+    other = _node(tree, tmp_path, "b", session="session_ref_older")
+    first = _node(tree, tmp_path, "a")
+    second = _node(tree, tmp_path, "b")
+    finish = _tool(tree, _Gate({first, second, other}))
+    # Another session's node shares the handle but not the session: no ambiguity.
+    frozen = finish.invoke({"outcome": "freeze", "node_id": "valid_b"}).value
+    assert (frozen["node_id"], frozen["handle"]) == (second, "valid_b")
+    # A resumed attempt of this session numbers its results from the start again.
+    repeat = _node(tree, tmp_path, "a", run="run_resumed")
+    with pytest.raises(ToolError) as ambiguous:
+        _tool(tree, _Gate({first})).invoke({"outcome": "freeze", "node_id": "valid_a"})
+    assert ambiguous.value.error_type == "unknown_node"
+    assert first in str(ambiguous.value) and repeat in str(ambiguous.value)
+    # Its nodes stay nameable by full id, the unique one by handle, and the
+    # refusal lists them that way.
+    assert sorted(ambiguous.value.details["nodes"]) == sorted([first, "valid_b", repeat])
+    full = _tool(tree, _Gate({first})).invoke({"outcome": "freeze", "node_id": first}).value
+    assert full["node_id"] == first and "handle" not in full
+    # The Step tree the Agent reads shows each unique handle beside its id.
+    rendered = tree.render_ascii()
+    assert f"[valid_b] {second}" in rendered and f"[valid_b] {other}" in rendered
+    assert f"[valid_a] {first}" not in rendered and f"- {first}" in rendered
+    # step_rollback takes the same two forms under the same rule.
+    output, models = tmp_path / "work" / "output", tmp_path / "work" / "models"
+    output.mkdir(parents=True)
+    rollback = StepRollbackTool(tree, output, models, session_ref=SESSION)
+    restored = rollback.invoke({"node_id": "valid_b"}).value
+    assert (restored["node_id"], restored["handle"]) == (second, "valid_b")
+    assert (output / "main.py").read_text(encoding="utf-8").count("'b'") == 1
+    with pytest.raises(ToolError, match="short handle of 2 nodes"):
+        rollback.invoke({"node_id": "valid_a"})
+    with pytest.raises(ToolError, match="neither a node_id nor the short handle"):
+        rollback.invoke({"node_id": "valid_zz"})
 
 
 def test_an_early_freeze_must_say_why_while_another_batch_fits(tmp_path: Path):

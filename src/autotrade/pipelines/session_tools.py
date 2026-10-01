@@ -50,6 +50,13 @@ from autotrade.environment.tools.base import (
 )
 from autotrade.environment.tools.finish_session import SessionBudgetStatus
 from autotrade.environment.tools.modification_check import ModificationCheckTool
+from autotrade.environment.tools.node_reference import (
+    NODE_REFERENCE_DESCRIPTION,
+    NODE_REFERENCE_EXAMPLE,
+    session_handle,
+    session_handles,
+    session_node_reference,
+)
 from autotrade.environment.tools.workspace import SafeWorkspace
 
 from .agent_views import NULL_CONTROL_KEYS, allowed_keys
@@ -498,6 +505,22 @@ class SessionValidations:
     def replay_years_remaining(self) -> int:
         return max(self.request.max_replay_years - self.replay_years_used, 0)
 
+    @property
+    def session_ref(self) -> str:
+        """The opaque session ref this session's Step nodes carry."""
+
+        return self.ref_store.get_or_create("session", self.request.session_key)
+
+    def handle(self, node_id: str) -> dict[str, str]:
+        """``{"handle": ...}`` where the node's short handle is unambiguous."""
+
+        return session_handle(self.tree, node_id, session_ref=self.session_ref)
+
+    def named(self, node_ids: Sequence[str]) -> list[str]:
+        """Nodes as the Agent should name them: the short handle where unambiguous."""
+
+        return session_handles(self.tree, node_ids, session_ref=self.session_ref)
+
     def span(self, label: object) -> ReplaySpan:
         """The research span ``label`` names, or a schema error naming the valid ones."""
 
@@ -647,7 +670,7 @@ class SessionValidations:
             revision.output_path,
             epoch_id=RESEARCH_STAGE,
             # The session id is opaqued like every other Agent-visible id.
-            session_ref=self.ref_store.get_or_create("session", self.request.session_key),
+            session_ref=self.session_ref,
             run_id=self.ref_store.get_or_create("run", self.request.run_id),
             result_name=result_name,
             revision_id=self.ref_store.get_or_create(
@@ -1053,7 +1076,8 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "unchanged. The call waits briefly for background sub-agents that can "
         "write and is refused while one is still running; read-only audits keep "
         "running while the candidates replay concurrently. Returns one row per "
-        "candidate: node id, headline metrics, the per-year return/excess/"
+        "candidate: node id with its short handle (valid_002, which every tool "
+        "taking a node_id accepts), headline metrics, the per-year return/excess/"
         "neutralized excess/Sharpe of sub_windows, the provisional "
         "selection_statistics (the freeze gate as it would read this node now, "
         "which the freeze recomputes), and wall seconds; a failed candidate's row "
@@ -1683,6 +1707,9 @@ class BatchValidateTool(SessionTimeBudgetAware):
         return {
             "status": "ok",
             "node_id": node_id,
+            # The batch's later siblings take later result names, so a handle
+            # unambiguous now stays so for the rest of the batch.
+            **self.backtest.handle(node_id),
             "revision_id": self.backtest.ref_store.get_or_create(
                 "strategy", revision.revision_id
             ),
@@ -1768,7 +1795,7 @@ def batch_select_hint(
     leading = max(ranked, key=lambda item: item[0], default=(float("-inf"), None))
     lead = (
         f"leading on active information ratio: {leading[1].get('name')} "
-        f"(node_id={leading[1].get('node_id')}); "
+        f"(node_id={leading[1].get('handle') or leading[1].get('node_id')}); "
         if leading[1] is not None and math.isfinite(leading[0])
         else "no row carries an active information ratio; "
     )
@@ -1866,7 +1893,12 @@ class NullControlTool(SessionTimeBudgetAware):
         {
             "type": "object",
             "properties": {
-                "node_id": {"type": "string", "minLength": 1, "maxLength": 500},
+                "node_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500,
+                    "description": NODE_REFERENCE_DESCRIPTION,
+                },
             },
             "required": ["node_id"],
             "additionalProperties": False,
@@ -1874,7 +1906,7 @@ class NullControlTool(SessionTimeBudgetAware):
         # Sequential, and locked after finish, like a formal backtest: it
         # pauses the session clock and spends a capped budget.
         mutating=True,
-        example={"node_id": "<complete Validation node_id>"},
+        example={"node_id": NODE_REFERENCE_EXAMPLE},
     )
 
     def __init__(self, backtest: SessionValidations, *, max_calls: int) -> None:
@@ -1922,14 +1954,21 @@ class NullControlTool(SessionTimeBudgetAware):
         return self.backtest.time_budget
 
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
-        node_id = str(arguments.get("node_id") or "")
         self.backtest.check_deadline()
+        candidates = [item.step_id for item in self.backtest.steps]
+        node_id = session_node_reference(
+            "run_null_control",
+            self.backtest.tree,
+            str(arguments.get("node_id") or ""),
+            session_ref=self.backtest.session_ref,
+            offered=candidates,
+        )
         step = next((item for item in self.backtest.steps if item.step_id == node_id), None)
         if step is None:
             raise ToolError(
                 "run_null_control requires the node_id of a complete Validation of "
-                f"this session; {node_id or '<empty>'} is not one",
-                details={"candidates": [item.step_id for item in self.backtest.steps]},
+                f"this session; {node_id} is not one",
+                details={"candidates": self.backtest.named(candidates)},
             )
         if node_id in self.blocks:
             return ToolResult(True, value=self._report(node_id, self.blocks[node_id], cached=True))
@@ -1980,6 +2019,7 @@ class NullControlTool(SessionTimeBudgetAware):
     ) -> dict[str, object]:
         return {
             "node_id": node_id,
+            **self.backtest.handle(node_id),
             "null_control": allowed_keys(block, NULL_CONTROL_KEYS),
             "cached": cached,
             "null_controls_used": self.used,

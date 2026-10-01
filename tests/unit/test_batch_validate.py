@@ -765,7 +765,9 @@ class ControlsAndOfflineScreensTest(unittest.TestCase):
                 )
             self.assertEqual(refused.exception.error_type, "freeze_gate_refused")
             self.assertIn("freeze_nominee_is_control", str(refused.exception))
-            self.assertEqual(refused.exception.details["passing_nodes"], [cand["node_id"]])
+            # Rows and refusals name a node by the short handle the tools accept.
+            self.assertEqual(cand["handle"], cand["result_name"])
+            self.assertEqual(refused.exception.details["passing_nodes"], [cand["handle"]])
             # A later batch's screens add to the earlier ones, once per batch
             # however many candidates it carries.
             session.candidate("v2", _strategy("3" * 60))
@@ -1795,9 +1797,11 @@ class NullControlToolTest(unittest.TestCase):
             tool = NullControlTool(session.backtest, max_calls=1)
             with self.assertRaises(ToolError) as refused:
                 tool.invoke({"node_id": "not_a_node"})
-            self.assertIn("complete Validation of this session", str(refused.exception))
-            self.assertEqual(refused.exception.details["candidates"], [first, second])
-            self.assertTrue(tool.invoke({"node_id": first}).ok)
+            self.assertIn("neither a node_id nor the short handle", str(refused.exception))
+            self.assertEqual(refused.exception.details["nodes"], ["valid_001", "valid_002"])
+            # The short handle names the node the full id does.
+            ranked = tool.invoke({"node_id": "valid_001"}).value
+            self.assertEqual((ranked["node_id"], ranked["handle"]), (first, "valid_001"))
             with self.assertRaises(ToolError) as exhausted:
                 tool.invoke({"node_id": second})
             self.assertEqual(exhausted.exception.error_type, "null_control_budget_exhausted")

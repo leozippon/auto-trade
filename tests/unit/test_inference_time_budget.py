@@ -897,7 +897,8 @@ def test_hard_finalization_labels_every_candidate_with_its_freeze_gate_verdict(
             ProviderResponse(tool_calls=(ToolCall("valid", "batch_validate", {}),)),
             ProviderResponse(
                 tool_calls=(
-                    ToolCall("finish", "finish_session", {"outcome": "freeze", "node_id": strong_id}),
+                    # Named by its short handle: the finalize window takes it too.
+                    ToolCall("finish", "finish_session", {"outcome": "freeze", "node_id": "valid_002"}),
                 )
             ),
         ]
@@ -944,9 +945,13 @@ def test_hard_finalization_labels_every_candidate_with_its_freeze_gate_verdict(
         for item in scripted.calls[1]["tools"]
         if item["function"]["name"] == "finish_session"
     )
+    # Each candidate may be named by its full id or its unique short handle.
+    assert [candidate["handle"] for candidate in candidates] == ["valid_001", "valid_002"]
     assert finish_schema["function"]["parameters"]["properties"]["node_id"]["enum"] == [
         weak_id,
         strong_id,
+        "valid_001",
+        "valid_002",
     ]
     assert any(
         event == "hard_finalization_started"

@@ -8,6 +8,13 @@ from dataclasses import asdict, dataclass
 from autotrade.environment.step_tree import StepTree, node_in_session
 
 from .base import AGENT_JUSTIFICATION_MAX_CHARS, ToolError, ToolResult, ToolSpec
+from .node_reference import (
+    NODE_REFERENCE_DESCRIPTION,
+    NODE_REFERENCE_EXAMPLE,
+    session_handle,
+    session_handles,
+    session_node_reference,
+)
 
 # The outcomes the Agent may state; the Pipeline's SESSION_OUTCOMES adds the
 # host-recorded ``deadline``.
@@ -67,7 +74,8 @@ _DESCRIPTION = (
     "tracking mandate when the arm has one. A nomination that fails the gate "
     "is refused with its named reasons and numbers and the session goes on; a "
     "freeze ends research for the whole arm, and the frozen artifact is then "
-    "tested once on later data no session sees. node_id may be omitted only while "
+    "tested once on later data no session sees. node_id is the full id or the "
+    "node's short handle (valid_002); it may be omitted only while "
     "this session has exactly one complete Validation. "
     'outcome="no_edge" ends the arm without a deliverable and takes no node_id; '
     "it needs at least one complete Validation of this session and a reason "
@@ -96,7 +104,12 @@ class FinishSessionTool:
                         "the arm without a deliverable."
                     ),
                 },
-                "node_id": {"type": "string", "minLength": 1, "maxLength": 500},
+                "node_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500,
+                    "description": NODE_REFERENCE_DESCRIPTION,
+                },
                 "reason": {
                     "type": "string",
                     "minLength": REASON_MIN_CHARS,
@@ -114,7 +127,7 @@ class FinishSessionTool:
             "required": ["outcome"],
             "additionalProperties": False,
         },
-        example={"outcome": "freeze", "node_id": "<complete full-span Validation node_id>"},
+        example={"outcome": "freeze", "node_id": NODE_REFERENCE_EXAMPLE},
     )
 
     def __init__(
@@ -142,19 +155,31 @@ class FinishSessionTool:
 
     # ---- outcomes ----
 
-    def _freeze(self, node_id: str, reason: str) -> ToolResult:
-        node_id = node_id or self._sole_candidate()
+    def _freeze(self, reference: str, reason: str) -> ToolResult:
+        node_id = (
+            session_node_reference(
+                "finish_session",
+                self.tree,
+                reference,
+                session_ref=self.session_ref,
+                offered=self._session_candidates(),
+            )
+            if reference
+            else self._sole_candidate()
+        )
         node = self._complete_node(node_id)
         gate = dict(self._freeze_gate(node_id))
         if not gate.get("passed"):
             reasons = [str(item) for item in gate.get("reasons") or ()]
-            passing = [
-                candidate
-                for candidate in self._session_candidates()
-                if candidate != node_id and self._freeze_gate(candidate).get("passed")
-            ]
+            passing = self._named(
+                [
+                    candidate
+                    for candidate in self._session_candidates()
+                    if candidate != node_id and self._freeze_gate(candidate).get("passed")
+                ]
+            )
             raise ToolError(
-                f"finish_session refused: {node_id} fails the freeze gate "
+                f"finish_session refused: {self._named([node_id])[0]} fails the freeze gate "
                 f"({', '.join(reasons) or 'no reason recorded'}); "
                 f"{_gate_numbers(gate)}. "
                 + (
@@ -176,6 +201,7 @@ class FinishSessionTool:
                 "status": "session_finished",
                 "outcome": "freeze",
                 "node_id": node_id,
+                **session_handle(self.tree, node_id, session_ref=self.session_ref),
                 "revision_id": str(node["revision_id"]),
                 **({"reason": reason} if reason else {}),
                 **budget,
@@ -238,16 +264,24 @@ class FinishSessionTool:
             and node.get("revision_id")
         ]
 
+    def _named(self, node_ids: list[str]) -> list[str]:
+        """Nodes as the Agent should name them: the short handle where unambiguous."""
+
+        return session_handles(self.tree, node_ids, session_ref=self.session_ref)
+
     def _sole_candidate(self) -> str:
         candidates = self._session_candidates()
         if len(candidates) == 1:
             return candidates[0]
+        named = self._named(candidates)
         raise ToolError(
             f"finish_session requires node_id: this session has {len(candidates)} "
             "complete Validations"
-            + (f" ({', '.join(candidates)})" if candidates else ""),
-            retry_hint='finish_session({"outcome": "freeze", "node_id": "<node_id>"})',
-            details={"candidates": candidates},
+            + (f" ({', '.join(named)})" if named else ""),
+            retry_hint=(
+                f'finish_session({{"outcome": "freeze", "node_id": "{NODE_REFERENCE_EXAMPLE}"}})'
+            ),
+            details={"candidates": named},
         )
 
     def _complete_node(self, node_id: str) -> Mapping[str, object]:

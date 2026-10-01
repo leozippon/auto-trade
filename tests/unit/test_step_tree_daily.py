@@ -113,8 +113,8 @@ def test_step_rollback_refuses_a_node_outside_the_current_session(tmp_path: Path
     ):
         absent = registry.invoke(tool, arguments)
         assert not absent.ok, tool
-        assert absent.value["error_type"] == "tool_error", tool
-        assert "absent Step" in absent.error or "not a Step node" in absent.error, tool
+        assert absent.value["error_type"] == "unknown_node", tool
+        assert "neither a node_id nor the short handle" in absent.error, tool
 
     # A node an interrupted attempt of this session recorded is this
     # session's: the resumed attempt may restore and nominate it.
