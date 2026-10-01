@@ -52,14 +52,8 @@ class BrokerProfile:
             or self.max_single_name_weight <= 0
         ):
             raise ValueError("max_single_name_weight must be a positive finite number")
-        CostModel(
-            commission_bps=self.commission_bps,
-            min_commission_cny=self.min_commission_cny,
-            stamp_duty_sell_bps_before_cutover=self.stamp_duty_sell_bps_before_cutover,
-            stamp_duty_sell_bps_from_cutover=self.stamp_duty_sell_bps_from_cutover,
-            transfer_fee_bps=self.transfer_fee_bps,
-            slippage_bps=self.slippage_bps,
-        )
+        # Building the cost model validates the cost fields at construction.
+        self.costs  # noqa: B018
 
     def to_record(self) -> dict[str, object]:
         return {
