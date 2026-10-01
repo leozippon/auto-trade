@@ -18,7 +18,7 @@ import pytest
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.data.snapshot import SnapshotConfig
-from autotrade.environment.executor import docker_available, raised_by_strategy
+from autotrade.environment.executor import raised_by_strategy
 from autotrade.environment.nl import NLConfig
 from autotrade.environment.replay import timeview as timeview_module
 from autotrade.environment.replay.engine import BacktestError
@@ -52,6 +52,8 @@ from autotrade.pipelines.pit_backend import (
     _bind_asof_stash_contract,
     prebuild_asof_stash,
 )
+
+from .fixtures_sandbox import docker_available
 
 
 @pytest.mark.skipif(not docker_available(), reason="Docker is unavailable")

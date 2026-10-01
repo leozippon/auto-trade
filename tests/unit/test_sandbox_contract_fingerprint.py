@@ -37,9 +37,10 @@ from autotrade.environment.contract_fingerprint import (
     host_runtime_fingerprint,
     read_image_contract,
 )
-from autotrade.environment.executor import docker_available
 
-REPO = Path(__file__).resolve().parents[2]
+from .fixtures_sandbox import docker_available
+
+REPO =Path(__file__).resolve().parents[2]
 DOCKERFILE = REPO / "ops/docker/sandbox.Dockerfile"
 IMAGE = "autotrade-sandbox:exp-base-1234"
 BASE_IMAGE = "autotrade-sandbox:latest"

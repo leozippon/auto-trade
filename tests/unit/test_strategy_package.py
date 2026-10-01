@@ -20,7 +20,6 @@ from autotrade.environment.artifacts import artifact_fingerprint
 from autotrade.environment.executor import (
     DockerStrategyExecutor,
     TrustedStrategyExecutor,
-    docker_available,
 )
 from autotrade.environment.sandbox import SandboxLimits, SandboxSpec
 from autotrade.environment.strategy import CN_TZ, AccountSnapshot, StrategyContext
@@ -39,7 +38,9 @@ from autotrade.pipelines.experiment import (
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
 from autotrade.pipelines.worker import _strategy_sandbox_from_spec
 
-MAIN = '''import numpy as np
+from .fixtures_sandbox import docker_available
+
+MAIN ='''import numpy as np
 
 from lib.features import scaled
 

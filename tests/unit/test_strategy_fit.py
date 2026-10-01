@@ -30,7 +30,6 @@ from autotrade.environment.executor import (
     DockerStrategyExecutor,
     StrategyExecutionError,
     TrustedStrategyExecutor,
-    docker_available,
     raised_by_strategy,
 )
 from autotrade.environment.replay import BacktestError, run_daily_replay
@@ -54,6 +53,7 @@ from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.pipelines.config import ArtifactRevision, EvaluationRequest, SnapshotBundle
 from autotrade.pipelines.pit_backend import PITDailyEvaluationBackend
 
+from tests.unit.fixtures_sandbox import docker_available
 from tests.unit.test_pit_daily_backend import (
     _pit_slot_paths,
     _write_corporate_actions,

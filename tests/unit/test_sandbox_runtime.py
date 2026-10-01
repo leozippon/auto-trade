@@ -40,7 +40,6 @@ from autotrade.environment.executor import (
     StrategyRaised,
     _run_limited_capture,
     attach_strategy_resources,
-    docker_available,
     raised_by_strategy,
     strategy_resource_usage,
     strategy_resources_of,
@@ -75,6 +74,8 @@ from autotrade.environment.tools.files import EditFileTool, WriteFileTool
 from autotrade.environment.tools.workspace import SafeWorkspace
 from autotrade.pipelines import DailyStrategyPipeline, StrategyExperimentConfig
 from autotrade.pipelines.worker import _strategy_sandbox_from_spec
+
+from .fixtures_sandbox import docker_available
 
 
 def _strategy(tmp_path: Path, source: str = "def generate_orders(context):\n    return []\n") -> Path:

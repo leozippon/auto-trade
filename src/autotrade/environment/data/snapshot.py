@@ -2440,22 +2440,6 @@ def _window_start(decision_time: datetime, months: int) -> pd.Timestamp:
     return window_start.tz_localize(CN_TZ)
 
 
-def finalize_snapshot_dir(snapshot_dir: str | Path, **fields: object) -> dict[str, object]:
-    """Stamp an externally assembled snapshot directory with an immutable manifest.
-
-    Directories containing union files must supply the builder's
-    ``domains[...]["dataset_columns"]`` explicitly via ``fields`` — dataset
-    ownership is never inferred from file content, and validation below fails
-    without it. Same gate as the builder: every column must classify in the
-    unit registry.
-    """
-    snapshot_dir = Path(snapshot_dir)
-    manifest: dict[str, object] = {"snapshot_id": new_id("snap"), "created_at": utc_now_iso(), **fields}
-    validate_snapshot_units(snapshot_dir, manifest)
-    _write_manifest(snapshot_dir, manifest, trim_trade_dates=False)
-    return manifest
-
-
 def load_snapshot_manifest(snapshot_dir: str | Path) -> dict[str, object]:
     path = Path(snapshot_dir) / "manifest.json"
     if not path.exists():
@@ -2773,14 +2757,12 @@ def _raw_generation_identity(stamp: dict[str, object] | None) -> dict[str, objec
     return {key: stamp[key] for key in _RAW_GENERATION_IDENTITY_KEYS if key in stamp}
 
 
-def _write_manifest(output_dir: Path, manifest: dict[str, object], *, trim_trade_dates: bool = True) -> None:
-    """Single manifest.json writer. The builder trims bulky per-domain
-    ``trade_dates`` (coverage fields remain); ``finalize_snapshot_dir`` keeps
-    the caller's fields verbatim."""
-    if trim_trade_dates:
-        manifest = json.loads(json.dumps(manifest, ensure_ascii=False, default=str))
-        for domain in manifest.get("domains", {}).values():
-            domain.pop("trade_dates", None)  # keep the manifest small; coverage fields remain
+def _write_manifest(output_dir: Path, manifest: dict[str, object]) -> None:
+    """Single manifest.json writer. Bulky per-domain ``trade_dates`` are
+    trimmed; the coverage fields remain."""
+    manifest = json.loads(json.dumps(manifest, ensure_ascii=False, default=str))
+    for domain in manifest.get("domains", {}).values():
+        domain.pop("trade_dates", None)  # keep the manifest small; coverage fields remain
     (output_dir / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8"
     )

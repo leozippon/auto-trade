@@ -13,9 +13,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from autotrade.environment.data.snapshot import finalize_snapshot_dir
 from autotrade.environment.sandbox import SCREENING_TOOL_SOURCE
 from autotrade.environment.screening import screen
+
+from .fixtures_sandbox import finalize_snapshot_dir
 
 
 def _write_view(out_dir: Path, daily: pd.DataFrame, *, kind: str = "decision_input", **fields: object) -> None:

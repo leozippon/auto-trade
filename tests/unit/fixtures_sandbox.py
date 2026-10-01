@@ -2,18 +2,52 @@
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
 
 from autotrade.environment.artifacts import artifact_fingerprint
-from autotrade.environment.data.snapshot import finalize_snapshot_dir
+from autotrade.environment.data.snapshot import _write_manifest
+from autotrade.environment.data.units import validate_snapshot_units
+from autotrade.environment.runtime import new_id, utc_now_iso
 from autotrade.environment.tools import ToolResult
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TEMPLATE_DIR = REPO_ROOT / "configs" / "agent_output_template"
 TS_CODE = "000001.SZ"
+
+
+def docker_available(docker_executable: str = "docker") -> bool:
+    """Whether a Docker daemon answers here: the skip condition of every test
+    that starts a real container."""
+
+    executable = shutil.which(docker_executable)
+    if executable is None:
+        return False
+    try:
+        completed = subprocess.run([executable, "info"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return completed.returncode == 0
+
+
+def finalize_snapshot_dir(snapshot_dir: str | Path, **fields: object) -> dict[str, object]:
+    """Stamp a test-assembled snapshot directory with a manifest.
+
+    Directories containing union files must supply the builder's
+    ``domains[...]["dataset_columns"]`` explicitly via ``fields`` — dataset
+    ownership is never inferred from file content, and validation below fails
+    without it. Same gate and same manifest writer as the builder: every column
+    must classify in the unit registry.
+    """
+    snapshot_dir = Path(snapshot_dir)
+    manifest: dict[str, object] = {"snapshot_id": new_id("snap"), "created_at": utc_now_iso(), **fields}
+    validate_snapshot_units(snapshot_dir, manifest)
+    _write_manifest(snapshot_dir, manifest)
+    return manifest
 
 # (trade_date, open, close) for the single fixture stock across all periods.
 # The two leading days predate every validation period so the prior-day research

@@ -997,17 +997,6 @@ class ExecResult:
     stderr_truncated: bool = False
 
 
-def docker_available(docker_executable: str = "docker") -> bool:
-    executable = shutil.which(docker_executable)
-    if executable is None:
-        return False
-    try:
-        completed = subprocess.run([executable, "info"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, check=False)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return completed.returncode == 0
-
-
 def _with_container_timeout(argv: Sequence[str], timeout_seconds: float) -> list[str]:
     return [
         "timeout",
@@ -1243,7 +1232,6 @@ __all__ = [
     "StrategyRaised",
     "TrustedStrategyExecutor",
     "attach_strategy_resources",
-    "docker_available",
     "raised_by_strategy",
     "strategy_resource_usage",
     "strategy_resources_of",

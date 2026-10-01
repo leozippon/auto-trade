@@ -28,9 +28,10 @@ from autotrade.environment.data.snapshot import (
     IndustryMembershipError,
     SnapshotBuilder,
     SnapshotConfig,
-    finalize_snapshot_dir,
     load_snapshot_manifest,
 )
+
+from .fixtures_sandbox import finalize_snapshot_dir
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
 DECISION = datetime(2021, 10, 8, 9, 25, tzinfo=CN_TZ)
