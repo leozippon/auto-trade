@@ -2,10 +2,13 @@
 
 Both halves stand on the two places the pipeline already treats as
 authoritative: the curated library committed under ``configs/operating_memory/``
-and the experiment trees under ``experiments/``. Admission to the graduated tier
-is never recomputed here — ``pipelines.skills`` answers it — so the console can
-only show what a session starting now would really mount, and what past sessions
-did mount, according to their run manifests.
+and the experiment trees under ``experiments/``. Admission is never recomputed
+here -- ``pipelines.skills`` answers it in two steps: the graduated tier holds
+an experiment's skills (``graduated_memory_sources``), and an arm mounts a held
+source only when that source's Held-out ended by the arm's research end
+(``admit_memory_sources``). So the tier lists what it holds with that Held-out
+end, and one experiment's block says which of its snapshot's sources its arm
+mounts.
 
 The curated tier is the one writable surface. It is a tracked repository
 directory that every session copies read-only into its workspace at session
@@ -24,6 +27,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from autotrade.environment.runtime import chmod_tree
+from autotrade.pipelines.config import rolling_default
 from autotrade.pipelines.hitl_state import HITL_DIR_NAME, PARAMS_NAME, read_json
 from autotrade.pipelines.ledger import experiment_verdict
 from autotrade.pipelines.skills import (
@@ -34,7 +38,9 @@ from autotrade.pipelines.skills import (
     MAX_SKILLS_FILES,
     OPERATING_MEMORY_LIBRARY,
     SKILL_FILENAME,
+    MemorySource,
     SkillsStats,
+    admit_memory_sources,
     build_skills_index,
     graduated_memory_sources,
     latest_skills_snapshot,
@@ -157,12 +163,16 @@ def _tier_key(root: Path) -> tuple[object, ...]:
 
 
 def graduated_tier(experiments_root: Path) -> dict[str, object]:
-    """Every experiment's verdict, what the tier admits now, and what it holds.
+    """Every experiment's verdict, whether the tier holds it, and what it holds.
 
-    Admission is whatever ``skills.graduated_memory_sources`` returns, never a
-    second rule. ``published`` is the size of the experiment's current skills
-    generation — the page needs it to tell an experiment the tier declines to
-    offer from one that has nothing to offer yet.
+    ``admitted`` is whatever ``skills.graduated_memory_sources`` returns, never
+    a second rule: the tier holds the source. Holding is not mounting -- an arm
+    mounts it only when ``heldout_end``, the last day the source's verdict
+    read, is no later than the arm's research end, and never when it is
+    unknown (``skills.admit_memory_sources``). ``published`` is the size of the
+    experiment's current skills generation — the page needs it to tell an
+    experiment the tier declines to offer from one that has nothing to offer
+    yet.
     """
 
     root = Path(experiments_root)
@@ -184,12 +194,9 @@ def graduated_tier(experiments_root: Path) -> dict[str, object]:
 
 def _graduated_tier(root: Path) -> dict[str, object]:
     payload: dict[str, object] = {"experiments": []}
-    admitted: dict[str, list[str]] | None
+    admitted: dict[str, MemorySource] | None
     try:
-        admitted = {
-            source.source: list(source.entries)
-            for source in graduated_memory_sources(root)
-        }
+        admitted = {source.source: source for source in graduated_memory_sources(root)}
     except (OSError, ValueError) as exc:
         # A tier that cannot be resolved is what a session starting now would
         # also hit. Report it, and leave every row's admission unknown rather
@@ -205,12 +212,13 @@ def _graduated_tier(root: Path) -> dict[str, object]:
 
 
 def _tier_row(
-    directory: Path, admitted: Mapping[str, list[str]] | None
+    directory: Path, admitted: Mapping[str, MemorySource] | None
 ) -> dict[str, object]:
     row: dict[str, object] = {
         "experiment_id": directory.name,
         "verdict": None,
         "admitted": False,
+        "heldout_end": None,
         "published": 0,
         "entries": [],
     }
@@ -228,8 +236,11 @@ def _tier_row(
     if admitted is None:
         row["admitted"] = None
         return row
-    row["admitted"] = directory.name in admitted
-    row["entries"] = list(admitted.get(directory.name, ()))
+    source = admitted.get(directory.name)
+    row["admitted"] = source is not None
+    if source is not None:
+        row["heldout_end"] = source.heldout_end
+        row["entries"] = list(source.entries)
     return row
 
 
@@ -245,10 +256,16 @@ def experiment_memory(experiments_root: Path, experiment_id: str) -> dict[str, o
 
     directory = resolve_experiment_dir(Path(experiments_root), experiment_id)
     params = read_json(directory / HITL_DIR_NAME / PARAMS_NAME)
+    # The arm's research end, resolved as the worker resolves it: the mount
+    # admits a graduated source only when its Held-out ended by this day.
+    research_end = str(
+        params.get("research_end", rolling_default("geometry").research_end)  # type: ignore[attr-defined]
+    )
     payload: dict[str, object] = {
         "experiment_id": experiment_id,
         "mode": resolve_operating_memory(params.get("operating_memory")),
         "default_mode": DEFAULT_OPERATING_MEMORY,
+        "research_end": research_end,
         # A count, not a projection: the collected runs no longer answer what was
         # mounted, they only say how many sessions have run against the snapshot.
         "sessions_seen": len(
@@ -259,17 +276,28 @@ def experiment_memory(experiments_root: Path, experiment_id: str) -> dict[str, o
     try:
         record = read_operating_memory_snapshot(directory)
         if record is not None:
+            sources = snapshot_memory_sources(record, directory)
+            mounted, _refused = admit_memory_sources(sources, research_end)
             payload["snapshot"] = {
                 "created_at": str(record.get("created_at") or ""),
                 "created_from": str(record.get("created_from") or ""),
                 "mode": str(record.get("mode") or ""),
+                # The snapshot holds every source; ``mounted`` is the mount's
+                # own admission at this arm's research end, the rule that
+                # records the refused ones under operating_memory_refused.
                 "sources": [
                     {
                         "source": source.source,
                         "origin": source.origin,
                         "entries": list(source.entries),
+                        "mounted": source in mounted,
+                        **(
+                            {"heldout_end": source.heldout_end}
+                            if source.origin == "graduated"
+                            else {}
+                        ),
                     }
-                    for source in snapshot_memory_sources(record, directory)
+                    for source in sources
                 ],
             }
     except (OSError, TypeError, ValueError) as exc:

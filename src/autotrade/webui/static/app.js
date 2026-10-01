@@ -6166,6 +6166,17 @@ function renderMemoryCandidates() {
     if (!skills.length) continue;
     shown += skills.length;
     nodes.push(el("div", { class: "epoch-head" }, row.experiment_id));
+    // Held by the tier is not mounted: an arm mounts it only once the
+    // source's Held-out has ended by that arm's research end.
+    nodes.push(
+      el(
+        "div",
+        { class: "hint" },
+        row.heldout_end
+          ? `只挂给研究期末不早于 ${row.heldout_end} 的臂（Held-out 止于该日）`
+          : "Held-out 结束日未知：任何臂都不挂载",
+      ),
+    );
     for (const skill of skills)
       nodes.push(
         memoryNavItem(
@@ -6641,9 +6652,16 @@ function mountedMemoryPanel(detail) {
 }
 
 function mountedSourceLabel(source) {
-  return source.origin === "curated"
-    ? "精选库"
-    : `毕业实验 ${source.source || "—"}`;
+  if (source.origin === "curated") return "精选库";
+  const label = `毕业实验 ${source.source || "—"}`;
+  // The snapshot holds it, the arm's mount refused it (operating_memory_refused).
+  if (source.mounted === false)
+    return `${label} · 未挂载：${
+      source.heldout_end
+        ? `Held-out 止于 ${source.heldout_end}，晚于本臂研究期末`
+        : "Held-out 结束日未知"
+    }`;
+  return label;
 }
 
 /* The snapshot's own copy, not the library's current text: the library may have
@@ -6718,12 +6736,14 @@ function mountedMemorySection(detail, payload) {
       `已挂载记忆 · ${payload.mode || "—"} · 快照待会话启动时补建`,
     );
   const sources = snapshot.sources || [];
+  // Only what the arm's mount admitted counts as mounted; a refused source
+  // stays listed below with the reason.
   const count = (origin) =>
     sources
       .filter((source) =>
         origin === "curated"
           ? source.origin === "curated"
-          : source.origin !== "curated",
+          : source.origin !== "curated" && source.mounted !== false,
       )
       .reduce((total, source) => total + (source.entries || []).length, 0);
   const curated = count("curated");
@@ -6746,7 +6766,7 @@ function mountedMemorySection(detail, payload) {
         ? kvRow("快照来源", "由首个会话补建")
         : null,
     ),
-    curated + graduated
+    sources.length
       ? mountedEntriesList(detail.experiment_id, sources)
       : el("div", { class: "empty compact" }, "本实验没有挂载运行记忆"),
   );

@@ -38,10 +38,12 @@ from autotrade.pipelines.skills import (
     MAX_SKILL_CHARS,
     OPERATING_MEMORY_LIBRARY,
     ExperimentSkillsStore,
+    admit_memory_sources,
     build_skills_index,
     create_operating_memory_snapshot,
     operating_memory_snapshot_path,
     read_operating_memory_snapshot,
+    snapshot_memory_sources,
     validate_skills_tree,
 )
 from autotrade.webui import memory
@@ -80,8 +82,13 @@ def _experiment(
     verdict: str | None = "graduated",
     skills: bool = True,
     reference: str = "",
+    heldout_end: str | None = None,
 ) -> Path:
-    """One research arm: its skills generation and, once replayed, its verdict."""
+    """One research arm: its skills generation and, once replayed, its verdict.
+
+    ``heldout_end`` is the last day the forward replay read; without it the
+    record carries none, as records written before the replay end was kept.
+    """
 
     directory = experiments_root / name
     # Before any ledger or artifact exists: the store refuses to initialize
@@ -126,6 +133,7 @@ def _experiment(
                     "status": verdict,
                     "reasons": [] if verdict == "graduated" else ["forward_lower_bound_not_positive"],
                 },
+                **({"replay": {"replay_end": heldout_end}} if heldout_end else {}),
             }
         )
     hitl = directory / "hitl"
@@ -282,6 +290,51 @@ def test_the_tier_lists_every_experiment_and_admits_only_graduated_ones(
     assert rows["not_adopted"]["published"] == 1
     assert rows["still_running"]["published"] == 1
     assert rows["adopted_without_skills"]["published"] == 0
+
+
+def test_held_is_not_mounted_the_page_says_which_arms_mount_a_source(
+    tmp_path: Path,
+) -> None:
+    """The tier holds a graduated experiment's skills, but an arm mounts them
+    only when the source's Held-out ended by that arm's research end, and never
+    when that end is unknown: the tier row carries the end, and one
+    experiment's block marks each snapshot source by the mount's own rule."""
+
+    _library(tmp_path)
+    experiments = tmp_path / "experiments"
+    experiments.mkdir()
+    _experiment(experiments, "early", heldout_end="20230930")
+    _experiment(experiments, "late", heldout_end="20260930")
+    _experiment(experiments, "undated")
+    rows = {row["experiment_id"]: row for row in memory.graduated_tier(experiments)["experiments"]}
+    assert all(rows[name]["admitted"] is True for name in ("early", "late", "undated"))
+    assert rows["early"]["heldout_end"] == "20230930"
+    assert rows["late"]["heldout_end"] == "20260930"
+    assert rows["undated"]["heldout_end"] is None
+
+    current = _experiment(experiments, "current", verdict=None, skills=False)
+    _params(current, operating_memory="curated+graduated", research_end="20250630")
+    _snapshot(tmp_path, experiments, "current")
+    sources = {
+        source["source"]: source
+        for source in memory.experiment_memory(experiments, "current")["snapshot"]["sources"]
+    }
+    assert sources["curated"]["mounted"] is True and "heldout_end" not in sources["curated"]
+    assert sources["early"]["mounted"] is True
+    # Its Held-out runs past this arm's research end: forward information.
+    assert sources["late"] == {**sources["late"], "mounted": False, "heldout_end": "20260930"}
+    assert sources["undated"]["mounted"] is False and sources["undated"]["heldout_end"] is None
+    # The same rule the session mount applies, not a second one.
+    record = read_operating_memory_snapshot(current)
+    admitted, refused = admit_memory_sources(
+        snapshot_memory_sources(record, current), "20250630"
+    )
+    assert {source.source for source in refused} == {"late", "undated"}
+    assert {source.source for source in admitted} == {"curated", "early"}
+    # Params without a research end take the pipeline default, as the worker does.
+    _params(current, operating_memory="curated+graduated")
+    payload = memory.experiment_memory(experiments, "current")
+    assert payload["research_end"] == DEFAULT_RESEARCH_GEOMETRY.research_end
 
 
 def test_an_arm_without_a_verdict_publishes_none_and_mounts_nothing(
