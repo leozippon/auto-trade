@@ -828,6 +828,19 @@ BATCH_REJECTION_CHARGE_AFTER = 6
 # instead of charging research budget for the environment's own trouble.
 BATCH_FAILURE_STRATEGY = "strategy"
 BATCH_FAILURE_ENVIRONMENT = "environment"
+
+
+def _failure_cause(error: BaseException | None) -> str:
+    """Which of the two a failed candidate's replay measured; an error the
+    replay did not even report measured nothing about the strategy."""
+
+    return (
+        BATCH_FAILURE_STRATEGY
+        if error is not None and raised_by_strategy(error)
+        else BATCH_FAILURE_ENVIRONMENT
+    )
+
+
 # What every attempt's run-manifest row keeps of its candidate's registration.
 _BATCH_MANIFEST_KEYS = (
     "batch_id",
@@ -1202,6 +1215,19 @@ class BatchValidateTool(SessionTimeBudgetAware):
         parent_node_id = self.backtest.tree.current_node_id
         revisions = self._commit(candidates, checks, span)
         outcomes = self._replay(revisions, span)
+        # The one place the batch settles its reservation. Every candidate was
+        # charged before anything ran; those whose replay measured the host and
+        # not the strategy bought no evidence, so their claim goes back here,
+        # before anything is recorded (a recording that fails cannot keep a
+        # charge that bought nothing) and before this call's result and its
+        # budget block reach the trace.
+        refunded = sum(
+            1
+            for evaluation, error, _seconds in outcomes
+            if evaluation is None and _failure_cause(error) == BATCH_FAILURE_ENVIRONMENT
+        )
+        if refunded:
+            self.backtest.refund(refunded, span)
         # A batch does not re-check the deadline here: every replay is already
         # paid for, and dropping N completed Validations because the clock ran
         # out during them would destroy real evidence. The session deadline is
@@ -1249,15 +1275,6 @@ class BatchValidateTool(SessionTimeBudgetAware):
             # the Agent moves it deliberately with step_rollback once it picks
             # a winner.
             self.backtest.tree.set_position(parent_node_id)
-        # The one place the batch settles its reservation. Every candidate was
-        # charged before anything ran; those whose replay measured the host and
-        # not the strategy bought no evidence, so their claim goes back here,
-        # before this call's result and its budget block reach the trace.
-        refunded = sum(
-            1 for row in rows if row.get("cause") == BATCH_FAILURE_ENVIRONMENT
-        )
-        if refunded:
-            self.backtest.refund(refunded, span)
         # Every row of the round deflates against the same trial pool: the
         # whole batch is complete by the time the table is returned.
         for row, step in recorded:
@@ -1683,11 +1700,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
         if error is None:
             error = RuntimeError("unknown replay failure")
         public_error = _public_validation_error(error)
-        cause = (
-            BATCH_FAILURE_STRATEGY
-            if raised_by_strategy(error)
-            else BATCH_FAILURE_ENVIRONMENT
-        )
+        cause = _failure_cause(error)
         request = self.backtest.request
         metadata = {
             **batch_metadata,

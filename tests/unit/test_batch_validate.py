@@ -1133,6 +1133,30 @@ class BatchValidateRunTest(unittest.TestCase):
                 dead_ends, {"raised": "strategy", "contended": "environment"}
             )
 
+    def test_environment_failures_are_refunded_when_recording_a_candidate_fails(
+        self,
+    ) -> None:
+        """Host IO failing while one completed candidate is recorded aborts the
+        batch, but the environment failures before and after it measured
+        nothing either way: their replay-years still come back."""
+
+        with TemporaryDirectory() as tmp:
+            session = _Session(Path(tmp), contention_markers=("998", "999"))
+            session.candidate("contended", _strategy("998"))
+            session.candidate("good", _strategy("1"))
+            session.candidate("late_contended", _strategy("999"))
+
+            def disk_full(*_args: object, **_kwargs: object) -> str:
+                raise OSError("No space left on device")
+
+            session.backtest.record_validation = disk_full  # type: ignore[method-assign]
+            with self.assertRaises(OSError):
+                session.call("contended", "good", "late_contended")
+            # Reserved 12 for three full-span candidates; both contended ones
+            # are refunded, the completed one stays charged.
+            self.assertEqual(session.backtest.replay_years_used, 4)
+            self.assertEqual(session.backtest.steps, [])
+
     def test_a_memory_cap_kill_is_charged_like_a_strategy_exception(self) -> None:
         """The memory cap is a budget the session was told about, with swap
         pinned to it, so a candidate killed there measured itself: no refund."""
