@@ -3,6 +3,7 @@ import tempfile
 import threading
 import time
 import unittest
+from collections.abc import Iterable
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -23,6 +24,8 @@ from autotrade.environment.data.snapshot import (
     DEFAULT_DATASETS,
     SELECTABLE_DATASETS,
     DividendHistoryError,
+    FundamentalCoverageError,
+    IndustryMembershipError,
     SnapshotBuilder,
     SnapshotConfig,
     finalize_snapshot_dir,
@@ -213,6 +216,22 @@ def write_dividend_history(root: Path) -> None:
     )
 
 
+def write_event_month_markers(root: Path, dataset: str, months: Iterable[str]) -> None:
+    """Zero-row partitions, as the PIT event builder writes a month it built
+    without events; a replay slot refuses a month the store never built
+    (FundamentalCoverageError)."""
+
+    columns = (
+        "dataset", "ts_code", "available_at", "available_at_rule", "available_month",
+        "business_key", "source_path", "source_write_id", "source_row_id",
+    )
+    for month in months:
+        write(
+            root / dataset / f"available_month={month}.parquet",
+            pd.DataFrame({column: pd.Series(dtype="object") for column in columns}),
+        )
+
+
 def build_fundamental_events(root: Path) -> None:
     write(
         root / "income_vip" / "available_month=202109.parquet",
@@ -221,6 +240,10 @@ def build_fundamental_events(root: Path) -> None:
                 {"dataset": "income_vip", "ts_code": "000001.SZ", "available_at": "2021-09-10T18:00:00+08:00", "available_at_rule": "source:f_ann_date_or_ann_date", "available_month": "202109", "business_key": "k1", "source_path": "x", "source_write_id": "w", "source_row_id": 0},
             ]
         ),
+    )
+    # Every other month of 2021 was built without income_vip events.
+    write_event_month_markers(
+        root, "income_vip", (f"2021{month:02d}" for month in range(1, 13) if month != 9)
     )
     write_dividend_history(root)
 
@@ -611,6 +634,15 @@ class SnapshotBuilderTest(unittest.TestCase):
             moved = builder._industry_membership("20240101")
             self.assertEqual(dict(zip(moved["ts_code"], moved["l1_code"])),
                              {"600123.SH": "801950.SI", "600456.SH": "801960.SI"})
+            # A day the stored membership classifies nobody on, and a lake
+            # without the membership at all, are refused: served empty, every
+            # holding would read as unclassified.
+            with self.assertRaisesRegex(IndustryMembershipError, "classifies no stock on 20110103"):
+                builder._industry_membership("20110103")
+            bare = SnapshotBuilder(Path(tmp) / "bare_raw", Path(tmp) / "missing_events")
+            for day in ("20180702", "20240101"):
+                with self.assertRaisesRegex(IndustryMembershipError, f"classifies no stock on {day}"):
+                    bare._industry_membership(day)
 
     def test_empty_auction_builder_writes_canonical_schema(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1627,10 +1659,16 @@ class SnapshotBuilderTest(unittest.TestCase):
             raw = Path(tmp) / "raw"
             build_raw(raw)
             out = Path(tmp) / "replay"
-            # Only the dividend history every replay's ex-date table needs.
+            # The dividend history every replay's ex-date table needs, and no
+            # income_vip month at all: the store never built the slot's month,
+            # so the slot is refused rather than served frozen fundamentals.
             events_root = Path(tmp) / "dividend_only_events"
             write_dividend_history(events_root)
             builder = SnapshotBuilder(raw, events_root)
+            with self.assertRaisesRegex(FundamentalCoverageError, r"income_vip \(1 of 1, first 202110\)"):
+                builder.build_replay_slot("20211007", "20211011", Path(tmp) / "refused", label="valid", config=CONFIG)
+            # Built without events, the month is a zero-row marker and reads empty.
+            write_event_month_markers(events_root, "income_vip", ("202110",))
             manifest = builder.build_replay_slot("20211007", "20211011", out, label="valid", config=CONFIG)
             daily = pd.read_parquet(out / "daily.parquet")
             self.assertEqual(sorted(daily["trade_date"].unique()), ["20211008"])
@@ -1646,7 +1684,7 @@ class SnapshotBuilderTest(unittest.TestCase):
             minutes = pd.read_parquet(out / "intraday_1min.parquet")
             self.assertEqual(len(minutes), 0)  # fixture minutes are outside the period
             # Macro and fundamentals domains are written even when empty for this period
-            # (cn_gdp rows fall outside, the events root holds no income_vip), so the
+            # (cn_gdp rows fall outside, the income_vip month holds no events), so the
             # Timeview always has a stable per-domain file to roll.
             self.assertTrue((out / "macro.parquet").exists())
             self.assertEqual(len(pd.read_parquet(out / "macro.parquet")), 0)
@@ -1874,6 +1912,7 @@ class SnapshotBuilderTest(unittest.TestCase):
                 # Announced only after its own ex-date: a revision artifact, dropped.
                 pd.DataFrame([dividend(ex_date="20211008", available_at="2021-10-09T18:00:00+08:00", business_key="d5")]),
             )
+            write_event_month_markers(events_root, "income_vip", ("202110",))
             out = Path(tmp) / "replay"
             manifest = SnapshotBuilder(raw, events_root).build_replay_slot(
                 "20211007", "20211011", out, label="valid", config=CONFIG

@@ -105,6 +105,22 @@ class DividendHistoryError(ValueError):
     settle every cash dividend as a bonus issue."""
 
 
+class FundamentalCoverageError(ValueError):
+    """A replay slot reads months the PIT fundamental event store never built.
+
+    The builder writes every month it covers, a month without events as a
+    zero-row marker, so an absent month was never built: served as it is, every
+    fundamental would stay frozen across that month without a sign."""
+
+
+class IndustryMembershipError(ValueError):
+    """Industry classification is on, but the stored Shenwan membership
+    classifies no stock on the decision day.
+
+    Served empty, every holding would read as unclassified and a book's top
+    industry weight as 1.0."""
+
+
 # Forward-scheduled event registries announce future events years ahead (IPO
 # lockup expiries), so the DECISION snapshot windows them on the event date as
 # well as announcement recency -- windowing on available_at alone silently
@@ -1063,8 +1079,16 @@ class SnapshotBuilder:
         def build_fundamentals(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
             started = time.perf_counter()
             # Not the formal PIT decision boundary: take fundamentals published
-            # inside the period without requiring partitions or the audit status,
-            # so a slot still builds where a fundamental window happens to be empty.
+            # inside the period without the audit status, so a slot still
+            # builds where a fundamental window happens to hold no events --
+            # but only where the store built every month of it.
+            _require_event_months(
+                self.fundamental_events_root,
+                tuple(config.fundamental_datasets),
+                window_floor,
+                period_end,
+                slot=f"{start_key}..{end_key}",
+            )
             nat_counts: dict[str, int] = {}
             fundamentals = read_fundamental_events(
                 self.fundamental_events_root,
@@ -2156,8 +2180,7 @@ class SnapshotBuilder:
         universe = universe.merge(self._names_as_of(decision_time), on="ts_code", how="left")
         if config.include_industry:
             industry = self._industry_membership(decision_time.strftime("%Y%m%d"))
-            if not industry.empty:
-                universe = universe.merge(industry, on="ts_code", how="left")
+            universe = universe.merge(industry, on="ts_code", how="left")
         return universe.reset_index(drop=True)
 
     def _names_as_of(self, decision_time: datetime) -> pd.DataFrame:
@@ -2184,9 +2207,25 @@ class SnapshotBuilder:
         Decision days before the SW2021 index switch use the frozen SW2014
         membership (legacy index_member partitions) so each day is classified
         by the scheme the market actually used then; later days use the
-        SW2021 scheme (index_member_all partitions)."""
+        SW2021 scheme (index_member_all partitions). Called only with
+        classification on, so a day the stored membership does not classify
+        is refused (``IndustryMembershipError``) rather than served empty."""
         if decision_day < SW2021_EFFECTIVE_DAY:
-            return self._sw2014_membership(decision_day)
+            membership = self._sw2014_membership(decision_day)
+            source = "index_member with index_classify/src=SW2014"
+        else:
+            membership = self._sw2021_membership(decision_day)
+            source = "index_member_all"
+        if membership.empty:
+            raise IndustryMembershipError(
+                f"industry classification is on, but the Shenwan membership ({source} "
+                f"under {self.raw_dir}) classifies no stock on {decision_day}: every "
+                "holding would read as unclassified. Download the membership, or "
+                "create the experiment with include_industry off."
+            )
+        return membership
+
+    def _sw2021_membership(self, decision_day: str) -> pd.DataFrame:
         dataset_dir = self.raw_dir / "index_member_all"
         if not dataset_dir.exists():
             return pd.DataFrame()
@@ -2223,6 +2262,50 @@ class SnapshotBuilder:
 
 
 SW2021_EFFECTIVE_DAY = "20211213"  # Shenwan indices switched to the 2021 classification on this day
+
+
+def _require_event_months(
+    root: Path,
+    datasets: tuple[str, ...],
+    first: pd.Timestamp,
+    last: pd.Timestamp,
+    *,
+    slot: str,
+) -> None:
+    """Refuse a replay slot whose fundamental window has a month the store never built.
+
+    ``read_fundamental_events`` reads the ``available_month`` partitions from
+    ``first``'s month through ``last``'s; each one must exist for every
+    configured dataset (an empty month is a zero-row marker), otherwise the
+    month would silently read as having no events (``FundamentalCoverageError``).
+    """
+
+    months = [
+        period.strftime("%Y%m")
+        for period in pd.period_range(first.strftime("%Y-%m"), last.strftime("%Y-%m"), freq="M")
+    ]
+    gaps: dict[str, list[str]] = {}
+    for dataset in datasets:
+        built = {
+            path.stem.split("=", 1)[1]
+            for path in (root / dataset).glob("available_month=*.parquet")
+        }
+        missing = [month for month in months if month not in built]
+        if missing:
+            gaps[dataset] = missing
+    if gaps:
+        detail = "; ".join(
+            f"{dataset} ({len(missing)} of {len(months)}, first {missing[0]})"
+            for dataset, missing in gaps.items()
+        )
+        raise FundamentalCoverageError(
+            f"replay slot {slot} reads PIT fundamental events for months "
+            f"{months[0]}..{months[-1]}, but the store under {root} never built "
+            f"some of them: {detail}. Served as it is, every fundamental would stay "
+            "frozen across the gap. Rebuild the PIT fundamental events over the slot "
+            "first (tushare_cron_update.py --job cn_nightly_pit_event_build "
+            "--start-date <first missing month>)."
+        )
 
 
 def _membership_as_of(merged: pd.DataFrame, decision_day: str) -> pd.DataFrame:
