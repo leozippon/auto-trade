@@ -23,6 +23,7 @@ from autotrade.environment.identity import (
 from autotrade.environment.runtime import utc_now_iso, write_json_atomic
 from autotrade.environment.sandbox import EXPERIMENT_LABEL
 from autotrade.environment.sandbox_images import reclaim_experiment_sandbox_images
+from autotrade.environment.tools.workspace import WORKSPACE_MIN_FREE_BYTES
 from autotrade.pipelines.agent_inbox import (
     INBOX_NAME,
     InboxError,
@@ -59,6 +60,12 @@ from .registry import experiment_state, read_ledger_records, worker_log_ref
 # four; a new direction therefore replaces the weakest running arm rather than
 # adding one. Measured rationale: docs/deployment-documentation.md.
 MAX_RUNNING_EXPERIMENTS = 4
+# What one new arm writes of its own before its first validation: the PIT views
+# and as-of stash its seed does not carry, measured at 0.5-2.5 GiB of unique
+# bytes per arm. A create is refused unless the experiments filesystem keeps the
+# Agent tools' free-space floor after that, so an arm never builds its views
+# only to have its shell and batch_validate calls refused below the floor.
+ARM_DISK_MARGIN_BYTES = 3 * 1024**3
 # SIGTERM graces before the worker's process group is SIGKILLed. Terminate is
 # an explicit stop, so it stays short; restart has to outwait the in-flight
 # work a worker cannot interrupt (a model call runs minutes) before forcing it.
@@ -340,6 +347,7 @@ class ExperimentManager:
             if directory.exists():
                 raise ManagerError(f"experiment {experiment_id!r} already exists")
             self._require_running_slot()
+            self._require_free_space()
             merged.update(
                 {
                     **WEB_INTERNAL_PARAMS,
@@ -558,6 +566,25 @@ class ExperimentManager:
             raise ManagerError(
                 f"parallel experiment cap reached ({MAX_RUNNING_EXPERIMENTS}); "
                 f"running: {', '.join(sorted(running))}"
+            )
+
+    def _require_free_space(self) -> None:
+        # The nearest existing directory is on the filesystem the experiment
+        # directory will be created on.
+        root = next(
+            path
+            for path in (self.experiments_root, *self.experiments_root.parents)
+            if path.exists()
+        )
+        free = shutil.disk_usage(root).free
+        needed = WORKSPACE_MIN_FREE_BYTES + ARM_DISK_MARGIN_BYTES
+        if free < needed:
+            raise ManagerError(
+                f"not enough free disk space to create an arm: {free / 1024**3:.1f} GiB "
+                f"free on the experiments filesystem, {needed / 1024**3:g} GiB needed "
+                f"(the {WORKSPACE_MIN_FREE_BYTES / 1024**3:g} GiB floor below which "
+                "shell and batch_validate are refused, plus "
+                f"{ARM_DISK_MARGIN_BYTES / 1024**3:g} GiB for the arm's own PIT views)"
             )
 
     def control(

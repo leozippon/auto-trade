@@ -14,6 +14,7 @@ import io
 import json
 import os
 import re
+import shutil
 import tempfile
 import unittest
 import zipfile
@@ -30,6 +31,7 @@ from autotrade.environment.runtime import (
     AgentTraceWriter,
     write_json_atomic,
 )
+from autotrade.environment.tools.workspace import WORKSPACE_MIN_FREE_BYTES
 from autotrade.pipelines.config import (
     DEFAULT_RESEARCH_GEOMETRY,
     AcceptanceRules,
@@ -45,6 +47,7 @@ from autotrade.pipelines.hitl_state import (
 )
 from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.webui.manager import (
+    ARM_DISK_MARGIN_BYTES,
     MAX_RUNNING_EXPERIMENTS,
     ExperimentManager,
     ManagerError,
@@ -1384,6 +1387,40 @@ class WebuiBackendTest(unittest.TestCase):
                 }
             )
         self.assertFalse((self.experiments_root / "exp_overflow").exists())
+
+    def test_create_is_refused_below_the_free_space_floor_plus_one_arm(self) -> None:
+        """An arm created below the Agent tools' floor plus its own views would
+        build them and then be refused every validation: the create is a 400
+        that writes nothing, and exactly the floor plus the margin passes."""
+
+        needed = WORKSPACE_MIN_FREE_BYTES + ARM_DISK_MARGIN_BYTES
+        usage = shutil.disk_usage(self.repo_root)
+        request = {"experiment_id": "exp_low_disk", **DEFAULT_RESEARCH_GEOMETRY.to_record()}
+        with (
+            patch(
+                "autotrade.webui.manager.shutil.disk_usage",
+                return_value=usage._replace(free=needed - 1),
+            ),
+            patch("autotrade.webui.manager.subprocess.Popen") as popen,
+        ):
+            response = self.client.post("/api/experiments", json={"params": request})
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn("not enough free disk space", response.json()["detail"])
+        self.assertIn(f"{needed / 1024**3:g} GiB needed", response.json()["detail"])
+        popen.assert_not_called()
+        self.assertFalse((self.experiments_root / "exp_low_disk").exists())
+
+        manager = ExperimentManager(self.repo_root, self.experiments_root)
+        with (
+            patch(
+                "autotrade.webui.manager.shutil.disk_usage",
+                return_value=usage._replace(free=needed),
+            ),
+            patch.object(manager, "_preflight"),
+            patch.object(manager, "start_worker", return_value={"spawned": False}),
+        ):
+            created = manager.create_experiment(request)
+        self.assertEqual(created["experiment_id"], "exp_low_disk")
 
     def test_running_cap_also_guards_worker_restart(self) -> None:
         manager = ExperimentManager(self.repo_root, self.experiments_root)
