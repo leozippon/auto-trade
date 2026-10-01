@@ -85,8 +85,10 @@ def book(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     )
     score.VALUES = pd.Series([6.0, 5.0, 4.0, 3.0, 2.0, 1.0], index=codes)
     yield trade, data, tmp_path / "asof"
+    # Popped, not monkeypatched: monkeypatch would put these stubs back when it
+    # undoes, and every later strategy importing its own ``lib`` would find them.
     for name in [module for module in sys.modules if module == "lib" or module.startswith("lib.")]:
-        monkeypatch.delitem(sys.modules, name)
+        sys.modules.pop(name)
 
 
 def _context(asof: Path, day: str, positions: dict[str, int], cash: float) -> SimpleNamespace:
