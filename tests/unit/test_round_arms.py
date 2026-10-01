@@ -267,6 +267,8 @@ def test_a_round_without_arms_is_never_posted() -> None:
 # the only tests here that fake it: the health record it reads and the create
 # request it sends.
 FILL_ARMS = ("fill_first", "fill_second", "fill_third")
+# The one line a timer run logs: its local time with offset, then the counts.
+SUMMARY = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2} fill launcher: (.*)$")
 
 
 def _fill_round(
@@ -276,14 +278,16 @@ def _fill_round(
     running: int,
     created: tuple[str, ...] = (),
     accepted: bool = True,
+    arms: dict[str, dict[str, object]] | None = None,
 ) -> tuple[Round, list[str]]:
     """A three-arm round on a finished seed, with the console's two calls faked.
 
     ``running`` is how many of the console's four slots are in use, ``created``
-    the arms whose experiment directory already exists. The returned list
-    records, in order, the ids a create request was actually sent for.
+    the arms whose experiment directory already exists, ``arms`` what each arm
+    decides for itself. The returned list records, in order, the ids a create
+    request was actually sent for.
     """
-    rnd = Round(arms={arm: {} for arm in FILL_ARMS}, pit_views_seed="data/seed_probe")
+    rnd = Round(arms=arms or {arm: {} for arm in FILL_ARMS}, pit_views_seed="data/seed_probe")
     _synthetic_repo(tmp_path, monkeypatch, rnd)
     for experiment_id in created:
         (tmp_path / "experiments" / experiment_id).mkdir(parents=True)
@@ -305,31 +309,52 @@ def _fill_round(
     return rnd, posted
 
 
+def _summary(out: str) -> str:
+    """The run's summary line, which must be the only line a timer run logs
+    on stdout when the console's own create lines are faked away."""
+    lines = out.splitlines()
+    assert len(lines) == 1, lines
+    match = SUMMARY.match(lines[0])
+    assert match, lines[0]
+    return match.group(1)
+
+
 def test_a_fill_creates_pending_arms_in_queue_order_up_to_the_free_slots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """One free slot, one arm already created: the next pending arm takes it and
-    the one behind it waits."""
+    the one behind it waits, and the run logs one line saying so."""
     rnd, posted = _fill_round(tmp_path, monkeypatch, running=3, created=("fill_first",))
     assert rnd.main(["launcher", "0", "--fill"]) == 0
     assert posted == ["fill_second"]
-    out = capsys.readouterr().out
-    assert "fill_first: created already, skipped" in out
-    assert "fill_third: pending, waits for a free slot" in out
+    assert _summary(capsys.readouterr().out) == (
+        "slots 3/4 in use (other_0, other_1, other_2), 1 free; queue 3: "
+        "1 skipped (created already), 1 created, 0 refused, 1 pending"
+    )
 
 
 @pytest.mark.parametrize(
-    ("running", "created"),
-    [(4, ()), (0, FILL_ARMS)],
+    ("running", "created", "counts"),
+    [
+        (4, (), "0 skipped (created already), 0 created, 0 refused, 3 pending"),
+        (0, FILL_ARMS, "3 skipped (created already), 0 created, 0 refused, 0 pending"),
+    ],
     ids=["no slot free", "nothing pending"],
 )
 def test_a_fill_with_nothing_to_do_is_the_steady_state(
-    running: int, created: tuple[str, ...], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    running: int,
+    created: tuple[str, ...],
+    counts: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The mode runs on a timer, so an idle fill exits 0 and sends nothing."""
+    """The mode runs on a timer, so an idle fill exits 0, sends nothing and
+    logs one line however long the queue behind it is."""
     rnd, posted = _fill_round(tmp_path, monkeypatch, running=running, created=created)
     assert rnd.main(["launcher", "0", "--fill"]) == 0
     assert posted == []
+    assert _summary(capsys.readouterr().out).endswith(counts)
 
 
 def test_a_fill_reports_a_creation_the_console_refused(
@@ -338,7 +363,25 @@ def test_a_fill_reports_a_creation_the_console_refused(
     rnd, posted = _fill_round(tmp_path, monkeypatch, running=2, accepted=False)
     assert rnd.main(["launcher", "0", "--fill"]) == 1
     assert posted == ["fill_first", "fill_second"]
-    assert "not created: fill_first, fill_second" in capsys.readouterr().err
+    captured = capsys.readouterr()
+    assert _summary(captured.out).endswith("0 created, 2 refused, 1 pending")
+    assert "not created: fill_first, fill_second" in captured.err
+
+
+def test_a_fill_stops_at_an_arm_the_preflight_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Nothing is sent for the refused arm or after it, the reason and the
+    summary still reach the log, and the run exits non-zero."""
+    arms = {arm: {} for arm in FILL_ARMS}
+    arms["fill_second"] = {"research_end": "20250331"}
+    rnd, posted = _fill_round(tmp_path, monkeypatch, running=0, arms=arms)
+    assert rnd.main(["launcher", "0", "--fill"]) == 1
+    assert posted == ["fill_first"]
+    captured = capsys.readouterr()
+    assert _summary(captured.out).endswith("1 created, 1 refused, 1 pending")
+    assert "fill_second: parameters rejected" in captured.err
+    assert "whole July-June years" in captured.err
 
 
 def test_a_fill_dry_run_plans_without_creating(
@@ -347,7 +390,12 @@ def test_a_fill_dry_run_plans_without_creating(
     rnd, posted = _fill_round(tmp_path, monkeypatch, running=3)
     assert rnd.main(["launcher", "0", "--fill", "--dry-run"]) == 0
     assert posted == []
-    assert "fill_first: pending, takes a free slot" in capsys.readouterr().out
+    out = capsys.readouterr().out.splitlines()
+    assert "fill_first: pending, takes a free slot" in out
+    assert "fill_third: pending, waits for a free slot" in out
+    match = SUMMARY.match(out[-1])
+    assert match, out[-1]
+    assert match.group(1).endswith("0 skipped (created already), 1 would be created, 0 refused, 2 pending")
 
 
 def test_a_fill_never_takes_an_experiment_id(

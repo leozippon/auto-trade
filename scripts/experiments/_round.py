@@ -42,7 +42,11 @@ experiment directory already exists -- running, completed and failed alike, the
 console's own rule -- and creates the next pending ones in file order through
 the same validation and POST path. Nothing pending or nothing free is the
 steady state and exits 0, so the mode is idempotent and safe on a timer; only a
-creation that was attempted and refused exits non-zero.
+creation that was attempted and refused exits non-zero. A timer run writes one
+timestamped summary line -- slots, and how many arms were skipped, created,
+refused and are still pending -- plus one line per arm it created or that was
+refused; with `--dry-run` it also lists each pending arm and whether it takes a
+free slot.
 
 RETIRED_IDS records the experiment ids that have been used and archived, so a
 new round cannot quietly reuse one. `logs/archive/` is not part of the
@@ -58,6 +62,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 _SCRIPTS = Path(__file__).resolve().parents[1]
@@ -284,8 +289,14 @@ def normalize(params: dict[str, object]) -> dict[str, object]:
     return merged
 
 
+def _now() -> str:
+    """Local time with its offset: the cron log's runs are told apart by it."""
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
 def post(port: int, params: dict[str, object]) -> bool:
-    """POST one create request; report whether the console accepted it."""
+    """POST one create request; print one line and report whether the console
+    accepted it."""
     experiment_id = params["experiment_id"]
     request = urllib.request.Request(
         f"http://127.0.0.1:{port}/api/experiments",
@@ -293,16 +304,20 @@ def post(port: int, params: dict[str, object]) -> bool:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
+    # Flushed: stdout and stderr share the cron log, and a buffered line would
+    # land after the refusals that followed it.
     try:
         with urllib.request.urlopen(request, timeout=300) as response:
-            print(experiment_id, response.status, response.read(400).decode("utf-8", "replace"))
+            body = response.read(400).decode("utf-8", "replace")
+            print(f"{experiment_id}: created, HTTP {response.status} {body}", flush=True)
             return True
     except urllib.error.HTTPError as exc:
-        print(experiment_id, "HTTP", exc.code, exc.read(800).decode("utf-8", "replace"), file=sys.stderr)
+        body = exc.read(800).decode("utf-8", "replace")
+        print(f"{experiment_id}: refused, HTTP {exc.code} {body}", file=sys.stderr)
     except urllib.error.URLError as exc:
         # No console on that port, or it dropped the connection: an operator
         # error, not a traceback.
-        print(experiment_id, "console unreachable:", exc.reason, file=sys.stderr)
+        print(f"{experiment_id}: not sent, console unreachable: {exc.reason}", file=sys.stderr)
     return False
 
 
@@ -318,7 +333,7 @@ def health(port: int) -> dict[str, object]:
         with urllib.request.urlopen(url, timeout=60) as response:
             return json.loads(response.read())
     except (OSError, json.JSONDecodeError) as exc:
-        raise SystemExit(f"console health unreadable at {url}: {exc}") from exc
+        raise SystemExit(f"{_now()} console health unreadable at {url}: {exc}") from exc
 
 
 @dataclass(frozen=True)
@@ -456,29 +471,28 @@ class Round:
             " still staging and checks that release is published and reaches Held-out."
         )
 
-    def fill(self, port: int) -> list[str]:
-        """The arms to create now: the pending ones, in order, up to the free slots.
+    def fill(self, port: int, *, dry_run: bool) -> tuple[list[str], list[str], str]:
+        """The arms to create now -- the pending ones, in order, up to the free
+        slots -- every pending arm, and the slot part of the run's summary line.
 
         The queue is the arm order of the round file. An arm whose experiment
         directory exists has been created already -- the console refuses a
         second one whatever state it reached -- so only the rest are pending,
-        and only as many of them as the console has slots free right now.
+        and only as many of them as the console has slots free right now. A
+        dry-run lists the pending arms; a timer run only counts them.
         """
         record = health(port)
         running = sorted(str(name) for name in record["running"])
         cap = int(record["max_running_experiments"])
-        free = cap - len(running)
-        print(f"console: {len(running)}/{cap} slots in use ({', '.join(running) or 'none'})")
-        chosen: list[str] = []
-        for experiment_id in self.arms:
-            if (EXPERIMENTS_ROOT / experiment_id).exists():
-                print(f"{experiment_id}: created already, skipped")
-            elif len(chosen) < free:
-                chosen.append(experiment_id)
-                print(f"{experiment_id}: pending, takes a free slot")
-            else:
-                print(f"{experiment_id}: pending, waits for a free slot")
-        return chosen
+        free = max(cap - len(running), 0)
+        pending = [arm for arm in self.arms if not (EXPERIMENTS_ROOT / arm).exists()]
+        chosen = pending[:free]
+        if dry_run:
+            for experiment_id in pending:
+                slot = "takes a free slot" if experiment_id in chosen else "waits for a free slot"
+                print(f"{experiment_id}: pending, {slot}")
+        slots = f"slots {len(running)}/{cap} in use ({', '.join(running) or 'none'}), {free} free"
+        return chosen, pending, slots
 
     def main(self, argv: list[str], usage: str | None = None) -> int:
         """`<port> [--dry-run] [--fill] [experiment_id ...]`, shared by every round file."""
@@ -504,34 +518,36 @@ class Round:
         if not dry_run and not self.arms:
             raise SystemExit("this round has no arms to create; --dry-run validates its geometry and seed")
         self.check_console_defaults()
-        print(self.seed_status())
+        if not fill or dry_run:
+            # A timer run's log carries its summary line, not the seed's
+            # contract every ten minutes.
+            print(self.seed_status())
         shared, reason = self.validated(PROBE_ID)
         if shared is None:
             # Every arm sends these parameters, so no arm can pass either.
-            print(reason, file=sys.stderr)
+            print(f"{_now()} {reason}" if fill else reason, file=sys.stderr)
             return 1
         if dry_run:
             print(json.dumps({key: shared[key] for key in ROUND_REPORT_KEYS}, ensure_ascii=False))
         if fill:
             # The queue decides the selection; --dry-run still decides whether
             # anything is sent.
-            wanted = set(self.fill(port))
-            if not wanted:
-                return 0
+            selected, pending, slots = self.fill(port, dry_run=dry_run)
+        else:
+            selected = [arm for arm in self.arms if not wanted or arm in wanted]
+        created: list[str] = []
         failed: list[str] = []
-        for experiment_id in self.arms:
-            if wanted and experiment_id not in wanted:
-                continue
+        for experiment_id in selected:
             merged, reason = self.validated(experiment_id)
             if merged is None:
-                # On the POST path nothing may be sent for a rejected arm; on a
-                # dry-run the refusal is a reading, so the remaining arms are
-                # read too and the exit code still reports it.
-                if not dry_run:
-                    raise SystemExit(reason)
+                # On a dry-run the refusal is a reading, so the remaining arms
+                # are read too and the exit code still reports it; on the POST
+                # path nothing more is sent after a rejected arm.
                 print(reason, file=sys.stderr)
                 failed.append(experiment_id)
-                continue
+                if dry_run:
+                    continue
+                break
             if dry_run:
                 # What this arm decides for itself: everything it sends that
                 # differs from the round it belongs to.
@@ -550,8 +566,19 @@ class Round:
                 for line in directive.splitlines():
                     print("   |", line)
                 continue
-            if not post(port, self.request_params(experiment_id)):
+            if post(port, self.request_params(experiment_id)):
+                created.append(experiment_id)
+            else:
                 failed.append(experiment_id)
+        if fill:
+            done = len(selected) - len(failed) if dry_run else len(created)
+            print(
+                f"{_now()} fill {Path(argv[0]).stem}: {slots}; queue {len(self.arms)}: "
+                f"{len(self.arms) - len(pending)} skipped (created already), "
+                f"{done} {'would be created' if dry_run else 'created'}, "
+                f"{len(failed)} refused, {len(pending) - done - len(failed)} pending",
+                flush=True,
+            )
         if failed:
             print(("refused: " if dry_run else "not created: ") + ", ".join(failed), file=sys.stderr)
             return 1
