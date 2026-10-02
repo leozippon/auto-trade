@@ -5680,6 +5680,57 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(deep["details"]["bad_days"], 1)
         self.assertEqual(deep["details"]["bad_day_sample"][0]["trade_date"], "20200103")
 
+    def test_intraday_by_date_audit_warns_on_a_stale_tail_and_errors_on_a_hole(self):
+        # The minute layer lands only through a manual job: days after its
+        # newest partition are staleness, a day missing before it is a defect.
+        cal = self.raw_dir / "trade_cal" / "exchange=SSE" / "year=2020.parquet"
+        cal.parent.mkdir(parents=True, exist_ok=True)
+        days = ["20200102", "20200103", "20200106", "20200107"]
+        pd.DataFrame([{"cal_date": day, "is_open": "1"} for day in days]).to_parquet(cal, index=False)
+        status_path = self.root / "status.json"
+        args = argparse.Namespace(
+            raw_dir=str(self.raw_dir),
+            start_date=days[0],
+            end_date=days[-1],
+            output_dataset=common.STK_MINS_BY_DATE_DATASET,
+            codes=None,
+            max_codes=None,
+            expected_codes_source="none",
+            min_rows_per_day=0,
+            allow_missing_codes=0,
+            full_scan=False,
+            sample_limit=0,
+            output=str(status_path),
+        )
+
+        def findings() -> dict[str, dict]:
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            prefix = common.STK_MINS_BY_DATE_DATASET
+            return {item["check"].removeprefix(f"{prefix}_"): item for item in status["findings"]}
+
+        (self.raw_dir / common.STK_MINS_BY_DATE_DATASET).mkdir(parents=True)
+        self.assertEqual(audit.audit_intraday_by_date(args), 1)
+        self.assertEqual(findings()["inventory"]["details"]["missing_files"], 4)
+        self.assertEqual(findings()["staleness"]["severity"], "info")
+
+        self._write_by_date_minutes("20200102")
+        self._write_by_date_minutes("20200103")
+        self.assertEqual(audit.audit_intraday_by_date(args), 0)
+        found = findings()
+        self.assertEqual(found["inventory"]["severity"], "info")
+        self.assertEqual(found["staleness"]["severity"], "warning")
+        self.assertEqual(
+            found["staleness"]["details"],
+            {"newest_trade_date": "20200103", "stale_trade_dates": 2, "stale_first": "20200106", "stale_last": "20200107"},
+        )
+
+        self._write_by_date_minutes("20200107")
+        self.assertEqual(audit.audit_intraday_by_date(args), 1)
+        found = findings()
+        self.assertEqual(found["inventory"]["severity"], "error")
+        self.assertEqual(found["inventory"]["details"]["missing_files"], 1)
+        self.assertEqual(found["staleness"]["severity"], "info")
+
     def test_stk_mins_sample_rotates_deterministically_with_seed(self):
         base = self.raw_dir / common.STK_MINS_DATASET
         files = []

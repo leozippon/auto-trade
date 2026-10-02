@@ -421,8 +421,19 @@ def audit_intraday_by_date(args: argparse.Namespace) -> int:
         findings.append({"severity": severity, "check": check, "message": message, "details": details or {}})
 
     paths = {trade_date: stk_mins_by_date_path(raw_dir, args.output_dataset, trade_date) for trade_date in trade_dates}
-    missing = [str(path) for trade_date, path in paths.items() if not path.exists()]
-    files = [path for path in paths.values() if path.exists()]
+    present = [trade_date for trade_date in trade_dates if paths[trade_date].exists()]
+    # The layer lands only through the manual job manual_intraday_minutes, so
+    # open days after its newest partition are "not landed yet": a warning that
+    # names the extent, which keeps the nightly audit's errors for real defects.
+    # A hole before the newest partition is a lost partition, and a window with
+    # no partition at all has nothing to be stale against; both stay errors.
+    stale = [trade_date for trade_date in trade_dates if present and trade_date > present[-1]]
+    missing = [
+        str(paths[trade_date])
+        for trade_date in trade_dates
+        if not paths[trade_date].exists() and (not present or trade_date < present[-1])
+    ]
+    files = [paths[trade_date] for trade_date in present]
     meta_files = [path.with_suffix(path.suffix + ".meta.json") for path in files]
     missing_meta = [str(path) for path in meta_files if not path.exists()]
     all_meta = sorted(dataset_dir.glob("*.parquet.meta.json"))
@@ -450,6 +461,12 @@ def audit_intraday_by_date(args: argparse.Namespace) -> int:
         "orphan_meta_sample": orphan_meta[:20],
         "zero_file_sample": zero_files[:20],
         "schema_missing_sample": schema_missing[:10],
+    })
+    add("warning" if stale else "info", f"{args.output_dataset}_staleness", "open days after the newest intraday minute partition (landed only by manual_intraday_minutes)", {
+        "newest_trade_date": present[-1] if present else None,
+        "stale_trade_dates": len(stale),
+        "stale_first": stale[0] if stale else None,
+        "stale_last": stale[-1] if stale else None,
     })
 
     # The by-date lake gets the same commit-pair coverage as every raw dataset.
