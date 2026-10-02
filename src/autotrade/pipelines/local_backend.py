@@ -116,6 +116,7 @@ from .config import (
     EvaluationResult,
     ResearchSessionRequest,
     ResearchSessionResult,
+    SessionResume,
     SnapshotBundle,
     StepResult,
     StrategyExperimentConfig,
@@ -148,6 +149,7 @@ from .skills import (
 )
 
 if TYPE_CHECKING:
+    from autotrade.agent.runner import AgentSessionRunner
     from autotrade.environment.llm import ChatMessage, LLMProxy, ProviderResponse
 
 
@@ -711,22 +713,190 @@ class LLMResearchDeveloper:
         return int(limits.gpu_count)
 
     def __call__(self, request: ResearchSessionRequest) -> ResearchSessionResult:
-        from autotrade.agent.compact import ContextCompactor, compaction_summary_message
-        from autotrade.agent.prompts import (
-            SESSION_DEFAULT_INSTRUCTION,
-            build_resume_instruction,
-            build_system_prompt,
+        root, resume, attempt = self._resolve_resume(request)
+        # The replay-years the counter continues from, not the trace's figure
+        # alone: the facts and the resume note show what the session has left.
+        used = replace(request.budget_used, replay_years=request.replay_years_spent)
+        session_ref = self.ref_store.get_or_create("session", request.session_key)
+        run_ref = self.ref_store.get_or_create("run", request.run_id)
+        transcripts, trace = self._open_trace(
+            request, session_ref=session_ref, run_ref=run_ref
         )
-        from autotrade.agent.runner import (
-            AgentSessionBudgetExhausted,
-            AgentSessionConfig,
-            AgentSessionRunner,
+        _environment_phase(request.progress_hook, "sandbox_layout", request.run_id)
+        local = LocalSandbox(root)
+        paths = local.prepare_layout()
+        sandbox_spec = self._session_sandbox_spec(request)
+        manifest = self._create_run_manifest(
+            request, paths, attempt=attempt, sandbox_spec=sandbox_spec, used=used
         )
-        from autotrade.agent.subagent import (
-            SubAgentConfig,
-            SubAgentEngine,
+        workspace_root = paths.workspace
+        output_dir = workspace_root / "output"
+        models_dir = workspace_root / "models"
+        inputs_dir = workspace_root / "inputs"
+        source = self.baseline_strategy.parent
+        source_models = None
+        seeded_readonly = self._seed_working_copy(
+            manifest,
+            resume=resume,
+            output_dir=output_dir,
+            models_dir=models_dir,
+            source=source,
+            source_models=source_models,
         )
-        from autotrade.pipelines.agent_inbox import bind_session_inbox
+        mounted_memory = self._mount_session_inputs(
+            request,
+            local,
+            manifest,
+            resume=resume,
+            workspace_root=workspace_root,
+            inputs_dir=inputs_dir,
+        )
+        safe = SafeWorkspace(workspace_root)
+        # Read-only exploration reaches the PIT view, the start node's
+        # artifacts, the backtest results, the step lineage and the session's
+        # own transcript, not just the writable workspace.
+        search_roots = SearchRoots(safe, paths=paths, trace_root=transcripts)
+        tree = self._install_step_tree(paths)
+        sandbox: DockerSandbox | None = None
+        emit_event = trace.emit
+        try:
+            if self.command_runner_factory is not None:
+                command_runner = self.command_runner_factory(workspace_root)
+            else:
+                _environment_phase(
+                    request.progress_hook, "sandbox_start", request.run_id
+                )
+                sandbox = DockerSandbox(
+                    local,
+                    sandbox_spec,
+                    labels=experiment_container_labels(
+                        request.experiment_id, run_id=request.run_id
+                    ),
+                )
+                sandbox.start()
+                command_runner = PersistentCommandRunner(sandbox)
+            facts = self._session_facts(
+                request,
+                manifest=manifest,
+                paths=paths,
+                models_dir=models_dir,
+            )
+            write_json_atomic(inputs_dir / SESSION_CONTEXT_NAME, facts)
+            chmod_tree(inputs_dir, file_mode=0o444, dir_mode=0o555)
+
+            modification = ModificationCheckTool(
+                output_dir,
+                parent_dir=source,
+                models_dir=models_dir,
+                parent_models_dir=source_models,
+                constraints=request.modification_constraints,
+                readonly_baseline=seeded_readonly,
+                # The host seeded this tree, so the host restores the contract
+                # file it owns there: a session that deleted or overwrote it
+                # cannot write it back, and without this every replay stayed
+                # blocked on bytes only the host may produce.
+                readonly_seed=source,
+            )
+            # The arm's budgets minus what earlier attempts spent: the clock
+            # holds only the remainder, the counters start from the spend.
+            attempt_seconds = max(request.deadline_seconds - used.inference_seconds, 0.001)
+            time_budget = InferenceTimeBudget(duration_seconds=attempt_seconds)
+            shared_budget = SessionCallBudget(
+                max_calls=request.max_llm_calls,
+                time_budget=time_budget,
+            )
+            shared_budget.seed(used)
+            backtest, smoke, tools, null_control_tool = self._session_tools(
+                request,
+                used=used,
+                paths=paths,
+                manifest=manifest,
+                tree=tree,
+                safe=safe,
+                search_roots=search_roots,
+                command_runner=command_runner,
+                modification=modification,
+                output_dir=output_dir,
+                models_dir=models_dir,
+                source=source,
+                source_models=source_models,
+                seeded_readonly=seeded_readonly,
+                mounted_memory=mounted_memory,
+                session_ref=session_ref,
+                trace=trace,
+                time_budget=time_budget,
+            )
+
+            def budget_used_now() -> dict[str, object]:
+                """The session's cumulative spend, as every budgeted trace event records it."""
+
+                return BudgetUsed(
+                    inference_seconds=used.inference_seconds
+                    + max(attempt_seconds - time_budget.remaining(), 0.0),
+                    llm_calls=shared_budget.calls,
+                    main_calls=shared_budget.main_calls,
+                    subagent_calls=shared_budget.subagent_calls,
+                    compact_calls=shared_budget.compact_calls,
+                    replay_years=backtest.replay_years_used,
+                    null_controls=(
+                        null_control_tool.used
+                        if null_control_tool is not None
+                        else int(used.null_controls)
+                    ),
+                ).to_record()
+
+            emit_event = _agent_event_sink(
+                trace, request.progress_hook, request.run_id, budget_used=budget_used_now
+            )
+            runner = self._session_runner(
+                request,
+                facts=facts,
+                tools=tools,
+                safe=safe,
+                search_roots=search_roots,
+                command_runner=command_runner,
+                modification=modification,
+                smoke=smoke,
+                backtest=backtest,
+                shared_budget=shared_budget,
+                time_budget=time_budget,
+                run_ref=run_ref,
+                emit_event=emit_event,
+            )
+            conversation_id, outcome, node_id, reason, finish_reason = self._run_agent(
+                runner, request, resume=resume, used=used, run_ref=run_ref
+            )
+            return self._collect_result(
+                request,
+                local=local,
+                manifest=manifest,
+                workspace_root=workspace_root,
+                inputs_dir=inputs_dir,
+                backtest=backtest,
+                null_control_tool=null_control_tool,
+                budget_used_now=budget_used_now,
+                attempt=attempt,
+                conversation_id=conversation_id,
+                outcome=outcome,
+                node_id=node_id,
+                reason=reason,
+                finish_reason=finish_reason,
+            )
+        except Exception as exc:
+            emit_event(
+                "session_error",
+                {"status": "error", "error": f"{type(exc).__name__}: {exc}"},
+            )
+            raise
+        finally:
+            if sandbox is not None:
+                sandbox.stop()
+
+    def _resolve_resume(
+        self, request: ResearchSessionRequest
+    ) -> tuple[Path, SessionResume | None, int]:
+        """The session runtime root, the resume this attempt continues (None
+        opens the session afresh) and the attempt number."""
 
         # One runtime root per session, reused by every attempt: the
         # workspace, the working copy, the candidates and the step tree are
@@ -753,11 +923,13 @@ class LLMResearchDeveloper:
             # attempt seeds and opens the session as a first attempt does, over
             # whatever partial layout they left.
             resume = None
-        # The replay-years the counter continues from, not the trace's figure
-        # alone: the facts and the resume note show what the session has left.
-        used = replace(request.budget_used, replay_years=request.replay_years_spent)
-        session_ref = self.ref_store.get_or_create("session", request.session_key)
-        run_ref = self.ref_store.get_or_create("run", request.run_id)
+        return root, resume, attempt
+
+    def _open_trace(
+        self, request: ResearchSessionRequest, *, session_ref: str, run_ref: str
+    ) -> tuple[Path, AgentTraceWriter]:
+        """The transcript directory and the host trace of this attempt."""
+
         # The Agent-readable transcript of every attempt, appended beside the
         # host trace and offered to the session as the ``trace`` read root.
         transcripts = agent_transcript_dir(self.artifact_store.root.parent)
@@ -773,9 +945,11 @@ class LLMResearchDeveloper:
             },
             transcript_dir=transcripts,
         )
-        _environment_phase(request.progress_hook, "sandbox_layout", request.run_id)
-        local = LocalSandbox(root)
-        paths = local.prepare_layout()
+        return transcripts, trace
+
+    def _session_sandbox_spec(self, request: ResearchSessionRequest) -> SandboxSpec:
+        """The session container's spec under this session's GPU allocation."""
+
         # Per-session HITL override; the "auto" selector still picks that many
         # GPUs by free memory at container start.
         if request.sandbox_gpu_count is None:
@@ -786,12 +960,23 @@ class LLMResearchDeveloper:
             sandbox_spec = replace(
                 self.sandbox_spec, gpu_count=int(request.sandbox_gpu_count)
             )
+        return sandbox_spec
+
+    def _create_run_manifest(
+        self,
+        request: ResearchSessionRequest,
+        paths,
+        *,
+        attempt: int,
+        sandbox_spec: SandboxSpec,
+        used: BudgetUsed,
+    ) -> RunManifest:
         # RunManifest publishes two views of the same data: the host audit copy
         # under runtime/, and the allowlisted Agent-visible copy mounted at
         # /mnt/artifacts/run_manifest.json. It is also where every backtest
         # summary accumulates. Research dates only: the forward period is
         # never known to a session.
-        manifest = RunManifest.create(
+        return RunManifest.create(
             paths.run_manifest,
             {
                 "experiment_id": request.experiment_id,
@@ -863,12 +1048,21 @@ class LLMResearchDeveloper:
             },
             ref_store=self.ref_store,
         )
-        workspace_root = paths.workspace
-        output_dir = workspace_root / "output"
-        models_dir = workspace_root / "models"
-        inputs_dir = workspace_root / "inputs"
-        source = self.baseline_strategy.parent
-        source_models = None
+
+    def _seed_working_copy(
+        self,
+        manifest: RunManifest,
+        *,
+        resume: SessionResume | None,
+        output_dir: Path,
+        models_dir: Path,
+        source: Path,
+        source_models: Path | None,
+    ) -> dict[str, str]:
+        """Seed ``output/`` and ``models/`` on a first attempt, hand them back
+        writable on every attempt, and pin the read-only contract files the
+        session received; returns that pin."""
+
         if self.baseline_strategy.name != "main.py":
             raise ValueError(
                 "baseline strategy file must be named main.py for research sessions"
@@ -888,6 +1082,22 @@ class LLMResearchDeveloper:
         # retroactively fail a session already running against the old bytes.
         seeded_readonly = readonly_baseline(output_dir)
         manifest.update(readonly_baseline=seeded_readonly)
+        return seeded_readonly
+
+    def _mount_session_inputs(
+        self,
+        request: ResearchSessionRequest,
+        local: LocalSandbox,
+        manifest: RunManifest,
+        *,
+        resume: SessionResume | None,
+        workspace_root: Path,
+        inputs_dir: Path,
+    ) -> list[MemorySource]:
+        """Mount what the session reads beside its working copy: operating
+        memory, skills and their index, the reference pack and the PIT view.
+        Returns the memory sources mounted."""
+
         if inputs_dir.exists():
             chmod_tree(inputs_dir, file_mode=0o644, dir_mode=0o755)
         inputs_dir.mkdir(exist_ok=True)
@@ -951,367 +1161,385 @@ class LLMResearchDeveloper:
             start=months_before(request.validation.end, request.window_months),
             end=request.validation.end,
         )
-        safe = SafeWorkspace(workspace_root)
-        # Read-only exploration reaches the PIT view, the start node's
-        # artifacts, the backtest results, the step lineage and the session's
-        # own transcript, not just the writable workspace.
-        search_roots = SearchRoots(safe, paths=paths, trace_root=transcripts)
-        tree = self._install_step_tree(paths)
-        sandbox: DockerSandbox | None = None
-        emit_event = trace.emit
-        try:
-            if self.command_runner_factory is not None:
-                command_runner = self.command_runner_factory(workspace_root)
-            else:
-                _environment_phase(
-                    request.progress_hook, "sandbox_start", request.run_id
-                )
-                sandbox = DockerSandbox(
-                    local,
-                    sandbox_spec,
-                    labels=experiment_container_labels(
-                        request.experiment_id, run_id=request.run_id
-                    ),
-                )
-                sandbox.start()
-                command_runner = PersistentCommandRunner(sandbox)
-            facts = self._session_facts(
-                request,
-                manifest=manifest,
-                paths=paths,
-                models_dir=models_dir,
-            )
-            write_json_atomic(inputs_dir / SESSION_CONTEXT_NAME, facts)
-            chmod_tree(inputs_dir, file_mode=0o444, dir_mode=0o555)
+        return mounted_memory
 
-            modification = ModificationCheckTool(
-                output_dir,
-                parent_dir=source,
-                models_dir=models_dir,
-                parent_models_dir=source_models,
-                constraints=request.modification_constraints,
-                readonly_baseline=seeded_readonly,
-                # The host seeded this tree, so the host restores the contract
-                # file it owns there: a session that deleted or overwrote it
-                # cannot write it back, and without this every replay stayed
-                # blocked on bytes only the host may produce.
-                readonly_seed=source,
-            )
-            # The arm's budgets minus what earlier attempts spent: the clock
-            # holds only the remainder, the counters start from the spend.
-            attempt_seconds = max(request.deadline_seconds - used.inference_seconds, 0.001)
-            time_budget = InferenceTimeBudget(duration_seconds=attempt_seconds)
-            shared_budget = SessionCallBudget(
-                max_calls=request.max_llm_calls,
-                time_budget=time_budget,
-            )
-            shared_budget.seed(used)
-            backtest = SessionValidations(
-                request=request,
-                output_dir=output_dir,
-                models_dir=models_dir,
-                artifact_store=self.artifact_store,
-                evaluator=self.evaluator,
-                tree=tree,
-                schedule=self.schedule,
-                broker_profile=self.broker_profile,
-                time_budget=time_budget,
-                ref_store=self.ref_store,
-                ledger=self.ledger,
-                manifest=manifest,
-                experiment_dir=self.experiment_dir,
-            )
-            smoke = SmokeBacktestTool(
-                request=request,
-                output_dir=output_dir,
-                models_dir=models_dir,
-                modification_check=modification,
-                evaluator=self.evaluator,
-                schedule=self.schedule,
-                broker_profile=self.broker_profile,
-                # Host-only runtime scratch: the rehearsal copy is outside every
-                # Agent mount, so nothing in the session can reach the bytes it
-                # is replaying.
-                scratch_root=paths.runtime / "smoke",
-                time_budget=time_budget,
-            )
-            tools: list[Tool] = [
-                ReadFileTool(search_roots),
-                GrepTool(search_roots),
-                GlobTool(search_roots),
-                WriteFileTool(safe),
-                EditFileTool(safe),
-                SandboxShellTool(safe, command_runner, result_store=search_roots),
-                WriteSkillTool(safe),
-                DeleteSkillTool(safe),
-                # Parent-only: sub-agents report findings to their parent, the
-                # parent files the report.
-                ReportIssueTool(issue_reports_path(self.experiment_dir), manifest),
-                # Parent-only, and negative only: one mounted memory entry this
-                # session's own measurements contradict.
-                SkillFeedbackTool(
-                    skill_feedback_path(self.experiment_dir),
-                    manifest,
-                    mounted_skill_refs(mounted_memory),
-                ),
-                # Parent-only: the Agent's own context compaction.
-                CompactTool(),
-                modification,
-                smoke,
-                BatchValidateTool(
-                    backtest=backtest,
-                    workspace=safe,
-                    # Same static gate as the live working copy, pointed at the
-                    # candidate directory: one constraint set for every formal
-                    # artifact this session produces.
-                    modification_check_factory=lambda directory: ModificationCheckTool(
-                        directory,
-                        parent_dir=source,
-                        models_dir=models_dir,
-                        parent_models_dir=source_models,
-                        constraints=request.modification_constraints,
-                        readonly_baseline=seeded_readonly,
-                        # Restored only in the tree the host seeded. A
-                        # candidate directory is the Agent's own layout of the
-                        # artifact it asks to freeze: the file is supplied
-                        # there when absent, and one carrying different bytes
-                        # is refused rather than silently corrected.
-                        readonly_seed=source if directory == output_dir else None,
-                    ),
-                    trace_emit=trace.emit,
-                ),
-            ]
-            null_control_tool = (
-                NullControlTool(backtest, max_calls=request.max_null_controls)
-                if request.max_null_controls > 0
-                else None
-            )
-            if null_control_tool is not None:
-                null_control_tool.used = int(used.null_controls)
-                tools.append(null_control_tool)
-            tools.append(
-                StepRollbackTool(tree, output_dir, models_dir, session_ref=session_ref)
-            )
-            # Matches the opaque session ref the step tree stores, so the
-            # current-session check compares like with like. One gate for the
-            # session: ``finish_session`` refuses a failing nomination with it,
-            # and the Runner labels every hard-finalization candidate with it.
-            tools.append(
-                FinishSessionTool(
-                    tree,
-                    session_ref=session_ref,
-                    freeze_gate=backtest.freeze_gate,
-                    another_round_fits=lambda: another_batch_round_fits(backtest),
-                    budget_status=lambda: session_budget_status(backtest),
-                )
-            )
-            def budget_used_now() -> dict[str, object]:
-                """The session's cumulative spend, as every budgeted trace event records it."""
+    def _session_tools(
+        self,
+        request: ResearchSessionRequest,
+        *,
+        used: BudgetUsed,
+        paths,
+        manifest: RunManifest,
+        tree: StepTree,
+        safe: SafeWorkspace,
+        search_roots: SearchRoots,
+        command_runner: CommandRunner,
+        modification: ModificationCheckTool,
+        output_dir: Path,
+        models_dir: Path,
+        source: Path,
+        source_models: Path | None,
+        seeded_readonly: dict[str, str],
+        mounted_memory: Sequence[MemorySource],
+        session_ref: str,
+        trace: AgentTraceWriter,
+        time_budget: InferenceTimeBudget,
+    ) -> tuple[SessionValidations, SmokeBacktestTool, list[Tool], NullControlTool | None]:
+        """The parent session's tools over the session's Validations; returns
+        the Validations, the smoke tool, the tool list and the null-control
+        tool (None when the arm allows no null controls)."""
 
-                return BudgetUsed(
-                    inference_seconds=used.inference_seconds
-                    + max(attempt_seconds - time_budget.remaining(), 0.0),
-                    llm_calls=shared_budget.calls,
-                    main_calls=shared_budget.main_calls,
-                    subagent_calls=shared_budget.subagent_calls,
-                    compact_calls=shared_budget.compact_calls,
-                    replay_years=backtest.replay_years_used,
-                    null_controls=(
-                        null_control_tool.used
-                        if null_control_tool is not None
-                        else int(used.null_controls)
-                    ),
-                ).to_record()
-
-            emit_event = _agent_event_sink(
-                trace, request.progress_hook, request.run_id, budget_used=budget_used_now
-            )
-            budgeted = SessionBudgetLLM(self.llm, budget=shared_budget, role="main")
-            subagent_budgeted = SessionBudgetLLM(
-                self.subagent_llm,
-                budget=shared_budget,
-                role="subagent",
-            )
-            compact_budgeted = (
-                SessionBudgetLLM(
-                    self.compact_llm, budget=shared_budget, role="compact"
-                )
-                if self.compact_llm is not None
-                else None
-            )
-            subagent_tools = ToolRegistry(
-                build_subagent_tools(
-                    search_roots, safe, command_runner, modification, smoke
-                )
-            )
-            subagent = SubAgentEngine(
-                llm=subagent_budgeted,
-                tools=subagent_tools,
-                config=SubAgentConfig(max_tokens=self.max_response_tokens),
-                time_budget=time_budget,
-                # The parent's compaction gateway and archive, at the
-                # threshold the children's own model window allows.
-                compactor=(
-                    ContextCompactor(
-                        compact_budgeted,
-                        self.subagent_compaction,
-                        result_store=search_roots,
-                        trace_ref=run_ref,
-                    )
-                    if compact_budgeted is not None
-                    else None
+        backtest = SessionValidations(
+            request=request,
+            output_dir=output_dir,
+            models_dir=models_dir,
+            artifact_store=self.artifact_store,
+            evaluator=self.evaluator,
+            tree=tree,
+            schedule=self.schedule,
+            broker_profile=self.broker_profile,
+            time_budget=time_budget,
+            ref_store=self.ref_store,
+            ledger=self.ledger,
+            manifest=manifest,
+            experiment_dir=self.experiment_dir,
+        )
+        smoke = SmokeBacktestTool(
+            request=request,
+            output_dir=output_dir,
+            models_dir=models_dir,
+            modification_check=modification,
+            evaluator=self.evaluator,
+            schedule=self.schedule,
+            broker_profile=self.broker_profile,
+            # Host-only runtime scratch: the rehearsal copy is outside every
+            # Agent mount, so nothing in the session can reach the bytes it
+            # is replaying.
+            scratch_root=paths.runtime / "smoke",
+            time_budget=time_budget,
+        )
+        tools: list[Tool] = [
+            ReadFileTool(search_roots),
+            GrepTool(search_roots),
+            GlobTool(search_roots),
+            WriteFileTool(safe),
+            EditFileTool(safe),
+            SandboxShellTool(safe, command_runner, result_store=search_roots),
+            WriteSkillTool(safe),
+            DeleteSkillTool(safe),
+            # Parent-only: sub-agents report findings to their parent, the
+            # parent files the report.
+            ReportIssueTool(issue_reports_path(self.experiment_dir), manifest),
+            # Parent-only, and negative only: one mounted memory entry this
+            # session's own measurements contradict.
+            SkillFeedbackTool(
+                skill_feedback_path(self.experiment_dir),
+                manifest,
+                mounted_skill_refs(mounted_memory),
+            ),
+            # Parent-only: the Agent's own context compaction.
+            CompactTool(),
+            modification,
+            smoke,
+            BatchValidateTool(
+                backtest=backtest,
+                workspace=safe,
+                # Same static gate as the live working copy, pointed at the
+                # candidate directory: one constraint set for every formal
+                # artifact this session produces.
+                modification_check_factory=lambda directory: ModificationCheckTool(
+                    directory,
+                    parent_dir=source,
+                    models_dir=models_dir,
+                    parent_models_dir=source_models,
+                    constraints=request.modification_constraints,
+                    readonly_baseline=seeded_readonly,
+                    # Restored only in the tree the host seeded. A
+                    # candidate directory is the Agent's own layout of the
+                    # artifact it asks to freeze: the file is supplied
+                    # there when absent, and one carrying different bytes
+                    # is refused rather than silently corrected.
+                    readonly_seed=source if directory == output_dir else None,
                 ),
-            )
-            runner = AgentSessionRunner(
-                llm=budgeted,
-                tools=ToolRegistry(tools),
-                system_prompt=build_system_prompt(
-                    self.schedule,
-                    experiment_facts=facts,
-                    exploration_directive=self.research_directive,
-                    session_directive=request.directive,
-                ),
-                config=AgentSessionConfig(
-                    finalize_before_deadline_seconds=(
-                        request.finalize_before_deadline_seconds
-                    ),
-                    deadline_grace_seconds=request.deadline_grace_seconds,
-                    max_llm_calls=request.max_llm_calls,
-                    deadline_seconds=request.deadline_seconds,
-                    max_response_tokens=self.max_response_tokens,
-                ),
-                compactor=(
-                    ContextCompactor(
-                        compact_budgeted,
-                        self.context_compaction,
-                        result_store=search_roots,
-                        trace_ref=run_ref,
-                    )
-                    if compact_budgeted is not None
-                    else None
-                ),
-                subagent=subagent,
-                time_budget=time_budget,
-                event_sink=emit_event,
-                inbox=bind_session_inbox(
-                    self.experiment_dir,
-                    session_key=request.session_key,
-                    run_id=request.run_id,
-                ),
+                trace_emit=trace.emit,
+            ),
+        ]
+        null_control_tool = (
+            NullControlTool(backtest, max_calls=request.max_null_controls)
+            if request.max_null_controls > 0
+            else None
+        )
+        if null_control_tool is not None:
+            null_control_tool.used = int(used.null_controls)
+            tools.append(null_control_tool)
+        tools.append(
+            StepRollbackTool(tree, output_dir, models_dir, session_ref=session_ref)
+        )
+        # Matches the opaque session ref the step tree stores, so the
+        # current-session check compares like with like. One gate for the
+        # session: ``finish_session`` refuses a failing nomination with it,
+        # and the Runner labels every hard-finalization candidate with it.
+        tools.append(
+            FinishSessionTool(
+                tree,
+                session_ref=session_ref,
                 freeze_gate=backtest.freeze_gate,
-                trace_ref=run_ref,
+                another_round_fits=lambda: another_batch_round_fits(backtest),
+                budget_status=lambda: session_budget_status(backtest),
             )
-            # The Validations earlier attempts recorded are this session's:
-            # nominable at the finish and listed in a hard finalization.
-            recorded_validations = [
-                {
-                    "node_id": step.step_id,
-                    "revision_id": self.ref_store.get_or_create("strategy", step.revision_id),
-                    "stats": batch_candidate_stats(step.validation.summary),
-                    **batch_candidate_resources(step.validation.summary),
-                }
-                for step in request.steps_before
-            ]
-            if resume is None:
-                preamble: list[ChatMessage] = []
-                instruction = SESSION_DEFAULT_INSTRUCTION
-            else:
-                preamble = (
-                    [
-                        compaction_summary_message(
-                            resume.compaction_summary, kind="resume", trace_ref=run_ref
-                        )
-                    ]
-                    if resume.compaction_summary
-                    else []
+        )
+        return backtest, smoke, tools, null_control_tool
+
+    def _session_runner(
+        self,
+        request: ResearchSessionRequest,
+        *,
+        facts: dict[str, object],
+        tools: list[Tool],
+        safe: SafeWorkspace,
+        search_roots: SearchRoots,
+        command_runner: CommandRunner,
+        modification: ModificationCheckTool,
+        smoke: SmokeBacktestTool,
+        backtest: SessionValidations,
+        shared_budget: SessionCallBudget,
+        time_budget: InferenceTimeBudget,
+        run_ref: str,
+        emit_event: Callable[[str, dict[str, object]], None],
+    ) -> AgentSessionRunner:
+        """The Agent loop: the role gateways under the shared call budget, the
+        sub-agent engine, compaction and the inbox, over the session prompt."""
+
+        from autotrade.agent.compact import ContextCompactor
+        from autotrade.agent.prompts import build_system_prompt
+        from autotrade.agent.runner import AgentSessionConfig, AgentSessionRunner
+        from autotrade.agent.subagent import (
+            SubAgentConfig,
+            SubAgentEngine,
+        )
+        from autotrade.pipelines.agent_inbox import bind_session_inbox
+
+        budgeted = SessionBudgetLLM(self.llm, budget=shared_budget, role="main")
+        subagent_budgeted = SessionBudgetLLM(
+            self.subagent_llm,
+            budget=shared_budget,
+            role="subagent",
+        )
+        compact_budgeted = (
+            SessionBudgetLLM(
+                self.compact_llm, budget=shared_budget, role="compact"
+            )
+            if self.compact_llm is not None
+            else None
+        )
+        subagent_tools = ToolRegistry(
+            build_subagent_tools(
+                search_roots, safe, command_runner, modification, smoke
+            )
+        )
+        subagent = SubAgentEngine(
+            llm=subagent_budgeted,
+            tools=subagent_tools,
+            config=SubAgentConfig(max_tokens=self.max_response_tokens),
+            time_budget=time_budget,
+            # The parent's compaction gateway and archive, at the
+            # threshold the children's own model window allows.
+            compactor=(
+                ContextCompactor(
+                    compact_budgeted,
+                    self.subagent_compaction,
+                    result_store=search_roots,
+                    trace_ref=run_ref,
                 )
-                instruction = build_resume_instruction(
-                    attempt=resume.attempt,
-                    interrupted_at=resume.interrupted_at,
-                    error=resume.error,
-                    has_summary=bool(resume.compaction_summary),
-                    transcripts=resume.transcripts,
-                    used=used.to_record(),
-                    totals={
-                        "inference_seconds": request.deadline_seconds,
-                        "llm_calls": request.max_llm_calls,
-                        "replay_years": request.max_replay_years,
-                        "null_controls": request.max_null_controls,
-                    },
-                )
-            try:
-                result = runner.run(
-                    instruction,
-                    preamble=preamble,
-                    complete_validations=recorded_validations,
-                    budget_total_seconds=request.deadline_seconds,
-                )
-                conversation_id = result.conversation_id
-                outcome, node_id, reason = _session_outcome(result.finish_value)
-                finish_reason = "llm_agent_finish_session"
-            except AgentSessionBudgetExhausted as exc:
-                # The session closed on an exhausted budget (its wrap-up grace
-                # or its model calls); the Validations it completed are still
-                # the arm's trials.
-                conversation_id = exc.conversation_id
-                outcome, node_id, reason = "deadline", None, ""
-                finish_reason = exc.finish_reason
-            chmod_tree(inputs_dir, file_mode=0o644, dir_mode=0o755)
-            final_skills = write_skills_index(
-                workspace_root / "skills", inputs_dir / "skills_index.json"
-            )
-            chmod_tree(inputs_dir, file_mode=0o444, dir_mode=0o555)
-            manifest.update(
-                skills={
-                    "index_path": SKILLS_INDEX_PATH,
-                    "count": final_skills.count,
-                    "files": final_skills.files,
-                    "bytes": final_skills.bytes,
-                }
-            )
-            steps = tuple(backtest.steps)
-            if outcome == "freeze" and node_id not in {step.step_id for step in steps}:
-                raise RuntimeError(
-                    "finish_session nominated a node absent from this session's Validations"
-                )
-            manifest.update(
-                conversation_id=conversation_id,
-                selected_step_id=node_id,
-                finish_outcome=outcome,
-            )
-            backtest.publish_tree()
-            collected = local.collect_artifacts(
-                self.artifact_store.root.parent / request.run_id
-            )
-            return ResearchSessionResult(
-                conversation_id,
-                steps,
-                outcome,
-                node_id=node_id,
-                reason=reason,
-                finish_reason=finish_reason,
-                # The nulls the session already drew, for the freeze to reuse.
-                null_controls=(
-                    dict(null_control_tool.blocks)
-                    if null_control_tool is not None
-                    else {}
+                if compact_budgeted is not None
+                else None
+            ),
+        )
+        return AgentSessionRunner(
+            llm=budgeted,
+            tools=ToolRegistry(tools),
+            system_prompt=build_system_prompt(
+                self.schedule,
+                experiment_facts=facts,
+                exploration_directive=self.research_directive,
+                session_directive=request.directive,
+            ),
+            config=AgentSessionConfig(
+                finalize_before_deadline_seconds=(
+                    request.finalize_before_deadline_seconds
                 ),
-                # The collected copy, not the live sandbox tree: it outlives
-                # the sandbox cleanup.
-                run_manifest_ref=str(collected / "run_manifest.json"),
-                skills_source_ref=str(collected / "workspace" / "skills"),
-                budget_used=BudgetUsed.from_record(budget_used_now()),
-                attempt=attempt,
+                deadline_grace_seconds=request.deadline_grace_seconds,
+                max_llm_calls=request.max_llm_calls,
+                deadline_seconds=request.deadline_seconds,
+                max_response_tokens=self.max_response_tokens,
+            ),
+            compactor=(
+                ContextCompactor(
+                    compact_budgeted,
+                    self.context_compaction,
+                    result_store=search_roots,
+                    trace_ref=run_ref,
+                )
+                if compact_budgeted is not None
+                else None
+            ),
+            subagent=subagent,
+            time_budget=time_budget,
+            event_sink=emit_event,
+            inbox=bind_session_inbox(
+                self.experiment_dir,
+                session_key=request.session_key,
+                run_id=request.run_id,
+            ),
+            freeze_gate=backtest.freeze_gate,
+            trace_ref=run_ref,
+        )
+
+    def _run_agent(
+        self,
+        runner: AgentSessionRunner,
+        request: ResearchSessionRequest,
+        *,
+        resume: SessionResume | None,
+        used: BudgetUsed,
+        run_ref: str,
+    ) -> tuple[str, str, str | None, str, str]:
+        """Open the conversation, afresh or with the resume note over the last
+        summary, and run it to its finish: the conversation id, the outcome,
+        the nominated node, the reason and the finish reason."""
+
+        from autotrade.agent.compact import compaction_summary_message
+        from autotrade.agent.prompts import (
+            SESSION_DEFAULT_INSTRUCTION,
+            build_resume_instruction,
+        )
+        from autotrade.agent.runner import AgentSessionBudgetExhausted
+
+        # The Validations earlier attempts recorded are this session's:
+        # nominable at the finish and listed in a hard finalization.
+        recorded_validations = [
+            {
+                "node_id": step.step_id,
+                "revision_id": self.ref_store.get_or_create("strategy", step.revision_id),
+                "stats": batch_candidate_stats(step.validation.summary),
+                **batch_candidate_resources(step.validation.summary),
+            }
+            for step in request.steps_before
+        ]
+        if resume is None:
+            preamble: list[ChatMessage] = []
+            instruction = SESSION_DEFAULT_INSTRUCTION
+        else:
+            preamble = (
+                [
+                    compaction_summary_message(
+                        resume.compaction_summary, kind="resume", trace_ref=run_ref
+                    )
+                ]
+                if resume.compaction_summary
+                else []
             )
-        except Exception as exc:
-            emit_event(
-                "session_error",
-                {"status": "error", "error": f"{type(exc).__name__}: {exc}"},
+            instruction = build_resume_instruction(
+                attempt=resume.attempt,
+                interrupted_at=resume.interrupted_at,
+                error=resume.error,
+                has_summary=bool(resume.compaction_summary),
+                transcripts=resume.transcripts,
+                used=used.to_record(),
+                totals={
+                    "inference_seconds": request.deadline_seconds,
+                    "llm_calls": request.max_llm_calls,
+                    "replay_years": request.max_replay_years,
+                    "null_controls": request.max_null_controls,
+                },
             )
-            raise
-        finally:
-            if sandbox is not None:
-                sandbox.stop()
+        try:
+            result = runner.run(
+                instruction,
+                preamble=preamble,
+                complete_validations=recorded_validations,
+                budget_total_seconds=request.deadline_seconds,
+            )
+            conversation_id = result.conversation_id
+            outcome, node_id, reason = _session_outcome(result.finish_value)
+            finish_reason = "llm_agent_finish_session"
+        except AgentSessionBudgetExhausted as exc:
+            # The session closed on an exhausted budget (its wrap-up grace
+            # or its model calls); the Validations it completed are still
+            # the arm's trials.
+            conversation_id = exc.conversation_id
+            outcome, node_id, reason = "deadline", None, ""
+            finish_reason = exc.finish_reason
+        return conversation_id, outcome, node_id, reason, finish_reason
+
+    def _collect_result(
+        self,
+        request: ResearchSessionRequest,
+        *,
+        local: LocalSandbox,
+        manifest: RunManifest,
+        workspace_root: Path,
+        inputs_dir: Path,
+        backtest: SessionValidations,
+        null_control_tool: NullControlTool | None,
+        budget_used_now: Callable[[], dict[str, object]],
+        attempt: int,
+        conversation_id: str,
+        outcome: str,
+        node_id: str | None,
+        reason: str,
+        finish_reason: str,
+    ) -> ResearchSessionResult:
+        """Re-index the skills the session left, check its nomination, publish
+        its step tree and collect its run directory: the session's result."""
+
+        chmod_tree(inputs_dir, file_mode=0o644, dir_mode=0o755)
+        final_skills = write_skills_index(
+            workspace_root / "skills", inputs_dir / "skills_index.json"
+        )
+        chmod_tree(inputs_dir, file_mode=0o444, dir_mode=0o555)
+        manifest.update(
+            skills={
+                "index_path": SKILLS_INDEX_PATH,
+                "count": final_skills.count,
+                "files": final_skills.files,
+                "bytes": final_skills.bytes,
+            }
+        )
+        steps = tuple(backtest.steps)
+        if outcome == "freeze" and node_id not in {step.step_id for step in steps}:
+            raise RuntimeError(
+                "finish_session nominated a node absent from this session's Validations"
+            )
+        manifest.update(
+            conversation_id=conversation_id,
+            selected_step_id=node_id,
+            finish_outcome=outcome,
+        )
+        backtest.publish_tree()
+        collected = local.collect_artifacts(
+            self.artifact_store.root.parent / request.run_id
+        )
+        return ResearchSessionResult(
+            conversation_id,
+            steps,
+            outcome,
+            node_id=node_id,
+            reason=reason,
+            finish_reason=finish_reason,
+            # The nulls the session already drew, for the freeze to reuse.
+            null_controls=(
+                dict(null_control_tool.blocks)
+                if null_control_tool is not None
+                else {}
+            ),
+            # The collected copy, not the live sandbox tree: it outlives
+            # the sandbox cleanup.
+            run_manifest_ref=str(collected / "run_manifest.json"),
+            skills_source_ref=str(collected / "workspace" / "skills"),
+            budget_used=BudgetUsed.from_record(budget_used_now()),
+            attempt=attempt,
+        )
 
     def _install_step_tree(self, paths) -> StepTree:
         """Hand the experiment-level step tree to the session.
