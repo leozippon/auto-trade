@@ -17,7 +17,9 @@ from .proxy import LLMProxy
 
 LOCAL_QWEN_MODEL = "qwen-3.8-27b-fp8"
 LEGACY_LOCAL_QWEN_MODEL = "qwen3.8-27b-local"
-MODEL_CHOICES = (LOCAL_QWEN_MODEL, *_deepseek.MODEL_CHOICES)
+# Xiaomi's hosted model; the API takes the id in lower case only.
+MIMO_FLASH_MODEL = "mimo-v2.6-flash"
+MODEL_CHOICES = (LOCAL_QWEN_MODEL, *_deepseek.MODEL_CHOICES, MIMO_FLASH_MODEL)
 
 
 def canonicalize_model_name(model: str) -> str:
@@ -58,6 +60,20 @@ _VLLM_PROFILE = ModelProfile(
     context_window_tokens=262_144,
     max_output_tokens=262_144,
 )
+_MIMO_PROFILE = ModelProfile(
+    provider="mimo",
+    api_key_env="MIMO_API_KEY",
+    base_url_env="MIMO_BASE_URL",
+    # Pay-as-you-go endpoint; Token Plan keys and overseas accounts get their
+    # own base URL from the MiMo console, set through MIMO_BASE_URL.
+    default_base_url="https://api.xiaomimimo.com/v1",
+    request_dialect="mimo",
+    # Published as a "1M" window and a 131,072-token completion ceiling
+    # (thinking tokens included); the decimal reading is the safe one.
+    context_window_tokens=1_000_000,
+    max_output_tokens=131_072,
+)
+_PROFILES = (_DEEPSEEK_PROFILE, _VLLM_PROFILE, _MIMO_PROFILE)
 
 # Smallest declared window in the catalog. A component that must pick a
 # window-dependent default before the run's model roles are known (the
@@ -65,7 +81,7 @@ _VLLM_PROFILE = ModelProfile(
 # exact per-role bound once the roles are resolved.
 MIN_CONTEXT_WINDOW_TOKENS = min(
     profile.context_window_tokens
-    for profile in (_DEEPSEEK_PROFILE, _VLLM_PROFILE)
+    for profile in _PROFILES
     if profile.context_window_tokens is not None
 )
 
@@ -121,7 +137,11 @@ def model_profile(model: str) -> ModelProfile:
         return _DEEPSEEK_PROFILE
     if model == LOCAL_QWEN_MODEL:
         return _VLLM_PROFILE
-    raise ValueError(f"unsupported DeepSeek model or local model: {model}")
+    if model == MIMO_FLASH_MODEL:
+        return _MIMO_PROFILE
+    raise ValueError(
+        f"unsupported model {model!r}; the catalog has {', '.join(MODEL_CHOICES)}"
+    )
 
 
 def effective_max_output_tokens(model: str, requested: int) -> int:
@@ -203,9 +223,10 @@ def build_model_gateway(
                 max_output_tokens=profile.max_output_tokens,
                 temperature=temperature,
                 thinking_enabled=thinking_enabled,
+                # MiMo's thinking is on/off only: no effort level to send.
                 reasoning_effort=(
                     _qwen_reasoning_effort(reasoning_effort)
-                    if thinking_enabled
+                    if thinking_enabled and profile.request_dialect == "vllm-qwen"
                     else None
                 ),
                 user_id="",
@@ -222,6 +243,7 @@ __all__ = [
     "DEFAULT_LLM_RETRY_BACKOFF_SECONDS",
     "LEGACY_LOCAL_QWEN_MODEL",
     "LOCAL_QWEN_MODEL",
+    "MIMO_FLASH_MODEL",
     "MIN_CONTEXT_WINDOW_TOKENS",
     "MODEL_CHOICES",
     "ModelProfile",

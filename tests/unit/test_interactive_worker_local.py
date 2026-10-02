@@ -614,8 +614,8 @@ def test_session_boundary_restart_is_taken_before_the_next_session_starts(
 @pytest.mark.parametrize(
     ("key", "value", "message"),
     [
-        ("model", "unknown-model", "unsupported DeepSeek model"),
-        ("subagent_model", "unknown-model", "unsupported DeepSeek model"),
+        ("model", "unknown-model", "unsupported model 'unknown-model'"),
+        ("subagent_model", "unknown-model", "unsupported model 'unknown-model'"),
         ("reasoning_effort", "ultra", "reasoning_effort"),
         ("no_thinking", 1, "must be a boolean"),
         ("compact_token_threshold", 0, "must be a positive integer"),

@@ -2,7 +2,9 @@
 
 One transport, stream assembler, retry policy, redaction rule and audit log for
 every provider that speaks the Chat Completions dialect: the authenticated local
-vLLM endpoint every live arm runs on, and the public services in ``deepseek.py``.
+vLLM endpoint every live arm runs on, the public services in ``deepseek.py`` and
+Xiaomi's hosted MiMo API. Where a provider's request contract differs, its
+``request_dialect`` decides the fields in :meth:`OpenAICompatibleProxy.complete`.
 """
 
 from __future__ import annotations
@@ -79,6 +81,11 @@ _QWEN_NON_THINKING_SAMPLING = {
     "top_k": 20,
     "presence_penalty": 1.5,
 }
+# MiMo's Chat Completions contract: the output budget is named
+# ``max_completion_tokens``, thinking is on/off with no effort level,
+# temperature is bounded at 1.5, and ``tool_choice`` only knows ``auto`` (any
+# other value is dropped server-side and behaves as ``auto``).
+_MIMO_MAX_TEMPERATURE = 1.5
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -283,7 +290,7 @@ class OpenAICompatibleConfig:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}", self.model):
             raise ValueError("model must be a safe identifier")
         _validate_base_url(self.base_url)
-        if self.request_dialect not in {"openai", "deepseek", "vllm-qwen"}:
+        if self.request_dialect not in {"openai", "deepseek", "vllm-qwen", "mimo"}:
             raise ValueError("unsupported request dialect")
         if self.timeout_seconds <= 0 or self.max_tokens <= 0:
             raise ValueError("timeout_seconds and max_tokens must be positive")
@@ -312,6 +319,11 @@ class OpenAICompatibleConfig:
             raise ValueError(
                 "vllm-qwen reasoning_effort must be one of low, medium, xhigh"
             )
+        if self.request_dialect == "mimo":
+            if self.reasoning_effort is not None:
+                raise ValueError("mimo thinking has no reasoning_effort level")
+            if self.temperature > _MIMO_MAX_TEMPERATURE:
+                raise ValueError("mimo temperature must be in [0, 1.5]")
         if self.user_id and not USER_ID_PATTERN.fullmatch(self.user_id):
             raise ValueError(
                 "user_id must match [A-Za-z0-9_-] and be at most 512 chars"
@@ -394,6 +406,9 @@ class OpenAICompatibleProxy:
             for field in dataclass_fields(self.config)
             if field.init
         }
+        if self.config.request_dialect == "mimo":
+            # A sub-agent's level becomes plain on/off: MiMo has no levels.
+            reasoning_effort = None
         values.update(thinking_enabled=enabled, reasoning_effort=reasoning_effort)
         return OpenAICompatibleProxy(
             OpenAICompatibleConfig(**values),
@@ -411,6 +426,14 @@ class OpenAICompatibleProxy:
     ) -> ProviderResponse:
         if not messages:
             raise ValueError("messages cannot be empty")
+        dialect = self.config.request_dialect
+        if dialect == "mimo" and tools and tool_choice not in ("auto", "none"):
+            raise ValueError("mimo honours only tool_choice auto or none")
+        if dialect == "mimo" and tool_choice == "none":
+            # MiMo would answer a "none" as "auto"; a model that sees no tool
+            # schema cannot call one, which is what "none" asks for.
+            tools = ()
+        output_field = "max_completion_tokens" if dialect == "mimo" else "max_tokens"
         stream = bool(tools and self.config.stream_tool_calls)
         requested_max_tokens = max_tokens or self.config.max_tokens
         if self.config.max_output_tokens is not None:
@@ -436,24 +459,25 @@ class OpenAICompatibleProxy:
             "model": self.config.model,
             "messages": [message.to_record() for message in messages],
             "stream": stream,
-            "max_tokens": requested_max_tokens,
+            output_field: requested_max_tokens,
         }
-        if self.config.request_dialect == "vllm-qwen":
+        if dialect == "vllm-qwen":
             # Thinking mode keeps the server-side sampling defaults; the
             # non-thinking mode sends the official recommendation verbatim.
             if not self.config.thinking_enabled:
                 body.update(_QWEN_NON_THINKING_SAMPLING)
         else:
             body["temperature"] = self.config.temperature
-        if self.config.request_dialect == "deepseek":
+        if dialect in ("deepseek", "mimo"):
             body["thinking"] = {
                 "type": "enabled" if self.config.thinking_enabled else "disabled"
             }
+        if dialect == "deepseek":
             if self.config.reasoning_effort is not None:
                 body["reasoning_effort"] = self.config.reasoning_effort
             if self.config.user_id:
                 body["user_id"] = self.config.user_id
-        elif self.config.request_dialect == "vllm-qwen":
+        elif dialect == "vllm-qwen":
             chat_template_kwargs: dict[str, object] = {
                 "enable_thinking": self.config.thinking_enabled
             }
@@ -552,7 +576,7 @@ class OpenAICompatibleProxy:
                     )
                     if shrunk is not None:
                         requested_max_tokens = shrunk
-                        body["max_tokens"] = requested_max_tokens
+                        body[output_field] = requested_max_tokens
                         raw = json.dumps(
                             body, ensure_ascii=False, allow_nan=False
                         ).encode("utf-8")

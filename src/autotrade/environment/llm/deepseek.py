@@ -1,9 +1,8 @@
 """DeepSeek adapter over the shared OpenAI-compatible gateway.
 
-The only non-local provider in the catalog, and therefore the fallback when the
-local vLLM gateway is down or saturated. Everything but the model catalog and
-the two constructors below is provider-neutral and lives in
-``openai_compatible.py``.
+One of the hosted providers in the catalog (``model_profiles.py``). Everything
+but the model catalog and the two constructors below is provider-neutral and
+lives in ``openai_compatible.py``.
 """
 
 from __future__ import annotations
