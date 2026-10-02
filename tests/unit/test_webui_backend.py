@@ -276,9 +276,9 @@ def test_cli_exposes_distinct_session_and_subagent_model_choices() -> None:
     assert defaults.model == defaults.subagent_model == LOCAL_QWEN_MODEL
     assert not hasattr(defaults, "meta_model")
     mixed = parser.parse_args(
-        ["--model", "deepseek-v4-flash", "--subagent-model", LOCAL_QWEN_MODEL]
+        ["--model", "deepseek-flash", "--subagent-model", LOCAL_QWEN_MODEL]
     )
-    assert mixed.model == "deepseek-v4-flash"
+    assert mixed.model == "deepseek-flash"
     assert mixed.subagent_model == LOCAL_QWEN_MODEL
 
 
@@ -385,10 +385,10 @@ def test_experiment_endpoint_creates_only_persistent_sandbox_research(tmp_path: 
                     "include_macro": False,
                     "events_datasets": ["margin", "moneyflow"],
                     "screen_boards": ["main", "gem"],
-                    "model": "deepseek-v4-flash",
+                    "model": "deepseek-flash",
                     "subagent_model": LOCAL_QWEN_MODEL,
-                    "nl_model": "deepseek-v4-pro",
-                    "compact_model": "deepseek-v4-pro",
+                    "nl_model": "deepseek-flash",
+                    "compact_model": "deepseek-flash",
                     "reasoning_effort": "high",
                     "no_thinking": True,
                     "disable_context_compact": False,
@@ -417,10 +417,10 @@ def test_experiment_endpoint_creates_only_persistent_sandbox_research(tmp_path: 
     assert params["include_macro"] is False
     assert params["events_datasets"] == ["margin", "moneyflow"]
     assert params["screen_boards"] == ["main", "gem"]
-    assert params["model"] == "deepseek-v4-flash"
+    assert params["model"] == "deepseek-flash"
     assert params["subagent_model"] == LOCAL_QWEN_MODEL
-    assert params["nl_model"] == "deepseek-v4-pro"
-    assert params["compact_model"] == "deepseek-v4-pro"
+    assert params["nl_model"] == "deepseek-flash"
+    assert params["compact_model"] == "deepseek-flash"
     assert params["reasoning_effort"] == "high"
     assert params["no_thinking"] is True
     assert params["compact_token_threshold"] == 90_000
@@ -674,8 +674,8 @@ class WebuiBackendTest(unittest.TestCase):
         ):
             self.assertNotIn(hidden, fields, hidden)
         for model_field in ("model", "subagent_model", "nl_model", "compact_model"):
-            self.assertNotIn("deepseek-chat", fields[model_field]["choices"])
-            self.assertNotIn("deepseek-reasoner", fields[model_field]["choices"])
+            for retired in ("deepseek-chat", "deepseek-reasoner", "deepseek-v4-flash", "deepseek-v4-pro"):
+                self.assertNotIn(retired, fields[model_field]["choices"])
         visible_copy = "\n".join(
             str(field.get(key, ""))
             for field in fields.values()
@@ -718,14 +718,14 @@ class WebuiBackendTest(unittest.TestCase):
             "llm_base_url",
         )
         params = {
-            "model": "deepseek-v4-pro",
+            "model": "deepseek-flash",
             **DEFAULT_RESEARCH_GEOMETRY.to_record(),
             "_created_at": "2026-09-13T00:00:00+00:00",
             **{key: f"secret-{key}" for key in operator_only},
         }
         self.assertEqual(
             _public_params(params),
-            {"model": "deepseek-v4-pro", **DEFAULT_RESEARCH_GEOMETRY.to_record()},
+            {"model": "deepseek-flash", **DEFAULT_RESEARCH_GEOMETRY.to_record()},
         )
 
     def test_historical_endpoint_is_absent_from_list_and_detail_api(self) -> None:
