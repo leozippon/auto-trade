@@ -929,7 +929,7 @@ def graduation_verdict(
     heldout: Mapping[str, Any] | None,
     strategy_error: Literal["forward", "heldout"] | None = None,
 ) -> dict[str, object]:
-    """``graduated`` iff F1–F6 and H1–H4 all hold, else ``discarded``.
+    """``graduated`` iff F1–F7 and H1–H4 all hold, else ``discarded``.
 
     ``strategy_error`` names the slice in which the strategy raised (F1/H1).
     A replay that raised produced no result, so it comes with no slice at all.
