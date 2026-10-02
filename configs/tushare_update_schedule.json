@@ -413,6 +413,19 @@
       "lock_wait_seconds": 900,
       "skip_if_already_ok": true
     },
+    "manual_event_available_at_repair": {
+      "description": "Manual (not scheduled): re-derive available_at/available_at_rule of every stored margin and margin_detail partition under the current rule, locally (no API calls). Run once after the rule moved from the next calendar day to the next SSE open day (2026-10-02): a partition whose stamp or rule label differs is written as a new file renamed over the old path, so published releases keep their hard-linked old files. Idempotent: a re-run rewrites nothing.",
+      "operation": "event_available_at_repair",
+      "end_date_offset_days": 0,
+      "end_date_mode": "sse_open_on_or_before",
+      "extra_args": [
+        "--datasets",
+        "margin",
+        "margin_detail"
+      ],
+      "lock_wait_seconds": 1800,
+      "skip_if_already_ok": false
+    },
     "manual_macro_schema_repair": {
       "description": "Manual (not scheduled): forced full-window re-request of cn_pmi after the vendor answered its declared lowercase field list with its own database schema (uppercase MONTH/PMI... plus ID/CREATE_*/UPDATE_* bookkeeping, first seen 2026-08-13 and flapping since), which left every row without a month key and therefore unstamped. The download now normalizes any response onto the declared contract, so this job republishes the table with its key and availability rule restored.",
       "operation": "download_tier",

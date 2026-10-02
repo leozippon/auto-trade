@@ -45,7 +45,7 @@ DEFAULT_LOCK_WAIT_SECONDS = 900
 # generation on success; audit-only jobs must not churn snapshot cache keys.
 # The generation schema/state contract itself is owned by
 # autotrade.environment.data.contracts so writer and PIT consumers cannot drift.
-MUTATING_OPERATIONS = {"update", "download_tier", "download_event_flow", "intraday_by_date", "pit_event_pipeline", "auction_capture", "auction_recheck"}
+MUTATING_OPERATIONS = {"update", "download_tier", "download_event_flow", "intraday_by_date", "pit_event_pipeline", "auction_capture", "auction_recheck", "event_available_at_repair"}
 
 
 @dataclass
@@ -346,6 +346,18 @@ def build_job_commands(ctx: RunContext) -> list[list[str]]:
             raw_dir,
         ]
         command.extend(ctx.config.get("default_update_args", []))
+        command.extend(ctx.job.get("extra_args", []))
+        return [command]
+    if operation == "event_available_at_repair":
+        # Local and payload-preserving, but it rewrites partitions, so it takes
+        # the updater lock and publishes a generation like any mutating job.
+        command = [
+            ctx.python,
+            "scripts/data/tushare_download.py",
+            "repair-event-available-at",
+            "--raw-dir",
+            raw_dir,
+        ]
         command.extend(ctx.job.get("extra_args", []))
         return [command]
     if operation == "auction_capture":

@@ -290,6 +290,17 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         pd.DataFrame([{"cal_date": trade_date, "is_open": is_open}]).to_parquet(path, index=False)
 
+    def _write_trade_cal_with_stamping_window(self, trade_date="20200102", is_open="1"):
+        """trade_date plus the 31 days a margin download stamps from (weekdays open)."""
+        start = pd.Timestamp(trade_date)
+        days = pd.date_range(start, start + pd.Timedelta(days=31))
+        path = self.raw_dir / "trade_cal" / "exchange=SSE" / f"year={trade_date[:4]}.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame([
+            {"cal_date": day.strftime("%Y%m%d"), "is_open": is_open if day == start else str(int(day.weekday() < 5))}
+            for day in days
+        ]).to_parquet(path, index=False)
+
     def _write_daily_universe(self, trade_date="20200102"):
         path = self.raw_dir / "daily" / f"trade_date={trade_date}.parquet"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -561,7 +572,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(codes, {"000001.SZ"})
 
     def test_event_flow_trade_date_download_skips_non_trading_day(self):
-        self._write_trade_cal("20260530", is_open="0")
+        self._write_trade_cal_with_stamping_window("20260530", is_open="0")
         args = argparse.Namespace(
             raw_dir=str(self.raw_dir),
             start_date="20260530",
@@ -1899,6 +1910,84 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 pd.DataFrame([{"ts_code": "301380.SZ", "ipo_date": "20220930"}]),
                 common.EVENT_FLOW_SPECS["new_share"],
             )
+
+    def test_margin_rows_become_visible_at_09_on_the_next_open_day(self):
+        # The vendor serves T's SZSE/BSE margin rows with the next session's
+        # pre-open: a Friday stays invisible to a Monday 08:30 decision, a
+        # pre-holiday session until the first morning after the holiday, and an
+        # ordinary Tuesday is visible on Wednesday morning as before.
+        calendar = ["20260929", "20260930", "20261008", "20261009", "20261012"]
+
+        def stamp(dataset: str, trade_date: str) -> pd.Timestamp:
+            rows = pd.DataFrame([{"trade_date": trade_date, "exchange_id": ex, "ts_code": f"60000{i}.SH"}
+                                 for i, ex in enumerate(("SSE", "SZSE", "BSE"))])
+            stamped = common.augment_event_frame(rows, common.EVENT_FLOW_SPECS[dataset], trading_dates=calendar)
+            self.assertEqual(set(stamped["available_at_rule"]), {"official_next_trading_day_09_from:trade_date"})
+            self.assertEqual(stamped["available_at"].nunique(), 1)
+            return pd.Timestamp(stamped.loc[0, "available_at"])
+
+        def at(text: str) -> pd.Timestamp:
+            return pd.Timestamp(f"{text}+08:00")
+
+        friday = stamp("margin", "20261009")
+        self.assertGreater(friday, at("2026-10-12 08:30"))
+        self.assertLessEqual(friday, at("2026-10-12 09:00"))
+        pre_holiday = stamp("margin_detail", "20260930")
+        self.assertGreater(pre_holiday, at("2026-10-08 08:30"))
+        self.assertLessEqual(pre_holiday, at("2026-10-08 09:00"))
+        tuesday = stamp("margin", "20260929")
+        self.assertEqual(tuesday, at("2026-09-30 09:00"))
+
+        with self.assertRaisesRegex(RuntimeError, "fewer than 1 open dates after 20261012"):
+            stamp("margin", "20261012")
+        with self.assertRaisesRegex(RuntimeError, "requires the A-share trading calendar"):
+            common.augment_event_frame(pd.DataFrame([{"trade_date": "20260929"}]), common.EVENT_FLOW_SPECS["margin"])
+
+    def test_event_available_at_repair_restamps_through_new_files(self):
+        # Releases hard-link raw partitions: the repair must replace the live
+        # path with a new file, never modify the shared one, and re-run clean.
+        cal = self.raw_dir / "trade_cal" / "exchange=SSE" / "year=2026.parquet"
+        cal.parent.mkdir(parents=True, exist_ok=True)
+        open_days = {"20260929", "20260930", "20261008", "20261009", "20261012"}
+        pd.DataFrame([
+            {"cal_date": f"2026{m:02d}{d:02d}", "is_open": "1" if f"2026{m:02d}{d:02d}" in open_days else "0"}
+            for m, d in [(9, 29), (9, 30)] + [(10, d) for d in range(1, 13)]
+        ]).to_parquet(cal, index=False)
+        spec = common.EVENT_FLOW_SPECS["margin"]
+        old_rule = "official_next_day_09_from:trade_date"
+
+        def land_old(trade_date: str, next_day: str) -> Path:
+            rows = pd.DataFrame([
+                {**{col: 1.0 for col in spec.fields.split(",")}, "trade_date": trade_date, "exchange_id": ex,
+                 "available_at": f"{next_day[:4]}-{next_day[4:6]}-{next_day[6:]} 09:00:00+08:00", "available_at_rule": old_rule}
+                for ex in ("SSE", "SZSE", "BSE")
+            ])
+            path = self.raw_dir / "margin" / f"trade_date={trade_date}.parquet"
+            common.write_parquet(path, rows, api_name="margin", params={"trade_date": trade_date}, fields=list(rows.columns))
+            return path
+
+        land_old("20260929", "20260930")  # same stamp under both rules, old label
+        friday = land_old("20261009", "20261010")
+        fetched_at = common.parquet_meta(friday)["fetched_at"]
+        release_copy = self.root / "release_margin.parquet"
+        os.link(friday, release_copy)
+
+        stats = common.repair_event_available_at(str(self.raw_dir), ["margin"])
+        self.assertEqual((stats["files_rewritten"], stats["rows_changed"]), (2, 3))
+        live = pd.read_parquet(friday)
+        self.assertEqual(set(live["available_at"]), {"2026-10-12 09:00:00+08:00"})
+        self.assertEqual(set(live["available_at_rule"]), {"official_next_trading_day_09_from:trade_date"})
+        self.assertEqual(live["rzye"].tolist(), [1.0, 1.0, 1.0])
+        self.assertTrue(common.committed_partition_intact(friday))
+        self.assertEqual(common.parquet_meta(friday)["fetched_at"], fetched_at)
+        self.assertEqual(set(pd.read_parquet(release_copy)["available_at"]), {"2026-10-10 09:00:00+08:00"})
+        self.assertEqual(common.repair_event_available_at(str(self.raw_dir), ["margin"])["files_rewritten"], 0)
+
+        meta_path = friday.with_suffix(".parquet.meta.json")
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        meta_path.write_text(json.dumps({**meta, "write_id": "torn"}), encoding="utf-8")
+        with self.assertRaisesRegex(RuntimeError, "not a complete commit"):
+            common.repair_event_available_at(str(self.raw_dir), ["margin"])
 
     def test_new_share_download_uses_the_local_trading_calendar(self):
         calendar_path = self.raw_dir / "trade_cal" / "exchange=SSE" / "year=2022.parquet"
@@ -4731,7 +4820,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertTrue(pd.read_parquet(path).equals(original))
 
     def test_required_event_flow_zero_rows_raise_instead_of_cron_ok(self):
-        self._write_trade_cal("20200102")
+        self._write_trade_cal_with_stamping_window("20200102")
         args = argparse.Namespace(
             raw_dir=str(self.raw_dir),
             start_date="20200102",
@@ -4748,7 +4837,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 download.download_event_flow(args)
 
     def test_event_flow_zero_rows_not_ready_exits_75_without_mutation(self):
-        self._write_trade_cal("20200102")
+        self._write_trade_cal_with_stamping_window("20200102")
         args = argparse.Namespace(
             raw_dir=str(self.raw_dir),
             start_date="20200102",
@@ -4781,7 +4870,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 row = ["20260529" if col == "trade_date" else "SSE" if col == "exchange_id" else "1.0" for col in columns]
                 return common.ApiResult(columns, [row])
 
-        self._write_trade_cal("20260529")
+        self._write_trade_cal_with_stamping_window("20260529")
         args = argparse.Namespace(
             raw_dir=str(self.raw_dir),
             start_date="20260529",
@@ -4813,7 +4902,8 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         # A covering non-force run must not skip the committed partial day.
         client = EmptyTradeDateClient()
         written, zero_skipped = download.download_event_trade_date_dataset(
-            client, self.raw_dir, common.EVENT_FLOW_SPECS["margin"], ["20260529"], False, None
+            client, self.raw_dir, common.EVENT_FLOW_SPECS["margin"], ["20260529"], False, None,
+            trading_dates=["20260529", "20260601"],
         )
         self.assertEqual((written, zero_skipped), (0, 1))
         self.assertEqual([api for api, _ in client.calls], ["margin"])
@@ -4863,7 +4953,8 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 return common.ApiResult(columns, [row])
 
         written, zero_skipped = download.download_event_trade_date_dataset(
-            ShOnlyDetailClient(), self.raw_dir, common.EVENT_FLOW_SPECS["margin_detail"], ["20260529"], True, None
+            ShOnlyDetailClient(), self.raw_dir, common.EVENT_FLOW_SPECS["margin_detail"], ["20260529"], True, None,
+            trading_dates=["20260529", "20260601"],
         )
         self.assertEqual((written, zero_skipped), (0, 1))
         self.assertFalse((self.raw_dir / "margin_detail" / "trade_date=20260529.parquet").exists())
@@ -4876,7 +4967,8 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         )
         client = EmptyTradeDateClient()
         written, zero_skipped = download.download_event_trade_date_dataset(
-            client, self.raw_dir, common.EVENT_FLOW_SPECS["margin_detail"], ["20260529"], False, None
+            client, self.raw_dir, common.EVENT_FLOW_SPECS["margin_detail"], ["20260529"], False, None,
+            trading_dates=["20260529", "20260601"],
         )
         self.assertEqual((written, zero_skipped), (0, 1))
         self.assertEqual([api for api, _ in client.calls], ["margin_detail"])
@@ -5378,7 +5470,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         # mutation" and must not fire even when every dataset was empty. The
         # run still failed to reach required coverage, so it reports 76 (commit
         # the generation, retry later) rather than success.
-        self._write_trade_cal("20200102")
+        self._write_trade_cal_with_stamping_window("20200102")
         args = argparse.Namespace(
             raw_dir=str(self.raw_dir),
             start_date="20200102",
@@ -5407,7 +5499,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
     def test_event_flow_blocked_shrink_raises_even_when_not_ready_enabled(self):
         # A non-empty response refused by the destructive-shrink guard is a
         # data-integrity alarm, never a "source not published yet" condition.
-        self._write_trade_cal("20200102")
+        self._write_trade_cal_with_stamping_window("20200102")
         path = self.raw_dir / "margin" / "trade_date=20200102.parquet"
         original = pd.DataFrame(
             [{"trade_date": "20200102", "exchange_id": f"EX{i:02d}", "rzye": 1.0} for i in range(30)]
@@ -5451,7 +5543,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertTrue(pd.read_parquet(path).equals(original))
 
     def test_event_flow_zero_rows_not_ready_partial_write_reports_not_ready(self):
-        self._write_trade_cal("20200102")
+        self._write_trade_cal_with_stamping_window("20200102")
 
         class MarginOnlyClient(EmptyTradeDateClient):
             def query(self, api_name, params=None, fields="", retries=5):
@@ -7351,8 +7443,9 @@ class FullPortContractTest(unittest.TestCase):
         # 29 since cn_preopen_text_backfill_0855 was retired (2026-09-10); 30
         # since the minute layer left cn_evening_full for its own manual job;
         # 32 with the two research-history backfill jobs (2026-09-24); 31 since
-        # the completed one-shot commit-identity migration job was retired.
-        self.assertEqual(len(config["jobs"]), 31)
+        # the completed one-shot commit-identity migration job was retired; 32
+        # with the margin available_at repair (2026-10-02).
+        self.assertEqual(len(config["jobs"]), 32)
         for name, tier in (
             ("manual_history_backfill_reference", "reference"),
             ("manual_history_backfill_macro", "macro"),
@@ -7383,6 +7476,22 @@ class FullPortContractTest(unittest.TestCase):
             ]],
         )
         self.assertIn("intraday_by_date", cron_update.MUTATING_OPERATIONS)
+
+    def test_event_available_at_repair_runs_as_a_mutating_job(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        config = json.loads((root / "configs/tushare_update_schedule.json").read_text(encoding="utf-8"))
+        job = config["jobs"]["manual_event_available_at_repair"]
+        context = cron_update.RunContext(
+            config={"default_raw_dir": "raw"}, repo_root=Path("."), python="python",
+            job_name="manual_event_available_at_repair", job=job,
+            start_date="20200101", end_date="20260930", timezone_name="Asia/Shanghai",
+        )
+        self.assertEqual(
+            cron_update.build_job_commands(context),
+            [["python", "scripts/data/tushare_download.py", "repair-event-available-at", "--raw-dir", "raw",
+              "--datasets", "margin", "margin_detail"]],
+        )
+        self.assertIn(job["operation"], cron_update.MUTATING_OPERATIONS)
 
     def test_generation_resume_uses_explicit_command_identity(self) -> None:
         transaction = {

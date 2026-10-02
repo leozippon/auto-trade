@@ -1477,20 +1477,22 @@ def download_event_flow(args: argparse.Namespace) -> int:
     revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
     allow_empty_revision_overwrite = getattr(args, "allow_empty_revision_overwrite", False)
     trade_dates: list[str] = []
-    new_share_trading_dates: list[str] | None = None
+    stamping_dates: list[str] | None = None
     trade_end_date = args.end_date
     trade_cal_refreshed = False
     has_trade_date_dataset = any(EVENT_FLOW_SPECS[name].strategy == "trade_date" for name in datasets)
-    if has_trade_date_dataset or "new_share" in datasets:
-        # new_share needs two future open dates to place the ballot field after
-        # its real disclosure window. A 31-day calendar request comfortably
-        # spans regular exchange holidays; the stamper still fails explicitly
-        # if no second open date exists, so this never becomes an approximation.
-        calendar_end_date = args.end_date
-        if "new_share" in datasets:
-            calendar_end_date = format_yyyymmdd(parse_yyyymmdd(args.end_date) + timedelta(days=31))
+    # Rules counted in open days (margin's next open day, new_share's second)
+    # stamp from the calendar after the window. A 31-day calendar request
+    # comfortably spans regular exchange holidays; the stamper still fails
+    # explicitly if the open date is missing, so this never approximates.
+    open_day_stamped = any(
+        (rule := EVENT_FLOW_SPECS[name].availability) is not None and rule.trading_day_offset
+        for name in datasets
+    )
+    stamping_end_date = format_yyyymmdd(parse_yyyymmdd(args.end_date) + timedelta(days=31))
+    if has_trade_date_dataset or open_day_stamped:
         trade_cal_refreshed = ensure_trade_cal_coverage(
-            client, raw_dir, args.start_date, calendar_end_date
+            client, raw_dir, args.start_date, stamping_end_date if open_day_stamped else args.end_date
         )
     if has_trade_date_dataset:
         latest_trade_calendar_date = latest_sse_calendar_date(raw_dir)
@@ -1503,13 +1505,8 @@ def download_event_flow(args: argparse.Namespace) -> int:
         trade_dates = load_sse_open_dates(raw_dir, args.start_date, trade_end_date, allow_empty=True)
         if not trade_dates:
             print(f"event/flow trade-date datasets skipped: no SSE open dates for {args.start_date}-{trade_end_date}")
-    if "new_share" in datasets:
-        new_share_trading_dates = load_sse_open_dates(
-            raw_dir,
-            args.start_date,
-            format_yyyymmdd(parse_yyyymmdd(args.end_date) + timedelta(days=31)),
-            allow_empty=True,
-        )
+    if open_day_stamped:
+        stamping_dates = load_sse_open_dates(raw_dir, args.start_date, stamping_end_date, allow_empty=True)
     required_zero_skipped: list[str] = []
     # trade_cal coverage refresh IS a lake write: it must veto the exit-75
     # no-mutation contract even when every dataset response was empty.
@@ -1528,6 +1525,7 @@ def download_event_flow(args: argparse.Namespace) -> int:
                 spec_page_limit(spec, args.page_limit),
                 revision_ledger,
                 allow_empty_revision_overwrite,
+                trading_dates=stamping_dates,
             )
             total_written += written
             if zero_skipped and not spec.zero_rows_ok:
@@ -1544,7 +1542,7 @@ def download_event_flow(args: argparse.Namespace) -> int:
                 spec_page_limit(spec, args.page_limit),
                 revision_ledger,
                 allow_empty_revision_overwrite,
-                trading_dates=new_share_trading_dates if dataset == "new_share" else None,
+                trading_dates=stamping_dates,
             )
         else:
             raise RuntimeError(f"unsupported event/flow strategy {spec.strategy} for {dataset}")
@@ -1594,6 +1592,8 @@ def download_event_trade_date_dataset(
     page_limit: int | None,
     revision_ledger: Path | str | None = None,
     allow_empty_revision_overwrite: bool = False,
+    *,
+    trading_dates: list[str] | None = None,
 ) -> tuple[int, int]:
     page_limit = page_limit or spec.page_limit
     written = 0
@@ -1622,7 +1622,7 @@ def download_event_trade_date_dataset(
         result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
         meta_params = dict(params)
         meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-        df = augment_event_frame(frame(result), spec)
+        df = augment_event_frame(frame(result), spec, trading_dates=trading_dates)
         if df.empty and not spec.zero_rows_ok:
             zero_skipped += 1
             total_pages += pages
@@ -4015,6 +4015,15 @@ def add_repair_text_parser(sub: argparse._SubParsersAction) -> None:
     )
     core.add_raw_arg(parser)
     parser.add_argument("--datasets", nargs="+", default=["anns_d", "report_rc"], choices=sorted(core.TEXT_SPECS))
+    event = sub.add_parser(
+        "repair-event-available-at",
+        help="re-derive trade-date event available_at locally under the current rule (no API calls)",
+    )
+    core.add_raw_arg(event)
+    event.add_argument(
+        "--datasets", nargs="+", required=True,
+        choices=sorted(name for name, spec in EVENT_FLOW_SPECS.items() if spec.strategy == "trade_date"),
+    )
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -4097,6 +4106,10 @@ def _dispatch(args: argparse.Namespace) -> int:
         return download_share_float_complete(args)
     if args.command == "repair-text-available-at":
         stats = core.repair_text_available_at(args.raw_dir, list(args.datasets))
+        print(json.dumps({"status": "ok", **stats}, ensure_ascii=False, sort_keys=True))
+        return 0
+    if args.command == "repair-event-available-at":
+        stats = core.repair_event_available_at(args.raw_dir, list(args.datasets))
         print(json.dumps({"status": "ok", **stats}, ensure_ascii=False, sort_keys=True))
         return 0
     raise RuntimeError(f"unknown command {args.command}")

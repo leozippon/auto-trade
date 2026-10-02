@@ -11,10 +11,11 @@ import re
 import time
 import uuid
 from bisect import bisect_right
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from functools import partial
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -595,7 +596,13 @@ class AvailabilityRule:
         if self.day_offset and self.trading_day_offset:
             raise ValueError("availability rule cannot mix calendar-day and trading-day offsets")
 
-OFFICIAL_NEXT_DAY_09 = AvailabilityRule("09:00:00", "official_next_day_09_from:trade_date", day_offset=1)
+# Margin summary/detail for T publish at 09:00 on the next OPEN day: on a
+# non-trading day the vendor answers with SSE rows only, and the SZSE/BSE rows
+# arrive with the next session's pre-open (the writer never commits a partial
+# day), so a Friday or pre-holiday session is not visible over the break.
+OFFICIAL_NEXT_TRADING_DAY_09 = AvailabilityRule(
+    "09:00:00", "official_next_trading_day_09_from:trade_date", trading_day_offset=1
+)
 OFFICIAL_PREOPEN_09 = AvailabilityRule("09:00:00", "official_preopen_09_from:trade_date")
 OFFICIAL_19 = AvailabilityRule("19:00:00", "official_19_from:trade_date")
 OFFICIAL_NEXT_DAY_0830 = AvailabilityRule("08:30:00", "official_next_day_0830_from:trade_date", day_offset=1)
@@ -1123,7 +1130,7 @@ EVENT_FLOW_SPECS = {
         key_columns=("trade_date", "exchange_id"),
         date_column="trade_date",
         zero_rows_ok=False,
-        availability=OFFICIAL_NEXT_DAY_09,
+        availability=OFFICIAL_NEXT_TRADING_DAY_09,
     ),
     "margin_detail": EventDataset(
         api_name="margin_detail",
@@ -1133,7 +1140,7 @@ EVENT_FLOW_SPECS = {
         key_columns=("trade_date", "ts_code"),
         date_column="trade_date",
         zero_rows_ok=False,
-        availability=OFFICIAL_NEXT_DAY_09,
+        availability=OFFICIAL_NEXT_TRADING_DAY_09,
     ),
     "margin_secs": EventDataset(
         api_name="margin_secs",
@@ -3027,6 +3034,36 @@ def refresh_sidecar_commit_identity(path: Path) -> None:
     migrate_partition_identity(path)
 
 
+def _rewrite_available_at(dataset_dir: Path, restamp: Callable[[pd.DataFrame], pd.DataFrame]) -> tuple[int, int]:
+    """Re-derive the two stamp columns of every partition under ``dataset_dir``.
+
+    A partition whose stamp or rule label differs is rewritten as a new file
+    renamed over the old path, so a release hard-linking the old file keeps
+    it. Only committed partitions are touched: the identity refresh would
+    otherwise bless a torn write. Returns (files rewritten, rows whose stamp moved).
+    """
+    files = 0
+    changed_rows = 0
+    for path in sorted(dataset_dir.rglob("*.parquet")):
+        if not committed_partition_intact(path):
+            raise RuntimeError(f"refusing to restamp a partition that is not a complete commit: {path}")
+        frame = pd.read_parquet(path)
+        if frame.empty:
+            continue
+        before = frame.get("available_at", pd.Series("", index=frame.index)).astype(str)
+        before_rule = frame.get("available_at_rule", pd.Series("", index=frame.index)).astype(str)
+        repaired = restamp(frame.drop(columns=[c for c in ("available_at", "available_at_rule") if c in frame.columns]))
+        delta = int((repaired["available_at"].astype(str) != before).sum())
+        if delta or (repaired["available_at_rule"].astype(str) != before_rule).any():
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            repaired.to_parquet(tmp, index=False)
+            tmp.replace(path)
+            refresh_sidecar_commit_identity(path)
+            files += 1
+            changed_rows += delta
+    return files, changed_rows
+
+
 def repair_text_available_at(raw_dir: str, datasets: list[str]) -> dict[str, Any]:
     """Re-derive available_at for existing text partitions under the current rule.
 
@@ -3041,25 +3078,32 @@ def repair_text_available_at(raw_dir: str, datasets: list[str]) -> dict[str, Any
         dataset_dir = Path(raw_dir) / dataset
         if not dataset_dir.exists():
             raise RuntimeError(f"missing dataset directory: {dataset_dir}")
-        files = 0
-        changed_rows = 0
-        for path in sorted(dataset_dir.rglob("*.parquet")):
-            frame = pd.read_parquet(path)
-            if frame.empty:
-                continue
-            before = frame.get("available_at", pd.Series("", index=frame.index)).astype(str)
-            repaired = augment_text_frame(
-                frame.drop(columns=[c for c in ("available_at", "available_at_rule") if c in frame.columns]),
-                spec,
-            )
-            delta = int((repaired["available_at"].astype(str) != before).sum())
-            if delta:
-                tmp = path.with_suffix(path.suffix + ".tmp")
-                repaired.to_parquet(tmp, index=False)
-                tmp.replace(path)
-                refresh_sidecar_commit_identity(path)
-                files += 1
-                changed_rows += delta
+        files, changed_rows = _rewrite_available_at(dataset_dir, partial(augment_text_frame, spec=spec))
+        stats["datasets"][dataset] = {"files_rewritten": files, "rows_changed": changed_rows}
+        stats["files_rewritten"] += files
+        stats["rows_changed"] += changed_rows
+    return stats
+
+
+def repair_event_available_at(raw_dir: str, datasets: list[str]) -> dict[str, Any]:
+    """Re-derive available_at for stored trade-date event partitions under the current rule.
+
+    The same local rewrite as the text repair. Rules counted in open days read
+    the SSE calendar, which must reach the open day after the newest partition.
+    """
+    raw = Path(raw_dir)
+    stats: dict[str, Any] = {"datasets": {}, "files_rewritten": 0, "rows_changed": 0}
+    for dataset in datasets:
+        spec = EVENT_FLOW_SPECS.get(dataset)
+        if spec is None or spec.strategy != "trade_date":
+            raise RuntimeError(f"event available_at repair covers trade-date event datasets; got {dataset}")
+        partitions = sorted((raw / dataset).glob("trade_date=*.parquet"))
+        if not partitions:
+            raise RuntimeError(f"no partitions under {raw / dataset}")
+        open_dates = load_sse_open_dates(raw, partition_date(partitions[0]), latest_sse_calendar_date(raw))
+        files, changed_rows = _rewrite_available_at(
+            raw / dataset, partial(augment_event_frame, spec=spec, trading_dates=open_dates)
+        )
         stats["datasets"][dataset] = {"files_rewritten": files, "rows_changed": changed_rows}
         stats["files_rewritten"] += files
         stats["rows_changed"] += changed_rows

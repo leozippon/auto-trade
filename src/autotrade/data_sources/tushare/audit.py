@@ -267,6 +267,8 @@ def audit_revision_sentinel(args: argparse.Namespace) -> int:
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
     datasets = list(args.datasets or DAILY_REQUIRED_DATASETS)
     trade_dates = load_sse_open_dates(raw_dir, args.start_date, args.end_date)
+    # Rules counted in open days stamp from the calendar after the probed date.
+    stamping_dates = load_sse_open_dates(raw_dir, args.start_date, latest_sse_calendar_date(raw_dir))
     events: list[dict[str, Any]] = []
     dataset_reports: list[dict[str, Any]] = []
     page_limit = args.page_limit or TRADE_DATE_PAGE_LIMIT
@@ -303,7 +305,7 @@ def audit_revision_sentinel(args: argparse.Namespace) -> int:
             if dataset in BOARD_TRADING_SPECS:
                 new_df = augment_board_frame(new_df, spec, {"trade_date": trade_date})
             elif dataset in EVENT_FLOW_SPECS:
-                new_df = augment_event_frame(new_df, spec)
+                new_df = augment_event_frame(new_df, spec, trading_dates=stamping_dates)
             if new_df.empty and not spec.zero_rows_ok:
                 remote_zero.append(trade_date)
                 continue
@@ -2291,8 +2293,8 @@ def event_unit_rules() -> dict[str, list[dict[str, object]]]:
 
 def event_pit_rules() -> dict[str, str]:
     return {
-        "margin": "available_at uses next-day 09:00+08 from trade_date.",
-        "margin_detail": "available_at uses next-day 09:00+08 from trade_date.",
+        "margin": "available_at uses 09:00+08 on the next SSE open day after trade_date.",
+        "margin_detail": "available_at uses 09:00+08 on the next SSE open day after trade_date.",
         "margin_secs": "available_at uses same-day 09:00+08 from trade_date because this is a pre-open eligibility table.",
         "moneyflow": "available_at uses 19:00+08 from trade_date.",
         "moneyflow_dc": "available_at uses 19:00+08 from trade_date.",

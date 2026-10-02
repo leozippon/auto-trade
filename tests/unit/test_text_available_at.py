@@ -52,7 +52,9 @@ class TextAvailableAtPlausibilityTest(unittest.TestCase):
             stale = anns_frame([("20200110", "000001.SZ", "n", "t", "u", "2025-07-05 06:55:56")])
             stale["available_at"] = "2025-07-05 06:55:56"
             stale["available_at_rule"] = "source:rec_time"
-            stale.to_parquet(dataset_dir / "month=202001.parquet", index=False)
+            core.write_parquet(
+                dataset_dir / "month=202001.parquet", stale, api_name="anns_d", params={}, fields=list(stale.columns)
+            )
             stats = core.repair_text_available_at(str(raw), ["anns_d"])
             self.assertEqual(stats["files_rewritten"], 1)
             self.assertEqual(stats["rows_changed"], 1)
