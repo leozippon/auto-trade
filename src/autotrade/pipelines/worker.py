@@ -1485,7 +1485,7 @@ def _pit_views_seed(
     if value in (None, ""):
         return default, None
     if not isinstance(value, str):
-        raise ValueError("pit_views_seed must be a string")  # noqa: TRY004
+        raise ValueError("pit_views_seed must be a string")
     seed = _repo_path(repo_root, value.strip(), "pit_views_seed")
     if seed == default:
         return default, None
@@ -1587,7 +1587,7 @@ def _gpu_count(value: object) -> int:
 
 def _strict_bool(value: object, name: str) -> bool:
     if not isinstance(value, bool):
-        raise ValueError(f"{name} must be a boolean")  # noqa: TRY004
+        raise ValueError(f"{name} must be a boolean")
     return value
 
 

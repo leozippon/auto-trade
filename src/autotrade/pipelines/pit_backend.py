@@ -1802,9 +1802,7 @@ def _replay_manifest_matches(
         or _optional_cn_datetime(manifest.get("available_from")) != decision
     ):
         return False
-    if phase is not None and str(manifest.get("label") or "") != phase:
-        return False
-    return True
+    return phase is None or str(manifest.get("label") or "") == phase
 
 
 def _cn_timestamp(value: object) -> pd.Timestamp:

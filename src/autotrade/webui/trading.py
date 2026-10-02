@@ -70,7 +70,8 @@ EQUITY_JOURNAL_NAME = "equity_daily.jsonl"
 
 
 def env_dir(repo_root: Path, env: str) -> Path:
-    if env not in TRADING_ENVS: raise KeyError(f"unknown trading environment: {env}")
+    if env not in TRADING_ENVS:
+        raise KeyError(f"unknown trading environment: {env}")
     return Path(repo_root) / PAPER_STATE_DIR
 
 
@@ -95,7 +96,8 @@ def _text(value: object) -> str | None:
 
 
 def _number(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)): return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
     result = float(value)
     return result if math.isfinite(result) else None
 

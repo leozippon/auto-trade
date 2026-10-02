@@ -1031,14 +1031,13 @@ def download_trade_date_dataset(
     total_rows = 0
     for index, trade_date in enumerate(trade_dates, start=1):
         path = dataset_dir / f"trade_date={trade_date}.parquet"
-        if not force:
-            # A parquet whose sidecar is missing or carries another write ID is
-            # an interrupted write, not a committed partition: re-attempt it.
-            if committed_partition_intact(path) and (spec.zero_rows_ok or parquet_rows(path) > 0):
-                skipped += 1
-                if index % 250 == 0:
-                    print(f"{spec.api_name} {index}/{len(trade_dates)} skipped={skipped} written={written}")
-                continue
+        # A parquet whose sidecar is missing or carries another write ID is
+        # an interrupted write, not a committed partition: re-attempt it.
+        if not force and committed_partition_intact(path) and (spec.zero_rows_ok or parquet_rows(path) > 0):
+            skipped += 1
+            if index % 250 == 0:
+                print(f"{spec.api_name} {index}/{len(trade_dates)} skipped={skipped} written={written}")
+            continue
         params = {"trade_date": trade_date}
         try:
             result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
@@ -1242,7 +1241,7 @@ def download_macro_trade_date(
     """Per-trade-date pulls for daily macro tables whose range endpoints cap the
     response server-side and ignore offset paging (ths/sw/ci index dailies:
     year-range pulls silently truncated at 3000/4000 rows)."""
-    trade_dates = [d for d in load_sse_open_dates(raw_dir, start_date, end_date)]
+    trade_dates = list(load_sse_open_dates(raw_dir, start_date, end_date))
     dataset_dir = raw_dir / spec.api_name
     written = 0
     skipped = 0

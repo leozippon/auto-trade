@@ -7,6 +7,7 @@ import argparse
 import json
 import re
 from bisect import bisect_left
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -1139,7 +1140,7 @@ def audit_index_member_all(raw_dir: Path, classify: pd.DataFrame, stock_basic: p
     files = sorted((raw_dir / "index_member_all").glob("l1_code=*.parquet"))
     df = read_many(files)
     l1_codes = set(classify.loc[classify["level"].astype(str) == "L1", "index_code"].astype(str)) if not classify.empty else set()
-    file_codes = set(path.stem.split("=", 1)[1] for path in files)
+    file_codes = {path.stem.split("=", 1)[1] for path in files}
     missing_in_basic: set[str] = set()
     if not df.empty and not stock_basic.empty:
         missing_in_basic = set(df["ts_code"].dropna().astype(str)) - set(stock_basic["ts_code"].dropna().astype(str))
@@ -1164,7 +1165,7 @@ def audit_index_member_history(raw_dir: Path, classify_sw2014: pd.DataFrame, add
     files = sorted((raw_dir / "index_member").glob("l1_code=*.parquet"))
     df = read_many(files)
     l1_codes = set(classify_sw2014.loc[classify_sw2014["level"].astype(str) == "L1", "index_code"].astype(str)) if not classify_sw2014.empty else set()
-    file_codes = set(path.stem.split("=", 1)[1] for path in files)
+    file_codes = {path.stem.split("=", 1)[1] for path in files}
     details = {
         "files": len(files), "rows": len(df), "missing_l1_partitions": len(l1_codes - file_codes),
         "extra_l1_partitions": len(file_codes - l1_codes),
@@ -1693,10 +1694,7 @@ def audit_fundamental_unit_and_pit_semantics(raw_dir: Path, add) -> None:
         },
     })
 
-from dataclasses import dataclass as _dataclass
-
-
-@_dataclass(frozen=True)
+@dataclass(frozen=True)
 class DomainAuditProfile:
     """Shared partition-inventory + key/PIT auditor knobs for one raw domain.
 

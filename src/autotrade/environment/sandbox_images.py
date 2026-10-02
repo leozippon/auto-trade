@@ -48,7 +48,7 @@ def _load_image_state(path: Path, *, experiment_id: str) -> dict[str, object]:
     except (OSError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"invalid persisted sandbox image state: {path}") from exc
     if not isinstance(payload, dict):
-        raise RuntimeError(  # noqa: TRY004
+        raise RuntimeError(
             f"invalid persisted sandbox image state: {path}"
         )
     image_ref = payload.get("image_ref")
@@ -56,7 +56,7 @@ def _load_image_state(path: Path, *, experiment_id: str) -> dict[str, object]:
     if payload.get("experiment_id") != experiment_id:
         raise RuntimeError("persisted sandbox image belongs to another experiment")
     if not isinstance(image_ref, str) or not isinstance(generation_id, str):
-        raise RuntimeError(  # noqa: TRY004
+        raise RuntimeError(
             "persisted sandbox image lacks required identity fields"
         )
     try:

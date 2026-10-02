@@ -8,6 +8,7 @@ import stat
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pandas as pd
 import pytest
@@ -586,13 +587,13 @@ def test_nothing_planned_for_research_is_stamped_after_research_end(
 class _FakeProvider:
     """The provider surface the prebuild reads, recording what it is asked."""
 
-    calls: list[tuple[str, str, str, str]] = []
+    calls: ClassVar[list[tuple[str, str, str, str]]] = []
 
     def __init__(self, **_kwargs: object) -> None:
         self.trading_days = _release_days()
         self.release = SimpleNamespace(generation_id="generation_test", raw_dir=Path("raw"))
 
-    def prepare(self, *, phase, start, end, decision_time):  # noqa: ANN001
+    def prepare(self, *, phase, start, end, decision_time):
         self.calls.append((phase, start, end, decision_time.isoformat()))
         return SnapshotBundle(
             snapshot_id="snapshot",

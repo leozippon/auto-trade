@@ -29,6 +29,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import ClassVar
 
 import numpy as np
 import pandas as pd
@@ -1225,9 +1226,9 @@ class SnapshotBuilder:
         "ts_code", "trade_date", "session", "price", "vol", "amount", "pre_close",
         "turnover_rate", "volume_ratio", "float_share", "available_at", "available_at_rule",
     )
-    _AUCTION_STRING_COLUMNS = {
+    _AUCTION_STRING_COLUMNS = frozenset({
         "ts_code", "trade_date", "session", "available_at", "available_at_rule",
-    }
+    })
 
     def _build_auction(self, start_key: str, end_key: str) -> tuple[pd.DataFrame, dict[str, object]]:
         """Exact opening call-auction results available from 2025-01-16."""
@@ -1578,7 +1579,7 @@ class SnapshotBuilder:
             if writer is not None:
                 try:
                     writer.close()
-                except Exception:  # noqa: BLE001, S110 - preserve the original build error
+                except Exception:  # noqa: BLE001 - preserve the original build error
                     pass
             tmp.unlink(missing_ok=True)
 
@@ -2061,7 +2062,7 @@ class SnapshotBuilder:
         meta = {"rows": len(index), "datasets": list(config.text_datasets), "library_dir": "text_library"}
         return index, meta
 
-    _BOARD_PREFIXES = {
+    _BOARD_PREFIXES: ClassVar[dict[str, tuple[str, ...]]] = {
         "main": ("600", "601", "603", "605", "000", "001", "002", "003"),
         "gem": ("300", "301", "302"),
         "star": ("688", "689"),

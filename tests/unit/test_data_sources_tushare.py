@@ -11,6 +11,7 @@ import sys
 import tempfile
 import threading
 import traceback
+import types
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta
@@ -4957,7 +4958,9 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         }).to_parquet(hollow, index=False)
 
         findings: list[tuple[str, str, str, dict]] = []
-        add = lambda sev, code, msg, details: findings.append((sev, code, msg, details))
+        def add(sev, code, msg, details):
+            findings.append((sev, code, msg, details))
+
         audit.audit_business_payload([hollow], "moneyflow", "moneyflow_payload", add, key_columns=("trade_date", "ts_code"))
         self.assertEqual(findings[0][0], "error")
         self.assertTrue(findings[0][3]["business_payload_empty"])
@@ -6181,9 +6184,6 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
 
 # Source: test_tushare_intraday_by_date.py
-import types
-import unittest
-
 
 def load_tushare_data_module():
     return types.SimpleNamespace(

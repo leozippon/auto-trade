@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
@@ -1111,7 +1112,7 @@ def test_compaction_keeps_the_session_system_prompt_byte_identical(tmp_path: Pat
     assert compactions, "the session must cross a compaction to prove the invariant"
     lengths = [len(call["messages"]) for call in llm.calls]
     # History really shrank, so the equality below is not a vacuous check.
-    assert any(later < earlier for earlier, later in zip(lengths, lengths[1:]))
+    assert any(later < earlier for earlier, later in pairwise(lengths))
     assert any(
         "context_compaction" in (message.content or "")
         for message in llm.calls[-1]["messages"]

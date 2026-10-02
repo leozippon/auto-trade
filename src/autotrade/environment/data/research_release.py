@@ -728,7 +728,7 @@ def _clone_directory(
 
 def _should_hardlink(name: str, *, kind: str) -> bool:
     if kind == "raw":
-        return name.endswith(".parquet") or name.endswith(".parquet.meta.json")
+        return name.endswith((".parquet", ".parquet.meta.json"))
     if kind == "pit":
         return name.endswith(".parquet")
     raise ValueError(f"unknown research-release tree kind: {kind}")

@@ -35,7 +35,7 @@ from pathlib import Path
 import pandas as pd
 import pyarrow.parquet as pq
 
-from autotrade.environment.data.unit_rules import (  # noqa: F401  (re-exported)
+from autotrade.environment.data.unit_rules import (  # re-exported
     COMMON_FIELD_SEMANTICS,
     FIELD_RULES,
     NO_NUMERIC_DATASETS,

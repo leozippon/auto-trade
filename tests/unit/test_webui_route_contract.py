@@ -550,7 +550,7 @@ def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) ->
         ("verdictStagePanel", reads("verdictStagePanel", "research"), record),
         ("replaySpanBar", reads("replaySpanBar", "replay"), set(replay["replay"])),
         ("armEquityHost", reads("armEquityHost", "item"), set(detail)),
-        ("stepper", {step for step in re.findall(r'^  (\w+): "', _js_literal("const STEP_LABELS = {", "\n};"), re.MULTILINE)}, {"research", "frozen", "forward", "heldout", "verdict"}),
+        ("stepper", set(re.findall(r'^  (\w+): "', _js_literal("const STEP_LABELS = {", "\n};"), re.MULTILINE)), {"research", "frozen", "forward", "heldout", "verdict"}),
     ):
         assert read, name
         assert read <= served, (name, sorted(read - served))

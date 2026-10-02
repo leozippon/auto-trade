@@ -44,7 +44,7 @@ from autotrade.pipelines.hitl_state import StatusReporter, read_json
 from autotrade.pipelines.worker import load_worker_options, run_local_interactive_worker
 
 
-def _terminate(signum, frame):  # noqa: ANN001 - signal handler signature
+def _terminate(signum, frame):  # signal handler signature
     raise SystemExit(128 + signum)
 
 

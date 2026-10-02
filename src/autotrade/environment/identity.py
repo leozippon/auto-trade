@@ -259,6 +259,4 @@ def _has_legacy_identity_artifacts(experiment_dir: Path) -> bool:
     if steps.is_dir() and any(steps.iterdir()):
         return True
     traces = experiment_dir / "artifacts" / "traces"
-    if traces.is_dir() and any(path.is_file() and path.stat().st_size for path in traces.iterdir()):
-        return True
-    return False
+    return traces.is_dir() and any(path.is_file() and path.stat().st_size for path in traces.iterdir())

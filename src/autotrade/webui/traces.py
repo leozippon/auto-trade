@@ -196,10 +196,7 @@ def read_trace_blocks(
     else:
         size = Path(path).stat().st_size
         remaining = max(size - max(0, int(offset)), 0)
-        if max_bytes is None:
-            window = remaining or 1
-        else:
-            window = max(1, int(max_bytes))
+        window = (remaining or 1) if max_bytes is None else max(1, int(max_bytes))
         window = min(window, MAX_BLOCK_READ_BYTES)
         page = read_trace_page(
             path, offset=offset, max_bytes=window, writer_alive=writer_alive

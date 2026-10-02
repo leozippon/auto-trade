@@ -758,7 +758,7 @@ def benchmark_summary_block(analysis: Mapping[str, object]) -> dict[str, object]
     return {
         "ts_code": benchmark.get("ts_code"),
         "label": benchmark.get("label"),
-        **{key: value for key, value in compact.items()},
+        **compact,
     }
 
 

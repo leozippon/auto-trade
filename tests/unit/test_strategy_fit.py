@@ -114,8 +114,10 @@ def test_loader_accepts_fit_with_a_declared_refit_period_and_rooted_state_io():
         ("async def fit(context): pass\ndef generate_orders(context): return []", "synchronous fit"),
         ("def fit(a, b): pass\ndef generate_orders(context): return []", "exactly one context"),
         (
-            "import numpy as np\ndef fit(context): np.save('/tmp/x.npy', [])\n"
-            "def generate_orders(context): return []",
+            (
+                "import numpy as np\ndef fit(context): np.save('/tmp/x.npy', [])\n"
+                "def generate_orders(context): return []"
+            ),
             "absolute path literal to save",
         ),
         (
@@ -126,8 +128,10 @@ def test_loader_accepts_fit_with_a_declared_refit_period_and_rooted_state_io():
             "absolute path literal to load",
         ),
         (
-            "import numpy as np\ndef fit(context): np.save(context.models_dir + '/w.npy', [])\n"
-            "def generate_orders(context): return []",
+            (
+                "import numpy as np\ndef fit(context): np.save(context.models_dir + '/w.npy', [])\n"
+                "def generate_orders(context): return []"
+            ),
             "may not save below context.models_dir",
         ),
         (

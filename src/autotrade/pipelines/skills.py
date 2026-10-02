@@ -216,11 +216,10 @@ def validate_skills_tree(
                 raise ValueError(f"skill file extension is not allowed: {relative}")
             payload = path.read_bytes()
             text = _decode_skill_file(path, payload)
-            if relative == PurePosixPath(SKILL_FILENAME):
-                if len(text) > MAX_SKILL_CHARS:
-                    raise ValueError(
-                        f"{item.name}/{SKILL_FILENAME} exceeds {MAX_SKILL_CHARS} characters"
-                    )
+            if relative == PurePosixPath(SKILL_FILENAME) and len(text) > MAX_SKILL_CHARS:
+                raise ValueError(
+                    f"{item.name}/{SKILL_FILENAME} exceeds {MAX_SKILL_CHARS} characters"
+                )
             file_count += 1
             total_bytes += len(payload)
             if file_count > MAX_SKILLS_FILES:
@@ -1039,12 +1038,11 @@ class WriteSkillTool:
             content = str(arguments["content"])
             payload = content.encode("utf-8")
             _decode_skill_file(Path(name) / Path(relative.as_posix()), payload)
-            if relative == PurePosixPath(SKILL_FILENAME):
-                if len(content) > MAX_SKILL_CHARS:
-                    raise ValueError(
-                        f"SKILL.md is {len(content)} characters; "
-                        f"keep it to {MAX_SKILL_CHARS}"
-                    )
+            if relative == PurePosixPath(SKILL_FILENAME) and len(content) > MAX_SKILL_CHARS:
+                raise ValueError(
+                    f"SKILL.md is {len(content)} characters; "
+                    f"keep it to {MAX_SKILL_CHARS}"
+                )
             before = validate_skills_tree(self.root, require_writable=True)
             item = self.root / name
             target = item.joinpath(*relative.parts)

@@ -70,8 +70,7 @@ def summarize_datasets(
                 name
                 for name in match_order
                 if check == name
-                or check.startswith(f"{name}_")
-                or check.startswith(f"source_{name}")
+                or check.startswith((f"{name}_", f"source_{name}"))
             ),
             None,
         )

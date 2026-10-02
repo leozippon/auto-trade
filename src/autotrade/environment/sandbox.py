@@ -458,7 +458,7 @@ def probe_image_runtime(image: str, *, docker_executable: str = "docker", timeou
         raise RuntimeError(f"sandbox image probe failed: {completed.stderr.strip()}")
     value = json.loads(completed.stdout)
     if not isinstance(value, dict):
-        raise RuntimeError("sandbox image probe returned an invalid record")  # noqa: TRY004
+        raise RuntimeError("sandbox image probe returned an invalid record")
     return value
 
 

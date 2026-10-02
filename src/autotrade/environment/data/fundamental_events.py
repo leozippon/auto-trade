@@ -298,7 +298,7 @@ def audit_fundamental_events(events_root: str | Path, config: FundamentalEventsC
             blank_source_write_id += int(df["source_write_id"].astype(str).str.strip().eq("").sum())
             source_paths = df["source_path"].astype(str)
             blank_source_path += int(source_paths.str.strip().eq("").sum())
-            wrong_source_path += int((~source_paths.map(lambda value: _source_path_matches_dataset(value, expected_dataset))).sum())
+            wrong_source_path += int((~source_paths.map(lambda value: _source_path_matches_dataset(value, expected_dataset))).sum())  # noqa: B023 - the lambda is consumed by .map within this iteration
             path_exists = {value: Path(value).exists() for value in source_paths.unique()}
             missing_source_path += int((~source_paths.map(path_exists)).sum())
             bad_source_row_id += int(pd.to_numeric(df["source_row_id"], errors="coerce").isna().sum())

@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 import importlib.util
 from datetime import datetime, timedelta
+from itertools import pairwise
 from pathlib import Path
 
 import pandas as pd
@@ -82,7 +83,7 @@ def test_each_slot_starts_the_instant_the_previous_one_ends() -> None:
         )
         assert slots[0].start == geometry.research_start
         assert slots[len(geometry.research_years) - 1].end == geometry.research_end
-        for previous, current in zip(slots, slots[1:]):
+        for previous, current in pairwise(slots):
             assert current.start > previous.end
             assert current.anchor == _close(previous.end)
             assert _close(previous.end) + timedelta(seconds=1) == datetime.strptime(

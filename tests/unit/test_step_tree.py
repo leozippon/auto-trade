@@ -12,7 +12,7 @@ from autotrade.environment.step_tree import StepTree
 
 from .test_artifacts import write_artifact
 
-NODE = dict(epoch_id="epoch_001", run_id="run_x")
+NODE = {"epoch_id": "epoch_001", "run_id": "run_x"}
 
 
 class StepTreeTest(unittest.TestCase):
@@ -65,13 +65,13 @@ class StepTreeTest(unittest.TestCase):
             tmp = Path(tmp)
             artifact = write_artifact(tmp / "artifact")
             tree = StepTree(tmp / "steps")
-            kwargs = dict(
-                epoch_id="epoch_001",
-                session_ref="session_ref_ab",
-                result_name="valid_000",
-                revision_id=new_revision_id("revision"),
-                metrics={},
-            )
+            kwargs = {
+                "epoch_id": "epoch_001",
+                "session_ref": "session_ref_ab",
+                "result_name": "valid_000",
+                "revision_id": new_revision_id("revision"),
+                "metrics": {},
+            }
             node1 = tree.record_step(artifact, run_id="run_x", **kwargs)
             node2 = tree.record_step(artifact, run_id="run_y", **kwargs)
             self.assertNotEqual(node1, node2)
@@ -84,13 +84,13 @@ class StepTreeTest(unittest.TestCase):
             tmp = Path(tmp)
             artifact = write_artifact(tmp / "artifact")
             tree = StepTree(tmp / "steps")
-            kwargs = dict(
-                session_ref="session_ref_ab",
-                run_id="run_x",
-                result_name="valid_000",
-                revision_id=new_revision_id("revision"),
-                metrics={},
-            )
+            kwargs = {
+                "session_ref": "session_ref_ab",
+                "run_id": "run_x",
+                "result_name": "valid_000",
+                "revision_id": new_revision_id("revision"),
+                "metrics": {},
+            }
             node1 = tree.record_step(artifact, epoch_id="epoch_001", **kwargs)
             node2 = tree.record_step(artifact, epoch_id="epoch_002", **kwargs)
             self.assertNotEqual(node1, node2)

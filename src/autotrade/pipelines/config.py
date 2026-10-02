@@ -113,7 +113,7 @@ def _finite_metric(value: object) -> float | None:
 
 def _finite_number(value: object, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"{name} must be finite")  # noqa: TRY004
+        raise ValueError(f"{name} must be finite")
     number = float(value)
     if not math.isfinite(number):
         raise ValueError(f"{name} must be finite")
