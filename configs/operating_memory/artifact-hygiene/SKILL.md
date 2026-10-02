@@ -7,13 +7,6 @@
 - 在候选第一次正式验证之前清，清完的字节就是要验证、要提名的字节。试验按字节计：探针之后再改任何一个字节（删死代码、改注释都算）然后上整期，就是另一个试验，要重新验证才能提名。
 - 已验证的节点不再顺手清理。清理是写候选时的一部分：不单独派子代理，不在提交前改写别的候选目录。
 
-## `__pycache__`
-
-在脚本里 import 候选目录或 `output/` 里的模块，Python 会在被 import 的文件旁边写 `__pycache__`，与当前目录无关；`python -m py_compile` 不论加不加 `-B` 都会写。冒烟与批次先跑的 `modification_check` 随即以 `hidden or runtime file is forbidden` 拒绝。
-
-- 要 import 时用 `python -B` 运行；只查语法用 `python -B -c "import ast, sys; [ast.parse(open(p, encoding='utf-8').read(), p) for p in sys.argv[1:]]" <文件…>`，不用 `py_compile`。
-- 已经留下的：`find output candidates -name __pycache__ -prune -exec rm -rf {} +`。
-
 ## 清什么
 
 - 恒为假的分支、只被它调用的函数、不再被引用的参数与常量：删掉，不留开关，需要时再写；删之前先证明零引用（全包只剩定义处）。
