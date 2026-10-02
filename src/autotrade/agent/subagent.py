@@ -588,7 +588,9 @@ def llm_with_thinking(proxy: LLMProxy, thinking: str) -> LLMProxy:
     if clone is None:
         return proxy
     enabled = thinking != "off"
-    # low/medium/xhigh are native levels for every supported dialect.
+    # low/medium/xhigh reach a dialect with effort levels (local Qwen,
+    # DeepSeek) as the child's level; MiMo's thinking is on/off only, so its
+    # proxy drops the level and keeps just ``enabled``.
     return cast(
         LLMProxy,
         clone(enabled=enabled, reasoning_effort=thinking if enabled else None),
