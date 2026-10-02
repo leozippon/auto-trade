@@ -111,9 +111,9 @@ def test_worker_maps_model_context_params_to_role_gateways_and_compactor(
     params = json.loads(path.read_text(encoding="utf-8"))
     params.update(
         {
-            "model": "deepseek-v4-flash",
-            "nl_model": "deepseek-v4-pro",
-            "compact_model": "deepseek-v4-pro",
+            "model": "deepseek-flash",
+            "nl_model": "deepseek-flash",
+            "compact_model": "deepseek-flash",
             "reasoning_effort": "high",
             "no_thinking": True,
             "disable_context_compact": False,
@@ -134,9 +134,9 @@ def test_worker_maps_model_context_params_to_role_gateways_and_compactor(
     nl = settings.build_gateway("nl").config
     compact = settings.build_gateway("compact").config
     assert (main.model, nl.model, compact.model) == (
-        "deepseek-v4-flash",
-        "deepseek-v4-pro",
-        "deepseek-v4-pro",
+        "deepseek-flash",
+        "deepseek-flash",
+        "deepseek-flash",
     )
     assert main.thinking_enabled is False and nl.thinking_enabled is False
     # Thinking is off, so no role sends a reasoning effort.
@@ -144,9 +144,9 @@ def test_worker_maps_model_context_params_to_role_gateways_and_compactor(
     assert compact.thinking_enabled is False and compact.reasoning_effort is None
     assert compact.max_tokens == 1_200
     assert settings.compact_enabled is True
-    # The configured 90,000 is clamped to the DeepSeek bound
-    # 128,000 − 32,768 output ceiling − 8,192 margin.
-    assert settings.compaction.token_threshold == 87_040
+    # The configured 90,000 sits below every role's DeepSeek bound
+    # (1,048,576 − output budget − 8,192 margin), so it applies as configured.
+    assert settings.compaction.token_threshold == 90_000
     assert settings.compaction.keep_recent_messages == 10
     assert settings.compaction.max_response_tokens == 1_200
     assert settings.compaction.max_calls == 4
@@ -236,7 +236,7 @@ def test_worker_ignores_historical_endpoint_and_credential_params(
     params = json.loads(path.read_text(encoding="utf-8"))
     params["llm_base_url"] = "https://untrusted-snapshot.example.test/v1"
     params["llm_api_key_env"] = "UNRELATED_SECRET"
-    params["subagent_model"] = "deepseek-v4-pro"
+    params["subagent_model"] = "deepseek-flash"
     path.write_text(json.dumps(params), encoding="utf-8")
     monkeypatch.setenv("UNRELATED_SECRET", "not-a-provider-credential")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-test-key")
@@ -265,9 +265,9 @@ def test_worker_resolves_mixed_local_and_deepseek_roles_with_real_timeout(
     params.update(
         {
             "model": LOCAL_QWEN_MODEL,
-            "subagent_model": "deepseek-v4-pro",
-            "nl_model": "deepseek-v4-flash",
-            "compact_model": "deepseek-v4-flash",
+            "subagent_model": "deepseek-flash",
+            "nl_model": "deepseek-flash",
+            "compact_model": "deepseek-flash",
             "compact_token_threshold": 20_000,
             "per_call_timeout_seconds": 120,
         }
@@ -286,7 +286,7 @@ def test_worker_resolves_mixed_local_and_deepseek_roles_with_real_timeout(
     assert main.provider == "vllm"
     assert isinstance(subagent, DeepSeekProxy)
     assert subagent.provider == "deepseek"
-    assert subagent.model == "deepseek-v4-pro"
+    assert subagent.model == "deepseek-flash"
     assert isinstance(nl, DeepSeekProxy)
     assert nl.provider == "deepseek"
     assert main.config.max_tokens == 32_768
@@ -375,14 +375,15 @@ def test_worker_default_threshold_fits_deepseek_and_compaction_can_be_disabled(
     repo, experiment = _experiment(tmp_path, developer_mode="llm")
     path = experiment / "hitl/params.json"
     params = json.loads(path.read_text(encoding="utf-8"))
-    params["model"] = "deepseek-v4-flash"
+    params["model"] = "deepseek-flash"
+    params["compact_model"] = "deepseek-flash"
     params.pop("compact_token_threshold", None)
     path.write_text(json.dumps(params), encoding="utf-8")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-test-key")
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     options = load_worker_options(experiment, repo_root=repo)
-    # 128,000 - 32,768 output ceiling - 8,192 margin: shipped defaults launch.
-    assert options.llm.compaction.token_threshold == 87_040
+    # 1,048,576 − 32,768 output ceiling − 8,192 margin: shipped defaults launch.
+    assert options.llm.compaction.token_threshold == 1_007_616
     params["disable_context_compact"] = True
     path.write_text(json.dumps(params), encoding="utf-8")
     disabled = load_worker_options(experiment, repo_root=repo)
@@ -404,7 +405,7 @@ def test_worker_gives_subagents_their_own_gateway_and_compaction_budget(
     params = json.loads(path.read_text(encoding="utf-8"))
     params.update(
         {
-            "model": "deepseek-v4-flash",
+            "model": "deepseek-flash",
             "subagent_model": LOCAL_QWEN_MODEL,
             "nl_model": LOCAL_QWEN_MODEL,
             "compact_model": LOCAL_QWEN_MODEL,
@@ -428,21 +429,23 @@ def test_worker_gives_subagents_their_own_gateway_and_compaction_budget(
     assert child.config.thinking_enabled and child.config.reasoning_effort == "xhigh"
     assert child.config.max_tokens == 32_768
     assert settings.build_gateway("main").provider == "deepseek"
-    # Parents on the 128,000 window, children on the 262,144 one.
-    assert settings.compaction.token_threshold == 87_040
+    # The local compaction model reads the whole parent conversation:
+    # 262,144 − 1,600 − 8,192 bounds the DeepSeek parent; the children
+    # compact at their own Qwen bound 262,144 − 32,768 − 8,192.
+    assert settings.compaction.token_threshold == 252_352
     assert settings.compaction_for("main") == settings.compaction
     assert settings.compaction_for("subagent").token_threshold == 221_184
     with pytest.raises(ValueError, match="unknown conversation role"):
         settings.compaction_for("nl")
-    # A DeepSeek compaction model reads the whole child conversation:
-    # 128,000 − 1,600 − 8,192 bounds the children too.
-    settings = settings_for(compact_model="deepseek-v4-flash")
-    assert settings.compaction.token_threshold == 87_040
-    assert settings.compaction_for("subagent").token_threshold == 118_208
+    # With a DeepSeek compaction model the parent compacts at its own bound
+    # 1,048,576 − 32,768 − 8,192.
+    settings = settings_for(compact_model="deepseek-flash")
+    assert settings.compaction.token_threshold == 1_007_616
+    assert settings.compaction_for("subagent").token_threshold == 221_184
     # A configured threshold is clamped per role.
-    settings = settings_for(compact_model=LOCAL_QWEN_MODEL, compact_token_threshold=100_000)
-    assert settings.compaction.token_threshold == 87_040
-    assert settings.compaction_for("subagent").token_threshold == 100_000
+    settings = settings_for(compact_model=LOCAL_QWEN_MODEL, compact_token_threshold=230_000)
+    assert settings.compaction.token_threshold == 230_000
+    assert settings.compaction_for("subagent").token_threshold == 221_184
     # Every gateway is validated at create preflight without credentials.
     monkeypatch.delenv("DEEPSEEK_API_KEY")
     monkeypatch.delenv("VLLM_API_KEY")

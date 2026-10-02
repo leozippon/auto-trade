@@ -11,8 +11,11 @@ from pathlib import Path
 
 from .openai_compatible import OpenAICompatibleConfig, OpenAICompatibleProxy
 
-MODEL_CHOICES = ("deepseek-v4-pro", "deepseek-v4-flash")
-SUPPORTED_MODELS = frozenset((*MODEL_CHOICES, "deepseek-chat", "deepseek-reasoner"))
+# The one model DeepSeek serves under its own name (DeepSeek-V4.1-Flash). The
+# legacy names deepseek-v4-flash, deepseek-chat and deepseek-reasoner, and
+# deepseek-v4-pro since 2026-09-14, are routed to it server-side, so an arm
+# naming any of them would run on Flash under another label; they are refused.
+MODEL_CHOICES = ("deepseek-flash",)
 
 
 class DeepSeekConfig(OpenAICompatibleConfig):
@@ -21,7 +24,7 @@ class DeepSeekConfig(OpenAICompatibleConfig):
     def __init__(
         self,
         api_key: str,
-        model: str = "deepseek-v4-flash",
+        model: str = "deepseek-flash",
         base_url: str = "https://api.deepseek.com",
         timeout_seconds: float = 60.0,
         max_retries: int = 2,
@@ -34,10 +37,11 @@ class DeepSeekConfig(OpenAICompatibleConfig):
         user_id: str = "autotrade-hl",
         conversation_log_dir: str | Path | None = "data/llm_conversations",
         context_window_tokens: int | None = None,
+        max_output_tokens: int | None = None,
     ) -> None:
         if not str(base_url).startswith("https://"):
             raise ValueError("base_url must use https")
-        if model not in SUPPORTED_MODELS:
+        if model not in MODEL_CHOICES:
             raise ValueError(f"unsupported DeepSeek model: {model}")
         super().__init__(
             api_key=api_key,
@@ -56,6 +60,7 @@ class DeepSeekConfig(OpenAICompatibleConfig):
             user_id=user_id,
             conversation_log_dir=conversation_log_dir,
             context_window_tokens=context_window_tokens,
+            max_output_tokens=max_output_tokens,
         )
 
 

@@ -4223,7 +4223,7 @@ def test_children_run_on_their_own_gateway_inside_the_shared_session_quota() -> 
     )
     assert (shared.subagent_cap, shared.parent_reserve) == (2, 0)
     parent_llm = ScriptedLLM([ProviderResponse(content="parent")], context_window_tokens=128_000)
-    parent_llm.provider, parent_llm.model = "deepseek", "deepseek-v4-flash"
+    parent_llm.provider, parent_llm.model = "deepseek", "deepseek-flash"
     child_llm = ScriptedLLM(
         [
             ProviderResponse(

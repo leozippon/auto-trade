@@ -81,6 +81,16 @@ _QWEN_NON_THINKING_SAMPLING = {
     "top_k": 20,
     "presence_penalty": 1.5,
 }
+# DeepSeek's distinct effort tiers are low / high / max (it folds medium and
+# xhigh into high). The shared scale keeps its order on the wire: its top tier
+# (xhigh, legacy high/max) is DeepSeek's max, as it is Qwen's xhigh.
+_DEEPSEEK_REASONING_EFFORTS = {
+    "low": "low",
+    "medium": "high",
+    "high": "max",
+    "xhigh": "max",
+    "max": "max",
+}
 # MiMo's Chat Completions contract: the output budget is named
 # ``max_completion_tokens``, thinking is on/off with no effort level,
 # temperature is bounded at 1.5, and ``tool_choice`` only knows ``auto`` (any
@@ -473,8 +483,12 @@ class OpenAICompatibleProxy:
                 "type": "enabled" if self.config.thinking_enabled else "disabled"
             }
         if dialect == "deepseek":
-            if self.config.reasoning_effort is not None:
-                body["reasoning_effort"] = self.config.reasoning_effort
+            # Any effort switches DeepSeek's thinking on, so none is sent with
+            # thinking disabled.
+            if self.config.thinking_enabled and self.config.reasoning_effort is not None:
+                body["reasoning_effort"] = _DEEPSEEK_REASONING_EFFORTS[
+                    self.config.reasoning_effort
+                ]
             if self.config.user_id:
                 body["user_id"] = self.config.user_id
         elif dialect == "vllm-qwen":

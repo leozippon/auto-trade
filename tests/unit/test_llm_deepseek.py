@@ -203,7 +203,7 @@ def _provider_server():
 
 def _response(message):
     return {
-        "model": "deepseek-chat",
+        "model": "deepseek-flash",
         "choices": [{"message": message}],
         "usage": {"total_tokens": 3},
     }
@@ -277,7 +277,7 @@ def test_env_loader_accepts_export_without_evaluating_shell(tmp_path: Path):
 
 def test_config_repr_redacts_api_key():
     fake_secret = "sk-" + "testsecret123456"
-    config = make_config(api_key=fake_secret, model="deepseek-v4-flash")
+    config = make_config(api_key=fake_secret, model="deepseek-flash")
     assert fake_secret not in repr(config)
     assert fake_secret not in json.dumps(config.safe_metadata())
 
@@ -396,7 +396,7 @@ def test_proxy_sends_model_thinking_reasoning_user_id_and_response_budget():
     transport = FakeTransport([_response({"content": "done"})])
     proxy = DeepSeekProxy(
         make_config(
-            model="deepseek-v4-pro",
+            model="deepseek-flash",
             thinking_enabled=True,
             reasoning_effort="xhigh",
             max_tokens=900,
@@ -407,9 +407,9 @@ def test_proxy_sends_model_thinking_reasoning_user_id_and_response_budget():
     )
     proxy.complete([ChatMessage("user", "research")], max_tokens=700)
     body = transport.requests[0][2]
-    assert body["model"] == "deepseek-v4-pro"
+    assert body["model"] == "deepseek-flash"
     assert body["thinking"] == {"type": "enabled"}
-    assert body["reasoning_effort"] == "xhigh"
+    assert body["reasoning_effort"] == "max"
     assert body["max_tokens"] == 700
     assert body["temperature"] == 0.25
     assert body["user_id"] == "autotrade_user-1"
@@ -417,8 +417,9 @@ def test_proxy_sends_model_thinking_reasoning_user_id_and_response_budget():
 
 
 def test_thinking_disabled_omits_reasoning_effort():
+    # Any effort would switch DeepSeek's thinking back on.
     transport = FakeTransport([_response({"content": "done"})])
-    proxy = DeepSeekProxy(make_config(), transport=transport)
+    proxy = DeepSeekProxy(make_config(reasoning_effort="xhigh"), transport=transport)
     proxy.complete([ChatMessage("user", "hi")])
     body = transport.requests[0][2]
     assert body["thinking"] == {"type": "disabled"}
@@ -426,11 +427,93 @@ def test_thinking_disabled_omits_reasoning_effort():
     assert body["stream"] is False
 
 
+@pytest.mark.parametrize(
+    ("level", "wire"), [("low", "low"), ("medium", "high"), ("xhigh", "max")]
+)
+def test_shared_effort_scale_keeps_its_order_on_deepseek_tiers(level: str, wire: str):
+    """DeepSeek's own tiers are low/high/max and it folds medium and xhigh into
+    high; the experiment's three levels stay three distinct tiers instead."""
+    transport = FakeTransport([_response({"content": "done"})])
+    proxy = DeepSeekProxy(make_config(), transport=transport)
+    child = proxy.with_thinking(enabled=True, reasoning_effort=level)
+    child.complete([ChatMessage("user", "hi")])
+    assert transport.requests[0][2]["reasoning_effort"] == wire
+    assert child.config.reasoning_effort == level
+
+
+@pytest.mark.parametrize(
+    "model", ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"]
+)
+def test_catalog_refuses_names_deepseek_serves_as_flash(model: str):
+    # DeepSeek routes every one of these to deepseek-flash server-side, so an
+    # arm created on one would run on Flash under another model's label.
+    assert MODEL_CHOICES.count("deepseek-flash") == 1
+    assert model not in MODEL_CHOICES
+    with pytest.raises(ValueError, match=f"unsupported model '{model}'"):
+        model_profile(model)
+    with pytest.raises(ValueError, match="unsupported DeepSeek model"):
+        make_config(model=model)
+
+
+def test_recorded_deepseek_flash_stream_with_usage_on_the_last_choice_chunk():
+    """The shape deepseek-flash streamed to the 2026-10-02 smoke (thinking on,
+    one tool call), ids shortened: usage is null on every chunk and arrives on
+    the final chunk that also carries the finish_reason."""
+
+    def chunk(delta: dict[str, object], finish_reason=None, usage=None):
+        return {
+            "id": "rec-1",
+            "object": "chat.completion.chunk",
+            "model": "deepseek-flash",
+            "system_fingerprint": "fp",
+            "choices": [
+                {"index": 0, "delta": delta, "logprobs": None, "finish_reason": finish_reason}
+            ],
+            "usage": usage,
+        }
+
+    call = {"index": 0, "id": "call_00_Q", "type": "function"}
+    raw = _stream_response(
+        chunk({"role": "assistant", "content": None, "reasoning_content": ""}),
+        chunk({"content": None, "reasoning_content": "The user"}),
+        chunk({"content": None, "reasoning_content": " wants a quote."}),
+        chunk({"tool_calls": [{**call, "function": {"name": "get_quote", "arguments": ""}}]}),
+        chunk({"tool_calls": [{"index": 0, "function": {"arguments": '{"symbol": "600519.SH"}'}}]}),
+        chunk(
+            {"content": "", "reasoning_content": None},
+            "tool_calls",
+            {
+                "prompt_tokens": 318,
+                "completion_tokens": 64,
+                "total_tokens": 382,
+                "prompt_tokens_details": {"cached_tokens": 0},
+                "completion_tokens_details": {"reasoning_tokens": 22},
+                "prompt_cache_hit_tokens": 0,
+                "prompt_cache_miss_tokens": 318,
+            },
+        ),
+    )
+    transport = FakeTransport([raw])
+    proxy = DeepSeekProxy(
+        make_config(thinking_enabled=True, reasoning_effort="xhigh"), transport=transport
+    )
+
+    response = proxy.complete([ChatMessage("user", "quote")], tools=[{"type": "function"}])
+
+    assert transport.requests[0][2]["stream_options"] == {"include_usage": True}
+    assert response.reasoning_content == "The user wants a quote."
+    assert [(c.id, c.name, c.arguments) for c in response.tool_calls] == [
+        ("call_00_Q", "get_quote", {"symbol": "600519.SH"})
+    ]
+    assert response.usage["prompt_cache_miss_tokens"] == 318
+    assert response.usage["completion_tokens_details"] == {"reasoning_tokens": 22}
+
+
 def test_proxy_reassembles_streamed_native_tool_call():
     chunks = [
         {},
         {
-            "model": "deepseek-v4-pro",
+            "model": "deepseek-flash",
             "choices": [
                 {
                     "delta": {
@@ -467,7 +550,7 @@ def test_proxy_reassembles_streamed_native_tool_call():
         + "\n\ndata: [DONE]\n"
     ).encode()
     transport = FakeTransport([raw])
-    proxy = DeepSeekProxy(make_config(model="deepseek-v4-pro"), transport=transport)
+    proxy = DeepSeekProxy(make_config(model="deepseek-flash"), transport=transport)
     result = proxy.complete(
         [ChatMessage("user", "inspect")],
         tools=[{"type": "function"}],
@@ -1103,7 +1186,7 @@ def test_stream_tool_call_complete_at_max_tokens_is_still_delivered():
 
 def test_json_tool_call_cut_at_max_tokens_is_rejected_without_retry():
     payload = {
-        "model": "deepseek-chat",
+        "model": "deepseek-flash",
         "choices": [
             {
                 "message": {
@@ -1159,7 +1242,7 @@ def test_complete_writes_conversation_log(tmp_path: Path):
         [
             {
                 "id": "resp",
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-flash",
                 "choices": [{"message": {"content": '{"action":"hold"}'}}],
                 "usage": {"total_tokens": 12},
             }
@@ -1419,7 +1502,7 @@ def test_invalid_stream_structure_is_not_retried(chunk: object):
 def test_conversation_log_redacts_sensitive_dict_keys(tmp_path: Path):
     payload = {
         "id": "resp-sk-secretvalue123456",
-        "model": "deepseek-v4-flash",
+        "model": "deepseek-flash",
         "choices": [{"message": {"content": '{"action":"hold"}'}}],
         "usage": {"total_tokens": 12, "secret": "usage-secret"},
         "api_key": "plain-secret",
@@ -1453,7 +1536,7 @@ def test_conversation_log_redacts_configured_credential_value_everywhere(
     credential = "opaque-configured-value-4815162342"
     returned_content = f"prefix {credential} suffix"
     payload = {
-        "model": "deepseek-chat",
+        "model": "deepseek-flash",
         "choices": [{"message": {"content": returned_content}}],
         "usage": {
             "total_tokens": 3,
@@ -1665,11 +1748,15 @@ def test_model_factory_reads_deepseek_endpoint_from_fixed_env_key(tmp_path: Path
         "export DEEPSEEK_BASE_URL='https://trusted-deepseek.example.test/v1'\n",
         encoding="utf-8",
     )
-    proxy = build_model_gateway("deepseek-v4-flash", env_file=path, max_tokens=8_000)
+    proxy = build_model_gateway("deepseek-flash", env_file=path, max_tokens=8_000)
     assert isinstance(proxy, DeepSeekProxy)
     assert proxy.config.base_url == "https://trusted-deepseek.example.test/v1"
     assert proxy.config.max_tokens == 8_000
-    assert proxy.config.max_output_tokens is None
+    # What the account's GET /models reports for deepseek-flash.
+    assert proxy.context_window_tokens == 1_048_576
+    assert proxy.config.max_output_tokens == 393_216
+    capped = build_model_gateway("deepseek-flash", env_file=path, max_tokens=500_000)
+    assert capped.config.max_tokens == 393_216
 
 
 def test_local_conversation_log_uses_truthful_provider_path(tmp_path: Path):

@@ -552,14 +552,14 @@ class DefaultsDriftTest(unittest.TestCase):
             },
         )
         moved = {
-            "model": "deepseek-v4-pro",
+            "model": "deepseek-flash",
             "max_replay_years": 7,
             "screen_boards": ("gem", "star"),
             "research_start": "20190701",
         }
         with patch.dict(WEB_CREATE_DEFAULTS, moved):
             after = rendered()
-        self.assertEqual(after["model"], "deepseek-v4-pro")
+        self.assertEqual(after["model"], "deepseek-flash")
         self.assertEqual(after["max_replay_years"], 7)
         self.assertEqual(after["screen_boards"], ["gem", "star"])
         self.assertEqual(after["research_start"], "20190701")

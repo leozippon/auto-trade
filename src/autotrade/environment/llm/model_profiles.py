@@ -49,9 +49,9 @@ _DEEPSEEK_PROFILE = ModelProfile(
     base_url_env="DEEPSEEK_BASE_URL",
     default_base_url="https://api.deepseek.com",
     request_dialect="deepseek",
-    # DeepSeek chat/reasoner models serve a 128K context; the per-generation
-    # output ceiling stays with the provider.
-    context_window_tokens=128_000,
+    # The account's GET /models reports these for deepseek-flash.
+    context_window_tokens=1_048_576,
+    max_output_tokens=393_216,
 )
 _VLLM_PROFILE = ModelProfile(
     provider="vllm",
@@ -136,7 +136,7 @@ def _profile_api_key(
 
 def model_profile(model: str) -> ModelProfile:
     model = canonicalize_model_name(model)
-    if model in _deepseek.SUPPORTED_MODELS:
+    if model in _deepseek.MODEL_CHOICES:
         return _DEEPSEEK_PROFILE
     if model == LOCAL_QWEN_MODEL:
         return _VLLM_PROFILE
@@ -207,6 +207,7 @@ def build_model_gateway(
                     reasoning_effort=reasoning_effort,
                     conversation_log_dir=conversation_log_dir,
                     context_window_tokens=profile.context_window_tokens,
+                    max_output_tokens=profile.max_output_tokens,
                 )
             ),
         )
