@@ -976,7 +976,7 @@ def test_sandbox_strategy_contract_checks_sibling_modules_before_start(tmp_path:
     (tmp_path / "helper.py").write_text("import subprocess\nVALUE = 1\n", encoding="utf-8")
     with (
         patch.object(DockerStrategyExecutor, "_start"),
-        pytest.raises(StrategyLoadError, match="helper.py: strategy imports unsupported module: subprocess"),
+        pytest.raises(StrategyLoadError, match=r"helper\.py: strategy imports unsupported module: subprocess"),
     ):
         DockerStrategyExecutor(strategy)
 
@@ -1818,7 +1818,7 @@ def test_a_worker_killed_while_starting_stays_a_startup_failure(tmp_path: Path):
     strategy = _strategy(tmp_path)
     with (
         patch.object(DockerStrategyExecutor, "_remove_container"),
-        pytest.raises(StrategyExecutionError, match="did not become ready.*exit 137") as error,
+        pytest.raises(StrategyExecutionError, match=r"did not become ready.*exit 137") as error,
     ):
         _started_executor(
             strategy,
@@ -2076,7 +2076,7 @@ def test_a_worker_that_never_becomes_ready_fails_as_a_host_side_error(tmp_path: 
         patch("autotrade.environment.executor.subprocess.Popen", capture),
         pytest.raises(
             StrategyExecutionError,
-            match="did not become ready.*not strategy compute",
+            match=r"did not become ready.*not strategy compute",
         ),
     ):
         _started_executor(

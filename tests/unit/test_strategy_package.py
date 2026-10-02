@@ -234,7 +234,7 @@ def test_a_path_passed_by_keyword_is_read_like_a_positional_one():
             "import numpy as np\ndef generate_orders(context):\n"
             "    np.load(file='/mnt/snapshot/daily.parquet')\n    return []\n"
         )
-    with pytest.raises(StrategyLoadError, match="may not save below context.models_dir"):
+    with pytest.raises(StrategyLoadError, match=r"may not save below context\.models_dir"):
         validate_strategy_source(
             "import numpy as np\ndef fit(context):\n"
             "    np.save(file=context.models_dir + '/w.npy', arr=1)\n"

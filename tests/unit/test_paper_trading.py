@@ -300,7 +300,7 @@ def test_the_book_refuses_orphan_journals_and_foreign_state(tmp_path: Path):
     book = _Book(tmp_path, COUNTER_STRATEGY, sessions=("20260102", *SESSIONS))
     book.root.mkdir()
     (book.root / "orders_20260105.jsonl").write_text("{}\n", encoding="utf-8")
-    with pytest.raises(PaperEngineError, match="state.*missing"):
+    with pytest.raises(PaperEngineError, match=r"state.*missing"):
         book.run("20260105")
     (book.root / "orders_20260105.jsonl").unlink()
     (book.root / ".paper_state.json").write_text(json.dumps({"schema_version": 3}), encoding="utf-8")

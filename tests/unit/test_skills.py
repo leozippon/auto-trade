@@ -258,7 +258,7 @@ def test_tree_validation_rejects_missing_skill_hidden_symlink_binary_and_limits(
     root.mkdir()
     missing = root / "missing-skill"
     missing.mkdir()
-    with pytest.raises(ValueError, match="missing SKILL.md"):
+    with pytest.raises(ValueError, match=r"missing SKILL\.md"):
         validate_skills_tree(root)
     missing.rmdir()
 

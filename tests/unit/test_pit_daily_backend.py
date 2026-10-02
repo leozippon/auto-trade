@@ -2380,7 +2380,7 @@ def test_an_arm_replays_grades_and_records_its_own_benchmark_index(tmp_path: Pat
     )
     # A Validation reports it as the panel's failure, the setup error in its text.
     with pytest.raises(
-        ZeroSkillPanelError, match="NullControlSetupError: .*no section of the benchmark"
+        ZeroSkillPanelError, match=r"NullControlSetupError: .*no section of the benchmark"
     ):
         backend.evaluate(request)
     chmod_tree(snapshot, file_mode=0o644, dir_mode=0o755)
@@ -2415,7 +2415,7 @@ def test_an_arm_replays_grades_and_records_its_own_benchmark_index(tmp_path: Pat
 
 
 def test_an_unknown_benchmark_index_never_reaches_a_replay(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="399905.SZ"):
+    with pytest.raises(ValueError, match=r"399905\.SZ"):
         PITDailyEvaluationBackend(
             tmp_path / "results", execution_mode="trusted", experiment_id="arm", benchmark_index="399905.SZ"
         )

@@ -1118,7 +1118,7 @@ def test_normalize_subagent_thinking_resolves_the_launch_precedence() -> None:
     assert normalize_subagent_thinking("low") == "low"
     assert normalize_subagent_thinking("medium") == "medium"
     assert SUBAGENT_THINKING_LEVELS == ("off", "low", "medium", "xhigh")
-    with pytest.raises(ValueError, match="agent.thinking"):
+    with pytest.raises(ValueError, match=r"agent\.thinking"):
         normalize_subagent_thinking("turbo")
 
 

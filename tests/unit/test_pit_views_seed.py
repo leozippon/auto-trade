@@ -882,7 +882,7 @@ def test_a_seed_without_a_contract_is_refused(tmp_path: Path) -> None:
 
     seed = tmp_path / "seed"
     seed.mkdir()
-    with pytest.raises(ValueError, match="missing provider.json"):
+    with pytest.raises(ValueError, match=r"missing provider\.json"):
         assert_seed_snapshot_config(seed, SnapshotConfig())
 
 

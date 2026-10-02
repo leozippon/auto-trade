@@ -133,7 +133,7 @@ def test_heldout_is_clipped_to_the_release_and_refused_below_what_grading_reads(
         _weekdays("20260615"),
         [],
     ):
-        with pytest.raises(ValueError, match="Held-out|trading days"):
+        with pytest.raises(ValueError, match=r"Held-out|trading days"):
             geometry.heldout(release)
 
 

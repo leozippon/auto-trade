@@ -235,7 +235,7 @@ def test_state_is_read_only_during_generate_orders_in_host(tmp_path: Path):
         "    seen = int(", "    np.save(context.state_dir + '/leak.npy', np.zeros(1))\n    seen = int("
     )
     executor, _state = _trusted(tmp_path, source)
-    with pytest.raises(BacktestError, match="generate_orders failed.*Permission denied"):
+    with pytest.raises(BacktestError, match=r"generate_orders failed.*Permission denied"):
         run_daily_replay(
             daily=_daily(["20240328"]), strategy=executor, schedule=StrategySchedule("day", "18:00")
         )
@@ -449,7 +449,7 @@ def test_fit_timeout_fails_explicitly_and_aborts_the_worker():
     started = time.monotonic()
     with (
         patch.object(executor, "_remove_container") as remove,
-        pytest.raises(StrategyExecutionError, match="strategy fit exceeded 0.05s"),
+        pytest.raises(StrategyExecutionError, match=r"strategy fit exceeded 0\.05s"),
     ):
         executor._roundtrip(
             StrategyContext(
@@ -711,5 +711,5 @@ def test_a_fit_strategy_that_leaves_no_state_fails_the_first_decision(tmp_path: 
     )
     days = ["20240328", "20240329"]
     snapshot, replay = _pit_bundle(tmp_path, days)
-    with pytest.raises(BacktestError, match="generate_orders failed.*missing.npy"):
+    with pytest.raises(BacktestError, match=r"generate_orders failed.*missing\.npy"):
         _evaluate(tmp_path, revision, snapshot, replay, days)
