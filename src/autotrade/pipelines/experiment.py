@@ -42,7 +42,7 @@ from autotrade.environment.replay import (
     run_daily_replay,
 )
 from autotrade.environment.replay.engine import BacktestError
-from autotrade.environment.replay.stats import window_activity
+from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR, window_activity
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
 from autotrade.environment.runtime import agent_trace_path, chmod_tree, utc_now_iso
 from autotrade.environment.strategy import NLQuery
@@ -100,14 +100,17 @@ from .skills import (
     resolve_collected_skills_source,
 )
 from .verdict import (
+    FREEZE_MIN_DSR_PROBABILITY,
     effective_trials,
     forward_mde,
     forward_slice,
     freeze_gate,
     graduation_verdict,
     heldout_slice,
+    information_ratio_bar,
     neutralized_statistics,
     trial_correlation,
+    trial_family_statistics,
 )
 
 # A session deadline override may raise the research deadline above the
@@ -1076,6 +1079,54 @@ def freeze_gate_for(
     return gate
 
 
+def full_span_bar(
+    records: Sequence[Mapping[str, object]],
+    session_rows: Sequence[Mapping[str, object]],
+    *,
+    experiment_dir: str | Path,
+    research_years: int,
+    acceptance: AcceptanceRules | None = None,
+) -> dict[str, object]:
+    """The trial count, effective count and active-IR bar a full-span,
+    non-control nominee faces now, for the rows :func:`freeze_gate_for`
+    refuses before measuring (a sub-span, a control, a hard rule broken).
+
+    The family is the one the gate deflates over (the same rows, fingerprints
+    and lineage); it holds at least the nominee itself. The bar is the gate's
+    ``information_ratio_bar`` at that N_eff over a full research period: the
+    days the arm's full-span Validations measured, or ``TRADING_DAYS_PER_YEAR``
+    per research year before there is one (8 years: 1,952 against the 1,940 a
+    full span measures, a bar about 0.3 % lower). The gate itself is unchanged.
+    """
+
+    rows = fingerprinted(experiment_dir, [*_recorded_steps(records), *session_rows])
+    family = trial_family(rows)
+    representatives: list[Mapping[str, object]] = family["representatives"]  # type: ignore[assignment]
+    _arms, lineage_trials, lineage_series = recorded_lineage(records)
+    statistics = trial_family_statistics(
+        trials=max(len(representatives), 1),
+        offline_trials=family["offline_trials"],  # type: ignore[arg-type]
+        trial_analyses=[_style_analysis(row) for row in representatives],
+        lineage_trials=lineage_trials,
+        lineage_series=lineage_series,
+    )
+    days = max(
+        (_measured_days(row) for row in rows if row.get("span") == FULL_SPAN),
+        default=0,
+    ) or TRADING_DAYS_PER_YEAR * research_years
+    return {
+        "trials": statistics["trials"],
+        "effective_trials": statistics["effective_trials"],
+        "information_ratio_bar": information_ratio_bar(
+            statistics["effective_trials"],  # type: ignore[arg-type]
+            days,
+            acceptance.min_dsr_probability
+            if acceptance is not None
+            else FREEZE_MIN_DSR_PROBABILITY,
+        ),
+    }
+
+
 def lineage_summary(extraction: Mapping[str, object]) -> dict[str, object]:
     """A lineage's own trial count and what it counts as independently, from
     what ``lineage.extract_lineage`` read: the ledger record's figures, and
@@ -1412,6 +1463,7 @@ __all__ = [
     "RollingExperimentPipeline",
     "fingerprinted",
     "freeze_gate_for",
+    "full_span_bar",
     "lineage_ledger_record",
     "lineage_summary",
     "neutralized",

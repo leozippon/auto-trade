@@ -359,8 +359,8 @@ class AcceptanceRules:
                     f"sqrt({verdict.TRADING_DAYS_PER_YEAR} / days), about 0.5 over "
                     "four years. A control "
                     "(control: true in batch_validate) is no trial and can never "
-                    "be nominated. selection_statistics.information_ratio_bar is "
-                    "the IR this asks for now"
+                    "be nominated. selection_statistics.information_ratio_bar, on "
+                    "every row, is the IR this asks of a full-span nominee now"
                 ),
                 "positive_years": (
                     "active neutralized excess > 0 in at least "

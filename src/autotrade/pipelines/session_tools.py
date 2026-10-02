@@ -72,7 +72,12 @@ from .config import (
     StepResult,
     research_span,
 )
-from .experiment import freeze_gate_for, null_control_seed, research_step_record
+from .experiment import (
+    freeze_gate_for,
+    full_span_bar,
+    null_control_seed,
+    research_step_record,
+)
 from .ledger import RESEARCH_STAGE, ExperimentLedger
 from .session_resume import record_step_sidecar
 from .skills import _assert_skills_absent_from_formal
@@ -449,6 +454,16 @@ SELECTION_STATISTICS_NOTE = (
     "provisional: the freeze gate as it would read this node now, over every "
     "strategy the arm has validated so far; the freeze recomputes it"
 )
+# A row the gate refuses before measuring it still shows the bar.
+UNMEASURED_SELECTION_NOTE = (
+    "provisional: the freeze gate measures no nominee on this row (see "
+    "freeze_gate_reasons), so it has no deflated_sharpe_probability. "
+    "information_ratio_bar is the FULL-SPAN bar: the active IR a full-span, "
+    "non-control nominee needs now, at the arm's trials so far (trials, "
+    "effective_trials) and the research period's length. It is not a bar for "
+    "this row, which cannot be nominated as it is; a strategy validated later "
+    "joins the trials and moves it"
+)
 GRADUATION_ACTIVITY_NOTE = (
     "informational, not a freeze-gate condition: this node's research-period "
     "readings of the activity conditions acceptance_rules.graduation.forward "
@@ -506,6 +521,8 @@ class SessionValidations:
         self.steps: list[StepResult] = list(request.steps_before)
         # Candidates reserved so far, which names each result.
         self.candidates_started = 0
+        # The full-span bar at a count of Steps (:meth:`nominee_bar`).
+        self._full_span_bar: tuple[int, dict[str, object]] | None = None
 
     @property
     def replay_years_remaining(self) -> int:
@@ -551,11 +568,7 @@ class SessionValidations:
         nominee = next((row for row in rows if row["step_id"] == node_id), None)
         if nominee is None:
             return {"passed": False, "reasons": ["freeze_needs_a_step_of_this_session"]}
-        rules = (
-            AcceptanceRules.from_record(self.request.acceptance_rules)
-            if self.request.acceptance_rules
-            else None
-        )
+        rules = self.acceptance
         return freeze_gate_for(
             self.ledger.read(),
             rows,
@@ -570,11 +583,48 @@ class SessionValidations:
             years=[(year.start, year.end) for year in self.request.research_years],
         )
 
+    @property
+    def acceptance(self) -> AcceptanceRules | None:
+        """The run's acceptance rules; ``None`` when the request carries none."""
+
+        return (
+            AcceptanceRules.from_record(self.request.acceptance_rules)
+            if self.request.acceptance_rules
+            else None
+        )
+
+    def nominee_bar(self) -> dict[str, object]:
+        """The trials, effective trials and active-IR bar a full-span nominee
+        faces now (``experiment.full_span_bar``), over the same Steps and
+        ledger as :meth:`freeze_gate`. Read once per count of Steps: the rows
+        of one batch share it, and on a long lineage one reading costs seconds.
+        """
+
+        if self._full_span_bar is None or self._full_span_bar[0] != len(self.steps):
+            self._full_span_bar = (
+                len(self.steps),
+                full_span_bar(
+                    self.ledger.read(),
+                    [research_step_record(item) for item in self.steps],
+                    experiment_dir=self.experiment_dir,
+                    research_years=len(self.request.research_years),
+                    acceptance=self.acceptance,
+                ),
+            )
+        return self._full_span_bar[1]
+
     def selection_statistics(self, step: StepResult) -> dict[str, object]:
-        """The provisional freeze-gate reading one candidate row carries."""
+        """The provisional freeze-gate reading one candidate row carries.
+
+        Every row carries the bar a full-span nominee faces now: the gate's own
+        figures where it measured this node, else :meth:`nominee_bar`, with
+        a note that says the bar is not this row's.
+        """
 
         gate = self.freeze_gate(step.step_id)
         dsr = gate.get("deflated_sharpe")
+        measured = isinstance(dsr, Mapping)
+        family = dsr if measured else self.nominee_bar()
         return {
             "freeze_gate_passed": gate["passed"],
             "freeze_gate_reasons": gate["reasons"],
@@ -585,24 +635,20 @@ class SessionValidations:
             "information_ratio": gate.get("information_ratio"),
             "positive_years": gate.get("positive_years"),
             "deflated_sharpe_probability": (
-                dsr.get("deflated_sharpe_probability") if isinstance(dsr, Mapping) else None
+                dsr.get("deflated_sharpe_probability") if measured else None  # type: ignore[union-attr]
             ),
             # M, what it counts as independently, and the IR the gate's DSR
-            # threshold asks for at that count.
-            "trials": dsr.get("trials") if isinstance(dsr, Mapping) else None,
-            "effective_trials": (
-                dsr.get("effective_trials") if isinstance(dsr, Mapping) else None
-            ),
-            "information_ratio_bar": (
-                dsr.get("information_ratio_bar") if isinstance(dsr, Mapping) else None
-            ),
+            # threshold asks of a full-span nominee at that count.
+            "trials": family["trials"],  # type: ignore[index]
+            "effective_trials": family["effective_trials"],  # type: ignore[index]
+            "information_ratio_bar": family["information_ratio_bar"],  # type: ignore[index]
             "full_span_validations": gate.get("full_span_validations"),
             **(
                 {"graduation_activity": self.graduation_activity(step)}
                 if step.span == FULL_SPAN
                 else {}
             ),
-            "note": SELECTION_STATISTICS_NOTE,
+            "note": SELECTION_STATISTICS_NOTE if measured else UNMEASURED_SELECTION_NOTE,
         }
 
     def graduation_activity(self, step: StepResult) -> dict[str, object]:
@@ -1135,7 +1181,11 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "taking a node_id accepts), headline metrics, the per-year return/excess/"
         "neutralized excess/Sharpe of sub_windows, the provisional "
         "selection_statistics (the freeze gate as it would read this node now, "
-        "which the freeze recomputes; a full-span row adds graduation_activity, "
+        "which the freeze recomputes; every row, sub-span and refused rows "
+        "included, carries information_ratio_bar, the active IR a full-span "
+        "non-control nominee needs now, beside trials and effective_trials -- on a "
+        "row the gate does not measure it is that full-span bar, not the row's "
+        "own; a full-span row adds graduation_activity, "
         "its research-period round trips per month and mean gross exposure beside "
         "the graduation's activity thresholds, which gate nothing at a freeze), "
         "and wall seconds; a failed candidate's row "

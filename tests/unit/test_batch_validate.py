@@ -43,6 +43,7 @@ from autotrade.environment.executor import (
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.replay.engine import BacktestError
 from autotrade.environment.replay.null_control import NullControlSetupError
+from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR
 from autotrade.environment.runtime import (
     agent_trace_path,
     utc_now_iso,
@@ -94,8 +95,9 @@ from autotrade.pipelines.session_tools import (
     batch_select_hint,
     session_budget_status,
 )
+from autotrade.pipelines.verdict import information_ratio_bar
 
-PARENT_SOURCE = "def generate_orders(context):\n    return []\n"
+PARENT_SOURCE ="def generate_orders(context):\n    return []\n"
 # A four-year research period, one slot per July-June year.
 YEARS = (
     ("Y1", "20210701", "20220630"),
@@ -1519,6 +1521,54 @@ class BatchValidateRunTest(unittest.TestCase):
                 self.assertTrue(0.0 <= statistics["deflated_sharpe_probability"] <= 1.0)
                 self.assertIn("the freeze recomputes it", statistics["note"])
                 self.assertNotIn("vs_parent", row)
+
+    def test_every_row_shows_the_bar_a_full_span_nominee_faces_now(self) -> None:
+        """A sub-span row and a full-span row a hard rule refuses carry no
+        measured DSR, yet each shows the full-span bar, labelled as such: before
+        any full-span validation at the research period's nominal length, then
+        exactly the bar the gate applies to a full-span nominee."""
+
+        with TemporaryDirectory() as tmp:
+            session = _Session(Path(tmp))
+            session.candidate("a", _strategy("1"))
+            session.candidate("b", _strategy("22"))
+            for row in session.call("a", "b", span="Y1..Y2").value["candidates"]:
+                statistics = row["selection_statistics"]
+                self.assertIn("freeze_needs_full_span_validation", statistics["freeze_gate_reasons"])
+                self.assertIsNone(statistics["deflated_sharpe_probability"])
+                self.assertEqual(statistics["trials"], 2)
+                self.assertEqual(
+                    statistics["information_ratio_bar"],
+                    information_ratio_bar(
+                        statistics["effective_trials"],
+                        TRADING_DAYS_PER_YEAR * len(YEARS),
+                        AcceptanceRules().min_dsr_probability,
+                    ),
+                )
+                self.assertIn("FULL-SPAN bar", statistics["note"])
+                self.assertIn("cannot be nominated as it is", statistics["note"])
+            # The equity drawdown breaks the run's limit on every full span.
+            relaxed = session.backtest.request
+            session.backtest.request = replace(relaxed, acceptance_rules={"max_drawdown": 0.01})
+            session.candidate("c", _strategy("333"))
+            refused = session.call("a", "c").value["candidates"]
+            session.candidate("d", _strategy("4444"))
+            probe = session.call("d", span="Y3").value["candidates"][0]
+            session.backtest.request = relaxed
+            applied = session.backtest.freeze_gate(str(refused[0]["node_id"]))["deflated_sharpe"]
+            for row in (*refused, probe):
+                statistics = row["selection_statistics"]
+                self.assertIsNone(statistics["deflated_sharpe_probability"])
+                self.assertIn("FULL-SPAN bar", statistics["note"])
+            for row in refused:
+                self.assertIn("max_drawdown_above_limit", row["selection_statistics"]["freeze_gate_reasons"])
+                self.assertEqual(row["selection_statistics"]["trials"], 3)
+            # Four strategies now, over the days a full span measured: the
+            # bar the gate applies to a full-span nominee, to the bit.
+            self.assertEqual(
+                {key: probe["selection_statistics"][key] for key in ("trials", "effective_trials", "information_ratio_bar")},
+                {key: applied[key] for key in ("trials", "effective_trials", "information_ratio_bar")},
+            )
 
     def test_a_full_span_row_reads_the_graduation_activity_beside_its_lines(
         self,
