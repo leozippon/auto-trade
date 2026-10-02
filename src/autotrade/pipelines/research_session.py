@@ -950,11 +950,31 @@ class LLMResearchDeveloper:
             manifest=manifest,
             experiment_dir=self.experiment_dir,
         )
+        def check_for(directory: Path) -> ModificationCheckTool:
+            """Same static gate as the live working copy, pointed at a strategy
+            directory: one constraint set for every artifact this session
+            smokes or validates."""
+
+            return ModificationCheckTool(
+                directory,
+                parent_dir=source,
+                models_dir=models_dir,
+                parent_models_dir=source_models,
+                constraints=request.modification_constraints,
+                readonly_baseline=seeded_readonly,
+                # Restored only in the tree the host seeded. A candidate
+                # directory is the Agent's own layout of the artifact it asks
+                # to replay: the file is supplied there when absent, and one
+                # carrying different bytes is refused rather than silently
+                # corrected.
+                readonly_seed=source if directory == output_dir else None,
+            )
+
         smoke = SmokeBacktestTool(
             request=request,
-            output_dir=output_dir,
+            workspace=safe,
             models_dir=models_dir,
-            modification_check=modification,
+            modification_check_factory=check_for,
             evaluator=self.evaluator,
             schedule=self.schedule,
             broker_profile=self.broker_profile,
@@ -990,23 +1010,7 @@ class LLMResearchDeveloper:
             BatchValidateTool(
                 backtest=backtest,
                 workspace=safe,
-                # Same static gate as the live working copy, pointed at the
-                # candidate directory: one constraint set for every formal
-                # artifact this session produces.
-                modification_check_factory=lambda directory: ModificationCheckTool(
-                    directory,
-                    parent_dir=source,
-                    models_dir=models_dir,
-                    parent_models_dir=source_models,
-                    constraints=request.modification_constraints,
-                    readonly_baseline=seeded_readonly,
-                    # Restored only in the tree the host seeded. A
-                    # candidate directory is the Agent's own layout of the
-                    # artifact it asks to freeze: the file is supplied
-                    # there when absent, and one carrying different bytes
-                    # is refused rather than silently corrected.
-                    readonly_seed=source if directory == output_dir else None,
-                ),
+                modification_check_factory=check_for,
                 trace_emit=trace.emit,
             ),
         ]

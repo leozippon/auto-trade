@@ -16,12 +16,14 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from autotrade.environment.artifacts import readonly_baseline
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.environment.tools import ToolError
 from autotrade.environment.tools.modification_check import ModificationCheckTool
+from autotrade.environment.tools.workspace import SafeWorkspace
 from autotrade.pipelines.config import (
     ReplaySpan,
     ResearchSessionRequest,
@@ -56,6 +58,8 @@ SUBSCRIPT_STRATEGY = """def generate_orders(context):
     return []
 """
 
+TEMPLATE_README = "# Strategy output contract\n\nRead-only template text.\n"
+
 
 def _tool(
     root: Path,
@@ -78,6 +82,7 @@ def _tool(
     output = root / "output"
     output.mkdir(parents=True)
     (output / "main.py").write_text(strategy, encoding="utf-8")
+    (output / "README.md").write_text(TEMPLATE_README, encoding="utf-8")
     models = root / "models"
     models.mkdir()
     snapshot = SnapshotBundle("snap", str(daily), str(daily))
@@ -93,11 +98,19 @@ def _tool(
         deadline_seconds=1200.0,
         benchmark_index=DEFAULT_BENCHMARK_INDEX,
     )
+    seeded = readonly_baseline(output)
     return SmokeBacktestTool(
         request=request,
-        output_dir=output,
+        # The workspace root holds output/ and models/, as in a session.
+        workspace=SafeWorkspace(root),
         models_dir=models,
-        modification_check=check or ModificationCheckTool(output, models_dir=models),
+        modification_check_factory=(
+            (lambda _directory: check)
+            if check is not None
+            else lambda directory: ModificationCheckTool(
+                directory, models_dir=models, readonly_baseline=seeded
+            )
+        ),
         evaluator=evaluator
         or LocalDailyEvaluationBackend(
             daily, root / "results", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX
@@ -468,3 +481,54 @@ def test_a_failed_rehearsal_still_reports_what_it_was_using(tmp_path: Path) -> N
     plain = tmp_path / "plain"
     plain.mkdir()
     assert "resources" not in _tool(plain, WORKING_STRATEGY).invoke({"days": 1}).value
+
+
+def test_a_candidate_directory_is_smoked_by_its_path(tmp_path: Path) -> None:
+    """Sessions keep several candidates under ``candidates/<name>/``; smoking
+    one must not mean copying it over the working copy. The path is the one a
+    batch_validate candidate names, and the read-only template is supplied the
+    same way."""
+
+    tool = _tool(tmp_path, SUBSCRIPT_STRATEGY)
+    candidate = tmp_path / "candidates" / "good"
+    candidate.mkdir(parents=True)
+    (candidate / "main.py").write_text(WORKING_STRATEGY, encoding="utf-8")
+
+    value = tool.invoke({"days": 2, "path": "candidates/good"}).value
+
+    assert value["status"] == "ok", value
+    assert value["path"] == "candidates/good"
+    assert (candidate / "README.md").read_text(encoding="utf-8") == TEMPLATE_README
+    # The working copy was neither replayed nor touched; by default it is.
+    assert (tmp_path / "output" / "main.py").read_text(encoding="utf-8") == SUBSCRIPT_STRATEGY
+    default = tool.invoke({"days": 1}).value
+    assert (default["status"], default["path"]) == ("failed", "output")
+    assert "not subscriptable" in str(default["error"])
+    # The working copy named outright is the same thing as the default.
+    assert tool.invoke({"days": 1, "path": "output"}).value["status"] == "failed"
+    assert "path=\"candidates/value\"" in SmokeBacktestTool.spec.description
+
+
+def test_a_smoked_path_is_held_to_the_batch_candidate_rules(tmp_path: Path) -> None:
+    tool = _tool(tmp_path, WORKING_STRATEGY)
+    for reserved in ("models", "."):
+        with pytest.raises(ToolError, match="reserved workspace root") as caught:
+            tool.invoke({"path": reserved})
+        assert caught.value.error_type == "path_error"
+    with pytest.raises(ToolError, match="stay within the workspace"):
+        tool.invoke({"path": "../output"})
+    with pytest.raises(ToolError):
+        tool.invoke({"path": "candidates/missing"})
+    with pytest.raises(ToolError, match="non-empty string"):
+        tool.invoke({"path": 7})
+    with pytest.raises(ToolError, match="exceeds 200 characters"):
+        tool.invoke({"path": "c" * 201})
+    # A candidate carrying its own edit of the read-only contract is refused,
+    # not corrected: only the host-seeded working copy is restored.
+    edited = tmp_path / "candidates" / "edited"
+    edited.mkdir(parents=True)
+    (edited / "main.py").write_text(WORKING_STRATEGY, encoding="utf-8")
+    (edited / "README.md").write_text("# my own contract\n", encoding="utf-8")
+    with pytest.raises(ToolError, match=r"README\.md"):
+        tool.invoke({"path": "candidates/edited"})
+    assert (edited / "README.md").read_text(encoding="utf-8") == "# my own contract\n"

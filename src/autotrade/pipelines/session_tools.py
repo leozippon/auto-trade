@@ -95,12 +95,77 @@ def _public_validation_error(exc: Exception) -> str:
     return f"daily Validation failed: {_public_error_text(exc)}"
 
 
+# A strategy directory a replay tool takes: ``output`` itself -- the working
+# copy as it stands -- or a workspace directory laid out like it, such as
+# ``candidates/<name>``. The other workspace roots are the working copy's own
+# trees or not strategy trees at all. ``smoke_backtest`` and ``batch_validate``
+# resolve a path through :func:`strategy_directory` and give it the read-only
+# template through :func:`supply_readonly_files`, so a directory one accepts is
+# one the other accepts. Every replay is a snapshot verified against the bytes
+# its check approved, so later edits cannot reach it.
+STRATEGY_PATH_MAX_CHARS = 200
+_RESERVED_WORKSPACE_ROOTS = frozenset({"output", "models", "inputs", "skills", "refs"})
+_WORKING_COPY = "output"
+
+
+def strategy_directory(workspace: SafeWorkspace, path: str, *, who: str) -> Path:
+    """The existing workspace directory ``path`` names, refused at a reserved root."""
+
+    directory = workspace.resolve(path, must_exist=True, directory=True)
+    if directory == workspace.root or (
+        PurePosixPath(path).parts[0] in _RESERVED_WORKSPACE_ROOTS
+        and directory != workspace.root / _WORKING_COPY
+    ):
+        raise ToolError(
+            f"{who} points at a reserved workspace root ({path}); pass output itself "
+            "or copy the tree to its own directory, e.g. candidates/<name>/",
+            error_type="path_error",
+            blocked_target=path,
+        )
+    return directory
+
+
+def supply_readonly_files(
+    output_dir: Path, directory: Path, *, who: str, path: str
+) -> None:
+    """Give a strategy directory the read-only template files it did not write.
+
+    ``README.md`` is part of every formal artifact but carries no strategy
+    content and the Agent may not edit it, so a directory laid out from its
+    strategy modules alone would be refused for "modifying" a file it never
+    touched. The working copy's own read-only files are copied in where absent;
+    a directory that carries a different one is still refused by
+    ``modification_check``, which restores only the working copy the host
+    itself seeded. Only the read-only template names are touched -- never a
+    sibling module of the package.
+    """
+
+    for name in READONLY_FILES:
+        source = output_dir / name
+        target = directory / name
+        if not source.is_file() or target.exists():
+            continue
+        try:
+            shutil.copyfile(source, target)
+        except PermissionError as exc:
+            # A directory copied out of a read-only artifact tree keeps mode
+            # 0444/0555, and the template cannot land in it. Say so with the
+            # remedy instead of failing as an unhandled host error.
+            raise ToolError(
+                f"{who} is not writable, so the read-only template {name} cannot "
+                f"be supplied: {_public_error_text(exc)}",
+                error_type="permission_denied",
+                blocked_target=path,
+            ) from exc
+
+
 SMOKE_BACKTEST_DEFAULT_DAYS = 3
 SMOKE_BACKTEST_MAX_DAYS = 5
 
 
 class SmokeBacktestTool(SessionTimeBudgetAware):
-    """Run the CURRENT working copy through the real replay for a few days.
+    """Run a strategy directory (the working copy by default) through the real
+    replay for a few days.
 
     Hand-rolled shell smoke tests are what let seven of nine official backtests
     die on day one: a script that sets ``ctx.asof_dir = "/mnt/snapshot"`` and
@@ -130,7 +195,10 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
 
     spec = ToolSpec(
         "smoke_backtest",
-        "UNOFFICIAL smoke run of the CURRENT output/ over a few trading days of "
+        "UNOFFICIAL smoke run of the CURRENT output/ -- or of the candidate "
+        "directory path names, given exactly as a batch_validate candidate's path "
+        "(path=\"candidates/value\"; same rules, and the read-only README.md is "
+        "supplied the same way) -- over a few trading days of "
         "the research period, on the real replay path: real rolling "
         "as-of view (each context.asof_dir/<domain>/ is a DIRECTORY of parquet "
         "parts, read it with pd.read_parquet(directory)), real AccountSnapshot "
@@ -178,21 +246,30 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
                         "date outside the research period is refused."
                     ),
                 },
+                "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": STRATEGY_PATH_MAX_CHARS,
+                    "description": (
+                        "Workspace-relative directory laid out like output/, "
+                        "e.g. candidates/value (default output)."
+                    ),
+                },
             },
             "required": [],
             "additionalProperties": False,
         },
         mutating=True,
-        example={"days": 2, "start": "20241008"},
+        example={"days": 2, "start": "20241008", "path": "candidates/value"},
     )
 
     def __init__(
         self,
         *,
         request: ResearchSessionRequest,
-        output_dir: Path,
+        workspace: SafeWorkspace,
         models_dir: Path,
-        modification_check: ModificationCheckTool,
+        modification_check_factory: Callable[[Path], ModificationCheckTool],
         evaluator: EvaluationBackend,
         schedule,
         broker_profile,
@@ -200,9 +277,11 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
         time_budget: InferenceTimeBudget,
     ) -> None:
         self.request = request
-        self.output_dir = output_dir
+        self.workspace = workspace
+        self.output_dir = workspace.root / _WORKING_COPY
         self.models_dir = models_dir
-        self.modification_check = modification_check
+        # The batch's own static gate, pointed at the directory smoked.
+        self.modification_check_factory = modification_check_factory
         self.evaluator = evaluator
         self.schedule = schedule
         self.broker_profile = broker_profile
@@ -219,35 +298,41 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
         # clock; the replay itself does not.
         days = self._days(arguments)
         start = self._start(arguments)
+        path, directory = self._directory(arguments)
         with self.time_budget.pause():
-            return self._invoke_exempt(days, start)
+            return self._invoke_exempt(days, start, path, directory)
 
-    def _invoke_exempt(self, days: int, start: str | None = None) -> ToolResult:
+    def _invoke_exempt(
+        self, days: int, start: str | None, path: str, directory: Path
+    ) -> ToolResult:
         self.runs += 1
-        check = self.modification_check.invoke({})
+        supply_readonly_files(
+            self.output_dir, directory, who=f"smoke_backtest path {path}", path=path
+        )
+        check = self.modification_check_factory(directory).invoke({})
         if not check.ok:
             # Same static gate as a Validation candidate, so a green smoke run
             # means the gate will not be what fails the official one.
             raise ToolError(f"smoke_backtest blocked by modification_check: {check.error}")
         # The rehearsal replays an immutable snapshot outside the Agent's mounts,
         # not the live tree: it can neither be frozen nor leave anything behind
-        # in output/ (a trusted-mode run imports main.py and would drop
-        # __pycache__ into the working copy, which the next modification_check
-        # would reject), and the Agent's own writes during the run cannot reach
-        # the bytes being replayed.
+        # in the directory (a trusted-mode run imports main.py and would drop
+        # __pycache__ into it, which the next modification_check would
+        # reject), and the Agent's own writes during the run cannot reach the
+        # bytes being replayed.
         scratch = self._scratch_dir()
         evaluation = None
         try:
             models_source = self.models_dir if self.models_dir.is_dir() else None
             fingerprint = copy_artifact_snapshot(
-                self.output_dir,
+                directory,
                 models_source,
                 dest_output=scratch / "output",
                 dest_models=scratch / "models",
             )
             if fingerprint != check.value["fingerprint"]:
                 raise ArtifactSnapshotUnstable(
-                    "output/ changed between modification_check and the smoke snapshot"
+                    f"{path}/ changed between modification_check and the smoke snapshot"
                 )
             revision = ArtifactRevision(
                 "smoke",
@@ -268,6 +353,7 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
                 True,
                 value={
                     "status": "failed",
+                    "path": path,
                     "days_requested": days,
                     "official": False,
                     "counts_against_replay_budget": False,
@@ -288,7 +374,8 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
         result_dir = Path(evaluation.result_ref).parent
         try:
             return ToolResult(
-                True, value=self._report(evaluation, result_dir, days, start)
+                True,
+                value={"path": path, **self._report(evaluation, result_dir, days, start)},
             )
         finally:
             # A smoke run leaves no result behind for the ledger or the Agent to
@@ -309,6 +396,26 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
                 f"smoke_backtest days must be between 1 and {SMOKE_BACKTEST_MAX_DAYS}"
             )
         return raw
+
+    def _directory(self, arguments: Mapping[str, object]) -> tuple[str, Path]:
+        """The strategy directory to smoke, under the rules a batch candidate's
+        path follows (:func:`strategy_directory`); ``output`` by default."""
+
+        raw = arguments.get("path", _WORKING_COPY)
+        if not isinstance(raw, str) or not raw.strip():
+            raise ToolError(
+                "smoke_backtest path must be a non-empty string",
+                error_type="schema_error",
+                blocked_target="path",
+            )
+        path = raw.strip()
+        if len(path) > STRATEGY_PATH_MAX_CHARS:
+            raise ToolError(
+                f"smoke_backtest path exceeds {STRATEGY_PATH_MAX_CHARS} characters",
+                error_type="schema_error",
+                blocked_target="path",
+            )
+        return path, strategy_directory(self.workspace, path, who="smoke_backtest path")
 
     def _start(self, arguments: Mapping[str, object]) -> str | None:
         """The probe date, refused unless it is inside the research period.
@@ -948,17 +1055,10 @@ BATCH_NAME_MAX_CHARS = 40
 # every other Agent-written justification, by what one such statement needs
 # rather than by what one line is.
 BATCH_HYPOTHESIS_MAX_CHARS = AGENT_JUSTIFICATION_MAX_CHARS
-BATCH_PATH_MAX_CHARS = 200
 # A declared offline screen is a count of candidate configurations; beyond
 # this the freeze gate's bar already exceeds any IR on record (about 2.5 over
 # four years), so a larger figure is a typo, not a screen.
 BATCH_OFFLINE_TRIALS_MAX = 10_000
-# Workspace roots a candidate may not sit under: they are the working copy's
-# own trees or not strategy trees at all. ``output`` itself is a valid path --
-# the working copy validated as it stands; every revision is a snapshot
-# verified against the bytes its check approved, so later edits cannot reach it.
-_BATCH_RESERVED_ROOTS = frozenset({"output", "models", "inputs", "skills", "refs"})
-_BATCH_WORKING_COPY = "output"
 # Repeated identical rejections. A refused batch is free by design — nothing is
 # committed and no slot is spent — which is also why nothing bounded the retry
 # loop: one audited session spent 3.89 h of 10.17 h on 128 consecutive
@@ -1278,7 +1378,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
                             "path": {
                                 "type": "string",
                                 "minLength": 1,
-                                "maxLength": BATCH_PATH_MAX_CHARS,
+                                "maxLength": STRATEGY_PATH_MAX_CHARS,
                                 "description": (
                                     "Workspace-relative directory laid out "
                                     "like output/, e.g. candidates/value."
@@ -1374,7 +1474,13 @@ class BatchValidateTool(SessionTimeBudgetAware):
             span = self.backtest.span(arguments.get("span", FULL_SPAN))
             offline_trials = _batch_offline_trials(arguments)
             candidates = self._parse(arguments)
-            self._supply_readonly_files(candidates)
+            for candidate in candidates:
+                supply_readonly_files(
+                    self.backtest.output_dir,
+                    candidate.directory,
+                    who=f"candidate {candidate.name} ({candidate.path})",
+                    path=candidate.path,
+                )
             checks = self._precheck(candidates)
         except ToolError as exc:
             escalated = self._rejected(exc)
@@ -1543,7 +1649,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
             hypothesis = _batch_text(
                 item, "hypothesis", index, BATCH_HYPOTHESIS_MAX_CHARS
             )
-            path = _batch_text(item, "path", index, BATCH_PATH_MAX_CHARS)
+            path = _batch_text(item, "path", index, STRATEGY_PATH_MAX_CHARS)
             control = item.get("control")
             if not isinstance(control, bool):
                 raise ToolError(
@@ -1560,18 +1666,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
                     blocked_target=name,
                 )
             names.add(name)
-            directory = self.workspace.resolve(path, must_exist=True, directory=True)
-            if directory == self.workspace.root or (
-                PurePosixPath(path).parts[0] in _BATCH_RESERVED_ROOTS
-                and directory != self.workspace.root / _BATCH_WORKING_COPY
-            ):
-                raise ToolError(
-                    f"candidate {name} points at a reserved workspace root "
-                    f"({path}); pass output itself or copy the tree to its own "
-                    "directory, e.g. candidates/<name>/",
-                    error_type="path_error",
-                    blocked_target=path,
-                )
+            directory = strategy_directory(self.workspace, path, who=f"candidate {name}")
             if str(directory) in directories:
                 raise ToolError(
                     f"duplicate candidate path: {path}",
@@ -1581,40 +1676,6 @@ class BatchValidateTool(SessionTimeBudgetAware):
             directories.add(str(directory))
             parsed.append(_BatchCandidate(name, hypothesis, path, directory, control))
         return parsed
-
-    def _supply_readonly_files(self, candidates: Sequence[_BatchCandidate]) -> None:
-        """Give each candidate the read-only template files it did not write.
-
-        ``README.md`` is part of every formal artifact but carries no strategy
-        content and the Agent may not edit it, so a candidate laid out from
-        its strategy modules alone would be refused for "modifying" a file it
-        never touched. The working copy's own read-only files are copied in
-        where absent; a candidate that carries a different one is still
-        refused by ``modification_check``, which restores only the working copy
-        the host itself seeded. Only the read-only template names are touched
-        — never a sibling module of the package.
-        """
-
-        for candidate in candidates:
-            for name in READONLY_FILES:
-                source = self.backtest.output_dir / name
-                target = candidate.directory / name
-                if not source.is_file() or target.exists():
-                    continue
-                try:
-                    shutil.copyfile(source, target)
-                except PermissionError as exc:
-                    # A candidate directory copied out of a read-only artifact
-                    # tree keeps mode 0444/0555, and the template cannot land
-                    # in it. Say so with the remedy instead of failing as an
-                    # unhandled host error.
-                    raise ToolError(
-                        f"candidate {candidate.name} ({candidate.path}) is not "
-                        f"writable, so the read-only template {name} cannot be "
-                        f"supplied: {_public_error_text(exc)}",
-                        error_type="permission_denied",
-                        blocked_target=candidate.path,
-                    ) from exc
 
     def _precheck(self, candidates: Sequence[_BatchCandidate]) -> list[dict[str, object]]:
         """Static gate for every candidate, plus the batch-only rule that no
