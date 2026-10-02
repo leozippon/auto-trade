@@ -93,7 +93,6 @@ from .ledger import (
 from .lineage import extract_lineage, lineage_arm_ids
 from .local_backend import (
     DeterministicBaselineDeveloper,
-    LLMResearchDeveloper,
     LocalDailyEvaluationBackend,
     LocalDailySnapshotProvider,
 )
@@ -103,6 +102,7 @@ from .pit_backend import (
     required_release_raw_datasets,
 )
 from .pit_views_seed import assert_seed_snapshot_config
+from .research_session import LLMResearchDeveloper
 from .skills import latest_skills_snapshot, resolve_operating_memory
 
 # Knobs no longer read by anything. They stay accepted, and only accepted, so

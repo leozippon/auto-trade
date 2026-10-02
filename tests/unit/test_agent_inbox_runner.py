@@ -455,7 +455,7 @@ def test_user_message_trace_projects_into_a_user_block() -> None:
 
 
 def test_the_research_session_backend_binds_its_inbox_hook() -> None:
-    source = Path("src/autotrade/pipelines/local_backend.py").read_text(
+    source = Path("src/autotrade/pipelines/research_session.py").read_text(
         encoding="utf-8"
     )
     assert source.count("inbox=bind_session_inbox(") == 1

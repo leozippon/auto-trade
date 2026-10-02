@@ -335,7 +335,7 @@ def test_the_facts_place_every_read_root_in_the_shell_filesystem() -> None:
 def test_an_early_research_year_does_not_advertise_history_before_the_store() -> None:
     from types import SimpleNamespace
 
-    from autotrade.pipelines.local_backend import research_geometry_record
+    from autotrade.pipelines.research_session import research_geometry_record
 
     record = research_geometry_record(
         [SimpleNamespace(label="Y1", start="20170701", end="20180630")],

@@ -45,7 +45,7 @@ from autotrade.pipelines.config import (
     SnapshotBundle,
 )
 from autotrade.pipelines.ledger import ExperimentLedger
-from autotrade.pipelines.local_backend import (
+from autotrade.pipelines.research_session import (
     SessionBudgetLLM,
     SessionCallBudget,
     session_role_quotas,

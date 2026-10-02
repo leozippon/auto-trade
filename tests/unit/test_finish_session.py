@@ -26,7 +26,7 @@ from autotrade.environment.tools.finish_session import (
 )
 from autotrade.environment.tools.step_rollback import StepRollbackTool
 from autotrade.pipelines.config import SESSION_OUTCOMES
-from autotrade.pipelines.local_backend import _session_outcome
+from autotrade.pipelines.research_session import _session_outcome
 
 SESSION = "session_ref_ab"
 RUN = "run_x"

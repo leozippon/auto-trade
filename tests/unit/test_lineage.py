@@ -29,7 +29,7 @@ from autotrade.pipelines.lineage import (
     lineage_arm_ids,
     write_lineage,
 )
-from autotrade.pipelines.local_backend import arm_record
+from autotrade.pipelines.research_session import arm_record
 
 RESEARCH_START, RESEARCH_END = "20210701", "20250630"
 DAYS = [day.strftime("%Y%m%d") for day in pd.bdate_range(RESEARCH_START, RESEARCH_END)]

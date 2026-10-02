@@ -51,7 +51,7 @@ from autotrade.environment.tools import (
     ToolSpec,
     WriteFileTool,
 )
-from autotrade.pipelines.local_backend import SessionBudgetLLM, SessionCallBudget
+from autotrade.pipelines.research_session import SessionBudgetLLM, SessionCallBudget
 
 
 def _passing_gate(node_id: str) -> dict[str, object]:
@@ -1445,7 +1445,7 @@ def _all_registrable_tool_names() -> set[str]:
         SmokeBacktestTool,
     )
 
-    # The backtest tools are constructed per fold in local_backend rather than
+    # The backtest tools are constructed per session in research_session rather than
     # exported from the tools package, so read their names off the classes: a
     # rename must not silently drop one from this set.
     names = {

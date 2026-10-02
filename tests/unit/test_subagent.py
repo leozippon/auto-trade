@@ -68,7 +68,7 @@ from autotrade.environment.tools import (
     WriteFileTool,
 )
 from autotrade.environment.tools.base import SessionInterrupt
-from autotrade.pipelines.local_backend import (
+from autotrade.pipelines.research_session import (
     SessionBudgetLLM,
     SessionCallBudget,
     build_subagent_tools,

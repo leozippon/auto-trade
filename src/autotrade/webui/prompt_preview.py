@@ -128,7 +128,7 @@ def _research_prompt(
     resource_override: object,
 ) -> str:
     from autotrade.pipelines.experiment import _session_budgets, lineage_ledger_record
-    from autotrade.pipelines.local_backend import (
+    from autotrade.pipelines.research_session import (
         arm_record,
         research_geometry_record,
         session_fact_blocks,

@@ -19,7 +19,7 @@ from autotrade.environment.tools.base import ToolError
 from autotrade.environment.tools.files import EditFileTool
 from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.environment.tools.workspace import SafeWorkspace
-from autotrade.pipelines.local_backend import (
+from autotrade.pipelines.research_session import (
     install_workspace_reference,
     seed_output_from_starter,
     session_workspace_map,

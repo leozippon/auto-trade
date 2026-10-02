@@ -759,7 +759,7 @@ def test_a_resume_without_the_interrupted_workspace_fails_the_attempt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synthetic_provider
 ):
     from autotrade.environment.llm import ProviderResponse, ToolCall
-    from autotrade.pipelines.local_backend import _remove_mounted_tree
+    from autotrade.pipelines.research_session import _remove_mounted_tree
     from tests.unit.test_interactive_worker_local import _NominatingLLM, _NoShellRunner
 
     repo, experiment = make_arm(tmp_path, developer_mode="llm", max_replay_years=2, session_max_attempts=1)
@@ -793,7 +793,7 @@ def test_attempts_that_fail_before_the_workspace_is_seeded_leave_a_fresh_start(
 
     from autotrade.agent.prompts import SESSION_DEFAULT_INSTRUCTION
     from autotrade.environment.llm import ProviderResponse, ToolCall
-    from autotrade.pipelines import local_backend
+    from autotrade.pipelines import research_session
     from tests.unit.test_interactive_worker_local import (
         VALIDATE_WORKING_COPY,
         _NominatingLLM,
@@ -823,13 +823,13 @@ def test_attempts_that_fail_before_the_workspace_is_seeded_leave_a_fresh_start(
     assert not session_root.exists()
     monkeypatch.setattr(pipeline, "research_inputs", research_inputs)
 
-    copy_artifact = local_backend.copy_artifact
-    monkeypatch.setattr(local_backend, "copy_artifact", interrupted)
+    copy_artifact = research_session.copy_artifact
+    monkeypatch.setattr(research_session, "copy_artifact", interrupted)
     with pytest.raises(SystemExit):
         run(_NominatingLLM([]))
     workspace = session_root / "agent" / "workspace"
     assert workspace.is_dir() and not (workspace / "output" / "main.py").exists()
-    monkeypatch.setattr(local_backend, "copy_artifact", copy_artifact)
+    monkeypatch.setattr(research_session, "copy_artifact", copy_artifact)
 
     reason = "neutralized excess is negative in three of four research years; the null percentile is 0.48"
     llm = _NominatingLLM(

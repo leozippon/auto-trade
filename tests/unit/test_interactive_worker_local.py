@@ -34,7 +34,7 @@ from autotrade.pipelines.hitl_state import (
 )
 from autotrade.pipelines.interactive import InteractiveExperimentRunner
 from autotrade.pipelines.ledger import ExperimentLedger
-from autotrade.pipelines.local_backend import SessionBudgetLLM, SessionCallBudget
+from autotrade.pipelines.research_session import SessionBudgetLLM, SessionCallBudget
 from autotrade.pipelines.worker import (
     NL_REASONING_EFFORT,
     load_worker_options,
