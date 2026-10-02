@@ -43,7 +43,10 @@ from typing import Any, Literal
 import numpy as np
 
 from autotrade.environment.replay.null_control import PANEL_DRAWS
-from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR, _max_drawdown
+from autotrade.environment.replay.stats import (
+    TRADING_DAYS_PER_YEAR,
+    compounded_drawdown,
+)
 from autotrade.environment.replay.style import (
     _series_pairs,
     active_analysis,
@@ -657,9 +660,8 @@ def _bootstrap_lower_bound(
 def _max_slice_drawdown(analysis: Mapping[str, object], start: str, end: str) -> float:
     """Peak-to-trough loss inside the slice, measured from the equity it opened at."""
 
-    returns = [value for _date_text, value in _strategy_returns(analysis, start, end)]
-    return _max_drawdown(
-        1.0, np.cumprod(1.0 + np.asarray(returns, dtype=float)).tolist()
+    return compounded_drawdown(
+        value for _date_text, value in _strategy_returns(analysis, start, end)
     )
 
 

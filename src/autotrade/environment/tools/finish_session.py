@@ -347,6 +347,8 @@ def _gate_record(gate: Mapping[str, object]) -> dict[str, object]:
         "full_span_validations": gate.get("full_span_validations"),
         "information_ratio": gate.get("information_ratio"),
         "neutralized_excess": gate.get("neutralized_excess"),
+        "positive_years": gate.get("positive_years"),
+        "active_max_drawdown": gate.get("active_max_drawdown"),
         "unavailable_reason": dsr.get("unavailable_reason"),
         "thresholds": gate.get("thresholds"),
     }
@@ -364,6 +366,8 @@ def _gate_numbers(gate: Mapping[str, object]) -> str:
             "full_span_validations",
             "information_ratio",
             "information_ratio_bar",
+            "positive_years",
+            "active_max_drawdown",
         )
         if name in record
     ]

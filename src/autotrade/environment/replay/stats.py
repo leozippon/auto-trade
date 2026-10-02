@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date
@@ -603,6 +603,22 @@ def _max_drawdown(opening: float, equities: Sequence[float]) -> float:
         if peak > 0:
             worst = max(worst, (peak - equity) / peak)
     return worst
+
+
+def compounded_drawdown(returns: Iterable[float]) -> float:
+    """Peak-to-trough loss of the equity a daily return series compounds to from 1.
+
+    The one drawdown of a return series: the freeze gate and the verdicts grade
+    the active series by it, and a formal result reports the same figure as
+    ``benchmark.active_max_drawdown``.
+    """
+
+    equity = 1.0
+    equities: list[float] = []
+    for value in returns:
+        equity *= 1.0 + value
+        equities.append(equity)
+    return _max_drawdown(1.0, equities)
 
 
 def _round(value: float) -> float:

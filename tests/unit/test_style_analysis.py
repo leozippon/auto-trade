@@ -674,7 +674,8 @@ def test_the_sidecar_carries_the_panel_and_the_active_figures_the_verdict_grades
     series, and the figures the Agent reads off it are the ones the verdict
     measures: same regression, same tracking error, on strategy minus panel."""
     from autotrade.environment.replay.stats import attach_sub_window_benchmark
-    from autotrade.pipelines.verdict import neutralized_statistics
+    from autotrade.environment.replay.style import active_analysis
+    from autotrade.pipelines.verdict import freeze_gate, neutralized_statistics
 
     rng = np.random.default_rng(7)
     days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2024-01-02", periods=60)]
@@ -740,12 +741,25 @@ def test_the_sidecar_carries_the_panel_and_the_active_figures_the_verdict_grades
     assert compact["panel_neutralized_excess"] == graded["panel_neutralized_excess"][
         "neutralized_excess_return"
     ]
+    # The active drawdown the freeze gate holds to its limit is the one the
+    # Agent reads: two sessions rebuilt it from proxies because no row had it.
+    gate = freeze_gate(graded, trials=1, full_span_validations=2)
+    assert compact["active_max_drawdown"] == gate["active_max_drawdown"]
+    active_curve = np.concatenate(
+        [[1.0], np.cumprod(1.0 + np.asarray(
+            [value for _day, value in active_analysis(graded)["strategy_daily"]]
+        ))]
+    )
+    expected = float(np.max(1.0 - active_curve / np.maximum.accumulate(active_curve)))
+    assert expected > 0.0
+    assert compact["active_max_drawdown"] == pytest.approx(expected, abs=1e-12)
     # A replay without a panel states none of it, and nothing else moved.
     unpanelled = benchmark_summary_block(bare)
     assert set(compact) - set(unpanelled) == {
         "active_neutralized_excess",
         "active_tracking_error",
         "active_information_ratio",
+        "active_max_drawdown",
         "panel_neutralized_excess",
         "panel_draws",
     }

@@ -69,9 +69,14 @@ class _Gate:
             }
         return {
             "passed": False,
-            "reasons": ["freeze_deflated_sharpe_below_threshold"],
+            "reasons": [
+                "freeze_deflated_sharpe_below_threshold",
+                "freeze_active_drawdown_exceeded",
+            ],
             "full_span_validations": 2,
             "information_ratio": 0.2,
+            "positive_years": 5,
+            "active_max_drawdown": 0.369,
             "deflated_sharpe": {"deflated_sharpe_probability": 0.12, "trials": 5},
         }
 
@@ -118,11 +123,14 @@ def test_a_nomination_the_gate_rejects_is_refused_with_its_reasons_and_numbers(t
     assert refused.value.error_type == "freeze_gate_refused"
     assert "freeze_deflated_sharpe_below_threshold" in message
     assert "deflated_sharpe_probability=0.12" in message and "trials=5" in message
+    # Every reason comes with the number it was refused on.
+    assert "active_max_drawdown=0.369" in message and "positive_years=5" in message
     # Passing nodes are named the way the Agent can type them back.
     assert node_handle(strong) in message
     assert refused.value.details["passing_nodes"] == [node_handle(strong)]
     assert refused.value.details["freeze_gate"]["reasons"] == [
-        "freeze_deflated_sharpe_below_threshold"
+        "freeze_deflated_sharpe_below_threshold",
+        "freeze_active_drawdown_exceeded",
     ]
     # Nothing ended: the tree still points where it was, and the passing node freezes.
     assert finish.invoke({"outcome": "freeze", "node_id": strong}).finish

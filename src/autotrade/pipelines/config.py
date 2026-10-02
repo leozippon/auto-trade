@@ -335,8 +335,9 @@ class AcceptanceRules:
                 "same side of the arm's benchmark_index membership that one board lot "
                 "of that money could "
                 "buy). Every formal validation reports it as "
-                "benchmark.active_neutralized_excess, benchmark.active_tracking_error and "
-                "benchmark.active_information_ratio, and per research year as "
+                "benchmark.active_neutralized_excess, benchmark.active_tracking_error, "
+                "benchmark.active_information_ratio and benchmark.active_max_drawdown "
+                "(over the validation's own span), and per research year as "
                 "sub_windows[].active_neutralized_excess_return; "
                 "benchmark.panel_neutralized_excess is what zero skill earned in the "
                 "node's own shape. The strategy exposes nothing for this beyond its orders"
@@ -369,7 +370,7 @@ class AcceptanceRules:
                 ),
                 "active_max_drawdown": (
                     f"<= {self.active_max_drawdown}: drawdown of the cumulative active "
-                    "series over the research period"
+                    "series over the research period (benchmark.active_max_drawdown)"
                 ),
                 "max_drawdown": (
                     f"<= {self.max_drawdown}: equity drawdown over the research period"

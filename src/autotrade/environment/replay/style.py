@@ -45,7 +45,12 @@ from autotrade.environment.data.contracts import (
 )
 from autotrade.environment.runtime import utc_now_iso, write_json_atomic
 
-from .stats import TRADING_DAYS_PER_YEAR, ReplayResult, total_return_from_curve
+from .stats import (
+    TRADING_DAYS_PER_YEAR,
+    ReplayResult,
+    compounded_drawdown,
+    total_return_from_curve,
+)
 
 # The benchmark an arm takes when its create request names none, and the one a
 # legacy sidecar or book that records none is read under. Every call below takes
@@ -600,6 +605,15 @@ def replay_style_analysis(
             "active_neutralized_excess": active.get("neutralized_excess_return"),
             "active_tracking_error": active.get("tracking_error"),
             "active_information_ratio": active.get("information_ratio"),
+            # The drawdown the freeze gate holds to active_max_drawdown, so
+            # the Agent reads the number it is graded on, not a proxy.
+            "active_max_drawdown": (
+                compounded_drawdown(
+                    value for _date, value in _series_pairs(graded["strategy_daily"])
+                )
+                if graded
+                else None
+            ),
             "panel_neutralized_excess": zero_skill.get("neutralized_excess_return"),
             "panel_draws": panel.get("k"),
         }
