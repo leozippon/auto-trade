@@ -5829,6 +5829,68 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         partitions = next(f for f in status["findings"] if f["check"] == "stk_holdernumber_event_partitions")
         self.assertEqual(partitions["details"]["missing_expected_files"], 0)
 
+    def test_margin_is_expected_only_once_published_on_the_next_open_day(self):
+        # Margin for T publishes at 09:00 on the next OPEN day: the 02:30 audit
+        # after a weekend or holiday must not expect it yet, an older missing
+        # day is still an error, and so is T itself once its morning has passed.
+        cal = self.raw_dir / "trade_cal" / "exchange=SSE" / "year=2026.parquet"
+        cal.parent.mkdir(parents=True, exist_ok=True)
+        open_days = {"20260924", "20260928", "20260929", "20260930", "20261008", "20261009"}
+        days = [f"202609{d:02d}" for d in range(24, 31)] + [f"202610{d:02d}" for d in range(1, 10)]
+        pd.DataFrame([{"cal_date": d, "is_open": "1" if d in open_days else "0"} for d in days]).to_parquet(cal, index=False)
+        spec = common.EVENT_FLOW_SPECS["margin"]
+        trading_dates = sorted(open_days)
+
+        def land(trade_date: str) -> None:
+            rows = pd.DataFrame([
+                {col: (trade_date if col == "trade_date" else exchange if col == "exchange_id" else 1.0) for col in spec.fields.split(",")}
+                for exchange in ("SSE", "SZSE", "BSE")
+            ])
+            df = common.augment_event_frame(rows, spec, trading_dates=trading_dates)
+            common.write_parquet(
+                self.raw_dir / "margin" / f"trade_date={trade_date}.parquet",
+                df, api_name="margin", params={}, fields=list(df.columns),
+            )
+
+        def partitions(end_date: str, as_of: str) -> dict:
+            status_path = self.root / "margin_status.json"
+            args = argparse.Namespace(
+                raw_dir=str(self.raw_dir), start_date="20260924", end_date=end_date,
+                datasets=["margin"], as_of=as_of, output=str(status_path),
+            )
+            with patch.object(audit.Path, "cwd", return_value=self.root):
+                audit.audit_event_flow_only(args)
+            findings = json.loads(status_path.read_text(encoding="utf-8"))["findings"]
+            return next(f for f in findings if f["check"] == "margin_event_partitions")
+
+        # An empty folder stays an error even when nothing is published yet.
+        self.assertEqual(partitions("20260927", "2026-09-27T02:30:00")["severity"], "error")
+
+        # Holiday stretch: 0924's margin publishes 0928 09:00, not on the holiday 0925.
+        land("20260928")
+        before = partitions("20260927", "2026-09-28T02:30:00")
+        self.assertEqual(before["details"]["expected_files"], 0)
+        self.assertNotEqual(before["severity"], "error")
+        after = partitions("20260927", "2026-09-28T09:20:00")
+        self.assertEqual(after["severity"], "error")
+        self.assertEqual(after["details"]["missing_sample"], [str((self.raw_dir / "margin" / "trade_date=20260924.parquet").resolve())])
+
+        # Day T (0930) not yet published at the 02:30 audit after the holiday: pass.
+        land("20260924")
+        land("20260929")
+        passing = partitions("20261002", "2026-10-03T02:30:00")
+        self.assertEqual(passing["details"]["missing_expected_files"], 0)
+        self.assertNotEqual(passing["severity"], "error")
+        # ... and an error once its publication morning has passed.
+        self.assertEqual(partitions("20261008", "2026-10-08T09:20:00")["severity"], "error")
+
+        # Day T-1 (0929) missing after its publication time: error even while T is unpublished.
+        (self.raw_dir / "margin" / "trade_date=20260929.parquet").unlink()
+        (self.raw_dir / "margin" / "trade_date=20260929.parquet.meta.json").unlink()
+        gap = partitions("20261002", "2026-10-03T02:30:00")
+        self.assertEqual(gap["severity"], "error")
+        self.assertEqual(gap["details"]["missing_expected_files"], 1)
+
     def _audit_text_window(self, start_date: str, end_date: str, output_name: str) -> dict:
         status_path = self.root / output_name
         args = argparse.Namespace(

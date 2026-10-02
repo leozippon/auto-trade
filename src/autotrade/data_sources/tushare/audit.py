@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+from bisect import bisect_left
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -2256,6 +2257,32 @@ def expected_event_paths(raw_dir: Path, spec: EventDataset, start_date: str, end
         return {raw_dir / spec.api_name / f"date={day}.parquet" for day in date_range_days(start, end_date)}
     raise RuntimeError(f"unsupported event/flow strategy {spec.strategy} for {spec.api_name}")
 
+def audit_as_of(value: str | None) -> datetime:
+    """The audit's clock: now, or an explicit time (naive means Asia/Shanghai)."""
+    tz = ZoneInfo("Asia/Shanghai")
+    if not value:
+        return datetime.now(tz)
+    parsed = datetime.fromisoformat(value)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=tz)
+
+def latest_published_trade_date(open_dates: list[str], through: str, rule: core.AvailabilityRule, as_of: datetime) -> str | None:
+    """Newest open day <= ``through`` whose official publication has passed at ``as_of``.
+
+    Exchanges publish on open days only, so the publication falls on the first
+    open day on or after the day the rule names: margin for a Friday or for the
+    last session before a holiday appears at 09:00 on the next open day, not on
+    the calendar day after (observed on every pre-weekend and pre-holiday day).
+    """
+    for trade_date in reversed([day for day in open_dates if day <= through]):
+        stamped, _ = core.official_available_at(trade_date, rule, trading_dates=open_dates)
+        named_day = stamped[:10].replace("-", "")
+        index = bisect_left(open_dates, named_day)
+        if index == len(open_dates):
+            raise RuntimeError(f"SSE trade_cal has no open day on or after {named_day}; refresh reference trade_cal first")
+        if datetime.fromisoformat(core.local_time(open_dates[index], rule.clock)) <= as_of:
+            return trade_date
+    return None
+
 # Raw event/flow datasets whose snapshot dataset id differs from the api name.
 SNAPSHOT_EVENT_ID_BY_RAW = {"share_float": "share_float_complete"}
 
@@ -2503,8 +2530,10 @@ def audit_event_flow_only(args: argparse.Namespace) -> int:
     # Producing jobs close on trading evenings, so month/day expectations
     # clamp to the last SSE open date in the window (mirrors the
     # macro/fundamental clamp; the clamp failure is an error).
+    open_dates: list[str] = []
     try:
         covered_end = load_sse_open_dates(raw_dir, args.start_date, args.end_date)[-1]
+        open_dates = load_sse_open_dates(raw_dir, args.start_date, latest_sse_calendar_date(raw_dir))
     except RuntimeError as exc:
         covered_end = args.end_date
         add("error", "event_expected_window_unclamped", "SSE trade_cal unavailable; completeness expectations use the raw calendar end date", {
@@ -2512,6 +2541,18 @@ def audit_event_flow_only(args: argparse.Namespace) -> int:
             "end_date": args.end_date,
             "error": str(exc),
         })
+    # A trade-date table with an official publication time is expected only
+    # through the newest open day already published at audit time: margin for
+    # T publishes at 09:00 on the next open day, so a 02:30 audit after a
+    # weekend or holiday must not expect it, while every older day still is.
+    # Conservative PIT stamps (stk_surv's +5 days) are not publication times.
+    as_of = audit_as_of(getattr(args, "as_of", None))
+    dataset_ends: dict[str, str | None] = {}
+    for dataset in datasets:
+        spec = EVENT_FLOW_SPECS[dataset]
+        rule = spec.availability
+        if open_dates and spec.strategy == "trade_date" and rule is not None and rule.rule.startswith("official_"):
+            dataset_ends[dataset] = latest_published_trade_date(open_dates, covered_end, rule, as_of)
     add("info", "event_flow_expected_scope", "TuShare event/flow datasets included in this audit", {
         "datasets": datasets,
         "filesystem_datasets": filesystem_datasets,
@@ -2519,6 +2560,8 @@ def audit_event_flow_only(args: argparse.Namespace) -> int:
         "start_date": args.start_date,
         "end_date": args.end_date,
         "covered_end_date": covered_end,
+        "as_of": as_of.isoformat(timespec="seconds"),
+        "published_end_dates": {dataset: end for dataset, end in dataset_ends.items() if end != covered_end},
         "dataset_pit_rules": event_pit_rules(),
         "dataset_unit_rules": event_unit_rules(),
     })
@@ -2526,7 +2569,8 @@ def audit_event_flow_only(args: argparse.Namespace) -> int:
         if dataset == "share_float" and share_float_complete_union_exists(raw_dir):
             continue
         spec = EVENT_FLOW_SPECS[dataset]
-        expected = expected_event_paths(raw_dir, spec, args.start_date, covered_end)
+        end = dataset_ends.get(dataset, covered_end)
+        expected = expected_event_paths(raw_dir, spec, args.start_date, end) if end else set()
         audit_event_dataset(raw_dir, spec, expected, add)
     if "share_float" in datasets:
         audit_share_float_complete_union(raw_dir, add)
@@ -2962,6 +3006,7 @@ def add_event_macro_parsers(sub: argparse._SubParsersAction) -> None:
     event.add_argument("--start-date", default="20200101")
     event.add_argument("--end-date", default=date.today().strftime("%Y%m%d"))
     event.add_argument("--datasets", nargs="+", choices=core.EVENT_FLOW_DATASETS)
+    event.add_argument("--as-of", help="Audit time for publication-time expectations (ISO; naive = Asia/Shanghai). Defaults to now.")
     event.add_argument("--output", help=f"Defaults to {core.EVENT_FLOW_STATUS_PATH}.")
 
     macro = sub.add_parser("macro", help="audit macro, policy, and global-context raw data")
