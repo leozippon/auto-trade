@@ -213,6 +213,40 @@ def test_both_containers_cap_numeric_threads_from_the_same_cpu_quota(tmp_path: P
     assert tiny["OMP_NUM_THREADS"] == "1"
 
 
+def test_a_syntax_check_in_the_session_shell_leaves_no_bytecode_in_the_workspace(tmp_path: Path):
+    """``python -m py_compile`` writes ``__pycache__`` beside its source even
+    under the image's PYTHONDONTWRITEBYTECODE, and modification_check then
+    refuses the package (31 of 34 such refusals followed one). The session
+    container sends bytecode to its tmpfs instead."""
+
+    local = LocalSandbox(tmp_path / "session")
+    local.prepare_layout()
+    command = DockerSandbox(local, SandboxSpec(gpu=None)).docker_command()
+    pairs = [command[i + 1] for i, value in enumerate(command) if value == "--env"]
+    prefix = dict(pair.split("=", 1) for pair in pairs)["PYTHONPYCACHEPREFIX"]
+    assert prefix.startswith("/tmp/") and "/tmp:rw" in " ".join(command)
+
+    source = tmp_path / "output" / "lib" / "score.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    environment = {
+        key: value for key, value in os.environ.items() if key != "PYTHONPYCACHEPREFIX"
+    }
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+
+    def compiles_into_the_package(**extra: str) -> bool:
+        subprocess.run(
+            [sys.executable, "-m", "py_compile", str(source)],
+            env={**environment, **extra},
+            check=True,
+        )
+        return (source.parent / "__pycache__").exists()
+
+    # The same variable, rooted in the test's own directory.
+    assert not compiles_into_the_package(PYTHONPYCACHEPREFIX=str(tmp_path / "cache"))
+    assert compiles_into_the_package()
+
+
 def test_both_containers_pin_swap_to_their_memory_cap(tmp_path: Path):
     """Docker's default grants a container as much swap again as its memory
     cap, and the cap then degrades into paging: two live session sandboxes were

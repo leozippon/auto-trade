@@ -509,6 +509,11 @@ class DockerSandbox:
         for key, value in (
             ("XDG_CACHE_HOME", "/tmp/cache"), ("PIP_CACHE_DIR", "/tmp/cache/pip"),
             ("HF_HOME", "/tmp/cache/hf"), ("MPLCONFIGDIR", "/tmp/cache/mpl"),
+            # py_compile and compileall write bytecode whatever
+            # PYTHONDONTWRITEBYTECODE says, and a __pycache__ left under
+            # output/ or a candidate fails modification_check; the prefix
+            # sends every .pyc to the tmpfs instead.
+            ("PYTHONPYCACHEPREFIX", "/tmp/cache/pycache"),
             *sorted(container_thread_env(self.spec.cpus).items()),
         ):
             command.extend(["--env", f"{key}={value}"])
