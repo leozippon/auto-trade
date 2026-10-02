@@ -153,7 +153,7 @@ TOOL_READ_ONLY_SCREEN_NOTE = """\
 
 STEP_TREE_SECTION = """\
 # Step 产物树
-搜索根 `steps` 挂载本臂的 Step 产物树（`tree.json`、`tree.txt`）：它累积本会话全部验证节点与血缘（每次尝试的节点都在），每个节点记着它回放的 `span`。`batch_validate` 每个完成的候选都在当前节点下新增一个带快照与结果的节点，同批候选并列，整批结束后当前位置不变。`step_rollback` 与 `finish_session` 只接受本会话的完整节点。\
+搜索根 `steps` 挂载本臂的 Step 产物树（`tree.json`、`tree.txt`）：它累积本会话全部验证节点与血缘（每次尝试的节点都在），每个节点记着它回放的 `span`。`batch_validate` 每个完成的候选都在当前节点下新增一个带快照与结果的节点，同批候选并列，整批结束后当前位置不变。`step_rollback` 与 `finish_session` 只接受本会话的完整节点。节点目录以完整 node_id 命名（结果在 `<node_id>/validation/result.json`）；`shell` 的工作目录下没有 `steps/`，在 shell 里用短名通配拼路径（`/mnt/artifacts/steps/*__valid_002/validation/result.json`），不手抄长 id。\
 """
 
 SESSION_STATIC_SECTIONS = (
