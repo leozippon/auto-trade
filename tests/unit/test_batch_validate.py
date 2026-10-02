@@ -15,6 +15,7 @@ node can actually be frozen through the gate.
 from __future__ import annotations
 
 import json
+import math
 import threading
 import unittest
 from collections.abc import Mapping
@@ -26,6 +27,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
+import pandas as pd
 
 from autotrade.environment.artifacts import (
     FilesystemArtifactStore,
@@ -75,6 +77,7 @@ from autotrade.pipelines.config import (
 )
 from autotrade.pipelines.experiment import (
     freeze_gate_for,
+    neutralized,
     null_control_seed,
     research_step_record,
     trial_family,
@@ -95,7 +98,7 @@ from autotrade.pipelines.session_tools import (
     batch_select_hint,
     session_budget_status,
 )
-from autotrade.pipelines.verdict import information_ratio_bar
+from autotrade.pipelines.verdict import ACTIVE_DAILY_COLUMNS, information_ratio_bar
 
 PARENT_SOURCE ="def generate_orders(context):\n    return []\n"
 # A four-year research period, one slot per July-June year.
@@ -182,9 +185,13 @@ class _Evaluator:
         memory_kill_markers: tuple[str, ...] = (),
         rendezvous: int = 0,
         resources: Mapping[str, object] | None = None,
+        alpha_scale: float = 0.0005,
     ) -> None:
         self.results_root = results_root
         self.resources = resources
+        # Daily alpha per character of main.py: the default is large enough
+        # that no fixture series ever draws down.
+        self.alpha_scale = alpha_scale
         self.fail_markers = fail_markers
         self.contention_markers = contention_markers
         self.strategy_fail_markers = strategy_fail_markers
@@ -262,7 +269,9 @@ class _Evaluator:
                 summary["resources"] = dict(self.resources)
             target = self.results_root / f"valid_{call_index:03d}" / "result.json"
             write_json_atomic(target, {"stats": summary})
-            _write_style_sidecar(target.parent, alpha=0.0005 * len(source), seed=call_index)
+            _write_style_sidecar(
+                target.parent, alpha=self.alpha_scale * len(source), seed=call_index
+            )
             return EvaluationResult(summary=dict(summary), result_ref=str(target))
         finally:
             with self._lock:
@@ -272,19 +281,24 @@ class _Evaluator:
 def _write_style_sidecar(directory: Path, *, alpha: float, seed: int) -> None:
     """The daily series the freeze gate reads: 60 days, fifteen in each of the
     four research years the gate counts, of a return that is ``alpha`` plus
-    benchmark and size exposure plus noise."""
+    benchmark and size exposure plus noise, and the zero-skill panel composite
+    every formal replay carries, which the gate subtracts."""
 
     rng = np.random.default_rng(seed)
     days = [f"{2021 + index // 15}09{index % 15 + 1:02d}" for index in range(60)]
     benchmark = rng.normal(0.0003, 0.01, len(days))
     size = rng.normal(0.0, 0.004, len(days))
-    strategy = alpha + 0.9 * benchmark + 0.2 * size + rng.normal(0.0, 0.004, len(days))
+    panel = rng.normal(0.0, 0.002, len(days))
+    strategy = (
+        alpha + 0.9 * benchmark + 0.2 * size + panel + rng.normal(0.0, 0.004, len(days))
+    )
     write_json_atomic(
         directory / "style_analysis.json",
         {
             "strategy_daily": [[day, float(value)] for day, value in zip(days, strategy)],
             "benchmark_daily": [[day, float(value)] for day, value in zip(days, benchmark)],
             "size_factor_daily": [[day, float(value)] for day, value in zip(days, size)],
+            "panel_daily": [[day, float(value)] for day, value in zip(days, panel)],
         },
     )
 
@@ -311,6 +325,7 @@ class _Session:
         steps_before: tuple[StepResult, ...] = (),
         resume: SessionResume | None = None,
         resources: Mapping[str, object] | None = None,
+        alpha_scale: float = 0.0005,
     ) -> None:
         self.root = root
         self.trace_events = trace
@@ -368,6 +383,7 @@ class _Session:
             memory_kill_markers=memory_kill_markers,
             rendezvous=rendezvous,
             resources=resources,
+            alpha_scale=alpha_scale,
         )
         self.backtest = SessionValidations(
             request=request,
@@ -1632,6 +1648,135 @@ class BatchValidateRunTest(unittest.TestCase):
                 (session.output / "main.py").read_text(encoding="utf-8"),
                 PARENT_SOURCE,
             )
+
+
+def _annualized_ir(neutral: pd.Series) -> float:
+    """The IR a session reads off ``active_neutralized``: its annualised mean
+    (which the gate rounds to four places) over its residual volatility
+    (three fitted coefficients)."""
+
+    residual = neutral - neutral.mean()
+    tracking = math.sqrt(
+        float((residual**2).sum()) / (len(neutral) - 3) * TRADING_DAYS_PER_YEAR
+    )
+    return round(float(neutral.mean()) * TRADING_DAYS_PER_YEAR, 4) / tracking
+
+
+class DailySeriesTest(unittest.TestCase):
+    """Every completed Validation leaves the series the gate grades, day by
+    day, where the session can read it; a failed one leaves nothing."""
+
+    def test_every_completed_row_reads_back_the_graded_series(self) -> None:
+        """Candidates and controls, full-span and sub-span rows alike; the file
+        reproduces the IR and the active drawdown the gate measures."""
+
+        with TemporaryDirectory() as tmp:
+            # A small edge, so the active series does draw down.
+            session = _Session(Path(tmp), alpha_scale=0.00001)
+            session.candidate("edge", _strategy("'edge'"))
+            session.candidate("base", _strategy("'base'"))
+            full = session.call("edge", "base", controls=("base",)).value
+            session.candidate("probe", _strategy("'probe'"))
+            sub = session.call("probe", span="Y2").value
+            steps = {step.step_id: step for step in session.backtest.steps}
+            rows = [*full["candidates"], *sub["candidates"]]
+            self.assertEqual(len(rows), 3)
+            for row in rows:
+                self.assertEqual(row["daily_series"], "validation/active_daily.csv")
+                path = session.tree.root / row["node_id"] / row["daily_series"]
+                frame = pd.read_csv(path, dtype={"trade_date": str})
+                self.assertEqual(tuple(frame.columns), ACTIVE_DAILY_COLUMNS)
+                result_ref = steps[row["node_id"]].validation.result_ref
+                sidecar = json.loads(
+                    (Path(result_ref).parent / "style_analysis.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                # One row per replayed day, the panel as its composite only.
+                self.assertEqual(
+                    list(frame["trade_date"]),
+                    [day for day, _value in sidecar["strategy_daily"]],
+                )
+                strategy = np.asarray([value for _day, value in sidecar["strategy_daily"]])
+                panel = np.asarray([value for _day, value in sidecar["panel_daily"]])
+                np.testing.assert_allclose(frame["strategy_return"], strategy, rtol=1e-9)
+                np.testing.assert_allclose(frame["panel_return"], panel, rtol=1e-9)
+                np.testing.assert_allclose(
+                    frame["active_return"], strategy - panel, rtol=1e-8, atol=1e-12
+                )
+                # The IR every row's ledger record carries (the gate rounds the
+                # neutralised excess to four places before dividing).
+                self.assertAlmostEqual(
+                    _annualized_ir(frame["active_neutralized"]),
+                    neutralized(result_ref)["information_ratio"],
+                    delta=1e-6,
+                )
+            # The full-span candidate is what the gate measures: the session
+            # reads its IR off the row and the gate holds its drawdown.
+            [edge] = [row for row in full["candidates"] if row["name"] == "edge"]
+            frame = pd.read_csv(session.tree.root / edge["node_id"] / edge["daily_series"])
+            self.assertAlmostEqual(
+                _annualized_ir(frame["active_neutralized"]),
+                edge["selection_statistics"]["information_ratio"],
+                delta=1e-6,
+            )
+            gate = session.backtest.freeze_gate(edge["node_id"])
+            self.assertGreater(gate["active_max_drawdown"], 0.0)
+            self.assertAlmostEqual(
+                frame["active_drawdown"].max(), gate["active_max_drawdown"], delta=1e-9
+            )
+            equity = 1.0 + frame["active_cumulative"]
+            np.testing.assert_allclose(
+                frame["active_drawdown"],
+                1.0 - equity / np.maximum.accumulate(np.maximum(equity, 1.0)),
+                atol=1e-9,
+            )
+            # The tree lists it beside the record, so an older node names it too.
+            node = session.tree.get_node(edge["node_id"])
+            self.assertIn("validation/active_daily.csv", node["attachments"])
+
+    def test_a_failed_validation_leaves_no_series(self) -> None:
+        with TemporaryDirectory() as tmp:
+            session = _Session(Path(tmp), strategy_fail_markers=("999",))
+            session.candidate("good", _strategy("1"))
+            session.candidate("bad", _strategy("999"))
+            rows = {
+                row["name"]: row
+                for row in session.call("good", "bad", span="Y1").value["candidates"]
+            }
+            self.assertNotIn("daily_series", rows["bad"])
+            # The good row's copy in its node and the host's beside its
+            # result; nothing for the failed one, anywhere.
+            [step] = session.backtest.steps
+            self.assertEqual(
+                sorted(Path(tmp).rglob("*active_daily*")),
+                sorted(
+                    [
+                        session.tree.root / rows["good"]["node_id"] / rows["good"]["daily_series"],
+                        Path(step.validation.result_ref).parent / "active_daily.csv",
+                    ]
+                ),
+            )
+
+    def test_a_series_that_cannot_be_written_leaves_no_partial_file_and_no_node(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            session = _Session(Path(tmp))
+            session.candidate("a", _strategy("1"))
+
+            def disk_full(frame: pd.DataFrame, path: Path, **_kwargs: object) -> None:
+                Path(path).write_text("trade_date,strategy_return\n2021", encoding="utf-8")
+                raise OSError("No space left on device")
+
+            with (
+                patch.object(pd.DataFrame, "to_csv", disk_full),
+                self.assertRaises(OSError),
+            ):
+                session.call("a", span="Y1")
+            self.assertEqual(sorted(Path(tmp).rglob("*active_daily*")), [])
+            self.assertEqual(session.tree.nodes(), [])
+            self.assertEqual(session.backtest.steps, [])
 
 
 class BatchSelectHintTest(unittest.TestCase):

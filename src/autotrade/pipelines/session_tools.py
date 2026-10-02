@@ -31,6 +31,7 @@ from autotrade.environment.data.summary import HOST_PATH_RE
 from autotrade.environment.executor import raised_by_strategy, strategy_resources_of
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.replay.null_control import PANEL_DRAWS, NullControlSetupError
+from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
 from autotrade.environment.runtime import (
     AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS,
     RunManifest,
@@ -81,6 +82,7 @@ from .experiment import (
 from .ledger import RESEARCH_STAGE, ExperimentLedger
 from .session_resume import record_step_sidecar
 from .skills import _assert_skills_absent_from_formal
+from .verdict import active_daily
 
 
 def _public_error_text(exc: Exception) -> str:
@@ -414,6 +416,12 @@ def _smoke_asof_domains(result_dir: Path) -> list[str]:
 # Agent-readable reference to the full result, so the attachment site and the
 # returned reference must name the same file.
 VALIDATION_RESULT_ATTACHMENT = "validation/result.json"
+# Beside it, the series the freeze gate grades, day by day (``verdict.
+# active_daily``): without it a session rebuilt proxies from its own equity
+# curve to find when a drawdown happened or which period drives a reading.
+# Only a research Validation is recorded here; the forward and Held-out replay
+# writes to the host's results root and never to a Step tree.
+VALIDATION_DAILY_ATTACHMENT = "validation/active_daily.csv"
 STEP_TREE_SEARCH_ROOT = "steps"
 # Summary blocks whose size scales with the replay: one row per closed position
 # and one per week of the window. An inline copy is therefore not a fixed-cost
@@ -422,6 +430,25 @@ STEP_TREE_SEARCH_ROOT = "steps"
 # stay in the referenced result.json; every other metric is O(1) and rides
 # inline.
 REPLAY_SCALED_SUMMARY_BLOCKS = ("per_stock", "weekly_returns")
+
+
+def write_active_daily(result_ref: str) -> Path:
+    """Write one completed Validation's daily graded series beside its result.
+
+    Read off the style sidecar the freeze gate itself reads, through a
+    temporary name, so a failure leaves no partial file behind.
+    """
+
+    result_dir = Path(result_ref).parent
+    analysis = json.loads((result_dir / STYLE_ARTIFACT_NAME).read_text(encoding="utf-8"))
+    target = result_dir / PurePosixPath(VALIDATION_DAILY_ATTACHMENT).name
+    staging = target.with_name(f".{target.name}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        active_daily(analysis).to_csv(staging, index=False, float_format="%.10g")
+        staging.replace(target)
+    finally:
+        staging.unlink(missing_ok=True)
+    return target
 
 
 def inline_backtest_stats(summary: Mapping[str, object]) -> dict[str, object]:
@@ -777,7 +804,10 @@ class SessionValidations:
             # same fixed-size projection the observation does.
             metrics=inline_backtest_stats(evaluation.summary),
             models_root=revision.models_path,
-            attachments={VALIDATION_RESULT_ATTACHMENT: evaluation.result_ref},
+            attachments={
+                VALIDATION_RESULT_ATTACHMENT: evaluation.result_ref,
+                VALIDATION_DAILY_ATTACHMENT: write_active_daily(evaluation.result_ref),
+            },
             metadata=metadata,
         )
         if self.experiment_dir is not None:
@@ -1196,7 +1226,16 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "this batch's concurrency put in force, and for a GPU strategy its peak video "
         "memory and the free memory it was admitted with). "
         "Each completed row's result_ref reads back that candidate's full "
-        "replay record. Selection stays yours: finish_session nominates a row as it "
+        "replay record, and its daily_series (validation/active_daily.csv in the "
+        "node's directory; pd.read_csv(path, dtype={'trade_date': str})) is the "
+        "series the freeze gate grades, one row per trading day of the span: "
+        "strategy_return, panel_return (the zero-skill composite), active_return "
+        "(their difference), active_cumulative and active_drawdown (its compounded "
+        "path and the loss below its running peak, whose maximum is "
+        "active_max_drawdown), benchmark_return and size_factor_return (the two "
+        "regressors) and active_neutralized (active_return net of the span's "
+        "fitted loadings; its annualised mean over its volatility is the active "
+        "IR). Selection stays yours: finish_session nominates a row as it "
         "is, and step_rollback(node_id) restores one as the working copy to build "
         "on.",
         {
@@ -1834,6 +1873,8 @@ class BatchValidateTool(SessionTimeBudgetAware):
             "stats": batch_candidate_stats(evaluation.summary),
             **batch_candidate_resources(evaluation.summary),
             "result_ref": public_result_ref,
+            # Relative to the node's directory, which the prompt says how to reach.
+            "daily_series": VALIDATION_DAILY_ATTACHMENT,
         }
 
     def _record_failure(

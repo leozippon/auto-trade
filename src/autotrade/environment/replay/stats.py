@@ -605,6 +605,24 @@ def _max_drawdown(opening: float, equities: Sequence[float]) -> float:
     return worst
 
 
+def compounded_path(returns: Iterable[float]) -> list[tuple[float, float]]:
+    """Day by day, the equity a daily return series compounds to from 1 and its
+    loss below the running peak (the opening 1 included).
+
+    The one drawdown path of a return series: :func:`compounded_drawdown` is
+    its worst day, and a session reads the same path in the daily series file
+    beside each of its validations.
+    """
+
+    equity = peak = 1.0
+    path: list[tuple[float, float]] = []
+    for value in returns:
+        equity *= 1.0 + value
+        peak = max(peak, equity)
+        path.append((equity, (peak - equity) / peak))
+    return path
+
+
 def compounded_drawdown(returns: Iterable[float]) -> float:
     """Peak-to-trough loss of the equity a daily return series compounds to from 1.
 
@@ -613,12 +631,7 @@ def compounded_drawdown(returns: Iterable[float]) -> float:
     ``benchmark.active_max_drawdown``.
     """
 
-    equity = 1.0
-    equities: list[float] = []
-    for value in returns:
-        equity *= 1.0 + value
-        equities.append(equity)
-    return _max_drawdown(1.0, equities)
+    return max((drawdown for _equity, drawdown in compounded_path(returns)), default=0.0)
 
 
 def _round(value: float) -> float:

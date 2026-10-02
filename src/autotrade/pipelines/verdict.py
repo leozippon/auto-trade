@@ -41,11 +41,13 @@ from statistics import NormalDist
 from typing import Any, Literal
 
 import numpy as np
+import pandas as pd
 
 from autotrade.environment.replay.null_control import PANEL_DRAWS
 from autotrade.environment.replay.stats import (
     TRADING_DAYS_PER_YEAR,
     compounded_drawdown,
+    compounded_path,
 )
 from autotrade.environment.replay.style import (
     _series_pairs,
@@ -93,6 +95,18 @@ HELDOUT_TOLERANCE_Z = 1.28
 FORWARD_MDE_Z = 2.12
 
 _EULER_MASCHERONI = 0.5772156649015329
+# The columns of one validation's daily graded series (:func:`active_daily`).
+ACTIVE_DAILY_COLUMNS = (
+    "trade_date",
+    "strategy_return",
+    "panel_return",
+    "active_return",
+    "active_cumulative",
+    "active_drawdown",
+    "benchmark_return",
+    "size_factor_return",
+    "active_neutralized",
+)
 
 
 def _date(value: str, name: str) -> str:
@@ -314,6 +328,50 @@ def neutral_daily(analysis: Mapping[str, object]) -> dict[str, float]:
     dates = [row[0] for row in _regression_join(graded, "", "")]
     _statistics, _rows, neutral = _measured(graded, "", "")
     return dict(zip(dates, (float(value) for value in neutral), strict=True))
+
+
+def active_daily(analysis: Mapping[str, object]) -> pd.DataFrame:
+    """One validation's graded series day by day, as the session reads it.
+
+    One row per replayed day (``ACTIVE_DAILY_COLUMNS``), every column read off
+    the computations the gate itself runs on this sidecar: the strategy's
+    return and the zero-skill panel composite as stored, the active return
+    :func:`style.active_analysis` grades, its :func:`stats.compounded_path`
+    (``active_cumulative`` is the equity minus 1, ``active_drawdown`` the loss
+    below the running peak, whose largest value is the gate's
+    ``active_max_drawdown``), the two regressors, and the
+    :func:`neutral_daily` series, whose annualised mean over its residual
+    volatility is the active IR. Only the composite of the panel is stored, so
+    no draw's names can be read back. Without a panel every ``active_*``
+    column is empty; ``active_neutralized`` is also empty on a day missing a
+    regressor and on a span the gate cannot measure.
+    """
+
+    frame = pd.DataFrame(
+        _series_pairs(analysis.get("strategy_daily")),
+        columns=["trade_date", "strategy_return"],
+    )
+    for column, key in (
+        ("panel_return", "panel_daily"),
+        ("benchmark_return", "benchmark_daily"),
+        ("size_factor_return", "size_factor_daily"),
+    ):
+        frame[column] = frame["trade_date"].map(dict(_series_pairs(analysis.get(key))))
+    active = active_analysis(analysis)
+    if active is not None:
+        # Day for day the strategy's own rows: active_analysis keeps their order.
+        graded = [value for _date, value in _series_pairs(active["strategy_daily"])]
+        path = compounded_path(graded)
+        try:
+            neutral = neutral_daily(analysis)
+        except ValueError:
+            # Unmeasurable: the gate reads no IR off this span either.
+            neutral = {}
+        frame["active_return"] = graded
+        frame["active_cumulative"] = [equity - 1.0 for equity, _drawdown in path]
+        frame["active_drawdown"] = [drawdown for _equity, drawdown in path]
+        frame["active_neutralized"] = frame["trade_date"].map(neutral)
+    return frame.reindex(columns=list(ACTIVE_DAILY_COLUMNS))
 
 
 def trial_correlation(

@@ -666,6 +666,38 @@ def test_the_forward_replay_is_one_span_from_forward_start_to_the_release(tmp_pa
         pipeline.run_forward()
 
 
+def test_the_forward_replay_writes_nothing_a_session_can_read(tmp_path: Path):
+    """A session reads the experiment only through its Step tree, where every
+    research Validation also leaves its daily graded series. The forward and
+    Held-out replay writes its record to the host's results root and the
+    ledger, never a Step node and never a daily series."""
+
+    pipeline, _snapshots, _evaluator, _developer, _ledger = _freezing(tmp_path)
+    pipeline.run_research_session()
+    experiment = pipeline.config.experiment_dir
+    steps = experiment / "steps"
+    steps.mkdir()
+    (steps / "tree.json").write_text('{"current_node_id": null, "nodes": []}', encoding="utf-8")
+
+    def state() -> dict[Path, int]:
+        return {path: path.stat().st_mtime_ns for path in experiment.rglob("*")}
+
+    before = state()
+    record = pipeline.run_forward()
+    after = state()
+
+    written = {path for path, stamp in after.items() if before.get(path) != stamp}
+    assert Path(record["result_ref"]).parent in written
+    assert all(
+        path.is_relative_to(experiment / "artifacts" / "results")
+        or path.is_relative_to(experiment / "ledgers")
+        or path.is_relative_to(experiment / ".host")
+        for path in written
+    ), sorted(written)
+    assert not any(path.is_relative_to(steps) for path in written)
+    assert not any("active_daily" in path.name for path in after)
+
+
 # A kill at the published memory cap is the strategy's own failure exactly as
 # an exception its code raised is: a verdict, not a rerun of the attempt.
 @pytest.mark.parametrize(
