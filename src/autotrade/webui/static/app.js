@@ -1708,7 +1708,8 @@ async function renderHomePage() {
     el(
       "span",
       { class: "mode-note" },
-      `并行运行 ${payload.running.length}/${payload.max_running_experiments}`,
+      `并行运行 ${payload.running.length}/${payload.max_running_experiments}` +
+        `（本机模型 ${payload.running_local.length}/${payload.max_running_local_experiments}）`,
     ),
     el(
       "button",

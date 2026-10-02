@@ -801,15 +801,15 @@ class CreatePreflightTest(unittest.TestCase):
 
 
 class RestartSlotRaceTest(unittest.TestCase):
-    """At the parallel cap, a restart owns the slot it is about to free.
+    """At a running-arm limit, a restart owns the slot it is about to free.
 
     `restart` terminates the worker and then spawns a new one, and for as long
     as the SIGTERM grace lasts this experiment holds no running slot. While the
     slot lock was taken only inside `start_worker`, a create arriving in that
-    window took the freed slot and the restart came back with "parallel
-    experiment cap reached": the researcher asked for a restart and was left
-    with a stopped experiment. What is asserted is that outcome, not an
-    ordering -- whatever the create does, the restarted experiment runs.
+    window took the freed slot and the restart came back refused at the limit:
+    the researcher asked for a restart and was left with a stopped experiment.
+    What is asserted is that outcome, not an ordering -- whatever the create
+    does, the restarted experiment runs.
     """
 
     def setUp(self) -> None:
@@ -903,5 +903,5 @@ class RestartSlotRaceTest(unittest.TestCase):
         # was refused rather than served out of exp_a's slot.
         self.assertEqual(self.client.get("/api/experiments").json()["running"], ["exp_a"])
         self.assertEqual(second.get("status"), 400, second.get("detail"))
-        self.assertIn("parallel experiment cap reached", str(second.get("detail")))
+        self.assertIn("running-arm limit reached", str(second.get("detail")))
         self.assertFalse((self.experiments_root / "exp_b").exists())

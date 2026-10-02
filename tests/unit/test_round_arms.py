@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from autotrade.environment.data.contracts import BENCHMARK_INDEXES
-from autotrade.environment.llm.model_profiles import LOCAL_QWEN_MODEL
+from autotrade.environment.llm.model_profiles import LOCAL_QWEN_MODEL, MIMO_FLASH_MODEL
 from autotrade.environment.strategy_loader import validate_strategy_package
 from autotrade.pipelines.config import (
     DEFAULT_RESEARCH_GEOMETRY,
@@ -27,6 +27,10 @@ from autotrade.pipelines.hitl_state import WEB_CLOSED_PARAMS, WEB_CREATE_DEFAULT
 from autotrade.pipelines.pit_backend import required_release_raw_datasets
 from autotrade.pipelines.pit_views_seed import pit_cache_provider_record
 from autotrade.pipelines.worker import _snapshot_config
+from autotrade.webui.manager import (
+    MAX_RUNNING_EXPERIMENTS,
+    MAX_RUNNING_LOCAL_EXPERIMENTS,
+)
 from scripts.experiments import _round
 from scripts.experiments._round import (
     BASE_EXPECTED_DEFAULTS,
@@ -371,28 +375,33 @@ def _fill_round(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
-    running: int,
+    local: int,
+    hosted: int = 0,
     created: tuple[str, ...] = (),
     accepted: bool = True,
     arms: dict[str, dict[str, object]] | None = None,
 ) -> tuple[Round, list[str]]:
     """A three-arm round on a finished seed, with the console's two calls faked.
 
-    ``running`` is how many of the console's four slots are in use, ``created``
-    the arms whose experiment directory already exists, ``arms`` what each arm
-    decides for itself. The returned list records, in order, the ids a create
-    request was actually sent for.
+    ``local`` and ``hosted`` are how many arms of each kind the console is
+    running against its two limits, ``created`` the arms whose experiment
+    directory already exists, ``arms`` what each arm decides for itself (an
+    arm that names no model role is local). The returned list records, in
+    order, the ids a create request was actually sent for.
     """
     rnd = Round(arms=arms or {arm: {} for arm in FILL_ARMS}, pit_views_seed="data/seed_probe")
     _synthetic_repo(tmp_path, monkeypatch, rnd)
     for experiment_id in created:
         (tmp_path / "experiments" / experiment_id).mkdir(parents=True)
+    running_local = [f"local_{index}" for index in range(local)]
     monkeypatch.setattr(
         _round,
         "health",
         lambda port: {
-            "max_running_experiments": 4,
-            "running": [f"other_{index}" for index in range(running)],
+            "max_running_experiments": MAX_RUNNING_EXPERIMENTS,
+            "max_running_local_experiments": MAX_RUNNING_LOCAL_EXPERIMENTS,
+            "running": running_local + [f"hosted_{index}" for index in range(hosted)],
+            "running_local": running_local,
         },
     )
     posted: list[str] = []
@@ -420,25 +429,49 @@ def test_a_fill_creates_pending_arms_in_queue_order_up_to_the_free_slots(
 ) -> None:
     """One free slot, one arm already created: the next pending arm takes it and
     the one behind it waits, and the run logs one line saying so."""
-    rnd, posted = _fill_round(tmp_path, monkeypatch, running=3, created=("fill_first",))
+    rnd, posted = _fill_round(
+        tmp_path, monkeypatch, local=2, hosted=MAX_RUNNING_EXPERIMENTS - 3, created=("fill_first",)
+    )
     assert rnd.main(["launcher", "0", "--fill"]) == 0
     assert posted == ["fill_second"]
+    hosted = ", ".join(f"hosted_{index}" for index in range(MAX_RUNNING_EXPERIMENTS - 3))
     assert _summary(capsys.readouterr().out) == (
-        "slots 3/4 in use (other_0, other_1, other_2), 1 free; queue 3: "
-        "1 skipped (created already), 1 created, 0 refused, 1 pending"
+        f"slots {MAX_RUNNING_EXPERIMENTS - 1}/{MAX_RUNNING_EXPERIMENTS} in use "
+        f"({hosted}, local_0, local_1), 1 free; "
+        f"local-model slots 2/{MAX_RUNNING_LOCAL_EXPERIMENTS} in use (local_0, local_1), "
+        f"{MAX_RUNNING_LOCAL_EXPERIMENTS - 2} free; queue 3: "
+        "1 skipped (created already), 1 created, 0 refused, 1 pending "
+        "(0 held by the local-model limit)"
     )
 
 
 @pytest.mark.parametrize(
-    ("running", "created", "counts"),
+    ("local", "hosted", "created", "counts"),
     [
-        (4, (), "0 skipped (created already), 0 created, 0 refused, 3 pending"),
-        (0, FILL_ARMS, "3 skipped (created already), 0 created, 0 refused, 0 pending"),
+        (
+            MAX_RUNNING_LOCAL_EXPERIMENTS,
+            MAX_RUNNING_EXPERIMENTS - MAX_RUNNING_LOCAL_EXPERIMENTS,
+            (),
+            "0 skipped (created already), 0 created, 0 refused, 3 pending (0 held by the local-model limit)",
+        ),
+        (
+            MAX_RUNNING_LOCAL_EXPERIMENTS,
+            0,
+            (),
+            "0 skipped (created already), 0 created, 0 refused, 3 pending (3 held by the local-model limit)",
+        ),
+        (
+            0,
+            0,
+            FILL_ARMS,
+            "3 skipped (created already), 0 created, 0 refused, 0 pending (0 held by the local-model limit)",
+        ),
     ],
-    ids=["no slot free", "nothing pending"],
+    ids=["no slot free", "no local slot for a local queue", "nothing pending"],
 )
 def test_a_fill_with_nothing_to_do_is_the_steady_state(
-    running: int,
+    local: int,
+    hosted: int,
     created: tuple[str, ...],
     counts: str,
     tmp_path: Path,
@@ -447,20 +480,72 @@ def test_a_fill_with_nothing_to_do_is_the_steady_state(
 ) -> None:
     """The mode runs on a timer, so an idle fill exits 0, sends nothing and
     logs one line however long the queue behind it is."""
-    rnd, posted = _fill_round(tmp_path, monkeypatch, running=running, created=created)
+    rnd, posted = _fill_round(tmp_path, monkeypatch, local=local, hosted=hosted, created=created)
     assert rnd.main(["launcher", "0", "--fill"]) == 0
     assert posted == []
     assert _summary(capsys.readouterr().out).endswith(counts)
 
 
+# Both session roles hosted: the arm does not count against the local limit.
+HOSTED_ROLES = {"model": MIMO_FLASH_MODEL, "subagent_model": MIMO_FLASH_MODEL}
+
+
+def test_a_fill_holds_a_local_arm_at_the_local_limit_and_creates_the_hosted_one_behind_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The local arms at the head and the tail of the queue stay pending, the
+    hosted arm between them takes a free slot, and holding is the steady
+    state, not a refusal."""
+    arms = {arm: {} for arm in FILL_ARMS}
+    arms["fill_second"] = dict(HOSTED_ROLES)
+    rnd, posted = _fill_round(tmp_path, monkeypatch, local=MAX_RUNNING_LOCAL_EXPERIMENTS, arms=arms)
+    assert rnd.main(["launcher", "0", "--fill", "--dry-run"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert "fill_first: pending, waits for a local-model slot" in out
+    assert "fill_second: pending, takes a free slot" in out
+    assert "fill_third: pending, waits for a local-model slot" in out
+    assert posted == []
+
+    assert rnd.main(["launcher", "0", "--fill"]) == 0
+    assert posted == ["fill_second"]
+    assert _summary(capsys.readouterr().out).endswith(
+        f"local-model slots {MAX_RUNNING_LOCAL_EXPERIMENTS}/{MAX_RUNNING_LOCAL_EXPERIMENTS} in use "
+        f"({', '.join(f'local_{index}' for index in range(MAX_RUNNING_LOCAL_EXPERIMENTS))}), 0 free; "
+        "queue 3: 0 skipped (created already), 1 created, 0 refused, 2 pending "
+        "(2 held by the local-model limit)"
+    )
+
+
+def test_a_fill_past_a_held_local_arm_still_stops_at_any_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Only the local limit holds an arm back; the pre-flight refusing the
+    hosted arm behind it stops the run as before, with nothing sent after it."""
+    arms = {arm: dict(HOSTED_ROLES) for arm in FILL_ARMS}
+    arms["fill_first"] = {}
+    arms["fill_second"] = {**HOSTED_ROLES, "research_end": "20250331"}
+    rnd, posted = _fill_round(tmp_path, monkeypatch, local=MAX_RUNNING_LOCAL_EXPERIMENTS, arms=arms)
+    assert rnd.main(["launcher", "0", "--fill"]) == 1
+    assert posted == []
+    captured = capsys.readouterr()
+    assert _summary(captured.out).endswith(
+        "0 created, 1 refused, 2 pending (1 held by the local-model limit)"
+    )
+    assert "fill_second: parameters rejected" in captured.err
+
+
 def test_a_fill_reports_a_creation_the_console_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    rnd, posted = _fill_round(tmp_path, monkeypatch, running=2, accepted=False)
+    rnd, posted = _fill_round(
+        tmp_path, monkeypatch, local=2, hosted=MAX_RUNNING_EXPERIMENTS - 4, accepted=False
+    )
     assert rnd.main(["launcher", "0", "--fill"]) == 1
     assert posted == ["fill_first", "fill_second"]
     captured = capsys.readouterr()
-    assert _summary(captured.out).endswith("0 created, 2 refused, 1 pending")
+    assert _summary(captured.out).endswith(
+        "0 created, 2 refused, 1 pending (0 held by the local-model limit)"
+    )
     assert "not created: fill_first, fill_second" in captured.err
 
 
@@ -471,11 +556,13 @@ def test_a_fill_stops_at_an_arm_the_preflight_refuses(
     summary still reach the log, and the run exits non-zero."""
     arms = {arm: {} for arm in FILL_ARMS}
     arms["fill_second"] = {"research_end": "20250331"}
-    rnd, posted = _fill_round(tmp_path, monkeypatch, running=0, arms=arms)
+    rnd, posted = _fill_round(tmp_path, monkeypatch, local=0, arms=arms)
     assert rnd.main(["launcher", "0", "--fill"]) == 1
     assert posted == ["fill_first"]
     captured = capsys.readouterr()
-    assert _summary(captured.out).endswith("1 created, 1 refused, 1 pending")
+    assert _summary(captured.out).endswith(
+        "1 created, 1 refused, 1 pending (0 held by the local-model limit)"
+    )
     assert "fill_second: parameters rejected" in captured.err
     assert "whole July-June years" in captured.err
 
@@ -483,7 +570,7 @@ def test_a_fill_stops_at_an_arm_the_preflight_refuses(
 def test_a_fill_dry_run_plans_without_creating(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    rnd, posted = _fill_round(tmp_path, monkeypatch, running=3)
+    rnd, posted = _fill_round(tmp_path, monkeypatch, local=0, hosted=MAX_RUNNING_EXPERIMENTS - 1)
     assert rnd.main(["launcher", "0", "--fill", "--dry-run"]) == 0
     assert posted == []
     out = capsys.readouterr().out.splitlines()
@@ -491,14 +578,17 @@ def test_a_fill_dry_run_plans_without_creating(
     assert "fill_third: pending, waits for a free slot" in out
     match = SUMMARY.match(out[-1])
     assert match, out[-1]
-    assert match.group(1).endswith("0 skipped (created already), 1 would be created, 0 refused, 2 pending")
+    assert match.group(1).endswith(
+        "0 skipped (created already), 1 would be created, 0 refused, 2 pending "
+        "(0 held by the local-model limit)"
+    )
 
 
 def test_a_fill_never_takes_an_experiment_id(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Naming an arm would be silently ignored: the queue decides the selection."""
-    rnd, _ = _fill_round(tmp_path, monkeypatch, running=0)
+    rnd, _ = _fill_round(tmp_path, monkeypatch, local=0)
     with pytest.raises(SystemExit, match="reads the queue itself"):
         rnd.main(["launcher", "0", "--fill", "fill_first"])
 

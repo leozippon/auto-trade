@@ -25,7 +25,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from autotrade.environment.identity import AgentRefStore
-from autotrade.environment.llm import LOCAL_QWEN_MODEL, MODEL_CHOICES
+from autotrade.environment.llm import LOCAL_QWEN_MODEL, MIMO_FLASH_MODEL, MODEL_CHOICES
 from autotrade.environment.runtime import (
     TRACE_PAYLOAD_HEAD_CHARS,
     AgentTraceWriter,
@@ -50,6 +50,7 @@ from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.webui.manager import (
     ARM_DISK_MARGIN_BYTES,
     MAX_RUNNING_EXPERIMENTS,
+    MAX_RUNNING_LOCAL_EXPERIMENTS,
     ExperimentManager,
     ManagerError,
 )
@@ -82,7 +83,8 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
     assert "experiments_root" not in health
     assert str(tmp_path) not in json.dumps(health)
     assert health["max_running_experiments"] == MAX_RUNNING_EXPERIMENTS
-    assert health["running"] == []
+    assert health["max_running_local_experiments"] == MAX_RUNNING_LOCAL_EXPERIMENTS
+    assert health["running"] == health["running_local"] == []
     assert health["unreadable_experiments"] == []
     assert health["raw_generation"] == {"state": "absent"}
     schema = client.get("/api/parameter-schema").json()
@@ -1393,37 +1395,118 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertTrue(Path(str(record["series_ref"])).is_relative_to(directory))
         self.assertFalse((self.experiments_root / "exp_orphan").exists())
 
-    def test_running_cap_allows_last_slot_and_blocks_overflow(self) -> None:
+    # ---- running-arm limits ------------------------------------------------------
+    def _running_arms(self, *, local: int, hosted: int) -> list[str]:
+        """Running arms with their params on disk, as the console reads them:
+        ``local`` on the local model (both roles), ``hosted`` with both the
+        main session and the sub-agents on a hosted model."""
+
+        names: list[str] = []
+        for kind, count, model in (
+            ("local", local, LOCAL_QWEN_MODEL),
+            ("hosted", hosted, MIMO_FLASH_MODEL),
+        ):
+            for index in range(count):
+                name = f"running_{kind}_{index}"
+                write_json_atomic(
+                    self.experiments_root / name / "hitl/params.json",
+                    {"experiment_id": name, "model": model, "subagent_model": model},
+                )
+                names.append(name)
+        return names
+
+    def _create_under(
+        self, running: list[str], experiment_id: str, **roles: str
+    ) -> dict[str, object]:
         manager = ExperimentManager(self.repo_root, self.experiments_root)
-        running = [f"running_{index}" for index in range(MAX_RUNNING_EXPERIMENTS - 1)]
         with (
             patch.object(manager, "running_experiments", return_value=running),
             patch.object(manager, "_preflight"),
             patch.object(manager, "start_worker", return_value={"spawned": False}),
         ):
-            created = manager.create_experiment(
+            return manager.create_experiment(
                 {
-                    "experiment_id": "exp_last_slot",
+                    "experiment_id": experiment_id,
                     **DEFAULT_RESEARCH_GEOMETRY.to_record(),
+                    **roles,
                 }
             )
-        self.assertEqual(created["experiment_id"], "exp_last_slot")
 
-        running.append("exp_last_slot")
-        with (
-            patch.object(manager, "running_experiments", return_value=running),
-            self.assertRaisesRegex(
-                ManagerError,
-                rf"parallel experiment cap reached \({MAX_RUNNING_EXPERIMENTS}\)",
-            ),
+    def test_local_limit_refuses_a_local_create_and_admits_a_hosted_one(self) -> None:
+        """An arm is local when its main session or its sub-agents run on the
+        local model; only those are refused at the local limit, and the refusal
+        names the limit and the local arms holding it."""
+
+        hosted = {"model": MIMO_FLASH_MODEL, "subagent_model": MIMO_FLASH_MODEL}
+        # The last local slot is still free below the limit, beside hosted arms.
+        running = self._running_arms(local=MAX_RUNNING_LOCAL_EXPERIMENTS - 1, hosted=2)
+        self._create_under(running, "exp_last_local")
+
+        running = self._running_arms(local=MAX_RUNNING_LOCAL_EXPERIMENTS, hosted=0)
+        local_names = ", ".join(sorted(running))
+        for experiment_id, roles in (
+            ("exp_local", {}),
+            ("exp_local_main", {**hosted, "model": LOCAL_QWEN_MODEL}),
+            ("exp_local_subagents", {**hosted, "subagent_model": LOCAL_QWEN_MODEL}),
         ):
-            manager.create_experiment(
+            with self.subTest(experiment_id):
+                with self.assertRaises(ManagerError) as refused:
+                    self._create_under(running, experiment_id, **roles)
+                message = str(refused.exception)
+                self.assertIn(
+                    f"local-model limit reached: {MAX_RUNNING_LOCAL_EXPERIMENTS} running arms",
+                    message,
+                )
+                self.assertIn(f"running on it: {local_names}", message)
+                self.assertFalse((self.experiments_root / experiment_id).exists())
+        created = self._create_under(running, "exp_hosted", **hosted)
+        self.assertEqual(created["experiment_id"], "exp_hosted")
+
+    def test_health_and_listing_report_both_limits_and_the_roster_by_kind(self) -> None:
+        running = self._running_arms(local=1, hosted=1)
+        for name in running:
+            # This test process stands in for the arms' live workers.
+            write_json_atomic(
+                self.experiments_root / name / "hitl/status.json",
                 {
-                    "experiment_id": "exp_overflow",
-                    **DEFAULT_RESEARCH_GEOMETRY.to_record(),
-                }
+                    "schema_version": 1,
+                    "state": "running_session",
+                    "pid": os.getpid(),
+                    "pid_start_ticks": proc_start_ticks(os.getpid()),
+                },
             )
-        self.assertFalse((self.experiments_root / "exp_overflow").exists())
+        expected = {
+            "max_running_experiments": MAX_RUNNING_EXPERIMENTS,
+            "max_running_local_experiments": MAX_RUNNING_LOCAL_EXPERIMENTS,
+            "running": ["running_hosted_0", "running_local_0"],
+            "running_local": ["running_local_0"],
+        }
+        for route in ("/api/health", "/api/experiments"):
+            payload = self.client.get(route).json()
+            with self.subTest(route):
+                self.assertEqual(
+                    {
+                        key: sorted(value) if isinstance(value, list) else value
+                        for key, value in payload.items()
+                        if key in expected
+                    },
+                    expected,
+                )
+
+    def test_total_limit_refuses_local_and_hosted_creates_alike(self) -> None:
+        hosted = {"model": MIMO_FLASH_MODEL, "subagent_model": MIMO_FLASH_MODEL}
+        hosted_count = MAX_RUNNING_EXPERIMENTS - MAX_RUNNING_LOCAL_EXPERIMENTS + 1
+        running = self._running_arms(local=MAX_RUNNING_LOCAL_EXPERIMENTS - 1, hosted=hosted_count)
+        self.assertEqual(len(running), MAX_RUNNING_EXPERIMENTS)
+        for experiment_id, roles in (("exp_local", {}), ("exp_hosted", hosted)):
+            with self.subTest(experiment_id):
+                with self.assertRaisesRegex(
+                    ManagerError,
+                    rf"running-arm limit reached: {MAX_RUNNING_EXPERIMENTS} arms in total; "
+                    rf"running: {', '.join(sorted(running))}$",
+                ):
+                    self._create_under(running, experiment_id, **roles)
+                self.assertFalse((self.experiments_root / experiment_id).exists())
 
     def test_create_is_refused_below_the_free_space_floor_plus_one_arm(self) -> None:
         """An arm created below the Agent tools' floor plus its own views would
@@ -1459,17 +1542,35 @@ class WebuiBackendTest(unittest.TestCase):
             created = manager.create_experiment(request)
         self.assertEqual(created["experiment_id"], "exp_low_disk")
 
-    def test_running_cap_also_guards_worker_restart(self) -> None:
+    def test_running_limits_also_guard_worker_restart(self) -> None:
+        """A (re)start reads the arm's kind from its persisted params and obeys
+        the create rule. No worker entrypoint exists in this repository, so a
+        start that clears both limits fails on exactly that, one step later."""
+
         manager = ExperimentManager(self.repo_root, self.experiments_root)
-        running = [f"running_{index}" for index in range(MAX_RUNNING_EXPERIMENTS)]
-        with (
-            patch.object(manager, "running_experiments", return_value=running),
-            self.assertRaisesRegex(
-                ManagerError,
-                rf"parallel experiment cap reached \({MAX_RUNNING_EXPERIMENTS}\)",
-            ),
+        params_path = self.experiments_root / "exp_hitl/hitl/params.json"
+        local_params = json.loads(params_path.read_text(encoding="utf-8"))
+        hosted_params = {
+            **local_params,
+            "model": MIMO_FLASH_MODEL,
+            "subagent_model": MIMO_FLASH_MODEL,
+        }
+        local_full = self._running_arms(local=MAX_RUNNING_LOCAL_EXPERIMENTS, hosted=0)
+        total_full = local_full + self._running_arms(
+            local=0, hosted=MAX_RUNNING_EXPERIMENTS - MAX_RUNNING_LOCAL_EXPERIMENTS
+        )
+        for params, running, refusal in (
+            (local_params, local_full, "local-model limit reached"),
+            (hosted_params, local_full, "interactive worker entrypoint is unavailable"),
+            (hosted_params, total_full, "running-arm limit reached"),
         ):
-            manager.start_worker("exp_hitl")
+            write_json_atomic(params_path, params)
+            with (
+                self.subTest(model=params.get("model"), running=len(running)),
+                patch.object(manager, "running_experiments", return_value=running),
+                self.assertRaisesRegex(ManagerError, refusal),
+            ):
+                manager.start_worker("exp_hitl")
 
     # ---- traces ----------------------------------------------------------------
     def test_trace_pagination_and_partial_tail(self) -> None:

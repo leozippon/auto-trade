@@ -41,16 +41,19 @@ the trials and effective trials the console will record for it, and the IR bar
 at that count alone.
 
 `--fill` reads the arm list as an ordered queue and keeps the console's running
-slots occupied: it asks /api/health how many are free, skips the arms whose
-experiment directory already exists -- running, completed and failed alike, the
-console's own rule -- and creates the next pending ones in file order through
-the same validation and POST path. Nothing pending or nothing free is the
-steady state and exits 0, so the mode is idempotent and safe on a timer; only a
-creation that was attempted and refused exits non-zero. A timer run writes one
-timestamped summary line -- slots, and how many arms were skipped, created,
-refused and are still pending -- plus one line per arm it created or that was
-refused; with `--dry-run` it also lists each pending arm and whether it takes a
-free slot.
+slots occupied: it asks /api/health how many are free under each of the two
+running-arm limits, skips the arms whose experiment directory already exists --
+running, completed and failed alike, the console's own rule -- and creates the
+next pending ones in file order through the same validation and POST path. A
+local arm reached while the local-model limit is full stays pending without
+stopping the queue, so the hosted arms behind it still take the free slots.
+Nothing pending or nothing free is the steady state and exits 0, so the mode is
+idempotent and safe on a timer; only a creation that was attempted and refused
+exits non-zero. A timer run writes one timestamped summary line -- slots under
+both limits, and how many arms were skipped, created, refused and are still
+pending, and how many of those the local-model limit holds -- plus one line per
+arm it created or that was refused; with `--dry-run` it also lists each pending
+arm and whether it takes a free slot.
 
 RETIRED_IDS records the experiment ids that have been used and archived, so a
 new round cannot quietly reuse one. `logs/archive/` is not part of the
@@ -93,9 +96,10 @@ from autotrade.pipelines.lineage import extract_lineage
 from autotrade.pipelines.verdict import information_ratio_bar
 from autotrade.pipelines.worker import resolve_worker_options
 
-# The console's own id rule; importing it keeps this module from growing a
-# second copy of the create contract.
+# The console's own id and local-arm rules; importing them keeps this module
+# from growing a second copy of the create contract.
 from autotrade.webui.manager import _ID as EXPERIMENT_ID_RE
+from autotrade.webui.manager import uses_local_model
 
 EXPERIMENTS_ROOT = REPO_ROOT / "experiments"
 ARCHIVE_ROOT = REPO_ROOT / "logs" / "archive"
@@ -364,11 +368,11 @@ def post(port: int, params: dict[str, object]) -> bool:
 
 
 def health(port: int) -> dict[str, object]:
-    """The console's running roster and its parallel cap.
+    """The console's running roster and its two running-arm limits.
 
-    Read rather than assumed: the cap is the console's constant and the roster
-    changes under the operator's hands, so a fill that cannot read them refuses
-    instead of creating blind against a cap it guessed.
+    Read rather than assumed: the limits are the console's constants and the
+    roster changes under the operator's hands, so a fill that cannot read them
+    refuses instead of creating blind against limits it guessed.
     """
     url = f"http://127.0.0.1:{port}/api/health"
     try:
@@ -520,28 +524,53 @@ class Round:
             " still staging and checks that release is published and reaches Held-out."
         )
 
-    def fill(self, port: int, *, dry_run: bool) -> tuple[list[str], list[str], str]:
-        """The arms to create now -- the pending ones, in order, up to the free
-        slots -- every pending arm, and the slot part of the run's summary line.
+    def fill(self, port: int, *, dry_run: bool) -> tuple[list[str], list[str], list[str], str]:
+        """The arms to create now, every pending arm, the pending local arms
+        the local-model limit holds back, and the slot part of the summary line.
 
         The queue is the arm order of the round file. An arm whose experiment
         directory exists has been created already -- the console refuses a
-        second one whatever state it reached -- so only the rest are pending,
-        and only as many of them as the console has slots free right now. A
-        dry-run lists the pending arms; a timer run only counts them.
+        second one whatever state it reached -- so only the rest are pending.
+        They take the console's free slots in order, except that a local arm
+        (the console's own ``uses_local_model``) reached while the local-model
+        limit is full is held: it stays pending and the arms behind it go ahead.
+        A dry-run lists the pending arms; a timer run only counts them.
         """
         record = health(port)
         running = sorted(str(name) for name in record["running"])
+        running_local = sorted(str(name) for name in record["running_local"])
         cap = int(record["max_running_experiments"])
+        local_cap = int(record["max_running_local_experiments"])
         free = max(cap - len(running), 0)
+        local_free = max(local_cap - len(running_local), 0)
+        slots = (
+            f"slots {len(running)}/{cap} in use ({', '.join(running) or 'none'}), {free} free; "
+            f"local-model slots {len(running_local)}/{local_cap} in use "
+            f"({', '.join(running_local) or 'none'}), {local_free} free"
+        )
         pending = [arm for arm in self.arms if not (EXPERIMENTS_ROOT / arm).exists()]
-        chosen = pending[:free]
+        chosen: list[str] = []
+        held: list[str] = []
+        for experiment_id in pending:
+            if len(chosen) == free:
+                break
+            if uses_local_model(self.request_params(experiment_id)):
+                if local_free == 0:
+                    held.append(experiment_id)
+                    continue
+                local_free -= 1
+            chosen.append(experiment_id)
         if dry_run:
             for experiment_id in pending:
-                slot = "takes a free slot" if experiment_id in chosen else "waits for a free slot"
+                slot = (
+                    "takes a free slot"
+                    if experiment_id in chosen
+                    else "waits for a local-model slot"
+                    if experiment_id in held
+                    else "waits for a free slot"
+                )
                 print(f"{experiment_id}: pending, {slot}")
-        slots = f"slots {len(running)}/{cap} in use ({', '.join(running) or 'none'}), {free} free"
-        return chosen, pending, slots
+        return chosen, pending, held, slots
 
     def main(self, argv: list[str], usage: str | None = None) -> int:
         """`<port> [--dry-run] [--fill] [experiment_id ...]`, shared by every round file."""
@@ -581,7 +610,7 @@ class Round:
         if fill:
             # The queue decides the selection; --dry-run still decides whether
             # anything is sent.
-            selected, pending, slots = self.fill(port, dry_run=dry_run)
+            selected, pending, held, slots = self.fill(port, dry_run=dry_run)
         else:
             selected = [arm for arm in self.arms if not wanted or arm in wanted]
         created: list[str] = []
@@ -627,7 +656,8 @@ class Round:
                 f"{_now()} fill {Path(argv[0]).stem}: {slots}; queue {len(self.arms)}: "
                 f"{len(self.arms) - len(pending)} skipped (created already), "
                 f"{done} {'would be created' if dry_run else 'created'}, "
-                f"{len(failed)} refused, {len(pending) - done - len(failed)} pending",
+                f"{len(failed)} refused, {len(pending) - done - len(failed)} pending "
+                f"({len(held)} held by the local-model limit)",
                 flush=True,
             )
         if failed:

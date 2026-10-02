@@ -36,7 +36,6 @@ from autotrade.pipelines.hitl_state import (
 
 from . import equity, issues, memory, registry, skill_feedback, steps, traces, trading
 from .manager import (
-    MAX_RUNNING_EXPERIMENTS,
     ExperimentManager,
     ManagerDeleteError,
     ManagerError,
@@ -239,8 +238,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         healthy = raw_generation["state"] in _HEALTHY_RAW_STATES and not unreadable
         return {
             "status": "ok" if healthy else "degraded",
-            "max_running_experiments": MAX_RUNNING_EXPERIMENTS,
-            "running": manager.running_experiments(),
+            **manager.running_slots(),
             "unreadable_experiments": unreadable,
             "raw_generation": raw_generation,
         }
@@ -264,8 +262,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         return {
             "experiments": rows,
             "best": registry.best_experiment(rows),
-            "running": manager.running_experiments(),
-            "max_running_experiments": MAX_RUNNING_EXPERIMENTS,
+            **manager.running_slots(),
         }
 
     @app.post("/api/experiments")

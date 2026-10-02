@@ -20,6 +20,10 @@ from autotrade.environment.identity import (
     AgentRefStore,
     LegacyExperimentError,
 )
+from autotrade.environment.llm.model_profiles import (
+    LOCAL_QWEN_MODEL,
+    canonicalize_model_name,
+)
 from autotrade.environment.runtime import utc_now_iso, write_json_atomic
 from autotrade.environment.sandbox import EXPERIMENT_LABEL
 from autotrade.environment.sandbox_images import reclaim_experiment_sandbox_images
@@ -50,17 +54,21 @@ from autotrade.pipelines.skills import create_operating_memory_snapshot
 from .public_identity import PublicIdentity
 from .registry import experiment_state, read_ledger_records, worker_log_ref
 
-# Parallel-run ceiling for the console: a create or a resume past this is
-# refused. Runner memory no longer binds (four runners hold 1-3 GiB each
-# since evaluation slots stream instead of decoding whole); what four arms
-# share is the local model service and the host's page cache and IO. In
-# production the service's aggregate generation throughput levels off at about
-# 8 concurrent requests (~150 tok/s), while four parent conversations with
-# their sub-agent fan-out (at most 4 concurrent each) run 3-5 requests at a
-# time (p50/p90) and use about half of that. The operator holds concurrency at
-# four; a new direction therefore replaces the weakest running arm rather than
-# adding one. Measured rationale: docs/deployment-documentation.md.
-MAX_RUNNING_EXPERIMENTS = 4
+# Running-arm limits, one rule for create and resume: a start is refused when
+# MAX_RUNNING_EXPERIMENTS arms already run, or when the arm is a local one
+# (uses_local_model) and MAX_RUNNING_LOCAL_EXPERIMENTS local arms already run.
+# Runner memory does not bind (a runner holds 1-3 GiB since evaluation slots
+# stream instead of decoding whole, and an arm's replays run in containers
+# capped at 16 GiB). The local limit protects the shared local model service:
+# its aggregate generation throughput levels off at about 8 concurrent
+# requests (~150 tok/s), while four parent conversations with their sub-agent
+# fan-out (at most 4 concurrent each) run 3-5 requests at a time (p50/p90) and
+# use about half of that. An arm whose main session and sub-agents are hosted
+# leaves that service almost idle, so only the total limit, which protects the
+# host's page cache and IO, applies to it. Measured rationale:
+# docs/deployment-documentation.md.
+MAX_RUNNING_EXPERIMENTS = 8
+MAX_RUNNING_LOCAL_EXPERIMENTS = 4
 # What one new arm writes of its own before its first validation: the PIT views
 # and as-of stash its seed does not carry, measured at 0.5-2.5 GiB of unique
 # bytes per arm. A create is refused unless the experiments filesystem keeps the
@@ -252,6 +260,25 @@ def _signal_worker_group(pid: int, sig: signal.Signals) -> None:
         os.kill(pid, sig)
 
 
+def uses_local_model(params: Mapping[str, object]) -> bool:
+    """Whether an arm counts against MAX_RUNNING_LOCAL_EXPERIMENTS: its main
+    session or its sub-agents run on the local model.
+
+    Read the way the registry reads an arm's effective configuration, its
+    params over the create defaults. A role left empty counts as local: the
+    worker runs an empty main role on the local model and an empty sub-agent
+    role on the main model, so this can only over-count the local service's
+    load.
+    """
+
+    effective = {**WEB_CREATE_DEFAULTS, **params}
+    return any(
+        canonicalize_model_name(str(effective.get(role) or LOCAL_QWEN_MODEL))
+        == LOCAL_QWEN_MODEL
+        for role in ("model", "subagent_model")
+    )
+
+
 class ManagerError(RuntimeError):
     pass
 
@@ -291,13 +318,12 @@ class ExperimentManager:
         # resume and set_directive.
         self._experiment_locks: dict[str, threading.RLock] = {}
         self._locks_guard = threading.Lock()
-        # The one genuinely console-wide invariant left: MAX_RUNNING_EXPERIMENTS.
-        # A holder keeps it from the running-slot count through the spawn that
-        # consumes the slot, so two callers can never claim the same one:
-        # create_experiment holds it across its pre-flight and the
-        # operating-memory snapshot as well, and restart
-        # holds it across the terminate that frees the slot it is about to
-        # retake. Creates and starts therefore wait for each other, and for a
+        # The one genuinely console-wide invariant left: the running-arm
+        # limits. A holder keeps it from the running-slot count through the
+        # spawn that consumes the slot, so two callers can never claim the same
+        # one: create_experiment holds it across its pre-flight and the
+        # operating-memory snapshot as well, and restart holds it across the
+        # terminate that frees the slot it is about to retake. Creates and starts therefore wait for each other, and for a
         # restart's SIGTERM grace; control actions on other experiments never
         # take it. Reentrant because both paths end in the start_worker that
         # takes it again on the same thread.
@@ -347,7 +373,7 @@ class ExperimentManager:
             directory = self.experiments_root / experiment_id
             if directory.exists():
                 raise ManagerError(f"experiment {experiment_id!r} already exists")
-            self._require_running_slot()
+            self._require_running_slot(local=uses_local_model(merged))
             self._require_free_space()
             merged.update(
                 {
@@ -469,6 +495,31 @@ class ExperimentManager:
                 running.append(directory.name)
         return running
 
+    def _running_roster(self) -> tuple[list[str], list[str]]:
+        """Every running arm, and those of them that count against the local
+        limit. An arm whose params.json cannot be read counts as local
+        (:func:`uses_local_model` over the defaults)."""
+
+        running = self.running_experiments()
+        return running, [
+            name
+            for name in running
+            if uses_local_model(
+                _read_json(self.experiments_root / name / "hitl/params.json")
+            )
+        ]
+
+    def running_slots(self) -> dict[str, object]:
+        """Both limits and the running roster, as the console reports them."""
+
+        running, running_local = self._running_roster()
+        return {
+            "max_running_experiments": MAX_RUNNING_EXPERIMENTS,
+            "max_running_local_experiments": MAX_RUNNING_LOCAL_EXPERIMENTS,
+            "running": running,
+            "running_local": running_local,
+        }
+
     def unreadable_experiments(self) -> list[dict[str, object]]:
         """Experiments whose hitl/status.json cannot be read (corrupt JSON or
         a foreign schema_version). They are excluded from every running roster
@@ -503,7 +554,9 @@ class ExperimentManager:
                 raise ManagerError(
                     f"experiment {experiment_id!r} already has a live worker"
                 )
-            self._require_running_slot()
+            self._require_running_slot(
+                local=uses_local_model(_read_json(directory / "hitl/params.json"))
+            )
             if not self.worker_script.is_file():
                 raise ManagerError("interactive worker entrypoint is unavailable")
             # A stop request left behind by a previous run would immediately
@@ -573,12 +626,22 @@ class ExperimentManager:
                 "worker_log": log_ref,
             }
 
-    def _require_running_slot(self) -> None:
-        running = self.running_experiments()
+    def _require_running_slot(self, *, local: bool) -> None:
+        """Refuse a start past either running-arm limit, naming the limit and
+        the running arms that count against it."""
+
+        running, running_local = self._running_roster()
         if len(running) >= MAX_RUNNING_EXPERIMENTS:
             raise ManagerError(
-                f"parallel experiment cap reached ({MAX_RUNNING_EXPERIMENTS}); "
+                f"running-arm limit reached: {MAX_RUNNING_EXPERIMENTS} arms in total; "
                 f"running: {', '.join(sorted(running))}"
+            )
+        if local and len(running_local) >= MAX_RUNNING_LOCAL_EXPERIMENTS:
+            raise ManagerError(
+                "local-model limit reached: "
+                f"{MAX_RUNNING_LOCAL_EXPERIMENTS} running arms whose main session or "
+                f"sub-agents run on {LOCAL_QWEN_MODEL}; running on it: "
+                f"{', '.join(sorted(running_local))}"
             )
 
     def _require_free_space(self) -> None:
@@ -850,8 +913,8 @@ class ExperimentManager:
         # The slot lock spans the terminate AND the respawn, because the
         # terminate below frees this experiment's own running slot: taking it
         # only in start_worker let a concurrent create claim that slot while
-        # the old worker was exiting, and the restart then failed on the
-        # parallel-experiment cap, leaving the experiment stopped. The price is
+        # the old worker was exiting, and the restart then failed on a
+        # running-arm limit, leaving the experiment stopped. The price is
         # that a create or start begun during a restart waits out its grace;
         # control actions on other experiments still take no slot lock. Lock
         # order stays experiment -> slots: control() already holds this
