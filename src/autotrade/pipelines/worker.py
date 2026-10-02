@@ -48,6 +48,7 @@ from autotrade.environment.sandbox import (
     SandboxLimits,
     SandboxSpec,
     experiment_container_labels,
+    remove_sandbox_tree,
 )
 from autotrade.environment.sandbox_images import prepare_experiment_sandbox_image
 from autotrade.environment.strategy import StrategySchedule
@@ -999,7 +1000,7 @@ def run_local_interactive_worker(
         # before any snapshot, sandbox or gateway preparation.
         payload = _terminal_status(ledger, read_status(hitl / "status.json"))
         write_json_atomic(hitl / "status.json", payload)
-        release_finished_sandbox(options)
+        _release_finished_arm(options, payload)
         return payload
     if (
         command_runner_factory is None
@@ -1060,7 +1061,7 @@ def run_local_interactive_worker(
         except Exception as exc:  # noqa: BLE001 - the verdict stands; the failure is recorded
             payload["paper_book_error"] = str(exc)
     write_json_atomic(hitl / "status.json", payload)
-    release_finished_sandbox(options)
+    _release_finished_arm(options, payload)
     return payload
 
 
@@ -1089,21 +1090,67 @@ def _write_session_plan(
     return planned_sessions()
 
 
+def _release_finished_arm(
+    options: InteractiveWorkerOptions, payload: dict[str, object]
+) -> None:
+    """Drop the derived trees of an arm that will not resume, once its
+    terminal status is written: the session workspace and the PIT view cache.
+
+    Best-effort: a cache that stays is named in the status, and the arm's
+    outcome stands. A stopped or failed arm never gets here and keeps both.
+    """
+
+    release_finished_sandbox(options)
+    try:
+        release_pit_views(options.experiment_dir)
+    except Exception as exc:  # noqa: BLE001 - the verdict stands; the failure is recorded
+        payload["pit_views_release_error"] = f"{type(exc).__name__}: {exc}"
+        write_json_atomic(options.experiment_dir / "hitl" / "status.json", payload)
+
+
 def release_finished_sandbox(options: InteractiveWorkerOptions) -> None:
     """Remove the session workspace once this arm will not resume.
 
-    The ledger, frozen strategy and pit views stay in the experiment
-    directory. An interrupted attempt keeps the tree: the next start
-    continues in it.
+    The ledger and frozen strategy stay in the experiment directory. An
+    interrupted attempt keeps the tree: the next start continues in it.
     """
 
     root = options.work_root.resolve()
     path = (options.work_root / options.experiment_id).resolve()
     if path == root or root not in path.parents or not path.is_dir():
         return
-    from autotrade.environment.sandbox import remove_sandbox_tree
-
     remove_sandbox_tree(path)
+
+
+def pit_views_tree(experiment_dir: Path) -> Path | None:
+    """The arm's PIT view cache, ``<experiment>/pit_views``, or None without one.
+
+    The fixed name, not the ``pit_cache_root`` parameter, which may name the
+    experiment directory itself. Raises ValueError when ``pit_views`` is not a
+    plain directory: deleting through a link could reach a tree the arm does
+    not own.
+    """
+
+    views = experiment_dir / "pit_views"
+    if views.is_symlink() or (views.exists() and not views.is_dir()):
+        raise ValueError(f"pit_views is not a plain directory: {views}")
+    return views if views.is_dir() else None
+
+
+def release_pit_views(experiment_dir: Path) -> None:
+    """Delete a finished arm's PIT view cache; the worker's terminal step and
+    ``scripts/experiments/prune_pit_views.py`` share it.
+
+    Its only reader is this arm's snapshot provider, which a worker with a
+    verdict never builds, and a missing tree is rebuilt on demand. Directory
+    modes are unlocked and file modes left alone: the views are hard links into
+    the seed and into every other arm seeded from it. Raises OSError when the
+    tree remains.
+    """
+
+    views = pit_views_tree(experiment_dir)
+    if views is not None and not remove_sandbox_tree(views):
+        raise OSError(f"pit_views still exists after removal: {views}")
 
 
 def _terminal_status(
@@ -1643,5 +1690,7 @@ __all__ = [
     "LLMWorkerSettings",
     "build_experiment_pipeline",
     "load_worker_options",
+    "pit_views_tree",
+    "release_pit_views",
     "run_local_interactive_worker",
 ]

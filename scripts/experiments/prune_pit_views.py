@@ -8,7 +8,9 @@ carries a verdict republishes the completion status and exits before any
 snapshot is prepared; a missing tree is rebuilt on demand (re-linked from the
 seed, the rest cold-built). So once an arm is finished for good its views can
 go, together with the sandbox work root a worker left behind before it learned
-to release it.
+to release it. A worker that writes an arm's terminal status releases both
+itself, through the same ``release_pit_views``; this tool is for the arms that
+ended before it did, and for arms stopped after their verdict.
 
 Finished for good means: hitl status ``completed`` or ``stopped``, no live
 worker, and a ledger verdict (``graduated``, ``discarded`` or
@@ -47,11 +49,8 @@ from autotrade.pipelines.hitl_state import (
     status_pid_alive,
 )
 from autotrade.pipelines.ledger import ExperimentLedger, experiment_verdict
-from autotrade.webui.manager import (
-    ManagerDeleteError,
-    _derived_sandbox_tree,
-    _remove_readonly_tree,
-)
+from autotrade.pipelines.worker import pit_views_tree, release_pit_views
+from autotrade.webui.manager import ManagerDeleteError, _derived_sandbox_tree
 
 TERMINAL_STATES = ("completed", "stopped")
 GIB = 1024**3
@@ -79,10 +78,8 @@ def derived_trees(repo_root: Path, directory: Path) -> dict[str, Path]:
     """The arm's derived trees that exist: its PIT views and its sandbox root."""
 
     trees: dict[str, Path] = {}
-    views = directory / "pit_views"
-    if views.is_symlink() or (views.exists() and not views.is_dir()):
-        raise ValueError(f"pit_views is not a plain directory: {views}")
-    if views.is_dir():
+    views = pit_views_tree(directory)
+    if views is not None:
         trees["pit_views"] = views
     sandbox = _derived_sandbox_tree(repo_root, directory.name)
     if sandbox is not None:
@@ -114,11 +111,11 @@ def freed_bytes(root: Path) -> int:
 
 
 def _delete(label: str, path: Path) -> None:
-    if label == "sandbox":
-        if not remove_sandbox_tree(path):
-            raise OSError(f"sandbox tree still exists after removal: {path}")
-    else:
-        _remove_readonly_tree(path)
+    if label == "pit_views":
+        # The worker's own release of a finished arm's views.
+        release_pit_views(path.parent)
+    elif not remove_sandbox_tree(path):
+        raise OSError(f"sandbox tree still exists after removal: {path}")
 
 
 def prune(repo_root: Path, *, apply: bool) -> int:
@@ -151,7 +148,7 @@ def prune(repo_root: Path, *, apply: bool) -> int:
             for label, path in trees.items():
                 try:
                     _delete(label, path)
-                except (OSError, ManagerDeleteError) as exc:
+                except (OSError, ValueError, ManagerDeleteError) as exc:
                     print(f"{name}: deleting {label} failed, stopping: {exc}", file=sys.stderr)
                     return 1
         print(f"{name}: {'freed' if apply else 'would free'} {sum(sizes.values()) / GIB:.2f} GiB ({detail})")

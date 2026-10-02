@@ -155,6 +155,11 @@ def test_an_arm_runs_research_freezes_once_and_replays_forward_and_heldout_in_on
     assert result["verdict"] == verdict
     assert result["final_strategy_artifact"] == frozen["artifact_id"]
     assert read_status(experiment / "hitl" / "status.json")["verdict"] == verdict
+    # The terminal step released the PIT view cache, and only that: the durable
+    # record read above and below is intact.
+    assert not (experiment / "pit_views").exists()
+    assert "pit_views_release_error" not in result
+    assert {path.name for path in experiment.iterdir()} >= {".host", "artifacts", "hitl", "ledgers"}
     # The graduate opened its own Paper book on the frozen artifact.
     assert (result["paper_book"], result.get("paper_book_error")) == (experiment.name, None)
     book = json.loads((repo / "data/trading/paper" / experiment.name / "book.json").read_text(encoding="utf-8"))
@@ -220,6 +225,8 @@ def test_a_worker_stopped_after_the_freeze_resumes_with_the_forward_replay_only(
     ledger = ExperimentLedger(experiment / "ledgers" / "experiment_ledger.jsonl")
     assert frozen_record(ledger.read()) is not None
     assert forward_record(ledger.read()) is None
+    # A failed run may resume: its cache stays until the verdict.
+    assert (experiment / "pit_views" / "provider.json").is_file()
 
     research = experiment_module.RollingExperimentPipeline.run_research_session
 
@@ -231,6 +238,48 @@ def test_a_worker_stopped_after_the_freeze_resumes_with_the_forward_replay_only(
     assert state["forward_calls"] == 2
     assert result["verdict"]["status"] == "graduated"
     assert research is not no_more_research
+    assert not (experiment / "pit_views").exists()
+
+
+def test_an_arm_stopped_before_its_verdict_keeps_its_pit_views(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from autotrade.pipelines.hitl_state import read_control, write_control
+
+    repo, experiment = make_arm(tmp_path)
+    control_path = experiment / "hitl" / "control.json"
+    real = experiment_module.RollingExperimentPipeline.run_research_session
+
+    def stop_after_research(self, **kwargs):
+        record = real(self, **kwargs)
+        control = read_control(control_path)
+        control.request = "stop"
+        write_control(control_path, control)
+        return record
+
+    monkeypatch.setattr(experiment_module.RollingExperimentPipeline, "run_research_session", stop_after_research)
+    result = run_local_interactive_worker(load_worker_options(experiment, repo_root=repo))
+    assert result["status"] == "stop"
+    rows = ExperimentLedger(experiment / "ledgers" / "experiment_ledger.jsonl").read()
+    assert frozen_record(rows) is not None and experiment_verdict(rows) is None
+    assert (experiment / "pit_views" / "provider.json").is_file()
+
+
+def test_a_cache_that_cannot_be_released_is_recorded_and_the_verdict_stands(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    repo, experiment = make_arm(tmp_path)
+
+    def stuck(_experiment_dir: Path) -> None:
+        raise OSError("pit_views still exists after removal")
+
+    monkeypatch.setattr(worker, "release_pit_views", stuck)
+    result = run_local_interactive_worker(load_worker_options(experiment, repo_root=repo))
+    assert result["state"] == "completed"
+    assert result["verdict"]["status"] == "graduated"
+    assert result["pit_views_release_error"] == "OSError: pit_views still exists after removal"
+    assert read_status(experiment / "hitl" / "status.json") == result
+    assert (experiment / "pit_views" / "provider.json").is_file()
 
 
 def test_a_failed_replay_attempt_is_recorded_and_retried_from_forward_start(
