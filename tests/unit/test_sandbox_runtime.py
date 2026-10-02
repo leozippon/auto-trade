@@ -432,7 +432,7 @@ def test_experiment_image_prepare_is_atomic_and_resume_uses_the_same_uuid4_tag(
                     experiment_dir=experiment_dir,
                 )
             )
-        except BaseException as exc:  # pragma: no cover - asserted below
+        except BaseException as exc:  # pragma: no cover - asserted below  # noqa: BLE001 - worker thread hands any failure to the main thread
             errors.append(exc)
 
     with (

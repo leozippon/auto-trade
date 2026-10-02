@@ -207,7 +207,7 @@ def _parquet_file_summary(path: Path, root: Path, mount_root: str, *, detailed: 
             null_counts = _metadata_null_counts(metadata, columns)
             if null_counts:
                 record["metadata_null_counts"] = null_counts
-    except Exception as exc:  # pragma: no cover - defensive for malformed local artifacts
+    except Exception as exc:  # pragma: no cover - defensive for malformed local artifacts  # noqa: BLE001 - metadata failure is recorded on the record
         record["metadata_error"] = _metadata_error_message(exc, path=path, root=root, mount_path=record["mount_path"])
     size = int(record["size_bytes"])
     row_count = int(record["rows"]) if isinstance(record.get("rows"), int) else 0

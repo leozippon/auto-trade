@@ -149,7 +149,7 @@ def resolve_event_flow_audit_end_date(ctx: RunContext) -> str:
     event_extra_offset = int(ctx.job.get("event_flow_end_extra_offset_days", 0))
     if event_extra_offset:
         event_flow_end_date = (
-            datetime.strptime(ctx.end_date, "%Y%m%d").date() - timedelta(days=event_extra_offset)
+            datetime.strptime(ctx.end_date, "%Y%m%d").date() - timedelta(days=event_extra_offset)  # noqa: DTZ007 - calendar date, no time of day
         ).strftime("%Y%m%d")
     return event_flow_end_date
 
@@ -176,7 +176,7 @@ def build_context(args: argparse.Namespace) -> RunContext:
         # A declared lookback wins for every operation: the disclosure job is
         # download_event_flow but needs the trailing month for late vendor
         # corrections, unlike the same-day pre-open margin jobs below.
-        end_day = datetime.strptime(end_date, "%Y%m%d").date()
+        end_day = datetime.strptime(end_date, "%Y%m%d").date()  # noqa: DTZ007 - calendar date, no time of day
         start_date = (end_day - timedelta(days=int(job["start_date_lookback_days"]))).strftime("%Y%m%d")
     elif job.get("operation") == "download_event_flow":
         start_date = end_date

@@ -166,7 +166,7 @@ class InteractiveExperimentRunner:
                 self.execute_session(session, context)
             except (ExperimentStopped, AgentSessionBudgetExhausted, FrozenArtifactMutated):
                 raise
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - session failure is kept and retried or re-raised after the last attempt
                 last_error = exc
                 if attempt >= self.session_max_attempts:
                     break

@@ -2242,7 +2242,7 @@ def selected_fundamental_datasets(values: Iterable[str] | None) -> list[str]:
     return select_datasets(values, default=FUNDAMENTAL_DATASETS, allowed=FUNDAMENTAL_SPECS, label="fundamental")
 
 def parse_yyyymmdd(value: str) -> date:
-    return datetime.strptime(value, "%Y%m%d").date()
+    return datetime.strptime(value, "%Y%m%d").date()  # noqa: DTZ007 - calendar date, no time of day
 
 def format_yyyymmdd(value: date) -> str:
     return value.strftime("%Y%m%d")
@@ -3098,7 +3098,7 @@ def add_intraday_by_date_common_args(
     expected_choices = expected_codes_choices or ["none", "daily", "active", "minute"]
     add_raw_arg(parser)
     parser.add_argument("--start-date", default="20200101")
-    parser.add_argument("--end-date", default=date.today().strftime("%Y%m%d"))
+    parser.add_argument("--end-date", default=date.today().strftime("%Y%m%d"))  # noqa: DTZ011 - CLI default is a calendar date on the host's local clock
     parser.add_argument("--output-dataset", default=STK_MINS_BY_DATE_DATASET)
     parser.add_argument("--codes", nargs="+", help="Optional explicit ts_code list for window tests or targeted refreshes.")
     parser.add_argument("--max-codes", type=int, help="Optional first-N stock_basic/daily codes for window tests.")

@@ -243,7 +243,7 @@ class IntradayStatsContractTest(unittest.TestCase):
         # during day D's session, visible at the D+1 pre-open.
         self.assertNotIn("intraday_stats", EVENT_DATASET_REFRESH_NODES)
         stamp = INTRADAY_STATS_CONTRACT.available_at(day)
-        for when, visible in ((datetime(2022, 1, 5, 14, 0), False), (datetime(2022, 1, 6, 8, 30), True)):
+        for when, visible in ((datetime(2022, 1, 5, 14, 0), False), (datetime(2022, 1, 6, 8, 30), True)):  # noqa: DTZ001 - naive value is stamped with CN_TZ immediately
             cutoff = event_dataset_visible_cutoff("intraday_stats", when.replace(tzinfo=CN_TZ))
             self.assertEqual(stamp <= cutoff, visible, when)
             self.assertEqual(cutoff, event_dataset_visible_cutoff("intraday_flow", when.replace(tzinfo=CN_TZ)))

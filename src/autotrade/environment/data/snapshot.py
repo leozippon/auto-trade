@@ -1613,7 +1613,7 @@ class SnapshotBuilder:
         return [
             key
             for key in self.store.trade_dates(dataset)
-            if contract.available_at(datetime.strptime(key, "%Y%m%d").date()) <= decision_time
+            if contract.available_at(datetime.strptime(key, "%Y%m%d").date()) <= decision_time  # noqa: DTZ007 - calendar date, no time of day
             and pd.Timestamp(key, tz=CN_TZ) >= window_start
         ]
 
@@ -2109,7 +2109,7 @@ class SnapshotBuilder:
             basic_dates = [
                 d
                 for d in self.store.trade_dates("daily_basic")
-                if d <= day and contract.available_at(datetime.strptime(d, "%Y%m%d").date()) <= decision_time
+                if d <= day and contract.available_at(datetime.strptime(d, "%Y%m%d").date()) <= decision_time  # noqa: DTZ007 - calendar date, no time of day
             ]
             if not basic_dates:
                 raise FileNotFoundError(f"universe screening needs a daily_basic partition at or before {day}")
@@ -2329,7 +2329,7 @@ def _stamp_daily_available_at(daily: pd.DataFrame, contract) -> pd.DataFrame:
         return daily
     out = daily.copy()
     out["available_at"] = [
-        contract.available_at(datetime.strptime(str(date), "%Y%m%d").date()).isoformat()
+        contract.available_at(datetime.strptime(str(date), "%Y%m%d").date()).isoformat()  # noqa: DTZ007 - calendar date, no time of day
         for date in out["trade_date"].astype(str)
     ]
     return out

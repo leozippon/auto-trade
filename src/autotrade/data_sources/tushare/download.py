@@ -765,7 +765,7 @@ def capture_open_auction(args: argparse.Namespace) -> int:
                 )
                 candidate = frame(result).reset_index(drop=True)
                 last_errors = _validate_auction_capture(candidate, trade_date, min_rows=min_rows)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - query failure is reported as a not-ready capture error
                 last_errors = [f"query_error={type(exc).__name__}: {exc}"]
                 stable_count = 0
                 last_snapshot = ""
@@ -795,7 +795,7 @@ def capture_open_auction(args: argparse.Namespace) -> int:
                 skipped_slots = math.floor((now - next_poll_at) / poll_interval) + 1
                 next_poll_at += skipped_slots * poll_interval
             time.sleep(min(next_poll_at - now, remaining))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - setup failure is reported as a not-ready outcome without mutation
         print(json.dumps({
             "status": "not_ready_no_mutation",
             "trade_date": trade_date,
@@ -885,7 +885,7 @@ def _recheck_stk_auction_day(args: argparse.Namespace, repo_root: Path, raw_dir:
         result, pages = query_paged(client, spec.api_name, {"trade_date": trade_date}, spec.fields, args.page_limit)
         candidate = frame(result).reset_index(drop=True)
         errors = _validate_auction_capture(candidate, trade_date, min_rows=min_rows)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - query failure is reported as recheck_invalid
         errors = [f"query_error={type(exc).__name__}: {exc}"]
     if errors:
         print(json.dumps({
@@ -2695,7 +2695,7 @@ def date_value_in_window(value: object, start_date: str, end_date: str) -> bool:
         return False
     try:
         parsed = pd.Timestamp(text).strftime("%Y%m%d")
-    except Exception:
+    except Exception:  # noqa: BLE001 - an unparseable date is simply outside the window
         return False
     return start_date <= parsed <= end_date
 
@@ -2931,7 +2931,7 @@ def read_stk_mins_source_subset(path: Path, trade_dates: set[str]) -> pd.DataFra
     columns = [col for col in STK_MINS_REQUIRED_COLUMNS if col in pq.ParquetFile(path).schema_arrow.names]
     try:
         df = pd.read_parquet(path, columns=columns, filters=[("trade_date", "in", sorted(trade_dates))])
-    except Exception:
+    except Exception:  # noqa: BLE001 - filtered read failure retries unfiltered; a second failure propagates
         df = pd.read_parquet(path, columns=columns)
     if df.empty or "trade_date" not in df.columns:
         return pd.DataFrame(columns=columns)
@@ -3118,7 +3118,7 @@ def update_intraday_by_date(args: argparse.Namespace) -> int:
                 }
                 try:
                     result, pages = query_paged(client, STK_MINS_API_NAME, params, STK_MINS_FIELDS, page_limit)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - non-quota failures mark the batch failed for the final report
                     if STK_MINS_QUOTA_MARKER in str(exc):
                         quota_error = str(exc)
                         break
@@ -3448,7 +3448,7 @@ def sidecar_params(path: Path) -> dict[str, Any]:
         return {}
     try:
         return json.loads(meta_path.read_text(encoding="utf-8")).get("params") or {}
-    except Exception:
+    except Exception:  # noqa: BLE001 - unreadable sidecar is treated as having no params
         return {}
 
 def normalized_coverage_bound(value: Any, *, end: bool) -> str:
@@ -3766,7 +3766,7 @@ def add_download_parser(sub: argparse._SubParsersAction) -> None:
     core.add_raw_arg(parser)
     parser.add_argument("--start-date", default="20100101")
     parser.add_argument("--bak-start-date", default="20160101")
-    parser.add_argument("--end-date", default=date.today().strftime("%Y%m%d"))
+    parser.add_argument("--end-date", default=date.today().strftime("%Y%m%d"))  # noqa: DTZ011 - CLI default is a calendar date on the host's local clock
     parser.add_argument("--trade-cal-end-date", help="Optional reference-tier lookahead end date used only for trade_cal coverage.")
     parser.add_argument("--datasets", nargs="+")
     parser.add_argument("--refresh-daily-datasets", nargs="+", choices=core.DAILY_DOWNLOAD_DATASETS, default=[])
@@ -3806,7 +3806,7 @@ def add_download_parser(sub: argparse._SubParsersAction) -> None:
 def add_update_parser(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser("update", help="fill missing TuShare data across all retained domains")
     core.add_raw_arg(parser)
-    parser.add_argument("--end-date", default=date.today().strftime("%Y%m%d"))
+    parser.add_argument("--end-date", default=date.today().strftime("%Y%m%d"))  # noqa: DTZ011 - CLI default is a calendar date on the host's local clock
     parser.add_argument("--start-date", required=True, help="Fill missing data from this date through --end-date across all retained data domains.")
     parser.add_argument("--bak-start-date", help="Optional bak_basic lower bound. Defaults to --start-date.")
     parser.add_argument(
@@ -3984,9 +3984,9 @@ def add_share_float_parser(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser("download-share-float-complete", help="download share_float through ann_date and targeted ts_code rescue paths")
     core.add_raw_arg(parser)
     parser.add_argument("--ann-start-date", default="20100101")
-    parser.add_argument("--ann-end-date", default=date.today().strftime("%Y%m%d"))
+    parser.add_argument("--ann-end-date", default=date.today().strftime("%Y%m%d"))  # noqa: DTZ011 - CLI default is a calendar date on the host's local clock
     parser.add_argument("--float-start-date", default="20200101")
-    parser.add_argument("--float-end-date", default=date.today().strftime("%Y%m%d"))
+    parser.add_argument("--float-end-date", default=date.today().strftime("%Y%m%d"))  # noqa: DTZ011 - CLI default is a calendar date on the host's local clock
     parser.add_argument("--skip-ann-date", action="store_true")
     parser.add_argument("--rescue-ann-limit-hits", action="store_true", help="Retry ann_date partitions that hit 6000 rows by ann_date + ts_code.")
     parser.add_argument("--rescue-ann-date", action="append", default=[], help="Specific ann_date to retry by ts_code; repeatable.")

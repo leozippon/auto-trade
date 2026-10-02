@@ -292,7 +292,7 @@ def audit_revision_sentinel(args: argparse.Namespace) -> int:
                 continue
             try:
                 result, _pages = query_paged(client, spec.api_name, {"trade_date": trade_date}, spec.fields, page_limit)
-            except Exception as exc:  # pragma: no cover - defensive runtime path
+            except Exception as exc:  # pragma: no cover - defensive runtime path  # noqa: BLE001 - records the failed trade_date and continues the audit
                 errors.append({"trade_date": trade_date, "error": str(exc)})
                 continue
             # Stamp the probe exactly like the writer would: board partitions
@@ -2405,7 +2405,7 @@ def audit_share_float_complete_union(raw_dir: Path, add) -> None:
     if meta_path.exists():
         try:
             meta_row_count = json.loads(meta_path.read_text(encoding="utf-8")).get("row_count")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - unreadable sidecar is reported through meta_error
             meta_error = str(exc)
 
     details: dict[str, Any] = {
@@ -2438,7 +2438,7 @@ def audit_share_float_complete_union(raw_dir: Path, add) -> None:
     if read_columns:
         try:
             union_frame = pd.read_parquet(union_path, columns=read_columns)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - read failure is kept and re-raised into the audit finding
             union_read_error = exc
     if has_identity_columns:
         try:
@@ -2466,7 +2466,7 @@ def audit_share_float_complete_union(raw_dir: Path, add) -> None:
                 details["cross_ann_date_sample"] = [
                     dict(zip(physical, values)) for values in multi.index[:5]
                 ]
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - failure is reported as identity_check_error
             details["identity_check_error"] = str(exc)
     try:
         if stat_columns and union_frame is None:
@@ -2481,7 +2481,7 @@ def audit_share_float_complete_union(raw_dir: Path, add) -> None:
             if risk.dtype != bool:
                 risk = risk.astype(str).str.lower().isin({"true", "1", "yes"})
             details["source_cap_risk_rows"] = int(risk.sum())
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - failure is reported as read_error
         details["read_error"] = str(exc)
 
     severity = "warning" if (
@@ -2749,7 +2749,7 @@ def audit_board_trading_only(args: argparse.Namespace) -> int:
 def audit_daily_direct(raw_dir: Path, args: argparse.Namespace, add) -> set[str]:
     try:
         trade_dates = set(load_sse_open_dates(raw_dir, args.start_date, args.end_date))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - calendar failure is reported as an audit error
         add("error", "daily_trade_calendar", str(exc))
         return set()
     for dataset in selected_daily_datasets(args, default=DAILY_REQUIRED_DATASETS):
@@ -2903,7 +2903,7 @@ def audit_intraday_only(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
     raw_dir = (repo_root / args.raw_dir).resolve()
     if getattr(args, "intraday_end_date", None) is None:
-        args.intraday_end_date = date.today().strftime("%Y%m%d")
+        args.intraday_end_date = date.today().strftime("%Y%m%d")  # noqa: DTZ011 - CLI default is a calendar date on the host's local clock
     output = (repo_root / (args.output or INTRADAY_MINUTES_STATUS_PATH)).resolve()
     findings: list[dict[str, Any]] = []
 
@@ -3002,7 +3002,7 @@ def add_event_macro_parsers(sub: argparse._SubParsersAction) -> None:
     event = sub.add_parser("event-flow", help="audit only event/flow raw data")
     core.add_raw_arg(event)
     event.add_argument("--start-date", default="20200101")
-    event.add_argument("--end-date", default=date.today().strftime("%Y%m%d"))
+    event.add_argument("--end-date", default=date.today().strftime("%Y%m%d"))  # noqa: DTZ011 - CLI default is a calendar date on the host's local clock
     event.add_argument("--datasets", nargs="+", choices=core.EVENT_FLOW_DATASETS)
     event.add_argument("--as-of", help="Audit time for publication-time expectations (ISO; naive = Asia/Shanghai). Defaults to now.")
     event.add_argument("--output", help=f"Defaults to {core.EVENT_FLOW_STATUS_PATH}.")
@@ -3010,7 +3010,7 @@ def add_event_macro_parsers(sub: argparse._SubParsersAction) -> None:
     macro = sub.add_parser("macro", help="audit macro, policy, and global-context raw data")
     core.add_raw_arg(macro)
     macro.add_argument("--start-date", default="20100101")
-    macro.add_argument("--end-date", default=date.today().strftime("%Y%m%d"))
+    macro.add_argument("--end-date", default=date.today().strftime("%Y%m%d"))  # noqa: DTZ011 - CLI default is a calendar date on the host's local clock
     macro.add_argument("--datasets", nargs="+", choices=core.MACRO_DATASETS)
     core.add_macro_filter_args(macro)
     macro.add_argument("--output", help=f"Defaults to {core.MACRO_CONTEXT_STATUS_PATH}.")
@@ -3018,7 +3018,7 @@ def add_event_macro_parsers(sub: argparse._SubParsersAction) -> None:
     text = sub.add_parser("text", help="audit only text-evidence raw data")
     core.add_raw_arg(text)
     text.add_argument("--start-date", dest="text_start_date", default="20100101")
-    text.add_argument("--end-date", dest="text_end_date", default=date.today().strftime("%Y%m%d"))
+    text.add_argument("--end-date", dest="text_end_date", default=date.today().strftime("%Y%m%d"))  # noqa: DTZ011 - CLI default is a calendar date on the host's local clock
     text.add_argument("--text-datasets", nargs="+", choices=core.TEXT_DATASETS, dest="text_datasets")
     text.add_argument("--news-src", action="append", default=[])
     text.add_argument("--major-news-src", action="append", default=[])
@@ -3028,7 +3028,7 @@ def add_board_parser(sub: argparse._SubParsersAction) -> None:
     board = sub.add_parser("board-trading", help="audit 打板专题 raw data")
     core.add_raw_arg(board)
     board.add_argument("--start-date", default="20200101")
-    board.add_argument("--end-date", default=date.today().strftime("%Y%m%d"))
+    board.add_argument("--end-date", default=date.today().strftime("%Y%m%d"))  # noqa: DTZ011 - CLI default is a calendar date on the host's local clock
     board.add_argument("--datasets", nargs="+", choices=core.BOARD_TRADING_DATASETS)
     core.add_board_filter_args(board)
     board.add_argument("--output", help=f"Defaults to {core.BOARD_TRADING_STATUS_PATH}.")
@@ -3037,7 +3037,7 @@ def add_revision_parser(sub: argparse._SubParsersAction) -> None:
     revision = sub.add_parser("revision-sentinel", help="sample TuShare source partitions and compare them with local raw data without overwriting raw files")
     core.add_raw_arg(revision)
     revision.add_argument("--start-date", default="20200101")
-    revision.add_argument("--end-date", default=date.today().strftime("%Y%m%d"))
+    revision.add_argument("--end-date", default=date.today().strftime("%Y%m%d"))  # noqa: DTZ011 - CLI default is a calendar date on the host's local clock
     revision.add_argument(
         "--datasets",
         nargs="+",

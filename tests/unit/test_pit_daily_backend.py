@@ -974,7 +974,7 @@ def test_concurrent_valid_prepare_from_unphased_is_phase_safe(tmp_path: Path) ->
                 end="20240103",
                 decision_time=decision,
             )
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - worker thread hands any failure to the main thread
             with guard:
                 errors.append(exc)
             return
