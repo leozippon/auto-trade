@@ -8,8 +8,6 @@
 /external_references
 /experiments
 /.pi
-/agent_capability_eval
-LOGBOOK.md
 **/__pycache__
 **/.pytest_cache
 **/.mypy_cache

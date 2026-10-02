@@ -42,9 +42,7 @@ Thumbs.db
 
 # Local agent workspace and evaluations
 /.pi/
-/agent_capability_eval/
 
 # Docs and logbook stay local
 /docs/
-/LOGBOOK.md
 .mutagenignore
