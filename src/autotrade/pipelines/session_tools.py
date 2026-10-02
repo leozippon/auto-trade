@@ -447,7 +447,7 @@ def manifest_backtest_stats(summary: Mapping[str, object]) -> dict[str, object]:
 # What a candidate row's provisional selection block is, and is not.
 SELECTION_STATISTICS_NOTE = (
     "provisional: the freeze gate as it would read this node now, over every "
-    "revision the arm has validated so far; the freeze recomputes it"
+    "strategy the arm has validated so far; the freeze recomputes it"
 )
 GRADUATION_ACTIVITY_NOTE = (
     "informational, not a freeze-gate condition: this node's research-period "
@@ -560,6 +560,7 @@ class SessionValidations:
             self.ledger.read(),
             rows,
             nominee,
+            experiment_dir=self.experiment_dir,
             hard_reasons=(
                 rules.evaluate(dict(nominee["summary"]))  # type: ignore[arg-type]
                 if rules is not None
@@ -708,11 +709,13 @@ class SessionValidations:
         evaluation: EvaluationResult,
         *,
         result_name: str,
+        fingerprint: str,
         metadata: Mapping[str, object] | None = None,
     ) -> str:
         """Append one completed Validation to the step tree under the current
         position; ``batch_validate`` repositions the tree before each record so
-        its candidates are siblings of one parent."""
+        its candidates are siblings of one parent. ``fingerprint`` is the
+        committed bytes' (:meth:`commit_revision`)."""
         node_id = self.tree.record_step(
             revision.output_path,
             epoch_id=RESEARCH_STAGE,
@@ -734,7 +737,9 @@ class SessionValidations:
         if self.experiment_dir is not None:
             record_step_sidecar(
                 self.experiment_dir,
-                recorded_step(node_id, revision.revision_id, evaluation, metadata or {}),
+                recorded_step(
+                    node_id, revision.revision_id, evaluation, metadata or {}, fingerprint
+                ),
             )
             self.publish_tree()
         return node_id
@@ -819,8 +824,10 @@ def recorded_step(
     revision_id: str,
     evaluation: EvaluationResult,
     metadata: Mapping[str, object],
+    fingerprint: str,
 ) -> StepResult:
-    """The Step a recorded Validation is, from the metadata its node carries."""
+    """The Step a recorded Validation is, from the metadata its node carries
+    and the ``fingerprint`` of the bytes its revision committed."""
 
     span = str(metadata.get("span") or "")
     if not span:
@@ -834,6 +841,7 @@ def recorded_step(
         control=metadata.get("control") is True,
         batch_id=str(metadata["batch_id"]) if metadata.get("batch_id") else None,
         offline_trials=offline if isinstance(offline, int) else None,
+        fingerprint=fingerprint,
     )
 
 
@@ -1309,8 +1317,8 @@ class BatchValidateTool(SessionTimeBudgetAware):
         rows: list[dict[str, object]] = []
         recorded: list[tuple[dict[str, object], StepResult]] = []
         try:
-            for candidate, revision, result_name, outcome in zip(
-                candidates, revisions, result_names, outcomes, strict=True
+            for candidate, check, revision, result_name, outcome in zip(
+                candidates, checks, revisions, result_names, outcomes, strict=True
             ):
                 evaluation, error, seconds = outcome
                 # Every candidate — recorded or dead end — hangs off the node
@@ -1338,7 +1346,12 @@ class BatchValidateTool(SessionTimeBudgetAware):
                 else:
                     row.update(
                         self._record_success(
-                            revision, evaluation, result_name=result_name, metadata=metadata
+                            revision,
+                            evaluation,
+                            result_name=result_name,
+                            # commit_revision verified the revision holds these bytes.
+                            fingerprint=str(check["fingerprint"]),
+                            metadata=metadata,
                         )
                     )
                     recorded.append((row, self.backtest.steps[-1]))
@@ -1730,13 +1743,18 @@ class BatchValidateTool(SessionTimeBudgetAware):
         evaluation: EvaluationResult,
         *,
         result_name: str,
+        fingerprint: str,
         metadata: Mapping[str, object],
     ) -> dict[str, object]:
         node_id = self.backtest.record_validation(
-            revision, evaluation, result_name=result_name, metadata=metadata
+            revision,
+            evaluation,
+            result_name=result_name,
+            fingerprint=fingerprint,
+            metadata=metadata,
         )
         self.backtest.steps.append(
-            recorded_step(node_id, revision.revision_id, evaluation, metadata)
+            recorded_step(node_id, revision.revision_id, evaluation, metadata, fingerprint)
         )
         self.backtest.append_manifest_summary(
             {

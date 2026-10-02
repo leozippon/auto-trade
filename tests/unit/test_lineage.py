@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from autotrade.environment.artifacts import REVISION_MANIFEST_FILE
 from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
 from autotrade.environment.runtime import write_json_atomic
@@ -30,6 +31,7 @@ from autotrade.pipelines.lineage import (
     write_lineage,
 )
 from autotrade.pipelines.research_session import arm_record
+from autotrade.pipelines.session_resume import REVISIONS_DIR
 
 RESEARCH_START, RESEARCH_END = "20210701", "20250630"
 DAYS = [day.strftime("%Y%m%d") for day in pd.bdate_range(RESEARCH_START, RESEARCH_END)]
@@ -71,8 +73,13 @@ def _payload(*, seed: int, loading: float, days=DAYS) -> dict[str, object]:
 
 
 def _row(directory: Path, index: int, *, seed: int, loading: float, span: str = "full",
-         control: bool = False, batch: str = "b1", offline: int | None = 0, days=DAYS) -> dict[str, object]:
-    """One ledger ``steps[]`` row, its result and style sidecar on disk."""
+         control: bool = False, batch: str = "b1", offline: int | None = 0, days=DAYS,
+         bytes_of: int | None = None) -> dict[str, object]:
+    """One ledger ``steps[]`` row, its result and style sidecar on disk.
+
+    Each row replays bytes of its own unless ``bytes_of`` names the row index
+    whose bytes it validates again (another revision of the same strategy).
+    """
 
     result = directory / "artifacts/results" / f"valid_{index:03d}"
     payload = _payload(seed=seed, loading=loading, days=days)
@@ -81,6 +88,7 @@ def _row(directory: Path, index: int, *, seed: int, loading: float, span: str = 
     return {
         "step_id": f"research__{directory.name}__valid_{index:03d}",
         "revision_id": f"revision_{directory.name}_{index}",
+        "fingerprint": f"bytes_{directory.name}_{index if bytes_of is None else bytes_of}",
         "control": control,
         "batch_id": batch,
         "offline_trials": offline,
@@ -171,7 +179,7 @@ def test_an_arm_without_a_lineage_is_judged_exactly_as_before(tmp_path: Path) ->
     to the last bit: an arm created without one deflates over its own family."""
 
     rows = _own_rows(tmp_path / "new_arm")
-    dsr = freeze_gate_for([], rows, rows[1])["deflated_sharpe"]
+    dsr = freeze_gate_for([], rows, rows[1], experiment_dir=tmp_path / "new_arm")["deflated_sharpe"]
     assert {
         key: dsr[key]
         for key in (
@@ -282,7 +290,7 @@ def test_the_recorded_lineage_joins_the_family_and_outlives_its_arms(tmp_path: P
     shutil.rmtree(first)
     shutil.rmtree(second)
     records = ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl").read()
-    dsr = freeze_gate_for(records, own, own[1])["deflated_sharpe"]
+    dsr = freeze_gate_for(records, own, own[1], experiment_dir=arm)["deflated_sharpe"]
     assert dsr["lineage_arms"] == ["first", "second"]
     assert (dsr["trials"], dsr["host_trials"], dsr["offline_trials"], dsr["lineage_trials"]) == (9, 2, 1, 6)
     assert dsr["controls"] == 1
@@ -304,6 +312,52 @@ def test_the_recorded_lineage_joins_the_family_and_outlives_its_arms(tmp_path: P
     }
     with pytest.raises(ValueError, match="already records its lineage"):
         ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl").append(lineage_ledger_record(arm))
+
+
+def test_a_lineage_counts_one_strategy_validated_twice_as_one_trial(tmp_path: Path) -> None:
+    """The lineage's trials are the gate's: a strategy probed on a year and
+    then run on the full span is one trial whose series is the full span's,
+    and a control later submitted as a candidate is one trial. An arm whose
+    rows name no bytes reads them off its revision manifests, and one whose
+    revisions were not kept cannot be a lineage."""
+
+    root = tmp_path / "experiments"
+    probed = _arm(
+        root,
+        "probed",
+        [
+            {"seed": 1, "loading": 0.6, "span": "Y1", "days": FIRST_YEAR},
+            {"seed": 2, "loading": 0.6, "span": "Y1", "days": FIRST_YEAR},
+            {"seed": 3, "loading": 0.6, "control": True},
+            {"seed": 4, "loading": 0.6, "bytes_of": 0, "batch": "b2"},
+            {"seed": 5, "loading": 0.6, "bytes_of": 2, "batch": "b2"},
+        ],
+    )
+    extraction = extract_lineage(root, ["probed"], research_start=RESEARCH_START, research_end=RESEARCH_END)
+    assert [(item["revision_id"], item["span"]) for item in extraction["series"]] == [
+        ("revision_probed_1", "Y1"),
+        ("revision_probed_2", "full"),
+        ("revision_probed_3", "full"),
+    ]
+    assert {key: extraction["arms"][0][key] for key in ("host_trials", "controls")} == {
+        "host_trials": 3,
+        "controls": 0,
+    }
+
+    # A ledger written before rows named their bytes: the manifests do.
+    ledger = ExperimentLedger(probed / "ledgers/experiment_ledger.jsonl")
+    records = ledger.read()
+    for row in records[0]["steps"]:
+        fingerprint = row.pop("fingerprint")
+        write_json_atomic(
+            probed / REVISIONS_DIR / str(row["revision_id"]) / REVISION_MANIFEST_FILE,
+            {"revision_id": row["revision_id"], "fingerprint": fingerprint},
+        )
+    ledger.rewrite(records)
+    assert extract_lineage(root, ["probed"], research_start=RESEARCH_START, research_end=RESEARCH_END) == extraction
+    shutil.rmtree(probed / REVISIONS_DIR / "revision_probed_4")
+    with pytest.raises(ValueError, match="lineage arm probed: revision revision_probed_4 has no manifest"):
+        extract_lineage(root, ["probed"], research_start=RESEARCH_START, research_end=RESEARCH_END)
 
 
 def test_a_lineage_arm_that_cannot_be_one_is_refused_by_name(tmp_path: Path) -> None:
@@ -399,7 +453,7 @@ def test_the_console_listing_counts_the_lineage_as_the_gate_does(tmp_path: Path)
         }
     )
     best = _research_best(arm, ledger.read())
-    dsr = freeze_gate_for(ledger.read(), own, own[1])["deflated_sharpe"]
+    dsr = freeze_gate_for(ledger.read(), own, own[1], experiment_dir=arm)["deflated_sharpe"]
     assert dsr["lineage_trials"] == 2
     assert best["step_id"] == own[1]["step_id"]
     assert best["trials"] == dsr["trials"] == 5

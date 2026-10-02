@@ -19,6 +19,7 @@ from pathlib import Path
 
 import numpy as np
 
+from autotrade.environment.artifacts import REVISION_MANIFEST_FILE
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME, STYLE_SCHEMA_VERSION
 from autotrade.environment.runtime import write_json_atomic
@@ -32,6 +33,7 @@ from autotrade.pipelines.hitl_state import (
     write_control,
 )
 from autotrade.pipelines.ledger import ExperimentLedger
+from autotrade.pipelines.session_resume import REVISIONS_DIR
 from autotrade.pipelines.verdict import (
     forward_mde,
     forward_slice,
@@ -148,9 +150,17 @@ def _analysis(result_ref: str) -> dict[str, object]:
 
 def _step(experiment_dir: Path, session: str, index: int, *, edge: float, seed: int, span: str = FULL_SPAN) -> dict[str, object]:
     ref = write_result(experiment_dir, "valid", start="20240701", days=120, edge=edge, seed=seed)
+    revision, fingerprint = f"revision_{session}_{index}", f"fingerprint_{session}_{index}"
+    # The manifest the artifact store writes for the revision; a host sidecar
+    # names only the revision, and its bytes are read off this.
+    write_json_atomic(
+        experiment_dir / REVISIONS_DIR / revision / REVISION_MANIFEST_FILE,
+        {"revision_id": revision, "fingerprint": fingerprint},
+    )
     return {
         "step_id": f"research__session_ref_{session}__run_ref_{session}__valid_{index:03d}",
-        "revision_id": f"revision_{session}_{index}",
+        "revision_id": revision,
+        "fingerprint": fingerprint,
         "span": span,
         "summary": {"total_return": 0.1 + edge, "sharpe": 1.0, "max_drawdown": 0.05},
         "validation_result_ref": ref,
@@ -209,7 +219,7 @@ def build_arm(root: Path, experiment_id: str, stage: str, *, alive: bool = False
             _step(directory, "research", 2, edge=0.001, seed=4, span="Y3"),
         ]
         nominee = steps[1]
-        gate = freeze_gate_for([], steps, nominee)
+        gate = freeze_gate_for([], steps, nominee, experiment_dir=directory)
         output = directory / "artifacts/strategy/frozen/strategy_research_abc/output"
         output.mkdir(parents=True)
         (output / "main.py").write_text("def generate_orders(context):\n    return []\n", encoding="utf-8")

@@ -91,7 +91,7 @@ from .ledger import (
     research_records,
 )
 from .pit_views_seed import FORWARD_PHASE, RESEARCH_PHASE
-from .session_resume import load_recorded_steps, resume_state
+from .session_resume import load_recorded_steps, resume_state, revision_fingerprint
 from .skills import (
     ExperimentSkillsStore,
     SkillsPublication,
@@ -372,7 +372,11 @@ class RollingExperimentPipeline:
                     f"research session replayed {spent} replay-years, over its budget "
                     f"of {budgets['max_replay_years']}"
                 )
-            step_rows = [research_step_record(step) for step in session.steps]
+            # Every row the ledger records names the bytes it replayed.
+            step_rows = fingerprinted(
+                self.config.experiment_dir,
+                [research_step_record(step) for step in session.steps],
+            )
             gate: dict[str, object] | None = None
             frozen: dict[str, object] | None = None
             arm_end: dict[str, object] | None = None
@@ -388,6 +392,7 @@ class RollingExperimentPipeline:
                     records,
                     step_rows,
                     nominee,
+                    experiment_dir=self.config.experiment_dir,
                     hard_reasons=self.config.acceptance.evaluate(dict(nominee["summary"])),
                     acceptance=self.config.acceptance,
                     years=[
@@ -438,9 +443,11 @@ class RollingExperimentPipeline:
                 "reason": session.reason or None,
                 "nominated_step_id": session.node_id if session.outcome == "freeze" else None,
                 "steps": step_rows,
-                "trials_to_date": trial_family([*_recorded_steps(records), *step_rows])[
-                    "trials"
-                ],
+                "trials_to_date": trial_family(
+                    fingerprinted(
+                        self.config.experiment_dir, [*_recorded_steps(records), *step_rows]
+                    )
+                )["trials"],
                 **self._account_record(),
                 "freeze_gate": gate,
                 "frozen": frozen,
@@ -890,6 +897,7 @@ def trial_fields(step: StepResult) -> dict[str, object]:
     return {
         "step_id": step.step_id,
         "revision_id": step.revision_id,
+        "fingerprint": step.fingerprint,
         "control": step.control,
         "batch_id": step.batch_id,
         "offline_trials": step.offline_trials,
@@ -903,8 +911,9 @@ def research_step_record(step: StepResult) -> dict[str, object]:
     tracking error and IR over the span, from the replay's own style sidecar
     (``None`` when they cannot be measured): the figures the freeze gate
     counts. ``series`` inside it says whether that is the active series (the
-    replay carries a zero-skill panel) or the strategy's own. ``control``,
-    ``batch_id`` and ``offline_trials`` are what the trial family reads.
+    replay carries a zero-skill panel) or the strategy's own. ``fingerprint``,
+    ``control``, ``batch_id`` and ``offline_trials`` are what the trial family
+    reads.
     """
 
     return {
@@ -919,22 +928,48 @@ def research_step_record(step: StepResult) -> dict[str, object]:
 def trial_family(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
     """The trials the freeze gate deflates over, from the arm's Validation rows.
 
-    A trial is a distinct revision validated anywhere in the arm, on any span,
-    in any attempt -- unless it was registered as a control: a control is a
-    comparison leg, not one of the configurations the nominee was selected
-    among, so it is left out (and can never be nominated). The candidate
-    configurations a batch declared as screened offline and not submitted
-    (``offline_trials``; a submitted one is a host trial, each configuration
-    is declared once) are trials too, counted once per batch. A batch whose
-    candidates all failed leaves no row, so its declaration is not counted and
-    ``batch_validate`` asks for it again in the next batch. A row
+    A trial is a distinct strategy validated anywhere in the arm, on any span,
+    in any attempt: the bytes its revision holds (``fingerprint``, which every
+    row must carry, :func:`fingerprinted`), not the revision, so validating
+    the same bytes again -- a probe's finalist on the full span -- is the same
+    trial. Bytes whose every Validation was registered as a control are left
+    out: a control is a comparison leg, not one of the configurations the
+    nominee was selected among (and can never be nominated). Bytes validated
+    both as a control and as a candidate are a trial: the candidate
+    registration is the selection. Each trial's series in ρ̄ is that of its
+    longest validated span (the Validation with the most measured days, the
+    first of equals); ``representatives`` are those Validations in revision
+    order.
+
+    The candidate configurations a batch declared as screened offline and not
+    submitted (``offline_trials``; a submitted one is a host trial, each
+    configuration is declared once) are trials too, counted once per batch. A
+    batch whose candidates all failed leaves no row, so its declaration is not
+    counted and ``batch_validate`` asks for it again in the next batch. A row
     recorded before batches declared them carries no ``offline_trials`` and
     reads as 0; ``undeclared_offline_validations`` counts such rows so the
-    record says so. ``trials`` is M, the host trials plus the offline ones.
+    record says so. ``trials`` is M, the host trials plus the offline ones;
+    ``controls`` counts the control-only strategies.
     """
 
-    controls = {str(row["revision_id"]) for row in rows if row.get("control") is True}
-    revisions = {str(row["revision_id"]) for row in rows} - controls
+    strategies: dict[str, list[Mapping[str, object]]] = {}
+    for row in rows:
+        fingerprint = row.get("fingerprint")
+        if not isinstance(fingerprint, str) or not fingerprint:
+            raise ValueError(
+                f"Validation {row.get('step_id')} carries no artifact fingerprint, "
+                "so its trial cannot be identified"
+            )
+        strategies.setdefault(fingerprint, []).append(row)
+    trials = [
+        validations
+        for validations in strategies.values()
+        if any(row.get("control") is not True for row in validations)
+    ]
+    representatives = sorted(
+        (max(validations, key=_measured_days) for validations in trials),
+        key=lambda row: str(row["revision_id"]),
+    )
     declared: dict[str, int] = {}
     undeclared = 0
     for row in rows:
@@ -945,12 +980,37 @@ def trial_family(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
             declared[str(row.get("batch_id") or row["step_id"])] = int(count)  # type: ignore[call-overload]
     offline = sum(declared.values())
     return {
-        "trials": len(revisions) + offline,
-        "revisions": sorted(revisions),
-        "controls": len(controls),
+        "trials": len(representatives) + offline,
+        "representatives": representatives,
+        "controls": len(strategies) - len(trials),
         "offline_trials": offline,
         "undeclared_offline_validations": undeclared,
     }
+
+
+def _measured_days(row: Mapping[str, object]) -> int:
+    """How many days one Validation row's graded series measured (0 when none)."""
+
+    neutral = row.get("neutralized")
+    days = neutral.get("days") if isinstance(neutral, Mapping) else None
+    return days if isinstance(days, int) else 0
+
+
+def fingerprinted(
+    experiment_dir: str | Path, rows: Sequence[Mapping[str, object]]
+) -> list[Mapping[str, object]]:
+    """``rows`` each with the artifact fingerprint :func:`trial_family` keys on:
+    the one a row carries, else the one the arm's revision store recorded for
+    its revision (``session_resume.revision_fingerprint``) -- a ledger row
+    written before rows carried it, or a Step of the host's deterministic
+    baseline."""
+
+    return [
+        row
+        if row.get("fingerprint")
+        else {**row, "fingerprint": revision_fingerprint(experiment_dir, str(row["revision_id"]))}
+        for row in rows
+    ]
 
 
 def freeze_gate_for(
@@ -958,6 +1018,7 @@ def freeze_gate_for(
     session_rows: Sequence[Mapping[str, object]],
     nominee: Mapping[str, object],
     *,
+    experiment_dir: str | Path,
     hard_reasons: Sequence[str] = (),
     acceptance: AcceptanceRules | None = None,
     years: Sequence[tuple[str, str]] = (),
@@ -965,16 +1026,16 @@ def freeze_gate_for(
     """The freeze gate of one nominated Step against the whole arm (PL1 §4.1).
 
     The trial family is :func:`trial_family` over earlier sessions' recorded
-    Steps and this session's alike, plus the lineage the ledger records
-    (:func:`recorded_lineage`); ρ̄ is read off one sidecar per non-control
-    revision (its full-span validation when it has one) and the lineage's
-    extracted series. The count of
-    full-span validations takes every measurable one, controls included. A
-    nominee that did not replay the full research period, was registered as a
-    control, fails a hard nomination rule, or whose statistics cannot be
-    measured does not pass. ``acceptance`` and ``years`` are the arm's rules
-    and research years; the console leaves them out when it only reads the
-    deflated Sharpe of an arm's best node.
+    Steps and this session's alike, fingerprinted from the revision store of
+    the arm in ``experiment_dir`` where a row does not carry it, plus the
+    lineage the ledger records (:func:`recorded_lineage`); ρ̄ is read off each
+    trial's representative sidecar and the lineage's extracted series. The
+    count of full-span validations takes every measurable one, controls
+    included. A nominee that did not replay the full research period, was
+    registered as a control, fails a hard nomination rule, or whose statistics
+    cannot be measured does not pass. ``acceptance`` and ``years`` are the
+    arm's rules and research years; the console leaves them out when it only
+    reads the deflated Sharpe of an arm's best node.
     """
 
     reasons = list(hard_reasons)
@@ -984,19 +1045,16 @@ def freeze_gate_for(
         reasons.append("freeze_nominee_is_control")
     if reasons:
         return {"passed": False, "reasons": reasons}
-    rows = [*_recorded_steps(records), *session_rows]
+    rows = fingerprinted(experiment_dir, [*_recorded_steps(records), *session_rows])
     family = trial_family(rows)
-    representative = trial_representatives(rows)
+    representatives: list[Mapping[str, object]] = family["representatives"]  # type: ignore[assignment]
     lineage_arms, lineage_trials, lineage_series = recorded_lineage(records)
     try:
         gate = freeze_gate(
             _style_analysis(nominee),
-            trials=len(family["revisions"]),  # type: ignore[arg-type]
+            trials=len(representatives),
             offline_trials=family["offline_trials"],  # type: ignore[arg-type]
-            trial_analyses=[
-                _style_analysis(representative[revision])
-                for revision in family["revisions"]  # type: ignore[union-attr]
-            ],
+            trial_analyses=[_style_analysis(row) for row in representatives],
             lineage_trials=lineage_trials,
             lineage_series=lineage_series,
             full_span_validations=sum(
@@ -1016,20 +1074,6 @@ def freeze_gate_for(
         "lineage_arms": lineage_arms,
     }
     return gate
-
-
-def trial_representatives(
-    rows: Sequence[Mapping[str, object]],
-) -> dict[str, Mapping[str, object]]:
-    """The Validation whose series stands for each revision in ρ̄: its
-    full-span one when it has one, else the one it has."""
-
-    representative: dict[str, Mapping[str, object]] = {}
-    for row in rows:
-        revision = str(row["revision_id"])
-        if revision not in representative or row.get("span") == FULL_SPAN:
-            representative[revision] = row
-    return representative
 
 
 def lineage_summary(extraction: Mapping[str, object]) -> dict[str, object]:
@@ -1366,6 +1410,7 @@ def _session_budgets(
 __all__ = [
     "DailyStrategyPipeline",
     "RollingExperimentPipeline",
+    "fingerprinted",
     "freeze_gate_for",
     "lineage_ledger_record",
     "lineage_summary",
@@ -1375,5 +1420,4 @@ __all__ = [
     "research_step_record",
     "trial_family",
     "trial_fields",
-    "trial_representatives",
 ]

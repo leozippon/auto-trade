@@ -11,7 +11,9 @@ The validations an attempt recorded survive in the experiment's step tree,
 whose nodes carry only opaque ids, plus a host-only sidecar per node holding
 the raw revision id, the span, the summary and the result reference the
 Pipeline needs to freeze it, and the control flag, batch id and declared
-offline screens the freeze gate's trial family reads. A Step is durable from
+offline screens the freeze gate's trial family reads; which bytes a Validation
+replayed is its revision's, read from the arm's revision store
+(:func:`revision_fingerprint`). A Step is durable from
 the moment it is recorded, while the budget block only rides on the event that
 settles its tool call, so an attempt that died inside a batch leaves Steps
 newer than its last block; the resume names them by recorded time so their
@@ -26,6 +28,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 
+from autotrade.environment.artifacts import REVISION_MANIFEST_FILE
 from autotrade.environment.runtime import (
     agent_trace_path,
     redact_host_paths,
@@ -38,6 +41,29 @@ from .ledger import RESEARCH_STAGE
 
 # Host-only, beside the run markers: never mounted and never Agent-visible.
 STEP_SIDECAR_DIR = ".host/steps"
+# The revisions of the arm's artifact store, which the worker roots at
+# ``artifacts/strategy`` of the experiment directory.
+REVISIONS_DIR = Path("artifacts") / "strategy" / "revisions"
+
+
+def revision_fingerprint(experiment_dir: str | Path, revision_id: str) -> str:
+    """The artifact fingerprint of the bytes one recorded revision holds, as its
+    manifest records it: the identity of the strategy a Validation replayed, so
+    two Validations of the same bytes are one trial (``experiment.trial_family``).
+
+    A revision with no manifest is one the host cannot identify, so it raises
+    instead of counting the Validation as a strategy of its own.
+    """
+
+    path = Path(experiment_dir) / REVISIONS_DIR / revision_id / REVISION_MANIFEST_FILE
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            f"revision {revision_id} has no manifest ({path}): the bytes it "
+            "replayed, which identify its trial, are unknown"
+        ) from exc
+    return str(manifest["fingerprint"])
 
 
 def record_step_sidecar(experiment_dir: str | Path, step: StepResult) -> Path:
@@ -93,6 +119,7 @@ def load_recorded_steps(experiment_dir: str | Path) -> tuple[StepResult, ...]:
                 control=record.get("control") is True,
                 batch_id=record.get("batch_id"),
                 offline_trials=record.get("offline_trials"),
+                fingerprint=revision_fingerprint(directory, str(record["revision_id"])),
             )
         )
     return tuple(steps)

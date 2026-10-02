@@ -238,7 +238,8 @@ def test_the_prompt_states_the_research_session_contract() -> None:
         "主动超额为正的研究年数",
         "那是约束，不是技能的证据",
         "本臂完整研究期验证数达到该节写明的下限",
-        "全部非对照 revision（任何 span、任何尝试）",
+        # A trial is the bytes: probing and then running them on full span is one.
+        "不同非对照策略（按字节认，任何 span、任何尝试；同一份字节换个 span 再验证——先探后全期——不是新试验）",
         "`offline_trials` 必须如实申报",
         # A configuration screened offline and then validated counts once.
         "但本批**没有**提交的候选配置数",

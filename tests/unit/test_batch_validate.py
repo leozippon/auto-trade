@@ -76,6 +76,8 @@ from autotrade.pipelines.experiment import (
     freeze_gate_for,
     null_control_seed,
     research_step_record,
+    trial_family,
+    trial_fields,
 )
 from autotrade.pipelines.ledger import RESEARCH_STAGE, ExperimentLedger
 from autotrade.pipelines.session_resume import load_recorded_steps, resume_state
@@ -369,7 +371,11 @@ class _Session:
             request=request,
             output_dir=self.output,
             models_dir=self.models,
-            artifact_store=FilesystemArtifactStore(root / "revisions"),
+            # Where the worker roots it: the Steps an experiment records are
+            # read back with the fingerprints its revision manifests hold.
+            artifact_store=FilesystemArtifactStore(
+                (experiment_dir or root) / "artifacts" / "strategy"
+            ),
             evaluator=self.evaluator,
             tree=self.tree,
             schedule=StrategySchedule(),
@@ -781,6 +787,45 @@ class ControlsAndOfflineScreensTest(unittest.TestCase):
                 {"host_trials": 3, "offline_trials": 5, "trials": 8, "controls": 1},
             )
             self.assertEqual(gate["deflated_sharpe"]["trial_correlation_pairs"], 3)
+
+    def test_the_same_bytes_validated_again_are_the_same_trial(self) -> None:
+        """A trial is the bytes, not the revision: the probe-then-full workflow
+        the packs ask for is one search, and a control re-registered as a
+        candidate is counted once, as the candidate it became."""
+
+        with TemporaryDirectory() as tmp:
+            experiment = Path(tmp) / "experiment"
+            session = _Session(Path(tmp), experiment_dir=experiment)
+            # One strategy probed on two years, then run on the full span.
+            session.candidate("a", _strategy("1"))
+            session.call("a", span="Y1..Y2")
+            full = session.call("a").value["candidates"][0]
+            self.assertEqual(full["selection_statistics"]["trials"], 1)
+            # Three different probes, then the winner on the full span: three.
+            for name, marker in (("b", "22"), ("c", "333")):
+                session.candidate(name, _strategy(marker))
+            session.call("a", "b", "c", span="Y1..Y2")
+            winner = session.call("b").value["candidates"][0]
+            dsr = session.backtest.freeze_gate(str(winner["node_id"]))["deflated_sharpe"]
+            self.assertEqual((dsr["host_trials"], dsr["controls"]), (3, 0))
+            # A control registered first and then submitted as a candidate.
+            session.candidate("d", _strategy("4444"))
+            session.call("d", span="Y1..Y2", controls=("d",))
+            self.assertEqual(
+                session.backtest.freeze_gate(str(winner["node_id"]))["deflated_sharpe"]["controls"], 1
+            )
+            again = session.call("d").value["candidates"][0]
+            dsr = session.backtest.freeze_gate(str(again["node_id"]))["deflated_sharpe"]
+            self.assertEqual((dsr["host_trials"], dsr["controls"]), (4, 0))
+            # Eight revisions, four strategies; the Steps a resumed attempt reads
+            # back, which the arm's run facts count, name the same bytes.
+            self.assertEqual(len({step.revision_id for step in session.backtest.steps}), 8)
+            reloaded = load_recorded_steps(experiment)
+            self.assertEqual(
+                [step.fingerprint for step in reloaded],
+                [step.fingerprint for step in session.backtest.steps],
+            )
+            self.assertEqual(trial_family([trial_fields(step) for step in reloaded])["trials"], 4)
 
     def test_a_wholly_failed_batch_s_screens_count_once_when_declared_again(self) -> None:
         """No Step, no declaration: the next batch repeats it and M holds it once."""
@@ -2034,17 +2079,22 @@ class RecordedValidationDurabilityTest(unittest.TestCase):
             )
             # The formerly flagged leg is a trial again; the declared batch
             # still counts its screens once.
-            gate = freeze_gate_for([], rows, rows[0])
+            gate = freeze_gate_for([], rows, rows[0], experiment_dir=experiment)
             dsr = gate["deflated_sharpe"]
             self.assertEqual(
                 (dsr["host_trials"], dsr["offline_trials"], dsr["trials"], dsr["controls"]),
                 (2, 4, 6, 0),
             )
             self.assertEqual(dsr["undeclared_offline_validations"], 1)
-            # An old ledger row carries none of the keys at all.
+            # An old ledger row carries none of the keys at all; its bytes are
+            # read off the arm's revision manifests.
             legacy = [
-                {key: value for key, value in row.items() if key not in ("control", "batch_id", "offline_trials")}
+                {
+                    key: value
+                    for key, value in row.items()
+                    if key not in ("fingerprint", "control", "batch_id", "offline_trials")
+                }
                 for row in rows
             ]
-            dsr = freeze_gate_for([], legacy, legacy[0])["deflated_sharpe"]
+            dsr = freeze_gate_for([], legacy, legacy[0], experiment_dir=experiment)["deflated_sharpe"]
             self.assertEqual((dsr["trials"], dsr["undeclared_offline_validations"]), (2, 2))

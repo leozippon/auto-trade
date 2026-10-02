@@ -348,11 +348,13 @@ class AcceptanceRules:
                 "deflated_sharpe_probability": (
                     f">= {self.min_dsr_probability} for the nominee's "
                     "research-period active IR. Trials M = distinct non-control "
-                    "revisions validated in the arm on any span plus every "
+                    "strategies (distinct bytes) validated in the arm on any span "
+                    "-- the same bytes validated again, on another span or "
+                    "after a control registration, are the same trial -- plus every "
                     "batch's declared offline_trials; they count as "
                     "rho + (1 - rho) * M independent trials, rho the mean "
-                    "pairwise correlation of the non-control revisions' daily "
-                    "graded series; the dispersion is the zero-skill sampling "
+                    "pairwise correlation of the trials' daily graded series, "
+                    "each over its longest validated span; the dispersion is the zero-skill sampling "
                     "error of an annualized IR over the nominee's days, "
                     f"sqrt({verdict.TRADING_DAYS_PER_YEAR} / days), about 0.5 over "
                     "four years. A control "
@@ -859,6 +861,12 @@ class StepResult:
     # as 0.
     batch_id: str | None = None
     offline_trials: int | None = None
+    # The artifact fingerprint of the bytes the revision holds: Validations of
+    # the same bytes, on any span, are one trial. ``None`` where the caller did
+    # not commit the revision through a session (the host's deterministic
+    # baseline); the trial family then reads it from the revision's manifest
+    # (``experiment.fingerprinted``).
+    fingerprint: str | None = None
 
 
 @dataclass(frozen=True)

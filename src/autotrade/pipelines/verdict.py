@@ -442,6 +442,34 @@ def _count(value: object, name: str, minimum: int) -> int:
     return value
 
 
+def trial_family_statistics(
+    *,
+    trials: int,
+    offline_trials: int = 0,
+    trial_analyses: Sequence[Mapping[str, object]] = (),
+    lineage_trials: int = 0,
+    lineage_series: Sequence[Mapping[str, float]] = (),
+) -> dict[str, object]:
+    """M, its parts, ρ̄ and N_eff of an arm's trial family (:func:`freeze_gate`
+    names the parts); what the gate deflates over and what the IR bar a
+    full-span nominee faces is read at."""
+
+    trials = _count(trials, "trials", 1)
+    offline_trials = _count(offline_trials, "offline_trials", 0)
+    lineage_trials = _count(lineage_trials, "lineage_trials", 0)
+    correlation, pairs = trial_correlation(trial_analyses, lineage_series)
+    total = trials + offline_trials + lineage_trials
+    return {
+        "trials": total,
+        "host_trials": trials,
+        "offline_trials": offline_trials,
+        "lineage_trials": lineage_trials,
+        "trial_correlation": correlation,
+        "trial_correlation_pairs": pairs,
+        "effective_trials": effective_trials(total, correlation),
+    }
+
+
 def freeze_gate(
     analysis: Mapping[str, object],
     *,
@@ -464,14 +492,15 @@ def freeze_gate(
     """Freeze gate of one nominee (PL1 §4.1).
 
     ``analysis`` is the nominee's full-span validation sidecar, read whole.
-    The deflated Sharpe deflates over the arm's trial family: ``trials``
-    distinct non-control revisions validated anywhere in the arm (the nominee
-    among them), the ``offline_trials`` its batches declared screening offline
-    and the ``lineage_trials`` of the earlier arms it was created to inherit,
-    M in all, counted at their effective number ρ̄ + (1 − ρ̄)·M, where ρ̄ is
+    The deflated Sharpe deflates over the arm's trial family
+    (:func:`trial_family_statistics`): ``trials`` distinct non-control
+    strategies validated anywhere in the arm (the nominee among them), the
+    ``offline_trials`` its batches declared screening offline and the
+    ``lineage_trials`` of the earlier arms it was created to inherit, M in all,
+    counted at their effective number ρ̄ + (1 − ρ̄)·M, where ρ̄ is
     :func:`trial_correlation` over ``trial_analyses`` (one sidecar per
-    non-control revision) and ``lineage_series`` (one reduced series per
-    measurable lineage revision). The dispersion √V is the zero-skill sampling error
+    trial) and ``lineage_series`` (one reduced series per measurable lineage
+    trial). The dispersion √V is the zero-skill sampling error
     of an IR over the nominee's own measured days (:func:`null_sharpe_std`), so
     neither controls nor near-copies of the nominee move the bar through it.
     ``information_ratio_bar`` is the research IR at which the probability
@@ -493,23 +522,20 @@ def freeze_gate(
     not judged.
     """
 
-    trials = _count(trials, "trials", 1)
-    offline_trials = _count(offline_trials, "offline_trials", 0)
-    lineage_trials = _count(lineage_trials, "lineage_trials", 0)
+    family = trial_family_statistics(
+        trials=trials,
+        offline_trials=offline_trials,
+        trial_analyses=trial_analyses,
+        lineage_trials=lineage_trials,
+        lineage_series=lineage_series,
+    )
     full_span_validations = _count(full_span_validations, "full_span_validations", 0)
     graded, series = _graded(analysis)
     statistics, _rows, neutral = _measured(graded, "", "")
-    correlation, pairs = trial_correlation(trial_analyses, lineage_series)
-    total = trials + offline_trials + lineage_trials
-    effective = effective_trials(total, correlation)
+    effective = float(family.pop("effective_trials"))  # type: ignore[arg-type]
     dispersion = null_sharpe_std(int(statistics["days"]))
     dsr = {
-        "trials": total,
-        "host_trials": trials,
-        "offline_trials": offline_trials,
-        "lineage_trials": lineage_trials,
-        "trial_correlation": correlation,
-        "trial_correlation_pairs": pairs,
+        **family,
         **deflated_sharpe(
             observed_sharpe=statistics["information_ratio"],
             effective_trials=effective,

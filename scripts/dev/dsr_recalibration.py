@@ -3,7 +3,10 @@ effective trials, declared offline screens) on the record, replay-free.
 
 Reads every arm's ``experiments/<arm>/ledgers/experiment_ledger.jsonl``, its
 step tree's candidate names and hypotheses, and the ``style_analysis.json``
-beside each recorded validation. Nothing is replayed; CPU only.
+beside each recorded validation. Nothing is replayed; CPU only. A trial is
+the gate's (``experiment.trial_family``): distinct non-control bytes, read off
+each arm's revision manifests; an arm whose revisions were not kept is listed
+as such instead of counted.
 
 A. Every frozen or nominated candidate re-graded: the DSR it was recorded
    with (and the threshold of its era), the former rule (N = every validated
@@ -52,7 +55,12 @@ from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR
 from autotrade.pipelines import verdict
 from autotrade.pipelines.calendar import FULL_SPAN
 from autotrade.pipelines.config import AcceptanceRules
-from autotrade.pipelines.experiment import freeze_gate_for, neutralized
+from autotrade.pipelines.experiment import (
+    fingerprinted,
+    freeze_gate_for,
+    neutralized,
+    trial_family,
+)
 
 # The former rule is read at the default it ran under; the current rule at
 # today's default (raised to 0.975 by this recalibration) unless a column
@@ -66,6 +74,9 @@ DSR_REASONS = {"freeze_deflated_sharpe_below_threshold", "freeze_deflated_sharpe
 # A leg the arm registered as a comparison: named c_*, or a hypothesis that
 # opens by calling itself a control or baseline. Printed per arm for audit.
 CONTROL_MARKERS = ("对照", "基线", "安慰剂", "control", "baseline", "placebo")
+# An arm recorded before revisions were kept has no revision manifests, so its
+# Validations cannot be told apart by the bytes they replayed: no trial family.
+PRUNED = "revisions not kept, trials not identifiable"
 
 
 def is_control(name: str, hypothesis: str) -> bool:
@@ -127,7 +138,9 @@ def old_rule(nominee: dict, rows: list[dict]) -> dict | None:
     return block
 
 
-def new_rule(nominee: dict, rows: list[dict], rules: AcceptanceRules, years, *, flag: bool, offline: int = 0) -> dict:
+def flagged_rows(rows: list[dict], *, flag: bool, offline: int = 0) -> list[dict]:
+    """The rows as the gate reads them, controls flagged by name when ``flag``."""
+
     flagged = []
     for row in rows:
         item = {k: v for k, v in row.items() if not k.startswith("_")}
@@ -135,10 +148,15 @@ def new_rule(nominee: dict, rows: list[dict], rules: AcceptanceRules, years, *, 
         if offline:
             item["offline_trials"], item["batch_id"] = offline, "declared"
         flagged.append(item)
+    return flagged
+
+
+def new_rule(arm: Path, nominee: dict, rows: list[dict], rules: AcceptanceRules, years, *, flag: bool, offline: int = 0) -> dict:
+    flagged = flagged_rows(rows, flag=flag, offline=offline)
     nominee_row = next(item for item in flagged if item["step_id"] == nominee["step_id"])
     nominee_row["control"] = False  # a nominated leg is by definition not a control
     rules = replace(rules, min_dsr_probability=THRESHOLD)
-    return freeze_gate_for([], flagged, nominee_row, hard_reasons=rules.evaluate(dict(nominee["summary"])), acceptance=rules, years=years)
+    return freeze_gate_for([], flagged, nominee_row, experiment_dir=arm, hard_reasons=rules.evaluate(dict(nominee["summary"])), acceptance=rules, years=years)
 
 
 def fmt(value, digits=3):
@@ -163,12 +181,16 @@ def part_a() -> list[str]:
             rules = AcceptanceRules.from_record(record.get("acceptance_rules") or {})
             years = years_of(arm)
             old = old_rule(nominee, rows)
-            plain = new_rule(nominee, rows, rules, years, flag=False)
-            named = new_rule(nominee, rows, rules, years, flag=True)
+            try:
+                plain = new_rule(arm, nominee, rows, rules, years, flag=False)
+            except FileNotFoundError:
+                out.append(f"| `{arm.name}` | {PRUNED} | | | | | | |")
+                continue
+            named = new_rule(arm, nominee, rows, rules, years, flag=True)
             flips = None
             if named.get("passed"):
                 for k in range(1, 201):
-                    if new_rule(nominee, rows, rules, years, flag=True, offline=k)["deflated_sharpe"]["deflated_sharpe_probability"] < THRESHOLD:
+                    if new_rule(arm, nominee, rows, rules, years, flag=True, offline=k)["deflated_sharpe"]["deflated_sharpe_probability"] < THRESHOLD:
                         flips = k
                         break
             d0, d1 = plain["deflated_sharpe"], named["deflated_sharpe"]
@@ -193,17 +215,19 @@ def part_b() -> list[str]:
     return out
 
 
-def full_span_trials(rows: list[dict]) -> tuple[list[dict], list[dict]]:
-    """Measurable full-span rows, one per revision: (non-controls, controls)."""
+def full_span_trials(arm: Path, rows: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Measurable full-span rows, one per strategy (the bytes its revision
+    holds, as the gate's trial family counts them): (non-controls, controls).
+    ``FileNotFoundError`` for an arm whose revisions were not kept."""
 
     seen, keep, controls = set(), [], []
-    for row in rows:
-        if row.get("span") != FULL_SPAN or row["revision_id"] in seen:
+    for row in fingerprinted(arm, rows):
+        if row.get("span") != FULL_SPAN or row["fingerprint"] in seen:
             continue
         stats = neutralized(row["validation_result_ref"])
         if not stats or stats.get("information_ratio") is None:
             continue
-        seen.add(row["revision_id"])
+        seen.add(row["fingerprint"])
         (controls if is_control(row["_name"], row["_hypothesis"]) else keep).append(row)
     return keep, controls
 
@@ -217,21 +241,25 @@ def part_c() -> list[str]:
         research, _meta, rows = arm_rows(arm)
         if not rows:
             continue
-        keep, _controls = full_span_trials(rows)
+        try:
+            keep, _controls = full_span_trials(arm, rows)
+        except FileNotFoundError:
+            out.append(f"| `{arm.name}` | {PRUNED} | | | | |")
+            continue
         if not keep:
             continue
         best = max(keep, key=lambda row: neutralized(row["validation_result_ref"])["information_ratio"])
         rules = AcceptanceRules.from_record(research[-1].get("acceptance_rules") or {})
         old = old_rule(best, rows)
-        new = new_rule(best, rows, rules, years_of(arm), flag=True)
+        new = new_rule(arm, best, rows, rules, years_of(arm), flag=True)
         dsr = new.get("deflated_sharpe")
         if dsr is None:
             continue
-        control_revisions = {row["revision_id"] for row in rows if is_control(row["_name"], row["_hypothesis"])}
+        family = trial_family(fingerprinted(arm, flagged_rows(rows, flag=True)))
         before = old is not None and old["deflated_sharpe_probability"] is not None and old["deflated_sharpe_probability"] >= FORMER_THRESHOLD
         after = dsr["deflated_sharpe_probability"] is not None and dsr["deflated_sharpe_probability"] >= THRESHOLD
         out.append(
-            f"| `{arm.name}` | {len({r['revision_id'] for r in rows}) - len(control_revisions)} / {len(control_revisions)} | {fmt(new['information_ratio'])} "
+            f"| `{arm.name}` | {len(family['representatives'])} / {family['controls']} | {fmt(new['information_ratio'])} "
             f"| {old['trials'] if old else '–'}, {fmt(old and old['trial_sharpe_std'])}, {fmt(old and old['deflated_sharpe_probability'])} "
             f"| {dsr['trials']}, {fmt(dsr['trial_correlation'], 2)}, {fmt(dsr['effective_trials'], 2)}, {fmt(dsr['information_ratio_bar'], 2)}, {fmt(dsr['deflated_sharpe_probability'])} "
             f"| {'pass' if before else 'fail'} → {'pass' if after else 'fail'}{' **flip**' if before != after else ''} |"
@@ -297,7 +325,10 @@ def _arm_rates(task: tuple[str, int, int]) -> dict | None:
     arm = Path("experiments") / arm_name
     rng = np.random.default_rng(seed)
     _research, _meta, rows = arm_rows(arm)
-    keep, controls = full_span_trials(rows)
+    try:
+        keep, controls = full_span_trials(arm, rows)
+    except FileNotFoundError:
+        return {"arm": arm_name, "pruned": True}
     if not keep or len(keep) + len(controls) < 2:
         return None
     family = keep + controls
@@ -357,7 +388,9 @@ def part_d(draws: int, processes: int) -> tuple[list[str], dict]:
     arms = sorted(Path(p).parents[1].name for p in glob.glob("experiments/*/ledgers/experiment_ledger.jsonl"))
     tasks = [(arm, draws, 20260922 + index) for index, arm in enumerate(arms)]
     with Pool(processes) as pool:
-        results = [r for r in pool.map(_arm_rates, tasks) if r is not None]
+        read = [r for r in pool.map(_arm_rates, tasks) if r is not None]
+    results = [r for r in read if not r.get("pruned")]
+    pruned = [r["arm"] for r in read if r.get("pruned")]
     out = ["## D. Zero skill and power through the real gate (bootstrap of each arm's own series)", "",
            ("Arm-level columns nominate the best non-control full-span trial of each draw (the selection the Agent makes). "
            "*former* deflates it over every full-span trial, controls included, at their sample IR spread (the rule until now); "
@@ -382,6 +415,8 @@ def part_d(draws: int, processes: int) -> tuple[list[str], dict]:
     means = {key: float(np.mean([r[key] for r in results])) for key in RATE_KEYS}
     with_controls = [r for r in results if r["controls"]]
     without = [r for r in results if not r["controls"]]
+    if pruned:
+        out += ["", f"Left out, {PRUNED}: " + ", ".join(f"`{arm}`" for arm in pruned) + "."]
     out += ["", f"Mean over {len(results)} arms ({draws} draws each; {len(with_controls)} with controls, {len(without)} without):", "",
             "| rate | former | former, no controls | current @0.90 | current @0.95 | current @0.975 |", "|---|---|---|---|---|---|"]
     for label, group in (("freeze with selection, all arms", results), ("  arms with controls", with_controls), ("  arms without controls", without)):

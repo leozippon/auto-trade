@@ -616,7 +616,9 @@ def _step_view(row: Mapping[str, object]) -> dict[str, object]:
 
 
 def _best_candidate(
-    earlier: Sequence[Mapping[str, object]], steps: Sequence[Mapping[str, object]]
+    directory: Path,
+    earlier: Sequence[Mapping[str, object]],
+    steps: Sequence[Mapping[str, object]],
 ) -> dict[str, object] | None:
     """The session's full-span Validation with the highest neutralised IR, and
     the deflated Sharpe probability the freeze gate would give it, with the
@@ -640,7 +642,7 @@ def _best_candidate(
         return None
     best = max(full, key=lambda row: float(row["neutralized"]["information_ratio"]))  # type: ignore[index]
     try:
-        gate = freeze_gate_for(earlier, steps, best)
+        gate = freeze_gate_for(earlier, steps, best, experiment_dir=directory)
     except (OSError, ValueError):
         gate = {}
     dsr = _mapping(gate.get("deflated_sharpe"))
@@ -762,7 +764,7 @@ def _live_best(
     steps = _live_steps(directory)
     key = (str(directory), tuple(sorted(str(row.get("step_id")) for row in steps)))
     if key not in _LIVE_BEST_CACHE:
-        _LIVE_BEST_CACHE[key] = _best_candidate(earlier, steps)
+        _LIVE_BEST_CACHE[key] = _best_candidate(directory, earlier, steps)
     return _LIVE_BEST_CACHE[key]
 
 
@@ -777,7 +779,7 @@ def _recorded_best(
     key = (str(directory), *(str(row.get("run_id")) for row in (*earlier, record)))
     if key not in _RECORDED_BEST_CACHE:
         steps = [row for row in record.get("steps") or () if isinstance(row, Mapping)]
-        _RECORDED_BEST_CACHE[key] = _best_candidate(earlier, steps)
+        _RECORDED_BEST_CACHE[key] = _best_candidate(directory, earlier, steps)
     return _RECORDED_BEST_CACHE[key]
 
 

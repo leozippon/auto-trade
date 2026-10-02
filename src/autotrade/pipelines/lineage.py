@@ -8,10 +8,11 @@ them with the arm's own (``experiment.freeze_gate_for``).
 
 The lineage is read from the earlier arms once, when the console creates the
 arm, into a compact series file beside the arm's ledger holding the per-arm
-counts and, for each measurable non-control revision, the daily neutralised
-graded series the gate correlates (``verdict.neutral_daily``) -- the same
-series and the same representative Validation (full span when there is one)
-the gate reads for the arm's own trials. From then on nothing reads the
+counts and, for each measurable trial, the daily neutralised graded series the
+gate correlates (``verdict.neutral_daily``) -- the same trials (distinct
+non-control bytes, ``experiment.trial_family``), series and representative
+Validation (the longest span) the gate reads for the arm's own. From then on
+nothing reads the
 lineage arms' directories. Only their research sessions' Validations are read,
 never a forward or Held-out replay, and every extracted day must lie inside the
 research period. The ``lineage`` ledger record is the pipeline's to write, from
@@ -32,8 +33,8 @@ from .config import DEFAULT_RESEARCH_GEOMETRY
 from .experiment import (
     _recorded_steps,
     _style_analysis,
+    fingerprinted,
     trial_family,
-    trial_representatives,
 )
 from .hitl_state import read_json
 from .ledger import LINEAGE_SERIES_NAME, ExperimentLedger
@@ -69,13 +70,15 @@ def extract_lineage(
     """What the freeze gate needs from each lineage arm, or ``ValueError``
     naming the arm that cannot be one.
 
-    A lineage arm must exist, have researched exactly this research period and
-    have recorded at least one non-control trial. Per arm: its trial family
-    (``experiment.trial_family`` over its research session's Validations, so
-    controls are left out and declared offline screens count, exactly as for
-    the arm's own). Per measurable non-control revision: its daily series. A
-    revision whose span cannot be measured is a trial with no series, as in
-    the arm's own family.
+    A lineage arm must exist, have researched exactly this research period,
+    still hold the revisions that identify its trials and have recorded at
+    least one non-control trial. Per arm: its trial family
+    (``experiment.trial_family`` over its research session's Validations,
+    fingerprinted from its own revision store, so the same bytes on two spans
+    are one trial, controls are left out and declared offline screens count,
+    exactly as for the arm's own). Per measurable trial: the daily series of
+    its representative Validation. A trial whose span cannot be measured has
+    no series, as in the arm's own family.
     """
 
     root = Path(experiments_root)
@@ -96,15 +99,22 @@ def extract_lineage(
                 f"lineage arm {arm} researched {period[0]}..{period[1]}, not this arm's "
                 f"{research_start}..{research_end}"
             )
-        rows = _recorded_steps(ExperimentLedger(directory / "ledgers" / "experiment_ledger.jsonl").read())
+        try:
+            rows = fingerprinted(
+                directory,
+                _recorded_steps(ExperimentLedger(directory / "ledgers" / "experiment_ledger.jsonl").read()),
+            )
+        except FileNotFoundError as exc:
+            # An arm whose revisions were not kept cannot name its trials.
+            raise ValueError(f"lineage arm {arm}: {exc}") from exc
         family = trial_family(rows)
-        revisions = list(family["revisions"])  # type: ignore[call-overload]
-        if not revisions:
+        representatives: list[Mapping[str, object]] = family["representatives"]  # type: ignore[assignment]
+        if not representatives:
             raise ValueError(f"lineage arm {arm} has no recorded non-control trial")
-        representative = trial_representatives(rows)
-        for revision in revisions:
+        for row in representatives:
+            revision = str(row["revision_id"])
             try:
-                daily = neutral_daily(_style_analysis(representative[revision]))
+                daily = neutral_daily(_style_analysis(row))
             except ValueError:
                 continue
             outside = sorted(day for day in daily if not research_start <= day <= research_end)
@@ -117,14 +127,14 @@ def extract_lineage(
                 {
                     "experiment_id": arm,
                     "revision_id": revision,
-                    "span": representative[revision].get("span"),
+                    "span": row.get("span"),
                     "daily": [[day, value] for day, value in daily.items()],
                 }
             )
         extracted.append(
             {
                 "experiment_id": arm,
-                "host_trials": len(revisions),
+                "host_trials": len(representatives),
                 "offline_trials": family["offline_trials"],
                 "controls": family["controls"],
                 "undeclared_offline_validations": family["undeclared_offline_validations"],

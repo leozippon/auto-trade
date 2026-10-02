@@ -621,7 +621,10 @@ def test_an_interrupted_llm_session_resumes_with_its_summary_budget_and_nodes(
     record = records[1]
     assert record["attempts"] == 2 and record["outcome"] == "freeze"
     assert record["steps"][0]["step_id"] == node["node_id"]
-    assert record["trials_to_date"] == 2 and record["freeze_gate"]["passed"] is True
+    # Both attempts validated the same working copy: two revisions, one trial.
+    assert record["trials_to_date"] == 1 and record["freeze_gate"]["passed"] is True
+    assert len({row["revision_id"] for row in record["steps"]}) == 2
+    assert len({row["fingerprint"] for row in record["steps"]}) == 1
     assert record["budget_used"]["replay_years"] == 2
     # The calls of both attempts: the first spent five (two scripted, three failed).
     assert record["budget_used"]["llm_calls"] == 5 + len(second_llm.calls)
@@ -924,7 +927,8 @@ def test_the_llm_session_validates_a_multi_year_span_is_refused_by_the_gate_and_
     assert [row["record_type"] for row in records] == ["research_session"]
     [record] = records
     assert [step["span"] for step in record["steps"]] == ["Y2", "full", "full"]
-    assert (record["outcome"], record["frozen"], record["trials_to_date"]) == ("no_edge", None, 3)
+    # One working copy validated on three spans is one trial.
+    assert (record["outcome"], record["frozen"], record["trials_to_date"]) == ("no_edge", None, 1)
     assert result["verdict"] == {"status": "no_deliverable", "reasons": [f"no_edge: {record['reason']}"]}
     assert all(item[0] != "heldout" for item in synthetic_provider.requests)
 
