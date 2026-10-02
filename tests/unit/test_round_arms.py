@@ -107,19 +107,24 @@ def _synthetic_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rnd: Round)
 
 
 @pytest.mark.parametrize("round_name", ROUND_IDS)
-def test_every_round_runs_every_model_role_on_the_local_model(round_name: str) -> None:
-    """Cost policy: no arm may open a hosted stream.
+def test_every_round_runs_on_the_local_model_unless_an_arm_declares_a_hosted_role(round_name: str) -> None:
+    """Cost policy: an arm opens a hosted stream only where its own entry says so.
 
-    No round overrides a model role, so the guarantee rests entirely on the
-    console defaults -- which is why BASE_EXPECTED_DEFAULTS pins every role and
-    check_console_defaults refuses a drift.
+    The console defaults pin every role to the local model (BASE_EXPECTED_DEFAULTS,
+    which check_console_defaults guards against drift), so a hosted role is always
+    an arm's explicit declaration in its round file. Text-evidence scoring is never
+    hosted: it also runs in the forward and Held-out replays, whose data must not
+    leave the machine.
     """
     rnd = ROUNDS[round_name]
     rnd.check_console_defaults()
     for experiment_id in (PROBE_ID, *rnd.arms):
         params = rnd.request_params(experiment_id)
+        declared = rnd.arms.get(experiment_id, {})
         for role in MODEL_ROLES:
             assert BASE_EXPECTED_DEFAULTS[role] == LOCAL_QWEN_MODEL, role
+            if role in declared and role != "nl_model":
+                continue
             assert params[role] == LOCAL_QWEN_MODEL, (experiment_id, role)
 
 
@@ -847,7 +852,7 @@ def test_mounting_index_weight_leaves_every_other_round_byte_for_byte() -> None:
         "create_round_20260925",
         "create_round_20260926",
     }
-    eight_year = {"create_round_20260927", "create_round_20261001"}
+    eight_year = {"create_round_20260927", "create_round_20261001", "create_round_20261002"}
     assert carrying == lineage | eight_year, sorted(carrying)
     base = records["create_round_20260920"]
     for name in sorted(eight_year):
