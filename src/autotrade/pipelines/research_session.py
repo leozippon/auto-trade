@@ -1454,8 +1454,9 @@ def arm_record(
     """The arm's selection state when the attempt starts.
 
     Trials are the freeze gate's trial family over the session's earlier
-    attempts (``experiment.trial_family``): non-control revisions plus the
-    offline screens their batches declared; controls are counted apart. A
+    attempts (``experiment.trial_family``): distinct non-control strategies
+    (by artifact fingerprint, whatever the span) plus the offline screens
+    their batches declared; controls are counted apart. A
     session only runs while nothing is frozen. ``lineage`` is the ledger's
     ``lineage`` record of an arm created with one: the earlier arms whose
     trials the gate adds to these, how many and what they count as.

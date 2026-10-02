@@ -3,7 +3,7 @@
 ``SessionValidations`` holds the session's replay-year budget, its Step list and
 its step tree; ``smoke_backtest``, ``batch_validate`` and ``run_null_control``
 are the three tools a research session hands the Agent on top of it. Nothing
-here composes a session: ``local_backend`` builds these tools and wires them
+here composes a session: ``research_session`` builds these tools and wires them
 into the Agent runner, so this module never imports it back.
 """
 
