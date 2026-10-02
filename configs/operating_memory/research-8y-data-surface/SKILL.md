@@ -19,8 +19,8 @@
 - 一行一个 (trade_date, ts_code)，合并了日线、每日指标与涨跌停价：open/high/low/close/pre_close/change/pct_chg/vol/amount、turnover_rate/turnover_rate_f/volume_ratio、pe/pe_ttm/pb/ps/ps_ttm/dv_ratio/dv_ttm、total_share/float_share/free_share、total_mv/circ_mv、up_limit/down_limit、adj_factor、is_suspended。
 - 单位已归一：价格 元/股，vol 股，amount 元，pct_chg/turnover_rate/turnover_rate_f/dv_ratio/dv_ttm 是小数（0.05 = 5%），股本 股，total_mv/circ_mv 元，估值是倍数。实读：amount ÷ (vol × close) 中位 0.9998，total_mv = close × total_share，circ_mv = close × float_share。亏损股的 pe/pe_ttm 是空值而不是负数（研究期末前一个月约四分之一为空、零个负值）。
 - 价格不复权，pre_close 是除权后的参考价。跨除权日的收益用 `close × adj_factor` 或 `pct_chg`（= close ÷ pre_close − 1），不能用相邻两天的 close：002667.SZ 在 2018-05-02 每股送转 0.7，两天 close 之比给出 −42.6%，复权收益与 pct_chg 都是 −2.3%。个别代码的 adj_factor 会回落，算复权收益时不要假定它逐日不降。
-- 回放里的除权由 Broker 结算：除权日把现金红利记入现金，股数变化按 pre_close 结算（运行事实 `broker_replay.ex_date_settlement`），持仓穿过除权日不需要策略自己记账。
-- 全日停牌当天没有行；`is_suspended=True` 只是盘中临时停牌，当天量额完整，Broker 会拒当天的委托。连续的 True 不构成停牌段：判断能否交易，看该股最近一根 bar 是不是视图里最新的交易日。
+- 回放里的除权由 Broker 结算：除权日把现金红利记入现金，股数变化按 pre_close 结算（运行事实 `broker_replay.ex_date_settlement`），持仓穿过除权日不需要策略自己记账。结算用的除权除息表只给 Broker，不是 as-of 域，策略读不到；每次验证的 result 记录里有逐笔的 `corporate_actions` 结算明细。
+- 全日停牌当天没有行，这一天的委托以 `missing_execution_price` 被拒，持仓留在账上；`is_suspended=True` 只是盘中临时停牌，当天量额完整，委托以 `suspended` 被拒。连续的 True 不构成停牌段：判断能否交易，看该股最近一根 bar 是不是视图里最新的交易日。
 - 研究期末视图的日线有 5,636 个代码，其中 216 个不在同一视图的 universe 里（在 2025-06-30 前已退市）。
 
 ## universe：每个研究年换一个版本
@@ -36,7 +36,7 @@
 - `index_daily`：指数代码在 `ts_code`，`index_code` 整列为空，按 `index_code` 过滤取不到任何行情。7 只指数：000001.SH、000016.SH、000300.SH、000688.SH、000852.SH、000905.SH、399006.SZ。点位；`pct_chg` 是百分数（−0.35 = −0.35%，与日线的小数口径不同）；vol 手、amount 千元，未归一。
 - `index_weight`：指数在 `index_code`、成分在 `con_code`（与日线 ts_code 同格式），`ts_code` 整列为空。同样 7 只，每只每月一张截面，日期是当月最后一个交易日（000688.SH 自 2020-07 起）。000300/000905/000852 每张恰 300/500/1000 行、三者互不重叠，相邻两张最长隔 36 天。`weight` 是百分数（每张合计约 100），当组合权重先除以 100。
 - `index_dailybasic`：只有 6 只（没有 000688.SH）；000852.SH 在这份数据里 20181228 之后没有行，2019 年起取不到中证 1000 的指数换手与估值。total_mv/float_mv 元、股本 股（与日线每日指标的口径不同，不要混算），turnover_rate 百分数。
-- `sw_daily`：申万指数行情，研究期末视图 596 个代码，一级之外还有二级、三级与风格指数。正则 `801\d\d0\.SI` 匹配 37 个，比研究期末的 31 个一级多出 801020.SI 与 801250/801260/801270/801280/801300.SI；某一年的一级以那一年 universe 的 l1_code 为准。`pct_change` 是百分数，vol 万股，amount/float_mv/total_mv 万元（单位表标为 inferred）。行业名与 universe 不一致（801030.SI 在这里叫「化工」、universe 里叫「基础化工」），跨表一律按代码连接。2021-12-13 之前的点位是按申万 2021 口径回算的，与当时按申万 2014 划分的个股归属不是同一套。
+- `sw_daily`：申万指数行情，研究期末视图 596 个代码，一级之外还有二级、三级与风格指数。正则 `801\d\d0\.SI` 匹配 37 个，比研究期末的 31 个一级多出 801020.SI 与 801250/801260/801270/801280/801300.SI；某一年的一级以那一年 universe 的 l1_code 为准。`pct_change` 是百分数，vol 万股，amount/float_mv/total_mv 万元（单位表标为 inferred）。行业名随口径改过（801030.SI 在这里 2021-12-13 起、在 universe 里 2022 版起由「化工」改叫「基础化工」），跨表一律按代码连接。2021-12-13 之前的点位是按申万 2021 口径回算的，与当时按申万 2014 划分的个股归属不是同一套。
 
 ## 按时点读成分、行业与指数行情
 
@@ -46,4 +46,4 @@
 
 ## 读取
 
-- 研究期末视图的日线约 923 万行、9 个按 trade_date 有序的 row group，整期回放的后几年 `asof_dir/daily` 更长。决策期一律 `pd.read_parquet(context.asof_dir + "/daily", columns=[...], filters=[("trade_date", ">=", start)])`，只读命中的行组；宏观同样带 `("dataset", "==", ...)` 过滤与列投影。universe 只有百余 KB，可以整读。
+- 研究期末视图的日线约 923 万行、9 个按 trade_date 有序的 row group，整期回放的后几年 `asof_dir/daily` 更长。决策期一律 `pd.read_parquet(context.asof_dir + "/daily", columns=[...], filters=[("trade_date", ">=", start)])`，只读命中的行组；宏观同样带 `("dataset", "==", ...)` 过滤与列投影。daily 与 macro 的 `trade_date` 都是 `YYYYMMDD` 字符串，过滤值与比较也用同格式的字符串。universe 只有百余 KB，可以整读。
