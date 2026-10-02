@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import re
 from collections.abc import Mapping
 from pathlib import Path
@@ -113,6 +114,7 @@ class ModificationCheckTool:
         except StrategyLoadError as exc:
             raise ToolError(str(exc)) from exc
         _reject_flat_asof_reads(files, self.output_dir)
+        _reject_unseeded_randomness(files, self.output_dir)
         # The same scan the artifact store runs when a frozen artifact is
         # reloaded as a later session's start: run it here so a hardcoded stage
         # path is reported to the Agent before any formal replay.
@@ -199,6 +201,134 @@ def _reject_flat_asof_reads(files: list[Path], root: Path) -> None:
             f"context.snapshot_dir is flat ({domain}.parquet), and falling back "
             f"to it when an as-of read fails is a point-in-time violation."
         )
+
+
+# Random draws must be a function of what the strategy is shown: two replays of
+# one span that place different orders are not reproducible evidence, and a
+# shuffled control or random placebo is only a control if it is the same draw
+# every time. ``random``, ``time``, ``os`` and ``hashlib`` are not importable,
+# so what source can prove unseeded is numpy's hidden global state, a generator
+# built without a seed (seeded from OS entropy), and a seed read off the wall
+# clock. Anything less certain -- a seed variable that may be None, an
+# estimator left at ``random_state=None`` -- is the contract's rule, not this
+# check's.
+# numpy.random names that build or seed an explicit generator instead of
+# drawing from the global state; the second set takes the seed first.
+_NUMPY_GENERATOR_NAMES = frozenset(
+    {"default_rng", "Generator", "RandomState", "SeedSequence", "BitGenerator",
+     "PCG64", "PCG64DXSM", "Philox", "MT19937", "SFC64", "seed"}
+)
+_NUMPY_SEEDED_NAMES = _NUMPY_GENERATOR_NAMES - {"Generator", "BitGenerator"}
+# Keywords that carry a seed into a constructor or a library call.
+_SEED_KEYWORDS = frozenset({"seed", "random_state", "entropy"})
+_WALL_CLOCK_CALLS = frozenset({"now", "today", "utcnow"})
+_SEEDED_DRAW_IDIOM = (
+    "Seed every draw from the decision date: day = "
+    "int(context.inference_at.strftime('%Y%m%d')), then rng = "
+    "numpy.random.default_rng(day), or default_rng([day, 1]) with a fixed integer "
+    "for each further independent stream; draw from rng (rng.permutation, "
+    "rng.choice, rng.integers) and pass rng or one of its integers as "
+    "random_state= to a library."
+)
+
+
+def _reject_unseeded_randomness(files: list[Path], root: Path) -> None:
+    """Reject a random draw whose seed the source proves is not reproducible."""
+
+    for path in files:
+        if path.suffix != ".py":
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, SyntaxError):
+            # validate_strategy_package has already reported what it could not read.
+            continue
+        finding = _unseeded_draw(tree)
+        if finding is None:
+            continue
+        line, what = finding
+        raise ToolError(
+            f"{path.relative_to(root)}:{line} {what}, so two replays of the same "
+            "span can place different orders and the result is not reproducible "
+            f"evidence. {_SEEDED_DRAW_IDIOM}"
+        )
+
+
+def _unseeded_draw(tree: ast.Module) -> tuple[int, str] | None:
+    """The first call in ``tree`` that draws or seeds irreproducibly, if any."""
+
+    aliases = _numpy_aliases(tree)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = _dotted(node.func, aliases)
+        parts = name.split(".") if name else []
+        if len(parts) == 3 and parts[:2] == ["numpy", "random"]:
+            if parts[2] not in _NUMPY_GENERATOR_NAMES:
+                return node.lineno, f"draws from numpy's global random state ({name})"
+            if parts[2] in _NUMPY_SEEDED_NAMES and not _has_seed(node):
+                return node.lineno, f"calls {name}() without a seed, which seeds it from OS entropy"
+        # The seed a call is handed: a seed keyword anywhere, and the
+        # positional arguments of a numpy generator or a torch manual_seed.
+        seeds = [keyword.value for keyword in node.keywords if keyword.arg in _SEED_KEYWORDS]
+        if parts[:2] == ["numpy", "random"] or (
+            isinstance(node.func, ast.Attribute) and node.func.attr == "manual_seed"
+        ):
+            seeds.extend(node.args)
+        for seed in seeds:
+            for inner in ast.walk(seed):
+                if (
+                    isinstance(inner, ast.Call)
+                    and isinstance(inner.func, ast.Attribute)
+                    and inner.func.attr in _WALL_CLOCK_CALLS
+                ):
+                    return node.lineno, (
+                        f"seeds a random generator from the wall clock ({inner.func.attr}())"
+                    )
+    return None
+
+
+def _has_seed(call: ast.Call) -> bool:
+    """Whether a numpy generator constructor is given a seed that is not ``None``."""
+
+    values = [*call.args[:1], *(k.value for k in call.keywords if k.arg in _SEED_KEYWORDS)]
+    return any(
+        not (isinstance(value, ast.Constant) and value.value is None) for value in values
+    )
+
+
+def _numpy_aliases(tree: ast.Module) -> dict[str, str]:
+    """Local names bound to numpy, ``numpy.random`` or a name imported from it."""
+
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "numpy" or alias.name.startswith("numpy."):
+                    if alias.asname:
+                        aliases[alias.asname] = alias.name
+                    else:
+                        aliases["numpy"] = "numpy"
+        elif (
+            isinstance(node, ast.ImportFrom)
+            and node.level == 0
+            and node.module
+            and (node.module == "numpy" or node.module.startswith("numpy."))
+        ):
+            for alias in node.names:
+                aliases[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    return aliases
+
+
+def _dotted(node: ast.expr, aliases: Mapping[str, str]) -> str | None:
+    """The numpy dotted name an expression refers to, or None."""
+
+    if isinstance(node, ast.Name):
+        return aliases.get(node.id)
+    if isinstance(node, ast.Attribute):
+        base = _dotted(node.value, aliases)
+        return f"{base}.{node.attr}" if base else None
+    return None
 
 
 def _formal_files(root: Path) -> list[Path]:

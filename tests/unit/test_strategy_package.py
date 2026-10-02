@@ -198,6 +198,78 @@ def test_a_hardcoded_stage_path_is_refused_before_any_formal_replay(tmp_path: Pa
         ModificationCheckTool(tmp_path / "output").invoke({})
 
 
+@pytest.mark.parametrize(
+    ("helper", "message"),
+    [
+        (
+            "import numpy as np\ndef draw(n):\n    return np.random.permutation(n)\n",
+            r"lib/features\.py:3 draws from numpy's global random state \(numpy\.random\.permutation\)",
+        ),
+        (
+            "from numpy import random\ndef draw(n):\n    return random.choice(n, 2)\n",
+            r"global random state \(numpy\.random\.choice\)",
+        ),
+        (
+            "from numpy.random import default_rng\ndef draw(n):\n    return default_rng().permutation(n)\n",
+            r"calls numpy\.random\.default_rng\(\) without a seed",
+        ),
+        (
+            "import numpy\ndef draw(n):\n    return numpy.random.RandomState(seed=None).rand(n)\n",
+            r"calls numpy\.random\.RandomState\(\) without a seed",
+        ),
+        (
+            (
+                "from datetime import datetime\nimport numpy as np\n"
+                "def draw(n):\n    return np.random.default_rng(int(datetime.now().timestamp())).permutation(n)\n"
+            ),
+            r"lib/features\.py:4 seeds a random generator from the wall clock \(now\(\)\)",
+        ),
+        (
+            (
+                "import pandas as pd\n"
+                "def draw(frame):\n    return frame.sample(5, random_state=pd.Timestamp.today().day)\n"
+            ),
+            r"from the wall clock \(today\(\)\)",
+        ),
+    ],
+)
+def test_a_random_draw_the_source_proves_irreproducible_is_refused(
+    tmp_path: Path, helper, message
+):
+    """Two replays of one span must place the same orders: a draw from the
+    global state, an unseeded generator or a wall-clock seed cannot, and the
+    refusal names the idiom that can."""
+
+    main = _write_package(tmp_path / "output", helper=helper + "\n\ndef scaled(value):\n    return value\n")
+    # The loader inside the image allows it; the host's check refuses it.
+    validate_strategy_package(main)
+    with pytest.raises(ToolError, match=message) as caught:
+        ModificationCheckTool(tmp_path / "output").invoke({})
+    assert "day = int(context.inference_at.strftime('%Y%m%d'))" in str(caught.value)
+    assert "numpy.random.default_rng(day)" in str(caught.value)
+
+
+def test_a_draw_seeded_from_the_decision_date_passes(tmp_path: Path):
+    """The pack starters' idiom and its variants are what the check exists to
+    allow: a generator seeded from the decision date, a second stream keyed
+    with a fixed integer, an explicit bit generator, and a seed handed on."""
+
+    helper = (
+        "import numpy as np\n"
+        "from numpy.random import PCG64, Generator\n"
+        "def draw(context, frame, model_cls):\n"
+        "    day = int(context.inference_at.strftime('%Y%m%d'))\n"
+        "    order = np.random.default_rng(day).permutation(len(frame))\n"
+        "    other = np.random.default_rng([day, 1]).choice(3)\n"
+        "    stream = Generator(PCG64(day)).random()\n"
+        "    sample = frame.sample(5, random_state=day)\n"
+        "    return order, other, stream, sample, model_cls(random_state=day)\n"
+        "\n\ndef scaled(value):\n    return value\n"
+    )
+    _write_package(tmp_path / "output", helper=helper)
+    assert ModificationCheckTool(tmp_path / "output").invoke({}).ok
+
+
 def test_a_path_may_be_built_any_way_the_strategy_likes(tmp_path: Path):
     """The check cannot see where a computed path points, so it does not guess.
 
