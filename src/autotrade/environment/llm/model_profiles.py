@@ -17,9 +17,11 @@ from .proxy import LLMProxy
 
 LOCAL_QWEN_MODEL = "qwen-3.8-27b-fp8"
 LEGACY_LOCAL_QWEN_MODEL = "qwen3.8-27b-local"
-# Xiaomi's hosted model; the API takes the id in lower case only.
+# Xiaomi's hosted models; the API takes ids in lower case only.
 MIMO_FLASH_MODEL = "mimo-v2.6-flash"
-MODEL_CHOICES = (LOCAL_QWEN_MODEL, *_deepseek.MODEL_CHOICES, MIMO_FLASH_MODEL)
+MIMO_PRO_MODEL = "mimo-v2.6-pro"
+MIMO_MODELS = (MIMO_FLASH_MODEL, MIMO_PRO_MODEL)
+MODEL_CHOICES = (LOCAL_QWEN_MODEL, *_deepseek.MODEL_CHOICES, *MIMO_MODELS)
 
 
 def canonicalize_model_name(model: str) -> str:
@@ -68,8 +70,9 @@ _MIMO_PROFILE = ModelProfile(
     # own base URL from the MiMo console, set through MIMO_BASE_URL.
     default_base_url="https://api.xiaomimimo.com/v1",
     request_dialect="mimo",
-    # Published as a "1M" window and a 131,072-token completion ceiling
-    # (thinking tokens included); the decimal reading is the safe one.
+    # Flash and Pro publish the same request contract, a "1M" window and a
+    # 131,072-token completion ceiling (thinking tokens included); the
+    # decimal reading of "1M" is the safe one.
     context_window_tokens=1_000_000,
     max_output_tokens=131_072,
 )
@@ -137,7 +140,7 @@ def model_profile(model: str) -> ModelProfile:
         return _DEEPSEEK_PROFILE
     if model == LOCAL_QWEN_MODEL:
         return _VLLM_PROFILE
-    if model == MIMO_FLASH_MODEL:
+    if model in MIMO_MODELS:
         return _MIMO_PROFILE
     raise ValueError(
         f"unsupported model {model!r}; the catalog has {', '.join(MODEL_CHOICES)}"
@@ -244,6 +247,8 @@ __all__ = [
     "LEGACY_LOCAL_QWEN_MODEL",
     "LOCAL_QWEN_MODEL",
     "MIMO_FLASH_MODEL",
+    "MIMO_MODELS",
+    "MIMO_PRO_MODEL",
     "MIN_CONTEXT_WINDOW_TOKENS",
     "MODEL_CHOICES",
     "ModelProfile",

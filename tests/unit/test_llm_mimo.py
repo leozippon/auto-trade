@@ -9,6 +9,7 @@ import pytest
 
 from autotrade.environment.llm import (
     MIMO_FLASH_MODEL,
+    MIMO_MODELS,
     MODEL_CHOICES,
     ChatMessage,
     LLMProxyError,
@@ -34,14 +35,16 @@ TOOLS = (
 )
 
 
-def _chunk(delta: dict[str, object], finish_reason: str | None = None) -> dict[str, object]:
+def _chunk(
+    model: str, delta: dict[str, object], finish_reason: str | None = None
+) -> dict[str, object]:
     full = {"content": None, "role": None, "tool_calls": None, "reasoning_content": None}
     full.update(delta)
     return {
         "id": "rec-1",
         "choices": [{"delta": full, "finish_reason": finish_reason, "index": 0}],
         "created": 1790911565,
-        "model": MIMO_FLASH_MODEL,
+        "model": model,
         "object": "chat.completion.chunk",
     }
 
@@ -59,37 +62,35 @@ def _call_delta(arguments: str, *, call_id: str | None = None, name: str | None 
     }
 
 
-# The stream mimo-v2.6-flash returned to the 2026-10-01 smoke (thinking on, one
-# tool call), with the response id shortened: null fields in every delta, the
-# usage only in a trailing chunk with empty choices.
-RECORDED_TOOL_CALL_STREAM = (
-    "\n".join(
-        "data: " + json.dumps(chunk)
-        for chunk in (
-            _chunk({"content": "", "role": "assistant"}),
-            _chunk({"reasoning_content": "Need"}),
-            _chunk({"reasoning_content": " to call get_quote."}),
-            _chunk(_call_delta("", call_id="call_ec6a", name="get_quote")),
-            _chunk(_call_delta('{"symbol": ')),
-            _chunk(_call_delta('"600519.SH"}')),
-            {**_chunk({}, "tool_calls"), "usage": None},
-            {
-                "id": "rec-1",
-                "choices": [],
-                "model": MIMO_FLASH_MODEL,
-                "object": "chat.completion.chunk",
-                "usage": {
-                    "completion_tokens": 32,
-                    "prompt_tokens": 118,
-                    "total_tokens": 150,
-                    "completion_tokens_details": {"reasoning_tokens": 7},
-                    "prompt_tokens_details": {"cached_tokens": 0},
-                },
+def _recorded_tool_call_stream(model: str) -> bytes:
+    """The stream shape both MiMo models returned to the 2026-10-01/02 smokes
+    (thinking on, one tool call), ids shortened: null fields in every delta,
+    the usage only in a trailing chunk with empty choices."""
+
+    chunks = (
+        _chunk(model, {"content": "", "role": "assistant"}),
+        _chunk(model, {"reasoning_content": "Need"}),
+        _chunk(model, {"reasoning_content": " to call get_quote."}),
+        _chunk(model, _call_delta("", call_id="call_ec6a", name="get_quote")),
+        _chunk(model, _call_delta('{"symbol": ')),
+        _chunk(model, _call_delta('"600519.SH"}')),
+        {**_chunk(model, {}, "tool_calls"), "usage": None},
+        {
+            "id": "rec-1",
+            "choices": [],
+            "model": model,
+            "object": "chat.completion.chunk",
+            "usage": {
+                "completion_tokens": 32,
+                "prompt_tokens": 118,
+                "total_tokens": 150,
+                "completion_tokens_details": {"reasoning_tokens": 7},
+                "prompt_tokens_details": {"cached_tokens": 0},
             },
-        )
+        },
     )
-    + "\ndata: [DONE]\n"
-).encode()
+    lines = "\n".join("data: " + json.dumps(chunk) for chunk in chunks)
+    return (lines + "\ndata: [DONE]\n").encode()
 
 
 def _json_response(content: str) -> bytes:
@@ -138,9 +139,11 @@ def _env(tmp_path: Path, text: str = "MIMO_API_KEY=mimo-test-key\n") -> Path:
     return path
 
 
-def _proxy(tmp_path: Path, outcomes, **kwargs) -> tuple[OpenAICompatibleProxy, FakeTransport]:
+def _proxy(
+    tmp_path: Path, outcomes, *, model: str = MIMO_FLASH_MODEL, **kwargs
+) -> tuple[OpenAICompatibleProxy, FakeTransport]:
     gateway = build_model_gateway(
-        MIMO_FLASH_MODEL,
+        model,
         env_file=_env(tmp_path),
         conversation_log_dir=None,
         **kwargs,
@@ -150,9 +153,10 @@ def _proxy(tmp_path: Path, outcomes, **kwargs) -> tuple[OpenAICompatibleProxy, F
     return OpenAICompatibleProxy(gateway.config, transport=transport), transport
 
 
-def test_profile_reads_fixed_env_keys_and_publishes_limits(tmp_path: Path):
-    assert MIMO_FLASH_MODEL in MODEL_CHOICES
-    profile = model_profile(MIMO_FLASH_MODEL)
+@pytest.mark.parametrize("model", MIMO_MODELS)
+def test_profile_reads_fixed_env_keys_and_publishes_limits(tmp_path: Path, model: str):
+    assert model in MODEL_CHOICES
+    profile = model_profile(model)
     assert (profile.provider, profile.api_key_env, profile.base_url_env) == (
         "mimo",
         "MIMO_API_KEY",
@@ -161,11 +165,12 @@ def test_profile_reads_fixed_env_keys_and_publishes_limits(tmp_path: Path):
     assert profile.context_window_tokens == 1_000_000
     assert profile.max_output_tokens == 131_072
 
-    default = build_model_gateway(MIMO_FLASH_MODEL, env_file=_env(tmp_path))
+    default = build_model_gateway(model, env_file=_env(tmp_path))
+    assert default.config.model == model
     assert default.config.base_url == "https://api.xiaomimimo.com/v1"
     assert default.config.max_tokens == 1_200
     plan = build_model_gateway(
-        MIMO_FLASH_MODEL,
+        model,
         env_file=_env(
             tmp_path,
             "MIMO_API_KEY=tp-key\nMIMO_BASE_URL=https://token-plan-cn.xiaomimimo.com/v1\n",
@@ -181,10 +186,20 @@ def test_missing_key_fails_naming_the_variable(tmp_path: Path):
         build_model_gateway(MIMO_FLASH_MODEL, env_file=_env(tmp_path, ""))
 
 
-def test_thinking_request_and_recorded_stream_with_reasoning_replay(tmp_path: Path):
+def test_id_the_service_does_not_serve_is_not_in_the_catalog():
+    # The API answers "Unsupported model mimo-v2.5-flash" (HTTP 400).
+    with pytest.raises(ValueError, match=r"unsupported model 'mimo-v2\.5-flash'"):
+        model_profile("mimo-v2.5-flash")
+
+
+@pytest.mark.parametrize("model", MIMO_MODELS)
+def test_thinking_request_and_recorded_stream_with_reasoning_replay(
+    tmp_path: Path, model: str
+):
     proxy, transport = _proxy(
         tmp_path,
-        [RECORDED_TOOL_CALL_STREAM, _json_response("1432.5")],
+        [_recorded_tool_call_stream(model), _json_response("1432.5")],
+        model=model,
         max_tokens=32_768,
         thinking_enabled=True,
         reasoning_effort="xhigh",
@@ -194,6 +209,7 @@ def test_thinking_request_and_recorded_stream_with_reasoning_replay(tmp_path: Pa
     response = proxy.complete(ask, tools=TOOLS)
 
     body = transport.bodies[0]
+    assert body["model"] == response.model == model
     assert transport.headers[0]["Authorization"] == "Bearer mimo-test-key"
     assert body["max_completion_tokens"] == 32_768
     assert body["thinking"] == {"type": "enabled"}
