@@ -1,13 +1,13 @@
 # 八年研究期的数据面：表、单位、可见时间与陷阱
 
-研究期 20170701..20250630、`history_floors` 为日线 20100101 与宏观 20140701、宏观只挂 `index_daily`/`index_dailybasic`/`index_weight`/`sw_daily` 的臂共用这份数据面。下面每条都在这份数据上实读或对照代码核对过，不必再派子代理重推一遍；先按运行事实、`data_summary.json` 与 `unit_reference.json` 确认本臂挂的是同一份，几何或数据集不同就先核对再用。
+研究期 20170701..20250630、`history_floors` 为日线 20100101 与宏观 20140701、宏观只挂 `index_daily`/`index_dailybasic`/`index_weight`/`sw_daily` 的臂共用这份数据面；其中一部分臂另挂财务域，挂没挂看本臂，见「财务域」一节。下面每条都在这份数据上实读或对照代码核对过，不必再派子代理重推一遍；先按运行事实、`data_summary.json` 与 `unit_reference.json` 确认本臂挂的是同一份，几何或数据集不同就先核对再用。
 
 ## 视图与窗口
 
-- 会话的 `/mnt/snapshot` 是研究期末（2025-06-30 23:59:59）的决策视图：`daily`、`macro`、`universe` 各一个平铺文件，日线与四张宏观表自 20160701 起。它只供离线探查，正式回放读不到它。
+- 会话的 `/mnt/snapshot` 是研究期末（2025-06-30 23:59:59）的决策视图：`daily`、`macro`、`universe`（挂了财务域的臂另有 `fundamentals`）各一个平铺文件，日线、四张宏观表与财务都自 20160701 起。它只供离线探查，正式回放读不到它。
 - 一次回放的 `context.snapshot_dir` 是该 span 第一年的决策视图（年初前一天 06-30 23:59:59），整场不变。`context.asof_dir/<域>/` 是 parts 目录：part 0 就是这个决策视图，之后随回放时钟逐日追加。多年 span 一路累加，从 Y1 起跑的整期回放到 Y8 时 `daily` 里是 2010 年起的全部行。
 - 每个研究年的决策视图窗口见 `research_geometry.years[].input_window`：年初前 108 个月，截到 `history_floors`。实读：Y1 视图日线 20100104..20170630、宏观自 2014-07；Y3 日线自 20100701；Y8 日线自 20150701、宏观自 2015-07。所以从 Y1、Y2 起跑时指数与申万序列只有 3、4 年历史，需要更长指数窗口的特征（多年 β、按指数算的残差标签、长期指数动量）在前两年取不满：缩短窗口，或在样本说明里写明。
-- 这份数据面没有财务、事件、文本与分钟；`auction` 只有 20250116 起的行，不能当全期特征。
+- 两种臂都没有事件、文本与分钟；`auction` 只有 20250116 起的行，不能当全期特征。
 
 ## 可见时间：08:30 的决策看到 T-1
 
@@ -43,6 +43,18 @@
 - T 日某股是否在指数 X 中：`dataset == "index_weight"`、`index_code == X`、`available_at <= inference_at`，取其中 trade_date 最大的那张截面的 con_code。T 日自己的截面 17:30 才盖章，08:30 看不到；月初第一个交易日读到的是上月末那张；两张之间的月中调整与临时剔除都看不到。日期回看 40 个自然日就能命中最新可见的一张。
 - 行业：读 `context.asof_dir/universe` 的 l1_code，再按代码连 `sw_daily`。
 - 指数行情：`dataset == "index_daily"`、`ts_code == X`。
+
+## 财务域 fundamentals：只在挂了它的臂上
+
+- 先判断：`/mnt/artifacts/data_summary.json` 里 `views.snapshot.domains.fundamentals` 的 `datasets` 列出十个数据集、`rows` 非零才是挂了；为空、为 0 时 `fundamentals.parquet` 是零列空壳，本节不适用，回放里按 `dataset` 过滤读它会报错。
+- 十个数据集纵向拼成一张宽表（466 列），先按 `dataset` 过滤、再取列：`income_vip`/`balancesheet_vip`/`cashflow_vip`（三大报表，只有合并报表 `report_type` 1）、`fina_indicator_vip`（财务指标）、`forecast_vip`（业绩预告）、`express_vip`（业绩快报）、`dividend`（分红送转各阶段 `div_proc`）、`fina_audit`（审计意见）、`fina_mainbz_vip`（主营构成，`bz_code` P 产品/D 地区/I 行业）、`disclosure_date`（披露计划）。键是 `ts_code` + `end_date`（报告期，`YYYYMMDD` 字符串）。
+- 单位：报表与快报金额是元；`fina_indicator_vip` 的比率与增速是百分数（600519.SH 2023 年 `roe` 36.18 即 36.18%）；`forecast_vip` 的 `net_profit_min/max`、`last_parent_net` 是万元，`p_change_min/max` 是百分数；`express_vip.yoy_net_profit` 是去年同期归母净利润（元），不是增长率。
+- 可见时间：每行 `available_at` 是公告日 18:00（三大报表按 `f_ann_date`，否则 `ann_date`；指标、预告、快报、审计按 `ann_date`；分红按 `imp_ann_date`，否则 `ann_date`；主营构成按同一报告期报表最晚一次公告）。回放里财务域随 03:35 的 PIT 落库节点放行，节点周二至周六运行：周二至周五 08:30 看到前一天及以前的公告，周一只看到上周五及以前，周六、周日盖章的行（披露计划之外各数据集约 17–22%）周二才可见。区间第一个决策日例外：冻结首片收到锚点 06-30 23:59:59 为止，锚点落在周末时首日多看到周末的行。
+- 历史从 2016-01 的公告起。Y1 视图（2017-06-30）看得到 FY2015、2016 各期与 2017Q1；更早的报告期只有 2016 年后重述过的约 6%。所以 Y1 开头 97% 的沪深股票能算最新一期 TTM，能算一年前同期 TTM 的只有 5%：用报表做 TTM 同比要等 FY2017 年报（2018-05 起 97%），`fina_indicator_vip` 的 `netprofit_yoy`、`tr_yoy`、`q_sales_yoy` 等厂商增速从 Y1 第一天就有。分红「预案」行 2018 年前几乎没有（2016、2017 年分别只有 18、25 行，2018-08 才成批出现，2019 年起每年 7,000 行以上），分红公告类特征的起点落在 Y2 里。
+- 版本：每个版本一行、按自己的时间可见。更正版在更正日另起一行，此前只看得到首次公告的数值；按决策时点取最新版本就是同一 (`ts_code`, `end_date`) 按 `available_at` 取最后一行，取首次公告就取最早一行。`update_flag` 不表示是否修订（首个版本里也大量为 1），不要按它过滤。已上市公司约 1.3% 的报告期缺原版，到更正日才第一次出现。
+- 三大报表是年初至今累计（Q1、H1、前三季度、全年）：单季 = 本期 − 同年上一期，TTM = 本期 + 上年全年 − 上年同期。最新一期按 `end_date` 取，不按时间取（旧报告期的重述盖的是新日期）。公告事件用每期最早一行的 `available_at`，否则重述会被当成新公告。
+- 未来字段：`disclosure_date.actual_date` 是事后回填的实际披露日，97% 的行晚于本行盖章，Y1 视图里 3,055 行晚于决策日；只在它早于决策日时可用，计划日用 `pre_date`。`dividend` 的「预案」「股东大会通过」行偶尔带着事后填上的 `ex_date`/`record_date`/`pay_date`，除权安排只取「实施」行。
+- 读取：整表或不投影的读取会撑破策略容器的 16 GiB。研究期末视图 271 万行：整读、只按 `dataset == "fina_mainbz_vip"` 过滤不投影都被杀，`income_vip` 过滤不投影峰值 6.6 GiB，8 列投影读全表 0.84 GiB。一律 `pd.read_parquet(context.asof_dir + "/fundamentals", columns=[...], filters=[("dataset", "==", ...)])`，`available_at` 用 `pd.to_datetime(..., utc=True)` 解析后再与 `context.inference_at` 比较。目录每个交易日多一个分片，整期回放里两张表的投影读取平均每次 3–5 秒：只在调仓日读，不要每个决策日重读。
 
 ## 读取
 
