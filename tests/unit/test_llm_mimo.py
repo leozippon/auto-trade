@@ -15,6 +15,7 @@ from autotrade.environment.llm import (
     LLMProxyError,
     OpenAICompatibleConfig,
     OpenAICompatibleProxy,
+    ProviderRefusalError,
     build_model_gateway,
     model_profile,
 )
@@ -261,6 +262,22 @@ def test_sub_agent_thinking_level_becomes_on_off(tmp_path: Path):
     assert child.config.reasoning_effort is None
     assert transport.bodies[0]["thinking"] == {"type": "enabled"}
     assert "reasoning_effort" not in transport.bodies[0]
+
+
+def test_content_filter_reply_is_a_refusal_never_an_answer(tmp_path: Path):
+    """The non-streamed shape (compaction, forced summaries, NL calls) of the
+    refusal MiMo streamed on 2026-10-02: rejected once, without a retry."""
+
+    refusal = json.loads(
+        _json_response("The request was rejected because it was considered high risk")
+    )
+    refusal["choices"][0]["finish_reason"] = "content_filter"
+    proxy, transport = _proxy(tmp_path, [json.dumps(refusal).encode()], max_retries=3)
+
+    with pytest.raises(ProviderRefusalError, match="considered high risk") as raised:
+        proxy.complete([ChatMessage("user", "summarize")])
+    assert raised.value.retryable is False
+    assert len(transport.bodies) == 1
 
 
 def test_provider_overflow_shrinks_the_documented_output_field(tmp_path: Path):

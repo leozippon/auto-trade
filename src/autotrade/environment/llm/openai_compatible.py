@@ -37,6 +37,7 @@ from .proxy import (
     ChatMessage,
     LLMProxyError,
     MalformedToolCallError,
+    ProviderRefusalError,
     ProviderResponse,
     ToolCall,
     clamp_requested_max_tokens,
@@ -70,6 +71,18 @@ _OUTPUT_LIMIT_TOOL_CALL_ERROR = (
 _MALFORMED_TOOL_CALL_ERROR = (
     "provider returned a malformed tool call (tool={name}: {detail}); "
     "no call from this response was executed"
+)
+# A provider that withholds a reply says so with the Chat Completions
+# finish_reason "content_filter" and puts its own refusal where the answer
+# would be. MiMo, 2026-10-02: HTTP 200 and an ordinary stream whose last chunk
+# carries finish_reason=content_filter with the content "The request was
+# rejected because it was considered high risk". The field, never the wording,
+# decides: that text is not model output, so the response is rejected as a
+# refusal, without a retry, and no tool call from it is executed.
+_CONTENT_FILTER_FINISH_REASON = "content_filter"
+_PROVIDER_REFUSAL_ERROR = (
+    "provider refused the request (finish_reason=content_filter); "
+    "nothing from this reply was used. Provider message: {message}"
 )
 _HTTP_ERROR_BODY_MAX_BYTES = 64 * 1024
 _RUNTIME_ERROR_MAX_CHARS = 1_025
@@ -701,6 +714,10 @@ class OpenAICompatibleProxy:
                 content=exc.content,
                 reasoning_content=exc.reasoning_content,
             )
+        if isinstance(exc, ProviderRefusalError):
+            return ProviderRefusalError(
+                self._bounded_runtime_error(self._redact_runtime_details(str(exc)))
+            )
         if isinstance(exc, LLMProxyError):
             message = self._bounded_runtime_error(
                 self._redact_runtime_details(str(exc))
@@ -829,6 +846,13 @@ def _provider_response_validation_error(exc: ValueError) -> LLMProxyError:
     return LLMProxyError(str(exc), retryable=str(exc) == _EMPTY_PROVIDER_RESPONSE_ERROR)
 
 
+def _provider_refusal(content: object) -> ProviderRefusalError:
+    message = content.strip() if isinstance(content, str) else ""
+    return ProviderRefusalError(
+        _PROVIDER_REFUSAL_ERROR.format(message=message or "(none)")
+    )
+
+
 def _parse_reasoning_content(record: Mapping[str, object]) -> tuple[bool, str | None]:
     """Normalize one compatible reasoning field to the gateway contract."""
 
@@ -921,6 +945,8 @@ def _parse_response(raw: bytes, *, expected_model: str) -> ProviderResponse:
         raise LLMProxyError(
             "provider returned an invalid response", retryable=False
         ) from exc
+    if choice.get("finish_reason") == _CONTENT_FILTER_FINISH_REASON:
+        raise _provider_refusal(message.get("content"))
     calls: list[ToolCall] = []
     raw_calls = message.get("tool_calls")
     if raw_calls is None:
@@ -1082,6 +1108,8 @@ def _parse_stream_response(raw: bytes, *, expected_model: str) -> ProviderRespon
                 if arguments:
                     assembled["arguments"] += arguments
     assistant_content = "".join(content)
+    if finish_reason == _CONTENT_FILTER_FINISH_REASON:
+        raise _provider_refusal(assistant_content)
     assistant_reasoning = (
         "".join(reasoning_content) if reasoning_content_seen else None
     )

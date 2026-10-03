@@ -35,6 +35,7 @@ from autotrade.environment.llm import (
     ChatMessage,
     LLMProxy,
     MalformedToolCallError,
+    ProviderRefusalError,
     ToolCall,
     clamp_requested_max_tokens,
     context_overflow_error,
@@ -595,6 +596,8 @@ class AgentSessionRunner:
                     # Countable in an audit: this class costs one round, not a
                     # repeated generation.
                     failure["error_type"] = "malformed_tool_call"
+                elif isinstance(exc, ProviderRefusalError):
+                    failure["error_type"] = "provider_refusal"
                 self._emit("llm_call", failure)
                 if is_context_overflow_error(exc):
                     if not context_overflow_recovery_used:

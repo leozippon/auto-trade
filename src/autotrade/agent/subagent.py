@@ -30,6 +30,7 @@ from autotrade.environment.llm import (
     ChatMessage,
     LLMProxy,
     MalformedToolCallError,
+    ProviderRefusalError,
     ProviderResponse,
     ToolCall,
     clamp_requested_max_tokens,
@@ -311,6 +312,8 @@ AGENT_TOOL_DESCRIPTION = (
     f"汇报：最多内联 {SUBAGENT_REPORT_MAX_CHARS} 字符，更长的汇报只内联开头（summary_truncated=true），"
     "全文落盘并以 result_root/result_ref 返回，用 read_file 从 resume_line 起分页读回（offset 是行号，不是字符数）；"
     "子代理的角色提示里写着这个上限：可写的子代理把长材料写进工作区文件、汇报给路径，只读的子代理给出处而不抄原文。"
+    "模型服务方拒绝子代理的某次请求（内容过滤）时，它立即以 status=refused 结束、没有汇报，error 给出服务方原文："
+    "任务没有完成，换一种表述重新委托或自己完成。"
 )
 
 AGENT_TOOL_SPEC = ToolSpec(
@@ -873,12 +876,20 @@ class SubAgentEngine(SessionTimeBudgetAware):
                         "llm_error": error,
                         "parent_call_id": parent_call_id,
                     }
+                    refused = isinstance(exc, ProviderRefusalError)
                     if malformed:
                         failure["error_type"] = "malformed_tool_call"
+                    elif refused:
+                        failure["error_type"] = "provider_refusal"
                     self._emit("subagent_llm_error", failure)
                     if self._cancelled():
                         status = "cancelled"
                         error = "Sub-agent cancelled"
+                        break
+                    if refused:
+                        # The provider withheld the reply: the parent hears
+                        # that, never the refusal text as a report.
+                        status = "refused"
                         break
                     if is_context_overflow_error(exc) and not overflow_recovery_used:
                         messages, progressed = self._recover_context_overflow(
@@ -1125,6 +1136,9 @@ class SubAgentEngine(SessionTimeBudgetAware):
         except Exception as exc:  # noqa: BLE001 - a sub-agent failure must not kill the parent
             if _is_worker_shutdown_error(exc):
                 status, error = "cancelled", _WORKER_SHUTDOWN_CANCELLATION
+            elif isinstance(exc, ProviderRefusalError):
+                # The forced final summary was refused.
+                status, error = "refused", safe_error_summary(exc)
             else:
                 status = "timeout" if isinstance(exc, TimeoutError) else "error"
                 error = safe_error_summary(exc)

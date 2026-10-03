@@ -63,6 +63,17 @@ class MalformedToolCallError(LLMProxyError):
         self.reasoning_content = reasoning_content
 
 
+class ProviderRefusalError(LLMProxyError):
+    """The provider withheld its reply: what came back is the provider's
+    refusal, not model output, so it is never an answer, a report or a tool
+    call. Never retried by the gateway; the caller decides whether to rephrase
+    the request or do the work another way.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, retryable=False)
+
+
 def _json_object(value: Mapping[str, object]) -> dict[str, object]:
     try:
         normalized = json.loads(

@@ -757,6 +757,8 @@ def test_project_subagent_terminal_statuses() -> None:
                 "task_id": "cx",
                 "status": "cancelled",
             },
+            # A provider refusal must never be drawn as a completed child.
+            {"event_type": "subagent", "task_id": "rf", "status": "refused"},
         ]
     )
     ended = {
@@ -769,6 +771,7 @@ def test_project_subagent_terminal_statuses() -> None:
         "err": "error",
         "to": "timeout",
         "cx": "cancelled",
+        "rf": "refused",
     }
     err = next(
         block

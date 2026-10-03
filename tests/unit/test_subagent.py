@@ -45,8 +45,11 @@ from autotrade.agent.subagent import (
     subagent_system_prompt,
 )
 from autotrade.environment.llm import (
+    MIMO_FLASH_MODEL,
     ChatMessage,
     MalformedToolCallError,
+    OpenAICompatibleConfig,
+    OpenAICompatibleProxy,
     ProviderResponse,
     ScriptedLLM,
     ToolCall,
@@ -3401,6 +3404,138 @@ def test_child_llm_error_is_traced_and_a_recovered_child_is_not_an_error() -> No
     )
     assert completed["ok"] is True and completed["llm_errors"] == 1
     assert "error" not in completed
+
+
+_MIMO_REFUSAL = "The request was rejected because it was considered high risk"
+
+
+class _ReplayTransport:
+    def __init__(self, *payloads: bytes) -> None:
+        self.payloads = list(payloads)
+        self.posts = 0
+
+    def post(self, url, headers, body, timeout):
+        del url, headers, body, timeout
+        self.posts += 1
+        return self.payloads.pop(0)
+
+
+def _mimo_child_gateway(
+    content: str, finish_reason: str
+) -> tuple[OpenAICompatibleProxy, _ReplayTransport]:
+    """A MiMo gateway replaying the stream shape of the two refused child
+    rounds of open_research_100k_8y_mimo_r3_20261004 (2026-10-02): reasoning
+    deltas, then one last chunk carrying the whole content, the
+    finish_reason and the usage."""
+
+    def chunk(
+        delta: dict[str, object], finish: str | None = None, **extra: object
+    ) -> str:
+        choice = {
+            "delta": {"content": None, "role": None, "tool_calls": None, **delta},
+            "finish_reason": finish,
+            "index": 0,
+        }
+        record = {
+            "id": "rec-1",
+            "choices": [choice],
+            "model": MIMO_FLASH_MODEL,
+            "object": "chat.completion.chunk",
+            **extra,
+        }
+        return "data: " + json.dumps(record)
+
+    usage = {
+        "completion_tokens": 457,
+        "prompt_tokens": 28898,
+        "total_tokens": 29355,
+        "completion_tokens_details": {"reasoning_tokens": 456},
+    }
+    stream = "\n".join(
+        (
+            chunk({"reasoning_content": "Screen the limit events."}),
+            chunk({"content": content}, finish_reason, usage=usage),
+            "data: [DONE]",
+        )
+    )
+    transport = _ReplayTransport(stream.encode())
+    gateway = OpenAICompatibleProxy(
+        OpenAICompatibleConfig(
+            api_key="mimo-test-key",
+            provider="mimo",
+            model=MIMO_FLASH_MODEL,
+            base_url="https://api.xiaomimimo.com/v1",
+            request_dialect="mimo",
+            thinking_enabled=True,
+            conversation_log_dir=None,
+            context_window_tokens=1_000_000,
+        ),
+        transport=transport,
+    )
+    return gateway, transport
+
+
+def test_provider_refusal_ends_the_child_refused_and_the_parent_is_told() -> None:
+    """The recorded MiMo refusal is a provider verdict, not the child's
+    report: the child ends ``refused`` at once (no retry), the trace counts it
+    as a provider error, and the parent's observation says so plainly."""
+
+    gateway, transport = _mimo_child_gateway(_MIMO_REFUSAL, "content_filter")
+    finish = _FinishStub("finish_session")
+    parent = ScriptedLLM(
+        [
+            ProviderResponse(
+                tool_calls=(
+                    ToolCall(
+                        "a1",
+                        "agent",
+                        {"agent": "general-purpose", "task": "screen limit events"},
+                    ),
+                )
+            ),
+            ProviderResponse(content="waiting"),
+            ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),)),
+        ]
+    )
+    events: list[tuple[str, dict[str, object]]] = []
+    runner = AgentSessionRunner(
+        llm=parent,
+        tools=ToolRegistry([finish]),
+        system_prompt="research",
+        config=_session_config(),
+        subagent=SubAgentEngine(
+            llm=gateway, tools=ToolRegistry([DeclaredReadOnlyShell()])
+        ),
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+    assert runner.run("go").status == "finished"
+    assert transport.posts == 1
+    completed = next(
+        json.loads(str(message.content))
+        for message in parent.calls[-1]["messages"]
+        if '"subagent_completed"' in str(message.content or "")
+    )
+    assert completed["ok"] is False and completed["status"] == "refused"
+    assert completed["summary"] == "" and completed["llm_errors"] == 1
+    assert "provider refused the request" in completed["error"]
+    assert _MIMO_REFUSAL in completed["error"]
+    traced = [payload for event, payload in events if event == "subagent_llm_error"]
+    assert [payload["error_type"] for payload in traced] == ["provider_refusal"]
+    assert not [payload for event, payload in events if event == "subagent_llm"]
+    terminal = next(payload for event, payload in events if event == "subagent")
+    assert terminal["status"] == "refused" and terminal["summary"] == ""
+
+
+def test_a_report_quoting_the_refusal_sentence_is_still_a_report() -> None:
+    """The finish_reason decides, never the wording: the same sentence under
+    an ordinary ``stop`` is the child's own report."""
+
+    gateway, _transport = _mimo_child_gateway(_MIMO_REFUSAL, "stop")
+    result = SubAgentEngine(
+        llm=gateway, tools=ToolRegistry([DeclaredReadOnlyShell()])
+    ).run("screen limit events", role="general-purpose")
+    assert result["status"] == "completed" and result["summary"] == _MIMO_REFUSAL
+    assert "error" not in result and "llm_errors" not in result
 
 
 def test_child_cut_short_by_worker_shutdown_is_cancelled_not_failed(monkeypatch) -> None:

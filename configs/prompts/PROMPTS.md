@@ -201,7 +201,7 @@
 2. resume（不是 action，是 launch 的一个参数）：{"agent": <与原来相同的角色>, "task": <后续任务>, "resume": <已完成子代理的 task_id>}。让一个已完成的子代理在自己的对话上继续新的 task（保留它读过的上下文）；仍在运行或未知的 task_id 会被拒绝，action=resume、只给 task_id、或省略 agent/task 都是错误形状。只在后续任务确实需要它已有的上下文时 resume；独立的后续工作另起并行的全新子代理，不要串成 resume 链。
 3. message（action=message）：{"action": "message", "task_id": <运行中或排队的 task_id>, "text": <指令>}。给一个仍在运行的子代理发中途指令：立即返回 status=queued，指令在它下一轮模型调用前作为一条 `[父代理指令]` 消息送达（尚未开始的排队子代理在第一轮前收到），它的 subagent_completed 里 steers/steers_undelivered 记送达与未送达条数。只在需要改变范围、追加刚发现的约束或让它提前收尾汇报时使用；不为催促而发，后续任务用 resume 或新子代理，已完成的子代理不能 message。
 轮次与思考：子代理拥有自己模型的完整上下文窗口、按该窗口推导的压缩阈值和与你相同的输出上限（达到阈值时自动压缩，不会因上下文写满而失败），可以承担较大的有界块；省略 max_turns 时最多 48 轮：倒数第 2 轮起收到收尾提示，到上限后强制一次简洁总结。几个并行的有界子代理仍好过一个很长的串行子代理；确需更多轮次时显式给 max_turns。thinking 默认 xhigh，适合需要判断的审计、设计与实现；有界的机械工作（按给定路径读取并摘录、跑一段已写好的脚本、逐文件核对）显式降到 low/medium：每轮输出上限 32768 token，把它全部耗在思考里而发不出工具调用的一轮只得到最多 1 次强制简洁续写，之后该次委托记为 error。thinking 与 max_turns 由你按次决定，生效顺序：本次调用参数 > 角色默认（见 agent 字段） > 全局默认（xhigh、48 轮）；生效值记入该子代理的 subagent_task 事件。
-汇报：最多内联 6000 字符，更长的汇报只内联开头（summary_truncated=true），全文落盘并以 result_root/result_ref 返回，用 read_file 从 resume_line 起分页读回（offset 是行号，不是字符数）；子代理的角色提示里写着这个上限：可写的子代理把长材料写进工作区文件、汇报给路径，只读的子代理给出处而不抄原文。
+汇报：最多内联 6000 字符，更长的汇报只内联开头（summary_truncated=true），全文落盘并以 result_root/result_ref 返回，用 read_file 从 resume_line 起分页读回（offset 是行号，不是字符数）；子代理的角色提示里写着这个上限：可写的子代理把长材料写进工作区文件、汇报给路径，只读的子代理给出处而不抄原文。模型服务方拒绝子代理的某次请求（内容过滤）时，它立即以 status=refused 结束、没有汇报，error 给出服务方原文：任务没有完成，换一种表述重新委托或自己完成。
 ```
 
 ### 3.1 general-purpose

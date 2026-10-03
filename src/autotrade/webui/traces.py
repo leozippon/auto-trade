@@ -30,7 +30,7 @@ SUBAGENT_TASK_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 # ``_decode_event`` would present whatever parses as one.
 _TRUNCATED_TAIL = "<truncated final event: {count} bytes>"
 _TERMINAL_SUBAGENT = frozenset(
-    {"completed", "exhausted", "timeout", "error", "cancelled"}
+    {"completed", "exhausted", "timeout", "error", "cancelled", "refused"}
 )
 
 

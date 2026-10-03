@@ -4391,6 +4391,7 @@ const SUBAGENT_STATUS_LABELS = new Map([
   ["timeout", "超时"],
   ["error", "失败"],
   ["cancelled", "已取消"],
+  ["refused", "服务方拒绝"],
 ]);
 const TERMINAL_SUBAGENT_STATUS = new Set([
   "completed",
@@ -4398,6 +4399,7 @@ const TERMINAL_SUBAGENT_STATUS = new Set([
   "timeout",
   "error",
   "cancelled",
+  "refused",
 ]);
 
 function isRunningSubagent(block) {
