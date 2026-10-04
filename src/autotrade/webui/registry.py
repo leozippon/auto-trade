@@ -15,9 +15,13 @@ verdict, so nothing of the replay is readable while it runs.
 from __future__ import annotations
 
 import csv
+import functools
+import hashlib
 import json
 import math
 import re
+import threading
+import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from io import StringIO
@@ -25,6 +29,7 @@ from pathlib import Path
 
 from autotrade.agent.runner import DEADLINE_GRACE_EXHAUSTED, LLM_CALL_BUDGET_EXHAUSTED
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME, STYLE_SCHEMA_VERSION
+from autotrade.environment.runtime import write_json_atomic
 from autotrade.pipelines.agent_inbox import INBOX_NAME, inbox_public_view
 from autotrade.pipelines.calendar import FULL_SPAN
 from autotrade.pipelines.config import acceptance_for
@@ -513,6 +518,7 @@ _SUMMARY_SOURCES = (
     ".host/agent-refs.json",
 )
 _SUMMARY_CACHE: dict[Path, tuple[tuple[object, ...], dict[str, object]]] = {}
+_LISTING_LOCK = threading.Lock()
 
 
 def _summary_signature(directory: Path) -> tuple[object, ...]:
@@ -527,35 +533,93 @@ def _summary_signature(directory: Path) -> tuple[object, ...]:
     return tuple(signature)
 
 
-def _listing_row(directory: Path) -> dict[str, object]:
+def _listing_row(directory: Path) -> tuple[dict[str, object], tuple[object, ...] | None]:
+    """The row, and the signature it is kept under; ``None`` for a row derived
+    afresh on every poll."""
+
     # Signed before reading, so a change racing the read only re-derives.
     signature = _summary_signature(directory)
     cached = _SUMMARY_CACHE.get(directory)
     if cached is not None and cached[0] == signature:
-        return cached[1]
+        return cached[1], signature
     row = summarize_experiment(directory)
     if row.get("worker_alive") is False and row.get("state") not in ("launching", "unreadable"):
         _SUMMARY_CACHE[directory] = (signature, row)
-    else:
-        _SUMMARY_CACHE.pop(directory, None)
-    return row
+        return row, signature
+    _SUMMARY_CACHE.pop(directory, None)
+    return row, None
+
+
+# Rows kept by another process were derived by the code that process ran, so a
+# listing digest never matches across a console restart.
+_PROCESS_NONCE = uuid.uuid4().hex
+
+
+def _listing(root: Path) -> tuple[list[dict[str, object]], set[str], str]:
+    """Every row in listing order, the ids of the rows derived afresh, and a
+    digest of all the kept ones (ids and signatures).
+
+    One listing at a time per process. The server answers requests from a
+    thread pool, and two overlapping listings would otherwise both derive the
+    rows of a cold process — repeated by every tab that asks meanwhile — and
+    one would prune the summary cache while the other fills it.
+    """
+
+    if not root.is_dir():
+        return [], set(), ""
+    with _LISTING_LOCK:
+        directories = [
+            path for path in root.iterdir() if path.is_dir() and not path.name.startswith(".")
+        ]
+        rows: list[dict[str, object]] = []
+        fresh: set[str] = set()
+        kept: list[tuple[str, tuple[object, ...]]] = []
+        for path in directories:
+            row, signature = _listing_row(path)
+            rows.append(row)
+            if signature is None:
+                fresh.add(path.name)
+            else:
+                kept.append((path.name, signature))
+        for gone in {path for path in _SUMMARY_CACHE if path.parent == root} - set(directories):
+            _SUMMARY_CACHE.pop(gone, None)
+        _RECORDED_BEST.flush()
+    rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+    rows.sort(key=_ending_rank)
+    digest = hashlib.sha256(repr((_PROCESS_NONCE, sorted(kept))).encode()).hexdigest()[:16]
+    return rows, fresh, digest
 
 
 def list_experiments(root: Path) -> list[dict[str, object]]:
     """Every experiment, newest first inside each :func:`_ending_rank` group."""
 
-    root = Path(root)
-    if not root.is_dir():
-        return []
-    directories = [
-        path for path in root.iterdir() if path.is_dir() and not path.name.startswith(".")
-    ]
-    rows = [_listing_row(path) for path in directories]
-    for gone in {path for path in _SUMMARY_CACHE if path.parent == root} - set(directories):
-        _SUMMARY_CACHE.pop(gone, None)
-    rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
-    rows.sort(key=_ending_rank)
-    return rows
+    return _listing(Path(root))[0]
+
+
+def experiment_listing(root: Path, kept: str | None = None) -> dict[str, object]:
+    """The home page's listing: every row in order, the best experiment, and
+    ``kept``, the digest of the rows that change only when their files do
+    (every arm without a live worker).
+
+    The home page polls it every few seconds, and those rows are nearly all of
+    it. A poll that sends back the digest it last received, and finds it
+    unchanged, is answered with the rows derived afresh (live workers,
+    launching or unreadable arms) and the order of every id; it keeps the
+    other rows it already holds. Any change to a kept row — an arm ending,
+    created or deleted, any of its files rewritten, or a console restart —
+    changes the digest, and the poll gets every row again.
+    """
+
+    rows, fresh, digest = _listing(Path(root))
+    payload: dict[str, object] = {
+        "experiments": rows,
+        "best": best_experiment(rows),
+        "kept": digest,
+    }
+    if kept is not None and kept == digest:
+        payload["experiments"] = [row for row in rows if row["experiment_id"] in fresh]
+        payload["order"] = [row["experiment_id"] for row in rows]
+    return payload
 
 
 def best_experiment(rows: Sequence[Mapping[str, object]]) -> dict[str, object] | None:
@@ -697,13 +761,116 @@ def _research_best(
 # are read once per node and kept for the process lifetime, and the best
 # candidate (with the freeze gate the Pipeline computes for it) is kept per
 # node set, so a listing poll of a running arm re-reads nothing until the
-# session records another node. A recorded research session is an append-only
-# ledger row with its own run id, so its best candidate is kept per chain of
-# run ids (it and the earlier sessions whose steps join its trial family): the
-# gate is computed once per process, not on every poll of every ended arm.
+# session records another node. A recorded research session's best candidate
+# is kept by _RecordedBest below.
 _LIVE_STEP_CACHE: dict[tuple[str, str], dict[str, object]] = {}
 _LIVE_BEST_CACHE: dict[tuple[str, tuple[str, ...]], dict[str, object] | None] = {}
-_RECORDED_BEST_CACHE: dict[tuple[str, ...], dict[str, object] | None] = {}
+
+
+def _ledger_state(directory: Path) -> list[int] | None:
+    try:
+        info = (Path(directory) / "ledgers" / "experiment_ledger.jsonl").stat()
+    except OSError:
+        return None
+    return [info.st_size, info.st_mtime_ns]
+
+
+# The code a stored best candidate was computed by: the freeze gate and the
+# statistics, the revision fingerprints it reads, and this read model.
+_BEST_SOURCES = (
+    "pipelines",
+    "environment/replay",
+    "environment/artifacts.py",
+    "webui/registry.py",
+)
+
+
+@functools.cache
+def _best_code() -> str:
+    package = Path(__file__).resolve().parents[1]
+    digest = hashlib.sha256()
+    for source in _BEST_SOURCES:
+        path = package / source
+        for file in sorted(path.rglob("*.py")) if path.is_dir() else [path]:
+            digest.update(str(file.relative_to(package)).encode())
+            digest.update(file.read_bytes())
+    return digest.hexdigest()
+
+
+class _RecordedBest:
+    """The best candidate of each recorded research session, kept.
+
+    It is the one costly reading of a listing row: the freeze gate behind its
+    deflated Sharpe re-reads every trial's daily series — seconds for a large
+    arm, tens of seconds over a full experiments root — and a process used to
+    redo it for every arm on its first listing. Its inputs never change once
+    recorded (the ledger's session rows, and the result, sidecar and revision
+    files written before the ledger names them), so an entry is keyed by the
+    arm and its chain of run ids (the session and the earlier ones whose steps
+    join its trial family) and holds while the arm's ledger keeps its size and
+    mtime. Once the console names a file (:meth:`attach`) the entries outlive
+    the process, for as long as the code that computed them is unchanged. The
+    file is a cache: one that cannot be read starts empty, and one that cannot
+    be written leaves the entries in memory.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._entries: dict[str, dict[str, object]] = {}
+        self._path: Path | None = None
+        self._dirty = False
+
+    def attach(self, path: Path) -> None:
+        with self._lock:
+            self._path = Path(path)
+            try:
+                stored = json.loads(self._path.read_text(encoding="utf-8"))
+                if stored.get("code") != _best_code():
+                    return
+                entries = dict(stored["entries"])
+            except (OSError, ValueError, TypeError, KeyError, AttributeError):
+                return
+            for key, entry in entries.items():
+                if isinstance(entry, dict) and entry.get("ledger") == _ledger_state(
+                    Path(json.loads(key)[0])
+                ):
+                    self._entries.setdefault(key, entry)
+
+    def get(self, directory: Path, run_ids: Sequence[str], compute) -> dict[str, object] | None:
+        key = json.dumps([str(directory), *run_ids])
+        ledger = _ledger_state(directory)
+        with self._lock:
+            entry = self._entries.get(key)
+        if entry is not None and entry["ledger"] == ledger:
+            return entry["best"]  # type: ignore[return-value]
+        best = compute()
+        try:
+            json.dumps(best, allow_nan=False)
+        except (TypeError, ValueError):
+            return best  # not storable: computed again next process
+        with self._lock:
+            self._entries[key] = {"ledger": ledger, "best": best}
+            self._dirty = True
+        return best
+
+    def flush(self) -> None:
+        with self._lock:
+            if not self._dirty or self._path is None:
+                return
+            try:
+                write_json_atomic(self._path, {"code": _best_code(), "entries": self._entries})
+            except OSError:
+                return
+            self._dirty = False
+
+
+_RECORDED_BEST = _RecordedBest()
+
+
+def persist_recorded_best(path: Path) -> None:
+    """Keep recorded sessions' best candidates in ``path`` across restarts."""
+
+    _RECORDED_BEST.attach(path)
 
 
 def _live_steps(directory: Path) -> list[dict[str, object]]:
@@ -776,11 +943,12 @@ def _recorded_best(
     """:func:`_best_candidate` of one recorded research session, shared by
     the listing and the experiment page."""
 
-    key = (str(directory), *(str(row.get("run_id")) for row in (*earlier, record)))
-    if key not in _RECORDED_BEST_CACHE:
-        steps = [row for row in record.get("steps") or () if isinstance(row, Mapping)]
-        _RECORDED_BEST_CACHE[key] = _best_candidate(directory, earlier, steps)
-    return _RECORDED_BEST_CACHE[key]
+    steps = [row for row in record.get("steps") or () if isinstance(row, Mapping)]
+    return _RECORDED_BEST.get(
+        directory,
+        [str(row.get("run_id")) for row in (*earlier, record)],
+        lambda: _best_candidate(directory, earlier, steps),
+    )
 
 
 def _research_result(
@@ -992,6 +1160,7 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
         sessions.append(entry)
     raw_status = _mapping(experiment_state(directory).get("status"))
     current = raw_status.get("session_key")
+    _RECORDED_BEST.flush()
     return {
         **detail,
         "params": _public_params(params),

@@ -10,6 +10,7 @@ only, and refuse a create whose geometry the worker would refuse.
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -526,6 +527,96 @@ def test_a_recorded_session_is_gated_once_across_listings_and_pages(tmp_path: Pa
     assert re.search(r"setInterval\((?!\(\) =>)", rest) is None
     # The definition, then the home, status, trace, sub-agent and Paper polls.
     assert rest.count("setPollInterval(") == 6
+
+
+def test_a_restarted_console_reads_the_gated_best_candidate_it_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate behind a recorded session's best candidate outlives the
+    process: a restarted console lists every ended arm without computing it
+    again, until the arm's ledger or the code that computed it changes."""
+
+    root = tmp_path / "experiments"
+    directory = build_arm(root, "arm", "sealed")
+    first = TestClient(create_app(tmp_path, root)).get("/api/experiments").json()
+    best = first["experiments"][0]["research_best"]
+    assert best["deflated_sharpe_probability"] is not None
+    gated: list[str] = []
+    gate = registry._best_candidate
+
+    def counting(*args: object) -> object:
+        gated.append(Path(str(args[0])).name)
+        return gate(*args)
+
+    def restart() -> dict[str, object]:
+        monkeypatch.setattr(registry, "_RECORDED_BEST", registry._RecordedBest())
+        monkeypatch.setattr(registry, "_SUMMARY_CACHE", {})
+        client = TestClient(create_app(tmp_path, root))
+        return client.get("/api/experiments").json()["experiments"][0]["research_best"]
+
+    monkeypatch.setattr(registry, "_best_candidate", counting)
+    assert restart() == best and gated == []
+    # A ledger that changed under the arm is gated afresh.
+    ledger = directory / "ledgers/experiment_ledger.jsonl"
+    stamp = ledger.stat().st_mtime_ns + 1_000_000
+    os.utime(ledger, ns=(stamp, stamp))
+    assert restart() == best and gated == ["arm"]
+    # So is every arm once the code that computes the gate changes.
+    gated.clear()
+    monkeypatch.setattr(registry, "_best_code", lambda: "another revision")
+    assert restart() == best and gated == ["arm"]
+
+
+def test_a_poll_holding_the_kept_digest_receives_only_the_live_rows(tmp_path: Path) -> None:
+    """The home page polls the listing every few seconds, and nearly all of it
+    is ended arms that change only when their files do. A poll that hands back
+    the digest of those rows gets the live rows and the order of every id; any
+    change to a kept row sends every row again."""
+
+    root = tmp_path / "experiments"
+    ended = build_arm(root, "ended", "no_deliverable")
+    build_arm(root, "running", "research", alive=True)
+    client = TestClient(create_app(tmp_path, root))
+    full = client.get("/api/experiments").json()
+    order = [row["experiment_id"] for row in full["experiments"]]
+    assert sorted(order) == ["ended", "running"] and "order" not in full
+    poll = client.get("/api/experiments", params={"kept": full["kept"]}).json()
+    assert [row["experiment_id"] for row in poll["experiments"]] == ["running"]
+    assert poll["order"] == order
+    assert (poll["kept"], poll["best"], poll["running"]) == (
+        full["kept"],
+        full["best"],
+        full["running"],
+    )
+    stale = client.get("/api/experiments", params={"kept": "not-the-digest"}).json()
+    assert "order" not in stale and len(stale["experiments"]) == 2
+    write_json_atomic(
+        ended / "hitl/status.json",
+        {"schema_version": 1, "pid": 999_999_999, "state": "failed", "error": "RuntimeError: boom"},
+    )
+    changed = client.get("/api/experiments", params={"kept": full["kept"]}).json()
+    assert "order" not in changed and changed["kept"] != full["kept"]
+    rows = {row["experiment_id"]: row for row in changed["experiments"]}
+    assert rows["ended"]["ending"] == {"state": "broken", "reason": "RuntimeError: boom"}
+
+
+def test_a_card_curve_is_served_on_a_sample_of_its_days(tmp_path: Path) -> None:
+    root = tmp_path / "experiments"
+    build_arm(root, "arm", "graduated")
+    client = TestClient(create_app(tmp_path, root))
+    name = client.get("/api/experiments").json()["experiments"][0]["research_result"]
+    url = f"/api/experiments/arm/results/{name}/equity"
+    full = client.get(url).json()["series"][0]
+    thin = client.get(url, params={"points": 20}).json()
+    line = thin["series"][0]
+    assert len(full["dates"]) > 20
+    assert len(line["dates"]) == len(line["cum"]) == len(line["drawdown"]) == 20
+    assert (line["dates"][0], line["dates"][-1]) == (full["dates"][0], full["dates"][-1])
+    for date, value in zip(line["dates"], line["cum"], strict=True):
+        assert full["cum"][full["dates"].index(date)] == value
+    assert line["final"] == full["final"]
+    assert len(thin["benchmark"]["dates"]) == 20
+    assert client.get(url, params={"points": 1}).status_code == 422
 
 
 def test_an_arm_with_no_plan_yet_lists_as_created(tmp_path: Path) -> None:

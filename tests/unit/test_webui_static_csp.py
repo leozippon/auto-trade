@@ -22,6 +22,7 @@ REPO = Path(__file__).resolve().parents[2]
 APP_JS = REPO / "src/autotrade/webui/static/app.js"
 STYLE_CSS = REPO / "src/autotrade/webui/static/style.css"
 INDEX_HTML = REPO / "src/autotrade/webui/static/index.html"
+PREFERENCES_JS = REPO / "src/autotrade/webui/static/preferences.js"
 VHOSTS = (
     REPO / "ops/nginx/aliyun/admcubequant-https.conf",
     REPO / "ops/nginx/aliyun/admcube-https.conf",
@@ -43,7 +44,7 @@ def test_el_applies_style_through_the_cssom() -> None:
 
 
 def test_no_asset_writes_an_inline_style_attribute() -> None:
-    for path in (APP_JS, STYLE_CSS, INDEX_HTML):
+    for path in (APP_JS, PREFERENCES_JS, STYLE_CSS, INDEX_HTML):
         text = path.read_text(encoding="utf-8")
         assert not re.search(r"""setAttribute\(\s*['"]style['"]""", text), path
         assert "style=" not in text, path

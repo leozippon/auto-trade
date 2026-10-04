@@ -5,37 +5,55 @@
    display) and is multiplied by the topbar zoom selector, per device — so a
    zoom setting resizes the whole interface, not only its text. Only hairlines,
    focus rings, shadows and the breakpoints themselves stay in px. */
+
+/* The palette: one token set, two themes. preferences.js marks the root with
+   the theme before the first paint, so these blocks — the only colours in the
+   console; charts read them too — decide every pixel from the first frame.
+   Surfaces step bg < panel-2 < panel (light) and bg < panel < panel-2 (dark);
+   text is --text or --muted; one accent. ok / warn / bad / muted are the
+   states — done or graduated, waiting, failed or rejected, ended — and
+   --run (the accent) is running; their pairs keep WCAG AA (4.5:1) on every
+   surface and their soft grounds, and stay apart under red-green and
+   blue-yellow colour blindness. Dark surfaces are never black and its text
+   never white. */
 :root {
  color-scheme: light;
- --bg: #f3f5f9;
+ --bg: #f3f5f8;
  --panel: #ffffff;
- --panel-2: #f8fafd;
- --border: #dfe4ea;
- --row-border: #eef1f5;
- --text: #1c212c;
- --muted: #68717f;
+ --panel-2: #f7f8fb;
+ --border: #dde2e9;
+ --row-border: #edf0f4;
+ --text: #1b2130;
+ --muted: #5c6676;
  --accent: #2456c4;
- --accent-soft: #e8eefc;
- --ok: #1a8a4a;
- --ok-soft: #e2f4e9;
- --warn: #b07708;
- --warn-soft: #fdf3dc;
- --bad: #bd3131;
- --bad-soft: #fbe7e7;
+ --accent-soft: #e6edfb;
+ --on-accent: #ffffff;
+ --ok: #1f7a56;
+ --ok-soft: #e1f2ea;
+ --warn: #8a5a00;
+ --warn-soft: #fbf0d6;
+ --bad: #ad1f34;
+ --bad-soft: #fbe7ea;
  /* P&L convention (A-share): red = gains, green = losses. Deliberately
      separate from the status colors so completed/failed semantics stay put. */
- --gain: #d03b3b;
- --loss: #1a8a4a;
- --run: #2456c4;
+ --gain: #ad1f34;
+ --loss: #1f7a56;
+ --run: var(--accent);
  /* Inputs read as toned "wells", clearly distinct from white panels/buttons. */
- --input-bg: #f2f4f8;
+ --input-bg: #f3f5f8;
  --input-border: #cdd4de;
- --hover-bg: #f2f5fa;
- --chip-bg: #ececf1;
+ --hover-bg: #f1f4f9;
+ --chip-bg: #eceef2;
  --code-bg: #f6f8fa;
- --code-ink: #333a46;
+ --code-ink: #2f3644;
+ /* Floating notes (chart tooltip, toast) stand off the page in either theme. */
+ --tip-bg: #1f2633;
+ --tip-ink: #f3f5f8;
+ --chart-grid: #e8ebf0;
+ --chart-axis: #c3c9d3;
+ --scroll-thumb: #c9cfd8;
  --mask: rgba(20, 26, 40, 0.45);
- --danger-border: #e5b8b8;
+ --danger-border: #e3b5bd;
  --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
  /* One spacing scale and two radii for every layout rule: panels and cards
     take --radius, anything nested inside them --radius-sm. */
@@ -47,39 +65,44 @@
  --space-6: 1.75rem;
  --radius: 0.75rem;
  --radius-sm: 0.5rem;
- --shadow: 0 1px 3px rgba(24, 34, 56, 0.08);
- --shadow-lift: 0 4px 14px rgba(24, 34, 56, 0.12);
+ --shadow: 0 1px 2px rgba(24, 34, 56, 0.06), 0 1px 3px rgba(24, 34, 56, 0.05);
+ --shadow-lift: 0 6px 18px rgba(24, 34, 56, 0.1);
 }
-[data-theme="dark"] {
+:root[data-theme="dark"] {
  color-scheme: dark;
- --bg: #12151c;
- --panel: #1b1f28;
- --panel-2: #20252f;
- --border: #2c323e;
- --row-border: #262c37;
- --text: #e4e8ef;
- --muted: #9aa2b1;
- --accent: #3987e5;
- --accent-soft: #1d2b45;
- --ok: #3dbb77;
- --ok-soft: #143324;
- --warn: #d9a13a;
- --warn-soft: #33270e;
- --bad: #e06c6c;
- --bad-soft: #3a1c1c;
- --gain: #e06c6c;
- --loss: #3dbb77;
- --run: #3987e5;
- --input-bg: #13161d;
- --input-border: #3a4150;
- --hover-bg: #222835;
- --chip-bg: #262c38;
- --code-bg: #161a22;
- --code-ink: #c6cdd9;
+ --bg: #111419;
+ --panel: #181c23;
+ --panel-2: #1e232b;
+ --border: #2c333e;
+ --row-border: #242a33;
+ --text: #e2e6ed;
+ --muted: #9ba3b1;
+ --accent: #5b9bf0;
+ --accent-soft: #1c2a40;
+ --on-accent: #0e1520;
+ --ok: #5ccb98;
+ --ok-soft: #14302a;
+ --warn: #e0a94a;
+ --warn-soft: #33280f;
+ --bad: #e5735f;
+ --bad-soft: #3b201d;
+ --gain: #e5735f;
+ --loss: #5ccb98;
+ --input-bg: #13161c;
+ --input-border: #3a4250;
+ --hover-bg: #222833;
+ --chip-bg: #262c36;
+ --code-bg: #14181e;
+ --code-ink: #c9d0db;
+ --tip-bg: #2a313d;
+ --tip-ink: #e9edf3;
+ --chart-grid: #262d37;
+ --chart-axis: #455061;
+ --scroll-thumb: #3a424f;
  --mask: rgba(0, 0, 0, 0.62);
- --danger-border: #6d3a3a;
- --shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
- --shadow-lift: 0 4px 16px rgba(0, 0, 0, 0.5);
+ --danger-border: #6b3a36;
+ --shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+ --shadow-lift: 0 6px 20px rgba(0, 0, 0, 0.45);
 }
 * {
  box-sizing: border-box;
@@ -88,6 +111,9 @@
 [hidden] {
  display: none !important;
 }
+/* The canvas takes the theme's ground itself, so not one frame shows the
+   browser's default white behind a dark page. A theme switch is instant: an
+   eased one would be a light/dark flash of its own. */
 html {
  --ui-zoom: 1;
  --topbar-h: calc(4rem + env(safe-area-inset-top, 0px));
@@ -95,6 +121,11 @@ html {
  -webkit-text-size-adjust: 100%;
  overflow-x: clip;
  overscroll-behavior-x: none;
+ background: var(--bg);
+ scrollbar-color: var(--scroll-thumb) transparent;
+}
+::selection {
+ background: color-mix(in srgb, var(--accent) 28%, transparent);
 }
 html,
 body {
@@ -118,9 +149,6 @@ body {
   "Hiragino Sans GB",
   "Microsoft YaHei",
   sans-serif;
- transition:
-  background 0.2s,
-  color 0.2s;
 }
 a {
  color: var(--accent);
@@ -128,6 +156,15 @@ a {
 }
 a:hover {
  text-decoration: underline;
+}
+/* One keyboard focus ring for everything that takes focus; a pointer click
+   draws none. */
+:focus-visible {
+ outline: 2px solid var(--accent);
+ outline-offset: 2px;
+}
+:focus:not(:focus-visible) {
+ outline: none;
 }
 
 #app {
@@ -310,18 +347,20 @@ main {
  outline: 2px solid var(--accent);
  outline-offset: 1px;
 }
+/* Mixed toward the text ink, a pressed or hovered primary deepens in the light
+   theme and brightens in the dark one, keeping its label's contrast. */
 .btn.primary {
  background: var(--accent);
  border-color: var(--accent);
- color: #fff;
+ color: var(--on-accent);
 }
 .btn.primary:hover {
- background: color-mix(in srgb, var(--accent) 88%, #000);
- border-color: color-mix(in srgb, var(--accent) 88%, #000);
- color: #fff;
+ background: color-mix(in srgb, var(--accent) 86%, var(--text));
+ border-color: color-mix(in srgb, var(--accent) 86%, var(--text));
+ color: var(--on-accent);
 }
 .btn.primary:active {
- background: color-mix(in srgb, var(--accent) 78%, #000);
+ background: color-mix(in srgb, var(--accent) 76%, var(--text));
 }
 .btn.danger {
  color: var(--bad);
@@ -344,6 +383,14 @@ main {
  padding: 0.28rem 0.6rem;
  font-size: 1rem;
  line-height: 1;
+}
+/* The toggle shows the theme it switches to, from the stylesheet, so it is
+   right on the first frame rather than once app.js runs. */
+#theme-toggle::before {
+ content: "🌙";
+}
+:root[data-theme="dark"] #theme-toggle::before {
+ content: "☀️";
 }
 
 /* badges — one size everywhere, centered on the line they sit in */
@@ -461,13 +508,17 @@ main {
  margin-top: 0;
  margin-bottom: 0;
 }
+/* The lift is the border as much as the shadow: a shadow barely reads on a
+   dark ground. */
 .card.clickable {
  cursor: pointer;
  transition:
   box-shadow 0.18s,
+  border-color 0.18s,
   transform 0.18s;
 }
 .card.clickable:hover {
+ border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
  box-shadow: var(--shadow-lift);
  transform: translateY(-1px);
 }
@@ -646,7 +697,8 @@ progress.progress.done::-moz-progress-bar {
  border-radius: 50%;
  box-shadow: inset 0 0 0 1.5px var(--input-border);
  background: var(--panel);
- color: #fff;
+ /* The mark is knocked out of the filled dot in the panel's own ground. */
+ color: var(--panel);
  font-size: calc(var(--stepper-dot) * 0.7);
  font-weight: 700;
  line-height: var(--stepper-dot);
@@ -1453,13 +1505,34 @@ table.data td {
  text-align: left;
  white-space: nowrap;
 }
+/* The header row stays in view while a long table scrolls inside its box: on
+   the panel's own ground, its rule drawn by the cell so it travels with it. */
 table.data th {
+ position: sticky;
+ top: 0;
+ z-index: 1;
+ background: var(--panel);
+ border-bottom: 0;
+ box-shadow: inset 0 -1px 0 var(--border);
  color: var(--muted);
  font-weight: 600;
+}
+table.data tr:hover > td {
+ background: var(--hover-bg);
 }
 table.data .num {
  text-align: right;
  font-variant-numeric: tabular-nums;
+}
+/* Where a pointer can hover, an overlong text cell ends in an ellipsis and
+   names its whole value in a tooltip (app.js); a touch screen keeps the
+   whole value and scrolls the box sideways instead. */
+@media (hover: hover) {
+ table.data td:not(.num) {
+  max-width: 24rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+ }
 }
 /* A short statistics table sized to its columns rather than stretched. */
 table.data.fit {
@@ -1620,8 +1693,9 @@ pre.code-view.pre-wrap {
  position: fixed;
  z-index: 120;
  pointer-events: none;
- background: #232a3a;
- color: #fff;
+ background: var(--tip-bg);
+ color: var(--tip-ink);
+ border: 1px solid color-mix(in srgb, var(--tip-ink) 12%, transparent);
  border-radius: var(--radius-sm);
  padding: 0.45rem 0.75rem;
  font-size: 0.875rem;
@@ -2343,8 +2417,8 @@ details.advanced .form-grid {
  z-index: 90;
 }
 .toast {
- background: #232a3a;
- color: #fff;
+ background: var(--tip-bg);
+ color: var(--tip-ink);
  border-radius: var(--radius-sm);
  padding: 0.7rem 1.1rem;
  font-size: 0.94rem;
@@ -2353,6 +2427,7 @@ details.advanced .form-grid {
 }
 .toast.error {
  background: var(--bad);
+ color: var(--panel);
 }
 
 .empty {
@@ -2372,6 +2447,51 @@ details.advanced .form-grid {
  color: var(--muted);
  padding: 1.4rem;
  text-align: center;
+ animation: skeleton-breathe 1.6s ease-in-out infinite;
+}
+/* Placeholders while a read is on its way (pageSkeleton, chartSkeleton): the
+   chip tone breathing on the page's own surfaces, in either theme. */
+.page-skeleton {
+ display: flex;
+ flex-direction: column;
+ gap: var(--space-4);
+}
+.skeleton,
+.chart-skeleton {
+ display: block;
+ border-radius: var(--radius-sm);
+ background: var(--chip-bg);
+ animation: skeleton-breathe 1.6s ease-in-out infinite;
+}
+.skeleton.line {
+ height: 0.9rem;
+ width: 70%;
+}
+.skeleton.line.short {
+ width: 40%;
+}
+.skeleton.line.title {
+ height: 1.3rem;
+ width: 12rem;
+}
+.skeleton.block {
+ height: 6.5rem;
+}
+.chart-skeleton {
+ width: 100%;
+ margin-top: 1.6rem;
+}
+@keyframes skeleton-breathe {
+ 50% {
+  opacity: 0.55;
+ }
+}
+@media (prefers-reduced-motion: reduce) {
+ .loading,
+ .skeleton,
+ .chart-skeleton {
+  animation: none;
+ }
 }
 
 /* ---- params modal ---- */
@@ -3189,6 +3309,10 @@ details.issue-evidence > summary:hover {
   z-index: 1;
   background: var(--panel);
   border-right: 1px solid var(--row-border);
+ }
+ /* The corner cell sticks both ways and covers both sticky edges. */
+ table.data th:first-child {
+  z-index: 2;
  }
  table.data th,
  table.data td {

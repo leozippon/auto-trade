@@ -24,7 +24,7 @@ def test_unauthenticated_console_badge_is_png_at_stable_url(tmp_path: Path) -> N
     assert badge.status_code == 200
     assert badge.headers["content-type"] == "image/png"
     assert badge.content[:8] == PNG_MAGIC
-    assert "no-store" in badge.headers["cache-control"]
+    assert badge.headers["cache-control"] == "no-cache"
 
     head = client.head(CANONICAL)
     assert head.status_code == 200

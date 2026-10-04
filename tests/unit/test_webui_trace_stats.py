@@ -1420,6 +1420,8 @@ def test_trace_stream_nudges_with_offsets_and_no_event_payload(
         params={"run_id": identity.trace_ref("run_001")},
     )
     assert response.status_code == 200
+    # Compression would hold the nudges back until a buffer fills.
+    assert "content-encoding" not in response.headers
     body = response.text
     # The console re-reads /trace/blocks; the stream only says "there is more".
     assert "secret-content" not in body

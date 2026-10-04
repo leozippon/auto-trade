@@ -24,6 +24,7 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
+from starlette.middleware.gzip import GZipMiddleware
 
 from autotrade.environment.data.contracts import RAW_GENERATION_FILENAME
 from autotrade.environment.llm.model_profiles import model_profile
@@ -123,6 +124,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     root = Path(repo_root).resolve()
     experiment_root = Path(experiments_root or root / "experiments").resolve()
     manager = ExperimentManager(root, experiment_root)
+    registry.persist_recorded_best(root / ".runtime" / "console" / "recorded-best.json")
     app = FastAPI(
         title="ADM-Cube Console", docs_url=None, redoc_url=None, openapi_url=None
     )
@@ -131,12 +133,19 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     async def revalidate_frontend_assets(request: Request, call_next):
         response = await call_next(request)
         if request.url.path == "/" or request.url.path.startswith("/static/"):
-            # Keep clean, unversioned asset URLs and never retain stale UI
-            # code in a browser cache.
-            response.headers["Cache-Control"] = "no-store, max-age=0"
-            response.headers["Pragma"] = "no-cache"
-            response.headers["Expires"] = "0"
+            # Clean, unversioned asset URLs that are never used stale: the
+            # browser keeps a copy but asks again on every load, and an
+            # unchanged file answers 304 on its ETag instead of resending
+            # a few hundred kilobytes of UI code each time.
+            response.headers["Cache-Control"] = "no-cache"
         return response
+
+    # The listing, a replay's curve and the UI code are JSON and text that
+    # shrink four- to five-fold, and the public console is read over a thin
+    # link. Level 6: level 9 saves 1% more of the 1 MB listing for a third
+    # more time on the event loop. The live trace stream (text/event-stream)
+    # is never compressed.
+    app.add_middleware(GZipMiddleware, compresslevel=6)
 
     def _experiment_dir(experiment_id: str) -> Path:
         try:
@@ -257,11 +266,9 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             return {"gpus": [], "error": f"{type(exc).__name__}: {exc}"}
 
     @app.get("/api/experiments")
-    def get_experiments() -> dict[str, object]:
-        rows = registry.list_experiments(experiment_root)
+    def get_experiments(kept: str | None = Query(None)) -> dict[str, object]:
         return {
-            "experiments": rows,
-            "best": registry.best_experiment(rows),
+            **registry.experiment_listing(experiment_root, kept),
             **manager.running_slots(),
         }
 
@@ -509,9 +516,15 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             raise HTTPException(status_code=404, detail=f"unknown result: {name}") from exc
 
     @app.get("/api/experiments/{experiment_id}/results/{name}/equity")
-    def get_result_equity(experiment_id: str, name: str) -> dict[str, object]:
+    def get_result_equity(
+        experiment_id: str,
+        name: str,
+        points: int | None = Query(None, ge=2, le=10_000),
+    ) -> dict[str, object]:
         return _ledger_result(
-            lambda: equity.result_equity_payload(experiment_root, experiment_id, name),
+            lambda: equity.result_equity_payload(
+                experiment_root, experiment_id, name, points=points
+            ),
             experiment_id,
             name,
         )

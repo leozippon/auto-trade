@@ -201,7 +201,7 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
     page = client.get("/")
     assert page.status_code == 200
     assert "ADM-Cube" in page.text
-    assert "no-store" in page.headers["cache-control"]
+    assert page.headers["cache-control"] == "no-cache"
     # Brand mark is a CSS background, so a failed fetch paints nothing rather
     # than the browser placeholder glyph in the top-left corner.
     assert '<span class="logo" aria-hidden="true"></span>' in page.text

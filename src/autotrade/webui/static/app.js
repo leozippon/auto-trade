@@ -169,21 +169,27 @@ let liveTimers = [];
 let liveSources = [];
 const injectDrafts = new Map();
 
-/* ---------------- theme ---------------- */
+/* ---------------- theme ----------------
+   preferences.js put the theme on the root before the first paint: the stored
+   choice, else the system's. The toggle stores a choice; without one the page
+   follows the system as it changes. The palette itself lives in style.css. */
 
 function currentTheme() {
   return document.documentElement.dataset.theme === "dark" ? "dark" : "light";
 }
 
-function applyTheme(theme) {
-  document.documentElement.dataset.theme = theme;
+function storedTheme() {
   try {
-    localStorage.setItem("ch_theme", theme);
+    const stored = localStorage.getItem("ch_theme");
+    return stored === "dark" || stored === "light" ? stored : null;
   } catch {
-    /* private mode */
+    return null; // private mode
   }
-  const button = document.getElementById("theme-toggle");
-  if (button) button.textContent = theme === "dark" ? "☀️" : "🌙";
+}
+
+function showTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  refreshCharts();
 }
 
 /* Theme switches repaint charts in place without rebuilding the page. */
@@ -195,28 +201,29 @@ function refreshCharts() {
 }
 
 (function initTheme() {
-  let stored = null;
-  try {
-    stored = localStorage.getItem("ch_theme");
-  } catch {
-    /* private mode */
-  }
-  const preferred =
-    window.matchMedia &&
-    window.matchMedia("(prefers-color-scheme: dark)").matches
-      ? "dark"
-      : "light";
-  applyTheme(stored === "dark" || stored === "light" ? stored : preferred);
   const button = document.getElementById("theme-toggle");
   if (button)
     button.addEventListener("click", () => {
-      applyTheme(currentTheme() === "dark" ? "light" : "dark");
-      refreshCharts();
+      const theme = currentTheme() === "dark" ? "light" : "dark";
+      try {
+        localStorage.setItem("ch_theme", theme);
+      } catch {
+        /* private mode: this page only */
+      }
+      showTheme(theme);
     });
+  if (window.matchMedia)
+    window
+      .matchMedia("(prefers-color-scheme: dark)")
+      .addEventListener("change", (event) => {
+        if (!storedTheme()) showTheme(event.matches ? "dark" : "light");
+      });
 })();
 
 /* Per-device UI scale: port-forwarded browsers and embedded webviews disagree
-   wildly about effective size; the choice persists per browser profile. */
+   wildly about effective size; the choice persists per browser profile.
+   preferences.js applied the stored scale before the first paint; this only
+   keeps the selector in step, and drops a stored value it does not offer. */
 (function initZoom() {
   const select = document.getElementById("ui-zoom");
   if (!select) return;
@@ -228,17 +235,15 @@ function refreshCharts() {
   }
   const apply = (value) => {
     document.documentElement.style.setProperty("--ui-zoom", value);
-    document.body.style.zoom = "";
     try {
       localStorage.setItem("ch_zoom", value);
     } catch {
       /* private mode */
     }
   };
-  if (stored && [...select.options].some((option) => option.value === stored)) {
+  if ([...select.options].some((option) => option.value === stored))
     select.value = stored;
-    apply(stored);
-  }
+  else document.documentElement.style.removeProperty("--ui-zoom");
   select.addEventListener("change", () => apply(select.value));
 })();
 
@@ -440,6 +445,32 @@ function toast(message, isError = false) {
   setTimeout(() => node.remove(), isError ? 7000 : 3500);
 }
 
+/* A page before its first read answers: the shapes it is about to fill, in
+   the theme's own surfaces — a grid of cards, two panes, or a stack of
+   panels. */
+function pageSkeleton(layout) {
+  const bar = (cls) => el("span", { class: `skeleton ${cls}` });
+  const card = () => el("div", { class: "card" }, bar("line short"), bar("line"), bar("block"));
+  const body =
+    layout === "grid"
+      ? el("div", { class: "grid" }, ...Array.from({ length: 6 }, card))
+      : layout === "split"
+        ? el("div", { class: "detail" }, card(), card())
+        : el("div", { class: "session-detail" }, card(), card(), card());
+  return el(
+    "div",
+    { class: "page-skeleton", role: "status", "aria-label": "加载中" },
+    bar("line title"),
+    body,
+  );
+}
+
+/* A table cell its column cuts short names its whole value on hover. */
+document.addEventListener("mouseover", (event) => {
+  const cell = event.target instanceof Element ? event.target.closest("table.data td") : null;
+  if (cell && !cell.title && cell.scrollWidth > cell.clientWidth) cell.title = cell.textContent;
+});
+
 function fmtPct(value, digits = 2) {
   if (value === null || value === undefined || Number.isNaN(value)) return "—";
   return `${(value * 100).toFixed(digits)}%`;
@@ -527,23 +558,18 @@ function escapeHtml(text) {
    Specs: thin marks (bars ≤24px, 2px surface gap, 4px rounded data-end,
    square baseline; 2px lines; ≥8px markers with 2px surface ring), hairline
    solid gridlines, muted-ink labels, legend, hover tooltips. One categorical
-   slot (blue) against a neutral dashed 沪深300, validated on both panels. */
+   slot (the accent) against a neutral dashed 沪深300. The inks are the
+   stylesheet's tokens for the theme on screen, read when a chart is drawn, so
+   a chart never carries a palette of its own. */
 function themeInk() {
-  if (currentTheme() === "dark") {
-    return {
-      strategyColor: "#3987e5",
-      grid: "#2b303c",
-      baseline: "#4a5163",
-      muted: "#98a0af",
-      ring: "#1b1f28",
-    };
-  }
+  const css = getComputedStyle(document.documentElement);
+  const token = (name) => css.getPropertyValue(name).trim();
   return {
-    strategyColor: "#2a78d6",
-    grid: "#e9ebf1",
-    baseline: "#c2c7d2",
-    muted: "#68717f",
-    ring: "#ffffff",
+    strategyColor: token("--accent"),
+    grid: token("--chart-grid"),
+    baseline: token("--chart-axis"),
+    muted: token("--muted"),
+    ring: token("--panel"),
   };
 }
 
@@ -609,16 +635,19 @@ function chartLegend(items) {
    One ledger-named replay result per payload (equity.result_equity_payload),
    compounded on the server; 沪深300 is served on the strategy's own days, so
    both lines start at 0 together. A marker is a dashed vertical line, a band
-   a labelled wash over a date range. */
-const RESULT_EQUITY_CACHE = new Map(); // `${experiment_id}/${result}` -> promise
+   a labelled wash over a date range. `points` asks for that many evenly
+   spaced days instead of every day: a card's miniature has no use for more. */
+const RESULT_EQUITY_CACHE = new Map(); // `${experiment_id}/${result}/${points}` -> promise
+const CARD_CURVE_POINTS = 200;
 
-function resultEquity(expId, result) {
-  const key = `${expId}/${result}`;
+function resultEquity(expId, result, points = null) {
+  const key = `${expId}/${result}/${points || "all"}`;
+  const query = points ? `?points=${points}` : "";
   if (!RESULT_EQUITY_CACHE.has(key))
     RESULT_EQUITY_CACHE.set(
       key,
       api(
-        `/api/experiments/${encodeURIComponent(expId)}/results/${encodeURIComponent(result)}/equity`,
+        `/api/experiments/${encodeURIComponent(expId)}/results/${encodeURIComponent(result)}/equity${query}`,
       ).catch((error) => {
         RESULT_EQUITY_CACHE.delete(key);
         throw error;
@@ -667,32 +696,70 @@ function chainEquity(research, forward) {
    tiles name, in-sample and drawn under a band that says so, and once the
    ledger names the replay the forward and Held-out slices compounded on after
    a 冻结 divider, the Held-out divider where that slice begins. Null until the
-   arm has a curve at all. */
+   arm has a curve at all. `lazy` fetches the curve only when its box comes
+   near the screen; a `mini` curve is drawn on a sample of its days. */
 function armEquityHost(item, opts = {}) {
   const research = item.research_result || null;
   const forward = (item.forward || {}).result || null;
   if (!research && !forward) return null;
   const replay = (item.forward || {}).replay || {};
-  const host = el("div", {}, el("div", { class: "hint" }, "收益曲线加载中…"));
-  Promise.all([
-    research ? resultEquity(item.experiment_id, research) : null,
-    forward ? resultEquity(item.experiment_id, forward) : null,
-  ])
-    .then(([before, after]) => {
-      const strategy = before && (before.series || [])[0];
-      const bands =
-        strategy && strategy.dates.length
-          ? [{ from: strategy.dates[0], to: strategy.dates[strategy.dates.length - 1], label: "研究期 · 样本内" }]
-          : [];
-      const markers = [];
-      if (after && before && replay.start) markers.push({ date: replay.start, label: "冻结" });
-      if (after && replay.heldout_start) markers.push({ date: replay.heldout_start, label: "Held-out" });
-      host.replaceChildren(equityChart(chainEquity(before, after), { ...opts, markers, bands }));
-    })
-    .catch((error) => {
-      host.replaceChildren(el("div", { class: "hint" }, `收益曲线加载失败：${error.message}`));
-    });
+  const points = opts.mini ? CARD_CURVE_POINTS : null;
+  const host = el("div", {}, chartSkeleton(opts));
+  const load = () =>
+    Promise.all([
+      research ? resultEquity(item.experiment_id, research, points) : null,
+      forward ? resultEquity(item.experiment_id, forward, points) : null,
+    ])
+      .then(([before, after]) => {
+        const strategy = before && (before.series || [])[0];
+        const bands =
+          strategy && strategy.dates.length
+            ? [{ from: strategy.dates[0], to: strategy.dates[strategy.dates.length - 1], label: "研究期 · 样本内" }]
+            : [];
+        const markers = [];
+        if (after && before && replay.start) markers.push({ date: replay.start, label: "冻结" });
+        if (after && replay.heldout_start) markers.push({ date: replay.heldout_start, label: "Held-out" });
+        host.replaceChildren(equityChart(chainEquity(before, after), { ...opts, markers, bands }));
+      })
+      .catch((error) => {
+        host.replaceChildren(el("div", { class: "hint" }, `收益曲线加载失败：${error.message}`));
+      });
+  if (opts.lazy) whenNearScreen(host, load);
+  else load();
   return host;
+}
+
+/* A chart's place while its data is on the way: a quiet block of about the
+   chart's own height, so the page does not jump when it lands. */
+function chartSkeleton({ width = 680, height = 240, ddH = 90, mini = false } = {}) {
+  return el("div", {
+    class: "chart-skeleton",
+    role: "status",
+    "aria-label": "收益曲线加载中",
+    style: `aspect-ratio:${fitChartWidth(width)}/${height + (mini ? 0 : ddH)}`,
+  });
+}
+
+/* Runs `load` once `node` comes within a screen of the visible part of the
+   page (the #app scroller). The home grid lists every arm ever run, and
+   fetching each card's curve up front made the first view wait on hundreds of
+   replays it never shows. One observer serves the page; route() drops what it
+   still watches when the page goes. */
+let nearScreen = null;
+function whenNearScreen(node, load) {
+  if (!nearScreen)
+    nearScreen = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          nearScreen.unobserve(entry.target);
+          entry.target.__nearScreen();
+        }
+      },
+      { root: document.getElementById("app"), rootMargin: "100% 0px" },
+    );
+  node.__nearScreen = load;
+  nearScreen.observe(node);
 }
 
 function fmtDateTick(date, withYear) {
@@ -1506,6 +1573,7 @@ function route(forceRefresh = false) {
   liveTimers = [];
   for (const source of liveSources) source.close();
   liveSources = [];
+  if (nearScreen) nearScreen.disconnect();
   closeModal();
   setActiveNav(
     qmtMatch
@@ -1691,13 +1759,41 @@ function navigatedAway(hash) {
   return location.hash !== hash;
 }
 
+/* The listing the home page holds: every row by id, and the digest of the
+   rows that change only with their files (registry.experiment_listing). A
+   poll hands the digest back and, while it still matches, receives only the
+   live rows and the order, and fills in the rest from what it holds. */
+let homeListing = null;
+
+async function fetchListing() {
+  const held = homeListing;
+  const payload = await api(
+    held ? `/api/experiments?kept=${encodeURIComponent(held.kept)}` : "/api/experiments",
+  );
+  if (payload.order) {
+    const fresh = new Map(payload.experiments.map((row) => [row.experiment_id, row]));
+    const rows = payload.order.map((id) => fresh.get(id) || held.rows.get(id));
+    if (rows.some((row) => !row)) {
+      homeListing = null; // out of step: the next read asks for every row
+      throw new Error("listing out of step");
+    }
+    payload.experiments = rows;
+  }
+  homeListing = {
+    kept: payload.kept,
+    rows: new Map(payload.experiments.map((row) => [row.experiment_id, row])),
+  };
+  return payload;
+}
+
 async function renderHomePage() {
   const hash = location.hash;
-  $main.innerHTML = '<div class="loading">加载中…</div>';
+  $main.replaceChildren(pageSkeleton("grid"));
   $topbarRight.innerHTML = "";
+  homeListing = null;
   let payload;
   try {
-    payload = await api("/api/experiments");
+    payload = await fetchListing();
   } catch (error) {
     if (navigatedAway(hash)) return;
     $main.innerHTML = `<div class="empty">加载失败：${escapeHtml(error.message)}</div>`;
@@ -1759,7 +1855,7 @@ function homeView(payload) {
 /* The grid is rebuilt on every poll; the hero only when what it shows
    changed, so its curve is not re-fetched and redrawn every five seconds. */
 async function refreshHomePage() {
-  const payload = await api("/api/experiments");
+  const payload = await fetchListing();
   const home = document.getElementById("home");
   const grid = home && home.querySelector(".grid");
   const hero = document.getElementById("hero-panel");
@@ -1894,16 +1990,17 @@ function evidenceTiles(item) {
   return tiles.length ? statTilesRow(tiles) : null;
 }
 
-/* The arm's curve on its card. The node is kept by id across the five-second
-   grid rebuild, so the curve is neither refetched nor redrawn while the page
-   sits open; it is rebuilt when the results it joins change. */
+/* The arm's curve on its card, fetched when the card comes near the screen.
+   The node is kept by id across the five-second grid rebuild, so the curve is
+   neither refetched nor redrawn while the page sits open; it is rebuilt when
+   the results it joins change. */
 function cardEquityNode(item) {
   const key = [item.research_result, (item.forward || {}).result].filter(Boolean).join("|");
   if (!key) return null;
   const id = `equity-card-${item.experiment_id}`;
   const existing = document.getElementById(id);
   if (existing && existing.dataset.result === key) return existing;
-  const host = armEquityHost(item, { width: 420, height: 130, mini: true });
+  const host = armEquityHost(item, { width: 420, height: 130, mini: true, lazy: true });
   host.id = id;
   host.dataset.result = key;
   return host;
@@ -2463,7 +2560,7 @@ function hashExperimentId() {
 }
 
 async function renderDetailPage(experimentId, selectedKey) {
-  $main.innerHTML = '<div class="loading">加载中…</div>';
+  $main.replaceChildren(pageSkeleton("split"));
   $topbarRight.innerHTML = "";
   let detail;
   try {
@@ -5704,7 +5801,7 @@ function sameSelection(left, right) {
 async function renderMemoryPage() {
   const hash = location.hash;
   memoryView = null;
-  $main.innerHTML = '<div class="loading">加载演化…</div>';
+  $main.replaceChildren(pageSkeleton("split"));
   $topbarRight.replaceChildren();
   let payload;
   try {
@@ -6919,7 +7016,7 @@ function bookHash(env, book) {
 
 /* #/trading/paper is the books overview; #/trading/paper/<book> one book. */
 async function renderTradingPage(env, book) {
-  $main.innerHTML = '<div class="loading">加载模拟交易…</div>';
+  $main.replaceChildren(pageSkeleton(book ? "stack" : "grid"));
   $topbarRight.replaceChildren();
   tradingView = { env, book, signature: "", openDays: new Set() };
   const hash = book ? bookHash(env, book) : `#/trading/${env}`;
