@@ -244,6 +244,12 @@ class FundamentalEventsBuilderTest(unittest.TestCase):
                  "div_proc": "预案", "record_date": "", "ex_date": "", "pay_date": ""},
                 {"ts_code": "000003.SZ", "end_date": "20191231", "ann_date": "", "imp_ann_date": "",
                  "div_proc": "预案", "record_date": "", "ex_date": "", "pay_date": ""},
+                # An implementation row without its notice date (the vendor's
+                # 600803.SH FY2024 row, stage name with a trailing space): its
+                # ann_date is the proposal's, so it is never stamped there and
+                # stays invisible until a notice date arrives.
+                {"ts_code": "000004.SZ", "end_date": "20191231", "ann_date": "20200103", "imp_ann_date": "",
+                 "div_proc": "实施 ", "record_date": "20200120", "ex_date": "20200121", "pay_date": "20200121"},
             ]
             pd.DataFrame(dividend).to_parquet(raw / "dividend" / "ts_code=000001.SZ.parquet", index=False)
             mainbz = [

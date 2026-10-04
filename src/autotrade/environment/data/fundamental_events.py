@@ -468,6 +468,15 @@ def _available_at_for_frame(
         return _first_available_frame(frame, ("ann_date",), "source:ann_date")
     if dataset == "dividend":
         available, rules = _first_available_frame(frame, ("imp_ann_date", "ann_date"), "source:imp_ann_date_or_ann_date")
+        # An implementation (实施) row is announced by its own notice,
+        # imp_ann_date; its ann_date is the earlier proposal or AGM date, so
+        # the fallback that serves the other stages would publish the
+        # implementation months early (600803.SH FY2024: proposal 2025-03-27,
+        # notice 2025-07-16). Without a notice date the row stays invisible
+        # until the vendor fills one. The vendor's stage name can carry
+        # whitespace ("实施 " on that very row).
+        implementation = _column_text(frame, "div_proc").str.strip().eq("实施")
+        available = available.mask(implementation & _clean_date_frame(frame, "imp_ann_date").eq(""), "")
         rules = rules.mask(available.eq(""), "missing_announcement_date_not_pit_visible")
         return available, rules
     if dataset in {"fina_audit", "fina_mainbz_vip"}:
