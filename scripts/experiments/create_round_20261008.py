@@ -122,10 +122,18 @@ ARMS: dict[str, dict[str, object]] = {
     "seqbag2_pool_100k_8y_mimo_20261008": {**MIMO, **POOL_ARM},
 }
 
-# The seed, the geometry and every round-level parameter are round 20261006's.
+# The fundamentals seed's taxed-era twin: every market and fundamentals table is
+# a hard link to round 20261006's seed, and only the Broker's corporate-action
+# tables are rebuilt to carry the bonus-share column the dividend tax reads
+# (logs/data/seed_8y_fund_20261008/). Arms created from here on are taxed by
+# the creation default, so a `c_base` row here differs from round 20261006's
+# by the dividend tax alone.
+TAXED_FUND_PIT_VIEWS_SEED = "data/pit_views_seed_research_8y_fund_20261008"
+
+# The geometry and every round-level parameter are round 20261006's.
 ROUND = Round(
     arms=ARMS,
-    pit_views_seed=SEQAXES_ROUND.pit_views_seed,
+    pit_views_seed=TAXED_FUND_PIT_VIEWS_SEED,
     overrides=dict(SEQAXES_ROUND.overrides),
 )
 
