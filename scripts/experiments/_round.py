@@ -234,6 +234,9 @@ RETIRED_IDS: frozenset[str] = frozenset(
         "explore_platform_strategies_20260910",
         "factor_cs_20260910",
         "factor_cs_allflash_20260910",
+        # Created by round 20261007, withdrawn from it and deleted unarchived.
+        "fund_event2_100k_8y_mimo_20261007",
+        "fund_event2_100k_8y_qwen_20261007",
         "github_confirm_20260917",
         "gru_ranker_20260920",
         "margin_flow_20260916",
