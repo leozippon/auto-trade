@@ -950,6 +950,7 @@ def test_mounting_index_weight_leaves_every_other_round_byte_for_byte() -> None:
         "create_round_20261004",
         "create_round_20261005",
         "create_round_20261006",
+        "create_round_20261007",
     }
     assert carrying == lineage | eight_year, sorted(carrying)
     base = records["create_round_20260920"]
