@@ -19,9 +19,9 @@ model and by `mimo-v2.6-flash`. Two lanes left something to build on
 This round reuses the pack unchanged and gives each lane a second pair of
 sessions whose gates already carry the first pair's search:
 
-- `fund_event2_100k_8y_qwen` / `_mimo`: event-time books on what the first
-  sessions left untested; they inherit the two event arms and the two open
-  arms of round 20261005, which also ran event books.
+- An event pair on what the first sessions left untested, inheriting the two
+  event arms and the two open arms of round 20261005 (which also ran event
+  books). It is defined here but not queued: see the note above `ARMS`.
 - `fund_learn2_100k_8y_qwen` / `_mimo`: seed-robust rankers (a bag over
   training seeds, a strongly regularised linear model); they inherit the four
   earlier learned composites and the two learn arms of round 20261005.
@@ -104,9 +104,11 @@ LEARN2_ARM: dict[str, object] = {
     "research_directive": LEARN2_DIRECTIVE,
 }
 
+# The event pair (`fund_event2_100k_8y_qwen` / `_mimo`) was created and withdrawn
+# within minutes: the Broker credits cash dividends gross and does not charge
+# the holding-period dividend tax, so any book that buys into an ex-date is
+# flattered. `EVENT2_ARM` is kept for the round that follows the Broker fix.
 ARMS: dict[str, dict[str, object]] = {
-    "fund_event2_100k_8y_qwen_20261007": dict(EVENT2_ARM),
-    "fund_event2_100k_8y_mimo_20261007": {**MIMO, **EVENT2_ARM},
     "fund_learn2_100k_8y_qwen_20261007": dict(LEARN2_ARM),
     "fund_learn2_100k_8y_mimo_20261007": {**MIMO, **LEARN2_ARM},
 }
