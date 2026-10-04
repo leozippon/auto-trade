@@ -469,6 +469,56 @@ class DefaultsDriftTest(unittest.TestCase):
             AcceptanceRules(),
         )
 
+    def test_the_dividend_tax_is_pinned_per_arm_and_on_for_new_arms(self) -> None:
+        """An arm recorded before the tax existed has no key in params.json and
+        replays untaxed for good; the creation defaults stamp it on every new
+        arm, and the run facts the Agent reads say which it is."""
+        import tempfile
+
+        from autotrade.agent.experiment_facts import _broker_replay_facts
+        from autotrade.pipelines.worker import resolve_worker_options
+
+        base = {
+            "experiment_id": "tax_demo",
+            "strategy_path": "configs/agent_output_template/main.py",
+            "data_backend": "pit",
+            "raw_dir": "data/raw",
+            "fundamental_events_root": "data/pit/fundamental_events",
+            "fundamental_events_status": "results/data_quality/fundamental_events_status.json",
+        }
+        self.assertIs(WEB_CREATE_DEFAULTS["dividend_tax"], True)
+        self.assertIs(BrokerProfile().dividend_tax, False)
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "experiments").mkdir()
+
+            def profile(params: dict[str, object]) -> BrokerProfile:
+                return resolve_worker_options(
+                    params,
+                    experiment_dir=repo_root / "experiments/tax_demo",
+                    repo_root=repo_root,
+                    preflight=True,
+                ).rolling.broker_profile
+
+            recorded = profile(base)
+            created = profile({**base, "dividend_tax": WEB_CREATE_DEFAULTS["dividend_tax"]})
+            with self.assertRaisesRegex(ValueError, "dividend_tax must be a boolean"):
+                profile({**base, "dividend_tax": "true"})
+        self.assertEqual(recorded, BrokerProfile(initial_cash=recorded.initial_cash))
+        self.assertTrue(created.dividend_tax)
+        self.assertEqual(
+            _broker_replay_facts({"broker_profile": recorded.to_record()})["dividend_tax_policy"],
+            {"charged": False},
+        )
+        # A run manifest written before the field existed reads the same way.
+        self.assertEqual(
+            _broker_replay_facts({"broker_profile": {"slippage_bps": 5.0}})["dividend_tax_policy"],
+            {"charged": False},
+        )
+        policy = _broker_replay_facts({"broker_profile": created.to_record()})["dividend_tax_policy"]
+        self.assertTrue(policy["charged"])
+        self.assertEqual(policy["rate_by_months_held_at_most"], {"1": 0.2, "12": 0.1})
+
     def test_the_geometry_and_gate_knobs_reach_the_configuration(self) -> None:
         """A knob accepted and never forwarded is the defect class here."""
         import tempfile

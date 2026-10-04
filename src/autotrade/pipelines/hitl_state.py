@@ -123,6 +123,10 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "max_single_name_weight": None,
     "commission_bps": BrokerProfile().commission_bps,
     "slippage_bps": BrokerProfile().slippage_bps,
+    # Deliberately not the profile's own default: an arm whose params.json has
+    # no key was recorded untaxed and stays so; every arm created from here
+    # on is taxed unless its request says otherwise.
+    "dividend_tax": True,
     "model": MODEL_CHOICES[0],
     "subagent_model": MODEL_CHOICES[0],
     "nl_model": MODEL_CHOICES[0],

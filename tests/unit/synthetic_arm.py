@@ -158,7 +158,10 @@ class SyntheticPITProvider:
             DAILY[days].to_parquet(replay / "daily.parquet", index=False)
             MACRO[MACRO["trade_date"].between(start, end)].to_parquet(replay / "macro.parquet", index=False)
             pd.DataFrame(
-                columns=["ts_code", "ex_date", "record_date", "pay_date", "div_listdate", "cash_per_share", "stock_per_share"]
+                columns=[
+                    "ts_code", "ex_date", "record_date", "pay_date", "div_listdate",
+                    "cash_per_share", "stock_per_share", "bonus_per_share",
+                ]
             ).to_parquet(replay / "corporate_actions.parquet", index=False)
             _manifest(
                 replay,

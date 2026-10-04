@@ -41,10 +41,12 @@ class DailyMarketData:
         slot's ex-date table (``ts_code``/``ex_date``/``cash_per_share``), whose
         cash leg the Broker credits on the ex-date. The share leg never comes
         from the table: the Broker reads the exchange reference price from the
-        day's ``pre_close``. A formal replay slot always passes the table; None
-        is only for synthetic frames in unit tests and the single-file ``daily``
-        Paper backend, which have no dividend cash to credit."""
-        self._cash_dividends = _cash_dividends_by_ex_date(corporate_actions)
+        day's ``pre_close``. The table's ``bonus_per_share`` (送股, apart from
+        转增) is read only for the dividend tax; a table built before that
+        column existed leaves it unknown. A formal replay slot always passes the
+        table; None is only for synthetic frames in unit tests and the
+        single-file ``daily`` Paper backend, which have no dividends at all."""
+        self._cash_dividends, self._bonus_shares = _distributions_by_ex_date(corporate_actions)
         columns = list(daily.columns)
         symbol_source = "symbol"
         if "symbol" not in columns and "ts_code" in columns:
@@ -122,6 +124,14 @@ class DailyMarketData:
 
         return self._cash_dividends.get(str(trade_date), {})
 
+    def bonus_shares_for_day(self, trade_date: str) -> Mapping[str, float] | None:
+        """Bonus shares (送股) per share of every name going ex on
+        ``trade_date``, or None when the ex-date table does not carry them."""
+
+        if self._bonus_shares is None:
+            return None
+        return self._bonus_shares.get(str(trade_date), {})
+
     def visible_at(self, inference_at: datetime) -> _BarPrefix:
         if inference_at.tzinfo is None or inference_at.utcoffset() is None:
             raise StrategyContractError("inference_at must include a timezone")
@@ -150,18 +160,20 @@ class _DayBars(Mapping[str, Mapping[str, object]]):
         return len(self._index)
 
 
-def _cash_dividends_by_ex_date(
+def _distributions_by_ex_date(
     actions: pd.DataFrame | None,
-) -> dict[str, dict[str, float]]:
-    """``{ex_date: {symbol: cash per share}}`` from a corporate-actions frame.
+) -> tuple[dict[str, dict[str, float]], dict[str, dict[str, float]] | None]:
+    """``{ex_date: {symbol: per share}}`` of cash and of bonus shares from a
+    corporate-actions frame; the bonus map is None when the frame has no
+    ``bonus_per_share`` column.
 
-    Rows without cash (pure bonus or transfer issues) carry nothing the Broker
-    needs from the table and are skipped; several events of one name on one
-    ex-date share the record-date share base and are summed.
+    Zero amounts carry nothing the Broker needs from the table and are
+    skipped; several events of one name on one ex-date share the record-date
+    share base and are summed.
     """
 
     if actions is None:
-        return {}
+        return {}, {}
     symbol_column = "symbol" if "symbol" in actions.columns else "ts_code"
     missing = [
         column
@@ -170,22 +182,32 @@ def _cash_dividends_by_ex_date(
     ]
     if missing:
         raise ValueError(f"corporate actions missing columns: {missing}")
-    out: dict[str, dict[str, float]] = {}
-    for symbol, ex_date, cash in zip(
-        actions[symbol_column], actions["ex_date"], actions["cash_per_share"], strict=True
+    has_bonus = "bonus_per_share" in actions.columns
+    cash_out: dict[str, dict[str, float]] = {}
+    bonus_out: dict[str, dict[str, float]] = {}
+    for symbol, ex_date, cash, bonus in zip(
+        actions[symbol_column],
+        actions["ex_date"],
+        actions["cash_per_share"],
+        actions["bonus_per_share"] if has_bonus else [0.0] * len(actions),
+        strict=True,
     ):
-        try:
-            amount = float(cash)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"invalid cash_per_share for {symbol} on {ex_date}: {cash!r}") from exc
-        if not math.isfinite(amount) or amount < 0:
-            raise ValueError(f"invalid cash_per_share for {symbol} on {ex_date}: {cash!r}")
-        if amount == 0.0:
-            continue
-        day = out.setdefault(_date_text(ex_date), {})
-        key = _symbol_text(symbol)
-        day[key] = day.get(key, 0.0) + amount
-    return out
+        for out, column, value in (
+            (cash_out, "cash_per_share", cash),
+            (bonus_out, "bonus_per_share", bonus),
+        ):
+            try:
+                amount = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"invalid {column} for {symbol} on {ex_date}: {value!r}") from exc
+            if not math.isfinite(amount) or amount < 0:
+                raise ValueError(f"invalid {column} for {symbol} on {ex_date}: {value!r}")
+            if amount == 0.0:
+                continue
+            day = out.setdefault(_date_text(ex_date), {})
+            key = _symbol_text(symbol)
+            day[key] = day.get(key, 0.0) + amount
+    return cash_out, bonus_out if has_bonus else None
 
 
 def _normalized_codes(series: pd.Series, normalize: Callable[[object], str]) -> tuple[np.ndarray, list[str]]:

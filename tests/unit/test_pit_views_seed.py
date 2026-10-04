@@ -935,3 +935,24 @@ def test_a_seed_whose_build_is_still_staging_a_slot_is_refused(tmp_path: Path) -
     deep.mkdir(parents=True)
     with pytest.raises(ValueError, match="unfinished build"):
         assert_seed_snapshot_config(seed, wanted)
+
+
+def test_a_seed_without_the_bonus_split_is_refused_for_a_taxed_arm(tmp_path: Path) -> None:
+    """A taxed arm's Broker refuses the first replay day of a slot whose ex-date
+    table predates ``bonus_per_share``; a seed of such slots is refused when
+    the arm is created, not at its first Validation."""
+
+    from autotrade.pipelines.pit_views_seed import assert_seed_carries_bonus_split
+
+    seed = tmp_path / "seed"
+    columns = ["ts_code", "ex_date", "cash_per_share", "stock_per_share"]
+    for phase in ("valid", "heldout"):
+        slot = seed / "replay" / phase / "20240701_20250630_20240630T235959+0800"
+        slot.mkdir(parents=True)
+        pd.DataFrame(columns=columns).to_parquet(slot / "corporate_actions.parquet", index=False)
+    with pytest.raises(ValueError, match="predates the bonus-share column") as excinfo:
+        assert_seed_carries_bonus_split(seed)
+    assert "2 replay slot table(s)" in str(excinfo.value)
+    for path in seed.glob("replay/**/corporate_actions.parquet"):
+        pd.DataFrame(columns=[*columns, "bonus_per_share"]).to_parquet(path, index=False)
+    assert_seed_carries_bonus_split(seed)

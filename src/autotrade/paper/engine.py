@@ -279,7 +279,9 @@ class DailyPaperEngine:
         market = data.market
         bars = market.bars_for_day(day)
         settled_actions = len(broker.corporate_actions)
-        broker.open_day(day, bars, market.cash_dividends_for_day(day))
+        broker.open_day(
+            day, bars, market.cash_dividends_for_day(day), market.bonus_shares_for_day(day)
+        )
         # Opening the day is the only step that changes the account without a
         # fill, so its ex-date settlements are journaled like executions.
         for action in broker.corporate_actions[settled_actions:]:
@@ -542,7 +544,14 @@ class DailyPaperEngine:
             raise PaperEngineError("strategy path differs from the persisted Paper account")
         if state.get("schedule") != self.schedule.to_record():
             raise PaperEngineError("strategy schedule differs from the persisted Paper account")
-        if state.get("profile") != asdict(self.profile):
+        # Compared as profiles, not as records: a field added to the profile
+        # later is absent from an older book's record and reads as its default,
+        # exactly as the book's own book.json does.
+        try:
+            persisted = BrokerProfile(**(state.get("profile") or {}))
+        except (TypeError, ValueError) as exc:
+            raise PaperEngineError(f"persisted Broker profile is invalid: {exc}") from exc
+        if persisted != self.profile:
             raise PaperEngineError("Broker profile differs from the persisted Paper account")
         return state
 
@@ -569,6 +578,12 @@ class DailyPaperEngine:
                 raise PaperEngineError("persisted position is invalid")
             position = Position(**item)
             broker.positions[position.symbol] = position
+        # An account checkpointed before the ledger existed has no "lots"; it
+        # was untaxed, and an untaxed profile keeps no ledger.
+        lots = raw.get("lots") or {}
+        if not isinstance(lots, dict):
+            raise PaperEngineError("persisted lot ledger is invalid")
+        broker.restore_lots(lots)
         broker._current_day = str(raw.get("current_day") or "") or None
         return broker
 
@@ -578,6 +593,9 @@ class DailyPaperEngine:
             "cash": broker.cash,
             "current_day": broker._current_day,
             "positions": [asdict(position) for _, position in sorted(broker.positions.items())],
+            # The buys each held share came from, for the dividend tax a later
+            # sale owes; empty unless the profile charges it.
+            "lots": broker.lot_records(),
         }
 
     @staticmethod

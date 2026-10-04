@@ -150,6 +150,7 @@
    "price": 9.754875,
    "commission": 5.009754875,
    "stamp_duty": 0.0,
+   "dividend_tax": 0.0,
    "realized_pnl": null,
    "reason": null,
    "metadata": {
@@ -169,6 +170,7 @@
    "price": 9.5952,
    "commission": 5.0095952,
    "stamp_duty": 0.95952,
+   "dividend_tax": 0.0,
    "realized_pnl": -26.94637007500023,
    "reason": null,
    "metadata": {
@@ -188,6 +190,7 @@
    "price": 19.599795,
    "commission": 5.03919959,
    "stamp_duty": 0.0,
+   "dividend_tax": 0.0,
    "realized_pnl": null,
    "reason": null,
    "metadata": {
@@ -207,6 +210,7 @@
    "price": 26.012999999999998,
    "commission": 5.0390195,
    "stamp_duty": 0.0,
+   "dividend_tax": 0.0,
    "realized_pnl": null,
    "reason": null,
    "metadata": {
@@ -226,6 +230,7 @@
    "price": null,
    "commission": 0.0,
    "stamp_duty": 0.0,
+   "dividend_tax": 0.0,
    "realized_pnl": null,
    "reason": "missing_execution_price",
    "metadata": {
@@ -245,6 +250,7 @@
    "price": null,
    "commission": 0.0,
    "stamp_duty": 0.0,
+   "dividend_tax": 0.0,
    "realized_pnl": null,
    "reason": "suspended",
    "metadata": {
@@ -264,6 +270,7 @@
    "price": null,
    "commission": 0.0,
    "stamp_duty": 0.0,
+   "dividend_tax": 0.0,
    "realized_pnl": null,
    "reason": "missing_daily_price_limit",
    "metadata": {
@@ -283,6 +290,7 @@
    "price": null,
    "commission": 0.0,
    "stamp_duty": 0.0,
+   "dividend_tax": 0.0,
    "realized_pnl": null,
    "reason": "amount_below_lot_size",
    "metadata": {
@@ -302,6 +310,7 @@
    "price": null,
    "commission": 0.0,
    "stamp_duty": 0.0,
+   "dividend_tax": 0.0,
    "realized_pnl": null,
    "reason": "missing_execution_price",
    "metadata": {
@@ -321,6 +330,7 @@
    "price": null,
    "commission": 0.0,
    "stamp_duty": 0.0,
+   "dividend_tax": 0.0,
    "realized_pnl": null,
    "reason": "daily_price_limit",
    "metadata": {
@@ -340,6 +350,7 @@
    "price": 20.139924999999998,
    "commission": 5.04027985,
    "stamp_duty": 2.0139925,
+   "dividend_tax": 0.0,
    "realized_pnl": 95.93252805999964,
    "reason": null,
    "metadata": {
@@ -359,6 +370,7 @@
    "price": 28.594289999999997,
    "commission": 5.02859429,
    "stamp_duty": 0.0,
+   "dividend_tax": 0.0,
    "realized_pnl": null,
    "reason": null,
    "metadata": {
@@ -378,6 +390,7 @@
    "price": 15.097544999999998,
    "commission": 5.045292635,
    "stamp_duty": 0.0,
+   "dividend_tax": 0.0,
    "realized_pnl": null,
    "reason": null,
    "metadata": {
@@ -397,6 +410,7 @@
    "price": 24.64767,
    "commission": 5.036971505,
    "stamp_duty": 1.8485752500000003,
+   "dividend_tax": 0.0,
    "realized_pnl": -216.72406625499934,
    "reason": null,
    "metadata": {
@@ -416,6 +430,7 @@
    "price": null,
    "commission": 0.0,
    "stamp_duty": 0.0,
+   "dividend_tax": 0.0,
    "realized_pnl": null,
    "reason": "insufficient_cash",
    "metadata": {
@@ -435,6 +450,7 @@
    "price": 29.805090000000003,
    "commission": 5.02980509,
    "stamp_duty": 1.4902545000000003,
+   "dividend_tax": 0.0,
    "realized_pnl": 109.53134612000076,
    "reason": null,
    "metadata": {
@@ -454,6 +470,7 @@
    "price": 14.602695,
    "commission": 5.014602695,
    "stamp_duty": 0.73013475,
+   "dividend_tax": 0.0,
    "realized_pnl": -56.91150165666613,
    "reason": null,
    "metadata": {
@@ -473,6 +490,7 @@
    "price": 19.419705,
    "commission": 5.03903360705,
    "stamp_duty": 0.0,
+   "dividend_tax": 0.0,
    "realized_pnl": null,
    "reason": null,
    "metadata": {
@@ -492,6 +510,7 @@
    "price": null,
    "commission": 0.0,
    "stamp_duty": 0.0,
+   "dividend_tax": 0.0,
    "realized_pnl": null,
    "reason": "invalid_buy_lot",
    "metadata": {
@@ -511,6 +530,7 @@
    "price": 15.417705,
    "commission": 5.015417705,
    "stamp_duty": 0.0,
+   "dividend_tax": 0.0,
    "realized_pnl": null,
    "reason": null,
    "metadata": {
@@ -530,6 +550,7 @@
    "price": 15.472260000000002,
    "commission": 5.03094452,
    "stamp_duty": 1.5472260000000002,
+   "dividend_tax": 0.0,
    "realized_pnl": 41.43486539444484,
    "reason": null,
    "metadata": {
@@ -654,6 +675,7 @@
   },
   "fees_paid": 65.37851106205,
   "stamp_duty_paid": 8.589703,
+  "dividend_tax_paid": 0.0,
   "decision_calls": 14,
   "per_stock": [
    {

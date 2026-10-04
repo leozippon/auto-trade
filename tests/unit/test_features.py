@@ -689,7 +689,7 @@ class UnitRegistryProjectionTest(unittest.TestCase):
         ]
         column_map[("corporate_actions.parquet", None)] = [
             "ts_code", "ex_date", "record_date", "pay_date", "div_listdate",
-            "cash_per_share", "stock_per_share",
+            "cash_per_share", "stock_per_share", "bonus_per_share",
         ]
         column_map[("text_index.parquet", None)] = [
             "text_id", "dataset", "ts_codes", "title", "available_at", "library_file",

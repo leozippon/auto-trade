@@ -1356,7 +1356,7 @@ class SnapshotBuilder:
 
     _CORPORATE_ACTION_COLUMNS = (
         "ts_code", "ex_date", "record_date", "pay_date", "div_listdate",
-        "cash_per_share", "stock_per_share",
+        "cash_per_share", "stock_per_share", "bonus_per_share",
     )
 
     def _build_corporate_actions(
@@ -1367,8 +1367,10 @@ class SnapshotBuilder:
         (docs/environment-design.md §1.2). Not an agent input — agent visibility of
         dividends stays announcement-gated via the PIT fundamental events.
 
-        ``cash_per_share`` is the gross (税前) per-share cash amount and
-        ``stock_per_share`` the combined 送转 ratio. Announcements are read without
+        ``cash_per_share`` is the gross (税前) per-share cash amount,
+        ``stock_per_share`` the combined 送转 ratio and ``bonus_per_share`` its
+        送股 part (the dividend tax's bonus-share income; the rest is 转增,
+        which is not income). Announcements are read without
         a lower available_at bound (an ex-date can trail its 实施公告 by weeks), a
         row announced only after its own ex-date is dropped as a revision artifact,
         and same-day events for one code are summed (they share the record-date
@@ -1430,7 +1432,11 @@ class SnapshotBuilder:
         bo = pd.to_numeric(frame["stk_bo_rate"], errors="coerce").fillna(0.0)
         co = pd.to_numeric(frame["stk_co_rate"], errors="coerce").fillna(0.0)
         stock = pd.to_numeric(frame["stk_div"], errors="coerce").fillna(bo + co)
-        frame = frame.assign(cash_per_share=cash.clip(lower=0.0), stock_per_share=stock.clip(lower=0.0))
+        frame = frame.assign(
+            cash_per_share=cash.clip(lower=0.0),
+            stock_per_share=stock.clip(lower=0.0),
+            bonus_per_share=bo.clip(lower=0.0),
+        )
         frame = frame[(frame["cash_per_share"] > 0.0) | (frame["stock_per_share"] > 0.0)]
         if frame.empty:
             return empty, meta
@@ -1439,6 +1445,7 @@ class SnapshotBuilder:
             .agg(
                 cash_per_share=("cash_per_share", "sum"),
                 stock_per_share=("stock_per_share", "sum"),
+                bonus_per_share=("bonus_per_share", "sum"),
                 record_date=("record_date", "first"),
                 pay_date=("pay_date", "first"),
                 div_listdate=("div_listdate", "max"),

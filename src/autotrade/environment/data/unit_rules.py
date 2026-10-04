@@ -229,6 +229,9 @@ FIELD_RULES: tuple[FieldRule, ...] = (
     FieldRule("corporate_actions.parquet", None, ("cash_per_share",), source_unit="CNY_per_share"),
     FieldRule("corporate_actions.parquet", None, ("stock_per_share",),
               source_unit="shares_per_share", note="bonus/transfer shares per held share"),
+    FieldRule("corporate_actions.parquet", None, ("bonus_per_share",),
+              source_unit="shares_per_share",
+              note="the bonus (送股) part of stock_per_share; the rest is capital-reserve transfer (转增)"),
     # ======================= events.parquet, by dataset =====================
     FieldRule("events.parquet", "margin", ("rzye", "rzmre", "rzche", "rqye", "rzrqye"),
               source_unit="CNY"),

@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+from collections.abc import Mapping, Sequence
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from functools import cached_property
 from types import MappingProxyType
 
 from autotrade.environment.broker_core import (
+    BONUS_SHARE_PAR_CNY,
     STAMP_DUTY_CUTOVER,
     CostModel,
+    dividend_tax_rate,
     reduce_amount_reject,
     validate_buy_lot,
 )
@@ -34,12 +36,20 @@ class BrokerProfile:
     slippage_bps: float = 5.0
     max_total_holdings: int | None = None
     max_single_name_weight: float | None = None
+    # The individual dividend tax, charged at each sale on the dividends the
+    # sold shares received (``broker_core.dividend_tax_rate``). Off by default
+    # so that a profile recorded before the tax existed, which has no such
+    # field, replays exactly as it was recorded; the experiment creation
+    # defaults switch it on for every new arm.
+    dividend_tax: bool = False
     profile_id: str = "gjzq_cash"
     source: str = "docs/environment-design.md §3.4"
 
     def __post_init__(self) -> None:
         if isinstance(self.initial_cash, bool) or not math.isfinite(self.initial_cash) or self.initial_cash <= 0:
             raise ValueError("initial_cash must be a positive finite number")
+        if not isinstance(self.dividend_tax, bool):
+            raise ValueError("dividend_tax must be a boolean")
         if self.max_total_holdings is not None and (
             isinstance(self.max_total_holdings, bool)
             or not isinstance(self.max_total_holdings, int)
@@ -69,6 +79,7 @@ class BrokerProfile:
             "slippage_bps": self.slippage_bps,
             "max_total_holdings": self.max_total_holdings,
             "max_single_name_weight": self.max_single_name_weight,
+            "dividend_tax": self.dividend_tax,
         }
 
     @cached_property
@@ -94,6 +105,18 @@ class Position:
     @property
     def market_value(self) -> float:
         return self.quantity * self.last_price
+
+
+@dataclass
+class Lot:
+    """The shares of one buy still held, taken first-in first-out on a sale."""
+
+    quantity: int
+    # Trade date of the buy (YYYYMMDD); shares an ex-date adds to the lot keep it.
+    acquired: str
+    # Dividend income these shares received while held (gross cash plus the
+    # par value of bonus shares, CNY), taxed when they are sold.
+    dividend_income: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -133,10 +156,14 @@ class Execution:
     price: float | None = None
     commission: float = 0.0
     stamp_duty: float = 0.0
-    # Realized P&L of a position-reducing fill, net of the fees on both legs and
-    # measured against the released cost basis. ``None`` on buys and rejections:
-    # the Broker is the single source of realized P&L, so the return statistics
-    # never re-derive a cost basis from the fill stream.
+    # Dividend tax a sale paid on the dividends its shares received; 0 on buys
+    # and whenever the profile does not charge the tax.
+    dividend_tax: float = 0.0
+    # Realized P&L of a position-reducing fill, net of the fees on both legs
+    # and of its dividend tax, measured against the released cost basis.
+    # ``None`` on buys and rejections: the Broker is the single source of
+    # realized P&L, so the return statistics never re-derive a cost basis from
+    # the fill stream.
     realized_pnl: float | None = None
     reason: str | None = None
     metadata: Mapping[str, object] = field(default_factory=dict)
@@ -152,6 +179,7 @@ class Execution:
             "price": self.price,
             "commission": self.commission,
             "stamp_duty": self.stamp_duty,
+            "dividend_tax": self.dividend_tax,
             "realized_pnl": self.realized_pnl,
             "reason": self.reason,
             "metadata": dict(self.metadata),
@@ -170,6 +198,10 @@ class DailyBroker:
         # Ex-date settlements, in order: the only way a quantity or the cash
         # balance changes without a fill, so they are kept as auditable records.
         self.corporate_actions: list[CorporateAction] = []
+        # Each held name's buys, oldest first, kept only when the profile
+        # charges the dividend tax: the tax is the one thing that needs to
+        # know when each sold share was bought and what it received.
+        self.lots: dict[str, list[Lot]] = {}
         self._current_day: str | None = None
 
     def open_day(
@@ -177,6 +209,7 @@ class DailyBroker:
         trade_date: str,
         bars: Mapping[str, Mapping[str, object]],
         cash_dividends: Mapping[str, float] | None = None,
+        bonus_shares: Mapping[str, float] | None = None,
     ) -> None:
         """Enter ``trade_date``: release the T+1 locks, then settle ex-dates.
 
@@ -191,21 +224,39 @@ class DailyBroker:
         credited in full even where the exchange's reset is smaller. Shares
         created on the ex-date stay locked until the next day, exactly like a
         same-day buy.
+
+        ``bonus_shares`` maps a symbol to its bonus shares (送股) per share
+        going ex on this day, apart from capital-reserve conversions (转增).
+        Only the dividend tax reads it, so a profile that charges the tax
+        refuses a day without it rather than treat every share leg as tax-free.
         """
         if self._current_day == trade_date:
             return
+        if self.profile.dividend_tax and bonus_shares is None:
+            raise ValueError(
+                f"{trade_date}: the dividend tax needs each ex-date's bonus shares apart from "
+                "capital-reserve conversions, and this replay's ex-date table does not carry "
+                "bonus_per_share; a replay slot built before that column existed must be rebuilt"
+            )
         self._current_day = str(trade_date)
         dividends = cash_dividends or {}
+        bonuses = bonus_shares or {}
         for symbol, position in self.positions.items():
             position.available_quantity = position.quantity
             bar = bars.get(symbol)
             # No bar today (full-day suspension or delisting): nothing marks or
             # resets the name, so there is no ex-date to settle either.
             if bar is not None:
-                self._settle_ex_date(position, bar, dividends.get(symbol, 0.0))
+                self._settle_ex_date(
+                    position, bar, dividends.get(symbol, 0.0), bonuses.get(symbol, 0.0)
+                )
 
     def _settle_ex_date(
-        self, position: Position, bar: Mapping[str, object], cash_per_share: object
+        self,
+        position: Position,
+        bar: Mapping[str, object],
+        cash_per_share: object,
+        bonus_per_share: object,
     ) -> None:
         symbol, day = position.symbol, self._current_day
         pre_close = _price(bar.get("pre_close"))
@@ -214,13 +265,14 @@ class DailyBroker:
                 f"{symbol} on {day}: the day's bar has no usable pre_close, so a held "
                 "position cannot be carried across the day"
             )
-        if (
-            isinstance(cash_per_share, bool)
-            or not isinstance(cash_per_share, (int, float))
-            or not math.isfinite(cash_per_share)
-            or cash_per_share < 0
-        ):
-            raise ValueError(f"{symbol} on {day}: invalid cash dividend per share {cash_per_share!r}")
+        for name, value in (("cash dividend", cash_per_share), ("bonus shares", bonus_per_share)):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value < 0
+            ):
+                raise ValueError(f"{symbol} on {day}: invalid {name} per share {value!r}")
         cash_per_share = float(cash_per_share)
         last_close = position.last_price
         quantity_before = position.quantity
@@ -257,6 +309,10 @@ class DailyBroker:
             position.average_cost * quantity_before - credit
         ) / quantity_after
         self.cash += credit
+        if self.profile.dividend_tax:
+            # Bonus shares are income only where the share leg created shares.
+            bonus = float(bonus_per_share) if ratio is not None else 0.0
+            self._settle_lots(symbol, cash_per_share + bonus * BONUS_SHARE_PAR_CNY, ratio)
         self.corporate_actions.append(
             CorporateAction(
                 trade_date=str(day),
@@ -269,6 +325,74 @@ class DailyBroker:
                 cash_credit=credit,
             )
         )
+
+    def _settle_lots(self, symbol: str, income_per_share: float, ratio: float | None) -> None:
+        """Credit one ex-date's dividend income to each lot of ``symbol`` and
+        carry the share leg into the lots.
+
+        The lots are resized on their running totals, so they always add up to
+        the whole shares the position became; a lot rounded to nothing (only a
+        reverse split can do that) leaves with its income.
+        """
+
+        held = settled = 0
+        kept: list[Lot] = []
+        for lot in self.lots[symbol]:
+            lot.dividend_income += lot.quantity * income_per_share
+            if ratio is not None:
+                held += lot.quantity
+                previous, settled = settled, ex_date_shares(held, ratio)
+                lot.quantity = settled - previous
+            if lot.quantity > 0:
+                kept.append(lot)
+        self.lots[symbol] = kept
+
+    def _release_lots(self, symbol: str, quantity: int) -> float:
+        """Take ``quantity`` shares off ``symbol``'s lots, first in first out,
+        and return the dividend tax the sold shares owe."""
+
+        lots = self.lots[symbol]
+        tax = 0.0
+        while quantity:
+            lot = lots[0]
+            taken = min(quantity, lot.quantity)
+            income = lot.dividend_income * taken / lot.quantity
+            if income:
+                tax += income * dividend_tax_rate(lot.acquired, str(self._current_day))
+            lot.quantity -= taken
+            lot.dividend_income -= income
+            quantity -= taken
+            if lot.quantity == 0:
+                lots.pop(0)
+        if not lots:
+            del self.lots[symbol]
+        return tax
+
+    def lot_records(self) -> dict[str, list[dict[str, object]]]:
+        """The lot ledger as plain records, for a Paper checkpoint."""
+
+        return {symbol: [asdict(lot) for lot in lots] for symbol, lots in sorted(self.lots.items())}
+
+    def restore_lots(self, records: Mapping[str, Sequence[Mapping[str, object]]]) -> None:
+        """Reload a ``lot_records`` ledger after the positions it belongs to.
+
+        A profile without the dividend tax keeps no ledger; with it, every held
+        name's lots must add up to its quantity and no other name may have any.
+        """
+
+        lots = {
+            str(symbol): [Lot(int(row["quantity"]), str(row["acquired"]), float(row["dividend_income"])) for row in rows]
+            for symbol, rows in records.items()
+        }
+        expected = (
+            {symbol: position.quantity for symbol, position in self.positions.items()}
+            if self.profile.dividend_tax
+            else {}
+        )
+        held = {symbol: sum(lot.quantity for lot in rows) for symbol, rows in lots.items()}
+        if held != expected or any(lot.quantity <= 0 for rows in lots.values() for lot in rows):
+            raise ValueError(f"the lot ledger {held} does not match the positions {expected}")
+        self.lots = lots
 
     def account_snapshot(self) -> tuple[float, Mapping[str, int]]:
         return self.cash, MappingProxyType(
@@ -311,11 +435,14 @@ class DailyBroker:
             notional, action=order.action, trade_date=self._current_day
         )
         realized_pnl: float | None = None
+        dividend_tax = 0.0
         if order.action == "buy":
             required_cash = notional + commission
             if required_cash > self.cash + 1e-9:
                 return self._record(order, matched_at, status="rejected", reason="insufficient_cash")
             self.cash -= required_cash
+            if self.profile.dividend_tax:
+                self.lots.setdefault(order.symbol, []).append(Lot(order.quantity, self._current_day))
             existing = self.positions.get(order.symbol)
             if existing is None:
                 self.positions[order.symbol] = Position(
@@ -332,7 +459,11 @@ class DailyBroker:
                 existing.last_price = fill_price
         else:
             position = self.positions[order.symbol]
-            proceeds = notional - commission - stamp_duty
+            # Deducted at the sale, as the broker deducts what the depository
+            # computes on the sold shares; shares still held owe nothing yet.
+            if self.profile.dividend_tax:
+                dividend_tax = self._release_lots(order.symbol, order.quantity)
+            proceeds = notional - commission - stamp_duty - dividend_tax
             basis_released = position.average_cost * order.quantity
             realized_pnl = proceeds - basis_released
             self.cash += proceeds
@@ -348,6 +479,7 @@ class DailyBroker:
             price=fill_price,
             commission=commission,
             stamp_duty=stamp_duty,
+            dividend_tax=dividend_tax,
             realized_pnl=realized_pnl,
         )
 
@@ -403,6 +535,7 @@ class DailyBroker:
         price: float | None = None,
         commission: float = 0.0,
         stamp_duty: float = 0.0,
+        dividend_tax: float = 0.0,
         realized_pnl: float | None = None,
         reason: str | None = None,
     ) -> Execution:
@@ -416,6 +549,7 @@ class DailyBroker:
             price=price,
             commission=commission,
             stamp_duty=stamp_duty,
+            dividend_tax=dividend_tax,
             realized_pnl=realized_pnl,
             reason=reason,
             metadata=order.metadata,
@@ -492,6 +626,7 @@ __all__ = [
     "CorporateAction",
     "DailyBroker",
     "Execution",
+    "Lot",
     "Position",
     "ex_date_share_multiplier",
     "ex_date_shares",

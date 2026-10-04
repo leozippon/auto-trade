@@ -17,6 +17,7 @@ import numpy as np
 import pytest
 
 from autotrade.environment.artifacts import FilesystemArtifactStore
+from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.executor import StrategyMemoryExceeded, StrategyRaised
 from autotrade.environment.replay.engine import BacktestError
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
@@ -224,12 +225,19 @@ CONFIG_PROFILE = _DEFAULT.broker_profile
 CONFIG_ACCEPTANCE = acceptance_for({"tracking_error_cap": 0.08})
 
 
-def _pipeline(tmp_path: Path, plan, *, evaluator_error: BaseException | None = None):
+def _pipeline(
+    tmp_path: Path,
+    plan,
+    *,
+    evaluator_error: BaseException | None = None,
+    broker_profile: BrokerProfile = CONFIG_PROFILE,
+):
     config = RollingExperimentConfig(
         experiment_id="arm",
         experiments_root=tmp_path / "experiments",
         geometry=GEOMETRY,
         acceptance=CONFIG_ACCEPTANCE,
+        broker_profile=broker_profile,
     )
     store = FilesystemArtifactStore(config.experiment_dir / "artifacts" / "strategy")
     evaluator = Evaluator(config.experiment_dir / "artifacts" / "results", raise_with=evaluator_error)
@@ -664,6 +672,23 @@ def test_the_forward_replay_is_one_span_from_forward_start_to_the_release(tmp_pa
     assert forward_record(ledger.read())["run_id"] == record["run_id"]
     with pytest.raises(RuntimeError, match="already recorded"):
         pipeline.run_forward()
+
+
+def test_the_forward_replay_trades_under_the_arms_own_cost_model(tmp_path: Path):
+    """The verdict replays the frozen book on the Broker profile its arm was
+    created with, the dividend tax included, not on today's defaults."""
+
+    taxed = replace(CONFIG_PROFILE, dividend_tax=True)
+    pipeline, _snapshots, evaluator, _developer, _ledger = _pipeline(
+        tmp_path,
+        {1: ([0.0012, 0.0002], "freeze", {"nominee": 0})},
+        broker_profile=taxed,
+    )
+    pipeline.run_research_session()
+    evaluator.requests.clear()
+    pipeline.run_forward()
+    [request] = evaluator.requests
+    assert request.broker_profile == taxed
 
 
 def test_the_forward_replay_writes_nothing_a_session_can_read(tmp_path: Path):

@@ -760,6 +760,38 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
     with pytest.raises(NullControlSetupError, match="replay slots are unknown"):
         restarted.null_control(result.result_ref, **null_control_call)
 
+    # An arm that charges the dividend tax replays on its own profile, and the
+    # panel it is graded against trades under the same one. This slot's table
+    # predates the bonus-share column, so the taxed replay is refused until the
+    # slot is rebuilt rather than treating every share leg as tax-free.
+    taxed = dataclasses.replace(
+        request, broker_profile=BrokerProfile(initial_cash=100_000, dividend_tax=True)
+    )
+    with pytest.raises(ValueError, match="bonus_per_share"):
+        PITDailyEvaluationBackend(tmp_path / "results_taxed_stale", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
+            taxed
+        )
+    table = pd.read_parquet(replay / "corporate_actions.parquet")
+    table.assign(bonus_per_share=0.0).to_parquet(replay / "corporate_actions.parquet", index=False)
+    panel_profiles: list[BrokerProfile] = []
+    draw_panel = pit_backend.run_null_control
+
+    def recording_panel(result, frame, benchmark, profile, *args, **kwargs):
+        panel_profiles.append(profile)
+        return draw_panel(result, frame, benchmark, profile, *args, **kwargs)
+
+    monkeypatch.setattr("autotrade.pipelines.pit_backend.run_null_control", recording_panel)
+    taxed_result = PITDailyEvaluationBackend(tmp_path / "results_taxed", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
+        taxed
+    )
+    monkeypatch.undo()
+    assert panel_profiles == [taxed.broker_profile]
+    taxed_stats = json.loads(Path(taxed_result.result_ref).read_text(encoding="utf-8"))["stats"]
+    # The book still holds its shares when the window ends: the dividend was
+    # credited gross and nothing is owed until they are sold.
+    assert taxed_stats["dividend_tax_paid"] == 0.0
+    assert taxed_stats["final_equity"] == pytest.approx(record["stats"]["final_equity"])
+
     (replay / "corporate_actions.parquet").unlink()
     with pytest.raises(FileNotFoundError, match="declares corporate_actions"):
         PITDailyEvaluationBackend(tmp_path / "results_missing", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
@@ -1492,7 +1524,7 @@ def _write_corporate_actions(replay: Path, rows: list[dict[str, object]] | None 
 
     columns = [
         "ts_code", "ex_date", "record_date", "pay_date", "div_listdate",
-        "cash_per_share", "stock_per_share",
+        "cash_per_share", "stock_per_share", "bonus_per_share",
     ]
     pd.DataFrame(rows or [], columns=columns).to_parquet(
         replay / "corporate_actions.parquet", index=False
@@ -2107,7 +2139,8 @@ def _write_span_release(root: Path) -> tuple[Path, dict[str, Path]]:
         write_frames(slot, _span_frames(days), minute_groups=1)
         dividends = (
             [{"ts_code": "000001.SZ", "ex_date": "20240105", "record_date": "20240104",
-              "pay_date": "20240105", "div_listdate": "", "cash_per_share": 0.2, "stock_per_share": 0.0}]
+              "pay_date": "20240105", "div_listdate": "", "cash_per_share": 0.2, "stock_per_share": 0.0,
+              "bonus_per_share": 0.0}]
             if "20240105" in days
             else []
         )

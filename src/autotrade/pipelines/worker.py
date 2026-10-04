@@ -101,7 +101,7 @@ from .pit_backend import (
     ResearchPITSnapshotProvider,
     required_release_raw_datasets,
 )
-from .pit_views_seed import assert_seed_snapshot_config
+from .pit_views_seed import assert_seed_carries_bonus_split, assert_seed_snapshot_config
 from .research_session import LLMResearchDeveloper
 from .skills import latest_skills_snapshot, resolve_operating_memory
 
@@ -189,6 +189,7 @@ _ALLOWED_PARAMS = {
     "strategy_fit_timeout_seconds",
     "commission_bps",
     "slippage_bps",
+    "dividend_tax",
     "max_total_holdings",
     "max_single_name_weight",
     "gpu_count",
@@ -572,6 +573,13 @@ def resolve_worker_options(
         if data_backend == "pit"
         else (None, None)
     )
+    # Part of the arm's cost model, pinned in params.json at creation: an arm
+    # recorded before the tax existed has no key and keeps replaying,
+    # re-verifying and trading Paper untaxed. The creation defaults
+    # (hitl_state.WEB_CREATE_DEFAULTS) stamp it on new arms.
+    dividend_tax = _strict_bool(params.get("dividend_tax", False), "dividend_tax")
+    if dividend_tax and pit_views_seed is not None and pit_views_seed.is_dir():
+        assert_seed_carries_bonus_split(pit_views_seed)
     default_geometry = rolling_default("geometry")
     geometry = ResearchGeometry(
         **{
@@ -706,6 +714,7 @@ def resolve_worker_options(
             slippage_bps=_nonnegative_float(
                 params.get("slippage_bps", 5.0), "slippage_bps"
             ),
+            dividend_tax=dividend_tax,
             max_total_holdings=_optional_positive_int(
                 params.get("max_total_holdings"), "max_total_holdings"
             ),

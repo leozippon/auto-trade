@@ -160,6 +160,7 @@ def compute_return_stats(
     traded_notional = 0.0
     fees_paid = 0.0
     stamp_duty_paid = 0.0
+    dividend_tax_paid = 0.0
     for order in orders:
         group = "exit" if str(order.get("action") or "") in _EXIT_ACTIONS else "entry"
         bucket = order_lifecycle[group]
@@ -174,6 +175,7 @@ def compute_return_stats(
         traded_notional += _filled_notional(order)
         fees_paid += float(order.get("commission") or 0.0)
         stamp_duty_paid += float(order.get("stamp_duty") or 0.0)
+        dividend_tax_paid += float(order.get("dividend_tax") or 0.0)
 
     # Exposure diagnostics: gross = Σ EOD market value / same-day equity, read
     # off the cash/equity split the engine records for each replay day. Primitive
@@ -214,6 +216,9 @@ def compute_return_stats(
         "reject_counts": reject_counts,
         "fees_paid": fees_paid,
         "stamp_duty_paid": stamp_duty_paid,
+        # Charged at each sale on the dividends the sold shares received;
+        # shares still held at the end owe nothing yet.
+        "dividend_tax_paid": dividend_tax_paid,
         "decision_calls": len(result.inference_dates),
         "per_stock": per_stock,
         # Timing. ``replay_wall_seconds`` is the replay loop alone; the

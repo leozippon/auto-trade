@@ -13,10 +13,18 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from datetime import date
 
 LOT_SIZE = 100
 STAR_MIN_LOT_SIZE = 200
 STAMP_DUTY_CUTOVER = "20230828"  # sell-side stamp duty halved to 0.05% from this date
+# 财税〔2015〕101号, in force from this date: the holding-period tiers below.
+DIVIDEND_TAX_RULE_START = "20150908"
+# (months held at most, rate) in order; a longer holding is not taxed.
+DIVIDEND_TAX_TIERS = ((1, 0.20), (12, 0.10))
+# A bonus share (送股, from retained earnings) is dividend income at its par
+# value; a capital-reserve conversion (转增) is not income at all.
+BONUS_SHARE_PAR_CNY = 1.0
 
 
 def is_star_market(symbol: str) -> bool:
@@ -84,6 +92,48 @@ class CostModel:
             raise ValueError("notional must be a positive finite number")
         stamp_duty = self.stamp_duty_on_sale(notional, trade_date) if action == "sell" else 0.0
         return self.trade_fee(notional), stamp_duty
+
+
+def dividend_tax_rate(acquired: str, sold: str) -> float:
+    """Individual dividend tax on shares acquired on ``acquired`` and sold on
+    ``sold`` (``YYYYMMDD`` trade dates), as a fraction of the dividend income
+    those shares received.
+
+    财税〔2015〕101号: the holding period runs from the acquisition date to the
+    day before the sale; one month or less is taxed in full at 20 %, over one
+    month up to one year at half (10 %), over one year not at all. A period of
+    one month ends the day before the same day of the next month, or at that
+    month's end when it has no such day; a year likewise.
+    """
+
+    if sold < DIVIDEND_TAX_RULE_START:
+        raise ValueError(
+            f"a sale on {sold} predates the dividend tax rule of {DIVIDEND_TAX_RULE_START}"
+        )
+    start, sale = _day(acquired), _day(sold)
+    if sale <= start:
+        raise ValueError(f"shares acquired on {acquired} cannot be sold on {sold}")
+    # Held through the day before the sale: within ``months`` exactly when the
+    # sale is no later than the same day ``months`` on.
+    for months, rate in DIVIDEND_TAX_TIERS:
+        if sale <= _months_later(start, months):
+            return rate
+    return 0.0
+
+
+def _day(text: str) -> date:
+    return date(int(text[:4]), int(text[4:6]), int(text[6:8]))
+
+
+def _months_later(day: date, months: int) -> date:
+    """The same day ``months`` later, or the first of the month after when
+    that month has no such day."""
+
+    year, month = divmod(day.year * 12 + day.month - 1 + months, 12)
+    try:
+        return day.replace(year=year, month=month + 1)
+    except ValueError:
+        return date(year + (month + 1) // 12, (month + 1) % 12 + 1, 1)
 
 
 def validate_buy_lot(quantity: int, symbol: str = "") -> None:

@@ -27,6 +27,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+import pyarrow.parquet as pq
+
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.runtime import chmod_tree, rmtree_keeping_file_modes
 from autotrade.pipelines.calendar import ResearchGeometry, Slot
@@ -173,6 +175,29 @@ def assert_seed_snapshot_config(
             "this seed, or remove the staged slots a killed build left behind"
         )
     return str(record.get("generation_id") or ""), str(record.get("release_raw_dir") or "")
+
+
+def assert_seed_carries_bonus_split(seed: Path) -> None:
+    """Refuse a seed whose replay slots cannot tell bonus shares from conversions.
+
+    An arm that charges the dividend tax reads ``bonus_per_share`` from every
+    slot's ex-date table, and its Broker refuses the first day of a replay
+    without it. A seed built before the column existed would therefore fail
+    the arm's first Validation mid-session; read from the tables' schemas,
+    it is refused when the arm is created instead.
+    """
+
+    stale = [
+        path
+        for path in sorted(Path(seed).glob("replay/**/corporate_actions.parquet"))
+        if "bonus_per_share" not in pq.read_schema(path).names
+    ]
+    if stale:
+        raise ValueError(
+            f"PIT view seed {seed} predates the bonus-share column the dividend tax reads "
+            f"({len(stale)} replay slot table(s), first {stale[0].parent.relative_to(seed)}); "
+            "rebuild the seed under a new directory, or create the arm with dividend_tax false"
+        )
 
 
 def seed_pit_views(
@@ -404,6 +429,7 @@ __all__ = [
     "FORWARD_PHASE",
     "RESEARCH_PHASE",
     "SeedPlan",
+    "assert_seed_carries_bonus_split",
     "assert_seed_snapshot_config",
     "pit_cache_provider_record",
     "plan_seed",

@@ -149,7 +149,10 @@ class DailyReplayEngine:
             # end-of-day pass below.
             with self.timer.phase("broker"):
                 self.broker.open_day(
-                    trade_date, bars, market.cash_dividends_for_day(trade_date)
+                    trade_date,
+                    bars,
+                    market.cash_dividends_for_day(trade_date),
+                    market.bonus_shares_for_day(trade_date),
                 )
                 self._match_due(inference_at, market)
             if due:

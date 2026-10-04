@@ -1901,7 +1901,11 @@ class SnapshotBuilderTest(unittest.TestCase):
                         dividend(cash_div_tax=0.4),
                         dividend(available_at="2021-09-26T18:00:00+08:00"),
                         # Same code, second event on the same ex-date: amounts sum.
-                        dividend(end_date="20201231", cash_div_tax=0.1, stk_div=0.5, business_key="d2"),
+                        # Its 0.5 shares per share are 0.2 bonus (送股) and 0.3 transfer (转增).
+                        dividend(
+                            end_date="20201231", cash_div_tax=0.1, stk_div=0.5,
+                            stk_bo_rate=0.2, stk_co_rate=0.3, business_key="d2",
+                        ),
                         # Plan-stage row and an out-of-window ex-date are both excluded.
                         dividend(div_proc="预案", cash_div_tax=9.9, business_key="d3"),
                         dividend(ex_date="20211201", business_key="d4"),
@@ -1924,6 +1928,8 @@ class SnapshotBuilderTest(unittest.TestCase):
             self.assertEqual((row["ts_code"], row["ex_date"]), ("000001.SZ", "20211008"))
             self.assertAlmostEqual(float(row["cash_per_share"]), 0.6)  # 0.5 (kept revision) + 0.1
             self.assertAlmostEqual(float(row["stock_per_share"]), 0.5)
+            # Only the bonus part is dividend income for the tax.
+            self.assertAlmostEqual(float(row["bonus_per_share"]), 0.2)
             self.assertEqual(row["record_date"], "20211007")
             meta = manifest["domains"]["corporate_actions"]
             self.assertEqual(meta["rows"], 1)
