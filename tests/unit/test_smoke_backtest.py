@@ -532,3 +532,63 @@ def test_a_smoked_path_is_held_to_the_batch_candidate_rules(tmp_path: Path) -> N
     with pytest.raises(ToolError, match=r"README\.md"):
         tool.invoke({"path": "candidates/edited"})
     assert (edited / "README.md").read_text(encoding="utf-8") == "# my own contract\n"
+
+
+def test_a_rehearsal_states_how_far_back_each_domain_reaches(tmp_path: Path) -> None:
+    """A session ran five debug smokes to learn the as-of view's date
+    coverage, and its notes first recorded it wrongly. The rehearsal now says,
+    per domain, its rows and the first and last of each date column on the
+    last day it replayed -- from the parts' statistics, or the column itself
+    where a part wrote none."""
+
+    from autotrade.pipelines.pit_backend import asof_date_ranges
+
+    asof = tmp_path / "asof"
+    for domain in ("daily", "fundamentals", "universe"):
+        (asof / domain).mkdir(parents=True)
+    pd.DataFrame({"trade_date": ["20100104", "20170630"], "close": [1.0, 2.0]}).to_parquet(
+        asof / "daily" / "part-000000.parquet", index=False
+    )
+    pd.DataFrame({"trade_date": ["20170703"], "close": [3.0]}).to_parquet(
+        asof / "daily" / "part-000001.parquet", index=False
+    )
+    pd.DataFrame(
+        {
+            "available_at": ["2016-01-01 18:00:00+08:00", "2017-06-30 18:00:00+08:00"],
+            "end_date": ["20151231", "20170331"],
+        }
+    ).to_parquet(asof / "fundamentals" / "part-000000.parquet", index=False, write_statistics=False)
+    pd.DataFrame({"ts_code": ["000001.SZ"]}).to_parquet(
+        asof / "universe" / "part-000000.parquet", index=False
+    )
+    ranges = asof_date_ranges(asof)
+    assert ranges == {
+        "daily": {"rows": 3, "trade_date": ["20100104", "20170703"]},
+        "fundamentals": {
+            "rows": 2,
+            "available_at": ["2016-01-01 18:00:00+08:00", "2017-06-30 18:00:00+08:00"],
+        },
+        "universe": {"rows": 1},
+    }
+
+    class _WithPit:
+        """The local backend, with the pit block a PIT replay records."""
+
+        def __init__(self, inner) -> None:
+            self.inner = inner
+
+        def evaluate(self, request, **window):
+            result = self.inner.evaluate(request, **window)
+            path = Path(result.result_ref)
+            record = json.loads(path.read_text(encoding="utf-8"))
+            record["pit"] = {"asof_domains": sorted(ranges), "asof_date_ranges": ranges}
+            path.write_text(json.dumps(record), encoding="utf-8")
+            return result
+
+    root = tmp_path / "session"
+    root.mkdir()
+    tool = _tool(root, WORKING_STRATEGY)
+    tool.evaluator = _WithPit(tool.evaluator)
+    value = tool.invoke({"days": 2}).value
+    assert value["asof_domains"] == ["daily", "fundamentals", "universe"]
+    assert value["asof_date_ranges"] == ranges

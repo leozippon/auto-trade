@@ -787,3 +787,104 @@ def test_an_unmeasurable_slice_raises_instead_of_judging():
         _forward({**analysis, "size_factor_daily": []})
     with pytest.raises(ValueError, match="YYYYMMDD"):
         _forward(analysis, end="2026-06-30")
+
+
+def _raw_summary(excess, *, slippage_bps=5.0, turnover=40.0):
+    """The two summary blocks the raw cost-stress reading takes."""
+
+    return {
+        "turnover": turnover,
+        "benchmark": {"excess_return": excess},
+        "cost_sensitivity": {
+            "slippage_bps": slippage_bps,
+            "cost_per_bp_per_side": turnover * 1e-4,
+            "excess_at_2x_slippage": excess - slippage_bps * turnover * 1e-4,
+        },
+    }
+
+
+def test_the_raw_condition_judges_the_holders_money_only_where_the_rules_hold_it():
+    """A book can beat a panel that loses 12 %/yr and still make nothing: the
+    dividend-event graduate's active IR was 1.71 on a raw eight-year return of
+    -0.8 %. An arm held to the raw condition refuses a nominee whose own equity,
+    after the stressed slippage, did not beat the benchmark; an arm whose rules
+    lack it reads exactly as it did, so no recorded gate moves."""
+
+    research = _weekdays("20210701", "20250630")
+    rng = np.random.default_rng(116)
+    days, active, benchmark, size = _segment(research, 0.10, rng, te=0.05, exact=True, beta=0.0)
+    panel = 0.03 / TRADING_DAYS_PER_YEAR + benchmark
+    sidecar = _with_panel(_analysis((days, active + panel, benchmark, size)), panel)
+
+    def gate(summary=None, **rules):
+        return verdict.freeze_gate(
+            sidecar,
+            trials=4,
+            full_span_validations=4,
+            years=RESEARCH_YEARS,
+            summary=summary,
+            **rules,
+        )
+
+    # At a multiplier of 3 the 40-turn book pays two more 5 bp per side: 4 %.
+    costs = 2.0 * 5.0 * 40.0 * 1e-4
+    assert verdict.raw_excess_at_cost_stress(
+        _raw_summary(0.10), cost_stress_multiplier=3.0
+    ) == pytest.approx(0.10 - costs)
+    # At 2 it is the replay's own excess_at_2x_slippage.
+    summary = _raw_summary(0.10)
+    assert verdict.raw_excess_at_cost_stress(summary, cost_stress_multiplier=2.0) == (
+        pytest.approx(summary["cost_sensitivity"]["excess_at_2x_slippage"])
+    )
+    assert verdict.raw_excess_at_cost_stress({"turnover": 1.0}, cost_stress_multiplier=2.0) is None
+
+    held = {"require_raw_excess_at_cost_stress": True, "cost_stress_multiplier": 3.0}
+    below = gate(_raw_summary(costs - 0.01), **held)
+    assert below["reasons"] == ["freeze_raw_excess_not_positive_at_cost_stress"]
+    assert below["raw_excess_at_cost_stress"] == pytest.approx(-0.01)
+    assert below["thresholds"]["cost_stress_multiplier"] == 3.0
+    # Above zero passes; exactly zero, or a reading the summary cannot give, does not.
+    assert gate(_raw_summary(costs + 0.01), **held)["passed"]
+    assert gate(_raw_summary(costs), **held)["reasons"] == [
+        "freeze_raw_excess_not_positive_at_cost_stress"
+    ]
+    assert gate({}, **held)["reasons"] == ["freeze_raw_excess_not_positive_at_cost_stress"]
+    with pytest.raises(ValueError, match="summary"):
+        gate(None, **held)
+
+    # Rules without the condition: the very gate of before, key for key.
+    before = verdict.freeze_gate(
+        sidecar, trials=4, full_span_validations=4, years=RESEARCH_YEARS
+    )
+    unheld = gate(_raw_summary(-0.5), require_raw_excess_at_cost_stress=False, cost_stress_multiplier=3.0)
+    assert unheld == before
+    assert "raw_excess_at_cost_stress" not in unheld
+    assert "cost_stress_multiplier" not in unheld["thresholds"]
+
+
+def test_the_graduations_cost_stress_is_one_formula_for_a_row_and_a_forward_slice():
+    """The forward slice's F5 reading and a research row's report are the same
+    function of the graded series, the turnover and the slippage."""
+
+    rng = np.random.default_rng(117)
+    analysis = _analysis(_segment(FORWARD_DAYS, 0.10, rng, exact=True))
+    block = _forward(analysis, turnover=30.0, slippage_bps=5.0, cost_stress_multiplier=2.0)
+    statistics = verdict.neutralized_statistics(analysis, start=FORWARD_START, end=FORWARD_END)
+    assert block["excess_at_cost_stress"] == verdict.excess_at_cost_stress(
+        statistics["neutralized_excess"],
+        statistics["days"],
+        cost_stress_multiplier=2.0,
+        slippage_bps=5.0,
+        turnover=30.0,
+    )
+    assert block["excess_at_cost_stress"] == pytest.approx(
+        statistics["neutralized_excess"] - 5.0 * 30.0 * 1e-4 / (statistics["days"] / TRADING_DAYS_PER_YEAR)
+    )
+
+
+def test_the_panel_return_is_what_the_panel_composite_compounded_to():
+    days = _weekdays("20210701", "20210730")
+    panel = [-0.001] * len(days)
+    sidecar = {"panel_daily": [[day, value] for day, value in zip(days, panel)]}
+    assert verdict.panel_return(sidecar) == pytest.approx((1 - 0.001) ** len(days) - 1)
+    assert verdict.panel_return({}) is None

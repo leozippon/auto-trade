@@ -18,7 +18,13 @@ import pytest
 from autotrade.environment.runtime import append_versioned_jsonl
 from autotrade.environment.tools.base import ToolError
 from autotrade.environment.tools.workspace import SafeWorkspace
-from autotrade.pipelines.ledger import LEDGER_RECORD_SCHEMA_VERSION, ExperimentLedger
+from autotrade.pipelines.ledger import (
+    LEDGER_RECORD_SCHEMA_VERSION,
+    ExperimentLedger,
+    experiment_verdict,
+    paper_candidate,
+    verdict_void,
+)
 from autotrade.pipelines.skills import (
     CURATED_MEMORY_SOURCE,
     DEFAULT_OPERATING_MEMORY,
@@ -27,6 +33,7 @@ from autotrade.pipelines.skills import (
     DeleteSkillTool,
     ExperimentSkillsStore,
     WriteSkillTool,
+    admit_memory_sources,
     build_skills_index,
     create_operating_memory_snapshot,
     ensure_operating_memory_snapshot,
@@ -224,6 +231,51 @@ def test_only_graduated_experiments_contribute_their_skills(tmp_path: Path) -> N
     assert [source.source for source in sources] == ["adopted"]
     assert sources[0].origin == "graduated"
     assert sources[0].entries == (GRADUATED_SKILL,)
+
+
+def test_a_voided_graduate_is_no_graduate_to_memory_or_paper(tmp_path: Path) -> None:
+    """A graduation later shown to be untaxed dividend capture is withdrawn by
+    an operator's appended void, never by rewriting the forward record: the
+    tier stops offering its skills to new arms and Paper stops offering it a
+    book, while the record it produced reads as it was."""
+
+    experiments = tmp_path / "experiments"
+    experiments.mkdir()
+    directory = _experiment_with_skill(experiments, "withdrawn")
+    _experiment_with_skill(experiments, "kept")
+    ledger = ExperimentLedger(directory / "ledgers" / "experiment_ledger.jsonl")
+    forward = ledger.read("forward")
+    void = verdict_void(
+        "withdrawn",
+        voided_by="operator",
+        reason="re-run with the dividend tax, research active IR is -1.80",
+        evidence_ref="logs/notes/x/dividend_tax_rerun",
+    )
+    ledger.append(void)
+    records = ledger.read()
+    verdict = experiment_verdict(records)
+    assert verdict is not None and verdict["status"] == "voided"
+    assert verdict["void"]["voided_by"] == "operator"
+    assert verdict["void"]["evidence_ref"] == "logs/notes/x/dividend_tax_rerun"
+    assert verdict["void"]["recorded_at"]
+    assert ledger.read("forward") == forward
+    assert paper_candidate(records) is None
+    sources = graduated_memory_sources(experiments)
+    assert [source.source for source in sources] == ["kept"]
+    admitted, refused = admit_memory_sources(sources, RESEARCH_END)
+    assert "withdrawn" not in {source.source for source in (*admitted, *refused)}
+    # One void per arm, and only a recorded graduation can be voided.
+    with pytest.raises(ValueError, match="already voided"):
+        ledger.append(void)
+    rejected = _experiment_with_skill(experiments, "rejected", graduated=False)
+    with pytest.raises(ValueError, match="only a recorded graduation"):
+        ExperimentLedger(rejected / "ledgers" / "experiment_ledger.jsonl").append(
+            verdict_void("rejected", voided_by="op", reason="r", evidence_ref="e")
+        )
+    with pytest.raises(ValueError, match="must state"):
+        ExperimentLedger(experiments / "kept" / "ledgers" / "experiment_ledger.jsonl").append(
+            verdict_void("kept", voided_by="op", reason=" ", evidence_ref="e")
+        )
 
 
 def test_a_fold_era_graduated_row_is_not_a_verdict(tmp_path: Path) -> None:
@@ -652,3 +704,53 @@ def test_a_snapshot_with_an_unknown_schema_is_refused(tmp_path: Path) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ValueError, match="schema_version"):
         read_operating_memory_snapshot(experiment)
+
+
+def test_the_operator_voids_a_graduation_by_one_appended_record(tmp_path: Path) -> None:
+    """The entry point checks before it writes: a dry run appends nothing, a
+    void needs evidence that exists, and the arm is voided exactly once."""
+
+    import json
+    import subprocess
+    import sys
+
+    script = REPO_ROOT / "scripts/experiments/void_graduation.py"
+    experiments = tmp_path / "experiments"
+    experiments.mkdir()
+    directory = _experiment_with_skill(experiments, "withdrawn")
+    ledger = ExperimentLedger(directory / "ledgers" / "experiment_ledger.jsonl")
+    before = ledger.read()
+
+    def void(*arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                sys.executable,
+                str(script),
+                "--experiments-root",
+                str(experiments),
+                "--experiment",
+                "withdrawn",
+                "--by",
+                "operator",
+                "--reason",
+                "untaxed dividend capture",
+                *arguments,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    missing = void("--evidence", "logs/notes/no_such_evidence_dir")
+    assert missing.returncode != 0 and "evidence" in missing.stderr
+    dry = void("--evidence", "src", "--dry-run")
+    assert dry.returncode == 0, dry.stderr
+    assert json.loads(dry.stdout)["dry_run"] is True
+    assert ledger.read() == before
+    applied = void("--evidence", "src")
+    assert applied.returncode == 0, applied.stderr
+    written = json.loads(applied.stdout)
+    assert written["record_type"] == "verdict_void" and written["evidence_ref"] == "src"
+    assert experiment_verdict(ledger.read())["status"] == "voided"
+    again = void("--evidence", "src")
+    assert again.returncode == 2 and "already voided" in again.stderr

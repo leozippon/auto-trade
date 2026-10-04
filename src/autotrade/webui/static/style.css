@@ -448,13 +448,15 @@ main {
  color: var(--muted);
  font-weight: 500;
 }
-/* How an arm ended: a graduate reads as the one good outcome, a refusal and a
-   broken worker as failures, and the two endings nobody decided stay quiet. */
+/* How an arm ended: a graduate reads as the one good outcome, a refusal, a
+   withdrawn graduation and a broken worker as failures, and the two endings
+   nobody decided stay quiet. */
 .badge.ending-graduated {
  background: var(--ok-soft);
  color: var(--ok);
 }
 .badge.ending-rejected,
+.badge.ending-voided,
 .badge.ending-broken {
  background: var(--bad-soft);
  color: var(--bad);

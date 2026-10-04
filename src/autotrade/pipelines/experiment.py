@@ -1052,6 +1052,7 @@ def freeze_gate_for(
     family = trial_family(rows)
     representatives: list[Mapping[str, object]] = family["representatives"]  # type: ignore[assignment]
     lineage_arms, lineage_trials, lineage_series = recorded_lineage(records)
+    summary = nominee.get("summary")
     try:
         gate = freeze_gate(
             _style_analysis(nominee),
@@ -1066,6 +1067,7 @@ def freeze_gate_for(
                 if row.get("span") == FULL_SPAN and _finite_ir(row.get("neutralized"))
             ),
             years=years,
+            summary=summary if isinstance(summary, Mapping) else None,
             **(acceptance.freeze_gate_kwargs() if acceptance is not None else {}),
         )
     except ValueError as exc:

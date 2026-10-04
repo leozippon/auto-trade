@@ -311,6 +311,32 @@ class AcceptanceRulesTest(unittest.TestCase):
         rendered = json.dumps(facts)
         self.assertIsNone(re.search(r"20\d{6}", rendered))
 
+    def test_the_raw_condition_is_stated_and_judged_only_where_an_arm_holds_it(self) -> None:
+        """An arm recorded before the raw cost-stress condition has no key and
+        is judged, and told, exactly as before; an arm that holds it is told
+        the condition and the gate receives it."""
+
+        recorded = acceptance_for({"max_drawdown": 0.45})
+        self.assertFalse(recorded.require_raw_excess_at_cost_stress)
+        self.assertNotIn("raw_excess_at_cost_stress", recorded.agent_facts()["freeze_gate"])
+        held = acceptance_for(
+            {"require_raw_excess_at_cost_stress": True, "cost_stress_multiplier": 3.0}
+        )
+        stated = held.agent_facts()["freeze_gate"]["raw_excess_at_cost_stress"]
+        self.assertIn("> 0", stated)
+        self.assertIn("3.0", stated)
+        self.assertIn("raw_readings.raw_excess_at_cost_stress", stated)
+        self.assertEqual(
+            {
+                key: held.freeze_gate_kwargs()[key]
+                for key in ("require_raw_excess_at_cost_stress", "cost_stress_multiplier")
+            },
+            {"require_raw_excess_at_cost_stress": True, "cost_stress_multiplier": 3.0},
+        )
+        self.assertEqual(AcceptanceRules.from_record(held.to_record()), held)
+        with self.assertRaisesRegex(ValueError, "must be a boolean"):
+            AcceptanceRules(require_raw_excess_at_cost_stress=1)  # type: ignore[arg-type]
+
     def test_a_record_with_a_retired_key_still_rebuilds_the_rules(self) -> None:
         rules = AcceptanceRules.from_record(
             {"max_drawdown": 0.2, "heldout_min_trades": 5, "confirmation_folds": 2}
@@ -413,7 +439,12 @@ class DefaultsDriftTest(unittest.TestCase):
             "beta_max",
         }
         for key, value in rules.to_record().items():
-            if key == "cost_stress_multiplier" or key not in optional:
+            if key == "require_raw_excess_at_cost_stress":
+                # Deliberately apart, like ``dividend_tax``: off for an arm
+                # recorded without the key, on for every arm created now.
+                self.assertFalse(value)
+                self.assertIs(WEB_CREATE_DEFAULTS[key], True)
+            elif key == "cost_stress_multiplier" or key not in optional:
                 self.assertEqual(WEB_CREATE_DEFAULTS[key], value, key)
             else:
                 self.assertIsNone(WEB_CREATE_DEFAULTS[key], key)
@@ -541,6 +572,7 @@ class DefaultsDriftTest(unittest.TestCase):
                     "max_research_minutes": 300,
                     "cost_stress_multiplier": 3.0,
                     "max_drawdown": 0.2,
+                    "require_raw_excess_at_cost_stress": True,
                     "strategy_path": "configs/agent_output_template/main.py",
                     "data_backend": "pit",
                     "raw_dir": "data/raw",
@@ -558,7 +590,12 @@ class DefaultsDriftTest(unittest.TestCase):
         # The two the request names; it named no cap, so no tracking mandate.
         self.assertEqual(
             options.rolling.acceptance,
-            replace(AcceptanceRules(), max_drawdown=0.2, cost_stress_multiplier=3.0),
+            replace(
+                AcceptanceRules(),
+                max_drawdown=0.2,
+                cost_stress_multiplier=3.0,
+                require_raw_excess_at_cost_stress=True,
+            ),
         )
 
     def test_the_console_create_form_is_seeded_with_the_research_preset(self) -> None:

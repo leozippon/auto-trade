@@ -173,6 +173,7 @@ _ALLOWED_PARAMS = {
     "min_dsr_probability",
     "min_positive_year_share",
     "min_full_span_validations",
+    "require_raw_excess_at_cost_stress",
     "forward_confidence",
     "recency_months",
     "min_mean_gross",
@@ -701,7 +702,11 @@ def resolve_worker_options(
         # limit absent or null takes its default (``config.acceptance_for``).
         acceptance=acceptance_for(
             {
-                name: None if params.get(name) is None else _finite_float(params[name], name)
+                name: None
+                if params.get(name) is None
+                else _strict_bool(params[name], name)
+                if name == "require_raw_excess_at_cost_stress"
+                else _finite_float(params[name], name)
                 for name in AcceptanceRules().to_record()
             }
         ),

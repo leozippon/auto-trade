@@ -349,6 +349,8 @@ def _gate_record(gate: Mapping[str, object]) -> dict[str, object]:
         "neutralized_excess": gate.get("neutralized_excess"),
         "positive_years": gate.get("positive_years"),
         "active_max_drawdown": gate.get("active_max_drawdown"),
+        # Only on an arm whose rules hold the raw cost-stress condition.
+        "raw_excess_at_cost_stress": gate.get("raw_excess_at_cost_stress"),
         "unavailable_reason": dsr.get("unavailable_reason"),
         "thresholds": gate.get("thresholds"),
     }
@@ -368,6 +370,7 @@ def _gate_numbers(gate: Mapping[str, object]) -> str:
             "information_ratio_bar",
             "positive_years",
             "active_max_drawdown",
+            "raw_excess_at_cost_stress",
         )
         if name in record
     ]

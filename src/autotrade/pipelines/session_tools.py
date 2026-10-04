@@ -82,7 +82,52 @@ from .experiment import (
 from .ledger import RESEARCH_STAGE, ExperimentLedger
 from .session_resume import record_step_sidecar
 from .skills import _assert_skills_absent_from_formal
-from .verdict import active_daily
+from .verdict import (
+    active_daily,
+    excess_at_cost_stress,
+    neutralized_statistics,
+    panel_return,
+    raw_excess_at_cost_stress,
+)
+
+
+def _rounded(value: float | None) -> float | None:
+    return None if value is None else round(value, 6)
+
+
+def _step_analysis(step: StepResult) -> dict[str, object]:
+    """The style sidecar beside one recorded Validation's result."""
+
+    result_dir = Path(step.validation.result_ref).parent
+    return json.loads((result_dir / STYLE_ARTIFACT_NAME).read_text(encoding="utf-8"))
+
+
+def _active_excess_at_cost_stress(step: StepResult, multiplier: float) -> float | None:
+    """``verdict.excess_at_cost_stress`` of one Validation over its own span:
+    the graded series' neutralised excess and measured days, the replay's
+    turnover and the slippage its cost block records; ``None`` where one of
+    them is not measured."""
+
+    summary = step.validation.summary
+    costs = summary.get("cost_sensitivity")
+    slippage = costs.get("slippage_bps") if isinstance(costs, Mapping) else None
+    turnover = summary.get("turnover")
+    if not all(
+        isinstance(value, (int, float)) and not isinstance(value, bool)
+        for value in (slippage, turnover)
+    ):
+        return None
+    try:
+        statistics = neutralized_statistics(_step_analysis(step))
+    except ValueError:
+        return None
+    return excess_at_cost_stress(
+        float(statistics["neutralized_excess"]),  # type: ignore[arg-type]
+        int(statistics["days"]),  # type: ignore[call-overload]
+        cost_stress_multiplier=multiplier,
+        slippage_bps=float(slippage),  # type: ignore[arg-type]
+        turnover=float(turnover),  # type: ignore[arg-type]
+    )
 
 
 def _public_error_text(exc: Exception) -> str:
@@ -216,7 +261,9 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
         "full-span batch opens at the period start and does not pay it), "
         "phase_seconds (raw instrumentation whose phases overlap -- data_view "
         "wraps the as-of sub-phases, so they do not add up), order "
-        "counts, the as-of domain directory names, the container resources block "
+        "counts, the as-of domain directory names with each domain's rows and "
+        "first/last trade_date and available_at on the last day replayed (how far "
+        "back the view this window opened on reaches), the container resources block "
         "(peak memory against the container limit, per-fit seconds against the "
         "fit timeout in force, and GPU memory for a GPU strategy), and the exact "
         "exception text on failure. It commits no revision, creates no Step, "
@@ -465,6 +512,7 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
             if replayed and "strategy" in phases
             else {}
         )
+        pit = _smoke_pit(result_dir)
         report: dict[str, object] = {
             "status": "ok",
             "official": False,
@@ -483,7 +531,8 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
             ),
             "phase_seconds": phases,
             "nl_calls": summary.get("nl_calls"),
-            "asof_domains": _smoke_asof_domains(result_dir),
+            "asof_domains": [str(item) for item in pit.get("asof_domains") or ()],
+            "asof_date_ranges": pit.get("asof_date_ranges") or {},
             "hint": _SMOKE_LAYOUT_HINT,
         }
         if start is not None:
@@ -507,15 +556,16 @@ _SMOKE_LAYOUT_HINT = (
 )
 
 
-def _smoke_asof_domains(result_dir: Path) -> list[str]:
-    """Domain directory names the replay actually exposed under asof_dir."""
+def _smoke_pit(result_dir: Path) -> dict[str, object]:
+    """The replay record's ``pit`` block: the domain directory names the
+    replay exposed under asof_dir and, for a smoke run, each one's date range
+    on its last day (``pit_backend.asof_date_ranges``)."""
     try:
         record = json.loads((result_dir / "result.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return []
+        return {}
     pit = record.get("pit")
-    domains = pit.get("asof_domains") if isinstance(pit, dict) else None
-    return [str(item) for item in domains] if isinstance(domains, list) else []
+    return dict(pit) if isinstance(pit, dict) else {}
 
 
 # One Validation's full replay record is attached to its step-tree node, and
@@ -599,10 +649,21 @@ UNMEASURED_SELECTION_NOTE = (
     "joins the trials and moves it"
 )
 GRADUATION_ACTIVITY_NOTE = (
-    "informational, not a freeze-gate condition: this node's research-period "
-    "readings of the activity conditions acceptance_rules.graduation.forward "
-    "applies to the frozen artifact (round trips per month, mean gross exposure) "
+    "informational, not a freeze-gate condition: this node's readings, over its "
+    "own span, of the activity and cost-stress conditions "
+    "acceptance_rules.graduation.forward applies to the frozen artifact (round "
+    "trips per month, mean gross exposure, and active_excess_at_cost_stress: the "
+    "annualised active neutralized excess after cost_stress_multiplier x the "
+    "slippage on this span's turnover, computed as the graduation computes it) "
     "beside their thresholds; the forward months are judged against these lines"
+)
+# A row whose bytes and span repeat an earlier node of the arm.
+SAME_BYTES_NOTE = (
+    "these bytes were already validated on this span as the nodes named: the "
+    "zero-skill panel is seeded by the span, so a deterministic strategy repeats "
+    "their readings exactly and a difference measures only the strategy's own "
+    "non-determinism (GPU training, for one); it is the same trial, not new "
+    "evidence"
 )
 
 
@@ -777,36 +838,38 @@ class SessionValidations:
             "effective_trials": family["effective_trials"],  # type: ignore[index]
             "information_ratio_bar": family["information_ratio_bar"],  # type: ignore[index]
             "full_span_validations": gate.get("full_span_validations"),
-            **(
-                {"graduation_activity": self.graduation_activity(step)}
-                if step.span == FULL_SPAN
-                else {}
-            ),
+            "graduation_activity": self.graduation_activity(step),
             "note": SELECTION_STATISTICS_NOTE if measured else UNMEASURED_SELECTION_NOTE,
         }
 
+    @property
+    def rules(self) -> AcceptanceRules:
+        """The run's acceptance rules, or the defaults when the request carries none."""
+
+        return self.acceptance or AcceptanceRules()
+
     def graduation_activity(self, step: StepResult) -> dict[str, object]:
-        """The research-period readings of the graduation's activity conditions.
+        """One node's readings of the graduation's activity and cost-stress
+        conditions, over its own span.
 
         A freeze is judged once on the forward months, where too few round
-        trips or too little exposure fails it whatever the excess; one frozen
-        arm traded 0.86 round trips a month over its research period and then
-        failed ``forward_too_few_round_trips``. The readings use the forward
-        slice's own definitions -- ``round_trips`` is the replay's realised
-        exits (``trade_count``), ``mean_gross`` its mean gross exposure
-        (``exposure.avg_gross``), and the round-trip floor is per calendar
-        month -- over the research period, beside the arm's thresholds. They
-        gate nothing.
+        trips, too little exposure or an edge that the cost stress erases
+        fails it whatever the excess; one frozen arm traded 0.86 round trips a
+        month over its research period and then failed
+        ``forward_too_few_round_trips``. The readings use the forward slice's
+        own definitions -- ``round_trips`` is the replay's realised exits
+        (``trade_count``), ``mean_gross`` its mean gross exposure
+        (``exposure.avg_gross``), the round-trip floor is per calendar month,
+        and the cost stress is ``verdict.excess_at_cost_stress`` on the graded
+        series over this span's turnover (a replay opens at the initial cash,
+        so ``turnover`` is the span's notional over its opening equity) --
+        beside the arm's thresholds. They gate nothing.
         """
 
         summary = step.validation.summary
-        rules = (
-            AcceptanceRules.from_record(self.request.acceptance_rules)
-            if self.request.acceptance_rules
-            else AcceptanceRules()
-        )
+        rules = self.rules
         # Research years are whole July-June years: twelve calendar months each.
-        months = 12 * len(self.request.research_years)
+        months = 12 * research_span(self.request.research_years, step.span).slots
         trips = summary.get("trade_count")
         exposure = summary.get("exposure")
         gross = exposure.get("avg_gross") if isinstance(exposure, Mapping) else None
@@ -818,7 +881,29 @@ class SessionValidations:
             "min_round_trips_per_month": rules.min_round_trips_per_month,
             "mean_gross": round(gross, 3) if isinstance(gross, (int, float)) else None,
             "min_mean_gross": rules.min_mean_gross,
+            "active_excess_at_cost_stress": _rounded(
+                _active_excess_at_cost_stress(step, rules.cost_stress_multiplier)
+            ),
+            "cost_stress_multiplier": rules.cost_stress_multiplier,
             "note": GRADUATION_ACTIVITY_NOTE,
+        }
+
+    def raw_readings(self, step: StepResult) -> dict[str, object]:
+        """What the holder's account did against the benchmark over the
+        node's span that the row's ``stats`` do not already say: the raw
+        excess at the arm's cost stress (``verdict.raw_excess_at_cost_stress``,
+        the reading the freeze gate's raw condition judges) and the zero-skill
+        panel's own return after its costs (``verdict.panel_return``)."""
+
+        multiplier = self.rules.cost_stress_multiplier
+        return {
+            "raw_excess_at_cost_stress": _rounded(
+                raw_excess_at_cost_stress(
+                    step.validation.summary, cost_stress_multiplier=multiplier
+                )
+            ),
+            "panel_return": _rounded(panel_return(_step_analysis(step))),
+            "cost_stress_multiplier": multiplier,
         }
 
     def append_manifest_summary(self, summary: dict[str, object]) -> None:
@@ -1315,10 +1400,26 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "included, carries information_ratio_bar, the active IR a full-span "
         "non-control nominee needs now, beside trials and effective_trials -- on a "
         "row the gate does not measure it is that full-span bar, not the row's "
-        "own; a full-span row adds graduation_activity, "
-        "its research-period round trips per month and mean gross exposure beside "
-        "the graduation's activity thresholds, which gate nothing at a freeze), "
-        "and wall seconds; a failed candidate's row "
+        "own; and graduation_activity, the row's own round trips per month, mean "
+        "gross exposure and active_excess_at_cost_stress (the graduation's cost "
+        "stress: annualised active neutralized excess after cost_stress_multiplier "
+        "x the slippage on the span's turnover) beside the graduation's "
+        "thresholds, which gate nothing at a freeze), raw_readings (the holder's "
+        "money, which active readings are not: raw_excess_at_cost_stress, the "
+        "span's own equity return after every cost minus benchmark_index's price "
+        "return over the same days, less (cost_stress_multiplier - 1) x the "
+        "slippage on its turnover, cumulative -- what the freeze gate's raw "
+        "condition judges on a full-span row when acceptance_rules.freeze_gate "
+        "lists raw_excess_at_cost_stress -- and panel_return, what the zero-skill "
+        "panel itself earned after its costs; the rest of that picture is in "
+        "stats: total_return and annualized_return after every cost, "
+        "benchmark.benchmark_return and benchmark.excess_return over the same "
+        "days, and cost_sensitivity.excess_at_2x_slippage, the raw cumulative "
+        "excess at twice the slippage, which gates nothing and equals "
+        "raw_excess_at_cost_stress only at a multiplier of 2), same_bytes_as when "
+        "the row repeats the bytes and span of earlier nodes (named: a "
+        "deterministic strategy reads exactly as they did, so it is no new "
+        "evidence), and wall seconds; a failed candidate's row "
         "carries its cause and its exact failure text instead — one failure never "
         "hides the others. Every row, failed ones included, also carries resources: "
         "what the replay cost the strategy container it ran in (peak memory against "
@@ -1560,6 +1661,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
         # Every row of the round deflates against the same trial pool: the
         # whole batch is complete by the time the table is returned.
         for row, step in recorded:
+            row["raw_readings"] = self.backtest.raw_readings(step)
             row["selection_statistics"] = self.backtest.selection_statistics(step)
         if not recorded:
             charged = len(rows) - refunded
@@ -1896,6 +1998,13 @@ class BatchValidateTool(SessionTimeBudgetAware):
         fingerprint: str,
         metadata: Mapping[str, object],
     ) -> dict[str, object]:
+        # Recorded before this one: Validations of the same bytes on the same
+        # span, in any attempt (a resumed attempt's Steps carry their bytes).
+        repeated = [
+            step.step_id
+            for step in self.backtest.steps
+            if step.fingerprint == fingerprint and step.span == metadata["span"]
+        ]
         node_id = self.backtest.record_validation(
             revision,
             evaluation,
@@ -1936,6 +2045,16 @@ class BatchValidateTool(SessionTimeBudgetAware):
             "result_ref": public_result_ref,
             # Relative to the node's directory, which the prompt says how to reach.
             "daily_series": VALIDATION_DAILY_ATTACHMENT,
+            **(
+                {
+                    "same_bytes_as": {
+                        "nodes": self.backtest.named(repeated),
+                        "note": SAME_BYTES_NOTE,
+                    }
+                }
+                if repeated
+                else {}
+            ),
         }
 
     def _record_failure(

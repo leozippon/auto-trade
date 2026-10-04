@@ -759,6 +759,58 @@ def panel_seed(start: str, end: str) -> int:
     return null_control_seed(f"{start}:{end}", "panel")
 
 
+# The date columns an as-of domain is read by, in the order a range is stated.
+_ASOF_DATE_COLUMNS = ("trade_date", "available_at")
+
+
+def asof_date_ranges(asof_dir: Path) -> dict[str, dict[str, object]]:
+    """Per as-of domain: its rows and the first and last value of each date
+    column it carries (``trade_date`` and/or ``available_at``), over every
+    part the view holds now.
+
+    Read from the parts' row-group statistics, falling back to the column
+    itself where a part wrote none; a domain without either column (the
+    universe) reports its rows alone.
+    """
+
+    ranges: dict[str, dict[str, object]] = {}
+    if not asof_dir.is_dir():
+        return ranges
+    for domain in sorted(item for item in asof_dir.iterdir() if item.is_dir()):
+        rows = 0
+        bounds: dict[str, list[str]] = {}
+        for part in sorted(domain.glob("*.parquet")):
+            parquet = pq.ParquetFile(part)
+            metadata = parquet.metadata
+            rows += metadata.num_rows
+            names = parquet.schema_arrow.names
+            for column in (name for name in _ASOF_DATE_COLUMNS if name in names):
+                index = names.index(column)
+                values: list[str] = []
+                for group in range(metadata.num_row_groups):
+                    if metadata.row_group(group).num_rows == 0:
+                        continue
+                    statistics = metadata.row_group(group).column(index).statistics
+                    if statistics is None or not statistics.has_min_max:
+                        values = [
+                            str(value)
+                            for value in pq.read_table(part, columns=[column])
+                            .column(0)
+                            .drop_null()
+                            .to_pylist()
+                        ]
+                        break
+                    values.extend((str(statistics.min), str(statistics.max)))
+                if values:
+                    seen = bounds.setdefault(column, [])
+                    seen.extend((min(values), max(values)))
+        ranges[domain.name] = {
+            "rows": rows,
+            **{column: [min(seen), max(seen)] for column, seen in bounds.items()},
+        }
+    return ranges
+
+
 def _trade_date_keys(frame: pd.DataFrame) -> pd.Series:
     """``YYYYMMDD`` of every row's ``trade_date``, parsed once per distinct value."""
 
@@ -1001,6 +1053,13 @@ class PITDailyEvaluationBackend:
                 )
                 if asof_dir.is_dir()
                 else [],
+                # A smoke run also says how far back each domain reaches by
+                # its last day, which a session otherwise learns by trial.
+                **(
+                    {"asof_date_ranges": asof_date_ranges(asof_dir)}
+                    if max_days is not None or start_day is not None
+                    else {}
+                ),
             }
             # The zero-skill panel the verdict grades this replay against, drawn
             # from its completed executions once it is over: every draw runs

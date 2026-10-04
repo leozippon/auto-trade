@@ -58,6 +58,7 @@ from autotrade.pipelines.ledger import (
 from autotrade.pipelines.pit_views_seed import FORWARD_PHASE, RESEARCH_PHASE
 from autotrade.pipelines.session_resume import STEP_SIDECAR_DIR
 from autotrade.pipelines.skills import latest_skills_snapshot
+from autotrade.pipelines.verdict import panel_return, raw_excess_at_cost_stress
 from autotrade.pipelines.worker import _ALLOWED_PARAMS
 
 from .public_identity import PublicIdentity
@@ -91,8 +92,9 @@ STAGES = ("research", "forward", "verdict")
 # How an arm ended, in the order the homepage lists them. The console says an
 # ending in this one vocabulary wherever it says it at all, so the ledger's own
 # words (``graduated``/``discarded``/``no_deliverable``, the session outcomes)
-# never have to be read twice into the same three blurred endings.
-ENDING_STATES = ("graduated", "rejected", "no_edge", "budget_exhausted", "broken")
+# never have to be read twice into the same three blurred endings. ``voided``
+# is a graduation an operator withdrew afterwards (``ledger.verdict_void``).
+ENDING_STATES = ("graduated", "rejected", "voided", "no_edge", "budget_exhausted", "broken")
 _ENDING_ORDER = {state: index for index, state in enumerate(ENDING_STATES)}
 # Which graduation criterion each failed verdict token is, as
 # docs/pipeline-design.md §3.2 numbers them: a rejected arm's reason names the
@@ -319,6 +321,9 @@ def arm_ending(
     verdict = experiment_verdict(records)
     if verdict is None:
         return None
+    if verdict["status"] == "voided":
+        void = _mapping(verdict.get("void"))
+        return {"state": "voided", "reason": identity.public_text(str(void.get("reason") or ""))}
     if verdict["status"] == "graduated":
         slices = _mapping(_mapping(forward_record(records)).get("slices"))
         forward = _mapping(slices.get("forward"))
@@ -659,9 +664,17 @@ def resolve_experiment_dir(root: Path, experiment_id: str) -> Path:
     return path
 
 
-def _step_view(row: Mapping[str, object]) -> dict[str, object]:
-    """One recorded Validation: its span, headline replay metrics and the
-    neutralised figures the freeze gate counts."""
+def _cost_stress_multiplier(directory: Path) -> float:
+    """The arm's cost-stress multiplier as its worker resolves it."""
+
+    return acceptance_for(read_json(directory / HITL_DIR_NAME / PARAMS_NAME)).cost_stress_multiplier
+
+
+def _step_view(row: Mapping[str, object], multiplier: float) -> dict[str, object]:
+    """One recorded Validation: its span, headline replay metrics, the raw
+    excess over the arm's benchmark plain and at the arm's cost stress
+    (``multiplier``; the freeze gate's raw condition), and the neutralised
+    figures the freeze gate counts."""
 
     summary = _mapping(row.get("summary"))
     neutral = _mapping(row.get("neutralized"))
@@ -669,6 +682,10 @@ def _step_view(row: Mapping[str, object]) -> dict[str, object]:
         "step_id": row.get("step_id"),
         "span": row.get("span"),
         "total_return": _number(summary.get("total_return")),
+        "excess_return": _number(_mapping(summary.get("benchmark")).get("excess_return")),
+        "raw_excess_at_cost_stress": raw_excess_at_cost_stress(
+            summary, cost_stress_multiplier=multiplier
+        ),
         "sharpe": _number(summary.get("sharpe")),
         "max_drawdown": _number(summary.get("max_drawdown")),
         "neutralized_excess": _number(neutral.get("neutralized_excess")),
@@ -710,8 +727,18 @@ def _best_candidate(
     except (OSError, ValueError):
         gate = {}
     dsr = _mapping(gate.get("deflated_sharpe"))
+    try:
+        sidecar = json.loads(
+            (Path(str(best["validation_result_ref"])).parent / STYLE_ARTIFACT_NAME).read_text(
+                encoding="utf-8"
+            )
+        )
+    except (OSError, ValueError):
+        sidecar = {}
     return {
-        **_step_view(best),
+        **_step_view(best, _cost_stress_multiplier(directory)),
+        # What the zero-skill panel itself earned over the same span.
+        "panel_return": panel_return(sidecar),
         "result": _result_name(best.get("validation_result_ref")),
         "deflated_sharpe_probability": _number(dsr.get("deflated_sharpe_probability")),
         "trials": dsr.get("trials"),
@@ -1023,6 +1050,7 @@ def _research_session_view(
     steps = [row for row in record.get("steps") or () if isinstance(row, Mapping)]
     gate = _mapping(record.get("freeze_gate"))
     run_id = str(record.get("run_id") or "")
+    multiplier = _cost_stress_multiplier(directory)
     return {
         "outcome": record.get("outcome"),
         "recorded_at": record.get("recorded_at"),
@@ -1048,6 +1076,9 @@ def _research_session_view(
                 "information_ratio": _number(gate.get("information_ratio")),
                 "positive_years": _number(gate.get("positive_years")),
                 "active_max_drawdown": _number(gate.get("active_max_drawdown")),
+                # Judged only where the arm's rules hold the raw condition;
+                # its thresholds then carry the multiplier.
+                "raw_excess_at_cost_stress": _number(gate.get("raw_excess_at_cost_stress")),
                 "mandate": {
                     key: _number(value)
                     for key, value in _mapping(gate.get("mandate")).items()
@@ -1068,7 +1099,7 @@ def _research_session_view(
         "arm_end": identity.public_record(record["arm_end"])  # type: ignore[arg-type]
         if isinstance(record.get("arm_end"), Mapping)
         else None,
-        "validations": [_step_view(row) for row in steps],
+        "validations": [_step_view(row, multiplier) for row in steps],
         "best": _recorded_best(directory, earlier, record),
         "attempts": record.get("attempts"),
         "budget_used": _mapping(record.get("budget_used")) or None,
@@ -1327,7 +1358,7 @@ def result_orders_csv(root: Path, experiment_id: str, name: str) -> tuple[str, s
     payload = result_orders(root, experiment_id, name, max_rows=None)
     fields = (
         "symbol", "action", "quantity", "execute_at", "matched_at", "status",
-        "price", "commission", "stamp_duty", "realized_pnl", "reason",
+        "price", "commission", "stamp_duty", "dividend_tax", "realized_pnl", "reason",
     )
     stream = StringIO()
     writer = csv.DictWriter(stream, fieldnames=fields, extrasaction="ignore")

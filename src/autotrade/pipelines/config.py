@@ -178,6 +178,12 @@ class AcceptanceRules:
     min_dsr_probability: float = verdict.FREEZE_MIN_DSR_PROBABILITY
     min_positive_year_share: float = verdict.FREEZE_MIN_POSITIVE_YEAR_SHARE
     min_full_span_validations: int = verdict.FREEZE_MIN_FULL_SPAN_VALIDATIONS
+    # The holder's money at the freeze: over the research period the nominee's
+    # own equity return, after ``cost_stress_multiplier`` times the slippage,
+    # must beat the benchmark's (``verdict.raw_excess_at_cost_stress`` above
+    # zero). Off here, so an arm recorded without the key is judged as it was;
+    # the creation defaults (``hitl_state.WEB_CREATE_DEFAULTS``) stamp it on.
+    require_raw_excess_at_cost_stress: bool = False
     # Forward and Held-out bars. Same compatibility default as above.
     forward_confidence: float = verdict.FORWARD_CONFIDENCE
     recency_months: int = verdict.RECENCY_MONTHS
@@ -216,6 +222,8 @@ class AcceptanceRules:
         )
         if self.min_full_span_validations < 1:
             raise ValueError("min_full_span_validations must be an integer >= 1")
+        if not isinstance(self.require_raw_excess_at_cost_stress, bool):
+            raise ValueError("require_raw_excess_at_cost_stress must be a boolean")
         object.__setattr__(
             self,
             "forward_confidence",
@@ -260,6 +268,7 @@ class AcceptanceRules:
             "min_dsr_probability": self.min_dsr_probability,
             "min_positive_year_share": self.min_positive_year_share,
             "min_full_span_validations": self.min_full_span_validations,
+            "require_raw_excess_at_cost_stress": self.require_raw_excess_at_cost_stress,
             "forward_confidence": self.forward_confidence,
             "recency_months": self.recency_months,
             "min_mean_gross": self.min_mean_gross,
@@ -375,6 +384,22 @@ class AcceptanceRules:
                 "max_drawdown": (
                     f"<= {self.max_drawdown}: equity drawdown over the research period"
                 ),
+                # Stated only where the arm's rules hold it: an arm recorded
+                # without the condition is not judged on it.
+                **(
+                    {
+                        "raw_excess_at_cost_stress": (
+                            "> 0: the holder's money over the research period, not the "
+                            "active series -- the node's own equity return after every "
+                            "cost minus benchmark_index's price return, after charging "
+                            f"{self.cost_stress_multiplier} x the slippage on its "
+                            "turnover (raw_readings.raw_excess_at_cost_stress on its "
+                            "batch_validate row)"
+                        )
+                    }
+                    if self.require_raw_excess_at_cost_stress
+                    else {}
+                ),
                 "tracking_mandate": mandate,
                 "full_span_validations": (
                     f">= {self.min_full_span_validations} in the arm, the "
@@ -439,6 +464,8 @@ class AcceptanceRules:
             "min_dsr_probability": self.min_dsr_probability,
             "min_positive_year_share": self.min_positive_year_share,
             "min_full_span_validations": self.min_full_span_validations,
+            "cost_stress_multiplier": self.cost_stress_multiplier,
+            "require_raw_excess_at_cost_stress": self.require_raw_excess_at_cost_stress,
         }
 
     def forward_slice_kwargs(self) -> dict[str, object]:

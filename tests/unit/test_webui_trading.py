@@ -496,7 +496,9 @@ class _PnlData:
                         "pre_close": pre_close, "up_limit": round(pre_close * 1.1, 2),
                         "down_limit": round(pre_close * 0.9, 2),
                     })
-        actions = pd.DataFrame([{"ts_code": PNL_B, "ex_date": "20260107", "cash_per_share": 0.5}])
+        actions = pd.DataFrame(
+            [{"ts_code": PNL_B, "ex_date": "20260107", "cash_per_share": 0.5, "bonus_per_share": 0.0}]
+        )
         columns = ["ts_code", "trade_date", "open", "close", "pre_close", "up_limit", "down_limit"]
         self.market = DailyMarketData(pd.DataFrame(rows, columns=columns), actions)
         self.sessions = PNL_SESSIONS
@@ -527,7 +529,7 @@ class _Plan:
         pass
 
 
-def _pnl_book(repo_root: Path) -> Path:
+def _pnl_book(repo_root: Path, *, dividend_tax: bool = False) -> Path:
     """The book the real engine writes for ``PNL_PLAN``, settled through 20260107."""
     root = paper_root(repo_root) / BOOK
     write_book_record(root)
@@ -539,7 +541,7 @@ def _pnl_book(repo_root: Path) -> Path:
         strategy_revision="revision_1",
         state_root=root,
         data_factory=lambda _start, day: _PnlData(max(session for session in PNL_SESSIONS if session < day)),
-        profile=BrokerProfile(initial_cash=100_000.0),
+        profile=BrokerProfile(initial_cash=100_000.0, dividend_tax=dividend_tax),
         executor_factory=lambda *_mounts: _Plan(),
     )
     for day in PNL_SESSIONS[1:]:
@@ -601,9 +603,32 @@ def test_each_names_pnl_sums_to_the_account_total_of_a_real_book(tmp_path: Path)
     # Per-name costs add up to the totals the performance panel prints.
     assert sum(row["commission"] for row in rows) == pytest.approx(statistics["fees"])
     assert sum(row["stamp_duty"] for row in rows) == pytest.approx(statistics["stamp_duty"])
+    # An untaxed book's fills carry a zero dividend tax.
+    assert b["dividend_tax"] == statistics["dividend_tax"] == 0.0
 
     response = TestClient(create_app(tmp_path)).get(f"/api/trading/paper/books/{BOOK}/pnl")
     assert response.status_code == 200 and response.json() == payload
+
+
+def test_a_taxed_book_shows_the_dividend_tax_in_its_costs_and_its_names(tmp_path: Path):
+    """B is bought two days before its ex-date and sold on it: a taxed book
+    pays 20 % of its 250 CNY dividend at the sale. The console lists the tax
+    beside the fees -- in the fill's cost, the name's row and the totals --
+    and the names still sum to the account."""
+    root = _pnl_book(tmp_path, dividend_tax=True)
+    payload = trading.pnl_payload(tmp_path, BOOK)
+    statistics = trading.performance_payload(tmp_path, BOOK)["statistics"]
+    b = next(row for row in payload["instruments"] if row["symbol"] == PNL_B)
+    assert b["dividend_tax"] == pytest.approx(50.0)
+    assert statistics["dividend_tax"] == pytest.approx(50.0)
+    assert payload["residual"] == 0.0
+    [sale] = [
+        row for row in read_jsonl(root / "executions_20260107.jsonl")[0] if row["symbol"] == PNL_B
+    ]
+    [day] = [day for day in trading.history_payload(tmp_path, BOOK)["days"] if day["trade_date"] == "20260107"]
+    [fill] = [row for row in day["fills"] if row["symbol"] == PNL_B]
+    assert fill["dividend_tax"] == pytest.approx(50.0)
+    assert fill["cost"] == pytest.approx(sale["commission"] + sale["stamp_duty"] + 50.0)
 
 
 def test_a_book_is_switched_to_real_fills_recorded_and_compared_through_the_console(tmp_path: Path, monkeypatch):

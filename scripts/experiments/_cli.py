@@ -332,6 +332,12 @@ def add_acceptance_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Forward verdict: trailing calendar months whose active excess must be non-negative.",
     )
+    parser.add_argument(
+        "--require-raw-excess-at-cost-stress",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Freeze gate: the nominee's own equity must beat the benchmark after the cost-stress slippage.",
+    )
 
 
 # ---------------------------------------------------------------------------

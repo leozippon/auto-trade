@@ -113,6 +113,11 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "min_dsr_probability": AcceptanceRules().min_dsr_probability,
     "min_positive_year_share": AcceptanceRules().min_positive_year_share,
     "min_full_span_validations": AcceptanceRules().min_full_span_validations,
+    # Deliberately not the rules' own default, like ``dividend_tax`` below: an
+    # arm whose params.json has no key was judged without the condition and
+    # stays so; every arm created from here on is held to it unless its
+    # request says otherwise.
+    "require_raw_excess_at_cost_stress": True,
     "forward_confidence": AcceptanceRules().forward_confidence,
     "recency_months": AcceptanceRules().recency_months,
     "min_mean_gross": AcceptanceRules().min_mean_gross,

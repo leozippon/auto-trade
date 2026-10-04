@@ -21,7 +21,7 @@ from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import write_json_atomic
 from autotrade.environment.step_tree import StepTree
 from autotrade.pipelines.config import DEFAULT_RESEARCH_GEOMETRY
-from autotrade.pipelines.ledger import ExperimentLedger
+from autotrade.pipelines.ledger import ExperimentLedger, verdict_void
 from autotrade.webui import registry
 from autotrade.webui.registry import (
     ENDING_STATES,
@@ -222,12 +222,23 @@ def test_every_way_an_arm_can_end_reads_as_one_ending_with_a_reason(tmp_path: Pa
     for experiment_id, stage in (
         ("graduated", "graduated"),
         ("rejected", "discarded"),
+        ("voided", "graduated"),
         ("no_edge", "no_deliverable"),
         ("budget_exhausted", "deadline"),
         ("broken", "broken"),
         ("running", "research"),
     ):
         build_arm(tmp_path, experiment_id, stage)
+    # A graduation an operator withdrew: an appended record, the forward
+    # record untouched.
+    ExperimentLedger(tmp_path / "voided/ledgers/experiment_ledger.jsonl").append(
+        verdict_void(
+            "voided",
+            voided_by="operator",
+            reason="复跑计入股息税后研究期主动 IR 为 −1.80。",
+            evidence_ref="logs/notes/live_readiness_20261004/dividend_tax_rerun",
+        )
+    )
     rows = {row["experiment_id"]: row for row in list_experiments(tmp_path)}
     assert rows["running"]["ending"] is None
     endings = {name: rows[name]["ending"] for name in ENDING_STATES}
@@ -243,6 +254,15 @@ def test_every_way_an_arm_can_end_reads_as_one_ending_with_a_reason(tmp_path: Pa
         f" · Held-out 超额 {forward['heldout']['neutralized_excess'] * 100:+.2f}%"
     )
     assert endings["rejected"]["reason"].split(" · ")[0] == "F2"
+    # A voided graduate says why, keeps its replay's slices, and is offered
+    # neither as the homepage's best nor a Paper book.
+    assert endings["voided"]["reason"] == "复跑计入股息税后研究期主动 IR 为 −1.80。"
+    assert rows["voided"]["verdict"]["status"] == "voided"
+    assert rows["voided"]["verdict"]["void"]["voided_by"] == "operator"
+    assert rows["voided"]["forward"]["slices"]["forward"]["lower_bound"] is not None
+    assert rows["voided"]["paper_candidate"] is None
+    assert rows["graduated"]["paper_candidate"] is not None
+    assert best_experiment(list(rows.values())) == {"experiment_id": "graduated"}
     assert endings["no_edge"]["reason"] == "没有候选值得冻结"
     assert endings["budget_exhausted"]["reason"] == "模型调用次数用尽"
     assert endings["broken"]["reason"] == "RuntimeError: sandbox image is gone"
@@ -868,3 +888,25 @@ def test_the_step_tree_names_the_session_and_the_frozen_node(tmp_path: Path) -> 
     assert node["session_key"] == "research"
     assert node["frozen"] is True
     assert node["session_ref"].startswith("session_ref_")
+
+
+def test_arms_with_and_without_the_newer_rule_and_cost_keys_list_alike(tmp_path: Path) -> None:
+    """A console started before ``dividend_tax`` existed lists the arms that
+    carry it as unreadable until it restarts. A current console reads an arm
+    recorded without the newer keys and one created with them alike, and
+    shows each Validation's raw excess over the benchmark beside its active
+    figures."""
+
+    build_arm(tmp_path, "old", "graduated")
+    new = build_arm(tmp_path, "new", "graduated")
+    path = new / "hitl/params.json"
+    params = json.loads(path.read_text(encoding="utf-8"))
+    params.update(dividend_tax=True, require_raw_excess_at_cost_stress=True)
+    write_json_atomic(path, params)
+    rows = {row["experiment_id"]: row for row in list_experiments(tmp_path)}
+    assert rows["old"]["ending"]["state"] == rows["new"]["ending"]["state"] == "graduated"
+    detail = experiment_detail(tmp_path, "new")
+    assert detail["params"]["dividend_tax"] is True
+    record = next(entry for entry in detail["sessions"] if entry["kind"] == "research")["record"]
+    assert {"excess_return", "raw_excess_at_cost_stress"} <= set(record["validations"][0])
+    assert "panel_return" in record["best"]

@@ -14,6 +14,11 @@ One JSONL file per experiment. The pipeline writes three record types:
   marker (:class:`RunMarkers`) that the next worker start turns into the
   missing ``attempt_failed``.
 
+An operator may append one more, by hand and never by the pipeline:
+``verdict_void`` withdraws a recorded graduation that later evidence showed
+was not one (who, when, why, and where the evidence is). The forward record
+stays as produced; :func:`experiment_verdict` reads the arm as ``voided``.
+
 An arm created with ``lineage_arms`` also gets ``lineage``: the earlier arms
 whose research-period trials join its freeze-gate family, with a reference to
 the series the console extracted from them at creation
@@ -62,7 +67,15 @@ FORWARD_SESSION_KEY = "forward"
 LINEAGE_RECORD_TYPE = "lineage"
 # Beside the ledger: the lineage series the console extracts at creation.
 LINEAGE_SERIES_NAME = "lineage_series.json"
-PIPELINE_RECORD_TYPES = ("research_session", "forward", "attempt_failed", LINEAGE_RECORD_TYPE)
+# An operator's withdrawal of a recorded graduation (:func:`verdict_void_record`).
+VERDICT_VOID_RECORD_TYPE = "verdict_void"
+PIPELINE_RECORD_TYPES = (
+    "research_session",
+    "forward",
+    "attempt_failed",
+    LINEAGE_RECORD_TYPE,
+    VERDICT_VOID_RECORD_TYPE,
+)
 FOLD_ERA_RECORD_TYPES = (
     "fold",
     "meta_learning",
@@ -71,6 +84,8 @@ FOLD_ERA_RECORD_TYPES = (
     "terminated",
 )
 LINK_KEYS = ("experiment_id", "epoch_id", "fold_id", "run_id")
+# What a verdict void states besides its link keys and its own stamp.
+VERDICT_VOID_FIELDS = ("voided_by", "reason", "evidence_ref", "recorded_at")
 # The ``status`` of a forward record whose replay stopped at the strategy's own
 # exception: the one replay failure that measures the strategy. Every other
 # failure fails the attempt and never reaches a business record.
@@ -189,6 +204,17 @@ def lineage_record(records: Sequence[Mapping[str, object]]) -> dict[str, object]
     return rows[0] if rows else None
 
 
+def verdict_void_record(records: Sequence[Mapping[str, object]]) -> dict[str, object] | None:
+    """The operator's void of the arm's graduation, or None. At most one."""
+
+    rows = [
+        dict(record) for record in records if record.get("record_type") == VERDICT_VOID_RECORD_TYPE
+    ]
+    if len(rows) > 1:
+        raise ValueError("the ledger holds more than one verdict void for one arm")
+    return rows[0] if rows else None
+
+
 def research_over(records: Sequence[Mapping[str, object]]) -> bool:
     """Whether research has ended: an artifact froze, or a session ended the arm."""
 
@@ -201,21 +227,33 @@ def experiment_verdict(
     records: Sequence[Mapping[str, object]],
 ) -> dict[str, object] | None:
     """The arm's verdict: ``graduated``/``discarded`` from its forward record,
-    ``no_deliverable`` when research ended without a freeze, else None.
+    ``voided`` when an operator withdrew that graduation, ``no_deliverable``
+    when research ended without a freeze, else None.
 
     The single source for the terminal status, the console, the graduated
-    memory tier and Paper.
+    memory tier and Paper: a voided arm is terminal, is no graduate to any of
+    them, and keeps its forward record's own reasons beside the void.
     """
 
     forward = forward_record(records)
+    void = verdict_void_record(records)
     if forward is not None:
         verdict = forward.get("verdict")
         if not isinstance(verdict, Mapping):
             raise ValueError("forward record carries no verdict block")
+        status = str(verdict.get("status") or "")
+        reasons = [str(reason) for reason in verdict.get("reasons") or ()]
+        if void is None:
+            return {"status": status, "reasons": reasons}
+        if status != "graduated":
+            raise ValueError(f"a verdict void stands on a {status!r} verdict, not a graduation")
         return {
-            "status": str(verdict.get("status") or ""),
-            "reasons": [str(reason) for reason in verdict.get("reasons") or ()],
+            "status": "voided",
+            "reasons": reasons,
+            "void": {key: void.get(key) for key in VERDICT_VOID_FIELDS},
         }
+    if void is not None:
+        raise ValueError("a verdict void stands on an arm without a forward verdict")
     if frozen_record(records) is not None:
         return None
     ended = next(
@@ -273,6 +311,8 @@ class ExperimentLedger:
             raise ValueError("the arm already has its forward verdict")
         if record_type == LINEAGE_RECORD_TYPE and lineage_record(self.read()) is not None:
             raise ValueError("the arm already records its lineage")
+        if record_type == VERDICT_VOID_RECORD_TYPE:
+            require_voidable(self.read(), record)
         append_versioned_jsonl(
             self.path, record, schema_version=LEDGER_RECORD_SCHEMA_VERSION
         )
@@ -317,6 +357,45 @@ class ExperimentLedger:
         if record_type is None:
             return records
         return [record for record in records if record.get("record_type") == record_type]
+
+
+def verdict_void(
+    experiment_id: str, *, voided_by: str, reason: str, evidence_ref: str
+) -> dict[str, object]:
+    """The record that withdraws one arm's recorded graduation.
+
+    Appended once, by an operator (``scripts/experiments/void_graduation.py``),
+    never by a run: its ``run_id`` names the record type, as a lineage record
+    names its own. ``recorded_at`` is the append's stamp.
+    """
+
+    return {
+        "record_type": VERDICT_VOID_RECORD_TYPE,
+        "experiment_id": experiment_id,
+        "epoch_id": FORWARD_STAGE,
+        "fold_id": FORWARD_SESSION_KEY,
+        "run_id": VERDICT_VOID_RECORD_TYPE,
+        "voided_by": voided_by,
+        "reason": reason,
+        "evidence_ref": evidence_ref,
+    }
+
+
+def require_voidable(
+    records: Sequence[Mapping[str, object]], void: Mapping[str, object]
+) -> None:
+    """Refuse a void that does not withdraw exactly one recorded graduation,
+    or that does not say who, why and where the evidence is."""
+
+    missing = [key for key in ("voided_by", "reason", "evidence_ref") if not str(void.get(key) or "").strip()]
+    if missing:
+        raise ValueError(f"a verdict void must state {missing}")
+    if verdict_void_record(records) is not None:
+        raise ValueError("the arm's graduation is already voided")
+    verdict = experiment_verdict(records)
+    if verdict is None or verdict["status"] != "graduated":
+        status = None if verdict is None else verdict["status"]
+        raise ValueError(f"only a recorded graduation can be voided; the arm's verdict is {status!r}")
 
 
 class RunMarkers:

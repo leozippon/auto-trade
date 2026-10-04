@@ -497,6 +497,70 @@ def information_ratio_bar(effective: float, days: int, probability: float) -> fl
     )
 
 
+def excess_at_cost_stress(
+    neutralized_excess: float,
+    days: int,
+    *,
+    cost_stress_multiplier: float,
+    slippage_bps: float,
+    turnover: float,
+) -> float:
+    """The graduation's cost-stress reading (F5) of one span: its annualised
+    neutralised excess (of the graded series) less ``(cost_stress_multiplier −
+    1) × slippage_bps`` more per side on ``turnover``, the span's traded
+    notional over its opening equity, annualised over its ``days`` measured
+    days. The forward slice judges it; a research row reports it."""
+
+    years = days / TRADING_DAYS_PER_YEAR
+    return (
+        neutralized_excess
+        - (cost_stress_multiplier - 1.0) * slippage_bps * turnover * 1e-4 / years
+    )
+
+
+def raw_excess_at_cost_stress(
+    summary: Mapping[str, object], *, cost_stress_multiplier: float
+) -> float | None:
+    """The holder's money against the benchmark at the cost stress, over one
+    replay's span: its own equity return after every cost minus the arm's
+    ``benchmark_index`` price return over the same days
+    (``benchmark.excess_return``), less ``(cost_stress_multiplier − 1)`` times
+    the modelled slippage on its turnover (``cost_sensitivity``: the profile's
+    slippage and what one bp per side costs as a fraction of the opening
+    equity). Cumulative and not compounded, like
+    ``cost_sensitivity.excess_at_2x_slippage``, which it equals at a
+    multiplier of 2. ``None`` when the summary carries no benchmark excess or
+    no cost block."""
+
+    benchmark = summary.get("benchmark")
+    costs = summary.get("cost_sensitivity")
+    if not isinstance(benchmark, Mapping) or not isinstance(costs, Mapping):
+        return None
+    excess = benchmark.get("excess_return")
+    slippage = costs.get("slippage_bps")
+    per_bp = costs.get("cost_per_bp_per_side")
+    if not all(
+        isinstance(value, (int, float)) and not isinstance(value, bool)
+        for value in (excess, slippage, per_bp)
+    ):
+        return None
+    return float(excess) - (cost_stress_multiplier - 1.0) * float(slippage) * float(per_bp)  # type: ignore[arg-type]
+
+
+def panel_return(analysis: Mapping[str, object]) -> float | None:
+    """What the zero-skill panel composite itself earned over the sidecar's
+    span, after its own costs: the return of the random-name copies of the
+    book's trade skeleton. ``None`` on a sidecar without a panel."""
+
+    pairs = list(_series_pairs(analysis.get("panel_daily")))
+    if not pairs:
+        return None
+    equity = 1.0
+    for _date_key, value in pairs:
+        equity *= 1.0 + value
+    return equity - 1.0
+
+
 def _count(value: object, name: str, minimum: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
         raise ValueError(f"{name} must be an integer >= {minimum}, got {value!r}")
@@ -549,6 +613,9 @@ def freeze_gate(
     min_dsr_probability: float = FREEZE_MIN_DSR_PROBABILITY,
     min_positive_year_share: float = FREEZE_MIN_POSITIVE_YEAR_SHARE,
     min_full_span_validations: int = FREEZE_MIN_FULL_SPAN_VALIDATIONS,
+    summary: Mapping[str, object] | None = None,
+    cost_stress_multiplier: float = 2.0,
+    require_raw_excess_at_cost_stress: bool = False,
 ) -> dict[str, object]:
     """Freeze gate of one nominee (PL1 §4.1).
 
@@ -575,7 +642,12 @@ def freeze_gate(
     ``min_dsr_probability``, at least ``min_full_span_validations`` full-span
     validations, a positive neutralised excess in ``min_positive_year_share``
     of the research years, and a drawdown within ``active_max_drawdown``; on
-    the strategy's own series, for the tracking mandate when one is set. The
+    the strategy's own series, for the tracking mandate when one is set. With
+    ``require_raw_excess_at_cost_stress`` it also asks the holder's money to
+    beat the benchmark: :func:`raw_excess_at_cost_stress` of the nominee's
+    ``summary`` at ``cost_stress_multiplier`` above zero; only then does the
+    record carry that reading and the multiplier, so the gate of an arm whose
+    rules lack the condition reads exactly as before. The
     equity drawdown is the caller's hard nomination rule
     (``config.AcceptanceRules.evaluate``). The statistical bars default to the
     module constants so a caller that omits them (the console reading an arm's
@@ -637,6 +709,16 @@ def freeze_gate(
         reasons.append("freeze_too_few_positive_years")
     if active_max_drawdown is not None and not active_drawdown <= active_max_drawdown:
         reasons.append("freeze_active_drawdown_exceeded")
+    raw: dict[str, object] = {}
+    if require_raw_excess_at_cost_stress:
+        if summary is None:
+            raise ValueError("the raw cost-stress condition needs the nominee's summary")
+        stressed = raw_excess_at_cost_stress(
+            summary, cost_stress_multiplier=cost_stress_multiplier
+        )
+        if stressed is None or not stressed > 0:
+            reasons.append("freeze_raw_excess_not_positive_at_cost_stress")
+        raw = {"raw_excess_at_cost_stress": stressed}
     reasons.extend(f"freeze_{name}" for name in broken)
     return {
         "passed": not reasons,
@@ -649,6 +731,7 @@ def freeze_gate(
         "mandate": mandate,
         "full_span_validations": full_span_validations,
         "deflated_sharpe": dsr,
+        **raw,
         "thresholds": {
             "min_information_ratio": min_active_ir,
             "min_deflated_sharpe_probability": min_dsr_probability,
@@ -660,6 +743,7 @@ def freeze_gate(
             "beta_min": beta_min,
             "beta_max": beta_max,
             "panel_draws": PANEL_DRAWS,
+            **({"cost_stress_multiplier": cost_stress_multiplier} if raw else {}),
         },
     }
 
@@ -799,10 +883,12 @@ def forward_slice(
         beta_min=beta_min,
         beta_max=beta_max,
     )
-    years = len(rows) / TRADING_DAYS_PER_YEAR
-    stressed_excess = (
-        statistics["neutralized_excess"]
-        - (cost_stress_multiplier - 1.0) * slippage_bps * turnover * 1e-4 / years
+    stressed_excess = excess_at_cost_stress(
+        statistics["neutralized_excess"],
+        len(rows),
+        cost_stress_multiplier=cost_stress_multiplier,
+        slippage_bps=slippage_bps,
+        turnover=turnover,
     )
     months = _month_index(end) - _month_index(start) + 1
     min_round_trips = min_round_trips_per_month * months

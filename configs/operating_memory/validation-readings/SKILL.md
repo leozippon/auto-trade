@@ -18,4 +18,12 @@
 
 ## 成本压力
 
-`cost_sensitivity.cost_per_bp_per_side` = `stats.turnover` × 1e−4，即每边多 1 bp 滑点吃掉期初资金的比例（整段累计）。毕业条件把滑点乘以 `acceptance_rules` 里的倍数后，要求主动中性化超额仍为正；研究期上可以先估：`benchmark.active_neutralized_excess` − (倍数 − 1) × `cost_sensitivity.slippage_bps` × `cost_per_bp_per_side` ÷ (`benchmark.n_days` ÷ 244)。权益一路增长时这个估计偏保守，缩水时偏乐观。
+行里有三个名字相近的成本压力读数，都由宿主算好，不用手算：
+
+| 读数 | 序列与口径 | 谁用它 |
+|---|---|---|
+| `selection_statistics.graduation_activity.active_excess_at_cost_stress` | 主动序列，年化：滑点乘以本臂倍数后的主动中性化超额，按毕业条件的算法、在本行自己的区间上算 | 毕业条件（前推期）判的就是这个量 |
+| `raw_readings.raw_excess_at_cost_stress` | 账户自身扣费收益减基准指数同期收益，整段累计，再扣（倍数 − 1）倍滑点 | 本臂的冻结门列有 `raw_excess_at_cost_stress` 时，完整研究期提名要它大于 0 |
+| `stats.cost_sensitivity.excess_at_2x_slippage` | 同上的原始超额，但固定两倍滑点 | 什么也不判；倍数是 2 时与上一行相等 |
+
+主动读数赢了面板，账户却可能没赢基准：面板本身扣费后也会亏（`raw_readings.panel_return`），赢一个亏钱的面板不等于账户赚钱。

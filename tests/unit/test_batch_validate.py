@@ -98,7 +98,11 @@ from autotrade.pipelines.session_tools import (
     batch_select_hint,
     session_budget_status,
 )
-from autotrade.pipelines.verdict import ACTIVE_DAILY_COLUMNS, information_ratio_bar
+from autotrade.pipelines.verdict import (
+    ACTIVE_DAILY_COLUMNS,
+    information_ratio_bar,
+    neutralized_statistics,
+)
 
 PARENT_SOURCE ="def generate_orders(context):\n    return []\n"
 # A four-year research period, one slot per July-June year.
@@ -212,6 +216,9 @@ class _Evaluator:
         self.fit_timeouts: list[float] = []
         self.inference_timeouts: list[float] = []
         self.requests: list[object] = []
+        # Merged into every summary: what a test needs the replay to report
+        # beyond the fixture's (a benchmark excess, a cost block).
+        self.summary_extra: dict[str, object] = {}
 
     def evaluate(self, request, max_days=None):
         del max_days
@@ -264,7 +271,7 @@ class _Evaluator:
                         "what kills a worker this way"
                     )
                     raise _replay_failure(f"fit failed ({marker}): {killed}", killed)
-            summary = _summary(0.01 * len(source))
+            summary = {**_summary(0.01 * len(source)), **self.summary_extra}
             if self.resources is not None:
                 summary["resources"] = dict(self.resources)
             target = self.results_root / f"valid_{call_index:03d}" / "result.json"
@@ -326,6 +333,7 @@ class _Session:
         resume: SessionResume | None = None,
         resources: Mapping[str, object] | None = None,
         alpha_scale: float = 0.0005,
+        acceptance_rules: Mapping[str, object] | None = None,
     ) -> None:
         self.root = root
         self.trace_events = trace
@@ -368,7 +376,7 @@ class _Session:
             deadline_grace_seconds=60.0,
             finalize_before_deadline_seconds=30,
             record_failed_attempts=record_failed_attempts,
-            acceptance_rules={"max_drawdown": 0.25},
+            acceptance_rules=dict(acceptance_rules or {"max_drawdown": 0.25}),
             budget_used=budget_used or BudgetUsed(),
             steps_before=steps_before,
             resume=resume,
@@ -1627,9 +1635,122 @@ class BatchValidateRunTest(unittest.TestCase):
                 ),
             )
             self.assertEqual(session.backtest.graduation_activity(exposed)["mean_gross"], 0.906)
-            # A sub-span row is no freeze candidate and carries no reading.
+            # A sub-span row reads the same conditions over its own months.
             year = session.validate_one("year", _strategy("2"), span="Y1")
-            self.assertNotIn("graduation_activity", year["selection_statistics"])
+            probe = year["selection_statistics"]["graduation_activity"]
+            self.assertEqual(probe["round_trips_per_month"], round(3 / 12, 3))
+
+    def test_every_row_reads_the_holders_money_and_the_graduations_cost_stress(
+        self,
+    ) -> None:
+        """Two sessions quoted 0.148 and 1.608 as one node's "cost stress": the
+        graduation's active reading and the raw cumulative excess. Every row
+        now carries both, computed by the host under names that say which:
+        the raw excess over the benchmark at the arm's multiplier beside the
+        zero-skill panel's own return, and the active one the graduation
+        judges."""
+        with TemporaryDirectory() as tmp:
+            session = _Session(
+                Path(tmp), acceptance_rules={"max_drawdown": 0.25, "cost_stress_multiplier": 3.0}
+            )
+            # The fixture's replay turns its opening capital over 1.2 times.
+            session.evaluator.summary_extra = {
+                "benchmark": {"excess_return": 0.05},
+                "cost_sensitivity": {"slippage_bps": 5.0, "cost_per_bp_per_side": 1.2e-4},
+            }
+            row = session.validate_one("a", _strategy("1"))
+            raw = row["raw_readings"]
+            # Rows report six decimals.
+            self.assertAlmostEqual(
+                raw["raw_excess_at_cost_stress"], 0.05 - 2.0 * 5.0 * 1.2e-4, places=6
+            )
+            self.assertEqual(raw["cost_stress_multiplier"], 3.0)
+            sidecar = json.loads(
+                (
+                    Path(session.backtest.steps[0].validation.result_ref).parent
+                    / "style_analysis.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertAlmostEqual(
+                raw["panel_return"],
+                math.prod(1.0 + value for _day, value in sidecar["panel_daily"]) - 1.0,
+                places=6,
+            )
+            statistics = neutralized_statistics(sidecar)
+            years = statistics["days"] / TRADING_DAYS_PER_YEAR
+            activity = row["selection_statistics"]["graduation_activity"]
+            self.assertAlmostEqual(
+                activity["active_excess_at_cost_stress"],
+                statistics["neutralized_excess"] - 2.0 * 5.0 * 1.2 * 1e-4 / years,
+                places=6,
+            )
+            self.assertEqual(activity["cost_stress_multiplier"], 3.0)
+            # These rules do not hold the raw condition, so no reason speaks of it.
+            self.assertNotIn(
+                "freeze_raw_excess_not_positive_at_cost_stress",
+                row["selection_statistics"]["freeze_gate_reasons"],
+            )
+            # A probe row reads both over its own span.
+            probe = session.validate_one("b", _strategy("2"), span="Y1")
+            self.assertIn("raw_excess_at_cost_stress", probe["raw_readings"])
+            self.assertIn(
+                "active_excess_at_cost_stress",
+                probe["selection_statistics"]["graduation_activity"],
+            )
+
+    def test_an_arm_held_to_the_raw_condition_names_a_row_below_the_benchmark(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as tmp:
+            session = _Session(
+                Path(tmp),
+                acceptance_rules={
+                    "max_drawdown": 0.25,
+                    "require_raw_excess_at_cost_stress": True,
+                },
+            )
+            costs = {"slippage_bps": 5.0, "cost_per_bp_per_side": 1.2e-4}
+            session.evaluator.summary_extra = {
+                "benchmark": {"excess_return": 0.0005},
+                "cost_sensitivity": costs,
+            }
+            below = session.validate_one("below", _strategy("1"))
+            session.evaluator.summary_extra = {
+                "benchmark": {"excess_return": 0.30},
+                "cost_sensitivity": costs,
+            }
+            above = session.validate_one("above", _strategy("22"))
+            token = "freeze_raw_excess_not_positive_at_cost_stress"
+            self.assertIn(token, below["selection_statistics"]["freeze_gate_reasons"])
+            self.assertNotIn(token, above["selection_statistics"]["freeze_gate_reasons"])
+            # The gate still measured the refused row: its DSR is on the row.
+            self.assertIsNotNone(below["selection_statistics"]["deflated_sharpe_probability"])
+            # A nomination is refused naming the condition and its reading.
+            with self.assertRaises(ToolError) as refused:
+                session.finish.invoke(
+                    {"outcome": "freeze", "node_id": below["node_id"], "reason": "x" * 40}
+                )
+            self.assertEqual(refused.exception.error_type, "freeze_gate_refused")
+            self.assertIn(token, str(refused.exception))
+            # 0.0005 less one more 5 bp per side on 1.2 turns of the capital.
+            self.assertIn("raw_excess_at_cost_stress=-0.0001", str(refused.exception))
+
+    def test_a_row_that_repeats_earlier_bytes_on_the_same_span_names_them(self) -> None:
+        """A session spent 8 replay-years re-running the bytes of a node it
+        already had on the same span. The replay still runs -- packs re-run a
+        same-seed baseline in every batch, and GPU training is not always
+        bit-reproducible -- but the row says which node it repeats."""
+        with TemporaryDirectory() as tmp:
+            session = _Session(Path(tmp))
+            first = session.validate_one("a", _strategy("1"))
+            self.assertNotIn("same_bytes_as", first)
+            # The same bytes on another span are a probe, not a repeat.
+            probe = session.validate_one("a_probe", _strategy("1"), span="Y1")
+            self.assertNotIn("same_bytes_as", probe)
+            again = session.validate_one("a_again", _strategy("1"))
+            self.assertEqual(again["same_bytes_as"]["nodes"], [first["handle"]])
+            self.assertIn("same trial", again["same_bytes_as"]["note"])
+            self.assertEqual(again["status"], "ok")
 
     def test_nothing_selects_a_winner_on_the_agent_s_behalf(self) -> None:
         with TemporaryDirectory() as tmp:

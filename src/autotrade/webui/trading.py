@@ -295,9 +295,17 @@ def signal_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str, 
     return {"env": env, "state": "ok", "error": None, "signal": signal}
 
 
+def _dividend_tax(row: dict[str, object]) -> float | None:
+    """The dividend tax a sale paid; a row journaled before the Broker charged
+    it carries no key and paid none."""
+
+    return _number(row.get("dividend_tax", 0.0))
+
+
 def _fill(row: dict[str, object], names: dict[str, str | None]) -> dict[str, object]:
     symbol = _text(row.get("symbol"))
     commission, stamp_duty = _number(row.get("commission")), _number(row.get("stamp_duty"))
+    dividend_tax = _dividend_tax(row)
     return {
         "symbol": symbol,
         "name": names.get(symbol or ""),
@@ -306,7 +314,12 @@ def _fill(row: dict[str, object], names: dict[str, str | None]) -> dict[str, obj
         "matched_at": _text(row.get("matched_at")),
         "status": _text(row.get("status")),
         "price": _number(row.get("price")),
-        "cost": None if commission is None and stamp_duty is None else (commission or 0.0) + (stamp_duty or 0.0),
+        "cost": None
+        if commission is None and stamp_duty is None
+        else (commission or 0.0) + (stamp_duty or 0.0) + (dividend_tax or 0.0),
+        # Inside ``cost``; stated apart because it is the holding-period tax on
+        # dividends the sold shares received, not a trading fee.
+        "dividend_tax": dividend_tax,
         "reason": _text(row.get("reason")),
         # A trade the owner recorded that no order asked for.
         "off_sheet": row.get("off_sheet") is True,
@@ -318,10 +331,12 @@ def _fill(row: dict[str, object], names: dict[str, str | None]) -> dict[str, obj
 def _outcome(value: object) -> dict[str, object]:
     row = _mapping(value)
     commission, stamp = _number(row.get("commission")) or 0.0, _number(row.get("stamp_duty")) or 0.0
+    tax = _dividend_tax(row) or 0.0
     return {
         "quantity": _count(row.get("quantity")),
         "price": _number(row.get("price")),
         "fees": commission + stamp,
+        "dividend_tax": tax,
         "reason": _text(row.get("reason")),
     }
 
@@ -738,6 +753,7 @@ def performance_payload(repo_root: Path, book: str, env: str = "paper") -> dict[
             "turnover": _number(stats["turnover"]),
             "fees": _number(stats["fees_paid"]),
             "stamp_duty": _number(stats["stamp_duty_paid"]),
+            "dividend_tax": _number(stats.get("dividend_tax_paid", 0.0)),
             "fills": int(_mapping(stats["order_status_counts"]).get("filled", 0)),
         },
     }
@@ -830,7 +846,7 @@ def snapshot_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str
 # ------------------------------------------------------------------ pnl
 
 # What a name's fills and ex-dates moved, summed per symbol from the journals.
-_FLOW_FIELDS = ("commission", "stamp_duty", "realized_pnl", "dividends")
+_FLOW_FIELDS = ("commission", "stamp_duty", "dividend_tax", "realized_pnl", "dividends")
 
 
 def _journal_rows(root: Path, prefix: str) -> list[tuple[str, dict[str, object]]]:
@@ -865,7 +881,8 @@ def _instrument_flows(root: Path) -> dict[str, dict[str, float]]:
             continue
         realized = _number(row.get("realized_pnl")) if row.get("action") == "sell" else 0.0
         add(name, row, commission=_number(row.get("commission")),
-            stamp_duty=_number(row.get("stamp_duty")), realized_pnl=realized)
+            stamp_duty=_number(row.get("stamp_duty")), dividend_tax=_dividend_tax(row),
+            realized_pnl=realized)
     for name, row in _journal_rows(root, "corporate_actions_"):
         add(name, row, dividends=_number(row.get("cash_credit")))
     # A real-fill book's corrections move the same money a fill does.
@@ -874,7 +891,8 @@ def _instrument_flows(root: Path) -> dict[str, dict[str, float]]:
         raise ValueError(f"{fills.CORRECTIONS_NAME} has {skipped} unreadable line(s)")
     for row in corrections:
         add(fills.CORRECTIONS_NAME, row, commission=_number(row.get("commission")),
-            stamp_duty=_number(row.get("stamp_duty")), realized_pnl=_number(row.get("realized_pnl")))
+            stamp_duty=_number(row.get("stamp_duty")), dividend_tax=_dividend_tax(row),
+            realized_pnl=_number(row.get("realized_pnl")))
     return flows
 
 

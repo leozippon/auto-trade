@@ -1333,7 +1333,11 @@ class WebuiBackendTest(unittest.TestCase):
             ("exp_tracked", {"tracking_error_cap": 0.08}),
             ("exp_tight_ir", {"min_active_ir": 1.1}),
         ):
-            expected = acceptance_for(request).to_record()
+            # A new arm is held to the raw cost-stress condition by default; an
+            # arm recorded without the key is not (``AcceptanceRules`` default).
+            expected = acceptance_for(
+                {"require_raw_excess_at_cost_stress": True, **request}
+            ).to_record()
             with (
                 patch.object(manager, "_preflight"),
                 patch.object(manager, "start_worker", return_value={"spawned": False}),
@@ -1358,6 +1362,8 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(
             acceptance_for({}).to_record(), AcceptanceRules().to_record()
         )
+        self.assertTrue(written["require_raw_excess_at_cost_stress"])
+        self.assertFalse(acceptance_for({}).require_raw_excess_at_cost_stress)
 
     def test_create_records_the_lineage_into_the_new_arm_or_creates_nothing(self) -> None:
         """The lineage is read from the earlier arms once, while the arm is

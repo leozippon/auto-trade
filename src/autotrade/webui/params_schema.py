@@ -493,6 +493,13 @@ _FIELDS: list[dict[str, object]] = [
         "help": "本臂可测的完整研究期验证数下限（提名计入），整数且至少为 1。",
     },
     {
+        "key": "require_raw_excess_at_cost_stress",
+        "group": "预算与验收",
+        "label": "冻结门要求成本压力下跑赢基准",
+        "type": "bool",
+        "help": "提名节点研究期账户自身扣费收益在滑点按成本压力倍数加价后，仍须高于本臂基准指数同期收益；主动序列赢了面板而账户没赢基准的节点不能冻结。关闭则只报告不评级。",
+    },
+    {
         "key": "forward_confidence",
         "group": "预算与验收",
         "label": "前推下界置信度",
@@ -557,6 +564,8 @@ _FIELDS: list[dict[str, object]] = [
      "help": "万一 = 1.0；受最低佣金 5 元/笔约束。"},
     {"key": "slippage_bps", "group": "Broker 账户", "label": "市价滑点（bp）", "type": "float", "advanced": True,
      "help": "市价 taker 成交滑点；限价/竞价成交不计滑点。"},
+    {"key": "dividend_tax", "group": "Broker 账户", "label": "按持有期征股息红利税", "type": "bool",
+     "help": "卖出时按先进先出对所卖股份在持有期内收到的现金红利与送股征税：持有一个月以内 20%，一年以内 10%，一年以上免征。关闭则红利按税前入账（个人投资者拿不到）。"},
     # 运行控制
     {
         "key": "operating_memory",

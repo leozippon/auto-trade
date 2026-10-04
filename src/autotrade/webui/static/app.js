@@ -32,6 +32,7 @@ const OUTCOME_LABELS = {
 const ENDING_LABELS = {
   graduated: "毕业",
   rejected: "未通过",
+  voided: "毕业已作废",
   no_edge: "未发现超额",
   budget_exhausted: "预算耗尽",
   broken: "失败",
@@ -54,6 +55,8 @@ const REASON_LABELS = {
   freeze_active_drawdown_exceeded: "研究期主动回撤",
   freeze_tracking_error_above_cap: "研究期对基准指数跟踪误差",
   freeze_beta_outside_band: "研究期市场 β",
+  freeze_raw_excess_not_positive_at_cost_stress: (t) =>
+    `研究期滑点 ×${t.cost_stress_multiplier ?? "—"} 后对基准指数超额`,
   freeze_unmeasurable: "研究期统计可算",
   forward_strategy_error: "前推期策略无报错",
   heldout_strategy_error: "Held-out 期策略无报错",
@@ -90,6 +93,12 @@ const TRIALS_TITLE = "DSR 据以折减的试验数：本臂验证过的不同策
 const NEUTRALIZED_EXCESS_TITLE = "剔除基准指数与规模暴露后的年化超额";
 const TRACKING_ERROR_TITLE = "中性化残差收益的年化标准差";
 const IR_TITLE = "中性化超额 ÷ 残差跟踪误差";
+// The holder's money, which no active figure is: the account's own return
+// after every cost minus the benchmark index's price return over the same days
+// (pipelines/verdict.py raw_excess_at_cost_stress), at the arm's cost stress.
+const RAW_EXCESS_TITLE = "账户自身扣费收益减基准指数（价格指数）同期收益，整段累计";
+const RAW_STRESS_TITLE = "滑点按成本压力倍数加价后的对基准指数超额，整段累计；冻结门的原始收益条件读它";
+const PANEL_RETURN_TITLE = "零技能面板（同一成交骨架随机换名）自身扣费后的整段收益";
 // How the forward bound is drawn (verdict.py `_bootstrap_lower_bound`).
 const LOWER_BOUND_TITLE = "中性化超额的移动块自助法单侧下界";
 
@@ -1657,6 +1666,7 @@ const STEP_STATUS_LABELS = {
 const ENDING_STEP_STATES = {
   graduated: "done",
   rejected: "failed",
+  voided: "failed",
   no_edge: "ended",
   budget_exhausted: "ended",
   broken: "ended",
@@ -3000,6 +3010,14 @@ function verdictStagePanel(detail) {
       ? kvRow("回放失败", `${attempts.failed} 次${attempts.last_error ? ` · ${attempts.last_error}` : ""}`)
       : null,
     recordedAt ? kvRow("记录于", fmtTs(recordedAt)) : null,
+    // A graduation an operator withdrew: who, when and on what evidence. The
+    // replay's own criteria above stay as they were recorded.
+    ...(verdict.void
+      ? [
+          kvRow("作废", `${verdict.void.voided_by || "—"} · ${fmtTs(verdict.void.recorded_at)}`),
+          kvRow("作废依据", verdict.void.evidence_ref || "—"),
+        ]
+      : []),
   ].filter(Boolean);
   return el(
     "div",
@@ -3551,6 +3569,18 @@ function freezeGateChecklist(gate) {
           row("freeze_too_few_positive_years", gate.positive_years ?? "—", `≥ ${t.min_positive_years ?? "—"}`),
         ]),
     ...activeDrawdownRows("freeze_active_drawdown_exceeded", gate, row, t),
+    // Judged only where the arm's rules hold it; such a gate states the
+    // multiplier it was judged at.
+    ...(t.cost_stress_multiplier === undefined || t.cost_stress_multiplier === null
+      ? []
+      : [
+          row(
+            "freeze_raw_excess_not_positive_at_cost_stress",
+            fmtPct(gate.raw_excess_at_cost_stress),
+            "> 0",
+            RAW_STRESS_TITLE,
+          ),
+        ]),
     ...mandateRows("freeze_tracking_error_above_cap", "freeze_beta_outside_band", gate, row, t),
   ]);
 }
@@ -3599,6 +3629,20 @@ function researchSessionPanel(detail, session) {
           title: DSR_TITLE,
         },
         {
+          label: "成本压力下对基准超额",
+          value: best.raw_excess_at_cost_stress,
+          fmt: fmtPct,
+          signed: true,
+          title: RAW_STRESS_TITLE,
+        },
+        {
+          label: "面板自身收益",
+          value: best.panel_return,
+          fmt: fmtPct,
+          signed: true,
+          title: PANEL_RETURN_TITLE,
+        },
+        {
           label: "累计试验",
           // Without a measurable candidate no gate ran over one, so the
           // session record's own count answers in its place.
@@ -3638,6 +3682,8 @@ function researchSessionPanel(detail, session) {
           { label: "收益", num: true },
           { label: "Sharpe", num: true },
           { label: "回撤", num: true },
+          { label: "对基准超额", num: true, title: RAW_EXCESS_TITLE },
+          { label: "成本压力下", num: true, title: RAW_STRESS_TITLE },
           { label: "中性化超额", num: true, title: NEUTRALIZED_EXCESS_TITLE },
           { label: "IR", num: true, title: IR_TITLE },
         ],
@@ -3655,6 +3701,11 @@ function researchSessionPanel(detail, session) {
           { value: fmtPct(row.total_return), cls: signCls(row.total_return) },
           { value: fmtSharpe(row.sharpe), cls: signCls(row.sharpe) },
           fmtPct(row.max_drawdown),
+          { value: fmtPct(row.excess_return), cls: signCls(row.excess_return) },
+          {
+            value: fmtPct(row.raw_excess_at_cost_stress),
+            cls: signCls(row.raw_excess_at_cost_stress),
+          },
           {
             value: fmtPct(row.neutralized_excess),
             cls: signCls(row.neutralized_excess),
@@ -6330,6 +6381,7 @@ function candidateAsideReason(row) {
     return el("span", { class: "hint warn" }, "无法解析");
   if (!row.verdict) return el("span", { class: "hint" }, "无裁决");
   // Why the tier declines it, not how it ended: that word is on its own page.
+  if (row.verdict === "voided") return el("span", { class: "hint" }, "毕业已作废");
   if (row.verdict !== "graduated") return el("span", { class: "hint" }, "未毕业");
   return el("span", { class: "hint" }, "无已发布 skill 条目");
 }
@@ -8016,7 +8068,7 @@ function paperHistoryDay(day) {
             { label: "方向" },
             { label: "股数", num: true },
             { label: "成交价", num: true },
-            { label: "费用", num: true },
+            { label: "费用", num: true, title: "佣金、印花税与持有期股息税" },
             { label: "状态" },
             ...(explained ? [{ label: "说明" }] : []),
           ],
@@ -8181,6 +8233,7 @@ function paperEquityPanel(payload, pnl) {
   const cost = [
     stats.fees === null ? null : `佣金 ${fmtAmount(stats.fees)}`,
     stats.stamp_duty === null ? null : `印花税 ${fmtAmount(stats.stamp_duty)}`,
+    stats.dividend_tax ? `股息税 ${fmtAmount(stats.dividend_tax)}` : null,
     `成交 ${stats.fills} 笔`,
   ].filter(Boolean);
   const tiles = presentTiles([
@@ -8342,6 +8395,7 @@ function paperPnlPanel(payload) {
         { label: "已实现", num: true, title: "卖出部分对成本的盈亏，已扣卖出费用" },
         { label: "佣金", num: true, title: "佣金与过户费，已含在盈亏里" },
         { label: "印花税", num: true, title: "已含在盈亏里" },
+        { label: "股息税", num: true, title: "卖出时按持有期补缴的股息红利税，已含在已实现盈亏里" },
         { label: "分红", num: true, title: "除权除息日入账的现金，已从成本中扣除" },
       ],
       rows.map((row) => [
@@ -8356,6 +8410,7 @@ function paperPnlPanel(payload) {
         signed(row.realized_pnl),
         fmtAmount(row.commission),
         fmtAmount(row.stamp_duty),
+        fmtAmount(row.dividend_tax),
         fmtAmount(row.dividends),
       ]),
       { box: "limit section-gap" },
@@ -8363,7 +8418,7 @@ function paperPnlPanel(payload) {
     el(
       "div",
       { class: "meta-line section-gap" },
-      "合计 = 浮动盈亏 + 已实现。成本含买入费用并扣除分红，已实现已扣卖出费用，所以佣金、印花税与分红都已含在盈亏里，单列只供参考。",
+      "合计 = 浮动盈亏 + 已实现。成本含买入费用并扣除分红，已实现已扣卖出费用与股息税，所以佣金、印花税、股息税与分红都已含在盈亏里，单列只供参考。",
     ),
     el(
       "div",
