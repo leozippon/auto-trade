@@ -15,9 +15,10 @@ CRON_TZ=Asia/Shanghai
 REPO_ROOT=/Data2/lzp/ADMCubeQuant
 QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 
-# The operator declares the sheet's orders by hand: an at-open order goes into
-# the 09:15-09:25 call auction, everything else from 09:30. The three runs
-# therefore all have to land before 09:15.
+# The operator places the sheet's orders by hand: an order that fills at the
+# open goes into the 09:15-09:25 opening call auction, one that fills at the
+# close into the 14:57-15:00 closing call auction. The morning batch is the
+# deadline, so the three runs all have to land before 09:15.
 #
 # 05:40 is the first, after the nightly chain has committed the previous
 # session: the evening update (23:35, visible from 03:05), the intraday-flow

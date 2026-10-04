@@ -120,11 +120,17 @@ def test_the_signal_is_the_latest_order_sheet_and_history_keeps_every_earlier_da
     assert signal["cash_after"] == 100_000.0 - 1050.0
     assert target["weight"] + signal["cash_weight"] == pytest.approx(1.0)
     assert set(signal["orders"][0]) == {
-        "execute_at", "window", "symbol", "name", "action", "quantity", "reference_price", "notional",
+        "execute_at", "session", "time", "window", "window_label", "symbol", "name", "action", "quantity",
+        "reference_price", "notional",
     }
-    # The fixture's orders fill at the open, so the operator declares them in
-    # the opening call auction.
+    # The fixture's orders fill at the open, so the operator places them in the
+    # opening call auction, and the page reads that wording off the payload.
     assert signal["orders"][0]["window"] == "open_auction"
+    assert signal["orders"][0]["window_label"] == "上午 开盘集合竞价 09:15–09:25"
+    [group] = signal["groups"]
+    assert (group["window"], group["orders"]) == ("open_auction", [0])
+    assert group["title"] == "上午 · 开盘集合竞价 09:15–09:25 申报 · 按开盘价成交"
+    assert signal["limit_guidance"].startswith("限价怎么填")
     # The strategy's own order metadata ("call") is writer content, never served.
     assert '"call"' not in json.dumps(signal)
     assert trading.history_payload(tmp_path, BOOK) == {"env": "paper", "state": "absent", "error": None, "days": []}
@@ -598,6 +604,89 @@ def test_each_names_pnl_sums_to_the_account_total_of_a_real_book(tmp_path: Path)
 
     response = TestClient(create_app(tmp_path)).get(f"/api/trading/paper/books/{BOOK}/pnl")
     assert response.status_code == 200 and response.json() == payload
+
+
+def test_a_book_is_switched_to_real_fills_recorded_and_compared_through_the_console(tmp_path: Path, monkeypatch):
+    """The owner's whole loop through the API: switch the book over, see the
+    session waiting, record it (a refused record writes nothing), and read
+    the settled session back against its simulated fill, as two curves, in
+    the history, and after a correction with the per-name P&L still whole."""
+    from tests.unit.test_paper_reconcile import PLAN_STRATEGY, _Book
+
+    root = paper_root(tmp_path) / BOOK
+    write_book_record(root)
+    plan = {"20260105": [("600000.SH", "buy", 300, "15:00"), ("000001.SZ", "buy", 1000, "09:30")]}
+    book = _Book(root, PLAN_STRATEGY.format(plan=plan), monkeypatch)
+    client = TestClient(create_app(tmp_path))
+    base = f"/api/trading/paper/books/{BOOK}"
+
+    assert client.get(f"{base}/fills").json()["mode"] == "off"
+    refused = client.post(f"{base}/fills", json={"trade_date": "20260105", "outcome": "simulated"})
+    assert refused.status_code == 400 and "switch it to real fills" in refused.json()["detail"]
+    assert client.post(f"{base}/fills/enable").json()["real_fills"] is True
+    assert client.get(f"{base}/fills").json()["mode"] == "pending"
+
+    book.run("20260105")
+    payload = client.get(f"{base}/fills").json()
+    assert (payload["mode"], payload["after"], payload["awaiting"]) == ("on", None, ["20260105"])
+    [session] = payload["sessions"]
+    assert [(row["key"], row["ordered"], row["resolved"]) for row in session["rows"]] == [
+        ("09:30 buy 000001.SZ", 1000, None), ("15:00 buy 600000.SH", 300, None),
+    ]
+    status = client.get(f"{base}/status").json()
+    assert (status["state"], status["awaiting_fills"]) == ("awaiting_fills", ["20260105"])
+
+    for bad in (
+        {"time": "15:00", "symbol": "600000.SH", "action": "buy", "outcome": "filled", "quantity": 250, "price": 15.2},
+        {"time": "14:00", "symbol": "600000.SH", "action": "buy", "outcome": "simulated"},
+        {"time": "15:00", "symbol": "600000", "action": "buy", "outcome": "not_traded"},
+    ):
+        response = client.post(f"{base}/fills", json={"trade_date": "20260105", "fills": [bad]})
+        assert response.status_code == 400, bad
+    assert client.post(f"{base}/fills", json={"trade_date": "20990105", "outcome": "simulated"}).status_code == 400
+    assert len(read_jsonl(root / "fills.jsonl")[0]) == 1  # the enable line alone
+
+    recorded = client.post(f"{base}/fills", json={
+        "trade_date": "20260105", "outcome": "simulated",
+        "fills": [{"time": "15:00", "symbol": "600000.SH", "action": "buy", "outcome": "filled",
+                   "quantity": 200, "price": 15.2, "commission": 5.0}],
+    })
+    assert recorded.json()["recorded"] == 2
+    assert client.get(f"{base}/status").json()["state"] != "awaiting_fills"
+    book.run("20260106")
+
+    payload = client.get(f"{base}/fills").json()
+    settled = next(session for session in payload["sessions"] if session["settled"])
+    rows = {row["key"]: row for row in settled["rows"]}
+    partial = rows["15:00 buy 600000.SH"]
+    assert (partial["status"], partial["simulated"]["quantity"], partial["real"]["quantity"]) == ("partial", 300, 200)
+    assert partial["price_cost"] == pytest.approx((15.2 - partial["simulated"]["price"]) * 200, abs=0.01)
+    assert rows["09:30 buy 000001.SZ"]["status"] == "filled"
+    gap = settled["gap"]
+    assert payload["totals"]["execution_cost"] == pytest.approx(gap)
+    assert payload["totals"]["missed"] == 1
+
+    chart = client.get(f"{base}/performance").json()["chart"]
+    assert [(entry["key"], entry["label"]) for entry in chart["series"]] == [
+        ("strategy", "实际成交"), ("simulated", "按模拟成交"),
+    ]
+    [day] = [row for row in client.get(f"{base}/history").json()["days"] if row["trade_date"] == "20260105"]
+    assert {row["key"]: row["status"] for row in day["reconciliation"]["rows"]} == {
+        "09:30 buy 000001.SZ": "filled", "15:00 buy 600000.SH": "partial",
+    }
+
+    # A correction of the settled session, booked on the next one.
+    client.post(f"{base}/fills", json={"trade_date": "20260105", "fills": [
+        {"time": "15:00", "symbol": "600000.SH", "action": "buy", "outcome": "filled", "quantity": 300,
+         "price": 15.1},
+    ]})
+    book.run("20260107")
+    [day] = [row for row in client.get(f"{base}/history").json()["days"] if row["trade_date"] == "20260106"]
+    [correction] = day["corrections"]
+    assert (correction["corrects"], correction["quantity"]) == ("20260105", 100)
+    pnl = client.get(f"{base}/pnl").json()
+    assert pnl["residual"] == 0.0 and pnl["instruments_error"] is None
+    assert client.get(f"{base}/fills").json()["totals"]["corrections"] == 1
 
 
 def test_a_per_name_view_that_cannot_be_read_whole_is_withheld_with_its_reason(tmp_path: Path):
@@ -1078,20 +1167,22 @@ def test_the_chip_says_whether_the_session_ahead_has_its_order_sheet():
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node required for the JS formatters")
-def test_every_order_row_names_the_window_that_declares_it():
-    """One sheet can mix an opening-auction order with a continuous-trading one,
-    and the two have different deadlines, so the window rides on the row rather
-    than in a heading. The badge and the copied text read it off one wording,
-    and every row of the table fills every column the header declares."""
+def test_every_order_row_names_the_window_it_is_placed_in_batch_by_batch():
+    """A sheet can sell at the close and buy at the open, so the window rides
+    on every row, in the server's one wording, and the copied text groups the
+    rows under a line naming each batch. Every row of a batch's table fills
+    every column its header declares."""
     script = _app_js()
     harness = "\n".join(
         [
-            _js_top_level(script, "const ORDER_WINDOW_LABELS ="),
             _js_top_level(script, "function orderWindowLabel("),
+            _js_top_level(script, "function sheetGroups("),
             _js_top_level(script, "function largestWeight("),
             _js_top_level(script, "function paperOrdersTable("),
-            "const actionCell = (v) => v, windowCell = (v) => v, weightCell = (v) => v;",
+            _js_top_level(script, "function orderClipboardText("),
+            "const actionCell = (v) => v, windowCell = (row) => row.window_label, weightCell = (v) => v;",
             "const fmtShares = (v) => v, fmtPrice = (v) => v, fmtAmountOpt = (v) => v;",
+            "const actionLabel = (v) => ({ buy: '买入', sell: '卖出' })[v];",
             (
                 "const dataTable = (columns, rows) => ({ columns: columns.map((c) => c.label),"
                 " widths: rows.map((row) => row.length) });"
@@ -1099,15 +1190,16 @@ def test_every_order_row_names_the_window_that_declares_it():
             (
                 "const sheet = { orders: ["
                 "{ symbol: '000001.SZ', name: 'A', action: 'buy', quantity: 100, reference_price: 10,"
-                " notional: 1000, window: 'open_auction' },"
+                " notional: 1000, window: 'open_auction', window_label: '上午 开盘集合竞价 09:15–09:25' },"
                 "{ symbol: '000002.SZ', name: 'B', action: 'sell', quantity: 200, reference_price: 20,"
-                " notional: 4000, window: 'continuous' }],"
+                " notional: 4000, window: 'close_auction', window_label: '下午 收盘集合竞价 14:57–15:00' }],"
+                " groups: [{ window: 'open_auction', title: '上午 · 开盘', orders: [0] },"
+                " { window: 'close_auction', title: '下午 · 收盘', orders: [1] }],"
                 " target: [{ symbol: '000001.SZ', weight: 0.5 }], cash_after: 1, cash_weight: 0.5 };"
             ),
             (
-                "console.log(JSON.stringify([paperOrdersTable(sheet),"
-                " orderWindowLabel('open_auction'), orderWindowLabel('continuous'),"
-                " orderWindowLabel('')]));"
+                "console.log(JSON.stringify([paperOrdersTable(sheet, sheet.orders),"
+                " orderClipboardText(sheet), orderWindowLabel({}), orderWindowLabel(null)]));"
             ),
         ]
     )
@@ -1115,12 +1207,16 @@ def test_every_order_row_names_the_window_that_declares_it():
         ["node", "-e", harness], capture_output=True, text=True, timeout=60, check=False
     )
     assert result.returncode == 0, result.stderr
-    table, auction, continuous, unknown = json.loads(result.stdout)
-    assert "窗口" in table["columns"]
-    # Orders and the closing cash line alike: one cell per declared column.
+    table, copied, unknown, absent = json.loads(result.stdout)
+    assert "下单时段" in table["columns"]
     assert set(table["widths"]) == {len(table["columns"])}
-    assert (auction, continuous) == ("集合竞价（09:15–09:25）", "连续竞价（09:30 起）")
-    assert unknown == "—"
-    assert "windowCell(row.window)" in _js_top_level(script, "function paperOrdersTable(")
-    # The copied text carries the same wording, from the same table.
-    assert "orderWindowLabel(row.window)" in _js_top_level(script, "function orderClipboardText(")
+    assert copied.splitlines() == [
+        "【上午 · 开盘】",
+        "000001.SZ\tA\t买入\t100\t10\t上午 开盘集合竞价 09:15–09:25",
+        "【下午 · 收盘】",
+        "000002.SZ\tB\t卖出\t200\t20\t下午 收盘集合竞价 14:57–15:00",
+    ]
+    assert (unknown, absent) == ("—", "—")
+    assert "windowCell(row)" in _js_top_level(script, "function paperOrdersTable(")
+    # The wrong wording of the old sheet is gone from the page.
+    assert "连续竞价（09:30 起）" not in script

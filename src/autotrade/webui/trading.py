@@ -2,7 +2,10 @@
 
 Books sit side by side under the Paper state root, one directory each
 (``paper.books``). ``books_payload`` is the overview, one row per book. A book's
-page reads it through seven projections, each from the book's own files:
+page reads it through eight projections, each from the book's own files —
+``fills_payload`` (whether the book follows its owner's recorded fills, the
+sessions still to record and every settled one against its simulated fill)
+and these seven:
 ``book_status`` (the status ladder, and whether the session ahead already has
 its order sheet), ``book_payload`` (identity, ``book.json``),
 ``signal_payload`` (the latest decision's order sheet), ``history_payload``
@@ -32,7 +35,7 @@ from __future__ import annotations
 
 import json
 import math
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 
 import pyarrow as pa
@@ -46,6 +49,7 @@ from autotrade.environment.replay.style import (
     slot_benchmark,
 )
 from autotrade.environment.strategy import CN_TZ
+from autotrade.paper import fills
 from autotrade.paper.book import (
     BOOK_NAME,
     SOURCE_HISTORY_NAME,
@@ -53,7 +57,13 @@ from autotrade.paper.book import (
 )
 from autotrade.paper.books import BOOK_ID_PATTERN, PAPER_STATE_DIR, list_books
 from autotrade.paper.engine import PAPER_STATE_NAME, REFERENCE_KEY, SNAPSHOT_NAME
-from autotrade.paper.orders import order_sheet
+from autotrade.paper.orders import (
+    CONTINUOUS,
+    LIMIT_GUIDANCE,
+    order_sheet,
+    order_window,
+    window_text,
+)
 from autotrade.paper.pit import newest_replay_slot
 from autotrade.paper.storage import read_jsonl
 
@@ -225,9 +235,13 @@ def _sheet(root: Path, state: dict[str, object], trade_date: str) -> dict[str, o
         "orders": [
             {
                 "execute_at": _text(row["execute_at"]),
-                # Where the operator declares it: the opening call auction that
-                # produces the fill price, or continuous trading.
+                "session": _text(row["session"]),
+                "time": _text(row["time"]),
+                # Where the operator places it, worded once by the sheet: the
+                # opening or closing call auction that sets the fill price, or
+                # continuous trading at its minute.
                 "window": _text(row["window"]),
+                "window_label": _text(row["window_label"]),
                 "symbol": _text(row["symbol"]),
                 "name": _text(row["name"]),
                 "action": _text(row["action"]),
@@ -237,6 +251,19 @@ def _sheet(root: Path, state: dict[str, object], trade_date: str) -> dict[str, o
             }
             for row in sheet["orders"]
         ],
+        # The batches placed at one sitting each, in placement order.
+        "groups": [
+            {
+                "window": _text(group["window"]),
+                "title": _text(group["title"]),
+                "how": _text(group["how"]),
+                "orders": list(group["orders"]),
+                "buy": _number(group["flows"]["buy"]),
+                "sell": _number(group["flows"]["sell"]),
+            }
+            for group in sheet["groups"]
+        ],
+        "limit_guidance": LIMIT_GUIDANCE if any(row["window"] != CONTINUOUS for row in sheet["orders"]) else None,
         "target": [
             {
                 "symbol": _text(row["symbol"]),
@@ -281,6 +308,192 @@ def _fill(row: dict[str, object], names: dict[str, str | None]) -> dict[str, obj
         "price": _number(row.get("price")),
         "cost": None if commission is None and stamp_duty is None else (commission or 0.0) + (stamp_duty or 0.0),
         "reason": _text(row.get("reason")),
+        # A trade the owner recorded that no order asked for.
+        "off_sheet": row.get("off_sheet") is True,
+    }
+
+
+# ------------------------------------------------------- real fills
+
+def _outcome(value: object) -> dict[str, object]:
+    row = _mapping(value)
+    commission, stamp = _number(row.get("commission")) or 0.0, _number(row.get("stamp_duty")) or 0.0
+    return {
+        "quantity": _count(row.get("quantity")),
+        "price": _number(row.get("price")),
+        "fees": commission + stamp,
+        "reason": _text(row.get("reason")),
+    }
+
+
+def _key_view(day: str, key: str, names: dict[str, str], references: dict[str, object]) -> dict[str, object]:
+    clock, action, symbol = fills.parse_key(key)
+    execute_at = datetime.combine(date(int(day[:4]), int(day[4:6]), int(day[6:])), time.fromisoformat(clock), tzinfo=CN_TZ)
+    return {
+        "key": key, "time": clock, "window": order_window(execute_at),
+        "window_label": window_text(execute_at, day)[0], "symbol": symbol,
+        "name": names.get(symbol), "action": action, "reference_price": _number(references.get(symbol)),
+    }
+
+
+def _record_view(record: fills.Record | None) -> dict[str, object] | None:
+    if record is None:
+        return None
+    return {
+        "outcome": record.outcome, "quantity": record.quantity or None, "price": _number(record.price),
+        "commission": _number(record.commission), "recorded_at": _utc_iso(_to_utc(record.recorded_at)),
+    }
+
+
+def _settled_rows(day: str, ledger: dict[str, object], names: dict[str, str]) -> list[dict[str, object]]:
+    """One settled real-fill session, key by key: what the simulator filled,
+    what the owner recorded, and what the difference cost."""
+    rows = []
+    for key, entry in ledger.items():
+        compared = fills.compare(key, entry)
+        rows.append({
+            **_key_view(day, key, names, {}),
+            "ordered": _count(_mapping(entry).get("ordered")),
+            "simulated": _outcome(_mapping(entry).get("simulated")),
+            "real": _outcome(_mapping(entry).get("real")),
+            "status": compared["status"],
+            "price_bp": _number(compared["price_bp"]),
+            # To the cent: a sub-cent difference is no difference.
+            **{
+                name: None if compared[name] is None else round(compared[name], 2) + 0.0
+                for name in ("price_cost", "fee_cost", "missed_notional")
+            },
+        })
+    return sorted(rows, key=lambda row: row["time"])
+
+
+def _equity_gaps(root: Path) -> dict[str, float]:
+    """Per real-fill session: the simulated account's close less the real one."""
+    gaps = {}
+    for row in read_jsonl(root / EQUITY_JOURNAL_NAME)[0]:
+        day, simulated, real = _text(row.get("trade_date")), _number(row.get("simulated_equity")), _number(row.get("equity"))
+        if day and simulated is not None and real is not None:
+            gaps[day] = simulated - real
+    return gaps
+
+
+def _session_closed(day: str) -> bool:
+    """A session's outcome can be recorded once its closing auction is over."""
+    now = datetime.now(CN_TZ)
+    today = now.strftime("%Y%m%d")
+    return day < today or (day == today and now.time() >= time(15, 0))
+
+
+def _open_sessions(root: Path, state: dict[str, object], records: fills.Records) -> list[dict[str, object]]:
+    """The sessions the next run settles from records, oldest first: each
+    order key due on it (and any trade recorded off the sheet) with what the
+    owner recorded and what it resolves to."""
+    current = fills.mode(state)
+    settled_through = str(state.get("settled_through") or "")
+    after = max(str(current["after"]) if current else settled_through, settled_through)
+    ordered: dict[str, dict[str, int]] = {}
+    for order in fills.pending_orders(state):
+        day = fills.order_session(order)
+        if day > after:
+            keys = ordered.setdefault(day, {})
+            keys[fills.order_key(order)] = keys.get(fills.order_key(order), 0) + order.quantity
+    days = set(ordered) | {day for day in _decision_dates(state) if day > after}
+    days |= {day for day, _key in records.fills if day > after} | {day for day in records.sessions if day > after}
+    late = fills.post_hoc_sessions(state)
+    names = _names(root)
+    sessions = []
+    for day in sorted(days):
+        references = {
+            str(row.get("symbol")): _mapping(row.get(REFERENCE_KEY)).get("close")
+            for row in read_jsonl(root / f"orders_{day}.jsonl")[0]
+        }
+        keys = ordered.get(day, {})
+        rows = []
+        for key in [*keys, *(key for key in records.keys(day) if key not in keys)]:
+            resolved = fills.resolve(records, day, key, ordered=key in keys, post_hoc=day in late)
+            rows.append({
+                **_key_view(day, key, names, references),
+                "ordered": keys.get(key, 0),
+                "record": _record_view(records.fills.get((day, key))),
+                "resolved": resolved.outcome if resolved is not None else None,
+            })
+        session = records.sessions.get(day)
+        unresolved = sum(1 for row in rows if row["ordered"] and row["resolved"] is None)
+        sessions.append({
+            "trade_date": day, "settled": False, "closed": _session_closed(day), "post_hoc": day in late,
+            "default": session.outcome if session is not None else None,
+            "unresolved": unresolved, "rows": sorted(rows, key=lambda row: row["time"]),
+        })
+    return sessions
+
+
+def _awaiting(sessions: list[dict[str, object]]) -> list[str]:
+    """Closed sessions with orders the owner has not recorded: the next run
+    stops on them."""
+    return [row["trade_date"] for row in sessions if row["closed"] and row["unresolved"]]
+
+
+def _awaiting_sessions(root: Path, state: dict[str, object] | None) -> list[str]:
+    try:
+        records = fills.read_records(root)
+    except ValueError:
+        return []  # the fills panel says why
+    state = state or {}
+    if fills.mode(state) is None and records.enabled_at is None:
+        return []
+    return _awaiting(_open_sessions(root, state, records))
+
+
+def fills_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str, object]:
+    """Whether the book follows real fills, and the record behind it: the
+    sessions still to record, every settled one key by key against its
+    simulated fill, and what manual execution has cost in total."""
+    root = book_dir(repo_root, book, env)
+    base: dict[str, object] = {
+        "env": env, "state": "ok", "error": None, "mode": "off", "after": None, "enabled_at": None,
+        "awaiting": [], "sessions": [], "totals": None, "skipped_lines": 0,
+    }
+    state, error = _read_json(root / PAPER_STATE_NAME)
+    try:
+        records = fills.read_records(root)
+    except ValueError as exc:
+        return {**base, "state": "unreadable", "error": str(exc)}
+    if error:
+        return {**base, "state": "unreadable", "error": error}
+    state = state or {}
+    current = fills.mode(state)
+    if current is None and records.enabled_at is None:
+        return base
+    open_sessions = _open_sessions(root, state, records)
+    names = _names(root)
+    gaps = _equity_gaps(root)
+    settled = [
+        {"trade_date": day, "settled": True, "gap": gaps.get(day), "rows": _settled_rows(day, ledger, names)}
+        for day, ledger in sorted(_mapping((current or {}).get("sessions")).items(), reverse=True)
+        if ledger
+    ]
+    compared = [row for session in settled for row in session["rows"]]
+    corrections = read_jsonl(root / fills.CORRECTIONS_NAME)[0]
+    return {
+        **base,
+        "mode": "on" if current is not None else "pending",
+        "after": _text((current or {}).get("after")) if current is not None else _text(state.get("settled_through")),
+        "enabled_at": _utc_iso(_to_utc(records.enabled_at)),
+        "awaiting": _awaiting(open_sessions),
+        "sessions": [*reversed(open_sessions), *settled],
+        "totals": {
+            "sessions": len(gaps),
+            # The two curves' gap summed over the sessions: what every
+            # difference (price, fee, missed or extra trade, correction) cost.
+            "execution_cost": sum(gaps.values()),
+            "price_cost": sum(row["price_cost"] or 0.0 for row in compared),
+            "fee_cost": sum(row["fee_cost"] or 0.0 for row in compared),
+            "missed": sum(1 for row in compared if row["status"] in {"missed", "partial"}),
+            "missed_notional": sum(row["missed_notional"] or 0.0 for row in compared),
+            "off_sheet": sum(1 for row in compared if row["status"] == "off_sheet"),
+            "corrections": len(corrections),
+        },
+        "skipped_lines": records.skipped,
     }
 
 
@@ -295,6 +508,18 @@ def history_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str,
         return {"env": env, "state": "unreadable", "error": error, "days": []}
     decided = _decision_dates(state)
     days = sorted(set(decided[:-1]) | set(_dates(root, "executions_")), reverse=True)
+    # A real-fill book's settled sessions, key by key against the simulator,
+    # and the corrections each later session booked.
+    ledgers = _mapping(_mapping(fills.mode(state or {})).get("sessions"))
+    gaps = _equity_gaps(root) if ledgers else {}
+    booked: dict[str, list[dict[str, object]]] = {}
+    for row in read_jsonl(root / fills.CORRECTIONS_NAME)[0] if ledgers else ():
+        booked.setdefault(str(row.get("trade_date")), []).append({
+            "corrects": _text(row.get("corrects")), "symbol": _text(row.get("symbol")),
+            "action": _text(row.get("action")), "quantity": _number(row.get("quantity")),
+            "cash": _number(row.get("cash")), "realized_pnl": _number(row.get("realized_pnl")),
+        })
+    all_names = _names(root) if ledgers else {}
     rows = []
     for day in days:
         try:
@@ -302,18 +527,26 @@ def history_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str,
         except (KeyError, TypeError, ValueError) as exc:
             return {"env": env, "state": "unreadable", "error": f"decision {day}: {exc}", "days": []}
         orders = sheet["orders"] if sheet else []
-        names = {row["symbol"]: row["name"] for row in orders if row["symbol"]}
-        fills, skipped = read_jsonl(root / f"executions_{day}.jsonl")
+        names = {**all_names, **{row["symbol"]: row["name"] for row in orders if row["symbol"]}}
+        executed, skipped = read_jsonl(root / f"executions_{day}.jsonl")
+        ledger = ledgers.get(day)
         rows.append({
             "trade_date": day,
             "orders": orders,
+            "groups": sheet["groups"] if sheet else [],
+            "limit_guidance": sheet["limit_guidance"] if sheet else None,
             # The same post-trade block the signal panel carries for today, so
             # a past day reads at the same level of detail. A day the book only
             # settled has no order sheet, and says so with null.
             "target": sheet["target"] if sheet else None,
             "cash_after": sheet["cash_after"] if sheet else None,
             "cash_weight": sheet["cash_weight"] if sheet else None,
-            "fills": [_fill(row, names) for row in fills],
+            "fills": [_fill(row, names) for row in executed],
+            "reconciliation": (
+                {"gap": gaps.get(day), "rows": _settled_rows(day, _mapping(ledger), names)}
+                if isinstance(ledger, dict) else None
+            ),
+            "corrections": booked.get(day, []),
             "skipped_lines": skipped + (sheet["skipped_lines"] if sheet else 0),
         })
     return {"env": env, "state": "ok" if rows else "absent", "error": None, "days": rows}
@@ -397,6 +630,25 @@ def _source_history(root: Path) -> tuple[dict[str, object] | None, str | None]:
     }, None
 
 
+def _simulated_returns(rows: list[dict[str, object]], initial: float) -> list[tuple[str, float]] | None:
+    """The simulated track's daily returns, or None for a simulated book.
+
+    Each real-fill session is simulated from the real account it opened with,
+    so its return is that session's simulated close over the real close
+    before it; a session settled before the switch is the account's own."""
+    if not any(_number(row.get("simulated_equity")) is not None for row in rows):
+        return None
+    result, previous = [], initial
+    for row in rows:
+        day, equity = _text(row.get("trade_date")), _number(row.get("equity"))
+        if not day or not _valid_date(day) or equity is None:
+            continue
+        simulated = _number(row.get("simulated_equity"))
+        result.append((day, (simulated if simulated is not None else equity) / previous - 1.0))
+        previous = equity
+    return result
+
+
 def performance_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str, object]:
     """The book's return against its benchmark over the same settled days, its
     end-of-day equity and cash on those days, the replay statistics, and the
@@ -440,6 +692,15 @@ def performance_payload(repo_root: Path, book: str, env: str = "paper") -> dict[
     )
     covered = benchmark is not None and len(benchmark_rows) == len(returns)
     enough = len(curve) >= MIN_STATISTICS_DAYS
+    series = [curve_entry("strategy", "模拟账户", [(anchor, 0.0), *returns])]
+    simulated = _simulated_returns(rows, initial)
+    if simulated is not None:
+        # A real-fill book: the account is the recorded one, and the second
+        # line compounds what each session would have made filled as simulated.
+        series = [
+            curve_entry("strategy", "实际成交", [(anchor, 0.0), *returns]),
+            curve_entry("simulated", "按模拟成交", [(anchor, 0.0), *simulated]),
+        ]
     total_return = _number(stats["total_return"])
     benchmark_return = _number(benchmark["final"]) if covered else None
     return {
@@ -447,7 +708,7 @@ def performance_payload(repo_root: Path, book: str, env: str = "paper") -> dict[
         "state": "ok",
         "error": None,
         "chart": {
-            "series": [curve_entry("strategy", "模拟账户", [(anchor, 0.0), *returns])],
+            "series": series,
             "benchmark": benchmark,
             "account": {
                 "dates": [anchor, *(row["trade_date"] for row in curve)],
@@ -607,6 +868,13 @@ def _instrument_flows(root: Path) -> dict[str, dict[str, float]]:
             stamp_duty=_number(row.get("stamp_duty")), realized_pnl=realized)
     for name, row in _journal_rows(root, "corporate_actions_"):
         add(name, row, dividends=_number(row.get("cash_credit")))
+    # A real-fill book's corrections move the same money a fill does.
+    corrections, skipped = read_jsonl(root / fills.CORRECTIONS_NAME)
+    if skipped:
+        raise ValueError(f"{fills.CORRECTIONS_NAME} has {skipped} unreadable line(s)")
+    for row in corrections:
+        add(fills.CORRECTIONS_NAME, row, commission=_number(row.get("commission")),
+            stamp_duty=_number(row.get("stamp_duty")), realized_pnl=_number(row.get("realized_pnl")))
     return flows
 
 
@@ -714,10 +982,15 @@ def book_status(repo_root: Path, book: str, env: str = "paper") -> dict[str, obj
     snapshot = snapshot_payload(repo_root, book, env)
     state, state_error = _read_json(root / PAPER_STATE_NAME)
     latest = max([*_dates(root, "orders_")[-1:], *_dates(root, "executions_")[-1:]], default=None)
+    environment = _environment_state(str(snapshot["state"]), state_error, latest)
+    # A real-fill book whose closed session is not recorded yet: the next run
+    # stops there, so it outranks every state but an unreadable one.
+    awaiting = _awaiting_sessions(root, state) if environment != "unreadable" else []
     return {
         "env": env,
         "book_id": book,
-        "state": _environment_state(str(snapshot["state"]), state_error, latest),
+        "state": "awaiting_fills" if awaiting else environment,
+        "awaiting_fills": awaiting,
         "error": snapshot["error"] or state_error,
         "generated_at": snapshot["generated_at"],
         "age_seconds": snapshot["age_seconds"],

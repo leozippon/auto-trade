@@ -652,7 +652,9 @@ progress.progress.done::-moz-progress-bar {
  background: var(--ok-soft);
  color: var(--loss);
 }
-/* The declaration window of one order, on every row of the sheet. */
+/* The window one order is placed in, on every row of the sheet, tinted per
+   window so the morning's opening auction and the afternoon's closing one
+   never read alike; continuous trading stays neutral. */
 .order-window {
  display: inline-block;
  border: 1px solid var(--row-border);
@@ -661,6 +663,103 @@ progress.progress.done::-moz-progress-bar {
  font-size: 0.82rem;
  white-space: nowrap;
  color: var(--muted);
+}
+.order-window.open {
+ border-color: transparent;
+ background: var(--accent-soft);
+ color: var(--accent);
+}
+.order-window.close {
+ border-color: transparent;
+ background: var(--warn-soft);
+ color: var(--warn);
+}
+/* One batch of a sheet: the orders placed at one sitting, ruled down the side
+   in their window's ink. */
+.order-batch {
+ margin-top: var(--space-4);
+ padding-left: var(--space-3);
+ border-left: 3px solid var(--border);
+}
+.order-batch:first-child {
+ margin-top: 0;
+}
+.order-batch.open {
+ border-left-color: var(--accent);
+}
+.order-batch.close {
+ border-left-color: var(--warn);
+}
+.order-batch > .subsection-title {
+ margin-top: 0;
+}
+.batch-note {
+ margin: 0 0 var(--space-3);
+ color: var(--text);
+ line-height: 2;
+}
+.batch-cash .wcell {
+ display: inline-flex;
+ vertical-align: middle;
+}
+details.fold.limit-guide {
+ margin-top: var(--space-2);
+}
+/* The fill record: one block per order key, its identity on one wrapping
+   line, then what it settles with now, then the controls that change it. */
+.fill-actions {
+ display: flex;
+ flex-wrap: wrap;
+ gap: var(--space-2);
+ margin-top: var(--space-3);
+}
+.fill-picker {
+ max-width: 22rem;
+}
+.fill-session {
+ margin-top: var(--space-2);
+}
+.fill-rows {
+ margin-top: var(--space-3);
+ border-top: 1px solid var(--row-border);
+}
+.fill-row {
+ padding: var(--space-3) 0;
+ border-bottom: 1px solid var(--row-border);
+}
+.fill-what {
+ display: flex;
+ flex-wrap: wrap;
+ align-items: center;
+ gap: var(--space-1) var(--space-2);
+ font-weight: 600;
+}
+.fill-code {
+ font-family: var(--mono);
+ font-size: 0.9rem;
+}
+.fill-note {
+ color: var(--muted);
+ font-weight: 400;
+ font-size: 0.875rem;
+}
+.fill-edit {
+ display: grid;
+ grid-template-columns: minmax(8rem, 11rem) minmax(0, 1fr);
+ gap: var(--space-2) var(--space-3);
+ align-items: end;
+ margin-top: var(--space-2);
+}
+.fill-inputs {
+ display: grid;
+ grid-template-columns: repeat(3, minmax(0, 1fr));
+ gap: var(--space-2) var(--space-3);
+}
+details.fold.fill-extra {
+ margin-top: var(--space-4);
+}
+details.fold.fill-extra .form-grid {
+ margin-top: var(--space-2);
 }
 /* The clipboard fallback's textarea: selectable, never seen. */
 .copy-fallback {
@@ -3323,6 +3422,24 @@ details.issue-evidence > summary:hover {
     carries them out of the page spans the panel head. */
  .copy-orders {
   flex: 1 1 100%;
+ }
+ /* Fills are often recorded on a phone after the close: the outcome takes a
+    row of its own, the three figures share the next, and the actions span
+    the panel. */
+ .fill-edit {
+  grid-template-columns: minmax(0, 1fr);
+ }
+ .fill-inputs {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+ }
+ .fill-actions > .btn {
+  flex: 1 1 auto;
+ }
+ .fill-picker {
+  max-width: none;
+ }
+ .order-batch {
+  padding-left: var(--space-2);
  }
  /* Form controls at 16px: below it a phone browser zooms the page in on focus
     and leaves the reader scrolled sideways in a field. */

@@ -829,6 +829,57 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     def trading_pnl(env: str, book: str):
         return _trading_book(env, book, trading.pnl_payload)
 
+    @app.get("/api/trading/{env}/books/{book}/fills")
+    def trading_fills(env: str, book: str):
+        return _trading_book(env, book, trading.fills_payload)
+
+    # The owner's record of what the book's orders actually did: two appends
+    # to the book's own fills.jsonl, gated like every other console write
+    # (the loopback bind and the edge's login). The run reads the file; the
+    # console never writes the book's state.
+    def _book_root(env: str, book: str) -> Path:
+        try:
+            return trading.book_dir(root, book, _trading_env(env))
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+
+    @app.post("/api/trading/{env}/books/{book}/fills")
+    def trading_record_fills(env: str, book: str, payload: dict = Body(...)) -> dict[str, object]:
+        from datetime import datetime
+
+        from autotrade.environment.strategy import CN_TZ
+        from autotrade.paper import fills
+        from autotrade.paper.engine import PAPER_STATE_NAME
+        from autotrade.paper.storage import read_json as read_paper_json
+
+        directory = _book_root(env, book)
+        entries = payload.get("fills") or []
+        if not isinstance(entries, list) or not all(isinstance(item, dict) for item in entries):
+            raise HTTPException(status_code=400, detail="fills must be a list of objects")
+        try:
+            lines = fills.record(
+                directory,
+                read_paper_json(directory / PAPER_STATE_NAME),
+                str(payload.get("trade_date") or ""),
+                outcome=payload.get("outcome"),
+                fills=entries,
+                today=datetime.now(CN_TZ).strftime("%Y%m%d"),
+            )
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=redact_host_paths(str(exc))) from exc
+        return {"env": env, "book_id": book, "recorded": len(lines)}
+
+    @app.post("/api/trading/{env}/books/{book}/fills/enable")
+    def trading_enable_fills(env: str, book: str) -> dict[str, object]:
+        from autotrade.paper import fills
+
+        directory = _book_root(env, book)
+        try:
+            fills.enable(directory)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=redact_host_paths(str(exc))) from exc
+        return {"env": env, "book_id": book, "real_fills": True}
+
     @app.get("/api/trading/{env}/health")
     def trading_health(env: str):
         return trading.health_payload(root, _trading_env(env))

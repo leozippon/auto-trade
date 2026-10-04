@@ -20,6 +20,10 @@ re-establishes that state by re-issuing every earlier decision call of the book
 to a fresh worker, in order, with that day's PIT view and journaled account,
 and discards their outputs before the real call. The journals, not those
 re-issued calls, are the record of what the book decided.
+
+A book its owner switched to real fills settles every later session from the
+owner's recorded outcomes instead of the simulator's, so each decision sees the
+account the owner actually holds (``paper.fills``).
 """
 
 from __future__ import annotations
@@ -59,6 +63,16 @@ from autotrade.environment.strategy import (
 )
 from autotrade.environment.strategy_loader import validate_strategy_package
 
+from .fills import (
+    CORRECTIONS_NAME,
+    SIMULATED_EXECUTIONS_PREFIX,
+    RealFills,
+    adopt,
+    mode,
+    read_records,
+    simulate,
+    unresolved,
+)
 from .storage import append_jsonl_once, read_json, read_jsonl, write_json_atomic
 
 PAPER_SOURCE = "paper_engine"
@@ -84,6 +98,10 @@ class PaperDataNotReady(PaperEngineError):
 
 class PaperWriterBusy(PaperEngineError):
     """Another process holds this book's writer lock."""
+
+
+class PaperAwaitingFills(PaperEngineError):
+    """A real-fill book has a session whose orders have no recorded outcome."""
 
 
 @contextmanager
@@ -188,10 +206,15 @@ class DailyPaperEngine:
                 self._reconcile_emissions(state)
                 broker = self._restore_broker(state)
                 pending = self._restore_orders(state)
+                records = read_records(self.state_root)
             except PaperEngineError:
                 raise
             except (OSError, TypeError, ValueError) as exc:
                 raise PaperEngineError(f"cannot restore Paper account: {exc}") from exc
+            # The owner switched the book to real fills since its last run.
+            if adopt(state, records):
+                write_json_atomic(self.state_root / PAPER_STATE_NAME, state)
+            real = RealFills(self.state_root, state, records) if mode(state) is not None else None
             decided = [str(row["trade_date"]) for row in state["decisions"]]
             if decided and trade_date == decided[-1]:
                 return self._summary(state)
@@ -205,8 +228,17 @@ class DailyPaperEngine:
                 raise PaperEngineError(f"session {trade_date} has not begun; decide it on its own calendar day")
             data: PaperData | None = None
             try:
+                # Checked before the data build: nothing settles a session
+                # whose outcome the owner has not recorded.
+                missing = unresolved(state, records, pending, before=trade_date) if real is not None else {}
+                if missing:
+                    raise PaperAwaitingFills(
+                        "fills not recorded: " + ", ".join(
+                            f"{day} has {count} order(s) without a recorded outcome" for day, count in sorted(missing.items())
+                        ) + "; record them on the book page, then run again"
+                    )
                 data = self.data_factory(str(state["start_date"] or trade_date), trade_date)
-                self._advance(state, data, broker, pending, trade_date)
+                self._advance(state, data, broker, pending, trade_date, real)
                 self._write_snapshot(state, broker, ok=True, error=None)
                 return self._summary(state)
             except Exception as exc:
@@ -232,6 +264,7 @@ class DailyPaperEngine:
         broker: DailyBroker,
         pending: list[StrategyOrder],
         trade_date: str,
+        real: RealFills | None = None,
     ) -> None:
         sessions = tuple(data.sessions)
         if trade_date not in sessions:
@@ -260,7 +293,7 @@ class DailyPaperEngine:
                     f"session {day} was never decided; run the book for {day} before {trade_date}"
                 )
         for day in to_settle:
-            self._settle(state, data, broker, pending, day)
+            self._settle(state, data, broker, pending, day, real)
         # The book's first decision is always due, as a replay's first day is.
         first = not state["decisions"]
         if self.schedule.is_due(trade_date, None if first else prior):
@@ -275,6 +308,7 @@ class DailyPaperEngine:
         broker: DailyBroker,
         pending: list[StrategyOrder],
         day: str,
+        real: RealFills | None = None,
     ) -> None:
         market = data.market
         bars = market.bars_for_day(day)
@@ -291,14 +325,38 @@ class DailyPaperEngine:
         day_end = datetime.combine(_date(day), time.max, tzinfo=CN_TZ)
         due = [order for order in pending if order.execute_at <= day_end]
         pending[:] = [order for order in pending if order.execute_at > day_end]
-        for order in due:
-            bar, raw_price = resolve_execution_price(market, order, execution_price=data.execution_price)
-            execution = broker.execute(order, bar, matched_at=order.execute_at, raw_price=raw_price)
-            self._queue_emission(state, f"executions_{day}.jsonl", {"kind": "execution", **execution.to_record()})
+        simulated_equity: dict[str, float] = {}
+        if real is not None and real.covers(day):
+            # The simulator fills a copy of the morning account; the account
+            # itself takes what the owner recorded (paper/fills.py).
+            simulator = simulate(broker)
+            simulated = []
+            for order in due:
+                bar, raw_price = resolve_execution_price(market, order, execution_price=data.execution_price)
+                execution = simulator.execute(order, bar, matched_at=order.execute_at, raw_price=raw_price)
+                simulated.append((order, execution))
+                self._queue_emission(
+                    state, f"{SIMULATED_EXECUTIONS_PREFIX}{day}.jsonl", {"kind": "execution", **execution.to_record()}
+                )
+            simulator.mark(bars)
+            try:
+                rows, corrections = real.settle(broker, day, simulated)
+            except ValueError as exc:
+                raise PaperEngineError(f"cannot settle {day} from the recorded fills: {exc}") from exc
+            for row in corrections:
+                self._queue_emission(state, CORRECTIONS_NAME, row)
+            for row in rows:
+                self._queue_emission(state, f"executions_{day}.jsonl", row)
+            simulated_equity = {"simulated_equity": simulator.equity()}
+        else:
+            for order in due:
+                bar, raw_price = resolve_execution_price(market, order, execution_price=data.execution_price)
+                execution = broker.execute(order, bar, matched_at=order.execute_at, raw_price=raw_price)
+                self._queue_emission(state, f"executions_{day}.jsonl", {"kind": "execution", **execution.to_record()})
         broker.mark(bars)
         self._queue_emission(state, "equity_daily.jsonl", {
             "kind": "equity", "trade_date": day, "equity": broker.equity(),
-            "cash": broker.cash, "position_count": len(broker.positions),
+            "cash": broker.cash, "position_count": len(broker.positions), **simulated_equity,
         })
         state["settled_through"] = day
         self._checkpoint(state, broker, pending)
@@ -526,8 +584,8 @@ class DailyPaperEngine:
             markers = [
                 item.name for item in self.state_root.iterdir()
                 if item.name == SNAPSHOT_NAME
-                or item.name.startswith(("orders_", "executions_", "corporate_actions_"))
-                or item.name == "equity_daily.jsonl"
+                or item.name.startswith(("orders_", "executions_", "corporate_actions_", SIMULATED_EXECUTIONS_PREFIX))
+                or item.name in {"equity_daily.jsonl", CORRECTIONS_NAME}
             ]
             if markers:
                 raise PaperEngineError(f"Paper journals exist but {PAPER_STATE_NAME} is missing; refusing to fabricate an account")
@@ -699,6 +757,7 @@ __all__ = [
     "REFERENCE_KEY",
     "SNAPSHOT_NAME",
     "DailyPaperEngine",
+    "PaperAwaitingFills",
     "PaperData",
     "PaperDataNotReady",
     "PaperEngineError",

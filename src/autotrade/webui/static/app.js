@@ -782,7 +782,10 @@ function equityChart(payload, opts = {}) {
   const width = fitChartWidth(opts.width || 680);
   let { ddH = 90 } = opts;
   const INK = themeInk();
-  const colorOf = { strategy: INK.strategyColor, benchmark: INK.muted };
+  // A Paper book that follows real fills also draws its simulated track: the
+  // same strategy, so the same ink, dotted as what did not happen.
+  const colorOf = { strategy: INK.strategyColor, simulated: INK.strategyColor, benchmark: INK.muted };
+  const dashOf = { benchmark: "6 4", simulated: "2 3" };
   const shown = (payload.series || []).filter((s) => (s.dates || []).length);
   if (!shown.length) return el("div", { class: "hint" }, "暂无日度收益数据");
   const bench = payload.benchmark;
@@ -795,7 +798,7 @@ function equityChart(payload, opts = {}) {
     cum: new Map(s.dates.map((d, i) => [d, s.cum[i]])),
     dd: new Map(s.dates.map((d, i) => [d, s.drawdown[i]])),
     color: colorOf[s.key] || INK.strategyColor,
-    dash: s.key === "benchmark" ? "6 4" : null,
+    dash: dashOf[s.key] || null,
   }));
   const dates = [...new Set(seriesList.flatMap((s) => s.dates))].sort();
   // Position-weight pane (EOD gross market value / equity), keyed like the
@@ -968,7 +971,7 @@ function equityChart(payload, opts = {}) {
             `${j ? "L" : "M"}${xOf(dates.indexOf(d)).toFixed(1)},${ddY(s.dd.get(d)).toFixed(1)}`,
         )
         .join(" ");
-      if (s.key !== "benchmark") {
+      if (s.key !== "benchmark" && s.key !== "simulated") {
         const first = xOf(dates.indexOf(pts[0])).toFixed(1);
         const last = xOf(dates.indexOf(pts[pts.length - 1])).toFixed(1);
         svg.push(
@@ -6885,6 +6888,7 @@ const TRADING_STATE = {
   ok: ["completed", "正常"],
   stale: ["paused", "数据陈旧"],
   no_snapshot: ["paused", "等待首次运行"],
+  awaiting_fills: ["paused", "待记录成交"],
   export_error: ["failed", "写入错误"],
   unreadable: ["failed", "数据不可读"],
   absent: ["stopped", "等待数据"],
@@ -6893,6 +6897,16 @@ const TRADING_STATE = {
 /* Banner zone (only when degraded). Data below still renders from the last
    written files — stale-but-visible, never blank. */
 function paperBanners(status) {
+  if (status.state === "awaiting_fills")
+    return [
+      el(
+        "div",
+        { class: "banner warn" },
+        `待记录成交：${(status.awaiting_fills || []).map(fmtDate).join("、")} 还有订单没有记录结果。` +
+          "在下面的「成交记录」里记下后，下一次运行才会结算这一场并给出新的订单单。",
+      ),
+      status.error ? el("div", { class: "banner bad" }, `上次运行：${status.error}`) : null,
+    ].filter(Boolean);
   if (status.state === "stale" && Number.isFinite(status.age_seconds))
     return [
       el(
@@ -6957,26 +6971,26 @@ function actionCell(action) {
   );
 }
 
-// When the operator has to declare an order by hand, keyed by the window the
-// engine wrote on the row (paper/orders.py order_window): an order that fills
-// at the session's open is matched by the opening call auction, so it has to
-// be declared before 09:25; anything else is declared once continuous trading
-// opens. One wording for the badge and for the copied text.
-const ORDER_WINDOW_LABELS = {
-  open_auction: "集合竞价（09:15–09:25）",
-  continuous: "连续竞价（09:30 起）",
-};
+// The window each order is placed in comes worded from the server
+// (paper/orders.py window_text): the opening call auction 09:15–09:25 that
+// sets the open, the closing call auction 14:57–15:00 that sets the close, or
+// continuous trading at the order's minute. The page adds only a tint per
+// window, so a morning batch and an afternoon one never look alike.
+const ORDER_WINDOW_TINTS = { open_auction: "open", close_auction: "close", continuous: "intraday" };
 
-function orderWindowLabel(orderWindow) {
-  return ORDER_WINDOW_LABELS[String(orderWindow || "")] || orderWindow || "—";
+function orderWindowLabel(row) {
+  return (row && row.window_label) || "—";
 }
 
-/* One order's declaration window as a badge. It rides on every row because a
-   sheet can mix the two, and the deadline is the operator's, not the book's. */
-function windowCell(orderWindow) {
-  const normalized = String(orderWindow || "");
-  if (!ORDER_WINDOW_LABELS[normalized]) return orderWindow || "—";
-  return el("span", { class: "order-window" }, ORDER_WINDOW_LABELS[normalized]);
+/* One order's window as a badge. It rides on every row because a sheet can
+   mix the windows, each with its own deadline, and either side can use either. */
+function windowCell(row) {
+  if (!row || !row.window_label) return "—";
+  return el(
+    "span",
+    { class: `order-window ${ORDER_WINDOW_TINTS[row.window] || ""}`.trim() },
+    row.window_label,
+  );
 }
 
 /* Whether the session ahead already has its order sheet, worded the same on the
@@ -7018,10 +7032,17 @@ function bookHash(env, book) {
 async function renderTradingPage(env, book) {
   $main.replaceChildren(pageSkeleton(book ? "stack" : "grid"));
   $topbarRight.replaceChildren();
-  tradingView = { env, book, signature: "", openDays: new Set() };
+  // fillDay and fillDrafts keep the session being recorded and what was typed
+  // into its form, so a poll that rebuilds the page never loses either.
+  tradingView = { env, book, signature: "", openDays: new Set(), fillDay: null, fillDrafts: {} };
   const hash = book ? bookHash(env, book) : `#/trading/${env}`;
   const load = book ? () => fetchBookBundle(env, book) : () => api(`/api/trading/${env}/books`);
   const render = book ? renderBookBundle : renderBooksOverview;
+  // After a write: read again now instead of at the next poll.
+  tradingView.refresh = async () => {
+    const fresh = await load();
+    if (tradingView && !navigatedAway(hash)) render(fresh);
+  };
   let bundle;
   try {
     bundle = await load();
@@ -7148,7 +7169,7 @@ function renderBooksOverview(payload) {
    Promise.all, so one missing route blanks the page. */
 async function fetchBookBundle(env, book) {
   const base = `/api/trading/${env}/books/${encodeURIComponent(book)}`;
-  const [status, identity, signal, history, performance, snapshot, pnl] = await Promise.all([
+  const [status, identity, signal, history, performance, snapshot, pnl, fills] = await Promise.all([
     api(`${base}/status`),
     api(`${base}/book`),
     api(`${base}/signal`),
@@ -7156,8 +7177,9 @@ async function fetchBookBundle(env, book) {
     api(`${base}/performance`),
     api(`${base}/snapshot`),
     api(`${base}/pnl`),
+    api(`${base}/fills`),
   ]);
-  return { status, identity, signal, history, performance, snapshot, pnl };
+  return { status, identity, signal, history, performance, snapshot, pnl, fills };
 }
 
 /* The snapshot age enters by the hour its banner quotes. */
@@ -7172,6 +7194,7 @@ function renderBookBundle(bundle) {
         paperHead(status, bundle.identity),
         ...paperBanners(status),
         paperSignalPanel(bundle.signal, bundle.identity),
+        paperFillsPanel(bundle.fills, status.book_id),
         paperEquityPanel(bundle.performance, bundle.pnl),
         paperPositionsPanel(bundle.snapshot),
         paperPnlPanel(bundle.pnl),
@@ -7241,16 +7264,23 @@ function largestWeight(rows) {
   return Math.max(0, ...rows.map((row) => Number(row.weight) || 0));
 }
 
-/* The rows an operator executes by hand: what to do, on what, how much, and
-   the weight the line is meant to carry once it fills. The sheet ends on the
-   cash the fills leave behind. */
-function paperOrdersTable(sheet) {
+/* The batches of a sheet, each placed at one sitting in its own window, in
+   placement order. A payload without them is one batch of every order. */
+function sheetGroups(sheet) {
+  return sheet.groups && sheet.groups.length
+    ? sheet.groups
+    : [{ window: null, title: "", how: "", orders: sheet.orders.map((_, index) => index) }];
+}
+
+/* The rows of one batch an operator executes by hand: what to do, where, on
+   what, how much, and the weight the line is meant to carry once it fills. */
+function paperOrdersTable(sheet, rows) {
   const weights = new Map(sheet.target.map((row) => [row.symbol, row.weight]));
   const largest = largestWeight([...sheet.target, { weight: sheet.cash_weight }]);
   return dataTable(
     [
       { label: "方向" },
-      { label: "窗口", title: "这一笔要在哪个竞价窗口申报" },
+      { label: "下单时段", title: "这一笔在哪个竞价时段申报，按什么价格成交" },
       { label: "代码" },
       { label: "名称" },
       { label: "股数", num: true },
@@ -7258,39 +7288,83 @@ function paperOrdersTable(sheet) {
       { label: "金额", num: true, title: "参考价 × 股数，未计费用" },
       { label: "目标权重", num: true, title: "成交后这只证券占总资产的权重" },
     ],
-    [
-      ...sheet.orders.map((row) => [
-        actionCell(row.action),
-        windowCell(row.window),
-        row.symbol,
-        row.name,
-        fmtShares(row.quantity),
-        fmtPrice(row.reference_price),
-        fmtAmountOpt(row.notional),
-        weightCell(weights.has(row.symbol) ? weights.get(row.symbol) : 0, largest),
-      ]),
-      ["", "", "现金", "", "", "", fmtAmountOpt(sheet.cash_after), weightCell(sheet.cash_weight, largest)],
-    ],
+    rows.map((row) => [
+      actionCell(row.action),
+      windowCell(row),
+      row.symbol,
+      row.name,
+      fmtShares(row.quantity),
+      fmtPrice(row.reference_price),
+      fmtAmountOpt(row.notional),
+      weightCell(weights.has(row.symbol) ? weights.get(row.symbol) : 0, largest),
+    ]),
   );
 }
 
+/* What one batch moves, at reference prices. */
+function batchFlows(group) {
+  return [
+    group.sell ? `卖出约 ${fmtAmount(group.sell)}` : null,
+    group.buy ? `买入约 ${fmtAmount(group.buy)}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
 /* One decision's order sheet, for today's panel and for any past day: the
-   orders it placed and, when it placed any, the holdings they fill into. No
-   orders is no change, so the holdings stay in 当前持仓 alone. */
+   orders it placed, batch by batch — each under its window, tinted apart, so
+   a sheet that mixes the morning and the afternoon cannot be read as one —
+   and, when it placed any, the holdings they fill into. No orders is no
+   change, so the holdings stay in 当前持仓 alone. */
 function paperSheetBody(sheet) {
   if (!sheet.orders.length) return [el("div", { class: "empty" }, "无订单 · 持仓不变")];
-  // Every order of a decision normally executes at the same minute; the times
-  // belong in the heading, not in a column repeating one value per row.
-  const times = [...new Set(sheet.orders.map((row) => fmtClock(row.execute_at)))].filter(
-    (time) => time !== "—",
-  );
+  const groups = sheetGroups(sheet);
+  const largest = largestWeight([...sheet.target, { weight: sheet.cash_weight }]);
   return [
-    el(
-      "h4",
-      { class: "subsection-title" },
-      `订单 ${sheet.orders.length}${times.length ? ` · ${times.join(" / ")} 执行` : ""}`,
+    groups.length > 1
+      ? el(
+          "div",
+          { class: "hint batch-note" },
+          `本单分 ${groups.length} 批下单：`,
+          ...groups.map((group, index) => [
+            index ? "，" : "",
+            el(
+              "span",
+              { class: `order-window ${ORDER_WINDOW_TINTS[group.window] || ""}`.trim() },
+              orderWindowLabel(sheet.orders[group.orders[0]]),
+            ),
+            ` ${group.orders.length} 笔`,
+          ]),
+        )
+      : null,
+    ...groups.map((group) =>
+      el(
+        "div",
+        { class: `order-batch ${ORDER_WINDOW_TINTS[group.window] || ""}`.trim() },
+        group.title
+          ? el("h4", { class: "subsection-title" }, `${group.title} · ${group.orders.length} 笔`)
+          : el("h4", { class: "subsection-title" }, `订单 ${group.orders.length}`),
+        group.how ? el("div", { class: "meta-line" }, group.how) : null,
+        paperOrdersTable(sheet, group.orders.map((index) => sheet.orders[index])),
+        batchFlows(group) ? el("div", { class: "meta-line" }, batchFlows(group)) : null,
+      ),
     ),
-    paperOrdersTable(sheet),
+    el(
+      "div",
+      { class: "meta-line section-gap batch-cash" },
+      "成交后现金 ",
+      fmtAmountOpt(sheet.cash_after),
+      " ",
+      weightCell(sheet.cash_weight, largest).value || "",
+    ),
+    sheet.limit_guidance
+      ? el(
+          "details",
+          { class: "fold limit-guide" },
+          el("summary", {}, "限价怎么填"),
+          el("div", { class: "meta-line" }, sheet.limit_guidance.replace(/^限价怎么填：/, "")),
+        )
+      : null,
     el("h4", { class: "subsection-title section-gap" }, `成交后持仓 ${sheet.target.length}`),
     sheet.target.length
       ? dataTable(
@@ -7315,19 +7389,28 @@ function paperSheetBody(sheet) {
   ];
 }
 
-/* The order rows as plain text, one line per order, tab separated: what a
-   manual execution needs and nothing else. */
-function orderClipboardText(orders) {
-  return orders
-    .map((row) =>
+/* The order rows as plain text, batch by batch under a line naming the
+   window, one tab-separated line per order that names it again: what a manual
+   execution needs and nothing else. */
+function orderClipboardText(sheet) {
+  return sheetGroups(sheet)
+    .map((group) =>
       [
-        row.symbol,
-        row.name,
-        actionLabel(row.action),
-        fmtShares(row.quantity),
-        fmtPrice(row.reference_price),
-        orderWindowLabel(row.window),
-      ].join("\t"),
+        group.title ? `【${group.title}】` : null,
+        ...group.orders.map((index) => {
+          const row = sheet.orders[index];
+          return [
+            row.symbol,
+            row.name,
+            actionLabel(row.action),
+            fmtShares(row.quantity),
+            fmtPrice(row.reference_price),
+            orderWindowLabel(row),
+          ].join("\t");
+        }),
+      ]
+        .filter(Boolean)
+        .join("\n"),
     )
     .join("\n");
 }
@@ -7357,19 +7440,19 @@ async function copyToClipboard(text) {
   return copied;
 }
 
-function copyOrdersButton(orders) {
+function copyOrdersButton(sheet) {
   return el(
     "button",
     {
       class: "btn small copy-orders",
-      title: "代码、名称、方向、股数、参考价、下单窗口，一行一笔",
+      title: "按下单时段分批；代码、名称、方向、股数、参考价、下单时段，一行一笔",
       onclick: async (event) => {
         const button = event.currentTarget;
-        if (!(await copyToClipboard(orderClipboardText(orders)))) {
+        if (!(await copyToClipboard(orderClipboardText(sheet)))) {
           toast("复制失败，请手动选择订单表", true);
           return;
         }
-        button.textContent = `已复制 ${orders.length} 笔`;
+        button.textContent = `已复制 ${sheet.orders.length} 笔`;
         setTimeout(() => {
           button.textContent = "复制订单";
         }, 2000);
@@ -7400,7 +7483,7 @@ function paperSignalPanel(payload, identity) {
       `今日信号 · ${fmtDate(signal.trade_date)}`,
       signal.fitted ? el("span", { class: "badge state-waiting_user" }, "重新拟合") : null,
       el("span", { class: "spacer" }),
-      signal.orders.length ? copyOrdersButton(signal.orders) : null,
+      signal.orders.length ? copyOrdersButton(signal) : null,
     ),
     el(
       "div",
@@ -7422,20 +7505,503 @@ function paperSignalPanel(payload, identity) {
   );
 }
 
-const FILL_STATUS_LABELS = { filled: "成交", rejected: "拒单" };
+/* ---- real fills: what the owner actually traded (paper/fills.py) ----
+   A book traded by hand can follow the owner's recorded fills instead of the
+   simulator's. The panel switches a book over, takes each session's outcomes
+   after the close — one click for the whole sheet, or order by order — and
+   adds what the sheet did not ask for; a settled session takes corrections. */
+
+const FILL_OUTCOME_LABELS = { simulated: "按模拟成交", filled: "实际成交", not_traded: "未成交" };
+
+/* What a key currently settles with, in words. */
+function recordText(row) {
+  const record = row.record;
+  if (record && record.outcome === "filled")
+    return `实际 ${fmtShares(record.quantity)} @ ${fmtPrice(record.price)}${
+      record.commission === null || record.commission === undefined ? "" : ` · 手续费 ${fmtAmount(record.commission)}`
+    }`;
+  if (record) return FILL_OUTCOME_LABELS[record.outcome] || record.outcome;
+  if (row.resolved) return `${FILL_OUTCOME_LABELS[row.resolved] || row.resolved}（整场）`;
+  return "未记录";
+}
+
+async function postFills(book, body) {
+  try {
+    const result = await api(`/api/trading/${tradingView.env}/books/${encodeURIComponent(book)}/fills`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    toast(`已记录 ${result.recorded} 条`);
+    delete tradingView.fillDrafts[body.trade_date];
+    tradingView.signature = "";
+    await tradingView.refresh();
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+function confirmRealFills(book) {
+  showModal(
+    "按实际成交跟踪",
+    el(
+      "div",
+      {},
+      el(
+        "p",
+        {},
+        "开启后，从下一次运行结算的那一场起，这个模拟账户按你记录的成交结算：每场收盘后记下每笔订单的结果——全部按模拟成交、全部未成交，或逐笔填实际成交价、股数与手续费——也可以记下订单单之外的成交。",
+      ),
+      el(
+        "p",
+        {},
+        "策略第二天看到的持仓与现金、以及下一张订单单，都来自记录的成交。有订单而没有记录的一场不会结算，下一张订单单也不会生成。按模拟成交的结果另存一份，在收益曲线上画成虚线作对照。",
+      ),
+      el("p", {}, "这个切换不能撤回；记录只追加，改错了再记一次即可。"),
+    ),
+    [
+      el("button", { class: "btn", onclick: closeModal }, "取消"),
+      el(
+        "button",
+        {
+          class: "btn primary",
+          onclick: async () => {
+            try {
+              await api(`/api/trading/${tradingView.env}/books/${encodeURIComponent(book)}/fills/enable`, {
+                method: "POST",
+              });
+              closeModal();
+              toast("已开启，下一次运行起生效");
+              tradingView.signature = "";
+              await tradingView.refresh();
+            } catch (error) {
+              toast(error.message, true);
+            }
+          },
+        },
+        "开启",
+      ),
+    ],
+  );
+}
+
+/* A labelled input of the fill form; what is typed lands in `draft`. */
+function fillInput(draft, name, label, attrs = {}) {
+  const input = el("input", { type: "number", inputmode: "decimal", min: "0", ...attrs });
+  if (draft[name] !== undefined) input.value = draft[name];
+  input.addEventListener("input", () => {
+    draft[name] = input.value;
+  });
+  return el("div", { class: "field" }, el("label", {}, label), input);
+}
+
+/* One order key of a session: what was ordered, what it settles with now,
+   and the controls that change it. */
+function fillRow(row, draft, settled) {
+  const choices = [
+    ["", "不改"],
+    ...(row.ordered ? [["simulated", FILL_OUTCOME_LABELS.simulated]] : []),
+    ["filled", FILL_OUTCOME_LABELS.filled],
+    ["not_traded", FILL_OUTCOME_LABELS.not_traded],
+  ];
+  const inputs = el(
+    "div",
+    { class: "fill-inputs" },
+    fillInput(draft, "price", "成交价", { step: "0.01", placeholder: fmtPrice(row.reference_price) }),
+    fillInput(draft, "quantity", "股数", { step: "1", inputmode: "numeric", placeholder: String(row.ordered || "") }),
+    fillInput(draft, "commission", "手续费（可选）", { step: "0.01", placeholder: "按费率计算" }),
+  );
+  const outcome = el(
+    "select",
+    {
+      "aria-label": `${row.symbol} 的结果`,
+      onchange: (event) => {
+        draft.outcome = event.target.value;
+        inputs.hidden = draft.outcome !== "filled";
+      },
+    },
+    ...choices.map(([value, label]) => el("option", { value }, label)),
+  );
+  outcome.value = draft.outcome || "";
+  inputs.hidden = outcome.value !== "filled";
+  return el(
+    "div",
+    { class: "fill-row" },
+    el(
+      "div",
+      { class: "fill-what" },
+      actionCell(row.action),
+      windowCell(row),
+      el("span", { class: "fill-code" }, row.symbol),
+      row.name ? el("span", {}, row.name) : null,
+      el(
+        "span",
+        { class: "fill-note" },
+        row.ordered ? `${fmtShares(row.ordered)} 股 · 参考价 ${fmtPrice(row.reference_price)}` : "单外成交",
+      ),
+    ),
+    el(
+      "div",
+      { class: "meta-line" },
+      settled
+        ? `模拟 ${outcomeText(row.simulated)} · 实际 ${outcomeText(row.real)}`
+        : `现在：${recordText(row)}`,
+    ),
+    el("div", { class: "fill-edit" }, el("div", { class: "field" }, outcome), inputs),
+  );
+}
+
+/* A trade the sheet did not ask for, on the session in view. */
+function offSheetForm(day, book) {
+  const draft = { time: "09:30", action: "buy" };
+  const clock = el("input", { type: "time", value: "10:00", step: "60" });
+  const clockField = el("div", { class: "field" }, el("label", {}, "成交时间"), clock);
+  clockField.hidden = true;
+  const when = el(
+    "select",
+    {
+      onchange: (event) => {
+        clockField.hidden = event.target.value !== "other";
+      },
+    },
+    el("option", { value: "09:30" }, "开盘集合竞价（09:30 撮合）"),
+    el("option", { value: "15:00" }, "收盘集合竞价（15:00 撮合）"),
+    el("option", { value: "other" }, "盘中连续竞价"),
+  );
+  const symbol = el("input", { type: "text", placeholder: "000001.SZ", autocapitalize: "characters" });
+  const side = el(
+    "select",
+    {},
+    el("option", { value: "buy" }, "买入"),
+    el("option", { value: "sell" }, "卖出"),
+  );
+  return el(
+    "details",
+    { class: "fold fill-extra" },
+    el("summary", {}, "记一笔订单单之外的成交"),
+    el(
+      "div",
+      { class: "form-grid" },
+      el("div", { class: "field" }, el("label", {}, "时段"), when),
+      clockField,
+      el("div", { class: "field" }, el("label", {}, "代码"), symbol),
+      el("div", { class: "field" }, el("label", {}, "方向"), side),
+      fillInput(draft, "quantity", "股数", { step: "1", inputmode: "numeric" }),
+      fillInput(draft, "price", "成交价", { step: "0.01" }),
+      fillInput(draft, "commission", "手续费（可选）", { step: "0.01", placeholder: "按费率计算" }),
+    ),
+    el(
+      "div",
+      { class: "fill-actions" },
+      el(
+        "button",
+        {
+          class: "btn",
+          onclick: () => {
+            const entry = {
+              time: when.value === "other" ? clock.value : when.value,
+              symbol: symbol.value.trim().toUpperCase(),
+              action: side.value,
+              outcome: "filled",
+              quantity: Number(draft.quantity),
+              price: Number(draft.price),
+              commission: draft.commission ? Number(draft.commission) : null,
+            };
+            postFills(book, { trade_date: day, fills: [entry] });
+          },
+        },
+        "记下这笔",
+      ),
+    ),
+  );
+}
+
+/* One session's record: the whole-sheet shortcuts while it is open, then each
+   order key, then what the sheet did not ask for. A settled session takes
+   corrections the same way and says what they do. */
+function fillSessionForm(session, book) {
+  const day = session.trade_date;
+  const drafts = (tradingView.fillDrafts[day] ||= {});
+  const save = () => {
+    const entries = [];
+    for (const row of session.rows) {
+      const draft = drafts[row.key];
+      if (!draft || !draft.outcome) continue;
+      const entry = { time: row.time, symbol: row.symbol, action: row.action, outcome: draft.outcome };
+      if (draft.outcome === "filled") {
+        const quantity = Number(draft.quantity || row.ordered);
+        const price = Number(draft.price);
+        if (!(price > 0) || !Number.isInteger(quantity) || quantity <= 0) {
+          toast(`${row.symbol}：请填写成交价与股数`, true);
+          return;
+        }
+        Object.assign(entry, {
+          price,
+          quantity,
+          commission: draft.commission ? Number(draft.commission) : null,
+        });
+      }
+      entries.push(entry);
+    }
+    if (!entries.length) {
+      toast("没有要保存的改动", true);
+      return;
+    }
+    postFills(book, { trade_date: day, fills: entries });
+  };
+  const notes = [
+    session.settled
+      ? "这一场已结算。在这里改动是更正：下一次运行把差额（股数、现金、成本与已实现盈亏）记在它结算的那一场，曲线在那一天体现，此前各天不重算。"
+      : null,
+    !session.settled && !session.closed ? "这一场还没收盘：15:00 之后再记录它。" : null,
+    session.post_hoc ? "这一场的订单单是事后补跑出来的，当天没人拿到它，未记录的订单按未成交结算。" : null,
+    session.default ? `整场已记为「${FILL_OUTCOME_LABELS[session.default]}」，逐笔记录优先。` : null,
+  ].filter(Boolean);
+  return el(
+    "div",
+    { class: "fill-session" },
+    ...notes.map((text) => el("div", { class: "meta-line" }, text)),
+    session.settled
+      ? null
+      : el(
+          "div",
+          { class: "fill-actions" },
+          el(
+            "button",
+            { class: "btn primary", onclick: () => postFills(book, { trade_date: day, outcome: "simulated" }) },
+            "全部按模拟成交",
+          ),
+          el(
+            "button",
+            { class: "btn", onclick: () => postFills(book, { trade_date: day, outcome: "not_traded" }) },
+            "全部未成交",
+          ),
+        ),
+    session.rows.length
+      ? el(
+          "div",
+          { class: "fill-rows" },
+          ...session.rows.map((row) => fillRow(row, (drafts[row.key] ||= {}), session.settled)),
+        )
+      : el("div", { class: "empty" }, "这一场没有订单"),
+    session.rows.length
+      ? el("div", { class: "fill-actions" }, el("button", { class: "btn", onclick: save }, "保存逐笔记录"))
+      : null,
+    offSheetForm(day, book),
+  );
+}
+
+function fillSessionLabel(session) {
+  if (session.settled) return `${fmtDate(session.trade_date)} · 已结算`;
+  if (!session.closed) return `${fmtDate(session.trade_date)} · 未收盘`;
+  return `${fmtDate(session.trade_date)} · ${session.unresolved ? `待记录 ${session.unresolved} 笔` : "已记录"}`;
+}
+
+/* The book's fill record: off, it offers the switch; on, it shows what manual
+   execution has cost so far, which sessions still need their outcomes, and the
+   form for the session picked. */
+function paperFillsPanel(payload, book) {
+  if (!payload) return null;
+  const title = "成交记录";
+  if (payload.state === "unreadable")
+    return el("div", { class: "panel section-gap" }, panelHead(title), el("div", { class: "hint warn" }, payload.error));
+  if (payload.mode === "off")
+    return el(
+      "div",
+      { class: "panel section-gap fills-panel" },
+      panelHead(title, el("span", { class: "mode-note" }, "按模拟成交结算")),
+      el(
+        "div",
+        { class: "meta-line" },
+        "照订单单手工下单时，可以改为按实际成交跟踪：每场收盘后记下每笔订单的实际结果，账户、收益与下一张订单单都从真实持仓出发，模拟成交另画一条线作对照。",
+      ),
+      el(
+        "div",
+        { class: "fill-actions" },
+        el("button", { class: "btn", onclick: () => confirmRealFills(book) }, "改为按实际成交跟踪…"),
+      ),
+    );
+  const totals = payload.totals || {};
+  const sessions = payload.sessions || [];
+  const panel = el(
+    "div",
+    { class: "panel section-gap fills-panel" },
+    panelHead(
+      title,
+      payload.mode === "on"
+        ? chip(
+            payload.after ? `按实际成交 · ${fmtDate(payload.after)} 之后` : "按实际成交 · 自第一场",
+            "这之后的每一场都按记录的成交结算",
+          )
+        : chip("已开启 · 下一次运行起生效", "下一次运行结算的第一场起按记录的成交结算"),
+    ),
+  );
+  if (totals.sessions)
+    panel.append(
+      statTilesRow(
+        presentTiles([
+          {
+            label: "执行成本",
+            value: totals.execution_cost,
+            fmt: fmtAmount,
+            title: "两条线逐场收盘之差的合计：按模拟成交比实际多出的钱，含价差、费用、未成交、单外成交与更正",
+          },
+          { label: "价差", value: totals.price_cost, fmt: fmtAmount, title: "实际成交价相对模拟成交价（含滑点）之差 × 股数，买贵卖便宜为正" },
+          { label: "费用差", value: totals.fee_cost, fmt: fmtAmount, title: "实际费用减模拟费用" },
+          {
+            label: "未成交",
+            value: totals.missed,
+            fmt: (count) => `${count} 笔`,
+            title: `未成交或部分成交的订单；少成交的金额约 ${fmtAmount(totals.missed_notional)}`,
+          },
+          { label: "单外成交", value: totals.off_sheet, fmt: (count) => `${count} 笔` },
+          { label: "更正", value: totals.corrections, fmt: (count) => `${count} 次` },
+        ]),
+      ),
+    );
+  if ((payload.awaiting || []).length)
+    panel.append(
+      el(
+        "div",
+        { class: "hint warn section-gap" },
+        `${payload.awaiting.map(fmtDate).join("、")} 还有订单没有记录：记下之后，下一次运行才会结算并给出新的订单单。`,
+      ),
+    );
+  panel.append(skippedChip(payload.skipped_lines) || "");
+  if (!sessions.length) {
+    panel.append(el("div", { class: "empty" }, "还没有要记录的一场"));
+    return panel;
+  }
+  const pick =
+    sessions.find((session) => session.trade_date === tradingView.fillDay) ||
+    sessions.find((session) => !session.settled && session.closed && session.unresolved) ||
+    sessions[0];
+  tradingView.fillDay = pick.trade_date;
+  const picker = el(
+    "select",
+    {
+      "aria-label": "选择要记录的一场",
+      onchange: (event) => {
+        tradingView.fillDay = event.target.value;
+        tradingView.signature = "";
+        tradingView.refresh();
+      },
+    },
+    ...sessions.map((session) => el("option", { value: session.trade_date }, fillSessionLabel(session))),
+  );
+  picker.value = pick.trade_date;
+  panel.append(
+    el("div", { class: "field fill-picker section-gap" }, el("label", {}, "哪一场"), picker),
+    fillSessionForm(pick, book),
+  );
+  return panel;
+}
+
+const FILL_STATUS_LABELS = { filled: "成交", rejected: "拒单", unfilled: "未成交" };
+
+// How a recorded fill compares with the simulated one (paper/fills.py
+// compare); anything but the two agreeing is flagged.
+const RECONCILE_STATUS = {
+  filled: ["已成交", ""],
+  none: ["均未成交", ""],
+  missed: ["未成交", "warn"],
+  partial: ["部分成交", "warn"],
+  extra: ["多成交", "warn"],
+  off_sheet: ["单外成交", "warn"],
+};
+
+/* One outcome as 股数 @ 价格, or why there is none. */
+function outcomeText(outcome) {
+  if (!outcome || !outcome.quantity) return outcome && outcome.reason ? `0（${outcome.reason}）` : "0";
+  return `${fmtShares(outcome.quantity)} @ ${fmtPrice(outcome.price)}`;
+}
+
+/* A real-fill session key by key: the simulator's fill, the recorded one, and
+   what the difference cost (positive = manual execution cost money). */
+function reconciliationTable(rows) {
+  return dataTable(
+    [
+      { label: "方向" },
+      { label: "下单时段" },
+      { label: "代码" },
+      { label: "名称" },
+      { label: "模拟", num: true, title: "模拟账户的成交：股数 @ 价格（含滑点）" },
+      { label: "实际", num: true, title: "记录的成交：股数 @ 价格" },
+      { label: "价差", num: true, title: "实际成交价相对模拟成交价，买贵或卖便宜为正（bp）" },
+      { label: "价差金额", num: true, title: "价差 × 实际股数；正数是人工执行多花的钱" },
+      { label: "费用差", num: true, title: "实际费用（佣金、过户费、印花税）减模拟费用" },
+      { label: "状态" },
+    ],
+    rows.map((row) => {
+      const [label, cls] = RECONCILE_STATUS[row.status] || [row.status, ""];
+      return [
+        actionCell(row.action),
+        windowCell(row),
+        row.symbol,
+        row.name,
+        outcomeText(row.simulated),
+        outcomeText(row.real),
+        Number.isFinite(row.price_bp) ? `${row.price_bp > 0 ? "+" : ""}${row.price_bp.toFixed(1)} bp` : "—",
+        { value: fmtAmountOpt(row.price_cost), cls: row.price_cost > 0 ? "neg" : "" },
+        { value: fmtAmountOpt(row.fee_cost), cls: row.fee_cost > 0 ? "neg" : "" },
+        el("span", { class: `stat-chip ${cls}`.trim() }, label),
+      ];
+    }),
+  );
+}
 
 /* A past day reads like today's panel: that morning's order sheet — its
    orders and the holdings they filled into — and then what actually filled.
-   A day the book only settled has no sheet at all, and shows only its fills. */
+   A day the book only settled has no sheet at all, and shows only its fills.
+   A real-fill book adds the session against its simulated fill, and the
+   corrections booked that day. */
 function paperHistoryDay(day) {
   const sheet = day.target ? paperSheetBody(day) : [];
   // Only a rejected order carries a reason: a day where everything filled has
   // no 说明 to show, and a column of dashes is not one.
   const explained = day.fills.some((row) => row.reason);
+  const reconciled = day.reconciliation;
   return el(
     "div",
     { class: "history-day-body" },
     ...sheet,
+    reconciled && reconciled.rows.length
+      ? [
+          el("h4", { class: "subsection-title section-gap" }, "实际成交对模拟成交"),
+          reconciliationTable(reconciled.rows),
+          Number.isFinite(reconciled.gap)
+            ? el(
+                "div",
+                { class: "meta-line" },
+                "这一场按模拟成交收盘时多 ",
+                el("span", { class: reconciled.gap > 0 ? "neg" : "" }, fmtAmount(reconciled.gap)),
+                "（两条曲线当天的差，含未成交与单外成交的影响）",
+              )
+            : null,
+        ]
+      : null,
+    (day.corrections || []).length
+      ? [
+          el("h4", { class: "subsection-title section-gap" }, "更正"),
+          dataTable(
+            [
+              { label: "更正哪一场" },
+              { label: "代码" },
+              { label: "方向" },
+              { label: "股数变动", num: true },
+              { label: "现金变动", num: true },
+              { label: "已实现变动", num: true },
+            ],
+            day.corrections.map((row) => [
+              fmtDate(row.corrects),
+              row.symbol,
+              actionCell(row.action),
+              Number.isFinite(row.quantity) ? `${row.quantity > 0 ? "+" : ""}${fmtShares(row.quantity)}` : "—",
+              { value: fmtAmountOpt(row.cash), cls: signCls(row.cash) },
+              { value: fmtAmountOpt(row.realized_pnl), cls: row.realized_pnl ? signCls(row.realized_pnl) : "" },
+            ]),
+          ),
+        ]
+      : null,
     el(
       "h4",
       { class: `subsection-title${sheet.length ? " section-gap" : ""}` },
@@ -7498,12 +8064,15 @@ function paperHistoryPanel(payload) {
   for (const day of days) {
     const filled = day.fills.filter((row) => row.status === "filled").length;
     const rejected = day.fills.filter((row) => row.status === "rejected").length;
+    const unfilled = day.fills.filter((row) => row.status === "unfilled").length;
     const details = lazyDetails(
       [
         fmtDate(day.trade_date),
         `订单 ${day.orders.length}`,
         `成交 ${filled}`,
         rejected ? `拒单 ${rejected}` : null,
+        unfilled ? `未成交 ${unfilled}` : null,
+        (day.corrections || []).length ? `更正 ${day.corrections.length}` : null,
       ]
         .filter(Boolean)
         .join(" · "),
@@ -7534,11 +8103,22 @@ function bookCurveChart(chart, source, opts) {
   if (!line || !(line.dates || []).length) return equityChart(chart, opts);
   const joined = chainEquity(source, chart);
   const paperStart = ((chart.series || [])[0] || {}).dates || [];
+  // A real-fill book draws its simulated track too, chained on the same
+  // source history, so the two lines part only where execution did.
+  const simulated = (chart.series || []).find((entry) => entry.key === "simulated");
   return equityChart(
     {
       // One strategy across two regimes: the legend says so, and the account
       // pane stays the book's own (the experiment has no account).
-      series: joined.series.map((entry) => ({ ...entry, label: "源实验 → 模拟账户" })),
+      series: [
+        ...joined.series.map((entry) => ({
+          ...entry,
+          label: simulated ? "源实验 → 实际成交" : "源实验 → 模拟账户",
+        })),
+        simulated
+          ? { ...chainSeries(line, simulated), key: "simulated", label: "源实验 → 按模拟成交" }
+          : null,
+      ].filter(Boolean),
       benchmark: joined.benchmark,
       account: chart.account,
     },

@@ -320,8 +320,8 @@ def test_the_order_sheet_matches_the_journal(tmp_path: Path):
     assert "数据截至 2026-01-06（周二） 收盘" in text
     # A held name is quoted at the close the account was marked with (20260106: 12.50).
     assert "总资产 ¥100,149.89，现金 ¥98,899.89，持仓 1 只" in text
-    assert "| 09:30 | 000001.SZ | 平安银行 | 卖出 | 100 | 12.50 | ¥1,250.00 |" in text
-    assert "下单窗口：全部 1 笔以当日开盘价成交，请在集合竞价（09:15–09:25）内申报。" in text
+    assert "### 上午 · 开盘集合竞价 09:15–09:25 申报 · 按开盘价成交（1 笔）" in text
+    assert "| 卖出 | 000001.SZ | 平安银行 | 100 | 12.50 | ¥1,250.00 | 上午 开盘集合竞价 09:15–09:25 |" in text
     assert "## 成交后目标持仓（0 只）" in text
     assert "重放此前决策 2 次，其中 2 次与模拟账户记录的订单一致" in text
     idle = render_orders(sheet_book, "20260106")
@@ -334,28 +334,82 @@ def test_the_order_sheet_matches_the_journal(tmp_path: Path):
     assert "未生成" in failure and "PaperDataNotReady: committed data ends at 20260106" in failure
 
 
-def test_the_sheet_says_where_each_order_is_declared(tmp_path: Path):
-    """The operator places these orders by hand, so each one names its window:
-    an order filling at the open is matched by the 09:15-09:25 call auction,
-    any other execute_at is declared once continuous trading opens."""
+WINDOW_STRATEGY = """ORDERS = {orders!r}
 
-    source = """def generate_orders(context):
+
+def generate_orders(context):
     day = context.inference_at.strftime("%Y-%m-%d")
     return [
-        {"symbol": "000001.SZ", "action": "buy", "quantity": 100, "execute_at": day + "T09:30:00+08:00"},
-        {"symbol": "000001.SZ", "action": "buy", "quantity": 100, "execute_at": day + "T14:00:00+08:00"},
+        {{"symbol": "000001.SZ", "action": action, "quantity": 100, "execute_at": day + "T" + clock + ":00+08:00"}}
+        for action, clock in ORDERS
     ]
+"""
+OPEN_LINE = "上午 开盘集合竞价 09:15–09:25"
+CLOSE_LINE = "下午 收盘集合竞价 14:57–15:00"
+
+
+def _window_sheet(tmp_path: Path, orders) -> tuple[dict[str, object], str]:
+    book = _Book(tmp_path, WINDOW_STRATEGY.format(orders=orders), sessions=("20260102", *SESSIONS))
+    book.run("20260105")
+    return order_sheet(book.root, "20260105"), render_orders(_sheet_book(book), "20260105")
+
+
+@pytest.mark.parametrize(
+    ("action", "clock", "window", "line", "heading"),
+    [
+        ("buy", "09:30", "open_auction", OPEN_LINE, "开盘集合竞价 09:15–09:25 申报 · 按开盘价成交"),
+        ("sell", "09:30", "open_auction", OPEN_LINE, "开盘集合竞价 09:15–09:25 申报 · 按开盘价成交"),
+        ("buy", "15:00", "close_auction", CLOSE_LINE, "收盘集合竞价 14:57–15:00 申报 · 按收盘价成交"),
+        ("sell", "15:00", "close_auction", CLOSE_LINE, "收盘集合竞价 14:57–15:00 申报 · 按收盘价成交"),
+    ],
+)
+def test_every_order_names_the_auction_it_is_placed_in_whatever_its_side(
+    tmp_path: Path, action, clock, window, line, heading
+):
+    """The window is read off the order's own time and nothing else: a buy at
+    the open and a sell at the close are as ordinary as the reverse."""
+
+    sheet, text = _window_sheet(tmp_path, [(action, clock)])
+    [row] = sheet["orders"]
+    assert (row["window"], row["window_label"], row["time"], row["session"]) == (window, line, clock, "20260105")
+    side = "买入" if action == "buy" else "卖出"
+    assert f"| {side} | 000001.SZ | 平安银行 | 100 | 10.50 | ¥1,050.00 | {line} |" in text
+    assert heading in text and "分 " not in text.split("## 订单", 1)[1].split("\n", 1)[0]
+    # The wrong statements are gone: nothing is placed "from 09:30", and the
+    # book is not said to fill everything at the open.
+    assert "09:30 起" not in text and "按当日开盘价撮合" not in text
+    assert "限价怎么填" in text
+
+
+def test_a_sheet_placed_in_two_sittings_says_so_before_its_first_table(tmp_path: Path):
+    """Sell at the close, buy at the open, and one intraday minute: three
+    batches, in placement order, each with its own heading and line labels."""
+
+    sheet, text = _window_sheet(tmp_path, [("sell", "15:00"), ("buy", "09:30"), ("buy", "10:00")])
+    assert [(row["action"], row["window"]) for row in sheet["orders"]] == [
+        ("buy", "open_auction"), ("buy", "continuous"), ("sell", "close_auction"),
+    ]
+    assert [group["window"] for group in sheet["groups"]] == ["open_auction", "continuous", "close_auction"]
+    assert [group["orders"] for group in sheet["groups"]] == [[0], [1], [2]]
+    head = text.split("## 订单", 1)[1].split("\n", 1)[0]
+    assert head == "（3 笔，分 3 批下单：上午 开盘集合竞价 1 笔，上午 连续竞价 1 笔，下午 收盘集合竞价 1 笔）"
+    sections = [line for line in text.splitlines() if line.startswith("### ")]
+    assert sections == [
+        "### 上午 · 开盘集合竞价 09:15–09:25 申报 · 按开盘价成交（1 笔）",
+        "### 上午 · 连续竞价 10:00 申报 · 按该分钟的价格成交（1 笔）",
+        "### 下午 · 收盘集合竞价 14:57–15:00 申报 · 按收盘价成交（1 笔）",
+    ]
+    assert "09:20–09:25 只能申报、不能撤单" in text and "申报后不能撤单" in text
+
+
+def test_an_order_for_a_later_session_says_which_day_it_is_placed_on(tmp_path: Path):
+    source = """def generate_orders(context):
+    return [{"symbol": "000001.SZ", "action": "buy", "quantity": 100, "execute_at": "2026-01-06T09:30:00+08:00"}]
 """
     book = _Book(tmp_path, source, sessions=("20260102", *SESSIONS))
     book.run("20260105")
-    assert [row["window"] for row in order_sheet(book.root, "20260105")["orders"]] == [
-        "open_auction", "continuous",
-    ]
-    text = render_orders(_sheet_book(book), "20260105")
-    assert (
-        "下单窗口：09:30 成交的 1 笔请在集合竞价（09:15–09:25）内申报，"
-        "其余 1 笔在连续竞价（09:30 起）按各自时间下单。"
-    ) in text
+    [row] = order_sheet(book.root, "20260105")["orders"]
+    assert (row["session"], row["window_label"]) == ("20260106", "2026-01-06（周二）上午 开盘集合竞价 09:15–09:25")
 
 
 def test_a_pre_open_book_reads_a_real_pit_window_without_the_session_bars(tmp_path: Path):
