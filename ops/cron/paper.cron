@@ -31,7 +31,7 @@ PRIORITY_BOOK=seqbag_alla_100k_8y_qwen_20261003
 # earlier decisions and one decision -- 8-13 min measured on a quiet host, 42
 # min with four research arms on the box; on a refit day the fit adds 10-40
 # min, capped at the fit timeout init froze into that book's book.json from its
-# experiment's strategy_fit_timeout_seconds (7200 s for the book in place
+# experiment's strategy_fit_timeout_seconds (3600 s for the books in place
 # today). Books run one after another.
 #
 # 07:40 and 08:35 are retries for a morning whose data landed late or whose

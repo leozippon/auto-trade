@@ -28,7 +28,7 @@ book on the same seed base) runs in every batch:
   legitimate ending. One arm, on the local model: its legs are deterministic
   bytes a second model would only repeat.
 - `seqhold_beta`: the book may buy only names whose ex-ante beta to the index
-  (the label's estimator) is at least a floor, 0.9 or 1.0, estimated over 120
+  (the label's estimator) is at least a floor, 1.0 or 1.1, estimated over 120
   or 60 days, against a placebo of the same floor on a date-seeded random
   score. The claim: on both seed bases the row's beta within 0.9-1.1 and the
   active reading within a tolerance of `c_base`'s, the placebo not earning

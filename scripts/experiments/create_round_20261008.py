@@ -27,8 +27,9 @@ same seed base) runs in every batch:
 
 Every claim is read on at least two seed bases; a row that clears the gate
 without its lane's claim is not nominated, because the baseline itself is
-already frozen. All six arms run on the fundamentals seed with the parameters
-of round 20261006, so `c_base` rows are comparable across the two rounds, on
+already frozen. All six arms run with the parameters of round 20261006 on the
+taxed twin of its seed (identical market and fundamentals tables), so a
+`c_base` row here differs from that round's by the dividend tax alone, on
 one GPU, by the local model and by `mimo-v2.6-flash`. Their lineage is round
 20261006's; that round's four arms on the same baseline are still running and
 have no recorded trial to inherit, so a freeze here is read against the pooled
