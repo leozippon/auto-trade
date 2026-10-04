@@ -14,6 +14,10 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 CRON_TZ=Asia/Shanghai
 REPO_ROOT=/Data2/lzp/ADMCubeQuant
 QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
+# The book the owner trades by hand runs first, so its order sheet is ready
+# before the others; the second command then runs every book and re-prints
+# the first one's decided sheet.
+PRIORITY_BOOK=seqbag_alla_100k_8y_qwen_20261003
 
 # The operator places the sheet's orders by hand: an order that fills at the
 # open goes into the 09:15-09:25 opening call auction, one that fills at the
@@ -38,6 +42,6 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # part of the chain that can push past 05:40 under load (03:35-05:32 on a quiet
 # night, 03:35-07:14 on 2026-09-16 with four arms running); a night where it
 # runs past 08:35 needs the arms throttled, not another retry.
-40 5 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && flock -n .runtime/paper/cron.lock $QUANT_PYTHON scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1
-40 7 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && flock -n .runtime/paper/cron.lock $QUANT_PYTHON scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1
-35 8 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && flock -n .runtime/paper/cron.lock $QUANT_PYTHON scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1
+40 5 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && flock -n .runtime/paper/cron.lock bash -c '$QUANT_PYTHON scripts/paper/run_paper.py run --book $PRIORITY_BOOK; $QUANT_PYTHON scripts/paper/run_paper.py run' >> logs/paper/cron.log 2>&1
+40 7 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && flock -n .runtime/paper/cron.lock bash -c '$QUANT_PYTHON scripts/paper/run_paper.py run --book $PRIORITY_BOOK; $QUANT_PYTHON scripts/paper/run_paper.py run' >> logs/paper/cron.log 2>&1
+35 8 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && flock -n .runtime/paper/cron.lock bash -c '$QUANT_PYTHON scripts/paper/run_paper.py run --book $PRIORITY_BOOK; $QUANT_PYTHON scripts/paper/run_paper.py run' >> logs/paper/cron.log 2>&1
