@@ -28,11 +28,11 @@ const OUTCOME_LABELS = {
 // How an arm ended (webui/registry.py ENDING_STATES). The server classifies
 // the ending and writes its one-line reason; the console only words it, and
 // words it the same way on the card, the page header, the process list, the
-// 裁决 view and Paper's 候选来源.
+// 裁决 view and Paper's 候选来源. A graduation withdrawn afterwards is a
+// failure, `rejected`, and only its reason says it had graduated.
 const ENDING_LABELS = {
   graduated: "毕业",
   rejected: "未通过",
-  voided: "毕业已作废",
   no_edge: "未发现超额",
   budget_exhausted: "预算耗尽",
   broken: "失败",
@@ -507,29 +507,32 @@ function fmtSharpe(value) {
    and the tool or call it is on, then a clock since the stage began. The clock
    is an elapsed node, so whoever holds the line ticks it with
    tickElapsedClocks; a caller that has its own duration passes elapsed: false.
-   Null when the status carries no stage. */
-function activityNode(status, { elapsed = true, className = "activity" } = {}) {
+   `brief` is the home card's line: the glyph and the stage word alone, the
+   figures being the experiment page's. Null when the status carries no stage. */
+function activityNode(status, { elapsed = true, className = "activity", brief = false } = {}) {
   const stage = status && status.environment_stage;
   if (!stage) return null;
   const progress = (status && status.environment_progress) || {};
   const done = Number(progress.completed ?? progress.day_index);
   const total = Number(progress.total ?? progress.total_days);
   const measured =
-    Number.isFinite(done) && Number.isFinite(total) && total > 0
+    !brief && Number.isFinite(done) && Number.isFinite(total) && total > 0
       ? ` ${done}/${total}`
       : "";
-  const action = progress.tool
-    ? ` · ${progress.tool}`
-    : progress.call_index
-      ? ` · 第 ${progress.call_index} 次调用`
-      : "";
+  const action = brief
+    ? ""
+    : progress.tool
+      ? ` · ${progress.tool}`
+      : progress.call_index
+        ? ` · 第 ${progress.call_index} 次调用`
+        : "";
   const node = el(
     "span",
     { class: className },
     el("span", { class: "activity-icon", "aria-hidden": "true" }, ENVIRONMENT_STAGE_ICONS[stage] || "⏳"),
     `${ENVIRONMENT_STAGE_LABELS[stage] || stage}${measured}${action}`,
   );
-  if (elapsed) {
+  if (elapsed && !brief) {
     const clock = elapsedClockNode(
       status.environment_stage_started_at || status.session_started_at,
       "",
@@ -799,7 +802,9 @@ function fitChartWidth(width) {
 }
 
 function equityChart(payload, opts = {}) {
-  const { height = 240, mini = false, markers = [], bands = [] } = opts;
+  // `legendValues: false` names the lines without their final returns: the
+  // home page's curves, whose figures are the experiment page's.
+  const { height = 240, mini = false, markers = [], bands = [], legendValues = true } = opts;
   const width = fitChartWidth(opts.width || 680);
   let { ddH = 90 } = opts;
   const INK = themeInk();
@@ -1138,7 +1143,7 @@ function equityChart(payload, opts = {}) {
   // the plot it collided with the pane's own ¥ ceiling tick.
   const legend = seriesList.map((s) => ({
     color: s.color,
-    label: `${s.label} ${fmtPct(s.final)}`,
+    label: legendValues ? `${s.label} ${fmtPct(s.final)}` : s.label,
   }));
   if (showAccount) legend.push({ color: null, label: "资金：权益（线）· 现金（柱）" });
   const wrap = el("div", { class: "svg-chart" }, chartLegend(legend));
@@ -1289,7 +1294,8 @@ function presentTiles(specs) {
     }));
 }
 
-/* Stat tiles: label + semibold value (proportional figures). */
+/* Stat tiles: label + semibold value (proportional figures). A tile with a
+   `ratio` draws it as a bar under the value. */
 function statTilesRow(tiles) {
   return el(
     "div",
@@ -1300,6 +1306,7 @@ function statTilesRow(tiles) {
         { class: "tile", title: tile.title || null },
         el("div", { class: "tile-label" }, tile.label),
         el("div", { class: `tile-value ${tile.cls || ""}` }, tile.value),
+        Number.isFinite(tile.ratio) ? ratioBar(tile.ratio) : null,
       ),
     ),
   );
@@ -1343,22 +1350,27 @@ const BUDGET_ROWS = [
   ["null_controls", "随机对照", String],
 ];
 
-/* The research budget as one block per limit — its name and used percentage on
-   one line, its bar across the block underneath — so four budgets read as four
-   figures instead of one run-on line. `mini` is the same block at card scale,
-   two by two. Null while nothing was spent or no limit is known. */
-function budgetBars(used, total, { mini = false } = {}) {
-  if (!used || !total) return null;
-  const rows = BUDGET_ROWS.map(([key, label, fmt]) => {
+/* Each budget that has both a limit and a spend, as the share of it used. */
+function budgetShares(used, total) {
+  if (!used || !total) return [];
+  return BUDGET_ROWS.map(([key, label, fmt]) => {
     const limit = Number(total[key]);
     const spent = Number(used[key]);
     if (!(limit > 0) || !Number.isFinite(spent)) return null;
     return { key, label, ratio: spent / limit, text: `${fmt(spent)} / ${fmt(limit)}` };
   }).filter(Boolean);
+}
+
+/* The research budget as one block per limit — its name and used percentage on
+   one line, its bar across the block underneath — so four budgets read as four
+   figures instead of one run-on line. Null while nothing was spent or no limit
+   is known. */
+function budgetBars(used, total) {
+  const rows = budgetShares(used, total);
   if (!rows.length) return null;
   return el(
     "div",
-    { class: `budget-bars${mini ? " mini" : ""}` },
+    { class: "budget-bars" },
     ...rows.map((row) =>
       el(
         "div",
@@ -1369,6 +1381,20 @@ function budgetBars(used, total, { mini = false } = {}) {
       ),
     ),
   );
+}
+
+/* The home card's one budget figure: the budget closest to its limit, the
+   others' shares in the tooltip. Null when no budget is measured. */
+function budgetTile(used, total) {
+  const rows = budgetShares(used, total);
+  if (!rows.length) return null;
+  const top = rows.reduce((most, row) => (row.ratio > most.ratio ? row : most));
+  return {
+    label: "预算已用",
+    value: `${Math.round(top.ratio * 100)}%`,
+    ratio: top.ratio,
+    title: `用得最多的一项：${top.label}。${rows.map((row) => `${row.label} ${Math.round(row.ratio * 100)}%`).join(" · ")}`,
+  };
 }
 
 /* A ratio as a ring, the percentage beside it. */
@@ -1687,7 +1713,6 @@ const STEP_STATUS_LABELS = {
 const ENDING_STEP_STATES = {
   graduated: "done",
   rejected: "failed",
-  voided: "failed",
   no_edge: "ended",
   budget_exhausted: "ended",
   broken: "ended",
@@ -1964,78 +1989,95 @@ function experimentBadges(...badges) {
   return el("span", { class: "exp-badges" }, ...badges.filter(Boolean));
 }
 
-/* A slice's account against its benchmark as one tile value, "+11.0% / +38.6%",
-   signed by the raw excess; null when the slice carries no reading. */
-function accountTile(label, slice) {
-  const raw = (slice || {}).raw_readings || {};
-  if (raw.strategy_return === null || raw.strategy_return === undefined) return null;
-  return {
-    label,
-    value: raw,
-    fmt: (r) => `${fmtPct(r.strategy_return)} / ${fmtPct(r.benchmark_return)}`,
-    cls: signCls(raw.raw_excess),
-    title: `${HOLDER_TITLE}${slice.readings_derived ? `。${DERIVED_TITLE}` : ""}`,
-  };
-}
-
-/* The forward and Held-out slices the verdict read, as the holder reads them:
-   his account against the benchmark first, then against the zero-skill panel
-   unregressed, then the neutralised IR the gate graded. Absent until the
-   verdict exists, and for a replay the strategy's own error stopped. */
-function forwardTiles(item) {
-  const slices = (item.forward || {}).slices || {};
-  const f = slices.forward || {};
-  const h = slices.heldout || {};
-  const tiles = [
-    accountTile("前推 账户 / 基准", f),
-    ...presentTiles([
-      {
-        label: "前推对面板（未回归）",
-        value: (f.raw_readings || {}).plain_selection,
-        fmt: fmtPct,
-        signed: true,
-        title: PLAIN_SELECTION_TITLE,
-      },
-      {
-        label: "前推中性化主动 IR",
-        value: f.information_ratio,
-        fmt: fmtSharpe,
-        signed: true,
-        title: NEUTRAL_IR_TITLE,
-      },
-    ]),
-    accountTile("Held-out 账户 / 基准", h),
-  ]
-    .filter(Boolean)
-    .map((tile) => (tile.fmt ? { ...tile, value: tile.fmt(tile.value) } : tile));
-  return tiles.length ? statTilesRow(tiles) : null;
-}
-
-/* Whatever evidence the arm already has: the judged forward slices once they
-   exist, else the best full-span candidate research has measured so far. */
-function evidenceTiles(item) {
-  const forward = forwardTiles(item);
-  if (forward) return forward;
-  const best = item.research_best;
-  if (!best) return null;
-  const tiles = presentTiles([
+/* The forward year as the holder reads it, in two figures: his book against
+   the benchmark, then against its zero-skill panel with no regression. The
+   account and benchmark returns behind the first, the Held-out slice and the
+   neutralised IR the gate graded are the experiment page's. Empty until the
+   verdict has measured the slice. */
+function forwardFigures(item) {
+  const slice = ((item.forward || {}).slices || {}).forward || {};
+  const raw = slice.raw_readings || {};
+  const derived = slice.readings_derived ? `。${DERIVED_TITLE}` : "";
+  return presentTiles([
     {
-      label: "最佳候选中性化超额",
-      value: best.neutralized_excess,
+      label: "前推对基准",
+      value: raw.raw_excess,
       fmt: fmtPct,
       signed: true,
-      title: `${sessionLabel(best.session_key)} 中 IR 最高的全区间验证，研究期年化`,
+      title: `${RAW_EXCESS_TITLE}${derived}`,
     },
-    { label: "IR", value: best.information_ratio, fmt: fmtSharpe, signed: true, title: IR_TITLE },
     {
-      label: "DSR",
-      value: best.deflated_sharpe_probability,
-      fmt: fmtSharpe,
-      title: DSR_TITLE,
+      label: "前推对面板",
+      value: raw.plain_selection,
+      fmt: fmtPct,
+      signed: true,
+      title: `${PLAIN_SELECTION_TITLE}${derived}`,
     },
-    { label: "累计试验", value: best.trials, fmt: String, title: TRIALS_TITLE },
   ]);
-  return tiles.length ? statTilesRow(tiles) : null;
+}
+
+/* What a home card says in figures, each one labelled value and at most two:
+   the forward year once it is measured; before that, while the arm can still
+   run, how much of its budget is spent; and the IR of the best full-span
+   candidate research has found. Everything else is on the experiment page. */
+function cardFigures(item) {
+  const forward = forwardFigures(item);
+  if (forward.length) return forward;
+  const best = item.research_best;
+  return [
+    item.ending ? null : budgetTile(item.budget_used, item.budget),
+    ...(best
+      ? presentTiles([
+          {
+            label: "最佳候选 IR",
+            value: best.information_ratio,
+            fmt: fmtSharpe,
+            signed: true,
+            title: `${sessionLabel(best.session_key)} 中 IR 最高的全区间验证，研究期。${IR_TITLE}`,
+          },
+        ])
+      : []),
+  ].filter(Boolean);
+}
+
+/* The best full-span candidate's figures, as the experiment page draws them
+   for a recorded research session and for one still running. `trials` stands
+   in when no candidate is measurable: no gate ran over one, so the session's
+   own count answers. */
+function bestCandidateTiles(best, trials) {
+  return statTilesRow(
+    presentTiles([
+      {
+        label: "最佳候选中性化超额",
+        value: best.neutralized_excess,
+        fmt: fmtPct,
+        signed: true,
+        title: "IR 最高的全区间验证，研究期年化",
+      },
+      { label: "IR", value: best.information_ratio, fmt: fmtSharpe, signed: true, title: IR_TITLE },
+      {
+        label: "DSR",
+        value: best.deflated_sharpe_probability,
+        fmt: fmtSharpe,
+        title: DSR_TITLE,
+      },
+      {
+        label: "成本压力下对基准超额",
+        value: best.raw_excess_at_cost_stress,
+        fmt: fmtPct,
+        signed: true,
+        title: RAW_STRESS_TITLE,
+      },
+      {
+        label: "面板自身收益",
+        value: best.panel_return,
+        fmt: fmtPct,
+        signed: true,
+        title: PANEL_RETURN_TITLE,
+      },
+      { label: "累计试验", value: best.trials ?? trials, fmt: String, title: TRIALS_TITLE },
+    ]),
+  );
 }
 
 /* The arm's curve on its card, fetched when the card comes near the screen.
@@ -2048,17 +2090,25 @@ function cardEquityNode(item) {
   const id = `equity-card-${item.experiment_id}`;
   const existing = document.getElementById(id);
   if (existing && existing.dataset.result === key) return existing;
-  const host = armEquityHost(item, { width: 420, height: 130, mini: true, lazy: true });
+  const host = armEquityHost(item, {
+    width: 420,
+    height: 130,
+    mini: true,
+    lazy: true,
+    legendValues: false,
+  });
   host.id = id;
   host.dataset.result = key;
   return host;
 }
 
-/* Name and badges, then the stepper, the live activity, the budget, the
-   evidence and the curve — each only when the arm has it. The grid is rebuilt
-   every poll, so the activity clock needs no ticker. */
+/* A card answers what the arm is, where it is and how it ended in words —
+   the name, one badge, the stepper and, while a worker runs, the stage it is
+   in — and how good it is in at most two figures (cardFigures), then the
+   curve; each only when the arm has it. The rest is the experiment page's. */
 function experimentCard(item) {
   const readable = item.state !== "unreadable";
+  const figures = readable ? cardFigures(item) : [];
   const card = el(
     "div",
     {
@@ -2076,10 +2126,9 @@ function experimentCard(item) {
     item.error ? el("div", { class: "meta-line" }, item.error) : null,
     readable ? pipelineStepper(item) : null,
     readable && item.worker_alive
-      ? activityNode(item.status, { className: "activity meta-line" })
+      ? activityNode(item.status, { className: "activity meta-line", brief: true })
       : null,
-    readable ? budgetBars(item.budget_used, item.budget, { mini: true }) : null,
-    readable ? evidenceTiles(item) : null,
+    figures.length ? statTilesRow(figures) : null,
     readable ? cardEquityNode(item) : null,
   );
   const actions = el("div", { class: "actions" });
@@ -2126,10 +2175,11 @@ function experimentCard(item) {
   return card;
 }
 
-/* Only an arm the server ranked on out-of-sample evidence reaches here, so the
-   tiles exist; they still go through el(), which drops an absent child instead
-   of printing it. */
+/* Only an arm the server ranked on out-of-sample evidence reaches here. It says
+   what its card says — the badge and the forward year's two figures — over
+   the full-size curve, whose lines are named without their figures. */
 function heroPanel(item) {
+  const figures = forwardFigures(item);
   const panel = el(
     "div",
     { class: "panel hero", id: "hero-panel" },
@@ -2144,10 +2194,10 @@ function heroPanel(item) {
       ),
       armBadge(item),
     ),
-    forwardTiles(item),
+    figures.length ? statTilesRow(figures) : null,
   );
   panel.__signature = heroSignature(item);
-  const curve = armEquityHost(item, { width: 980, height: 240, ddH: 90 });
+  const curve = armEquityHost(item, { width: 980, height: 240, ddH: 90, legendValues: false });
   if (curve) panel.append(el("div", { class: "section-gap" }, curve));
   return panel;
 }
@@ -2714,21 +2764,23 @@ function processRows(detail) {
   const record = (session || {}).record;
   const research = researchStep(detail);
   const live = research.state === "running" || research.state === "waiting";
-  const best = record && record.best;
+  // The recorded session's best candidate, else the one the listing reads off
+  // the Validations a session still running has written.
+  const best = record ? record.best : detail.research_best;
   const replay =
     ((detail.sessions || []).find((entry) => entry.kind === "forward") || {})
       .replay || {};
   const frozen = detail.frozen;
   const note = {
-    research: record
-      ? best
-        ? el(
-            "span",
-            { title: "IR 最高的全区间验证：研究期中性化超额与 DSR" },
-            `最佳候选 ${fmtPct(best.neutralized_excess)} · DSR ${fmtSharpe(best.deflated_sharpe_probability)}`,
-          )
-        : `验证 ${record.validations.length} 次 · 无全区间`
-      : null,
+    research: best
+      ? el(
+          "span",
+          { title: "IR 最高的全区间验证：研究期中性化超额与 DSR" },
+          `最佳候选 ${fmtPct(best.neutralized_excess)} · DSR ${fmtSharpe(best.deflated_sharpe_probability)}`,
+        )
+      : record
+        ? `验证 ${record.validations.length} 次 · 无全区间`
+        : null,
     frozen: frozen
       ? `${fmtPct(frozen.neutralized_excess)} · DSR ${fmtSharpe(frozen.deflated_sharpe_probability)}`
       : null,
@@ -3107,19 +3159,27 @@ function verdictStagePanel(detail) {
       ? kvRow("回放失败", `${attempts.failed} 次${attempts.last_error ? ` · ${attempts.last_error}` : ""}`)
       : null,
     recordedAt ? kvRow("记录于", fmtTs(recordedAt)) : null,
-    // A graduation an operator withdrew: who, when and on what evidence. The
-    // replay's own criteria above stay as they were recorded.
-    ...(verdict.void
-      ? [
-          kvRow("作废", `${verdict.void.voided_by || "—"} · ${fmtTs(verdict.void.recorded_at)}`),
-          kvRow("作废依据", verdict.void.evidence_ref || "—"),
-        ]
-      : []),
   ].filter(Boolean);
+  // A graduation withdrawn afterwards is why the badge reads 未通过 over a
+  // checklist that passed: when, by whom, why and on what evidence lead the
+  // view, and the replay's readings and criteria below stay as recorded.
+  const withdrawn = verdict.void;
   return el(
     "div",
     { class: "panel section-gap" },
     panelHead(STEP_LABELS.verdict, badge),
+    withdrawn
+      ? el("div", { class: "hint warn" }, `毕业于 ${fmtTs(withdrawn.recorded_at)} 撤销，记为未通过；以下是回放当时的读数与判定`)
+      : null,
+    withdrawn
+      ? el(
+          "table",
+          { class: "kv" },
+          kvRow("撤销人", withdrawn.voided_by || "—"),
+          kvRow("理由", withdrawn.reason || "—"),
+          kvRow("依据", withdrawn.evidence_ref || "—"),
+        )
+      : null,
     // What the holder's account did, before the criteria that decided it.
     forward ? holderLine("前推", slices.forward) : null,
     forward ? holderLine("Held-out", slices.heldout) : null,
@@ -3611,6 +3671,12 @@ function sessionDetailPanel(detail, selectedKey) {
   // sessions have built, the live Trace below it is what is happening in the
   // current one, and the reader's own message box closes the column.
   panel.append(stepTreePanel(detail));
+  // Before the session is recorded its best candidate so far is the listing's,
+  // drawn as the recorded session draws its own.
+  if (!session.record && detail.research_best)
+    panel.append(
+      el("div", { class: "panel" }, panelHead("目前最佳候选"), bestCandidateTiles(detail.research_best)),
+    );
   if (session.record) panel.append(researchSessionPanel(detail, session));
   else if (isCurrent) {
     // Before the Agent speaks (PIT, Sandbox) there is no trace to follow;
@@ -3712,46 +3778,7 @@ function researchSessionPanel(detail, session) {
         ? el("span", { class: "badge kind", title: "失败后原地续跑的尝试数" }, `${attempts} 次尝试`)
         : null,
     ),
-    statTilesRow(
-      presentTiles([
-        {
-          label: "最佳候选中性化超额",
-          value: best.neutralized_excess,
-          fmt: fmtPct,
-          signed: true,
-          title: "本会话 IR 最高的全区间验证，研究期年化",
-        },
-        { label: "IR", value: best.information_ratio, fmt: fmtSharpe, signed: true, title: IR_TITLE },
-        {
-          label: "DSR",
-          value: best.deflated_sharpe_probability,
-          fmt: fmtSharpe,
-          title: DSR_TITLE,
-        },
-        {
-          label: "成本压力下对基准超额",
-          value: best.raw_excess_at_cost_stress,
-          fmt: fmtPct,
-          signed: true,
-          title: RAW_STRESS_TITLE,
-        },
-        {
-          label: "面板自身收益",
-          value: best.panel_return,
-          fmt: fmtPct,
-          signed: true,
-          title: PANEL_RETURN_TITLE,
-        },
-        {
-          label: "累计试验",
-          // Without a measurable candidate no gate ran over one, so the
-          // session record's own count answers in its place.
-          value: best.trials ?? record.trials_to_date,
-          fmt: String,
-          title: TRIALS_TITLE,
-        },
-      ]),
-    ),
+    bestCandidateTiles(best, record.trials_to_date),
     gate
       ? el(
           "div",
@@ -6481,7 +6508,7 @@ function candidateAsideReason(row) {
     return el("span", { class: "hint warn" }, "无法解析");
   if (!row.verdict) return el("span", { class: "hint" }, "无裁决");
   // Why the tier declines it, not how it ended: that word is on its own page.
-  if (row.verdict === "voided") return el("span", { class: "hint" }, "毕业已作废");
+  // A withdrawn graduation is no graduate here either.
   if (row.verdict !== "graduated") return el("span", { class: "hint" }, "未毕业");
   return el("span", { class: "hint" }, "无已发布 skill 条目");
 }

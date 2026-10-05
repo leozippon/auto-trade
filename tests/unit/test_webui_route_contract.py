@@ -347,8 +347,6 @@ def test_no_page_appends_a_renderer_that_can_return_nothing() -> None:
 
     source = APP_JS.read_text(encoding="utf-8")
     nullable = (
-        "forwardTiles",
-        "evidenceTiles",
         "cardEquityNode",
         "endingBadge",
         "endingReason",
@@ -506,6 +504,7 @@ def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) ->
     field would render an empty cell instead of failing. Checked against a
     projection of a synthetic arm that carries its verdict."""
 
+    from autotrade.pipelines.ledger import VERDICT_VOID_FIELDS
     from autotrade.webui.registry import experiment_detail
     from tests.unit.webui_research_arm import build_arm
 
@@ -544,7 +543,10 @@ def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) ->
     for name, read, served in (
         ("frozenPanel", reads("frozenPanel", "frozen"), frozen),
         ("researchSessionPanel", reads("researchSessionPanel", "record"), record),
-        ("researchSessionPanel", reads("researchSessionPanel", "best"), best),
+        ("bestCandidateTiles", reads("bestCandidateTiles", "best"), best),
+        ("cardFigures", reads("cardFigures", "best"), set(detail["research_best"])),
+        ("forwardFigures", reads("forwardFigures", "raw"), set(slices["forward"]["raw_readings"])),
+        ("verdictStagePanel", reads("verdictStagePanel", "withdrawn"), set(VERDICT_VOID_FIELDS)),
         ("researchSessionPanel", reads("researchSessionPanel", "row"), validation),
         ("freezeGateChecklist", reads("freezeGateChecklist", "gate"), gate),
         ("forwardStagePanel", reads("forwardStagePanel", "forward"), forward),

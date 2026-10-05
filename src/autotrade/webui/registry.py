@@ -95,10 +95,11 @@ _RESULT_MODES = frozenset({RESEARCH_PHASE, FORWARD_PHASE})
 STAGES = ("research", "forward", "verdict")
 # How an arm ended, in the order the homepage lists them. The console says an
 # ending in this one vocabulary wherever it says it at all, so the ledger's own
-# words (``graduated``/``discarded``/``no_deliverable``, the session outcomes)
-# never have to be read twice into the same three blurred endings. ``voided``
-# is a graduation an operator withdrew afterwards (``ledger.verdict_void``).
-ENDING_STATES = ("graduated", "rejected", "voided", "no_edge", "budget_exhausted", "broken")
+# words (``graduated``/``discarded``/``voided``/``no_deliverable``, the session
+# outcomes) never have to be read twice into the same three blurred endings. A
+# graduation an operator withdrew afterwards (``ledger.verdict_void``) is a
+# failure and ends as ``rejected``; its reason says the graduation was withdrawn.
+ENDING_STATES = ("graduated", "rejected", "no_edge", "budget_exhausted", "broken")
 _ENDING_ORDER = {state: index for index, state in enumerate(ENDING_STATES)}
 # Which graduation criterion each failed verdict token is, as
 # docs/pipeline-design.md §3.2 numbers them: a rejected arm's reason names the
@@ -279,13 +280,6 @@ def _reason_line(text: str, limit: int = 80) -> str:
     return head if len(head) <= limit else head[: limit - 1] + "…"
 
 
-def _percent(value: object) -> str:
-    """One signed percentage of the ending's reason line."""
-
-    number = _number(value)
-    return "—" if number is None else f"{number * 100:+.2f}%"
-
-
 def _attempt_failures(
     records: Sequence[Mapping[str, object]], phase: str | None = None
 ) -> list[Mapping[str, object]]:
@@ -303,7 +297,6 @@ def arm_ending(
     identity: PublicIdentity,
     records: Sequence[Mapping[str, object]],
     state: Mapping[str, object],
-    forward: Mapping[str, object] | None,
 ) -> dict[str, str] | None:
     """How the arm ended — one of :data:`ENDING_STATES` and a one-line reason —
     or ``None`` while it can still run.
@@ -311,14 +304,13 @@ def arm_ending(
     Every ending the console shows comes from here, so no page classifies one
     for itself. A worker the host or the environment broke ended the process
     rather than the research, so its state is read before the ledger. Otherwise
-    the verdict decides: a graduate is named by its forward year as the holder
-    reads it — the book against the benchmark, then against its zero-skill
-    panel unregressed, then the neutralised IR the gate graded (``forward`` is
-    :func:`_forward_view`, which carries those readings for every recorded
-    slice) — a replay that refused one by the criteria it failed, and an arm
-    that never reached a replay by how its research session ended — the
-    Agent's own ``no_edge``, an exhausted budget, or a nomination the freeze
-    gate refused.
+    the verdict decides, and the reason is a line of words, never a row of
+    figures (the forward year's readings are the card's and the 裁决 view's): a
+    graduate passed every condition, a replay refused one by the criteria it
+    failed, a graduation the operator withdrew is a refusal whose reason says
+    so with the void's first sentence, and an arm that never reached a replay
+    ended by how its research session ended — the Agent's own ``no_edge``, an
+    exhausted budget, or a nomination the freeze gate refused.
     """
 
     if str(state.get("state") or "") == "failed":
@@ -333,20 +325,10 @@ def arm_ending(
         return None
     if verdict["status"] == "voided":
         void = _mapping(verdict.get("void"))
-        return {"state": "voided", "reason": identity.public_text(str(void.get("reason") or ""))}
+        reason = _reason_line(identity.public_text(str(void.get("reason") or "")))
+        return {"state": "rejected", "reason": f"毕业后复核未通过：{reason}"}
     if verdict["status"] == "graduated":
-        judged = _mapping(_mapping(_mapping(forward).get("slices")).get("forward"))
-        raw = _mapping(judged.get("raw_readings"))
-        ratio = _number(judged.get("information_ratio"))
-        return {
-            "state": "graduated",
-            "reason": (
-                f"前推 账户 {_percent(raw.get('strategy_return'))}"
-                f" · 基准 {_percent(raw.get('benchmark_return'))}"
-                f" · 对面板（未回归）{_percent(raw.get('plain_selection'))}"
-                f" · 中性化主动 IR {'—' if ratio is None else f'{ratio:.2f}'}"
-            ),
-        }
+        return {"state": "graduated", "reason": "前推与 Held-out 条件全部通过"}
     if verdict["status"] == "discarded":
         codes = dict.fromkeys(
             _CRITERION_CODES.get(str(token), str(token))
@@ -457,6 +439,20 @@ def _forward_view(
     }
 
 
+def _verdict_view(
+    identity: PublicIdentity, records: Sequence[Mapping[str, object]]
+) -> dict[str, object] | None:
+    """The ledger's verdict, with a withdrawn graduation's reason projected
+    like the ending line that quotes it: the 裁决 view states it in full."""
+
+    verdict = experiment_verdict(records)
+    if verdict is None or "void" not in verdict:
+        return verdict
+    void = dict(_mapping(verdict["void"]))
+    void["reason"] = identity.public_text(str(void.get("reason") or ""))
+    return {**verdict, "void": void}
+
+
 def _paper_candidate_view(
     directory: Path, records: list[dict[str, object]]
 ) -> dict[str, object] | None:
@@ -499,8 +495,8 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                 ),
                 "budget": _budget_totals(params),
                 "budget_used": _budget_used(directory, records, raw_status),
-                "verdict": experiment_verdict(records),
-                "ending": arm_ending(identity, records, state, forward),
+                "verdict": _verdict_view(identity, records),
+                "ending": arm_ending(identity, records, state),
                 "forward": forward,
                 "paper_candidate": _paper_candidate_view(directory, records),
             }

@@ -223,52 +223,25 @@ def test_every_way_an_arm_can_end_reads_as_one_ending_with_a_reason(tmp_path: Pa
     for experiment_id, stage in (
         ("graduated", "graduated"),
         ("rejected", "discarded"),
-        ("voided", "graduated"),
         ("no_edge", "no_deliverable"),
         ("budget_exhausted", "deadline"),
         ("broken", "broken"),
         ("running", "research"),
     ):
         build_arm(tmp_path, experiment_id, stage)
-    # A graduation an operator withdrew: an appended record, the forward
-    # record untouched.
-    ExperimentLedger(tmp_path / "voided/ledgers/experiment_ledger.jsonl").append(
-        verdict_void(
-            "voided",
-            voided_by="operator",
-            reason="复跑计入股息税后研究期主动 IR 为 −1.80。",
-            evidence_ref="logs/notes/live_readiness_20261004/dividend_tax_rerun",
-        )
-    )
     rows = {row["experiment_id"]: row for row in list_experiments(tmp_path)}
     assert rows["running"]["ending"] is None
     endings = {name: rows[name]["ending"] for name in ENDING_STATES}
     assert {name: ending["state"] for name, ending in endings.items()} == {
         name: name for name in ENDING_STATES
     }
-    # A graduate is named by its forward year as the holder reads it -- his
-    # account against the benchmark, then against the zero-skill panel with no
-    # regression, then the neutralised IR the gate graded -- a refusal by the
-    # criteria it failed, and the three endings no replay decided by what the
-    # record says: the Agent's first sentence, the budget, the error's first line.
-    forward = rows["graduated"]["forward"]["slices"]["forward"]
-    raw = forward["raw_readings"]
-    assert endings["graduated"]["reason"] == (
-        f"前推 账户 {raw['strategy_return'] * 100:+.2f}%"
-        f" · 基准 {raw['benchmark_return'] * 100:+.2f}%"
-        " · 对面板（未回归）—"
-        f" · 中性化主动 IR {forward['information_ratio']:.2f}"
-    )
+    # Each reason is a line of words, never a row of figures: a graduate passed
+    # every condition, a refusal names the criteria it failed, and the three
+    # endings no replay decided say what the record says: the Agent's first
+    # sentence, the budget, the error's first line.
+    assert endings["graduated"]["reason"] == "前推与 Held-out 条件全部通过"
     assert endings["rejected"]["reason"].split(" · ")[0] == "F2"
-    # A voided graduate says why, keeps its replay's slices, and is offered
-    # neither as the homepage's best nor a Paper book.
-    assert endings["voided"]["reason"] == "复跑计入股息税后研究期主动 IR 为 −1.80。"
-    assert rows["voided"]["verdict"]["status"] == "voided"
-    assert rows["voided"]["verdict"]["void"]["voided_by"] == "operator"
-    assert rows["voided"]["forward"]["slices"]["forward"]["lower_bound"] is not None
-    assert rows["voided"]["paper_candidate"] is None
     assert rows["graduated"]["paper_candidate"] is not None
-    assert best_experiment(list(rows.values())) == {"experiment_id": "graduated"}
     assert endings["no_edge"]["reason"] == "没有候选值得冻结"
     assert endings["budget_exhausted"]["reason"] == "模型调用次数用尽"
     assert endings["broken"]["reason"] == "RuntimeError: sandbox image is gone"
@@ -278,6 +251,64 @@ def test_every_way_an_arm_can_end_reads_as_one_ending_with_a_reason(tmp_path: Pa
     assert "running" in listed[: -len(ENDING_STATES)]
     # The detail page reads the same projection as the card.
     assert experiment_detail(tmp_path, "no_edge")["ending"] == endings["no_edge"]
+
+
+def test_a_withdrawn_graduation_reads_as_a_failure_everywhere(tmp_path: Path) -> None:
+    """A graduate later found to have a material problem is failed, not a kind
+    of graduate: it ends as a refusal, sorts among the refusals ahead of the
+    endings nobody decided, is never the best experiment, and its 裁决 view
+    still has who withdrew it, when, why and on what evidence."""
+
+    for experiment_id, stage, created in (
+        ("graduated", "graduated", "2026-09-10"),
+        ("refused", "discarded", "2026-09-11"),
+        ("withdrawn", "graduated", "2026-09-12"),
+        ("no_edge", "no_deliverable", "2026-09-13"),
+    ):
+        directory = build_arm(tmp_path, experiment_id, stage)
+        params = json.loads((directory / "hitl/params.json").read_text(encoding="utf-8"))
+        write_json_atomic(directory / "hitl/params.json", {**params, "_created_at": f"{created}T00:00:00+00:00"})
+    reason = "复跑计入股息税后研究期主动 IR 为 −1.80。毕业靠的是冻结种子的一次抽签。"
+    ExperimentLedger(tmp_path / "withdrawn/ledgers/experiment_ledger.jsonl").append(
+        verdict_void(
+            "withdrawn",
+            voided_by="operator",
+            reason=reason,
+            evidence_ref="logs/notes/live_readiness_20261004/dividend_tax_rerun",
+        )
+    )
+    arms = {"graduated", "refused", "withdrawn", "no_edge"}
+    rows = [row for row in list_experiments(tmp_path) if row["experiment_id"] in arms]
+    withdrawn = next(row for row in rows if row["experiment_id"] == "withdrawn")
+    # One ending word with the refusals; the reason says it had graduated and
+    # why it no longer has, in the void's first sentence.
+    assert withdrawn["ending"] == {
+        "state": "rejected",
+        "reason": "毕业后复核未通过：复跑计入股息税后研究期主动 IR 为 −1.80",
+    }
+    # Listed in the failures' group, newest first inside it, ahead of the
+    # endings nobody decided whatever its date.
+    assert [row["experiment_id"] for row in rows] == ["graduated", "withdrawn", "refused", "no_edge"]
+    # Never crowned, even over a lower bound the graduate cannot match.
+    withdrawn["forward"]["slices"]["forward"]["lower_bound"] = 1.0
+    assert best_experiment(rows) == {"experiment_id": "graduated"}
+    assert best_experiment([withdrawn]) is None
+    # The replay's own record stays, and the 裁决 view has the void in full.
+    assert withdrawn["forward"]["slices"]["forward"]["raw_readings"]["raw_excess"] is not None
+    assert withdrawn["paper_candidate"] is None
+    void = experiment_detail(tmp_path, "withdrawn")["verdict"]["void"]
+    assert void["voided_by"] == "operator"
+    assert void["reason"] == reason
+    assert void["evidence_ref"] == "logs/notes/live_readiness_20261004/dividend_tax_rerun"
+    assert void["recorded_at"]
+    # The pages have no second word for it: no label, step state or badge
+    # colour of its own.
+    static = Path(__file__).resolve().parents[2] / "src/autotrade/webui/static"
+    script = (static / "app.js").read_text(encoding="utf-8")
+    for table in ("const ENDING_LABELS", "const ENDING_STEP_STATES"):
+        assert "voided" not in script.split(table, 1)[1].split("};", 1)[0], table
+    assert "毕业已作废" not in script
+    assert "ending-voided" not in (static / "style.css").read_text(encoding="utf-8")
 
 
 def test_the_listing_rederives_a_row_only_when_its_files_change(
@@ -726,20 +757,37 @@ def test_a_running_arm_is_never_the_best_experiment(tmp_path: Path) -> None:
     assert "if (best)" in home and "heroPanel(best)" in home
 
 
-def test_the_card_and_the_research_panel_name_the_same_four_figures() -> None:
-    """One vocabulary for the arm's evidence: the experiment card and the
-    research session panel draw the same four tiles, in the same order, with
-    the gate threshold and the deflation denominator explained once."""
+def test_a_home_card_carries_two_single_figures_and_the_page_keeps_the_rest() -> None:
+    """The home card answers how good an arm is in at most two figures, each
+    one labelled value -- never two values joined into one tile -- and the
+    figures it leaves out stay on the experiment page: the best candidate's
+    tiles are drawn there for a running session as for a recorded one."""
 
     script = (
         Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
     ).read_text(encoding="utf-8")
-    labels = ("中性化超额", "IR", "DSR", "累计试验")
-    for opening in ("function evidenceTiles(", "function researchSessionPanel("):
-        body = script.split(opening, 1)[1].split("\nfunction ", 1)[0]
-        found = [label for label in labels if f'label: "{label}"' in body or f'"最佳候选{label}"' in body]
-        assert found == list(labels), opening
-        assert "DSR_TITLE" in body and "TRIALS_TITLE" in body, opening
+
+    def body(name: str) -> str:
+        return script.split(f"function {name}(", 1)[1].split("\nfunction ", 1)[0]
+
+    card = body("cardFigures")
+    assert "forwardFigures(item)" in card and "budgetTile(" in card
+    assert body("forwardFigures").count("label: ") == 2
+    for name in ("cardFigures", "forwardFigures", "budgetTile"):
+        assert not re.search(r"\$\{[^}]*\} / \$\{", body(name)), name
+    # The card's own lines: the stage without its counters, the curve's lines
+    # named without their returns.
+    assert "brief: true" in body("experimentCard")
+    assert "budgetBars(" not in body("experimentCard")
+    assert "legendValues: false" in body("cardEquityNode")
+    assert "legendValues: false" in body("heroPanel") and "forwardFigures(item)" in body("heroPanel")
+    # The experiment page: one set of best-candidate tiles, recorded or live.
+    assert "bestCandidateTiles(best, record.trials_to_date)" in body("researchSessionPanel")
+    assert "bestCandidateTiles(detail.research_best)" in body("sessionDetailPanel")
+    tiles = body("bestCandidateTiles")
+    for label in ("最佳候选中性化超额", "IR", "DSR", "累计试验"):
+        assert f'label: "{label}"' in tiles, label
+    assert "DSR_TITLE" in tiles and "TRIALS_TITLE" in tiles
     # The gloss says what the figure is; the gate's own limits and measured
     # values stay in the checklist, which reads both from the record.
     [dsr_gloss] = [row for row in script.splitlines() if row.startswith("const DSR_TITLE")]
@@ -762,8 +810,9 @@ def test_a_figure_whose_label_does_not_read_itself_is_glossed_once() -> None:
     for name in ("IR_TITLE", "NEUTRALIZED_EXCESS_TITLE", "TRACKING_ERROR_TITLE", "LOWER_BOUND_TITLE"):
         assert script.count(f"const {name} = ") == 1, name
     for opening, glosses in (
-        ("function evidenceTiles(", ("IR_TITLE",)),
-        ("function forwardTiles(", ("PLAIN_SELECTION_TITLE", "NEUTRAL_IR_TITLE")),
+        ("function cardFigures(", ("IR_TITLE",)),
+        ("function forwardFigures(", ("RAW_EXCESS_TITLE", "PLAIN_SELECTION_TITLE")),
+        ("function bestCandidateTiles(", ("IR_TITLE", "DSR_TITLE", "TRIALS_TITLE")),
         ("function researchSessionPanel(", ("IR_TITLE", "NEUTRALIZED_EXCESS_TITLE")),
         ("function frozenPanel(", ("IR_TITLE", "NEUTRALIZED_EXCESS_TITLE", "TRACKING_ERROR_TITLE")),
         ("function freezeGateChecklist(", ("DSR_TITLE",)),
@@ -831,8 +880,8 @@ def test_the_listing_carries_the_freeze_and_the_best_candidate_so_far(
     best = rows["frozen"]["research_best"]
     assert best["session_key"] == "research"
     session_best = experiment_detail(tmp_path, "frozen")["sessions"][0]["record"]["best"]
-    # The card's four evidence tiles: a measurable candidate carries every
-    # figure, so the card never draws a partial row.
+    # The best-candidate tiles the card's IR and the experiment page read: a
+    # measurable candidate carries every figure, so neither draws a partial row.
     evidence = (
         "neutralized_excess",
         "information_ratio",
@@ -972,10 +1021,12 @@ def test_an_arm_judged_before_slices_carried_the_holders_readings_reads_them_der
     assert forward["raw_readings"]["strategy_return"] == pytest.approx(book, rel=1e-12)
     assert forward["raw_readings"]["benchmark_return"] == pytest.approx(benchmark, rel=1e-12)
     assert forward["raw_readings"]["plain_selection"] == pytest.approx(book - panel, rel=1e-12)
-    # The ending names the derived holder's line, and reading wrote nothing.
-    ending = summarize_experiment(directory)["ending"]["reason"]
-    assert ending.startswith(f"前推 账户 {book * 100:+.2f}% · 基准 {benchmark * 100:+.2f}%")
-    assert f"对面板（未回归）{(book - panel) * 100:+.2f}%" in ending
+    # The listing row carries the same derived readings for the card's two
+    # figures, and reading wrote nothing.
+    card = summarize_experiment(directory)["forward"]["slices"]["forward"]
+    assert card["readings_derived"] is True
+    assert card["raw_readings"]["raw_excess"] == pytest.approx(book - benchmark, rel=1e-12)
+    assert card["raw_readings"]["plain_selection"] == pytest.approx(book - panel, rel=1e-12)
     assert ledger_path.read_bytes() == before
     # The curve draws the panel beside the book and the benchmark, on the
     # book's own days.
