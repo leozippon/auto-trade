@@ -36,10 +36,12 @@ book on the same seed base) runs in every batch:
 
 A row that clears the gate without its lane's claim is not nominated, because
 the baseline itself is already frozen. These three arms run on the
-fundamentals seed with the parameters and lineage of round 20261008, so
-`c_base` rows are comparable across rounds 20261006, 20261008 and this one, on
-one GPU. A freeze here is read against the pooled trials of the arms on the
-same baseline before it is treated as a result.
+fundamentals seed with the parameters of round 20261008, so `c_base` rows are
+comparable across rounds 20261006, 20261008 and this one, on one GPU. The
+clock arm was created with round 20261006's lineage; the beta pair is created
+after the clock arm and that round's four arms closed and inherits them
+(`SEQBOOK_LINEAGE`). A freeze here is still read by hand against the pooled
+trials of siblings that ran at the same time before it is treated as a result.
 
 A second pack tests one new selection family on the same seed and parameters,
 CPU only: `indcycle` ranks Shenwan L1 industries by the median acceleration of
@@ -76,6 +78,7 @@ from scripts.experiments._round import Round
 from scripts.experiments.create_round_20261002 import MIMO
 from scripts.experiments.create_round_20261006 import SEQAXES_LINEAGE
 from scripts.experiments.create_round_20261008 import ROUND as SEQBOOK_ROUND
+from scripts.experiments.create_round_20261008 import SEQBOOK_LINEAGE
 
 SEQHOLD_PACK = "configs/workspace_refs/seqhold_alla_100k_8y_20261009"
 INDCYCLE_PACK = "configs/workspace_refs/indcycle_alla_100k_8y_20261009"
@@ -139,7 +142,11 @@ ARM: dict[str, object] = {
     "lineage_arms": SEQAXES_LINEAGE,
 }
 CLOCK_ARM: dict[str, object] = {**ARM, "research_directive": CLOCK_DIRECTIVE}
-BETA_ARM: dict[str, object] = {**ARM, "research_directive": BETA_DIRECTIVE}
+BETA_ARM: dict[str, object] = {
+    **ARM,
+    "lineage_arms": SEQBOOK_LINEAGE,
+    "research_directive": BETA_DIRECTIVE,
+}
 INDCYCLE_ARM: dict[str, object] = {
     "workspace_reference": INDCYCLE_PACK,
     "gpu_count": 0,

@@ -30,11 +30,14 @@ without its lane's claim is not nominated, because the baseline itself is
 already frozen. All six arms run with the parameters of round 20261006 on the
 taxed twin of its seed (identical market and fundamentals tables), so a
 `c_base` row here differs from that round's by the dividend tax alone, on
-one GPU, by the local model and by `mimo-v2.6-flash`. Their lineage is round
-20261006's; that round's four arms on the same baseline are still running and
-have no recorded trial to inherit, so a freeze here is read against the pooled
-trials of those arms and of this round's siblings before it is treated as a
-result. Fill order (ids end in `_20261008`): `seqbag2_bag_100k_8y_qwen` /
+one GPU, by the local model and by `mimo-v2.6-flash`. The bag pair was created
+while round 20261006's four arms on the same baseline were still running, so
+its lineage is that round's and a freeze there is read against those arms'
+pooled trials by hand. The cost and pool pairs are created after those four
+arms and the clock arm of round 20261009 closed and inherit them
+(`SEQBOOK_LINEAGE`), so their gates price that search themselves; siblings
+that run at the same time are still pooled by hand. Fill order (ids end in
+`_20261008`): `seqbag2_bag_100k_8y_qwen` /
 `_mimo`, `seqbag2_cost_100k_8y_qwen` / `_mimo`, `seqbag2_pool_100k_8y_qwen` /
 `_mimo`.
 
@@ -111,8 +114,20 @@ BAG_ARM: dict[str, object] = {
     "lineage_arms": SEQAXES_LINEAGE,
     "research_directive": BAG_DIRECTIVE,
 }
-COST_ARM: dict[str, object] = {**BAG_ARM, "research_directive": COST_DIRECTIVE}
-POOL_ARM: dict[str, object] = {**BAG_ARM, "research_directive": POOL_DIRECTIVE}
+# Every arm that has searched this baseline and closed: round 20261006's label
+# and fundamentals-input pairs and round 20261009's clock arm, on top of that
+# round's own lineage. Arms created after they closed inherit them.
+SEQBOOK_LINEAGE = [
+    *SEQAXES_LINEAGE,
+    "seqlabel_alla_100k_8y_qwen_20261006",
+    "seqlabel_alla_100k_8y_mimo_20261006",
+    "seqfund_alla_100k_8y_qwen_20261006",
+    "seqfund_alla_100k_8y_mimo_20261006",
+    "seqhold_clock_100k_8y_qwen_20261009",
+]
+LATE_ARM: dict[str, object] = {**BAG_ARM, "lineage_arms": SEQBOOK_LINEAGE}
+COST_ARM: dict[str, object] = {**LATE_ARM, "research_directive": COST_DIRECTIVE}
+POOL_ARM: dict[str, object] = {**LATE_ARM, "research_directive": POOL_DIRECTIVE}
 
 ARMS: dict[str, dict[str, object]] = {
     "seqbag2_bag_100k_8y_qwen_20261008": dict(BAG_ARM),
