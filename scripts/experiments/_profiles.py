@@ -132,13 +132,22 @@ SEQBOOK_LINEAGE = [
     "seqfund_alla_100k_8y_mimo_20261006",
     "seqhold_clock_100k_8y_qwen_20261009",
 ]
+# Plus round 20261008's bag pair, which ran the bag with four and six seeds
+# per head; the four-seed bag is the baseline of the lanes after it (round
+# 20261011). The two arms' rows are byte-identical, and the gate counts each
+# arm's trials, so the pair adds its four trials twice, as the label and
+# fundamentals-input pairs above already do.
+SEQBAG4_LINEAGE = [
+    *SEQBOOK_LINEAGE,
+    "seqbag2_bag_100k_8y_qwen_20261008",
+    "seqbag2_bag_100k_8y_mimo_20261008",
+]
 
-# Arms created from round 20261008's cost and pool pairs on are judged on their
-# seed bases together (`require_seed_replicates`): the mean over the nominee
-# and its registered replicates must clear the bar at the freeze and beat the
-# panel forward. The packs predate the rule and say which seed base's node is
-# nominated; this sentence, appended to a directive, keeps that from being read
-# as waiving the registration.
+# Appended to the directives of the arms queued after `require_seed_replicates`
+# came in but whose packs predate it and say which seed base's node is
+# nominated, so that rule is not read as waiving the registration. Those arms
+# (round 20261008's cost and pool pairs, round 20261009's beta pair) were
+# withdrawn; a pack written for the rule says the right thing itself.
 SEED_REPLICATES = (
     "冻结时把被提名的腿在其他种子基数上的整期行登记为 finish_session 的 seed_replicates；"
     "包里关于提名哪个种子基数节点的规定只决定提名哪一行，不免除这一登记。"

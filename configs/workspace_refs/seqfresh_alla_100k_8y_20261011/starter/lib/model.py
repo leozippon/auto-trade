@@ -11,9 +11,10 @@ this recipe, with the input width cut from 14 to the 12 live channels:
     attn   Linear(12, 64) -> 4-head self-attention over the 60 steps (no positional
            encoding, as in the single-head arm) -> last step -> LayerNorm -> Linear(64, 1)
 
-The bag is every head with `SEEDS_PER_HEAD` (two) seeds each, `b4s2`, the
-100k bag. Member j of head h trains with seed `knobs.SEED_BASE` + 100 x
-(position of h in `HEADS`) + j, so bags on different bases share no member.
+The bag is every head with `SEEDS_PER_HEAD` (four) seeds each, `b4s4`; the
+frozen 100k bag had two (`b4s2`). Member j of head h trains with seed
+`knobs.SEED_BASE` + 100 x (position of h in `HEADS`) + j, so b4s4 on a base
+contains that base's b4s2, and bags on different bases share no member.
 
 Training, one loop for every member (the recipe's): training dates are the
 signal dates of the trailing `knobs.TRAIN_YEARS` whose label is realised by
@@ -35,12 +36,13 @@ loss is multiplied by 0.5 ** (age / H), its age counted in calendar days back
 from the newest training date, and the weights are scaled to mean 1 over the
 training dates, so the average step is unchanged and only its spread over the
 window moves. Validation is never weighted. With H = 0 the loss is the
-unweighted one, computed exactly as in c_base.
+unweighted one, computed exactly as in c_bag4.
 
 The training inputs of one refit are built once (half precision on the device)
 and reused by every member; a member's model and optimiser are freed before
-the next one starts, so the device peak is the cache plus the largest head.
-The cache grows with the window: a five-year window holds about 1.7 times the
+the next one starts, so the device peak is the cache plus the largest head,
+whatever the number of members, and a fit's time grows with the members. The
+cache grows with the window: a five-year window holds about 1.7 times the
 three-year one's dates.
 
 Device: CUDA only. The arm is created with one GPU; a container without one is
@@ -55,7 +57,7 @@ from torch import nn
 from lib import knobs, label, panel as P
 
 HIDDEN = 64
-SEEDS_PER_HEAD = 2
+SEEDS_PER_HEAD = 4
 FIT_CALENDAR_DAYS = int(365.25 * knobs.TRAIN_YEARS) + 150   # the window plus SEQ_LEN bars of warm-up
 VALID_DAYS = 60
 EMBARGO_DAYS = label.HOLD

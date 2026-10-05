@@ -22,8 +22,8 @@ seat is ranked and kept like any other, never force-sold for its price.
     swaps        at most MAX_SWAPS band exits a review, worst first; forced
                  exits (no score, no T-1 bar, ST / 退) always go on top
 
-The book is c_base's in every leg of this package; only what the heads learn
-from changes (`lib/model.py`).
+The book is the frozen bag's, and c_bag4's, in every leg of this package;
+only what the heads learn from changes (`lib/model.py`).
 
 Sizing: the book value is (cash + 0.98 x sale proceeds) x CASH_BUFFER plus
 the kept holdings at T-1; each buy is book value / book size in 100-share
@@ -52,8 +52,8 @@ KEEP_BAND = 2.0
 REVIEW_CALENDAR_DAYS = 200   # SEQ_LEN bars plus holidays
 
 
-def run(context, refit_period):
-    leg = knobs.leg(refit_period)
+def run(context):
+    leg = knobs.leg()
     seats = knobs.SEATS
     decision = pd.Timestamp(context.inference_at)
     sell_at = decision.replace(hour=9, minute=30, second=0, microsecond=0)
