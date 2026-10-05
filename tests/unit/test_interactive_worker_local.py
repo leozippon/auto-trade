@@ -499,7 +499,7 @@ def test_interactive_runner_publishes_current_session_timing(tmp_path: Path):
     control_path = tmp_path / "control.json"
     status_path = tmp_path / "status.json"
     ledger = ExperimentLedger(tmp_path / "ledger.jsonl")
-    write_control(control_path, ControlState(mode="auto"))
+    write_control(control_path, ControlState())
     captured: dict[str, object] = {}
 
     def execute(session, context):
@@ -556,7 +556,7 @@ def test_session_boundary_restart_keeps_the_finished_session_and_stops_the_next(
     control_path = tmp_path / "control.json"
     status_path = tmp_path / "status.json"
     ledger = ExperimentLedger(tmp_path / "ledger.jsonl")
-    write_control(control_path, ControlState(mode="auto"))
+    write_control(control_path, ControlState())
     ran: list[str] = []
 
     def execute(session, context):
@@ -610,7 +610,7 @@ def test_session_boundary_restart_is_taken_before_the_next_session_starts(
 
     control_path = tmp_path / "control.json"
     status_path = tmp_path / "status.json"
-    write_control(control_path, ControlState(mode="manual", restart_pending=True))
+    write_control(control_path, ControlState(restart_pending=True))
 
     def execute(session, context):  # pragma: no cover - must not run
         del session, context
@@ -947,7 +947,6 @@ def test_a_cpu_only_allocation_survives_the_control_round_trip(tmp_path: Path) -
     write_control(
         control,
         ControlState(
-            mode="auto",
             gpu_counts={"research": 0},
         ),
     )

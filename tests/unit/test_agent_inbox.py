@@ -49,7 +49,7 @@ def _write_inbox_experiment(root: Path, experiment_id: str = "exp_in") -> Path:
     hitl = directory / "hitl"
     hitl.mkdir(parents=True)
     write_json_atomic(hitl / "params.json", {"experiment_id": experiment_id})
-    write_control(hitl / "control.json", ControlState(mode="auto"))
+    write_control(hitl / "control.json", ControlState())
     write_json_atomic(
         hitl / "status.json",
         {"schema_version": 1, "pid": 999_999_999, "state": "stopped"},
@@ -263,7 +263,8 @@ def test_old_control_schema_is_unchanged_by_inject(tmp_path: Path) -> None:
     )
     before = control_path.read_bytes()
     state = read_control(control_path)
-    assert state.mode == "auto"
+    # The retired approval mode the file still names is ignored, not kept.
+    assert "mode" not in state.to_record()
     assert state.gpu_counts == {}
     _mark_live(directory, session_key=SESSION_A)
     client = TestClient(create_app(tmp_path))

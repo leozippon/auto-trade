@@ -439,10 +439,7 @@ class ExperimentManager:
             merged.update(acceptance_for(merged).to_record())
             merged["_created_at"] = utc_now_iso()
             write_json_atomic(hitl / "params.json", merged)
-            write_control(
-                hitl / "control.json",
-                ControlState(mode=str(merged["initial_control_mode"])),
-            )
+            write_control(hitl / "control.json", ControlState())
             write_json_atomic(
                 hitl / "status.json", {"schema_version": 1, "state": "created"}
             )

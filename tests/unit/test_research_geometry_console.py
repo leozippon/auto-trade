@@ -34,7 +34,7 @@ def _experiment(root: Path, experiment_id: str, params: dict[str, object]) -> Pa
     hitl = directory / "hitl"
     hitl.mkdir(parents=True)
     write_json_atomic(hitl / "params.json", {"experiment_id": experiment_id, **params})
-    write_control(hitl / "control.json", ControlState(mode="auto"))
+    write_control(hitl / "control.json", ControlState())
     write_json_atomic(hitl / "status.json", {"schema_version": 1, "state": "completed"})
     return directory
 

@@ -30,7 +30,6 @@ from .config import (
 from .ledger import FORWARD_SESSION_KEY, RESEARCH_SESSION_KEY
 
 HITL_STATE_SCHEMA_VERSION = 1
-CONTROL_MODES = ("auto", "manual")
 HITL_DIR_NAME = "hitl"
 PARAMS_NAME = "params.json"
 CONTROL_NAME = "control.json"
@@ -98,6 +97,8 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "lineage_arms": rolling_default("lineage_arms"),
     "strategy_period": "day",
     "inference_time": "08:30",
+    # Sets nothing since the approval mode was removed; still written because
+    # the round launcher pins it (scripts/experiments/_round.py).
     "initial_control_mode": "auto",
     "benchmark_index": rolling_default("benchmark_index"),
     "window_months": rolling_default("window_months"),
@@ -208,12 +209,6 @@ WEB_REQUIRED_PARAMS = frozenset({"experiment_id", *GEOMETRY_PARAMETERS})
 
 @dataclass
 class ControlState:
-    # Legacy compatibility only: no session of this code base gates on it.
-    # One still-running worker executes pre-removal code whose reader defaults
-    # a missing ``mode`` to "manual" and then holds every session at an
-    # approval gate this console can no longer release, so the key has to keep
-    # round-tripping through control.json with its recorded value ("auto").
-    mode: str = "manual"
     request: str | None = None
     # One-shot: the console asked for a code swap at the next session
     # boundary. The worker consumes it and re-executes itself in place, so an
@@ -236,13 +231,10 @@ class ControlState:
     updated_at: str | None = None
 
     def to_record(self) -> dict[str, object]:
-        if self.mode not in CONTROL_MODES:
-            raise ValueError(f"invalid HITL mode: {self.mode}")
         if self.request not in (None, "pause", "stop"):
             raise ValueError(f"invalid HITL request: {self.request}")
         return {
             "schema_version": HITL_STATE_SCHEMA_VERSION,
-            "mode": self.mode,
             "request": self.request,
             "restart_pending": self.restart_pending,
             "directives": dict(self.directives),
@@ -260,14 +252,10 @@ def read_control(path: str | Path) -> ControlState:
     _require_version(payload, Path(path))
     if not payload:
         return ControlState()
-    mode = str(payload.get("mode") or "manual")
-    if mode not in CONTROL_MODES:
-        mode = "manual"
     request = payload.get("request")
     # Keys no longer in the contract are ignored, so a file written before a
     # control was removed still reads.
     return ControlState(
-        mode=mode,
         request=str(request) if request in ("pause", "stop") else None,
         restart_pending=bool(payload.get("restart_pending")),
         directives=_string_map(payload.get("directives")),

@@ -141,7 +141,7 @@ class WorkerLifecycleTest(unittest.TestCase):
         self.control_path = self.hitl / "control.json"
         self.status_path = self.hitl / "status.json"
         write_json_atomic(self.hitl / "params.json", {"experiment_id": "exp_ctl"})
-        write_control(self.control_path, ControlState(mode="manual"))
+        write_control(self.control_path, ControlState())
         write_json_atomic(
             self.status_path, {"schema_version": 1, "pid": 999_999_999, "state": "stopped"}
         )
@@ -290,7 +290,7 @@ class WorkerLifecycleTest(unittest.TestCase):
         AgentRefStore(other)
         (other / "hitl").mkdir(parents=True)
         write_json_atomic(other / "hitl/params.json", {"experiment_id": "exp_other"})
-        write_control(other / "hitl/control.json", ControlState(mode="auto"))
+        write_control(other / "hitl/control.json", ControlState())
         write_json_atomic(
             other / "hitl/status.json",
             {"schema_version": 1, "pid": 999_999_999, "state": "stopped"},
@@ -372,7 +372,7 @@ class WorkerLifecycleTest(unittest.TestCase):
         self._install_worker_script()
         write_control(
             self.control_path,
-            ControlState(mode="manual", request="stop", restart_pending=True),
+            ControlState(request="stop", restart_pending=True),
         )
         process = self._spawn(_COOPERATIVE)
         self._publish(process, session_key="research")
@@ -408,7 +408,6 @@ class WorkerLifecycleTest(unittest.TestCase):
         write_control(
             self.control_path,
             ControlState(
-                mode="manual",
                 request="stop",
                 directives={"research": "keep the turnover down"},
             ),

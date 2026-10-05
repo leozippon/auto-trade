@@ -430,7 +430,7 @@ def test_the_llm_research_session_mounts_only_the_research_end_view_and_freezes(
     )
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     # The console's GPU allocation for the research session, one-shot.
-    write_control(experiment / "hitl" / "control.json", ControlState(mode="auto", gpu_counts={"research": 3}))
+    write_control(experiment / "hitl" / "control.json", ControlState(gpu_counts={"research": 3}))
     options = load_worker_options(experiment, repo_root=repo)
     llm = _NominatingLLM(
         [

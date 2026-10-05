@@ -151,10 +151,10 @@ BASE_EXPECTED_DEFAULTS: dict[str, object] = {
     "reasoning_effort": "xhigh",
     "inference_time": "08:30",
     "strategy_period": "day",
-    # Every model role. Every round runs entirely on the local model and
-    # overrides none of them, so the console default is what actually decides
-    # them; spelled out as literals on purpose, since a rename of the local
-    # model is exactly the drift this has to catch.
+    # Every model role. An arm on the local model overrides none of them (a
+    # hosted arm overrides its own, `_profiles.MIMO`), so the console default
+    # is what actually decides them; spelled out as literals on purpose, since
+    # a rename of the local model is exactly the drift this has to catch.
     "model": "qwen-3.8-27b-fp8",
     "subagent_model": "qwen-3.8-27b-fp8",
     "nl_model": "qwen-3.8-27b-fp8",

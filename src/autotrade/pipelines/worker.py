@@ -70,7 +70,6 @@ from .config import (
 )
 from .experiment import RollingExperimentPipeline
 from .hitl_state import (
-    CONTROL_MODES,
     SCHEDULE_NAME,
     WEB_INTERNAL_PARAMS,
     PlannedSession,
@@ -107,12 +106,6 @@ from .pit_views_seed import assert_seed_carries_bonus_split, assert_seed_snapsho
 from .research_session import LLMResearchDeveloper
 from .skills import latest_skills_snapshot, resolve_operating_memory
 
-# Knobs no longer read by anything. They stay accepted, and only accepted, so
-# every experiment created before their removal keeps launching and keeps
-# listing: rejecting a key the console itself wrote would make those arms
-# unreadable. The acceptance targets set warnings no run ever recorded.
-RETIRED_PARAMS = ("min_return", "min_sharpe")
-
 _ALLOWED_PARAMS = {
     "experiment_id",
     *GEOMETRY_PARAMETERS,
@@ -129,6 +122,8 @@ _ALLOWED_PARAMS = {
     "strategy_period",
     "inference_time",
     "initial_cash",
+    # Sets nothing since the approval mode was removed; every params.json
+    # carries it, and the creation defaults still write it.
     "initial_control_mode",
     "daily_window_months",
     "fundamentals_window_months",
@@ -206,7 +201,6 @@ _ALLOWED_PARAMS = {
     "agent_sandbox_memory",
     "agent_sandbox_pids",
     "agent_sandbox_tmpfs",
-    *RETIRED_PARAMS,
 }
 
 # Single source for the NL budget defaults advertised to experiment parameters.
@@ -371,7 +365,6 @@ class InteractiveWorkerOptions:
     data_backend: str
     execution_mode: str
     developer_mode: str
-    initial_control_mode: str
     rolling: RollingExperimentConfig
     work_root: Path
     raw_dir: Path | None = None
@@ -522,9 +515,6 @@ def resolve_worker_options(
         if developer_mode == "llm"
         else (None, None)
     )
-    initial_control_mode = str(params.get("initial_control_mode") or "manual")
-    if initial_control_mode not in CONTROL_MODES:
-        raise ValueError(f"initial_control_mode must be one of {CONTROL_MODES}")
     snapshot_config = _snapshot_config(params)
     # The arm's benchmark: refused here if it is not an index the lake carries,
     # and checked against the pinned release's partitions below.
@@ -737,7 +727,6 @@ def resolve_worker_options(
         data_backend=data_backend,
         execution_mode=execution_mode,
         developer_mode=developer_mode,
-        initial_control_mode=initial_control_mode,
         rolling=rolling,
         work_root=work_root,
         raw_dir=raw_dir,

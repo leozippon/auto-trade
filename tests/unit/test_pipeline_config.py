@@ -821,21 +821,6 @@ class ConsoleParameterSurfaceTest(unittest.TestCase):
                 self.assertTrue(fields[key].get("label"))
                 self.assertTrue(fields[key].get("help"), f"{key} has no help text")
 
-    def test_a_retired_parameter_is_accepted_but_offered_nowhere(self) -> None:
-        """The acceptance targets set warnings no run ever recorded, so they are
-        gone from the rules and from the create form. Every params.json on disk
-        still names them, and rejecting a key the console itself wrote would
-        make those arms unreadable to the listing and unresumable."""
-
-        from autotrade.pipelines.worker import _ALLOWED_PARAMS, RETIRED_PARAMS
-
-        fields = self._schema_fields()
-        for key in RETIRED_PARAMS:
-            with self.subTest(key=key):
-                self.assertIn(key, _ALLOWED_PARAMS)
-                self.assertNotIn(key, fields)
-                self.assertNotIn(key, WEB_CREATE_DEFAULTS)
-
     def test_every_rendered_field_is_a_parameter_the_worker_accepts(self) -> None:
         from autotrade.pipelines.worker import _ALLOWED_PARAMS
 

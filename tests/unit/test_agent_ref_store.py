@@ -197,7 +197,7 @@ def test_legacy_web_audit_remains_readable_but_mutations_and_preview_fail(
     )
     hitl = experiment / "hitl"
     hitl.mkdir(parents=True)
-    write_control(hitl / "control.json", ControlState(mode="manual"))
+    write_control(hitl / "control.json", ControlState())
     write_json_atomic(hitl / "status.json", {"schema_version": 1, "state": "stopped"})
     write_json_atomic(hitl / "params.json", {"strategy_period": "day"})
     write_json_atomic(

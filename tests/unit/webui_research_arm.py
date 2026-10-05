@@ -237,7 +237,7 @@ def build_arm(
             "_created_at": "2026-09-13T00:00:00+00:00",
         },
     )
-    write_control(hitl / "control.json", ControlState(mode="auto"))
+    write_control(hitl / "control.json", ControlState())
     if stage == "created":
         write_json_atomic(hitl / "status.json", {"schema_version": 1, "state": "created"})
         return directory

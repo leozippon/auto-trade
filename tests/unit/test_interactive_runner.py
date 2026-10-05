@@ -93,7 +93,7 @@ class RunnerTestCase(unittest.TestCase):
         self.control = self.hitl / "control.json"
         self.status = self.hitl / "status.json"
         self.ledger = ExperimentLedger(self.root / "ledger.jsonl")
-        write_control(self.control, ControlState(mode="auto"))
+        write_control(self.control, ControlState())
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
