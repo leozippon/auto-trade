@@ -256,6 +256,8 @@ def test_the_prompt_states_the_research_session_contract() -> None:
         "`selection_statistics.information_ratio_bar`",
         "基准指数涨得最多的几个研究年",
         "按种子基配对后在至少两个种子基上都为正",
+        # How a strategy writes its seed is the README's.
+        "种子的写法见 `output/README.md`",
         "参考包写定的更严复现规则以包为准，但免除不了这两节的条件",
         "没有候选过检验时以 `no_edge` 结束是诚实的结果",
         # The arm's conclusion is the finish reason, not a skill.
@@ -274,6 +276,7 @@ def test_the_prompt_states_the_research_session_contract() -> None:
         "plain_selection",
         "seed_replicates",
         "arm.lineage",
+        "SEED_BASE",
         "研究期权益回撤与主动回撤",
         "按字节认",
     ):

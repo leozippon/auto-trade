@@ -52,6 +52,7 @@ from autotrade.environment.strategy_loader import (
 from autotrade.environment.tools import ToolError
 from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.pipelines.config import (
+    AcceptanceRules,
     ArtifactRevision,
     EvaluationRequest,
     SnapshotBundle,
@@ -703,6 +704,25 @@ def test_readme_seed_idiom_passes_the_static_check_and_is_what_a_replicate_chang
             encoding="utf-8",
         )
     assert seed_change(tmp_path, "nominee", "replicate") == f"main.py: {name} = 2000"
+
+
+def test_the_facts_define_a_replicate_by_the_seed_line_the_readme_writes():
+    """One seed line, two texts: the README states how a strategy writes it
+    (checked against the gate above), and the acceptance_rules fact defines a
+    seed replicate as that line changed. Both name the same seed names, in
+    the same order, and the fact's example is the README's own line."""
+
+    paragraph = next(
+        block
+        for block in (TEMPLATE / "README.md").read_text(encoding="utf-8").split("\n\n")
+        if block.startswith("Random draws must be reproducible")
+    )
+    fact = AcceptanceRules(require_seed_replicates=True).agent_facts()["freeze_gate"]["seed_replicates"]
+    names = re.compile(r"\b_?SEED(?:_BASE)?\b")
+    assert names.findall(paragraph)[:4] == ["SEED", "SEED_BASE", "_SEED", "_SEED_BASE"]
+    assert names.findall(fact)[:4] == names.findall(paragraph)[:4]
+    example = re.search(r"`(\w+ = \d+)`", paragraph)
+    assert example is not None and f"e.g. {example[1]} in the nominee" in fact
 
 
 def test_every_replay_starts_from_an_empty_state_directory(tmp_path: Path):

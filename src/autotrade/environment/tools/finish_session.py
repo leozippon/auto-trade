@@ -38,23 +38,14 @@ REASON_MAX_CHARS = AGENT_JUSTIFICATION_MAX_CHARS
 # records the freeze.
 FreezeGate = Callable[[str, tuple[str, ...]], Mapping[str, object]]
 
-# The gate's reasons that concern a nominee's seed replicates, and what a
-# replicate is, for the refusal that names one of them.
+# The gate's reasons that concern a nominee's seed replicates: a refusal that
+# names one points to the fact that defines a replicate.
 SEED_REASONS = frozenset(
     {
         "freeze_seed_replicate_invalid",
         "freeze_too_few_seed_replicates",
         "freeze_seed_mean_information_ratio_below_threshold",
     }
-)
-SEED_REPLICATE_RULE = (
-    "A seed replicate is another complete full-span Validation of this session, "
-    "registered as a candidate (not a control), whose strategy is the nominee's "
-    "bytes with exactly one line changed: an integer assignment to a seed name (SEED, "
-    "SEED_BASE, or one ending in _SEED or _SEED_BASE; SEED_BASE = 2000). Each one's "
-    "bytes differ from every other named one, and "
-    "the mean active information ratio over the nominee and its replicates must reach "
-    "the nominee's information_ratio_bar."
 )
 
 
@@ -111,7 +102,7 @@ def _spec(*, seed_replicates: bool) -> ToolSpec:
     """The tool's schema; ``seed_replicates`` only for an arm whose rules hold it.
 
     The rule a replicate meets is the arm's ``acceptance_rules.freeze_gate``
-    fact; a refusal that concerns one restates it (``SEED_REPLICATE_RULE``)."""
+    fact, which the parameter and a refusal that concerns one point to."""
 
     return ToolSpec(
         "finish_session",
@@ -230,7 +221,12 @@ class FinishSessionTool:
                 f"finish_session refused: {self._named([node_id])[0]} fails the freeze gate "
                 f"({', '.join(reasons) or 'no reason recorded'}); "
                 f"{_gate_numbers(gate)}. "
-                + (f"{self._seed_text(gate)} {SEED_REPLICATE_RULE} " if seeds else "")
+                + (
+                    f"{self._seed_text(gate)} A seed replicate is what "
+                    "acceptance_rules.freeze_gate.seed_replicates defines. "
+                    if seeds
+                    else ""
+                )
                 + (
                     "These nodes of this session pass it now"
                     + (
@@ -506,7 +502,6 @@ __all__ = [
     "REASON_MAX_CHARS",
     "REASON_MIN_CHARS",
     "SEED_REASONS",
-    "SEED_REPLICATE_RULE",
     "FinishSessionTool",
     "FreezeGate",
     "SessionBudgetStatus",

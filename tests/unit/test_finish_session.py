@@ -21,7 +21,6 @@ from autotrade.environment.tools.base import (
 from autotrade.environment.tools.finish_session import (
     REASON_MAX_CHARS,
     REASON_MIN_CHARS,
-    SEED_REPLICATE_RULE,
     FinishSessionTool,
     SessionBudgetStatus,
 )
@@ -303,16 +302,16 @@ def test_seed_replicates_are_offered_where_the_arm_holds_them_and_go_to_the_gate
 
     seeded = _tool(tree, gate, seed_replicates=True)  # type: ignore[arg-type]
     assert "seed_replicates" in seeded.spec.input_schema["properties"]
-    # The rule a replicate meets is the arm's freeze_gate fact; the schema
-    # points there, and only a refusal that concerns one restates it.
-    assert SEED_REPLICATE_RULE not in seeded.spec.description
-    assert "acceptance_rules.freeze_gate.seed_replicates" in str(
-        seeded.spec.input_schema["properties"]["seed_replicates"]["description"]
-    )
+    # The rule a replicate meets is the arm's freeze_gate fact, stated there
+    # alone: the schema and a refusal that concerns one point to it.
+    fact = "acceptance_rules.freeze_gate.seed_replicates"
+    assert "seed name" not in seeded.spec.description
+    assert fact in str(seeded.spec.input_schema["properties"]["seed_replicates"]["description"])
     with pytest.raises(ToolError) as refused:
         seeded.invoke({"outcome": "freeze", "node_id": nominee})
     message = str(refused.value)
-    assert "freeze_too_few_seed_replicates" in message and SEED_REPLICATE_RULE in message
+    assert "freeze_too_few_seed_replicates" in message and fact in message
+    assert "seed name" not in message
     assert refused.value.details["passing_nodes"] == [node_handle(replicate)]
     assert '"seed_replicates"' in str(refused.value.retry_hint)
 
