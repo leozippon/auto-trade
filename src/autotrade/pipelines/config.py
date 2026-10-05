@@ -198,9 +198,10 @@ class AcceptanceRules:
     # The optional conditions: off here, stamped on at creation
     # (``hitl_state.CREATION_STAMPS`` states that convention once). The raw
     # condition reads ``verdict.raw_excess_at_cost_stress`` of the nominee at
-    # ``cost_stress_multiplier``. Plain selection (F8) reads
-    # ``verdict.judged_selection`` of the frozen book and whatever seed
-    # replicates its freeze registered. Seed replicates are what a nominee
+    # ``cost_stress_multiplier``. The forward plain-excess bound (F8) reads
+    # ``verdict.plain_excess_lower_bound`` of the frozen book and whatever seed
+    # replicates its freeze registered; the rule keeps the name it was
+    # recorded under. Seed replicates are what a nominee
     # that trains a model registers (``experiment.freeze_gate_for`` judges
     # them at the freeze, and the forward stage replays each like the book),
     # so the two compose without naming each other: with both, F8 judges the
@@ -493,13 +494,18 @@ class AcceptanceRules:
                     # also holds seed replicates.
                     **(
                         {
-                            "plain_selection": (
+                            "plain_excess_lower_bound": (
                                 f"{self.forward_confidence:.0%} one-sided block-bootstrap "
-                                "lower bound > 0 of the annualized mean of the frozen "
-                                "book's daily return after every cost minus its "
-                                "zero-skill panel's over the forward months, with no "
-                                "regression: selection in the holder's terms, positive "
-                                "beyond its own noise"
+                                "lower bound > 0 of the frozen book's plain excess over "
+                                "the forward months: the annualized mean of its active "
+                                "series with no regression, its daily return after "
+                                "every cost minus its zero-skill panel's (on a "
+                                "batch_validate row, the mean of daily_series "
+                                f"active_return x {verdict.TRADING_DAYS_PER_YEAR}). "
+                                "Not raw_readings.plain_selection, which compounds the "
+                                "book and the panel each over the span before taking "
+                                "their difference. Selection in the holder's terms, "
+                                "positive beyond its own noise"
                                 + (
                                     ". Where the freeze registered seed replicates the "
                                     "series is the day-by-day average over the frozen "

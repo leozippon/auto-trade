@@ -830,8 +830,9 @@ class RollingExperimentPipeline:
         Each seed replicate's completed replay is handed to both slices, named
         by its artifact and source Step: ``slices.<name>.seed_replicates`` and
         ``slices.<name>.seed_mean`` carry its readings and the mean with the
-        book, ``slices.forward.judged_selection`` the series F8 judges on them
-        together, and the record's ``seed_replicates`` its result and refits.
+        book, ``slices.forward.plain_excess_lower_bound`` what F8 judges on
+        them together, and the record's ``seed_replicates`` its result and
+        refits.
         """
 
         replay, analysis = _replay_and_analysis(result)

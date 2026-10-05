@@ -240,15 +240,12 @@ def test_a_model_nominee_freezes_with_its_seed_replicate_and_both_replay_forward
                 sum(member["raw_readings"][key] for member in members) / 3
             )
     block = forward["slices"]["forward"]
-    judged = block["judged_selection"]
     # The nominee itself beat its panel, and so does the mean over the three
     # seeds; the mean's lower bound does not clear zero.
     assert block["raw_readings"]["plain_selection"] > 0
     assert block["seed_mean"]["raw_readings"]["plain_selection"] > 0
-    assert judged["members"] == 3
-    assert judged["mean"] == pytest.approx(block["seed_mean"]["plain_excess"])
-    assert judged["lower_bound"] < 0 < judged["mean"]
-    assert forward["verdict"]["reasons"] == ["forward_plain_selection_lower_bound_not_positive"]
+    assert block["plain_excess_lower_bound"] < 0 < block["seed_mean"]["plain_excess"]
+    assert forward["verdict"]["reasons"] == ["forward_plain_excess_lower_bound_not_positive"]
     assert forward["verdict"]["thresholds"]["require_forward_plain_selection"] is True
     assert experiment_verdict(pipeline.ledger.read())["status"] == "discarded"
 
@@ -259,8 +256,8 @@ def test_seeds_that_agree_forward_graduate_together(tmp_path: Path):
     )
     pipeline.run_research_session()
     forward = pipeline.run_forward()
-    judged = forward["slices"]["forward"]["judged_selection"]
-    assert judged["members"] == 2 and judged["lower_bound"] > 0
+    block = forward["slices"]["forward"]
+    assert block["seed_mean"]["members"] == 2 and block["plain_excess_lower_bound"] > 0
     assert forward["verdict"]["status"] == "graduated"
 
 
@@ -334,9 +331,7 @@ def test_a_nominee_that_trains_no_model_is_judged_on_its_own_series(tmp_path: Pa
     assert len(evaluator.requests) == research + 1
     block = forward["slices"]["forward"]
     assert "seed_mean" not in block
-    assert block["judged_selection"]["members"] == 1
-    assert block["judged_selection"]["mean"] == pytest.approx(block["plain_excess"])
-    assert 0 < block["judged_selection"]["lower_bound"] < block["judged_selection"]["mean"]
+    assert 0 < block["plain_excess_lower_bound"] < block["plain_excess"]
     assert forward["verdict"]["status"] == "graduated"
 
 
@@ -359,7 +354,7 @@ def test_an_arm_without_the_condition_freezes_and_judges_as_before(tmp_path: Pat
     assert len(evaluator.requests) == research + 1
     assert "seed_replicates" not in forward
     assert "seed_mean" not in forward["slices"]["forward"]
-    assert forward["slices"]["forward"]["judged_selection"]["members"] == 1
+    assert forward["slices"]["forward"]["plain_excess_lower_bound"] > 0
     assert forward["verdict"]["status"] == "graduated"
 
     rows = record["steps"]
@@ -382,7 +377,7 @@ def test_an_arm_without_the_condition_freezes_and_judges_as_before(tmp_path: Pat
             RuntimeError,
             r"seed replicate research_step_1 \(.*\) did not complete",
         ),
-        ({"bare_seed": 2000}, ValueError, "no plain selection to judge"),
+        ({"bare_seed": 2000}, ValueError, "no plain excess to judge"),
     ],
     ids=["its_replay_fails", "its_replay_has_no_panel"],
 )

@@ -633,8 +633,8 @@ def seed_replicate_slice(
     exactly as the book is. Its slice carries what the book's own slice
     reads -- the graded series' neutralised statistics and
     :func:`slice_readings` -- and no condition: forward judges the book and
-    its replicates as one series (:func:`judged_selection`), never a replicate
-    on its own.
+    its replicates as one series (:func:`plain_excess_lower_bound`), never a
+    replicate on its own.
     """
 
     start, end = _span(start, end)
@@ -697,29 +697,31 @@ def _plain_active(analysis: Mapping[str, object], start: str, end: str) -> dict[
 
     active = active_analysis(analysis)
     if active is None:
-        raise ValueError("a replay without a zero-skill panel has no plain selection to judge")
+        raise ValueError("a replay without a zero-skill panel has no plain excess to judge")
     return {row[0]: row[1] for row in _regression_join(active, start, end)}
 
 
-def judged_selection(
+def plain_excess_lower_bound(
     analyses: Sequence[Mapping[str, object]],
     *,
     start: str,
     end: str,
     seed_key: str,
     confidence: float,
-) -> dict[str, object]:
-    """What the forward selection condition (F8) judges: one series, its mean
-    and that mean's lower bound.
+) -> float:
+    """What the forward selection condition (F8) judges: the one-sided
+    ``confidence`` lower bound of the plain excess of ``analyses`` together.
 
     The series is the daily plain active return (:func:`_plain_active`)
     averaged day by day over ``analyses``: the frozen book's sidecar, then one
     per seed replicate its freeze registered, so a book frozen with none is
-    judged on its own series. ``mean`` is the series' annualised mean and
-    ``lower_bound`` that mean's one-sided ``confidence`` bound, drawn as F2
-    draws its own (:func:`_bootstrap_lower_bound`: the same days, blocks,
-    draws and ``seed_key``) with the mean in place of the regression
-    intercept. ``members`` counts the book and its replicates. A member whose
+    judged on its own series. Its annualised mean is the slice's
+    ``plain_excess``, or with replicates ``seed_mean.plain_excess``, so the
+    record carries the bound alone, drawn as F2 draws its own
+    (:func:`_bootstrap_lower_bound`: the same days, blocks, draws and
+    ``seed_key``) with the mean in place of the regression intercept. It is
+    not ``raw_readings.plain_selection``, which compounds the book and the
+    panel each over the span before taking their difference. A member whose
     replay carries no panel or measured other days than the book's raises
     ``ValueError``: a seed is never dropped from the mean.
     """
@@ -731,13 +733,7 @@ def judged_selection(
             f"a seed replicate measured other days than the frozen book over {start}..{end}"
         )
     daily = np.mean([list(member.values()) for member in members], axis=0)
-    return {
-        "members": len(members),
-        "mean": float(daily.mean()) * TRADING_DAYS_PER_YEAR,
-        "lower_bound": _bootstrap_lower_bound(
-            daily, seed_key, confidence=confidence, statistic=_mean
-        ),
-    }
+    return _bootstrap_lower_bound(daily, seed_key, confidence=confidence, statistic=_mean)
 
 
 def _count(value: object, name: str, minimum: int) -> int:
@@ -881,7 +877,7 @@ CONDITIONS: tuple[Condition, ...] = (
     Condition("replay", "heldout_strategy_error", lambda m, t: m["strategy_error"] != "heldout", "H1"),
     # The forward slice (:func:`forward_slice`). F2-F7 read the frozen book;
     # F8 reads the book and its seed replicates as one series
-    # (:func:`judged_selection`).
+    # (:func:`plain_excess_lower_bound`).
     Condition("forward", "forward_lower_bound_not_positive", lambda m, t: m["lower_bound"] > 0, "F2"),
     Condition("forward", "forward_recency_negative", lambda m, t: m["recency_neutralized_excess"] >= 0, "F3"),
     Condition("forward", "forward_max_drawdown_exceeded", lambda m, t: m["max_drawdown"] <= t["max_drawdown"], "F4"),
@@ -891,7 +887,7 @@ CONDITIONS: tuple[Condition, ...] = (
     Condition("forward", "forward_exposure_below_floor", lambda m, t: m["mean_gross"] >= t["min_mean_gross"], "F6"),
     Condition("forward", "forward_tracking_error_above_cap", _within_cap, "F7", requires=_CAP),
     Condition("forward", "forward_beta_outside_band", _within_band, "F7", requires=_CAP),
-    Condition("forward", "forward_plain_selection_lower_bound_not_positive", lambda m, t: m["judged_selection"]["lower_bound"] > 0, "F8", requires=_PLAIN, stamp=_PLAIN),
+    Condition("forward", "forward_plain_excess_lower_bound_not_positive", lambda m, t: m["plain_excess_lower_bound"] > 0, "F8", requires=_PLAIN, stamp=_PLAIN),
     # The Held-out slice (:func:`heldout_slice`).
     Condition("heldout", "heldout_excess_below_tolerance", lambda m, t: m["neutralized_excess"] >= m["tolerance"], "H2"),
     Condition("heldout", "heldout_max_drawdown_exceeded", lambda m, t: m["max_drawdown"] <= t["max_drawdown"], "H3"),
@@ -1156,10 +1152,10 @@ def forward_slice(
     freeze registered, replayed like the book, each as what names it and its
     replay's sidecar; with any, the slice carries their slices and the
     :func:`seed_mean` with the book. With ``require_forward_plain_selection``
-    (F8) the slice also carries ``judged_selection``
-    (:func:`judged_selection` of the book and those replicates, at
-    ``forward_confidence``), whose lower bound must be above zero: selection
-    in plain terms, with its uncertainty, on the seeds together. Only then do
+    (F8) the slice also carries ``plain_excess_lower_bound``
+    (:func:`plain_excess_lower_bound` of the book and those replicates, at
+    ``forward_confidence``), which must be above zero: selection in plain
+    terms, with its uncertainty, on the seeds together. Only then do
     the thresholds name the condition, so a slice judged without it reads as
     before. The holder's readings (:func:`slice_readings`) ride on every
     slice either way.
@@ -1211,7 +1207,7 @@ def forward_slice(
     readings = slice_readings(analysis, start=start, end=end)
     selection: dict[str, object] = {}
     if rules.require_forward_plain_selection:
-        selection["judged_selection"] = judged_selection(
+        selection["plain_excess_lower_bound"] = plain_excess_lower_bound(
             [analysis, *(sidecar for _identity, sidecar in seed_replicates)],
             start=start,
             end=end,

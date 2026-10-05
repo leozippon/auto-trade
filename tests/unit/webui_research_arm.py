@@ -214,7 +214,7 @@ def build_arm(
     two together, in the shapes ``pipelines.experiment`` records
     (tests/unit/test_seed_replicates.py): the gate's ``seed_replicates``
     block, the frozen block's, each slice's ``seed_replicates`` and
-    ``seed_mean``, the forward slice's ``judged_selection`` and the record's
+    ``seed_mean``, the forward slice's ``plain_excess_lower_bound`` and the record's
     own rows.
     """
 

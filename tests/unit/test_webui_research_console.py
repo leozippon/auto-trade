@@ -348,15 +348,15 @@ def test_seed_replicates_are_shown_where_the_record_has_them_and_absent_otherwis
         assert block["seed_mean"]["raw_readings"]["plain_selection"] == pytest.approx(
             (block["raw_readings"]["plain_selection"] + block["seed_replicates"][0]["raw_readings"]["plain_selection"]) / 2
         )
-    assert forward["judged_selection"]["members"] == 2
-    assert forward["judged_selection"]["mean"] == pytest.approx(forward["seed_mean"]["plain_excess"])
+    assert forward["seed_mean"]["members"] == 2
+    assert isinstance(forward["plain_excess_lower_bound"], float)
     assert seeded["forward"]["verdict"]["thresholds"]["require_forward_plain_selection"] is True
     assert seeded["sessions"][1]["thresholds"]["require_forward_plain_selection"] is True
-    assert registry._CRITERION_CODES["forward_plain_selection_lower_bound_not_positive"] == "F8"
+    assert registry._CRITERION_CODES["forward_plain_excess_lower_bound_not_positive"] == "F8"
     # One seed under the earlier rules: nothing served, so nothing drawn.
     assert single["frozen"]["seed_replicates"] is None
     assert single["sessions"][0]["record"]["freeze_gate"]["seed_replicates"] is None
-    assert not {"seed_mean", "judged_selection"} & set(single["forward"]["slices"]["forward"])
+    assert not {"seed_mean", "plain_excess_lower_bound"} & set(single["forward"]["slices"]["forward"])
     assert "require_forward_plain_selection" not in single["sessions"][1]["thresholds"]
 
     script = (

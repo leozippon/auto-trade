@@ -340,17 +340,21 @@ class AcceptanceRulesTest(unittest.TestCase):
 
         recorded = acceptance_for({"max_drawdown": 0.45})
         self.assertFalse(recorded.require_forward_plain_selection)
-        self.assertNotIn("plain_selection", recorded.agent_facts()["graduation"]["forward"])
+        self.assertNotIn("plain_excess_lower_bound", recorded.agent_facts()["graduation"]["forward"])
         held = acceptance_for({"require_forward_plain_selection": True})
         self.assertTrue(held.require_forward_plain_selection)
-        stated = held.agent_facts()["graduation"]["forward"]["plain_selection"]
+        stated = held.agent_facts()["graduation"]["forward"]["plain_excess_lower_bound"]
         self.assertIn("lower bound > 0", stated)
         self.assertIn("with no regression", stated)
+        # Its research-period reading, and the row field of a similar name
+        # that it is not.
+        self.assertIn("daily_series active_return", stated)
+        self.assertIn("Not raw_readings.plain_selection", stated)
         self.assertNotIn("seed replicates", stated)
         self.assertIsNone(re.search(r"\d\.\d", stated))
         seeded = replace(held, require_seed_replicates=True).agent_facts()["graduation"]["forward"]
         self.assertEqual(set(seeded), set(held.agent_facts()["graduation"]["forward"]))
-        self.assertIn("average over the frozen book and its replicates", seeded["plain_selection"])
+        self.assertIn("average over the frozen book and its replicates", seeded["plain_excess_lower_bound"])
         self.assertEqual(AcceptanceRules.from_record(held.to_record()), held)
         with self.assertRaisesRegex(ValueError, "require_forward_plain_selection must be a boolean"):
             AcceptanceRules(require_forward_plain_selection="yes")  # type: ignore[arg-type]

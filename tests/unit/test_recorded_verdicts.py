@@ -181,13 +181,13 @@ def test_the_dump_judges_every_stored_input_under_every_variant_of_its_rules(cur
     }
     assert "forward_tracking_error_above_cap" in verdicts[MANDATED]["verdict"]["reasons"]
     assert verdicts["recorded"]["verdict"]["reasons"] == []
-    # The series F8 judges exists exactly where an era holds the condition:
-    # the book's own, or the book with the replicates named.
-    assert "judged_selection" not in verdicts["R1"]["slices"]["forward"]
+    # The bound F8 judges exists exactly where an era holds the condition:
+    # on the book's own series, or on the book with the replicates named.
+    assert "plain_excess_lower_bound" not in verdicts["R1"]["slices"]["forward"]
     alone = verdicts["R3"]["slices"]["forward"]
     named = verdicts[WITH_REPLICATES]["slices"]["forward"]
-    assert "seed_mean" not in alone and alone["judged_selection"]["members"] == 1
-    assert named["seed_mean"]["members"] == named["judged_selection"]["members"] == 2
+    assert "seed_mean" not in alone and "plain_excess_lower_bound" in alone
+    assert named["seed_mean"]["members"] == 2 and "plain_excess_lower_bound" in named
     # The creation contract rides along, in the console's own order.
     assert [key for key, _value in current["creation"]["defaults"]] == list(WEB_CREATE_DEFAULTS)
     assert "min_dsr_probability" in current["creation"]["accepted"]
@@ -238,7 +238,11 @@ def test_the_differential_names_exactly_what_a_baseline_judges_differently(
     differing, moved = differential(baseline_dump("HEAD", experiments, jobs=1, repo=repo), current)
 
     assert differing and not moved
-    assert {path.rsplit(".", 1)[-1] for path in differing} == {"lower_bound", "bootstrap_draws"}
+    assert {path.rsplit(".", 1)[-1] for path in differing} == {
+        "lower_bound",
+        "plain_excess_lower_bound",
+        "bootstrap_draws",
+    }
     assert all(path.startswith(f"arms.{ARM}.forward.") for path in differing)
 
 
