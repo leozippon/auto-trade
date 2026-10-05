@@ -337,6 +337,27 @@ class AcceptanceRulesTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must be a boolean"):
             AcceptanceRules(require_raw_excess_at_cost_stress=1)  # type: ignore[arg-type]
 
+    def test_plain_selection_is_stated_and_judged_only_where_an_arm_holds_it(self) -> None:
+        """An arm recorded before the forward plain-selection condition has no
+        key: its forward slice is judged and its session told exactly as
+        before. An arm that holds it is told the rule (no figure) and the
+        forward slice receives it; the switch accepts only a boolean."""
+
+        recorded = acceptance_for({"max_drawdown": 0.45})
+        self.assertFalse(recorded.require_forward_plain_selection)
+        self.assertFalse(recorded.forward_slice_kwargs()["require_forward_plain_selection"])
+        self.assertNotIn("plain_selection", recorded.agent_facts()["graduation"]["forward"])
+        held = acceptance_for({"require_forward_plain_selection": True})
+        self.assertTrue(held.forward_slice_kwargs()["require_forward_plain_selection"])
+        stated = held.agent_facts()["graduation"]["forward"]["plain_selection"]
+        self.assertIn("> 0", stated)
+        self.assertIn("raw_readings.plain_selection", stated)
+        self.assertIsNone(re.search(r"\d\.\d", stated))
+        self.assertNotIn("require_forward_plain_selection", held.heldout_slice_kwargs())
+        self.assertEqual(AcceptanceRules.from_record(held.to_record()), held)
+        with self.assertRaisesRegex(ValueError, "require_forward_plain_selection must be a boolean"):
+            AcceptanceRules(require_forward_plain_selection="yes")  # type: ignore[arg-type]
+
     def test_a_record_with_a_retired_key_still_rebuilds_the_rules(self) -> None:
         rules = AcceptanceRules.from_record(
             {"max_drawdown": 0.2, "heldout_min_trades": 5, "confirmation_folds": 2}
@@ -439,7 +460,7 @@ class DefaultsDriftTest(unittest.TestCase):
             "beta_max",
         }
         for key, value in rules.to_record().items():
-            if key == "require_raw_excess_at_cost_stress":
+            if key in ("require_raw_excess_at_cost_stress", "require_forward_plain_selection"):
                 # Deliberately apart, like ``dividend_tax``: off for an arm
                 # recorded without the key, on for every arm created now.
                 self.assertFalse(value)
@@ -573,6 +594,7 @@ class DefaultsDriftTest(unittest.TestCase):
                     "cost_stress_multiplier": 3.0,
                     "max_drawdown": 0.2,
                     "require_raw_excess_at_cost_stress": True,
+                    "require_forward_plain_selection": True,
                     "strategy_path": "configs/agent_output_template/main.py",
                     "data_backend": "pit",
                     "raw_dir": "data/raw",
@@ -595,6 +617,7 @@ class DefaultsDriftTest(unittest.TestCase):
                 max_drawdown=0.2,
                 cost_stress_multiplier=3.0,
                 require_raw_excess_at_cost_stress=True,
+                require_forward_plain_selection=True,
             ),
         )
 

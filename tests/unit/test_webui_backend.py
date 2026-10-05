@@ -1333,10 +1333,15 @@ class WebuiBackendTest(unittest.TestCase):
             ("exp_tracked", {"tracking_error_cap": 0.08}),
             ("exp_tight_ir", {"min_active_ir": 1.1}),
         ):
-            # A new arm is held to the raw cost-stress condition by default; an
-            # arm recorded without the key is not (``AcceptanceRules`` default).
+            # A new arm is held to the raw cost-stress condition and to plain
+            # selection forward by default; an arm recorded without the keys is
+            # not (``AcceptanceRules`` defaults).
             expected = acceptance_for(
-                {"require_raw_excess_at_cost_stress": True, **request}
+                {
+                    "require_raw_excess_at_cost_stress": True,
+                    "require_forward_plain_selection": True,
+                    **request,
+                }
             ).to_record()
             with (
                 patch.object(manager, "_preflight"),
@@ -1363,6 +1368,7 @@ class WebuiBackendTest(unittest.TestCase):
             acceptance_for({}).to_record(), AcceptanceRules().to_record()
         )
         self.assertTrue(written["require_raw_excess_at_cost_stress"])
+        self.assertTrue(written["require_forward_plain_selection"])
         self.assertFalse(acceptance_for({}).require_raw_excess_at_cost_stress)
 
     def test_create_records_the_lineage_into_the_new_arm_or_creates_nothing(self) -> None:

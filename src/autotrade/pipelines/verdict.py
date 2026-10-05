@@ -1,10 +1,13 @@
 """Verdict statistics of one arm: freeze gate, forward verdict, Held-out rule.
 
-Pure functions over frozen replay data (PL1 §3.3 and §4). Every return figure
-is the neutralised excess of ``environment/replay/style.py``: a daily return
-series regressed on the arm's benchmark and the replay size factor, the intercept annualised
-over ``TRADING_DAYS_PER_YEAR``. The inputs are the daily series a
-``style_analysis.json`` sidecar stores, sliced by ``YYYYMMDD`` dates, so the
+Pure functions over frozen replay data (PL1 §3.3 and §4). The statistical
+return figures are the neutralised excess of ``environment/replay/style.py``: a
+daily return series regressed on the arm's benchmark and the replay size factor,
+the intercept annualised over ``TRADING_DAYS_PER_YEAR``. The holder's readings
+beside them are not regressed: :func:`holder_readings` compounds the book, the
+benchmark and the panel as stored, :func:`raw_excess_at_cost_stress` reads the
+replay's own excess and :func:`panel_return` the panel's. The inputs are the
+daily series a ``style_analysis.json`` sidecar stores, sliced by ``YYYYMMDD`` dates, so the
 forward and Held-out slices of one continuous replay are read from one sidecar.
 
 The graded series is the ACTIVE one: the strategy's daily return minus the
@@ -547,18 +550,84 @@ def raw_excess_at_cost_stress(
     return float(excess) - (cost_stress_multiplier - 1.0) * float(slippage) * float(per_bp)  # type: ignore[arg-type]
 
 
+def _compounded(series: object, start: str, end: str) -> float | None:
+    """One stored daily series compounded over its own days in
+    ``start``..``end`` (empty bounds take the whole series); ``None`` when it
+    has no day there."""
+
+    values = [
+        value
+        for date, value in _series_pairs(series)
+        if (not start or date >= start) and (not end or date <= end)
+    ]
+    if not values:
+        return None
+    equity = 1.0
+    for value in values:
+        equity *= 1.0 + value
+    return equity - 1.0
+
+
 def panel_return(analysis: Mapping[str, object]) -> float | None:
     """What the zero-skill panel composite itself earned over the sidecar's
     span, after its own costs: the return of the random-name copies of the
     book's trade skeleton. ``None`` on a sidecar without a panel."""
 
-    pairs = list(_series_pairs(analysis.get("panel_daily")))
-    if not pairs:
-        return None
-    equity = 1.0
-    for _date_key, value in pairs:
-        equity *= 1.0 + value
-    return equity - 1.0
+    return _compounded(analysis.get("panel_daily"), "", "")
+
+
+def holder_readings(
+    analysis: Mapping[str, object], *, start: str = "", end: str = ""
+) -> dict[str, float | None]:
+    """What a long-only holder of the book saw over one span, unregressed.
+
+    The book's own return after every cost (``strategy_return``), the arm's
+    benchmark price return (``benchmark_return``) and the zero-skill panel's
+    return after its costs (``panel_return``), each compounded from the stored
+    daily series over its days in ``start``..``end``; ``raw_excess`` is book
+    minus benchmark and ``plain_selection`` book minus panel, cumulative
+    differences like ``benchmark.excess_return``. ``plain_selection`` is what
+    the active series says without its regression: whether the names the book
+    picked beat random names on its own skeleton. A series the sidecar does not
+    carry over the span reads ``None``, and so does every difference built on
+    it. Empty bounds take the whole sidecar.
+    """
+
+    strategy = _compounded(analysis.get("strategy_daily"), start, end)
+    benchmark = _compounded(analysis.get("benchmark_daily"), start, end)
+    panel = _compounded(analysis.get("panel_daily"), start, end)
+    return {
+        "strategy_return": strategy,
+        "benchmark_return": benchmark,
+        "panel_return": panel,
+        "raw_excess": None if strategy is None or benchmark is None else strategy - benchmark,
+        "plain_selection": None if strategy is None or panel is None else strategy - panel,
+    }
+
+
+def slice_readings(
+    analysis: Mapping[str, object], *, start: str, end: str
+) -> dict[str, object]:
+    """The readings a forward or Held-out slice carries beside its statistics.
+
+    ``plain_excess`` is the graded series' annualised mean over the days the
+    regression reads, before the regression: ``neutralized_excess`` minus it
+    is what the market and size loadings were credited or charged, which an
+    unhedged holder never receives. ``raw_readings`` is
+    :func:`holder_readings` of the slice. Both are recomputable from a stored
+    sidecar, so a slice recorded before they existed reads the same numbers
+    on demand. ``ValueError`` when the slice has no regression day.
+    """
+
+    start, end = _span(start, end)
+    graded, _series = _graded(analysis)
+    rows = _regression_rows(graded, start, end)
+    if not len(rows):
+        raise ValueError(f"slice {start}..{end} has no day with both regressors")
+    return {
+        "plain_excess": float(rows[:, 0].mean()) * TRADING_DAYS_PER_YEAR,
+        "raw_readings": holder_readings(analysis, start=start, end=end),
+    }
 
 
 def _count(value: object, name: str, minimum: int) -> int:
@@ -831,13 +900,20 @@ def forward_slice(
     recency_months: int = RECENCY_MONTHS,
     min_mean_gross: float = MIN_MEAN_GROSS,
     min_round_trips_per_month: float = MIN_ROUND_TRIPS_PER_MONTH,
+    require_forward_plain_selection: bool = False,
 ) -> dict[str, object]:
-    """Statistics and failed conditions F2–F7 of the forward slice (PL1 §4.2).
+    """Statistics and failed conditions F2–F8 of the forward slice (PL1 §4.2).
 
     The lower bound, the recency window, the cost stress and
     ``active_max_drawdown`` are read off the graded series; ``max_drawdown``
     limits the equity itself and the tracking mandate, when one is set, the
-    strategy's own tracking error and beta over the slice.
+    strategy's own tracking error and beta over the slice. With
+    ``require_forward_plain_selection`` (F8) the book's compounded return over
+    the slice, after every cost, must beat its zero-skill panel's with no
+    regression (``raw_readings.plain_selection`` above zero); only then do the
+    thresholds name the condition, so a slice judged without it reads its
+    conditions as before. The holder's readings (:func:`slice_readings`) ride
+    on every slice either way.
     ``start``/``end`` are the slice's calendar bounds; the recency window is
     the last ``recency_months`` calendar months ending in ``end``'s month.
     ``turnover`` (traded notional over the slice's opening equity),
@@ -892,6 +968,7 @@ def forward_slice(
     )
     months = _month_index(end) - _month_index(start) + 1
     min_round_trips = min_round_trips_per_month * months
+    readings = slice_readings(analysis, start=start, end=end)
 
     reasons: list[str] = []
     if not lower_bound > 0:
@@ -909,11 +986,17 @@ def forward_slice(
     if not mean_gross >= min_mean_gross:
         reasons.append("forward_exposure_below_floor")
     reasons.extend(f"forward_{name}" for name in broken)
+    if require_forward_plain_selection:
+        # No panel, no plain selection: an unmeasured reading never passes.
+        selection = readings["raw_readings"]["plain_selection"]  # type: ignore[index]
+        if selection is None or not selection > 0:
+            reasons.append("forward_plain_selection_not_positive")
     return {
         "start": start,
         "end": end,
         "series": series,
         **statistics,
+        **readings,
         "lower_bound": lower_bound,
         "recency_start": recency_start,
         "recency_neutralized_excess": recency_excess,
@@ -939,6 +1022,11 @@ def forward_slice(
             "cost_stress_multiplier": cost_stress_multiplier,
             "min_round_trips": min_round_trips,
             "min_mean_gross": min_mean_gross,
+            **(
+                {"require_forward_plain_selection": True}
+                if require_forward_plain_selection
+                else {}
+            ),
         },
     }
 
@@ -963,7 +1051,8 @@ def heldout_slice(
     within ``active_max_drawdown`` and the mean gross exposure at least
     ``min_mean_gross``. H1 (strategy error) is :func:`graduation_verdict`'s.
     The statistical bars default to the module constants so a caller that
-    omits them judges as today.
+    omits them judges as today. The holder's readings
+    (:func:`slice_readings`) are reported, not judged.
     """
 
     start, end = _span(start, end)
@@ -995,6 +1084,7 @@ def heldout_slice(
         "end": end,
         "series": series,
         **statistics,
+        **slice_readings(analysis, start=start, end=end),
         "tolerance": tolerance,
         "max_drawdown": drawdown,
         "active_max_drawdown": active_drawdown,
@@ -1009,18 +1099,45 @@ def heldout_slice(
     }
 
 
+def _signed(value: object, unit: str, *, scale: float = 100.0, digits: int = 1) -> str:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return "n/a"
+    return f"{float(value) * scale:+.{digits}f}{unit}"
+
+
+def holder_line(block: Mapping[str, Any]) -> str:
+    """One slice in words, the holder's reading first: the book against the
+    benchmark, then against its zero-skill panel, then the graded series
+    before and after the regression that neutralises it."""
+
+    raw = block.get("raw_readings") or {}
+    return (
+        f"{block['start']}..{block['end']}: book {_signed(raw.get('strategy_return'), '%')} "
+        f"against benchmark {_signed(raw.get('benchmark_return'), '%')} "
+        f"(raw excess {_signed(raw.get('raw_excess'), ' points')}); "
+        f"zero-skill panel {_signed(raw.get('panel_return'), '%')} "
+        f"(plain selection {_signed(raw.get('plain_selection'), ' points')}); "
+        f"{block.get('series')} series {_signed(block.get('plain_excess'), '%/yr')} unregressed, "
+        f"{_signed(block.get('neutralized_excess'), '%/yr')} neutralised "
+        f"(market loading {_signed(block.get('market_beta'), '', scale=1.0, digits=2)}, "
+        f"IR {_signed(block.get('information_ratio'), '', scale=1.0, digits=2)})"
+    )
+
+
 def graduation_verdict(
     *,
     forward: Mapping[str, Any] | None,
     heldout: Mapping[str, Any] | None,
     strategy_error: Literal["forward", "heldout"] | None = None,
 ) -> dict[str, object]:
-    """``graduated`` iff F1–F7 and H1–H4 all hold, else ``discarded``.
+    """``graduated`` iff F1–F8 and H1–H4 all hold, else ``discarded``.
 
     ``strategy_error`` names the slice in which the strategy raised (F1/H1).
     A replay that raised produced no result, so it comes with no slice at all.
     ``reasons`` lists every failed condition in F-then-H order; ``thresholds``
-    merges the slices' own.
+    merges the slices' own. A measured verdict also states each slice's
+    :func:`holder_line`, so the ledger says in words what the holder's account
+    did beside the codes that decided it.
     """
 
     if strategy_error not in (None, "forward", "heldout"):
@@ -1042,4 +1159,15 @@ def graduation_verdict(
         "status": "discarded" if reasons else "graduated",
         "reasons": reasons,
         "thresholds": thresholds,
+        **(
+            {
+                "holder_line": {
+                    name: holder_line(block)
+                    for name, block in (("forward", forward), ("heldout", heldout))
+                    if block is not None
+                }
+            }
+            if measured
+            else {}
+        ),
     }

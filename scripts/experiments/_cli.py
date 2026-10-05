@@ -338,6 +338,12 @@ def add_acceptance_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Freeze gate: the nominee's own equity must beat the benchmark after the cost-stress slippage.",
     )
+    parser.add_argument(
+        "--require-forward-plain-selection",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Forward verdict: the frozen book's own return must beat its zero-skill panel's, unregressed.",
+    )
 
 
 # ---------------------------------------------------------------------------

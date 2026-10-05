@@ -184,6 +184,12 @@ class AcceptanceRules:
     # zero). Off here, so an arm recorded without the key is judged as it was;
     # the creation defaults (``hitl_state.WEB_CREATE_DEFAULTS``) stamp it on.
     require_raw_excess_at_cost_stress: bool = False
+    # Plain selection at graduation (F8): over the forward months the frozen
+    # book's compounded return after every cost must beat its zero-skill
+    # panel's with no regression (``raw_readings.plain_selection`` above
+    # zero). Off here for the same reason as the raw freeze condition; the
+    # creation defaults stamp it on.
+    require_forward_plain_selection: bool = False
     # Forward and Held-out bars. Same compatibility default as above.
     forward_confidence: float = verdict.FORWARD_CONFIDENCE
     recency_months: int = verdict.RECENCY_MONTHS
@@ -222,8 +228,9 @@ class AcceptanceRules:
         )
         if self.min_full_span_validations < 1:
             raise ValueError("min_full_span_validations must be an integer >= 1")
-        if not isinstance(self.require_raw_excess_at_cost_stress, bool):
-            raise ValueError("require_raw_excess_at_cost_stress must be a boolean")
+        for name in ("require_raw_excess_at_cost_stress", "require_forward_plain_selection"):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"{name} must be a boolean")
         object.__setattr__(
             self,
             "forward_confidence",
@@ -269,6 +276,7 @@ class AcceptanceRules:
             "min_positive_year_share": self.min_positive_year_share,
             "min_full_span_validations": self.min_full_span_validations,
             "require_raw_excess_at_cost_stress": self.require_raw_excess_at_cost_stress,
+            "require_forward_plain_selection": self.require_forward_plain_selection,
             "forward_confidence": self.forward_confidence,
             "recency_months": self.recency_months,
             "min_mean_gross": self.min_mean_gross,
@@ -434,6 +442,21 @@ class AcceptanceRules:
                     ),
                     "mean_gross": f">= {self.min_mean_gross}",
                     "tracking_mandate": "as in freeze_gate, over the forward months",
+                    # Stated only where the arm's rules hold it, like the raw
+                    # freeze condition.
+                    **(
+                        {
+                            "plain_selection": (
+                                "> 0: no regression -- the frozen book's compounded "
+                                "return over the forward months after every cost minus "
+                                "its zero-skill panel's (raw_readings.plain_selection "
+                                "of the forward slice); the neutralized conditions "
+                                "above must hold as well"
+                            )
+                        }
+                        if self.require_forward_plain_selection
+                        else {}
+                    ),
                     "strategy_error": "none",
                     "minimum_detectable_excess": (
                         "about 2.12 x research active tracking error / sqrt(years of "
@@ -480,6 +503,7 @@ class AcceptanceRules:
             "recency_months": self.recency_months,
             "min_mean_gross": self.min_mean_gross,
             "min_round_trips_per_month": self.min_round_trips_per_month,
+            "require_forward_plain_selection": self.require_forward_plain_selection,
         }
 
     def heldout_slice_kwargs(self) -> dict[str, object]:

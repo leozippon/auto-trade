@@ -174,6 +174,7 @@ _ALLOWED_PARAMS = {
     "min_positive_year_share",
     "min_full_span_validations",
     "require_raw_excess_at_cost_stress",
+    "require_forward_plain_selection",
     "forward_confidence",
     "recency_months",
     "min_mean_gross",
@@ -700,14 +701,15 @@ def resolve_worker_options(
         ),
         # A tracking mandate exactly where the request named a cap; every
         # limit absent or null takes its default (``config.acceptance_for``).
+        # A switch (a rule whose default is a bool) is read as one.
         acceptance=acceptance_for(
             {
                 name: None
                 if params.get(name) is None
                 else _strict_bool(params[name], name)
-                if name == "require_raw_excess_at_cost_stress"
+                if isinstance(default, bool)
                 else _finite_float(params[name], name)
-                for name in AcceptanceRules().to_record()
+                for name, default in AcceptanceRules().to_record().items()
             }
         ),
         schedule=schedule,

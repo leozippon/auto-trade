@@ -490,7 +490,9 @@ def _with_panel(analysis, panel):
 def test_a_zero_panel_reproduces_the_ungraded_figures_exactly():
     """Grading subtracts the panel and changes nothing else: against a panel of
     zeros every statistic, bound and reason is the float it was without one,
-    and only ``series`` tells the two records apart."""
+    and only ``series`` and the panel's own reading tell the two records
+    apart: a book without a panel has no plain selection, one against a zero
+    panel selects exactly its own return."""
     rng = np.random.default_rng(101)
     research = _weekdays("20210701", "20250630")
     analysis = _analysis(_segment(research, 0.16, rng))
@@ -498,8 +500,17 @@ def test_a_zero_panel_reproduces_the_ungraded_figures_exactly():
         _segment(FORWARD_DAYS, 0.10, rng), _segment(HELDOUT_DAYS, 0.02, rng, te=0.05)
     )
 
+    panel_readings = ("panel_return", "plain_selection")
+
     def without_series(block):
-        return {key: value for key, value in block.items() if key != "series"}
+        kept = {key: value for key, value in block.items() if key != "series"}
+        if "raw_readings" in kept:
+            kept["raw_readings"] = {
+                key: value
+                for key, value in kept["raw_readings"].items()
+                if key not in panel_readings
+            }
+        return kept
 
     def heldout(sidecar):
         return verdict.heldout_slice(
@@ -527,6 +538,13 @@ def test_a_zero_panel_reproduces_the_ungraded_figures_exactly():
         own, graded = read(sidecar), read(zeros)
         assert (own["series"], graded["series"]) == ("absolute", "active")
         assert without_series(own) == without_series(graded)
+        if "raw_readings" in own:
+            assert {key: own["raw_readings"][key] for key in panel_readings} == {
+                "panel_return": None,
+                "plain_selection": None,
+            }
+            assert graded["raw_readings"]["panel_return"] == 0.0
+            assert graded["raw_readings"]["plain_selection"] == own["raw_readings"]["strategy_return"]
 
 
 def test_the_graded_series_is_the_strategy_minus_its_panel():
@@ -888,3 +906,115 @@ def test_the_panel_return_is_what_the_panel_composite_compounded_to():
     sidecar = {"panel_daily": [[day, value] for day, value in zip(days, panel)]}
     assert verdict.panel_return(sidecar) == pytest.approx((1 - 0.001) ** len(days) - 1)
     assert verdict.panel_return({}) is None
+
+
+def _rally_book(rng, *, alpha, active_beta, days=FORWARD_DAYS):
+    """A book whose selection earns ``alpha`` a year after the regression but
+    holds lower-beta names than its random copies (``active_beta`` < 0) in a
+    year the benchmark rallies about 45 %: the neutralised reading credits
+    the lag back, the holder does not get it."""
+
+    n = len(days)
+    benchmark = rng.normal(0.0015, 0.01, n)
+    size = rng.normal(0.0, 0.004, n)
+    panel = 0.9 * benchmark + rng.normal(0.0, 0.003, n)
+    active = alpha / TRADING_DAYS_PER_YEAR + active_beta * benchmark + rng.normal(0.0, 0.003, n)
+    return _with_panel(_analysis((list(days), panel + active, benchmark, size)), panel)
+
+
+def test_plain_selection_refuses_a_book_the_regression_carried_only_where_held():
+    """F8: the neutralised conditions pass a book that lost to its own panel
+    in a rally because its negative active market loading is credited back;
+    an arm held to plain selection refuses it, and an arm whose rules lack the
+    condition judges the slice exactly as before (no reason, no threshold),
+    with the holder's readings reported either way."""
+
+    rng = np.random.default_rng(118)
+    book = _rally_book(rng, alpha=0.12, active_beta=-0.5)
+    unheld = _forward(book)
+    raw = unheld["raw_readings"]
+    # The neutralised reading passes, the plain one is negative.
+    assert unheld["reasons"] == []
+    assert unheld["lower_bound"] > 0 and unheld["neutralized_excess"] > 0
+    assert unheld["market_beta"] < 0
+    assert raw["plain_selection"] < 0
+    assert unheld["plain_excess"] < 0 < unheld["neutralized_excess"]
+    assert "require_forward_plain_selection" not in unheld["thresholds"]
+
+    held = _forward(book, require_forward_plain_selection=True)
+    assert held["reasons"] == ["forward_plain_selection_not_positive"]
+    assert held["thresholds"]["require_forward_plain_selection"] is True
+    # The switch adds a reason and its threshold, and changes no reading.
+    assert {key: value for key, value in held.items() if key not in ("reasons", "thresholds")} == {
+        key: value for key, value in unheld.items() if key not in ("reasons", "thresholds")
+    }
+
+    # A book that did beat its panel in plain terms passes the held rule.
+    winner = _forward(_rally_book(rng, alpha=0.40, active_beta=0.0), require_forward_plain_selection=True)
+    assert winner["raw_readings"]["plain_selection"] > 0
+    assert "forward_plain_selection_not_positive" not in winner["reasons"]
+
+    # Without a panel there is no plain selection, and an unmeasured reading
+    # never passes.
+    bare = _forward({**book, "panel_daily": []}, require_forward_plain_selection=True)
+    assert bare["raw_readings"]["plain_selection"] is None
+    assert "forward_plain_selection_not_positive" in bare["reasons"]
+
+
+def test_the_holders_readings_are_the_stored_series_compounded():
+    """Every reading is the stored daily series compounded over the slice's own
+    days, the differences are cumulative, and the plain excess is the graded
+    series' mean over the days the regression reads; the verdict states them
+    in words for both slices."""
+
+    rng = np.random.default_rng(119)
+    book = _rally_book(rng, alpha=0.05, active_beta=-0.3, days=FORWARD_DAYS + HELDOUT_DAYS)
+
+    def compound(key, start, end):
+        values = [value for day, value in book[key] if start <= day <= end]
+        return float(np.prod(1.0 + np.array(values)) - 1.0)
+
+    forward = _forward(book)
+    raw = forward["raw_readings"]
+    strategy = compound("strategy_daily", FORWARD_START, FORWARD_END)
+    benchmark = compound("benchmark_daily", FORWARD_START, FORWARD_END)
+    panel = compound("panel_daily", FORWARD_START, FORWARD_END)
+    assert raw == pytest.approx(
+        {
+            "strategy_return": strategy,
+            "benchmark_return": benchmark,
+            "panel_return": panel,
+            "raw_excess": strategy - benchmark,
+            "plain_selection": strategy - panel,
+        },
+        rel=1e-12,
+    )
+    active = [
+        own - drawn
+        for (day, own), (_day, drawn) in zip(book["strategy_daily"], book["panel_daily"], strict=True)
+        if FORWARD_START <= day <= FORWARD_END
+    ]
+    assert forward["plain_excess"] == pytest.approx(np.mean(active) * TRADING_DAYS_PER_YEAR, rel=1e-12)
+    # The whole-span reading of a sidecar is the panel_return of before.
+    assert verdict.holder_readings(book)["panel_return"] == pytest.approx(verdict.panel_return(book))
+    # A span with no stored day reads nothing rather than zero.
+    assert verdict.holder_readings(book, start="20300101", end="20301231") == dict.fromkeys(raw)
+
+    heldout = verdict.heldout_slice(
+        book,
+        start=HELDOUT_START,
+        end=HELDOUT_END,
+        forward_tracking_error=forward["tracking_error"],
+        max_drawdown=1.0,
+        active_max_drawdown=1.0,
+        mean_gross=1.0,
+    )
+    assert heldout["raw_readings"]["strategy_return"] == pytest.approx(
+        compound("strategy_daily", HELDOUT_START, HELDOUT_END), rel=1e-12
+    )
+    lines = verdict.graduation_verdict(forward=forward, heldout=heldout)["holder_line"]
+    assert set(lines) == {"forward", "heldout"}
+    assert lines["forward"].startswith(
+        f"{FORWARD_START}..{FORWARD_END}: book {strategy * 100:+.1f}% against benchmark {benchmark * 100:+.1f}%"
+    )
+    assert f"plain selection {(strategy - panel) * 100:+.1f} points" in lines["forward"]
