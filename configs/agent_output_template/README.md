@@ -1,6 +1,6 @@
 # Strategy output contract
 
-This directory is the formal strategy artifact: a Python package whose entry module `main.py` must define exactly one synchronous function:
+This directory is the formal strategy artifact: a Python package whose entry module `main.py` must define exactly one synchronous `generate_orders`:
 
 ```python
 def generate_orders(context):
@@ -27,7 +27,7 @@ Static assets that travel with the artifact (hand-curated tables, priors, refere
 
 ## Data units are part of the strategy contract
 
-Read `/mnt/artifacts/data_summary.json` and its `unit_contract` before writing thresholds or combining domains. The system prompt intentionally keeps only critical unit examples; this run-specific file is authoritative. `daily.parquet` is normalized: prices are CNY/share, volume and share fields are shares, amount/market-value fields are CNY, and `pct_chg`, turnover, and ratio fields are decimals (`5%=0.05`, `-9.5%=-0.095`). Heterogeneous research unions retain source units and must be interpreted by the tuple (file, `dataset`, column): `events.parquet` moneyflow `*_amount` is 万元 (`500` = CNY 5m), while `macro.parquet` `index_daily.pct_chg` is a percent-number (`5%=5.0`, do not multiply by 100 again). Verify and explicitly convert any unlabelled source unit before using it in a signal or threshold.
+Read `/mnt/artifacts/data_summary.json` and its `unit_contract` before writing thresholds or combining domains; this run-specific file, with the unit reference it points to, is authoritative. `daily.parquet` is normalized: prices are CNY/share, volume and share fields are shares, amount/market-value fields are CNY, and `pct_chg`, turnover-rate and dividend-yield fields are decimals (`5%=0.05`, `-9.5%=-0.095`). Heterogeneous research unions retain source units and must be interpreted by the tuple (file, `dataset`, column): `events.parquet` moneyflow `*_amount` is 万元 (`500` = CNY 5m), while `macro.parquet` `index_daily.pct_chg` is a percent-number (`5%=5.0`, do not multiply by 100 again). Verify and explicitly convert any unlabelled source unit before using it in a signal or threshold.
 
 ## Schedule
 
@@ -59,7 +59,7 @@ Each invocation receives an immutable market-level context:
 | `context.snapshot_dir` | Read-only frozen research snapshot path string |
 | `context.asof_dir` | Read-only PIT view path string for this decision |
 | `context.asof_version` | Version label for the current as-of view |
-| `context.state_dir` | Per-replay state directory path string: writable while `fit` runs, read-only for `generate_orders`; empty when the strategy defines no `fit` |
+| `context.state_dir` | Per-replay state directory path string: writable while `fit` runs, read-only for `generate_orders`; nothing is there for a strategy without `fit` |
 | `context.models_dir` | Read-only path string of the artifact's `models/` directory; empty when the artifact has none |
 | `context.nl(...)` | Optional host-mediated local evidence query; absent configurations fail explicitly |
 
@@ -82,9 +82,9 @@ The two path strings have **different layouts**, and mixing them up is the singl
 
 **Never fall back from `asof_dir` to `snapshot_dir` when an as-of read fails.** The frozen snapshot stops at the decision time, so reading it during the replay silently substitutes stale data for the rolling view — a point-in-time violation, not a recovery. Fix the read instead, and let a genuine failure fail.
 
-Run `smoke_backtest` before `batch_validate`: it replays the current `output/` over the first few trading days on the real path — real as-of layout, real `AccountSnapshot`, same executor and per-decision timeout — and returns the exact exception text plus the as-of domain directory names. A hand-written shell script that assigns `context.asof_dir = "/mnt/snapshot"` or fakes an account object proves nothing about the replay.
+Run `smoke_backtest` before `batch_validate`: it replays `output/` or a candidate directory over a few trading days, from the start of the research period or from a later `start`, on the real path — real as-of layout, real `AccountSnapshot`, same executor and per-decision timeout — and returns the exact exception text on failure. A hand-written shell script that assigns `context.asof_dir = "/mnt/snapshot"` or fakes an account object proves nothing about the replay.
 
-The supported file I/O is `pandas.read_parquet`, `numpy.load` and a booster's `load_model` for reading, and `numpy.save`/`savez`/`savez_compressed`, `DataFrame.to_parquet`, `torch.save` and a booster's `save_model` for writing. Build the path however you like — a helper function, a variable, a loop, an f-string, a module constant — from the context directory it belongs under: reads from `context.snapshot_dir`, `context.asof_dir`, `context.state_dir` or `context.models_dir`, writes from `context.state_dir`. The static check only refuses what the source proves wrong: an absolute path literal (nothing at a host or sandbox path exists inside the replay container) and a write rooted at one of the read-only directories. At runtime the state directory is read-only outside `fit`, so a write from `generate_orders` fails the backtest. For example:
+The supported file I/O is `pandas.read_parquet`, `numpy.load`, `torch.load` and a booster's `load_model` for reading, and `numpy.save`/`savez`/`savez_compressed`, `DataFrame.to_parquet`, `torch.save` and a booster's `save_model` for writing. Build the path however you like — a helper function, a variable, a loop, an f-string, a module constant — from the context directory it belongs under: reads from `context.snapshot_dir`, `context.asof_dir`, `context.state_dir` or `context.models_dir`, writes from `context.state_dir`. The static check only refuses what the source proves wrong: an absolute path literal (nothing at a host or sandbox path exists inside the replay container) and a write rooted at one of the read-only directories. At runtime the state directory is read-only outside `fit`, so a write from `generate_orders` fails the backtest. For example:
 
 ```python
 import pandas as pd
@@ -95,11 +95,7 @@ daily = pd.read_parquet(
 )
 ```
 
-Do not import a path helper or use an arbitrary file path. The exact file layout, schema, dataset labels, coverage, and units come from the current run's data summary, snapshot manifest, Parquet metadata, and unit reference.
-
-If the confirmed signal and execution conditions produce no eligible security, return `[]` — an empty array is a valid and correct result. A genuine strategy order may carry concise metadata describing its signal basis.
-
-Units follow the contract above: normalized daily fields are already converted, combined event, macro, and fundamental domains can retain source units, and such fields must be interpreted by the full (file, `dataset`, column) identity — never infer a unit from a shared column name.
+The exact file layout, schema, dataset labels, coverage, and units come from the current run's data summary, snapshot manifest, Parquet metadata, and unit reference.
 
 The formal executor keeps one strategy worker alive across the inference calls of a replay. A module-level cache may reuse PIT-data-derived values only while its recorded `context.asof_version` still matches the current call. The version identifies the as-of data view only; values that depend on `context.inference_at`, `context.bars`, or `context.account` must be recomputed per call or keyed separately. When the version changes, update the cache from only newly visible rows or replace it from the required columns and an exact finite tail. If the incremental merge cannot be proved exact for the confirmed schema, use the bounded-tail reload. Every read must remain rooted in the current context and must not admit a row beyond `context.inference_at`.
 
@@ -128,7 +124,7 @@ Rules:
 - `execute_at` is a timezone-aware ISO-8601 string and cannot precede `context.inference_at`.
 - Additional JSON fields are preserved as order metadata. A short `reason` is useful for review.
 
-The account snapshot does not change while `generate_orders` is running. For a batch, read cash once, keep a local remaining budget, and leave room for price movement and fees.
+A return value that breaks any of these rules fails the backtest at that decision; a well-formed order the Broker cannot fill is rejected on its own and the replay goes on.
 
 Sort candidates explicitly whenever order expresses investment priority: iteration order over an unordered container is not a substitute for stating intent, and it decides which orders get the remaining budget.
 
@@ -149,13 +145,15 @@ If the exact price source is absent or invalid, including when the required dail
 - Buys and sells use share quantities. A buy declares whole 100-share lots, except on the STAR board (`688`/`689.SH`), where it declares at least 200 shares and then any 1-share increment, and on the BSE, where it declares at least 100 shares and then any 1-share increment.
 - A sell declares whole lots, or one declaration carrying the entire odd-lot tail a corporate action left behind (a STAR/BSE position below its minimum declaration is likewise exitable only in full).
 - A position bought today becomes sellable from the next trading day's open.
+- On an ex-date, before any fill or decision, the account is credited each held position's cash dividend in full, and a bonus issue or split re-sizes the position to the whole shares the exchange's ex-rights reference price (`pre_close`) implies, with any fractional share paid in cash; shares created that day become sellable the next trading day.
 - Commission applies on both sides with a minimum fee, and a transfer fee (过户费) applies on both sides with no minimum. Stamp duty applies on sells only, at a rate that depends on the execution date. Directional slippage adjusts the event price.
+- When the run facts' `broker_replay.dividend_tax_policy.charged` is true, a sell also pays the individual dividend tax on the dividends its shares received: shares leave first in first out by buy, and each buy's dividend income (cash dividends plus bonus shares 送股 at CNY 1 par; 转增 is not income) is taxed 20% if held one month or less, 10% up to one year and nothing beyond. Since the dividend was credited in full on the ex-date, a position bought shortly before an ex-date and sold within a month keeps 80% of it; shares still held owe nothing until sold.
 - Suspension, `missing_execution_price`, daily price limits, insufficient cash, insufficient sellable quantity, and invalid buy lots reject the whole order. Missing or non-finite direction-related limit-up/limit-down prices reject the whole order as `missing_daily_price_limit`.
 - Orders are all-or-reject. There is no partial fill, order-book depth, queue position, market impact, or liquidity-capacity model.
 
-Initial cash is an experiment setting, so size from `context.account.cash` instead of assuming a fixed account. The default cost profile uses 1 bp commission with a CNY 5 minimum, a 0.1 bp transfer fee, and 5 bp directional slippage. Sell stamp duty is **10 bp for executions before 2023-08-28 and 5 bp from 2023-08-28 onward** — size pre-cutover windows against the higher rate, because the Broker charges it. Round-trip cost on a pre-cutover sell is therefore about twice the post-cutover figure.
+Initial cash is an experiment setting, so size from `context.account.cash` instead of assuming a fixed account; the run facts' `broker_replay` gives this arm's cash, commission, slippage, stamp duty and dividend-tax policy. The default cost profile uses 1 bp commission with a CNY 5 minimum, a 0.1 bp transfer fee, and 5 bp directional slippage. Sell stamp duty is **10 bp for executions before 2023-08-28 and 5 bp from 2023-08-28 onward** — size pre-cutover windows against the higher rate, because the Broker charges it. At the default profile a round trip of fills of at least CNY 50,000 each therefore costs about 22 bp before the cutover and 17 bp from it, slippage included; smaller fills pay more, because the commission minimum binds below that size.
 
-The Broker processes due orders sequentially and updates its true account after each fill. `context.account` remains the pre-call snapshot, so batch sizing must not assume that later strategy statements can observe earlier fills.
+Each trading day opens with the T+1 release and ex-date settlement, then fills the orders due at or before the inference time, so `context.account` is the account as it stood at the decision. The Broker processes due orders sequentially and updates its true account after each fill, while `context.account` stays the snapshot taken before the call: batch sizing must not assume that later strategy statements can observe earlier fills. Read cash once, keep a local remaining budget, and leave room for price movement and fees.
 
 ## Local evidence
 
@@ -178,7 +176,9 @@ __future__, collections, dataclasses, datetime, decimal, functools, itertools, m
 numpy, pandas, scipy, sklearn, lightgbm, xgboost, statsmodels, torch
 ```
 
-Submodules of these libraries (`scipy.stats`, `sklearn.linear_model`, `torch.nn`) are covered. GPU devices are visible to strategy code only when the experiment was created with `gpu_count > 0`, so select the device from `torch.cuda.is_available()` and keep the CPU path working; on CPU, torch's thread count is tied to the container's CPU quota. Relative imports, dynamic import/execution, arbitrary file access, process calls, and general external I/O are rejected. Common NumPy and pandas load/save methods and pickle-based persistence outside those libraries (`pickle`, `joblib`, `read_pickle`/`to_pickle`) are blocked; the only supported strategy file I/O is the context-rooted form described above, so fitted parameters are persisted as NumPy arrays, as a `torch.save` checkpoint, or as a LightGBM/XGBoost booster file written with `save_model(context.state_dir + "/model.txt")`.
+Submodules of these libraries (`scipy.stats`, `sklearn.linear_model`, `torch.nn`) are covered. GPU devices are visible to strategy code only when the run facts' `budgets.strategy_gpu_count` is above zero, so select the device from `torch.cuda.is_available()` and keep the CPU path working; on CPU, torch's thread count is tied to the container's CPU quota. Relative imports, dynamic import/execution, arbitrary file access, process calls, and general external I/O are rejected. Common NumPy and pandas load/save methods and pickle-based persistence outside those libraries (`pickle`, `joblib`, `read_pickle`/`to_pickle`) are blocked; the only supported strategy file I/O is the context-rooted form described above, so fitted parameters are persisted as NumPy arrays, as a `torch.save` checkpoint, or as a LightGBM/XGBoost booster file written with `save_model(context.state_dir + "/model.txt")`.
+
+Random draws must be reproducible, because two replays of the same span that place different orders are not reproducible evidence. Write the seed once, as one integer assignment to a seed name — `SEED`, `SEED_BASE`, or a name ending in `_SEED` or `_SEED_BASE` (`SEED_BASE = 1000`) — and derive every draw from it, optionally together with the decision date: `day = int(context.inference_at.strftime("%Y%m%d"))`, then `rng = np.random.default_rng([SEED_BASE, day])` with a further fixed integer for each independent stream, and an integer derived from the seed for any library that samples (`random_state=`, `seed=`, `torch.manual_seed`). Another draw of the same strategy is then that one line changed. Never seed from the wall clock or draw from numpy's unseeded global state (`np.random.choice`, `np.random.default_rng()`); `modification_check` refuses both.
 
 The default executor uses network-disabled, read-only Docker containers with bounded CPU, memory, process count, inference time, fit time, protocol output, and temporary storage; a strategy with `fit` gets a second identical container whose only difference is the writable state mount. If the container boundary cannot be established, execution fails instead of changing modes.
 
@@ -324,5 +324,5 @@ Before validating a candidate or finishing a research session, verify that:
 - Every field and unit used by the signal has been confirmed from the current data contract.
 - Orders pass strict JSON validation and respect the configured schedule.
 - Batch sizing leaves a cost buffer and does not depend on same-call account mutation.
-- A node nominated for a freeze completed a `batch_validate` Validation over the whole research period.
+- Every random draw derives from the one seed line.
 - The formal output contains no hidden paths, caches, temporary data, notebooks, credentials, or unused code.

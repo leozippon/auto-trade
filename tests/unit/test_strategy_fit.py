@@ -9,6 +9,7 @@ and every replay starts from an empty state directory.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -55,7 +56,9 @@ from autotrade.pipelines.config import (
     EvaluationRequest,
     SnapshotBundle,
 )
+from autotrade.pipelines.experiment import seed_change
 from autotrade.pipelines.pit_backend import PITDailyEvaluationBackend
+from autotrade.pipelines.session_resume import REVISIONS_DIR
 from tests.unit.fixtures_sandbox import docker_available
 from tests.unit.test_pit_daily_backend import (
     _pit_slot_paths,
@@ -664,6 +667,45 @@ def test_readme_package_example_passes_modification_check_and_a_short_pit_smoke_
     assert result.summary["phase_seconds"]["fit"] > 0
     assert result.summary["order_count"] >= 1
     assert any(execution["status"] == "filled" for execution in record["executions"])
+
+
+README_SEEDED_STRATEGY = '''import numpy as np
+
+{name} = {seed}
+
+
+def generate_orders(context):
+    day = int(context.inference_at.strftime("%Y%m%d"))
+    rng = np.random.default_rng([{name}, day])
+    return [] if rng.integers(2) else []
+'''
+
+
+@pytest.mark.parametrize("name", ["SEED", "SEED_BASE", "MODEL_SEED", "MODEL_SEED_BASE"])
+def test_readme_seed_idiom_passes_the_static_check_and_is_what_a_replicate_changes(
+    tmp_path: Path, name: str
+):
+    """The README tells a strategy to write its seed as one line under one of
+    these names and to draw from ``default_rng([SEED_BASE, day])``. That idiom
+    clears the check that refuses unseeded draws, and a copy differing only in
+    the seed's value is a seed replicate by the freeze gate's own reading."""
+
+    readme = (TEMPLATE / "README.md").read_text(encoding="utf-8")
+    assert "`SEED`, `SEED_BASE`, or a name ending in `_SEED` or `_SEED_BASE`" in readme
+    assert "np.random.default_rng([SEED_BASE, day])" in readme
+    revisions = tmp_path / REVISIONS_DIR
+    for revision, seed in (("nominee", 1000), ("replicate", 2000)):
+        source = README_SEEDED_STRATEGY.format(name=name, seed=seed)
+        output = revisions / revision / "output"
+        output.mkdir(parents=True)
+        (output / "main.py").write_text(source, encoding="utf-8")
+        ModificationCheckTool(output).invoke({})
+        digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+        (revisions / revision / "manifest.json").write_text(
+            json.dumps({"files": [{"path": "output/main.py", "sha256": digest}]}),
+            encoding="utf-8",
+        )
+    assert seed_change(tmp_path, "nominee", "replicate") == f"main.py: {name} = 2000"
 
 
 def test_every_replay_starts_from_an_empty_state_directory(tmp_path: Path):
