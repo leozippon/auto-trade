@@ -1,24 +1,28 @@
 # ADM-Cube research arm fill: keep the console's running slots occupied.
 # Install or refresh with: /home/lzp/miniconda3/envs/quant/bin/python ops/cron/install_tushare_cron.py --block research
 #
-# The round file below is the arm queue. `--fill` asks /api/health how many of
-# the console's slots are free, skips the arms whose experiment directory
-# already exists and creates the next pending ones in file order, through the
-# same validation the operator gets from `--dry-run`. Nothing pending or
-# nothing free is the steady state and exits 0; a refused creation exits
-# non-zero with its reason in the log. The operator tops the queue up by
-# appending arms and their reference packs to that file.
+# The round files below, in order, are the arm queue. Each file's `--fill`
+# asks /api/health how many of the console's slots and GPUs are free, skips
+# the arms whose experiment directory already exists and creates the next
+# pending ones in file order, through the same validation the operator gets
+# from `--dry-run`; a local arm the local-model limit holds, or a GPU arm too
+# few free cards hold, stays pending and the arms behind it go ahead. The next
+# file reads the slots afresh, so it takes what the earlier ones left. Nothing
+# pending or nothing free is the steady state and exits 0; a refused creation
+# in any file makes the run exit non-zero with its reason in the log, and the
+# files after it still fill. The operator tops the queue up by appending arms
+# and their reference packs to a file, or a file to ROUNDS.
 
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 CRON_TZ=Asia/Shanghai
 REPO_ROOT=/Data2/lzp/ADMCubeQuant
 QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
-# Repointed at whichever round file is the current queue.
-ROUND=scripts/experiments/create_round_20261010.py
+# The queue's round files, filled in this order; separated by spaces.
+ROUNDS=scripts/experiments/create_round_20261008.py scripts/experiments/create_round_20261009.py scripts/experiments/create_round_20261010.py
 
 # Every ten minutes, all day: a slot that frees up stays empty for at most that
-# long, and research arms end at no particular hour. One run takes seconds
-# unless it creates, and `flock -n` skips a run while an earlier one is still
-# creating, so two fills can never take the same slot.
-*/10 * * * * cd $REPO_ROOT && mkdir -p logs/research .runtime/research && flock -n .runtime/research/cron.lock $QUANT_PYTHON $ROUND 38888 --fill >> logs/research/cron.log 2>&1
+# long, and research arms end at no particular hour. One run takes seconds per
+# file unless it creates, and `flock -n` skips a run while an earlier one is
+# still creating, so two fills can never take the same slot.
+*/10 * * * * cd $REPO_ROOT && mkdir -p logs/research .runtime/research && flock -n .runtime/research/cron.lock bash -c 'status=0; for round in $ROUNDS; do $QUANT_PYTHON $round 38888 --fill || status=1; done; exit $status' >> logs/research/cron.log 2>&1

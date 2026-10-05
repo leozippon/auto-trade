@@ -106,12 +106,58 @@ class CronInstallerTest(unittest.TestCase):
         # Every ten minutes, every day, under its own lock and its own log.
         self.assertEqual(jobs[0].split()[:5], ["*/10", "*", "*", "*", "*"])
         self.assertIn("flock -n .runtime/research/cron.lock", jobs[0])
-        self.assertIn("--fill >> logs/research/cron.log 2>&1", jobs[0])
-        # The queue it fills has to be a round file this repository holds:
+        self.assertTrue(jobs[0].endswith(" >> logs/research/cron.log 2>&1"), jobs[0])
+        # The queue it fills has to be round files this repository holds:
         # a mistyped one would fail every ten minutes instead of once.
-        round_file = next(line.split("=", 1)[1] for line in lines if line.startswith("ROUND="))
-        self.assertIn("$ROUND", jobs[0])
-        self.assertTrue((installer.REPO_ROOT / round_file).is_file(), round_file)
+        rounds = next(line.split("=", 1)[1] for line in lines if line.startswith("ROUNDS="))
+        self.assertIn("$ROUNDS", jobs[0])
+        self.assertTrue(rounds.split())
+        for round_file in rounds.split():
+            self.assertTrue((installer.REPO_ROOT / round_file).is_file(), round_file)
+
+    def test_the_research_fill_runs_every_round_in_order_and_fails_on_any_refusal(self) -> None:
+        """The job line itself, run by bash with a stand-in interpreter: each
+        round file's fill runs in the listed order under the one lock and into
+        the one log, a round whose fill fails does not stop the ones after it,
+        and the run's exit status still reports the failure."""
+        import os
+        import subprocess
+
+        template, _, _ = installer.BLOCKS["research"]
+        job = next(
+            line for line in template.read_text(encoding="utf-8").splitlines()
+            if "--fill" in line and not line.startswith("#")
+        )
+        command = job.split(None, 5)[5]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            calls = root / "calls"
+            python = root / "python"
+            # Records its arguments and fails the round named `refused`.
+            python.write_text(
+                f'#!/bin/bash\necho "$@" >> {calls}\necho "fill $1"\n'
+                '[ "$1" != refused ]\n',
+                encoding="utf-8",
+            )
+            python.chmod(0o755)
+
+            def run(rounds: str) -> subprocess.CompletedProcess[str]:
+                calls.unlink(missing_ok=True)
+                env = {"PATH": os.environ["PATH"], "REPO_ROOT": tmp, "QUANT_PYTHON": str(python), "ROUNDS": rounds}
+                return subprocess.run(["bash", "-c", command], env=env, capture_output=True, text=True, timeout=60)
+
+            self.assertEqual(run("first second").returncode, 0)
+            self.assertEqual(
+                calls.read_text(encoding="utf-8").splitlines(),
+                ["first 38888 --fill", "second 38888 --fill"],
+            )
+            self.assertEqual(run("first refused last").returncode, 1)
+            self.assertEqual(
+                calls.read_text(encoding="utf-8").splitlines(),
+                ["first 38888 --fill", "refused 38888 --fill", "last 38888 --fill"],
+            )
+            log = (root / "logs/research/cron.log").read_text(encoding="utf-8")
+            self.assertTrue(log.endswith("fill first\nfill refused\nfill last\n"), log)
 
     def test_removing_a_block_keeps_every_other_entry_and_is_idempotent(self) -> None:
         """Pausing one managed job -- the research fill, while a stop window
