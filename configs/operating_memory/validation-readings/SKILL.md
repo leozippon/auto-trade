@@ -1,4 +1,4 @@
-# 验证记录的读数口径：主动回撤、换手与成本
+# 验证记录的读数口径：主动回撤、换手、成本与持有人读数
 
 验证行与 `result_ref` 记录里有几组名字相近、口径不同的读数；拿它们比较、外推或预估冻结门与毕业条件之前，先认清各自是什么。
 
@@ -27,3 +27,9 @@
 | `stats.cost_sensitivity.excess_at_2x_slippage` | 同上的原始超额，但固定两倍滑点 | 什么也不判；倍数是 2 时与上一行相等 |
 
 主动读数赢了面板，账户却可能没赢基准：面板本身扣费后也会亏（`raw_readings.panel_return`），赢一个亏钱的面板不等于账户赚钱。
+
+## 账户、基准与面板
+
+逐年行 `sub_windows[]` 并列给出 `return`（账户扣费后的年收益）、`benchmark_return`（本臂基准指数的价格收益）与 `panel_return`（零技能面板，即同一成交骨架随机换名的副本，扣费后的年收益）。三者相减就是三种不经回归的读法：`return − benchmark_return` 是持有人对基准的原始超额（即 `excess_return`），`return − panel_return` 是选股本身是否赢了随机名字，`panel_return − benchmark_return` 是骨架与股票池相对基准的部分，与选股无关。覆盖最后两个研究年的行另有 `raw_readings.last_two_years`，给出这两年合起来的同三个数。
+
+`raw_readings.active_market_beta` 是主动序列（账户减面板）对基准指数的回归载荷，整段一个数。为负说明账户持有的名字比随机副本更低 β：指数大涨时它落后于面板，中性化读数（`active_neutralized_*`）按载荷把这段落后记回来，于是中性化超额可以为正，而账户对面板的未回归差为负。持有人只做多、不对冲，拿不到这笔记回。某一年的载荷用 `daily_series`（`validation/active_daily.csv`）里该年的 `active_return` 对 `benchmark_return` 回归即得。

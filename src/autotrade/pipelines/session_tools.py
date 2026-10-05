@@ -85,6 +85,7 @@ from .skills import _assert_skills_absent_from_formal
 from .verdict import (
     active_daily,
     excess_at_cost_stress,
+    holder_readings,
     neutralized_statistics,
     panel_return,
     raw_excess_at_cost_stress,
@@ -892,19 +893,41 @@ class SessionValidations:
         """What the holder's account did against the benchmark over the
         node's span that the row's ``stats`` do not already say: the raw
         excess at the arm's cost stress (``verdict.raw_excess_at_cost_stress``,
-        the reading the freeze gate's raw condition judges) and the zero-skill
-        panel's own return after its costs (``verdict.panel_return``)."""
+        the reading the freeze gate's raw condition judges), the zero-skill
+        panel's own return after its costs (``verdict.panel_return``), the
+        book's market loading relative to that panel (the market coefficient
+        of the active series' regression, from the sidecar), and, on a row
+        whose span covers them, the last two research years read on their own
+        (``verdict.holder_readings``): the book, the benchmark and the panel,
+        compounded over those two years."""
 
         multiplier = self.rules.cost_stress_multiplier
-        return {
+        analysis = _step_analysis(step)
+        active = analysis.get("active_neutralized_excess")
+        readings: dict[str, object] = {
             "raw_excess_at_cost_stress": _rounded(
                 raw_excess_at_cost_stress(
                     step.validation.summary, cost_stress_multiplier=multiplier
                 )
             ),
-            "panel_return": _rounded(panel_return(_step_analysis(step))),
+            "panel_return": _rounded(panel_return(analysis)),
             "cost_stress_multiplier": multiplier,
+            "active_market_beta": (
+                active.get("market_beta") if isinstance(active, Mapping) else None
+            ),
         }
+        years = self.request.research_years
+        first = max(len(years) - 2, 0)
+        span = research_span(years, step.span)
+        if span.start <= years[first].start and span.end >= years[-1].end:
+            late = holder_readings(analysis, start=years[first].start, end=years[-1].end)
+            readings["last_two_years"] = {
+                "span": f"Y{first + 1}..Y{len(years)}" if first + 1 < len(years) else "Y1",
+                "return": _rounded(late["strategy_return"]),
+                "benchmark_return": _rounded(late["benchmark_return"]),
+                "panel_return": _rounded(late["panel_return"]),
+            }
+        return readings
 
     def append_manifest_summary(self, summary: dict[str, object]) -> None:
         """Every backtest attempt, successful or not, lands in the run manifest.
@@ -1219,10 +1242,14 @@ BATCH_CANDIDATE_SUMMARY_KEYS = (
 # The neutralized figures ride with the raw one because the freeze gate and the
 # verdict read them, the active one above all -- it is the series they grade:
 # a comparison made on the raw column alone reads a different number than they
-# will.
+# will. The year's benchmark and panel returns ride beside the book's own, so
+# each year reads as the holder's account, the index and zero skill on the
+# same skeleton without a regression in between.
 BATCH_SUB_WINDOW_KEYS = (
     "label",
     "return",
+    "benchmark_return",
+    "panel_return",
     "excess_return",
     "neutralized_excess_return",
     "active_neutralized_excess_return",
@@ -1393,8 +1420,9 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "write and is refused while one is still running; read-only audits keep "
         "running while the candidates replay concurrently. Returns one row per "
         "candidate: node id with its short handle (valid_002, which every tool "
-        "taking a node_id accepts), headline metrics, the per-year return/excess/"
-        "neutralized excess/Sharpe of sub_windows, the provisional "
+        "taking a node_id accepts), headline metrics, the per-year return, "
+        "benchmark_return, panel_return (the zero-skill panel's own), excess, "
+        "neutralized excess and Sharpe of sub_windows, the provisional "
         "selection_statistics (the freeze gate as it would read this node now, "
         "which the freeze recomputes; every row, sub-span and refused rows "
         "included, carries information_ratio_bar, the active IR a full-span "
@@ -1410,8 +1438,13 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "return over the same days, less (cost_stress_multiplier - 1) x the "
         "slippage on its turnover, cumulative -- what the freeze gate's raw "
         "condition judges on a full-span row when acceptance_rules.freeze_gate "
-        "lists raw_excess_at_cost_stress -- and panel_return, what the zero-skill "
-        "panel itself earned after its costs; the rest of that picture is in "
+        "lists raw_excess_at_cost_stress -- panel_return, what the zero-skill "
+        "panel itself earned after its costs, active_market_beta, the book's "
+        "market loading relative to that panel (below zero it lags its random "
+        "copies whenever the index rallies, a lag the neutralized readings "
+        "credit back but the unhedged holder bears), and on a row covering "
+        "them last_two_years, the book's, benchmark's and panel's returns over "
+        "the last two research years; the rest of that picture is in "
         "stats: total_return and annualized_return after every cost, "
         "benchmark.benchmark_return and benchmark.excess_return over the same "
         "days, and cost_sensitivity.excess_at_2x_slippage, the raw cumulative "

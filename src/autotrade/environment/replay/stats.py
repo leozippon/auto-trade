@@ -363,7 +363,8 @@ def sub_window_stats(
     ``benchmark_return`` / ``excess_return`` / ``neutralized_excess_return``
     stay ``None`` until the evaluation backend joins the benchmark and size
     series in (``attach_sub_window_benchmark``): the replay itself never reads
-    an index or a cross-section.
+    an index or a cross-section. ``panel_return`` is added there too, on a
+    replay that carries a panel.
     """
 
     rows = sorted(
@@ -431,13 +432,16 @@ def attach_sub_window_benchmark(
     cannot separate an edge from a size or beta tilt any better than a whole
     window's can. A replay that carries a zero-skill panel gets the same figure
     for its active series beside it, which is the one the freeze gate counts
-    positive years on.
+    positive years on, and the panel composite's own return over the year,
+    compounded like the benchmark's: the year's return, its benchmark and its
+    panel side by side are the holder's account, the index and zero skill on
+    the same skeleton.
     """
 
     # Deferred: ``style`` imports this module for the trading-day constant and
     # the equity-curve helpers, so the attribution function it owns can only be
     # reached from here at call time.
-    from .style import active_analysis, window_neutralized_excess
+    from .style import _series_pairs, active_analysis, window_neutralized_excess
 
     rows = summary.get("sub_windows")
     if not isinstance(rows, list):
@@ -484,6 +488,11 @@ def attach_sub_window_benchmark(
             row["active_neutralized_excess_return"] = window_neutralized_excess(
                 active, start=start, end=end
             )
+            panel = 1.0
+            for day, value in _series_pairs(style_analysis.get("panel_daily")):
+                if start <= day <= end:
+                    panel *= 1.0 + value
+            row["panel_return"] = _round(panel - 1.0)
     return summary
 
 

@@ -299,15 +299,18 @@ def _write_style_sidecar(directory: Path, *, alpha: float, seed: int) -> None:
     strategy = (
         alpha + 0.9 * benchmark + 0.2 * size + panel + rng.normal(0.0, 0.004, len(days))
     )
-    write_json_atomic(
-        directory / "style_analysis.json",
-        {
-            "strategy_daily": [[day, float(value)] for day, value in zip(days, strategy)],
-            "benchmark_daily": [[day, float(value)] for day, value in zip(days, benchmark)],
-            "size_factor_daily": [[day, float(value)] for day, value in zip(days, size)],
-            "panel_daily": [[day, float(value)] for day, value in zip(days, panel)],
-        },
-    )
+    sidecar = {
+        "strategy_daily": [[day, float(value)] for day, value in zip(days, strategy)],
+        "benchmark_daily": [[day, float(value)] for day, value in zip(days, benchmark)],
+        "size_factor_daily": [[day, float(value)] for day, value in zip(days, size)],
+        "panel_daily": [[day, float(value)] for day, value in zip(days, panel)],
+    }
+    # The replay stores its active series' regression beside the series, as
+    # style.replay_style_analysis does (loadings to three decimals).
+    sidecar["active_neutralized_excess"] = {
+        "market_beta": round(float(neutralized_statistics(sidecar)["market_beta"]), 3)
+    }
+    write_json_atomic(directory / "style_analysis.json", sidecar)
 
 
 class _Session:
@@ -1690,12 +1693,36 @@ class BatchValidateRunTest(unittest.TestCase):
                 "freeze_raw_excess_not_positive_at_cost_stress",
                 row["selection_statistics"]["freeze_gate_reasons"],
             )
-            # A probe row reads both over its own span.
+            # The book's market loading against its own panel is the active
+            # series' regression coefficient.
+            self.assertAlmostEqual(
+                raw["active_market_beta"], statistics["market_beta"], places=3
+            )
+            # The last two research years read on their own: the stored
+            # series compounded over Y3..Y4.
+            def compound(key: str) -> float:
+                return math.prod(
+                    1.0 + value for day, value in sidecar[key] if "20230701" <= day <= "20250630"
+                ) - 1.0
+
+            late = raw["last_two_years"]
+            self.assertEqual(late["span"], "Y3..Y4")
+            self.assertAlmostEqual(late["return"], compound("strategy_daily"), places=6)
+            self.assertAlmostEqual(late["benchmark_return"], compound("benchmark_daily"), places=6)
+            self.assertAlmostEqual(late["panel_return"], compound("panel_daily"), places=6)
+            # A probe row reads both over its own span; it does not reach the
+            # last two years, so it has no line for them.
             probe = session.validate_one("b", _strategy("2"), span="Y1")
             self.assertIn("raw_excess_at_cost_stress", probe["raw_readings"])
+            self.assertNotIn("last_two_years", probe["raw_readings"])
             self.assertIn(
                 "active_excess_at_cost_stress",
                 probe["selection_statistics"]["graduation_activity"],
+            )
+            # A row's year carries the benchmark and the panel beside its return.
+            self.assertTrue(
+                {"return", "benchmark_return", "panel_return"}
+                <= set(row["stats"]["sub_windows"][0])
             )
 
     def test_an_arm_held_to_the_raw_condition_names_a_row_below_the_benchmark(
