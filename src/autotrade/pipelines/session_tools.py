@@ -10,7 +10,6 @@ into the Agent runner, so this module never imports it back.
 from __future__ import annotations
 
 import json
-import math
 import shutil
 import time
 import uuid
@@ -1724,8 +1723,10 @@ class BatchValidateTool(SessionTimeBudgetAware):
                 "replay_years_used": self.backtest.replay_years_used,
                 "replay_years_remaining": self.backtest.replay_years_remaining,
                 "result_root": STEP_TREE_SEARCH_ROOT,
-                "select_hint": batch_select_hint(
-                    rows, replay_years_remaining=self.backtest.replay_years_remaining
+                **(
+                    {"budget_spent": BUDGET_SPENT_NOTE}
+                    if self.backtest.replay_years_remaining < 1
+                    else {}
                 ),
             },
         )
@@ -2133,59 +2134,13 @@ class BatchValidateTool(SessionTimeBudgetAware):
         return row
 
 
-def batch_select_hint(
-    rows: Sequence[Mapping[str, object]], *, replay_years_remaining: int
-) -> str:
-    """Name the row leading on the graded figure; select nothing.
-
-    The active information ratio -- the row's return minus its zero-skill panel,
-    neutralized, over its residual risk -- is what the freeze gate grades, so
-    the hint says which row leads on it and on nothing else. A winning round
-    is the starting point of the next pre-registered round, not the end of the
-    session; once no batch fits the replay-year budget, the hint says the
-    session is left with finishing.
-    """
-
-    ranked = [
-        (_batch_row_active_ir(row), row)
-        for row in rows
-        if row.get("status") == "ok"
-    ]
-    leading = max(ranked, key=lambda item: item[0], default=(float("-inf"), None))
-    lead = (
-        f"leading on active information ratio: {leading[1].get('name')} "
-        f"(node_id={leading[1].get('handle') or leading[1].get('node_id')}); "
-        if leading[1] is not None and math.isfinite(leading[0])
-        else "no row carries an active information ratio; "
-    )
-    if replay_years_remaining < 1:
-        return (
-            f"{lead}read every row yourself (whole span AND sub_windows) — nothing "
-            "is selected for you. The replay-year budget is spent, so no further "
-            "batch can run: finish_session, with the arm's conclusion in its reason."
-        )
-    return (
-        f"{lead}read every row yourself (whole span AND sub_windows) — nothing "
-        "is selected for you. A winning round is the start of the next "
-        "pre-registered round: step_rollback(node_id=<chosen>) restores it as "
-        "the working copy; a freeze needs a full-span validation that passes the "
-        "freeze gate, and finish_session is warranted only once the pre-registered "
-        "hypotheses are resolved or the remaining budget no longer fits another "
-        "round."
-    )
-
-
-def _batch_row_active_ir(row: Mapping[str, object]) -> float:
-    stats = row.get("stats")
-    benchmark = stats.get("benchmark") if isinstance(stats, Mapping) else None
-    value = (
-        benchmark.get("active_information_ratio")
-        if isinstance(benchmark, Mapping)
-        else None
-    )
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return float("-inf")
-    return float(value) if math.isfinite(value) else float("-inf")
+# What a batch result says beyond its rows, and only once no batch fits the
+# replay-year budget: the next call cannot be another batch. Which row to build
+# on or nominate is the Agent's reading; the host ranks none.
+BUDGET_SPENT_NOTE = (
+    "The replay-year budget is spent, so no further batch can run: finish_session, "
+    "with the arm's conclusion in its reason."
+)
 
 
 def another_batch_round_fits(backtest: SessionValidations) -> bool:

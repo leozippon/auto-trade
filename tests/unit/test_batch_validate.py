@@ -91,11 +91,11 @@ from autotrade.pipelines.session_tools import (
     BATCH_REJECTION_ESCALATE_AT,
     BATCH_VALIDATE_MAX_CANDIDATES,
     BATCH_VALIDATE_MAX_CONCURRENCY,
+    BUDGET_SPENT_NOTE,
     BatchValidateTool,
     NullControlTool,
     SessionValidations,
     another_batch_round_fits,
-    batch_select_hint,
     session_budget_status,
 )
 from autotrade.pipelines.verdict import (
@@ -1827,12 +1827,23 @@ class BatchValidateRunTest(unittest.TestCase):
             session.candidate("a", _strategy("1"))
             session.candidate("b", _strategy("22"))
             value = session.call("a", "b").value
-            self.assertNotIn("winner", value)
-            self.assertNotIn("selected", value)
-            self.assertIn("step_rollback", value["select_hint"])
-            # A winning round starts the next one; the hint states when
-            # finishing is warranted and never instructs it.
-            self.assertNotIn("finish_session(", value["select_hint"])
+            # The rows are the whole answer: no row is ranked, named or
+            # picked, and nothing beside them restates the protocol.
+            self.assertEqual(
+                set(value) - {"candidates"},
+                {
+                    "batch_id",
+                    "run_id",
+                    "parent_node_id",
+                    "span",
+                    "offline_trials",
+                    "complete_validations",
+                    "failed",
+                    "replay_years_used",
+                    "replay_years_remaining",
+                    "result_root",
+                },
+            )
             # The working copy is untouched by the batch.
             self.assertEqual(
                 (session.output / "main.py").read_text(encoding="utf-8"),
@@ -1969,37 +1980,28 @@ class DailySeriesTest(unittest.TestCase):
             self.assertEqual(session.backtest.steps, [])
 
 
-class BatchSelectHintTest(unittest.TestCase):
-    """The hint names the row leading on the active information ratio -- the figure the
-    freeze gate grades -- and selects nothing."""
+class BudgetSpentNoteTest(unittest.TestCase):
+    """A batch result says one thing beyond its rows, and only when it is
+    true: the batch that spends the replay-year budget says no further batch
+    can run."""
 
-    def test_names_the_leader_on_the_active_information_ratio(self) -> None:
-        rows = [
-            {"name": "a", "node_id": "n_a", "status": "ok",
-             "stats": {"benchmark": {"neutralized_excess_return": 0.02, "active_information_ratio": 0.9}}},
-            {"name": "b", "node_id": "n_b", "status": "ok",
-             "stats": {"benchmark": {"neutralized_excess_return": 0.30, "active_information_ratio": float("nan")}}},
-            {"name": "c", "node_id": "n_c", "status": "failed", "error": "boom"},
-        ]
-        hint = batch_select_hint(rows, replay_years_remaining=8)
-        self.assertIn("leading on active information ratio: a (node_id=n_a)", hint)
-        self.assertIn("step_rollback(node_id=<chosen>)", hint)
-        self.assertIn("a freeze needs a full-span validation", hint)
-        self.assertNotIn("finish_session(", hint)
-        self.assertIn("pre-registered hypotheses are resolved", hint)
-
-    def test_names_nobody_when_no_row_carries_the_figure(self) -> None:
-        rows = [{"name": "a", "node_id": "n_a", "status": "ok", "stats": {"total_return": 0.2}}]
-        hint = batch_select_hint(rows, replay_years_remaining=8)
-        self.assertIn("no row carries an active information ratio", hint)
-        self.assertNotIn("leading on", hint)
-
-    def test_a_spent_budget_leaves_only_the_handoff_and_the_finish(self) -> None:
-        rows = [{"name": "a", "node_id": "n_a", "status": "ok", "stats": {}}]
-        hint = batch_select_hint(rows, replay_years_remaining=0)
-        self.assertIn("replay-year budget is spent", hint)
-        self.assertIn("finish_session, with the arm's conclusion in its reason", hint)
-        self.assertNotIn("skill", hint)
+    def test_only_the_batch_that_spends_the_budget_says_so(self) -> None:
+        with TemporaryDirectory() as tmp:
+            session = _Session(Path(tmp), max_replay_years=2)
+            session.candidate("a", _strategy("1"))
+            session.candidate("b", _strategy("22"))
+            first = session.call("a", span="Y1").value
+            self.assertEqual(first["replay_years_remaining"], 1)
+            self.assertNotIn("budget_spent", first)
+            last = session.call("b", span="Y1").value
+            self.assertEqual(last["replay_years_remaining"], 0)
+            self.assertEqual(last["budget_spent"], BUDGET_SPENT_NOTE)
+            self.assertIn("no further batch can run", last["budget_spent"])
+            # It says what the next refusal would.
+            session.candidate("c", _strategy("333"))
+            with self.assertRaises(ToolError) as refused:
+                session.call("c", span="Y1")
+            self.assertIn("replay-year budget is spent", str(refused.exception))
 
 
 class BatchValidateContractTest(unittest.TestCase):
