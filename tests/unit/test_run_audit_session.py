@@ -10,8 +10,9 @@ import pytest
 from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.sandbox import SandboxSpec
 from autotrade.pipelines import worker as worker_module
-from autotrade.pipelines.config import AcceptanceRules
-from scripts.experiments import run_audit_session
+from autotrade.pipelines.config import AcceptanceRules, acceptance_for
+from autotrade.pipelines.hitl_state import CREATION_STAMPS
+from scripts.experiments import _cli, run_audit_session
 from scripts.experiments._cli import add_acceptance_arguments
 
 
@@ -130,6 +131,35 @@ def test_the_audit_parser_exposes_every_create_time_gate() -> None:
     AcceptanceRules(**{"beta_min": 0.85, "beta_max": 1.15, **named})
     with pytest.raises(SystemExit):
         parser.parse_args(["--recency-months=2.5"])
+
+
+def test_an_arm_created_from_the_command_line_holds_the_consoles_creation_rules(
+    tmp_path: Path,
+) -> None:
+    """Every rule the console stamps on a new arm is stamped on one created
+    here, so an audited arm is judged as a console arm created the same day
+    would be; a rule the operator turns off stays off."""
+
+    def params(*flags: str) -> dict[str, object]:
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--experiment-id", required=True)
+        parser.add_argument("--max-research-minutes", type=int, default=20)
+        _cli.add_path_arguments(parser, tmp_path)
+        _cli.add_calendar_arguments(parser)
+        _cli.add_schedule_arguments(parser)
+        _cli.add_snapshot_window_arguments(parser)
+        _cli.add_model_arguments(parser)
+        add_acceptance_arguments(parser)
+        args = parser.parse_args(["--experiment-id", "audit", *flags])
+        return _cli._build_worker_params(args, repo_root=tmp_path)
+
+    assert CREATION_STAMPS and all(CREATION_STAMPS.values())
+    created = params()
+    assert {key: created[key] for key in CREATION_STAMPS} == CREATION_STAMPS
+    assert acceptance_for(created) == acceptance_for(CREATION_STAMPS)
+    relaxed = params("--no-require-seed-replicates")
+    assert relaxed["require_seed_replicates"] is False
+    assert relaxed["require_forward_plain_selection"] is True
 
 
 def test_the_compaction_gateway_is_built_without_provider_retries(

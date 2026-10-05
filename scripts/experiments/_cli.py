@@ -24,7 +24,11 @@ from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.runtime import write_json_atomic
 from autotrade.pipelines.calendar import GEOMETRY_PARAMETERS
 from autotrade.pipelines.config import AcceptanceRules
-from autotrade.pipelines.hitl_state import MODEL_CHOICES, WEB_CREATE_DEFAULTS
+from autotrade.pipelines.hitl_state import (
+    CREATION_STAMPS,
+    MODEL_CHOICES,
+    WEB_CREATE_DEFAULTS,
+)
 from autotrade.pipelines.worker import (
     NON_PERSISTABLE_PARAMS,
     InteractiveWorkerOptions,
@@ -304,10 +308,10 @@ def add_acceptance_arguments(parser: argparse.ArgumentParser) -> None:
 
     Unset takes the default of ``autotrade.pipelines.config.acceptance_for``:
     a tracking mandate only where ``--tracking-error-cap`` is given, drawdowns
-    0.45 / 0.30 unless named, the statistical bars at today's constants, and
-    an optional condition (``--require-*``) off: the console stamps
-    ``hitl_state.CREATION_STAMPS`` on the arms it creates, this entrypoint
-    does not.
+    0.45 / 0.30 unless named and the statistical bars at today's constants. An
+    optional condition (``--require-*``) left unset is on, as on an arm the
+    console creates (``hitl_state.CREATION_STAMPS``, which
+    ``_build_worker_params`` stamps); ``--no-require-*`` turns one off.
     """
     for rule in fields(AcceptanceRules):
         flag = f"--{rule.name.replace('_', '-')}"
@@ -347,7 +351,10 @@ def _build_worker_params(
 
     The worker owns every default and every validation rule, so the CLI only
     supplies the keys the operator actually chose. Anything absent here falls
-    back to the same default a console-created experiment gets.
+    back to the same default a console-created experiment gets, and the rules
+    the console stamps on a new arm (``hitl_state.CREATION_STAMPS``) are
+    stamped here too unless the operator chose otherwise: an arm created from
+    the command line is held to the rules of one created in the console.
     """
     forbidden = sorted(set(overrides or {}) & NON_PERSISTABLE_PARAMS)
     if forbidden:
@@ -410,7 +417,10 @@ def _build_worker_params(
         if value is not None:
             params[f"{window}_window_months"] = value
     params.update(overrides or {})
-    return {key: value for key, value in params.items() if value is not None}
+    return {
+        **CREATION_STAMPS,
+        **{key: value for key, value in params.items() if value is not None},
+    }
 
 
 def build_worker_options(
