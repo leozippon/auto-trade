@@ -116,6 +116,7 @@ _CRITERION_CODES = {
     "forward_tracking_error_above_cap": "F7",
     "forward_beta_outside_band": "F7",
     "forward_plain_selection_not_positive": "F8",
+    "forward_seed_mean_plain_selection_not_positive": "F9",
     "heldout_strategy_error": "H1",
     "heldout_excess_below_tolerance": "H2",
     "heldout_max_drawdown_exceeded": "H3",
@@ -1134,6 +1135,37 @@ def _verdict_thresholds(
             if params.get("require_forward_plain_selection") is True
             else {}
         ),
+        **(
+            {"require_seed_replicates": True}
+            if params.get("require_seed_replicates") is True
+            else {}
+        ),
+    }
+
+
+def _seed_gate_view(identity: PublicIdentity, block: object) -> dict[str, object] | None:
+    """The freeze gate's seed-replicate reading (``experiment._seed_replicate_gate``)
+    -- the replicates it read, each one's seed line and IR or the problem that
+    refused it, their mean with the nominee and the bar -- or ``None`` for a
+    gate of an arm without the rule."""
+
+    seeds = _mapping(block)
+    if not seeds:
+        return None
+    return {
+        "trains_a_model": bool(seeds.get("trains_a_model")),
+        "mean_information_ratio": _number(seeds.get("mean_information_ratio")),
+        "information_ratio_bar": _number(seeds.get("information_ratio_bar")),
+        "replicates": [
+            {
+                "step_id": entry.get("step_id"),
+                "seed_line": entry.get("seed_line"),
+                "information_ratio": _number(entry.get("information_ratio")),
+                "problem": identity.public_text(str(entry.get("problem") or "")) or None,
+            }
+            for entry in seeds.get("replicates") or ()
+            if isinstance(entry, Mapping)
+        ],
     }
 
 
@@ -1187,6 +1219,7 @@ def _research_session_view(
                     key: _number(value)
                     for key, value in _mapping(gate.get("thresholds")).items()
                 },
+                "seed_replicates": _seed_gate_view(identity, gate.get("seed_replicates")),
             }
             if gate
             else None
@@ -1231,6 +1264,13 @@ def _frozen_view(
         "fit": bool(fit.get("fit")),
         "refit_period": fit.get("refit_period"),
         "blocks": [dict(item) for item in block.get("blocks") or () if isinstance(item, Mapping)],
+        # Frozen beside replicates: the gate's reading of them, for the seed
+        # mean beside the nominee's IR and their bar. Absent on one seed.
+        "seed_replicates": (
+            _seed_gate_view(identity, _mapping(row.get("freeze_gate")).get("seed_replicates"))
+            if block.get("seed_replicates")
+            else None
+        ),
     }
 
 

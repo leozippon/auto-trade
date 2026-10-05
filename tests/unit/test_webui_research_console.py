@@ -320,6 +320,67 @@ def test_a_withdrawn_graduation_reads_as_a_failure_everywhere(tmp_path: Path) ->
     assert "ending-voided" not in (static / "style.css").read_text(encoding="utf-8")
 
 
+def test_seed_replicates_are_shown_where_the_record_has_them_and_absent_otherwise(
+    tmp_path: Path,
+) -> None:
+    """An arm judged on its training seeds together shows each seed and their
+    mean on the experiment page -- the freeze's seed-mean IR beside the
+    nominee's and the bar, and the forward and Held-out readings per seed --
+    from the fields the console serves; an arm frozen on one seed serves none
+    of them and draws nothing in their place. F9 is its own criterion code."""
+
+    build_arm(tmp_path, "seeded", "graduated", seeded=True)
+    build_arm(tmp_path, "single", "graduated")
+    seeded = experiment_detail(tmp_path, "seeded")
+    single = experiment_detail(tmp_path, "single")
+    gate = seeded["sessions"][0]["record"]["freeze_gate"]["seed_replicates"]
+    frozen = seeded["frozen"]["seed_replicates"]
+    forward = seeded["forward"]["slices"]["forward"]
+    assert frozen == gate and gate["information_ratio_bar"] is not None
+    assert gate["mean_information_ratio"] == pytest.approx(
+        (seeded["frozen"]["information_ratio"] + gate["replicates"][0]["information_ratio"]) / 2
+    )
+    assert gate["replicates"][0]["seed_line"] == "main.py: SEED_BASE = 2000"
+    for name in ("forward", "heldout"):
+        block = seeded["forward"]["slices"][name]
+        assert block["seed_mean"]["members"] == 2
+        assert block["seed_mean"]["raw_readings"]["plain_selection"] == pytest.approx(
+            (block["raw_readings"]["plain_selection"] + block["seed_replicates"][0]["raw_readings"]["plain_selection"]) / 2
+        )
+    assert seeded["forward"]["verdict"]["thresholds"]["require_seed_replicates"] is True
+    assert seeded["sessions"][1]["thresholds"]["require_seed_replicates"] is True
+    assert registry._CRITERION_CODES["forward_seed_mean_plain_selection_not_positive"] == "F9"
+    # One seed: nothing served, so nothing drawn.
+    assert single["frozen"]["seed_replicates"] is None
+    assert single["sessions"][0]["record"]["freeze_gate"]["seed_replicates"] is None
+    assert "seed_mean" not in single["forward"]["slices"]["forward"]
+    assert "require_seed_replicates" not in single["sessions"][1]["thresholds"]
+
+    script = (
+        Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
+    ).read_text(encoding="utf-8")
+
+    def body(name: str) -> str:
+        return script.split(f"function {name}(", 1)[1].split("\nfunction ", 1)[0]
+
+    def reads(name: str, var: str) -> set[str]:
+        return set(re.findall(rf"\b{var}\.([a-z_]+)", body(name)))
+
+    replicate = set(forward["seed_replicates"][0])
+    assert reads("seedReadingsTable", "replicate") <= replicate
+    assert reads("seedReadingsTable", "raw") <= set(forward["seed_mean"]["raw_readings"])
+    assert reads("seedReadingsTable", "slice") <= set(forward)
+    for name in ("frozenPanel", "freezeGateChecklist"):
+        assert reads(name, "seeds") <= set(gate), name
+        assert reads(name, "entry") <= set(gate["replicates"][0]), name
+    assert "if (!shown.length) return null;" in body("seedReadingsTable")
+    for panel in ("forwardStagePanel", "heldoutStagePanel", "verdictStagePanel"):
+        assert "seedReadingsTable(" in body(panel), panel
+    # Never on the home page.
+    for home in ("experimentCard", "heroPanel", "evidenceTiles", "forwardTiles"):
+        assert "seed" not in body(home), home
+
+
 def test_the_listing_rederives_a_row_only_when_its_files_change(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

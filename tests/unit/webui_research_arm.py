@@ -40,6 +40,7 @@ from autotrade.pipelines.verdict import (
     graduation_verdict,
     heldout_slice,
     neutralized_statistics,
+    seed_replicate_slice,
 )
 
 STAGES = (
@@ -189,8 +190,28 @@ def _session_record(experiment_id: str, **fields: object) -> dict[str, object]:
     }
 
 
-def build_arm(root: Path, experiment_id: str, stage: str, *, alive: bool = False) -> Path:
-    """Write one arm at ``stage`` (one of :data:`STAGES`) under ``root``."""
+def _with_panel(result_ref: str, scale: float) -> None:
+    """Give a replay's sidecar the zero-skill panel series a panel-era replay
+    carries, so its slices measure the plain selection."""
+
+    path = Path(result_ref).parent / STYLE_ARTIFACT_NAME
+    sidecar = json.loads(path.read_text(encoding="utf-8"))
+    sidecar["panel_daily"] = [[day, scale * value] for day, value in sidecar["strategy_daily"]]
+    write_json_atomic(path, sidecar)
+
+
+def build_arm(
+    root: Path, experiment_id: str, stage: str, *, alive: bool = False, seeded: bool = False
+) -> Path:
+    """Write one arm at ``stage`` (one of :data:`STAGES`) under ``root``.
+
+    ``seeded`` makes it an arm under ``require_seed_replicates`` whose nominee
+    froze with one seed replicate and, past the freeze, was replayed with it
+    and judged on their mean, in the shapes ``pipelines.experiment`` records
+    (tests/unit/test_seed_replicates.py): the gate's ``seed_replicates``
+    block, the frozen block's, each slice's ``seed_replicates`` and
+    ``seed_mean`` and the record's own rows.
+    """
 
     if stage not in STAGES:
         raise ValueError(stage)
@@ -200,7 +221,12 @@ def build_arm(root: Path, experiment_id: str, stage: str, *, alive: bool = False
     hitl.mkdir(parents=True)
     write_json_atomic(
         hitl / "params.json",
-        {"experiment_id": experiment_id, **PARAMS, "_created_at": "2026-09-13T00:00:00+00:00"},
+        {
+            "experiment_id": experiment_id,
+            **PARAMS,
+            **({"require_seed_replicates": True} if seeded else {}),
+            "_created_at": "2026-09-13T00:00:00+00:00",
+        },
     )
     write_control(hitl / "control.json", ControlState(mode="auto"))
     if stage == "created":
@@ -220,6 +246,26 @@ def build_arm(root: Path, experiment_id: str, stage: str, *, alive: bool = False
         ]
         nominee = steps[1]
         gate = freeze_gate_for([], steps, nominee, experiment_dir=directory)
+        # The seed replicate: the full-span step other than the nominee.
+        replicate = steps[0]
+        if seeded:
+            ratios = [gate["information_ratio"], replicate["neutralized"]["information_ratio"]]
+            gate = {
+                **gate,
+                "seed_replicates": {
+                    "trains_a_model": True,
+                    "replicates": [
+                        {
+                            "step_id": replicate["step_id"],
+                            "seed_line": "main.py: SEED_BASE = 2000",
+                            "information_ratio": ratios[1],
+                        }
+                    ],
+                    "mean_information_ratio": sum(ratios) / len(ratios),
+                    "information_ratio_bar": gate["deflated_sharpe"]["information_ratio_bar"],
+                },
+                "thresholds": {**gate["thresholds"], "require_seed_replicates": True},
+            }
         output = directory / "artifacts/strategy/frozen/strategy_research_abc/output"
         output.mkdir(parents=True)
         (output / "main.py").write_text("def generate_orders(context):\n    return []\n", encoding="utf-8")
@@ -241,7 +287,24 @@ def build_arm(root: Path, experiment_id: str, stage: str, *, alive: bool = False
             "deflated_sharpe": gate["deflated_sharpe"],
             "full_span_validations": gate["full_span_validations"],
             "forward_mde": forward_mde(float(gate["tracking_error"]), 242),
-            "fit_plan": {"fit": False, "refit_period": None},
+            "fit_plan": {"fit": seeded, "refit_period": "quarter" if seeded else None},
+            **(
+                {
+                    "seed_replicates": [
+                        {
+                            "artifact_id": "strategy_research_seed",
+                            "output_path": str(output.parent.parent / "strategy_research_seed/output"),
+                            "models_path": None,
+                            "source_step_id": replicate["step_id"],
+                            "revision_id": replicate["revision_id"],
+                            "research_result_ref": replicate["validation_result_ref"],
+                            "information_ratio": replicate["neutralized"]["information_ratio"],
+                        }
+                    ]
+                }
+                if seeded
+                else {}
+            ),
         }
         records.append(
             _session_record(
@@ -309,6 +372,34 @@ def build_arm(root: Path, experiment_id: str, stage: str, *, alive: bool = False
     if stage in ("graduated", "discarded"):
         edge = 0.002 if stage == "graduated" else -0.002
         ref = write_result(directory, "heldout", start=REPLAY["start"], days=300, edge=edge, seed=7)
+        seeds: dict[str, dict[str, object]] = {"forward": {}, "heldout": {}}
+        replicate_rows: list[dict[str, object]] = []
+        if seeded:
+            replicate_ref = write_result(
+                directory, "heldout", start=REPLAY["start"], days=300, edge=edge / 4, seed=8
+            )
+            _with_panel(ref, 0.6)
+            _with_panel(replicate_ref, 0.9)
+            identity = {"artifact_id": "strategy_research_seed", "source_step_id": replicate["step_id"]}
+            replicate_analysis = _analysis(replicate_ref)
+            for name, (start, end) in (
+                ("forward", (REPLAY["start"], REPLAY["forward_end"])),
+                ("heldout", (REPLAY["heldout_start"], REPLAY["replay_end"])),
+            ):
+                seeds[name] = {
+                    "seed_replicates": [
+                        {**identity, **seed_replicate_slice(replicate_analysis, start=start, end=end)}
+                    ]
+                }
+            seeds["forward"]["require_seed_replicates"] = True
+            replicate_rows.append(
+                {
+                    **identity,
+                    "revision_id": replicate["revision_id"],
+                    "result_ref": replicate_ref,
+                    "refits_executed": {"forward": 0, "heldout": 0},
+                }
+            )
         analysis = _analysis(ref)
         forward = forward_slice(
             analysis,
@@ -322,6 +413,7 @@ def build_arm(root: Path, experiment_id: str, stage: str, *, alive: bool = False
             turnover=2.0,
             round_trips=24,
             mean_gross=0.9,
+            **seeds["forward"],  # type: ignore[arg-type]
         )
         heldout = heldout_slice(
             analysis,
@@ -331,6 +423,7 @@ def build_arm(root: Path, experiment_id: str, stage: str, *, alive: bool = False
             max_drawdown=0.9,
             active_max_drawdown=0.9,
             mean_gross=0.9,
+            **seeds["heldout"],  # type: ignore[arg-type]
         )
         ledger.append(
             {
@@ -347,6 +440,7 @@ def build_arm(root: Path, experiment_id: str, stage: str, *, alive: bool = False
                 "result_ref": ref,
                 "slices": {"forward": forward, "heldout": heldout},
                 "refits_executed": {"forward": 0, "heldout": 0},
+                **({"seed_replicates": replicate_rows} if replicate_rows else {}),
                 "null_control": {"k": 500, "excess_percentile": 0.9, "step": {"excess_percentile": 0.77}},
                 "verdict": graduation_verdict(forward=forward, heldout=heldout),
             }

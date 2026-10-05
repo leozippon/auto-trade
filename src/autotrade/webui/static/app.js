@@ -47,6 +47,7 @@ const ENDING_LABELS = {
 // does not carry reads as "—", so the gap shows instead of today's default.
 const REASON_LABELS = {
   freeze_needs_full_span_validation: "提名节点为全区间验证",
+  freeze_nominee_is_control: "提名节点不是对照",
   freeze_too_few_full_span_validations: "全区间验证次数",
   freeze_deflated_sharpe_unavailable: "DSR 可算",
   freeze_deflated_sharpe_below_threshold: "DSR",
@@ -58,6 +59,9 @@ const REASON_LABELS = {
   freeze_raw_excess_not_positive_at_cost_stress: (t) =>
     `研究期滑点 ×${t.cost_stress_multiplier ?? "—"} 后对基准指数超额`,
   freeze_unmeasurable: "研究期统计可算",
+  freeze_too_few_seed_replicates: "训练模型的提名登记了种子副本",
+  freeze_seed_replicate_invalid: "种子副本只改种子一行",
+  freeze_seed_mean_information_ratio_below_threshold: "研究期种子均值主动 IR",
   forward_strategy_error: "前推期策略无报错",
   heldout_strategy_error: "Held-out 期策略无报错",
   forward_lower_bound_not_positive: (t) => `前推超额 ${fmtPct(t.forward_confidence, 0)} 下界`,
@@ -70,6 +74,7 @@ const REASON_LABELS = {
   forward_tracking_error_above_cap: "前推对基准指数跟踪误差",
   forward_beta_outside_band: "前推市场 β",
   forward_plain_selection_not_positive: "前推账户对零技能面板（未回归）",
+  forward_seed_mean_plain_selection_not_positive: "前推种子均值对零技能面板（未回归）",
   heldout_excess_below_tolerance: "Held-out 超额",
   heldout_max_drawdown_exceeded: "Held-out 回撤",
   heldout_active_drawdown_exceeded: "Held-out 主动回撤",
@@ -112,6 +117,11 @@ const PLAIN_SELECTION_TITLE = "账户收益减零技能面板收益，不做回�
 const ACTIVE_BETA_TITLE = "主动序列（账户 − 面板）对基准指数的回归载荷；为负即持仓比随机副本更低 β，指数大涨时落后，中性化读数会把这部分记回";
 const NEUTRAL_IR_TITLE = "剔除基准与规模载荷后的主动超额 ÷ 残差跟踪误差；回归退回的 β 与规模部分持有人拿不到";
 const DERIVED_TITLE = "此记录写于切片携带这些读数之前，数字由同一次回放存下的日序列推得";
+// A model-training nominee judged on its training seeds together
+// (pipelines/experiment.py `_seed_replicate_gate`, verdict.py `seed_mean`): a
+// seed replicate is the same strategy with only its seed line changed.
+const SEED_IR_TITLE = "提名节点与它的种子副本（同一策略只换训练种子那一行）研究期主动 IR 的平均，须达到提名节点自己的 IR 门槛";
+const SEED_MEAN_TITLE = "冻结产物与它的种子副本各自读数的平均；只判训练模型并登记了种子副本的提名";
 
 function reasonLabel(reason, thresholds) {
   const label = REASON_LABELS[reason];
@@ -2951,6 +2961,51 @@ function holderLine(label, slice) {
   );
 }
 
+/* The frozen book beside its seed replicates and their mean, over the named
+   slices (verdict.py `seed_replicate_slice` and `seed_mean`): one row per
+   seed, one figure per cell — the account against the benchmark and against
+   its zero-skill panel, unregressed. Null for a record without replicates, so
+   an arm frozen on one seed shows nothing in its place. */
+const SLICE_NAMES = { forward: "前推", heldout: "Held-out " };
+
+function seedReadingsTable(slices, names) {
+  const shown = names.filter((name) => ((slices || {})[name] || {}).seed_mean);
+  if (!shown.length) return null;
+  const first = slices[shown[0]];
+  const figures = (pick) =>
+    shown.flatMap((name) => {
+      const raw = (pick(slices[name]) || {}).raw_readings || {};
+      return [raw.raw_excess, raw.plain_selection].map((value) => ({
+        value: fmtPct(value),
+        cls: signCls(value),
+      }));
+    });
+  return dataTable(
+    [
+      { label: "种子" },
+      ...shown.flatMap((name) => [
+        { label: `${SLICE_NAMES[name]}对基准`, num: true, title: RAW_EXCESS_TITLE },
+        { label: `${SLICE_NAMES[name]}对面板`, num: true, title: PLAIN_SELECTION_TITLE },
+      ]),
+    ],
+    [
+      [{ value: "冻结产物" }, ...figures((slice) => slice)],
+      ...(first.seed_replicates || []).map((replicate, index) => [
+        {
+          value: String(replicate.source_step_id || "").split("__").pop(),
+          title: [replicate.source_step_id, replicate.artifact_id].filter(Boolean).join(" · "),
+        },
+        ...figures((slice) => (slice.seed_replicates || [])[index]),
+      ]),
+      [
+        { value: "均值", title: `${first.seed_mean.members} 个种子的平均。${SEED_MEAN_TITLE}` },
+        ...figures((slice) => slice.seed_mean),
+      ],
+    ],
+    { fit: true, box: "section-gap" },
+  );
+}
+
 /* One slice's graduation criteria (pipelines/verdict.py), as rows: before the
    record the threshold alone, unmarked; after it the measured figure with its
    pass or fail mark. A slice the strategy's error left unmeasured stays
@@ -3003,10 +3058,12 @@ function mandateRows(capToken, bandToken, measured, row, t) {
   ];
 }
 
-/* F1–F8 over the forward slice, as criterion rows: the 前推回放 view draws
+/* F1–F9 over the forward slice, as criterion rows: the 前推回放 view draws
    them alone, 裁决 draws them ahead of H1–H4, and neither restates a
    threshold the other spells differently. F8, plain selection, is drawn only
-   where the arm's own thresholds hold it. */
+   where the arm's own thresholds hold it; F9, its seed mean, where they hold
+   seed replicates and, once measured, only for a slice that has replicates —
+   a book with nothing to replicate has no mean to judge. */
 function forwardCriteria(f, verdict, thresholds) {
   const failed = failedReasons(verdict);
   const t = thresholds || {};
@@ -3030,6 +3087,16 @@ function forwardCriteria(f, verdict, thresholds) {
             fmtPct(f && (f.raw_readings || {}).plain_selection),
             "> 0",
             PLAIN_SELECTION_TITLE,
+          ),
+        ]
+      : []),
+    ...((f ? f.seed_mean : t.require_seed_replicates)
+      ? [
+          row(
+            "forward_seed_mean_plain_selection_not_positive",
+            fmtPct(f && (f.seed_mean.raw_readings || {}).plain_selection),
+            "> 0",
+            SEED_MEAN_TITLE,
           ),
         ]
       : []),
@@ -3085,7 +3152,8 @@ function stageHead(key, detail) {
 }
 
 /* 前推回放: the forward slice alone — its span (progress while replaying),
-   once recorded the holder's line, F1–F8 and the slice's own statistics. */
+   once recorded the holder's line and its seed replicates, F1–F9 and the
+   slice's own statistics. */
 function forwardStagePanel(detail) {
   const { forward, replay, thresholds, progress } = replayContext(detail);
   const f = ((forward || {}).slices || {}).forward;
@@ -3096,10 +3164,11 @@ function forwardStagePanel(detail) {
     replaySpanBar(replay, "forward", { pending: !forward, progress }),
     forward && forward.error ? el("div", { class: "hint warn" }, `策略报错：${forward.error}`) : null,
     holderLine("前推", f),
+    seedReadingsTable((forward || {}).slices, ["forward"]),
     el(
       "div",
       { class: "section-gap" },
-      el("h4", { class: "subsection-title" }, forward ? "前推条件 F1–F8" : "前推条件 F1–F8 · 阈值"),
+      el("h4", { class: "subsection-title" }, forward ? "前推条件 F1–F9" : "前推条件 F1–F9 · 阈值"),
       checklist(forwardCriteria(f, detail.verdict, thresholds)),
     ),
     sliceStats(f, FORWARD_STAT_FIELDS, thresholds),
@@ -3124,6 +3193,7 @@ function heldoutStagePanel(detail) {
     replaySpanBar(replay, "heldout", { pending: !forward, progress }),
     el("div", { class: "meta-line" }, "与前推是同一次连续回放的尾段，同一个裁决"),
     holderLine("Held-out", h),
+    seedReadingsTable((forward || {}).slices, ["heldout"]),
     el(
       "div",
       { class: "section-gap" },
@@ -3135,7 +3205,7 @@ function heldoutStagePanel(detail) {
 }
 
 /* 裁决: how the arm ended — its ending badge and reason, then the criteria
-   that decided it, as the same F1–F6 and H1–H4 rows the two slice views draw,
+   that decided it, as the same F1–F9 and H1–H4 rows the two slice views draw,
    so all three stages read in one vocabulary; then what the arm cost and when
    it was recorded, and the Paper handoff. An ending no replay decided (研究
    delivered nothing, or the worker broke) has the reason alone. Before it
@@ -3180,6 +3250,7 @@ function verdictStagePanel(detail) {
     // What the holder's account did, before the criteria that decided it.
     forward ? holderLine("前推", slices.forward) : null,
     forward ? holderLine("Held-out", slices.heldout) : null,
+    seedReadingsTable(slices, ["forward", "heldout"]),
     forward
       ? checklist([
           ...forwardCriteria(slices.forward, verdict, thresholds),
@@ -3189,7 +3260,7 @@ function verdictStagePanel(detail) {
         el(
           "div",
           { class: "meta-line" },
-          "前推 F1–F8 与 Held-out H1–H4 全部通过才毕业；策略异常直接未通过，其他失败按上限重试",
+          "前推 F1–F9 与 Held-out H1–H4 全部通过才毕业；策略异常直接未通过，其他失败按上限重试",
         ),
     facts.length ? el("table", { class: "kv section-gap" }, ...facts) : null,
     paperHandoff(detail),
@@ -3252,10 +3323,13 @@ function paperHandoff(detail) {
   return host;
 }
 
-/* The frozen artifact and the research statistics it was frozen on. */
+/* The frozen artifact and the research statistics it was frozen on. An
+   artifact frozen with seed replicates also shows the seed-mean IR beside
+   its own IR and the bar both were held to, and one row per seed. */
 function frozenPanel(detail) {
   const frozen = detail.frozen;
   if (!frozen) return null;
+  const seeds = frozen.seed_replicates || {};
   const panel = el(
     "div",
     { class: "panel section-gap" },
@@ -3282,6 +3356,19 @@ function frozenPanel(detail) {
         },
         { label: "残差跟踪误差", value: frozen.tracking_error, fmt: fmtPct, title: TRACKING_ERROR_TITLE },
         { label: "IR", value: frozen.information_ratio, fmt: fmtSharpe, signed: true, title: IR_TITLE },
+        {
+          label: "种子均值 IR",
+          value: seeds.mean_information_ratio,
+          fmt: fmtSharpe,
+          signed: true,
+          title: SEED_IR_TITLE,
+        },
+        {
+          label: "IR 门槛",
+          value: seeds.information_ratio_bar,
+          fmt: fmtSharpe,
+          title: "DSR 达到门槛时的研究期 IR，按本臂试验数折算；提名节点与种子均值都须达到",
+        },
         {
           label: "DSR",
           value: frozen.deflated_sharpe_probability,
@@ -3318,6 +3405,20 @@ function frozenPanel(detail) {
         ? chip(`节点 ${String(frozen.source_step_id).split("__").pop()}`, frozen.source_step_id)
         : null,
     ]),
+    seeds.replicates
+      ? dataTable(
+          [{ label: "种子" }, { label: "种子行" }, { label: "研究期 IR", num: true, title: IR_TITLE }],
+          [
+            [{ value: "冻结产物", title: frozen.source_step_id || null }, "—", { value: fmtSharpe(frozen.information_ratio), cls: signCls(frozen.information_ratio) }],
+            ...seeds.replicates.map((entry) => [
+              { value: String(entry.step_id).split("__").pop(), title: entry.step_id },
+              entry.seed_line,
+              { value: fmtSharpe(entry.information_ratio), cls: signCls(entry.information_ratio) },
+            ]),
+          ],
+          { fit: true, box: "section-gap" },
+        )
+      : null,
     subWindowSection("研究期分年度表现", frozen.blocks),
     frozen.result ? styleCard(detail.experiment_id, frozen.result) : null,
   );
@@ -3696,18 +3797,35 @@ function sessionDetailPanel(detail, selectedKey) {
 }
 
 /* The freeze gate as the pipeline judged the nomination: the two measured
-   criteria always, a failed precondition only when it failed. */
+   criteria always, a failed precondition only when it failed. Where the arm
+   holds seed replicates the gate records them (`seed_replicates`): a missing
+   or invalid replicate is a precondition, each invalid one's problem in the
+   row's hover, and the seed-mean IR against the nominee's IR bar is a row
+   whenever replicates were read. */
 function freezeGateChecklist(gate) {
   const failed = new Set(gate.reasons || []);
   const t = gate.thresholds || {};
   const row = criteriaRow(gate, failed, t);
+  const seeds = gate.seed_replicates;
+  const problems = ((seeds || {}).replicates || [])
+    .filter((entry) => entry.problem)
+    .map((entry) => `${String(entry.step_id).split("__").pop()}：${entry.problem}`)
+    .join("\n");
   const preconditions = [
     "freeze_needs_full_span_validation",
+    "freeze_nominee_is_control",
     "freeze_unmeasurable",
     "freeze_deflated_sharpe_unavailable",
+    "freeze_too_few_seed_replicates",
+    "freeze_seed_replicate_invalid",
   ].filter((token) => failed.has(token));
+  const seedMean = "freeze_seed_mean_information_ratio_below_threshold";
   return checklist([
-    ...preconditions.map((token) => ({ ok: false, label: reasonLabel(token) })),
+    ...preconditions.map((token) => ({
+      ok: false,
+      label: reasonLabel(token),
+      title: token === "freeze_seed_replicate_invalid" ? problems || null : null,
+    })),
     {
       ok: !failed.has("freeze_too_few_full_span_validations"),
       label: reasonLabel("freeze_too_few_full_span_validations"),
@@ -3745,6 +3863,16 @@ function freezeGateChecklist(gate) {
           ),
         ]),
     ...mandateRows("freeze_tracking_error_above_cap", "freeze_beta_outside_band", gate, row, t),
+    ...(seeds && (seeds.mean_information_ratio != null || failed.has(seedMean))
+      ? [
+          row(
+            seedMean,
+            fmtSharpe(seeds.mean_information_ratio),
+            `≥ ${fmtSharpe(seeds.information_ratio_bar)}`,
+            SEED_IR_TITLE,
+          ),
+        ]
+      : []),
   ]);
 }
 

@@ -439,15 +439,18 @@ def test_every_progress_stage_the_pipeline_publishes_has_a_console_label() -> No
 
 def test_every_reason_the_pipeline_records_has_a_console_label() -> None:
     """A failed freeze-gate or verdict condition renders as its raw token when
-    the console has no label for it, so the label map is checked against the
-    tokens pipelines/verdict.py can emit, and every session outcome too."""
+    the console has no label for it, so the label map is checked against every
+    token the pipelines can append -- the verdict's and the freeze gate's own,
+    wherever they are written -- and every session outcome too."""
 
     from autotrade.pipelines.config import SESSION_OUTCOMES
 
-    verdict = (
-        Path(__file__).resolve().parents[2] / "src/autotrade/pipelines/verdict.py"
-    ).read_text(encoding="utf-8")
-    emitted = set(re.findall(r'reasons\.append\("([a-z_]+)"\)', verdict))
+    pipelines = Path(__file__).resolve().parents[2] / "src/autotrade/pipelines"
+    emitted = {
+        token
+        for path in pipelines.rglob("*.py")
+        for token in re.findall(r'reasons\.append\("([a-z_]+)"\)', path.read_text(encoding="utf-8"))
+    }
     emitted |= {f"{where}_strategy_error" for where in ("forward", "heldout")}
     assert "forward_lower_bound_not_positive" in emitted
     labels = _reason_tokens()
@@ -498,19 +501,20 @@ def test_a_criterion_that_names_a_threshold_words_it_from_the_record() -> None:
 
 # Threshold keys a forward record carries only where the arm's rules hold the
 # condition they name.
-CONDITIONAL_THRESHOLDS = {"require_forward_plain_selection"}
+CONDITIONAL_THRESHOLDS = {"require_forward_plain_selection", "require_seed_replicates"}
 
 
 def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) -> None:
     """The panels read the registry's arm projections by field name; a renamed
     field would render an empty cell instead of failing. Checked against a
-    projection of a synthetic arm that carries its verdict."""
+    projection of a synthetic arm that carries its verdict, judged on its seed
+    replicates so the fields only such an arm has are served too."""
 
     from autotrade.pipelines.ledger import VERDICT_VOID_FIELDS
     from autotrade.webui.registry import experiment_detail
     from tests.unit.webui_research_arm import build_arm
 
-    build_arm(tmp_path, "arm", "graduated")
+    build_arm(tmp_path, "arm", "graduated", seeded=True)
     detail = experiment_detail(tmp_path, "arm")
     [research, replay] = detail["sessions"]
     assert (research["kind"], replay["kind"]) == ("research", "forward")
