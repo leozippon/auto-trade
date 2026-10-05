@@ -30,11 +30,32 @@ EARLY_FINISH_BUDGET_FRACTION = 1 / 3
 REASON_MIN_CHARS = 40
 REASON_MAX_CHARS = AGENT_JUSTIFICATION_MAX_CHARS
 
-# The freeze gate as the Pipeline would read one node of this session now:
-# ``passed``, ``reasons`` (named in ``pipelines/verdict.py``) and the gate's
-# numbers. The Environment never imports the Pipeline, so the gate is handed
-# over as a callable; the Pipeline recomputes it when it records the freeze.
-FreezeGate = Callable[[str], Mapping[str, object]]
+# The freeze gate as the Pipeline would read one node of this session now,
+# with the nodes it would register as its seed replicates: ``passed``,
+# ``reasons`` (named in ``pipelines/verdict.py`` and ``pipelines/experiment.py``)
+# and the gate's numbers. The Environment never imports the Pipeline, so the
+# gate is handed over as a callable; the Pipeline recomputes it when it
+# records the freeze.
+FreezeGate = Callable[[str, tuple[str, ...]], Mapping[str, object]]
+
+# The gate's reasons that concern a nominee's seed replicates, and what a
+# replicate is, for the refusal that names one of them.
+SEED_REASONS = frozenset(
+    {
+        "freeze_seed_replicate_invalid",
+        "freeze_too_few_seed_replicates",
+        "freeze_seed_mean_information_ratio_below_threshold",
+    }
+)
+SEED_REPLICATE_RULE = (
+    "A seed replicate is another complete full-span Validation of this session, "
+    "registered as a candidate (not a control), whose strategy is the nominee's "
+    "bytes with exactly one line changed: an integer assignment to a seed name (SEED, "
+    "SEED_BASE, or one ending in _SEED or _SEED_BASE; SEED_BASE = 2000). Each one's "
+    "bytes differ from every other named one, and "
+    "the mean active information ratio over the nominee and its replicates must reach "
+    "the nominee's information_ratio_bar."
+)
 
 
 @dataclass(frozen=True)
@@ -88,12 +109,23 @@ _DESCRIPTION = (
     "refused while one is still running, and once it succeeds the remaining tool "
     "calls of the turn are cancelled."
 )
+# Appended where the arm's rules hold the seed-replicate condition, the only
+# arms whose schema carries ``seed_replicates``.
+_SEED_DESCRIPTION = (
+    " A nominee whose strategy trains a model (main.py defines fit) is judged on its "
+    "training seeds together: name its seed replicates in seed_replicates. "
+    + SEED_REPLICATE_RULE
+    + " After the freeze the host replays each replicate beside the frozen artifact on "
+    "the later data and judges their mean plain selection."
+)
 
 
-class FinishSessionTool:
-    spec = ToolSpec(
+def _spec(*, seed_replicates: bool) -> ToolSpec:
+    """The tool's schema; ``seed_replicates`` only for an arm whose rules hold it."""
+
+    return ToolSpec(
         "finish_session",
-        _DESCRIPTION,
+        _DESCRIPTION + (_SEED_DESCRIPTION if seed_replicates else ""),
         {
             "type": "object",
             "properties": {
@@ -111,6 +143,21 @@ class FinishSessionTool:
                     "maxLength": 500,
                     "description": NODE_REFERENCE_DESCRIPTION,
                 },
+                **(
+                    {
+                        "seed_replicates": {
+                            "type": "array",
+                            "items": {"type": "string", "minLength": 1, "maxLength": 500},
+                            "description": (
+                                "freeze only: the nominee's seed replicates, each a node "
+                                "id or short handle of this session; required (at least "
+                                "one) when the nominee's main.py defines fit."
+                            ),
+                        }
+                    }
+                    if seed_replicates
+                    else {}
+                ),
                 "reason": {
                     "type": "string",
                     "minLength": REASON_MIN_CHARS,
@@ -131,6 +178,12 @@ class FinishSessionTool:
         example={"outcome": "freeze", "node_id": NODE_REFERENCE_EXAMPLE},
     )
 
+
+class FinishSessionTool:
+    # The schema of an arm without the seed-replicate condition; an instance
+    # for an arm that holds it carries its own (``seed_replicates=True``).
+    spec = _spec(seed_replicates=False)
+
     def __init__(
         self,
         tree: StepTree,
@@ -139,60 +192,76 @@ class FinishSessionTool:
         freeze_gate: FreezeGate,
         another_round_fits: Callable[[], bool] | None = None,
         budget_status: Callable[[], SessionBudgetStatus] | None = None,
+        seed_replicates: bool = False,
     ) -> None:
         self.tree = tree
         self.session_ref = session_ref
         self._freeze_gate = freeze_gate
         self._another_round_fits = another_round_fits or (lambda: True)
         self._budget_status = budget_status
+        self._seed_replicates = seed_replicates
+        if seed_replicates:
+            self.spec = _spec(seed_replicates=True)
 
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
         outcome = str(arguments.get("outcome") or "")
         reason = str(arguments.get("reason") or "").strip()
         node_id = str(arguments.get("node_id") or "")
+        replicates = [str(item) for item in arguments.get("seed_replicates") or ()]  # type: ignore[union-attr]
         if outcome == "freeze":
-            return self._freeze(node_id, reason)
-        return self._no_edge(node_id, reason)
+            return self._freeze(node_id, reason, replicates)
+        return self._no_edge(node_id, reason, replicates)
 
     # ---- outcomes ----
 
-    def _freeze(self, reference: str, reason: str) -> ToolResult:
+    def _freeze(self, reference: str, reason: str, replicate_refs: list[str]) -> ToolResult:
         node_id = (
-            session_node_reference(
-                "finish_session",
-                self.tree,
-                reference,
-                session_ref=self.session_ref,
-                offered=self._session_candidates(),
-            )
-            if reference
-            else self._sole_candidate()
+            self._reference(reference) if reference else self._sole_candidate()
         )
         node = self._complete_node(node_id)
-        gate = dict(self._freeze_gate(node_id))
+        replicates = tuple(self._reference(item) for item in replicate_refs)
+        for replicate in replicates:
+            self._complete_node(replicate)
+        gate = dict(self._freeze_gate(node_id, replicates))
         if not gate.get("passed"):
             reasons = [str(item) for item in gate.get("reasons") or ()]
             passing = self._named(
                 [
                     candidate
                     for candidate in self._session_candidates()
-                    if candidate != node_id and self._freeze_gate(candidate).get("passed")
+                    if candidate != node_id
+                    and _passes_but_for_replicates(self._freeze_gate(candidate, ()))
                 ]
             )
+            seeds = SEED_REASONS.intersection(reasons)
             raise ToolError(
                 f"finish_session refused: {self._named([node_id])[0]} fails the freeze gate "
                 f"({', '.join(reasons) or 'no reason recorded'}); "
                 f"{_gate_numbers(gate)}. "
+                + (f"{self._seed_text(gate)} {SEED_REPLICATE_RULE} " if seeds else "")
                 + (
-                    f"These nodes of this session pass it now: {', '.join(passing)}. "
+                    "These nodes of this session pass it now"
+                    + (
+                        " (one that trains a model once its seed replicates hold up)"
+                        if self._seed_replicates
+                        else ""
+                    )
+                    + f": {', '.join(passing)}. "
                     if passing
                     else "No node of this session passes it now. "
                 )
                 + "Nominate a passing node, validate what the gate lacks (a "
-                "full-span validation, a control), or finish with no_edge.",
+                "full-span validation, a control"
+                + (", a seed replicate" if self._seed_replicates else "")
+                + "), or finish with no_edge.",
                 error_type="freeze_gate_refused",
-                retry_hint='finish_session({"outcome": "no_edge", "reason": "<evidence>"})',
-                details={"freeze_gate": _gate_record(gate), "passing_nodes": passing},
+                retry_hint=(
+                    'finish_session({"outcome": "freeze", "node_id": "<nominee>", '
+                    '"seed_replicates": ["<replicate>"]})'
+                    if seeds
+                    else 'finish_session({"outcome": "no_edge", "reason": "<evidence>"})'
+                ),
+                details={"freeze_gate": self._gate_record(gate), "passing_nodes": passing},
             )
         budget = self._early_finish_budget(reason)
         self.tree.set_position(node_id)
@@ -204,22 +273,25 @@ class FinishSessionTool:
                 "node_id": node_id,
                 **session_handle(self.tree, node_id, session_ref=self.session_ref),
                 "revision_id": str(node["revision_id"]),
+                **({"seed_replicates": list(replicates)} if replicates else {}),
                 **({"reason": reason} if reason else {}),
                 **budget,
-                "freeze_gate": _gate_record(gate),
+                "freeze_gate": self._gate_record(gate),
                 "pipeline_outcome": (
-                    f"The Pipeline freezes {node_id} as the arm's artifact; research "
-                    "ends and no further session runs."
+                    f"The Pipeline freezes {node_id} as the arm's artifact"
+                    + (" with its seed replicates" if replicates else "")
+                    + "; research ends and no further session runs."
                 ),
             },
             finish=True,
         )
 
-    def _no_edge(self, node_id: str, reason: str) -> ToolResult:
-        if node_id:
+    def _no_edge(self, node_id: str, reason: str, replicates: list[str]) -> ToolResult:
+        if node_id or replicates:
             raise ToolError(
                 'finish_session: outcome="no_edge" nominates nothing, so node_id must '
-                "be absent",
+                "be absent"
+                + (" and so must seed_replicates" if replicates else ""),
                 retry_hint='finish_session({"outcome": "no_edge", "reason": "<evidence>"})',
             )
         self._require_reason("no_edge", reason)
@@ -255,6 +327,57 @@ class FinishSessionTool:
                 "evidence behind it; it is recorded on the arm's session record",
                 retry_hint=f'finish_session({{"outcome": "{outcome}", "reason": "<evidence>"}})',
             )
+
+    def _reference(self, reference: str) -> str:
+        return session_node_reference(
+            "finish_session",
+            self.tree,
+            reference,
+            session_ref=self.session_ref,
+            offered=self._session_candidates(),
+        )
+
+    def _gate_record(self, gate: Mapping[str, object]) -> dict[str, object]:
+        """:func:`_gate_record` with seed replicates named by their handles."""
+
+        record = _gate_record(gate)
+        block = gate.get("seed_replicates")
+        if isinstance(block, Mapping):
+            record["seed_replicates"] = {
+                **block,
+                "replicates": [
+                    {**entry, "step_id": self._named([str(entry["step_id"])])[0]}
+                    for entry in block.get("replicates") or ()  # type: ignore[union-attr]
+                ],
+            }
+        return record
+
+    def _seed_text(self, gate: Mapping[str, object]) -> str:
+        """What the gate read off the nominee's seed replicates, in one sentence."""
+
+        block = gate.get("seed_replicates")
+        block = block if isinstance(block, Mapping) else {}
+        parts = [
+            f"{self._named([str(entry['step_id'])])[0]} "
+            + (
+                str(entry["problem"])
+                if "problem" in entry
+                else f"reads IR {float(entry['information_ratio']):.4g} ({entry['seed_line']})"
+            )
+            for entry in block.get("replicates") or ()  # type: ignore[union-attr]
+        ]
+        mean = block.get("mean_information_ratio")
+        bar = block.get("information_ratio_bar")
+        return (
+            "Seed replicates: "
+            + ("; ".join(parts) if parts else "none named, and the nominee trains a model")
+            + (
+                f"; mean IR {mean:.4g} against the nominee's bar {bar:.4g}"
+                if isinstance(mean, float) and isinstance(bar, float)
+                else ""
+            )
+            + "."
+        )
 
     def _session_candidates(self) -> list[str]:
         return [
@@ -332,6 +455,14 @@ class FinishSessionTool:
         )
 
 
+def _passes_but_for_replicates(gate: Mapping[str, object]) -> bool:
+    """Whether a node passes the gate read alone, or fails it only for want of
+    the seed replicates a model-training nominee must name."""
+
+    reasons = {str(item) for item in gate.get("reasons") or ()}
+    return bool(gate.get("passed")) or reasons == {"freeze_too_few_seed_replicates"}
+
+
 def _gate_record(gate: Mapping[str, object]) -> dict[str, object]:
     """The gate's verdict and numbers, bounded for an observation."""
 
@@ -382,6 +513,8 @@ __all__ = [
     "FINISH_OUTCOMES",
     "REASON_MAX_CHARS",
     "REASON_MIN_CHARS",
+    "SEED_REASONS",
+    "SEED_REPLICATE_RULE",
     "FinishSessionTool",
     "FreezeGate",
     "SessionBudgetStatus",

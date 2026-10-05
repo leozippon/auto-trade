@@ -750,24 +750,29 @@ class SessionValidations:
                 str(exc), error_type="schema_error", blocked_target="span"
             ) from exc
 
-    def freeze_gate(self, node_id: str) -> dict[str, object]:
+    def freeze_gate(
+        self, node_id: str, seed_replicates: Sequence[str] = ()
+    ) -> dict[str, object]:
         """The freeze gate as the Pipeline would read one Step of this session now.
 
         The Pipeline's own gate (``experiment.freeze_gate_for``) over the arm's
         recorded Steps and this session's completed ones, with the hard
         nomination rules of the run, so the Agent reads the verdict a freeze of
-        this node would get today. A node that is not a Step of this session
-        does not pass.
+        this node would get today, with ``seed_replicates`` the Steps it would
+        register as its seed replicates. A node that is not a Step of this
+        session does not pass.
         """
 
-        rows = [research_step_record(item) for item in self.steps]
-        nominee = next((row for row in rows if row["step_id"] == node_id), None)
-        if nominee is None:
+        rows = {
+            str(row["step_id"]): row for row in (research_step_record(item) for item in self.steps)
+        }
+        if any(step_id not in rows for step_id in (node_id, *seed_replicates)):
             return {"passed": False, "reasons": ["freeze_needs_a_step_of_this_session"]}
+        nominee = rows[node_id]
         rules = self.acceptance
         return freeze_gate_for(
             self.ledger.read(),
-            rows,
+            list(rows.values()),
             nominee,
             experiment_dir=self.experiment_dir,
             hard_reasons=(
@@ -777,6 +782,7 @@ class SessionValidations:
             ),
             acceptance=rules,
             years=[(year.start, year.end) for year in self.request.research_years],
+            seed_replicates=[rows[step_id] for step_id in seed_replicates],
         )
 
     @property

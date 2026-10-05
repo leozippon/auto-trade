@@ -120,9 +120,10 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     # Deliberately not the rules' own default, like ``dividend_tax`` below: an
     # arm whose params.json has no key was judged without the condition and
     # stays so; every arm created from here on is held to it unless its
-    # request says otherwise. The same holds for both conditions.
+    # request says otherwise. The same holds for all three conditions.
     "require_raw_excess_at_cost_stress": True,
     "require_forward_plain_selection": True,
+    "require_seed_replicates": True,
     "forward_confidence": AcceptanceRules().forward_confidence,
     "recency_months": AcceptanceRules().recency_months,
     "min_mean_gross": AcceptanceRules().min_mean_gross,

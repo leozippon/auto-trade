@@ -1340,6 +1340,7 @@ class WebuiBackendTest(unittest.TestCase):
                 {
                     "require_raw_excess_at_cost_stress": True,
                     "require_forward_plain_selection": True,
+                    "require_seed_replicates": True,
                     **request,
                 }
             ).to_record()

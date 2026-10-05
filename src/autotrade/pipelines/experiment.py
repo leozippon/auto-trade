@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -45,6 +46,7 @@ from autotrade.environment.replay.engine import BacktestError
 from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR, window_activity
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
 from autotrade.environment.runtime import agent_trace_path, chmod_tree, utc_now_iso
+from autotrade.environment.step_tree import node_handle
 from autotrade.environment.strategy import NLQuery
 from autotrade.environment.strategy_loader import validate_strategy_package
 
@@ -91,7 +93,12 @@ from .ledger import (
     research_records,
 )
 from .pit_views_seed import FORWARD_PHASE, RESEARCH_PHASE
-from .session_resume import load_recorded_steps, resume_state, revision_fingerprint
+from .session_resume import (
+    REVISIONS_DIR,
+    load_recorded_steps,
+    resume_state,
+    revision_fingerprint,
+)
 from .skills import (
     ExperimentSkillsStore,
     SkillsPublication,
@@ -109,6 +116,7 @@ from .verdict import (
     heldout_slice,
     information_ratio_bar,
     neutralized_statistics,
+    seed_replicate_slice,
     trial_correlation,
     trial_family_statistics,
 )
@@ -384,13 +392,18 @@ class RollingExperimentPipeline:
             frozen: dict[str, object] | None = None
             arm_end: dict[str, object] | None = None
             if session.outcome == "freeze":
-                nominee = next(
-                    (row for row in step_rows if row["step_id"] == session.node_id), None
-                )
-                if nominee is None:
+                by_step = {str(row["step_id"]): row for row in step_rows}
+                missing = [
+                    step_id
+                    for step_id in (session.node_id, *session.seed_replicates)
+                    if step_id not in by_step
+                ]
+                if missing:
                     raise RuntimeError(
-                        f"the nominated node {session.node_id!r} is not a Step of this session"
+                        f"the nominated node or seed replicate {missing[0]!r} is not a "
+                        "Step of this session"
                     )
+                nominee = by_step[str(session.node_id)]
                 gate = freeze_gate_for(
                     records,
                     step_rows,
@@ -402,14 +415,17 @@ class RollingExperimentPipeline:
                         (slot.start, slot.end)
                         for slot in self.config.geometry.research_years
                     ],
+                    seed_replicates=[by_step[step_id] for step_id in session.seed_replicates],
                 )
                 if gate["passed"]:
                     _publish_progress(progress, "freezing", run_id=run_id)
+                    steps = {step.step_id: step for step in session.steps}
                     frozen = self._freeze(
-                        next(step for step in session.steps if step.step_id == nominee["step_id"]),
+                        steps[str(nominee["step_id"])],
                         gate=gate,
                         run_id=run_id,
                         null_controls=session.null_controls,
+                        seed_replicates=[steps[step_id] for step_id in session.seed_replicates],
                     )
                     frozen_id = str(frozen["artifact_id"])
                 else:
@@ -514,21 +530,53 @@ class RollingExperimentPipeline:
         gate: Mapping[str, object],
         run_id: str,
         null_controls: Mapping[str, Mapping[str, object]],
+        seed_replicates: Sequence[StepResult] = (),
     ) -> dict[str, object]:
-        """Freeze the nominee's immutable revision and state what it was frozen on."""
+        """Freeze the nominee's immutable revision and state what it was frozen on.
 
-        artifact_id = f"strategy_{RESEARCH_SESSION_KEY}_{uuid.uuid4().hex[:12]}"
-        stored = self.artifacts.freeze_revision(
-            nominee.revision_id,
-            artifact_id=artifact_id,
-            experiment_id=self.config.experiment_id,
-            epoch_id=RESEARCH_STAGE,
-            fold_id=RESEARCH_SESSION_KEY,
-            run_id=run_id,
-            step_id=nominee.step_id,
-        )
-        output = Path(stored.path)
-        models = Path(stored.model_path) if stored.model_path is not None else None
+        The seed replicates the gate accepted are frozen beside it, each as an
+        artifact of its own, so the forward stage replays bytes no later
+        change can reach; ``seed_replicates`` in the block names them, absent
+        when there are none.
+        """
+
+        def freeze(step: StepResult) -> tuple[str, Path, Path | None]:
+            artifact_id = f"strategy_{RESEARCH_SESSION_KEY}_{uuid.uuid4().hex[:12]}"
+            stored = self.artifacts.freeze_revision(
+                step.revision_id,
+                artifact_id=artifact_id,
+                experiment_id=self.config.experiment_id,
+                epoch_id=RESEARCH_STAGE,
+                fold_id=RESEARCH_SESSION_KEY,
+                run_id=run_id,
+                step_id=step.step_id,
+            )
+            models = Path(stored.model_path) if stored.model_path is not None else None
+            return artifact_id, Path(stored.path), models
+
+        artifact_id, output, models = freeze(nominee)
+        ratios = {
+            str(entry["step_id"]): entry.get("information_ratio")
+            for entry in (gate.get("seed_replicates") or {}).get("replicates") or ()  # type: ignore[union-attr]
+        }
+        replicates = []
+        for step in seed_replicates:
+            replicate_id, replicate_output, replicate_models = freeze(step)
+            replicates.append(
+                {
+                    "artifact_id": replicate_id,
+                    "output_path": str(replicate_output),
+                    "models_path": (
+                        str(replicate_models)
+                        if replicate_models is not None and replicate_models.is_dir()
+                        else None
+                    ),
+                    "source_step_id": step.step_id,
+                    "revision_id": step.revision_id,
+                    "research_result_ref": step.validation.result_ref,
+                    "information_ratio": ratios[step.step_id],
+                }
+            )
         forward = self.config.geometry.forward
         forward_days = sum(1 for day in self.trading_days if forward.start <= day <= forward.end)
         fit = validate_strategy_package(output / "main.py")
@@ -566,6 +614,7 @@ class RollingExperimentPipeline:
                 "fit": fit is not None,
                 "refit_period": fit.refit_period if fit is not None else None,
             },
+            **({"seed_replicates": replicates} if replicates else {}),
         }
 
     # ---- forward -------------------------------------------------------
@@ -581,6 +630,12 @@ class RollingExperimentPipeline:
         measured nothing and fails the attempt, which the caller retries from
         the forward start. Frozen trees that changed during the replay are
         recorded and fail closed.
+
+        The seed replicates the freeze registered are then replayed one after
+        another exactly as the book was (same span, warm-up, refits, Broker,
+        panel and style analysis) and judged with it (:meth:`_judge`). A
+        replicate whose replay fails for any reason, its own strategy's
+        included, fails the attempt: the seed mean is never read without it.
         """
 
         records = self.ledger.read()
@@ -590,7 +645,12 @@ class RollingExperimentPipeline:
             raise RuntimeError("the forward replay needs a frozen artifact")
         if forward_record(records) is not None:
             raise RuntimeError("the arm's forward verdict is already recorded")
-        artifact = self._frozen_artifact(frozen_row)
+        block: Mapping[str, object] = frozen_row["frozen"]  # type: ignore[assignment]
+        artifact = self._frozen_artifact(block)
+        replicates = [
+            self._frozen_artifact(item)
+            for item in block.get("seed_replicates") or ()  # type: ignore[union-attr]
+        ]
         forward = self.config.geometry.forward
         heldout = self.config.geometry.heldout(self.trading_days)
         context = dict(session_context or {})
@@ -618,16 +678,6 @@ class RollingExperimentPipeline:
                 snapshot=forward_bundle,
                 continuation=(heldout_bundle.replay_ref,),
             )
-            _publish_progress(progress, "forward_replay", run_id=run_id)
-            result, error, changed, restore_error = _run_guarded_evaluation(
-                self.evaluator,
-                span.request(
-                    _frozen_revision(artifact),
-                    schedule=self.config.schedule,
-                    broker_profile=self.config.broker_profile,
-                ),
-                artifact,
-            )
             base = {
                 "record_type": "forward",
                 **{key: attempt[key] for key in ("experiment_id", "epoch_id", "fold_id", "run_id")},
@@ -647,27 +697,48 @@ class RollingExperimentPipeline:
                     "heldout_decision": heldout_bundle.snapshot_id,
                 },
             }
-            if changed:
-                self.ledger.append(
-                    {
-                        **base,
-                        "status": "integrity_failure",
-                        "state_changed_during_test": True,
-                        "result_ref": result.result_ref if result is not None else None,
-                        "error": _error_text(error) if error is not None else None,
-                    }
+
+            def replay(
+                item: FrozenArtifact,
+            ) -> tuple[EvaluationResult | None, BaseException | None]:
+                """One guarded replay of a frozen artifact over the span."""
+
+                nonlocal wrote_ledger_record
+                result, error, changed, restore_error = _run_guarded_evaluation(
+                    self.evaluator,
+                    span.request(
+                        _frozen_revision(item),
+                        schedule=self.config.schedule,
+                        broker_profile=self.config.broker_profile,
+                    ),
+                    item,
                 )
-                # The integrity row is this run's record: the fail-fast below
-                # must not also log a failed attempt.
-                wrote_ledger_record = True
-                if restore_error is not None:
-                    raise FrozenArtifactRestoreFailed(
-                        "strategy or model artifacts changed during the forward replay "
-                        f"and restoring the pre-evaluation trees failed: {restore_error}"
-                    ) from restore_error
-                raise FrozenArtifactMutated(
-                    "strategy or model artifacts changed during the forward replay"
-                ) from error
+                if changed:
+                    self.ledger.append(
+                        {
+                            **base,
+                            "artifact_id": item.artifact_id,
+                            "status": "integrity_failure",
+                            "state_changed_during_test": True,
+                            "result_ref": result.result_ref if result is not None else None,
+                            "error": _error_text(error) if error is not None else None,
+                        }
+                    )
+                    # The integrity row is this run's record: the fail-fast
+                    # below must not also log a failed attempt.
+                    wrote_ledger_record = True
+                    if restore_error is not None:
+                        raise FrozenArtifactRestoreFailed(
+                            "strategy or model artifacts changed during the forward replay "
+                            f"and restoring the pre-evaluation trees failed: {restore_error}"
+                        ) from restore_error
+                    raise FrozenArtifactMutated(
+                        "strategy or model artifacts changed during the forward replay"
+                    ) from error
+                return result, error
+
+            _publish_progress(progress, "forward_replay", run_id=run_id)
+            result, error = replay(artifact)
             if error is not None:
                 if not raised_by_strategy(error):
                     raise error
@@ -688,10 +759,33 @@ class RollingExperimentPipeline:
                 }
             else:
                 assert result is not None
+                replays: list[tuple[FrozenArtifact, EvaluationResult]] = []
+                for index, item in enumerate(replicates, start=1):
+                    _publish_progress(
+                        progress,
+                        "forward_replay",
+                        run_id=run_id,
+                        seed_replicate=f"{index}/{len(replicates)}",
+                    )
+                    replicate_result, replicate_error = replay(item)
+                    if replicate_error is not None:
+                        raise RuntimeError(
+                            f"seed replicate {item.source_step_id} ({item.artifact_id}) did "
+                            "not complete its forward replay, and the seed mean is never "
+                            f"read without it: {_error_text(replicate_error)}"
+                        ) from replicate_error
+                    assert replicate_result is not None
+                    replays.append((item, replicate_result))
                 _publish_progress(progress, "verdict", run_id=run_id)
                 record = {
                     **base,
-                    **self._judge(result, artifact, forward=forward, heldout=heldout),
+                    **self._judge(
+                        result,
+                        artifact,
+                        forward=forward,
+                        heldout=heldout,
+                        seed_replicates=replays,
+                    ),
                 }
             self.ledger.append(record)
             wrote_ledger_record = True
@@ -726,18 +820,42 @@ class RollingExperimentPipeline:
         *,
         forward: Slot,
         heldout: Slot,
+        seed_replicates: Sequence[tuple[FrozenArtifact, EvaluationResult]] = (),
     ) -> dict[str, object]:
         """The two slices of one completed replay and the verdict on them.
 
         A slice that cannot be measured raises ``ValueError``, which fails the
         attempt: a verdict is never read off a number that was not measured.
+        Each seed replicate's completed replay is read over the same two
+        slices (``verdict.seed_replicate_slice``, named by its artifact and
+        source Step) and handed to them: ``slices.<name>.seed_replicates`` and
+        ``slices.<name>.seed_mean`` carry its readings and the mean with the
+        book, and the record's ``seed_replicates`` its result and refits.
         """
 
-        result_path = Path(result.result_ref)
-        replay = json.loads(result_path.read_text(encoding="utf-8"))
-        analysis = json.loads(
-            (result_path.parent / STYLE_ARTIFACT_NAME).read_text(encoding="utf-8")
-        )
+        replay, analysis = _replay_and_analysis(result)
+        replicate_slices: dict[str, list[dict[str, object]]] = {"forward": [], "heldout": []}
+        replicate_rows: list[dict[str, object]] = []
+        for item, item_result in seed_replicates:
+            item_replay, item_analysis = _replay_and_analysis(item_result)
+            identity = {"artifact_id": item.artifact_id, "source_step_id": item.source_step_id}
+            for name, slot in (("forward", forward), ("heldout", heldout)):
+                replicate_slices[name].append(
+                    {
+                        **identity,
+                        **seed_replicate_slice(item_analysis, start=slot.start, end=slot.end),
+                    }
+                )
+            replicate_rows.append(
+                {
+                    **identity,
+                    "revision_id": item.revision_id,
+                    "result_ref": item_result.result_ref,
+                    "refits_executed": _refits_executed(
+                        item, item_replay, forward=forward, heldout=heldout
+                    ),
+                }
+            )
         curve = replay["equity_curve"]
         executions = replay["executions"]
         acceptance = self.config.acceptance
@@ -757,6 +875,7 @@ class RollingExperimentPipeline:
             turnover=float(forward_activity["turnover"]),  # type: ignore[arg-type]
             round_trips=int(forward_activity["round_trips"]),  # type: ignore[arg-type]
             mean_gross=float(forward_activity["mean_gross"]),  # type: ignore[arg-type]
+            seed_replicates=replicate_slices["forward"],
         )
         heldout_block = heldout_slice(
             analysis,
@@ -765,11 +884,8 @@ class RollingExperimentPipeline:
             forward_tracking_error=float(forward_block["tracking_error"]),  # type: ignore[arg-type]
             **acceptance.heldout_slice_kwargs(),
             mean_gross=float(heldout_activity["mean_gross"]),  # type: ignore[arg-type]
+            seed_replicates=replicate_slices["heldout"],
         )
-        fit = validate_strategy_package(artifact.path / "main.py")
-        inference_days = [
-            str(value)[:10].replace("-", "") for value in replay.get("inference_dates") or ()
-        ]
         return {
             "status": "ok",
             "error": None,
@@ -778,10 +894,10 @@ class RollingExperimentPipeline:
                 "forward": {**forward_block, "activity": forward_activity},
                 "heldout": {**heldout_block, "activity": heldout_activity},
             },
-            "refits_executed": {
-                "forward": _fits_in(fit, inference_days, forward),
-                "heldout": _fits_in(fit, inference_days, heldout),
-            },
+            "refits_executed": _refits_executed(
+                artifact, replay, forward=forward, heldout=heldout
+            ),
+            **({"seed_replicates": replicate_rows} if replicate_rows else {}),
             # Diagnostic only: where the forward slice's excess sits among
             # random-name replays of the same skeleton.
             "null_control": self._null_control(
@@ -794,10 +910,10 @@ class RollingExperimentPipeline:
             "verdict": graduation_verdict(forward=forward_block, heldout=heldout_block),
         }
 
-    def _frozen_artifact(self, frozen_row: Mapping[str, object]) -> FrozenArtifact:
-        """The frozen artifact the ledger names, validated by its store."""
+    def _frozen_artifact(self, block: object) -> FrozenArtifact:
+        """The frozen artifact a frozen block (or one of its seed replicates)
+        names, validated by its store."""
 
-        block = frozen_row["frozen"]
         if not isinstance(block, Mapping):
             raise TypeError("frozen record carries no frozen block")
         stored = self.artifacts.frozen(
@@ -1025,6 +1141,7 @@ def freeze_gate_for(
     hard_reasons: Sequence[str] = (),
     acceptance: AcceptanceRules | None = None,
     years: Sequence[tuple[str, str]] = (),
+    seed_replicates: Sequence[Mapping[str, object]] = (),
 ) -> dict[str, object]:
     """The freeze gate of one nominated Step against the whole arm (PL1 §4.1).
 
@@ -1038,9 +1155,15 @@ def freeze_gate_for(
     registered as a control, fails a hard nomination rule, or whose statistics
     cannot be measured does not pass. ``acceptance`` and ``years`` are the
     arm's rules and research years; the console leaves them out when it only
-    reads the deflated Sharpe of an arm's best node.
+    reads the deflated Sharpe of an arm's best node. Where the rules hold
+    ``require_seed_replicates`` the measured gate also judges the nominee's
+    ``seed_replicates`` (rows of this session; :func:`_seed_replicate_gate`);
+    naming any under rules that do not hold it is refused.
     """
 
+    holds_seeds = acceptance is not None and acceptance.require_seed_replicates
+    if seed_replicates and not holds_seeds:
+        raise ValueError("this arm's acceptance rules hold no seed-replicate condition")
     reasons = list(hard_reasons)
     if nominee.get("span") != FULL_SPAN:
         reasons.append("freeze_needs_full_span_validation")
@@ -1078,7 +1201,166 @@ def freeze_gate_for(
         "undeclared_offline_validations": family["undeclared_offline_validations"],
         "lineage_arms": lineage_arms,
     }
+    if holds_seeds:
+        gate = _seed_replicate_gate(
+            gate,
+            fingerprinted(experiment_dir, [nominee])[0],
+            fingerprinted(experiment_dir, seed_replicates),
+            experiment_dir=experiment_dir,
+        )
     return gate
+
+
+# The one line a seed replicate changes: an integer assignment, with an
+# optional ``int`` annotation and a trailing comment, to a seed name --
+# ``SEED``, ``SEED_BASE`` or one ending in ``_SEED`` or ``_SEED_BASE``, any
+# case (``SEED_BASE = 2000``). A count of seeds such as ``SEEDS_PER_HEAD``
+# changes the strategy, not its draw, and is not one.
+_SEED_LINE = re.compile(r"\s*([A-Za-z_]\w*)\s*(?::\s*int\s*)?=\s*([+-]?\d+)\s*(?:#.*)?")
+_SEED_NAME = re.compile(r"(?:\w*_)?seed(?:_base)?", re.IGNORECASE)
+
+
+def seed_change(experiment_dir: str | Path, nominee_revision: str, replicate_revision: str) -> str:
+    """The one seed line by which a replicate's revision differs from the nominee's.
+
+    Read off the two revisions' manifests (every ``output/`` and ``models/``
+    file by SHA-256): exactly one file may differ, a ``.py`` file of the
+    strategy package, and in exactly one line, which on both sides assigns an
+    integer to the same seed name (``_SEED_NAME``), with two
+    different values. That is how a strategy changes its training seed and
+    nothing else -- the packs set it in one knob line -- and it is checked
+    on bytes, so a replicate cannot differ in anything a seed does not
+    explain. Returns ``"<path>: <line>"``; ``ValueError`` says what else
+    differs.
+    """
+
+    root = Path(experiment_dir) / REVISIONS_DIR
+    nominee = _revision_files(root / nominee_revision)
+    replicate = _revision_files(root / replicate_revision)
+    changed = sorted(
+        path for path in {*nominee, *replicate} if nominee.get(path) != replicate.get(path)
+    )
+    if not changed:
+        raise ValueError("holds the nominee's own bytes")
+    path = changed[0]
+    if len(changed) > 1 or path not in nominee or path not in replicate:
+        raise ValueError(
+            f"differs from the nominee in {len(changed)} file(s) "
+            f"({', '.join(changed[:5])}), not in one seed line"
+        )
+    if not (path.startswith("output/") and path.endswith(".py")):
+        raise ValueError(f"differs from the nominee in {path}, which is not strategy code")
+    before = (root / nominee_revision / path).read_text(encoding="utf-8").splitlines()
+    after = (root / replicate_revision / path).read_text(encoding="utf-8").splitlines()
+    lines = [index for index, pair in enumerate(zip(before, after)) if pair[0] != pair[1]]
+    if len(before) != len(after) or len(lines) != 1:
+        raise ValueError(
+            f"differs from the nominee in more than one line of {path}, not in one seed line"
+        )
+    line = lines[0]
+    old, new = _SEED_LINE.fullmatch(before[line]), _SEED_LINE.fullmatch(after[line])
+    if (
+        old is None
+        or new is None
+        or old[1] != new[1]
+        or _SEED_NAME.fullmatch(old[1]) is None
+        or int(old[2]) == int(new[2])
+    ):
+        raise ValueError(
+            f"changes line {line + 1} of {path} to {after[line].strip()!r}, which does not "
+            "give a seed name (SEED, SEED_BASE, or one ending in _SEED or _SEED_BASE) "
+            "another integer value"
+        )
+    return f"{path.removeprefix('output/')}: {after[line].strip()}"
+
+
+def _revision_files(directory: Path) -> dict[str, str]:
+    """``path -> sha256`` of every file one recorded revision holds."""
+
+    manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+    return {str(entry["path"]): str(entry["sha256"]) for entry in manifest["files"]}
+
+
+def _seed_replicate_gate(
+    gate: Mapping[str, object],
+    nominee: Mapping[str, object],
+    replicates: Sequence[Mapping[str, object]],
+    *,
+    experiment_dir: str | Path,
+) -> dict[str, object]:
+    """``gate`` with the seed-replicate conditions of an arm that holds them.
+
+    A strategy that trains a model (its ``main.py`` defines ``fit``, the
+    frozen block's ``fit_plan``) is judged on its training seeds together. A
+    seed replicate is a full-span, non-control row of the session whose bytes
+    are the nominee's but for one seed line (:func:`seed_change`) and differ
+    from every other registered row's, with a measured IR on the nominee's
+    graded series. Refused: a named replicate that is not one
+    (``freeze_seed_replicate_invalid``), a nominee that trains a model and
+    names none (``freeze_too_few_seed_replicates``), and a mean active IR over
+    the nominee and its replicates below the nominee's own
+    ``information_ratio_bar``
+    (``freeze_seed_mean_information_ratio_below_threshold``). Every other
+    condition stays the nominee's own. The block ``seed_replicates`` records
+    what was read, a ``problem`` per refused replicate, and the thresholds
+    name ``require_seed_replicates`` whether or not the nominee had anything
+    to replicate: the stamp says the arm holds the rule.
+    """
+
+    main = Path(experiment_dir) / REVISIONS_DIR / str(nominee["revision_id"]) / "output" / "main.py"
+    trains = validate_strategy_package(main) is not None
+    seen = {str(nominee["fingerprint"]): "the nominee"}
+    entries: list[dict[str, object]] = []
+    for row in replicates:
+        step_id = str(row["step_id"])
+        neutral = row.get("neutralized")
+        entry: dict[str, object] = {"step_id": step_id}
+        try:
+            if step_id == nominee["step_id"]:
+                raise ValueError("is the nominee itself")
+            if row.get("span") != FULL_SPAN:
+                raise ValueError(f"replayed span {row.get('span')}, not {FULL_SPAN}")
+            if row.get("control") is True:
+                raise ValueError("is registered as a control")
+            fingerprint = str(row["fingerprint"])
+            if fingerprint in seen:
+                raise ValueError(f"holds the same bytes as {seen[fingerprint]}")
+            seen[fingerprint] = node_handle(step_id)
+            if not _finite_ir(neutral) or neutral.get("series") != gate.get("series"):  # type: ignore[union-attr]
+                raise ValueError(f"has no measured {gate.get('series')} information ratio")
+            entry["seed_line"] = seed_change(
+                experiment_dir, str(nominee["revision_id"]), str(row["revision_id"])
+            )
+            entry["information_ratio"] = float(neutral["information_ratio"])  # type: ignore[index]
+        except ValueError as exc:
+            entry["problem"] = str(exc)
+        entries.append(entry)
+    ratios = [gate.get("information_ratio"), *(entry.get("information_ratio") for entry in entries)]
+    measured = all(
+        isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+        for value in ratios
+    )
+    mean = sum(ratios) / len(ratios) if entries and measured else None  # type: ignore[arg-type]
+    bar = gate["deflated_sharpe"].get("information_ratio_bar")  # type: ignore[union-attr]
+    reasons: list[str] = []
+    if any("problem" in entry for entry in entries):
+        reasons.append("freeze_seed_replicate_invalid")
+    elif trains and not entries:
+        reasons.append("freeze_too_few_seed_replicates")
+    elif entries and (mean is None or not isinstance(bar, (int, float)) or not mean >= bar):
+        reasons.append("freeze_seed_mean_information_ratio_below_threshold")
+    return {
+        **gate,
+        "passed": bool(gate["passed"]) and not reasons,
+        "reasons": [*gate["reasons"], *reasons],  # type: ignore[misc]
+        "seed_replicates": {
+            "trains_a_model": trains,
+            "replicates": entries,
+            "mean_information_ratio": mean,
+            "information_ratio_bar": bar,
+        },
+        "thresholds": {**gate["thresholds"], "require_seed_replicates": True},  # type: ignore[dict-item]
+    }
 
 
 def full_span_bar(
@@ -1258,6 +1540,26 @@ def _finite_ir(block: object) -> bool:
     )
 
 
+def _replay_and_analysis(result: EvaluationResult) -> tuple[dict[str, object], dict[str, object]]:
+    """One completed replay's result and the style sidecar beside it."""
+
+    path = Path(result.result_ref)
+    return (
+        json.loads(path.read_text(encoding="utf-8")),
+        json.loads((path.parent / STYLE_ARTIFACT_NAME).read_text(encoding="utf-8")),
+    )
+
+
+def _refits_executed(
+    artifact: FrozenArtifact, replay: Mapping[str, object], *, forward: Slot, heldout: Slot
+) -> dict[str, int]:
+    """How many ``fit`` calls of one forward replay fell in each slice."""
+
+    fit = validate_strategy_package(artifact.path / "main.py")
+    days = [str(value)[:10].replace("-", "") for value in replay.get("inference_dates") or ()]  # type: ignore[union-attr]
+    return {"forward": _fits_in(fit, days, forward), "heldout": _fits_in(fit, days, heldout)}
+
+
 def _fits_in(fit, inference_days: Sequence[str], slot: Slot) -> int:
     """How many ``fit`` calls of the replay fell inside ``slot``."""
 
@@ -1293,13 +1595,18 @@ def _keep_frozen_artifact_ids(
     records: Sequence[Mapping[str, object]],
     extra_id: str | None = None,
 ) -> tuple[str, ...]:
-    """The arm's frozen artifact, any artifact an integrity row names, and the
-    freeze now being recorded."""
+    """The arm's frozen artifact and its seed replicates, any artifact an
+    integrity row names, and the freeze now being recorded."""
 
     keep = {str(extra_id)} if extra_id else set()
     frozen = frozen_record(records)
     if frozen is not None:
-        keep.add(str(frozen["frozen"]["artifact_id"]))  # type: ignore[index]
+        block: Mapping[str, object] = frozen["frozen"]  # type: ignore[assignment]
+        keep.add(str(block["artifact_id"]))
+        keep.update(
+            str(item["artifact_id"])
+            for item in block.get("seed_replicates") or ()  # type: ignore[union-attr]
+        )
     for record in records:
         if is_frozen_artifact_mutation(record) and record.get("artifact_id"):
             keep.add(str(record["artifact_id"]))
@@ -1472,6 +1779,7 @@ __all__ = [
     "null_control_seed",
     "recorded_lineage",
     "research_step_record",
+    "seed_change",
     "trial_family",
     "trial_fields",
 ]

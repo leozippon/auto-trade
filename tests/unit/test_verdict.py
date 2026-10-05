@@ -1018,3 +1018,65 @@ def test_the_holders_readings_are_the_stored_series_compounded():
         f"{FORWARD_START}..{FORWARD_END}: book {strategy * 100:+.1f}% against benchmark {benchmark * 100:+.1f}%"
     )
     assert f"plain selection {(strategy - panel) * 100:+.1f} points" in lines["forward"]
+
+
+def test_the_seed_mean_reads_every_seed_and_an_unmeasured_one_never_passes():
+    """F9: with seed replicates the forward slice carries each one's readings
+    and their mean with the book, and refuses a mean plain selection that is
+    not positive; a replicate whose plain selection cannot be read leaves the
+    mean unread rather than dropped, which never passes. The thresholds name
+    the condition where the arm's rule holds it, replicates or none, and
+    never otherwise; replicates under rules without it are refused. Held-out
+    reports the same, unjudged."""
+
+    rng = np.random.default_rng(121)
+    span = FORWARD_DAYS + HELDOUT_DAYS
+    book = _rally_book(rng, alpha=0.40, active_beta=0.0, days=span)
+    winner = _rally_book(rng, alpha=0.40, active_beta=0.0, days=span)
+    loser = _rally_book(rng, alpha=-1.20, active_beta=0.0, days=span)
+
+    def replicate(analysis, start=FORWARD_START, end=FORWARD_END):
+        return verdict.seed_replicate_slice(analysis, start=start, end=end)
+
+    alone = _forward(book)
+    assert "seed_replicates" not in alone and "seed_mean" not in alone
+    assert "require_seed_replicates" not in alone["thresholds"]
+    nothing = _forward(book, require_seed_replicates=True)
+    assert nothing["thresholds"]["require_seed_replicates"] is True
+    assert {key: value for key, value in nothing.items() if key != "thresholds"} == {
+        key: value for key, value in alone.items() if key != "thresholds"
+    }
+    with pytest.raises(ValueError, match="no seed condition"):
+        _forward(book, seed_replicates=[replicate(winner)])
+
+    def judged(*replicates):
+        return _forward(book, require_seed_replicates=True, seed_replicates=list(replicates))
+
+    held = judged(replicate(winner))
+    assert held["reasons"] == [] and held["thresholds"]["require_seed_replicates"] is True
+    assert held["seed_mean"]["raw_readings"]["plain_selection"] == pytest.approx(
+        (alone["raw_readings"]["plain_selection"] + replicate(winner)["raw_readings"]["plain_selection"]) / 2
+    )
+    sunk = judged(replicate(loser))
+    assert alone["raw_readings"]["plain_selection"] > 0
+    assert sunk["seed_mean"]["raw_readings"]["plain_selection"] < 0
+    assert sunk["reasons"] == ["forward_seed_mean_plain_selection_not_positive"]
+    unread = judged(replicate({**winner, "panel_daily": []}))
+    assert unread["seed_mean"]["raw_readings"]["plain_selection"] is None
+    assert unread["reasons"] == ["forward_seed_mean_plain_selection_not_positive"]
+
+    heldout = verdict.heldout_slice(
+        book,
+        start=HELDOUT_START,
+        end=HELDOUT_END,
+        forward_tracking_error=0.05,
+        max_drawdown=1.0,
+        active_max_drawdown=1.0,
+        mean_gross=1.0,
+        seed_replicates=[replicate(loser, HELDOUT_START, HELDOUT_END)],
+    )
+    assert heldout["seed_mean"]["members"] == 2
+    assert not any("seed" in reason for reason in heldout["reasons"])
+    assert verdict.graduation_verdict(forward=sunk, heldout=heldout)["reasons"][0] == (
+        "forward_seed_mean_plain_selection_not_positive"
+    )

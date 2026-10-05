@@ -190,6 +190,15 @@ class AcceptanceRules:
     # zero). Off here for the same reason as the raw freeze condition; the
     # creation defaults stamp it on.
     require_forward_plain_selection: bool = False
+    # Seed replicates: a nominee whose strategy trains a model is judged on
+    # its training seeds together. At the freeze it names at least one seed
+    # replicate (another full-span Validation of the session, the same bytes
+    # but for one integer seed line) and the mean active IR over it and its
+    # replicates must reach its own bar (``experiment.freeze_gate_for``);
+    # forward, the mean plain selection over all of them must be positive
+    # (``verdict.forward_slice``). Off here for the same reason as the two
+    # conditions above; the creation defaults stamp it on.
+    require_seed_replicates: bool = False
     # Forward and Held-out bars. Same compatibility default as above.
     forward_confidence: float = verdict.FORWARD_CONFIDENCE
     recency_months: int = verdict.RECENCY_MONTHS
@@ -228,7 +237,11 @@ class AcceptanceRules:
         )
         if self.min_full_span_validations < 1:
             raise ValueError("min_full_span_validations must be an integer >= 1")
-        for name in ("require_raw_excess_at_cost_stress", "require_forward_plain_selection"):
+        for name in (
+            "require_raw_excess_at_cost_stress",
+            "require_forward_plain_selection",
+            "require_seed_replicates",
+        ):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f"{name} must be a boolean")
         object.__setattr__(
@@ -277,6 +290,7 @@ class AcceptanceRules:
             "min_full_span_validations": self.min_full_span_validations,
             "require_raw_excess_at_cost_stress": self.require_raw_excess_at_cost_stress,
             "require_forward_plain_selection": self.require_forward_plain_selection,
+            "require_seed_replicates": self.require_seed_replicates,
             "forward_confidence": self.forward_confidence,
             "recency_months": self.recency_months,
             "min_mean_gross": self.min_mean_gross,
@@ -408,6 +422,27 @@ class AcceptanceRules:
                     if self.require_raw_excess_at_cost_stress
                     else {}
                 ),
+                **(
+                    {
+                        "seed_replicates": (
+                            "a nominee whose main.py defines fit (it trains a model) "
+                            "names at least one seed replicate in finish_session's "
+                            "seed_replicates: another complete full-span Validation of "
+                            "this session, registered as a candidate (not a control), "
+                            "whose strategy is the nominee's bytes with exactly one line "
+                            "changed, an integer assignment to a seed name (SEED, "
+                            "SEED_BASE, or one ending in _SEED or _SEED_BASE; SEED_BASE "
+                            "= 2000), and whose bytes differ from every other "
+                            "registered one; the mean active information ratio over the "
+                            "nominee and its replicates must be >= the nominee's "
+                            "information_ratio_bar, and every other condition here is "
+                            "judged on the nominee itself. A nominee without fit needs "
+                            "none; replicates it names are held to the same rules"
+                        )
+                    }
+                    if self.require_seed_replicates
+                    else {}
+                ),
                 "tracking_mandate": mandate,
                 "full_span_validations": (
                     f">= {self.min_full_span_validations} in the arm, the "
@@ -457,6 +492,21 @@ class AcceptanceRules:
                         if self.require_forward_plain_selection
                         else {}
                     ),
+                    **(
+                        {
+                            "seed_mean_plain_selection": (
+                                "> 0 where the freeze registered seed replicates: each "
+                                "replicate is replayed exactly like the frozen book over "
+                                "the forward months and Held-out, and the mean of "
+                                "raw_readings.plain_selection over the frozen book and "
+                                "its replicates over the forward months must be "
+                                "positive; the conditions above are judged on the "
+                                "frozen book itself"
+                            )
+                        }
+                        if self.require_seed_replicates
+                        else {}
+                    ),
                     "strategy_error": "none",
                     "minimum_detectable_excess": (
                         "about 2.12 x research active tracking error / sqrt(years of "
@@ -504,6 +554,7 @@ class AcceptanceRules:
             "min_mean_gross": self.min_mean_gross,
             "min_round_trips_per_month": self.min_round_trips_per_month,
             "require_forward_plain_selection": self.require_forward_plain_selection,
+            "require_seed_replicates": self.require_seed_replicates,
         }
 
     def heldout_slice_kwargs(self) -> dict[str, object]:
@@ -1107,8 +1158,10 @@ class ResearchSessionResult:
     # Keyword-only from here: independent optional fields, so a new one can
     # never land in an older field's positional slot.
     _: KW_ONLY
-    # ``freeze``: the nominated Step.
+    # ``freeze``: the nominated Step, and the Steps it registered as its seed
+    # replicates (``AcceptanceRules.require_seed_replicates``).
     node_id: str | None = None
+    seed_replicates: tuple[str, ...] = ()
     # The Agent's own account of its outcome.
     reason: str = ""
     finish_reason: str = ""

@@ -630,6 +630,62 @@ def slice_readings(
     }
 
 
+# The holder's readings a slice carries (:func:`holder_readings`), in order.
+_HOLDER_READINGS = (
+    "strategy_return",
+    "benchmark_return",
+    "panel_return",
+    "raw_excess",
+    "plain_selection",
+)
+
+
+def seed_replicate_slice(
+    analysis: Mapping[str, object], *, start: str, end: str
+) -> dict[str, object]:
+    """One seed replicate of the frozen book over one slice, unjudged.
+
+    A replicate is the book's strategy on another training seed, replayed
+    exactly as the book is. Its slice carries what the book's own slice
+    reads -- the graded series' neutralised statistics and
+    :func:`slice_readings` -- and no condition: forward judges the seed mean
+    (:func:`seed_mean`), never a replicate on its own.
+    """
+
+    start, end = _span(start, end)
+    return {
+        "start": start,
+        "end": end,
+        **neutralized_statistics(analysis, start=start, end=end),
+        **slice_readings(analysis, start=start, end=end),
+    }
+
+
+def seed_mean(blocks: Sequence[Mapping[str, object]]) -> dict[str, object]:
+    """The mean over the frozen book's slice and its replicates' slices.
+
+    Each holder reading (``raw_readings``) and ``plain_excess`` averaged over
+    the members, ``None`` where any member lacks it: a seed the replay could
+    not read is never dropped from the mean. ``members`` counts the book and
+    its replicates.
+    """
+
+    def mean(values: Sequence[object]) -> float | None:
+        if any(not isinstance(value, (int, float)) or isinstance(value, bool) for value in values):
+            return None
+        return float(sum(values)) / len(values)  # type: ignore[arg-type]
+
+    raw = [block.get("raw_readings") or {} for block in blocks]
+    return {
+        "members": len(blocks),
+        "plain_excess": mean([block.get("plain_excess") for block in blocks]),
+        "raw_readings": {
+            name: mean([reading.get(name) for reading in raw])  # type: ignore[union-attr]
+            for name in _HOLDER_READINGS
+        },
+    }
+
+
 def _count(value: object, name: str, minimum: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
         raise ValueError(f"{name} must be an integer >= {minimum}, got {value!r}")
@@ -901,8 +957,10 @@ def forward_slice(
     min_mean_gross: float = MIN_MEAN_GROSS,
     min_round_trips_per_month: float = MIN_ROUND_TRIPS_PER_MONTH,
     require_forward_plain_selection: bool = False,
+    require_seed_replicates: bool = False,
+    seed_replicates: Sequence[Mapping[str, object]] = (),
 ) -> dict[str, object]:
-    """Statistics and failed conditions F2–F8 of the forward slice (PL1 §4.2).
+    """Statistics and failed conditions F2–F9 of the forward slice (PL1 §4.2).
 
     The lower bound, the recency window, the cost stress and
     ``active_max_drawdown`` are read off the graded series; ``max_drawdown``
@@ -913,7 +971,14 @@ def forward_slice(
     regression (``raw_readings.plain_selection`` above zero); only then do the
     thresholds name the condition, so a slice judged without it reads its
     conditions as before. The holder's readings (:func:`slice_readings`) ride
-    on every slice either way.
+    on every slice either way. ``require_seed_replicates`` (F9) is stamped
+    the same way, by the arm's rule alone: ``seed_replicates`` are the slices
+    (:func:`seed_replicate_slice`) of the seed replicates the freeze
+    registered, replayed like the book, and with any the slice carries them
+    and their :func:`seed_mean` with the book, whose ``plain_selection`` must
+    be above zero; a book frozen with nothing to replicate has no mean to
+    judge. Replicates under rules without the condition are refused. Every
+    other condition reads the book alone.
     ``start``/``end`` are the slice's calendar bounds; the recency window is
     the last ``recency_months`` calendar months ending in ``end``'s month.
     ``turnover`` (traded notional over the slice's opening equity),
@@ -991,12 +1056,22 @@ def forward_slice(
         selection = readings["raw_readings"]["plain_selection"]  # type: ignore[index]
         if selection is None or not selection > 0:
             reasons.append("forward_plain_selection_not_positive")
+    if seed_replicates and not require_seed_replicates:
+        raise ValueError("seed replicates were given under rules that hold no seed condition")
+    seeds: dict[str, object] = {}
+    if seed_replicates:
+        mean = seed_mean([readings, *seed_replicates])
+        seeds = {"seed_replicates": [dict(block) for block in seed_replicates], "seed_mean": mean}
+        selection = mean["raw_readings"]["plain_selection"]  # type: ignore[index]
+        if selection is None or not selection > 0:
+            reasons.append("forward_seed_mean_plain_selection_not_positive")
     return {
         "start": start,
         "end": end,
         "series": series,
         **statistics,
         **readings,
+        **seeds,
         "lower_bound": lower_bound,
         "recency_start": recency_start,
         "recency_neutralized_excess": recency_excess,
@@ -1027,6 +1102,7 @@ def forward_slice(
                 if require_forward_plain_selection
                 else {}
             ),
+            **({"require_seed_replicates": True} if require_seed_replicates else {}),
         },
     }
 
@@ -1042,6 +1118,7 @@ def heldout_slice(
     mean_gross: float,
     min_mean_gross: float = MIN_MEAN_GROSS,
     heldout_tolerance_z: float = HELDOUT_TOLERANCE_Z,
+    seed_replicates: Sequence[Mapping[str, object]] = (),
 ) -> dict[str, object]:
     """Statistics and failed conditions H2–H4 of the Held-out slice (PL1 §4.3).
 
@@ -1052,7 +1129,9 @@ def heldout_slice(
     ``min_mean_gross``. H1 (strategy error) is :func:`graduation_verdict`'s.
     The statistical bars default to the module constants so a caller that
     omits them judges as today. The holder's readings
-    (:func:`slice_readings`) are reported, not judged.
+    (:func:`slice_readings`) are reported, not judged; so are the seed
+    replicates' slices and their :func:`seed_mean` with the book, which the
+    slice carries as :func:`forward_slice` does.
     """
 
     start, end = _span(start, end)
@@ -1079,12 +1158,21 @@ def heldout_slice(
         reasons.append("heldout_active_drawdown_exceeded")
     if not mean_gross >= min_mean_gross:
         reasons.append("heldout_exposure_below_floor")
+    readings = slice_readings(analysis, start=start, end=end)
     return {
         "start": start,
         "end": end,
         "series": series,
         **statistics,
-        **slice_readings(analysis, start=start, end=end),
+        **readings,
+        **(
+            {
+                "seed_replicates": [dict(block) for block in seed_replicates],
+                "seed_mean": seed_mean([readings, *seed_replicates]),
+            }
+            if seed_replicates
+            else {}
+        ),
         "tolerance": tolerance,
         "max_drawdown": drawdown,
         "active_max_drawdown": active_drawdown,
@@ -1130,7 +1218,7 @@ def graduation_verdict(
     heldout: Mapping[str, Any] | None,
     strategy_error: Literal["forward", "heldout"] | None = None,
 ) -> dict[str, object]:
-    """``graduated`` iff F1–F8 and H1–H4 all hold, else ``discarded``.
+    """``graduated`` iff F1–F9 and H1–H4 all hold, else ``discarded``.
 
     ``strategy_error`` names the slice in which the strategy raised (F1/H1).
     A replay that raised produced no result, so it comes with no slice at all.

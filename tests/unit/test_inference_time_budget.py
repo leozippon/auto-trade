@@ -59,7 +59,7 @@ from .fixtures_sandbox import PassingModificationCheck
 from .test_batch_validate import _write_style_sidecar
 
 
-def _passing_gate(node_id: str) -> dict[str, object]:
+def _passing_gate(node_id: str, seed_replicates: tuple[str, ...] = ()) -> dict[str, object]:
     """A freeze gate every node passes: these tests are about the Runner."""
     return {"passed": True, "reasons": []}
 
@@ -887,7 +887,7 @@ def test_hard_finalization_labels_every_candidate_with_its_freeze_gate_verdict(
                 },
             )
 
-    def gate(node_id: str) -> dict[str, object]:
+    def gate(node_id: str, seed_replicates: tuple[str, ...] = ()) -> dict[str, object]:
         if node_id == strong_id:
             return {"passed": True, "reasons": []}
         return {"passed": False, "reasons": ["freeze_deflated_sharpe_below_threshold"]}

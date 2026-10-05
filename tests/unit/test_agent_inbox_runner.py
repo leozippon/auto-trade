@@ -66,7 +66,7 @@ class FakeInbox:
     def push(self, notice: FakeNotice) -> None:
         self.items.append(notice)
 
-def _passing_gate(node_id: str) -> dict[str, object]:
+def _passing_gate(node_id: str, seed_replicates: tuple[str, ...] = ()) -> dict[str, object]:
     """A freeze gate every node passes: these tests are about the Runner."""
     return {"passed": True, "reasons": []}
 

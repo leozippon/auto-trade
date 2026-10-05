@@ -176,6 +176,7 @@ _ALLOWED_PARAMS = {
     "min_full_span_validations",
     "require_raw_excess_at_cost_stress",
     "require_forward_plain_selection",
+    "require_seed_replicates",
     "forward_confidence",
     "recency_months",
     "min_mean_gross",

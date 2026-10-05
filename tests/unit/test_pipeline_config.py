@@ -460,7 +460,11 @@ class DefaultsDriftTest(unittest.TestCase):
             "beta_max",
         }
         for key, value in rules.to_record().items():
-            if key in ("require_raw_excess_at_cost_stress", "require_forward_plain_selection"):
+            if key in (
+                "require_raw_excess_at_cost_stress",
+                "require_forward_plain_selection",
+                "require_seed_replicates",
+            ):
                 # Deliberately apart, like ``dividend_tax``: off for an arm
                 # recorded without the key, on for every arm created now.
                 self.assertFalse(value)
@@ -595,6 +599,7 @@ class DefaultsDriftTest(unittest.TestCase):
                     "max_drawdown": 0.2,
                     "require_raw_excess_at_cost_stress": True,
                     "require_forward_plain_selection": True,
+                    "require_seed_replicates": True,
                     "strategy_path": "configs/agent_output_template/main.py",
                     "data_backend": "pit",
                     "raw_dir": "data/raw",
@@ -618,6 +623,7 @@ class DefaultsDriftTest(unittest.TestCase):
                 cost_stress_multiplier=3.0,
                 require_raw_excess_at_cost_stress=True,
                 require_forward_plain_selection=True,
+                require_seed_replicates=True,
             ),
         )
 

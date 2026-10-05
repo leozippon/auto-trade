@@ -344,6 +344,15 @@ def add_acceptance_arguments(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Forward verdict: the frozen book's own return must beat its zero-skill panel's, unregressed.",
     )
+    parser.add_argument(
+        "--require-seed-replicates",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Freeze and forward: a nominee that trains a model registers its seed replicates; "
+            "their mean active IR must reach its bar and their mean forward plain selection be positive."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

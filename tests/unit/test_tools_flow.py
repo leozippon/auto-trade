@@ -55,7 +55,7 @@ from .fixtures_sandbox import PassingModificationCheck
 
 RG_AVAILABLE = shutil.which("rg") is not None
 
-def _passing_gate(node_id: str) -> dict[str, object]:
+def _passing_gate(node_id: str, seed_replicates: tuple[str, ...] = ()) -> dict[str, object]:
     """A freeze gate every node passes: these tests are about the Runner."""
     return {"passed": True, "reasons": []}
 

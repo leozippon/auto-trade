@@ -21,12 +21,13 @@ from autotrade.environment.tools.base import (
 from autotrade.environment.tools.finish_session import (
     REASON_MAX_CHARS,
     REASON_MIN_CHARS,
+    SEED_REPLICATE_RULE,
     FinishSessionTool,
     SessionBudgetStatus,
 )
 from autotrade.environment.tools.step_rollback import StepRollbackTool
 from autotrade.pipelines.config import SESSION_OUTCOMES
-from autotrade.pipelines.research_session import _session_outcome
+from autotrade.pipelines.research_session import _seed_replicates, _session_outcome
 
 SESSION = "session_ref_ab"
 RUN = "run_x"
@@ -58,7 +59,7 @@ class _Gate:
     def __init__(self, passing: set[str]) -> None:
         self.passing = passing
 
-    def __call__(self, node_id: str) -> dict[str, object]:
+    def __call__(self, node_id: str, seed_replicates: tuple[str, ...] = ()) -> dict[str, object]:
         if node_id in self.passing:
             return {
                 "passed": True,
@@ -271,3 +272,52 @@ def test_an_early_freeze_must_say_why_while_another_batch_fits(tmp_path: Path):
     assert _tool(
         tree, _Gate({node}), budget_status=lambda: status(12), another_round_fits=lambda: False
     ).invoke({"outcome": "freeze", "node_id": node}).finish
+
+
+def test_seed_replicates_are_offered_where_the_arm_holds_them_and_go_to_the_gate(tmp_path: Path):
+    """Only an arm whose rules hold the condition is offered seed_replicates;
+    the tool resolves them like node_id and hands them to the gate, which
+    judges them. A nominee refused for want of them is told what a replicate
+    is, a node that fails only for want of them is listed as passing, and the
+    freeze hands the Pipeline their full ids."""
+
+    tree = StepTree(tmp_path / "steps")
+    nominee = _node(tree, tmp_path, "a")
+    replicate = _node(tree, tmp_path, "b")
+    calls: list[tuple[str, tuple[str, ...]]] = []
+
+    def gate(node_id: str, seed_replicates: tuple[str, ...] = ()) -> dict[str, object]:
+        calls.append((node_id, seed_replicates))
+        if seed_replicates == (replicate,):
+            return {"passed": True, "reasons": []}
+        return {
+            "passed": False,
+            "reasons": ["freeze_too_few_seed_replicates"],
+            "seed_replicates": {"trains_a_model": True, "replicates": []},
+        }
+
+    plain = ToolRegistry([_tool(tree, gate)])  # type: ignore[arg-type]
+    assert "seed_replicates" not in FinishSessionTool.spec.input_schema["properties"]
+    named = {"outcome": "freeze", "node_id": nominee, "seed_replicates": [replicate]}
+    assert "unknown argument" in str(plain.invoke("finish_session", named).error)
+
+    seeded = _tool(tree, gate, seed_replicates=True)  # type: ignore[arg-type]
+    assert "seed_replicates" in seeded.spec.input_schema["properties"]
+    assert SEED_REPLICATE_RULE in seeded.spec.description
+    with pytest.raises(ToolError) as refused:
+        seeded.invoke({"outcome": "freeze", "node_id": nominee})
+    message = str(refused.value)
+    assert "freeze_too_few_seed_replicates" in message and SEED_REPLICATE_RULE in message
+    assert refused.value.details["passing_nodes"] == [node_handle(replicate)]
+    assert '"seed_replicates"' in str(refused.value.retry_hint)
+
+    calls.clear()
+    finish = ToolRegistry([seeded]).invoke(
+        "finish_session",
+        {"outcome": "freeze", "node_id": "valid_a", "seed_replicates": ["valid_b"]},
+    )
+    assert finish.ok and finish.finish
+    assert calls == [(nominee, (replicate,))]
+    assert _seed_replicates(finish.value) == (replicate,)
+    with pytest.raises(ToolError, match="so must seed_replicates"):
+        seeded.invoke({"outcome": "no_edge", "reason": REASON, "seed_replicates": [replicate]})

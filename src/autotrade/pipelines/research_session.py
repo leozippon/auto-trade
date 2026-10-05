@@ -610,8 +610,8 @@ class LLMResearchDeveloper:
                 run_ref=run_ref,
                 emit_event=emit_event,
             )
-            conversation_id, outcome, node_id, reason, finish_reason = self._run_agent(
-                runner, request, resume=resume, used=used, run_ref=run_ref
+            conversation_id, outcome, node_id, replicates, reason, finish_reason = (
+                self._run_agent(runner, request, resume=resume, used=used, run_ref=run_ref)
             )
             return self._collect_result(
                 request,
@@ -626,6 +626,7 @@ class LLMResearchDeveloper:
                 conversation_id=conversation_id,
                 outcome=outcome,
                 node_id=node_id,
+                seed_replicates=replicates,
                 reason=reason,
                 finish_reason=finish_reason,
             )
@@ -1044,6 +1045,10 @@ class LLMResearchDeveloper:
                 freeze_gate=backtest.freeze_gate,
                 another_round_fits=lambda: another_batch_round_fits(backtest),
                 budget_status=lambda: session_budget_status(backtest),
+                seed_replicates=(
+                    backtest.acceptance is not None
+                    and backtest.acceptance.require_seed_replicates
+                ),
             )
         )
         return backtest, smoke, tools, null_control_tool
@@ -1161,10 +1166,11 @@ class LLMResearchDeveloper:
         resume: SessionResume | None,
         used: BudgetUsed,
         run_ref: str,
-    ) -> tuple[str, str, str | None, str, str]:
+    ) -> tuple[str, str, str | None, tuple[str, ...], str, str]:
         """Open the conversation, afresh or with the resume note over the last
         summary, and run it to its finish: the conversation id, the outcome,
-        the nominated node, the reason and the finish reason."""
+        the nominated node and its seed replicates, the reason and the finish
+        reason."""
 
         from autotrade.agent.compact import compaction_summary_message
         from autotrade.agent.prompts import (
@@ -1220,15 +1226,16 @@ class LLMResearchDeveloper:
             )
             conversation_id = result.conversation_id
             outcome, node_id, reason = _session_outcome(result.finish_value)
+            replicates = _seed_replicates(result.finish_value) if outcome == "freeze" else ()
             finish_reason = "llm_agent_finish_session"
         except AgentSessionBudgetExhausted as exc:
             # The session closed on an exhausted budget (its wrap-up grace
             # or its model calls); the Validations it completed are still
             # the arm's trials.
             conversation_id = exc.conversation_id
-            outcome, node_id, reason = "deadline", None, ""
+            outcome, node_id, replicates, reason = "deadline", None, (), ""
             finish_reason = exc.finish_reason
-        return conversation_id, outcome, node_id, reason, finish_reason
+        return conversation_id, outcome, node_id, replicates, reason, finish_reason
 
     def _collect_result(
         self,
@@ -1245,6 +1252,7 @@ class LLMResearchDeveloper:
         conversation_id: str,
         outcome: str,
         node_id: str | None,
+        seed_replicates: tuple[str, ...],
         reason: str,
         finish_reason: str,
     ) -> ResearchSessionResult:
@@ -1265,9 +1273,11 @@ class LLMResearchDeveloper:
             }
         )
         steps = tuple(backtest.steps)
-        if outcome == "freeze" and node_id not in {step.step_id for step in steps}:
+        recorded = {step.step_id for step in steps}
+        if outcome == "freeze" and not {node_id, *seed_replicates} <= recorded:
             raise RuntimeError(
-                "finish_session nominated a node absent from this session's Validations"
+                "finish_session nominated a node or seed replicate absent from this "
+                "session's Validations"
             )
         manifest.update(
             conversation_id=conversation_id,
@@ -1283,6 +1293,7 @@ class LLMResearchDeveloper:
             steps,
             outcome,
             node_id=node_id,
+            seed_replicates=seed_replicates,
             reason=reason,
             finish_reason=finish_reason,
             # The nulls the session already drew, for the freeze to reuse.
@@ -1500,6 +1511,12 @@ SESSION_FORBIDDEN = [
     "external_network",
     "host_control",
 ]
+
+
+def _seed_replicates(finish: Mapping[str, object]) -> tuple[str, ...]:
+    """The seed replicates a ``finish_session`` freeze registered (full node ids)."""
+
+    return tuple(str(item) for item in finish.get("seed_replicates") or ())  # type: ignore[union-attr]
 
 
 def _session_outcome(finish: Mapping[str, object]) -> tuple[str, str | None, str]:

@@ -1062,7 +1062,9 @@ class AgentSessionRunner:
                 "listed node_id whose passes_freeze_gate is true, or outcome="
                 "\"no_edge\" with a reason. The Runner does not rank or "
                 "auto-submit candidates; a node with passes_freeze_gate=false "
-                "cannot be frozen."
+                "cannot be frozen, except that one whose only freeze_gate_reason "
+                "is freeze_too_few_seed_replicates is read alone: name its seed "
+                "replicates in seed_replicates and the gate judges them together."
             ),
             "complete_validation_candidates": self._finalization_candidates(),
             "available_tools": sorted(self._finalization_tool_names()),
