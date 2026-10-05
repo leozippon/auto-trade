@@ -75,6 +75,7 @@ from .hitl_state import (
     PlannedSession,
     build_session_plan,
     planned_sessions,
+    read_gpu_claim,
     read_json,
     read_status,
 )
@@ -413,7 +414,21 @@ def load_worker_options(
     params = read_json(params_path)
     if not params:
         raise ValueError(f"missing experiment params: {params_path}")
-    return resolve_worker_options(params, experiment_dir=directory, repo_root=repo_root)
+    options = resolve_worker_options(params, experiment_dir=directory, repo_root=repo_root)
+    # The devices the console claimed for this run (webui.manager.start_worker):
+    # the session container and every replay's strategy containers attach
+    # exactly these, so no container of this arm selects a card by free memory
+    # and lands on one another arm holds. A worker started without a claim
+    # keeps the free-memory selector.
+    claim = read_gpu_claim(directory / "hitl")
+    spec = options.agent_sandbox
+    if claim is None or spec is None or spec.gpu is None:
+        return options
+    if len(claim) != spec.gpu_count:
+        raise ValueError(
+            f"GPU claim {list(claim)} does not match gpu_count {spec.gpu_count}"
+        )
+    return replace(options, agent_sandbox=replace(spec, gpu=claim))
 
 
 def resolve_worker_options(
@@ -795,9 +810,10 @@ def _strategy_sandbox_from_spec(
     model is trained, and it runs in the strategy container of every formal
     replay (validation and forward alike), not in the session. The request is the experiment-level one — a per-session HITL
     ``sandbox_gpu_count`` override moves only that session's own container.
-    The strategy container always uses the free-memory selector, so a spec that
-    pins explicit device indexes is honoured as a device count, not as those
-    exact devices.
+    A spec carrying the console's claim (a tuple of device indexes, see
+    ``load_worker_options``) pins every strategy container to those devices;
+    otherwise the strategy container uses the free-memory selector, and any
+    other pinned form is honoured as a device count, not as those devices.
     """
 
     labels = experiment_container_labels(experiment_id) if experiment_id else {}
@@ -813,6 +829,7 @@ def _strategy_sandbox_from_spec(
             fit_timeout_seconds=float(fit_timeout_seconds),
             gpu_count=spec.gpu_count if spec.gpu is not None else 0,
             gpu_name_filter=spec.gpu_name_filter,
+            gpu_devices=spec.gpu if isinstance(spec.gpu, tuple) else (),
         ),
         docker_executable=spec.docker_executable,
         labels=labels,

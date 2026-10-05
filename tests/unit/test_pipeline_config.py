@@ -896,7 +896,6 @@ class ConsoleParameterSurfaceTest(unittest.TestCase):
 
         from fastapi.testclient import TestClient
 
-        from autotrade.environment.gpu import GpuUnavailableError
         from autotrade.webui.manager import ExperimentManager
         from autotrade.webui.server import create_app
 
@@ -904,10 +903,8 @@ class ConsoleParameterSurfaceTest(unittest.TestCase):
             repo_root = Path(tmp)
             with (
                 patch.object(ExperimentManager, "start_worker", return_value={"spawned": False}),
-                patch(
-                    "autotrade.environment.gpu.select_gpus",
-                    side_effect=GpuUnavailableError("requested 2 GPU(s), 1 qualify"),
-                ),
+                # One idle card, one another process uses.
+                stubbed_gpu_probe([0], busy=[1]),
             ):
                 response = TestClient(create_app(repo_root)).post(
                     "/api/experiments",
@@ -921,7 +918,7 @@ class ConsoleParameterSurfaceTest(unittest.TestCase):
                 )
             self.assertEqual(response.status_code, 400, response.text)
             self.assertIn("当前 GPU 无法满足实验默认分配", response.json()["detail"])
-            self.assertIn("1 qualify", response.json()["detail"])
+            self.assertIn("requested 2 GPU(s), 1 free (0)", response.json()["detail"])
             self.assertFalse((repo_root / "experiments/params_gpu").exists())
 
 

@@ -42,18 +42,21 @@ at that count alone.
 
 `--fill` reads the arm list as an ordered queue and keeps the console's running
 slots occupied: it asks /api/health how many are free under each of the two
-running-arm limits, skips the arms whose experiment directory already exists --
-running, completed and failed alike, the console's own rule -- and creates the
-next pending ones in file order through the same validation and POST path. A
-local arm reached while the local-model limit is full stays pending without
-stopping the queue, so the hosted arms behind it still take the free slots.
-Nothing pending or nothing free is the steady state and exits 0, so the mode is
-idempotent and safe on a timer; only a creation that was attempted and refused
-exits non-zero. A timer run writes one timestamped summary line -- slots under
-both limits, and how many arms were skipped, created, refused and are still
-pending, and how many of those the local-model limit holds -- plus one line per
-arm it created or that was refused; with `--dry-run` it also lists each pending
-arm and whether it takes a free slot.
+running-arm limits and which GPUs a GPU arm could take, skips the arms whose
+experiment directory already exists -- running, completed and failed alike, the
+console's own rule -- and creates the next pending ones in file order through
+the same validation and POST path. A local arm reached while the local-model
+limit is full, and a GPU arm reached while too few cards are free, stays
+pending without stopping the queue, so the arms behind it still take the free
+slots. Nothing pending or nothing free is the steady state and exits 0, so the
+mode is idempotent and safe on a timer; only a creation that was attempted and
+refused exits non-zero. A timer run writes one timestamped summary line --
+slots under both limits and the free GPUs, and how many arms were skipped,
+created, refused and are still pending, and how many of those the local-model
+limit and the free GPUs hold back -- plus one line per arm it created or that
+was refused; with `--dry-run`
+it also lists each pending arm and whether it takes a free slot. The research
+cron (`ops/cron/research_fill.cron`) runs it over several round files in turn.
 
 RETIRED_IDS records the experiment ids that have been used and archived, so a
 new round cannot quietly reuse one. `logs/archive/` is not part of the
@@ -96,10 +99,10 @@ from autotrade.pipelines.lineage import extract_lineage
 from autotrade.pipelines.verdict import information_ratio_bar
 from autotrade.pipelines.worker import resolve_worker_options
 
-# The console's own id and local-arm rules; importing them keeps this module
-# from growing a second copy of the create contract.
+# The console's own id, local-arm and GPU-request rules; importing them keeps
+# this module from growing a second copy of the create contract.
 from autotrade.webui.manager import _ID as EXPERIMENT_ID_RE
-from autotrade.webui.manager import uses_local_model
+from autotrade.webui.manager import gpu_request, uses_local_model
 
 EXPERIMENTS_ROOT = REPO_ROOT / "experiments"
 ARCHIVE_ROOT = REPO_ROOT / "logs" / "archive"
@@ -370,19 +373,37 @@ def post(port: int, params: dict[str, object]) -> bool:
     return False
 
 
+# What --fill reads from /api/health.
+HEALTH_KEYS = (
+    "max_running_experiments",
+    "max_running_local_experiments",
+    "running",
+    "running_local",
+    "gpus_free",
+)
+
+
 def health(port: int) -> dict[str, object]:
-    """The console's running roster and its two running-arm limits.
+    """The console's running roster, its two running-arm limits and its free GPUs.
 
     Read rather than assumed: the limits are the console's constants and the
-    roster changes under the operator's hands, so a fill that cannot read them
-    refuses instead of creating blind against limits it guessed.
+    roster and the cards change under the operator's hands, so a fill that
+    cannot read them -- a console too old to report them included -- refuses
+    instead of creating blind against limits it guessed.
     """
     url = f"http://127.0.0.1:{port}/api/health"
     try:
         with urllib.request.urlopen(url, timeout=60) as response:
-            return json.loads(response.read())
+            record = json.loads(response.read())
     except (OSError, json.JSONDecodeError) as exc:
         raise SystemExit(f"{_now()} console health unreadable at {url}: {exc}") from exc
+    missing = [key for key in HEALTH_KEYS if key not in record]
+    if missing:
+        raise SystemExit(
+            f"{_now()} console health at {url} lacks {', '.join(missing)}: "
+            "restart the console onto this checkout"
+        )
+    return record
 
 
 @dataclass(frozen=True)
@@ -527,17 +548,23 @@ class Round:
             " still staging and checks that release is published and reaches Held-out."
         )
 
-    def fill(self, port: int, *, dry_run: bool) -> tuple[list[str], list[str], list[str], str]:
-        """The arms to create now, every pending arm, the pending local arms
-        the local-model limit holds back, and the slot part of the summary line.
+    def fill(
+        self, port: int, *, dry_run: bool
+    ) -> tuple[list[str], list[str], list[str], list[str], str]:
+        """The arms to create now, every pending arm, the pending arms the
+        local-model limit holds back and those the free GPUs hold back, and the
+        slot part of the summary line.
 
         The queue is the arm order of the round file. An arm whose experiment
         directory exists has been created already -- the console refuses a
         second one whatever state it reached -- so only the rest are pending.
-        They take the console's free slots in order, except that a local arm
-        (the console's own ``uses_local_model``) reached while the local-model
-        limit is full is held: it stays pending and the arms behind it go ahead.
-        A dry-run lists the pending arms; a timer run only counts them.
+        They take the console's free slots in order, except that an arm the
+        console would refuse for a reason that clears by itself is held: it
+        stays pending and the arms behind it go ahead. That is a local arm (the
+        console's own ``uses_local_model``) reached while the local-model limit
+        is full, and an arm asking for more GPUs (``gpu_request``) than the
+        console has free cards for. A dry-run lists the pending arms; a timer
+        run only counts them.
         """
         record = health(port)
         running = sorted(str(name) for name in record["running"])
@@ -546,22 +573,33 @@ class Round:
         local_cap = int(record["max_running_local_experiments"])
         free = max(cap - len(running), 0)
         local_free = max(local_cap - len(running_local), 0)
+        cards = [str(device) for device in record["gpus_free"]]  # type: ignore[attr-defined]
+        gpus_free = len(cards)
         slots = (
             f"slots {len(running)}/{cap} in use ({', '.join(running) or 'none'}), {free} free; "
             f"local-model slots {len(running_local)}/{local_cap} in use "
-            f"({', '.join(running_local) or 'none'}), {local_free} free"
+            f"({', '.join(running_local) or 'none'}), {local_free} free; "
+            f"GPUs {gpus_free} free ({', '.join(cards) or 'none'})"
+            + (f", unreadable: {record['gpu_error']}" if record.get("gpu_error") else "")
         )
         pending = [arm for arm in self.arms if not (EXPERIMENTS_ROOT / arm).exists()]
         chosen: list[str] = []
         held: list[str] = []
+        held_gpu: list[str] = []
         for experiment_id in pending:
             if len(chosen) == free:
                 break
-            if uses_local_model(self.request_params(experiment_id)):
-                if local_free == 0:
-                    held.append(experiment_id)
-                    continue
-                local_free -= 1
+            params = self.request_params(experiment_id)
+            local = uses_local_model(params)
+            if local and local_free == 0:
+                held.append(experiment_id)
+                continue
+            gpus = gpu_request(params)
+            if gpus > gpus_free:
+                held_gpu.append(experiment_id)
+                continue
+            local_free -= local
+            gpus_free -= gpus
             chosen.append(experiment_id)
         if dry_run:
             for experiment_id in pending:
@@ -570,10 +608,12 @@ class Round:
                     if experiment_id in chosen
                     else "waits for a local-model slot"
                     if experiment_id in held
+                    else "waits for a free GPU"
+                    if experiment_id in held_gpu
                     else "waits for a free slot"
                 )
                 print(f"{experiment_id}: pending, {slot}")
-        return chosen, pending, held, slots
+        return chosen, pending, held, held_gpu, slots
 
     def main(self, argv: list[str], usage: str | None = None) -> int:
         """`<port> [--dry-run] [--fill] [experiment_id ...]`, shared by every round file."""
@@ -613,7 +653,7 @@ class Round:
         if fill:
             # The queue decides the selection; --dry-run still decides whether
             # anything is sent.
-            selected, pending, held, slots = self.fill(port, dry_run=dry_run)
+            selected, pending, held, held_gpu, slots = self.fill(port, dry_run=dry_run)
         else:
             selected = [arm for arm in self.arms if not wanted or arm in wanted]
         created: list[str] = []
@@ -660,7 +700,7 @@ class Round:
                 f"{len(self.arms) - len(pending)} skipped (created already), "
                 f"{done} {'would be created' if dry_run else 'created'}, "
                 f"{len(failed)} refused, {len(pending) - done - len(failed)} pending "
-                f"({len(held)} held by the local-model limit)",
+                f"({len(held)} held by the local-model limit, {len(held_gpu)} by the free GPUs)",
                 flush=True,
             )
         if failed:

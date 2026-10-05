@@ -151,6 +151,11 @@ class WorkerLifecycleTest(unittest.TestCase):
         )
         # The research session is not settled: no durable record yet.
         self.client = TestClient(create_app(self.repo_root, self.experiments_root))
+        # The arm asks for the default GPU, so starting it claims a card; this
+        # class is about the worker, not the host's devices.
+        probe = stubbed_gpu_probe()
+        probe.start()
+        self.addCleanup(probe.stop)
 
     # ---- helpers ---------------------------------------------------------
     def _spawn(self, source: str) -> subprocess.Popen:
@@ -757,34 +762,69 @@ class CreatePreflightTest(unittest.TestCase):
                     manager.create_experiment({**payload, "experiment_id": "shared_body_2"})
         self.assertFalse((self.experiments_root / "shared_body_2").exists())
 
-    def test_an_unsatisfiable_gpu_request_is_refused_before_anything_is_written(self) -> None:
-        """Create is coupled to GPU availability, exactly as closed source is.
+    def test_a_gpu_arm_gets_an_unused_card_and_holds_it_while_its_worker_lives(self) -> None:
+        """A card somebody else uses is never handed out, a card a running arm
+        holds is never handed out again even while it shows nothing in use, and
+        a GPU arm with no such card left is refused before anything is written
+        while a CPU arm is still created. The worker is a real detached child,
+        so the hold ends exactly when it dies."""
+        # Cards 0 and 1 carry another process's memory; card 2 is unused.
+        with stubbed_gpu_probe([2], busy=[0, 1]):
+            first = self._create()
+            self.assertEqual(first.status_code, 200, first.text)
+            pid = int(first.json()["spawned_pid"])
+            self.addCleanup(self._kill_pid, pid)
+            claim = self.experiments_root / "preflight_demo/hitl/gpu_claim.json"
+            self.assertEqual(json.loads(claim.read_text(encoding="utf-8"))["devices"], [2])
+            health = self.client.get("/api/health").json()
+            self.assertEqual(health["gpus_free"], [])
+            self.assertEqual(health["gpu_claims"], {"preflight_demo": [2]})
 
-        `_preflight` runs closed's `select_gpus(spec.gpu_count,
-        require_name=spec.gpu_name_filter)` check, so an experiment can no
-        longer be created against a host that cannot serve its default
-        allocation. Both directions are asserted here so the coupling is
-        pinned without the test depending on this host's devices.
-        """
-        from autotrade.environment.gpu import GpuUnavailableError
+            refused = self._create(experiment_id="gpu_behind")
+            self.assertEqual(refused.status_code, 400, refused.text)
+            detail = refused.json()["detail"]
+            self.assertIn("当前 GPU 无法满足实验默认分配", detail)
+            self.assertIn("requested 1 GPU(s), 0 free (none)", detail)
+            self.assertIn("held by running arms: preflight_demo [2]", detail)
+            self.assertFalse((self.experiments_root / "gpu_behind").exists())
 
-        with patch(
-            "autotrade.environment.gpu.select_gpus",
-            side_effect=GpuUnavailableError("requested 1 GPU(s), available matching GPUs: none"),
-        ):
-            refused = self._create()
+            cpu = self._create(experiment_id="cpu_behind", gpu_count=0)
+            self.assertEqual(cpu.status_code, 200, cpu.text)
+            self.addCleanup(self._kill_pid, int(cpu.json()["spawned_pid"]))
+            self.assertFalse((self.experiments_root / "cpu_behind/hitl/gpu_claim.json").exists())
+
+            self._kill_pid(pid)
+            self.assertEqual(self.client.get("/api/health").json()["gpus_free"], [2])
+
+    def test_a_running_gpu_arm_without_a_claim_keeps_an_unused_card_back(self) -> None:
+        """An arm started before claims existed picks a card by free memory at
+        every replay, so which one it will use next is unknown: one unused
+        card stays out of reach for each it asked for."""
+        legacy = self.experiments_root / "legacy_gpu_arm" / "hitl"
+        write_json_atomic(legacy / "params.json", {"experiment_id": "legacy_gpu_arm", "gpu_count": 1})
+        write_json_atomic(
+            legacy / "status.json",
+            {
+                "schema_version": 1,
+                "state": "running_session",
+                "pid": os.getpid(),
+                "pid_start_ticks": proc_start_ticks(os.getpid()),
+            },
+        )
+        with stubbed_gpu_probe([0, 1]):
+            health = self.client.get("/api/health").json()
+            self.assertEqual(health["gpus_free"], [1])
+            self.assertEqual(health["gpu_claims"], {"legacy_gpu_arm": None})
+            first = self._create()
+            self.assertEqual(first.status_code, 200, first.text)
+            self.addCleanup(self._kill_pid, int(first.json()["spawned_pid"]))
+            refused = self._create(experiment_id="gpu_behind")
         self.assertEqual(refused.status_code, 400, refused.text)
-        self.assertIn("当前 GPU 无法满足实验默认分配", refused.json()["detail"])
-        self._assert_nothing_was_created()
-        time.sleep(2.0)
-        self.assertFalse(self.marker.exists())
-        with patch("autotrade.environment.gpu.select_gpus", return_value=[0]) as selector:
-            allowed = self._create()
-        self.assertEqual(allowed.status_code, 200, allowed.text)
-        self.addCleanup(self._kill_pid, int(allowed.json()["spawned_pid"]))
-        # Read off the resolved spec, not hardcoded: gpu.py is the single
-        # configuration source for the device filter.
-        selector.assert_called_once_with(1, require_name="L20")
+        self.assertIn(
+            "held by running arms: legacy_gpu_arm (no claim, idle cards kept back); "
+            "preflight_demo [1]",
+            refused.json()["detail"],
+        )
 
     def _kill_pid(self, pid: int) -> None:
         try:

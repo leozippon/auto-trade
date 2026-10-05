@@ -34,6 +34,7 @@ from autotrade.environment.artifacts import (
 )
 from autotrade.environment.data.summary import write_agent_data_summary
 from autotrade.environment.executor import PersistentCommandRunner
+from autotrade.environment.gpu import GpuUnavailableError
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm.model_profiles import AGENT_MAX_OUTPUT_TOKENS
 from autotrade.environment.runtime import (
@@ -697,16 +698,23 @@ class LLMResearchDeveloper:
         """The session container's spec under this session's GPU allocation."""
 
         # Per-session HITL override; the "auto" selector still picks that many
-        # GPUs by free memory at container start.
+        # GPUs by free memory at container start, while an arm holding the
+        # console's claim (a tuple, worker.load_worker_options) attaches that
+        # many of its own devices and never another arm's.
         if request.sandbox_gpu_count is None:
-            sandbox_spec = self.sandbox_spec
-        elif int(request.sandbox_gpu_count) == 0:
-            sandbox_spec = replace(self.sandbox_spec, gpu=None, gpu_count=0)
-        else:
-            sandbox_spec = replace(
-                self.sandbox_spec, gpu_count=int(request.sandbox_gpu_count)
-            )
-        return sandbox_spec
+            return self.sandbox_spec
+        count = int(request.sandbox_gpu_count)
+        if count == 0:
+            return replace(self.sandbox_spec, gpu=None, gpu_count=0)
+        claim = self.sandbox_spec.gpu
+        if isinstance(claim, tuple):
+            if count > len(claim):
+                raise GpuUnavailableError(
+                    f"this session asks for {count} GPU(s) but the arm holds "
+                    f"{len(claim)}: devices {list(claim)}"
+                )
+            return replace(self.sandbox_spec, gpu=claim[:count], gpu_count=count)
+        return replace(self.sandbox_spec, gpu_count=count)
 
     def _create_run_manifest(
         self,

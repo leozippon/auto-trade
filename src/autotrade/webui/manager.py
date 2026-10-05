@@ -25,7 +25,7 @@ from autotrade.environment.llm.model_profiles import (
     canonicalize_model_name,
 )
 from autotrade.environment.runtime import utc_now_iso, write_json_atomic
-from autotrade.environment.sandbox import EXPERIMENT_LABEL
+from autotrade.environment.sandbox import EXPERIMENT_LABEL, SandboxSpec
 from autotrade.environment.sandbox_images import reclaim_experiment_sandbox_images
 from autotrade.environment.tools.workspace import WORKSPACE_MIN_FREE_BYTES
 from autotrade.pipelines.agent_inbox import (
@@ -44,8 +44,10 @@ from autotrade.pipelines.hitl_state import (
     control_lock,
     proc_start_ticks,
     read_control,
+    read_gpu_claim,
     status_pid_alive,
     write_control,
+    write_gpu_claim,
 )
 from autotrade.pipelines.ledger import research_over
 from autotrade.pipelines.lineage import extract_lineage, lineage_arm_ids, write_lineage
@@ -66,7 +68,9 @@ from .registry import experiment_state, read_ledger_records, worker_log_ref
 # use about half of that. An arm whose main session and sub-agents are hosted
 # leaves that service almost idle, so only the total limit, which protects the
 # host's page cache and IO, applies to it. Measured rationale:
-# docs/deployment-documentation.md.
+# docs/deployment-documentation.md. GPUs are not a count: a GPU arm starts only
+# on whole cards nobody else uses or holds, and keeps them while its worker
+# lives (gpu_slots).
 MAX_RUNNING_EXPERIMENTS = 8
 MAX_RUNNING_LOCAL_EXPERIMENTS = 4
 # What one new arm writes of its own before its first validation: the PIT views
@@ -279,6 +283,14 @@ def uses_local_model(params: Mapping[str, object]) -> bool:
     )
 
 
+def gpu_request(params: Mapping[str, object]) -> int:
+    """The GPUs an arm's worker attaches, read like :func:`uses_local_model`:
+    its params over the create defaults, so an unreadable params.json counts
+    as the default request."""
+
+    return int({**WEB_CREATE_DEFAULTS, **params}.get("gpu_count") or 0)
+
+
 class ManagerError(RuntimeError):
     pass
 
@@ -472,12 +484,62 @@ class ExperimentManager:
         sandbox = options.agent_sandbox
         if sandbox is None or sandbox.gpu is None:
             return  # a CPU-only session allocates no device
-        from autotrade.environment.gpu import GpuUnavailableError, select_gpus
+        self._claimable_gpus(sandbox.gpu_count)
 
+    def gpu_slots(self) -> dict[str, object]:
+        """The cards a GPU arm starting now would take, and what running arms hold.
+
+        A running GPU arm holds the devices claimed for its worker at start
+        (``hitl/gpu_claim.json``) for as long as that worker lives, whether
+        or not they show memory in use: between batches, while its model
+        thinks, they show none. A running GPU arm without a claim (started
+        before claims existed, or by hand) picks a card by free memory at
+        every replay, so as many idle cards as it asked for are kept back for
+        it. A card is free when it matches the sandbox device filter, no
+        process holds memory on it (``gpu.idle_gpus``) and no running arm
+        claims it; ``gpus_free`` lists the free cards in the order a start
+        takes them. ``gpu_claims`` maps every running GPU arm to its devices,
+        ``None`` for one without a claim. When the devices cannot be read no
+        card is free and ``gpu_error`` says why.
+        """
+        from autotrade.environment.gpu import GpuUnavailableError, idle_gpus
+
+        claims: dict[str, list[int] | None] = {}
+        kept = 0
+        for name in sorted(self.running_experiments()):
+            hitl = self.experiments_root / name / "hitl"
+            count = gpu_request(_read_json(hitl / "params.json"))
+            if count:
+                claim = read_gpu_claim(hitl)
+                claims[name] = None if claim is None else list(claim)
+                kept += count if claim is None else 0
+        claimed = {device for devices in claims.values() for device in devices or ()}
         try:
-            select_gpus(sandbox.gpu_count, require_name=sandbox.gpu_name_filter)
+            idle = idle_gpus(require_name=SandboxSpec().gpu_name_filter)
         except GpuUnavailableError as exc:
-            raise ManagerError(f"当前 GPU 无法满足实验默认分配：{exc}") from exc
+            return {"gpus_free": [], "gpu_claims": claims, "gpu_error": str(exc)}
+        free = [device for device in idle if device not in claimed][kept:]
+        return {"gpus_free": free, "gpu_claims": claims}
+
+    def _claimable_gpus(self, count: int) -> list[int]:
+        """The ``count`` cards a GPU arm starting now takes, or a refusal
+        naming the cards in use and the running arms that hold the rest."""
+
+        slots = self.gpu_slots()
+        free = list(slots["gpus_free"])  # type: ignore[call-overload]
+        if len(free) >= count:
+            return free[:count]
+        holders = "; ".join(
+            f"{name} {devices}" if devices is not None else f"{name} (no claim, idle cards kept back)"
+            for name, devices in slots["gpu_claims"].items()  # type: ignore[attr-defined]
+        )
+        raise ManagerError(
+            f"当前 GPU 无法满足实验默认分配：requested {count} GPU(s), {len(free)} free "
+            f"({', '.join(map(str, free)) or 'none'}); a card is free only when nothing "
+            "holds memory on it and no running arm claims it; "
+            f"held by running arms: {holders or 'none'}"
+            + (f"; GPUs unreadable: {slots['gpu_error']}" if "gpu_error" in slots else "")
+        )
 
     def running_experiments(self) -> list[str]:
         if not self.experiments_root.is_dir():
@@ -554,11 +616,15 @@ class ExperimentManager:
                 raise ManagerError(
                     f"experiment {experiment_id!r} already has a live worker"
                 )
-            self._require_running_slot(
-                local=uses_local_model(_read_json(directory / "hitl/params.json"))
-            )
+            params = _read_json(directory / "hitl/params.json")
+            self._require_running_slot(local=uses_local_model(params))
             if not self.worker_script.is_file():
                 raise ManagerError("interactive worker entrypoint is unavailable")
+            # Claimed before anything else is touched, so a refusal leaves the
+            # arm as it was, and written before the spawn, which reads it.
+            gpus = gpu_request(params)
+            if gpus:
+                write_gpu_claim(directory / "hitl", self._claimable_gpus(gpus))
             # A stop request left behind by a previous run would immediately
             # re-stop the resumed worker; clear it (the session directives are
             # preserved).

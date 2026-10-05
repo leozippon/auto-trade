@@ -1,5 +1,11 @@
 """GPU selection for sandbox containers.
 
+A research arm the console starts does not select per container: the console
+claims whole idle devices for the arm's worker (``idle_gpus``, and
+``webui.manager`` for which devices running arms hold), and every container of
+that worker attaches exactly those. Everything else -- a worker started without
+a claim, a Paper book, an operator's replay -- uses the default policy below.
+
 Default policy: allocate the requested number of GPUs with the most free video
 memory at container start, optionally restricted to a device-name substring
 (``SandboxSpec.gpu_name_filter`` is the single configuration source). A one-GPU
@@ -25,6 +31,11 @@ from collections.abc import Sequence
 # sequence-model refit on a 46 GiB L20 (a measured 9 GiB peak) with headroom
 # for a second concurrent candidate on the same card.
 MIN_FREE_GPU_MEMORY_MIB = 12 * 1024
+# Memory a device may show in use and still be idle. Any process that opened a
+# CUDA context on it holds more (an idle strategy container's context is about
+# 390 MiB on an L20, and an unused L20 reports 0), so a card above this carries
+# somebody's work, however much of it is free.
+IDLE_GPU_MEMORY_MIB = 256
 
 
 def device_request(indices: Sequence[int]) -> str:
@@ -52,10 +63,10 @@ class GpuUnavailableError(RuntimeError):
 
 
 def list_gpus() -> list[dict[str, object]]:
-    """[{index, name, memory_free_mib, memory_total_mib, utilization_pct, temperature_c}] from nvidia-smi."""
+    """[{index, name, memory_used_mib, memory_free_mib, memory_total_mib, utilization_pct, temperature_c}] from nvidia-smi."""
     try:
         completed = subprocess.run(
-            ["nvidia-smi", "--query-gpu=index,name,memory.free,memory.total,utilization.gpu,temperature.gpu", "--format=csv,noheader,nounits"],
+            ["nvidia-smi", "--query-gpu=index,name,memory.used,memory.free,memory.total,utilization.gpu,temperature.gpu", "--format=csv,noheader,nounits"],
             capture_output=True,
             text=True,
             timeout=15,
@@ -66,14 +77,30 @@ def list_gpus() -> list[dict[str, object]]:
         raise GpuUnavailableError(f"nvidia-smi failed: {completed.stderr.strip()[:200]}")
     gpus = []
     for line in completed.stdout.strip().splitlines():
-        index, name, free, total, util, temp = (part.strip() for part in line.split(",", 5))
+        index, name, used, free, total, util, temp = (part.strip() for part in line.split(",", 6))
         gpus.append(
-            {"index": int(index), "name": name, "memory_free_mib": int(free), "memory_total_mib": int(total),
-             "utilization_pct": _int_or_none(util), "temperature_c": _int_or_none(temp)}
+            {"index": int(index), "name": name, "memory_used_mib": int(used), "memory_free_mib": int(free),
+             "memory_total_mib": int(total), "utilization_pct": _int_or_none(util), "temperature_c": _int_or_none(temp)}
         )
     if not gpus:
         raise GpuUnavailableError("nvidia-smi reported no GPUs")
     return gpus
+
+
+def idle_gpus(*, require_name: str | None = None) -> list[int]:
+    """Indexes of the matching devices nobody holds memory on, ascending.
+
+    A card in use by anyone -- the local model service, an operator's replay,
+    the legs of an arm started without a claim -- is not idle however much of
+    it is free. The converse is the caller's to know: a running arm whose card
+    shows nothing between its batches still holds it.
+    """
+    return sorted(
+        int(gpu["index"])
+        for gpu in list_gpus()
+        if (not require_name or require_name.lower() in str(gpu["name"]).lower())
+        and int(gpu["memory_used_mib"]) < IDLE_GPU_MEMORY_MIB
+    )
 
 
 def select_gpus(count: int = 1, *, require_name: str | None = None) -> list[int]:

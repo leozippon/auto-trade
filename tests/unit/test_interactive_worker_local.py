@@ -31,6 +31,7 @@ from autotrade.pipelines.hitl_state import (
     read_control,
     read_status,
     write_control,
+    write_gpu_claim,
 )
 from autotrade.pipelines.interactive import InteractiveExperimentRunner
 from autotrade.pipelines.ledger import ExperimentLedger
@@ -100,6 +101,24 @@ def test_worker_rejects_llm_mode_without_provider_credentials(tmp_path: Path):
     with pytest.raises(ValueError, match="requires an API key: set VLLM_API_KEY"):
         load_worker_options(experiment, repo_root=repo)
 
+
+
+def test_the_worker_attaches_exactly_the_cards_the_console_claimed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without a claim the free-memory selector stays; with one the run pins
+    those devices, and a claim that disagrees with the arm's GPU count stops
+    the worker instead of attaching some other number of cards."""
+    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-only-key")
+    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
+    assert load_worker_options(experiment, repo_root=repo).agent_sandbox.gpu == "auto"
+    write_gpu_claim(experiment / "hitl", [5])
+    spec = load_worker_options(experiment, repo_root=repo).agent_sandbox
+    assert (spec.gpu, spec.gpu_count) == ((5,), 1)
+    write_gpu_claim(experiment / "hitl", [5, 6])
+    with pytest.raises(ValueError, match=r"GPU claim \[5, 6\] does not match gpu_count 1"):
+        load_worker_options(experiment, repo_root=repo)
 
 
 def test_worker_maps_model_context_params_to_role_gateways_and_compactor(
@@ -760,7 +779,8 @@ def test_webui_worker_output_is_recoverable_from_a_per_experiment_log(
         return Process()
 
     monkeypatch.setattr("autotrade.webui.manager.subprocess.Popen", fake_popen)
-    result = ExperimentManager(repo).start_worker("demo")
+    with stubbed_gpu_probe():
+        result = ExperimentManager(repo).start_worker("demo")
 
     log_path = repo / "logs" / "workers" / "demo.log"
     # Repo-relative only: this value crosses the public API/status boundary.
@@ -784,7 +804,8 @@ def test_webui_worker_output_is_recoverable_from_a_per_experiment_log(
     (experiment / "hitl/status.json").write_text(
         '{"schema_version":1,"state":"created"}', encoding="utf-8"
     )
-    ExperimentManager(repo).start_worker("demo")
+    with stubbed_gpu_probe():
+        ExperimentManager(repo).start_worker("demo")
     assert log_path.read_text(encoding="utf-8").count("===== worker start") == 2
 
 

@@ -384,9 +384,10 @@ def _fill_round(
     """A three-arm round on a finished seed, with the console's two calls faked.
 
     ``local`` and ``hosted`` are how many arms of each kind the console is
-    running against its two limits, ``created`` the arms whose experiment
-    directory already exists, ``arms`` what each arm decides for itself (an
-    arm that names no model role is local). The returned list records, in
+    running against its two limits (it has no free GPU), ``created`` the arms
+    whose experiment directory already exists, ``arms`` what each arm decides
+    for itself (an arm that names no model role is local, one that names no
+    ``gpu_count`` runs on CPU like the round). The returned list records, in
     order, the ids a create request was actually sent for.
     """
     rnd = Round(arms=arms or {arm: {} for arm in FILL_ARMS}, pit_views_seed="data/seed_probe")
@@ -402,6 +403,7 @@ def _fill_round(
             "max_running_local_experiments": MAX_RUNNING_LOCAL_EXPERIMENTS,
             "running": running_local + [f"hosted_{index}" for index in range(hosted)],
             "running_local": running_local,
+            "gpus_free": [],
         },
     )
     posted: list[str] = []
@@ -439,9 +441,9 @@ def test_a_fill_creates_pending_arms_in_queue_order_up_to_the_free_slots(
         f"slots {MAX_RUNNING_EXPERIMENTS - 1}/{MAX_RUNNING_EXPERIMENTS} in use "
         f"({hosted}, local_0, local_1), 1 free; "
         f"local-model slots 2/{MAX_RUNNING_LOCAL_EXPERIMENTS} in use (local_0, local_1), "
-        f"{MAX_RUNNING_LOCAL_EXPERIMENTS - 2} free; queue 3: "
+        f"{MAX_RUNNING_LOCAL_EXPERIMENTS - 2} free; GPUs 0 free (none); queue 3: "
         "1 skipped (created already), 1 created, 0 refused, 1 pending "
-        "(0 held by the local-model limit)"
+        "(0 held by the local-model limit, 0 by the free GPUs)"
     )
 
 
@@ -452,19 +454,28 @@ def test_a_fill_creates_pending_arms_in_queue_order_up_to_the_free_slots(
             MAX_RUNNING_LOCAL_EXPERIMENTS,
             MAX_RUNNING_EXPERIMENTS - MAX_RUNNING_LOCAL_EXPERIMENTS,
             (),
-            "0 skipped (created already), 0 created, 0 refused, 3 pending (0 held by the local-model limit)",
+            (
+                "0 skipped (created already), 0 created, 0 refused, 3 pending "
+                "(0 held by the local-model limit, 0 by the free GPUs)"
+            ),
         ),
         (
             MAX_RUNNING_LOCAL_EXPERIMENTS,
             0,
             (),
-            "0 skipped (created already), 0 created, 0 refused, 3 pending (3 held by the local-model limit)",
+            (
+                "0 skipped (created already), 0 created, 0 refused, 3 pending "
+                "(3 held by the local-model limit, 0 by the free GPUs)"
+            ),
         ),
         (
             0,
             0,
             FILL_ARMS,
-            "3 skipped (created already), 0 created, 0 refused, 0 pending (0 held by the local-model limit)",
+            (
+                "3 skipped (created already), 0 created, 0 refused, 0 pending "
+                "(0 held by the local-model limit, 0 by the free GPUs)"
+            ),
         ),
     ],
     ids=["no slot free", "no local slot for a local queue", "nothing pending"],
@@ -511,8 +522,41 @@ def test_a_fill_holds_a_local_arm_at_the_local_limit_and_creates_the_hosted_one_
     assert _summary(capsys.readouterr().out).endswith(
         f"local-model slots {MAX_RUNNING_LOCAL_EXPERIMENTS}/{MAX_RUNNING_LOCAL_EXPERIMENTS} in use "
         f"({', '.join(f'local_{index}' for index in range(MAX_RUNNING_LOCAL_EXPERIMENTS))}), 0 free; "
-        "queue 3: 0 skipped (created already), 1 created, 0 refused, 2 pending "
-        "(2 held by the local-model limit)"
+        "GPUs 0 free (none); queue 3: 0 skipped (created already), 1 created, 0 refused, "
+        "2 pending (2 held by the local-model limit, 0 by the free GPUs)"
+    )
+
+
+def test_a_fill_holds_a_gpu_arm_while_no_card_is_free_and_creates_the_cpu_arm_behind_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """With every card in use or held, the GPU arms stay pending and the CPU
+    arm between them is created; one free card takes the first GPU arm only,
+    since the console hands a card to one arm at a time."""
+    arms = {arm: {"gpu_count": 1} for arm in FILL_ARMS}
+    arms["fill_second"] = {}
+    rnd, posted = _fill_round(tmp_path, monkeypatch, local=0, arms=arms)
+    assert rnd.main(["launcher", "0", "--fill", "--dry-run"]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert "fill_first: pending, waits for a free GPU" in out
+    assert "fill_second: pending, takes a free slot" in out
+    assert "fill_third: pending, waits for a free GPU" in out
+    assert rnd.main(["launcher", "0", "--fill"]) == 0
+    assert posted == ["fill_second"]
+    assert _summary(capsys.readouterr().out).endswith(
+        "GPUs 0 free (none); queue 3: 0 skipped (created already), 1 created, 0 refused, "
+        "2 pending (0 held by the local-model limit, 2 by the free GPUs)"
+    )
+
+    # Nothing was really created (the POST is faked), so the queue is unchanged.
+    no_card = _round.health(0)
+    monkeypatch.setattr(_round, "health", lambda port: {**no_card, "gpus_free": [5]})
+    posted.clear()
+    assert rnd.main(["launcher", "0", "--fill"]) == 0
+    assert posted == ["fill_first", "fill_second"]
+    assert _summary(capsys.readouterr().out).endswith(
+        "GPUs 1 free (5); queue 3: 0 skipped (created already), 2 created, 0 refused, "
+        "1 pending (0 held by the local-model limit, 1 by the free GPUs)"
     )
 
 
@@ -529,7 +573,7 @@ def test_a_fill_past_a_held_local_arm_still_stops_at_any_refusal(
     assert posted == []
     captured = capsys.readouterr()
     assert _summary(captured.out).endswith(
-        "0 created, 1 refused, 2 pending (1 held by the local-model limit)"
+        "0 created, 1 refused, 2 pending (1 held by the local-model limit, 0 by the free GPUs)"
     )
     assert "fill_second: parameters rejected" in captured.err
 
@@ -544,7 +588,7 @@ def test_a_fill_reports_a_creation_the_console_refused(
     assert posted == ["fill_first", "fill_second"]
     captured = capsys.readouterr()
     assert _summary(captured.out).endswith(
-        "0 created, 2 refused, 1 pending (0 held by the local-model limit)"
+        "0 created, 2 refused, 1 pending (0 held by the local-model limit, 0 by the free GPUs)"
     )
     assert "not created: fill_first, fill_second" in captured.err
 
@@ -561,7 +605,7 @@ def test_a_fill_stops_at_an_arm_the_preflight_refuses(
     assert posted == ["fill_first"]
     captured = capsys.readouterr()
     assert _summary(captured.out).endswith(
-        "1 created, 1 refused, 1 pending (0 held by the local-model limit)"
+        "1 created, 1 refused, 1 pending (0 held by the local-model limit, 0 by the free GPUs)"
     )
     assert "fill_second: parameters rejected" in captured.err
     assert "whole July-June years" in captured.err
@@ -580,7 +624,7 @@ def test_a_fill_dry_run_plans_without_creating(
     assert match, out[-1]
     assert match.group(1).endswith(
         "0 skipped (created already), 1 would be created, 0 refused, 2 pending "
-        "(0 held by the local-model limit)"
+        "(0 held by the local-model limit, 0 by the free GPUs)"
     )
 
 

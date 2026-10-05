@@ -248,6 +248,9 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         return {
             "status": "ok" if healthy else "degraded",
             **manager.running_slots(),
+            # The GPU side of a start, which the research fill reads beside
+            # the two running-arm limits.
+            **manager.gpu_slots(),
             "unreadable_experiments": unreadable,
             "raw_generation": raw_generation,
         }

@@ -559,6 +559,32 @@ def test_experiment_gpu_request_reaches_the_formal_strategy_container() -> None:
     )
 
 
+def test_the_consoles_claim_pins_every_container_of_the_arm() -> None:
+    """A spec carrying the console's claim attaches exactly its devices: every
+    strategy container without consulting the selector, and a session that
+    asks for fewer gets that many of the arm's own cards, never another one."""
+    from autotrade.environment.executor import _select_strategy_gpus
+    from autotrade.pipelines.research_session import LLMResearchDeveloper
+
+    claimed = SandboxSpec(gpu=(3, 6), gpu_count=2)
+    limits = _strategy_sandbox_from_spec(claimed, fit_timeout_seconds=60).limits
+    assert (limits.gpu_count, limits.gpu_devices) == (2, (3, 6))
+    with patch("autotrade.environment.gpu.list_gpus", side_effect=AssertionError("selector ran")):
+        assert _select_strategy_gpus(limits) == ([3, 6], None)
+    unclaimed = _strategy_sandbox_from_spec(SandboxSpec(gpu_count=2), fit_timeout_seconds=60)
+    assert unclaimed.limits.gpu_devices == ()
+
+    def session(count: int) -> SandboxSpec:
+        return LLMResearchDeveloper._session_sandbox_spec(
+            SimpleNamespace(sandbox_spec=claimed), SimpleNamespace(sandbox_gpu_count=count)
+        )
+
+    assert (session(1).gpu, session(1).gpu_count) == ((3,), 1)
+    assert (session(0).gpu, session(0).gpu_count) == (None, 0)
+    with pytest.raises(GpuUnavailableError, match=r"asks for 3 GPU\(s\) but the arm holds 2"):
+        session(3)
+
+
 def test_every_container_of_an_experiment_carries_its_label(tmp_path: Path):
     """The console reclaims an experiment's containers by one label; the
     session container and the strategy container of every replay carry it
@@ -1977,6 +2003,24 @@ def test_select_gpus_never_hands_out_a_card_below_the_free_memory_floor():
     enough = [{**_GPU_ROSTER[0], "memory_free_mib": MIN_FREE_GPU_MEMORY_MIB}]
     with patch("autotrade.environment.gpu.list_gpus", return_value=enough):
         assert select_gpus(1, require_name="L20") == [0]
+
+
+def test_idle_gpus_never_offers_a_card_anyone_holds_memory_on():
+    """However much of it is free, a card carrying one CUDA context of
+    somebody's is in use; a card outside the name filter is never offered."""
+    from autotrade.environment.gpu import IDLE_GPU_MEMORY_MIB, idle_gpus
+
+    roster = [
+        {**_GPU_ROSTER[0], "memory_used_mib": 38_000},
+        {**_GPU_ROSTER[1], "memory_used_mib": 0},
+        {**_GPU_ROSTER[2], "memory_used_mib": 0},
+        # 40 GiB free, but an idle strategy container's context is on it.
+        {**_GPU_ROSTER[3], "memory_used_mib": 386},
+    ]
+    assert 386 >= IDLE_GPU_MEMORY_MIB
+    with patch("autotrade.environment.gpu.list_gpus", return_value=roster):
+        assert idle_gpus(require_name="L20") == [1]
+        assert idle_gpus() == [1, 2]
 
 
 def test_persistent_sandbox_start_pins_the_selected_gpus_on_the_container(tmp_path: Path):

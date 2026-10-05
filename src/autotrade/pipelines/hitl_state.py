@@ -34,6 +34,10 @@ PARAMS_NAME = "params.json"
 CONTROL_NAME = "control.json"
 STATUS_NAME = "status.json"
 SCHEDULE_NAME = "schedule.json"
+# The GPUs the console handed an arm when it last started its worker
+# (webui.manager.start_worker). That worker attaches exactly these to every
+# container it starts, and the console counts them as held while it lives.
+GPU_CLAIM_NAME = "gpu_claim.json"
 LIVE_RUN_STATES = {"running_session"}
 
 # The persistent WebUI creation contract.  The form and manager both read
@@ -334,6 +338,29 @@ def read_status(path: str | Path) -> dict[str, object]:
     payload = read_json(path)
     _require_version(payload, Path(path))
     return payload
+
+
+def write_gpu_claim(hitl: str | Path, devices: list[int]) -> None:
+    _write_json(
+        Path(hitl) / GPU_CLAIM_NAME,
+        {"devices": [int(device) for device in devices], "claimed_at": _now()},
+    )
+
+
+def read_gpu_claim(hitl: str | Path) -> tuple[int, ...] | None:
+    """The devices of an arm's GPU claim, or ``None`` when it has none."""
+    path = Path(hitl) / GPU_CLAIM_NAME
+    payload = read_json(path)
+    if not payload:
+        return None
+    devices = payload.get("devices")
+    if (
+        not isinstance(devices, list)
+        or not devices
+        or any(type(device) is not int or device < 0 for device in devices)
+    ):
+        raise ValueError(f"malformed GPU claim in {path}")
+    return tuple(devices)
 
 
 class StatusReporter:
