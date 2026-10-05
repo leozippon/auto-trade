@@ -6,7 +6,8 @@
 # the arms whose experiment directory already exists and creates the next
 # pending ones in file order, through the same validation the operator gets
 # from `--dry-run`; a local arm the local-model limit holds, or a GPU arm too
-# few free cards hold, stays pending and the arms behind it go ahead. The next
+# few free cards hold, stays pending and the arms behind it go ahead (no card
+# is free while a GPU arm started without a claim still runs). The next
 # file reads the slots afresh, so it takes what the earlier ones left. Nothing
 # pending or nothing free is the steady state and exits 0; a refused creation
 # in any file makes the run exit non-zero with its reason in the log, and the

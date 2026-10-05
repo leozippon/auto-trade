@@ -492,33 +492,34 @@ class ExperimentManager:
         A running GPU arm holds the devices claimed for its worker at start
         (``hitl/gpu_claim.json``) for as long as that worker lives, whether
         or not they show memory in use: between batches, while its model
-        thinks, they show none. A running GPU arm without a claim (started
-        before claims existed, or by hand) picks a card by free memory at
-        every replay, so as many idle cards as it asked for are kept back for
-        it. A card is free when it matches the sandbox device filter, no
-        process holds memory on it (``gpu.idle_gpus``) and no running arm
-        claims it; ``gpus_free`` lists the free cards in the order a start
-        takes them. ``gpu_claims`` maps every running GPU arm to its devices,
-        ``None`` for one without a claim. When the devices cannot be read no
-        card is free and ``gpu_error`` says why.
+        thinks, they show none. A card is free when it matches the sandbox
+        device filter, no process holds memory on it (``gpu.idle_gpus``) and
+        no running arm claims it; ``gpus_free`` lists the free cards in the
+        order a start takes them. ``gpu_claims`` maps every running GPU arm to
+        its devices, ``None`` for one without a claim (no ``gpu_claim.json``:
+        started before claims existed, or by hand). While any such arm runs no
+        card is free: its legs pick the card with the most free memory at
+        every start, which is exactly a claimed card its owner is not using
+        yet, and two of them beside the owner's three overfill it. The rule
+        needs no removal: once no unclaimed arm runs it never applies. When
+        the devices cannot be read no card is free and ``gpu_error`` says why.
         """
         from autotrade.environment.gpu import GpuUnavailableError, idle_gpus
 
         claims: dict[str, list[int] | None] = {}
-        kept = 0
         for name in sorted(self.running_experiments()):
             hitl = self.experiments_root / name / "hitl"
-            count = gpu_request(_read_json(hitl / "params.json"))
-            if count:
+            if gpu_request(_read_json(hitl / "params.json")):
                 claim = read_gpu_claim(hitl)
                 claims[name] = None if claim is None else list(claim)
-                kept += count if claim is None else 0
+        if None in claims.values():
+            return {"gpus_free": [], "gpu_claims": claims}
         claimed = {device for devices in claims.values() for device in devices or ()}
         try:
             idle = idle_gpus(require_name=SandboxSpec().gpu_name_filter)
         except GpuUnavailableError as exc:
             return {"gpus_free": [], "gpu_claims": claims, "gpu_error": str(exc)}
-        free = [device for device in idle if device not in claimed][kept:]
+        free = [device for device in idle if device not in claimed]
         return {"gpus_free": free, "gpu_claims": claims}
 
     def _claimable_gpus(self, count: int) -> list[int]:
@@ -529,15 +530,24 @@ class ExperimentManager:
         free = list(slots["gpus_free"])  # type: ignore[call-overload]
         if len(free) >= count:
             return free[:count]
+        claims = slots["gpu_claims"]
+        unclaimed = [name for name, devices in claims.items() if devices is None]  # type: ignore[attr-defined]
         holders = "; ".join(
-            f"{name} {devices}" if devices is not None else f"{name} (no claim, idle cards kept back)"
-            for name, devices in slots["gpu_claims"].items()  # type: ignore[attr-defined]
+            f"{name} {devices}"
+            for name, devices in claims.items()  # type: ignore[attr-defined]
+            if devices is not None
+        )
+        reason = (
+            "no card is claimable while running GPU arms without a claim pick cards "
+            f"themselves: {', '.join(unclaimed)}"
+            if unclaimed
+            else "a card is free only when nothing holds memory on it and no running "
+            "arm claims it"
         )
         raise ManagerError(
             f"当前 GPU 无法满足实验默认分配：requested {count} GPU(s), {len(free)} free "
-            f"({', '.join(map(str, free)) or 'none'}); a card is free only when nothing "
-            "holds memory on it and no running arm claims it; "
-            f"held by running arms: {holders or 'none'}"
+            f"({', '.join(map(str, free)) or 'none'}); {reason}; "
+            f"claimed by running arms: {holders or 'none'}"
             + (f"; GPUs unreadable: {slots['gpu_error']}" if "gpu_error" in slots else "")
         )
 
