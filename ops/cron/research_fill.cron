@@ -12,7 +12,8 @@
 # in any file makes the run exit non-zero with its reason in the log, and the
 # files after it still fill. The operator tops the queue up by appending arms
 # and their reference packs to a file, or a file to ROUNDS; a round whose arms
-# have all been created is marked closed and leaves ROUNDS in the same change.
+# have all been created, or whose remaining arms are withdrawn, is marked closed
+# and leaves ROUNDS in the same change.
 
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -20,7 +21,7 @@ CRON_TZ=Asia/Shanghai
 REPO_ROOT=/Data2/lzp/ADMCubeQuant
 QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # The queue's round files, filled in this order; separated by spaces.
-ROUNDS=scripts/experiments/create_round_20261011.py scripts/experiments/create_round_20261009.py scripts/experiments/create_round_20261008.py scripts/experiments/create_round_20261011b.py
+ROUNDS=scripts/experiments/create_round_20261011.py
 
 # Every ten minutes, all day: a slot that frees up stays empty for at most that
 # long, and research arms end at no particular hour. One run takes seconds per

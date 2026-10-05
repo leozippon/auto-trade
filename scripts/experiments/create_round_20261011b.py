@@ -17,8 +17,11 @@ The round-level parameters are round 20261008's (the fundamentals pack's
 latest, round 20261010, shares them value for value), on the same taxed seed.
 Text-evidence scoring stays on the local model in both arms.
 
-Fill order (ids end in `_20261011`): `fund_open2_100k_8y_qwen`,
-`fund_open2_100k_8y_mimo`.
+The pair (`fund_open2_100k_8y_qwen` / `_mimo`) was withdrawn on 2026-10-05
+before either arm recorded a validation: the inherited trials put its bar at
+1.739 before its own first trial, against a best open-lane row of 0.777 on
+this surface. Nothing was created from this file that remains; its ids are
+retired and the round is closed.
 
 Usage: create_round_20261011b.py <port> [--dry-run] [--fill] [experiment_id ...]
 """
@@ -38,7 +41,6 @@ if str(_REPO_ROOT) not in sys.path:
 from scripts.experiments._profiles import (
     FUND_EIGHT_YEAR_100K,
     FUND_PACK,
-    MIMO,
     TAXED_FUND_PIT_VIEWS_SEED,
 )
 from scripts.experiments._round import Round
@@ -90,15 +92,16 @@ OPEN2_ARM: dict[str, object] = {
     "research_directive": OPEN2_DIRECTIVE,
 }
 
-ARMS: dict[str, dict[str, object]] = {
-    "fund_open2_100k_8y_qwen_20261011": dict(OPEN2_ARM),
-    "fund_open2_100k_8y_mimo_20261011": {**MIMO, **OPEN2_ARM},
-}
+# The pair (`fund_open2_100k_8y_qwen`, and `_mimo` with the `MIMO` roles) was
+# withdrawn and its ids retired; `OPEN2_ARM` stays as the record of what was
+# queued.
+ARMS: dict[str, dict[str, object]] = {}
 
 ROUND = Round(
     arms=ARMS,
     pit_views_seed=TAXED_FUND_PIT_VIEWS_SEED,
     overrides=FUND_EIGHT_YEAR_100K,
+    closed=True,
 )
 
 

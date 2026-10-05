@@ -23,10 +23,11 @@ send alike -- a geometry, the graduation bars, a model pair's hosted roles, a
 lineage -- lives in `_profiles.py`; an open round imports from there and from
 here, never from another round file.
 
-A round whose arms have all been created is marked `closed`. Its file stays as
-the record of what was run, and its `main` refuses every mode: once an arm is
-archived its directory is gone, and the queue would read it as pending and
-create it again.
+A round whose arms have all been created is marked `closed`, and so is one
+whose remaining arms are withdrawn: they leave its arm list and their ids go
+to RETIRED_IDS. Its file stays as the record of what was run, and its `main`
+refuses every mode: once an arm is archived its directory is gone, and the
+queue would read it as pending and create it again.
 
 `normalize` runs the request-level checks the console applies on POST
 /api/experiments (ExperimentManager.create_experiment's closed, unknown,
@@ -67,10 +68,11 @@ was refused; with `--dry-run`
 it also lists each pending arm and whether it takes a free slot. The research
 cron (`ops/cron/research_fill.cron`) runs it over several round files in turn.
 
-RETIRED_IDS records the experiment ids that have been used and archived, so a
-new round cannot quietly reuse one. `logs/archive/` is not part of the
-repository, which is why the list is checked in rather than read from disk;
-`archived_ids` reads the archive where it exists so the two can be compared.
+RETIRED_IDS records the experiment ids that have been used and archived, or
+withdrawn from a round's queue, so a new round cannot quietly reuse one.
+`logs/archive/` is not part of the repository, which is why the list is
+checked in rather than read from disk; `archived_ids` reads the archive
+where it exists so the two can be compared.
 """
 
 from __future__ import annotations
@@ -237,10 +239,11 @@ ROUND_REPORT_KEYS: tuple[str, ...] = (
     "compact_model",
 )
 
-# Experiment ids that were used and archived. An id is never reused: the
-# console keys the experiment directory, the sandbox work root, the Docker
-# image tag and the archive path on it, so a second run under an old name would
-# be indistinguishable from the first in every record that survives it.
+# Experiment ids that were used and archived, or withdrawn from a round's
+# queue. An id is never reused: the console keys the experiment directory,
+# the sandbox work root, the Docker image tag and the archive path on it, so
+# a second run under an old name would be indistinguishable from the first
+# in every record that survives it.
 RETIRED_IDS: frozenset[str] = frozenset(
     {
         "alpha158_lgbm_20260920",
@@ -261,6 +264,17 @@ RETIRED_IDS: frozenset[str] = frozenset(
         # Created by round 20261007, withdrawn from it and deleted unarchived.
         "fund_event2_100k_8y_mimo_20261007",
         "fund_event2_100k_8y_qwen_20261007",
+        # Queued by rounds 20261008, 20261009 and 20261011b and withdrawn on
+        # 2026-10-05 before any recorded a validation; the five that had been
+        # created were deleted unarchived. The round files say why.
+        "fund_open2_100k_8y_mimo_20261011",
+        "fund_open2_100k_8y_qwen_20261011",
+        "seqbag2_cost_100k_8y_mimo_20261008",
+        "seqbag2_cost_100k_8y_qwen_20261008",
+        "seqbag2_pool_100k_8y_mimo_20261008",
+        "seqbag2_pool_100k_8y_qwen_20261008",
+        "seqhold_beta_100k_8y_mimo_20261009",
+        "seqhold_beta_100k_8y_qwen_20261009",
         "github_confirm_20260917",
         "gru_ranker_20260920",
         "margin_flow_20260916",

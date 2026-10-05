@@ -55,9 +55,12 @@ inherited, so the reopening is priced by an `offline_trials` of 12 in the
 first batch, stated in the directive. The local model and `mimo-v2.6-flash`
 each run it.
 
-Fill order (ids end in `_20261009`): `seqhold_clock_100k_8y_qwen`,
-`seqhold_beta_100k_8y_qwen`, `seqhold_beta_100k_8y_mimo`,
-`indcycle_100k_8y_qwen`, `indcycle_100k_8y_mimo`.
+Created (ids end in `_20261009`): `seqhold_clock_100k_8y_qwen`,
+`indcycle_100k_8y_qwen`, `indcycle_100k_8y_mimo`. The beta pair
+(`seqhold_beta_100k_8y_qwen` / `_mimo`) was withdrawn on 2026-10-05 before it
+recorded a validation: it refines the two-seed bag, which round 20261008's
+bag pair found short of the bar on a seed mean, so a lane on a baseline that
+passes is a new round. Its ids are retired and the round is closed.
 
 Usage: create_round_20261009.py <port> [--dry-run] [--fill] [experiment_id ...]
 """
@@ -157,10 +160,10 @@ INDCYCLE_ARM: dict[str, object] = {
     "research_directive": INDCYCLE_DIRECTIVE,
 }
 
+# The beta pair (`seqhold_beta_100k_8y_qwen` / `_mimo`) was withdrawn and its
+# ids retired; `BETA_ARM` stays as the record of what was queued.
 ARMS: dict[str, dict[str, object]] = {
     "seqhold_clock_100k_8y_qwen_20261009": dict(CLOCK_ARM),
-    "seqhold_beta_100k_8y_qwen_20261009": dict(BETA_ARM),
-    "seqhold_beta_100k_8y_mimo_20261009": {**MIMO, **BETA_ARM},
     "indcycle_100k_8y_qwen_20261009": dict(INDCYCLE_ARM),
     "indcycle_100k_8y_mimo_20261009": {**MIMO, **INDCYCLE_ARM},
 }
@@ -171,6 +174,7 @@ ROUND = Round(
     arms=ARMS,
     pit_views_seed=TAXED_FUND_PIT_VIEWS_SEED,
     overrides=FUND_EIGHT_YEAR_100K,
+    closed=True,
 )
 
 

@@ -39,10 +39,14 @@ arms and the clock arm of round 20261009 closed and inherit them
 that run at the same time are still pooled by hand. Both pairs are also held
 to seed replicates, the rule that came in after the bag pair started; the
 local cost arm's first run was deleted before it recorded anything and is
-recreated under that rule like its twin. Fill order (ids end in
-`_20261008`): `seqbag2_bag_100k_8y_qwen` /
-`_mimo`, `seqbag2_cost_100k_8y_qwen` / `_mimo`, `seqbag2_pool_100k_8y_qwen` /
-`_mimo`.
+recreated under that rule like its twin.
+
+Only the bag pair ran (`seqbag2_bag_100k_8y_qwen` / `_mimo`). The cost and
+pool pairs were withdrawn on 2026-10-05 before any of them recorded a
+validation: they refine the two-seed bag, which the bag pair found short of
+the bar on a seed mean (1.244 over seed bases 1000 and 2000 against 1.479), so
+they would refine a baseline that does not pass; a lane on one that does is a
+new round. Their ids are retired and the round is closed.
 
 Usage: create_round_20261008.py <port> [--dry-run] [--fill] [experiment_id ...]
 """
@@ -135,13 +139,12 @@ POOL_ARM: dict[str, object] = {
     "research_directive": POOL_DIRECTIVE + SEED_REPLICATES,
 }
 
+# The cost and pool pairs (`seqbag2_cost_100k_8y_qwen` / `_mimo`,
+# `seqbag2_pool_100k_8y_qwen` / `_mimo`) were withdrawn and their ids retired;
+# `COST_ARM` and `POOL_ARM` stay as the record of what was queued.
 ARMS: dict[str, dict[str, object]] = {
     "seqbag2_bag_100k_8y_qwen_20261008": dict(BAG_ARM),
     "seqbag2_bag_100k_8y_mimo_20261008": {**MIMO, **BAG_ARM},
-    "seqbag2_cost_100k_8y_qwen_20261008": dict(COST_ARM),
-    "seqbag2_cost_100k_8y_mimo_20261008": {**MIMO, **COST_ARM},
-    "seqbag2_pool_100k_8y_qwen_20261008": dict(POOL_ARM),
-    "seqbag2_pool_100k_8y_mimo_20261008": {**MIMO, **POOL_ARM},
 }
 
 # The geometry and every round-level parameter are round 20261006's, on the
@@ -151,6 +154,7 @@ ROUND = Round(
     arms=ARMS,
     pit_views_seed=TAXED_FUND_PIT_VIEWS_SEED,
     overrides=FUND_EIGHT_YEAR_100K,
+    closed=True,
 )
 
 

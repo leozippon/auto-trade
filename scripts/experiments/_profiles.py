@@ -122,7 +122,8 @@ SEQAXES_LINEAGE = [
 ]
 # Plus every arm that has searched the frozen 100k bag as a baseline and closed:
 # round 20261006's label and fundamentals-input pairs and round 20261009's
-# clock arm (round 20261008's cost and pool pairs, and the lanes after them).
+# clock arm (round 20261008's cost and pool pairs and round 20261009's beta
+# pair, which were withdrawn before they ran).
 SEQBOOK_LINEAGE = [
     *SEQAXES_LINEAGE,
     "seqlabel_alla_100k_8y_qwen_20261006",
