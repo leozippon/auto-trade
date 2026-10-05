@@ -9,8 +9,11 @@ that experiment. Neither tier may be rewritten by the session that reads it.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import stat
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -18,6 +21,8 @@ import pytest
 from autotrade.environment.runtime import append_versioned_jsonl
 from autotrade.environment.tools.base import ToolError
 from autotrade.environment.tools.workspace import SafeWorkspace
+from autotrade.paper import fills
+from autotrade.paper.books import list_books
 from autotrade.pipelines.ledger import (
     LEDGER_RECORD_SCHEMA_VERSION,
     ExperimentLedger,
@@ -48,6 +53,7 @@ from autotrade.pipelines.skills import (
 )
 from autotrade.pipelines.worker import load_worker_options
 
+from .paper_book_fixture import paper_root, write_book_record
 from .test_interactive_worker_local import _experiment
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -706,51 +712,97 @@ def test_a_snapshot_with_an_unknown_schema_is_refused(tmp_path: Path) -> None:
         read_operating_memory_snapshot(experiment)
 
 
+def _void(tmp_path: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+    """The void entry point on the arm ``withdrawn`` under ``tmp_path``, with
+    the Paper state root there too."""
+
+    return subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts/experiments/void_graduation.py"),
+            "--experiments-root",
+            str(tmp_path / "experiments"),
+            "--paper-state-root",
+            str(paper_root(tmp_path)),
+            "--experiment",
+            "withdrawn",
+            "--by",
+            "operator",
+            "--reason",
+            "untaxed dividend capture",
+            *arguments,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 def test_the_operator_voids_a_graduation_by_one_appended_record(tmp_path: Path) -> None:
     """The entry point checks before it writes: a dry run appends nothing, a
     void needs evidence that exists, and the arm is voided exactly once."""
 
-    import json
-    import subprocess
-    import sys
-
-    script = REPO_ROOT / "scripts/experiments/void_graduation.py"
     experiments = tmp_path / "experiments"
     experiments.mkdir()
     directory = _experiment_with_skill(experiments, "withdrawn")
     ledger = ExperimentLedger(directory / "ledgers" / "experiment_ledger.jsonl")
     before = ledger.read()
 
-    def void(*arguments: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [
-                sys.executable,
-                str(script),
-                "--experiments-root",
-                str(experiments),
-                "--experiment",
-                "withdrawn",
-                "--by",
-                "operator",
-                "--reason",
-                "untaxed dividend capture",
-                *arguments,
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-
-    missing = void("--evidence", "logs/notes/no_such_evidence_dir")
+    missing = _void(tmp_path, "--evidence", "logs/notes/no_such_evidence_dir")
     assert missing.returncode != 0 and "evidence" in missing.stderr
-    dry = void("--evidence", "src", "--dry-run")
+    dry = _void(tmp_path, "--evidence", "src", "--dry-run")
     assert dry.returncode == 0, dry.stderr
     assert json.loads(dry.stdout)["dry_run"] is True
     assert ledger.read() == before
-    applied = void("--evidence", "src")
+    applied = _void(tmp_path, "--evidence", "src")
     assert applied.returncode == 0, applied.stderr
     written = json.loads(applied.stdout)
     assert written["record_type"] == "verdict_void" and written["evidence_ref"] == "src"
+    assert written["paper_books_deleted"] == []  # the arm had no book
     assert experiment_verdict(ledger.read())["status"] == "voided"
-    again = void("--evidence", "src")
+    again = _void(tmp_path, "--evidence", "src")
     assert again.returncode == 2 and "already voided" in again.stderr
+
+
+def test_a_void_deletes_the_arms_paper_books_first_and_a_real_fill_book_only_when_told(
+    tmp_path: Path,
+) -> None:
+    """A failed strategy does not stay in Paper. The void deletes every book
+    trading the arm, whatever its id, and appends last. A book that follows
+    real fills holds the owner's record of what he traded: it is refused, with
+    nothing changed, unless the operator says to delete it. A book a Paper run
+    is writing stops the void before the append, so the graduation stands and
+    the same command finishes the job once the run is over."""
+
+    experiments = tmp_path / "experiments"
+    experiments.mkdir()
+    directory = _experiment_with_skill(experiments, "withdrawn")
+    ledger = ExperimentLedger(directory / "ledgers" / "experiment_ledger.jsonl")
+    paper = paper_root(tmp_path)
+    for book, experiment_id in (("withdrawn", "withdrawn"), ("withdrawn_hand", "withdrawn"), ("kept", "kept")):
+        write_book_record(paper / book, experiment_id=experiment_id)
+    fills.enable(paper / "withdrawn_hand")  # the owner trades this one
+    before = ledger.read()
+
+    for dry in ((), ("--dry-run",)):
+        refused = _void(tmp_path, "--evidence", "src", *dry)
+        assert refused.returncode == 2 and "withdrawn_hand follows real fills" in refused.stderr
+        assert list_books(paper) == ["kept", "withdrawn", "withdrawn_hand"] and ledger.read() == before
+    told = _void(tmp_path, "--evidence", "src", "--delete-real-fill-book", "--dry-run")
+    assert told.returncode == 0, told.stderr
+    assert json.loads(told.stdout)["paper_books_deleted"] == ["withdrawn", "withdrawn_hand"]
+    assert list_books(paper) == ["kept", "withdrawn", "withdrawn_hand"] and ledger.read() == before
+
+    with (paper / "withdrawn_hand" / ".paper_engine.lock").open("a+b") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)  # a Paper run is writing it
+        busy = _void(tmp_path, "--evidence", "src", "--delete-real-fill-book")
+    assert busy.returncode == 2
+    assert "a Paper run is writing book withdrawn_hand" in busy.stderr and "not voided yet" in busy.stderr
+    assert list_books(paper) == ["kept", "withdrawn_hand"]
+    assert experiment_verdict(ledger.read())["status"] == "graduated"
+
+    finished = _void(tmp_path, "--evidence", "src", "--delete-real-fill-book")
+    assert finished.returncode == 0, finished.stderr
+    assert json.loads(finished.stdout)["paper_books_deleted"] == ["withdrawn_hand"]
+    assert list_books(paper) == ["kept"] and sorted(entry.name for entry in paper.iterdir()) == ["kept"]
+    assert experiment_verdict(ledger.read())["status"] == "voided"

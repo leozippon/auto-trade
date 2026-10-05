@@ -3,8 +3,9 @@
 Each book is an independent account in its own directory,
 ``<state root>/<book id>/``, holding everything ``create_book`` and the engine
 write for it (``book.json``, state, journals, artifact copy, PIT cache) and its
-own writer lock. A run goes through the books one at a time; one book's failure
-is reported for that book and never stops the others.
+own writer lock. A run goes through the books one at a time, the ones the owner
+trades by hand first; one book's failure is reported for that book and never
+stops the others.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from autotrade.pipelines.ledger import ExperimentLedger, paper_candidate
 
 from .book import BOOK_NAME, create_book
 from .engine import writer_lock
+from .fills import FILLS_NAME
 
 # The Paper state root, relative to the repository root.
 PAPER_STATE_DIR = Path("data/trading/paper")
@@ -53,6 +55,25 @@ def list_books(state_root: str | Path) -> list[str]:
         for entry in root.iterdir()
         if entry.is_dir() and BOOK_ID_PATTERN.fullmatch(entry.name) and (entry / BOOK_NAME).is_file()
     )
+
+
+def follows_real_fills(book_root: str | Path) -> bool:
+    """Whether the owner switched this book to real fills.
+
+    He did so because he trades it by hand, and its ``fills.jsonl`` -- the
+    switch and every outcome he recorded -- is his record of what he actually
+    traded.
+    """
+
+    return (Path(book_root) / FILLS_NAME).is_file()
+
+
+def run_order(state_root: str | Path) -> list[str]:
+    """Every book in the order a run takes them: the books that follow real
+    fills first, so the sheets the owner trades from are ready first."""
+
+    root = Path(state_root)
+    return sorted(list_books(root), key=lambda book_id: not follows_real_fills(root / book_id))
 
 
 def run_books(
@@ -123,8 +144,10 @@ __all__ = [
     "BOOK_ID_PATTERN",
     "PAPER_STATE_DIR",
     "delete_book",
+    "follows_real_fills",
     "list_books",
     "open_graduated_book",
     "run_books",
+    "run_order",
     "validate_book_id",
 ]

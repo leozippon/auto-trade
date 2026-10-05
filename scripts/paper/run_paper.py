@@ -6,8 +6,9 @@ Books live side by side under the state root, one directory per book id.
 the artifact's out-of-sample curve into a new book (id: the experiment id, or
 ``--book``); ``source-history`` backfills that curve into a book created before
 init copied it. ``run`` goes through
-every book (or ``--book`` alone) one at a time: it settles each session whose
-data has landed and makes the pre-open decision for the target session
+every book (or ``--book`` alone) one at a time, the books that follow real
+fills -- the ones the owner trades by hand -- first: it settles each session
+whose data has landed and makes the pre-open decision for the target session
 (default: today, Asia/Shanghai), then writes the book's order sheet to
 ``<orders-dir>/<book>/<date>_orders.md`` and ``latest_orders.md`` and prints it.
 A book that fails writes its failure to the same two files and the run goes on
@@ -43,6 +44,7 @@ from autotrade.paper.books import (
     PAPER_STATE_DIR,
     list_books,
     run_books,
+    run_order,
     validate_book_id,
 )
 from autotrade.paper.engine import DailyPaperEngine, PaperWriterBusy
@@ -205,7 +207,7 @@ def run_book(book_id: str, root: Path, trade_date: str, orders_dir: Path) -> Non
 
 def run(args: argparse.Namespace) -> int:
     trade_date = args.trade_date or datetime.now(CN_TZ).strftime("%Y%m%d")
-    book_ids = [validate_book_id(args.book)] if args.book else list_books(args.state_root)
+    book_ids = [validate_book_id(args.book)] if args.book else run_order(args.state_root)
     if not book_ids:
         print(f"no Paper books under {args.state_root}; create one with `run_paper.py init`", file=sys.stderr)
         return 1

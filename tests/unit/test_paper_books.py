@@ -11,12 +11,15 @@ from pathlib import Path
 import pytest
 
 from autotrade.environment.artifacts import artifact_fingerprint
+from autotrade.paper import fills
 from autotrade.paper.book import STRATEGY_COPY_NAME, create_book
 from autotrade.paper.books import (
     delete_book,
+    follows_real_fills,
     list_books,
     open_graduated_book,
     run_books,
+    run_order,
     validate_book_id,
 )
 from autotrade.paper.engine import PaperWriterBusy
@@ -59,6 +62,23 @@ def test_one_failing_or_busy_book_does_not_stop_the_others(tmp_path: Path):
     assert isinstance(failures["busy"], PaperWriterBusy)
     assert _decided(root / "alpha") == _decided(root / "gamma") == ["20260105"]
     assert not (root / "busy" / ".paper_state.json").exists()
+
+
+def test_a_run_takes_the_books_the_owner_trades_first(tmp_path: Path):
+    """The books switched to real fills run before the others, so the sheets
+    the owner trades from are ready first; the order is the books' own state,
+    so a deleted book leaves nothing behind to name."""
+
+    root = paper_root(tmp_path)
+    for book in ("alpha", "beta", "gamma", "traded"):
+        write_book_record(root / book, experiment_id=book)
+    assert run_order(root) == ["alpha", "beta", "gamma", "traded"]
+    fills.enable(root / "traded")
+    fills.enable(root / "beta")
+    assert [follows_real_fills(root / book) for book in list_books(root)] == [False, True, False, True]
+    assert run_order(root) == ["beta", "traded", "alpha", "gamma"]
+    delete_book(root, "traded")
+    assert run_order(root) == ["beta", "alpha", "gamma"]
 
 
 def test_a_new_book_records_the_content_address_of_the_artifact_it_trades(tmp_path: Path):

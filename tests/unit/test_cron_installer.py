@@ -85,10 +85,15 @@ class CronInstallerTest(unittest.TestCase):
         for job in jobs:
             # Weekdays only, never overlapping, logged under logs/paper/.
             self.assertEqual(job.split()[4], "1-5")
-            self.assertIn("flock -n .runtime/paper/cron.lock", job)
-            # The owner's book first, then every book, under one lock.
-            self.assertIn("scripts/paper/run_paper.py run --book $PRIORITY_BOOK; ", job)
-            self.assertIn("scripts/paper/run_paper.py run' >> logs/paper/cron.log 2>&1", job)
+            # Every book, in the run's own order (the hand-traded ones first):
+            # the job names no book, so a deleted one cannot break the morning.
+            self.assertTrue(
+                job.endswith(
+                    " flock -n .runtime/paper/cron.lock $QUANT_PYTHON scripts/paper/run_paper.py run"
+                    " >> logs/paper/cron.log 2>&1"
+                ),
+                job,
+            )
 
     def test_the_research_fill_block_installs_beside_the_paper_block(self) -> None:
         template, begin, end = installer.BLOCKS["research"]
