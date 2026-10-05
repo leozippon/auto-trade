@@ -20,8 +20,9 @@ judgement. REV's tree is extracted to a temporary directory, where its own
 copy of this script dumps everything it recomputes; this tree dumps the same;
 the two dumps must be equal key for key, key order included. The dump is
 wider than the records: every recorded Step taken as the nominee and every
-forward replay judged again under every rule era (``ERAS``, so an era no
-record has reached yet is covered), the full-span bar after every session,
+forward replay judged again under every rule era and under a tracking mandate
+(``VARIANTS``, so rules no record has reached yet are covered), the full-span
+bar after every session,
 every arm's resolved rules and the facts its Agent reads from them, and the
 creation contract (the console's creation defaults, the accepted parameters).
 The arms are live: one whose parameters or ledger were not the same bytes in
@@ -67,7 +68,11 @@ from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.replay.stats import window_activity
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
 from autotrade.pipelines.calendar import GEOMETRY_PARAMETERS, ResearchGeometry
-from autotrade.pipelines.config import AcceptanceRules, acceptance_for
+from autotrade.pipelines.config import (
+    MANDATED_DEFAULTS,
+    AcceptanceRules,
+    acceptance_for,
+)
 from autotrade.pipelines.experiment import freeze_gate_for, full_span_bar
 from autotrade.pipelines.hitl_state import (
     HITL_DIR_NAME,
@@ -98,6 +103,14 @@ ERAS: dict[str, dict[str, bool]] = {
     "R1": {_RAW: True, _PLAIN: False, _SEEDS: False},
     "R2": {_RAW: True, _PLAIN: True, _SEEDS: False},
     "R3": {_RAW: True, _PLAIN: True, _SEEDS: True},
+}
+# The arm's rules under a tracking mandate, which no arm on disk holds: the
+# cap of the console's own example with the default beta band.
+MANDATED = "mandated"
+# What the differential lays over the rules each input was judged under.
+VARIANTS: dict[str, dict[str, object]] = {
+    **ERAS,
+    MANDATED: {"tracking_error_cap": 0.08, **MANDATED_DEFAULTS},
 }
 # R3 once more with seed replicates named, which no record holds yet: at the
 # freeze every other Step of the session (most are refused as replicates, and
@@ -347,8 +360,8 @@ def _recomputed(
     variants = {
         "own": own,
         **{
-            era: AcceptanceRules.from_record({**own.to_record(), **flags})
-            for era, flags in ERAS.items()
+            name: AcceptanceRules.from_record({**own.to_record(), **overlay})
+            for name, overlay in VARIANTS.items()
         },
     }
     sessions: dict[str, object] = {}
@@ -417,7 +430,7 @@ def _forward(
     record: Mapping[str, Any], *, slippage_bps: float, extended: bool
 ) -> dict[str, object]:
     """One completed forward record: its recorded verdict again and,
-    ``extended``, the verdict under every era's conditions."""
+    ``extended``, the verdict under every variant of its rules."""
 
     replay, analysis = _replay_and_analysis(record["result_ref"])
     stated: Mapping[str, object] = record["acceptance_rules"]
@@ -436,8 +449,8 @@ def _forward(
 
     verdicts = {"recorded": judged(stated, record.get("seed_replicates") or ())}
     if extended:
-        for era, flags in ERAS.items():
-            verdicts[era] = judged({**stated, **flags})
+        for name, overlay in VARIANTS.items():
+            verdicts[name] = judged({**stated, **overlay})
         book = {key: "book" for key in ("artifact_id", "source_step_id")}
         verdicts[WITH_REPLICATES] = judged(
             {**stated, **ERAS["R3"]}, [{**book, "result_ref": record["result_ref"]}]

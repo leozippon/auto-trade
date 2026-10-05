@@ -21,8 +21,9 @@ from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
 from autotrade.pipelines.worker import load_worker_options, run_local_interactive_worker
 from scripts.dev.recompute_verdicts import (
     BASELINE_PATHS,
-    ERAS,
+    MANDATED,
     REPO_ROOT,
+    VARIANTS,
     WITH_REPLICATES,
     baseline_dump,
     changed,
@@ -138,10 +139,11 @@ def test_a_declared_exception_covers_exactly_the_keys_it_names(experiments: Path
     )
 
 
-def test_the_dump_judges_every_stored_input_under_every_era(current: dict):
-    variants = ["own", *ERAS, WITH_REPLICATES]
+def test_the_dump_judges_every_stored_input_under_every_variant_of_its_rules(current: dict):
+    assert list(VARIANTS) == ["R0", "R1", "R2", "R3", MANDATED]
+    variants = ["own", *VARIANTS, WITH_REPLICATES]
     arm = current["arms"][ARM]
-    assert list(arm["rules"]) == list(arm["facts"]) == ["own", *ERAS]
+    assert list(arm["rules"]) == list(arm["facts"]) == ["own", *VARIANTS]
     (session,) = arm["sessions"].values()
     assert session["freeze_gate"]["passed"] is True
     assert session["full_span_bar"]["trials"] >= 1
@@ -158,8 +160,13 @@ def test_the_dump_judges_every_stored_input_under_every_era(current: dict):
         # it holds the nominee's own bytes.
         assert gates["R3"]["seed_replicates"]["replicates"] == []
         assert gates[WITH_REPLICATES]["reasons"] == ["freeze_seed_replicate_invalid"]
+        # No arm on disk holds a tracking mandate; under one, a one-name book
+        # is refused for the tracking error it cannot keep.
+        assert gates["own"]["thresholds"]["tracking_error_cap"] is None
+        assert gates[MANDATED]["thresholds"]["tracking_error_cap"] == 0.08
+        assert "freeze_tracking_error_above_cap" in gates[MANDATED]["reasons"]
     (verdicts,) = arm["forward"].values()
-    assert list(verdicts) == ["recorded", *ERAS, WITH_REPLICATES]
+    assert list(verdicts) == ["recorded", *VARIANTS, WITH_REPLICATES]
     stamped = {
         name: sorted(key for key in block["verdict"]["thresholds"] if key.startswith("require_"))
         for name, block in verdicts.items()
@@ -170,8 +177,11 @@ def test_the_dump_judges_every_stored_input_under_every_era(current: dict):
         "R1": [],
         "R2": ["require_forward_plain_selection"],
         "R3": ["require_forward_plain_selection", "require_seed_replicates"],
+        MANDATED: [],
         WITH_REPLICATES: ["require_forward_plain_selection", "require_seed_replicates"],
     }
+    assert "forward_tracking_error_above_cap" in verdicts[MANDATED]["verdict"]["reasons"]
+    assert verdicts["recorded"]["verdict"]["reasons"] == []
     assert "seed_mean" not in verdicts["R3"]["slices"]["forward"]
     assert verdicts[WITH_REPLICATES]["slices"]["forward"]["seed_mean"]["members"] == 2
     # The creation contract rides along, in the console's own order.
