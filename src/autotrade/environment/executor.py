@@ -21,6 +21,7 @@ from .container_stats import ContainerResourceMonitor
 from .contract_fingerprint import (
     SandboxImageContractMismatch,
     assert_image_contract_current,
+    compute_runtime_fingerprint,
 )
 from .gpu import device_request, gpu_memory_contention, select_gpus_with_free_memory
 from .runtime import chmod_tree
@@ -58,6 +59,11 @@ CONTAINER_SNAPSHOT_DIR = "/strategy-data/snapshot"
 CONTAINER_ASOF_DIR = "/strategy-data/asof"
 CONTAINER_MODELS_DIR = "/strategy-data/models"
 CONTAINER_STATE_DIR = "/strategy-data/state"
+# The strategy runtime this process enforces: the modules it imported, read
+# once alongside them. A strategy container's image must bake exactly these;
+# a checkout that moves on under a running worker changes neither the
+# validator the worker runs nor what its next container is compared with.
+IMPORTED_RUNTIME_FINGERPRINT = compute_runtime_fingerprint(Path(__file__).resolve().parent)
 
 
 class StrategyExecutionError(RuntimeError):
@@ -277,12 +283,6 @@ class DockerStrategyExecutor:
     inference container selects the devices once at start and the fit worker
     inherits exactly those, so one evaluation holds one allocation and a
     replay whose experiment asked for no GPU stays CPU-only.
-
-    ``agent_contract`` says whether an Agent is reading the contract text this
-    checkout states: on for a research replay, off for a Paper book replaying a
-    strategy frozen long ago. It only widens the image check from both halves
-    of the contract to the runtime modules the container really enforces
-    (``contract_fingerprint``); the runtime half is never optional.
     """
 
     def __init__(
@@ -295,7 +295,6 @@ class DockerStrategyExecutor:
         models_dir: str | Path | None = None,
         state_dir: str | Path | None = None,
         state_writable: bool = False,
-        agent_contract: bool = True,
     ) -> None:
         self.strategy_path = Path(strategy_path).resolve()
         if not self.strategy_path.is_file():
@@ -313,7 +312,6 @@ class DockerStrategyExecutor:
         self.context_state_dir = CONTAINER_STATE_DIR if self.state_dir is not None else ""
         self.context_models_dir = CONTAINER_MODELS_DIR if self.models_dir is not None else ""
         self._state_writable = state_writable
-        self._agent_contract = agent_contract
         self._fit_worker: DockerStrategyExecutor | None = None
         # Resolved before the container exists and rendered into its run
         # arguments below. An unsatisfiable request fails right here, so a
@@ -437,7 +435,6 @@ class DockerStrategyExecutor:
                 models_dir=self.models_dir,
                 state_dir=self.state_dir,
                 state_writable=True,
-                agent_contract=self._agent_contract,
             )
         try:
             self._fit_worker._roundtrip(
@@ -703,7 +700,7 @@ class DockerStrategyExecutor:
         self.close()
 
     def _start(self) -> None:
-        _require_local_image(self.config, agent_contract=self._agent_contract)
+        _require_local_image(self.config)
         try:
             self._process = subprocess.Popen(
                 self.docker_command(),
@@ -1172,15 +1169,15 @@ def _select_strategy_gpus(limits: SandboxLimits) -> tuple[list[int], int | None]
     return [index for index, _free in selected], sum(free for _index, free in selected)
 
 
-def _require_local_image(config: SandboxConfig, *, agent_contract: bool) -> str:
+def _require_local_image(config: SandboxConfig) -> str:
     """Resolve Docker and reject an absent or stale image without any pull attempt.
 
     The image carries its own copy of the strategy loader, so an image baking
-    other bytes would enforce superseded rules against a strategy written to
-    the rules this checkout states. That divergence is invisible from inside
-    the container, so it is checked here — once per strategy worker start,
-    before the worker exists. ``agent_contract`` additionally requires the
-    image to have been built from the README the Agent reads; see
+    other bytes would enforce superseded rules against a strategy validated by
+    this process's loader. That divergence is invisible from inside the
+    container, so it is checked here — once per strategy worker start, before
+    the worker exists — against ``IMPORTED_RUNTIME_FINGERPRINT``. The README
+    half is the research session's check, where it mounts the README; see
     ``contract_fingerprint``.
     """
 
@@ -1206,7 +1203,7 @@ def _require_local_image(config: SandboxConfig, *, agent_contract: bool) -> str:
         )
     try:
         assert_image_contract_current(
-            config.image, docker_executable=executable, agent_contract=agent_contract
+            config.image, runtime=IMPORTED_RUNTIME_FINGERPRINT, docker_executable=executable
         )
     except SandboxImageContractMismatch as exc:
         raise StrategyExecutionError(str(exc)) from exc
@@ -1221,6 +1218,7 @@ __all__ = [
     "CONTAINER_SNAPSHOT_DIR",
     "CONTAINER_STATE_DIR",
     "CONTAINER_STRATEGY_DIR",
+    "IMPORTED_RUNTIME_FINGERPRINT",
     "DockerStrategyExecutor",
     "ExecResult",
     "FittableStrategyExecutor",

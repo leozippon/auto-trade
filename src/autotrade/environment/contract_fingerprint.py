@@ -9,15 +9,19 @@ two contracts, and they drift apart for different reasons:
   ``strategy_worker.py`` — is what the container actually enforces. An image
   baking other bytes would accept or reject a strategy by superseded rules, and
   nothing inside the container reveals that. Every strategy container start
-  checks it, research and Paper alike.
+  checks it, research and Paper alike, against the modules the starting
+  process imported (``executor.IMPORTED_RUNTIME_FINGERPRINT``), not against
+  whatever the checkout holds by then.
 - The **Agent-facing contract** — ``configs/agent_output_template/README.md`` —
   is the text that states those same rules to the Agent. It matters only where
-  an Agent reads it, that is in a research session; a Paper book replays a
-  strategy frozen long before, with no README anywhere in the loop.
+  an Agent reads it, so it is checked once, where a research session mounts its
+  copy as ``output/README.md``, against that copy; a strategy container never
+  reads it, and a Paper book replays a strategy frozen long before.
 
-Splitting them is what lets a README-only rebuild of the base image leave a
-Paper book running on a pinned image that bakes exactly this checkout's
-runtime, while any drift of the runtime modules is still refused everywhere.
+Splitting them is what lets a README-only rebuild of the base image reach new
+arms only: an arm already running keeps the README it was seeded with and the
+image pinned to it, while any drift of the runtime modules is still refused
+everywhere.
 
 The two digests come from one hashing function and one file list. The runtime
 digest is computed from the modules the image baked — the very bytes the worker
@@ -97,15 +101,20 @@ def _digest(entries: Iterable[tuple[str, Path]]) -> str:
     return digest.hexdigest()
 
 
-def compute_contract_fingerprint(root: str | Path) -> str:
+def compute_contract_fingerprint(root: str | Path, *, readme: str | Path | None = None) -> str:
     """Digest the full contract below ``root`` (a repository-shaped tree).
 
     ``root`` is the repository root on the host and the staging tree the image
     build copies the same files into, so one function serves both sides.
+    ``readme`` stands in for the template README: the copy a research session
+    mounts, which is the text its Agent actually reads.
     """
 
     base = Path(root)
-    return _digest((relative, base / relative) for relative in CONTRACT_SOURCE_PATHS)
+    sources = {relative: base / relative for relative in CONTRACT_SOURCE_PATHS}
+    if readme is not None:
+        sources[AGENT_CONTRACT_PATHS[0]] = Path(readme)
+    return _digest(sources.items())
 
 
 def compute_runtime_fingerprint(module_dir: str | Path) -> str:
@@ -120,10 +129,11 @@ def compute_runtime_fingerprint(module_dir: str | Path) -> str:
     return _digest((name, base / name) for name in RUNTIME_CONTRACT_MODULES)
 
 
-def host_contract_fingerprint() -> str:
-    """Digest the full contract of the checkout this module belongs to."""
+def host_contract_fingerprint(readme: str | Path | None = None) -> str:
+    """Digest the full contract of the checkout this module belongs to, with
+    ``readme`` in place of its template README when given."""
 
-    return compute_contract_fingerprint(_repository_root())
+    return compute_contract_fingerprint(_repository_root(), readme=readme)
 
 
 def host_runtime_fingerprint() -> str:
@@ -188,27 +198,27 @@ def read_image_contract(
         ) from exc
 
 
-def check_runtime_contract(image: str, image_runtime: str) -> None:
-    """Raise unless the image bakes this checkout's strategy runtime modules."""
+def check_runtime_contract(image: str, image_runtime: str, host: str) -> None:
+    """Raise unless the image bakes the strategy runtime ``host`` digests."""
 
-    host = host_runtime_fingerprint()
     if image_runtime == host:
         return
     raise SandboxImageContractMismatch(
-        f"sandbox image {image} bakes a different strategy runtime than this checkout "
-        f"(image {image_runtime or '<empty>'}, host {host}); the container would enforce "
+        f"sandbox image {image} bakes a different strategy runtime than this process "
+        f"enforces (image {image_runtime or '<empty>'}, host {host}); the container would enforce "
         f"superseded rules from {', '.join(RUNTIME_CONTRACT_MODULES)}. Rebuild the base "
         f"image with `{REBUILD_COMMAND}`, then re-point every pinned experiment tag at it "
         "(see docs/environment-design.md)."
     )
 
 
-def check_agent_contract(image: str, image_contract: str) -> None:
+def check_agent_contract(image: str, image_contract: str, host: str) -> None:
     """Raise unless the image was built from the contract text the Agent reads.
 
-    Called only for a session in which an Agent reads that text. The recorded
-    digest covers the runtime modules as well, which ``check_runtime_contract``
-    has already compared byte for byte; what this adds is the README.
+    Called only for a session in which an Agent reads that text, with ``host``
+    the full digest over the README it mounts. The recorded digest covers the
+    runtime modules as well, which ``check_runtime_contract`` has already
+    compared byte for byte; what this adds is the README.
     """
 
     if not image_contract:
@@ -218,7 +228,6 @@ def check_agent_contract(image: str, image_contract: str) -> None:
             f"Rebuild the base image with `{REBUILD_COMMAND}`, then re-point every "
             "pinned experiment tag at it (see docs/environment-design.md)."
         )
-    host = host_contract_fingerprint()
     if image_contract == host:
         return
     raise SandboxImageContractMismatch(
@@ -231,18 +240,24 @@ def check_agent_contract(image: str, image_contract: str) -> None:
 
 
 def assert_image_contract_current(
-    image: str, *, docker_executable: str = "docker", agent_contract: bool = True
+    image: str,
+    *,
+    runtime: str,
+    readme: str | Path | None = None,
+    docker_executable: str = "docker",
 ) -> None:
-    """Fail fast when ``image``'s contract has drifted from this checkout's.
+    """Fail fast when ``image``'s contract has drifted from the caller's.
 
-    The runtime half is always checked. ``agent_contract`` adds the README half
-    and is on for every caller but Paper, where no Agent reads it.
+    ``runtime`` digests the strategy runtime the calling process enforces and
+    is always checked. ``readme`` is the README a research session mounts:
+    given, the image must also have been built from it together with this
+    checkout's runtime modules.
     """
 
     found = read_image_contract(image, docker_executable=docker_executable)
-    check_runtime_contract(image, found.runtime)
-    if agent_contract:
-        check_agent_contract(image, found.contract)
+    check_runtime_contract(image, found.runtime, runtime)
+    if readme is not None:
+        check_agent_contract(image, found.contract, host_contract_fingerprint(readme))
 
 
 def _image_contract_report() -> str:

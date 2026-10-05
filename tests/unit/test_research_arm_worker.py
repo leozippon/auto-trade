@@ -987,3 +987,77 @@ def test_the_llm_session_validates_a_multi_year_span_is_refused_by_the_gate_and_
     assert retired_vocabulary(read) == []
     for later in ("20240701", "2024-07-01", GEOMETRY["forward_end"], GEOMETRY["heldout_end"], RELEASE_END):
         assert later not in read
+
+
+def test_a_readme_edit_stops_a_new_session_and_not_one_already_seeded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The arm's pinned image was built from the template README its session
+    was seeded with, and a maintainer then edits the template in the checkout.
+    The session's next attempt resumes on the copy it was seeded with and
+    starts. A session seeded after the edit is refused before its Agent reads
+    the new text, naming the README. The strategy containers never read the
+    README (``test_sandbox_contract_fingerprint``)."""
+
+    import shutil
+
+    from autotrade.environment import contract_fingerprint
+    from autotrade.environment.contract_fingerprint import (
+        AGENT_CONTRACT_PATHS,
+        ImageContract,
+        SandboxImageContractMismatch,
+        host_contract_fingerprint,
+    )
+    from autotrade.environment.executor import IMPORTED_RUNTIME_FINGERPRINT
+    from autotrade.environment.identity import AgentRefStore
+    from autotrade.pipelines import research_session
+
+    class SandboxStarting(Exception):
+        """The session passed its image check and reached its container."""
+
+    class StoppedSandbox:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def start(self) -> None:
+            raise SandboxStarting
+
+        def stop(self) -> None:
+            pass
+
+    monkeypatch.setattr(research_session, "DockerSandbox", StoppedSandbox)
+    # The pinned image, built from this checkout's template before the edit.
+    built = ImageContract(IMPORTED_RUNTIME_FINGERPRINT, host_contract_fingerprint())
+    monkeypatch.setattr(contract_fingerprint, "read_image_contract", lambda image, **_kwargs: built)
+    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
+    template = Path(contract_fingerprint.__file__).resolve().parents[3] / "configs" / "agent_output_template"
+
+    def arm(root: Path):
+        repo, experiment = make_arm(
+            root, developer_mode="llm", strategy_path="configs/agent_output_template/main.py"
+        )
+        shutil.copytree(template, repo / "configs" / "agent_output_template")
+        options = load_worker_options(experiment, repo_root=repo)
+        build = worker.build_experiment_pipeline(
+            options,
+            ledger=ExperimentLedger(options.rolling.ledger_path),
+            store=FilesystemArtifactStore(options.experiment_dir / "artifacts" / "strategy"),
+            ref_store=AgentRefStore(options.experiment_dir),
+            llm=object(),
+        )
+        return repo, build.pipeline
+
+    repo, running = arm(tmp_path / "running")
+    with pytest.raises(SandboxStarting):
+        running.run_research_session()
+    readme = repo / AGENT_CONTRACT_PATHS[0]
+    readme.write_text(readme.read_text(encoding="utf-8") + "\nEach decision gets 360 s.\n", encoding="utf-8")
+    # The second attempt continues the first one's session runtime (a fresh
+    # one over it would refuse), on the README that attempt was seeded with.
+    with pytest.raises(SandboxStarting):
+        running.run_research_session()
+
+    later, fresh = arm(tmp_path / "later")
+    shutil.copyfile(readme, later / AGENT_CONTRACT_PATHS[0])
+    with pytest.raises(SandboxImageContractMismatch, match=AGENT_CONTRACT_PATHS[0]):
+        fresh.run_research_session()

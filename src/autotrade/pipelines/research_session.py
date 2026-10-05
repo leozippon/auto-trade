@@ -32,8 +32,12 @@ from autotrade.environment.artifacts import (
     readonly_baseline,
     restore_working_artifacts_writable,
 )
+from autotrade.environment.contract_fingerprint import assert_image_contract_current
 from autotrade.environment.data.summary import write_agent_data_summary
-from autotrade.environment.executor import PersistentCommandRunner
+from autotrade.environment.executor import (
+    IMPORTED_RUNTIME_FINGERPRINT,
+    PersistentCommandRunner,
+)
 from autotrade.environment.gpu import GpuUnavailableError
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm.model_profiles import AGENT_MAX_OUTPUT_TOKENS
@@ -512,6 +516,19 @@ class LLMResearchDeveloper:
             else:
                 _environment_phase(
                     request.progress_hook, "sandbox_start", request.run_id
+                )
+                # The one place an Agent reads the strategy contract: the
+                # README this session was seeded with, which a resumed attempt
+                # keeps. Its image must have been built from it; the strategy
+                # containers check only the runtime they enforce. A baseline
+                # that ships no README leaves the Agent no contract text, so
+                # only the runtime half applies.
+                readme = output_dir / "README.md"
+                assert_image_contract_current(
+                    sandbox_spec.image,
+                    runtime=IMPORTED_RUNTIME_FINGERPRINT,
+                    readme=readme if readme.is_file() else None,
+                    docker_executable=sandbox_spec.docker_executable,
                 )
                 sandbox = DockerSandbox(
                     local,

@@ -1,12 +1,13 @@
 """The strategy contract a sandbox image carries, in its two halves.
 
 What the container enforces is the strategy runtime it bakes; what the Agent is
-told is the template README the build only hashed. An image whose runtime has
-drifted would silently judge a strategy by superseded rules and is refused
-everywhere. An image built from a different README only misleads an Agent, so
-it is refused where an Agent reads it and not in a Paper book replaying a
-strategy frozen long before. These tests cover both digests, both refusals, and
-the build step that puts the recorded digest into the image.
+told is the template README the build only hashed. An image whose runtime
+differs from the one the starting process imported would silently judge a
+strategy by superseded rules and is refused at every container start. An image
+built from a different README only misleads an Agent, so it is refused where a
+research session mounts its copy, and nowhere else. These tests cover both
+digests, both refusals, and the build step that puts the recorded digest into
+the image.
 """
 
 from __future__ import annotations
@@ -37,6 +38,12 @@ from autotrade.environment.contract_fingerprint import (
     host_runtime_fingerprint,
     read_image_contract,
 )
+from autotrade.environment.executor import (
+    IMPORTED_RUNTIME_FINGERPRINT,
+    StrategyExecutionError,
+    _require_local_image,
+)
+from autotrade.environment.sandbox import SandboxConfig
 
 from .fixtures_sandbox import docker_available
 
@@ -73,6 +80,16 @@ def _image_reports(monkeypatch: pytest.MonkeyPatch, found: ImageContract) -> Non
     )
 
 
+def _container_start(tmp_path: Path) -> SandboxConfig:
+    """A strategy container's config whose Docker finds every image locally;
+    what the image bakes is answered by ``_image_reports``."""
+
+    docker = tmp_path / "docker"
+    docker.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    docker.chmod(0o755)
+    return SandboxConfig(image=IMAGE, docker_executable=str(docker))
+
+
 def test_both_fingerprints_are_stable_and_layout_independent(tmp_path: Path) -> None:
     staged = _contract_tree(tmp_path / "contract")
     # The image stages and bakes the same files under different absolute roots;
@@ -81,6 +98,12 @@ def test_both_fingerprints_are_stable_and_layout_independent(tmp_path: Path) -> 
     assert compute_runtime_fingerprint(staged / HOST_RUNTIME_MODULE_DIR) == (
         host_runtime_fingerprint()
     )
+    # A session's copy of an unchanged README digests like the template.
+    assert host_contract_fingerprint(staged / AGENT_CONTRACT_PATHS[0]) == (
+        host_contract_fingerprint()
+    )
+    # Nothing has moved under this process since it imported the runtime.
+    assert IMPORTED_RUNTIME_FINGERPRINT == host_runtime_fingerprint()
 
 
 @pytest.mark.parametrize("relative", CONTRACT_SOURCE_PATHS)
@@ -120,19 +143,15 @@ def test_missing_contract_source_fails_instead_of_digesting_a_subset(
         compute_contract_fingerprint(staged)
 
 
-def test_matching_image_is_accepted_by_both_checks() -> None:
-    check_runtime_contract(BASE_IMAGE, host_runtime_fingerprint())
-    check_agent_contract(BASE_IMAGE, host_contract_fingerprint())
-
-
 def test_drift_is_refused_with_both_fingerprints_and_the_rebuild_command() -> None:
     stale = "0" * 64
     for check, host in (
         (check_runtime_contract, host_runtime_fingerprint()),
         (check_agent_contract, host_contract_fingerprint()),
     ):
+        check(IMAGE, host, host)
         with pytest.raises(SandboxImageContractMismatch) as raised:
-            check(IMAGE, stale)
+            check(IMAGE, stale, host)
         message = str(raised.value)
         assert IMAGE in message
         assert stale in message
@@ -141,48 +160,92 @@ def test_drift_is_refused_with_both_fingerprints_and_the_rebuild_command() -> No
 
 
 @pytest.mark.parametrize("module", RUNTIME_CONTRACT_MODULES)
-def test_runtime_drift_stops_a_paper_book_and_a_research_session_alike(
+def test_runtime_drift_stops_every_container_and_every_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, module: str
 ) -> None:
     staged = _contract_tree(tmp_path / "image")
     edited = staged / HOST_RUNTIME_MODULE_DIR / module
     edited.write_bytes(edited.read_bytes() + b"\n# superseded loader rule\n")
     _image_reports(monkeypatch, _image_contract(staged))
-    for agent_contract in (True, False):
-        with pytest.raises(SandboxImageContractMismatch) as raised:
-            assert_image_contract_current(IMAGE, agent_contract=agent_contract)
-        assert module in str(raised.value)
+    with pytest.raises(StrategyExecutionError, match=module):
+        _require_local_image(_container_start(tmp_path))
+    with pytest.raises(SandboxImageContractMismatch, match=module):
+        assert_image_contract_current(
+            IMAGE,
+            runtime=IMPORTED_RUNTIME_FINGERPRINT,
+            readme=staged / AGENT_CONTRACT_PATHS[0],
+        )
 
 
-def test_contract_text_drift_stops_a_research_session_and_lets_paper_run(
+def test_a_readme_edit_is_refused_where_a_session_mounts_it_and_nowhere_else(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    staged = _contract_tree(tmp_path / "image")
-    readme = staged / AGENT_CONTRACT_PATHS[0]
+    """The arm's image was built before the template README changed in this
+    checkout. A session seeded afterwards mounts the new text and is refused
+    before its Agent reads it. A strategy container -- a running arm's next
+    validation, its forward replay, a Paper book -- never reads the README and
+    starts, and a resumed session keeps the copy it was seeded with."""
+
+    built = _contract_tree(tmp_path / "built")
+    _image_reports(monkeypatch, _image_contract(built))
+    checkout = _contract_tree(tmp_path / "checkout")
+    readme = checkout / AGENT_CONTRACT_PATHS[0]
     readme.write_bytes(readme.read_bytes() + b"\nEach decision gets 360 s.\n")
-    _image_reports(monkeypatch, _image_contract(staged))
-    # The image bakes this checkout's runtime, so the frozen strategy it would
-    # run is judged by exactly the rules in force here.
-    assert_image_contract_current(IMAGE, agent_contract=False)
-    with pytest.raises(SandboxImageContractMismatch) as raised:
-        assert_image_contract_current(IMAGE)
-    assert AGENT_CONTRACT_PATHS[0] in str(raised.value)
+    monkeypatch.setattr(contract_fingerprint, "_repository_root", lambda: checkout)
+
+    config = _container_start(tmp_path)
+    assert _require_local_image(config) == config.docker_executable
+    with pytest.raises(SandboxImageContractMismatch, match=AGENT_CONTRACT_PATHS[0]):
+        assert_image_contract_current(
+            IMAGE, runtime=IMPORTED_RUNTIME_FINGERPRINT, readme=readme
+        )
+    assert_image_contract_current(
+        IMAGE,
+        runtime=IMPORTED_RUNTIME_FINGERPRINT,
+        readme=built / AGENT_CONTRACT_PATHS[0],
+    )
 
 
-def test_image_predating_the_recorded_digest_runs_paper_and_stops_research(
-    monkeypatch: pytest.MonkeyPatch,
+def test_a_container_is_compared_with_the_runtime_its_process_imported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _image_reports(monkeypatch, ImageContract(host_runtime_fingerprint(), ""))
-    assert_image_contract_current(IMAGE, agent_contract=False)
+    """A runtime module edited under a running worker changes neither the
+    validator that worker runs nor what its next container must bake: the
+    pinned image still matches, and an image rebuilt from the edit does not."""
+
+    built = _contract_tree(tmp_path / "built")
+    checkout = _contract_tree(tmp_path / "checkout")
+    edited = checkout / HOST_RUNTIME_MODULE_DIR / RUNTIME_CONTRACT_MODULES[1]
+    edited.write_bytes(edited.read_bytes() + b"\n# a later loader rule\n")
+    monkeypatch.setattr(contract_fingerprint, "_repository_root", lambda: checkout)
+    config = _container_start(tmp_path)
+    _image_reports(monkeypatch, _image_contract(built))
+    _require_local_image(config)
+    _image_reports(monkeypatch, _image_contract(checkout))
+    with pytest.raises(StrategyExecutionError, match=RUNTIME_CONTRACT_MODULES[1]):
+        _require_local_image(config)
+
+
+def test_image_predating_the_recorded_digest_runs_containers_and_stops_a_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _image_reports(monkeypatch, ImageContract(IMPORTED_RUNTIME_FINGERPRINT, ""))
+    _require_local_image(_container_start(tmp_path))
     with pytest.raises(SandboxImageContractMismatch) as raised:
-        assert_image_contract_current(IMAGE)
+        assert_image_contract_current(
+            IMAGE,
+            runtime=IMPORTED_RUNTIME_FINGERPRINT,
+            readme=REPO / AGENT_CONTRACT_PATHS[0],
+        )
     assert IMAGE_FINGERPRINT_PATH in str(raised.value)
 
 
 @pytest.mark.skipif(not docker_available(), reason="Docker is unavailable")
 def test_unreadable_image_is_refused_rather_than_reported_as_drift() -> None:
     with pytest.raises(SandboxImageContractMismatch, match="cannot be read"):
-        assert_image_contract_current("autotrade-sandbox:absent-0000")
+        assert_image_contract_current(
+            "autotrade-sandbox:absent-0000", runtime=IMPORTED_RUNTIME_FINGERPRINT
+        )
 
 
 @pytest.mark.skipif(not docker_available(), reason="Docker is unavailable")
