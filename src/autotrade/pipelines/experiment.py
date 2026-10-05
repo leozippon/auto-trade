@@ -107,6 +107,7 @@ from .skills import (
     resolve_collected_skills_source,
 )
 from .verdict import (
+    UNMEASURABLE,
     effective_trials,
     forward_mde,
     forward_slice,
@@ -114,8 +115,10 @@ from .verdict import (
     graduation_verdict,
     heldout_slice,
     information_ratio_bar,
+    judge,
     neutralized_statistics,
     seed_replicate_slice,
+    stamps,
     trial_correlation,
     trial_family_statistics,
 )
@@ -1179,11 +1182,7 @@ def freeze_gate_for(
 
     if seed_replicates and not acceptance.require_seed_replicates:
         raise ValueError("this arm's acceptance rules hold no seed-replicate condition")
-    reasons = list(hard_reasons)
-    if nominee.get("span") != FULL_SPAN:
-        reasons.append("freeze_needs_full_span_validation")
-    if nominee.get("control") is True:
-        reasons.append("freeze_nominee_is_control")
+    reasons = [*hard_reasons, *judge("registration", nominee, {})]
     if reasons:
         return {"passed": False, "reasons": reasons}
     rows, family, (lineage_arms, lineage_trials, lineage_series) = _arm_trials(
@@ -1209,7 +1208,7 @@ def freeze_gate_for(
             summary=summary if isinstance(summary, Mapping) else None,
         )
     except ValueError as exc:
-        return {"passed": False, "reasons": ["freeze_unmeasurable"], "error": str(exc)}
+        return {"passed": False, "reasons": [UNMEASURABLE], "error": str(exc)}
     gate["deflated_sharpe"] = {
         **gate["deflated_sharpe"],  # type: ignore[dict-item]
         "controls": family["controls"],
@@ -1222,6 +1221,7 @@ def freeze_gate_for(
             fingerprinted(experiment_dir, [nominee])[0],
             fingerprinted(experiment_dir, seed_replicates),
             experiment_dir=experiment_dir,
+            rules=acceptance,
         )
     return gate
 
@@ -1302,6 +1302,7 @@ def _seed_replicate_gate(
     replicates: Sequence[Mapping[str, object]],
     *,
     experiment_dir: str | Path,
+    rules: AcceptanceRules,
 ) -> dict[str, object]:
     """``gate`` with the seed-replicate conditions of an arm that holds them.
 
@@ -1310,16 +1311,14 @@ def _seed_replicate_gate(
     seed replicate is a full-span, non-control row of the session whose bytes
     are the nominee's but for one seed line (:func:`seed_change`) and differ
     from every other registered row's, with a measured IR on the nominee's
-    graded series. Refused: a named replicate that is not one
-    (``freeze_seed_replicate_invalid``), a nominee that trains a model and
-    names none (``freeze_too_few_seed_replicates``), and a mean active IR over
-    the nominee and its replicates below the nominee's own
-    ``information_ratio_bar``
-    (``freeze_seed_mean_information_ratio_below_threshold``). Every other
-    condition stays the nominee's own. The block ``seed_replicates`` records
-    what was read, a ``problem`` per refused replicate, and the thresholds
-    name ``require_seed_replicates`` whether or not the nominee had anything
-    to replicate: the stamp says the arm holds the rule.
+    graded series. The block ``seed_replicates`` records what was read, a
+    ``problem`` per refused replicate, and the ``seeds`` conditions of
+    ``verdict.CONDITIONS`` are judged on it: a named replicate that is not
+    one, a nominee that trains a model and names none, and a mean active IR
+    over the nominee and its replicates below the nominee's own
+    ``information_ratio_bar``. Every other condition stays the nominee's own.
+    The thresholds name ``require_seed_replicates`` whether or not the nominee
+    had anything to replicate: the stamp says the arm holds the rule.
     """
 
     main = Path(experiment_dir) / REVISIONS_DIR / str(nominee["revision_id"]) / "output" / "main.py"
@@ -1355,26 +1354,19 @@ def _seed_replicate_gate(
         isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
         for value in ratios
     )
-    mean = sum(ratios) / len(ratios) if entries and measured else None  # type: ignore[arg-type]
-    bar = gate["deflated_sharpe"].get("information_ratio_bar")  # type: ignore[union-attr]
-    reasons: list[str] = []
-    if any("problem" in entry for entry in entries):
-        reasons.append("freeze_seed_replicate_invalid")
-    elif trains and not entries:
-        reasons.append("freeze_too_few_seed_replicates")
-    elif entries and (mean is None or not isinstance(bar, (int, float)) or not mean >= bar):
-        reasons.append("freeze_seed_mean_information_ratio_below_threshold")
+    block = {
+        "trains_a_model": trains,
+        "replicates": entries,
+        "mean_information_ratio": sum(ratios) / len(ratios) if entries and measured else None,  # type: ignore[arg-type]
+        "information_ratio_bar": gate["deflated_sharpe"].get("information_ratio_bar"),  # type: ignore[union-attr]
+    }
+    reasons = judge("seeds", block, {}, rules)
     return {
         **gate,
         "passed": bool(gate["passed"]) and not reasons,
         "reasons": [*gate["reasons"], *reasons],  # type: ignore[misc]
-        "seed_replicates": {
-            "trains_a_model": trains,
-            "replicates": entries,
-            "mean_information_ratio": mean,
-            "information_ratio_bar": bar,
-        },
-        "thresholds": {**gate["thresholds"], "require_seed_replicates": True},  # type: ignore[dict-item]
+        "seed_replicates": block,
+        "thresholds": {**gate["thresholds"], **stamps("seeds", rules)},  # type: ignore[dict-item]
     }
 
 

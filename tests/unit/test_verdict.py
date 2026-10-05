@@ -1053,3 +1053,79 @@ def test_the_seed_mean_reads_every_seed_and_an_unmeasured_one_never_passes():
     assert verdict.graduation_verdict(forward=sunk, heldout=heldout)["reasons"][0] == (
         "forward_seed_mean_plain_selection_not_positive"
     )
+
+
+def test_the_condition_table_is_the_one_list_of_what_a_record_can_carry():
+    """Every condition has its own reason token. A graduation condition names
+    its criterion, F1..F9 and H1..H4 between them, and no freeze condition
+    does. An optional condition is turned on by a rule that exists, and only
+    an optional condition states a rule in the thresholds. The Environment's
+    copy of the seed reasons (it cannot import the Pipeline) is the table's."""
+
+    from autotrade.environment.tools.finish_session import SEED_REASONS
+
+    reasons = [condition.reason for condition in verdict.CONDITIONS]
+    assert len(reasons) == len(set(reasons))
+    stages: dict[str, list[verdict.Condition]] = {}
+    for condition in verdict.CONDITIONS:
+        stages.setdefault(condition.stage, []).append(condition)
+    graduation = [*stages["replay"], *stages["forward"], *stages["heldout"]]
+    assert sorted({condition.code for condition in graduation}) == [
+        *(f"F{number}" for number in range(1, 10)),
+        *(f"H{number}" for number in range(1, 5)),
+    ]
+    # ``forward_...`` is an F criterion, ``heldout_...`` an H one.
+    assert all(condition.code[0] == condition.reason[0].upper() for condition in graduation)
+    assert not any(c.code for c in verdict.CONDITIONS if c not in graduation)
+    for condition in verdict.CONDITIONS:
+        assert {condition.requires, condition.stamp} - {""} <= set(ACCEPTANCE_KEYS), condition.reason
+        assert condition.requires or not condition.stamp, condition.reason
+    assert {condition.reason for condition in stages["seeds"]} == SEED_REASONS
+
+
+def test_a_stage_records_its_failures_in_the_tables_order_and_judges_nothing_that_is_off():
+    """One judge path. A block that fails every forward condition records all
+    of them in the table's order; under rules that hold no optional condition
+    and no mandate the same block records the others alone, and the record's
+    thresholds state no optional rule."""
+
+    failing = {
+        "lower_bound": -0.1,
+        "recency_neutralized_excess": -0.1,
+        "max_drawdown": 0.9,
+        "active_max_drawdown": 0.9,
+        "excess_at_cost_stress": -0.1,
+        "round_trips": 0,
+        "mean_gross": 0.1,
+        "mandate": {"tracking_error": 0.5, "market_beta": 2.0},
+        "raw_readings": {"plain_selection": -0.1},
+        "seed_mean": {"raw_readings": {"plain_selection": None}},
+    }
+    mandate = {"tracking_error_cap": 0.08, "beta_min": 0.85, "beta_max": 1.15}
+    thresholds = {
+        "max_drawdown": 0.45,
+        "active_max_drawdown": 0.3,
+        "min_round_trips": 12.0,
+        "min_mean_gross": 0.5,
+        **mandate,
+    }
+    every = AcceptanceRules(
+        **mandate, require_forward_plain_selection=True, require_seed_replicates=True
+    )
+    forward = [condition for condition in verdict.CONDITIONS if condition.stage == "forward"]
+
+    assert verdict.judge("forward", failing, thresholds, every) == [c.reason for c in forward]
+    assert verdict.stamps("forward", every) == {
+        "require_forward_plain_selection": True,
+        "require_seed_replicates": True,
+    }
+    assert verdict.judge("forward", failing, thresholds, AcceptanceRules()) == [
+        condition.reason for condition in forward if not condition.requires
+    ]
+    assert verdict.stamps("forward", AcceptanceRules()) == {}
+    # The raw freeze condition states the multiplier it was read at, the
+    # seed conditions that the arm holds them.
+    raw = AcceptanceRules(require_raw_excess_at_cost_stress=True, cost_stress_multiplier=3.0)
+    assert verdict.stamps("freeze", raw) == {"cost_stress_multiplier": 3.0}
+    assert verdict.stamps("freeze", AcceptanceRules()) == {}
+    assert verdict.stamps("seeds", every) == {"require_seed_replicates": True}

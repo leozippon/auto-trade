@@ -46,6 +46,10 @@ const ENDING_LABELS = {
 // mislabels every experiment run at another multiple. A threshold the record
 // does not carry reads as "—", so the gap shows instead of today's default.
 const REASON_LABELS = {
+  non_finite_total_return: "研究期总收益可算",
+  non_finite_max_drawdown: "研究期回撤可算",
+  non_finite_sharpe: "研究期夏普可算",
+  max_drawdown_above_limit: "研究期回撤",
   freeze_needs_full_span_validation: "提名节点为全区间验证",
   freeze_nominee_is_control: "提名节点不是对照",
   freeze_too_few_full_span_validations: "全区间验证次数",

@@ -59,9 +59,11 @@ from autotrade.pipelines.pit_views_seed import FORWARD_PHASE, RESEARCH_PHASE
 from autotrade.pipelines.session_resume import STEP_SIDECAR_DIR
 from autotrade.pipelines.skills import latest_skills_snapshot
 from autotrade.pipelines.verdict import (
+    CONDITIONS,
     panel_return,
     raw_excess_at_cost_stress,
     slice_readings,
+    stamps,
 )
 from autotrade.pipelines.worker import _ALLOWED_PARAMS
 
@@ -101,27 +103,11 @@ STAGES = ("research", "forward", "verdict")
 # failure and ends as ``rejected``; its reason says the graduation was withdrawn.
 ENDING_STATES = ("graduated", "rejected", "no_edge", "budget_exhausted", "broken")
 _ENDING_ORDER = {state: index for index, state in enumerate(ENDING_STATES)}
-# Which graduation criterion each failed verdict token is, as
-# docs/pipeline-design.md §3.2 numbers them: a rejected arm's reason names the
-# criteria that refused it. F6 and H4 each cover two recorded conditions.
+# Which graduation criterion each failed verdict token is, as the verdict's
+# own condition table numbers them: a rejected arm's reason names the criteria
+# that refused it. A criterion may cover two recorded conditions.
 _CRITERION_CODES = {
-    "forward_strategy_error": "F1",
-    "forward_lower_bound_not_positive": "F2",
-    "forward_recency_negative": "F3",
-    "forward_max_drawdown_exceeded": "F4",
-    "forward_active_drawdown_exceeded": "F4",
-    "forward_not_positive_at_cost_stress": "F5",
-    "forward_too_few_round_trips": "F6",
-    "forward_exposure_below_floor": "F6",
-    "forward_tracking_error_above_cap": "F7",
-    "forward_beta_outside_band": "F7",
-    "forward_plain_selection_not_positive": "F8",
-    "forward_seed_mean_plain_selection_not_positive": "F9",
-    "heldout_strategy_error": "H1",
-    "heldout_excess_below_tolerance": "H2",
-    "heldout_max_drawdown_exceeded": "H3",
-    "heldout_active_drawdown_exceeded": "H3",
-    "heldout_exposure_below_floor": "H4",
+    condition.reason: condition.code for condition in CONDITIONS if condition.code
 }
 # The two budgets a research session can run out of, named as the reason line.
 _BUDGET_EXHAUSTED = {
@@ -1130,19 +1116,11 @@ def _verdict_thresholds(
         ),
         "min_mean_gross": rules.min_mean_gross,
         "heldout_tolerance_z": rules.heldout_tolerance_z,
-        # Stated, like the forward record states it, only for an arm whose own
-        # params.json holds the condition: an arm recorded without the key is
-        # not judged on it, whatever today's creation default is.
-        **(
-            {"require_forward_plain_selection": True}
-            if params.get("require_forward_plain_selection") is True
-            else {}
-        ),
-        **(
-            {"require_seed_replicates": True}
-            if params.get("require_seed_replicates") is True
-            else {}
-        ),
+        # Stated, like the forward record states them, only for an arm whose
+        # own params.json holds the optional condition: an arm recorded
+        # without the key is not judged on it, whatever today's creation
+        # default is.
+        **stamps("forward", acceptance_for(params)),
     }
 
 

@@ -440,21 +440,16 @@ def test_every_progress_stage_the_pipeline_publishes_has_a_console_label() -> No
 def test_every_reason_the_pipeline_records_has_a_console_label() -> None:
     """A failed freeze-gate or verdict condition renders as its raw token when
     the console has no label for it, so the label map is checked against every
-    token the pipelines can append -- the verdict's and the freeze gate's own,
-    wherever they are written -- and every session outcome too."""
+    reason a record can carry -- the verdict's condition table and the gate
+    that could not be measured -- and every session outcome too."""
 
     from autotrade.pipelines.config import SESSION_OUTCOMES
+    from autotrade.pipelines.verdict import CONDITIONS, UNMEASURABLE
 
-    pipelines = Path(__file__).resolve().parents[2] / "src/autotrade/pipelines"
-    emitted = {
-        token
-        for path in pipelines.rglob("*.py")
-        for token in re.findall(r'reasons\.append\("([a-z_]+)"\)', path.read_text(encoding="utf-8"))
-    }
-    emitted |= {f"{where}_strategy_error" for where in ("forward", "heldout")}
-    assert "forward_lower_bound_not_positive" in emitted
+    recorded = {condition.reason for condition in CONDITIONS} | {UNMEASURABLE}
+    assert "forward_lower_bound_not_positive" in recorded
     labels = _reason_tokens()
-    assert emitted <= labels, sorted(emitted - labels)
+    assert recorded <= labels, sorted(recorded - labels)
     outcomes = set(
         re.findall(
             r"^  ([a-z_]+): \"",
@@ -591,10 +586,12 @@ def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) ->
     assert forward_rows <= slice_served["forward"]
     assert heldout_rows <= slice_served["heldout"]
     assert slice_rows == forward_rows | heldout_rows, sorted(slice_rows ^ (forward_rows | heldout_rows))
-    # Every criterion the pipeline can fail is a line of the checklist.
+    # Every graduation criterion the pipeline can fail is a line of the checklist.
+    from autotrade.pipelines.verdict import CONDITIONS
+
     checked = set(re.findall(r'"((?:forward|heldout)_[a-z_]+)"', _js_function_body("forwardCriteria") + _js_function_body("heldoutCriteria")))
     checked |= {f"{where}_strategy_error" for where in ("forward", "heldout")}
-    assert {token for token in _reason_tokens() if not token.startswith("freeze_")} <= checked
+    assert {condition.reason for condition in CONDITIONS if condition.code} <= checked
     # The budget bars read the keys both the totals and the usage block carry.
     bars = set(re.findall(r'^  \["([a-z_]+)",', _js_literal("const BUDGET_ROWS = [", "\n];"), re.MULTILINE))
     assert bars and bars <= budget, sorted(bars - budget)

@@ -350,6 +350,36 @@ class AcceptanceRulesTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "require_forward_plain_selection must be a boolean"):
             AcceptanceRules(require_forward_plain_selection="yes")  # type: ignore[arg-type]
 
+    def test_every_optional_condition_is_a_creation_stamp_the_agent_is_told_of(self) -> None:
+        """The conditions a switch turns on (``verdict.CONDITIONS``) are
+        exactly the acceptance rules creation stamps on, and the Agent's facts
+        state one exactly where the arm holds it: turning a switch on adds to
+        the facts and moves nothing they already said."""
+
+        defaults = AcceptanceRules()
+        switches = {
+            condition.requires
+            for condition in verdict.CONDITIONS
+            if isinstance(getattr(defaults, condition.requires, None), bool)
+        }
+        self.assertEqual(switches, set(CREATION_STAMPS) & set(ACCEPTANCE_KEYS))
+
+        def leaves(node: object, path: tuple[str, ...] = ()) -> dict[tuple[str, ...], object]:
+            if not isinstance(node, dict):
+                return {path: node}
+            return {
+                key: value
+                for name, child in node.items()
+                for key, value in leaves(child, (*path, name)).items()
+            }
+
+        unheld = leaves(defaults.agent_facts())
+        for switch in sorted(switches):
+            held = leaves(replace(defaults, **{switch: True}).agent_facts())
+            with self.subTest(switch=switch):
+                self.assertGreater(len(held), len(unheld))
+                self.assertEqual({path: held[path] for path in unheld}, unheld)
+
     def test_a_record_with_a_retired_key_still_rebuilds_the_rules(self) -> None:
         rules = AcceptanceRules.from_record(
             {"max_drawdown": 0.2, "heldout_min_trades": 5, "confirmation_folds": 2}

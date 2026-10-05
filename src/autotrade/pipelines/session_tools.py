@@ -83,6 +83,7 @@ from .ledger import RESEARCH_STAGE, ExperimentLedger
 from .session_resume import record_step_sidecar
 from .skills import _assert_skills_absent_from_formal
 from .verdict import (
+    NOT_A_SESSION_STEP,
     active_daily,
     excess_at_cost_stress,
     holder_readings,
@@ -757,7 +758,7 @@ class SessionValidations:
             str(row["step_id"]): row for row in (research_step_record(item) for item in self.steps)
         }
         if any(step_id not in rows for step_id in (node_id, *seed_replicates)):
-            return {"passed": False, "reasons": ["freeze_needs_a_step_of_this_session"]}
+            return {"passed": False, "reasons": [NOT_A_SESSION_STEP]}
         nominee = rows[node_id]
         rules = self.rules
         return freeze_gate_for(

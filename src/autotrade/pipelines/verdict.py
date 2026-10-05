@@ -41,9 +41,9 @@ from __future__ import annotations
 import hashlib
 import itertools
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from statistics import NormalDist
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -60,6 +60,8 @@ from autotrade.environment.replay.style import (
     active_analysis,
     window_neutralized_excess,
 )
+
+from .calendar import FULL_SPAN
 
 if TYPE_CHECKING:
     # ``config`` reads this module's constants for its defaults.
@@ -257,25 +259,13 @@ def neutralized_statistics(
     return {**_measured(graded, start, end)[0], "series": series}
 
 
-def _mandate(
-    analysis: Mapping[str, object], start: str, end: str, rules: AcceptanceRules
-) -> tuple[dict[str, object], list[str]]:
-    """The strategy's own tracking error and beta against its benchmark over a span,
-    and which limits of the rules' tracking mandate they break (none when no
-    cap is set: the two figures are then reported, not graded)."""
+def _mandate(analysis: Mapping[str, object], start: str, end: str) -> dict[str, object]:
+    """The strategy's own tracking error and beta against its benchmark over a
+    span: what a tracking mandate limits, and what is reported, not graded,
+    where the rules set none."""
 
     own = _measured(analysis, start, end)[0]
-    block = {
-        "tracking_error": own["tracking_error"],
-        "market_beta": own["market_beta"],
-    }
-    broken: list[str] = []
-    if rules.tracking_error_cap is not None:
-        if not own["tracking_error"] <= rules.tracking_error_cap:
-            broken.append("tracking_error_above_cap")
-        if not rules.beta_min <= own["market_beta"] <= rules.beta_max:  # type: ignore[operator]
-            broken.append("beta_outside_band")
-    return block, broken
+    return {"tracking_error": own["tracking_error"], "market_beta": own["market_beta"]}
 
 
 def forward_mde(tracking_error: float, forward_days: int) -> float:
@@ -680,6 +670,20 @@ def seed_mean(blocks: Sequence[Mapping[str, object]]) -> dict[str, object]:
     }
 
 
+def _with_seed_replicates(
+    readings: Mapping[str, object], seed_replicates: Sequence[Mapping[str, object]]
+) -> dict[str, object]:
+    """What a slice carries of its seed replicates: their own slices and the
+    :func:`seed_mean` with the book; nothing where there are none."""
+
+    if not seed_replicates:
+        return {}
+    return {
+        "seed_replicates": [dict(block) for block in seed_replicates],
+        "seed_mean": seed_mean([readings, *seed_replicates]),
+    }
+
+
 def _count(value: object, name: str, minimum: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
         raise ValueError(f"{name} must be an integer >= {minimum}, got {value!r}")
@@ -712,6 +716,175 @@ def trial_family_statistics(
         "trial_correlation_pairs": pairs,
         "effective_trials": effective_trials(total, correlation),
     }
+
+
+class Condition(NamedTuple):
+    """One condition a stage judges on what it measured.
+
+    ``holds(measured, thresholds)`` reads the stage's own block and the bars
+    its record states; a condition that does not hold records ``reason``.
+    ``requires`` names the rule that turns an optional condition on (empty:
+    every arm is held to it). An optional condition that is off is neither
+    judged nor stated; one that is on states the rule ``stamp`` names in the
+    record's thresholds. ``code`` is the graduation criterion a forward or
+    Held-out condition belongs to (docs/pipeline-design.md).
+    """
+
+    stage: str
+    reason: str
+    holds: Callable[[Mapping[str, Any], Mapping[str, Any]], bool]
+    code: str = ""
+    requires: str = ""
+    stamp: str = ""
+
+
+def _finite(value: object) -> bool:
+    """Whether one replay metric is a finite number. ``bool`` is an ``int`` in
+    Python, so ``True`` would otherwise read as a total return of 1.0."""
+
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _positive(value: object) -> bool:
+    """A reading above zero. One that was not measured never passes."""
+
+    return value is not None and value > 0  # type: ignore[operator]
+
+
+def _probability(measured: Mapping[str, Any]) -> object:
+    return measured["deflated_sharpe"]["deflated_sharpe_probability"]
+
+
+def _within_cap(measured: Mapping[str, Any], thresholds: Mapping[str, Any]) -> bool:
+    return measured["mandate"]["tracking_error"] <= thresholds["tracking_error_cap"]
+
+
+def _within_band(measured: Mapping[str, Any], thresholds: Mapping[str, Any]) -> bool:
+    return thresholds["beta_min"] <= measured["mandate"]["market_beta"] <= thresholds["beta_max"]
+
+
+def _refused_replicate(measured: Mapping[str, Any]) -> bool:
+    return any("problem" in entry for entry in measured["replicates"])
+
+
+def _seed_mean_reaches_bar(measured: Mapping[str, Any]) -> bool:
+    mean, bar = measured["mean_information_ratio"], measured["information_ratio_bar"]
+    return mean is not None and isinstance(bar, (int, float)) and mean >= bar
+
+
+_RAW = "require_raw_excess_at_cost_stress"
+_PLAIN = "require_forward_plain_selection"
+_SEEDS = "require_seed_replicates"
+_CAP = "tracking_error_cap"
+# Not a condition's: what a gate that was never read off a nominee records.
+# The session reads a node that is not one of its Steps; the nominee's
+# statistics could not be measured.
+NOT_A_SESSION_STEP = "freeze_needs_a_step_of_this_session"
+UNMEASURABLE = "freeze_unmeasurable"
+
+# Every condition the freeze gate and the graduation verdict judge, by stage
+# and, within a stage, in the order its failures are recorded. The one list of
+# the reason tokens a record can carry: each stage reads its failures off it
+# (:func:`judge`), and the console's criterion codes and labels, the Agent's
+# facts and the tests are checked against it.
+CONDITIONS: tuple[Condition, ...] = (
+    # The hard nomination rules, on the nominee's replay summary
+    # (``config.AcceptanceRules.evaluate``). A non-finite metric, because every
+    # IEEE comparison against NaN is False, so it would otherwise pass every
+    # threshold; and a research-period drawdown over the limit F4/H3 enforce
+    # forward: freezing a book that already breached it spends a forward test
+    # on a candidate the verdict must reject. ``sharpe`` is read only for
+    # finiteness: how much edge is enough is the deflated Sharpe's question.
+    Condition("nomination", "non_finite_total_return", lambda m, t: _finite(m.get("total_return"))),
+    Condition("nomination", "non_finite_max_drawdown", lambda m, t: _finite(m.get("max_drawdown"))),
+    Condition("nomination", "non_finite_sharpe", lambda m, t: m.get("sharpe") is None or _finite(m["sharpe"])),
+    Condition("nomination", "max_drawdown_above_limit", lambda m, t: not (_finite(m.get("max_drawdown")) and abs(m["max_drawdown"]) > t["max_drawdown"])),
+    # How the nominee was registered (``experiment.freeze_gate_for``).
+    Condition("registration", "freeze_needs_full_span_validation", lambda m, t: m.get("span") == FULL_SPAN),
+    Condition("registration", "freeze_nominee_is_control", lambda m, t: m.get("control") is not True),
+    # The freeze gate, on the nominee's research period (:func:`freeze_gate`).
+    Condition("freeze", "freeze_too_few_full_span_validations", lambda m, t: m["full_span_validations"] >= t["min_full_span_validations"]),
+    Condition("freeze", "freeze_information_ratio_below_threshold", lambda m, t: m["information_ratio"] is not None and m["information_ratio"] >= t["min_information_ratio"]),
+    Condition("freeze", "freeze_deflated_sharpe_unavailable", lambda m, t: isinstance(_probability(m), float)),
+    Condition("freeze", "freeze_deflated_sharpe_below_threshold", lambda m, t: not isinstance(_probability(m), float) or not _probability(m) < t["min_deflated_sharpe_probability"]),
+    Condition("freeze", "freeze_too_few_positive_years", lambda m, t: m["positive_years"] >= t["min_positive_years"]),
+    Condition("freeze", "freeze_active_drawdown_exceeded", lambda m, t: m["active_max_drawdown"] <= t["active_max_drawdown"]),
+    Condition("freeze", "freeze_raw_excess_not_positive_at_cost_stress", lambda m, t: _positive(m["raw_excess_at_cost_stress"]), requires=_RAW, stamp="cost_stress_multiplier"),
+    Condition("freeze", "freeze_tracking_error_above_cap", _within_cap, requires=_CAP),
+    Condition("freeze", "freeze_beta_outside_band", _within_band, requires=_CAP),
+    # The nominee's seed replicates (``experiment._seed_replicate_gate``): a
+    # named replicate that is not one, a nominee that trains a model and names
+    # none, and a mean active IR over the nominee and its replicates below
+    # the nominee's own bar.
+    Condition("seeds", "freeze_seed_replicate_invalid", lambda m, t: not _refused_replicate(m), requires=_SEEDS, stamp=_SEEDS),
+    Condition("seeds", "freeze_too_few_seed_replicates", lambda m, t: bool(m["replicates"]) or not m["trains_a_model"], requires=_SEEDS, stamp=_SEEDS),
+    Condition("seeds", "freeze_seed_mean_information_ratio_below_threshold", lambda m, t: not m["replicates"] or _refused_replicate(m) or _seed_mean_reaches_bar(m), requires=_SEEDS, stamp=_SEEDS),
+    # F1/H1: the frozen strategy raised during the replay, which then has no
+    # slice to judge (:func:`graduation_verdict`).
+    Condition("replay", "forward_strategy_error", lambda m, t: m["strategy_error"] != "forward", "F1"),
+    Condition("replay", "heldout_strategy_error", lambda m, t: m["strategy_error"] != "heldout", "H1"),
+    # The forward slice (:func:`forward_slice`). F8: no panel, no plain
+    # selection, and an unmeasured reading never passes. F9: a book frozen
+    # with nothing to replicate has no mean to judge.
+    Condition("forward", "forward_lower_bound_not_positive", lambda m, t: m["lower_bound"] > 0, "F2"),
+    Condition("forward", "forward_recency_negative", lambda m, t: m["recency_neutralized_excess"] >= 0, "F3"),
+    Condition("forward", "forward_max_drawdown_exceeded", lambda m, t: m["max_drawdown"] <= t["max_drawdown"], "F4"),
+    Condition("forward", "forward_active_drawdown_exceeded", lambda m, t: m["active_max_drawdown"] <= t["active_max_drawdown"], "F4"),
+    Condition("forward", "forward_not_positive_at_cost_stress", lambda m, t: m["excess_at_cost_stress"] > 0, "F5"),
+    Condition("forward", "forward_too_few_round_trips", lambda m, t: m["round_trips"] >= t["min_round_trips"], "F6"),
+    Condition("forward", "forward_exposure_below_floor", lambda m, t: m["mean_gross"] >= t["min_mean_gross"], "F6"),
+    Condition("forward", "forward_tracking_error_above_cap", _within_cap, "F7", requires=_CAP),
+    Condition("forward", "forward_beta_outside_band", _within_band, "F7", requires=_CAP),
+    Condition("forward", "forward_plain_selection_not_positive", lambda m, t: _positive(m["raw_readings"]["plain_selection"]), "F8", requires=_PLAIN, stamp=_PLAIN),
+    Condition("forward", "forward_seed_mean_plain_selection_not_positive", lambda m, t: "seed_mean" not in m or _positive(m["seed_mean"]["raw_readings"]["plain_selection"]), "F9", requires=_SEEDS, stamp=_SEEDS),
+    # The Held-out slice (:func:`heldout_slice`).
+    Condition("heldout", "heldout_excess_below_tolerance", lambda m, t: m["neutralized_excess"] >= m["tolerance"], "H2"),
+    Condition("heldout", "heldout_max_drawdown_exceeded", lambda m, t: m["max_drawdown"] <= t["max_drawdown"], "H3"),
+    Condition("heldout", "heldout_active_drawdown_exceeded", lambda m, t: m["active_max_drawdown"] <= t["active_max_drawdown"], "H3"),
+    Condition("heldout", "heldout_exposure_below_floor", lambda m, t: m["mean_gross"] >= t["min_mean_gross"], "H4"),
+)
+
+
+def _on(condition: Condition, rules: AcceptanceRules | None) -> bool:
+    """Whether ``rules`` hold ``condition``: always, a switch that is on, or
+    a tracking mandate that is set."""
+
+    if not condition.requires:
+        return True
+    rule = getattr(rules, condition.requires)
+    return rule is not None and rule is not False
+
+
+def stamps(stage: str, rules: AcceptanceRules) -> dict[str, object]:
+    """What the optional conditions of ``stage`` that ``rules`` turn on state
+    in a record's thresholds, so a record judged without one reads as it did
+    before the condition existed."""
+
+    return {
+        condition.stamp: getattr(rules, condition.stamp)
+        for condition in CONDITIONS
+        if condition.stage == stage and condition.stamp and _on(condition, rules)
+    }
+
+
+def judge(
+    stage: str,
+    measured: Mapping[str, Any],
+    thresholds: Mapping[str, Any],
+    rules: AcceptanceRules | None = None,
+) -> list[str]:
+    """The reasons of the conditions of ``stage`` that ``measured`` fails, in
+    the table's order: the one path every stage's failures are read by.
+    ``rules`` decide which optional conditions are on; a stage that has none
+    is judged without them."""
+
+    return [
+        condition.reason
+        for condition in CONDITIONS
+        if condition.stage == stage
+        and _on(condition, rules)
+        and not condition.holds(measured, thresholds)
+    ]
 
 
 def freeze_gate(
@@ -792,60 +965,37 @@ def freeze_gate(
         window_neutralized_excess(graded, start=start, end=end)
         for start, end in (_span(*year) for year in years)
     ]
-    positive_years = sum(1 for value in year_excess if value is not None and value > 0)
-    min_positive_years = math.ceil(rules.min_positive_year_share * len(year_excess))
-    active_drawdown = _max_slice_drawdown(graded, "", "")
-    mandate, broken = _mandate(analysis, "", "", rules)
-    reasons: list[str] = []
-    if full_span_validations < rules.min_full_span_validations:
-        reasons.append("freeze_too_few_full_span_validations")
-    ratio = statistics["information_ratio"]
-    if ratio is None or not ratio >= rules.min_active_ir:
-        reasons.append("freeze_information_ratio_below_threshold")
-    probability = dsr["deflated_sharpe_probability"]
-    if not isinstance(probability, float):
-        reasons.append("freeze_deflated_sharpe_unavailable")
-    elif probability < rules.min_dsr_probability:
-        reasons.append("freeze_deflated_sharpe_below_threshold")
-    if positive_years < min_positive_years:
-        reasons.append("freeze_too_few_positive_years")
-    if not active_drawdown <= rules.active_max_drawdown:
-        reasons.append("freeze_active_drawdown_exceeded")
     raw: dict[str, object] = {}
     if rules.require_raw_excess_at_cost_stress:
         if summary is None:
             raise ValueError("the raw cost-stress condition needs the nominee's summary")
-        stressed = raw_excess_at_cost_stress(
+        raw["raw_excess_at_cost_stress"] = raw_excess_at_cost_stress(
             summary, cost_stress_multiplier=rules.cost_stress_multiplier
         )
-        if stressed is None or not stressed > 0:
-            reasons.append("freeze_raw_excess_not_positive_at_cost_stress")
-        raw = {"raw_excess_at_cost_stress": stressed}
-    reasons.extend(f"freeze_{name}" for name in broken)
-    return {
-        "passed": not reasons,
-        "reasons": reasons,
+    measured = {
         "series": series,
         **statistics,
         "year_neutralized_excess": year_excess,
-        "positive_years": positive_years,
-        "active_max_drawdown": active_drawdown,
-        "mandate": mandate,
+        "positive_years": sum(1 for value in year_excess if value is not None and value > 0),
+        "active_max_drawdown": _max_slice_drawdown(graded, "", ""),
+        "mandate": _mandate(analysis, "", ""),
         "full_span_validations": full_span_validations,
         "deflated_sharpe": dsr,
         **raw,
-        "thresholds": {
-            "min_information_ratio": rules.min_active_ir,
-            "min_deflated_sharpe_probability": rules.min_dsr_probability,
-            "min_full_span_validations": rules.min_full_span_validations,
-            "min_positive_years": min_positive_years,
-            "research_years": len(year_excess),
-            "active_max_drawdown": rules.active_max_drawdown,
-            **rules.mandate,
-            "panel_draws": PANEL_DRAWS,
-            **({"cost_stress_multiplier": rules.cost_stress_multiplier} if raw else {}),
-        },
     }
+    thresholds = {
+        "min_information_ratio": rules.min_active_ir,
+        "min_deflated_sharpe_probability": rules.min_dsr_probability,
+        "min_full_span_validations": rules.min_full_span_validations,
+        "min_positive_years": math.ceil(rules.min_positive_year_share * len(year_excess)),
+        "research_years": len(year_excess),
+        "active_max_drawdown": rules.active_max_drawdown,
+        **rules.mandate,
+        "panel_draws": PANEL_DRAWS,
+        **stamps("freeze", rules),
+    }
+    reasons = judge("freeze", measured, thresholds, rules)
+    return {"passed": not reasons, "reasons": reasons, **measured, "thresholds": thresholds}
 
 
 # Refit the draws in batches holding at most this many bytes of resampled rows.
@@ -978,7 +1128,7 @@ def forward_slice(
         )
     drawdown = _max_slice_drawdown(analysis, start, end)
     active_drawdown = _max_slice_drawdown(graded, start, end)
-    mandate, broken = _mandate(analysis, start, end, rules)
+    mandate = _mandate(analysis, start, end)
     stressed_excess = excess_at_cost_stress(
         statistics["neutralized_excess"],
         len(rows),
@@ -987,46 +1137,16 @@ def forward_slice(
         turnover=turnover,
     )
     months = _month_index(end) - _month_index(start) + 1
-    min_round_trips = rules.min_round_trips_per_month * months
     readings = slice_readings(analysis, start=start, end=end)
-
-    reasons: list[str] = []
-    if not lower_bound > 0:
-        reasons.append("forward_lower_bound_not_positive")
-    if not recency_excess >= 0:
-        reasons.append("forward_recency_negative")
-    if not drawdown <= rules.max_drawdown:
-        reasons.append("forward_max_drawdown_exceeded")
-    if not active_drawdown <= rules.active_max_drawdown:
-        reasons.append("forward_active_drawdown_exceeded")
-    if not stressed_excess > 0:
-        reasons.append("forward_not_positive_at_cost_stress")
-    if round_trips < min_round_trips:
-        reasons.append("forward_too_few_round_trips")
-    if not mean_gross >= rules.min_mean_gross:
-        reasons.append("forward_exposure_below_floor")
-    reasons.extend(f"forward_{name}" for name in broken)
-    if rules.require_forward_plain_selection:
-        # No panel, no plain selection: an unmeasured reading never passes.
-        selection = readings["raw_readings"]["plain_selection"]  # type: ignore[index]
-        if selection is None or not selection > 0:
-            reasons.append("forward_plain_selection_not_positive")
     if seed_replicates and not rules.require_seed_replicates:
         raise ValueError("seed replicates were given under rules that hold no seed condition")
-    seeds: dict[str, object] = {}
-    if seed_replicates:
-        mean = seed_mean([readings, *seed_replicates])
-        seeds = {"seed_replicates": [dict(block) for block in seed_replicates], "seed_mean": mean}
-        selection = mean["raw_readings"]["plain_selection"]  # type: ignore[index]
-        if selection is None or not selection > 0:
-            reasons.append("forward_seed_mean_plain_selection_not_positive")
-    return {
+    measured = {
         "start": start,
         "end": end,
         "series": series,
         **statistics,
         **readings,
-        **seeds,
+        **_with_seed_replicates(readings, seed_replicates),
         "lower_bound": lower_bound,
         "recency_start": recency_start,
         "recency_neutralized_excess": recency_excess,
@@ -1037,26 +1157,25 @@ def forward_slice(
         "turnover": turnover,
         "round_trips": round_trips,
         "mean_gross": mean_gross,
-        "reasons": reasons,
-        "thresholds": {
-            "forward_confidence": rules.forward_confidence,
-            "bootstrap_block_days": BOOTSTRAP_BLOCK_DAYS,
-            "bootstrap_draws": BOOTSTRAP_DRAWS,
-            "recency_months": rules.recency_months,
-            "max_drawdown": rules.max_drawdown,
-            "active_max_drawdown": rules.active_max_drawdown,
-            **rules.mandate,
-            "panel_draws": PANEL_DRAWS,
-            "cost_stress_multiplier": rules.cost_stress_multiplier,
-            "min_round_trips": min_round_trips,
-            "min_mean_gross": rules.min_mean_gross,
-            **(
-                {"require_forward_plain_selection": True}
-                if rules.require_forward_plain_selection
-                else {}
-            ),
-            **({"require_seed_replicates": True} if rules.require_seed_replicates else {}),
-        },
+    }
+    thresholds = {
+        "forward_confidence": rules.forward_confidence,
+        "bootstrap_block_days": BOOTSTRAP_BLOCK_DAYS,
+        "bootstrap_draws": BOOTSTRAP_DRAWS,
+        "recency_months": rules.recency_months,
+        "max_drawdown": rules.max_drawdown,
+        "active_max_drawdown": rules.active_max_drawdown,
+        **rules.mandate,
+        "panel_draws": PANEL_DRAWS,
+        "cost_stress_multiplier": rules.cost_stress_multiplier,
+        "min_round_trips": rules.min_round_trips_per_month * months,
+        "min_mean_gross": rules.min_mean_gross,
+        **stamps("forward", rules),
+    }
+    return {
+        **measured,
+        "reasons": judge("forward", measured, thresholds, rules),
+        "thresholds": thresholds,
     }
 
 
@@ -1098,42 +1217,29 @@ def heldout_slice(
     )
     drawdown = _max_slice_drawdown(analysis, start, end)
     active_drawdown = _max_slice_drawdown(graded, start, end)
-
-    reasons: list[str] = []
-    if not statistics["neutralized_excess"] >= tolerance:
-        reasons.append("heldout_excess_below_tolerance")
-    if not drawdown <= rules.max_drawdown:
-        reasons.append("heldout_max_drawdown_exceeded")
-    if not active_drawdown <= rules.active_max_drawdown:
-        reasons.append("heldout_active_drawdown_exceeded")
-    if not mean_gross >= rules.min_mean_gross:
-        reasons.append("heldout_exposure_below_floor")
     readings = slice_readings(analysis, start=start, end=end)
-    return {
+    measured = {
         "start": start,
         "end": end,
         "series": series,
         **statistics,
         **readings,
-        **(
-            {
-                "seed_replicates": [dict(block) for block in seed_replicates],
-                "seed_mean": seed_mean([readings, *seed_replicates]),
-            }
-            if seed_replicates
-            else {}
-        ),
+        **_with_seed_replicates(readings, seed_replicates),
         "tolerance": tolerance,
         "max_drawdown": drawdown,
         "active_max_drawdown": active_drawdown,
         "mean_gross": mean_gross,
-        "reasons": reasons,
-        "thresholds": {
-            "heldout_tolerance_z": rules.heldout_tolerance_z,
-            "max_drawdown": rules.max_drawdown,
-            "active_max_drawdown": rules.active_max_drawdown,
-            "min_mean_gross": rules.min_mean_gross,
-        },
+    }
+    thresholds = {
+        "heldout_tolerance_z": rules.heldout_tolerance_z,
+        "max_drawdown": rules.max_drawdown,
+        "active_max_drawdown": rules.active_max_drawdown,
+        "min_mean_gross": rules.min_mean_gross,
+    }
+    return {
+        **measured,
+        "reasons": judge("heldout", measured, thresholds, rules),
+        "thresholds": thresholds,
     }
 
 
@@ -1185,10 +1291,8 @@ def graduation_verdict(
     measured = strategy_error is None
     if (forward is not None, heldout is not None) != (measured, measured):
         raise ValueError(f"slices given do not match strategy_error={strategy_error!r}")
-    reasons: list[str] = []
+    reasons = judge("replay", {"strategy_error": strategy_error}, {})
     thresholds: dict[str, object] = {}
-    if strategy_error is not None:
-        reasons.append(f"{strategy_error}_strategy_error")
     for block in (forward, heldout):
         if block is not None:
             reasons.extend(block["reasons"])

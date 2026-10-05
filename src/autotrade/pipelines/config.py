@@ -99,18 +99,6 @@ class StrategyExperimentConfig:
             object.__setattr__(self, "models_dir", models)
 
 
-def _finite_metric(value: object) -> float | None:
-    """One replay metric as a float, or ``None`` when it is not a finite number.
-
-    ``bool`` is an ``int`` in Python, so ``True`` would otherwise read as a
-    total return of 1.0.
-    """
-
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    return float(value) if math.isfinite(value) else None
-
-
 def _finite_number(value: object, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{name} must be finite")
@@ -547,30 +535,13 @@ class AcceptanceRules:
         }
 
     def evaluate(self, summary: dict[str, object]) -> list[str]:
-        """The hard reasons a nomination is refused (``experiment.freeze_gate_for``).
+        """The hard reasons a nomination is refused (``experiment.freeze_gate_for``):
+        the ``nomination`` conditions of ``verdict.CONDITIONS``, a non-finite
+        metric and a research-period drawdown over ``max_drawdown``, read off
+        the nominee's replay summary. Only a summary from a completed
+        evaluation reaches here; an aborted replay never produces one."""
 
-        Two of them. Non-finite metrics, because every IEEE comparison against
-        NaN is False, so a NaN metric would otherwise pass every threshold. And
-        a research-period drawdown over ``max_drawdown``, the same limit F4/H3
-        enforce forward: freezing a book that already breached it spends a
-        forward test on a candidate the verdict must reject.
-
-        Nothing else is judged here. ``sharpe`` is read only for finiteness --
-        an arm may honestly freeze a modest but real edge, and how much edge is
-        enough is the deflated Sharpe's question, asked by the gate itself.
-        Only a summary from a completed evaluation reaches here; an aborted
-        replay never produces one."""
-        hard = [
-            f"non_finite_{key}"
-            for key in ("total_return", "max_drawdown")
-            if _finite_metric(summary.get(key)) is None
-        ]
-        if summary.get("sharpe") is not None and _finite_metric(summary["sharpe"]) is None:
-            hard.append("non_finite_sharpe")
-        drawdown = _finite_metric(summary.get("max_drawdown"))
-        if drawdown is not None and abs(drawdown) > self.max_drawdown:
-            hard.append("max_drawdown_above_limit")
-        return hard
+        return verdict.judge("nomination", summary, {"max_drawdown": self.max_drawdown})
 
 
 # Every rule's name, in declaration order: the keys of a rules record and of
