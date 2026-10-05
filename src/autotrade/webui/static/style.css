@@ -628,19 +628,7 @@ progress.progress.done::-moz-progress-bar {
  font-weight: 650;
  margin-top: 0.125rem;
 }
-.tile > .bar {
- display: block;
- width: 100%;
- margin-top: var(--space-1);
-}
-/* The home page's cards and its best experiment carry at most two figures,
-   two tiles of one measure from phone to desktop. A label or value never
-   wraps: it is one labelled figure, so at worst it is cut short, never
-   broken across lines. */
-#home .tiles {
- grid-template-columns: repeat(2, minmax(0, 14rem));
-}
-#home .tile-label,
+/* A home-page figure is one value and never breaks across lines. */
 #home .tile-value {
  white-space: nowrap;
  overflow: hidden;
@@ -1018,15 +1006,20 @@ details.fold.fill-extra .form-grid {
 .bar-fill.bad {
  background: var(--bad);
 }
-/* The research budgets on the experiment page: one block per limit — name and
-   used percentage on one line, the bar across the block below — laid out as a
-   grid with the same room between blocks that the cards keep between groups.
-   A home card carries only the fullest budget, as a tile. */
+/* The research budgets: one block per limit — name and used percentage on one
+   line, the bar across the block below — laid out as a grid with the same room
+   between blocks that the cards keep between groups. `mini` is the card's two
+   by two at a smaller scale, the amount spent in place of the percentage. */
 .budget-bars {
  display: grid;
  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
  gap: var(--space-4) var(--space-5);
  margin-top: var(--space-4);
+}
+.budget-bars.mini {
+ grid-template-columns: repeat(2, minmax(0, 1fr));
+ gap: var(--space-2) var(--space-3);
+ margin: 0;
 }
 .budget-row {
  display: grid;
@@ -1038,9 +1031,16 @@ details.fold.fill-extra .form-grid {
  color: var(--muted);
  font-variant-numeric: tabular-nums;
 }
+.budget-bars.mini .budget-row {
+ font-size: 0.75rem;
+ row-gap: 0.125rem;
+}
 .budget-row > .bar {
  grid-column: 1 / -1;
  width: 100%;
+}
+.budget-bars.mini .budget-row > .bar {
+ height: 0.3rem;
 }
 .budget-pct {
  text-align: right;
@@ -3249,8 +3249,9 @@ details.issue-evidence > summary:hover {
  }
 }
 @media (max-width: 720px) {
- /* Two budget blocks per row on a phone. */
- .budget-bars {
+ /* Two budget blocks per row on a phone, cards included. */
+ .budget-bars,
+ .budget-bars.mini {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   column-gap: var(--space-3);
  }
@@ -3470,6 +3471,7 @@ details.issue-evidence > summary:hover {
  .order-window,
  .tile-label,
  .budget-row,
+ .budget-bars.mini .budget-row,
  .span-bar,
  .card .chart-legend,
  .issue-meta,

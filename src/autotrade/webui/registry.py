@@ -280,6 +280,13 @@ def _reason_line(text: str, limit: int = 80) -> str:
     return head if len(head) <= limit else head[: limit - 1] + "…"
 
 
+def _percent(value: object) -> str:
+    """One signed percentage of the ending's reason line."""
+
+    number = _number(value)
+    return "—" if number is None else f"{number * 100:+.2f}%"
+
+
 def _attempt_failures(
     records: Sequence[Mapping[str, object]], phase: str | None = None
 ) -> list[Mapping[str, object]]:
@@ -297,6 +304,7 @@ def arm_ending(
     identity: PublicIdentity,
     records: Sequence[Mapping[str, object]],
     state: Mapping[str, object],
+    forward: Mapping[str, object] | None,
 ) -> dict[str, str] | None:
     """How the arm ended — one of :data:`ENDING_STATES` and a one-line reason —
     or ``None`` while it can still run.
@@ -304,13 +312,15 @@ def arm_ending(
     Every ending the console shows comes from here, so no page classifies one
     for itself. A worker the host or the environment broke ended the process
     rather than the research, so its state is read before the ledger. Otherwise
-    the verdict decides, and the reason is a line of words, never a row of
-    figures (the forward year's readings are the card's and the 裁决 view's): a
-    graduate passed every condition, a replay refused one by the criteria it
-    failed, a graduation the operator withdrew is a refusal whose reason says
-    so with the void's first sentence, and an arm that never reached a replay
-    ended by how its research session ended — the Agent's own ``no_edge``, an
-    exhausted budget, or a nomination the freeze gate refused.
+    the verdict decides: a graduate is named by its forward year as the holder
+    reads it — the book, the benchmark, the book against its zero-skill panel
+    unregressed, then the neutralised IR the gate graded (``forward`` is
+    :func:`_forward_view`, which carries those readings for every recorded
+    slice) — a replay that refused one by the criteria it failed, a graduation
+    the operator withdrew as a refusal whose reason says so with the void's
+    first sentence, and an arm that never reached a replay by how its research
+    session ended — the Agent's own ``no_edge``, an exhausted budget, or a
+    nomination the freeze gate refused.
     """
 
     if str(state.get("state") or "") == "failed":
@@ -328,7 +338,18 @@ def arm_ending(
         reason = _reason_line(identity.public_text(str(void.get("reason") or "")))
         return {"state": "rejected", "reason": f"毕业后复核未通过：{reason}"}
     if verdict["status"] == "graduated":
-        return {"state": "graduated", "reason": "前推与 Held-out 条件全部通过"}
+        judged = _mapping(_mapping(_mapping(forward).get("slices")).get("forward"))
+        raw = _mapping(judged.get("raw_readings"))
+        ratio = _number(judged.get("information_ratio"))
+        return {
+            "state": "graduated",
+            "reason": (
+                f"前推 账户 {_percent(raw.get('strategy_return'))}"
+                f" · 基准 {_percent(raw.get('benchmark_return'))}"
+                f" · 对面板（未回归）{_percent(raw.get('plain_selection'))}"
+                f" · 中性化主动 IR {'—' if ratio is None else f'{ratio:.2f}'}"
+            ),
+        }
     if verdict["status"] == "discarded":
         codes = dict.fromkeys(
             _CRITERION_CODES.get(str(token), str(token))
@@ -496,7 +517,7 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                 "budget": _budget_totals(params),
                 "budget_used": _budget_used(directory, records, raw_status),
                 "verdict": _verdict_view(identity, records),
-                "ending": arm_ending(identity, records, state),
+                "ending": arm_ending(identity, records, state, forward),
                 "forward": forward,
                 "paper_candidate": _paper_candidate_view(directory, records),
             }

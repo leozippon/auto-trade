@@ -347,6 +347,8 @@ def test_no_page_appends_a_renderer_that_can_return_nothing() -> None:
 
     source = APP_JS.read_text(encoding="utf-8")
     nullable = (
+        "forwardTiles",
+        "evidenceTiles",
         "cardEquityNode",
         "endingBadge",
         "endingReason",
@@ -544,8 +546,8 @@ def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) ->
         ("frozenPanel", reads("frozenPanel", "frozen"), frozen),
         ("researchSessionPanel", reads("researchSessionPanel", "record"), record),
         ("bestCandidateTiles", reads("bestCandidateTiles", "best"), best),
-        ("cardFigures", reads("cardFigures", "best"), set(detail["research_best"])),
-        ("forwardFigures", reads("forwardFigures", "raw"), set(slices["forward"]["raw_readings"])),
+        ("evidenceTiles", reads("evidenceTiles", "best"), set(detail["research_best"])),
+        ("accountTiles", reads("accountTiles", "raw"), set(slices["forward"]["raw_readings"])),
         ("verdictStagePanel", reads("verdictStagePanel", "withdrawn"), set(VERDICT_VOID_FIELDS)),
         ("researchSessionPanel", reads("researchSessionPanel", "row"), validation),
         ("freezeGateChecklist", reads("freezeGateChecklist", "gate"), gate),

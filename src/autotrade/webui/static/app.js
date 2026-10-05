@@ -507,32 +507,31 @@ function fmtSharpe(value) {
    and the tool or call it is on, then a clock since the stage began. The clock
    is an elapsed node, so whoever holds the line ticks it with
    tickElapsedClocks; a caller that has its own duration passes elapsed: false.
-   `brief` is the home card's line: the glyph and the stage word alone, the
-   figures being the experiment page's. Null when the status carries no stage. */
-function activityNode(status, { elapsed = true, className = "activity", brief = false } = {}) {
+   `fraction: false` leaves out the progress, which only reads as done over
+   total: the home card's line carries no such fraction. Null when the status
+   carries no stage. */
+function activityNode(status, { elapsed = true, className = "activity", fraction = true } = {}) {
   const stage = status && status.environment_stage;
   if (!stage) return null;
   const progress = (status && status.environment_progress) || {};
   const done = Number(progress.completed ?? progress.day_index);
   const total = Number(progress.total ?? progress.total_days);
   const measured =
-    !brief && Number.isFinite(done) && Number.isFinite(total) && total > 0
+    fraction && Number.isFinite(done) && Number.isFinite(total) && total > 0
       ? ` ${done}/${total}`
       : "";
-  const action = brief
-    ? ""
-    : progress.tool
-      ? ` · ${progress.tool}`
-      : progress.call_index
-        ? ` · 第 ${progress.call_index} 次调用`
-        : "";
+  const action = progress.tool
+    ? ` · ${progress.tool}`
+    : progress.call_index
+      ? ` · 第 ${progress.call_index} 次调用`
+      : "";
   const node = el(
     "span",
     { class: className },
     el("span", { class: "activity-icon", "aria-hidden": "true" }, ENVIRONMENT_STAGE_ICONS[stage] || "⏳"),
     `${ENVIRONMENT_STAGE_LABELS[stage] || stage}${measured}${action}`,
   );
-  if (elapsed && !brief) {
+  if (elapsed) {
     const clock = elapsedClockNode(
       status.environment_stage_started_at || status.session_started_at,
       "",
@@ -802,9 +801,7 @@ function fitChartWidth(width) {
 }
 
 function equityChart(payload, opts = {}) {
-  // `legendValues: false` names the lines without their final returns: the
-  // home page's curves, whose figures are the experiment page's.
-  const { height = 240, mini = false, markers = [], bands = [], legendValues = true } = opts;
+  const { height = 240, mini = false, markers = [], bands = [] } = opts;
   const width = fitChartWidth(opts.width || 680);
   let { ddH = 90 } = opts;
   const INK = themeInk();
@@ -1143,7 +1140,7 @@ function equityChart(payload, opts = {}) {
   // the plot it collided with the pane's own ¥ ceiling tick.
   const legend = seriesList.map((s) => ({
     color: s.color,
-    label: legendValues ? `${s.label} ${fmtPct(s.final)}` : s.label,
+    label: `${s.label} ${fmtPct(s.final)}`,
   }));
   if (showAccount) legend.push({ color: null, label: "资金：权益（线）· 现金（柱）" });
   const wrap = el("div", { class: "svg-chart" }, chartLegend(legend));
@@ -1294,8 +1291,7 @@ function presentTiles(specs) {
     }));
 }
 
-/* Stat tiles: label + semibold value (proportional figures). A tile with a
-   `ratio` draws it as a bar under the value. */
+/* Stat tiles: label + semibold value (proportional figures). */
 function statTilesRow(tiles) {
   return el(
     "div",
@@ -1306,7 +1302,6 @@ function statTilesRow(tiles) {
         { class: "tile", title: tile.title || null },
         el("div", { class: "tile-label" }, tile.label),
         el("div", { class: `tile-value ${tile.cls || ""}` }, tile.value),
-        Number.isFinite(tile.ratio) ? ratioBar(tile.ratio) : null,
       ),
     ),
   );
@@ -1350,51 +1345,40 @@ const BUDGET_ROWS = [
   ["null_controls", "随机对照", String],
 ];
 
-/* Each budget that has both a limit and a spend, as the share of it used. */
-function budgetShares(used, total) {
-  if (!used || !total) return [];
-  return BUDGET_ROWS.map(([key, label, fmt]) => {
+/* The research budget as one block per limit — its name and used percentage on
+   one line, its bar across the block underneath — so four budgets read as four
+   figures instead of one run-on line. `mini` is the home card's block: it says
+   what was spent, never against its limit, and leaves the share used to the
+   bar alone. Null while nothing was spent or no limit is known. */
+function budgetBars(used, total, { mini = false } = {}) {
+  if (!used || !total) return null;
+  const rows = BUDGET_ROWS.map(([key, label, fmt]) => {
     const limit = Number(total[key]);
     const spent = Number(used[key]);
     if (!(limit > 0) || !Number.isFinite(spent)) return null;
-    return { key, label, ratio: spent / limit, text: `${fmt(spent)} / ${fmt(limit)}` };
+    return { key, label, ratio: spent / limit, spent: fmt(spent), limit: fmt(limit) };
   }).filter(Boolean);
-}
-
-/* The research budget as one block per limit — its name and used percentage on
-   one line, its bar across the block underneath — so four budgets read as four
-   figures instead of one run-on line. Null while nothing was spent or no limit
-   is known. */
-function budgetBars(used, total) {
-  const rows = budgetShares(used, total);
   if (!rows.length) return null;
   return el(
     "div",
-    { class: "budget-bars" },
+    { class: `budget-bars${mini ? " mini" : ""}` },
     ...rows.map((row) =>
       el(
         "div",
-        { class: "budget-row", title: `${row.label} ${row.text}` },
+        {
+          class: "budget-row",
+          title: mini ? `${row.label}已用 ${row.spent}` : `${row.label} ${row.spent} / ${row.limit}`,
+        },
         el("span", { class: "budget-label" }, row.label),
-        el("span", { class: `budget-pct ${ratioClass(row.ratio)}`.trim() }, `${Math.round(row.ratio * 100)}%`),
+        el(
+          "span",
+          { class: `budget-pct ${mini ? "" : ratioClass(row.ratio)}`.trim() },
+          mini ? row.spent : `${Math.round(row.ratio * 100)}%`,
+        ),
         ratioBar(row.ratio),
       ),
     ),
   );
-}
-
-/* The home card's one budget figure: the budget closest to its limit, the
-   others' shares in the tooltip. Null when no budget is measured. */
-function budgetTile(used, total) {
-  const rows = budgetShares(used, total);
-  if (!rows.length) return null;
-  const top = rows.reduce((most, row) => (row.ratio > most.ratio ? row : most));
-  return {
-    label: "预算已用",
-    value: `${Math.round(top.ratio * 100)}%`,
-    ratio: top.ratio,
-    title: `用得最多的一项：${top.label}。${rows.map((row) => `${row.label} ${Math.round(row.ratio * 100)}%`).join(" · ")}`,
-  };
 }
 
 /* A ratio as a ring, the percentage beside it. */
@@ -1989,55 +1973,74 @@ function experimentBadges(...badges) {
   return el("span", { class: "exp-badges" }, ...badges.filter(Boolean));
 }
 
-/* The forward year as the holder reads it, in two figures: his book against
-   the benchmark, then against its zero-skill panel with no regression. The
-   account and benchmark returns behind the first, the Held-out slice and the
-   neutralised IR the gate graded are the experiment page's. Empty until the
-   verdict has measured the slice. */
-function forwardFigures(item) {
-  const slice = ((item.forward || {}).slices || {}).forward || {};
-  const raw = slice.raw_readings || {};
-  const derived = slice.readings_derived ? `。${DERIVED_TITLE}` : "";
+/* A slice's account and its benchmark as two tiles, each one figure; none
+   when the slice carries no reading. */
+function accountTiles(name, slice) {
+  const raw = (slice || {}).raw_readings || {};
+  const title = `${HOLDER_TITLE}${(slice || {}).readings_derived ? `。${DERIVED_TITLE}` : ""}`;
   return presentTiles([
-    {
-      label: "前推对基准",
-      value: raw.raw_excess,
-      fmt: fmtPct,
-      signed: true,
-      title: `${RAW_EXCESS_TITLE}${derived}`,
-    },
-    {
-      label: "前推对面板",
-      value: raw.plain_selection,
-      fmt: fmtPct,
-      signed: true,
-      title: `${PLAIN_SELECTION_TITLE}${derived}`,
-    },
+    { label: `${name}账户`, value: raw.strategy_return, fmt: fmtPct, signed: true, title },
+    { label: `${name}基准`, value: raw.benchmark_return, fmt: fmtPct, signed: true, title },
   ]);
 }
 
-/* What a home card says in figures, each one labelled value and at most two:
-   the forward year once it is measured; before that, while the arm can still
-   run, how much of its budget is spent; and the IR of the best full-span
-   candidate research has found. Everything else is on the experiment page. */
-function cardFigures(item) {
-  const forward = forwardFigures(item);
-  if (forward.length) return forward;
+/* The forward and Held-out slices the verdict read, as the holder reads them:
+   his account and the benchmark first, then the account against the
+   zero-skill panel unregressed, then the neutralised IR the gate graded. Every
+   tile is one figure: the account and its benchmark sit side by side, never
+   joined into one value. Absent until the verdict exists, and for a replay
+   the strategy's own error stopped. */
+function forwardTiles(item) {
+  const slices = (item.forward || {}).slices || {};
+  const f = slices.forward || {};
+  const tiles = [
+    ...accountTiles("前推", f),
+    ...presentTiles([
+      {
+        label: "前推对面板（未回归）",
+        value: (f.raw_readings || {}).plain_selection,
+        fmt: fmtPct,
+        signed: true,
+        title: PLAIN_SELECTION_TITLE,
+      },
+      {
+        label: "前推中性化主动 IR",
+        value: f.information_ratio,
+        fmt: fmtSharpe,
+        signed: true,
+        title: NEUTRAL_IR_TITLE,
+      },
+    ]),
+    ...accountTiles("Held-out ", slices.heldout),
+  ];
+  return tiles.length ? statTilesRow(tiles) : null;
+}
+
+/* Whatever evidence the arm already has: the judged forward slices once they
+   exist, else the best full-span candidate research has measured so far. */
+function evidenceTiles(item) {
+  const forward = forwardTiles(item);
+  if (forward) return forward;
   const best = item.research_best;
-  return [
-    item.ending ? null : budgetTile(item.budget_used, item.budget),
-    ...(best
-      ? presentTiles([
-          {
-            label: "最佳候选 IR",
-            value: best.information_ratio,
-            fmt: fmtSharpe,
-            signed: true,
-            title: `${sessionLabel(best.session_key)} 中 IR 最高的全区间验证，研究期。${IR_TITLE}`,
-          },
-        ])
-      : []),
-  ].filter(Boolean);
+  if (!best) return null;
+  const tiles = presentTiles([
+    {
+      label: "最佳候选中性化超额",
+      value: best.neutralized_excess,
+      fmt: fmtPct,
+      signed: true,
+      title: `${sessionLabel(best.session_key)} 中 IR 最高的全区间验证，研究期年化`,
+    },
+    { label: "IR", value: best.information_ratio, fmt: fmtSharpe, signed: true, title: IR_TITLE },
+    {
+      label: "DSR",
+      value: best.deflated_sharpe_probability,
+      fmt: fmtSharpe,
+      title: DSR_TITLE,
+    },
+    { label: "累计试验", value: best.trials, fmt: String, title: TRIALS_TITLE },
+  ]);
+  return tiles.length ? statTilesRow(tiles) : null;
 }
 
 /* The best full-span candidate's figures, as the experiment page draws them
@@ -2090,25 +2093,19 @@ function cardEquityNode(item) {
   const id = `equity-card-${item.experiment_id}`;
   const existing = document.getElementById(id);
   if (existing && existing.dataset.result === key) return existing;
-  const host = armEquityHost(item, {
-    width: 420,
-    height: 130,
-    mini: true,
-    lazy: true,
-    legendValues: false,
-  });
+  const host = armEquityHost(item, { width: 420, height: 130, mini: true, lazy: true });
   host.id = id;
   host.dataset.result = key;
   return host;
 }
 
-/* A card answers what the arm is, where it is and how it ended in words —
-   the name, one badge, the stepper and, while a worker runs, the stage it is
-   in — and how good it is in at most two figures (cardFigures), then the
-   curve; each only when the arm has it. The rest is the experiment page's. */
+/* Name and badges, then the stepper, the live activity, the budget, the
+   evidence and the curve — each only when the arm has it. A card shows every
+   figure as one labelled value: no fraction, no figure against its limit or
+   threshold (those are the experiment page's). The grid is rebuilt every
+   poll, so the activity clock needs no ticker. */
 function experimentCard(item) {
   const readable = item.state !== "unreadable";
-  const figures = readable ? cardFigures(item) : [];
   const card = el(
     "div",
     {
@@ -2126,9 +2123,10 @@ function experimentCard(item) {
     item.error ? el("div", { class: "meta-line" }, item.error) : null,
     readable ? pipelineStepper(item) : null,
     readable && item.worker_alive
-      ? activityNode(item.status, { className: "activity meta-line", brief: true })
+      ? activityNode(item.status, { className: "activity meta-line", fraction: false })
       : null,
-    figures.length ? statTilesRow(figures) : null,
+    readable ? budgetBars(item.budget_used, item.budget, { mini: true }) : null,
+    readable ? evidenceTiles(item) : null,
     readable ? cardEquityNode(item) : null,
   );
   const actions = el("div", { class: "actions" });
@@ -2175,11 +2173,10 @@ function experimentCard(item) {
   return card;
 }
 
-/* Only an arm the server ranked on out-of-sample evidence reaches here. It says
-   what its card says — the badge and the forward year's two figures — over
-   the full-size curve, whose lines are named without their figures. */
+/* Only an arm the server ranked on out-of-sample evidence reaches here, so the
+   tiles exist; they still go through el(), which drops an absent child instead
+   of printing it. */
 function heroPanel(item) {
-  const figures = forwardFigures(item);
   const panel = el(
     "div",
     { class: "panel hero", id: "hero-panel" },
@@ -2194,10 +2191,10 @@ function heroPanel(item) {
       ),
       armBadge(item),
     ),
-    figures.length ? statTilesRow(figures) : null,
+    forwardTiles(item),
   );
   panel.__signature = heroSignature(item);
-  const curve = armEquityHost(item, { width: 980, height: 240, ddH: 90, legendValues: false });
+  const curve = armEquityHost(item, { width: 980, height: 240, ddH: 90 });
   if (curve) panel.append(el("div", { class: "section-gap" }, curve));
   return panel;
 }
