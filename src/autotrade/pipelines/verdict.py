@@ -632,8 +632,9 @@ def seed_replicate_slice(
     A replicate is the book's strategy on another training seed, replayed
     exactly as the book is. Its slice carries what the book's own slice
     reads -- the graded series' neutralised statistics and
-    :func:`slice_readings` -- and no condition: forward judges the seed mean
-    (:func:`seed_mean`), never a replicate on its own.
+    :func:`slice_readings` -- and no condition: forward judges the book and
+    its replicates as one series (:func:`judged_selection`), never a replicate
+    on its own.
     """
 
     start, end = _span(start, end)
@@ -671,16 +672,71 @@ def seed_mean(blocks: Sequence[Mapping[str, object]]) -> dict[str, object]:
 
 
 def _with_seed_replicates(
-    readings: Mapping[str, object], seed_replicates: Sequence[Mapping[str, object]]
+    readings: Mapping[str, object],
+    seed_replicates: Sequence[tuple[Mapping[str, object], Mapping[str, object]]],
+    start: str,
+    end: str,
 ) -> dict[str, object]:
-    """What a slice carries of its seed replicates: their own slices and the
-    :func:`seed_mean` with the book; nothing where there are none."""
+    """What a slice carries of its seed replicates, each given as what names
+    it and its replay's sidecar: their own slices (:func:`seed_replicate_slice`)
+    and the :func:`seed_mean` with the book; nothing where there are none."""
 
     if not seed_replicates:
         return {}
+    blocks = [
+        {**identity, **seed_replicate_slice(sidecar, start=start, end=end)}
+        for identity, sidecar in seed_replicates
+    ]
+    return {"seed_replicates": blocks, "seed_mean": seed_mean([readings, *blocks])}
+
+
+def _plain_active(analysis: Mapping[str, object], start: str, end: str) -> dict[str, float]:
+    """One book's daily plain active return over a slice, by date: its return
+    minus its zero-skill panel's, with no regression, on the days the slice's
+    regression reads. ``ValueError`` without a panel."""
+
+    active = active_analysis(analysis)
+    if active is None:
+        raise ValueError("a replay without a zero-skill panel has no plain selection to judge")
+    return {row[0]: row[1] for row in _regression_join(active, start, end)}
+
+
+def judged_selection(
+    analyses: Sequence[Mapping[str, object]],
+    *,
+    start: str,
+    end: str,
+    seed_key: str,
+    confidence: float,
+) -> dict[str, object]:
+    """What the forward selection condition (F8) judges: one series, its mean
+    and that mean's lower bound.
+
+    The series is the daily plain active return (:func:`_plain_active`)
+    averaged day by day over ``analyses``: the frozen book's sidecar, then one
+    per seed replicate its freeze registered, so a book frozen with none is
+    judged on its own series. ``mean`` is the series' annualised mean and
+    ``lower_bound`` that mean's one-sided ``confidence`` bound, drawn as F2
+    draws its own (:func:`_bootstrap_lower_bound`: the same days, blocks,
+    draws and ``seed_key``) with the mean in place of the regression
+    intercept. ``members`` counts the book and its replicates. A member whose
+    replay carries no panel or measured other days than the book's raises
+    ``ValueError``: a seed is never dropped from the mean.
+    """
+
+    members = [_plain_active(analysis, start, end) for analysis in analyses]
+    dates = list(members[0])
+    if any(list(member) != dates for member in members[1:]):
+        raise ValueError(
+            f"a seed replicate measured other days than the frozen book over {start}..{end}"
+        )
+    daily = np.mean([list(member.values()) for member in members], axis=0)
     return {
-        "seed_replicates": [dict(block) for block in seed_replicates],
-        "seed_mean": seed_mean([readings, *seed_replicates]),
+        "members": len(members),
+        "mean": float(daily.mean()) * TRADING_DAYS_PER_YEAR,
+        "lower_bound": _bootstrap_lower_bound(
+            daily, seed_key, confidence=confidence, statistic=_mean
+        ),
     }
 
 
@@ -823,9 +879,9 @@ CONDITIONS: tuple[Condition, ...] = (
     # slice to judge (:func:`graduation_verdict`).
     Condition("replay", "forward_strategy_error", lambda m, t: m["strategy_error"] != "forward", "F1"),
     Condition("replay", "heldout_strategy_error", lambda m, t: m["strategy_error"] != "heldout", "H1"),
-    # The forward slice (:func:`forward_slice`). F8: no panel, no plain
-    # selection, and an unmeasured reading never passes. F9: a book frozen
-    # with nothing to replicate has no mean to judge.
+    # The forward slice (:func:`forward_slice`). F2-F7 read the frozen book;
+    # F8 reads the book and its seed replicates as one series
+    # (:func:`judged_selection`).
     Condition("forward", "forward_lower_bound_not_positive", lambda m, t: m["lower_bound"] > 0, "F2"),
     Condition("forward", "forward_recency_negative", lambda m, t: m["recency_neutralized_excess"] >= 0, "F3"),
     Condition("forward", "forward_max_drawdown_exceeded", lambda m, t: m["max_drawdown"] <= t["max_drawdown"], "F4"),
@@ -835,8 +891,7 @@ CONDITIONS: tuple[Condition, ...] = (
     Condition("forward", "forward_exposure_below_floor", lambda m, t: m["mean_gross"] >= t["min_mean_gross"], "F6"),
     Condition("forward", "forward_tracking_error_above_cap", _within_cap, "F7", requires=_CAP),
     Condition("forward", "forward_beta_outside_band", _within_band, "F7", requires=_CAP),
-    Condition("forward", "forward_plain_selection_not_positive", lambda m, t: _positive(m["raw_readings"]["plain_selection"]), "F8", requires=_PLAIN, stamp=_PLAIN),
-    Condition("forward", "forward_seed_mean_plain_selection_not_positive", lambda m, t: "seed_mean" not in m or _positive(m["seed_mean"]["raw_readings"]["plain_selection"]), "F9", requires=_SEEDS, stamp=_SEEDS),
+    Condition("forward", "forward_plain_selection_lower_bound_not_positive", lambda m, t: m["judged_selection"]["lower_bound"] > 0, "F8", requires=_PLAIN, stamp=_PLAIN),
     # The Held-out slice (:func:`heldout_slice`).
     Condition("heldout", "heldout_excess_below_tolerance", lambda m, t: m["neutralized_excess"] >= m["tolerance"], "H2"),
     Condition("heldout", "heldout_max_drawdown_exceeded", lambda m, t: m["max_drawdown"] <= t["max_drawdown"], "H3"),
@@ -1011,15 +1066,35 @@ def freeze_gate(
 _BOOTSTRAP_BATCH_BYTES = 128 * 1024
 
 
-def _bootstrap_lower_bound(rows: np.ndarray, seed_key: str, *, confidence: float) -> float:
-    """One-sided ``confidence`` lower bound of the annualised intercept.
+def _intercept(rows: np.ndarray) -> np.ndarray:
+    """F2's statistic: the regression intercept of ``(strategy, benchmark,
+    size)`` rows."""
 
-    Moving-block bootstrap: ``BOOTSTRAP_DRAWS`` resamples of whole rows in
-    blocks of ``BOOTSTRAP_BLOCK_DAYS`` consecutive days, the regression refit
-    on each, the bound read as the percentile. The generator is seeded from a
-    SHA-256 of ``seed_key`` (the frozen artifact id), so one artifact always
-    gets the same bound. The refits run in batches of ``_BOOTSTRAP_BATCH_BYTES``
-    worth of draws, which does not move the bound.
+    return _fit(rows)[0]
+
+
+def _mean(series: np.ndarray) -> np.ndarray:
+    """F8's statistic: the mean of a daily series."""
+
+    return series.mean(axis=-1)
+
+
+def _bootstrap_lower_bound(
+    rows: np.ndarray,
+    seed_key: str,
+    *,
+    confidence: float,
+    statistic: Callable[[np.ndarray], np.ndarray] = _intercept,
+) -> float:
+    """One-sided ``confidence`` lower bound of an annualised daily figure.
+
+    Moving-block bootstrap: ``BOOTSTRAP_DRAWS`` resamples of whole days in
+    blocks of ``BOOTSTRAP_BLOCK_DAYS`` consecutive days, ``statistic`` read on
+    each (over the day axis, any draws ahead of it), the bound read as the
+    percentile. The generator is seeded from a SHA-256 of ``seed_key`` (the
+    frozen artifact id), so one artifact always gets the same bound, and two
+    statistics over the same days resample the same days. The draws run in
+    batches of ``_BOOTSTRAP_BATCH_BYTES``, which does not move the bound.
     """
 
     days = len(rows)
@@ -1036,15 +1111,13 @@ def _bootstrap_lower_bound(rows: np.ndarray, seed_key: str, *, confidence: float
         0, days - BOOTSTRAP_BLOCK_DAYS + 1, size=(BOOTSTRAP_DRAWS, blocks)
     )
     offsets = np.arange(BOOTSTRAP_BLOCK_DAYS)
-    batch = max(1, _BOOTSTRAP_BATCH_BYTES // (days * rows.shape[1] * rows.itemsize))
-    intercepts = np.empty(BOOTSTRAP_DRAWS)
+    batch = max(1, _BOOTSTRAP_BATCH_BYTES // rows.nbytes)
+    estimates = np.empty(BOOTSTRAP_DRAWS)
     for first in range(0, BOOTSTRAP_DRAWS, batch):
         drawn = starts[first : first + batch]
         index = (drawn[:, :, None] + offsets).reshape(len(drawn), -1)[:, :days]
-        intercepts[first : first + len(drawn)] = _fit(rows[index])[0]
-    return (
-        float(np.quantile(intercepts, 1.0 - confidence)) * TRADING_DAYS_PER_YEAR
-    )
+        estimates[first : first + len(drawn)] = statistic(rows[index])
+    return float(np.quantile(estimates, 1.0 - confidence)) * TRADING_DAYS_PER_YEAR
 
 
 def _max_slice_drawdown(analysis: Mapping[str, object], start: str, end: str) -> float:
@@ -1070,28 +1143,26 @@ def forward_slice(
     turnover: float,
     round_trips: int,
     mean_gross: float,
-    seed_replicates: Sequence[Mapping[str, object]] = (),
+    seed_replicates: Sequence[tuple[Mapping[str, object], Mapping[str, object]]] = (),
 ) -> dict[str, object]:
-    """Statistics and failed conditions F2–F9 of the forward slice under the
+    """Statistics and failed conditions F2–F8 of the forward slice under the
     arm's ``rules`` (docs/pipeline-design.md, the graduation verdict).
 
     The lower bound, the recency window, the cost stress and
     ``active_max_drawdown`` are read off the graded series; ``max_drawdown``
     limits the equity itself and the tracking mandate, when one is set, the
-    strategy's own tracking error and beta over the slice. With
-    ``require_forward_plain_selection`` (F8) the book's compounded return over
-    the slice, after every cost, must beat its zero-skill panel's with no
-    regression (``raw_readings.plain_selection`` above zero); only then do the
-    thresholds name the condition, so a slice judged without it reads its
-    conditions as before. The holder's readings (:func:`slice_readings`) ride
-    on every slice either way. ``require_seed_replicates`` (F9) is stamped
-    the same way, by the arm's rule alone: ``seed_replicates`` are the slices
-    (:func:`seed_replicate_slice`) of the seed replicates the freeze
-    registered, replayed like the book, and with any the slice carries them
-    and their :func:`seed_mean` with the book, whose ``plain_selection`` must
-    be above zero; a book frozen with nothing to replicate has no mean to
-    judge. Replicates under rules without the condition are refused. Every
-    other condition reads the book alone.
+    strategy's own tracking error and beta over the slice. Those conditions
+    read the book alone. ``seed_replicates`` are the seed replicates the
+    freeze registered, replayed like the book, each as what names it and its
+    replay's sidecar; with any, the slice carries their slices and the
+    :func:`seed_mean` with the book. With ``require_forward_plain_selection``
+    (F8) the slice also carries ``judged_selection``
+    (:func:`judged_selection` of the book and those replicates, at
+    ``forward_confidence``), whose lower bound must be above zero: selection
+    in plain terms, with its uncertainty, on the seeds together. Only then do
+    the thresholds name the condition, so a slice judged without it reads as
+    before. The holder's readings (:func:`slice_readings`) ride on every
+    slice either way.
     ``start``/``end`` are the slice's calendar bounds; the recency window is
     the last ``recency_months`` calendar months ending in ``end``'s month.
     ``turnover`` (traded notional over the slice's opening equity),
@@ -1138,15 +1209,23 @@ def forward_slice(
     )
     months = _month_index(end) - _month_index(start) + 1
     readings = slice_readings(analysis, start=start, end=end)
-    if seed_replicates and not rules.require_seed_replicates:
-        raise ValueError("seed replicates were given under rules that hold no seed condition")
+    selection: dict[str, object] = {}
+    if rules.require_forward_plain_selection:
+        selection["judged_selection"] = judged_selection(
+            [analysis, *(sidecar for _identity, sidecar in seed_replicates)],
+            start=start,
+            end=end,
+            seed_key=seed_key,
+            confidence=rules.forward_confidence,
+        )
     measured = {
         "start": start,
         "end": end,
         "series": series,
         **statistics,
         **readings,
-        **_with_seed_replicates(readings, seed_replicates),
+        **_with_seed_replicates(readings, seed_replicates, start, end),
+        **selection,
         "lower_bound": lower_bound,
         "recency_start": recency_start,
         "recency_neutralized_excess": recency_excess,
@@ -1187,7 +1266,7 @@ def heldout_slice(
     end: str,
     forward_tracking_error: float,
     mean_gross: float,
-    seed_replicates: Sequence[Mapping[str, object]] = (),
+    seed_replicates: Sequence[tuple[Mapping[str, object], Mapping[str, object]]] = (),
 ) -> dict[str, object]:
     """Statistics and failed conditions H2–H4 of the Held-out slice under the
     arm's ``rules`` (docs/pipeline-design.md, the graduation verdict).
@@ -1224,7 +1303,7 @@ def heldout_slice(
         "series": series,
         **statistics,
         **readings,
-        **_with_seed_replicates(readings, seed_replicates),
+        **_with_seed_replicates(readings, seed_replicates, start, end),
         "tolerance": tolerance,
         "max_drawdown": drawdown,
         "active_max_drawdown": active_drawdown,
@@ -1274,7 +1353,7 @@ def graduation_verdict(
     heldout: Mapping[str, Any] | None,
     strategy_error: Literal["forward", "heldout"] | None = None,
 ) -> dict[str, object]:
-    """``graduated`` iff F1–F9 and H1–H4 all hold, else ``discarded``.
+    """``graduated`` iff F1–F8 and H1–H4 all hold, else ``discarded``.
 
     ``strategy_error`` names the slice in which the strategy raised (F1/H1).
     A replay that raised produced no result, so it comes with no slice at all.

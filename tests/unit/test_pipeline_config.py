@@ -334,8 +334,9 @@ class AcceptanceRulesTest(unittest.TestCase):
     def test_plain_selection_is_stated_and_judged_only_where_an_arm_holds_it(self) -> None:
         """An arm recorded before the forward plain-selection condition has no
         key: its forward slice is judged and its session told exactly as
-        before. An arm that holds it is told the rule (no figure) and its
-        rules carry it; the switch accepts only a boolean."""
+        before. An arm that holds it is told the rule (no figure), with the
+        seed average only where it also holds seed replicates, and its rules
+        carry it; the switch accepts only a boolean."""
 
         recorded = acceptance_for({"max_drawdown": 0.45})
         self.assertFalse(recorded.require_forward_plain_selection)
@@ -343,9 +344,13 @@ class AcceptanceRulesTest(unittest.TestCase):
         held = acceptance_for({"require_forward_plain_selection": True})
         self.assertTrue(held.require_forward_plain_selection)
         stated = held.agent_facts()["graduation"]["forward"]["plain_selection"]
-        self.assertIn("> 0", stated)
-        self.assertIn("raw_readings.plain_selection", stated)
+        self.assertIn("lower bound > 0", stated)
+        self.assertIn("with no regression", stated)
+        self.assertNotIn("seed replicates", stated)
         self.assertIsNone(re.search(r"\d\.\d", stated))
+        seeded = replace(held, require_seed_replicates=True).agent_facts()["graduation"]["forward"]
+        self.assertEqual(set(seeded), set(held.agent_facts()["graduation"]["forward"]))
+        self.assertIn("average over the frozen book and its replicates", seeded["plain_selection"])
         self.assertEqual(AcceptanceRules.from_record(held.to_record()), held)
         with self.assertRaisesRegex(ValueError, "require_forward_plain_selection must be a boolean"):
             AcceptanceRules(require_forward_plain_selection="yes")  # type: ignore[arg-type]

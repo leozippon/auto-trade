@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 from statistics import NormalDist
 
@@ -908,12 +909,25 @@ def _rally_book(rng, *, alpha, active_beta, days=FORWARD_DAYS):
     return _with_panel(_analysis((list(days), panel + active, benchmark, size)), panel)
 
 
+def _selection_book(rng, mean, *, days=FORWARD_DAYS):
+    """A book whose daily return minus its panel's averages exactly ``mean`` a
+    year over ``days``, around noise of about 4.8 % a year."""
+
+    n = len(days)
+    benchmark = rng.normal(0.0, 0.01, n)
+    size = rng.normal(0.0, 0.004, n)
+    panel = 0.9 * benchmark + rng.normal(0.0, 0.003, n)
+    noise = rng.normal(0.0, 0.003, n)
+    active = noise - noise.mean() + mean / TRADING_DAYS_PER_YEAR
+    return _with_panel(_analysis((list(days), panel + active, benchmark, size)), panel)
+
+
 def test_plain_selection_refuses_a_book_the_regression_carried_only_where_held():
     """F8: the neutralised conditions pass a book that lost to its own panel
     in a rally because its negative active market loading is credited back;
     an arm held to plain selection refuses it, and an arm whose rules lack the
-    condition judges the slice exactly as before (no reason, no threshold),
-    with the holder's readings reported either way."""
+    condition judges the slice exactly as before (no reason, no threshold, no
+    judged series), with the holder's readings reported either way."""
 
     rng = np.random.default_rng(118)
     book = _rally_book(rng, alpha=0.12, active_beta=-0.5)
@@ -926,25 +940,71 @@ def test_plain_selection_refuses_a_book_the_regression_carried_only_where_held()
     assert raw["plain_selection"] < 0
     assert unheld["plain_excess"] < 0 < unheld["neutralized_excess"]
     assert "require_forward_plain_selection" not in unheld["thresholds"]
+    assert "judged_selection" not in unheld
 
     held = _forward(book, require_forward_plain_selection=True)
-    assert held["reasons"] == ["forward_plain_selection_not_positive"]
+    assert held["reasons"] == ["forward_plain_selection_lower_bound_not_positive"]
     assert held["thresholds"]["require_forward_plain_selection"] is True
-    # The switch adds a reason and its threshold, and changes no reading.
-    assert {key: value for key, value in held.items() if key not in ("reasons", "thresholds")} == {
-        key: value for key, value in unheld.items() if key not in ("reasons", "thresholds")
+    # The switch adds a reason, its threshold and the series it judged, and
+    # changes no other reading.
+    added = ("reasons", "thresholds", "judged_selection")
+    assert {key: value for key, value in held.items() if key not in added} == {
+        key: value for key, value in unheld.items() if key not in added
     }
 
-    # A book that did beat its panel in plain terms passes the held rule.
-    winner = _forward(_rally_book(rng, alpha=0.40, active_beta=0.0), require_forward_plain_selection=True)
-    assert winner["raw_readings"]["plain_selection"] > 0
-    assert "forward_plain_selection_not_positive" not in winner["reasons"]
+    # Without a panel there is no plain selection: the slice is not judged.
+    with pytest.raises(ValueError, match="no plain selection to judge"):
+        _forward({**book, "panel_daily": []}, require_forward_plain_selection=True)
 
-    # Without a panel there is no plain selection, and an unmeasured reading
-    # never passes.
-    bare = _forward({**book, "panel_daily": []}, require_forward_plain_selection=True)
-    assert bare["raw_readings"]["plain_selection"] is None
-    assert "forward_plain_selection_not_positive" in bare["reasons"]
+
+def test_plain_selection_is_judged_on_the_lower_bound_of_its_mean():
+    """F8 asks for more than a positive mean: the one-sided bound of the
+    judged series' mean, drawn as F2 draws its own, must be above zero. A book
+    frozen with no replicate is judged on its own series."""
+
+    rng = np.random.default_rng(122)
+
+    def judged(mean, **overrides):
+        return _forward(_selection_book(rng, mean), require_forward_plain_selection=True, **overrides)
+
+    # A mean above zero inside its own noise is refused.
+    thin = judged(0.01)
+    selection = thin["judged_selection"]
+    assert selection["members"] == 1
+    assert selection["mean"] == pytest.approx(0.01, rel=1e-9)
+    assert selection["mean"] == pytest.approx(thin["plain_excess"], rel=1e-9)
+    assert selection["lower_bound"] < 0 < selection["mean"]
+    assert "forward_plain_selection_lower_bound_not_positive" in thin["reasons"]
+    # One clear of its noise passes.
+    clear = judged(0.15)
+    assert 0 < clear["judged_selection"]["lower_bound"] < clear["judged_selection"]["mean"]
+    assert clear["reasons"] == []
+
+    # The bound is the documented procedure on the plain series: F2's blocks,
+    # draws and artifact seed, the mean in place of the intercept.
+    book = _selection_book(rng, 0.05)
+    series = np.array(
+        [
+            own - drawn
+            for (_day, own), (_same, drawn) in zip(book["strategy_daily"], book["panel_daily"], strict=True)
+        ]
+    )
+    bound = _forward(book, require_forward_plain_selection=True, forward_confidence=0.9)
+    seed = int.from_bytes(hashlib.sha256(b"artifact-1").digest()[:8], "big")
+    blocks = -(-len(series) // verdict.BOOTSTRAP_BLOCK_DAYS)
+    starts = np.random.default_rng(seed).integers(
+        0, len(series) - verdict.BOOTSTRAP_BLOCK_DAYS + 1, size=(verdict.BOOTSTRAP_DRAWS, blocks)
+    )
+    index = (starts[:, :, None] + np.arange(verdict.BOOTSTRAP_BLOCK_DAYS)).reshape(len(starts), -1)
+    means = series[index[:, : len(series)]].mean(axis=1)
+    assert bound["judged_selection"]["lower_bound"] == pytest.approx(
+        float(np.quantile(means, 0.1)) * TRADING_DAYS_PER_YEAR, rel=1e-12
+    )
+    assert _forward(book, require_forward_plain_selection=True, seed_key="artifact-2")[
+        "judged_selection"
+    ]["lower_bound"] != pytest.approx(
+        _forward(book, require_forward_plain_selection=True)["judged_selection"]["lower_bound"]
+    )
 
 
 def test_the_holders_readings_are_the_stored_series_compounded():
@@ -998,66 +1058,79 @@ def test_the_holders_readings_are_the_stored_series_compounded():
     assert f"plain selection {(strategy - panel) * 100:+.1f} points" in lines["forward"]
 
 
-def test_the_seed_mean_reads_every_seed_and_an_unmeasured_one_never_passes():
-    """F9: with seed replicates the forward slice carries each one's readings
-    and their mean with the book, and refuses a mean plain selection that is
-    not positive; a replicate whose plain selection cannot be read leaves the
-    mean unread rather than dropped, which never passes. The thresholds name
-    the condition where the arm's rule holds it, replicates or none, and
-    never otherwise; replicates under rules without it are refused. Held-out
-    reports the same, unjudged."""
+def test_plain_selection_judges_the_book_and_its_seed_replicates_as_one_series():
+    """With seed replicates the forward slice carries each one's readings and
+    their mean with the book, and F8 judges the day-by-day mean series: a
+    seed mean above zero whose bound is not above zero is refused, whatever
+    the frozen seed read alone; a replicate that cannot be read is never
+    dropped from the mean, the slice is not judged. Held-out reports the
+    replicates, unjudged."""
 
     rng = np.random.default_rng(121)
-    span = FORWARD_DAYS + HELDOUT_DAYS
-    book = _rally_book(rng, alpha=0.40, active_beta=0.0, days=span)
-    winner = _rally_book(rng, alpha=0.40, active_beta=0.0, days=span)
-    loser = _rally_book(rng, alpha=-1.20, active_beta=0.0, days=span)
+    book = _selection_book(rng, 0.12)
+    held = {"require_forward_plain_selection": True, "require_seed_replicates": True}
 
-    def replicate(analysis, start=FORWARD_START, end=FORWARD_END):
-        return verdict.seed_replicate_slice(analysis, start=start, end=end)
+    def replicate(analysis, name="replicate"):
+        return ({"artifact_id": name, "source_step_id": f"step_{name}"}, analysis)
 
-    alone = _forward(book)
+    alone = _forward(book, **held)
     assert "seed_replicates" not in alone and "seed_mean" not in alone
-    assert "require_seed_replicates" not in alone["thresholds"]
-    nothing = _forward(book, require_seed_replicates=True)
-    assert nothing["thresholds"]["require_seed_replicates"] is True
-    assert {key: value for key, value in nothing.items() if key != "thresholds"} == {
-        key: value for key, value in alone.items() if key != "thresholds"
+    assert alone["judged_selection"]["members"] == 1
+    assert alone["reasons"] == []
+
+    # The frozen seed clears the bound alone; with the other two seeds the
+    # mean is still above zero, and no longer clear of its noise.
+    others = [replicate(_selection_book(rng, -0.03), "b"), replicate(_selection_book(rng, -0.07), "c")]
+    sunk = _forward(book, seed_replicates=others, **held)
+    selection = sunk["judged_selection"]
+    assert selection["members"] == sunk["seed_mean"]["members"] == 3
+    assert selection["mean"] == pytest.approx((0.12 - 0.03 - 0.07) / 3, rel=1e-9)
+    assert selection["mean"] == pytest.approx(sunk["seed_mean"]["plain_excess"], rel=1e-9)
+    assert selection["lower_bound"] < 0 < selection["mean"]
+    assert sunk["reasons"] == ["forward_plain_selection_lower_bound_not_positive"]
+    assert [block["artifact_id"] for block in sunk["seed_replicates"]] == ["b", "c"]
+    assert sunk["seed_replicates"][0]["plain_excess"] == pytest.approx(-0.03, rel=1e-9)
+    # Every other reading and condition stays the book's own.
+    added = ("reasons", "seed_replicates", "seed_mean", "judged_selection")
+    assert {key: value for key, value in sunk.items() if key not in added} == {
+        key: value for key, value in alone.items() if key not in added
     }
-    with pytest.raises(ValueError, match="no seed condition"):
-        _forward(book, seed_replicates=[replicate(winner)])
+    assert "require_seed_replicates" not in sunk["thresholds"]
 
-    def judged(*replicates):
-        return _forward(book, require_seed_replicates=True, seed_replicates=list(replicates))
-
-    held = judged(replicate(winner))
-    assert held["reasons"] == [] and held["thresholds"]["require_seed_replicates"] is True
-    assert held["seed_mean"]["raw_readings"]["plain_selection"] == pytest.approx(
-        (alone["raw_readings"]["plain_selection"] + replicate(winner)["raw_readings"]["plain_selection"]) / 2
-    )
-    sunk = judged(replicate(loser))
-    assert alone["raw_readings"]["plain_selection"] > 0
-    assert sunk["seed_mean"]["raw_readings"]["plain_selection"] < 0
-    assert sunk["reasons"] == ["forward_seed_mean_plain_selection_not_positive"]
-    unread = judged(replicate({**winner, "panel_daily": []}))
-    assert unread["seed_mean"]["raw_readings"]["plain_selection"] is None
-    assert unread["reasons"] == ["forward_seed_mean_plain_selection_not_positive"]
-
-    heldout = _heldout(
+    # Seeds that agree pass together.
+    agreed = _forward(
         book,
+        seed_replicates=[replicate(_selection_book(rng, 0.10)), replicate(_selection_book(rng, 0.08))],
+        **held,
+    )
+    assert agreed["judged_selection"]["lower_bound"] > 0 and agreed["reasons"] == []
+
+    # A replicate without a panel, or one that measured other days.
+    with pytest.raises(ValueError, match="no plain selection to judge"):
+        _forward(book, seed_replicates=[replicate({**others[0][1], "panel_daily": []})], **held)
+    short = _selection_book(rng, 0.10, days=FORWARD_DAYS[:-1])
+    with pytest.raises(ValueError, match="measured other days than the frozen book"):
+        _forward(book, seed_replicates=[replicate(short)], **held)
+
+    span = FORWARD_DAYS + HELDOUT_DAYS
+    long_book, long_other = _selection_book(rng, 0.10, days=span), _selection_book(rng, -0.50, days=span)
+    heldout = _heldout(
+        long_book,
         forward_tracking_error=0.05,
-        seed_replicates=[replicate(loser, HELDOUT_START, HELDOUT_END)],
+        seed_replicates=[replicate(long_other)],
+        **held,
     )
     assert heldout["seed_mean"]["members"] == 2
-    assert not any("seed" in reason for reason in heldout["reasons"])
+    assert "judged_selection" not in heldout
+    assert not any("selection" in reason for reason in heldout["reasons"])
     assert verdict.graduation_verdict(forward=sunk, heldout=heldout)["reasons"][0] == (
-        "forward_seed_mean_plain_selection_not_positive"
+        "forward_plain_selection_lower_bound_not_positive"
     )
 
 
 def test_the_condition_table_is_the_one_list_of_what_a_record_can_carry():
     """Every condition has its own reason token. A graduation condition names
-    its criterion, F1..F9 and H1..H4 between them, and no freeze condition
+    its criterion, F1..F8 and H1..H4 between them, and no freeze condition
     does. An optional condition is turned on by a rule that exists, and only
     an optional condition states a rule in the thresholds. The Environment's
     copy of the seed reasons (it cannot import the Pipeline) is the table's."""
@@ -1071,7 +1144,7 @@ def test_the_condition_table_is_the_one_list_of_what_a_record_can_carry():
         stages.setdefault(condition.stage, []).append(condition)
     graduation = [*stages["replay"], *stages["forward"], *stages["heldout"]]
     assert sorted({condition.code for condition in graduation}) == [
-        *(f"F{number}" for number in range(1, 10)),
+        *(f"F{number}" for number in range(1, 9)),
         *(f"H{number}" for number in range(1, 5)),
     ]
     # ``forward_...`` is an F criterion, ``heldout_...`` an H one.
@@ -1098,8 +1171,7 @@ def test_a_stage_records_its_failures_in_the_tables_order_and_judges_nothing_tha
         "round_trips": 0,
         "mean_gross": 0.1,
         "mandate": {"tracking_error": 0.5, "market_beta": 2.0},
-        "raw_readings": {"plain_selection": -0.1},
-        "seed_mean": {"raw_readings": {"plain_selection": None}},
+        "judged_selection": {"lower_bound": -0.1},
     }
     mandate = {"tracking_error_cap": 0.08, "beta_min": 0.85, "beta_max": 1.15}
     thresholds = {
@@ -1115,10 +1187,7 @@ def test_a_stage_records_its_failures_in_the_tables_order_and_judges_nothing_tha
     forward = [condition for condition in verdict.CONDITIONS if condition.stage == "forward"]
 
     assert verdict.judge("forward", failing, thresholds, every) == [c.reason for c in forward]
-    assert verdict.stamps("forward", every) == {
-        "require_forward_plain_selection": True,
-        "require_seed_replicates": True,
-    }
+    assert verdict.stamps("forward", every) == {"require_forward_plain_selection": True}
     assert verdict.judge("forward", failing, thresholds, AcceptanceRules()) == [
         condition.reason for condition in forward if not condition.requires
     ]

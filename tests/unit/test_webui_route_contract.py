@@ -494,16 +494,12 @@ def test_a_criterion_that_names_a_threshold_words_it_from_the_record() -> None:
     assert not re.search(r"≥ [0-9]", gate), gate
 
 
-# Threshold keys a forward record carries only where the arm's rules hold the
-# condition they name.
-CONDITIONAL_THRESHOLDS = {"require_forward_plain_selection", "require_seed_replicates"}
-
-
 def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) -> None:
     """The panels read the registry's arm projections by field name; a renamed
     field would render an empty cell instead of failing. Checked against a
-    projection of a synthetic arm that carries its verdict, judged on its seed
-    replicates so the fields only such an arm has are served too."""
+    projection of a synthetic arm that carries its verdict, judged on plain
+    selection over its seed replicates so the fields only such an arm has are
+    served too."""
 
     from autotrade.pipelines.ledger import VERDICT_VOID_FIELDS
     from autotrade.webui.registry import experiment_detail
@@ -555,12 +551,9 @@ def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) ->
         ("verdictStagePanel", reads("verdictStagePanel", "forward"), forward),
         ("forwardCriteria", reads("forwardCriteria", "f"), set(slices["forward"])),
         ("heldoutCriteria", reads("heldoutCriteria", "h"), set(slices["heldout"])),
-        # Plain selection (F8) is stated only by an arm that holds it, and the
-        # fixture's rules do not; its served key is checked on such an arm in
-        # the verdict and research-console tests.
-        ("criteria thresholds", criteria_thresholds - CONDITIONAL_THRESHOLDS, set(detail["forward"]["verdict"]["thresholds"])),
+        ("criteria thresholds", criteria_thresholds, set(detail["forward"]["verdict"]["thresholds"])),
         # The same threshold keys are served before the replay, from the plan.
-        ("plan thresholds", criteria_thresholds - CONDITIONAL_THRESHOLDS, set(replay["thresholds"])),
+        ("plan thresholds", criteria_thresholds, set(replay["thresholds"])),
         ("verdictStagePanel", reads("verdictStagePanel", "attempts"), set(detail["replay_attempts"])),
         ("verdictStagePanel", reads("verdictStagePanel", "research"), record),
         ("replaySpanBar", reads("replaySpanBar", "replay"), set(replay["replay"])),

@@ -117,7 +117,6 @@ from .verdict import (
     information_ratio_bar,
     judge,
     neutralized_statistics,
-    seed_replicate_slice,
     stamps,
     trial_correlation,
     trial_family_statistics,
@@ -828,26 +827,20 @@ class RollingExperimentPipeline:
 
         A slice that cannot be measured raises ``ValueError``, which fails the
         attempt: a verdict is never read off a number that was not measured.
-        Each seed replicate's completed replay is read over the same two
-        slices (``verdict.seed_replicate_slice``, named by its artifact and
-        source Step) and handed to them: ``slices.<name>.seed_replicates`` and
+        Each seed replicate's completed replay is handed to both slices, named
+        by its artifact and source Step: ``slices.<name>.seed_replicates`` and
         ``slices.<name>.seed_mean`` carry its readings and the mean with the
-        book, and the record's ``seed_replicates`` its result and refits.
+        book, ``slices.forward.judged_selection`` the series F8 judges on them
+        together, and the record's ``seed_replicates`` its result and refits.
         """
 
         replay, analysis = _replay_and_analysis(result)
-        replicate_slices: dict[str, list[dict[str, object]]] = {"forward": [], "heldout": []}
+        replicates: list[tuple[dict[str, object], dict[str, object]]] = []
         replicate_rows: list[dict[str, object]] = []
         for item, item_result in seed_replicates:
             item_replay, item_analysis = _replay_and_analysis(item_result)
             identity = {"artifact_id": item.artifact_id, "source_step_id": item.source_step_id}
-            for name, slot in (("forward", forward), ("heldout", heldout)):
-                replicate_slices[name].append(
-                    {
-                        **identity,
-                        **seed_replicate_slice(item_analysis, start=slot.start, end=slot.end),
-                    }
-                )
+            replicates.append((identity, item_analysis))
             replicate_rows.append(
                 {
                     **identity,
@@ -877,7 +870,7 @@ class RollingExperimentPipeline:
             turnover=float(forward_activity["turnover"]),  # type: ignore[arg-type]
             round_trips=int(forward_activity["round_trips"]),  # type: ignore[arg-type]
             mean_gross=float(forward_activity["mean_gross"]),  # type: ignore[arg-type]
-            seed_replicates=replicate_slices["forward"],
+            seed_replicates=replicates,
         )
         heldout_block = heldout_slice(
             analysis,
@@ -886,7 +879,7 @@ class RollingExperimentPipeline:
             end=heldout.end,
             forward_tracking_error=float(forward_block["tracking_error"]),  # type: ignore[arg-type]
             mean_gross=float(heldout_activity["mean_gross"]),  # type: ignore[arg-type]
-            seed_replicates=replicate_slices["heldout"],
+            seed_replicates=replicates,
         )
         return {
             "status": "ok",

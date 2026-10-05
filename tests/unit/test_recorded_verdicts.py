@@ -140,7 +140,7 @@ def test_a_declared_exception_covers_exactly_the_keys_it_names(experiments: Path
 
 
 def test_the_dump_judges_every_stored_input_under_every_variant_of_its_rules(current: dict):
-    assert list(VARIANTS) == ["R0", "R1", "R2", "R3", MANDATED]
+    assert list(VARIANTS) == ["R0", "R1", "R3", MANDATED]
     variants = ["own", *VARIANTS, WITH_REPLICATES]
     arm = current["arms"][ARM]
     assert list(arm["rules"]) == list(arm["facts"]) == ["own", *VARIANTS]
@@ -154,7 +154,7 @@ def test_the_dump_judges_every_stored_input_under_every_variant_of_its_rules(cur
         assert "raw_excess_at_cost_stress" not in gates["R0"]
         assert "cost_stress_multiplier" not in gates["R0"]["thresholds"]
         assert gates["R1"]["thresholds"]["cost_stress_multiplier"] == 2.0
-        assert "require_seed_replicates" not in gates["R2"]["thresholds"]
+        assert "require_seed_replicates" not in gates["R1"]["thresholds"]
         assert gates["R3"]["thresholds"]["require_seed_replicates"] is True
         # Named, the session's other Step is read as a replicate and refused:
         # it holds the nominee's own bytes.
@@ -175,15 +175,19 @@ def test_the_dump_judges_every_stored_input_under_every_variant_of_its_rules(cur
         "recorded": [],
         "R0": [],
         "R1": [],
-        "R2": ["require_forward_plain_selection"],
-        "R3": ["require_forward_plain_selection", "require_seed_replicates"],
+        "R3": ["require_forward_plain_selection"],
         MANDATED: [],
-        WITH_REPLICATES: ["require_forward_plain_selection", "require_seed_replicates"],
+        WITH_REPLICATES: ["require_forward_plain_selection"],
     }
     assert "forward_tracking_error_above_cap" in verdicts[MANDATED]["verdict"]["reasons"]
     assert verdicts["recorded"]["verdict"]["reasons"] == []
-    assert "seed_mean" not in verdicts["R3"]["slices"]["forward"]
-    assert verdicts[WITH_REPLICATES]["slices"]["forward"]["seed_mean"]["members"] == 2
+    # The series F8 judges exists exactly where an era holds the condition:
+    # the book's own, or the book with the replicates named.
+    assert "judged_selection" not in verdicts["R1"]["slices"]["forward"]
+    alone = verdicts["R3"]["slices"]["forward"]
+    named = verdicts[WITH_REPLICATES]["slices"]["forward"]
+    assert "seed_mean" not in alone and alone["judged_selection"]["members"] == 1
+    assert named["seed_mean"]["members"] == named["judged_selection"]["members"] == 2
     # The creation contract rides along, in the console's own order.
     assert [key for key, _value in current["creation"]["defaults"]] == list(WEB_CREATE_DEFAULTS)
     assert "min_dsr_probability" in current["creation"]["accepted"]

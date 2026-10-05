@@ -326,8 +326,9 @@ def test_seed_replicates_are_shown_where_the_record_has_them_and_absent_otherwis
     """An arm judged on its training seeds together shows each seed and their
     mean on the experiment page -- the freeze's seed-mean IR beside the
     nominee's and the bar, and the forward and Held-out readings per seed --
-    from the fields the console serves; an arm frozen on one seed serves none
-    of them and draws nothing in their place. F9 is its own criterion code."""
+    and the series F8 judges them on together -- from the fields the console
+    serves; an arm frozen on one seed serves none of them and draws nothing
+    in their place."""
 
     build_arm(tmp_path, "seeded", "graduated", seeded=True)
     build_arm(tmp_path, "single", "graduated")
@@ -347,14 +348,16 @@ def test_seed_replicates_are_shown_where_the_record_has_them_and_absent_otherwis
         assert block["seed_mean"]["raw_readings"]["plain_selection"] == pytest.approx(
             (block["raw_readings"]["plain_selection"] + block["seed_replicates"][0]["raw_readings"]["plain_selection"]) / 2
         )
-    assert seeded["forward"]["verdict"]["thresholds"]["require_seed_replicates"] is True
-    assert seeded["sessions"][1]["thresholds"]["require_seed_replicates"] is True
-    assert registry._CRITERION_CODES["forward_seed_mean_plain_selection_not_positive"] == "F9"
-    # One seed: nothing served, so nothing drawn.
+    assert forward["judged_selection"]["members"] == 2
+    assert forward["judged_selection"]["mean"] == pytest.approx(forward["seed_mean"]["plain_excess"])
+    assert seeded["forward"]["verdict"]["thresholds"]["require_forward_plain_selection"] is True
+    assert seeded["sessions"][1]["thresholds"]["require_forward_plain_selection"] is True
+    assert registry._CRITERION_CODES["forward_plain_selection_lower_bound_not_positive"] == "F8"
+    # One seed under the earlier rules: nothing served, so nothing drawn.
     assert single["frozen"]["seed_replicates"] is None
     assert single["sessions"][0]["record"]["freeze_gate"]["seed_replicates"] is None
-    assert "seed_mean" not in single["forward"]["slices"]["forward"]
-    assert "require_seed_replicates" not in single["sessions"][1]["thresholds"]
+    assert not {"seed_mean", "judged_selection"} & set(single["forward"]["slices"]["forward"])
+    assert "require_forward_plain_selection" not in single["sessions"][1]["thresholds"]
 
     script = (
         Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"

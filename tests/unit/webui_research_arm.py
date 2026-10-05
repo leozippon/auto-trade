@@ -41,7 +41,6 @@ from autotrade.pipelines.verdict import (
     graduation_verdict,
     heldout_slice,
     neutralized_statistics,
-    seed_replicate_slice,
 )
 
 STAGES = (
@@ -209,12 +208,14 @@ def build_arm(
 ) -> Path:
     """Write one arm at ``stage`` (one of :data:`STAGES`) under ``root``.
 
-    ``seeded`` makes it an arm under ``require_seed_replicates`` whose nominee
-    froze with one seed replicate and, past the freeze, was replayed with it
-    and judged on their mean, in the shapes ``pipelines.experiment`` records
+    ``seeded`` makes it an arm under ``require_seed_replicates`` and
+    ``require_forward_plain_selection`` whose nominee froze with one seed
+    replicate and, past the freeze, was replayed with it and judged on the
+    two together, in the shapes ``pipelines.experiment`` records
     (tests/unit/test_seed_replicates.py): the gate's ``seed_replicates``
     block, the frozen block's, each slice's ``seed_replicates`` and
-    ``seed_mean`` and the record's own rows.
+    ``seed_mean``, the forward slice's ``judged_selection`` and the record's
+    own rows.
     """
 
     if stage not in STAGES:
@@ -228,7 +229,11 @@ def build_arm(
         {
             "experiment_id": experiment_id,
             **PARAMS,
-            **({"require_seed_replicates": True} if seeded else {}),
+            **(
+                {"require_seed_replicates": True, "require_forward_plain_selection": True}
+                if seeded
+                else {}
+            ),
             "_created_at": "2026-09-13T00:00:00+00:00",
         },
     )
@@ -376,7 +381,7 @@ def build_arm(
     if stage in ("graduated", "discarded"):
         edge = 0.002 if stage == "graduated" else -0.002
         ref = write_result(directory, "heldout", start=REPLAY["start"], days=300, edge=edge, seed=7)
-        seeds: dict[str, dict[str, object]] = {"forward": {}, "heldout": {}}
+        replicates: list[tuple[dict[str, object], dict[str, object]]] = []
         replicate_rows: list[dict[str, object]] = []
         if seeded:
             replicate_ref = write_result(
@@ -385,16 +390,7 @@ def build_arm(
             _with_panel(ref, 0.6)
             _with_panel(replicate_ref, 0.9)
             identity = {"artifact_id": "strategy_research_seed", "source_step_id": replicate["step_id"]}
-            replicate_analysis = _analysis(replicate_ref)
-            for name, (start, end) in (
-                ("forward", (REPLAY["start"], REPLAY["forward_end"])),
-                ("heldout", (REPLAY["heldout_start"], REPLAY["replay_end"])),
-            ):
-                seeds[name] = {
-                    "seed_replicates": [
-                        {**identity, **seed_replicate_slice(replicate_analysis, start=start, end=end)}
-                    ]
-                }
+            replicates.append((identity, _analysis(replicate_ref)))
             replicate_rows.append(
                 {
                     **identity,
@@ -404,7 +400,9 @@ def build_arm(
                 }
             )
         analysis = _analysis(ref)
-        rules = replace(RULES, require_seed_replicates=seeded)
+        rules = replace(
+            RULES, require_seed_replicates=seeded, require_forward_plain_selection=seeded
+        )
         forward = forward_slice(
             analysis,
             rules=rules,
@@ -415,7 +413,7 @@ def build_arm(
             turnover=2.0,
             round_trips=24,
             mean_gross=0.9,
-            **seeds["forward"],  # type: ignore[arg-type]
+            seed_replicates=replicates,
         )
         heldout = heldout_slice(
             analysis,
@@ -424,7 +422,7 @@ def build_arm(
             end=REPLAY["replay_end"],
             forward_tracking_error=float(forward["tracking_error"]),
             mean_gross=0.9,
-            **seeds["heldout"],  # type: ignore[arg-type]
+            seed_replicates=replicates,
         )
         ledger.append(
             {

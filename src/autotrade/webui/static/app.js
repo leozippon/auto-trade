@@ -77,8 +77,8 @@ const REASON_LABELS = {
   forward_exposure_below_floor: "前推平均仓位",
   forward_tracking_error_above_cap: "前推对基准指数跟踪误差",
   forward_beta_outside_band: "前推市场 β",
-  forward_plain_selection_not_positive: "前推账户对零技能面板（未回归）",
-  forward_seed_mean_plain_selection_not_positive: "前推种子均值对零技能面板（未回归）",
+  forward_plain_selection_lower_bound_not_positive: (t) =>
+    `前推对零技能面板（未回归）${fmtPct(t.forward_confidence, 0)} 下界`,
   heldout_excess_below_tolerance: "Held-out 超额",
   heldout_max_drawdown_exceeded: "Held-out 回撤",
   heldout_active_drawdown_exceeded: "Held-out 主动回撤",
@@ -122,10 +122,14 @@ const ACTIVE_BETA_TITLE = "主动序列（账户 − 面板）对基准指数的
 const NEUTRAL_IR_TITLE = "剔除基准与规模载荷后的主动超额 ÷ 残差跟踪误差；回归退回的 β 与规模部分持有人拿不到";
 const DERIVED_TITLE = "此记录写于切片携带这些读数之前，数字由同一次回放存下的日序列推得";
 // A model-training nominee judged on its training seeds together
-// (pipelines/experiment.py `_seed_replicate_gate`, verdict.py `seed_mean`): a
-// seed replicate is the same strategy with only its seed line changed.
+// (pipelines/experiment.py `_seed_replicate_gate`, verdict.py `seed_mean` and
+// `judged_selection`): a seed replicate is the same strategy with only its
+// seed line changed.
 const SEED_IR_TITLE = "提名节点与它的种子副本（同一策略只换训练种子那一行）研究期主动 IR 的平均，须达到提名节点自己的 IR 门槛";
-const SEED_MEAN_TITLE = "冻结产物与它的种子副本各自读数的平均；只判训练模型并登记了种子副本的提名";
+const SEED_MEAN_TITLE = "冻结产物与它的种子副本各自读数的平均；只有登记了种子副本的提名才有";
+// What F8 judges (verdict.py `judged_selection`): one daily series, its mean
+// and that mean's lower bound, drawn as the neutralised bound is.
+const JUDGED_SELECTION_TITLE = "冻结产物日收益减零技能面板日收益、不做回归的序列（登记了种子副本时为冻结产物与各副本逐日平均），其年化均值的移动块自助法单侧下界";
 
 function reasonLabel(reason, thresholds) {
   const label = REASON_LABELS[reason];
@@ -3062,16 +3066,16 @@ function mandateRows(capToken, bandToken, measured, row, t) {
   ];
 }
 
-/* F1–F9 over the forward slice, as criterion rows: the 前推回放 view draws
+/* F1–F8 over the forward slice, as criterion rows: the 前推回放 view draws
    them alone, 裁决 draws them ahead of H1–H4, and neither restates a
    threshold the other spells differently. F8, plain selection, is drawn only
-   where the arm's own thresholds hold it; F9, its seed mean, where they hold
-   seed replicates and, once measured, only for a slice that has replicates —
-   a book with nothing to replicate has no mean to judge. */
+   where the arm's own thresholds hold it: the lower bound of the series it
+   judged, whose mean and seed count its hover states. */
 function forwardCriteria(f, verdict, thresholds) {
   const failed = failedReasons(verdict);
   const t = thresholds || {};
   const row = criteriaRow(f, failed, t);
+  const judged = (f && f.judged_selection) || {};
   return [
     ...(failed.has("forward_strategy_error")
       ? [{ ok: false, label: reasonLabel("forward_strategy_error"), value: null }]
@@ -3087,20 +3091,12 @@ function forwardCriteria(f, verdict, thresholds) {
     ...(t.require_forward_plain_selection
       ? [
           row(
-            "forward_plain_selection_not_positive",
-            fmtPct(f && (f.raw_readings || {}).plain_selection),
+            "forward_plain_selection_lower_bound_not_positive",
+            fmtPct(judged.lower_bound),
             "> 0",
-            PLAIN_SELECTION_TITLE,
-          ),
-        ]
-      : []),
-    ...((f ? f.seed_mean : t.require_seed_replicates)
-      ? [
-          row(
-            "forward_seed_mean_plain_selection_not_positive",
-            fmtPct(f && (f.seed_mean.raw_readings || {}).plain_selection),
-            "> 0",
-            SEED_MEAN_TITLE,
+            f
+              ? `${JUDGED_SELECTION_TITLE}；均值 ${fmtPct(judged.mean)}/年，${judged.members} 个种子`
+              : JUDGED_SELECTION_TITLE,
           ),
         ]
       : []),
@@ -3156,7 +3152,7 @@ function stageHead(key, detail) {
 }
 
 /* 前推回放: the forward slice alone — its span (progress while replaying),
-   once recorded the holder's line and its seed replicates, F1–F9 and the
+   once recorded the holder's line and its seed replicates, F1–F8 and the
    slice's own statistics. */
 function forwardStagePanel(detail) {
   const { forward, replay, thresholds, progress } = replayContext(detail);
@@ -3172,7 +3168,7 @@ function forwardStagePanel(detail) {
     el(
       "div",
       { class: "section-gap" },
-      el("h4", { class: "subsection-title" }, forward ? "前推条件 F1–F9" : "前推条件 F1–F9 · 阈值"),
+      el("h4", { class: "subsection-title" }, forward ? "前推条件 F1–F8" : "前推条件 F1–F8 · 阈值"),
       checklist(forwardCriteria(f, detail.verdict, thresholds)),
     ),
     sliceStats(f, FORWARD_STAT_FIELDS, thresholds),
@@ -3209,7 +3205,7 @@ function heldoutStagePanel(detail) {
 }
 
 /* 裁决: how the arm ended — its ending badge and reason, then the criteria
-   that decided it, as the same F1–F9 and H1–H4 rows the two slice views draw,
+   that decided it, as the same F1–F8 and H1–H4 rows the two slice views draw,
    so all three stages read in one vocabulary; then what the arm cost and when
    it was recorded, and the Paper handoff. An ending no replay decided (研究
    delivered nothing, or the worker broke) has the reason alone. Before it
@@ -3264,7 +3260,7 @@ function verdictStagePanel(detail) {
         el(
           "div",
           { class: "meta-line" },
-          "前推 F1–F9 与 Held-out H1–H4 全部通过才毕业；策略异常直接未通过，其他失败按上限重试",
+          "前推 F1–F8 与 Held-out H1–H4 全部通过才毕业；策略异常直接未通过，其他失败按上限重试",
         ),
     facts.length ? el("table", { class: "kv section-gap" }, ...facts) : null,
     paperHandoff(detail),

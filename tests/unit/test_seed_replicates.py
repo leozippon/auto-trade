@@ -71,7 +71,9 @@ SEEDED = acceptance_for(
 # in mode ``valid``, the forward stage in ``heldout``. An active return of
 # 0.0009 a day or more reads an IR above 3.5 over the two research years, far
 # above any bar the few trials here set; -0.0010 reads near -3.9. Forward,
-# seed 3000 loses to its panel by more than the other two beat theirs.
+# seed 1000 beats its panel well clear of its noise, seed 2000 barely and seed
+# 3000 loses nearly as much as the other two win: their mean stays above zero
+# and inside its noise.
 ALPHAS = {
     ("valid", 1000): 0.0012,
     ("valid", 2000): 0.0010,
@@ -79,7 +81,7 @@ ALPHAS = {
     ("valid", 4000): -0.0010,
     ("heldout", 1000): 0.0015,
     ("heldout", 2000): 0.0002,
-    ("heldout", 3000): -0.0030,
+    ("heldout", 3000): -0.0014,
 }
 
 
@@ -91,10 +93,14 @@ class SeedEvaluator:
     """A result whose zero-skill panel is the replay's market and size
     exposure, so the active series is the seed's daily ``alpha`` plus noise."""
 
-    def __init__(self, root: Path, *, fail_seed: int | None = None) -> None:
+    def __init__(
+        self, root: Path, *, fail_seed: int | None = None, bare_seed: int | None = None
+    ) -> None:
         self.root = root
         self.requests: list[EvaluationRequest] = []
+        # Forward, this seed's replay raises; that one's stores no panel.
         self.fail_seed = fail_seed
+        self.bare_seed = bare_seed
 
     def evaluate(self, request: EvaluationRequest) -> EvaluationResult:
         self.requests.append(request)
@@ -108,6 +114,8 @@ class SeedEvaluator:
             alpha=ALPHAS[(request.mode, seed)],
             seed=len(self.requests),
         )
+        if seed == self.bare_seed and request.mode == "heldout":
+            return result
         sidecar = Path(result.result_ref).parent / STYLE_ARTIFACT_NAME
         analysis = json.loads(sidecar.read_text(encoding="utf-8"))
         analysis["panel_daily"] = [
@@ -155,7 +163,7 @@ class SeedDeveloper:
         )
 
 
-def _arm(tmp_path: Path, candidates, *, nominee=0, replicates=(), rules=SEEDED, fail_seed=None):
+def _arm(tmp_path: Path, candidates, *, nominee=0, replicates=(), rules=SEEDED, **replays):
     config = RollingExperimentConfig(
         experiment_id="arm",
         experiments_root=tmp_path / "experiments",
@@ -163,7 +171,7 @@ def _arm(tmp_path: Path, candidates, *, nominee=0, replicates=(), rules=SEEDED, 
         acceptance=rules,
     )
     store = FilesystemArtifactStore(config.experiment_dir / "artifacts" / "strategy")
-    evaluator = SeedEvaluator(config.experiment_dir / "artifacts" / "results", fail_seed=fail_seed)
+    evaluator = SeedEvaluator(config.experiment_dir / "artifacts" / "results", **replays)
     pipeline = RollingExperimentPipeline(
         config,
         snapshots=Snapshots(),
@@ -177,10 +185,10 @@ def _arm(tmp_path: Path, candidates, *, nominee=0, replicates=(), rules=SEEDED, 
 
 
 def test_a_model_nominee_freezes_with_its_seed_replicate_and_both_replay_forward(tmp_path: Path):
-    """The registered replicate is checked, counted in the seed mean, frozen
+    """The registered replicates are checked, counted in the seed mean, frozen
     beside the nominee, and replayed exactly like it; the forward record
-    carries its readings and the mean, and the seed mean decides with the
-    nominee's own conditions."""
+    carries their readings and the series the seeds are judged on together,
+    whose mean above zero does not graduate a book while its bound is not."""
 
     pipeline, evaluator = _arm(
         tmp_path,
@@ -231,13 +239,29 @@ def test_a_model_nominee_freezes_with_its_seed_replicate_and_both_replay_forward
             assert block["seed_mean"]["raw_readings"][key] == pytest.approx(
                 sum(member["raw_readings"][key] for member in members) / 3
             )
-    selection = forward["slices"]["forward"]
-    # The nominee itself beat its panel; seed 3000 lost enough to sink the mean.
-    assert selection["raw_readings"]["plain_selection"] > 0
-    assert selection["seed_mean"]["raw_readings"]["plain_selection"] < 0
-    assert forward["verdict"]["reasons"] == ["forward_seed_mean_plain_selection_not_positive"]
-    assert forward["verdict"]["thresholds"]["require_seed_replicates"] is True
+    block = forward["slices"]["forward"]
+    judged = block["judged_selection"]
+    # The nominee itself beat its panel, and so does the mean over the three
+    # seeds; the mean's lower bound does not clear zero.
+    assert block["raw_readings"]["plain_selection"] > 0
+    assert block["seed_mean"]["raw_readings"]["plain_selection"] > 0
+    assert judged["members"] == 3
+    assert judged["mean"] == pytest.approx(block["seed_mean"]["plain_excess"])
+    assert judged["lower_bound"] < 0 < judged["mean"]
+    assert forward["verdict"]["reasons"] == ["forward_plain_selection_lower_bound_not_positive"]
+    assert forward["verdict"]["thresholds"]["require_forward_plain_selection"] is True
     assert experiment_verdict(pipeline.ledger.read())["status"] == "discarded"
+
+
+def test_seeds_that_agree_forward_graduate_together(tmp_path: Path):
+    pipeline, _evaluator = _arm(
+        tmp_path, [(_source(1000), "full"), (_source(2000), "full")], replicates=(1,)
+    )
+    pipeline.run_research_session()
+    forward = pipeline.run_forward()
+    judged = forward["slices"]["forward"]["judged_selection"]
+    assert judged["members"] == 2 and judged["lower_bound"] > 0
+    assert forward["verdict"]["status"] == "graduated"
 
 
 def _refused(tmp_path: Path, candidates, **arm) -> dict[str, object]:
@@ -290,9 +314,10 @@ def test_a_nominee_above_its_bar_is_refused_when_its_seed_mean_is_below(tmp_path
     assert gate["reasons"] == ["freeze_seed_mean_information_ratio_below_threshold"]
 
 
-def test_an_arm_with_the_rule_and_nothing_to_replicate_reads_as_holding_it(tmp_path: Path):
+def test_a_nominee_that_trains_no_model_is_judged_on_its_own_series(tmp_path: Path):
     """A nominee that trains no model needs no replicate: it freezes alone,
-    and both records name the rule the arm holds with nothing to replicate."""
+    its gate names the rule the arm holds with nothing to replicate, and
+    forward its own series is judged, with its bound."""
 
     pipeline, evaluator = _arm(
         tmp_path, [(_source(1000, fit=False), "full"), (_source(2000, fit=False), "full")]
@@ -307,8 +332,11 @@ def test_an_arm_with_the_rule_and_nothing_to_replicate_reads_as_holding_it(tmp_p
     research = len(evaluator.requests)
     forward = pipeline.run_forward()
     assert len(evaluator.requests) == research + 1
-    assert forward["verdict"]["thresholds"]["require_seed_replicates"] is True
-    assert "seed_mean" not in forward["slices"]["forward"]
+    block = forward["slices"]["forward"]
+    assert "seed_mean" not in block
+    assert block["judged_selection"]["members"] == 1
+    assert block["judged_selection"]["mean"] == pytest.approx(block["plain_excess"])
+    assert 0 < block["judged_selection"]["lower_bound"] < block["judged_selection"]["mean"]
     assert forward["verdict"]["status"] == "graduated"
 
 
@@ -331,7 +359,7 @@ def test_an_arm_without_the_condition_freezes_and_judges_as_before(tmp_path: Pat
     assert len(evaluator.requests) == research + 1
     assert "seed_replicates" not in forward
     assert "seed_mean" not in forward["slices"]["forward"]
-    assert "require_seed_replicates" not in forward["verdict"]["thresholds"]
+    assert forward["slices"]["forward"]["judged_selection"]["members"] == 1
     assert forward["verdict"]["status"] == "graduated"
 
     rows = record["steps"]
@@ -346,15 +374,29 @@ def test_an_arm_without_the_condition_freezes_and_judges_as_before(tmp_path: Pat
         )
 
 
-def test_a_replicate_replay_that_fails_fails_the_stage_and_leaves_no_verdict(tmp_path: Path):
+@pytest.mark.parametrize(
+    ("replays", "error", "message"),
+    [
+        (
+            {"fail_seed": 2000},
+            RuntimeError,
+            r"seed replicate research_step_1 \(.*\) did not complete",
+        ),
+        ({"bare_seed": 2000}, ValueError, "no plain selection to judge"),
+    ],
+    ids=["its_replay_fails", "its_replay_has_no_panel"],
+)
+def test_a_replicate_missing_from_the_mean_fails_the_stage_and_leaves_no_verdict(
+    tmp_path: Path, replays, error, message
+):
     pipeline, _evaluator = _arm(
         tmp_path,
         [(_source(1000), "full"), (_source(2000), "full")],
         replicates=(1,),
-        fail_seed=2000,
+        **replays,
     )
     pipeline.run_research_session()
-    with pytest.raises(RuntimeError, match=r"seed replicate research_step_1 \(.*\) did not complete"):
+    with pytest.raises(error, match=message):
         pipeline.run_forward()
     rows = pipeline.ledger.read()
     assert rows[-1]["record_type"] == "attempt_failed"

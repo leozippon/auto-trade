@@ -198,10 +198,13 @@ class AcceptanceRules:
     # The optional conditions: off here, stamped on at creation
     # (``hitl_state.CREATION_STAMPS`` states that convention once). The raw
     # condition reads ``verdict.raw_excess_at_cost_stress`` of the nominee at
-    # ``cost_stress_multiplier``; plain selection (F8) reads the forward
-    # slice's ``raw_readings.plain_selection``; seed replicates are judged by
-    # ``experiment.freeze_gate_for`` at the freeze and by
-    # ``verdict.forward_slice`` forward.
+    # ``cost_stress_multiplier``. Plain selection (F8) reads
+    # ``verdict.judged_selection`` of the frozen book and whatever seed
+    # replicates its freeze registered. Seed replicates are what a nominee
+    # that trains a model registers (``experiment.freeze_gate_for`` judges
+    # them at the freeze, and the forward stage replays each like the book),
+    # so the two compose without naming each other: with both, F8 judges the
+    # seeds together.
     require_raw_excess_at_cost_stress: bool = _rule(
         False,
         "Freeze gate: the nominee's own equity must beat the benchmark after the "
@@ -209,14 +212,15 @@ class AcceptanceRules:
     )
     require_forward_plain_selection: bool = _rule(
         False,
-        "Forward verdict: the frozen book's own return must beat its zero-skill panel's, "
-        "unregressed.",
+        "Forward verdict: the lower confidence bound of the frozen book's mean daily "
+        "return over its zero-skill panel's, unregressed and averaged over the book and "
+        "its seed replicates, must be above zero.",
     )
     require_seed_replicates: bool = _rule(
         False,
         "Freeze and forward: a nominee that trains a model registers its seed replicates; "
-        "their mean active IR must reach its bar and their mean forward plain selection "
-        "be positive.",
+        "their mean active IR must reach its bar, and each is replayed forward like the "
+        "frozen book.",
     )
     forward_confidence: float = _rule(
         verdict.FORWARD_CONFIDENCE, "Forward verdict: one-sided block-bootstrap confidence."
@@ -485,33 +489,32 @@ class AcceptanceRules:
                     "mean_gross": f">= {self.min_mean_gross}",
                     "tracking_mandate": "as in freeze_gate, over the forward months",
                     # Stated only where the arm's rules hold it, like the raw
-                    # freeze condition.
+                    # freeze condition; the seed average only where the arm
+                    # also holds seed replicates.
                     **(
                         {
                             "plain_selection": (
-                                "> 0: no regression -- the frozen book's compounded "
-                                "return over the forward months after every cost minus "
-                                "its zero-skill panel's (raw_readings.plain_selection "
-                                "of the forward slice); the neutralized conditions "
-                                "above must hold as well"
+                                f"{self.forward_confidence:.0%} one-sided block-bootstrap "
+                                "lower bound > 0 of the annualized mean of the frozen "
+                                "book's daily return after every cost minus its "
+                                "zero-skill panel's over the forward months, with no "
+                                "regression: selection in the holder's terms, positive "
+                                "beyond its own noise"
+                                + (
+                                    ". Where the freeze registered seed replicates the "
+                                    "series is the day-by-day average over the frozen "
+                                    "book and its replicates, each replicate replayed "
+                                    "exactly like the frozen book over the forward "
+                                    "months and Held-out; a frozen book without "
+                                    "replicates is judged on its own series"
+                                    if self.require_seed_replicates
+                                    else ""
+                                )
+                                + ". The neutralized conditions above are judged on the "
+                                "frozen book itself and must hold as well"
                             )
                         }
                         if self.require_forward_plain_selection
-                        else {}
-                    ),
-                    **(
-                        {
-                            "seed_mean_plain_selection": (
-                                "> 0 where the freeze registered seed replicates: each "
-                                "replicate is replayed exactly like the frozen book over "
-                                "the forward months and Held-out, and the mean of "
-                                "raw_readings.plain_selection over the frozen book and "
-                                "its replicates over the forward months must be "
-                                "positive; the conditions above are judged on the "
-                                "frozen book itself"
-                            )
-                        }
-                        if self.require_seed_replicates
                         else {}
                     ),
                     "strategy_error": "none",

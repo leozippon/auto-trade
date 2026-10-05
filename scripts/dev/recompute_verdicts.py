@@ -79,12 +79,7 @@ from autotrade.pipelines.hitl_state import (
     PARAMS_NAME,
     WEB_CREATE_DEFAULTS,
 )
-from autotrade.pipelines.verdict import (
-    forward_slice,
-    graduation_verdict,
-    heldout_slice,
-    seed_replicate_slice,
-)
+from autotrade.pipelines.verdict import forward_slice, graduation_verdict, heldout_slice
 from autotrade.pipelines.worker import _ALLOWED_PARAMS
 
 # What a baseline's tree needs to dump: the code, and its own copy of this
@@ -97,11 +92,12 @@ _PLAIN = "require_forward_plain_selection"
 _SEEDS = "require_seed_replicates"
 # The optional conditions each rule era holds. An arm carries the era of its
 # creation in ``params.json``; the differential judges every stored input
-# under each of them.
+# under each of them. R3 is what creation stamps today
+# (``hitl_state.CREATION_STAMPS``); no arm was kept from the days plain
+# selection was stamped without seed replicates (R2).
 ERAS: dict[str, dict[str, bool]] = {
     "R0": {_RAW: False, _PLAIN: False, _SEEDS: False},
     "R1": {_RAW: True, _PLAIN: False, _SEEDS: False},
-    "R2": {_RAW: True, _PLAIN: True, _SEEDS: False},
     "R3": {_RAW: True, _PLAIN: True, _SEEDS: True},
 }
 # The arm's rules under a tracking mandate, which no arm on disk holds: the
@@ -114,7 +110,7 @@ VARIANTS: dict[str, dict[str, object]] = {
 }
 # R3 once more with seed replicates named, which no record holds yet: at the
 # freeze every other Step of the session (most are refused as replicates, and
-# that refusal is the path read), forward the book's own slice as its one
+# that refusal is the path read), forward the book's own replay as its one
 # replicate.
 WITH_REPLICATES = "R3+replicates"
 
@@ -231,19 +227,18 @@ def _slots(record: Mapping[str, Any]) -> dict[str, tuple[str, str]]:
     }
 
 
-def _replicate_slices(
-    record: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]
-) -> dict[str, list[dict[str, object]]]:
-    """The slices of the seed replicates a forward record replayed (``rows``:
-    its ``seed_replicates``), as the Pipeline handed them to the verdict."""
+def _replicates(rows: Sequence[Mapping[str, Any]]) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """The seed replicates a forward record replayed (``rows``: its
+    ``seed_replicates``), as the Pipeline handed them to the verdict: what
+    names each, and its replay's sidecar."""
 
-    slices: dict[str, list[dict[str, object]]] = {"forward": [], "heldout": []}
-    for row in rows:
-        _replay, analysis = _replay_and_analysis(row["result_ref"])
-        identity = {key: row[key] for key in ("artifact_id", "source_step_id")}
-        for name, (start, end) in _slots(record).items():
-            slices[name].append({**identity, **seed_replicate_slice(analysis, start=start, end=end)})
-    return slices
+    return [
+        (
+            {key: row[key] for key in ("artifact_id", "source_step_id")},
+            _replay_and_analysis(row["result_ref"])[1],
+        )
+        for row in rows
+    ]
 
 
 def _judged(
@@ -253,7 +248,7 @@ def _judged(
     rules: AcceptanceRules,
     *,
     slippage_bps: float,
-    replicates: Mapping[str, Sequence[Mapping[str, object]]],
+    replicates: Sequence[tuple[Mapping[str, object], Mapping[str, object]]],
 ) -> dict[str, object]:
     """One forward record's ``slices`` and ``verdict`` from its stored replay."""
 
@@ -272,7 +267,7 @@ def _judged(
         turnover=float(activity["forward"]["turnover"]),
         round_trips=int(activity["forward"]["round_trips"]),
         mean_gross=float(activity["forward"]["mean_gross"]),
-        seed_replicates=replicates["forward"],
+        seed_replicates=replicates,
     )
     heldout = heldout_slice(
         analysis,
@@ -281,7 +276,7 @@ def _judged(
         end=slots["heldout"][1],
         forward_tracking_error=float(forward["tracking_error"]),  # type: ignore[arg-type]
         mean_gross=float(activity["heldout"]["mean_gross"]),
-        seed_replicates=replicates["heldout"],
+        seed_replicates=replicates,
     )
     return {
         "verdict": graduation_verdict(forward=forward, heldout=heldout),
@@ -444,7 +439,7 @@ def _forward(
             record,
             AcceptanceRules.from_record(rules),
             slippage_bps=slippage_bps,
-            replicates=_replicate_slices(record, replicates),
+            replicates=_replicates(replicates),
         )
 
     verdicts = {"recorded": judged(stated, record.get("seed_replicates") or ())}
