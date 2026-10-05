@@ -13,7 +13,7 @@ import threading
 import traceback
 import types
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import chdir, redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,6 +21,7 @@ from unittest.mock import patch
 from urllib.parse import unquote
 
 import pandas as pd
+import tushare.pro.client as tushare_sdk
 from pyarrow.lib import ArrowInvalid
 
 from autotrade.data_sources.tushare import audit, common, cron_update, download
@@ -3168,6 +3169,148 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(json.loads(generation.read_text(encoding="utf-8"))["state"], "dirty")
         record = json.loads((jobs_root / "tier_job.json").read_text(encoding="utf-8"))
         self.assertEqual(record["status"], "error")
+
+    def test_lost_official_access_leaves_the_lake_committed_and_the_job_failed(self):
+        # Losing TUSHARE_TOKEN_TMP must stop the official datasets alone: their
+        # job wrote nothing, so the generation every other job and consumer
+        # needs stays committed, while the job reports an error every night.
+        config_path = self.root / "anns_schedule.json"
+        config_path.write_text(json.dumps({
+            "schema_version": 1,
+            "timezone": "Asia/Shanghai",
+            "repo_root": str(self.root),
+            "python": "/env/python",
+            "default_raw_dir": "raw",
+            "default_start_date": "20200101",
+            "jobs": {"anns": {
+                "operation": "download_tier",
+                "tier": "text_evidence",
+                "end_date_offset_days": 0,
+                "extra_args": ["--datasets", "anns_d", "--force"],
+                "skip_if_already_ok": True,
+            }},
+        }), encoding="utf-8")
+        generation = self.raw_dir / ".raw_generation.json"
+        cron_update.write_raw_generation(self.raw_dir)
+        before = json.loads(generation.read_text(encoding="utf-8"))
+        jobs_root = self.root / "runtime" / "jobs"
+        for _ in range(2):  # an error is never skipped: the next night tries again
+            result, runner, _ = self._run_job_once(
+                config_path, "anns", "20261006", common.NO_MUTATION_FAILURE_EXIT_CODE, jobs_root
+            )
+            self.assertTrue(runner.called)
+            self.assertEqual(result, common.NO_MUTATION_FAILURE_EXIT_CODE)
+            self.assertEqual(json.loads(generation.read_text(encoding="utf-8")), before)
+            record = json.loads((jobs_root / "anns.json").read_text(encoding="utf-8"))
+            self.assertEqual(record["status"], "error")
+
+    def test_no_mutation_failure_elsewhere_still_fences_the_lake(self):
+        # Exit 77 vouches for "nothing written" only where the text tier
+        # enforces it; any other job claiming it is an ordinary failure.
+        config_path = self._write_event_flow_schedule("tier_job", operation="download_tier")
+        generation = self.raw_dir / ".raw_generation.json"
+        cron_update.write_raw_generation(self.raw_dir)
+        result, _, _ = self._run_job_once(
+            config_path, "tier_job", "20260807", common.NO_MUTATION_FAILURE_EXIT_CODE, self.root / "jobs"
+        )
+        self.assertEqual(result, common.NO_MUTATION_FAILURE_EXIT_CODE)
+        self.assertEqual(json.loads(generation.read_text(encoding="utf-8"))["state"], "dirty")
+
+    def test_only_a_lone_command_passes_the_no_mutation_failure_through(self):
+        ctx = cron_update.RunContext(
+            config={}, repo_root=self.root, python="/env/python", job_name="unit_77",
+            job={"fail_fast": False}, start_date="20200101", end_date="20200102",
+            timezone_name="Asia/Shanghai",
+        )
+        for commands, expected in (
+            ([["anns"]], common.NO_MUTATION_FAILURE_EXIT_CODE),
+            ([["other"], ["anns"]], 1),
+        ):
+            with (
+                patch.object(cron_update, "run_probe"),
+                patch.object(
+                    cron_update.subprocess, "run",
+                    side_effect=lambda command, **_: SimpleNamespace(
+                        returncode=common.NO_MUTATION_FAILURE_EXIT_CODE if command == ["anns"] else 0
+                    ),
+                ),
+            ):
+                self.assertEqual(cron_update.run_update(ctx, commands, self.root / "cron_77.log"), expected)
+
+    def _text_args(self, datasets: list[str]) -> argparse.Namespace:
+        return argparse.Namespace(
+            raw_dir=str(self.raw_dir), datasets=datasets, news_src=[], major_news_src=[],
+            start_date="20261001", end_date="20261006", force=True, page_limit=None,
+            min_interval_seconds=0, timeout_seconds=5,
+            revision_ledger=str(self.root / "revision_events.jsonl"), allow_empty_revision_overwrite=False,
+        )
+
+    def test_each_text_dataset_goes_to_its_own_endpoint_with_its_own_token(self):
+        # Through the real SDK, stopping only at the HTTP call: anns_d goes to
+        # the official service with TUSHARE_TOKEN_TMP, report_rc stays on the
+        # relay with TUSHARE_TOKEN. Dummy tokens only.
+        sent = []
+
+        def post(url, **kwargs):
+            payload = kwargs["json"]
+            sent.append((url, payload["api_name"], payload["token"]))
+            fields = common.TEXT_SPECS[payload["api_name"]].fields.split(",")
+            body = {"code": 0, "msg": "", "data": {"fields": fields, "items": []}}
+            return SimpleNamespace(text=json.dumps(body))
+
+        env = {"TUSHARE_TOKEN": "relay-dummy", "TUSHARE_TOKEN_TMP": "official-dummy",
+               "TUSHARE_RELAY_URL": "https://relay.example"}
+        with (
+            chdir(self.root),
+            patch.dict(os.environ, env, clear=True),
+            patch.object(tushare_sdk.requests, "post", side_effect=post),
+            redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(download.download_text(self._text_args(["anns_d", "report_rc"])), 0)
+        routes = {(url.rsplit("/", 1)[0], api, token) for url, api, token in sent}
+        self.assertEqual(routes, {
+            (common.OFFICIAL_TUSHARE_URL, "anns_d", "official-dummy"),
+            ("https://relay.example", "report_rc", "relay-dummy"),
+        })
+        self.assertTrue(common.OFFICIAL_TUSHARE_URL.startswith("https://"))
+        self.assertTrue((self.raw_dir / "anns_d" / "month=202610.parquet").is_file())
+
+    def test_refused_official_token_exits_77_before_any_write_and_never_prints_it(self):
+        token = "official-dummy-5f3a"
+        sent = []
+
+        def post(url, **kwargs):
+            sent.append(kwargs["json"]["api_name"])
+            body = {"code": 40101, "msg": f"您的token不对，请确认。{token}", "data": None}
+            return SimpleNamespace(text=json.dumps(body, ensure_ascii=False))
+
+        out = io.StringIO()
+        with (
+            chdir(self.root),  # no .env here: the relay token is never needed
+            patch.dict(os.environ, {"TUSHARE_TOKEN_TMP": token}, clear=True),
+            patch.object(tushare_sdk.requests, "post", side_effect=post),
+            patch.object(common.time, "sleep"),
+            redirect_stdout(out),
+        ):
+            code = download.download_text(self._text_args(["anns_d"]))
+        self.assertEqual(code, common.NO_MUTATION_FAILURE_EXIT_CODE)
+        self.assertEqual(sent, ["anns_d"] * 5)  # the one-row proof, retried; no page request
+        self.assertFalse((self.raw_dir / "anns_d").exists())
+        self.assertIn("OfficialAccessError: anns_d", out.getvalue())
+        self.assertIn(common.OFFICIAL_TOKEN_ENV, out.getvalue())
+        self.assertNotIn(token, out.getvalue())
+
+    def test_missing_official_token_exits_77_naming_the_variable(self):
+        out = io.StringIO()
+        with (
+            chdir(self.root),
+            patch.dict(os.environ, {}, clear=True),
+            redirect_stdout(out),
+        ):
+            code = download.download_text(self._text_args(["anns_d"]))
+        self.assertEqual(code, common.NO_MUTATION_FAILURE_EXIT_CODE)
+        self.assertIn("TUSHARE_TOKEN_TMP is not set", out.getvalue())
+        self.assertFalse((self.raw_dir / "anns_d").exists())
 
     def test_finishing_run_preserves_concurrently_recorded_failure(self):
         # Invariant: an outcome another process persisted while this run was
@@ -7118,7 +7261,53 @@ class ShareFloatUndatedDuplicateInvariantTest(unittest.TestCase):
 
 
 class TuShareClientTest(unittest.TestCase):
-    """Relay (中转) access is the only supported TuShare transport."""
+    """The relay (中转) is the default transport; the official service serves
+    only the datasets that say so, each with its own token."""
+
+    def test_official_client_pins_the_official_endpoint_and_its_own_token(self) -> None:
+        pro = SimpleNamespace(_DataApi__http_url=None, query=lambda *args, **kwargs: pd.DataFrame())
+        tokens = []
+        fake = SimpleNamespace(pro_api=lambda token, timeout: tokens.append(token) or pro)
+        env = {"TUSHARE_TOKEN": "relay-dummy", "TUSHARE_TOKEN_TMP": "official-dummy",
+               "TUSHARE_RELAY_URL": "https://relay.example"}
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(sys.modules, {"tushare": fake}),
+            patch.dict(os.environ, env, clear=True),
+        ):
+            client = common.official_client(Path(tmp), 0, 5)
+        self.assertEqual(pro._DataApi__http_url, common.OFFICIAL_TUSHARE_URL)
+        self.assertEqual(client.endpoint, common.OFFICIAL_TUSHARE_URL)
+        self.assertTrue(common.OFFICIAL_TUSHARE_URL.startswith("https://"))
+        self.assertEqual(tokens, ["official-dummy"])
+        self.assertEqual([n for n, s in common.TEXT_SPECS.items() if s.official], ["anns_d"])
+
+    def test_each_token_is_read_from_its_own_line(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {}, clear=True):
+            env_file = Path(tmp, ".env")
+            env_file.write_text("TUSHARE_TOKEN_TMP=official-dummy\nTUSHARE_TOKEN=relay-dummy\n", encoding="utf-8")
+            self.assertEqual(common.load_token(Path(tmp)), "relay-dummy")
+            self.assertEqual(common.load_token(Path(tmp), common.OFFICIAL_TOKEN_ENV), "official-dummy")
+            env_file.write_text("TUSHARE_TOKEN=relay-dummy\n", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "^TUSHARE_TOKEN_TMP is not set") as caught:
+                common.load_token(Path(tmp), common.OFFICIAL_TOKEN_ENV)
+            self.assertNotIn("relay-dummy", str(caught.exception))
+
+    def test_token_never_reaches_an_error_or_its_traceback(self) -> None:
+        token = "official-dummy-5f3a"
+
+        def query(api_name, fields="", **params):
+            raise ValueError(f"vendor echoed {token} for {api_name}")
+
+        pro = SimpleNamespace(_DataApi__http_url=None, query=query)
+        fake = SimpleNamespace(pro_api=lambda token, timeout: pro)
+        with patch.dict(sys.modules, {"tushare": fake}):
+            client = common.TuShareClient(token, min_interval=0, timeout=5, endpoint=common.OFFICIAL_TUSHARE_URL)
+            with self.assertRaises(RuntimeError) as caught:
+                client.query("anns_d", {"ann_date": "20230301"}, retries=1)
+        rendered = "".join(traceback.format_exception(caught.exception))
+        self.assertIn("vendor echoed <token> for anns_d", rendered)
+        self.assertNotIn(token, rendered)
 
     def test_sdk_uses_default_relay(self) -> None:
         pro = SimpleNamespace(_DataApi__http_url=None, query=lambda *args, **kwargs: pd.DataFrame())
@@ -7444,8 +7633,9 @@ class FullPortContractTest(unittest.TestCase):
         # since the minute layer left cn_evening_full for its own manual job;
         # 32 with the two research-history backfill jobs (2026-09-24); 31 since
         # the completed one-shot commit-identity migration job was retired; 32
-        # with the margin available_at repair (2026-10-02).
-        self.assertEqual(len(config["jobs"]), 32)
+        # with the margin available_at repair (2026-10-02); 33 with anns_d's
+        # own official-service job (2026-10-06).
+        self.assertEqual(len(config["jobs"]), 33)
         for name, tier in (
             ("manual_history_backfill_reference", "reference"),
             ("manual_history_backfill_macro", "macro"),
@@ -7572,7 +7762,7 @@ class FullPortContractTest(unittest.TestCase):
         }
         specs = {name: spec.frozen_through for name, spec in common.TEXT_SPECS.items()}
         self.assertEqual(registry, specs)
-        self.assertEqual(common.TEXT_FETCHABLE_DATASETS, ["report_rc"])
+        self.assertEqual(common.TEXT_FETCHABLE_DATASETS, ["anns_d", "report_rc"])
         for row in schedule["interfaces"]:
             frozen = bool(row.get("frozen_through"))
             self.assertEqual(

@@ -329,6 +329,11 @@ REFRESH_NODES: dict[str, RefreshNode] = {
     # The tier step measured 177s inside the evening update; 15 min keeps the
     # boundary conservative and still clears the 23:35 evening launch.
     "cn_nightly_text_full": RefreshNode("cn_nightly_text_full", time(23, 15), 15),
+    # Announcement titles from the official service, every calendar evening.
+    # Same launch as the text job (the updater lock serialises them), so anns_d
+    # keeps the 23:15 cutoff it had when the text job landed it; a run that
+    # waits for the lock fetches later than the cutoff, never earlier.
+    "cn_nightly_anns_full": RefreshNode("cn_nightly_anns_full", time(23, 15), 15),
     # Ann-date disclosure tables (holder counts/trades, top-10 holders,
     # repurchases), every calendar evening: ~one row in ten announces on a
     # weekend, and waiting for the next trading evening left the structured
@@ -425,13 +430,13 @@ EVENT_DATASET_REFRESH_NODES: dict[str, tuple[str, ...]] = {
     "report_rc": (TEXT_NODE,),
 }
 
-# Per-dataset overrides inside the text domain (default = TEXT_NODE). Empty
-# since the 08:55 pre-open short-text backfill was retired: the token lost
-# access to cctv_news and news, so no text table gains rows between the
-# evening text job and the open, and both now follow the evening node for
-# their whole retained history (a later boundary than the 08:55 one they used
-# to get, i.e. conservative, never a look-ahead).
-TEXT_DATASET_REFRESH_NODES: dict[str, tuple[str, ...]] = {}
+# Per-dataset overrides inside the text domain (default = TEXT_NODE). The
+# 08:55 pre-open short-text backfill is retired: the token lost access to
+# cctv_news and news, so no text table gains rows between the evening text
+# jobs and the open, and both follow the evening node for their whole retained
+# history (a later boundary than the 08:55 one they used to get, i.e.
+# conservative, never a look-ahead). anns_d is landed by its own job.
+TEXT_DATASET_REFRESH_NODES: dict[str, tuple[str, ...]] = {"anns_d": ("cn_nightly_anns_full",)}
 
 # Per-dataset overrides inside the macro domain (default = cn_evening_full).
 # The global tier lands via its own natural-day job; every other macro dataset

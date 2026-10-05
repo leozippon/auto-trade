@@ -27,6 +27,7 @@ from autotrade.environment.data.contracts import (
 from .audit import AUDIT_SUMMARY_RE
 from .common import (
     MUTATED_NOT_READY_RETRY_EXIT_CODE,
+    NO_MUTATION_FAILURE_EXIT_CODE,
     NO_MUTATION_RETRY_EXIT_CODE,
     normalize_date_key,
     read_many,
@@ -843,6 +844,9 @@ def run_update(ctx: RunContext, commands: list[list[str]], log_path: Path, *, lo
             if code in returncodes:
                 return code
         return 0
+    if returncodes == [NO_MUTATION_FAILURE_EXIT_CODE]:
+        # Only a lone command can vouch that the run wrote nothing.
+        return NO_MUTATION_FAILURE_EXIT_CODE
     return 1
 
 
@@ -972,8 +976,18 @@ def _run(args: argparse.Namespace) -> int:
             and ctx.job.get("operation") in {"download_event_flow", "intraday_by_date"}
             and len(commands) == 1
         )
+        # Exit 77 also asserts "no lake mutation happened", but for a failure
+        # the next run will not outgrow by itself (a dataset's own access is
+        # gone): restore the generation so the rest of the lake stays usable,
+        # and record an error. Only the text tier enforces the contract.
+        no_mutation_failure = bool(
+            returncode == NO_MUTATION_FAILURE_EXIT_CODE
+            and ctx.job.get("operation") == "download_tier"
+            and ctx.job.get("tier") == "text_evidence"
+            and len(commands) == 1
+        )
         if transaction is not None:
-            if no_mutation_retry:
+            if no_mutation_retry or no_mutation_failure:
                 _restore_raw_generation_file(raw_dir, generation_before)
             elif returncode == 0 or mutated_not_ready:
                 write_raw_generation(raw_dir, transaction=transaction)

@@ -323,7 +323,18 @@ class RefreshNodeDriftGuardTest(unittest.TestCase):
         # without a job would grant replay visibility no ingestion produces.
         self.assertNotIn("cn_preopen_text_backfill_0855", REFRESH_NODES)
         self.assertNotIn("cn_preopen_text_backfill_0855", _cron_jobs())
-        self.assertEqual(TEXT_DATASET_REFRESH_NODES, {})
+        self.assertEqual(TEXT_DATASET_REFRESH_NODES, {"anns_d": ("cn_nightly_anns_full",)})
+
+    def test_anns_d_keeps_its_cutoff_on_its_own_job(self) -> None:
+        # anns_d moved from the relay text job to its own official-service job
+        # without moving its visibility: the same 23:15 launch, so every
+        # existing view and stash of anns_d rows reads the same cutoffs.
+        anns, text = REFRESH_NODES["cn_nightly_anns_full"], REFRESH_NODES["cn_nightly_text_full"]
+        self.assertEqual((anns.start, anns.duration_minutes), (text.start, text.duration_minutes))
+        for when in (datetime(2024, 3, 4, 8, 30, tzinfo=CN_TZ), datetime(2026, 10, 6, 23, 40, tzinfo=CN_TZ)):
+            self.assertEqual(
+                text_dataset_visible_cutoff("anns_d", when), text_dataset_visible_cutoff("report_rc", when)
+            )
 
     def test_dataset_refresh_overrides_are_landed_by_their_jobs(self) -> None:
         jobs = json.loads(CRON_SCHEDULE.read_text(encoding="utf-8"))["jobs"]
@@ -509,10 +520,11 @@ class VisibilityCutoffTest(unittest.TestCase):
         )
 
     def test_text_datasets_without_an_override_use_the_text_node(self) -> None:
-        # Announcements, policy documents and research reports have no pre-open
-        # refinement; they roll on the daily text node alone.
+        # Policy documents and research reports have no pre-open refinement;
+        # they roll on the daily text node alone (announcements have their own
+        # job at the same launch, test_anns_d_keeps_its_cutoff_on_its_own_job).
         saturday_night = datetime(2022, 1, 8, 23, 40, tzinfo=CN_TZ)
-        for dataset in ("anns_d", "major_news", "npr", "research_report", "report_rc"):
+        for dataset in ("major_news", "npr", "research_report", "report_rc"):
             self.assertNotIn(dataset, TEXT_DATASET_REFRESH_NODES)
             self.assertEqual(
                 text_dataset_visible_cutoff(dataset, saturday_night),

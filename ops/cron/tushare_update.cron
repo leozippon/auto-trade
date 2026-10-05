@@ -20,10 +20,15 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # 23:05 ann-date disclosure tables (holder counts/trades, top-10, repurchases).
 # 23:15 text evidence -- report_rc only since 2026-09-10, the one text
 #       interface the token still holds.
+# 23:15 announcement titles (anns_d) from the official service with
+#       TUSHARE_TOKEN_TMP, on their own job so that losing that token stops
+#       anns_d alone. Same minute as the text job (the updater lock serialises
+#       the two), so anns_d keeps the 23:15 visibility cutoff it always had.
 # 23:25 global tier (overseas indices, FX, US rates, economic calendar) --
 #       overseas sessions keep trading through A-share holidays.
 5 23 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_disclosure_full
 15 23 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_text_full
+15 23 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_anns_full
 25 23 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_global_full
 
 # Trading-evening self-heals, one job per family with identical shape: the

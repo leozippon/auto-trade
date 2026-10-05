@@ -108,6 +108,19 @@
       ],
       "skip_if_already_ok": true
     },
+    "cn_nightly_anns_full": {
+      "description": "Land announcement titles (anns_d) every calendar evening from the official TuShare service with TUSHARE_TOKEN_TMP: the relay's permission for anns_d lapsed on 2026-09-10, and the official copy is the same announcement set (logs/data/anns_official_20261006/). It is its own job so that losing that token stops anns_d alone: the downloader proves access with one request before it writes, and a refusal exits 77, which restores the raw generation and records an error instead of fencing the lake. Natural-day window with a forced 30-day refresh like the text job, launched at the same 23:15 (the updater lock serialises the two), so anns_d keeps the visibility cutoff it has always had.",
+      "operation": "download_tier",
+      "tier": "text_evidence",
+      "end_date_offset_days": 0,
+      "start_date_lookback_days": 30,
+      "extra_args": [
+        "--datasets",
+        "anns_d",
+        "--force"
+      ],
+      "skip_if_already_ok": true
+    },
     "cn_evening_margin_backfill": {
       "description": "Trading-evening self-healing pass over the margin family: a non-forced 90-day window re-attempts exactly the missing and exchange-incomplete partitions the pre-open chain could not complete (the completeness skip-check re-tries committed partial days until the vendor backfills; observed BSE lag on margin_secs has reached about seven weeks). Same guards as the pre-open jobs; --zero-rows-not-ready keeps a still-unpublished day a retry, not a failure. Cannot recover the same day's pre-open decision inputs; the 02:30 full audit re-audits the event domain after it.",
       "operation": "download_event_flow",
@@ -1162,11 +1175,8 @@
       "api": "anns_d",
       "domain": "text_evidence",
       "frequency": "event_driven",
-      "official_update": "全量公告；官方页面提供发布时间字段rec_time，未标固定入库时刻。历史冻结（权限已失）：截至 2026-08-13。",
-      "cron_policy": "frozen_history_no_refresh",
-      "status": "permission_denied",
-      "status_since": "2026-09-10",
-      "frozen_through": "20260813",
+      "official_update": "全量公告；官方页面提供发布时间字段rec_time，未标固定入库时刻。中转权限 2026-09-10 失效后，自 2026-10-06 起经官方服务以 TUSHARE_TOKEN_TMP 拉取（cn_nightly_anns_full）。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
       "doc_ref": "https://tushare.pro/document/2?doc_id=176"
     },
     {

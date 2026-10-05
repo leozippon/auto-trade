@@ -34,7 +34,9 @@ from .common import (
     INDEX_WEIGHT_PAGE_LIMIT,
     MACRO_SPECS,
     MUTATED_NOT_READY_RETRY_EXIT_CODE,
+    NO_MUTATION_FAILURE_EXIT_CODE,
     NO_MUTATION_RETRY_EXIT_CODE,
+    OFFICIAL_TOKEN_ENV,
     PHYSICAL_IDENTITY_COLUMNS,
     REFERENCE_PAGE_LIMIT,
     RESEARCH_HISTORY_FLOOR,
@@ -90,6 +92,7 @@ from .common import (
     normalize_stk_mins_by_date_frame,
     normalized_date_keys,
     normalized_holder_keys,
+    official_client,
     parquet_rows,
     parse_yyyymmdd,
     physical_identity_index,
@@ -3200,20 +3203,51 @@ def update_intraday_by_date(args: argparse.Namespace) -> int:
     print(f"{args.output_dataset} update finished dates={len(trade_dates)} written={written} skipped={skipped} rows_written={total_rows}")
     return 0
 
+def official_text_client(datasets: list[str], repo_root: Path, args: argparse.Namespace) -> TuShareClient:
+    """The official-service client for ``datasets``, proven before anything is written.
+
+    Each dataset is asked for one row of the run's last day, so a missing,
+    expired or refused OFFICIAL_TOKEN_ENV fails here, with the lake untouched,
+    rather than on the first page of a long loop.
+    """
+    client = official_client(repo_root, args.min_interval_seconds, args.timeout_seconds)
+    for dataset in datasets:
+        spec = TEXT_SPECS[dataset]
+        client.query(spec.api_name, {"start_date": args.end_date, "end_date": args.end_date, "limit": 1}, spec.fields)
+    return client
+
+
 def download_text(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
     raw_dir = repo_root / args.raw_dir
-    client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
+    # The tier default is what the tokens can still fetch; the frozen
+    # interfaces stay nameable so a historical repair can still target one.
+    datasets = selected_text_datasets(args.datasets, news_src=args.news_src, default=TEXT_FETCHABLE_DATASETS)
+    official = [dataset for dataset in datasets if TEXT_SPECS[dataset].official]
+    # One client per source, keyed by ``spec.official``; each reads only its
+    # own token, so losing one token stops only the datasets that use it.
+    clients: dict[bool, TuShareClient] = {}
+    if len(official) < len(datasets):
+        clients[False] = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
+    if official:
+        try:
+            clients[True] = official_text_client(official, repo_root, args)
+        except Exception as exc:  # noqa: BLE001 - every cause leaves the lake untouched
+            # One line in the runner's "SomeError: ..." form, so the job state
+            # names the cause; the client has already scrubbed the token from it.
+            print(
+                f"OfficialAccessError: {' '.join(official)} could not be fetched from the official "
+                f"TuShare service with {OFFICIAL_TOKEN_ENV}; nothing was written: {exc}",
+                flush=True,
+            )
+            return NO_MUTATION_FAILURE_EXIT_CODE
     revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
     allow_empty_revision_overwrite = getattr(args, "allow_empty_revision_overwrite", False)
     windows = month_windows(args.start_date, args.end_date)
     days = date_range_days(args.start_date, args.end_date)
-    # The tier default is what the token can still fetch; the frozen
-    # interfaces stay nameable so a historical repair can still target one.
-    for dataset in selected_text_datasets(
-        args.datasets, news_src=args.news_src, default=TEXT_FETCHABLE_DATASETS
-    ):
+    for dataset in datasets:
         spec = TEXT_SPECS[dataset]
+        client = clients[spec.official]
         start_date = max(args.start_date, spec.start_date)
         dataset_windows = [(s, e, m) for s, e, m in windows if e >= start_date]
         dataset_days = [d for d in days if d >= start_date]

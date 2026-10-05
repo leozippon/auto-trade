@@ -50,6 +50,14 @@ from .io import (  # noqa: F401 -- re-exported via this hub (audit.py imports ha
 
 DEFAULT_TUSHARE_RELAY_URL = "https://fast.xiaodefa.cn"
 
+# The official TuShare service, reached over TLS (the SDK's own default is the
+# same host over plain HTTP, which would put the token on the wire in clear).
+# Only datasets whose spec says ``official=True`` go here, with their own
+# token; everything else stays on the relay with TUSHARE_TOKEN. The variable's
+# name says the access may be temporary: without it those datasets alone stop.
+OFFICIAL_TUSHARE_URL = "https://api.waditu.com/dataapi"
+OFFICIAL_TOKEN_ENV = "TUSHARE_TOKEN_TMP"
+
 # Status file names are owned by environment.data.contracts (one source for
 # audit producers, snapshot gates, and research-release pinning).
 CORE_MARKET_STATUS_PATH = "results/data_quality/" + DOMAIN_STATUS_FILES["daily"]
@@ -120,6 +128,13 @@ BOARD_TRADING_STATUS_PATH = "results/data_quality/" + DOMAIN_STATUS_FILES["board
 # Child-process contract: validation/polling ended before any raw write began.
 # The cron runner may restore the previous committed generation and retry later.
 NO_MUTATION_RETRY_EXIT_CODE = 75
+
+# Child-process contract: the run failed before any raw write began, on a
+# dataset whose own access is gone (the official-service datasets and
+# OFFICIAL_TOKEN_ENV). Nothing changed, so the runner restores the previous
+# committed generation instead of fencing the whole lake, and records the job
+# as an error: losing that access stops those datasets alone, loudly.
+NO_MUTATION_FAILURE_EXIT_CODE = 77
 
 # Child-process contract: the lake DID mutate, but a required partition is still
 # unpublished at the source. The generation must be committed (the writes are
@@ -541,6 +556,9 @@ class TextDataset:
     # snapshot can still select it; nothing new will ever land, so the download
     # default drops it and the audit expects no partition past this day.
     frozen_through: str = ""
+    # Fetched from the official service with OFFICIAL_TOKEN_ENV instead of the
+    # relay (the relay's permission for it lapsed).
+    official: bool = False
 
 @dataclass
 class MacroDataset:
@@ -703,12 +721,15 @@ FUNDAMENTAL_SPECS = {
 # still answers, yet the vendor states it is a 40-request/day complimentary
 # trial outside the purchased plan and one monthly page loop alone exceeds
 # that, so it cannot be scheduled either. All of them stop at this day.
+# ``anns_d`` came back on 2026-10-06 through the official service (its
+# ``official`` flag); the relay copy it continues is the same announcement set
+# (logs/data/anns_official_20261006/).
 TEXT_ACCESS_LOST_THROUGH = "20260813"
 
 TEXT_SPECS = {
     "anns_d": TextDataset(
         api_name="anns_d",
-        frozen_through=TEXT_ACCESS_LOST_THROUGH,
+        official=True,
         strategy="range_month",
         fields="ann_date,ts_code,name,title,url,rec_time",
         page_limit=2000,
@@ -1531,14 +1552,21 @@ DAILY_SPECS = {
 }
 
 class TuShareClient:
-    """TuShare SDK adapter whose HTTP transport is pinned to the configured relay."""
+    """TuShare SDK adapter whose HTTP transport is pinned to one endpoint.
+
+    The endpoint is the relay unless a caller names another (the official
+    service, for the datasets that use it). The token lives only in this
+    object: it is handed to the SDK client in memory (never ``set_token``,
+    which writes it to a file in the home directory) and scrubbed from any
+    error this adapter raises.
+    """
 
     def __init__(
         self,
         token: str,
         min_interval: float = MIN_REQUEST_INTERVAL_SECONDS,
         timeout: int = 60,
-        relay_url: str | None = None,
+        endpoint: str | None = None,
     ) -> None:
         if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
             raise ValueError("TuShare timeout must be a positive integer number of seconds")
@@ -1548,19 +1576,20 @@ class TuShareClient:
             raise RuntimeError(
                 "the tushare SDK is not installed; install the project's declared dependencies"
             ) from exc
+        self._token = token
         self.pro = ts.pro_api(token, timeout=timeout)
-        # Relay mode: the endpoint is pinned by writing the SDK's name-mangled
-        # private attribute. Assigning it always "succeeds", so an SDK rename
-        # would silently create a dead attribute and send every request to the
-        # official endpoint instead. Require the attribute to exist first, and
-        # refuse to start rather than route traffic out of relay mode.
-        endpoint = (relay_url or load_relay_url()).rstrip("/")
+        # The endpoint is pinned by writing the SDK's name-mangled private
+        # attribute. Assigning it always "succeeds", so an SDK rename would
+        # silently create a dead attribute and send every request, token
+        # included, to the SDK's plain-HTTP default instead. Require the
+        # attribute to exist first, and refuse to start rather than reroute.
+        self.endpoint = (endpoint or load_relay_url()).rstrip("/")
         if not hasattr(self.pro, "_DataApi__http_url"):
             raise RuntimeError(
-                "the tushare SDK no longer exposes _DataApi__http_url; the relay endpoint "
-                f"cannot be pinned to {endpoint} and requests would leave relay mode"
+                "the tushare SDK no longer exposes _DataApi__http_url; the endpoint "
+                f"cannot be pinned to {self.endpoint} and requests would go elsewhere"
             )
-        self.pro._DataApi__http_url = endpoint
+        self.pro._DataApi__http_url = self.endpoint
         self.min_interval = max(0.0, float(min_interval))
         self.timeout = timeout
         self.last_call = 0.0
@@ -1572,7 +1601,11 @@ class TuShareClient:
                 result_frame = self.pro.query(api_name, fields=fields, **(params or {}))
             except Exception as exc:
                 if attempt == retries:
-                    raise RuntimeError(f"{api_name} failed after {retries} attempts: {exc}") from exc
+                    # Raised without the chained original, whose text the
+                    # traceback would print unscrubbed.
+                    raise RuntimeError(
+                        f"{api_name} failed after {retries} attempts: {self._scrub(str(exc))}"
+                    ) from None
                 time.sleep(2 * attempt)
                 continue
             if not isinstance(result_frame, pd.DataFrame):
@@ -1588,18 +1621,30 @@ class TuShareClient:
             time.sleep(self.min_interval - elapsed)
         self.last_call = time.monotonic()
 
-def load_token(repo_root: Path) -> str:
-    token = os.environ.get("TUSHARE_TOKEN", "").strip()
+    def _scrub(self, text: str) -> str:
+        return text.replace(self._token, "<token>") if self._token else text
+
+
+def load_token(repo_root: Path, name: str = "TUSHARE_TOKEN") -> str:
+    """The token in environment variable ``name``, else its line in the ignored .env."""
+    token = os.environ.get(name, "").strip()
     if token:
         return token
     env_file = repo_root / ".env"
     if env_file.exists():
         for line in env_file.read_text(encoding="utf-8").splitlines():
-            if line.strip().startswith("TUSHARE_TOKEN="):
+            if line.strip().startswith(f"{name}="):
                 token = line.split("=", 1)[1].strip().strip('"').strip("'")
                 if token:
                     return token
-    raise RuntimeError("TUSHARE_TOKEN is not set in the environment or ignored .env")
+    raise RuntimeError(f"{name} is not set in the environment or ignored .env")
+
+
+def official_client(repo_root: Path, min_interval: float, timeout: int) -> TuShareClient:
+    """A client on the official service with its own token (``OFFICIAL_TOKEN_ENV``)."""
+    return TuShareClient(
+        load_token(repo_root, OFFICIAL_TOKEN_ENV), min_interval, timeout, endpoint=OFFICIAL_TUSHARE_URL
+    )
 
 
 def load_relay_url() -> str:
