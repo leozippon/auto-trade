@@ -72,7 +72,7 @@ from scripts.experiments._round import Round
 from scripts.experiments.create_round_20261002 import MIMO
 from scripts.experiments.create_round_20261005 import FUND_PACK
 from scripts.experiments.create_round_20261008 import ROUND as SEQBOOK_ROUND
-from scripts.experiments.create_round_20261008 import SEQBOOK_LINEAGE
+from scripts.experiments.create_round_20261008 import SEED_REPLICATES, SEQBOOK_LINEAGE
 
 SEQFRESH_PACK = "configs/workspace_refs/seqfresh_alla_100k_8y_20261011"
 
@@ -112,6 +112,7 @@ SEQFRESH_DIRECTIVE = (
     "每一行都报主动 IR、正年、主动回撤、逐年朴素选名、书对基准的市场载荷与权益口径的扣费年化收益。"
     "门槛读每行的 information_ratio_bar，不自己算；第一批 offline_trials = 0；杀死线只结束候选，至多四批；"
     "批次计划与决赛者规则照 refs/README.md。"
+    + SEED_REPLICATES
 )
 
 OPEN2_DIRECTIVE = (
@@ -134,6 +135,7 @@ OPEN2_DIRECTIVE = (
     "都从行里取，写进 reason。"
     "杀死线只结束候选或家族，不结束本臂；至多四批，登记过的轴没测完就收尾要在 reason 里说明；"
     "门槛读每行的 information_ratio_bar，不自己算；重开 refs/families.md 里其余家族照 README「什么算重复」申报 offline_trials。"
+    "学习型候选的训练种子写成一行 SEED_BASE 整数常量，复现只改这一行，冻结时把其他种子上的整期行登记为 finish_session 的 seed_replicates。"
 )
 
 # The lineage the queued cost and pool pairs of round 20261008 carry: that

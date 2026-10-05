@@ -127,13 +127,32 @@ SEQBOOK_LINEAGE = [
 ]
 LATE_ARM: dict[str, object] = {**BAG_ARM, "lineage_arms": SEQBOOK_LINEAGE}
 COST_ARM: dict[str, object] = {**LATE_ARM, "research_directive": COST_DIRECTIVE}
-POOL_ARM: dict[str, object] = {**LATE_ARM, "research_directive": POOL_DIRECTIVE}
+
+# Arms created from here on are judged on their seed bases together
+# (`require_seed_replicates`): the mean over the nominee and its registered
+# replicates must clear the bar at the freeze and beat the panel forward. The
+# packs predate the rule and say which seed base's node is nominated; this
+# sentence keeps that from being read as waiving the registration. The local
+# cost arm was created before the rule and runs without it and without the
+# sentence.
+SEED_REPLICATES = (
+    "冻结时把被提名的腿在其他种子基数上的整期行登记为 finish_session 的 seed_replicates；"
+    "包里关于提名哪个种子基数节点的规定只决定提名哪一行，不免除这一登记。"
+)
+POOL_ARM: dict[str, object] = {
+    **LATE_ARM,
+    "research_directive": POOL_DIRECTIVE + SEED_REPLICATES,
+}
 
 ARMS: dict[str, dict[str, object]] = {
     "seqbag2_bag_100k_8y_qwen_20261008": dict(BAG_ARM),
     "seqbag2_bag_100k_8y_mimo_20261008": {**MIMO, **BAG_ARM},
     "seqbag2_cost_100k_8y_qwen_20261008": dict(COST_ARM),
-    "seqbag2_cost_100k_8y_mimo_20261008": {**MIMO, **COST_ARM},
+    "seqbag2_cost_100k_8y_mimo_20261008": {
+        **MIMO,
+        **COST_ARM,
+        "research_directive": COST_DIRECTIVE + SEED_REPLICATES,
+    },
     "seqbag2_pool_100k_8y_qwen_20261008": dict(POOL_ARM),
     "seqbag2_pool_100k_8y_mimo_20261008": {**MIMO, **POOL_ARM},
 }

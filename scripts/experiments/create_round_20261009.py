@@ -78,7 +78,7 @@ from scripts.experiments._round import Round
 from scripts.experiments.create_round_20261002 import MIMO
 from scripts.experiments.create_round_20261006 import SEQAXES_LINEAGE
 from scripts.experiments.create_round_20261008 import ROUND as SEQBOOK_ROUND
-from scripts.experiments.create_round_20261008 import SEQBOOK_LINEAGE
+from scripts.experiments.create_round_20261008 import SEED_REPLICATES, SEQBOOK_LINEAGE
 
 SEQHOLD_PACK = "configs/workspace_refs/seqhold_alla_100k_8y_20261009"
 INDCYCLE_PACK = "configs/workspace_refs/indcycle_alla_100k_8y_20261009"
@@ -145,7 +145,7 @@ CLOCK_ARM: dict[str, object] = {**ARM, "research_directive": CLOCK_DIRECTIVE}
 BETA_ARM: dict[str, object] = {
     **ARM,
     "lineage_arms": SEQBOOK_LINEAGE,
-    "research_directive": BETA_DIRECTIVE,
+    "research_directive": BETA_DIRECTIVE + SEED_REPLICATES,
 }
 INDCYCLE_ARM: dict[str, object] = {
     "workspace_reference": INDCYCLE_PACK,
