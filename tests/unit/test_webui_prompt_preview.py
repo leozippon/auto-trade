@@ -37,6 +37,7 @@ from autotrade.pipelines.config import (
     session_deadline_seconds,
 )
 from autotrade.pipelines.hitl_state import build_session_plan
+from autotrade.pipelines.research_session import LINEAGE_NOTE
 from autotrade.pipelines.session_tools import BATCH_VALIDATE_MAX_CONCURRENCY
 from autotrade.webui.prompt_preview import RUNTIME_PLACEHOLDER, build_prompt_preview
 
@@ -294,7 +295,12 @@ def test_preview_shows_the_lineage_the_session_will_see(tmp_path: Path):
         "undeclared_offline_validations": 0,
     }
     write_lineage(directory, {"arms": [arm], "series": []})
-    expected = {"arms": ["earlier"], "trials": 5, "effective_trials": 5.0}
+    expected = {
+        "arms": ["earlier"],
+        "trials": 5,
+        "effective_trials": 5.0,
+        "note": LINEAGE_NOTE,
+    }
     assert _facts(_preview_of(directory, repo, SESSION_KEY))["arm"]["lineage"] == expected
     ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl").append(
         lineage_ledger_record(directory)

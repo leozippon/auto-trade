@@ -303,7 +303,12 @@ def test_seed_replicates_are_offered_where_the_arm_holds_them_and_go_to_the_gate
 
     seeded = _tool(tree, gate, seed_replicates=True)  # type: ignore[arg-type]
     assert "seed_replicates" in seeded.spec.input_schema["properties"]
-    assert SEED_REPLICATE_RULE in seeded.spec.description
+    # The rule a replicate meets is the arm's freeze_gate fact; the schema
+    # points there, and only a refusal that concerns one restates it.
+    assert SEED_REPLICATE_RULE not in seeded.spec.description
+    assert "acceptance_rules.freeze_gate.seed_replicates" in str(
+        seeded.spec.input_schema["properties"]["seed_replicates"]["description"]
+    )
     with pytest.raises(ToolError) as refused:
         seeded.invoke({"outcome": "freeze", "node_id": nominee})
     message = str(refused.value)

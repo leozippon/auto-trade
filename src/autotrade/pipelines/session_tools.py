@@ -648,15 +648,6 @@ UNMEASURED_SELECTION_NOTE = (
     "this row, which cannot be nominated as it is; a strategy validated later "
     "joins the trials and moves it"
 )
-GRADUATION_ACTIVITY_NOTE = (
-    "informational, not a freeze-gate condition: this node's readings, over its "
-    "own span, of the activity and cost-stress conditions "
-    "acceptance_rules.graduation.forward applies to the frozen artifact (round "
-    "trips per month, mean gross exposure, and active_excess_at_cost_stress: the "
-    "annualised active neutralized excess after cost_stress_multiplier x the "
-    "slippage on this span's turnover, computed as the graduation computes it) "
-    "beside their thresholds; the forward months are judged against these lines"
-)
 # A row whose bytes and span repeat an earlier node of the arm.
 SAME_BYTES_NOTE = (
     "these bytes were already validated on this span as the nodes named: the "
@@ -878,7 +869,6 @@ class SessionValidations:
                 _active_excess_at_cost_stress(step, rules.cost_stress_multiplier)
             ),
             "cost_stress_multiplier": rules.cost_stress_multiplier,
-            "note": GRADUATION_ACTIVITY_NOTE,
         }
 
     def raw_readings(self, step: StepResult) -> dict[str, object]:
@@ -1369,29 +1359,15 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "whole research period, the default), one research year such as Y2, or "
         "contiguous years such as Y2..Y4, as the research_geometry fact lists them; "
         "each span is replayed as one continuous book from the decision view at "
-        "its first year. Each candidate is {name, hypothesis, path, control}: path is a "
+        "its first year. Each candidate is {name, hypothesis, path, control}, as their "
+        "parameters define them: path is a "
         "workspace directory laid out like output/ (main.py plus its sibling "
         "modules; the read-only template files such as README.md are supplied for "
         "you; models/ is shared with the working copy), or output itself to "
         "validate the working copy as it stands; build such a directory by copying "
         "output/, the code you have been editing, not refs/, which only holds the "
-        "pack this arm started from. hypothesis is the falsifiable "
-        "statement you register BEFORE any result exists. control registers the "
-        "candidate as a comparison leg (a baseline, the mechanism-removed carrier, "
-        "a placebo): it replays and costs replay-years like any candidate, but it "
-        "is not a trial of the freeze gate and can never be nominated or frozen, so "
-        "a real candidate registered as a control forfeits its nomination. "
-        "offline_trials declares, for the whole batch, the number of candidate "
-        "configurations whose offline research-period reading (a pack's screening "
-        "gate, a grid, a probe script) influenced what this batch submits and that "
-        "are NOT themselves submitted in this batch (rejected or deferred): a "
-        "submitted candidate counts as a host trial once validated and is not "
-        "declared, controls never count, each configuration is declared once, in "
-        "the first batch that records a Validation after its screen, and 0 only if "
-        "nothing was screened. The freeze gate adds it to the arm's trial count, "
-        "summed over batches, so "
-        "declare it honestly -- an undercount understates the search the gate "
-        "corrects for. The batch costs one "
+        "pack this arm started from. offline_trials, defined by its parameter, "
+        "declares the batch's offline screening. The batch costs one "
         "replay-year per candidate per year of the span, reserved before anything "
         "runs; a candidate whose replay completes becomes its own immutable "
         "revision and Step node under the CURRENT node as shared parent, recorded "
@@ -1426,29 +1402,26 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "included, carries information_ratio_bar, the active IR a full-span "
         "non-control nominee needs now, beside trials and effective_trials -- on a "
         "row the gate does not measure it is that full-span bar, not the row's "
-        "own; and graduation_activity, the row's own round trips per month, mean "
-        "gross exposure and active_excess_at_cost_stress (the graduation's cost "
-        "stress: annualised active neutralized excess after cost_stress_multiplier "
-        "x the slippage on the span's turnover) beside the graduation's "
-        "thresholds, which gate nothing at a freeze), raw_readings (the holder's "
-        "money, which active readings are not: strategy_return, benchmark_return "
-        "and panel_return, what the book after every cost, benchmark_index and "
-        "the zero-skill panel after its costs each compounded to over the span, "
-        "with raw_excess, book minus benchmark, and plain_selection, book minus "
-        "panel with no regression -- the reading the graduation judges over the "
-        "forward months when acceptance_rules.graduation.forward lists "
-        "plain_selection; raw_excess_at_cost_stress, the "
-        "span's own equity return after every cost minus benchmark_index's price "
-        "return over the same days, less (cost_stress_multiplier - 1) x the "
-        "slippage on its turnover, cumulative -- what the freeze gate's raw "
-        "condition judges on a full-span row when acceptance_rules.freeze_gate "
-        "lists raw_excess_at_cost_stress; active_market_beta, the book's "
-        "market loading relative to its panel (below zero it lags its random "
-        "copies whenever the index rallies, a lag the neutralized readings "
-        "credit back but the unhedged holder bears); and on a row covering "
-        "them last_two_years, the same five readings from strategy_return to "
-        "plain_selection over the last two research years alone; the rest of "
-        "that picture is in "
+        "own; and graduation_activity, informational and no freeze-gate "
+        "condition: the row's own round trips per month, mean gross exposure and "
+        "active_excess_at_cost_stress (annualised active neutralized excess after "
+        "cost_stress_multiplier x the slippage on the span's turnover, computed as "
+        "the graduation computes it) beside the thresholds "
+        "acceptance_rules.graduation.forward applies to the frozen artifact over "
+        "the forward months), raw_readings (the holder's money, which active "
+        "readings are not, under the names a forward slice carries: "
+        "strategy_return, benchmark_return and panel_return, what the book after "
+        "every cost, benchmark_index and the zero-skill panel after its costs each "
+        "compounded to over the span, with raw_excess, book minus benchmark, and "
+        "plain_selection, book minus panel with no regression; "
+        "raw_excess_at_cost_stress, the span's own equity return after every cost "
+        "minus benchmark_index's price return over the same days, less "
+        "(cost_stress_multiplier - 1) x the slippage on its turnover, cumulative; "
+        "active_market_beta, the book's market loading relative to its panel: the "
+        "benchmark coefficient of the active series' regression over the span; "
+        "and on a row covering them last_two_years, the same five readings from "
+        "strategy_return to plain_selection over the last two research years "
+        "alone; the rest of that picture is in "
         "stats: total_return and annualized_return after every cost, "
         "benchmark.benchmark_return and benchmark.excess_return over the same "
         "days, and cost_sensitivity.excess_at_2x_slippage, the raw cumulative "
@@ -1507,8 +1480,8 @@ class BatchValidateTool(SessionTimeBudgetAware):
                                 "minLength": 1,
                                 "maxLength": BATCH_HYPOTHESIS_MAX_CHARS,
                                 "description": (
-                                    "Falsifiable statement registered before "
-                                    "the result exists; at most "
+                                    "Falsifiable statement registered BEFORE "
+                                    "any result exists; at most "
                                     f"{BATCH_HYPOTHESIS_MAX_CHARS} characters "
                                     "(keep the detail in your own notes)."
                                 ),
@@ -1525,9 +1498,14 @@ class BatchValidateTool(SessionTimeBudgetAware):
                             "control": {
                                 "type": "boolean",
                                 "description": (
-                                    "true for a registered comparison leg: "
-                                    "not a freeze-gate trial, never "
-                                    "nominatable; false for a candidate."
+                                    "true registers a comparison leg (a "
+                                    "baseline, the mechanism-removed carrier, a "
+                                    "placebo): it replays and costs "
+                                    "replay-years like any candidate but is no "
+                                    "freeze-gate trial and can never be "
+                                    "nominated or frozen, so a real candidate "
+                                    "registered as a control forfeits its "
+                                    "nomination; false for a candidate."
                                 ),
                             },
                         },
@@ -1541,12 +1519,16 @@ class BatchValidateTool(SessionTimeBudgetAware):
                     "maximum": BATCH_OFFLINE_TRIALS_MAX,
                     "description": (
                         "Candidate configurations screened offline on "
-                        "research-period data whose reading shaped this batch "
-                        "and that this batch does NOT submit; each declared "
-                        "once, in the first batch that records a Validation "
-                        "after its screen; controls never count; 0 only if "
-                        "nothing was screened. Added to the arm's freeze-gate "
-                        "trial count."
+                        "research-period data (a pack's screening gate, a "
+                        "parameter grid and a probe script all count) whose "
+                        "reading shaped what this batch submits and that this "
+                        "batch does NOT submit (rejected or deferred). A "
+                        "submitted candidate counts as a host trial once "
+                        "validated and is not declared; controls never count; "
+                        "each configuration is declared once, in the first "
+                        "batch that records a Validation after its screen; 0 "
+                        "only if nothing was screened. Summed over batches into "
+                        "the arm's freeze-gate trial count."
                     ),
                 },
             },

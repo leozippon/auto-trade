@@ -208,7 +208,7 @@ def test_the_prompt_states_the_research_session_contract() -> None:
         "不是替代它",
     ):
         assert clause in role, clause
-    protocol = prompt[prompt.index("# 研究协议") : prompt.index("# 决策合同")]
+    protocol = prompt[prompt.index("# 研究协议") : prompt.index("# 证据标准")]
     for clause in (
         "`hypothesis` 参数就是有约束力的预登记记录",
         "调用之后补写的笔记不算预登记",
@@ -217,51 +217,24 @@ def test_the_prompt_states_the_research_session_contract() -> None:
         "冻结只接受完整研究期节点",
         "`run_null_control` 的随机同名组合对照",
         "登记为 `control: true`",
-        "永远不能被提名",
         "`source_refs.signal_screen_ref`",
         "机制家族指收益来源的经济解释",
         "同一特征集换个估计器不算",
         "示例（只示形式）",
+        # A pack's kill line ends what it names; its termination ends the arm.
+        "杀死线结束的是包写明的候选或家族，不是本臂",
         '`finish_session(outcome="no_edge", reason=<触发它的读数>)`',
+        "参考包写定的更严条件以包为准",
     ):
         assert clause in protocol, clause
-    contract = prompt[prompt.index("# 决策合同") : prompt.index("# 证据标准")]
+    # The sections follow the Agent's decisions: what to test, whether a row
+    # is evidence, what to nominate and when to end.
+    evidence = prompt[prompt.index("# 证据标准") : prompt.index("# 决策合同")]
     for clause in (
-        "`freeze`",
-        "`no_edge`",
-        "之后没有别的会话接手",
-        "`deadline`",
-        "`acceptance_rules.freeze_gate`",
         "`acceptance_rules.graded_series`",
-        "研究期权益回撤与主动回撤都不超过上限",
-        "主动信息比率",
-        "主动超额为正的研究年数",
-        "那是约束，不是技能的证据",
-        "本臂完整研究期验证数达到该节写明的下限",
-        # A trial is the bytes: probing and then running them on full span is one.
-        "不同非对照策略（按字节认，任何 span、任何尝试；同一份字节换个 span 再验证——先探后全期——不是新试验）",
-        "`offline_trials` 必须如实申报",
-        # A configuration screened offline and then validated counts once.
-        "但本批**没有**提交的候选配置数",
-        "不重复申报",
-        "`selection_statistics.information_ratio_bar`",
-        # Earlier arms on the same research period join the trial family.
-        "运行事实里有 `arm.lineage` 时，试验族还包括其中所列、同一研究期上先前各臂的非对照试验",
-        "一条臂至多冻结一次",
-        # The arm's conclusion is the finish reason, not a skill.
-        "本臂的结论与证据写进 `finish_session` 的 `reason`，不另写成 skill",
-        "结束不需要先写 skill",
-    ):
-        assert clause in contract, clause
-    # Round 20260927 wrote 296 skills, most re-deriving one data contract,
-    # because every finishing text asked for them first; none does now.
-    for surface in (prompt, prompts.SESSION_DEFAULT_INSTRUCTION, prompts.WRAP_UP_PROMPT):
-        assert "写好 skills" not in surface and "写进 skills" not in surface
-    feedback = prompt[prompt.index("# 反馈通道") : prompt.index("# Step 产物树")]
-    assert "只写挂载的运行记忆与数据引用里还没有的知识" in feedback
-    assert "`continue`" not in contract and "PRIOR" not in prompt
-    evidence = prompt[prompt.index("# 证据标准") : prompt.index("# 原则")]
-    for clause in (
+        "他只做多、不对冲",
+        "持有人却拿不到",
+        "在研究期前后两半与最后两个研究年上各自成立才算改进",
         "中性化超额约为 0",
         "半数以上研究年份的主动中性化超额为负",
         "`excess_percentile` 在 0.5 附近",
@@ -269,6 +242,55 @@ def test_the_prompt_states_the_research_session_contract() -> None:
         "`acceptance_rules.graduation.forward.minimum_detectable_excess`",
     ):
         assert clause in evidence, clause
+    contract = prompt[prompt.index("# 决策合同") : prompt.index("# 原则")]
+    for clause in (
+        "`freeze`",
+        "`no_edge`",
+        "之后没有别的会话接手",
+        "`deadline`",
+        "一条臂至多冻结一次",
+        "`acceptance_rules.freeze_gate`",
+        "`acceptance_rules.graduation`",
+        "没列出的条件本臂没有",
+        "`offline_trials` 必须如实申报",
+        "`selection_statistics.information_ratio_bar`",
+        "基准指数涨得最多的几个研究年",
+        "按种子基配对后在至少两个种子基上都为正",
+        "参考包写定的更严复现规则以包为准，但免除不了这两节的条件",
+        "没有候选过检验时以 `no_edge` 结束是诚实的结果",
+        # The arm's conclusion is the finish reason, not a skill.
+        "本臂的结论与证据写进 `finish_session` 的 `reason`，不另写成 skill",
+        "结束不需要先写 skill",
+    ):
+        assert clause in contract, clause
+    # Each kind of statement has one home. Which conditions bind and at what
+    # threshold is the arm's acceptance_rules fact: the prompt enumerates none
+    # and carries no sentence that holds only for arms whose rules list an
+    # optional condition, which a resumed older arm would misread.
+    stable = prompt.split("# 本会话动态上下文")[0]
+    for statement in (
+        "列有",
+        "raw_excess_at_cost_stress",
+        "plain_selection",
+        "seed_replicates",
+        "arm.lineage",
+        "研究期权益回撤与主动回撤",
+        "按字节认",
+    ):
+        assert statement not in stable, statement
+    # A registration field is defined by its parameter, not here.
+    from autotrade.pipelines.session_tools import BatchValidateTool
+
+    offline = BatchValidateTool.spec.input_schema["properties"]["offline_trials"]
+    assert "does NOT submit" in offline["description"]
+    assert "**没有**提交" not in stable and "不重复申报" not in stable
+    # Round 20260927 wrote 296 skills, most re-deriving one data contract,
+    # because every finishing text asked for them first; none does now.
+    for surface in (prompt, prompts.SESSION_DEFAULT_INSTRUCTION, prompts.WRAP_UP_PROMPT):
+        assert "写好 skills" not in surface and "写进 skills" not in surface
+    feedback = prompt[prompt.index("# 反馈通道") : prompt.index("# Step 产物树")]
+    assert "只写挂载的运行记忆与数据引用里还没有的知识" in feedback
+    assert "`continue`" not in contract and "PRIOR" not in prompt
     facts = prompt[prompt.index("# 预算与事实") : prompt.index("# 反馈通道")]
     for fact in ("`budgets`", "`research_geometry`", "`arm`", "`artifact_contract`"):
         assert fact in facts, fact
@@ -279,3 +301,56 @@ def test_the_prompt_states_the_research_session_contract() -> None:
     # Enforced limits and mount paths sit in the schema and the facts.
     assert "500 字符" not in prompt
     assert "/mnt/tools/screen.py" not in prompt.split("# 本会话动态上下文")[0].split("# 工具与工作方式")[0]
+
+
+# Forward and Held-out results never enter a session (agent-design §1.2): the
+# prompt and the curated memory state rules about those periods, never a
+# reading of them. A clause that names either period carries no figure.
+FORWARD_MARKERS = ("前推", "Held-out", "heldout", "forward months", "会话看不到的")
+FIGURE = re.compile(r"\d+\.\d+|\d\s*%")
+# The row blocks the host builds; a path the contract names under them must
+# exist on a real row, so a renamed field cannot leave the contract pointing
+# at nothing (``raw_readings.last_two_years.return`` did).
+ROW_BLOCKS = ("selection_statistics", "raw_readings")
+
+
+def _contract_texts() -> dict[str, str]:
+    from autotrade.pipelines.skills import OPERATING_MEMORY_LIBRARY
+
+    library = Path(__file__).resolve().parents[2] / OPERATING_MEMORY_LIBRARY
+    return {
+        "system_prompt": prompts.PROTOCOL_INSTRUCTION,
+        "default_instruction": prompts.SESSION_DEFAULT_INSTRUCTION,
+        "wrap_up": prompts.WRAP_UP_PROMPT,
+        "hard_finalization": prompts.HARD_FINALIZATION_SYSTEM_PROMPT,
+        **{
+            f"memory:{path.parent.name}": path.read_text(encoding="utf-8")
+            for path in sorted(library.glob("*/SKILL.md"))
+        },
+    }
+
+
+def test_the_contract_quotes_no_forward_figure_and_names_only_real_row_fields() -> None:
+    from .test_batch_validate import _Session, _strategy
+
+    texts = _contract_texts()
+    for name, text in texts.items():
+        for clause in re.split(r"[。；\n]", text):
+            if any(marker in clause for marker in FORWARD_MARKERS):
+                assert not FIGURE.search(clause), (name, clause)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        session = _Session(Path(tmp))
+        row = session.validate_one("a", _strategy("1"))
+    named = {
+        path
+        for text in texts.values()
+        for path in re.findall(r"`([a-z_]+(?:\.[a-z_0-9]+)+)`", text)
+        if path.split(".")[0] in ROW_BLOCKS
+    }
+    assert named, "the contract names no row field"
+    for path in sorted(named):
+        node: object = row
+        for key in path.split("."):
+            assert isinstance(node, dict) and key in node, path
+            node = node[key]

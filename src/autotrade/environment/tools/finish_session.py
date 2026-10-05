@@ -85,14 +85,10 @@ class SessionBudgetStatus:
 _DESCRIPTION = (
     "End the arm's research session with one outcome; no other session follows. "
     'outcome="freeze" nominates node_id, a complete Validation of this session '
-    "that replayed the whole research period (span=full), and passes only the "
-    "freeze gate the acceptance_rules fact states, thresholds included: at least "
-    "two full-span validations in the arm, and on the nominee's active series "
-    "(its return minus the host's zero-skill panel) the information ratio, its "
-    "deflated Sharpe probability with trials counted over every revision the arm "
-    "has validated on any span, the share of research years with a positive "
-    "excess and the drawdown limit, plus the equity drawdown limit and the "
-    "tracking mandate when the arm has one. A nomination that fails the gate "
+    "that replayed the whole research period (span=full), and succeeds only if "
+    "that node passes the freeze gate: every condition the "
+    "acceptance_rules.freeze_gate fact lists for this arm, at its threshold. A "
+    "nomination that fails the gate "
     "is refused with its named reasons and numbers and the session goes on; a "
     "freeze ends research for the whole arm, and the frozen artifact is then "
     "tested once on later data no session sees. node_id is the full id or the "
@@ -109,23 +105,17 @@ _DESCRIPTION = (
     "refused while one is still running, and once it succeeds the remaining tool "
     "calls of the turn are cancelled."
 )
-# Appended where the arm's rules hold the seed-replicate condition, the only
-# arms whose schema carries ``seed_replicates``.
-_SEED_DESCRIPTION = (
-    " A nominee whose strategy trains a model (main.py defines fit) is judged on its "
-    "training seeds together: name its seed replicates in seed_replicates. "
-    + SEED_REPLICATE_RULE
-    + " After the freeze the host replays each replicate beside the frozen artifact on "
-    "the later data and judges their mean plain selection."
-)
 
 
 def _spec(*, seed_replicates: bool) -> ToolSpec:
-    """The tool's schema; ``seed_replicates`` only for an arm whose rules hold it."""
+    """The tool's schema; ``seed_replicates`` only for an arm whose rules hold it.
+
+    The rule a replicate meets is the arm's ``acceptance_rules.freeze_gate``
+    fact; a refusal that concerns one restates it (``SEED_REPLICATE_RULE``)."""
 
     return ToolSpec(
         "finish_session",
-        _DESCRIPTION + (_SEED_DESCRIPTION if seed_replicates else ""),
+        _DESCRIPTION,
         {
             "type": "object",
             "properties": {
@@ -149,9 +139,11 @@ def _spec(*, seed_replicates: bool) -> ToolSpec:
                             "type": "array",
                             "items": {"type": "string", "minLength": 1, "maxLength": 500},
                             "description": (
-                                "freeze only: the nominee's seed replicates, each a node "
-                                "id or short handle of this session; required (at least "
-                                "one) when the nominee's main.py defines fit."
+                                "freeze only: the nominee's seed replicates as "
+                                "acceptance_rules.freeze_gate.seed_replicates defines "
+                                "them, each a node id or short handle of this session; "
+                                "required (at least one) when the nominee's main.py "
+                                "defines fit."
                             ),
                         }
                     }

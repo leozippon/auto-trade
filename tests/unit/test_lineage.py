@@ -31,7 +31,7 @@ from autotrade.pipelines.lineage import (
     lineage_arm_ids,
     write_lineage,
 )
-from autotrade.pipelines.research_session import arm_record
+from autotrade.pipelines.research_session import LINEAGE_NOTE, arm_record
 from autotrade.pipelines.session_resume import REVISIONS_DIR
 
 RESEARCH_START, RESEARCH_END = "20210701", "20250630"
@@ -312,6 +312,7 @@ def test_the_recorded_lineage_joins_the_family_and_outlives_its_arms(tmp_path: P
         "arms": ["first", "second"],
         "trials": 6,
         "effective_trials": record["effective_trials"],
+        "note": LINEAGE_NOTE,
     }
     with pytest.raises(ValueError, match="already records its lineage"):
         ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl").append(lineage_ledger_record(arm))

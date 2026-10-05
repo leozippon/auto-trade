@@ -421,13 +421,14 @@ class PromptCompositionTest(unittest.TestCase):
         second_prefix, second_context = second.split(self.MARKER, 1)
         self.assertEqual(first_prefix, second_prefix)
         self.assertNotEqual(first_context, second_context)
-        # Purpose, protocol, decision contract, evidence, constraints, facts,
-        # feedback -- then the per-run context.
+        # Purpose, protocol, evidence, decision contract (the agent's
+        # decisions in order), constraints, facts, feedback -- then the
+        # per-run context.
         order = [
             first.index("# 身份与任务"),
             first.index("# 研究协议"),
-            first.index("# 决策合同"),
             first.index("# 证据标准"),
+            first.index("# 决策合同"),
             first.index("# 原则"),
             first.index("# 工具与工作方式"),
             first.index("# 角色与写权"),

@@ -881,9 +881,10 @@ class ControlsAndOfflineScreensTest(unittest.TestCase):
         schema = BatchValidateTool.spec.input_schema
         self.assertIn("offline_trials", schema["required"])
         # A configuration screened offline and then submitted counts once, as
-        # the host trial it becomes.
-        self.assertIn("NOT themselves submitted", BatchValidateTool.spec.description)
+        # the host trial it becomes. The parameter is its one definition.
         self.assertIn("does NOT submit", schema["properties"]["offline_trials"]["description"])
+        self.assertIn("offline_trials, defined by its parameter", BatchValidateTool.spec.description)
+        self.assertNotIn("does NOT submit", BatchValidateTool.spec.description)
         self.assertIn("control", schema["properties"]["candidates"]["items"]["required"])
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
@@ -1621,7 +1622,13 @@ class BatchValidateRunTest(unittest.TestCase):
             self.assertEqual(activity["min_mean_gross"], rules.min_mean_gross)
             # The fixture reports no exposure block: unmeasured, not zero.
             self.assertIsNone(activity["mean_gross"])
-            self.assertIn("not a freeze-gate condition", activity["note"])
+            # What the block is for is said once, in the description, not on
+            # every row.
+            self.assertNotIn("note", activity)
+            self.assertIn(
+                "graduation_activity, informational and no freeze-gate condition",
+                BatchValidateTool.spec.description,
+            )
             # Far below the floor, yet no gate reason speaks of activity.
             self.assertFalse(
                 any(

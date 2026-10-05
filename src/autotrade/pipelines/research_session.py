@@ -1485,6 +1485,14 @@ def start_record() -> dict[str, object]:
     return {"kind": "template", "template_ref": "agent_output_template"}
 
 
+# What an arm's lineage fact means for its freeze gate.
+LINEAGE_NOTE = (
+    "the non-control trials of these earlier arms on the same research period "
+    "join this arm's freeze-gate trial family: selection_statistics."
+    "information_ratio_bar already counts them"
+)
+
+
 def arm_record(
     steps: Sequence[StepResult], lineage: Mapping[str, object] | None = None
 ) -> dict[str, object]:
@@ -1496,7 +1504,9 @@ def arm_record(
     their batches declared; controls are counted apart. A
     session only runs while nothing is frozen. ``lineage`` is the ledger's
     ``lineage`` record of an arm created with one: the earlier arms whose
-    trials the gate adds to these, how many and what they count as.
+    trials the gate adds to these, how many and what they count as, with the
+    note that says so (``LINEAGE_NOTE``), so no prompt sentence holds only for
+    the arms that have one.
     """
 
     family = trial_family([trial_fields(step) for step in steps])
@@ -1509,7 +1519,8 @@ def arm_record(
     }
     if lineage is not None:
         record["lineage"] = {
-            key: lineage[key] for key in ("arms", "trials", "effective_trials")
+            **{key: lineage[key] for key in ("arms", "trials", "effective_trials")},
+            "note": LINEAGE_NOTE,
         }
     return record
 
