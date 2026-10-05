@@ -51,11 +51,13 @@ def result_equity_payload(
     info = path.stat()
     curve = _curve(str(path), info.st_size, info.st_mtime_ns)
     benchmark = curve["benchmark"]
+    panel = curve["panel"]
     return {
         "experiment_id": experiment_id,
         "result": name,
         "series": [_thin(line, points) for line in curve["series"]],  # type: ignore[union-attr]
         "benchmark": _thin(benchmark, points) if isinstance(benchmark, dict) else benchmark,
+        "panel": _thin(panel, points) if isinstance(panel, dict) else panel,
         "exposure": {
             key: _thin(line, points)
             for key, line in curve["exposure"].items()  # type: ignore[union-attr]

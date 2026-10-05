@@ -496,6 +496,11 @@ def test_a_criterion_that_names_a_threshold_words_it_from_the_record() -> None:
     assert not re.search(r"≥ [0-9]", gate), gate
 
 
+# Threshold keys a forward record carries only where the arm's rules hold the
+# condition they name.
+CONDITIONAL_THRESHOLDS = {"require_forward_plain_selection"}
+
+
 def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) -> None:
     """The panels read the registry's arm projections by field name; a renamed
     field would render an empty cell instead of failing. Checked against a
@@ -515,7 +520,11 @@ def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) ->
     gate = set(research["record"]["freeze_gate"])
     forward = set(detail["forward"])
     slices = detail["forward"]["slices"]
-    slice_fields = set(slices["forward"]) | set(slices["heldout"])
+    # A slice's statistics table reads its holder's readings as rows of its own.
+    slice_served = {
+        name: set(block) | set(block["raw_readings"]) for name, block in slices.items()
+    }
+    slice_fields = slice_served["forward"] | slice_served["heldout"]
     budget = set(detail["budget"]) & set(detail["budget_used"])
     def reads(name: str, var: str) -> set[str]:
         return set(re.findall(rf"\b{var}\.([a-z_]+)", _js_function_body(name)))
@@ -543,9 +552,12 @@ def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) ->
         ("verdictStagePanel", reads("verdictStagePanel", "forward"), forward),
         ("forwardCriteria", reads("forwardCriteria", "f"), set(slices["forward"])),
         ("heldoutCriteria", reads("heldoutCriteria", "h"), set(slices["heldout"])),
-        ("criteria thresholds", criteria_thresholds, set(detail["forward"]["verdict"]["thresholds"])),
+        # Plain selection (F8) is stated only by an arm that holds it, and the
+        # fixture's rules do not; its served key is checked on such an arm in
+        # the verdict and research-console tests.
+        ("criteria thresholds", criteria_thresholds - CONDITIONAL_THRESHOLDS, set(detail["forward"]["verdict"]["thresholds"])),
         # The same threshold keys are served before the replay, from the plan.
-        ("plan thresholds", criteria_thresholds, set(replay["thresholds"])),
+        ("plan thresholds", criteria_thresholds - CONDITIONAL_THRESHOLDS, set(replay["thresholds"])),
         ("verdictStagePanel", reads("verdictStagePanel", "attempts"), set(detail["replay_attempts"])),
         ("verdictStagePanel", reads("verdictStagePanel", "research"), record),
         ("replaySpanBar", reads("replaySpanBar", "replay"), set(replay["replay"])),
@@ -558,11 +570,18 @@ def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) ->
     # and every row defined is one a view selects: two rows (残差跟踪误差, IR)
     # sat in the table definition that neither stage ever drew.
     slice_rows = set(re.findall(r'^  \["([a-z_]+)",', _js_literal("const SLICE_ROWS = [", "\n];"), re.MULTILINE))
-    forward_rows = set(re.findall(r'"([a-z_]+)"', _js_literal("const FORWARD_STAT_FIELDS = [", "\n];")))
-    heldout_rows = set(re.findall(r'"([a-z_]+)"', _js_literal("const HELDOUT_STAT_FIELDS = [", "];")))
+    holder_rows = set(re.findall(r'"([a-z_]+)"', _js_literal("const HOLDER_STAT_FIELDS = [", "\n];")))
+
+    def stat_rows(literal: str) -> set[str]:
+        """A view's rows: its own names and the holder's readings it spreads."""
+        rows = set(re.findall(r'"([a-z_]+)"', literal))
+        return rows | holder_rows if "...HOLDER_STAT_FIELDS" in literal else rows
+
+    forward_rows = stat_rows(_js_literal("const FORWARD_STAT_FIELDS = [", "\n];"))
+    heldout_rows = stat_rows(_js_literal("const HELDOUT_STAT_FIELDS = [", "];"))
     assert slice_rows <= slice_fields
-    assert forward_rows <= set(slices["forward"])
-    assert heldout_rows <= set(slices["heldout"])
+    assert forward_rows <= slice_served["forward"]
+    assert heldout_rows <= slice_served["heldout"]
     assert slice_rows == forward_rows | heldout_rows, sorted(slice_rows ^ (forward_rows | heldout_rows))
     # Every criterion the pipeline can fail is a line of the checklist.
     checked = set(re.findall(r'"((?:forward|heldout)_[a-z_]+)"', _js_function_body("forwardCriteria") + _js_function_body("heldoutCriteria")))

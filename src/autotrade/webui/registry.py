@@ -58,7 +58,11 @@ from autotrade.pipelines.ledger import (
 from autotrade.pipelines.pit_views_seed import FORWARD_PHASE, RESEARCH_PHASE
 from autotrade.pipelines.session_resume import STEP_SIDECAR_DIR
 from autotrade.pipelines.skills import latest_skills_snapshot
-from autotrade.pipelines.verdict import panel_return, raw_excess_at_cost_stress
+from autotrade.pipelines.verdict import (
+    panel_return,
+    raw_excess_at_cost_stress,
+    slice_readings,
+)
 from autotrade.pipelines.worker import _ALLOWED_PARAMS
 
 from .public_identity import PublicIdentity
@@ -110,6 +114,7 @@ _CRITERION_CODES = {
     "forward_exposure_below_floor": "F6",
     "forward_tracking_error_above_cap": "F7",
     "forward_beta_outside_band": "F7",
+    "forward_plain_selection_not_positive": "F8",
     "heldout_strategy_error": "H1",
     "heldout_excess_below_tolerance": "H2",
     "heldout_max_drawdown_exceeded": "H3",
@@ -298,6 +303,7 @@ def arm_ending(
     identity: PublicIdentity,
     records: Sequence[Mapping[str, object]],
     state: Mapping[str, object],
+    forward: Mapping[str, object] | None,
 ) -> dict[str, str] | None:
     """How the arm ended — one of :data:`ENDING_STATES` and a one-line reason —
     or ``None`` while it can still run.
@@ -305,10 +311,14 @@ def arm_ending(
     Every ending the console shows comes from here, so no page classifies one
     for itself. A worker the host or the environment broke ended the process
     rather than the research, so its state is read before the ledger. Otherwise
-    the verdict decides: a graduate is named by the two numbers that carried
-    it, a replay that refused one by the criteria it failed, and an arm that
-    never reached a replay by how its research session ended — the Agent's own
-    ``no_edge``, an exhausted budget, or a nomination the freeze gate refused.
+    the verdict decides: a graduate is named by its forward year as the holder
+    reads it — the book against the benchmark, then against its zero-skill
+    panel unregressed, then the neutralised IR the gate graded (``forward`` is
+    :func:`_forward_view`, which carries those readings for every recorded
+    slice) — a replay that refused one by the criteria it failed, and an arm
+    that never reached a replay by how its research session ended — the
+    Agent's own ``no_edge``, an exhausted budget, or a nomination the freeze
+    gate refused.
     """
 
     if str(state.get("state") or "") == "failed":
@@ -325,14 +335,16 @@ def arm_ending(
         void = _mapping(verdict.get("void"))
         return {"state": "voided", "reason": identity.public_text(str(void.get("reason") or ""))}
     if verdict["status"] == "graduated":
-        slices = _mapping(_mapping(forward_record(records)).get("slices"))
-        forward = _mapping(slices.get("forward"))
-        heldout = _mapping(slices.get("heldout"))
+        judged = _mapping(_mapping(_mapping(forward).get("slices")).get("forward"))
+        raw = _mapping(judged.get("raw_readings"))
+        ratio = _number(judged.get("information_ratio"))
         return {
             "state": "graduated",
             "reason": (
-                f"前推 80% 下界 {_percent(forward.get('lower_bound'))}"
-                f" · Held-out 超额 {_percent(heldout.get('neutralized_excess'))}"
+                f"前推 账户 {_percent(raw.get('strategy_return'))}"
+                f" · 基准 {_percent(raw.get('benchmark_return'))}"
+                f" · 对面板（未回归）{_percent(raw.get('plain_selection'))}"
+                f" · 中性化主动 IR {'—' if ratio is None else f'{ratio:.2f}'}"
             ),
         }
     if verdict["status"] == "discarded":
@@ -362,24 +374,79 @@ def _result_name(reference: object) -> str | None:
     return path.parent.name if path.name == "result.json" else path.name
 
 
+def _derived_slice_readings(
+    directory: Path, record: Mapping[str, object]
+) -> dict[str, dict[str, object]]:
+    """The holder's readings (``verdict.slice_readings``) of each slice the
+    forward record stores without them, from the replay's own style sidecar.
+
+    A record written before slices carried them has every series they are
+    computed from, so the console derives them on read rather than rewriting
+    the arm's ledger. They are kept like a recorded session's best candidate
+    (:class:`_RecordedBest`, keyed by the forward run). A sidecar that cannot
+    be read or measured derives nothing, and the view shows no reading."""
+
+    slices = _mapping(record.get("slices"))
+    missing = [
+        name
+        for name, block in slices.items()
+        if isinstance(block, Mapping) and "raw_readings" not in block
+    ]
+    if not missing:
+        return {}
+
+    def compute() -> dict[str, object]:
+        root = Path(directory).resolve()
+        path = (root / str(record.get("result_ref") or "")).resolve()
+        if path.is_dir():
+            path = path / "result.json"
+        if not path.is_relative_to(root):
+            raise ValueError("the forward result is outside the experiment")
+        sidecar = json.loads((path.parent / STYLE_ARTIFACT_NAME).read_text(encoding="utf-8"))
+        return {
+            name: slice_readings(
+                sidecar,
+                start=str(_mapping(slices[name]).get("start")),
+                end=str(_mapping(slices[name]).get("end")),
+            )
+            for name in missing
+        }
+
+    try:
+        derived = _RECORDED_BEST.get(
+            directory, [str(record.get("run_id")), "slice_readings"], compute
+        )
+    except (OSError, ValueError, TypeError):
+        return {}
+    return {name: dict(_mapping(block)) for name, block in _mapping(derived).items()}
+
+
 def _forward_view(
-    identity: PublicIdentity, record: Mapping[str, object] | None
+    directory: Path, identity: PublicIdentity, record: Mapping[str, object] | None
 ) -> dict[str, object] | None:
     """The forward record: replay span, slice statistics and verdict.
 
     ``None`` until the record exists, which is also when the verdict does.
+    Every slice carries the holder's readings: the record's own, or for a
+    record written before slices carried them, the same numbers derived from
+    its replay (:func:`_derived_slice_readings`) and marked
+    ``readings_derived``.
     """
 
     if record is None:
         return None
     null = _mapping(record.get("null_control"))
+    derived = _derived_slice_readings(directory, record)
     return {
         "recorded_at": record.get("recorded_at"),
         "error": identity.public_text(str(record.get("error") or "")) or None,
         "replay": dict(_mapping(record.get("replay"))),
         "result": _result_name(record.get("result_ref")),
         "slices": {
-            name: dict(block)
+            name: {
+                **block,
+                **({**derived[name], "readings_derived": True} if name in derived else {}),
+            }
             for name, block in _mapping(record.get("slices")).items()
             if isinstance(block, Mapping)
         },
@@ -418,6 +485,7 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
         if raw_status is not None:
             summary["status"] = status
         best = _research_best(directory, records)
+        forward = _forward_view(directory, identity, forward_record(records))
         summary.update(
             {
                 "created_at": _created_at(directory, params),
@@ -432,8 +500,8 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                 "budget": _budget_totals(params),
                 "budget_used": _budget_used(directory, records, raw_status),
                 "verdict": experiment_verdict(records),
-                "ending": arm_ending(identity, records, state),
-                "forward": _forward_view(identity, forward_record(records)),
+                "ending": arm_ending(identity, records, state, forward),
+                "forward": forward,
                 "paper_candidate": _paper_candidate_view(directory, records),
             }
         )
@@ -838,7 +906,10 @@ class _RecordedBest:
     mtime. Once the console names a file (:meth:`attach`) the entries outlive
     the process, for as long as the code that computed them is unchanged. The
     file is a cache: one that cannot be read starts empty, and one that cannot
-    be written leaves the entries in memory.
+    be written leaves the entries in memory. The holder's readings derived for
+    a forward record written before slices carried them
+    (:func:`_derived_slice_readings`) are kept the same way, keyed by the
+    forward run.
     """
 
     def __init__(self) -> None:
@@ -1038,6 +1109,14 @@ def _verdict_thresholds(
         ),
         "min_mean_gross": rules.min_mean_gross,
         "heldout_tolerance_z": rules.heldout_tolerance_z,
+        # Stated, like the forward record states it, only for an arm whose own
+        # params.json holds the condition: an arm recorded without the key is
+        # not judged on it, whatever today's creation default is.
+        **(
+            {"require_forward_plain_selection": True}
+            if params.get("require_forward_plain_selection") is True
+            else {}
+        ),
     }
 
 

@@ -14,6 +14,7 @@ import os
 import re
 from pathlib import Path
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
@@ -245,13 +246,18 @@ def test_every_way_an_arm_can_end_reads_as_one_ending_with_a_reason(tmp_path: Pa
     assert {name: ending["state"] for name, ending in endings.items()} == {
         name: name for name in ENDING_STATES
     }
-    # A graduate is named by the two numbers that carried it, a refusal by the
+    # A graduate is named by its forward year as the holder reads it -- his
+    # account against the benchmark, then against the zero-skill panel with no
+    # regression, then the neutralised IR the gate graded -- a refusal by the
     # criteria it failed, and the three endings no replay decided by what the
     # record says: the Agent's first sentence, the budget, the error's first line.
-    forward = rows["graduated"]["forward"]["slices"]
+    forward = rows["graduated"]["forward"]["slices"]["forward"]
+    raw = forward["raw_readings"]
     assert endings["graduated"]["reason"] == (
-        f"前推 80% 下界 {forward['forward']['lower_bound'] * 100:+.2f}%"
-        f" · Held-out 超额 {forward['heldout']['neutralized_excess'] * 100:+.2f}%"
+        f"前推 账户 {raw['strategy_return'] * 100:+.2f}%"
+        f" · 基准 {raw['benchmark_return'] * 100:+.2f}%"
+        " · 对面板（未回归）—"
+        f" · 中性化主动 IR {forward['information_ratio']:.2f}"
     )
     assert endings["rejected"]["reason"].split(" · ")[0] == "F2"
     # A voided graduate says why, keeps its replay's slices, and is offered
@@ -757,7 +763,7 @@ def test_a_figure_whose_label_does_not_read_itself_is_glossed_once() -> None:
         assert script.count(f"const {name} = ") == 1, name
     for opening, glosses in (
         ("function evidenceTiles(", ("IR_TITLE",)),
-        ("function forwardTiles(", ("LOWER_BOUND_TITLE", "NEUTRALIZED_EXCESS_TITLE")),
+        ("function forwardTiles(", ("PLAIN_SELECTION_TITLE", "NEUTRAL_IR_TITLE")),
         ("function researchSessionPanel(", ("IR_TITLE", "NEUTRALIZED_EXCESS_TITLE")),
         ("function frozenPanel(", ("IR_TITLE", "NEUTRALIZED_EXCESS_TITLE", "TRACKING_ERROR_TITLE")),
         ("function freezeGateChecklist(", ("DSR_TITLE",)),
@@ -910,3 +916,94 @@ def test_arms_with_and_without_the_newer_rule_and_cost_keys_list_alike(tmp_path:
     record = next(entry for entry in detail["sessions"] if entry["kind"] == "research")["record"]
     assert {"excess_return", "raw_excess_at_cost_stress"} <= set(record["validations"][0])
     assert "panel_return" in record["best"]
+
+
+def test_an_arm_judged_before_slices_carried_the_holders_readings_reads_them_derived(
+    tmp_path: Path,
+) -> None:
+    """A forward record written before slices carried the holder's readings
+    keeps its ledger as written; the console derives the same numbers from
+    the replay's stored series and says they were derived. They are the
+    sidecar's own daily series compounded over each slice, and the very
+    numbers the pipeline now records for a slice of that sidecar."""
+
+    from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
+    from autotrade.pipelines.verdict import slice_readings
+
+    directory = build_arm(tmp_path, "arm", "graduated")
+    ledger_path = directory / "ledgers/experiment_ledger.jsonl"
+    records = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
+    record = records[-1]
+    sidecar_path = Path(str(record["result_ref"])).parent / STYLE_ARTIFACT_NAME
+    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    # A replay of the panel era: random names on the book's skeleton.
+    sidecar["panel_daily"] = [[day, 0.6 * value - 0.0004] for day, value in sidecar["strategy_daily"]]
+    write_json_atomic(sidecar_path, sidecar)
+    recorded_now = {
+        name: slice_readings(sidecar, start=block["start"], end=block["end"])
+        for name, block in record["slices"].items()
+    }
+    # The record as an arm judged before this change wrote it.
+    for block in record["slices"].values():
+        del block["raw_readings"], block["plain_excess"]
+    del record["verdict"]["holder_line"]
+    ledger_path.write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in records), encoding="utf-8"
+    )
+    before = ledger_path.read_bytes()
+
+    detail = experiment_detail(tmp_path, "arm")
+    slices = detail["forward"]["slices"]
+    for name, readings in recorded_now.items():
+        assert slices[name]["readings_derived"] is True
+        assert slices[name]["raw_readings"] == readings["raw_readings"]
+        assert slices[name]["plain_excess"] == readings["plain_excess"]
+    forward = slices["forward"]
+    in_slice = [
+        (own, drawn, index)
+        for (day, own), (_day, drawn), (_d, index) in zip(
+            sidecar["strategy_daily"], sidecar["panel_daily"], sidecar["benchmark_daily"], strict=True
+        )
+        if forward["start"] <= day <= forward["end"]
+    ]
+    book, panel, benchmark = (
+        float(np.prod([1.0 + row[column] for row in in_slice]) - 1.0) for column in range(3)
+    )
+    assert forward["raw_readings"]["strategy_return"] == pytest.approx(book, rel=1e-12)
+    assert forward["raw_readings"]["benchmark_return"] == pytest.approx(benchmark, rel=1e-12)
+    assert forward["raw_readings"]["plain_selection"] == pytest.approx(book - panel, rel=1e-12)
+    # The ending names the derived holder's line, and reading wrote nothing.
+    ending = summarize_experiment(directory)["ending"]["reason"]
+    assert ending.startswith(f"前推 账户 {book * 100:+.2f}% · 基准 {benchmark * 100:+.2f}%")
+    assert f"对面板（未回归）{(book - panel) * 100:+.2f}%" in ending
+    assert ledger_path.read_bytes() == before
+    # The curve draws the panel beside the book and the benchmark, on the
+    # book's own days.
+    client = TestClient(create_app(tmp_path, tmp_path))
+    equity = client.get(f"/api/experiments/arm/results/{detail['forward']['result']}/equity").json()
+    assert equity["panel"]["dates"] == equity["series"][0]["dates"]
+    assert equity["panel"]["final"] == pytest.approx(
+        float(np.prod([1.0 + value for _day, value in sidecar["panel_daily"]]) - 1.0), abs=1e-6
+    )
+
+    # An arm judged now carries its own readings, not derived ones.
+    build_arm(tmp_path, "current", "graduated")
+    current = experiment_detail(tmp_path, "current")["forward"]["slices"]["forward"]
+    assert "readings_derived" not in current and "raw_readings" in current
+
+
+def test_the_replay_plan_states_plain_selection_only_for_an_arm_that_holds_it(
+    tmp_path: Path,
+) -> None:
+    """Before the replay runs the console lists the criteria the verdict will
+    apply; F8 is among them only where the arm's own parameters hold it,
+    whatever today's creation default is."""
+
+    directory = build_arm(tmp_path, "arm", "research")
+    preview = experiment_detail(tmp_path, "arm")["sessions"][1]["thresholds"]
+    assert "require_forward_plain_selection" not in preview
+    path = directory / "hitl/params.json"
+    params = json.loads(path.read_text(encoding="utf-8"))
+    path.write_text(json.dumps({**params, "require_forward_plain_selection": True}), encoding="utf-8")
+    preview = experiment_detail(tmp_path, "arm")["sessions"][1]["thresholds"]
+    assert preview["require_forward_plain_selection"] is True

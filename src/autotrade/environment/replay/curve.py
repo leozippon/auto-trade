@@ -16,6 +16,7 @@ from pathlib import Path
 from .style import BENCHMARK_LABEL, STYLE_ARTIFACT_NAME
 
 STRATEGY_LABEL = "策略"
+PANEL_LABEL = "零技能面板"
 
 
 def _finite(value: object) -> float | None:
@@ -72,17 +73,23 @@ def result_exposures(payload: dict[str, object]) -> list[tuple[str, float]]:
     return rows
 
 
-def benchmark_returns(result_file: Path) -> list[tuple[str, float]]:
-    """Benchmark daily returns from the result's own style sidecar."""
+def _sidecar_returns(result_file: Path, key: str) -> list[tuple[str, float]]:
+    """One daily series of the result's own style sidecar, by date."""
 
     sidecar = read_result(Path(result_file).parent / STYLE_ARTIFACT_NAME)
     rows: dict[str, float] = {}
-    for item in sidecar.get("benchmark_daily") or ():
+    for item in sidecar.get(key) or ():
         if isinstance(item, list) and len(item) == 2 and item[0]:
             value = _finite(item[1])
             if value is not None:
                 rows.setdefault(str(item[0]), value)
     return sorted(rows.items())
+
+
+def benchmark_returns(result_file: Path) -> list[tuple[str, float]]:
+    """Benchmark daily returns from the result's own style sidecar."""
+
+    return _sidecar_returns(result_file, "benchmark_daily")
 
 
 def benchmark_label(result_file: Path) -> str:
@@ -120,13 +127,18 @@ def curve_entry(key: str, label: str, rows: list[tuple[str, float]]) -> dict[str
 
 
 def result_curve(result_file: Path) -> dict[str, object]:
-    """The strategy's cumulative curve, its benchmark on the strategy's own days
-    so both start at zero together, and the daily position weight."""
+    """The strategy's cumulative curve, its benchmark and its zero-skill panel
+    (the mean of the random-name copies of its own trades; ``None`` for a
+    result without one) on the strategy's own days so all start at zero
+    together, and the daily position weight."""
 
     payload = read_result(result_file)
     returns = result_returns(payload)
     days = {day for day, _value in returns}
     benchmark = [(day, value) for day, value in benchmark_returns(result_file) if day in days]
+    panel = [
+        (day, value) for day, value in _sidecar_returns(result_file, "panel_daily") if day in days
+    ]
     exposure = result_exposures(payload)
     return {
         "series": [curve_entry("strategy", STRATEGY_LABEL, returns)] if returns else [],
@@ -135,6 +147,7 @@ def result_curve(result_file: Path) -> dict[str, object]:
             if benchmark
             else None
         ),
+        "panel": curve_entry("panel", PANEL_LABEL, panel) if panel else None,
         "exposure": {
             "strategy": {
                 "dates": [day for day, _value in exposure],

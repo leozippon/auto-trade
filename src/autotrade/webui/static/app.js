@@ -69,6 +69,7 @@ const REASON_LABELS = {
   forward_exposure_below_floor: "前推平均仓位",
   forward_tracking_error_above_cap: "前推对基准指数跟踪误差",
   forward_beta_outside_band: "前推市场 β",
+  forward_plain_selection_not_positive: "前推账户对零技能面板（未回归）",
   heldout_excess_below_tolerance: "Held-out 超额",
   heldout_max_drawdown_exceeded: "Held-out 回撤",
   heldout_active_drawdown_exceeded: "Held-out 主动回撤",
@@ -101,6 +102,16 @@ const RAW_STRESS_TITLE = "滑点按成本压力倍数加价后的对基准指数
 const PANEL_RETURN_TITLE = "零技能面板（同一成交骨架随机换名）自身扣费后的整段收益";
 // How the forward bound is drawn (verdict.py `_bootstrap_lower_bound`).
 const LOWER_BOUND_TITLE = "中性化超额的移动块自助法单侧下界";
+// A replay slice as the holder reads it (verdict.py `holder_readings` and
+// `slice_readings`): his own account against the benchmark first, then against
+// the zero-skill panel with no regression, then the neutralised figure the
+// gate grades — which credits back the market and size loadings the book did
+// not carry, a credit an unhedged long-only holder never receives.
+const HOLDER_TITLE = "冻结产物扣费后的账户收益与基准指数（价格指数）同期收益，切片内复利";
+const PLAIN_SELECTION_TITLE = "账户收益减零技能面板收益，不做回归：选的名字是否赢了同一骨架上的随机名字";
+const ACTIVE_BETA_TITLE = "主动序列（账户 − 面板）对基准指数的回归载荷；为负即持仓比随机副本更低 β，指数大涨时落后，中性化读数会把这部分记回";
+const NEUTRAL_IR_TITLE = "剔除基准与规模载荷后的主动超额 ÷ 残差跟踪误差；回归退回的 β 与规模部分持有人拿不到";
+const DERIVED_TITLE = "此记录写于切片携带这些读数之前，数字由同一次回放存下的日序列推得";
 
 function reasonLabel(reason, thresholds) {
   const label = REASON_LABELS[reason];
@@ -689,6 +700,7 @@ function chainEquity(research, forward) {
   return {
     series: (research.series || []).map((entry) => chainSeries(entry, after(entry.key))),
     benchmark: chainSeries(research.benchmark, forward.benchmark),
+    panel: chainSeries(research.panel, forward.panel),
     exposure:
       exposure[0] && exposure[1]
         ? {
@@ -792,13 +804,22 @@ function equityChart(payload, opts = {}) {
   let { ddH = 90 } = opts;
   const INK = themeInk();
   // A Paper book that follows real fills also draws its simulated track: the
-  // same strategy, so the same ink, dotted as what did not happen.
-  const colorOf = { strategy: INK.strategyColor, simulated: INK.strategyColor, benchmark: INK.muted };
-  const dashOf = { benchmark: "6 4", simulated: "2 3" };
+  // same strategy, so the same ink, dotted as what did not happen. A replay's
+  // zero-skill panel (random names on the book's own trades) is a reference
+  // like the benchmark, in the same quiet ink, finely dotted.
+  const colorOf = {
+    strategy: INK.strategyColor,
+    simulated: INK.strategyColor,
+    benchmark: INK.muted,
+    panel: INK.muted,
+  };
+  const dashOf = { benchmark: "6 4", simulated: "2 3", panel: "1 3" };
+  const reference = new Set(["benchmark", "panel"]);
   const shown = (payload.series || []).filter((s) => (s.dates || []).length);
   if (!shown.length) return el("div", { class: "hint" }, "暂无日度收益数据");
-  const bench = payload.benchmark;
-  if (bench && (bench.dates || []).length) shown.push(bench);
+  for (const line of [payload.benchmark, payload.panel]) {
+    if (line && (line.dates || []).length) shown.push(line);
+  }
   const seriesList = shown.map((s) => ({
     key: s.key,
     label: s.label,
@@ -818,7 +839,7 @@ function equityChart(payload, opts = {}) {
     : seriesList
         .filter(
           (s) =>
-            s.key !== "benchmark" &&
+            !reference.has(s.key) &&
             exposureBy[s.key] &&
             (exposureBy[s.key].dates || []).length,
         )
@@ -980,7 +1001,7 @@ function equityChart(payload, opts = {}) {
             `${j ? "L" : "M"}${xOf(dates.indexOf(d)).toFixed(1)},${ddY(s.dd.get(d)).toFixed(1)}`,
         )
         .join(" ");
-      if (s.key !== "benchmark" && s.key !== "simulated") {
+      if (!reference.has(s.key) && s.key !== "simulated") {
         const first = xOf(dates.indexOf(pts[0])).toFixed(1);
         const last = xOf(dates.indexOf(pts[pts.length - 1])).toFixed(1);
         svg.push(
@@ -1077,7 +1098,7 @@ function equityChart(payload, opts = {}) {
     svg.push(
       `<path d="${line}" fill="none" stroke="${s.color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"${s.dash ? ` stroke-dasharray="${s.dash}"` : ""}/>`,
     );
-    if (s.key !== "benchmark") {
+    if (!reference.has(s.key)) {
       const lastDate = pts[pts.length - 1];
       svg.push(
         `<circle cx="${xOf(dates.indexOf(lastDate)).toFixed(1)}" cy="${yOf(s.cum.get(lastDate)).toFixed(1)}" r="3.5" fill="${s.color}" stroke="${INK.ring}" stroke-width="2"/>`,
@@ -1943,36 +1964,50 @@ function experimentBadges(...badges) {
   return el("span", { class: "exp-badges" }, ...badges.filter(Boolean));
 }
 
-/* The forward and Held-out slices the verdict read; absent until it exists,
-   and absent for a replay the strategy's own error stopped. */
+/* A slice's account against its benchmark as one tile value, "+11.0% / +38.6%",
+   signed by the raw excess; null when the slice carries no reading. */
+function accountTile(label, slice) {
+  const raw = (slice || {}).raw_readings || {};
+  if (raw.strategy_return === null || raw.strategy_return === undefined) return null;
+  return {
+    label,
+    value: raw,
+    fmt: (r) => `${fmtPct(r.strategy_return)} / ${fmtPct(r.benchmark_return)}`,
+    cls: signCls(raw.raw_excess),
+    title: `${HOLDER_TITLE}${slice.readings_derived ? `。${DERIVED_TITLE}` : ""}`,
+  };
+}
+
+/* The forward and Held-out slices the verdict read, as the holder reads them:
+   his account against the benchmark first, then against the zero-skill panel
+   unregressed, then the neutralised IR the gate graded. Absent until the
+   verdict exists, and for a replay the strategy's own error stopped. */
 function forwardTiles(item) {
   const slices = (item.forward || {}).slices || {};
   const f = slices.forward || {};
   const h = slices.heldout || {};
-  const tiles = presentTiles([
-    {
-      label: "前推超额 80% 下界",
-      value: f.lower_bound,
-      fmt: fmtPct,
-      signed: true,
-      title: LOWER_BOUND_TITLE,
-    },
-    {
-      label: "前推中性化超额",
-      value: f.neutralized_excess,
-      fmt: fmtPct,
-      signed: true,
-      title: NEUTRALIZED_EXCESS_TITLE,
-    },
-    {
-      label: "Held-out 中性化超额",
-      value: h.neutralized_excess,
-      fmt: fmtPct,
-      signed: true,
-      title: NEUTRALIZED_EXCESS_TITLE,
-    },
-    { label: "前推回撤", value: f.max_drawdown, fmt: fmtPct },
-  ]);
+  const tiles = [
+    accountTile("前推 账户 / 基准", f),
+    ...presentTiles([
+      {
+        label: "前推对面板（未回归）",
+        value: (f.raw_readings || {}).plain_selection,
+        fmt: fmtPct,
+        signed: true,
+        title: PLAIN_SELECTION_TITLE,
+      },
+      {
+        label: "前推中性化主动 IR",
+        value: f.information_ratio,
+        fmt: fmtSharpe,
+        signed: true,
+        title: NEUTRAL_IR_TITLE,
+      },
+    ]),
+    accountTile("Held-out 账户 / 基准", h),
+  ]
+    .filter(Boolean)
+    .map((tile) => (tile.fmt ? { ...tile, value: tile.fmt(tile.value) } : tile));
   return tiles.length ? statTilesRow(tiles) : null;
 }
 
@@ -2763,10 +2798,21 @@ function processListPanel(detail, selectedKey) {
 // One row per statistic of the forward and Held-out slices (verdict.py). A row
 // whose name states a threshold reads it from the same `thresholds` block the
 // criteria do, so the table and the checklist above it never disagree.
+// The holder's readings lead: account, benchmark, the raw excess between them,
+// the panel and the plain selection against it, then the active series before
+// and after the regression that neutralises it.
 const SLICE_ROWS = [
+  ["strategy_return", "账户收益", fmtPct, true, HOLDER_TITLE],
+  ["benchmark_return", "基准收益", fmtPct, true],
+  ["raw_excess", "原始超额（账户 − 基准）", fmtPct, true],
+  ["panel_return", "零技能面板收益", fmtPct, true, PANEL_RETURN_TITLE],
+  ["plain_selection", "对面板（账户 − 面板，未回归）", fmtPct, true, PLAIN_SELECTION_TITLE],
+  ["market_beta", "主动市场 β（对面板）", fmtSharpe, true, ACTIVE_BETA_TITLE],
+  ["plain_excess", "主动超额（年化，未回归）", fmtPct, true],
   ["series", "评分序列", (value) => SERIES_LABELS[value] || String(value)],
   ["days", "交易日", String],
-  ["neutralized_excess", "中性化超额（年化）", fmtPct, true],
+  ["neutralized_excess", "中性化超额（年化）", fmtPct, true, NEUTRALIZED_EXCESS_TITLE],
+  ["information_ratio", "中性化主动 IR", fmtSharpe, true, NEUTRAL_IR_TITLE],
   ["lower_bound", (t) => `${fmtPct(t.forward_confidence, 0)} 下界`, fmtPct, true],
   ["recency_neutralized_excess", (t) => `最近 ${t.recency_months ?? "—"} 个月中性化超额`, fmtPct, true],
   ["tolerance", "容忍线", fmtPct],
@@ -2778,10 +2824,21 @@ const SLICE_ROWS = [
 ];
 
 // The statistics each stage view lists of its own slice.
+const HOLDER_STAT_FIELDS = [
+  "strategy_return",
+  "benchmark_return",
+  "raw_excess",
+  "panel_return",
+  "plain_selection",
+  "market_beta",
+  "plain_excess",
+];
 const FORWARD_STAT_FIELDS = [
+  ...HOLDER_STAT_FIELDS,
   "series",
   "days",
   "neutralized_excess",
+  "information_ratio",
   "lower_bound",
   "recency_neutralized_excess",
   "max_drawdown",
@@ -2791,30 +2848,57 @@ const FORWARD_STAT_FIELDS = [
   "mean_gross",
 ];
 const HELDOUT_STAT_FIELDS = [
+  ...HOLDER_STAT_FIELDS,
   "series",
   "days",
   "neutralized_excess",
+  "information_ratio",
   "tolerance",
   "max_drawdown",
   "active_max_drawdown",
   "mean_gross",
 ];
 
-/* One slice's statistics, the rows it carries only. Null before the record. */
+/* One slice's statistics, the rows it carries only. Null before the record.
+   The holder's readings sit in the slice's `raw_readings` block and are read
+   as rows of the same table. */
 function sliceStats(slice, fields, thresholds) {
   if (!slice) return null;
   const t = thresholds || {};
+  const values = { ...slice, ...(slice.raw_readings || {}) };
   const rows = SLICE_ROWS.filter(
-    ([field]) => fields.includes(field) && slice[field] !== null && slice[field] !== undefined,
+    ([field]) => fields.includes(field) && values[field] !== null && values[field] !== undefined,
   );
   if (!rows.length) return null;
   return dataTable(
     [{ label: "" }, { label: "", num: true }],
-    rows.map(([field, label, fmt, signed]) => [
-      typeof label === "function" ? label(t) : label,
-      { value: fmt(slice[field]), cls: signed ? signCls(slice[field]) : "" },
+    rows.map(([field, label, fmt, signed, title]) => [
+      {
+        value: typeof label === "function" ? label(t) : label,
+        // Only what slice_readings derives for an older record says so.
+        title:
+          slice.readings_derived && (field === "plain_excess" || field in (slice.raw_readings || {}))
+            ? [title, DERIVED_TITLE].filter(Boolean).join("。")
+            : title || null,
+      },
+      { value: fmt(values[field]), cls: signed ? signCls(values[field]) : "" },
     ]),
     { fit: true, box: "section-gap" },
+  );
+}
+
+/* A slice as one sentence in the holder's order: the account against the
+   benchmark, then against its zero-skill panel unregressed, then the
+   neutralised IR labelled as what it is. Null without readings. */
+function holderLine(label, slice) {
+  const raw = (slice || {}).raw_readings;
+  if (!raw || raw.strategy_return === null || raw.strategy_return === undefined) return null;
+  const neutral = `中性化主动 IR ${fmtSharpe(slice.information_ratio)}（未回归主动 ${fmtPct(slice.plain_excess)}/年 → 中性化 ${fmtPct(slice.neutralized_excess)}/年，主动市场 β ${fmtSharpe(slice.market_beta)}）`;
+  return el(
+    "div",
+    { class: "meta-line", title: slice.readings_derived ? DERIVED_TITLE : null },
+    `${label}：账户 ${fmtPct(raw.strategy_return)}，基准 ${fmtPct(raw.benchmark_return)}（原始超额 ${fmtPct(raw.raw_excess)}）；` +
+      `零技能面板 ${fmtPct(raw.panel_return)}（对面板 ${fmtPct(raw.plain_selection)}，未回归）；${neutral}`,
   );
 }
 
@@ -2870,9 +2954,10 @@ function mandateRows(capToken, bandToken, measured, row, t) {
   ];
 }
 
-/* F1–F6 over the forward slice, as criterion rows: the 前推回放 view draws
+/* F1–F8 over the forward slice, as criterion rows: the 前推回放 view draws
    them alone, 裁决 draws them ahead of H1–H4, and neither restates a
-   threshold the other spells differently. */
+   threshold the other spells differently. F8, plain selection, is drawn only
+   where the arm's own thresholds hold it. */
 function forwardCriteria(f, verdict, thresholds) {
   const failed = failedReasons(verdict);
   const t = thresholds || {};
@@ -2889,6 +2974,16 @@ function forwardCriteria(f, verdict, thresholds) {
     row("forward_exposure_below_floor", fmtPct(f && f.mean_gross), thresholdCell("≥", t.min_mean_gross)),
     ...activeDrawdownRows("forward_active_drawdown_exceeded", f, row, t),
     ...mandateRows("forward_tracking_error_above_cap", "forward_beta_outside_band", f, row, t),
+    ...(t.require_forward_plain_selection
+      ? [
+          row(
+            "forward_plain_selection_not_positive",
+            fmtPct(f && (f.raw_readings || {}).plain_selection),
+            "> 0",
+            PLAIN_SELECTION_TITLE,
+          ),
+        ]
+      : []),
   ];
 }
 
@@ -2941,7 +3036,7 @@ function stageHead(key, detail) {
 }
 
 /* 前推回放: the forward slice alone — its span (progress while replaying),
-   F1–F6 and, once recorded, the slice's own statistics. */
+   once recorded the holder's line, F1–F8 and the slice's own statistics. */
 function forwardStagePanel(detail) {
   const { forward, replay, thresholds, progress } = replayContext(detail);
   const f = ((forward || {}).slices || {}).forward;
@@ -2951,10 +3046,11 @@ function forwardStagePanel(detail) {
     stageHead("forward", detail),
     replaySpanBar(replay, "forward", { pending: !forward, progress }),
     forward && forward.error ? el("div", { class: "hint warn" }, `策略报错：${forward.error}`) : null,
+    holderLine("前推", f),
     el(
       "div",
       { class: "section-gap" },
-      el("h4", { class: "subsection-title" }, forward ? "前推条件 F1–F6" : "前推条件 F1–F6 · 阈值"),
+      el("h4", { class: "subsection-title" }, forward ? "前推条件 F1–F8" : "前推条件 F1–F8 · 阈值"),
       checklist(forwardCriteria(f, detail.verdict, thresholds)),
     ),
     sliceStats(f, FORWARD_STAT_FIELDS, thresholds),
@@ -2978,6 +3074,7 @@ function heldoutStagePanel(detail) {
     stageHead("heldout", detail),
     replaySpanBar(replay, "heldout", { pending: !forward, progress }),
     el("div", { class: "meta-line" }, "与前推是同一次连续回放的尾段，同一个裁决"),
+    holderLine("Held-out", h),
     el(
       "div",
       { class: "section-gap" },
@@ -3023,6 +3120,9 @@ function verdictStagePanel(detail) {
     "div",
     { class: "panel section-gap" },
     panelHead(STEP_LABELS.verdict, badge),
+    // What the holder's account did, before the criteria that decided it.
+    forward ? holderLine("前推", slices.forward) : null,
+    forward ? holderLine("Held-out", slices.heldout) : null,
     forward
       ? checklist([
           ...forwardCriteria(slices.forward, verdict, thresholds),
@@ -3032,7 +3132,7 @@ function verdictStagePanel(detail) {
         el(
           "div",
           { class: "meta-line" },
-          "前推 F1–F6 与 Held-out H1–H4 全部通过才毕业；策略异常直接未通过，其他失败按上限重试",
+          "前推 F1–F8 与 Held-out H1–H4 全部通过才毕业；策略异常直接未通过，其他失败按上限重试",
         ),
     facts.length ? el("table", { class: "kv section-gap" }, ...facts) : null,
     paperHandoff(detail),
