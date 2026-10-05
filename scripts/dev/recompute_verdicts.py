@@ -251,10 +251,10 @@ def _judged(
     }
     forward = forward_slice(
         analysis,
+        rules=rules,
         start=slots["forward"][0],
         end=slots["forward"][1],
         seed_key=str(record["artifact_id"]),
-        **rules.forward_slice_kwargs(),
         slippage_bps=slippage_bps,
         turnover=float(activity["forward"]["turnover"]),
         round_trips=int(activity["forward"]["round_trips"]),
@@ -263,10 +263,10 @@ def _judged(
     )
     heldout = heldout_slice(
         analysis,
+        rules=rules,
         start=slots["heldout"][0],
         end=slots["heldout"][1],
         forward_tracking_error=float(forward["tracking_error"]),  # type: ignore[arg-type]
-        **rules.heldout_slice_kwargs(),
         mean_gross=float(activity["heldout"]["mean_gross"]),
         seed_replicates=replicates["heldout"],
     )

@@ -61,6 +61,7 @@ from .calendar import (
     yyyymmdd,
 )
 from .config import (
+    ACCEPTANCE_KEYS,
     DEFAULT_PIT_VIEWS_SEED,
     AcceptanceRules,
     RollingExperimentConfig,
@@ -164,24 +165,7 @@ _ALLOWED_PARAMS = {
     "max_llm_calls",
     "session_max_attempts",
     "max_research_minutes",
-    "max_drawdown",
-    "active_max_drawdown",
-    "tracking_error_cap",
-    "beta_min",
-    "beta_max",
-    "cost_stress_multiplier",
-    "min_active_ir",
-    "min_dsr_probability",
-    "min_positive_year_share",
-    "min_full_span_validations",
-    "require_raw_excess_at_cost_stress",
-    "require_forward_plain_selection",
-    "require_seed_replicates",
-    "forward_confidence",
-    "recency_months",
-    "min_mean_gross",
-    "min_round_trips_per_month",
-    "heldout_tolerance_z",
+    *ACCEPTANCE_KEYS,
     "research_directive",
     "workspace_reference",
     "operating_memory",
@@ -591,10 +575,9 @@ def resolve_worker_options(
         if data_backend == "pit"
         else (None, None)
     )
-    # Part of the arm's cost model, pinned in params.json at creation: an arm
-    # recorded before the tax existed has no key and keeps replaying,
-    # re-verifying and trading Paper untaxed. The creation defaults
-    # (hitl_state.WEB_CREATE_DEFAULTS) stamp it on new arms.
+    # Part of the arm's cost model, pinned in params.json at creation
+    # (hitl_state.CREATION_STAMPS): an arm without the key keeps replaying,
+    # re-verifying and trading Paper untaxed.
     dividend_tax = _strict_bool(params.get("dividend_tax", False), "dividend_tax")
     if dividend_tax and pit_views_seed is not None and pit_views_seed.is_dir():
         assert_seed_carries_bonus_split(pit_views_seed)

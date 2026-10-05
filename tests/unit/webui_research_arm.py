@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from dataclasses import replace
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -24,7 +25,7 @@ from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME, STYLE_SCHEMA_VERSION
 from autotrade.environment.runtime import write_json_atomic
 from autotrade.pipelines.calendar import FULL_SPAN
-from autotrade.pipelines.config import DEFAULT_RESEARCH_GEOMETRY
+from autotrade.pipelines.config import DEFAULT_RESEARCH_GEOMETRY, AcceptanceRules
 from autotrade.pipelines.experiment import freeze_gate_for
 from autotrade.pipelines.hitl_state import (
     ControlState,
@@ -72,6 +73,9 @@ REPLAY = {
     "requested_end": "20260930",
     "truncation_reason": "release_ends_20260911",
 }
+# The rules every recorded statistic of the arm is judged under: drawdown
+# limits wide enough that the synthetic series' edge alone decides.
+RULES = AcceptanceRules(max_drawdown=0.9, active_max_drawdown=0.9)
 
 
 def _business_days(start: str, count: int) -> list[str]:
@@ -245,7 +249,7 @@ def build_arm(
             _step(directory, "research", 2, edge=0.001, seed=4, span="Y3"),
         ]
         nominee = steps[1]
-        gate = freeze_gate_for([], steps, nominee, experiment_dir=directory)
+        gate = freeze_gate_for([], steps, nominee, experiment_dir=directory, acceptance=RULES)
         # The seed replicate: the full-span step other than the nominee.
         replicate = steps[0]
         if seeded:
@@ -391,7 +395,6 @@ def build_arm(
                         {**identity, **seed_replicate_slice(replicate_analysis, start=start, end=end)}
                     ]
                 }
-            seeds["forward"]["require_seed_replicates"] = True
             replicate_rows.append(
                 {
                     **identity,
@@ -401,14 +404,13 @@ def build_arm(
                 }
             )
         analysis = _analysis(ref)
+        rules = replace(RULES, require_seed_replicates=seeded)
         forward = forward_slice(
             analysis,
+            rules=rules,
             start=REPLAY["start"],
             end=REPLAY["forward_end"],
             seed_key="strategy_research_abc",
-            max_drawdown=0.9,
-            active_max_drawdown=0.9,
-            cost_stress_multiplier=2.0,
             slippage_bps=5.0,
             turnover=2.0,
             round_trips=24,
@@ -417,11 +419,10 @@ def build_arm(
         )
         heldout = heldout_slice(
             analysis,
+            rules=rules,
             start=REPLAY["heldout_start"],
             end=REPLAY["replay_end"],
             forward_tracking_error=float(forward["tracking_error"]),
-            max_drawdown=0.9,
-            active_max_drawdown=0.9,
             mean_gross=0.9,
             **seeds["heldout"],  # type: ignore[arg-type]
         )

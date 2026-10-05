@@ -23,6 +23,7 @@ from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
 from autotrade.environment.runtime import write_json_atomic
 from autotrade.pipelines import verdict
+from autotrade.pipelines.config import AcceptanceRules
 from autotrade.pipelines.experiment import freeze_gate_for, lineage_ledger_record
 from autotrade.pipelines.ledger import ExperimentLedger, lineage_record
 from autotrade.pipelines.lineage import (
@@ -179,7 +180,7 @@ def test_an_arm_without_a_lineage_is_judged_exactly_as_before(tmp_path: Path) ->
     to the last bit: an arm created without one deflates over its own family."""
 
     rows = _own_rows(tmp_path / "new_arm")
-    dsr = freeze_gate_for([], rows, rows[1], experiment_dir=tmp_path / "new_arm")["deflated_sharpe"]
+    dsr = freeze_gate_for([], rows, rows[1], experiment_dir=tmp_path / "new_arm", acceptance=AcceptanceRules())["deflated_sharpe"]
     assert {
         key: dsr[key]
         for key in (
@@ -219,6 +220,7 @@ def test_a_correlated_lineage_adds_almost_nothing_and_an_independent_one_its_cou
     def gate(series) -> dict[str, object]:
         return verdict.freeze_gate(
             nominee,
+            rules=AcceptanceRules(),
             trials=1,
             trial_analyses=[nominee],
             lineage_trials=len(series),
@@ -290,13 +292,14 @@ def test_the_recorded_lineage_joins_the_family_and_outlives_its_arms(tmp_path: P
     shutil.rmtree(first)
     shutil.rmtree(second)
     records = ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl").read()
-    dsr = freeze_gate_for(records, own, own[1], experiment_dir=arm)["deflated_sharpe"]
+    dsr = freeze_gate_for(records, own, own[1], experiment_dir=arm, acceptance=AcceptanceRules())["deflated_sharpe"]
     assert dsr["lineage_arms"] == ["first", "second"]
     assert (dsr["trials"], dsr["host_trials"], dsr["offline_trials"], dsr["lineage_trials"]) == (9, 2, 1, 6)
     assert dsr["controls"] == 1
     # The same formula and series as if every trial were the arm's own.
     direct = verdict.freeze_gate(
         _analysis(own[1]),
+        rules=AcceptanceRules(),
         trials=2 + 3,
         offline_trials=1 + 3,
         trial_analyses=[_analysis(own[1]), _analysis(own[2]), *lineage_analyses],
@@ -453,7 +456,7 @@ def test_the_console_listing_counts_the_lineage_as_the_gate_does(tmp_path: Path)
         }
     )
     best = _research_best(arm, ledger.read())
-    dsr = freeze_gate_for(ledger.read(), own, own[1], experiment_dir=arm)["deflated_sharpe"]
+    dsr = freeze_gate_for(ledger.read(), own, own[1], experiment_dir=arm, acceptance=AcceptanceRules())["deflated_sharpe"]
     assert dsr["lineage_trials"] == 2
     assert best["step_id"] == own[1]["step_id"]
     assert best["trials"] == dsr["trials"] == 5

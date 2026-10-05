@@ -96,15 +96,40 @@ def test_the_audit_entrypoint_assembles_through_the_shared_builder() -> None:
 def test_the_audit_parser_exposes_every_create_time_gate() -> None:
     """The acceptance rules are stamped into ``params.json`` when the arm is
     created and nothing can move them afterwards, so a field the parser does
-    not expose pins every audited arm at its default. The parameter renderer
-    reads the fields themselves, so a missing flag can only fail loudly here
-    and at the entrypoint, never silently."""
+    not expose pins every audited arm at its default. The flags are read off
+    the rules' own fields: unset is ``None`` (the worker's default), a count
+    parses as an integer, a limit as a float and a condition as a switch."""
 
     parser = argparse.ArgumentParser()
     add_acceptance_arguments(parser)
-    assert set(vars(parser.parse_args([]))) == {
-        rule.name for rule in fields(AcceptanceRules)
+    unset = vars(parser.parse_args([]))
+    assert unset == {rule.name: None for rule in fields(AcceptanceRules)}
+    assert all(action.help for action in parser._actions)
+
+    chosen = parser.parse_args(
+        [
+            "--recency-months=3",
+            "--min-full-span-validations=4",
+            "--max-drawdown=0.3",
+            "--tracking-error-cap=0.08",
+            "--require-forward-plain-selection",
+            "--no-require-seed-replicates",
+        ]
+    )
+    named = {key: value for key, value in vars(chosen).items() if value is not None}
+    assert named == {
+        "recency_months": 3,
+        "min_full_span_validations": 4,
+        "max_drawdown": 0.3,
+        "tracking_error_cap": 0.08,
+        "require_forward_plain_selection": True,
+        "require_seed_replicates": False,
     }
+    assert type(chosen.recency_months) is int and type(chosen.max_drawdown) is float
+    # The rules accept what the parser hands them.
+    AcceptanceRules(**{"beta_min": 0.85, "beta_max": 1.15, **named})
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--recency-months=2.5"])
 
 
 def test_the_compaction_gateway_is_built_without_provider_retries(

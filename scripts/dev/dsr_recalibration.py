@@ -342,7 +342,7 @@ def _arm_rates(task: tuple[str, int, int]) -> dict | None:
     )
     n_eff = verdict.effective_trials(k_new, rho)
     te0 = float(np.std(y[:, 0], ddof=1)) * math.sqrt(TRADING_DAYS_PER_YEAR)
-    kwargs = {"active_max_drawdown": AcceptanceRules().active_max_drawdown}
+    rules = AcceptanceRules()
     counts = {key: 0 for key in RATE_KEYS}
     for _ in range(draws):
         starts = rng.integers(0, len(dates) - BLOCK + 1, size=-(-len(dates) // BLOCK))
@@ -356,7 +356,7 @@ def _arm_rates(task: tuple[str, int, int]) -> dict | None:
             irs = _ir(ya, bb, sb)
             best = int(np.argmax(irs[:k_new]))
             nominee = _analysis(dates, ya[:, best], bb, sb)
-            gate = verdict.freeze_gate(nominee, trials=k_new, full_span_validations=k_all, years=years, **kwargs)
+            gate = verdict.freeze_gate(nominee, rules=rules, trials=k_new, full_span_validations=k_all, years=years)
             if [r for r in gate["reasons"] if r not in DSR_REASONS]:
                 continue
             null = gate["deflated_sharpe"]["trial_sharpe_std"]
@@ -368,7 +368,7 @@ def _arm_rates(task: tuple[str, int, int]) -> dict | None:
                 counts["old_nc"] += _dsr(nominee, trials=k_new, dispersion=float(np.std(irs[:k_new], ddof=1))) >= FORMER_THRESHOLD
         for drift, keys in ((0.0, ("old1", "new1")), (te0 / TRADING_DAYS_PER_YEAR, ("oldp", "newp"))):
             single = _analysis(dates, yb[:, 0] + drift, bb, sb)
-            gate = verdict.freeze_gate(single, trials=4, full_span_validations=4, years=years, **kwargs)
+            gate = verdict.freeze_gate(single, rules=rules, trials=4, full_span_validations=4, years=years)
             if not [r for r in gate["reasons"] if r not in DSR_REASONS]:
                 current = gate["deflated_sharpe"]["deflated_sharpe_probability"] or 0.0
                 for t in CURRENT_THRESHOLDS:

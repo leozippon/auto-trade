@@ -92,7 +92,6 @@ from _bootstrap import add_repo_src
 
 REPO_ROOT = add_repo_src(__file__)
 
-from autotrade.environment.broker import BrokerProfile
 from autotrade.pipelines.config import (
     SNAPSHOT_CACHE_FORMAT_VERSION,
     AcceptanceRules,
@@ -100,6 +99,7 @@ from autotrade.pipelines.config import (
 )
 from autotrade.pipelines.experiment import lineage_summary
 from autotrade.pipelines.hitl_state import (
+    CREATION_STAMPS,
     WEB_CLOSED_PARAMS,
     WEB_CREATE_DEFAULTS,
     WEB_INTERNAL_PARAMS,
@@ -158,7 +158,8 @@ BASE_EXPECTED_DEFAULTS: dict[str, object] = {
     "nl_model": "qwen-3.8-27b-fp8",
     "compact_model": "qwen-3.8-27b-fp8",
     # The rule set: every rule the console stamps on a new arm although an arm
-    # recorded without it keeps being judged without it (`creation_stamps`).
+    # recorded without it keeps being judged without it
+    # (`hitl_state.CREATION_STAMPS`).
     # A round's queued arms are created days after its first ones, so a change
     # here, or a rule the console starts stamping that is missing here, would
     # let a pair straddle two rule sets; both stop the launcher until the round
@@ -290,21 +291,6 @@ def archived_ids() -> set[str]:
         if batch.is_dir() and not batch.is_symlink()
         for arm in batch.iterdir()
         if arm.is_dir() and not arm.is_symlink()
-    }
-
-
-def creation_stamps() -> set[str]:
-    """The rules the console turns on for a new arm only.
-
-    Every acceptance rule, and the Broker's dividend tax, whose creation
-    default differs from the default an arm recorded without the key is read
-    with: those keys are what distinguishes one rule set from the next.
-    """
-    own = {**AcceptanceRules().to_record(), "dividend_tax": BrokerProfile().dividend_tax}
-    return {
-        key
-        for key, value in own.items()
-        if WEB_CREATE_DEFAULTS[key] is not None and WEB_CREATE_DEFAULTS[key] != value
     }
 
 
@@ -498,7 +484,7 @@ class Round:
         }
         # A rule the console newly stamps moves a queued arm as much as a
         # changed default does, so one nobody pinned or decided is drift too.
-        undecided = creation_stamps() - set(BASE_EXPECTED_DEFAULTS) - set(self.common_overrides)
+        undecided = set(CREATION_STAMPS) - set(BASE_EXPECTED_DEFAULTS) - set(self.common_overrides)
         drift.update({key: ("undecided", WEB_CREATE_DEFAULTS[key]) for key in sorted(undecided)})
         if drift:
             raise SystemExit(

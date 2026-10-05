@@ -1,6 +1,7 @@
 """Verdict statistics of one arm: freeze gate, forward verdict, Held-out rule.
 
-Pure functions over frozen replay data (PL1 §3.3 and §4). The statistical
+Pure functions over frozen replay data (docs/pipeline-design.md: the freeze
+gate and the graduation verdict). The statistical
 return figures are the neutralised excess of ``environment/replay/style.py``: a
 daily return series regressed on the arm's benchmark and the replay size factor,
 the intercept annualised over ``TRADING_DAYS_PER_YEAR``. The holder's readings
@@ -26,9 +27,10 @@ The bootstrap needs thousands of refits, so the same normal equations run
 vectorised in :func:`_fit`; one test pins it to the style figure.
 
 The statistical definitions live here (DSR, the block bootstrap, the panel).
-The freeze, forward and Held-out bars are create-time parameters the caller
-passes (``config.AcceptanceRules``); the module constants below are the
-defaults those fields take when a record omits them. A slice that cannot be
+The freeze, forward and Held-out bars are the arm's create-time rules, which
+every stage function takes whole (``rules``: a ``config.AcceptanceRules``);
+the module constants below are the defaults those fields take when a record
+omits them, and nothing here falls back to them. A slice that cannot be
 measured (too few days with both factors, collinear factors, a slice shorter
 than one bootstrap block) raises ``ValueError``: a verdict must never be read
 off a number that was not measured.
@@ -41,7 +43,7 @@ import itertools
 import math
 from collections.abc import Mapping, Sequence
 from statistics import NormalDist
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -58,11 +60,15 @@ from autotrade.environment.replay.style import (
     window_neutralized_excess,
 )
 
-# Freeze gate (PL1 §4.1), calibrated on its zero-skill pass rate and its power,
-# not on the record of earlier freezes (``scripts/dev/dsr_recalibration.py``).
-# The forward test alone passes zero skill about 15 % of the time, so an arm's
-# protection against a false graduate when several arms share one forward
-# window is this gate.
+if TYPE_CHECKING:
+    # ``config`` reads this module's constants for its defaults.
+    from .config import AcceptanceRules
+
+# Freeze gate (docs/pipeline-design.md), calibrated on its zero-skill pass rate
+# and its power, not on the record of earlier freezes
+# (``scripts/dev/dsr_recalibration.py``). The forward test alone passes zero
+# skill about 15 % of the time, so an arm's protection against a false
+# graduate when several arms share one forward window is this gate.
 FREEZE_MIN_ACTIVE_IR = 0.75
 # Active neutralised excess positive in three of four research years; another
 # research length keeps the share, rounded up.
@@ -81,20 +87,21 @@ FREEZE_MIN_POSITIVE_YEAR_SHARE = 0.75
 # discarded forward).
 FREEZE_MIN_DSR_PROBABILITY = 0.975
 FREEZE_MIN_FULL_SPAN_VALIDATIONS = 2
-# Forward verdict (PL1 §4.2).
+# Forward verdict (docs/pipeline-design.md, the graduation verdict).
 FORWARD_CONFIDENCE = 0.80
 BOOTSTRAP_BLOCK_DAYS = 20
 BOOTSTRAP_DRAWS = 2_000
 RECENCY_MONTHS = 6
 MIN_ROUND_TRIPS_PER_MONTH = 1
 MIN_MEAN_GROSS = 0.5
-# Held-out (PL1 §4.3): neutralised excess no worse than this many standard
-# errors, the standard error taken from the forward slice's tracking error.
+# Held-out: neutralised excess no worse than this many standard errors, the
+# standard error taken from the forward slice's tracking error.
 HELDOUT_TOLERANCE_Z = 1.28
 # Minimum detectable annualised neutralised excess at 80 % power and one-sided
-# 10 % (PL1 §2.1), in standard errors: Φ⁻¹(0.90) + Φ⁻¹(0.80) = 2.12. F2 itself
-# is a one-sided 20 % bound, so this is a deliberately conservative planning
-# figure (about 1.26 × the 1.68 the applied gate would give), not F2's own bar.
+# 10 % (the frozen block's ``forward_mde``), in standard errors:
+# Φ⁻¹(0.90) + Φ⁻¹(0.80) = 2.12. F2 itself is a one-sided 20 % bound, so this
+# is a deliberately conservative planning figure (about 1.26 × the 1.68 the
+# applied gate would give), not F2's own bar.
 FORWARD_MDE_Z = 2.12
 
 _EULER_MASCHERONI = 0.5772156649015329
@@ -250,17 +257,11 @@ def neutralized_statistics(
 
 
 def _mandate(
-    analysis: Mapping[str, object],
-    start: str,
-    end: str,
-    *,
-    tracking_error_cap: float | None,
-    beta_min: float | None,
-    beta_max: float | None,
+    analysis: Mapping[str, object], start: str, end: str, rules: AcceptanceRules
 ) -> tuple[dict[str, object], list[str]]:
     """The strategy's own tracking error and beta against its benchmark over a span,
-    and which limits of a tracking mandate they break (none when no cap is set:
-    the two figures are then reported, not graded)."""
+    and which limits of the rules' tracking mandate they break (none when no
+    cap is set: the two figures are then reported, not graded)."""
 
     own = _measured(analysis, start, end)[0]
     block = {
@@ -268,19 +269,17 @@ def _mandate(
         "market_beta": own["market_beta"],
     }
     broken: list[str] = []
-    if tracking_error_cap is not None:
-        if beta_min is None or beta_max is None:
-            raise ValueError("a tracking mandate needs its beta band")
-        if not own["tracking_error"] <= tracking_error_cap:
+    if rules.tracking_error_cap is not None:
+        if not own["tracking_error"] <= rules.tracking_error_cap:
             broken.append("tracking_error_above_cap")
-        if not beta_min <= own["market_beta"] <= beta_max:
+        if not rules.beta_min <= own["market_beta"] <= rules.beta_max:  # type: ignore[operator]
             broken.append("beta_outside_band")
     return block, broken
 
 
 def forward_mde(tracking_error: float, forward_days: int) -> float:
     """Smallest annualised neutralised excess a forward test of
-    ``forward_days`` detects at 80 % power (PL1 §2.1)."""
+    ``forward_days`` detects at 80 % power (``FORWARD_MDE_Z``)."""
 
     return (
         FORWARD_MDE_Z * tracking_error / math.sqrt(forward_days / TRADING_DAYS_PER_YEAR)
@@ -723,6 +722,7 @@ def trial_family_statistics(
 def freeze_gate(
     analysis: Mapping[str, object],
     *,
+    rules: AcceptanceRules,
     trials: int,
     full_span_validations: int,
     offline_trials: int = 0,
@@ -730,19 +730,10 @@ def freeze_gate(
     lineage_trials: int = 0,
     lineage_series: Sequence[Mapping[str, float]] = (),
     years: Sequence[tuple[str, str]] = (),
-    active_max_drawdown: float | None = None,
-    tracking_error_cap: float | None = None,
-    beta_min: float | None = None,
-    beta_max: float | None = None,
-    min_active_ir: float = FREEZE_MIN_ACTIVE_IR,
-    min_dsr_probability: float = FREEZE_MIN_DSR_PROBABILITY,
-    min_positive_year_share: float = FREEZE_MIN_POSITIVE_YEAR_SHARE,
-    min_full_span_validations: int = FREEZE_MIN_FULL_SPAN_VALIDATIONS,
     summary: Mapping[str, object] | None = None,
-    cost_stress_multiplier: float = 2.0,
-    require_raw_excess_at_cost_stress: bool = False,
 ) -> dict[str, object]:
-    """Freeze gate of one nominee (PL1 §4.1).
+    """Freeze gate of one nominee under the arm's ``rules``
+    (docs/pipeline-design.md).
 
     ``analysis`` is the nominee's full-span validation sidecar, read whole.
     The deflated Sharpe deflates over the arm's trial family
@@ -757,8 +748,9 @@ def freeze_gate(
     of an IR over the nominee's own measured days (:func:`null_sharpe_std`), so
     neither controls nor near-copies of the nominee move the bar through it.
     ``information_ratio_bar`` is the research IR at which the probability
-    reaches ``min_dsr_probability`` for normal returns, √V·(E[max] + Φ⁻¹(p));
-    the nominee's own skew and kurtosis move the applied bar by hundredths.
+    reaches ``rules.min_dsr_probability`` for normal returns,
+    √V·(E[max] + Φ⁻¹(p)); the nominee's own skew and kurtosis move the applied
+    bar by hundredths.
 
     ``full_span_validations`` counts the arm's measurable full-span
     validations, controls included; ``years`` are the research years'
@@ -774,10 +766,7 @@ def freeze_gate(
     record carry that reading and the multiplier, so the gate of an arm whose
     rules lack the condition reads exactly as before. The
     equity drawdown is the caller's hard nomination rule
-    (``config.AcceptanceRules.evaluate``). The statistical bars default to the
-    module constants so a caller that omits them (the console reading an arm's
-    best-node DSR) judges as today. A drawdown or mandate left at ``None`` is
-    not judged.
+    (``config.AcceptanceRules.evaluate``).
     """
 
     family = trial_family_statistics(
@@ -801,7 +790,7 @@ def freeze_gate(
             returns=neutral,
         ),
         "information_ratio_bar": information_ratio_bar(
-            effective, int(statistics["days"]), min_dsr_probability
+            effective, int(statistics["days"]), rules.min_dsr_probability
         ),
     }
     year_excess = [
@@ -809,37 +798,30 @@ def freeze_gate(
         for start, end in (_span(*year) for year in years)
     ]
     positive_years = sum(1 for value in year_excess if value is not None and value > 0)
-    min_positive_years = math.ceil(min_positive_year_share * len(year_excess))
+    min_positive_years = math.ceil(rules.min_positive_year_share * len(year_excess))
     active_drawdown = _max_slice_drawdown(graded, "", "")
-    mandate, broken = _mandate(
-        analysis,
-        "",
-        "",
-        tracking_error_cap=tracking_error_cap,
-        beta_min=beta_min,
-        beta_max=beta_max,
-    )
+    mandate, broken = _mandate(analysis, "", "", rules)
     reasons: list[str] = []
-    if full_span_validations < min_full_span_validations:
+    if full_span_validations < rules.min_full_span_validations:
         reasons.append("freeze_too_few_full_span_validations")
     ratio = statistics["information_ratio"]
-    if ratio is None or not ratio >= min_active_ir:
+    if ratio is None or not ratio >= rules.min_active_ir:
         reasons.append("freeze_information_ratio_below_threshold")
     probability = dsr["deflated_sharpe_probability"]
     if not isinstance(probability, float):
         reasons.append("freeze_deflated_sharpe_unavailable")
-    elif probability < min_dsr_probability:
+    elif probability < rules.min_dsr_probability:
         reasons.append("freeze_deflated_sharpe_below_threshold")
     if positive_years < min_positive_years:
         reasons.append("freeze_too_few_positive_years")
-    if active_max_drawdown is not None and not active_drawdown <= active_max_drawdown:
+    if not active_drawdown <= rules.active_max_drawdown:
         reasons.append("freeze_active_drawdown_exceeded")
     raw: dict[str, object] = {}
-    if require_raw_excess_at_cost_stress:
+    if rules.require_raw_excess_at_cost_stress:
         if summary is None:
             raise ValueError("the raw cost-stress condition needs the nominee's summary")
         stressed = raw_excess_at_cost_stress(
-            summary, cost_stress_multiplier=cost_stress_multiplier
+            summary, cost_stress_multiplier=rules.cost_stress_multiplier
         )
         if stressed is None or not stressed > 0:
             reasons.append("freeze_raw_excess_not_positive_at_cost_stress")
@@ -858,17 +840,15 @@ def freeze_gate(
         "deflated_sharpe": dsr,
         **raw,
         "thresholds": {
-            "min_information_ratio": min_active_ir,
-            "min_deflated_sharpe_probability": min_dsr_probability,
-            "min_full_span_validations": min_full_span_validations,
+            "min_information_ratio": rules.min_active_ir,
+            "min_deflated_sharpe_probability": rules.min_dsr_probability,
+            "min_full_span_validations": rules.min_full_span_validations,
             "min_positive_years": min_positive_years,
             "research_years": len(year_excess),
-            "active_max_drawdown": active_max_drawdown,
-            "tracking_error_cap": tracking_error_cap,
-            "beta_min": beta_min,
-            "beta_max": beta_max,
+            "active_max_drawdown": rules.active_max_drawdown,
+            **rules.mandate,
             "panel_draws": PANEL_DRAWS,
-            **({"cost_stress_multiplier": cost_stress_multiplier} if raw else {}),
+            **({"cost_stress_multiplier": rules.cost_stress_multiplier} if raw else {}),
         },
     }
 
@@ -886,9 +866,7 @@ def freeze_gate(
 _BOOTSTRAP_BATCH_BYTES = 128 * 1024
 
 
-def _bootstrap_lower_bound(
-    rows: np.ndarray, seed_key: str, *, confidence: float = FORWARD_CONFIDENCE
-) -> float:
+def _bootstrap_lower_bound(rows: np.ndarray, seed_key: str, *, confidence: float) -> float:
     """One-sided ``confidence`` lower bound of the annualised intercept.
 
     Moving-block bootstrap: ``BOOTSTRAP_DRAWS`` resamples of whole rows in
@@ -939,28 +917,18 @@ def _month_index(date: str) -> int:
 def forward_slice(
     analysis: Mapping[str, object],
     *,
+    rules: AcceptanceRules,
     start: str,
     end: str,
     seed_key: str,
-    max_drawdown: float,
-    active_max_drawdown: float,
-    cost_stress_multiplier: float,
     slippage_bps: float,
     turnover: float,
     round_trips: int,
     mean_gross: float,
-    tracking_error_cap: float | None = None,
-    beta_min: float | None = None,
-    beta_max: float | None = None,
-    forward_confidence: float = FORWARD_CONFIDENCE,
-    recency_months: int = RECENCY_MONTHS,
-    min_mean_gross: float = MIN_MEAN_GROSS,
-    min_round_trips_per_month: float = MIN_ROUND_TRIPS_PER_MONTH,
-    require_forward_plain_selection: bool = False,
-    require_seed_replicates: bool = False,
     seed_replicates: Sequence[Mapping[str, object]] = (),
 ) -> dict[str, object]:
-    """Statistics and failed conditions F2–F9 of the forward slice (PL1 §4.2).
+    """Statistics and failed conditions F2–F9 of the forward slice under the
+    arm's ``rules`` (docs/pipeline-design.md, the graduation verdict).
 
     The lower bound, the recency window, the cost stress and
     ``active_max_drawdown`` are read off the graded series; ``max_drawdown``
@@ -986,8 +954,7 @@ def forward_slice(
     replay; ``slippage_bps`` is the Broker profile's. The cost stress charges
     ``(cost_stress_multiplier − 1) × slippage_bps × turnover × 1e−4``,
     annualised over the slice's measured days, against the neutralised excess.
-    F1 (strategy error) is :func:`graduation_verdict`'s. The statistical bars
-    default to the module constants so a caller that omits them judges as today.
+    F1 (strategy error) is :func:`graduation_verdict`'s.
     """
 
     start, end = _span(start, end)
@@ -1004,8 +971,8 @@ def forward_slice(
         )
     graded, series = _graded(analysis)
     statistics, rows, _neutral = _measured(graded, start, end)
-    lower_bound = _bootstrap_lower_bound(rows, seed_key, confidence=forward_confidence)
-    recency_month = _month_index(end) - (recency_months - 1)
+    lower_bound = _bootstrap_lower_bound(rows, seed_key, confidence=rules.forward_confidence)
+    recency_month = _month_index(end) - (rules.recency_months - 1)
     recency_start = f"{recency_month // 12:04d}{recency_month % 12 + 1:02d}01"
     recency_excess = window_neutralized_excess(
         graded, start=max(start, recency_start), end=end
@@ -1016,23 +983,16 @@ def forward_slice(
         )
     drawdown = _max_slice_drawdown(analysis, start, end)
     active_drawdown = _max_slice_drawdown(graded, start, end)
-    mandate, broken = _mandate(
-        analysis,
-        start,
-        end,
-        tracking_error_cap=tracking_error_cap,
-        beta_min=beta_min,
-        beta_max=beta_max,
-    )
+    mandate, broken = _mandate(analysis, start, end, rules)
     stressed_excess = excess_at_cost_stress(
         statistics["neutralized_excess"],
         len(rows),
-        cost_stress_multiplier=cost_stress_multiplier,
+        cost_stress_multiplier=rules.cost_stress_multiplier,
         slippage_bps=slippage_bps,
         turnover=turnover,
     )
     months = _month_index(end) - _month_index(start) + 1
-    min_round_trips = min_round_trips_per_month * months
+    min_round_trips = rules.min_round_trips_per_month * months
     readings = slice_readings(analysis, start=start, end=end)
 
     reasons: list[str] = []
@@ -1040,23 +1000,23 @@ def forward_slice(
         reasons.append("forward_lower_bound_not_positive")
     if not recency_excess >= 0:
         reasons.append("forward_recency_negative")
-    if not drawdown <= max_drawdown:
+    if not drawdown <= rules.max_drawdown:
         reasons.append("forward_max_drawdown_exceeded")
-    if not active_drawdown <= active_max_drawdown:
+    if not active_drawdown <= rules.active_max_drawdown:
         reasons.append("forward_active_drawdown_exceeded")
     if not stressed_excess > 0:
         reasons.append("forward_not_positive_at_cost_stress")
     if round_trips < min_round_trips:
         reasons.append("forward_too_few_round_trips")
-    if not mean_gross >= min_mean_gross:
+    if not mean_gross >= rules.min_mean_gross:
         reasons.append("forward_exposure_below_floor")
     reasons.extend(f"forward_{name}" for name in broken)
-    if require_forward_plain_selection:
+    if rules.require_forward_plain_selection:
         # No panel, no plain selection: an unmeasured reading never passes.
         selection = readings["raw_readings"]["plain_selection"]  # type: ignore[index]
         if selection is None or not selection > 0:
             reasons.append("forward_plain_selection_not_positive")
-    if seed_replicates and not require_seed_replicates:
+    if seed_replicates and not rules.require_seed_replicates:
         raise ValueError("seed replicates were given under rules that hold no seed condition")
     seeds: dict[str, object] = {}
     if seed_replicates:
@@ -1084,25 +1044,23 @@ def forward_slice(
         "mean_gross": mean_gross,
         "reasons": reasons,
         "thresholds": {
-            "forward_confidence": forward_confidence,
+            "forward_confidence": rules.forward_confidence,
             "bootstrap_block_days": BOOTSTRAP_BLOCK_DAYS,
             "bootstrap_draws": BOOTSTRAP_DRAWS,
-            "recency_months": recency_months,
-            "max_drawdown": max_drawdown,
-            "active_max_drawdown": active_max_drawdown,
-            "tracking_error_cap": tracking_error_cap,
-            "beta_min": beta_min,
-            "beta_max": beta_max,
+            "recency_months": rules.recency_months,
+            "max_drawdown": rules.max_drawdown,
+            "active_max_drawdown": rules.active_max_drawdown,
+            **rules.mandate,
             "panel_draws": PANEL_DRAWS,
-            "cost_stress_multiplier": cost_stress_multiplier,
+            "cost_stress_multiplier": rules.cost_stress_multiplier,
             "min_round_trips": min_round_trips,
-            "min_mean_gross": min_mean_gross,
+            "min_mean_gross": rules.min_mean_gross,
             **(
                 {"require_forward_plain_selection": True}
-                if require_forward_plain_selection
+                if rules.require_forward_plain_selection
                 else {}
             ),
-            **({"require_seed_replicates": True} if require_seed_replicates else {}),
+            **({"require_seed_replicates": True} if rules.require_seed_replicates else {}),
         },
     }
 
@@ -1110,25 +1068,22 @@ def forward_slice(
 def heldout_slice(
     analysis: Mapping[str, object],
     *,
+    rules: AcceptanceRules,
     start: str,
     end: str,
     forward_tracking_error: float,
-    max_drawdown: float,
-    active_max_drawdown: float,
     mean_gross: float,
-    min_mean_gross: float = MIN_MEAN_GROSS,
-    heldout_tolerance_z: float = HELDOUT_TOLERANCE_Z,
     seed_replicates: Sequence[Mapping[str, object]] = (),
 ) -> dict[str, object]:
-    """Statistics and failed conditions H2–H4 of the Held-out slice (PL1 §4.3).
+    """Statistics and failed conditions H2–H4 of the Held-out slice under the
+    arm's ``rules`` (docs/pipeline-design.md, the graduation verdict).
 
     Non-catastrophic only: the graded neutralised excess must be at least
     −``heldout_tolerance_z`` × ``forward_tracking_error`` / √(measured years),
     the equity drawdown within ``max_drawdown``, the graded series' drawdown
     within ``active_max_drawdown`` and the mean gross exposure at least
     ``min_mean_gross``. H1 (strategy error) is :func:`graduation_verdict`'s.
-    The statistical bars default to the module constants so a caller that
-    omits them judges as today. The holder's readings
+    The holder's readings
     (:func:`slice_readings`) are reported, not judged; so are the seed
     replicates' slices and their :func:`seed_mean` with the book, which the
     slice carries as :func:`forward_slice` does.
@@ -1142,7 +1097,7 @@ def heldout_slice(
     graded, series = _graded(analysis)
     statistics, rows, _neutral = _measured(graded, start, end)
     tolerance = (
-        -heldout_tolerance_z
+        -rules.heldout_tolerance_z
         * forward_tracking_error
         / math.sqrt(len(rows) / TRADING_DAYS_PER_YEAR)
     )
@@ -1152,11 +1107,11 @@ def heldout_slice(
     reasons: list[str] = []
     if not statistics["neutralized_excess"] >= tolerance:
         reasons.append("heldout_excess_below_tolerance")
-    if not drawdown <= max_drawdown:
+    if not drawdown <= rules.max_drawdown:
         reasons.append("heldout_max_drawdown_exceeded")
-    if not active_drawdown <= active_max_drawdown:
+    if not active_drawdown <= rules.active_max_drawdown:
         reasons.append("heldout_active_drawdown_exceeded")
-    if not mean_gross >= min_mean_gross:
+    if not mean_gross >= rules.min_mean_gross:
         reasons.append("heldout_exposure_below_floor")
     readings = slice_readings(analysis, start=start, end=end)
     return {
@@ -1179,10 +1134,10 @@ def heldout_slice(
         "mean_gross": mean_gross,
         "reasons": reasons,
         "thresholds": {
-            "heldout_tolerance_z": heldout_tolerance_z,
-            "max_drawdown": max_drawdown,
-            "active_max_drawdown": active_max_drawdown,
-            "min_mean_gross": min_mean_gross,
+            "heldout_tolerance_z": rules.heldout_tolerance_z,
+            "max_drawdown": rules.max_drawdown,
+            "active_max_drawdown": rules.active_max_drawdown,
+            "min_mean_gross": rules.min_mean_gross,
         },
     }
 

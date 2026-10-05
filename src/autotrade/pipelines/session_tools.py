@@ -769,31 +769,24 @@ class SessionValidations:
         if any(step_id not in rows for step_id in (node_id, *seed_replicates)):
             return {"passed": False, "reasons": ["freeze_needs_a_step_of_this_session"]}
         nominee = rows[node_id]
-        rules = self.acceptance
+        rules = self.rules
         return freeze_gate_for(
             self.ledger.read(),
             list(rows.values()),
             nominee,
             experiment_dir=self.experiment_dir,
-            hard_reasons=(
-                rules.evaluate(dict(nominee["summary"]))  # type: ignore[arg-type]
-                if rules is not None
-                else []
-            ),
             acceptance=rules,
+            hard_reasons=rules.evaluate(dict(nominee["summary"])),  # type: ignore[arg-type]
             years=[(year.start, year.end) for year in self.request.research_years],
             seed_replicates=[rows[step_id] for step_id in seed_replicates],
         )
 
     @property
-    def acceptance(self) -> AcceptanceRules | None:
-        """The run's acceptance rules; ``None`` when the request carries none."""
+    def rules(self) -> AcceptanceRules:
+        """The run's acceptance rules. A request that states none is judged
+        under the rules' own defaults, as a record that omits a key is."""
 
-        return (
-            AcceptanceRules.from_record(self.request.acceptance_rules)
-            if self.request.acceptance_rules
-            else None
-        )
+        return AcceptanceRules.from_record(self.request.acceptance_rules)
 
     def nominee_bar(self) -> dict[str, object]:
         """The trials, effective trials and active-IR bar a full-span nominee
@@ -810,7 +803,7 @@ class SessionValidations:
                     [research_step_record(item) for item in self.steps],
                     experiment_dir=self.experiment_dir,
                     research_years=len(self.request.research_years),
-                    acceptance=self.acceptance,
+                    acceptance=self.rules,
                 ),
             )
         return self._full_span_bar[1]
@@ -848,12 +841,6 @@ class SessionValidations:
             "graduation_activity": self.graduation_activity(step),
             "note": SELECTION_STATISTICS_NOTE if measured else UNMEASURED_SELECTION_NOTE,
         }
-
-    @property
-    def rules(self) -> AcceptanceRules:
-        """The run's acceptance rules, or the defaults when the request carries none."""
-
-        return self.acceptance or AcceptanceRules()
 
     def graduation_activity(self, step: StepResult) -> dict[str, object]:
         """One node's readings of the graduation's activity and cost-stress

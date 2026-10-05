@@ -2422,7 +2422,9 @@ class RecordedValidationDurabilityTest(unittest.TestCase):
             )
             # The formerly flagged leg is a trial again; the declared batch
             # still counts its screens once.
-            gate = freeze_gate_for([], rows, rows[0], experiment_dir=experiment)
+            gate = freeze_gate_for(
+                [], rows, rows[0], experiment_dir=experiment, acceptance=AcceptanceRules()
+            )
             dsr = gate["deflated_sharpe"]
             self.assertEqual(
                 (dsr["host_trials"], dsr["offline_trials"], dsr["trials"], dsr["controls"]),
@@ -2439,5 +2441,7 @@ class RecordedValidationDurabilityTest(unittest.TestCase):
                 }
                 for row in rows
             ]
-            dsr = freeze_gate_for([], legacy, legacy[0], experiment_dir=experiment)["deflated_sharpe"]
+            dsr = freeze_gate_for(
+                [], legacy, legacy[0], experiment_dir=experiment, acceptance=AcceptanceRules()
+            )["deflated_sharpe"]
             self.assertEqual((dsr["trials"], dsr["undeclared_offline_validations"]), (2, 2))

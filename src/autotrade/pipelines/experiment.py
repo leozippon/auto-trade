@@ -107,7 +107,6 @@ from .skills import (
     resolve_collected_skills_source,
 )
 from .verdict import (
-    FREEZE_MIN_DSR_PROBABILITY,
     effective_trials,
     forward_mde,
     forward_slice,
@@ -867,10 +866,10 @@ class RollingExperimentPipeline:
         )
         forward_block = forward_slice(
             analysis,
+            rules=acceptance,
             start=forward.start,
             end=forward.end,
             seed_key=artifact.artifact_id,
-            **acceptance.forward_slice_kwargs(),
             slippage_bps=self.config.broker_profile.slippage_bps,
             turnover=float(forward_activity["turnover"]),  # type: ignore[arg-type]
             round_trips=int(forward_activity["round_trips"]),  # type: ignore[arg-type]
@@ -879,10 +878,10 @@ class RollingExperimentPipeline:
         )
         heldout_block = heldout_slice(
             analysis,
+            rules=acceptance,
             start=heldout.start,
             end=heldout.end,
             forward_tracking_error=float(forward_block["tracking_error"]),  # type: ignore[arg-type]
-            **acceptance.heldout_slice_kwargs(),
             mean_gross=float(heldout_activity["mean_gross"]),  # type: ignore[arg-type]
             seed_replicates=replicate_slices["heldout"],
         )
@@ -1132,37 +1131,53 @@ def fingerprinted(
     ]
 
 
+def _arm_trials(
+    records: Sequence[Mapping[str, object]],
+    session_rows: Sequence[Mapping[str, object]],
+    experiment_dir: str | Path,
+) -> tuple[
+    list[Mapping[str, object]], dict[str, object], tuple[list[str], int, list[dict[str, float]]]
+]:
+    """What an arm's freeze gate deflates over: its Validation rows, earlier
+    sessions' recorded Steps and this session's alike, fingerprinted from the
+    revision store of the arm in ``experiment_dir`` where a row does not carry
+    it; their :func:`trial_family`; and the lineage the ledger records
+    (:func:`recorded_lineage`)."""
+
+    rows = fingerprinted(experiment_dir, [*_recorded_steps(records), *session_rows])
+    return rows, trial_family(rows), recorded_lineage(records)
+
+
 def freeze_gate_for(
     records: Sequence[Mapping[str, object]],
     session_rows: Sequence[Mapping[str, object]],
     nominee: Mapping[str, object],
     *,
     experiment_dir: str | Path,
+    acceptance: AcceptanceRules,
     hard_reasons: Sequence[str] = (),
-    acceptance: AcceptanceRules | None = None,
     years: Sequence[tuple[str, str]] = (),
     seed_replicates: Sequence[Mapping[str, object]] = (),
 ) -> dict[str, object]:
-    """The freeze gate of one nominated Step against the whole arm (PL1 §4.1).
+    """The freeze gate of one nominated Step against the whole arm
+    (docs/pipeline-design.md).
 
-    The trial family is :func:`trial_family` over earlier sessions' recorded
-    Steps and this session's alike, fingerprinted from the revision store of
-    the arm in ``experiment_dir`` where a row does not carry it, plus the
-    lineage the ledger records (:func:`recorded_lineage`); ρ̄ is read off each
+    The trial family is the arm's (:func:`_arm_trials`); ρ̄ is read off each
     trial's representative sidecar and the lineage's extracted series. The
     count of full-span validations takes every measurable one, controls
     included. A nominee that did not replay the full research period, was
     registered as a control, fails a hard nomination rule, or whose statistics
-    cannot be measured does not pass. ``acceptance`` and ``years`` are the
-    arm's rules and research years; the console leaves them out when it only
-    reads the deflated Sharpe of an arm's best node. Where the rules hold
+    cannot be measured does not pass. ``acceptance`` is the arm's rules,
+    ``hard_reasons`` what their ``evaluate`` refuses the nominee for and
+    ``years`` the research years; the console, which reads only the deflated
+    Sharpe of an arm's best node, passes the default rules and leaves the
+    other two out. Where the rules hold
     ``require_seed_replicates`` the measured gate also judges the nominee's
     ``seed_replicates`` (rows of this session; :func:`_seed_replicate_gate`);
     naming any under rules that do not hold it is refused.
     """
 
-    holds_seeds = acceptance is not None and acceptance.require_seed_replicates
-    if seed_replicates and not holds_seeds:
+    if seed_replicates and not acceptance.require_seed_replicates:
         raise ValueError("this arm's acceptance rules hold no seed-replicate condition")
     reasons = list(hard_reasons)
     if nominee.get("span") != FULL_SPAN:
@@ -1171,14 +1186,15 @@ def freeze_gate_for(
         reasons.append("freeze_nominee_is_control")
     if reasons:
         return {"passed": False, "reasons": reasons}
-    rows = fingerprinted(experiment_dir, [*_recorded_steps(records), *session_rows])
-    family = trial_family(rows)
+    rows, family, (lineage_arms, lineage_trials, lineage_series) = _arm_trials(
+        records, session_rows, experiment_dir
+    )
     representatives: list[Mapping[str, object]] = family["representatives"]  # type: ignore[assignment]
-    lineage_arms, lineage_trials, lineage_series = recorded_lineage(records)
     summary = nominee.get("summary")
     try:
         gate = freeze_gate(
             _style_analysis(nominee),
+            rules=acceptance,
             trials=len(representatives),
             offline_trials=family["offline_trials"],  # type: ignore[arg-type]
             trial_analyses=[_style_analysis(row) for row in representatives],
@@ -1191,7 +1207,6 @@ def freeze_gate_for(
             ),
             years=years,
             summary=summary if isinstance(summary, Mapping) else None,
-            **(acceptance.freeze_gate_kwargs() if acceptance is not None else {}),
         )
     except ValueError as exc:
         return {"passed": False, "reasons": ["freeze_unmeasurable"], "error": str(exc)}
@@ -1201,7 +1216,7 @@ def freeze_gate_for(
         "undeclared_offline_validations": family["undeclared_offline_validations"],
         "lineage_arms": lineage_arms,
     }
-    if holds_seeds:
+    if acceptance.require_seed_replicates:
         gate = _seed_replicate_gate(
             gate,
             fingerprinted(experiment_dir, [nominee])[0],
@@ -1369,24 +1384,24 @@ def full_span_bar(
     *,
     experiment_dir: str | Path,
     research_years: int,
-    acceptance: AcceptanceRules | None = None,
+    acceptance: AcceptanceRules,
 ) -> dict[str, object]:
     """The trial count, effective count and active-IR bar a full-span,
     non-control nominee faces now, for the rows :func:`freeze_gate_for`
     refuses before measuring (a sub-span, a control, a hard rule broken).
 
-    The family is the one the gate deflates over (the same rows, fingerprints
-    and lineage); it holds at least the nominee itself. The bar is the gate's
+    The family is the one the gate deflates over (:func:`_arm_trials`); it
+    holds at least the nominee itself. The bar is the gate's
     ``information_ratio_bar`` at that N_eff over a full research period: the
     days the arm's full-span Validations measured, or ``TRADING_DAYS_PER_YEAR``
     per research year before there is one (8 years: 1,952 against the 1,940 a
     full span measures, a bar about 0.3 % lower). The gate itself is unchanged.
     """
 
-    rows = fingerprinted(experiment_dir, [*_recorded_steps(records), *session_rows])
-    family = trial_family(rows)
+    rows, family, (_arms, lineage_trials, lineage_series) = _arm_trials(
+        records, session_rows, experiment_dir
+    )
     representatives: list[Mapping[str, object]] = family["representatives"]  # type: ignore[assignment]
-    _arms, lineage_trials, lineage_series = recorded_lineage(records)
     statistics = trial_family_statistics(
         trials=max(len(representatives), 1),
         offline_trials=family["offline_trials"],  # type: ignore[arg-type]
@@ -1404,9 +1419,7 @@ def full_span_bar(
         "information_ratio_bar": information_ratio_bar(
             statistics["effective_trials"],  # type: ignore[arg-type]
             days,
-            acceptance.min_dsr_probability
-            if acceptance is not None
-            else FREEZE_MIN_DSR_PROBABILITY,
+            acceptance.min_dsr_probability,
         ),
     }
 

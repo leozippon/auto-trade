@@ -32,7 +32,7 @@ from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME, STYLE_SCHEMA
 from autotrade.environment.runtime import write_json_atomic
 from autotrade.pipelines.agent_inbox import INBOX_NAME, inbox_public_view
 from autotrade.pipelines.calendar import FULL_SPAN
-from autotrade.pipelines.config import acceptance_for
+from autotrade.pipelines.config import AcceptanceRules, acceptance_for
 from autotrade.pipelines.experiment import freeze_gate_for, neutralized
 from autotrade.pipelines.hitl_state import (
     CONTROL_NAME,
@@ -809,7 +809,10 @@ def _best_candidate(
         return None
     best = max(full, key=lambda row: float(row["neutralized"]["information_ratio"]))  # type: ignore[index]
     try:
-        gate = freeze_gate_for(earlier, steps, best, experiment_dir=directory)
+        # The deflated Sharpe and its trials do not depend on any threshold.
+        gate = freeze_gate_for(
+            earlier, steps, best, experiment_dir=directory, acceptance=AcceptanceRules()
+        )
     except (OSError, ValueError):
         gate = {}
     dsr = _mapping(gate.get("deflated_sharpe"))

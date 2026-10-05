@@ -39,6 +39,7 @@ from autotrade.pipelines.config import (
 )
 from autotrade.pipelines.experiment import lineage_ledger_record
 from autotrade.pipelines.hitl_state import (
+    CREATION_STAMPS,
     WEB_CREATE_DEFAULTS,
     StatusReporter,
     proc_start_ticks,
@@ -1333,17 +1334,9 @@ class WebuiBackendTest(unittest.TestCase):
             ("exp_tracked", {"tracking_error_cap": 0.08}),
             ("exp_tight_ir", {"min_active_ir": 1.1}),
         ):
-            # A new arm is held to the raw cost-stress condition and to plain
-            # selection forward by default; an arm recorded without the keys is
-            # not (``AcceptanceRules`` defaults).
-            expected = acceptance_for(
-                {
-                    "require_raw_excess_at_cost_stress": True,
-                    "require_forward_plain_selection": True,
-                    "require_seed_replicates": True,
-                    **request,
-                }
-            ).to_record()
+            # A new arm is held to every rule creation stamps on; an arm
+            # recorded without the keys is not (``AcceptanceRules`` defaults).
+            expected = acceptance_for({**CREATION_STAMPS, **request}).to_record()
             with (
                 patch.object(manager, "_preflight"),
                 patch.object(manager, "start_worker", return_value={"spawned": False}),

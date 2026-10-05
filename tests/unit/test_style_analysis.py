@@ -675,6 +675,7 @@ def test_the_sidecar_carries_the_panel_and_the_active_figures_the_verdict_grades
     measures: same regression, same tracking error, on strategy minus panel."""
     from autotrade.environment.replay.stats import attach_sub_window_benchmark
     from autotrade.environment.replay.style import active_analysis
+    from autotrade.pipelines.config import AcceptanceRules
     from autotrade.pipelines.verdict import freeze_gate, neutralized_statistics
 
     rng = np.random.default_rng(7)
@@ -743,7 +744,7 @@ def test_the_sidecar_carries_the_panel_and_the_active_figures_the_verdict_grades
     ]
     # The active drawdown the freeze gate holds to its limit is the one the
     # Agent reads: two sessions rebuilt it from proxies because no row had it.
-    gate = freeze_gate(graded, trials=1, full_span_validations=2)
+    gate = freeze_gate(graded, rules=AcceptanceRules(), trials=1, full_span_validations=2)
     assert compact["active_max_drawdown"] == gate["active_max_drawdown"]
     active_curve = np.concatenate(
         [[1.0], np.cumprod(1.0 + np.asarray(

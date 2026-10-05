@@ -1,4 +1,5 @@
-"""Verdict statistics: freeze gate, forward verdict, Held-out rule (PL1 §4)."""
+"""Verdict statistics: freeze gate, forward verdict, Held-out rule
+(docs/pipeline-design.md)."""
 
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ import pytest
 from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR
 from autotrade.environment.replay.style import window_neutralized_excess
 from autotrade.pipelines import verdict
+from autotrade.pipelines.config import ACCEPTANCE_KEYS, AcceptanceRules
 
 SCALE = math.sqrt(TRADING_DAYS_PER_YEAR)
 FORWARD_START, FORWARD_END = "20250701", "20260630"
@@ -57,21 +59,37 @@ def _analysis(*segments):
     }
 
 
+def _ruled(arguments):
+    """``arguments`` with the acceptance rules among them gathered into the
+    ``rules`` a stage function takes. Neither drawdown limits unless named,
+    so each test judges the condition it is about."""
+
+    named = {key: arguments.pop(key) for key in list(arguments) if key in ACCEPTANCE_KEYS}
+    rules = AcceptanceRules(**{"max_drawdown": 1.0, "active_max_drawdown": 1.0, **named})
+    return {**arguments, "rules": rules}
+
+
+def _gate(analysis, **arguments):
+    return verdict.freeze_gate(analysis, **_ruled(arguments))
+
+
+def _heldout(analysis, **overrides):
+    arguments = {"start": HELDOUT_START, "end": HELDOUT_END, "mean_gross": 1.0, **overrides}
+    return verdict.heldout_slice(analysis, **_ruled(arguments))
+
+
 def _forward(analysis, **overrides):
     arguments = {
         "start": FORWARD_START,
         "end": FORWARD_END,
         "seed_key": "artifact-1",
-        "max_drawdown": 1.0,
-        "active_max_drawdown": 1.0,
-        "cost_stress_multiplier": 2.0,
         "slippage_bps": 10.0,
         "turnover": 0.0,
         "round_trips": 12,
         "mean_gross": 1.0,
     }
     arguments.update(overrides)
-    return verdict.forward_slice(analysis, **arguments)
+    return verdict.forward_slice(analysis, **_ruled(arguments))
 
 
 def _split(days, boundary="20260101"):
@@ -131,7 +149,7 @@ def test_bootstrap_bound_is_fixed_by_the_artifact_id(monkeypatch):
 
 
 def test_forward_pass_rates_match_the_design_simulation():
-    """PL1 §4.2 at TE 13 %: nulls pass ≈ 0.18, a steady 8 %/yr edge ≈ 0.38.
+    """The design simulation at TE 13 %: nulls pass ≈ 0.18, a steady 8 %/yr edge ≈ 0.38.
 
     F4–F6 are held passing so only the bootstrap bound and the recency check
     decide; the bounds are loose around the design figures, the seeds fixed.
@@ -232,16 +250,7 @@ def test_heldout_tolerates_noise_but_not_a_collapse():
             _segment(FORWARD_DAYS, 0.10, rng),
             _segment(HELDOUT_DAYS, alpha, rng, te=0.05, exact=True),
         )
-        arguments = {
-            "start": HELDOUT_START,
-            "end": HELDOUT_END,
-            "forward_tracking_error": forward_te,
-            "max_drawdown": 1.0,
-            "active_max_drawdown": 1.0,
-            "mean_gross": 1.0,
-        }
-        arguments.update(overrides)
-        return verdict.heldout_slice(analysis, **arguments)
+        return _heldout(analysis, forward_tracking_error=forward_te, **overrides)
 
     inside = heldout(tolerance + 0.0003)
     assert inside["days"] == len(HELDOUT_DAYS) == 53
@@ -258,7 +267,7 @@ def test_heldout_tolerates_noise_but_not_a_collapse():
 
 
 def test_deflated_sharpe_reproduces_the_design_example():
-    """PL1 §3.3: N = 20, IR s.d. 0.3 → SR* ≈ 0.57; a 4-year IR of 0.6 → ≈ 0.52."""
+    """N = 20, IR s.d. 0.3 → SR* ≈ 0.57; a 4-year IR of 0.6 → ≈ 0.52."""
 
     returns = np.random.default_rng(61).normal(0.0, 0.01, 968)
     block = verdict.deflated_sharpe(
@@ -324,9 +333,7 @@ def test_the_freeze_gate_deflates_by_the_null_sampling_error_at_the_trial_count(
     null = math.sqrt(TRADING_DAYS_PER_YEAR / statistics["days"])
 
     def gate(trials, offline=0):
-        return verdict.freeze_gate(
-            analysis, trials=trials, offline_trials=offline, full_span_validations=2
-        )
+        return _gate(analysis, trials=trials, offline_trials=offline, full_span_validations=2)
 
     for trials in (1, 2, 5, 20):
         block = gate(trials)["deflated_sharpe"]
@@ -371,7 +378,7 @@ def test_the_freeze_gate_deflates_by_the_null_sampling_error_at_the_trial_count(
     assert failing["deflated_sharpe"]["deflated_sharpe_probability"] > 0.5
     assert failing["deflated_sharpe"]["information_ratio_bar"] > information_ratio
 
-    alone = verdict.freeze_gate(analysis, trials=1, full_span_validations=1)
+    alone = _gate(analysis, trials=1, full_span_validations=1)
     assert alone["reasons"] == ["freeze_too_few_full_span_validations"]
     for arguments in (
         {"trials": 0, "full_span_validations": 2},
@@ -379,7 +386,7 @@ def test_the_freeze_gate_deflates_by_the_null_sampling_error_at_the_trial_count(
         {"trials": 1, "full_span_validations": True},
     ):
         with pytest.raises(ValueError, match="must be an integer"):
-            verdict.freeze_gate(analysis, **arguments)
+            _gate(analysis, **arguments)
 
 
 def test_the_dispersion_does_not_depend_on_what_else_the_arm_validated():
@@ -413,9 +420,9 @@ def test_the_dispersion_does_not_depend_on_what_else_the_arm_validated():
     ]
     assert spreads[0] > 10 * spreads[1]
     readings = [
-        verdict.freeze_gate(
-            nominee, trials=3, trial_analyses=[nominee, *group], full_span_validations=3
-        )["deflated_sharpe"]
+        _gate(nominee, trials=3, trial_analyses=[nominee, *group], full_span_validations=3)[
+            "deflated_sharpe"
+        ]
         for group in (controls, copies)
     ]
     assert readings[0] == pytest.approx(readings[1])
@@ -440,9 +447,9 @@ def test_the_effective_trial_count_reads_the_correlation_of_the_trials_series():
     shared = [trial(math.sqrt(0.6), seed) for seed in (1, 2, 3)]
     correlation, pairs = verdict.trial_correlation(shared)
     assert pairs == 3 and correlation == pytest.approx(0.6, abs=0.08)
-    block = verdict.freeze_gate(
-        shared[0], trials=3, trial_analyses=shared, full_span_validations=3
-    )["deflated_sharpe"]
+    block = _gate(shared[0], trials=3, trial_analyses=shared, full_span_validations=3)[
+        "deflated_sharpe"
+    ]
     assert block["trial_correlation"] == correlation
     assert block["effective_trials"] == pytest.approx(correlation + (1 - correlation) * 3)
     assert block["sharpe_star"] == pytest.approx(
@@ -513,18 +520,12 @@ def test_a_zero_panel_reproduces_the_ungraded_figures_exactly():
         return kept
 
     def heldout(sidecar):
-        return verdict.heldout_slice(
-            sidecar,
-            start=HELDOUT_START,
-            end=HELDOUT_END,
-            forward_tracking_error=0.1,
-            max_drawdown=0.2,
-            active_max_drawdown=0.2,
-            mean_gross=1.0,
+        return _heldout(
+            sidecar, forward_tracking_error=0.1, max_drawdown=0.2, active_max_drawdown=0.2
         )
 
     def gate(sidecar):
-        return verdict.freeze_gate(
+        return _gate(
             sidecar,
             trials=6,
             full_span_validations=3,
@@ -568,9 +569,7 @@ def test_the_graded_series_is_the_strategy_minus_its_panel():
         verdict.neutralized_statistics(alone)["tracking_error"], rel=1e-9
     )
 
-    gate = verdict.freeze_gate(
-        book, trials=2, full_span_validations=2, years=RESEARCH_YEARS, active_max_drawdown=1.0
-    )
+    gate = _gate(book, trials=2, full_span_validations=2, years=RESEARCH_YEARS)
     own = verdict.neutralized_statistics({**book, "panel_daily": []})
     assert gate["mandate"] == {
         "tracking_error": own["tracking_error"],
@@ -608,7 +607,7 @@ def test_the_freeze_gate_refuses_zero_skill_an_uneven_edge_and_a_broken_mandate(
 
     def gate(sidecar, **limits):
         arguments = {"years": RESEARCH_YEARS, "active_max_drawdown": 0.30, **limits}
-        return verdict.freeze_gate(sidecar, trials=4, full_span_validations=4, **arguments)
+        return _gate(sidecar, trials=4, full_span_validations=4, **arguments)
 
     skilled = gate(book([0.10, 0.10, 0.10, 0.10], seed=111))
     assert skilled["passed"] and skilled["series"] == "active"
@@ -662,7 +661,8 @@ def test_the_freeze_gate_refuses_zero_skill_an_uneven_edge_and_a_broken_mandate(
     assert gate(steady, tracking_error_cap=0.04, beta_min=0.85, beta_max=1.15)["reasons"] == [
         "freeze_tracking_error_above_cap"
     ]
-    with pytest.raises(ValueError, match="beta band"):
+    # The rules themselves refuse a cap that comes without its beta band.
+    with pytest.raises(ValueError, match="set together"):
         gate(steady, tracking_error_cap=0.08)
 
     # Create-time bars move the gate: a missing key is today's default, an
@@ -685,7 +685,7 @@ def test_the_freeze_gate_names_a_deflated_sharpe_it_cannot_compute():
     days, strategy, benchmark, size = _segment(research, 0.10, np.random.default_rng(116))
     copy = _with_panel(_analysis((days, strategy, benchmark, size)), strategy)
 
-    gate = verdict.freeze_gate(copy, trials=2, full_span_validations=2)
+    gate = _gate(copy, trials=2, full_span_validations=2)
 
     assert gate["series"] == "active" and gate["information_ratio"] is None
     assert gate["deflated_sharpe"]["deflated_sharpe_probability"] is None
@@ -734,31 +734,19 @@ def test_graduation_lists_every_failed_condition_and_a_strategy_error_discards()
     )
     forward = _forward(analysis)
 
-    def heldout(mean_gross):
-        return verdict.heldout_slice(
+    def heldout(mean_gross, **rules):
+        return _heldout(
             analysis,
-            start=HELDOUT_START,
-            end=HELDOUT_END,
             forward_tracking_error=forward["tracking_error"],
-            max_drawdown=1.0,
-            active_max_drawdown=1.0,
             mean_gross=mean_gross,
+            **rules,
         )
 
     graduated = verdict.graduation_verdict(forward=forward, heldout=heldout(1.0))
     assert graduated["status"] == "graduated" and graduated["reasons"] == []
     assert graduated["thresholds"]["forward_confidence"] == 0.8
     assert graduated["thresholds"]["heldout_tolerance_z"] == 1.28
-    tight_heldout = verdict.heldout_slice(
-        analysis,
-        start=HELDOUT_START,
-        end=HELDOUT_END,
-        forward_tracking_error=forward["tracking_error"],
-        max_drawdown=1.0,
-        active_max_drawdown=1.0,
-        mean_gross=0.6,
-        min_mean_gross=0.7,
-    )
+    tight_heldout = heldout(0.6, min_mean_gross=0.7)
     assert "heldout_exposure_below_floor" in tight_heldout["reasons"]
 
     weak_forward = _forward(analysis, round_trips=0, mean_gross=0.1)
@@ -835,7 +823,7 @@ def test_the_raw_condition_judges_the_holders_money_only_where_the_rules_hold_it
     sidecar = _with_panel(_analysis((days, active + panel, benchmark, size)), panel)
 
     def gate(summary=None, **rules):
-        return verdict.freeze_gate(
+        return _gate(
             sidecar,
             trials=4,
             full_span_validations=4,
@@ -871,9 +859,7 @@ def test_the_raw_condition_judges_the_holders_money_only_where_the_rules_hold_it
         gate(None, **held)
 
     # Rules without the condition: the very gate of before, key for key.
-    before = verdict.freeze_gate(
-        sidecar, trials=4, full_span_validations=4, years=RESEARCH_YEARS
-    )
+    before = _gate(sidecar, trials=4, full_span_validations=4, years=RESEARCH_YEARS)
     unheld = gate(_raw_summary(-0.5), require_raw_excess_at_cost_stress=False, cost_stress_multiplier=3.0)
     assert unheld == before
     assert "raw_excess_at_cost_stress" not in unheld
@@ -1000,15 +986,7 @@ def test_the_holders_readings_are_the_stored_series_compounded():
     # A span with no stored day reads nothing rather than zero.
     assert verdict.holder_readings(book, start="20300101", end="20301231") == dict.fromkeys(raw)
 
-    heldout = verdict.heldout_slice(
-        book,
-        start=HELDOUT_START,
-        end=HELDOUT_END,
-        forward_tracking_error=forward["tracking_error"],
-        max_drawdown=1.0,
-        active_max_drawdown=1.0,
-        mean_gross=1.0,
-    )
+    heldout = _heldout(book, forward_tracking_error=forward["tracking_error"])
     assert heldout["raw_readings"]["strategy_return"] == pytest.approx(
         compound("strategy_daily", HELDOUT_START, HELDOUT_END), rel=1e-12
     )
@@ -1065,14 +1043,9 @@ def test_the_seed_mean_reads_every_seed_and_an_unmeasured_one_never_passes():
     assert unread["seed_mean"]["raw_readings"]["plain_selection"] is None
     assert unread["reasons"] == ["forward_seed_mean_plain_selection_not_positive"]
 
-    heldout = verdict.heldout_slice(
+    heldout = _heldout(
         book,
-        start=HELDOUT_START,
-        end=HELDOUT_END,
         forward_tracking_error=0.05,
-        max_drawdown=1.0,
-        active_max_drawdown=1.0,
-        mean_gross=1.0,
         seed_replicates=[replicate(loser, HELDOUT_START, HELDOUT_END)],
     )
     assert heldout["seed_mean"]["members"] == 2

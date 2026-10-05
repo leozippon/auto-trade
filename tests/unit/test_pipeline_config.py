@@ -23,13 +23,14 @@ from autotrade.environment.strategy import StrategySchedule
 from autotrade.pipelines import verdict
 from autotrade.pipelines.calendar import ResearchGeometry
 from autotrade.pipelines.config import (
+    ACCEPTANCE_KEYS,
     DEFAULT_RESEARCH_GEOMETRY,
     MANDATED_DEFAULTS,
     AcceptanceRules,
     RollingExperimentConfig,
     acceptance_for,
 )
-from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
+from autotrade.pipelines.hitl_state import CREATION_STAMPS, WEB_CREATE_DEFAULTS
 from tests.unit.gpu_probe import stubbed_gpu_probe
 
 #: The console create form is seeded from the pinned explore profile so a
@@ -215,10 +216,7 @@ class AcceptanceRulesTest(unittest.TestCase):
         self.assertEqual(old.min_mean_gross, verdict.MIN_MEAN_GROSS)
         self.assertEqual(old.min_round_trips_per_month, verdict.MIN_ROUND_TRIPS_PER_MONTH)
         self.assertEqual(old.heldout_tolerance_z, verdict.HELDOUT_TOLERANCE_Z)
-        self.assertEqual(
-            acceptance_for({"max_drawdown": 0.25}).freeze_gate_kwargs(),
-            AcceptanceRules(max_drawdown=0.25).freeze_gate_kwargs(),
-        )
+        self.assertEqual(acceptance_for({"max_drawdown": 0.25}), AcceptanceRules(max_drawdown=0.25))
 
     def test_the_tracking_mandate_is_set_by_hand_and_never_by_the_capital(self) -> None:
         """One switch, and it is the operator's: naming a ``tracking_error_cap``
@@ -314,7 +312,7 @@ class AcceptanceRulesTest(unittest.TestCase):
     def test_the_raw_condition_is_stated_and_judged_only_where_an_arm_holds_it(self) -> None:
         """An arm recorded before the raw cost-stress condition has no key and
         is judged, and told, exactly as before; an arm that holds it is told
-        the condition and the gate receives it."""
+        the condition and its rules carry it."""
 
         recorded = acceptance_for({"max_drawdown": 0.45})
         self.assertFalse(recorded.require_raw_excess_at_cost_stress)
@@ -327,11 +325,7 @@ class AcceptanceRulesTest(unittest.TestCase):
         self.assertIn("3.0", stated)
         self.assertIn("raw_readings.raw_excess_at_cost_stress", stated)
         self.assertEqual(
-            {
-                key: held.freeze_gate_kwargs()[key]
-                for key in ("require_raw_excess_at_cost_stress", "cost_stress_multiplier")
-            },
-            {"require_raw_excess_at_cost_stress": True, "cost_stress_multiplier": 3.0},
+            (held.require_raw_excess_at_cost_stress, held.cost_stress_multiplier), (True, 3.0)
         )
         self.assertEqual(AcceptanceRules.from_record(held.to_record()), held)
         with self.assertRaisesRegex(ValueError, "must be a boolean"):
@@ -340,20 +334,18 @@ class AcceptanceRulesTest(unittest.TestCase):
     def test_plain_selection_is_stated_and_judged_only_where_an_arm_holds_it(self) -> None:
         """An arm recorded before the forward plain-selection condition has no
         key: its forward slice is judged and its session told exactly as
-        before. An arm that holds it is told the rule (no figure) and the
-        forward slice receives it; the switch accepts only a boolean."""
+        before. An arm that holds it is told the rule (no figure) and its
+        rules carry it; the switch accepts only a boolean."""
 
         recorded = acceptance_for({"max_drawdown": 0.45})
         self.assertFalse(recorded.require_forward_plain_selection)
-        self.assertFalse(recorded.forward_slice_kwargs()["require_forward_plain_selection"])
         self.assertNotIn("plain_selection", recorded.agent_facts()["graduation"]["forward"])
         held = acceptance_for({"require_forward_plain_selection": True})
-        self.assertTrue(held.forward_slice_kwargs()["require_forward_plain_selection"])
+        self.assertTrue(held.require_forward_plain_selection)
         stated = held.agent_facts()["graduation"]["forward"]["plain_selection"]
         self.assertIn("> 0", stated)
         self.assertIn("raw_readings.plain_selection", stated)
         self.assertIsNone(re.search(r"\d\.\d", stated))
-        self.assertNotIn("require_forward_plain_selection", held.heldout_slice_kwargs())
         self.assertEqual(AcceptanceRules.from_record(held.to_record()), held)
         with self.assertRaisesRegex(ValueError, "require_forward_plain_selection must be a boolean"):
             AcceptanceRules(require_forward_plain_selection="yes")  # type: ignore[arg-type]
@@ -446,33 +438,25 @@ class DefaultsDriftTest(unittest.TestCase):
             if key not in WEB_CREATE_DEFAULTS:
                 continue
             self.assertEqual(WEB_CREATE_DEFAULTS[key], getattr(profile, key), key)
-        rules = AcceptanceRules()
-        self.assertEqual(
-            WEB_CREATE_DEFAULTS["cost_stress_multiplier"], rules.cost_stress_multiplier
-        )
+        rules = AcceptanceRules().to_record()
+        # A creation stamp is a rule whose own default is off, so an arm
+        # recorded without the key reads as it was, and which every arm
+        # created now is held to.
+        own = {**rules, "dividend_tax": profile.dividend_tax}
+        for key, stamp in CREATION_STAMPS.items():
+            self.assertIs(own[key], False, key)
+            self.assertIs(stamp, True, key)
+            self.assertIs(WEB_CREATE_DEFAULTS[key], stamp, key)
         # Drawdowns and the mandate switch stay empty so the form does not pin
-        # a mandate onto every arm. Statistical bars show today's stamp defaults.
-        optional = {
-            "max_drawdown",
-            "active_max_drawdown",
-            "tracking_error_cap",
-            "beta_min",
-            "beta_max",
-        }
-        for key, value in rules.to_record().items():
-            if key in (
-                "require_raw_excess_at_cost_stress",
-                "require_forward_plain_selection",
-                "require_seed_replicates",
-            ):
-                # Deliberately apart, like ``dividend_tax``: off for an arm
-                # recorded without the key, on for every arm created now.
-                self.assertFalse(value)
-                self.assertIs(WEB_CREATE_DEFAULTS[key], True)
-            elif key == "cost_stress_multiplier" or key not in optional:
-                self.assertEqual(WEB_CREATE_DEFAULTS[key], value, key)
-            else:
+        # a mandate onto every arm. Every other rule shows what an empty
+        # request would stamp.
+        blank = {"max_drawdown", "active_max_drawdown", "tracking_error_cap", "beta_min", "beta_max"}
+        self.assertEqual(set(rules), set(ACCEPTANCE_KEYS))
+        for key, value in rules.items():
+            if key in blank:
                 self.assertIsNone(WEB_CREATE_DEFAULTS[key], key)
+            elif key not in CREATION_STAMPS:
+                self.assertEqual(WEB_CREATE_DEFAULTS[key], value, key)
         for key, value in DEFAULT_RESEARCH_GEOMETRY.to_record().items():
             self.assertEqual(WEB_CREATE_DEFAULTS[key], value, key)
         schedule = StrategySchedule()

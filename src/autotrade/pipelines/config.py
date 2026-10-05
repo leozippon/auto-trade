@@ -8,7 +8,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import KW_ONLY, MISSING, dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from autotrade.environment.artifacts import ModificationConstraints
 from autotrade.environment.broker import BrokerProfile
@@ -140,6 +140,12 @@ def _open_unit(value: object, name: str, *, include_one: bool) -> float:
     return number
 
 
+def _rule(default: object, text: str) -> Any:
+    """One acceptance rule's field: its default, and in one line what it limits."""
+
+    return field(default=default, metadata={"help": text})
+
+
 @dataclass(frozen=True)
 class AcceptanceRules:
     """The arm's create-time gates for the freeze nomination and the verdict.
@@ -151,60 +157,97 @@ class AcceptanceRules:
     an arm that already exists. Statistical definitions (the DSR formula, the
     bootstrap, the panel) stay in ``pipelines/verdict.py``. Every field is a
     limit something enforces.
+
+    This is the one declaration of the rules. The record (``to_record``), the
+    parameters a worker accepts (``ACCEPTANCE_KEYS``), the console's creation
+    defaults (``hitl_state.WEB_CREATE_DEFAULTS``) and the audit entrypoint's
+    flags (``scripts/experiments/_cli.py``) are read off its fields, and the
+    verdict functions take the rules whole. A numeric default is today's
+    verdict constant, so a record written before the field existed is judged
+    as it was.
     """
 
-    # Equity drawdown, over the research period, forward and Held-out alike.
-    max_drawdown: float = 0.45
-    # The forward neutralised excess must stay positive after paying this
-    # multiple of the profile's slippage (verdict F5).
-    cost_stress_multiplier: float = 2.0
-    # Drawdown of the cumulative active series (strategy minus the zero-skill
-    # panel composite), over the same three slices.
-    active_max_drawdown: float = 0.30
+    # Over the research period, forward and Held-out alike.
+    max_drawdown: float = _rule(0.45, "Equity drawdown limit of the freeze gate and the verdict.")
+    cost_stress_multiplier: float = _rule(
+        2.0,
+        "Forward verdict: multiple of the profile's slippage the neutralised excess must survive.",
+    )
+    active_max_drawdown: float = _rule(
+        0.30, "Drawdown limit of the active series (strategy minus zero-skill panel)."
+    )
     # The tracking mandate: the strategy's own residual tracking error against
     # the arm's benchmark and its market beta, over the research period and
-    # again forward.
-    # ``None`` means no mandate: both are measured and reported, not graded.
-    # The band is set exactly when the cap is -- a cap alone is cheapest to
-    # meet by dropping beta.
-    tracking_error_cap: float | None = None
-    beta_min: float | None = None
-    beta_max: float | None = None
-    # Freeze-gate statistical bars. Defaults are today's verdict constants; an
-    # arm records its own at creation. ``min_dsr_probability`` moved from 0.90
-    # to 0.975 with the DSR1 recalibration, and only arms that ended before
-    # the field was recorded omit it.
-    min_active_ir: float = verdict.FREEZE_MIN_ACTIVE_IR
-    min_dsr_probability: float = verdict.FREEZE_MIN_DSR_PROBABILITY
-    min_positive_year_share: float = verdict.FREEZE_MIN_POSITIVE_YEAR_SHARE
-    min_full_span_validations: int = verdict.FREEZE_MIN_FULL_SPAN_VALIDATIONS
-    # The holder's money at the freeze: over the research period the nominee's
-    # own equity return, after ``cost_stress_multiplier`` times the slippage,
-    # must beat the benchmark's (``verdict.raw_excess_at_cost_stress`` above
-    # zero). Off here, so an arm recorded without the key is judged as it was;
-    # the creation defaults (``hitl_state.WEB_CREATE_DEFAULTS``) stamp it on.
-    require_raw_excess_at_cost_stress: bool = False
-    # Plain selection at graduation (F8): over the forward months the frozen
-    # book's compounded return after every cost must beat its zero-skill
-    # panel's with no regression (``raw_readings.plain_selection`` above
-    # zero). Off here for the same reason as the raw freeze condition; the
-    # creation defaults stamp it on.
-    require_forward_plain_selection: bool = False
-    # Seed replicates: a nominee whose strategy trains a model is judged on
-    # its training seeds together. At the freeze it names at least one seed
-    # replicate (another full-span Validation of the session, the same bytes
-    # but for one integer seed line) and the mean active IR over it and its
-    # replicates must reach its own bar (``experiment.freeze_gate_for``);
-    # forward, the mean plain selection over all of them must be positive
-    # (``verdict.forward_slice``). Off here for the same reason as the two
-    # conditions above; the creation defaults stamp it on.
-    require_seed_replicates: bool = False
-    # Forward and Held-out bars. Same compatibility default as above.
-    forward_confidence: float = verdict.FORWARD_CONFIDENCE
-    recency_months: int = verdict.RECENCY_MONTHS
-    min_mean_gross: float = verdict.MIN_MEAN_GROSS
-    min_round_trips_per_month: float = verdict.MIN_ROUND_TRIPS_PER_MONTH
-    heldout_tolerance_z: float = verdict.HELDOUT_TOLERANCE_Z
+    # again forward. ``None`` means no mandate: both are measured and
+    # reported, not graded. The band is set exactly when the cap is -- a cap
+    # alone is cheapest to meet by dropping beta.
+    tracking_error_cap: float | None = _rule(
+        None,
+        "Tracking mandate: residual tracking error cap against the arm's benchmark index; "
+        "giving it turns the mandate on for this arm.",
+    )
+    beta_min: float | None = _rule(None, "Tracking mandate: lower end of the market beta band.")
+    beta_max: float | None = _rule(None, "Tracking mandate: upper end of the market beta band.")
+    # ``min_dsr_probability`` moved from 0.90 to 0.975 with the DSR1
+    # recalibration, and only arms that ended before the field was recorded
+    # omit it.
+    min_active_ir: float = _rule(
+        verdict.FREEZE_MIN_ACTIVE_IR,
+        "Freeze gate: minimum research-period active information ratio.",
+    )
+    min_dsr_probability: float = _rule(
+        verdict.FREEZE_MIN_DSR_PROBABILITY,
+        "Freeze gate: minimum deflated Sharpe probability of that IR.",
+    )
+    min_positive_year_share: float = _rule(
+        verdict.FREEZE_MIN_POSITIVE_YEAR_SHARE,
+        "Freeze gate: share of research years whose active excess must be positive.",
+    )
+    min_full_span_validations: int = _rule(
+        verdict.FREEZE_MIN_FULL_SPAN_VALIDATIONS,
+        "Freeze gate: minimum measurable full-span validations in the arm.",
+    )
+    # The optional conditions: off here, stamped on at creation
+    # (``hitl_state.CREATION_STAMPS`` states that convention once). The raw
+    # condition reads ``verdict.raw_excess_at_cost_stress`` of the nominee at
+    # ``cost_stress_multiplier``; plain selection (F8) reads the forward
+    # slice's ``raw_readings.plain_selection``; seed replicates are judged by
+    # ``experiment.freeze_gate_for`` at the freeze and by
+    # ``verdict.forward_slice`` forward.
+    require_raw_excess_at_cost_stress: bool = _rule(
+        False,
+        "Freeze gate: the nominee's own equity must beat the benchmark after the "
+        "cost-stress slippage.",
+    )
+    require_forward_plain_selection: bool = _rule(
+        False,
+        "Forward verdict: the frozen book's own return must beat its zero-skill panel's, "
+        "unregressed.",
+    )
+    require_seed_replicates: bool = _rule(
+        False,
+        "Freeze and forward: a nominee that trains a model registers its seed replicates; "
+        "their mean active IR must reach its bar and their mean forward plain selection "
+        "be positive.",
+    )
+    forward_confidence: float = _rule(
+        verdict.FORWARD_CONFIDENCE, "Forward verdict: one-sided block-bootstrap confidence."
+    )
+    recency_months: int = _rule(
+        verdict.RECENCY_MONTHS,
+        "Forward verdict: trailing calendar months whose active excess must be non-negative.",
+    )
+    min_mean_gross: float = _rule(
+        verdict.MIN_MEAN_GROSS, "Forward and Held-out: minimum mean gross exposure."
+    )
+    min_round_trips_per_month: float = _rule(
+        verdict.MIN_ROUND_TRIPS_PER_MONTH,
+        "Forward verdict: minimum completed round trips per month.",
+    )
+    heldout_tolerance_z: float = _rule(
+        verdict.HELDOUT_TOLERANCE_Z,
+        "Held-out: tolerated shortfall in standard errors of forward tracking error.",
+    )
 
     def __post_init__(self) -> None:
         mandate = (self.tracking_error_cap, self.beta_min, self.beta_max)
@@ -237,13 +280,9 @@ class AcceptanceRules:
         )
         if self.min_full_span_validations < 1:
             raise ValueError("min_full_span_validations must be an integer >= 1")
-        for name in (
-            "require_raw_excess_at_cost_stress",
-            "require_forward_plain_selection",
-            "require_seed_replicates",
-        ):
-            if not isinstance(getattr(self, name), bool):
-                raise ValueError(f"{name} must be a boolean")
+        for rule in fields(self):
+            if isinstance(rule.default, bool) and not isinstance(getattr(self, rule.name), bool):
+                raise ValueError(f"{rule.name} must be a boolean")
         object.__setattr__(
             self,
             "forward_confidence",
@@ -277,30 +316,11 @@ class AcceptanceRules:
             raise ValueError("beta_min must be below beta_max")
 
     def to_record(self) -> dict[str, object]:
-        return {
-            "max_drawdown": self.max_drawdown,
-            "cost_stress_multiplier": self.cost_stress_multiplier,
-            "active_max_drawdown": self.active_max_drawdown,
-            "tracking_error_cap": self.tracking_error_cap,
-            "beta_min": self.beta_min,
-            "beta_max": self.beta_max,
-            "min_active_ir": self.min_active_ir,
-            "min_dsr_probability": self.min_dsr_probability,
-            "min_positive_year_share": self.min_positive_year_share,
-            "min_full_span_validations": self.min_full_span_validations,
-            "require_raw_excess_at_cost_stress": self.require_raw_excess_at_cost_stress,
-            "require_forward_plain_selection": self.require_forward_plain_selection,
-            "require_seed_replicates": self.require_seed_replicates,
-            "forward_confidence": self.forward_confidence,
-            "recency_months": self.recency_months,
-            "min_mean_gross": self.min_mean_gross,
-            "min_round_trips_per_month": self.min_round_trips_per_month,
-            "heldout_tolerance_z": self.heldout_tolerance_z,
-        }
+        return {rule.name: getattr(self, rule.name) for rule in fields(self)}
 
     @property
     def mandate(self) -> dict[str, float | None]:
-        """The tracking mandate as the verdict functions take it."""
+        """The tracking mandate as a record's thresholds state it."""
 
         return {
             "tracking_error_cap": self.tracking_error_cap,
@@ -318,8 +338,7 @@ class AcceptanceRules:
         does name.
         """
 
-        allowed = set(cls().to_record())
-        return cls(**{key: record[key] for key in allowed if key in record})  # type: ignore[arg-type]
+        return cls(**{rule.name: record[rule.name] for rule in fields(cls) if rule.name in record})  # type: ignore[arg-type]
 
     def agent_facts(self, *, research_years: int | None = None) -> dict[str, object]:
         """The ``acceptance_rules`` run fact, derived from these rules so no
@@ -527,46 +546,6 @@ class AcceptanceRules:
             },
         }
 
-    def freeze_gate_kwargs(self) -> dict[str, object]:
-        """Keyword arguments ``verdict.freeze_gate`` takes from these rules."""
-
-        return {
-            "active_max_drawdown": self.active_max_drawdown,
-            **self.mandate,
-            "min_active_ir": self.min_active_ir,
-            "min_dsr_probability": self.min_dsr_probability,
-            "min_positive_year_share": self.min_positive_year_share,
-            "min_full_span_validations": self.min_full_span_validations,
-            "cost_stress_multiplier": self.cost_stress_multiplier,
-            "require_raw_excess_at_cost_stress": self.require_raw_excess_at_cost_stress,
-        }
-
-    def forward_slice_kwargs(self) -> dict[str, object]:
-        """Keyword arguments ``verdict.forward_slice`` takes from these rules."""
-
-        return {
-            "max_drawdown": self.max_drawdown,
-            "active_max_drawdown": self.active_max_drawdown,
-            **self.mandate,
-            "cost_stress_multiplier": self.cost_stress_multiplier,
-            "forward_confidence": self.forward_confidence,
-            "recency_months": self.recency_months,
-            "min_mean_gross": self.min_mean_gross,
-            "min_round_trips_per_month": self.min_round_trips_per_month,
-            "require_forward_plain_selection": self.require_forward_plain_selection,
-            "require_seed_replicates": self.require_seed_replicates,
-        }
-
-    def heldout_slice_kwargs(self) -> dict[str, object]:
-        """Keyword arguments ``verdict.heldout_slice`` takes from these rules."""
-
-        return {
-            "max_drawdown": self.max_drawdown,
-            "active_max_drawdown": self.active_max_drawdown,
-            "min_mean_gross": self.min_mean_gross,
-            "heldout_tolerance_z": self.heldout_tolerance_z,
-        }
-
     def evaluate(self, summary: dict[str, object]) -> list[str]:
         """The hard reasons a nomination is refused (``experiment.freeze_gate_for``).
 
@@ -593,6 +572,10 @@ class AcceptanceRules:
             hard.append("max_drawdown_above_limit")
         return hard
 
+
+# Every rule's name, in declaration order: the keys of a rules record and of
+# the arm parameters that set one.
+ACCEPTANCE_KEYS: tuple[str, ...] = tuple(rule.name for rule in fields(AcceptanceRules))
 
 # The beta band that travels with a tracking mandate when the create request
 # names a cap and leaves the band blank. A cap alone is cheapest to meet by

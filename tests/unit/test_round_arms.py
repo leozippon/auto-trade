@@ -26,7 +26,11 @@ from autotrade.pipelines.config import (
     DEFAULT_RESEARCH_GEOMETRY,
     SNAPSHOT_CACHE_FORMAT_VERSION,
 )
-from autotrade.pipelines.hitl_state import WEB_CLOSED_PARAMS, WEB_CREATE_DEFAULTS
+from autotrade.pipelines.hitl_state import (
+    CREATION_STAMPS,
+    WEB_CLOSED_PARAMS,
+    WEB_CREATE_DEFAULTS,
+)
 from autotrade.pipelines.pit_backend import required_release_raw_datasets
 from autotrade.pipelines.pit_views_seed import pit_cache_provider_record
 from autotrade.pipelines.worker import _snapshot_config
@@ -43,7 +47,6 @@ from scripts.experiments._round import (
     RETIRED_IDS,
     Round,
     archived_ids,
-    creation_stamps,
 )
 from tests.unit.research_release_fixture import (
     BACKFILLED_HISTORY_START,
@@ -398,7 +401,7 @@ def test_a_change_of_the_rule_set_stops_the_launcher(monkeypatch: pytest.MonkeyP
     so turning one off, or stamping one nobody pinned, stops a round that has
     not decided that rule for itself."""
     Round().check_console_defaults()
-    assert creation_stamps() <= set(BASE_EXPECTED_DEFAULTS)
+    assert set(CREATION_STAMPS) <= set(BASE_EXPECTED_DEFAULTS)
 
     monkeypatch.setitem(_round.WEB_CREATE_DEFAULTS, "require_seed_replicates", False)
     drift = '"require_seed_replicates": {"round": "True", "console": "False"}'
@@ -693,7 +696,7 @@ def test_an_arm_is_tracked_only_when_it_names_a_tracking_error_cap() -> None:
     carries the optional drawdown and mandate limits as null, and a null cap
     is no mandate at any account size. An arm that wants one names the cap,
     which fills a blank beta band; drawdowns stay 0.45 / 0.30 unless named."""
-    from autotrade.pipelines.config import AcceptanceRules, acceptance_for
+    from autotrade.pipelines.config import acceptance_for
 
     optional = (
         "max_drawdown",
@@ -721,15 +724,9 @@ def test_an_arm_is_tracked_only_when_it_names_a_tracking_error_cap() -> None:
     assert [rnd.request_params("large")[key] for key in optional] == [None] * len(optional)
     # The account decides nothing: two arms an order of magnitude apart, both
     # silent about the mandate, are judged by exactly the same rules.
-    # A new arm is also held to the raw cost-stress condition, to plain
-    # selection forward and to its seed replicates (creation defaults the
-    # rules themselves leave off for arms recorded without them).
-    assert rules("large") == rules("small") == {
-        **AcceptanceRules().to_record(),
-        "require_raw_excess_at_cost_stress": True,
-        "require_forward_plain_selection": True,
-        "require_seed_replicates": True,
-    }
+    # A new arm is also held to every rule creation stamps on, which the
+    # rules themselves leave off for arms recorded without them.
+    assert rules("large") == rules("small") == acceptance_for(CREATION_STAMPS).to_record()
     tracked = rules("tracked")
     assert (tracked["tracking_error_cap"], tracked["beta_min"], tracked["beta_max"]) == (
         0.08,

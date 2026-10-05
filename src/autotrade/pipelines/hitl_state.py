@@ -20,6 +20,7 @@ from autotrade.environment.sandbox import SandboxSpec
 
 from .calendar import GEOMETRY_PARAMETERS
 from .config import (
+    ACCEPTANCE_KEYS,
     DEFAULT_PIT_VIEWS_SEED,
     DEFAULT_RESEARCH_GEOMETRY,
     AcceptanceRules,
@@ -39,6 +40,41 @@ SCHEDULE_NAME = "schedule.json"
 # container it starts, and the console counts them as held while it lives.
 GPU_CLAIM_NAME = "gpu_claim.json"
 LIVE_RUN_STATES = {"running_session"}
+
+# How a rule newer than the arms on disk is introduced, stated here once. Its
+# own default stays off (``config.AcceptanceRules``, ``BrokerProfile``), so an
+# arm whose params.json has no key reads as it was recorded -- judged without
+# the condition, untaxed -- for as long as it lives. Creation stamps the key
+# on: every arm created from here on is held to the rule unless its request
+# says otherwise.
+CREATION_STAMPS: dict[str, bool] = {
+    "require_raw_excess_at_cost_stress": True,
+    "require_forward_plain_selection": True,
+    "require_seed_replicates": True,
+    "dividend_tax": True,
+}
+
+
+def _acceptance_defaults() -> dict[str, object]:
+    """The acceptance block of the creation defaults, read off the rules' own
+    declaration (``config.AcceptanceRules``).
+
+    The limits a request may leave blank come first: the tracking mandate,
+    which naming ``tracking_error_cap`` switches on (a blank beta band then
+    takes ``config.MANDATED_DEFAULTS``), and the two drawdowns, which stay the
+    rules' own 0.45 / 0.30 unless the request names them. Every other rule is
+    filled, so the form shows the values an empty request would stamp
+    (``config.acceptance_for``).
+    """
+
+    rules = {
+        **AcceptanceRules().to_record(),
+        "max_drawdown": None,
+        "active_max_drawdown": None,
+        **{name: value for name, value in CREATION_STAMPS.items() if name in ACCEPTANCE_KEYS},
+    }
+    return {**{name: None for name, value in rules.items() if value is None}, **rules}
+
 
 # The persistent WebUI creation contract.  The form and manager both read
 # these defaults, while the worker retains its broader file-based/CLI contract.
@@ -101,43 +137,13 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "per_call_timeout_seconds": rolling_default("per_call_timeout_seconds"),
     "strategy_fit_timeout_seconds": rolling_default("strategy_fit_timeout_seconds"),
     "record_failed_attempts": rolling_default("record_failed_attempts"),
-    # ``tracking_error_cap`` is the tracking mandate's switch: naming it turns
-    # the mandate on for this arm and, if the beta band is left blank, fills
-    # it from ``config.MANDATED_DEFAULTS``. Drawdowns stay the rules' own
-    # 0.45 / 0.30 unless the request names them. The statistical bars are
-    # filled with today's defaults so the form shows the values an empty
-    # request would stamp (``config.acceptance_for``).
-    "max_drawdown": None,
-    "active_max_drawdown": None,
-    "tracking_error_cap": None,
-    "beta_min": None,
-    "beta_max": None,
-    "cost_stress_multiplier": AcceptanceRules().cost_stress_multiplier,
-    "min_active_ir": AcceptanceRules().min_active_ir,
-    "min_dsr_probability": AcceptanceRules().min_dsr_probability,
-    "min_positive_year_share": AcceptanceRules().min_positive_year_share,
-    "min_full_span_validations": AcceptanceRules().min_full_span_validations,
-    # Deliberately not the rules' own default, like ``dividend_tax`` below: an
-    # arm whose params.json has no key was judged without the condition and
-    # stays so; every arm created from here on is held to it unless its
-    # request says otherwise. The same holds for all three conditions.
-    "require_raw_excess_at_cost_stress": True,
-    "require_forward_plain_selection": True,
-    "require_seed_replicates": True,
-    "forward_confidence": AcceptanceRules().forward_confidence,
-    "recency_months": AcceptanceRules().recency_months,
-    "min_mean_gross": AcceptanceRules().min_mean_gross,
-    "min_round_trips_per_month": AcceptanceRules().min_round_trips_per_month,
-    "heldout_tolerance_z": AcceptanceRules().heldout_tolerance_z,
+    **_acceptance_defaults(),
     "initial_cash": 1_000_000.0,
     "max_total_holdings": None,
     "max_single_name_weight": None,
     "commission_bps": BrokerProfile().commission_bps,
     "slippage_bps": BrokerProfile().slippage_bps,
-    # Deliberately not the profile's own default: an arm whose params.json has
-    # no key was recorded untaxed and stays so; every arm created from here
-    # on is taxed unless its request says otherwise.
-    "dividend_tax": True,
+    "dividend_tax": CREATION_STAMPS["dividend_tax"],
     "model": MODEL_CHOICES[0],
     "subagent_model": MODEL_CHOICES[0],
     "nl_model": MODEL_CHOICES[0],

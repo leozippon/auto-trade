@@ -1062,10 +1062,7 @@ class LLMResearchDeveloper:
                 freeze_gate=backtest.freeze_gate,
                 another_round_fits=lambda: another_batch_round_fits(backtest),
                 budget_status=lambda: session_budget_status(backtest),
-                seed_replicates=(
-                    backtest.acceptance is not None
-                    and backtest.acceptance.require_seed_replicates
-                ),
+                seed_replicates=backtest.rules.require_seed_replicates,
             )
         )
         return backtest, smoke, tools, null_control_tool
