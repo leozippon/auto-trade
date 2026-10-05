@@ -74,11 +74,15 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.append(str(_REPO_ROOT))
 
+from scripts.experiments._profiles import (
+    FUND_EIGHT_YEAR_100K,
+    MIMO,
+    SEED_REPLICATES,
+    SEQAXES_LINEAGE,
+    SEQBOOK_LINEAGE,
+    TAXED_FUND_PIT_VIEWS_SEED,
+)
 from scripts.experiments._round import Round
-from scripts.experiments.create_round_20261002 import MIMO
-from scripts.experiments.create_round_20261006 import SEQAXES_LINEAGE
-from scripts.experiments.create_round_20261008 import ROUND as SEQBOOK_ROUND
-from scripts.experiments.create_round_20261008 import SEED_REPLICATES, SEQBOOK_LINEAGE
 
 SEQHOLD_PACK = "configs/workspace_refs/seqhold_alla_100k_8y_20261009"
 INDCYCLE_PACK = "configs/workspace_refs/indcycle_alla_100k_8y_20261009"
@@ -165,8 +169,8 @@ ARMS: dict[str, dict[str, object]] = {
 # for both packs.
 ROUND = Round(
     arms=ARMS,
-    pit_views_seed=SEQBOOK_ROUND.pit_views_seed,
-    overrides=dict(SEQBOOK_ROUND.overrides),
+    pit_views_seed=TAXED_FUND_PIT_VIEWS_SEED,
+    overrides=FUND_EIGHT_YEAR_100K,
 )
 
 

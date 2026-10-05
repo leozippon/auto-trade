@@ -53,6 +53,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.append(str(_REPO_ROOT))
 
+# The seqbag arm's lineage, RECIPE_ARMS, is shared with the rounds after it.
+from scripts.experiments._profiles import RECIPE_ARMS
 from scripts.experiments._round import Round
 from scripts.experiments.create_round_20260927 import (
     CSI1000,
@@ -114,22 +116,6 @@ CENSUS_ARMS: tuple[str, ...] = (
     "sz1k_alla_100k_20260927", "tom1k_alla_100k_20260927", "volag_alla_100k_20260927",
     "wdelta_alla_100k_20260927", "wresid_alla_100k_20260927", "wtheavy_alla_100k_20260927",
     "wtstab_alla_100k_20260927",
-)
-
-# The seqbag arm's lineage: every arm that recorded a non-control trial on the
-# whole-pool sequence recipe over these eight years (its pack README §8). The
-# 100k MLP and the CSI 1000 GRU recorded controls only and cannot be lineage.
-RECIPE_ARMS: tuple[str, ...] = (
-    "mlp_alla_8y_20260925",
-    "tcn_alla_8y_20260925",
-    "lstm_alla_8y_20260926",
-    "tattn_alla_8y_20260926",
-    "shortmlp_alla_8y_20260926",
-    "lagpool_alla_8y_20260926",
-    "decay_alla_1m_20260926",
-    "patchmlp_alla_100k_20260926",
-    "spec_alla_100k_20260926",
-    "lstm_alla_100k_20260926",
 )
 
 ARMS: dict[str, dict[str, object]] = {
@@ -208,6 +194,7 @@ ROUND = Round(
         "max_drawdown": 0.55,
         "active_max_drawdown": 0.30,
     },
+    closed=True,
 )
 
 

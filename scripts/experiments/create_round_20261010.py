@@ -32,11 +32,9 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.append(str(_REPO_ROOT))
 
+from scripts.experiments._profiles import FUND_EIGHT_YEAR_100K, MIMO, TAXED_FUND_PIT_VIEWS_SEED
 from scripts.experiments._round import Round
-from scripts.experiments.create_round_20261002 import MIMO
 from scripts.experiments.create_round_20261007 import EVENT2_ARM, EVENT2_DIRECTIVE
-from scripts.experiments.create_round_20261007 import ROUND as LEARN2_ROUND
-from scripts.experiments.create_round_20261008 import TAXED_FUND_PIT_VIEWS_SEED
 
 EVENT3_DIRECTIVE = (
     EVENT2_DIRECTIVE
@@ -57,7 +55,8 @@ ARMS: dict[str, dict[str, object]] = {
 ROUND = Round(
     arms=ARMS,
     pit_views_seed=TAXED_FUND_PIT_VIEWS_SEED,
-    overrides=dict(LEARN2_ROUND.overrides),
+    overrides=FUND_EIGHT_YEAR_100K,
+    closed=True,
 )
 
 

@@ -43,15 +43,9 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.append(str(_REPO_ROOT))
 
+from scripts.experiments._profiles import FUND_EIGHT_YEAR_100K, FUND_PACK, MIMO
 from scripts.experiments._round import Round
-from scripts.experiments.create_round_20260927 import CSI1000, GATES
-from scripts.experiments.create_round_20261002 import MIMO
-from scripts.experiments.create_round_20261005 import (
-    FUND_EIGHT_YEAR,
-    FUND_PACK,
-    FUND_PIT_VIEWS_SEED,
-    LEARN_LINEAGE,
-)
+from scripts.experiments.create_round_20261005 import FUND_PIT_VIEWS_SEED, LEARN_LINEAGE
 
 # Every arm of round 20261005 that validated an event-time book on this surface.
 EVENT2_LINEAGE = [
@@ -116,15 +110,8 @@ ARMS: dict[str, dict[str, object]] = {
 ROUND = Round(
     arms=ARMS,
     pit_views_seed=FUND_PIT_VIEWS_SEED,
-    overrides={
-        **FUND_EIGHT_YEAR,
-        **GATES,
-        "max_replay_years": 96,
-        "initial_cash": 100_000,
-        "benchmark_index": CSI1000,
-        "max_drawdown": 0.55,
-        "active_max_drawdown": 0.30,
-    },
+    overrides=FUND_EIGHT_YEAR_100K,
+    closed=True,
 )
 
 

@@ -112,6 +112,7 @@ ROUND = Round(
         "max_drawdown": 0.55,
         "active_max_drawdown": 0.30,
     },
+    closed=True,
 )
 
 

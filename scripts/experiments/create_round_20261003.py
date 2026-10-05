@@ -40,6 +40,10 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.append(str(_REPO_ROOT))
 
+# Every arm that recorded a non-control trial on the whole-pool sequence recipe
+# over these eight years, the 1m bag included: SEQBAG_LINEAGE, shared with the
+# rounds after it.
+from scripts.experiments._profiles import SEQBAG_LINEAGE
 from scripts.experiments._round import Round
 from scripts.experiments.create_round_20260927 import (
     CSI1000,
@@ -47,14 +51,9 @@ from scripts.experiments.create_round_20260927 import (
     EIGHT_YEAR,
     GATES,
 )
-from scripts.experiments.create_round_20261001 import RECIPE_ARMS
 from scripts.experiments.create_round_20261002 import MIMO, OPEN_DIRECTIVE, OPEN_PACK
 
 SEQBAG_PACK = "configs/workspace_refs/seqbag_alla_100k_8y_20261003"
-
-# Every arm that recorded a non-control trial on the whole-pool sequence recipe
-# over these eight years, the 1m bag included.
-SEQBAG_LINEAGE = [*RECIPE_ARMS, "seqbag_alla_8y_20261001"]
 
 SEQBAG_DIRECTIVE = (
     "本臂是 [FEAT-14] 配方上四个序列头各两个种子的秩平均袋（b4s2）放进 10 万账户的书："
@@ -106,6 +105,7 @@ ROUND = Round(
         "max_drawdown": 0.55,
         "active_max_drawdown": 0.30,
     },
+    closed=True,
 )
 
 

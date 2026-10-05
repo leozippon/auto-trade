@@ -48,22 +48,14 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.append(str(_REPO_ROOT))
 
+# The recipe arms and the 1m bag, plus every arm that rebuilt the bag as a
+# 100k book: their trials are this search's own history on these eight years
+# (SEQAXES_LINEAGE, shared with the rounds after it).
+from scripts.experiments._profiles import FUND_EIGHT_YEAR_100K, MIMO, SEQAXES_LINEAGE
 from scripts.experiments._round import Round
-from scripts.experiments.create_round_20260927 import CSI1000, GATES
-from scripts.experiments.create_round_20261002 import MIMO
-from scripts.experiments.create_round_20261003 import SEQBAG_LINEAGE
-from scripts.experiments.create_round_20261005 import FUND_EIGHT_YEAR, FUND_PIT_VIEWS_SEED
+from scripts.experiments.create_round_20261005 import FUND_PIT_VIEWS_SEED
 
 SEQAXES_PACK = "configs/workspace_refs/seqaxes_alla_100k_8y_20261006"
-
-# The recipe arms and the 1m bag, plus every arm that rebuilt the bag as a
-# 100k book: their trials are this search's own history on these eight years.
-SEQAXES_LINEAGE = [
-    *SEQBAG_LINEAGE,
-    "seqbag_alla_100k_8y_qwen_20261003",
-    "seqbag_alla_100k_8y_mimo_20261003",
-    "seqbag_alla_100k_8y_deepseek_20261004",
-]
 
 LABEL_DIRECTIVE = (
     "本臂走标签线：模型、输入与书都是 10 万序列袋的基线 c_base（12 席、每次至多换 4 只、每周复核、不残差化），"
@@ -110,15 +102,8 @@ ARMS: dict[str, dict[str, object]] = {
 ROUND = Round(
     arms=ARMS,
     pit_views_seed=FUND_PIT_VIEWS_SEED,
-    overrides={
-        **FUND_EIGHT_YEAR,
-        **GATES,
-        "max_replay_years": 96,
-        "initial_cash": 100_000,
-        "benchmark_index": CSI1000,
-        "max_drawdown": 0.55,
-        "active_max_drawdown": 0.30,
-    },
+    overrides=FUND_EIGHT_YEAR_100K,
+    closed=True,
 )
 
 

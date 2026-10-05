@@ -15,9 +15,18 @@ carries the research geometry, the account, the cost stress and the
 per-session budgets, and BASE_EXPECTED_DEFAULTS pins the console creation
 defaults every round relies on -- above all the model roles, which no round
 overrides, so a rename of the local model must stop the launcher rather than
-silently move an arm onto a hosted stream. A round states what it decides for
-itself in `overrides`, and anything it states there stops being an expected
-default.
+silently move an arm onto a hosted stream, and the rule set a new arm is
+stamped with, so the arms a round queues are judged by the rules its first
+arms were. A round states what it decides for itself in `overrides`, and
+anything it states there stops being an expected default. What several rounds
+send alike -- a geometry, the graduation bars, a model pair's hosted roles, a
+lineage -- lives in `_profiles.py`; an open round imports from there and from
+here, never from another round file.
+
+A round whose arms have all been created is marked `closed`. Its file stays as
+the record of what was run, and its `main` refuses every mode: once an arm is
+archived its directory is gone, and the queue would read it as pending and
+create it again.
 
 `normalize` runs the request-level checks the console applies on POST
 /api/experiments (ExperimentManager.create_experiment's closed, unknown,
@@ -83,6 +92,7 @@ from _bootstrap import add_repo_src
 
 REPO_ROOT = add_repo_src(__file__)
 
+from autotrade.environment.broker import BrokerProfile
 from autotrade.pipelines.config import (
     SNAPSHOT_CACHE_FORMAT_VERSION,
     AcceptanceRules,
@@ -147,6 +157,16 @@ BASE_EXPECTED_DEFAULTS: dict[str, object] = {
     "subagent_model": "qwen-3.8-27b-fp8",
     "nl_model": "qwen-3.8-27b-fp8",
     "compact_model": "qwen-3.8-27b-fp8",
+    # The rule set: every rule the console stamps on a new arm although an arm
+    # recorded without it keeps being judged without it (`creation_stamps`).
+    # A round's queued arms are created days after its first ones, so a change
+    # here, or a rule the console starts stamping that is missing here, would
+    # let a pair straddle two rule sets; both stop the launcher until the round
+    # re-decides.
+    "require_raw_excess_at_cost_stress": True,
+    "require_forward_plain_selection": True,
+    "require_seed_replicates": True,
+    "dividend_tax": True,
 }
 
 # What every round decides the same way. Values, not commentary.
@@ -270,6 +290,21 @@ def archived_ids() -> set[str]:
         if batch.is_dir() and not batch.is_symlink()
         for arm in batch.iterdir()
         if arm.is_dir() and not arm.is_symlink()
+    }
+
+
+def creation_stamps() -> set[str]:
+    """The rules the console turns on for a new arm only.
+
+    Every acceptance rule, and the Broker's dividend tax, whose creation
+    default differs from the default an arm recorded without the key is read
+    with: those keys are what distinguishes one rule set from the next.
+    """
+    own = {**AcceptanceRules().to_record(), "dividend_tax": BrokerProfile().dividend_tax}
+    return {
+        key
+        for key, value in own.items()
+        if WEB_CREATE_DEFAULTS[key] is not None and WEB_CREATE_DEFAULTS[key] != value
     }
 
 
@@ -416,7 +451,8 @@ class Round:
     changes. ``overrides`` is what the whole round decides on top of
     BASE_OVERRIDES -- normally its dataset selection, and any default every arm
     shares -- and ``pit_views_seed`` the prebuilt view tree every arm hardlinks
-    from.
+    from. ``closed`` says every arm has been created: the file is then only
+    the record of what was run, and :meth:`main` refuses it.
     """
 
     arms: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
@@ -424,6 +460,9 @@ class Round:
     # Empty means the console default seed, which carries the default dataset
     # selection.
     pit_views_seed: str = ""
+    # Stated, not read from disk: an archived arm has no directory and would
+    # look pending.
+    closed: bool = False
 
     def __post_init__(self) -> None:
         reused = sorted(set(self.arms) & RETIRED_IDS)
@@ -457,6 +496,10 @@ class Round:
             for key, value in self.expected.items()
             if WEB_CREATE_DEFAULTS[key] != value
         }
+        # A rule the console newly stamps moves a queued arm as much as a
+        # changed default does, so one nobody pinned or decided is drift too.
+        undecided = creation_stamps() - set(BASE_EXPECTED_DEFAULTS) - set(self.common_overrides)
+        drift.update({key: ("undecided", WEB_CREATE_DEFAULTS[key]) for key in sorted(undecided)})
         if drift:
             raise SystemExit(
                 "console creation defaults drifted from what this round assumes; "
@@ -617,6 +660,11 @@ class Round:
 
     def main(self, argv: list[str], usage: str | None = None) -> int:
         """`<port> [--dry-run] [--fill] [experiment_id ...]`, shared by every round file."""
+        if self.closed:
+            raise SystemExit(
+                "this round is closed: every arm it defines has been created, and the file"
+                " is only the record of what was run"
+            )
         # A mistyped flag must never fall through to the real POST path: without
         # this, --dryrun is read as an experiment-id filter and creates the round.
         mistyped = [

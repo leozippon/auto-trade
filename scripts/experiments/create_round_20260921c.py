@@ -231,6 +231,7 @@ ROUND = Round(
         "events_datasets": EVENTS_DATASETS,
         "text_datasets": TEXT_DATASETS,
     },
+    closed=True,
 )
 
 

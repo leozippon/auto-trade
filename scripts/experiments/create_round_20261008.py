@@ -36,7 +36,10 @@ its lineage is that round's and a freeze there is read against those arms'
 pooled trials by hand. The cost and pool pairs are created after those four
 arms and the clock arm of round 20261009 closed and inherit them
 (`SEQBOOK_LINEAGE`), so their gates price that search themselves; siblings
-that run at the same time are still pooled by hand. Fill order (ids end in
+that run at the same time are still pooled by hand. Both pairs are also held
+to seed replicates, the rule that came in after the bag pair started; the
+local cost arm's first run was deleted before it recorded anything and is
+recreated under that rule like its twin. Fill order (ids end in
 `_20261008`): `seqbag2_bag_100k_8y_qwen` /
 `_mimo`, `seqbag2_cost_100k_8y_qwen` / `_mimo`, `seqbag2_pool_100k_8y_qwen` /
 `_mimo`.
@@ -56,10 +59,15 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.append(str(_REPO_ROOT))
 
+from scripts.experiments._profiles import (
+    FUND_EIGHT_YEAR_100K,
+    MIMO,
+    SEED_REPLICATES,
+    SEQAXES_LINEAGE,
+    SEQBOOK_LINEAGE,
+    TAXED_FUND_PIT_VIEWS_SEED,
+)
 from scripts.experiments._round import Round
-from scripts.experiments.create_round_20261002 import MIMO
-from scripts.experiments.create_round_20261006 import ROUND as SEQAXES_ROUND
-from scripts.experiments.create_round_20261006 import SEQAXES_LINEAGE
 
 SEQBOOK_PACK = "configs/workspace_refs/seqbook_alla_100k_8y_20261008"
 
@@ -114,31 +122,14 @@ BAG_ARM: dict[str, object] = {
     "lineage_arms": SEQAXES_LINEAGE,
     "research_directive": BAG_DIRECTIVE,
 }
-# Every arm that has searched this baseline and closed: round 20261006's label
-# and fundamentals-input pairs and round 20261009's clock arm, on top of that
-# round's own lineage. Arms created after they closed inherit them.
-SEQBOOK_LINEAGE = [
-    *SEQAXES_LINEAGE,
-    "seqlabel_alla_100k_8y_qwen_20261006",
-    "seqlabel_alla_100k_8y_mimo_20261006",
-    "seqfund_alla_100k_8y_qwen_20261006",
-    "seqfund_alla_100k_8y_mimo_20261006",
-    "seqhold_clock_100k_8y_qwen_20261009",
-]
+# Created after round 20261006's four arms and the clock arm of round 20261009
+# closed, so they inherit them; and judged on their seed bases together, which
+# their directives say (`SEED_REPLICATES`).
 LATE_ARM: dict[str, object] = {**BAG_ARM, "lineage_arms": SEQBOOK_LINEAGE}
-COST_ARM: dict[str, object] = {**LATE_ARM, "research_directive": COST_DIRECTIVE}
-
-# Arms created from here on are judged on their seed bases together
-# (`require_seed_replicates`): the mean over the nominee and its registered
-# replicates must clear the bar at the freeze and beat the panel forward. The
-# packs predate the rule and say which seed base's node is nominated; this
-# sentence keeps that from being read as waiving the registration. The local
-# cost arm was created before the rule and runs without it and without the
-# sentence.
-SEED_REPLICATES = (
-    "冻结时把被提名的腿在其他种子基数上的整期行登记为 finish_session 的 seed_replicates；"
-    "包里关于提名哪个种子基数节点的规定只决定提名哪一行，不免除这一登记。"
-)
+COST_ARM: dict[str, object] = {
+    **LATE_ARM,
+    "research_directive": COST_DIRECTIVE + SEED_REPLICATES,
+}
 POOL_ARM: dict[str, object] = {
     **LATE_ARM,
     "research_directive": POOL_DIRECTIVE + SEED_REPLICATES,
@@ -148,28 +139,18 @@ ARMS: dict[str, dict[str, object]] = {
     "seqbag2_bag_100k_8y_qwen_20261008": dict(BAG_ARM),
     "seqbag2_bag_100k_8y_mimo_20261008": {**MIMO, **BAG_ARM},
     "seqbag2_cost_100k_8y_qwen_20261008": dict(COST_ARM),
-    "seqbag2_cost_100k_8y_mimo_20261008": {
-        **MIMO,
-        **COST_ARM,
-        "research_directive": COST_DIRECTIVE + SEED_REPLICATES,
-    },
+    "seqbag2_cost_100k_8y_mimo_20261008": {**MIMO, **COST_ARM},
     "seqbag2_pool_100k_8y_qwen_20261008": dict(POOL_ARM),
     "seqbag2_pool_100k_8y_mimo_20261008": {**MIMO, **POOL_ARM},
 }
 
-# The fundamentals seed's taxed-era twin: every market and fundamentals table is
-# a hard link to round 20261006's seed, and only the Broker's corporate-action
-# tables are rebuilt to carry the bonus-share column the dividend tax reads
-# (logs/data/seed_8y_fund_20261008/). Arms created from here on are taxed by
-# the creation default, so a `c_base` row here differs from round 20261006's
-# by the dividend tax alone.
-TAXED_FUND_PIT_VIEWS_SEED = "data/pit_views_seed_research_8y_fund_20261008"
-
-# The geometry and every round-level parameter are round 20261006's.
+# The geometry and every round-level parameter are round 20261006's, on the
+# taxed twin of its seed, so a `c_base` row here differs from that round's by
+# the dividend tax alone.
 ROUND = Round(
     arms=ARMS,
     pit_views_seed=TAXED_FUND_PIT_VIEWS_SEED,
-    overrides=dict(SEQAXES_ROUND.overrides),
+    overrides=FUND_EIGHT_YEAR_100K,
 )
 
 

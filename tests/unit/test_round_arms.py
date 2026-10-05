@@ -1,13 +1,16 @@
-"""Every checked-in round and reference pack, read through the one launcher.
+"""Every open round and the reference packs its arms mount, read through the one launcher.
 
 The round files are data -- arms, seed, dataset selection, directives -- and
 `scripts/experiments/_round.py` is the behaviour, so these checks are written
-once and parametrised over whatever round files exist. A new round file or arm
-is covered the moment it is added.
+once and parametrised over whatever open round files exist. A new round file or
+arm is covered the moment it is added. A closed round is the record of arms
+that were created and is only imported: it must refuse to run, and its ids stay
+used.
 """
 
 from __future__ import annotations
 
+import ast
 import importlib
 import json
 import re
@@ -40,6 +43,7 @@ from scripts.experiments._round import (
     RETIRED_IDS,
     Round,
     archived_ids,
+    creation_stamps,
 )
 from tests.unit.research_release_fixture import (
     BACKFILLED_HISTORY_START,
@@ -49,22 +53,30 @@ from tests.unit.research_release_fixture import (
 MODEL_ROLES = ("model", "subagent_model", "nl_model", "compact_model")
 # A four-digit calendar year, the shape every literal date in a directive takes.
 CALENDAR_YEAR = re.compile(r"(?<!\d)(?:19|20)\d{2}(?:\d{4})?(?!\d)")
-PACKS = sorted(path for path in (REPO_ROOT / "configs" / "workspace_refs").iterdir() if path.is_dir())
+ROUND_FILES = sorted((REPO_ROOT / "scripts" / "experiments").glob("create_round_*.py"))
 
 
 def _rounds() -> dict[str, Round]:
-    """Every checked-in round file, by module name."""
-    paths = sorted((REPO_ROOT / "scripts" / "experiments").glob("create_round_*.py"))
-    assert paths, "no round definitions found"
+    """Every checked-in round file, closed ones included, by module name."""
+    assert ROUND_FILES, "no round definitions found"
     return {
         path.stem: importlib.import_module(f"scripts.experiments.{path.stem}").ROUND
-        for path in paths
+        for path in ROUND_FILES
     }
 
 
 ROUNDS = _rounds()
-ROUND_IDS = sorted(ROUNDS)
-ARMS = [(name, arm) for name, rnd in sorted(ROUNDS.items()) for arm in rnd.arms]
+ROUND_IDS = sorted(name for name, rnd in ROUNDS.items() if not rnd.closed)
+ARMS = [(name, arm) for name in ROUND_IDS for arm in ROUNDS[name].arms]
+# The packs the open rounds' arms mount: every research attempt copies its
+# pack from the repository, so these are the packs a session can still read.
+PACKS = sorted(
+    {
+        REPO_ROOT / str(reference)
+        for name, arm in ARMS
+        if (reference := ROUNDS[name].request_params(arm)["workspace_reference"])
+    }
+)
 
 
 def _synthetic_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rnd: Round) -> Path:
@@ -284,18 +296,6 @@ def test_an_arm_mounts_the_pack_named_after_it_unless_it_names_another(
     request byte for byte without it; an arm or a round that names another
     pack, or "" for none, keeps it; and a default pack that is not there is
     refused like a named one."""
-    for round_name, rnd in ROUNDS.items():
-        for experiment_id, arm in rnd.arms.items():
-            if arm.get("workspace_reference") != f"configs/workspace_refs/{experiment_id}":
-                continue
-            trimmed = Round(
-                arms={experiment_id: {k: v for k, v in arm.items() if k != "workspace_reference"}},
-                overrides=rnd.overrides,
-                pit_views_seed=rnd.pit_views_seed,
-            )
-            assert json.dumps(trimmed.request_params(experiment_id)) == json.dumps(
-                rnd.request_params(experiment_id)
-            ), (round_name, experiment_id)
     rnd = Round(
         arms={
             "conventional": {},
@@ -361,6 +361,57 @@ def test_a_dry_run_reads_each_lineage_and_refuses_one_by_name(
 def test_a_round_without_arms_is_never_posted() -> None:
     with pytest.raises(SystemExit, match="no arms to create"):
         Round().main(["launcher", "0"])
+
+
+def test_a_closed_round_refuses_every_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every arm of a closed round was created, and archiving an arm deletes
+    its directory, so a mode that reads the queue would create it again. The
+    round refuses before it reads the console or the seed."""
+
+    def unreachable(*args: object) -> object:
+        raise AssertionError("a closed round reached the console")
+
+    monkeypatch.setattr(_round, "health", unreachable)
+    monkeypatch.setattr(_round, "post", unreachable)
+    rnd = Round(arms={"done": {}}, closed=True)
+    for flags in ([], ["done"], ["--dry-run"], ["--fill"], ["--fill", "--dry-run"]):
+        with pytest.raises(SystemExit, match="this round is closed"):
+            rnd.main(["launcher", "0", *flags])
+
+
+def test_an_open_round_imports_no_other_round() -> None:
+    """What rounds share lives in `_profiles.py`, so a round can close, and stay
+    the record of its arms, without an open round reading its values from it."""
+    for name in ROUND_IDS:
+        source = (REPO_ROOT / "scripts" / "experiments" / f"{name}.py").read_text(encoding="utf-8")
+        modules = {
+            node.module
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.ImportFrom) and node.module
+        }
+        assert not [module for module in modules if "create_round_" in module], (name, sorted(modules))
+
+
+def test_a_change_of_the_rule_set_stops_the_launcher(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A round's queued arms are created days after its first ones, with the
+    rules the console then stamps on a new arm. Every rule it stamps is pinned,
+    so turning one off, or stamping one nobody pinned, stops a round that has
+    not decided that rule for itself."""
+    Round().check_console_defaults()
+    assert creation_stamps() <= set(BASE_EXPECTED_DEFAULTS)
+
+    monkeypatch.setitem(_round.WEB_CREATE_DEFAULTS, "require_seed_replicates", False)
+    drift = '"require_seed_replicates": {"round": "True", "console": "False"}'
+    with pytest.raises(SystemExit, match=re.escape(drift)):
+        Round().check_console_defaults()
+    Round(overrides={"require_seed_replicates": False}).check_console_defaults()
+
+    monkeypatch.setitem(_round.WEB_CREATE_DEFAULTS, "require_seed_replicates", True)
+    monkeypatch.delitem(_round.BASE_EXPECTED_DEFAULTS, "require_seed_replicates")
+    undecided = '"require_seed_replicates": {"round": "undecided", "console": "True"}'
+    with pytest.raises(SystemExit, match=re.escape(undecided)):
+        Round().check_console_defaults()
+    Round(overrides={"require_seed_replicates": True}).check_console_defaults()
 
 
 # --fill reads the arm list as a queue against the live console, so these are
@@ -688,178 +739,6 @@ def test_an_arm_is_tracked_only_when_it_names_a_tracking_error_cap() -> None:
     assert (tracked["max_drawdown"], tracked["active_max_drawdown"]) == (0.4, 0.30)
 
 
-def test_the_20260921_mandated_arms_keep_unmandated_drawdowns() -> None:
-    """Those 1M arms named only a cap. Drawdowns stay 0.45 / 0.30; the cap
-    still fills the default beta band."""
-    from autotrade.pipelines.config import acceptance_for
-
-    rnd = ROUNDS["create_round_20260921"]
-    for experiment_id in (
-        "capital_aware_1m_enhanced_20260921",
-        "capital_aware_1m_riskmodel_20260921",
-    ):
-        rules = acceptance_for(rnd.request_params(experiment_id)).to_record()
-        assert (rules["max_drawdown"], rules["active_max_drawdown"]) == (0.45, 0.30)
-        assert rules["tracking_error_cap"] == 0.08
-        assert (rules["beta_min"], rules["beta_max"]) == (0.85, 1.15)
-
-
-def test_the_20260921b_arms_name_their_graduation_bars() -> None:
-    """The b-round records a create-time choice for every bar, not a hidden
-    pair of packages. Mandated arms keep the 35/15 drawdowns they named;
-    un-mandated arms keep 45/30; statistical bars are the defaults of their day."""
-    from autotrade.pipelines.config import AcceptanceRules, acceptance_for
-
-    rnd = ROUNDS["create_round_20260921b"]
-    # The defaults these arms were created under: DSR1 later raised
-    # min_dsr_probability to 0.975, and a round file is the record of its day.
-    defaults = {**AcceptanceRules().to_record(), "min_dsr_probability": 0.90}
-    statistical = (
-        "min_active_ir",
-        "min_dsr_probability",
-        "min_positive_year_share",
-        "min_full_span_validations",
-        "forward_confidence",
-        "recency_months",
-        "min_mean_gross",
-        "min_round_trips_per_month",
-        "heldout_tolerance_z",
-    )
-    mandated = (
-        "fullcash_overlay_1m_20260921b",
-        "indneutral_value_1m_20260921b",
-    )
-    unmandated = (
-        "resid_momentum_100k_20260921b",
-        "eyield_concentrated_100k_20260921b",
-    )
-    for experiment_id in (*mandated, *unmandated):
-        request = rnd.request_params(experiment_id)
-        rules = acceptance_for(request).to_record()
-        for key in statistical:
-            assert request[key] == defaults[key], (experiment_id, key)
-            assert rules[key] == defaults[key], (experiment_id, key)
-    for experiment_id in mandated:
-        rules = acceptance_for(rnd.request_params(experiment_id)).to_record()
-        assert (rules["max_drawdown"], rules["active_max_drawdown"]) == (0.35, 0.15)
-        assert rules["tracking_error_cap"] == 0.08
-        assert (rules["beta_min"], rules["beta_max"]) == (0.85, 1.15)
-    for experiment_id in unmandated:
-        rules = acceptance_for(rnd.request_params(experiment_id)).to_record()
-        assert (rules["max_drawdown"], rules["active_max_drawdown"]) == (0.45, 0.30)
-        assert rules["tracking_error_cap"] is None
-
-
-def test_the_20260921c_arms_name_their_graduation_bars() -> None:
-    """The c-round records a create-time choice for every bar, not a hidden
-    pair of packages. Mandated arms keep the 35/15 drawdowns they named;
-    un-mandated arms keep 45/30; statistical bars are the defaults of their day.
-    `--fill` takes the first four and queues the last two."""
-    from autotrade.pipelines.config import AcceptanceRules, acceptance_for
-
-    rnd = ROUNDS["create_round_20260921c"]
-    # The defaults these arms were created under: DSR1 later raised
-    # min_dsr_probability to 0.975, and a round file is the record of its day.
-    defaults = {**AcceptanceRules().to_record(), "min_dsr_probability": 0.90}
-    statistical = (
-        "min_active_ir",
-        "min_dsr_probability",
-        "min_positive_year_share",
-        "min_full_span_validations",
-        "forward_confidence",
-        "recency_months",
-        "min_mean_gross",
-        "min_round_trips_per_month",
-        "heldout_tolerance_z",
-    )
-    assert list(rnd.arms) == [
-        "quality_overlay_1m_20260921c",
-        "pacc_index_100k_20260921c",
-        "high52_overlay_1m_20260921c",
-        "lottery_reverse_100k_20260921c",
-        "rmax_overlay_1m_20260921c",
-        "net_issuance_100k_20260921c",
-    ]
-    mandated = (
-        "quality_overlay_1m_20260921c",
-        "high52_overlay_1m_20260921c",
-        "rmax_overlay_1m_20260921c",
-    )
-    unmandated = (
-        "pacc_index_100k_20260921c",
-        "lottery_reverse_100k_20260921c",
-        "net_issuance_100k_20260921c",
-    )
-    for experiment_id in (*mandated, *unmandated):
-        request = rnd.request_params(experiment_id)
-        rules = acceptance_for(request).to_record()
-        for key in statistical:
-            assert request[key] == defaults[key], (experiment_id, key)
-            assert rules[key] == defaults[key], (experiment_id, key)
-    for experiment_id in mandated:
-        rules = acceptance_for(rnd.request_params(experiment_id)).to_record()
-        assert (rules["max_drawdown"], rules["active_max_drawdown"]) == (0.35, 0.15)
-        assert rules["tracking_error_cap"] == 0.08
-        assert (rules["beta_min"], rules["beta_max"]) == (0.85, 1.15)
-    for experiment_id in unmandated:
-        rules = acceptance_for(rnd.request_params(experiment_id)).to_record()
-        assert (rules["max_drawdown"], rules["active_max_drawdown"]) == (0.45, 0.30)
-        assert rules["tracking_error_cap"] is None
-
-
-def test_the_20260921d_arms_name_their_graduation_bars() -> None:
-    """The d-round records a create-time choice for every bar, not a hidden
-    pair of packages. Mandated arms keep the 35/15 drawdowns they named;
-    un-mandated arms keep 45/30; statistical bars are the defaults of their day.
-    Four arms in file order: an empty slot takes the first."""
-    from autotrade.pipelines.config import AcceptanceRules, acceptance_for
-
-    rnd = ROUNDS["create_round_20260921d"]
-    # The defaults these arms were created under: DSR1 later raised
-    # min_dsr_probability to 0.975, and a round file is the record of its day.
-    defaults = {**AcceptanceRules().to_record(), "min_dsr_probability": 0.90}
-    statistical = (
-        "min_active_ir",
-        "min_dsr_probability",
-        "min_positive_year_share",
-        "min_full_span_validations",
-        "forward_confidence",
-        "recency_months",
-        "min_mean_gross",
-        "min_round_trips_per_month",
-        "heldout_tolerance_z",
-    )
-    assert list(rnd.arms) == [
-        "gp_overlay_1m_20260921d",
-        "noa_index_100k_20260921d",
-        "cma_overlay_1m_20260921d",
-        "cashdiv_pool_100k_20260921d",
-    ]
-    mandated = (
-        "gp_overlay_1m_20260921d",
-        "cma_overlay_1m_20260921d",
-    )
-    unmandated = (
-        "noa_index_100k_20260921d",
-        "cashdiv_pool_100k_20260921d",
-    )
-    for experiment_id in (*mandated, *unmandated):
-        request = rnd.request_params(experiment_id)
-        rules = acceptance_for(request).to_record()
-        for key in statistical:
-            assert request[key] == defaults[key], (experiment_id, key)
-            assert rules[key] == defaults[key], (experiment_id, key)
-    for experiment_id in mandated:
-        rules = acceptance_for(rnd.request_params(experiment_id)).to_record()
-        assert (rules["max_drawdown"], rules["active_max_drawdown"]) == (0.35, 0.15)
-        assert rules["tracking_error_cap"] == 0.08
-        assert (rules["beta_min"], rules["beta_max"]) == (0.85, 1.15)
-    for experiment_id in unmandated:
-        rules = acceptance_for(rnd.request_params(experiment_id)).to_record()
-        assert (rules["max_drawdown"], rules["active_max_drawdown"]) == (0.45, 0.30)
-        assert rules["tracking_error_cap"] is None
-
-
 @pytest.mark.parametrize(("round_name", "experiment_id"), ARMS)
 def test_every_arm_directive_is_usable(round_name: str, experiment_id: str) -> None:
     """A directive is copied into every research session of the arm and must
@@ -889,13 +768,12 @@ def test_an_arm_requests_a_gpu_exactly_when_its_starter_needs_cuda(
 def test_an_arm_may_run_its_own_account_and_an_arm_that_states_none_inherits() -> None:
     """The account is a per-arm parameter, not only a per-round one.
 
-    Two arms of the 2026-09-19 round mount one pack and differ in the account
-    they research on, because at CNY 100k a constituent book is cost-feasible
-    to about 30 names and at CNY 1M to 50. That only works while `initial_cash`
-    stays an open create parameter the arm entry may override: a closed or
-    unknown key would be refused before anything is sent, and an ignored one
-    would run both arms on the same account while the round file claimed
-    otherwise. Stated as the two relations that must hold.
+    Arms that mount one pack may differ in the account they research on,
+    because at CNY 100k a constituent book is cost-feasible to about 30 names
+    and at CNY 1M to 50. That only works while `initial_cash` stays an open
+    create parameter the arm entry may override: a closed or unknown key would
+    be refused before anything is sent, and an ignored one would run both arms
+    on the same account while the round file claimed otherwise.
     """
     assert "initial_cash" in WEB_CREATE_DEFAULTS
     assert "initial_cash" not in WEB_CLOSED_PARAMS
@@ -905,23 +783,6 @@ def test_an_arm_may_run_its_own_account_and_an_arm_that_states_none_inherits() -
     )
     assert rnd.request_params("states_it")["initial_cash"] == 250_000
     assert rnd.request_params("states_none")["initial_cash"] == 100_000
-    accounts = {
-        experiment_id: float(ROUNDS[name].request_params(experiment_id)["initial_cash"])
-        for name, experiment_id in ARMS
-    }
-    assert all(value > 0 for value in accounts.values()), accounts
-    paired = {
-        experiment_id: value
-        for experiment_id, value in accounts.items()
-        if experiment_id.startswith("index_relative_")
-    }
-    # The id names the account, and the group really does run more than one.
-    assert len(set(paired.values())) > 1, paired
-    for experiment_id, value in paired.items():
-        assert value == (100_000.0 if "_100k_" in experiment_id else 1_000_000.0), (
-            experiment_id,
-            value,
-        )
 
 
 @pytest.mark.parametrize(("round_name", "experiment_id"), ARMS)
@@ -960,83 +821,15 @@ def test_the_selection_matches_the_prebuilt_seed(round_name: str) -> None:
     assert recorded["snapshot_config"] == expected
 
 
-def test_mounting_index_weight_leaves_every_other_round_byte_for_byte() -> None:
-    """A newly selectable dataset reaches exactly the round that asked for it.
-
-    A round's snapshot configuration IS the contract its prebuilt seed and the
-    arms hardlinking that tree were built under, so adding a dataset to a round
-    with running arms would make their seed unusable. Stated as the relation
-    that has to hold: `index_weight` reaches exactly the rounds built on the
-    benchmark round's selection -- the one that introduced it and whichever
-    later rounds import it -- and the eight-year round, which chose it for its
-    own seed. Each benchmark-lineage macro selection is the 2026-09-20 one plus
-    that name, and each record is otherwise identical to it byte for byte; the
-    eight-year selection draws only on that same menu. The tree each round's
-    arms actually read is compared separately, above, against its own
-    provider.json.
-    """
-    records = {
-        name: _snapshot_config(ROUNDS[name].request_params(PROBE_ID)).to_record()
-        for name in ROUND_IDS
-    }
-    carrying = {
-        name for name, record in records.items() if "index_weight" in record["datasets"]["macro"]
-    }
-    lineage = {
-        "create_round_20260919",
-        "create_round_20260921",
-        "create_round_20260921b",
-        "create_round_20260921c",
-        "create_round_20260921d",
-        "create_round_20260922",
-        "create_round_20260923",
-        "create_round_20260924",
-        "create_round_20260925",
-        "create_round_20260926",
-    }
-    eight_year = {
-        "create_round_20260927",
-        "create_round_20261001",
-        "create_round_20261002",
-        "create_round_20261003",
-        "create_round_20261004",
-        "create_round_20261005",
-        "create_round_20261006",
-        "create_round_20261007",
-        "create_round_20261008",
-        "create_round_20261009",
-        "create_round_20261010",
-        "create_round_20261011",
-    }
-    assert carrying == lineage | eight_year, sorted(carrying)
-    base = records["create_round_20260920"]
-    for name in sorted(eight_year):
-        assert set(records[name]["datasets"]["macro"]) <= {*base["datasets"]["macro"], "index_weight"}, name
-    for name in sorted(lineage):
-        benchmark = records[name]
-        assert benchmark["datasets"]["macro"] == [*base["datasets"]["macro"], "index_weight"], name
-        assert json.dumps(
-            {**benchmark, "datasets": base["datasets"]}, sort_keys=True
-        ) == json.dumps(base, sort_keys=True), name
-    # The pin-time check reads the same selection: a round that does not select
-    # the dataset must not start requiring its raw directory either.
-    for name, record in records.items():
-        required = required_release_raw_datasets(
-            _snapshot_config(ROUNDS[name].request_params(PROBE_ID))
-        )
-        assert ("index_weight" in required) == (name in carrying), name
-        assert "index_weight" not in record["datasets"]["events"], name
-
-
 def test_no_round_reuses_an_experiment_id() -> None:
     """An id is never reused, by any round.
 
-    Three sources of "already used" are checked: the other round files, the
-    retired ids, and -- where the operator's archive exists -- what is actually
-    archived on this machine.
+    Three sources of "already used" are checked: the other round files, closed
+    ones included, the retired ids, and -- where the operator's archive
+    exists -- what is actually archived on this machine.
     """
     seen: dict[str, str] = {}
-    for round_name in ROUND_IDS:
+    for round_name in sorted(ROUNDS):
         for experiment_id in ROUNDS[round_name].arms:
             assert experiment_id not in seen, (experiment_id, seen.get(experiment_id), round_name)
             seen[experiment_id] = round_name
@@ -1093,11 +886,8 @@ def test_no_reference_pack_restates_the_import_allowlist(pack: Path) -> None:
 # round 20260926 other arms' forward readings reached refs/ through the packs'
 # closed-direction and prior tables: the tables whose header row names a
 # closure (关闭) or the register (登记册). Those tables cite the register row
-# and research-period readings only. Packs of earlier rounds are exempt: their
-# arms have run, and every attempt re-copies refs/ from the repository.
+# and research-period readings only.
 FORWARD_PERIOD_MARKERS = ("前推", "held-out", "forward ir", "f2 下界")
-FORWARD_PERIOD_CHECK_FROM = 20260927
-PACK_ROUND_LABEL = re.compile(r"_(\d{8})[a-z]?$")
 
 
 def _forward_period_table_rows(pack: Path) -> list[str]:
@@ -1119,21 +909,16 @@ def _forward_period_table_rows(pack: Path) -> list[str]:
 
 
 @pytest.mark.parametrize("pack", PACKS, ids=lambda path: path.name)
-def test_no_new_pack_table_quotes_the_forward_period(pack: Path) -> None:
-    """A pack of round 20260927 or later quotes no forward or Held-out reading."""
-    label = PACK_ROUND_LABEL.search(pack.name)
-    assert label, f"{pack.name} does not end in its round label _YYYYMMDD"
-    if int(label.group(1)) < FORWARD_PERIOD_CHECK_FROM:
-        return
+def test_no_pack_table_quotes_the_forward_period(pack: Path) -> None:
+    """A pack quotes no forward or Held-out reading."""
     rows = _forward_period_table_rows(pack)
     assert not rows, f"{pack.name} quotes the forward period:\n" + "\n".join(rows)
 
 
 # Round 20260927 copied the book into 225 starters in 38 variants, so a fixed
 # defect (a full book buying a 13th seat) kept shipping in the copies for 70
-# hours. From round 20261001 on a starter's book is the canonical file itself.
+# hours. A starter's book is the canonical file itself.
 STARTER_LIB = REPO_ROOT / "configs" / "starter_lib"
-CANONICAL_BOOK_FROM = 20261001
 CANONICAL_BOOK = {
     path.name: path.read_bytes()
     for path in STARTER_LIB.iterdir()
@@ -1142,13 +927,9 @@ CANONICAL_BOOK = {
 
 
 @pytest.mark.parametrize("pack", PACKS, ids=lambda path: path.name)
-def test_a_new_starter_carries_the_canonical_book_byte_for_byte(pack: Path) -> None:
+def test_a_starter_carries_the_canonical_book_byte_for_byte(pack: Path) -> None:
     """A starter file named like one in configs/starter_lib/ is that file."""
     assert CANONICAL_BOOK, "configs/starter_lib/ holds no canonical module"
-    label = PACK_ROUND_LABEL.search(pack.name)
-    assert label, f"{pack.name} does not end in its round label _YYYYMMDD"
-    if int(label.group(1)) < CANONICAL_BOOK_FROM:
-        return
     differing = [
         str(path.relative_to(pack))
         for path in sorted((pack / "starter").rglob("*"))

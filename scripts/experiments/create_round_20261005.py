@@ -44,20 +44,13 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.append(str(_REPO_ROOT))
 
+# The pack, the fundamentals geometry and the round-level parameters this round
+# first stated are shared with the rounds after it.
+from scripts.experiments._profiles import FUND_EIGHT_YEAR_100K, FUND_PACK, MIMO
 from scripts.experiments._round import Round
-from scripts.experiments.create_round_20260927 import CSI1000, EIGHT_YEAR, GATES
-from scripts.experiments.create_round_20261002 import MIMO
 
-FUND_PACK = "configs/workspace_refs/fund_open_100k_8y_20261005"
-
-# The eight-year geometry with the fundamentals domain switched on; leaving
-# `fundamental_datasets` empty selects the default ten, the selection the seed
-# was prebuilt for from release 55fc7fd82c3c4c77b752920ec4507609 (the dividend
-# seed's own, its fundamental events audited from 2016-01). Daily, macro,
-# universe and the Broker's corporate actions are byte-identical to the
-# dividend seed's (logs/notes/round_20261005/SEED_fund_8y.md §1).
+# Prebuilt for exactly the fundamentals geometry and selection (FUND_EIGHT_YEAR).
 FUND_PIT_VIEWS_SEED = "data/pit_views_seed_research_8y_fund_20261005"
-FUND_EIGHT_YEAR: dict[str, object] = {**EIGHT_YEAR, "include_fundamentals": True}
 
 # Every arm that recorded a non-control trial of a learned or sign-fitted
 # composite on cross-sectional features at 100k on CSI 1000 over these years.
@@ -119,15 +112,8 @@ ARMS: dict[str, dict[str, object]] = {
 ROUND = Round(
     arms=ARMS,
     pit_views_seed=FUND_PIT_VIEWS_SEED,
-    overrides={
-        **FUND_EIGHT_YEAR,
-        **GATES,
-        "max_replay_years": 96,
-        "initial_cash": 100_000,
-        "benchmark_index": CSI1000,
-        "max_drawdown": 0.55,
-        "active_max_drawdown": 0.30,
-    },
+    overrides=FUND_EIGHT_YEAR_100K,
+    closed=True,
 )
 
 

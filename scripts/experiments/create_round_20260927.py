@@ -121,6 +121,9 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.append(str(_REPO_ROOT))
 
+# The eight-year geometry and selection, CSI 1000 and the graduation bars this
+# round first stated are shared with the rounds after it.
+from scripts.experiments._profiles import CSI1000, EIGHT_YEAR, GATES
 from scripts.experiments._round import Round
 
 # Built for exactly EIGHT_YEAR over release 41f74471aa754d5e80e52a6360711c5a.
@@ -130,37 +133,8 @@ PIT_VIEWS_SEED = "data/pit_views_seed_research_8y_20260927"
 # pins this tree; the range20 arms stay on the seed they already ran.
 DIVIDEND_PIT_VIEWS_SEED = "data/pit_views_seed_research_8y_div_20260924"
 
-# The research geometry and dataset selection the seed was planned over; part
-# of its contract, so no arm may change one of them alone.
-EIGHT_YEAR: dict[str, object] = {
-    "research_start": "20170701",
-    "research_end": "20250630",
-    "forward_end": "20260630",
-    "heldout_end": "20260930",
-    "window_months": 108,
-    "include_fundamentals": False,
-    "include_events": False,
-    "include_text": False,
-    "macro_datasets": ["index_daily", "index_dailybasic", "sw_daily", "index_weight"],
-}
-
 CSI300 = "000300.SH"
 CSI500 = "000905.SH"
-CSI1000 = "000852.SH"
-
-# Create-time graduation bars, named on every arm so the request records a
-# choice. These are today's defaults.
-GATES: dict[str, object] = {
-    "min_active_ir": 0.75,
-    "min_dsr_probability": 0.975,
-    "min_positive_year_share": 0.75,
-    "min_full_span_validations": 2,
-    "forward_confidence": 0.80,
-    "recency_months": 6,
-    "min_mean_gross": 0.50,
-    "min_round_trips_per_month": 1,
-    "heldout_tolerance_z": 1.28,
-}
 
 ARMS: dict[str, dict[str, object]] = {
     # Primary. The untrained range20 score on CSI 500 constituents over eight research years:
@@ -3723,6 +3697,7 @@ ROUND = Round(
     arms=ARMS,
     pit_views_seed=PIT_VIEWS_SEED,
     overrides={**EIGHT_YEAR, "max_replay_years": 96},
+    closed=True,
 )
 
 

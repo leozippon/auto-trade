@@ -46,6 +46,9 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.append(str(_REPO_ROOT))
 
+# The hosted arm of a pair, MIMO, first stated here, is shared with the rounds
+# after it.
+from scripts.experiments._profiles import MIMO
 from scripts.experiments._round import Round
 from scripts.experiments.create_round_20260927 import (
     CSI1000,
@@ -56,16 +59,6 @@ from scripts.experiments.create_round_20260927 import (
 
 OPEN_PACK = "configs/workspace_refs/open_research_100k_8y_20261002"
 CENSUS_LIN_PACK = "configs/workspace_refs/census_lin_csi1000_100k_8y_20261002"
-
-# The hosted arm of a pair: main session, sub-agents and compaction on MiMo, the
-# compaction threshold pinned to the local arms' value so both compact alike.
-# `nl_model` is left on the local default.
-MIMO: dict[str, object] = {
-    "model": "mimo-v2.6-flash",
-    "subagent_model": "mimo-v2.6-flash",
-    "compact_model": "mimo-v2.6-flash",
-    "compact_token_threshold": 221_184,
-}
 
 OPEN_DIRECTIVE = (
     "本臂不定机制家族：你在 10 万元账户上、从八年数据面里自己提出家族、成批预登记并检验，"
@@ -125,6 +118,7 @@ ROUND = Round(
         "max_drawdown": 0.55,
         "active_max_drawdown": 0.30,
     },
+    closed=True,
 )
 
 

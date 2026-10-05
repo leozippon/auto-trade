@@ -112,13 +112,15 @@ class CronInstallerTest(unittest.TestCase):
         self.assertEqual(jobs[0].split()[:5], ["*/10", "*", "*", "*", "*"])
         self.assertIn("flock -n .runtime/research/cron.lock", jobs[0])
         self.assertTrue(jobs[0].endswith(" >> logs/research/cron.log 2>&1"), jobs[0])
-        # The queue it fills has to be round files this repository holds:
-        # a mistyped one would fail every ten minutes instead of once.
+        # The queue it fills has to be open round files this repository holds:
+        # a mistyped or closed one would fail every ten minutes instead of once.
         rounds = next(line.split("=", 1)[1] for line in lines if line.startswith("ROUNDS="))
         self.assertIn("$ROUNDS", jobs[0])
         self.assertTrue(rounds.split())
         for round_file in rounds.split():
             self.assertTrue((installer.REPO_ROOT / round_file).is_file(), round_file)
+            module = importlib.import_module("scripts.experiments." + Path(round_file).stem)
+            self.assertFalse(module.ROUND.closed, round_file)
 
     def test_the_research_fill_runs_every_round_in_order_and_fails_on_any_refusal(self) -> None:
         """The job line itself, run by bash with a stand-in interpreter: each
