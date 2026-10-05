@@ -100,6 +100,7 @@ from autotrade.pipelines.session_tools import (
 )
 from autotrade.pipelines.verdict import (
     ACTIVE_DAILY_COLUMNS,
+    HOLDER_READINGS,
     information_ratio_bar,
     neutralized_statistics,
 )
@@ -1649,9 +1650,10 @@ class BatchValidateRunTest(unittest.TestCase):
         """Two sessions quoted 0.148 and 1.608 as one node's "cost stress": the
         graduation's active reading and the raw cumulative excess. Every row
         now carries both, computed by the host under names that say which:
-        the raw excess over the benchmark at the arm's multiplier beside the
-        zero-skill panel's own return, and the active one the graduation
-        judges."""
+        the raw excess over the benchmark at the arm's multiplier and the
+        active one the graduation judges. The holder's readings beside them
+        are the structure a forward slice carries, plain selection included,
+        so the row reads over research what the graduation reads forward."""
         with TemporaryDirectory() as tmp:
             session = _Session(
                 Path(tmp), acceptance_rules={"max_drawdown": 0.25, "cost_stress_multiplier": 3.0}
@@ -1674,11 +1676,35 @@ class BatchValidateRunTest(unittest.TestCase):
                     / "style_analysis.json"
                 ).read_text(encoding="utf-8")
             )
-            self.assertAlmostEqual(
-                raw["panel_return"],
-                math.prod(1.0 + value for _day, value in sidecar["panel_daily"]) - 1.0,
-                places=6,
+
+            def compound(key: str, start: str = "", end: str = "99999999") -> float:
+                return math.prod(
+                    1.0 + value for day, value in sidecar[key] if start <= day <= end
+                ) - 1.0
+
+            # The holder's readings of the row's own span: each stored series
+            # compounded, and the two differences, unregressed.
+            self.assertEqual(
+                list(raw),
+                [
+                    *HOLDER_READINGS,
+                    "raw_excess_at_cost_stress",
+                    "cost_stress_multiplier",
+                    "active_market_beta",
+                    "last_two_years",
+                ],
             )
+            book, benchmark, panel = (
+                compound(key) for key in ("strategy_daily", "benchmark_daily", "panel_daily")
+            )
+            for name, expected in (
+                ("strategy_return", book),
+                ("benchmark_return", benchmark),
+                ("panel_return", panel),
+                ("raw_excess", book - benchmark),
+                ("plain_selection", book - panel),
+            ):
+                self.assertAlmostEqual(raw[name], expected, places=6, msg=name)
             statistics = neutralized_statistics(sidecar)
             years = statistics["days"] / TRADING_DAYS_PER_YEAR
             activity = row["selection_statistics"]["graduation_activity"]
@@ -1698,23 +1724,32 @@ class BatchValidateRunTest(unittest.TestCase):
             self.assertAlmostEqual(
                 raw["active_market_beta"], statistics["market_beta"], places=3
             )
-            # The last two research years read on their own: the stored
-            # series compounded over Y3..Y4.
-            def compound(key: str) -> float:
-                return math.prod(
-                    1.0 + value for day, value in sidecar[key] if "20230701" <= day <= "20250630"
-                ) - 1.0
-
+            # The last two research years read on their own: the same five
+            # readings, the stored series compounded over Y3..Y4.
             late = raw["last_two_years"]
+            self.assertEqual(list(late), ["span", *HOLDER_READINGS])
             self.assertEqual(late["span"], "Y3..Y4")
-            self.assertAlmostEqual(late["return"], compound("strategy_daily"), places=6)
-            self.assertAlmostEqual(late["benchmark_return"], compound("benchmark_daily"), places=6)
-            self.assertAlmostEqual(late["panel_return"], compound("panel_daily"), places=6)
-            # A probe row reads both over its own span; it does not reach the
-            # last two years, so it has no line for them.
+            book, benchmark, panel = (
+                compound(key, "20230701", "20250630")
+                for key in ("strategy_daily", "benchmark_daily", "panel_daily")
+            )
+            self.assertAlmostEqual(late["strategy_return"], book, places=6)
+            self.assertAlmostEqual(late["benchmark_return"], benchmark, places=6)
+            self.assertAlmostEqual(late["panel_return"], panel, places=6)
+            self.assertAlmostEqual(late["plain_selection"], book - panel, places=6)
+            self.assertNotEqual(late["strategy_return"], raw["strategy_return"])
+            # A probe row reads the same over its own span; it does not reach
+            # the last two years, so it has no line for them.
             probe = session.validate_one("b", _strategy("2"), span="Y1")
-            self.assertIn("raw_excess_at_cost_stress", probe["raw_readings"])
-            self.assertNotIn("last_two_years", probe["raw_readings"])
+            self.assertEqual(
+                list(probe["raw_readings"]),
+                [
+                    *HOLDER_READINGS,
+                    "raw_excess_at_cost_stress",
+                    "cost_stress_multiplier",
+                    "active_market_beta",
+                ],
+            )
             self.assertIn(
                 "active_excess_at_cost_stress",
                 probe["selection_statistics"]["graduation_activity"],

@@ -53,6 +53,7 @@ from autotrade.environment.replay.stats import (
     TRADING_DAYS_PER_YEAR,
     compounded_drawdown,
     compounded_path,
+    compounded_return,
 )
 from autotrade.environment.replay.style import (
     _series_pairs,
@@ -559,12 +560,7 @@ def _compounded(series: object, start: str, end: str) -> float | None:
         for date, value in _series_pairs(series)
         if (not start or date >= start) and (not end or date <= end)
     ]
-    if not values:
-        return None
-    equity = 1.0
-    for value in values:
-        equity *= 1.0 + value
-    return equity - 1.0
+    return compounded_return(values) if values else None
 
 
 def panel_return(analysis: Mapping[str, object]) -> float | None:
@@ -590,6 +586,11 @@ def holder_readings(
     picked beat random names on its own skeleton. A series the sidecar does not
     carry over the span reads ``None``, and so does every difference built on
     it. Empty bounds take the whole sidecar.
+
+    One structure wherever the holder is read: the ``raw_readings`` of a
+    forward or Held-out slice (:func:`slice_readings`), and of a research
+    row over its span and its last two years
+    (``session_tools.SessionValidations.raw_readings``).
     """
 
     strategy = _compounded(analysis.get("strategy_daily"), start, end)
@@ -602,6 +603,10 @@ def holder_readings(
         "raw_excess": None if strategy is None or benchmark is None else strategy - benchmark,
         "plain_selection": None if strategy is None or panel is None else strategy - panel,
     }
+
+
+# The holder's readings by name, in order: what :func:`holder_readings` returns.
+HOLDER_READINGS = tuple(holder_readings({}))
 
 
 def slice_readings(
@@ -627,16 +632,6 @@ def slice_readings(
         "plain_excess": float(rows[:, 0].mean()) * TRADING_DAYS_PER_YEAR,
         "raw_readings": holder_readings(analysis, start=start, end=end),
     }
-
-
-# The holder's readings a slice carries (:func:`holder_readings`), in order.
-_HOLDER_READINGS = (
-    "strategy_return",
-    "benchmark_return",
-    "panel_return",
-    "raw_excess",
-    "plain_selection",
-)
 
 
 def seed_replicate_slice(
@@ -680,7 +675,7 @@ def seed_mean(blocks: Sequence[Mapping[str, object]]) -> dict[str, object]:
         "plain_excess": mean([block.get("plain_excess") for block in blocks]),
         "raw_readings": {
             name: mean([reading.get(name) for reading in raw])  # type: ignore[union-attr]
-            for name in _HOLDER_READINGS
+            for name in HOLDER_READINGS
         },
     }
 

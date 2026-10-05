@@ -473,10 +473,7 @@ def attach_sub_window_benchmark(
         ]
         if not covered:
             continue
-        compounded = 1.0
-        for value in covered:
-            compounded *= 1.0 + value
-        benchmark = compounded - 1.0
+        benchmark = compounded_return(covered)
         own = row.get("return")
         row["benchmark_return"] = _round(benchmark)
         if isinstance(own, (int, float)) and not isinstance(own, bool):
@@ -488,11 +485,13 @@ def attach_sub_window_benchmark(
             row["active_neutralized_excess_return"] = window_neutralized_excess(
                 active, start=start, end=end
             )
-            panel = 1.0
-            for day, value in _series_pairs(style_analysis.get("panel_daily")):
-                if start <= day <= end:
-                    panel *= 1.0 + value
-            row["panel_return"] = _round(panel - 1.0)
+            row["panel_return"] = _round(
+                compounded_return(
+                    value
+                    for day, value in _series_pairs(style_analysis.get("panel_daily"))
+                    if start <= day <= end
+                )
+            )
     return summary
 
 
@@ -617,6 +616,17 @@ def _max_drawdown(opening: float, equities: Sequence[float]) -> float:
         if peak > 0:
             worst = max(worst, (peak - equity) / peak)
     return worst
+
+
+def compounded_return(returns: Iterable[float]) -> float:
+    """What a daily return series compounds to: the equity it reaches from 1,
+    less 1. The one compounding of a stored series over a window, for a year's
+    benchmark and panel and for the holder's readings of a slice alike."""
+
+    equity = 1.0
+    for value in returns:
+        equity *= 1.0 + value
+    return equity - 1.0
 
 
 def compounded_path(returns: Iterable[float]) -> list[tuple[float, float]]:

@@ -87,7 +87,6 @@ from .verdict import (
     excess_at_cost_stress,
     holder_readings,
     neutralized_statistics,
-    panel_return,
     raw_excess_at_cost_stress,
 )
 
@@ -883,27 +882,36 @@ class SessionValidations:
         }
 
     def raw_readings(self, step: StepResult) -> dict[str, object]:
-        """What the holder's account did against the benchmark over the
-        node's span that the row's ``stats`` do not already say: the raw
-        excess at the arm's cost stress (``verdict.raw_excess_at_cost_stress``,
-        the reading the freeze gate's raw condition judges), the zero-skill
-        panel's own return after its costs (``verdict.panel_return``), the
-        book's market loading relative to that panel (the market coefficient
-        of the active series' regression, from the sidecar), and, on a row
-        whose span covers them, the last two research years read on their own
-        (``verdict.holder_readings``): the book, the benchmark and the panel,
-        compounded over those two years."""
+        """What the holder's account did over the node's span, unregressed.
+
+        The holder's readings of the span (``verdict.holder_readings``: the
+        book, the benchmark and the zero-skill panel as stored, the raw excess
+        and the plain selection), in the structure a forward slice carries
+        them, so a row reads over research what the graduation reads forward.
+        Beside them the raw excess at the arm's cost stress
+        (``verdict.raw_excess_at_cost_stress``, the reading the freeze gate's
+        raw condition judges), the book's market loading relative to its
+        panel (the market coefficient of the active series' regression, from
+        the sidecar) and, on a row whose span covers them, the same holder's
+        readings of the last two research years on their own
+        (``last_two_years``). Rows report six decimals.
+        """
 
         multiplier = self.rules.cost_stress_multiplier
         analysis = _step_analysis(step)
         active = analysis.get("active_neutralized_excess")
+
+        def held(start: str = "", end: str = "") -> dict[str, float | None]:
+            readings = holder_readings(analysis, start=start, end=end)
+            return {name: _rounded(value) for name, value in readings.items()}
+
         readings: dict[str, object] = {
+            **held(),
             "raw_excess_at_cost_stress": _rounded(
                 raw_excess_at_cost_stress(
                     step.validation.summary, cost_stress_multiplier=multiplier
                 )
             ),
-            "panel_return": _rounded(panel_return(analysis)),
             "cost_stress_multiplier": multiplier,
             "active_market_beta": (
                 active.get("market_beta") if isinstance(active, Mapping) else None
@@ -913,12 +921,9 @@ class SessionValidations:
         first = max(len(years) - 2, 0)
         span = research_span(years, step.span)
         if span.start <= years[first].start and span.end >= years[-1].end:
-            late = holder_readings(analysis, start=years[first].start, end=years[-1].end)
             readings["last_two_years"] = {
                 "span": f"Y{first + 1}..Y{len(years)}" if first + 1 < len(years) else "Y1",
-                "return": _rounded(late["strategy_return"]),
-                "benchmark_return": _rounded(late["benchmark_return"]),
-                "panel_return": _rounded(late["panel_return"]),
+                **held(years[first].start, years[-1].end),
             }
         return readings
 
@@ -1426,18 +1431,24 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "stress: annualised active neutralized excess after cost_stress_multiplier "
         "x the slippage on the span's turnover) beside the graduation's "
         "thresholds, which gate nothing at a freeze), raw_readings (the holder's "
-        "money, which active readings are not: raw_excess_at_cost_stress, the "
+        "money, which active readings are not: strategy_return, benchmark_return "
+        "and panel_return, what the book after every cost, benchmark_index and "
+        "the zero-skill panel after its costs each compounded to over the span, "
+        "with raw_excess, book minus benchmark, and plain_selection, book minus "
+        "panel with no regression -- the reading the graduation judges over the "
+        "forward months when acceptance_rules.graduation.forward lists "
+        "plain_selection; raw_excess_at_cost_stress, the "
         "span's own equity return after every cost minus benchmark_index's price "
         "return over the same days, less (cost_stress_multiplier - 1) x the "
         "slippage on its turnover, cumulative -- what the freeze gate's raw "
         "condition judges on a full-span row when acceptance_rules.freeze_gate "
-        "lists raw_excess_at_cost_stress -- panel_return, what the zero-skill "
-        "panel itself earned after its costs, active_market_beta, the book's "
-        "market loading relative to that panel (below zero it lags its random "
+        "lists raw_excess_at_cost_stress; active_market_beta, the book's "
+        "market loading relative to its panel (below zero it lags its random "
         "copies whenever the index rallies, a lag the neutralized readings "
-        "credit back but the unhedged holder bears), and on a row covering "
-        "them last_two_years, the book's, benchmark's and panel's returns over "
-        "the last two research years; the rest of that picture is in "
+        "credit back but the unhedged holder bears); and on a row covering "
+        "them last_two_years, the same five readings from strategy_return to "
+        "plain_selection over the last two research years alone; the rest of "
+        "that picture is in "
         "stats: total_return and annualized_return after every cost, "
         "benchmark.benchmark_return and benchmark.excess_return over the same "
         "days, and cost_sensitivity.excess_at_2x_slippage, the raw cumulative "
