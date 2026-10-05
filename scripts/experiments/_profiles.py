@@ -78,6 +78,22 @@ FUND_EIGHT_YEAR_100K: dict[str, object] = {
 # twin by the dividend tax alone.
 TAXED_FUND_PIT_VIEWS_SEED = "data/pit_views_seed_research_8y_fund_20261008"
 
+# The eight-year geometry with the vendor's announcement titles as the one text
+# dataset (round 20261012): daily, universe, the four macro tables and
+# `anns_d`, no fundamentals or events -- the selection the title seed below was
+# prebuilt for. Its titles are the vendor's `anns_d` throughout: 2016-01..2019-12
+# fetched from the official service, 2020-01 on the relay copy the lake held
+# (logs/data/seed_8y_anns_20261006/).
+TITLE_EIGHT_YEAR: dict[str, object] = {**EIGHT_YEAR, "include_text": True, "text_datasets": ["anns_d"]}
+
+# Round 20261005's 100k bars on the title geometry.
+TITLE_EIGHT_YEAR_100K: dict[str, object] = {**FUND_EIGHT_YEAR_100K, **TITLE_EIGHT_YEAR}
+
+# The title seed: daily, macro and universe from release
+# fa6a99174bcb4c43bcc957f0a91a0cce, the Broker's taxed corporate actions, and
+# the text domain with `anns_d` alone.
+TITLE_PIT_VIEWS_SEED = "data/pit_views_seed_research_8y_anns_20261006"
+
 # The fundamentals pack (round 20261005), which every lane on that surface mounts.
 FUND_PACK = "configs/workspace_refs/fund_open_100k_8y_20261005"
 
