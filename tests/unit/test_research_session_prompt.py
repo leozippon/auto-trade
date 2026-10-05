@@ -227,6 +227,9 @@ def test_the_prompt_states_the_research_session_contract() -> None:
         "参考包写定的更严条件以包为准",
     ):
         assert clause in protocol, clause
+    # A fixed family or line is stated once: what follows a falsified
+    # candidate, beside the pack rules it belongs with.
+    assert protocol.count("下一根登记轴") == 1
     # The sections follow the Agent's decisions: what to test, whether a row
     # is evidence, what to nominate and when to end.
     evidence = prompt[prompt.index("# 证据标准") : prompt.index("# 决策合同")]
