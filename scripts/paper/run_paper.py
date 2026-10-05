@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -31,7 +32,10 @@ from _bootstrap import add_repo_src
 
 add_repo_src(__file__)
 
+from autotrade.environment.executor import StrategyExecutor
 from autotrade.environment.llm import build_model_gateway
+from autotrade.environment.replay.engine import StrategyDataView
+from autotrade.environment.sandbox import SandboxConfig
 from autotrade.environment.strategy import CN_TZ
 from autotrade.paper.book import (
     SOURCE_HISTORY_NAME,
@@ -47,7 +51,7 @@ from autotrade.paper.books import (
     run_order,
     validate_book_id,
 )
-from autotrade.paper.engine import DailyPaperEngine, PaperWriterBusy
+from autotrade.paper.engine import DailyPaperEngine, PaperWriterBusy, docker_executor
 from autotrade.paper.orders import (
     render_failure,
     render_orders,
@@ -55,6 +59,7 @@ from autotrade.paper.orders import (
 )
 from autotrade.paper.pit import BookPITData
 from autotrade.pipelines.calendar import load_sse_trading_days
+from autotrade.pipelines.hitl_state import select_gpus
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_STATE_ROOT = PAPER_STATE_DIR
@@ -159,6 +164,31 @@ def source_history(args: argparse.Namespace) -> int:
     return 0
 
 
+def _executor_on_free_gpus(
+    strategy_path: Path,
+    sandbox: SandboxConfig,
+    view: StrategyDataView,
+    state_dir: Path | None,
+    models_dir: Path | None,
+) -> StrategyExecutor:
+    """A book's strategy container, on cards taken as it starts.
+
+    A book holds no card between its runs, so a run that has a decision to
+    make takes the ones its book asks for from the one selection
+    (``hitl_state.select_gpus``): whole cards nobody uses and no running
+    research arm claims. With too few free the book cannot decide, and its
+    sheet says why.
+    """
+
+    limits = sandbox.limits
+    if limits.gpu_count > 0:
+        devices = select_gpus(
+            REPO_ROOT / "experiments", limits.gpu_count, require_name=limits.gpu_name_filter
+        )
+        sandbox = replace(sandbox, limits=replace(limits, gpu_devices=tuple(devices)))
+    return docker_executor(strategy_path, sandbox, view, state_dir, models_dir)
+
+
 def run_book(book_id: str, root: Path, trade_date: str, orders_dir: Path) -> None:
     book = load_book(root)
     if trade_date not in set(load_sse_trading_days(book.raw_dir)):
@@ -189,6 +219,7 @@ def run_book(book_id: str, root: Path, trade_date: str, orders_dir: Path) -> Non
         schedule=book.schedule,
         profile=book.profile,
         sandbox=book.sandbox,
+        executor_factory=_executor_on_free_gpus,
     )
     sheets = orders_dir / book_id
     try:

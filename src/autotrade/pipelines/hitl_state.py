@@ -15,6 +15,7 @@ from pathlib import Path
 
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.snapshot import SnapshotConfig
+from autotrade.environment.gpu import GpuUnavailableError, idle_gpus
 from autotrade.environment.llm.model_profiles import MODEL_CHOICES
 from autotrade.environment.sandbox import SandboxSpec
 
@@ -37,9 +38,11 @@ STATUS_NAME = "status.json"
 SCHEDULE_NAME = "schedule.json"
 # The GPUs the console handed an arm when it last started its worker
 # (webui.manager.start_worker). That worker attaches exactly these to every
-# container it starts, and the console counts them as held while it lives.
+# container it starts, and they are held while it lives (``gpu_claims``).
 GPU_CLAIM_NAME = "gpu_claim.json"
 LIVE_RUN_STATES = {"running_session"}
+# The states a worker ends in: an arm in one of them runs nothing.
+ENDED_STATES = frozenset({"completed", "failed", "stopped"})
 
 # How a rule newer than the arms on disk is introduced, stated here once. Its
 # own default stays off (``config.AcceptanceRules``, ``BrokerProfile``), so an
@@ -219,8 +222,8 @@ class ControlState:
     directives: dict[str, str] = field(default_factory=dict)
     skip_to_heldout: bool = False
     resource_overrides: dict[str, dict[str, object]] = field(default_factory=dict)
-    # Per-session sandbox GPU allocation set before the session starts; the
-    # sandbox's "auto" selector still picks which devices by free memory.
+    # Per-session sandbox GPU allocation set before the session starts: that
+    # many of the cards the arm holds.
     gpu_counts: dict[str, int] = field(default_factory=dict)
     # A pending re-run token per session: the worker re-runs the session
     # whose latest ledger record has not absorbed this id yet.
@@ -368,6 +371,81 @@ def read_gpu_claim(hitl: str | Path) -> tuple[int, ...] | None:
     ):
         raise ValueError(f"malformed GPU claim in {path}")
     return tuple(devices)
+
+
+def running_arms(experiments_root: str | Path) -> list[str]:
+    """The arms under ``experiments_root`` whose worker is alive and has not
+    ended, by id. An arm whose status cannot be read runs nothing."""
+
+    root = Path(experiments_root)
+    if not root.is_dir():
+        return []
+    running: list[str] = []
+    for directory in sorted(root.iterdir()):
+        if not directory.is_dir() or directory.name.startswith("."):
+            continue
+        try:
+            status = read_json(directory / HITL_DIR_NAME / STATUS_NAME)
+        except (OSError, TypeError, ValueError):
+            continue
+        if status_pid_alive(status) and status.get("state") not in ENDED_STATES:
+            running.append(directory.name)
+    return running
+
+
+def gpu_claims(experiments_root: str | Path) -> dict[str, list[int]]:
+    """The devices every running arm holds, by arm.
+
+    An arm holds the cards claimed for its worker for as long as that worker
+    lives, whether or not they show memory in use: between batches, while its
+    model thinks, they show none. An arm that asked for no GPU has no claim,
+    and the claim an ended worker left behind holds nothing.
+    """
+
+    root = Path(experiments_root)
+    claims: dict[str, list[int]] = {}
+    for name in running_arms(root):
+        claim = read_gpu_claim(root / name / HITL_DIR_NAME)
+        if claim is not None:
+            claims[name] = list(claim)
+    return claims
+
+
+def free_gpus(experiments_root: str | Path, *, require_name: str | None = None) -> list[int]:
+    """The GPUs free to take, ascending: the devices matching ``require_name``
+    that nobody holds memory on (``gpu.idle_gpus``) and that no running arm
+    under ``experiments_root`` claims (:func:`gpu_claims`)."""
+
+    claimed = {device for devices in gpu_claims(experiments_root).values() for device in devices}
+    return [device for device in idle_gpus(require_name=require_name) if device not in claimed]
+
+
+def select_gpus(
+    experiments_root: str | Path, count: int, *, require_name: str | None = None
+) -> list[int]:
+    """The one way a GPU is chosen: the first ``count`` of :func:`free_gpus`.
+
+    The console takes an arm's cards here when it starts the worker and
+    records them as its claim. Whatever else needs a card -- a Paper book's
+    morning run, a session audited from the command line, an operator's replay
+    -- takes its cards here for that run and pins them on its containers, so
+    it is never given a card a running arm holds. ``GpuUnavailableError``
+    names the free cards and who holds the rest when fewer than ``count`` are
+    free, or says why the devices could not be read.
+    """
+
+    free = free_gpus(experiments_root, require_name=require_name)
+    if len(free) >= count:
+        return free[:count]
+    holders = "; ".join(
+        f"{name} {devices}" for name, devices in gpu_claims(experiments_root).items()
+    )
+    raise GpuUnavailableError(
+        f"requested {count} GPU(s), {len(free)} free "
+        f"({', '.join(map(str, free)) or 'none'}); a card is free only when nothing "
+        "holds memory on it and no running arm claims it; claimed by running arms: "
+        f"{holders or 'none'}"
+    )
 
 
 class StatusReporter:

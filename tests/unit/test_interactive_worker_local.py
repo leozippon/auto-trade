@@ -106,7 +106,7 @@ def test_worker_rejects_llm_mode_without_provider_credentials(tmp_path: Path):
 def test_the_worker_attaches_exactly_the_cards_the_console_claimed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Without a claim the free-memory selector stays; with one the run pins
+    """Without a claim the request names no device; with one the run pins
     those devices, and a claim that disagrees with the arm's GPU count stops
     the worker instead of attaching some other number of cards."""
     repo, experiment = _experiment(tmp_path, developer_mode="llm")

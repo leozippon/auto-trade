@@ -600,7 +600,7 @@ _FIELDS: list[dict[str, object]] = [
         ),
     },
     {"key": "gpu_count", "group": "运行控制", "label": "默认 GPU 数量", "type": "int", "min": 0, "max": 4,
-     "help": "每个研究会话与正式回放 Sandbox 默认分配的 GPU 数量（0–4）；0 表示 CPU-only，不占用 L20。大于 0 时按空闲显存自动选择，逐会话设置可覆盖此默认值。"},
+     "help": "每个研究会话与正式回放 Sandbox 默认分配的 GPU 数量（0–4）；0 表示 CPU-only，不占用 L20。大于 0 时控制台在启动 Worker 前为本臂认领同样多张没人在用、也没被别的在跑臂认领的整卡，本臂的会话与回放只用这些卡；逐会话设置可覆盖此默认值。"},
     # 模型与上下文
     {
         "key": "model",

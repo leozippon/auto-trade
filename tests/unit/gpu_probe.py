@@ -1,12 +1,12 @@
 """Stub the host's GPU roster.
 
 The console admits and claims a GPU arm's devices against the live host
-(``ExperimentManager.gpu_slots`` reads ``autotrade.environment.gpu.list_gpus``
+(``hitl_state.select_gpus`` reads ``autotrade.environment.gpu.list_gpus``
 through ``idle_gpus``), so a create request that passes parameter validation
 depends on what is free on this machine. Tests that create an experiment for
 some other reason wrap the request in ``stubbed_gpu_probe``, which replaces
 only the ``nvidia-smi`` reading: the selection and the claims stay real. The
-selectors themselves are covered in ``test_sandbox_runtime``, and the admission
+selection itself is covered in ``test_sandbox_runtime``, and the admission
 and claim of the create route in ``test_webui_worker_lifecycle``.
 """
 

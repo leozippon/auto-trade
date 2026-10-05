@@ -12,7 +12,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, Self, runtime_checkable
@@ -23,7 +23,7 @@ from .contract_fingerprint import (
     assert_image_contract_current,
     compute_runtime_fingerprint,
 )
-from .gpu import device_request, gpu_memory_contention, select_gpus_with_free_memory
+from .gpu import GpuUnavailableError, device_request, gpu_memory_contention
 from .runtime import chmod_tree
 from .sandbox import DockerSandbox, SandboxConfig, SandboxLimits, container_thread_env
 from .strategy import BarTable, FitSchedule, StrategyContext, StrategyFunction
@@ -313,12 +313,10 @@ class DockerStrategyExecutor:
         self.context_models_dir = CONTAINER_MODELS_DIR if self.models_dir is not None else ""
         self._state_writable = state_writable
         self._fit_worker: DockerStrategyExecutor | None = None
-        # Resolved before the container exists and rendered into its run
-        # arguments below. An unsatisfiable request fails right here, so a
+        # Read before the container exists and rendered into its run arguments
+        # below. A request that was given no device fails right here, so a
         # replay never silently trains on CPU instead of the GPU it asked for.
-        self.gpu_indices, self.gpu_free_at_start_mib = _select_strategy_gpus(
-            self.config.limits
-        )
+        self.gpu_indices = _strategy_gpus(self.config.limits)
         self.container_name = f"autotrade-strategy-{uuid.uuid4().hex}"
         # Host-side telemetry of this container: what it actually cost, beside
         # the limits it was started with. Bound once the container is up.
@@ -421,15 +419,9 @@ class DockerStrategyExecutor:
         if self._fit_worker is None:
             self._fit_worker = DockerStrategyExecutor(
                 self.strategy_path,
-                # Same boundary, plus this evaluation's already-selected
-                # devices: the fit worker shares the inference container's
-                # GPUs instead of selecting a second set of its own.
-                replace(
-                    self.config,
-                    limits=replace(
-                        self.config.limits, gpu_devices=tuple(self.gpu_indices)
-                    ),
-                ),
+                # Same boundary, so the same devices: the fit worker shares
+                # the inference container's GPUs.
+                self.config,
                 snapshot_dir=self.snapshot_dir,
                 asof_dir=self.asof_dir,
                 models_dir=self.models_dir,
@@ -656,10 +648,6 @@ class DockerStrategyExecutor:
         if self.fit_schedule is not None:
             record["fit_timeout_seconds"] = limits.fit_timeout_seconds
         record["decision_timeout_seconds"] = limits.timeout_seconds
-        if self.gpu_free_at_start_mib is not None:
-            record["gpu_free_at_start_bytes"] = (
-                self.gpu_free_at_start_mib * 1024 * 1024
-            )
         return record
 
     def close(self) -> None:
@@ -1140,33 +1128,25 @@ def _existing_dir(value: str | Path | None, name: str) -> Path | None:
     return path
 
 
-def _select_strategy_gpus(limits: SandboxLimits) -> tuple[list[int], int | None]:
-    """Device indexes this strategy container attaches, and their free memory.
+def _strategy_gpus(limits: SandboxLimits) -> list[int]:
+    """The devices this strategy container attaches: the ones it was given.
 
-    Already-selected devices (``gpu_devices``, how the fit worker inherits the
-    inference container's allocation) are used as they are. Otherwise the Agent
-    session container's policy applies unchanged: the requested number of
-    devices matching ``gpu_name_filter`` with the most free video memory at
-    container start. There is no CPU fallback — ``fit(context)`` training on a
-    device the experiment did not get would be a different computation reported
-    as the same result, so an unsatisfiable request raises
-    ``GpuUnavailableError`` instead.
-
-    The second element is the free video memory the admission probe measured
-    across the selected devices, which is the headroom the strategy started
-    with on a shared card. It is ``None`` when no probe ran: no device was
-    asked for, or this is the fit worker reusing the allocation the inference
-    container already made.
+    Choosing a device is not the Environment's (``environment.gpu``): whoever
+    builds the limits pins ``gpu_devices``. There is no CPU fallback either --
+    ``fit(context)`` training on a device the experiment did not get would be
+    a different computation reported as the same result -- so a request for
+    devices that names none raises ``GpuUnavailableError``.
     """
 
     if limits.gpu_count <= 0:
-        return [], None
-    if limits.gpu_devices:
-        return list(limits.gpu_devices), None
-    selected = select_gpus_with_free_memory(
-        limits.gpu_count, require_name=limits.gpu_name_filter
-    )
-    return [index for index, _free in selected], sum(free for _index, free in selected)
+        return []
+    if not limits.gpu_devices:
+        raise GpuUnavailableError(
+            f"this strategy container asks for {limits.gpu_count} GPU(s) and was given no "
+            "device: an arm's worker attaches the cards the console claimed for it, and "
+            "anything else takes its cards from pipelines.hitl_state.select_gpus"
+        )
+    return list(limits.gpu_devices)
 
 
 def _require_local_image(config: SandboxConfig) -> str:

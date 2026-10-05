@@ -796,44 +796,6 @@ class CreatePreflightTest(unittest.TestCase):
             self._kill_pid(pid)
             self.assertEqual(self.client.get("/api/health").json()["gpus_free"], [2])
 
-    def test_no_card_is_claimable_while_a_gpu_arm_without_a_claim_runs(self) -> None:
-        """An arm started before claims existed picks the card with the most
-        free memory at every replay, which is a claimed card its owner is not
-        using yet; so while one runs no GPU arm starts, a CPU arm still does,
-        and the rule lapses by itself once that arm has stopped."""
-        legacy = self.experiments_root / "legacy_gpu_arm" / "hitl"
-        write_json_atomic(legacy / "params.json", {"experiment_id": "legacy_gpu_arm", "gpu_count": 1})
-        running = {
-            "schema_version": 1,
-            "state": "running_session",
-            "pid": os.getpid(),
-            "pid_start_ticks": proc_start_ticks(os.getpid()),
-        }
-        write_json_atomic(legacy / "status.json", running)
-        with stubbed_gpu_probe([0, 1]):
-            health = self.client.get("/api/health").json()
-            self.assertEqual(health["gpus_free"], [])
-            self.assertEqual(health["gpu_claims"], {"legacy_gpu_arm": None})
-            refused = self._create()
-            self.assertEqual(refused.status_code, 400, refused.text)
-            self.assertIn(
-                "no card is claimable while running GPU arms without a claim pick cards "
-                "themselves: legacy_gpu_arm",
-                refused.json()["detail"],
-            )
-            self.assertFalse((self.experiments_root / "preflight_demo").exists())
-            cpu = self._create(experiment_id="cpu_beside", gpu_count=0)
-            self.assertEqual(cpu.status_code, 200, cpu.text)
-            self.addCleanup(self._kill_pid, int(cpu.json()["spawned_pid"]))
-
-            write_json_atomic(legacy / "status.json", {**running, "state": "stopped"})
-            self.assertEqual(self.client.get("/api/health").json()["gpus_free"], [0, 1])
-            first = self._create()
-            self.assertEqual(first.status_code, 200, first.text)
-            self.addCleanup(self._kill_pid, int(first.json()["spawned_pid"]))
-        claim = self.experiments_root / "preflight_demo/hitl/gpu_claim.json"
-        self.assertEqual(json.loads(claim.read_text(encoding="utf-8"))["devices"], [0])
-
     def _kill_pid(self, pid: int) -> None:
         try:
             os.killpg(pid, signal.SIGKILL)

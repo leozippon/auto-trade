@@ -367,14 +367,16 @@ def test_docker_command_binds_state_read_only_for_orders_and_read_write_for_fit(
 
 def test_fit_worker_shares_the_inference_container_gpu_devices(tmp_path: Path):
     """Training happens in the fit worker, so the experiment's GPU request has
-    to reach that container — and reach the SAME devices: a second selection
-    would make one `gpu_count=1` evaluation occupy two cards."""
+    to reach that container, and reach the SAME devices: one `gpu_count=1`
+    evaluation occupies one card."""
 
     path = tmp_path / "main.py"
     path.write_text(FIT_STRATEGY, encoding="utf-8")
     state = tmp_path / "state"
     state.mkdir()
-    config = SandboxConfig(limits=SandboxLimits(gpu_count=1, gpu_name_filter="L20"))
+    config = SandboxConfig(
+        limits=SandboxLimits(gpu_count=1, gpu_name_filter="L20", gpu_devices=(3,))
+    )
     context = StrategyContext(
         inference_at=datetime(2024, 3, 28, 8, 30, tzinfo=CN_TZ),
         bars=(),
@@ -383,15 +385,10 @@ def test_fit_worker_shares_the_inference_container_gpu_devices(tmp_path: Path):
     with (
         patch.object(DockerStrategyExecutor, "_start"),
         patch.object(DockerStrategyExecutor, "_roundtrip") as roundtrip,
-        patch(
-            "autotrade.environment.executor.select_gpus_with_free_memory",
-            return_value=[(3, 18000)],
-        ) as select,
     ):
         executor = DockerStrategyExecutor(path, config, state_dir=state)
         executor.fit(context)
     roundtrip.assert_called_once()
-    select.assert_called_once_with(1, require_name="L20")
     fit_worker = executor._fit_worker
     assert fit_worker is not None
     assert fit_worker.gpu_indices == executor.gpu_indices == [3]

@@ -46,6 +46,7 @@ from autotrade.environment.executor import (
 )
 from autotrade.environment.gpu import GpuUnavailableError
 from autotrade.environment.replay import DailyMarketData
+from autotrade.environment.runtime import write_json_atomic
 from autotrade.environment.sandbox import (
     EXPERIMENT_LABEL,
     SCREENING_TOOL_MOUNT,
@@ -73,9 +74,18 @@ from autotrade.environment.tools.base import CommandResult
 from autotrade.environment.tools.files import EditFileTool, WriteFileTool
 from autotrade.environment.tools.workspace import SafeWorkspace
 from autotrade.pipelines import DailyStrategyPipeline, StrategyExperimentConfig
+from autotrade.pipelines.hitl_state import (
+    free_gpus,
+    gpu_claims,
+    proc_start_ticks,
+    running_arms,
+    select_gpus,
+    write_gpu_claim,
+)
 from autotrade.pipelines.worker import _strategy_sandbox_from_spec
 
 from .fixtures_sandbox import docker_available
+from .gpu_probe import stubbed_gpu_probe
 
 
 def _strategy(tmp_path: Path, source: str = "def generate_orders(context):\n    return []\n") -> Path:
@@ -141,7 +151,6 @@ def _executor_for_process(
     executor._state_writable = False
     executor._fit_worker = None
     executor.gpu_indices = []
-    executor.gpu_free_at_start_mib = None
     executor._fit_seconds = []
     executor._monitor = ContainerResourceMonitor(executor.container_name)
     executor._reset_transport_state()
@@ -561,18 +570,20 @@ def test_experiment_gpu_request_reaches_the_formal_strategy_container() -> None:
 
 def test_the_consoles_claim_pins_every_container_of_the_arm() -> None:
     """A spec carrying the console's claim attaches exactly its devices: every
-    strategy container without consulting the selector, and a session that
-    asks for fewer gets that many of the arm's own cards, never another one."""
-    from autotrade.environment.executor import _select_strategy_gpus
+    strategy container, and a session that asks for fewer gets that many of
+    the arm's own cards, never another one. A spec without a claim gives its
+    strategy containers no device."""
+    from autotrade.environment.executor import _strategy_gpus
     from autotrade.pipelines.research_session import LLMResearchDeveloper
 
     claimed = SandboxSpec(gpu=(3, 6), gpu_count=2)
     limits = _strategy_sandbox_from_spec(claimed, fit_timeout_seconds=60).limits
     assert (limits.gpu_count, limits.gpu_devices) == (2, (3, 6))
-    with patch("autotrade.environment.gpu.list_gpus", side_effect=AssertionError("selector ran")):
-        assert _select_strategy_gpus(limits) == ([3, 6], None)
+    assert _strategy_gpus(limits) == [3, 6]
     unclaimed = _strategy_sandbox_from_spec(SandboxSpec(gpu_count=2), fit_timeout_seconds=60)
     assert unclaimed.limits.gpu_devices == ()
+    with pytest.raises(GpuUnavailableError, match="was given no device"):
+        _strategy_gpus(unclaimed.limits)
 
     def session(count: int) -> SandboxSpec:
         return LLMResearchDeveloper._session_sandbox_spec(
@@ -919,68 +930,47 @@ def test_docker_command_has_fail_closed_boundary(tmp_path: Path):
     executor.close()
 
 
-def test_strategy_container_attaches_only_a_requested_gpu(tmp_path: Path):
+def test_strategy_container_attaches_exactly_the_gpus_it_is_given(tmp_path: Path):
     """``fit(context)`` trains inside this container, so an experiment that
-    asked for GPUs must reach it — with the session container's own selector —
-    while an experiment that asked for none never consults nvidia-smi and runs
-    exactly the CPU-only boundary it ran before."""
+    asked for GPUs must reach it, on the devices pinned for it: the container
+    chooses none and never consults nvidia-smi, and an experiment that asked
+    for none runs exactly the CPU-only boundary it ran before."""
 
     strategy = _strategy(tmp_path)
     with (
         patch.object(DockerStrategyExecutor, "_start"),
-        patch(
-            "autotrade.environment.executor.select_gpus_with_free_memory",
-            return_value=[(2, 20000)],
-        ) as select,
+        patch("autotrade.environment.gpu.list_gpus", side_effect=AssertionError("probed")),
     ):
         executor = DockerStrategyExecutor(
             strategy,
-            SandboxConfig(limits=SandboxLimits(gpu_count=1, gpu_name_filter="L20")),
+            SandboxConfig(limits=SandboxLimits(gpu_count=1, gpu_devices=(2,))),
         )
+        two = DockerStrategyExecutor(
+            strategy, SandboxConfig(limits=SandboxLimits(gpu_count=2, gpu_devices=(0, 1)))
+        )
+        cpu_only = DockerStrategyExecutor(strategy)
     command = executor.docker_command()
     # The quotes belong to the value: Docker splits an unquoted device= list on
     # commas and reads the second field as a device count.
     assert command[command.index("--gpus") + 1] == '"device=2"'
-    select.assert_called_once_with(1, require_name="L20")
-    executor.close()
-
-    with (
-        patch.object(DockerStrategyExecutor, "_start"),
-        patch(
-            "autotrade.environment.executor.select_gpus_with_free_memory",
-            return_value=[(0, 20000), (1, 19000)],
-        ),
-    ):
-        two = DockerStrategyExecutor(
-            strategy, SandboxConfig(limits=SandboxLimits(gpu_count=2))
-        )
     assert two.docker_command()[two.docker_command().index("--gpus") + 1] == '"device=0,1"'
-    two.close()
-
-    with (
-        patch.object(DockerStrategyExecutor, "_start"),
-        patch("autotrade.environment.executor.select_gpus_with_free_memory") as unused,
-    ):
-        cpu_only = DockerStrategyExecutor(strategy)
     assert "--gpus" not in cpu_only.docker_command()
-    unused.assert_not_called()
-    cpu_only.close()
+    for started in (executor, two, cpu_only):
+        started.close()
 
 
 def test_strategy_container_gpu_request_fails_instead_of_falling_back_to_cpu(
     tmp_path: Path,
 ):
-    """An unavailable device must abort the replay: training on CPU would be a
-    different computation reported under the same result."""
+    """A request that was given no device must abort the replay: training on
+    CPU would be a different computation reported under the same result, and
+    picking a card here could land on one a running arm holds."""
 
     strategy = _strategy(tmp_path)
     with (
         patch.object(DockerStrategyExecutor, "_start") as start,
-        patch(
-            "autotrade.environment.executor.select_gpus_with_free_memory",
-            side_effect=GpuUnavailableError("requested 1 GPU(s), available matching GPUs: none"),
-        ),
-        pytest.raises(GpuUnavailableError, match="available matching GPUs: none"),
+        patch("autotrade.environment.gpu.list_gpus", side_effect=AssertionError("probed")),
+        pytest.raises(GpuUnavailableError, match=r"asks for 1 GPU\(s\) and was given no device"),
     ):
         DockerStrategyExecutor(
             strategy, SandboxConfig(limits=SandboxLimits(gpu_count=1))
@@ -1946,12 +1936,12 @@ _GPU_ROSTER = [
 ]
 
 
-def test_the_default_sandbox_spec_allocates_the_freest_matching_gpus():
-    """`gpu="auto"` + `gpu_name_filter="L20"` is the shipped default.
+def test_the_default_sandbox_spec_asks_for_one_matching_gpu():
+    """`gpu="auto"` + `gpu_name_filter="L20"` is the shipped default: one L20,
+    to be pinned by whoever starts the container.
 
-    With `gpu=None` the whole selector is dead code and the per-session GPU
-    count the console offers means nothing, so the defaults are part of the
-    contract, not incidental.
+    With `gpu=None` the per-session GPU count the console offers means
+    nothing, so the defaults are part of the contract, not incidental.
     """
     spec = SandboxSpec()
     assert (spec.gpu, spec.gpu_count, spec.gpu_name_filter) == ("auto", 1, "L20")
@@ -1961,48 +1951,6 @@ def test_the_default_sandbox_spec_allocates_the_freest_matching_gpus():
     assert "image" not in record
     assert record["gpu"] == "auto" and record["gpu_count"] == 1
     assert record["gpu_name_filter"] == "L20"
-
-
-def test_select_gpus_ranks_matching_devices_by_free_memory():
-    from autotrade.environment.gpu import GpuUnavailableError, select_gpus
-
-    with patch("autotrade.environment.gpu.list_gpus", return_value=_GPU_ROSTER):
-        # Freest first, and the non-L20 device is never offered even though it
-        # has the most free memory of all.
-        assert select_gpus(1, require_name="L20") == [1]
-        assert select_gpus(2, require_name="L20") == [1, 5]
-        assert select_gpus(1) == [2]
-        with pytest.raises(GpuUnavailableError, match="requested 4 GPU"):
-            select_gpus(4, require_name="L20")
-        with pytest.raises(GpuUnavailableError, match="available matching GPUs: none"):
-            select_gpus(1, require_name="H100")
-
-
-def test_select_gpus_never_hands_out_a_card_below_the_free_memory_floor():
-    """The cards are shared with services outside the project: a device the
-    floor rules out is refused even when it is the only match, and the refusal
-    names every matching card's free memory."""
-    from autotrade.environment.gpu import (
-        MIN_FREE_GPU_MEMORY_MIB,
-        GpuUnavailableError,
-        select_gpus,
-    )
-
-    with patch("autotrade.environment.gpu.list_gpus", return_value=_GPU_ROSTER):
-        # GPU 0 matches L20 but has 8,000 MiB free.
-        assert 8_000 < MIN_FREE_GPU_MEMORY_MIB
-        with pytest.raises(GpuUnavailableError, match="2 qualify") as refused:
-            select_gpus(3, require_name="L20")
-        assert "0:NVIDIA L20 8000 MiB free" in str(refused.value)
-    taken = [{**_GPU_ROSTER[0], "memory_free_mib": MIN_FREE_GPU_MEMORY_MIB - 1}]
-    with (
-        patch("autotrade.environment.gpu.list_gpus", return_value=taken),
-        pytest.raises(GpuUnavailableError, match="0 qualify"),
-    ):
-        select_gpus(1, require_name="L20")
-    enough = [{**_GPU_ROSTER[0], "memory_free_mib": MIN_FREE_GPU_MEMORY_MIB}]
-    with patch("autotrade.environment.gpu.list_gpus", return_value=enough):
-        assert select_gpus(1, require_name="L20") == [0]
 
 
 def test_idle_gpus_never_offers_a_card_anyone_holds_memory_on():
@@ -2023,20 +1971,108 @@ def test_idle_gpus_never_offers_a_card_anyone_holds_memory_on():
         assert idle_gpus() == [1, 2]
 
 
-def test_persistent_sandbox_start_pins_the_selected_gpus_on_the_container(tmp_path: Path):
+def _running_arm(root: Path, name: str, devices: list[int] | None, *, state: str = "running_session") -> None:
+    """An arm under ``root`` whose worker is this process, holding ``devices``."""
+
+    hitl = root / name / "hitl"
+    hitl.mkdir(parents=True)
+    write_json_atomic(
+        hitl / "status.json",
+        {
+            "schema_version": 1,
+            "state": state,
+            "pid": os.getpid(),
+            "pid_start_ticks": proc_start_ticks(os.getpid()),
+        },
+    )
+    if devices is not None:
+        write_gpu_claim(hitl, devices)
+
+
+def test_the_one_selection_never_hands_out_a_card_a_running_arm_claims(tmp_path: Path):
+    """Whoever asks -- the console for an arm, a Paper run, an operator's
+    replay -- gets whole cards nobody holds memory on and no running arm
+    claims, in ascending order: a claimed card that shows nothing in use is
+    not free, the claim an ended worker left behind holds nothing, and a
+    request the free cards cannot meet is refused naming who holds the rest
+    instead of landing on one of them."""
+
+    root = tmp_path / "experiments"
+    _running_arm(root, "holder", [1, 3])
+    _running_arm(root, "cpu_arm", None)
+    _running_arm(root, "ended", [0], state="stopped")
+    assert running_arms(root) == ["cpu_arm", "holder"]
+    assert gpu_claims(root) == {"holder": [1, 3]}
+    # Cards 0-3 show nothing in use, card 5 carries another process's memory.
+    with stubbed_gpu_probe([0, 1, 2, 3], busy=[5]):
+        assert free_gpus(root, require_name="L20") == [0, 2]
+        assert select_gpus(root, 1, require_name="L20") == [0]
+        assert select_gpus(root, 2, require_name="L20") == [0, 2]
+        with pytest.raises(GpuUnavailableError) as refused:
+            select_gpus(root, 3, require_name="L20")
+        assert "requested 3 GPU(s), 2 free (0, 2)" in str(refused.value)
+        assert "claimed by running arms: holder [1, 3]" in str(refused.value)
+        assert free_gpus(root, require_name="H100") == []
+    # Every idle card is claimed: nothing is free, whoever asks.
+    with stubbed_gpu_probe([1, 3], busy=[0, 2]):
+        assert free_gpus(root) == []
+        with pytest.raises(GpuUnavailableError, match=r"requested 1 GPU\(s\), 0 free \(none\)"):
+            select_gpus(root, 1)
+    # No experiments at all: every idle card is free.
+    with stubbed_gpu_probe([4]):
+        assert select_gpus(tmp_path / "absent", 1) == [4]
+
+
+def test_a_paper_run_takes_free_cards_only_when_a_container_starts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A Paper book's strategy container is pinned to cards the one selection
+    gives it, never to a card a running arm claims, and a run that starts no
+    container (a session already decided) asks for none. A CPU book never
+    reads the devices."""
+    from scripts.paper import run_paper
+
+    _running_arm(tmp_path / "experiments", "holder", [0])
+    monkeypatch.setattr(run_paper, "REPO_ROOT", tmp_path)
+    started: list[SandboxConfig] = []
+    monkeypatch.setattr(
+        run_paper, "docker_executor", lambda path, sandbox, *rest: started.append(sandbox)
+    )
+    book = SandboxConfig(limits=SandboxLimits(gpu_count=1, gpu_name_filter="L20"))
+
+    with stubbed_gpu_probe([0, 1]):
+        run_paper._executor_on_free_gpus(tmp_path, book, None, None, None)
+    assert started[-1].limits.gpu_devices == (1,)
+    assert book.limits.gpu_devices == ()
+    # The only idle card is the arm's: the book cannot decide.
+    with stubbed_gpu_probe([0]), pytest.raises(GpuUnavailableError, match="holder"):
+        run_paper._executor_on_free_gpus(tmp_path, book, None, None, None)
+    with patch("autotrade.environment.gpu.list_gpus", side_effect=AssertionError("probed")):
+        run_paper._executor_on_free_gpus(tmp_path, SandboxConfig(), None, None, None)
+    assert len(started) == 2 and started[-1].limits.gpu_devices == ()
+
+
+def test_persistent_sandbox_start_attaches_the_devices_it_is_given(tmp_path: Path):
+    """A session container chooses no card: it attaches the ones pinned on its
+    spec, and a spec that asks for devices and names none does not start."""
+
     local = LocalSandbox(tmp_path / "session")
     local.prepare_layout()
-    sandbox = DockerSandbox(local, SandboxSpec(gpu_count=2))
     completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="container\n", stderr="")
     with (
-        patch("autotrade.environment.gpu.list_gpus", return_value=_GPU_ROSTER),
+        patch("autotrade.environment.gpu.list_gpus", side_effect=AssertionError("probed")),
         patch("autotrade.environment.sandbox.probe_image_runtime", return_value={}),
         patch("autotrade.environment.sandbox.subprocess.run", return_value=completed) as run,
     ):
+        sandbox = DockerSandbox(local, SandboxSpec(gpu=(1, 5), gpu_count=2))
         sandbox.start()
-    assert sandbox.gpu_indices == [1, 5]
-    command = run.call_args_list[0][0][0]
-    assert command[command.index("--gpus") + 1] == '"device=1,5"'
+        assert sandbox.gpu_indices == [1, 5]
+        command = run.call_args_list[0][0][0]
+        assert command[command.index("--gpus") + 1] == '"device=1,5"'
+        run.reset_mock()
+        with pytest.raises(GpuUnavailableError, match=r"asks for 2 GPU\(s\) and was given no device"):
+            DockerSandbox(local, SandboxSpec(gpu_count=2)).start()
+        run.assert_not_called()
 
 
 def test_a_cpu_only_sandbox_never_consults_the_gpu_selector(tmp_path: Path):

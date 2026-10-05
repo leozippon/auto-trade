@@ -485,6 +485,28 @@ def test_gpu_allocation_bar_uses_csp_compatible_native_control(tmp_path: Path):
     assert 'select.value === "" ? experimentDefault' in source
 
 
+def test_the_session_gpu_panel_marks_the_cards_the_arm_claimed(tmp_path: Path):
+    """A session attaches some of the cards claimed for its arm's worker and
+    no other, so the panel marks those, read from the detail, and never ranks
+    the host's cards by free memory."""
+    from autotrade.pipelines.hitl_state import write_gpu_claim
+    from autotrade.webui.registry import experiment_detail
+    from tests.unit.webui_research_arm import build_arm
+
+    build_arm(tmp_path, "arm", "created")
+    assert experiment_detail(tmp_path, "arm")["gpu_claim"] == []
+    write_gpu_claim(tmp_path / "arm" / "hitl", [5, 2])
+    assert experiment_detail(tmp_path, "arm")["gpu_claim"] == [5, 2]
+    script = (Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js").read_text(
+        encoding="utf-8"
+    )
+    source = script.split("function gpuAllocationRow(", 1)[1].split(
+        "async function sendControlAction(", 1
+    )[0]
+    assert "detail.gpu_claim" in source
+    assert "b.memory_free_mib - a.memory_free_mib" not in source
+
+
 def test_qmt_backend_is_absent_and_loopback_validation_is_single_source(tmp_path: Path):
     client = TestClient(create_app(tmp_path))
     assert client.get("/api/trading/live/health").status_code == 404

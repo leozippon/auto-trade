@@ -402,9 +402,8 @@ def load_worker_options(
     options = resolve_worker_options(params, experiment_dir=directory, repo_root=repo_root)
     # The devices the console claimed for this run (webui.manager.start_worker):
     # the session container and every replay's strategy containers attach
-    # exactly these, so no container of this arm selects a card by free memory
-    # and lands on one another arm holds. A worker started without a claim
-    # keeps the free-memory selector.
+    # exactly these. Without a claim the request names no device, and the
+    # first container that asks for one refuses to start.
     claim = read_gpu_claim(directory / "hitl")
     spec = options.agent_sandbox
     if claim is None or spec is None or spec.gpu is None:
@@ -794,10 +793,10 @@ def _strategy_sandbox_from_spec(
     model is trained, and it runs in the strategy container of every formal
     replay (validation and forward alike), not in the session. The request is the experiment-level one — a per-session HITL
     ``sandbox_gpu_count`` override moves only that session's own container.
-    A spec carrying the console's claim (a tuple of device indexes, see
-    ``load_worker_options``) pins every strategy container to those devices;
-    otherwise the strategy container uses the free-memory selector, and any
-    other pinned form is honoured as a device count, not as those devices.
+    A spec carrying the devices taken for this run (a tuple of indexes: the
+    console's claim, see ``load_worker_options``, or another caller's
+    ``hitl_state.select_gpus``) pins every strategy container to them; a spec
+    that names none leaves the container none, and it refuses to start.
     """
 
     labels = experiment_container_labels(experiment_id) if experiment_id else {}

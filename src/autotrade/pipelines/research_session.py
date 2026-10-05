@@ -715,10 +715,9 @@ class LLMResearchDeveloper:
     def _session_sandbox_spec(self, request: ResearchSessionRequest) -> SandboxSpec:
         """The session container's spec under this session's GPU allocation."""
 
-        # Per-session HITL override; the "auto" selector still picks that many
-        # GPUs by free memory at container start, while an arm holding the
-        # console's claim (a tuple, worker.load_worker_options) attaches that
-        # many of its own devices and never another arm's.
+        # Per-session HITL override: the session attaches that many of the
+        # devices its arm holds (a tuple, worker.load_worker_options) and
+        # never another arm's.
         if request.sandbox_gpu_count is None:
             return self.sandbox_spec
         count = int(request.sandbox_gpu_count)

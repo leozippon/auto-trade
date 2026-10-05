@@ -4060,10 +4060,10 @@ function directivePanel(detail, session) {
 }
 
 /* GPU status + per-session allocation picker, shown before the session starts.
-   The chosen count rides in control.gpu_counts[session_key]; the sandbox's
-   "auto" selector then picks that many GPUs by free memory at start, so rows
-   are ranked by free memory, the top N are marked as the likely allocation,
-   and each bar tracks FREE memory (longer = more headroom). */
+   The chosen count rides in control.gpu_counts[session_key]; the session then
+   attaches that many of the cards claimed for the arm's worker
+   (detail.gpu_claim, in claim order) and no other, so those rows come first
+   and are marked, and each bar tracks FREE memory (longer = more headroom). */
 function gpuAllocationRow(detail, session, send) {
   const current = ((detail.control || {}).gpu_counts || {})[session.key];
   const experimentDefault = Number((detail.params || {}).gpu_count || 1);
@@ -4072,7 +4072,7 @@ function gpuAllocationRow(detail, session, send) {
     { class: "section-gap" },
     el(
       "h4",
-      { class: "subsection-title", title: "设备按空闲显存自动挑选；条越长剩余显存越多" },
+      { class: "subsection-title", title: "本会话只用本臂认领的卡，按认领顺序取；条越长剩余显存越多" },
       "本会话 GPU 分配",
     ),
   );
@@ -4127,9 +4127,14 @@ function gpuAllocationRow(detail, session, send) {
     stamp,
   );
   wrap.append(statusHost, row);
-  // Render the cached inventory: rows mirror the sandbox "auto" selector
-  // (free-memory ranking) so the first N rows match the picker's current
-  // count; bars track FREE memory (longer = more free), not machine-wide use.
+  // Render the cached inventory: the arm's claimed cards first, in claim
+  // order, so the first N rows are the ones the picker's current count
+  // attaches; bars track FREE memory (longer = more free), not machine-wide use.
+  const claim = detail.gpu_claim || [];
+  const claimRank = (gpu) => {
+    const rank = claim.indexOf(gpu.index);
+    return rank < 0 ? claim.length : rank;
+  };
   let gpuCache = null;
   const renderGpus = (gpus) => {
     gpuCache = gpus;
@@ -4137,11 +4142,9 @@ function gpuAllocationRow(detail, session, send) {
       select.value === "" ? experimentDefault : Number(select.value);
     const grid = el("div", { class: "gpu-grid" });
     [...gpus]
-      .sort(
-        (a, b) => b.memory_free_mib - a.memory_free_mib || a.index - b.index,
-      )
-      .forEach((gpu, i) => {
-        const picked = i < count;
+      .sort((a, b) => claimRank(a) - claimRank(b) || a.index - b.index)
+      .forEach((gpu) => {
+        const picked = claimRank(gpu) < Math.min(count, claim.length);
         const freeGib = (gpu.memory_free_mib / 1024).toFixed(1);
         const totalGib = (gpu.memory_total_mib / 1024).toFixed(1);
         const freePct = gpu.memory_total_mib

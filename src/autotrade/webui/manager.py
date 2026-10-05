@@ -15,6 +15,7 @@ import time
 from collections.abc import Mapping
 from pathlib import Path
 
+from autotrade.environment.gpu import GpuUnavailableError
 from autotrade.environment.identity import (
     LEGACY_EXPERIMENT_MESSAGE,
     AgentRefStore,
@@ -42,9 +43,12 @@ from autotrade.pipelines.hitl_state import (
     WEB_REQUIRED_PARAMS,
     ControlState,
     control_lock,
+    free_gpus,
+    gpu_claims,
     proc_start_ticks,
     read_control,
-    read_gpu_claim,
+    running_arms,
+    select_gpus,
     status_pid_alive,
     write_control,
     write_gpu_claim,
@@ -70,7 +74,7 @@ from .registry import experiment_state, read_ledger_records, worker_log_ref
 # host's page cache and IO, applies to it. Measured rationale:
 # docs/deployment-documentation.md. GPUs are not a count: a GPU arm starts only
 # on whole cards nobody else uses or holds, and keeps them while its worker
-# lives (gpu_slots).
+# lives (hitl_state.select_gpus).
 MAX_RUNNING_EXPERIMENTS = 8
 MAX_RUNNING_LOCAL_EXPERIMENTS = 4
 # What one new arm writes of its own before its first validation: the PIT views
@@ -489,83 +493,33 @@ class ExperimentManager:
     def gpu_slots(self) -> dict[str, object]:
         """The cards a GPU arm starting now would take, and what running arms hold.
 
-        A running GPU arm holds the devices claimed for its worker at start
-        (``hitl/gpu_claim.json``) for as long as that worker lives, whether
-        or not they show memory in use: between batches, while its model
-        thinks, they show none. A card is free when it matches the sandbox
-        device filter, no process holds memory on it (``gpu.idle_gpus``) and
-        no running arm claims it; ``gpus_free`` lists the free cards in the
-        order a start takes them. ``gpu_claims`` maps every running GPU arm to
-        its devices, ``None`` for one without a claim (no ``gpu_claim.json``:
-        started before claims existed, or by hand). While any such arm runs no
-        card is free: its legs pick the card with the most free memory at
-        every start, which is exactly a claimed card its owner is not using
-        yet, and two of them beside the owner's three overfill it. The rule
-        needs no removal: once no unclaimed arm runs it never applies. When
-        the devices cannot be read no card is free and ``gpu_error`` says why.
+        ``gpus_free`` is the one selection's free cards in the order a start
+        takes them (``hitl_state.free_gpus``: matching the sandbox device
+        filter, nobody holding memory on them, claimed by no running arm) and
+        ``gpu_claims`` every running arm's devices. When the devices cannot be
+        read no card is free and ``gpu_error`` says why.
         """
-        from autotrade.environment.gpu import GpuUnavailableError, idle_gpus
 
-        claims: dict[str, list[int] | None] = {}
-        for name in sorted(self.running_experiments()):
-            hitl = self.experiments_root / name / "hitl"
-            if gpu_request(_read_json(hitl / "params.json")):
-                claim = read_gpu_claim(hitl)
-                claims[name] = None if claim is None else list(claim)
-        if None in claims.values():
-            return {"gpus_free": [], "gpu_claims": claims}
-        claimed = {device for devices in claims.values() for device in devices or ()}
+        claims = gpu_claims(self.experiments_root)
         try:
-            idle = idle_gpus(require_name=SandboxSpec().gpu_name_filter)
+            free = free_gpus(self.experiments_root, require_name=SandboxSpec().gpu_name_filter)
         except GpuUnavailableError as exc:
             return {"gpus_free": [], "gpu_claims": claims, "gpu_error": str(exc)}
-        free = [device for device in idle if device not in claimed]
         return {"gpus_free": free, "gpu_claims": claims}
 
     def _claimable_gpus(self, count: int) -> list[int]:
         """The ``count`` cards a GPU arm starting now takes, or a refusal
-        naming the cards in use and the running arms that hold the rest."""
+        naming the free cards and the running arms that hold the rest."""
 
-        slots = self.gpu_slots()
-        free = list(slots["gpus_free"])  # type: ignore[call-overload]
-        if len(free) >= count:
-            return free[:count]
-        claims = slots["gpu_claims"]
-        unclaimed = [name for name, devices in claims.items() if devices is None]  # type: ignore[attr-defined]
-        holders = "; ".join(
-            f"{name} {devices}"
-            for name, devices in claims.items()  # type: ignore[attr-defined]
-            if devices is not None
-        )
-        reason = (
-            "no card is claimable while running GPU arms without a claim pick cards "
-            f"themselves: {', '.join(unclaimed)}"
-            if unclaimed
-            else "a card is free only when nothing holds memory on it and no running "
-            "arm claims it"
-        )
-        raise ManagerError(
-            f"当前 GPU 无法满足实验默认分配：requested {count} GPU(s), {len(free)} free "
-            f"({', '.join(map(str, free)) or 'none'}); {reason}; "
-            f"claimed by running arms: {holders or 'none'}"
-            + (f"; GPUs unreadable: {slots['gpu_error']}" if "gpu_error" in slots else "")
-        )
+        try:
+            return select_gpus(
+                self.experiments_root, count, require_name=SandboxSpec().gpu_name_filter
+            )
+        except GpuUnavailableError as exc:
+            raise ManagerError(f"当前 GPU 无法满足实验默认分配：{exc}") from exc
 
     def running_experiments(self) -> list[str]:
-        if not self.experiments_root.is_dir():
-            return []
-        running: list[str] = []
-        for directory in self.experiments_root.iterdir():
-            if not directory.is_dir() or directory.name.startswith("."):
-                continue
-            status = _read_json(directory / "hitl/status.json")
-            if status_pid_alive(status) and status.get("state") not in {
-                "completed",
-                "failed",
-                "stopped",
-            }:
-                running.append(directory.name)
-        return running
+        return running_arms(self.experiments_root)
 
     def _running_roster(self) -> tuple[list[str], list[str]]:
         """Every running arm, and those of them that count against the local

@@ -1,23 +1,19 @@
-"""GPU selection for sandbox containers.
+"""GPUs for sandbox containers: what the host has, and what a strategy may count on.
 
-A research arm the console starts does not select per container: the console
-claims whole idle devices for the arm's worker (``idle_gpus``, and
-``webui.manager`` for which devices running arms hold), and every container of
-that worker attaches exactly those. Everything else -- a worker started without
-a claim, a Paper book, an operator's replay -- uses the default policy below.
+The Environment attaches the devices a container is given and never chooses
+one. Choosing is one selection, ``pipelines.hitl_state.select_gpus``: whole
+devices nobody holds memory on (``idle_gpus``) that no running arm claims.
+The console takes an arm's cards there when it starts its worker, and every
+container of that worker attaches exactly those; whatever else needs a card
+-- a Paper book's morning run, an operator's replay -- takes its cards there
+for one run and pins them the same way. A container that asks for a device
+and was given none refuses to start.
 
-Default policy: allocate the requested number of GPUs with the most free video
-memory at container start, optionally restricted to a device-name substring
-(``SandboxSpec.gpu_name_filter`` is the single configuration source). A one-GPU
-sandbox is the normal case, but the same selector supports wider ML experiments
-without changing Docker plumbing.
-
-A device is allocated only while it has ``MIN_FREE_GPU_MEMORY_MIB`` free. The
-cards are shared with services outside this project and are never reserved, so
-the floor is the memory a GPU strategy may count on: a request no device can
-meet fails as an environment error at container start, and a CUDA out-of-memory
-error whose own report shows the strategy had less than the floor to work with
-is contention (``gpu_memory_contention``), not a measurement of the strategy.
+The cards are shared with services outside this project and are never
+reserved, so ``MIN_FREE_GPU_MEMORY_MIB`` is the memory a GPU strategy may
+count on: a CUDA out-of-memory error whose own report shows the strategy had
+less than that to work with is contention (``gpu_memory_contention``), not a
+measurement of the strategy.
 """
 
 from __future__ import annotations
@@ -26,10 +22,9 @@ import re
 import subprocess
 from collections.abc import Sequence
 
-# Free video memory a device must have to be allocated to a container, and the
-# memory a GPU strategy may count on while it runs. Sized for one quarterly
-# sequence-model refit on a 46 GiB L20 (a measured 9 GiB peak) with headroom
-# for a second concurrent candidate on the same card.
+# The video memory a GPU strategy may count on while it runs. Sized for one
+# quarterly sequence-model refit on a 46 GiB L20 (a measured 9 GiB peak) with
+# headroom for a second concurrent candidate on the same card.
 MIN_FREE_GPU_MEMORY_MIB = 12 * 1024
 # Memory a device may show in use and still be idle. Any process that opened a
 # CUDA context on it holds more (an idle strategy container's context is about
@@ -90,10 +85,10 @@ def list_gpus() -> list[dict[str, object]]:
 def idle_gpus(*, require_name: str | None = None) -> list[int]:
     """Indexes of the matching devices nobody holds memory on, ascending.
 
-    A card in use by anyone -- the local model service, an operator's replay,
-    the legs of an arm started without a claim -- is not idle however much of
-    it is free. The converse is the caller's to know: a running arm whose card
-    shows nothing between its batches still holds it.
+    A card in use by anyone -- the local model service, an operator's replay
+    -- is not idle however much of it is free. The converse is the caller's to
+    know: a running arm whose card shows nothing between its batches still
+    holds it (``pipelines.hitl_state.gpu_claims``).
     """
     return sorted(
         int(gpu["index"])
@@ -101,45 +96,6 @@ def idle_gpus(*, require_name: str | None = None) -> list[int]:
         if (not require_name or require_name.lower() in str(gpu["name"]).lower())
         and int(gpu["memory_used_mib"]) < IDLE_GPU_MEMORY_MIB
     )
-
-
-def select_gpus(count: int = 1, *, require_name: str | None = None) -> list[int]:
-    """GPU indexes sorted by descending free memory."""
-
-    return [index for index, _free in select_gpus_with_free_memory(count, require_name=require_name)]
-
-
-def select_gpus_with_free_memory(
-    count: int = 1, *, require_name: str | None = None
-) -> list[tuple[int, int]]:
-    """``(index, free MiB)`` of the selected devices, sorted by descending free memory.
-
-    ``require_name`` restricts selection to devices whose name contains the
-    substring (case-insensitive); ``None`` allows any visible NVIDIA GPU. Only
-    devices with at least ``MIN_FREE_GPU_MEMORY_MIB`` free are offered; when
-    fewer than ``count`` qualify the request fails with every matching
-    device's free memory in the message. The free memory is the admission
-    probe's own reading, which is what a replay reports as the headroom its
-    strategy started with.
-    """
-    if count <= 0:
-        raise ValueError(f"count must be positive: {count}")
-    gpus = list_gpus()
-    if require_name:
-        gpus = [gpu for gpu in gpus if require_name.lower() in str(gpu["name"]).lower()]
-    if not gpus:
-        raise GpuUnavailableError(f"requested {count} GPU(s), available matching GPUs: none")
-    eligible = [gpu for gpu in gpus if int(gpu["memory_free_mib"]) >= MIN_FREE_GPU_MEMORY_MIB]
-    if len(eligible) < count:
-        roster = ", ".join(
-            f"{gpu['index']}:{gpu['name']} {gpu['memory_free_mib']} MiB free" for gpu in gpus
-        )
-        raise GpuUnavailableError(
-            f"requested {count} GPU(s) with at least {MIN_FREE_GPU_MEMORY_MIB} MiB free, "
-            f"{len(eligible)} qualify; matching GPUs: {roster}"
-        )
-    selected = sorted(eligible, key=lambda gpu: int(gpu["memory_free_mib"]), reverse=True)[:count]
-    return [(int(gpu["index"]), int(gpu["memory_free_mib"])) for gpu in selected]
 
 
 _SIZE_UNITS_MIB = {"bytes": 1 / 2**20, "B": 1 / 2**20, "KiB": 1 / 2**10, "MiB": 1.0, "GiB": 2**10, "TiB": 2**20}

@@ -154,6 +154,25 @@ ExecutorFactory = Callable[
 ]
 
 
+def docker_executor(
+    strategy_path: Path,
+    sandbox: SandboxConfig,
+    view: StrategyDataView,
+    state_dir: Path | None,
+    models_dir: Path | None,
+) -> StrategyExecutor:
+    """The default ``ExecutorFactory``: the strategy container a replay starts."""
+
+    return DockerStrategyExecutor(
+        strategy_path,
+        sandbox,
+        snapshot_dir=view.snapshot_dir or None,
+        asof_dir=view.asof_dir or None,
+        models_dir=models_dir,
+        state_dir=state_dir,
+    )
+
+
 class DailyPaperEngine:
     def __init__(
         self,
@@ -185,7 +204,7 @@ class DailyPaperEngine:
         self.schedule = schedule or StrategySchedule()
         self.profile = profile or BrokerProfile()
         self.sandbox = sandbox or SandboxConfig()
-        self.executor_factory = executor_factory
+        self.executor_factory = executor_factory or docker_executor
 
     # ------------------------------------------------------------------ run
 
@@ -480,15 +499,8 @@ class DailyPaperEngine:
         )
 
     def _executor(self, view: StrategyDataView, state_dir: Path | None) -> StrategyExecutor:
-        if self.executor_factory is not None:
-            return self.executor_factory(self.strategy_path, self.sandbox, view, state_dir, self.models_dir)
-        return DockerStrategyExecutor(
-            self.strategy_path,
-            self.sandbox,
-            snapshot_dir=view.snapshot_dir or None,
-            asof_dir=view.asof_dir or None,
-            models_dir=self.models_dir,
-            state_dir=state_dir,
+        return self.executor_factory(
+            self.strategy_path, self.sandbox, view, state_dir, self.models_dir
         )
 
     def _journaled_orders(self, trade_date: str) -> list[dict[str, object]]:

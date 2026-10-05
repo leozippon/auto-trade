@@ -1436,7 +1436,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "what the replay cost the strategy container it ran in (peak memory against "
         "that container's own limit, the seconds of each fit against the fit timeout "
         "this batch's concurrency put in force, and for a GPU strategy its peak video "
-        "memory and the free memory it was admitted with). "
+        "memory). "
         "Each completed row's result_ref reads back that candidate's full "
         "replay record, and its daily_series (validation/active_daily.csv in the "
         "node's directory; pd.read_csv(path, dtype={'trade_date': str})) is the "

@@ -13,7 +13,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .gpu import device_request
+from .gpu import GpuUnavailableError, device_request
 from .runtime import (
     ARTIFACT_TOP_LEVEL,
     RUNTIME_CACHE_DIR_NAMES,
@@ -190,14 +190,13 @@ class SandboxLimits:
     # (``pipelines.worker._strategy_sandbox_from_spec``). ``fit(context)`` runs
     # in THIS container rather than in the Agent session, so an experiment that
     # asked for GPUs must reach it; 0 attaches no device and keeps the formal
-    # replay CPU-only, which is what ``gpu_count=0`` experiments get. The
-    # devices themselves are chosen at container start by the same free-memory
-    # selector the session container uses (``environment.gpu.select_gpus``).
+    # replay CPU-only, which is what ``gpu_count=0`` experiments get.
     gpu_count: int = 0
     gpu_name_filter: str | None = None
-    # Devices already selected for this evaluation. The inference container
-    # runs the selector once and pins its result here for the fit worker, so
-    # one ``gpu_count=1`` evaluation occupies one device rather than two.
+    # The devices every container of this evaluation attaches: the arm's
+    # claimed cards, or the ones another caller took for this run
+    # (``pipelines.hitl_state.select_gpus``). The Environment chooses none, so
+    # a request for devices that names none here refuses to start.
     gpu_devices: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
@@ -310,8 +309,10 @@ class SandboxSpec:
     memory: str = "16g"
     pids_limit: int = 512
     tmpfs_size: str = "1g"
-    # "auto" allocates gpu_count matching GPUs with the most free memory at
-    # container start; an integer or list pins devices; None runs CPU-only.
+    # "auto" asks for gpu_count devices and names none yet: whoever starts the
+    # session pins them first (an arm's worker the cards the console claimed,
+    # ``pipelines.worker.load_worker_options``), and a session still on "auto"
+    # refuses to start. An integer or list pins devices; None runs CPU-only.
     gpu: str | int | Sequence[int] | None = "auto"
     gpu_count: int = 1
     gpu_name_filter: str | None = "L20"
@@ -530,10 +531,13 @@ class DockerSandbox:
         if self._started:
             return self.container
         if self.spec.gpu is not None:
-            from .gpu import select_gpus
             if self.spec.gpu == "auto":
-                self.gpu_indices = select_gpus(self.spec.gpu_count, require_name=self.spec.gpu_name_filter)
-            elif isinstance(self.spec.gpu, int):
+                raise GpuUnavailableError(
+                    f"this session asks for {self.spec.gpu_count} GPU(s) and was given no "
+                    "device: an arm's worker attaches the cards the console claimed for it, "
+                    "and anything else takes its cards from pipelines.hitl_state.select_gpus"
+                )
+            if isinstance(self.spec.gpu, int):
                 self.gpu_indices = [self.spec.gpu]
             elif isinstance(self.spec.gpu, str):
                 self.gpu_indices = [int(item) for item in self.spec.gpu.split(",") if item.strip()]

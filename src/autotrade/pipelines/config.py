@@ -1034,8 +1034,8 @@ class ResearchSessionRequest:
     deadline_grace_seconds: float = DEFAULT_DEADLINE_GRACE_MINUTES * 60.0
     directive: str = ""
     # Per-session HITL override of the experiment's default sandbox GPU count;
-    # None keeps the experiment default. The "auto" selector still picks which
-    # devices by free memory at container start.
+    # None keeps the experiment default. The session takes that many of the
+    # cards its arm holds.
     sandbox_gpu_count: int | None = None
     acceptance_rules: Mapping[str, object] = field(default_factory=dict)
     modification_constraints: ModificationConstraints = field(

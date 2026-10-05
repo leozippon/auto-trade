@@ -16,7 +16,7 @@ parameters already exist.
 from __future__ import annotations
 
 import argparse
-from dataclasses import fields
+from dataclasses import fields, replace
 from pathlib import Path
 
 from autotrade.environment.data.contracts import BENCHMARK_INDEXES
@@ -28,6 +28,7 @@ from autotrade.pipelines.hitl_state import (
     CREATION_STAMPS,
     MODEL_CHOICES,
     WEB_CREATE_DEFAULTS,
+    select_gpus,
 )
 from autotrade.pipelines.worker import (
     NON_PERSISTABLE_PARAMS,
@@ -436,6 +437,10 @@ def build_worker_options(
     single place that validates parameter names, path containment, research
     dates and the release pin, and a resumed or console-inspected run must see
     exactly the configuration this invocation used.
+
+    No console claims cards for a run started here, so a run that asks for
+    GPUs takes them for its duration from the same selection
+    (``hitl_state.select_gpus``), and every container it starts attaches them.
     """
     experiment_dir = Path(args.experiments_root).resolve() / args.experiment_id
     params = _build_worker_params(
@@ -446,4 +451,11 @@ def build_worker_options(
     )
     (experiment_dir / "hitl").mkdir(parents=True, exist_ok=True)
     write_json_atomic(experiment_dir / "hitl" / "params.json", params)
-    return load_worker_options(experiment_dir, repo_root=repo_root)
+    options = load_worker_options(experiment_dir, repo_root=repo_root)
+    spec = options.agent_sandbox
+    if spec is None or spec.gpu != "auto":
+        return options
+    devices = select_gpus(
+        experiment_dir.parent, spec.gpu_count, require_name=spec.gpu_name_filter
+    )
+    return replace(options, agent_sandbox=replace(spec, gpu=tuple(devices)))

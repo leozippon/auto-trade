@@ -41,6 +41,7 @@ from autotrade.pipelines.hitl_state import (
     STATUS_NAME,
     WEB_CREATE_DEFAULTS,
     read_control,
+    read_gpu_claim,
     read_json,
     read_status,
     status_pid_alive,
@@ -1313,6 +1314,9 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
         **detail,
         "params": _public_params(params),
         "control": identity.public_control(read_control(hitl / CONTROL_NAME).to_record()),
+        # The cards claimed for the arm's worker when it was last started: a
+        # session attaches some of these and no other.
+        "gpu_claim": list(read_gpu_claim(hitl) or ()),
         "inbox": inbox_public_view(
             hitl / INBOX_NAME,
             session_key=str(current) if isinstance(current, str) and current else None,
