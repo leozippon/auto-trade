@@ -275,6 +275,39 @@ def render_orders(book: Book, trade_date: str) -> str:
     return "\n".join(lines)
 
 
+def render_killed(book: Book, trade_date: str, transition: Mapping[str, object]) -> str:
+    """The sheet of a killed book: no decision, and the holdings its last
+    sheet leaves once every order fills, for the owner to exit by hand."""
+
+    state = read_json(book.root / PAPER_STATE_NAME)
+    decisions = state.get("decisions") or ()
+    target = order_sheet(book.root, str(decisions[-1]["trade_date"]), state=state)["target"] if decisions else []
+    lines = [f"# Paper 订单 · {_day(trade_date)} · 已终止（killed — exit these holdings by hand）", ""]
+    if book.note:
+        lines += [f"> {book.note}", ""]
+    lines += [
+        (
+            f"本模拟账户（{book.experiment_id} / {book.artifact_id}，{book.candidate_source}）在 "
+            f"{_day(str(transition['date']))}（Paper 第 {transition['days']} 个结算日）被判定终止："
+            f"{transition['reason']}。它不再决策，今后不出订单；请手工卖出下列持仓。"
+        ),
+        "",
+    ]
+    if target:
+        lines += [
+            f"## 待手工退出的持仓（{len(target)} 只，按上一张订单全部成交计）",
+            "",
+            "| 代码 | 名称 | 股数 |",
+            "| --- | --- | ---: |",
+            *(f"| {row['symbol']} | {row['name']} | {row['quantity']:,} |" for row in target),
+            "",
+        ]
+    else:
+        lines += ["账户没有持仓。", ""]
+    lines += [DISCLAIMER, ""]
+    return "\n".join(lines)
+
+
 def render_failure(book: Book, trade_date: str, error: BaseException) -> str:
     message = str(error).strip().splitlines()[0] if str(error).strip() else type(error).__name__
     lines = [f"# Paper 订单 · {_day(trade_date)} · 未生成", ""]
@@ -389,6 +422,7 @@ __all__ = [
     "order_window",
     "orders_file_name",
     "render_failure",
+    "render_killed",
     "render_orders",
     "window_text",
     "write_orders",

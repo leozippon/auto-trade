@@ -12,12 +12,18 @@ whose data has landed and makes the pre-open decision for the target session
 (default: today, Asia/Shanghai), then writes the book's order sheet to
 ``<orders-dir>/<book>/<date>_orders.md`` and ``latest_orders.md`` and prints it.
 A book that fails writes its failure to the same two files and the run goes on
-to the next book; the run exits non-zero if any book failed.
+to the next book; the run exits non-zero if any book failed. Once a book's
+sheet is written the run reads its Paper verdict (``paper/verdict.py``); a
+reading that fails fails the book and leaves the sheet as it is. A killed book
+decides nothing: its sheet lists the holdings to exit by hand, and it is
+skipped, not failed. ``verdict`` reads every book's verdict (or ``--book``'s)
+and prints it as JSON.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 from dataclasses import replace
@@ -39,6 +45,8 @@ from autotrade.environment.sandbox import SandboxConfig
 from autotrade.environment.strategy import CN_TZ
 from autotrade.paper.book import (
     SOURCE_HISTORY_NAME,
+    VERDICT_LOG_NAME,
+    book_status,
     copy_source_history,
     create_book,
     load_book,
@@ -54,10 +62,13 @@ from autotrade.paper.books import (
 from autotrade.paper.engine import DailyPaperEngine, PaperWriterBusy, docker_executor
 from autotrade.paper.orders import (
     render_failure,
+    render_killed,
     render_orders,
     write_orders,
 )
 from autotrade.paper.pit import BookPITData
+from autotrade.paper.storage import read_jsonl
+from autotrade.paper.verdict import record_verdict
 from autotrade.pipelines.calendar import load_sse_trading_days
 from autotrade.pipelines.hitl_state import select_gpus
 
@@ -97,6 +108,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--book", help="Run this book only; default: every book.")
     run.add_argument("--state-root", type=Path, default=DEFAULT_STATE_ROOT)
     run.add_argument("--orders-dir", type=Path, default=DEFAULT_ORDERS_DIR)
+    verdict = commands.add_parser("verdict", help="Read and record each book's Paper verdict; print it as JSON.")
+    verdict.add_argument("--book", help="This book only; default: every book.")
+    verdict.add_argument("--state-root", type=Path, default=DEFAULT_STATE_ROOT)
     return parser
 
 
@@ -200,6 +214,13 @@ def run_book(book_id: str, root: Path, trade_date: str, orders_dir: Path) -> Non
     if trade_date not in set(load_sse_trading_days(book.raw_dir)):
         print(f"[{book_id}] {trade_date} is not an SSE session; nothing to decide")
         return
+    sheets = orders_dir / book_id
+    if book_status(root) == "killed":
+        transitions, _skipped = read_jsonl(root / VERDICT_LOG_NAME)
+        text = render_killed(book, trade_date, transitions[0])
+        print(text)
+        print(f"[{book_id}] killed; nothing decided, exit sheet written to {write_orders(sheets, trade_date, text)}", file=sys.stderr)
+        return
 
     def data_factory(start: str, target: str) -> BookPITData:
         return BookPITData(
@@ -227,7 +248,6 @@ def run_book(book_id: str, root: Path, trade_date: str, orders_dir: Path) -> Non
         sandbox=book.sandbox,
         executor_factory=_executor_on_free_gpus,
     )
-    sheets = orders_dir / book_id
     try:
         engine.run_day(trade_date)
     except PaperWriterBusy:
@@ -240,6 +260,27 @@ def run_book(book_id: str, root: Path, trade_date: str, orders_dir: Path) -> Non
     text = render_orders(book, trade_date)
     print(text)
     print(f"[{book_id}] orders written to {write_orders(sheets, trade_date, text)}", file=sys.stderr)
+    # After the sheet, so the reading never delays it; a failure fails the book.
+    reading = record_verdict(book)
+    print(
+        f"[{book_id}] verdict: {reading['status']} after {reading['days']} Paper sessions, "
+        f"next checkpoint at {reading['next_checkpoint']}",
+        file=sys.stderr,
+    )
+
+
+def verdict(args: argparse.Namespace) -> int:
+    book_ids = [validate_book_id(args.book)] if args.book else list_books(args.state_root)
+    readings: dict[str, object] = {}
+    failures = run_books(
+        args.state_root,
+        book_ids,
+        lambda book_id, root: readings.__setitem__(book_id, record_verdict(load_book(root))),
+    )
+    for book_id, exc in failures.items():
+        readings[book_id] = {"error": f"{type(exc).__name__}: {exc}"}
+    print(json.dumps(readings, ensure_ascii=False, indent=2, sort_keys=True))
+    return 1 if failures else 0
 
 
 def run(args: argparse.Namespace) -> int:
@@ -261,7 +302,7 @@ def run(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return {"init": init, "run": run, "source-history": source_history}[args.command](args)
+    return {"init": init, "run": run, "source-history": source_history, "verdict": verdict}[args.command](args)
 
 
 if __name__ == "__main__":
