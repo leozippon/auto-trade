@@ -15,11 +15,11 @@ DESIGN_2_expanded_data.md §3, §7). It is the one stock family with offline
 support in some fifty long-side screens, and no arm has read announcement
 titles before: the eight-year seeds carried an empty text domain.
 
-One pack (configs/workspace_refs/incdraft_alla_8y_20261012) runs the memo's
-book unchanged as the baseline: the drafts that became visible since the
-previous weekly review fill empty equal-cash seats oldest first, with no
-ranking among them, and each is sold at the first review HOLD trading days
-after it was bought. The registered axes are seats and hold (40 or 60 trading
+One pack (configs/workspace_refs/incdraft_alla_8y_20261012, and its 500k
+sibling below) runs the memo's book unchanged as the baseline: the drafts
+that became visible since the previous weekly review fill empty equal-cash
+seats oldest first, with no ranking among them, and each is sold at the
+first review HOLD trading days after it was bought. The registered axes are seats and hold (40 or 60 trading
 days). The falsifying control is the memo's late-entry placebo `c_late`, the
 same events entered 120 trading days late on the same seats and hold; the
 placebo in which as many names enter on the same days from a matched pool is
@@ -34,16 +34,24 @@ The 100k pair is the primary focus: baseline `b16`, seats 16 / 20 / 24 / 30,
 sell 09:30 and buy 15:00; batch 1 runs the four seat legs and `c_late` at 16
 and 30 seats (48 replay-years), batch 2 the finalist's 60-day hold with its
 controls (16-24). The 500k arm, which the owner allowed beside it because
-breadth is the lever, runs the same pack with `ACCOUNT` and `SEATS` set at
+breadth is the lever, runs the same book with `ACCOUNT` and `SEATS` set at
 round 0: baseline `b40`, seats 40 / 30, both legs in the closing auction and
 a CNY 40m median-daily-amount floor, the second memo's capacity advice;
 batch 1 is the two seat legs and their `c_late` (32), batch 2 the 60-day
-hold with its control (16). STAR names stay excluded at 500k until the owner
-confirms the account holds that permission (an account funded at exactly
-500k sits on the exchange's threshold), so the pack registers no STAR pool.
-Each arm declares the designer's screens that shaped what it submits and
-that it never submits in its first batch's `offline_trials`: 17 at 100k, 19
-at 500k (the pack's README §6 lists them and why the rest are left out).
+hold with its control (16). The owner confirmed that the 500k account holds
+the STAR permission, so its pool includes STAR, fixed by the account and not
+an axis; the 100k account has none. The pool was hard-coded in the starter
+and the running 100k pair mounts that pack, so the 500k arm mounts a sibling
+(configs/workspace_refs/incdraft_alla_500k_8y_20261012) that differs only in
+the pool: STAR names are bought at 500k at the exchange's 200-share minimum,
+then in whole shares. STAR adds 744 events to the 3,694 (Y3..Y8), about 250
+of them affordable at a 40-seat ticket and above the floor. The floor stays
+one rule for every board: at the same daily amount a STAR closing auction is
+about a quarter thinner, and a 12-16k ticket is still at most 5 % of the
+thinnest tenth's. Each arm declares the designer's screens that shaped what
+it submits and that it never submits in its first batch's `offline_trials`:
+17 at 100k, 20 at 500k, where the STAR-draft screen now shapes the pool (the
+packs' README §6 lists them and why the rest are left out).
 
 No lineage: a new family on a surface no arm has read. A later arm that
 continues it on the same research period -- the drafts on another account
@@ -84,6 +92,8 @@ from scripts.experiments._profiles import (
 from scripts.experiments._round import Round
 
 INCDRAFT_PACK = "configs/workspace_refs/incdraft_alla_8y_20261012"
+# The same pack with STAR in the 500k pool.
+INCDRAFT_500K_PACK = "configs/workspace_refs/incdraft_alla_500k_8y_20261012"
 
 # Said once for both accounts; each directive adds its account's part.
 COMMON = (
@@ -113,8 +123,9 @@ DIRECTIVE_500K = (
     "文本域可用，否则停；把 knobs 的 ACCOUNT 改成 500_000、SEATS 改成 40（基线 b40）。"
     "登记的轴只有席位（40、30）与持有期（40、60 个交易日）；两条腿都在 15:00 收盘竞价，"
     "只买近 20 个交易日成交额中位数不低于 4000 万元的名字，这两条随账户固定、不是轴；"
-    "科创板不买，账户的科创板权限没有确认。成本压力另报 breakeven_extra_slippage_bps 够不够 10 bp。"
-    "第一批 offline_trials 报 19，之后报 0。"
+    "账户有科创板权限，池含科创板（200 股起），也随账户固定、不是轴。"
+    "成本压力另报 breakeven_extra_slippage_bps 够不够 10 bp。"
+    "第一批 offline_trials 报 20，之后报 0。"
 )
 
 ARMS: dict[str, dict[str, object]] = {
@@ -128,7 +139,7 @@ ARMS: dict[str, dict[str, object]] = {
         "research_directive": DIRECTIVE_100K,
     },
     "incdraft_500k_8y_qwen_20261012": {
-        "workspace_reference": INCDRAFT_PACK,
+        "workspace_reference": INCDRAFT_500K_PACK,
         "research_directive": DIRECTIVE_500K,
         "initial_cash": 500_000,
     },
