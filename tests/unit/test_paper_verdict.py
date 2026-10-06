@@ -187,7 +187,7 @@ def test_a_paper_reading_reads_the_fills_a_real_fill_book_holds_over_its_newest_
     handed: dict[str, object] = {}
 
     def spy(result, frame, benchmark, *args, **kwargs):
-        handed.update(result=result, frame=frame, membership=kwargs["membership"])
+        handed.update(result=result, frame=frame, profile=args[0], membership=kwargs["membership"])
         return run_null_control(result, frame, benchmark, *args, **kwargs)
 
     monkeypatch.setattr(paper_verdict, "run_null_control", spy)
@@ -202,6 +202,8 @@ def test_a_paper_reading_reads_the_fills_a_real_fill_book_holds_over_its_newest_
     ] == [(B, "buy", 200, 15.2, "2026-01-05T15:00:00+08:00")]
     assert sorted(handed["frame"]["trade_date"].unique()) == settled
     assert handed["membership"] == {"20251231": frozenset({A, B}), "20260106": frozenset({A})}
+    # The panel is drawn through the book's pinned profile, so on its boards only.
+    assert handed["profile"] is book.profile
     assert reading["panel"]["matched"] == MATCHED_MEMBERSHIP and reading["panel"]["round_trips"] == 1
     assert reading["index_return"] == pytest.approx(np.prod([1 + index_pct[day] / 100 for day in settled]) - 1)
     assert reading["status"] == "observing" and reading["confirm_lower_bound"] is None  # under one bootstrap block

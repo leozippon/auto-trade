@@ -11,6 +11,8 @@ from pathlib import Path
 import pytest
 
 from autotrade.environment.artifacts import artifact_fingerprint
+from autotrade.environment.broker import DailyBroker
+from autotrade.environment.broker_core import board_of
 from autotrade.paper import fills
 from autotrade.paper.book import (
     BOOK_NAME,
@@ -41,6 +43,8 @@ from tests.unit.paper_book_fixture import (
     run_days,
     write_book_record,
 )
+from tests.unit.test_broker_engine import MATCHED_AT, _bar, _order
+from tests.unit.test_null_control import _board_draws
 from tests.unit.webui_research_arm import build_arm
 
 
@@ -208,9 +212,9 @@ def _graduated_book(tmp_path: Path, book_id: str = "exp") -> Book:
     )
 
 
-def _incubate(tmp_path: Path, book_id: str) -> Book:
+def _incubate(tmp_path: Path, book_id: str, boards: tuple[str, ...] = ("main", "gem")) -> Book:
     """An incubating book of a discarded arm, from the replay its forward
-    record names (the shape an incubation record passes)."""
+    record names (the shape an incubation record passes), on ``boards``."""
 
     arm = tmp_path / "experiments" / book_id
     if not arm.exists():
@@ -223,6 +227,7 @@ def _incubate(tmp_path: Path, book_id: str) -> Book:
         repo_root=tmp_path,
         track="incubating",
         source_record={"result_ref": record["result_ref"], "replay": record.get("replay") or {}},
+        permitted_boards=boards,
     )
 
 
@@ -254,6 +259,37 @@ def test_a_new_book_carries_its_track_and_pins_its_verdict_rules(tmp_path: Path)
         create_book(
             paper_root(tmp_path) / "other", experiment_dir=tmp_path / "experiments/exp",
             artifact_id="strategy_research_abc", repo_root=tmp_path, track="promoted",
+        )
+
+
+def test_a_book_pins_the_boards_its_broker_and_its_verdict_panel_buy_on(tmp_path: Path):
+    """The fixture arm carries no board stamp: a graduated book pins those its
+    initial cash qualifies for, an incubating one the boards its incubation
+    replayed on, and that one pinned field is what its Broker enforces and
+    what its zero-skill panel draws from."""
+
+    assert load_book(_graduated_book(tmp_path).root).profile.permitted_boards == ("main", "gem", "star", "bj")
+    arm = tmp_path / "experiments" / "exp"
+    small = create_book(
+        paper_root(tmp_path) / "small", experiment_dir=arm, artifact_id="strategy_research_abc",
+        repo_root=tmp_path, track="graduated", initial_cash=100_000,
+    )
+    assert read_json(small.root / BOOK_NAME)["profile"]["permitted_boards"] == ["main", "gem"]
+
+    book = load_book(_incubate(tmp_path, "inc", boards=("main",)).root)
+    assert book.profile.permitted_boards == ("main",)
+    broker = DailyBroker(book.profile)
+    broker.open_day("20260105", {})
+    rejected = broker.execute(_order(symbol="300001.SZ"), _bar(), matched_at=MATCHED_AT, raw_price=10.0)
+    assert (rejected.status, rejected.reason) == ("rejected", "board_not_permitted")
+    assert broker.execute(_order(), _bar(), matched_at=MATCHED_AT, raw_price=10.0).status == "filled"
+    drawn = {symbol for draw in _board_draws(book.profile.permitted_boards, 200, 1) for symbol, *_ in draw}
+    assert drawn and {board_of(symbol) for symbol in drawn} == {"main"}
+
+    with pytest.raises(ValueError, match="permitted_boards"):
+        create_book(
+            paper_root(tmp_path) / "other", experiment_dir=arm, artifact_id="strategy_research_abc",
+            repo_root=tmp_path, track="graduated", permitted_boards=("main",),
         )
 
 

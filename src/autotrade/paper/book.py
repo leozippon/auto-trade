@@ -16,19 +16,23 @@ A book is on one of two tracks, recorded as its ``candidate_source``: a
 trades a node an operator incubated, whose source history is the replay the
 incubation recorded, and at most ``INCUBATING_BOOK_CAP`` of those are open at
 once. Either way creation pins the rules its Paper verdict is read by
-(``paper/verdict.py``), so a later change cannot move a book already trading.
+(``paper/verdict.py``), so a later change cannot move a book already trading,
+and the boards its account may buy on, in its Broker profile: the boards its
+incubation replayed on, else the arm's stamp, else those the book's initial
+cash qualifies for. The book's Broker and its verdict's zero-skill panel both
+read that one field.
 """
 
 from __future__ import annotations
 
 import shutil
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
 from autotrade.environment.artifacts import artifact_fingerprint
-from autotrade.environment.broker import BrokerProfile
+from autotrade.environment.broker import BrokerProfile, default_permitted_boards
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.nl import NLConfig
 from autotrade.environment.replay.curve import result_curve
@@ -105,18 +109,22 @@ def create_book(
     repo_root: str | Path,
     track: str,
     source_record: Mapping[str, object] | None = None,
+    permitted_boards: Sequence[str] | None = None,
     initial_cash: float | None = None,
     note: str = "",
 ) -> Book:
     """Create the book at ``state_root`` (``<Paper state root>/<book id>``).
 
     A ``graduated`` book trades the arm's Paper candidate and copies the
-    replay its forward record names. An ``incubating`` book trades the
-    artifact the caller incubated -- the caller has checked it may -- and
-    copies the replay ``source_record`` names, in the forward record's shape:
-    ``result_ref`` relative to the experiment directory and
-    ``replay.heldout_start``. It is refused while ``INCUBATING_BOOK_CAP``
-    other incubating books beside it are not killed.
+    replay its forward record names; it buys on the arm's stamped boards, or
+    on those its initial cash qualifies for when the arm has none. An
+    ``incubating`` book trades the artifact the caller incubated -- the
+    caller has checked it may -- copies the replay ``source_record`` names,
+    in the forward record's shape (``result_ref`` inside the experiment
+    directory and ``replay.heldout_start``), and buys on the
+    ``permitted_boards`` that replay ran on; both are given exactly for that
+    track. It is refused while ``INCUBATING_BOOK_CAP`` other incubating
+    books beside it are not killed.
     """
 
     root = Path(state_root).resolve()
@@ -124,10 +132,12 @@ def create_book(
         raise FileExistsError(f"Paper state root is not empty; a new book needs a new state root: {root}")
     if track not in TRACKS:
         raise ValueError(f"unknown Paper book track {track!r}; choose one of {', '.join(TRACKS)}")
-    if (track == "incubating") != (source_record is not None):
+    if (track == "incubating") != (source_record is not None) or (track == "incubating") != (
+        permitted_boards is not None
+    ):
         raise ValueError(
-            "an incubating book copies the replay its incubation recorded, and only it: "
-            "pass source_record exactly for track 'incubating'"
+            "an incubating book copies the replay its incubation recorded and the boards it ran on, "
+            "and only it: pass source_record and permitted_boards exactly for track 'incubating'"
         )
     experiment = Path(experiment_dir).resolve(strict=True)
     if track == "graduated":
@@ -142,12 +152,7 @@ def create_book(
                 f"choose {candidate['artifact_id']}"
             )
     else:
-        incubating = open_incubating_books(root.parent)
-        if len(incubating) >= INCUBATING_BOOK_CAP:
-            raise ValueError(
-                f"{len(incubating)} incubating Paper books are open ({', '.join(incubating)}), "
-                f"the cap is {INCUBATING_BOOK_CAP}; a book frees its place when it is killed"
-            )
+        require_incubating_place(root.parent, root.name)
     source = experiment / "artifacts" / "strategy" / "frozen" / artifact_id
     if not (source / "output" / "main.py").is_file():
         raise FileNotFoundError(f"frozen artifact has no output/main.py: {source}")
@@ -160,6 +165,10 @@ def create_book(
     options = resolve_worker_options(params, experiment_dir=experiment, repo_root=repo_root, preflight=True)
     if options.data_backend != "pit":
         raise ValueError("Paper books trade on the PIT research release only")
+    profile = options.rolling.broker_profile
+    if permitted_boards is None:
+        permitted_boards = profile.permitted_boards or default_permitted_boards(profile.initial_cash)
+    profile = replace(profile, permitted_boards=tuple(permitted_boards))
     sandbox = _strategy_sandbox_from_spec(
         options.agent_sandbox, fit_timeout_seconds=options.rolling.strategy_fit_timeout_seconds
     )
@@ -207,7 +216,7 @@ def create_book(
         # continues the copied out-of-sample curve against the same benchmark
         # instead of splicing two different indexes into one line.
         "benchmark_index": options.rolling.benchmark_index,
-        "profile": asdict(options.rolling.broker_profile),
+        "profile": asdict(profile),
         "sandbox": {
             "image": sandbox.image,
             "docker_executable": sandbox.docker_executable,
@@ -381,6 +390,19 @@ def open_incubating_books(paper_root: str | Path) -> list[str]:
     ]
 
 
+def require_incubating_place(paper_root: str | Path, book_id: str) -> None:
+    """Refuse a new incubating book ``book_id`` while ``INCUBATING_BOOK_CAP``
+    other incubating books under ``paper_root`` are not killed; the book's
+    own id never counts against itself."""
+
+    others = [book for book in open_incubating_books(paper_root) if book != book_id]
+    if len(others) >= INCUBATING_BOOK_CAP:
+        raise ValueError(
+            f"{len(others)} incubating Paper books are open ({', '.join(others)}), "
+            f"the cap is {INCUBATING_BOOK_CAP}; a book frees its place when it is killed"
+        )
+
+
 def _tuples(record: dict[str, object]) -> dict[str, object]:
     """JSON arrays back to the tuples the frozen dataclasses hold."""
 
@@ -399,5 +421,6 @@ __all__ = [
     "create_book",
     "load_book",
     "open_incubating_books",
+    "require_incubating_place",
     "write_source_history",
 ]

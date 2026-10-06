@@ -5,7 +5,8 @@ account's daily return minus the mean of the zero-skill panel drawn on the
 book's own Paper fills -- for a real-fill book the fills its owner recorded,
 corrections included (``replay/null_control.run_null_control``, the panel
 research grades against), over the bars, ex-dates, index and membership of the
-book's newest replay slot. The days begin at the book's first Paper settlement:
+book's newest replay slot, through the book's pinned Broker profile, so its
+names come only from the boards the book may buy on. The days begin at the book's first Paper settlement:
 the forward year selected the book, so it is never read into the statistic.
 
 A book is ``observing`` until one terminal transition, ``confirmed`` or
