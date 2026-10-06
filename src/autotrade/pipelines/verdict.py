@@ -720,7 +720,7 @@ def plain_excess_lower_bound(
     judged on its own series. Its annualised mean is the slice's
     ``plain_excess``, or with replicates ``seed_mean.plain_excess``, so the
     record carries the bound alone, drawn as F2 draws its own
-    (:func:`_bootstrap_lower_bound`: the same days, blocks, draws and
+    (:func:`bootstrap_lower_bound`: the same days, blocks, draws and
     ``seed_key``) with the mean in place of the regression intercept. It is
     not ``raw_readings.plain_selection``, which compounds the book and the
     panel each over the span before taking their difference. A member whose
@@ -735,7 +735,7 @@ def plain_excess_lower_bound(
             f"a seed replicate measured other days than the frozen book over {start}..{end}"
         )
     daily = np.mean([list(member.values()) for member in members], axis=0)
-    return _bootstrap_lower_bound(daily, seed_key, confidence=confidence, statistic=_mean)
+    return bootstrap_lower_bound(daily, seed_key, confidence=confidence, statistic=daily_mean)
 
 
 def _count(value: object, name: str, minimum: int) -> int:
@@ -1090,13 +1090,13 @@ def _intercept(rows: np.ndarray) -> np.ndarray:
     return _fit(rows)[0]
 
 
-def _mean(series: np.ndarray) -> np.ndarray:
+def daily_mean(series: np.ndarray) -> np.ndarray:
     """F8's statistic: the mean of a daily series."""
 
     return series.mean(axis=-1)
 
 
-def _bootstrap_lower_bound(
+def bootstrap_lower_bound(
     rows: np.ndarray,
     seed_key: str,
     *,
@@ -1204,7 +1204,7 @@ def forward_slice(
         )
     graded, series = _graded(analysis)
     statistics, rows, _neutral = _measured(graded, start, end)
-    lower_bound = _bootstrap_lower_bound(rows, seed_key, confidence=rules.forward_confidence)
+    lower_bound = bootstrap_lower_bound(rows, seed_key, confidence=rules.forward_confidence)
     recency_month = _month_index(end) - (rules.recency_months - 1)
     recency_start = f"{recency_month // 12:04d}{recency_month % 12 + 1:02d}01"
     recency_excess = window_neutralized_excess(
