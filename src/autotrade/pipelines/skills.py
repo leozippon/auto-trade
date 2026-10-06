@@ -471,31 +471,42 @@ def graduated_memory_sources(
     for directory in sorted(root.iterdir(), key=lambda path: path.name):
         if not directory.is_dir() or directory.name == exclude:
             continue
-        ledger_path = directory / "ledgers" / "experiment_ledger.jsonl"
-        if not ledger_path.is_file():
-            continue
-        records = ExperimentLedger(ledger_path).read()
-        if not experiment_graduated(records):
-            continue
-        if directory.name == CURATED_MEMORY_SOURCE:
-            raise ValueError(
-                f"experiment id {CURATED_MEMORY_SOURCE!r} is reserved for the "
-                "curated memory tier; rename that experiment"
-            )
-        snapshot = latest_skills_snapshot(records, experiment_dir=directory)
-        if snapshot.root is None or not snapshot.stats.count:
-            continue
-        entries = tuple(sorted(item.name for item in snapshot.root.iterdir()))
-        sources.append(
-            MemorySource(
-                directory.name,
-                "graduated",
-                snapshot.root,
-                entries,
-                heldout_end=_verdict_heldout_end(records),
-            )
-        )
+        source = graduated_memory_source(directory)
+        if source is not None:
+            sources.append(source)
     return tuple(sources)
+
+
+def graduated_memory_source(directory: Path) -> MemorySource | None:
+    """What one experiment contributes to the graduated tier, if anything.
+
+    Everything it reads hangs off the experiment's ledger: the skills
+    generation the ledger names is published immutably before the ledger
+    names it.
+    """
+
+    ledger_path = directory / "ledgers" / "experiment_ledger.jsonl"
+    if not ledger_path.is_file():
+        return None
+    records = ExperimentLedger(ledger_path).read()
+    if not experiment_graduated(records):
+        return None
+    if directory.name == CURATED_MEMORY_SOURCE:
+        raise ValueError(
+            f"experiment id {CURATED_MEMORY_SOURCE!r} is reserved for the "
+            "curated memory tier; rename that experiment"
+        )
+    snapshot = latest_skills_snapshot(records, experiment_dir=directory)
+    if snapshot.root is None or not snapshot.stats.count:
+        return None
+    entries = tuple(sorted(item.name for item in snapshot.root.iterdir()))
+    return MemorySource(
+        directory.name,
+        "graduated",
+        snapshot.root,
+        entries,
+        heldout_end=_verdict_heldout_end(records),
+    )
 
 
 def _trade_date(value: object, what: str) -> str:
@@ -1156,6 +1167,7 @@ __all__ = [
     "curated_memory_source",
     "ensure_operating_memory_snapshot",
     "experiment_graduated",
+    "graduated_memory_source",
     "graduated_memory_sources",
     "install_operating_memory",
     "install_workspace_skills",

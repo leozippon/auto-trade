@@ -418,10 +418,13 @@ def test_the_tier_is_read_once_per_ledger_state_and_sees_every_change(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The page reads the tier on every visit, and re-parsing every ledger per
-    request (once per overlapping visitor) starved the console. The payload is
-    kept while no ledger moves, so a repeat or concurrent read re-reads
-    nothing — but a verdict landing or an experiment appearing is on the next
-    read, because a row can change only through its experiment's ledger."""
+    request (once per overlapping visitor) starved the console. Each
+    experiment's part is kept while its ledger does not move, so a repeat or
+    concurrent read re-reads nothing — but a verdict landing or an experiment
+    appearing is on the next read, because a row can change only through its
+    experiment's ledger, and that read re-reads those ledgers alone, while
+    running arms append to theirs all the time. What is kept is exactly what
+    a cold read computes."""
 
     experiments = tmp_path / "experiments"
     experiments.mkdir()
@@ -460,15 +463,19 @@ def test_the_tier_is_read_once_per_ledger_state_and_sees_every_change(
         }
     )
     _experiment(experiments, "late", verdict="discarded")
-    rows = {
-        row["experiment_id"]: row
-        for row in memory.graduated_tier(experiments)["experiments"]
+    reads.clear()
+    payload = memory.graduated_tier(experiments)
+    assert set(reads) == {
+        experiments / name / "ledgers" / "experiment_ledger.jsonl" for name in ("mid_forward", "late")
     }
+    rows = {row["experiment_id"]: row for row in payload["experiments"]}
     assert rows["mid_forward"]["verdict"] == "graduated"
     assert rows["mid_forward"]["admitted"] is True
     assert rows["mid_forward"]["entries"] == ["same-window-parent-control"]
     assert rows["late"]["verdict"] == "discarded"
     assert rows["adopted"] == payloads[0]["experiments"][0]
+    monkeypatch.setattr(memory, "_TIER_CACHE", {})
+    assert memory.graduated_tier(experiments) == payload
 
 
 # ---- the snapshot one experiment froze -------------------------------------

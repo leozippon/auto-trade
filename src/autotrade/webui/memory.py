@@ -42,6 +42,7 @@ from autotrade.pipelines.skills import (
     SkillsStats,
     admit_memory_sources,
     build_skills_index,
+    graduated_memory_source,
     graduated_memory_sources,
     latest_skills_snapshot,
     operating_memory_snapshot_root,
@@ -137,36 +138,52 @@ def curated_entry(repo_root: Path, name: str) -> dict[str, object]:
 
 
 # The tier reads every experiment's ledger and validates every published skills
-# tree, which is most of a second on a full experiments root and several
-# seconds per visitor when visits overlap. Everything a row depends on hangs off
-# its experiment's ledger: the ledger is append-only (or atomically rewritten),
-# and the skills generation a row points at is published immutably before the
-# row names it. So the payload is kept while the experiment set and every
-# ledger's size and mtime are unchanged — one slot, the current state; the lock
-# makes overlapping misses compute it once.
+# tree, which is seconds on a full experiments root, and running arms append to
+# their ledgers all the time. Everything one experiment contributes -- the
+# source the tier holds from it and its row -- hangs off its own ledger: the
+# ledger is append-only (or atomically rewritten), and the skills generation a
+# row points at is published immutably before the row names it. So each
+# experiment's contribution is kept while its ledger's size and mtime are
+# unchanged, and a ledger that moved re-reads that experiment alone; the lock
+# makes overlapping requests compute it once.
 _TIER_LOCK = threading.Lock()
-_TIER_CACHE: dict[tuple[object, ...], dict[str, object]] = {}
+_TIER_CACHE: dict[
+    Path, tuple[tuple[int, int] | None, MemorySource | None, dict[str, object]]
+] = {}
 
 
-def _tier_key(root: Path) -> tuple[object, ...]:
-    key: list[object] = [str(root)]
-    for directory in sorted(root.iterdir(), key=lambda path: path.name):
-        if not directory.is_dir():
-            continue
-        try:
-            stat = (directory / "ledgers" / "experiment_ledger.jsonl").stat()
-        except OSError:
-            key.append((directory.name,))
-        else:
-            key.append((directory.name, stat.st_size, stat.st_mtime_ns))
-    return tuple(key)
+def _ledger_key(directory: Path) -> tuple[int, int] | None:
+    try:
+        stat = (directory / "ledgers" / "experiment_ledger.jsonl").stat()
+    except OSError:
+        return None
+    return (stat.st_size, stat.st_mtime_ns)
+
+
+def _contribution(directory: Path) -> tuple[MemorySource | None, dict[str, object]]:
+    """The source the tier holds from ``directory``, if any, and its row
+    before admission. Raises what ``graduated_memory_source`` raises."""
+
+    key = _ledger_key(directory)
+    kept = _TIER_CACHE.get(directory)
+    if kept is not None and kept[0] == key:
+        return kept[1], kept[2]
+    _TIER_CACHE.pop(directory, None)
+    source = graduated_memory_source(directory)
+    row = _tier_row(directory)
+    # An error may be a transient I/O failure the key cannot see, so it is
+    # read afresh on every request rather than kept.
+    if "error" not in row:
+        _TIER_CACHE[directory] = (key, source, row)
+    return source, row
 
 
 def graduated_tier(experiments_root: Path) -> dict[str, object]:
     """Every experiment's verdict, whether the tier holds it, and what it holds.
 
     ``admitted`` is whatever ``skills.graduated_memory_sources`` returns, never
-    a second rule: the tier holds the source. Holding is not mounting -- an arm
+    a second rule: the tier holds the source, read one experiment at a time by
+    the same ``skills.graduated_memory_source``. Holding is not mounting -- an arm
     mounts it only when ``heldout_end``, the last day the source's verdict
     read, is no later than the arm's research end, and never when it is
     unknown (``skills.admit_memory_sources``). ``published`` is the size of the
@@ -179,41 +196,60 @@ def graduated_tier(experiments_root: Path) -> dict[str, object]:
     if not root.is_dir():
         return {"experiments": []}
     with _TIER_LOCK:
-        key = _tier_key(root)
-        if key in _TIER_CACHE:
-            return _TIER_CACHE[key]
-        payload = _graduated_tier(root)
-        rows: list[dict[str, object]] = payload["experiments"]  # type: ignore[assignment]
-        _TIER_CACHE.clear()
-        # An error may be a transient I/O failure the key cannot see, so it is
-        # read afresh on every request rather than kept.
-        if "error" not in payload and not any("error" in row for row in rows):
-            _TIER_CACHE[key] = payload
-        return payload
-
-
-def _graduated_tier(root: Path) -> dict[str, object]:
+        # Every directory feeds the tier, as ``graduated_memory_sources``
+        # reads it; a dot-directory is no experiment row.
+        directories = sorted(
+            (path for path in root.iterdir() if path.is_dir()), key=lambda path: path.name
+        )
+        for gone in {path for path in _TIER_CACHE if path.parent == root} - set(directories):
+            del _TIER_CACHE[gone]
+        admitted: dict[str, MemorySource] | None = {}
+        failure: Exception | None = None
+        rows: list[dict[str, object]] = []
+        for directory in directories:
+            try:
+                source, row = _contribution(directory)
+            except (OSError, ValueError) as exc:
+                failure = failure or exc
+                row = _tier_row(directory)
+            else:
+                if source is not None:
+                    admitted[source.source] = source
+            if not directory.name.startswith("."):
+                rows.append(row)
     payload: dict[str, object] = {"experiments": []}
-    admitted: dict[str, MemorySource] | None
-    try:
-        admitted = {source.source: source for source in graduated_memory_sources(root)}
-    except (OSError, ValueError) as exc:
+    if failure is not None:
         # A tier that cannot be resolved is what a session starting now would
         # also hit. Report it, and leave every row's admission unknown rather
         # than printing a "not admitted" the read model cannot stand behind.
-        payload["error"] = _error(exc, _UNREADABLE_TIER)
+        payload["error"] = _error(failure, _UNREADABLE_TIER)
         admitted = None
-    payload["experiments"] = [
-        _tier_row(directory, admitted)
-        for directory in sorted(root.iterdir(), key=lambda path: path.name)
-        if directory.is_dir() and not directory.name.startswith(".")
-    ]
+    payload["experiments"] = [_admitted(row, admitted) for row in rows]
     return payload
 
 
-def _tier_row(
-    directory: Path, admitted: Mapping[str, MemorySource] | None
+def _admitted(
+    row: Mapping[str, object], admitted: Mapping[str, MemorySource] | None
 ) -> dict[str, object]:
+    """``row`` with whether the tier holds it and what; a row that could not
+    be read answers neither."""
+
+    if "error" in row:
+        return dict(row)
+    if admitted is None:
+        return {**row, "admitted": None}
+    source = admitted.get(str(row["experiment_id"]))
+    if source is None:
+        return dict(row)
+    return {
+        **row,
+        "admitted": True,
+        "heldout_end": source.heldout_end,
+        "entries": list(source.entries),
+    }
+
+
+def _tier_row(directory: Path) -> dict[str, object]:
     row: dict[str, object] = {
         "experiment_id": directory.name,
         "verdict": None,
@@ -233,14 +269,6 @@ def _tier_row(
         return row
     row["verdict"] = str(verdict["status"]) if isinstance(verdict, Mapping) else None
     row["published"] = published.stats.count
-    if admitted is None:
-        row["admitted"] = None
-        return row
-    source = admitted.get(directory.name)
-    row["admitted"] = source is not None
-    if source is not None:
-        row["heldout_end"] = source.heldout_end
-        row["entries"] = list(source.entries)
     return row
 
 
