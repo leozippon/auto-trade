@@ -239,11 +239,15 @@ class AcceptanceRules:
     # and stamped on like the conditions. A declared offline trial has no
     # series, so nothing measured its correlation; with the rule it counts as
     # one independent trial (``verdict.trial_family_statistics``), without it
-    # at the validated trials' ρ̄.
+    # at the validated trials' ρ̄. With it the arm and its lineage are also
+    # one family (``experiment.recorded_lineage``): one trial per strategy's
+    # bytes, and one count of declared offline trials per reference pack.
     independent_offline_trials: bool = _rule(
         False,
         "Freeze gate: each declared offline trial, the arm's or its lineage's, counts as one "
-        "independent trial; validated trials keep their measured correlation.",
+        "independent trial; validated trials keep their measured correlation. Across the arm "
+        "and its lineage the same bytes are one trial, and arms mounting one reference pack "
+        "declare its offline trials once, at the most any of them declared.",
     )
     forward_confidence: float = _rule(
         verdict.FORWARD_CONFIDENCE, "Forward verdict: one-sided block-bootstrap confidence."

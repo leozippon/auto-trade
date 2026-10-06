@@ -34,6 +34,7 @@ from .experiment import (
     _recorded_steps,
     _style_analysis,
     fingerprinted,
+    reference_pack,
     trial_family,
 )
 from .hitl_state import read_json
@@ -76,9 +77,12 @@ def extract_lineage(
     (``experiment.trial_family`` over its research session's Validations,
     fingerprinted from its own revision store, so the same bytes on two spans
     are one trial, controls are left out and declared offline screens count,
-    exactly as for the arm's own). Per measurable trial: the daily series of
-    its representative Validation. A trial whose span cannot be measured has
-    no series, as in the arm's own family.
+    exactly as for the arm's own), each trial's bytes and the reference pack
+    the arm mounted, by which an arm under ``independent_offline_trials``
+    joins the lineage's trials to its own (``experiment.recorded_lineage``).
+    Per measurable trial: its bytes and the daily series of its
+    representative Validation. A trial whose span cannot be measured has no
+    series, as in the arm's own family.
     """
 
     root = Path(experiments_root)
@@ -127,6 +131,7 @@ def extract_lineage(
                 {
                     "experiment_id": arm,
                     "revision_id": revision,
+                    "fingerprint": str(row["fingerprint"]),
                     "span": row.get("span"),
                     "daily": [[day, value] for day, value in daily.items()],
                 }
@@ -138,6 +143,8 @@ def extract_lineage(
                 "offline_trials": family["offline_trials"],
                 "controls": family["controls"],
                 "undeclared_offline_validations": family["undeclared_offline_validations"],
+                "fingerprints": [str(row["fingerprint"]) for row in representatives],
+                "workspace_reference": reference_pack(params.get("workspace_reference")),
             }
         )
     return {"arms": extracted, "series": series}

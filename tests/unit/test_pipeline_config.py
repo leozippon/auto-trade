@@ -1312,7 +1312,7 @@ class PitViewsSeedParameterTest(unittest.TestCase):
             self.assertEqual(pin["generation_id"], "gen_seed")
             self.assertEqual(options.rolling.lineage_arms, ("earlier_arm",))
             # What the research session writes first; a later worker start resumes.
-            ledger.append(lineage_ledger_record(directory, acceptance=AcceptanceRules()))
+            ledger.append(lineage_ledger_record(directory, acceptance=AcceptanceRules(), workspace_reference=""))
             load_worker_options(directory, repo_root=repo_root)
 
             ran = experiments / "ran_unpinned"

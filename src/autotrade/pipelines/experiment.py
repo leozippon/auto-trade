@@ -315,7 +315,9 @@ class RollingExperimentPipeline:
             # is written here, after the worker pinned the research release.
             self.ledger.append(
                 lineage_ledger_record(
-                    self.config.experiment_dir, acceptance=self.config.acceptance
+                    self.config.experiment_dir,
+                    acceptance=self.config.acceptance,
+                    workspace_reference=self.config.workspace_reference,
                 )
             )
             records = self.ledger.read()
@@ -1136,15 +1138,31 @@ def _arm_trials(
     records: Sequence[Mapping[str, object]],
     session_rows: Sequence[Mapping[str, object]],
     experiment_dir: str | Path,
-) -> tuple[list[Mapping[str, object]], dict[str, object], tuple[list[str], dict[str, object]]]:
+    acceptance: AcceptanceRules,
+) -> tuple[
+    list[Mapping[str, object]],
+    dict[str, object],
+    tuple[list[str], list[Mapping[str, object]], dict[str, object]],
+]:
     """What an arm's freeze gate deflates over: its Validation rows, earlier
     sessions' recorded Steps and this session's alike, fingerprinted from the
     revision store of the arm in ``experiment_dir`` where a row does not carry
-    it; their :func:`trial_family`; and the lineage the ledger records
+    it; their :func:`trial_family`; and the lineage the ledger records, joined
+    to that family under the arm's ``acceptance`` rules
     (:func:`recorded_lineage`)."""
 
     rows = fingerprinted(experiment_dir, [*_recorded_steps(records), *session_rows])
-    return rows, trial_family(rows), recorded_lineage(records)
+    family = trial_family(rows)
+    return (
+        rows,
+        family,
+        recorded_lineage(
+            records,
+            family["representatives"],  # type: ignore[arg-type]
+            family["offline_trials"],  # type: ignore[arg-type]
+            acceptance=acceptance,
+        ),
+    )
 
 
 def freeze_gate_for(
@@ -1181,7 +1199,9 @@ def freeze_gate_for(
     reasons = [*hard_reasons, *judge("registration", nominee, {})]
     if reasons:
         return {"passed": False, "reasons": reasons}
-    rows, family, (lineage_arms, lineage) = _arm_trials(records, session_rows, experiment_dir)
+    rows, family, (lineage_arms, correlated, lineage) = _arm_trials(
+        records, session_rows, experiment_dir, acceptance
+    )
     representatives: list[Mapping[str, object]] = family["representatives"]  # type: ignore[assignment]
     summary = nominee.get("summary")
     try:
@@ -1190,7 +1210,7 @@ def freeze_gate_for(
             rules=acceptance,
             trials=len(representatives),
             offline_trials=family["offline_trials"],  # type: ignore[arg-type]
-            trial_analyses=[_style_analysis(row) for row in representatives],
+            trial_analyses=[_style_analysis(row) for row in correlated],
             **lineage,  # type: ignore[arg-type]
             full_span_validations=sum(
                 1
@@ -1383,12 +1403,14 @@ def full_span_bar(
     full span measures, a bar about 0.3 % lower). The gate itself is unchanged.
     """
 
-    rows, family, (_arms, lineage) = _arm_trials(records, session_rows, experiment_dir)
+    rows, family, (_arms, correlated, lineage) = _arm_trials(
+        records, session_rows, experiment_dir, acceptance
+    )
     representatives: list[Mapping[str, object]] = family["representatives"]  # type: ignore[assignment]
     statistics = trial_family_statistics(
         trials=max(len(representatives), 1),
         offline_trials=family["offline_trials"],  # type: ignore[arg-type]
-        trial_analyses=[_style_analysis(row) for row in representatives],
+        trial_analyses=[_style_analysis(row) for row in correlated],
         **lineage,  # type: ignore[arg-type]
         independent_offline_trials=acceptance.independent_offline_trials,
     )
@@ -1407,23 +1429,116 @@ def full_span_bar(
     }
 
 
+def reference_pack(value: object) -> str:
+    """The reference pack an arm mounts, as its ``workspace_reference`` names
+    it, one spelling per directory; ``""`` for an arm that mounts none."""
+
+    text = str(value or "").strip()
+    return str(Path(text)) if text else ""
+
+
+def _daily(item: Mapping[str, object]) -> dict[str, float]:
+    """One extracted lineage series as ``verdict.trial_correlation`` reads it."""
+
+    return {str(day): float(value) for day, value in item["daily"]}  # type: ignore[attr-defined]
+
+
+def _joined_lineage(
+    extraction: Mapping[str, object],
+    representatives: Sequence[Mapping[str, object]] = (),
+    offline_trials: int = 0,
+    *,
+    own: Mapping[str, object] | None = None,
+) -> tuple[list[Mapping[str, object]], dict[str, object]]:
+    """An arm's trials and its lineage's as one family, the rule of an arm
+    whose rules hold ``independent_offline_trials``: what the lineage
+    (``lineage.extract_lineage``) adds to the arm's own distinct non-control
+    ``representatives`` and declared ``offline_trials``, as
+    ``verdict.trial_family_statistics`` takes it, and the representatives
+    whose own series ρ̄ reads. ``own`` is the arm's ``lineage`` record, which
+    names the arm and the pack it mounts; ``None`` reads the lineage alone.
+
+    A trial is one strategy's bytes across the arm and every lineage arm (a
+    control is none), so sibling arms that validated the same bytes add it
+    once; its series is that of its longest validation, the first of equals
+    in order -- the arm's own, then the lineage arms' as listed -- as within
+    one arm. Declared offline screens are the screens of a reference pack:
+    the arms mounting one pack count once, at the most any of them declared,
+    since an arm may add screens of its own to the pack's; an arm that mounts
+    none is a pack of its own. ``ValueError`` for a lineage extracted before
+    its trials carried their bytes, which cannot be joined.
+    """
+
+    arms: Sequence[Mapping[str, object]] = extraction["arms"]  # type: ignore[assignment]
+    stale = [str(arm["experiment_id"]) for arm in arms if "fingerprints" not in arm]
+    if stale:
+        raise ValueError(
+            f"the lineage of {', '.join(stale)} was extracted before its trials carried "
+            "their bytes, so it cannot be joined under independent_offline_trials"
+        )
+    name = str(own["experiment_id"]) if own is not None else ""
+    # bytes -> (measured days of the series that represents it, whose it is)
+    longest: dict[str, tuple[int, str]] = {}
+
+    def offer(fingerprint: str, days: int, whose: str) -> None:
+        if fingerprint not in longest or days > longest[fingerprint][0]:
+            longest[fingerprint] = (days, whose)
+
+    for row in representatives:
+        offer(str(row["fingerprint"]), _measured_days(row), name)
+    series = {
+        (str(item["experiment_id"]), str(item["fingerprint"])): item
+        for item in extraction["series"]  # type: ignore[attr-defined]
+    }
+    for arm in arms:
+        arm_id = str(arm["experiment_id"])
+        for fingerprint in arm["fingerprints"]:  # type: ignore[attr-defined]
+            item = series.get((arm_id, fingerprint))
+            offer(fingerprint, len(item["daily"]) if item is not None else 0, arm_id)  # type: ignore[arg-type]
+    declared: dict[tuple[str, str], int] = {}
+    for pack, arm_id, count in (
+        (str(own["workspace_reference"]) if own is not None else "", name, offline_trials),
+        *(
+            (str(arm["workspace_reference"]), str(arm["experiment_id"]), int(arm["offline_trials"]))  # type: ignore[call-overload]
+            for arm in arms
+        ),
+    ):
+        key = ("pack", pack) if pack else ("arm", arm_id)
+        declared[key] = max(declared.get(key, 0), count)
+    offline = sum(declared.values()) - offline_trials
+    return [
+        row for row in representatives if longest[str(row["fingerprint"])][1] == name
+    ], {
+        "lineage_trials": len(longest) - len(representatives) + offline,
+        "lineage_offline_trials": offline,
+        "lineage_series": [
+            _daily(item)
+            for (arm_id, fingerprint), item in series.items()
+            if longest[fingerprint][1] == arm_id
+        ],
+    }
+
+
 def lineage_summary(
     extraction: Mapping[str, object], *, acceptance: AcceptanceRules
 ) -> dict[str, object]:
     """A lineage's own trial count and what it counts as independently under
     the arm's ``acceptance`` rules, from what ``lineage.extract_lineage`` read:
-    the ledger record's figures, and what a round's ``--dry-run`` prints."""
+    the ledger record's figures, and what a round's ``--dry-run`` prints.
+    Under ``independent_offline_trials`` its arms' trials are one family
+    (:func:`_joined_lineage`); otherwise each arm's count adds."""
 
     arms: Sequence[Mapping[str, object]] = extraction["arms"]  # type: ignore[assignment]
-    host = sum(int(arm["host_trials"]) for arm in arms)  # type: ignore[call-overload]
-    offline = sum(int(arm["offline_trials"]) for arm in arms)  # type: ignore[call-overload]
-    correlation, pairs = trial_correlation(
-        (),
-        [
-            {str(day): float(value) for day, value in item["daily"]}  # type: ignore[index]
-            for item in extraction["series"]  # type: ignore[attr-defined]
-        ],
-    )
+    if acceptance.independent_offline_trials:
+        _own, joined = _joined_lineage(extraction)
+        offline = int(joined["lineage_offline_trials"])  # type: ignore[call-overload]
+        host = int(joined["lineage_trials"]) - offline  # type: ignore[call-overload]
+        series: list[dict[str, float]] = joined["lineage_series"]  # type: ignore[assignment]
+    else:
+        host = sum(int(arm["host_trials"]) for arm in arms)  # type: ignore[call-overload]
+        offline = sum(int(arm["offline_trials"]) for arm in arms)  # type: ignore[call-overload]
+        series = [_daily(item) for item in extraction["series"]]  # type: ignore[attr-defined]
+    correlation, pairs = trial_correlation((), series)
     unmeasured = offline if acceptance.independent_offline_trials else 0
     return {
         "arms": [str(arm["experiment_id"]) for arm in arms],
@@ -1437,10 +1552,14 @@ def lineage_summary(
     }
 
 
-def lineage_ledger_record(experiment_dir: Path, *, acceptance: AcceptanceRules) -> dict[str, object]:
+def lineage_ledger_record(
+    experiment_dir: Path, *, acceptance: AcceptanceRules, workspace_reference: str
+) -> dict[str, object]:
     """The ``lineage`` ledger record of an arm created with ``lineage_arms``,
     from the series file the console wrote beside its ledger at creation,
-    priced under the arm's ``acceptance`` rules."""
+    priced under the arm's ``acceptance`` rules. It names the reference pack
+    the arm mounts (its ``workspace_reference``), which the joined family of
+    :func:`recorded_lineage` reads."""
 
     path = Path(experiment_dir) / "ledgers" / LINEAGE_SERIES_NAME
     if not path.is_file():
@@ -1455,6 +1574,7 @@ def lineage_ledger_record(experiment_dir: Path, *, acceptance: AcceptanceRules) 
         # No run produced it: it carries what creation read from other arms.
         "run_id": LINEAGE_RECORD_TYPE,
         **lineage_summary(json.loads(path.read_text(encoding="utf-8")), acceptance=acceptance),
+        "workspace_reference": reference_pack(workspace_reference),
         "series_ref": str(path),
         "recorded_at": utc_now_iso(),
     }
@@ -1462,28 +1582,37 @@ def lineage_ledger_record(experiment_dir: Path, *, acceptance: AcceptanceRules) 
 
 def recorded_lineage(
     records: Sequence[Mapping[str, object]],
-) -> tuple[list[str], dict[str, object]]:
-    """The lineage the ledger records (``pipelines/lineage.py``): its arms, and
-    what they add to the trial family as ``verdict.trial_family_statistics``
-    takes it -- their trials, the part of those declared offline and one daily
-    series per measurable lineage revision.
+    representatives: Sequence[Mapping[str, object]],
+    offline_trials: int,
+    *,
+    acceptance: AcceptanceRules,
+) -> tuple[list[str], list[Mapping[str, object]], dict[str, object]]:
+    """The lineage the ledger records (``pipelines/lineage.py``) beside the
+    arm's own trial family -- its distinct non-control ``representatives``
+    and declared ``offline_trials`` (:func:`trial_family`): the lineage arms;
+    the representatives whose own series ρ̄ reads; and what the lineage adds
+    as ``verdict.trial_family_statistics`` takes it -- its trials, the part of
+    those declared offline and one daily series per measurable lineage trial.
 
-    Read from this arm's own files only -- the ledger record and the series
-    file it names, both written at creation -- never from the lineage arms.
-    ``([], {})`` for an arm created without one.
+    Under ``acceptance.independent_offline_trials`` the arm and its lineage
+    are one family (:func:`_joined_lineage`); otherwise the lineage adds the
+    trials its record counts and every series it extracted, and ρ̄ reads every
+    representative. Read from this arm's own files only -- the ledger record
+    and the series file it names, both written at creation -- never from the
+    lineage arms. ``([], representatives, {})`` for an arm created without one.
     """
 
     record = lineage_record(records)
     if record is None:
-        return [], {}
+        return [], list(representatives), {}
+    arms = [str(arm) for arm in record["arms"]]  # type: ignore[union-attr]
     payload = json.loads(Path(str(record["series_ref"])).read_text(encoding="utf-8"))
-    return [str(arm) for arm in record["arms"]], {  # type: ignore[union-attr]
+    if acceptance.independent_offline_trials:
+        return arms, *_joined_lineage(payload, representatives, offline_trials, own=record)
+    return arms, list(representatives), {
         "lineage_trials": int(record["trials"]),  # type: ignore[call-overload]
         "lineage_offline_trials": int(record["offline_trials"]),  # type: ignore[call-overload]
-        "lineage_series": [
-            {str(date): float(value) for date, value in item["daily"]}
-            for item in payload["series"]
-        ],
+        "lineage_series": [_daily(item) for item in payload["series"]],
     }
 
 

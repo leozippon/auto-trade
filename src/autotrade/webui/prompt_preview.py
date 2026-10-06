@@ -144,7 +144,9 @@ def _research_prompt(
     lineage = lineage_record(context.records)
     if lineage is None and rolling.lineage_arms:
         lineage = lineage_ledger_record(
-            context.options.experiment_dir, acceptance=rolling.acceptance
+            context.options.experiment_dir,
+            acceptance=rolling.acceptance,
+            workspace_reference=rolling.workspace_reference,
         )
     manifest: dict[str, object] = {
         "experiment_id": rolling.experiment_id,
@@ -159,7 +161,11 @@ def _research_prompt(
         "benchmark_index": rolling.benchmark_index,
         "snapshot_config": context.options.snapshot_config.to_record(),
         "start": start_record(),
-        "arm": arm_record((), lineage),
+        "arm": arm_record(
+            (),
+            lineage,
+            independent_offline_trials=rolling.acceptance.independent_offline_trials,
+        ),
         "modification_constraints": rolling.step_constraints.to_record(),
         "acceptance_rules": rolling.acceptance.to_record(),
         "schedule": rolling.schedule.to_record(),

@@ -980,7 +980,9 @@ def freeze_gate(
     trial) and ``lineage_series`` (one reduced series per measurable lineage
     trial). Under ``rules.independent_offline_trials`` the declared offline
     trials, which have no series, are left out of M in that formula and
-    count one each. The dispersion √V is the zero-skill sampling error
+    count one each; the caller has then joined the lineage to the arm's own
+    family, so each strategy's bytes come once, with one series
+    (``experiment.recorded_lineage``). The dispersion √V is the zero-skill sampling error
     of an IR over the nominee's own measured days (:func:`null_sharpe_std`), so
     neither controls nor near-copies of the nominee move the bar through it.
     ``information_ratio_bar`` is the research IR at which the probability

@@ -100,6 +100,7 @@ from .calendar import (
     yyyymmdd,
 )
 from .config import (
+    AcceptanceRules,
     BudgetUsed,
     EvaluationBackend,
     ResearchSessionRequest,
@@ -785,7 +786,11 @@ class LLMResearchDeveloper:
                 },
                 "start": start_record(),
                 "arm": arm_record(
-                    request.steps_before, lineage_record(self.ledger.read())
+                    request.steps_before,
+                    lineage_record(self.ledger.read()),
+                    independent_offline_trials=AcceptanceRules.from_record(
+                        request.acceptance_rules
+                    ).independent_offline_trials,
                 ),
                 "modification_constraints": request.modification_constraints.to_record(),
                 "acceptance_rules": dict(request.acceptance_rules),
@@ -1490,10 +1495,20 @@ LINEAGE_NOTE = (
     "join this arm's freeze-gate trial family: selection_statistics."
     "information_ratio_bar already counts them"
 )
+# How they join where the arm's rules hold ``independent_offline_trials``
+# (``experiment.recorded_lineage``), in the one sentence the fact adds.
+LINEAGE_JOINING = (
+    "Strategy bytes validated both here and in a lineage arm, or in two lineage "
+    "arms, are one trial, and the offline_trials declared by arms that mount the "
+    "same reference pack count once, at the largest number any of them declared"
+)
 
 
 def arm_record(
-    steps: Sequence[StepResult], lineage: Mapping[str, object] | None = None
+    steps: Sequence[StepResult],
+    lineage: Mapping[str, object] | None = None,
+    *,
+    independent_offline_trials: bool = False,
 ) -> dict[str, object]:
     """The arm's selection state when the attempt starts.
 
@@ -1504,8 +1519,9 @@ def arm_record(
     session only runs while nothing is frozen. ``lineage`` is the ledger's
     ``lineage`` record of an arm created with one: the earlier arms whose
     trials the gate adds to these, how many and what they count as, with the
-    note that says so (``LINEAGE_NOTE``), so no prompt sentence holds only for
-    the arms that have one.
+    note that says so (``LINEAGE_NOTE``, and ``LINEAGE_JOINING`` where the
+    arm's rules hold ``independent_offline_trials``), so no prompt sentence
+    holds only for the arms that have one.
     """
 
     family = trial_family([trial_fields(step) for step in steps])
@@ -1519,7 +1535,11 @@ def arm_record(
     if lineage is not None:
         record["lineage"] = {
             **{key: lineage[key] for key in ("arms", "trials", "effective_trials")},
-            "note": LINEAGE_NOTE,
+            "note": (
+                f"{LINEAGE_NOTE}. {LINEAGE_JOINING}"
+                if independent_offline_trials
+                else LINEAGE_NOTE
+            ),
         }
     return record
 

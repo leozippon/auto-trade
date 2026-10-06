@@ -298,14 +298,22 @@ def _nominee_gates(
     years: Sequence[tuple[str, str]],
 ) -> dict[str, object]:
     """One Step of a session taken as its nominee, under every rule variant.
-    Variants that state the same rules share one reading."""
+    Variants that state the same rules share one reading. A variant whose
+    rules the arm's stored inputs cannot carry records why instead: R4 joins
+    the lineage to the arm's family by bytes, which a lineage extracted before
+    its trials carried them does not hold. The arm's own rules always read."""
 
     read: dict[str, dict[str, object]] = {}
     gates: dict[str, object] = {}
     for name, rules in variants.items():
         key = json.dumps(rules.to_record(), sort_keys=True)
         if key not in read:
-            read[key] = _gate(arm, records, index, nominee, rules, years)
+            try:
+                read[key] = _gate(arm, records, index, nominee, rules, years)
+            except ValueError as exc:
+                if name == "own":
+                    raise
+                read[key] = {"refused": str(exc)}
         gates[name] = read[key]
     others = [row for row in _steps(records[index]) if row["step_id"] != nominee["step_id"]]
     gates[WITH_REPLICATES] = _gate(arm, records, index, nominee, variants["R3"], years, others)

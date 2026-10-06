@@ -1418,7 +1418,7 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(
             ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl").read(), []
         )
-        record = lineage_ledger_record(directory, acceptance=AcceptanceRules())
+        record = lineage_ledger_record(directory, acceptance=AcceptanceRules(), workspace_reference="")
         self.assertEqual((record["arms"], record["trials"]), (["earlier_arm"], 1))
         self.assertTrue(Path(str(record["series_ref"])).is_relative_to(directory))
         self.assertFalse((self.experiments_root / "exp_orphan").exists())

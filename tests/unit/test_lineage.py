@@ -24,14 +24,22 @@ from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
 from autotrade.environment.runtime import write_json_atomic
 from autotrade.pipelines import verdict
 from autotrade.pipelines.config import AcceptanceRules
-from autotrade.pipelines.experiment import freeze_gate_for, lineage_ledger_record
+from autotrade.pipelines.experiment import (
+    freeze_gate_for,
+    lineage_ledger_record,
+    lineage_summary,
+)
 from autotrade.pipelines.ledger import ExperimentLedger, lineage_record
 from autotrade.pipelines.lineage import (
     extract_lineage,
     lineage_arm_ids,
     write_lineage,
 )
-from autotrade.pipelines.research_session import LINEAGE_NOTE, arm_record
+from autotrade.pipelines.research_session import (
+    LINEAGE_JOINING,
+    LINEAGE_NOTE,
+    arm_record,
+)
 from autotrade.pipelines.session_resume import REVISIONS_DIR
 
 RESEARCH_START, RESEARCH_END = "20210701", "20250630"
@@ -75,11 +83,12 @@ def _payload(*, seed: int, loading: float, days=DAYS) -> dict[str, object]:
 
 def _row(directory: Path, index: int, *, seed: int, loading: float, span: str = "full",
          control: bool = False, batch: str = "b1", offline: int | None = 0, days=DAYS,
-         bytes_of: int | None = None) -> dict[str, object]:
+         bytes_of: int | None = None, fingerprint: str | None = None) -> dict[str, object]:
     """One ledger ``steps[]`` row, its result and style sidecar on disk.
 
     Each row replays bytes of its own unless ``bytes_of`` names the row index
-    whose bytes it validates again (another revision of the same strategy).
+    whose bytes it validates again (another revision of the same strategy), or
+    ``fingerprint`` names bytes another arm validates too.
     """
 
     result = directory / "artifacts/results" / f"valid_{index:03d}"
@@ -89,7 +98,7 @@ def _row(directory: Path, index: int, *, seed: int, loading: float, span: str = 
     return {
         "step_id": f"research__{directory.name}__valid_{index:03d}",
         "revision_id": f"revision_{directory.name}_{index}",
-        "fingerprint": f"bytes_{directory.name}_{index if bytes_of is None else bytes_of}",
+        "fingerprint": fingerprint or f"bytes_{directory.name}_{index if bytes_of is None else bytes_of}",
         "control": control,
         "batch_id": batch,
         "offline_trials": offline,
@@ -101,17 +110,23 @@ def _row(directory: Path, index: int, *, seed: int, loading: float, span: str = 
 
 
 def _arm(root: Path, experiment_id: str, rows, *, research=(RESEARCH_START, RESEARCH_END),
-         forward: bool = False) -> Path:
+         forward: bool = False, pack: str = "") -> Path:
     """An arm whose one research session recorded ``rows`` (``_row`` keywords).
 
     ``forward`` adds what a frozen arm goes on to write: a ``forward`` record
-    naming a replay that runs past research end.
+    naming a replay that runs past research end. ``pack`` is the reference
+    pack it mounted.
     """
 
     directory = root / experiment_id
     write_json_atomic(
         directory / "hitl/params.json",
-        {"experiment_id": experiment_id, "research_start": research[0], "research_end": research[1]},
+        {
+            "experiment_id": experiment_id,
+            "research_start": research[0],
+            "research_end": research[1],
+            **({"workspace_reference": pack} if pack else {}),
+        },
     )
     ledger = ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl")
     ledger.append(
@@ -154,12 +169,14 @@ def _analysis(row) -> dict[str, object]:
     )
 
 
-def _record(arm: Path, extraction) -> dict[str, object]:
+def _record(arm: Path, extraction, *, rules: AcceptanceRules | None = None, pack: str = "") -> dict[str, object]:
     """What creation and the start of the research session write: the
-    console's series file, then the pipeline's ledger record read from it."""
+    console's series file, then the pipeline's ledger record read from it
+    under the arm's ``rules`` (the defaults when none), naming the reference
+    ``pack`` the arm mounts."""
 
     write_lineage(arm, extraction)
-    record = lineage_ledger_record(arm, acceptance=AcceptanceRules())
+    record = lineage_ledger_record(arm, acceptance=rules or AcceptanceRules(), workspace_reference=pack)
     ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl").append(record)
     return record
 
@@ -332,7 +349,7 @@ def test_the_recorded_lineage_joins_the_family_and_outlives_its_arms(tmp_path: P
     union = dsr["trial_correlation"]
     assert held["trial_correlation"] == union
     assert held["effective_trials"] == pytest.approx(union + (1 - union) * 5 + 4)
-    assert lineage_ledger_record(arm, acceptance=rules)["effective_trials"] == pytest.approx(
+    assert lineage_ledger_record(arm, acceptance=rules, workspace_reference="")["effective_trials"] == pytest.approx(
         correlation + (1 - correlation) * 3 + 3
     )
     assert arm_record((), lineage_record(records))["lineage"] == {
@@ -343,7 +360,7 @@ def test_the_recorded_lineage_joins_the_family_and_outlives_its_arms(tmp_path: P
     }
     with pytest.raises(ValueError, match="already records its lineage"):
         ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl").append(
-            lineage_ledger_record(arm, acceptance=AcceptanceRules())
+            lineage_ledger_record(arm, acceptance=AcceptanceRules(), workspace_reference="")
         )
 
 
@@ -391,6 +408,103 @@ def test_a_lineage_counts_one_strategy_validated_twice_as_one_trial(tmp_path: Pa
     shutil.rmtree(probed / REVISIONS_DIR / "revision_probed_4")
     with pytest.raises(ValueError, match="lineage arm probed: revision revision_probed_4 has no manifest"):
         extract_lineage(root, ["probed"], research_start=RESEARCH_START, research_end=RESEARCH_END)
+
+
+def test_under_the_rule_bytes_validated_in_two_arms_are_one_trial(tmp_path: Path) -> None:
+    """Sibling arms on a pack that prescribes its batches validate the same
+    bytes. Under ``independent_offline_trials`` the arm and its lineage are one
+    family: those bytes are one trial, represented by their longest series --
+    the lineage's full span, not the arm's own probe of them on a year.
+    Without the rule every arm's trials add, as the lineage record counts them."""
+
+    root = tmp_path / "experiments"
+    for name, seed in (("qwen", 2), ("mimo", 3)):
+        _arm(root, name, [{"seed": 1, "loading": 0.6, "fingerprint": "prescribed"}, {"seed": seed, "loading": 0.6}])
+    extraction = extract_lineage(root, ["qwen", "mimo"], research_start=RESEARCH_START, research_end=RESEARCH_END)
+    assert [arm["fingerprints"] for arm in extraction["arms"]] == [
+        ["prescribed", "bytes_qwen_1"],
+        ["prescribed", "bytes_mimo_1"],
+    ]
+    rules = AcceptanceRules(independent_offline_trials=True)
+    assert lineage_summary(extraction, acceptance=AcceptanceRules())["host_trials"] == 4
+    assert lineage_summary(extraction, acceptance=rules)["host_trials"] == 3
+
+    arm = root / "heir"
+    own = [
+        _row(arm, 0, seed=1, loading=0.6, span="Y1", days=FIRST_YEAR, fingerprint="prescribed"),
+        _row(arm, 1, seed=101, loading=0.6),
+    ]
+    _record(arm, extraction, rules=rules)
+    records = ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl").read()
+    held = freeze_gate_for(records, own, own[1], experiment_dir=arm, acceptance=rules)["deflated_sharpe"]
+    assert (held["trials"], held["host_trials"], held["lineage_trials"]) == (4, 2, 2)
+    qwen, mimo = (
+        ExperimentLedger(root / name / "ledgers/experiment_ledger.jsonl").read()[0]["steps"] for name in ("qwen", "mimo")
+    )
+    direct = verdict.freeze_gate(
+        _analysis(own[1]),
+        rules=rules,
+        trials=4,
+        trial_analyses=[_analysis(own[1]), _analysis(qwen[0]), _analysis(qwen[1]), _analysis(mimo[1])],
+        full_span_validations=1,
+    )["deflated_sharpe"]
+    assert held["trial_correlation_pairs"] == direct["trial_correlation_pairs"] == 6
+    for key in ("trial_correlation", "effective_trials", "information_ratio_bar", "deflated_sharpe_probability"):
+        assert held[key] == pytest.approx(direct[key], rel=1e-12), key
+
+    arm = root / "plain_heir"
+    own = [
+        _row(arm, 0, seed=1, loading=0.6, span="Y1", days=FIRST_YEAR, fingerprint="prescribed"),
+        _row(arm, 1, seed=101, loading=0.6),
+    ]
+    _record(arm, extraction)
+    records = ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl").read()
+    plain = freeze_gate_for(records, own, own[1], experiment_dir=arm, acceptance=AcceptanceRules())["deflated_sharpe"]
+    assert (plain["trials"], plain["host_trials"], plain["lineage_trials"]) == (6, 2, 4)
+    assert plain["trial_correlation_pairs"] == 15
+
+
+def test_under_the_rule_a_reference_pack_declares_its_screens_once(tmp_path: Path) -> None:
+    """Arms mounting one reference pack declare its screens once, at the most
+    any of them declared: 17 and 20 add 20, however the pack's path is spelt.
+    Arms on other packs and an arm mounting none add theirs, and the arm's own
+    declarations join its pack's. A lineage extracted before its trials
+    carried their bytes cannot be joined."""
+
+    root = tmp_path / "experiments"
+    _arm(root, "qwen", [{"seed": 1, "loading": 0.5, "offline": 17}], pack="configs/workspace_refs/book")
+    _arm(root, "mimo", [{"seed": 2, "loading": 0.5, "offline": 20}], pack="configs/workspace_refs/book/")
+    _arm(root, "star", [{"seed": 3, "loading": 0.5, "offline": 6}], pack="configs/workspace_refs/star")
+    _arm(root, "bare", [{"seed": 4, "loading": 0.5, "offline": 2}])
+    names = ["qwen", "mimo", "star", "bare"]
+    extraction = extract_lineage(root, names, research_start=RESEARCH_START, research_end=RESEARCH_END)
+    rules = AcceptanceRules(independent_offline_trials=True)
+    assert lineage_summary(extraction, acceptance=AcceptanceRules())["offline_trials"] == 17 + 20 + 6 + 2
+    assert lineage_summary(extraction, acceptance=rules)["offline_trials"] == 20 + 6 + 2
+
+    arm = root / "heir"
+    own = [_row(arm, 0, seed=101, loading=0.5, offline=8)]
+    _record(arm, extraction, rules=rules, pack="configs/workspace_refs/star")
+    records = ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl").read()
+    dsr = freeze_gate_for(records, own, own[0], experiment_dir=arm, acceptance=rules)["deflated_sharpe"]
+    # The arm's own 8 on the star pack stand for that pack's 6: the lineage
+    # adds its four strategies and 20 + 2 screens.
+    assert (dsr["host_trials"], dsr["offline_trials"], dsr["lineage_trials"], dsr["trials"]) == (1, 8, 4 + 22, 35)
+    assert dsr["effective_trials"] == pytest.approx(
+        dsr["trial_correlation"] + (1 - dsr["trial_correlation"]) * 5 + 30
+    )
+    assert arm_record((), lineage_record(records), independent_offline_trials=True)["lineage"]["note"] == (
+        f"{LINEAGE_NOTE}. {LINEAGE_JOINING}"
+    )
+
+    stale = json.loads((arm / "ledgers/lineage_series.json").read_text(encoding="utf-8"))
+    for item in (*stale["arms"], *stale["series"]):
+        item.pop("fingerprints", None)
+        item.pop("fingerprint", None)
+        item.pop("workspace_reference", None)
+    write_lineage(arm, stale)
+    with pytest.raises(ValueError, match="the lineage of qwen, mimo, star, bare was extracted before"):
+        freeze_gate_for(records, own, own[0], experiment_dir=arm, acceptance=rules)
 
 
 def test_a_lineage_arm_that_cannot_be_one_is_refused_by_name(tmp_path: Path) -> None:

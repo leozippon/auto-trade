@@ -304,6 +304,6 @@ def test_preview_shows_the_lineage_the_session_will_see(tmp_path: Path):
     }
     assert _facts(_preview_of(directory, repo, SESSION_KEY))["arm"]["lineage"] == expected
     ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl").append(
-        lineage_ledger_record(directory, acceptance=AcceptanceRules())
+        lineage_ledger_record(directory, acceptance=AcceptanceRules(), workspace_reference="")
     )
     assert _facts(_preview_of(directory, repo, SESSION_KEY))["arm"]["lineage"] == expected
