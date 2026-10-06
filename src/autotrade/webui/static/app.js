@@ -28,14 +28,34 @@ const OUTCOME_LABELS = {
 // How an arm ended (webui/registry.py ENDING_STATES). The server classifies
 // the ending and writes its one-line reason; the console only words it, and
 // words it the same way on the card, the page header, the process list, the
-// 裁决 view and Paper's 候选来源. A graduation withdrawn afterwards is a
-// failure, `rejected`, and only its reason says it had graduated.
+// 裁决 view. A graduation withdrawn afterwards is a failure, `rejected`, and
+// only its reason says it had graduated.
 const ENDING_LABELS = {
   graduated: "毕业",
   rejected: "未通过",
   no_edge: "未发现超额",
   budget_exhausted: "预算耗尽",
   broken: "失败",
+};
+// The way a Paper book came in (paper/book.py candidate_source), and where its
+// Paper verdict stands (paper/verdict.py): the status as [badge state, label],
+// and the reason a terminal row or an unmeasured reading carries. A value not
+// listed renders as written.
+const TRACK_LABELS = {
+  graduated: "毕业",
+  incubating: "孵化中",
+};
+const VERDICT_STATUS = {
+  observing: ["stopped", "观察中"],
+  confirmed: ["completed", "已确认"],
+  killed: ["failed", "已终止"],
+};
+const VERDICT_REASON_LABELS = {
+  account_drawdown_exceeded: "账户回撤超限",
+  active_drawdown_exceeded: "主动回撤超限",
+  both_kill_upper_bounds_below_zero: "两个读数的终止上界均低于 0",
+  both_confirm_lower_bounds_above_zero: "两个读数的确认下界均高于 0",
+  too_few_regression_days: "回归所需的交易日不足",
 };
 // The conditions of the freeze gate and of the forward and Held-out verdict
 // (pipelines/verdict.py), keyed by the token the pipeline records when one
@@ -1998,10 +2018,8 @@ function endingLabel(ending) {
   return ENDING_LABELS[state] || state;
 }
 
-/* A Paper book records the ending that made its artifact a candidate
-   (paper/book.py); the book says it in the same word. */
-function candidateSourceLabel(source) {
-  return ENDING_LABELS[source] || source;
+function trackLabel(source) {
+  return TRACK_LABELS[source] || source;
 }
 
 /* The ending as one badge; null while the arm can still run. */
@@ -7448,9 +7466,9 @@ function redrawTrading(payload, build) {
 
 /* One card per book, in the research home's language: its name and state, the
    figures its own panels measured and its curve once two days settled. A
-   figure the book has not measured has no tile, and the book's frozen identity
-   — candidate, artifact, start, initial cash — belongs to the page head that
-   spells it out in full. */
+   figure the book has not measured has no tile. Of the book's frozen identity
+   only the track and where its verdict stands ride along; artifact, start and
+   initial cash belong to the page head that spells it out in full. */
 function bookCard(row) {
   const href = bookHash(tradingView.env, row.book_id);
   const card = el("div", {
@@ -7508,8 +7526,12 @@ function bookCard(row) {
       ),
     ),
   );
-  const ready = todayChip(row.today);
-  if (ready) card.append(el("div", { class: "stats-chips" }, ready));
+  const facts = [
+    todayChip(row.today),
+    row.candidate_source ? chip(`轨道 ${trackLabel(row.candidate_source)}`) : null,
+    row.verdict ? chip(`验证 ${(VERDICT_STATUS[row.verdict.status] || [])[1] || row.verdict.status}`) : null,
+  ].filter(Boolean);
+  if (facts.length) card.append(el("div", { class: "stats-chips" }, ...facts));
   if (tiles.length) card.append(statTilesRow(tiles));
   if (row.curve)
     card.append(bookCurveChart(row.curve, row.source, { width: 420, height: 130, mini: true }));
@@ -7567,6 +7589,7 @@ function renderBookBundle(bundle) {
         ...paperBanners(status),
         paperSignalPanel(bundle.signal, bundle.identity),
         paperFillsPanel(bundle.fills, status.book_id),
+        paperVerdictPanel(bundle.identity),
         paperEquityPanel(bundle.performance, bundle.pnl),
         paperPositionsPanel(bundle.snapshot),
         paperPnlPanel(bundle.pnl),
@@ -7601,7 +7624,7 @@ function paperHead(status, payload) {
     // One vocabulary for the row: the status badge lives in the title, every
     // fact under it is the same labelled chip.
     book.candidate_source
-      ? chip(`候选来源 ${candidateSourceLabel(book.candidate_source)}`)
+      ? chip(`轨道 ${trackLabel(book.candidate_source)}`)
       : null,
     payload.start_date ? chip(`起始 ${fmtDate(payload.start_date)}`) : null,
     book.initial_cash === null || book.initial_cash === undefined
@@ -7629,6 +7652,87 @@ function paperHead(status, payload) {
         )
       : null,
   );
+}
+
+/* The Paper verdict the morning run stored (paper/verdict.py), read as
+   written: where the book stands, and the plain and the regressed reading of
+   its active return side by side. A checkpoint acts only when both agree. */
+function paperVerdictPanel(payload) {
+  const title = "模拟验证";
+  if (payload.state === "unreadable")
+    return el("div", { class: "panel section-gap" }, panelHead(title), el("div", { class: "hint warn" }, payload.error));
+  const verdict = payload.verdict;
+  if (!verdict) return null;
+  const [badgeState, statusLabel] = VERDICT_STATUS[verdict.status] || ["unknown", verdict.status];
+  const rules = verdict.rules || {};
+  const panel = el(
+    "div",
+    { class: "panel section-gap" },
+    panelHead(
+      title,
+      el("span", { class: `badge state-${badgeState}` }, statusLabel),
+      el(
+        "span",
+        {
+          class: "mode-note",
+          title: `每结算 ${rules.checkpoint_days ?? "—"} 个交易日设一个检查点；未回归与回归后两个读数必须同时满足，才会确认或按统计终止。`,
+        },
+        "检查点规则",
+      ),
+    ),
+  );
+  const ended = verdict.transition;
+  if (ended)
+    panel.append(
+      el(
+        "div",
+        { class: "meta-line" },
+        `${statusLabel}于 ${fmtDate(ended.date)}：${VERDICT_REASON_LABELS[ended.reason] || ended.reason}`,
+      ),
+    );
+  if (!verdict.days) {
+    panel.append(el("div", { class: "empty" }, "尚无已结算的交易日"));
+    return panel;
+  }
+  panel.append(
+    el(
+      "div",
+      { class: "meta-line" },
+      `已结算 ${verdict.days} 个交易日（${fmtDate(verdict.first_day)} 至 ${fmtDate(verdict.last_day)}） · 下一检查点 ${verdict.next_checkpoint} 个交易日`,
+    ),
+  );
+  const readings = [
+    ["未回归", verdict.plain],
+    ["回归后", verdict.regressed],
+  ].filter(([, reading]) => reading);
+  if (readings.length)
+    panel.append(
+      dataTable(
+        [
+          { label: "读数" },
+          { label: "年化均值", num: true, title: "每日主动收益的年化均值" },
+          { label: "确认下界", num: true, title: "高于 0 时支持确认" },
+          { label: "终止上界", num: true, title: "低于 0 时支持终止" },
+        ],
+        readings.map(([label, reading]) => [
+          label,
+          fmtPct(reading.mean),
+          fmtPct(reading.confirm_lower_bound),
+          fmtPct(reading.kill_upper_bound),
+        ]),
+      ),
+    );
+  const unmeasured = (verdict.regressed || {}).reason;
+  if (unmeasured)
+    panel.append(el("div", { class: "hint" }, `回归后读数暂缺：${VERDICT_REASON_LABELS[unmeasured] || unmeasured}`));
+  const tiles = presentTiles([
+    { label: "账户收益", value: verdict.account_return, fmt: fmtPct, signed: true },
+    { label: "指数收益", value: verdict.index_return, fmt: fmtPct, signed: true },
+    { label: "账户最大回撤", value: verdict.account_max_drawdown, fmt: fmtPct },
+    { label: "主动最大回撤", value: verdict.active_max_drawdown, fmt: fmtPct },
+  ]);
+  if (tiles.length) panel.append(statTilesRow(tiles));
+  return panel;
 }
 
 /* The scale of a holdings table's weight bars: its largest weight. */

@@ -7,7 +7,7 @@ page reads it through eight projections, each from the book's own files —
 sessions still to record and every settled one against its simulated fill)
 and these seven:
 ``book_status`` (the status ladder, and whether the session ahead already has
-its order sheet), ``book_payload`` (identity, ``book.json``),
+its order sheet), ``book_payload`` (identity, ``book.json``, and the stored Paper verdict),
 ``signal_payload`` (the latest decision's order sheet), ``history_payload``
 (every earlier day's order sheet and fills), ``performance_payload`` (return against
 the book's benchmark, equity and cash tracks, statistics, and the source experiment's
@@ -66,6 +66,7 @@ from autotrade.paper.orders import (
 )
 from autotrade.paper.pit import newest_replay_slot
 from autotrade.paper.storage import read_jsonl
+from autotrade.paper.verdict import VERDICT_NAME
 
 TRADING_ENVS = ("paper",)
 # A snapshot older than this is served but flagged: the account data is the
@@ -192,10 +193,14 @@ def _today(state: dict[str, object] | None) -> dict[str, object]:
 # ---------------------------------------------------------------- book
 
 def book_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str, object]:
-    """The book's frozen identity and where its calendar stands."""
+    """The book's frozen identity and where its calendar stands, with the
+    Paper verdict ``run_paper`` last stored, as written (None before the first
+    run); the console reads it and never computes one."""
     root = book_dir(repo_root, book, env)
     record, error = _read_json(root / BOOK_NAME)
     state, state_error = _read_json(root / PAPER_STATE_NAME)
+    verdict, verdict_error = _read_json(root / VERDICT_NAME)
+    error = error or verdict_error
     status = "unreadable" if error or state_error else "ok" if record else "absent"
     identity = None
     if record:
@@ -212,6 +217,7 @@ def book_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str, ob
         "state": status,
         "error": error or state_error,
         "book": identity,
+        "verdict": verdict,
         "start_date": _text(state.get("start_date")),
         "settled_through": _text(state.get("settled_through")),
         "last_fit_date": _text(state.get("last_fit_date")),
@@ -1044,6 +1050,7 @@ def books_payload(repo_root: Path, env: str = "paper") -> dict[str, object]:
             "experiment_id": (identity["book"] or {}).get("experiment_id"),
             "artifact_id": (identity["book"] or {}).get("artifact_id"),
             "candidate_source": (identity["book"] or {}).get("candidate_source"),
+            "verdict": identity["verdict"],
             "start_date": identity["start_date"],
             "initial_cash": (identity["book"] or {}).get("initial_cash"),
             "equity": account.get("equity"),

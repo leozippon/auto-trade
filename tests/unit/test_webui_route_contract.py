@@ -219,7 +219,7 @@ def test_paper_bundle_serves_the_key_names_the_console_reads(tmp_path: Path):
     } <= day.keys(), "a past day renders through the same order-sheet renderer as today"
     assert "executions" not in day, "the SPA reads day.fills"
     assert {"state", "error", "signal"} <= client.get("/api/trading/paper/books/exp/signal").json().keys()
-    assert {"state", "error", "book", "start_date", "settled_through", "last_fit_date"} <= (
+    assert {"state", "error", "book", "verdict", "start_date", "settled_through", "last_fit_date"} <= (
         client.get("/api/trading/paper/books/exp/book").json().keys()
     )
     performance = client.get("/api/trading/paper/books/exp/performance").json()
@@ -238,7 +238,7 @@ def test_paper_bundle_serves_the_key_names_the_console_reads(tmp_path: Path):
 
     [row] = client.get("/api/trading/paper/books").json()["books"]
     for key in (
-        "book_id", "experiment_id", "artifact_id", "candidate_source", "start_date",
+        "book_id", "experiment_id", "artifact_id", "candidate_source", "verdict", "start_date",
         "initial_cash", "equity", "cash", "position_count", "total_return", "excess_return",
         "benchmark_label", "curve", "source", "signal_date", "order_count", "state", "error",
     ):
@@ -458,6 +458,33 @@ def test_every_reason_the_pipeline_records_has_a_console_label() -> None:
         )
     )
     assert set(SESSION_OUTCOMES) <= outcomes, sorted(set(SESSION_OUTCOMES) - outcomes)
+
+
+def test_every_track_status_and_verdict_reason_has_a_console_label() -> None:
+    """The Paper page words the book's track, the verdict's status and the
+    reason of its terminal row; a code added to paper/verdict.py without a
+    label would render raw."""
+
+    import ast
+
+    from autotrade.paper import verdict
+
+    def keys(literal: str) -> set[str]:
+        return set(re.findall(r"^  ([a-z_]+): ", _js_literal(literal, "\n};"), re.MULTILINE))
+
+    # Every reason string the checkpoint logic can write, and the one a
+    # regressed reading carries when it could not be measured.
+    reasons = {verdict.TOO_FEW_REGRESSION_DAYS}
+    source = ast.parse(Path(verdict.__file__).read_text(encoding="utf-8"))
+    transitions = next(n for n in ast.walk(source) if isinstance(n, ast.FunctionDef) and n.name == "_first_transition")
+    for node in ast.walk(transitions):
+        if isinstance(node, ast.Tuple) and len(node.elts) == 2 and all(isinstance(e, ast.Constant) for e in node.elts):
+            if node.elts[0].value in ("killed", "confirmed"):
+                reasons.add(node.elts[1].value)
+    assert len(reasons) == 5, reasons
+    assert reasons <= keys("const VERDICT_REASON_LABELS = {"), sorted(reasons)
+    assert keys("const VERDICT_STATUS = {") == {"observing", "confirmed", "killed"}
+    assert keys("const TRACK_LABELS = {") == {"graduated", "incubating"}
 
 
 def test_a_criterion_that_names_a_threshold_words_it_from_the_record() -> None:

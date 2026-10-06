@@ -110,6 +110,23 @@ def test_the_book_panel_is_a_whitelist_of_the_frozen_identity(tmp_path: Path):
     assert "/private/lake" not in json.dumps(payload)
 
 
+def test_the_book_and_its_card_carry_the_stored_verdict_as_written(tmp_path: Path):
+    root = engine_book(tmp_path, "20260105")
+    assert trading.book_payload(tmp_path, BOOK)["verdict"] is None
+    assert trading.books_payload(tmp_path)["books"][0]["verdict"] is None
+    stored = {"status": "observing", "days": 1, "rules": {"checkpoint_days": 126}, "plain": None}
+    (root / "verdict.json").write_text(json.dumps(stored), encoding="utf-8")
+    assert trading.book_payload(tmp_path, BOOK)["verdict"] == stored
+    assert trading.books_payload(tmp_path)["books"][0]["verdict"] == stored
+    # A damaged file is this panel's unreadable state, not an exception.
+    (root / "verdict.json").write_text("{broken", encoding="utf-8")
+    payload = trading.book_payload(tmp_path, BOOK)
+    assert (payload["state"], payload["verdict"]) == ("unreadable", None) and payload["error"]
+    assert trading.books_payload(tmp_path)["books"][0]["verdict"] is None
+    response = TestClient(create_app(tmp_path)).get(f"/api/trading/paper/books/{BOOK}/book")
+    assert response.status_code == 200 and response.json()["state"] == "unreadable"
+
+
 def test_the_signal_is_the_latest_order_sheet_and_history_keeps_every_earlier_day(tmp_path: Path):
     engine_book(tmp_path, "20260105")
     signal = trading.signal_payload(tmp_path, BOOK)["signal"]
@@ -1019,16 +1036,18 @@ def test_degraded_states_raise_a_banner_and_skipped_lines_raise_a_chip():
 def test_a_book_card_is_a_name_a_badge_six_figures_and_a_curve():
     """The overview is scanned, so a card carries only what distinguishes one
     book from another: its name with a state badge — the writer's error in that
-    badge's tooltip alone — the six figures and the miniature curve. The book's
-    frozen identity and the error in full belong to its own page."""
+    badge's tooltip alone — its track and verdict status, the six figures and
+    the miniature curve. The rest of the frozen identity and the error in full
+    belong to its own page."""
 
     script = _app_js()
     card = _js_top_level(script, "function bookCard(")
     assert "tradingBadge(row.state, row.error)" in card
     assert "row.error" not in card.replace("tradingBadge(row.state, row.error)", "")
     assert "title: error || null" in _js_top_level(script, "function tradingBadge(")
-    # The identity line the page head draws as chips is not repeated here.
-    for field in ("candidate_source", "artifact_id", "start_date", "initial_cash"):
+    # The identity line the page head draws as chips is not repeated here, but
+    # for the track and where the verdict stands.
+    for field in ("artifact_id", "start_date", "initial_cash"):
         assert field not in card, field
     assert "meta-line" not in card
     assert "bookCurveChart(" in card

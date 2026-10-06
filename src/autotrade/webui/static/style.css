@@ -3316,6 +3316,7 @@ details.issue-evidence > summary:hover {
  }
  .topnav a,
  .file-chip,
+ .archived-link,
  label.check-item,
  label.issue-filter,
  .trace-tools label {
