@@ -163,3 +163,11 @@ INCDRAFT_LINEAGE = [
     "incdraft_100k_8y_mimo_20261012",
     "incdraft_500k_8y_qwen_20261012",
 ]
+# Plus the two lanes that read the same titles beside the drafts and have
+# closed: round 20261012d's commitment-event map and round 20261012c's title
+# ranker. The title family through its second stage (round 20261013).
+TITLE_LINEAGE = [
+    *INCDRAFT_LINEAGE,
+    "titlemap_100k_8y_mimo_20261012",
+    "titlerank_100k_8y_qwen_20261012",
+]

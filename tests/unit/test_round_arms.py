@@ -179,6 +179,8 @@ def test_a_round_dry_runs_against_its_seed_contract(
     report = json.loads(out[1])
     assert report["research_end"] == BASE_OVERRIDES["research_end"]
     assert report["pit_views_seed"] == rnd.pit_views_seed
+    # The boards the round names, or null where it leaves them to the capital.
+    assert report["permitted_boards"] == rnd.common_overrides.get("permitted_boards")
 
 
 def test_the_dry_run_refuses_a_seed_built_for_another_selection(

@@ -234,6 +234,8 @@ ROUND_REPORT_KEYS: tuple[str, ...] = (
     "max_null_controls",
     "strategy_fit_timeout_seconds",
     "initial_cash",
+    # null: the console stamps the boards the initial cash qualifies for.
+    "permitted_boards",
     "cost_stress_multiplier",
     "gpu_count",
     "reasoning_effort",
