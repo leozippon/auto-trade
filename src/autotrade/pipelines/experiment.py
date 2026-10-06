@@ -72,9 +72,11 @@ from .config import (
     research_span,
     session_deadline_seconds,
 )
+from .incubation import entry_screen, forward_screen
 from .ledger import (
     FORWARD_SESSION_KEY,
     FORWARD_STAGE,
+    INCUBATION_RECORD_TYPE,
     LINEAGE_RECORD_TYPE,
     LINEAGE_SERIES_NAME,
     RESEARCH_SESSION_KEY,
@@ -87,8 +89,10 @@ from .ledger import (
     assert_no_frozen_artifact_mutation,
     forward_record,
     frozen_record,
+    incubation_record,
     is_frozen_artifact_mutation,
     lineage_record,
+    require_incubable,
     research_over,
     research_records,
 )
@@ -107,6 +111,7 @@ from .skills import (
     resolve_collected_skills_source,
 )
 from .verdict import (
+    NOT_A_SESSION_STEP,
     UNMEASURABLE,
     effective_trials,
     forward_mde,
@@ -979,6 +984,88 @@ class RollingExperimentPipeline:
             str(stored.revision_id),
         )
 
+    # ---- incubation ----------------------------------------------------
+
+    def incubate(
+        self,
+        step_id: str,
+        seed_replicates: Sequence[str] = (),
+        *,
+        incubated_by: str,
+        reason: str,
+    ) -> dict[str, object]:
+        """Incubate one node of an arm whose research ended without a graduation.
+
+        The node must pass the entry screen (:func:`incubation_entry`). Its
+        revision and its seed replicates' are frozen as new artifacts and
+        replayed once over forward and Held-out exactly as a frozen artifact
+        is (:meth:`replay_frozen`); the reading and the forward screen on it
+        go into the arm's one ``incubation`` record, whose screen says whether
+        Paper may open a book. The arm's verdict is untouched. The strategy's
+        own exception is a reading like any other, which the forward screen
+        blocks. A replay that measured nothing, a replicate that failed and
+        frozen trees that changed during a replay raise and record nothing, so
+        the operator can run it again: the next attempt freezes the unchanged
+        revisions afresh, and the artifacts a failed attempt froze stay behind
+        with no record naming them.
+        """
+
+        records = self.ledger.read()
+        assert_no_frozen_artifact_mutation(records)
+        require_incubable(records)
+        reading = incubation_entry(records, step_id, seed_replicates, config=self.config)
+        screen: Mapping[str, object] = reading["screen"]  # type: ignore[assignment]
+        if not screen["passed"]:
+            raise ValueError(
+                f"the entry screen blocks {step_id}: {', '.join(screen['blocking'])}"  # type: ignore[arg-type]
+            )
+        forward = self.config.geometry.forward
+        heldout = self.config.geometry.heldout(self.trading_days)
+        run_id = f"{INCUBATION_RECORD_TYPE}_{uuid.uuid4().hex}"
+
+        def freeze(row: Mapping[str, object]) -> dict[str, object]:
+            artifact_id, output, models = self._freeze_revision(
+                str(row["step_id"]), str(row["revision_id"]), run_id
+            )
+            return {
+                "artifact_id": artifact_id,
+                "output_path": str(output),
+                "models_path": str(models) if models is not None and models.is_dir() else None,
+                "source_step_id": str(row["step_id"]),
+                "revision_id": str(row["revision_id"]),
+            }
+
+        step: Mapping[str, object] = reading["step"]  # type: ignore[assignment]
+        frozen = freeze(step)
+        replicates = [freeze(row) for row in reading["seed_replicates"]]  # type: ignore[attr-defined]
+        if replicates:
+            frozen["seed_replicates"] = replicates
+        forward_reading = self.replay_frozen(
+            self._frozen_artifact(frozen),
+            [self._frozen_artifact(item) for item in replicates],
+            None,
+            run_id=run_id,
+            forward=forward,
+            heldout=heldout,
+        )
+        record = {
+            "record_type": INCUBATION_RECORD_TYPE,
+            "experiment_id": self.config.experiment_id,
+            "epoch_id": FORWARD_STAGE,
+            "fold_id": INCUBATION_RECORD_TYPE,
+            "run_id": run_id,
+            "incubated_by": incubated_by,
+            "reason": reason,
+            "source_step_id": str(step["step_id"]),
+            "revision_id": str(step["revision_id"]),
+            "entry": reading["entry"],
+            "frozen": frozen,
+            "forward_reading": forward_reading,
+            "screen": forward_screen(forward_reading),
+        }
+        self.ledger.append(record)
+        return record
+
     # ---- shared --------------------------------------------------------
 
     def _account_record(self) -> dict[str, object]:
@@ -1283,6 +1370,60 @@ def freeze_gate_for(
             rules=acceptance,
         )
     return gate
+
+
+def incubation_entry(
+    records: Sequence[Mapping[str, object]],
+    step_id: str,
+    seed_replicates: Sequence[str] = (),
+    *,
+    config: RollingExperimentConfig,
+) -> dict[str, object]:
+    """The entry screen of one node of a finished arm: its session row
+    (``step``) and its seed replicates', the freeze gate on them as the arm's
+    research session would have read it -- under the arm's own rules, against
+    the records before that session and the session's Steps
+    (:func:`freeze_gate_for`) -- as ``entry`` with the reasons the screen
+    defers, and the screen (``incubation.entry_screen``).
+
+    ``ValueError`` when the node or a replicate is not a Step of the session
+    that ended the arm's research.
+    """
+
+    ended = [
+        index
+        for index, record in enumerate(records)
+        if record.get("record_type") == "research_session"
+        and (record.get("frozen") or record.get("arm_end"))
+    ]
+    if len(ended) != 1:
+        raise ValueError("the arm has no research session that ended its research")
+    session_rows: list[Mapping[str, object]] = list(records[ended[0]]["steps"])  # type: ignore[call-overload]
+    by_step = {str(row["step_id"]): row for row in session_rows}
+    missing = [item for item in (step_id, *seed_replicates) if item not in by_step]
+    if missing:
+        raise ValueError(
+            f"{NOT_A_SESSION_STEP}: {missing[0]!r} is not a Step of the arm's research session"
+        )
+    nominee = by_step[step_id]
+    replicates = [by_step[item] for item in seed_replicates]
+    gate = freeze_gate_for(
+        records[: ended[0]],
+        session_rows,
+        nominee,
+        experiment_dir=config.experiment_dir,
+        hard_reasons=config.acceptance.evaluate(dict(nominee["summary"])),  # type: ignore[arg-type]
+        acceptance=config.acceptance,
+        years=[(slot.start, slot.end) for slot in config.geometry.research_years],
+        seed_replicates=replicates,
+    )
+    screen = entry_screen(gate)
+    return {
+        "step": nominee,
+        "seed_replicates": replicates,
+        "entry": {**gate, "deferred": screen["deferred"]},
+        "screen": screen,
+    }
 
 
 # The one line a seed replicate changes: an integer assignment, with an
@@ -1772,13 +1913,15 @@ def _keep_frozen_artifact_ids(
     records: Sequence[Mapping[str, object]],
     extra_id: str | None = None,
 ) -> tuple[str, ...]:
-    """The arm's frozen artifact and its seed replicates, any artifact an
-    integrity row names, and the freeze now being recorded."""
+    """The arm's frozen artifact and its seed replicates, those its
+    incubation froze, any artifact an integrity row names, and the freeze now
+    being recorded."""
 
     keep = {str(extra_id)} if extra_id else set()
-    frozen = frozen_record(records)
-    if frozen is not None:
-        block: Mapping[str, object] = frozen["frozen"]  # type: ignore[assignment]
+    for row in (frozen_record(records), incubation_record(records)):
+        if row is None:
+            continue
+        block: Mapping[str, object] = row["frozen"]  # type: ignore[assignment]
         keep.add(str(block["artifact_id"]))
         keep.update(
             str(item["artifact_id"])
@@ -1950,6 +2093,7 @@ __all__ = [
     "fingerprinted",
     "freeze_gate_for",
     "full_span_bar",
+    "incubation_entry",
     "lineage_ledger_record",
     "lineage_summary",
     "neutralized",

@@ -18,6 +18,13 @@ An operator may append one more, by hand and never by the pipeline:
 ``verdict_void`` withdraws a recorded graduation that later evidence showed
 was not one (who, when, why, and where the evidence is). The forward record
 stays as produced; :func:`experiment_verdict` reads the arm as ``voided``.
+An operator may also incubate one node of an arm whose research ended without
+a graduation (``scripts/experiments/incubate.py``): the pipeline then appends
+``incubation``, at most once per arm, with the node's entry-screen reading,
+the artifact it froze for it, the forward and Held-out reading of that
+artifact and the forward screen on it (``pipelines/incubation.py``). The
+arm's verdict is untouched; :func:`incubation_candidate` reads what Paper
+opens a book from.
 
 An arm created with ``lineage_arms`` also gets ``lineage``: the earlier arms
 whose research-period trials join its freeze-gate family, with a reference to
@@ -69,12 +76,28 @@ LINEAGE_RECORD_TYPE = "lineage"
 LINEAGE_SERIES_NAME = "lineage_series.json"
 # An operator's withdrawal of a recorded graduation (:func:`verdict_void_record`).
 VERDICT_VOID_RECORD_TYPE = "verdict_void"
+# An operator's incubation of one node of a finished arm; its link keys are
+# ``epoch_id=forward``, ``fold_id=incubation`` and ``run_id=incubation_<hex>``.
+INCUBATION_RECORD_TYPE = "incubation"
+INCUBATION_FIELDS = (
+    "incubated_by",
+    "reason",
+    "source_step_id",
+    "revision_id",
+    "entry",
+    "frozen",
+    "forward_reading",
+    "screen",
+)
+# The verdicts an arm can be incubated from: research is over, nothing graduated.
+INCUBABLE_VERDICTS = ("no_deliverable", "discarded")
 PIPELINE_RECORD_TYPES = (
     "research_session",
     "forward",
     "attempt_failed",
     LINEAGE_RECORD_TYPE,
     VERDICT_VOID_RECORD_TYPE,
+    INCUBATION_RECORD_TYPE,
 )
 FOLD_ERA_RECORD_TYPES = (
     "fold",
@@ -215,6 +238,33 @@ def verdict_void_record(records: Sequence[Mapping[str, object]]) -> dict[str, ob
     return rows[0] if rows else None
 
 
+def incubation_record(records: Sequence[Mapping[str, object]]) -> dict[str, object] | None:
+    """The arm's one incubation, or None. Two are a corrupt ledger and raise."""
+
+    rows = [
+        dict(record) for record in records if record.get("record_type") == INCUBATION_RECORD_TYPE
+    ]
+    if len(rows) > 1:
+        raise ValueError("the ledger holds more than one incubation for one arm")
+    return rows[0] if rows else None
+
+
+def require_incubable(records: Sequence[Mapping[str, object]]) -> None:
+    """Refuse an incubation of an arm whose research is not over, that
+    graduated (voided or not), or that already incubated a node: one
+    incubation per arm, so its nodes never shop the forward window."""
+
+    verdict = experiment_verdict(records)
+    status = None if verdict is None else verdict["status"]
+    if status not in INCUBABLE_VERDICTS:
+        raise ValueError(
+            f"only an arm whose verdict is {' or '.join(INCUBABLE_VERDICTS)} can be "
+            f"incubated; this arm's verdict is {status!r}"
+        )
+    if incubation_record(records) is not None:
+        raise ValueError("the arm already incubated a node; one incubation per arm")
+
+
 def research_over(records: Sequence[Mapping[str, object]]) -> bool:
     """Whether research has ended: an artifact froze, or a session ended the arm."""
 
@@ -286,6 +336,26 @@ def paper_candidate(records: Sequence[Mapping[str, object]]) -> dict[str, object
     }
 
 
+def incubation_candidate(records: Sequence[Mapping[str, object]]) -> dict[str, object] | None:
+    """What Paper opens an incubating book from, else None: the artifact the
+    incubation froze, in :func:`paper_candidate`'s shape, its seed
+    replicates' frozen blocks, and under ``forward`` the forward reading,
+    which names its replay result and span as a forward record does. None
+    when the arm incubated nothing or its forward screen blocked."""
+
+    record = incubation_record(records)
+    if record is None or not record["screen"]["passed"]:  # type: ignore[index]
+        return None
+    block: Mapping[str, object] = record["frozen"]  # type: ignore[assignment]
+    return {
+        "artifact_id": str(block["artifact_id"]),
+        "output_path": str(block["output_path"]),
+        "models_path": str(block.get("models_path") or "") or None,
+        "seed_replicates": [dict(item) for item in block.get("seed_replicates") or ()],  # type: ignore[union-attr]
+        "forward": dict(record["forward_reading"]),  # type: ignore[arg-type]
+    }
+
+
 class ExperimentLedger:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -313,6 +383,11 @@ class ExperimentLedger:
             raise ValueError("the arm already records its lineage")
         if record_type == VERDICT_VOID_RECORD_TYPE:
             require_voidable(self.read(), record)
+        if record_type == INCUBATION_RECORD_TYPE:
+            missing = [key for key in INCUBATION_FIELDS if not str(record.get(key) or "").strip()]
+            if missing:
+                raise ValueError(f"an incubation record must state {missing}")
+            require_incubable(self.read())
         append_versioned_jsonl(
             self.path, record, schema_version=LEDGER_RECORD_SCHEMA_VERSION
         )
