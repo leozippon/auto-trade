@@ -36,28 +36,16 @@ from _bootstrap import add_repo_src
 
 add_repo_src(__file__)
 
-from autotrade.paper.book import BOOK_NAME
 from autotrade.paper.books import (
     PAPER_STATE_DIR,
     delete_book,
+    experiment_books,
     follows_real_fills,
-    list_books,
 )
 from autotrade.paper.engine import PaperWriterBusy
-from autotrade.paper.storage import read_json
 from autotrade.pipelines.ledger import ExperimentLedger, require_voidable, verdict_void
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-
-
-def arm_books(state_root: Path, experiment_id: str) -> list[str]:
-    """The ids of the Paper books trading ``experiment_id``."""
-
-    return [
-        book_id
-        for book_id in list_books(state_root)
-        if read_json(state_root / book_id / BOOK_NAME).get("experiment_id") == experiment_id
-    ]
 
 
 def main() -> int:
@@ -99,7 +87,7 @@ def main() -> int:
     try:
         # The checks the append runs, then the books', before anything changes.
         require_voidable(ledger.read(), record)
-        books = arm_books(paper_root, args.experiment)
+        books = experiment_books(paper_root, args.experiment)
         real = [book_id for book_id in books if follows_real_fills(paper_root / book_id)]
         if real and not args.delete_real_fill_book:
             raise ValueError(

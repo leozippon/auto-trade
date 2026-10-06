@@ -21,6 +21,7 @@ from autotrade.pipelines.ledger import ExperimentLedger, paper_candidate
 from .book import BOOK_NAME, create_book
 from .engine import writer_lock
 from .fills import FILLS_NAME
+from .storage import read_json
 
 # The Paper state root, relative to the repository root.
 PAPER_STATE_DIR = Path("data/trading/paper")
@@ -55,6 +56,17 @@ def list_books(state_root: str | Path) -> list[str]:
         for entry in root.iterdir()
         if entry.is_dir() and BOOK_ID_PATTERN.fullmatch(entry.name) and (entry / BOOK_NAME).is_file()
     )
+
+
+def experiment_books(state_root: str | Path, experiment_id: str) -> list[str]:
+    """The ids of the books trading ``experiment_id``, whatever they are named."""
+
+    root = Path(state_root)
+    return [
+        book_id
+        for book_id in list_books(root)
+        if read_json(root / book_id / BOOK_NAME).get("experiment_id") == experiment_id
+    ]
 
 
 def follows_real_fills(book_root: str | Path) -> bool:

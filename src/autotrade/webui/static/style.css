@@ -3130,6 +3130,11 @@ details.issue-evidence > summary:hover {
  font-size: 0.94rem;
  font-weight: 600;
 }
+/* The home list's way to the archived arms: present, never prominent. */
+.archived-link {
+ font-size: 0.875rem;
+ color: var(--muted);
+}
 
 /* ---------------- responsive breakpoints ----------------
    Every viewport rule in the console lives here, one block per breakpoint,

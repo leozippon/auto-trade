@@ -730,6 +730,67 @@ def test_a_poll_holding_the_kept_digest_receives_only_the_live_rows(tmp_path: Pa
     assert rows["ended"]["ending"] == {"state": "broken", "reason": "RuntimeError: boom"}
 
 
+def _shelve(directory: Path) -> Path:
+    marker = directory / "hitl" / registry.ARCHIVED_NAME
+    write_json_atomic(marker, {"archived_at": "2026-10-06T00:00:00+00:00", "reason": "historical"})
+    return marker
+
+
+def test_an_archived_arm_is_listed_only_on_request_and_its_page_still_opens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cold console lists the arms not archived without summarizing an
+    archived one at all — its freeze gate is never recomputed — and counts
+    the archived ones; asked for them, it lists those alone. The archived
+    arm's page opens as before and says it is archived."""
+
+    root = tmp_path / "experiments"
+    build_arm(root, "ended", "no_deliverable")
+    _shelve(build_arm(root, "shelved", "sealed"))
+    summarized: list[str] = []
+    summarize = registry.summarize_experiment
+
+    def counting(directory: Path) -> dict[str, object]:
+        summarized.append(Path(directory).name)
+        return summarize(directory)
+
+    monkeypatch.setattr(registry, "summarize_experiment", counting)
+    monkeypatch.setattr(registry, "_SUMMARY_CACHE", {})
+    monkeypatch.setattr(registry, "_RECORDED_BEST", registry._RecordedBest())
+    client = TestClient(create_app(tmp_path, root))
+    listing = client.get("/api/experiments").json()
+    assert [row["experiment_id"] for row in listing["experiments"]] == ["ended"]
+    assert listing["archived"] == 1 and summarized == ["ended"]
+    shelf = client.get("/api/experiments", params={"archived": 1}).json()
+    assert [row["experiment_id"] for row in shelf["experiments"]] == ["shelved"]
+    assert shelf["archived"] == 1
+    assert shelf["experiments"][0]["research_best"]["deflated_sharpe_probability"] is not None
+    detail = client.get("/api/experiments/shelved").json()
+    assert detail["archived"]["reason"] == "historical" and detail["stage"] == shelf["experiments"][0]["stage"]
+    assert client.get("/api/experiments/ended").json()["archived"] is None
+
+
+def test_archiving_or_restoring_any_arm_changes_the_kept_digest(tmp_path: Path) -> None:
+    """A poll holding the digest is told of an archive or a restore by a new
+    digest and every row, even when the arm's own row is derived afresh on
+    every poll and so is in no kept set."""
+
+    root = tmp_path / "experiments"
+    build_arm(root, "ended", "no_deliverable")
+    running = build_arm(root, "running", "research", alive=True)
+    client = TestClient(create_app(tmp_path, root))
+    full = client.get("/api/experiments").json()
+    marker = _shelve(running)
+    archived = client.get("/api/experiments", params={"kept": full["kept"]}).json()
+    assert "order" not in archived and archived["kept"] != full["kept"]
+    assert [row["experiment_id"] for row in archived["experiments"]] == ["ended"]
+    marker.unlink()
+    restored = client.get("/api/experiments", params={"kept": archived["kept"]}).json()
+    assert "order" not in restored and restored["kept"] == full["kept"] != archived["kept"]
+    assert sorted(row["experiment_id"] for row in restored["experiments"]) == ["ended", "running"]
+    assert restored["archived"] == 0
+
+
 def test_a_card_curve_is_served_on_a_sample_of_its_days(tmp_path: Path) -> None:
     root = tmp_path / "experiments"
     build_arm(root, "arm", "graduated")

@@ -1608,8 +1608,9 @@ function route(forceRefresh = false) {
   const tradingMatch = hash.match(/^#\/trading\/(paper)(?:\/([^/]+))?$/);
   const qmtMatch = hash === "#/qmt";
   const memoryMatch = hash === "#/memory";
+  const archivedMatch = hash === "#/archived";
   const expMatch =
-    tradingMatch || qmtMatch || memoryMatch
+    tradingMatch || qmtMatch || memoryMatch || archivedMatch
       ? null
       : hash.match(/^#\/exp\/([^/]+)(?:\/(.*))?$/);
   const expId = expMatch ? decodeURIComponent(expMatch[1]) : null;
@@ -1660,7 +1661,10 @@ function route(forceRefresh = false) {
     detailView = null;
     renderMemoryPage();
   } else if (expMatch) renderDetailPage(expId, key);
-  else {
+  else if (archivedMatch) {
+    detailView = null;
+    renderArchivedPage();
+  } else {
     detailView = null;
     renderHomePage();
   }
@@ -1906,12 +1910,26 @@ function homeView(payload) {
     container.append(heroPanel(best), el("div", { class: "section-gap" }));
   const rows = payload.experiments || [];
   container.append(
-    el("div", { class: "page-head" }, el("h2", {}, "实验列表")),
+    listHead(payload),
     rows.length
       ? experimentGrid(rows)
       : el("div", { class: "empty" }, "还没有实验 —— 点右上角「新建实验」开始。"),
   );
   return container;
+}
+
+/* The list's heading, with a quiet way to the arms the operator archived
+   (scripts/experiments/archive_arm.py), which the list leaves out. */
+function listHead(payload) {
+  const archived = payload.archived || 0;
+  return el(
+    "div",
+    { class: "page-head" },
+    el("h2", {}, "实验列表"),
+    archived
+      ? el("a", { class: "archived-link", href: "#/archived" }, `已归档 ${archived} 条`)
+      : null,
+  );
 }
 
 /* The grid is rebuilt on every poll; the hero only when what it shows
@@ -1927,7 +1945,38 @@ async function refreshHomePage() {
     if (home) home.replaceWith(homeView(payload));
     return;
   }
+  home.querySelector(".page-head").replaceWith(listHead(payload));
   grid.replaceWith(experimentGrid(payload.experiments || []));
+}
+
+/* The archived arms, read once: none of them runs, so nothing here moves
+   until the operator archives or restores one. */
+async function renderArchivedPage() {
+  const hash = location.hash;
+  $main.replaceChildren(pageSkeleton("grid"));
+  $topbarRight.innerHTML = "";
+  let payload;
+  try {
+    payload = await api("/api/experiments?archived=1");
+  } catch (error) {
+    if (navigatedAway(hash)) return;
+    $main.innerHTML = `<div class="empty">加载失败：${escapeHtml(error.message)}</div>`;
+    return;
+  }
+  if (navigatedAway(hash)) return;
+  const rows = payload.experiments || [];
+  $main.replaceChildren(
+    el(
+      "div",
+      {},
+      el(
+        "div",
+        { class: "page-head" },
+        el("h2", {}, el("a", { class: "exp-back", href: "#/" }, "← 实验"), "已归档实验"),
+      ),
+      rows.length ? experimentGrid(rows) : el("div", { class: "empty" }, "没有已归档的实验。"),
+    ),
+  );
 }
 
 function heroSignature(item) {
@@ -2689,15 +2738,30 @@ async function renderDetailPage(experimentId, selectedKey) {
   const rows = processRows(detail);
   if (!selectedKey || !rows.some((row) => row.key === selectedKey))
     selectedKey = defaultStepKey(detail, rows);
+  const archived = detail.archived;
   const head = el(
     "div",
     { class: "page-head" },
     el(
       "h2",
       {},
-      el("a", { class: "exp-back", href: "#/" }, "← 实验"),
+      archived
+        ? el("a", { class: "exp-back", href: "#/archived" }, "← 已归档")
+        : el("a", { class: "exp-back", href: "#/" }, "← 实验"),
       experimentName(detail.experiment_id, { link: false }),
-      experimentBadges(armBadge(detail)),
+      experimentBadges(
+        armBadge(detail),
+        archived
+          ? el(
+              "span",
+              {
+                class: "badge state-stopped",
+                title: `${fmtTs(archived.archived_at)} 归档：${archived.reason || ""}`,
+              },
+              "已归档",
+            )
+          : null,
+      ),
     ),
   );
   // Progress, the current stage and the run's own error ride on the control

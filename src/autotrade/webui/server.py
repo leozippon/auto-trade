@@ -269,9 +269,11 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             return {"gpus": [], "error": f"{type(exc).__name__}: {exc}"}
 
     @app.get("/api/experiments")
-    def get_experiments(kept: str | None = Query(None)) -> dict[str, object]:
+    def get_experiments(
+        kept: str | None = Query(None), archived: bool = Query(False)
+    ) -> dict[str, object]:
         return {
-            **registry.experiment_listing(experiment_root, kept),
+            **registry.experiment_listing(experiment_root, kept, archived=archived),
             **manager.running_slots(),
         }
 

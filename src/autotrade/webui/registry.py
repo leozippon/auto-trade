@@ -628,14 +628,35 @@ def _listing_row(directory: Path) -> tuple[dict[str, object], tuple[object, ...]
     return row, None
 
 
+# An arm the operator archived (scripts/experiments/archive_arm.py) carries this
+# marker in its hitl/ directory, and removing the file restores it. The home
+# page lists such an arm only when asked for the archived ones, and the default
+# listing never summarizes it, so its freeze gate is not recomputed after a
+# restart. Nothing outside the console's listing reads the marker: lineage, the
+# regression check, the round fill queue, operating memory and Paper see the
+# arm as before, and its experiment page still opens.
+ARCHIVED_NAME = "archived.json"
+
+
+def archive_marker(directory: Path) -> dict[str, object] | None:
+    """The arm's archive marker (when and why), or None when it is not archived."""
+
+    path = Path(directory) / HITL_DIR_NAME / ARCHIVED_NAME
+    return read_json(path) if path.is_file() else None
+
+
 # Rows kept by another process were derived by the code that process ran, so a
 # listing digest never matches across a console restart.
 _PROCESS_NONCE = uuid.uuid4().hex
 
 
-def _listing(root: Path) -> tuple[list[dict[str, object]], set[str], str]:
-    """Every row in listing order, the ids of the rows derived afresh, and a
-    digest of all the kept ones (ids and signatures).
+def _listing(
+    root: Path, *, archived: bool = False
+) -> tuple[list[dict[str, object]], set[str], str, int]:
+    """Every row in listing order (the archived arms' when ``archived``, else
+    every other arm's), the ids of the rows derived afresh, a digest of all
+    the kept ones (ids and signatures) and of which arms are archived, and how
+    many arms are archived.
 
     One listing at a time per process. The server answers requests from a
     thread pool, and two overlapping listings would otherwise both derive the
@@ -644,15 +665,20 @@ def _listing(root: Path) -> tuple[list[dict[str, object]], set[str], str]:
     """
 
     if not root.is_dir():
-        return [], set(), ""
+        return [], set(), "", 0
     with _LISTING_LOCK:
         directories = [
             path for path in root.iterdir() if path.is_dir() and not path.name.startswith(".")
         ]
+        shelved = {
+            path.name for path in directories if (path / HITL_DIR_NAME / ARCHIVED_NAME).is_file()
+        }
         rows: list[dict[str, object]] = []
         fresh: set[str] = set()
         kept: list[tuple[str, tuple[object, ...]]] = []
         for path in directories:
+            if (path.name in shelved) != archived:
+                continue
             row, signature = _listing_row(path)
             rows.append(row)
             if signature is None:
@@ -664,35 +690,43 @@ def _listing(root: Path) -> tuple[list[dict[str, object]], set[str], str]:
         _RECORDED_BEST.flush()
     rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
     rows.sort(key=_ending_rank)
-    digest = hashlib.sha256(repr((_PROCESS_NONCE, sorted(kept))).encode()).hexdigest()[:16]
-    return rows, fresh, digest
+    digest = hashlib.sha256(
+        repr((_PROCESS_NONCE, archived, sorted(kept), sorted(shelved))).encode()
+    ).hexdigest()[:16]
+    return rows, fresh, digest, len(shelved)
 
 
 def list_experiments(root: Path) -> list[dict[str, object]]:
-    """Every experiment, newest first inside each :func:`_ending_rank` group."""
+    """Every experiment not archived, newest first inside each
+    :func:`_ending_rank` group."""
 
     return _listing(Path(root))[0]
 
 
-def experiment_listing(root: Path, kept: str | None = None) -> dict[str, object]:
-    """The home page's listing: every row in order, the best experiment, and
-    ``kept``, the digest of the rows that change only when their files do
-    (every arm without a live worker).
+def experiment_listing(
+    root: Path, kept: str | None = None, *, archived: bool = False
+) -> dict[str, object]:
+    """The home page's listing: every row in order, the best experiment,
+    ``archived``, how many arms are archived, and ``kept``, the digest of the
+    rows that change only when their files do (every arm without a live
+    worker) and of which arms are archived. With ``archived`` the rows are the
+    archived arms' instead of every other arm's.
 
     The home page polls it every few seconds, and those rows are nearly all of
     it. A poll that sends back the digest it last received, and finds it
     unchanged, is answered with the rows derived afresh (live workers,
     launching or unreadable arms) and the order of every id; it keeps the
     other rows it already holds. Any change to a kept row — an arm ending,
-    created or deleted, any of its files rewritten, or a console restart —
-    changes the digest, and the poll gets every row again.
+    created, deleted, archived or restored, any of its files rewritten, or a
+    console restart — changes the digest, and the poll gets every row again.
     """
 
-    rows, fresh, digest = _listing(Path(root))
+    rows, fresh, digest, shelved = _listing(Path(root), archived=archived)
     payload: dict[str, object] = {
         "experiments": rows,
         "best": best_experiment(rows),
         "kept": digest,
+        "archived": shelved,
     }
     if kept is not None and kept == digest:
         payload["experiments"] = [row for row in rows if row["experiment_id"] in fresh]
@@ -1280,7 +1314,7 @@ def _failed_attempts(
 
 def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
     directory = resolve_experiment_dir(root, experiment_id)
-    detail = summarize_experiment(directory)
+    detail = {**summarize_experiment(directory), "archived": archive_marker(directory)}
     if detail.get("state") == "unreadable":
         return {
             **detail,
