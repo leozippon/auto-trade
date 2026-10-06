@@ -12,7 +12,9 @@ whose data has landed and makes the pre-open decision for the target session
 (default: today, Asia/Shanghai), then writes the book's order sheet to
 ``<orders-dir>/<book>/<date>_orders.md`` and ``latest_orders.md`` and prints it.
 A book that fails writes its failure to the same two files and the run goes on
-to the next book; the run exits non-zero if any book failed. Once a book's
+to the next book; the run exits non-zero if any book failed. A book that reads
+announcement titles fails this way, after settling, when the title job's run
+its decision relies on has not succeeded (``paper/titles.py``). Once a book's
 sheet is written the run reads its Paper verdict (``paper/verdict.py``); a
 reading that fails fails the book and leaves the sheet as it is. A killed book
 decides nothing: its sheet lists the holdings to exit by hand, and it is
@@ -68,6 +70,7 @@ from autotrade.paper.orders import (
 )
 from autotrade.paper.pit import BookPITData
 from autotrade.paper.storage import read_jsonl
+from autotrade.paper.titles import require_landed_titles
 from autotrade.paper.verdict import record_verdict
 from autotrade.pipelines.calendar import load_sse_trading_days
 from autotrade.pipelines.hitl_state import select_gpus
@@ -247,6 +250,7 @@ def run_book(book_id: str, root: Path, trade_date: str, orders_dir: Path) -> Non
         profile=book.profile,
         sandbox=book.sandbox,
         executor_factory=_executor_on_free_gpus,
+        decision_check=lambda at: require_landed_titles(book.snapshot_config, at, REPO_ROOT),
     )
     try:
         engine.run_day(trade_date)

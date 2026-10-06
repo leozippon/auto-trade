@@ -23,7 +23,12 @@ from autotrade.environment.replay.engine import MARKET_CLOSE, MARKET_OPEN
 from autotrade.environment.strategy import CN_TZ
 
 from .book import Book
-from .engine import PAPER_STATE_NAME, REFERENCE_KEY, PaperAwaitingFills
+from .engine import (
+    PAPER_STATE_NAME,
+    REFERENCE_KEY,
+    PaperAwaitingFills,
+    PaperTitlesNotLanded,
+)
 from .storage import read_json, read_jsonl
 
 WEEKDAYS = "一二三四五六日"
@@ -325,6 +330,8 @@ def render_failure(book: Book, trade_date: str, error: BaseException) -> str:
             ),
             "",
         ]
+    if isinstance(error, PaperTitlesNotLanded):
+        lines += [error.action, ""]
     lines += [
         (
             "修复原因后重跑同一命令（已完成的结算不会重复）："

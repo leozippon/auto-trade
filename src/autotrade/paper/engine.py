@@ -96,6 +96,15 @@ class PaperDataNotReady(PaperEngineError):
     """The committed data does not yet reach the sessions a run needs."""
 
 
+class PaperTitlesNotLanded(PaperDataNotReady):
+    """The title-job run a decision's view relies on has not succeeded
+    (``paper.titles``); ``action`` tells the operator what to do."""
+
+    def __init__(self, message: str, action: str) -> None:
+        super().__init__(message)
+        self.action = action
+
+
 class PaperWriterBusy(PaperEngineError):
     """Another process holds this book's writer lock."""
 
@@ -152,6 +161,8 @@ PaperDataFactory = Callable[[str, str], PaperData]
 ExecutorFactory = Callable[
     [Path, SandboxConfig, StrategyDataView, Path | None, Path | None], StrategyExecutor
 ]
+# A due decision's inference time -> None, or raises to refuse that decision.
+DecisionCheck = Callable[[datetime], None]
 
 
 def docker_executor(
@@ -186,6 +197,7 @@ class DailyPaperEngine:
         profile: BrokerProfile | None = None,
         sandbox: SandboxConfig | None = None,
         executor_factory: ExecutorFactory | None = None,
+        decision_check: DecisionCheck | None = None,
     ) -> None:
         self.strategy_path = Path(strategy_path).resolve()
         if not self.strategy_path.is_file():
@@ -205,6 +217,7 @@ class DailyPaperEngine:
         self.profile = profile or BrokerProfile()
         self.sandbox = sandbox or SandboxConfig()
         self.executor_factory = executor_factory or docker_executor
+        self.decision_check = decision_check
 
     # ------------------------------------------------------------------ run
 
@@ -316,6 +329,10 @@ class DailyPaperEngine:
         # The book's first decision is always due, as a replay's first day is.
         first = not state["decisions"]
         if self.schedule.is_due(trade_date, None if first else prior):
+            if self.decision_check is not None:
+                # After settling: a refused decision still books the sessions
+                # before it, and the next run decides it as a late one.
+                self.decision_check(self.schedule.at(trade_date))
             self._decide(state, data, broker, pending, trade_date, prior)
 
     # --------------------------------------------------------------- settle
@@ -768,6 +785,7 @@ __all__ = [
     "PaperData",
     "PaperDataNotReady",
     "PaperEngineError",
+    "PaperTitlesNotLanded",
     "PaperWriterBusy",
     "writer_lock",
 ]
