@@ -637,12 +637,16 @@ class DefaultsDriftTest(unittest.TestCase):
         self.assertTrue(policy["charged"])
         self.assertEqual(policy["rate_by_months_held_at_most"], {"1": 0.2, "12": 0.1})
 
-    def test_the_permitted_boards_are_pinned_per_arm(self) -> None:
-        """An arm without the key buys on every board; a stamped value reaches
-        the Broker profile, an invalid one is refused by the pre-flight the
-        console runs before creating."""
+    def test_the_permitted_boards_are_pinned_per_arm_and_stated_only_where_pinned(self) -> None:
+        """An arm without the key buys on every board and its facts say nothing
+        new; a stamped value reaches the Broker profile, an invalid one is
+        refused by the pre-flight the console runs before creating."""
         import tempfile
 
+        from autotrade.agent.experiment_facts import (
+            PERMITTED_BOARDS_RULE,
+            _broker_replay_facts,
+        )
         from autotrade.pipelines.worker import resolve_worker_options
 
         base = {
@@ -681,6 +685,12 @@ class DefaultsDriftTest(unittest.TestCase):
         self.assertEqual(pinned.to_record()["permitted_boards"], ["main", "gem"])
         # A profile read back from the JSON a Paper book keeps is the same profile.
         self.assertEqual(BrokerProfile(**json.loads(json.dumps(asdict(pinned)))), pinned)
+        # The run facts state the boards only where the profile pins them.
+        self.assertNotIn("permitted_boards", _broker_replay_facts({"broker_profile": recorded.to_record()}))
+        self.assertEqual(
+            _broker_replay_facts({"broker_profile": pinned.to_record()})["permitted_boards"],
+            {"boards": ["main", "gem"], "rule": PERMITTED_BOARDS_RULE},
+        )
 
     def test_the_geometry_and_gate_knobs_reach_the_configuration(self) -> None:
         """A knob accepted and never forwarded is the defect class here."""

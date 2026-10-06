@@ -417,6 +417,19 @@ def test_a_change_of_the_rule_set_stops_the_launcher(monkeypatch: pytest.MonkeyP
     Round(overrides={"require_seed_replicates": True}).check_console_defaults()
 
 
+def test_a_round_leaves_the_boards_to_the_capital_unless_it_names_them(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A round's request leaves the boards null, so the console stamps the ones
+    the arm's capital qualifies for; a console that stamped others by default
+    would move the round's queued arms, and stops it."""
+    rnd = Round()
+    assert rnd.request_params(PROBE_ID)["permitted_boards"] is None
+    assert Round(overrides={"permitted_boards": ["main"]}).request_params(PROBE_ID)["permitted_boards"] == ["main"]
+    monkeypatch.setitem(_round.WEB_CREATE_DEFAULTS, "permitted_boards", ["main"])
+    with pytest.raises(SystemExit, match="permitted_boards"):
+        rnd.check_console_defaults()
+    Round(overrides={"permitted_boards": ["main"]}).check_console_defaults()
+
+
 # --fill reads the arm list as a queue against the live console, so these are
 # the only tests here that fake it: the health record it reads and the create
 # request it sends.

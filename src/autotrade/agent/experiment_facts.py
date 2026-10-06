@@ -420,9 +420,20 @@ def _artifact_contract_facts(
     )
 
 
+# What ``BrokerProfile.permitted_boards`` means for the Agent, stated beside the
+# boards on an arm whose account carries them.
+PERMITTED_BOARDS_RULE = (
+    "The account may buy only names listed on these boards (main = Shanghai and Shenzhen "
+    "main boards, gem = ChiNext, star = STAR Market, bj = Beijing Stock Exchange): a buy of "
+    "a name on any other board is rejected whole as board_not_permitted, a sale never is, "
+    "and the zero-skill panel draws its replacement names from these boards only."
+)
+
+
 def _broker_replay_facts(manifest: Mapping[str, object]) -> dict[str, object]:
     profile = _as_mapping(manifest.get("broker_profile"))
     schedule = _as_mapping(manifest.get("schedule"))
+    boards = profile.get("permitted_boards")
     return compact_mapping(
         {
             "profile_id": profile.get("profile_id"),
@@ -451,6 +462,11 @@ def _broker_replay_facts(manifest: Mapping[str, object]) -> dict[str, object]:
                 }
                 if profile.get("dividend_tax") is True
                 else {"charged": False}
+            ),
+            # Only where the profile pins them: an account without the field
+            # buys on every board, and its facts say nothing new.
+            "permitted_boards": (
+                None if boards is None else {"boards": boards, "rule": PERMITTED_BOARDS_RULE}
             ),
             "t_plus_one": True,
             "ex_date_settlement": "pre_close_reset_cash_dividend_credited",

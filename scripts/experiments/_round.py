@@ -173,6 +173,10 @@ BASE_EXPECTED_DEFAULTS: dict[str, object] = {
     "require_seed_replicates": True,
     "independent_offline_trials": True,
     "dividend_tax": True,
+    # Left to the console, which stamps the boards the arm's initial cash
+    # qualifies for (`broker.default_permitted_boards`); a round that wants
+    # others names them.
+    "permitted_boards": None,
 }
 
 # What every round decides the same way. Values, not commentary.
