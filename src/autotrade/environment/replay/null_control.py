@@ -39,6 +39,7 @@ from autotrade.environment.broker import (
 from autotrade.environment.broker_core import (
     LOT_SIZE,
     STAR_MIN_LOT_SIZE,
+    board_of,
     is_bse_market,
     is_star_market,
 )
@@ -57,6 +58,8 @@ PANEL_DRAWS = 20
 # one board lot of this round trip's own money can buy and that sit on the
 # original's side of the benchmark's membership. Without a membership table the
 # side is the original's circulating market-cap decile of that day instead.
+# A profile that pins the boards its account may buy on
+# (``BrokerProfile.permitted_boards``) keeps the names of every other board out.
 MATCHED_MEMBERSHIP = "index_membership+affordability"
 MATCHED_DECILE = "circ_mv_decile+affordability"
 _DECILES = 10
@@ -244,7 +247,7 @@ def run_null_control(
             idle["panel_draw_sd"] = [[date, 0.0] for date, _value in returns]
         return idle
     universe = _Universe(frame)
-    pools = [_candidate_pool(trip, universe, members) for trip in skeleton]
+    pools = [_candidate_pool(trip, universe, members, profile.permitted_boards) for trip in skeleton]
     rng = np.random.default_rng(seed)
 
     window_benchmark = _benchmark_return(dates, benchmark)
@@ -394,8 +397,12 @@ class _Universe:
         # A name without a usable opening price cannot be sized, so it is not a
         # candidate on that day at all.
         rows = rows[np.isfinite(rows["open"]) & (rows["open"] > 0)]
-        boards = {symbol: _board(symbol) for symbol in rows["symbol"].unique()}
-        rows = rows.assign(board=rows["symbol"].map(boards))
+        symbols = rows["symbol"].unique()
+        # ``board`` sets a buy's lot ladder; ``listed_on`` is the board in the
+        # vocabulary an account's permission names.
+        boards = {symbol: _board(symbol) for symbol in symbols}
+        listed_on = {symbol: board_of(symbol) for symbol in symbols}
+        rows = rows.assign(board=rows["symbol"].map(boards), listed_on=rows["symbol"].map(listed_on))
         self._days = {
             date: group.set_index("symbol")
             for date, group in rows.groupby("trade_date", sort=False)
@@ -506,7 +513,10 @@ def _price_resets(
 
 
 def _candidate_pool(
-    trip: RoundTrip, universe: _Universe, members: _Membership | None = None
+    trip: RoundTrip,
+    universe: _Universe,
+    members: _Membership | None = None,
+    permitted_boards: Collection[str] | None = None,
 ) -> tuple[tuple[str, int], ...]:
     """Replacement names for one round trip, with the shares its money buys.
 
@@ -514,7 +524,9 @@ def _candidate_pool(
     this trip's money cannot buy was never a candidate, so drawing it and then
     dropping the trip would run the null with less capital than the result.
     Sized from the entry day's open only: the null learns nothing the original
-    position did not already know when it was opened.
+    position did not already know when it was opened. A name on a board the
+    account may not buy on is no candidate either, for the same reason;
+    ``permitted_boards`` None restricts nothing.
     """
 
     entry = universe.day(trip.entry_date)
@@ -528,6 +540,8 @@ def _candidate_pool(
         names = entry.index[inside == (trip.symbol in constituents)]
     if trip.exit_date is not None:
         names = names.intersection(universe.day(trip.exit_date).index)
+    if permitted_boards is not None:
+        names = names[entry.loc[names, "listed_on"].isin(permitted_boards).to_numpy()]
     names = names.drop(trip.symbol, errors="ignore")
     bars = entry.loc[names]
     shares = np.floor_divide(trip.notional, bars["open"].to_numpy()).astype(int)

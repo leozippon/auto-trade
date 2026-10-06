@@ -244,6 +244,102 @@ def test_null_quantities_follow_the_star_declaration_ladder():
     assert [order["quantity"] for order in orders[DAYS[2]]] == [200]
 
 
+BOARD_NAMES = (
+    "000001.SZ", "000002.SZ", "600001.SH",  # main
+    "300001.SZ", "300002.SZ",  # ChiNext
+    "688001.SH", "688002.SH",  # STAR
+    "830001.BJ", "830002.BJ",  # Beijing
+)
+
+
+def _board_frame() -> pd.DataFrame:
+    """Six days of names on every board, one size bucket, no ex-date."""
+
+    rows = []
+    for offset, day in enumerate(DAYS[:6]):
+        for index, symbol in enumerate(BOARD_NAMES):
+            price = 10.0 + index + 0.1 * offset
+            rows.append(
+                {
+                    "ts_code": symbol,
+                    "trade_date": day,
+                    "open": price,
+                    "close": price,
+                    "pre_close": 10.0 + index + 0.1 * (offset - 1) if offset else price,
+                    "up_limit": price * 1.5,
+                    "down_limit": price * 0.5,
+                    "is_suspended": False,
+                    "circ_mv": 1.0e9,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+_BOARD_SKELETON = (
+    RoundTrip("000001.SZ", 1000, 10.0, _at(DAYS[0], "09:30"), _at(DAYS[3], "15:00")),
+    RoundTrip("300001.SZ", 500, 13.1, _at(DAYS[1], "09:30"), None),
+)
+
+
+def _board_draws(permitted_boards, draws: int, seed: int) -> list[list[tuple[str, str, int]]]:
+    frame = _board_frame()
+    universe = _Universe(frame)
+    pools = [_candidate_pool(trip, universe, None, permitted_boards) for trip in _BOARD_SKELETON]
+    rng = np.random.default_rng(seed)
+    result = []
+    for _ in range(draws):
+        orders, _dropped = _orders_from_pools(_BOARD_SKELETON, pools, rng, _sellable(universe, frame))
+        result.append(
+            [(order["symbol"], order["action"], order["quantity"]) for day in sorted(orders) for order in orders[day]]
+        )
+    return result
+
+
+def test_the_panel_draws_only_on_the_boards_the_account_may_buy():
+    drawn = {symbol for draw in _board_draws(("main", "gem"), 200, 1) for symbol, _action, _quantity in draw}
+    assert drawn == {"000001.SZ", "000002.SZ", "600001.SH", "300001.SZ", "300002.SZ"}
+    # Without the restriction the same pool reaches STAR and Beijing names.
+    unrestricted = {symbol for draw in _board_draws(None, 200, 1) for symbol, _action, _quantity in draw}
+    assert {"688001.SH", "688002.SH", "830001.BJ", "830002.BJ"} <= unrestricted
+
+    # End to end through a restricted Broker: no draw is ever refused for its board.
+    def strategy(context):
+        day = context.inference_at.strftime("%Y%m%d")
+        script = {
+            DAYS[0]: [("000001.SZ", "buy", 1000, _at(DAYS[0], "09:30"))],
+            DAYS[1]: [("300001.SZ", "buy", 500, _at(DAYS[1], "09:30"))],
+            DAYS[3]: [("000001.SZ", "sell", 1000, _at(DAYS[3], "15:00"))],
+        }
+        return [
+            {"symbol": s, "action": a, "quantity": q, "execute_at": w.isoformat()}
+            for s, a, q, w in script.get(day, ())
+        ]
+
+    profile = BrokerProfile(initial_cash=100_000, permitted_boards=("main", "gem"))
+    observed = run_daily_replay(
+        daily=_board_frame(), strategy=strategy, schedule=StrategySchedule("day", "08:30"), profile=profile
+    )
+    block = run_null_control(
+        observed, _board_frame(), BENCHMARK, profile, StrategySchedule("day", "08:30"), k=20, seed=5
+    )
+    assert block["rejects_mean"] == 0.0
+    assert block["dropped_trips_mean"] == 0.0
+
+
+def test_an_unrestricted_panel_draws_exactly_as_before_the_boards_existed():
+    """Pinned from the code before ``permitted_boards`` existed: an arm
+    without the key keeps its panel bit for bit."""
+
+    assert _board_draws(None, 6, 7) == [
+        [("830002.BJ", "buy", 555), ("688002.SH", "buy", 406), ("830002.BJ", "sell", 555)],
+        [("688002.SH", "buy", 625), ("830002.BJ", "buy", 361), ("688002.SH", "sell", 625)],
+        [("688001.SH", "buy", 666), ("830001.BJ", "buy", 383), ("688001.SH", "sell", 666)],
+        [("830001.BJ", "buy", 588), ("000002.SZ", "buy", 500), ("830001.BJ", "sell", 588)],
+        [("000002.SZ", "buy", 900), ("600001.SH", "buy", 500), ("000002.SZ", "sell", 900)],
+        [("300001.SZ", "buy", 700), ("830001.BJ", "buy", 383), ("300001.SZ", "sell", 700)],
+    ]
+
+
 def test_a_round_trip_too_small_to_buy_a_lot_is_counted_not_hidden():
     """A partial exit splits one entry into independent round trips, so each
     exit's share of the money is rounded down to a board lot on its own. A
