@@ -3,14 +3,12 @@
 A round file is its arms and their directives. The values several rounds share
 -- the eight-year geometry and dataset selection a seed was prebuilt for, the
 graduation bars, the round-level parameters, the hosted roles of a model pair,
-a reference pack, the lineage that grows as the arms searching one baseline
-close -- live here, and a round imports them from here and from `_round`,
-never from another round file, so a round can close without its values
-moving.
+the lineage that grows as the arms searching one baseline close -- live here,
+and a round imports them from here and from `_round`, never from another round
+file, so a round can close without its values moving.
 
-Arms have been created under every value below, and a closed round reads its
-record through these names. A round that needs another value adds a new name
-rather than editing one in place.
+Arms have been created under every value below. A round that needs another
+value adds a new name rather than editing one in place.
 """
 
 from __future__ import annotations
@@ -94,9 +92,6 @@ TITLE_EIGHT_YEAR_100K: dict[str, object] = {**FUND_EIGHT_YEAR_100K, **TITLE_EIGH
 # the text domain with `anns_d` alone.
 TITLE_PIT_VIEWS_SEED = "data/pit_views_seed_research_8y_anns_20261006"
 
-# The fundamentals pack (round 20261005), which every lane on that surface mounts.
-FUND_PACK = "configs/workspace_refs/fund_open_100k_8y_20261005"
-
 # The hosted arm of a pair: main session, sub-agents and compaction on MiMo, the
 # compaction threshold pinned to the local arms' value so both compact alike.
 # `nl_model` is left on the local default: text-evidence scoring also runs in
@@ -168,13 +163,3 @@ INCDRAFT_LINEAGE = [
     "incdraft_100k_8y_mimo_20261012",
     "incdraft_500k_8y_qwen_20261012",
 ]
-
-# Appended to the directives of the arms queued after `require_seed_replicates`
-# came in but whose packs predate it and say which seed base's node is
-# nominated, so that rule is not read as waiving the registration. Those arms
-# (round 20261008's cost and pool pairs, round 20261009's beta pair) were
-# withdrawn; a pack written for the rule says the right thing itself.
-SEED_REPLICATES = (
-    "冻结时把被提名的腿在其他种子基数上的整期行登记为 finish_session 的 seed_replicates；"
-    "包里关于提名哪个种子基数节点的规定只决定提名哪一行，不免除这一登记。"
-)

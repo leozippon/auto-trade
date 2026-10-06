@@ -5,7 +5,7 @@ The round files are data -- arms, seed, dataset selection, directives -- and
 once and parametrised over whatever open round files exist. A new round file or
 arm is covered the moment it is added. A closed round is the record of arms
 that were created and is only imported: it must refuse to run, and its ids stay
-used.
+used, in RETIRED_IDS once its file has left the tree.
 """
 
 from __future__ import annotations
@@ -383,8 +383,8 @@ def test_a_closed_round_refuses_every_mode(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_an_open_round_imports_no_other_round() -> None:
-    """What rounds share lives in `_profiles.py`, so a round can close, and stay
-    the record of its arms, without an open round reading its values from it."""
+    """What rounds share lives in `_profiles.py`, so a round can close, and its
+    file leave the tree, without an open round reading its values from it."""
     for name in ROUND_IDS:
         source = (REPO_ROOT / "scripts" / "experiments" / f"{name}.py").read_text(encoding="utf-8")
         modules = {
