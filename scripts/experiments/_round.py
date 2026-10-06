@@ -169,6 +169,7 @@ BASE_EXPECTED_DEFAULTS: dict[str, object] = {
     "require_raw_excess_at_cost_stress": True,
     "require_forward_plain_selection": True,
     "require_seed_replicates": True,
+    "independent_offline_trials": True,
     "dividend_tax": True,
 }
 
@@ -360,7 +361,7 @@ def _lineage_reading(merged: Mapping[str, object], rules: AcceptanceRules) -> di
         research_start=str(merged["research_start"]),
         research_end=str(merged["research_end"]),
     )
-    summary = lineage_summary(extraction)
+    summary = lineage_summary(extraction, acceptance=rules)
     days = max((len(item["daily"]) for item in extraction["series"]), default=0)  # type: ignore[attr-defined]
     return {
         # The arms themselves are on the line above, as `lineage_arms`.

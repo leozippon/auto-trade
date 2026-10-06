@@ -493,6 +493,13 @@ _FIELDS: list[dict[str, object]] = [
         "help": "本臂可测的完整研究期验证数下限（提名计入），整数且至少为 1。",
     },
     {
+        "key": "independent_offline_trials",
+        "group": "预算与验收",
+        "label": "离线筛选按独立试验计价",
+        "type": "bool",
+        "help": "冻结门的 DSR 把每个申报的离线筛选（本臂的与 lineage 继承的）各计一个独立试验：它们没有收益序列，相关性无从测量；宿主上验证过的试验仍按实测的两两相关折算。关闭则离线筛选按宿主试验实测的平均相关折算，近似副本的书申报再多离线筛选也几乎不抬门槛。",
+    },
+    {
         "key": "require_raw_excess_at_cost_stress",
         "group": "预算与验收",
         "label": "冻结门要求成本压力下跑赢基准",

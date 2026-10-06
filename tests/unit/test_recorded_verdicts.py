@@ -140,7 +140,7 @@ def test_a_declared_exception_covers_exactly_the_keys_it_names(experiments: Path
 
 
 def test_the_dump_judges_every_stored_input_under_every_variant_of_its_rules(current: dict):
-    assert list(VARIANTS) == ["R0", "R1", "R3", MANDATED]
+    assert list(VARIANTS) == ["R0", "R1", "R3", "R4", MANDATED]
     variants = ["own", *VARIANTS, WITH_REPLICATES]
     arm = current["arms"][ARM]
     assert list(arm["rules"]) == list(arm["facts"]) == ["own", *VARIANTS]
@@ -176,6 +176,7 @@ def test_the_dump_judges_every_stored_input_under_every_variant_of_its_rules(cur
         "R0": [],
         "R1": [],
         "R3": ["require_forward_plain_selection"],
+        "R4": ["require_forward_plain_selection"],
         MANDATED: [],
         WITH_REPLICATES: ["require_forward_plain_selection"],
     }

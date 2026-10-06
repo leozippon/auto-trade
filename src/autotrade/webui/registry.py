@@ -796,9 +796,17 @@ def _best_candidate(
         return None
     best = max(full, key=lambda row: float(row["neutralized"]["information_ratio"]))  # type: ignore[index]
     try:
-        # The deflated Sharpe and its trials do not depend on any threshold.
+        # No threshold moves the deflated Sharpe, so the default rules, with
+        # the one rule that does: how the arm prices its trial family.
+        own = acceptance_for(read_json(directory / HITL_DIR_NAME / PARAMS_NAME))
         gate = freeze_gate_for(
-            earlier, steps, best, experiment_dir=directory, acceptance=AcceptanceRules()
+            earlier,
+            steps,
+            best,
+            experiment_dir=directory,
+            acceptance=AcceptanceRules(
+                independent_offline_trials=own.independent_offline_trials
+            ),
         )
     except (OSError, ValueError):
         gate = {}

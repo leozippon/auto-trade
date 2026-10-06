@@ -477,6 +477,49 @@ def test_the_effective_trial_count_reads_the_correlation_of_the_trials_series():
     assert verdict.trial_correlation([shared[0]]) == (0.0, 0)
 
 
+def test_a_declared_offline_trial_is_priced_as_independent_only_under_the_rule():
+    """Near-copies on the host make ρ̄ high. Without the rule that ρ̄ prices
+    the declared offline trials too, so they are almost free; with it, each
+    one, the arm's or the lineage's, has no series and counts one, while the
+    validated trials, own and inherited, keep their measured correlation."""
+
+    rng = np.random.default_rng(7)
+    book = _analysis(_segment(_weekdays("20210701", "20250630"), 0.1, rng))
+    copies = [book, {**book, "strategy_daily": [[day, 2 * value] for day, value in book["strategy_daily"]]}]
+    inherited = [verdict.neutral_daily(book)]
+    family = {
+        "trials": 2,
+        "offline_trials": 3,
+        "trial_analyses": copies,
+        "lineage_trials": 3,
+        "lineage_offline_trials": 2,
+        "lineage_series": inherited,
+    }
+    priced = verdict.trial_family_statistics(**family)
+    independent = verdict.trial_family_statistics(**family, independent_offline_trials=True)
+    assert priced["trial_correlation"] == independent["trial_correlation"] == pytest.approx(1.0)
+    assert priced["trials"] == independent["trials"] == 8
+    # Without the rule all eight trials are one; with it the three validated
+    # ones are one and the five declared offline five more.
+    assert priced["effective_trials"] == pytest.approx(1.0)
+    assert independent["effective_trials"] == pytest.approx(1.0 + 5)
+    # One formula: ρ̄ + (1 − ρ̄)·measured + unmeasured.
+    assert verdict.effective_trials(3, 0.4, 5) == pytest.approx(0.4 + 0.6 * 3 + 5)
+    assert verdict.effective_trials(8, 0.4) == verdict.effective_trials(8, 0.4, 0)
+    # The gate reads the rule off the arm's rules, and the bar follows.
+    gates = [
+        _gate(book, full_span_validations=2, **family, independent_offline_trials=held)[
+            "deflated_sharpe"
+        ]
+        for held in (False, True)
+    ]
+    assert [gate["effective_trials"] for gate in gates] == [
+        priced["effective_trials"],
+        independent["effective_trials"],
+    ]
+    assert gates[1]["information_ratio_bar"] > gates[0]["information_ratio_bar"] + 0.4
+
+
 RESEARCH_YEARS = [
     ("20210701", "20220630"),
     ("20220701", "20230630"),

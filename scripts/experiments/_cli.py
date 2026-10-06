@@ -309,10 +309,11 @@ def add_acceptance_arguments(parser: argparse.ArgumentParser) -> None:
 
     Unset takes the default of ``autotrade.pipelines.config.acceptance_for``:
     a tracking mandate only where ``--tracking-error-cap`` is given, drawdowns
-    0.45 / 0.30 unless named and the statistical bars at today's constants. An
-    optional condition (``--require-*``) left unset is on, as on an arm the
-    console creates (``hitl_state.CREATION_STAMPS``, which
-    ``_build_worker_params`` stamps); ``--no-require-*`` turns one off.
+    0.45 / 0.30 unless named and the statistical bars at today's constants. A
+    switch the console stamps on (``--require-*``,
+    ``--independent-offline-trials``; ``hitl_state.CREATION_STAMPS``, which
+    ``_build_worker_params`` stamps) left unset is on, as on an arm the console
+    creates; its ``--no-`` form turns it off.
     """
     for rule in fields(AcceptanceRules):
         flag = f"--{rule.name.replace('_', '-')}"

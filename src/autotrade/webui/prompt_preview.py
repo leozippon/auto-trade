@@ -143,7 +143,9 @@ def _research_prompt(
     # then the preview reads the same figures off the creation-time file.
     lineage = lineage_record(context.records)
     if lineage is None and rolling.lineage_arms:
-        lineage = lineage_ledger_record(context.options.experiment_dir)
+        lineage = lineage_ledger_record(
+            context.options.experiment_dir, acceptance=rolling.acceptance
+        )
     manifest: dict[str, object] = {
         "experiment_id": rolling.experiment_id,
         "epoch_id": "research",

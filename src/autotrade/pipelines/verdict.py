@@ -410,12 +410,14 @@ def trial_correlation(
     return min(max(float(np.mean(correlations)), 0.0), 1.0), len(correlations)
 
 
-def effective_trials(trials: int, correlation: float) -> float:
-    """Bailey & López de Prado (2014, App. A.3, eq. 9): ``trials`` trials with
-    mean pairwise correlation ρ̄ count as ρ̄ + (1 − ρ̄)·``trials`` independent
-    ones -- one when they are identical, all of them when independent."""
+def effective_trials(measured: int, correlation: float, unmeasured: int = 0) -> float:
+    """Bailey & López de Prado (2014, App. A.3, eq. 9): ``measured`` trials
+    with mean pairwise correlation ρ̄ count as ρ̄ + (1 − ρ̄)·``measured``
+    independent ones -- one when they are identical, all of them when
+    independent -- and each of the ``unmeasured`` trials, whose correlation
+    nothing measured, as one more."""
 
-    return correlation + (1.0 - correlation) * trials
+    return correlation + (1.0 - correlation) * measured + unmeasured
 
 
 def deflated_sharpe(
@@ -748,17 +750,28 @@ def trial_family_statistics(
     offline_trials: int = 0,
     trial_analyses: Sequence[Mapping[str, object]] = (),
     lineage_trials: int = 0,
+    lineage_offline_trials: int = 0,
     lineage_series: Sequence[Mapping[str, float]] = (),
+    independent_offline_trials: bool = False,
 ) -> dict[str, object]:
     """M, its parts, ρ̄ and N_eff of an arm's trial family (:func:`freeze_gate`
     names the parts); what the gate deflates over and what the IR bar a
-    full-span nominee faces is read at."""
+    full-span nominee faces is read at.
+
+    ``lineage_offline_trials`` is the part of ``lineage_trials`` the lineage
+    arms declared offline. Under ``independent_offline_trials`` the declared
+    offline trials, the arm's own and the lineage's, have no series, so
+    nothing measured their correlation: each counts as one independent trial,
+    and ρ̄ prices the validated ones alone. Otherwise every trial is priced
+    at ρ̄, the rule of arms recorded without it."""
 
     trials = _count(trials, "trials", 1)
     offline_trials = _count(offline_trials, "offline_trials", 0)
     lineage_trials = _count(lineage_trials, "lineage_trials", 0)
+    lineage_offline_trials = _count(lineage_offline_trials, "lineage_offline_trials", 0)
     correlation, pairs = trial_correlation(trial_analyses, lineage_series)
     total = trials + offline_trials + lineage_trials
+    unmeasured = offline_trials + lineage_offline_trials if independent_offline_trials else 0
     return {
         "trials": total,
         "host_trials": trials,
@@ -766,7 +779,7 @@ def trial_family_statistics(
         "lineage_trials": lineage_trials,
         "trial_correlation": correlation,
         "trial_correlation_pairs": pairs,
-        "effective_trials": effective_trials(total, correlation),
+        "effective_trials": effective_trials(total - unmeasured, correlation, unmeasured),
     }
 
 
@@ -947,6 +960,7 @@ def freeze_gate(
     offline_trials: int = 0,
     trial_analyses: Sequence[Mapping[str, object]] = (),
     lineage_trials: int = 0,
+    lineage_offline_trials: int = 0,
     lineage_series: Sequence[Mapping[str, float]] = (),
     years: Sequence[tuple[str, str]] = (),
     summary: Mapping[str, object] | None = None,
@@ -959,11 +973,14 @@ def freeze_gate(
     (:func:`trial_family_statistics`): ``trials`` distinct non-control
     strategies validated anywhere in the arm (the nominee among them), the
     ``offline_trials`` its batches declared screening offline and the
-    ``lineage_trials`` of the earlier arms it was created to inherit, M in all,
-    counted at their effective number ρ̄ + (1 − ρ̄)·M, where ρ̄ is
+    ``lineage_trials`` of the earlier arms it was created to inherit
+    (``lineage_offline_trials`` of them declared offline), M in all, counted
+    at their effective number ρ̄ + (1 − ρ̄)·M, where ρ̄ is
     :func:`trial_correlation` over ``trial_analyses`` (one sidecar per
     trial) and ``lineage_series`` (one reduced series per measurable lineage
-    trial). The dispersion √V is the zero-skill sampling error
+    trial). Under ``rules.independent_offline_trials`` the declared offline
+    trials, which have no series, are left out of M in that formula and
+    count one each. The dispersion √V is the zero-skill sampling error
     of an IR over the nominee's own measured days (:func:`null_sharpe_std`), so
     neither controls nor near-copies of the nominee move the bar through it.
     ``information_ratio_bar`` is the research IR at which the probability
@@ -993,7 +1010,9 @@ def freeze_gate(
         offline_trials=offline_trials,
         trial_analyses=trial_analyses,
         lineage_trials=lineage_trials,
+        lineage_offline_trials=lineage_offline_trials,
         lineage_series=lineage_series,
+        independent_offline_trials=rules.independent_offline_trials,
     )
     full_span_validations = _count(full_span_validations, "full_span_validations", 0)
     graded, series = _graded(analysis)

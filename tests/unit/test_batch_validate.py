@@ -64,6 +64,7 @@ from autotrade.environment.tools.workspace import (
     SafeWorkspace,
 )
 from autotrade.pipelines.config import (
+    OFFLINE_TRIALS_PRICING,
     AcceptanceRules,
     BrokerProfile,
     BudgetUsed,
@@ -856,6 +857,37 @@ class ControlsAndOfflineScreensTest(unittest.TestCase):
                 [step.fingerprint for step in session.backtest.steps],
             )
             self.assertEqual(trial_family([trial_fields(step) for step in reloaded])["trials"], 4)
+
+    def test_an_arm_that_prices_screens_as_independent_says_so_where_they_are_declared(
+        self,
+    ) -> None:
+        """Under ``independent_offline_trials`` each declared screen adds one
+        effective trial and the validated ones keep their measured
+        correlation; the offline_trials parameter states that once, and an arm
+        without the rule is neither told it nor priced by it."""
+
+        with TemporaryDirectory() as tmp:
+            sessions = {
+                held: _Session(
+                    Path(tmp) / str(held),
+                    acceptance_rules={"max_drawdown": 0.25, "independent_offline_trials": held},
+                )
+                for held in (False, True)
+            }
+            readings = {}
+            for held, session in sessions.items():
+                told = json.dumps(session.batch.spec.provider_record()).count(OFFLINE_TRIALS_PRICING)
+                self.assertEqual(told, int(held))
+                session.candidate("v1", _strategy("2" * 60))
+                session.candidate("v2", _strategy("3" * 60))
+                row = session.call("v1", "v2", offline_trials=3).value["candidates"][0]
+                readings[held] = session.backtest.freeze_gate(str(row["node_id"]))["deflated_sharpe"]
+            self.assertNotIn(OFFLINE_TRIALS_PRICING, json.dumps(BatchValidateTool.spec.provider_record()))
+            rho = readings[False]["trial_correlation"]
+            self.assertEqual(readings[True]["trial_correlation"], rho)
+            self.assertEqual(readings[False]["trials"], readings[True]["trials"])
+            self.assertAlmostEqual(readings[False]["effective_trials"], rho + (1 - rho) * 5)
+            self.assertAlmostEqual(readings[True]["effective_trials"], rho + (1 - rho) * 2 + 3)
 
     def test_a_wholly_failed_batch_s_screens_count_once_when_declared_again(self) -> None:
         """No Step, no declaration: the next batch repeats it and M holds it once."""

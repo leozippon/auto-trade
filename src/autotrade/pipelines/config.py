@@ -134,6 +134,18 @@ def _rule(default: object, text: str) -> Any:
     return field(default=default, metadata={"help": text})
 
 
+# What ``AcceptanceRules.independent_offline_trials`` means for the Agent's
+# choice between declaring a screen and running it, in the one sentence its
+# facts and batch_validate's offline_trials parameter state where an arm holds
+# the rule.
+OFFLINE_TRIALS_PRICING = (
+    "A screen declared in offline_trials is priced as independent, one effective trial "
+    "each; a screen run on the host as a candidate is priced by its measured correlation "
+    "with the other trials, which is the reason to run screens that are near-copies of "
+    "each other on the host."
+)
+
+
 @dataclass(frozen=True)
 class AcceptanceRules:
     """The arm's create-time gates for the freeze nomination and the verdict.
@@ -222,6 +234,16 @@ class AcceptanceRules:
         "Freeze and forward: a nominee that trains a model registers its seed replicates; "
         "their mean active IR must reach its bar, and each is replayed forward like the "
         "frozen book.",
+    )
+    # Not a condition: how the deflated Sharpe prices the trial family, off
+    # and stamped on like the conditions. A declared offline trial has no
+    # series, so nothing measured its correlation; with the rule it counts as
+    # one independent trial (``verdict.trial_family_statistics``), without it
+    # at the validated trials' ρ̄.
+    independent_offline_trials: bool = _rule(
+        False,
+        "Freeze gate: each declared offline trial, the arm's or its lineage's, counts as one "
+        "independent trial; validated trials keep their measured correlation.",
     )
     forward_confidence: float = _rule(
         verdict.FORWARD_CONFIDENCE, "Forward verdict: one-sided block-bootstrap confidence."
@@ -395,10 +417,20 @@ class AcceptanceRules:
                     "strategies (distinct bytes) validated in the arm on any span "
                     "-- the same bytes validated again, on another span or "
                     "after a control registration, are the same trial -- plus every "
-                    "batch's declared offline_trials; they count as "
-                    "rho + (1 - rho) * M independent trials, rho the mean "
-                    "pairwise correlation of the trials' daily graded series, "
-                    "each over its longest validated span; the dispersion is the zero-skill sampling "
+                    "batch's declared offline_trials; "
+                    + (
+                        "the H of them validated on the host and the M - H declared "
+                        "offline count as rho + (1 - rho) * H + (M - H) independent "
+                        "trials, rho the mean pairwise correlation of the H trials' "
+                        "daily graded series, each over its longest validated span. "
+                        f"{OFFLINE_TRIALS_PRICING} The dispersion"
+                        if self.independent_offline_trials
+                        else "they count as "
+                        "rho + (1 - rho) * M independent trials, rho the mean "
+                        "pairwise correlation of the trials' daily graded series, "
+                        "each over its longest validated span; the dispersion"
+                    )
+                    + " is the zero-skill sampling "
                     "error of an annualized IR over the nominee's days, "
                     f"sqrt({verdict.TRADING_DAYS_PER_YEAR} / days), about 0.5 over "
                     "four years. A control "

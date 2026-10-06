@@ -33,6 +33,7 @@ from autotrade.environment.sandbox import SandboxLimits
 from autotrade.pipelines.config import (
     DEFAULT_DEADLINE_GRACE_MINUTES,
     DEFAULT_RESEARCH_GEOMETRY,
+    AcceptanceRules,
     rolling_default,
     session_deadline_seconds,
 )
@@ -303,6 +304,6 @@ def test_preview_shows_the_lineage_the_session_will_see(tmp_path: Path):
     }
     assert _facts(_preview_of(directory, repo, SESSION_KEY))["arm"]["lineage"] == expected
     ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl").append(
-        lineage_ledger_record(directory)
+        lineage_ledger_record(directory, acceptance=AcceptanceRules())
     )
     assert _facts(_preview_of(directory, repo, SESSION_KEY))["arm"]["lineage"] == expected

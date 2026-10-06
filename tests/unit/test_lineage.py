@@ -159,7 +159,7 @@ def _record(arm: Path, extraction) -> dict[str, object]:
     console's series file, then the pipeline's ledger record read from it."""
 
     write_lineage(arm, extraction)
-    record = lineage_ledger_record(arm)
+    record = lineage_ledger_record(arm, acceptance=AcceptanceRules())
     ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl").append(record)
     return record
 
@@ -177,10 +177,21 @@ def _own_rows(directory: Path) -> list[dict[str, object]]:
 
 def test_an_arm_without_a_lineage_is_judged_exactly_as_before(tmp_path: Path) -> None:
     """The figures below are what this fixture read before lineages existed,
-    to the last bit: an arm created without one deflates over its own family."""
+    to the last bit: an arm created without one deflates over its own family.
+    An arm whose rules were recorded before offline screens were priced as
+    independent reads its recorded bar to the last bit too; one that holds
+    the rule counts its one declared screen as one more trial."""
 
     rows = _own_rows(tmp_path / "new_arm")
-    dsr = freeze_gate_for([], rows, rows[1], experiment_dir=tmp_path / "new_arm", acceptance=AcceptanceRules())["deflated_sharpe"]
+
+    def dsr_under(rules: AcceptanceRules) -> dict[str, object]:
+        gate = freeze_gate_for([], rows, rows[1], experiment_dir=tmp_path / "new_arm", acceptance=rules)
+        return gate["deflated_sharpe"]
+
+    # Rules as a params.json written before the rule existed states them.
+    recorded = AcceptanceRules().to_record()
+    del recorded["independent_offline_trials"]
+    dsr = dsr_under(AcceptanceRules.from_record(recorded))
     assert {
         key: dsr[key]
         for key in (
@@ -207,6 +218,12 @@ def test_an_arm_without_a_lineage_is_judged_exactly_as_before(tmp_path: Path) ->
     }
     assert (dsr["lineage_trials"], dsr["lineage_arms"]) == (0, [])
     assert "lineage" not in arm_record(())
+    held = dsr_under(AcceptanceRules(independent_offline_trials=True))
+    correlation = dsr["trial_correlation"]
+    assert held["effective_trials"] == pytest.approx(correlation + (1 - correlation) * 2 + 1)
+    assert held["information_ratio_bar"] > dsr["information_ratio_bar"]
+    priced = {"effective_trials", "sharpe_star", "information_ratio_bar", "deflated_sharpe_probability"}
+    assert {key for key in dsr if held[key] != dsr[key]} == priced
 
 
 def test_a_correlated_lineage_adds_almost_nothing_and_an_independent_one_its_count() -> None:
@@ -308,6 +325,16 @@ def test_the_recorded_lineage_joins_the_family_and_outlives_its_arms(tmp_path: P
     assert dsr["trial_correlation_pairs"] == direct["trial_correlation_pairs"] == 10
     for key in ("trial_correlation", "effective_trials", "information_ratio_bar", "deflated_sharpe_probability"):
         assert dsr[key] == pytest.approx(direct[key], rel=1e-12), key
+    # Priced as independent, the lineage's three declared screens count one
+    # each like the arm's own one; the validated five keep the union's ρ̄.
+    rules = AcceptanceRules(independent_offline_trials=True)
+    held = freeze_gate_for(records, own, own[1], experiment_dir=arm, acceptance=rules)["deflated_sharpe"]
+    union = dsr["trial_correlation"]
+    assert held["trial_correlation"] == union
+    assert held["effective_trials"] == pytest.approx(union + (1 - union) * 5 + 4)
+    assert lineage_ledger_record(arm, acceptance=rules)["effective_trials"] == pytest.approx(
+        correlation + (1 - correlation) * 3 + 3
+    )
     assert arm_record((), lineage_record(records))["lineage"] == {
         "arms": ["first", "second"],
         "trials": 6,
@@ -315,7 +342,9 @@ def test_the_recorded_lineage_joins_the_family_and_outlives_its_arms(tmp_path: P
         "note": LINEAGE_NOTE,
     }
     with pytest.raises(ValueError, match="already records its lineage"):
-        ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl").append(lineage_ledger_record(arm))
+        ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl").append(
+            lineage_ledger_record(arm, acceptance=AcceptanceRules())
+        )
 
 
 def test_a_lineage_counts_one_strategy_validated_twice_as_one_trial(tmp_path: Path) -> None:

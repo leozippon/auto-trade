@@ -62,6 +62,7 @@ from autotrade.environment.tools.workspace import SafeWorkspace
 from .agent_views import NULL_CONTROL_KEYS, allowed_keys
 from .calendar import FULL_SPAN, yyyymmdd
 from .config import (
+    OFFLINE_TRIALS_PRICING,
     AcceptanceRules,
     ArtifactRevision,
     EvaluationBackend,
@@ -1571,6 +1572,13 @@ class BatchValidateTool(SessionTimeBudgetAware):
         # Per-session rejection counter, keyed by signature. Not persisted:
         # the loop it bounds is one session's retry loop.
         self._rejections: dict[tuple[str, str], int] = {}
+        if backtest.rules.independent_offline_trials:
+            # How this arm's gate prices a declared screen, stated where the
+            # Agent declares one; an arm without the rule is not told it.
+            schema = json.loads(json.dumps(self.spec.input_schema))
+            parameter = schema["properties"]["offline_trials"]
+            parameter["description"] = f"{parameter['description']} {OFFLINE_TRIALS_PRICING}"
+            self.spec = replace(self.spec, input_schema=schema)
 
     @property
     def session_time_budget(self) -> InferenceTimeBudget:

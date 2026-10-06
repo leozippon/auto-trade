@@ -313,7 +313,11 @@ class RollingExperimentPipeline:
         if self.config.lineage_arms and lineage_record(records) is None:
             # The console extracted the lineage at creation; its ledger record
             # is written here, after the worker pinned the research release.
-            self.ledger.append(lineage_ledger_record(self.config.experiment_dir))
+            self.ledger.append(
+                lineage_ledger_record(
+                    self.config.experiment_dir, acceptance=self.config.acceptance
+                )
+            )
             records = self.ledger.read()
         recorded = lineage_record(records)
         recorded_arms = tuple(recorded["arms"]) if recorded is not None else ()  # type: ignore[arg-type]
@@ -1132,9 +1136,7 @@ def _arm_trials(
     records: Sequence[Mapping[str, object]],
     session_rows: Sequence[Mapping[str, object]],
     experiment_dir: str | Path,
-) -> tuple[
-    list[Mapping[str, object]], dict[str, object], tuple[list[str], int, list[dict[str, float]]]
-]:
+) -> tuple[list[Mapping[str, object]], dict[str, object], tuple[list[str], dict[str, object]]]:
     """What an arm's freeze gate deflates over: its Validation rows, earlier
     sessions' recorded Steps and this session's alike, fingerprinted from the
     revision store of the arm in ``experiment_dir`` where a row does not carry
@@ -1167,9 +1169,9 @@ def freeze_gate_for(
     cannot be measured does not pass. ``acceptance`` is the arm's rules,
     ``hard_reasons`` what their ``evaluate`` refuses the nominee for and
     ``years`` the research years; the console, which reads only the deflated
-    Sharpe of an arm's best node, passes the default rules and leaves the
-    other two out. Where the rules hold
-    ``require_seed_replicates`` the measured gate also judges the nominee's
+    Sharpe of an arm's best node, passes the default rules with the arm's
+    pricing of its trial family and leaves the other two out. Where the rules
+    hold ``require_seed_replicates`` the measured gate also judges the nominee's
     ``seed_replicates`` (rows of this session; :func:`_seed_replicate_gate`);
     naming any under rules that do not hold it is refused.
     """
@@ -1179,9 +1181,7 @@ def freeze_gate_for(
     reasons = [*hard_reasons, *judge("registration", nominee, {})]
     if reasons:
         return {"passed": False, "reasons": reasons}
-    rows, family, (lineage_arms, lineage_trials, lineage_series) = _arm_trials(
-        records, session_rows, experiment_dir
-    )
+    rows, family, (lineage_arms, lineage) = _arm_trials(records, session_rows, experiment_dir)
     representatives: list[Mapping[str, object]] = family["representatives"]  # type: ignore[assignment]
     summary = nominee.get("summary")
     try:
@@ -1191,8 +1191,7 @@ def freeze_gate_for(
             trials=len(representatives),
             offline_trials=family["offline_trials"],  # type: ignore[arg-type]
             trial_analyses=[_style_analysis(row) for row in representatives],
-            lineage_trials=lineage_trials,
-            lineage_series=lineage_series,
+            **lineage,  # type: ignore[arg-type]
             full_span_validations=sum(
                 1
                 for row in rows
@@ -1384,16 +1383,14 @@ def full_span_bar(
     full span measures, a bar about 0.3 % lower). The gate itself is unchanged.
     """
 
-    rows, family, (_arms, lineage_trials, lineage_series) = _arm_trials(
-        records, session_rows, experiment_dir
-    )
+    rows, family, (_arms, lineage) = _arm_trials(records, session_rows, experiment_dir)
     representatives: list[Mapping[str, object]] = family["representatives"]  # type: ignore[assignment]
     statistics = trial_family_statistics(
         trials=max(len(representatives), 1),
         offline_trials=family["offline_trials"],  # type: ignore[arg-type]
         trial_analyses=[_style_analysis(row) for row in representatives],
-        lineage_trials=lineage_trials,
-        lineage_series=lineage_series,
+        **lineage,  # type: ignore[arg-type]
+        independent_offline_trials=acceptance.independent_offline_trials,
     )
     days = max(
         (_measured_days(row) for row in rows if row.get("span") == FULL_SPAN),
@@ -1410,10 +1407,12 @@ def full_span_bar(
     }
 
 
-def lineage_summary(extraction: Mapping[str, object]) -> dict[str, object]:
-    """A lineage's own trial count and what it counts as independently, from
-    what ``lineage.extract_lineage`` read: the ledger record's figures, and
-    what a round's ``--dry-run`` prints."""
+def lineage_summary(
+    extraction: Mapping[str, object], *, acceptance: AcceptanceRules
+) -> dict[str, object]:
+    """A lineage's own trial count and what it counts as independently under
+    the arm's ``acceptance`` rules, from what ``lineage.extract_lineage`` read:
+    the ledger record's figures, and what a round's ``--dry-run`` prints."""
 
     arms: Sequence[Mapping[str, object]] = extraction["arms"]  # type: ignore[assignment]
     host = sum(int(arm["host_trials"]) for arm in arms)  # type: ignore[call-overload]
@@ -1425,6 +1424,7 @@ def lineage_summary(extraction: Mapping[str, object]) -> dict[str, object]:
             for item in extraction["series"]  # type: ignore[attr-defined]
         ],
     )
+    unmeasured = offline if acceptance.independent_offline_trials else 0
     return {
         "arms": [str(arm["experiment_id"]) for arm in arms],
         "trials": host + offline,
@@ -1433,13 +1433,14 @@ def lineage_summary(extraction: Mapping[str, object]) -> dict[str, object]:
         "controls": sum(int(arm["controls"]) for arm in arms),  # type: ignore[call-overload]
         "trial_correlation": correlation,
         "trial_correlation_pairs": pairs,
-        "effective_trials": effective_trials(host + offline, correlation),
+        "effective_trials": effective_trials(host + offline - unmeasured, correlation, unmeasured),
     }
 
 
-def lineage_ledger_record(experiment_dir: Path) -> dict[str, object]:
+def lineage_ledger_record(experiment_dir: Path, *, acceptance: AcceptanceRules) -> dict[str, object]:
     """The ``lineage`` ledger record of an arm created with ``lineage_arms``,
-    from the series file the console wrote beside its ledger at creation."""
+    from the series file the console wrote beside its ledger at creation,
+    priced under the arm's ``acceptance`` rules."""
 
     path = Path(experiment_dir) / "ledgers" / LINEAGE_SERIES_NAME
     if not path.is_file():
@@ -1453,7 +1454,7 @@ def lineage_ledger_record(experiment_dir: Path) -> dict[str, object]:
         "fold_id": RESEARCH_SESSION_KEY,
         # No run produced it: it carries what creation read from other arms.
         "run_id": LINEAGE_RECORD_TYPE,
-        **lineage_summary(json.loads(path.read_text(encoding="utf-8"))),
+        **lineage_summary(json.loads(path.read_text(encoding="utf-8")), acceptance=acceptance),
         "series_ref": str(path),
         "recorded_at": utc_now_iso(),
     }
@@ -1461,27 +1462,29 @@ def lineage_ledger_record(experiment_dir: Path) -> dict[str, object]:
 
 def recorded_lineage(
     records: Sequence[Mapping[str, object]],
-) -> tuple[list[str], int, list[dict[str, float]]]:
-    """The lineage the ledger records: its arms, the trials they add and one
-    daily series per measurable lineage revision (``pipelines/lineage.py``).
+) -> tuple[list[str], dict[str, object]]:
+    """The lineage the ledger records (``pipelines/lineage.py``): its arms, and
+    what they add to the trial family as ``verdict.trial_family_statistics``
+    takes it -- their trials, the part of those declared offline and one daily
+    series per measurable lineage revision.
 
     Read from this arm's own files only -- the ledger record and the series
     file it names, both written at creation -- never from the lineage arms.
-    ``([], 0, [])`` for an arm created without one.
+    ``([], {})`` for an arm created without one.
     """
 
     record = lineage_record(records)
     if record is None:
-        return [], 0, []
+        return [], {}
     payload = json.loads(Path(str(record["series_ref"])).read_text(encoding="utf-8"))
-    return (
-        [str(arm) for arm in record["arms"]],  # type: ignore[union-attr]
-        int(record["trials"]),  # type: ignore[call-overload]
-        [
+    return [str(arm) for arm in record["arms"]], {  # type: ignore[union-attr]
+        "lineage_trials": int(record["trials"]),  # type: ignore[call-overload]
+        "lineage_offline_trials": int(record["offline_trials"]),  # type: ignore[call-overload]
+        "lineage_series": [
             {str(date): float(value) for date, value in item["daily"]}
             for item in payload["series"]
         ],
-    )
+    }
 
 
 def _style_analysis(row: Mapping[str, object]) -> dict[str, object]:

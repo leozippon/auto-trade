@@ -90,15 +90,17 @@ BASELINE_PATHS = ("pyproject.toml", "src", "scripts/_bootstrap.py", SCRIPT)
 _RAW = "require_raw_excess_at_cost_stress"
 _PLAIN = "require_forward_plain_selection"
 _SEEDS = "require_seed_replicates"
-# The optional conditions each rule era holds. An arm carries the era of its
-# creation in ``params.json``; the differential judges every stored input
-# under each of them. R3 is what creation stamps today
-# (``hitl_state.CREATION_STAMPS``); no arm was kept from the days plain
-# selection was stamped without seed replicates (R2).
+_INDEPENDENT = "independent_offline_trials"
+# The switches each rule era holds. An arm carries the era of its creation in
+# ``params.json``; the differential judges every stored input under each of
+# them. R4 is what creation stamps today (``hitl_state.CREATION_STAMPS``); no
+# arm was kept from the days plain selection was stamped without seed
+# replicates (R2).
 ERAS: dict[str, dict[str, bool]] = {
-    "R0": {_RAW: False, _PLAIN: False, _SEEDS: False},
-    "R1": {_RAW: True, _PLAIN: False, _SEEDS: False},
-    "R3": {_RAW: True, _PLAIN: True, _SEEDS: True},
+    "R0": {_RAW: False, _PLAIN: False, _SEEDS: False, _INDEPENDENT: False},
+    "R1": {_RAW: True, _PLAIN: False, _SEEDS: False, _INDEPENDENT: False},
+    "R3": {_RAW: True, _PLAIN: True, _SEEDS: True, _INDEPENDENT: False},
+    "R4": {_RAW: True, _PLAIN: True, _SEEDS: True, _INDEPENDENT: True},
 }
 # The arm's rules under a tracking mandate, which no arm on disk holds: the
 # cap of the console's own example with the default beta band.

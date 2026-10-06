@@ -26,6 +26,7 @@ from autotrade.pipelines.config import (
     ACCEPTANCE_KEYS,
     DEFAULT_RESEARCH_GEOMETRY,
     MANDATED_DEFAULTS,
+    OFFLINE_TRIALS_PRICING,
     AcceptanceRules,
     RollingExperimentConfig,
     acceptance_for,
@@ -371,7 +372,11 @@ class AcceptanceRulesTest(unittest.TestCase):
             for condition in verdict.CONDITIONS
             if isinstance(getattr(defaults, condition.requires, None), bool)
         }
-        self.assertEqual(switches, set(CREATION_STAMPS) & set(ACCEPTANCE_KEYS))
+        # The one stamped rule that is no condition prices the trial family
+        # (``test_offline_pricing_is_stated_once_where_an_arm_holds_it``).
+        self.assertEqual(
+            switches | {"independent_offline_trials"}, set(CREATION_STAMPS) & set(ACCEPTANCE_KEYS)
+        )
 
         def leaves(node: object, path: tuple[str, ...] = ()) -> dict[tuple[str, ...], object]:
             if not isinstance(node, dict):
@@ -388,6 +393,40 @@ class AcceptanceRulesTest(unittest.TestCase):
             with self.subTest(switch=switch):
                 self.assertGreater(len(held), len(unheld))
                 self.assertEqual({path: held[path] for path in unheld}, unheld)
+
+    def test_offline_pricing_is_stated_once_where_an_arm_holds_it(self) -> None:
+        """The DSR passage of an arm that prices declared screens as
+        independent gives that formula and states the reason once; an arm
+        recorded without the rule is told exactly what it was told before,
+        and nothing else of either moves."""
+
+        def leaves(node: object, path: tuple[str, ...] = ()) -> dict[tuple[str, ...], object]:
+            if not isinstance(node, dict):
+                return {path: node}
+            return {
+                key: value
+                for name, child in node.items()
+                for key, value in leaves(child, (*path, name)).items()
+            }
+
+        unheld = acceptance_for({"max_drawdown": 0.45})
+        held = replace(unheld, independent_offline_trials=True)
+        facts = {rules: rules.agent_facts() for rules in (unheld, held)}
+        self.assertEqual(
+            [json.dumps(facts[rules]).count(OFFLINE_TRIALS_PRICING) for rules in (unheld, held)],
+            [0, 1],
+        )
+        passage = ("freeze_gate", "deflated_sharpe_probability")
+        stated = leaves(facts[held])[passage]
+        self.assertIn("rho + (1 - rho) * H + (M - H) independent trials", stated)
+        self.assertIn("rho + (1 - rho) * M independent trials", leaves(facts[unheld])[passage])
+        self.assertEqual(
+            {path for path, value in leaves(facts[held]).items() if leaves(facts[unheld])[path] != value},
+            {passage},
+        )
+        self.assertEqual(AcceptanceRules.from_record(held.to_record()), held)
+        with self.assertRaisesRegex(ValueError, "independent_offline_trials must be a boolean"):
+            AcceptanceRules(independent_offline_trials=1)  # type: ignore[arg-type]
 
     def test_a_record_with_a_retired_key_still_rebuilds_the_rules(self) -> None:
         rules = AcceptanceRules.from_record(
@@ -1273,7 +1312,7 @@ class PitViewsSeedParameterTest(unittest.TestCase):
             self.assertEqual(pin["generation_id"], "gen_seed")
             self.assertEqual(options.rolling.lineage_arms, ("earlier_arm",))
             # What the research session writes first; a later worker start resumes.
-            ledger.append(lineage_ledger_record(directory))
+            ledger.append(lineage_ledger_record(directory, acceptance=AcceptanceRules()))
             load_worker_options(directory, repo_root=repo_root)
 
             ran = experiments / "ran_unpinned"

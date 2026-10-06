@@ -46,13 +46,14 @@ ENDED_STATES = frozenset({"completed", "failed", "stopped"})
 # How a rule newer than the arms on disk is introduced, stated here once. Its
 # own default stays off (``config.AcceptanceRules``, ``BrokerProfile``), so an
 # arm whose params.json has no key reads as it was recorded -- judged without
-# the condition, untaxed -- for as long as it lives. Creation stamps the key
-# on: every arm created from here on is held to the rule unless its request
-# says otherwise.
+# the condition, its trials priced as before, untaxed -- for as long as it
+# lives. Creation stamps the key on: every arm created from here on is held to
+# the rule unless its request says otherwise.
 CREATION_STAMPS: dict[str, bool] = {
     "require_raw_excess_at_cost_stress": True,
     "require_forward_plain_selection": True,
     "require_seed_replicates": True,
+    "independent_offline_trials": True,
     "dividend_tax": True,
 }
 
