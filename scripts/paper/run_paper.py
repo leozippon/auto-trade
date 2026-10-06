@@ -122,6 +122,7 @@ def init(args: argparse.Namespace) -> int:
         experiment_dir=REPO_ROOT / "experiments" / args.experiment,
         artifact_id=args.artifact,
         repo_root=REPO_ROOT,
+        track="graduated",
         initial_cash=args.initial_cash,
         note=args.note,
     )
@@ -151,6 +152,11 @@ def source_history(args: argparse.Namespace) -> int:
         if experiment.name != book.experiment_id:
             raise ValueError(
                 f"{experiment} is not the source of {book.root.name}: the book names {book.experiment_id}"
+            )
+        if book.candidate_source != "graduated":
+            raise ValueError(
+                f"{book.root.name} is {book.candidate_source}: its history is the replay its incubation "
+                "recorded, not the forward record's; name that replay with --result"
             )
         written = copy_source_history(root, experiment)
     else:

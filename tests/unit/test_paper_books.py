@@ -12,7 +12,16 @@ import pytest
 
 from autotrade.environment.artifacts import artifact_fingerprint
 from autotrade.paper import fills
-from autotrade.paper.book import STRATEGY_COPY_NAME, create_book
+from autotrade.paper.book import (
+    BOOK_NAME,
+    INCUBATING_BOOK_CAP,
+    STRATEGY_COPY_NAME,
+    VERDICT_LOG_NAME,
+    Book,
+    book_status,
+    create_book,
+    load_book,
+)
 from autotrade.paper.books import (
     delete_book,
     follows_real_fills,
@@ -23,6 +32,8 @@ from autotrade.paper.books import (
     validate_book_id,
 )
 from autotrade.paper.engine import PaperWriterBusy
+from autotrade.paper.storage import append_jsonl_once, read_json
+from autotrade.pipelines.ledger import ExperimentLedger, forward_record
 from tests.unit.paper_book_fixture import (
     FAILING_STRATEGY,
     engine_book,
@@ -93,6 +104,7 @@ def test_a_new_book_records_the_content_address_of_the_artifact_it_trades(tmp_pa
         experiment_dir=arm,
         artifact_id="strategy_research_abc",
         repo_root=tmp_path,
+        track="graduated",
         note="参考簿（观察中）",
     )
     record = json.loads((book.root / "book.json").read_text(encoding="utf-8"))
@@ -183,3 +195,84 @@ def test_a_book_a_run_is_writing_is_refused_and_left_whole(tmp_path: Path):
     assert list_books(root) == ["exp"] and _book_files(book) == before
     delete_book(root, "exp")  # the run is over
     assert list_books(root) == [] and not any(root.iterdir())
+
+
+def _graduated_book(tmp_path: Path, book_id: str = "exp") -> Book:
+    arm = build_arm(tmp_path / "experiments", book_id, "graduated")
+    return create_book(
+        paper_root(tmp_path) / book_id,
+        experiment_dir=arm,
+        artifact_id="strategy_research_abc",
+        repo_root=tmp_path,
+        track="graduated",
+    )
+
+
+def _incubate(tmp_path: Path, book_id: str) -> Book:
+    """An incubating book of a discarded arm, from the replay its forward
+    record names (the shape an incubation record passes)."""
+
+    arm = tmp_path / "experiments" / book_id
+    if not arm.exists():
+        build_arm(tmp_path / "experiments", book_id, "discarded")
+    record = forward_record(ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl").read())
+    return create_book(
+        paper_root(tmp_path) / book_id,
+        experiment_dir=arm,
+        artifact_id="strategy_research_abc",
+        repo_root=tmp_path,
+        track="incubating",
+        source_record={"result_ref": record["result_ref"], "replay": record.get("replay") or {}},
+    )
+
+
+def _kill(root: Path, day: str = "20260105") -> None:
+    append_jsonl_once(
+        root / VERDICT_LOG_NAME,
+        {"event_id": "terminal", "status": "killed", "reason": "kill_upper_bound_below_zero", "date": day, "days": 126},
+    )
+
+
+def test_a_new_book_carries_its_track_and_pins_its_verdict_rules(tmp_path: Path):
+    book = _graduated_book(tmp_path)
+    record = read_json(book.root / BOOK_NAME)
+    assert record["schema_version"] == 2 and record["candidate_source"] == book.candidate_source == "graduated"
+    rules = record["verdict_rules"]
+    assert (rules["checkpoint_days"], rules["kill_confidence"], rules["confirm_confidence"]) == (126, 0.841, 0.977)
+    assert (rules["max_drawdown"], rules["active_max_drawdown"]) == (0.45, 0.30)
+    assert isinstance(rules["panel_seed"], int) and book.verdict_rules == rules
+
+    incubating = _incubate(tmp_path, "inc")
+    assert read_json(incubating.root / BOOK_NAME)["candidate_source"] == "incubating"
+    assert read_json(incubating.root / "source_history.json")["series"]
+    with pytest.raises(ValueError, match="source_record"):
+        create_book(
+            paper_root(tmp_path) / "other", experiment_dir=tmp_path / "experiments/inc",
+            artifact_id="strategy_research_abc", repo_root=tmp_path, track="incubating",
+        )
+    with pytest.raises(ValueError, match="unknown Paper book track"):
+        create_book(
+            paper_root(tmp_path) / "other", experiment_dir=tmp_path / "experiments/exp",
+            artifact_id="strategy_research_abc", repo_root=tmp_path, track="promoted",
+        )
+
+
+def test_the_incubating_cap_refuses_a_book_and_a_killed_book_frees_its_place(tmp_path: Path):
+    root = paper_root(tmp_path)
+    for index in range(INCUBATING_BOOK_CAP):
+        write_book_record(root / f"inc{index}", experiment_id=f"inc{index}", candidate_source="incubating")
+    write_book_record(root / "grad", experiment_id="grad")  # a graduated book never counts
+    with pytest.raises(ValueError, match=f"the cap is {INCUBATING_BOOK_CAP}"):
+        _incubate(tmp_path, "late")
+    assert not (root / "late").exists()
+    _kill(root / "inc0")
+    assert book_status(root / "inc0") == "killed"
+    assert _incubate(tmp_path, "late").candidate_source == "incubating"
+
+
+def test_a_book_of_an_older_schema_is_refused(tmp_path: Path):
+    book = _graduated_book(tmp_path)
+    record = read_json(book.root / BOOK_NAME)
+    (book.root / BOOK_NAME).write_text(json.dumps({**record, "schema_version": 1}), encoding="utf-8")
+    with pytest.raises(ValueError, match="unsupported Paper book schema 1"):
+        load_book(book.root)

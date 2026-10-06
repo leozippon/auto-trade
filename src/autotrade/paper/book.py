@@ -10,11 +10,19 @@ the artifact's out-of-sample curve (the forward and Held-out replay its verdict
 named) into ``source_history.json``, so the book keeps the history its own days
 continue. A different capital, artifact or environment is a new book in a new
 state root.
+
+A book is on one of two tracks, recorded as its ``candidate_source``: a
+``graduated`` book trades an arm's Paper candidate; an ``incubating`` book
+trades a node an operator incubated, whose source history is the replay the
+incubation recorded, and at most ``INCUBATING_BOOK_CAP`` of those are open at
+once. Either way creation pins the rules its Paper verdict is read by
+(``paper/verdict.py``), so a later change cannot move a book already trading.
 """
 
 from __future__ import annotations
 
 import shutil
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -27,17 +35,32 @@ from autotrade.environment.replay.curve import result_curve
 from autotrade.environment.sandbox import SandboxConfig, SandboxLimits
 from autotrade.environment.strategy import CN_TZ, StrategySchedule
 from autotrade.environment.strategy_loader import validate_strategy_package
+from autotrade.pipelines.experiment import null_control_seed
 from autotrade.pipelines.ledger import ExperimentLedger, forward_record, paper_candidate
 from autotrade.pipelines.worker import (
     _strategy_sandbox_from_spec,
     resolve_worker_options,
 )
 
-from .storage import read_json, write_json_atomic
+from .storage import read_json, read_jsonl, write_json_atomic
 
 BOOK_NAME = "book.json"
-BOOK_SCHEMA_VERSION = 1
+# 2: the track and the pinned verdict rules. An older book is refused, never
+# migrated: its verdict would be read by rules nobody pinned.
+BOOK_SCHEMA_VERSION = 2
 STRATEGY_COPY_NAME = "strategy"
+TRACKS = ("graduated", "incubating")
+# Incubating books open at once; a killed book does not count.
+INCUBATING_BOOK_CAP = 4
+# The Paper verdict's rules, pinned into every new book. A statistical check
+# runs only every CHECKPOINT_DAYS settled Paper sessions (half a year): kill
+# when the KILL_CONFIDENCE upper bound of the active mean is below zero (t < -1),
+# confirm when the CONFIRM_CONFIDENCE lower bound is above zero (t > 2).
+CHECKPOINT_DAYS = 126
+KILL_CONFIDENCE = 0.841
+CONFIRM_CONFIDENCE = 0.977
+# The book's terminal verdict transitions, appended by ``paper/verdict.py``.
+VERDICT_LOG_NAME = "verdict.jsonl"
 # The out-of-sample history the book continues: the forward and Held-out
 # replay of the very artifact it trades, copied out of the experiment at
 # creation so the book keeps it after the experiment is archived.
@@ -50,6 +73,7 @@ class Book:
     root: Path
     experiment_id: str
     artifact_id: str
+    # The track: "graduated" or "incubating".
     candidate_source: str
     note: str
     strategy_path: Path
@@ -67,6 +91,10 @@ class Book:
     raw_dir: Path
     fundamental_events_root: Path
     fundamental_events_status: Path
+    benchmark_index: str
+    # Pinned at creation: checkpoint_days, kill_confidence,
+    # confirm_confidence, max_drawdown, active_max_drawdown, panel_seed.
+    verdict_rules: dict[str, object]
 
 
 def create_book(
@@ -75,23 +103,51 @@ def create_book(
     experiment_dir: str | Path,
     artifact_id: str,
     repo_root: str | Path,
+    track: str,
+    source_record: Mapping[str, object] | None = None,
     initial_cash: float | None = None,
     note: str = "",
 ) -> Book:
+    """Create the book at ``state_root`` (``<Paper state root>/<book id>``).
+
+    A ``graduated`` book trades the arm's Paper candidate and copies the
+    replay its forward record names. An ``incubating`` book trades the
+    artifact the caller incubated -- the caller has checked it may -- and
+    copies the replay ``source_record`` names, in the forward record's shape:
+    ``result_ref`` relative to the experiment directory and
+    ``replay.heldout_start``. It is refused while ``INCUBATING_BOOK_CAP``
+    other incubating books beside it are not killed.
+    """
+
     root = Path(state_root).resolve()
     if root.exists() and any(root.iterdir()):
         raise FileExistsError(f"Paper state root is not empty; a new book needs a new state root: {root}")
-    experiment = Path(experiment_dir).resolve(strict=True)
-    candidate = paper_candidate(
-        ExperimentLedger(experiment / "ledgers" / "experiment_ledger.jsonl").read()
-    )
-    if candidate is None:
-        raise ValueError(f"{experiment.name} has no Paper candidate: it did not graduate")
-    if artifact_id != candidate["artifact_id"]:
+    if track not in TRACKS:
+        raise ValueError(f"unknown Paper book track {track!r}; choose one of {', '.join(TRACKS)}")
+    if (track == "incubating") != (source_record is not None):
         raise ValueError(
-            f"{artifact_id} is not the Paper candidate of {experiment.name}; "
-            f"choose {candidate['artifact_id']}"
+            "an incubating book copies the replay its incubation recorded, and only it: "
+            "pass source_record exactly for track 'incubating'"
         )
+    experiment = Path(experiment_dir).resolve(strict=True)
+    if track == "graduated":
+        candidate = paper_candidate(
+            ExperimentLedger(experiment / "ledgers" / "experiment_ledger.jsonl").read()
+        )
+        if candidate is None:
+            raise ValueError(f"{experiment.name} has no Paper candidate: it did not graduate")
+        if artifact_id != candidate["artifact_id"]:
+            raise ValueError(
+                f"{artifact_id} is not the Paper candidate of {experiment.name}; "
+                f"choose {candidate['artifact_id']}"
+            )
+    else:
+        incubating = open_incubating_books(root.parent)
+        if len(incubating) >= INCUBATING_BOOK_CAP:
+            raise ValueError(
+                f"{len(incubating)} incubating Paper books are open ({', '.join(incubating)}), "
+                f"the cap is {INCUBATING_BOOK_CAP}; a book frees its place when it is killed"
+            )
     source = experiment / "artifacts" / "strategy" / "frozen" / artifact_id
     if not (source / "output" / "main.py").is_file():
         raise FileNotFoundError(f"frozen artifact has no output/main.py: {source}")
@@ -141,7 +197,7 @@ def create_book(
         "created_at": datetime.now(CN_TZ).isoformat(),
         "experiment_id": experiment.name,
         "artifact_id": artifact_id,
-        "candidate_source": "graduated",
+        "candidate_source": track,
         "artifact_fingerprint": fingerprint,
         "note": note,
         "strategy_path": str((copy / "output" / "main.py").relative_to(root)),
@@ -165,9 +221,18 @@ def create_book(
         "raw_dir": str(options.raw_dir),
         "fundamental_events_root": str(options.fundamental_events_root),
         "fundamental_events_status": str(options.fundamental_events_status),
+        "verdict_rules": {
+            "checkpoint_days": CHECKPOINT_DAYS,
+            "kill_confidence": KILL_CONFIDENCE,
+            "confirm_confidence": CONFIRM_CONFIDENCE,
+            # The arm's own drawdown limits, which its verdict and gate used.
+            "max_drawdown": options.rolling.acceptance.max_drawdown,
+            "active_max_drawdown": options.rolling.acceptance.active_max_drawdown,
+            "panel_seed": null_control_seed(artifact_id, "paper"),
+        },
     }
     write_json_atomic(root / BOOK_NAME, record)
-    copy_source_history(root, experiment)
+    copy_source_history(root, experiment, source_record)
     return load_book(root)
 
 
@@ -213,16 +278,22 @@ def write_source_history(
     return target
 
 
-def copy_source_history(state_root: str | Path, experiment_dir: str | Path) -> Path:
+def copy_source_history(
+    state_root: str | Path,
+    experiment_dir: str | Path,
+    record: Mapping[str, object] | None = None,
+) -> Path:
     """The book's copy of its source experiment's out-of-sample curve.
 
     The forward record names the one replay carrying the arm's forward and
     Held-out slices — the curve the console draws for that verdict — so an arm
-    without one has no history to copy and says so.
+    without one has no history to copy and says so. An incubated book passes
+    the replay its incubation recorded as ``record``, in the same shape.
     """
 
     experiment = Path(experiment_dir).resolve(strict=True)
-    record = forward_record(ExperimentLedger(experiment / "ledgers" / "experiment_ledger.jsonl").read())
+    if record is None:
+        record = forward_record(ExperimentLedger(experiment / "ledgers" / "experiment_ledger.jsonl").read())
     if record is None:
         raise ValueError(
             f"{experiment.name} has no forward verdict record: there is no out-of-sample history to copy"
@@ -249,7 +320,11 @@ def load_book(state_root: str | Path) -> Book:
     if not record:
         raise FileNotFoundError(f"no Paper book at {root}; create one with `run_paper.py init`")
     if record.get("schema_version") != BOOK_SCHEMA_VERSION:
-        raise ValueError(f"unsupported Paper book schema in {root / BOOK_NAME}")
+        raise ValueError(
+            f"unsupported Paper book schema {record.get('schema_version')!r} in {root / BOOK_NAME} "
+            f"(this code reads {BOOK_SCHEMA_VERSION}): a book without a track and pinned verdict "
+            "rules is not migrated; delete it and create it again"
+        )
     sandbox = record["sandbox"]
     return Book(
         root=root,
@@ -274,7 +349,36 @@ def load_book(state_root: str | Path) -> Book:
         raw_dir=Path(record["raw_dir"]),
         fundamental_events_root=Path(record["fundamental_events_root"]),
         fundamental_events_status=Path(record["fundamental_events_status"]),
+        benchmark_index=str(record["benchmark_index"]),
+        verdict_rules=dict(record["verdict_rules"]),
     )
+
+
+def book_status(state_root: str | Path) -> str:
+    """``observing`` until the book's one terminal transition, then its status
+    (``confirmed`` or ``killed``) for good."""
+
+    path = Path(state_root) / VERDICT_LOG_NAME
+    rows, skipped = read_jsonl(path)
+    if skipped or len(rows) > 1:
+        raise ValueError(f"{path} must hold at most one whole transition")
+    return str(rows[0]["status"]) if rows else "observing"
+
+
+def open_incubating_books(paper_root: str | Path) -> list[str]:
+    """The ids of the incubating books under ``paper_root`` that are not killed.
+
+    A hidden directory is a book being deleted (``books.delete_book``)."""
+
+    root = Path(paper_root)
+    books = sorted(path.parent for path in root.glob(f"*/{BOOK_NAME}")) if root.is_dir() else []
+    return [
+        book.name
+        for book in books
+        if not book.name.startswith(".")
+        and read_json(book / BOOK_NAME).get("candidate_source") == "incubating"
+        and book_status(book) != "killed"
+    ]
 
 
 def _tuples(record: dict[str, object]) -> dict[str, object]:
@@ -285,10 +389,15 @@ def _tuples(record: dict[str, object]) -> dict[str, object]:
 
 __all__ = [
     "BOOK_NAME",
+    "INCUBATING_BOOK_CAP",
     "SOURCE_HISTORY_NAME",
+    "TRACKS",
+    "VERDICT_LOG_NAME",
     "Book",
+    "book_status",
     "copy_source_history",
     "create_book",
     "load_book",
+    "open_incubating_books",
     "write_source_history",
 ]

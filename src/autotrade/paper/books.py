@@ -124,6 +124,7 @@ def open_graduated_book(repo_root: str | Path, experiment_dir: str | Path) -> st
         experiment_dir=experiment,
         artifact_id=str(candidate["artifact_id"]),
         repo_root=repo_root,
+        track="graduated",
         note="graduated",
     )
     return book_id
