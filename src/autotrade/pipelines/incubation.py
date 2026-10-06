@@ -15,6 +15,8 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable, Mapping
 
+from autotrade.environment.broker import BrokerProfile, default_permitted_boards
+
 from .verdict import CONDITIONS, NOT_A_SESSION_STEP, UNMEASURABLE
 
 
@@ -104,6 +106,18 @@ def _number(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         return None
     return float(value)
+
+
+def incubation_boards(profile: BrokerProfile) -> dict[str, object]:
+    """The boards an incubation replays on and its Paper book trades on, and
+    where they come from: the arm's stamped boards (``stamped``), else, for an
+    arm stamped before boards existed, those its initial cash qualifies for
+    (``derived``). The replay is a new measurement of a book about to trade,
+    so it is never read against names that book could not buy."""
+
+    if profile.permitted_boards is not None:
+        return {"boards": list(profile.permitted_boards), "origin": "stamped"}
+    return {"boards": list(default_permitted_boards(profile.initial_cash)), "origin": "derived"}
 
 
 def entry_screen(gate: Mapping[str, object]) -> dict[str, object]:

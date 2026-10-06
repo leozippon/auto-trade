@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from autotrade.environment.broker import BrokerProfile
+from autotrade.environment.broker_core import board_of
 from autotrade.environment.executor import StrategyRaised
 from autotrade.environment.replay.engine import BacktestError
 from autotrade.environment.strategy import CN_TZ
@@ -28,7 +30,8 @@ from autotrade.pipelines.ledger import (
     require_incubable,
 )
 from autotrade.pipelines.verdict import CONDITIONS, NOT_A_SESSION_STEP, UNMEASURABLE
-from tests.unit.test_rolling_pipeline import _pipeline
+from tests.unit.test_null_control import _board_draws
+from tests.unit.test_rolling_pipeline import CONFIG_PROFILE, _pipeline
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -124,12 +127,12 @@ def test_only_an_arm_whose_research_ended_without_a_graduation_is_incubable():
             require_incubable(records)
 
 
-def _ended_arm(tmp_path: Path):
+def _ended_arm(tmp_path: Path, broker_profile: BrokerProfile = CONFIG_PROFILE):
     """An arm whose nominee (Step 1) the gate refused, so research ended
     without a deliverable; Step 0 is the better node."""
 
     pipeline, _snapshots, _evaluator, _developer, ledger = _pipeline(
-        tmp_path, {1: ([0.0012, -0.0004], "freeze", {"nominee": 1})}
+        tmp_path, {1: ([0.0012, -0.0004], "freeze", {"nominee": 1})}, broker_profile=broker_profile
     )
     pipeline.run_research_session()
     assert experiment_verdict(ledger.read())["status"] == "no_deliverable"
@@ -172,6 +175,7 @@ def test_a_passing_incubation_appends_one_record_and_leaves_the_verdict(tmp_path
         "output_path": record["frozen"]["output_path"],
         "models_path": record["frozen"]["models_path"],
         "seed_replicates": [],
+        "permitted_boards": record["permitted_boards"]["boards"],
         "forward": reading,
     }
     assert opened["forward"]["result_ref"] and opened["forward"]["replay"]["heldout_start"]
@@ -184,6 +188,39 @@ def test_a_passing_incubation_appends_one_record_and_leaves_the_verdict(tmp_path
         pipeline.incubate("research_step_0", incubated_by="operator", reason="again")
     with pytest.raises(ValueError, match="already incubated"):
         ledger.append({**record, "run_id": "incubation_again"})
+
+
+def test_an_unstamped_arm_replays_on_the_boards_its_capital_qualifies_for(tmp_path: Path):
+    """An arm stamped before boards existed buys on every board in research;
+    its incubation replays on the boards its 100,000 CNY may buy on, Broker
+    and zero-skill panel alike, records them as derived, and reads the entry
+    screen exactly as the session recorded it."""
+
+    pipeline, ledger = _ended_arm(tmp_path, BrokerProfile(initial_cash=100_000))
+    assert pipeline.config.broker_profile.permitted_boards is None
+    before = ledger.read()
+    [session] = [row for row in before if row["record_type"] == "research_session"]
+    nominee = incubation_entry(before, session["nominated_step_id"], config=pipeline.config)["entry"]
+    assert {key: value for key, value in nominee.items() if key != "deferred"} == session["freeze_gate"]
+    researched = len(pipeline.evaluator.requests)
+    record = pipeline.incubate("research_step_0", incubated_by="operator", reason="the better node")
+    assert record["entry"] == incubation_entry(before, "research_step_0", config=pipeline.config)["entry"]
+    assert record["permitted_boards"] == {"boards": ["main", "gem"], "origin": "derived"}
+    [request] = pipeline.evaluator.requests[researched:]
+    assert request.broker_profile == BrokerProfile(initial_cash=100_000, permitted_boards=("main", "gem"))
+    # The panel draws with the request's profile: never a STAR or Beijing name.
+    drawn = {symbol for draw in _board_draws(request.broker_profile.permitted_boards, 200, 1) for symbol, *_ in draw}
+    assert drawn and all(board_of(symbol) in ("main", "gem") for symbol in drawn)
+    assert incubation_candidate(ledger.read())["permitted_boards"] == ["main", "gem"]
+
+
+def test_a_stamped_arm_replays_on_its_own_boards(tmp_path: Path):
+    stamped = BrokerProfile(initial_cash=100_000, permitted_boards=("main",))
+    pipeline, _ledger = _ended_arm(tmp_path, stamped)
+    researched = len(pipeline.evaluator.requests)
+    record = pipeline.incubate("research_step_0", incubated_by="operator", reason="the better node")
+    assert record["permitted_boards"] == {"boards": ["main"], "origin": "stamped"}
+    assert [request.broker_profile for request in pipeline.evaluator.requests[researched:]] == [stamped]
 
 
 def test_the_entry_reading_is_the_gate_the_session_recorded(tmp_path: Path):

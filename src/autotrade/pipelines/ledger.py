@@ -86,6 +86,9 @@ INCUBATION_FIELDS = (
     "revision_id",
     "entry",
     "frozen",
+    # The boards the replay ran on and its book pins, and their origin
+    # (``incubation.incubation_boards``).
+    "permitted_boards",
     "forward_reading",
     "screen",
 )
@@ -339,9 +342,10 @@ def paper_candidate(records: Sequence[Mapping[str, object]]) -> dict[str, object
 def incubation_candidate(records: Sequence[Mapping[str, object]]) -> dict[str, object] | None:
     """What Paper opens an incubating book from, else None: the artifact the
     incubation froze, in :func:`paper_candidate`'s shape, its seed
-    replicates' frozen blocks, and under ``forward`` the forward reading,
-    which names its replay result and span as a forward record does. None
-    when the arm incubated nothing or its forward screen blocked."""
+    replicates' frozen blocks, the boards the replay ran on, and under
+    ``forward`` the forward reading, which names its replay result and span
+    as a forward record does. None when the arm incubated nothing or its
+    forward screen blocked."""
 
     record = incubation_record(records)
     if record is None or not record["screen"]["passed"]:  # type: ignore[index]
@@ -352,6 +356,7 @@ def incubation_candidate(records: Sequence[Mapping[str, object]]) -> dict[str, o
         "output_path": str(block["output_path"]),
         "models_path": str(block.get("models_path") or "") or None,
         "seed_replicates": [dict(item) for item in block.get("seed_replicates") or ()],  # type: ignore[union-attr]
+        "permitted_boards": list(record["permitted_boards"]["boards"]),  # type: ignore[index]
         "forward": dict(record["forward_reading"]),  # type: ignore[arg-type]
     }
 

@@ -28,6 +28,7 @@ from autotrade.environment.artifacts import (
     modification_delta,
     restore_frozen_artifact_trees,
 )
+from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.executor import (
     DockerStrategyExecutor,
     StrategyExecutor,
@@ -72,7 +73,7 @@ from .config import (
     research_span,
     session_deadline_seconds,
 )
-from .incubation import entry_screen, forward_screen
+from .incubation import entry_screen, forward_screen, incubation_boards
 from .ledger import (
     FORWARD_SESSION_KEY,
     FORWARD_STAGE,
@@ -588,6 +589,7 @@ class RollingExperimentPipeline:
                 nominee.validation.result_ref,
                 start=self.config.geometry.research_start,
                 end=self.config.geometry.research_end,
+                profile=self.config.broker_profile,
                 seed=null_control_seed(RESEARCH_SESSION_KEY, "frozen"),
             )
         )
@@ -710,6 +712,7 @@ class RollingExperimentPipeline:
                     run_id=run_id,
                     forward=forward,
                     heldout=heldout,
+                    broker_profile=self.config.broker_profile,
                     integrity_failure=integrity_failure,
                 ),
             }
@@ -740,13 +743,15 @@ class RollingExperimentPipeline:
         run_id: str,
         forward: Slot,
         heldout: Slot,
+        broker_profile: BrokerProfile,
         integrity_failure: Callable[[Mapping[str, object]], None] | None = None,
     ) -> dict[str, object]:
         """One continuous replay of a frozen artifact and its seed replicates
-        over the ``forward`` and ``heldout`` slots, read as :meth:`run_forward`
-        records it: the artifact, the account, the span and the decision
-        views, then the :meth:`_judge` output or the strategy-error body.
-        Writes nothing to the ledger.
+        over the ``forward`` and ``heldout`` slots through ``broker_profile``
+        (its Broker and the zero-skill panel drawn with it), read as
+        :meth:`run_forward` records it: the artifact, the account, the span
+        and the decision views, then the :meth:`_judge` output or the
+        strategy-error body. Writes nothing to the ledger.
 
         A failure that measured nothing raises, and so does any replicate's
         failure. Frozen trees that changed during a replay fail closed after
@@ -791,7 +796,7 @@ class RollingExperimentPipeline:
                 span.request(
                     _frozen_revision(item),
                     schedule=self.config.schedule,
-                    broker_profile=self.config.broker_profile,
+                    broker_profile=broker_profile,
                 ),
                 item,
             )
@@ -859,6 +864,7 @@ class RollingExperimentPipeline:
                 artifact,
                 forward=forward,
                 heldout=heldout,
+                broker_profile=broker_profile,
                 seed_replicates=replays,
             ),
         }
@@ -878,9 +884,11 @@ class RollingExperimentPipeline:
         *,
         forward: Slot,
         heldout: Slot,
+        broker_profile: BrokerProfile,
         seed_replicates: Sequence[tuple[FrozenArtifact, EvaluationResult]] = (),
     ) -> dict[str, object]:
-        """The two slices of one completed replay and the verdict on them.
+        """The two slices of one completed replay through ``broker_profile``
+        and the verdict on them.
 
         A slice that cannot be measured raises ``ValueError``, which fails the
         attempt: a verdict is never read off a number that was not measured.
@@ -924,7 +932,7 @@ class RollingExperimentPipeline:
             start=forward.start,
             end=forward.end,
             seed_key=artifact.artifact_id,
-            slippage_bps=self.config.broker_profile.slippage_bps,
+            slippage_bps=broker_profile.slippage_bps,
             turnover=float(forward_activity["turnover"]),  # type: ignore[arg-type]
             round_trips=int(forward_activity["round_trips"]),  # type: ignore[arg-type]
             mean_gross=float(forward_activity["mean_gross"]),  # type: ignore[arg-type]
@@ -957,6 +965,7 @@ class RollingExperimentPipeline:
                 result.result_ref,
                 start=forward.start,
                 end=heldout.end,
+                profile=broker_profile,
                 seed=null_control_seed(artifact.artifact_id, "forward"),
                 step=(forward.start, forward.end),
             ),
@@ -999,9 +1008,13 @@ class RollingExperimentPipeline:
         The node must pass the entry screen (:func:`incubation_entry`). Its
         revision and its seed replicates' are frozen as new artifacts and
         replayed once over forward and Held-out exactly as a frozen artifact
-        is (:meth:`replay_frozen`); the reading and the forward screen on it
-        go into the arm's one ``incubation`` record, whose screen says whether
-        Paper may open a book. The arm's verdict is untouched. The strategy's
+        is (:meth:`replay_frozen`), except that its Broker and zero-skill panel
+        are held to the boards its book may buy on
+        (:func:`incubation.incubation_boards`); the boards, the reading and the
+        forward screen on it go into the arm's one ``incubation`` record,
+        whose screen says whether Paper may open a book. The entry screen
+        stays the arm's own recorded gate under its own rules. The arm's
+        verdict is untouched. The strategy's
         own exception is a reading like any other, which the forward screen
         blocks. A replay that measured nothing, a replicate that failed and
         frozen trees that changed during a replay raise and record nothing, so
@@ -1040,6 +1053,7 @@ class RollingExperimentPipeline:
         replicates = [freeze(row) for row in reading["seed_replicates"]]  # type: ignore[attr-defined]
         if replicates:
             frozen["seed_replicates"] = replicates
+        boards = incubation_boards(self.config.broker_profile)
         forward_reading = self.replay_frozen(
             self._frozen_artifact(frozen),
             [self._frozen_artifact(item) for item in replicates],
@@ -1047,6 +1061,7 @@ class RollingExperimentPipeline:
             run_id=run_id,
             forward=forward,
             heldout=heldout,
+            broker_profile=replace(self.config.broker_profile, permitted_boards=tuple(boards["boards"])),  # type: ignore[arg-type]
         )
         record = {
             "record_type": INCUBATION_RECORD_TYPE,
@@ -1060,6 +1075,7 @@ class RollingExperimentPipeline:
             "revision_id": str(step["revision_id"]),
             "entry": reading["entry"],
             "frozen": frozen,
+            "permitted_boards": boards,
             "forward_reading": forward_reading,
             "screen": forward_screen(forward_reading),
         }
@@ -1083,10 +1099,12 @@ class RollingExperimentPipeline:
         *,
         start: str,
         end: str,
+        profile: BrokerProfile,
         seed: int,
         step: tuple[str, str] | None = None,
     ) -> dict[str, object] | None:
-        """Rank one completed result against random-name copies of its own trades.
+        """Rank one completed result against random-name copies of its own
+        trades, replayed through ``profile`` (the one the result ran through).
 
         Informational evidence beside the return: it says whether the excess
         came from WHICH names were picked or only from the timing, sizing and
@@ -1105,7 +1123,7 @@ class RollingExperimentPipeline:
                 result_ref,
                 start=start,
                 end=end,
-                profile=self.config.broker_profile,
+                profile=profile,
                 schedule=self.config.schedule,
                 seed=seed,
                 step=step,
