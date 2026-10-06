@@ -548,18 +548,7 @@ class RollingExperimentPipeline:
         """
 
         def freeze(step: StepResult) -> tuple[str, Path, Path | None]:
-            artifact_id = f"strategy_{RESEARCH_SESSION_KEY}_{uuid.uuid4().hex[:12]}"
-            stored = self.artifacts.freeze_revision(
-                step.revision_id,
-                artifact_id=artifact_id,
-                experiment_id=self.config.experiment_id,
-                epoch_id=RESEARCH_STAGE,
-                fold_id=RESEARCH_SESSION_KEY,
-                run_id=run_id,
-                step_id=step.step_id,
-            )
-            models = Path(stored.model_path) if stored.model_path is not None else None
-            return artifact_id, Path(stored.path), models
+            return self._freeze_revision(step.step_id, step.revision_id, run_id)
 
         artifact_id, output, models = freeze(nominee)
         ratios = {
@@ -624,6 +613,25 @@ class RollingExperimentPipeline:
             **({"seed_replicates": replicates} if replicates else {}),
         }
 
+    def _freeze_revision(
+        self, step_id: str, revision_id: str, run_id: str
+    ) -> tuple[str, Path, Path | None]:
+        """Freeze one Step's revision as a new artifact: its id, its output
+        tree and its models tree (``None`` when the store keeps none)."""
+
+        artifact_id = f"strategy_{RESEARCH_SESSION_KEY}_{uuid.uuid4().hex[:12]}"
+        stored = self.artifacts.freeze_revision(
+            revision_id,
+            artifact_id=artifact_id,
+            experiment_id=self.config.experiment_id,
+            epoch_id=RESEARCH_STAGE,
+            fold_id=RESEARCH_SESSION_KEY,
+            run_id=run_id,
+            step_id=step_id,
+        )
+        models = Path(stored.model_path) if stored.model_path is not None else None
+        return artifact_id, Path(stored.path), models
+
     # ---- forward -------------------------------------------------------
 
     def run_forward(
@@ -671,129 +679,35 @@ class RollingExperimentPipeline:
             "session_key": FORWARD_SESSION_KEY,
             "phase": FORWARD_STAGE,
         }
+        head = {
+            "record_type": "forward",
+            **{key: attempt[key] for key in ("experiment_id", "epoch_id", "fold_id", "run_id")},
+            "session_key": FORWARD_SESSION_KEY,
+        }
         self.run_markers.begin(attempt)
         wrote_ledger_record = False
+
+        def integrity_failure(row: Mapping[str, object]) -> None:
+            nonlocal wrote_ledger_record
+            self.ledger.append({**head, **row})
+            # The integrity row is this run's record: the fail-fast that
+            # follows must not also log a failed attempt.
+            wrote_ledger_record = True
+
         try:
             _publish_progress(progress, "pit_snapshot", run_id=run_id, phase=FORWARD_STAGE)
-            forward_bundle = self._prepare_slot(forward)
-            heldout_bundle = self._prepare_slot(heldout)
-            span = ReplaySpan(
-                label=FORWARD_STAGE,
-                mode=FORWARD_PHASE,
-                start=forward.start,
-                end=heldout.end,
-                snapshot=forward_bundle,
-                continuation=(heldout_bundle.replay_ref,),
-            )
-            base = {
-                "record_type": "forward",
-                **{key: attempt[key] for key in ("experiment_id", "epoch_id", "fold_id", "run_id")},
-                "session_key": FORWARD_SESSION_KEY,
-                "artifact_id": artifact.artifact_id,
-                **self._account_record(),
-                "replay": {
-                    "start": forward.start,
-                    "forward_end": forward.end,
-                    "heldout_start": heldout.start,
-                    "replay_end": heldout.end,
-                    "requested_end": heldout.requested_end,
-                    "truncation_reason": heldout.truncation_reason,
-                },
-                "snapshot_ids": {
-                    "forward_decision": forward_bundle.snapshot_id,
-                    "heldout_decision": heldout_bundle.snapshot_id,
-                },
+            record = {
+                **head,
+                **self.replay_frozen(
+                    artifact,
+                    replicates,
+                    progress,
+                    run_id=run_id,
+                    forward=forward,
+                    heldout=heldout,
+                    integrity_failure=integrity_failure,
+                ),
             }
-
-            def replay(
-                item: FrozenArtifact,
-            ) -> tuple[EvaluationResult | None, BaseException | None]:
-                """One guarded replay of a frozen artifact over the span."""
-
-                nonlocal wrote_ledger_record
-                result, error, changed, restore_error = _run_guarded_evaluation(
-                    self.evaluator,
-                    span.request(
-                        _frozen_revision(item),
-                        schedule=self.config.schedule,
-                        broker_profile=self.config.broker_profile,
-                    ),
-                    item,
-                )
-                if changed:
-                    self.ledger.append(
-                        {
-                            **base,
-                            "artifact_id": item.artifact_id,
-                            "status": "integrity_failure",
-                            "state_changed_during_test": True,
-                            "result_ref": result.result_ref if result is not None else None,
-                            "error": _error_text(error) if error is not None else None,
-                        }
-                    )
-                    # The integrity row is this run's record: the fail-fast
-                    # below must not also log a failed attempt.
-                    wrote_ledger_record = True
-                    if restore_error is not None:
-                        raise FrozenArtifactRestoreFailed(
-                            "strategy or model artifacts changed during the forward replay "
-                            f"and restoring the pre-evaluation trees failed: {restore_error}"
-                        ) from restore_error
-                    raise FrozenArtifactMutated(
-                        "strategy or model artifacts changed during the forward replay"
-                    ) from error
-                return result, error
-
-            _publish_progress(progress, "forward_replay", run_id=run_id)
-            result, error = replay(artifact)
-            if error is not None:
-                if not raised_by_strategy(error):
-                    raise error
-                where = (
-                    "heldout" if _failure_day(error) >= heldout.start else "forward"
-                )
-                record = {
-                    **base,
-                    "status": STRATEGY_ERROR,
-                    "error": _error_text(error),
-                    "result_ref": None,
-                    "slices": None,
-                    "refits_executed": None,
-                    "null_control": None,
-                    "verdict": graduation_verdict(
-                        forward=None, heldout=None, strategy_error=where
-                    ),
-                }
-            else:
-                assert result is not None
-                replays: list[tuple[FrozenArtifact, EvaluationResult]] = []
-                for index, item in enumerate(replicates, start=1):
-                    _publish_progress(
-                        progress,
-                        "forward_replay",
-                        run_id=run_id,
-                        seed_replicate=f"{index}/{len(replicates)}",
-                    )
-                    replicate_result, replicate_error = replay(item)
-                    if replicate_error is not None:
-                        raise RuntimeError(
-                            f"seed replicate {item.source_step_id} ({item.artifact_id}) did "
-                            "not complete its forward replay, and the seed mean is never "
-                            f"read without it: {_error_text(replicate_error)}"
-                        ) from replicate_error
-                    assert replicate_result is not None
-                    replays.append((item, replicate_result))
-                _publish_progress(progress, "verdict", run_id=run_id)
-                record = {
-                    **base,
-                    **self._judge(
-                        result,
-                        artifact,
-                        forward=forward,
-                        heldout=heldout,
-                        seed_replicates=replays,
-                    ),
-                }
             self.ledger.append(record)
             wrote_ledger_record = True
             return record
@@ -811,6 +725,138 @@ class RollingExperimentPipeline:
         finally:
             if wrote_ledger_record:
                 self.run_markers.finish(run_id)
+
+    def replay_frozen(
+        self,
+        artifact: FrozenArtifact,
+        replicates: Sequence[FrozenArtifact],
+        progress,
+        *,
+        run_id: str,
+        forward: Slot,
+        heldout: Slot,
+        integrity_failure: Callable[[Mapping[str, object]], None] | None = None,
+    ) -> dict[str, object]:
+        """One continuous replay of a frozen artifact and its seed replicates
+        over the ``forward`` and ``heldout`` slots, read as :meth:`run_forward`
+        records it: the artifact, the account, the span and the decision
+        views, then the :meth:`_judge` output or the strategy-error body.
+        Writes nothing to the ledger.
+
+        A failure that measured nothing raises, and so does any replicate's
+        failure. Frozen trees that changed during a replay fail closed after
+        the integrity row (the body of what :meth:`run_forward` appends) is
+        handed to ``integrity_failure``, when given.
+        """
+
+        forward_bundle = self._prepare_slot(forward)
+        heldout_bundle = self._prepare_slot(heldout)
+        span = ReplaySpan(
+            label=FORWARD_STAGE,
+            mode=FORWARD_PHASE,
+            start=forward.start,
+            end=heldout.end,
+            snapshot=forward_bundle,
+            continuation=(heldout_bundle.replay_ref,),
+        )
+        base = {
+            "artifact_id": artifact.artifact_id,
+            **self._account_record(),
+            "replay": {
+                "start": forward.start,
+                "forward_end": forward.end,
+                "heldout_start": heldout.start,
+                "replay_end": heldout.end,
+                "requested_end": heldout.requested_end,
+                "truncation_reason": heldout.truncation_reason,
+            },
+            "snapshot_ids": {
+                "forward_decision": forward_bundle.snapshot_id,
+                "heldout_decision": heldout_bundle.snapshot_id,
+            },
+        }
+
+        def replay(
+            item: FrozenArtifact,
+        ) -> tuple[EvaluationResult | None, BaseException | None]:
+            """One guarded replay of a frozen artifact over the span."""
+
+            result, error, changed, restore_error = _run_guarded_evaluation(
+                self.evaluator,
+                span.request(
+                    _frozen_revision(item),
+                    schedule=self.config.schedule,
+                    broker_profile=self.config.broker_profile,
+                ),
+                item,
+            )
+            if changed:
+                if integrity_failure is not None:
+                    integrity_failure(
+                        {
+                            **base,
+                            "artifact_id": item.artifact_id,
+                            "status": "integrity_failure",
+                            "state_changed_during_test": True,
+                            "result_ref": result.result_ref if result is not None else None,
+                            "error": _error_text(error) if error is not None else None,
+                        }
+                    )
+                if restore_error is not None:
+                    raise FrozenArtifactRestoreFailed(
+                        "strategy or model artifacts changed during the forward replay "
+                        f"and restoring the pre-evaluation trees failed: {restore_error}"
+                    ) from restore_error
+                raise FrozenArtifactMutated(
+                    "strategy or model artifacts changed during the forward replay"
+                ) from error
+            return result, error
+
+        _publish_progress(progress, "forward_replay", run_id=run_id)
+        result, error = replay(artifact)
+        if error is not None:
+            if not raised_by_strategy(error):
+                raise error
+            where = "heldout" if _failure_day(error) >= heldout.start else "forward"
+            return {
+                **base,
+                "status": STRATEGY_ERROR,
+                "error": _error_text(error),
+                "result_ref": None,
+                "slices": None,
+                "refits_executed": None,
+                "null_control": None,
+                "verdict": graduation_verdict(forward=None, heldout=None, strategy_error=where),
+            }
+        assert result is not None
+        replays: list[tuple[FrozenArtifact, EvaluationResult]] = []
+        for index, item in enumerate(replicates, start=1):
+            _publish_progress(
+                progress,
+                "forward_replay",
+                run_id=run_id,
+                seed_replicate=f"{index}/{len(replicates)}",
+            )
+            replicate_result, replicate_error = replay(item)
+            if replicate_error is not None:
+                raise RuntimeError(
+                    f"seed replicate {item.source_step_id} ({item.artifact_id}) did "
+                    "not complete its forward replay, and the seed mean is never "
+                    f"read without it: {_error_text(replicate_error)}"
+                ) from replicate_error
+            assert replicate_result is not None
+            replays.append((item, replicate_result))
+        _publish_progress(progress, "verdict", run_id=run_id)
+        return {
+            **base,
+            **self._judge(
+                result,
+                artifact,
+                forward=forward,
+                heldout=heldout,
+                seed_replicates=replays,
+            ),
+        }
 
     def _prepare_slot(self, slot: Slot) -> SnapshotBundle:
         return self.snapshots.prepare(
