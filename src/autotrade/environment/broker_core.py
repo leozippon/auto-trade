@@ -25,6 +25,26 @@ DIVIDEND_TAX_TIERS = ((1, 0.20), (12, 0.10))
 # A bonus share (送股, from retained earnings) is dividend income at its par
 # value; a capital-reserve conversion (转增) is not income at all.
 BONUS_SHARE_PAR_CNY = 1.0
+# The board a name is listed on, told by its code: the one vocabulary of the
+# research universe's board screen (``SnapshotConfig.screen_boards``) and of the
+# boards an account may buy (``BrokerProfile.permitted_boards``). A Beijing
+# name is told by its ``.BJ`` suffix instead of a prefix.
+BOARD_PREFIXES: dict[str, tuple[str, ...]] = {
+    "main": ("600", "601", "603", "605", "000", "001", "002", "003"),
+    "gem": ("300", "301", "302"),
+    "star": ("688", "689"),
+    "bj": (),
+}
+BOARDS: tuple[str, ...] = tuple(BOARD_PREFIXES)
+
+
+def board_of(symbol: str) -> str | None:
+    """The board ``symbol`` is listed on, or None for a code on none of them."""
+
+    code = str(symbol).upper()
+    if code.endswith(".BJ"):
+        return "bj"
+    return next((board for board, prefixes in BOARD_PREFIXES.items() if code.startswith(prefixes)), None)
 
 
 def is_star_market(symbol: str) -> bool:

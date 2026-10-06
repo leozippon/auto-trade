@@ -20,12 +20,15 @@ from autotrade.environment.broker import (
     BrokerProfile,
     DailyBroker,
     Position,
+    default_permitted_boards,
+    stamped_permitted_boards,
 )
 from autotrade.environment.broker_core import (
     LOT_SIZE,
     STAMP_DUTY_CUTOVER,
     STAR_MIN_LOT_SIZE,
     CostModel,
+    board_of,
     is_bse_market,
     is_star_market,
     reduce_amount_reject,
@@ -113,6 +116,46 @@ class BrokerEligibilityTest(unittest.TestCase):
                 rejected = broker.execute(_order(), _bar(), matched_at=MATCHED_AT, raw_price=bad)
                 self.assertEqual(rejected.reason, "missing_execution_price")
         self.assertEqual(broker.cash, broker.profile.initial_cash)
+
+    def test_a_buy_off_the_permitted_boards_is_rejected_and_a_sale_never_is(self) -> None:
+        broker = _broker(initial_cash=100_000, permitted_boards=("main", "gem"))
+        for symbol in ("688001.SH", "830001.BJ", "900901.SH"):
+            with self.subTest(symbol=symbol):
+                rejected = broker.execute(
+                    _order(symbol=symbol, quantity=200), _bar(), matched_at=MATCHED_AT, raw_price=10.0
+                )
+                self.assertEqual((rejected.status, rejected.reason), ("rejected", "board_not_permitted"))
+        for symbol in ("600001.SH", "300001.SZ"):
+            with self.subTest(symbol=symbol):
+                filled = broker.execute(_order(symbol=symbol), _bar(), matched_at=MATCHED_AT, raw_price=10.0)
+                self.assertEqual(filled.status, "filled")
+        broker.positions["688001.SH"] = Position("688001.SH", 200, 200, 10.0, 10.0)
+        sold = broker.execute(
+            _order("sell", symbol="688001.SH", quantity=200), _bar(), matched_at=MATCHED_AT, raw_price=10.0
+        )
+        self.assertEqual(sold.status, "filled")
+        # A profile recorded without the field buys on every board.
+        unrestricted = _broker(initial_cash=100_000)
+        star = unrestricted.execute(
+            _order(symbol="688001.SH", quantity=200), _bar(), matched_at=MATCHED_AT, raw_price=10.0
+        )
+        self.assertEqual(star.status, "filled")
+
+    def test_the_default_boards_follow_the_exchanges_asset_thresholds(self) -> None:
+        for cash, boards in (
+            (99_999, ("main",)),
+            (100_000, ("main", "gem")),
+            (499_999, ("main", "gem")),
+            (500_000, ("main", "gem", "star", "bj")),
+        ):
+            with self.subTest(cash=cash):
+                self.assertEqual(default_permitted_boards(cash), boards)
+        self.assertIsNone(stamped_permitted_boards({"initial_cash": 100_000}))
+        self.assertEqual(stamped_permitted_boards({"permitted_boards": ["star", "main"]}), ("main", "star"))
+        self.assertEqual(
+            [board_of(code) for code in ("600000.SH", "000001.SZ", "300750.SZ", "688981.SH", "830799.BJ", "200002.SZ")],
+            ["main", "main", "gem", "star", "bj", None],
+        )
 
     def test_limit_up_blocks_buy_and_limit_down_blocks_sell(self) -> None:
         broker = _broker(initial_cash=1_000_000, slippage_bps=0)

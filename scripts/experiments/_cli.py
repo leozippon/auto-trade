@@ -19,6 +19,7 @@ import argparse
 from dataclasses import fields, replace
 from pathlib import Path
 
+from autotrade.environment.broker import default_permitted_boards
 from autotrade.environment.data.contracts import BENCHMARK_INDEXES
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.runtime import write_json_atomic
@@ -419,10 +420,17 @@ def _build_worker_params(
         if value is not None:
             params[f"{window}_window_months"] = value
     params.update(overrides or {})
-    return {
+    stamped = {
         **CREATION_STAMPS,
         **{key: value for key, value in params.items() if value is not None},
     }
+    # The boards the console stamps from the account's capital
+    # (``ExperimentManager.create_experiment``), unless an override names them.
+    stamped.setdefault(
+        "permitted_boards",
+        list(default_permitted_boards(float(stamped.get("initial_cash", WEB_CREATE_DEFAULTS["initial_cash"])))),  # type: ignore[arg-type]
+    )
+    return stamped
 
 
 def build_worker_options(

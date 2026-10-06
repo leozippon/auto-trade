@@ -1387,6 +1387,31 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertTrue(written["require_forward_plain_selection"])
         self.assertFalse(acceptance_for({}).require_raw_excess_at_cost_stress)
 
+    def test_creation_stamps_the_boards_the_initial_cash_qualifies_for(self) -> None:
+        """ChiNext from CNY 100,000, STAR and Beijing from 500,000, written into
+        params.json; a request that names the boards keeps its own."""
+
+        manager = ExperimentManager(self.repo_root, self.experiments_root)
+        for experiment_id, request, boards in (
+            ("exp_99999", {"initial_cash": 99_999}, ["main"]),
+            ("exp_100000", {"initial_cash": 100_000}, ["main", "gem"]),
+            ("exp_499999", {"initial_cash": 499_999}, ["main", "gem"]),
+            ("exp_500000", {"initial_cash": 500_000}, ["main", "gem", "star", "bj"]),
+            ("exp_named", {"initial_cash": 100_000, "permitted_boards": ["main", "star"]}, ["main", "star"]),
+        ):
+            with (
+                patch.object(manager, "_preflight"),
+                patch.object(manager, "start_worker", return_value={"spawned": False}),
+            ):
+                manager.create_experiment(
+                    {"experiment_id": experiment_id, **DEFAULT_RESEARCH_GEOMETRY.to_record(), **request}
+                )
+            written = json.loads(
+                (self.experiments_root / experiment_id / "hitl/params.json").read_text(encoding="utf-8")
+            )
+            with self.subTest(experiment=experiment_id):
+                self.assertEqual(written["permitted_boards"], boards)
+
     def test_create_records_the_lineage_into_the_new_arm_or_creates_nothing(self) -> None:
         """The lineage is read from the earlier arms once, while the arm is
         created, into a file beside its ledger, and the ledger stays empty

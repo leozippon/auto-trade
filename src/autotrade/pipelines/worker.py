@@ -16,7 +16,8 @@ from autotrade.agent.compact import ContextCompactionConfig
 from autotrade.environment.artifacts import (
     FilesystemArtifactStore,
 )
-from autotrade.environment.broker import BrokerProfile
+from autotrade.environment.broker import BrokerProfile, stamped_permitted_boards
+from autotrade.environment.broker_core import BOARDS
 from autotrade.environment.data.contracts import benchmark_index_label
 from autotrade.environment.data.research_release import (
     pin_research_release,
@@ -173,6 +174,7 @@ _ALLOWED_PARAMS = {
     "commission_bps",
     "slippage_bps",
     "dividend_tax",
+    "permitted_boards",
     "max_total_holdings",
     "max_single_name_weight",
     "gpu_count",
@@ -710,6 +712,8 @@ def resolve_worker_options(
                 params.get("slippage_bps", 5.0), "slippage_bps"
             ),
             dividend_tax=dividend_tax,
+            # Stamped at creation; an arm without the key buys on every board.
+            permitted_boards=stamped_permitted_boards(params),
             max_total_holdings=_optional_positive_int(
                 params.get("max_total_holdings"), "max_total_holdings"
             ),
@@ -1286,7 +1290,7 @@ def _snapshot_config(params: dict[str, object]) -> SnapshotConfig:
     screen_exclude_st = params.get("screen_exclude_st", False)
     if type(screen_exclude_st) is not bool:
         raise ValueError("screen_exclude_st must be boolean")
-    screen_boards = selection("screen_boards", ("main", "gem", "star", "bj"))
+    screen_boards = selection("screen_boards", BOARDS)
     return SnapshotConfig(
         window_months=_positive_int(
             params.get("window_months", rolling_default("window_months")), "window_months"

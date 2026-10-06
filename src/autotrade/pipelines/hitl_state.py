@@ -149,6 +149,11 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "commission_bps": BrokerProfile().commission_bps,
     "slippage_bps": BrokerProfile().slippage_bps,
     "dividend_tax": CREATION_STAMPS["dividend_tax"],
+    # The boards the account may buy on. Left null, creation stamps the ones
+    # its initial cash qualifies for (``broker.default_permitted_boards``), so
+    # the stamped params.json always names them; an arm without the key is
+    # unrestricted.
+    "permitted_boards": None,
     "model": MODEL_CHOICES[0],
     "subagent_model": MODEL_CHOICES[0],
     "nl_model": MODEL_CHOICES[0],

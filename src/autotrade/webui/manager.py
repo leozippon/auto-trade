@@ -15,6 +15,7 @@ import time
 from collections.abc import Mapping
 from pathlib import Path
 
+from autotrade.environment.broker import default_permitted_boards
 from autotrade.environment.gpu import GpuUnavailableError
 from autotrade.environment.identity import (
     LEGACY_EXPERIMENT_MESSAGE,
@@ -437,6 +438,10 @@ class ExperimentManager:
             # or to the beta band that travels with a cap cannot move an arm
             # that has already been created.
             merged.update(acceptance_for(merged).to_record())
+            # So are the boards the account may buy on, from the capital the
+            # pre-flight has just accepted, unless the request named them.
+            if merged["permitted_boards"] is None:
+                merged["permitted_boards"] = list(default_permitted_boards(float(merged["initial_cash"])))  # type: ignore[arg-type]
             merged["_created_at"] = utc_now_iso()
             write_json_atomic(hitl / "params.json", merged)
             write_control(hitl / "control.json", ControlState())

@@ -10,9 +10,11 @@ from functools import cached_property
 from types import MappingProxyType
 
 from autotrade.environment.broker_core import (
+    BOARDS,
     BONUS_SHARE_PAR_CNY,
     STAMP_DUTY_CUTOVER,
     CostModel,
+    board_of,
     dividend_tax_rate,
     reduce_amount_reject,
     validate_buy_lot,
@@ -23,6 +25,43 @@ from autotrade.environment.strategy import StrategyOrder
 # the last close by more than half a tick is an exchange price reset (an
 # ex-date), never rounding.
 EX_DATE_PRICE_TOLERANCE = 0.005
+# The assets (CNY) an individual account needs before the exchange lets it buy
+# on each board: none for the main board, 100,000 for ChiNext, 500,000 for the
+# STAR Market and the Beijing exchange. Each also asks two years of trading
+# experience, which an account is taken to have.
+BOARD_MIN_ASSETS_CNY: dict[str, float] = {"main": 0.0, "gem": 100_000.0, "star": 500_000.0, "bj": 500_000.0}
+
+
+def default_permitted_boards(initial_cash: float) -> tuple[str, ...]:
+    """The boards an account opened with ``initial_cash`` may buy on, by the
+    exchanges' asset thresholds: what creation stamps on a new arm unless its
+    request names the boards itself."""
+
+    return tuple(board for board in BOARDS if initial_cash >= BOARD_MIN_ASSETS_CNY[board])
+
+
+def stamped_permitted_boards(params: Mapping[str, object]) -> tuple[str, ...] | None:
+    """The boards an arm's stamped parameters let its account buy on.
+
+    None, for an arm stamped before the parameter existed: its account buys on
+    every board, as it always did, and nothing re-derives a restriction for it.
+    """
+
+    value = params.get("permitted_boards")
+    return None if value is None else _permitted_boards(value)
+
+
+def _permitted_boards(value: object) -> tuple[str, ...]:
+    """``value`` as a permitted-board set in the vocabulary's order, or a refusal."""
+
+    if not isinstance(value, list | tuple | frozenset | set) or not all(isinstance(board, str) for board in value):
+        raise ValueError("permitted_boards must be a list of board names")
+    unknown = sorted(set(value) - set(BOARDS))
+    if unknown:
+        raise ValueError(f"unknown permitted_boards: {unknown}")
+    if "main" not in value:
+        raise ValueError("permitted_boards must include the main board")
+    return tuple(board for board in BOARDS if board in value)
 
 
 @dataclass(frozen=True)
@@ -42,6 +81,11 @@ class BrokerProfile:
     # field, replays exactly as it was recorded; the experiment creation
     # defaults switch it on for every new arm.
     dividend_tax: bool = False
+    # The boards (``broker_core.BOARDS``) the account may buy on; a buy on any
+    # other is rejected, a sale never is. None, no restriction, so that a
+    # profile recorded before the field existed replays as it was recorded;
+    # creation stamps every new arm's boards (``default_permitted_boards``).
+    permitted_boards: tuple[str, ...] | None = None
     profile_id: str = "gjzq_cash"
     source: str = "docs/environment-design.md §3.4"
 
@@ -50,6 +94,9 @@ class BrokerProfile:
             raise ValueError("initial_cash must be a positive finite number")
         if not isinstance(self.dividend_tax, bool):
             raise ValueError("dividend_tax must be a boolean")
+        if self.permitted_boards is not None:
+            # Canonical, so a profile read back from JSON compares equal.
+            object.__setattr__(self, "permitted_boards", _permitted_boards(self.permitted_boards))
         if self.max_total_holdings is not None and (
             isinstance(self.max_total_holdings, bool)
             or not isinstance(self.max_total_holdings, int)
@@ -80,6 +127,8 @@ class BrokerProfile:
             "max_total_holdings": self.max_total_holdings,
             "max_single_name_weight": self.max_single_name_weight,
             "dividend_tax": self.dividend_tax,
+            # Absent, like the parameter itself, on an unrestricted account.
+            **({} if self.permitted_boards is None else {"permitted_boards": list(self.permitted_boards)}),
         }
 
     @cached_property
@@ -490,6 +539,13 @@ class DailyBroker:
         *,
         raw_price: object,
     ) -> str | None:
+        # The account's permission, settled before the market is looked at.
+        if (
+            order.action == "buy"
+            and self.profile.permitted_boards is not None
+            and board_of(order.symbol) not in self.profile.permitted_boards
+        ):
+            return "board_not_permitted"
         if bar is None:
             return "missing_execution_price"
         if bool(bar.get("is_suspended", False)):

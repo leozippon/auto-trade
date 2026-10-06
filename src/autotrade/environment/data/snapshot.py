@@ -29,7 +29,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import ClassVar
 
 import numpy as np
 import pandas as pd
@@ -37,6 +36,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from autotrade.data_quality import read_quality_report
+from autotrade.environment.broker_core import BOARDS, board_of
 from autotrade.environment.data import PITDataStore, default_tushare_contracts
 from autotrade.environment.data.auction import (
     AUCTION_CORRECTION_RULE_ID,
@@ -509,7 +509,7 @@ class SnapshotConfig:
             raise ValueError("intraday_trade_days must be positive")
         if self.screen_exclude_new_listed_days < 0:
             raise ValueError("screen_exclude_new_listed_days must be >= 0")
-        unknown_boards = set(self.screen_boards) - {"main", "gem", "star", "bj"}
+        unknown_boards = set(self.screen_boards) - set(BOARDS)
         if unknown_boards:
             raise ValueError(f"unknown screen_boards: {sorted(unknown_boards)}")
         for low, high, label in (
@@ -2069,13 +2069,6 @@ class SnapshotBuilder:
         meta = {"rows": len(index), "datasets": list(config.text_datasets), "library_dir": "text_library"}
         return index, meta
 
-    _BOARD_PREFIXES: ClassVar[dict[str, tuple[str, ...]]] = {
-        "main": ("600", "601", "603", "605", "000", "001", "002", "003"),
-        "gem": ("300", "301", "302"),
-        "star": ("688", "689"),
-        "bj": (),  # matched by the .BJ suffix instead
-    }
-
     def _screened_codes(self, decision_time: datetime, config: SnapshotConfig) -> frozenset[str] | None:
         """Research-universe screen, evaluated with decision-time knowledge only.
 
@@ -2099,13 +2092,7 @@ class SnapshotBuilder:
             listed = keep["list_date"].fillna("").astype(str)
             keep = keep[(listed != "") & (listed <= cutoff)]
         if config.screen_boards:
-            codes = keep["ts_code"].astype(str)
-            allowed_boards = set(config.screen_boards)
-            prefixes = tuple(p for board in allowed_boards for p in self._BOARD_PREFIXES[board])
-            mask = codes.str.startswith(prefixes) if prefixes else pd.Series(False, index=codes.index)
-            if "bj" in allowed_boards:
-                mask = mask | codes.str.endswith(".BJ")
-            keep = keep[mask]
+            keep = keep[keep["ts_code"].astype(str).map(board_of).isin(config.screen_boards)]
         needs_basic = any(
             value is not None
             for value in (config.screen_min_circ_mv_yi, config.screen_max_circ_mv_yi,

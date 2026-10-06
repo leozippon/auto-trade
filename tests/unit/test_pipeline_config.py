@@ -13,7 +13,7 @@ import json
 import math
 import re
 import unittest
-from dataclasses import MISSING, fields, replace
+from dataclasses import MISSING, asdict, fields, replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -636,6 +636,51 @@ class DefaultsDriftTest(unittest.TestCase):
         policy = _broker_replay_facts({"broker_profile": created.to_record()})["dividend_tax_policy"]
         self.assertTrue(policy["charged"])
         self.assertEqual(policy["rate_by_months_held_at_most"], {"1": 0.2, "12": 0.1})
+
+    def test_the_permitted_boards_are_pinned_per_arm(self) -> None:
+        """An arm without the key buys on every board; a stamped value reaches
+        the Broker profile, an invalid one is refused by the pre-flight the
+        console runs before creating."""
+        import tempfile
+
+        from autotrade.pipelines.worker import resolve_worker_options
+
+        base = {
+            "experiment_id": "boards_demo",
+            "strategy_path": "configs/agent_output_template/main.py",
+            "data_backend": "pit",
+            "raw_dir": "data/raw",
+            "fundamental_events_root": "data/pit/fundamental_events",
+            "fundamental_events_status": "results/data_quality/fundamental_events_status.json",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "experiments").mkdir()
+
+            def profile(params: dict[str, object]) -> BrokerProfile:
+                return resolve_worker_options(
+                    params,
+                    experiment_dir=repo_root / "experiments/boards_demo",
+                    repo_root=repo_root,
+                    preflight=True,
+                ).rolling.broker_profile
+
+            recorded = profile(base)
+            pinned = profile({**base, "permitted_boards": ["gem", "main"]})
+            for value, message in (
+                ([], "must include the main board"),
+                (["gem"], "must include the main board"),
+                (["main", "nasdaq"], "unknown permitted_boards"),
+                ("main", "must be a list of board names"),
+            ):
+                with self.subTest(value=value), self.assertRaisesRegex(ValueError, message):
+                    profile({**base, "permitted_boards": value})
+        self.assertIsNone(recorded.permitted_boards)
+        self.assertNotIn("permitted_boards", recorded.to_record())
+        self.assertEqual(pinned.permitted_boards, ("main", "gem"))
+        self.assertEqual(pinned.to_record()["permitted_boards"], ["main", "gem"])
+        # A profile read back from the JSON a Paper book keeps is the same profile.
+        self.assertEqual(BrokerProfile(**json.loads(json.dumps(asdict(pinned)))), pinned)
 
     def test_the_geometry_and_gate_knobs_reach_the_configuration(self) -> None:
         """A knob accepted and never forwarded is the defect class here."""
