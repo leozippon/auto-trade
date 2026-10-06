@@ -8,16 +8,23 @@ seen the one question its freeze gate could not settle: whether the node is
 the lucky best of many tries. The checks run in order before anything
 changes, each a refusal with a non-zero exit: the arm's verdict and no earlier
 incubation of the arm, no live worker, the node (and each
-``--seed-replicate``) is a Step of the arm's research session, and the entry
-screen passes on the arm's own pinned rules (``pipelines/incubation.py``).
-GPUs are then taken for an arm that needs them, the node's bytes are frozen
-and replayed exactly as a frozen artifact is, and the record states the entry
-reading, the frozen artifact, the forward reading and the forward screen on
-it. The arm's verdict and its Paper candidate are untouched.
+``--seed-replicate``) is a Step of the arm's research session, the entry
+screen passes on the arm's own pinned rules (``pipelines/incubation.py``), and
+fewer than ``INCUBATING_BOOK_CAP`` other incubating Paper books are open
+(killed books do not count). GPUs are then taken for an arm that needs them,
+the node's bytes are frozen and replayed exactly as a frozen artifact is, on
+the boards its book may buy on (``incubation.incubation_boards``), and the
+record states the entry reading, the frozen artifact, the boards, the forward
+reading and the forward screen on it. When the screen passed, the arm's
+incubating Paper book is opened (``books.open_incubating_book``). The arm's
+verdict and its Paper candidate are untouched.
 
-``--dry-run`` stops after the entry screen and prints the gate reading with
-the deferred and blocking reasons, writing nothing. Run again after the
-record exists, the command changes nothing in the arm.
+The printed JSON says whether the book was ``opened``, ``existed`` or was
+``blocked`` by the forward screen, with the forward and Held-out headline
+numbers. ``--dry-run`` stops after the entry screen and prints the gate
+reading with the deferred and blocking reasons and the boards a real run
+would replay on, writing nothing. Run again after the record exists, the
+command changes nothing in the arm and only opens a book that is missing.
 """
 
 from __future__ import annotations
@@ -40,8 +47,15 @@ from autotrade.environment.artifacts import FilesystemArtifactStore
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.sandbox import SandboxSpec
 from autotrade.environment.sandbox_images import prepare_experiment_sandbox_image
+from autotrade.paper.book import require_incubating_place
+from autotrade.paper.books import (
+    PAPER_STATE_DIR,
+    open_incubating_book,
+    validate_book_id,
+)
 from autotrade.pipelines.experiment import incubation_entry
 from autotrade.pipelines.hitl_state import assert_no_live_writer, read_json, select_gpus
+from autotrade.pipelines.incubation import incubation_boards
 from autotrade.pipelines.ledger import (
     ExperimentLedger,
     incubation_record,
@@ -50,6 +64,31 @@ from autotrade.pipelines.ledger import (
 from autotrade.pipelines.worker import build_experiment_pipeline, resolve_worker_options
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def headline(block: object) -> dict[str, object] | None:
+    """One slice's headline numbers, or None for a reading without slices
+    (a strategy error): the regressed (neutralised) and unregressed (plain)
+    active excess with their bounds, the account and index return, and the
+    drawdowns. ``seed_mean_plain_excess`` is what the screen reads when the
+    node has seed replicates."""
+
+    if not isinstance(block, dict):
+        return None
+    raw = block.get("raw_readings") or {}
+    seed_mean = block.get("seed_mean")
+    return {
+        "neutralized_excess": block.get("neutralized_excess"),
+        "neutralized_excess_lower_bound": block.get("lower_bound"),
+        "plain_excess": block.get("plain_excess"),
+        "plain_excess_lower_bound": block.get("plain_excess_lower_bound"),
+        "seed_mean_plain_excess": seed_mean.get("plain_excess") if isinstance(seed_mean, dict) else None,
+        "information_ratio": block.get("information_ratio"),
+        "account_return": raw.get("strategy_return"),
+        "index_return": raw.get("benchmark_return"),
+        "max_drawdown": block.get("max_drawdown"),
+        "active_max_drawdown": block.get("active_max_drawdown"),
+    }
 
 
 def main() -> int:
@@ -65,6 +104,7 @@ def main() -> int:
     parser.add_argument("--by", required=True, help="Who incubates the node.")
     parser.add_argument("--reason", required=True, help="Why, in a sentence or two.")
     parser.add_argument("--experiments-root", type=Path, default=REPO_ROOT / "experiments")
+    parser.add_argument("--paper-state-root", type=Path, default=REPO_ROOT / PAPER_STATE_DIR)
     parser.add_argument(
         "--dry-run", action="store_true", help="Stop after the entry screen and print it; change nothing."
     )
@@ -75,6 +115,7 @@ def main() -> int:
         parser.error(f"unknown experiment: {experiment_dir}")
     ledger = ExperimentLedger(experiment_dir / "ledgers" / "experiment_ledger.jsonl")
     try:
+        book_id = validate_book_id(args.experiment)
         records = ledger.read()
         record = None if args.dry_run else incubation_record(records)
         if record is None:
@@ -96,6 +137,7 @@ def main() -> int:
                             "step_id": args.step,
                             "seed_replicates": args.seed_replicate,
                             **screen,
+                            "permitted_boards": incubation_boards(options.rolling.broker_profile),
                             "gate": reading["entry"],
                         },
                         ensure_ascii=False,
@@ -106,8 +148,7 @@ def main() -> int:
                 return 0 if screen["passed"] else 2
             if not screen["passed"]:
                 raise ValueError(f"the entry screen blocks {args.step}: {', '.join(screen['blocking'])}")
-            # ---- Integration step: refuse here when the cap on incubating
-            # Paper books is reached (design check 6).
+            require_incubating_place(args.paper_state_root, book_id)
             # No console claims cards for this run: take them as _cli does.
             spec = options.agent_sandbox
             if spec is not None and spec.gpu == "auto":
@@ -135,14 +176,14 @@ def main() -> int:
             raise ValueError(
                 f"the arm already incubated {record['source_step_id']}; one incubation per arm"
             )
-        # ---- Integration step: open the Paper book here. -----------------
-        # When record["screen"]["passed"] and the book is missing: open it
-        # from ledger.incubation_candidate(ledger.read()) (track
-        # ``incubating``). Reached both after the append above and on a re-run
-        # whose record exists, so a book that failed to open is opened then.
+        # Reached after the append and on a re-run, so a book that failed to
+        # open is opened then.
+        book = open_incubating_book(args.paper_state_root, REPO_ROOT, experiment_dir)
     except (KeyError, OSError, RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    reading = record["forward_reading"]
+    slices = reading.get("slices") or {}
     print(
         json.dumps(
             {
@@ -151,8 +192,13 @@ def main() -> int:
                 "source_step_id": record["source_step_id"],
                 "deferred": record["entry"]["deferred"],
                 "frozen": record["frozen"],
-                "verdict_reasons": record["forward_reading"]["verdict"]["reasons"],
+                "permitted_boards": record["permitted_boards"],
+                "verdict_reasons": reading["verdict"]["reasons"],
                 "screen": record["screen"],
+                "forward": headline(slices.get("forward")),
+                "heldout": headline(slices.get("heldout")),
+                "book": book,
+                "book_id": book_id,
             },
             ensure_ascii=False,
             sort_keys=True,

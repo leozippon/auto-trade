@@ -23,6 +23,7 @@ from autotrade.paper.book import (
     book_status,
     create_book,
     load_book,
+    require_incubating_place,
 )
 from autotrade.paper.books import (
     delete_book,
@@ -301,9 +302,12 @@ def test_the_incubating_cap_refuses_a_book_and_a_killed_book_frees_its_place(tmp
     with pytest.raises(ValueError, match=f"the cap is {INCUBATING_BOOK_CAP}"):
         _incubate(tmp_path, "late")
     assert not (root / "late").exists()
+    require_incubating_place(root, "inc0")  # an open book is never a second book of its own arm
     _kill(root / "inc0")
     assert book_status(root / "inc0") == "killed"
     assert _incubate(tmp_path, "late").candidate_source == "incubating"
+    with pytest.raises(ValueError, match=f"the cap is {INCUBATING_BOOK_CAP}"):
+        require_incubating_place(root, "later")
 
 
 def test_a_book_of_an_older_schema_is_refused(tmp_path: Path):

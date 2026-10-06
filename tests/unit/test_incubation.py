@@ -3,12 +3,14 @@ the operator's command (``scripts/experiments/incubate.py``)."""
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,21 +19,27 @@ from autotrade.environment.broker_core import board_of
 from autotrade.environment.executor import StrategyRaised
 from autotrade.environment.replay.engine import BacktestError
 from autotrade.environment.strategy import CN_TZ
+from autotrade.paper.book import INCUBATING_BOOK_CAP
 from autotrade.pipelines import incubation
 from autotrade.pipelines.experiment import _keep_frozen_artifact_ids, incubation_entry
 from autotrade.pipelines.hitl_state import proc_start_ticks
 from autotrade.pipelines.ledger import (
     INCUBATION_FIELDS,
+    ExperimentLedger,
     FrozenArtifactMutated,
     RunMarkers,
     experiment_verdict,
+    forward_record,
+    frozen_record,
     incubation_candidate,
     paper_candidate,
     require_incubable,
 )
 from autotrade.pipelines.verdict import CONDITIONS, NOT_A_SESSION_STEP, UNMEASURABLE
+from tests.unit.paper_book_fixture import write_book_record
 from tests.unit.test_null_control import _board_draws
 from tests.unit.test_rolling_pipeline import CONFIG_PROFILE, _pipeline
+from tests.unit.webui_research_arm import build_arm
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -350,3 +358,91 @@ def test_the_command_refuses_an_arm_with_a_live_worker(tmp_path: Path):
     assert completed.returncode == 2
     assert "live worker" in completed.stderr
     assert ledger.read() == before
+
+
+def _incubate_script():
+    spec = importlib.util.spec_from_file_location("incubate", REPO_ROOT / "scripts/experiments/incubate.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_command_refuses_at_the_cap_before_anything_changes(tmp_path: Path, monkeypatch, capsys):
+    pipeline, ledger = _ended_arm(tmp_path)
+    (pipeline.config.experiment_dir / "hitl").mkdir(exist_ok=True)
+    (pipeline.config.experiment_dir / "hitl" / "params.json").write_text('{"experiment_id": "arm"}', encoding="utf-8")
+    paper = tmp_path / "paper"
+    for index in range(INCUBATING_BOOK_CAP):
+        write_book_record(paper / f"inc{index}", experiment_id=f"inc{index}", candidate_source="incubating")
+    script = _incubate_script()
+    # The arm's resolved options are the pipeline's own; nothing past the cap may read more of them.
+    monkeypatch.setattr(script, "resolve_worker_options", lambda *_args, **_kwargs: SimpleNamespace(rolling=pipeline.config))
+    monkeypatch.setattr(sys, "argv", [
+        "incubate.py", "--experiment", "arm", "--step", "research_step_0", "--by", "operator", "--reason", "r",
+        "--experiments-root", str(pipeline.config.experiments_root), "--paper-state-root", str(paper),
+    ])
+    before, tree = ledger.read(), _tree(tmp_path)
+    assert script.main() == 2
+    assert f"the cap is {INCUBATING_BOOK_CAP}" in capsys.readouterr().err
+    assert ledger.read() == before and _tree(tmp_path) == tree
+
+
+def _incubated_arm(experiments: Path, passed: bool = True) -> Path:
+    """A discarded arm whose incubation record the command already appended:
+    the forward replay of its frozen nominee, read as the incubation's."""
+
+    arm = build_arm(experiments, "inc", "discarded")
+    ledger = ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl")
+    records = ledger.read()
+    frozen, forward = frozen_record(records)["frozen"], forward_record(records)
+    ledger.append({
+        "record_type": "incubation", "experiment_id": "inc", "epoch_id": "forward", "fold_id": "incubation",
+        "run_id": "incubation_0", "incubated_by": "operator", "reason": "r",
+        "source_step_id": frozen["source_step_id"], "revision_id": frozen["revision_id"],
+        "entry": {"reasons": [], "deferred": []},
+        "frozen": {key: frozen[key] for key in ("artifact_id", "output_path", "models_path", "source_step_id", "revision_id")},
+        "permitted_boards": {"boards": ["main", "gem"], "origin": "derived"},
+        "forward_reading": {key: forward[key] for key in ("artifact_id", "replay", "result_ref", "slices", "verdict")},
+        "screen": {"passed": passed, "reasons": [] if passed else [incubation.PLAIN_EXCESS_NOT_POSITIVE]},
+    })
+    return arm
+
+
+def _rerun(tmp_path: Path, step: str) -> dict[str, object]:
+    completed = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "experiments" / "incubate.py"),
+         "--experiment", "inc", "--step", step, "--by", "operator", "--reason", "r",
+         "--experiments-root", str(tmp_path / "experiments"), "--paper-state-root", str(tmp_path / "paper")],
+        capture_output=True, text=True, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return json.loads(completed.stdout)
+
+
+def test_a_rerun_opens_only_the_missing_book_and_appends_nothing(tmp_path: Path):
+    arm = _incubated_arm(tmp_path / "experiments")
+    ledger_bytes = (arm / "ledgers/experiment_ledger.jsonl").read_bytes()
+    [record] = ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl").read("incubation")
+
+    opened = _rerun(tmp_path, record["source_step_id"])
+    assert (opened["book"], opened["book_id"], opened["screen"]["passed"]) == ("opened", "inc", True)
+    forward = record["forward_reading"]["slices"]["forward"]
+    assert opened["forward"]["neutralized_excess"] == forward["neutralized_excess"]
+    assert opened["forward"]["account_return"] == forward["raw_readings"]["strategy_return"]
+    book = tmp_path / "paper" / "inc"
+    pinned = json.loads((book / "book.json").read_text(encoding="utf-8"))
+    assert (pinned["candidate_source"], pinned["artifact_id"]) == ("incubating", record["frozen"]["artifact_id"])
+    assert pinned["profile"]["permitted_boards"] == ["main", "gem"]
+    files = {path: path.read_bytes() for path in book.rglob("*") if path.is_file()}
+
+    assert _rerun(tmp_path, record["source_step_id"])["book"] == "existed"
+    assert {path: path.read_bytes() for path in book.rglob("*") if path.is_file()} == files
+    assert (arm / "ledgers/experiment_ledger.jsonl").read_bytes() == ledger_bytes
+
+
+def test_a_blocked_forward_screen_opens_no_book(tmp_path: Path):
+    arm = _incubated_arm(tmp_path / "experiments", passed=False)
+    [record] = ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl").read("incubation")
+    blocked = _rerun(tmp_path, record["source_step_id"])
+    assert (blocked["book"], blocked["screen"]["passed"]) == ("blocked", False)
+    assert not (tmp_path / "paper" / "inc").exists()

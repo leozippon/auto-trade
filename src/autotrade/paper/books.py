@@ -16,7 +16,12 @@ from collections.abc import Callable
 from pathlib import Path
 
 from autotrade.environment.sandbox import remove_sandbox_tree
-from autotrade.pipelines.ledger import ExperimentLedger, paper_candidate
+from autotrade.pipelines.ledger import (
+    ExperimentLedger,
+    incubation_candidate,
+    incubation_record,
+    paper_candidate,
+)
 
 from .book import BOOK_NAME, create_book
 from .engine import writer_lock
@@ -130,6 +135,46 @@ def open_graduated_book(repo_root: str | Path, experiment_dir: str | Path) -> st
     return book_id
 
 
+def open_incubating_book(state_root: str | Path, repo_root: str | Path, experiment_dir: str | Path) -> str:
+    """Open the book of an arm's incubation when its forward screen passed and
+    none exists yet; what happened: ``opened``, ``existed`` (left as it is) or
+    ``blocked`` (the screen blocked, so no book).
+
+    The book is named after the experiment, trades the artifact the
+    incubation froze on the boards its replay ran on, and keeps that replay
+    as its history (``ledger.incubation_candidate``). A book of that id that
+    trades anything else is refused, never taken for this one.
+    """
+    experiment = Path(experiment_dir).resolve(strict=True)
+    book_id = validate_book_id(experiment.name)
+    records = ExperimentLedger(experiment / "ledgers" / "experiment_ledger.jsonl").read()
+    if incubation_record(records) is None:
+        raise ValueError(f"{book_id} has no incubation record")
+    candidate = incubation_candidate(records)
+    if candidate is None:
+        return "blocked"
+    root = Path(state_root) / book_id
+    existing = read_json(root / BOOK_NAME)
+    if existing:
+        if (existing.get("candidate_source"), existing.get("artifact_id")) != ("incubating", candidate["artifact_id"]):
+            raise ValueError(
+                f"Paper book {book_id} exists but is not the incubating book of {candidate['artifact_id']}"
+            )
+        return "existed"
+    list_books(state_root)
+    create_book(
+        root,
+        experiment_dir=experiment,
+        artifact_id=str(candidate["artifact_id"]),
+        repo_root=repo_root,
+        track="incubating",
+        source_record=candidate["forward"],  # type: ignore[arg-type]
+        permitted_boards=candidate["permitted_boards"],  # type: ignore[arg-type]
+        note="incubating",
+    )
+    return "opened"
+
+
 def delete_book(state_root: str | Path, book_id: str) -> None:
     """Remove one Paper book whole, or leave it listed as it was.
 
@@ -160,6 +205,7 @@ __all__ = [
     "follows_real_fills",
     "list_books",
     "open_graduated_book",
+    "open_incubating_book",
     "run_books",
     "run_order",
     "validate_book_id",
