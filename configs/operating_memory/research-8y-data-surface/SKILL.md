@@ -7,7 +7,7 @@
 - 会话的 `/mnt/snapshot` 是研究期末（2025-06-30 23:59:59）的决策视图：`daily`、`macro`、`universe`（挂了财务域的臂另有 `fundamentals`）各一个平铺文件，日线、四张宏观表与财务都自 20160701 起。它只供离线探查，正式回放读不到它。
 - 一次回放的 `context.snapshot_dir` 是该 span 第一年的决策视图（年初前一天 06-30 23:59:59），整场不变。`context.asof_dir/<域>/` 是 parts 目录：part 0 就是这个决策视图，之后随回放时钟逐日追加。多年 span 一路累加，从 Y1 起跑的整期回放到 Y8 时 `daily` 里是 2010 年起的全部行。
 - 每个研究年的决策视图窗口见 `research_geometry.years[].input_window`：年初前 108 个月，截到 `history_floors`。实读：Y1 视图日线 20100104..20170630、宏观自 2014-07；Y3 日线自 20100701；Y8 日线自 20150701、宏观自 2015-07。所以从 Y1、Y2 起跑时指数与申万序列只有 3、4 年历史，需要更长指数窗口的特征（多年 β、按指数算的残差标签、长期指数动量）在前两年取不满：缩短窗口，或在样本说明里写明。
-- 两种臂都没有事件、文本与分钟；`auction` 只有 20250116 起的行，不能当全期特征。
+- 挂财务域与不挂财务域的臂都没有事件、文本与分钟；挂公告标题（`text_datasets` 含 `anns_d`）的臂有 `text_index` 域而没有财务域，见「文本域」一节。`auction` 只有 20250116 起的行，不能当全期特征。
 
 ## 可见时间：08:30 的决策看到 T-1
 
@@ -55,6 +55,13 @@
 - 三大报表是年初至今累计（Q1、H1、前三季度、全年）：单季 = 本期 − 同年上一期，TTM = 本期 + 上年全年 − 上年同期。最新一期按 `end_date` 取，不按时间取（旧报告期的重述盖的是新日期）。公告事件用每期最早一行的 `available_at`，否则重述会被当成新公告。
 - 未来字段：`disclosure_date.actual_date` 是事后回填的实际披露日，97% 的行晚于本行盖章，Y1 视图里 3,055 行晚于决策日；只在它早于决策日时可用，计划日用 `pre_date`。`dividend` 的「预案」「股东大会通过」行偶尔带着事后填上的 `ex_date`/`record_date`/`pay_date`，除权安排只取「实施」行。
 - 读取：整表或不投影的读取会撑破策略容器的 16 GiB。研究期末视图 271 万行：整读、只按 `dataset == "fina_mainbz_vip"` 过滤不投影都被杀，`income_vip` 过滤不投影峰值 6.6 GiB，8 列投影读全表 0.84 GiB。一律 `pd.read_parquet(context.asof_dir + "/fundamentals", columns=[...], filters=[("dataset", "==", ...)])`，`available_at` 用 `pd.to_datetime(..., utc=True)` 解析后再与 `context.inference_at` 比较。目录每个交易日多一个分片，整期回放里两张表的投影读取平均每次 3–5 秒：只在调仓日读，不要每个决策日重读。
+
+## 文本域 text_index：只在挂了公告标题的臂上
+
+- 先判断：`/mnt/artifacts/data_summary.json` 里 `views.snapshot.domains` 列出 `text_index` 且 `text_datasets` 含 `anns_d` 才是挂了；这类臂的 `fundamentals.parquet` 是零列空壳，「财务域」一节不适用。
+- `context.asof_dir/text_index` 一行一份公告：`dataset`（取 `anns_d`）、`ts_codes`、`title`、`available_at`，自 2016-01 起。一律投影这四列并按 `dataset` 与 `available_at` 过滤读取，`available_at` 用 `pd.to_datetime(..., utc=True)` 解析后再与 `context.inference_at` 比较。
+- 可见时间：厂商的接收时间落在公告日前一天到后三天之内就按接收时间盖章，否则按公告日 23:59:59；文本落库节点每天 23:15。研究期的行几乎全部只有日期，所以公告日为 D 的标题最早在 D+2 日 08:30 的决策里可见；2026-08-12 起落库的行带接收时间（多在公告日前一晚），Paper 与 Held-out 后段比研究期早一到一天半看到标题。按「首次可见的本地日期之后的第一个交易日」计事件日，两段口径就一致。
+- 标题是公告的标题而不是正文；同一公告的摘要、修订、法律意见等伴随文件各是一行，按股票与日期去重后再当事件。
 
 ## 读取
 
