@@ -31,7 +31,7 @@
 
 | 项 | 值 |
 |---|---|
-| 账户与基准 | 只做多 10 万；`benchmark_index` 必须是 `000852.SH`；运行事实的 `permitted_boards` 必须恰好是主板与创业板；`visible_timeline.execution_policy.text_available` 必须为真。任何一条不符就停 |
+| 账户与基准 | 只做多 10 万；`benchmark_index` 必须是 `000852.SH`；运行事实 `broker_replay.permitted_boards.boards` 必须恰好是 `main` 与 `gem`（主板与创业板）；`visible_timeline.execution_policy.text_available` 必须为真。任何一条不符就停 |
 | 研究期与数据 | 2017-07..2025-06 八个研究年；日线、`universe`、四张宏观表与文本域的 `anns_d`；Broker 计红利税 |
 | 事件、可见日、复核、入场、出场、等额、执行 | 与上一场逐字相同，写在两份包的 `lib/titles.py` 与 `lib/book.py` 的文档字符串里：每周第一个决策日复核；09:30 卖、15:00 买；没有流动性下限；行业上限 max(1, ⌊席位 × 0.2⌋) |
 | 分侧 | 先用全部草案按九十天静默定事件，再看事件那一天这只股票的全部草案标题：任何一行含「股票期权」归 `opt`，否则归 `rs`。两侧恰好分完同一批事件。员工持股计划不在事件里（标题规则不认它），也不进任何一侧 |
