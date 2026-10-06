@@ -149,6 +149,34 @@ def test_bootstrap_bound_is_fixed_by_the_artifact_id(monkeypatch):
     assert _forward(analysis, seed_key="artifact-1")["lower_bound"] == first
 
 
+def test_the_neutralized_interval_reads_the_forward_regression_on_both_sides():
+    rng = np.random.default_rng(13)
+    analysis = _analysis(_segment(FORWARD_DAYS, 0.05, rng))
+    forward = _forward(analysis, forward_confidence=0.8)
+    interval = verdict.neutralized_interval(
+        analysis, seed_key="artifact-1", lower_confidence=0.8, upper_confidence=0.8
+    )
+    # F2's own figures, and the planted loadings (0.8 on the index, 0.3 on size).
+    assert (interval["days"], interval["neutralized_excess"], interval["lower_bound"]) == (
+        forward["days"], forward["neutralized_excess"], forward["lower_bound"]
+    )
+    assert interval["market_beta"] == pytest.approx(0.8, abs=0.1)
+    assert interval["size_beta"] == pytest.approx(0.3, abs=0.2)
+    assert interval["lower_bound"] < interval["neutralized_excess"] < interval["upper_bound"]
+
+    # The fit is linear in the series: the upper bound is the negated series'
+    # lower bound, and a prefix is read through ``end`` alone.
+    negated = {**analysis, "strategy_daily": [[day, -value] for day, value in analysis["strategy_daily"]]}
+    mirror = verdict.neutralized_interval(
+        negated, seed_key="artifact-1", lower_confidence=0.8, upper_confidence=0.8
+    )
+    assert mirror["lower_bound"] == pytest.approx(-interval["upper_bound"], abs=1e-12)
+    prefix = verdict.neutralized_interval(
+        analysis, end="20251231", seed_key="artifact-1", lower_confidence=0.8, upper_confidence=0.8
+    )
+    assert prefix["days"] == len([day for day in FORWARD_DAYS if day <= "20251231"])
+
+
 def test_forward_pass_rates_match_the_design_simulation():
     """The design simulation at TE 13 %: nulls pass ≈ 0.18, a steady 8 %/yr edge ≈ 0.38.
 

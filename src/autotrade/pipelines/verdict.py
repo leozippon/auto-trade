@@ -1137,6 +1137,40 @@ def bootstrap_lower_bound(
     return float(np.quantile(estimates, 1.0 - confidence)) * TRADING_DAYS_PER_YEAR
 
 
+def neutralized_interval(
+    analysis: Mapping[str, object],
+    *,
+    start: str = "",
+    end: str = "",
+    seed_key: str,
+    lower_confidence: float,
+    upper_confidence: float,
+) -> dict[str, object]:
+    """The neutralised excess of ``analysis``'s ``strategy_daily`` over a span,
+    its two loadings, and a one-sided bound on each side of it.
+
+    ``lower_bound`` is F2's bound at ``lower_confidence``
+    (:func:`bootstrap_lower_bound` of the regression intercept);
+    ``upper_bound`` the ``upper_confidence`` upper bound, the negated lower
+    bound of the regression of the negated series -- the fit is linear in
+    it -- on the same resampled days. An empty ``start``/``end`` takes the
+    whole analysis. ``ValueError`` when the span cannot be measured or is
+    shorter than one bootstrap block.
+    """
+
+    statistics, rows, _neutral = _measured(analysis, start, end)
+    _intercept_daily, market_beta, size_beta = _fit(rows)
+    negated = rows * np.array([-1.0, 1.0, 1.0])
+    return {
+        "days": statistics["days"],
+        "neutralized_excess": statistics["neutralized_excess"],
+        "market_beta": float(market_beta),
+        "size_beta": float(size_beta),
+        "lower_bound": bootstrap_lower_bound(rows, seed_key, confidence=lower_confidence),
+        "upper_bound": -bootstrap_lower_bound(negated, seed_key, confidence=upper_confidence),
+    }
+
+
 def _max_slice_drawdown(analysis: Mapping[str, object], start: str, end: str) -> float:
     """Peak-to-trough loss inside the slice, measured from the equity it opened at."""
 
