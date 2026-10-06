@@ -3192,8 +3192,10 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         }), encoding="utf-8")
         generation = self.raw_dir / ".raw_generation.json"
         cron_update.write_raw_generation(self.raw_dir)
-        before = json.loads(generation.read_text(encoding="utf-8"))
         jobs_root = self.root / "runtime" / "jobs"
+        self._run_job_once(config_path, "anns", "20261005", 0, jobs_root)
+        landed = json.loads((jobs_root / "anns.json").read_text(encoding="utf-8"))
+        before = json.loads(generation.read_text(encoding="utf-8"))
         for _ in range(2):  # an error is never skipped: the next night tries again
             result, runner, _ = self._run_job_once(
                 config_path, "anns", "20261006", common.NO_MUTATION_FAILURE_EXIT_CODE, jobs_root
@@ -3203,6 +3205,10 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             self.assertEqual(json.loads(generation.read_text(encoding="utf-8")), before)
             record = json.loads((jobs_root / "anns.json").read_text(encoding="utf-8"))
             self.assertEqual(record["status"], "error")
+            # Every failure keeps the last success, which Paper's title check reads.
+            self.assertEqual(
+                (record["last_ok_at"], record["last_ok_end_date"]), (landed["updated_at"], "20261005")
+            )
 
     def test_no_mutation_failure_elsewhere_still_fences_the_lake(self):
         # Exit 77 vouches for "nothing written" only where the text tier

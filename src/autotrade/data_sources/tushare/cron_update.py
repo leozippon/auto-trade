@@ -491,12 +491,14 @@ def build_job_commands(ctx: RunContext) -> list[list[str]]:
     raise ValueError(f"unsupported cron operation: {operation}")
 
 
-def job_state_path(job_name: str) -> Path:
-    return JOB_STATE_ROOT / f"{job_name}.json"
+def job_state_path(job_name: str, repo_root: Path = Path()) -> Path:
+    """The job's outcome file; the runner itself works from the repository
+    root, a reader elsewhere (the Paper title check) names that root."""
+    return repo_root / JOB_STATE_ROOT / f"{job_name}.json"
 
 
-def read_job_state(job_name: str) -> dict:
-    path = job_state_path(job_name)
+def read_job_state(job_name: str, repo_root: Path = Path()) -> dict:
+    path = job_state_path(job_name, repo_root)
     if not path.exists():
         return {}
     try:
@@ -524,6 +526,14 @@ def record_job_state(job_name: str, record: dict) -> dict:
     tmp.write_text(json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     tmp.replace(path)
     return record
+
+
+def last_success(job_state: dict) -> dict:
+    """The success a failure record carries forward from the job's previous
+    record, so the state alone says how long the job has been failing."""
+    if job_state.get("status") == "ok":
+        return {"last_ok_at": job_state.get("updated_at"), "last_ok_end_date": job_state.get("end_date")}
+    return {key: job_state[key] for key in ("last_ok_at", "last_ok_end_date") if key in job_state}
 
 
 def job_config_identity(ctx: RunContext) -> dict:
@@ -927,6 +937,7 @@ def _run(args: argparse.Namespace) -> int:
             "error": str(exc),
             "log_path": str(log_path),
             "updated_at": utc_now(),
+            **last_success(job_state),
         })
         log_outcome(log_path, {**record, "job": ctx.job_name})
         return 1
@@ -1008,6 +1019,8 @@ def _run(args: argparse.Namespace) -> int:
         }
         if status == "error":
             state["error"] = summarize_failure_from_log(log_path, returncode)
+        if status != "ok":
+            state.update(last_success(job_state))
         record = record_job_state(ctx.job_name, state)
         state_recorded = True
         log_outcome(log_path, {**record, "job": ctx.job_name})
@@ -1032,6 +1045,7 @@ def _run(args: argparse.Namespace) -> int:
             "error": str(exc)[:1000],
             "log_path": str(log_path),
             "updated_at": utc_now(),
+            **last_success(job_state),
         })
         log_outcome(log_path, {**record, "job": ctx.job_name})
         raise
