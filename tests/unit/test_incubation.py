@@ -1,8 +1,12 @@
-"""Incubation: the entry and forward screens and the ``incubation`` record."""
+"""Incubation: the entry and forward screens, the ``incubation`` record, and
+the operator's command (``scripts/experiments/incubate.py``)."""
 
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -13,6 +17,7 @@ from autotrade.environment.replay.engine import BacktestError
 from autotrade.environment.strategy import CN_TZ
 from autotrade.pipelines import incubation
 from autotrade.pipelines.experiment import _keep_frozen_artifact_ids, incubation_entry
+from autotrade.pipelines.hitl_state import proc_start_ticks
 from autotrade.pipelines.ledger import (
     INCUBATION_FIELDS,
     FrozenArtifactMutated,
@@ -24,6 +29,9 @@ from autotrade.pipelines.ledger import (
 )
 from autotrade.pipelines.verdict import CONDITIONS, NOT_A_SESSION_STEP, UNMEASURABLE
 from tests.unit.test_rolling_pipeline import _pipeline
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
 
 def test_every_freeze_gate_reason_is_classified_exactly_once():
     # Every condition the graduation verdict does not judge is the gate's,
@@ -285,3 +293,23 @@ def test_controls_and_sub_span_nodes_are_blocked(tmp_path: Path, field: str, val
     screen = incubation_entry(records, "research_step_0", config=pipeline.config)["screen"]
     assert screen["passed"] is False and reason in screen["blocking"]
 
+
+def test_the_command_refuses_an_arm_with_a_live_worker(tmp_path: Path):
+    pipeline, ledger = _ended_arm(tmp_path)
+    hitl = pipeline.config.experiment_dir / "hitl"
+    hitl.mkdir(exist_ok=True)
+    (hitl / "status.json").write_text(
+        f'{{"schema_version": 1, "state": "running", "pid": {os.getpid()}, '
+        f'"pid_start_ticks": {proc_start_ticks(os.getpid())}}}',
+        encoding="utf-8",
+    )
+    before = ledger.read()
+    completed = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "experiments" / "incubate.py"),
+         "--experiment", "arm", "--step", "research_step_0", "--by", "operator", "--reason", "r",
+         "--experiments-root", str(pipeline.config.experiments_root), "--dry-run"],
+        capture_output=True, text=True, check=False,
+    )
+    assert completed.returncode == 2
+    assert "live worker" in completed.stderr
+    assert ledger.read() == before
