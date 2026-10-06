@@ -159,6 +159,16 @@ SEQBAG4_LINEAGE = [
     "seqbag2_bag_100k_8y_mimo_20261008",
 ]
 
+# The title family's first stage: round 20261012's incentive-draft arms, the
+# 100k pair and the 500k arm. A later lane on the announcement titles over the
+# same eight years inherits all three; the console reads them only once they
+# have closed, so such an arm waits for the last of them.
+INCDRAFT_LINEAGE = [
+    "incdraft_100k_8y_qwen_20261012",
+    "incdraft_100k_8y_mimo_20261012",
+    "incdraft_500k_8y_qwen_20261012",
+]
+
 # Appended to the directives of the arms queued after `require_seed_replicates`
 # came in but whose packs predate it and say which seed base's node is
 # nominated, so that rule is not read as waiving the registration. Those arms
