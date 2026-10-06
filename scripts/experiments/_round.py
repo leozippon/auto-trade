@@ -581,6 +581,16 @@ RETIRED_IDS: frozenset[str] = frozenset(
         "wtstab_alla_100k_20260927",
         "xs_transformer_1m_20260922",
         "xsattn_csi1000_8y_20260925",
+        # Every arm of the closed rounds 20261011, 20261012, 20261012c and
+        # 20261012d, whose files were removed from the tree on 2026-10-06 (last
+        # in 6a0f487); all finished and stay on disk.
+        "incdraft_100k_8y_mimo_20261012",
+        "incdraft_100k_8y_qwen_20261012",
+        "incdraft_500k_8y_qwen_20261012",
+        "seqfresh_100k_8y_mimo_20261011",
+        "seqfresh_100k_8y_qwen_20261011",
+        "titlemap_100k_8y_mimo_20261012",
+        "titlerank_100k_8y_qwen_20261012",
     }
 )
 

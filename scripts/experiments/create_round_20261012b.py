@@ -155,10 +155,13 @@ ARMS: dict[str, dict[str, object]] = {
 }
 
 # The seed, the geometry and every round-level parameter are round 20261011's.
+# Both arms have been created, so the round is closed; the file and its pack
+# stay until the state-space arm has ended.
 ROUND = Round(
     arms=ARMS,
     pit_views_seed=TAXED_FUND_PIT_VIEWS_SEED,
     overrides=FUND_EIGHT_YEAR_100K,
+    closed=True,
 )
 
 
