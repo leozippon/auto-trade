@@ -16,6 +16,7 @@ from autotrade.paper import DailyPaperEngine, PaperEngineError
 from autotrade.paper.engine import PaperDataNotReady
 from autotrade.paper.orders import (
     LATEST_NAME,
+    _action,
     order_sheet,
     render_failure,
     render_orders,
@@ -452,21 +453,26 @@ def test_a_pre_open_book_reads_a_real_pit_window_without_the_session_bars(tmp_pa
     strategy = tmp_path / "main.py"
     strategy.write_text("def generate_orders(context):\n    return []\n", encoding="utf-8")
     state_root = tmp_path / "paper"
+    built: list[BookPITData] = []
     engine = DailyPaperEngine(
         strategy_path=strategy,
         strategy_revision="revision_1",
         state_root=state_root,
-        data_factory=lambda start, trade_date: BookPITData(
+        data_factory=lambda start, trade_date: built.append(BookPITData(
             state_root=state_root, raw_dir=raw, fundamental_events_root=events_root,
             fundamental_events_status=status, snapshot_config=config, start=start, trade_date=trade_date,
-        ),
+        )) or built[-1],
         executor_factory=lambda *_mounts: MacroReader(),
     )
     summary = engine.run_day("20211011")
     assert seen["index_dates"] == ["20210930", "20211008"]
     assert summary["pending_order_count"] == 1
     [order] = [json.loads(line) for line in (state_root / "orders_20211011.jsonl").read_text(encoding="utf-8").splitlines()]
-    assert order["paper_reference"]["close"] == 10.5
+    assert (order["paper_reference"]["close"], order["paper_reference"]["name"]) == (10.5, "平安银行")
+    # The sheet's names are the ones the morning knew: an ST name in force is
+    # shown, a rename announced only later is not.
+    names = built[0].references({"000005.SZ", "000010.SZ"}, "20211011")
+    assert {symbol: quote["name"] for symbol, quote in names.items()} == {"000005.SZ": "世纪星源", "000010.SZ": "ST美丽"}
     assert json.loads((state_root / ".paper_state.json").read_text(encoding="utf-8"))["decisions"][0]["data_through"] == "20211008"
     # The run's as-of view is discarded; the release-scoped cache stays.
     assert [entry.name for entry in (state_root / "pit").iterdir()] == ["live"]
@@ -501,3 +507,9 @@ def test_late_data_is_refused_before_any_pit_view_is_built(tmp_path: Path):
             start="20211011", trade_date="20211011",
         )
     assert not (tmp_path / "paper" / "pit" / "live" / "pit_views" / "decision").exists()
+
+
+def test_a_buy_of_a_name_currently_st_is_flagged():
+    assert _action({"action": "buy", "name": "*ST华仪"}) == "买入（ST）"
+    assert _action({"action": "buy", "name": "平安银行"}) == "买入"
+    assert _action({"action": "sell", "name": "ST 华仪"}) == "卖出"

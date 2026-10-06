@@ -22,7 +22,11 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from autotrade.environment.data.research_release import pin_research_release
-from autotrade.environment.data.snapshot import SnapshotConfig, load_snapshot_manifest
+from autotrade.environment.data.snapshot import (
+    SnapshotBuilder,
+    SnapshotConfig,
+    load_snapshot_manifest,
+)
 from autotrade.environment.llm import LLMProxy
 from autotrade.environment.nl import NLConfig, NLService
 from autotrade.environment.replay.engine import StrategyDataView
@@ -107,6 +111,7 @@ class BookPITData:
                 _remove_tree(entry)
         self.sessions = tuple(load_sse_trading_days(provider.release.raw_dir))
         self.release_end = provider.trading_days[-1]
+        self._names = SnapshotBuilder(provider.release.raw_dir, fundamental_events_root)
         prior = [day for day in self.sessions if day < trade_date]
         if prior and self.release_end < prior[-1]:
             # Checked before the views are built: a late morning must not spend
@@ -192,13 +197,20 @@ class BookPITData:
 
     def references(self, symbols: Iterable[str], before: str) -> dict[str, dict[str, object]]:
         """Name and last raw close before ``before`` of each symbol: host-side
-        display quotes for the order sheet, never a strategy input."""
+        display quotes for the order sheet, never a strategy input.
+
+        The name is the one in force on the last session before ``before``,
+        read as a snapshot reads it (announced name changes only), so the
+        sheet shows a name -- and an ST mark -- the morning could know, not
+        the name of the book's first decision view.
+        """
 
         wanted = sorted(set(symbols))
         if not wanted:
             return {}
-        universe = pd.read_parquet(self.snapshot_dir / "universe.parquet", columns=["ts_code", "name"])
-        names = dict(zip(universe["ts_code"].astype(str), universe["name"].astype(str), strict=True))
+        prior = max(day for day in self.sessions if day < before)
+        current = self._names._names_as_of(datetime.combine(pd.Timestamp(prior).date(), time(23, 59, 59), tzinfo=CN_TZ))
+        names = dict(zip(current["ts_code"].astype(str), current["name"].astype(str), strict=True))
         floor = (pd.Timestamp(before) - pd.Timedelta(days=45)).strftime("%Y%m%d")
         history = pd.read_parquet(self.snapshot_dir / "daily.parquet", columns=["ts_code", "trade_date", "close"])
         frames = [history, self._daily[["ts_code", "trade_date", "close"]]]

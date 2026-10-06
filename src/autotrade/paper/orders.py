@@ -242,7 +242,7 @@ def render_orders(book: Book, trade_date: str) -> str:
             ]
             for row in members:
                 lines.append(
-                    f"| {'买入' if row['action'] == 'buy' else '卖出'} | {row['symbol']} | {row['name']} "
+                    f"| {_action(row)} | {row['symbol']} | {row['name']} "
                     f"| {row['quantity']:,} | {_price(row['reference_price'])} | {_money(row['notional'])} "
                     f"| {row['window_label']} |"
                 )
@@ -346,6 +346,15 @@ def write_orders(orders_dir: str | Path, trade_date: str, text: str) -> Path:
         staging.write_text(text, encoding="utf-8")
         staging.replace(path)
     return target
+
+
+def _action(row: Mapping[str, object]) -> str:
+    """The direction cell; a buy of a name that is ST (by the rule the
+    research screen uses on the name in force) is flagged."""
+
+    if row["action"] != "buy":
+        return "卖出"
+    return "买入（ST）" if "ST" in str(row["name"]) else "买入"
 
 
 def _batches(groups: list[Mapping[str, object]], rows: list[Mapping[str, object]]) -> str:
