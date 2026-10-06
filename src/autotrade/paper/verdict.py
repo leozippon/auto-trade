@@ -1,24 +1,38 @@
 """The Paper verdict: does a book's active return hold up on days nobody saw?
 
-The evidence is the book's daily unregressed active return on Paper: the
-account's daily return minus the mean of the zero-skill panel drawn on the
-book's own Paper fills -- for a real-fill book the fills its owner recorded,
-corrections included (``replay/null_control.run_null_control``, the panel
-research grades against), over the bars, ex-dates, index and membership of the
-book's newest replay slot, through the book's pinned Broker profile, so its
-names come only from the boards the book may buy on. The days begin at the book's first Paper settlement:
-the forward year selected the book, so it is never read into the statistic.
+The evidence is the book's daily active return on Paper: the account's daily
+return minus the mean of the zero-skill panel drawn on the book's own Paper
+fills -- for a real-fill book the fills its owner recorded, corrections
+included (``replay/null_control.run_null_control``, the panel research grades
+against), over the bars, ex-dates, index and membership of the book's newest
+replay slot, through the book's pinned Broker profile, so its names come only
+from the boards the book may buy on. The days begin at the book's first Paper
+settlement: the forward year selected the book, so it is never read into the
+statistic.
+
+The series is read twice, as graduation reads the forward year. Plain, its
+annualised mean (F8's statistic); and regressed, its annualised intercept on
+the pinned index and the size factor of the slot's own cross-section (F2's
+regression, ``pipelines/verdict.neutralized_interval``, over the same frame
+the forward replay builds them from), whose loadings the reading reports. The
+plain mean carries the book's market beta, so a rising market lifts it and a
+falling one sinks it; the regressed one credits a low-beta book in a rally.
+Each guards against the other's failure, so a statistical transition needs
+both.
 
 A book is ``observing`` until one terminal transition, ``confirmed`` or
 ``killed``, appended once to ``verdict.jsonl`` (``book.book_status``). The
 statistical checks run only at checkpoints, every ``checkpoint_days`` settled
 sessions, each on the days through it and each once: kill when the
-``kill_confidence`` upper bound of the annualised active mean is below zero,
-confirm when the ``confirm_confidence`` lower bound is above it (F8's bootstrap,
-``pipelines/verdict.bootstrap_lower_bound``, seeded by the artifact id). A
-drawdown past the arm's pinned ``max_drawdown`` (account) or
-``active_max_drawdown`` (active series) kills on any day. ``verdict.json``
-holds the latest reading. The rules are the ones the book pinned at creation.
+``kill_confidence`` upper bounds of both readings are below zero, confirm when
+both ``confirm_confidence`` lower bounds are above it (the moving-block
+bootstrap, ``pipelines/verdict.bootstrap_lower_bound``, seeded by the artifact
+id). A checkpoint whose regression has fewer days than one bootstrap block
+(the first Paper day has no size factor) passes without a transition and the
+regressed reading names the reason. A drawdown past the arm's pinned
+``max_drawdown`` (account) or ``active_max_drawdown`` (plain active series)
+kills on any day. ``verdict.json`` holds the latest reading. The rules are the
+ones the book pinned at creation.
 """
 
 from __future__ import annotations
@@ -39,6 +53,7 @@ from autotrade.environment.replay.stats import (
     compounded_return,
 )
 from autotrade.environment.replay.style import (
+    _size_factor,
     daily_returns_from_curve,
     slot_benchmark,
     slot_membership,
@@ -49,6 +64,7 @@ from autotrade.pipelines.verdict import (
     BOOTSTRAP_BLOCK_DAYS,
     bootstrap_lower_bound,
     daily_mean,
+    neutralized_interval,
 )
 
 from .book import VERDICT_LOG_NAME, Book, book_status
@@ -58,7 +74,9 @@ from .pit import newest_replay_slot
 from .storage import append_jsonl_once, read_json, read_jsonl, write_json_atomic
 
 VERDICT_NAME = "verdict.json"
-VERDICT_SCHEMA_VERSION = 1
+# 2: the plain and the regressed reading, each in its own block.
+VERDICT_SCHEMA_VERSION = 2
+TOO_FEW_REGRESSION_DAYS = "too_few_regression_days"
 
 
 def paper_reading(book: Book) -> dict[str, object]:
@@ -103,7 +121,8 @@ def evidence_reading(
     previous: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """The reading of ``equity`` (the book's settled days, in order) and its
-    fills against ``frame``'s bars of exactly those days.
+    fills against ``frame``'s bars of exactly those days, which also build the
+    size factor as the forward replay builds it (``style._size_factor``).
 
     ``previous`` is the last reading: a checkpoint it already checked is never
     checked again, though the panel drawn on a longer window differs.
@@ -130,9 +149,8 @@ def evidence_reading(
     if not dates:
         return {
             **reading, "status": stored, "transition": transition, "checked_through": checked,
-            "next_checkpoint": checkpoint, "active_mean": None, "confirm_lower_bound": None,
-            "kill_upper_bound": None, "account_return": None, "index_return": None,
-            "account_max_drawdown": None, "active_max_drawdown": None, "panel": None,
+            "next_checkpoint": checkpoint, "plain": None, "regressed": None, "account_return": None,
+            "index_return": None, "account_max_drawdown": None, "active_max_drawdown": None, "panel": None,
         }
     if len(set(dates)) != len(dates) or dates != sorted(dates):
         raise ValueError(f"{book.root.name}'s equity journal does not hold each settled day once, in order")
@@ -162,20 +180,25 @@ def evidence_reading(
         raise ValueError(f"the benchmark {book.benchmark_index} has no return on {missing[0]}")
     account_returns = np.asarray([value for _day, value in account])
     active = account_returns - np.asarray([zero_skill[day] for day in dates])
+    size = _size_factor(frame)
+    # The analysis the forward replay's regression reads, of the active series.
+    regression = {
+        "strategy_daily": list(zip(dates, active.tolist(), strict=True)),
+        "benchmark_daily": [(day, benchmark[day]) for day in dates],
+        "size_factor_daily": [(day, size[day]) for day in dates if day in size],
+    }
 
     if transition is None:
-        transition = _first_transition(book, dates, account_returns, active, checked)
+        transition = _first_transition(book, dates, account_returns, active, regression, checked)
     last_checkpoint = len(dates) // checkpoint * checkpoint
-    lower, upper = _bounds(active, book)
     return {
         **reading,
         "status": transition["status"] if transition else "observing",
         "transition": transition,
         "checked_through": max(checked, last_checkpoint),
         "next_checkpoint": last_checkpoint + checkpoint,
-        "active_mean": float(active.mean()) * TRADING_DAYS_PER_YEAR,
-        "confirm_lower_bound": lower,
-        "kill_upper_bound": upper,
+        "plain": _plain(active, book),
+        "regressed": _regressed(regression, dates[-1], book),
         "account_return": float(compounded_return(account_returns)),
         "index_return": float(compounded_return(benchmark[day] for day in dates)),
         "account_max_drawdown": float(max(drawdown for _equity, drawdown in compounded_path(account_returns))),
@@ -200,11 +223,17 @@ def record_verdict(book: Book) -> dict[str, object]:
 
 
 def _first_transition(
-    book: Book, dates: Sequence[str], account: np.ndarray, active: np.ndarray, checked: int
+    book: Book,
+    dates: Sequence[str],
+    account: np.ndarray,
+    active: np.ndarray,
+    regression: Mapping[str, object],
+    checked: int,
 ) -> dict[str, object] | None:
     """The first terminal event on the book's path, or None.
 
-    Drawdowns are read every day; a checkpoint only once, past ``checked``.
+    Drawdowns are read every day; a checkpoint only once, past ``checked``,
+    and it acts only when the plain and the regressed bounds agree.
     """
 
     rules = book.verdict_rules
@@ -213,19 +242,20 @@ def _first_transition(
     active_path = compounded_path(active)
     for index, day in enumerate(dates):
         days = index + 1
-        status = reason = None
+        status = reason = plain = regressed = None
         if account_path[index][1] > float(rules["max_drawdown"]):
             status, reason = "killed", "account_drawdown_exceeded"
         elif active_path[index][1] > float(rules["active_max_drawdown"]):
             status, reason = "killed", "active_drawdown_exceeded"
         elif days % checkpoint == 0 and days > checked:
-            lower, upper = _bounds(active[:days], book)
-            if upper < 0:
-                status, reason = "killed", "kill_upper_bound_below_zero"
-            elif lower > 0:
-                status, reason = "confirmed", "confirm_lower_bound_above_zero"
+            plain, regressed = _plain(active[:days], book), _regressed(regression, day, book)
+            # An unmeasured regression acts on nothing: the checkpoint passes.
+            if regressed["reason"] is None:
+                if plain["kill_upper_bound"] < 0 and regressed["kill_upper_bound"] < 0:
+                    status, reason = "killed", "both_kill_upper_bounds_below_zero"
+                elif plain["confirm_lower_bound"] > 0 and regressed["confirm_lower_bound"] > 0:
+                    status, reason = "confirmed", "both_confirm_lower_bounds_above_zero"
         if status is not None:
-            lower, upper = _bounds(active[:days], book)
             return {
                 "event_id": "terminal",
                 "status": status,
@@ -233,13 +263,53 @@ def _first_transition(
                 "date": day,
                 "days": days,
                 "recorded_at": datetime.now(CN_TZ).isoformat(timespec="seconds"),
-                "active_mean": float(active[:days].mean()) * TRADING_DAYS_PER_YEAR,
-                "confirm_lower_bound": lower,
-                "kill_upper_bound": upper,
+                "plain": plain or _plain(active[:days], book),
+                "regressed": regressed or _regressed(regression, day, book),
                 "account_drawdown": float(account_path[index][1]),
                 "active_drawdown": float(active_path[index][1]),
             }
     return None
+
+
+def _plain(active: np.ndarray, book: Book) -> dict[str, float | None]:
+    """The plain reading: the annualised active mean and its two bounds."""
+
+    lower, upper = _bounds(active, book)
+    return {
+        "mean": float(active.mean()) * TRADING_DAYS_PER_YEAR,
+        "confirm_lower_bound": lower,
+        "kill_upper_bound": upper,
+    }
+
+
+def _regressed(regression: Mapping[str, object], end: str, book: Book) -> dict[str, object]:
+    """The regressed reading of the days through ``end``: the annualised
+    intercept, its two bounds and the market and size loadings, or, below one
+    bootstrap block of days with both regressors, its ``reason``."""
+
+    days = sum(1 for day, _value in regression["size_factor_daily"] if day <= end)
+    if days < BOOTSTRAP_BLOCK_DAYS:
+        return {
+            "days": days, "mean": None, "confirm_lower_bound": None, "kill_upper_bound": None,
+            "market_beta": None, "size_beta": None, "reason": TOO_FEW_REGRESSION_DAYS,
+        }
+    rules = book.verdict_rules
+    measured = neutralized_interval(
+        regression,
+        end=end,
+        seed_key=book.artifact_id,
+        lower_confidence=float(rules["confirm_confidence"]),
+        upper_confidence=float(rules["kill_confidence"]),
+    )
+    return {
+        "days": measured["days"],
+        "mean": measured["neutralized_excess"],
+        "confirm_lower_bound": measured["lower_bound"],
+        "kill_upper_bound": measured["upper_bound"],
+        "market_beta": measured["market_beta"],
+        "size_beta": measured["size_beta"],
+        "reason": None,
+    }
 
 
 def _bounds(active: np.ndarray, book: Book) -> tuple[float | None, float | None]:

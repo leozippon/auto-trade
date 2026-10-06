@@ -58,8 +58,9 @@ TRACKS = ("graduated", "incubating")
 INCUBATING_BOOK_CAP = 4
 # The Paper verdict's rules, pinned into every new book. A statistical check
 # runs only every CHECKPOINT_DAYS settled Paper sessions (half a year): kill
-# when the KILL_CONFIDENCE upper bound of the active mean is below zero (t < -1),
-# confirm when the CONFIRM_CONFIDENCE lower bound is above zero (t > 2).
+# when the KILL_CONFIDENCE upper bounds of the plain active mean and of its
+# regressed intercept are both below zero (t < -1), confirm when both
+# CONFIRM_CONFIDENCE lower bounds are above zero (t > 2).
 CHECKPOINT_DAYS = 126
 KILL_CONFIDENCE = 0.841
 CONFIRM_CONFIDENCE = 0.977

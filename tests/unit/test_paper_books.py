@@ -235,7 +235,7 @@ def _incubate(tmp_path: Path, book_id: str, boards: tuple[str, ...] = ("main", "
 def _kill(root: Path, day: str = "20260105") -> None:
     append_jsonl_once(
         root / VERDICT_LOG_NAME,
-        {"event_id": "terminal", "status": "killed", "reason": "kill_upper_bound_below_zero", "date": day, "days": 126},
+        {"event_id": "terminal", "status": "killed", "reason": "both_kill_upper_bounds_below_zero", "date": day, "days": 126},
     )
 
 

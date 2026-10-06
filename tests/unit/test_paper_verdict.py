@@ -53,7 +53,7 @@ def _graduated_book(tmp_path: Path, book_id: str = "exp") -> Book:
 def _kill(root: Path, day: str = "20260105") -> None:
     append_jsonl_once(
         root / VERDICT_LOG_NAME,
-        {"event_id": "terminal", "status": "killed", "reason": "kill_upper_bound_below_zero", "date": day, "days": 126},
+        {"event_id": "terminal", "status": "killed", "reason": "both_kill_upper_bounds_below_zero", "date": day, "days": 126},
     )
 
 
@@ -62,18 +62,38 @@ def _days(count: int) -> list[str]:
     return [str(day).replace("-", "") for day in np.busday_offset(start, np.arange(count), roll="forward")]
 
 
-def _read(book: Book, returns, *, previous=None) -> dict[str, object]:
+def _noisy(mean: float, count: int, seed: int = 7, sd: float = 0.004) -> np.ndarray:
+    return mean + np.random.default_rng(seed).normal(0.0, sd, count)
+
+
+def _frame(dates: list[str], size) -> pd.DataFrame:
+    """``_bars`` beside a 30-name cross-section whose small-minus-big spread
+    (``style._size_factor``) is ``size`` from the second day on: the nine
+    smallest names by float cap earn it, the rest nothing."""
+
+    legs = pd.DataFrame([
+        {"trade_date": day, "symbol": f"{600000 + rank}.SH", "open": 10.0, "close": 10.0, "pre_close": 10.0,
+         "up_limit": 11.0, "down_limit": 9.0, "circ_mv": float(rank), "pct_chg": float(value) if rank <= 9 else 0.0}
+        for day, value in zip(dates, size, strict=True) for rank in range(1, 31)
+    ])
+    return pd.concat([_bars(dates), legs], ignore_index=True)
+
+
+def _read(book: Book, returns, *, index=None, size=True, previous=None) -> dict[str, object]:
     """The reading of an account that earned ``returns`` and never traded:
-    its zero-skill panel is the idle account, so its active return is its own."""
+    its zero-skill panel is the idle account, so its active return is its own.
+
+    ``index`` is the pinned index's daily return (independent noise unless
+    given); the slot's cross-section carries a size factor unless ``size`` is
+    False."""
 
     dates = _days(len(returns))
+    index = _noisy(0.0, len(dates), seed=11, sd=0.01) if index is None else index
+    frame = _frame(dates, _noisy(0.0, len(dates), seed=13)) if size else _bars(dates)
     equity = book.profile.initial_cash * np.cumprod(1.0 + np.asarray(returns))
     rows = [{"trade_date": day, "equity": float(value)} for day, value in zip(dates, equity, strict=True)]
-    return evidence_reading(book, rows, [], _bars(dates), {day: 0.0 for day in dates}, previous=previous)
-
-
-def _noisy(mean: float, count: int, seed: int = 7) -> np.ndarray:
-    return mean + np.random.default_rng(seed).normal(0.0, 0.004, count)
+    benchmark = {day: float(value) for day, value in zip(dates, index, strict=True)}
+    return evidence_reading(book, rows, [], frame, benchmark, previous=previous)
 
 
 def _statistical(book: Book) -> Book:
@@ -87,26 +107,66 @@ def test_statistical_checks_run_only_at_checkpoints_and_each_once(tmp_path: Path
 
     before = _read(book, losing[:125])
     assert before["status"] == "observing" and before["transition"] is None
-    assert before["kill_upper_bound"] < 0  # reported, but not acted on before the checkpoint
+    # Reported, but not acted on before the checkpoint.
+    assert before["plain"]["kill_upper_bound"] < 0 and before["regressed"]["kill_upper_bound"] < 0
     assert (before["checked_through"], before["next_checkpoint"]) == (0, 126)
 
     at = _read(book, losing[:126])
     assert at["status"] == "killed" and at["checked_through"] == 126
-    assert at["transition"]["reason"] == "kill_upper_bound_below_zero"
+    assert at["transition"]["reason"] == "both_kill_upper_bounds_below_zero"
     assert at["transition"]["days"] == 126 and at["transition"]["date"] == _days(126)[-1]
+    # The first day has no size factor (no prior float cap), so 125 are regressed.
+    assert at["transition"]["regressed"]["days"] == 125
+    assert at["transition"]["plain"] == at["plain"] and at["transition"]["regressed"] == at["regressed"]
 
     # A later reading does not check the 126th day again: nothing acts until 252.
     between = _read(book, losing[:200], previous={"checked_through": 126})
     assert between["status"] == "observing" and between["next_checkpoint"] == 252
 
     confirmed = _read(book, _noisy(0.003, 126))
-    assert confirmed["status"] == "confirmed" and confirmed["confirm_lower_bound"] > 0
-    assert confirmed["transition"]["reason"] == "confirm_lower_bound_above_zero"
+    assert confirmed["status"] == "confirmed"
+    assert confirmed["plain"]["confirm_lower_bound"] > 0 and confirmed["regressed"]["confirm_lower_bound"] > 0
+    assert confirmed["transition"]["reason"] == "both_confirm_lower_bounds_above_zero"
 
     # One window and one seed read the same numbers every time.
     again = _read(book, _noisy(0.003, 126))
     assert {**again, "computed_at": None, "transition": None} == {**confirmed, "computed_at": None, "transition": None}
-    assert again["transition"]["confirm_lower_bound"] == confirmed["transition"]["confirm_lower_bound"]
+    assert {**again["transition"], "recorded_at": None} == {**confirmed["transition"], "recorded_at": None}
+
+
+def test_a_market_move_alone_neither_confirms_nor_kills(tmp_path: Path):
+    """A book whose active return is half the index's, and 10 %/yr below
+    (above) zero after it: the plain bound alone would confirm it in a rising
+    market (kill it in a falling one), the regressed one does not agree."""
+
+    book = _statistical(_graduated_book(tmp_path))
+    noise = _noisy(0.0, 126, seed=5, sd=0.001)
+
+    def read(drift: float, alpha: float) -> dict[str, object]:
+        index = _noisy(drift, 126, seed=17, sd=0.008)
+        reading = _read(book, alpha + 0.5 * index + noise, index=index)
+        assert reading["status"] == "observing" and reading["transition"] is None
+        assert reading["checked_through"] == 126 and reading["regressed"]["reason"] is None
+        assert reading["regressed"]["market_beta"] == pytest.approx(0.5, abs=0.05)
+        return reading
+
+    rising = read(0.004, -0.0004)
+    assert rising["plain"]["confirm_lower_bound"] > 0 > rising["regressed"]["confirm_lower_bound"]
+    falling = read(-0.004, 0.0004)
+    assert falling["plain"]["kill_upper_bound"] < 0 < falling["regressed"]["kill_upper_bound"]
+
+
+def test_a_checkpoint_without_a_regression_passes_and_says_why(tmp_path: Path):
+    """No size factor in the slot: the plain bound alone confirms nothing."""
+
+    book = _statistical(_graduated_book(tmp_path))
+    reading = _read(book, _noisy(0.003, 126), size=False)
+    assert reading["status"] == "observing" and reading["checked_through"] == 126
+    assert reading["plain"]["confirm_lower_bound"] > 0
+    assert reading["regressed"] == {
+        "days": 0, "mean": None, "confirm_lower_bound": None, "kill_upper_bound": None,
+        "market_beta": None, "size_beta": None, "reason": paper_verdict.TOO_FEW_REGRESSION_DAYS,
+    }
 
 
 def test_a_drawdown_kills_on_an_ordinary_day(tmp_path: Path):
@@ -115,6 +175,8 @@ def test_a_drawdown_kills_on_an_ordinary_day(tmp_path: Path):
     account = _read(book, [*calm, -0.50, *calm])
     assert account["status"] == "killed" and account["transition"]["reason"] == "account_drawdown_exceeded"
     assert account["transition"]["days"] == 11
+    # A drawdown needs no regression: eleven days measure none.
+    assert account["transition"]["regressed"]["reason"] == paper_verdict.TOO_FEW_REGRESSION_DAYS
 
     # 35 % is inside the account limit but past the active one.
     active = _read(book, [*calm, -0.35, *calm])
@@ -206,7 +268,10 @@ def test_a_paper_reading_reads_the_fills_a_real_fill_book_holds_over_its_newest_
     assert handed["profile"] is book.profile
     assert reading["panel"]["matched"] == MATCHED_MEMBERSHIP and reading["panel"]["round_trips"] == 1
     assert reading["index_return"] == pytest.approx(np.prod([1 + index_pct[day] / 100 for day in settled]) - 1)
-    assert reading["status"] == "observing" and reading["confirm_lower_bound"] is None  # under one bootstrap block
+    # Under one bootstrap block, and the slot's two names build no size factor.
+    assert reading["status"] == "observing" and reading["plain"]["confirm_lower_bound"] is None
+    assert reading["plain"]["mean"] is not None
+    assert (reading["regressed"]["days"], reading["regressed"]["reason"]) == (0, paper_verdict.TOO_FEW_REGRESSION_DAYS)
 
 
 def _run_paper():
