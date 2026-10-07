@@ -105,6 +105,51 @@ FUND_TITLE_EIGHT_YEAR_100K: dict[str, object] = {**FUND_EIGHT_YEAR_100K, **FUND_
 
 FUND_TITLE_PIT_VIEWS_SEED = "data/pit_views_seed_research_8y_fundanns_20261014"
 
+# The five-year geometry (round 20261015): research on the five July-June years
+# from 2020-07, when the events domain begins, with a 72-month window (the
+# research years plus one warm-up year, as the four- and eight-year windows
+# have), the fundamentals domain (default ten), the announcement titles, the
+# eight-year surface's four macro tables, and the events domain: its default
+# fourteen datasets plus the two top-ten holder tables, which are complete
+# only as a union (docs/data-documentation.md §4), and the famous-trader seats.
+# The gates are GATES unchanged: a positive-year share of 0.75 already asks for
+# four of five years.
+FIVE_YEAR: dict[str, object] = {
+    **EIGHT_YEAR,
+    "research_start": "20200701",
+    "window_months": 72,
+    "include_fundamentals": True,
+    "include_events": True,
+    "events_datasets": [
+        "margin",
+        "margin_detail",
+        "moneyflow",
+        "cyq_perf",
+        "bak_daily",
+        "block_trade",
+        "stk_holdernumber",
+        "stk_holdertrade",
+        "new_share",
+        "share_float_complete",
+        "top_list",
+        "top_inst",
+        "limit_list_d",
+        "kpl_list",
+        "top10_holders",
+        "top10_floatholders",
+        "hm_detail",
+    ],
+    "include_text": True,
+    "text_datasets": ["anns_d"],
+}
+
+# Round 20261005's 100k bars on the five-year geometry.
+FIVE_YEAR_100K: dict[str, object] = {**FUND_EIGHT_YEAR_100K, **FIVE_YEAR}
+
+# Its seed, prebuilt from release b5dc339b708d4a0ba962805828e973af
+# (logs/data/seed_5y_full_20261015/).
+FIVE_YEAR_PIT_VIEWS_SEED = "data/pit_views_seed_research_5y_full_20261015"
+
 # The hosted arm of a pair: main session, sub-agents and compaction on MiMo, the
 # compaction threshold pinned to the local arms' value so both compact alike.
 # `nl_model` is left on the local default: text-evidence scoring also runs in
@@ -187,6 +232,11 @@ TITLE_LINEAGE = [
 # Plus round 20261013's board-matched rerun and instrument split of the drafts:
 # the company-commitment titles through their third stage (round 20261014).
 COMMITMENT_LINEAGE = [*TITLE_LINEAGE, "incdraft2_100k_8y_qwen_20261013"]
+# Plus round 20261014's commitment arm, which selected the ESOP-draft book: the
+# searches that chose both Paper books, `b30` (incdraft_100k_8y_qwen_20261012)
+# and `esop60` (open_commit_100k_8y_qwen_20261014), the fixed sleeves of round
+# 20261015's ensemble arm.
+SLEEVE_LINEAGE = [*COMMITMENT_LINEAGE, "open_commit_100k_8y_qwen_20261014"]
 
 # Every arm that searched the fundamentals domain over the eight years as a
 # source of its own edge and recorded a non-control trial (rounds 20261005 to

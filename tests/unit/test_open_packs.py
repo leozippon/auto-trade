@@ -1,16 +1,22 @@
-"""The five open-exploration packs of round 20261014: one common contract, five directions.
+"""The open-exploration packs of rounds 20261014 and 20261015: one common contract per round, one direction per pack.
 
-What must hold. The packs give a direction each and share everything else --
-the rules file, the closed-direction record and the starter -- byte for byte,
-since a pack is mounted alone and cannot point at another. The starter is a
-valid strategy package that, like every arm of the round, may run on a card
-and must still run on the CPU; its title helper returns only visible titles,
-dated by the local calendar day, matched as asked. A pack names the lineage
-its arm is created with, and cites no reading after the research period.
+What must hold. Within a round the packs give a direction each and share the
+rules file and the record of occupied and closed directions byte for byte,
+since a pack is mounted alone and cannot point at another. Each starter is a
+valid strategy package; a round whose arms claim a card ships the device
+helper and one that claims none ships no CUDA path. Round 20261015's starters
+share every common module, carry the events helper exactly where the arm
+mounts the events domain, and the ensemble pack's fixed sleeves are the frozen
+Paper strategies, changed only in their import lines. The read helpers return
+only visible rows, matched as asked. The combined book gives each sleeve its
+own holdings and cash and never lets one sleeve trade another's names. A pack
+names the lineage its arm is created with, and cites no reading after the
+research period.
 """
 
 from __future__ import annotations
 
+import hashlib
 import re
 import sys
 from datetime import datetime
@@ -25,7 +31,15 @@ from autotrade.environment.strategy_loader import validate_strategy_package
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REFS = REPO_ROOT / "configs" / "workspace_refs"
-PACKS = [REFS / f"open_{name}_100k_8y_20261014" for name in ("free", "commit", "avoid", "earnings", "adapt")]
+PACKS_14 = [REFS / f"open_{name}_100k_8y_20261014" for name in ("free", "commit", "avoid", "earnings", "adapt")]
+FIVE_YEAR_15 = [REFS / f"open_{name}_100k_5y_20261015" for name in ("tables", "chips")]
+EIGHT_YEAR_15 = [REFS / f"open_{name}_100k_8y_20261015" for name in ("micro", "distress", "cluster")]
+ENSEMBLE = REFS / "open_ensemble_100k_8y_20261015"
+PACKS_15 = [*FIVE_YEAR_15, *EIGHT_YEAR_15, ENSEMBLE]
+ROUNDS = {
+    "create_round_20261014": (PACKS_14, 1),
+    "create_round_20261015": (PACKS_15, 0),
+}
 COMMON = ("families.md", "references/open-rules.md")
 
 
@@ -33,25 +47,50 @@ def _files(root: Path) -> dict[str, bytes]:
     return {str(path.relative_to(root)): path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
 
 
-@pytest.mark.parametrize("pack", PACKS[1:], ids=lambda path: path.name)
-def test_the_common_contract_and_starter_are_one_text(pack: Path) -> None:
-    first = PACKS[0]
-    for name in COMMON:
-        assert (pack / name).read_bytes() == (first / name).read_bytes(), (pack.name, name)
-    assert _files(pack / "starter") == _files(first / "starter"), pack.name
+@pytest.mark.parametrize("packs", [PACKS_14, PACKS_15], ids=["20261014", "20261015"])
+def test_a_round_shares_one_contract(packs: list[Path]) -> None:
+    for pack in packs[1:]:
+        for name in COMMON:
+            assert (pack / name).read_bytes() == (packs[0] / name).read_bytes(), (pack.name, name)
 
 
-@pytest.mark.parametrize("pack", PACKS, ids=lambda path: path.name)
+@pytest.mark.parametrize("pack", PACKS_14[1:], ids=lambda path: path.name)
+def test_round_20261014_ships_one_starter(pack: Path) -> None:
+    assert _files(pack / "starter") == _files(PACKS_14[0] / "starter"), pack.name
+
+
+def test_round_20261015_starters_share_their_common_modules() -> None:
+    """The six starters agree on every module they share, the five non-ensemble
+    ones on their entry module too; only the five-year packs read the events
+    domain, and no starter keeps a device helper, since no arm has a card."""
+    reference = _files(EIGHT_YEAR_15[0] / "starter")
+    for pack in PACKS_15:
+        files = _files(pack / "starter")
+        shared = {name for name in files if name.startswith("lib/") and name in reference}
+        assert shared >= {"lib/controls.py", "lib/trade.py", "lib/score.py", "lib/titles.py", "lib/fund.py"}, pack.name
+        assert {name: files[name] for name in shared} == {name: reference[name] for name in shared}, pack.name
+        assert ("lib/events.py" in files) is (pack in FIVE_YEAR_15), pack.name
+        assert "lib/device.py" not in files, pack.name
+        if pack != ENSEMBLE:
+            assert files["main.py"] == reference["main.py"], pack.name
+    events = {(pack / "starter" / "lib" / "events.py").read_bytes() for pack in FIVE_YEAR_15}
+    assert len(events) == 1
+
+
+@pytest.mark.parametrize("pack", [*PACKS_14, *PACKS_15], ids=lambda path: path.name)
 def test_the_starter_is_a_valid_package(pack: Path) -> None:
     validate_strategy_package(pack / "starter" / "main.py")
 
 
-def test_every_arm_of_the_round_mounts_its_direction_and_names_its_lineage() -> None:
-    from scripts.experiments.create_round_20261014 import ROUND
+@pytest.mark.parametrize("round_name", sorted(ROUNDS))
+def test_every_arm_of_a_round_mounts_its_direction_and_names_its_lineage(round_name: str) -> None:
+    import importlib
 
+    packs, gpus = ROUNDS[round_name]
+    rnd = importlib.import_module(f"scripts.experiments.{round_name}").ROUND
     mounted = set()
-    for arm in ROUND.arms:
-        params = ROUND.request_params(arm)
+    for arm in rnd.arms:
+        params = rnd.request_params(arm)
         pack = REPO_ROOT / str(params["workspace_reference"])
         mounted.add(pack)
         readme = (pack / "README.md").read_text(encoding="utf-8")
@@ -59,12 +98,24 @@ def test_every_arm_of_the_round_mounts_its_direction_and_names_its_lineage() -> 
         lineage = set(params.get("lineage_arms") or ())
         assert lineage <= set(re.findall(r"`([a-z0-9_]+_\d{8})`", section)), arm
         assert section.lstrip().startswith("没有") is not bool(lineage), arm
-        assert int(params["gpu_count"]) == 1, arm
-    assert mounted == set(PACKS)
+        assert int(params["gpu_count"]) == gpus, arm
+    assert mounted == set(packs)
+
+
+def test_round_20261015_mounts_the_events_domain_on_the_five_year_arms_only() -> None:
+    from scripts.experiments.create_round_20261015 import ROUND
+
+    for arm in ROUND.arms:
+        params = ROUND.request_params(arm)
+        five = "_5y_" in arm
+        assert params["research_start"] == ("20200701" if five else "20170701"), arm
+        assert bool(params["include_events"]) is five, arm
+        assert ("5y" in str(params["pit_views_seed"])) is five, arm
+        assert params["permitted_boards"] == ["main", "gem"], arm
 
 
 def test_no_pack_cites_a_reading_after_the_research_period() -> None:
-    for pack in PACKS:
+    for pack in [*PACKS_14, *PACKS_15]:
         for path in pack.rglob("*"):
             if path.is_file() and path.suffix in (".md", ".py"):
                 text = path.read_text(encoding="utf-8")
@@ -72,20 +123,54 @@ def test_no_pack_cites_a_reading_after_the_research_period() -> None:
                     assert word not in text, (pack.name, path.name, word)
 
 
-def _drop_lib() -> None:
-    for name in [module for module in sys.modules if module == "lib" or module.startswith("lib.")]:
+# The frozen artifacts' files by their SHA-256 prefix, as the ensemble README
+# records them; the sleeves differ from them in their import lines alone.
+SLEEVE_HASH_ROW = re.compile(r"^\| `([a-z/_.]+)`(?:（`b30`）/ `([a-z/_.]+)`（`esop60`）)? \| `([0-9a-f]{16}|—)` \| `([0-9a-f]{16})` \|$")
+
+
+def _recorded_hashes() -> dict[tuple[str, str], str]:
+    recorded: dict[tuple[str, str], str] = {}
+    for line in (ENSEMBLE / "README.md").read_text(encoding="utf-8").splitlines():
+        line = line.replace("| — |", "| `—` |")
+        match = SLEEVE_HASH_ROW.match(line)
+        if match:
+            b30_file, esop_file, b30_hash, esop_hash = match.groups()
+            if b30_hash != "—":
+                recorded[("b30", b30_file)] = b30_hash
+            recorded[("esop60", esop_file or b30_file)] = esop_hash
+    return recorded
+
+
+def test_the_ensemble_sleeves_are_the_frozen_strategies_but_for_their_imports() -> None:
+    recorded = _recorded_hashes()
+    assert len(recorded) == 11
+    for (sleeve, name), prefix in recorded.items():
+        copy = ENSEMBLE / "starter" / "sleeves" / sleeve / Path(name).name
+        original = re.sub(rf"^from sleeves\.{sleeve} import ", "from lib import ", copy.read_text(encoding="utf-8"), flags=re.M)
+        assert hashlib.sha256(original.encode("utf-8")).hexdigest()[:16] == prefix, (sleeve, name)
+    for sleeve in ("b30", "esop60"):
+        files = {path.name for path in (ENSEMBLE / "starter" / "sleeves" / sleeve).glob("*.py")}
+        assert files == {Path(name).name for (owner, name) in recorded if owner == sleeve} | {"__init__.py"}
+
+
+def _drop_packages() -> None:
+    for name in [module for module in sys.modules if module.split(".", 1)[0] in ("lib", "sleeves")]:
         sys.modules.pop(name)
+
+
+def _starter(monkeypatch: pytest.MonkeyPatch, pack: Path) -> None:
+    _drop_packages()
+    monkeypatch.setattr(sys, "dont_write_bytecode", True)
+    monkeypatch.syspath_prepend(str(pack / "starter"))
 
 
 @pytest.fixture
 def lib(monkeypatch: pytest.MonkeyPatch):
-    _drop_lib()
-    monkeypatch.setattr(sys, "dont_write_bytecode", True)
-    monkeypatch.syspath_prepend(str(PACKS[0] / "starter"))
+    _starter(monkeypatch, PACKS_14[0])
     from lib import device, titles
 
     yield SimpleNamespace(device=device, titles=titles)
-    _drop_lib()
+    _drop_packages()
 
 
 # (dataset, code, title, available_at). A decision on Monday 2024-03-11 08:30.
@@ -101,6 +186,7 @@ TITLES = [
     ("anns_d", "000005.SZ", "关于回购股份实施完毕的公告", "2024-03-06 23:59:59+08:00"),
     ("other", "000006.SZ", "关于回购股份实施完毕的公告", "2024-03-06 23:59:59+08:00"),
 ]
+DECISION = datetime(2024, 3, 11, 8, 30, tzinfo=CN_TZ)
 
 
 def _context(root: Path, rows: list[tuple[str, str, str, str]]) -> SimpleNamespace:
@@ -108,7 +194,7 @@ def _context(root: Path, rows: list[tuple[str, str, str, str]]) -> SimpleNamespa
     pd.DataFrame(rows, columns=["dataset", "ts_codes", "title", "available_at"]).to_parquet(
         root / "text_index" / "part-0.parquet", index=False
     )
-    return SimpleNamespace(asof_dir=str(root), inference_at=datetime(2024, 3, 11, 8, 30, tzinfo=CN_TZ))
+    return SimpleNamespace(asof_dir=str(root), inference_at=DECISION)
 
 
 def test_titles_are_read_by_local_day_pattern_and_dataset(lib, tmp_path: Path) -> None:
@@ -138,3 +224,80 @@ def test_a_title_stamped_after_the_decision_fails_the_read(lib, tmp_path: Path) 
 def test_the_device_falls_back_to_the_cpu(lib, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(lib.device.torch.cuda, "is_available", lambda: False)
     assert lib.device.device().type == "cpu"
+
+
+# (dataset, code, available_at, change_ratio) in the events domain.
+EVENTS = [
+    ("stk_holdertrade", "000001.SZ", "2024-03-01 19:00:00+08:00", 0.5),
+    ("stk_holdertrade", "000002.SZ", "2024-03-08 19:00:00+08:00", 1.5),
+    # 23:30 on 03-07 UTC is 07:30 on 03-08 local: inside the window by local day.
+    ("stk_holdertrade", "000003.SZ", "2024-03-07 23:30:00+00:00", 2.5),
+    ("block_trade", "000004.SZ", "2024-03-08 21:00:00+08:00", None),
+]
+
+
+def test_the_events_helper_reads_one_dataset_by_local_day_and_refuses_the_future(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _starter(monkeypatch, FIVE_YEAR_15[0])
+    from lib import events
+
+    (tmp_path / "events").mkdir()
+    frame = pd.DataFrame(EVENTS, columns=["dataset", "ts_code", "available_at", "change_ratio"])
+    frame.to_parquet(tmp_path / "events" / "part-0.parquet", index=False)
+    context = SimpleNamespace(asof_dir=str(tmp_path), inference_at=DECISION)
+    rows = events.read(context, "stk_holdertrade", ["change_ratio"], since="20240308")
+    assert rows[["ts_code", "change_ratio"]].values.tolist() == [["000002.SZ", 1.5], ["000003.SZ", 2.5]]
+    assert len(events.read(context, "stk_holdertrade", ["change_ratio"])) == 3
+    early = SimpleNamespace(asof_dir=str(tmp_path), inference_at=datetime(2024, 3, 8, 8, 30, tzinfo=CN_TZ))
+    with pytest.raises(RuntimeError, match="stamped after this decision"):
+        events.read(early, "stk_holdertrade", ["change_ratio"])
+    _drop_packages()
+
+
+def test_the_combined_book_gives_each_sleeve_its_own_holdings_and_cash(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Ownership is the first claim, the rest goes to the last sleeve; cash is
+    each share of the account's value less the sleeve's holdings; a buy of a
+    name another sleeve holds or already bought is dropped, and a sleeve that
+    sells a name it does not hold stops the book."""
+    _starter(monkeypatch, ENSEMBLE)
+    from lib import combine
+
+    (tmp_path / "daily").mkdir()
+    pd.DataFrame(
+        {"ts_code": ["A", "B", "C", "D"], "trade_date": "20240308", "close": [10.0, 20.0, 5.0, 8.0]}
+    ).to_parquet(tmp_path / "daily" / "part-0.parquet", index=False)
+    seen = {}
+
+    def sleeve(name, buys, sells=()):
+        def run(context):
+            seen[name] = (context.account.cash, dict(context.account.positions))
+            return [{"symbol": code, "action": "sell", "quantity": 100} for code in sells] + [
+                {"symbol": code, "action": "buy", "quantity": 100} for code in buys
+            ]
+
+        return run
+
+    first = combine.Sleeve("first", sleeve("first", ["D", "B"], sells=["A"]), lambda context, codes: {"A", "C"} & set(codes), 0.6)
+    last = combine.Sleeve("last", sleeve("last", ["D", "C"]), lambda context, codes: pytest.fail("never asked"), 0.4)
+    context = SimpleNamespace(
+        asof_dir=str(tmp_path), inference_at=DECISION, account=combine.Account(cash=4_000.0, positions={"A": 100, "B": 100})
+    )
+    orders = combine.combine(context, [first, last])
+    # A is claimed by the first sleeve, B by nobody: it goes to the last.
+    # The account is worth 4,000 + 1,000 + 2,000 = 7,000: the first asks
+    # 4,200 - 1,000, the last 2,800 - 2,000, together 4,000 = the cash.
+    assert seen == {"first": (3_200.0, {"A": 100}), "last": (800.0, {"B": 100})}
+    assert [(o["sleeve"], o["action"], o["symbol"]) for o in orders] == [
+        ("first", "sell", "A"),
+        ("first", "buy", "D"),
+        ("last", "buy", "C"),
+    ]
+    rogue = combine.Sleeve("last", sleeve("last", [], sells=["A"]), None, 0.4)
+    with pytest.raises(RuntimeError, match="does not hold"):
+        combine.combine(context, [first, rogue])
+    with pytest.raises(ValueError, match="sum to at most 1"):
+        combine.combine(context, [first, combine.Sleeve("last", last.run, None, 0.5)])
+    _drop_packages()

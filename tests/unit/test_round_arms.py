@@ -930,12 +930,18 @@ CANONICAL_BOOK = {
 
 @pytest.mark.parametrize("pack", PACKS, ids=lambda path: path.name)
 def test_a_starter_carries_the_canonical_book_byte_for_byte(pack: Path) -> None:
-    """A starter file named like one in configs/starter_lib/ is that file."""
+    """A starter file named like one in configs/starter_lib/ is that file.
+
+    Files under ``starter/sleeves/`` are frozen copies of another arm's
+    strategy artifact (round 20261015's ensemble pack): they are compared with
+    that artifact (tests/unit/test_open_packs.py), not with this library."""
     assert CANONICAL_BOOK, "configs/starter_lib/ holds no canonical module"
     differing = [
         str(path.relative_to(pack))
         for path in sorted((pack / "starter").rglob("*"))
-        if path.name in CANONICAL_BOOK and path.read_bytes() != CANONICAL_BOOK[path.name]
+        if path.name in CANONICAL_BOOK
+        and path.relative_to(pack / "starter").parts[0] != "sleeves"
+        and path.read_bytes() != CANONICAL_BOOK[path.name]
     ]
     assert not differing, (
         f"{pack.name} edits its copy of configs/starter_lib/ ({', '.join(differing)}): copy the "
