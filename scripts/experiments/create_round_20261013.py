@@ -82,10 +82,14 @@ ARMS: dict[str, dict[str, object]] = {
 
 # The seed, the geometry and every other round-level parameter are round
 # 20261012's; the boards are this round's own decision.
+# The arm has been created and has ended, so the round is closed; the file
+# leaves the tree once its lessons are in the register, and the pack stays
+# while the arm may still be incubated.
 ROUND = Round(
     arms=ARMS,
     pit_views_seed=TITLE_PIT_VIEWS_SEED,
     overrides={**TITLE_EIGHT_YEAR_100K, "permitted_boards": ["main", "gem"]},
+    closed=True,
 )
 
 
