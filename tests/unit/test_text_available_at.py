@@ -25,8 +25,11 @@ class TextAvailableAtPlausibilityTest(unittest.TestCase):
         self.assertEqual(out.loc[0, "available_at_rule"], "conservative_from:ann_date:implausible_rec_time")
 
     def test_rec_time_evening_before_ann_date_is_plausible(self):
+        # The nightly title job fetches the next day's titles the evening
+        # they arrive: each is visible from its receive time, never earlier.
         frame = anns_frame([("20200111", "000001.SZ", "n", "t", "u", "2020-01-10 20:00:00")])
         out = core.augment_text_frame(frame, core.TEXT_SPECS["anns_d"])
+        self.assertEqual(out.loc[0, "available_at"], "2020-01-10 20:00:00+08:00")
         self.assertEqual(out.loc[0, "available_at_rule"], "source:rec_time")
 
     def test_missing_rec_time_uses_ann_date_fallback(self):

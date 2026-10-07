@@ -109,10 +109,10 @@
       "skip_if_already_ok": true
     },
     "cn_nightly_anns_full": {
-      "description": "Land announcement titles (anns_d) every calendar evening from the official TuShare service with TUSHARE_TOKEN_TMP: the relay's permission for anns_d lapsed on 2026-09-10, and the official copy is the same announcement set (logs/data/anns_official_20261006/). It is its own job so that losing that token stops anns_d alone: the downloader proves access with one request before it writes, and a refusal exits 77, which restores the raw generation and records an error instead of fencing the lake. Natural-day window with a forced 30-day refresh like the text job, launched at the same 23:15 (the updater lock serialises the two), so anns_d keeps the visibility cutoff it has always had.",
+      "description": "Land announcement titles (anns_d) every calendar evening from the official TuShare service with TUSHARE_TOKEN_TMP: the relay's permission for anns_d lapsed on 2026-09-10, and the official copy is the same announcement set (logs/data/anns_official_20261006/). It is its own job so that losing that token stops anns_d alone: the downloader proves access with one request before it writes, and a refusal exits 77, which restores the raw generation and records an error instead of fencing the lake. Natural-day window with a forced 30-day refresh like the text job, launched at the same 23:15 (the updater lock serialises the two), so anns_d keeps the visibility cutoff it has always had. The window ends on the next calendar day (offset -1): an evening disclosure is dated the following calendar day, and the vendor receives most of them that evening, so the 23:15 run lands every title the replay already shows at the next 08:30 decision. Such a title is stamped at its receive time (augment_text_frame), and the view cuts at the 23:15 launch, so fetching it early never makes it visible early.",
       "operation": "download_tier",
       "tier": "text_evidence",
-      "end_date_offset_days": 0,
+      "end_date_offset_days": -1,
       "start_date_lookback_days": 30,
       "extra_args": [
         "--datasets",
