@@ -12,6 +12,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from autotrade.data_sources.tushare.cron_update import resolve_job_start_date
 from autotrade.environment.artifacts import artifact_fingerprint
 from autotrade.environment.broker import DailyBroker
 from autotrade.environment.broker_core import board_of
@@ -347,10 +348,10 @@ def _fundamentals_arm(tmp_path: Path, name: str, window_months: int) -> Path:
 def test_a_book_reading_fundamentals_opens_only_on_an_audit_covering_its_view(tmp_path: Path):
     """Every run builds the book's decision view behind the snapshot's audit
     gate, so a book whose view that gate refuses could never decide: it is
-    refused when it is opened, on either track, with the rebuild that fixes
-    it. The months the view loads follow the book's own window: events from
-    six years back audited from three years back cover a 24-month window and
-    not a 108-month one."""
+    refused when it is opened, on either track, naming the schedule setting
+    that makes the nightly audit cover it. The months the view loads follow
+    the book's own window: events from six years back audited from three
+    years back cover a 24-month window and not a 108-month one."""
 
     first, audited = f"{YEAR - 6}01", f"{YEAR - 3}0101"
     _pit_lake(tmp_path, first_month=first, audited_from=audited)
@@ -362,8 +363,11 @@ def test_a_book_reading_fundamentals_opens_only_on_an_audit_covering_its_view(tm
     message = str(refused.value)
     assert f"loads PIT fundamental events from {first}, but their audit" in message
     assert f"starts at {audited}" in message
-    command = f"python scripts/data/tushare_cron_update.py --job cn_nightly_pit_event_build --start-date {first}01 --force-run"
-    assert command in message
+    setting = f'Set "start_date": "{first}01" on job cn_nightly_pit_event_build in configs/tushare_update_schedule.json'
+    assert setting in message
+    assert "`python scripts/data/tushare_cron_update.py --job cn_nightly_pit_event_build --force-run` once" in message
+    # The key it names is the one the nightly runner reads as that job's start.
+    assert resolve_job_start_date({"start_date": f"{first}01"}, {}, "20991231") == f"{first}01"
     record = forward_record(ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl").read())
     with pytest.raises(ValueError, match="cannot open"):
         create_book(
@@ -372,7 +376,7 @@ def test_a_book_reading_fundamentals_opens_only_on_an_audit_covering_its_view(tm
         )
     assert sorted(entry.name for entry in paper_root(tmp_path).iterdir()) == ["short"]  # nothing written
 
-    # The rebuild the refusal names audits from that month: the book opens.
+    # The nightly run the refusal configures audits from that month: the book opens.
     write_fundamental_status(tmp_path / FUNDAMENTALS_STATUS, scope_start_date=f"{first}01")
     assert open_graduated_book(tmp_path, arm) == "long"
 

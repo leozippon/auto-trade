@@ -22,6 +22,7 @@ from pathlib import Path
 import pandas as pd
 import pyarrow.parquet as pq
 
+from autotrade.data_sources.tushare.cron_update import DEFAULT_CONFIG
 from autotrade.environment.data.contracts import PIT_EVENT_NODE
 from autotrade.environment.data.research_release import pin_research_release
 from autotrade.environment.data.snapshot import (
@@ -285,11 +286,11 @@ def require_audited_fundamentals(
         raise ValueError(
             f"a book that reads fundamentals cannot open: its decision view loads PIT fundamental events "
             f"from {month}, but their audit ({fundamental_events_status}) starts at "
-            f"{exc.audited_start or '<missing>'}. Rebuild and audit them from that month first: "
-            f"`python scripts/data/tushare_cron_update.py --job {PIT_EVENT_NODE} --start-date {month}01 "
-            f"--force-run`. The job's nightly run starts from the schedule's default_start_date again, "
-            f"and from then on the same gate refuses every decision of this book until that run "
-            f"also audits from {month}"
+            f"{exc.audited_start or '<missing>'}, and every run of the book passes the same gate. "
+            f"Set \"start_date\": \"{month}01\" on job {PIT_EVENT_NODE} in {DEFAULT_CONFIG}, run "
+            f"`python scripts/data/tushare_cron_update.py --job {PIT_EVENT_NODE} --force-run` once, "
+            f"then create the book. The setting is permanent: every nightly run then rebuilds and audits "
+            f"from that month (from 2015-01 about 10 minutes and 78 GiB peak RSS, measured 2026-10-07)"
         ) from exc
 
 
