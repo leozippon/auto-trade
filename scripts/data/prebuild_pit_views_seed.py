@@ -26,6 +26,11 @@ chain; a later slot of a chain continues the as-of tree of the slots before
 it, which this backend cannot encode offline, so those parts are built on
 first use.
 
+A build writes ``UNFINISHED_BUILD_MARKER`` into the seed root before the
+provider binds the tree and removes it only after its last step, right before
+it reports status ok, so creating an experiment on a seed whose build is still
+running, failed or was killed is refused.
+
 Reuses ``ResearchPITSnapshotProvider`` / ``SnapshotBuilder`` and the worker's
 own ``_snapshot_config``; does not fork a second builder or a second reading of
 the experiment parameters.
@@ -38,6 +43,7 @@ import json
 import shutil
 import sys
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
 
@@ -63,7 +69,7 @@ from autotrade.pipelines.pit_backend import (
     ResearchPITSnapshotProvider,
     prebuild_asof_stash,
 )
-from autotrade.pipelines.pit_views_seed import plan_seed
+from autotrade.pipelines.pit_views_seed import UNFINISHED_BUILD_MARKER, plan_seed
 from autotrade.pipelines.worker import _snapshot_config
 
 # Scratch cache_root for --dry-run: planning must not bind or create views in
@@ -237,6 +243,10 @@ def main(argv: list[str] | None = None) -> int:
     else:
         cache_root = seed
         seed.mkdir(parents=True, exist_ok=True)
+        (seed / UNFINISHED_BUILD_MARKER).write_text(
+            json.dumps({"started_at": datetime.now(UTC).isoformat(timespec="seconds")}) + "\n",
+            encoding="utf-8",
+        )
     provider = ResearchPITSnapshotProvider(
         experiment_dir=workspace,
         raw_dir=raw_dir,
@@ -311,6 +321,8 @@ def main(argv: list[str] | None = None) -> int:
             )
             status = "reused" if report.pop("reused") else "built"
             print(f"    {status} {json.dumps(report, sort_keys=True)}", flush=True)
+    if not args.dry_run:
+        (seed / UNFINISHED_BUILD_MARKER).unlink()
     print(
         json.dumps(
             {

@@ -32,7 +32,10 @@ from autotrade.pipelines.hitl_state import (
     WEB_CREATE_DEFAULTS,
 )
 from autotrade.pipelines.pit_backend import required_release_raw_datasets
-from autotrade.pipelines.pit_views_seed import pit_cache_provider_record
+from autotrade.pipelines.pit_views_seed import (
+    UNFINISHED_BUILD_MARKER,
+    pit_cache_provider_record,
+)
 from autotrade.pipelines.worker import _snapshot_config
 from autotrade.webui.manager import (
     MAX_RUNNING_EXPERIMENTS,
@@ -205,14 +208,16 @@ def test_the_dry_run_refuses_a_seed_whose_release_is_not_published(
     assert "research release synthetic is missing or incomplete" in capsys.readouterr().err
 
 
-def test_the_dry_run_refuses_a_seed_still_being_built(
+def test_the_dry_run_refuses_a_seed_whose_build_did_not_finish(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """A contract and no views: the prebuild failed on its first view."""
     rnd = Round(pit_views_seed="data/seed_probe")
     seed = _synthetic_repo(tmp_path, monkeypatch, rnd)
-    (seed / "decision" / ".20210630T235959+0800.0123abcd.tmp").mkdir(parents=True)
+    (seed / UNFINISHED_BUILD_MARKER).write_text("{}", encoding="utf-8")
     assert rnd.main(["launcher", "0", "--dry-run"]) == 1
-    assert "unfinished build" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "unfinished build" in err and "no parameter needs changing" in err
 
 
 def test_the_dry_run_refuses_a_research_period_that_is_not_whole_years(

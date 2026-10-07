@@ -35,7 +35,7 @@ history keeps it) and its ids join RETIRED_IDS.
 required and id rules, then the worker's own resolve_worker_options pre-flight,
 which type-checks every knob, refuses a malformed research geometry and, for a
 named PIT view seed, refuses a tree whose cache format or snapshot
-configuration is not this round's or whose prebuild is still staging views,
+configuration is not this round's or whose prebuild has not finished,
 and reads the research release the seed was built from -- the release every
 arm will pin -- refusing it unless it is published here and reaches Held-out).
 The console's deployment-state checks -- an experiment directory that already
@@ -846,10 +846,11 @@ class Round:
             reason = f"{experiment_id}: parameters rejected, nothing was sent: {exc}"
             if "unfinished build" in str(exc):
                 reason += (
-                    "\n  the tree is there and its contract is this round's; the"
-                    " prebuild is still staging views into it. Wait for"
-                    " scripts/data/prebuild_pit_views_seed.py to report status ok,"
-                    " then re-run -- no parameter needs changing"
+                    "\n  the tree is there and its contract is this round's, but its"
+                    " prebuild has not finished: wait for a running"
+                    " scripts/data/prebuild_pit_views_seed.py, or re-run one that"
+                    " failed, until it reports status ok, then re-run --"
+                    " no parameter needs changing"
                 )
             elif "pit_views_seed" in str(exc) or "view seed" in str(exc):
                 reason += (
@@ -893,8 +894,8 @@ class Round:
         return (
             f"seed {self.pit_views_seed}: contract present (snapshot cache format {version},"
             f" release {record.get('generation_id')}, which every arm pins); the pre-flight"
-            " below compares this round's selection against it, refuses a tree a prebuild is"
-            " still staging and checks that release is published and reaches Held-out."
+            " below compares this round's selection against it, refuses a tree whose prebuild"
+            " has not finished and checks that release is published and reaches Held-out."
         )
 
     def fill(

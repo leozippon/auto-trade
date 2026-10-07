@@ -39,6 +39,11 @@ from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION
 # still writes into, so it is descended, never published as a view.
 _VIEW_MARKERS = ("manifest.json", "data_summary.json")
 
+# Written at the seed root by the prebuild before it binds the tree and removed
+# only once the build reports status ok, so a build that is still running, or
+# that failed or was killed at any point, leaves it behind.
+UNFINISHED_BUILD_MARKER = "prebuild_unfinished.json"
+
 # The provider phase each stage's slots are published under: research years
 # are validation replays, and the forward replay reads F and H as held-out data.
 RESEARCH_PHASE = "valid"
@@ -163,16 +168,14 @@ def assert_seed_snapshot_config(
         )
     # ``provider.json`` is written when the build binds its cache root, not when
     # it finishes, so the contract above says nothing about how much of the tree
-    # exists yet. A staged slot does: it is the view the provider is writing
-    # right now, and it is renamed into place only once that view is complete.
-    staged = _staged_seed_slots(Path(seed))
-    if staged:
+    # exists yet. The prebuild's own marker does: it outlives a build that is
+    # still running, failed or was killed, wherever it stopped.
+    if (Path(seed) / UNFINISHED_BUILD_MARKER).exists():
         raise ValueError(
-            f"PIT view seed {seed} has an unfinished build: "
-            f"{len(staged)} staged slot(s) still present, first "
-            f"{staged[0].relative_to(seed)}. Wait for "
-            "scripts/data/prebuild_pit_views_seed.py to report status ok for "
-            "this seed, or remove the staged slots a killed build left behind"
+            f"PIT view seed {seed} has an unfinished build: {UNFINISHED_BUILD_MARKER} "
+            "is still present, so scripts/data/prebuild_pit_views_seed.py has not "
+            "reported status ok for this seed. Wait for a running prebuild; re-run "
+            "one that failed or was killed until it reports status ok"
         )
     return str(record.get("generation_id") or ""), str(record.get("release_raw_dir") or "")
 
@@ -312,40 +315,6 @@ def _completed_seed_views(seed: Path) -> list[Path]:
     return views
 
 
-def _staged_seed_slots(seed: Path, root: Path | None = None, *, depth: int = 4) -> list[Path]:
-    """Slots a build is still writing into this seed, if any.
-
-    The provider stages a slot as ``.<slot>.<uuid>.tmp`` beside its destination
-    and renames it in only when the view is complete, so a staged directory is
-    on-disk evidence that a prebuild is running here or was killed part way.
-
-    This proves an unfinished build; it cannot prove a finished one. The
-    prebuild reports its own completion only on stdout (``{"status": "ok"}``),
-    leaving nothing in the tree for a later reader, so a build stopped between
-    two jobs still looks like a complete seed here. Walks exactly as far as
-    ``_marked_seed_views``: down the layout levels, stopping at any published
-    view.
-    """
-
-    if root is None:
-        return [
-            path
-            for name in ("decision", "replay", "asof_stash")
-            for path in _staged_seed_slots(seed, seed / name, depth=depth)
-        ]
-    if depth <= 0 or not root.is_dir() or root.is_symlink():
-        return []
-    staged: list[Path] = []
-    for path in sorted(root.iterdir()):
-        if path.is_symlink() or not path.is_dir():
-            continue
-        if ".tmp" in path.name.lower():
-            staged.append(path)
-        elif not any((path / marker).is_file() for marker in _VIEW_MARKERS):
-            staged.extend(_staged_seed_slots(seed, path, depth=depth - 1))
-    return staged
-
-
 def _marked_seed_views(root: Path) -> list[Path]:
     if not root.is_dir() or root.is_symlink():
         return []
@@ -428,6 +397,7 @@ def _load_json(path: Path) -> dict[str, object]:
 __all__ = [
     "FORWARD_PHASE",
     "RESEARCH_PHASE",
+    "UNFINISHED_BUILD_MARKER",
     "SeedPlan",
     "assert_seed_carries_bonus_split",
     "assert_seed_snapshot_config",

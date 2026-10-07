@@ -3,7 +3,6 @@ from __future__ import annotations
 import errno
 import json
 import os
-import shutil
 import stat
 import uuid
 from pathlib import Path
@@ -886,55 +885,71 @@ def test_a_seed_without_a_contract_is_refused(tmp_path: Path) -> None:
         assert_seed_snapshot_config(seed, SnapshotConfig())
 
 
-def test_a_seed_whose_build_is_still_staging_a_slot_is_refused(tmp_path: Path) -> None:
-    """A create must not accept a tree a prebuild is still filling.
+def test_a_seed_whose_prebuild_did_not_finish_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A create must not accept a tree whose prebuild has not reported status ok.
 
     ``provider.json`` is written when the build binds its cache root, so the
-    contract matches from the first minute of a three-hour build: the round
-    script's dry-run passed against a seed that had one of its fourteen
-    regions. The provider's own staging directory is the evidence, and it
-    outlives a killed build too.
+    contract matches from the first minute of the build: the round script's
+    dry-run accepted a seed whose first decision view had failed and that held
+    no view at all. The prebuild's marker is the evidence, wherever the build
+    stopped, and only a build that runs to status ok removes it.
     """
 
-    from autotrade.pipelines.pit_views_seed import assert_seed_snapshot_config
-
-    seed = tmp_path / "seed"
-    seed.mkdir()
-    wanted = SnapshotConfig()
-    (seed / "provider.json").write_text(
-        json.dumps(
-            pit_cache_provider_record(
-                generation_id="generation_test",
-                release_raw_dir=tmp_path / "raw",
-                snapshot_config=wanted,
-            )
-        ),
-        encoding="utf-8",
+    from autotrade.pipelines.pit_views_seed import (
+        UNFINISHED_BUILD_MARKER,
+        assert_seed_snapshot_config,
     )
-    finished = seed / "decision" / SEED_DECISION_KEY
-    finished.mkdir(parents=True)
-    (finished / "manifest.json").write_text('{"kind": "decision"}', encoding="utf-8")
-    finished.with_suffix(".lock").touch()
-    # A finished tree is accepted; the same tree with the slot the provider is
-    # writing right now is not.
-    assert_seed_snapshot_config(seed, wanted)
+    from scripts.data import prebuild_pit_views_seed as prebuild
 
-    staging = seed / "decision" / f".{SEED_SLOT}.{uuid.uuid4().hex}.tmp"
-    (staging / "daily").mkdir(parents=True)
+    class BindingProvider(_FakeProvider):
+        """Binds the contract like the real provider; fails while ``failing``."""
+
+        failing = True
+        config: ClassVar[SnapshotConfig | None] = None
+
+        def __init__(self, *, cache_root: Path, config: SnapshotConfig, **kwargs: object) -> None:
+            super().__init__(**kwargs)
+            BindingProvider.config = config
+            (cache_root / "provider.json").write_text(
+                json.dumps(
+                    pit_cache_provider_record(
+                        generation_id="generation_test",
+                        release_raw_dir=tmp_path / "raw",
+                        snapshot_config=config,
+                    )
+                ),
+                encoding="utf-8",
+            )
+
+        def prepare(self, **kwargs):
+            if self.failing:
+                raise ValueError("the first decision view failed")
+            return super().prepare(**kwargs)
+
+    monkeypatch.setattr(prebuild, "ResearchPITSnapshotProvider", BindingProvider)
+    monkeypatch.setattr(
+        prebuild, "prebuild_asof_stash", lambda **_kwargs: {"reused": False, "trade_days": 1}
+    )
+    seed = tmp_path / "seed"
+    argv = ["--repo-root", str(tmp_path), "--seed", str(seed)]
+    with pytest.raises(ValueError, match="first decision view failed"):
+        prebuild.main(argv)
+    assert BindingProvider.config is not None
+    assert (seed / "provider.json").is_file() and not (seed / "decision").exists()
     with pytest.raises(ValueError) as excinfo:
-        assert_seed_snapshot_config(seed, wanted)
-    message = str(excinfo.value)
-    assert str(seed) in message
-    assert staging.name in message
-    assert "unfinished build" in message
+        assert_seed_snapshot_config(seed, BindingProvider.config)
+    assert "unfinished build" in str(excinfo.value) and str(seed) in str(excinfo.value)
 
-    # A staged view deeper in the layout is the same evidence.
-    shutil.rmtree(staging)
-    assert_seed_snapshot_config(seed, wanted)
-    deep = seed / "replay" / "paper" / f".{SEED_SLOT}.{uuid.uuid4().hex}.tmp"
-    deep.mkdir(parents=True)
-    with pytest.raises(ValueError, match="unfinished build"):
-        assert_seed_snapshot_config(seed, wanted)
+    # Re-run to status ok: the marker goes and the same contract is accepted.
+    BindingProvider.failing = False
+    assert prebuild.main(argv) == 0
+    assert not (seed / UNFINISHED_BUILD_MARKER).exists()
+    assert assert_seed_snapshot_config(seed, BindingProvider.config) == (
+        "generation_test",
+        str(tmp_path / "raw"),
+    )
 
 
 def test_a_seed_without_the_bonus_split_is_refused_for_a_taxed_arm(tmp_path: Path) -> None:
