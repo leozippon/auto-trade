@@ -364,6 +364,7 @@ RETIRED_IDS: frozenset[str] = frozenset(
         "dvy_csi500_1m_q_20260925",
         "earnac_alla_100k_20260927",
         "entry_alla_100k_20260927",
+        "ep_csi500_8y_20260927",
         "event_screens_20260917",
         "exit1000_alla_100k_20260927",
         "exit300_alla_100k_20260927",
@@ -581,14 +582,17 @@ RETIRED_IDS: frozenset[str] = frozenset(
         "wtstab_alla_100k_20260927",
         "xs_transformer_1m_20260922",
         "xsattn_csi1000_8y_20260925",
-        # Every arm of the closed rounds 20261011, 20261012, 20261012c and
-        # 20261012d, whose files were removed from the tree on 2026-10-06 (last
-        # in 6a0f487); all finished and stay on disk.
+        # Every arm of the closed rounds 20261011, 20261012, 20261012b,
+        # 20261012c and 20261012d, whose files were removed from the tree on
+        # 2026-10-06 (last in 6a0f487; 20261012b's file and pack in 0144b7c);
+        # all finished and stay on disk or in the archive.
         "incdraft_100k_8y_mimo_20261012",
         "incdraft_100k_8y_qwen_20261012",
         "incdraft_500k_8y_qwen_20261012",
         "seqfresh_100k_8y_mimo_20261011",
         "seqfresh_100k_8y_qwen_20261011",
+        "seqnovel_cl_100k_8y_qwen_20261012",
+        "seqnovel_ssm_100k_8y_mimo_20261012",
         "titlemap_100k_8y_mimo_20261012",
         "titlerank_100k_8y_qwen_20261012",
     }
