@@ -5,9 +5,9 @@ An arm is archived by one marker file inside its own directory,
 ``hitl/archived.json``, which records when and why; ``--restore`` removes it.
 The directory never moves, so only the console's home list changes: it leaves
 the arm out (and never summarizes it) and offers it under 已归档 instead, and
-its experiment page still opens. Lineage, the regression check, the round fill
-queue, the running caps, operating memory and Paper read the arm exactly as
-before. The console need not be running.
+its experiment page still opens. Lineage, the consistency check, the round
+fill queue, the running caps, operating memory and Paper read the arm exactly
+as before. The console need not be running.
 
 Only an arm that is over and holds nothing live is archived. Every arm named
 is checked before anything changes, and the command refuses them all when one

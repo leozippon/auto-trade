@@ -572,10 +572,10 @@ def _listing_row(directory: Path) -> tuple[dict[str, object], tuple[object, ...]
 # An arm the operator archived (scripts/experiments/archive_arm.py) carries this
 # marker in its hitl/ directory, and removing the file restores it. The home
 # page lists such an arm only when asked for the archived ones, and the default
-# listing never summarizes it, so its freeze gate is not recomputed after a
-# restart. Nothing outside the console's listing reads the marker: lineage, the
-# regression check, the round fill queue, operating memory and Paper see the
-# arm as before, and its experiment page still opens.
+# listing never summarizes it. Nothing outside the console's listing reads the
+# marker: lineage, the consistency check (scripts/dev/check_verdicts.py), the
+# round fill queue, operating memory and Paper see the arm as before, and its
+# experiment page still opens.
 ARCHIVED_NAME = "archived.json"
 
 
