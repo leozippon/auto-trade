@@ -46,6 +46,7 @@ from autotrade.pipelines.worker import (
     resolve_worker_options,
 )
 
+from .pit import require_audited_fundamentals
 from .storage import read_json, read_jsonl, write_json_atomic
 
 BOOK_NAME = "book.json"
@@ -125,7 +126,10 @@ def create_book(
     directory and ``replay.heldout_start``), and buys on the
     ``permitted_boards`` that replay ran on; both are given exactly for that
     track. It is refused while ``INCUBATING_BOOK_CAP`` other incubating
-    books beside it are not killed.
+    books beside it are not killed. Either track is refused, before anything
+    is written, when the arm reads fundamentals and the PIT fundamental
+    events audit does not cover the book's first decision view
+    (``pit.require_audited_fundamentals``).
     """
 
     root = Path(state_root).resolve()
@@ -166,6 +170,13 @@ def create_book(
     options = resolve_worker_options(params, experiment_dir=experiment, repo_root=repo_root, preflight=True)
     if options.data_backend != "pit":
         raise ValueError("Paper books trade on the PIT research release only")
+    require_audited_fundamentals(
+        options.snapshot_config,
+        raw_dir=options.raw_dir,
+        fundamental_events_root=options.fundamental_events_root,
+        fundamental_events_status=options.fundamental_events_status,
+        today=datetime.now(CN_TZ).strftime("%Y%m%d"),
+    )
     profile = options.rolling.broker_profile
     if permitted_boards is None:
         permitted_boards = profile.permitted_boards or default_permitted_boards(profile.initial_cash)

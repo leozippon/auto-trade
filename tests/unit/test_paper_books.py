@@ -6,13 +6,16 @@ import fcntl
 import json
 import os
 import stat
+from datetime import datetime
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from autotrade.environment.artifacts import artifact_fingerprint
 from autotrade.environment.broker import DailyBroker
 from autotrade.environment.broker_core import board_of
+from autotrade.environment.strategy import CN_TZ
 from autotrade.paper import fills
 from autotrade.paper.book import (
     BOOK_NAME,
@@ -35,7 +38,7 @@ from autotrade.paper.books import (
     validate_book_id,
 )
 from autotrade.paper.engine import PaperWriterBusy
-from autotrade.paper.storage import append_jsonl_once, read_json
+from autotrade.paper.storage import append_jsonl_once, read_json, write_json_atomic
 from autotrade.pipelines.ledger import ExperimentLedger, forward_record
 from tests.unit.paper_book_fixture import (
     FAILING_STRATEGY,
@@ -46,6 +49,7 @@ from tests.unit.paper_book_fixture import (
 )
 from tests.unit.test_broker_engine import MATCHED_AT, _bar, _order
 from tests.unit.test_null_control import _board_draws
+from tests.unit.test_snapshot_builder import write_fundamental_status
 from tests.unit.webui_research_arm import build_arm
 
 
@@ -308,6 +312,76 @@ def test_the_incubating_cap_refuses_a_book_and_a_killed_book_frees_its_place(tmp
     assert _incubate(tmp_path, "late").candidate_source == "incubating"
     with pytest.raises(ValueError, match=f"the cap is {INCUBATING_BOOK_CAP}"):
         require_incubating_place(root, "later")
+
+
+FUNDAMENTALS_STATUS = Path("results/data_quality/fundamental_events_status.json")
+YEAR = datetime.now(CN_TZ).year
+
+
+def _pit_lake(repo: Path, *, first_month: str, audited_from: str, calendar: bool = True) -> None:
+    """The live lake a book's views read fundamentals from: weekday sessions
+    around today, PIT fundamental events from ``first_month`` (YYYYMM) and
+    their audit from ``audited_from`` (YYYYMMDD)."""
+
+    if calendar:
+        sessions = pd.bdate_range(f"{YEAR - 1}0101", f"{YEAR + 1}1231").strftime("%Y%m%d")
+        path = repo / "data/raw/trade_cal/exchange=SSE" / f"year={YEAR}.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"cal_date": sessions, "is_open": "1"}).to_parquet(path, index=False)
+    events = repo / "data/pit/fundamental_events/income_vip"
+    events.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({"ts_code": []}).to_parquet(events / f"available_month={first_month}.parquet", index=False)
+    (repo / FUNDAMENTALS_STATUS).parent.mkdir(parents=True, exist_ok=True)
+    write_fundamental_status(repo / FUNDAMENTALS_STATUS, scope_start_date=audited_from)
+
+
+def _fundamentals_arm(tmp_path: Path, name: str, window_months: int) -> Path:
+    arm = build_arm(tmp_path / "experiments", name, "graduated")
+    params = read_json(arm / "hitl/params.json")
+    write_json_atomic(
+        arm / "hitl/params.json", {**params, "include_fundamentals": True, "window_months": window_months}
+    )
+    return arm
+
+
+def test_a_book_reading_fundamentals_opens_only_on_an_audit_covering_its_view(tmp_path: Path):
+    """Every run builds the book's decision view behind the snapshot's audit
+    gate, so a book whose view that gate refuses could never decide: it is
+    refused when it is opened, on either track, with the rebuild that fixes
+    it. The months the view loads follow the book's own window: events from
+    six years back audited from three years back cover a 24-month window and
+    not a 108-month one."""
+
+    first, audited = f"{YEAR - 6}01", f"{YEAR - 3}0101"
+    _pit_lake(tmp_path, first_month=first, audited_from=audited)
+    assert open_graduated_book(tmp_path, _fundamentals_arm(tmp_path, "short", 24)) == "short"
+
+    arm = _fundamentals_arm(tmp_path, "long", 108)
+    with pytest.raises(ValueError, match="cannot open") as refused:
+        open_graduated_book(tmp_path, arm)
+    message = str(refused.value)
+    assert f"loads PIT fundamental events from {first}, but their audit" in message
+    assert f"starts at {audited}" in message
+    command = f"python scripts/data/tushare_cron_update.py --job cn_nightly_pit_event_build --start-date {first}01 --force-run"
+    assert command in message
+    record = forward_record(ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl").read())
+    with pytest.raises(ValueError, match="cannot open"):
+        create_book(
+            paper_root(tmp_path) / "long-incubating", experiment_dir=arm, artifact_id="strategy_research_abc",
+            repo_root=tmp_path, track="incubating", source_record=record, permitted_boards=("main",),
+        )
+    assert sorted(entry.name for entry in paper_root(tmp_path).iterdir()) == ["short"]  # nothing written
+
+    # The rebuild the refusal names audits from that month: the book opens.
+    write_fundamental_status(tmp_path / FUNDAMENTALS_STATUS, scope_start_date=f"{first}01")
+    assert open_graduated_book(tmp_path, arm) == "long"
+
+
+def test_a_book_without_fundamentals_never_asks_the_audit(tmp_path: Path):
+    # An audit that covers nothing and no exchange calendar: either one read
+    # would refuse the book.
+    _pit_lake(tmp_path, first_month="201501", audited_from="20990101", calendar=False)
+    assert open_graduated_book(tmp_path, build_arm(tmp_path / "experiments", "exp", "graduated")) == "exp"
 
 
 def test_a_book_of_an_older_schema_is_refused(tmp_path: Path):

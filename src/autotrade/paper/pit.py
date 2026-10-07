@@ -6,7 +6,8 @@ the book: a decision view anchored two sessions before the book's first
 decision and one replay slot from the session before it through the target
 session, whose own bars do not exist yet. Views are cached per release
 generation under the book's state root, and a run drops the caches of every
-older generation.
+older generation. A book whose decision view the fundamentals audit gate
+would refuse is refused when it is opened (``require_audited_fundamentals``).
 """
 
 from __future__ import annotations
@@ -14,15 +15,17 @@ from __future__ import annotations
 import os
 import shutil
 import uuid
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import datetime, time
 from pathlib import Path
 
 import pandas as pd
 import pyarrow.parquet as pq
 
+from autotrade.environment.data.contracts import PIT_EVENT_NODE
 from autotrade.environment.data.research_release import pin_research_release
 from autotrade.environment.data.snapshot import (
+    FundamentalAuditScopeError,
     SnapshotBuilder,
     SnapshotConfig,
     load_snapshot_manifest,
@@ -120,20 +123,12 @@ class BookPITData:
                 f"committed data ends at {self.release_end} (generation {self.generation_id}); "
                 f"the decision for {trade_date} needs sessions through {prior[-1]}"
             )
-        # The slot opens one session before the book's first decision: a slot
-        # needs daily bars, and on the first morning the decision session has
-        # none yet. The rows of that extra session reach the Timeview through
-        # the slot instead of the frozen view, so every decision sees exactly
-        # what a replay anchored the session before would show.
-        earlier = [day for day in self.sessions if day < start]
-        if len(earlier) < 2:
-            raise RuntimeError(f"the exchange calendar has fewer than two sessions before {start}")
-        window_start, anchor = earlier[-1], earlier[-2]
+        window_start, anchor = book_window(self.sessions, start)
         bundle = provider.prepare(
             phase=PAPER_PHASE,
             start=window_start,
             end=trade_date,
-            decision_time=datetime.combine(pd.Timestamp(anchor).date(), time(23, 59, 59), tzinfo=CN_TZ),
+            decision_time=anchor,
         )
         self.snapshot_dir = Path(bundle.decision_ref).resolve(strict=True)
         replay_dir = Path(bundle.replay_ref).resolve(strict=True)
@@ -236,6 +231,68 @@ class BookPITData:
         _discard_ephemeral_asof(self.asof_dir)
 
 
+def book_window(sessions: Sequence[str], start: str) -> tuple[str, datetime]:
+    """The first session of the replay slot, and the instant the decision
+    view is anchored at, of a book whose first decision is ``start``.
+
+    The slot opens one session before the first decision: a slot needs daily
+    bars, and on the first morning the decision session has none yet. The rows
+    of that extra session reach the Timeview through the slot instead of the
+    frozen view, so every decision sees exactly what a replay anchored the
+    session before would show: the view is anchored at 23:59:59 of the session
+    before the slot's first.
+    """
+
+    earlier = [day for day in sessions if day < start]
+    if len(earlier) < 2:
+        raise RuntimeError(f"the exchange calendar has fewer than two sessions before {start}")
+    return earlier[-1], datetime.combine(pd.Timestamp(earlier[-2]).date(), time(23, 59, 59), tzinfo=CN_TZ)
+
+
+def require_audited_fundamentals(
+    config: SnapshotConfig,
+    *,
+    raw_dir: str | Path,
+    fundamental_events_root: str | Path,
+    fundamental_events_status: str | Path,
+    today: str,
+) -> None:
+    """Refuse to open a book whose decision view would load fundamental
+    events the PIT audit does not cover; a book without fundamentals passes.
+
+    Every run builds the book's decision view anew for its release, behind the
+    snapshot gate (``SnapshotBuilder.assert_fundamental_events_audited``), and
+    the release carries the live audit status. The same gate over the same
+    status is asked here, for the view of the earliest first decision the
+    book can have: the first session on or after ``today`` (YYYYMMDD). A
+    later first decision only moves the window forward.
+    """
+
+    if not config.fundamental_datasets:
+        return
+    sessions = load_sse_trading_days(raw_dir)
+    start = next((day for day in sessions if day >= today), None)
+    if start is None:
+        raise RuntimeError(f"the exchange calendar has no session on or after {today}")
+    _, anchor = book_window(sessions, start)
+    builder = SnapshotBuilder(raw_dir, fundamental_events_root, fundamental_events_status)
+    try:
+        builder.assert_fundamental_events_audited(
+            config.window_start_for(anchor, "fundamentals"), tuple(config.fundamental_datasets)
+        )
+    except FundamentalAuditScopeError as exc:
+        month = exc.needed_month
+        raise ValueError(
+            f"a book that reads fundamentals cannot open: its decision view loads PIT fundamental events "
+            f"from {month}, but their audit ({fundamental_events_status}) starts at "
+            f"{exc.audited_start or '<missing>'}. Rebuild and audit them from that month first: "
+            f"`python scripts/data/tushare_cron_update.py --job {PIT_EVENT_NODE} --start-date {month}01 "
+            f"--force-run`. The job's nightly run starts from the schedule's default_start_date again, "
+            f"and from then on the same gate refuses every decision of this book until that run "
+            f"also audits from {month}"
+        ) from exc
+
+
 def _pin_newest_release(
     cache_root: Path,
     *,
@@ -279,4 +336,4 @@ def _remove_tree(root: Path) -> None:
     shutil.rmtree(root)
 
 
-__all__ = ["PIT_CACHE_NAME", "BookPITData", "newest_replay_slot"]
+__all__ = ["PIT_CACHE_NAME", "BookPITData", "book_window", "newest_replay_slot", "require_audited_fundamentals"]

@@ -122,6 +122,21 @@ class IndustryMembershipError(ValueError):
     industry weight as 1.0."""
 
 
+class FundamentalAuditScopeError(ValueError):
+    """The PIT fundamental events audit starts after the first partition month
+    a build loads (``needed_month``, YYYYMM); ``audited_start`` is the start
+    the status records, as it records it."""
+
+    def __init__(self, audited_start: str, needed_month: str, status: Path) -> None:
+        super().__init__(
+            f"PIT fundamental events audit window starts at {audited_start or '<missing>'} "
+            f"but this build loads partitions from {needed_month}; "
+            f"the audited range must cover everything the snapshot can load (path={status})"
+        )
+        self.audited_start = audited_start
+        self.needed_month = needed_month
+
+
 # Forward-scheduled event registries announce future events years ahead (IPO
 # lockup expiries), so the DECISION snapshot windows them on the event date as
 # well as announcement recency -- windowing on available_at alone silently
@@ -706,7 +721,7 @@ class SnapshotBuilder:
         def build_fundamentals(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
             started = time.perf_counter()
             if config.fundamental_datasets:
-                self._assert_fundamental_event_status_ok(
+                self.assert_fundamental_events_audited(
                     fundamentals_window_start, tuple(config.fundamental_datasets)
                 )
             nat_counts: dict[str, int] = {}
@@ -938,9 +953,11 @@ class SnapshotBuilder:
                 warnings[domain] = warning_status
         return warnings
 
-    def _assert_fundamental_event_status_ok(
+    def assert_fundamental_events_audited(
         self, window_start: datetime, datasets: tuple[str, ...]
     ) -> None:
+        """The gate a decision view passes before it loads ``datasets`` from
+        ``window_start``; Paper also asks it before it opens a book."""
         if self.fundamental_events_status is None:
             raise ValueError("PIT fundamental events status is required when fundamental datasets are enabled")
         if not self.fundamental_events_status.exists():
@@ -983,12 +1000,7 @@ class SnapshotBuilder:
         if not first_loadable_month:
             return  # nothing to load; require_partitions fails the build explicitly
         if len(audited_start) < 6 or not audited_start[:6].isdigit() or audited_start[:6] > first_needed_month:
-            raise ValueError(
-                f"PIT fundamental events audit window starts at {audited_start or '<missing>'} "
-                f"but this build loads partitions from {first_needed_month}; "
-                f"the audited range must cover everything the snapshot can load "
-                f"(path={self.fundamental_events_status})"
-            )
+            raise FundamentalAuditScopeError(audited_start, first_needed_month, self.fundamental_events_status)
 
     # ---- replay slot (valid/test region; not PIT-filtered) ----
 
