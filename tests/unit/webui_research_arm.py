@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from dataclasses import replace
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -160,17 +159,29 @@ def _step(experiment_dir: Path, session: str, index: int, *, edge: float, seed: 
     ref = write_result(experiment_dir, "valid", start="20240701", days=120, edge=edge, seed=seed)
     revision, fingerprint = f"revision_{session}_{index}", f"fingerprint_{session}_{index}"
     # The manifest the artifact store writes for the revision; a host sidecar
-    # names only the revision, and its bytes are read off this.
+    # names only the revision, and its bytes are read off this. The freeze
+    # gate reads a nominee's strategy from beside it.
     write_json_atomic(
         experiment_dir / REVISIONS_DIR / revision / REVISION_MANIFEST_FILE,
         {"revision_id": revision, "fingerprint": fingerprint},
     )
+    output = experiment_dir / REVISIONS_DIR / revision / "output"
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "main.py").write_text("def generate_orders(context):\n    return []\n", encoding="utf-8")
     return {
         "step_id": f"research__session_ref_{session}__run_ref_{session}__valid_{index:03d}",
         "revision_id": revision,
         "fingerprint": fingerprint,
         "span": span,
-        "summary": {"total_return": 0.1 + edge, "sharpe": 1.0, "max_drawdown": 0.05},
+        "summary": {
+            "total_return": 0.1 + edge,
+            "sharpe": 1.0,
+            "max_drawdown": 0.05,
+            # Above the benchmark well clear of the stressed slippage.
+            "turnover": 1.0,
+            "benchmark": {"excess_return": 0.05 + edge},
+            "cost_sensitivity": {"slippage_bps": 5.0, "cost_per_bp_per_side": 1e-4},
+        },
         "validation_result_ref": ref,
         "neutralized": neutralized_statistics(_analysis(ref)),
     }
@@ -197,13 +208,13 @@ def _session_record(experiment_id: str, **fields: object) -> dict[str, object]:
     }
 
 
-def _with_panel(result_ref: str, scale: float) -> None:
-    """Give a replay's sidecar the zero-skill panel series a panel-era replay
-    carries, so its slices measure the plain selection."""
+def _with_panel(result_ref: str, scale: float, *, series: str = "strategy_daily") -> None:
+    """Give a replay's sidecar the zero-skill panel series every replay
+    carries: ``scale`` times its ``series``."""
 
     path = Path(result_ref).parent / STYLE_ARTIFACT_NAME
     sidecar = json.loads(path.read_text(encoding="utf-8"))
-    sidecar["panel_daily"] = [[day, scale * value] for day, value in sidecar["strategy_daily"]]
+    sidecar["panel_daily"] = [[day, scale * value] for day, value in sidecar[series]]
     write_json_atomic(path, sidecar)
 
 
@@ -212,14 +223,12 @@ def build_arm(
 ) -> Path:
     """Write one arm at ``stage`` (one of :data:`STAGES`) under ``root``.
 
-    ``seeded`` makes it an arm under ``require_seed_replicates`` and
-    ``require_forward_plain_selection`` whose nominee froze with one seed
-    replicate and, past the freeze, was replayed with it and judged on the
-    two together, in the shapes ``pipelines.experiment`` records
+    ``seeded`` makes its nominee one that trains a model and froze with one
+    seed replicate and, past the freeze, was replayed with it and judged on
+    the two together, in the shapes ``pipelines.experiment`` records
     (tests/unit/test_seed_replicates.py): the gate's ``seed_replicates``
     block, the frozen block's, each slice's ``seed_replicates`` and
-    ``seed_mean``, the forward slice's ``plain_excess_lower_bound`` and the record's
-    own rows.
+    ``seed_mean``, and the record's own rows.
     """
 
     if stage not in STAGES:
@@ -233,11 +242,6 @@ def build_arm(
         {
             "experiment_id": experiment_id,
             **PARAMS,
-            **(
-                {"require_seed_replicates": True, "require_forward_plain_selection": True}
-                if seeded
-                else {}
-            ),
             "_created_at": "2026-09-13T00:00:00+00:00",
         },
     )
@@ -277,7 +281,6 @@ def build_arm(
                     "mean_information_ratio": sum(ratios) / len(ratios),
                     "information_ratio_bar": gate["deflated_sharpe"]["information_ratio_bar"],
                 },
-                "thresholds": {**gate["thresholds"], "require_seed_replicates": True},
             }
         output = directory / "artifacts/strategy/frozen/strategy_research_abc/output"
         output.mkdir(parents=True)
@@ -387,11 +390,16 @@ def build_arm(
         ref = write_result(directory, "heldout", start=REPLAY["start"], days=300, edge=edge, seed=7)
         replicates: list[tuple[dict[str, object], dict[str, object]]] = []
         replicate_rows: list[dict[str, object]] = []
+        # Every forward replay carries its zero-skill panel: random names on
+        # the book's own skeleton, which ride the market as the book does.
+        if seeded:
+            _with_panel(ref, 0.6)
+        else:
+            _with_panel(ref, 0.9, series="benchmark_daily")
         if seeded:
             replicate_ref = write_result(
                 directory, "heldout", start=REPLAY["start"], days=300, edge=edge / 4, seed=8
             )
-            _with_panel(ref, 0.6)
             _with_panel(replicate_ref, 0.9)
             identity = {"artifact_id": "strategy_research_seed", "source_step_id": replicate["step_id"]}
             replicates.append((identity, _analysis(replicate_ref)))
@@ -404,12 +412,9 @@ def build_arm(
                 }
             )
         analysis = _analysis(ref)
-        rules = replace(
-            RULES, require_seed_replicates=seeded, require_forward_plain_selection=seeded
-        )
         forward = forward_slice(
             analysis,
-            rules=rules,
+            rules=RULES,
             start=REPLAY["start"],
             end=REPLAY["forward_end"],
             seed_key="strategy_research_abc",
@@ -421,7 +426,7 @@ def build_arm(
         )
         heldout = heldout_slice(
             analysis,
-            rules=rules,
+            rules=RULES,
             start=REPLAY["heldout_start"],
             end=REPLAY["replay_end"],
             forward_tracking_error=float(forward["tracking_error"]),

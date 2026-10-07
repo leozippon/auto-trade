@@ -752,18 +752,15 @@ def trial_family_statistics(
     lineage_trials: int = 0,
     lineage_offline_trials: int = 0,
     lineage_series: Sequence[Mapping[str, float]] = (),
-    independent_offline_trials: bool = False,
 ) -> dict[str, object]:
     """M, its parts, ρ̄ and N_eff of an arm's trial family (:func:`freeze_gate`
     names the parts); what the gate deflates over and what the IR bar a
     full-span nominee faces is read at.
 
     ``lineage_offline_trials`` is the part of ``lineage_trials`` the lineage
-    arms declared offline. Under ``independent_offline_trials`` the declared
-    offline trials, the arm's own and the lineage's, have no series, so
-    nothing measured their correlation: each counts as one independent trial,
-    and ρ̄ prices the validated ones alone. Otherwise every trial is priced
-    at ρ̄, the rule of arms recorded without it."""
+    arms declared offline. The declared offline trials, the arm's own and the
+    lineage's, have no series, so nothing measured their correlation: each
+    counts as one independent trial, and ρ̄ prices the validated ones alone."""
 
     trials = _count(trials, "trials", 1)
     offline_trials = _count(offline_trials, "offline_trials", 0)
@@ -771,7 +768,7 @@ def trial_family_statistics(
     lineage_offline_trials = _count(lineage_offline_trials, "lineage_offline_trials", 0)
     correlation, pairs = trial_correlation(trial_analyses, lineage_series)
     total = trials + offline_trials + lineage_trials
-    unmeasured = offline_trials + lineage_offline_trials if independent_offline_trials else 0
+    unmeasured = offline_trials + lineage_offline_trials
     return {
         "trials": total,
         "host_trials": trials,
@@ -788,10 +785,9 @@ class Condition(NamedTuple):
 
     ``holds(measured, thresholds)`` reads the stage's own block and the bars
     its record states; a condition that does not hold records ``reason``.
-    ``requires`` names the rule that turns an optional condition on (empty:
-    every arm is held to it). An optional condition that is off is neither
-    judged nor stated; one that is on states the rule ``stamp`` names in the
-    record's thresholds. ``code`` is the graduation criterion a forward or
+    ``requires`` names the rule that turns a condition on, the tracking
+    mandate's cap (empty: every arm is held to it); an arm without a mandate
+    is not judged on it. ``code`` is the graduation criterion a forward or
     Held-out condition belongs to (docs/pipeline-design.md).
     """
 
@@ -800,7 +796,6 @@ class Condition(NamedTuple):
     holds: Callable[[Mapping[str, Any], Mapping[str, Any]], bool]
     code: str = ""
     requires: str = ""
-    stamp: str = ""
 
 
 def _finite(value: object) -> bool:
@@ -837,9 +832,6 @@ def _seed_mean_reaches_bar(measured: Mapping[str, Any]) -> bool:
     return mean is not None and isinstance(bar, (int, float)) and mean >= bar
 
 
-_RAW = "require_raw_excess_at_cost_stress"
-_PLAIN = "require_forward_plain_selection"
-_SEEDS = "require_seed_replicates"
 _CAP = "tracking_error_cap"
 # Not a condition's: what a gate that was never read off a nominee records.
 # The session reads a node that is not one of its Steps; the nominee's
@@ -874,16 +866,16 @@ CONDITIONS: tuple[Condition, ...] = (
     Condition("freeze", "freeze_deflated_sharpe_below_threshold", lambda m, t: not isinstance(_probability(m), float) or not _probability(m) < t["min_deflated_sharpe_probability"]),
     Condition("freeze", "freeze_too_few_positive_years", lambda m, t: m["positive_years"] >= t["min_positive_years"]),
     Condition("freeze", "freeze_active_drawdown_exceeded", lambda m, t: m["active_max_drawdown"] <= t["active_max_drawdown"]),
-    Condition("freeze", "freeze_raw_excess_not_positive_at_cost_stress", lambda m, t: _positive(m["raw_excess_at_cost_stress"]), requires=_RAW, stamp="cost_stress_multiplier"),
+    Condition("freeze", "freeze_raw_excess_not_positive_at_cost_stress", lambda m, t: _positive(m["raw_excess_at_cost_stress"])),
     Condition("freeze", "freeze_tracking_error_above_cap", _within_cap, requires=_CAP),
     Condition("freeze", "freeze_beta_outside_band", _within_band, requires=_CAP),
     # The nominee's seed replicates (``experiment._seed_replicate_gate``): a
     # named replicate that is not one, a nominee that trains a model and names
     # none, and a mean active IR over the nominee and its replicates below
     # the nominee's own bar.
-    Condition("seeds", "freeze_seed_replicate_invalid", lambda m, t: not _refused_replicate(m), requires=_SEEDS, stamp=_SEEDS),
-    Condition("seeds", "freeze_too_few_seed_replicates", lambda m, t: bool(m["replicates"]) or not m["trains_a_model"], requires=_SEEDS, stamp=_SEEDS),
-    Condition("seeds", "freeze_seed_mean_information_ratio_below_threshold", lambda m, t: not m["replicates"] or _refused_replicate(m) or _seed_mean_reaches_bar(m), requires=_SEEDS, stamp=_SEEDS),
+    Condition("seeds", "freeze_seed_replicate_invalid", lambda m, t: not _refused_replicate(m)),
+    Condition("seeds", "freeze_too_few_seed_replicates", lambda m, t: bool(m["replicates"]) or not m["trains_a_model"]),
+    Condition("seeds", "freeze_seed_mean_information_ratio_below_threshold", lambda m, t: not m["replicates"] or _refused_replicate(m) or _seed_mean_reaches_bar(m)),
     # F1/H1: the frozen strategy raised during the replay, which then has no
     # slice to judge (:func:`graduation_verdict`).
     Condition("replay", "forward_strategy_error", lambda m, t: m["strategy_error"] != "forward", "F1"),
@@ -900,7 +892,7 @@ CONDITIONS: tuple[Condition, ...] = (
     Condition("forward", "forward_exposure_below_floor", lambda m, t: m["mean_gross"] >= t["min_mean_gross"], "F6"),
     Condition("forward", "forward_tracking_error_above_cap", _within_cap, "F7", requires=_CAP),
     Condition("forward", "forward_beta_outside_band", _within_band, "F7", requires=_CAP),
-    Condition("forward", "forward_plain_excess_lower_bound_not_positive", lambda m, t: m["plain_excess_lower_bound"] > 0, "F8", requires=_PLAIN, stamp=_PLAIN),
+    Condition("forward", "forward_plain_excess_lower_bound_not_positive", lambda m, t: m["plain_excess_lower_bound"] > 0, "F8"),
     # The Held-out slice (:func:`heldout_slice`).
     Condition("heldout", "heldout_excess_below_tolerance", lambda m, t: m["neutralized_excess"] >= m["tolerance"], "H2"),
     Condition("heldout", "heldout_max_drawdown_exceeded", lambda m, t: m["max_drawdown"] <= t["max_drawdown"], "H3"),
@@ -910,25 +902,10 @@ CONDITIONS: tuple[Condition, ...] = (
 
 
 def _on(condition: Condition, rules: AcceptanceRules | None) -> bool:
-    """Whether ``rules`` hold ``condition``: always, a switch that is on, or
-    a tracking mandate that is set."""
+    """Whether ``rules`` hold ``condition``: always, or a tracking mandate
+    that is set."""
 
-    if not condition.requires:
-        return True
-    rule = getattr(rules, condition.requires)
-    return rule is not None and rule is not False
-
-
-def stamps(stage: str, rules: AcceptanceRules) -> dict[str, object]:
-    """What the optional conditions of ``stage`` that ``rules`` turn on state
-    in a record's thresholds, so a record judged without one reads as it did
-    before the condition existed."""
-
-    return {
-        condition.stamp: getattr(rules, condition.stamp)
-        for condition in CONDITIONS
-        if condition.stage == stage and condition.stamp and _on(condition, rules)
-    }
+    return not condition.requires or getattr(rules, condition.requires) is not None
 
 
 def judge(
@@ -939,8 +916,8 @@ def judge(
 ) -> list[str]:
     """The reasons of the conditions of ``stage`` that ``measured`` fails, in
     the table's order: the one path every stage's failures are read by.
-    ``rules`` decide which optional conditions are on; a stage that has none
-    is judged without them."""
+    ``rules`` decide whether the tracking mandate's conditions are on; a stage
+    that has none is judged without them."""
 
     return [
         condition.reason
@@ -978,11 +955,10 @@ def freeze_gate(
     at their effective number ρ̄ + (1 − ρ̄)·M, where ρ̄ is
     :func:`trial_correlation` over ``trial_analyses`` (one sidecar per
     trial) and ``lineage_series`` (one reduced series per measurable lineage
-    trial). Under ``rules.independent_offline_trials`` the declared offline
-    trials, which have no series, are left out of M in that formula and
-    count one each; the caller has then joined the lineage to the arm's own
-    family, so each strategy's bytes come once, with one series
-    (``experiment.recorded_lineage``). The dispersion √V is the zero-skill sampling error
+    trial). The declared offline trials, which have no series, are left out
+    of M in that formula and count one each; the caller has joined the
+    lineage to the arm's own family, so each strategy's bytes come once, with
+    one series (``experiment.recorded_lineage``). The dispersion √V is the zero-skill sampling error
     of an IR over the nominee's own measured days (:func:`null_sharpe_std`), so
     neither controls nor near-copies of the nominee move the bar through it.
     ``information_ratio_bar`` is the research IR at which the probability
@@ -997,13 +973,11 @@ def freeze_gate(
     ``min_dsr_probability``, at least ``min_full_span_validations`` full-span
     validations, a positive neutralised excess in ``min_positive_year_share``
     of the research years, and a drawdown within ``active_max_drawdown``; on
-    the strategy's own series, for the tracking mandate when one is set. With
-    ``require_raw_excess_at_cost_stress`` it also asks the holder's money to
-    beat the benchmark: :func:`raw_excess_at_cost_stress` of the nominee's
-    ``summary`` at ``cost_stress_multiplier`` above zero; only then does the
-    record carry that reading and the multiplier, so the gate of an arm whose
-    rules lack the condition reads exactly as before. The
-    equity drawdown is the caller's hard nomination rule
+    the strategy's own series, for the tracking mandate when one is set. It
+    also asks the holder's money to beat the benchmark:
+    :func:`raw_excess_at_cost_stress` of the nominee's ``summary`` at
+    ``cost_stress_multiplier`` above zero, the multiplier stated among the
+    thresholds. The equity drawdown is the caller's hard nomination rule
     (``config.AcceptanceRules.evaluate``).
     """
 
@@ -1014,7 +988,6 @@ def freeze_gate(
         lineage_trials=lineage_trials,
         lineage_offline_trials=lineage_offline_trials,
         lineage_series=lineage_series,
-        independent_offline_trials=rules.independent_offline_trials,
     )
     full_span_validations = _count(full_span_validations, "full_span_validations", 0)
     graded, series = _graded(analysis)
@@ -1037,13 +1010,8 @@ def freeze_gate(
         window_neutralized_excess(graded, start=start, end=end)
         for start, end in (_span(*year) for year in years)
     ]
-    raw: dict[str, object] = {}
-    if rules.require_raw_excess_at_cost_stress:
-        if summary is None:
-            raise ValueError("the raw cost-stress condition needs the nominee's summary")
-        raw["raw_excess_at_cost_stress"] = raw_excess_at_cost_stress(
-            summary, cost_stress_multiplier=rules.cost_stress_multiplier
-        )
+    if summary is None:
+        raise ValueError("the raw cost-stress condition needs the nominee's summary")
     measured = {
         "series": series,
         **statistics,
@@ -1053,7 +1021,9 @@ def freeze_gate(
         "mandate": _mandate(analysis, "", ""),
         "full_span_validations": full_span_validations,
         "deflated_sharpe": dsr,
-        **raw,
+        "raw_excess_at_cost_stress": raw_excess_at_cost_stress(
+            summary, cost_stress_multiplier=rules.cost_stress_multiplier
+        ),
     }
     thresholds = {
         "min_information_ratio": rules.min_active_ir,
@@ -1064,7 +1034,7 @@ def freeze_gate(
         "active_max_drawdown": rules.active_max_drawdown,
         **rules.mandate,
         "panel_draws": PANEL_DRAWS,
-        **stamps("freeze", rules),
+        "cost_stress_multiplier": rules.cost_stress_multiplier,
     }
     reasons = judge("freeze", measured, thresholds, rules)
     return {"passed": not reasons, "reasons": reasons, **measured, "thresholds": thresholds}
@@ -1206,14 +1176,11 @@ def forward_slice(
     read the book alone. ``seed_replicates`` are the seed replicates the
     freeze registered, replayed like the book, each as what names it and its
     replay's sidecar; with any, the slice carries their slices and the
-    :func:`seed_mean` with the book. With ``require_forward_plain_selection``
-    (F8) the slice also carries ``plain_excess_lower_bound``
+    :func:`seed_mean` with the book. F8 reads ``plain_excess_lower_bound``
     (:func:`plain_excess_lower_bound` of the book and those replicates, at
     ``forward_confidence``), which must be above zero: selection in plain
-    terms, with its uncertainty, on the seeds together. Only then do
-    the thresholds name the condition, so a slice judged without it reads as
-    before. The holder's readings (:func:`slice_readings`) ride on every
-    slice either way.
+    terms, with its uncertainty, on the seeds together. The holder's readings
+    (:func:`slice_readings`) ride on every slice.
     ``start``/``end`` are the slice's calendar bounds; the recency window is
     the last ``recency_months`` calendar months ending in ``end``'s month.
     ``turnover`` (traded notional over the slice's opening equity),
@@ -1260,15 +1227,6 @@ def forward_slice(
     )
     months = _month_index(end) - _month_index(start) + 1
     readings = slice_readings(analysis, start=start, end=end)
-    selection: dict[str, object] = {}
-    if rules.require_forward_plain_selection:
-        selection["plain_excess_lower_bound"] = plain_excess_lower_bound(
-            [analysis, *(sidecar for _identity, sidecar in seed_replicates)],
-            start=start,
-            end=end,
-            seed_key=seed_key,
-            confidence=rules.forward_confidence,
-        )
     measured = {
         "start": start,
         "end": end,
@@ -1276,7 +1234,13 @@ def forward_slice(
         **statistics,
         **readings,
         **_with_seed_replicates(readings, seed_replicates, start, end),
-        **selection,
+        "plain_excess_lower_bound": plain_excess_lower_bound(
+            [analysis, *(sidecar for _identity, sidecar in seed_replicates)],
+            start=start,
+            end=end,
+            seed_key=seed_key,
+            confidence=rules.forward_confidence,
+        ),
         "lower_bound": lower_bound,
         "recency_start": recency_start,
         "recency_neutralized_excess": recency_excess,
@@ -1300,7 +1264,6 @@ def forward_slice(
         "cost_stress_multiplier": rules.cost_stress_multiplier,
         "min_round_trips": rules.min_round_trips_per_month * months,
         "min_mean_gross": rules.min_mean_gross,
-        **stamps("forward", rules),
     }
     return {
         **measured,

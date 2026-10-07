@@ -39,7 +39,6 @@ from autotrade.pipelines.config import (
 )
 from autotrade.pipelines.experiment import lineage_ledger_record
 from autotrade.pipelines.hitl_state import (
-    CREATION_STAMPS,
     WEB_CREATE_DEFAULTS,
     StatusReporter,
     proc_start_ticks,
@@ -1356,9 +1355,7 @@ class WebuiBackendTest(unittest.TestCase):
             ("exp_tracked", {"tracking_error_cap": 0.08}),
             ("exp_tight_ir", {"min_active_ir": 1.1}),
         ):
-            # A new arm is held to every rule creation stamps on; an arm
-            # recorded without the keys is not (``AcceptanceRules`` defaults).
-            expected = acceptance_for({**CREATION_STAMPS, **request}).to_record()
+            expected = acceptance_for(request).to_record()
             with (
                 patch.object(manager, "_preflight"),
                 patch.object(manager, "start_worker", return_value={"spawned": False}),
@@ -1383,9 +1380,6 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(
             acceptance_for({}).to_record(), AcceptanceRules().to_record()
         )
-        self.assertTrue(written["require_raw_excess_at_cost_stress"])
-        self.assertTrue(written["require_forward_plain_selection"])
-        self.assertFalse(acceptance_for({}).require_raw_excess_at_cost_stress)
 
     def test_creation_stamps_the_boards_the_initial_cash_qualifies_for(self) -> None:
         """ChiNext from CNY 100,000, STAR and Beijing from 500,000, written into
@@ -1443,7 +1437,7 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(
             ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl").read(), []
         )
-        record = lineage_ledger_record(directory, acceptance=AcceptanceRules(), workspace_reference="")
+        record = lineage_ledger_record(directory, workspace_reference="")
         self.assertEqual((record["arms"], record["trials"]), (["earlier_arm"], 1))
         self.assertTrue(Path(str(record["series_ref"])).is_relative_to(directory))
         self.assertFalse((self.experiments_root / "exp_orphan").exists())

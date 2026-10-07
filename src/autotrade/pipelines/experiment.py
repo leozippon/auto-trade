@@ -123,7 +123,6 @@ from .verdict import (
     information_ratio_bar,
     judge,
     neutralized_statistics,
-    stamps,
     trial_correlation,
     trial_family_statistics,
 )
@@ -322,7 +321,6 @@ class RollingExperimentPipeline:
             self.ledger.append(
                 lineage_ledger_record(
                     self.config.experiment_dir,
-                    acceptance=self.config.acceptance,
                     workspace_reference=self.config.workspace_reference,
                 )
             )
@@ -900,11 +898,11 @@ class RollingExperimentPipeline:
         refits.
         """
 
-        replay, analysis = _replay_and_analysis(result)
+        replay, analysis = replay_and_analysis(result.result_ref)
         replicates: list[tuple[dict[str, object], dict[str, object]]] = []
         replicate_rows: list[dict[str, object]] = []
         for item, item_result in seed_replicates:
-            item_replay, item_analysis = _replay_and_analysis(item_result)
+            item_replay, item_analysis = replay_and_analysis(item_result.result_ref)
             identity = {"artifact_id": item.artifact_id, "source_step_id": item.source_step_id}
             replicates.append((identity, item_analysis))
             replicate_rows.append(
@@ -917,44 +915,21 @@ class RollingExperimentPipeline:
                     ),
                 }
             )
-        curve = replay["equity_curve"]
-        executions = replay["executions"]
-        acceptance = self.config.acceptance
-        forward_activity = window_activity(
-            curve, executions, start=forward.start, end=forward.end
-        )
-        heldout_activity = window_activity(
-            curve, executions, start=heldout.start, end=heldout.end
-        )
-        forward_block = forward_slice(
+        judged = judged_replay(
+            replay,
             analysis,
-            rules=acceptance,
-            start=forward.start,
-            end=forward.end,
+            rules=self.config.acceptance,
+            forward=(forward.start, forward.end),
+            heldout=(heldout.start, heldout.end),
             seed_key=artifact.artifact_id,
             slippage_bps=broker_profile.slippage_bps,
-            turnover=float(forward_activity["turnover"]),  # type: ignore[arg-type]
-            round_trips=int(forward_activity["round_trips"]),  # type: ignore[arg-type]
-            mean_gross=float(forward_activity["mean_gross"]),  # type: ignore[arg-type]
-            seed_replicates=replicates,
-        )
-        heldout_block = heldout_slice(
-            analysis,
-            rules=acceptance,
-            start=heldout.start,
-            end=heldout.end,
-            forward_tracking_error=float(forward_block["tracking_error"]),  # type: ignore[arg-type]
-            mean_gross=float(heldout_activity["mean_gross"]),  # type: ignore[arg-type]
             seed_replicates=replicates,
         )
         return {
             "status": "ok",
             "error": None,
             "result_ref": result.result_ref,
-            "slices": {
-                "forward": {**forward_block, "activity": forward_activity},
-                "heldout": {**heldout_block, "activity": heldout_activity},
-            },
+            "slices": judged["slices"],
             "refits_executed": _refits_executed(
                 artifact, replay, forward=forward, heldout=heldout
             ),
@@ -969,7 +944,7 @@ class RollingExperimentPipeline:
                 seed=null_control_seed(artifact.artifact_id, "forward"),
                 step=(forward.start, forward.end),
             ),
-            "verdict": graduation_verdict(forward=forward_block, heldout=heldout_block),
+            "verdict": judged["verdict"],
         }
 
     def _frozen_artifact(self, block: object) -> FrozenArtifact:
@@ -1289,7 +1264,6 @@ def _arm_trials(
     records: Sequence[Mapping[str, object]],
     session_rows: Sequence[Mapping[str, object]],
     experiment_dir: str | Path,
-    acceptance: AcceptanceRules,
 ) -> tuple[
     list[Mapping[str, object]],
     dict[str, object],
@@ -1299,8 +1273,7 @@ def _arm_trials(
     sessions' recorded Steps and this session's alike, fingerprinted from the
     revision store of the arm in ``experiment_dir`` where a row does not carry
     it; their :func:`trial_family`; and the lineage the ledger records, joined
-    to that family under the arm's ``acceptance`` rules
-    (:func:`recorded_lineage`)."""
+    to that family (:func:`recorded_lineage`)."""
 
     rows = fingerprinted(experiment_dir, [*_recorded_steps(records), *session_rows])
     family = trial_family(rows)
@@ -1311,7 +1284,6 @@ def _arm_trials(
             records,
             family["representatives"],  # type: ignore[arg-type]
             family["offline_trials"],  # type: ignore[arg-type]
-            acceptance=acceptance,
         ),
     )
 
@@ -1338,20 +1310,16 @@ def freeze_gate_for(
     cannot be measured does not pass. ``acceptance`` is the arm's rules,
     ``hard_reasons`` what their ``evaluate`` refuses the nominee for and
     ``years`` the research years; the console, which reads only the deflated
-    Sharpe of an arm's best node, passes the default rules with the arm's
-    pricing of its trial family and leaves the other two out. Where the rules
-    hold ``require_seed_replicates`` the measured gate also judges the nominee's
-    ``seed_replicates`` (rows of this session; :func:`_seed_replicate_gate`);
-    naming any under rules that do not hold it is refused.
+    Sharpe of an arm's best node, passes the default rules and
+    leaves the other two out. The measured gate also judges the nominee's
+    ``seed_replicates`` (rows of this session; :func:`_seed_replicate_gate`).
     """
 
-    if seed_replicates and not acceptance.require_seed_replicates:
-        raise ValueError("this arm's acceptance rules hold no seed-replicate condition")
     reasons = [*hard_reasons, *judge("registration", nominee, {})]
     if reasons:
         return {"passed": False, "reasons": reasons}
     rows, family, (lineage_arms, correlated, lineage) = _arm_trials(
-        records, session_rows, experiment_dir, acceptance
+        records, session_rows, experiment_dir
     )
     representatives: list[Mapping[str, object]] = family["representatives"]  # type: ignore[assignment]
     summary = nominee.get("summary")
@@ -1379,15 +1347,12 @@ def freeze_gate_for(
         "undeclared_offline_validations": family["undeclared_offline_validations"],
         "lineage_arms": lineage_arms,
     }
-    if acceptance.require_seed_replicates:
-        gate = _seed_replicate_gate(
-            gate,
-            fingerprinted(experiment_dir, [nominee])[0],
-            fingerprinted(experiment_dir, seed_replicates),
-            experiment_dir=experiment_dir,
-            rules=acceptance,
-        )
-    return gate
+    return _seed_replicate_gate(
+        gate,
+        fingerprinted(experiment_dir, [nominee])[0],
+        fingerprinted(experiment_dir, seed_replicates),
+        experiment_dir=experiment_dir,
+    )
 
 
 def incubation_entry(
@@ -1520,9 +1485,8 @@ def _seed_replicate_gate(
     replicates: Sequence[Mapping[str, object]],
     *,
     experiment_dir: str | Path,
-    rules: AcceptanceRules,
 ) -> dict[str, object]:
-    """``gate`` with the seed-replicate conditions of an arm that holds them.
+    """``gate`` with the seed-replicate conditions.
 
     A strategy that trains a model (its ``main.py`` defines ``fit``, the
     frozen block's ``fit_plan``) is judged on its training seeds together. A
@@ -1535,8 +1499,6 @@ def _seed_replicate_gate(
     one, a nominee that trains a model and names none, and a mean active IR
     over the nominee and its replicates below the nominee's own
     ``information_ratio_bar``. Every other condition stays the nominee's own.
-    The thresholds name ``require_seed_replicates`` whether or not the nominee
-    had anything to replicate: the stamp says the arm holds the rule.
     """
 
     main = Path(experiment_dir) / REVISIONS_DIR / str(nominee["revision_id"]) / "output" / "main.py"
@@ -1578,13 +1540,12 @@ def _seed_replicate_gate(
         "mean_information_ratio": sum(ratios) / len(ratios) if entries and measured else None,  # type: ignore[arg-type]
         "information_ratio_bar": gate["deflated_sharpe"].get("information_ratio_bar"),  # type: ignore[union-attr]
     }
-    reasons = judge("seeds", block, {}, rules)
+    reasons = judge("seeds", block, {})
     return {
         **gate,
         "passed": bool(gate["passed"]) and not reasons,
         "reasons": [*gate["reasons"], *reasons],  # type: ignore[misc]
         "seed_replicates": block,
-        "thresholds": {**gate["thresholds"], **stamps("seeds", rules)},  # type: ignore[dict-item]
     }
 
 
@@ -1608,16 +1569,13 @@ def full_span_bar(
     full span measures, a bar about 0.3 % lower). The gate itself is unchanged.
     """
 
-    rows, family, (_arms, correlated, lineage) = _arm_trials(
-        records, session_rows, experiment_dir, acceptance
-    )
+    rows, family, (_arms, correlated, lineage) = _arm_trials(records, session_rows, experiment_dir)
     representatives: list[Mapping[str, object]] = family["representatives"]  # type: ignore[assignment]
     statistics = trial_family_statistics(
         trials=max(len(representatives), 1),
         offline_trials=family["offline_trials"],  # type: ignore[arg-type]
         trial_analyses=[_style_analysis(row) for row in correlated],
         **lineage,  # type: ignore[arg-type]
-        independent_offline_trials=acceptance.independent_offline_trials,
     )
     days = max(
         (_measured_days(row) for row in rows if row.get("span") == FULL_SPAN),
@@ -1655,8 +1613,7 @@ def _joined_lineage(
     *,
     own: Mapping[str, object] | None = None,
 ) -> tuple[list[Mapping[str, object]], dict[str, object]]:
-    """An arm's trials and its lineage's as one family, the rule of an arm
-    whose rules hold ``independent_offline_trials``: what the lineage
+    """An arm's trials and its lineage's as one family: what the lineage
     (``lineage.extract_lineage``) adds to the arm's own distinct non-control
     ``representatives`` and declared ``offline_trials``, as
     ``verdict.trial_family_statistics`` takes it, and the representatives
@@ -1679,7 +1636,7 @@ def _joined_lineage(
     if stale:
         raise ValueError(
             f"the lineage of {', '.join(stale)} was extracted before its trials carried "
-            "their bytes, so it cannot be joined under independent_offline_trials"
+            "their bytes, so it cannot be joined to the arm's trials"
         )
     name = str(own["experiment_id"]) if own is not None else ""
     # bytes -> (measured days of the series that represents it, whose it is)
@@ -1724,27 +1681,17 @@ def _joined_lineage(
     }
 
 
-def lineage_summary(
-    extraction: Mapping[str, object], *, acceptance: AcceptanceRules
-) -> dict[str, object]:
-    """A lineage's own trial count and what it counts as independently under
-    the arm's ``acceptance`` rules, from what ``lineage.extract_lineage`` read:
-    the ledger record's figures, and what a round's ``--dry-run`` prints.
-    Under ``independent_offline_trials`` its arms' trials are one family
-    (:func:`_joined_lineage`); otherwise each arm's count adds."""
+def lineage_summary(extraction: Mapping[str, object]) -> dict[str, object]:
+    """A lineage's own trial count and what it counts as independently, its
+    arms' trials as one family (:func:`_joined_lineage`), from what
+    ``lineage.extract_lineage`` read: the ledger record's figures, and what a
+    round's ``--dry-run`` prints."""
 
     arms: Sequence[Mapping[str, object]] = extraction["arms"]  # type: ignore[assignment]
-    if acceptance.independent_offline_trials:
-        _own, joined = _joined_lineage(extraction)
-        offline = int(joined["lineage_offline_trials"])  # type: ignore[call-overload]
-        host = int(joined["lineage_trials"]) - offline  # type: ignore[call-overload]
-        series: list[dict[str, float]] = joined["lineage_series"]  # type: ignore[assignment]
-    else:
-        host = sum(int(arm["host_trials"]) for arm in arms)  # type: ignore[call-overload]
-        offline = sum(int(arm["offline_trials"]) for arm in arms)  # type: ignore[call-overload]
-        series = [_daily(item) for item in extraction["series"]]  # type: ignore[attr-defined]
-    correlation, pairs = trial_correlation((), series)
-    unmeasured = offline if acceptance.independent_offline_trials else 0
+    _own, joined = _joined_lineage(extraction)
+    offline = int(joined["lineage_offline_trials"])  # type: ignore[call-overload]
+    host = int(joined["lineage_trials"]) - offline  # type: ignore[call-overload]
+    correlation, pairs = trial_correlation((), joined["lineage_series"])  # type: ignore[arg-type]
     return {
         "arms": [str(arm["experiment_id"]) for arm in arms],
         "trials": host + offline,
@@ -1753,18 +1700,15 @@ def lineage_summary(
         "controls": sum(int(arm["controls"]) for arm in arms),  # type: ignore[call-overload]
         "trial_correlation": correlation,
         "trial_correlation_pairs": pairs,
-        "effective_trials": effective_trials(host + offline - unmeasured, correlation, unmeasured),
+        "effective_trials": effective_trials(host, correlation, offline),
     }
 
 
-def lineage_ledger_record(
-    experiment_dir: Path, *, acceptance: AcceptanceRules, workspace_reference: str
-) -> dict[str, object]:
+def lineage_ledger_record(experiment_dir: Path, *, workspace_reference: str) -> dict[str, object]:
     """The ``lineage`` ledger record of an arm created with ``lineage_arms``,
-    from the series file the console wrote beside its ledger at creation,
-    priced under the arm's ``acceptance`` rules. It names the reference pack
-    the arm mounts (its ``workspace_reference``), which the joined family of
-    :func:`recorded_lineage` reads."""
+    from the series file the console wrote beside its ledger at creation. It
+    names the reference pack the arm mounts (its ``workspace_reference``),
+    which the joined family of :func:`recorded_lineage` reads."""
 
     path = Path(experiment_dir) / "ledgers" / LINEAGE_SERIES_NAME
     if not path.is_file():
@@ -1778,7 +1722,7 @@ def lineage_ledger_record(
         "fold_id": RESEARCH_SESSION_KEY,
         # No run produced it: it carries what creation read from other arms.
         "run_id": LINEAGE_RECORD_TYPE,
-        **lineage_summary(json.loads(path.read_text(encoding="utf-8")), acceptance=acceptance),
+        **lineage_summary(json.loads(path.read_text(encoding="utf-8"))),
         "workspace_reference": reference_pack(workspace_reference),
         "series_ref": str(path),
         "recorded_at": utc_now_iso(),
@@ -1789,22 +1733,18 @@ def recorded_lineage(
     records: Sequence[Mapping[str, object]],
     representatives: Sequence[Mapping[str, object]],
     offline_trials: int,
-    *,
-    acceptance: AcceptanceRules,
 ) -> tuple[list[str], list[Mapping[str, object]], dict[str, object]]:
-    """The lineage the ledger records (``pipelines/lineage.py``) beside the
-    arm's own trial family -- its distinct non-control ``representatives``
-    and declared ``offline_trials`` (:func:`trial_family`): the lineage arms;
-    the representatives whose own series ρ̄ reads; and what the lineage adds
-    as ``verdict.trial_family_statistics`` takes it -- its trials, the part of
+    """The lineage the ledger records (``pipelines/lineage.py``) joined to
+    the arm's own trial family -- its distinct non-control
+    ``representatives`` and declared ``offline_trials`` (:func:`trial_family`)
+    -- as one family (:func:`_joined_lineage`): the lineage arms; the
+    representatives whose own series ρ̄ reads; and what the lineage adds as
+    ``verdict.trial_family_statistics`` takes it -- its trials, the part of
     those declared offline and one daily series per measurable lineage trial.
 
-    Under ``acceptance.independent_offline_trials`` the arm and its lineage
-    are one family (:func:`_joined_lineage`); otherwise the lineage adds the
-    trials its record counts and every series it extracted, and ρ̄ reads every
-    representative. Read from this arm's own files only -- the ledger record
-    and the series file it names, both written at creation -- never from the
-    lineage arms. ``([], representatives, {})`` for an arm created without one.
+    Read from this arm's own files only -- the ledger record and the series
+    file it names, both written at creation -- never from the lineage arms.
+    ``([], representatives, {})`` for an arm created without one.
     """
 
     record = lineage_record(records)
@@ -1812,13 +1752,7 @@ def recorded_lineage(
         return [], list(representatives), {}
     arms = [str(arm) for arm in record["arms"]]  # type: ignore[union-attr]
     payload = json.loads(Path(str(record["series_ref"])).read_text(encoding="utf-8"))
-    if acceptance.independent_offline_trials:
-        return arms, *_joined_lineage(payload, representatives, offline_trials, own=record)
-    return arms, list(representatives), {
-        "lineage_trials": int(record["trials"]),  # type: ignore[call-overload]
-        "lineage_offline_trials": int(record["offline_trials"]),  # type: ignore[call-overload]
-        "lineage_series": [_daily(item) for item in payload["series"]],
-    }
+    return arms, *_joined_lineage(payload, representatives, offline_trials, own=record)
 
 
 def _style_analysis(row: Mapping[str, object]) -> dict[str, object]:
@@ -1876,14 +1810,71 @@ def _finite_ir(block: object) -> bool:
     )
 
 
-def _replay_and_analysis(result: EvaluationResult) -> tuple[dict[str, object], dict[str, object]]:
+def replay_and_analysis(result_ref: str) -> tuple[dict[str, object], dict[str, object]]:
     """One completed replay's result and the style sidecar beside it."""
 
-    path = Path(result.result_ref)
+    path = Path(result_ref)
     return (
         json.loads(path.read_text(encoding="utf-8")),
         json.loads((path.parent / STYLE_ARTIFACT_NAME).read_text(encoding="utf-8")),
     )
+
+
+def judged_replay(
+    replay: Mapping[str, object],
+    analysis: Mapping[str, object],
+    *,
+    rules: AcceptanceRules,
+    forward: tuple[str, str],
+    heldout: tuple[str, str],
+    seed_key: str,
+    slippage_bps: float,
+    seed_replicates: Sequence[tuple[Mapping[str, object], Mapping[str, object]]] = (),
+) -> dict[str, object]:
+    """The ``slices`` and ``verdict`` of one completed forward replay: its
+    result ``replay`` and style sidecar ``analysis``, judged under ``rules``
+    over the ``forward`` and ``heldout`` bounds, each slice with its activity.
+
+    What a forward record and an incubation reading store, so a stored
+    replay is judged again by this same function
+    (``scripts/dev/check_verdicts.py``). ``seed_key`` is the frozen artifact's
+    id, ``slippage_bps`` the Broker's and ``seed_replicates`` what names each
+    replicate with its replay's sidecar.
+    """
+
+    curve, executions = replay["equity_curve"], replay["executions"]
+    activity = {
+        name: window_activity(curve, executions, start=start, end=end)  # type: ignore[arg-type]
+        for name, (start, end) in (("forward", forward), ("heldout", heldout))
+    }
+    forward_block = forward_slice(
+        analysis,
+        rules=rules,
+        start=forward[0],
+        end=forward[1],
+        seed_key=seed_key,
+        slippage_bps=slippage_bps,
+        turnover=float(activity["forward"]["turnover"]),  # type: ignore[arg-type]
+        round_trips=int(activity["forward"]["round_trips"]),  # type: ignore[arg-type]
+        mean_gross=float(activity["forward"]["mean_gross"]),  # type: ignore[arg-type]
+        seed_replicates=seed_replicates,
+    )
+    heldout_block = heldout_slice(
+        analysis,
+        rules=rules,
+        start=heldout[0],
+        end=heldout[1],
+        forward_tracking_error=float(forward_block["tracking_error"]),  # type: ignore[arg-type]
+        mean_gross=float(activity["heldout"]["mean_gross"]),  # type: ignore[arg-type]
+        seed_replicates=seed_replicates,
+    )
+    return {
+        "slices": {
+            "forward": {**forward_block, "activity": activity["forward"]},
+            "heldout": {**heldout_block, "activity": activity["heldout"]},
+        },
+        "verdict": graduation_verdict(forward=forward_block, heldout=heldout_block),
+    }
 
 
 def _refits_executed(
@@ -2112,11 +2103,13 @@ __all__ = [
     "freeze_gate_for",
     "full_span_bar",
     "incubation_entry",
+    "judged_replay",
     "lineage_ledger_record",
     "lineage_summary",
     "neutralized",
     "null_control_seed",
     "recorded_lineage",
+    "replay_and_analysis",
     "research_step_record",
     "seed_change",
     "trial_family",

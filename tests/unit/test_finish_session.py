@@ -273,12 +273,11 @@ def test_an_early_freeze_must_say_why_while_another_batch_fits(tmp_path: Path):
     ).invoke({"outcome": "freeze", "node_id": node}).finish
 
 
-def test_seed_replicates_are_offered_where_the_arm_holds_them_and_go_to_the_gate(tmp_path: Path):
-    """Only an arm whose rules hold the condition is offered seed_replicates;
-    the tool resolves them like node_id and hands them to the gate, which
-    judges them. A nominee refused for want of them is told what a replicate
-    is, a node that fails only for want of them is listed as passing, and the
-    freeze hands the Pipeline their full ids."""
+def test_seed_replicates_are_resolved_and_go_to_the_gate(tmp_path: Path):
+    """The tool resolves seed_replicates like node_id and hands them to the
+    gate, which judges them. A nominee refused for want of them is told what
+    a replicate is, a node that fails only for want of them is listed as
+    passing, and the freeze hands the Pipeline their full ids."""
 
     tree = StepTree(tmp_path / "steps")
     nominee = _node(tree, tmp_path, "a")
@@ -295,13 +294,8 @@ def test_seed_replicates_are_offered_where_the_arm_holds_them_and_go_to_the_gate
             "seed_replicates": {"trains_a_model": True, "replicates": []},
         }
 
-    plain = ToolRegistry([_tool(tree, gate)])  # type: ignore[arg-type]
-    assert "seed_replicates" not in FinishSessionTool.spec.input_schema["properties"]
-    named = {"outcome": "freeze", "node_id": nominee, "seed_replicates": [replicate]}
-    assert "unknown argument" in str(plain.invoke("finish_session", named).error)
-
-    seeded = _tool(tree, gate, seed_replicates=True)  # type: ignore[arg-type]
-    assert "seed_replicates" in seeded.spec.input_schema["properties"]
+    seeded = _tool(tree, gate)  # type: ignore[arg-type]
+    assert "seed_replicates" in FinishSessionTool.spec.input_schema["properties"]
     # The rule a replicate meets is the arm's freeze_gate fact, stated there
     # alone: the schema and a refusal that concerns one point to it.
     fact = "acceptance_rules.freeze_gate.seed_replicates"

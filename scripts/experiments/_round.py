@@ -15,10 +15,9 @@ carries the research geometry, the account, the cost stress and the
 per-session budgets, and BASE_EXPECTED_DEFAULTS pins the console creation
 defaults every round relies on -- above all the model roles, which no round
 overrides, so a rename of the local model must stop the launcher rather than
-silently move an arm onto a hosted stream, and the rule set a new arm is
-stamped with, so the arms a round queues are judged by the rules its first
-arms were. A round states what it decides for itself in `overrides`, and
-anything it states there stops being an expected default. What several rounds
+silently move an arm onto a hosted stream. A round states what it decides for
+itself in `overrides`, and anything it states there stops being an expected
+default. What several rounds
 send alike -- a geometry, the graduation bars, a model pair's hosted roles, a
 lineage -- lives in `_profiles.py`; an open round imports from there and from
 here, never from another round file.
@@ -103,7 +102,6 @@ from autotrade.pipelines.config import (
 )
 from autotrade.pipelines.experiment import lineage_summary
 from autotrade.pipelines.hitl_state import (
-    CREATION_STAMPS,
     WEB_CLOSED_PARAMS,
     WEB_CREATE_DEFAULTS,
     WEB_INTERNAL_PARAMS,
@@ -161,18 +159,6 @@ BASE_EXPECTED_DEFAULTS: dict[str, object] = {
     "subagent_model": "qwen-3.8-27b-fp8",
     "nl_model": "qwen-3.8-27b-fp8",
     "compact_model": "qwen-3.8-27b-fp8",
-    # The rule set: every rule the console stamps on a new arm although an arm
-    # recorded without it keeps being judged without it
-    # (`hitl_state.CREATION_STAMPS`).
-    # A round's queued arms are created days after its first ones, so a change
-    # here, or a rule the console starts stamping that is missing here, would
-    # let a pair straddle two rule sets; both stop the launcher until the round
-    # re-decides.
-    "require_raw_excess_at_cost_stress": True,
-    "require_forward_plain_selection": True,
-    "require_seed_replicates": True,
-    "independent_offline_trials": True,
-    "dividend_tax": True,
     # Left to the console, which stamps the boards the arm's initial cash
     # qualifies for (`broker.default_permitted_boards`); a round that wants
     # others names them.
@@ -670,7 +656,7 @@ def _lineage_reading(merged: Mapping[str, object], rules: AcceptanceRules) -> di
         research_start=str(merged["research_start"]),
         research_end=str(merged["research_end"]),
     )
-    summary = lineage_summary(extraction, acceptance=rules)
+    summary = lineage_summary(extraction)
     days = max((len(item["daily"]) for item in extraction["series"]), default=0)  # type: ignore[attr-defined]
     return {
         # The arms themselves are on the line above, as `lineage_arms`.
@@ -806,10 +792,6 @@ class Round:
             for key, value in self.expected.items()
             if WEB_CREATE_DEFAULTS[key] != value
         }
-        # A rule the console newly stamps moves a queued arm as much as a
-        # changed default does, so one nobody pinned or decided is drift too.
-        undecided = set(CREATION_STAMPS) - set(BASE_EXPECTED_DEFAULTS) - set(self.common_overrides)
-        drift.update({key: ("undecided", WEB_CREATE_DEFAULTS[key]) for key in sorted(undecided)})
         if drift:
             raise SystemExit(
                 "console creation defaults drifted from what this round assumes; "

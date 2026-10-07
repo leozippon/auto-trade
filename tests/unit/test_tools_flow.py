@@ -1979,19 +1979,23 @@ def _fold_backtest_tool(
         deadline_seconds=600.0,
         benchmark_index=DEFAULT_BENCHMARK_INDEX,
     )
+    # The experiment the worker roots a session in: the freeze gate reads a
+    # nominee's strategy from its revision store.
+    experiment = tmp / "experiment"
     backtest = SessionValidations(
         request=request,
         output_dir=output,
         models_dir=models,
-        artifact_store=FilesystemArtifactStore(tmp / "revisions"),
+        artifact_store=FilesystemArtifactStore(experiment / "artifacts" / "strategy"),
         evaluator=evaluator or Evaluator(),
         tree=tree(paths.steps) if tree is not None else StepTree(paths.steps),
         schedule=StrategySchedule(),
         broker_profile=BrokerProfile(),
         time_budget=InferenceTimeBudget(duration_seconds=600.0),
-        ref_store=AgentRefStore(tmp / "experiment"),
+        ref_store=AgentRefStore(experiment),
         ledger=ExperimentLedger(tmp / "ledger.jsonl"),
         manifest=manifest,
+        experiment_dir=experiment,
     )
     tool = BatchValidateTool(
         backtest=backtest,

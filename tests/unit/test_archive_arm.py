@@ -16,7 +16,6 @@ from pathlib import Path
 from autotrade.pipelines.ledger import ExperimentLedger, verdict_void
 from autotrade.pipelines.lineage import extract_lineage
 from autotrade.webui.registry import ARCHIVED_NAME, experiment_listing, list_experiments
-from scripts.dev.recompute_verdicts import over_arms
 from tests.unit.paper_book_fixture import paper_root, write_book_record
 from tests.unit.test_lineage import RESEARCH_END, RESEARCH_START, _arm
 from tests.unit.webui_research_arm import build_arm
@@ -107,7 +106,7 @@ def test_archive_and_restore_are_idempotent_and_move_only_the_home_list(tmp_path
     assert experiment_listing(root)["archived"] == 1
 
 
-def test_an_archived_arm_stays_a_lineage_arm_and_in_the_regression_check(tmp_path: Path) -> None:
+def test_an_archived_arm_stays_a_lineage_arm(tmp_path: Path) -> None:
     root = tmp_path / "experiments"
     _arm(root, "ancestor", [{"seed": 2, "loading": 0.6}, {"seed": 3, "loading": 0.4}])
     period = {"research_start": RESEARCH_START, "research_end": RESEARCH_END}
@@ -115,4 +114,3 @@ def test_an_archived_arm_stays_a_lineage_arm_and_in_the_regression_check(tmp_pat
     archived = _archive(tmp_path, "ancestor", "--reason", "historical")
     assert archived.returncode == 0, archived.stderr
     assert extract_lineage(root, ["ancestor"], **period) == before
-    assert list(over_arms(lambda arm: arm.name, root, jobs=1)) == ["ancestor"]

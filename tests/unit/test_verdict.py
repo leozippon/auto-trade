@@ -71,6 +71,10 @@ def _ruled(arguments):
 
 
 def _gate(analysis, **arguments):
+    """The freeze gate of ``analysis``; a nominee whose summary the raw
+    condition passes unless the test names one."""
+
+    arguments.setdefault("summary", _raw_summary(1.0))
     return verdict.freeze_gate(analysis, **_ruled(arguments))
 
 
@@ -80,6 +84,13 @@ def _heldout(analysis, **overrides):
 
 
 def _forward(analysis, **overrides):
+    """The forward slice of ``analysis``. A forward replay always carries its
+    zero-skill panel, and F8 reads it: a sidecar built without one gets a
+    panel of zeros, which leaves every graded figure the book's own
+    (:func:`test_a_zero_panel_reproduces_the_ungraded_figures_exactly`)."""
+
+    if "panel_daily" not in analysis:
+        analysis = _with_panel(analysis, np.zeros(len(analysis["strategy_daily"])))
     arguments = {
         "start": FORWARD_START,
         "end": FORWARD_END,
@@ -505,11 +516,11 @@ def test_the_effective_trial_count_reads_the_correlation_of_the_trials_series():
     assert verdict.trial_correlation([shared[0]]) == (0.0, 0)
 
 
-def test_a_declared_offline_trial_is_priced_as_independent_only_under_the_rule():
-    """Near-copies on the host make ρ̄ high. Without the rule that ρ̄ prices
-    the declared offline trials too, so they are almost free; with it, each
-    one, the arm's or the lineage's, has no series and counts one, while the
-    validated trials, own and inherited, keep their measured correlation."""
+def test_a_declared_offline_trial_is_priced_as_one_independent_trial():
+    """Near-copies on the host make ρ̄ high, and declaring a screen instead of
+    running it buys nothing from that: each declared offline trial, the arm's
+    or the lineage's, has no series and counts one, while the validated
+    trials, own and inherited, keep their measured correlation."""
 
     rng = np.random.default_rng(7)
     book = _analysis(_segment(_weekdays("20210701", "20250630"), 0.1, rng))
@@ -524,28 +535,18 @@ def test_a_declared_offline_trial_is_priced_as_independent_only_under_the_rule()
         "lineage_series": inherited,
     }
     priced = verdict.trial_family_statistics(**family)
-    independent = verdict.trial_family_statistics(**family, independent_offline_trials=True)
-    assert priced["trial_correlation"] == independent["trial_correlation"] == pytest.approx(1.0)
-    assert priced["trials"] == independent["trials"] == 8
-    # Without the rule all eight trials are one; with it the three validated
-    # ones are one and the five declared offline five more.
-    assert priced["effective_trials"] == pytest.approx(1.0)
-    assert independent["effective_trials"] == pytest.approx(1.0 + 5)
+    assert priced["trial_correlation"] == pytest.approx(1.0)
+    assert priced["trials"] == 8
+    # The three validated trials are one, the five declared offline five more.
+    assert priced["effective_trials"] == pytest.approx(1.0 + 5)
     # One formula: ρ̄ + (1 − ρ̄)·measured + unmeasured.
     assert verdict.effective_trials(3, 0.4, 5) == pytest.approx(0.4 + 0.6 * 3 + 5)
     assert verdict.effective_trials(8, 0.4) == verdict.effective_trials(8, 0.4, 0)
-    # The gate reads the rule off the arm's rules, and the bar follows.
-    gates = [
-        _gate(book, full_span_validations=2, **family, independent_offline_trials=held)[
-            "deflated_sharpe"
-        ]
-        for held in (False, True)
-    ]
-    assert [gate["effective_trials"] for gate in gates] == [
-        priced["effective_trials"],
-        independent["effective_trials"],
-    ]
-    assert gates[1]["information_ratio_bar"] > gates[0]["information_ratio_bar"] + 0.4
+    # The gate deflates over that count, and its bar follows.
+    gate = _gate(book, full_span_validations=2, **family)["deflated_sharpe"]
+    assert gate["effective_trials"] == priced["effective_trials"]
+    one = _gate(book, full_span_validations=2, trials=1)["deflated_sharpe"]
+    assert gate["information_ratio_bar"] > one["information_ratio_bar"] + 0.4
 
 
 RESEARCH_YEARS = [
@@ -571,7 +572,8 @@ def test_a_zero_panel_reproduces_the_ungraded_figures_exactly():
     zeros every statistic, bound and reason is the float it was without one,
     and only ``series`` and the panel's own reading tell the two records
     apart: a book without a panel has no plain selection, one against a zero
-    panel selects exactly its own return."""
+    panel selects exactly its own return. A forward slice without a panel is
+    not judged at all, since F8 reads it."""
     rng = np.random.default_rng(101)
     research = _weekdays("20210701", "20250630")
     analysis = _analysis(_segment(research, 0.16, rng))
@@ -605,7 +607,9 @@ def test_a_zero_panel_reproduces_the_ungraded_figures_exactly():
             active_max_drawdown=0.3,
         )
 
-    for read in (gate, _forward, heldout, verdict.neutralized_statistics):
+    with pytest.raises(ValueError, match="no plain excess to judge"):
+        _forward({**forward, "panel_daily": []})
+    for read in (gate, heldout, verdict.neutralized_statistics):
         sidecar = analysis if read is gate else forward
         zeros = _with_panel(sidecar, np.zeros(len(sidecar["strategy_daily"])))
         own, graded = read(sidecar), read(zeros)
@@ -696,6 +700,7 @@ def test_the_freeze_gate_refuses_zero_skill_an_uneven_edge_and_a_broken_mandate(
         "beta_min": None,
         "beta_max": None,
         "panel_draws": 20,
+        "cost_stress_multiplier": 2.0,
     }
 
     # Zero skill: the whole +3 %/yr of the book is what its panel earned.
@@ -881,12 +886,11 @@ def _raw_summary(excess, *, slippage_bps=5.0, turnover=40.0):
     }
 
 
-def test_the_raw_condition_judges_the_holders_money_only_where_the_rules_hold_it():
+def test_the_raw_condition_judges_the_holders_money():
     """A book can beat a panel that loses 12 %/yr and still make nothing: the
     dividend-event graduate's active IR was 1.71 on a raw eight-year return of
-    -0.8 %. An arm held to the raw condition refuses a nominee whose own equity,
-    after the stressed slippage, did not beat the benchmark; an arm whose rules
-    lack it reads exactly as it did, so no recorded gate moves."""
+    -0.8 %. The gate refuses a nominee whose own equity, after the stressed
+    slippage, did not beat the benchmark, and states the multiplier it read."""
 
     research = _weekdays("20210701", "20250630")
     rng = np.random.default_rng(116)
@@ -916,26 +920,18 @@ def test_the_raw_condition_judges_the_holders_money_only_where_the_rules_hold_it
     )
     assert verdict.raw_excess_at_cost_stress({"turnover": 1.0}, cost_stress_multiplier=2.0) is None
 
-    held = {"require_raw_excess_at_cost_stress": True, "cost_stress_multiplier": 3.0}
-    below = gate(_raw_summary(costs - 0.01), **held)
+    below = gate(_raw_summary(costs - 0.01), cost_stress_multiplier=3.0)
     assert below["reasons"] == ["freeze_raw_excess_not_positive_at_cost_stress"]
     assert below["raw_excess_at_cost_stress"] == pytest.approx(-0.01)
     assert below["thresholds"]["cost_stress_multiplier"] == 3.0
     # Above zero passes; exactly zero, or a reading the summary cannot give, does not.
-    assert gate(_raw_summary(costs + 0.01), **held)["passed"]
-    assert gate(_raw_summary(costs), **held)["reasons"] == [
+    assert gate(_raw_summary(costs + 0.01), cost_stress_multiplier=3.0)["passed"]
+    assert gate(_raw_summary(costs), cost_stress_multiplier=3.0)["reasons"] == [
         "freeze_raw_excess_not_positive_at_cost_stress"
     ]
-    assert gate({}, **held)["reasons"] == ["freeze_raw_excess_not_positive_at_cost_stress"]
+    assert gate({})["reasons"] == ["freeze_raw_excess_not_positive_at_cost_stress"]
     with pytest.raises(ValueError, match="summary"):
-        gate(None, **held)
-
-    # Rules without the condition: the very gate of before, key for key.
-    before = _gate(sidecar, trials=4, full_span_validations=4, years=RESEARCH_YEARS)
-    unheld = gate(_raw_summary(-0.5), require_raw_excess_at_cost_stress=False, cost_stress_multiplier=3.0)
-    assert unheld == before
-    assert "raw_excess_at_cost_stress" not in unheld
-    assert "cost_stress_multiplier" not in unheld["thresholds"]
+        gate(None)
 
 
 def test_the_graduations_cost_stress_is_one_formula_for_a_row_and_a_forward_slice():
@@ -993,39 +989,26 @@ def _selection_book(rng, mean, *, days=FORWARD_DAYS):
     return _with_panel(_analysis((list(days), panel + active, benchmark, size)), panel)
 
 
-def test_plain_selection_refuses_a_book_the_regression_carried_only_where_held():
+def test_plain_selection_refuses_a_book_the_regression_carried():
     """F8: the neutralised conditions pass a book that lost to its own panel
     in a rally because its negative active market loading is credited back;
-    an arm held to plain selection refuses it, and an arm whose rules lack the
-    condition judges the slice exactly as before (no reason, no threshold, no
-    judged series), with the holder's readings reported either way."""
+    plain selection refuses it, and the holder's readings say why."""
 
     rng = np.random.default_rng(118)
     book = _rally_book(rng, alpha=0.12, active_beta=-0.5)
-    unheld = _forward(book)
-    raw = unheld["raw_readings"]
+    judged = _forward(book)
+    raw = judged["raw_readings"]
     # The neutralised reading passes, the plain one is negative.
-    assert unheld["reasons"] == []
-    assert unheld["lower_bound"] > 0 and unheld["neutralized_excess"] > 0
-    assert unheld["market_beta"] < 0
+    assert judged["reasons"] == ["forward_plain_excess_lower_bound_not_positive"]
+    assert judged["lower_bound"] > 0 and judged["neutralized_excess"] > 0
+    assert judged["market_beta"] < 0
     assert raw["plain_selection"] < 0
-    assert unheld["plain_excess"] < 0 < unheld["neutralized_excess"]
-    assert "require_forward_plain_selection" not in unheld["thresholds"]
-    assert "plain_excess_lower_bound" not in unheld
-
-    held = _forward(book, require_forward_plain_selection=True)
-    assert held["reasons"] == ["forward_plain_excess_lower_bound_not_positive"]
-    assert held["thresholds"]["require_forward_plain_selection"] is True
-    # The switch adds a reason, its threshold and the bound it judged, and
-    # changes no other reading.
-    added = ("reasons", "thresholds", "plain_excess_lower_bound")
-    assert {key: value for key, value in held.items() if key not in added} == {
-        key: value for key, value in unheld.items() if key not in added
-    }
+    assert judged["plain_excess"] < 0 < judged["neutralized_excess"]
+    assert judged["plain_excess_lower_bound"] < 0
 
     # Without a panel there is no plain excess: the slice is not judged.
     with pytest.raises(ValueError, match="no plain excess to judge"):
-        _forward({**book, "panel_daily": []}, require_forward_plain_selection=True)
+        _forward({**book, "panel_daily": []})
 
 
 def test_plain_selection_is_judged_on_the_lower_bound_of_its_mean():
@@ -1036,7 +1019,7 @@ def test_plain_selection_is_judged_on_the_lower_bound_of_its_mean():
     rng = np.random.default_rng(122)
 
     def judged(mean, **overrides):
-        return _forward(_selection_book(rng, mean), require_forward_plain_selection=True, **overrides)
+        return _forward(_selection_book(rng, mean), **overrides)
 
     # A mean above zero inside its own noise is refused.
     thin = judged(0.01)
@@ -1057,7 +1040,7 @@ def test_plain_selection_is_judged_on_the_lower_bound_of_its_mean():
             for (_day, own), (_same, drawn) in zip(book["strategy_daily"], book["panel_daily"], strict=True)
         ]
     )
-    bound = _forward(book, require_forward_plain_selection=True, forward_confidence=0.9)
+    bound = _forward(book, forward_confidence=0.9)
     seed = int.from_bytes(hashlib.sha256(b"artifact-1").digest()[:8], "big")
     blocks = -(-len(series) // verdict.BOOTSTRAP_BLOCK_DAYS)
     starts = np.random.default_rng(seed).integers(
@@ -1068,9 +1051,9 @@ def test_plain_selection_is_judged_on_the_lower_bound_of_its_mean():
     assert bound["plain_excess_lower_bound"] == pytest.approx(
         float(np.quantile(means, 0.1)) * TRADING_DAYS_PER_YEAR, rel=1e-12
     )
-    assert _forward(book, require_forward_plain_selection=True, seed_key="artifact-2")[
-        "plain_excess_lower_bound"
-    ] != pytest.approx(_forward(book, require_forward_plain_selection=True)["plain_excess_lower_bound"])
+    assert _forward(book, seed_key="artifact-2")["plain_excess_lower_bound"] != pytest.approx(
+        _forward(book)["plain_excess_lower_bound"]
+    )
 
 
 def test_the_holders_readings_are_the_stored_series_compounded():
@@ -1134,12 +1117,11 @@ def test_plain_selection_judges_the_book_and_its_seed_replicates_as_one_series()
 
     rng = np.random.default_rng(121)
     book = _selection_book(rng, 0.12)
-    held = {"require_forward_plain_selection": True, "require_seed_replicates": True}
 
     def replicate(analysis, name="replicate"):
         return ({"artifact_id": name, "source_step_id": f"step_{name}"}, analysis)
 
-    alone = _forward(book, **held)
+    alone = _forward(book)
     assert "seed_replicates" not in alone and "seed_mean" not in alone
     assert alone["plain_excess_lower_bound"] > 0
     assert alone["reasons"] == []
@@ -1147,7 +1129,7 @@ def test_plain_selection_judges_the_book_and_its_seed_replicates_as_one_series()
     # The frozen seed clears the bound alone; with the other two seeds the
     # mean is still above zero, and no longer clear of its noise.
     others = [replicate(_selection_book(rng, -0.03), "b"), replicate(_selection_book(rng, -0.07), "c")]
-    sunk = _forward(book, seed_replicates=others, **held)
+    sunk = _forward(book, seed_replicates=others)
     mean = sunk["seed_mean"]
     assert mean["members"] == 3
     assert mean["plain_excess"] == pytest.approx((0.12 - 0.03 - 0.07) / 3, rel=1e-9)
@@ -1160,31 +1142,24 @@ def test_plain_selection_judges_the_book_and_its_seed_replicates_as_one_series()
     assert {key: value for key, value in sunk.items() if key not in added} == {
         key: value for key, value in alone.items() if key not in added
     }
-    assert "require_seed_replicates" not in sunk["thresholds"]
 
     # Seeds that agree pass together.
     agreed = _forward(
         book,
         seed_replicates=[replicate(_selection_book(rng, 0.10)), replicate(_selection_book(rng, 0.08))],
-        **held,
     )
     assert agreed["plain_excess_lower_bound"] > 0 and agreed["reasons"] == []
 
     # A replicate without a panel, or one that measured other days.
     with pytest.raises(ValueError, match="no plain excess to judge"):
-        _forward(book, seed_replicates=[replicate({**others[0][1], "panel_daily": []})], **held)
+        _forward(book, seed_replicates=[replicate({**others[0][1], "panel_daily": []})])
     short = _selection_book(rng, 0.10, days=FORWARD_DAYS[:-1])
     with pytest.raises(ValueError, match="measured other days than the frozen book"):
-        _forward(book, seed_replicates=[replicate(short)], **held)
+        _forward(book, seed_replicates=[replicate(short)])
 
     span = FORWARD_DAYS + HELDOUT_DAYS
     long_book, long_other = _selection_book(rng, 0.10, days=span), _selection_book(rng, -0.50, days=span)
-    heldout = _heldout(
-        long_book,
-        forward_tracking_error=0.05,
-        seed_replicates=[replicate(long_other)],
-        **held,
-    )
+    heldout = _heldout(long_book, forward_tracking_error=0.05, seed_replicates=[replicate(long_other)])
     assert heldout["seed_mean"]["members"] == 2
     assert "plain_excess_lower_bound" not in heldout
     assert not any("selection" in reason for reason in heldout["reasons"])
@@ -1196,9 +1171,9 @@ def test_plain_selection_judges_the_book_and_its_seed_replicates_as_one_series()
 def test_the_condition_table_is_the_one_list_of_what_a_record_can_carry():
     """Every condition has its own reason token. A graduation condition names
     its criterion, F1..F8 and H1..H4 between them, and no freeze condition
-    does. An optional condition is turned on by a rule that exists, and only
-    an optional condition states a rule in the thresholds. The Environment's
-    copy of the seed reasons (it cannot import the Pipeline) is the table's."""
+    does. The only optional conditions are the tracking mandate's, which its
+    cap turns on. The Environment's copy of the seed reasons (it cannot import
+    the Pipeline) is the table's."""
 
     from autotrade.environment.tools.finish_session import SEED_REASONS
 
@@ -1215,17 +1190,14 @@ def test_the_condition_table_is_the_one_list_of_what_a_record_can_carry():
     # ``forward_...`` is an F criterion, ``heldout_...`` an H one.
     assert all(condition.code[0] == condition.reason[0].upper() for condition in graduation)
     assert not any(c.code for c in verdict.CONDITIONS if c not in graduation)
-    for condition in verdict.CONDITIONS:
-        assert {condition.requires, condition.stamp} - {""} <= set(ACCEPTANCE_KEYS), condition.reason
-        assert condition.requires or not condition.stamp, condition.reason
+    assert {condition.requires for condition in verdict.CONDITIONS} == {"", "tracking_error_cap"}
     assert {condition.reason for condition in stages["seeds"]} == SEED_REASONS
 
 
 def test_a_stage_records_its_failures_in_the_tables_order_and_judges_nothing_that_is_off():
     """One judge path. A block that fails every forward condition records all
-    of them in the table's order; under rules that hold no optional condition
-    and no mandate the same block records the others alone, and the record's
-    thresholds state no optional rule."""
+    of them in the table's order; under rules without a tracking mandate the
+    same block records the others alone."""
 
     failing = {
         "lower_bound": -0.1,
@@ -1246,20 +1218,11 @@ def test_a_stage_records_its_failures_in_the_tables_order_and_judges_nothing_tha
         "min_mean_gross": 0.5,
         **mandate,
     }
-    every = AcceptanceRules(
-        **mandate, require_forward_plain_selection=True, require_seed_replicates=True
-    )
     forward = [condition for condition in verdict.CONDITIONS if condition.stage == "forward"]
 
-    assert verdict.judge("forward", failing, thresholds, every) == [c.reason for c in forward]
-    assert verdict.stamps("forward", every) == {"require_forward_plain_selection": True}
+    assert verdict.judge("forward", failing, thresholds, AcceptanceRules(**mandate)) == [
+        c.reason for c in forward
+    ]
     assert verdict.judge("forward", failing, thresholds, AcceptanceRules()) == [
         condition.reason for condition in forward if not condition.requires
     ]
-    assert verdict.stamps("forward", AcceptanceRules()) == {}
-    # The raw freeze condition states the multiplier it was read at, the
-    # seed conditions that the arm holds them.
-    raw = AcceptanceRules(require_raw_excess_at_cost_stress=True, cost_stress_multiplier=3.0)
-    assert verdict.stamps("freeze", raw) == {"cost_stress_multiplier": 3.0}
-    assert verdict.stamps("freeze", AcceptanceRules()) == {}
-    assert verdict.stamps("seeds", every) == {"require_seed_replicates": True}

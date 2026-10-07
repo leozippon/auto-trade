@@ -183,9 +183,9 @@ def assert_seed_snapshot_config(
 def assert_seed_carries_bonus_split(seed: Path) -> None:
     """Refuse a seed whose replay slots cannot tell bonus shares from conversions.
 
-    An arm that charges the dividend tax reads ``bonus_per_share`` from every
-    slot's ex-date table, and its Broker refuses the first day of a replay
-    without it. A seed built before the column existed would therefore fail
+    Every arm charges the dividend tax, which reads ``bonus_per_share`` from
+    every slot's ex-date table, and its Broker refuses the first day of a
+    replay without it. A seed built before the column existed would therefore fail
     the arm's first Validation mid-session; read from the tables' schemas,
     it is refused when the arm is created instead.
     """
@@ -199,7 +199,7 @@ def assert_seed_carries_bonus_split(seed: Path) -> None:
         raise ValueError(
             f"PIT view seed {seed} predates the bonus-share column the dividend tax reads "
             f"({len(stale)} replay slot table(s), first {stale[0].parent.relative_to(seed)}); "
-            "rebuild the seed under a new directory, or create the arm with dividend_tax false"
+            "rebuild the seed under a new directory"
         )
 
 

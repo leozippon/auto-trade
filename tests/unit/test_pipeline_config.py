@@ -27,11 +27,12 @@ from autotrade.pipelines.config import (
     DEFAULT_RESEARCH_GEOMETRY,
     MANDATED_DEFAULTS,
     OFFLINE_TRIALS_PRICING,
+    RETIRED_SWITCHES,
     AcceptanceRules,
     RollingExperimentConfig,
     acceptance_for,
 )
-from autotrade.pipelines.hitl_state import CREATION_STAMPS, WEB_CREATE_DEFAULTS
+from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
 from tests.unit.gpu_probe import stubbed_gpu_probe
 
 #: The console create form is seeded from the pinned explore profile so a
@@ -310,127 +311,41 @@ class AcceptanceRulesTest(unittest.TestCase):
         rendered = json.dumps(facts)
         self.assertIsNone(re.search(r"20\d{6}", rendered))
 
-    def test_the_raw_condition_is_stated_and_judged_only_where_an_arm_holds_it(self) -> None:
-        """An arm recorded before the raw cost-stress condition has no key and
-        is judged, and told, exactly as before; an arm that holds it is told
-        the condition and its rules carry it."""
-
-        recorded = acceptance_for({"max_drawdown": 0.45})
-        self.assertFalse(recorded.require_raw_excess_at_cost_stress)
-        self.assertNotIn("raw_excess_at_cost_stress", recorded.agent_facts()["freeze_gate"])
-        held = acceptance_for(
-            {"require_raw_excess_at_cost_stress": True, "cost_stress_multiplier": 3.0}
-        )
-        stated = held.agent_facts()["freeze_gate"]["raw_excess_at_cost_stress"]
+    def test_the_raw_condition_is_stated_at_the_arms_multiplier(self) -> None:
+        stated = acceptance_for({"cost_stress_multiplier": 3.0}).agent_facts()["freeze_gate"][
+            "raw_excess_at_cost_stress"
+        ]
         self.assertIn("> 0", stated)
         self.assertIn("3.0", stated)
         self.assertIn("raw_readings.raw_excess_at_cost_stress", stated)
-        self.assertEqual(
-            (held.require_raw_excess_at_cost_stress, held.cost_stress_multiplier), (True, 3.0)
-        )
-        self.assertEqual(AcceptanceRules.from_record(held.to_record()), held)
-        with self.assertRaisesRegex(ValueError, "must be a boolean"):
-            AcceptanceRules(require_raw_excess_at_cost_stress=1)  # type: ignore[arg-type]
 
-    def test_plain_selection_is_stated_and_judged_only_where_an_arm_holds_it(self) -> None:
-        """An arm recorded before the forward plain-selection condition has no
-        key: its forward slice is judged and its session told exactly as
-        before. An arm that holds it is told the rule (no figure), with the
-        seed average only where it also holds seed replicates, and its rules
-        carry it; the switch accepts only a boolean."""
+    def test_plain_selection_is_stated_as_a_rule_over_the_seeds_together(self) -> None:
+        """The forward plain-excess bound is told as a rule with no figure,
+        over the frozen book and its seed replicates averaged day by day."""
 
-        recorded = acceptance_for({"max_drawdown": 0.45})
-        self.assertFalse(recorded.require_forward_plain_selection)
-        self.assertNotIn("plain_excess_lower_bound", recorded.agent_facts()["graduation"]["forward"])
-        held = acceptance_for({"require_forward_plain_selection": True})
-        self.assertTrue(held.require_forward_plain_selection)
-        stated = held.agent_facts()["graduation"]["forward"]["plain_excess_lower_bound"]
+        stated = AcceptanceRules().agent_facts()["graduation"]["forward"]["plain_excess_lower_bound"]
         self.assertIn("lower bound > 0", stated)
         self.assertIn("with no regression", stated)
         # Its research-period reading, and the row field of a similar name
         # that it is not.
         self.assertIn("daily_series active_return", stated)
         self.assertIn("Not raw_readings.plain_selection", stated)
-        self.assertNotIn("seed replicates", stated)
+        self.assertIn("average over the frozen book and its replicates", stated)
         self.assertIsNone(re.search(r"\d\.\d", stated))
-        seeded = replace(held, require_seed_replicates=True).agent_facts()["graduation"]["forward"]
-        self.assertEqual(set(seeded), set(held.agent_facts()["graduation"]["forward"]))
-        self.assertIn("average over the frozen book and its replicates", seeded["plain_excess_lower_bound"])
-        self.assertEqual(AcceptanceRules.from_record(held.to_record()), held)
-        with self.assertRaisesRegex(ValueError, "require_forward_plain_selection must be a boolean"):
-            AcceptanceRules(require_forward_plain_selection="yes")  # type: ignore[arg-type]
 
-    def test_every_optional_condition_is_a_creation_stamp_the_agent_is_told_of(self) -> None:
-        """The conditions a switch turns on (``verdict.CONDITIONS``) are
-        exactly the acceptance rules creation stamps on, and the Agent's facts
-        state one exactly where the arm holds it: turning a switch on adds to
-        the facts and moves nothing they already said."""
-
-        defaults = AcceptanceRules()
-        switches = {
-            condition.requires
-            for condition in verdict.CONDITIONS
-            if isinstance(getattr(defaults, condition.requires, None), bool)
-        }
-        # The one stamped rule that is no condition prices the trial family
-        # (``test_offline_pricing_is_stated_once_where_an_arm_holds_it``).
-        self.assertEqual(
-            switches | {"independent_offline_trials"}, set(CREATION_STAMPS) & set(ACCEPTANCE_KEYS)
-        )
-
-        def leaves(node: object, path: tuple[str, ...] = ()) -> dict[tuple[str, ...], object]:
-            if not isinstance(node, dict):
-                return {path: node}
-            return {
-                key: value
-                for name, child in node.items()
-                for key, value in leaves(child, (*path, name)).items()
-            }
-
-        unheld = leaves(defaults.agent_facts())
-        for switch in sorted(switches):
-            held = leaves(replace(defaults, **{switch: True}).agent_facts())
-            with self.subTest(switch=switch):
-                self.assertGreater(len(held), len(unheld))
-                self.assertEqual({path: held[path] for path in unheld}, unheld)
-
-    def test_offline_pricing_is_stated_once_where_an_arm_holds_it(self) -> None:
-        """The DSR passage of an arm that prices declared screens as
-        independent gives that formula and states the reason once; an arm
-        recorded without the rule is told exactly what it was told before,
-        and nothing else of either moves."""
-
-        def leaves(node: object, path: tuple[str, ...] = ()) -> dict[tuple[str, ...], object]:
-            if not isinstance(node, dict):
-                return {path: node}
-            return {
-                key: value
-                for name, child in node.items()
-                for key, value in leaves(child, (*path, name)).items()
-            }
-
-        unheld = acceptance_for({"max_drawdown": 0.45})
-        held = replace(unheld, independent_offline_trials=True)
-        facts = {rules: rules.agent_facts() for rules in (unheld, held)}
-        self.assertEqual(
-            [json.dumps(facts[rules]).count(OFFLINE_TRIALS_PRICING) for rules in (unheld, held)],
-            [0, 1],
-        )
-        passage = ("freeze_gate", "deflated_sharpe_probability")
-        stated = leaves(facts[held])[passage]
-        self.assertIn("rho + (1 - rho) * H + (M - H) independent trials", stated)
-        self.assertIn("rho + (1 - rho) * M independent trials", leaves(facts[unheld])[passage])
-        self.assertEqual(
-            {path for path, value in leaves(facts[held]).items() if leaves(facts[unheld])[path] != value},
-            {passage},
-        )
-        self.assertEqual(AcceptanceRules.from_record(held.to_record()), held)
-        with self.assertRaisesRegex(ValueError, "independent_offline_trials must be a boolean"):
-            AcceptanceRules(independent_offline_trials=1)  # type: ignore[arg-type]
+    def test_offline_pricing_is_stated_once(self) -> None:
+        facts = json.dumps(AcceptanceRules().agent_facts())
+        self.assertEqual(facts.count(OFFLINE_TRIALS_PRICING), 1)
+        self.assertIn("rho + (1 - rho) * H + (M - H) independent trials", facts)
 
     def test_a_record_with_a_retired_key_still_rebuilds_the_rules(self) -> None:
         rules = AcceptanceRules.from_record(
-            {"max_drawdown": 0.2, "heldout_min_trades": 5, "confirmation_folds": 2}
+            {
+                "max_drawdown": 0.2,
+                "heldout_min_trades": 5,
+                "confirmation_folds": 2,
+                **dict.fromkeys(RETIRED_SWITCHES, False),
+            }
         )
         self.assertEqual(rules, AcceptanceRules(max_drawdown=0.2))
 
@@ -517,14 +432,8 @@ class DefaultsDriftTest(unittest.TestCase):
                 continue
             self.assertEqual(WEB_CREATE_DEFAULTS[key], getattr(profile, key), key)
         rules = AcceptanceRules().to_record()
-        # A creation stamp is a rule whose own default is off, so an arm
-        # recorded without the key reads as it was, and which every arm
-        # created now is held to.
-        own = {**rules, "dividend_tax": profile.dividend_tax}
-        for key, stamp in CREATION_STAMPS.items():
-            self.assertIs(own[key], False, key)
-            self.assertIs(stamp, True, key)
-            self.assertIs(WEB_CREATE_DEFAULTS[key], stamp, key)
+        # A retired switch is no parameter a request can name.
+        self.assertFalse(RETIRED_SWITCHES & set(WEB_CREATE_DEFAULTS))
         # Drawdowns and the mandate switch stay empty so the form does not pin
         # a mandate onto every arm. Every other rule shows what an empty
         # request would stamp.
@@ -533,7 +442,7 @@ class DefaultsDriftTest(unittest.TestCase):
         for key, value in rules.items():
             if key in blank:
                 self.assertIsNone(WEB_CREATE_DEFAULTS[key], key)
-            elif key not in CREATION_STAMPS:
+            else:
                 self.assertEqual(WEB_CREATE_DEFAULTS[key], value, key)
         for key, value in DEFAULT_RESEARCH_GEOMETRY.to_record().items():
             self.assertEqual(WEB_CREATE_DEFAULTS[key], value, key)
@@ -587,53 +496,58 @@ class DefaultsDriftTest(unittest.TestCase):
             AcceptanceRules(),
         )
 
-    def test_the_dividend_tax_is_pinned_per_arm_and_on_for_new_arms(self) -> None:
-        """An arm recorded before the tax existed has no key in params.json and
-        replays untaxed for good; the creation defaults stamp it on every new
-        arm, and the run facts the Agent reads say which it is."""
+    def test_the_retired_switches_are_accepted_and_inert_and_any_other_key_refused(self) -> None:
+        """Every params.json written before 2026-10-07 carries the retired
+        switches. The worker loads such an arm as if they were absent, whatever
+        their values, and runs it under the one rule set: its account pays the
+        dividend tax, which the run facts state. A key it does not know is
+        refused as ever."""
         import tempfile
 
         from autotrade.agent.experiment_facts import _broker_replay_facts
         from autotrade.pipelines.worker import resolve_worker_options
 
         base = {
-            "experiment_id": "tax_demo",
+            "experiment_id": "legacy_demo",
             "strategy_path": "configs/agent_output_template/main.py",
             "data_backend": "pit",
             "raw_dir": "data/raw",
             "fundamental_events_root": "data/pit/fundamental_events",
             "fundamental_events_status": "results/data_quality/fundamental_events_status.json",
         }
-        self.assertIs(WEB_CREATE_DEFAULTS["dividend_tax"], True)
-        self.assertIs(BrokerProfile().dividend_tax, False)
+        self.assertEqual(
+            RETIRED_SWITCHES,
+            {
+                "require_raw_excess_at_cost_stress",
+                "require_forward_plain_selection",
+                "require_seed_replicates",
+                "independent_offline_trials",
+                "dividend_tax",
+            },
+        )
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(tmp)
             (repo_root / "experiments").mkdir()
 
-            def profile(params: dict[str, object]) -> BrokerProfile:
+            def options(params: dict[str, object]):
                 return resolve_worker_options(
                     params,
-                    experiment_dir=repo_root / "experiments/tax_demo",
+                    experiment_dir=repo_root / "experiments/legacy_demo",
                     repo_root=repo_root,
                     preflight=True,
-                ).rolling.broker_profile
+                )
 
-            recorded = profile(base)
-            created = profile({**base, "dividend_tax": WEB_CREATE_DEFAULTS["dividend_tax"]})
-            with self.assertRaisesRegex(ValueError, "dividend_tax must be a boolean"):
-                profile({**base, "dividend_tax": "true"})
-        self.assertEqual(recorded, BrokerProfile(initial_cash=recorded.initial_cash))
-        self.assertTrue(created.dividend_tax)
-        self.assertEqual(
-            _broker_replay_facts({"broker_profile": recorded.to_record()})["dividend_tax_policy"],
-            {"charged": False},
-        )
-        # A run manifest written before the field existed reads the same way.
-        self.assertEqual(
-            _broker_replay_facts({"broker_profile": {"slippage_bps": 5.0}})["dividend_tax_policy"],
-            {"charged": False},
-        )
-        policy = _broker_replay_facts({"broker_profile": created.to_record()})["dividend_tax_policy"]
+            current = options(base)
+            for value in (True, False, "not even a boolean"):
+                with self.subTest(value=value):
+                    legacy = options({**base, **dict.fromkeys(RETIRED_SWITCHES, value)})
+                    self.assertEqual(legacy, current)
+            with self.assertRaisesRegex(ValueError, r"unknown experiment parameters: \['require_heldout_magic'\]"):
+                options({**base, "require_heldout_magic": True})
+        profile = current.rolling.broker_profile
+        self.assertTrue(profile.dividend_tax)
+        self.assertEqual(current.rolling.acceptance, AcceptanceRules())
+        policy = _broker_replay_facts({"broker_profile": profile.to_record()})["dividend_tax_policy"]
         self.assertTrue(policy["charged"])
         self.assertEqual(policy["rate_by_months_held_at_most"], {"1": 0.2, "12": 0.1})
 
@@ -714,9 +628,6 @@ class DefaultsDriftTest(unittest.TestCase):
                     "max_research_minutes": 300,
                     "cost_stress_multiplier": 3.0,
                     "max_drawdown": 0.2,
-                    "require_raw_excess_at_cost_stress": True,
-                    "require_forward_plain_selection": True,
-                    "require_seed_replicates": True,
                     "strategy_path": "configs/agent_output_template/main.py",
                     "data_backend": "pit",
                     "raw_dir": "data/raw",
@@ -734,14 +645,7 @@ class DefaultsDriftTest(unittest.TestCase):
         # The two the request names; it named no cap, so no tracking mandate.
         self.assertEqual(
             options.rolling.acceptance,
-            replace(
-                AcceptanceRules(),
-                max_drawdown=0.2,
-                cost_stress_multiplier=3.0,
-                require_raw_excess_at_cost_stress=True,
-                require_forward_plain_selection=True,
-                require_seed_replicates=True,
-            ),
+            replace(AcceptanceRules(), max_drawdown=0.2, cost_stress_multiplier=3.0),
         )
 
     def test_the_console_create_form_is_seeded_with_the_research_preset(self) -> None:
@@ -1367,7 +1271,7 @@ class PitViewsSeedParameterTest(unittest.TestCase):
             self.assertEqual(pin["generation_id"], "gen_seed")
             self.assertEqual(options.rolling.lineage_arms, ("earlier_arm",))
             # What the research session writes first; a later worker start resumes.
-            ledger.append(lineage_ledger_record(directory, acceptance=AcceptanceRules(), workspace_reference=""))
+            ledger.append(lineage_ledger_record(directory, workspace_reference=""))
             load_worker_options(directory, repo_root=repo_root)
 
             ran = experiments / "ran_unpinned"

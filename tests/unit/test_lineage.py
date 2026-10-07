@@ -35,11 +35,7 @@ from autotrade.pipelines.lineage import (
     lineage_arm_ids,
     write_lineage,
 )
-from autotrade.pipelines.research_session import (
-    LINEAGE_JOINING,
-    LINEAGE_NOTE,
-    arm_record,
-)
+from autotrade.pipelines.research_session import LINEAGE_NOTE, arm_record
 from autotrade.pipelines.session_resume import REVISIONS_DIR
 
 RESEARCH_START, RESEARCH_END = "20210701", "20250630"
@@ -84,7 +80,8 @@ def _payload(*, seed: int, loading: float, days=DAYS) -> dict[str, object]:
 def _row(directory: Path, index: int, *, seed: int, loading: float, span: str = "full",
          control: bool = False, batch: str = "b1", offline: int | None = 0, days=DAYS,
          bytes_of: int | None = None, fingerprint: str | None = None) -> dict[str, object]:
-    """One ledger ``steps[]`` row, its result and style sidecar on disk.
+    """One ledger ``steps[]`` row, its result and style sidecar on disk, and
+    the strategy its revision holds, which the gate reads for a nominee.
 
     Each row replays bytes of its own unless ``bytes_of`` names the row index
     whose bytes it validates again (another revision of the same strategy), or
@@ -95,9 +92,13 @@ def _row(directory: Path, index: int, *, seed: int, loading: float, span: str = 
     payload = _payload(seed=seed, loading=loading, days=days)
     write_json_atomic(result / "result.json", {"initial_cash": 1_000_000.0})
     write_json_atomic(result / STYLE_ARTIFACT_NAME, payload)
+    revision = f"revision_{directory.name}_{index}"
+    output = directory / REVISIONS_DIR / revision / "output"
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "main.py").write_text("def generate_orders(context):\n    return []\n", encoding="utf-8")
     return {
         "step_id": f"research__{directory.name}__valid_{index:03d}",
-        "revision_id": f"revision_{directory.name}_{index}",
+        "revision_id": revision,
         "fingerprint": fingerprint or f"bytes_{directory.name}_{index if bytes_of is None else bytes_of}",
         "control": control,
         "batch_id": batch,
@@ -169,14 +170,13 @@ def _analysis(row) -> dict[str, object]:
     )
 
 
-def _record(arm: Path, extraction, *, rules: AcceptanceRules | None = None, pack: str = "") -> dict[str, object]:
+def _record(arm: Path, extraction, *, pack: str = "") -> dict[str, object]:
     """What creation and the start of the research session write: the
-    console's series file, then the pipeline's ledger record read from it
-    under the arm's ``rules`` (the defaults when none), naming the reference
-    ``pack`` the arm mounts."""
+    console's series file, then the pipeline's ledger record read from it,
+    naming the reference ``pack`` the arm mounts."""
 
     write_lineage(arm, extraction)
-    record = lineage_ledger_record(arm, acceptance=rules or AcceptanceRules(), workspace_reference=pack)
+    record = lineage_ledger_record(arm, workspace_reference=pack)
     ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl").append(record)
     return record
 
@@ -192,55 +192,23 @@ def _own_rows(directory: Path) -> list[dict[str, object]]:
     ]
 
 
-def test_an_arm_without_a_lineage_is_judged_exactly_as_before(tmp_path: Path) -> None:
-    """The figures below are what this fixture read before lineages existed,
-    to the last bit: an arm created without one deflates over its own family.
-    An arm whose rules were recorded before offline screens were priced as
-    independent reads its recorded bar to the last bit too; one that holds
-    the rule counts its one declared screen as one more trial."""
+def test_an_arm_without_a_lineage_deflates_over_its_own_family(tmp_path: Path) -> None:
+    """Its two host trials at their measured correlation and its one declared
+    screen as one more trial; a control is no trial."""
 
     rows = _own_rows(tmp_path / "new_arm")
-
-    def dsr_under(rules: AcceptanceRules) -> dict[str, object]:
-        gate = freeze_gate_for([], rows, rows[1], experiment_dir=tmp_path / "new_arm", acceptance=rules)
-        return gate["deflated_sharpe"]
-
-    # Rules as a params.json written before the rule existed states them.
-    recorded = AcceptanceRules().to_record()
-    del recorded["independent_offline_trials"]
-    dsr = dsr_under(AcceptanceRules.from_record(recorded))
+    dsr = freeze_gate_for(
+        [], rows, rows[1], experiment_dir=tmp_path / "new_arm", acceptance=AcceptanceRules()
+    )["deflated_sharpe"]
     assert {
         key: dsr[key]
-        for key in (
-            "trials",
-            "host_trials",
-            "offline_trials",
-            "controls",
-            "trial_correlation",
-            "trial_correlation_pairs",
-            "effective_trials",
-            "information_ratio_bar",
-            "deflated_sharpe_probability",
-        )
-    } == {
-        "trials": 3,
-        "host_trials": 2,
-        "offline_trials": 1,
-        "controls": 1,
-        "trial_correlation": 0.25222736470355794,
-        "trial_correlation_pairs": 1,
-        "effective_trials": 2.495545270592884,
-        "information_ratio_bar": 1.2918824832171654,
-        "deflated_sharpe_probability": 0.3208028904472676,
-    }
+        for key in ("trials", "host_trials", "offline_trials", "controls", "trial_correlation_pairs")
+    } == {"trials": 3, "host_trials": 2, "offline_trials": 1, "controls": 1, "trial_correlation_pairs": 1}
+    correlation = dsr["trial_correlation"]
+    assert correlation == pytest.approx(0.25222736470355794, rel=1e-12)
+    assert dsr["effective_trials"] == pytest.approx(correlation + (1 - correlation) * 2 + 1)
     assert (dsr["lineage_trials"], dsr["lineage_arms"]) == (0, [])
     assert "lineage" not in arm_record(())
-    held = dsr_under(AcceptanceRules(independent_offline_trials=True))
-    correlation = dsr["trial_correlation"]
-    assert held["effective_trials"] == pytest.approx(correlation + (1 - correlation) * 2 + 1)
-    assert held["information_ratio_bar"] > dsr["information_ratio_bar"]
-    priced = {"effective_trials", "sharpe_star", "information_ratio_bar", "deflated_sharpe_probability"}
-    assert {key for key in dsr if held[key] != dsr[key]} == priced
 
 
 def test_a_correlated_lineage_adds_almost_nothing_and_an_independent_one_its_count() -> None:
@@ -260,6 +228,7 @@ def test_a_correlated_lineage_adds_almost_nothing_and_an_independent_one_its_cou
             lineage_trials=len(series),
             lineage_series=series,
             full_span_validations=2,
+            summary={},
         )["deflated_sharpe"]
 
     alone = gate([])
@@ -321,7 +290,7 @@ def test_the_recorded_lineage_joins_the_family_and_outlives_its_arms(tmp_path: P
     # 2 + 1 revisions and 2 + 1 declared screens; the two controls are not trials.
     assert (record["trials"], record["host_trials"], record["offline_trials"], record["controls"]) == (6, 3, 3, 2)
     correlation, _pairs = verdict.trial_correlation(lineage_analyses)
-    assert record["effective_trials"] == pytest.approx(verdict.effective_trials(6, correlation))
+    assert record["effective_trials"] == pytest.approx(correlation + (1 - correlation) * 3 + 3)
 
     shutil.rmtree(first)
     shutil.rmtree(second)
@@ -338,20 +307,15 @@ def test_the_recorded_lineage_joins_the_family_and_outlives_its_arms(tmp_path: P
         offline_trials=1 + 3,
         trial_analyses=[_analysis(own[1]), _analysis(own[2]), *lineage_analyses],
         full_span_validations=2,
+        summary={},
     )["deflated_sharpe"]
     assert dsr["trial_correlation_pairs"] == direct["trial_correlation_pairs"] == 10
     for key in ("trial_correlation", "effective_trials", "information_ratio_bar", "deflated_sharpe_probability"):
         assert dsr[key] == pytest.approx(direct[key], rel=1e-12), key
-    # Priced as independent, the lineage's three declared screens count one
-    # each like the arm's own one; the validated five keep the union's ρ̄.
-    rules = AcceptanceRules(independent_offline_trials=True)
-    held = freeze_gate_for(records, own, own[1], experiment_dir=arm, acceptance=rules)["deflated_sharpe"]
+    # The lineage's three declared screens count one each like the arm's own
+    # one; the validated five keep the union's ρ̄.
     union = dsr["trial_correlation"]
-    assert held["trial_correlation"] == union
-    assert held["effective_trials"] == pytest.approx(union + (1 - union) * 5 + 4)
-    assert lineage_ledger_record(arm, acceptance=rules, workspace_reference="")["effective_trials"] == pytest.approx(
-        correlation + (1 - correlation) * 3 + 3
-    )
+    assert dsr["effective_trials"] == pytest.approx(union + (1 - union) * 5 + 4)
     assert arm_record((), lineage_record(records))["lineage"] == {
         "arms": ["first", "second"],
         "trials": 6,
@@ -360,7 +324,7 @@ def test_the_recorded_lineage_joins_the_family_and_outlives_its_arms(tmp_path: P
     }
     with pytest.raises(ValueError, match="already records its lineage"):
         ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl").append(
-            lineage_ledger_record(arm, acceptance=AcceptanceRules(), workspace_reference="")
+            lineage_ledger_record(arm, workspace_reference="")
         )
 
 
@@ -410,12 +374,11 @@ def test_a_lineage_counts_one_strategy_validated_twice_as_one_trial(tmp_path: Pa
         extract_lineage(root, ["probed"], research_start=RESEARCH_START, research_end=RESEARCH_END)
 
 
-def test_under_the_rule_bytes_validated_in_two_arms_are_one_trial(tmp_path: Path) -> None:
+def test_bytes_validated_in_two_arms_are_one_trial(tmp_path: Path) -> None:
     """Sibling arms on a pack that prescribes its batches validate the same
-    bytes. Under ``independent_offline_trials`` the arm and its lineage are one
-    family: those bytes are one trial, represented by their longest series --
-    the lineage's full span, not the arm's own probe of them on a year.
-    Without the rule every arm's trials add, as the lineage record counts them."""
+    bytes. The arm and its lineage are one family: those bytes are one trial,
+    represented by their longest series -- the lineage's full span, not the
+    arm's own probe of them on a year."""
 
     root = tmp_path / "experiments"
     for name, seed in (("qwen", 2), ("mimo", 3)):
@@ -425,46 +388,36 @@ def test_under_the_rule_bytes_validated_in_two_arms_are_one_trial(tmp_path: Path
         ["prescribed", "bytes_qwen_1"],
         ["prescribed", "bytes_mimo_1"],
     ]
-    rules = AcceptanceRules(independent_offline_trials=True)
-    assert lineage_summary(extraction, acceptance=AcceptanceRules())["host_trials"] == 4
-    assert lineage_summary(extraction, acceptance=rules)["host_trials"] == 3
+    assert lineage_summary(extraction)["host_trials"] == 3
 
     arm = root / "heir"
     own = [
         _row(arm, 0, seed=1, loading=0.6, span="Y1", days=FIRST_YEAR, fingerprint="prescribed"),
         _row(arm, 1, seed=101, loading=0.6),
     ]
-    _record(arm, extraction, rules=rules)
+    _record(arm, extraction)
     records = ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl").read()
-    held = freeze_gate_for(records, own, own[1], experiment_dir=arm, acceptance=rules)["deflated_sharpe"]
-    assert (held["trials"], held["host_trials"], held["lineage_trials"]) == (4, 2, 2)
+    joined = freeze_gate_for(records, own, own[1], experiment_dir=arm, acceptance=AcceptanceRules())[
+        "deflated_sharpe"
+    ]
+    assert (joined["trials"], joined["host_trials"], joined["lineage_trials"]) == (4, 2, 2)
     qwen, mimo = (
         ExperimentLedger(root / name / "ledgers/experiment_ledger.jsonl").read()[0]["steps"] for name in ("qwen", "mimo")
     )
     direct = verdict.freeze_gate(
         _analysis(own[1]),
-        rules=rules,
+        rules=AcceptanceRules(),
         trials=4,
         trial_analyses=[_analysis(own[1]), _analysis(qwen[0]), _analysis(qwen[1]), _analysis(mimo[1])],
         full_span_validations=1,
+        summary={},
     )["deflated_sharpe"]
-    assert held["trial_correlation_pairs"] == direct["trial_correlation_pairs"] == 6
+    assert joined["trial_correlation_pairs"] == direct["trial_correlation_pairs"] == 6
     for key in ("trial_correlation", "effective_trials", "information_ratio_bar", "deflated_sharpe_probability"):
-        assert held[key] == pytest.approx(direct[key], rel=1e-12), key
-
-    arm = root / "plain_heir"
-    own = [
-        _row(arm, 0, seed=1, loading=0.6, span="Y1", days=FIRST_YEAR, fingerprint="prescribed"),
-        _row(arm, 1, seed=101, loading=0.6),
-    ]
-    _record(arm, extraction)
-    records = ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl").read()
-    plain = freeze_gate_for(records, own, own[1], experiment_dir=arm, acceptance=AcceptanceRules())["deflated_sharpe"]
-    assert (plain["trials"], plain["host_trials"], plain["lineage_trials"]) == (6, 2, 4)
-    assert plain["trial_correlation_pairs"] == 15
+        assert joined[key] == pytest.approx(direct[key], rel=1e-12), key
 
 
-def test_under_the_rule_a_reference_pack_declares_its_screens_once(tmp_path: Path) -> None:
+def test_a_reference_pack_declares_its_screens_once(tmp_path: Path) -> None:
     """Arms mounting one reference pack declare its screens once, at the most
     any of them declared: 17 and 20 add 20, however the pack's path is spelt.
     Arms on other packs and an arm mounting none add theirs, and the arm's own
@@ -478,14 +431,13 @@ def test_under_the_rule_a_reference_pack_declares_its_screens_once(tmp_path: Pat
     _arm(root, "bare", [{"seed": 4, "loading": 0.5, "offline": 2}])
     names = ["qwen", "mimo", "star", "bare"]
     extraction = extract_lineage(root, names, research_start=RESEARCH_START, research_end=RESEARCH_END)
-    rules = AcceptanceRules(independent_offline_trials=True)
-    assert lineage_summary(extraction, acceptance=AcceptanceRules())["offline_trials"] == 17 + 20 + 6 + 2
-    assert lineage_summary(extraction, acceptance=rules)["offline_trials"] == 20 + 6 + 2
+    assert lineage_summary(extraction)["offline_trials"] == 20 + 6 + 2
 
     arm = root / "heir"
     own = [_row(arm, 0, seed=101, loading=0.5, offline=8)]
-    _record(arm, extraction, rules=rules, pack="configs/workspace_refs/star")
+    _record(arm, extraction, pack="configs/workspace_refs/star")
     records = ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl").read()
+    rules = AcceptanceRules()
     dsr = freeze_gate_for(records, own, own[0], experiment_dir=arm, acceptance=rules)["deflated_sharpe"]
     # The arm's own 8 on the star pack stand for that pack's 6: the lineage
     # adds its four strategies and 20 + 2 screens.
@@ -493,9 +445,7 @@ def test_under_the_rule_a_reference_pack_declares_its_screens_once(tmp_path: Pat
     assert dsr["effective_trials"] == pytest.approx(
         dsr["trial_correlation"] + (1 - dsr["trial_correlation"]) * 5 + 30
     )
-    assert arm_record((), lineage_record(records), independent_offline_trials=True)["lineage"]["note"] == (
-        f"{LINEAGE_NOTE}. {LINEAGE_JOINING}"
-    )
+    assert arm_record((), lineage_record(records))["lineage"]["note"] == LINEAGE_NOTE
 
     stale = json.loads((arm / "ledgers/lineage_series.json").read_text(encoding="utf-8"))
     for item in (*stale["arms"], *stale["series"]):

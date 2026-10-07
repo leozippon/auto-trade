@@ -76,10 +76,11 @@ class BrokerProfile:
     max_total_holdings: int | None = None
     max_single_name_weight: float | None = None
     # The individual dividend tax, charged at each sale on the dividends the
-    # sold shares received (``broker_core.dividend_tax_rate``). Off by default
-    # so that a profile recorded before the tax existed, which has no such
-    # field, replays exactly as it was recorded; the experiment creation
-    # defaults switch it on for every new arm.
+    # sold shares received (``broker_core.dividend_tax_rate``). Every arm's
+    # account pays it (``worker.resolve_worker_options``), and so does every
+    # Paper book opened from one; it reads each ex-date's bonus shares, which
+    # a bare Broker over data without an ex-date table does not have, so the
+    # field's own default is off.
     dividend_tax: bool = False
     # The boards (``broker_core.BOARDS``) the account may buy on; a buy on any
     # other is rejected, a sale never is. None, no restriction, so that a

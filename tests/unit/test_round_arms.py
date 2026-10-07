@@ -26,11 +26,7 @@ from autotrade.pipelines.config import (
     DEFAULT_RESEARCH_GEOMETRY,
     SNAPSHOT_CACHE_FORMAT_VERSION,
 )
-from autotrade.pipelines.hitl_state import (
-    CREATION_STAMPS,
-    WEB_CLOSED_PARAMS,
-    WEB_CREATE_DEFAULTS,
-)
+from autotrade.pipelines.hitl_state import WEB_CLOSED_PARAMS, WEB_CREATE_DEFAULTS
 from autotrade.pipelines.pit_backend import required_release_raw_datasets
 from autotrade.pipelines.pit_views_seed import (
     UNFINISHED_BUILD_MARKER,
@@ -402,26 +398,17 @@ def test_an_open_round_imports_no_other_round() -> None:
         assert not [module for module in modules if "create_round_" in module], (name, sorted(modules))
 
 
-def test_a_change_of_the_rule_set_stops_the_launcher(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_drifted_console_default_stops_the_launcher(monkeypatch: pytest.MonkeyPatch) -> None:
     """A round's queued arms are created days after its first ones, with the
-    rules the console then stamps on a new arm. Every rule it stamps is pinned,
-    so turning one off, or stamping one nobody pinned, stops a round that has
-    not decided that rule for itself."""
+    defaults the console then has. A default the round relies on that moved
+    stops a round that has not decided it for itself."""
     Round().check_console_defaults()
-    assert set(CREATION_STAMPS) <= set(BASE_EXPECTED_DEFAULTS)
 
-    monkeypatch.setitem(_round.WEB_CREATE_DEFAULTS, "require_seed_replicates", False)
-    drift = '"require_seed_replicates": {"round": "True", "console": "False"}'
+    monkeypatch.setitem(_round.WEB_CREATE_DEFAULTS, "max_null_controls", 6)
+    drift = '"max_null_controls": {"round": "12", "console": "6"}'
     with pytest.raises(SystemExit, match=re.escape(drift)):
         Round().check_console_defaults()
-    Round(overrides={"require_seed_replicates": False}).check_console_defaults()
-
-    monkeypatch.setitem(_round.WEB_CREATE_DEFAULTS, "require_seed_replicates", True)
-    monkeypatch.delitem(_round.BASE_EXPECTED_DEFAULTS, "require_seed_replicates")
-    undecided = '"require_seed_replicates": {"round": "undecided", "console": "True"}'
-    with pytest.raises(SystemExit, match=re.escape(undecided)):
-        Round().check_console_defaults()
-    Round(overrides={"require_seed_replicates": True}).check_console_defaults()
+    Round(overrides={"max_null_controls": 6}).check_console_defaults()
 
 
 def test_a_round_leaves_the_boards_to_the_capital_unless_it_names_them(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -744,9 +731,7 @@ def test_an_arm_is_tracked_only_when_it_names_a_tracking_error_cap() -> None:
     assert [rnd.request_params("large")[key] for key in optional] == [None] * len(optional)
     # The account decides nothing: two arms an order of magnitude apart, both
     # silent about the mandate, are judged by exactly the same rules.
-    # A new arm is also held to every rule creation stamps on, which the
-    # rules themselves leave off for arms recorded without them.
-    assert rules("large") == rules("small") == acceptance_for(CREATION_STAMPS).to_record()
+    assert rules("large") == rules("small") == acceptance_for({}).to_record()
     tracked = rules("tracked")
     assert (tracked["tracking_error_cap"], tracked["beta_min"], tracked["beta_max"]) == (
         0.08,

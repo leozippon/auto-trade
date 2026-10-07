@@ -98,13 +98,10 @@ _DESCRIPTION = (
 )
 
 
-def _spec(*, seed_replicates: bool) -> ToolSpec:
-    """The tool's schema; ``seed_replicates`` only for an arm whose rules hold it.
-
-    The rule a replicate meets is the arm's ``acceptance_rules.freeze_gate``
-    fact, which the parameter and a refusal that concerns one point to."""
-
-    return ToolSpec(
+class FinishSessionTool:
+    # The rule a replicate meets is the arm's ``acceptance_rules.freeze_gate``
+    # fact, which the parameter and a refusal that concerns one point to.
+    spec = ToolSpec(
         "finish_session",
         _DESCRIPTION,
         {
@@ -124,23 +121,17 @@ def _spec(*, seed_replicates: bool) -> ToolSpec:
                     "maxLength": 500,
                     "description": NODE_REFERENCE_DESCRIPTION,
                 },
-                **(
-                    {
-                        "seed_replicates": {
-                            "type": "array",
-                            "items": {"type": "string", "minLength": 1, "maxLength": 500},
-                            "description": (
-                                "freeze only: the nominee's seed replicates as "
-                                "acceptance_rules.freeze_gate.seed_replicates defines "
-                                "them, each a node id or short handle of this session; "
-                                "required (at least one) when the nominee's main.py "
-                                "defines fit."
-                            ),
-                        }
-                    }
-                    if seed_replicates
-                    else {}
-                ),
+                "seed_replicates": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1, "maxLength": 500},
+                    "description": (
+                        "freeze only: the nominee's seed replicates as "
+                        "acceptance_rules.freeze_gate.seed_replicates defines "
+                        "them, each a node id or short handle of this session; "
+                        "required (at least one) when the nominee's main.py "
+                        "defines fit."
+                    ),
+                },
                 "reason": {
                     "type": "string",
                     "minLength": REASON_MIN_CHARS,
@@ -161,12 +152,6 @@ def _spec(*, seed_replicates: bool) -> ToolSpec:
         example={"outcome": "freeze", "node_id": NODE_REFERENCE_EXAMPLE},
     )
 
-
-class FinishSessionTool:
-    # The schema of an arm without the seed-replicate condition; an instance
-    # for an arm that holds it carries its own (``seed_replicates=True``).
-    spec = _spec(seed_replicates=False)
-
     def __init__(
         self,
         tree: StepTree,
@@ -175,16 +160,12 @@ class FinishSessionTool:
         freeze_gate: FreezeGate,
         another_round_fits: Callable[[], bool] | None = None,
         budget_status: Callable[[], SessionBudgetStatus] | None = None,
-        seed_replicates: bool = False,
     ) -> None:
         self.tree = tree
         self.session_ref = session_ref
         self._freeze_gate = freeze_gate
         self._another_round_fits = another_round_fits or (lambda: True)
         self._budget_status = budget_status
-        self._seed_replicates = seed_replicates
-        if seed_replicates:
-            self.spec = _spec(seed_replicates=True)
 
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
         outcome = str(arguments.get("outcome") or "")
@@ -228,20 +209,14 @@ class FinishSessionTool:
                     else ""
                 )
                 + (
-                    "These nodes of this session pass it now"
-                    + (
-                        " (one that trains a model once its seed replicates hold up)"
-                        if self._seed_replicates
-                        else ""
-                    )
-                    + f": {', '.join(passing)}. "
+                    "These nodes of this session pass it now (one that trains a "
+                    f"model once its seed replicates hold up): {', '.join(passing)}. "
                     if passing
                     else "No node of this session passes it now. "
                 )
                 + "Nominate a passing node, validate what the gate lacks (a "
-                "full-span validation, a control"
-                + (", a seed replicate" if self._seed_replicates else "")
-                + "), or finish with no_edge.",
+                "full-span validation, a control, a seed replicate), or finish "
+                "with no_edge.",
                 error_type="freeze_gate_refused",
                 retry_hint=(
                     'finish_session({"outcome": "freeze", "node_id": "<nominee>", '

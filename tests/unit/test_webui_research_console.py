@@ -21,7 +21,7 @@ from fastapi.testclient import TestClient
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import write_json_atomic
 from autotrade.environment.step_tree import StepTree
-from autotrade.pipelines.config import DEFAULT_RESEARCH_GEOMETRY
+from autotrade.pipelines.config import DEFAULT_RESEARCH_GEOMETRY, RETIRED_SWITCHES
 from autotrade.pipelines.ledger import ExperimentLedger, verdict_void
 from autotrade.webui import registry
 from autotrade.webui.registry import (
@@ -246,7 +246,7 @@ def test_every_way_an_arm_can_end_reads_as_one_ending_with_a_reason(tmp_path: Pa
     assert endings["graduated"]["reason"] == (
         f"前推 账户 {raw['strategy_return'] * 100:+.2f}%"
         f" · 基准 {raw['benchmark_return'] * 100:+.2f}%"
-        " · 对面板（未回归）—"
+        f" · 对面板（未回归）{raw['plain_selection'] * 100:+.2f}%"
         f" · 中性化主动 IR {forward['information_ratio']:.2f}"
     )
     assert endings["rejected"]["reason"].split(" · ")[0] == "F2"
@@ -350,14 +350,13 @@ def test_seed_replicates_are_shown_where_the_record_has_them_and_absent_otherwis
         )
     assert forward["seed_mean"]["members"] == 2
     assert isinstance(forward["plain_excess_lower_bound"], float)
-    assert seeded["forward"]["verdict"]["thresholds"]["require_forward_plain_selection"] is True
-    assert seeded["sessions"][1]["thresholds"]["require_forward_plain_selection"] is True
     assert registry._CRITERION_CODES["forward_plain_excess_lower_bound_not_positive"] == "F8"
-    # One seed under the earlier rules: nothing served, so nothing drawn.
+    # One seed: no replicate served, so nothing drawn; F8 reads the book alone.
     assert single["frozen"]["seed_replicates"] is None
-    assert single["sessions"][0]["record"]["freeze_gate"]["seed_replicates"] is None
-    assert not {"seed_mean", "plain_excess_lower_bound"} & set(single["forward"]["slices"]["forward"])
-    assert "require_forward_plain_selection" not in single["sessions"][1]["thresholds"]
+    alone = single["sessions"][0]["record"]["freeze_gate"]["seed_replicates"]
+    assert (alone["replicates"], alone["mean_information_ratio"]) == ([], None)
+    assert "seed_mean" not in single["forward"]["slices"]["forward"]
+    assert isinstance(single["forward"]["slices"]["forward"]["plain_excess_lower_bound"], float)
 
     script = (
         Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
@@ -1082,23 +1081,9 @@ def test_the_step_tree_names_the_session_and_the_frozen_node(tmp_path: Path) -> 
     assert node["session_ref"].startswith("session_ref_")
 
 
-def test_arms_with_and_without_the_newer_rule_and_cost_keys_list_alike(tmp_path: Path) -> None:
-    """A console started before ``dividend_tax`` existed lists the arms that
-    carry it as unreadable until it restarts. A current console reads an arm
-    recorded without the newer keys and one created with them alike, and
-    shows each Validation's raw excess over the benchmark beside its active
-    figures."""
-
-    build_arm(tmp_path, "old", "graduated")
-    new = build_arm(tmp_path, "new", "graduated")
-    path = new / "hitl/params.json"
-    params = json.loads(path.read_text(encoding="utf-8"))
-    params.update(dividend_tax=True, require_raw_excess_at_cost_stress=True)
-    write_json_atomic(path, params)
-    rows = {row["experiment_id"]: row for row in list_experiments(tmp_path)}
-    assert rows["old"]["ending"]["state"] == rows["new"]["ending"]["state"] == "graduated"
-    detail = experiment_detail(tmp_path, "new")
-    assert detail["params"]["dividend_tax"] is True
+def test_each_validation_shows_its_raw_excess_beside_its_active_figures(tmp_path: Path) -> None:
+    build_arm(tmp_path, "arm", "graduated")
+    detail = experiment_detail(tmp_path, "arm")
     record = next(entry for entry in detail["sessions"] if entry["kind"] == "research")["record"]
     assert {"excess_return", "raw_excess_at_cost_stress"} <= set(record["validations"][0])
     assert "panel_return" in record["best"]
@@ -1178,18 +1163,27 @@ def test_an_arm_judged_before_slices_carried_the_holders_readings_reads_them_der
     assert "readings_derived" not in current and "raw_readings" in current
 
 
-def test_the_replay_plan_states_plain_selection_only_for_an_arm_that_holds_it(
-    tmp_path: Path,
-) -> None:
-    """Before the replay runs the console lists the criteria the verdict will
-    apply; F8 is among them only where the arm's own parameters hold it,
-    whatever today's creation default is."""
+def test_an_arm_carrying_the_retired_switches_reads_as_one_without_them(tmp_path: Path) -> None:
+    """The console accepts the switches every older params.json carries and
+    reads nothing from them: the replay plan, the listing row and the page
+    are those of the same arm without them. A key no reader knows still makes
+    the arm unreadable."""
 
-    directory = build_arm(tmp_path, "arm", "research")
-    preview = experiment_detail(tmp_path, "arm")["sessions"][1]["thresholds"]
-    assert "require_forward_plain_selection" not in preview
-    path = directory / "hitl/params.json"
-    params = json.loads(path.read_text(encoding="utf-8"))
-    path.write_text(json.dumps({**params, "require_forward_plain_selection": True}), encoding="utf-8")
-    preview = experiment_detail(tmp_path, "arm")["sessions"][1]["thresholds"]
-    assert preview["require_forward_plain_selection"] is True
+    def plan(experiment_id: str) -> dict[str, object]:
+        return experiment_detail(tmp_path, experiment_id)["sessions"][1]["thresholds"]
+
+    def written(directory: Path, extra: dict[str, object]) -> None:
+        path = directory / "hitl/params.json"
+        params = json.loads(path.read_text(encoding="utf-8"))
+        path.write_text(json.dumps({**params, **extra}), encoding="utf-8")
+
+    build_arm(tmp_path, "current", "research")
+    written(build_arm(tmp_path, "legacy", "research"), dict.fromkeys(RETIRED_SWITCHES, False))
+    rows = {row["experiment_id"]: row for row in list_experiments(tmp_path)}
+    assert rows["legacy"].get("state") != "unreadable"
+    assert plan("legacy") == plan("current")
+    assert not RETIRED_SWITCHES & set(plan("legacy"))
+
+    written(build_arm(tmp_path, "unknown", "research"), {"require_heldout_magic": True})
+    unknown = {row["experiment_id"]: row for row in list_experiments(tmp_path)}["unknown"]
+    assert unknown["state"] == "unreadable"

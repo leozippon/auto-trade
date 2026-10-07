@@ -78,8 +78,8 @@ def extract_lineage(
     fingerprinted from its own revision store, so the same bytes on two spans
     are one trial, controls are left out and declared offline screens count,
     exactly as for the arm's own), each trial's bytes and the reference pack
-    the arm mounted, by which an arm under ``independent_offline_trials``
-    joins the lineage's trials to its own (``experiment.recorded_lineage``).
+    the arm mounted, by which the arm joins the lineage's trials to its own
+    (``experiment.recorded_lineage``).
     Per measurable trial: its bytes and the daily series of its
     representative Validation. A trial whose span cannot be measured has no
     series, as in the arm's own family.

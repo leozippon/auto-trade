@@ -100,7 +100,6 @@ from .calendar import (
     yyyymmdd,
 )
 from .config import (
-    AcceptanceRules,
     BudgetUsed,
     EvaluationBackend,
     ResearchSessionRequest,
@@ -785,13 +784,7 @@ class LLMResearchDeveloper:
                     "decision_input": {"snapshot_id": request.snapshot.snapshot_id}
                 },
                 "start": start_record(),
-                "arm": arm_record(
-                    request.steps_before,
-                    lineage_record(self.ledger.read()),
-                    independent_offline_trials=AcceptanceRules.from_record(
-                        request.acceptance_rules
-                    ).independent_offline_trials,
-                ),
+                "arm": arm_record(request.steps_before, lineage_record(self.ledger.read())),
                 "modification_constraints": request.modification_constraints.to_record(),
                 "acceptance_rules": dict(request.acceptance_rules),
                 "schedule": self.schedule.to_record(),
@@ -1066,7 +1059,6 @@ class LLMResearchDeveloper:
                 freeze_gate=backtest.freeze_gate,
                 another_round_fits=lambda: another_batch_round_fits(backtest),
                 budget_status=lambda: session_budget_status(backtest),
-                seed_replicates=backtest.rules.require_seed_replicates,
             )
         )
         return backtest, smoke, tools, null_control_tool
@@ -1489,26 +1481,20 @@ def start_record() -> dict[str, object]:
     return {"kind": "template", "template_ref": "agent_output_template"}
 
 
-# What an arm's lineage fact means for its freeze gate.
+# What an arm's lineage fact means for its freeze gate, and how its trials
+# join the arm's own (``experiment.recorded_lineage``).
 LINEAGE_NOTE = (
     "the non-control trials of these earlier arms on the same research period "
     "join this arm's freeze-gate trial family: selection_statistics."
-    "information_ratio_bar already counts them"
-)
-# How they join where the arm's rules hold ``independent_offline_trials``
-# (``experiment.recorded_lineage``), in the one sentence the fact adds.
-LINEAGE_JOINING = (
-    "Strategy bytes validated both here and in a lineage arm, or in two lineage "
-    "arms, are one trial, and the offline_trials declared by arms that mount the "
-    "same reference pack count once, at the largest number any of them declared"
+    "information_ratio_bar already counts them. Strategy bytes validated both "
+    "here and in a lineage arm, or in two lineage arms, are one trial, and the "
+    "offline_trials declared by arms that mount the same reference pack count "
+    "once, at the largest number any of them declared"
 )
 
 
 def arm_record(
-    steps: Sequence[StepResult],
-    lineage: Mapping[str, object] | None = None,
-    *,
-    independent_offline_trials: bool = False,
+    steps: Sequence[StepResult], lineage: Mapping[str, object] | None = None
 ) -> dict[str, object]:
     """The arm's selection state when the attempt starts.
 
@@ -1519,9 +1505,8 @@ def arm_record(
     session only runs while nothing is frozen. ``lineage`` is the ledger's
     ``lineage`` record of an arm created with one: the earlier arms whose
     trials the gate adds to these, how many and what they count as, with the
-    note that says so (``LINEAGE_NOTE``, and ``LINEAGE_JOINING`` where the
-    arm's rules hold ``independent_offline_trials``), so no prompt sentence
-    holds only for the arms that have one.
+    note that says so (``LINEAGE_NOTE``), so no prompt sentence holds only for
+    the arms that have one.
     """
 
     family = trial_family([trial_fields(step) for step in steps])
@@ -1535,11 +1520,7 @@ def arm_record(
     if lineage is not None:
         record["lineage"] = {
             **{key: lineage[key] for key in ("arms", "trials", "effective_trials")},
-            "note": (
-                f"{LINEAGE_NOTE}. {LINEAGE_JOINING}"
-                if independent_offline_trials
-                else LINEAGE_NOTE
-            ),
+            "note": LINEAGE_NOTE,
         }
     return record
 

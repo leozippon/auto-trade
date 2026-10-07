@@ -285,7 +285,7 @@ def test_a_book_pins_the_boards_its_broker_and_its_verdict_panel_buy_on(tmp_path
     book = load_book(_incubate(tmp_path, "inc", boards=("main",)).root)
     assert book.profile.permitted_boards == ("main",)
     broker = DailyBroker(book.profile)
-    broker.open_day("20260105", {})
+    broker.open_day("20260105", {}, bonus_shares={})  # every arm's account is taxed
     rejected = broker.execute(_order(symbol="300001.SZ"), _bar(), matched_at=MATCHED_AT, raw_price=10.0)
     assert (rejected.status, rejected.reason) == ("rejected", "board_not_permitted")
     assert broker.execute(_order(), _bar(), matched_at=MATCHED_AT, raw_price=10.0).status == "filled"

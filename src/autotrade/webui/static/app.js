@@ -3152,13 +3152,15 @@ function mandateRows(capToken, bandToken, measured, row, t) {
 /* F1–F8 over the forward slice, as criterion rows: the 前推回放 view draws
    them alone, 裁决 draws them ahead of H1–H4, and neither restates a
    threshold the other spells differently. F8, the plain-excess bound, is drawn
-   only where the arm's own thresholds hold it: the lower bound of the series
+   before the replay is judged and wherever the recorded slice carries it (a
+   slice recorded before F8 existed does not): the lower bound of the series
    it judged, whose mean and seed count its hover states. */
 function forwardCriteria(f, verdict, thresholds) {
   const failed = failedReasons(verdict);
   const t = thresholds || {};
   const row = criteriaRow(f, failed, t);
   const seeds = (f && f.seed_mean) || null;
+  const plainBound = f ? f.plain_excess_lower_bound !== undefined : !verdict;
   return [
     ...(failed.has("forward_strategy_error")
       ? [{ ok: false, label: reasonLabel("forward_strategy_error"), value: null }]
@@ -3171,7 +3173,7 @@ function forwardCriteria(f, verdict, thresholds) {
     row("forward_exposure_below_floor", fmtPct(f && f.mean_gross), thresholdCell("≥", t.min_mean_gross)),
     ...activeDrawdownRows("forward_active_drawdown_exceeded", f, row, t),
     ...mandateRows("forward_tracking_error_above_cap", "forward_beta_outside_band", f, row, t),
-    ...(t.require_forward_plain_selection
+    ...(plainBound
       ? [
           row(
             "forward_plain_excess_lower_bound_not_positive",

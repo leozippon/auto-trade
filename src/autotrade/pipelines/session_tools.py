@@ -1529,7 +1529,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
                         "each configuration is declared once, in the first "
                         "batch that records a Validation after its screen; 0 "
                         "only if nothing was screened. Summed over batches into "
-                        "the arm's freeze-gate trial count."
+                        f"the arm's freeze-gate trial count. {OFFLINE_TRIALS_PRICING}"
                     ),
                 },
             },
@@ -1572,13 +1572,6 @@ class BatchValidateTool(SessionTimeBudgetAware):
         # Per-session rejection counter, keyed by signature. Not persisted:
         # the loop it bounds is one session's retry loop.
         self._rejections: dict[tuple[str, str], int] = {}
-        if backtest.rules.independent_offline_trials:
-            # How this arm's gate prices a declared screen, stated where the
-            # Agent declares one; an arm without the rule is not told it.
-            schema = json.loads(json.dumps(self.spec.input_schema))
-            parameter = schema["properties"]["offline_trials"]
-            parameter["description"] = f"{parameter['description']} {OFFLINE_TRIALS_PRICING}"
-            self.spec = replace(self.spec, input_schema=schema)
 
     @property
     def session_time_budget(self) -> InferenceTimeBudget:

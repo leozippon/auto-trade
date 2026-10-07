@@ -717,7 +717,7 @@ def test_the_facts_define_a_replicate_by_the_seed_line_the_readme_writes():
         for block in (TEMPLATE / "README.md").read_text(encoding="utf-8").split("\n\n")
         if block.startswith("Random draws must be reproducible")
     )
-    fact = AcceptanceRules(require_seed_replicates=True).agent_facts()["freeze_gate"]["seed_replicates"]
+    fact = AcceptanceRules().agent_facts()["freeze_gate"]["seed_replicates"]
     names = re.compile(r"\b_?SEED(?:_BASE)?\b")
     assert names.findall(paragraph)[:4] == ["SEED", "SEED_BASE", "_SEED", "_SEED_BASE"]
     assert names.findall(fact)[:4] == names.findall(paragraph)[:4]

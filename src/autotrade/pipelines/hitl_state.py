@@ -21,7 +21,6 @@ from autotrade.environment.sandbox import SandboxSpec
 
 from .calendar import GEOMETRY_PARAMETERS
 from .config import (
-    ACCEPTANCE_KEYS,
     DEFAULT_PIT_VIEWS_SEED,
     DEFAULT_RESEARCH_GEOMETRY,
     AcceptanceRules,
@@ -43,20 +42,6 @@ LIVE_RUN_STATES = {"running_session"}
 # The states a worker ends in: an arm in one of them runs nothing.
 ENDED_STATES = frozenset({"completed", "failed", "stopped"})
 
-# How a rule newer than the arms on disk is introduced, stated here once. Its
-# own default stays off (``config.AcceptanceRules``, ``BrokerProfile``), so an
-# arm whose params.json has no key reads as it was recorded -- judged without
-# the condition, its trials priced as before, untaxed -- for as long as it
-# lives. Creation stamps the key on: every arm created from here on is held to
-# the rule unless its request says otherwise.
-CREATION_STAMPS: dict[str, bool] = {
-    "require_raw_excess_at_cost_stress": True,
-    "require_forward_plain_selection": True,
-    "require_seed_replicates": True,
-    "independent_offline_trials": True,
-    "dividend_tax": True,
-}
-
 
 def _acceptance_defaults() -> dict[str, object]:
     """The acceptance block of the creation defaults, read off the rules' own
@@ -74,7 +59,6 @@ def _acceptance_defaults() -> dict[str, object]:
         **AcceptanceRules().to_record(),
         "max_drawdown": None,
         "active_max_drawdown": None,
-        **{name: value for name, value in CREATION_STAMPS.items() if name in ACCEPTANCE_KEYS},
     }
     return {**{name: None for name, value in rules.items() if value is None}, **rules}
 
@@ -148,7 +132,6 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "max_single_name_weight": None,
     "commission_bps": BrokerProfile().commission_bps,
     "slippage_bps": BrokerProfile().slippage_bps,
-    "dividend_tax": CREATION_STAMPS["dividend_tax"],
     # The boards the account may buy on. Left null, creation stamps the ones
     # its initial cash qualifies for (``broker.default_permitted_boards``), so
     # the stamped params.json always names them; an arm without the key is

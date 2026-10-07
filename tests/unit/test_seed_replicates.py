@@ -27,7 +27,7 @@ from autotrade.pipelines.config import (
     acceptance_for,
     research_span,
 )
-from autotrade.pipelines.experiment import RollingExperimentPipeline, freeze_gate_for
+from autotrade.pipelines.experiment import RollingExperimentPipeline
 from autotrade.pipelines.ledger import (
     ExperimentLedger,
     experiment_verdict,
@@ -64,9 +64,6 @@ MAX_SWAPS = {swaps}
 def generate_orders(context):
     return []
 '''
-SEEDED = acceptance_for(
-    {"require_seed_replicates": True, "require_forward_plain_selection": True}
-)
 # Daily active return by stage and training seed: research Validations replay
 # in mode ``valid``, the forward stage in ``heldout``. An active return of
 # 0.0009 a day or more reads an IR above 3.5 over the two research years, far
@@ -114,16 +111,17 @@ class SeedEvaluator:
             alpha=ALPHAS[(request.mode, seed)],
             seed=len(self.requests),
         )
-        if seed == self.bare_seed and request.mode == "heldout":
-            return result
         sidecar = Path(result.result_ref).parent / STYLE_ARTIFACT_NAME
         analysis = json.loads(sidecar.read_text(encoding="utf-8"))
-        analysis["panel_daily"] = [
-            [day, 0.9 * market + 0.2 * size]
-            for (day, market), (_day, size) in zip(
-                analysis["benchmark_daily"], analysis["size_factor_daily"], strict=True
-            )
-        ]
+        if seed == self.bare_seed and request.mode == "heldout":
+            del analysis["panel_daily"]
+        else:
+            analysis["panel_daily"] = [
+                [day, 0.9 * market + 0.2 * size]
+                for (day, market), (_day, size) in zip(
+                    analysis["benchmark_daily"], analysis["size_factor_daily"], strict=True
+                )
+            ]
         sidecar.write_text(json.dumps(analysis), encoding="utf-8")
         return result
 
@@ -163,12 +161,12 @@ class SeedDeveloper:
         )
 
 
-def _arm(tmp_path: Path, candidates, *, nominee=0, replicates=(), rules=SEEDED, **replays):
+def _arm(tmp_path: Path, candidates, *, nominee=0, replicates=(), **replays):
     config = RollingExperimentConfig(
         experiment_id="arm",
         experiments_root=tmp_path / "experiments",
         geometry=GEOMETRY,
-        acceptance=rules,
+        acceptance=acceptance_for({}),
     )
     store = FilesystemArtifactStore(config.experiment_dir / "artifacts" / "strategy")
     evaluator = SeedEvaluator(config.experiment_dir / "artifacts" / "results", **replays)
@@ -207,7 +205,6 @@ def test_a_model_nominee_freezes_with_its_seed_replicate_and_both_replay_forward
     ratios = [gate["information_ratio"], *(entry["information_ratio"] for entry in seeds["replicates"])]
     assert seeds["mean_information_ratio"] == pytest.approx(sum(ratios) / 3)
     assert seeds["mean_information_ratio"] >= seeds["information_ratio_bar"]
-    assert gate["thresholds"]["require_seed_replicates"] is True
     frozen = record["frozen"]
     assert [item["source_step_id"] for item in frozen["seed_replicates"]] == [
         "research_step_1",
@@ -246,7 +243,6 @@ def test_a_model_nominee_freezes_with_its_seed_replicate_and_both_replay_forward
     assert block["seed_mean"]["raw_readings"]["plain_selection"] > 0
     assert block["plain_excess_lower_bound"] < 0 < block["seed_mean"]["plain_excess"]
     assert forward["verdict"]["reasons"] == ["forward_plain_excess_lower_bound_not_positive"]
-    assert forward["verdict"]["thresholds"]["require_forward_plain_selection"] is True
     assert experiment_verdict(pipeline.ledger.read())["status"] == "discarded"
 
 
@@ -313,8 +309,8 @@ def test_a_nominee_above_its_bar_is_refused_when_its_seed_mean_is_below(tmp_path
 
 def test_a_nominee_that_trains_no_model_is_judged_on_its_own_series(tmp_path: Path):
     """A nominee that trains no model needs no replicate: it freezes alone,
-    its gate names the rule the arm holds with nothing to replicate, and
-    forward its own series is judged, with its bound."""
+    its gate reads that it had nothing to replicate, and forward its own
+    series is judged, with its bound."""
 
     pipeline, evaluator = _arm(
         tmp_path, [(_source(1000, fit=False), "full"), (_source(2000, fit=False), "full")]
@@ -324,7 +320,6 @@ def test_a_nominee_that_trains_no_model_is_judged_on_its_own_series(tmp_path: Pa
     assert gate["passed"] is True
     assert gate["seed_replicates"]["trains_a_model"] is False
     assert gate["seed_replicates"]["replicates"] == []
-    assert gate["thresholds"]["require_seed_replicates"] is True
     assert "seed_replicates" not in record["frozen"]
     research = len(evaluator.requests)
     forward = pipeline.run_forward()
@@ -333,40 +328,6 @@ def test_a_nominee_that_trains_no_model_is_judged_on_its_own_series(tmp_path: Pa
     assert "seed_mean" not in block
     assert 0 < block["plain_excess_lower_bound"] < block["plain_excess"]
     assert forward["verdict"]["status"] == "graduated"
-
-
-def test_an_arm_without_the_condition_freezes_and_judges_as_before(tmp_path: Path):
-    """No key, no condition: a model nominee freezes alone, its gate and
-    frozen block carry no seed block, one replay judges it, and naming a
-    replicate under these rules is refused rather than ignored."""
-
-    rules = acceptance_for({"require_forward_plain_selection": True})
-    pipeline, evaluator = _arm(
-        tmp_path, [(_source(1000), "full"), (_source(2000), "full")], rules=rules
-    )
-    record = pipeline.run_research_session()
-    assert record["freeze_gate"]["passed"] is True
-    assert "seed_replicates" not in record["freeze_gate"]
-    assert "require_seed_replicates" not in record["freeze_gate"]["thresholds"]
-    assert "seed_replicates" not in record["frozen"]
-    research = len(evaluator.requests)
-    forward = pipeline.run_forward()
-    assert len(evaluator.requests) == research + 1
-    assert "seed_replicates" not in forward
-    assert "seed_mean" not in forward["slices"]["forward"]
-    assert forward["slices"]["forward"]["plain_excess_lower_bound"] > 0
-    assert forward["verdict"]["status"] == "graduated"
-
-    rows = record["steps"]
-    with pytest.raises(ValueError, match="no seed-replicate condition"):
-        freeze_gate_for(
-            [],
-            rows,
-            rows[0],
-            experiment_dir=pipeline.config.experiment_dir,
-            acceptance=rules,
-            seed_replicates=[rows[1]],
-        )
 
 
 @pytest.mark.parametrize(

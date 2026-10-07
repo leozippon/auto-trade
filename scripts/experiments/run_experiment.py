@@ -23,7 +23,6 @@ add_repo_src(__file__)
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.pipelines import DailyStrategyPipeline, StrategyExperimentConfig
-from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -47,13 +46,10 @@ def main(argv: list[str] | None = None) -> int:
     config = StrategyExperimentConfig(
         strategy_path=args.strategy,
         schedule=StrategySchedule(args.strategy_period, args.inference_time),
-        # The creation default, as for a new arm. A single daily file carries
-        # no ex-date table, so this runner credits no dividend and the tax
-        # never has anything to charge; the profile still states the rule.
-        broker_profile=BrokerProfile(
-            initial_cash=args.initial_cash,
-            dividend_tax=bool(WEB_CREATE_DEFAULTS["dividend_tax"]),
-        ),
+        # Taxed, as every arm's account is. A single daily file carries no
+        # ex-date table, so this runner credits no dividend and the tax never
+        # has anything to charge; the profile still states the rule.
+        broker_profile=BrokerProfile(initial_cash=args.initial_cash, dividend_tax=True),
         execution_mode=args.execution_mode,
     )
     result = DailyStrategyPipeline(config).run(args.daily)

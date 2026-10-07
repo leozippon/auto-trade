@@ -64,7 +64,6 @@ from autotrade.pipelines.verdict import (
     panel_return,
     raw_excess_at_cost_stress,
     slice_readings,
-    stamps,
 )
 from autotrade.pipelines.worker import _ALLOWED_PARAMS
 
@@ -830,17 +829,9 @@ def _best_candidate(
         return None
     best = max(full, key=lambda row: float(row["neutralized"]["information_ratio"]))  # type: ignore[index]
     try:
-        # No threshold moves the deflated Sharpe, so the default rules, with
-        # the one rule that does: how the arm prices its trial family.
-        own = acceptance_for(read_json(directory / HITL_DIR_NAME / PARAMS_NAME))
+        # No threshold moves the deflated Sharpe, so the default rules.
         gate = freeze_gate_for(
-            earlier,
-            steps,
-            best,
-            experiment_dir=directory,
-            acceptance=AcceptanceRules(
-                independent_offline_trials=own.independent_offline_trials
-            ),
+            earlier, steps, best, experiment_dir=directory, acceptance=AcceptanceRules()
         )
     except (OSError, ValueError):
         gate = {}
@@ -1159,11 +1150,6 @@ def _verdict_thresholds(
         ),
         "min_mean_gross": rules.min_mean_gross,
         "heldout_tolerance_z": rules.heldout_tolerance_z,
-        # Stated, like the forward record states them, only for an arm whose
-        # own params.json holds the optional condition: an arm recorded
-        # without the key is not judged on it, whatever today's creation
-        # default is.
-        **stamps("forward", acceptance_for(params)),
     }
 
 

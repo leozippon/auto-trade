@@ -64,7 +64,7 @@ from .calendar import (
 from .config import (
     ACCEPTANCE_KEYS,
     DEFAULT_PIT_VIEWS_SEED,
-    AcceptanceRules,
+    RETIRED_SWITCHES,
     RollingExperimentConfig,
     acceptance_for,
     rolling_default,
@@ -173,7 +173,6 @@ _ALLOWED_PARAMS = {
     "strategy_fit_timeout_seconds",
     "commission_bps",
     "slippage_bps",
-    "dividend_tax",
     "permitted_boards",
     "max_total_holdings",
     "max_single_name_weight",
@@ -203,6 +202,9 @@ _ALLOWED_PARAMS = {
     "agent_sandbox_memory",
     "agent_sandbox_pids",
     "agent_sandbox_tmpfs",
+    # Accepted so that an arm created before their retirement still loads;
+    # nothing reads them (``config.RETIRED_SWITCHES``).
+    *RETIRED_SWITCHES,
 }
 
 # Single source for the NL budget defaults advertised to experiment parameters.
@@ -566,11 +568,9 @@ def resolve_worker_options(
         if data_backend == "pit"
         else (None, None)
     )
-    # Part of the arm's cost model, pinned in params.json at creation
-    # (hitl_state.CREATION_STAMPS): an arm without the key keeps replaying,
-    # re-verifying and trading Paper untaxed.
-    dividend_tax = _strict_bool(params.get("dividend_tax", False), "dividend_tax")
-    if dividend_tax and pit_views_seed is not None and pit_views_seed.is_dir():
+    # Every arm's account pays the dividend tax, which reads each replay
+    # slot's bonus shares.
+    if pit_views_seed is not None and pit_views_seed.is_dir():
         assert_seed_carries_bonus_split(pit_views_seed)
     default_geometry = rolling_default("geometry")
     geometry = ResearchGeometry(
@@ -691,15 +691,10 @@ def resolve_worker_options(
         ),
         # A tracking mandate exactly where the request named a cap; every
         # limit absent or null takes its default (``config.acceptance_for``).
-        # A switch (a rule whose default is a bool) is read as one.
         acceptance=acceptance_for(
             {
-                name: None
-                if params.get(name) is None
-                else _strict_bool(params[name], name)
-                if isinstance(default, bool)
-                else _finite_float(params[name], name)
-                for name, default in AcceptanceRules().to_record().items()
+                name: None if params.get(name) is None else _finite_float(params[name], name)
+                for name in ACCEPTANCE_KEYS
             }
         ),
         schedule=schedule,
@@ -711,7 +706,7 @@ def resolve_worker_options(
             slippage_bps=_nonnegative_float(
                 params.get("slippage_bps", 5.0), "slippage_bps"
             ),
-            dividend_tax=dividend_tax,
+            dividend_tax=True,
             # Stamped at creation; an arm without the key buys on every board.
             permitted_boards=stamped_permitted_boards(params),
             max_total_holdings=_optional_positive_int(

@@ -134,10 +134,9 @@ def _rule(default: object, text: str) -> Any:
     return field(default=default, metadata={"help": text})
 
 
-# What ``AcceptanceRules.independent_offline_trials`` means for the Agent's
-# choice between declaring a screen and running it, in the one sentence its
-# facts and batch_validate's offline_trials parameter state where an arm holds
-# the rule.
+# How the freeze gate prices a declared offline screen against one run on the
+# host (``verdict.trial_family_statistics``), in the one sentence the Agent's
+# facts and batch_validate's offline_trials parameter state.
 OFFLINE_TRIALS_PRICING = (
     "A screen declared in offline_trials is priced as independent, one effective trial "
     "each; a screen run on the host as a candidate is priced by its measured correlation "
@@ -207,48 +206,6 @@ class AcceptanceRules:
         verdict.FREEZE_MIN_FULL_SPAN_VALIDATIONS,
         "Freeze gate: minimum measurable full-span validations in the arm.",
     )
-    # The optional conditions: off here, stamped on at creation
-    # (``hitl_state.CREATION_STAMPS`` states that convention once). The raw
-    # condition reads ``verdict.raw_excess_at_cost_stress`` of the nominee at
-    # ``cost_stress_multiplier``. The forward plain-excess bound (F8) reads
-    # ``verdict.plain_excess_lower_bound`` of the frozen book and whatever seed
-    # replicates its freeze registered; the rule keeps the name it was
-    # recorded under. Seed replicates are what a nominee
-    # that trains a model registers (``experiment.freeze_gate_for`` judges
-    # them at the freeze, and the forward stage replays each like the book),
-    # so the two compose without naming each other: with both, F8 judges the
-    # seeds together.
-    require_raw_excess_at_cost_stress: bool = _rule(
-        False,
-        "Freeze gate: the nominee's own equity must beat the benchmark after the "
-        "cost-stress slippage.",
-    )
-    require_forward_plain_selection: bool = _rule(
-        False,
-        "Forward verdict: the lower confidence bound of the frozen book's mean daily "
-        "return over its zero-skill panel's, unregressed and averaged over the book and "
-        "its seed replicates, must be above zero.",
-    )
-    require_seed_replicates: bool = _rule(
-        False,
-        "Freeze and forward: a nominee that trains a model registers its seed replicates; "
-        "their mean active IR must reach its bar, and each is replayed forward like the "
-        "frozen book.",
-    )
-    # Not a condition: how the deflated Sharpe prices the trial family, off
-    # and stamped on like the conditions. A declared offline trial has no
-    # series, so nothing measured its correlation; with the rule it counts as
-    # one independent trial (``verdict.trial_family_statistics``), without it
-    # at the validated trials' ρ̄. With it the arm and its lineage are also
-    # one family (``experiment.recorded_lineage``): one trial per strategy's
-    # bytes, and one count of declared offline trials per reference pack.
-    independent_offline_trials: bool = _rule(
-        False,
-        "Freeze gate: each declared offline trial, the arm's or its lineage's, counts as one "
-        "independent trial; validated trials keep their measured correlation. Across the arm "
-        "and its lineage the same bytes are one trial, and arms mounting one reference pack "
-        "declare its offline trials once, at the most any of them declared.",
-    )
     forward_confidence: float = _rule(
         verdict.FORWARD_CONFIDENCE, "Forward verdict: one-sided block-bootstrap confidence."
     )
@@ -299,9 +256,6 @@ class AcceptanceRules:
         )
         if self.min_full_span_validations < 1:
             raise ValueError("min_full_span_validations must be an integer >= 1")
-        for rule in fields(self):
-            if isinstance(rule.default, bool) and not isinstance(getattr(self, rule.name), bool):
-                raise ValueError(f"{rule.name} must be a boolean")
         object.__setattr__(
             self,
             "forward_confidence",
@@ -353,8 +307,8 @@ class AcceptanceRules:
 
         Run manifests and ``hitl/params.json`` are read back long after they
         were written, so a record that carries a retired key (the former
-        ``min_return``/``min_sharpe`` targets) must still rebuild the rules it
-        does name.
+        ``min_return``/``min_sharpe`` targets, the ``RETIRED_SWITCHES``) must
+        still rebuild the rules it does name.
         """
 
         return cls(**{rule.name: record[rule.name] for rule in fields(cls) if rule.name in record})  # type: ignore[arg-type]
@@ -422,19 +376,12 @@ class AcceptanceRules:
                     "-- the same bytes validated again, on another span or "
                     "after a control registration, are the same trial -- plus every "
                     "batch's declared offline_trials; "
-                    + (
-                        "the H of them validated on the host and the M - H declared "
-                        "offline count as rho + (1 - rho) * H + (M - H) independent "
-                        "trials, rho the mean pairwise correlation of the H trials' "
-                        "daily graded series, each over its longest validated span. "
-                        f"{OFFLINE_TRIALS_PRICING} The dispersion"
-                        if self.independent_offline_trials
-                        else "they count as "
-                        "rho + (1 - rho) * M independent trials, rho the mean "
-                        "pairwise correlation of the trials' daily graded series, "
-                        "each over its longest validated span; the dispersion"
-                    )
-                    + " is the zero-skill sampling "
+                    "the H of them validated on the host and the M - H declared "
+                    "offline count as rho + (1 - rho) * H + (M - H) independent "
+                    "trials, rho the mean pairwise correlation of the H trials' "
+                    "daily graded series, each over its longest validated span. "
+                    f"{OFFLINE_TRIALS_PRICING} The dispersion"
+                    " is the zero-skill sampling "
                     "error of an annualized IR over the nominee's days, "
                     f"sqrt({verdict.TRADING_DAYS_PER_YEAR} / days), about 0.5 over "
                     "four years. A control "
@@ -454,43 +401,29 @@ class AcceptanceRules:
                 "max_drawdown": (
                     f"<= {self.max_drawdown}: equity drawdown over the research period"
                 ),
-                # Stated only where the arm's rules hold it: an arm recorded
-                # without the condition is not judged on it.
-                **(
-                    {
-                        "raw_excess_at_cost_stress": (
-                            "> 0: the holder's money over the research period, not the "
-                            "active series -- the node's own equity return after every "
-                            "cost minus benchmark_index's price return, after charging "
-                            f"{self.cost_stress_multiplier} x the slippage on its "
-                            "turnover (raw_readings.raw_excess_at_cost_stress on its "
-                            "batch_validate row)"
-                        )
-                    }
-                    if self.require_raw_excess_at_cost_stress
-                    else {}
+                "raw_excess_at_cost_stress": (
+                    "> 0: the holder's money over the research period, not the "
+                    "active series -- the node's own equity return after every "
+                    "cost minus benchmark_index's price return, after charging "
+                    f"{self.cost_stress_multiplier} x the slippage on its "
+                    "turnover (raw_readings.raw_excess_at_cost_stress on its "
+                    "batch_validate row)"
                 ),
-                **(
-                    {
-                        "seed_replicates": (
-                            "a nominee whose main.py defines fit (it trains a model) "
-                            "names at least one seed replicate in finish_session's "
-                            "seed_replicates: another complete full-span Validation of "
-                            "this session, registered as a candidate (not a control), "
-                            "whose strategy is the nominee's bytes with exactly one line "
-                            "changed, an integer assignment to a seed name (SEED, "
-                            "SEED_BASE, or one ending in _SEED or _SEED_BASE; e.g. "
-                            "SEED_BASE = 1000 in the nominee, 2000 in a replicate), "
-                            "and whose bytes differ from every other "
-                            "registered one; the mean active information ratio over the "
-                            "nominee and its replicates must be >= the nominee's "
-                            "information_ratio_bar, and every other condition here is "
-                            "judged on the nominee itself. A nominee without fit needs "
-                            "none; replicates it names are held to the same rules"
-                        )
-                    }
-                    if self.require_seed_replicates
-                    else {}
+                "seed_replicates": (
+                    "a nominee whose main.py defines fit (it trains a model) "
+                    "names at least one seed replicate in finish_session's "
+                    "seed_replicates: another complete full-span Validation of "
+                    "this session, registered as a candidate (not a control), "
+                    "whose strategy is the nominee's bytes with exactly one line "
+                    "changed, an integer assignment to a seed name (SEED, "
+                    "SEED_BASE, or one ending in _SEED or _SEED_BASE; e.g. "
+                    "SEED_BASE = 1000 in the nominee, 2000 in a replicate), "
+                    "and whose bytes differ from every other "
+                    "registered one; the mean active information ratio over the "
+                    "nominee and its replicates must be >= the nominee's "
+                    "information_ratio_bar, and every other condition here is "
+                    "judged on the nominee itself. A nominee without fit needs "
+                    "none; replicates it names are held to the same rules"
                 ),
                 "tracking_mandate": mandate,
                 "full_span_validations": (
@@ -526,39 +459,26 @@ class AcceptanceRules:
                     ),
                     "mean_gross": f">= {self.min_mean_gross}",
                     "tracking_mandate": "as in freeze_gate, over the forward months",
-                    # Stated only where the arm's rules hold it, like the raw
-                    # freeze condition; the seed average only where the arm
-                    # also holds seed replicates.
-                    **(
-                        {
-                            "plain_excess_lower_bound": (
-                                f"{self.forward_confidence:.0%} one-sided block-bootstrap "
-                                "lower bound > 0 of the frozen book's plain excess over "
-                                "the forward months: the annualized mean of its active "
-                                "series with no regression, its daily return after "
-                                "every cost minus its zero-skill panel's (on a "
-                                "batch_validate row, the mean of daily_series "
-                                f"active_return x {verdict.TRADING_DAYS_PER_YEAR}). "
-                                "Not raw_readings.plain_selection, which compounds the "
-                                "book and the panel each over the span before taking "
-                                "their difference. Selection in the holder's terms, "
-                                "positive beyond its own noise"
-                                + (
-                                    ". Where the freeze registered seed replicates the "
-                                    "series is the day-by-day average over the frozen "
-                                    "book and its replicates, each replicate replayed "
-                                    "exactly like the frozen book over the forward "
-                                    "months and Held-out; a frozen book without "
-                                    "replicates is judged on its own series"
-                                    if self.require_seed_replicates
-                                    else ""
-                                )
-                                + ". The neutralized conditions above are judged on the "
-                                "frozen book itself and must hold as well"
-                            )
-                        }
-                        if self.require_forward_plain_selection
-                        else {}
+                    "plain_excess_lower_bound": (
+                        f"{self.forward_confidence:.0%} one-sided block-bootstrap "
+                        "lower bound > 0 of the frozen book's plain excess over "
+                        "the forward months: the annualized mean of its active "
+                        "series with no regression, its daily return after "
+                        "every cost minus its zero-skill panel's (on a "
+                        "batch_validate row, the mean of daily_series "
+                        f"active_return x {verdict.TRADING_DAYS_PER_YEAR}). "
+                        "Not raw_readings.plain_selection, which compounds the "
+                        "book and the panel each over the span before taking "
+                        "their difference. Selection in the holder's terms, "
+                        "positive beyond its own noise. Where the freeze "
+                        "registered seed replicates the "
+                        "series is the day-by-day average over the frozen "
+                        "book and its replicates, each replicate replayed "
+                        "exactly like the frozen book over the forward "
+                        "months and Held-out; a frozen book without "
+                        "replicates is judged on its own series. The "
+                        "neutralized conditions above are judged on the "
+                        "frozen book itself and must hold as well"
                     ),
                     "strategy_error": "none",
                     "minimum_detectable_excess": (
@@ -593,6 +513,21 @@ class AcceptanceRules:
 # Every rule's name, in declaration order: the keys of a rules record and of
 # the arm parameters that set one.
 ACCEPTANCE_KEYS: tuple[str, ...] = tuple(rule.name for rule in fields(AcceptanceRules))
+
+# The per-arm on/off switches retired on 2026-10-07, when what they switched on
+# became the only rules (docs/pipeline-design.md §6). Every params.json written
+# before then carries them, and the run records of that time state the first
+# four in their acceptance rules and thresholds. Readers accept exactly these
+# keys and derive nothing from them; any other unknown parameter is refused.
+RETIRED_SWITCHES = frozenset(
+    {
+        "require_raw_excess_at_cost_stress",
+        "require_forward_plain_selection",
+        "require_seed_replicates",
+        "independent_offline_trials",
+        "dividend_tax",
+    }
+)
 
 # The beta band that travels with a tracking mandate when the create request
 # names a cap and leaves the band blank. A cap alone is cheapest to meet by
@@ -1159,7 +1094,7 @@ class ResearchSessionResult:
     # never land in an older field's positional slot.
     _: KW_ONLY
     # ``freeze``: the nominated Step, and the Steps it registered as its seed
-    # replicates (``AcceptanceRules.require_seed_replicates``).
+    # replicates (``experiment.freeze_gate_for``).
     node_id: str | None = None
     seed_replicates: tuple[str, ...] = ()
     # The Agent's own account of its outcome.

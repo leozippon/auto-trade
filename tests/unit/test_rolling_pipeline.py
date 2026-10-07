@@ -144,12 +144,17 @@ def _write_result(directory: Path, days: list[str], *, alpha: float, seed: int) 
              "matched_at": f"{days[index + 5][:4]}-{days[index + 5][4:6]}-{days[index + 5][6:]}T09:30:00+08:00"}
         )
     directory.mkdir(parents=True)
+    total_return = float(equity[-1] / 1_000_000 - 1)
     summary = {
-        "total_return": float(equity[-1] / 1_000_000 - 1),
+        "total_return": total_return,
         "max_drawdown": 0.1,
         "sharpe": 1.0,
         "order_count": len(executions),
         "sub_windows": [],
+        # What the freeze gate's raw condition reads: the book against its
+        # benchmark, and the slippage on its turnover.
+        "benchmark": {"excess_return": total_return - float(np.prod(1 + benchmark) - 1)},
+        "cost_sensitivity": {"slippage_bps": 5.0, "cost_per_bp_per_side": 1e-4},
     }
     (directory / "result.json").write_text(
         json.dumps(
@@ -168,6 +173,9 @@ def _write_result(directory: Path, days: list[str], *, alpha: float, seed: int) 
                 "strategy_daily": [[day, float(value)] for day, value in zip(days, strategy)],
                 "benchmark_daily": [[day, float(value)] for day, value in zip(days, benchmark)],
                 "size_factor_daily": [[day, float(value)] for day, value in zip(days, size)],
+                # The zero-skill panel: random names on the book's skeleton,
+                # riding the market as the book does.
+                "panel_daily": [[day, float(0.9 * value)] for day, value in zip(days, benchmark)],
             }
         ),
         encoding="utf-8",
@@ -377,6 +385,7 @@ def test_a_nominee_below_the_deflated_sharpe_threshold_is_not_frozen(tmp_path: P
         "freeze_deflated_sharpe_below_threshold",
         "freeze_too_few_positive_years",
         "freeze_active_drawdown_exceeded",
+        "freeze_raw_excess_not_positive_at_cost_stress",
     ]
     assert record["frozen"] is None
     assert record["arm_end"]["status"] == "no_deliverable"

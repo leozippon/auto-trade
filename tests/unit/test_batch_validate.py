@@ -121,6 +121,14 @@ def _strategy(marker: str) -> str:
     return f"def generate_orders(context):\n    _ = {marker}\n    return []\n"
 
 
+# What a replay's summary says of a book that beat its benchmark well clear of
+# the stressed slippage: the freeze gate's raw condition holds.
+ABOVE_THE_BENCHMARK = {
+    "benchmark": {"excess_return": 0.30},
+    "cost_sensitivity": {"slippage_bps": 5.0, "cost_per_bp_per_side": 1.2e-4},
+}
+
+
 def _summary(total_return: float) -> dict[str, object]:
     return {
         "total_return": total_return,
@@ -340,6 +348,9 @@ class _Session:
         alpha_scale: float = 0.0005,
         acceptance_rules: Mapping[str, object] | None = None,
     ) -> None:
+        # Where the worker roots a session, as every session has one: the
+        # freeze gate reads a nominee's strategy from its revision store.
+        experiment_dir = experiment_dir or root / "experiment"
         self.root = root
         self.trace_events = trace
         self.workspace_root = root / "workspace"
@@ -404,9 +415,7 @@ class _Session:
             models_dir=self.models,
             # Where the worker roots it: the Steps an experiment records are
             # read back with the fingerprints its revision manifests hold.
-            artifact_store=FilesystemArtifactStore(
-                (experiment_dir or root) / "artifacts" / "strategy"
-            ),
+            artifact_store=FilesystemArtifactStore(experiment_dir / "artifacts" / "strategy"),
             evaluator=self.evaluator,
             tree=self.tree,
             schedule=StrategySchedule(),
@@ -736,6 +745,7 @@ class FreezeThroughTheGateTest(unittest.TestCase):
         and no step_rollback comes first."""
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
+            session.evaluator.summary_extra = ABOVE_THE_BENCHMARK
             session.candidate("a", _strategy("1"))
             session.candidate("b", _strategy("2" * 60))
             value = session.call("a", "b").value
@@ -770,6 +780,7 @@ class ControlsAndOfflineScreensTest(unittest.TestCase):
     def test_a_control_is_recorded_is_no_trial_and_can_never_be_nominated(self) -> None:
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
+            session.evaluator.summary_extra = ABOVE_THE_BENCHMARK
             session.candidate("cand", _strategy("2" * 60))
             session.candidate("c_base", _strategy("1"))
             value = session.call("cand", "c_base", controls=("c_base",), offline_trials=3).value
@@ -858,36 +869,22 @@ class ControlsAndOfflineScreensTest(unittest.TestCase):
             )
             self.assertEqual(trial_family([trial_fields(step) for step in reloaded])["trials"], 4)
 
-    def test_an_arm_that_prices_screens_as_independent_says_so_where_they_are_declared(
-        self,
-    ) -> None:
-        """Under ``independent_offline_trials`` each declared screen adds one
-        effective trial and the validated ones keep their measured
-        correlation; the offline_trials parameter states that once, and an arm
-        without the rule is neither told it nor priced by it."""
+    def test_a_declared_screen_is_priced_as_independent_where_it_is_declared(self) -> None:
+        """Each declared screen adds one effective trial and the validated
+        ones keep their measured correlation; the offline_trials parameter
+        states that once."""
 
         with TemporaryDirectory() as tmp:
-            sessions = {
-                held: _Session(
-                    Path(tmp) / str(held),
-                    acceptance_rules={"max_drawdown": 0.25, "independent_offline_trials": held},
-                )
-                for held in (False, True)
-            }
-            readings = {}
-            for held, session in sessions.items():
-                told = json.dumps(session.batch.spec.provider_record()).count(OFFLINE_TRIALS_PRICING)
-                self.assertEqual(told, int(held))
-                session.candidate("v1", _strategy("2" * 60))
-                session.candidate("v2", _strategy("3" * 60))
-                row = session.call("v1", "v2", offline_trials=3).value["candidates"][0]
-                readings[held] = session.backtest.freeze_gate(str(row["node_id"]))["deflated_sharpe"]
-            self.assertNotIn(OFFLINE_TRIALS_PRICING, json.dumps(BatchValidateTool.spec.provider_record()))
-            rho = readings[False]["trial_correlation"]
-            self.assertEqual(readings[True]["trial_correlation"], rho)
-            self.assertEqual(readings[False]["trials"], readings[True]["trials"])
-            self.assertAlmostEqual(readings[False]["effective_trials"], rho + (1 - rho) * 5)
-            self.assertAlmostEqual(readings[True]["effective_trials"], rho + (1 - rho) * 2 + 3)
+            session = _Session(Path(tmp), acceptance_rules={"max_drawdown": 0.25})
+            told = json.dumps(session.batch.spec.provider_record()).count(OFFLINE_TRIALS_PRICING)
+            self.assertEqual(told, 1)
+            session.candidate("v1", _strategy("2" * 60))
+            session.candidate("v2", _strategy("3" * 60))
+            row = session.call("v1", "v2", offline_trials=3).value["candidates"][0]
+            reading = session.backtest.freeze_gate(str(row["node_id"]))["deflated_sharpe"]
+            rho = reading["trial_correlation"]
+            self.assertEqual(reading["trials"], 5)
+            self.assertAlmostEqual(reading["effective_trials"], rho + (1 - rho) * 2 + 3)
 
     def test_a_wholly_failed_batch_s_screens_count_once_when_declared_again(self) -> None:
         """No Step, no declaration: the next batch repeats it and M holds it once."""
@@ -1799,17 +1796,9 @@ class BatchValidateRunTest(unittest.TestCase):
                 <= set(row["stats"]["sub_windows"][0])
             )
 
-    def test_an_arm_held_to_the_raw_condition_names_a_row_below_the_benchmark(
-        self,
-    ) -> None:
+    def test_the_raw_condition_names_a_row_below_the_benchmark(self) -> None:
         with TemporaryDirectory() as tmp:
-            session = _Session(
-                Path(tmp),
-                acceptance_rules={
-                    "max_drawdown": 0.25,
-                    "require_raw_excess_at_cost_stress": True,
-                },
-            )
+            session = _Session(Path(tmp), acceptance_rules={"max_drawdown": 0.25})
             costs = {"slippage_bps": 5.0, "cost_per_bp_per_side": 1.2e-4}
             session.evaluator.summary_extra = {
                 "benchmark": {"excess_return": 0.0005},
@@ -1978,14 +1967,17 @@ class DailySeriesTest(unittest.TestCase):
                 for row in session.call("good", "bad", span="Y1").value["candidates"]
             }
             self.assertNotIn("daily_series", rows["bad"])
-            # The good row's copy in its node and the host's beside its
-            # result; nothing for the failed one, anywhere.
+            # The good row's copy in its node, the experiment's published
+            # copy of that node and the host's beside its result; nothing for
+            # the failed one, anywhere.
             [step] = session.backtest.steps
+            node = Path(rows["good"]["node_id"]) / rows["good"]["daily_series"]
             self.assertEqual(
                 sorted(Path(tmp).rglob("*active_daily*")),
                 sorted(
                     [
-                        session.tree.root / rows["good"]["node_id"] / rows["good"]["daily_series"],
+                        session.tree.root / node,
+                        session.backtest.experiment_dir / "steps" / node,
                         Path(step.validation.result_ref).parent / "active_daily.csv",
                     ]
                 ),

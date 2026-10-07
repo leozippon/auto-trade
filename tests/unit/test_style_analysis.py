@@ -744,7 +744,7 @@ def test_the_sidecar_carries_the_panel_and_the_active_figures_the_verdict_grades
     ]
     # The active drawdown the freeze gate holds to its limit is the one the
     # Agent reads: two sessions rebuilt it from proxies because no row had it.
-    gate = freeze_gate(graded, rules=AcceptanceRules(), trials=1, full_span_validations=2)
+    gate = freeze_gate(graded, rules=AcceptanceRules(), trials=1, full_span_validations=2, summary={})
     assert compact["active_max_drawdown"] == gate["active_max_drawdown"]
     active_curve = np.concatenate(
         [[1.0], np.cumprod(1.0 + np.asarray(
