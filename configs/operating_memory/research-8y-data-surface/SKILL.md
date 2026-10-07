@@ -1,13 +1,13 @@
 # 八年研究期的数据面：表、单位、可见时间与陷阱
 
-研究期 20170701..20250630、`history_floors` 为日线 20100101 与宏观 20140701、宏观只挂 `index_daily`/`index_dailybasic`/`index_weight`/`sw_daily` 的臂共用这份数据面；其中一部分臂另挂财务域，挂没挂看本臂，见「财务域」一节。下面每条都在这份数据上实读或对照代码核对过，不必再派子代理重推一遍；先按运行事实、`data_summary.json` 与 `unit_reference.json` 确认本臂挂的是同一份，几何或数据集不同就先核对再用。
+研究期 20170701..20250630、`history_floors` 为日线 20100101 与宏观 20140701、宏观只挂 `index_daily`/`index_dailybasic`/`index_weight`/`sw_daily` 的臂共用这份数据面；其中一部分臂另挂财务域、公告标题或两者都挂，挂没挂看本臂，见「财务域」「文本域」两节。下面每条都在这份数据上实读或对照代码核对过，不必再派子代理重推一遍；先按运行事实、`data_summary.json` 与 `unit_reference.json` 确认本臂挂的是同一份，几何或数据集不同就先核对再用。
 
 ## 视图与窗口
 
-- 会话的 `/mnt/snapshot` 是研究期末（2025-06-30 23:59:59）的决策视图：`daily`、`macro`、`universe`（挂了财务域的臂另有 `fundamentals`）各一个平铺文件，日线、四张宏观表与财务都自 20160701 起。它只供离线探查，正式回放读不到它。
+- 会话的 `/mnt/snapshot` 是研究期末（2025-06-30 23:59:59）的决策视图：`daily`、`macro`、`universe`（挂了财务域的臂另有 `fundamentals`，挂了公告标题的臂另有 `text_index`）各一个平铺文件，日线、四张宏观表与财务都自 20160701 起。它只供离线探查，正式回放读不到它。
 - 一次回放的 `context.snapshot_dir` 是该 span 第一年的决策视图（年初前一天 06-30 23:59:59），整场不变。`context.asof_dir/<域>/` 是 parts 目录：part 0 就是这个决策视图，之后随回放时钟逐日追加。多年 span 一路累加，从 Y1 起跑的整期回放到 Y8 时 `daily` 里是 2010 年起的全部行。
 - 每个研究年的决策视图窗口见 `research_geometry.years[].input_window`：年初前 108 个月，截到 `history_floors`。实读：Y1 视图日线 20100104..20170630、宏观自 2014-07；Y3 日线自 20100701；Y8 日线自 20150701、宏观自 2015-07。所以从 Y1、Y2 起跑时指数与申万序列只有 3、4 年历史，需要更长指数窗口的特征（多年 β、按指数算的残差标签、长期指数动量）在前两年取不满：缩短窗口，或在样本说明里写明。
-- 挂财务域与不挂财务域的臂都没有事件、文本与分钟；挂公告标题（`text_datasets` 含 `anns_d`）的臂有 `text_index` 域而没有财务域，见「文本域」一节。`auction` 只有 20250116 起的行，不能当全期特征。
+- 各臂都没有事件与分钟；文本只有挂了公告标题（`text_datasets` 含 `anns_d`）的臂才有，即 `text_index` 域。财务域与公告标题各自独立挂载，一个臂可以挂其一、两者都挂或都不挂，分别按「财务域」「文本域」两节的第一条判断。`auction` 只有 20250116 起的行，不能当全期特征。
 
 ## 可见时间：08:30 的决策看到 T-1
 
@@ -58,7 +58,7 @@
 
 ## 文本域 text_index：只在挂了公告标题的臂上
 
-- 先判断：`/mnt/artifacts/data_summary.json` 里 `views.snapshot.domains` 列出 `text_index` 且 `text_datasets` 含 `anns_d` 才是挂了；这类臂的 `fundamentals.parquet` 是零列空壳，「财务域」一节不适用。
+- 先判断：`/mnt/artifacts/data_summary.json` 里 `views.snapshot.domains` 列出 `text_index` 且 `text_datasets` 含 `anns_d` 才是挂了。它不决定财务域挂没挂：同一个臂可以两者都挂，财务域按那一节第一条另行判断。
 - `context.asof_dir/text_index` 一行一份公告：`dataset`（取 `anns_d`）、`ts_codes`、`title`、`available_at`，自 2016-01 起。一律投影这四列并按 `dataset` 与 `available_at` 过滤读取，`available_at` 用 `pd.to_datetime(..., utc=True)` 解析后再与 `context.inference_at` 比较。
 - 可见时间：厂商的接收时间落在公告日前一天到后三天之内就按接收时间盖章，否则按公告日 23:59:59；文本落库节点每天 23:15。研究期的行几乎全部只有日期，所以公告日为 D 的标题最早在 D+2 日 08:30 的决策里可见；2026-08-12 起实时落库的行带接收时间（多在公告日前一晚），Paper 比研究期早一到一天半看到标题。按「首次可见的本地日期之后的第一个交易日」计事件日，两段口径就一致。
 - 标题是公告的标题而不是正文；同一公告的摘要、修订、法律意见等伴随文件各是一行，按股票与日期去重后再当事件。
