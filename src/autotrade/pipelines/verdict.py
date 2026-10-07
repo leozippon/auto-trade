@@ -68,10 +68,9 @@ if TYPE_CHECKING:
     from .config import AcceptanceRules
 
 # Freeze gate (docs/pipeline-design.md), calibrated on its zero-skill pass rate
-# and its power, not on the record of earlier freezes
-# (``scripts/dev/dsr_recalibration.py``). The forward test alone passes zero
-# skill about 15 % of the time, so an arm's protection against a false
-# graduate when several arms share one forward window is this gate.
+# and its power, not on the record of earlier freezes. The forward test alone
+# passes zero skill about 15 % of the time, so an arm's protection against a
+# false graduate when several arms share one forward window is this gate.
 FREEZE_MIN_ACTIVE_IR = 0.75
 # Active neutralised excess positive in three of four research years; another
 # research length keeps the share, rounded up.
