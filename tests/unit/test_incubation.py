@@ -427,7 +427,8 @@ def test_a_rerun_opens_only_the_missing_book_and_appends_nothing(tmp_path: Path)
     opened = _rerun(tmp_path, record["source_step_id"])
     assert (opened["book"], opened["book_id"], opened["screen"]["passed"]) == ("opened", "inc", True)
     forward = record["forward_reading"]["slices"]["forward"]
-    assert opened["forward"]["neutralized_excess"] == forward["neutralized_excess"]
+    assert opened["forward"]["neutralized_excess_per_year"] == forward["neutralized_excess"]
+    assert opened["forward"]["panel_return"] == forward["raw_readings"]["panel_return"]
     assert opened["forward"]["account_return"] == forward["raw_readings"]["strategy_return"]
     book = tmp_path / "paper" / "inc"
     pinned = json.loads((book / "book.json").read_text(encoding="utf-8"))
