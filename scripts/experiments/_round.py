@@ -570,8 +570,10 @@ RETIRED_IDS: frozenset[str] = frozenset(
         "xsattn_csi1000_8y_20260925",
         # Every arm of the closed rounds 20261011, 20261012, 20261012b,
         # 20261012c and 20261012d, whose files were removed from the tree on
-        # 2026-10-06 (last in 6a0f487; 20261012b's file and pack in 0144b7c);
-        # all finished and stay on disk or in the archive.
+        # 2026-10-06 (last in 6a0f487; 20261012b's file and pack in 0144b7c;
+        # 20261013's file and pack in 315e7c5); all finished and stay on disk
+        # or in the archive.
+        "incdraft2_100k_8y_qwen_20261013",
         "incdraft_100k_8y_mimo_20261012",
         "incdraft_100k_8y_qwen_20261012",
         "incdraft_500k_8y_qwen_20261012",
