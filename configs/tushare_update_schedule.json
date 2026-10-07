@@ -225,7 +225,7 @@
       "skip_if_already_ok": true
     },
     "cn_nightly_pit_event_build": {
-      "description": "Rebuild and audit ALL PIT-ready financial event availability partitions (default_start_date..end). The build reads the whole raw history anyway; full-window replacement keeps every month's provenance aligned with the living raw lake, and the audited range always covers what snapshots can load (the snapshot gateway verifies this).",
+      "description": "Rebuild and audit ALL PIT-ready financial event availability partitions from this job's start_date (YYYYMMDD; default_start_date when unset) to end. Before a Paper book whose decision view loads older fundamentals opens, set start_date to that view's first month. The build reads the whole raw history anyway; full-window replacement keeps every month's provenance aligned with the living raw lake, and the audited range always covers what snapshots can load (the snapshot gateway verifies this).",
       "operation": "pit_event_pipeline",
       "end_date_offset_days": 1,
       "end_date_mode": "sse_open_on_or_before",

@@ -65,7 +65,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run a locked scheduled TuShare update job.")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="Path to tushare_update_schedule.json.")
     parser.add_argument("--job", required=True, help="Job name from the schedule config.")
-    parser.add_argument("--start-date", help="Override update lower bound. Defaults to TUSHARE_UPDATE_START_DATE or config default_start_date.")
+    parser.add_argument("--start-date", help="Override update lower bound. Defaults to TUSHARE_UPDATE_START_DATE, else the job's start_date or start_date_lookback_days, else config default_start_date.")
     parser.add_argument("--end-date", help="Override update end date. Defaults to job offset from current Asia/Shanghai date.")
     parser.add_argument("--dry-run", action="store_true", help="Print the computed command without running it.")
     parser.add_argument("--force-run", action="store_true", help="Run even if this job/date already has an ok state.")
@@ -129,6 +129,40 @@ def resolve_job_end_date(job: dict, repo_root: Path, raw_dir: str, target_date: 
     raise ValueError(f"unsupported end_date_mode: {mode}")
 
 
+def resolve_job_start_date(job: dict, config: dict, end_date: str) -> str:
+    """The lower bound of a run of ``job`` that neither ``--start-date`` nor
+    TUSHARE_UPDATE_START_DATE overrides.
+
+    ``start_date`` (YYYYMMDD) fixes it for this job alone: the nightly PIT
+    event audit must reach back to the first month a Paper book's decision
+    view loads, without widening every job that falls back to the schedule's
+    ``default_start_date``. ``start_date_lookback_days`` trails the end date
+    instead; a job sets at most one of the two."""
+    if "start_date" in job:
+        start_date = job["start_date"]
+        try:
+            datetime.strptime(start_date, "%Y%m%d")  # noqa: DTZ007 - calendar date, no time of day
+            valid = re.fullmatch(r"\d{8}", start_date) is not None
+        except (TypeError, ValueError):
+            valid = False
+        if not valid:
+            raise ValueError(f"job start_date must be a YYYYMMDD date: {start_date!r}")
+        if "start_date_lookback_days" in job:
+            raise ValueError("a job sets start_date or start_date_lookback_days, not both")
+        if start_date > end_date:
+            raise ValueError(f"job start_date {start_date} is after its end date {end_date}")
+        return start_date
+    if "start_date_lookback_days" in job:
+        # A declared lookback wins for every operation: the disclosure job is
+        # download_event_flow but needs the trailing month for late vendor
+        # corrections, unlike the same-day pre-open margin jobs below.
+        end_day = datetime.strptime(end_date, "%Y%m%d").date()  # noqa: DTZ007 - calendar date, no time of day
+        return (end_day - timedelta(days=int(job["start_date_lookback_days"]))).strftime("%Y%m%d")
+    if job.get("operation") == "download_event_flow":
+        return end_date
+    return config["default_start_date"]
+
+
 def is_sse_open_date(repo_root: Path, raw_dir: str, target_date: str) -> bool:
     """Whether ``target_date`` itself is open, without silently rolling backward."""
     files = sorted((repo_root / raw_dir / "trade_cal" / "exchange=SSE").glob("year=*.parquet"))
@@ -170,19 +204,11 @@ def build_context(args: argparse.Namespace) -> RunContext:
     offset_days = int(job.get("end_date_offset_days", 0))
     target_date = args.end_date or (now.date() - timedelta(days=offset_days)).strftime("%Y%m%d")
     end_date = resolve_job_end_date(job, repo_root, raw_dir, target_date)
-    env_start_date = os.environ.get("TUSHARE_UPDATE_START_DATE")
-    if args.start_date or env_start_date:
-        start_date = args.start_date or env_start_date or config["default_start_date"]
-    elif "start_date_lookback_days" in job:
-        # A declared lookback wins for every operation: the disclosure job is
-        # download_event_flow but needs the trailing month for late vendor
-        # corrections, unlike the same-day pre-open margin jobs below.
-        end_day = datetime.strptime(end_date, "%Y%m%d").date()  # noqa: DTZ007 - calendar date, no time of day
-        start_date = (end_day - timedelta(days=int(job["start_date_lookback_days"]))).strftime("%Y%m%d")
-    elif job.get("operation") == "download_event_flow":
-        start_date = end_date
-    else:
-        start_date = config["default_start_date"]
+    start_date = (
+        args.start_date
+        or os.environ.get("TUSHARE_UPDATE_START_DATE")
+        or resolve_job_start_date(job, config, end_date)
+    )
     return RunContext(config, repo_root, python, args.job, job, start_date, end_date, timezone_name)
 
 

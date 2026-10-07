@@ -3780,6 +3780,75 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertIn("--start-date 20200101", " ".join(commands[0]))
         self.assertIn("--start-date 20200101", " ".join(commands[1]))
 
+    def test_cron_job_start_date_overrides_the_default_for_that_job_alone(self):
+        # The nightly PIT audit must reach back to the first month a Paper
+        # book's decision view loads without widening the jobs that share
+        # default_start_date. The run's state record names the start it used,
+        # so the audit status's scope traces back to the schedule.
+        config_path = self.root / "schedule.json"
+        config_path.write_text(json.dumps({
+            "schema_version": 1,
+            "timezone": "Asia/Shanghai",
+            "repo_root": str(self.root),
+            "python": "/env/python",
+            "default_start_date": "20200101",
+            "default_raw_dir": "raw",
+            "default_pit_root": "pit",
+            "jobs": {
+                "cn_nightly_pit_event_build": {"operation": "pit_event_pipeline", "start_date": "20150101"},
+                "cn_nightly_full_audit": {"operation": "audit_full"},
+            },
+        }), encoding="utf-8")
+
+        def args(job, start_date=None):
+            return argparse.Namespace(
+                config=str(config_path), job=job, start_date=start_date, end_date="20260930",
+                dry_run=False, force_run=False, then=[],
+            )
+
+        ctx = cron_update.build_context(args("cn_nightly_pit_event_build"))
+        self.assertEqual(ctx.start_date, "20150101")
+        for command in cron_update.build_job_commands(ctx):  # the build and its audit
+            self.assertIn("--start-date 20150101 --end-date 20260930", " ".join(command))
+        self.assertEqual(cron_update.build_context(args("cn_nightly_full_audit")).start_date, "20200101")
+        # A one-off --start-date still wins over the job's own bound.
+        self.assertEqual(
+            cron_update.build_context(args("cn_nightly_pit_event_build", "20180101")).start_date, "20180101"
+        )
+
+        class FakeLock:
+            fd = 7
+
+            def release(self):
+                return None
+
+        jobs_root = self.root / "runtime" / "jobs"
+        with (
+            patch.object(cron_update, "parse_args", return_value=args("cn_nightly_pit_event_build")),
+            patch.object(cron_update.os, "chdir"),
+            patch.object(cron_update, "JOB_STATE_ROOT", jobs_root),
+            patch.object(cron_update, "RUN_LOG_ROOT", self.root / "logs" / "cron"),
+            patch.object(cron_update, "acquire_lock", return_value=FakeLock()),
+            patch.object(cron_update, "run_update", return_value=0),
+            redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(cron_update.main(), 0)
+        record = json.loads((jobs_root / "cn_nightly_pit_event_build.json").read_text(encoding="utf-8"))
+        self.assertEqual((record["status"], record["start_date"]), ("ok", "20150101"))
+        self.assertEqual(record["config_identity"]["job"]["start_date"], "20150101")
+
+    def test_cron_job_start_date_is_refused_unless_a_valid_bound(self):
+        config = {"default_start_date": "20200101"}
+        for job, message in (
+            ({"start_date": "2015-01-01"}, "YYYYMMDD"),
+            ({"start_date": "20151301"}, "YYYYMMDD"),
+            ({"start_date": 20150101}, "YYYYMMDD"),
+            ({"start_date": "20261001"}, "after its end date 20260930"),
+            ({"start_date": "20150101", "start_date_lookback_days": 30}, "not both"),
+        ):
+            with self.subTest(job=job), self.assertRaisesRegex(ValueError, message):
+                cron_update.resolve_job_start_date(job, config, "20260930")
+
     def test_cron_download_tier_job_builds_targeted_command(self):
         ctx = cron_update.RunContext(
             config={"default_raw_dir": "raw", "default_update_args": ["--min-interval-seconds", "0.22"]},
