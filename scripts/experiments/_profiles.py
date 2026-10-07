@@ -92,6 +92,19 @@ TITLE_EIGHT_YEAR_100K: dict[str, object] = {**FUND_EIGHT_YEAR_100K, **TITLE_EIGH
 # the text domain with `anns_d` alone.
 TITLE_PIT_VIEWS_SEED = "data/pit_views_seed_research_8y_anns_20261006"
 
+# The eight-year geometry with both the fundamentals domain (the default ten
+# datasets) and the vendor's announcement titles (round 20261014): the first
+# selection to mount statements and titles on one arm. Its seed is prebuilt
+# from the newest research release, whose fundamentals and titles both reach
+# back to 2016-01 and whose Broker corporate actions carry the bonus-share
+# column the dividend tax reads.
+FUND_TITLE_EIGHT_YEAR: dict[str, object] = {**FUND_EIGHT_YEAR, "include_text": True, "text_datasets": ["anns_d"]}
+
+# Round 20261005's 100k bars on that geometry.
+FUND_TITLE_EIGHT_YEAR_100K: dict[str, object] = {**FUND_EIGHT_YEAR_100K, **FUND_TITLE_EIGHT_YEAR}
+
+FUND_TITLE_PIT_VIEWS_SEED = "data/pit_views_seed_research_8y_fundanns_20261014"
+
 # The hosted arm of a pair: main session, sub-agents and compaction on MiMo, the
 # compaction threshold pinned to the local arms' value so both compact alike.
 # `nl_model` is left on the local default: text-evidence scoring also runs in
@@ -170,4 +183,27 @@ TITLE_LINEAGE = [
     *INCDRAFT_LINEAGE,
     "titlemap_100k_8y_mimo_20261012",
     "titlerank_100k_8y_qwen_20261012",
+]
+# Plus round 20261013's board-matched rerun and instrument split of the drafts:
+# the company-commitment titles through their third stage (round 20261014).
+COMMITMENT_LINEAGE = [*TITLE_LINEAGE, "incdraft2_100k_8y_qwen_20261013"]
+
+# Every arm that searched the fundamentals domain over the eight years as a
+# source of its own edge and recorded a non-control trial (rounds 20261005 to
+# 20261010): the open, event, industry-cycle and learning lanes. Left out:
+# fund_learn2_100k_8y_mimo_20261007, stopped before it recorded a trial, and
+# round 20261006's fundamentals tower, a block on the sequence bag that belongs
+# to the bag's lineage.
+FUNDAMENTALS_LINEAGE = [
+    "fund_open_100k_8y_qwen_20261005",
+    "fund_open_100k_8y_mimo_20261005",
+    "fund_event_100k_8y_qwen_20261005",
+    "fund_event_100k_8y_mimo_20261005",
+    "fund_event3_100k_8y_qwen_20261010",
+    "fund_event3_100k_8y_mimo_20261010",
+    "indcycle_100k_8y_qwen_20261009",
+    "indcycle_100k_8y_mimo_20261009",
+    "fund_learn_100k_8y_qwen_20261005",
+    "fund_learn_100k_8y_mimo_20261005",
+    "fund_learn2_100k_8y_qwen_20261007",
 ]

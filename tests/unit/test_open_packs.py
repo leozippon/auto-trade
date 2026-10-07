@@ -5,12 +5,13 @@ the rules file, the closed-direction record and the starter -- byte for byte,
 since a pack is mounted alone and cannot point at another. The starter is a
 valid strategy package that, like every arm of the round, may run on a card
 and must still run on the CPU; its title helper returns only visible titles,
-dated by the local calendar day, matched as asked. A pack cites no reading
-after the research period.
+dated by the local calendar day, matched as asked. A pack names the lineage
+its arm is created with, and cites no reading after the research period.
 """
 
 from __future__ import annotations
 
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -43,6 +44,23 @@ def test_the_common_contract_and_starter_are_one_text(pack: Path) -> None:
 @pytest.mark.parametrize("pack", PACKS, ids=lambda path: path.name)
 def test_the_starter_is_a_valid_package(pack: Path) -> None:
     validate_strategy_package(pack / "starter" / "main.py")
+
+
+def test_every_arm_of_the_round_mounts_its_direction_and_names_its_lineage() -> None:
+    from scripts.experiments.create_round_20261014 import ROUND
+
+    mounted = set()
+    for arm in ROUND.arms:
+        params = ROUND.request_params(arm)
+        pack = REPO_ROOT / str(params["workspace_reference"])
+        mounted.add(pack)
+        readme = (pack / "README.md").read_text(encoding="utf-8")
+        section = readme.split("## 血缘", 1)[1].split("\n## ", 1)[0]
+        lineage = set(params.get("lineage_arms") or ())
+        assert lineage <= set(re.findall(r"`([a-z0-9_]+_\d{8})`", section)), arm
+        assert section.lstrip().startswith("没有") is not bool(lineage), arm
+        assert int(params["gpu_count"]) == 1, arm
+    assert mounted == set(PACKS)
 
 
 def test_no_pack_cites_a_reading_after_the_research_period() -> None:
