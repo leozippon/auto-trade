@@ -36,7 +36,7 @@ from autotrade.pipelines.lineage import (
     write_lineage,
 )
 from autotrade.pipelines.research_session import LINEAGE_NOTE, arm_record
-from autotrade.pipelines.session_resume import REVISIONS_DIR
+from autotrade.pipelines.session_resume import REVISIONS_DIR, STEP_SIDECAR_DIR
 
 RESEARCH_START, RESEARCH_END = "20210701", "20250630"
 DAYS = [day.strftime("%Y%m%d") for day in pd.bdate_range(RESEARCH_START, RESEARCH_END)]
@@ -93,13 +93,18 @@ def _row(directory: Path, index: int, *, seed: int, loading: float, span: str = 
     write_json_atomic(result / "result.json", {"initial_cash": 1_000_000.0})
     write_json_atomic(result / STYLE_ARTIFACT_NAME, payload)
     revision = f"revision_{directory.name}_{index}"
+    fingerprint = fingerprint or f"bytes_{directory.name}_{index if bytes_of is None else bytes_of}"
     output = directory / REVISIONS_DIR / revision / "output"
     output.mkdir(parents=True, exist_ok=True)
     (output / "main.py").write_text("def generate_orders(context):\n    return []\n", encoding="utf-8")
+    write_json_atomic(
+        directory / REVISIONS_DIR / revision / REVISION_MANIFEST_FILE,
+        {"revision_id": revision, "fingerprint": fingerprint},
+    )
     return {
         "step_id": f"research__{directory.name}__valid_{index:03d}",
         "revision_id": revision,
-        "fingerprint": fingerprint or f"bytes_{directory.name}_{index if bytes_of is None else bytes_of}",
+        "fingerprint": fingerprint,
         "control": control,
         "batch_id": batch,
         "offline_trials": offline,
@@ -525,31 +530,28 @@ def test_the_research_session_gates_on_the_lineage_its_ledger_records(tmp_path: 
 
 
 def test_the_console_listing_counts_the_lineage_as_the_gate_does(tmp_path: Path) -> None:
-    """The console's best node is deflated against the same trials, N_eff and
-    DSR ``freeze_gate_for`` gives, lineage included."""
+    """A running session's best node, read off its live Validations, is
+    deflated against the same trials, N_eff and DSR ``freeze_gate_for``
+    gives, lineage included."""
 
     from autotrade.webui.registry import _research_best
 
     root = tmp_path / "experiments"
     _arm(root, "first", [{"seed": 2, "loading": 0.6}, {"seed": 3, "loading": 0.6}])
-    arm = _arm(root, "new_arm", [])
+    arm = root / "new_arm"
+    write_json_atomic(arm / "hitl/params.json", {"experiment_id": "new_arm"})
     own = _own_rows(arm)
     _record(arm, extract_lineage(root, ["first"], research_start=RESEARCH_START, research_end=RESEARCH_END))
+    for row in own:
+        write_json_atomic(
+            arm / STEP_SIDECAR_DIR / f"{row['step_id']}.json",
+            {
+                **{key: row[key] for key in ("step_id", "revision_id", "span", "summary", "control", "batch_id", "offline_trials")},
+                "result_ref": row["validation_result_ref"],
+            },
+        )
     ledger = ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl")
-    ledger.append(
-        {
-            "record_type": "research_session",
-            "experiment_id": "new_arm",
-            "epoch_id": "research",
-            "fold_id": "research",
-            "run_id": "run_new_arm",
-            "session_key": "research",
-            "steps": own,
-            "arm_end": {"status": "no_deliverable", "reason": "no_edge"},
-            "frozen": None,
-        }
-    )
-    best = _research_best(arm, ledger.read())
+    best = _research_best(arm, ledger.read(), running=True)
     dsr = freeze_gate_for(ledger.read(), own, own[1], experiment_dir=arm, acceptance=AcceptanceRules())["deflated_sharpe"]
     assert dsr["lineage_trials"] == 2
     assert best["step_id"] == own[1]["step_id"]

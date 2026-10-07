@@ -140,7 +140,6 @@ const HOLDER_TITLE = "冻结产物扣费后的账户收益与基准指数（价�
 const PLAIN_SELECTION_TITLE = "账户收益减零技能面板收益，不做回归：选的名字是否赢了同一骨架上的随机名字";
 const ACTIVE_BETA_TITLE = "主动序列（账户 − 面板）对基准指数的回归载荷；为负即持仓比随机副本更低 β，指数大涨时落后，中性化读数会把这部分记回";
 const NEUTRAL_IR_TITLE = "剔除基准与规模载荷后的主动超额 ÷ 残差跟踪误差；回归退回的 β 与规模部分持有人拿不到";
-const DERIVED_TITLE = "此记录写于切片携带这些读数之前，数字由同一次回放存下的日序列推得";
 // A model-training nominee judged on its training seeds together
 // (pipelines/experiment.py `_seed_replicate_gate`, verdict.py `seed_mean` and
 // `plain_excess_lower_bound`): a seed replicate is the same strategy with only
@@ -2063,10 +2062,9 @@ function experimentBadges(...badges) {
    when the slice carries no reading. */
 function accountTiles(name, slice) {
   const raw = (slice || {}).raw_readings || {};
-  const title = `${HOLDER_TITLE}${(slice || {}).readings_derived ? `。${DERIVED_TITLE}` : ""}`;
   return presentTiles([
-    { label: `${name}账户`, value: raw.strategy_return, fmt: fmtPct, signed: true, title },
-    { label: `${name}基准`, value: raw.benchmark_return, fmt: fmtPct, signed: true, title },
+    { label: `${name}账户`, value: raw.strategy_return, fmt: fmtPct, signed: true, title: HOLDER_TITLE },
+    { label: `${name}基准`, value: raw.benchmark_return, fmt: fmtPct, signed: true, title: HOLDER_TITLE },
   ]);
 }
 
@@ -2130,9 +2128,9 @@ function evidenceTiles(item) {
 }
 
 /* The best full-span candidate's figures, as the experiment page draws them
-   for a recorded research session and for one still running. `trials` stands
-   in when no candidate is measurable: no gate ran over one, so the session's
-   own count answers. */
+   for a recorded research session and for one still running. A recorded
+   session's carry the deflated Sharpe only where its own gate measured that
+   candidate; `trials` stands in where none did, the session's own count. */
 function bestCandidateTiles(best, trials) {
   return statTilesRow(
     presentTiles([
@@ -3023,14 +3021,7 @@ function sliceStats(slice, fields, thresholds) {
   return dataTable(
     [{ label: "" }, { label: "", num: true }],
     rows.map(([field, label, fmt, signed, title]) => [
-      {
-        value: typeof label === "function" ? label(t) : label,
-        // Only what slice_readings derives for an older record says so.
-        title:
-          slice.readings_derived && (field === "plain_excess" || field in (slice.raw_readings || {}))
-            ? [title, DERIVED_TITLE].filter(Boolean).join("。")
-            : title || null,
-      },
+      { value: typeof label === "function" ? label(t) : label, title: title || null },
       { value: fmt(values[field]), cls: signed ? signCls(values[field]) : "" },
     ]),
     { fit: true, box: "section-gap" },
@@ -3046,7 +3037,7 @@ function holderLine(label, slice) {
   const neutral = `中性化主动 IR ${fmtSharpe(slice.information_ratio)}（未回归主动 ${fmtPct(slice.plain_excess)}/年 → 中性化 ${fmtPct(slice.neutralized_excess)}/年，主动市场 β ${fmtSharpe(slice.market_beta)}）`;
   return el(
     "div",
-    { class: "meta-line", title: slice.readings_derived ? DERIVED_TITLE : null },
+    { class: "meta-line" },
     `${label}：账户 ${fmtPct(raw.strategy_return)}，基准 ${fmtPct(raw.benchmark_return)}（原始超额 ${fmtPct(raw.raw_excess)}）；` +
       `零技能面板 ${fmtPct(raw.panel_return)}（对面板 ${fmtPct(raw.plain_selection)}，未回归）；${neutral}`,
   );
@@ -3962,9 +3953,8 @@ function freezeGateChecklist(gate) {
 }
 
 /* The recorded research session: how it ended, its best full-span candidate
-   with the deflated Sharpe the freeze gate would give it, the gate it met
-   when it nominated, the budget it spent, every Validation it ran, and its
-   Trace. */
+   as the record states it, the gate it met when it nominated, the budget it
+   spent, every Validation it ran, and its Trace. */
 function researchSessionPanel(detail, session) {
   const record = session.record;
   const best = record.best || {};

@@ -15,7 +15,6 @@ verdict, so nothing of the replay is readable while it runs.
 from __future__ import annotations
 
 import csv
-import functools
 import hashlib
 import json
 import math
@@ -29,7 +28,6 @@ from pathlib import Path
 
 from autotrade.agent.runner import DEADLINE_GRACE_EXHAUSTED, LLM_CALL_BUDGET_EXHAUSTED
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME, STYLE_SCHEMA_VERSION
-from autotrade.environment.runtime import write_json_atomic
 from autotrade.pipelines.agent_inbox import INBOX_NAME, inbox_public_view
 from autotrade.pipelines.calendar import FULL_SPAN
 from autotrade.pipelines.config import AcceptanceRules, acceptance_for
@@ -63,7 +61,6 @@ from autotrade.pipelines.verdict import (
     CONDITIONS,
     panel_return,
     raw_excess_at_cost_stress,
-    slice_readings,
 )
 from autotrade.pipelines.worker import _ALLOWED_PARAMS
 
@@ -364,79 +361,24 @@ def _result_name(reference: object) -> str | None:
     return path.parent.name if path.name == "result.json" else path.name
 
 
-def _derived_slice_readings(
-    directory: Path, record: Mapping[str, object]
-) -> dict[str, dict[str, object]]:
-    """The holder's readings (``verdict.slice_readings``) of each slice the
-    forward record stores without them, from the replay's own style sidecar.
-
-    A record written before slices carried them has every series they are
-    computed from, so the console derives them on read rather than rewriting
-    the arm's ledger. They are kept like a recorded session's best candidate
-    (:class:`_RecordedBest`, keyed by the forward run). A sidecar that cannot
-    be read or measured derives nothing, and the view shows no reading."""
-
-    slices = _mapping(record.get("slices"))
-    missing = [
-        name
-        for name, block in slices.items()
-        if isinstance(block, Mapping) and "raw_readings" not in block
-    ]
-    if not missing:
-        return {}
-
-    def compute() -> dict[str, object]:
-        root = Path(directory).resolve()
-        path = (root / str(record.get("result_ref") or "")).resolve()
-        if path.is_dir():
-            path = path / "result.json"
-        if not path.is_relative_to(root):
-            raise ValueError("the forward result is outside the experiment")
-        sidecar = json.loads((path.parent / STYLE_ARTIFACT_NAME).read_text(encoding="utf-8"))
-        return {
-            name: slice_readings(
-                sidecar,
-                start=str(_mapping(slices[name]).get("start")),
-                end=str(_mapping(slices[name]).get("end")),
-            )
-            for name in missing
-        }
-
-    try:
-        derived = _RECORDED_BEST.get(
-            directory, [str(record.get("run_id")), "slice_readings"], compute
-        )
-    except (OSError, ValueError, TypeError):
-        return {}
-    return {name: dict(_mapping(block)) for name, block in _mapping(derived).items()}
-
-
 def _forward_view(
-    directory: Path, identity: PublicIdentity, record: Mapping[str, object] | None
+    identity: PublicIdentity, record: Mapping[str, object] | None
 ) -> dict[str, object] | None:
-    """The forward record: replay span, slice statistics and verdict.
-
-    ``None`` until the record exists, which is also when the verdict does.
-    Every slice carries the holder's readings: the record's own, or for a
-    record written before slices carried them, the same numbers derived from
-    its replay (:func:`_derived_slice_readings`) and marked
-    ``readings_derived``.
-    """
+    """The forward record: replay span, slice statistics and verdict, as the
+    record stores them. ``None`` until the record exists, which is also when
+    the verdict does. A slice recorded before slices carried the holder's
+    readings shows none: nothing is read again from its replay."""
 
     if record is None:
         return None
     null = _mapping(record.get("null_control"))
-    derived = _derived_slice_readings(directory, record)
     return {
         "recorded_at": record.get("recorded_at"),
         "error": identity.public_text(str(record.get("error") or "")) or None,
         "replay": dict(_mapping(record.get("replay"))),
         "result": _result_name(record.get("result_ref")),
         "slices": {
-            name: {
-                **block,
-                **({**derived[name], "readings_derived": True} if name in derived else {}),
-            }
+            name: dict(block)
             for name, block in _mapping(record.get("slices")).items()
             if isinstance(block, Mapping)
         },
@@ -488,8 +430,8 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
         )
         if raw_status is not None:
             summary["status"] = status
-        best = _research_best(directory, records)
-        forward = _forward_view(directory, identity, forward_record(records))
+        best = _research_best(directory, records, running=bool(state.get("worker_alive")))
+        forward = _forward_view(identity, forward_record(records))
         summary.update(
             {
                 "created_at": _created_at(directory, params),
@@ -686,7 +628,6 @@ def _listing(
                 kept.append((path.name, signature))
         for gone in {path for path in _SUMMARY_CACHE if path.parent == root} - set(directories):
             _SUMMARY_CACHE.pop(gone, None)
-        _RECORDED_BEST.flush()
     rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
     rows.sort(key=_ending_rank)
     digest = hashlib.sha256(
@@ -802,20 +743,9 @@ def _step_view(row: Mapping[str, object], multiplier: float) -> dict[str, object
     }
 
 
-def _best_candidate(
-    directory: Path,
-    earlier: Sequence[Mapping[str, object]],
-    steps: Sequence[Mapping[str, object]],
-) -> dict[str, object] | None:
-    """The session's full-span Validation with the highest neutralised IR, and
-    the deflated Sharpe probability the freeze gate would give it, with the
-    trials it was deflated against.
-
-    Both come from the pipeline's own gate over the arm as it stood when the
-    session ended (``experiment.freeze_gate_for``), so they are the numbers a
-    nomination of this node would have been judged on. ``None`` when the
-    session ran no measurable full-span Validation.
-    """
+def _best_row(steps: Sequence[Mapping[str, object]]) -> Mapping[str, object] | None:
+    """A session's full-span Validation with the highest neutralised IR, or
+    ``None`` when it ran no measurable one."""
 
     full = [
         row
@@ -825,13 +755,49 @@ def _best_candidate(
         and row.get("control") is not True
         and _number(_mapping(row.get("neutralized")).get("information_ratio")) is not None
     ]
-    if not full:
+    return max(
+        full,
+        key=lambda row: float(row["neutralized"]["information_ratio"]),  # type: ignore[index]
+        default=None,
+    )
+
+
+def _live_candidate(
+    directory: Path,
+    records: Sequence[Mapping[str, object]],
+    steps: Sequence[Mapping[str, object]],
+    *,
+    gated: bool,
+) -> dict[str, object] | None:
+    """An unrecorded session's best Validation so far and, ``gated`` while
+    its worker runs, the deflated Sharpe probability the freeze gate gives it
+    now, the trials it deflates against and what its zero-skill panel earned.
+
+    The gate is the pipeline's own (``experiment.freeze_gate_for``) over the
+    arm's lineage and the Validations recorded so far, as the session reads
+    it; no threshold moves the deflated Sharpe, so the default rules. A
+    session whose worker no longer runs is judged by nothing: an arm stopped
+    mid-session under rules since retired would otherwise show numbers its
+    session never saw.
+    """
+
+    best = _best_row(steps)
+    if best is None:
         return None
-    best = max(full, key=lambda row: float(row["neutralized"]["information_ratio"]))  # type: ignore[index]
+    view = {
+        **_step_view(best, _cost_stress_multiplier(directory)),
+        "result": _result_name(best.get("validation_result_ref")),
+    }
+    if not gated:
+        return {**view, "deflated_sharpe_probability": None, "trials": None}
+    lineage = lineage_record(records)
     try:
-        # No threshold moves the deflated Sharpe, so the default rules.
         gate = freeze_gate_for(
-            earlier, steps, best, experiment_dir=directory, acceptance=AcceptanceRules()
+            [lineage] if lineage is not None else [],
+            steps,
+            best,
+            experiment_dir=directory,
+            acceptance=AcceptanceRules(),
         )
     except (OSError, ValueError):
         gate = {}
@@ -845,9 +811,33 @@ def _best_candidate(
     except (OSError, ValueError):
         sidecar = {}
     return {
-        **_step_view(best, _cost_stress_multiplier(directory)),
+        **view,
         # What the zero-skill panel itself earned over the same span.
         "panel_return": panel_return(sidecar),
+        "deflated_sharpe_probability": _number(dsr.get("deflated_sharpe_probability")),
+        "trials": dsr.get("trials"),
+    }
+
+
+def _recorded_best(directory: Path, record: Mapping[str, object]) -> dict[str, object] | None:
+    """A recorded research session's best Validation, read off its ledger
+    record alone, for the listing and the experiment page alike.
+
+    Its figures are the ones the record stores; its deflated Sharpe
+    probability and trials are those the session's own freeze gate recorded,
+    which exist only where the session nominated this node. Nothing is
+    measured again: a gate re-read under today's code would state numbers the
+    session never saw, so a figure the record does not hold is shown as none.
+    """
+
+    best = _best_row([row for row in record.get("steps") or () if isinstance(row, Mapping)])
+    if best is None:
+        return None
+    gate = _mapping(record.get("freeze_gate"))
+    nominated = best.get("step_id") == record.get("nominated_step_id")
+    dsr = _mapping(gate.get("deflated_sharpe")) if nominated else {}
+    return {
+        **_step_view(best, _cost_stress_multiplier(directory)),
         "result": _result_name(best.get("validation_result_ref")),
         "deflated_sharpe_probability": _number(dsr.get("deflated_sharpe_probability")),
         "trials": dsr.get("trials"),
@@ -867,29 +857,27 @@ def _frozen_session(records: Sequence[Mapping[str, object]]) -> str | None:
 
 
 def _research_best(
-    directory: Path, records: Sequence[Mapping[str, object]]
+    directory: Path, records: Sequence[Mapping[str, object]], *, running: bool
 ) -> dict[str, object] | None:
     """The arm's best full-span candidate so far, for the listing.
 
-    The recorded research session's, through the same :func:`_best_candidate`
-    the experiment page reads, so both surfaces name one number; while the
-    session still runs, the same rule over the Validations it has recorded so
-    far (:func:`_live_steps`), so the card, the tiles and the curve follow the
-    research as it happens and agree with the record once it lands. ``None``
-    while no measurable full-span Validation exists — the card then shows no
-    research evidence rather than a dash.
+    The recorded research session's, read off its record as the experiment
+    page reads it (:func:`_recorded_best`), so both surfaces name one number;
+    before the session is recorded, the same choice over the Validations it
+    has recorded so far (:func:`_live_steps`), gated now while its worker is
+    ``running``, so the card, the tiles and the curve follow the research as
+    it happens. ``None`` while no measurable full-span Validation exists —
+    the card then shows no research evidence rather than a dash.
     """
 
     research = research_records(records)
-    for position in reversed(range(len(research))):
-        best = _recorded_best(
-            directory, _with_lineage(records, research[:position]), research[position]
-        )
+    for record in reversed(research):
+        best = _recorded_best(directory, record)
         if best is not None:
-            return {"session_key": research[position].get("session_key"), **best}
+            return {"session_key": record.get("session_key"), **best}
     if research:
         return None
-    best = _live_best(directory, _with_lineage(records, []))
+    best = _live_best(directory, records, gated=running)
     return {"session_key": RESEARCH_SESSION_KEY, **best} if best is not None else None
 
 
@@ -897,119 +885,9 @@ def _research_best(
 # are read once per node and kept for the process lifetime, and the best
 # candidate (with the freeze gate the Pipeline computes for it) is kept per
 # node set, so a listing poll of a running arm re-reads nothing until the
-# session records another node. A recorded research session's best candidate
-# is kept by _RecordedBest below.
+# session records another node.
 _LIVE_STEP_CACHE: dict[tuple[str, str], dict[str, object]] = {}
-_LIVE_BEST_CACHE: dict[tuple[str, tuple[str, ...]], dict[str, object] | None] = {}
-
-
-def _ledger_state(directory: Path) -> list[int] | None:
-    try:
-        info = (Path(directory) / "ledgers" / "experiment_ledger.jsonl").stat()
-    except OSError:
-        return None
-    return [info.st_size, info.st_mtime_ns]
-
-
-# The code a stored best candidate was computed by: the freeze gate and the
-# statistics, the revision fingerprints it reads, and this read model.
-_BEST_SOURCES = (
-    "pipelines",
-    "environment/replay",
-    "environment/artifacts.py",
-    "webui/registry.py",
-)
-
-
-@functools.cache
-def _best_code() -> str:
-    package = Path(__file__).resolve().parents[1]
-    digest = hashlib.sha256()
-    for source in _BEST_SOURCES:
-        path = package / source
-        for file in sorted(path.rglob("*.py")) if path.is_dir() else [path]:
-            digest.update(str(file.relative_to(package)).encode())
-            digest.update(file.read_bytes())
-    return digest.hexdigest()
-
-
-class _RecordedBest:
-    """The best candidate of each recorded research session, kept.
-
-    It is the one costly reading of a listing row: the freeze gate behind its
-    deflated Sharpe re-reads every trial's daily series — seconds for a large
-    arm, tens of seconds over a full experiments root — and a process used to
-    redo it for every arm on its first listing. Its inputs never change once
-    recorded (the ledger's session rows, and the result, sidecar and revision
-    files written before the ledger names them), so an entry is keyed by the
-    arm and its chain of run ids (the session and the earlier ones whose steps
-    join its trial family) and holds while the arm's ledger keeps its size and
-    mtime. Once the console names a file (:meth:`attach`) the entries outlive
-    the process, for as long as the code that computed them is unchanged. The
-    file is a cache: one that cannot be read starts empty, and one that cannot
-    be written leaves the entries in memory. The holder's readings derived for
-    a forward record written before slices carried them
-    (:func:`_derived_slice_readings`) are kept the same way, keyed by the
-    forward run.
-    """
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._entries: dict[str, dict[str, object]] = {}
-        self._path: Path | None = None
-        self._dirty = False
-
-    def attach(self, path: Path) -> None:
-        with self._lock:
-            self._path = Path(path)
-            try:
-                stored = json.loads(self._path.read_text(encoding="utf-8"))
-                if stored.get("code") != _best_code():
-                    return
-                entries = dict(stored["entries"])
-            except (OSError, ValueError, TypeError, KeyError, AttributeError):
-                return
-            for key, entry in entries.items():
-                if isinstance(entry, dict) and entry.get("ledger") == _ledger_state(
-                    Path(json.loads(key)[0])
-                ):
-                    self._entries.setdefault(key, entry)
-
-    def get(self, directory: Path, run_ids: Sequence[str], compute) -> dict[str, object] | None:
-        key = json.dumps([str(directory), *run_ids])
-        ledger = _ledger_state(directory)
-        with self._lock:
-            entry = self._entries.get(key)
-        if entry is not None and entry["ledger"] == ledger:
-            return entry["best"]  # type: ignore[return-value]
-        best = compute()
-        try:
-            json.dumps(best, allow_nan=False)
-        except (TypeError, ValueError):
-            return best  # not storable: computed again next process
-        with self._lock:
-            self._entries[key] = {"ledger": ledger, "best": best}
-            self._dirty = True
-        return best
-
-    def flush(self) -> None:
-        with self._lock:
-            if not self._dirty or self._path is None:
-                return
-            try:
-                write_json_atomic(self._path, {"code": _best_code(), "entries": self._entries})
-            except OSError:
-                return
-            self._dirty = False
-
-
-_RECORDED_BEST = _RecordedBest()
-
-
-def persist_recorded_best(path: Path) -> None:
-    """Keep recorded sessions' best candidates in ``path`` across restarts."""
-
-    _RECORDED_BEST.attach(path)
+_LIVE_BEST_CACHE: dict[tuple[str, bool, tuple[str, ...]], dict[str, object] | None] = {}
 
 
 def _live_steps(directory: Path) -> list[dict[str, object]]:
@@ -1053,41 +931,14 @@ def _live_steps(directory: Path) -> list[dict[str, object]]:
     return rows
 
 
-def _with_lineage(
-    records: Sequence[Mapping[str, object]], earlier: Sequence[Mapping[str, object]]
-) -> list[Mapping[str, object]]:
-    """``earlier`` plus the arm's lineage record, which the gate reads its
-    inherited trials from (``experiment.recorded_lineage``) as the Pipeline's
-    own call does with the whole ledger."""
-
-    lineage = lineage_record(records)
-    return [*earlier, *([lineage] if lineage is not None else [])]
-
-
 def _live_best(
-    directory: Path, earlier: Sequence[Mapping[str, object]]
+    directory: Path, records: Sequence[Mapping[str, object]], *, gated: bool
 ) -> dict[str, object] | None:
     steps = _live_steps(directory)
-    key = (str(directory), tuple(sorted(str(row.get("step_id")) for row in steps)))
+    key = (str(directory), gated, tuple(sorted(str(row.get("step_id")) for row in steps)))
     if key not in _LIVE_BEST_CACHE:
-        _LIVE_BEST_CACHE[key] = _best_candidate(directory, earlier, steps)
+        _LIVE_BEST_CACHE[key] = _live_candidate(directory, records, steps, gated=gated)
     return _LIVE_BEST_CACHE[key]
-
-
-def _recorded_best(
-    directory: Path,
-    earlier: Sequence[Mapping[str, object]],
-    record: Mapping[str, object],
-) -> dict[str, object] | None:
-    """:func:`_best_candidate` of one recorded research session, shared by
-    the listing and the experiment page."""
-
-    steps = [row for row in record.get("steps") or () if isinstance(row, Mapping)]
-    return _RECORDED_BEST.get(
-        directory,
-        [str(row.get("run_id")) for row in (*earlier, record)],
-        lambda: _best_candidate(directory, earlier, steps),
-    )
 
 
 def _research_result(
@@ -1157,7 +1008,7 @@ def _seed_gate_view(identity: PublicIdentity, block: object) -> dict[str, object
     """The freeze gate's seed-replicate reading (``experiment._seed_replicate_gate``)
     -- the replicates it read, each one's seed line and IR or the problem that
     refused it, their mean with the nominee and the bar -- or ``None`` for a
-    gate of an arm without the rule."""
+    gate recorded before it read seed replicates."""
 
     seeds = _mapping(block)
     if not seeds:
@@ -1180,10 +1031,7 @@ def _seed_gate_view(identity: PublicIdentity, block: object) -> dict[str, object
 
 
 def _research_session_view(
-    directory: Path,
-    identity: PublicIdentity,
-    earlier: Sequence[Mapping[str, object]],
-    record: Mapping[str, object],
+    directory: Path, identity: PublicIdentity, record: Mapping[str, object]
 ) -> dict[str, object]:
     steps = [row for row in record.get("steps") or () if isinstance(row, Mapping)]
     gate = _mapping(record.get("freeze_gate"))
@@ -1214,8 +1062,8 @@ def _research_session_view(
                 "information_ratio": _number(gate.get("information_ratio")),
                 "positive_years": _number(gate.get("positive_years")),
                 "active_max_drawdown": _number(gate.get("active_max_drawdown")),
-                # Judged only where the arm's rules hold the raw condition;
-                # its thresholds then carry the multiplier.
+                # Absent from a gate recorded before the raw condition; its
+                # thresholds carry the multiplier where it was judged.
                 "raw_excess_at_cost_stress": _number(gate.get("raw_excess_at_cost_stress")),
                 "mandate": {
                     key: _number(value)
@@ -1239,7 +1087,7 @@ def _research_session_view(
         if isinstance(record.get("arm_end"), Mapping)
         else None,
         "validations": [_step_view(row, multiplier) for row in steps],
-        "best": _recorded_best(directory, earlier, record),
+        "best": _recorded_best(directory, record),
         "attempts": record.get("attempts"),
         "budget_used": _mapping(record.get("budget_used")) or None,
     }
@@ -1319,17 +1167,9 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
     for planned in identity.sessions:
         key = str(planned["session_key"])
         entry: dict[str, object] = {"key": key, "kind": planned["kind"]}
-        position = next(
-            (index for index, row in enumerate(research) if row.get("session_key") == key),
-            None,
-        )
-        if position is not None:
-            entry["record"] = _research_session_view(
-                directory,
-                identity,
-                _with_lineage(records, research[:position]),
-                research[position],
-            )
+        record = next((row for row in research if row.get("session_key") == key), None)
+        if record is not None:
+            entry["record"] = _research_session_view(directory, identity, record)
         if planned["kind"] == "forward":
             replay = dict(_mapping(planned.get("replay")))
             entry["replay"] = replay
@@ -1337,7 +1177,6 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
         sessions.append(entry)
     raw_status = _mapping(experiment_state(directory).get("status"))
     current = raw_status.get("session_key")
-    _RECORDED_BEST.flush()
     return {
         **detail,
         "params": _public_params(params),

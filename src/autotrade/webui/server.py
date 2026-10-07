@@ -124,7 +124,6 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     root = Path(repo_root).resolve()
     experiment_root = Path(experiments_root or root / "experiments").resolve()
     manager = ExperimentManager(root, experiment_root)
-    registry.persist_recorded_best(root / ".runtime" / "console" / "recorded-best.json")
     app = FastAPI(
         title="ADM-Cube Console", docs_url=None, redoc_url=None, openapi_url=None
     )

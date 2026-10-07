@@ -10,7 +10,6 @@ only, and refuse a create whose geometry the worker would refuse.
 from __future__ import annotations
 
 import json
-import os
 import re
 from pathlib import Path
 
@@ -567,11 +566,13 @@ def _sidecar(directory: Path, row: dict[str, object]) -> Path:
     return path
 
 
-def test_a_running_session_serves_its_best_candidate_as_the_record_will(tmp_path: Path) -> None:
+def test_a_running_session_serves_its_best_candidate_and_the_record_keeps_it(tmp_path: Path) -> None:
     """While the one research session runs, the listing reads the Validations
     it has recorded so far from the host sidecars and names the best
     full-span candidate, its curve and its result by the rule the recorded
-    session is read with, so nothing changes when the record lands."""
+    session is read with, with the freeze gate read now. Once the record
+    lands the same candidate is read off it alone: its figures stay, and the
+    gate the session never recorded over it is shown as none."""
 
     directory = build_arm(tmp_path, "arm", "research", alive=True)
     steps = [
@@ -585,6 +586,8 @@ def test_a_running_session_serves_its_best_candidate_as_the_record_will(tmp_path
     assert live["research_best"]["step_id"] == steps[1]["step_id"]
     assert live["research_best"]["session_key"] == "research"
     assert live["research_best"]["trials"] == 3
+    assert live["research_best"]["deflated_sharpe_probability"] is not None
+    assert live["research_best"]["panel_return"] is None  # these sidecars carry no panel
     assert live["research_result"] == Path(str(steps[1]["validation_result_ref"])).parent.name
     client = TestClient(create_app(tmp_path, tmp_path))
     assert client.get(f"/api/experiments/arm/results/{live['research_result']}/equity").status_code == 200
@@ -601,7 +604,11 @@ def test_a_running_session_serves_its_best_candidate_as_the_record_will(tmp_path
         )
     )
     recorded = summarize_experiment(directory)
-    assert recorded["research_best"] == live["research_best"]
+    gated = ("deflated_sharpe_probability", "trials", "panel_return")
+    assert {key: value for key, value in recorded["research_best"].items() if key not in gated} == {
+        key: value for key, value in live["research_best"].items() if key not in gated
+    }
+    assert (recorded["research_best"]["deflated_sharpe_probability"], recorded["research_best"]["trials"]) == (None, None)
     assert recorded["research_result"] == live["research_result"]
 
 
@@ -623,21 +630,97 @@ def test_a_recorded_node_is_read_once_across_listings(tmp_path: Path) -> None:
     assert summarize_experiment(directory)["research_best"]["step_id"] == second["step_id"]
 
 
-def test_a_recorded_session_is_gated_once_across_listings_and_pages(tmp_path: Path) -> None:
-    """A recorded research session is an immutable ledger row: the freeze gate
-    behind its best candidate is computed on the first read and shared by
-    every later listing poll and experiment page, so a poll of many ended arms
-    costs no replay statistics at all. Every page poll keeps one request in
-    flight, so a slow listing cannot stack requests on the server either."""
+def test_an_ended_arm_is_read_off_its_ledger_and_never_judged_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A recorded research session and a forward record are what an ended arm
+    shows: a cold console lists every such arm and opens its page without
+    calling the freeze gate or reading any replay's series, and the numbers it
+    serves are the ledger's own -- the nominee's deflated Sharpe as its gate
+    recorded it, and no gate at all over a best candidate the session never
+    nominated. Only a running session's live Validations are gated, now."""
 
-    directory = build_arm(tmp_path, "arm", "sealed")
-    before = summarize_experiment(directory)["research_best"]
-    assert before["deflated_sharpe_probability"] is not None
-    for row in _records(directory)[0]["steps"]:
-        (Path(str(row["validation_result_ref"])).parent / "style_analysis.json").unlink()
-    assert summarize_experiment(directory)["research_best"] == before
-    record = experiment_detail(tmp_path, "arm")["sessions"][0]["record"]
-    assert {"session_key": "research", **record["best"]} == before
+    root = tmp_path / "experiments"
+    for experiment_id, stage in (
+        ("frozen", "sealed"),
+        ("graduate", "graduated"),
+        ("refused", "discarded"),
+        ("no_edge", "no_deliverable"),
+        # Stopped mid-session: Validations on disk, no session record.
+        ("stopped", "research"),
+    ):
+        build_arm(root, experiment_id, stage)
+    _sidecar(root / "stopped", _step(root / "stopped", "research", 0, edge=0.002, seed=3))
+    no_edge = root / "no_edge"
+    steps = [
+        _step(no_edge, "research", 0, edge=0.0005, seed=1),
+        _step(no_edge, "research", 1, edge=0.002, seed=3),
+    ]
+    ledger = ExperimentLedger(no_edge / "ledgers/experiment_ledger.jsonl")
+    records = ledger.read()
+    records[0]["steps"] = steps
+    ledger.rewrite(records)
+    for directory in root.iterdir():
+        if directory.name == "stopped":
+            continue  # its Validations are read off their own files
+        for result in (directory / "artifacts/results").glob("*/style_analysis.json"):
+            result.unlink()
+
+    calls: list[str] = []
+    gate, panel = registry.freeze_gate_for, registry.panel_return
+
+    def gated(*args: object, **kwargs: object) -> object:
+        calls.append("freeze_gate_for")
+        return gate(*args, **kwargs)
+
+    def paneled(*args: object, **kwargs: object) -> object:
+        calls.append("panel_return")
+        return panel(*args, **kwargs)
+
+    monkeypatch.setattr(registry, "freeze_gate_for", gated)
+    monkeypatch.setattr(registry, "panel_return", paneled)
+    monkeypatch.setattr(registry, "_SUMMARY_CACHE", {})
+    client = TestClient(create_app(tmp_path, root))
+    rows = {row["experiment_id"]: row for row in client.get("/api/experiments").json()["experiments"]}
+    details = {name: client.get(f"/api/experiments/{name}").json() for name in rows}
+    assert calls == []
+    assert all(row.get("state") != "unreadable" for row in rows.values())
+
+    # The nominee is the best candidate: its deflated Sharpe is the gate's.
+    stored = _records(root / "frozen")[0]
+    best = rows["frozen"]["research_best"]
+    assert best["step_id"] == stored["nominated_step_id"]
+    assert best["deflated_sharpe_probability"] == stored["freeze_gate"]["deflated_sharpe"]["deflated_sharpe_probability"]
+    assert best["trials"] == stored["freeze_gate"]["deflated_sharpe"]["trials"]
+    assert best["information_ratio"] == stored["steps"][1]["neutralized"]["information_ratio"]
+    assert {"session_key": "research", **details["frozen"]["sessions"][0]["record"]["best"]} == best
+    # A session that nominated nothing recorded no gate over its best, and
+    # one stopped before its record has none either.
+    unnominated = rows["no_edge"]["research_best"]
+    assert unnominated["step_id"] == steps[1]["step_id"]
+    assert (unnominated["deflated_sharpe_probability"], unnominated["trials"]) == (None, None)
+    stopped = rows["stopped"]["research_best"]
+    assert stopped["information_ratio"] is not None
+    assert (stopped["deflated_sharpe_probability"], stopped["trials"]) == (None, None)
+    # The forward slices and verdict are the record's, key for key.
+    for name in ("graduate", "refused"):
+        forward = _records(root / name)[-1]
+        assert details[name]["forward"]["slices"] == forward["slices"]
+        assert details[name]["forward"]["verdict"] == forward["verdict"]
+
+    # A running session is gated now, over the Validations it has so far.
+    running = build_arm(root, "running", "research", alive=True)
+    _sidecar(running, _step(running, "research", 0, edge=0.002, seed=3))
+    live = client.get("/api/experiments").json()
+    assert calls[:1] == ["freeze_gate_for"]
+    assert next(row for row in live["experiments"] if row["experiment_id"] == "running")[
+        "research_best"
+    ]["deflated_sharpe_probability"] is not None
+
+
+def test_a_page_poll_keeps_one_request_in_flight() -> None:
+    """Every page poll keeps one request in flight, so a slow listing cannot
+    stack requests on the server."""
 
     script = (
         Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
@@ -656,44 +739,6 @@ def test_a_recorded_session_is_gated_once_across_listings_and_pages(tmp_path: Pa
     assert re.search(r"setInterval\((?!\(\) =>)", rest) is None
     # The definition, then the home, status, trace, sub-agent and Paper polls.
     assert rest.count("setPollInterval(") == 6
-
-
-def test_a_restarted_console_reads_the_gated_best_candidate_it_kept(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The gate behind a recorded session's best candidate outlives the
-    process: a restarted console lists every ended arm without computing it
-    again, until the arm's ledger or the code that computed it changes."""
-
-    root = tmp_path / "experiments"
-    directory = build_arm(root, "arm", "sealed")
-    first = TestClient(create_app(tmp_path, root)).get("/api/experiments").json()
-    best = first["experiments"][0]["research_best"]
-    assert best["deflated_sharpe_probability"] is not None
-    gated: list[str] = []
-    gate = registry._best_candidate
-
-    def counting(*args: object) -> object:
-        gated.append(Path(str(args[0])).name)
-        return gate(*args)
-
-    def restart() -> dict[str, object]:
-        monkeypatch.setattr(registry, "_RECORDED_BEST", registry._RecordedBest())
-        monkeypatch.setattr(registry, "_SUMMARY_CACHE", {})
-        client = TestClient(create_app(tmp_path, root))
-        return client.get("/api/experiments").json()["experiments"][0]["research_best"]
-
-    monkeypatch.setattr(registry, "_best_candidate", counting)
-    assert restart() == best and gated == []
-    # A ledger that changed under the arm is gated afresh.
-    ledger = directory / "ledgers/experiment_ledger.jsonl"
-    stamp = ledger.stat().st_mtime_ns + 1_000_000
-    os.utime(ledger, ns=(stamp, stamp))
-    assert restart() == best and gated == ["arm"]
-    # So is every arm once the code that computes the gate changes.
-    gated.clear()
-    monkeypatch.setattr(registry, "_best_code", lambda: "another revision")
-    assert restart() == best and gated == ["arm"]
 
 
 def test_a_poll_holding_the_kept_digest_receives_only_the_live_rows(tmp_path: Path) -> None:
@@ -739,9 +784,9 @@ def test_an_archived_arm_is_listed_only_on_request_and_its_page_still_opens(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A cold console lists the arms not archived without summarizing an
-    archived one at all — its freeze gate is never recomputed — and counts
-    the archived ones; asked for them, it lists those alone. The archived
-    arm's page opens as before and says it is archived."""
+    archived one at all, and counts the archived ones; asked for them, it
+    lists those alone. The archived arm's page opens as before and says it is
+    archived."""
 
     root = tmp_path / "experiments"
     build_arm(root, "ended", "no_deliverable")
@@ -755,7 +800,6 @@ def test_an_archived_arm_is_listed_only_on_request_and_its_page_still_opens(
 
     monkeypatch.setattr(registry, "summarize_experiment", counting)
     monkeypatch.setattr(registry, "_SUMMARY_CACHE", {})
-    monkeypatch.setattr(registry, "_RECORDED_BEST", registry._RecordedBest())
     client = TestClient(create_app(tmp_path, root))
     listing = client.get("/api/experiments").json()
     assert [row["experiment_id"] for row in listing["experiments"]] == ["ended"]
@@ -1086,81 +1130,42 @@ def test_each_validation_shows_its_raw_excess_beside_its_active_figures(tmp_path
     detail = experiment_detail(tmp_path, "arm")
     record = next(entry for entry in detail["sessions"] if entry["kind"] == "research")["record"]
     assert {"excess_return", "raw_excess_at_cost_stress"} <= set(record["validations"][0])
-    assert "panel_return" in record["best"]
+    # The ledger holds no reading of the best candidate's panel.
+    assert "panel_return" not in record["best"]
 
 
-def test_an_arm_judged_before_slices_carried_the_holders_readings_reads_them_derived(
-    tmp_path: Path,
-) -> None:
+def test_a_forward_record_without_the_holders_readings_shows_none(tmp_path: Path) -> None:
     """A forward record written before slices carried the holder's readings
-    keeps its ledger as written; the console derives the same numbers from
-    the replay's stored series and says they were derived. They are the
-    sidecar's own daily series compounded over each slice, and the very
-    numbers the pipeline now records for a slice of that sidecar."""
+    is shown as written: no reading is derived again from its replay, and
+    the graduate's ending line names the figures it does hold. Its curve
+    still draws the replay's panel beside the book, on the book's own days."""
 
     from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
-    from autotrade.pipelines.verdict import slice_readings
 
     directory = build_arm(tmp_path, "arm", "graduated")
     ledger_path = directory / "ledgers/experiment_ledger.jsonl"
     records = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
     record = records[-1]
-    sidecar_path = Path(str(record["result_ref"])).parent / STYLE_ARTIFACT_NAME
-    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
-    # A replay of the panel era: random names on the book's skeleton.
-    sidecar["panel_daily"] = [[day, 0.6 * value - 0.0004] for day, value in sidecar["strategy_daily"]]
-    write_json_atomic(sidecar_path, sidecar)
-    recorded_now = {
-        name: slice_readings(sidecar, start=block["start"], end=block["end"])
-        for name, block in record["slices"].items()
-    }
-    # The record as an arm judged before this change wrote it.
     for block in record["slices"].values():
         del block["raw_readings"], block["plain_excess"]
     del record["verdict"]["holder_line"]
     ledger_path.write_text(
         "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in records), encoding="utf-8"
     )
-    before = ledger_path.read_bytes()
-
     detail = experiment_detail(tmp_path, "arm")
-    slices = detail["forward"]["slices"]
-    for name, readings in recorded_now.items():
-        assert slices[name]["readings_derived"] is True
-        assert slices[name]["raw_readings"] == readings["raw_readings"]
-        assert slices[name]["plain_excess"] == readings["plain_excess"]
-    forward = slices["forward"]
-    in_slice = [
-        (own, drawn, index)
-        for (day, own), (_day, drawn), (_d, index) in zip(
-            sidecar["strategy_daily"], sidecar["panel_daily"], sidecar["benchmark_daily"], strict=True
-        )
-        if forward["start"] <= day <= forward["end"]
-    ]
-    book, panel, benchmark = (
-        float(np.prod([1.0 + row[column] for row in in_slice]) - 1.0) for column in range(3)
-    )
-    assert forward["raw_readings"]["strategy_return"] == pytest.approx(book, rel=1e-12)
-    assert forward["raw_readings"]["benchmark_return"] == pytest.approx(benchmark, rel=1e-12)
-    assert forward["raw_readings"]["plain_selection"] == pytest.approx(book - panel, rel=1e-12)
-    # The ending names the derived holder's line, and reading wrote nothing.
+    assert detail["forward"]["slices"] == record["slices"]
     ending = summarize_experiment(directory)["ending"]["reason"]
-    assert ending.startswith(f"前推 账户 {book * 100:+.2f}% · 基准 {benchmark * 100:+.2f}%")
-    assert f"对面板（未回归）{(book - panel) * 100:+.2f}%" in ending
-    assert ledger_path.read_bytes() == before
-    # The curve draws the panel beside the book and the benchmark, on the
-    # book's own days.
+    information_ratio = record["slices"]["forward"]["information_ratio"]
+    assert ending == f"前推 账户 — · 基准 — · 对面板（未回归）— · 中性化主动 IR {information_ratio:.2f}"
+    sidecar = json.loads(
+        (Path(str(record["result_ref"])).parent / STYLE_ARTIFACT_NAME).read_text(encoding="utf-8")
+    )
     client = TestClient(create_app(tmp_path, tmp_path))
     equity = client.get(f"/api/experiments/arm/results/{detail['forward']['result']}/equity").json()
     assert equity["panel"]["dates"] == equity["series"][0]["dates"]
     assert equity["panel"]["final"] == pytest.approx(
         float(np.prod([1.0 + value for _day, value in sidecar["panel_daily"]]) - 1.0), abs=1e-6
     )
-
-    # An arm judged now carries its own readings, not derived ones.
-    build_arm(tmp_path, "current", "graduated")
-    current = experiment_detail(tmp_path, "current")["forward"]["slices"]["forward"]
-    assert "readings_derived" not in current and "raw_readings" in current
 
 
 def test_an_arm_carrying_the_retired_switches_reads_as_one_without_them(tmp_path: Path) -> None:

@@ -1310,7 +1310,7 @@ def freeze_gate_for(
     cannot be measured does not pass. ``acceptance`` is the arm's rules,
     ``hard_reasons`` what their ``evaluate`` refuses the nominee for and
     ``years`` the research years; the console, which reads only the deflated
-    Sharpe of an arm's best node, passes the default rules and
+    Sharpe of a running session's best node, passes the default rules and
     leaves the other two out. The measured gate also judges the nominee's
     ``seed_replicates`` (rows of this session; :func:`_seed_replicate_gate`).
     """
