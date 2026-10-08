@@ -374,10 +374,16 @@ TEXT_NODE = "cn_nightly_text_full"
 # calendar/observed-completion ledger for exact modelling.
 NODE_ACTIVE_WEEKDAYS: dict[str, frozenset[int]] = {
     EVENING_NODE: frozenset(range(5)),
-    # The job audits the previous A-share trading day. Tuesday through
-    # Saturday produce a new range; Sunday and Monday resolve to Friday again
-    # and are skipped. Weekday exchange holidays remain covered by the
-    # documented conservative fallback until per-run completion history exists.
+    # The job builds through the session on or before its launch date, so a
+    # launch on session D publishes every filing stamped through D 03:35,
+    # holiday filings included on the first session after a holiday. Monday
+    # through Friday produce a new range; weekend launches resolve to Friday
+    # and are skipped (the Saturday deep-update chain rebuilds through
+    # Friday). The node keeps the Tuesday-Saturday cutoffs of the earlier
+    # previous-session end: identical on Tuesday-Friday, while a Monday
+    # decision still sees only filings stamped through Saturday 03:35 and the
+    # weekend's wait for Tuesday -- later than the Monday build holds them,
+    # never earlier.
     PIT_EVENT_NODE: frozenset(range(1, 6)),
 }
 

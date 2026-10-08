@@ -2310,8 +2310,10 @@ def _require_event_months(
             f"{months[0]}..{months[-1]}, but the store under {root} never built "
             f"some of them: {detail}. Served as it is, every fundamental would stay "
             "frozen across the gap. Rebuild the PIT fundamental events over the slot "
-            "first (tushare_cron_update.py --job cn_nightly_pit_event_build "
-            "--start-date <first missing month>)."
+            "first: tushare_cron_update.py --job cn_nightly_pit_event_build --force-run "
+            "builds from the job's start_date through the latest session on or before "
+            "today; a month before that start_date needs the job's start_date moved "
+            "to it first."
         )
 
 

@@ -19,6 +19,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import unquote
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import tushare.pro.client as tushare_sdk
@@ -26,7 +27,8 @@ from pyarrow.lib import ArrowInvalid
 
 from autotrade.data_sources.tushare import audit, common, cron_update, download
 from autotrade.data_sources.tushare import io as tushare_io
-from autotrade.environment.data.snapshot import SELECTABLE_DATASETS
+from autotrade.environment.data.fundamental_events import FundamentalEventsBuilder, month_aligned_replace_window
+from autotrade.environment.data.snapshot import SELECTABLE_DATASETS, _require_event_months
 
 
 class EmptyMinuteClient:
@@ -3836,6 +3838,71 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         record = json.loads((jobs_root / "cn_nightly_pit_event_build.json").read_text(encoding="utf-8"))
         self.assertEqual((record["status"], record["start_date"]), ("ok", "20150101"))
         self.assertEqual(record["config_identity"]["job"]["start_date"], "20150101")
+
+    def test_cron_pit_event_job_builds_the_month_of_the_session_it_launches_on(self):
+        # Paper decides session D at 05:40 through a replay slot that ends on D,
+        # and the snapshot gateway refuses a slot month the store never built.
+        # The scheduled 03:35 launch on D must therefore build through D: ending
+        # on the previous session left D's month unbuilt on the first session of
+        # every month and after every holiday (2026-10-08, after National Day).
+        schedule_path = Path(__file__).resolve().parents[2] / "configs" / "tushare_update_schedule.json"
+        job = json.loads(schedule_path.read_text(encoding="utf-8"))["jobs"]["cn_nightly_pit_event_build"]
+        days = [
+            day.strftime("%Y%m%d")
+            for span in (("20260528", "20260602"), ("20260929", "20261012"))
+            for day in pd.date_range(*span)
+        ]
+        closed = {"20260530", "20260531", *(f"202610{day:02d}" for day in range(1, 8)), "20261010", "20261011"}
+        sessions = [day for day in days if day not in closed]
+        trade_cal = self.raw_dir / "trade_cal" / "exchange=SSE" / "year=2026.parquet"
+        trade_cal.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"cal_date": days, "is_open": ["0" if day in closed else "1" for day in days]}).to_parquet(
+            trade_cal, index=False
+        )
+        config_path = self.root / "schedule.json"
+        config_path.write_text(json.dumps({
+            "schema_version": 1,
+            "timezone": "Asia/Shanghai",
+            "repo_root": str(self.root),
+            "python": "/env/python",
+            "default_start_date": "20200101",
+            "default_raw_dir": "raw",
+            "default_pit_root": "pit",
+            "jobs": {"cn_nightly_pit_event_build": job},
+        }), encoding="utf-8")
+        for launch in days[1:]:
+            launched_at = datetime.strptime(f"{launch}0335", "%Y%m%d%H%M").replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+
+            class LaunchClock(datetime):
+                @classmethod
+                def now(cls, tz=None, _at=launched_at):
+                    return _at.astimezone(tz)
+
+            # A short --start-date keeps the store small; only the end is under test.
+            args = argparse.Namespace(
+                config=str(config_path), job="cn_nightly_pit_event_build", start_date="20260501",
+                end_date=None, dry_run=False, force_run=False,
+            )
+            with self.subTest(launch=launch), patch.object(cron_update, "datetime", LaunchClock):
+                ctx = cron_update.build_context(args)
+                # Weekend and holiday launches resolve to the previous session,
+                # an unchanged range the skip rule suppresses.
+                self.assertEqual(ctx.end_date, max(day for day in sessions if day <= launch))
+                if launch not in sessions:
+                    continue
+                store = self.root / "pit" / launch
+                _start, months = month_aligned_replace_window(ctx.start_date, ctx.end_date)
+                FundamentalEventsBuilder(self.raw_dir).write_partitioned(
+                    pd.DataFrame(), store, replace_months=months, replace_datasets=("income_vip",)
+                )
+                previous = max(day for day in sessions if day < launch)
+                _require_event_months(
+                    store,
+                    ("income_vip",),
+                    pd.Timestamp(previous, tz="Asia/Shanghai"),
+                    pd.Timestamp(launch, tz="Asia/Shanghai") + pd.Timedelta(days=1, seconds=-1),
+                    slot=f"{previous}..{launch}",
+                )
 
     def test_cron_job_start_date_is_refused_unless_a_valid_bound(self):
         config = {"default_start_date": "20200101"}
