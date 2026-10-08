@@ -50,7 +50,15 @@ STAGES = (
     "discarded",
     "no_deliverable",
     "deadline",
+    "environment_blocked",
     "broken",
+)
+# The reason the host writes for an arm whose session it ended on the
+# environment (``session_tools.EnvironmentBlocked``).
+ENVIRONMENT_BLOCKED_REASON = (
+    "span full: 2 batches failed on the environment in every candidate; last error: "
+    "daily Validation failed: ArrowTypeError: Unable to merge: Field dataset has "
+    "incompatible types: large_string vs string"
 )
 GEOMETRY = DEFAULT_RESEARCH_GEOMETRY
 # Worker-accepted parameters of a console-created arm.
@@ -362,6 +370,19 @@ def build_arm(
             )
         )
         current = ""
+    elif stage == "environment_blocked":
+        records.append(
+            _session_record(
+                experiment_id,
+                outcome="environment_blocked",
+                finish_reason="environment_blocked",
+                steps=[],
+                trials_to_date=0,
+                reason=ENVIRONMENT_BLOCKED_REASON,
+                arm_end={"status": "environment_blocked", "reason": ENVIRONMENT_BLOCKED_REASON},
+            )
+        )
+        current = ""
     elif stage == "broken":
         # The worker exhausted its attempts: the ledger records the failures,
         # status.json carries the error that stopped the run.
@@ -455,7 +476,7 @@ def build_arm(
         )
         current = ""
     status: dict[str, object] = {"schema_version": 1, "pid": 999_999_999, "state": "stopped"}
-    if stage in ("graduated", "discarded", "no_deliverable", "deadline"):
+    if stage in ("graduated", "discarded", "no_deliverable", "deadline", "environment_blocked"):
         status["state"] = "completed"
     elif stage == "broken":
         status["state"] = "failed"

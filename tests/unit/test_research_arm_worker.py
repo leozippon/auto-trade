@@ -989,6 +989,98 @@ def test_the_llm_session_validates_a_multi_year_span_is_refused_by_the_gate_and_
         assert later not in read
 
 
+def test_a_span_the_host_cannot_replay_ends_the_arm_environment_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synthetic_provider, capsys
+):
+    """Round 20261015 through the real worker: every replay crossing into Y2
+    fails in the host's as-of merge. The session validates Y1, then the full
+    span fails on the environment twice; the second ends the session without
+    another model call, and the arm ends ``environment_blocked`` -- not
+    ``no_deliverable`` -- with the host's reason in its ledger record, its
+    terminal status, the worker log and the console's attention line. No
+    replay follows and the arm is never incubated."""
+
+    import pyarrow as pa
+
+    from autotrade.environment.llm import ProviderResponse, ToolCall
+    from autotrade.pipelines import pit_backend
+    from autotrade.pipelines.ledger import require_incubable
+    from autotrade.webui.registry import summarize_experiment
+    from tests.unit.test_interactive_worker_local import _NominatingLLM, _NoShellRunner
+
+    real_evaluate = pit_backend.PITDailyEvaluationBackend.evaluate
+
+    def merge_breaks_past_y1(self, request, **kwargs):
+        if request.end > "20230630":
+            raise pa.ArrowTypeError(
+                "Unable to merge: Field dataset has incompatible types: large_string vs string"
+            )
+        return real_evaluate(self, request, **kwargs)
+
+    monkeypatch.setattr(pit_backend.PITDailyEvaluationBackend, "evaluate", merge_breaks_past_y1)
+
+    def validate(span: str) -> ProviderResponse:
+        return ProviderResponse(
+            tool_calls=(
+                ToolCall(
+                    f"valid_{span}",
+                    "batch_validate",
+                    {
+                        "span": span,
+                        "offline_trials": 0,
+                        "candidates": [
+                            {
+                                "name": "working_copy",
+                                "hypothesis": f"the working copy earns a positive neutralized excess over {span}",
+                                "path": "output",
+                                "control": False,
+                            }
+                        ],
+                    },
+                ),
+            )
+        )
+
+    repo, experiment = make_arm(
+        tmp_path, developer_mode="llm", research_start="20220701", max_replay_years=6
+    )
+    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
+    options = load_worker_options(experiment, repo_root=repo)
+    never = ProviderResponse(
+        tool_calls=(ToolCall("finish", "finish_session", {"outcome": "no_edge", "reason": "x" * 60}),)
+    )
+    llm = _NominatingLLM([validate("Y1"), validate("full"), validate("full"), never])
+    result = run_local_interactive_worker(
+        options, llm=llm, command_runner_factory=lambda _workspace: _NoShellRunner()
+    )
+
+    assert len(llm.calls) == 3
+    [record] = ExperimentLedger(options.rolling.ledger_path).read()
+    reason = record["reason"]
+    assert reason.startswith("span full: 2 batches failed on the environment in every candidate")
+    assert reason.endswith("ArrowTypeError: Unable to merge: Field dataset has incompatible types: large_string vs string")
+    assert (record["outcome"], record["finish_reason"], record["frozen"]) == (
+        "environment_blocked",
+        "environment_blocked",
+        None,
+    )
+    assert record["arm_end"] == {"status": "environment_blocked", "reason": reason}
+    assert [step["span"] for step in record["steps"]] == ["Y1"]
+    # The failed batches were refunded: only Y1's replay-year was spent.
+    assert record["budget_used"]["replay_years"] == 1
+    verdict = {"status": "environment_blocked", "reasons": [reason]}
+    assert result["verdict"] == verdict
+    assert read_status(experiment / "hitl" / "status.json")["verdict"] == verdict
+    assert f"arm environment_blocked: {reason}" in capsys.readouterr().err
+    assert all(item[0] != "heldout" for item in synthetic_provider.requests)
+    with pytest.raises(ValueError, match="only an arm whose verdict is no_deliverable or discarded"):
+        require_incubable([record])
+    row = summarize_experiment(experiment)
+    assert row["ending"] == {"state": "environment_blocked", "reason": reason}
+    assert row["attention"] == {"reason": reason}
+    assert row["research_outcome"] == "environment_blocked"
+
+
 def test_a_readme_edit_stops_a_new_session_and_not_one_already_seeded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

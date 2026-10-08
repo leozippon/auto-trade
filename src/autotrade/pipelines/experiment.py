@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import re
+import sys
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -75,6 +76,7 @@ from .config import (
 )
 from .incubation import entry_screen, forward_screen, incubation_boards
 from .ledger import (
+    ENVIRONMENT_BLOCKED,
     FORWARD_SESSION_KEY,
     FORWARD_STAGE,
     INCUBATION_RECORD_TYPE,
@@ -447,6 +449,15 @@ class RollingExperimentPipeline:
                     }
             elif session.outcome == "no_edge":
                 arm_end = {"status": "no_deliverable", "reason": f"no_edge: {session.reason}"}
+            elif session.outcome == ENVIRONMENT_BLOCKED:
+                arm_end = {"status": ENVIRONMENT_BLOCKED, "reason": session.reason}
+                # The worker log is the operator's other place to see it.
+                print(
+                    f"{utc_now_iso()} {attempt['experiment_id']} {ENVIRONMENT_BLOCKED}: "
+                    f"{session.reason}",
+                    file=sys.stderr,
+                    flush=True,
+                )
             else:
                 arm_end = {
                     "status": "no_deliverable",

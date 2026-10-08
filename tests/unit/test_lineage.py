@@ -116,12 +116,12 @@ def _row(directory: Path, index: int, *, seed: int, loading: float, span: str = 
 
 
 def _arm(root: Path, experiment_id: str, rows, *, research=(RESEARCH_START, RESEARCH_END),
-         forward: bool = False, pack: str = "") -> Path:
+         forward: bool = False, pack: str = "", arm_end: str = "no_deliverable") -> Path:
     """An arm whose one research session recorded ``rows`` (``_row`` keywords).
 
     ``forward`` adds what a frozen arm goes on to write: a ``forward`` record
     naming a replay that runs past research end. ``pack`` is the reference
-    pack it mounted.
+    pack it mounted; ``arm_end`` the status an unfrozen arm ended with.
     """
 
     directory = root / experiment_id
@@ -144,7 +144,7 @@ def _arm(root: Path, experiment_id: str, rows, *, research=(RESEARCH_START, RESE
             "run_id": f"run_{experiment_id}",
             "session_key": "research",
             "steps": [_row(directory, index, **kwargs) for index, kwargs in enumerate(rows)],
-            "arm_end": None if forward else {"status": "no_deliverable", "reason": "no_edge"},
+            "arm_end": None if forward else {"status": arm_end, "reason": "no_edge"},
             "frozen": {"artifact_id": "strategy_research_x"} if forward else None,
         }
     )
@@ -467,6 +467,9 @@ def test_a_lineage_arm_that_cannot_be_one_is_refused_by_name(tmp_path: Path) -> 
     _arm(root, "ok", [{"seed": 1, "loading": 0.5}])
     _arm(root, "controls_only", [{"seed": 2, "loading": 0.5, "control": True}])
     _arm(root, "four_years_earlier", [{"seed": 3, "loading": 0.5}], research=("20200701", "20240630"))
+    # Its trials are real Validations, but the host stopped the search they
+    # belong to: no lineage counts them.
+    _arm(root, "blocked", [{"seed": 5, "loading": 0.5}], arm_end="environment_blocked")
     leaky = _arm(root, "leaky", [{"seed": 4, "loading": 0.5}])
     sidecar = leaky / "artifacts/results/valid_000" / STYLE_ARTIFACT_NAME
     payload = json.loads(sidecar.read_text(encoding="utf-8"))
@@ -480,6 +483,7 @@ def test_a_lineage_arm_that_cannot_be_one_is_refused_by_name(tmp_path: Path) -> 
             "lineage arm four_years_earlier researched 20200701..20240630, not this arm's 20210701..20250630",
         ),
         (["controls_only"], "lineage arm controls_only has no recorded non-control trial"),
+        (["ok", "blocked"], "lineage arm blocked ended environment_blocked"),
         (["leaky"], "lineage arm leaky revision revision_leaky_0 has days outside the research period"),
     ):
         with pytest.raises(ValueError, match=re.escape(message)):

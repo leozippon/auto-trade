@@ -21,7 +21,7 @@ from autotrade.environment.strategy import StrategySchedule
 
 from . import verdict
 from .calendar import FULL_SPAN, ResearchGeometry
-from .ledger import RESEARCH_SESSION_KEY
+from .ledger import ENVIRONMENT_BLOCKED, RESEARCH_SESSION_KEY
 from .skills import DEFAULT_OPERATING_MEMORY
 
 ExecutionMode = Literal["sandbox", "trusted"]
@@ -976,10 +976,12 @@ class SessionResume:
 
 
 # How the research session ended. ``freeze`` nominates a node for the freeze
-# gate, ``no_edge`` ends the arm without a deliverable, and ``deadline`` is a
+# gate, ``no_edge`` ends the arm without a deliverable, ``deadline`` is a
 # session whose budget (the wrap-up grace or the model-call budget) ran out
-# before it finished.
-SESSION_OUTCOMES = ("freeze", "no_edge", "deadline")
+# before it finished, and ``environment_blocked`` one the host ended because
+# its replays on one span kept failing on the environment
+# (``session_tools.EnvironmentBlocked``).
+SESSION_OUTCOMES = ("freeze", "no_edge", "deadline", ENVIRONMENT_BLOCKED)
 
 
 @dataclass(frozen=True)

@@ -1179,6 +1179,28 @@ BATCH_REJECTION_CHARGE_AFTER = 6
 # instead of charging research budget for the environment's own trouble.
 BATCH_FAILURE_STRATEGY = "strategy"
 BATCH_FAILURE_ENVIRONMENT = "environment"
+# A span the host cannot replay. The refund makes a batch that failed on the
+# environment free to resend, which is right for a transient fault (a clock
+# lost to load, a card another process took) and leaves nothing to stop the
+# loop when the host fails the span every time: in round 20261015 every replay
+# crossing 2022-07-01 failed in the host's as-of merge, and two arms resent 6
+# and 4 such batches (2.1 h and 1.5 h of wall time) and ended ``no_edge``,
+# although nothing past that date had been tested.
+# A batch in which every candidate failed on the environment measured nothing;
+# the second such batch on the same span in one attempt ends the session
+# (outcome ``environment_blocked``). A batch in which any candidate completed or
+# raised in its own code proved the span runs, and does not count.
+ENVIRONMENT_BLOCKED_BATCHES = 2
+
+
+class EnvironmentBlocked(SessionInterrupt):
+    """The host failed every candidate of ``ENVIRONMENT_BLOCKED_BATCHES``
+    batches on one span: the research session ends here with outcome
+    ``environment_blocked`` and ``reason`` as the arm's ending reason."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"environment_blocked: {reason}")
+        self.reason = reason
 
 
 def _failure_cause(error: BaseException | None) -> str:
@@ -1572,6 +1594,9 @@ class BatchValidateTool(SessionTimeBudgetAware):
         # Per-session rejection counter, keyed by signature. Not persisted:
         # the loop it bounds is one session's retry loop.
         self._rejections: dict[tuple[str, str], int] = {}
+        # Batches whose every candidate failed on the environment, per span
+        # label; per attempt like the rejection counter.
+        self._environment_failed: dict[str, int] = {}
 
     @property
     def session_time_budget(self) -> InferenceTimeBudget:
@@ -1685,6 +1710,8 @@ class BatchValidateTool(SessionTimeBudgetAware):
             row["selection_statistics"] = self.backtest.selection_statistics(step)
         if not recorded:
             charged = len(rows) - refunded
+            if refunded == len(rows):
+                self._environment_blocked(span, rows)
             # The trial family reads a batch's declaration from its recorded
             # Validations, so a batch that recorded none counted none of it.
             raise ToolError(
@@ -1731,6 +1758,27 @@ class BatchValidateTool(SessionTimeBudgetAware):
                 ),
             },
         )
+
+    def _environment_blocked(
+        self, span: ReplaySpan, rows: Sequence[Mapping[str, object]]
+    ) -> None:
+        """Count a batch the environment failed whole on ``span``; raise
+        :class:`EnvironmentBlocked` once the span reaches the threshold."""
+
+        count = self._environment_failed.get(span.label, 0) + 1
+        self._environment_failed[span.label] = count
+        if count < ENVIRONMENT_BLOCKED_BATCHES:
+            return
+        reason = (
+            f"span {span.label}: {count} batches failed on the environment in every "
+            f"candidate; last error: {rows[-1]['error']}"
+        )
+        if self._trace_emit is not None:
+            self._trace_emit(
+                "environment_blocked",
+                {"tool": "batch_validate", "span": span.label, "batches": count, "reason": reason},
+            )
+        raise EnvironmentBlocked(reason)
 
     # ---- input ----
 

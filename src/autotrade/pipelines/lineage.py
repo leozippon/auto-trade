@@ -38,7 +38,12 @@ from .experiment import (
     trial_family,
 )
 from .hitl_state import read_json
-from .ledger import LINEAGE_SERIES_NAME, ExperimentLedger
+from .ledger import (
+    ENVIRONMENT_BLOCKED,
+    LINEAGE_SERIES_NAME,
+    ExperimentLedger,
+    experiment_verdict,
+)
 from .verdict import neutral_daily
 
 _ARM_ID = re.compile(r"[A-Za-z0-9_-]+")
@@ -72,8 +77,10 @@ def extract_lineage(
     naming the arm that cannot be one.
 
     A lineage arm must exist, have researched exactly this research period,
-    still hold the revisions that identify its trials and have recorded at
-    least one non-control trial. Per arm: its trial family
+    not have ended ``environment_blocked`` (the host stopped its research, so
+    its trials are no search anyone completed), still hold the revisions that
+    identify its trials and have recorded at least one non-control trial. Per
+    arm: its trial family
     (``experiment.trial_family`` over its research session's Validations,
     fingerprinted from its own revision store, so the same bytes on two spans
     are one trial, controls are left out and declared offline screens count,
@@ -103,11 +110,15 @@ def extract_lineage(
                 f"lineage arm {arm} researched {period[0]}..{period[1]}, not this arm's "
                 f"{research_start}..{research_end}"
             )
-        try:
-            rows = fingerprinted(
-                directory,
-                _recorded_steps(ExperimentLedger(directory / "ledgers" / "experiment_ledger.jsonl").read()),
+        records = ExperimentLedger(directory / "ledgers" / "experiment_ledger.jsonl").read()
+        verdict = experiment_verdict(records)
+        if verdict is not None and verdict["status"] == ENVIRONMENT_BLOCKED:
+            raise ValueError(
+                f"lineage arm {arm} ended {ENVIRONMENT_BLOCKED}: the host stopped its "
+                "research, so its trials are not a lineage"
             )
+        try:
+            rows = fingerprinted(directory, _recorded_steps(records))
         except FileNotFoundError as exc:
             # An arm whose revisions were not kept cannot name its trials.
             raise ValueError(f"lineage arm {arm}: {exc}") from exc

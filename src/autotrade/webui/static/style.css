@@ -465,6 +465,18 @@ main {
  background: var(--chip-bg);
  color: var(--muted);
 }
+/* An arm the host ended on the environment is no research outcome: it wears
+   the warning colour, as does the card's attention line. */
+.badge.ending-environment_blocked {
+ background: var(--warn-soft);
+ color: var(--warn);
+}
+.attention {
+ color: var(--warn);
+ font-size: 0.875rem;
+ line-height: 1.55;
+ overflow-wrap: anywhere;
+}
 /* The ending's reason: one quiet line under the badge on the experiment page.
    In the page heading it belongs to the title above it, so it takes a row of
    its own under the badge instead of closing the heading's gap. */

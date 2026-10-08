@@ -108,9 +108,15 @@ from .config import (
     StepResult,
 )
 from .experiment import trial_family, trial_fields
-from .ledger import RESEARCH_STAGE, ExperimentLedger, lineage_record
+from .ledger import (
+    ENVIRONMENT_BLOCKED,
+    RESEARCH_STAGE,
+    ExperimentLedger,
+    lineage_record,
+)
 from .session_tools import (
     BatchValidateTool,
+    EnvironmentBlocked,
     NullControlTool,
     SessionValidations,
     SmokeBacktestTool,
@@ -1245,6 +1251,12 @@ class LLMResearchDeveloper:
             conversation_id = exc.conversation_id
             outcome, node_id, replicates, reason = "deadline", None, (), ""
             finish_reason = exc.finish_reason
+        except EnvironmentBlocked as exc:
+            # The host ended the session: its replays on one span kept failing
+            # on the environment, so the arm ends on that, not on research.
+            conversation_id = runner.conversation_id
+            outcome, node_id, replicates, reason = ENVIRONMENT_BLOCKED, None, (), exc.reason
+            finish_reason = ENVIRONMENT_BLOCKED
         return conversation_id, outcome, node_id, replicates, reason, finish_reason
 
     def _collect_result(

@@ -93,7 +93,8 @@ def test_every_outcome_maps_to_the_pipeline_outcome_it_names(tmp_path: Path):
         "freeze": registry.invoke("finish_session", {"outcome": "freeze", "node_id": winner}),
         "no_edge": registry.invoke("finish_session", {"outcome": "no_edge", "reason": REASON}),
     }
-    assert set(results) == set(SESSION_OUTCOMES) - {"deadline"}
+    # The other two are the host's: a spent budget, a span it cannot replay.
+    assert set(results) == set(SESSION_OUTCOMES) - {"deadline", "environment_blocked"}
     mapped = {name: _session_outcome(result.value) for name, result in results.items()}
     assert mapped == {
         "freeze": ("freeze", winner, ""),

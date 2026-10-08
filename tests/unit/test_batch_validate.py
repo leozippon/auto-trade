@@ -94,6 +94,7 @@ from autotrade.pipelines.session_tools import (
     BATCH_VALIDATE_MAX_CONCURRENCY,
     BUDGET_SPENT_NOTE,
     BatchValidateTool,
+    EnvironmentBlocked,
     NullControlTool,
     SessionValidations,
     another_batch_round_fits,
@@ -1882,6 +1883,64 @@ def _annualized_ir(neutral: pd.Series) -> float:
         float((residual**2).sum()) / (len(neutral) - 3) * TRADING_DAYS_PER_YEAR
     )
     return round(float(neutral.mean()) * TRADING_DAYS_PER_YEAR, 4) / tracking
+
+
+class EnvironmentBlockedTest(unittest.TestCase):
+    """A span the host fails in every candidate, twice, ends the session.
+
+    The refund makes resending a batch the environment failed free, which is
+    right once and wrong forever: in round 20261015 two arms resent batches
+    on spans the host could never replay until their sessions ran out.
+    """
+
+    def test_the_second_batch_failed_whole_on_one_span_ends_the_session(self) -> None:
+        trace: list[tuple[str, dict[str, object]]] = []
+        with TemporaryDirectory() as tmp:
+            session = _Session(Path(tmp), fail_markers=("999",), trace=trace)
+            session.candidate("blocked", _strategy("999"))
+            session.candidate("good", _strategy("1"))
+            # The first is refunded and reported like any failed batch.
+            with self.assertRaises(ToolError):
+                session.call("blocked")
+            # Neither another span nor a batch in which a candidate completed
+            # on this span is a second one: that batch proved the span runs.
+            with self.assertRaises(ToolError):
+                session.call("blocked", span="Y1")
+            self.assertTrue(session.call("good", "blocked").ok)
+            with self.assertRaises(EnvironmentBlocked) as caught:
+                session.call("blocked")
+            reason = caught.exception.reason
+            self.assertTrue(
+                reason.startswith(
+                    "span full: 2 batches failed on the environment in every candidate; "
+                    "last error: daily Validation failed: "
+                ),
+                reason,
+            )
+            self.assertIn("generate_orders exceeded 30s (999)", reason)
+            # The batch that ended it settled first: refunded, dead end kept.
+            self.assertEqual(session.backtest.replay_years_used, 4)
+            dead_ends = [node for node in session.tree.nodes() if node.get("status") == "failed"]
+            self.assertEqual(
+                [node["metadata"]["span"] for node in dead_ends], ["full", "Y1", "full", "full"]
+            )
+            self.assertEqual({node["metadata"]["cause"] for node in dead_ends}, {"environment"})
+            self.assertEqual(
+                [payload for event, payload in trace if event == "environment_blocked"],
+                [{"tool": "batch_validate", "span": "full", "batches": 2, "reason": reason}],
+            )
+
+    def test_a_batch_with_a_candidate_that_raised_in_its_own_code_never_counts(self) -> None:
+        with TemporaryDirectory() as tmp:
+            session = _Session(Path(tmp), fail_markers=("999",), strategy_fail_markers=("777",))
+            session.candidate("slow", _strategy("999"))
+            session.candidate("raised", _strategy("777"))
+            # The strategy's own exception means the host ran the span up to
+            # the strategy's code: the span is not blocked, however often.
+            for _ in range(3):
+                with self.assertRaises(ToolError):
+                    session.call("slow", "raised")
+            self.assertEqual(session.backtest.replay_years_used, 12)
 
 
 class DailySeriesTest(unittest.TestCase):

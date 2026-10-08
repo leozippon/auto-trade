@@ -20,6 +20,11 @@ from fastapi.testclient import TestClient
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import write_json_atomic
 from autotrade.environment.step_tree import StepTree
+from autotrade.environment.tools.report_issue import (
+    append_issue_report,
+    append_issue_resolution,
+    issue_reports_path,
+)
 from autotrade.pipelines.config import DEFAULT_RESEARCH_GEOMETRY, RETIRED_SWITCHES
 from autotrade.pipelines.ledger import ExperimentLedger, verdict_void
 from autotrade.webui import registry
@@ -32,7 +37,13 @@ from autotrade.webui.registry import (
 )
 from autotrade.webui.server import create_app
 from autotrade.webui.steps import step_tree_view
-from tests.unit.webui_research_arm import REPLAY, _session_record, _step, build_arm
+from tests.unit.webui_research_arm import (
+    ENVIRONMENT_BLOCKED_REASON,
+    REPLAY,
+    _session_record,
+    _step,
+    build_arm,
+)
 
 
 def _records(directory: Path) -> list[dict[str, object]]:
@@ -224,6 +235,7 @@ def test_every_way_an_arm_can_end_reads_as_one_ending_with_a_reason(tmp_path: Pa
         ("rejected", "discarded"),
         ("no_edge", "no_deliverable"),
         ("budget_exhausted", "deadline"),
+        ("environment_blocked", "environment_blocked"),
         ("broken", "broken"),
         ("running", "research"),
     ):
@@ -252,6 +264,8 @@ def test_every_way_an_arm_can_end_reads_as_one_ending_with_a_reason(tmp_path: Pa
     assert rows["graduated"]["paper_candidate"] is not None
     assert endings["no_edge"]["reason"] == "没有候选值得冻结"
     assert endings["budget_exhausted"]["reason"] == "模型调用次数用尽"
+    # The host's reason in full, its error included: that is what to act on.
+    assert endings["environment_blocked"]["reason"] == ENVIRONMENT_BLOCKED_REASON
     assert endings["broken"]["reason"] == "RuntimeError: sandbox image is gone"
     # The homepage lists what can still run first, then the endings in order.
     listed = [row["experiment_id"] for row in list_experiments(tmp_path)]
@@ -259,6 +273,51 @@ def test_every_way_an_arm_can_end_reads_as_one_ending_with_a_reason(tmp_path: Pa
     assert "running" in listed[: -len(ENDING_STATES)]
     # The detail page reads the same projection as the card.
     assert experiment_detail(tmp_path, "no_edge")["ending"] == endings["no_edge"]
+
+
+def test_the_home_list_flags_a_blocked_arm_and_an_unresolved_issue(tmp_path: Path) -> None:
+    """Two things put an attention line on an arm's card and nothing else
+    does: the host ending its session on the environment, and an issue report
+    its session filed that nobody has resolved while the arm can still run.
+    Resolving the report clears the line even on a row the listing keeps
+    without re-reading, and an arm that ended no longer carries its reports."""
+
+    build_arm(tmp_path, "blocked", "environment_blocked")
+    stopped = build_arm(tmp_path, "stopped", "research")
+    ended = build_arm(tmp_path, "ended", "no_deliverable")
+
+    def attention() -> dict[str, object]:
+        rows = {row["experiment_id"]: row for row in list_experiments(tmp_path)}
+        return {name: rows[name]["attention"] for name in ("blocked", "stopped", "ended")}
+
+    assert attention() == {
+        "blocked": {"reason": ENVIRONMENT_BLOCKED_REASON},
+        "stopped": None,
+        "ended": None,
+    }
+    summary = "五年种子在 2022-07-01 之后的回放全部失败。证据见下。"
+    report = append_issue_report(
+        issue_reports_path(stopped),
+        {"report_id": "issue_a", "category": "data", "summary": summary, "evidence": "e"},
+    )
+    append_issue_report(
+        issue_reports_path(ended),
+        {"report_id": "issue_b", "category": "data", "summary": summary, "evidence": "e"},
+    )
+    flagged = attention()
+    assert flagged["stopped"] == {"reason": "1 条问题报告未处置：五年种子在 2022-07-01 之后的回放全部失败"}
+    assert flagged["ended"] is None
+    append_issue_resolution(
+        issue_reports_path(stopped), report_id=str(report["report_id"]), outcome="fixed", note="seed rebuilt"
+    )
+    assert attention()["stopped"] is None
+    # The card draws the line; the ending keeps its own badge and colour.
+    static = Path(__file__).resolve().parents[2] / "src/autotrade/webui/static"
+    script = (static / "app.js").read_text(encoding="utf-8")
+    card = script.split("function experimentCard(", 1)[1].split("\nfunction ", 1)[0]
+    assert "attentionLine(item)" in card
+    assert "item.attention" in script.split("function attentionLine(", 1)[1].split("\nfunction ", 1)[0]
+    assert ".badge.ending-environment_blocked" in (static / "style.css").read_text(encoding="utf-8")
 
 
 def test_a_withdrawn_graduation_reads_as_a_failure_everywhere(tmp_path: Path) -> None:

@@ -92,6 +92,15 @@ INCUBATION_FIELDS = (
     "forward_reading",
     "screen",
 )
+# How a research session ends the arm without a freeze (``arm_end.status``).
+# ``no_deliverable`` is a research outcome: the Agent's no_edge, a spent budget,
+# a nomination the freeze gate refused. ``environment_blocked`` is not one: the
+# host kept failing the session's replays on one span and ended the session
+# (``session_tools.EnvironmentBlocked``), so nothing there was tested. Such an
+# arm is never incubated, is refused as a lineage arm
+# (``lineage.extract_lineage``) and is flagged on the console's home list.
+ENVIRONMENT_BLOCKED = "environment_blocked"
+ARM_END_STATUSES = ("no_deliverable", ENVIRONMENT_BLOCKED)
 # The verdicts an arm can be incubated from: research is over, nothing graduated.
 INCUBABLE_VERDICTS = ("no_deliverable", "discarded")
 PIPELINE_RECORD_TYPES = (
@@ -280,8 +289,9 @@ def experiment_verdict(
     records: Sequence[Mapping[str, object]],
 ) -> dict[str, object] | None:
     """The arm's verdict: ``graduated``/``discarded`` from its forward record,
-    ``voided`` when an operator withdrew that graduation, ``no_deliverable``
-    when research ended without a freeze, else None.
+    ``voided`` when an operator withdrew that graduation, the ``arm_end``
+    status (:data:`ARM_END_STATUSES`) when research ended without a freeze,
+    else None.
 
     The single source for the terminal status, the console, the graduated
     memory tier and Paper: a voided arm is terminal, is no graduate to any of
@@ -316,10 +326,10 @@ def experiment_verdict(
     if ended is None:
         return None
     arm_end = ended["arm_end"]
-    return {
-        "status": "no_deliverable",
-        "reasons": [str(arm_end.get("reason") or "") if isinstance(arm_end, Mapping) else ""],
-    }
+    status = arm_end.get("status") if isinstance(arm_end, Mapping) else None
+    if not isinstance(arm_end, Mapping) or status not in ARM_END_STATUSES:
+        raise ValueError(f"research session record ends the arm with an unknown status {status!r}")
+    return {"status": status, "reasons": [str(arm_end.get("reason") or "")]}
 
 
 def paper_candidate(records: Sequence[Mapping[str, object]]) -> dict[str, object] | None:

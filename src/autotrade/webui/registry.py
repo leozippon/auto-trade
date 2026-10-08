@@ -28,6 +28,11 @@ from pathlib import Path
 
 from autotrade.agent.runner import DEADLINE_GRACE_EXHAUSTED, LLM_CALL_BUDGET_EXHAUSTED
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME, STYLE_SCHEMA_VERSION
+from autotrade.environment.tools.report_issue import (
+    ISSUE_REPORTS_NAME,
+    issue_reports_path,
+    read_issue_reports,
+)
 from autotrade.pipelines.agent_inbox import INBOX_NAME, inbox_public_view
 from autotrade.pipelines.calendar import FULL_SPAN
 from autotrade.pipelines.config import AcceptanceRules, acceptance_for
@@ -45,6 +50,7 @@ from autotrade.pipelines.hitl_state import (
     status_pid_alive,
 )
 from autotrade.pipelines.ledger import (
+    ENVIRONMENT_BLOCKED,
     RESEARCH_SESSION_KEY,
     ExperimentLedger,
     experiment_verdict,
@@ -98,7 +104,16 @@ STAGES = ("research", "forward", "verdict")
 # outcomes) never have to be read twice into the same three blurred endings. A
 # graduation an operator withdrew afterwards (``ledger.verdict_void``) is a
 # failure and ends as ``rejected``; its reason says the graduation was withdrawn.
-ENDING_STATES = ("graduated", "rejected", "no_edge", "budget_exhausted", "broken")
+# An arm whose session the host ended on the environment (``environment_blocked``)
+# is no research outcome and keeps that word of its own.
+ENDING_STATES = (
+    "graduated",
+    "rejected",
+    "no_edge",
+    "budget_exhausted",
+    ENVIRONMENT_BLOCKED,
+    "broken",
+)
 _ENDING_ORDER = {state: index for index, state in enumerate(ENDING_STATES)}
 # Which graduation criterion each failed verdict token is, as the verdict's
 # own condition table numbers them: a rejected arm's reason names the criteria
@@ -304,7 +319,8 @@ def arm_ending(
     the operator withdrew as a refusal whose reason says so with the void's
     first sentence, and an arm that never reached a replay by how its research
     session ended — the Agent's own ``no_edge``, an exhausted budget, or a
-    nomination the freeze gate refused.
+    nomination the freeze gate refused — and one whose session the host ended
+    on the environment by the host's own reason.
     """
 
     if str(state.get("state") or "") == "failed":
@@ -340,6 +356,13 @@ def arm_ending(
             for token in verdict.get("reasons") or ()
         )
         return {"state": "rejected", "reason": " · ".join(codes)}
+    if verdict["status"] == ENVIRONMENT_BLOCKED:
+        # The host's reason names the span and the error, like a broken
+        # worker's: the error is what the operator acts on, so it is not cut.
+        reasons = verdict.get("reasons")
+        text = str(reasons[0]) if isinstance(reasons, list) and reasons else ""
+        line = identity.public_text(text).splitlines()
+        return {"state": ENVIRONMENT_BLOCKED, "reason": line[0] if line else ""}
     session = _mapping(
         next((row for row in research_records(records) if row.get("arm_end")), None)
     )
@@ -350,6 +373,32 @@ def arm_ending(
         finish = str(session.get("finish_reason") or "")
         return {"state": "budget_exhausted", "reason": _BUDGET_EXHAUSTED.get(finish, finish)}
     return {"state": "rejected", "reason": "提名未通过冻结门"}
+
+
+def arm_attention(
+    identity: PublicIdentity, directory: Path, ending: Mapping[str, object] | None
+) -> dict[str, str] | None:
+    """What the home list flags for the operator on this arm, as one line, or
+    ``None``.
+
+    Two things raise it and nothing else does: an arm the host ended on the
+    environment, which needs a fix and a re-run rather than a reading, and an
+    arm that can still run while an issue report its session filed is
+    unresolved -- until ``scripts/experiments/resolve_issue.py`` answers it or
+    the arm ends.
+    """
+
+    if ending is not None:
+        return {"reason": str(ending["reason"])} if ending["state"] == ENVIRONMENT_BLOCKED else None
+    try:
+        reports = read_issue_reports(issue_reports_path(directory))
+    except (OSError, ValueError):
+        return {"reason": "问题报告无法读取"}
+    unresolved = [report for report in reports if "resolved_at" not in report]
+    if not unresolved:
+        return None
+    summary = _reason_line(identity.public_text(str(unresolved[-1].get("summary") or "")))
+    return {"reason": f"{len(unresolved)} 条问题报告未处置：{summary}"}
 
 
 def _result_name(reference: object) -> str | None:
@@ -432,6 +481,7 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
             summary["status"] = status
         best = _research_best(directory, records, running=bool(state.get("worker_alive")))
         forward = _forward_view(identity, forward_record(records))
+        ending = arm_ending(identity, records, state, forward)
         summary.update(
             {
                 "created_at": _created_at(directory, params),
@@ -446,7 +496,8 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                 "budget": _budget_totals(params),
                 "budget_used": _budget_used(directory, records, raw_status),
                 "verdict": _verdict_view(identity, records),
-                "ending": arm_ending(identity, records, state, forward),
+                "ending": ending,
+                "attention": arm_attention(identity, directory, ending),
                 "forward": forward,
                 "paper_candidate": _paper_candidate_view(directory, records),
             }
@@ -525,14 +576,16 @@ def _ending_rank(row: Mapping[str, object]) -> int:
 
 
 # While no worker is alive a listing row is a function of a few files: the
-# status, the ledger, the params, the public-identity map and whether the
-# worker log exists. The home page polls the listing every 5 s over every
-# experiment ever created, so such a row is kept per process and re-derived
-# only when one of those files changes; a row with a live worker, or one still
-# launching (its state ages), is derived on every poll.
+# status, the ledger, the issue reports (resolving one clears the row's
+# attention line), the params, the public-identity map and whether the worker
+# log exists. The home page polls the listing every 5 s over every experiment
+# ever created, so such a row is kept per process and re-derived only when one
+# of those files changes; a row with a live worker, or one still launching (its
+# state ages), is derived on every poll.
 _SUMMARY_SOURCES = (
     f"{HITL_DIR_NAME}/{STATUS_NAME}",
     "ledgers/experiment_ledger.jsonl",
+    f"ledgers/{ISSUE_REPORTS_NAME}",
     f"{HITL_DIR_NAME}/{PARAMS_NAME}",
     ".host/agent-refs.json",
 )

@@ -24,6 +24,7 @@ const OUTCOME_LABELS = {
   freeze: "提名冻结",
   no_edge: "未发现超额",
   deadline: "预算耗尽",
+  environment_blocked: "环境阻断",
 };
 // How an arm ended (webui/registry.py ENDING_STATES). The server classifies
 // the ending and writes its one-line reason; the console only words it, and
@@ -35,6 +36,7 @@ const ENDING_LABELS = {
   rejected: "未通过",
   no_edge: "未发现超额",
   budget_exhausted: "预算耗尽",
+  environment_blocked: "环境阻断",
   broken: "失败",
 };
 // The way a Paper book came in (paper/book.py candidate_source), and where its
@@ -1741,6 +1743,7 @@ const ENDING_STEP_STATES = {
   rejected: "failed",
   no_edge: "ended",
   budget_exhausted: "ended",
+  environment_blocked: "ended",
   broken: "ended",
 };
 
@@ -2044,6 +2047,14 @@ function endingReason(item) {
   return reason ? el("div", { class: "ending-reason" }, reason) : null;
 }
 
+/* What the operator has to look at on this arm (webui/registry.py
+   arm_attention): an arm the host ended on the environment, or an unresolved
+   issue report of an arm that can still run. One flagged line on the card. */
+function attentionLine(item) {
+  const reason = (item.attention || {}).reason;
+  return reason ? el("div", { class: "attention" }, `需关注 · ${reason}`) : null;
+}
+
 /* A long experiment id must not reflow the heading: the name takes one
    elastic column and truncates, the badges keep their own column, so every
    card's badges line up on the same edge. The full id stays in the tooltip. */
@@ -2205,6 +2216,7 @@ function experimentCard(item) {
       experimentBadges(armBadge(item)),
     ),
     item.error ? el("div", { class: "meta-line" }, item.error) : null,
+    attentionLine(item),
     readable ? pipelineStepper(item) : null,
     readable && item.worker_alive
       ? activityNode(item.status, { className: "activity meta-line", fraction: false })
