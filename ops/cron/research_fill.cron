@@ -7,7 +7,12 @@
 # pending ones in file order, through the same validation the operator gets
 # from `--dry-run`; a local arm the local-model limit holds, or a GPU arm too
 # few free cards hold, stays pending and the arms behind it go ahead. The next
-# file reads the slots afresh, so it takes what the earlier ones left. Nothing
+# file reads the slots afresh, so it takes what the earlier ones left. An arm
+# whose PIT view seed is still being prebuilt stays pending too, and is created
+# by the first run after the prebuild reports status ok. Before an arm is
+# created its starter is replayed on its seed (`_round.smoke`, recorded under
+# logs/research/smoke/), so the run that creates it can take tens of minutes;
+# `flock -n` keeps the later runs out meanwhile. Nothing
 # pending or nothing free is the steady state and exits 0; a refused creation
 # in any file makes the run exit non-zero with its reason in the log, and the
 # files after it still fill. The operator tops the queue up by appending arms
@@ -21,7 +26,7 @@ CRON_TZ=Asia/Shanghai
 REPO_ROOT=/Data2/lzp/ADMCubeQuant
 QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # The queue's round files, filled in this order; separated by spaces.
-ROUNDS=scripts/experiments/create_round_20261015.py
+ROUNDS=scripts/experiments/create_round_20261008b.py
 
 # Every ten minutes, all day: a slot that frees up stays empty for at most that
 # long, and research arms end at no particular hour. One run takes seconds per

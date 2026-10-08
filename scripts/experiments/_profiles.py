@@ -149,6 +149,11 @@ FIVE_YEAR_100K: dict[str, object] = {**FUND_EIGHT_YEAR_100K, **FIVE_YEAR}
 # Its seed, prebuilt from release b5dc339b708d4a0ba962805828e973af
 # (logs/data/seed_5y_full_20261015/).
 FIVE_YEAR_PIT_VIEWS_SEED = "data/pit_views_seed_research_5y_full_20261015"
+# That seed typed some events columns two ways (string beside large_string),
+# so every replay crossing 2022-07-01 failed
+# (logs/notes/review_20261008/asof_partition_defect.md); this is its rebuild
+# for the same selection after the fix (logs/data/seed_5y_full_20261016/).
+FIVE_YEAR_FIXED_PIT_VIEWS_SEED = "data/pit_views_seed_research_5y_full_20261016"
 
 # The hosted arm of a pair: main session, sub-agents and compaction on MiMo, the
 # compaction threshold pinned to the local arms' value so both compact alike.
@@ -237,6 +242,9 @@ COMMITMENT_LINEAGE = [*TITLE_LINEAGE, "incdraft2_100k_8y_qwen_20261013"]
 # and `esop60` (open_commit_100k_8y_qwen_20261014), the fixed sleeves of round
 # 20261015's ensemble arm.
 SLEEVE_LINEAGE = [*COMMITMENT_LINEAGE, "open_commit_100k_8y_qwen_20261014"]
+# Plus round 20261015's ensemble arm, which searched a third sleeve beside the
+# same two and closed: the lineage of a later sleeve search (round 20261008b).
+ENSEMBLE_LINEAGE = [*SLEEVE_LINEAGE, "open_ensemble_100k_8y_qwen_20261015"]
 
 # Every arm that searched the fundamentals domain over the eight years as a
 # source of its own edge and recorded a non-control trial (rounds 20261005 to

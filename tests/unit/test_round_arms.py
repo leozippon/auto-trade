@@ -92,11 +92,13 @@ def _synthetic_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rnd: Round)
     they all name, which reaches the round's Held-out and holds benchmark
     history back to the backfill floor, as the lake now does; a tree needs
     nothing else for the create-time pre-flight to accept it. Every arm's
-    reference pack exists, as the repository holds them. Returns the round's
-    tree.
+    reference pack exists, as the repository holds them, and its starter's
+    smoke passes (the replay needs the host's sandbox; the smoke step is
+    tested on its own below). Returns the round's tree.
     """
     monkeypatch.setattr(_round, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(_round, "EXPERIMENTS_ROOT", tmp_path / "experiments")
+    monkeypatch.setattr(_round, "smoke", lambda merged: "")
     configs = {}
     for experiment_id in (PROBE_ID, *rnd.arms):
         params = rnd.request_params(experiment_id)
@@ -504,7 +506,7 @@ def test_a_fill_creates_pending_arms_in_queue_order_up_to_the_free_slots(
         f"local-model slots 2/{MAX_RUNNING_LOCAL_EXPERIMENTS} in use (local_0, local_1), "
         f"{MAX_RUNNING_LOCAL_EXPERIMENTS - 2} free; GPUs 0 free (none); queue 3: "
         "1 skipped (created already), 1 created, 0 refused, 1 pending "
-        "(0 held by the local-model limit, 0 by the free GPUs)"
+        "(0 held by the local-model limit, 0 by the free GPUs, 0 by an unfinished seed)"
     )
 
 
@@ -517,7 +519,7 @@ def test_a_fill_creates_pending_arms_in_queue_order_up_to_the_free_slots(
             (),
             (
                 "0 skipped (created already), 0 created, 0 refused, 3 pending "
-                "(0 held by the local-model limit, 0 by the free GPUs)"
+                "(0 held by the local-model limit, 0 by the free GPUs, 0 by an unfinished seed)"
             ),
         ),
         (
@@ -526,7 +528,7 @@ def test_a_fill_creates_pending_arms_in_queue_order_up_to_the_free_slots(
             (),
             (
                 "0 skipped (created already), 0 created, 0 refused, 3 pending "
-                "(3 held by the local-model limit, 0 by the free GPUs)"
+                "(3 held by the local-model limit, 0 by the free GPUs, 0 by an unfinished seed)"
             ),
         ),
         (
@@ -535,7 +537,7 @@ def test_a_fill_creates_pending_arms_in_queue_order_up_to_the_free_slots(
             FILL_ARMS,
             (
                 "3 skipped (created already), 0 created, 0 refused, 0 pending "
-                "(0 held by the local-model limit, 0 by the free GPUs)"
+                "(0 held by the local-model limit, 0 by the free GPUs, 0 by an unfinished seed)"
             ),
         ),
     ],
@@ -584,7 +586,7 @@ def test_a_fill_holds_a_local_arm_at_the_local_limit_and_creates_the_hosted_one_
         f"local-model slots {MAX_RUNNING_LOCAL_EXPERIMENTS}/{MAX_RUNNING_LOCAL_EXPERIMENTS} in use "
         f"({', '.join(f'local_{index}' for index in range(MAX_RUNNING_LOCAL_EXPERIMENTS))}), 0 free; "
         "GPUs 0 free (none); queue 3: 0 skipped (created already), 1 created, 0 refused, "
-        "2 pending (2 held by the local-model limit, 0 by the free GPUs)"
+        "2 pending (2 held by the local-model limit, 0 by the free GPUs, 0 by an unfinished seed)"
     )
 
 
@@ -606,7 +608,7 @@ def test_a_fill_holds_a_gpu_arm_while_no_card_is_free_and_creates_the_cpu_arm_be
     assert posted == ["fill_second"]
     assert _summary(capsys.readouterr().out).endswith(
         "GPUs 0 free (none); queue 3: 0 skipped (created already), 1 created, 0 refused, "
-        "2 pending (0 held by the local-model limit, 2 by the free GPUs)"
+        "2 pending (0 held by the local-model limit, 2 by the free GPUs, 0 by an unfinished seed)"
     )
 
     # Nothing was really created (the POST is faked), so the queue is unchanged.
@@ -617,7 +619,7 @@ def test_a_fill_holds_a_gpu_arm_while_no_card_is_free_and_creates_the_cpu_arm_be
     assert posted == ["fill_first", "fill_second"]
     assert _summary(capsys.readouterr().out).endswith(
         "GPUs 1 free (5); queue 3: 0 skipped (created already), 2 created, 0 refused, "
-        "1 pending (0 held by the local-model limit, 1 by the free GPUs)"
+        "1 pending (0 held by the local-model limit, 1 by the free GPUs, 0 by an unfinished seed)"
     )
 
 
@@ -634,7 +636,7 @@ def test_a_fill_past_a_held_local_arm_still_stops_at_any_refusal(
     assert posted == []
     captured = capsys.readouterr()
     assert _summary(captured.out).endswith(
-        "0 created, 1 refused, 2 pending (1 held by the local-model limit, 0 by the free GPUs)"
+        "0 created, 1 refused, 2 pending (1 held by the local-model limit, 0 by the free GPUs, 0 by an unfinished seed)"
     )
     assert "fill_second: parameters rejected" in captured.err
 
@@ -649,7 +651,7 @@ def test_a_fill_reports_a_creation_the_console_refused(
     assert posted == ["fill_first", "fill_second"]
     captured = capsys.readouterr()
     assert _summary(captured.out).endswith(
-        "0 created, 2 refused, 1 pending (0 held by the local-model limit, 0 by the free GPUs)"
+        "0 created, 2 refused, 1 pending (0 held by the local-model limit, 0 by the free GPUs, 0 by an unfinished seed)"
     )
     assert "not created: fill_first, fill_second" in captured.err
 
@@ -666,7 +668,7 @@ def test_a_fill_stops_at_an_arm_the_preflight_refuses(
     assert posted == ["fill_first"]
     captured = capsys.readouterr()
     assert _summary(captured.out).endswith(
-        "1 created, 1 refused, 1 pending (0 held by the local-model limit, 0 by the free GPUs)"
+        "1 created, 1 refused, 1 pending (0 held by the local-model limit, 0 by the free GPUs, 0 by an unfinished seed)"
     )
     assert "fill_second: parameters rejected" in captured.err
     assert "whole July-June years" in captured.err
@@ -685,8 +687,98 @@ def test_a_fill_dry_run_plans_without_creating(
     assert match, out[-1]
     assert match.group(1).endswith(
         "0 skipped (created already), 1 would be created, 0 refused, 2 pending "
-        "(0 held by the local-model limit, 0 by the free GPUs)"
+        "(0 held by the local-model limit, 0 by the free GPUs, 0 by an unfinished seed)"
     )
+
+
+def test_a_fill_holds_an_arm_whose_seed_is_not_built_yet_and_creates_it_once_it_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A seed with no contract yet, or with its prebuild still running, holds
+    its arm pending -- not refused -- while the arms behind it go ahead; the
+    next run after the prebuild reports status ok creates it."""
+    arms = {arm: {} for arm in FILL_ARMS}
+    arms["fill_first"] = {"pit_views_seed": "data/seed_later"}
+    rnd, posted = _fill_round(tmp_path, monkeypatch, local=0, arms=arms)
+    seed = tmp_path / "data" / "seed_later"
+    shutil.move(seed / "provider.json", tmp_path / "provider.later")
+    assert rnd.main(["launcher", "0", "--fill", "--dry-run"]) == 0
+    assert "fill_first: pending, waits for its seed's prebuild to finish" in capsys.readouterr().out.splitlines()
+    assert rnd.main(["launcher", "0", "--fill"]) == 0
+    assert posted == ["fill_second", "fill_third"]
+    assert _summary(capsys.readouterr().out).endswith(
+        "2 created, 0 refused, 1 pending (0 held by the local-model limit, 0 by the free GPUs, 1 by an unfinished seed)"
+    )
+
+    # The prebuild has bound its contract but not finished: still held.
+    shutil.move(tmp_path / "provider.later", seed / "provider.json")
+    (seed / UNFINISHED_BUILD_MARKER).write_text("{}", encoding="utf-8")
+    posted.clear()
+    assert rnd.main(["launcher", "0", "--fill"]) == 0
+    assert posted == ["fill_second", "fill_third"]
+    capsys.readouterr()
+
+    (seed / UNFINISHED_BUILD_MARKER).unlink()
+    posted.clear()
+    assert rnd.main(["launcher", "0", "--fill"]) == 0
+    assert posted == list(FILL_ARMS) and "1 by an unfinished seed" not in capsys.readouterr().out
+
+
+def test_a_failed_smoke_refuses_the_arm_with_its_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The starter's replay is part of creating an arm: a failure stops the
+    run before anything is sent for that arm, with the replay's own text, and
+    a dry-run reads every arm before it reports the refusal."""
+    rnd, posted = _fill_round(tmp_path, monkeypatch, local=0)
+    reason = "Y3, 3 days from 20190701: RuntimeError: daily Validation failed: ArrowTypeError"
+    monkeypatch.setattr(_round, "smoke", lambda merged: reason if merged["experiment_id"] == "fill_second" else "")
+    assert rnd.main(["launcher", "0", "--fill"]) == 1
+    assert posted == ["fill_first"]
+    captured = capsys.readouterr()
+    assert f"fill_second: the starter's smoke failed on data/seed_probe, nothing was sent: {reason}" in captured.err
+    assert _summary(captured.out).endswith("1 created, 1 refused, 1 pending (0 held by the local-model limit, 0 by the free GPUs, 0 by an unfinished seed)")
+    assert rnd.main(["launcher", "0", "--dry-run"]) == 1
+    out = capsys.readouterr()
+    assert out.out.count("  smoke: the starter replayed") == 2 and "refused: fill_second" in out.err
+
+
+def test_the_smoke_is_recorded_once_per_seed_and_starter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pass is not replayed again; a failure keeps refusing, with its record
+    named, until the record is deleted; new starter bytes are a new smoke."""
+    monkeypatch.setattr(_round, "REPO_ROOT", tmp_path)
+    starter = tmp_path / "packs" / "arm" / "starter"
+    starter.mkdir(parents=True)
+    (starter / "main.py").write_text("def generate_orders(context):\n    return []\n", encoding="utf-8")
+    (tmp_path / "data" / "seed").mkdir(parents=True)
+    (tmp_path / "data" / "seed" / "provider.json").write_text("{}", encoding="utf-8")
+    merged = {"experiment_id": "arm", "workspace_reference": "packs/arm", "pit_views_seed": "data/seed"}
+    runs: list[str] = []
+    outcome = {"failure": ""}
+
+    def replays(params: dict[str, object], directory: Path) -> str:
+        runs.append(str(directory.relative_to(tmp_path)))
+        return outcome["failure"]
+
+    monkeypatch.setattr(_round, "_smoke_replays", replays)
+    assert _round.smoke(merged) == "" and _round.smoke(merged) == ""
+    assert runs == ["packs/arm/starter"]
+    record = json.loads(next((tmp_path / "logs" / "research" / "smoke").glob("*.json")).read_text(encoding="utf-8"))
+    assert record["passed"] is True and record["experiment_id"] == "arm"
+
+    (starter / "main.py").write_text("def generate_orders(context):\n    return [] \n", encoding="utf-8")
+    outcome["failure"] = "full, the full span 20170703..20250630: ValueError: boom"
+    first = _round.smoke(merged)
+    assert first == outcome["failure"] and len(runs) == 2
+    again = _round.smoke(merged)
+    assert again.startswith(outcome["failure"]) and "delete it to smoke again" in again and len(runs) == 2
+    for path in (tmp_path / "logs" / "research" / "smoke").glob("*.json"):
+        if not json.loads(path.read_text(encoding="utf-8"))["passed"]:
+            path.unlink()
+    outcome["failure"] = ""
+    assert _round.smoke(merged) == "" and len(runs) == 3
+    (starter / "main.py").unlink()
+    assert "lacks main.py" in _round.smoke(merged)
 
 
 def test_a_fill_never_takes_an_experiment_id(

@@ -1,17 +1,19 @@
-"""The open-exploration packs of rounds 20261014 and 20261015: one common contract per round, one direction per pack.
+"""The open-exploration packs of rounds 20261014 and 20261008b: one common contract per round, one direction per pack.
 
 What must hold. Within a round the packs give a direction each and share the
 rules file and the record of occupied and closed directions byte for byte,
 since a pack is mounted alone and cannot point at another. Each starter is a
 valid strategy package; a round whose arms claim a card ships the device
-helper and one that claims none ships no CUDA path. Round 20261015's starters
+helper and one that claims none ships no CUDA path. Round 20261008b's starters
 share every common module, carry the events helper exactly where the arm
-mounts the events domain, and the ensemble pack's fixed sleeves are the frozen
-Paper strategies, changed only in their import lines. The read helpers return
-only visible rows, matched as asked. The combined book gives each sleeve its
-own holdings and cash and never lets one sleeve trade another's names. A pack
-names the lineage its arm is created with, and cites no reading after the
-research period.
+mounts the events domain, and their built-in shuffled control keeps a name's
+stand-in from one review to the next. The ensemble pack's fixed sleeves are
+the frozen Paper strategies, changed only in their import lines and their seat
+counts, and its legs run the candidate and the two required controls on the
+same account. The read helpers return only visible rows, matched as asked. The
+combined book gives each sleeve its own holdings and cash and never lets one
+sleeve trade another's names. A pack names the lineage its arm is created
+with, and cites no reading after the research period.
 """
 
 from __future__ import annotations
@@ -32,13 +34,13 @@ from autotrade.environment.strategy_loader import validate_strategy_package
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REFS = REPO_ROOT / "configs" / "workspace_refs"
 PACKS_14 = [REFS / f"open_{name}_100k_8y_20261014" for name in ("free", "commit", "avoid", "earnings", "adapt")]
-FIVE_YEAR_15 = [REFS / f"open_{name}_100k_5y_20261015" for name in ("tables", "chips")]
-EIGHT_YEAR_15 = [REFS / f"open_{name}_100k_8y_20261015" for name in ("micro", "distress", "cluster")]
-ENSEMBLE = REFS / "open_ensemble_100k_8y_20261015"
-PACKS_15 = [*FIVE_YEAR_15, *EIGHT_YEAR_15, ENSEMBLE]
+FIVE_YEAR_08B = [REFS / f"open_{name}_100k_5y_20261008b" for name in ("tables", "exclude")]
+EIGHT_YEAR_08B = [REFS / f"open_{name}_100k_8y_20261008b" for name in ("guidance", "capital")]
+ENSEMBLE = REFS / "open_ensemble_100k_8y_20261008b"
+PACKS_08B = [*FIVE_YEAR_08B, *EIGHT_YEAR_08B, ENSEMBLE]
 ROUNDS = {
     "create_round_20261014": (PACKS_14, 1),
-    "create_round_20261015": (PACKS_15, 0),
+    "create_round_20261008b": (PACKS_08B, 0),
 }
 COMMON = ("families.md", "references/open-rules.md")
 
@@ -47,7 +49,7 @@ def _files(root: Path) -> dict[str, bytes]:
     return {str(path.relative_to(root)): path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
 
 
-@pytest.mark.parametrize("packs", [PACKS_14, PACKS_15], ids=["20261014", "20261015"])
+@pytest.mark.parametrize("packs", [PACKS_14, PACKS_08B], ids=["20261014", "20261008b"])
 def test_a_round_shares_one_contract(packs: list[Path]) -> None:
     for pack in packs[1:]:
         for name in COMMON:
@@ -59,25 +61,41 @@ def test_round_20261014_ships_one_starter(pack: Path) -> None:
     assert _files(pack / "starter") == _files(PACKS_14[0] / "starter"), pack.name
 
 
-def test_round_20261015_starters_share_their_common_modules() -> None:
-    """The six starters agree on every module they share, the five non-ensemble
+def test_round_20261008b_starters_share_their_common_modules() -> None:
+    """The five starters agree on every module they share, the four non-ensemble
     ones on their entry module too; only the five-year packs read the events
     domain, and no starter keeps a device helper, since no arm has a card."""
-    reference = _files(EIGHT_YEAR_15[0] / "starter")
-    for pack in PACKS_15:
+    reference = _files(EIGHT_YEAR_08B[0] / "starter")
+    for pack in PACKS_08B:
         files = _files(pack / "starter")
         shared = {name for name in files if name.startswith("lib/") and name in reference}
         assert shared >= {"lib/controls.py", "lib/trade.py", "lib/score.py", "lib/titles.py", "lib/fund.py"}, pack.name
         assert {name: files[name] for name in shared} == {name: reference[name] for name in shared}, pack.name
-        assert ("lib/events.py" in files) is (pack in FIVE_YEAR_15), pack.name
+        assert ("lib/events.py" in files) is (pack in FIVE_YEAR_08B), pack.name
         assert "lib/device.py" not in files, pack.name
         if pack != ENSEMBLE:
             assert files["main.py"] == reference["main.py"], pack.name
-    events = {(pack / "starter" / "lib" / "events.py").read_bytes() for pack in FIVE_YEAR_15}
+    events = {(pack / "starter" / "lib" / "events.py").read_bytes() for pack in FIVE_YEAR_08B}
     assert len(events) == 1
 
 
-@pytest.mark.parametrize("pack", [*PACKS_14, *PACKS_15], ids=lambda path: path.name)
+def test_the_starter_control_keeps_each_stand_in_from_review_to_review(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`knobs.SHUFFLE` runs the held shuffle over the day's tradable names: the
+    same scores give the same stand-ins on any day, so a keep-band book keeps
+    the candidate's holding period."""
+    _starter(monkeypatch, EIGHT_YEAR_08B[0])
+    from lib import controls, score
+
+    codes = [f"{i:06d}.SZ" for i in range(1, 31)]
+    values = pd.Series([float(i) if i % 4 else float("nan") for i in range(30)], index=codes)
+    first = score.shuffle(values, datetime(2024, 3, 11, 8, 30, tzinfo=CN_TZ))
+    assert first.equals(score.shuffle(values, datetime(2024, 4, 1, 8, 30, tzinfo=CN_TZ)))
+    assert first.equals(controls.held_shuffle(values, values.index))
+    assert sorted(first) == sorted(values.dropna())
+    _drop_packages()
+
+
+@pytest.mark.parametrize("pack", [*PACKS_14, *PACKS_08B], ids=lambda path: path.name)
 def test_the_starter_is_a_valid_package(pack: Path) -> None:
     validate_strategy_package(pack / "starter" / "main.py")
 
@@ -102,8 +120,8 @@ def test_every_arm_of_a_round_mounts_its_direction_and_names_its_lineage(round_n
     assert mounted == set(packs)
 
 
-def test_round_20261015_mounts_the_events_domain_on_the_five_year_arms_only() -> None:
-    from scripts.experiments.create_round_20261015 import ROUND
+def test_round_20261008b_mounts_the_events_domain_on_the_five_year_arms_only() -> None:
+    from scripts.experiments.create_round_20261008b import ROUND
 
     for arm in ROUND.arms:
         params = ROUND.request_params(arm)
@@ -115,7 +133,7 @@ def test_round_20261015_mounts_the_events_domain_on_the_five_year_arms_only() ->
 
 
 def test_no_pack_cites_a_reading_after_the_research_period() -> None:
-    for pack in [*PACKS_14, *PACKS_15]:
+    for pack in [*PACKS_14, *PACKS_08B]:
         for path in pack.rglob("*"):
             if path.is_file() and path.suffix in (".md", ".py"):
                 text = path.read_text(encoding="utf-8")
@@ -124,7 +142,8 @@ def test_no_pack_cites_a_reading_after_the_research_period() -> None:
 
 
 # The frozen artifacts' files by their SHA-256 prefix, as the ensemble README
-# records them; the sleeves differ from them in their import lines alone.
+# records them; the sleeves differ from them in their import lines and in the
+# seat count of their knobs (16, where both artifacts hold 30).
 SLEEVE_HASH_ROW = re.compile(r"^\| `([a-z/_.]+)`(?:（`b30`）/ `([a-z/_.]+)`（`esop60`）)? \| `([0-9a-f]{16}|—)` \| `([0-9a-f]{16})` \|$")
 
 
@@ -147,6 +166,9 @@ def test_the_ensemble_sleeves_are_the_frozen_strategies_but_for_their_imports() 
     for (sleeve, name), prefix in recorded.items():
         copy = ENSEMBLE / "starter" / "sleeves" / sleeve / Path(name).name
         original = re.sub(rf"^from sleeves\.{sleeve} import ", "from lib import ", copy.read_text(encoding="utf-8"), flags=re.M)
+        if copy.name == "knobs.py":
+            assert re.search(r"^SEATS = 16$", original, flags=re.M), (sleeve, name)
+            original = re.sub(r"^SEATS = 16$", "SEATS = 30", original, flags=re.M)
         assert hashlib.sha256(original.encode("utf-8")).hexdigest()[:16] == prefix, (sleeve, name)
     for sleeve in ("b30", "esop60"):
         files = {path.name for path in (ENSEMBLE / "starter" / "sleeves" / sleeve).glob("*.py")}
@@ -239,7 +261,7 @@ EVENTS = [
 def test_the_events_helper_reads_one_dataset_by_local_day_and_refuses_the_future(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    _starter(monkeypatch, FIVE_YEAR_15[0])
+    _starter(monkeypatch, FIVE_YEAR_08B[0])
     from lib import events
 
     (tmp_path / "events").mkdir()
@@ -300,4 +322,36 @@ def test_the_combined_book_gives_each_sleeve_its_own_holdings_and_cash(
         combine.combine(context, [first, rogue])
     with pytest.raises(ValueError, match="sum to at most 1"):
         combine.combine(context, [first, combine.Sleeve("last", last.run, None, 0.5)])
+    _drop_packages()
+
+
+def test_the_ensemble_legs_keep_the_seats_and_scale_the_shares(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The candidate is every sleeve; "without" spends the merged book's share
+    on the given sleeves alone, in their proportions; a given sleeve alone
+    takes the whole of it. The shipped package is the given sleeves at 16
+    seats each, the 36-seat ceiling leaving room for a sleeve of the arm's."""
+    _starter(monkeypatch, ENSEMBLE)
+    import main
+    from lib import combine
+    from sleeves.b30 import knobs as b30_knobs
+    from sleeves.esop60 import knobs as esop60_knobs
+
+    def run(context: object) -> list[dict[str, object]]:
+        return []
+
+    sleeves = [
+        combine.Sleeve("esop60", run, None, 0.35),
+        combine.Sleeve("own", run, None, 0.3),
+        combine.Sleeve("b30", run, None, 0.35),
+    ]
+    assert combine.leg(sleeves, "merged") == sleeves
+    without = combine.leg(sleeves, "without")
+    assert [sleeve.name for sleeve in without] == ["esop60", "b30"]
+    assert [sleeve.share for sleeve in without] == pytest.approx([0.5, 0.5])
+    assert [(sleeve.name, sleeve.share) for sleeve in combine.leg(sleeves, "b30")] == [("b30", pytest.approx(1.0))]
+    with pytest.raises(ValueError, match="leg must be"):
+        combine.leg(sleeves, "own")
+    assert main.LEG == "merged" and [sleeve.name for sleeve in main.SLEEVES] == ["esop60", "b30"]
+    assert b30_knobs.SEATS == esop60_knobs.SEATS == 16
+    sys.modules.pop("main")
     _drop_packages()

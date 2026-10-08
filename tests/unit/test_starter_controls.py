@@ -3,10 +3,14 @@
 What must hold. Each control changes one thing about the candidate: late entry
 moves only the day, by trading days, and never acts before the calendar
 reaches it; shuffled assignment keeps every event day and count and draws only
-eligible names; random skip removes exactly as many names as the rule did and
-keeps the book's order; the static version ignores the state it is given. The
-draws reproduce across calls and do not move when the pool gains a name, so a
-later review recomputes an old event to the same names.
+eligible names; the held shuffle moves every score onto an eligible stand-in
+that stays the same from review to review, so a book with a keep band holds
+the stand-ins exactly as long as the candidate holds its names; random skip
+removes exactly as many names as the rule did and keeps the book's order; the
+static version ignores the state it is given. The draws reproduce across calls
+and do not move when the pool gains a name, so a later review recomputes an
+old event to the same names. Turnover per year is the host's span figure on a
+yearly scale, counting only fills.
 """
 
 from __future__ import annotations
@@ -72,6 +76,67 @@ def test_shuffled_assignment_keeps_days_and_counts_and_draws_eligible_names() ->
     assert drawn.equals(controls.shuffled_assignment(events, shrunk))
     with pytest.raises(ValueError, match="eligible names"):
         controls.shuffled_assignment(events, POOL[:1])
+
+
+def _keep_band_book(values: pd.Series, held: set[str], seats: int, band: float) -> set[str]:
+    """The review of a keep-band book: keep holdings ranked inside seats *
+    band, fill the free seats from the top."""
+    ranked = list(values.sort_values(ascending=False, kind="stable").index)
+    keep = {code for code in held if code in ranked[: int(seats * band)]}
+    return keep | set([code for code in ranked if code not in keep][: seats - len(keep)])
+
+
+def test_the_held_shuffle_keeps_a_screen_s_holding_period() -> None:
+    """Twelve monthly reviews of a drifting score: the candidate book and the
+    held-shuffle control trade exactly as often; the stand-ins are eligible
+    names, fixed across days, and unmoved when the pool gains a name."""
+    # Distinct values on every day (i < 40), reshuffled in blocks month to month.
+    scores = [
+        pd.Series({code: float(i) + 40.0 * ((month * 7 + i * 13) % 5) for i, code in enumerate(POOL)})
+        for month in range(12)
+    ]
+    held_candidate: set[str] = set()
+    held_control: set[str] = set()
+    trades = {"candidate": 0, "control": 0}
+    for values in scores:
+        new = _keep_band_book(values, held_candidate, 6, 2.0)
+        trades["candidate"] += len(new ^ held_candidate)
+        held_candidate = new
+        new = _keep_band_book(controls.held_shuffle(values, POOL), held_control, 6, 2.0)
+        trades["control"] += len(new ^ held_control)
+        held_control = new
+    assert trades["control"] == trades["candidate"]
+
+    moved = controls.held_shuffle(scores[0], POOL)
+    assert sorted(moved.to_numpy()) == sorted(scores[0].to_numpy())
+    assert set(moved.index) == set(POOL)
+    assert (moved != scores[0].reindex(moved.index)).all()
+    # The same stand-ins on another day's scores and in another pool order.
+    partner = {code: scores[0].index[scores[0].to_numpy() == value][0] for code, value in moved.items()}
+    later = controls.held_shuffle(scores[5], list(reversed(POOL)))
+    assert all(later[code] == scores[5][partner[code]] for code in later.index)
+    assert not moved.equals(controls.held_shuffle(scores[0], POOL, salt=1))
+    # A new eligible name re-partners one neighbour at most; scores on fewer
+    # names leave the unscored stand-ins out.
+    grown = controls.held_shuffle(scores[0], [*POOL, "000041.SZ"])
+    assert sum(grown.get(code) != value for code, value in moved.items()) <= 1
+    assert len(controls.held_shuffle(scores[0].iloc[:10], POOL)) == 10
+    with pytest.raises(ValueError, match="not eligible"):
+        controls.held_shuffle(scores[0], POOL[:5])
+
+
+def test_turnover_per_year_counts_filled_notional_over_the_cash() -> None:
+    fills = [
+        {"price": 10.0, "quantity": 1_000, "status": "filled"},
+        {"price": 10.0, "quantity": 1_000, "status": "filled"},
+        {"price": 50.0, "quantity": 9_900, "status": "rejected"},
+    ]
+    # 20,000 traded on 100,000 over half a year: 0.2 a half-year, 0.4 a year.
+    assert controls.turnover_per_year(fills, 100_000, 122) == pytest.approx(0.4)
+    assert controls.turnover_per_year(pd.DataFrame(fills[:1]).drop(columns="status"), 100_000, 244) == pytest.approx(0.1)
+    assert controls.turnover_per_year([], 100_000, 244) == 0.0
+    with pytest.raises(ValueError, match="positive"):
+        controls.turnover_per_year(fills, 100_000, 0)
 
 
 def test_random_skip_removes_as_many_names_and_keeps_the_order() -> None:

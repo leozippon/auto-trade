@@ -22,6 +22,14 @@ send alike -- a geometry, the graduation bars, a model pair's hosted roles, a
 lineage -- lives in `_profiles.py`; an open round imports from there and from
 here, never from another round file.
 
+A round's id is the day it is launched, in Beijing time, with a letter suffix
+(b, c, ...) when that id is already taken -- by an earlier round of the same
+day, or by one of the rounds 20261008 to 20261015 that were named ahead of the
+calendar between 2026-10-03 and 10-08 -- and its arms' ids end in it. Nothing
+reads an order into these ids: the queue is the arm order of a round file,
+lineages name their arms, and RETIRED_IDS and the reuse check compare whole
+ids.
+
 A round whose arms have all been created is marked `closed`, and so is one
 whose remaining arms are withdrawn: they leave its arm list and their ids go
 to RETIRED_IDS. Its `main` refuses every mode: once an arm is archived its
@@ -58,15 +66,27 @@ console's own rule -- and creates the next pending ones in file order through
 the same validation and POST path. A local arm reached while the local-model
 limit is full, and a GPU arm reached while too few cards are free, stays
 pending without stopping the queue, so the arms behind it still take the free
-slots. Nothing pending or nothing free is the steady state and exits 0, so the
-mode is idempotent and safe on a timer; only a creation that was attempted and
-refused exits non-zero. A timer run writes one timestamped summary line --
+slots; so does an arm whose PIT view seed has no contract yet or whose
+prebuild has not finished, which the next run creates once the seed reports
+status ok. Nothing pending or nothing free is the steady state and exits 0, so
+the mode is idempotent and safe on a timer; only a creation that was attempted
+and refused exits non-zero. A timer run writes one timestamped summary line --
 slots under both limits and the free GPUs, and how many arms were skipped,
 created, refused and are still pending, and how many of those the local-model
-limit and the free GPUs hold back -- plus one line per arm it created or that
-was refused; with `--dry-run`
-it also lists each pending arm and whether it takes a free slot. The research
-cron (`ops/cron/research_fill.cron`) runs it over several round files in turn.
+limit, the free GPUs and an unfinished seed hold back -- plus one line per arm
+it created or that was refused; with `--dry-run` it also lists each pending
+arm and whether it takes a free slot. The research cron
+(`ops/cron/research_fill.cron`) runs it over several round files in turn.
+
+Before an arm is created, and on every dry-run reading of it, `smoke` replays
+its pack's starter through the host's own evaluator on the arm's seed: a few
+days from each research-year start inside the full span, and the full span
+once. A seed whose views break the replay (round 20261015's five-year seed
+failed every replay crossing 2022-07-01, the untouched starter included)
+refuses the arm with the failure instead of letting a session discover it.
+The outcome is recorded under logs/research/smoke/, keyed by the seed, its
+contract, the geometry and the starter's bytes: a pass is not replayed again,
+and a failure keeps refusing until its record is deleted.
 
 RETIRED_IDS records the experiment ids that have been used and archived, or
 withdrawn from a round's queue, or defined by a round whose file has left the
@@ -78,10 +98,14 @@ where it exists so the two can be compared.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import shutil
 import sys
+import time
 import urllib.error
 import urllib.request
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -95,10 +119,16 @@ from _bootstrap import add_repo_src
 
 REPO_ROOT = add_repo_src(__file__)
 
+from autotrade.environment.artifacts import FilesystemArtifactStore
+from autotrade.environment.identity import AgentRefStore
+from autotrade.environment.runtime import rmtree_keeping_file_modes
+from autotrade.pipelines.calendar import FULL_SPAN
 from autotrade.pipelines.config import (
     SNAPSHOT_CACHE_FORMAT_VERSION,
     AcceptanceRules,
+    ArtifactRevision,
     acceptance_for,
+    research_span,
 )
 from autotrade.pipelines.experiment import lineage_summary
 from autotrade.pipelines.hitl_state import (
@@ -107,9 +137,11 @@ from autotrade.pipelines.hitl_state import (
     WEB_INTERNAL_PARAMS,
     WEB_REQUIRED_PARAMS,
 )
+from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.pipelines.lineage import extract_lineage
+from autotrade.pipelines.pit_views_seed import UNFINISHED_BUILD_MARKER
 from autotrade.pipelines.verdict import information_ratio_bar
-from autotrade.pipelines.worker import resolve_worker_options
+from autotrade.pipelines.worker import build_experiment_pipeline, resolve_worker_options
 
 # The console's own id, local-arm and GPU-request rules; importing them keeps
 # this module from growing a second copy of the create contract.
@@ -583,6 +615,14 @@ RETIRED_IDS: frozenset[str] = frozenset(
         "seqnovel_ssm_100k_8y_mimo_20261012",
         "titlemap_100k_8y_mimo_20261012",
         "titlerank_100k_8y_qwen_20261012",
+        # Every arm of the closed round 20261015, whose file and packs left the
+        # tree with round 20261008b's launch; all ended no_edge and stay on disk.
+        "open_chips_100k_5y_mimo_20261015",
+        "open_cluster_100k_8y_mimo_20261015",
+        "open_distress_100k_8y_qwen_20261015",
+        "open_ensemble_100k_8y_qwen_20261015",
+        "open_micro_100k_8y_mimo_20261015",
+        "open_tables_100k_5y_qwen_20261015",
     }
 )
 
@@ -643,6 +683,123 @@ def normalize(params: dict[str, object]) -> dict[str, object]:
         preflight=True,
     )
     return merged
+
+
+# Trading days each research-year start is replayed for by the smoke.
+SMOKE_DAYS = 3
+# What decides a starter's replay besides its own bytes and its seed's contract.
+SMOKE_KEYS = (
+    "pit_views_seed",
+    "research_start",
+    "research_end",
+    "window_months",
+    "benchmark_index",
+    "initial_cash",
+    "permitted_boards",
+)
+
+
+def smoke(merged: Mapping[str, object]) -> str:
+    """Replay an arm's starter on its seed before the arm is created; "" when it
+    passed, else why not.
+
+    ``merged`` is the arm's validated params.json. The pack's ``starter/`` is
+    replayed by the host's own evaluator as a session's smoke_backtest and
+    Validation replay it: over the full research span, a few days from each
+    research-year start (the late-start path a defective seed breaks first),
+    then the whole span. The outcome is recorded once per seed contract,
+    geometry and starter bytes, so a pass is not replayed by the next timer run
+    and a failure is not retried until its record is deleted.
+    """
+
+    starter = REPO_ROOT / str(merged["workspace_reference"]) / "starter"
+    if not (starter / "main.py").is_file():
+        return f"the pack has no starter to smoke: {starter} lacks main.py"
+    digest = hashlib.sha256(
+        json.dumps({key: merged.get(key) for key in SMOKE_KEYS}, sort_keys=True, default=str).encode("utf-8")
+    )
+    seed = str(merged.get("pit_views_seed") or "")
+    if seed:
+        digest.update((REPO_ROOT / seed / "provider.json").read_bytes())
+    for path in sorted(starter.rglob("*")):
+        if path.is_file() and "__pycache__" not in path.parts:
+            digest.update(str(path.relative_to(starter)).encode("utf-8") + b"\0" + path.read_bytes())
+    record_path = REPO_ROOT / "logs" / "research" / "smoke" / f"{digest.hexdigest()[:20]}.json"
+    if record_path.is_file():
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        if record["passed"]:
+            return ""
+        return f"{record['failure']} (recorded {record_path.relative_to(REPO_ROOT)}; delete it to smoke again)"
+    started = time.monotonic()
+    failure = _smoke_replays(merged, starter)
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    record_path.write_text(
+        json.dumps(
+            {
+                "experiment_id": merged["experiment_id"],
+                "starter": str(starter.relative_to(REPO_ROOT)),
+                **{key: merged.get(key) for key in SMOKE_KEYS},
+                "smoke_days": SMOKE_DAYS,
+                "passed": not failure,
+                "failure": failure,
+                "seconds": round(time.monotonic() - started, 1),
+                "at": _now(),
+            },
+            ensure_ascii=False,
+            indent=1,
+        ),
+        encoding="utf-8",
+    )
+    return failure
+
+
+def _smoke_replays(merged: Mapping[str, object], starter: Path) -> str:
+    """The replays of :func:`smoke`, in a scratch experiment assembled exactly
+    as the worker and incubate.py assemble one (its seed hardlinked in, the
+    configured sandbox image, no Agent run); "" or the first failure."""
+
+    scratch = REPO_ROOT / ".runtime" / "round_smoke" / uuid.uuid4().hex
+    experiment_dir = scratch / str(merged["experiment_id"])
+    experiment_dir.mkdir(parents=True)
+    try:
+        options = resolve_worker_options(
+            {**merged, "experiments_root": str(scratch)}, experiment_dir=experiment_dir, repo_root=REPO_ROOT
+        )
+        pipeline = build_experiment_pipeline(
+            options,
+            ledger=ExperimentLedger(experiment_dir / "ledgers" / "experiment_ledger.jsonl"),
+            store=FilesystemArtifactStore(experiment_dir / "artifacts" / "strategy"),
+            ref_store=AgentRefStore(experiment_dir),
+        ).pipeline
+        output = scratch / "output"
+        shutil.copytree(starter, output, ignore=shutil.ignore_patterns("__pycache__"))
+        _, years = pipeline.research_inputs()
+        request = research_span(years, FULL_SPAN).request(
+            ArtifactRevision("smoke", output),
+            schedule=options.rolling.schedule,
+            broker_profile=options.rolling.broker_profile,
+        )
+        runs = [(year.label, year.start, SMOKE_DAYS) for year in years] + [(FULL_SPAN, None, None)]
+        for label, start, days in runs:
+            try:
+                pipeline.evaluator.evaluate(request, max_days=days, start_day=start)
+            except Exception as exc:  # noqa: BLE001 - the exception text IS the result
+                where = f"{days} days from {start}" if start else f"the full span {request.start}..{request.end}"
+                return f"{label}, {where}: {type(exc).__name__}: {exc}"
+        return ""
+    except Exception as exc:  # noqa: BLE001 - an arm that cannot even be assembled fails its smoke
+        return f"the smoke could not be assembled: {type(exc).__name__}: {exc}"
+    finally:
+        rmtree_keeping_file_modes(scratch)
+
+
+def seed_ready(seed: str) -> bool:
+    """Whether a named PIT view seed has its contract and a finished prebuild;
+    the console default (no seed) always is. Readiness alone: whether the tree
+    is this arm's is the pre-flight's to judge."""
+
+    root = REPO_ROOT / seed
+    return not seed or ((root / "provider.json").is_file() and not (root / UNFINISHED_BUILD_MARKER).exists())
 
 
 def _lineage_reading(merged: Mapping[str, object], rules: AcceptanceRules) -> dict[str, object]:
@@ -888,10 +1045,10 @@ class Round:
 
     def fill(
         self, port: int, *, dry_run: bool
-    ) -> tuple[list[str], list[str], list[str], list[str], str]:
-        """The arms to create now, every pending arm, the pending arms the
-        local-model limit holds back and those the free GPUs hold back, and the
-        slot part of the summary line.
+    ) -> tuple[list[str], list[str], dict[str, list[str]], str]:
+        """The arms to create now, every pending arm, the pending arms held
+        back by each reason that clears by itself, and the slot part of the
+        summary line.
 
         The queue is the arm order of the round file. An arm whose experiment
         directory exists has been created already -- the console refuses a
@@ -900,9 +1057,10 @@ class Round:
         console would refuse for a reason that clears by itself is held: it
         stays pending and the arms behind it go ahead. That is a local arm (the
         console's own ``uses_local_model``) reached while the local-model limit
-        is full, and an arm asking for more GPUs (``gpu_request``) than the
-        console has free cards for. A dry-run lists the pending arms; a timer
-        run only counts them.
+        is full, an arm asking for more GPUs (``gpu_request``) than the console
+        has free cards for, and an arm whose seed has no contract yet or an
+        unfinished prebuild (``seed_ready``). A dry-run lists the pending arms;
+        a timer run only counts them.
         """
         record = health(port)
         running = sorted(str(name) for name in record["running"])
@@ -922,36 +1080,38 @@ class Round:
         )
         pending = [arm for arm in self.arms if not (EXPERIMENTS_ROOT / arm).exists()]
         chosen: list[str] = []
-        held: list[str] = []
-        held_gpu: list[str] = []
+        held: dict[str, list[str]] = {"local": [], "gpu": [], "seed": []}
         for experiment_id in pending:
             if len(chosen) == free:
                 break
             params = self.request_params(experiment_id)
+            if not seed_ready(str(params.get("pit_views_seed") or "")):
+                held["seed"].append(experiment_id)
+                continue
             local = uses_local_model(params)
             if local and local_free == 0:
-                held.append(experiment_id)
+                held["local"].append(experiment_id)
                 continue
             gpus = gpu_request(params)
             if gpus > gpus_free:
-                held_gpu.append(experiment_id)
+                held["gpu"].append(experiment_id)
                 continue
             local_free -= local
             gpus_free -= gpus
             chosen.append(experiment_id)
         if dry_run:
+            waits = {
+                "local": "waits for a local-model slot",
+                "gpu": "waits for a free GPU",
+                "seed": "waits for its seed's prebuild to finish",
+            }
             for experiment_id in pending:
-                slot = (
-                    "takes a free slot"
-                    if experiment_id in chosen
-                    else "waits for a local-model slot"
-                    if experiment_id in held
-                    else "waits for a free GPU"
-                    if experiment_id in held_gpu
-                    else "waits for a free slot"
+                slot = next(
+                    (waits[reason] for reason, arms in held.items() if experiment_id in arms),
+                    "takes a free slot" if experiment_id in chosen else "waits for a free slot",
                 )
                 print(f"{experiment_id}: pending, {slot}")
-        return chosen, pending, held, held_gpu, slots
+        return chosen, pending, held, slots
 
     def main(self, argv: list[str], usage: str | None = None) -> int:
         """`<port> [--dry-run] [--fill] [experiment_id ...]`, shared by every round file."""
@@ -996,7 +1156,7 @@ class Round:
         if fill:
             # The queue decides the selection; --dry-run still decides whether
             # anything is sent.
-            selected, pending, held, held_gpu, slots = self.fill(port, dry_run=dry_run)
+            selected, pending, held, slots = self.fill(port, dry_run=dry_run)
         else:
             selected = [arm for arm in self.arms if not wanted or arm in wanted]
         created: list[str] = []
@@ -1012,6 +1172,17 @@ class Round:
                 if dry_run:
                     continue
                 break
+            failure = smoke(merged)
+            if failure:
+                print(
+                    f"{experiment_id}: the starter's smoke failed on {merged.get('pit_views_seed')},"
+                    f" nothing was sent: {failure}",
+                    file=sys.stderr,
+                )
+                failed.append(experiment_id)
+                if dry_run:
+                    continue
+                break
             if dry_run:
                 # What this arm decides for itself: everything it sends that
                 # differs from the round it belongs to.
@@ -1022,6 +1193,7 @@ class Round:
                 }
                 directive = str(merged["research_directive"])
                 print(json.dumps(own, ensure_ascii=False))
+                print("  smoke: the starter replayed from every research-year start and over the full span")
                 # The gates this arm would be judged by: the defaults with
                 # whatever the arm names, mandate included.
                 rules = acceptance_for(merged)
@@ -1043,7 +1215,8 @@ class Round:
                 f"{len(self.arms) - len(pending)} skipped (created already), "
                 f"{done} {'would be created' if dry_run else 'created'}, "
                 f"{len(failed)} refused, {len(pending) - done - len(failed)} pending "
-                f"({len(held)} held by the local-model limit, {len(held_gpu)} by the free GPUs)",
+                f"({len(held['local'])} held by the local-model limit, {len(held['gpu'])} by the free GPUs,"
+                f" {len(held['seed'])} by an unfinished seed)",
                 flush=True,
             )
         if failed:
