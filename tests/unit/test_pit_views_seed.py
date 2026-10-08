@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import ClassVar
 
 import pandas as pd
+import pyarrow as pa
 import pytest
 
 from autotrade.environment.data.snapshot import SnapshotConfig
@@ -971,3 +972,53 @@ def test_a_seed_without_the_bonus_split_is_refused_for_a_taxed_arm(tmp_path: Pat
     for path in seed.glob("replay/**/corporate_actions.parquet"):
         pd.DataFrame(columns=[*columns, "bonus_per_share"]).to_parquet(path, index=False)
     assert_seed_carries_bonus_split(seed)
+
+
+def test_a_seed_whose_views_type_a_column_two_ways_keeps_its_unfinished_marker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The prebuild's last step refuses views that replay a column two ways.
+
+    The first slot writes its strings as the whole-union Arrow padding did
+    (``string[pyarrow]``, which replays as ``large_string``) beside plain
+    object strings everywhere else; a column without a value in one view
+    (``null``) agrees with any type.
+    """
+
+    from autotrade.pipelines.pit_views_seed import UNFINISHED_BUILD_MARKER
+    from scripts.data import prebuild_pit_views_seed as prebuild
+
+    class WritingProvider(_FakeProvider):
+        arrow_strings = True
+
+        def __init__(self, *, cache_root: Path, **kwargs: object) -> None:
+            super().__init__(**kwargs)
+            self.cache_root = cache_root
+
+        def prepare(self, **kwargs):
+            bundle = super().prepare(**kwargs)
+            for ref in (bundle.decision_ref, bundle.replay_ref):
+                view = self.cache_root / ref
+                view.mkdir(parents=True, exist_ok=True)
+                (view / "manifest.json").write_text("{}", encoding="utf-8")
+                frame = pd.DataFrame({"dataset": ["margin"], "note": [None if len(self.calls) == 1 else "x"]})
+                if self.arrow_strings and len(self.calls) == 1:
+                    frame["dataset"] = frame["dataset"].astype(pd.ArrowDtype(pa.string()))
+                frame.to_parquet(view / "events.parquet", index=False)
+            return bundle
+
+    monkeypatch.setattr(prebuild, "ResearchPITSnapshotProvider", WritingProvider)
+    monkeypatch.setattr(
+        prebuild, "prebuild_asof_stash", lambda **_kwargs: {"reused": False, "trade_days": 1}
+    )
+    WritingProvider.calls = []
+    seed = tmp_path / "seed"
+    argv = ["--repo-root", str(tmp_path), "--seed", str(seed)]
+    with pytest.raises(ValueError, match=r"events\.parquet dataset: large_string .*string"):
+        prebuild.main(argv)
+    assert (seed / UNFINISHED_BUILD_MARKER).exists()
+
+    WritingProvider.calls = []
+    WritingProvider.arrow_strings = False
+    assert prebuild.main(argv) == 0
+    assert not (seed / UNFINISHED_BUILD_MARKER).exists()

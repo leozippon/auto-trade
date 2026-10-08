@@ -22,11 +22,13 @@ import json
 import os
 import stat
 import uuid
+from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 from autotrade.environment.data.snapshot import SnapshotConfig
@@ -201,6 +203,69 @@ def assert_seed_carries_bonus_split(seed: Path) -> None:
             f"({len(stale)} replay slot table(s), first {stale[0].parent.relative_to(seed)}); "
             "rebuild the seed under a new directory"
         )
+
+
+def assert_seed_views_share_types(seed: Path) -> int:
+    """Refuse a seed whose views type one column of a domain two ways.
+
+    The Timeview merges rows of several views of a domain into one as-of part
+    (the first roll after ``continue_into`` takes the earlier slot's pending
+    rows with the next slot's, a late start publishes years at once), each
+    slice after the ``ReplayRows.take`` round trip through pandas, and that
+    merge refuses a column typed two ways (``string`` beside ``large_string``,
+    ``int64`` beside ``double``). So, per file of a view (``events.parquet``,
+    ``text_library/anns_d.parquet``, ...), every decision and replay view must
+    type each column alike after that round trip. A column the round trip
+    types by its values (object) is taken at its file type, and ``null`` (no
+    value in the file) unifies with any type. Column sets may differ: parts
+    are projected onto the frozen part's columns.
+
+    Returns the number of files checked.
+    """
+
+    seed = Path(seed)
+    seen: dict[tuple[str, str], dict[str, Path]] = defaultdict(dict)
+    checked = 0
+    for view in _completed_seed_views(seed):
+        for path in sorted(view.rglob("*.parquet")):
+            checked += 1
+            name = path.relative_to(view).as_posix()
+            for column, data_type in _round_trip_types(path).items():
+                if data_type != pa.null():
+                    seen[(name, column)].setdefault(str(data_type), path)
+    conflicts = [
+        f"{name} {column}: "
+        + ", ".join(f"{data_type} ({path.parent.relative_to(seed)})" for data_type, path in types.items())
+        for (name, column), types in seen.items()
+        if len(types) > 1
+    ]
+    if conflicts:
+        raise ValueError(
+            f"PIT view seed {seed} types {len(conflicts)} column(s) differently across its views "
+            "after the replay round trip, so the Timeview cannot merge a part that spans them; "
+            "rebuild the seed under a new directory. First: " + "; ".join(conflicts[:5])
+        )
+    return checked
+
+
+def _round_trip_types(path: Path) -> dict[str, pa.DataType]:
+    """Each column's Arrow type after ``ReplayRows.take``'s pandas round trip.
+
+    The round trip of a zero-row table gives the type a column's pandas dtype
+    fixes; an object column comes back ``null`` there and takes its file
+    type, which its values infer. A column pandas restores as the index is
+    not a column of the round trip.
+    """
+
+    schema = pq.read_schema(path)
+    back = pa.Table.from_pandas(schema.empty_table().to_pandas(), preserve_index=False).schema
+    types: dict[str, pa.DataType] = {}
+    for field in schema:
+        index = back.get_field_index(field.name)
+        if index >= 0:
+            restored = back.field(index).type
+            types[field.name] = field.type if restored == pa.null() else restored
+    return types
 
 
 def seed_pit_views(
@@ -401,6 +466,7 @@ __all__ = [
     "SeedPlan",
     "assert_seed_carries_bonus_split",
     "assert_seed_snapshot_config",
+    "assert_seed_views_share_types",
     "pit_cache_provider_record",
     "plan_seed",
     "seed_pit_views",

@@ -29,7 +29,10 @@ first use.
 A build writes ``UNFINISHED_BUILD_MARKER`` into the seed root before the
 provider binds the tree and removes it only after its last step, right before
 it reports status ok, so creating an experiment on a seed whose build is still
-running, failed or was killed is refused.
+running, failed or was killed is refused. That last step checks that every
+decision and replay view types each column of a domain alike after the replay
+round trip (``assert_seed_views_share_types``); a seed that does not keeps the
+marker.
 
 Reuses ``ResearchPITSnapshotProvider`` / ``SnapshotBuilder`` and the worker's
 own ``_snapshot_config``; does not fork a second builder or a second reading of
@@ -69,7 +72,11 @@ from autotrade.pipelines.pit_backend import (
     ResearchPITSnapshotProvider,
     prebuild_asof_stash,
 )
-from autotrade.pipelines.pit_views_seed import UNFINISHED_BUILD_MARKER, plan_seed
+from autotrade.pipelines.pit_views_seed import (
+    UNFINISHED_BUILD_MARKER,
+    assert_seed_views_share_types,
+    plan_seed,
+)
 from autotrade.pipelines.worker import _snapshot_config
 
 # Scratch cache_root for --dry-run: planning must not bind or create views in
@@ -322,6 +329,10 @@ def main(argv: list[str] | None = None) -> int:
             status = "reused" if report.pop("reused") else "built"
             print(f"    {status} {json.dumps(report, sort_keys=True)}", flush=True)
     if not args.dry_run:
+        # A seed whose views type a column two ways stops a replay at the first
+        # part spanning them, so it keeps its marker instead of reporting ok.
+        checked = assert_seed_views_share_types(seed)
+        print(f"view types agree across {checked} decision/replay files", flush=True)
         (seed / UNFINISHED_BUILD_MARKER).unlink()
     print(
         json.dumps(

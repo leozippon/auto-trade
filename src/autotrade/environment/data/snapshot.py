@@ -1340,7 +1340,12 @@ class SnapshotBuilder:
             }
             auction["available_at"] = [availability[str(day)][0] for day in auction["trade_date"]]
             auction["available_at_rule"] = [availability[str(day)][1] for day in auction["trade_date"]]
-            auction = auction[list(self._AUCTION_COLUMNS)]
+            # Quantities typed as the empty payload types them: a window whose
+            # raw partitions hold no null reads ``vol`` as int64, and an int64
+            # slot beside a double one cannot merge into one as-of part.
+            auction = auction[list(self._AUCTION_COLUMNS)].astype(
+                {column: "float64" for column in self._AUCTION_COLUMNS if column not in self._AUCTION_STRING_COLUMNS}
+            )
             auction = auction.sort_values(["trade_date", "session", "ts_code"]).reset_index(drop=True)
         auction, conversions = normalize_auction_units(auction)
         metadata: dict[str, object] = {
@@ -2414,34 +2419,51 @@ def _run_domain_tasks(tasks: list[DomainBuildTask]) -> dict[str, DomainBuildResu
 
 
 def _pad_union_schema(merged: pd.DataFrame, schema_only: Mapping[str, object]) -> pd.DataFrame:
-    """Add zero-row dataset columns in one Arrow pass.
+    """Add the columns only zero-row datasets carry, typed as the rows path types them.
 
-    Assigning each missing column through pandas on an 8M-row union recopies
-    the frame per column. Arrow appends null arrays without rewriting row data.
+    A padded union has to write what the union would have written had the
+    dataset had rows, or the slots of one domain disagree after the replay
+    round trip (``string`` vs ``large_string``, ``int64`` vs ``double``) and
+    the Timeview cannot merge a part that spans them. The union's own columns
+    are therefore left as they are and only the missing ones are added,
+    all-NA: numbers as float64 (the union NaN-pads a dataset's integer
+    column), strings as the ``string`` dtype, which writes Arrow ``string``
+    where an all-None object column would write ``null`` and refuse the typed
+    rows of later parts in a directory read. One concat adds them all:
+    assigning each column recopies an 8M-row union per column.
     """
-    missing: list[pa.Field] = []
-    seen: set[str] = set(merged.columns)
-    if schema_only and "dataset" not in seen:
-        missing.append(pa.field("dataset", pa.string()))
-        seen.add("dataset")
-    for schema in schema_only.values():
+    missing: dict[str, str] = {}
+    if schema_only and "dataset" not in merged.columns:
+        missing["dataset"] = "string"
+    for dataset, schema in schema_only.items():
         if not isinstance(schema, pa.Schema):
             continue
         for field in schema:
-            if field.name not in seen:
-                missing.append(field)
-                seen.add(field.name)
+            if field.name not in merged.columns and field.name not in missing:
+                missing[field.name] = _padding_dtype(dataset, field)
     if not missing:
         return merged
-    if merged.empty:
-        for field in missing:
-            merged[field.name] = pd.Series(dtype=pd.ArrowDtype(field.type))
-        return merged
-    table = pa.Table.from_pandas(merged, preserve_index=False)
-    n = table.num_rows
-    for field in missing:
-        table = table.append_column(field.name, pa.nulls(n, type=field.type))
-    return table.to_pandas(types_mapper=pd.ArrowDtype)
+    padding = pd.DataFrame(
+        {name: pd.Series(index=merged.index, dtype=dtype) for name, dtype in missing.items()},
+        index=merged.index,
+    )
+    return pd.concat([merged, padding], axis=1, copy=False)
+
+
+def _padding_dtype(dataset: str, field: pa.Field) -> str:
+    """The pandas dtype a zero-row dataset's footer field is padded with."""
+    if pa.types.is_string(field.type) or pa.types.is_large_string(field.type):
+        return "string"
+    if pa.types.is_integer(field.type) or pa.types.is_floating(field.type):
+        return "float64"
+    if pa.types.is_boolean(field.type):
+        return "boolean"
+    if pa.types.is_null(field.type):
+        return "object"
+    raise TypeError(
+        f"{dataset}.{field.name}: no padding dtype for Arrow type {field.type} "
+        "that matches what the rows path would write"
+    )
 
 
 def _window_start(decision_time: datetime, months: int) -> pd.Timestamp:

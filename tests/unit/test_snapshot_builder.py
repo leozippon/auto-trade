@@ -10,7 +10,9 @@ from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
+import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
@@ -30,6 +32,7 @@ from autotrade.environment.data.snapshot import (
     SnapshotConfig,
     load_snapshot_manifest,
 )
+from autotrade.environment.replay.timeview import ReplayRows, Timeview
 
 from .fixtures_sandbox import finalize_snapshot_dir
 
@@ -801,6 +804,15 @@ class SnapshotBuilderTest(unittest.TestCase):
             self.assertTrue(pd.isna(prices["000002.SZ"]))
             self.assertEqual(meta["price_quality"]["derived_price_rows"], 1)
             self.assertEqual(meta["price_quality"]["no_trade_rows"], 1)
+            # Integer raw quantities write the schema an empty slot writes: an
+            # int64 slot beside a double one cannot merge into one as-of part.
+            empty, _ = SnapshotBuilder(raw, Path(tmp) / "missing_events")._build_auction(
+                "20260714", "20260714"
+            )
+            self.assertEqual(
+                pa.Schema.from_pandas(auction, preserve_index=False).remove_metadata(),
+                pa.Schema.from_pandas(empty, preserve_index=False).remove_metadata(),
+            )
 
     def test_auction_builder_drops_unobserved_rows_and_counts_them(self):
         # Suspended codes — and the retired BSE aliases around the 2025-08
@@ -2956,3 +2968,113 @@ def test_external_union_snapshot_fixture_finalizes_under_the_unit_contract(tmp_p
     )
     with pytest.raises(ValueError, match="dataset_columns"):
         finalize_snapshot_dir(stray, kind="decision_input", decision_date="20260105")
+
+
+# Event datasets of one union whose raw history starts on different days, the
+# way the vendor's hm_detail starts in 2022-08 inside a five-year seed: a
+# window before 20211007 evening has no hm_detail row and pads its columns
+# from the raw footer, a later one carries its rows.
+LATE_UNION_DATASETS = ("margin_secs", "block_trade", "hm_detail")
+
+
+def _late_dataset_raw(raw: Path) -> None:
+    for day in ("20211005", "20211006", "20211007"):
+        write(
+            raw / "margin_secs" / f"trade_date={day}.parquet",
+            pd.DataFrame([{
+                "trade_date": day, "ts_code": "000001.SZ", "exchange": "SZSE",
+                "available_at": f"{day[:4]}-{day[4:6]}-{day[6:]} 09:00:00+08:00",
+            }]),
+        )
+    for day in ("20211006", "20211007"):
+        write(
+            raw / "block_trade" / f"trade_date={day}.parquet",
+            pd.DataFrame([{
+                "trade_date": day, "ts_code": "000001.SZ", "price": 10.0,
+                "available_at": f"{day[:4]}-{day[4:6]}-{day[6:]} 21:00:00+08:00",
+            }]),
+        )
+    write(
+        raw / "hm_detail" / "trade_date=20211007.parquet",
+        pd.DataFrame([{
+            "trade_date": "20211007", "ts_code": "000002.SZ", "hm_name": "x",
+            "buy_amount": 1200, "sell_amount": 0,
+            "available_at": "2021-10-07 21:00:00+08:00",
+        }]),
+    )
+
+
+def _late_union_file(builder: SnapshotBuilder, path: Path, decision: datetime, start: str) -> Path:
+    union, _ = builder._build_available_at_domain(
+        LATE_UNION_DATASETS, decision, pd.Timestamp(start, tz="Asia/Shanghai")
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    snapshot_module._write(path, union)
+    return path
+
+
+def test_a_padded_union_replays_to_the_schema_of_the_union_with_rows(tmp_path):
+    """Padding a zero-row dataset's columns must not change how the slot replays.
+
+    The Timeview merges slices of two slots after ``ReplayRows.take``'s pandas
+    round trip; a padded slot that came back ``large_string``/``int64`` beside
+    a slot with rows (``string``/``double``) stopped every five-year replay at
+    the first part spanning hm_detail's start.
+    """
+    raw = tmp_path / "raw"
+    _late_dataset_raw(raw)
+    builder = SnapshotBuilder(raw, tmp_path / "fund_events_missing")
+    padded = _late_union_file(
+        builder, tmp_path / "padded.parquet", datetime(2021, 10, 7, 9, 25, tzinfo=CN_TZ), "2021-10-01"
+    )
+    with_rows = _late_union_file(builder, tmp_path / "rows.parquet", DECISION, "2021-10-01")
+    assert "hm_detail" not in set(pd.read_parquet(padded)["dataset"])
+    assert "hm_detail" in set(pd.read_parquet(with_rows)["dataset"])
+
+    def replayed(path: Path) -> pa.Schema:
+        rows = ReplayRows(path)
+        tables = list(rows.take(np.arange(rows.num_rows)))
+        return pa.concat_tables(tables, promote_options="default").schema.remove_metadata()
+
+    assert replayed(padded) == replayed(with_rows)
+    assert replayed(padded).field("buy_amount").type == pa.float64()
+    assert replayed(padded).field("hm_name").type == pa.string()
+
+
+def test_a_replay_rolls_across_the_slot_where_a_dataset_starts(tmp_path):
+    """One as-of part takes the padded slot's evening row with the next slot's morning row.
+
+    Slot A (20211006) has no hm_detail row and pads it, slot B (20211007)
+    carries it; the first roll after ``continue_into`` publishes A's pending
+    block_trade row together with B's margin_secs row.
+    """
+    raw = tmp_path / "raw"
+    _late_dataset_raw(raw)
+    builder = SnapshotBuilder(raw, tmp_path / "fund_events_missing")
+    snapshot = tmp_path / "decision"
+    _late_union_file(
+        builder, snapshot / "events.parquet", datetime(2021, 10, 5, 23, 59, 59, tzinfo=CN_TZ), "2021-10-01"
+    )
+    slot_a = _late_union_file(
+        builder, tmp_path / "slot_a" / "events.parquet", datetime(2021, 10, 6, 23, 59, 59, tzinfo=CN_TZ), "2021-10-06"
+    )
+    slot_b = _late_union_file(
+        builder, tmp_path / "slot_b" / "events.parquet", datetime(2021, 10, 7, 23, 59, 59, tzinfo=CN_TZ), "2021-10-07"
+    )
+    view = Timeview(host_dir=tmp_path / "asof", snapshot_dir=snapshot, replay={"events": ReplayRows(slot_a)})
+    view.refresh(pd.Timestamp("2021-10-06 09:20:00", tz=CN_TZ))
+    view.continue_into(
+        lambda: {"events": ReplayRows(slot_b)},
+        universe_file=None,
+        replay_text_library_dir=None,
+        stash_dir=None,
+    )
+    view.refresh(pd.Timestamp("2021-10-07 09:20:00", tz=CN_TZ))
+    spanning = pq.read_table(tmp_path / "asof" / "events" / "part_0002.parquet")
+    assert spanning["dataset"].to_pylist() == ["block_trade", "margin_secs"]
+    assert spanning["trade_date"].to_pylist() == ["20211006", "20211007"]
+    view.refresh(pd.Timestamp("2021-10-08 03:10:00", tz=CN_TZ))
+    events = pd.read_parquet(tmp_path / "asof" / "events")
+    assert len(events) == 6
+    hm = events[events["dataset"] == "hm_detail"]
+    assert hm["hm_name"].tolist() == ["x"] and hm["buy_amount"].tolist() == [1200.0]
