@@ -313,7 +313,13 @@ class OpenAICompatibleConfig:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}", self.model):
             raise ValueError("model must be a safe identifier")
         _validate_base_url(self.base_url)
-        if self.request_dialect not in {"openai", "deepseek", "vllm-qwen", "mimo"}:
+        if self.request_dialect not in {
+            "openai",
+            "deepseek",
+            "vllm-qwen",
+            "mimo",
+            "openai-responses",
+        }:
             raise ValueError("unsupported request dialect")
         if self.timeout_seconds <= 0 or self.max_tokens <= 0:
             raise ValueError("timeout_seconds and max_tokens must be positive")
@@ -364,7 +370,14 @@ class OpenAICompatibleConfig:
 
     @property
     def endpoint(self) -> str:
-        return self.base_url.rstrip("/") + "/chat/completions"
+        # The responses dialect posts to its own path; every other dialect
+        # shares the Chat Completions endpoint.
+        suffix = (
+            "/responses"
+            if self.request_dialect == "openai-responses"
+            else "/chat/completions"
+        )
+        return self.base_url.rstrip("/") + suffix
 
     def safe_metadata(self) -> dict[str, Any]:
         metadata = {
@@ -439,50 +452,32 @@ class OpenAICompatibleProxy:
             sleep=self._sleep,
         )
 
-    def complete(
+    def _output_token_field(self) -> str:
+        """The wire field carrying this dialect's output budget."""
+
+        return (
+            "max_completion_tokens"
+            if self.config.request_dialect == "mimo"
+            else "max_tokens"
+        )
+
+    def _build_request_body(
         self,
         messages: Sequence[ChatMessage],
         *,
-        tools: Sequence[Mapping[str, object]] = (),
-        tool_choice: str | Mapping[str, object] = "auto",
-        max_tokens: int | None = None,
-    ) -> ProviderResponse:
-        if not messages:
-            raise ValueError("messages cannot be empty")
+        tools: Sequence[Mapping[str, object]],
+        tool_choice: str | Mapping[str, object],
+        stream: bool,
+        max_tokens: int,
+    ) -> dict[str, object]:
+        """One attempt's payload; a dialect may replace it wholesale."""
+
         dialect = self.config.request_dialect
-        if dialect == "mimo" and tools and tool_choice not in ("auto", "none"):
-            raise ValueError("mimo honours only tool_choice auto or none")
-        if dialect == "mimo" and tool_choice == "none":
-            # MiMo would answer a "none" as "auto"; a model that sees no tool
-            # schema cannot call one, which is what "none" asks for.
-            tools = ()
-        output_field = "max_completion_tokens" if dialect == "mimo" else "max_tokens"
-        stream = bool(tools and self.config.stream_tool_calls)
-        requested_max_tokens = max_tokens or self.config.max_tokens
-        if self.config.max_output_tokens is not None:
-            requested_max_tokens = min(
-                requested_max_tokens, self.config.max_output_tokens
-            )
-        # Vendor-like behaviour: never reject a request merely because the
-        # requested output budget does not fit. Clamp max_tokens to the
-        # remaining window minus tokenizer slack. Only a prompt that leaves
-        # no room after that slack is a true overflow.
-        _fits, estimated_prompt_tokens, context_window = context_request_fits(
-            self,
-            messages,
-            tools=tools,
-            max_tokens=requested_max_tokens,
-        )
-        requested_max_tokens, fits = clamp_requested_max_tokens(
-            requested_max_tokens=requested_max_tokens,
-            estimated_prompt_tokens=estimated_prompt_tokens,
-            context_window=context_window,
-        )
         body: dict[str, object] = {
             "model": self.config.model,
             "messages": [message.to_record() for message in messages],
             "stream": stream,
-            output_field: requested_max_tokens,
+            self._output_token_field(): max_tokens,
         }
         if dialect == "vllm-qwen":
             # Thinking mode keeps the server-side sampling defaults; the
@@ -521,6 +516,69 @@ class OpenAICompatibleProxy:
         if tools:
             body["tools"] = [dict(item) for item in tools]
             body["tool_choice"] = tool_choice
+        return body
+
+    def _set_output_budget(self, body: dict[str, object], max_tokens: int) -> None:
+        """Rewrite one attempt's output budget (the overflow shrink path)."""
+
+        body[self._output_token_field()] = max_tokens
+
+    def _parse_response_payload(
+        self, payload: bytes, *, stream: bool
+    ) -> ProviderResponse:
+        """Turn one raw provider payload into a response; the parse seam."""
+
+        return (
+            _parse_stream_response(payload, expected_model=self.config.model)
+            if stream
+            else _parse_response(payload, expected_model=self.config.model)
+        )
+
+    def complete(
+        self,
+        messages: Sequence[ChatMessage],
+        *,
+        tools: Sequence[Mapping[str, object]] = (),
+        tool_choice: str | Mapping[str, object] = "auto",
+        max_tokens: int | None = None,
+    ) -> ProviderResponse:
+        if not messages:
+            raise ValueError("messages cannot be empty")
+        dialect = self.config.request_dialect
+        if dialect == "mimo" and tools and tool_choice not in ("auto", "none"):
+            raise ValueError("mimo honours only tool_choice auto or none")
+        if dialect == "mimo" and tool_choice == "none":
+            # MiMo would answer a "none" as "auto"; a model that sees no tool
+            # schema cannot call one, which is what "none" asks for.
+            tools = ()
+        stream = bool(tools and self.config.stream_tool_calls)
+        requested_max_tokens = max_tokens or self.config.max_tokens
+        if self.config.max_output_tokens is not None:
+            requested_max_tokens = min(
+                requested_max_tokens, self.config.max_output_tokens
+            )
+        # Vendor-like behaviour: never reject a request merely because the
+        # requested output budget does not fit. Clamp max_tokens to the
+        # remaining window minus tokenizer slack. Only a prompt that leaves
+        # no room after that slack is a true overflow.
+        _fits, estimated_prompt_tokens, context_window = context_request_fits(
+            self,
+            messages,
+            tools=tools,
+            max_tokens=requested_max_tokens,
+        )
+        requested_max_tokens, fits = clamp_requested_max_tokens(
+            requested_max_tokens=requested_max_tokens,
+            estimated_prompt_tokens=estimated_prompt_tokens,
+            context_window=context_window,
+        )
+        body = self._build_request_body(
+            messages,
+            tools=tools,
+            tool_choice=tool_choice,
+            stream=stream,
+            max_tokens=requested_max_tokens,
+        )
         raw = json.dumps(body, ensure_ascii=False, allow_nan=False).encode("utf-8")
         headers = {
             "Authorization": f"Bearer {self.config.api_key}",
@@ -572,11 +630,7 @@ class OpenAICompatibleProxy:
                     raw,
                     _remaining_call_seconds(call_deadline),
                 )
-                response = (
-                    _parse_stream_response(payload, expected_model=self.config.model)
-                    if stream
-                    else _parse_response(payload, expected_model=self.config.model)
-                )
+                response = self._parse_response_payload(payload, stream=stream)
                 _remaining_call_seconds(call_deadline)
             # pi-lens-ignore: ast-grep:no-boolean-in-except
             except (LLMProxyError, OSError, RuntimeError, TypeError, ValueError) as exc:
@@ -603,7 +657,7 @@ class OpenAICompatibleProxy:
                     )
                     if shrunk is not None:
                         requested_max_tokens = shrunk
-                        body[output_field] = requested_max_tokens
+                        self._set_output_budget(body, requested_max_tokens)
                         raw = json.dumps(
                             body, ensure_ascii=False, allow_nan=False
                         ).encode("utf-8")

@@ -7,6 +7,9 @@ from pathlib import Path
 from typing import cast
 
 from . import deepseek as _deepseek
+
+# Temporary Lighting relay hook: see ``lighting.py`` for the removal steps.
+from . import lighting as _lighting
 from .deepseek import DeepSeekConfig, DeepSeekProxy
 from .openai_compatible import (
     OpenAICompatibleConfig,
@@ -21,7 +24,12 @@ LEGACY_LOCAL_QWEN_MODEL = "qwen3.8-27b-local"
 MIMO_FLASH_MODEL = "mimo-v2.6-flash"
 MIMO_PRO_MODEL = "mimo-v2.6-pro"
 MIMO_MODELS = (MIMO_FLASH_MODEL, MIMO_PRO_MODEL)
-MODEL_CHOICES = (LOCAL_QWEN_MODEL, *_deepseek.MODEL_CHOICES, *MIMO_MODELS)
+MODEL_CHOICES = (
+    LOCAL_QWEN_MODEL,
+    *_deepseek.MODEL_CHOICES,
+    *MIMO_MODELS,
+    *_lighting.MODEL_CHOICES,
+)
 
 
 def canonicalize_model_name(model: str) -> str:
@@ -76,7 +84,31 @@ _MIMO_PROFILE = ModelProfile(
     context_window_tokens=1_000_000,
     max_output_tokens=131_072,
 )
-_PROFILES = (_DEEPSEEK_PROFILE, _VLLM_PROFILE, _MIMO_PROFILE)
+# --- Temporary Lighting relay hook (delete with ``lighting.py``) -----------
+# The relay's own ids with one shared provider, key and base URL, and the
+# dialect and window each id needs; ``lighting.MODEL_PROFILES`` is the single
+# source for both this registration and the relay's builder.
+_LIGHTING_PROFILES = {
+    model: ModelProfile(
+        provider="lighting",
+        api_key_env=_lighting.API_KEY_ENV,
+        base_url_env=_lighting.BASE_URL_ENV,
+        default_base_url=_lighting.DEFAULT_BASE_URL,
+        request_dialect=dialect,
+        context_window_tokens=context_window,
+        max_output_tokens=max_output,
+    )
+    for model, dialect, context_window, max_output in _lighting.MODEL_PROFILES
+}
+# ---------------------------------------------------------------------------
+
+_PROFILES = (
+    _DEEPSEEK_PROFILE,
+    _VLLM_PROFILE,
+    _MIMO_PROFILE,
+    # Temporary Lighting relay hook (delete with ``lighting.py``).
+    *_LIGHTING_PROFILES.values(),
+)
 
 # Smallest declared window in the catalog. A component that must pick a
 # window-dependent default before the run's model roles are known (the
@@ -142,6 +174,8 @@ def model_profile(model: str) -> ModelProfile:
         return _VLLM_PROFILE
     if model in MIMO_MODELS:
         return _MIMO_PROFILE
+    if model in _LIGHTING_PROFILES:  # Temporary Lighting relay hook
+        return _LIGHTING_PROFILES[model]
     raise ValueError(
         f"unsupported model {model!r}; the catalog has {', '.join(MODEL_CHOICES)}"
     )
@@ -190,6 +224,22 @@ def build_model_gateway(
         if profile.base_url_env is not None
         else ""
     ) or profile.default_base_url
+    if profile.provider == "lighting":  # Temporary Lighting relay hook
+        return _lighting.build_gateway(
+            profile=profile,
+            model=model,
+            api_key=key,
+            base_url=base_url,
+            env_file=env_file,
+            timeout_seconds=timeout_seconds,
+            max_retries=max_retries,
+            retry_backoff_seconds=retry_backoff_seconds,
+            max_tokens=effective_max_tokens,
+            temperature=temperature,
+            thinking_enabled=thinking_enabled,
+            reasoning_effort=reasoning_effort,
+            conversation_log_dir=conversation_log_dir,
+        )
     if profile.provider == "deepseek":
         return cast(
             LLMProxy,
