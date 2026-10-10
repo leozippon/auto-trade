@@ -1,35 +1,9 @@
-"""Temporary LightingTheWord (New API relay) provider integration.
+"""LightingTheWord (New API relay) gateway.
 
-The relay is a short-lived hosted provider used to compare model roles against
-the local Qwen, DeepSeek and MiMo gateways: one key serves Anthropic's models
-and DeepSeek-V4.1-Flash over ``/v1/chat/completions``, and the gpt-6 family
-over ``/v1/responses`` because that family refuses function tools on the Chat
-Completions endpoint. Everything relay-specific lives in this module — the
-model ids, the profiles' dialect and windows, the responses payload and stream
-assembly, and the primary/alternate-key fallback — so the integration can be
-deleted without a trace.
-
-Removal steps (all of them):
-
-1. delete this module and ``tests/unit/test_llm_lighting.py``;
-2. delete the ``_LIGHTING_*`` block in ``model_profiles.py`` and the three
-   lines that use it (the ``MODEL_CHOICES`` entry, the ``_PROFILES`` entry, the
-   ``model_profile()`` lookup and the ``build_model_gateway()`` branch);
-3. in ``openai_compatible.py``, delete the ``openai-responses`` dialect value
-   and endpoint branch, restoring the Chat Completions-only endpoint. The four
-   extension methods there (``_output_token_field``, ``_build_request_body``,
-   ``_set_output_budget``, ``_parse_response_payload``) are dialect-neutral
-   seams extracted from the previous inline code; they may stay, or be inlined
-   again, with no behavior change for any provider.
-
-Verified against the relay on 2026-10-10: the seven ids exist; ``/v1/responses``
-takes flat function tools, ``reasoning.effort``, ``max_output_tokens``,
-``tool_choice`` (including ``none``/``required``), assistant ``output_text`` and
-``function_call``/``function_call_output`` input items, and streams
-``response.output_item.added``/``response.function_call_arguments.delta``/
-``response.output_text.delta`` with usage on ``response.completed``; the
-Anthropic ids answer Chat Completions with function tools; DeepSeek-V4.1-Flash
-answers with ``thinking`` plus ``reasoning_effort``.
+The relay serves its gpt-6 family over ``/v1/responses`` — that family refuses
+function tools on Chat Completions — and its Anthropic ids and
+DeepSeek-V4.1-Flash over ``/v1/chat/completions``, with a primary credential
+and an alternate one.
 """
 
 from __future__ import annotations

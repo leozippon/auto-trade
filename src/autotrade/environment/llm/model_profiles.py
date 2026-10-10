@@ -7,8 +7,6 @@ from pathlib import Path
 from typing import cast
 
 from . import deepseek as _deepseek
-
-# Temporary Lighting relay hook: see ``lighting.py`` for the removal steps.
 from . import lighting as _lighting
 from .deepseek import DeepSeekConfig, DeepSeekProxy
 from .openai_compatible import (
@@ -84,10 +82,6 @@ _MIMO_PROFILE = ModelProfile(
     context_window_tokens=1_000_000,
     max_output_tokens=131_072,
 )
-# --- Temporary Lighting relay hook (delete with ``lighting.py``) -----------
-# The relay's own ids with one shared provider, key and base URL, and the
-# dialect and window each id needs; ``lighting.MODEL_PROFILES`` is the single
-# source for both this registration and the relay's builder.
 _LIGHTING_PROFILES = {
     model: ModelProfile(
         provider="lighting",
@@ -100,13 +94,11 @@ _LIGHTING_PROFILES = {
     )
     for model, dialect, context_window, max_output in _lighting.MODEL_PROFILES
 }
-# ---------------------------------------------------------------------------
 
 _PROFILES = (
     _DEEPSEEK_PROFILE,
     _VLLM_PROFILE,
     _MIMO_PROFILE,
-    # Temporary Lighting relay hook (delete with ``lighting.py``).
     *_LIGHTING_PROFILES.values(),
 )
 
@@ -174,7 +166,7 @@ def model_profile(model: str) -> ModelProfile:
         return _VLLM_PROFILE
     if model in MIMO_MODELS:
         return _MIMO_PROFILE
-    if model in _LIGHTING_PROFILES:  # Temporary Lighting relay hook
+    if model in _LIGHTING_PROFILES:
         return _LIGHTING_PROFILES[model]
     raise ValueError(
         f"unsupported model {model!r}; the catalog has {', '.join(MODEL_CHOICES)}"
@@ -224,7 +216,7 @@ def build_model_gateway(
         if profile.base_url_env is not None
         else ""
     ) or profile.default_base_url
-    if profile.provider == "lighting":  # Temporary Lighting relay hook
+    if profile.provider == "lighting":
         return _lighting.build_gateway(
             profile=profile,
             model=model,
