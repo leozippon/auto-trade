@@ -14,7 +14,7 @@
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 CRON_TZ=Asia/Shanghai
-REPO_ROOT=/Data2/lzp/ADMCubeQuant
+REPO_ROOT=/Data2/lzp/auto-trade
 QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 
 # The operator places the sheet's orders by hand: an order that fills at the

@@ -23,7 +23,7 @@
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 CRON_TZ=Asia/Shanghai
-REPO_ROOT=/Data2/lzp/ADMCubeQuant
+REPO_ROOT=/Data2/lzp/auto-trade
 QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # The queue's round files, filled in this order; separated by spaces.
 ROUNDS=scripts/experiments/create_round_20261008b.py

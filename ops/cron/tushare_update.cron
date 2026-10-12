@@ -3,7 +3,7 @@
 # jobs, append/refresh this block instead of replacing the whole crontab.
 # Install or refresh with: /home/lzp/miniconda3/envs/quant/bin/python ops/cron/install_tushare_cron.py
 #
-# The runner reads /Data2/lzp/ADMCubeQuant/.env when TUSHARE_TOKEN is not already
+# The runner reads /Data2/lzp/auto-trade/.env when TUSHARE_TOKEN is not already
 # exported, writes every run outcome to its own 14-day log under
 # logs/tushare/cron/, persists per-job state under .runtime/tushare/jobs/, and
 # skips duplicate successful job/date runs.
@@ -11,7 +11,7 @@
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 CRON_TZ=Asia/Shanghai
-REPO_ROOT=/Data2/lzp/ADMCubeQuant
+REPO_ROOT=/Data2/lzp/auto-trade
 QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 
 # Natural-day landing jobs: these tiers publish on weekends and A-share
