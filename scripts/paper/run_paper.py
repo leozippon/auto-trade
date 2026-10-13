@@ -31,6 +31,7 @@ import sys
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
+from typing import cast
 
 SCRIPTS_ROOT = Path(__file__).resolve().parents[1]
 if str(SCRIPTS_ROOT) not in sys.path:
@@ -40,10 +41,11 @@ from _bootstrap import add_repo_src
 
 add_repo_src(__file__)
 
+from autotrade.environment import gpu as _gpu
 from autotrade.environment.executor import StrategyExecutor
 from autotrade.environment.llm import build_model_gateway
 from autotrade.environment.replay.engine import StrategyDataView
-from autotrade.environment.sandbox import SandboxConfig
+from autotrade.environment.sandbox import SandboxConfig, SandboxLimits
 from autotrade.environment.strategy import CN_TZ
 from autotrade.paper.book import (
     SOURCE_HISTORY_NAME,
@@ -73,7 +75,7 @@ from autotrade.paper.storage import read_jsonl
 from autotrade.paper.titles import require_landed_titles
 from autotrade.paper.verdict import record_verdict
 from autotrade.pipelines.calendar import load_sse_trading_days
-from autotrade.pipelines.hitl_state import select_gpus
+from autotrade.pipelines.hitl_state import gpu_claims, select_gpus
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_STATE_ROOT = PAPER_STATE_DIR
@@ -187,6 +189,46 @@ def source_history(args: argparse.Namespace) -> int:
     return 0
 
 
+# A book's strategy fits a small model and declares no GPU memory of its own.
+# The machine is shared and an empty card is often unavailable, so when none
+# is the run takes the emptiest matching cards that keep this much free
+# instead of refusing to decide.
+PAPER_GPU_MIN_FREE_MIB = 8 * 1024
+
+
+def _paper_gpu_devices(limits: SandboxLimits) -> list[int]:
+    """Cards for one book's container.
+
+    The one selection first (whole cards nobody uses and no running research
+    arm claims), as everywhere else; with no empty card, the emptiest matching
+    cards no running arm holds that still have ``PAPER_GPU_MIN_FREE_MIB`` free.
+    """
+
+    experiments_root = REPO_ROOT / "experiments"
+    try:
+        return select_gpus(
+            experiments_root, limits.gpu_count, require_name=limits.gpu_name_filter
+        )
+    except _gpu.GpuUnavailableError:
+        claimed = {
+            device
+            for devices in gpu_claims(experiments_root).values()
+            for device in devices
+        }
+        wanted = (limits.gpu_name_filter or "").lower()
+        rows = [
+            (cast(int, gpu["memory_free_mib"]), cast(int, gpu["index"]))
+            for gpu in _gpu.list_gpus()
+            if (not wanted or wanted in str(gpu["name"]).lower())
+            and cast(int, gpu["index"]) not in claimed
+            and cast(int, gpu["memory_free_mib"]) >= PAPER_GPU_MIN_FREE_MIB
+        ]
+        rows.sort(reverse=True)
+        if len(rows) < limits.gpu_count:
+            raise
+        return [index for _free, index in rows[: limits.gpu_count]]
+
+
 def _executor_on_free_gpus(
     strategy_path: Path,
     sandbox: SandboxConfig,
@@ -197,18 +239,14 @@ def _executor_on_free_gpus(
     """A book's strategy container, on cards taken as it starts.
 
     A book holds no card between its runs, so a run that has a decision to
-    make takes the ones its book asks for from the one selection
-    (``hitl_state.select_gpus``): whole cards nobody uses and no running
-    research arm claims. With too few free the book cannot decide, and its
-    sheet says why.
+    make takes the ones its book asks for through ``_paper_gpu_devices``.
     """
 
     limits = sandbox.limits
     if limits.gpu_count > 0:
-        devices = select_gpus(
-            REPO_ROOT / "experiments", limits.gpu_count, require_name=limits.gpu_name_filter
+        sandbox = replace(
+            sandbox, limits=replace(limits, gpu_devices=tuple(_paper_gpu_devices(limits)))
         )
-        sandbox = replace(sandbox, limits=replace(limits, gpu_devices=tuple(devices)))
     return docker_executor(strategy_path, sandbox, view, state_dir, models_dir)
 
 
