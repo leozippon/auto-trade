@@ -280,13 +280,28 @@ def render_orders(book: Book, trade_date: str) -> str:
     return "\n".join(lines)
 
 
+def exit_holdings(state: Mapping[str, object]) -> list[dict[str, object]]:
+    """Holdings of the last settled account, not assumed historical fills."""
+    account = state.get("account")
+    if not isinstance(account, Mapping):
+        raise ValueError("persisted account is invalid; cannot list exit holdings")
+    positions = account.get("positions")
+    if not isinstance(positions, list):
+        raise ValueError("persisted account positions must be an explicit list; cannot list exit holdings")
+    decisions = state.get("decisions") or ()
+    quotes = (decisions[-1].get("quotes") or {}) if decisions else {}
+    return [
+        {"symbol": row["symbol"], "name": quotes.get(row["symbol"], {}).get("name", ""),
+         "quantity": row["quantity"], "reference_price": row["last_price"]}
+        for row in positions if row["quantity"] > 0
+    ]
+
+
 def render_killed(book: Book, trade_date: str, transition: Mapping[str, object]) -> str:
-    """The sheet of a killed book: no decision, and the holdings its last
-    sheet leaves once every order fills, for the owner to exit by hand."""
+    """The sheet of a killed book: no decision, exit the settled holdings."""
 
     state = read_json(book.root / PAPER_STATE_NAME)
-    decisions = state.get("decisions") or ()
-    target = order_sheet(book.root, str(decisions[-1]["trade_date"]), state=state)["target"] if decisions else []
+    target = exit_holdings(state)
     lines = [f"# Paper 订单 · {_day(trade_date)} · 已终止（killed — exit these holdings by hand）", ""]
     if book.note:
         lines += [f"> {book.note}", ""]
@@ -300,7 +315,7 @@ def render_killed(book: Book, trade_date: str, transition: Mapping[str, object])
     ]
     if target:
         lines += [
-            f"## 待手工退出的持仓（{len(target)} 只，按上一张订单全部成交计）",
+            f"## 待手工退出的持仓（{len(target)} 只，按最后已结算账户计）",
             "",
             "| 代码 | 名称 | 股数 |",
             "| --- | --- | ---: |",
@@ -313,10 +328,10 @@ def render_killed(book: Book, trade_date: str, transition: Mapping[str, object])
     return "\n".join(lines)
 
 
-def render_failure(book: Book, trade_date: str, error: BaseException) -> str:
+def render_failure(book: Book | None, trade_date: str, error: BaseException) -> str:
     message = str(error).strip().splitlines()[0] if str(error).strip() else type(error).__name__
     lines = [f"# Paper 订单 · {_day(trade_date)} · 未生成", ""]
-    if book.note:
+    if book is not None and book.note:
         lines += [f"> {book.note}", ""]
     lines += [
         f"本次运行失败，{_day(trade_date)} 没有订单。原因：{type(error).__name__}: {message}",

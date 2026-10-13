@@ -214,11 +214,16 @@ def record_verdict(book: Book) -> dict[str, object]:
     transition to ``verdict.jsonl`` and write the reading to ``verdict.json``."""
 
     with writer_lock(book.root):
-        reading = paper_reading(book)
-        transition = reading["transition"]
-        if transition is not None and book_status(book.root) == "observing":
-            append_jsonl_once(book.root / VERDICT_LOG_NAME, transition)
-        write_json_atomic(book.root / VERDICT_NAME, reading)
+        return record_verdict_locked(book)
+
+
+def record_verdict_locked(book: Book) -> dict[str, object]:
+    """Same persistent reading when the run already holds the writer lock."""
+    reading = paper_reading(book)
+    transition = reading["transition"]
+    if transition is not None and book_status(book.root) == "observing":
+        append_jsonl_once(book.root / VERDICT_LOG_NAME, transition)
+    write_json_atomic(book.root / VERDICT_NAME, reading)
     return reading
 
 
@@ -392,4 +397,4 @@ def _stored_transition(root: Path) -> dict[str, object]:
     return rows[0]
 
 
-__all__ = ["VERDICT_NAME", "evidence_reading", "paper_reading", "record_verdict"]
+__all__ = ["VERDICT_NAME", "evidence_reading", "paper_reading", "record_verdict", "record_verdict_locked"]

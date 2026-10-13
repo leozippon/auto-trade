@@ -15,8 +15,9 @@ A book that fails writes its failure to the same two files and the run goes on
 to the next book; the run exits non-zero if any book failed. A book that reads
 announcement titles fails this way, after settling, when the title job's run
 its decision relies on has not succeeded (``paper/titles.py``). Once a book's
-sheet is written the run reads its Paper verdict (``paper/verdict.py``); a
-reading that fails fails the book and leaves the sheet as it is. A killed book
+settlement is journaled the run reads its Paper verdict (``paper/verdict.py``),
+before executing any new strategy decision or publishing the sheet; a reading
+that fails writes a failure sheet. A killed book
 decides nothing: its sheet lists the holdings to exit by hand, and it is
 skipped, not failed. ``verdict`` reads every book's verdict (or ``--book``'s)
 and prints it as JSON.
@@ -49,12 +50,14 @@ from autotrade.environment.sandbox import SandboxConfig, SandboxLimits
 from autotrade.environment.strategy import CN_TZ
 from autotrade.paper.book import (
     SOURCE_HISTORY_NAME,
+    Book,
     VERDICT_LOG_NAME,
     book_status,
     copy_source_history,
     create_book,
     load_book,
     write_source_history,
+    verify_book_artifact,
 )
 from autotrade.paper.books import (
     PAPER_STATE_DIR,
@@ -63,7 +66,7 @@ from autotrade.paper.books import (
     run_order,
     validate_book_id,
 )
-from autotrade.paper.engine import DailyPaperEngine, PaperWriterBusy, docker_executor
+from autotrade.paper.engine import DailyPaperEngine, PaperWriterBusy, docker_executor, writer_lock, write_run_status
 from autotrade.paper.orders import (
     render_failure,
     render_killed,
@@ -73,7 +76,7 @@ from autotrade.paper.orders import (
 from autotrade.paper.pit import BookPITData
 from autotrade.paper.storage import read_jsonl
 from autotrade.paper.titles import require_landed_titles
-from autotrade.paper.verdict import record_verdict
+from autotrade.paper.verdict import record_verdict, record_verdict_locked
 from autotrade.pipelines.calendar import load_sse_trading_days
 from autotrade.pipelines.hitl_state import gpu_claims, select_gpus
 
@@ -251,7 +254,27 @@ def _executor_on_free_gpus(
 
 
 def run_book(book_id: str, root: Path, trade_date: str, orders_dir: Path) -> None:
-    book = load_book(root)
+    # Own initialization, engine restoration, verdict and publication as one
+    # writer. A busy contender never touches the active writer's output.
+    with writer_lock(root):
+        book = None
+        try:
+            book = load_book(root)
+            _run_book_locked(book_id, book, trade_date, orders_dir)
+        except PaperWriterBusy:
+            raise
+        except Exception as exc:
+            write_run_status(root, trade_date, exc)
+            text = render_failure(book, trade_date, exc)
+            print(text, file=sys.stderr)
+            print(f"[{book_id}] failure written to {write_orders(orders_dir / book_id, trade_date, text)}", file=sys.stderr)
+            raise
+        else:
+            write_run_status(root, trade_date)
+
+
+def _run_book_locked(book_id: str, book: Book, trade_date: str, orders_dir: Path) -> None:
+    root = book.root
     if trade_date not in set(load_sse_trading_days(book.raw_dir)):
         print(f"[{book_id}] {trade_date} is not an SSE session; nothing to decide")
         return
@@ -278,6 +301,16 @@ def run_book(book_id: str, root: Path, trade_date: str, orders_dir: Path) -> Non
             max_intraday_row_group_rows=book.max_intraday_row_group_rows,
         )
 
+    verify_book_artifact(book)
+
+    def verdict_gate() -> bool:
+        reading = record_verdict_locked(book)
+        print(
+            f"[{book_id}] verdict: {reading['status']} after {reading['days']} Paper sessions, "
+            f"next checkpoint at {reading['next_checkpoint']}", file=sys.stderr,
+        )
+        return reading["status"] != "killed"
+
     engine = DailyPaperEngine(
         strategy_path=book.strategy_path,
         strategy_revision=book.artifact_id,
@@ -289,26 +322,16 @@ def run_book(book_id: str, root: Path, trade_date: str, orders_dir: Path) -> Non
         sandbox=book.sandbox,
         executor_factory=_executor_on_free_gpus,
         decision_check=lambda at: require_landed_titles(book.snapshot_config, at, REPO_ROOT),
+        after_settlement=verdict_gate,
     )
-    try:
-        engine.run_day(trade_date)
-    except PaperWriterBusy:
-        raise  # the running writer owns the sheet
-    except Exception as exc:
-        text = render_failure(book, trade_date, exc)
-        print(text, file=sys.stderr)
-        print(f"[{book_id}] failure written to {write_orders(sheets, trade_date, text)}", file=sys.stderr)
-        raise
-    text = render_orders(book, trade_date)
+    engine.run_day(trade_date, lock_held=True)
+    if book_status(root) == "killed":
+        transitions, _skipped = read_jsonl(root / VERDICT_LOG_NAME)
+        text = render_killed(book, trade_date, transitions[0])
+    else:
+        text = render_orders(book, trade_date)
     print(text)
-    print(f"[{book_id}] orders written to {write_orders(sheets, trade_date, text)}", file=sys.stderr)
-    # After the sheet, so the reading never delays it; a failure fails the book.
-    reading = record_verdict(book)
-    print(
-        f"[{book_id}] verdict: {reading['status']} after {reading['days']} Paper sessions, "
-        f"next checkpoint at {reading['next_checkpoint']}",
-        file=sys.stderr,
-    )
+    print(f"[{book_id}] sheet written to {write_orders(sheets, trade_date, text)}", file=sys.stderr)
 
 
 def verdict(args: argparse.Namespace) -> int:

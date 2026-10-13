@@ -101,6 +101,7 @@ class Book:
     # Pinned at creation: checkpoint_days, kill_confidence,
     # confirm_confidence, max_drawdown, active_max_drawdown, panel_seed.
     verdict_rules: dict[str, object]
+    artifact_fingerprint: str = ""
 
 
 def create_book(
@@ -372,7 +373,18 @@ def load_book(state_root: str | Path) -> Book:
         fundamental_events_status=Path(record["fundamental_events_status"]),
         benchmark_index=str(record["benchmark_index"]),
         verdict_rules=dict(record["verdict_rules"]),
+        artifact_fingerprint=str(record.get("artifact_fingerprint") or ""),
     )
+
+
+def verify_book_artifact(book: Book) -> None:
+    """Verify the complete pinned package before execution, under writer_lock.
+
+    Never refresh the pin: differing bytes are a failed run, not a revision.
+    """
+    actual = artifact_fingerprint(book.strategy_path.parent, book.models_dir)
+    if not book.artifact_fingerprint or actual != book.artifact_fingerprint:
+        raise ValueError("Paper artifact fingerprint mismatch; refusing to execute the strategy or models")
 
 
 def book_status(state_root: str | Path) -> str:
@@ -434,5 +446,6 @@ __all__ = [
     "load_book",
     "open_incubating_books",
     "require_incubating_place",
+    "verify_book_artifact",
     "write_source_history",
 ]

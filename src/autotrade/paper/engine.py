@@ -34,7 +34,7 @@ import os
 import shutil
 import uuid
 from collections.abc import Callable, Iterable
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 from datetime import date, datetime, time
 from pathlib import Path
@@ -83,6 +83,30 @@ PAPER_LOCK_NAME = ".paper_engine.lock"
 # the one ``fit_state`` names is current.
 STRATEGY_STATE_NAME = ".strategy_state"
 SNAPSHOT_NAME = "account_snapshot.json"
+# Run health is separate from the account: even startup failures can report
+# without inventing or modifying an account checkpoint.
+RUN_STATUS_NAME = "run_status.json"
+
+
+def write_run_status(root: Path, trade_date: str, error: BaseException | None = None) -> None:
+    write_json_atomic(Path(root) / RUN_STATUS_NAME, {
+        "generated_at": datetime.now(CN_TZ).isoformat(),
+        "trade_date": trade_date,
+        "ok": error is None,
+        "error": f"{type(error).__name__}: {error}" if error is not None else None,
+    })
+
+
+@contextmanager
+def run_reporting(root: Path, trade_date: str):
+    """Caller holds the writer lock; busy writers must never report here."""
+    try:
+        yield
+    except Exception as exc:
+        write_run_status(root, trade_date, exc)
+        raise
+    else:
+        write_run_status(root, trade_date)
 # Journal-row key for the host-side reference quote of an order (last close and
 # name). Namespaced so it cannot collide with a strategy's own order metadata.
 REFERENCE_KEY = "paper_reference"
@@ -198,6 +222,7 @@ class DailyPaperEngine:
         sandbox: SandboxConfig | None = None,
         executor_factory: ExecutorFactory | None = None,
         decision_check: DecisionCheck | None = None,
+        after_settlement: Callable[[], bool] | None = None,
     ) -> None:
         self.strategy_path = Path(strategy_path).resolve()
         if not self.strategy_path.is_file():
@@ -218,27 +243,33 @@ class DailyPaperEngine:
         self.sandbox = sandbox or SandboxConfig()
         self.executor_factory = executor_factory or docker_executor
         self.decision_check = decision_check
+        # Reads the reconciled settlement journals under the writer lock.
+        # False is a terminal stop, not a failed strategy decision.
+        self.after_settlement = after_settlement
 
     # ------------------------------------------------------------------ run
 
-    def run_day(self, trade_date: str) -> dict[str, object]:
+    def run_day(self, trade_date: str, *, lock_held: bool = False) -> dict[str, object]:
         """Settle every landed session before ``trade_date`` and decide it.
 
         Idempotent: a session the book already decided returns its summary
-        without touching data or the strategy.
+        without touching data or the strategy. ``lock_held`` is only for a
+        caller holding ``writer_lock`` through startup and sheet publication.
         """
 
         if len(trade_date) != 8 or not trade_date.isdigit():
             raise ValueError("trade_date must be YYYYMMDD")
         self.state_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.state_root.chmod(0o700)
-        with writer_lock(self.state_root):
+        with (nullcontext() if lock_held else writer_lock(self.state_root)), (
+            nullcontext() if lock_held else run_reporting(self.state_root, trade_date)
+        ):
             try:
                 state = self._load_state()
-                self._reconcile_emissions(state)
                 broker = self._restore_broker(state)
                 pending = self._restore_orders(state)
                 records = read_records(self.state_root)
+                self._reconcile_emissions(state)
             except PaperEngineError:
                 raise
             except (OSError, TypeError, ValueError) as exc:
@@ -249,6 +280,8 @@ class DailyPaperEngine:
             real = RealFills(self.state_root, state, records) if mode(state) is not None else None
             decided = [str(row["trade_date"]) for row in state["decisions"]]
             if decided and trade_date == decided[-1]:
+                if self.after_settlement is not None:
+                    self.after_settlement()
                 return self._summary(state)
             if decided and trade_date < decided[-1]:
                 raise PaperEngineError(
@@ -278,10 +311,11 @@ class DailyPaperEngine:
                 # last checkpoint on disk is the account, so record the error
                 # there.
                 path = self.state_root / PAPER_STATE_NAME
-                persisted = read_json(path) if path.exists() else self._new_state()
-                persisted["last_error"] = f"{type(exc).__name__}: {exc}"
-                write_json_atomic(path, persisted)
-                self._write_snapshot(persisted, self._restore_broker(persisted), ok=False, error=str(exc))
+                if path.exists():
+                    persisted = read_json(path)
+                    persisted["last_error"] = f"{type(exc).__name__}: {exc}"
+                    write_json_atomic(path, persisted)
+                    self._write_snapshot(persisted, self._restore_broker(persisted), ok=False, error=str(exc))
                 if isinstance(exc, PaperEngineError):
                     raise
                 raise PaperEngineError(f"paper session {trade_date} failed: {exc}") from exc
@@ -326,6 +360,11 @@ class DailyPaperEngine:
                 )
         for day in to_settle:
             self._settle(state, data, broker, pending, day, real)
+        # Settlement checkpoints have emitted the persistent evidence the
+        # verdict reads. A newly killed book must not execute even a replayed
+        # strategy call, let alone publish new orders.
+        if self.after_settlement is not None and not self.after_settlement():
+            return
         # The book's first decision is always due, as a replay's first day is.
         first = not state["decisions"]
         if self.schedule.is_due(trade_date, None if first else prior):
@@ -645,8 +684,10 @@ class DailyPaperEngine:
     def _restore_broker(self, state: dict[str, object]) -> DailyBroker:
         broker = DailyBroker(self.profile)
         raw = state.get("account")
-        if not isinstance(raw, dict):
+        if raw is None:
             return broker
+        if not isinstance(raw, dict):
+            raise PaperEngineError("persisted account is invalid")
         cash = raw.get("cash")
         if isinstance(cash, bool) or not isinstance(cash, (int, float)) or not math.isfinite(float(cash)):
             raise PaperEngineError("persisted account cash is invalid")
@@ -779,6 +820,7 @@ __all__ = [
     "PAPER_LOCK_NAME",
     "PAPER_STATE_NAME",
     "REFERENCE_KEY",
+    "RUN_STATUS_NAME",
     "SNAPSHOT_NAME",
     "DailyPaperEngine",
     "PaperAwaitingFills",
@@ -788,4 +830,5 @@ __all__ = [
     "PaperTitlesNotLanded",
     "PaperWriterBusy",
     "writer_lock",
+    "write_run_status",
 ]

@@ -54,13 +54,16 @@ from autotrade.paper.book import (
     BOOK_NAME,
     SOURCE_HISTORY_NAME,
     SOURCE_HISTORY_SCHEMA_VERSION,
+    book_status as persisted_book_status,
+    VERDICT_LOG_NAME,
 )
 from autotrade.paper.books import BOOK_ID_PATTERN, PAPER_STATE_DIR, list_books
-from autotrade.paper.engine import PAPER_STATE_NAME, REFERENCE_KEY, SNAPSHOT_NAME
+from autotrade.paper.engine import PAPER_STATE_NAME, REFERENCE_KEY, SNAPSHOT_NAME, RUN_STATUS_NAME
 from autotrade.paper.orders import (
     CONTINUOUS,
     LIMIT_GUIDANCE,
     order_sheet,
+    exit_holdings,
     order_window,
     window_text,
 )
@@ -291,6 +294,26 @@ def signal_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str, 
     """The latest decision: its orders and the holdings once they fill."""
     root = book_dir(repo_root, book, env)
     state, error = _read_json(root / PAPER_STATE_NAME)
+    try:
+        if persisted_book_status(root) == "killed":
+            if state is None or error:
+                return {"env": env, "state": "unreadable", "error": error or "Paper account state is missing", "signal": None}
+            transitions, _skipped = read_jsonl(root / VERDICT_LOG_NAME)
+            holdings = exit_holdings(state)
+            return {"env": env, "state": "ok", "error": error, "signal": {
+                "instruction": "exit", "trade_date": datetime.now(CN_TZ).strftime("%Y%m%d"),
+                "transition": {key: _text(transitions[0].get(key)) for key in ("status", "date", "reason")},
+                "orders": [], "groups": [],
+                "target": [{"symbol": _text(row["symbol"]), "name": _text(row["name"]),
+                            "quantity": _quantity(row["quantity"]), "reference_price": _number(row["reference_price"])}
+                           for row in holdings], "limit_guidance": None,
+                "cash_after": None, "cash_weight": None, "skipped_lines": 0,
+            }}
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        return {"env": env, "state": "unreadable", "error": str(exc), "signal": None}
+    health = _snapshot_status(root)
+    if health["state"] in {"unreadable", "export_error"}:
+        return {"env": env, "state": health["state"], "error": health["error"], "signal": None}
     decided = _decision_dates(state)
     if error or not decided:
         return {"env": env, "state": "unreadable" if error else "absent", "error": error, "signal": None}
@@ -810,6 +833,14 @@ def _snapshot_status(directory: Path) -> dict[str, object]:
     empty: dict[str, object] = {"raw": None, "generated_at": None, "age_seconds": None}
     if not directory.is_dir():
         return {"state": "absent", "error": None, **empty}
+    run, run_error = _read_json(directory / RUN_STATUS_NAME)
+    if run_error:
+        return {"state": "unreadable", "error": run_error, **empty}
+    if run and run.get("ok") is False:
+        # No account fields: startup/restoration failed without a valid account.
+        lines = (_text(run.get("error")) or "Paper run failed").splitlines()
+        return {"state": "export_error", "error": lines[0], **empty,
+                "generated_at": _utc_iso(_to_utc(run.get("generated_at")))}
     raw, error = _read_json(directory / SNAPSHOT_NAME)
     if raw is None and error is None:
         return {"state": "no_snapshot", "error": None, **empty}
@@ -1009,7 +1040,7 @@ def book_status(repo_root: Path, book: str, env: str = "paper") -> dict[str, obj
     environment = _environment_state(str(snapshot["state"]), state_error, latest)
     # A real-fill book whose closed session is not recorded yet: the next run
     # stops there, so it outranks every state but an unreadable one.
-    awaiting = _awaiting_sessions(root, state) if environment != "unreadable" else []
+    awaiting = _awaiting_sessions(root, state) if environment not in {"unreadable", "export_error"} else []
     return {
         "env": env,
         "book_id": book,
@@ -1074,9 +1105,9 @@ def books_payload(repo_root: Path, env: str = "paper") -> dict[str, object]:
 
 
 def health_payload(repo_root: Path, env: str = "paper") -> dict[str, object]:
-    """For external monitors: every book's status, ``ok`` unless one is unreadable."""
+    """For external monitors: false for unreadable books or failed runs."""
     try:
         books = [book_status(repo_root, book, env) for book in list_books(env_dir(repo_root, env))]
     except RuntimeError as exc:
         return {"ok": False, "env": env, "error": str(exc), "books": []}
-    return {"ok": all(row["state"] != "unreadable" for row in books), "env": env, "error": None, "books": books}
+    return {"ok": all(row["state"] not in {"unreadable", "export_error"} for row in books), "env": env, "error": None, "books": books}
