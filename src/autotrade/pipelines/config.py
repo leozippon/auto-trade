@@ -18,6 +18,7 @@ from autotrade.environment.data.contracts import (
 )
 from autotrade.environment.sandbox import SandboxConfig, SandboxLimits
 from autotrade.environment.strategy import StrategySchedule
+from autotrade.environment.tools.finish_session import offline_trials_count
 
 from . import verdict
 from .calendar import FULL_SPAN, ResearchGeometry
@@ -1117,10 +1118,19 @@ class ResearchSessionResult:
     # The session's cumulative spend at its end, and which attempt ended it.
     budget_used: BudgetUsed = field(default_factory=BudgetUsed)
     attempt: int = 1
+    # The candidate configurations screened offline on research-period data
+    # whose readings shaped this session and that no batch declared through
+    # ``batch_validate``: the terminal delta the session's ``finish_session``
+    # declared, added to the arm's trial family once (0 when it declared none).
+    terminal_offline_trials: int = 0
 
     def __post_init__(self) -> None:
         if self.outcome not in SESSION_OUTCOMES:
             raise ValueError(f"unknown research session outcome: {self.outcome!r}")
+        offline_trials_count(
+            self.terminal_offline_trials,
+            where="ResearchSessionResult.terminal_offline_trials",
+        )
 
 
 ResearchDeveloper = Callable[[ResearchSessionRequest], ResearchSessionResult]

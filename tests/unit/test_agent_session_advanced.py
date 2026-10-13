@@ -55,7 +55,9 @@ from autotrade.environment.tools import (
 from autotrade.pipelines.research_session import SessionBudgetLLM, SessionCallBudget
 
 
-def _passing_gate(node_id: str, seed_replicates: tuple[str, ...] = ()) -> dict[str, object]:
+def _passing_gate(
+    node_id: str, seed_replicates: tuple[str, ...] = (), offline_trials: int = 0
+) -> dict[str, object]:
     """A freeze gate every node passes: these tests are about the Runner."""
     return {"passed": True, "reasons": []}
 

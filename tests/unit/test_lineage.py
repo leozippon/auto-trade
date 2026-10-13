@@ -23,11 +23,13 @@ from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
 from autotrade.environment.runtime import write_json_atomic
 from autotrade.pipelines import verdict
-from autotrade.pipelines.config import AcceptanceRules
+from autotrade.pipelines.config import AcceptanceRules, ResearchSessionResult
 from autotrade.pipelines.experiment import (
     freeze_gate_for,
     lineage_ledger_record,
     lineage_summary,
+    recorded_terminal_offline_trials,
+    trial_family,
 )
 from autotrade.pipelines.ledger import ExperimentLedger, lineage_record
 from autotrade.pipelines.lineage import (
@@ -116,12 +118,14 @@ def _row(directory: Path, index: int, *, seed: int, loading: float, span: str = 
 
 
 def _arm(root: Path, experiment_id: str, rows, *, research=(RESEARCH_START, RESEARCH_END),
-         forward: bool = False, pack: str = "", arm_end: str = "no_deliverable") -> Path:
+         forward: bool = False, pack: str = "", arm_end: str = "no_deliverable",
+         terminal: int = 0) -> Path:
     """An arm whose one research session recorded ``rows`` (``_row`` keywords).
 
     ``forward`` adds what a frozen arm goes on to write: a ``forward`` record
     naming a replay that runs past research end. ``pack`` is the reference
-    pack it mounted; ``arm_end`` the status an unfrozen arm ended with.
+    pack it mounted; ``arm_end`` the status an unfrozen arm ended with;
+    ``terminal`` the offline-screen delta its ``finish_session`` declared.
     """
 
     directory = root / experiment_id
@@ -144,6 +148,7 @@ def _arm(root: Path, experiment_id: str, rows, *, research=(RESEARCH_START, RESE
             "run_id": f"run_{experiment_id}",
             "session_key": "research",
             "steps": [_row(directory, index, **kwargs) for index, kwargs in enumerate(rows)],
+            "terminal_offline_trials": terminal,
             "arm_end": None if forward else {"status": arm_end, "reason": "no_edge"},
             "frozen": {"artifact_id": "strategy_research_x"} if forward else None,
         }
@@ -422,12 +427,12 @@ def test_bytes_validated_in_two_arms_are_one_trial(tmp_path: Path) -> None:
         assert joined[key] == pytest.approx(direct[key], rel=1e-12), key
 
 
-def test_a_reference_pack_declares_its_screens_once(tmp_path: Path) -> None:
-    """Arms mounting one reference pack declare its screens once, at the most
-    any of them declared: 17 and 20 add 20, however the pack's path is spelt.
-    Arms on other packs and an arm mounting none add theirs, and the arm's own
-    declarations join its pack's. A lineage extracted before its trials
-    carried their bytes cannot be joined."""
+def test_each_arms_declared_screens_count_as_its_own(tmp_path: Path) -> None:
+    """A reference pack does not identify its screens: arms mounting one pack
+    each declared their own search, so 17, 20, 6 and 2 add to 45. The arm's
+    own declarations are its own, neither merged with a pack sibling's nor
+    inherited from one. A lineage extracted before its trials carried their
+    bytes cannot be joined."""
 
     root = tmp_path / "experiments"
     _arm(root, "qwen", [{"seed": 1, "loading": 0.5, "offline": 17}], pack="configs/workspace_refs/book")
@@ -436,7 +441,7 @@ def test_a_reference_pack_declares_its_screens_once(tmp_path: Path) -> None:
     _arm(root, "bare", [{"seed": 4, "loading": 0.5, "offline": 2}])
     names = ["qwen", "mimo", "star", "bare"]
     extraction = extract_lineage(root, names, research_start=RESEARCH_START, research_end=RESEARCH_END)
-    assert lineage_summary(extraction)["offline_trials"] == 20 + 6 + 2
+    assert lineage_summary(extraction)["offline_trials"] == 17 + 20 + 6 + 2
 
     arm = root / "heir"
     own = [_row(arm, 0, seed=101, loading=0.5, offline=8)]
@@ -444,11 +449,16 @@ def test_a_reference_pack_declares_its_screens_once(tmp_path: Path) -> None:
     records = ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl").read()
     rules = AcceptanceRules()
     dsr = freeze_gate_for(records, own, own[0], experiment_dir=arm, acceptance=rules)["deflated_sharpe"]
-    # The arm's own 8 on the star pack stand for that pack's 6: the lineage
-    # adds its four strategies and 20 + 2 screens.
-    assert (dsr["host_trials"], dsr["offline_trials"], dsr["lineage_trials"], dsr["trials"]) == (1, 8, 4 + 22, 35)
+    # The arm's own 8 stay its own; the lineage adds its four strategies and
+    # 17 + 20 + 6 + 2 screens as four distinct per-arm searches.
+    assert (dsr["host_trials"], dsr["offline_trials"], dsr["lineage_trials"], dsr["trials"]) == (
+        1,
+        8,
+        4 + 45,
+        58,
+    )
     assert dsr["effective_trials"] == pytest.approx(
-        dsr["trial_correlation"] + (1 - dsr["trial_correlation"]) * 5 + 30
+        dsr["trial_correlation"] + (1 - dsr["trial_correlation"]) * 5 + 53
     )
     assert arm_record((), lineage_record(records))["lineage"]["note"] == LINEAGE_NOTE
 
@@ -561,3 +571,110 @@ def test_the_console_listing_counts_the_lineage_as_the_gate_does(tmp_path: Path)
     assert best["step_id"] == own[1]["step_id"]
     assert best["trials"] == dsr["trials"] == 5
     assert best["deflated_sharpe_probability"] == pytest.approx(dsr["deflated_sharpe_probability"])
+
+
+def test_a_batch_and_a_terminal_delta_are_each_counted_once():
+    """A batch declares a delta (5) and the terminal finish another (3): the
+    family holds 8 offline trials, and reading it again adds neither twice. A
+    malformed terminal count fails rather than reading as none."""
+
+    rows = [
+        {
+            "step_id": "research__arm__valid_000",
+            "revision_id": "revision_0",
+            "fingerprint": "bytes_0",
+            "control": False,
+            "batch_id": "b1",
+            "offline_trials": 5,
+        }
+    ]
+    assert trial_family(rows)["offline_trials"] == 5
+    assert trial_family(rows, 3)["offline_trials"] == 8
+    assert trial_family(rows, 3)["trials"] == 1 + 8
+    # Read again: the same 8, never 16.
+    assert trial_family(rows, 3)["offline_trials"] == 8
+    for invalid in (-1, True, False, 3.0, None):
+        with pytest.raises(ValueError, match="terminal_offline_trials"):
+            trial_family(rows, invalid)  # type: ignore[arg-type]
+
+
+def test_a_persisted_terminal_delta_is_read_or_refused(tmp_path: Path) -> None:
+    """The reader takes the count from the record that ended the arm: the
+    count when present, 0 for a record written before the field existed, and
+    an explicit refusal for anything that is not a valid count."""
+
+    arm = _arm(
+        tmp_path / "experiments", "ended", [{"seed": 1, "loading": 0.5, "offline": 5}], terminal=3
+    )
+    ledger = ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl")
+    records = ledger.read()
+    assert recorded_terminal_offline_trials(records) == 3
+    assert recorded_terminal_offline_trials([]) == 0
+
+    for invalid in (None, True, -1, 10_001, 2.5):
+        records[0]["terminal_offline_trials"] = invalid
+        ledger.rewrite(records)
+        with pytest.raises(ValueError, match="terminal_offline_trials"):
+            recorded_terminal_offline_trials(ledger.read())
+
+    records[0].pop("terminal_offline_trials")
+    ledger.rewrite(records)
+    assert recorded_terminal_offline_trials(ledger.read()) == 0
+
+
+def test_a_terminals_declared_screens_are_inherited_once(tmp_path: Path) -> None:
+    """A lineage arm's terminal delta joins its arm-local total, so a
+    successor inherits 5 batch + 3 terminal screens as 8, once, and a
+    recompute adds nothing more."""
+
+    root = tmp_path / "experiments"
+    _arm(root, "ended", [{"seed": 1, "loading": 0.5, "offline": 5}], terminal=3)
+    extraction = extract_lineage(root, ["ended"], research_start=RESEARCH_START, research_end=RESEARCH_END)
+    assert extraction["arms"][0]["offline_trials"] == 8
+    assert lineage_summary(extraction)["offline_trials"] == 8
+    # Read again: the same arm, not 16 screens.
+    assert (
+        extract_lineage(root, ["ended"], research_start=RESEARCH_START, research_end=RESEARCH_END)
+        == extraction
+    )
+
+    arm = root / "heir"
+    own = [_row(arm, 0, seed=101, loading=0.5, offline=0)]
+    _record(arm, extraction)
+    records = ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl").read()
+    first = freeze_gate_for(records, own, own[0], experiment_dir=arm, acceptance=AcceptanceRules())[
+        "deflated_sharpe"
+    ]
+    second = freeze_gate_for(records, own, own[0], experiment_dir=arm, acceptance=AcceptanceRules())[
+        "deflated_sharpe"
+    ]
+    assert first == second
+    assert (first["host_trials"], first["offline_trials"], first["lineage_trials"], first["trials"]) == (
+        1,
+        0,
+        9,
+        10,
+    )
+
+
+def test_a_terminal_only_arm_cannot_be_a_lineage(tmp_path: Path) -> None:
+    """An arm that only screened offline and validated nothing has no
+    measurable trial: its terminal declaration alone cannot represent a
+    research period, so extraction refuses it by name rather than joining a
+    count with no trial behind it."""
+
+    root = tmp_path / "experiments"
+    _arm(root, "screened", [], terminal=4)
+    with pytest.raises(ValueError, match="lineage arm screened has no recorded non-control trial"):
+        extract_lineage(root, ["screened"], research_start=RESEARCH_START, research_end=RESEARCH_END)
+
+
+def test_a_research_session_result_refuses_an_invalid_terminal_count() -> None:
+    """The result the Pipeline threads the finish's count through is validated
+    at construction, so a host path that builds it directly cannot smuggle a
+    negative or boolean count past the tool."""
+
+    for invalid in (-1, True, 10_001):
+        with pytest.raises(ValueError, match="terminal_offline_trials"):
+            ResearchSessionResult("conversation", (), "no_edge", terminal_offline_trials=invalid)
+    assert ResearchSessionResult("conversation", (), "no_edge").terminal_offline_trials == 0

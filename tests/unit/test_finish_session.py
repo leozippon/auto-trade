@@ -19,6 +19,7 @@ from autotrade.environment.tools.base import (
     ToolRegistry,
 )
 from autotrade.environment.tools.finish_session import (
+    OFFLINE_TRIALS_MAX,
     REASON_MAX_CHARS,
     REASON_MIN_CHARS,
     FinishSessionTool,
@@ -58,7 +59,12 @@ class _Gate:
     def __init__(self, passing: set[str]) -> None:
         self.passing = passing
 
-    def __call__(self, node_id: str, seed_replicates: tuple[str, ...] = ()) -> dict[str, object]:
+    def __call__(
+        self,
+        node_id: str,
+        seed_replicates: tuple[str, ...] = (),
+        offline_trials: int = 0,
+    ) -> dict[str, object]:
         if node_id in self.passing:
             return {
                 "passed": True,
@@ -283,10 +289,12 @@ def test_seed_replicates_are_resolved_and_go_to_the_gate(tmp_path: Path):
     tree = StepTree(tmp_path / "steps")
     nominee = _node(tree, tmp_path, "a")
     replicate = _node(tree, tmp_path, "b")
-    calls: list[tuple[str, tuple[str, ...]]] = []
+    calls: list[tuple[str, tuple[str, ...], int]] = []
 
-    def gate(node_id: str, seed_replicates: tuple[str, ...] = ()) -> dict[str, object]:
-        calls.append((node_id, seed_replicates))
+    def gate(
+        node_id: str, seed_replicates: tuple[str, ...] = (), offline_trials: int = 0
+    ) -> dict[str, object]:
+        calls.append((node_id, seed_replicates, offline_trials))
         if seed_replicates == (replicate,):
             return {"passed": True, "reasons": []}
         return {
@@ -316,7 +324,77 @@ def test_seed_replicates_are_resolved_and_go_to_the_gate(tmp_path: Path):
         {"outcome": "freeze", "node_id": "valid_a", "seed_replicates": ["valid_b"]},
     )
     assert finish.ok and finish.finish
-    assert calls == [(nominee, (replicate,))]
+    assert calls == [(nominee, (replicate,), 0)]
     assert _seed_replicates(finish.value) == (replicate,)
     with pytest.raises(ToolError, match="so must seed_replicates"):
         seeded.invoke({"outcome": "no_edge", "reason": REASON, "seed_replicates": [replicate]})
+
+
+def test_offline_trials_reach_the_gate_before_it_verdicts(tmp_path: Path):
+    """The terminal offline-screen delta is read by the gate before its
+    verdict: a count that pushes the nominee over a bar is refused, an
+    alternate candidate is compared at the same count, and the accepted
+    freeze carries the count the Pipeline persists."""
+
+    tree = StepTree(tmp_path / "steps")
+    weak = _node(tree, tmp_path, "weak")
+    strong = _node(tree, tmp_path, "strong")
+    seen: list[tuple[str, tuple[str, ...], int]] = []
+
+    def gate(
+        node_id: str, seed_replicates: tuple[str, ...] = (), offline_trials: int = 0
+    ) -> dict[str, object]:
+        seen.append((node_id, seed_replicates, offline_trials))
+        passed = node_id == strong and offline_trials < 10
+        return {
+            "passed": passed,
+            "reasons": [] if passed else ["freeze_deflated_sharpe_below_threshold"],
+            "deflated_sharpe": {"trials": 5 + offline_trials},
+        }
+
+    finish = _tool(tree, gate)  # type: ignore[arg-type]
+    with pytest.raises(ToolError) as refused:
+        finish.invoke({"outcome": "freeze", "node_id": weak, "offline_trials": 5})
+    assert "trials=10" in str(refused.value)
+    # The alternate candidate the refusal lists was read at the same count.
+    assert node_handle(strong) in str(refused.value)
+    assert seen[-1] == (strong, (), 5)
+
+    with pytest.raises(ToolError) as over:
+        finish.invoke({"outcome": "freeze", "node_id": strong, "offline_trials": 12})
+    assert "trials=17" in str(over.value)
+
+    frozen = finish.invoke({"outcome": "freeze", "node_id": strong, "offline_trials": 5})
+    assert frozen.value["terminal_offline_trials"] == 5
+
+
+def test_offline_trials_is_optional_and_never_assumed(tmp_path: Path):
+    """The parameter is optional and defaults to 0; an explicitly null or
+    malformed count is refused rather than read as none. Both outcomes carry
+    the count, so the Pipeline persists it whether the arm froze or ended."""
+
+    tree = StepTree(tmp_path / "steps")
+    node = _node(tree, tmp_path, "a")
+    calls: list[int] = []
+
+    def gate(
+        node_id: str, seed_replicates: tuple[str, ...] = (), offline_trials: int = 0
+    ) -> dict[str, object]:
+        calls.append(offline_trials)
+        return {"passed": True, "reasons": []}
+
+    finish = _tool(tree, gate)  # type: ignore[arg-type]
+    assert finish.invoke({"outcome": "freeze", "node_id": node}).value["terminal_offline_trials"] == 0
+    assert finish.invoke({"outcome": "no_edge", "reason": REASON}).value["terminal_offline_trials"] == 0
+    assert calls == [0]
+
+    for invalid in (None, True, False, 1.5, -1, OFFLINE_TRIALS_MAX + 1):
+        with pytest.raises(ToolError) as bad:
+            finish.invoke({"outcome": "no_edge", "reason": REASON, "offline_trials": invalid})
+        assert bad.value.error_type == "schema_error"
+        assert bad.value.blocked_target == "offline_trials"
+
+    at_cap = finish.invoke(
+        {"outcome": "no_edge", "reason": REASON, "offline_trials": OFFLINE_TRIALS_MAX}
+    )
+    assert at_cap.value["terminal_offline_trials"] == OFFLINE_TRIALS_MAX

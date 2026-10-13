@@ -51,6 +51,7 @@ from autotrade.environment.runtime import agent_trace_path, chmod_tree, utc_now_
 from autotrade.environment.step_tree import node_handle
 from autotrade.environment.strategy import NLQuery
 from autotrade.environment.strategy_loader import validate_strategy_package
+from autotrade.environment.tools.finish_session import offline_trials_count
 
 from .agent_inbox import expire_experiment_session_inbox
 from .calendar import FULL_SPAN, Slot
@@ -429,6 +430,7 @@ class RollingExperimentPipeline:
                         for slot in self.config.geometry.research_years
                     ],
                     seed_replicates=[by_step[step_id] for step_id in session.seed_replicates],
+                    terminal_offline_trials=session.terminal_offline_trials,
                 )
                 if gate["passed"]:
                     _publish_progress(progress, "freezing", run_id=run_id)
@@ -483,11 +485,13 @@ class RollingExperimentPipeline:
                 "outcome": session.outcome,
                 "reason": session.reason or None,
                 "nominated_step_id": session.node_id if session.outcome == "freeze" else None,
+                "terminal_offline_trials": session.terminal_offline_trials,
                 "steps": step_rows,
                 "trials_to_date": trial_family(
                     fingerprinted(
                         self.config.experiment_dir, [*_recorded_steps(records), *step_rows]
-                    )
+                    ),
+                    session.terminal_offline_trials,
                 )["trials"],
                 **self._account_record(),
                 "freeze_gate": gate,
@@ -1183,7 +1187,9 @@ def research_step_record(step: StepResult) -> dict[str, object]:
     }
 
 
-def trial_family(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
+def trial_family(
+    rows: Sequence[Mapping[str, object]], terminal_offline_trials: int = 0
+) -> dict[str, object]:
     """The trials the freeze gate deflates over, from the arm's Validation rows.
 
     A trial is a distinct strategy validated anywhere in the arm, on any span,
@@ -1206,10 +1212,17 @@ def trial_family(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
     counted and ``batch_validate`` asks for it again in the next batch. A row
     recorded before batches declared them carries no ``offline_trials`` and
     reads as 0; ``undeclared_offline_validations`` counts such rows so the
-    record says so. ``trials`` is M, the host trials plus the offline ones;
-    ``controls`` counts the control-only strategies.
+    record says so. ``terminal_offline_trials`` is the delta a session's
+    terminal ``finish_session`` declared beyond those batch declarations
+    (``environment.tools.finish_session``), added once: a session that
+    finished and is read again adds it again, it never accumulates.
+    ``trials`` is M, the host trials plus the offline ones; ``controls``
+    counts the control-only strategies.
     """
 
+    terminal = offline_trials_count(
+        terminal_offline_trials, where="trial_family's terminal_offline_trials"
+    )
     strategies: dict[str, list[Mapping[str, object]]] = {}
     for row in rows:
         fingerprint = row.get("fingerprint")
@@ -1236,7 +1249,7 @@ def trial_family(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
             undeclared += 1
         else:
             declared[str(row.get("batch_id") or row["step_id"])] = int(count)  # type: ignore[call-overload]
-    offline = sum(declared.values())
+    offline = sum(declared.values()) + terminal
     return {
         "trials": len(representatives) + offline,
         "representatives": representatives,
@@ -1244,6 +1257,37 @@ def trial_family(rows: Sequence[Mapping[str, object]]) -> dict[str, object]:
         "offline_trials": offline,
         "undeclared_offline_validations": undeclared,
     }
+
+
+def recorded_terminal_offline_trials(records: Sequence[Mapping[str, object]]) -> int:
+    """The terminal offline-screen delta an arm's research session declared.
+
+    The screens a session's ``finish_session`` declared beyond what its batches
+    declared, persisted once on the research-session record that ended the arm
+    (``frozen`` or ``arm_end``). At most one such record may exist; a record
+    written before the field existed reads as 0. Anything else raises: an
+    unreadable terminal count must not be silently dropped from the trial
+    family.
+    """
+
+    ended = [
+        record
+        for record in research_records(records)
+        if record.get("frozen") or record.get("arm_end")
+    ]
+    if len(ended) > 1:
+        raise ValueError("the ledger holds more than one research session that ended the arm")
+    if not ended:
+        return 0
+    record = ended[0]
+    if "terminal_offline_trials" not in record:
+        # A session recorded before the field existed declares no terminal
+        # delta; a present value must be a valid count, never assumed 0.
+        return 0
+    return offline_trials_count(
+        record["terminal_offline_trials"],
+        where="the research session's terminal_offline_trials",
+    )
 
 
 def _measured_days(row: Mapping[str, object]) -> int:
@@ -1275,6 +1319,7 @@ def _arm_trials(
     records: Sequence[Mapping[str, object]],
     session_rows: Sequence[Mapping[str, object]],
     experiment_dir: str | Path,
+    terminal_offline_trials: int = 0,
 ) -> tuple[
     list[Mapping[str, object]],
     dict[str, object],
@@ -1287,7 +1332,7 @@ def _arm_trials(
     to that family (:func:`recorded_lineage`)."""
 
     rows = fingerprinted(experiment_dir, [*_recorded_steps(records), *session_rows])
-    family = trial_family(rows)
+    family = trial_family(rows, terminal_offline_trials)
     return (
         rows,
         family,
@@ -1309,6 +1354,7 @@ def freeze_gate_for(
     hard_reasons: Sequence[str] = (),
     years: Sequence[tuple[str, str]] = (),
     seed_replicates: Sequence[Mapping[str, object]] = (),
+    terminal_offline_trials: int = 0,
 ) -> dict[str, object]:
     """The freeze gate of one nominated Step against the whole arm
     (docs/pipeline-design.md).
@@ -1324,13 +1370,15 @@ def freeze_gate_for(
     Sharpe of a running session's best node, passes the default rules and
     leaves the other two out. The measured gate also judges the nominee's
     ``seed_replicates`` (rows of this session; :func:`_seed_replicate_gate`).
+    ``terminal_offline_trials`` is the terminal delta the session's finish
+    declared, added to the arm's family once.
     """
 
     reasons = [*hard_reasons, *judge("registration", nominee, {})]
     if reasons:
         return {"passed": False, "reasons": reasons}
     rows, family, (lineage_arms, correlated, lineage) = _arm_trials(
-        records, session_rows, experiment_dir
+        records, session_rows, experiment_dir, terminal_offline_trials
     )
     representatives: list[Mapping[str, object]] = family["representatives"]  # type: ignore[assignment]
     summary = nominee.get("summary")
@@ -1410,6 +1458,7 @@ def incubation_entry(
         acceptance=config.acceptance,
         years=[(slot.start, slot.end) for slot in config.geometry.research_years],
         seed_replicates=replicates,
+        terminal_offline_trials=recorded_terminal_offline_trials(records),
     )
     screen = entry_screen(gate)
     return {
@@ -1635,11 +1684,12 @@ def _joined_lineage(
     control is none), so sibling arms that validated the same bytes add it
     once; its series is that of its longest validation, the first of equals
     in order -- the arm's own, then the lineage arms' as listed -- as within
-    one arm. Declared offline screens are the screens of a reference pack:
-    the arms mounting one pack count once, at the most any of them declared,
-    since an arm may add screens of its own to the pack's; an arm that mounts
-    none is a pack of its own. ``ValueError`` for a lineage extracted before
-    its trials carried their bytes, which cannot be joined.
+    one arm. Declared offline screens are summed per arm: each arm's own
+    total is its own search, and a shared reference pack is not an identity
+    of its screens, so no overlap is inferred from one. An arm listed twice
+    counts once, at the most it declared; the arm's own total is excluded
+    from the inherited contribution once. ``ValueError`` for a lineage
+    extracted before its trials carried their bytes, which cannot be joined.
     """
 
     arms: Sequence[Mapping[str, object]] = extraction["arms"]  # type: ignore[assignment]
@@ -1668,16 +1718,13 @@ def _joined_lineage(
         for fingerprint in arm["fingerprints"]:  # type: ignore[attr-defined]
             item = series.get((arm_id, fingerprint))
             offer(fingerprint, len(item["daily"]) if item is not None else 0, arm_id)  # type: ignore[arg-type]
-    declared: dict[tuple[str, str], int] = {}
-    for pack, arm_id, count in (
-        (str(own["workspace_reference"]) if own is not None else "", name, offline_trials),
-        *(
-            (str(arm["workspace_reference"]), str(arm["experiment_id"]), int(arm["offline_trials"]))  # type: ignore[call-overload]
-            for arm in arms
-        ),
+    declared: dict[str, int] = {}
+    own_declaration = [(name, offline_trials)] if own is not None else []
+    for arm_id, count in (
+        *own_declaration,
+        *((str(arm["experiment_id"]), int(arm["offline_trials"])) for arm in arms),
     ):
-        key = ("pack", pack) if pack else ("arm", arm_id)
-        declared[key] = max(declared.get(key, 0), count)
+        declared[arm_id] = max(declared.get(arm_id, 0), count)
     offline = sum(declared.values()) - offline_trials
     return [
         row for row in representatives if longest[str(row["fingerprint"])][1] == name

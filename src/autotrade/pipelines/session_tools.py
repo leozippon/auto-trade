@@ -48,7 +48,10 @@ from autotrade.environment.tools.base import (
     ToolResult,
     ToolSpec,
 )
-from autotrade.environment.tools.finish_session import SessionBudgetStatus
+from autotrade.environment.tools.finish_session import (
+    OFFLINE_TRIALS_MAX,
+    SessionBudgetStatus,
+)
 from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.environment.tools.node_reference import (
     NODE_REFERENCE_DESCRIPTION,
@@ -742,7 +745,7 @@ class SessionValidations:
             ) from exc
 
     def freeze_gate(
-        self, node_id: str, seed_replicates: Sequence[str] = ()
+        self, node_id: str, seed_replicates: Sequence[str] = (), offline_trials: int = 0
     ) -> dict[str, object]:
         """The freeze gate as the Pipeline would read one Step of this session now.
 
@@ -750,8 +753,9 @@ class SessionValidations:
         recorded Steps and this session's completed ones, with the hard
         nomination rules of the run, so the Agent reads the verdict a freeze of
         this node would get today, with ``seed_replicates`` the Steps it would
-        register as its seed replicates. A node that is not a Step of this
-        session does not pass.
+        register as its seed replicates and ``offline_trials`` the terminal
+        offline-screen delta a finish would declare. A node that is not a Step
+        of this session does not pass.
         """
 
         rows = {
@@ -770,6 +774,7 @@ class SessionValidations:
             hard_reasons=rules.evaluate(dict(nominee["summary"])),  # type: ignore[arg-type]
             years=[(year.start, year.end) for year in self.request.research_years],
             seed_replicates=[rows[step_id] for step_id in seed_replicates],
+            terminal_offline_trials=offline_trials,
         )
 
     @property
@@ -1155,7 +1160,7 @@ BATCH_HYPOTHESIS_MAX_CHARS = AGENT_JUSTIFICATION_MAX_CHARS
 # A declared offline screen is a count of candidate configurations; beyond
 # this the freeze gate's bar already exceeds any IR on record (about 2.5 over
 # four years), so a larger figure is a typo, not a screen.
-BATCH_OFFLINE_TRIALS_MAX = 10_000
+BATCH_OFFLINE_TRIALS_MAX = OFFLINE_TRIALS_MAX
 # Repeated identical rejections. A refused batch is free by design — nothing is
 # committed and no slot is spent — which is also why nothing bounded the retry
 # loop: one audited session spent 3.89 h of 10.17 h on 128 consecutive

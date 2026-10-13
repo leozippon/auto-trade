@@ -29,14 +29,18 @@ EARLY_FINISH_BUDGET_FRACTION = 1 / 3
 # gets, so the reason and a candidate's hypothesis cannot drift apart.
 REASON_MIN_CHARS = 40
 REASON_MAX_CHARS = AGENT_JUSTIFICATION_MAX_CHARS
+# The most terminal offline screens one finish may declare, the same cap a batch
+# declaration carries (``pipelines.session_tools.BATCH_OFFLINE_TRIALS_MAX``):
+# one source, so the two ways of declaring screens cannot drift apart.
+OFFLINE_TRIALS_MAX = 10_000
 
 # The freeze gate as the Pipeline would read one node of this session now,
-# with the nodes it would register as its seed replicates: ``passed``,
-# ``reasons`` (named in ``pipelines/verdict.py`` and ``pipelines/experiment.py``)
-# and the gate's numbers. The Environment never imports the Pipeline, so the
-# gate is handed over as a callable; the Pipeline recomputes it when it
-# records the freeze.
-FreezeGate = Callable[[str, tuple[str, ...]], Mapping[str, object]]
+# with the nodes it would register as its seed replicates and the terminal
+# offline screens this finish declares: ``passed``, ``reasons`` (named in
+# ``pipelines/verdict.py`` and ``pipelines/experiment.py``) and the gate's
+# numbers. The Environment never imports the Pipeline, so the gate is handed
+# over as a callable; the Pipeline recomputes it when it records the freeze.
+FreezeGate = Callable[[str, tuple[str, ...], int], Mapping[str, object]]
 
 # The gate's reasons that concern a nominee's seed replicates: a refusal that
 # names one points to the fact that defines a replicate.
@@ -92,6 +96,11 @@ _DESCRIPTION = (
     "the replay-year budget while another batch still fits. The reason is "
     "recorded on the arm's session record and is where the arm's conclusion "
     "belongs; no skill is needed to finish, and none can be written after this call. "
+    "offline_trials (0 to "
+    f"{OFFLINE_TRIALS_MAX}) declares the candidate configurations screened "
+    "offline on research-period data whose readings shaped this session and "
+    "that no batch declared through batch_validate, each once: they are added "
+    "to the arm's freeze-gate trial count once, as batch declarations are. "
     "The call starts only after every background sub-agent has finished, is "
     "refused while one is still running, and once it succeeds the remaining tool "
     "calls of the turn are cancelled."
@@ -145,6 +154,21 @@ class FinishSessionTool:
                         f"{REASON_MAX_CHARS} characters."
                     ),
                 },
+                "offline_trials": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": OFFLINE_TRIALS_MAX,
+                    "description": (
+                        "The whole number (0 to "
+                        f"{OFFLINE_TRIALS_MAX}) of candidate configurations "
+                        "screened offline on research-period data whose readings "
+                        "shaped this session and that no earlier batch declared "
+                        "through batch_validate: declare each once here, at the "
+                        "terminal call, and never a screen a batch already "
+                        "declared. They are added to the arm's freeze-gate trial "
+                        "count once. Default 0."
+                    ),
+                },
             },
             "required": ["outcome"],
             "additionalProperties": False,
@@ -172,13 +196,16 @@ class FinishSessionTool:
         reason = str(arguments.get("reason") or "").strip()
         node_id = str(arguments.get("node_id") or "")
         replicates = [str(item) for item in arguments.get("seed_replicates") or ()]  # type: ignore[union-attr]
+        count = _terminal_offline_trials(arguments)
         if outcome == "freeze":
-            return self._freeze(node_id, reason, replicates)
-        return self._no_edge(node_id, reason, replicates)
+            return self._freeze(node_id, reason, replicates, count)
+        return self._no_edge(node_id, reason, replicates, count)
 
     # ---- outcomes ----
 
-    def _freeze(self, reference: str, reason: str, replicate_refs: list[str]) -> ToolResult:
+    def _freeze(
+        self, reference: str, reason: str, replicate_refs: list[str], offline_trials: int
+    ) -> ToolResult:
         node_id = (
             self._reference(reference) if reference else self._sole_candidate()
         )
@@ -186,7 +213,7 @@ class FinishSessionTool:
         replicates = tuple(self._reference(item) for item in replicate_refs)
         for replicate in replicates:
             self._complete_node(replicate)
-        gate = dict(self._freeze_gate(node_id, replicates))
+        gate = dict(self._freeze_gate(node_id, replicates, offline_trials))
         if not gate.get("passed"):
             reasons = [str(item) for item in gate.get("reasons") or ()]
             passing = self._named(
@@ -194,7 +221,9 @@ class FinishSessionTool:
                     candidate
                     for candidate in self._session_candidates()
                     if candidate != node_id
-                    and _passes_but_for_replicates(self._freeze_gate(candidate, ()))
+                    and _passes_but_for_replicates(
+                        self._freeze_gate(candidate, (), offline_trials)
+                    )
                 ]
             )
             seeds = SEED_REASONS.intersection(reasons)
@@ -238,6 +267,7 @@ class FinishSessionTool:
                 "revision_id": str(node["revision_id"]),
                 **({"seed_replicates": list(replicates)} if replicates else {}),
                 **({"reason": reason} if reason else {}),
+                "terminal_offline_trials": offline_trials,
                 **budget,
                 "freeze_gate": self._gate_record(gate),
                 "pipeline_outcome": (
@@ -249,7 +279,9 @@ class FinishSessionTool:
             finish=True,
         )
 
-    def _no_edge(self, node_id: str, reason: str, replicates: list[str]) -> ToolResult:
+    def _no_edge(
+        self, node_id: str, reason: str, replicates: list[str], offline_trials: int
+    ) -> ToolResult:
         if node_id or replicates:
             raise ToolError(
                 'finish_session: outcome="no_edge" nominates nothing, so node_id must '
@@ -272,6 +304,7 @@ class FinishSessionTool:
                 "outcome": "no_edge",
                 "reason": reason,
                 "candidates_evaluated": len(candidates),
+                "terminal_offline_trials": offline_trials,
                 **self._budget_record(),
                 "pipeline_outcome": (
                     "The arm ends without a deliverable: no forward test."
@@ -418,6 +451,41 @@ class FinishSessionTool:
         )
 
 
+def offline_trials_count(value: object, *, where: str) -> int:
+    """``value`` as a declared offline-screen count (0 to ``OFFLINE_TRIALS_MAX``).
+
+    The one rule the two places a session declares offline screens and every
+    reader of them share: a whole number in range, never a bool, ``None`` or a
+    negative count. ``where`` names the declaration in the refusal, and an
+    invalid count fails rather than falling back to 0.
+    """
+
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value <= OFFLINE_TRIALS_MAX
+    ):
+        raise ValueError(
+            f"{where} must be the whole number (0 to {OFFLINE_TRIALS_MAX}) of "
+            f"candidate configurations screened offline; got {value!r}"
+        )
+    return value
+
+
+def _terminal_offline_trials(arguments: Mapping[str, object]) -> int:
+    """The finish's terminal offline-screen delta: 0 when the parameter is
+    omitted, refused when it is present but not a valid count."""
+
+    try:
+        return offline_trials_count(
+            arguments.get("offline_trials", 0), where="finish_session: offline_trials"
+        )
+    except ValueError as exc:
+        raise ToolError(
+            str(exc), error_type="schema_error", blocked_target="offline_trials"
+        ) from exc
+
+
 def _passes_but_for_replicates(gate: Mapping[str, object]) -> bool:
     """Whether a node passes the gate read alone, or fails it only for want of
     the seed replicates a model-training nominee must name."""
@@ -474,10 +542,12 @@ def _gate_numbers(gate: Mapping[str, object]) -> str:
 __all__ = [
     "EARLY_FINISH_BUDGET_FRACTION",
     "FINISH_OUTCOMES",
+    "OFFLINE_TRIALS_MAX",
     "REASON_MAX_CHARS",
     "REASON_MIN_CHARS",
     "SEED_REASONS",
     "FinishSessionTool",
     "FreezeGate",
     "SessionBudgetStatus",
+    "offline_trials_count",
 ]

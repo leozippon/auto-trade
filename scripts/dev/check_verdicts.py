@@ -61,6 +61,7 @@ from autotrade.pipelines.experiment import (
     incubation_entry,
     judged_replay,
     lineage_summary,
+    recorded_terminal_offline_trials,
     replay_and_analysis,
 )
 from autotrade.pipelines.hitl_state import HITL_DIR_NAME, PARAMS_NAME
@@ -206,6 +207,7 @@ def check_arm(arm: Path) -> list[Judgement]:
                     hard_reasons=rules.evaluate(dict(nominee["summary"])),
                     years=years,
                     seed_replicates=[steps[str(entry["step_id"])] for entry in named],
+                    terminal_offline_trials=recorded_terminal_offline_trials(records[: index + 1]),
                 ),
             )
         elif kind == "forward" and record.get("status") == "ok":

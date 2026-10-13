@@ -99,3 +99,18 @@ def test_an_arm_created_under_retired_rules_is_not_judged(arm: Path, tmp_path: P
     _copy(arm, root, _created_at=earlier)
     assert current_arms(root) == []
     assert main(["--experiments", str(root)]) == 0
+
+
+def test_a_terminal_offline_delta_is_rejudged_from_the_record(arm: Path, tmp_path: Path) -> None:
+    """The re-judge reads the declared terminal delta off the research-session
+    record, so a gate stored without it no longer reproduces once the record
+    declares screens."""
+
+    def declared(records: list[dict]) -> None:
+        _record(records, "research_session")["terminal_offline_trials"] = 5
+
+    copy = _copy(arm, tmp_path / "experiments", declared)
+    judgements = {item.reading: item.differences for item in check_arm(copy)}
+    assert judgements["freeze_gate"]
+    assert any("trials" in path for path in judgements["freeze_gate"])
+    assert main(["--experiments", str(copy.parent)]) == 1

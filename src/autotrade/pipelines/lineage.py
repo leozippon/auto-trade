@@ -34,6 +34,7 @@ from .experiment import (
     _recorded_steps,
     _style_analysis,
     fingerprinted,
+    recorded_terminal_offline_trials,
     reference_pack,
     trial_family,
 )
@@ -84,7 +85,8 @@ def extract_lineage(
     (``experiment.trial_family`` over its research session's Validations,
     fingerprinted from its own revision store, so the same bytes on two spans
     are one trial, controls are left out and declared offline screens count,
-    exactly as for the arm's own), each trial's bytes and the reference pack
+    exactly as for the arm's own, its terminal ``finish_session`` delta
+    included), each trial's bytes and the reference pack
     the arm mounted, by which the arm joins the lineage's trials to its own
     (``experiment.recorded_lineage``).
     Per measurable trial: its bytes and the daily series of its
@@ -122,7 +124,7 @@ def extract_lineage(
         except FileNotFoundError as exc:
             # An arm whose revisions were not kept cannot name its trials.
             raise ValueError(f"lineage arm {arm}: {exc}") from exc
-        family = trial_family(rows)
+        family = trial_family(rows, recorded_terminal_offline_trials(records))
         representatives: list[Mapping[str, object]] = family["representatives"]  # type: ignore[assignment]
         if not representatives:
             raise ValueError(f"lineage arm {arm} has no recorded non-control trial")

@@ -70,7 +70,10 @@ from autotrade.environment.tools.base import (
 )
 from autotrade.environment.tools.compact import CompactTool
 from autotrade.environment.tools.files import EditFileTool, WriteFileTool
-from autotrade.environment.tools.finish_session import FinishSessionTool
+from autotrade.environment.tools.finish_session import (
+    FinishSessionTool,
+    offline_trials_count,
+)
 from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.environment.tools.report_issue import (
     ReportIssueTool,
@@ -633,7 +636,7 @@ class LLMResearchDeveloper:
                 run_ref=run_ref,
                 emit_event=emit_event,
             )
-            conversation_id, outcome, node_id, replicates, reason, finish_reason = (
+            conversation_id, outcome, node_id, replicates, reason, finish_reason, terminal = (
                 self._run_agent(runner, request, resume=resume, used=used, run_ref=run_ref)
             )
             return self._collect_result(
@@ -652,6 +655,7 @@ class LLMResearchDeveloper:
                 seed_replicates=replicates,
                 reason=reason,
                 finish_reason=finish_reason,
+                terminal_offline_trials=terminal,
             )
         except Exception as exc:
             emit_event(
@@ -1182,11 +1186,11 @@ class LLMResearchDeveloper:
         resume: SessionResume | None,
         used: BudgetUsed,
         run_ref: str,
-    ) -> tuple[str, str, str | None, tuple[str, ...], str, str]:
+    ) -> tuple[str, str, str | None, tuple[str, ...], str, str, int]:
         """Open the conversation, afresh or with the resume note over the last
         summary, and run it to its finish: the conversation id, the outcome,
-        the nominated node and its seed replicates, the reason and the finish
-        reason."""
+        the nominated node and its seed replicates, the reason, the finish
+        reason and the terminal offline-screen delta a finish declared."""
 
         from autotrade.agent.compact import compaction_summary_message
         from autotrade.agent.prompts import (
@@ -1243,6 +1247,7 @@ class LLMResearchDeveloper:
             conversation_id = result.conversation_id
             outcome, node_id, reason = _session_outcome(result.finish_value)
             replicates = _seed_replicates(result.finish_value) if outcome == "freeze" else ()
+            terminal = _terminal_offline_trials(result.finish_value)
             finish_reason = "llm_agent_finish_session"
         except AgentSessionBudgetExhausted as exc:
             # The session closed on an exhausted budget (its wrap-up grace
@@ -1250,14 +1255,16 @@ class LLMResearchDeveloper:
             # the arm's trials.
             conversation_id = exc.conversation_id
             outcome, node_id, replicates, reason = "deadline", None, (), ""
+            terminal = 0
             finish_reason = exc.finish_reason
         except EnvironmentBlocked as exc:
             # The host ended the session: its replays on one span kept failing
             # on the environment, so the arm ends on that, not on research.
             conversation_id = runner.conversation_id
             outcome, node_id, replicates, reason = ENVIRONMENT_BLOCKED, None, (), exc.reason
+            terminal = 0
             finish_reason = ENVIRONMENT_BLOCKED
-        return conversation_id, outcome, node_id, replicates, reason, finish_reason
+        return conversation_id, outcome, node_id, replicates, reason, finish_reason, terminal
 
     def _collect_result(
         self,
@@ -1277,6 +1284,7 @@ class LLMResearchDeveloper:
         seed_replicates: tuple[str, ...],
         reason: str,
         finish_reason: str,
+        terminal_offline_trials: int,
     ) -> ResearchSessionResult:
         """Re-index the skills the session left, check its nomination, publish
         its step tree and collect its run directory: the session's result."""
@@ -1318,6 +1326,7 @@ class LLMResearchDeveloper:
             seed_replicates=seed_replicates,
             reason=reason,
             finish_reason=finish_reason,
+            terminal_offline_trials=terminal_offline_trials,
             # The nulls the session already drew, for the freeze to reuse.
             null_controls=(
                 dict(null_control_tool.blocks)
@@ -1499,9 +1508,9 @@ LINEAGE_NOTE = (
     "the non-control trials of these earlier arms on the same research period "
     "join this arm's freeze-gate trial family: selection_statistics."
     "information_ratio_bar already counts them. Strategy bytes validated both "
-    "here and in a lineage arm, or in two lineage arms, are one trial, and the "
-    "offline_trials declared by arms that mount the same reference pack count "
-    "once, at the largest number any of them declared"
+    "here and in a lineage arm, or in two lineage arms, are one trial, and "
+    "each arm's declared offline screens count as that arm declared them: "
+    "screens are summed per arm, never merged across arms"
 )
 
 
@@ -1554,6 +1563,23 @@ def _seed_replicates(finish: Mapping[str, object]) -> tuple[str, ...]:
     """The seed replicates a ``finish_session`` freeze registered (full node ids)."""
 
     return tuple(str(item) for item in finish.get("seed_replicates") or ())  # type: ignore[union-attr]
+
+
+def _terminal_offline_trials(finish: Mapping[str, object]) -> int:
+    """The terminal offline-screen delta a ``finish_session`` declared, or 0.
+
+    A finish that does not carry the field (a host outcome that never went
+    through the tool) declares none. A finish that carries it is read through
+    the one validator the tool itself uses: a malformed count fails here
+    rather than being silently dropped from the trial family.
+    """
+
+    if "terminal_offline_trials" not in finish:
+        return 0
+    return offline_trials_count(
+        finish["terminal_offline_trials"],
+        where="the finish's terminal_offline_trials",
+    )
 
 
 def _session_outcome(finish: Mapping[str, object]) -> tuple[str, str | None, str]:
