@@ -668,12 +668,26 @@ def ex_date_shares(quantity: int, ratio: float) -> int:
     return math.floor(round(quantity * ratio, 6))
 
 
+# A-share limits are quoted to 0.01 CNY, but the gate compares a modeled fill
+# price, base * (1 + slippage_bps/10_000), which binary arithmetic can place a
+# few ulps on either side of the exact boundary: 10.0 * 1.0010 evaluates to
+# 10.009999999999998 against a 10.01 limit and would slip past a plain
+# `>= limit`. The tolerance absorbs that arithmetic noise only: it is far below
+# a tick, so a price a tick inside the limit still fills, and far above the
+# worst-case double error at A-share price magnitudes (~1e-12 at 1e4 CNY).
+_PRICE_LIMIT_TOLERANCE = 1e-9
+
+
 def _price_limit_reject(action: str, price: float, bar: Mapping[str, object]) -> str | None:
     field = "up_limit" if action == "buy" else "down_limit"
     limit = _price(bar.get(field))
     if limit is None:
         return "missing_daily_price_limit"
-    blocked = price >= limit if action == "buy" else price <= limit
+    blocked = (
+        price >= limit - _PRICE_LIMIT_TOLERANCE
+        if action == "buy"
+        else price <= limit + _PRICE_LIMIT_TOLERANCE
+    )
     return "daily_price_limit" if blocked else None
 
 

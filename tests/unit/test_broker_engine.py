@@ -171,6 +171,44 @@ class BrokerEligibilityTest(unittest.TestCase):
         self.assertEqual((sell_blocked.status, sell_blocked.reason), ("rejected", "daily_price_limit"))
         self.assertEqual(broker.positions["000001.SZ"].quantity, 100)
 
+    def test_slippage_onto_the_exact_price_limit_rejects_and_neighbours_keep_today(self) -> None:
+        # The gate compares the slipped fill price, and binary arithmetic can
+        # place an at-the-limit fill a few ulps inside it: 10 * (1 + 10 bps) is
+        # 10.009999999999998 against a 10.01 cap, and 20 * (1 - 5 bps) is
+        # 19.990000000000002 against a 19.99 floor. Both must reject, while a
+        # fill genuinely inside the limit keeps its old economics.
+        self.assertLess(CostModel(slippage_bps=10.0).fill_price(10.0, action="buy"), 10.01)
+        self.assertGreater(CostModel(slippage_bps=5.0).fill_price(20.0, action="sell"), 19.99)
+
+        buyer = _broker(initial_cash=1_000_000, slippage_bps=10)
+        blocked = buyer.execute(_order(), _bar(up_limit=10.01), matched_at=MATCHED_AT, raw_price=10.0)
+        self.assertEqual((blocked.status, blocked.reason), ("rejected", "daily_price_limit"))
+        self.assertEqual(buyer.positions, {})
+
+        # A slipped buy inside the cap still fills, and one above it rejects.
+        allowed = _broker(initial_cash=1_000_000, slippage_bps=5)
+        filled = allowed.execute(_order(), _bar(up_limit=10.01), matched_at=MATCHED_AT, raw_price=10.0)
+        self.assertEqual(filled.status, "filled")
+        self.assertAlmostEqual(filled.price, 10.005)
+        breached = _broker(initial_cash=1_000_000, slippage_bps=20)
+        above = breached.execute(_order(), _bar(up_limit=10.01), matched_at=MATCHED_AT, raw_price=10.0)
+        self.assertEqual((above.status, above.reason), ("rejected", "daily_price_limit"))
+
+        seller = _broker(initial_cash=1_000_000, slippage_bps=5)
+        seller.positions["000001.SZ"] = Position("000001.SZ", 100, 100, 20.0, 20.0)
+        at_floor = seller.execute(
+            _order("sell"), _bar(down_limit=19.99), matched_at=MATCHED_AT, raw_price=20.0
+        )
+        self.assertEqual((at_floor.status, at_floor.reason), ("rejected", "daily_price_limit"))
+        self.assertEqual(seller.positions["000001.SZ"].quantity, 100)
+        # A slipped sale inside the floor still fills at the same price.
+        inside = seller.execute(
+            _order("sell"), _bar(down_limit=19.98), matched_at=MATCHED_AT, raw_price=20.0
+        )
+        self.assertEqual(inside.status, "filled")
+        self.assertAlmostEqual(inside.price, 19.99)
+        self.assertNotIn("000001.SZ", seller.positions)
+
     def test_missing_or_non_finite_daily_limit_rejects_the_whole_order(self) -> None:
         broker = _broker(initial_cash=1_000_000, slippage_bps=0)
         missing_key = _bar()
