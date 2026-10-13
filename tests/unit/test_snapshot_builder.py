@@ -2153,6 +2153,70 @@ class SnapshotBuilderTest(unittest.TestCase):
             self.assertNotIn("limit_amount", zero_meta["dataset_columns"]["limit_list_d"])
             self.assertIn("fd_amount", zero_meta["dataset_columns"]["limit_list_d"])
 
+    def test_cyq_perf_future_price_columns_leave_the_built_snapshot(self):
+        # SNAPSHOT_EXCLUDED_COLUMNS: cyq_perf.his_high is back-filled with
+        # post-decision highs and his_low is its unverified same-source sibling;
+        # neither may reach a newly built snapshot, while the audited cost
+        # percentiles and weight_avg stay (winner_rate is retained too, but the
+        # running-high audit cannot validate a proportion). A view cached under
+        # the previous cache format would still carry his_high, so the exclusion
+        # must have moved SNAPSHOT_CACHE_FORMAT_VERSION too (v12).
+        from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION
+
+        self.assertGreaterEqual(SNAPSHOT_CACHE_FORMAT_VERSION, 12)
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            build_raw(raw)
+            stamp = {
+                "available_at": "2021-10-07 19:00:00+08:00",
+                "available_at_rule": "official_19_from:trade_date",
+            }
+            write(
+                raw / "cyq_perf" / "trade_date=20211007.parquet",
+                pd.DataFrame([{
+                    "trade_date": "20211007", "ts_code": "000001.SZ",
+                    "his_low": 3.6, "his_high": 357.6, "cost_5pct": 8.1,
+                    "cost_15pct": 9.0, "cost_50pct": 10.2, "cost_85pct": 11.4,
+                    "cost_95pct": 12.0, "weight_avg": 10.1, "winner_rate": 55.0,
+                    **stamp,
+                }]),
+            )
+            out = Path(tmp) / "snap"
+            config = replace(
+                CONFIG,
+                events_datasets=("cyq_perf",),
+                macro_datasets=(),
+                text_datasets=(),
+                fundamental_datasets=(),
+                include_intraday=False,
+            )
+            manifest = SnapshotBuilder(raw, Path(tmp) / "fund_events").build_decision_snapshot(
+                DECISION, out, config
+            )
+            events = pd.read_parquet(out / "events.parquet")
+            columns = manifest["domains"]["events"]["dataset_columns"]["cyq_perf"]
+            for future in ("his_high", "his_low"):
+                self.assertNotIn(future, events.columns, future)
+                self.assertNotIn(future, columns, future)
+            for safe in (
+                "cost_5pct", "cost_15pct", "cost_50pct", "cost_85pct",
+                "cost_95pct", "weight_avg", "winner_rate",
+            ):
+                self.assertIn(safe, events.columns, safe)
+                self.assertIn(safe, columns, safe)
+            # Zero-visible-row builds contribute footer schema: the exclusion
+            # must hold there too, or frozen and replay parts would diverge.
+            builder = SnapshotBuilder(raw, Path(tmp) / "fund_events")
+            window_start = pd.Timestamp("2021-09-01", tz="Asia/Shanghai")
+            early = datetime(2021, 10, 7, 9, 25, tzinfo=CN_TZ)
+            zero_rows, zero_meta = builder._build_available_at_domain(
+                ("cyq_perf",), early, window_start
+            )
+            self.assertEqual(len(zero_rows), 0)
+            for future in ("his_high", "his_low"):
+                self.assertNotIn(future, zero_meta["dataset_columns"]["cyq_perf"], future)
+            self.assertIn("cost_50pct", zero_meta["dataset_columns"]["cyq_perf"])
+
     def test_incomplete_vendor_columns_never_reach_a_built_snapshot(self):
         # Every SNAPSHOT_EXCLUDED_COLUMNS entry that this fixture can cover is
         # gone from the written files AND from the manifest attribution, while

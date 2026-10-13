@@ -41,7 +41,12 @@ ExecutionMode = Literal["sandbox", "trusted"]
 # macro view shows T rows a trading day later than a v10 one.
 # v11: daily.is_suspended counts only suspend_d halts (suspend_type "S"); v10
 # also flagged resumption rows ("R"), i.e. normally traded sessions.
-SNAPSHOT_CACHE_FORMAT_VERSION = 11
+# v12: cyq_perf.his_high (a proven post-decision price leak) and its unverified
+# same-source his_low leave the events union (SNAPSHOT_EXCLUDED_COLUMNS), so a
+# v11 decision/replay view still carries his_high. A cached view, or a PIT view
+# seed, built under v11 must be rebuilt; SNAPSHOT_CACHE_FORMAT_VERSION is the
+# only reuse gate and nothing rebuilds a stale view automatically.
+SNAPSHOT_CACHE_FORMAT_VERSION = 12
 
 # Trailing wrap-up grace added to the research session budget. Not a console or
 # worker knob; ResearchSessionRequest carries the seconds to the Agent runner.

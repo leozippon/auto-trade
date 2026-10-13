@@ -160,9 +160,11 @@ _AUCTION_PUBLISH_CLOCK = "09:29:00"
 # them and the unit registry still classifies them for the data audit; they
 # are dropped per dataset before the domain union, so a same-named column of
 # another dataset (limit_list_ths.limit_amount, daily_info.total_share) is
-# unaffected. Three removal reasons, all permanent:
+# unaffected. Four removal reasons, all permanent:
 #
 # leakage — the column would carry post-decision state into history.
+# same-source — an unverified column of a dataset whose sibling column is a
+#   proven leak: forbidden with it, without claiming a confirmed leak.
 # unusable — the column is dead, dead for the recent years, mostly zero with
 #   undocumented semantics, inconsistent with its declared unit, or carries
 #   irreconcilable regimes inside one series. Evidence below comes from a
@@ -177,6 +179,16 @@ SNAPSHOT_EXCLUDED_COLUMNS: dict[str, tuple[str, ...]] = {
     # undocumented. interval_3/interval_6: last populated 2018-09, all-NA in
     # every later partition (8.0% of scanned rows overall).
     "bak_daily": ("avg_turnover", "interval_3", "interval_6"),
+    # his_high is back-filled from the vendor's price history at capture time,
+    # so a row carries highs that only appeared after its own day (152,486-row
+    # audit in data docs §4: 7-12% of rows per research year above that day's
+    # true running high, up to ~10x). Reading it imports future prices.
+    # his_low is the same-source vendor field, never verified and never to be
+    # used (data docs §4 records it untested); it leaves the snapshot with
+    # his_high rather than remain as an untested sibling. The cost percentiles
+    # and weight_avg passed the same audit and stay; winner_rate is retained but
+    # cannot be validated by the running-high test (it is a proportion).
+    "cyq_perf": ("his_high", "his_low"),
     # 板上成交金额: the source rewrites history to null and early-2020
     # magnitudes are anomalous — audit-only by contract (data docs §3.2).
     "limit_list_d": ("limit_amount",),

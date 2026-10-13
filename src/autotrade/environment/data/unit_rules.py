@@ -343,8 +343,17 @@ FIELD_RULES: tuple[FieldRule, ...] = (
               status="verified",
               evidence="241 on every one of the 7,639,286 stock-days built from 20200102-20260821",
               note="session-grid bars present; a complete day has 241"),
+    # his_high is a proven post-decision price leak and his_low its unverified
+    # same-source sibling; both are excluded from the snapshot
+    # (SNAPSHOT_EXCLUDED_COLUMNS), so they stand alone here: a mixed rule would
+    # make the unit reference ambiguous about what the Agent can see.
+    FieldRule("events.parquet", "cyq_perf", ("his_low", "his_high"),
+              source_unit="CNY_per_share",
+              status="verified",
+              evidence="same price scale as the cost percentiles; both columns are out of the snapshot",
+              note="his_high carries highs after the row's day (data docs §4); his_low is untested and unused"),
     FieldRule("events.parquet", "cyq_perf",
-              ("his_low", "his_high", "cost_5pct", "cost_15pct", "cost_50pct",
+              ("cost_5pct", "cost_15pct", "cost_50pct",
                "cost_85pct", "cost_95pct", "weight_avg"),
               source_unit="CNY_per_share",
               status="verified",
