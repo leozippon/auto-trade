@@ -50,14 +50,14 @@ from autotrade.environment.sandbox import SandboxConfig, SandboxLimits
 from autotrade.environment.strategy import CN_TZ
 from autotrade.paper.book import (
     SOURCE_HISTORY_NAME,
-    Book,
     VERDICT_LOG_NAME,
+    Book,
     book_status,
     copy_source_history,
     create_book,
     load_book,
-    write_source_history,
     verify_book_artifact,
+    write_source_history,
 )
 from autotrade.paper.books import (
     PAPER_STATE_DIR,
@@ -66,7 +66,13 @@ from autotrade.paper.books import (
     run_order,
     validate_book_id,
 )
-from autotrade.paper.engine import DailyPaperEngine, PaperWriterBusy, docker_executor, writer_lock, write_run_status
+from autotrade.paper.engine import (
+    DailyPaperEngine,
+    PaperWriterBusy,
+    docker_executor,
+    write_run_status,
+    writer_lock,
+)
 from autotrade.paper.orders import (
     render_failure,
     render_killed,

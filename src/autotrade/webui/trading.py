@@ -54,16 +54,23 @@ from autotrade.paper.book import (
     BOOK_NAME,
     SOURCE_HISTORY_NAME,
     SOURCE_HISTORY_SCHEMA_VERSION,
-    book_status as persisted_book_status,
     VERDICT_LOG_NAME,
 )
+from autotrade.paper.book import (
+    book_status as persisted_book_status,
+)
 from autotrade.paper.books import BOOK_ID_PATTERN, PAPER_STATE_DIR, list_books
-from autotrade.paper.engine import PAPER_STATE_NAME, REFERENCE_KEY, SNAPSHOT_NAME, RUN_STATUS_NAME
+from autotrade.paper.engine import (
+    PAPER_STATE_NAME,
+    REFERENCE_KEY,
+    RUN_STATUS_NAME,
+    SNAPSHOT_NAME,
+)
 from autotrade.paper.orders import (
     CONTINUOUS,
     LIMIT_GUIDANCE,
-    order_sheet,
     exit_holdings,
+    order_sheet,
     order_window,
     window_text,
 )

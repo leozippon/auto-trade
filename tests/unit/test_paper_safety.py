@@ -9,11 +9,17 @@ import pytest
 from autotrade.environment.artifacts import artifact_fingerprint
 from autotrade.environment.executor import TrustedStrategyExecutor
 from autotrade.environment.replay.market import DailyMarketData
-from autotrade.paper.engine import PAPER_STATE_NAME, RUN_STATUS_NAME, PaperWriterBusy
+from autotrade.environment.strategy_loader import StrategyLoadError
+from autotrade.paper.engine import (
+    PAPER_STATE_NAME,
+    RUN_STATUS_NAME,
+    PaperEngineError,
+    PaperWriterBusy,
+)
 from autotrade.paper.storage import read_json, read_jsonl, write_json_atomic
 from autotrade.webui import trading
 from tests.unit.paper_book_fixture import BOOK_SESSIONS
-from tests.unit.test_paper_trading import COUNTER_STRATEGY, PROFILE, _Data, _bars
+from tests.unit.test_paper_trading import COUNTER_STRATEGY, PROFILE, _bars, _Data
 from tests.unit.test_paper_verdict import _graduated_book, _run_paper, _write_slot
 
 
@@ -103,8 +109,17 @@ def test_tampered_complete_artifact_refused_visibly_before_execution(tmp_path, m
     assert trading.health_payload(tmp_path)["ok"] is False
 
 
-@pytest.mark.parametrize("failure", ["book", "calendar", "strategy", "restoration", "verdict"])
-def test_startup_and_restoration_failures_have_same_visible_boundary(tmp_path, monkeypatch, failure):
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        ("book", ValueError),  # malformed book.json
+        ("calendar", FileNotFoundError),
+        ("strategy", StrategyLoadError),
+        ("restoration", PaperEngineError),
+        ("verdict", PaperEngineError),
+    ],
+)
+def test_startup_and_restoration_failures_have_same_visible_boundary(tmp_path, monkeypatch, failure, expected):
     cli, book, calls = _setup(tmp_path, monkeypatch)
     checkpoint = book.root / PAPER_STATE_NAME
     if failure == "book":
@@ -128,7 +143,7 @@ def test_startup_and_restoration_failures_have_same_visible_boundary(tmp_path, m
         # Settlement succeeds, but the persistent evidence is damaged.
         (book.root / "equity_daily.jsonl").write_text("damaged\n", encoding="utf-8")
     before = checkpoint.read_bytes() if checkpoint.exists() else None
-    with pytest.raises(Exception):
+    with pytest.raises(expected):
         _run(cli, book, tmp_path, "20260106")
     assert read_json(book.root / RUN_STATUS_NAME)["ok"] is False
     assert "未生成" in (tmp_path / "orders/exp/latest_orders.md").read_text(encoding="utf-8")
@@ -180,7 +195,7 @@ def test_killed_book_requires_known_account_and_explicit_positions(tmp_path, mon
         write_json_atomic(checkpoint, state)
     payload = trading.signal_payload(tmp_path, "exp")
     assert payload["state"] == "unreadable" and payload["signal"] is None and payload["error"]
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError):
         _run(cli, book, tmp_path, "20260106")  # render_killed uses the same refusal
     assert "未生成" in (tmp_path / "orders/exp/latest_orders.md").read_text(encoding="utf-8")
     assert read_json(book.root / RUN_STATUS_NAME)["ok"] is False
