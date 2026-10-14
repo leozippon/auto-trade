@@ -1,11 +1,11 @@
 #!/usr/bin/env python
 """The 2026-10-14 fourth round: round 20261014b's two HCM arms, restarted.
 
-Round 20261014b's arms were terminated after 36 minutes. Their starter lost
+Round 20261014b's arms were terminated 58 minutes after creation. Their starter lost
 the slow parameter groups' pending gradients at every checkpoint, so the
 multi-timescale updates the study is about never accumulated (fixed in commit
 3c7b844), and the main model filled the `agent` tool's optional parameters
-with placeholders, so all 469 sub-agent launches were rejected (fixed in
+with placeholders, so all 469 sub-agent launches were rejected before the stop (fixed in
 483b16d: optional tool parameters are nullable). Both arms keep their records
 and resolved issue reports; this round reruns the same study on the fixed
 pack and code.
