@@ -1697,7 +1697,7 @@ def download_event_range_month(
             params=meta_params,
             fields=list(df.columns),
             key_columns=list(spec.key_columns),
-            date_columns=[spec.date_column, spec.fallback_date_column, "available_at"],
+            date_columns=[spec.window_date_column or spec.date_column, spec.fallback_date_column, "available_at"],
             start_date=start_date,
             end_date=end_date,
             revision_ledger=revision_ledger,

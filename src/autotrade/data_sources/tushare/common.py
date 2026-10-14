@@ -642,6 +642,12 @@ class EventDataset:
     fallback_date_column: str = ""
     zero_rows_ok: bool = True
     availability: AvailabilityRule | None = None
+    # The column the supplier's start_date/end_date filter applies to, when it
+    # is not date_column. A range_month refresh replaces exactly the rows its
+    # request re-serves, so the merge must drop by this column: dropping by
+    # ann_date while the API filters on end_date silently lost every row whose
+    # report period precedes a mid-month window start.
+    window_date_column: str = ""
 
 @dataclass
 class BoardTradingDataset:
@@ -1269,6 +1275,8 @@ EVENT_FLOW_SPECS = {
         page_limit=5000,
         key_columns=("ts_code", "ann_date", "end_date", "holder_name"),
         date_column="ann_date",
+        # start_date/end_date filter the report period, not the announcement.
+        window_date_column="end_date",
     ),
     "top10_floatholders": EventDataset(
         api_name="top10_floatholders",
@@ -1277,6 +1285,8 @@ EVENT_FLOW_SPECS = {
         page_limit=5000,
         key_columns=("ts_code", "ann_date", "end_date", "holder_name"),
         date_column="ann_date",
+        # start_date/end_date filter the report period, not the announcement.
+        window_date_column="end_date",
     ),
     "pledge_detail": EventDataset(
         api_name="pledge_detail",

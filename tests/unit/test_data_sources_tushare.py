@@ -5059,6 +5059,59 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         # refused by the empty guard and is NOT a mutation.
         self.assertEqual(written, 0)
 
+    def test_event_range_month_replaces_by_the_supplier_filter_column(self):
+        # top10_floatholders' start_date/end_date filter the report period
+        # (end_date), not ann_date. A mid-month nightly window that dropped
+        # existing rows by ann_date silently lost every row whose report period
+        # precedes the window start (the request never re-serves it) and kept
+        # the stale version of a re-served row whose ann_date the supplier
+        # moved past the window.
+        spec = common.EVENT_FLOW_SPECS["top10_floatholders"]
+        fields = spec.fields.split(",")
+
+        def row(ts_code, ann_date, end_date, amount):
+            values = {"ts_code": ts_code, "ann_date": ann_date, "end_date": end_date, "holder_name": "holder", "hold_amount": amount}
+            return [values.get(field, "") for field in fields]
+
+        class ReportPeriodClient:
+            def __init__(self, rows):
+                self.rows = rows
+
+            def query(self, api_name, params=None, fields="", retries=5):
+                params = params or {}
+                served = [] if params.get("offset") else [
+                    item for item in self.rows
+                    if params["start_date"] <= item[fields.split(",").index("end_date")] <= params["end_date"]
+                ]
+                return common.ApiResult(fields.split(","), served)
+
+        client = ReportPeriodClient([
+            row("301575.SZ", "20260916", "20260911", 1.0),
+            row("000001.SZ", "20260920", "20260915", 2.0),
+            row("000002.SZ", "20261010", "20260930", 3.0),
+        ])
+        ledger = str(self.root / "report_period_revision_events.jsonl")
+        with redirect_stdout(io.StringIO()):
+            download.download_event_range_month(client, self.raw_dir, spec, [("20260901", "20260930", "202609")], True, 5000, ledger)
+            # The supplier revises one row and corrects another's ann_date;
+            # the 301575.SZ row is untouched and lies outside the next window.
+            client.rows = [
+                row("301575.SZ", "20260916", "20260911", 1.0),
+                row("000001.SZ", "20260920", "20260915", 20.0),
+                row("000002.SZ", "20261012", "20260930", 3.0),
+            ]
+            download.download_event_range_month(client, self.raw_dir, spec, [("20260913", "20260930", "202609")], True, 5000, ledger)
+
+        merged = pd.read_parquet(self.raw_dir / "top10_floatholders" / "month=202609.parquet")
+        self.assertEqual(
+            sorted(zip(merged["ts_code"], merged["ann_date"], merged["end_date"], merged["hold_amount"], strict=True)),
+            [
+                ("000001.SZ", "20260920", "20260915", 20.0),
+                ("000002.SZ", "20261012", "20260930", 3.0),
+                ("301575.SZ", "20260916", "20260911", 1.0),
+            ],
+        )
+
     def test_bak_basic_blocked_shrink_fails_the_run(self):
         # download_bak_basic discarded the writer's answer entirely.
         path = self.raw_dir / "bak_basic" / "trade_date=20200102.parquet"
