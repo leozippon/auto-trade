@@ -18,8 +18,9 @@ window's last days so the ring holds a state per day. Every later daily call
      parameter group only when its period has elapsed, its gradient having
      accumulated over the days in between (knobs.UPDATE);
   4. offers the matured episodes to the store;
-  5. saves the weights, the optimiser moments, the state ring, the counters
-     and the store.
+  5. saves the weights, the optimiser moments, the gradients still pending
+     in the groups not yet stepped, the state ring, the counters and the
+     store.
 
 "frozen" skips step 3; "cold_quarter" skips it too and instead pretrains
 afresh at the first call of each quarter. Nothing lives in module variables:
@@ -86,6 +87,9 @@ def load(context, dev):
         return None
     net = model.HCM(features.FEATURES, knobs.HIDDEN).to(dev)
     net.load_state_dict(record["model"])
+    parameters = dict(net.named_parameters())
+    for name, grad in record["grads"].items():
+        parameters[name].grad = grad
     optim = None
     if record["optim"] is not None:
         optim = _optimisers(net)
@@ -107,6 +111,9 @@ def load(context, dev):
 def _save(context, ckpt):
     record = {
         "model": ckpt["model"].state_dict(),
+        # What each group has accumulated since its last step (`_step`): the
+        # next fit rebuilds the model from this record and adds to it.
+        "grads": {name: p.grad for name, p in ckpt["model"].named_parameters() if p.grad is not None},
         "optim": {name: opt.state_dict() for name, opt in ckpt["optim"].items()} if ckpt["optim"] else None,
         "codes": ckpt["codes"],
         "ring": ckpt["ring"].cpu() if ckpt["ring"] is not None else None,
@@ -161,6 +168,8 @@ def _pretrain(context, dev, rng):
             optim.zero_grad()
             functional.mse_loss(s[ok], y[ok]).backward()
             optim.step()
+    # The daily schedule starts accumulating from nothing.
+    optim.zero_grad(set_to_none=True)
     if knobs.MEMORY:
         store = fill()
     ring = ring_dates = seen = None

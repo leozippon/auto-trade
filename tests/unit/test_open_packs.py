@@ -301,6 +301,53 @@ def test_the_hcm_store_retrieves_only_labels_known_on_the_query_day(monkeypatch:
     _drop_packages()
 
 
+def test_the_hcm_slow_groups_accumulate_their_gradient_across_daily_fits(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Every daily fit rebuilds the model from the state directory, so a
+    group between two of its steps carries its gradient through the
+    checkpoint: fits that reload between days end bitwise where one process
+    holding the model in memory does, with the input group's gradient still
+    pending."""
+    import torch
+    from torch.nn import functional
+
+    _starter(monkeypatch, HCM_14B)
+    from lib import features, hcm, knobs, model
+
+    cpu = torch.device("cpu")
+    torch.manual_seed(0)
+    net = model.HCM(features.FEATURES, knobs.HIDDEN)
+    context = SimpleNamespace(state_dir=str(tmp_path))
+    store = model.Store(4, knobs.HIDDEN, cpu)
+    hcm._save(context, {"model": net, "optim": hcm._optimisers(net), "store": store, "codes": [], "ring": None,
+                        "ring_dates": None, "seen": None, "last_day": "", "steps": 0, "quarter": ""})
+    warm = hcm.load(context, cpu)
+
+    def fit(ckpt: dict, x: torch.Tensor, y: torch.Tensor) -> None:
+        net = ckpt["model"]
+        score = net.score(net.embed(net.run(x, torch.zeros(x.shape[1], knobs.HIDDEN))), torch.zeros(x.shape[1]))
+        functional.mse_loss(score, y).backward()
+        ckpt["steps"] += 1
+        hcm._step(ckpt["optim"], net, ckpt["steps"])
+
+    # The body steps once on the first BODY_PERIOD days' summed gradient; the
+    # input group, INPUT_PERIOD days apart, steps on none of them.
+    assert knobs.BODY_PERIOD < knobs.INPUT_PERIOD
+    for _ in range(knobs.BODY_PERIOD + 1):
+        x, y = torch.randn(3, 16, features.FEATURES), torch.randn(16)
+        fit(warm, x, y)
+        cold = hcm.load(context, cpu)
+        fit(cold, x, y)
+        hcm._save(context, cold)
+    cold = hcm.load(context, cpu)
+    assert all(parameter.grad is not None for parameter in model.groups(cold["model"])["input"])
+    for (name, a), b in zip(warm["model"].named_parameters(), cold["model"].parameters()):
+        assert torch.equal(a, b), name
+        assert (a.grad is None and b.grad is None) or torch.equal(a.grad, b.grad), name
+    _drop_packages()
+
+
 # (dataset, code, available_at, change_ratio) in the events domain.
 EVENTS = [
     ("stk_holdertrade", "000001.SZ", "2024-03-01 19:00:00+08:00", 0.5),
