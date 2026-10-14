@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from pathlib import Path
 
 import pandas as pd
@@ -101,6 +102,22 @@ def test_worker_rejects_llm_mode_without_provider_credentials(tmp_path: Path):
     with pytest.raises(ValueError, match="requires an API key: set VLLM_API_KEY"):
         load_worker_options(experiment, repo_root=repo)
 
+
+
+def test_worker_rejects_llm_mode_without_ripgrep_on_the_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The typed grep tool runs `rg` on the host; a host without it must stop
+    the worker before the session starts rather than leave it without grep."""
+    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
+    which = shutil.which
+    monkeypatch.setattr(
+        "autotrade.pipelines.worker.shutil.which",
+        lambda name, *args, **kwargs: None if name == "rg" else which(name, *args, **kwargs),
+    )
+    with pytest.raises(ValueError, match="'rg' is not on PATH"):
+        load_worker_options(experiment, repo_root=repo)
 
 
 def test_the_worker_attaches_exactly_the_cards_the_console_claimed(

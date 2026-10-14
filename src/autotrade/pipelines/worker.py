@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import shutil
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -1435,6 +1436,14 @@ def _llm_settings(
     # validated at preflight with a non-secret placeholder.
     for role in ("main", "subagent", "nl", "compact"):
         settings.build_gateway(role, require_credentials=not preflight)
+    # The Agent's typed grep tool runs ripgrep on this host (``tools.search``),
+    # not in the sandbox image. Like a credential it is deployment state, so it
+    # is refused here, before a session starts, instead of by the session.
+    if not preflight and shutil.which("rg") is None:
+        raise ValueError(
+            "the Agent's grep tool runs ripgrep on this host, and 'rg' is not on PATH: "
+            "install ripgrep"
+        )
     # Every conversation role must leave room for its output budget; the
     # session parent's derived budget becomes the settings' own.
     settings.compaction_for("subagent")
