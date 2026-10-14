@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .gpu import GpuUnavailableError, device_request
+from .gpu import GpuUnavailableError, device_request, host_gpu_name
 from .runtime import (
     ARTIFACT_TOP_LEVEL,
     RUNTIME_CACHE_DIR_NAMES,
@@ -345,7 +345,7 @@ class SandboxSpec:
     # refuses to start. An integer or list pins devices; None runs CPU-only.
     gpu: str | int | Sequence[int] | None = "auto"
     gpu_count: int = 1
-    gpu_name_filter: str | None = "L20"
+    gpu_name_filter: str | None = field(default_factory=host_gpu_name)
     docker_executable: str = "docker"
 
     def __post_init__(self) -> None:

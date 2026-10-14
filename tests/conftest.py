@@ -50,6 +50,9 @@ def _restore_tmp_path_writable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("TMPDIR", str(nested))
     monkeypatch.setenv("TEMP", str(nested))
     monkeypatch.setenv("TMP", str(nested))
+    # The stubbed GPU rosters are L20 cards; a host that names another model
+    # (``gpu.GPU_NAME_ENV``) must not move the suite's selections onto it.
+    monkeypatch.delenv("AUTOTRADE_GPU_NAME", raising=False)
     yield
     _restore_writable_tree(tmp_path)
 

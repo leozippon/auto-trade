@@ -2006,6 +2006,25 @@ def test_the_default_sandbox_spec_asks_for_one_matching_gpu():
     assert record["gpu_name_filter"] == "L20"
 
 
+def test_the_host_gpu_name_setting_moves_every_selection_to_that_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """An A100 host names its model once, in the environment the console and
+    its workers share; the L20 cards it does not have are then never offered,
+    and the setting cannot be blanked into "any card"."""
+
+    a100 = [{**row, "name": "NVIDIA A100-SXM4-80GB"} for row in gpu_roster((0,))]
+    monkeypatch.setenv("AUTOTRADE_GPU_NAME", "A100")
+    spec = SandboxSpec()
+    assert spec.gpu_name_filter == "A100"
+    with patch("autotrade.environment.gpu.list_gpus", return_value=a100):
+        assert select_gpus(tmp_path, 1, require_name=spec.gpu_name_filter) == [0]
+    with stubbed_gpu_probe((0,)), pytest.raises(GpuUnavailableError):
+        select_gpus(tmp_path, 1, require_name=spec.gpu_name_filter)
+    monkeypatch.setenv("AUTOTRADE_GPU_NAME", " ")
+    assert SandboxSpec().gpu_name_filter == "L20"
+
+
 def test_idle_gpus_never_offers_a_card_anyone_holds_memory_on():
     """However much of it is free, a card carrying one CUDA context of
     somebody's is in use; a card outside the name filter is never offered."""

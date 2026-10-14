@@ -19,9 +19,24 @@ measurement of the strategy.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from collections.abc import Sequence
+
+# The device model this host's sandboxes run on: a case-insensitive substring
+# of the nvidia-smi name that every selection on the host filters by (the
+# console's claims, a round's smoke, command-line runs). It is a property of
+# the host, not of an experiment, so it is read from the environment the
+# console and its workers share; unset, it is the L20 workstation's.
+GPU_NAME_ENV = "AUTOTRADE_GPU_NAME"
+DEFAULT_GPU_NAME = "L20"
+
+
+def host_gpu_name() -> str:
+    """The device-name filter this host's GPU selections use."""
+
+    return os.environ.get(GPU_NAME_ENV, "").strip() or DEFAULT_GPU_NAME
 
 # The video memory a GPU strategy may count on while it runs. Sized for one
 # quarterly sequence-model refit on a 46 GiB L20 (a measured 9 GiB peak) with
