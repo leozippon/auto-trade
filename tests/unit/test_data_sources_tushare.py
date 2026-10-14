@@ -5160,6 +5160,32 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             )
         self.assertFalse((self.raw_dir / "stk_holdernumber" / "month=202609.parquet").exists())
 
+    def test_event_flow_report_period_window_reaches_back_by_the_disclosure_lag(self):
+        # A nightly window over announcements must request every report period
+        # those announcements can belong to: the top-10 tables filter on the
+        # period, and annual reports land up to 120 days after it ends.
+        client = EmptyTradeDateClient()
+        args = argparse.Namespace(
+            raw_dir=str(self.raw_dir),
+            start_date="20260914",
+            end_date="20261014",
+            datasets=["top10_floatholders", "repurchase"],
+            force=True,
+            page_limit=None,
+            min_interval_seconds=0,
+            timeout_seconds=1,
+        )
+        with redirect_stdout(io.StringIO()), patch.object(download, "load_token", return_value="token"), patch.object(
+            download, "TuShareClient", return_value=client
+        ):
+            download.download_event_flow(args)
+
+        def first_window(api_name):
+            return min((params["start_date"], params["end_date"]) for name, params in client.calls if name == api_name)
+
+        self.assertEqual(first_window("top10_floatholders"), ("20260517", "20260531"))
+        self.assertEqual(first_window("repurchase"), ("20260914", "20260930"))
+
     def test_bak_basic_blocked_shrink_fails_the_run(self):
         # download_bak_basic discarded the writer's answer entirely.
         path = self.raw_dir / "bak_basic" / "trade_date=20200102.parquet"

@@ -1534,8 +1534,9 @@ def download_event_flow(args: argparse.Namespace) -> int:
             if zero_skipped and not spec.zero_rows_ok:
                 required_zero_skipped.append(f"{spec.api_name}:{zero_skipped}")
         elif spec.strategy == "range_month":
-            windows = month_windows(args.start_date, args.end_date)
-            dataset_windows = [(s, e, m) for s, e, m in windows if e >= start_date]
+            window_start = format_yyyymmdd(parse_yyyymmdd(args.start_date) - timedelta(days=spec.report_lag_days))
+            windows = month_windows(window_start, args.end_date)
+            dataset_windows = [(s, e, m) for s, e, m in windows if e >= max(window_start, spec.start_date)]
             total_written += download_event_range_month(
                 client,
                 raw_dir,

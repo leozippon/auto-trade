@@ -648,6 +648,12 @@ class EventDataset:
     # ann_date while the API filters on end_date silently lost every row whose
     # report period precedes a mid-month window start.
     window_date_column: str = ""
+    # How far a report period's disclosures trail it, when window_date_column
+    # is a report period: a run's window starts this many days earlier, so the
+    # rows announced inside its lookback are requested whatever their period.
+    # Without it a 30-day nightly window never re-requested a quarter once 30
+    # days had passed, and the 2026-06 top-10 tables held 444 of 59,204 rows.
+    report_lag_days: int = 0
 
 @dataclass
 class BoardTradingDataset:
@@ -1275,8 +1281,10 @@ EVENT_FLOW_SPECS = {
         page_limit=5000,
         key_columns=("ts_code", "ann_date", "end_date", "holder_name"),
         date_column="ann_date",
-        # start_date/end_date filter the report period, not the announcement.
+        # start_date/end_date filter the report period, not the announcement;
+        # annual reports are due 120 days after the period ends.
         window_date_column="end_date",
+        report_lag_days=120,
     ),
     "top10_floatholders": EventDataset(
         api_name="top10_floatholders",
@@ -1285,8 +1293,10 @@ EVENT_FLOW_SPECS = {
         page_limit=5000,
         key_columns=("ts_code", "ann_date", "end_date", "holder_name"),
         date_column="ann_date",
-        # start_date/end_date filter the report period, not the announcement.
+        # start_date/end_date filter the report period, not the announcement;
+        # annual reports are due 120 days after the period ends.
         window_date_column="end_date",
+        report_lag_days=120,
     ),
     "pledge_detail": EventDataset(
         api_name="pledge_detail",
