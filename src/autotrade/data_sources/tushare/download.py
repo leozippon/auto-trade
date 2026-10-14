@@ -1663,6 +1663,50 @@ def download_event_trade_date_dataset(
     print(f"{spec.api_name} done dates={len(trade_dates)} skipped={skipped} written={written} zero_skipped={zero_skipped} rows_written={total_rows} pages={total_pages}")
     return written, zero_skipped
 
+def query_event_window(
+    client: TuShareClient,
+    spec: EventDataset,
+    start_date: str,
+    end_date: str,
+    page_limit: int,
+) -> tuple[ApiResult, int]:
+    """Every row of one date window, from requests that each fit in one page.
+
+    Offset paging is not order-stable on every endpoint: stk_holdernumber sorts
+    on a non-unique key, so consecutive pages repeat the rows at each boundary
+    and never serve as many others, reproducibly (2026-10-14: 202609 repeated 8
+    of 3,141 rows, 202504 2,694 of 12,588). A window whose answer fills a page
+    is therefore halved by date until every half fits in one page. Only a single
+    day that still fills a page is offset-paged (the top-10 holder tables at a
+    quarter end, whose paging is stable), and a row served on two of its pages
+    fails the run: the rows it displaced are missing from the response.
+    Returns the rows and the number of requests.
+    """
+    params = {"start_date": start_date, "end_date": end_date}
+    if start_date < end_date:
+        result = client.query(spec.api_name, {**params, "limit": page_limit, "offset": 0}, spec.fields)
+        if len(result.items) < page_limit:
+            return result, 1
+        start, end = parse_yyyymmdd(start_date), parse_yyyymmdd(end_date)
+        middle = start + (end - start) // 2
+        left, left_requests = query_event_window(client, spec, start_date, format_yyyymmdd(middle), page_limit)
+        right, right_requests = query_event_window(client, spec, format_yyyymmdd(middle + timedelta(days=1)), end_date, page_limit)
+        if left.items and right.items and left.fields != right.fields:
+            raise RuntimeError(f"{spec.api_name} returned inconsistent fields across {start_date}-{end_date}")
+        return ApiResult(left.fields or right.fields, left.items + right.items), 1 + left_requests + right_requests
+    result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
+    first_page: dict[str, int] = {}
+    repeated = 0
+    for index, row in enumerate(result.items):
+        page = first_page.setdefault(json.dumps(row, ensure_ascii=False, default=str), index // page_limit)
+        repeated += page != index // page_limit
+    if repeated:
+        raise RuntimeError(
+            f"{spec.api_name} {start_date}: offset paging served {repeated} row(s) on two pages over {pages} pages, "
+            "so as many rows are missing from the response; refusing to merge an incomplete day"
+        )
+    return result, pages
+
 def download_event_range_month(
     client: TuShareClient,
     raw_dir: Path,
@@ -1685,7 +1729,7 @@ def download_event_range_month(
         if should_skip_existing_partition(path, force=force, requested_params=params):
             skipped += 1
             continue
-        result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
+        result, pages = query_event_window(client, spec, start_date, end_date, page_limit)
         meta_params = dict(params)
         meta_params["month"] = month
         meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}

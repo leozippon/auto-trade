@@ -279,6 +279,24 @@ class RepeatingPagedClient:
         return common.ApiResult(result_fields, [row])
 
 
+class TieUnstablePagingClient:
+    """stk_holdernumber's pager: rows sorted on a non-unique key whose tie
+    order depends on the offset, so consecutive pages overlap and skip."""
+
+    def __init__(self, rows):
+        self.rows = rows
+        self.calls = []
+
+    def query(self, api_name, params=None, fields="", retries=5):
+        params = params or {}
+        self.calls.append(dict(params))
+        names = fields.split(",")
+        served = [row for row in self.rows if params["start_date"] <= row["ann_date"] <= params["end_date"]]
+        served.sort(key=lambda row: row["ts_code"], reverse=bool(params["offset"]))
+        page = served[params["offset"]:params["offset"] + params["limit"]]
+        return common.ApiResult(names, [[row.get(name, "") for name in names] for row in page])
+
+
 class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -5111,6 +5129,36 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 ("301575.SZ", "20260916", "20260911", 1.0),
             ],
         )
+
+    def test_event_range_month_bisects_windows_instead_of_trusting_offset_paging(self):
+        spec = common.EVENT_FLOW_SPECS["stk_holdernumber"]
+        rows = [
+            {"ts_code": f"{index:06d}.SZ", "ann_date": f"2026090{1 + index // 2}", "end_date": "20260820", "holder_num": index}
+            for index in range(6)
+        ]
+        client = TieUnstablePagingClient(rows)
+        with redirect_stdout(io.StringIO()):
+            download.download_event_range_month(
+                client, self.raw_dir, spec, [("20260901", "20260930", "202609")], True, 4,
+                str(self.root / "paging_revision_events.jsonl"),
+            )
+        # Offset paging would land rows 0-3 plus a repeat of 0-1, and never 4-5.
+        landed = pd.read_parquet(self.raw_dir / "stk_holdernumber" / "month=202609.parquet")
+        self.assertEqual(sorted(landed["holder_num"].tolist()), list(range(6)))
+        self.assertTrue(all(call["offset"] == 0 for call in client.calls))
+
+    def test_event_range_month_refuses_a_single_day_its_pager_repeats(self):
+        spec = common.EVENT_FLOW_SPECS["stk_holdernumber"]
+        client = TieUnstablePagingClient([
+            {"ts_code": f"{index:06d}.SZ", "ann_date": "20260905", "end_date": "20260820", "holder_num": index}
+            for index in range(5)
+        ])
+        with redirect_stdout(io.StringIO()), self.assertRaisesRegex(RuntimeError, "on two pages"):
+            download.download_event_range_month(
+                client, self.raw_dir, spec, [("20260901", "20260930", "202609")], True, 4,
+                str(self.root / "paging_revision_events.jsonl"),
+            )
+        self.assertFalse((self.raw_dir / "stk_holdernumber" / "month=202609.parquet").exists())
 
     def test_bak_basic_blocked_shrink_fails_the_run(self):
         # download_bak_basic discarded the writer's answer entirely.
