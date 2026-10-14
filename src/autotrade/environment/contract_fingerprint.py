@@ -164,21 +164,27 @@ def read_image_contract(
 ) -> ImageContract:
     """Read both fingerprints out of ``image`` in one offline container run.
 
-    This module is piped in as the script, so the digest of the baked modules
-    is computed by the same function the host compares against and no image
+    This module's source is the script, so the digest of the baked modules is
+    computed by the same function the host compares against and no image
     needs to be rebuilt to be readable.
     """
 
-    completed = subprocess.run(
-        [
-            docker_executable, "run", "--pull", "never", "--rm", "--network", "none",
-            "-i", "--entrypoint", "python", image, "-",
-        ],
-        input=Path(__file__).read_bytes(),
-        capture_output=True,
-        timeout=timeout_seconds,
-        check=False,
-    )
+    # Imported here: this module is also baked into the image, which has no
+    # ``sandbox`` module, and runs there as the build's fingerprint writer.
+    from .sandbox import attached_stdin
+
+    with attached_stdin() as stdin:
+        completed = subprocess.run(
+            [
+                docker_executable, "run", "--pull", "never", "--rm", "--network", "none",
+                "-i", "--entrypoint", "python", image,
+                "-c", Path(__file__).read_text(encoding="utf-8"),
+            ],
+            stdin=stdin,
+            capture_output=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
     if completed.returncode != 0:
         detail = completed.stderr.decode("utf-8", errors="replace").strip()
         raise SandboxImageContractMismatch(

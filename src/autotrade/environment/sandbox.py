@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import math
 import os
@@ -9,7 +10,8 @@ import re
 import shutil
 import subprocess
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -26,6 +28,34 @@ from .runtime import (
 )
 
 DEFAULT_IMAGE = "autotrade-sandbox:latest"
+
+
+@contextmanager
+def attached_stdin(data: bytes = b"") -> Iterator[int]:
+    """The stdin of one attached ``docker run -i`` / ``docker exec -i``.
+
+    The Docker client half-closes its attach stream once its stdin ends, and a
+    daemon reached through a socket proxy that cannot half-close then drops
+    everything the process writes afterwards: the command prints nothing and
+    exits 0. So the stream must not end while the command runs. The yielded
+    descriptor is a pipe holding ``data`` that stays open until the block
+    exits, after the command returned; a payload that needs EOF gets it from
+    an in-band byte count instead (``_EXEC_PAYLOAD``). ``data`` is buffered in
+    the pipe up front, so no writer outlives the call; more than the pipe can
+    be grown to hold fails here, explicitly.
+    """
+
+    read_fd, write_fd = os.pipe()
+    try:
+        if data:
+            fcntl.fcntl(write_fd, fcntl.F_SETPIPE_SZ, len(data))
+            view = memoryview(data)
+            while view:
+                view = view[os.write(write_fd, view):]
+        yield read_fd
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
 
 
 def _unlock_owned_directories(path: Path) -> None:
@@ -451,10 +481,11 @@ class LocalSandbox:
 def probe_image_runtime(image: str, *, docker_executable: str = "docker", timeout_seconds: float = 120.0) -> dict[str, object]:
     _validate_explicit_image_tag(image)
     script = "import json,platform; print(json.dumps({'python_version':platform.python_version()}))"
-    completed = subprocess.run(
-        [docker_executable, "run", "--pull", "never", "--rm", "--network", "none", "--entrypoint", "python", image, "-c", script],
-        capture_output=True, text=True, timeout=timeout_seconds, check=False,
-    )
+    with attached_stdin() as stdin:
+        completed = subprocess.run(
+            [docker_executable, "run", "--pull", "never", "--rm", "-i", "--network", "none", "--entrypoint", "python", image, "-c", script],
+            stdin=stdin, capture_output=True, text=True, timeout=timeout_seconds, check=False,
+        )
     if completed.returncode != 0:
         raise RuntimeError(f"sandbox image probe failed: {completed.stderr.strip()}")
     value = json.loads(completed.stdout)
@@ -470,11 +501,13 @@ def probe_image_runtime(image: str, *, docker_executable: str = "docker", timeou
 # (0o666/0o777, `tools.files._SANDBOX_FILE_MODE`); a zero umask closes the
 # reverse direction, so a file the Agent creates in `shell` stays editable by
 # `write_file`/`edit_file` instead of arriving 0o644 and refusing them.
-# `exec "$0" "$@"` keeps the argv-only contract: the payload is handed to `sh`
-# as positional parameters and is never re-parsed, and the exec replaces the
-# shell, so the payload itself owns the pid, the stdio and the exit status
-# (`timeout`'s 124 included).
-_ZERO_UMASK = ("sh", "-c", 'umask 0000; exec "$0" "$@"')
+# The exec's own stdin stays open until it returns (``attached_stdin``), so the
+# payload reads its input through `head -c "$0"`, the input's byte count: it
+# gets exactly those bytes and then EOF, at once when there are none. The
+# payload is handed to `sh` as positional parameters and is never re-parsed,
+# and as the last command of the pipeline it owns the stdout, the stderr and
+# the exit status (`timeout`'s 124 included).
+_EXEC_PAYLOAD = ("sh", "-c", 'umask 0000; head -c "$0" | exec "$@"')
 
 
 class DockerSandbox:
@@ -573,12 +606,14 @@ class DockerSandbox:
         timeout_seconds: float = 30.0,
         input_text: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        command = self._exec_command(argv, cwd=cwd)
-        return subprocess.run(
-            command,
-            input=input_text, capture_output=True, text=True, errors="replace",
-            timeout=timeout_seconds, check=False,
-        )
+        data = (input_text or "").encode("utf-8")
+        command = self._exec_command(argv, cwd=cwd, input_bytes=len(data))
+        with attached_stdin(data) as stdin:
+            return subprocess.run(
+                command,
+                stdin=stdin, capture_output=True, text=True, errors="replace",
+                timeout=timeout_seconds, check=False,
+            )
 
     def exec_limited(
         self,
@@ -595,17 +630,21 @@ class DockerSandbox:
             _with_container_timeout,
         )
 
+        data = (input_text or "").encode("utf-8")
         command = self._exec_command(
-            _with_container_timeout(argv, timeout_seconds), cwd=cwd
+            _with_container_timeout(argv, timeout_seconds), cwd=cwd, input_bytes=len(data)
         )
-        return _run_limited_capture(
-            command,
-            timeout_seconds=timeout_seconds + _HOST_TIMEOUT_BUFFER_SECONDS,
-            max_output_chars=max_output_chars,
-            input_text=input_text,
-        )
+        with attached_stdin(data) as stdin:
+            return _run_limited_capture(
+                command,
+                timeout_seconds=timeout_seconds + _HOST_TIMEOUT_BUFFER_SECONDS,
+                max_output_chars=max_output_chars,
+                stdin=stdin,
+            )
 
-    def _exec_command(self, argv: Sequence[str], *, cwd: str) -> list[str]:
+    def _exec_command(
+        self, argv: Sequence[str], *, cwd: str, input_bytes: int
+    ) -> list[str]:
         if not self._started:
             raise RuntimeError("persistent sandbox is not started")
         relative = Path(cwd)
@@ -621,7 +660,8 @@ class DockerSandbox:
             str(work),
             "-i",
             self.container,
-            *_ZERO_UMASK,
+            *_EXEC_PAYLOAD,
+            str(input_bytes),
             *map(str, argv),
         ]
 
@@ -721,6 +761,6 @@ def _validate_explicit_image_tag(image: str) -> None:
 __all__ = [
     "DEFAULT_IMAGE", "EXPERIMENT_LABEL", "MAX_CONTAINER_THREADS", "SCREENING_TOOL_MOUNT",
     "SCREENING_TOOL_SOURCE", "DockerSandbox", "LocalSandbox", "SandboxConfig", "SandboxLimits",
-    "SandboxSpec", "container_thread_env", "experiment_container_labels", "link_copytree",
+    "SandboxSpec", "attached_stdin", "container_thread_env", "experiment_container_labels", "link_copytree",
     "probe_image_runtime",
 ]

@@ -56,6 +56,7 @@ from autotrade.environment.sandbox import (
     SandboxConfig,
     SandboxLimits,
     SandboxSpec,
+    attached_stdin,
     experiment_container_labels,
 )
 from autotrade.environment.sandbox_images import (
@@ -373,6 +374,58 @@ def test_persistent_command_timeout_keeps_sandbox_for_followup_work():
     )
     assert result == CommandResult(124, "partial", "timed out", timed_out=True)
     sandbox.stop.assert_not_called()
+
+
+def test_attached_stdin_delivers_its_data_and_stays_open_while_the_command_runs():
+    """An attached Docker command must never see its stdin end while it runs:
+    the client half-closes the attach stream at EOF, and a daemon behind a
+    proxy that cannot half-close then drops all later output."""
+
+    probe = (
+        "import os, select, sys; size = int(sys.argv[1]); "
+        "data = os.read(0, size) if size else b''; "
+        "ready, _, _ = select.select([0], [], [], 0.5); "
+        "print(repr(data), 'eof' if ready else 'open')"
+    )
+    for data in (b"", "h\u00e9".encode()):
+        with attached_stdin(data) as stdin:
+            completed = subprocess.run(
+                [sys.executable, "-c", probe, str(len(data))],
+                stdin=stdin, capture_output=True, text=True, timeout=30, check=False,
+            )
+        assert completed.returncode == 0, completed.stderr
+        assert completed.stdout.strip() == f"{data!r} open"
+
+
+@pytest.mark.skipif(not docker_available(), reason="Docker is unavailable")
+def test_real_exec_input_reaches_the_payload_in_band_while_stdin_stays_open(tmp_path: Path):
+    image = "autotrade-sandbox:latest"
+    if subprocess.run(["docker", "image", "inspect", image], capture_output=True, check=False).returncode:
+        pytest.skip(f"local sandbox image is unavailable: {image}")
+    sandbox = DockerSandbox(
+        LocalSandbox(tmp_path / "session"),
+        SandboxSpec(image=image, gpu=None, cpus=1, memory="1g", pids_limit=64, tmpfs_size="64m"),
+    )
+    sandbox.local.prepare_layout()
+    sandbox.start()
+    try:
+        runner = PersistentCommandRunner(sandbox)
+        # Exactly the input, then EOF: `cat` returns instead of waiting on the
+        # still-open exec stdin, and the output after it is kept.
+        echoed = runner.run(
+            ["sh", "-c", "cat; printf '|end'"],
+            cwd=".", timeout_seconds=10, max_output_chars=4_000, input_text="h\u00e9\nx",
+        )
+        assert (echoed.exit_code, echoed.stdout) == (0, "h\u00e9\nx|end")
+        # No input is an immediate EOF, as before.
+        empty = runner.run(
+            ["sh", "-c", "cat; printf end"], cwd=".", timeout_seconds=10, max_output_chars=4_000
+        )
+        assert (empty.exit_code, empty.stdout, empty.timed_out) == (0, "end", False)
+        failing = sandbox.exec(["sh", "-c", "cat >&2; exit 3"], timeout_seconds=10, input_text="why")
+        assert (failing.returncode, failing.stderr) == (3, "why")
+    finally:
+        sandbox.stop()
 
 
 @pytest.mark.skipif(not docker_available(), reason="Docker is unavailable")

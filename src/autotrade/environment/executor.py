@@ -999,15 +999,18 @@ def _run_limited_capture(
     env: Mapping[str, str] | None = None,
     timeout_seconds: float,
     max_output_chars: int,
-    input_text: str | None = None,
+    stdin: int = subprocess.DEVNULL,
 ) -> ExecResult:
-    """Run a command while bounding retained stdout and stderr."""
+    """Run a command while bounding retained stdout and stderr.
+
+    ``stdin`` is handed to the command as is; an attached Docker command gets
+    one that stays open while it runs (``sandbox.attached_stdin``).
+    """
 
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
     if isinstance(max_output_chars, bool) or max_output_chars <= 0:
         raise ValueError("max_output_chars must be a positive integer")
-    stdin = subprocess.PIPE if input_text is not None else subprocess.DEVNULL
     process = subprocess.Popen(
         list(map(str, argv)),
         cwd=str(cwd) if cwd is not None else None,
@@ -1021,11 +1024,6 @@ def _run_limited_capture(
     selector = selectors.DefaultSelector()
     selector.register(process.stdout, selectors.EVENT_READ, "stdout")
     selector.register(process.stderr, selectors.EVENT_READ, "stderr")
-    pending_input = memoryview((input_text or "").encode("utf-8"))
-    input_offset = 0
-    if process.stdin is not None:
-        os.set_blocking(process.stdin.fileno(), False)
-        selector.register(process.stdin, selectors.EVENT_WRITE, "stdin")
     stdout = bytearray()
     stderr = bytearray()
     stdout_truncated = False
@@ -1044,19 +1042,6 @@ def _run_limited_capture(
             if not events and process.poll() is not None:
                 events = selector.select(timeout=0)
             for key, _mask in events:
-                if key.data == "stdin":
-                    try:
-                        if input_offset < len(pending_input):
-                            input_offset += os.write(
-                                key.fileobj.fileno(), pending_input[input_offset:]
-                            )
-                        if input_offset >= len(pending_input):
-                            selector.unregister(key.fileobj)
-                            key.fileobj.close()
-                    except (BrokenPipeError, OSError):
-                        selector.unregister(key.fileobj)
-                        key.fileobj.close()
-                    continue
                 chunk = os.read(key.fileobj.fileno(), 8192)
                 if not chunk:
                     selector.unregister(key.fileobj)
