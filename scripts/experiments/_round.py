@@ -86,7 +86,9 @@ failed every replay crossing 2022-07-01, the untouched starter included)
 refuses the arm with the failure instead of letting a session discover it.
 The outcome is recorded under logs/research/smoke/, keyed by the seed, its
 contract, the geometry and the starter's bytes: a pass is not replayed again,
-and a failure keeps refusing until its record is deleted.
+and a failure keeps refusing until its record is deleted. A GPU arm's starter
+replays on idle cards the smoke takes for its duration; with too few idle the
+arm is refused for that run only, and nothing is recorded.
 
 RETIRED_IDS records the experiment ids that have been used and archived, or
 withdrawn from a round's queue, or defined by a round whose file has left the
@@ -107,7 +109,7 @@ import urllib.error
 import urllib.request
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -120,6 +122,7 @@ from _bootstrap import add_repo_src
 REPO_ROOT = add_repo_src(__file__)
 
 from autotrade.environment.artifacts import FilesystemArtifactStore
+from autotrade.environment.gpu import GpuUnavailableError
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import rmtree_keeping_file_modes
 from autotrade.pipelines.calendar import FULL_SPAN
@@ -136,6 +139,7 @@ from autotrade.pipelines.hitl_state import (
     WEB_CREATE_DEFAULTS,
     WEB_INTERNAL_PARAMS,
     WEB_REQUIRED_PARAMS,
+    select_gpus,
 )
 from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.pipelines.lineage import extract_lineage
@@ -709,7 +713,10 @@ def smoke(merged: Mapping[str, object]) -> str:
     research-year start (the late-start path a defective seed breaks first),
     then the whole span. The outcome is recorded once per seed contract,
     geometry and starter bytes, so a pass is not replayed by the next timer run
-    and a failure is not retried until its record is deleted.
+    and a failure is not retried until its record is deleted. A starter whose
+    arm asks for GPUs replays on idle cards it takes for the smoke; when too few
+    are idle, ``GpuUnavailableError`` propagates and nothing is recorded, so a
+    later run smokes the arm again.
     """
 
     starter = REPO_ROOT / str(merged["workspace_reference"]) / "starter"
@@ -765,6 +772,13 @@ def _smoke_replays(merged: Mapping[str, object], starter: Path) -> str:
         options = resolve_worker_options(
             {**merged, "experiments_root": str(scratch)}, experiment_dir=experiment_dir, repo_root=REPO_ROOT
         )
+        # No console claims cards for the smoke, so it takes idle ones for its
+        # duration, as scripts/experiments/_cli.py does for a command-line run:
+        # a strategy container that asks for a GPU and names none refuses to start.
+        spec = options.agent_sandbox
+        if spec is not None and spec.gpu == "auto":
+            devices = select_gpus(EXPERIMENTS_ROOT, spec.gpu_count, require_name=spec.gpu_name_filter)
+            options = replace(options, agent_sandbox=replace(spec, gpu=tuple(devices)))
         pipeline = build_experiment_pipeline(
             options,
             ledger=ExperimentLedger(experiment_dir / "ledgers" / "experiment_ledger.jsonl"),
@@ -787,6 +801,9 @@ def _smoke_replays(merged: Mapping[str, object], starter: Path) -> str:
                 where = f"{days} days from {start}" if start else f"the full span {request.start}..{request.end}"
                 return f"{label}, {where}: {type(exc).__name__}: {exc}"
         return ""
+    except GpuUnavailableError:
+        # Too few idle cards says nothing about the starter or its seed.
+        raise
     except Exception as exc:  # noqa: BLE001 - an arm that cannot even be assembled fails its smoke
         return f"the smoke could not be assembled: {type(exc).__name__}: {exc}"
     finally:
@@ -1172,13 +1189,14 @@ class Round:
                 if dry_run:
                     continue
                 break
-            failure = smoke(merged)
+            try:
+                failure = smoke(merged)
+                if failure:
+                    failure = f"the starter's smoke failed on {merged.get('pit_views_seed')}, nothing was sent: {failure}"
+            except GpuUnavailableError as exc:
+                failure = f"no GPU is idle for the starter's smoke, so nothing was smoked, recorded or sent: {exc}"
             if failure:
-                print(
-                    f"{experiment_id}: the starter's smoke failed on {merged.get('pit_views_seed')},"
-                    f" nothing was sent: {failure}",
-                    file=sys.stderr,
-                )
+                print(f"{experiment_id}: {failure}", file=sys.stderr)
                 failed.append(experiment_id)
                 if dry_run:
                     continue
