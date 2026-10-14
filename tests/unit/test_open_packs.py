@@ -38,6 +38,9 @@ FIVE_YEAR_08B = [REFS / f"open_{name}_100k_5y_20261008b" for name in ("tables", 
 EIGHT_YEAR_08B = [REFS / f"open_{name}_100k_8y_20261008b" for name in ("guidance", "capital")]
 ENSEMBLE = REFS / "open_ensemble_100k_8y_20261008b"
 PACKS_08B = [*FIVE_YEAR_08B, *EIGHT_YEAR_08B, ENSEMBLE]
+# Round 20261014b: the hierarchical-continual-memory arm, one pack whose
+# starter trains daily and whose controls are knob settings.
+HCM_14B = REFS / "hcm_100k_8y_20261014b"
 ROUNDS = {
     "create_round_20261014": (PACKS_14, 1),
     "create_round_20261008b": (PACKS_08B, 0),
@@ -95,7 +98,7 @@ def test_the_starter_control_keeps_each_stand_in_from_review_to_review(monkeypat
     _drop_packages()
 
 
-@pytest.mark.parametrize("pack", [*PACKS_14, *PACKS_08B], ids=lambda path: path.name)
+@pytest.mark.parametrize("pack", [*PACKS_14, *PACKS_08B, HCM_14B], ids=lambda path: path.name)
 def test_the_starter_is_a_valid_package(pack: Path) -> None:
     validate_strategy_package(pack / "starter" / "main.py")
 
@@ -133,7 +136,7 @@ def test_round_20261008b_mounts_the_events_domain_on_the_five_year_arms_only() -
 
 
 def test_no_pack_cites_a_reading_after_the_research_period() -> None:
-    for pack in [*PACKS_14, *PACKS_08B]:
+    for pack in [*PACKS_14, *PACKS_08B, HCM_14B]:
         for path in pack.rglob("*"):
             if path.is_file() and path.suffix in (".md", ".py"):
                 text = path.read_text(encoding="utf-8")
@@ -246,6 +249,56 @@ def test_a_title_stamped_after_the_decision_fails_the_read(lib, tmp_path: Path) 
 def test_the_device_falls_back_to_the_cpu(lib, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(lib.device.torch.cuda, "is_available", lambda: False)
     assert lib.device.device().type == "cpu"
+
+
+def test_the_hcm_starter_carries_the_canonical_book_and_its_controls_are_knobs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The HCM starter ships the canonical book byte for byte, keeps one daily
+    refit literal for every control, and maps the update knob onto the three
+    parameter groups' schedules as the README's table says."""
+    library = REPO_ROOT / "configs" / "starter_lib"
+    for name in ("trade.py", "controls.py"):
+        assert (HCM_14B / "starter" / "lib" / name).read_bytes() == (library / name).read_bytes(), name
+    assert re.search(r'^REFIT_PERIOD = "day"$', (HCM_14B / "starter" / "main.py").read_text(encoding="utf-8"), flags=re.M)
+    _starter(monkeypatch, HCM_14B)
+    from lib import hcm, knobs
+
+    assert (knobs.UPDATE, knobs.STATE, knobs.MEMORY) == ("graded", "carried", True)
+    graded = hcm._schedule()
+    assert graded == {"head": (knobs.HEAD_LR, knobs.HEAD_PERIOD), "body": (knobs.BODY_LR, knobs.BODY_PERIOD), "input": (knobs.INPUT_LR, knobs.INPUT_PERIOD)}
+    monkeypatch.setattr(knobs, "UPDATE", "reversed")
+    reversed_schedule = hcm._schedule()
+    assert (reversed_schedule["input"], reversed_schedule["head"]) == (graded["head"], graded["input"])
+    monkeypatch.setattr(knobs, "UPDATE", "uniform")
+    assert set(hcm._schedule().values()) == {graded["head"]}
+    _drop_packages()
+
+
+def test_the_hcm_store_retrieves_only_labels_known_on_the_query_day(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An episode enters retrieval only from its due day on, so the memory
+    signal never carries a label the query day could not have seen; a query
+    with no eligible neighbour reads 0; the reservoir keeps every episode
+    while it has room."""
+    import numpy as np
+    import torch
+
+    _starter(monkeypatch, HCM_14B)
+    from lib import model
+
+    store = model.Store(size=8, hidden=4, device=torch.device("cpu"))
+    # Two episodes per direction: a twin due in January and one due in February.
+    emb = torch.eye(4).repeat(2, 1)
+    labels = torch.tensor([0.4, 0.2, 0.1, 0.3, -0.4, -0.2, -0.1, -0.3])
+    day = torch.tensor([20240101] * 8)
+    due = torch.tensor([20240131] * 4 + [20240229] * 4)
+    store.add(emb, emb, labels, day, due, np.random.default_rng(0))
+    assert store.filled == 8
+    query = torch.eye(4)
+    early = store.signal(query, torch.full((4,), 20240131), k=1)
+    assert early.tolist() == pytest.approx([0.4, 0.2, 0.1, 0.3])  # the February twin is not due yet
+    late = store.signal(query, torch.full((4,), 20240229), k=2)
+    assert late.tolist() == pytest.approx([0.0] * 4)  # both twins are due and their labels cancel
+    assert store.signal(query, torch.full((4,), 20231231), k=2).tolist() == [0.0] * 4
+    _drop_packages()
 
 
 # (dataset, code, available_at, change_ratio) in the events domain.
