@@ -68,30 +68,6 @@ FUND_EIGHT_YEAR_100K: dict[str, object] = {
     "active_max_drawdown": 0.30,
 }
 
-# The fundamentals seed's taxed-era twin: every market and fundamentals table is
-# a hard link to round 20261006's seed, and only the Broker's corporate-action
-# tables are rebuilt to carry the bonus-share column the dividend tax reads
-# (logs/data/seed_8y_fund_20261008/). Arms created from round 20261008 on are
-# taxed by the creation default, so a row on this seed differs from one on its
-# twin by the dividend tax alone.
-TAXED_FUND_PIT_VIEWS_SEED = "data/pit_views_seed_research_8y_fund_20261008"
-
-# The eight-year geometry with the vendor's announcement titles as the one text
-# dataset (round 20261012): daily, universe, the four macro tables and
-# `anns_d`, no fundamentals or events -- the selection the title seed below was
-# prebuilt for. Its titles are the vendor's `anns_d` throughout: 2016-01..2019-12
-# fetched from the official service, 2020-01 on the relay copy the lake held
-# (logs/data/seed_8y_anns_20261006/).
-TITLE_EIGHT_YEAR: dict[str, object] = {**EIGHT_YEAR, "include_text": True, "text_datasets": ["anns_d"]}
-
-# Round 20261005's 100k bars on the title geometry.
-TITLE_EIGHT_YEAR_100K: dict[str, object] = {**FUND_EIGHT_YEAR_100K, **TITLE_EIGHT_YEAR}
-
-# The title seed: daily, macro and universe from release
-# fa6a99174bcb4c43bcc957f0a91a0cce, the Broker's taxed corporate actions, and
-# the text domain with `anns_d` alone.
-TITLE_PIT_VIEWS_SEED = "data/pit_views_seed_research_8y_anns_20261006"
-
 # The eight-year geometry with both the fundamentals domain (the default ten
 # datasets) and the vendor's announcement titles (round 20261014): the first
 # selection to mount statements and titles on one arm. Its seed is prebuilt
@@ -146,13 +122,11 @@ FIVE_YEAR: dict[str, object] = {
 # Round 20261005's 100k bars on the five-year geometry.
 FIVE_YEAR_100K: dict[str, object] = {**FUND_EIGHT_YEAR_100K, **FIVE_YEAR}
 
-# Its seed, prebuilt from release b5dc339b708d4a0ba962805828e973af
-# (logs/data/seed_5y_full_20261015/).
-FIVE_YEAR_PIT_VIEWS_SEED = "data/pit_views_seed_research_5y_full_20261015"
-# That seed typed some events columns two ways (string beside large_string),
-# so every replay crossing 2022-07-01 failed
-# (logs/notes/review_20261008/asof_partition_defect.md); this is its rebuild
-# for the same selection after the fix (logs/data/seed_5y_full_20261016/).
+# Its seed: the rebuild for the same selection (logs/data/seed_5y_full_20261016/)
+# of the one first prebuilt from release b5dc339b708d4a0ba962805828e973af
+# (logs/data/seed_5y_full_20261015/), which typed some events columns two ways
+# (string beside large_string), so every replay crossing 2022-07-01 failed
+# (logs/notes/review_20261008/asof_partition_defect.md).
 FIVE_YEAR_FIXED_PIT_VIEWS_SEED = "data/pit_views_seed_research_5y_full_20261016"
 
 # The hosted arm of a pair: main session, sub-agents and compaction on MiMo, the
@@ -165,57 +139,6 @@ MIMO: dict[str, object] = {
     "compact_model": "mimo-v2.6-flash",
     "compact_token_threshold": 221_184,
 }
-
-# The sequence bag's lineage, one list per stage of its search; an arm inherits
-# the stage that had closed when it was created.
-#
-# Every arm that recorded a non-control trial on the whole-pool sequence recipe
-# over the eight years (round 20261001; its pack README §8). The 100k MLP and
-# the CSI 1000 GRU recorded controls only and cannot be lineage.
-RECIPE_ARMS: tuple[str, ...] = (
-    "mlp_alla_8y_20260925",
-    "tcn_alla_8y_20260925",
-    "lstm_alla_8y_20260926",
-    "tattn_alla_8y_20260926",
-    "shortmlp_alla_8y_20260926",
-    "lagpool_alla_8y_20260926",
-    "decay_alla_1m_20260926",
-    "patchmlp_alla_100k_20260926",
-    "spec_alla_100k_20260926",
-    "lstm_alla_100k_20260926",
-)
-# The recipe arms and the 1m bag (round 20261003).
-SEQBAG_LINEAGE = [*RECIPE_ARMS, "seqbag_alla_8y_20261001"]
-# Plus every arm that rebuilt the bag as a 100k book (round 20261006): their
-# trials are the search's own history on these eight years.
-SEQAXES_LINEAGE = [
-    *SEQBAG_LINEAGE,
-    "seqbag_alla_100k_8y_qwen_20261003",
-    "seqbag_alla_100k_8y_mimo_20261003",
-    "seqbag_alla_100k_8y_deepseek_20261004",
-]
-# Plus every arm that has searched the frozen 100k bag as a baseline and closed:
-# round 20261006's label and fundamentals-input pairs and round 20261009's
-# clock arm (round 20261008's cost and pool pairs and round 20261009's beta
-# pair, which were withdrawn before they ran).
-SEQBOOK_LINEAGE = [
-    *SEQAXES_LINEAGE,
-    "seqlabel_alla_100k_8y_qwen_20261006",
-    "seqlabel_alla_100k_8y_mimo_20261006",
-    "seqfund_alla_100k_8y_qwen_20261006",
-    "seqfund_alla_100k_8y_mimo_20261006",
-    "seqhold_clock_100k_8y_qwen_20261009",
-]
-# Plus round 20261008's bag pair, which ran the bag with four and six seeds
-# per head; the four-seed bag is the baseline of the lanes after it (round
-# 20261011). The two arms' rows are byte-identical, and the gate counts each
-# arm's trials, so the pair adds its four trials twice, as the label and
-# fundamentals-input pairs above already do.
-SEQBAG4_LINEAGE = [
-    *SEQBOOK_LINEAGE,
-    "seqbag2_bag_100k_8y_qwen_20261008",
-    "seqbag2_bag_100k_8y_mimo_20261008",
-]
 
 # The title family's first stage: round 20261012's incentive-draft arms, the
 # 100k pair and the 500k arm. A later lane on the announcement titles over the
