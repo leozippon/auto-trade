@@ -66,9 +66,8 @@ from autotrade.paper.books import (
 )
 from autotrade.paper.engine import (
     DailyPaperEngine,
-    PaperWriterBusy,
     docker_executor,
-    write_run_status,
+    run_reporting,
     writer_lock,
 )
 from autotrade.paper.orders import (
@@ -229,18 +228,21 @@ def run_book(book_id: str, root: Path, trade_date: str, orders_dir: Path) -> Non
     with writer_lock(root):
         book = None
         try:
-            book = load_book(root)
-            _run_book_locked(book_id, book, trade_date, orders_dir)
-        except PaperWriterBusy:
-            raise
+            with run_reporting(root, trade_date):
+                book = load_book(root)
+                _run_book_locked(book_id, book, trade_date, orders_dir)
         except Exception as exc:
-            write_run_status(root, trade_date, exc)
             text = render_failure(book, trade_date, exc)
             print(text, file=sys.stderr)
             print(f"[{book_id}] failure written to {write_orders(orders_dir / book_id, trade_date, text)}", file=sys.stderr)
             raise
-        else:
-            write_run_status(root, trade_date)
+
+
+def _killed_sheet(book: Book, trade_date: str) -> str:
+    """The exit sheet of a killed book: its holdings, to sell by hand."""
+
+    transitions, _skipped = read_jsonl(book.root / VERDICT_LOG_NAME)
+    return render_killed(book, trade_date, transitions[0])
 
 
 def _run_book_locked(book_id: str, book: Book, trade_date: str, orders_dir: Path) -> None:
@@ -250,8 +252,7 @@ def _run_book_locked(book_id: str, book: Book, trade_date: str, orders_dir: Path
         return
     sheets = orders_dir / book_id
     if book_status(root) == "killed":
-        transitions, _skipped = read_jsonl(root / VERDICT_LOG_NAME)
-        text = render_killed(book, trade_date, transitions[0])
+        text = _killed_sheet(book, trade_date)
         print(text)
         print(f"[{book_id}] killed; nothing decided, exit sheet written to {write_orders(sheets, trade_date, text)}", file=sys.stderr)
         return
@@ -295,11 +296,7 @@ def _run_book_locked(book_id: str, book: Book, trade_date: str, orders_dir: Path
         after_settlement=verdict_gate,
     )
     engine.run_day(trade_date, lock_held=True)
-    if book_status(root) == "killed":
-        transitions, _skipped = read_jsonl(root / VERDICT_LOG_NAME)
-        text = render_killed(book, trade_date, transitions[0])
-    else:
-        text = render_orders(book, trade_date)
+    text = _killed_sheet(book, trade_date) if book_status(root) == "killed" else render_orders(book, trade_date)
     print(text)
     print(f"[{book_id}] sheet written to {write_orders(sheets, trade_date, text)}", file=sys.stderr)
 
