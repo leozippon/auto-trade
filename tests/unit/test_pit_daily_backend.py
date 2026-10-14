@@ -930,6 +930,39 @@ def test_research_pit_provider_reuses_completed_semantic_views(tmp_path: Path) -
     assert fake.calls == ["decision", "replay"]
 
 
+def test_research_pit_provider_names_a_cache_format_mismatch(tmp_path: Path) -> None:
+    """A cache bound under another cache format is refused naming both
+    formats, not as a different release; any other drift keeps the generic
+    refusal, and neither refusal rewrites the binding."""
+
+    provider, _fake = _provider_with_fake_builder(tmp_path)
+    contract = provider.cache_root / "provider.json"
+    current = json.loads(contract.read_text(encoding="utf-8"))
+
+    def reopen() -> ResearchPITSnapshotProvider:
+        return ResearchPITSnapshotProvider(
+            experiment_dir=provider.experiment_dir,
+            raw_dir=tmp_path / "data" / "raw",
+            fundamental_events_root=tmp_path / "data" / "pit" / "fundamental_events",
+            fundamental_events_status=tmp_path / "results" / "data_quality" / "fundamental_events_status.json",
+            config=provider.config,
+        )
+
+    older = {**current, "schema_version": SNAPSHOT_CACHE_FORMAT_VERSION - 1}
+    contract.write_text(json.dumps(older), encoding="utf-8")
+    with pytest.raises(
+        RuntimeError,
+        match=rf"cache format {SNAPSHOT_CACHE_FORMAT_VERSION - 1}, this code requires {SNAPSHOT_CACHE_FORMAT_VERSION}",
+    ):
+        reopen()
+    assert json.loads(contract.read_text(encoding="utf-8")) == older
+    contract.write_text(json.dumps({**current, "generation_id": "another"}), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="already bound to a different release or configuration"):
+        reopen()
+    contract.write_text(json.dumps(current), encoding="utf-8")
+    assert reopen().cache_root == provider.cache_root
+
+
 def test_unphased_forward_replay_is_cloned_into_valid_phase(tmp_path: Path) -> None:
     provider, fake = _provider_with_fake_builder(tmp_path)
     decision = datetime.fromisoformat("2024-01-01T23:59:59+08:00")

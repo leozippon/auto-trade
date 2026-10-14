@@ -240,6 +240,12 @@ class ResearchPITSnapshotProvider:
         with _exclusive_lock(self.cache_root / ".provider.lock"):
             if path.exists():
                 existing = _read_json(path)
+                if existing.get("schema_version") != record["schema_version"]:
+                    raise RuntimeError(
+                        f"PIT view cache {self.cache_root} was built under cache format "
+                        f"{existing.get('schema_version')!r}, this code requires {record['schema_version']}: "
+                        "a view built under another format is never reused, so the cache must be rebuilt"
+                    )
                 if existing != record:
                     raise RuntimeError("PIT view cache is already bound to a different release or configuration")
             else:
