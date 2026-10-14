@@ -379,17 +379,57 @@ def _responses_input(messages: Sequence[ChatMessage]) -> list[dict[str, object]]
     return items
 
 
+# Appended to every optional parameter's description on the responses wire.
+_NULL_MEANS_ABSENT = "Optional: null means omitted."
+
+
 def _responses_tool(tool: Mapping[str, object]) -> dict[str, object]:
-    """One Chat Completions tool schema in the responses flat form."""
+    """One Chat Completions tool schema in the responses flat form.
+
+    The endpoint runs a function tool in strict mode unless told otherwise and
+    then requires every property, so a model can no longer omit an optional
+    parameter: each one is sent nullable, and the tool registry reads null as
+    absent. Before this, a parameter with no neutral value got a placeholder
+    -- ``resume="unused"`` or ``"/"`` on all 469 sub-agent launches of round
+    20261014b's two gpt-6.1-sol arms, each refused as an unknown task_id.
+    """
 
     function = tool.get("function")
     if not isinstance(function, Mapping):
         raise ValueError("relay tools must use the chat-completions function shape")
     converted: dict[str, object] = {"type": "function", "name": function.get("name")}
-    for key in ("description", "parameters"):
-        if function.get(key) is not None:
-            converted[key] = function[key]
+    if function.get("description") is not None:
+        converted["description"] = function["description"]
+    parameters = function.get("parameters")
+    if parameters is not None:
+        converted["parameters"] = _nullable_optional_parameters(
+            cast(Mapping[str, object], parameters)
+        )
     return converted
+
+
+def _nullable_optional_parameters(parameters: Mapping[str, object]) -> dict[str, object]:
+    """``parameters`` with each top-level optional property accepting null."""
+
+    properties = parameters.get("properties")
+    if not isinstance(properties, Mapping):
+        return dict(parameters)
+    required = parameters.get("required") or ()
+    nullable: dict[str, object] = {}
+    for name, schema in properties.items():
+        if name in required:
+            nullable[name] = schema
+            continue
+        field = {**schema, "type": [schema["type"], "null"]}
+        if "enum" in field:
+            # A strict enum admits only its listed values.
+            field["enum"] = [*field["enum"], None]
+        description = field.get("description")
+        field["description"] = (
+            f"{description} {_NULL_MEANS_ABSENT}" if description else _NULL_MEANS_ABSENT
+        )
+        nullable[name] = field
+    return {**parameters, "properties": nullable}
 
 
 def _responses_tool_choice(

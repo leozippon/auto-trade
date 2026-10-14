@@ -365,7 +365,15 @@ def validate_arguments(
     unknown = sorted(set(arguments).difference(properties))
     if unknown and schema.get("additionalProperties", False) is False:
         raise ToolSchemaError(f"unknown argument(s): {unknown}")
-    missing = sorted(str(name) for name in required if name not in arguments)
+    # A null optional argument is an absent one. A strict function call (the
+    # relay's responses endpoint) must carry every property and gives null for
+    # those it does not use; a null required argument is still missing.
+    arguments = {
+        name: value
+        for name, value in arguments.items()
+        if value is not None or name in required
+    }
+    missing = sorted(str(name) for name in required if arguments.get(name) is None)
     if missing:
         raise ToolSchemaError(f"missing required argument(s): {missing}")
     normalized = _json_object(arguments, name="tool arguments")

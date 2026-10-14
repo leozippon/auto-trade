@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from autotrade.agent.subagent import AGENT_TOOL_SPEC
 from autotrade.environment.llm import (
     MODEL_CHOICES,
     ChatMessage,
@@ -33,6 +34,7 @@ from autotrade.environment.llm.lighting import (
     LightingProxy,
 )
 from autotrade.environment.llm.openai_compatible import load_env_value
+from autotrade.environment.tools.base import validate_arguments
 
 MODEL = "gpt-6-astra"
 CLAUDE_MODEL = "claude-sonnet-5-5"
@@ -413,6 +415,61 @@ def test_responses_payload_maps_history_tools_and_reasoning(tmp_path: Path):
         "prompt_tokens": 11,
         "completion_tokens": 3,
     }
+
+
+def test_responses_tools_send_optional_parameters_nullable(tmp_path: Path):
+    """The responses endpoint runs a tool strict by default and then requires
+    every property; with string-only optionals gpt-6.1-sol sent
+    ``resume="unused"`` on all 469 launches of round 20261014b. Optional
+    parameters go out nullable, the registry schema stays as it is, and the
+    strict call the model returned to this schema on 2026-10-14 -- every key,
+    null for the unused -- validates as a launch without resume. The chat
+    dialects, which can omit a key, send the schema unchanged."""
+
+    agent = AGENT_TOOL_SPEC.provider_record()
+    proxy, transport = _proxy(tmp_path, [_responses_json(content="done")])
+    proxy.complete([ChatMessage("user", "delegate")], tools=(*TOOLS, agent))
+
+    plain, sent = transport.bodies[0]["tools"]
+    assert plain == FLAT_TOOL
+    source = AGENT_TOOL_SPEC.input_schema
+    assert sent["parameters"]["required"] == source["required"]
+    for name, schema in source["properties"].items():
+        field = sent["parameters"]["properties"][name]
+        assert field["type"] == [schema["type"], "null"]
+        assert field["description"] == f"{schema['description']} Optional: null means omitted."
+        assert field.get("enum") == ([*schema["enum"], None] if "enum" in schema else None)
+    assert source["properties"]["resume"]["type"] == "string"
+    returned = {
+        "action": "launch",
+        "agent": "Explore",
+        "description": "参考包与执行 ABI 合同",
+        "inherit_context": True,
+        "max_turns": 12,
+        "resume": None,
+        "task": "开局只读调查，范围 refs/ 与 output/README.md。",
+        "task_id": None,
+        "text": None,
+        "thinking": "medium",
+    }
+    assert set(returned) == set(sent["parameters"]["properties"])
+    validated = validate_arguments(source, returned)
+    assert not {"resume", "task_id", "text"} & validated.keys()
+
+    chat, chat_transport = _proxy(
+        tmp_path,
+        [
+            json.dumps(
+                {
+                    "model": CLAUDE_MODEL,
+                    "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+                }
+            ).encode()
+        ],
+        model=CLAUDE_MODEL,
+    )
+    chat.complete([ChatMessage("user", "delegate")], tools=(agent,))
+    assert chat_transport.bodies[0]["tools"] == [agent]
 
 
 def test_thinking_off_omits_reasoning_and_the_clone_keeps_the_dialect(

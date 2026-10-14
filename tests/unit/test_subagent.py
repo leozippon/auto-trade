@@ -2634,6 +2634,55 @@ def test_resume_refuses_unknown_running_or_mismatched_children() -> None:
     assert runner._subagent_attempts == 1
 
 
+def test_a_strict_call_with_null_optionals_launches_and_messages() -> None:
+    """The relay's responses endpoint makes every ``agent`` property required,
+    so gpt-6.1-sol sends all of them and null for those it does not use (the
+    launch below is the one it returned on 2026-10-14). With string-only
+    optionals it had to invent ``resume="unused"``, and all 469 launches of
+    round 20261014b were refused as an unknown task_id. Null is an omitted
+    resume, task_id or text; a null agent is still a launch without one."""
+
+    started = threading.Event()
+    release = threading.Event()
+    runner = AgentSessionRunner(
+        llm=ScriptedLLM([]),
+        tools=ToolRegistry(),
+        system_prompt="research",
+        config=_session_config(),
+        subagent=SubAgentEngine(
+            llm=_GateLLM(started, release), tools=ToolRegistry([DeclaredReadOnlyShell()])
+        ),
+    )
+    unused = dict.fromkeys(AGENT_TOOL_SPEC.input_schema["properties"])
+    launch = {
+        **unused,
+        "action": "launch",
+        "agent": "Explore",
+        "description": "参考包与执行 ABI 合同",
+        "inherit_context": True,
+        "max_turns": 12,
+        "task": "读 output/README.md，返回执行合同要点。",
+        "thinking": "medium",
+    }
+    launched = runner.tools.invoke("agent", launch)
+    assert launched.ok, launched.error
+    assert launched.value["status"] == "started" and "resumed_from" not in launched.value
+    task_id = str(launched.value["task_id"])
+    assert started.wait(3)
+    try:
+        steered = runner.tools.invoke(
+            "agent", {**unused, "action": "message", "task_id": task_id, "text": "先看合同"}
+        )
+        assert steered.ok, steered.error
+        assert steered.value["status"] == "queued"
+    finally:
+        release.set()
+    assert runner._wait_subagent_jobs()[-1]["ok"] is True
+    bare = runner.tools.invoke("agent", {**launch, "agent": None})
+    assert bare.ok is False and "launch requires agent and task" in bare.error
+    assert runner._subagent_attempts == 1
+
+
 def test_a_parent_working_alone_is_never_nudged_to_delegate() -> None:
     """A delegation reminder after eight own calls provoked a sub-agent launch
     65 times out of 156 in one round, trivial ones included, so the Runner

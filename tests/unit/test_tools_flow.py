@@ -1774,6 +1774,42 @@ class ToolResultContractTest(unittest.TestCase):
             self.assertIn("over 40000 chars come back as an inline head", shell_description)
             self.assertIn("`<stream>_spill.result_hint`", shell_description)
 
+    def test_null_optional_arguments_are_absent_and_null_required_ones_missing(self) -> None:
+        """A strict function call (the relay's responses endpoint) carries every
+        property and null for those it does not use. Null reads as absent for
+        an optional argument -- the call means what omitting it means, never the
+        string "None" -- and as missing for a required one; it never lets an
+        unknown key through."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _, registry = self._layout(tmp)
+            _, _, workspace = build_sandbox(Path(tmp + "/shell"))
+            runner = FakeRunner()
+            registry = ToolRegistry([*registry._tools.values(), SandboxShellTool(workspace, runner)])
+            omitted = registry.invoke("read_file", {"path": "inputs/x.json"})
+            nulls = registry.invoke(
+                "read_file", {"root": None, "path": "inputs/x.json", "offset": None, "limit": None}
+            )
+            self.assertTrue(nulls.ok, nulls.error)
+            self.assertEqual(nulls.value, omitted.value)
+            shell = registry.invoke(
+                "shell", {"argv": ["ls"], "cwd": None, "timeout_seconds": None, "input": None}
+            )
+            self.assertTrue(shell.ok, shell.error)
+            argv, cwd, timeout, _, input_text = runner.calls[0]
+            self.assertEqual((argv, cwd, timeout, input_text), (("ls",), ".", DEFAULT_SHELL_TIMEOUT_SECONDS, None))
+            for name, arguments, needle in (
+                ("read_file", {"root": "workspace", "path": None, "offset": None}, "missing required argument(s): ['path']"),
+                ("shell", {"argv": None, "cwd": "."}, "missing required argument(s): ['argv']"),
+                ("read_file", {"path": "inputs/x.json", "page": None}, "unknown argument(s): ['page']"),
+                ("read_file", {"path": "inputs/x.json", "limit": "null"}, "limit must be integer"),
+            ):
+                result = registry.invoke(name, arguments)
+                self.assertFalse(result.ok, arguments)
+                self.assertIn(needle, result.error, arguments)
+                self.assertEqual(result.value["error_type"], "schema_error", arguments)
+            self.assertEqual(len(runner.calls), 1)
+
 
 class SpillAndRootContractTest(unittest.TestCase):
     """Oversized results spill to a reference the Agent can read back; roots
