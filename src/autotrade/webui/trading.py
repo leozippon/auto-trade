@@ -1045,9 +1045,11 @@ def book_status(repo_root: Path, book: str, env: str = "paper") -> dict[str, obj
     state, state_error = _read_json(root / PAPER_STATE_NAME)
     latest = max([*_dates(root, "orders_")[-1:], *_dates(root, "executions_")[-1:]], default=None)
     environment = _environment_state(str(snapshot["state"]), state_error, latest)
-    # A real-fill book whose closed session is not recorded yet: the next run
-    # stops there, so it outranks every state but an unreadable one.
-    awaiting = _awaiting_sessions(root, state) if environment not in {"unreadable", "export_error"} else []
+    # A real-fill book whose closed session is not recorded yet: every run
+    # stops there (``PaperAwaitingFills``, which the run reports as a failed
+    # run) until the owner records it, so it outranks every state but an
+    # unreadable one; the last run's error stays in ``error`` beside it.
+    awaiting = _awaiting_sessions(root, state) if environment != "unreadable" else []
     return {
         "env": env,
         "book_id": book,
@@ -1112,7 +1114,8 @@ def books_payload(repo_root: Path, env: str = "paper") -> dict[str, object]:
 
 
 def health_payload(repo_root: Path, env: str = "paper") -> dict[str, object]:
-    """For external monitors: false for unreadable books or failed runs."""
+    """For external monitors: false for an unreadable book or a failed run.
+    A book awaiting the owner's fills is waiting on him, not failing."""
     try:
         books = [book_status(repo_root, book, env) for book in list_books(env_dir(repo_root, env))]
     except RuntimeError as exc:

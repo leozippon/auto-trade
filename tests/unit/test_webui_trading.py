@@ -28,6 +28,7 @@ from autotrade.environment.replay.engine import StrategyDataView
 from autotrade.environment.replay.market import DailyMarketData
 from autotrade.paper import DailyPaperEngine
 from autotrade.paper.book import SOURCE_HISTORY_NAME, copy_source_history
+from autotrade.paper.engine import PaperAwaitingFills
 from autotrade.paper.orders import order_sheet
 from autotrade.paper.pit import newest_replay_slot
 from autotrade.paper.storage import read_jsonl
@@ -677,6 +678,14 @@ def test_a_book_is_switched_to_real_fills_recorded_and_compared_through_the_cons
     ]
     status = client.get(f"{base}/status").json()
     assert (status["state"], status["awaiting_fills"]) == ("awaiting_fills", ["20260105"])
+    # The next morning stops on the unrecorded session: the run reports it as
+    # failed, but the book is waiting on its owner, not broken.
+    with pytest.raises(PaperAwaitingFills):
+        book.run("20260106")
+    status = client.get(f"{base}/status").json()
+    assert (status["state"], status["awaiting_fills"]) == ("awaiting_fills", ["20260105"])
+    assert status["error"].startswith("PaperAwaitingFills: fills not recorded")
+    assert client.get("/api/trading/paper/health").json()["ok"] is True
 
     for bad in (
         {"time": "15:00", "symbol": "600000.SH", "action": "buy", "outcome": "filled", "quantity": 250, "price": 15.2},
