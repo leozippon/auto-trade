@@ -44,7 +44,7 @@ from autotrade.environment.executor import (
     strategy_resource_usage,
     strategy_resources_of,
 )
-from autotrade.environment.gpu import GpuUnavailableError
+from autotrade.environment.gpu import MIN_FREE_GPU_MEMORY_MIB, GpuUnavailableError
 from autotrade.environment.replay import DailyMarketData
 from autotrade.environment.runtime import write_json_atomic
 from autotrade.environment.sandbox import (
@@ -85,7 +85,7 @@ from autotrade.pipelines.hitl_state import (
 from autotrade.pipelines.worker import _strategy_sandbox_from_spec
 
 from .fixtures_sandbox import docker_available
-from .gpu_probe import stubbed_gpu_probe
+from .gpu_probe import gpu_roster, stubbed_gpu_probe
 
 
 def _strategy(tmp_path: Path, source: str = "def generate_orders(context):\n    return []\n") -> Path:
@@ -2023,13 +2023,37 @@ def test_the_one_selection_never_hands_out_a_card_a_running_arm_claims(tmp_path:
         assert select_gpus(tmp_path / "absent", 1) == [4]
 
 
+def test_only_a_caller_that_opts_in_shares_a_card(tmp_path: Path):
+    """With no empty card, a caller that allows sharing (the Paper's morning
+    run) gets the unclaimed matching cards with the most free memory, each
+    keeping the memory a GPU strategy is promised; nobody else shares, a
+    claimed card is never shared, and a request those cards cannot meet is
+    refused saying so."""
+
+    root = tmp_path / "experiments"
+    _running_arm(root, "holder", [2])
+    roster = gpu_roster(idle=(), busy=[1, 2, 3, 4])  # 35,220 MiB free on each
+    roster[0]["memory_free_mib"] = MIN_FREE_GPU_MEMORY_MIB - 1  # card 1: too little
+    roster[2]["memory_free_mib"] = 40_000  # card 3: the most
+    with patch("autotrade.environment.gpu.list_gpus", return_value=roster):
+        with pytest.raises(GpuUnavailableError, match=r"0 free \(none\)"):
+            select_gpus(root, 1, require_name="L20")
+        assert select_gpus(root, 1, require_name="L20", allow_shared=True) == [3]
+        assert select_gpus(root, 2, require_name="L20", allow_shared=True) == [3, 4]
+        shared = rf"fewer than 3 unclaimed card\(s\) keep {MIN_FREE_GPU_MEMORY_MIB} MiB free"
+        with pytest.raises(GpuUnavailableError, match=shared):
+            select_gpus(root, 3, require_name="L20", allow_shared=True)
+        with pytest.raises(GpuUnavailableError):
+            select_gpus(root, 1, require_name="H100", allow_shared=True)
+
+
 def test_a_paper_run_takes_free_cards_only_when_a_container_starts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """A Paper book's strategy container is pinned to cards the one selection
-    gives it, never to a card a running arm claims, and a run that starts no
-    container (a session already decided) asks for none. A CPU book never
-    reads the devices."""
+    gives it -- an empty card, or else one it may share -- never to a card a
+    running arm claims, and a run that starts no container (a session already
+    decided) asks for none. A CPU book never reads the devices."""
     from scripts.paper import run_paper
 
     _running_arm(tmp_path / "experiments", "holder", [0])

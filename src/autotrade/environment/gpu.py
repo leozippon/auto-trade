@@ -6,8 +6,9 @@ devices nobody holds memory on (``idle_gpus``) that no running arm claims.
 The console takes an arm's cards there when it starts its worker, and every
 container of that worker attaches exactly those; whatever else needs a card
 -- a Paper book's morning run, an operator's replay -- takes its cards there
-for one run and pins them the same way. A container that asks for a device
-and was given none refuses to start.
+for one run and pins them the same way. Only the Paper run may opt into a
+card it shares when none is idle (``shareable_gpus``). A container that asks
+for a device and was given none refuses to start.
 
 The cards are shared with services outside this project and are never
 reserved, so ``MIN_FREE_GPU_MEMORY_MIB`` is the memory a GPU strategy may
@@ -96,6 +97,22 @@ def idle_gpus(*, require_name: str | None = None) -> list[int]:
         if (not require_name or require_name.lower() in str(gpu["name"]).lower())
         and int(gpu["memory_used_mib"]) < IDLE_GPU_MEMORY_MIB
     )
+
+
+def shareable_gpus(*, require_name: str | None = None) -> list[int]:
+    """Indexes of the matching devices that keep ``MIN_FREE_GPU_MEMORY_MIB``
+    free, the most free first: the cards a GPU strategy may share with
+    somebody else's work and still have the memory it is promised. Whether a
+    caller may share at all is the selection's to decide, as is whether a
+    running arm claims the card."""
+    rows = [
+        gpu
+        for gpu in list_gpus()
+        if (not require_name or require_name.lower() in str(gpu["name"]).lower())
+        and int(gpu["memory_free_mib"]) >= MIN_FREE_GPU_MEMORY_MIB
+    ]
+    rows.sort(key=lambda gpu: (-int(gpu["memory_free_mib"]), int(gpu["index"])))
+    return [int(gpu["index"]) for gpu in rows]
 
 
 _SIZE_UNITS_MIB = {"bytes": 1 / 2**20, "B": 1 / 2**20, "KiB": 1 / 2**10, "MiB": 1.0, "GiB": 2**10, "TiB": 2**20}

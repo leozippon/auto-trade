@@ -15,7 +15,12 @@ from pathlib import Path
 
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.snapshot import SnapshotConfig
-from autotrade.environment.gpu import GpuUnavailableError, idle_gpus
+from autotrade.environment.gpu import (
+    MIN_FREE_GPU_MEMORY_MIB,
+    GpuUnavailableError,
+    idle_gpus,
+    shareable_gpus,
+)
 from autotrade.environment.llm.model_profiles import MODEL_CHOICES
 from autotrade.environment.sandbox import SandboxSpec
 
@@ -398,7 +403,11 @@ def free_gpus(experiments_root: str | Path, *, require_name: str | None = None) 
 
 
 def select_gpus(
-    experiments_root: str | Path, count: int, *, require_name: str | None = None
+    experiments_root: str | Path,
+    count: int,
+    *,
+    require_name: str | None = None,
+    allow_shared: bool = False,
 ) -> list[int]:
     """The one way a GPU is chosen: the first ``count`` of :func:`free_gpus`.
 
@@ -406,21 +415,37 @@ def select_gpus(
     records them as its claim. Whatever else needs a card -- a Paper book's
     morning run, a session audited from the command line, an operator's replay
     -- takes its cards here for that run and pins them on its containers, so
-    it is never given a card a running arm holds. ``GpuUnavailableError``
-    names the free cards and who holds the rest when fewer than ``count`` are
-    free, or says why the devices could not be read.
+    it is never given a card a running arm holds.
+
+    ``allow_shared`` lets a caller share cards when too few are free: it then
+    gets the ``count`` matching cards no running arm claims that keep the most
+    free memory, each at least the ``MIN_FREE_GPU_MEMORY_MIB`` a GPU strategy
+    is promised (``gpu.shareable_gpus``). Only the Paper's morning run asks for
+    it: on a shared machine an empty card is often unavailable, and a book
+    without its card decides nothing that day. ``GpuUnavailableError`` names
+    the free cards and who holds the rest when the request cannot be met, or
+    says why the devices could not be read.
     """
 
     free = free_gpus(experiments_root, require_name=require_name)
     if len(free) >= count:
         return free[:count]
-    holders = "; ".join(
-        f"{name} {devices}" for name, devices in gpu_claims(experiments_root).items()
+    claims = gpu_claims(experiments_root)
+    if allow_shared:
+        claimed = {device for devices in claims.values() for device in devices}
+        shareable = [device for device in shareable_gpus(require_name=require_name) if device not in claimed]
+        if len(shareable) >= count:
+            return shareable[:count]
+    holders = "; ".join(f"{name} {devices}" for name, devices in claims.items())
+    shared = (
+        f"fewer than {count} unclaimed card(s) keep {MIN_FREE_GPU_MEMORY_MIB} MiB free to share; "
+        if allow_shared
+        else ""
     )
     raise GpuUnavailableError(
         f"requested {count} GPU(s), {len(free)} free "
         f"({', '.join(map(str, free)) or 'none'}); a card is free only when nothing "
-        "holds memory on it and no running arm claims it; claimed by running arms: "
+        f"holds memory on it and no running arm claims it; {shared}claimed by running arms: "
         f"{holders or 'none'}"
     )
 
