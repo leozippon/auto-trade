@@ -1,13 +1,13 @@
 # 八年研究期的数据面：表、单位、可见时间与陷阱
 
-研究期 20170701..20250630、`history_floors` 为日线 20100101 与宏观 20140701、宏观只挂 `index_daily`/`index_dailybasic`/`index_weight`/`sw_daily` 的臂共用这份数据面；其中一部分臂另挂财务域、公告标题或两者都挂，挂没挂看本臂，见「财务域」「文本域」两节。下面每条都在这份数据上实读或对照代码核对过，不必再派子代理重推一遍；先按运行事实、`data_summary.json` 与 `unit_reference.json` 确认本臂挂的是同一份，几何或数据集不同就先核对再用。
+研究期 20170701..20250630、`history_floors` 为日线 20100101 与宏观 20140701、宏观只挂 `index_daily`/`index_dailybasic`/`index_weight`/`sw_daily` 的臂共用这份数据面；其中一部分臂另挂财务域、公告标题或两者都挂。下面的列、单位、可见时间与读法都在这份数据上实读或对照代码核对过，不必再派子代理重推一遍；行数、列数与个别序列的起止是某一份种子上的实读，挂哪些域和各域的覆盖随本臂的种子而异，见「视图与窗口」最后一条。先按运行事实、`data_summary.json` 与 `unit_reference.json` 确认本臂的几何与数据集，不同就先核对再用。
 
 ## 视图与窗口
 
-- 会话的 `/mnt/snapshot` 是研究期末（2025-06-30 23:59:59）的决策视图：`daily`、`macro`、`universe`（挂了财务域的臂另有 `fundamentals`，挂了公告标题的臂另有 `text_index`）各一个平铺文件，日线、四张宏观表与财务都自 20160701 起。它只供离线探查，正式回放读不到它。
+- 会话的 `/mnt/snapshot` 是研究期末（2025-06-30 23:59:59）的决策视图：`daily`、`macro`、`universe` 各一个平铺文件，日线、四张宏观表与财务都自 20160701 起；`fundamentals`、`text_index` 两个文件总在，没挂对应的域时是空壳，见「财务域」「文本域」两节的第一条。它只供离线探查，正式回放读不到它。
 - 一次回放的 `context.snapshot_dir` 是该 span 第一年的决策视图（年初前一天 06-30 23:59:59），整场不变。`context.asof_dir/<域>/` 是 parts 目录：part 0 就是这个决策视图，之后随回放时钟逐日追加。多年 span 一路累加，从 Y1 起跑的整期回放到 Y8 时 `daily` 里是 2010 年起的全部行。
 - 每个研究年的决策视图窗口见 `research_geometry.years[].input_window`：年初前 108 个月，截到 `history_floors`。实读：Y1 视图日线 20100104..20170630、宏观自 2014-07；Y3 日线自 20100701；Y8 日线自 20150701、宏观自 2015-07。所以从 Y1、Y2 起跑时指数与申万序列只有 3、4 年历史，需要更长指数窗口的特征（多年 β、按指数算的残差标签、长期指数动量）在前两年取不满：缩短窗口，或在样本说明里写明。
-- 各臂都没有事件与分钟；文本只有挂了公告标题（`text_datasets` 含 `anns_d`）的臂才有，即 `text_index` 域。财务域与公告标题各自独立挂载，一个臂可以挂其一、两者都挂或都不挂，分别按「财务域」「文本域」两节的第一条判断。`auction` 只有 20250116 起的行，不能当全期特征。
+- 随臂而异的以本臂为准，不要把这里的数字当成各臂通用：挂了哪些域、每域哪些数据集与多少行看 `/mnt/artifacts/data_summary.json` 的 `views.snapshot.domains`，列看 `/mnt/snapshot` 各文件的 schema，某条序列的起止在用之前到 `/mnt/snapshot` 上数一下（例如「宏观」一节 `index_dailybasic` 的 000852.SH）。财务域与公告标题各自独立挂载，一个臂可以挂其一、两者都挂或都不挂，分别按「财务域」「文本域」两节的第一条判断。各臂都没有事件与分钟。`auction` 只有 20250116 起的行，不能当全期特征。
 
 ## 可见时间：08:30 的决策看到 T-1
 
@@ -35,7 +35,7 @@
 - 先按 `dataset` 过滤、再取列：每张表只填自己的列。研究期末视图 158 万行，两个 row group 都横跨全期，不能按日期跳过。
 - `index_daily`：指数代码在 `ts_code`，`index_code` 整列为空，按 `index_code` 过滤取不到任何行情。7 只指数：000001.SH、000016.SH、000300.SH、000688.SH、000852.SH、000905.SH、399006.SZ。点位；`pct_chg` 是百分数（−0.35 = −0.35%，与日线的小数口径不同）；vol 手、amount 千元，未归一。
 - `index_weight`：指数在 `index_code`、成分在 `con_code`（与日线 ts_code 同格式），`ts_code` 整列为空。同样 7 只，每只每月一张截面，日期是当月最后一个交易日；起点不一：000852.SH 自 20141031 起（Y1 视图里 33 张，其余五只自 20140731 起 36 张），000688.SH 自 2020-07 起。按中证 1000 成分回看的训练窗在 Y1 早不过 2014-10。000300/000905/000852 每张恰 300/500/1000 行、三者互不重叠，相邻两张最长隔 36 天。`weight` 是百分数（每张合计约 100），当组合权重先除以 100。
-- `index_dailybasic`：只有 6 只（没有 000688.SH）；000852.SH 在这份数据里 20181228 之后没有行，2019 年起取不到中证 1000 的指数换手与估值。total_mv/float_mv 元、股本 股（与日线每日指标的口径不同，不要混算），turnover_rate 百分数。
+- `index_dailybasic`：只有 6 只（没有 000688.SH）。000852.SH 的覆盖随种子而异：有的种子 20181228 之后没有它的行，2019 年起取不到中证 1000 的指数换手与估值；补齐的种子全期都有（研究期末视图 2,184 行，20160701..20250630）。用之前在本臂 `/mnt/snapshot/macro.parquet` 里数一下它 20181228 之后的行。total_mv/float_mv 元、股本 股（与日线每日指标的口径不同，不要混算），turnover_rate 百分数。
 - `sw_daily`：申万指数行情，研究期末视图 596 个代码，一级之外还有二级、三级与风格指数。正则 `801\d\d0\.SI` 匹配 37 个，比研究期末的 31 个一级多出 801020.SI 与 801250/801260/801270/801280/801300.SI；某一年的一级以那一年 universe 的 l1_code 为准。`pct_change` 是百分数，vol 万股，amount/float_mv/total_mv 万元（单位表标为 inferred）。代码是稳定的键，名称随申万 2021 改版而变：801030.SI 在这里 2021-12-13 之前叫「化工」、之后叫「基础化工」，universe 里 2021 版及以前叫「化工」、2022 版起叫「基础化工」；跨表一律按代码连接。2021-12-13 之前的点位是按申万 2021 口径回算的，与当时按申万 2014 划分的个股归属不是同一套。
 
 ## 按时点读成分、行业与指数行情
@@ -47,7 +47,7 @@
 ## 财务域 fundamentals：只在挂了它的臂上
 
 - 先判断：`/mnt/artifacts/data_summary.json` 里 `views.snapshot.domains.fundamentals` 的 `datasets` 列出十个数据集、`rows` 非零才是挂了；为空、为 0 时 `fundamentals.parquet` 是零列空壳，本节不适用，回放里按 `dataset` 过滤读它会报错。
-- 十个数据集纵向拼成一张宽表（466 列），先按 `dataset` 过滤、再取列：`income_vip`/`balancesheet_vip`/`cashflow_vip`（三大报表，只有合并报表 `report_type` 1）、`fina_indicator_vip`（财务指标）、`forecast_vip`（业绩预告）、`express_vip`（业绩快报）、`dividend`（分红送转各阶段 `div_proc`）、`fina_audit`（审计意见）、`fina_mainbz_vip`（主营构成，`bz_code` P 产品/D 地区/I 行业）、`disclosure_date`（披露计划）。键是 `ts_code` + `end_date`（报告期，`YYYYMMDD` 字符串）。
+- 十个数据集纵向拼成一张宽表（四百六十余列），先按 `dataset` 过滤、再取列：`income_vip`/`balancesheet_vip`/`cashflow_vip`（三大报表，只有合并报表 `report_type` 1）、`fina_indicator_vip`（财务指标）、`forecast_vip`（业绩预告）、`express_vip`（业绩快报）、`dividend`（分红送转各阶段 `div_proc`）、`fina_audit`（审计意见）、`fina_mainbz_vip`（主营构成，`bz_code` P 产品/D 地区/I 行业）、`disclosure_date`（披露计划）。键是 `ts_code` + `end_date`（报告期，`YYYYMMDD` 字符串）。
 - 单位：报表与快报金额是元；`fina_indicator_vip` 的比率与增速是百分数（600519.SH 2023 年 `roe` 36.18 即 36.18%）；`forecast_vip` 的 `net_profit_min/max`、`last_parent_net` 是万元，`p_change_min/max` 是百分数；`express_vip.yoy_net_profit` 是去年同期归母净利润（元），不是增长率。
 - 可见时间：每行 `available_at` 是公告日 18:00（三大报表按 `f_ann_date`，否则 `ann_date`；指标、预告、快报、审计按 `ann_date`；分红按 `imp_ann_date`，否则 `ann_date`；主营构成按同一报告期报表最晚一次公告）。回放里财务域随 03:35 的 PIT 落库节点放行，节点周二至周六运行：周二至周五 08:30 看到前一天及以前的公告，周一只看到上周五及以前，周六、周日盖章的行（披露计划之外各数据集约 17–22%）周二才可见。区间第一个决策日例外：冻结首片收到锚点 06-30 23:59:59 为止，锚点落在周末时首日多看到周末的行。
 - 历史：各研究年的决策视图（Y1..Y8）里财务都从 2016-01 的公告起。Y1 视图（2017-06-30）看得到 FY2015、2016 各期与 2017Q1；更早的报告期只有 2016 年后重述过的约 6%。所以 Y1 开头 97% 的沪深股票能算最新一期 TTM，能算一年前同期 TTM 的只有 5%：用报表做 TTM 同比要等 FY2017 年报（2018-05 起 97%），`fina_indicator_vip` 的 `netprofit_yoy`、`tr_yoy`、`q_sales_yoy` 等厂商增速从 Y1 第一天就有。`/mnt/snapshot` 不一样：它按 108 个月窗口自 2016-07 起（「视图与窗口」第一条），缺 2016 上半年的公告，FY2015 年报与 2016Q1 大多不在里面，所以在它上面量不出 Y1 看得到什么——同样截到 Y1 锚点的可见行，它只给出约 13% 的沪深股票能算最新一期 TTM。分红「预案」行 2018 年前几乎没有（2016、2017 年分别只有 18、25 行，2018-08 才成批出现，2019 年起每年 7,000 行以上），分红公告类特征的起点落在 Y2 里。
@@ -58,7 +58,7 @@
 
 ## 文本域 text_index：只在挂了公告标题的臂上
 
-- 先判断：`/mnt/artifacts/data_summary.json` 里 `views.snapshot.domains` 列出 `text_index` 且 `text_datasets` 含 `anns_d` 才是挂了。它不决定财务域挂没挂：同一个臂可以两者都挂，财务域按那一节第一条另行判断。
+- 先判断：`/mnt/artifacts/data_summary.json` 里 `views.snapshot.domains.text` 的 `datasets` 含 `anns_d`、`rows` 非零才是挂了；没挂时 `text_index.parquet` 只有表头、零行。它不决定财务域挂没挂：同一个臂可以两者都挂，财务域按那一节第一条另行判断。
 - `context.asof_dir/text_index` 一行一份公告：`dataset`（取 `anns_d`）、`ts_codes`、`title`、`available_at`，自 2016-01 起。一律投影这四列并按 `dataset` 与 `available_at` 过滤读取，`available_at` 用 `pd.to_datetime(..., utc=True)` 解析后再与 `context.inference_at` 比较。
 - 可见时间：厂商的接收时间落在公告日前一天到后三天之内就按接收时间盖章，否则按公告日 23:59:59；文本落库节点每天 23:15。研究期的行几乎全部只有日期，所以公告日为 D 的标题最早在 D+2 日 08:30 的决策里可见；2026-08-12 起实时落库的行带接收时间（多在公告日前一晚），Paper 比研究期早一到一天半看到标题。按「首次可见的本地日期之后的第一个交易日」计事件日，两段口径就一致。
 - 标题是公告的标题而不是正文；同一公告的摘要、修订、法律意见等伴随文件各是一行，按股票与日期去重后再当事件。
