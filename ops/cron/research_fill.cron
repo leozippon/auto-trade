@@ -26,7 +26,7 @@ CRON_TZ=Asia/Shanghai
 REPO_ROOT=/Data2/lzp/auto-trade
 QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # The queue's round files, filled in this order; separated by spaces.
-ROUNDS=scripts/experiments/create_round_20261014b.py
+ROUNDS=scripts/experiments/create_round_20261014d.py
 
 # Every ten minutes, all day: a slot that frees up stays empty for at most that
 # long, and research arms end at no particular hour. One run takes seconds per
