@@ -124,6 +124,7 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "max_replay_years": rolling_default("max_replay_years"),
     "max_null_controls": rolling_default("max_null_controls"),
     "max_llm_calls": rolling_default("max_llm_calls"),
+    "max_api_spend_usd": rolling_default("max_api_spend_usd"),
     "session_max_attempts": rolling_default("session_max_attempts"),
     "max_research_minutes": rolling_default("max_research_minutes"),
     "nl_failure_policy": rolling_default("nl_failure_policy"),

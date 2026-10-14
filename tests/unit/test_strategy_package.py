@@ -386,7 +386,7 @@ def test_budgets_come_from_one_source_each():
         None, fit_timeout_seconds=rolling_default("strategy_fit_timeout_seconds")
     )
     assert strategy_config.limits == limits
-    for name in ("max_research_minutes", "max_replay_years", "max_llm_calls", "max_null_controls"):
+    for name in ("max_research_minutes", "max_replay_years", "max_llm_calls", "max_null_controls", "max_api_spend_usd"):
         assert WEB_CREATE_DEFAULTS[name] == rolling_default(name)
     assert (
         rolling_default("max_research_minutes"),
