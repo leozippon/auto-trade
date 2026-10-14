@@ -47,18 +47,23 @@ CHAT_DIALECT = "openai"
 DEEPSEEK_DIALECT = "deepseek"
 
 # (relay model id, request dialect, context window, max output tokens, list
-# prices). The hosted gpt-6 ids declare a 272k window; the Anthropic ids and
-# DeepSeek-V4.1-Flash declare 1M, with the relay's own completion ceilings.
-# Prices are USD per million uncached prompt / cached prompt / completion
-# tokens from the relay's public ``GET https://lightingtheword.com/api/pricing``
-# as of 2026-10-14: a dated snapshot, refreshed by hand when the relay's
-# ``pricing_version`` moves. gpt-6.1-sol is its short-context tier, the only
-# one a 272k window reaches; DeepSeek-V4.1-Flash its weekday-peak rate
-# (off-peak bills half). Cache writes are charged as uncached prompt.
+# prices). Every relay id declares a 1M window, with the relay's own completion
+# ceilings; for the gpt-6 ids that is the project owner's figure (2026-10-14),
+# backed by the relay pricing a tier past 272k but not yet probed with such a
+# request. Prices are USD per million uncached prompt / cached prompt /
+# completion tokens from the relay's public
+# ``GET https://lightingtheword.com/api/pricing`` as of 2026-10-14: a dated
+# snapshot, refreshed by hand when the relay's ``pricing_version`` moves. The
+# gpt-6 ids bill a request by its length: up to 272,000 prompt tokens at the
+# short-context tier listed here, a longer one at twice the prompt and 1.5
+# times the completion price, which the spend cap does not model -- an arm on
+# them pins its compaction threshold below that boundary. DeepSeek-V4.1-Flash
+# is listed at its weekday-peak rate (off-peak bills half). Cache writes are
+# charged as uncached prompt (the relay bills gpt-6.1-sol's at 2.5, not 2).
 MODEL_PROFILES: tuple[tuple[str, str, int, int, TokenPrices], ...] = (
-    ("gpt-6.1-sol", RESPONSES_DIALECT, 272_000, 128_000, TokenPrices(2.0, 0.1, 10.0)),
-    ("gpt-6-astra", RESPONSES_DIALECT, 272_000, 128_000, TokenPrices(10.0, 1.0, 50.0)),
-    ("gpt-6-luna", RESPONSES_DIALECT, 272_000, 128_000, TokenPrices(0.1, 0.01, 0.5)),
+    ("gpt-6.1-sol", RESPONSES_DIALECT, 1_000_000, 128_000, TokenPrices(2.0, 0.1, 10.0)),
+    ("gpt-6-astra", RESPONSES_DIALECT, 1_000_000, 128_000, TokenPrices(10.0, 1.0, 50.0)),
+    ("gpt-6-luna", RESPONSES_DIALECT, 1_000_000, 128_000, TokenPrices(0.1, 0.01, 0.5)),
     ("claude-fable-5-1", CHAT_DIALECT, 1_000_000, 128_000, TokenPrices(10.0, 0.25, 50.0)),
     ("claude-sonnet-5-5", CHAT_DIALECT, 1_000_000, 128_000, TokenPrices(2.0, 0.2, 10.0)),
     ("claude-opus-5-5", CHAT_DIALECT, 1_000_000, 128_000, TokenPrices(4.0, 0.2, 20.0)),
