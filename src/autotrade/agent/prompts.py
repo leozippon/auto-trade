@@ -62,7 +62,7 @@ SESSION_EVIDENCE_SECTION = """\
 
 SESSION_DECISION_CONTRACT = """\
 # 决策合同（finish_session）
-- 本会话以两种结局之一结束，之后没有别的会话接手：`freeze` 把本会话一个完整研究期节点冻结为本臂唯一的交付，研究随即结束；`no_edge` 说明本臂未发现值得交付的超额并结束本臂，要附证据 `reason`。推理时间或模型调用预算耗尽而仍未冻结时宿主以 `deadline` 结束本臂，同样没有交付物。一条臂至多冻结一次，冻结后没有第二次机会：前推期不过，本臂就结束了。
+- 本会话以两种结局之一结束，之后没有别的会话接手：`freeze` 把本会话一个完整研究期节点冻结为本臂唯一的交付，研究随即结束；`no_edge` 说明本臂未发现值得交付的超额并结束本臂，要附证据 `reason`。推理时间、模型调用或 API 花费预算耗尽而仍未冻结时宿主以 `deadline` 结束本臂，同样没有交付物。一条臂至多冻结一次，冻结后没有第二次机会：前推期不过，本臂就结束了。
 - 本臂受哪些条件约束、阈值多少，只看运行事实 `acceptance_rules`：`acceptance_rules.freeze_gate` 是 `finish_session` 提名时执行的冻结门，`acceptance_rules.graduation` 是冻结产物随后在会话看不到的前推期与 Held-out 上被裁决的毕业条件。两节列出的每一条都按它写的阈值与读数约束本臂，没列出的条件本臂没有。
 - 试验数只增不减，搜索越多，冻结需要的证据越强：每行的 `selection_statistics.information_ratio_bar` 就是此刻一个完整研究期提名需要的主动信息比率，本臂试验族里至今的全部试验都已计价在内（怎样计数见冻结门的 `deflated_sharpe_probability`）。所以 `offline_trials` 必须如实申报（口径见 `batch_validate` 与 `finish_session` 的该参数）：少报就是替这次搜索瞒下了多重检验。
 - 冻结的是过冻结门每一条、并按毕业条件每一条设计的节点：逐年一致、比过对照。提名前把最后两个研究年、以及基准指数涨得最多的几个研究年单独读一遍（对基准的原始超额、对面板的未回归超额与市场载荷），在 `reason` 里写明它们说明了什么。被冻结的是节点的不可变快照，工作副本不必先恢复到它。
@@ -129,7 +129,7 @@ SESSION_PROHIBITIONS = """\
 
 SESSION_FACTS_SECTION = """\
 # 预算与事实
-数字不写在提示里：推理时限与暂停规则、replay-year 与随机组合对照次数、模型调用上限、策略容器的超时与 CPU/GPU 见运行事实 `budgets`；研究期、各研究年份、决策时点与 span 的写法见 `research_geometry`；本臂已有的试验数与完整研究期验证数见 `arm`；起点、冻结门与毕业条件见 `artifact_contract`；数据摘要、单位引用与筛选脚本见 `source_refs`；股票池、调用节奏与各数据域的可用性见 `research_scope` 与 `visible_timeline`。\
+数字不写在提示里：推理时限与暂停规则、replay-year 与随机组合对照次数、模型调用上限与 API 花费上限（美元，主对话、子代理与压缩共用，本地模型不计）、策略容器的超时与 CPU/GPU 见运行事实 `budgets`；研究期、各研究年份、决策时点与 span 的写法见 `research_geometry`；本臂已有的试验数与完整研究期验证数见 `arm`；起点、冻结门与毕业条件见 `artifact_contract`；数据摘要、单位引用与筛选脚本见 `source_refs`；股票池、调用节奏与各数据域的可用性见 `research_scope` 与 `visible_timeline`。\
 """
 
 SESSION_FEEDBACK_SECTION = """\
@@ -188,7 +188,7 @@ SESSION_DYNAMIC_CONTEXT_HEADER = """\
 """
 
 RESUME_INSTRUCTION = """\
-本次是本臂研究会话的第 {attempt} 次尝试：上一次尝试在 {interrupted_at} 中断（{error}）。已用预算：推理 {used_minutes:g}/{total_minutes:g} 分钟、模型调用 {used_calls}/{total_calls}、回测（年）{used_years}/{total_years}、随机组合对照 {used_nulls}/{total_nulls}。工作区、`output/`、`TODO.md`、skills 与 Step 树都保持中断时的状态；之前尝试的 transcript 在根 `trace` 下（{transcripts}）。{summary_note}先读 `TODO.md` 与 Step 树（根 `steps` 的 `tree.txt`），核对工作区现状后继续研究，不要重做已有节点验证过的工作；仍以 `finish_session` 冻结或结束本臂。\
+本次是本臂研究会话的第 {attempt} 次尝试：上一次尝试在 {interrupted_at} 中断（{error}）。已用预算：推理 {used_minutes:g}/{total_minutes:g} 分钟、模型调用 {used_calls}/{total_calls}、API 花费 ${used_usd:.2f}/${total_usd:.2f}、回测（年）{used_years}/{total_years}、随机组合对照 {used_nulls}/{total_nulls}。工作区、`output/`、`TODO.md`、skills 与 Step 树都保持中断时的状态；之前尝试的 transcript 在根 `trace` 下（{transcripts}）。{summary_note}先读 `TODO.md` 与 Step 树（根 `steps` 的 `tree.txt`），核对工作区现状后继续研究，不要重做已有节点验证过的工作；仍以 `finish_session` 冻结或结束本臂。\
 """
 
 WRAP_UP_PROMPT = """\
@@ -248,6 +248,8 @@ def build_resume_instruction(
         total_minutes=round(float(totals.get("inference_seconds", 0.0)) / 60.0, 1),
         used_calls=int(used.get("llm_calls", 0)),
         total_calls=int(totals.get("llm_calls", 0)),
+        used_usd=float(used.get("api_spend_usd", 0.0)),
+        total_usd=float(totals.get("api_spend_usd", 0.0)),
         used_years=int(used.get("replay_years", 0)),
         total_years=int(totals.get("replay_years", 0)),
         used_nulls=int(used.get("null_controls", 0)),

@@ -532,7 +532,13 @@ def test_the_listing_carries_the_budget_and_the_research_outcome(tmp_path: Path)
     (judged_traces / "run_research.jsonl").write_text('{"event_type": "session_start"}\n', encoding="utf-8")
     assert experiment_detail(tmp_path, "judged")["sessions"][0]["record"]["trace"] is True
     rows = {row["experiment_id"]: row for row in list_experiments(tmp_path)}
-    assert rows["live"]["budget"] == {"inference_seconds": 3600.0, "llm_calls": 6400.0, "replay_years": 96.0, "null_controls": 12.0}
+    assert rows["live"]["budget"] == {
+        "inference_seconds": 3600.0,
+        "llm_calls": 6400.0,
+        "replay_years": 96.0,
+        "null_controls": 12.0,
+        "api_spend_usd": 50.0,
+    }
     assert rows["live"]["budget_used"] == {"inference_seconds": 900.0, "llm_calls": 7, "replay_years": 4, "null_controls": 0}
     assert rows["idle"]["budget_used"] is None
     assert rows["judged"]["budget_used"]["replay_years"] == 8

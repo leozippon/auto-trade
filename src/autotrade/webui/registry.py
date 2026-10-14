@@ -26,7 +26,11 @@ from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
 
-from autotrade.agent.runner import DEADLINE_GRACE_EXHAUSTED, LLM_CALL_BUDGET_EXHAUSTED
+from autotrade.agent.runner import (
+    API_SPEND_EXHAUSTED,
+    DEADLINE_GRACE_EXHAUSTED,
+    LLM_CALL_BUDGET_EXHAUSTED,
+)
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME, STYLE_SCHEMA_VERSION
 from autotrade.environment.tools.report_issue import (
     ISSUE_REPORTS_NAME,
@@ -35,7 +39,7 @@ from autotrade.environment.tools.report_issue import (
 )
 from autotrade.pipelines.agent_inbox import INBOX_NAME, inbox_public_view
 from autotrade.pipelines.calendar import FULL_SPAN
-from autotrade.pipelines.config import AcceptanceRules, acceptance_for
+from autotrade.pipelines.config import AcceptanceRules, acceptance_for, rolling_default
 from autotrade.pipelines.experiment import freeze_gate_for, neutralized
 from autotrade.pipelines.hitl_state import (
     CONTROL_NAME,
@@ -121,10 +125,11 @@ _ENDING_ORDER = {state: index for index, state in enumerate(ENDING_STATES)}
 _CRITERION_CODES = {
     condition.reason: condition.code for condition in CONDITIONS if condition.code
 }
-# The two budgets a research session can run out of, named as the reason line.
+# The budgets a research session can run out of, named as the reason line.
 _BUDGET_EXHAUSTED = {
     DEADLINE_GRACE_EXHAUSTED: "研究时长用尽",
     LLM_CALL_BUDGET_EXHAUSTED: "模型调用次数用尽",
+    API_SPEND_EXHAUSTED: "API 花费上限用尽",
 }
 # Sentence enders of an Agent-authored reason, whose first sentence is the line
 # the console shows.
@@ -527,6 +532,9 @@ def _budget_totals(params: Mapping[str, object]) -> dict[str, object]:
         "llm_calls": _number(effective.get("max_llm_calls")),
         "replay_years": _number(effective.get("max_replay_years")),
         "null_controls": _number(effective.get("max_null_controls")),
+        "api_spend_usd": _number(
+            effective.get("max_api_spend_usd", rolling_default("max_api_spend_usd"))
+        ),
     }
 
 

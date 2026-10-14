@@ -210,7 +210,7 @@ def _session_record(experiment_id: str, **fields: object) -> dict[str, object]:
         "frozen": None,
         "arm_end": None,
         "attempts": 1,
-        "budget_used": {"inference_seconds": 600.0, "llm_calls": 40, "replay_years": 8, "null_controls": 0},
+        "budget_used": {"inference_seconds": 600.0, "llm_calls": 40, "replay_years": 8, "null_controls": 0, "api_spend_usd": 1.25},
         "run_wall_seconds": 600.0,
         **fields,
     }

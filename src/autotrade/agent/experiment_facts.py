@@ -326,6 +326,7 @@ def _budget_facts(
             "deadline_grace_seconds": budgets.get("deadline_grace_seconds"),
             "finalize_before_deadline_seconds": manifest.get("finalize_before_deadline_seconds"),
             "max_llm_calls": max_llm_calls or budgets.get("max_llm_calls"),
+            "max_api_spend_usd": budgets.get("max_api_spend_usd"),
             "max_replay_years": budgets.get("max_replay_years"),
             "max_replay_years_note": (
                 REPLAY_YEARS_NOTE if budgets.get("max_replay_years") is not None else None

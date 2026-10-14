@@ -534,6 +534,8 @@ _FIELDS: list[dict[str, object]] = [
      "help": "研究会话内 run_null_control 工具的调用上限（冻结节点复用其结果）；0 表示不注册该工具。"},
     {"key": "max_llm_calls", "group": "预算与验收", "label": "研究会话模型调用上限", "type": "int",
      "help": "研究会话的模型调用总次数上限，跨续跑累计；主循环、子代理与上下文压缩共享同一计数。"},
+    {"key": "max_api_spend_usd", "group": "预算与验收", "label": "研究会话 API 花费上限（美元）", "type": "float",
+     "help": "研究会话调用托管模型的累计花费上限，按目录标价计、跨续跑累计；主循环、子代理与上下文压缩共用，本地模型不计。用尽即以 deadline 结束本臂。"},
     {"key": "nl_failure_policy", "group": "预算与验收", "label": "NL 失败策略", "type": "choice",
      "choice_labels": {"return_error_with_audit": "返回可审计错误，策略自行降级（推荐）", "fail": "任一 NL 调用失败即终止回测"},
      "choices": ["return_error_with_audit", "fail"],

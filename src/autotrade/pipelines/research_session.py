@@ -40,7 +40,11 @@ from autotrade.environment.executor import (
 )
 from autotrade.environment.gpu import GpuUnavailableError
 from autotrade.environment.identity import AgentRefStore
-from autotrade.environment.llm.model_profiles import AGENT_MAX_OUTPUT_TOKENS
+from autotrade.environment.llm.model_profiles import (
+    AGENT_MAX_OUTPUT_TOKENS,
+    token_prices,
+)
+from autotrade.environment.llm.pricing import FREE, ApiSpendExhausted, billed_tokens
 from autotrade.environment.runtime import (
     AgentTraceWriter,
     RunManifest,
@@ -103,12 +107,14 @@ from .calendar import (
     yyyymmdd,
 )
 from .config import (
+    DEFAULT_MAX_API_SPEND_USD,
     BudgetUsed,
     EvaluationBackend,
     ResearchSessionRequest,
     ResearchSessionResult,
     SessionResume,
     StepResult,
+    positive_spend_cap,
 )
 from .experiment import trial_family, trial_fields
 from .ledger import (
@@ -173,17 +179,22 @@ def session_role_quotas(max_calls: int) -> tuple[int, int]:
 
 
 class SessionCallBudget:
-    """One counter and deadline shared across all model roles in a session.
+    """One counter, spend meter and deadline shared across all model roles in
+    a session.
 
     The total ``max_calls`` cap is hard. Sub-agents have a cumulative ceiling and
     compact/subagent cannot consume the parent-main reserve. This is not two
-    independent budgets.
+    independent budgets. The API spend cap is hard too: once the responses
+    charged so far reach it, no role may start another call. A call already
+    in flight when the cap is reached still lands and is charged, so the
+    overshoot is bounded by the calls in flight.
     """
 
     def __init__(
         self,
         *,
         max_calls: int,
+        max_api_spend_usd: float = DEFAULT_MAX_API_SPEND_USD,
         deadline: float | None = None,
         time_budget: InferenceTimeBudget | None = None,
     ) -> None:
@@ -192,9 +203,11 @@ class SessionCallBudget:
         if (deadline is None) == (time_budget is None):
             raise ValueError("provide exactly one of deadline or time_budget")
         self.max_calls = max_calls
+        self.max_api_spend_usd = positive_spend_cap(max_api_spend_usd)
         self.subagent_cap, self.parent_reserve = session_role_quotas(max_calls)
         self.time_budget = time_budget or InferenceTimeBudget(deadline=deadline)
         self.calls = 0
+        self.api_spend_usd = 0.0
         self._subagent_calls = 0
         self._main_calls = 0
         self._compact_calls = 0
@@ -224,12 +237,18 @@ class SessionCallBudget:
             self._main_calls = int(used.main_calls)
             self._subagent_calls = int(used.subagent_calls)
             self._compact_calls = int(used.compact_calls)
+            self.api_spend_usd = float(used.api_spend_usd)
 
     def claim(self, role: str = "main") -> None:
         if role not in SESSION_LLM_CALL_ROLES:
             raise ValueError(f"unknown LLM call role: {role}")
         with self._lock:
             self.time_budget.check()
+            if self.api_spend_usd >= self.max_api_spend_usd:
+                raise ApiSpendExhausted(
+                    "Agent session API spend budget exhausted: "
+                    f"${self.api_spend_usd:.2f} of ${self.max_api_spend_usd:.2f}"
+                )
             if self.calls >= self.max_calls:
                 raise RuntimeError("Agent session LLM call budget exhausted")
             if role == "subagent" and self._subagent_calls >= self.subagent_cap:
@@ -245,6 +264,12 @@ class SessionCallBudget:
                 self._main_calls += 1
             else:
                 self._compact_calls += 1
+
+    def charge(self, usd: float) -> None:
+        """Add one landed response's cost to the session's API spend."""
+
+        with self._lock:
+            self.api_spend_usd += usd
 
     def check_deadline(self) -> None:
         self.time_budget.check()
@@ -275,6 +300,9 @@ class SessionBudgetLLM(SessionTimeBudgetAware):
         self.role = role
         self.provider = str(getattr(delegate, "provider", ""))
         self.model = str(getattr(delegate, "model", ""))
+        # Resolved once from the configured model: a gateway outside the
+        # catalog has no price and fails here, before the session's first call.
+        self.prices = token_prices(self.provider, self.model)
         window = getattr(delegate, "context_window_tokens", None)
         self.context_window_tokens = (
             window if isinstance(window, int) and not isinstance(window, bool) else None
@@ -325,6 +353,12 @@ class SessionBudgetLLM(SessionTimeBudgetAware):
             tool_choice=tool_choice,
             max_tokens=max_tokens,
         )
+        # Charged before the deadline check, so a reply the provider billed is
+        # never discarded unmetered.
+        if self.prices != FREE:
+            self.budget.charge(
+                self.prices.cost_usd(billed_tokens(response, messages=messages, tools=tools))
+            )
         self.budget.check_deadline()
         return response
 
@@ -576,6 +610,7 @@ class LLMResearchDeveloper:
             time_budget = InferenceTimeBudget(duration_seconds=attempt_seconds)
             shared_budget = SessionCallBudget(
                 max_calls=request.max_llm_calls,
+                max_api_spend_usd=request.max_api_spend_usd,
                 time_budget=time_budget,
             )
             shared_budget.seed(used)
@@ -616,6 +651,7 @@ class LLMResearchDeveloper:
                         if null_control_tool is not None
                         else int(used.null_controls)
                     ),
+                    api_spend_usd=shared_budget.api_spend_usd,
                 ).to_record()
 
             emit_event = _agent_event_sink(
@@ -809,6 +845,7 @@ class LLMResearchDeveloper:
                     "max_replay_years": request.max_replay_years,
                     "max_null_controls": request.max_null_controls,
                     "max_llm_calls": request.max_llm_calls,
+                    "max_api_spend_usd": request.max_api_spend_usd,
                     # deadline_seconds is the whole session wall clock;
                     # the grace is the trailing wrap-up slice of it, so
                     # the manifest carries both and the run facts can
@@ -1235,6 +1272,7 @@ class LLMResearchDeveloper:
                     "llm_calls": request.max_llm_calls,
                     "replay_years": request.max_replay_years,
                     "null_controls": request.max_null_controls,
+                    "api_spend_usd": request.max_api_spend_usd,
                 },
             )
         try:
@@ -1250,9 +1288,9 @@ class LLMResearchDeveloper:
             terminal = _terminal_offline_trials(result.finish_value)
             finish_reason = "llm_agent_finish_session"
         except AgentSessionBudgetExhausted as exc:
-            # The session closed on an exhausted budget (its wrap-up grace
-            # or its model calls); the Validations it completed are still
-            # the arm's trials.
+            # The session closed on an exhausted budget (its wrap-up grace,
+            # its model calls or its API spend); the Validations it completed
+            # are still the arm's trials.
             conversation_id = exc.conversation_id
             outcome, node_id, replicates, reason = "deadline", None, (), ""
             terminal = 0

@@ -528,7 +528,7 @@ def test_a_resumed_attempt_continues_from_the_trace_and_the_recorded_node(tmp_pa
     assert request.resume.transcripts == ("run_ref_first.txt",)
     assert request.budget_used.to_record() == {
         "inference_seconds": 900.0, "llm_calls": 9, "main_calls": 7, "subagent_calls": 2,
-        "compact_calls": 0, "replay_years": 2, "null_controls": 1,
+        "compact_calls": 0, "replay_years": 2, "null_controls": 1, "api_spend_usd": 0.0,
     }
     [earlier] = request.steps_before
     assert earlier.span == "full" and earlier.validation.summary["order_count"] > 0

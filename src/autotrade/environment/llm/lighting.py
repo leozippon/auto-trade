@@ -22,6 +22,7 @@ from .openai_compatible import (
     _provider_response_validation_error,
     load_env_value,
 )
+from .pricing import TokenPrices
 from .proxy import (
     ChatMessage,
     LLMProxy,
@@ -45,19 +46,31 @@ RESPONSES_DIALECT = "openai-responses"
 CHAT_DIALECT = "openai"
 DEEPSEEK_DIALECT = "deepseek"
 
-# (relay model id, request dialect, context window, max output tokens). The
-# hosted gpt-6 ids declare a 272k window; the Anthropic ids and
+# (relay model id, request dialect, context window, max output tokens, list
+# prices). The hosted gpt-6 ids declare a 272k window; the Anthropic ids and
 # DeepSeek-V4.1-Flash declare 1M, with the relay's own completion ceilings.
-MODEL_PROFILES: tuple[tuple[str, str, int, int], ...] = (
-    ("gpt-6.1-sol", RESPONSES_DIALECT, 272_000, 128_000),
-    ("gpt-6-astra", RESPONSES_DIALECT, 272_000, 128_000),
-    ("gpt-6-luna", RESPONSES_DIALECT, 272_000, 128_000),
-    ("claude-fable-5-1", CHAT_DIALECT, 1_000_000, 128_000),
-    ("claude-sonnet-5-5", CHAT_DIALECT, 1_000_000, 128_000),
-    ("claude-opus-5-5", CHAT_DIALECT, 1_000_000, 128_000),
-    ("DeepSeek-V4.1-Flash", DEEPSEEK_DIALECT, 1_000_000, 384_000),
+# Prices are USD per million uncached prompt / cached prompt / completion
+# tokens from the relay's public ``GET https://lightingtheword.com/api/pricing``
+# as of 2026-10-14: a dated snapshot, refreshed by hand when the relay's
+# ``pricing_version`` moves. gpt-6.1-sol is its short-context tier, the only
+# one a 272k window reaches; DeepSeek-V4.1-Flash its weekday-peak rate
+# (off-peak bills half). Cache writes are charged as uncached prompt.
+MODEL_PROFILES: tuple[tuple[str, str, int, int, TokenPrices], ...] = (
+    ("gpt-6.1-sol", RESPONSES_DIALECT, 272_000, 128_000, TokenPrices(2.0, 0.1, 10.0)),
+    ("gpt-6-astra", RESPONSES_DIALECT, 272_000, 128_000, TokenPrices(10.0, 1.0, 50.0)),
+    ("gpt-6-luna", RESPONSES_DIALECT, 272_000, 128_000, TokenPrices(0.1, 0.01, 0.5)),
+    ("claude-fable-5-1", CHAT_DIALECT, 1_000_000, 128_000, TokenPrices(10.0, 0.25, 50.0)),
+    ("claude-sonnet-5-5", CHAT_DIALECT, 1_000_000, 128_000, TokenPrices(2.0, 0.2, 10.0)),
+    ("claude-opus-5-5", CHAT_DIALECT, 1_000_000, 128_000, TokenPrices(4.0, 0.2, 20.0)),
+    (
+        "DeepSeek-V4.1-Flash",
+        DEEPSEEK_DIALECT,
+        1_000_000,
+        384_000,
+        TokenPrices(0.2957, 0.0059, 1.1829),
+    ),
 )
-MODEL_CHOICES = tuple(name for name, _dialect, _window, _output in MODEL_PROFILES)
+MODEL_CHOICES = tuple(profile[0] for profile in MODEL_PROFILES)
 
 # The responses endpoint takes the shared effort scale narrowed to its own
 # tiers; the shared scale's top tier is xhigh.

@@ -179,6 +179,7 @@ def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path)
         "max_replay_years_note": REPLAY_YEARS_NOTE,
         "max_null_controls": rolling_default("max_null_controls"),
         "max_llm_calls": rolling_default("max_llm_calls"),
+        "max_api_spend_usd": rolling_default("max_api_spend_usd"),
         "used_before_this_attempt": {
             "inference_seconds": 0.0,
             "llm_calls": 0,
@@ -187,6 +188,7 @@ def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path)
             "compact_calls": 0,
             "replay_years": 0,
             "null_controls": 0,
+            "api_spend_usd": 0.0,
         },
         "strategy_fit_timeout_seconds": float(
             rolling_default("strategy_fit_timeout_seconds")
@@ -248,12 +250,14 @@ def test_preview_follows_the_experiment_parameters(tmp_path: Path):
             max_research_minutes=90,
             max_replay_years=7,
             max_llm_calls=123,
+            max_api_spend_usd=12.5,
             research_directive="以截面因子为主线",
         )["prompt"]
     )
     facts = _facts(prompt)
     assert facts["budgets"]["max_replay_years"] == 7
     assert facts["budgets"]["max_llm_calls"] == 123
+    assert facts["budgets"]["max_api_spend_usd"] == 12.5
     assert facts["budgets"]["deadline_seconds"] == session_deadline_seconds(
         90, DEFAULT_DEADLINE_GRACE_MINUTES
     )

@@ -27,6 +27,7 @@ from typing import cast
 
 from autotrade.environment.llm import (
     AGENT_MAX_OUTPUT_TOKENS,
+    ApiSpendExhausted,
     ChatMessage,
     LLMProxy,
     MalformedToolCallError,
@@ -1490,7 +1491,7 @@ def _is_worker_shutdown_error(exc: BaseException) -> bool:
 
 
 def _is_nonretryable_subagent_error(exc: Exception) -> bool:
-    if isinstance(exc, (SessionInterrupt, TimeoutError)):
+    if isinstance(exc, (SessionInterrupt, TimeoutError, ApiSpendExhausted)):
         return True
     if is_context_overflow_error(exc):
         # Compaction and tool-result editing already ran; the next round

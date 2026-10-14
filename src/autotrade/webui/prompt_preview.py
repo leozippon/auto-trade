@@ -178,6 +178,7 @@ def _research_prompt(
             "max_replay_years": budgets["max_replay_years"],
             "max_null_controls": rolling.max_null_controls,
             "max_llm_calls": budgets["max_llm_calls"],
+            "max_api_spend_usd": budgets["max_api_spend_usd"],
             "deadline_seconds": budgets["deadline_seconds"],
             "deadline_grace_seconds": budgets["deadline_grace_seconds"],
             "strategy_inference_timeout_seconds": limits.timeout_seconds,

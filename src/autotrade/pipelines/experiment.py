@@ -370,6 +370,7 @@ class RollingExperimentPipeline:
                     window_months=self.config.window_months,
                     max_replay_years=int(budgets["max_replay_years"]),
                     max_llm_calls=int(budgets["max_llm_calls"]),
+                    max_api_spend_usd=float(budgets["max_api_spend_usd"]),
                     deadline_seconds=budgets["deadline_seconds"],
                     deadline_grace_seconds=budgets["deadline_grace_seconds"],
                     benchmark_index=self.config.benchmark_index,
@@ -2116,6 +2117,7 @@ def _session_budgets(
     limits: dict[str, int | float] = {
         "max_replay_years": config.max_replay_years,
         "max_llm_calls": config.max_llm_calls,
+        "max_api_spend_usd": config.max_api_spend_usd,
         "deadline_seconds": config.max_research_minutes * 60,
     }
     if override not in (None, {}):
@@ -2143,7 +2145,11 @@ def _session_budgets(
                 raise ValueError(
                     f"{name} override cannot exceed the configured session limit"
                 )
-            limits[name] = float(value) if name == "deadline_seconds" else int(value)
+            limits[name] = (
+                float(value)
+                if name in ("deadline_seconds", "max_api_spend_usd")
+                else int(value)
+            )
     # Grace is not a resource_override key: add it after the override check so
     # the session budget and the runner reservation share one config source.
     main_minutes = float(limits["deadline_seconds"]) / 60.0

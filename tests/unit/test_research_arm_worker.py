@@ -734,6 +734,98 @@ def test_an_interrupted_session_without_a_checkpoint_resumes_from_the_note_alone
     assert not (options.work_root / options.experiment_id).exists()
 
 
+def test_a_hosted_session_that_reaches_its_api_spend_cap_ends_the_arm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synthetic_provider
+):
+    """The real worker, twice, on a gateway priced as the relay's
+    claude-opus-5-5: each scripted reply bills 5,000 uncached and 5,000 cached
+    prompt tokens and 1,000 completion tokens, $0.041. The first attempt
+    spends one reply and loses its model; the resumed attempt continues from
+    that spend, its next reply reaches the $0.08 cap, and the call after it is
+    never made: the arm ends without a deliverable on the spend cap, and its
+    ledger record carries both attempts' spend."""
+
+    from autotrade.environment.llm import ProviderResponse, ToolCall
+    from tests.unit.test_interactive_worker_local import (
+        LAST_WORKING_COPY_NODE,
+        VALIDATE_WORKING_COPY,
+        _NominatingLLM,
+        _NoShellRunner,
+    )
+
+    class HostedLLM(_NominatingLLM):
+        provider = "lighting"
+        model = "claude-opus-5-5"
+
+    usage = {
+        "prompt_tokens": 10_000,
+        "completion_tokens": 1_000,
+        "prompt_tokens_details": {"cached_tokens": 5_000},
+    }
+    repo, experiment = make_arm(
+        tmp_path,
+        developer_mode="llm",
+        max_replay_years=2,
+        session_max_attempts=1,
+        max_llm_calls=40,
+        max_api_spend_usd=0.08,
+    )
+    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
+    options = load_worker_options(experiment, repo_root=repo)
+    with pytest.raises(RuntimeError, match="language model unavailable"):
+        run_local_interactive_worker(
+            options,
+            llm=HostedLLM([ProviderResponse(tool_calls=(VALIDATE_WORKING_COPY,), usage=usage)]),
+            command_runner_factory=lambda _workspace: _NoShellRunner(),
+        )
+
+    second_llm = HostedLLM(
+        [
+            ProviderResponse(tool_calls=(VALIDATE_WORKING_COPY,), usage=usage),
+            ProviderResponse(
+                tool_calls=(
+                    ToolCall("finish", "finish_session", {"outcome": "freeze", "node_id": LAST_WORKING_COPY_NODE}),
+                ),
+                usage=usage,
+            ),
+        ]
+    )
+    result = run_local_interactive_worker(
+        load_worker_options(experiment, repo_root=repo),
+        llm=second_llm,
+        command_runner_factory=lambda _workspace: _NoShellRunner(),
+    )
+
+    # The finish was never asked for: the cap refused the call before it.
+    assert len(second_llm.calls) == 1
+    records = ExperimentLedger(options.rolling.ledger_path).read()
+    assert [row["record_type"] for row in records] == ["attempt_failed", "research_session"]
+    record = records[1]
+    assert (record["attempts"], record["outcome"], record["finish_reason"]) == (
+        2,
+        "deadline",
+        "api_spend_exhausted",
+    )
+    assert record["arm_end"] == {
+        "status": "no_deliverable",
+        "reason": "research budget exhausted without a freeze (api_spend_exhausted)",
+    }
+    assert record["budget_used"]["api_spend_usd"] == 0.082
+    assert result["verdict"]["status"] == "no_deliverable"
+    events = [
+        json.loads(line)
+        for line in Path(record["agent_trace_ref"]).read_text(encoding="utf-8").splitlines()
+    ]
+    [end] = [event for event in events if event.get("event_type") == "session_end"]
+    assert end["status"] == "api_spend_exhausted"
+    # The resumed attempt was told the cap and what the first one spent of it.
+    opening = second_llm.calls[0]["messages"]
+    assert "API 花费 $0.04/$0.08" in opening[1].content
+    facts = json.loads(opening[0].content.split("```json\n", 1)[1].split("\n```", 1)[0])
+    assert facts["budgets"]["max_api_spend_usd"] == 0.08
+    assert facts["budgets"]["used_before_this_attempt"]["api_spend_usd"] == 0.041
+
+
 def test_release_finished_sandbox_removes_only_that_experiment(tmp_path: Path) -> None:
     from types import SimpleNamespace
 

@@ -58,6 +58,9 @@ DEFAULT_MAX_RESEARCH_MINUTES = 2400
 DEFAULT_MAX_REPLAY_YEARS = 96
 DEFAULT_MAX_NULL_CONTROLS = 12
 DEFAULT_MAX_LLM_CALLS = 6400
+# What one arm's research session may spend on hosted model APIs, in USD at the
+# catalog's list prices (``environment.llm.pricing``); the local model is free.
+DEFAULT_MAX_API_SPEND_USD = 50.0
 
 # Research on four July-June years, a twelve-month forward test after them,
 # and a Held-out quarter the replay clips to the release end
@@ -594,6 +597,9 @@ class RollingExperimentConfig:
     # frozen node's block is reused at freeze. 0 leaves the tool out.
     max_null_controls: int = DEFAULT_MAX_NULL_CONTROLS
     max_llm_calls: int = DEFAULT_MAX_LLM_CALLS
+    # Spent by the session's main, sub-agent and compaction calls together; the
+    # NL gateway is not metered (it stays on the local model by round policy).
+    max_api_spend_usd: float = DEFAULT_MAX_API_SPEND_USD
     # Attempts of the research session or of the forward replay before the
     # experiment fails with the last error.
     session_max_attempts: int = 3
@@ -665,6 +671,7 @@ class RollingExperimentConfig:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} must be a non-negative integer")
+        positive_spend_cap(self.max_api_spend_usd)
         benchmark_index_label(self.benchmark_index)
         object.__setattr__(self, "experiments_root", Path(self.experiments_root))
 
@@ -675,6 +682,19 @@ class RollingExperimentConfig:
     @property
     def ledger_path(self) -> Path:
         return self.experiment_dir / "ledgers" / "experiment_ledger.jsonl"
+
+
+def positive_spend_cap(value: object) -> float:
+    """A spend cap is a positive finite number of USD; there is no uncapped arm."""
+
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        raise ValueError("max_api_spend_usd must be a positive finite number of USD")
+    return float(value)
 
 
 _ROLLING_FIELDS = {field_obj.name: field_obj for field_obj in fields(RollingExperimentConfig)}
@@ -929,6 +949,9 @@ class BudgetUsed:
     compact_calls: int = 0
     replay_years: int = 0
     null_controls: int = 0
+    # USD charged against ``max_api_spend_usd``; a block written before the cap
+    # existed reads as 0.
+    api_spend_usd: float = 0.0
 
     def to_record(self) -> dict[str, object]:
         return {
@@ -939,6 +962,7 @@ class BudgetUsed:
             "compact_calls": int(self.compact_calls),
             "replay_years": int(self.replay_years),
             "null_controls": int(self.null_controls),
+            "api_spend_usd": round(float(self.api_spend_usd), 4),
         }
 
     @classmethod
@@ -957,6 +981,7 @@ class BudgetUsed:
             compact_calls=number("compact_calls", int),  # type: ignore[arg-type]
             replay_years=number("replay_years", int),  # type: ignore[arg-type]
             null_controls=number("null_controls", int),  # type: ignore[arg-type]
+            api_spend_usd=number("api_spend_usd", float),  # type: ignore[arg-type]
         )
 
 
@@ -983,9 +1008,9 @@ class SessionResume:
 
 # How the research session ended. ``freeze`` nominates a node for the freeze
 # gate, ``no_edge`` ends the arm without a deliverable, ``deadline`` is a
-# session whose budget (the wrap-up grace or the model-call budget) ran out
-# before it finished, and ``environment_blocked`` one the host ended because
-# its replays on one span kept failing on the environment
+# session whose budget (the wrap-up grace, the model-call budget or the API
+# spend cap) ran out before it finished, and ``environment_blocked`` one the
+# host ended because its replays on one span kept failing on the environment
 # (``session_tools.EnvironmentBlocked``).
 SESSION_OUTCOMES = ("freeze", "no_edge", "deadline", ENVIRONMENT_BLOCKED)
 
@@ -1034,6 +1059,9 @@ class ResearchSessionRequest:
     # Cap on the session's own ``run_null_control`` calls; the experiment default
     # is the single source (RollingExperimentConfig.max_null_controls).
     max_null_controls: int = RollingExperimentConfig.max_null_controls
+    # The arm's API spend cap (RollingExperimentConfig.max_api_spend_usd), after
+    # any HITL resource override.
+    max_api_spend_usd: float = RollingExperimentConfig.max_api_spend_usd
     progress_hook: Callable[[str, dict[str, object] | None], None] | None = field(
         default=None,
         repr=False,
@@ -1138,6 +1166,7 @@ ResearchDeveloper = Callable[[ResearchSessionRequest], ResearchSessionResult]
 
 __all__ = [
     "DEFAULT_DEADLINE_GRACE_MINUTES",
+    "DEFAULT_MAX_API_SPEND_USD",
     "DEFAULT_MAX_LLM_CALLS",
     "DEFAULT_MAX_NULL_CONTROLS",
     "DEFAULT_MAX_REPLAY_YEARS",
@@ -1163,6 +1192,7 @@ __all__ = [
     "SnapshotProvider",
     "StepResult",
     "StrategyExperimentConfig",
+    "positive_spend_cap",
     "research_span",
     "rolling_default",
     "session_deadline_seconds",

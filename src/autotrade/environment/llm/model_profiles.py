@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import cast
 
@@ -14,7 +14,8 @@ from .openai_compatible import (
     OpenAICompatibleProxy,
     load_env_value,
 )
-from .proxy import LLMProxy
+from .pricing import FREE, TokenPrices
+from .proxy import LLMProxy, ScriptedLLM
 
 LOCAL_QWEN_MODEL = "qwen-3.8-27b-fp8"
 LEGACY_LOCAL_QWEN_MODEL = "qwen3.8-27b-local"
@@ -45,6 +46,9 @@ class ModelProfile:
     base_url_env: str | None
     default_base_url: str
     request_dialect: str
+    # List prices the session's API spend cap charges (``pricing``); FREE
+    # only for the locally served model.
+    prices: TokenPrices
     context_window_tokens: int | None = None
     max_output_tokens: int | None = None
 
@@ -55,6 +59,9 @@ _DEEPSEEK_PROFILE = ModelProfile(
     base_url_env="DEEPSEEK_BASE_URL",
     default_base_url="https://api.deepseek.com",
     request_dialect="deepseek",
+    # The weekday-peak rate (docs/deployment-documentation.md, list prices as
+    # of 2026-10-14); off-peak hours bill half, which the cap ignores.
+    prices=TokenPrices(0.30, 0.006, 1.20),
     # The account's GET /models reports these for deepseek-flash.
     context_window_tokens=1_048_576,
     max_output_tokens=393_216,
@@ -65,10 +72,11 @@ _VLLM_PROFILE = ModelProfile(
     base_url_env="VLLM_BASE_URL",
     default_base_url="http://127.0.0.1:8011/v1",
     request_dialect="vllm-qwen",
+    prices=FREE,
     context_window_tokens=262_144,
     max_output_tokens=262_144,
 )
-_MIMO_PROFILE = ModelProfile(
+_MIMO_FLASH_PROFILE = ModelProfile(
     provider="mimo",
     api_key_env="MIMO_API_KEY",
     base_url_env="MIMO_BASE_URL",
@@ -76,12 +84,22 @@ _MIMO_PROFILE = ModelProfile(
     # own base URL from the MiMo console, set through MIMO_BASE_URL.
     default_base_url="https://api.xiaomimimo.com/v1",
     request_dialect="mimo",
+    # The domestic real-time list prices (docs/deployment-documentation.md,
+    # as of 2026-10-14), CNY 1.00 / 0.02 / 2.00 converted at 7.1.
+    prices=TokenPrices(0.141, 0.0028, 0.282),
     # Flash and Pro publish the same request contract, a "1M" window and a
     # 131,072-token completion ceiling (thinking tokens included); the
     # decimal reading of "1M" is the safe one.
     context_window_tokens=1_000_000,
     max_output_tokens=131_072,
 )
+_MIMO_PROFILES = {
+    MIMO_FLASH_MODEL: _MIMO_FLASH_PROFILE,
+    # Only the price differs: CNY 3.00 / 0.025 / 6.00 at 7.1.
+    MIMO_PRO_MODEL: replace(
+        _MIMO_FLASH_PROFILE, prices=TokenPrices(0.423, 0.0035, 0.845)
+    ),
+}
 _LIGHTING_PROFILES = {
     model: ModelProfile(
         provider="lighting",
@@ -89,16 +107,17 @@ _LIGHTING_PROFILES = {
         base_url_env=_lighting.BASE_URL_ENV,
         default_base_url=_lighting.DEFAULT_BASE_URL,
         request_dialect=dialect,
+        prices=prices,
         context_window_tokens=context_window,
         max_output_tokens=max_output,
     )
-    for model, dialect, context_window, max_output in _lighting.MODEL_PROFILES
+    for model, dialect, context_window, max_output, prices in _lighting.MODEL_PROFILES
 }
 
 _PROFILES = (
     _DEEPSEEK_PROFILE,
     _VLLM_PROFILE,
-    _MIMO_PROFILE,
+    *_MIMO_PROFILES.values(),
     *_LIGHTING_PROFILES.values(),
 )
 
@@ -164,13 +183,26 @@ def model_profile(model: str) -> ModelProfile:
         return _DEEPSEEK_PROFILE
     if model == LOCAL_QWEN_MODEL:
         return _VLLM_PROFILE
-    if model in MIMO_MODELS:
-        return _MIMO_PROFILE
+    if model in _MIMO_PROFILES:
+        return _MIMO_PROFILES[model]
     if model in _LIGHTING_PROFILES:
         return _LIGHTING_PROFILES[model]
     raise ValueError(
         f"unsupported model {model!r}; the catalog has {', '.join(MODEL_CHOICES)}"
     )
+
+
+def token_prices(provider: str, model: str) -> TokenPrices:
+    """The list prices one role gateway's calls are charged at.
+
+    Keyed on the gateway's configured catalog model, never on the model id a
+    response reports. The injected test double is free; a gateway outside
+    the catalog has no price and is refused, so no model call runs unmetered.
+    """
+
+    if provider == ScriptedLLM.provider:
+        return FREE
+    return model_profile(model).prices
 
 
 def effective_max_output_tokens(model: str, requested: int) -> int:
@@ -299,4 +331,5 @@ __all__ = [
     "canonicalize_model_name",
     "effective_max_output_tokens",
     "model_profile",
+    "token_prices",
 ]

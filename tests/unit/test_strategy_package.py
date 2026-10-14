@@ -394,11 +394,13 @@ def test_budgets_come_from_one_source_each():
         rolling_default("max_llm_calls"),
         rolling_default("max_null_controls"),
     ) == (2400, 96, 6400, 12)
+    assert rolling_default("max_api_spend_usd") == 50.0
     assert _MAX_DEADLINE_OVERRIDE_MINUTES == 2 * rolling_default("max_research_minutes") == 4800
 
     config = SimpleNamespace(
         max_replay_years=rolling_default("max_replay_years"),
         max_llm_calls=rolling_default("max_llm_calls"),
+        max_api_spend_usd=rolling_default("max_api_spend_usd"),
         max_research_minutes=rolling_default("max_research_minutes"),
         deadline_grace_minutes=rolling_default("deadline_grace_minutes"),
     )
@@ -407,6 +409,10 @@ def test_budgets_come_from_one_source_each():
     assert budgets["deadline_seconds"] == 4800 * 60.0 + grace
     with pytest.raises(ValueError, match="cannot exceed 4800 minutes"):
         _session_budgets(config, {"deadline_seconds": _MAX_DEADLINE_OVERRIDE_MINUTES * 60 + 1})
+    # The spend cap overrides downward only, and keeps its cents.
+    assert _session_budgets(config, {"max_api_spend_usd": 12.5})["max_api_spend_usd"] == 12.5
+    with pytest.raises(ValueError, match="max_api_spend_usd override cannot exceed"):
+        _session_budgets(config, {"max_api_spend_usd": 50.01})
 
 
 @pytest.mark.skipif(not docker_available(), reason="Docker is unavailable")

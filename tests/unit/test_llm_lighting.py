@@ -273,7 +273,7 @@ def _streamed_text(text: str = "OK") -> bytes:
 
 def test_catalog_registers_every_relay_id_with_its_dialect_and_window():
     assert len(MODEL_PROFILES) == 7
-    for model, dialect, window, output in MODEL_PROFILES:
+    for model, dialect, window, output, prices in MODEL_PROFILES:
         assert model in MODEL_CHOICES
         profile = model_profile(model)
         assert (
@@ -284,6 +284,7 @@ def test_catalog_registers_every_relay_id_with_its_dialect_and_window():
             profile.request_dialect,
             profile.context_window_tokens,
             profile.max_output_tokens,
+            profile.prices,
         ) == (
             "lighting",
             API_KEY_ENV,
@@ -292,6 +293,7 @@ def test_catalog_registers_every_relay_id_with_its_dialect_and_window():
             dialect,
             window,
             output,
+            prices,
         )
 
 

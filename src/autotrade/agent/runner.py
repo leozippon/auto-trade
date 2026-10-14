@@ -7,10 +7,11 @@ budget is the master constraint. The budget the pipeline hands over includes
 a trailing wrap-up grace window (``deadline_grace_seconds``): reaching the
 main deadline never interrupts the model — with no complete Validation a
 single wrap-up prompt is injected and the session keeps its full autonomy
-through the grace window; when the grace window or the model-call budget is
-exhausted the session closes gracefully (``session_end`` with status
-``deadline_exceeded`` or ``call_budget_exhausted``) and the Pipeline records
-a ``deadline`` outcome instead of failing the run. Inside the finalize window
+through the grace window; when the grace window, the model-call budget or the
+API spend cap is exhausted the session closes gracefully (``session_end`` with
+status ``deadline_exceeded``, ``call_budget_exhausted`` or
+``api_spend_exhausted``) and the Pipeline records a ``deadline`` outcome
+instead of failing the run. Inside the finalize window
 a complete Validation instead switches to the restricted hard-finalization
 capability view. Main conversation calls and compactions are logged in the
 Agent trace (docs/environment-design.md §2.4 and §4.2).
@@ -32,11 +33,13 @@ from typing import Protocol
 from autotrade.environment.llm import (
     AGENT_MAX_OUTPUT_TOKENS,
     CONTEXT_OUTPUT_MIN_TOKENS,
+    ApiSpendExhausted,
     ChatMessage,
     LLMProxy,
     MalformedToolCallError,
     ProviderRefusalError,
     ToolCall,
+    cached_prompt_tokens,
     clamp_requested_max_tokens,
     context_overflow_error,
     context_request_fits,
@@ -102,14 +105,16 @@ DEFAULT_DEADLINE_GRACE_SECONDS = 600.0
 # ``finish_reason`` values of a session that ended because a budget ran out.
 DEADLINE_GRACE_EXHAUSTED = "deadline_grace_exhausted"
 LLM_CALL_BUDGET_EXHAUSTED = "llm_call_budget_exhausted"
+API_SPEND_EXHAUSTED = "api_spend_exhausted"
 
 
 class AgentSessionBudgetExhausted(SessionInterrupt):
-    """A session budget ran out: the deadline with its wrap-up grace, or the
-    model-call budget.
+    """A session budget ran out: the deadline with its wrap-up grace, the
+    model-call budget or the API spend cap.
 
     Control flow, not an error: the session has already emitted
-    ``session_end`` (status ``deadline_exceeded`` or ``call_budget_exhausted``);
+    ``session_end`` (status ``deadline_exceeded``, ``call_budget_exhausted``
+    or ``api_spend_exhausted``);
     the Pipeline records the ``deadline`` outcome with ``finish_reason`` and
     ends the arm instead of failing the run. A SessionInterrupt subclass so it
     re-raises through tool dispatch instead of being swallowed into an error
@@ -623,6 +628,16 @@ class AgentSessionRunner:
                     )
                     raise AgentSessionBudgetExhausted(
                         "Agent session deadline and wrap-up grace exhausted",
+                        conversation_id=self.conversation_id,
+                        llm_calls=llm_calls,
+                    ) from exc
+                if isinstance(exc, ApiSpendExhausted):
+                    self._close_session(
+                        {"status": API_SPEND_EXHAUSTED, "llm_calls": llm_calls}
+                    )
+                    raise AgentSessionBudgetExhausted(
+                        str(exc),
+                        finish_reason=API_SPEND_EXHAUSTED,
                         conversation_id=self.conversation_id,
                         llm_calls=llm_calls,
                     ) from exc
@@ -2123,16 +2138,7 @@ def _accumulate_usage(total: dict[str, int], usage: object) -> None:
         value = usage.get(key)
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             total[key] += int(value)
-    hit = usage.get("prompt_cache_hit_tokens")
-    if not isinstance(hit, (int, float)) or isinstance(hit, bool):
-        prompt_details = usage.get("prompt_tokens_details")
-        hit = (
-            prompt_details.get("cached_tokens")
-            if isinstance(prompt_details, dict)
-            else None
-        )
-    if isinstance(hit, (int, float)) and not isinstance(hit, bool):
-        total["cache_hit_tokens"] += int(hit)
+    total["cache_hit_tokens"] += cached_prompt_tokens(usage)
     miss = usage.get("prompt_cache_miss_tokens")
     if isinstance(miss, (int, float)) and not isinstance(miss, bool):
         total["cache_miss_tokens"] += int(miss)

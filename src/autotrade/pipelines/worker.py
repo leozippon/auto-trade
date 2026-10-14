@@ -159,6 +159,7 @@ _ALLOWED_PARAMS = {
     "max_replay_years",
     "max_null_controls",
     "max_llm_calls",
+    "max_api_spend_usd",
     "session_max_attempts",
     "max_research_minutes",
     *ACCEPTANCE_KEYS,
@@ -661,6 +662,7 @@ def resolve_worker_options(
             knob("max_null_controls"), "max_null_controls"
         ),
         max_llm_calls=_positive_int(knob("max_llm_calls"), "max_llm_calls"),
+        max_api_spend_usd=_positive_float(knob("max_api_spend_usd"), "max_api_spend_usd"),
         session_max_attempts=_positive_int(
             knob("session_max_attempts"), "session_max_attempts"
         ),
