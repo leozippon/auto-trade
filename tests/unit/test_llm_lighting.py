@@ -19,6 +19,7 @@ from autotrade.environment.llm import (
     ChatMessage,
     LLMProxyError,
     MalformedToolCallError,
+    ProviderRefusalError,
     ToolCall,
     build_model_gateway,
     model_profile,
@@ -581,6 +582,40 @@ def test_refusal_reply_is_never_an_answer(tmp_path: Path):
         proxy.complete([ChatMessage("user", "summarize")], tools=TOOLS)
 
     assert type(caught.value).__name__ == "ProviderRefusalError"
+    assert len(transport.bodies) == 1
+
+
+def test_streamed_reply_cut_by_the_content_filter_is_a_refusal(tmp_path: Path):
+    # The deltas already delivered partial text; the terminal event says the
+    # provider withheld the rest, so nothing of it may become an answer.
+    filtered = _sse(
+        {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {"id": "msg_1", "type": "message", "role": "assistant"},
+        },
+        {
+            "type": "response.output_text.delta",
+            "item_id": "msg_1",
+            "output_index": 0,
+            "delta": "The first half of an",
+        },
+        {
+            "type": "response.incomplete",
+            "response": {
+                "status": "incomplete",
+                "model": MODEL,
+                "incomplete_details": {"reason": "content_filter"},
+                "usage": {"input_tokens": 10, "output_tokens": 6, "total_tokens": 16},
+                "output": [],
+            },
+        },
+    )
+    proxy, transport = _proxy(tmp_path, [filtered], max_retries=2)
+
+    with pytest.raises(ProviderRefusalError, match="refused the request"):
+        proxy.complete([ChatMessage("user", "summarize")], tools=TOOLS)
+
     assert len(transport.bodies) == 1
 
 

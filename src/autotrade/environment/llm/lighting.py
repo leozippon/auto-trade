@@ -598,10 +598,12 @@ def _parse_responses_stream(payload: bytes, *, expected_model: str) -> ProviderR
         if terminal.get("model"):
             model = str(terminal["model"])
         incomplete = terminal.get("incomplete_details")
-        output_limited = (
-            isinstance(incomplete, Mapping)
-            and incomplete.get("reason") == "max_output_tokens"
-        )
+        reason = incomplete.get("reason") if isinstance(incomplete, Mapping) else None
+        # A reply the provider cut off for its content is its refusal, as on
+        # the non-streamed path: the partial text is never an answer.
+        if reason == "content_filter":
+            raise _refusal("")
+        output_limited = reason == "max_output_tokens"
     assembled = "".join(content)
     built: list[ToolCall] = []
     for key in order:
