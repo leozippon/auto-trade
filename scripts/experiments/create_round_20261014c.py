@@ -1,13 +1,14 @@
 #!/usr/bin/env python
-"""The 2026-10-14 third round: one HCM arm on the A100 development instance.
+"""The 2026-10-14 third round: two HCM arms on the A100 development instance.
 
-The arm runs round 20261014b's study unchanged -- the same pack
+The arms run round 20261014b's study unchanged -- the same pack
 (configs/workspace_refs/hcm_100k_8y_20261014b), directive, eight-year
 fundamentals geometry on a 100k account graded against CSI 1000, boards and
-seed -- on a host with one A100 instead of the L20 workstation. Every hosted
-role is DeepSeek-V4.1-Flash on the LightingTheWord relay: the main session,
-the sub-agents and compaction, with the compaction threshold pinned to the
-local arms' value as `_profiles.MIMO` does for its 1M window. Text-evidence
+seed -- on a host with one A100 instead of the L20 workstation. They differ
+only in the main session: DeepSeek-V4.1-Flash, or gpt-6.1-sol. Sub-agents and
+compaction run on DeepSeek-V4.1-Flash on the LightingTheWord relay in both,
+since the instance has no local model, with the compaction threshold pinned to
+the local arms' value as `_profiles.MIMO` does for a 1M window. Text-evidence
 scoring stays on the local default; the pack's starter never calls
 `context.nl()` and the pack's rules forbid it, so that gateway is built but
 not called.
@@ -15,10 +16,12 @@ not called.
 | Arm | Main session | Sub-agents | Compaction |
 | --- | --- | --- | --- |
 | `hcm_100k_8y_dsf_zgca_20261014c` | DeepSeek-V4.1-Flash | DeepSeek-V4.1-Flash | DeepSeek-V4.1-Flash |
+| `hcm_100k_8y_sol_dsf_zgca_20261014c` | gpt-6.1-sol | DeepSeek-V4.1-Flash | DeepSeek-V4.1-Flash |
 
 The host must name its card model (`AUTOTRADE_GPU_NAME=A100`) in the
-environment of both the console and this launcher. The arm claims one GPU and
-does not count against the local-model limit.
+environment of both the console and this launcher. Each arm claims the one
+GPU, so they run one after the other, and neither counts against the
+local-model limit.
 
 Usage: create_round_20261014c.py <port> [--dry-run] [--fill] [experiment_id ...]
 """
@@ -41,6 +44,7 @@ from scripts.experiments._round import Round
 PACK = "configs/workspace_refs/hcm_100k_8y_20261014b"
 PIT_VIEWS_SEED = "data/pit_views_seed_research_8y_fund_20261014b"
 MODEL = "DeepSeek-V4.1-Flash"
+SOL = "gpt-6.1-sol"
 
 DIRECTIVE = (
     "验证「分层持续记忆」——一个从不重新初始化、在多个时间尺度上更新参数、并带有外部情景记忆的选股模型，"
@@ -51,6 +55,14 @@ DIRECTIVE = (
 ARMS: dict[str, dict[str, object]] = {
     "hcm_100k_8y_dsf_zgca_20261014c": {
         "model": MODEL,
+        "subagent_model": MODEL,
+        "compact_model": MODEL,
+        "compact_token_threshold": 221_184,
+        "workspace_reference": PACK,
+        "research_directive": DIRECTIVE,
+    },
+    "hcm_100k_8y_sol_dsf_zgca_20261014c": {
+        "model": SOL,
         "subagent_model": MODEL,
         "compact_model": MODEL,
         "compact_token_threshold": 221_184,
