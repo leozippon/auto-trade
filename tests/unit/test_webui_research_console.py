@@ -26,7 +26,7 @@ from autotrade.environment.tools.report_issue import (
     issue_reports_path,
 )
 from autotrade.pipelines.config import DEFAULT_RESEARCH_GEOMETRY, RETIRED_SWITCHES
-from autotrade.pipelines.ledger import ExperimentLedger, verdict_void
+from autotrade.pipelines.ledger import ExperimentLedger, recorded_path, verdict_void
 from autotrade.webui import registry
 from autotrade.webui.registry import (
     ENDING_STATES,
@@ -178,6 +178,36 @@ def test_a_result_without_a_style_sidecar_is_not_an_unknown_result(tmp_path: Pat
     unknown = client.get("/api/experiments/arm/results/valid_absent/style")
     assert unknown.status_code == 404
     assert unknown.json()["detail"] == "unknown result: valid_absent"
+
+
+def test_a_moved_arm_serves_its_recorded_paths_from_where_it_now_lives(
+    tmp_path: Path,
+) -> None:
+    """Records name files by the host path they were written at. An arm moved
+    to another checkout or host serves them from its new directory, and a
+    recorded file that is not there fails by name, not as an unknown result."""
+
+    old_root = tmp_path / "old/experiments"
+    build_arm(old_root, "arm", "graduated")
+    new_root = tmp_path / "new/experiments"
+    new_root.parent.mkdir()
+    old_root.rename(new_root)
+    assert str(old_root / "arm") in json.dumps(_records(new_root / "arm"))
+    client = TestClient(create_app(tmp_path / "new", new_root))
+    name = experiment_detail(new_root, "arm")["forward"]["result"]
+    for route in ("equity", "style", "orders", "orders.csv"):
+        response = client.get(f"/api/experiments/arm/results/{name}/{route}")
+        assert response.status_code == 200, route
+    assert client.get("/api/experiments/arm/frozen/strategy.zip").status_code == 200
+
+    (new_root / "arm/artifacts/results" / name / "result.json").unlink()
+    missing = client.get(f"/api/experiments/arm/results/{name}/equity")
+    assert missing.status_code == 404
+    assert missing.json()["detail"] == (
+        f"arm: artifacts/results/{name}/result.json is recorded but not on disk"
+    )
+    with pytest.raises(FileNotFoundError, match="outside the experiment"):
+        recorded_path(new_root / "arm", tmp_path / "elsewhere/arm/result.json")
 
 
 @pytest.mark.parametrize("status", ["graduated", "discarded"])

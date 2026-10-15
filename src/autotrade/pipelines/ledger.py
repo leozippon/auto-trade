@@ -191,6 +191,39 @@ def assert_no_frozen_artifact_mutation(records: list[dict[str, object]]) -> None
             )
 
 
+def recorded_path(experiment_dir: str | Path, reference: str | Path) -> Path:
+    """Where a path a record of ``experiment_dir`` names lives now.
+
+    Records name what the pipeline wrote by the host path it was written at,
+    and an experiment directory keeps its records when it moves (a renamed
+    checkout, an arm synced from another host). What is fixed is the path
+    below the experiment's own directory, so a recorded absolute path is read
+    as its tail after the last ``<experiments root>/<experiment id>`` pair,
+    named as ``experiment_dir`` is now, under ``experiment_dir``; a relative
+    reference is that tail already. Raises ``FileNotFoundError`` when the
+    reference names no place inside the experiment, or nothing is there.
+    """
+
+    directory = Path(experiment_dir).resolve()
+    outside = f"{directory.name}: recorded path outside the experiment: {reference}"
+    tail = Path(reference)
+    if tail.is_absolute():
+        parts = tail.parts
+        anchor = (directory.parent.name, directory.name)
+        starts = [i for i in range(1, len(parts) - 1) if parts[i : i + 2] == anchor]
+        if not starts:
+            raise FileNotFoundError(outside)
+        tail = Path(*parts[starts[-1] + 2 :])
+    path = (directory / tail).resolve()
+    if not path.is_relative_to(directory):
+        raise FileNotFoundError(outside)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{directory.name}: {tail.as_posix()} is recorded but not on disk"
+        )
+    return path
+
+
 def research_records(records: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
     """The research sessions' records, in the order they ran."""
 

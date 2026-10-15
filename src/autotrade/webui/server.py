@@ -479,6 +479,8 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         _experiment_dir(experiment_id)
         try:
             strategy_dir = registry.frozen_strategy_dir(experiment_root, experiment_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=redact_host_paths(str(exc))) from exc
         except (KeyError, ValueError) as exc:
             raise HTTPException(status_code=404, detail="the experiment has no frozen artifact") from exc
         return _strategy_zip_response(strategy_dir, f"{experiment_id}__frozen.zip")
@@ -511,11 +513,14 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
 
     # ---- replay results named by the ledger -----------------------------------------
     # A result no ledger record names answers 404 exactly like a missing one, so
-    # the forward replay stays unreadable until its verdict is recorded.
+    # the forward replay stays unreadable until its verdict is recorded. A
+    # named result whose file is not in the experiment directory says so.
     def _ledger_result(read, experiment_id: str, name: str):
         _experiment_dir(experiment_id)
         try:
             return read()
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=redact_host_paths(str(exc))) from exc
         except (KeyError, ValueError) as exc:
             raise HTTPException(status_code=404, detail=f"unknown result: {name}") from exc
 

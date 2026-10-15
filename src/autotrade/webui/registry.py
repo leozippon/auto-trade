@@ -62,6 +62,7 @@ from autotrade.pipelines.ledger import (
     frozen_record,
     lineage_record,
     paper_candidate,
+    recorded_path,
     research_records,
 )
 from autotrade.pipelines.pit_views_seed import FORWARD_PHASE, RESEARCH_PHASE
@@ -966,8 +967,10 @@ def _live_steps(directory: Path) -> list[dict[str, object]]:
         row = _LIVE_STEP_CACHE.get(key)
         if row is None:
             record = read_json(path)
-            reference = str(record.get("result_ref") or "")
             try:
+                reference = str(
+                    recorded_path(directory, str(record.get("result_ref") or ""))
+                )
                 figures = neutralized(reference)
             except OSError:
                 # The replay's style file is written before its sidecar; a
@@ -1263,10 +1266,7 @@ def frozen_strategy_dir(root: Path, experiment_id: str) -> Path:
     value = _mapping(_mapping(row).get("frozen")).get("output_path")
     if not isinstance(value, str) or not value:
         raise KeyError("the experiment has no frozen artifact")
-    strategy_dir = (directory / value).resolve()
-    if not strategy_dir.is_relative_to(directory) or not strategy_dir.is_dir():
-        raise KeyError("the experiment has no frozen artifact on disk")
-    return strategy_dir
+    return recorded_path(directory, value)
 
 
 def _ledger_result_refs(
@@ -1292,18 +1292,15 @@ def ledger_result(root: Path, experiment_id: str, name: str) -> Path:
     """The ``result.json`` of the ledger-named result called ``name``.
 
     A result directory no record names — a replay still running, or one a
-    failed attempt left behind — answers exactly like a missing one.
+    failed attempt left behind — raises ``KeyError`` exactly like a missing
+    one; a named one whose file is not in the experiment directory raises
+    ``FileNotFoundError`` (:func:`recorded_path`).
     """
 
     directory = resolve_experiment_dir(root, experiment_id)
     for reference in _ledger_result_refs(directory, read_ledger_records(directory)):
-        if _result_name(reference) != name:
-            continue
-        path = (directory / str(reference)).resolve()
-        if path.is_dir():
-            path = path / "result.json"
-        if path.is_relative_to(directory) and path.is_file():
-            return path
+        if _result_name(reference) == name:
+            return recorded_path(directory, str(reference))
     raise KeyError(f"unknown result: {name}")
 
 
