@@ -578,6 +578,58 @@ def test_the_listing_carries_the_budget_and_the_research_outcome(tmp_path: Path)
     assert client.get("/api/experiments/idle/status").json()["budget_used"] is None
 
 
+def test_a_terminated_session_shows_what_it_spent_and_no_record(tmp_path: Path) -> None:
+    """A session the operator terminated before it recorded anything has no
+    ledger record, and the console invents none. Its trace still says what it
+    spent, so the budget reads off the trace with the worker gone, and the
+    research step says how it stopped and replays that trace instead of
+    reading as a step yet to run."""
+
+    directory = build_arm(tmp_path, "cut", "research")
+    block = {"inference_seconds": 1316.2, "llm_calls": 180, "replay_years": 0, "null_controls": 0, "api_spend_usd": 1.8}
+    write_json_atomic(
+        directory / "hitl/status.json",
+        {
+            "schema_version": 1,
+            "pid": 999_999_999,
+            "state": "terminated",
+            "session_key": "research",
+            "run_id": "run_research_cut",
+        },
+    )
+    trace_dir = directory / "artifacts/traces"
+    trace_dir.mkdir(parents=True)
+    (trace_dir / "run_research_cut.jsonl").write_text(
+        json.dumps({"event_type": "llm_call", "budget_used": block}) + "\n", encoding="utf-8"
+    )
+    row = {row["experiment_id"]: row for row in list_experiments(tmp_path)}["cut"]
+    detail = experiment_detail(tmp_path, "cut")
+    assert (row["state"], row["worker_alive"], row["budget_used"]) == ("terminated", False, block)
+    assert detail["budget_used"] == block
+    assert detail["status"]["session_key"] == "research" and detail["status"]["run_ref"]
+    assert detail["sessions"][0] == {"key": "research", "kind": "research"}
+    client = TestClient(create_app(tmp_path.parent, tmp_path))
+    assert client.get("/api/experiments/cut/status").json()["budget_used"] == block
+    # The same arm with no trace on disk has spent nothing the console can read.
+    (trace_dir / "run_research_cut.jsonl").unlink()
+    assert experiment_detail(tmp_path, "cut")["budget_used"] is None
+
+    script = (
+        Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
+    ).read_text(encoding="utf-8")
+
+    def body(name: str) -> str:
+        return script.split(f"function {name}(", 1)[1].split("\nfunction ", 1)[0]
+
+    step = body("researchStep")
+    assert 'status.session_key === "research" && status.run_ref' in step
+    assert "STATE_LABELS[item.state]" in step and 'STATE_LABELS = {' in script
+    assert 'terminated: "已强制终止"' in script
+    panel = body("sessionDetailPanel")
+    assert "traceReplayNode(detail.experiment_id, runRef, detail)" in panel
+    assert "没有研究记录" in panel
+
+
 def test_the_listing_names_the_research_curve_and_the_replay_its_thresholds(tmp_path: Path) -> None:
     """The one curve per arm starts from the research-period validation of the
     candidate the tiles name — the frozen artifact's own once the arm froze —

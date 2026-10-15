@@ -1749,7 +1749,8 @@ const ENDING_STEP_STATES = {
 };
 
 /* The research step: its recorded outcome once the session ended — a freeze
-   is the step done, anything else ended the arm — else where the worker is. */
+   is the step done, anything else ended the arm — else where the worker is,
+   else how a session that ran stopped before it recorded anything. */
 function researchStep(item) {
   const status = item.status || {};
   const step = { key: "research", label: STEP_LABELS.research };
@@ -1768,6 +1769,10 @@ function researchStep(item) {
     return item.state === "paused"
       ? { ...step, state: "waiting", status: STEP_STATUS_LABELS.paused }
       : { ...step, state: "running", status: STEP_STATUS_LABELS.running };
+  // Terminated, or its worker lost: the session has no record and can resume,
+  // so the step waits, worded in the arm's own state.
+  if (status.session_key === "research" && status.run_ref)
+    return { ...step, state: "waiting", status: STATE_LABELS[item.state] || item.state };
   return { ...step, state: "pending", status: STEP_STATUS_LABELS.pending };
 }
 
@@ -3359,12 +3364,12 @@ function verdictStagePanel(detail) {
 // The one trading environment with a backend (docs/deployment-documentation.md).
 const PAPER_ENV = "paper";
 
-/* The Paper handoff: a graduate's candidate, a button that opens its book,
-   and the book itself once one exists. Graduation opens the book on its own;
-   the button is the same action for a graduate that has none yet. */
+/* The Paper handoff: the arm's book once one exists — a graduate's, or one an
+   incubation opened — else, for a graduate, a button that opens it.
+   Graduation opens the book on its own; the button is the same action for a
+   graduate that has none yet. */
 function paperHandoff(detail) {
-  const candidate = detail.paper_candidate;
-  if (!candidate) return null;
+  const title = el("h4", { class: "subsection-title" }, "Paper 建账户");
   const button = el(
     "button",
     {
@@ -3386,18 +3391,20 @@ function paperHandoff(detail) {
     },
     "建立模拟账户",
   );
+  // Only a graduate can open a book here; any arm shows the book it has.
   const host = el(
     "div",
-    { class: "section-gap" },
-    el("h4", { class: "subsection-title" }, "Paper 建账户"),
+    { class: "section-gap", hidden: detail.paper_candidate ? null : "" },
+    title,
     button,
   );
   api(`/api/trading/${PAPER_ENV}/books`)
     .then((payload) => {
       const books = (payload.books || []).filter((row) => row.experiment_id === detail.experiment_id);
       if (!books.length) return;
-      button.remove();
-      host.append(
+      host.hidden = false;
+      host.replaceChildren(
+        title,
         el(
           "div",
           { class: "meta-line" },
@@ -3874,13 +3881,42 @@ function sessionDetailPanel(detail, selectedKey) {
   } else {
     if (detail.kind === "hitl" && detail.stage === "research")
       panel.append(directivePanel(detail, session));
+    // A session that stopped before it recorded anything has no record, but
+    // the trace it wrote is still its own: its counters and its replay.
+    const runRef = status.session_key === session.key ? status.run_ref : "";
     panel.append(
       el(
         "div",
         { class: "panel section-gap" },
-        el("div", { class: "empty" }, researchStep(detail).status),
+        el(
+          "div",
+          { class: "empty" },
+          runRef
+            ? `${researchStep(detail).status} · 会话结束前未登记结果，没有研究记录`
+            : researchStep(detail).status,
+        ),
       ),
     );
+    if (runRef) {
+      const traceHost = el("div", {});
+      panel.append(traceHost);
+      api(
+        `/api/experiments/${encodeURIComponent(detail.experiment_id)}/trace/stats?run_id=${encodeURIComponent(runRef)}`,
+      )
+        .then((stats) =>
+          traceHost.append(
+            el(
+              "div",
+              { class: "panel section-gap" },
+              statsChipsRow(stats),
+              traceReplayNode(detail.experiment_id, runRef, detail),
+            ),
+          ),
+        )
+        .catch(() => {
+          /* the run wrote no trace */
+        });
+    }
   }
   return panel;
 }
@@ -5477,9 +5513,11 @@ function toolGroupTitle(block) {
     .join(", ");
   const failed = Number(block.failed) || 0;
   const running = Number(block.running) || 0;
+  const interrupted = Number(block.interrupted) || 0;
   const bits = [names || "工具"];
   if (failed) bits.push(`${failed} 失败`);
   if (running) bits.push(`${running} 进行中`);
+  if (interrupted) bits.push(`${interrupted} 已中断`);
   return bits.join(" · ");
 }
 
@@ -5490,6 +5528,7 @@ function toolRowsNode(tools) {
     if (row.ok) parts.push(`成功 ${row.ok}`);
     if (row.failed) parts.push(`失败 ${row.failed}`);
     if (row.running) parts.push(`进行中 ${row.running}`);
+    if (row.interrupted) parts.push(`中断 ${row.interrupted}`);
     const line = el("div", { class: "tool-brief" }, parts.join("  "));
     if (row.summary) line.append(el("span", {}, `  ${row.summary}`));
     list.append(line);

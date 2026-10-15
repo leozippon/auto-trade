@@ -545,14 +545,16 @@ def _budget_used(
     raw_status: object,
 ) -> dict[str, object] | None:
     """What the research session has spent: the ledger's block once it is
-    recorded, else the last block its live trace carries, else nothing."""
+    recorded, else the last block its trace carries (all a session that
+    ended unrecorded, terminated or with its worker lost, leaves), else
+    nothing."""
 
     for record in research_records(records):
         block = record.get("budget_used")
         if isinstance(block, Mapping):
             return dict(block)
     status = _mapping(raw_status)
-    if status.get("session_key") != RESEARCH_SESSION_KEY or not status_pid_alive(status):
+    if status.get("session_key") != RESEARCH_SESSION_KEY:
         return None
     run_id = status.get("run_id")
     path = resolve_trace_path(directory, str(run_id)) if isinstance(run_id, str) else None
@@ -1245,9 +1247,10 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
         **detail,
         "params": _public_params(params),
         "control": identity.public_control(read_control(hitl / CONTROL_NAME).to_record()),
-        # The cards claimed for the arm's worker when it was last started: a
-        # session attaches some of these and no other.
-        "gpu_claim": list(read_gpu_claim(hitl) or ()),
+        # The cards claimed for the arm's live worker: a session attaches some
+        # of these and no other. A dead worker's claim holds nothing (a resume
+        # writes a fresh one), so it is not shown.
+        "gpu_claim": list(read_gpu_claim(hitl) or ()) if detail.get("worker_alive") else [],
         "inbox": inbox_public_view(
             hitl / INBOX_NAME,
             session_key=str(current) if isinstance(current, str) and current else None,

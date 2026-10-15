@@ -487,15 +487,22 @@ def test_gpu_allocation_bar_uses_csp_compatible_native_control(tmp_path: Path):
 def test_the_session_gpu_panel_marks_the_cards_the_arm_claimed(tmp_path: Path):
     """A session attaches some of the cards claimed for its arm's worker and
     no other, so the panel marks those, read from the detail, and never ranks
-    the host's cards by free memory."""
+    the host's cards by free memory. The claim holds only while that worker
+    lives: a dead worker's claim file holds nothing and is not shown."""
     from autotrade.pipelines.hitl_state import write_gpu_claim
     from autotrade.webui.registry import experiment_detail
     from tests.unit.webui_research_arm import build_arm
 
-    build_arm(tmp_path, "arm", "created")
+    hitl = build_arm(tmp_path, "arm", "research", alive=True) / "hitl"
     assert experiment_detail(tmp_path, "arm")["gpu_claim"] == []
-    write_gpu_claim(tmp_path / "arm" / "hitl", [5, 2])
+    write_gpu_claim(hitl, [5, 2])
     assert experiment_detail(tmp_path, "arm")["gpu_claim"] == [5, 2]
+    status = json.loads((hitl / "status.json").read_text(encoding="utf-8"))
+    (hitl / "status.json").write_text(
+        json.dumps({**status, "state": "terminated", "pid": 999_999_999}), encoding="utf-8"
+    )
+    detail = experiment_detail(tmp_path, "arm")
+    assert (detail["worker_alive"], detail["gpu_claim"]) == (False, [])
     script = (Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js").read_text(
         encoding="utf-8"
     )

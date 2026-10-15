@@ -1136,6 +1136,54 @@ def test_a_dead_runs_torn_tail_ends_every_page_that_reaches_it(tmp_path: Path) -
         assert (last["kind"], last["text"]) == ("raw", marker["raw"])
 
 
+def test_a_dead_runs_open_tool_calls_read_as_interrupted(tmp_path: Path) -> None:
+    """A call started and never finished is running only while its writer
+    lives. Once the writer is gone a read that reaches the end of the trace
+    counts it as interrupted, so the replay of a terminated session never
+    shows a tool still running; a read that stops short of the end cannot
+    tell and leaves it running."""
+
+    events = [
+        {"event_type": "llm_call", "content": "plan"},
+        {"event_type": "tool_call_started", "tool": "read_file", "tool_call_id": "c1"},
+        {"event_type": "tool_call", "tool": "read_file", "tool_call_id": "c1", "result": {"ok": True}},
+        {"event_type": "tool_call_started", "tool": "batch_validate", "tool_call_id": "c2"},
+        # A content-free round: an event after the open call that draws no block.
+        {"event_type": "llm_call"},
+    ]
+    identity = _experiment_with_trace(tmp_path, events)
+    root = tmp_path / "experiments" / "demo"
+    trace = root / "artifacts" / "traces" / "run_001.jsonl"
+    short = trace.stat().st_size - len(json.dumps(events[-1]).encode()) - 1
+
+    def group(payload: dict[str, object]) -> dict[str, object]:
+        [block] = [block for block in payload["blocks"] if block["kind"] == "tool_group"]
+        return block
+
+    live = group(traces.read_trace_blocks(trace, writer_alive=True))
+    assert (live["running"], "interrupted" in live) == (1, False)
+    dead = traces.read_trace_blocks(trace, writer_alive=False)
+    assert dead["eof"] is True
+    ended = group(dead)
+    assert (ended["count"], ended["ok"], ended["running"], ended["interrupted"]) == (2, 1, 0, 1)
+    rows = {row["name"]: row for row in ended["tools"]}
+    assert (rows["batch_validate"]["running"], rows["batch_validate"]["interrupted"]) == (0, 1)
+    assert "interrupted" not in rows["read_file"]
+    partial = traces.read_trace_blocks(trace, offset=0, max_bytes=short, writer_alive=False)
+    assert partial["eof"] is False and group(partial)["running"] == 1
+
+    # The route reads liveness from hitl/status.json, for a tail as for a page.
+    client = TestClient(create_app(tmp_path))
+    params = {"run_id": identity.trace_ref("run_001"), "tail_events": 20}
+    _claim_writer(root, alive=True, run_id="run_001")
+    running = client.get("/api/experiments/demo/trace/blocks", params=params).json()
+    assert group(running)["running"] == 1
+    _claim_writer(root, alive=False, run_id="run_001")
+    terminated = client.get("/api/experiments/demo/trace/blocks", params=params).json()
+    assert terminated["eof"] is True
+    assert (group(terminated)["running"], group(terminated)["interrupted"]) == (0, 1)
+
+
 def test_project_subagent_running_card_accumulates_progress() -> None:
     blocks = project_trace_blocks(
         [

@@ -189,7 +189,11 @@ def read_trace_blocks(
     tail_events: int | None = None,
     writer_alive: bool = True,
 ) -> dict[str, object]:
-    """Project a page or tail of raw events into display blocks. JSONL is unchanged."""
+    """Project a page or tail of raw events into display blocks. JSONL is unchanged.
+
+    A read that reached the end of a trace whose writer is gone marks the
+    calls still open there as interrupted: they will never finish.
+    """
 
     if tail_events is not None:
         page = read_trace_tail(path, max_events=tail_events, writer_alive=writer_alive)
@@ -204,14 +208,27 @@ def read_trace_blocks(
     events = page.get("events")
     if not isinstance(events, list):
         events = []
+    blocks = project_trace_blocks(events)
+    if not writer_alive and page.get("eof"):
+        _interrupt_open_calls(blocks)
     projected = {
-        "blocks": project_trace_blocks(events),
+        "blocks": blocks,
         "next_offset": page.get("next_offset"),
         "eof": page.get("eof"),
     }
     if "history_truncated" in page:
         projected["history_truncated"] = page["history_truncated"]
     return projected
+
+
+def _interrupt_open_calls(blocks: list[dict[str, object]]) -> None:
+    """Count every tool call a dead trace leaves running as interrupted."""
+
+    for block in blocks:
+        if block.get("kind") == "tool_group":
+            for row in (block, *block["tools"]):
+                if row["running"]:
+                    row["interrupted"], row["running"] = row["running"], 0
 
 
 def project_trace_blocks(events: object) -> list[dict[str, object]]:
