@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import logging
 import tempfile
 import zipfile
 from collections.abc import Iterable, Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
@@ -137,6 +139,25 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             # unchanged file answers 304 on its ETag instead of resending
             # a few hundred kilobytes of UI code each time.
             response.headers["Cache-Control"] = "no-cache"
+        return response
+
+    # The console keeps no access log, so each 5xx it answers is logged here:
+    # when, the method and the path, never the query or a body.
+    server_log = logging.getLogger("uvicorn.error")
+
+    def log_server_error(request: Request, status: int) -> None:
+        stamp = datetime.now(UTC).isoformat(timespec="seconds")
+        server_log.warning("%s %s %s -> %d", stamp, request.method, request.url.path, status)
+
+    @app.middleware("http")
+    async def log_server_errors(request: Request, call_next):
+        try:
+            response = await call_next(request)
+        except Exception:
+            log_server_error(request, 500)  # what an escaped exception is answered with
+            raise
+        if response.status_code >= 500:
+            log_server_error(request, response.status_code)
         return response
 
     # The listing, a replay's curve and the UI code are JSON and text that
