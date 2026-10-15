@@ -153,7 +153,12 @@ PY
     fi
     nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu --format=csv,noheader | sed 's/^/gpu: /'
     df -h --output=target,size,used,avail,pcent / "$(dirname "$ROOT")" | sed 's/^/disk: /'
-    echo "image: $(docker images --format '{{.Repository}}:{{.Tag}} {{.ID}} {{.CreatedSince}}' "$IMAGE" 2>/dev/null || echo 'docker unavailable')"
+    local image
+    if image=$(docker images --format '{{.Repository}}:{{.Tag}} {{.ID}} {{.CreatedSince}}' "$IMAGE" 2>/dev/null); then
+        echo "image: ${image:-$IMAGE absent (tags are lost across stop/start; deploy rebuilds it)}"
+    else
+        echo "image: docker unavailable"
+    fi
     local latest
     latest=$(ls -t logs/zgca/*.log 2>/dev/null | head -n 1 || true)
     if [ -n "$latest" ]; then echo "round log: $latest"; tail -n 3 "$latest" | sed 's/^/  /'; fi
@@ -163,10 +168,14 @@ arm_state() {
     local arm=$1 status="$ROOT/experiments/$1/hitl/status.json"
     require_venv
     [ -f "$status" ] || die "no arm $arm on the instance ($status is missing)"
-    "$VENV/bin/python" -c 'import json, sys
+    "$VENV/bin/python" - "$status" "$arm" <<'PY'
+import json
+import sys
+
 record = json.load(open(sys.argv[1], encoding="utf-8"))
-print(f"{sys.argv[2]}: state {record.get(\"state\")}, verdict {record.get(\"verdict\") or \"-\"}, "
-      f"sessions {record.get(\"completed_sessions\")}/{record.get(\"total_sessions\")}")' "$status" "$arm"
+state, verdict = record.get("state"), record.get("verdict") or "-"
+print(f"{sys.argv[2]}: state {state}, verdict {verdict}, sessions {record.get('completed_sessions')}/{record.get('total_sessions')}")
+PY
 }
 
 step=${1:-}
