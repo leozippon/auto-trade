@@ -1391,13 +1391,17 @@ const BUDGET_ROWS = [
    one line, its bar across the block underneath — so six budgets read as six
    figures instead of one run-on line. `mini` is the home card's block: it says
    what was spent, never against its limit, and leaves the share used to the
-   bar alone. Null while nothing was spent or no limit is known. */
+   bar alone. A budget the arm has a limit for but never metered (an arm from
+   before that figure was recorded) keeps its block with a dash and an empty
+   bar, so the grid stays six figures wherever it appears. Null while nothing
+   was spent or no limit is known. */
 function budgetBars(used, total, { mini = false } = {}) {
   if (!used || !total) return null;
   const rows = BUDGET_ROWS.map(([key, label, fmt]) => {
     const limit = Number(total[key]);
     const spent = Number(used[key]);
-    if (!(limit > 0) || !Number.isFinite(spent)) return null;
+    if (!(limit > 0)) return null;
+    if (!Number.isFinite(spent)) return { key, label, ratio: 0, spent: null, limit: fmt(limit) };
     return { key, label, ratio: spent / limit, spent: fmt(spent), limit: fmt(limit) };
   }).filter(Boolean);
   if (!rows.length) return null;
@@ -1409,13 +1413,18 @@ function budgetBars(used, total, { mini = false } = {}) {
         "div",
         {
           class: "budget-row",
-          title: mini ? `${row.label}已用 ${row.spent}` : `${row.label} ${row.spent} / ${row.limit}`,
+          title:
+            row.spent === null
+              ? `${row.label}未计量（上限 ${row.limit}）`
+              : mini
+                ? `${row.label}已用 ${row.spent}`
+                : `${row.label} ${row.spent} / ${row.limit}`,
         },
         el("span", { class: "budget-label" }, row.label),
         el(
           "span",
-          { class: `budget-pct ${mini ? "" : ratioClass(row.ratio)}`.trim() },
-          mini ? row.spent : `${Math.round(row.ratio * 100)}%`,
+          { class: `budget-pct ${row.spent === null ? "muted" : mini ? "" : ratioClass(row.ratio)}`.trim() },
+          row.spent === null ? "—" : mini ? row.spent : `${Math.round(row.ratio * 100)}%`,
         ),
         ratioBar(row.ratio),
       ),

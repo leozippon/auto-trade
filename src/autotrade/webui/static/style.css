@@ -1064,6 +1064,10 @@ details.fold.fill-extra .form-grid {
 .budget-pct.bad {
  color: var(--bad);
 }
+/* A budget the arm never metered: the figure is absent, not zero. */
+.budget-pct.muted {
+ color: var(--muted);
+}
 
 /* A ratio as a ring: the track in the chip tone, the value in the accent. */
 .gauge {
