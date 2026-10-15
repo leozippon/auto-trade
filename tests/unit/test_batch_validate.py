@@ -401,7 +401,9 @@ class _Session:
         )
         self.tree = StepTree(root / "steps")
         self.evaluator = _Evaluator(
-            root / "results",
+            # Where the worker roots them: a recorded result is read under
+            # the arm it belongs to (``ledger.recorded_path``).
+            experiment_dir / "artifacts" / "results",
             fail_markers=fail_markers,
             contention_markers=contention_markers,
             strategy_fail_markers=strategy_fail_markers,

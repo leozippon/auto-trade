@@ -37,7 +37,7 @@ from autotrade.environment.runtime import (
 from autotrade.environment.step_tree import StepTree
 
 from .config import BudgetUsed, EvaluationResult, SessionResume, StepResult
-from .ledger import RESEARCH_STAGE
+from .ledger import RESEARCH_STAGE, recorded_path
 
 # Host-only, beside the run markers: never mounted and never Agent-visible.
 STEP_SIDECAR_DIR = ".host/steps"
@@ -94,7 +94,10 @@ def load_recorded_steps(experiment_dir: str | Path) -> tuple[StepResult, ...]:
 
     A complete node without its sidecar is a validation the host cannot
     account for, so it fails the attempt instead of silently narrowing the
-    trial pool the freeze gate deflates over.
+    trial pool the freeze gate deflates over. A sidecar's result reference is
+    read where the arm is now (``ledger.recorded_path``), so an arm moved
+    since its interrupted attempt resumes in place; one that names nothing
+    inside the arm raises ``FileNotFoundError``.
     """
 
     directory = Path(experiment_dir)
@@ -112,7 +115,10 @@ def load_recorded_steps(experiment_dir: str | Path) -> tuple[StepResult, ...]:
             StepResult(
                 str(record["step_id"]),
                 str(record["revision_id"]),
-                EvaluationResult(dict(record["summary"]), str(record["result_ref"])),
+                EvaluationResult(
+                    dict(record["summary"]),
+                    str(recorded_path(directory, str(record["result_ref"]))),
+                ),
                 span=str(record["span"]),
                 # A sidecar written before batches registered controls and
                 # declared offline screens has neither: no control, undeclared.

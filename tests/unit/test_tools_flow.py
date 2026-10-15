@@ -1999,7 +1999,9 @@ def _fold_backtest_tool(
 
     class Evaluator:
         def evaluate(self, _request, max_days=None):
-            target = tmp / "host_results" / "valid_deadbeef" / "result.json"
+            # Under the arm, where the worker roots results: the freeze gate
+            # reads a row's result under its arm (``ledger.recorded_path``).
+            target = tmp / "experiment" / "artifacts" / "results" / "valid_deadbeef" / "result.json"
             write_json_atomic(target, {"stats": summary})
             _write_style_sidecar(target.parent, alpha=0.001, seed=1)
             return EvaluationResult(summary=dict(summary), result_ref=str(target))

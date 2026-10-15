@@ -65,6 +65,7 @@ from autotrade.pipelines.experiment import (
     replay_and_analysis,
 )
 from autotrade.pipelines.hitl_state import HITL_DIR_NAME, PARAMS_NAME
+from autotrade.pipelines.ledger import recorded_path
 
 # When the current rules took effect: the last of the switches since folded
 # into them (pricing declared offline screens as independent, bca4f5e) was
@@ -146,12 +147,12 @@ def differences(stored: object, now: object, path: str = "") -> list[str]:
 
 
 def _replayed(
-    record: Mapping[str, Any], rules: AcceptanceRules, slippage_bps: float
+    arm: Path, record: Mapping[str, Any], rules: AcceptanceRules, slippage_bps: float
 ) -> dict[str, object]:
     """The slices and verdict of one stored forward replay (a forward record
-    or an incubation's reading), judged again."""
+    or an incubation's reading) of ``arm``, judged again."""
 
-    replay, analysis = replay_and_analysis(str(record["result_ref"]))
+    replay, analysis = replay_and_analysis(str(recorded_path(arm, str(record["result_ref"]))))
     spans = record["replay"]
     return judged_replay(
         replay,
@@ -164,7 +165,7 @@ def _replayed(
         seed_replicates=[
             (
                 {key: row[key] for key in ("artifact_id", "source_step_id")},
-                replay_and_analysis(str(row["result_ref"]))[1],
+                replay_and_analysis(str(recorded_path(arm, str(row["result_ref"]))))[1],
             )
             for row in record.get("seed_replicates") or ()
         ],
@@ -214,7 +215,7 @@ def check_arm(arm: Path) -> list[Judgement]:
             judge(
                 "forward",
                 {key: record[key] for key in ("slices", "verdict")},
-                _replayed(record, rules, slippage),
+                _replayed(arm, record, rules, slippage),
             )
         elif kind == "incubation":
             config = RollingExperimentConfig(
@@ -233,10 +234,11 @@ def check_arm(arm: Path) -> list[Judgement]:
                 judge(
                     "incubation.forward_reading",
                     {key: reading[key] for key in ("slices", "verdict")},
-                    _replayed(reading, rules, slippage),
+                    _replayed(arm, reading, rules, slippage),
                 )
         elif kind == "lineage":
-            summary = lineage_summary(json.loads(Path(str(record["series_ref"])).read_text(encoding="utf-8")))
+            series = recorded_path(arm, str(record["series_ref"]))
+            summary = lineage_summary(json.loads(series.read_text(encoding="utf-8")))
             judge("lineage", {key: record[key] for key in summary}, summary)
     return found
 

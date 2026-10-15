@@ -131,7 +131,7 @@ def extract_lineage(
         for row in representatives:
             revision = str(row["revision_id"])
             try:
-                daily = neutral_daily(_style_analysis(row))
+                daily = neutral_daily(_style_analysis(directory, row))
             except ValueError:
                 continue
             outside = sorted(day for day in daily if not research_start <= day <= research_end)

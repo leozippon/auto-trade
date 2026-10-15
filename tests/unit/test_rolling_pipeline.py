@@ -584,6 +584,42 @@ def test_a_complete_node_without_its_sidecar_fails_the_attempt(tmp_path: Path):
     assert [row["record_type"] for row in ledger.read()] == []
 
 
+def test_a_moved_arm_resumes_from_the_recorded_node_where_it_now_lives(tmp_path: Path):
+    """The records an interrupted attempt left name the host paths they were
+    written at; once the repository moves, the next attempt reads the
+    recorded Validation under the arm's current directory and records it
+    there. A sidecar naming a place outside the arm, or a result no longer on
+    disk, is refused."""
+
+    from autotrade.pipelines.session_resume import STEP_SIDECAR_DIR, load_recorded_steps
+
+    plan = {1: ([0.0012], "freeze", {"nominee": 1})}
+    old, _snapshots, old_evaluator, _developer, old_ledger = _pipeline(tmp_path / "old", plan)
+    _interrupted_attempt(old, old_ledger, summary=None, replay_years=2, node=True)
+    (tmp_path / "old").rename(tmp_path / "new")
+    pipeline, _snapshots, evaluator, developer, _ledger = _pipeline(tmp_path / "new", plan)
+    # The fixture names results by count: number on after the moved ones.
+    evaluator.requests[:] = old_evaluator.requests
+    experiment = pipeline.config.experiment_dir
+    [sidecar] = (experiment / STEP_SIDECAR_DIR).glob("*.json")
+    recorded = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert recorded["result_ref"].startswith(str(tmp_path / "old"))
+
+    record = pipeline.run_research_session()
+
+    [earlier] = developer.requests[-1].steps_before
+    assert Path(earlier.validation.result_ref).is_relative_to(experiment / "artifacts" / "results")
+    assert record["steps"][0]["validation_result_ref"] == earlier.validation.result_ref
+    assert record["freeze_gate"]["passed"] is True and record["frozen"] is not None
+    for reference, refusal in (
+        (str(tmp_path / "new/experiments/other_arm/artifacts/results/valid_001/result.json"), "outside the experiment"),
+        (str(Path(recorded["result_ref"]).with_name("absent.json")), "not on disk"),
+    ):
+        sidecar.write_text(json.dumps({**recorded, "result_ref": reference}), encoding="utf-8")
+        with pytest.raises(FileNotFoundError, match=refusal):
+            load_recorded_steps(experiment)
+
+
 def test_an_exhausted_budget_ends_the_arm_without_a_deliverable(tmp_path: Path):
     pipeline, *_rest, ledger = _pipeline(
         tmp_path, {1: ([0.0], "deadline", {"finish_reason": "llm_call_budget_exhausted"})}
@@ -698,6 +734,35 @@ def test_the_forward_replay_trades_under_the_arms_own_cost_model(tmp_path: Path)
     pipeline.run_forward()
     [request] = evaluator.requests
     assert request.broker_profile == taxed
+
+
+def test_a_moved_arm_replays_the_artifact_its_frozen_block_names(tmp_path: Path):
+    """The frozen block names the artifact's output where it was frozen; on an
+    arm moved since, the forward stage holds the store to that path read under
+    the arm's current directory. A block naming a place outside the arm, or
+    one not on disk, fails the attempt."""
+
+    _freezing(tmp_path / "old")[0].run_research_session()
+    (tmp_path / "old").rename(tmp_path / "new")
+    pipeline, *_rest, ledger = _freezing(tmp_path / "new")
+    records = ledger.read()
+    frozen = frozen_record(records)["frozen"]
+    assert frozen["output_path"].startswith(str(tmp_path / "old"))
+    for reference, refusal in (
+        (frozen["output_path"].replace("/experiments/arm/", "/experiments/other_arm/"), "outside the experiment"),
+        (frozen["output_path"].replace(frozen["artifact_id"], "strategy_research_absent"), "not on disk"),
+    ):
+        edited = json.loads(json.dumps(records))
+        frozen_record(edited)["frozen"]["output_path"] = reference
+        ledger.rewrite(edited)
+        with pytest.raises(FileNotFoundError, match=refusal):
+            pipeline.run_forward()
+    ledger.rewrite(records)
+
+    record = pipeline.run_forward()
+
+    assert record["status"] == "ok" and record["artifact_id"] == frozen["artifact_id"]
+    assert Path(record["result_ref"]).is_relative_to(pipeline.config.experiment_dir)
 
 
 def test_the_forward_replay_writes_nothing_a_session_can_read(tmp_path: Path):

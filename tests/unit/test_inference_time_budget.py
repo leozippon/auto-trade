@@ -165,7 +165,8 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
         "def generate_orders(context):\n    return []\n", encoding="utf-8"
     )
     tree = StepTree(tmp_path / "steps")
-    ref_store = AgentRefStore(tmp_path / "experiment")
+    experiment = tmp_path / "experiment"
+    ref_store = AgentRefStore(experiment)
     fold_ref = ref_store.get_or_create("session", request.session_key)
     run_ref = ref_store.get_or_create("run", request.run_id)
 
@@ -177,9 +178,12 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
             clock.advance(10.0)
             if self.calls == 1:
                 raise RuntimeError("repairable validation failure")
-            result = tmp_path / "result.json"
+            # Under the arm, where the worker roots results: the freeze gate
+            # reads a row's result under its arm (``ledger.recorded_path``).
+            result = experiment / "artifacts" / "results" / f"valid_{self.calls:03d}" / "result.json"
+            result.parent.mkdir(parents=True)
             result.write_text("{}\n", encoding="utf-8")
-            _write_style_sidecar(tmp_path, alpha=0.001, seed=self.calls)
+            _write_style_sidecar(result.parent, alpha=0.001, seed=self.calls)
             return EvaluationResult(
                 summary={"total_return": 0.01}, result_ref=str(result)
             )
@@ -197,6 +201,7 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
         time_budget=time_budget,
         ref_store=ref_store,
         ledger=ExperimentLedger(tmp_path / "ledger.jsonl"),
+        experiment_dir=experiment,
     )
     working_copy = {
         "offline_trials": 0,

@@ -45,7 +45,7 @@ def arm(tmp_path_factory: pytest.TempPathFactory) -> Path:
 def _copy(arm: Path, root: Path, edit=None, **params: object) -> Path:
     """The arm copied under ``root``, its ledger lines passed through
     ``edit`` and its parameters updated with ``params``. The records still
-    name the stored replays where the worker wrote them."""
+    name the paths the worker wrote at, and are read under the copy."""
 
     target = root / arm.name
     shutil.copytree(arm, target)
@@ -68,6 +68,31 @@ def test_every_reading_of_a_current_arm_reproduces(arm: Path) -> None:
     assert [item.differences for item in judgements] == [[], []]
     assert current_arms(arm.parent) == [arm]
     assert main(["--experiments", str(arm.parent)]) == 0
+
+
+def test_a_moved_arm_is_judged_from_where_it_now_lives(arm: Path, tmp_path: Path) -> None:
+    """An arm whose records name a root it no longer lives at is judged from
+    its own files; a record naming a place outside the arm fails the check
+    instead of being read from there."""
+
+    gone = tmp_path / "gone" / "experiments" / arm.name
+
+    def moved(records: list[dict]) -> None:
+        records[:] = json.loads(json.dumps(records).replace(str(arm), str(gone)))
+
+    copy = _copy(arm, tmp_path / "experiments", moved)
+    records = [json.loads(line) for line in (copy / LEDGER).read_text(encoding="utf-8").splitlines()]
+    assert _record(records, "forward")["result_ref"].startswith(str(gone))
+    judgements = check_arm(copy)
+    assert [(item.reading, item.differences) for item in judgements] == [("freeze_gate", []), ("forward", [])]
+
+    def elsewhere(records: list[dict]) -> None:
+        moved(records)
+        forward = _record(records, "forward")
+        forward["result_ref"] = forward["result_ref"].replace(f"/{arm.name}/", "/another_arm/")
+
+    with pytest.raises(FileNotFoundError, match="outside the experiment"):
+        check_arm(_copy(arm, tmp_path / "elsewhere" / "experiments", elsewhere))
 
 
 def test_a_tampered_reading_is_named_and_fails_the_run(arm: Path, tmp_path: Path) -> None:

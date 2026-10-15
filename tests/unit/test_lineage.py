@@ -338,6 +338,43 @@ def test_the_recorded_lineage_joins_the_family_and_outlives_its_arms(tmp_path: P
         )
 
 
+def test_a_moved_tree_reads_its_lineage_and_gate_where_the_arms_now_live(tmp_path: Path) -> None:
+    """Ledgers and the lineage record name the host paths they were written
+    at. Once the experiments root moves, extraction reads each lineage arm's
+    Validations, and the gate the arm's own rows and series file, where each
+    arm now is, and both read what they read before. A row naming a place
+    outside its arm, or a series file no longer on disk, is refused."""
+
+    old = tmp_path / "old" / "experiments"
+    _arm(old, "first", [{"seed": 1, "loading": 0.6}, {"seed": 2, "loading": 0.3, "span": "Y1", "days": FIRST_YEAR}])
+    own = _own_rows(old / "new_arm")
+    extraction = extract_lineage(old, ["first"], research_start=RESEARCH_START, research_end=RESEARCH_END)
+    _record(old / "new_arm", extraction)
+    rules = AcceptanceRules()
+    before = freeze_gate_for(
+        ExperimentLedger(old / "new_arm/ledgers/experiment_ledger.jsonl").read(),
+        own,
+        own[1],
+        experiment_dir=old / "new_arm",
+        acceptance=rules,
+    )
+
+    (tmp_path / "old").rename(tmp_path / "new")
+    root = tmp_path / "new" / "experiments"
+    arm = root / "new_arm"
+    records = ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl").read()
+    assert lineage_record(records)["series_ref"].startswith(str(old))
+    assert extract_lineage(root, ["first"], research_start=RESEARCH_START, research_end=RESEARCH_END) == extraction
+    assert freeze_gate_for(records, own, own[1], experiment_dir=arm, acceptance=rules) == before
+
+    stray = {**own[1], "validation_result_ref": str(root / "first/artifacts/results/valid_000/result.json")}
+    with pytest.raises(FileNotFoundError, match="outside the experiment"):
+        freeze_gate_for(records, own, stray, experiment_dir=arm, acceptance=rules)
+    (arm / "ledgers" / "lineage_series.json").unlink()
+    with pytest.raises(FileNotFoundError, match="not on disk"):
+        freeze_gate_for(records, own, own[1], experiment_dir=arm, acceptance=rules)
+
+
 def test_a_lineage_counts_one_strategy_validated_twice_as_one_trial(tmp_path: Path) -> None:
     """The lineage's trials are the gate's: a strategy probed on a year and
     then run on the full span is one trial whose series is the full span's,

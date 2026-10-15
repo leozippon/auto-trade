@@ -96,6 +96,7 @@ from .ledger import (
     incubation_record,
     is_frozen_artifact_mutation,
     lineage_record,
+    recorded_path,
     require_incubable,
     research_over,
     research_records,
@@ -965,13 +966,15 @@ class RollingExperimentPipeline:
 
     def _frozen_artifact(self, block: object) -> FrozenArtifact:
         """The frozen artifact a frozen block (or one of its seed replicates)
-        names, validated by its store."""
+        names, validated by its store against the output path the block
+        records, read under the arm's current directory
+        (``ledger.recorded_path``)."""
 
         if not isinstance(block, Mapping):
             raise TypeError("frozen record carries no frozen block")
         stored = self.artifacts.frozen(
             str(block["artifact_id"]),
-            expected_path=str(block["output_path"]),
+            expected_path=recorded_path(self.config.experiment_dir, str(block["output_path"])),
             experiment_id=self.config.experiment_id,
         )
         return FrozenArtifact(
@@ -1341,6 +1344,7 @@ def _arm_trials(
             records,
             family["representatives"],  # type: ignore[arg-type]
             family["offline_trials"],  # type: ignore[arg-type]
+            experiment_dir=experiment_dir,
         ),
     )
 
@@ -1385,11 +1389,11 @@ def freeze_gate_for(
     summary = nominee.get("summary")
     try:
         gate = freeze_gate(
-            _style_analysis(nominee),
+            _style_analysis(experiment_dir, nominee),
             rules=acceptance,
             trials=len(representatives),
             offline_trials=family["offline_trials"],  # type: ignore[arg-type]
-            trial_analyses=[_style_analysis(row) for row in correlated],
+            trial_analyses=[_style_analysis(experiment_dir, row) for row in correlated],
             **lineage,  # type: ignore[arg-type]
             full_span_validations=sum(
                 1
@@ -1635,7 +1639,7 @@ def full_span_bar(
     statistics = trial_family_statistics(
         trials=max(len(representatives), 1),
         offline_trials=family["offline_trials"],  # type: ignore[arg-type]
-        trial_analyses=[_style_analysis(row) for row in correlated],
+        trial_analyses=[_style_analysis(experiment_dir, row) for row in correlated],
         **lineage,  # type: ignore[arg-type]
     )
     days = max(
@@ -1792,6 +1796,8 @@ def recorded_lineage(
     records: Sequence[Mapping[str, object]],
     representatives: Sequence[Mapping[str, object]],
     offline_trials: int,
+    *,
+    experiment_dir: str | Path,
 ) -> tuple[list[str], list[Mapping[str, object]], dict[str, object]]:
     """The lineage the ledger records (``pipelines/lineage.py``) joined to
     the arm's own trial family -- its distinct non-control
@@ -1802,23 +1808,27 @@ def recorded_lineage(
     those declared offline and one daily series per measurable lineage trial.
 
     Read from this arm's own files only -- the ledger record and the series
-    file it names, both written at creation -- never from the lineage arms.
-    ``([], representatives, {})`` for an arm created without one.
+    file it names, both written at creation, the file read where the arm in
+    ``experiment_dir`` is now (``ledger.recorded_path``) -- never from the
+    lineage arms. ``([], representatives, {})`` for an arm created without one.
     """
 
     record = lineage_record(records)
     if record is None:
         return [], list(representatives), {}
     arms = [str(arm) for arm in record["arms"]]  # type: ignore[union-attr]
-    payload = json.loads(Path(str(record["series_ref"])).read_text(encoding="utf-8"))
+    series = recorded_path(experiment_dir, str(record["series_ref"]))
+    payload = json.loads(series.read_text(encoding="utf-8"))
     return arms, *_joined_lineage(payload, representatives, offline_trials, own=record)
 
 
-def _style_analysis(row: Mapping[str, object]) -> dict[str, object]:
-    """The style sidecar beside one Validation row's result."""
+def _style_analysis(experiment_dir: str | Path, row: Mapping[str, object]) -> dict[str, object]:
+    """The style sidecar beside one Validation row's result, the row of the
+    arm in ``experiment_dir`` read where that arm is now
+    (``ledger.recorded_path``)."""
 
-    result_ref = Path(str(row["validation_result_ref"]))
-    return json.loads((result_ref.parent / STYLE_ARTIFACT_NAME).read_text(encoding="utf-8"))
+    result = recorded_path(experiment_dir, str(row["validation_result_ref"]))
+    return json.loads((result.parent / STYLE_ARTIFACT_NAME).read_text(encoding="utf-8"))
 
 
 def null_control_seed(key: str, role: str) -> int:
