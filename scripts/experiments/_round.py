@@ -32,8 +32,9 @@ ids.
 
 A round whose arms have all been created is marked `closed`, and so is one
 whose remaining arms are withdrawn: they leave its arm list and their ids go
-to RETIRED_IDS. Its `main` refuses every mode: once an arm is archived its
-directory is gone, and the queue would read it as pending and create it again.
+to RETIRED_IDS. Its `main` refuses every mode: the queue reads an arm without
+an experiment directory as pending, so an arm whose directory was deleted would
+be created again (archiving keeps the directory, see archive_arm.py).
 Once every arm of a closed round has ended, its file leaves the tree (git
 history keeps it) and its ids join RETIRED_IDS.
 
@@ -627,6 +628,23 @@ RETIRED_IDS: frozenset[str] = frozenset(
         "open_ensemble_100k_8y_qwen_20261015",
         "open_micro_100k_8y_mimo_20261015",
         "open_tables_100k_5y_qwen_20261015",
+        # Every arm of rounds 20261008b, 20261014 and 20261014b, whose files
+        # left the tree on 2026-10-15. The eleven arms of the first two ended
+        # and stay on disk; the two 20261014b arms were terminated on
+        # 2026-10-14 and their directories are no longer on disk.
+        "hcm_100k_8y_sol_dsf_20261014b",
+        "hcm_100k_8y_sol_qwen_20261014b",
+        "open_adapt_100k_8y_mimo_20261014",
+        "open_avoid_100k_8y_mimo_20261014",
+        "open_capital_100k_8y_mimo_20261008b",
+        "open_commit_100k_8y_qwen_20261014",
+        "open_earnings_100k_8y_qwen_20261014",
+        "open_ensemble_100k_8y_qwen_20261008b",
+        "open_exclude_100k_5y_mimo_20261008b",
+        "open_free_100k_8y_mimo_20261014",
+        "open_free_100k_8y_qwen_20261014",
+        "open_guidance_100k_8y_qwen_20261008b",
+        "open_tables_100k_5y_qwen_20261008b",
     }
 )
 
@@ -932,8 +950,8 @@ class Round:
     # Empty means the console default seed, which carries the default dataset
     # selection.
     pit_views_seed: str = ""
-    # Stated, not read from disk: an archived arm has no directory and would
-    # look pending.
+    # Stated, not read from disk: an arm whose directory was deleted would look
+    # pending.
     closed: bool = False
 
     def __post_init__(self) -> None:

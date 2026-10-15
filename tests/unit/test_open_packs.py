@@ -5,15 +5,15 @@ rules file and the record of occupied and closed directions byte for byte,
 since a pack is mounted alone and cannot point at another. Each starter is a
 valid strategy package; a round whose arms claim a card ships the device
 helper and one that claims none ships no CUDA path. Round 20261008b's starters
-share every common module, carry the events helper exactly where the arm
-mounts the events domain, and their built-in shuffled control keeps a name's
+share every common module, carry the events helper exactly in the five-year
+packs, and their built-in shuffled control keeps a name's
 stand-in from one review to the next. The ensemble pack's fixed sleeves are
 the frozen Paper strategies, changed only in their import lines and their seat
 counts, and its legs run the candidate and the two required controls on the
 same account. The read helpers return only visible rows, matched as asked. The
 combined book gives each sleeve its own holdings and cash and never lets one
-sleeve trade another's names. A pack names the lineage its arm is created
-with, and cites no reading after the research period.
+sleeve trade another's names. No pack cites a reading after the research
+period.
 """
 
 from __future__ import annotations
@@ -41,10 +41,6 @@ PACKS_08B = [*FIVE_YEAR_08B, *EIGHT_YEAR_08B, ENSEMBLE]
 # Round 20261014b: the hierarchical-continual-memory arm, one pack whose
 # starter trains daily and whose controls are knob settings.
 HCM_14B = REFS / "hcm_100k_8y_20261014b"
-ROUNDS = {
-    "create_round_20261014": (PACKS_14, 1),
-    "create_round_20261008b": (PACKS_08B, 0),
-}
 COMMON = ("families.md", "references/open-rules.md")
 
 
@@ -101,38 +97,6 @@ def test_the_starter_control_keeps_each_stand_in_from_review_to_review(monkeypat
 @pytest.mark.parametrize("pack", [*PACKS_14, *PACKS_08B, HCM_14B], ids=lambda path: path.name)
 def test_the_starter_is_a_valid_package(pack: Path) -> None:
     validate_strategy_package(pack / "starter" / "main.py")
-
-
-@pytest.mark.parametrize("round_name", sorted(ROUNDS))
-def test_every_arm_of_a_round_mounts_its_direction_and_names_its_lineage(round_name: str) -> None:
-    import importlib
-
-    packs, gpus = ROUNDS[round_name]
-    rnd = importlib.import_module(f"scripts.experiments.{round_name}").ROUND
-    mounted = set()
-    for arm in rnd.arms:
-        params = rnd.request_params(arm)
-        pack = REPO_ROOT / str(params["workspace_reference"])
-        mounted.add(pack)
-        readme = (pack / "README.md").read_text(encoding="utf-8")
-        section = readme.split("## 血缘", 1)[1].split("\n## ", 1)[0]
-        lineage = set(params.get("lineage_arms") or ())
-        assert lineage <= set(re.findall(r"`([a-z0-9_]+_\d{8})`", section)), arm
-        assert section.lstrip().startswith("没有") is not bool(lineage), arm
-        assert int(params["gpu_count"]) == gpus, arm
-    assert mounted == set(packs)
-
-
-def test_round_20261008b_mounts_the_events_domain_on_the_five_year_arms_only() -> None:
-    from scripts.experiments.create_round_20261008b import ROUND
-
-    for arm in ROUND.arms:
-        params = ROUND.request_params(arm)
-        five = "_5y_" in arm
-        assert params["research_start"] == ("20200701" if five else "20170701"), arm
-        assert bool(params["include_events"]) is five, arm
-        assert ("5y" in str(params["pit_views_seed"])) is five, arm
-        assert params["permitted_boards"] == ["main", "gem"], arm
 
 
 def test_no_pack_cites_a_reading_after_the_research_period() -> None:
