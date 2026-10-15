@@ -274,6 +274,30 @@ def test_a_book_carries_the_source_curve_the_console_projects_for_that_result(tm
     )
 
 
+def test_a_moved_arm_copies_its_forward_result_and_nothing_outside_it(tmp_path: Path):
+    """The forward record names its replay by the host path it was written at.
+    A book opened from an arm moved since copies that replay from where the arm
+    now lives; a record naming a path outside the arm is refused."""
+    old_root = tmp_path / "old/experiments"
+    build_arm(old_root, "exp", "graduated")
+    experiments = tmp_path / "experiments"
+    old_root.rename(experiments)
+    arm = experiments / "exp"
+    ledger = ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl")
+    assert str(old_root / "exp") in json.dumps(ledger.read())
+    root = engine_book(tmp_path, "20260105", "20260106")
+    copy_source_history(root, arm)
+    source = trading.performance_payload(tmp_path, BOOK)["source"]
+    console = result_equity_payload(experiments, "exp", _forward_result(arm))
+    assert source["series"][0]["cum"] == console["series"][0]["cum"]
+
+    (root / SOURCE_HISTORY_NAME).unlink()
+    outside = {**forward_record(ledger.read()), "result_ref": str(tmp_path / "elsewhere/result.json")}
+    with pytest.raises(FileNotFoundError, match="outside the experiment"):
+        copy_source_history(root, arm, outside)
+    assert not (root / SOURCE_HISTORY_NAME).exists()
+
+
 def test_an_arm_without_a_forward_record_has_no_history_to_copy(tmp_path: Path):
     """The forward record names the replay that carries the verdict's slices;
     without it there is nothing to copy, and init must say so rather than

@@ -40,7 +40,12 @@ from autotrade.environment.sandbox import SandboxConfig, SandboxLimits
 from autotrade.environment.strategy import CN_TZ, StrategySchedule
 from autotrade.environment.strategy_loader import validate_strategy_package
 from autotrade.pipelines.experiment import null_control_seed
-from autotrade.pipelines.ledger import ExperimentLedger, forward_record, paper_candidate
+from autotrade.pipelines.ledger import (
+    ExperimentLedger,
+    forward_record,
+    paper_candidate,
+    recorded_path,
+)
 from autotrade.pipelines.worker import (
     _strategy_sandbox_from_spec,
     resolve_worker_options,
@@ -310,7 +315,9 @@ def copy_source_history(
     The forward record names the one replay carrying the arm's forward and
     Held-out slices — the curve the console draws for that verdict — so an arm
     without one has no history to copy and says so. An incubated book passes
-    the replay its incubation recorded as ``record``, in the same shape.
+    the replay its incubation recorded as ``record``, in the same shape. The
+    recorded path is read under the arm's current directory
+    (``ledger.recorded_path``), so an arm moved since its replay copies too.
     """
 
     experiment = Path(experiment_dir).resolve(strict=True)
@@ -323,9 +330,7 @@ def copy_source_history(
     reference = record.get("result_ref")
     if not isinstance(reference, str) or not reference:
         raise ValueError(f"{experiment.name}'s forward record names no replay result")
-    result_file = (experiment / reference).resolve()
-    if not result_file.is_relative_to(experiment):
-        raise ValueError(f"{experiment.name}'s forward result is outside the experiment: {result_file}")
+    result_file = recorded_path(experiment, reference)
     replay = record.get("replay") if isinstance(record.get("replay"), dict) else {}
     heldout_start = replay.get("heldout_start")
     return write_source_history(
