@@ -66,6 +66,7 @@ from autotrade.pipelines.ledger import (
     research_records,
 )
 from autotrade.pipelines.pit_views_seed import FORWARD_PHASE, RESEARCH_PHASE
+from autotrade.pipelines.research_session import session_role_quotas
 from autotrade.pipelines.session_resume import STEP_SIDECAR_DIR
 from autotrade.pipelines.skills import latest_skills_snapshot
 from autotrade.pipelines.verdict import (
@@ -524,17 +525,23 @@ def _budget_totals(params: Mapping[str, object]) -> dict[str, object]:
 
     The create form persists only what differs from the defaults, so the
     effective ceilings are the worker defaults overlaid with ``params.json``.
+    The sub-agents' ceiling is their quota of the shared call budget
+    (:func:`session_role_quotas`), not a parameter of its own.
     """
 
     effective = {**WEB_CREATE_DEFAULTS, **params}
     minutes = _number(effective.get("max_research_minutes"))
+    calls = _number(effective.get("max_llm_calls"))
     return {
         "inference_seconds": minutes * 60.0 if minutes is not None else None,
-        "llm_calls": _number(effective.get("max_llm_calls")),
+        "llm_calls": calls,
         "replay_years": _number(effective.get("max_replay_years")),
         "null_controls": _number(effective.get("max_null_controls")),
         "api_spend_usd": _number(
             effective.get("max_api_spend_usd", rolling_default("max_api_spend_usd"))
+        ),
+        "subagent_calls": (
+            float(session_role_quotas(int(calls))[0]) if calls is not None and calls > 0 else None
         ),
     }
 

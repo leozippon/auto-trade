@@ -1384,10 +1384,11 @@ const BUDGET_ROWS = [
   ["replay_years", "回测（年）", String],
   ["null_controls", "随机对照", String],
   ["api_spend_usd", "API 花费", (usd) => `$${usd.toFixed(2)}`],
+  ["subagent_calls", "子代理调用", String],
 ];
 
 /* The research budget as one block per limit — its name and used percentage on
-   one line, its bar across the block underneath — so five budgets read as five
+   one line, its bar across the block underneath — so six budgets read as six
    figures instead of one run-on line. `mini` is the home card's block: it says
    what was spent, never against its limit, and leaves the share used to the
    bar alone. Null while nothing was spent or no limit is known. */

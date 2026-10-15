@@ -27,6 +27,7 @@ from autotrade.environment.tools.report_issue import (
 )
 from autotrade.pipelines.config import DEFAULT_RESEARCH_GEOMETRY, RETIRED_SWITCHES
 from autotrade.pipelines.ledger import ExperimentLedger, recorded_path, verdict_void
+from autotrade.pipelines.research_session import session_role_quotas
 from autotrade.webui import registry
 from autotrade.webui.registry import (
     ENDING_STATES,
@@ -568,6 +569,7 @@ def test_the_listing_carries_the_budget_and_the_research_outcome(tmp_path: Path)
         "replay_years": 96.0,
         "null_controls": 12.0,
         "api_spend_usd": 50.0,
+        "subagent_calls": float(session_role_quotas(6400)[0]),
     }
     assert rows["live"]["budget_used"] == {"inference_seconds": 900.0, "llm_calls": 7, "replay_years": 4, "null_controls": 0}
     assert rows["idle"]["budget_used"] is None
