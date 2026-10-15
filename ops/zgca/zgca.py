@@ -56,6 +56,12 @@ def _text(payload: object) -> str:
     return json.dumps(payload, ensure_ascii=False) if isinstance(payload, dict | list) else str(payload)
 
 
+def say(message: str) -> None:
+    """One timestamped progress line, flushed so it lands before the output of the step it announces."""
+
+    print(f"{datetime.now(tz=UTC):%H:%M:%S}Z {message}", flush=True)
+
+
 @dataclass
 class Workflow:
     repo_root: Path
@@ -151,11 +157,11 @@ class Workflow:
         key_file = self.state_dir / f"{self.instance}.{action}.key"
         if self.instance_state() == target:
             key_file.unlink(missing_ok=True)
-            print(f"instance {self.instance} is {target}")
+            say(f"instance {self.instance} is {target}")
             return
         if key_file.exists():
             key = key_file.read_text(encoding="utf-8").strip()
-            print(f"{action}: re-sending the pending intent {key}")
+            say(f"{action}: re-sending the pending intent {key}")
         else:
             key = f"autotrade-{action}-{uuid.uuid4().hex}"
             self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -164,7 +170,7 @@ class Workflow:
         if not ok:
             if self.instance_state() == target:
                 key_file.unlink(missing_ok=True)
-                print(f"instance {self.instance} is {target}")
+                say(f"instance {self.instance} is {target}")
                 return
             raise WorkflowError(
                 f"{action} was not accepted: {_text(receipt)}. The intent key stays in {key_file}: "
@@ -175,7 +181,7 @@ class Workflow:
         operation_id = str(receipt.get("operation_id") or "")
         if not SAFE_ID.fullmatch(operation_id):
             raise WorkflowError(f"{action} receipt names no operation: {_text(receipt)}")
-        print(f"{action} accepted: operation {operation_id} {receipt.get('state') or ''}".rstrip())
+        say(f"{action} accepted: operation {operation_id} {receipt.get('state') or ''}".rstrip())
         record = self.wait_operation(operation_id)
         state = str(record.get("state") or "")
         if state == "FAILED":
@@ -187,7 +193,7 @@ class Workflow:
             )
         self.wait_state(target)
         key_file.unlink(missing_ok=True)
-        print(f"instance {self.instance} is {target}")
+        say(f"instance {self.instance} is {target}")
 
     def wait_operation(self, operation_id: str) -> dict[str, object]:
         deadline = self.clock() + OPERATION_TIMEOUT_SECONDS
@@ -258,7 +264,7 @@ class Workflow:
     def up(self) -> None:
         self.transition("start", "RUNNING")
         self.wait_ssh()
-        print(f"ssh reachable; {self.card_hours()}")
+        say(f"ssh reachable; {self.card_hours()}")
 
     def deploy(self, seed: str) -> None:
         seed_path = Path(seed)
@@ -287,15 +293,17 @@ class Workflow:
         self.require_running()
         self.remote("dirs")
         preserve = ("-a", "--no-owner", "--no-group")
-        print("deploy: tracked files")
+        say("deploy: tracked files")
         self.rsync(*preserve, "--files-from=-", "--from0", f"{self.repo_root}/", f"dev:{REMOTE_ROOT}/", stdin=listed.stdout)
-        print("deploy: .env")
+        say("deploy: .env")
         self.rsync(*preserve, str(env_file), f"dev:{REMOTE_ROOT}/.env")
-        print(f"deploy: {seed}")
+        say(f"deploy: {seed}")
         self.rsync(*preserve, "-H", "--delete", f"{seed_dir}/", f"dev:{REMOTE_ROOT}/{seed_path.as_posix()}/")
-        print(f"deploy: {RELEASES}/{generation}")
+        say(f"deploy: {RELEASES}/{generation}")
         self.rsync(*preserve, "-H", "--delete", f"{release_dir}/", f"dev:{REMOTE_ROOT}/{RELEASES}/{generation}/")
+        say("deploy: preparing the instance")
         self.remote("prepare")
+        say("deploy: done")
 
     def run(self, round_file: str, args: Sequence[str]) -> None:
         tracked = subprocess.run(
@@ -339,7 +347,7 @@ class Workflow:
         logs = self.repo_root / "logs" / "workers"
         logs.mkdir(parents=True, exist_ok=True)
         self.rsync(*preserve, f"dev:{REMOTE_ROOT}/logs/workers/{arm}.log", f"{logs / arm}.log")
-        print(f"synced experiments/{arm} (without pit_views) and logs/workers/{arm}.log")
+        say(f"synced experiments/{arm} (without pit_views) and logs/workers/{arm}.log")
 
     def down(self) -> None:
         self.transition("stop", "STOPPED")

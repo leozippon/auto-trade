@@ -50,6 +50,56 @@ dirs() {
         "$ROOT/logs/webui" "$ROOT/logs/zgca" "$ROOT/.runtime"
 }
 
+# The arms whose worker is active, one id per line (none: empty output).
+active_arms() {
+    "$VENV/bin/python" - <<'PY'
+import json
+from pathlib import Path
+
+active = {"launching", "initializing", "running_session", "paused"}
+for status in sorted(Path("experiments").glob("*/hitl/status.json")):
+    try:
+        state = json.loads(status.read_text(encoding="utf-8")).get("state")
+    except (OSError, ValueError):
+        state = "unreadable"
+    if state in active or state == "unreadable":
+        print(status.parent.parent.name)
+PY
+}
+
+# The legacy builder on the platform's bridge network (no buildx, no host
+# networking); --force-rm so a failed step leaves no multi-GB container behind.
+build_image() {
+    local log=$1
+    echo "building $IMAGE (log $ROOT/$log)"
+    DOCKER_BUILDKIT=0 docker build --force-rm -t "$IMAGE" -f ops/docker/sandbox.Dockerfile . 2>&1 | tee "$log"
+    return "${PIPESTATUS[0]}"
+}
+
+# The 20 GB root disk is also the image store: it holds one sandbox image and
+# its layer cache, not two. A rebuild that reuses the cache (a lost tag, a
+# contract-only change) fits beside the old layers; one that rebuilds the pip
+# layer does not and dies of ENOSPC after downloading everything. Nothing
+# predicts which it will be, so the build is tried as is and only an
+# out-of-disk failure clears the store -- every unused image and stopped
+# container -- for one cold rebuild. An arm whose worker is active runs on the
+# image it pinned, so no rebuild is attempted beside it.
+rebuild_image() {
+    local active log
+    active=$(active_arms | tr '\n' ' ')
+    [ -z "$active" ] || die "the sandbox image must be rebuilt, but arms are active (${active% }) and the disk cannot hold a second image beside the one they run on; wait for them to end"
+    log="logs/zgca/image_build_$(date -u +%Y%m%dT%H%M%SZ).log"
+    if ! build_image "$log"; then
+        grep -q "No space left on device" "$log" || die "the image build failed (see $ROOT/$log)"
+        echo "the build ran out of disk beside the previous image's layers: removing every unused image and stopped container, then building cold"
+        docker container prune -f
+        docker image prune -af
+        df -h --output=target,size,used,avail,pcent / | sed 's/^/disk: /'
+        log="logs/zgca/image_build_$(date -u +%Y%m%dT%H%M%SZ).log"
+        build_image "$log" || die "the image build failed again on an empty store (see $ROOT/$log)"
+    fi
+}
+
 prepare() {
     cd "$ROOT"
     export DEBIAN_FRONTEND=noninteractive
@@ -70,12 +120,11 @@ prepare() {
     if image_current; then
         echo "sandbox image $IMAGE carries this checkout's strategy contract"
     else
-        # No buildx and no host networking on the platform: the legacy
-        # builder over the default bridge; a cached rebuild takes ~15 s.
-        echo "building $IMAGE"
-        DOCKER_BUILDKIT=0 docker build -t "$IMAGE" -f ops/docker/sandbox.Dockerfile .
+        rebuild_image
         image_current || die "$IMAGE was rebuilt but does not carry this checkout's strategy contract"
     fi
+    docker images --format 'image: {{.Repository}}:{{.Tag}} {{.ID}} {{.Size}}' "$IMAGE"
+    df -h --output=target,size,used,avail,pcent / | sed 's/^/disk: /'
     nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader | sed 's/^/gpu: /'
 }
 
