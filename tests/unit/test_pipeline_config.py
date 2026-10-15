@@ -1097,6 +1097,35 @@ class PitViewsSeedParameterTest(unittest.TestCase):
             self.assertIn("fut_daily", message)
             self.assertIn("sw_daily", message)
 
+    def test_a_seed_and_its_release_deployed_without_a_live_lake_are_accepted(self) -> None:
+        """A deployment that carries only a seed and the release it was built
+        from (the A100 instance) creates the arm as the workstation does: the
+        seed's recorded release path names the host that built it, the
+        release manifest's sources are read relative to the repository, and
+        no live ``data/raw`` or PIT root is required at pre-flight or create."""
+        import shutil
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            origin = Path(tmp) / "auto-trade"
+            (origin / "experiments").mkdir(parents=True)
+            selection = {"macro_datasets": ["cn_gdp", "fut_daily"]}
+            self._seed(origin, "pit_views_seed_ext", selection)
+            # What the deploy carries: the checkout, the seed and its release.
+            instance = Path(tmp) / "personal_fast_storage" / "auto-trade"
+            shutil.move(str(origin), str(instance))
+            shutil.rmtree(instance / "data" / "raw")
+            shutil.rmtree(instance / "data" / "pit")
+            strategy = instance / PIT_SEED_BASE_PARAMS["strategy_path"]
+            strategy.parent.mkdir(parents=True)
+            strategy.write_text("", encoding="utf-8")
+            named = {**selection, "pit_views_seed": "data/pit_views_seed_ext"}
+            for preflight in (True, False):
+                options = self._resolve(instance, named, preflight=preflight)
+                self.assertEqual(options.pit_views_seed, instance / "data" / "pit_views_seed_ext")
+                self.assertTrue(options.pit_views_seed_required)
+            self.assertTrue((instance / "experiments" / "seed_demo" / "research_release").is_dir())
+
     def test_a_benchmark_index_the_release_cannot_key_fails_the_create(self) -> None:
         """An arm is refused where it names its benchmark, not at replay end.
 

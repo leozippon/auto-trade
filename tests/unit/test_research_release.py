@@ -216,6 +216,39 @@ class ResearchReleaseTest(unittest.TestCase):
                 fundamental_events_status=self.status,
             )
 
+    def test_a_release_copied_with_its_repository_keeps_its_source_contract(self) -> None:
+        """A release copied to another checkout (the A100 instance, which holds
+        the releases its seeds were built from and no live lake) is the same
+        release: its sources are compared where they sit relative to the
+        repository, so the copy pins without the manifest being rewritten,
+        while another raw root in the same repository is still refused."""
+        published = self._pin("seed")
+        instance = self.root / "instance"
+        shutil.copytree(
+            self.root / "data" / "research_releases" / published.generation_id,
+            instance / "data" / "research_releases" / published.generation_id,
+        )
+        roots = {
+            "fundamental_events_root": instance / "data" / "pit" / "fundamental_events",
+            "fundamental_events_status": instance / "results" / "data_quality" / self.status.name,
+        }
+        self.assertFalse((instance / "data" / "raw").exists())
+        copied = published_research_release(
+            generation_id=published.generation_id, raw_dir=instance / "data" / "raw", **roots
+        )
+        self.assertEqual(copied.raw_dir, instance / "data" / "research_releases" / published.generation_id / "raw")
+        pinned = pin_research_release(
+            experiment_dir=instance / "experiments" / "moved",
+            generation_id=published.generation_id,
+            raw_dir=instance / "data" / "raw",
+            **roots,
+        )
+        self.assertEqual(pinned.generation_id, published.generation_id)
+        with self.assertRaisesRegex(RuntimeError, "different raw/PIT/status contract"):
+            published_research_release(
+                generation_id=published.generation_id, raw_dir=instance / "data" / "raw_alt", **roots
+            )
+
     def test_updating_generation_uses_previous_release_and_baseline_quality(self) -> None:
         first = self._pin("seed")
         self._write_generation("gen1", state="updating")

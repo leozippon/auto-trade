@@ -132,6 +132,19 @@ def pit_cache_provider_record(
     }
 
 
+def contract_identity(record: Mapping[str, object]) -> dict[str, object]:
+    """What a provider or as-of stash contract binds: everything but ``release_raw_dir``.
+
+    That field records where the release was when the views were built -- a
+    host path -- while ``generation_id`` already names the release itself. A
+    seed copied to another host together with its release, or an experiment
+    synced back from one, holds views that are still that release's, so the
+    path is kept for the operator and never compared.
+    """
+
+    return {key: value for key, value in record.items() if key != "release_raw_dir"}
+
+
 def assert_seed_snapshot_config(
     seed: Path, snapshot_config: SnapshotConfig
 ) -> tuple[str, str]:
@@ -144,7 +157,8 @@ def assert_seed_snapshot_config(
     was built from — are returned rather than judged: an experiment that names
     this seed pins that very release, so it is the caller that checks the
     release is published and reaches Held-out. ``seed_pit_views`` still
-    compares the whole record before it links anything.
+    compares the record's identity (``contract_identity``) before it links
+    anything.
     """
 
     provider_path = Path(seed) / "provider.json"
@@ -309,7 +323,7 @@ def seed_pit_views(
     if not provider_path.is_file() or provider_path.is_symlink():
         raise RuntimeError(f"PIT view seed is missing provider.json: {provider_path}")
     seed_record = _load_json(provider_path)
-    if seed_record != dict(expected_provider):
+    if contract_identity(seed_record) != contract_identity(expected_provider):
         if required:
             raise RuntimeError(
                 f"PIT view seed {seed} does not match this experiment's provider "

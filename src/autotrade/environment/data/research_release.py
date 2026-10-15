@@ -657,10 +657,29 @@ def _source_contract_matches(
     fundamental_events_root: Path,
     fundamental_events_status: Path,
 ) -> bool:
+    """Whether the release was published from the lake these roots name.
+
+    The manifest records its sources by the host paths they had when the
+    release was published, and a release travels with its lake: the A100
+    instance holds the releases its seeds were built from under its own
+    repository path. What is fixed is where the sources sit relative to the
+    repository -- the parent of the directory holding ``raw`` and
+    ``research_releases``, as this module reads it -- so each recorded path is
+    compared to the current one relative to its own repository. A release
+    reused for another raw root, PIT root or status file in the same
+    repository is still refused.
+    """
+
+    recorded_root = shared.source_raw_dir.parent.parent
+    current_root = raw_dir.resolve().parent.parent
+
+    def same_place(recorded: Path, current: Path) -> bool:
+        return os.path.relpath(recorded, recorded_root) == os.path.relpath(current, current_root)
+
     return (
-        shared.source_raw_dir == raw_dir.resolve()
-        and shared.source_fundamental_events_root == fundamental_events_root.resolve()
-        and shared.source_quality_dir == fundamental_events_status.resolve().parent
+        same_place(shared.source_raw_dir, raw_dir.resolve())
+        and same_place(shared.source_fundamental_events_root, fundamental_events_root.resolve())
+        and same_place(shared.source_quality_dir, fundamental_events_status.resolve().parent)
         and shared.fundamental_status_name == fundamental_events_status.name
     )
 

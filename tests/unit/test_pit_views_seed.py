@@ -318,6 +318,26 @@ def test_required_mismatch_fails_fast(tmp_path: Path) -> None:
     assert not dest.exists() or not any(dest.rglob("*"))
 
 
+def test_a_seed_built_on_another_host_links_the_same_release(tmp_path: Path) -> None:
+    """The release path a seed records is where the release was on the host
+    that built it; a seed copied to the A100 instance with its release still
+    holds that release's views, so it links. The generation is still the
+    identity: another one is refused as before."""
+    seed = tmp_path / "seed"
+    dest = tmp_path / "exp" / "pit_views"
+    _write_seed(seed, _record(Path("/elsewhere/auto-trade/data/research_releases/g/raw")))
+    expected = _record(tmp_path / "data" / "research_releases" / "g" / "raw")
+    assert seed_pit_views(dest, seed, expected_provider=expected, required=True) is True
+    assert (dest / f"decision/{SEED_DECISION_KEY}" / "daily.parquet").is_file()
+    with pytest.raises(RuntimeError, match="refusing to mix"):
+        seed_pit_views(
+            tmp_path / "other" / "pit_views",
+            seed,
+            expected_provider={**expected, "generation_id": "another_generation"},
+            required=True,
+        )
+
+
 def test_required_missing_seed_fails_fast(tmp_path: Path) -> None:
     dest = tmp_path / "exp" / "pit_views"
     with pytest.raises(FileNotFoundError, match="does not exist"):

@@ -90,7 +90,7 @@ from .config import (
     StrategyExperimentConfig,
 )
 from .experiment import DailyStrategyPipeline, null_control_seed
-from .pit_views_seed import pit_cache_provider_record, seed_pit_views
+from .pit_views_seed import contract_identity, pit_cache_provider_record, seed_pit_views
 
 _PHASES = frozenset({"valid", "heldout", "paper"})
 # Manifest label of the unphased replay store. Never a phase, so a store can
@@ -246,7 +246,7 @@ class ResearchPITSnapshotProvider:
                         f"{existing.get('schema_version')!r}, this code requires {record['schema_version']}: "
                         "a view built under another format is never reused, so the cache must be rebuilt"
                     )
-                if existing != record:
+                if contract_identity(existing) != contract_identity(record):
                     raise RuntimeError("PIT view cache is already bound to a different release or configuration")
             else:
                 write_json_atomic(path, record)
@@ -1505,7 +1505,7 @@ def _bind_asof_stash_contract(
             if not stash_dir.is_dir():
                 raise RuntimeError(f"PIT stash path is not a directory: {stash_dir}")
             existing = _read_json(contract_path)
-            if existing != contract:
+            if contract_identity(existing) != contract_identity(contract):
                 raise RuntimeError(
                     f"PIT stash contract conflicts with requested semantics: {contract_path}"
                 )

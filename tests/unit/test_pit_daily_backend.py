@@ -961,6 +961,13 @@ def test_research_pit_provider_names_a_cache_format_mismatch(tmp_path: Path) -> 
         reopen()
     contract.write_text(json.dumps(current), encoding="utf-8")
     assert reopen().cache_root == provider.cache_root
+    # The release path is where the release was when the cache was bound (an
+    # arm synced from another host): recorded, not a binding.
+    contract.write_text(
+        json.dumps({**current, "release_raw_dir": "/elsewhere/data/research_releases/g/raw"}),
+        encoding="utf-8",
+    )
+    assert reopen().cache_root == provider.cache_root
 
 
 def test_unphased_forward_replay_is_cloned_into_valid_phase(tmp_path: Path) -> None:
@@ -1481,6 +1488,30 @@ def test_stash_contract_corruption_or_mismatch_fails(tmp_path: Path) -> None:
     contract.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
     with pytest.raises(RuntimeError, match="conflicts with requested semantics"):
         _bind_asof_stash_contract(**kwargs)
+
+
+def test_a_stash_encoded_on_another_host_is_reused(tmp_path: Path) -> None:
+    """A seed's stash parts come with the release path of the host that
+    encoded them; hardlinked into an experiment on another host (the A100
+    instance), the parts are still this release's and the contract holds."""
+    snapshot, replay = _pit_slot_paths(
+        tmp_path, decision="decision_one", replay="replay_one", generation_id="generation_one"
+    )
+    decision_manifest, replay_manifest = _stash_manifests("generation_one")
+    kwargs = {
+        "snapshot_dir": snapshot,
+        "replay_dir": replay,
+        "schedule": StrategySchedule("day", "08:30"),
+        "phase": "valid",
+        "generation_id": "generation_one",
+        "decision_manifest": decision_manifest,
+        "replay_manifest": replay_manifest,
+    }
+    stash = _bind_asof_stash_contract(**kwargs)
+    contract = json.loads((stash / "contract.json").read_text(encoding="utf-8"))
+    contract["release_raw_dir"] = "/elsewhere/auto-trade/data/research_releases/generation_one/raw"
+    (stash / "contract.json").write_text(json.dumps(contract), encoding="utf-8")
+    assert _bind_asof_stash_contract(**kwargs) == stash
 
 
 def test_asof_stash_rejects_slots_outside_one_cache_root(tmp_path: Path) -> None:

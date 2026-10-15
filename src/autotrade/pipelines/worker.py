@@ -452,10 +452,9 @@ def resolve_worker_options(
 
     directory = Path(experiment_dir).resolve()
     repository = Path(repo_root).resolve(strict=True)
-    # The deployment's template file and data roots are identical for every
-    # create on a host, so their absence is not a property of the request.
+    # The deployment's template file is identical for every create on a host,
+    # so its absence is not a property of the request.
     repo_file = _repo_path if preflight else _repo_file
-    repo_dir = _repo_path if preflight else _repo_dir
     unknown = sorted(
         key for key in params if not key.startswith("_") and key not in _ALLOWED_PARAMS
     )
@@ -527,12 +526,12 @@ def resolve_worker_options(
     benchmark_index = str(knob("benchmark_index"))
     benchmark_index_label(benchmark_index)
     raw_dir = (
-        repo_dir(repository, params.get("raw_dir", "data/raw"), "raw_dir")
+        _repo_path(repository, params.get("raw_dir", "data/raw"), "raw_dir")
         if data_backend == "pit"
         else None
     )
     events_root = (
-        repo_dir(
+        _repo_path(
             repository,
             params.get("fundamental_events_root", "data/pit/fundamental_events"),
             "fundamental_events_root",
@@ -565,7 +564,7 @@ def resolve_worker_options(
         pit_cache_root == directory or pit_cache_root.is_relative_to(directory)
     ):
         raise ValueError("pit_cache_root must stay inside the experiment directory")
-    pit_views_seed, seed_release = (
+    pit_views_seed, seed_generation = (
         _pit_views_seed(params.get("pit_views_seed"), repository, snapshot_config)
         if data_backend == "pit"
         else (None, None)
@@ -596,11 +595,11 @@ def resolve_worker_options(
         )
         required_raw_datasets = required_release_raw_datasets(snapshot_config)
         release_raw_dir: Path | None = None
-        if seed_release is not None:
+        if seed_generation is not None:
             assert pit_views_seed is not None
             release_raw_dir, trading_days = _seed_release_trading_days(
                 pit_views_seed,
-                seed_release,
+                seed_generation,
                 experiment_dir=directory,
                 raw_dir=raw_dir,
                 fundamental_events_root=events_root,
@@ -736,7 +735,7 @@ def resolve_worker_options(
         fundamental_events_status=events_status,
         pit_cache_root=pit_cache_root,
         pit_views_seed=pit_views_seed,
-        pit_views_seed_required=seed_release is not None,
+        pit_views_seed_required=seed_generation is not None,
         snapshot_config=snapshot_config,
         # NLConfig owns the NL budget defaults; an absent parameter keeps the
         # shipped default rather than a second copy of it living here.
@@ -1223,10 +1222,11 @@ def _repo_dir(repo_root: Path, value: object, label: str) -> Path:
 def _repo_path(repo_root: Path, value: object, label: str) -> Path:
     """Resolve an input path without requiring the mutable live copy to exist.
 
-    A dirty raw lake is allowed to fall back to a pinned immutable research
-    release.  Its quality status lives inside that release, so requiring the
-    corresponding live status file before pinning would reject the valid
-    fallback path prematurely.
+    An experiment reads its data from a pinned immutable research release: a
+    dirty raw lake falls back to one, the quality status lives inside it, and
+    a deployment that carries only releases and seeds (the A100 instance) has
+    no live lake at all. Requiring the live roots here would refuse all of
+    them; a read that does need the live lake fails where it reads.
     """
 
     if not isinstance(value, str) or not value.strip():
@@ -1479,7 +1479,7 @@ COMPACTION_SAFETY_MARGIN_TOKENS = 8_192
 
 def _pit_views_seed(
     value: object, repo_root: Path, snapshot_config: SnapshotConfig
-) -> tuple[Path, tuple[str, str] | None]:
+) -> tuple[Path, str | None]:
     """The PIT view seed this experiment hardlinks from, and the release it binds.
 
     The default seed is an optimisation over cold-building: it carries the
@@ -1490,9 +1490,11 @@ def _pit_views_seed(
     time: the tree must exist and must already carry exactly this snapshot
     configuration. Silently cold-building instead would cost hours and look
     like a slow experiment rather than a wrong parameter. A named seed also
-    binds the experiment's research release: the ``(generation_id,
-    release_raw_dir)`` it was built from is returned, and None means the seed
-    is the optional default, which binds nothing and need not apply.
+    binds the experiment's research release: the generation id it was built
+    from is returned (the path the seed records beside it is where that
+    release was on the host that built the seed, not a condition), and None
+    means the seed is the optional default, which binds nothing and need not
+    apply.
     """
 
     default = repo_root / DEFAULT_PIT_VIEWS_SEED
@@ -1505,12 +1507,13 @@ def _pit_views_seed(
         return default, None
     if not seed.is_dir() or seed.is_symlink():
         raise ValueError(f"pit_views_seed must be an existing directory: {seed}")
-    return seed, assert_seed_snapshot_config(seed, snapshot_config)
+    generation_id, _release_raw_dir = assert_seed_snapshot_config(seed, snapshot_config)
+    return seed, generation_id
 
 
 def _seed_release_trading_days(
     seed: Path,
-    seed_release: tuple[str, str],
+    generation_id: str,
     *,
     experiment_dir: Path,
     raw_dir: Path,
@@ -1528,7 +1531,6 @@ def _seed_release_trading_days(
     parameter, refused before any view is linked.
     """
 
-    generation_id, seed_raw_dir = seed_release
     try:
         if preflight:
             release = published_research_release(
@@ -1553,11 +1555,6 @@ def _seed_release_trading_days(
             f"pit_views_seed {seed} was built from research release {generation_id!r}, "
             f"which this experiment cannot pin: {exc}"
         ) from exc
-    if str(release.raw_dir) != seed_raw_dir:
-        raise ValueError(
-            f"pit_views_seed {seed} records release raw dir {seed_raw_dir}, but research "
-            f"release {generation_id} is at {release.raw_dir} in this repository"
-        )
     return release.raw_dir, trading_days
 
 
