@@ -312,6 +312,66 @@ def test_the_hcm_slow_groups_accumulate_their_gradient_across_daily_fits(
     _drop_packages()
 
 
+def test_the_hcm_daily_sequence_steps_the_state_as_the_roll_does(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """In carried mode a daily fit replays the matured day's SEQ_DAYS from the
+    state the ring stored SEQ_DAYS days earlier; with the weights frozen it
+    must end bitwise on the state the roll stored for that day, for a name
+    suspended inside the window as for one never missing a bar, or training
+    fits another recurrence than the decision reads. Window mode steps every
+    day, so its daily sequence is the decision's own unmasked recurrence."""
+    import numpy as np
+    import torch
+
+    _starter(monkeypatch, HCM_14B)
+    from lib import features, hcm, knobs, model
+
+    cpu = torch.device("cpu")
+    monkeypatch.setattr(knobs, "UPDATE", "frozen")
+    monkeypatch.setattr(knobs, "MEMORY", True)
+    # One RECENT_DAYS read in which only day `matured`, HORIZON + 1 days
+    # before the newest bar, carries a label.
+    days, newest = hcm.RECENT_DAYS, hcm.RECENT_DAYS - 1
+    matured = newest - knobs.HORIZON - 1
+    window = slice(matured - knobs.SEQ_DAYS + 1, matured + 1)
+    dates = list(pd.bdate_range("2020-01-02", periods=days).strftime("%Y%m%d"))
+    x = np.random.default_rng(0).standard_normal((days, 2, features.FEATURES)).astype("float32")
+    valid = np.ones((days, 2), dtype=bool)
+    valid[matured - 5:matured - 3, 1] = False  # name 1 is suspended for two days inside the window
+    label = np.full((days, 2), np.nan, dtype="float32")
+    label[matured] = [0.25, -0.25]
+    due = [dates[newest] if i == matured else None for i in range(days)]
+    panel = features.Panel(dates, ["000001.SZ", "000002.SZ"], x, valid, label, due)
+    monkeypatch.setattr(features, "panel", lambda context, count: panel)
+    torch.manual_seed(0)
+    net = model.HCM(features.FEATURES, knobs.HIDDEN).eval()
+    context = SimpleNamespace(state_dir=str(tmp_path))
+
+    def daily(state: str) -> dict:
+        monkeypatch.setattr(knobs, "STATE", state)
+        start = newest - knobs.SEQ_DAYS - hcm.RING  # the ring stands before the window and is rolled through it
+        ring = torch.zeros(hcm.RING, 2, knobs.HIDDEN) if state == "carried" else None
+        ckpt = {"model": net, "optim": None, "store": model.Store(4, knobs.HIDDEN, cpu), "codes": panel.codes,
+                "ring": ring, "ring_dates": dates[start - hcm.RING + 1:start + 1] if ring is not None else [],
+                "seen": torch.zeros(2, dtype=torch.int64) if ring is not None else None,
+                "last_day": dates[matured - 1], "steps": 0}
+        hcm._continue(context, cpu, np.random.default_rng(0), ckpt)
+        assert ckpt["last_day"] == dates[matured] and ckpt["store"].filled == 2
+        return ckpt
+
+    carried = daily("carried")
+    rolled = carried["ring"][carried["ring_dates"].index(dates[matured])]
+    gap = [carried["ring_dates"].index(dates[i]) for i in (matured - 6, matured - 4)]
+    assert torch.equal(carried["ring"][gap[0], 1], carried["ring"][gap[1], 1])  # the roll held name 1 still
+    for name in (0, 1):
+        assert torch.equal(carried["store"].hin[name], rolled[name]), name
+    stepped = daily("window")["store"].hin[:2]
+    with torch.no_grad():
+        assert torch.equal(stepped, net.run(torch.as_tensor(x[window]), torch.zeros(2, knobs.HIDDEN)))
+    _drop_packages()
+
+
 # (dataset, code, available_at, change_ratio) in the events domain.
 EVENTS = [
     ("stk_holdertrade", "000001.SZ", "2024-03-01 19:00:00+08:00", 0.5),

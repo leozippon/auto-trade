@@ -11,7 +11,8 @@
                             already known on the query's day
 
 The GRU cell is the one recurrence: `step` advances every name's state by one
-day, `run` applies it over a sequence. The body and head are plain
+day -- given a validity mask, only the names it marks -- and `run` applies it
+over a sequence. The body and head are plain
 feed-forward layers, so a stored body input replays through them exactly as a
 fresh one. Parameters are about 92k at HIDDEN 80.
 """
@@ -43,16 +44,19 @@ class HCM(nn.Module):
         self.norm = nn.LayerNorm(hidden)
         self.head = nn.Linear(hidden + 1, 1)
 
-    def step(self, x, h):
-        """x (names, features), h (names, hidden) -> the next state."""
+    def step(self, x, h, valid=None):
+        """x (names, features), h (names, hidden) -> the next state; a name
+        that `valid` (names,) marks False keeps its state."""
 
-        return self.cell(torch.tanh(self.proj(x)), h)
+        moved = self.cell(torch.tanh(self.proj(x)), h)
+        return moved if valid is None else torch.where(valid.unsqueeze(1), moved, h)
 
-    def run(self, x, h):
-        """x (days, names, features) -> the state after every day in turn."""
+    def run(self, x, h, valid=None):
+        """x (days, names, features) -> the state after every day in turn,
+        each day's step masked by its row of `valid` (days, names)."""
 
         for day in range(x.shape[0]):
-            h = self.step(x[day], h)
+            h = self.step(x[day], h, None if valid is None else valid[day])
         return h
 
     def embed(self, h):

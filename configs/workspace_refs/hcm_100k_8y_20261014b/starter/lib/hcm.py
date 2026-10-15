@@ -8,8 +8,7 @@ window's last days so the ring holds a state per day. Every later daily call
 (REFIT_PERIOD "day"):
 
   1. reads the newest RECENT_DAYS trading days;
-  2. carried mode: rolls every name's state forward through each new day,
-     names without a bar keeping theirs;
+  2. carried mode: rolls every name's state forward through each new day;
   3. for each day whose label matured since the last call -- normally the one
      day whose HORIZON-day window closed with the newest bar -- takes one
      gradient step on that day's names (the last SEQ_DAYS days from the state
@@ -21,6 +20,14 @@ window's last days so the ring holds a state per day. Every later daily call
   5. saves the weights, the optimiser moments, the gradients still pending
      in the groups not yet stepped, the state ring, the counters and the
      store.
+
+In carried mode a name's state moves only on the days the name is `valid`
+(lib/features.py) and stands still on the others, in every pass through the
+recurrence -- the roll, the pretraining and daily sequences, the store write
+(`model.HCM.step`) -- so the sequences train the recurrence the roll applies,
+and with the weights unchanged a daily sequence from the state stored
+SEQ_DAYS days earlier ends on the state stored for its day. Window mode steps
+through every day of its SEQ_DAYS, in training and at the decision alike.
 
 "frozen" skips step 3; "cold_quarter" skips it too and instead pretrains
 afresh at the first call of each quarter. Nothing lives in module variables:
@@ -142,8 +149,9 @@ def _pretrain(context, dev, rng):
 
     def batch(idx, store):
         seq = torch.cat([x[i - knobs.SEQ_DAYS + 1:i + 1] for i in idx], dim=1)
+        mask = torch.cat([valid[i - knobs.SEQ_DAYS + 1:i + 1] for i in idx], dim=1)
         qday = day_ids[idx].repeat_interleave(names)
-        h, e, s = _forward(net, store, seq, torch.zeros(seq.shape[1], knobs.HIDDEN, device=dev), qday)
+        h, e, s = _forward(net, store, seq, mask, torch.zeros(seq.shape[1], knobs.HIDDEN, device=dev), qday)
         y = label[idx].reshape(-1)
         return h, e, s, y, valid[idx].reshape(-1) & torch.isfinite(y), qday, due_ids[idx].repeat_interleave(names)
 
@@ -180,7 +188,7 @@ def _pretrain(context, dev, rng):
         states = []
         with torch.no_grad():
             for i in range(max(0, len(panel.dates) - 2 * RING), len(panel.dates)):
-                h = _roll(net, h, x[i], valid[i])
+                h = net.step(x[i], h, valid[i])
                 seen[valid[i]] = int(panel.dates[i])
                 states.append(h)
         ring, ring_dates = torch.stack(states[-RING:]), panel.dates[-RING:]
@@ -207,7 +215,7 @@ def _continue(context, dev, rng, ckpt):
         net.eval()
         with torch.no_grad():
             for i in range(dates.index(ring_dates[-1]) + 1, len(dates)):
-                ring = torch.cat([ring, _roll(net, ring[-1], x[i], valid[i]).unsqueeze(0)])[-RING:]
+                ring = torch.cat([ring, net.step(x[i], ring[-1], valid[i]).unsqueeze(0)])[-RING:]
                 ring_dates = (ring_dates + [dates[i]])[-RING:]
                 seen[valid[i]] = int(dates[i])
         ckpt.update(codes=codes, ring=ring, ring_dates=ring_dates, seen=seen)
@@ -216,7 +224,7 @@ def _continue(context, dev, rng, ckpt):
     for i in [i for i, day in enumerate(dates) if day > ckpt["last_day"] and np.isfinite(panel.label[i]).any()]:
         if i - knobs.SEQ_DAYS < 0:
             raise RuntimeError(f"matured day {dates[i]} has no {knobs.SEQ_DAYS}-day sequence in the read")
-        seq = x[i - knobs.SEQ_DAYS + 1:i + 1]
+        seq, mask = x[i - knobs.SEQ_DAYS + 1:i + 1], valid[i - knobs.SEQ_DAYS + 1:i + 1]
         if knobs.STATE == "carried":
             if dates[i - knobs.SEQ_DAYS] not in ckpt["ring_dates"]:
                 raise RuntimeError(f"no carried state for {dates[i - knobs.SEQ_DAYS]}: the ring holds {RING} days")
@@ -228,7 +236,7 @@ def _continue(context, dev, rng, ckpt):
         ok = valid[i] & torch.isfinite(y)
         if knobs.UPDATE in LEARNING and bool(ok.any()):
             net.train()
-            _, _, s = _forward(net, store, seq, h0, qday)
+            _, _, s = _forward(net, store, seq, mask, h0, qday)
             loss = functional.mse_loss(s[ok], y[ok])
             if store is not None and store.filled:
                 picked = torch.as_tensor(rng.integers(0, store.filled, knobs.REPLAY_BATCH), device=dev)
@@ -241,26 +249,22 @@ def _continue(context, dev, rng, ckpt):
         if store is not None:
             net.eval()
             with torch.no_grad():
-                h, e, _ = _forward(net, store, seq, h0, qday)
+                h, e, _ = _forward(net, store, seq, mask, h0, qday)
             due = torch.full((len(codes),), int(panel.due[i]), dtype=torch.int64, device=dev)
             store.add(e[ok], h[ok], y[ok], qday[ok], due[ok], rng)
         ckpt["last_day"] = dates[i]
 
 
-def _forward(net, store, seq, h0, qday):
-    """(state, embedding, score) of one sequence batch from the states `h0`;
-    the memory signal comes from `store` as known on each row's `qday`."""
+def _forward(net, store, seq, valid, h0, qday):
+    """(state, embedding, score) of one sequence batch from the states `h0`,
+    stepped only over the `valid` days in carried mode and over every day in
+    window mode; the memory signal comes from `store` as known on each row's
+    `qday`."""
 
-    h = net.run(seq, h0)
+    h = net.run(seq, h0, valid if knobs.STATE == "carried" else None)
     e = net.embed(h)
     m = store.signal(e, qday, knobs.KNN) if store is not None else torch.zeros(e.shape[0], device=e.device)
     return h, e, net.score(e, m)
-
-
-def _roll(net, h, x, valid):
-    """Every name's state one day on; a name without a bar keeps its state."""
-
-    return torch.where(valid.unsqueeze(1), net.step(x, h), h)
 
 
 def _schedule():
