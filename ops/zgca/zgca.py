@@ -20,6 +20,7 @@ usage: zgca.py up | deploy <seed dir> | run <round file> [launcher args...] |
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -40,6 +41,15 @@ INSTANCE_ID = "ozaeun8qxljr1niyoz9flg6uc"
 REMOTE_ROOT = "/personal_fast_storage/auto-trade"
 RELEASES = "data/research_releases"
 UNFINISHED_SEED_MARKER = "prebuild_unfinished.json"
+# The DuckDB CLI release the sandbox image installs (ops/docker/sandbox.Dockerfile,
+# build arg DUCKDB_CLI_URL). GitHub is unreachable from the instance and its
+# release proxies answer or refuse by the day, so the deploy fetches the
+# release where GitHub is reachable, verifies it against this digest (two
+# independent routes agreed on it on 2026-10-15), ships it, and the build reads
+# it from the instance host through that build arg.
+DUCKDB_CLI_URL = "https://github.com/duckdb/duckdb/releases/download/v1.1.3/duckdb_cli-linux-amd64.zip"
+DUCKDB_CLI_NAME = "duckdb_cli-linux-amd64.zip"
+DUCKDB_CLI_SHA256 = "efd0fccdb1a28d9ec7a6ebfcde59900068b8ba43a846c9b553c0fd2bbe4acf43"
 POLL_SECONDS = 5
 OPERATION_TIMEOUT_SECONDS = 15 * 60
 SSH_TIMEOUT_SECONDS = 3 * 60
@@ -60,6 +70,14 @@ def say(message: str) -> None:
     """One timestamped progress line, flushed so it lands before the output of the step it announces."""
 
     print(f"{datetime.now(tz=UTC):%H:%M:%S}Z {message}", flush=True)
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 @dataclass
@@ -259,6 +277,28 @@ class Workflow:
                 raise WorkflowError(f"instance {self.instance} is RUNNING but SSH did not answer within {SSH_TIMEOUT_SECONDS} s")
             self.sleep(10)
 
+    def duckdb_cli(self) -> Path:
+        """The verified DuckDB CLI release the deploy ships, fetched once into the state directory."""
+
+        path = self.state_dir / DUCKDB_CLI_NAME
+        if not path.is_file():
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            say(f"deploy: fetching {DUCKDB_CLI_URL}")
+            fetched = subprocess.run(
+                ["curl", "-fsSL", "--retry", "5", "--retry-all-errors", "--retry-delay", "3",
+                 "--max-time", "900", "-C", "-", "-o", str(path), DUCKDB_CLI_URL],
+                stdin=subprocess.DEVNULL, check=False,
+            )
+            if fetched.returncode != 0 or not path.is_file():
+                raise WorkflowError(f"could not fetch {DUCKDB_CLI_URL} (curl exit {fetched.returncode})")
+        digest = _sha256(path)
+        if digest != DUCKDB_CLI_SHA256:
+            raise WorkflowError(
+                f"{path} has digest {digest}, not the pinned {DUCKDB_CLI_SHA256}: remove it to fetch "
+                "the release again, or re-pin the digest after verifying the new release"
+            )
+        return path
+
     # ----- commands -----
 
     def up(self) -> None:
@@ -290,6 +330,7 @@ class Workflow:
         )
         if listed.returncode != 0 or not listed.stdout:
             raise WorkflowError("git ls-files listed no tracked files in " + str(self.repo_root))
+        duckdb_cli = self.duckdb_cli()
         self.require_running()
         self.remote("dirs")
         preserve = ("-a", "--no-owner", "--no-group")
@@ -297,12 +338,14 @@ class Workflow:
         self.rsync(*preserve, "--files-from=-", "--from0", f"{self.repo_root}/", f"dev:{REMOTE_ROOT}/", stdin=listed.stdout)
         say("deploy: .env")
         self.rsync(*preserve, str(env_file), f"dev:{REMOTE_ROOT}/.env")
+        say(f"deploy: {DUCKDB_CLI_NAME}")
+        self.rsync(*preserve, str(duckdb_cli), f"dev:{REMOTE_ROOT}/.runtime/zgca/{DUCKDB_CLI_NAME}")
         say(f"deploy: {seed}")
         self.rsync(*preserve, "-H", "--delete", f"{seed_dir}/", f"dev:{REMOTE_ROOT}/{seed_path.as_posix()}/")
         say(f"deploy: {RELEASES}/{generation}")
         self.rsync(*preserve, "-H", "--delete", f"{release_dir}/", f"dev:{REMOTE_ROOT}/{RELEASES}/{generation}/")
         say("deploy: preparing the instance")
-        self.remote("prepare")
+        self.remote("prepare", DUCKDB_CLI_SHA256)
         say("deploy: done")
 
     def run(self, round_file: str, args: Sequence[str]) -> None:

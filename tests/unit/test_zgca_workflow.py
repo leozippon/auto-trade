@@ -8,6 +8,7 @@ instance it was pointed at, and the file list it received on stdin.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -58,6 +59,14 @@ if args[:2] == ["bash", "-lc"]:
 if args == ["true"]:
     sys.exit(int(os.environ.get("MOCK_SSH_EXIT", "0")))
 '''
+MOCK_CURL = r'''#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+with open(os.environ["MOCK_LOG"], "a") as log:
+    log.write(json.dumps({"tool": "curl", "args": args}) + "\n")
+with open(args[args.index("-o") + 1], "wb") as out:
+    out.write(os.environ.get("MOCK_CURL_BODY", "").encode())
+'''
 
 
 def _instance(state: str, **extra: object) -> dict[str, object]:
@@ -76,7 +85,7 @@ class ZgcaWorkflowTest(unittest.TestCase):
         base = Path(self.temp.name)
         self.tools = base / "tools"
         self.tools.mkdir()
-        for name, text in (("zenith", MOCK_ZENITH), ("dev", MOCK_DEV)):
+        for name, text in (("zenith", MOCK_ZENITH), ("dev", MOCK_DEV), ("curl", MOCK_CURL)):
             (self.tools / name).write_text(text, encoding="utf-8")
             (self.tools / name).chmod(0o700)
         self.repo = base / "repo"
@@ -85,7 +94,14 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self.api = base / "api.json"
         self.api.write_text("{}", encoding="utf-8")
         self.env = {name: value for name, value in os.environ.items() if not name.startswith(("ZGCA_", "ZENITH_", "MOCK_"))}
-        self.env.update(MOCK_LOG=str(self.log), MOCK_API=str(self.api))
+        # The DuckDB CLI the deploy ships is a fixture here: the mock curl writes
+        # it and the pinned digest is the fixture's for the test's duration.
+        body = "fixture, not the DuckDB CLI\n"
+        self.env.update(MOCK_LOG=str(self.log), MOCK_API=str(self.api), MOCK_CURL_BODY=body,
+                        PATH=str(self.tools) + os.pathsep + os.environ["PATH"])
+        self.pinned = zgca.DUCKDB_CLI_SHA256
+        zgca.DUCKDB_CLI_SHA256 = hashlib.sha256(body.encode()).hexdigest()
+        self.addCleanup(setattr, zgca, "DUCKDB_CLI_SHA256", self.pinned)
         self.sleeps: list[float] = []
 
     def calls(self) -> list[dict[str, object]]:
@@ -227,6 +243,12 @@ class ZgcaWorkflowTest(unittest.TestCase):
         (self.repo / ".env").write_text("KEY=value\n", encoding="utf-8")
         refusals.append((self.run_main("deploy", "/etc/passwd"), "below data/"))
         refusals.append((self.run_main("deploy", "scripts/experiments"), "below data/"))
+        # A shipped DuckDB CLI that is not the pinned release is refused, not refetched.
+        cli = self.repo / ".runtime" / "zgca" / zgca.DUCKDB_CLI_NAME
+        cli.parent.mkdir(parents=True)
+        cli.write_text("another release\n", encoding="utf-8")
+        refusals.append((self.run_main("deploy", "data/pit_views_seed_test"), "not the pinned"))
+        cli.unlink()
         for (code, err), reason in refusals:
             with self.subTest(reason=reason):
                 self.assertEqual(code, 1)
@@ -248,19 +270,26 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         dev = [call for call in self.calls() if call["tool"] == "dev"]
         self.assertTrue(all(call["instance"] == INSTANCE for call in dev))
-        steps = [call["args"][4] for call in dev if call["args"][:2] == ["bash", "-lc"]]
-        self.assertEqual(steps, ["dirs", "prepare"])
+        steps = [call["args"][4:] for call in dev if call["args"][:2] == ["bash", "-lc"]]
+        self.assertEqual(steps, [["dirs"], ["prepare", zgca.DUCKDB_CLI_SHA256]])
         self.assertEqual(dev[0]["args"][2], zgca.REMOTE_SCRIPT.read_text(encoding="utf-8"))
         transfers = [call for call in dev if call["args"][:1] == ["rsync"] and call["args"][1] != "--dry-run"]
         remote = zgca.REMOTE_ROOT
         self.assertEqual(
             [call["args"][-1] for call in transfers],
-            [f"dev:{remote}/", f"dev:{remote}/.env", f"dev:{remote}/data/pit_views_seed_test/", f"dev:{remote}/data/research_releases/gen_test/"],
+            [f"dev:{remote}/", f"dev:{remote}/.env", f"dev:{remote}/.runtime/zgca/{zgca.DUCKDB_CLI_NAME}",
+             f"dev:{remote}/data/pit_views_seed_test/", f"dev:{remote}/data/research_releases/gen_test/"],
         )
         self.assertEqual(transfers[0]["stdin"], "scripts/experiments/create_round_test.py\0")
-        self.assertIn("--delete", transfers[2]["args"])
-        self.assertIn("-H", transfers[3]["args"])
+        self.assertIn("--delete", transfers[3]["args"])
+        self.assertIn("-H", transfers[4]["args"])
         self.assertNotIn("--delete", transfers[0]["args"])
+        # The release was fetched once, from the official URL, and is reused by the next deploy.
+        fetches = [call for call in self.calls() if call["tool"] == "curl"]
+        self.assertEqual([call["args"][-1] for call in fetches], [zgca.DUCKDB_CLI_URL])
+        self.assertTrue((self.repo / ".runtime" / "zgca" / zgca.DUCKDB_CLI_NAME).is_file())
+        self.assertEqual(self.run_main("deploy", "data/pit_views_seed_test")[0], 0)
+        self.assertEqual(len([call for call in self.calls() if call["tool"] == "curl"]), 1)
         # Every transfer is followed by its own dry-run itemization.
         verifications = [call for call in dev if call["args"][:2] == ["rsync", "--dry-run"]]
         self.assertEqual([call["args"][3:] for call in verifications], [call["args"][1:] for call in transfers])
