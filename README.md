@@ -20,7 +20,7 @@ Live trading is deliberately not implemented. The console has a live-trading pag
 | `src/autotrade/paper/` | Paper-trading engine |
 | `scripts/` | Entry points: `webui/`, `experiments/`, `data/`, `paper/`, `dev/` |
 | `configs/` | Update schedule, column inventory, exported prompt snapshot, strategy output template, workspace reference packs |
-| `ops/` | Sandbox Dockerfile, cron templates, nginx deployment configs |
+| `ops/` | Sandbox Dockerfile, cron templates, nginx deployment configs, the ZGCA A100 instance workflow (`ops/zgca/`) |
 | `tests/unit/` | The whole test suite |
 
 Runtime directories (`data/`, `experiments/`, `logs/`, `results/`, `.runtime/`) are created locally and are not tracked. Worker stdout/stderr for a console-launched experiment is appended to `logs/workers/<experiment_id>.log`.
