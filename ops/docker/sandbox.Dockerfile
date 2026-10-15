@@ -1,11 +1,13 @@
 # AutoTrade Agent sandbox image (docs/environment-design.md 3.1/3.3).
 # Build (context is the repo root so the trusted runtime modules can be copied in):
-#   docker build --network=host --build-arg HTTP_PROXY --build-arg HTTPS_PROXY \
+#   docker build --build-arg HTTP_PROXY --build-arg HTTPS_PROXY \
 #     --build-arg ALL_PROXY --build-arg NO_PROXY \
 #     -t autotrade-sandbox:latest -f ops/docker/sandbox.Dockerfile .
-# Package and release downloads default to mirrors. Proxy build args without an
-# explicit value forward the current process environment without baking proxy
-# credentials into the image; --network=host is required for loopback proxies.
+# Package and release downloads default to mirrors, so the default bridge
+# network is enough. Proxy build args without an explicit value forward the
+# current process environment without baking proxy credentials into the image;
+# add --network=host only when that proxy listens on the host's loopback.
+# Nothing here needs BuildKit, so the classic builder (DOCKER_BUILDKIT=0) works.
 # Project-level build identity is assigned after a successful offline smoke
 # test by the host lifecycle; this build consumes the declared Python tag.
 FROM python:3.11-slim
@@ -50,7 +52,7 @@ RUN sed -i \
         pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-# Complete, pinned research/DL stack. Data layer pins are the environment's
+# Pinned research/DL stack. Data layer pins are the environment's
 # byte-format contract (parquet caches) and stay put; the DL family follows
 # "widely adopted, relatively recent": torch 2.10.0 is the last and most
 # mature release of the CUDA 12.8 line, and the boosting picks are the current
@@ -72,6 +74,30 @@ RUN pip install --no-cache-dir -i ${PIP_INDEX_URL} \
         lightgbm==4.7.0 \
         xgboost==3.2.0
 
+# Transformer and continual-learning stack: model families (transformers),
+# tensor rearrangement (einops), device and mixed-precision handling
+# (accelerate) and parameter-efficient adapters (peft). tokenizers and
+# huggingface_hub come with transformers, safetensors from the layer above;
+# peft 0.20.0 is the release cut while transformers 5.14 was current. A layer
+# of its own, so a host that already holds the layer above (torch alone is
+# several GB) rebuilds only this one. The installed set is its constraint file:
+# this layer can only add packages, and a requirement that would move a pin of
+# the layer above fails the build instead of replacing it.
+RUN pip freeze > /tmp/installed.txt \
+    && pip install --no-cache-dir -i ${PIP_INDEX_URL} -c /tmp/installed.txt \
+        transformers==5.14.1 \
+        einops==0.8.2 \
+        accelerate==1.14.0 \
+        peft==0.20.0 \
+    && rm /tmp/installed.txt
+
+# Both containers run without a network and the image holds no pretrained
+# weights, so the hub is switched off: a hub model id fails at once instead of
+# waiting on a connection that cannot exist. Hub caches live under
+# XDG_CACHE_HOME like every other cache.
+ENV HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1
+
 # DuckDB CLI binary, pinned to the Python package version. The Agent's data-probe
 # guidance uses `duckdb -c "..."`; without the CLI it fails with exit 127 and the
 # Agent wastes turns falling back. (curl is already installed; release zip extracted
@@ -88,11 +114,10 @@ RUN curl -fL --retry 8 --retry-all-errors --retry-delay 3 --connect-timeout 30 -
 # strategy context, loaded as `python -m autotrade.environment.strategy_worker`
 # in the strategy container. Standard-library plus the pinned data stack only;
 # the Broker stays on the host, so the worker never needs broker_core. The
-# formal strategy allowlist (strategy_loader.ALLOWED_MODULES) names numpy,
-# pandas, scipy, scikit-learn, LightGBM, XGBoost, statsmodels and torch from
-# the pip layer above; the strategy container gets --gpus only when the
-# experiment asked for a device (executor.DockerStrategyExecutor), else
-# CPU-only.
+# formal strategy allowlist (strategy_loader.ALLOWED_MODULES) draws its
+# libraries from the pip layers above; the strategy container gets --gpus only
+# when the experiment asked for a device (executor.DockerStrategyExecutor),
+# else CPU-only.
 WORKDIR /opt/autotrade
 COPY src/autotrade/__init__.py /opt/autotrade/autotrade/__init__.py
 COPY src/autotrade/environment/__init__.py /opt/autotrade/autotrade/environment/__init__.py
