@@ -24,6 +24,7 @@ from autotrade.environment.executor import (
 from autotrade.environment.sandbox import SandboxLimits, SandboxSpec
 from autotrade.environment.strategy import CN_TZ, AccountSnapshot, StrategyContext
 from autotrade.environment.strategy_loader import (
+    ALLOWED_MODULES,
     StrategyLoadError,
     validate_strategy_package,
     validate_strategy_source,
@@ -38,7 +39,7 @@ from autotrade.pipelines.experiment import (
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
 from autotrade.pipelines.worker import _strategy_sandbox_from_spec
 
-from .fixtures_sandbox import docker_available
+from .fixtures_sandbox import TEMPLATE_DIR, docker_available
 
 MAIN ='''import numpy as np
 
@@ -345,6 +346,8 @@ def test_library_imports_and_booster_files_follow_the_rooted_io_rule():
     validate_strategy_source(
         "from sklearn.linear_model import Ridge\nimport scipy.stats\nimport torch.nn\n"
         "import lightgbm as lgb\nimport xgboost\nimport statsmodels.api as sm\n"
+        "from transformers import AutoModel, LlamaConfig\nfrom peft import LoraConfig, get_peft_model\n"
+        "from accelerate import Accelerator\nfrom einops import rearrange\n"
         "from dataclasses import dataclass\nfrom typing import Sequence\n"
         "def fit(context):\n"
         "    lgb.Booster().save_model(context.state_dir + '/m.txt')\n"
@@ -369,6 +372,21 @@ def test_library_imports_and_booster_files_follow_the_rooted_io_rule():
         )
     with pytest.raises(StrategyLoadError, match="unsupported module: joblib"):
         validate_strategy_source("import joblib\ndef generate_orders(context): return []\n")
+    # The image ships the hub client with transformers; shipping is not
+    # permission, and the strategy never reaches a network.
+    with pytest.raises(StrategyLoadError, match="unsupported module: huggingface_hub"):
+        validate_strategy_source(
+            "from huggingface_hub import snapshot_download\n"
+            "def generate_orders(context): return []\n"
+        )
+
+
+def test_the_template_readme_states_the_enforced_import_allowlist():
+    """The Agent is told exactly the modules the loader accepts, no more and no fewer."""
+    readme = (TEMPLATE_DIR / "README.md").read_text(encoding="utf-8")
+    block = readme.split("Supported imports", 1)[1].split("```text\n", 1)[1].split("```", 1)[0]
+    stated = {name.strip() for name in block.replace("\n", ",").split(",") if name.strip()}
+    assert stated == ALLOWED_MODULES
 
 
 def test_budgets_come_from_one_source_each():
@@ -423,6 +441,7 @@ def test_real_sandbox_runs_a_package_with_the_shipped_libraries(tmp_path: Path):
     package = tmp_path / "output"
     helper = (
         "import lightgbm, scipy, sklearn, statsmodels, torch, xgboost\n"
+        "import accelerate, einops, peft, transformers\n"
         "torch.set_num_threads(2)\n"
         "SCALE = torch.get_num_threads()\n\n\n"
         "def scaled(value):\n    return value * SCALE\n"
