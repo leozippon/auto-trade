@@ -1105,7 +1105,7 @@ def test_a_home_card_shows_each_figure_alone_never_as_a_fraction() -> None:
     assert "evidenceTiles(item)" in card and "forwardTiles(item)" in body("heroPanel")
     # The fraction and the limit are left out of the card's lines only.
     assert "fraction && Number.isFinite(done)" in body("activityNode")
-    budget = body("budgetBars")
+    budget = re.sub(r"\s+", " ", body("budgetBars"))
     assert "mini ? row.spent" in budget and "mini ? `${row.label}已用 ${row.spent}`" in budget
     assert "activityNode(fresh.status)" in body("controlPanel")
     # One vocabulary for the best candidate: the card's four tiles are the
