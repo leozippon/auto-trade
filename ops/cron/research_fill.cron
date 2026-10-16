@@ -25,8 +25,9 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 CRON_TZ=Asia/Shanghai
 REPO_ROOT=/Data2/lzp/auto-trade
 QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
-# The queue's round files, filled in this order; separated by spaces.
-ROUNDS=scripts/experiments/create_round_20261014d.py
+# The queue's round files, filled in this order; separated by spaces. Empty
+# while nothing is queued: the job then exits 0 without creating anything.
+ROUNDS=
 
 # Every ten minutes, all day: a slot that frees up stays empty for at most that
 # long, and research arms end at no particular hour. One run takes seconds per

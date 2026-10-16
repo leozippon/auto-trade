@@ -112,11 +112,11 @@ class CronInstallerTest(unittest.TestCase):
         self.assertEqual(jobs[0].split()[:5], ["*/10", "*", "*", "*", "*"])
         self.assertIn("flock -n .runtime/research/cron.lock", jobs[0])
         self.assertTrue(jobs[0].endswith(" >> logs/research/cron.log 2>&1"), jobs[0])
-        # The queue it fills has to be open round files this repository holds:
-        # a mistyped or closed one would fail every ten minutes instead of once.
+        # The queue it fills has to be open round files this repository holds
+        # (none while nothing is queued): a mistyped or closed one would fail
+        # every ten minutes instead of once.
         rounds = next(line.split("=", 1)[1] for line in lines if line.startswith("ROUNDS="))
         self.assertIn("$ROUNDS", jobs[0])
-        self.assertTrue(rounds.split())
         for round_file in rounds.split():
             self.assertTrue((installer.REPO_ROOT / round_file).is_file(), round_file)
             module = importlib.import_module("scripts.experiments." + Path(round_file).stem)
@@ -153,6 +153,9 @@ class CronInstallerTest(unittest.TestCase):
                 env = {"PATH": os.environ["PATH"], "REPO_ROOT": tmp, "QUANT_PYTHON": str(python), "ROUNDS": rounds}
                 return subprocess.run(["bash", "-c", command], env=env, capture_output=True, text=True, timeout=60)
 
+            # An empty queue is the steady state between rounds: nothing runs.
+            self.assertEqual(run("").returncode, 0)
+            self.assertFalse(calls.exists())
             self.assertEqual(run("first second").returncode, 0)
             self.assertEqual(
                 calls.read_text(encoding="utf-8").splitlines(),

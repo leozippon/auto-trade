@@ -628,12 +628,15 @@ RETIRED_IDS: frozenset[str] = frozenset(
         "open_ensemble_100k_8y_qwen_20261015",
         "open_micro_100k_8y_mimo_20261015",
         "open_tables_100k_5y_qwen_20261015",
-        # Every arm of rounds 20261008b, 20261014 and 20261014b, whose files
-        # left the tree on 2026-10-15. The eleven arms of the first two ended
-        # and stay on disk; the two 20261014b arms were terminated on
-        # 2026-10-14 and their directories are no longer on disk.
+        # Every arm of rounds 20261008b, 20261014, 20261014b and 20261014d,
+        # whose files left the tree on 2026-10-15. The eleven arms of the first
+        # two and the two of 20261014d ended and stay on disk; the two 20261014b
+        # arms were terminated on 2026-10-14 and their directories are no
+        # longer on disk.
         "hcm_100k_8y_sol_dsf_20261014b",
+        "hcm_100k_8y_sol_dsf_20261014d",
         "hcm_100k_8y_sol_qwen_20261014b",
+        "hcm_100k_8y_sol_qwen_20261014d",
         "open_adapt_100k_8y_mimo_20261014",
         "open_avoid_100k_8y_mimo_20261014",
         "open_capital_100k_8y_mimo_20261008b",
