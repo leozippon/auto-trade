@@ -1,9 +1,10 @@
 """Offline contract of ops/zgca/zgca.py: the platform layer is a mock, no network.
 
-The mock `zenith` answers each METHOD PATH from a scripted queue and records
-the idempotency key it was given; the mock `dev` records its arguments and the
-instance it was pointed at. The remote script's `tracked` step, which deletes
-files, runs for real against a temporary root.
+The mock `instance` (the shared lifecycle entry, tested in ~/zgca-compute) and
+the mock `dev` record their arguments and the instance they were pointed at,
+and answer from the environment; the mock `zenith` only records, since the
+workflow reaches the API through those two. The remote script's `tracked`
+step, which deletes files, runs for real against a temporary root.
 """
 
 from __future__ import annotations
@@ -30,22 +31,22 @@ sys.modules[SPEC.name] = zgca  # dataclasses resolve the module's annotations th
 SPEC.loader.exec_module(zgca)
 
 INSTANCE = zgca.INSTANCE_ID
-DETAIL = f"GET /pt/api/ai/instances/{INSTANCE}"
-MOCK_ZENITH = r'''#!/usr/bin/env python3
+MOCK_ZENITH = r"""#!/usr/bin/env python3
 import json, os, sys
 with open(os.environ["MOCK_LOG"], "a") as log:
-    log.write(json.dumps({"tool": "zenith", "args": sys.argv[1:], "key": os.environ.get("ZENITH_IDEMPOTENCY_KEY")}) + "\n")
-script = json.load(open(os.environ["MOCK_API"]))
-queue = script.get(" ".join(sys.argv[1:3]))
-if not queue:
-    sys.exit("unexpected call: " + " ".join(sys.argv[1:3]))
-response = queue.pop(0) if len(queue) > 1 else queue[0]
-json.dump(script, open(os.environ["MOCK_API"], "w"))
-if "body" in response:
-    print(json.dumps(response["body"]))
-sys.exit(response.get("exit", 0))
-'''
-MOCK_DEV = r'''#!/usr/bin/env python3
+    log.write(json.dumps({"tool": "zenith", "args": sys.argv[1:]}) + "\n")
+sys.exit("the workflow reaches the API only through instance and dev")
+"""
+MOCK_INSTANCE = r"""#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+with open(os.environ["MOCK_LOG"], "a") as log:
+    log.write(json.dumps({"tool": "instance", "args": args, "instance": os.environ.get("ZGCA_INSTANCE")}) + "\n")
+if args[0] == "state":
+    print(os.environ.get("MOCK_STATE", "RUNNING"))
+sys.exit(int(os.environ.get("MOCK_INSTANCE_EXIT_" + args[0].upper(), "0")))
+"""
+MOCK_DEV = r"""#!/usr/bin/env python3
 import json, os, sys
 args = sys.argv[1:]
 record = {"tool": "dev", "args": args, "instance": os.environ.get("ZGCA_INSTANCE")}
@@ -55,26 +56,16 @@ if args[:1] == ["rsync"] and args[1] == "--dry-run":
     sys.stdout.write(os.environ.get("MOCK_RSYNC_DIFF", ""))
 if args[:2] == ["bash", "-lc"]:
     sys.exit(int(os.environ.get("MOCK_STEP_EXIT_" + args[4].replace("-", "_").upper(), "0")))
-if args == ["true"]:
-    sys.exit(int(os.environ.get("MOCK_SSH_EXIT", "0")))
-'''
-MOCK_CURL = r'''#!/usr/bin/env python3
+"""
+MOCK_CURL = r"""#!/usr/bin/env python3
 import json, os, sys
 args = sys.argv[1:]
 with open(os.environ["MOCK_LOG"], "a") as log:
     log.write(json.dumps({"tool": "curl", "args": args}) + "\n")
 with open(args[args.index("-o") + 1], "wb") as out:
     out.write(os.environ.get("MOCK_CURL_BODY", "").encode())
-'''
-
-
-def _instance(state: str, **extra: object) -> dict[str, object]:
-    return {"body": {"instance": {"id": INSTANCE, "name": "auto-trade-dev-a100", "unified_status": state,
-                                  "gpu_type": "Tesla-A100-80G", "gpu_count": 1, "retention": {"stopped_at": None}, **extra}}}
-
-
-CARD_HOURS = {"body": {"personal": {"used_card_hours": 26.578, "remaining_card_hours": 141.421,
-                                    "effective_allowance_card_hours": 168.0, "current_period_end_at": 1792339200000}}}
+"""
+TOOLS = {"zenith": MOCK_ZENITH, "instance": MOCK_INSTANCE, "dev": MOCK_DEV, "curl": MOCK_CURL}
 
 
 class ZgcaWorkflowTest(unittest.TestCase):
@@ -84,128 +75,78 @@ class ZgcaWorkflowTest(unittest.TestCase):
         base = Path(self.temp.name)
         self.tools = base / "tools"
         self.tools.mkdir()
-        for name, text in (("zenith", MOCK_ZENITH), ("dev", MOCK_DEV), ("curl", MOCK_CURL)):
+        for name, text in TOOLS.items():
             (self.tools / name).write_text(text, encoding="utf-8")
             (self.tools / name).chmod(0o700)
         self.repo = base / "repo"
         self.repo.mkdir()
         self.log = base / "calls.jsonl"
-        self.api = base / "api.json"
-        self.api.write_text("{}", encoding="utf-8")
         self.env = {name: value for name, value in os.environ.items() if not name.startswith(("ZGCA_", "ZENITH_", "MOCK_"))}
         # The DuckDB CLI the deploy ships is a fixture here: the mock curl writes
         # it and the pinned digest is the fixture's for the test's duration.
         body = "fixture, not the DuckDB CLI\n"
-        self.env.update(MOCK_LOG=str(self.log), MOCK_API=str(self.api), MOCK_CURL_BODY=body,
-                        PATH=str(self.tools) + os.pathsep + os.environ["PATH"])
+        self.env.update(MOCK_LOG=str(self.log), MOCK_CURL_BODY=body, PATH=str(self.tools) + os.pathsep + os.environ["PATH"])
         self.pinned = zgca.DUCKDB_CLI_SHA256
         zgca.DUCKDB_CLI_SHA256 = hashlib.sha256(body.encode()).hexdigest()
         self.addCleanup(setattr, zgca, "DUCKDB_CLI_SHA256", self.pinned)
-        self.sleeps: list[float] = []
 
-    def calls(self) -> list[dict[str, object]]:
-        return [json.loads(line) for line in self.log.read_text(encoding="utf-8").splitlines()] if self.log.exists() else []
+    def calls(self, tool: str | None = None) -> list[dict[str, object]]:
+        lines = self.log.read_text(encoding="utf-8").splitlines() if self.log.exists() else []
+        return [call for call in map(json.loads, lines) if tool is None or call["tool"] == tool]
 
     def run_main(self, *argv: str, **env: str) -> tuple[int, str]:
-        """Run the CLI against the mocks with no real sleeping; (exit code, stderr)."""
+        """Run the CLI against the mocks; (exit code, stderr)."""
         saved = dict(os.environ)
         os.environ.clear()
         os.environ.update(self.env | env)
-        clock = iter(range(0, 10**6, 60))
         err = io.StringIO()
         try:
             with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
-                code = zgca.main(
-                    argv, repo_root=self.repo, tools=self.tools,
-                    sleep=self.sleeps.append, clock=lambda: float(next(clock)),
-                )
+                code = zgca.main(argv, repo_root=self.repo, tools=self.tools)
         finally:
             os.environ.clear()
             os.environ.update(saved)
         return code, err.getvalue()
 
-    def key_file(self, action: str) -> Path:
-        return self.repo / ".runtime" / "zgca" / f"{INSTANCE}.{action}.key"
-
     # ----- instance lifecycle -----
 
-    def test_up_starts_a_stopped_instance_under_one_key_and_clears_it(self) -> None:
-        self.api.write_text(json.dumps({
-            DETAIL: [_instance("STOPPED"), _instance("STARTING"), _instance("RUNNING")],
-            f"POST /pt/api/ai/instances/{INSTANCE}/start": [{"body": {"operation_id": "a" * 25, "state": "CLAIMED"}}],
-            f"GET /pt/api/operations/{'a' * 25}": [{"body": {"operation": {"state": "RUNNING"}}}, {"body": {"operation": {"state": "SUCCEEDED"}}}],
-            "GET /pt/api/me/card-hours": [CARD_HOURS],
-        }), encoding="utf-8")
-        code, err = self.run_main("up")
-        self.assertEqual(code, 0, err)
-        posts = [call for call in self.calls() if call["tool"] == "zenith" and call["args"][0] == "POST"]
-        self.assertEqual(len(posts), 1)
-        self.assertRegex(posts[0]["key"], r"^autotrade-start-[0-9a-f]{32}$")
-        self.assertTrue(all(call["key"] is None for call in self.calls() if call["tool"] == "zenith" and call["args"][0] == "GET"))
-        ssh = [call for call in self.calls() if call["tool"] == "dev"]
-        self.assertEqual([call["args"] for call in ssh], [["true"]])
-        self.assertEqual(ssh[0]["instance"], INSTANCE)
-        self.assertFalse(self.key_file("start").exists())
-        self.assertTrue(self.sleeps)
-
-    def test_a_refused_or_lost_start_keeps_its_key_for_the_retry(self) -> None:
-        self.api.write_text(json.dumps({
-            DETAIL: [_instance("STOPPED")],
-            f"POST /pt/api/ai/instances/{INSTANCE}/start": [{"exit": 22, "body": {"error": "queue_snapshot_unavailable", "retryable": True}}],
-        }), encoding="utf-8")
-        code, err = self.run_main("up")
-        self.assertEqual(code, 1)
-        self.assertIn("queue_snapshot_unavailable", err)
-        key = self.key_file("start").read_text(encoding="utf-8").strip()
-        self.assertRegex(key, r"^autotrade-start-")
-        # A transport failure (no JSON) keeps it too, and the re-run re-sends the same key.
-        self.api.write_text(json.dumps({
-            DETAIL: [_instance("STOPPED")],
-            f"POST /pt/api/ai/instances/{INSTANCE}/start": [{"exit": 255}],
-        }), encoding="utf-8")
-        code, err = self.run_main("up")
-        self.assertEqual(code, 1)
-        self.assertIn("exit 255", err)
-        posts = [call for call in self.calls() if call["tool"] == "zenith" and call["args"][0] == "POST"]
-        self.assertEqual([call["key"] for call in posts], [key, key])
-        self.assertEqual(self.key_file("start").read_text(encoding="utf-8").strip(), key)
-
-    def test_a_failed_operation_drops_the_key_and_an_unknown_one_keeps_it(self) -> None:
-        start = f"POST /pt/api/ai/instances/{INSTANCE}/start"
-        for state, kept in (("FAILED", False), ("UNKNOWN", True)):
-            with self.subTest(state=state):
-                self.key_file("start").unlink(missing_ok=True)
-                self.api.write_text(json.dumps({
-                    DETAIL: [_instance("STOPPED")],
-                    start: [{"body": {"operation_id": "b" * 25, "state": "CLAIMED"}}],
-                    f"GET /pt/api/operations/{'b' * 25}": [{"body": {"operation": {"state": state}}}],
-                }), encoding="utf-8")
-                code, err = self.run_main("up")
+    def test_up_and_down_are_the_shared_entry_for_the_pinned_instance(self) -> None:
+        for command, action in (("up", "start"), ("down", "stop")):
+            with self.subTest(command=command):
+                self.log.unlink(missing_ok=True)
+                code, err = self.run_main(command)
+                self.assertEqual(code, 0, err)
+                self.assertEqual(self.calls(), [{"tool": "instance", "args": [action, INSTANCE], "instance": INSTANCE}])
+                # Its unverified result (a refused request, a timeout, no SSH) is this command's failure.
+                code, err = self.run_main(command, **{f"MOCK_INSTANCE_EXIT_{action.upper()}": "1"})
                 self.assertEqual(code, 1)
-                self.assertIn(state.lower() if state == "FAILED" else "UNKNOWN", err)
-                self.assertEqual(self.key_file("start").exists(), kept)
+                self.assertIn(f"instance {action} {INSTANCE} failed", err)
 
-    def test_up_and_down_are_complete_at_their_target_state(self) -> None:
-        self.api.write_text(json.dumps({DETAIL: [_instance("RUNNING")], "GET /pt/api/me/card-hours": [CARD_HOURS]}), encoding="utf-8")
-        self.assertEqual(self.run_main("up")[0], 0)
-        self.api.write_text(json.dumps({DETAIL: [_instance("STOPPED")], "GET /pt/api/me/card-hours": [CARD_HOURS]}), encoding="utf-8")
-        self.assertEqual(self.run_main("down")[0], 0)
-        self.assertFalse([call for call in self.calls() if call["tool"] == "zenith" and call["args"][0] == "POST"])
+    def test_status_shows_the_instance_and_logs_in_only_when_it_is_running(self) -> None:
+        self.assertEqual(self.run_main("status", MOCK_STATE="STOPPED")[0], 0)
+        self.assertEqual([call["args"] for call in self.calls()], [["show", INSTANCE], ["state", INSTANCE]])
+        self.log.unlink()
+        self.assertEqual(self.run_main("status")[0], 0)
+        self.assertEqual([(call["tool"], call["args"][4] if call["tool"] == "dev" else call["args"][0]) for call in self.calls()],
+                         [("instance", "show"), ("instance", "state"), ("dev", "status")])
+        self.log.unlink()
+        code, err = self.run_main("status", MOCK_INSTANCE_EXIT_SHOW="1")
+        self.assertEqual(code, 1)
+        self.assertIn(f"instance show {INSTANCE} failed", err)
+        self.assertEqual(len(self.calls()), 1)
 
-    def test_down_stops_under_a_key_and_waits_for_stopped(self) -> None:
-        self.api.write_text(json.dumps({
-            DETAIL: [_instance("RUNNING"), _instance("STOPPING"), _instance("STOPPED")],
-            f"POST /pt/api/ai/instances/{INSTANCE}/stop": [{"body": {"operation_id": "c" * 25, "state": "CLAIMED"}}],
-            f"GET /pt/api/operations/{'c' * 25}": [{"body": {"operation": {"state": "SUCCEEDED"}}}],
-            "GET /pt/api/me/card-hours": [CARD_HOURS],
-        }), encoding="utf-8")
-        code, err = self.run_main("down")
-        self.assertEqual(code, 0, err)
-        posts = [call for call in self.calls() if call["tool"] == "zenith" and call["args"][0] == "POST"]
-        self.assertEqual([call["args"][1] for call in posts], [f"/pt/api/ai/instances/{INSTANCE}/stop"])
-        self.assertRegex(posts[0]["key"], r"^autotrade-stop-")
-        self.assertFalse(self.key_file("stop").exists())
-        self.assertFalse([call for call in self.calls() if call["tool"] == "dev"])
+    def test_deploy_run_and_sync_refuse_an_instance_that_is_not_running_before_any_transfer(self) -> None:
+        self._tracked_repo()
+        self._seed()
+        (self.repo / ".env").write_text("KEY=value\n", encoding="utf-8")
+        for argv in (("deploy", "data/pit_views_seed_test"), ("run", "scripts/experiments/create_round_test.py"), ("sync", "arm_new")):
+            for env, reason in (({"MOCK_STATE": "STOPPING"}, "is STOPPING, not RUNNING"), ({"MOCK_INSTANCE_EXIT_STATE": "1"}, "instance state")):
+                with self.subTest(command=argv[0], reason=reason):
+                    code, err = self.run_main(*argv, **env)
+                    self.assertEqual(code, 1)
+                    self.assertIn(reason, err)
+        self.assertFalse(self.calls("dev"))
+        self.assertEqual({tuple(call["args"]) for call in self.calls("instance")}, {("state", INSTANCE)})
 
     # ----- deploy -----
 
@@ -229,7 +170,6 @@ class ZgcaWorkflowTest(unittest.TestCase):
 
     def test_deploy_refuses_before_any_transfer(self) -> None:
         self._tracked_repo()
-        self.api.write_text(json.dumps({DETAIL: [_instance("RUNNING")]}), encoding="utf-8")
         refusals = []
         refusals.append((self.run_main("deploy", "data/pit_views_seed_test"), "existing directory"))
         self._seed(release=False)
@@ -252,22 +192,15 @@ class ZgcaWorkflowTest(unittest.TestCase):
             with self.subTest(reason=reason):
                 self.assertEqual(code, 1)
                 self.assertIn(reason, err)
-        self.assertFalse([call for call in self.calls() if call["tool"] == "dev"])
-        # A stopped instance refuses after the local checks, before any transfer.
-        self.api.write_text(json.dumps({DETAIL: [_instance("STOPPED")]}), encoding="utf-8")
-        code, err = self.run_main("deploy", "data/pit_views_seed_test")
-        self.assertEqual(code, 1)
-        self.assertIn("not RUNNING", err)
-        self.assertFalse([call for call in self.calls() if call["tool"] == "dev"])
+        self.assertFalse(self.calls())
 
     def test_deploy_carries_tracked_files_env_seed_and_release_then_prepares(self) -> None:
         self._tracked_repo()
         self._seed()
         (self.repo / ".env").write_text("KEY=value\n", encoding="utf-8")
-        self.api.write_text(json.dumps({DETAIL: [_instance("RUNNING")]}), encoding="utf-8")
         code, err = self.run_main("deploy", "data/pit_views_seed_test")
         self.assertEqual(code, 0, err)
-        dev = [call for call in self.calls() if call["tool"] == "dev"]
+        dev = self.calls("dev")
         self.assertTrue(all(call["instance"] == INSTANCE for call in dev))
         self.assertEqual(dev[0]["args"][2], zgca.REMOTE_SCRIPT.read_text(encoding="utf-8"))
         # Transfers (by destination) and remote steps in the order they ran: the
@@ -292,11 +225,11 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self.assertIn("-H", transfers[4]["args"])
         self.assertNotIn("--delete", transfers[0]["args"])
         # The release was fetched once, from the official URL, and is reused by the next deploy.
-        fetches = [call for call in self.calls() if call["tool"] == "curl"]
+        fetches = self.calls("curl")
         self.assertEqual([call["args"][-1] for call in fetches], [zgca.DUCKDB_CLI_URL])
         self.assertTrue((state / zgca.DUCKDB_CLI_NAME).is_file())
         self.assertEqual(self.run_main("deploy", "data/pit_views_seed_test")[0], 0)
-        self.assertEqual(len([call for call in self.calls() if call["tool"] == "curl"]), 1)
+        self.assertEqual(len(self.calls("curl")), 1)
         # Every transfer is followed by its own dry-run itemization.
         verifications = [call for call in dev if call["args"][:2] == ["rsync", "--dry-run"]]
         self.assertEqual([call["args"][3:] for call in verifications], [call["args"][1:] for call in transfers])
@@ -346,44 +279,30 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self._tracked_repo()
         self._seed()
         (self.repo / ".env").write_text("KEY=value\n", encoding="utf-8")
-        self.api.write_text(json.dumps({DETAIL: [_instance("RUNNING")]}), encoding="utf-8")
         code, err = self.run_main("deploy", "data/pit_views_seed_test", MOCK_RSYNC_DIFF=">f.st...... scripts/x.py\n")
         self.assertEqual(code, 1)
         self.assertIn("differs from its source", err)
-        steps = [call["args"][4] for call in self.calls() if call["tool"] == "dev" and call["args"][:2] == ["bash", "-lc"]]
+        steps = [call["args"][4] for call in self.calls("dev") if call["args"][:2] == ["bash", "-lc"]]
         self.assertEqual(steps, ["dirs"])
 
-    # ----- run, status, sync -----
+    # ----- run, sync -----
 
     def test_run_forwards_the_launcher_arguments_and_refuses_an_untracked_round(self) -> None:
         self._tracked_repo()
-        self.api.write_text(json.dumps({DETAIL: [_instance("RUNNING")]}), encoding="utf-8")
         code, err = self.run_main("run", "untracked.py", "--dry-run")
         self.assertEqual(code, 1)
         self.assertIn("not a tracked file", err)
-        self.assertFalse([call for call in self.calls() if call["tool"] == "dev"])
+        self.assertFalse(self.calls("dev"))
         code, err = self.run_main("run", "scripts/experiments/create_round_test.py", "--dry-run", "arm_one")
         self.assertEqual(code, 0, err)
-        steps = [call["args"][4:] for call in self.calls() if call["tool"] == "dev"]
+        steps = [call["args"][4:] for call in self.calls("dev")]
         self.assertEqual(steps, [["console-up"], ["round", "scripts/experiments/create_round_test.py", "--dry-run", "arm_one"]])
         code, err = self.run_main("run", "scripts/experiments/create_round_test.py", MOCK_STEP_EXIT_CONSOLE_UP="1")
         self.assertEqual(code, 1)
         self.assertIn("console-up failed", err)
         self.assertEqual(self.calls()[-1]["args"][4], "console-up")
 
-    def test_status_reads_the_instance_and_only_a_running_one_over_ssh(self) -> None:
-        self.api.write_text(json.dumps({
-            DETAIL: [_instance("STOPPED", retention={"stopped_at": 1792057411679})],
-            "GET /pt/api/me/card-hours": [CARD_HOURS],
-        }), encoding="utf-8")
-        self.assertEqual(self.run_main("status")[0], 0)
-        self.assertFalse([call for call in self.calls() if call["tool"] == "dev"])
-        self.api.write_text(json.dumps({DETAIL: [_instance("RUNNING")], "GET /pt/api/me/card-hours": [CARD_HOURS]}), encoding="utf-8")
-        self.assertEqual(self.run_main("status")[0], 0)
-        self.assertEqual([call["args"][4] for call in self.calls() if call["tool"] == "dev"], ["status"])
-
     def test_sync_pulls_an_instance_arm_and_refuses_to_overwrite_a_local_one(self) -> None:
-        self.api.write_text(json.dumps({DETAIL: [_instance("RUNNING")]}), encoding="utf-8")
         local = self.repo / "experiments" / "arm_local"
         (local / "hitl").mkdir(parents=True)
         (local / "hitl" / "params.json").write_text(json.dumps({"experiments_root": str(self.repo / "experiments")}), encoding="utf-8")
@@ -396,7 +315,7 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self.assertIn("refusing to overwrite", err)
         code, err = self.run_main("sync", "../escape")
         self.assertEqual(code, 1)
-        self.assertFalse([call for call in self.calls() if call["tool"] == "dev"])
+        self.assertFalse(self.calls("dev"))
         copied = self.repo / "experiments" / "arm_zgca"
         (copied / "hitl").mkdir(parents=True)
         (copied / "hitl" / "params.json").write_text(json.dumps({"experiments_root": f"{zgca.REMOTE_ROOT}/experiments"}), encoding="utf-8")
@@ -404,7 +323,7 @@ class ZgcaWorkflowTest(unittest.TestCase):
             with self.subTest(arm=arm):
                 code, err = self.run_main("sync", arm)
                 self.assertEqual(code, 0, err)
-                dev = [call for call in self.calls() if call["tool"] == "dev"]
+                dev = self.calls("dev")
                 self.assertEqual(dev[-5]["args"][4:], ["arm-state", arm])
                 pull = dev[-4]["args"]
                 self.assertEqual(pull[-2:], [f"dev:{zgca.REMOTE_ROOT}/experiments/{arm}/", f"{self.repo / 'experiments' / arm}/"])
@@ -414,10 +333,15 @@ class ZgcaWorkflowTest(unittest.TestCase):
                 self.log.unlink()
 
     def test_the_tools_must_exist_and_the_remote_script_rejects_unknown_steps(self) -> None:
-        (self.tools / "dev").unlink()
-        code, err = self.run_main("status")
-        self.assertEqual(code, 1)
-        self.assertIn("not executable", err)
+        for name in ("zenith", "instance", "dev"):
+            with self.subTest(tool=name):
+                (self.tools / name).unlink()
+                code, err = self.run_main("status")
+                self.assertEqual(code, 1)
+                self.assertIn(f"{self.tools / name} is not executable", err)
+                (self.tools / name).write_text(TOOLS[name], encoding="utf-8")
+                (self.tools / name).chmod(0o700)
+        self.assertFalse(self.calls())
         with self.assertRaises(SystemExit) as caught:
             zgca.main([], repo_root=self.repo, tools=self.tools)
         self.assertEqual(caught.exception.code, 2)
