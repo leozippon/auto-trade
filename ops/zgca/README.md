@@ -17,7 +17,7 @@ python ops/zgca/zgca.py down
 
 `up` 读实例状态；已是 RUNNING 就直接返回，否则发出一次启动请求，每 5 秒轮询操作直到 SUCCEEDED、再等实例显示 RUNNING，最后确认 SSH 能登录，并打印本周卡时。
 
-`deploy <种子目录>` 先在本机核对：种子目录在 `data/` 下且预构建已完成（没有 `prebuild_unfinished.json`），它的 `provider.json` 指向的 research release 已经发布在 `data/research_releases/` 下，`.env` 存在。然后按顺序同步到开发机的 `/personal_fast_storage/auto-trade`：`git ls-files` 列出的受管文件、`.env`、种子目录、该 release 目录（后两者是精确镜像，带 `--delete`，硬链接保留）；每一次传输之后都用 rsync 的 dry-run 逐项比对，有差异就停下。最后在开发机上执行准备步骤：装 ripgrep（worker 在会话开始前就拒绝没有 `rg` 的宿主）和 tmux，venv 不存在或缺包时用开发机的 miniconda 建 `/personal_fast_storage/envs/quant` 并以可编辑方式安装本仓库（平台镜像缺 tushare 1.4.29，所以加清华作为额外索引），确认 Docker 可达并打印磁盘余量，再用执行器自己的指纹检查判断沙箱镜像：镜像不存在、或者它烤入的策略契约与这份检出不一致，就用旧构建器在默认网桥上重建（`DOCKER_BUILDKIT=0`，平台没有 buildx 也不允许 `--network host`；停机重开后 tag 丢失而层都在时，全部命中缓存约 15 秒），重建后再检查一次，仍不一致即失败。
+`deploy <种子目录>` 先在本机核对：种子目录在 `data/` 下且预构建已完成（没有 `prebuild_unfinished.json`），它的 `provider.json` 指向的 research release 已经发布在 `data/research_releases/` 下，`.env` 存在。然后按顺序同步到开发机的 `/personal_fast_storage/auto-trade`：`git ls-files` 列出的受管文件、`.env`、镜像构建要装的 DuckDB CLI 发布包（开发机访问不到 GitHub，所以由本机下载、按钉住的 SHA-256 核对后带过去）连同这份受管文件清单、种子目录、该 release 目录（后两者是精确镜像，带 `--delete`，硬链接保留）；每一次传输之后都用 rsync 的 dry-run 逐项比对，有差异就停下。清单到位后、传种子之前，开发机按清单清理代码：在含受管文件的顶层目录里删除清单上没有的文件，运行时目录（`data/`、`experiments/`、`logs/`、`results/`、`.runtime/`）从不进入，符号链接、`__pycache__` 和 `*.egg-info` 保留，这样退役的轮次文件不会留在开发机上被启动器或测试读到。最后在开发机上执行准备步骤：装 ripgrep（worker 在会话开始前就拒绝没有 `rg` 的宿主）和 tmux，venv 不存在或缺包时用开发机的 miniconda 建 `/personal_fast_storage/envs/quant` 并以可编辑方式安装本仓库（平台镜像缺 tushare 1.4.29，所以加清华作为额外索引），确认 Docker 可达并打印磁盘余量，再用执行器自己的指纹检查判断沙箱镜像：镜像不存在、或者它烤入的策略契约与这份检出不一致，就用旧构建器在默认网桥上重建（`DOCKER_BUILDKIT=0`，平台没有 buildx 也不允许 `--network host`；停机重开后 tag 丢失而层都在时，全部命中缓存约 15 秒），重建后再检查一次，仍不一致即失败。
 
 `run <轮次文件> [启动器参数...]` 要求轮次文件是仓库里的受管文件（否则 `deploy` 不会把它带过去）。它先确保控制台在 tmux 会话 `autotrade-console` 里以 `AUTOTRADE_GPU_NAME=A100` 运行并回答 `/api/health`，再把启动器放进 tmux 会话 `autotrade-round`，同样带着 `AUTOTRADE_GPU_NAME=A100`，端口由脚本补上，其余参数（`--dry-run`、`--fill`、臂 id）原样传给轮次文件；输出写到开发机的 `logs/zgca/<轮次>_<UTC 时间>.log`，结束时追加一行 `round-exit <退出码>`。上一轮启动器还在跑时拒绝再启动。启动器创建臂之前要先做起步策略的冒烟回放，在 A100 上实测约两小时；通过的记录在开发机的 `logs/research/smoke/` 下按种子、几何与起步策略字节保存，下次直接复用。
 
@@ -41,4 +41,4 @@ python ops/zgca/zgca.py down
 
 ## 已接受的局限
 
-`deploy` 对代码只增不删：本机删除了的受管文件不会从开发机删除。控制台不随 `deploy` 重启，改了代码之后要在没有臂运行时 `~/zgca-compute/dev tmux kill-session -t autotrade-console` 再 `run`。开发机上的容器遥测缺少峰值内存和 GPU 峰值，那是平台 daemon 在另一个 PID 命名空间里的缘故（见 `NOTES.md`）。离线测试在 `tests/unit/test_zgca_workflow.py`，用模拟的 `zenith` 和 `dev`，不访问网络也不启停实例。
+`deploy` 只在仍含受管文件的顶层目录里清理：整个退出版本库的顶层目录、仓库根下不再受管的文件和清理后留下的空目录仍留在开发机上。控制台不随 `deploy` 重启，改了代码之后要在没有臂运行时 `~/zgca-compute/dev tmux kill-session -t autotrade-console` 再 `run`。开发机上的容器遥测缺少峰值内存和 GPU 峰值，那是平台 daemon 在另一个 PID 命名空间里的缘故（见 `NOTES.md`）。离线测试在 `tests/unit/test_zgca_workflow.py`，用模拟的 `zenith` 和 `dev`，不访问网络也不启停实例。

@@ -55,6 +55,34 @@ dirs() {
         "$ROOT/logs/webui" "$ROOT/logs/zgca" "$ROOT/.runtime/zgca"
 }
 
+# Keep only tracked files inside the top-level directories that hold them, by
+# the NUL-separated list the deploy shipped (what rsync copied from). The
+# runtime directories are never entered, symlinks are left alone, and the
+# install's own byproducts (__pycache__, *.egg-info) stay; a retired round
+# file, which the launcher and the tests would still read, goes.
+tracked() {
+    cd "$ROOT"
+    [ -s .runtime/zgca/tracked.txt ] || die "no tracked file list at $ROOT/.runtime/zgca/tracked.txt: deploy ships it"
+    python3 - <<'PY'
+from pathlib import Path
+
+tracked = set(Path(".runtime/zgca/tracked.txt").read_text(encoding="utf-8").split("\0")) - {""}
+runtime = {"data", "experiments", "logs", "results", ".runtime"}
+tops = {entry.split("/", 1)[0] for entry in tracked if "/" in entry} - runtime
+removed = []
+for top in sorted(tops):
+    for path in sorted(Path(top).rglob("*")):
+        if path.is_symlink() or not path.is_file() or path.as_posix() in tracked:
+            continue
+        if "__pycache__" in path.parts or any(part.endswith(".egg-info") for part in path.parts):
+            continue
+        path.unlink()
+        removed.append(path.as_posix())
+print(f"tracked: {len(tracked)} listed; {len(removed)} stale removed under {', '.join(sorted(tops))}"
+      + (": " + ", ".join(removed) if removed else ""))
+PY
+}
+
 # The arms whose worker is active, one id per line (none: empty output).
 active_arms() {
     "$VENV/bin/python" - <<'PY'
@@ -251,6 +279,7 @@ step=${1:-}
 [ $# -eq 0 ] || shift
 case "$step" in
     dirs) dirs ;;
+    tracked) tracked ;;
     prepare) [ $# -eq 1 ] || die "prepare needs the pinned DuckDB CLI digest"; prepare "$1" ;;
     console-up) console_up ;;
     round) [ $# -ge 1 ] || die "round needs the round file"; round "$@" ;;

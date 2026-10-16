@@ -50,6 +50,7 @@ UNFINISHED_SEED_MARKER = "prebuild_unfinished.json"
 DUCKDB_CLI_URL = "https://github.com/duckdb/duckdb/releases/download/v1.1.3/duckdb_cli-linux-amd64.zip"
 DUCKDB_CLI_NAME = "duckdb_cli-linux-amd64.zip"
 DUCKDB_CLI_SHA256 = "efd0fccdb1a28d9ec7a6ebfcde59900068b8ba43a846c9b553c0fd2bbe4acf43"
+TRACKED_LIST_NAME = "tracked.txt"
 POLL_SECONDS = 5
 OPERATION_TIMEOUT_SECONDS = 15 * 60
 SSH_TIMEOUT_SECONDS = 3 * 60
@@ -240,12 +241,11 @@ class Workflow:
 
     # ----- instance shell and transfers -----
 
-    def dev(self, *args: str, stdin: bytes | None = None, capture: bool = False) -> subprocess.CompletedProcess[bytes]:
+    def dev(self, *args: str, capture: bool = False) -> subprocess.CompletedProcess[bytes]:
         env = {**os.environ, "ZGCA_INSTANCE": self.instance}
         return subprocess.run(
             [str(self.tools / "dev"), *args],
-            input=stdin, stdin=None if stdin is not None else subprocess.DEVNULL,
-            stdout=subprocess.PIPE if capture else None, env=env, check=False,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE if capture else None, env=env, check=False,
         )
 
     def remote(self, step: str, *args: str) -> None:
@@ -255,11 +255,11 @@ class Workflow:
         if completed.returncode != 0:
             raise WorkflowError(f"remote step {step} failed (exit {completed.returncode})")
 
-    def rsync(self, *args: str, stdin: bytes | None = None) -> None:
-        completed = self.dev("rsync", *args, stdin=stdin)
+    def rsync(self, *args: str) -> None:
+        completed = self.dev("rsync", *args)
         if completed.returncode != 0:
             raise WorkflowError(f"rsync failed (exit {completed.returncode}): {' '.join(args[-2:])}")
-        verify = self.dev("rsync", "--dry-run", "--itemize-changes", *args, stdin=stdin, capture=True)
+        verify = self.dev("rsync", "--dry-run", "--itemize-changes", *args, capture=True)
         if verify.returncode != 0:
             raise WorkflowError(f"rsync verification failed (exit {verify.returncode}): {' '.join(args[-2:])}")
         if verify.stdout.strip():
@@ -331,15 +331,21 @@ class Workflow:
         if listed.returncode != 0 or not listed.stdout:
             raise WorkflowError("git ls-files listed no tracked files in " + str(self.repo_root))
         duckdb_cli = self.duckdb_cli()
+        # The list rsync copies from is also what the instance keeps: shipped
+        # beside the DuckDB CLI, it lets the `tracked` step remove what is no
+        # longer tracked (a retired round file would otherwise stay and be read).
+        manifest = self.state_dir / TRACKED_LIST_NAME
+        manifest.write_bytes(listed.stdout)
         self.require_running()
         self.remote("dirs")
         preserve = ("-a", "--no-owner", "--no-group")
         say("deploy: tracked files")
-        self.rsync(*preserve, "--files-from=-", "--from0", f"{self.repo_root}/", f"dev:{REMOTE_ROOT}/", stdin=listed.stdout)
+        self.rsync(*preserve, f"--files-from={manifest}", "--from0", f"{self.repo_root}/", f"dev:{REMOTE_ROOT}/")
         say("deploy: .env")
         self.rsync(*preserve, str(env_file), f"dev:{REMOTE_ROOT}/.env")
-        say(f"deploy: {DUCKDB_CLI_NAME}")
-        self.rsync(*preserve, str(duckdb_cli), f"dev:{REMOTE_ROOT}/.runtime/zgca/{DUCKDB_CLI_NAME}")
+        say(f"deploy: {DUCKDB_CLI_NAME} and {TRACKED_LIST_NAME}")
+        self.rsync(*preserve, str(duckdb_cli), str(manifest), f"dev:{REMOTE_ROOT}/.runtime/zgca/")
+        self.remote("tracked")
         say(f"deploy: {seed}")
         self.rsync(*preserve, "-H", "--delete", f"{seed_dir}/", f"dev:{REMOTE_ROOT}/{seed_path.as_posix()}/")
         say(f"deploy: {RELEASES}/{generation}")

@@ -1,8 +1,9 @@
 """Offline contract of ops/zgca/zgca.py: the platform layer is a mock, no network.
 
 The mock `zenith` answers each METHOD PATH from a scripted queue and records
-the idempotency key it was given; the mock `dev` records its arguments, the
-instance it was pointed at, and the file list it received on stdin.
+the idempotency key it was given; the mock `dev` records its arguments and the
+instance it was pointed at. The remote script's `tracked` step, which deletes
+files, runs for real against a temporary root.
 """
 
 from __future__ import annotations
@@ -48,8 +49,6 @@ MOCK_DEV = r'''#!/usr/bin/env python3
 import json, os, sys
 args = sys.argv[1:]
 record = {"tool": "dev", "args": args, "instance": os.environ.get("ZGCA_INSTANCE")}
-if "--files-from=-" in args:
-    record["stdin"] = sys.stdin.read()
 with open(os.environ["MOCK_LOG"], "a") as log:
     log.write(json.dumps(record) + "\n")
 if args[:1] == ["rsync"] and args[1] == "--dry-run":
@@ -270,30 +269,78 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         dev = [call for call in self.calls() if call["tool"] == "dev"]
         self.assertTrue(all(call["instance"] == INSTANCE for call in dev))
-        steps = [call["args"][4:] for call in dev if call["args"][:2] == ["bash", "-lc"]]
-        self.assertEqual(steps, [["dirs"], ["prepare", zgca.DUCKDB_CLI_SHA256]])
         self.assertEqual(dev[0]["args"][2], zgca.REMOTE_SCRIPT.read_text(encoding="utf-8"))
-        transfers = [call for call in dev if call["args"][:1] == ["rsync"] and call["args"][1] != "--dry-run"]
+        # Transfers (by destination) and remote steps in the order they ran: the
+        # tracked list lands before the `tracked` step prunes by it, and both
+        # come before the seed and release.
         remote = zgca.REMOTE_ROOT
-        self.assertEqual(
-            [call["args"][-1] for call in transfers],
-            [f"dev:{remote}/", f"dev:{remote}/.env", f"dev:{remote}/.runtime/zgca/{zgca.DUCKDB_CLI_NAME}",
-             f"dev:{remote}/data/pit_views_seed_test/", f"dev:{remote}/data/research_releases/gen_test/"],
-        )
-        self.assertEqual(transfers[0]["stdin"], "scripts/experiments/create_round_test.py\0")
+        ran = [call["args"][-1] if call["args"][0] == "rsync" else call["args"][4:]
+               for call in dev if call["args"][1] != "--dry-run"]
+        self.assertEqual(ran, [
+            ["dirs"], f"dev:{remote}/", f"dev:{remote}/.env", f"dev:{remote}/.runtime/zgca/", ["tracked"],
+            f"dev:{remote}/data/pit_views_seed_test/", f"dev:{remote}/data/research_releases/gen_test/",
+            ["prepare", zgca.DUCKDB_CLI_SHA256],
+        ])
+        transfers = [call for call in dev if call["args"][:1] == ["rsync"] and call["args"][1] != "--dry-run"]
+        state = self.repo / ".runtime" / "zgca"
+        manifest = state / zgca.TRACKED_LIST_NAME
+        self.assertEqual(manifest.read_bytes(), b"scripts/experiments/create_round_test.py\0")
+        self.assertIn(f"--files-from={manifest}", transfers[0]["args"])
+        self.assertIn("--from0", transfers[0]["args"])
+        self.assertEqual(transfers[2]["args"][-3:-1], [str(state / zgca.DUCKDB_CLI_NAME), str(manifest)])
         self.assertIn("--delete", transfers[3]["args"])
         self.assertIn("-H", transfers[4]["args"])
         self.assertNotIn("--delete", transfers[0]["args"])
         # The release was fetched once, from the official URL, and is reused by the next deploy.
         fetches = [call for call in self.calls() if call["tool"] == "curl"]
         self.assertEqual([call["args"][-1] for call in fetches], [zgca.DUCKDB_CLI_URL])
-        self.assertTrue((self.repo / ".runtime" / "zgca" / zgca.DUCKDB_CLI_NAME).is_file())
+        self.assertTrue((state / zgca.DUCKDB_CLI_NAME).is_file())
         self.assertEqual(self.run_main("deploy", "data/pit_views_seed_test")[0], 0)
         self.assertEqual(len([call for call in self.calls() if call["tool"] == "curl"]), 1)
         # Every transfer is followed by its own dry-run itemization.
         verifications = [call for call in dev if call["args"][:2] == ["rsync", "--dry-run"]]
         self.assertEqual([call["args"][3:] for call in verifications], [call["args"][1:] for call in transfers])
-        self.assertEqual(verifications[0].get("stdin"), transfers[0]["stdin"])
+
+    def test_the_tracked_step_removes_only_untracked_files_below_tracked_directories(self) -> None:
+        root = Path(self.temp.name) / "instance"
+        files = {  # path on the instance: whether the shipped list names it
+            "README.md": True,
+            ".env": False,
+            "scripts/experiments/create_round_kept.py": True,
+            "scripts/experiments/create_round_retired.py": False,
+            "src/pkg/mod.py": True,
+            "src/pkg/__pycache__/mod.cpython-311.pyc": False,
+            "src/pkg.egg-info/PKG-INFO": False,
+            "data/README.md": True,  # a tracked file does not open a runtime directory
+            "data/release/manifest.json": False,
+            "experiments/arm/hitl/status.json": False,
+            "logs/workers/arm.log": False,
+        }
+        for name in files:
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            (root / name).write_text("", encoding="utf-8")
+        (root / "scripts" / "alias.py").symlink_to("experiments/create_round_kept.py")
+        (root / "scripts" / "data_link").symlink_to("../data")
+        script = zgca.REMOTE_SCRIPT.read_text(encoding="utf-8")
+        line = f"ROOT={zgca.REMOTE_ROOT}\n"
+        self.assertEqual(script.count(line), 1)
+        script = script.replace(line, f"ROOT={root}\n")
+
+        def step() -> subprocess.CompletedProcess[str]:
+            return subprocess.run(["bash", "-c", script, "remote.sh", "tracked"], capture_output=True, text=True, check=False)
+
+        missing = step()
+        self.assertEqual(missing.returncode, 1)
+        self.assertIn("no tracked file list", missing.stderr)
+        listed = root / ".runtime" / "zgca" / zgca.TRACKED_LIST_NAME
+        listed.parent.mkdir(parents=True)
+        listed.write_bytes(b"".join(name.encode() + b"\0" for name, named in files.items() if named))
+        pruned = step()
+        self.assertEqual(pruned.returncode, 0, pruned.stderr)
+        self.assertIn("1 stale removed under scripts, src: scripts/experiments/create_round_retired.py", pruned.stdout)
+        left = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_symlink() or path.is_file()}
+        self.assertEqual(left, set(files) - {"scripts/experiments/create_round_retired.py"}
+                         | {"scripts/alias.py", "scripts/data_link", f".runtime/zgca/{zgca.TRACKED_LIST_NAME}"})
 
     def test_deploy_stops_at_a_transfer_that_left_differences(self) -> None:
         self._tracked_repo()
