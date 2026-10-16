@@ -3,9 +3,11 @@
 The round files are data -- arms, seed, dataset selection, directives -- and
 `scripts/experiments/_round.py` is the behaviour, so these checks are written
 once and parametrised over whatever open round files exist. A new round file or
-arm is covered the moment it is added. A closed round is the record of arms
-that were created and is only imported: it must refuse to run, and its ids stay
-used, in RETIRED_IDS once its file has left the tree.
+arm is covered the moment it is added; with none, the steady state between
+rounds, those checks collect nothing and are reported skipped, while the
+launcher's own behaviour is still tested on synthetic rounds. A closed round is
+the record of arms that were created and is only imported: it must refuse to
+run, and its ids stay used, in RETIRED_IDS once its file has left the tree.
 """
 
 from __future__ import annotations
@@ -64,7 +66,6 @@ ROUND_FILES = sorted((REPO_ROOT / "scripts" / "experiments").glob("create_round_
 
 def _rounds() -> dict[str, Round]:
     """Every checked-in round file, closed ones included, by module name."""
-    assert ROUND_FILES, "no round definitions found"
     return {
         path.stem: importlib.import_module(f"scripts.experiments.{path.stem}").ROUND
         for path in ROUND_FILES

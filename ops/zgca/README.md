@@ -5,7 +5,7 @@
 ```bash
 python ops/zgca/zgca.py up
 python ops/zgca/zgca.py deploy data/pit_views_seed_research_8y_fund_20261014b
-python ops/zgca/zgca.py run scripts/experiments/create_round_20261014c.py --dry-run
+python ops/zgca/zgca.py run scripts/experiments/create_round_<轮次>.py --dry-run
 python ops/zgca/zgca.py status
 python ops/zgca/zgca.py sync hcm_100k_8y_sol_dsf_zgca_20261014c
 python ops/zgca/zgca.py down

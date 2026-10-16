@@ -648,6 +648,9 @@ RETIRED_IDS: frozenset[str] = frozenset(
         "open_free_100k_8y_qwen_20261014",
         "open_guidance_100k_8y_qwen_20261008b",
         "open_tables_100k_5y_qwen_20261008b",
+        # Both arms of round 20261014c, on the A100 instance; ended no_deliverable, synced here.
+        "hcm_100k_8y_dsf_zgca_20261014c",
+        "hcm_100k_8y_sol_dsf_zgca_20261014c",
     }
 )
 
