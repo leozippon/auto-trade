@@ -23,6 +23,7 @@ from autotrade.environment.llm import (
     ProviderRefusalError,
     ToolCall,
     build_model_gateway,
+    is_context_overflow_error,
     model_profile,
 )
 from autotrade.environment.llm.lighting import (
@@ -735,6 +736,32 @@ def test_alternate_failure_still_reports_the_original_error(tmp_path: Path):
         proxy.complete([ChatMessage("user", "hi")])
 
     assert caught.value.status_code == 401
+    assert _authorization(transport) == ["Bearer relay-primary", "Bearer relay-alt"]
+
+
+def test_alternate_failure_of_another_kind_surfaces_as_its_own_error(tmp_path: Path):
+    # The alternate key reaches the model, which rejects the prompt as too
+    # long: the caller must see the overflow so its recovery can run, not the
+    # primary's credential error.
+    overflow = LLMProxyError(
+        "provider HTTP error 400: the prompt exceeds the maximum context length",
+        retryable=False,
+        status_code=400,
+    )
+    proxy, transport = _proxy(
+        tmp_path,
+        [
+            LLMProxyError("provider HTTP error 401", retryable=False, status_code=401),
+            overflow,
+        ],
+    )
+
+    # An output budget too small to halve, so the overflow is not shrunk away.
+    with pytest.raises(LLMProxyError, match="maximum context length") as caught:
+        proxy.complete([ChatMessage("user", "hi")], max_tokens=300)
+
+    assert is_context_overflow_error(caught.value)
+    assert caught.value.status_code == 400
     assert _authorization(transport) == ["Bearer relay-primary", "Bearer relay-alt"]
 
 

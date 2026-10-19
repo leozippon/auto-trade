@@ -233,9 +233,11 @@ class LightingProxy(OpenAICompatibleProxy):
                 raise
             _log_credential_switch(self.config.model, error)
             # The alternate key is one more logical call: it logs its own
-            # attempts, and a failure there still reports the original
-            # credential error. The clone carries no alternate key, so a call
-            # can switch at most once.
+            # attempts. When it is rejected too, the original credential error
+            # is reported; any other failure (a context overflow, a transient
+            # fault, a malformed reply) is the alternate call's own outcome and
+            # surfaces as it is, so the caller's recovery sees it. The clone
+            # carries no alternate key, so a call can switch at most once.
             retry = type(self)(
                 replace(self.config, api_key=self.fallback_api_key),
                 transport=self._transport,
@@ -248,8 +250,10 @@ class LightingProxy(OpenAICompatibleProxy):
                     tool_choice=tool_choice,
                     max_tokens=max_tokens,
                 )
-            except LLMProxyError:
-                raise error from None
+            except LLMProxyError as backup_error:
+                if is_credential_failure(backup_error):
+                    raise error from None
+                raise
 
     def _output_token_field(self) -> str:
         if self.config.request_dialect != RESPONSES_DIALECT:
