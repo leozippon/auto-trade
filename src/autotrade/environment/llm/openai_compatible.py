@@ -1179,6 +1179,15 @@ def _parse_stream_response(raw: bytes, *, expected_model: str) -> ProviderRespon
                     assembled["name"] += name
                 if arguments:
                     assembled["arguments"] += arguments
+    if finish_reason is None:
+        # A completed stream names its finish_reason on the last choice chunk
+        # (every one of ~4,400 logged vLLM, DeepSeek, MiMo and relay streams
+        # did); ``[DONE]`` is no such marker, since the relay also sends it
+        # after a mid-stream error chunk. Without one the stream was cut off
+        # and its deltas are a fragment, which the retry policy covers.
+        raise LLMProxyError(
+            "provider stream was cut off before its finish_reason", retryable=True
+        )
     assistant_content = "".join(content)
     if finish_reason == _CONTENT_FILTER_FINISH_REASON:
         raise _provider_refusal(assistant_content)

@@ -639,33 +639,30 @@ def _parse_responses_stream(payload: bytes, *, expected_model: str) -> ProviderR
                 refusal.append(delta)
     if refusal:
         raise _refusal("".join(refusal))
-    if terminal is None and not content and not calls:
-        # Nothing assembled and no terminal event: the stream was cut off or
-        # empty, which the shared retry policy treats as transient.
-        return _responses_provider_response(
-            {"output": []}, expected_model=expected_model
+    if terminal is None:
+        # Every responses stream ends with a completed, incomplete or failed
+        # event. Without one the connection closed early: the deltas so far
+        # are a fragment (text cut mid-sentence, a call with no arguments),
+        # never an answer, and the shared retry policy treats it as transient.
+        raise LLMProxyError(
+            "provider stream was cut off before its terminal event", retryable=True
         )
-    if terminal is not None and not content and not calls:
+    if not content and not calls:
         # A stream whose deltas carried nothing still ends with the whole
         # response on the terminal event.
         return _responses_provider_response(terminal, expected_model=expected_model)
-    usage: Mapping[str, object] = {}
-    model = expected_model
-    output_limited = False
-    if terminal is not None:
-        failure = _responses_failure(terminal)
-        if failure is not None:
-            raise failure
-        usage = _responses_usage(terminal.get("usage"))
-        if terminal.get("model"):
-            model = str(terminal["model"])
-        incomplete = terminal.get("incomplete_details")
-        reason = incomplete.get("reason") if isinstance(incomplete, Mapping) else None
-        # A reply the provider cut off for its content is its refusal, as on
-        # the non-streamed path: the partial text is never an answer.
-        if reason == "content_filter":
-            raise _refusal("")
-        output_limited = reason == "max_output_tokens"
+    failure = _responses_failure(terminal)
+    if failure is not None:
+        raise failure
+    usage = _responses_usage(terminal.get("usage"))
+    model = str(terminal.get("model") or expected_model)
+    incomplete = terminal.get("incomplete_details")
+    reason = incomplete.get("reason") if isinstance(incomplete, Mapping) else None
+    # A reply the provider cut off for its content is its refusal, as on the
+    # non-streamed path: the partial text is never an answer.
+    if reason == "content_filter":
+        raise _refusal("")
+    output_limited = reason == "max_output_tokens"
     assembled = "".join(content)
     built: list[ToolCall] = []
     for key in order:

@@ -225,9 +225,13 @@ def _stream_response(*chunks):
     return ("\n".join(lines) + "\n").encode()
 
 
+# The last choice chunk of a completed tool-call stream, as the providers send it.
+TOOL_CALLS_FINISH = {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}
+
+
 RETRYABLE_PROTOCOL_FAILURES = (
     (
-        _stream_response({"choices": [{"delta": {"content": None}}]}),
+        _stream_response({"choices": [{"delta": {"content": None}, "finish_reason": "stop"}]}),
         ({"type": "function"},),
         "provider response must contain content or tool calls",
     ),
@@ -553,6 +557,7 @@ def test_proxy_reassembles_streamed_native_tool_call():
                 }
             ]
         },
+        TOOL_CALLS_FINISH,
         {"choices": [], "usage": {"total_tokens": 9}},
     ]
     raw = (
@@ -595,6 +600,7 @@ def test_proxy_reassembles_streamed_reasoning_with_native_tool_call():
                 }
             ]
         },
+        TOOL_CALLS_FINISH,
     )
     proxy = DeepSeekProxy(make_config(), transport=FakeTransport([raw]))
 
@@ -1158,6 +1164,7 @@ def test_stream_malformed_tool_call_is_rejected_once_and_keeps_the_assistant_tex
                         }
                     ]
                 },
+                TOOL_CALLS_FINISH,
             )
         ]
     )
@@ -1652,6 +1659,7 @@ def test_local_vllm_uses_shared_stream_parser_without_deepseek_fields():
                         }
                     ],
                 },
+                TOOL_CALLS_FINISH,
                 {"choices": [], "usage": {"total_tokens": 17}},
             )
         ]

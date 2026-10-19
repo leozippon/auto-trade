@@ -679,6 +679,79 @@ def test_streamed_reply_cut_by_the_content_filter_is_a_refusal(tmp_path: Path):
     assert len(transport.bodies) == 1
 
 
+@pytest.mark.parametrize("cut", ["text", "call"])
+def test_a_stream_cut_before_its_terminal_event_is_retried(tmp_path: Path, cut: str):
+    # The connection closed early: the deltas are a fragment -- text cut
+    # mid-sentence, or a call whose arguments never arrived -- never an answer.
+    fragment = {
+        "text": _sse(
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {"id": "msg_1", "type": "message", "role": "assistant"},
+            },
+            {
+                "type": "response.output_text.delta",
+                "item_id": "msg_1",
+                "output_index": 0,
+                "delta": "The first half of an",
+            },
+        ),
+        "call": _sse(
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": _call_item(""),
+            },
+        ),
+    }[cut]
+    proxy, _transport = _proxy(tmp_path, [fragment], max_retries=0)
+    with pytest.raises(LLMProxyError, match="cut off") as caught:
+        proxy.complete([ChatMessage("user", "quote")], tools=TOOLS)
+    assert caught.value.retryable is True
+
+    proxy, transport = _proxy(
+        tmp_path, [fragment, _streamed_call()], max_retries=1, retry_backoff_seconds=0
+    )
+    response = proxy.complete([ChatMessage("user", "quote")], tools=TOOLS)
+    assert response.tool_calls[0].arguments == {"symbol": "600519.SH"}
+    assert len(transport.bodies) == 2
+
+
+def test_a_chat_stream_without_a_finish_reason_is_cut_off_and_retried(tmp_path: Path):
+    """The relay's DeepSeek-V4.1-Flash, 2026-10-15: an error chunk in mid-stream,
+    then usage and [DONE] but no finish_reason. The text before it is a fragment."""
+
+    def chunk(delta: dict[str, object], finish: str | None = None) -> dict[str, object]:
+        return {
+            "object": "chat.completion.chunk",
+            "model": "deepseek-v4.1-flash",
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+        }
+
+    def stream(*items: dict[str, object]) -> bytes:
+        return ("".join(f"data: {json.dumps(item)}\n\n" for item in items) + "data: [DONE]\n").encode()
+
+    cut = stream(
+        chunk({"content": "600519.SH closed at"}),
+        {"error": {"code": "Throttling.ServiceOverloaded", "message": "[Too many requests.]"}},
+        {"choices": [], "usage": {"prompt_tokens": 35_681, "completion_tokens": 0}},
+    )
+    finished = stream(chunk({"content": "600519.SH closed at 1432.50."}), chunk({}, "stop"))
+    proxy, transport = _proxy(
+        tmp_path,
+        [cut, finished],
+        model=RELAY_DEEPSEEK_MODEL,
+        max_retries=1,
+        retry_backoff_seconds=0,
+    )
+
+    response = proxy.complete([ChatMessage("user", "quote")], tools=TOOLS)
+
+    assert response.content == "600519.SH closed at 1432.50."
+    assert len(transport.bodies) == 2
+
+
 def test_alternate_key_completes_after_a_rejected_primary(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ):
