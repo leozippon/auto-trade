@@ -190,7 +190,7 @@ tokenizer = AutoTokenizer.from_pretrained(root)
 model = AutoModelForCausalLM.from_pretrained(root, dtype=torch.bfloat16)
 ```
 
-`AutoModelForCausalLM` loads the Qwen3.5 checkpoints as text-only language models. The hub is unreachable from both containers, so any other model id fails at once. `peft` is installed for adapters, and `flash-linear-attention` and `causal-conv1d` give the Qwen3.5 linear-attention layers their fused GPU kernels. Whatever is trained during a replay is written under `context.state_dir` (`model.save_pretrained(context.state_dir + "/adapter")`, or a `torch.save` of the weights), never into the store.
+`AutoModelForCausalLM` loads the Qwen3.5 checkpoints as text-only language models. The hub is unreachable from both containers, so any other model id fails at once. `peft` is installed for adapters, and `flash-linear-attention` and `causal-conv1d` give the Qwen3.5 linear-attention layers their fused GPU kernels; each container compiles them on first use, so its first GPU forward and first backward each take up to about a minute longer, on the clock of the call that makes them. Whatever is trained during a replay is written under `context.state_dir` (`model.save_pretrained(context.state_dir + "/adapter")`, or a `torch.save` of the weights), never into the store.
 
 ## Runtime restrictions
 

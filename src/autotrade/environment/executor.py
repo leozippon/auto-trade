@@ -371,8 +371,11 @@ class DockerStrategyExecutor:
             "--user",
             "61000:61000",
             "--read-only",
+            # exec: Triton compiles the launcher modules of its kernels into
+            # its cache under /tmp (the image's TRITON_CACHE_DIR) and loads
+            # them from there; Docker mounts a tmpfs noexec unless told.
             "--tmpfs",
-            f"/tmp:rw,noexec,nosuid,nodev,size={limits.tmpfs_size}",
+            f"/tmp:rw,exec,nosuid,nodev,size={limits.tmpfs_size}",
             # Shared memory for multi-process training inside fit(context):
             # without it Docker's 64 MB default makes a torch DataLoader with
             # workers or a joblib memmapped backend fail on a container that

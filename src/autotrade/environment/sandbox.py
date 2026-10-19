@@ -544,7 +544,9 @@ class DockerSandbox:
         command = [
             self.spec.docker_executable, "run", "--pull", "never", "--detach", "--init",
             "--name", self.container, "--network", "none", "--user", self.spec.user,
-            "--read-only", "--tmpfs", f"/tmp:rw,nosuid,nodev,size={self.spec.tmpfs_size}",
+            # exec for Triton's kernel cache, as in the strategy container
+            # (``executor.DockerStrategyExecutor.docker_command``).
+            "--read-only", "--tmpfs", f"/tmp:rw,exec,nosuid,nodev,size={self.spec.tmpfs_size}",
             # Swap ceiling equal to the memory cap: see ``SandboxLimits.memory``
             # for why the two are the same number.
             "--cpus", f"{self.spec.cpus:g}", "--memory", self.spec.memory,
