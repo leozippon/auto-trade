@@ -18,7 +18,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 from autotrade.environment.broker import BrokerProfile
-from autotrade.environment.llm import LOCAL_QWEN_MODEL
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.pipelines import verdict
 from autotrade.pipelines.calendar import ResearchGeometry
@@ -43,8 +42,8 @@ _CONSOLE_CREATE_PRESET: dict[str, object] = {
     "compact_keep_recent_messages": 10,
     "compact_max_calls": 10,
     "compact_max_tokens": 10_000,
-    # Empty: the worker derives it from the model window and output ceiling.
-    "compact_token_threshold": None,
+    # The local window's derived value; empty would derive it per role.
+    "compact_token_threshold": 221_184,
     # Four July-June research years, a forward year, a Held-out quarter.
     "research_start": "20210701",
     "research_end": "20250630",
@@ -62,7 +61,7 @@ _CONSOLE_CREATE_PRESET: dict[str, object] = {
     "max_replay_years": 96,
     "max_research_minutes": 2400,
     "max_llm_calls": 6400,
-    "model": LOCAL_QWEN_MODEL,
+    "model": "DeepSeek-V4.1-Flash",
     # The universe reaches the agent unfiltered; the strategy filters itself.
     "screen_boards": (),
     "screen_exclude_new_listed_days": 0,
@@ -1306,7 +1305,9 @@ class PitViewsSeedParameterTest(unittest.TestCase):
             ledger = ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl")
             self.assertEqual(ledger.read(), [])
             # A worker start resolves the model gateway before it pins.
-            (repo_root / ".env").write_text("VLLM_API_KEY=placeholder\n", encoding="utf-8")
+            (repo_root / ".env").write_text(
+                "VLLM_API_KEY=placeholder\nLIGHTING_API_KEY=placeholder\n", encoding="utf-8"
+            )
             options = load_worker_options(directory, repo_root=repo_root)
             pin = json.loads((directory / "research_release/manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(pin["generation_id"], "gen_seed")
