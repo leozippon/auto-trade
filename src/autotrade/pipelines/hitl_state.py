@@ -21,7 +21,11 @@ from autotrade.environment.gpu import (
     idle_gpus,
     shareable_gpus,
 )
-from autotrade.environment.llm.model_profiles import MODEL_CHOICES
+from autotrade.environment.llm.lighting import (
+    DEEPSEEK_FLASH_MODEL,
+    SHORT_TIER_MAX_COMPACTION_THRESHOLD,
+)
+from autotrade.environment.llm.model_profiles import NL_MODEL_CHOICES
 from autotrade.environment.sandbox import SandboxSpec
 
 from .calendar import GEOMETRY_PARAMETERS
@@ -144,14 +148,22 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     # the stamped params.json always names them; an arm without the key is
     # unrestricted.
     "permitted_boards": None,
-    "model": MODEL_CHOICES[0],
-    "subagent_model": MODEL_CHOICES[0],
-    "nl_model": MODEL_CHOICES[0],
-    "compact_model": MODEL_CHOICES[0],
+    # The conversation roles run on the relay's DeepSeek-V4.1-Flash: hosted
+    # APIs are the operating default, the local model the fallback once the
+    # API quota is exhausted. NL stays on the local model, the only one it may
+    # use (model_profiles.NL_MODEL_CHOICES).
+    "model": DEEPSEEK_FLASH_MODEL,
+    "subagent_model": DEEPSEEK_FLASH_MODEL,
+    "nl_model": NL_MODEL_CHOICES[0],
+    "compact_model": DEEPSEEK_FLASH_MODEL,
     "reasoning_effort": "xhigh",
     "no_thinking": False,
     "disable_context_compact": False,
-    "compact_token_threshold": None,
+    # The value the local model's window derives (262,144 - 32,768 - 8,192),
+    # which is also the most a conversation touching the relay's gpt-6 tier may
+    # use: with the 1M-window default roles the derived bound would be 959,040.
+    # Null still derives it per role.
+    "compact_token_threshold": SHORT_TIER_MAX_COMPACTION_THRESHOLD,
     "compact_keep_recent_messages": 10,
     "compact_max_tokens": 10_000,
     "compact_max_calls": 10,

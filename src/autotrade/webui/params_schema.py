@@ -652,7 +652,7 @@ _FIELDS: list[dict[str, object]] = [
         "type": "int",
         "optional": True,
         "advanced": True,
-        "help": "估算上下文 token 超过该值时触发语义压缩。留空按模型推导：上下文窗口 − 输出上限 − 8,192；填入的值也夹到该上限。",
+        "help": "估算上下文 token 超过该值时触发语义压缩。默认 221,184：本机模型窗口推导出的值，也是用到中转站 gpt-6 的对话允许的上限。留空按各角色模型推导（上下文窗口 − 输出上限 − 8,192，百万窗口的模型约 96 万）；填入的值也夹到该上限。",
     },
     {
         "key": "compact_keep_recent_messages",

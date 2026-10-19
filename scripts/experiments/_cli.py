@@ -22,12 +22,11 @@ from pathlib import Path
 from autotrade.environment.broker import default_permitted_boards
 from autotrade.environment.data.contracts import BENCHMARK_INDEXES
 from autotrade.environment.data.snapshot import SnapshotConfig
-from autotrade.environment.llm import NL_MODEL_CHOICES
+from autotrade.environment.llm import MODEL_CHOICES, NL_MODEL_CHOICES
 from autotrade.environment.runtime import write_json_atomic
 from autotrade.pipelines.calendar import GEOMETRY_PARAMETERS
 from autotrade.pipelines.config import AcceptanceRules
 from autotrade.pipelines.hitl_state import (
-    MODEL_CHOICES,
     WEB_CREATE_DEFAULTS,
     select_gpus,
 )
@@ -37,10 +36,11 @@ from autotrade.pipelines.worker import (
     load_worker_options,
 )
 
-DEFAULT_AGENT_MODEL = MODEL_CHOICES[0]
-DEFAULT_SUBAGENT_MODEL = DEFAULT_AGENT_MODEL
-DEFAULT_NL_MODEL = DEFAULT_AGENT_MODEL
-DEFAULT_COMPACT_MODEL = DEFAULT_AGENT_MODEL
+# The console's defaults, so a headless run and a created arm agree.
+DEFAULT_AGENT_MODEL = str(WEB_CREATE_DEFAULTS["model"])
+DEFAULT_SUBAGENT_MODEL = str(WEB_CREATE_DEFAULTS["subagent_model"])
+DEFAULT_NL_MODEL = str(WEB_CREATE_DEFAULTS["nl_model"])
+DEFAULT_COMPACT_MODEL = str(WEB_CREATE_DEFAULTS["compact_model"])
 
 
 def resolve_research_directive(
@@ -266,10 +266,11 @@ def add_model_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--compact-token-threshold",
         type=int,
+        default=WEB_CREATE_DEFAULTS["compact_token_threshold"],
         help=(
-            "Estimated context tokens that trigger semantic compaction. Omitted "
-            "by default, exactly like the console: the worker then derives one "
-            "threshold per conversation role from that role's model window."
+            "Estimated context tokens that trigger semantic compaction; defaults "
+            "to the console's value. The worker clamps it per conversation role "
+            "to that role's model window minus its output budget and margin."
         ),
     )
     parser.add_argument(

@@ -45,6 +45,9 @@ DEFAULT_BASE_URL = "https://lightingtheword.com/v1"
 RESPONSES_DIALECT = "openai-responses"
 CHAT_DIALECT = "openai"
 DEEPSEEK_DIALECT = "deepseek"
+# The relay's DeepSeek: the console's default for every conversation role
+# (pipelines.hitl_state.WEB_CREATE_DEFAULTS).
+DEEPSEEK_FLASH_MODEL = "DeepSeek-V4.1-Flash"
 
 # (relay model id, request dialect, context window, max output tokens, list
 # prices). Every relay id declares a 1M window, with the relay's own completion
@@ -69,7 +72,7 @@ MODEL_PROFILES: tuple[tuple[str, str, int, int, TokenPrices], ...] = (
     ("claude-sonnet-5-5", CHAT_DIALECT, 1_000_000, 128_000, TokenPrices(2.0, 0.2, 10.0)),
     ("claude-opus-5-5", CHAT_DIALECT, 1_000_000, 128_000, TokenPrices(4.0, 0.2, 20.0)),
     (
-        "DeepSeek-V4.1-Flash",
+        DEEPSEEK_FLASH_MODEL,
         DEEPSEEK_DIALECT,
         1_000_000,
         384_000,
@@ -745,6 +748,7 @@ __all__ = [
     "API_KEY_ALT_ENV",
     "API_KEY_ENV",
     "BASE_URL_ENV",
+    "DEEPSEEK_FLASH_MODEL",
     "DEFAULT_BASE_URL",
     "LONG_CONTEXT_TIER_MODELS",
     "MODEL_CHOICES",

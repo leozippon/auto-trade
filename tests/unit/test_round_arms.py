@@ -132,25 +132,23 @@ def _synthetic_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rnd: Round)
 
 
 @pytest.mark.parametrize("round_name", ROUND_IDS)
-def test_every_round_runs_on_the_local_model_unless_an_arm_declares_a_hosted_role(round_name: str) -> None:
-    """Cost policy: an arm opens a hosted stream only where its own entry says so.
-
-    The console defaults pin every role to the local model (BASE_EXPECTED_DEFAULTS,
-    which check_console_defaults guards against drift), so a hosted role is always
-    an arm's explicit declaration in its round file. Text-evidence scoring is never
+def test_every_arm_runs_its_unnamed_roles_on_the_pinned_defaults_and_nl_locally(round_name: str) -> None:
+    """A role an arm does not name runs on the console default, which
+    BASE_EXPECTED_DEFAULTS pins against drift, so another model is always an
+    arm's explicit declaration in its round file. Text-evidence scoring is never
     hosted: it also runs in the forward and Held-out replays, whose data must not
     leave the machine.
     """
     rnd = ROUNDS[round_name]
     rnd.check_console_defaults()
+    assert BASE_EXPECTED_DEFAULTS["nl_model"] == LOCAL_QWEN_MODEL
     for experiment_id in (PROBE_ID, *rnd.arms):
         params = rnd.request_params(experiment_id)
         declared = rnd.arms.get(experiment_id, {})
+        assert params["nl_model"] == LOCAL_QWEN_MODEL, experiment_id
         for role in MODEL_ROLES:
-            assert BASE_EXPECTED_DEFAULTS[role] == LOCAL_QWEN_MODEL, role
-            if role in declared and role != "nl_model":
-                continue
-            assert params[role] == LOCAL_QWEN_MODEL, (experiment_id, role)
+            if role not in declared:
+                assert params[role] == BASE_EXPECTED_DEFAULTS[role], (experiment_id, role)
 
 
 def test_the_shared_geometry_is_the_one_seeds_are_planned_over() -> None:
@@ -435,6 +433,8 @@ def test_a_round_leaves_the_boards_to_the_capital_unless_it_names_them(monkeypat
 # the only tests here that fake it: the health record it reads and the create
 # request it sends.
 FILL_ARMS = ("fill_first", "fill_second", "fill_third")
+# Both session roles on the local model: the arm counts against the local limit.
+LOCAL_ROLES = {"model": LOCAL_QWEN_MODEL, "subagent_model": LOCAL_QWEN_MODEL}
 # The one line a timer run logs: its local time with offset, then the counts.
 SUMMARY = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2} fill launcher: (.*)$")
 
@@ -454,11 +454,12 @@ def _fill_round(
     ``local`` and ``hosted`` are how many arms of each kind the console is
     running against its two limits (it has no free GPU), ``created`` the arms
     whose experiment directory already exists, ``arms`` what each arm decides
-    for itself (an arm that names no model role is local, one that names no
-    ``gpu_count`` runs on CPU like the round). The returned list records, in
+    for itself (by default each names the local model for both session
+    roles, so it is a local arm; one that names no ``gpu_count`` runs on CPU
+    like the round). The returned list records, in
     order, the ids a create request was actually sent for.
     """
-    rnd = Round(arms=arms or {arm: {} for arm in FILL_ARMS}, pit_views_seed="data/seed_probe")
+    rnd = Round(arms=arms or {arm: dict(LOCAL_ROLES) for arm in FILL_ARMS}, pit_views_seed="data/seed_probe")
     _synthetic_repo(tmp_path, monkeypatch, rnd)
     for experiment_id in created:
         (tmp_path / "experiments" / experiment_id).mkdir(parents=True)
@@ -575,7 +576,7 @@ def test_a_fill_holds_a_local_arm_at_the_local_limit_and_creates_the_hosted_one_
     """The local arms at the head and the tail of the queue stay pending, the
     hosted arm between them takes a free slot, and holding is the steady
     state, not a refusal."""
-    arms = {arm: {} for arm in FILL_ARMS}
+    arms = {arm: dict(LOCAL_ROLES) for arm in FILL_ARMS}
     arms["fill_second"] = dict(HOSTED_ROLES)
     rnd, posted = _fill_round(tmp_path, monkeypatch, local=MAX_RUNNING_LOCAL_EXPERIMENTS, arms=arms)
     assert rnd.main(["launcher", "0", "--fill", "--dry-run"]) == 0
@@ -634,7 +635,7 @@ def test_a_fill_past_a_held_local_arm_still_stops_at_any_refusal(
     """Only the local limit holds an arm back; the pre-flight refusing the
     hosted arm behind it stops the run as before, with nothing sent after it."""
     arms = {arm: dict(HOSTED_ROLES) for arm in FILL_ARMS}
-    arms["fill_first"] = {}
+    arms["fill_first"] = dict(LOCAL_ROLES)
     arms["fill_second"] = {**HOSTED_ROLES, "research_end": "20250331"}
     rnd, posted = _fill_round(tmp_path, monkeypatch, local=MAX_RUNNING_LOCAL_EXPERIMENTS, arms=arms)
     assert rnd.main(["launcher", "0", "--fill"]) == 1

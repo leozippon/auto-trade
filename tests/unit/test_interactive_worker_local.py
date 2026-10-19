@@ -1152,8 +1152,8 @@ def test_preflight_narrows_exactly_three_things_and_nothing_else(
     """
     from autotrade.pipelines.worker import resolve_worker_options
 
-    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-    monkeypatch.delenv("VLLM_API_KEY", raising=False)
+    for name in ("DEEPSEEK_API_KEY", "LIGHTING_API_KEY", "LIGHTING_API_KEY_ALT", "VLLM_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
     repo = tmp_path / "repo"
     experiments_root = repo / "experiments"
     experiments_root.mkdir(parents=True)
@@ -1180,8 +1180,12 @@ def test_preflight_narrows_exactly_three_things_and_nothing_else(
     (repo / "data/raw").mkdir(parents=True)
     (repo / "data/pit/fundamental_events").mkdir(parents=True)
 
-    # (2) the API key: deployment state, reported by /api/health.
+    # (2) the API keys: deployment state, reported by /api/health. The
+    # conversation roles default to the relay, NL to the local model.
     assert resolve(True) is not None
+    with pytest.raises(ValueError, match="requires an API key: set LIGHTING_API_KEY"):
+        resolve(False)
+    monkeypatch.setenv("LIGHTING_API_KEY", "test-only-key")
     with pytest.raises(ValueError, match="requires an API key: set VLLM_API_KEY"):
         resolve(False)
 

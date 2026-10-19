@@ -13,9 +13,9 @@ Two decisions are shared rather than per-round because the console runs rounds
 side by side and their verdicts only compare while they agree: BASE_OVERRIDES
 carries the research geometry, the account, the cost stress and the
 per-session budgets, and BASE_EXPECTED_DEFAULTS pins the console creation
-defaults every round relies on -- above all the model roles, which no round
-overrides, so a rename of the local model must stop the launcher rather than
-silently move an arm onto a hosted stream. A round states what it decides for
+defaults every round relies on -- above all the model roles an arm does not
+name, so a change of the console's model defaults must stop the launcher
+rather than silently move an arm onto another model. A round states what it decides for
 itself in `overrides`, and anything it states there stops being an expected
 default. What several rounds
 send alike -- a geometry, the graduation bars, a model pair's hosted roles, a
@@ -189,14 +189,16 @@ BASE_EXPECTED_DEFAULTS: dict[str, object] = {
     "reasoning_effort": "xhigh",
     "inference_time": "08:30",
     "strategy_period": "day",
-    # Every model role. An arm on the local model overrides none of them (a
-    # hosted arm overrides its own, `_profiles.MIMO`), so the console default
-    # is what actually decides them; spelled out as literals on purpose, since
-    # a rename of the local model is exactly the drift this has to catch.
-    "model": "qwen-3.8-27b-fp8",
-    "subagent_model": "qwen-3.8-27b-fp8",
+    # Every model role, as the console defaults it: the relay's
+    # DeepSeek-V4.1-Flash for the conversation roles, the local model for NL,
+    # the one role that must stay local. A role an arm does not name runs on
+    # these; spelled out as literals on purpose, since a change of a console
+    # default is exactly the drift this has to catch. An arm that wants the
+    # local model for a conversation role names it.
+    "model": "DeepSeek-V4.1-Flash",
+    "subagent_model": "DeepSeek-V4.1-Flash",
     "nl_model": "qwen-3.8-27b-fp8",
-    "compact_model": "qwen-3.8-27b-fp8",
+    "compact_model": "DeepSeek-V4.1-Flash",
     # Left to the console, which stamps the boards the arm's initial cash
     # qualifies for (`broker.default_permitted_boards`); a round that wants
     # others names them.

@@ -166,17 +166,18 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
         "compact_max_calls",
     ]
     assert fields["model"]["choices"] == list(MODEL_CHOICES)
-    assert fields["model"]["default"] == LOCAL_QWEN_MODEL
+    # The conversation roles default to the relay's DeepSeek-V4.1-Flash.
+    for role in ("model", "subagent_model", "compact_model"):
+        assert fields[role]["default"] == "DeepSeek-V4.1-Flash", role
     assert fields["subagent_model"]["choices"] == fields["model"]["choices"]
-    assert fields["subagent_model"]["default"] == LOCAL_QWEN_MODEL
     assert fields["nl_model"]["default"] == LOCAL_QWEN_MODEL
     # NL also answers in the forward and Held-out replays, unmetered: no
     # hosted model is offered for it.
     assert fields["nl_model"]["choices"] == [LOCAL_QWEN_MODEL]
-    assert fields["compact_model"]["default"] == LOCAL_QWEN_MODEL
     assert fields["reasoning_effort"]["default"] == "xhigh"
-    # Empty = derived from the model window by the worker.
-    assert fields["compact_token_threshold"]["default"] is None
+    # The local window's derived value, kept by the 1M-window defaults; an
+    # empty field still derives it per role from the model windows.
+    assert fields["compact_token_threshold"]["default"] == 221_184
     assert fields["compact_token_threshold"]["optional"] is True
     assert fields["compact_keep_recent_messages"]["default"] == 10
     assert fields["compact_max_tokens"]["default"] == 10_000
@@ -276,7 +277,8 @@ def test_cli_exposes_distinct_session_and_subagent_model_choices() -> None:
     parser = argparse.ArgumentParser()
     add_model_arguments(parser)
     defaults = parser.parse_args([])
-    assert defaults.model == defaults.subagent_model == LOCAL_QWEN_MODEL
+    assert defaults.model == defaults.subagent_model == WEB_CREATE_DEFAULTS["model"]
+    assert defaults.nl_model == LOCAL_QWEN_MODEL
     assert not hasattr(defaults, "meta_model")
     mixed = parser.parse_args(
         ["--model", "deepseek-flash", "--subagent-model", LOCAL_QWEN_MODEL]
@@ -1502,7 +1504,7 @@ class WebuiBackendTest(unittest.TestCase):
         running = self._running_arms(local=MAX_RUNNING_LOCAL_EXPERIMENTS, hosted=0)
         local_names = ", ".join(sorted(running))
         for experiment_id, roles in (
-            ("exp_local", {}),
+            ("exp_local", {"model": LOCAL_QWEN_MODEL, "subagent_model": LOCAL_QWEN_MODEL}),
             ("exp_local_main", {**hosted, "model": LOCAL_QWEN_MODEL}),
             ("exp_local_subagents", {**hosted, "subagent_model": LOCAL_QWEN_MODEL}),
         ):
@@ -1518,6 +1520,9 @@ class WebuiBackendTest(unittest.TestCase):
                 self.assertFalse((self.experiments_root / experiment_id).exists())
         created = self._create_under(running, "exp_hosted", **hosted)
         self.assertEqual(created["experiment_id"], "exp_hosted")
+        # The console's default roles are hosted, so a default arm is too.
+        created = self._create_under(running, "exp_default")
+        self.assertEqual(created["experiment_id"], "exp_default")
 
     def test_health_and_listing_report_both_limits_and_the_roster_by_kind(self) -> None:
         running = self._running_arms(local=1, hosted=1)
@@ -1606,7 +1611,11 @@ class WebuiBackendTest(unittest.TestCase):
 
         manager = ExperimentManager(self.repo_root, self.experiments_root)
         params_path = self.experiments_root / "exp_hitl/hitl/params.json"
-        local_params = json.loads(params_path.read_text(encoding="utf-8"))
+        local_params = {
+            **json.loads(params_path.read_text(encoding="utf-8")),
+            "model": LOCAL_QWEN_MODEL,
+            "subagent_model": LOCAL_QWEN_MODEL,
+        }
         hosted_params = {
             **local_params,
             "model": MIMO_FLASH_MODEL,
