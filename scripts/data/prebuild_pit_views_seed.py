@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Prebuild the exploration PIT view seed (docs/data-documentation.md §3.4).
 
-Pins the current research generation, plans the seed of one research geometry
+Pins the current research generation (or, with ``--generation-id``, a release that is
+already published), plans the seed of one research geometry
 (``pit_views_seed.plan_seed``) and writes the completed decision views and
 replay slots into ``data/pit_views_seed/explore/``. That tree is not a
 live worker cache_root. New experiments hardlink it when ``provider.json``
@@ -143,6 +144,15 @@ def build_parser() -> argparse.ArgumentParser:
         "Default: <repo>/data/pit_views_seed/explore_workspace",
     )
     parser.add_argument("--raw-dir", type=Path, default=None)
+    parser.add_argument(
+        "--generation-id",
+        default=None,
+        help=(
+            "pin this already published research release instead of the newest committed "
+            "generation (no updater lock is consulted); a seed meant for a host that already "
+            "holds one release is built on it"
+        ),
+    )
     parser.add_argument("--fundamental-events-root", type=Path, default=None)
     parser.add_argument("--fundamental-events-status", type=Path, default=None)
     geometry = parser.add_argument_group(
@@ -261,6 +271,7 @@ def main(argv: list[str] | None = None) -> int:
         fundamental_events_status=events_status,
         config=config,
         cache_root=cache_root,
+        generation_id=args.generation_id,
     )
     plan = plan_seed(geometry, provider.trading_days)
     jobs = plan.jobs

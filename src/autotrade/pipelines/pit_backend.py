@@ -149,6 +149,7 @@ class ResearchPITSnapshotProvider:
         cache_root: str | Path | None = None,
         pit_views_seed: str | Path | None = None,
         pit_views_seed_required: bool = False,
+        generation_id: str | None = None,
     ) -> None:
         self.experiment_dir = Path(experiment_dir).resolve()
         self.config = config or SnapshotConfig()
@@ -158,6 +159,7 @@ class ResearchPITSnapshotProvider:
             fundamental_events_root=fundamental_events_root,
             fundamental_events_status=fundamental_events_status,
             required_raw_datasets=required_release_raw_datasets(self.config),
+            generation_id=generation_id,
         )
         self.cache_root = Path(cache_root).resolve() if cache_root is not None else self.experiment_dir / "pit_views"
         self.cache_root.mkdir(parents=True, exist_ok=True)
