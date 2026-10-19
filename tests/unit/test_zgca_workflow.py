@@ -332,6 +332,53 @@ class ZgcaWorkflowTest(unittest.TestCase):
                 self.assertEqual(dev[-2]["args"][-2:], [f"dev:{zgca.REMOTE_ROOT}/logs/workers/{arm}.log", f"{self.repo / 'logs' / 'workers' / arm}.log"])
                 self.log.unlink()
 
+    def test_sync_stops_before_any_transfer_when_the_arm_state_step_refuses(self) -> None:
+        code, err = self.run_main("sync", "arm_running", MOCK_STEP_EXIT_ARM_STATE="1")
+        self.assertEqual(code, 1)
+        self.assertIn("remote step arm-state failed", err)
+        self.assertEqual([call["args"][:1] for call in self.calls("dev")], [["bash"]])
+
+    def test_the_arm_state_step_refuses_an_arm_whose_worker_runs(self) -> None:
+        """The console's own notion of a running arm decides, run for real against a temporary root."""
+        from autotrade.pipelines.hitl_state import proc_start_ticks
+
+        base = Path(self.temp.name)
+        root, venv = base / "instance", base / "venv"
+        (venv / "bin").mkdir(parents=True)
+        (venv / "bin" / "python").write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8")
+        (venv / "bin" / "python").chmod(0o700)
+        live = {"state": "running_session", "pid": os.getpid(), "pid_start_ticks": proc_start_ticks(os.getpid())}
+        arms = {
+            "arm_live": live,
+            # A worker that is gone no longer writes, whatever its last state said.
+            "arm_gone": {**live, "pid_start_ticks": live["pid_start_ticks"] + 1},
+            "arm_done": {"state": "completed", "verdict": "pass", "pid": None},
+        }
+        for arm, record in arms.items():
+            (root / "experiments" / arm / "hitl").mkdir(parents=True)
+            (root / "experiments" / arm / "hitl" / "status.json").write_text(json.dumps(record), encoding="utf-8")
+        script = zgca.REMOTE_SCRIPT.read_text(encoding="utf-8")
+        for line, replacement in ((f"ROOT={zgca.REMOTE_ROOT}\n", f"ROOT={root}\n"),
+                                  ("VENV=/personal_fast_storage/envs/quant\n", f"VENV={venv}\n")):
+            self.assertEqual(script.count(line), 1)
+            script = script.replace(line, replacement)
+
+        def step(arm: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(["bash", "-c", script, "remote.sh", "arm-state", arm], capture_output=True, text=True, check=False)
+
+        refused = step("arm_live")
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("arm_live: state running_session", refused.stdout)
+        self.assertIn("arm_live is still running", refused.stderr)
+        for arm in ("arm_gone", "arm_done"):
+            with self.subTest(arm=arm):
+                shown = step(arm)
+                self.assertEqual(shown.returncode, 0, shown.stderr)
+                self.assertIn(f"{arm}: state {arms[arm]['state']}", shown.stdout)
+        missing = step("arm_absent")
+        self.assertEqual(missing.returncode, 1)
+        self.assertIn("no arm arm_absent", missing.stderr)
+
     def test_the_tools_must_exist_and_the_remote_script_rejects_unknown_steps(self) -> None:
         for name in ("zenith", "instance", "dev"):
             with self.subTest(tool=name):

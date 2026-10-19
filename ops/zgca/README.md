@@ -21,9 +21,9 @@ python ops/zgca/zgca.py down
 
 `run <轮次文件> [启动器参数...]` 要求轮次文件是仓库里的受管文件（否则 `deploy` 不会把它带过去）。它先确保控制台在 tmux 会话 `autotrade-console` 里以 `AUTOTRADE_GPU_NAME=A100` 运行并回答 `/api/health`，再把启动器放进 tmux 会话 `autotrade-round`，同样带着 `AUTOTRADE_GPU_NAME=A100`，端口由脚本补上，其余参数（`--dry-run`、`--fill`、臂 id）原样传给轮次文件；输出写到开发机的 `logs/zgca/<轮次>_<UTC 时间>.log`，结束时追加一行 `round-exit <退出码>`。上一轮启动器还在跑时拒绝再启动。启动器创建臂之前要先做起步策略的冒烟回放，在 A100 上实测约两小时；通过的记录在开发机的 `logs/research/smoke/` 下按种子、几何与起步策略字节保存，下次直接复用。
 
-`status` 先用 `instance show` 打印实例状态与卡时；实例在运行时再登录一次，打印 tmux 会话、控制台健康（含空闲槽位与空闲 GPU）、每条活动臂的状态、阶段与心跳距今的秒数、GPU 占用、根盘与个人存储余量、沙箱镜像，以及最近一份启动器日志的末尾三行。
+`status` 先用 `instance show` 打印实例状态与卡时；实例在运行时再登录一次，打印 tmux 会话、控制台健康（含空闲槽位与空闲 GPU）、每条在跑臂的状态、阶段与心跳距今的秒数（worker 已不在却没有结束的臂单独标出）、GPU 占用、根盘与个人存储余量、沙箱镜像，以及最近一份启动器日志的末尾三行。
 
-`sync <臂 id>` 把开发机上这条臂的实验目录（不含 `pit_views/`，那是可从种子重建的 12 GB 缓存）和 `logs/workers/<臂>.log` 拉回本仓库，拉回后同样 dry-run 比对。本地已有同名目录时，只有它的 `hitl/params.json` 记着开发机的实验根（即以前从开发机同步来的副本）才会更新，本机自己的臂一律拒绝覆盖。臂还在跑时也能同步，先打印它当前的状态。
+`sync <臂 id>` 把开发机上这条臂的实验目录（不含 `pit_views/`，那是可从种子重建的 12 GB 缓存）和 `logs/workers/<臂>.log` 拉回本仓库，拉回后同样 dry-run 比对。本地已有同名目录时，只有它的 `hitl/params.json` 记着开发机的实验根（即以前从开发机同步来的副本）才会更新，本机自己的臂一律拒绝覆盖。同步前先打印臂当前的状态；臂还在跑时拒绝同步，因为它的 `status.json` 每几秒改写一次、日志不断增长，拷贝过不了比对，等它结束再同步。“在跑”与 `status` 和镜像重建的判定都用控制台自己的规则（`hitl_state.running_arms`：worker 进程活着且状态没有结束）。
 
 `down` 就是 `instance stop`：等到 STOPPED 后打印卡时。它不问也不检查有没有臂在跑：先看 `status`，由调用者决定。
 

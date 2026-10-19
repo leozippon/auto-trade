@@ -83,21 +83,12 @@ print(f"tracked: {len(tracked)} listed; {len(removed)} stale removed under {', '
 PY
 }
 
-# The arms whose worker is active, one id per line (none: empty output).
-active_arms() {
-    "$VENV/bin/python" - <<'PY'
-import json
-from pathlib import Path
-
-active = {"launching", "initializing", "running_session", "paused"}
-for status in sorted(Path("experiments").glob("*/hitl/status.json")):
-    try:
-        state = json.loads(status.read_text(encoding="utf-8")).get("state")
-    except (OSError, ValueError):
-        state = "unreadable"
-    if state in active or state == "unreadable":
-        print(status.parent.parent.name)
-PY
+# The arms whose worker is alive and has not ended -- the console's own
+# notion, hitl_state.running_arms -- one id per line (none: empty output).
+running_arms() {
+    "$VENV/bin/python" -c 'import sys
+from autotrade.pipelines.hitl_state import running_arms
+sys.stdout.writelines(f"{arm}\n" for arm in running_arms(sys.argv[1]))' "$ROOT/experiments"
 }
 
 # The legacy builder on the platform's bridge network (no buildx, no host
@@ -129,12 +120,12 @@ build_image() {
 # layer does not and dies of ENOSPC after downloading everything. Nothing
 # predicts which it will be, so the build is tried as is and only an
 # out-of-disk failure clears the store -- every unused image and stopped
-# container -- for one cold rebuild. An arm whose worker is active runs on the
-# image it pinned, so no rebuild is attempted beside it.
+# container -- for one cold rebuild. A running arm runs on the image it
+# pinned, so no rebuild is attempted beside it.
 rebuild_image() {
-    local digest=$1 active log
-    active=$(active_arms | tr '\n' ' ')
-    [ -z "$active" ] || die "the sandbox image must be rebuilt, but arms are active (${active% }) and the disk cannot hold a second image beside the one they run on; wait for them to end"
+    local digest=$1 running log
+    running=$(running_arms | tr '\n' ' ')
+    [ -z "$running" ] || die "the sandbox image must be rebuilt, but arms are running (${running% }) and the disk cannot hold a second image beside the one they run on; wait for them to end"
     log="logs/zgca/image_build_$(date -u +%Y%m%dT%H%M%SZ).log"
     if ! build_image "$log" "$digest"; then
         grep -q "No space left on device" "$log" || die "the image build failed (see $ROOT/$log)"
@@ -227,7 +218,9 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-active = {"launching", "initializing", "running_session", "paused"}
+from autotrade.pipelines.hitl_state import ENDED_STATES, running_arms
+
+running = set(running_arms("experiments"))
 rows, ended = [], 0
 for status in sorted(Path("experiments").glob("*/hitl/status.json")):
     name = status.parent.parent.name
@@ -237,13 +230,16 @@ for status in sorted(Path("experiments").glob("*/hitl/status.json")):
         rows.append(f"{name}: status unreadable ({exc})")
         continue
     state = str(record.get("state") or "")
-    if state not in active:
-        ended += 1
+    if name not in running:
+        if state in ENDED_STATES:
+            ended += 1
+        else:
+            rows.append(f"{name}: {state}, but its worker is gone (interrupted)")
         continue
     beat = record.get("heartbeat_at")
     age = f"{time.time() - datetime.fromisoformat(str(beat)).timestamp():.0f} s ago" if beat else "none"
     rows.append(f"{name}: {state}, stage {record.get('environment_stage') or '-'}, heartbeat {age}, pid {record.get('pid')}")
-print(f"arms: {len(rows)} active, {ended} ended")
+print(f"arms: {len(running)} running, {ended} ended")
 for row in rows:
     print("  " + row)
 PY
@@ -261,17 +257,29 @@ PY
     if [ -n "$latest" ]; then echo "round log: $latest"; tail -n 3 "$latest" | sed 's/^/  /'; fi
 }
 
+# One arm's recorded state, and a refusal while it runs: a running arm
+# rewrites its status every few seconds and grows its worker log, so no copy
+# of it could pass the transfer's verification.
 arm_state() {
     local arm=$1 status="$ROOT/experiments/$1/hitl/status.json"
     require_venv
     [ -f "$status" ] || die "no arm $arm on the instance ($status is missing)"
-    "$VENV/bin/python" - "$status" "$arm" <<'PY'
+    "$VENV/bin/python" - "$ROOT/experiments" "$arm" <<'PY'
 import json
 import sys
+from pathlib import Path
 
-record = json.load(open(sys.argv[1], encoding="utf-8"))
+from autotrade.pipelines.hitl_state import running_arms
+
+root, arm = Path(sys.argv[1]), sys.argv[2]
+record = json.loads((root / arm / "hitl" / "status.json").read_text(encoding="utf-8"))
 state, verdict = record.get("state"), record.get("verdict") or "-"
-print(f"{sys.argv[2]}: state {state}, verdict {verdict}, sessions {record.get('completed_sessions')}/{record.get('total_sessions')}")
+print(f"{arm}: state {state}, verdict {verdict}, sessions {record.get('completed_sessions')}/{record.get('total_sessions')}")
+if arm in running_arms(root):
+    sys.exit(
+        f"ERROR: {arm} is still running (worker pid {record.get('pid')}): its status and log change "
+        "every few seconds, so a copy cannot be verified; sync it after it ends"
+    )
 PY
 }
 
