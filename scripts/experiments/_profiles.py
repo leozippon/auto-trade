@@ -169,6 +169,17 @@ SLEEVE_LINEAGE = [*COMMITMENT_LINEAGE, "open_commit_100k_8y_qwen_20261014"]
 # same two and closed: the lineage of a later sleeve search (round 20261008b).
 ENSEMBLE_LINEAGE = [*SLEEVE_LINEAGE, "open_ensemble_100k_8y_qwen_20261015"]
 
+# The four arms of rounds 20261014c and 20261014d that tested hierarchical
+# continual memory on a numeric model (one pack, nine full-span legs replayed
+# on two card models): the family a later HCM arm on another carrier
+# continues (round 20261019).
+HCM_LINEAGE = [
+    "hcm_100k_8y_sol_qwen_20261014d",
+    "hcm_100k_8y_sol_dsf_20261014d",
+    "hcm_100k_8y_dsf_zgca_20261014c",
+    "hcm_100k_8y_sol_dsf_zgca_20261014c",
+]
+
 # Every arm that searched the fundamentals domain over the eight years as a
 # source of its own edge and recorded a non-control trial (rounds 20261005 to
 # 20261010): the open, event, industry-cycle and learning lanes. Left out:
