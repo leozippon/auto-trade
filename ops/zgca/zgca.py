@@ -5,13 +5,14 @@ Every step goes through the platform layer in ~/zgca-compute (`instance` to
 show, start and stop the one instance as idempotent intents, `dev` for SSH and
 rsync to it, both over `zenith`) and verifies its own result: up and down are
 `instance start` and `instance stop`; a deploy carries the tracked files, the
-local .env, the named PIT view seed and the research release that seed was
-built from, prunes code the tree no longer tracks, then prepares the instance
-(venv, ripgrep, tmux, sandbox image) through ops/zgca/remote.sh; a run starts
-the console and a round launcher in tmux with AUTOTRADE_GPU_NAME set; status
-and sync read and copy back. Nothing here schedules, caches an endpoint, holds
-a secret or changes how the executor isolates a strategy container. See
-ops/zgca/README.md.
+model gateways' keys from the local .env (only the keys the model profiles
+name, written owner-only), the named PIT view seed and the research release
+that seed was built from, prunes code the tree no longer tracks, then prepares
+the instance (venv, ripgrep, tmux, sandbox image) through ops/zgca/remote.sh; a
+run starts the console and a round launcher in tmux with AUTOTRADE_GPU_NAME
+set; status and sync read and copy back. Nothing here schedules, caches an
+endpoint, keeps a secret in the repository or changes how the executor
+isolates a strategy container. See ops/zgca/README.md.
 
 usage: zgca.py up | deploy <seed dir> | run <round file> [launcher args...] |
        status | sync <arm id> | down
@@ -64,6 +65,33 @@ def say(message: str) -> None:
     print(f"{datetime.now(tz=UTC):%H:%M:%S}Z {message}", flush=True)
 
 
+def gateway_env(env_file: Path) -> bytes:
+    """The lines of ``env_file`` that set a key some model gateway reads.
+
+    The model profiles name those keys (``gateway_env_names``), parsed as the
+    gateways parse the file; everything else in it (the TuShare tokens,
+    HF_TOKEN) stays on this host.
+    """
+
+    src = str(REPO_ROOT / "src")
+    if src not in sys.path:  # the script also runs on the system python3
+        sys.path.insert(0, src)
+    from autotrade.environment.llm.model_profiles import gateway_env_names
+
+    names = set(gateway_env_names())
+    kept = []
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        if key.startswith("export "):
+            key = key[7:].strip()
+        if key in names:
+            kept.append(stripped + "\n")
+    return "".join(kept).encode("utf-8")
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -92,12 +120,15 @@ class Workflow:
 
     # ----- platform entries -----
 
-    def call(self, tool: str, *args: str, capture: bool = False) -> subprocess.CompletedProcess[bytes]:
-        """One run of a ~/zgca-compute entry (`instance`, `dev`), pointed at the pinned instance."""
+    def call(
+        self, tool: str, *args: str, capture: bool = False, data: bytes | None = None
+    ) -> subprocess.CompletedProcess[bytes]:
+        """One run of a ~/zgca-compute entry (`instance`, `dev`), pointed at the pinned instance; ``data`` is its stdin."""
         env = {**os.environ, "ZGCA_INSTANCE": self.instance}
         return subprocess.run(
             [str(self.tools / tool), *args],
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE if capture else None, env=env, check=False,
+            stdin=subprocess.DEVNULL if data is None else None, input=data,
+            stdout=subprocess.PIPE if capture else None, env=env, check=False,
         )
 
     def lifecycle(self, command: str, *, capture: bool = False) -> str:
@@ -133,6 +164,17 @@ class Workflow:
                 f"the copy differs from its source after the transfer ({args[-1]}):\n"
                 + verify.stdout.decode("utf-8", errors="replace")
             )
+
+    def write_remote(self, path: str, content: bytes) -> None:
+        """Stream ``content`` into ``path`` on the instance, owner-only, with no local copy, and verify its digest."""
+        completed = self.call(
+            "dev", "sh", "-c", 'umask 077 && cat >"$1.part" && mv -f "$1.part" "$1" && sha256sum "$1"', "sh", path,
+            capture=True, data=content,
+        )
+        if completed.returncode != 0:
+            raise WorkflowError(f"writing {path} on the instance failed (exit {completed.returncode})")
+        if completed.stdout.split()[:1] != [hashlib.sha256(content).hexdigest().encode()]:
+            raise WorkflowError(f"{path} on the instance does not hold what was sent")
 
     def duckdb_cli(self) -> Path:
         """The verified DuckDB CLI release the deploy ships, fetched once into the state directory."""
@@ -179,7 +221,10 @@ class Workflow:
             raise WorkflowError(f"{seed} was built from research release {generation}, which is not published at {release_dir}")
         env_file = self.repo_root / ".env"
         if not env_file.is_file():
-            raise WorkflowError(f"{env_file} is missing: the instance's sessions read the same credentials")
+            raise WorkflowError(f"{env_file} is missing: the instance's sessions read the same model gateway keys")
+        gateway_keys = gateway_env(env_file)
+        if not gateway_keys:
+            raise WorkflowError(f"{env_file} sets none of the keys the model profiles name")
         listed = subprocess.run(
             ["git", "ls-files", "-z"], cwd=self.repo_root, stdin=subprocess.DEVNULL, capture_output=True, check=False,
         )
@@ -196,8 +241,8 @@ class Workflow:
         preserve = ("-a", "--no-owner", "--no-group")
         say("deploy: tracked files")
         self.rsync(*preserve, f"--files-from={manifest}", "--from0", f"{self.repo_root}/", f"dev:{REMOTE_ROOT}/")
-        say("deploy: .env")
-        self.rsync(*preserve, str(env_file), f"dev:{REMOTE_ROOT}/.env")
+        say("deploy: .env (the model gateway keys only)")
+        self.write_remote(f"{REMOTE_ROOT}/.env", gateway_keys)
         say(f"deploy: {DUCKDB_CLI_NAME} and {TRACKED_LIST_NAME}")
         self.rsync(*preserve, str(duckdb_cli), str(manifest), f"dev:{REMOTE_ROOT}/.runtime/zgca/")
         self.remote("tracked")
@@ -259,7 +304,7 @@ def main(
     parser = argparse.ArgumentParser(prog="zgca.py", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True, metavar="command")
     commands.add_parser("up", help="instance start: wait for RUNNING and SSH")
-    deploy = commands.add_parser("deploy", help="copy code, .env, a seed and its release; prepare venv, ripgrep, tmux, image")
+    deploy = commands.add_parser("deploy", help="copy code, the model gateway keys, a seed and its release; prepare venv, ripgrep, tmux, image")
     deploy.add_argument("seed", help="PIT view seed directory, relative to the repository (data/pit_views_seed_...)")
     run = commands.add_parser("run", help="start the console if needed and a round launcher in tmux")
     run.add_argument("round_file", help="scripts/experiments/create_round_*.py")

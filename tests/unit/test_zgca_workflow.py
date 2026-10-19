@@ -47,9 +47,13 @@ if args[0] == "state":
 sys.exit(int(os.environ.get("MOCK_INSTANCE_EXIT_" + args[0].upper(), "0")))
 """
 MOCK_DEV = r"""#!/usr/bin/env python3
-import json, os, sys
+import hashlib, json, os, sys
 args = sys.argv[1:]
 record = {"tool": "dev", "args": args, "instance": os.environ.get("ZGCA_INSTANCE")}
+if args[:2] == ["sh", "-c"]:  # a streamed write: stdin is the file, stdout its digest
+    data = sys.stdin.buffer.read()
+    record["stdin"] = data.decode()
+    print(os.environ.get("MOCK_WRITE_DIGEST", hashlib.sha256(data).hexdigest()) + "  " + args[-1])
 with open(os.environ["MOCK_LOG"], "a") as log:
     log.write(json.dumps(record) + "\n")
 if args[:1] == ["rsync"] and args[1] == "--dry-run":
@@ -66,6 +70,12 @@ with open(args[args.index("-o") + 1], "wb") as out:
     out.write(os.environ.get("MOCK_CURL_BODY", "").encode())
 """
 TOOLS = {"zenith": MOCK_ZENITH, "instance": MOCK_INSTANCE, "dev": MOCK_DEV, "curl": MOCK_CURL}
+# A local .env as the host keeps it: data tokens beside the model gateway keys.
+LOCAL_ENV = (
+    "TUSHARE_TOKEN=tushare-relay\nTUSHARE_TOKEN_TMP=tushare-official\nHF_TOKEN=hf\n"
+    "# DEEPSEEK_API_KEY=commented-out\nexport LIGHTING_API_KEY=relay-primary\nLIGHTING_API_KEY_ALT=relay-alt\n"
+)
+SHIPPED_ENV = "export LIGHTING_API_KEY=relay-primary\nLIGHTING_API_KEY_ALT=relay-alt\n"
 
 
 class ZgcaWorkflowTest(unittest.TestCase):
@@ -138,7 +148,7 @@ class ZgcaWorkflowTest(unittest.TestCase):
     def test_deploy_run_and_sync_refuse_an_instance_that_is_not_running_before_any_transfer(self) -> None:
         self._tracked_repo()
         self._seed()
-        (self.repo / ".env").write_text("KEY=value\n", encoding="utf-8")
+        (self.repo / ".env").write_text(LOCAL_ENV, encoding="utf-8")
         for argv in (("deploy", "data/pit_views_seed_test"), ("run", "scripts/experiments/create_round_test.py"), ("sync", "arm_new")):
             for env, reason in (({"MOCK_STATE": "STOPPING"}, "is STOPPING, not RUNNING"), ({"MOCK_INSTANCE_EXIT_STATE": "1"}, "instance state")):
                 with self.subTest(command=argv[0], reason=reason):
@@ -179,7 +189,9 @@ class ZgcaWorkflowTest(unittest.TestCase):
         refusals.append((self.run_main("deploy", "data/pit_views_seed_test"), "unfinished prebuild"))
         (self.repo / "data/pit_views_seed_test" / zgca.UNFINISHED_SEED_MARKER).unlink()
         refusals.append((self.run_main("deploy", "data/pit_views_seed_test"), ".env is missing"))
-        (self.repo / ".env").write_text("KEY=value\n", encoding="utf-8")
+        (self.repo / ".env").write_text("TUSHARE_TOKEN=tushare-relay\n", encoding="utf-8")
+        refusals.append((self.run_main("deploy", "data/pit_views_seed_test"), "none of the keys"))
+        (self.repo / ".env").write_text(LOCAL_ENV, encoding="utf-8")
         refusals.append((self.run_main("deploy", "/etc/passwd"), "below data/"))
         refusals.append((self.run_main("deploy", "scripts/experiments"), "below data/"))
         # A shipped DuckDB CLI that is not the pinned release is refused, not refetched.
@@ -197,7 +209,7 @@ class ZgcaWorkflowTest(unittest.TestCase):
     def test_deploy_carries_tracked_files_env_seed_and_release_then_prepares(self) -> None:
         self._tracked_repo()
         self._seed()
-        (self.repo / ".env").write_text("KEY=value\n", encoding="utf-8")
+        (self.repo / ".env").write_text(LOCAL_ENV, encoding="utf-8")
         code, err = self.run_main("deploy", "data/pit_views_seed_test")
         self.assertEqual(code, 0, err)
         dev = self.calls("dev")
@@ -207,22 +219,27 @@ class ZgcaWorkflowTest(unittest.TestCase):
         # tracked list lands before the `tracked` step prunes by it, and both
         # come before the seed and release.
         remote = zgca.REMOTE_ROOT
-        ran = [call["args"][-1] if call["args"][0] == "rsync" else call["args"][4:]
+        ran = [call["args"][-1] if call["args"][0] in ("rsync", "sh") else call["args"][4:]
                for call in dev if call["args"][1] != "--dry-run"]
         self.assertEqual(ran, [
-            ["dirs"], f"dev:{remote}/", f"dev:{remote}/.env", f"dev:{remote}/.runtime/zgca/", ["tracked"],
+            ["dirs"], f"dev:{remote}/", f"{remote}/.env", f"dev:{remote}/.runtime/zgca/", ["tracked"],
             f"dev:{remote}/data/pit_views_seed_test/", f"dev:{remote}/data/research_releases/gen_test/",
             ["prepare", zgca.DUCKDB_CLI_SHA256],
         ])
+        # Only the keys the model profiles name leave this host, streamed into an
+        # owner-only file: no local copy, nothing else from the .env.
+        (written,) = [call for call in dev if call["args"][0] == "sh"]
+        self.assertEqual(written["stdin"], SHIPPED_ENV)
+        self.assertIn("umask 077", written["args"][2])
         transfers = [call for call in dev if call["args"][:1] == ["rsync"] and call["args"][1] != "--dry-run"]
         state = self.repo / ".runtime" / "zgca"
         manifest = state / zgca.TRACKED_LIST_NAME
         self.assertEqual(manifest.read_bytes(), b"scripts/experiments/create_round_test.py\0")
         self.assertIn(f"--files-from={manifest}", transfers[0]["args"])
         self.assertIn("--from0", transfers[0]["args"])
-        self.assertEqual(transfers[2]["args"][-3:-1], [str(state / zgca.DUCKDB_CLI_NAME), str(manifest)])
-        self.assertIn("--delete", transfers[3]["args"])
-        self.assertIn("-H", transfers[4]["args"])
+        self.assertEqual(transfers[1]["args"][-3:-1], [str(state / zgca.DUCKDB_CLI_NAME), str(manifest)])
+        self.assertIn("--delete", transfers[2]["args"])
+        self.assertIn("-H", transfers[3]["args"])
         self.assertNotIn("--delete", transfers[0]["args"])
         # The release was fetched once, from the official URL, and is reused by the next deploy.
         fetches = self.calls("curl")
@@ -278,12 +295,16 @@ class ZgcaWorkflowTest(unittest.TestCase):
     def test_deploy_stops_at_a_transfer_that_left_differences(self) -> None:
         self._tracked_repo()
         self._seed()
-        (self.repo / ".env").write_text("KEY=value\n", encoding="utf-8")
-        code, err = self.run_main("deploy", "data/pit_views_seed_test", MOCK_RSYNC_DIFF=">f.st...... scripts/x.py\n")
-        self.assertEqual(code, 1)
-        self.assertIn("differs from its source", err)
-        steps = [call["args"][4] for call in self.calls("dev") if call["args"][:2] == ["bash", "-lc"]]
-        self.assertEqual(steps, ["dirs"])
+        (self.repo / ".env").write_text(LOCAL_ENV, encoding="utf-8")
+        for env, reason in (({"MOCK_RSYNC_DIFF": ">f.st...... scripts/x.py\n"}, "differs from its source"),
+                            ({"MOCK_WRITE_DIGEST": "0" * 64}, ".env on the instance does not hold what was sent")):
+            with self.subTest(reason=reason):
+                self.log.unlink(missing_ok=True)
+                code, err = self.run_main("deploy", "data/pit_views_seed_test", **env)
+                self.assertEqual(code, 1)
+                self.assertIn(reason, err)
+                steps = [call["args"][4] for call in self.calls("dev") if call["args"][:2] == ["bash", "-lc"]]
+                self.assertEqual(steps, ["dirs"])
 
     # ----- run, sync -----
 

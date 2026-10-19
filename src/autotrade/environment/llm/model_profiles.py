@@ -177,6 +177,16 @@ def _profile_api_key(
     )
 
 
+def gateway_env_names() -> tuple[str, ...]:
+    """Every environment key a role gateway reads, each once: the profiles'
+    credentials and endpoints and the relay's alternate key."""
+
+    names = [_lighting.API_KEY_ALT_ENV]
+    for profile in _PROFILES:
+        names += [profile.api_key_env, profile.base_url_env or ""]
+    return tuple(dict.fromkeys(name for name in names if name))
+
+
 def model_profile(model: str) -> ModelProfile:
     model = canonicalize_model_name(model)
     if model in _deepseek.MODEL_CHOICES:
@@ -341,6 +351,7 @@ __all__ = [
     "build_model_gateway",
     "canonicalize_model_name",
     "effective_max_output_tokens",
+    "gateway_env_names",
     "model_profile",
     "token_prices",
 ]
