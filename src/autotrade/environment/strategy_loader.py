@@ -91,7 +91,9 @@ FORBIDDEN_ATTRIBUTES = frozenset(
 )
 # The only file I/O a strategy may perform: reads below a read-only data root,
 # writes below the per-replay state directory that ``fit`` owns.
-# ``save_model``/``load_model`` are the LightGBM and XGBoost booster files.
+# ``save_model``/``load_model`` are the LightGBM and XGBoost booster files,
+# ``from_pretrained``/``save_pretrained`` the transformers and peft model
+# directories (the pretrained store under ``pretrained_dir`` among them).
 # The static check on their path arguments is a denylist, not a shape rule: a
 # path may be built by a helper, a variable, a loop or an f-string, and which
 # positional argument holds it differs per API (``np.save(path, obj)`` against
@@ -99,9 +101,11 @@ FORBIDDEN_ATTRIBUTES = frozenset(
 # refused — a literal absolute path, and a write aimed at a read-only context
 # root. The replay container's mounts and ``StrategyContext`` are the real
 # boundary; this check only reports the mistakes it can see before the replay.
-ROOTED_READS = frozenset({"read_parquet", "load", "load_model"})
-ROOTED_WRITES = frozenset({"to_parquet", "save", "savez", "savez_compressed", "save_model"})
-READ_ROOTS = ("snapshot_dir", "asof_dir", "state_dir", "models_dir")
+ROOTED_READS = frozenset({"read_parquet", "load", "load_model", "from_pretrained"})
+ROOTED_WRITES = frozenset(
+    {"to_parquet", "save", "savez", "savez_compressed", "save_model", "save_pretrained"}
+)
+READ_ROOTS = ("snapshot_dir", "asof_dir", "state_dir", "models_dir", "pretrained_dir")
 WRITE_ROOTS = ("state_dir",)
 REFIT_PERIOD_NAME = "REFIT_PERIOD"
 ENTRYPOINT_NAME = "main.py"

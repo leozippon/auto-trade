@@ -239,6 +239,9 @@ def create_book(
             "image": sandbox.image,
             "docker_executable": sandbox.docker_executable,
             "limits": asdict(sandbox.limits),
+            # The arm's pretrained-store pin; a book created before the store
+            # existed has no key and mounts nothing.
+            "pretrained_manifest_sha256": sandbox.pretrained_manifest_sha256,
         },
         "snapshot_config": asdict(options.snapshot_config),
         "nl_gateway": nl_gateway,
@@ -367,6 +370,7 @@ def load_book(state_root: str | Path) -> Book:
             image=str(sandbox["image"]),
             docker_executable=str(sandbox["docker_executable"]),
             limits=SandboxLimits(**_tuples(sandbox["limits"])),
+            pretrained_manifest_sha256=str(sandbox.get("pretrained_manifest_sha256") or ""),
         ),
         snapshot_config=SnapshotConfig(**_tuples(record["snapshot_config"])),
         nl_gateway=dict(record["nl_gateway"]) if record.get("nl_gateway") else None,

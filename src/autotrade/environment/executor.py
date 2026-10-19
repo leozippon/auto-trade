@@ -24,6 +24,7 @@ from .contract_fingerprint import (
     compute_runtime_fingerprint,
 )
 from .gpu import GpuUnavailableError, device_request, gpu_memory_contention
+from .pretrained import PretrainedStoreError, require_pretrained_store
 from .runtime import chmod_tree
 from .sandbox import DockerSandbox, SandboxConfig, SandboxLimits, container_thread_env
 from .strategy import BarTable, FitSchedule, StrategyContext, StrategyFunction
@@ -59,6 +60,8 @@ CONTAINER_SNAPSHOT_DIR = "/strategy-data/snapshot"
 CONTAINER_ASOF_DIR = "/strategy-data/asof"
 CONTAINER_MODELS_DIR = "/strategy-data/models"
 CONTAINER_STATE_DIR = "/strategy-data/state"
+# The pinned pretrained-model store (``environment.pretrained``), read-only.
+CONTAINER_PRETRAINED_DIR = "/strategy-data/pretrained"
 # The strategy runtime this process enforces: the modules it imported, read
 # once alongside them. A strategy container's image must bake exactly these;
 # a checkout that moves on under a running worker changes neither the
@@ -180,13 +183,15 @@ class FittableStrategyExecutor(StrategyExecutor, Protocol):
     """An executor that also runs the strategy's optional ``fit(context)``.
 
     ``fit_schedule`` is ``None`` when ``main.py`` declares no ``fit``.
-    ``context_state_dir`` and ``context_models_dir`` are the path strings the
-    strategy sees on its context, empty when the directory is absent.
+    ``context_state_dir``, ``context_models_dir`` and ``context_pretrained_dir``
+    are the path strings the strategy sees on its context, empty when the
+    directory is absent.
     """
 
     fit_schedule: FitSchedule | None
     context_state_dir: str
     context_models_dir: str
+    context_pretrained_dir: str
 
     def fit(self, context: StrategyContext) -> None: ...
 
@@ -234,6 +239,8 @@ class TrustedStrategyExecutor:
             )
         self.context_state_dir = str(self.state_dir) if self.state_dir is not None else ""
         self.context_models_dir = str(self.models_dir) if self.models_dir is not None else ""
+        # The pretrained store reaches Docker strategies only.
+        self.context_pretrained_dir = ""
         _lock_state_dir(self.state_dir, writable=False)
 
     @classmethod
@@ -282,7 +289,9 @@ class DockerStrategyExecutor:
     Both workers attach the experiment's GPU request (``SandboxLimits``): the
     inference container selects the devices once at start and the fit worker
     inherits exactly those, so one evaluation holds one allocation and a
-    replay whose experiment asked for no GPU stays CPU-only.
+    replay whose experiment asked for no GPU stays CPU-only. Both mount the
+    pretrained store read-only when the config pins one, and neither starts
+    unless the store's manifest is the pinned one.
     """
 
     def __init__(
@@ -311,6 +320,10 @@ class DockerStrategyExecutor:
             )
         self.context_state_dir = CONTAINER_STATE_DIR if self.state_dir is not None else ""
         self.context_models_dir = CONTAINER_MODELS_DIR if self.models_dir is not None else ""
+        self.pretrained_dir = _pinned_store(self.config.pretrained_manifest_sha256)
+        self.context_pretrained_dir = (
+            CONTAINER_PRETRAINED_DIR if self.pretrained_dir is not None else ""
+        )
         self._state_writable = state_writable
         self._fit_worker: DockerStrategyExecutor | None = None
         # Read before the container exists and rendered into its run arguments
@@ -392,6 +405,7 @@ class DockerStrategyExecutor:
             (self.snapshot_dir, CONTAINER_SNAPSHOT_DIR),
             (self.asof_dir, CONTAINER_ASOF_DIR),
             (self.models_dir, CONTAINER_MODELS_DIR),
+            (self.pretrained_dir, CONTAINER_PRETRAINED_DIR),
         ):
             if source is not None:
                 command.extend(["--mount", f"type=bind,src={source},dst={target},readonly"])
@@ -603,12 +617,14 @@ class DockerStrategyExecutor:
             "asof_version": context.asof_version,
             "state_dir": context.state_dir,
             "models_dir": context.models_dir,
+            "pretrained_dir": context.pretrained_dir,
         }
         for name, target in (
             ("snapshot_dir", CONTAINER_SNAPSHOT_DIR),
             ("asof_dir", CONTAINER_ASOF_DIR),
             ("models_dir", CONTAINER_MODELS_DIR),
             ("state_dir", CONTAINER_STATE_DIR),
+            ("pretrained_dir", CONTAINER_PRETRAINED_DIR),
         ):
             if not getattr(context, name):
                 continue
@@ -1113,6 +1129,18 @@ def _existing_dir(value: str | Path | None, name: str) -> Path | None:
     return path
 
 
+def _pinned_store(pin: str) -> Path | None:
+    """The pretrained store a strategy container mounts: none without a pin,
+    and no container at all when the pinned store is missing or another one."""
+
+    if not pin:
+        return None
+    try:
+        return require_pretrained_store(pin)
+    except PretrainedStoreError as exc:
+        raise StrategyExecutionError(str(exc)) from exc
+
+
 def _strategy_gpus(limits: SandboxLimits) -> list[int]:
     """The devices this strategy container attaches: the ones it was given.
 
@@ -1180,6 +1208,7 @@ def _require_local_image(config: SandboxConfig) -> str:
 __all__ = [
     "CONTAINER_ASOF_DIR",
     "CONTAINER_MODELS_DIR",
+    "CONTAINER_PRETRAINED_DIR",
     "CONTAINER_SNAPSHOT_DIR",
     "CONTAINER_STATE_DIR",
     "CONTAINER_STRATEGY_DIR",

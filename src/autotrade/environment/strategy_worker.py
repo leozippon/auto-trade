@@ -86,6 +86,7 @@ _CONTEXT_KEYS = {
     "asof_version",
     "state_dir",
     "models_dir",
+    "pretrained_dir",
 }
 # ``execute`` runs generate_orders and answers ``orders``; ``fit`` runs the
 # optional fit entrypoint over the same context shape and answers ``fitted``.
@@ -158,6 +159,7 @@ class BarStream:
                 asof_version=raw_context.get("asof_version"),  # type: ignore[arg-type]
                 state_dir=raw_context.get("state_dir"),  # type: ignore[arg-type]
                 models_dir=raw_context.get("models_dir"),  # type: ignore[arg-type]
+                pretrained_dir=raw_context.get("pretrained_dir"),  # type: ignore[arg-type]
                 _nl_query=protocol.nl_query,
             )
         except StrategyContractError as exc:

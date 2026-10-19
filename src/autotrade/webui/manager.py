@@ -15,6 +15,7 @@ import time
 from collections.abc import Mapping
 from pathlib import Path
 
+from autotrade.environment import pretrained
 from autotrade.environment.broker import default_permitted_boards
 from autotrade.environment.gpu import GpuUnavailableError
 from autotrade.environment.identity import (
@@ -402,6 +403,15 @@ class ExperimentManager:
                 }
             )
             self._preflight(merged, directory)
+            # The pretrained store every container of this arm will mount,
+            # pinned by its manifest's digest before anything is written: each
+            # container start compares the store with this pin, so a store
+            # replaced later reaches only arms created after it, and a host
+            # without one creates no arm whose contract promises it.
+            try:
+                merged["pretrained_manifest_sha256"] = pretrained.manifest_digest()
+            except pretrained.PretrainedStoreError as exc:
+                raise ManagerError(str(exc)) from exc
             _modern_ref_store(directory)
             hitl = directory / "hitl"
             hitl.mkdir(parents=True)

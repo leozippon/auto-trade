@@ -46,6 +46,7 @@ from autotrade.environment.executor import (
     FittableStrategyExecutor,
     StrategyExecutor,
 )
+from autotrade.environment.pretrained import require_pretrained_store
 from autotrade.environment.replay.engine import (
     StrategyDataView,
     resolve_execution_price,
@@ -241,6 +242,11 @@ class DailyPaperEngine:
         self.schedule = schedule or StrategySchedule()
         self.profile = profile or BrokerProfile()
         self.sandbox = sandbox or SandboxConfig()
+        # A book that pinned the pretrained store refuses the run here, before
+        # any data is built, when the store is gone or is another one; every
+        # strategy container checks it again as it starts.
+        if self.sandbox.pretrained_manifest_sha256:
+            require_pretrained_store(self.sandbox.pretrained_manifest_sha256)
         self.executor_factory = executor_factory or docker_executor
         self.decision_check = decision_check
         # Reads the reconciled settlement journals under the writer lock.
@@ -551,6 +557,7 @@ class DailyPaperEngine:
             asof_version=view.asof_version,
             state_dir=fittable.context_state_dir if fittable is not None else "",
             models_dir=fittable.context_models_dir if fittable is not None else "",
+            pretrained_dir=fittable.context_pretrained_dir if fittable is not None else "",
             _nl_query=data.nl_query,
         )
 

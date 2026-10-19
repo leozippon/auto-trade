@@ -43,6 +43,27 @@ def _restore_writable_tree(root: Path) -> None:
         _restore_writable_tree(child)
 
 
+@pytest.fixture(scope="session")
+def _fixture_pretrained_store(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    store = tmp_path_factory.mktemp("pretrained")
+    (store / "TinyModel").mkdir()
+    (store / "TinyModel" / "config.json").write_text("{}\n", encoding="utf-8")
+    (store / "MANIFEST.sha256").write_text(
+        "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356  TinyModel/config.json\n",
+        encoding="utf-8",
+    )
+    return store
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_pretrained_store(_fixture_pretrained_store: Path, monkeypatch: pytest.MonkeyPatch):
+    """Every test sees a tiny fixture store, never the host's model weights:
+    console creation pins it, and pinned containers compare against it."""
+    from autotrade.environment import pretrained
+
+    monkeypatch.setattr(pretrained, "PRETRAINED_STORE", _fixture_pretrained_store)
+
+
 @pytest.fixture(autouse=True)
 def _restore_tmp_path_writable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     nested = tmp_path / "tmp"

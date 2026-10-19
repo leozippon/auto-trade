@@ -61,11 +61,12 @@ Each invocation receives an immutable market-level context:
 | `context.asof_version` | Version label for the current as-of view |
 | `context.state_dir` | Per-replay state directory path string: writable while `fit` runs, read-only for `generate_orders`; nothing is there for a strategy without `fit` |
 | `context.models_dir` | Read-only path string of the artifact's `models/` directory; empty when the artifact has none |
+| `context.pretrained_dir` | Read-only path string of the pretrained-model store (see Pretrained models); empty when this arm mounts none |
 | `context.nl(...)` | Optional host-mediated local evidence query; absent configurations fail explicitly |
 
 Every bar has a timezone-aware `available_at` no later than `context.inference_at`. The host also rejects any explicit future `available_at` nested in an NL request or response.
 
-The strategy receives no Broker, Shell, experiment controls or previous results. The runtime mounts this `output/` package read-only, the read-only snapshot/as-of directories, the read-only `models/` directory and the state directory (read-write only for `fit`); nothing else of the workspace is visible, so executable strategy logic must live in this package.
+The strategy receives no Broker, Shell, experiment controls or previous results. The runtime mounts this `output/` package read-only, the read-only snapshot/as-of directories, the read-only `models/` directory, the read-only pretrained-model store and the state directory (read-write only for `fit`); nothing else of the workspace is visible, so executable strategy logic must live in this package.
 
 ## Reading PIT data
 
@@ -84,7 +85,7 @@ The two path strings have **different layouts**, and mixing them up is the singl
 
 Run `smoke_backtest` before `batch_validate`: it replays `output/` or a candidate directory over a few trading days, from the start of the research period or from a later `start`, on the real path — real as-of layout, real `AccountSnapshot`, same executor and per-decision timeout — and returns the exact exception text on failure. A hand-written shell script that assigns `context.asof_dir = "/mnt/snapshot"` or fakes an account object proves nothing about the replay.
 
-The supported file I/O is `pandas.read_parquet`, `numpy.load`, `torch.load` and a booster's `load_model` for reading, and `numpy.save`/`savez`/`savez_compressed`, `DataFrame.to_parquet`, `torch.save` and a booster's `save_model` for writing. Build the path however you like — a helper function, a variable, a loop, an f-string, a module constant — from the context directory it belongs under: reads from `context.snapshot_dir`, `context.asof_dir`, `context.state_dir` or `context.models_dir`, writes from `context.state_dir`. The static check only refuses what the source proves wrong: an absolute path literal (nothing at a host or sandbox path exists inside the replay container) and a write rooted at one of the read-only directories. At runtime the state directory is read-only outside `fit`, so a write from `generate_orders` fails the backtest. For example:
+The supported file I/O is `pandas.read_parquet`, `numpy.load`, `torch.load`, a booster's `load_model` and `from_pretrained` for reading, and `numpy.save`/`savez`/`savez_compressed`, `DataFrame.to_parquet`, `torch.save`, a booster's `save_model` and `save_pretrained` for writing. Build the path however you like — a helper function, a variable, a loop, an f-string, a module constant — from the context directory it belongs under: reads from `context.snapshot_dir`, `context.asof_dir`, `context.state_dir`, `context.models_dir` or `context.pretrained_dir`, writes from `context.state_dir`. The static check only refuses what the source proves wrong: an absolute path literal (nothing at a host or sandbox path exists inside the replay container) and a write rooted at one of the read-only directories. At runtime the state directory is read-only outside `fit`, so a write from `generate_orders` fails the backtest. For example:
 
 ```python
 import pandas as pd
@@ -167,6 +168,30 @@ result = context.nl(query="利润预告", mode="search", limit=5)
 
 Treat text as fallible supporting evidence. Publish time, ingest time, retrieval recall, model priors, parsing, and look-ahead contamination remain risks. NL never overrides cash, positions, tradability, costs, or PIT.
 
+## Pretrained models
+
+The only pretrained weights available are four Hugging Face model directories in a read-only store, `context.pretrained_dir` for the strategy and `/mnt/pretrained` in the session's shell. In an arm whose `runtime_env.json` shows no `sandbox_spec.pretrained_manifest_sha256`, neither is mounted and `context.pretrained_dir` is empty.
+
+| Directory | Parameters | Architecture |
+| --- | --- | --- |
+| `Qwen3-0.6B` | 0.6B | Qwen3: 28 standard attention layers |
+| `Qwen3-1.7B` | 1.7B | Qwen3: 28 standard attention layers |
+| `Qwen3.5-0.8B` | 0.8B | Qwen3.5: hybrid, 18 Gated DeltaNet (linear-attention) and 6 full-attention layers |
+| `Qwen3.5-2B` | 2B | Qwen3.5: hybrid, 18 Gated DeltaNet (linear-attention) and 6 full-attention layers |
+
+The model cards publish no training-data cutoff; the release month bounds it — Qwen3-0.6B and Qwen3-1.7B were released in 2025-04, Qwen3.5-0.8B and Qwen3.5-2B in 2026-02 — so only replay dates after a model's release lie certainly beyond its training data.
+
+```python
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+root = context.pretrained_dir + "/Qwen3.5-0.8B"
+tokenizer = AutoTokenizer.from_pretrained(root)
+model = AutoModelForCausalLM.from_pretrained(root, dtype=torch.bfloat16)
+```
+
+`AutoModelForCausalLM` loads the Qwen3.5 checkpoints as text-only language models. The hub is unreachable from both containers, so any other model id fails at once. `peft` is installed for adapters, and `flash-linear-attention` and `causal-conv1d` give the Qwen3.5 linear-attention layers their fused GPU kernels. Whatever is trained during a replay is written under `context.state_dir` (`model.save_pretrained(context.state_dir + "/adapter")`, or a `torch.save` of the weights), never into the store.
+
 ## Runtime restrictions
 
 The loader requires `main.py` to define one synchronous single-argument `generate_orders`, accepts at most one synchronous single-argument `fit`, and requires `REFIT_PERIOD`, when present, to be a single module-level assignment of a period literal or `None`. Supported imports, in every module of the package, are the package's own modules plus:
@@ -176,7 +201,7 @@ __future__, collections, dataclasses, datetime, decimal, functools, itertools, m
 numpy, pandas, scipy, sklearn, lightgbm, xgboost, statsmodels, torch, transformers, peft, accelerate, einops
 ```
 
-Submodules of these libraries (`scipy.stats`, `sklearn.linear_model`, `torch.nn`) are covered. Both containers are offline and the image holds no pretrained weights, so a `transformers` model is built from its config (`AutoModel.from_config(LlamaConfig(...))`) — a hub id passed to `from_pretrained` fails at once — and is persisted like any torch module, as a `torch.save` of its `state_dict()` (a `peft` adapter's own weights from `get_peft_model_state_dict`). GPU devices are visible to strategy code only when the run facts' `budgets.strategy_gpu_count` is above zero, so select the device from `torch.cuda.is_available()` and keep the CPU path working; on CPU, torch's thread count is tied to the container's CPU quota. Relative imports, dynamic import/execution, arbitrary file access, process calls, and general external I/O are rejected. Common NumPy and pandas load/save methods and pickle-based persistence outside those libraries (`pickle`, `joblib`, `read_pickle`/`to_pickle`) are blocked; the only supported strategy file I/O is the context-rooted form described above, so fitted parameters are persisted as NumPy arrays, as a `torch.save` checkpoint, or as a LightGBM/XGBoost booster file written with `save_model(context.state_dir + "/model.txt")`.
+Submodules of these libraries (`scipy.stats`, `sklearn.linear_model`, `torch.nn`) are covered. Both containers are offline, so a `transformers` model either loads from the pretrained store above or is built from its config (`AutoModel.from_config(LlamaConfig(...))`); a hub id passed to `from_pretrained` fails at once. GPU devices are visible to strategy code only when the run facts' `budgets.strategy_gpu_count` is above zero, so select the device from `torch.cuda.is_available()` and keep the CPU path working; on CPU, torch's thread count is tied to the container's CPU quota. Relative imports, dynamic import/execution, arbitrary file access, process calls, and general external I/O are rejected. Common NumPy and pandas load/save methods and pickle-based persistence outside those libraries (`pickle`, `joblib`, `read_pickle`/`to_pickle`) are blocked; the only supported strategy file I/O is the context-rooted form described above, so fitted parameters are persisted as NumPy arrays, as a `torch.save` checkpoint (a `peft` adapter's own weights from `get_peft_model_state_dict`), as a `save_pretrained` model directory, or as a LightGBM/XGBoost booster file written with `save_model(context.state_dir + "/model.txt")`.
 
 Random draws must be reproducible, because two replays of the same span that place different orders are not reproducible evidence. Write the seed once, as one integer assignment to a seed name — `SEED`, `SEED_BASE`, or a name ending in `_SEED` or `_SEED_BASE` (`SEED_BASE = 1000`) — and derive every draw from it, optionally together with the decision date: `day = int(context.inference_at.strftime("%Y%m%d"))`, then `rng = np.random.default_rng([SEED_BASE, day])` with a further fixed integer for each independent stream, and an integer derived from the seed for any library that samples (`random_state=`, `seed=`, `torch.manual_seed`). Another draw of the same strategy is then that one line changed. Never seed from the wall clock or draw from numpy's unseeded global state (`np.random.choice`, `np.random.default_rng()`); `modification_check` refuses both.
 

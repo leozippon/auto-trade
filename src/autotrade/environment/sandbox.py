@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .gpu import GpuUnavailableError, device_request, host_gpu_name
+from .pretrained import pretrained_pin, require_pretrained_store
 from .runtime import (
     ARTIFACT_TOP_LEVEL,
     RUNTIME_CACHE_DIR_NAMES,
@@ -126,6 +127,9 @@ def remove_sandbox_tree(path: Path) -> bool:
 # the single source the experiment facts and docs quote.
 SCREENING_TOOL_SOURCE = Path(__file__).resolve().parent / "screening" / "screen.py"
 SCREENING_TOOL_MOUNT = "/mnt/tools/screen.py"
+# Where the Agent session sees the pretrained-model store (``environment.pretrained``)
+# when its arm pins one; a strategy sees the same store as ``context.pretrained_dir``.
+PRETRAINED_SESSION_MOUNT = "/mnt/pretrained"
 
 RUNTIME_ENV_SCHEMA_VERSION = 2
 _MEMORY_LIMIT = re.compile(r"^[1-9][0-9]*(?:[kKmMgG])?$")
@@ -318,11 +322,16 @@ class SandboxConfig:
     # Rendered as ``--label`` on the strategy container; the experiment's
     # labels from ``experiment_container_labels``.
     labels: Mapping[str, str] = field(default_factory=dict)
+    # The pretrained store the arm pinned (``environment.pretrained``): set,
+    # every strategy container mounts it read-only after comparing its
+    # manifest; empty, none mounts anything.
+    pretrained_manifest_sha256: str = ""
 
     def __post_init__(self) -> None:
         _validate_explicit_image_tag(self.image)
         if not self.docker_executable.strip():
             raise ValueError("docker_executable must be non-empty")
+        pretrained_pin(self.pretrained_manifest_sha256)
 
 
 @dataclass(frozen=True)
@@ -347,9 +356,13 @@ class SandboxSpec:
     gpu_count: int = 1
     gpu_name_filter: str | None = field(default_factory=host_gpu_name)
     docker_executable: str = "docker"
+    # The arm's pretrained-store pin; the session mounts the store at
+    # ``PRETRAINED_SESSION_MOUNT`` only when it is set (see ``SandboxConfig``).
+    pretrained_manifest_sha256: str = ""
 
     def __post_init__(self) -> None:
         _validate_explicit_image_tag(self.image)
+        pretrained_pin(self.pretrained_manifest_sha256)
         if self.build_generation_id:
             try:
                 generation = uuid.UUID(self.build_generation_id)
@@ -393,6 +406,7 @@ class SandboxSpec:
             "gpu": self.gpu,
             "gpu_count": self.gpu_count,
             "gpu_name_filter": self.gpu_name_filter,
+            "pretrained_manifest_sha256": self.pretrained_manifest_sha256 or None,
         }
 
 
@@ -521,6 +535,8 @@ class DockerSandbox:
         self.session_id = new_id("sandbox_session")
         self.image_runtime: dict[str, object] = {}
         self.gpu_indices: list[int] = []
+        # The verified store directory, resolved at start when the arm pins one.
+        self.pretrained_dir: Path | None = None
         self._started = False
 
     def docker_command(self) -> list[str]:
@@ -555,6 +571,13 @@ class DockerSandbox:
             "--mount", f"type=bind,src={paths.current_snapshot},dst=/mnt/snapshot,readonly",
             "--mount", f"type=bind,src={paths.artifacts},dst=/mnt/artifacts,readonly",
             "--mount", f"type=bind,src={SCREENING_TOOL_SOURCE},dst={SCREENING_TOOL_MOUNT},readonly",
+        ])
+        if self.pretrained_dir is not None:
+            command.extend([
+                "--mount",
+                f"type=bind,src={self.pretrained_dir},dst={PRETRAINED_SESSION_MOUNT},readonly",
+            ])
+        command.extend([
             "--mount", f"type=bind,src={paths.agent},dst=/mnt/agent",
             "--workdir", "/mnt/agent/workspace", self.spec.image, "sleep", "infinity",
         ])
@@ -576,6 +599,8 @@ class DockerSandbox:
                 self.gpu_indices = [int(item) for item in self.spec.gpu.split(",") if item.strip()]
             else:
                 self.gpu_indices = [int(item) for item in self.spec.gpu]
+        if self.spec.pretrained_manifest_sha256:
+            self.pretrained_dir = require_pretrained_store(self.spec.pretrained_manifest_sha256)
         self.image_runtime = probe_image_runtime(
             self.spec.image,
             docker_executable=self.spec.docker_executable,
@@ -759,7 +784,8 @@ def _validate_explicit_image_tag(image: str) -> None:
 
 
 __all__ = [
-    "DEFAULT_IMAGE", "EXPERIMENT_LABEL", "MAX_CONTAINER_THREADS", "SCREENING_TOOL_MOUNT",
+    "DEFAULT_IMAGE", "EXPERIMENT_LABEL", "MAX_CONTAINER_THREADS", "PRETRAINED_SESSION_MOUNT",
+    "SCREENING_TOOL_MOUNT",
     "SCREENING_TOOL_SOURCE", "DockerSandbox", "LocalSandbox", "SandboxConfig", "SandboxLimits",
     "SandboxSpec", "attached_stdin", "container_thread_env", "experiment_container_labels", "link_copytree",
     "probe_image_runtime",

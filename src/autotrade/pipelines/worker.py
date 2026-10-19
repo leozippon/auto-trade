@@ -48,6 +48,7 @@ from autotrade.environment.llm.lighting import (
     SHORT_TIER_MAX_COMPACTION_THRESHOLD,
 )
 from autotrade.environment.nl import NLConfig
+from autotrade.environment.pretrained import pretrained_pin
 from autotrade.environment.runtime import utc_now_iso, write_json_atomic
 from autotrade.environment.sandbox import (
     DEFAULT_IMAGE,
@@ -210,6 +211,8 @@ _ALLOWED_PARAMS = {
     "agent_sandbox_memory",
     "agent_sandbox_pids",
     "agent_sandbox_tmpfs",
+    # Stamped by the console at creation (``environment.pretrained``).
+    "pretrained_manifest_sha256",
     # Accepted so that an arm created before their retirement still loads;
     # nothing reads them (``config.RETIRED_SWITCHES``).
     *RETIRED_SWITCHES,
@@ -797,6 +800,9 @@ def _strategy_sandbox_from_spec(
     console's claim, see ``load_worker_options``, or another caller's
     ``hitl_state.select_gpus``) pins every strategy container to them; a spec
     that names none leaves the container none, and it refuses to start.
+
+    The arm's pretrained-store pin travels the same way, so every strategy
+    container mounts the store the session container does.
     """
 
     labels = experiment_container_labels(experiment_id) if experiment_id else {}
@@ -816,6 +822,7 @@ def _strategy_sandbox_from_spec(
         ),
         docker_executable=spec.docker_executable,
         labels=labels,
+        pretrained_manifest_sha256=spec.pretrained_manifest_sha256,
     )
 
 
@@ -1483,6 +1490,9 @@ def _llm_settings(
         ),
         gpu=None if gpu_count == 0 else "auto",
         gpu_count=gpu_count,
+        # The store the arm pinned at creation; an arm created before the store
+        # has none and its containers mount nothing.
+        pretrained_manifest_sha256=pretrained_pin(params.get("pretrained_manifest_sha256")),
     )
     return settings, sandbox
 

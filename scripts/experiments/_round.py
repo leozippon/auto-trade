@@ -122,6 +122,7 @@ from _bootstrap import add_repo_src
 
 REPO_ROOT = add_repo_src(__file__)
 
+from autotrade.environment import pretrained
 from autotrade.environment.artifacts import FilesystemArtifactStore
 from autotrade.environment.gpu import GpuUnavailableError
 from autotrade.environment.identity import AgentRefStore
@@ -787,14 +788,21 @@ def smoke(merged: Mapping[str, object]) -> str:
 def _smoke_replays(merged: Mapping[str, object], starter: Path) -> str:
     """The replays of :func:`smoke`, in a scratch experiment assembled exactly
     as the worker and incubate.py assemble one (its seed hardlinked in, the
-    configured sandbox image, no Agent run); "" or the first failure."""
+    configured sandbox image, the pretrained store pinned as the console will
+    pin it, no Agent run); "" or the first failure."""
 
     scratch = REPO_ROOT / ".runtime" / "round_smoke" / uuid.uuid4().hex
     experiment_dir = scratch / str(merged["experiment_id"])
     experiment_dir.mkdir(parents=True)
     try:
         options = resolve_worker_options(
-            {**merged, "experiments_root": str(scratch)}, experiment_dir=experiment_dir, repo_root=REPO_ROOT
+            {
+                **merged,
+                "experiments_root": str(scratch),
+                "pretrained_manifest_sha256": pretrained.manifest_digest(),
+            },
+            experiment_dir=experiment_dir,
+            repo_root=REPO_ROOT,
         )
         # No console claims cards for the smoke, so it takes idle ones for its
         # duration, as scripts/experiments/_cli.py does for a command-line run:

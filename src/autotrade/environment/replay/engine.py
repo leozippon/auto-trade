@@ -206,6 +206,7 @@ class DailyReplayEngine:
             asof_version=data_view.asof_version,
             state_dir=fittable.context_state_dir if fittable is not None else "",
             models_dir=fittable.context_models_dir if fittable is not None else "",
+            pretrained_dir=fittable.context_pretrained_dir if fittable is not None else "",
             _nl_query=self.nl_query,
         )
         # fit receives the very context object generate_orders gets on this

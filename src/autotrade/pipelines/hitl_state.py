@@ -197,6 +197,8 @@ WEB_CLOSED_PARAMS = frozenset(
         "agent_sandbox_memory",
         "agent_sandbox_pids",
         "agent_sandbox_tmpfs",
+        # Stamped from the host's pretrained store at creation, never requested.
+        "pretrained_manifest_sha256",
     }
 )
 

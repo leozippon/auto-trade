@@ -638,10 +638,12 @@ class StrategyContext:
     snapshot_dir: str = ""
     asof_dir: str = ""
     asof_version: str = "0"
-    # Per-replay fitted state written by ``fit`` and read-only afterwards, and
-    # the frozen Agent-authored ``models/`` assets; both empty when absent.
+    # Per-replay fitted state written by ``fit`` and read-only afterwards, the
+    # frozen Agent-authored ``models/`` assets, and the read-only pretrained
+    # model store the arm pinned; each empty when absent.
     state_dir: str = ""
     models_dir: str = ""
+    pretrained_dir: str = ""
     _nl_query: NLQuery | None = field(default=None, repr=False, compare=False)
     # The columnar store behind ``bars``; ``bars`` is its first len(bars) rows.
     _bars_table: BarTable = field(default_factory=BarTable, init=False, repr=False, compare=False)
@@ -661,7 +663,14 @@ class StrategyContext:
         # A plain tuple: the strategy gets rows, never the store behind them.
         object.__setattr__(self, "bars", tuple(bars))
         object.__setattr__(self, "_bars_table", table)
-        for name in ("snapshot_dir", "asof_dir", "asof_version", "state_dir", "models_dir"):
+        for name in (
+            "snapshot_dir",
+            "asof_dir",
+            "asof_version",
+            "state_dir",
+            "models_dir",
+            "pretrained_dir",
+        ):
             value = getattr(self, name)
             if not isinstance(value, str):
                 raise StrategyContractError(f"{name} must be a string")
@@ -698,6 +707,7 @@ class StrategyContext:
             "asof_version": self.asof_version,
             "state_dir": self.state_dir,
             "models_dir": self.models_dir,
+            "pretrained_dir": self.pretrained_dir,
         }
         return _json_mapping(record, name="strategy context")
 
@@ -719,6 +729,7 @@ class StrategyContext:
                 "asof_version",
                 "state_dir",
                 "models_dir",
+                "pretrained_dir",
             },
             name="strategy context",
         )
@@ -734,6 +745,7 @@ class StrategyContext:
             asof_version=record["asof_version"],  # type: ignore[arg-type]
             state_dir=record["state_dir"],  # type: ignore[arg-type]
             models_dir=record["models_dir"],  # type: ignore[arg-type]
+            pretrained_dir=record["pretrained_dir"],  # type: ignore[arg-type]
             _nl_query=nl_query,
         )
 
