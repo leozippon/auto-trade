@@ -2,7 +2,7 @@
 """The ZGCA A100 development instance, end to end: up, deploy, run, status, sync, down.
 
 Every step goes through the platform layer in ~/zgca-compute (`instance` to
-show, start and stop the one instance as idempotent intents, `dev` for SSH and
+show, start and stop the instance as idempotent intents, `dev` for SSH and
 rsync to it, both over `zenith`) and verifies its own result: up and down are
 `instance start` and `instance stop`; a deploy carries the tracked files, the
 model gateways' keys from the local .env (only the keys the model profiles
@@ -14,8 +14,8 @@ set; status and sync read and copy back. Nothing here schedules, caches an
 endpoint, keeps a secret in the repository or changes how the executor
 isolates a strategy container. See ops/zgca/README.md.
 
-usage: zgca.py up | deploy <seed dir> | run <round file> [launcher args...] |
-       status | sync <arm id> | down
+usage: zgca.py [--instance <id>] up | deploy <seed dir> |
+       run <round file> [launcher args...] | status | sync <arm id> | down
 """
 
 from __future__ import annotations
@@ -32,9 +32,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-# auto-trade-dev-a100: one Tesla-A100-80G in the Volcano zone; its id is the
-# platform ledger id the API addresses it by, not a secret.
+# auto-trade-dev-a100: one Tesla-A100-80G in the Volcano zone, the default of
+# --instance; its id is the platform ledger id the API addresses it by, not a
+# secret.
 INSTANCE_ID = "ozaeun8qxljr1niyoz9flg6uc"
+# The platform's own shape for an instance id (~/zgca-compute/dev).
+INSTANCE_ID_SHAPE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 # The instance's persistent personal storage: the only place code, the .env,
 # seeds and releases go (~/zgca-compute/README.md, 配额与存储).
 REMOTE_ROOT = "/personal_fast_storage/auto-trade"
@@ -63,6 +66,14 @@ def say(message: str) -> None:
     """One timestamped progress line, flushed so it lands before the output of the step it announces."""
 
     print(f"{datetime.now(tz=UTC):%H:%M:%S}Z {message}", flush=True)
+
+
+def instance_id(value: str) -> str:
+    """An --instance value; an empty one would let `dev` pick any RUNNING machine."""
+
+    if not INSTANCE_ID_SHAPE.fullmatch(value):
+        raise argparse.ArgumentTypeError(f"not a platform instance id: {value!r}")
+    return value
 
 
 def gateway_env(env_file: Path) -> bytes:
@@ -123,7 +134,7 @@ class Workflow:
     def call(
         self, tool: str, *args: str, capture: bool = False, data: bytes | None = None
     ) -> subprocess.CompletedProcess[bytes]:
-        """One run of a ~/zgca-compute entry (`instance`, `dev`), pointed at the pinned instance; ``data`` is its stdin."""
+        """One run of a ~/zgca-compute entry (`instance`, `dev`), pointed at this workflow's instance; ``data`` is its stdin."""
         env = {**os.environ, "ZGCA_INSTANCE": self.instance}
         return subprocess.run(
             [str(self.tools / tool), *args],
@@ -302,6 +313,10 @@ def main(
     tools: Path | None = None,
 ) -> int:
     parser = argparse.ArgumentParser(prog="zgca.py", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument(
+        "--instance", type=instance_id, default=INSTANCE_ID,
+        help=f"platform id of the instance every step addresses (default {INSTANCE_ID}, auto-trade-dev-a100)",
+    )
     commands = parser.add_subparsers(dest="command", required=True, metavar="command")
     commands.add_parser("up", help="instance start: wait for RUNNING and SSH")
     deploy = commands.add_parser("deploy", help="copy code, the model gateway keys, a seed and its release; prepare venv, ripgrep, tmux, image")
@@ -318,6 +333,7 @@ def main(
         workflow = Workflow(
             repo_root=repo_root,
             tools=tools or Path(os.environ.get("ZGCA_COMPUTE") or "~/zgca-compute").expanduser(),
+            instance=options.instance,
         )
         if options.command == "up":
             workflow.up()

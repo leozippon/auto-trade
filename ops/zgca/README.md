@@ -9,9 +9,10 @@ python ops/zgca/zgca.py run scripts/experiments/create_round_<轮次>.py --dry-r
 python ops/zgca/zgca.py status
 python ops/zgca/zgca.py sync hcm_100k_8y_sol_dsf_zgca_20261014c
 python ops/zgca/zgca.py down
+python ops/zgca/zgca.py --instance <平台实例 id> status
 ```
 
-脚本只用标准库和本检出里的模型档案（同样只用标准库），本机的 `quant` 环境或系统 `python3` 都能运行；`ZGCA_COMPUTE` 可以指向别处的 zgca-compute 检出，默认 `~/zgca-compute`。实例固定为 `auto-trade-dev-a100`（一张 A100-80G），`instance` 和 `dev` 都被指到这台机器，所以别的实例同时在跑也不会选错。
+脚本只用标准库和本检出里的模型档案（同样只用标准库），本机的 `quant` 环境或系统 `python3` 都能运行；`ZGCA_COMPUTE` 可以指向别处的 zgca-compute 检出，默认 `~/zgca-compute`。实例缺省是 `auto-trade-dev-a100`（一张 A100-80G）；放在子命令之前的 `--instance <平台实例 id>` 让同一个脚本驱动另一台。`instance` 和 `dev` 都被指到所选的这台机器，所以别的实例同时在跑也不会选错。开发机上的仓库根目录不随实例改变，仍是 `/personal_fast_storage/auto-trade`。
 
 ## 六步各做什么
 
@@ -41,4 +42,4 @@ python ops/zgca/zgca.py down
 
 ## 已接受的局限
 
-`deploy` 只在仍含受管文件的顶层目录里清理：整个退出版本库的顶层目录、仓库根下不再受管的文件和清理后留下的空目录仍留在开发机上。控制台不随 `deploy` 重启，改了代码之后要在没有臂运行时 `~/zgca-compute/dev tmux kill-session -t autotrade-console` 再 `run`。模型服务的 key 在实例存在期间一直留在开发机的 `.env` 里（仅 root 可读），停机不清除；其中本机 vLLM 网关的 key 在开发机上没有用处（那里没有这个网关），但 worker 启动时要求每个角色都有凭据，而 NL 总在本机模型上。`sync` 不拉回开发机上的模型服务会话日志（`data/llm_conversations/`）：日志按服务方、模型、日期和 worker 进程号分文件，几条臂写在同一棵目录里，续跑换了进程号的旧文件也无从按臂认出，一条 gpt-6 臂就有数百 MB；要用时整棵取回，`~/zgca-compute/dev rsync -a dev:/personal_fast_storage/auto-trade/data/llm_conversations/ <本地目录>/`。开发机上的容器遥测缺少峰值内存和 GPU 峰值，那是平台 daemon 在另一个 PID 命名空间里的缘故（见 `NOTES.md`）。离线测试在 `tests/unit/test_zgca_workflow.py`，用模拟的 `instance` 和 `dev`，不访问网络也不启停实例；启停意图本身的测试在 `~/zgca-compute/tests`。
+`/personal_fast_storage` 按资源区隔离、同一资源区内的实例共用，所以用 `--instance` 驱动的第二台若与第一台在同一资源区，两台读写的是同一个仓库根目录：代码、`.env`、种子、臂目录和日志都是同一份，一台上的 `deploy` 改的也是另一台正在用的代码，一台的 `status` 会把另一台在跑的臂标成 worker 已不在。两台同时跑臂时要放在不同资源区，或者同一时间只让一台有臂。`deploy` 只在仍含受管文件的顶层目录里清理：整个退出版本库的顶层目录、仓库根下不再受管的文件和清理后留下的空目录仍留在开发机上。控制台不随 `deploy` 重启，改了代码之后要在没有臂运行时 `~/zgca-compute/dev tmux kill-session -t autotrade-console` 再 `run`。模型服务的 key 在实例存在期间一直留在开发机的 `.env` 里（仅 root 可读），停机不清除；其中本机 vLLM 网关的 key 在开发机上没有用处（那里没有这个网关），但 worker 启动时要求每个角色都有凭据，而 NL 总在本机模型上。`sync` 不拉回开发机上的模型服务会话日志（`data/llm_conversations/`）：日志按服务方、模型、日期和 worker 进程号分文件，几条臂写在同一棵目录里，续跑换了进程号的旧文件也无从按臂认出，一条 gpt-6 臂就有数百 MB；要用时整棵取回，`~/zgca-compute/dev rsync -a dev:/personal_fast_storage/auto-trade/data/llm_conversations/ <本地目录>/`。开发机上的容器遥测缺少峰值内存和 GPU 峰值，那是平台 daemon 在另一个 PID 命名空间里的缘故（见 `NOTES.md`）。离线测试在 `tests/unit/test_zgca_workflow.py`，用模拟的 `instance` 和 `dev`，不访问网络也不启停实例；启停意图本身的测试在 `~/zgca-compute/tests`。

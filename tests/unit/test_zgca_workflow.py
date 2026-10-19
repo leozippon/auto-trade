@@ -145,6 +145,21 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self.assertIn(f"instance show {INSTANCE} failed", err)
         self.assertEqual(len(self.calls()), 1)
 
+    def test_another_instance_is_addressed_by_every_entry_when_named(self) -> None:
+        other = "secondinstance01"
+        self.assertEqual(self.run_main("--instance", other, "status")[0], 0)
+        calls = self.calls()
+        self.assertEqual([call["tool"] for call in calls], ["instance", "instance", "dev"])
+        self.assertTrue(all(call["instance"] == other for call in calls))
+        self.assertEqual([call["args"][1] for call in calls if call["tool"] == "instance"], [other, other])
+        # An empty or malformed id would let `dev` pick whichever machine runs.
+        for bad in ("", "a b", "../x"):
+            with self.subTest(instance=bad), self.assertRaises(SystemExit) as caught, \
+                    contextlib.redirect_stderr(io.StringIO()):
+                zgca.main(["--instance", bad, "status"], repo_root=self.repo, tools=self.tools)
+            self.assertEqual(caught.exception.code, 2)
+        self.assertEqual(len(self.calls()), 3)
+
     def test_deploy_run_and_sync_refuse_an_instance_that_is_not_running_before_any_transfer(self) -> None:
         self._tracked_repo()
         self._seed()
