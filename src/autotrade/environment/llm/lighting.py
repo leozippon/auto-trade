@@ -217,6 +217,7 @@ class LightingProxy(OpenAICompatibleProxy):
         tool_choice: str | Mapping[str, object] = "auto",
         max_tokens: int | None = None,
     ) -> ProviderResponse:
+        used_key = self.config.api_key
         try:
             return super().complete(
                 messages,
@@ -227,24 +228,23 @@ class LightingProxy(OpenAICompatibleProxy):
         except LLMProxyError as error:
             if (
                 not self.fallback_api_key
-                or self.fallback_api_key == self.config.api_key
+                or self.fallback_api_key == used_key
                 or not is_credential_failure(error)
             ):
                 raise
             _log_credential_switch(self.config.model, error)
+            # The switch is sticky: a rejected or exhausted primary stays so,
+            # and every later call of this gateway (and every clone made from
+            # it afterwards) starts on the alternate key, where a credential
+            # failure is final.
+            self.config = replace(self.config, api_key=self.fallback_api_key)
             # The alternate key is one more logical call: it logs its own
             # attempts. When it is rejected too, the original credential error
             # is reported; any other failure (a context overflow, a transient
             # fault, a malformed reply) is the alternate call's own outcome and
-            # surfaces as it is, so the caller's recovery sees it. The clone
-            # carries no alternate key, so a call can switch at most once.
-            retry = type(self)(
-                replace(self.config, api_key=self.fallback_api_key),
-                transport=self._transport,
-                sleep=self._sleep,
-            )
+            # surfaces as it is, so the caller's recovery sees it.
             try:
-                return retry.complete(
+                return super().complete(
                     messages,
                     tools=tools,
                     tool_choice=tool_choice,

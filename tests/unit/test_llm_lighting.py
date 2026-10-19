@@ -719,6 +719,40 @@ def test_quota_exhausted_400_also_switches_to_the_alternate_key(tmp_path: Path):
     assert _authorization(transport) == ["Bearer relay-primary", "Bearer relay-alt"]
 
 
+def test_the_switch_to_the_alternate_key_is_sticky(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    rejected = LLMProxyError("provider HTTP error 401", retryable=False, status_code=401)
+    proxy, transport = _proxy(
+        tmp_path,
+        [
+            rejected,
+            _responses_json(content="first"),
+            _responses_json(content="second"),
+            _responses_json(content="clone"),
+            LLMProxyError("provider HTTP error 403", retryable=False, status_code=403),
+        ],
+    )
+
+    assert proxy.complete([ChatMessage("user", "hi")]).content == "first"
+    # The exhausted primary is not asked again, nor by a later clone.
+    assert proxy.complete([ChatMessage("user", "hi")]).content == "second"
+    clone = proxy.with_thinking(enabled=False, reasoning_effort=None)
+    assert clone.complete([ChatMessage("user", "hi")]).content == "clone"
+    # A rejected alternate key is final: there is no key left to switch to.
+    with pytest.raises(LLMProxyError, match="403"):
+        proxy.complete([ChatMessage("user", "hi")])
+
+    assert _authorization(transport) == [
+        "Bearer relay-primary",
+        "Bearer relay-alt",
+        "Bearer relay-alt",
+        "Bearer relay-alt",
+        "Bearer relay-alt",
+    ]
+    assert capsys.readouterr().err.count(API_KEY_ALT_ENV) == 1
+
+
 def test_alternate_failure_still_reports_the_original_error(tmp_path: Path):
     proxy, transport = _proxy(
         tmp_path,
