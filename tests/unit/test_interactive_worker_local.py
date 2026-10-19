@@ -148,7 +148,7 @@ def test_worker_maps_model_context_params_to_role_gateways_and_compactor(
     params.update(
         {
             "model": "deepseek-flash",
-            "nl_model": "deepseek-flash",
+            "nl_model": LOCAL_QWEN_MODEL,
             "compact_model": "deepseek-flash",
             "reasoning_effort": "high",
             "no_thinking": True,
@@ -171,7 +171,7 @@ def test_worker_maps_model_context_params_to_role_gateways_and_compactor(
     compact = settings.build_gateway("compact").config
     assert (main.model, nl.model, compact.model) == (
         "deepseek-flash",
-        "deepseek-flash",
+        LOCAL_QWEN_MODEL,
         "deepseek-flash",
     )
     assert main.thinking_enabled is False and nl.thinking_enabled is False
@@ -187,6 +187,25 @@ def test_worker_maps_model_context_params_to_role_gateways_and_compactor(
     assert settings.compaction.max_response_tokens == 1_200
     assert settings.compaction.max_calls == 4
 
+
+
+@pytest.mark.parametrize("hosted", ["deepseek-flash", "gpt-6-luna"])
+def test_worker_refuses_a_hosted_nl_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hosted: str
+) -> None:
+    """NL answers in the forward and Held-out replays and is not metered, so a
+    hosted model may run every role but this one."""
+    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    path = experiment / "hitl/params.json"
+    params = json.loads(path.read_text(encoding="utf-8"))
+    params["nl_model"] = hosted
+    path.write_text(json.dumps(params), encoding="utf-8")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-only-key")
+    monkeypatch.setenv("LIGHTING_API_KEY", "test-only-key")
+    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
+
+    with pytest.raises(ValueError, match=f"nl_model '{hosted}' is not allowed"):
+        load_worker_options(experiment, repo_root=repo)
 
 
 def test_nl_cost_controls_reach_the_worker_without_being_configured(
@@ -302,7 +321,7 @@ def test_worker_resolves_mixed_local_and_deepseek_roles_with_real_timeout(
         {
             "model": LOCAL_QWEN_MODEL,
             "subagent_model": "deepseek-flash",
-            "nl_model": "deepseek-flash",
+            "nl_model": LOCAL_QWEN_MODEL,
             "compact_model": "deepseek-flash",
             "compact_token_threshold": 20_000,
             "per_call_timeout_seconds": 120,
@@ -323,8 +342,7 @@ def test_worker_resolves_mixed_local_and_deepseek_roles_with_real_timeout(
     assert isinstance(subagent, DeepSeekProxy)
     assert subagent.provider == "deepseek"
     assert subagent.model == "deepseek-flash"
-    assert isinstance(nl, DeepSeekProxy)
-    assert nl.provider == "deepseek"
+    assert nl.provider == "vllm"
     assert main.config.max_tokens == 32_768
     assert main.config.timeout_seconds == 120
     assert main.config.reasoning_effort == "xhigh"

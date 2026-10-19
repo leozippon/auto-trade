@@ -205,6 +205,16 @@ def token_prices(provider: str, model: str) -> TokenPrices:
     return model_profile(model).prices
 
 
+# The NL role answers ``context.nl()`` in the forward, held-out and Paper
+# replays too, so its requests carry text from after the research period, and
+# its gateway is outside the session's API spend cap. Only a model whose
+# prices are FREE -- the one served on this machine -- may run it; the create
+# form, the CLI and the worker all read this list.
+NL_MODEL_CHOICES = tuple(
+    model for model in MODEL_CHOICES if model_profile(model).prices == FREE
+)
+
+
 def effective_max_output_tokens(model: str, requested: int) -> int:
     """Apply the trusted model profile's per-generation output ceiling."""
 
@@ -326,6 +336,7 @@ __all__ = [
     "MIMO_PRO_MODEL",
     "MIN_CONTEXT_WINDOW_TOKENS",
     "MODEL_CHOICES",
+    "NL_MODEL_CHOICES",
     "ModelProfile",
     "build_model_gateway",
     "canonicalize_model_name",

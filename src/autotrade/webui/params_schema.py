@@ -21,7 +21,7 @@ from pathlib import Path
 
 from autotrade.environment.data.contracts import BENCHMARK_INDEXES
 from autotrade.environment.data.snapshot import DEFAULT_DATASETS, SELECTABLE_DATASETS
-from autotrade.environment.llm.model_profiles import MODEL_CHOICES
+from autotrade.environment.llm.model_profiles import MODEL_CHOICES, NL_MODEL_CHOICES
 from autotrade.pipelines.config import MANDATED_DEFAULTS, AcceptanceRules
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
 from autotrade.pipelines.skills import (
@@ -602,8 +602,8 @@ _FIELDS: list[dict[str, object]] = [
         "group": "模型与上下文",
         "label": "NL 子代理模型",
         "type": "choice",
-        "choices": list(MODEL_CHOICES),
-        "help": "策略内 ctx.nl() 文本分析子代理模型。",
+        "choices": list(NL_MODEL_CHOICES),
+        "help": "策略内 ctx.nl() 文本分析子代理模型。它也服务前推、Held-out 与 Paper 回放，且不计入 API 花费上限，所以只能用本机模型。",
     },
     {
         "key": "compact_model",

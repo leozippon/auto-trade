@@ -22,6 +22,7 @@ from pathlib import Path
 from autotrade.environment.broker import default_permitted_boards
 from autotrade.environment.data.contracts import BENCHMARK_INDEXES
 from autotrade.environment.data.snapshot import SnapshotConfig
+from autotrade.environment.llm import NL_MODEL_CHOICES
 from autotrade.environment.runtime import write_json_atomic
 from autotrade.pipelines.calendar import GEOMETRY_PARAMETERS
 from autotrade.pipelines.config import AcceptanceRules
@@ -237,8 +238,8 @@ def add_model_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--nl-model",
         default=DEFAULT_NL_MODEL,
-        choices=MODEL_CHOICES,
-        help=f"NL Sub Agent model; defaults to {DEFAULT_NL_MODEL} (independent interface).",
+        choices=NL_MODEL_CHOICES,
+        help=f"NL Sub Agent model; defaults to {DEFAULT_NL_MODEL} (local models only).",
     )
     parser.add_argument(
         "--compact-model",

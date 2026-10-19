@@ -36,6 +36,7 @@ from autotrade.environment.llm import (
     DEFAULT_LLM_MAX_RETRIES,
     DEFAULT_LLM_RETRY_BACKOFF_SECONDS,
     LOCAL_QWEN_MODEL,
+    NL_MODEL_CHOICES,
     LLMProxy,
     build_model_gateway,
     canonicalize_model_name,
@@ -1365,6 +1366,13 @@ def _llm_settings(
     nl_model = canonicalize_model_name(
         str(params.get("nl_model") or LOCAL_QWEN_MODEL)
     )
+    if nl_model not in NL_MODEL_CHOICES:
+        raise ValueError(
+            f"nl_model {nl_model!r} is not allowed: context.nl() also runs in the "
+            "forward, held-out and Paper replays and is not metered by "
+            "max_api_spend_usd, so nl_model must be a local model "
+            f"({', '.join(NL_MODEL_CHOICES)})"
+        )
     compact_model = canonicalize_model_name(
         str(params.get("compact_model") or LOCAL_QWEN_MODEL)
     )

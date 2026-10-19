@@ -170,6 +170,9 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
     assert fields["subagent_model"]["choices"] == fields["model"]["choices"]
     assert fields["subagent_model"]["default"] == LOCAL_QWEN_MODEL
     assert fields["nl_model"]["default"] == LOCAL_QWEN_MODEL
+    # NL also answers in the forward and Held-out replays, unmetered: no
+    # hosted model is offered for it.
+    assert fields["nl_model"]["choices"] == [LOCAL_QWEN_MODEL]
     assert fields["compact_model"]["default"] == LOCAL_QWEN_MODEL
     assert fields["reasoning_effort"]["default"] == "xhigh"
     # Empty = derived from the model window by the worker.
@@ -387,7 +390,7 @@ def test_experiment_endpoint_creates_only_persistent_sandbox_research(tmp_path: 
                     "screen_boards": ["main", "gem"],
                     "model": "deepseek-flash",
                     "subagent_model": LOCAL_QWEN_MODEL,
-                    "nl_model": "deepseek-flash",
+                    "nl_model": LOCAL_QWEN_MODEL,
                     "compact_model": "deepseek-flash",
                     "reasoning_effort": "high",
                     "no_thinking": True,
@@ -419,7 +422,7 @@ def test_experiment_endpoint_creates_only_persistent_sandbox_research(tmp_path: 
     assert params["screen_boards"] == ["main", "gem"]
     assert params["model"] == "deepseek-flash"
     assert params["subagent_model"] == LOCAL_QWEN_MODEL
-    assert params["nl_model"] == "deepseek-flash"
+    assert params["nl_model"] == LOCAL_QWEN_MODEL
     assert params["compact_model"] == "deepseek-flash"
     assert params["reasoning_effort"] == "high"
     assert params["no_thinking"] is True
