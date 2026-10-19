@@ -43,6 +43,10 @@ from autotrade.environment.llm import (
     effective_max_output_tokens,
     model_profile,
 )
+from autotrade.environment.llm.lighting import (
+    LONG_CONTEXT_TIER_MODELS,
+    SHORT_TIER_MAX_COMPACTION_THRESHOLD,
+)
 from autotrade.environment.nl import NLConfig
 from autotrade.environment.runtime import utc_now_iso, write_json_atomic
 from autotrade.environment.sandbox import (
@@ -1456,6 +1460,7 @@ def _llm_settings(
     # session parent's derived budget becomes the settings' own.
     settings.compaction_for("subagent")
     settings = replace(settings, compaction=settings.compaction_for("main"))
+    _require_short_tier_compaction(settings)
     gpu_count = _gpu_count(params.get("gpu_count", SandboxSpec().gpu_count))
     sandbox = SandboxSpec(
         image=str(params.get("agent_sandbox_image") or DEFAULT_IMAGE),
@@ -1483,6 +1488,41 @@ def _llm_settings(
 # so the margin lets one such addition ride along without a forced
 # compaction; the gateway keeps its own 2,048-token tokenizer slack on top.
 COMPACTION_SAFETY_MARGIN_TOKENS = 8_192
+
+
+def _require_short_tier_compaction(settings: LLMWorkerSettings) -> None:
+    """Refuse a conversation that could outgrow the relay's priced gpt-6 tier.
+
+    The spend cap prices a gpt-6 request at its short-context tier only;
+    compaction is what keeps a conversation, and the compaction request that
+    reads it, below 272,000 prompt tokens. So a main or sub-agent
+    conversation running on a gpt-6 id, or compacted by one, must compact at
+    or below SHORT_TIER_MAX_COMPACTION_THRESHOLD.
+    """
+
+    for role in ("main", "subagent"):
+        models = {settings.model_for(role)}
+        if settings.compact_enabled:
+            models.add(settings.compact_model)
+        tiered = sorted(models & set(LONG_CONTEXT_TIER_MODELS))
+        if not tiered:
+            continue
+        if not settings.compact_enabled:
+            raise ValueError(
+                f"disable_context_compact cannot be set while the {role} conversation "
+                f"runs on {tiered[0]}: the relay bills its requests past 272,000 prompt "
+                "tokens at a tier max_api_spend_usd does not price, and only compaction "
+                "keeps them below it"
+            )
+        threshold = settings.compaction_for(role).token_threshold
+        if threshold > SHORT_TIER_MAX_COMPACTION_THRESHOLD:
+            raise ValueError(
+                f"compact_token_threshold must be at most "
+                f"{SHORT_TIER_MAX_COMPACTION_THRESHOLD:,} when the {role} conversation "
+                f"runs on or is compacted by {', '.join(tiered)} (it is {threshold:,}): "
+                "the relay bills a request past 272,000 prompt tokens at a tier "
+                "max_api_spend_usd does not price"
+            )
 
 
 def _pit_views_seed(

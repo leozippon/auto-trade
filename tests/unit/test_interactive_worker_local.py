@@ -445,6 +445,44 @@ def test_worker_default_threshold_fits_deepseek_and_compaction_can_be_disabled(
 
 
 
+def test_worker_refuses_a_gpt6_conversation_that_could_outgrow_the_short_tier(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """The relay bills gpt-6 prompts past 272,000 tokens at a tier the spend
+    cap does not price, so every conversation on or compacted by a gpt-6 id
+    must compact at or below 221,184 -- a console-created arm included."""
+    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    path = experiment / "hitl/params.json"
+    params = json.loads(path.read_text(encoding="utf-8"))
+    monkeypatch.setenv("LIGHTING_API_KEY", "relay-test-key")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-test-key")
+    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
+
+    def load(**overrides: object):
+        params.update(overrides)
+        path.write_text(json.dumps(params), encoding="utf-8")
+        return load_worker_options(experiment, repo_root=repo).llm
+
+    # Derived from the windows: the local compaction model bounds the gpt-6
+    # parent at 262,144 - 1,600 - 8,192 = 252,352, past the priced tier.
+    with pytest.raises(ValueError, match=r"compact_token_threshold must be at most 221,184 .*main.*gpt-6\.1-sol.*252,352"):
+        load(model="gpt-6.1-sol", compact_model=LOCAL_QWEN_MODEL)
+    assert load(compact_token_threshold=221_184).compaction.token_threshold == 221_184
+    with pytest.raises(ValueError, match="compact_token_threshold must be at most"):
+        load(compact_token_threshold=221_185)
+    # A sub-agent conversation on gpt-6, or a gpt-6 compaction model reading a
+    # DeepSeek conversation, is held to the same bound.
+    with pytest.raises(ValueError, match=r"subagent conversation runs on or is compacted by gpt-6-luna"):
+        load(model="deepseek-flash", subagent_model="gpt-6-luna", compact_token_threshold=None)
+    with pytest.raises(ValueError, match=r"main conversation runs on or is compacted by gpt-6-astra"):
+        load(subagent_model="deepseek-flash", compact_model="gpt-6-astra")
+    assert load(compact_token_threshold=200_000).compaction.token_threshold == 200_000
+    # Without compaction nothing keeps a gpt-6 conversation below the tier.
+    with pytest.raises(ValueError, match="disable_context_compact"):
+        load(model="gpt-6.1-sol", compact_model=LOCAL_QWEN_MODEL, disable_context_compact=True)
+
+
 def test_worker_gives_subagents_their_own_gateway_and_compaction_budget(
     tmp_path: Path,
     monkeypatch,

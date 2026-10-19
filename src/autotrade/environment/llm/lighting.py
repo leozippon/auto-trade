@@ -56,10 +56,11 @@ DEEPSEEK_DIALECT = "deepseek"
 # snapshot, refreshed by hand when the relay's ``pricing_version`` moves. The
 # gpt-6 ids bill a request by its length: up to 272,000 prompt tokens at the
 # short-context tier listed here, a longer one at twice the prompt and 1.5
-# times the completion price, which the spend cap does not model -- an arm on
-# them pins its compaction threshold below that boundary. DeepSeek-V4.1-Flash
-# is listed at its weekday-peak rate (off-peak bills half). Cache writes are
-# charged as uncached prompt (the relay bills gpt-6.1-sol's at 2.5, not 2).
+# times the completion price, which the spend cap does not model -- a
+# conversation on them must compact below that boundary (see
+# LONG_CONTEXT_TIER_MODELS). DeepSeek-V4.1-Flash is listed at its weekday-peak
+# rate (off-peak bills half). Cache writes are charged as uncached prompt (the
+# relay bills gpt-6.1-sol's at 2.5, not 2).
 MODEL_PROFILES: tuple[tuple[str, str, int, int, TokenPrices], ...] = (
     ("gpt-6.1-sol", RESPONSES_DIALECT, 1_000_000, 128_000, TokenPrices(2.0, 0.1, 10.0)),
     ("gpt-6-astra", RESPONSES_DIALECT, 1_000_000, 128_000, TokenPrices(10.0, 1.0, 50.0)),
@@ -76,6 +77,15 @@ MODEL_PROFILES: tuple[tuple[str, str, int, int, TokenPrices], ...] = (
     ),
 )
 MODEL_CHOICES = tuple(profile[0] for profile in MODEL_PROFILES)
+# The ids billed past 272,000 prompt tokens at the long-context tier above.
+# Only compaction keeps a conversation below it, so a conversation on one, or
+# compacted by one, must compact at or below the local arms' threshold
+# (262,144 - 32,768 - 8,192), which leaves 50,816 tokens under the boundary
+# for the prompt estimate's error; the worker refuses a larger one.
+LONG_CONTEXT_TIER_MODELS = tuple(
+    model for model in MODEL_CHOICES if model.startswith("gpt-6")
+)
+SHORT_TIER_MAX_COMPACTION_THRESHOLD = 221_184
 
 # The responses endpoint takes the shared effort scale narrowed to its own
 # tiers; the shared scale's top tier is xhigh.
@@ -736,8 +746,10 @@ __all__ = [
     "API_KEY_ENV",
     "BASE_URL_ENV",
     "DEFAULT_BASE_URL",
+    "LONG_CONTEXT_TIER_MODELS",
     "MODEL_CHOICES",
     "MODEL_PROFILES",
+    "SHORT_TIER_MAX_COMPACTION_THRESHOLD",
     "LightingProxy",
     "build_gateway",
     "is_credential_failure",
