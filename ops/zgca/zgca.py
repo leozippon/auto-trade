@@ -7,8 +7,9 @@ rsync to it, both over `zenith`) and verifies its own result: up and down are
 `instance start` and `instance stop`; a deploy carries the tracked files, the
 model gateways' keys from the local .env (only the keys the model profiles
 name, written owner-only), the named PIT view seed and the research release
-that seed was built from, prunes code the tree no longer tracks, then prepares
-the instance (venv, ripgrep, tmux, sandbox image) through ops/zgca/remote.sh; a
+that seed was built from, the pretrained-model store every new arm pins and
+mounts, prunes code the tree no longer tracks, then prepares the instance
+(venv, ripgrep, tmux, sandbox image) through ops/zgca/remote.sh; a
 run starts the console and a round launcher in tmux with AUTOTRADE_GPU_NAME
 set; status and sync read and copy back. Nothing here schedules, caches an
 endpoint, keeps a secret in the repository or changes how the executor
@@ -52,6 +53,18 @@ UNFINISHED_SEED_MARKER = "prebuild_unfinished.json"
 DUCKDB_CLI_URL = "https://github.com/duckdb/duckdb/releases/download/v1.1.3/duckdb_cli-linux-amd64.zip"
 DUCKDB_CLI_NAME = "duckdb_cli-linux-amd64.zip"
 DUCKDB_CLI_SHA256 = "efd0fccdb1a28d9ec7a6ebfcde59900068b8ba43a846c9b553c0fd2bbe4acf43"
+# The causal-conv1d release wheel the image installs (build arg
+# CAUSAL_CONV1D_WHEEL_URL, whose default is this URL), fetched where GitHub is
+# reachable, verified against this digest, shipped and served to the build like
+# the DuckDB CLI (two independent routes, GitHub directly and its ghfast.top
+# proxy, agreed on it on 2026-10-19).
+CAUSAL_CONV1D_WHEEL_NAME = "causal_conv1d-1.7.0+cu12torch2.10cxx11abiTRUE-cp311-cp311-linux_x86_64.whl"
+CAUSAL_CONV1D_WHEEL_URL = f"https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.7.0/{CAUSAL_CONV1D_WHEEL_NAME}"
+CAUSAL_CONV1D_WHEEL_SHA256 = "b872d04d98c80856fd897660eac7129cc2ab51db9694530ce0cd24e1b57200fe"
+# The pretrained-model store (environment.pretrained): the console stamps its
+# manifest digest into every arm it creates and every container compares it.
+PRETRAINED = "data/pretrained"
+PRETRAINED_MANIFEST = "MANIFEST.sha256"
 TRACKED_LIST_NAME = "tracked.txt"
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 REMOTE_SCRIPT = Path(__file__).with_name("remote.sh")
@@ -187,24 +200,24 @@ class Workflow:
         if completed.stdout.split()[:1] != [hashlib.sha256(content).hexdigest().encode()]:
             raise WorkflowError(f"{path} on the instance does not hold what was sent")
 
-    def duckdb_cli(self) -> Path:
-        """The verified DuckDB CLI release the deploy ships, fetched once into the state directory."""
+    def release_file(self, url: str, name: str, pinned: str) -> Path:
+        """A verified release file the image build needs and the deploy ships, fetched once into the state directory."""
 
-        path = self.state_dir / DUCKDB_CLI_NAME
+        path = self.state_dir / name
         if not path.is_file():
             self.state_dir.mkdir(parents=True, exist_ok=True)
-            say(f"deploy: fetching {DUCKDB_CLI_URL}")
+            say(f"deploy: fetching {url}")
             fetched = subprocess.run(
                 ["curl", "-fsSL", "--retry", "5", "--retry-all-errors", "--retry-delay", "3",
-                 "--max-time", "900", "-C", "-", "-o", str(path), DUCKDB_CLI_URL],
+                 "--max-time", "900", "-C", "-", "-o", str(path), url],
                 stdin=subprocess.DEVNULL, check=False,
             )
             if fetched.returncode != 0 or not path.is_file():
-                raise WorkflowError(f"could not fetch {DUCKDB_CLI_URL} (curl exit {fetched.returncode})")
+                raise WorkflowError(f"could not fetch {url} (curl exit {fetched.returncode})")
         digest = _sha256(path)
-        if digest != DUCKDB_CLI_SHA256:
+        if digest != pinned:
             raise WorkflowError(
-                f"{path} has digest {digest}, not the pinned {DUCKDB_CLI_SHA256}: remove it to fetch "
+                f"{path} has digest {digest}, not the pinned {pinned}: remove it to fetch "
                 "the release again, or re-pin the digest after verifying the new release"
             )
         return path
@@ -236,14 +249,20 @@ class Workflow:
         gateway_keys = gateway_env(env_file)
         if not gateway_keys:
             raise WorkflowError(f"{env_file} sets none of the keys the model profiles name")
+        pretrained = self.repo_root / PRETRAINED
+        if not (pretrained / PRETRAINED_MANIFEST).is_file():
+            raise WorkflowError(
+                f"{PRETRAINED}/{PRETRAINED_MANIFEST} is missing: the instance's arms pin and mount that store"
+            )
         listed = subprocess.run(
             ["git", "ls-files", "-z"], cwd=self.repo_root, stdin=subprocess.DEVNULL, capture_output=True, check=False,
         )
         if listed.returncode != 0 or not listed.stdout:
             raise WorkflowError("git ls-files listed no tracked files in " + str(self.repo_root))
-        duckdb_cli = self.duckdb_cli()
+        duckdb_cli = self.release_file(DUCKDB_CLI_URL, DUCKDB_CLI_NAME, DUCKDB_CLI_SHA256)
+        wheel = self.release_file(CAUSAL_CONV1D_WHEEL_URL, CAUSAL_CONV1D_WHEEL_NAME, CAUSAL_CONV1D_WHEEL_SHA256)
         # The list rsync copies from is also what the instance keeps: shipped
-        # beside the DuckDB CLI, it lets the `tracked` step remove what is no
+        # beside the release files, it lets the `tracked` step remove what is no
         # longer tracked (a retired round file would otherwise stay and be read).
         manifest = self.state_dir / TRACKED_LIST_NAME
         manifest.write_bytes(listed.stdout)
@@ -254,15 +273,17 @@ class Workflow:
         self.rsync(*preserve, f"--files-from={manifest}", "--from0", f"{self.repo_root}/", f"dev:{REMOTE_ROOT}/")
         say("deploy: .env (the model gateway keys only)")
         self.write_remote(f"{REMOTE_ROOT}/.env", gateway_keys)
-        say(f"deploy: {DUCKDB_CLI_NAME} and {TRACKED_LIST_NAME}")
-        self.rsync(*preserve, str(duckdb_cli), str(manifest), f"dev:{REMOTE_ROOT}/.runtime/zgca/")
+        say(f"deploy: {DUCKDB_CLI_NAME}, {CAUSAL_CONV1D_WHEEL_NAME} and {TRACKED_LIST_NAME}")
+        self.rsync(*preserve, str(duckdb_cli), str(wheel), str(manifest), f"dev:{REMOTE_ROOT}/.runtime/zgca/")
         self.remote("tracked")
         say(f"deploy: {seed}")
         self.rsync(*preserve, "-H", "--delete", f"{seed_dir}/", f"dev:{REMOTE_ROOT}/{seed_path.as_posix()}/")
         say(f"deploy: {RELEASES}/{generation}")
         self.rsync(*preserve, "-H", "--delete", f"{release_dir}/", f"dev:{REMOTE_ROOT}/{RELEASES}/{generation}/")
+        say(f"deploy: {PRETRAINED}")
+        self.rsync(*preserve, "-H", "--delete", f"{pretrained}/", f"dev:{REMOTE_ROOT}/{PRETRAINED}/")
         say("deploy: preparing the instance")
-        self.remote("prepare", DUCKDB_CLI_SHA256)
+        self.remote("prepare", DUCKDB_CLI_SHA256, CAUSAL_CONV1D_WHEEL_SHA256)
         say("deploy: done")
 
     def run(self, round_file: str, args: Sequence[str]) -> None:
@@ -319,7 +340,7 @@ def main(
     )
     commands = parser.add_subparsers(dest="command", required=True, metavar="command")
     commands.add_parser("up", help="instance start: wait for RUNNING and SSH")
-    deploy = commands.add_parser("deploy", help="copy code, the model gateway keys, a seed and its release; prepare venv, ripgrep, tmux, image")
+    deploy = commands.add_parser("deploy", help="copy code, the model gateway keys, a seed and its release, the pretrained store; prepare venv, ripgrep, tmux, image")
     deploy.add_argument("seed", help="PIT view seed directory, relative to the repository (data/pit_views_seed_...)")
     run = commands.add_parser("run", help="start the console if needed and a round launcher in tmux")
     run.add_argument("round_file", help="scripts/experiments/create_round_*.py")

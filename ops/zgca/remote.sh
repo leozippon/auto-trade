@@ -12,10 +12,12 @@ BOX_PYTHON=/root/miniconda3/bin/python
 # The platform's PyPI mirror lacks tushare 1.4.29 (~/zgca-compute/NOTES.md).
 EXTRA_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
 IMAGE=autotrade-sandbox:latest
-# Shipped by the deploy with the digest it pinned; GitHub and its release
+# Shipped by the deploy with the digests it pinned; GitHub and its release
 # proxies are not reliably reachable from the instance, so the build reads the
-# DuckDB CLI from this host over the bridge network instead.
+# DuckDB CLI and the causal-conv1d wheel from this host over the bridge
+# network instead.
 DUCKDB_CLI=.runtime/zgca/duckdb_cli-linux-amd64.zip
+CAUSAL_CONV1D_WHEEL=.runtime/zgca/causal_conv1d-1.7.0+cu12torch2.10cxx11abiTRUE-cp311-cp311-linux_x86_64.whl
 SERVE_PORT=8765
 PORT=38888
 GPU_NAME=A100
@@ -93,21 +95,25 @@ sys.stdout.writelines(f"{arm}\n" for arm in running_arms(sys.argv[1]))' "$ROOT/e
 
 # The legacy builder on the platform's bridge network (no buildx, no host
 # networking); --force-rm so a failed step leaves no multi-GB container behind.
-# The shipped DuckDB CLI is served to the build from this host, on the bridge
-# gateway only, for the build's duration.
+# The shipped DuckDB CLI and causal-conv1d wheel are served to the build from
+# this host, on the bridge gateway only, for the build's duration.
 build_image() {
-    local log=$1 digest=$2 gateway server status
-    echo "$digest  $DUCKDB_CLI" | sha256sum -c --quiet \
+    local log=$1 duckdb_digest=$2 wheel_digest=$3 gateway server status base
+    echo "$duckdb_digest  $DUCKDB_CLI" | sha256sum -c --quiet \
         || die "$ROOT/$DUCKDB_CLI is missing or is not the release the deploy pinned"
+    echo "$wheel_digest  $CAUSAL_CONV1D_WHEEL" | sha256sum -c --quiet \
+        || die "$ROOT/$CAUSAL_CONV1D_WHEEL is missing or is not the release the deploy pinned"
     gateway=$(docker network inspect bridge --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}')
-    [ -n "$gateway" ] || die "the bridge network names no gateway to serve $DUCKDB_CLI on"
+    [ -n "$gateway" ] || die "the bridge network names no gateway to serve $(dirname "$DUCKDB_CLI") on"
     (cd "$(dirname "$DUCKDB_CLI")" && exec python3 -m http.server "$SERVE_PORT" --bind "$gateway" >/dev/null 2>&1) &
     server=$!
     sleep 1
-    kill -0 "$server" 2>/dev/null || die "could not serve $DUCKDB_CLI on $gateway:$SERVE_PORT"
+    kill -0 "$server" 2>/dev/null || die "could not serve $(dirname "$DUCKDB_CLI") on $gateway:$SERVE_PORT"
+    base="http://$gateway:$SERVE_PORT"
     echo "building $IMAGE (log $ROOT/$log)"
     DOCKER_BUILDKIT=0 docker build --force-rm -t "$IMAGE" -f ops/docker/sandbox.Dockerfile \
-        --build-arg "DUCKDB_CLI_URL=http://$gateway:$SERVE_PORT/$(basename "$DUCKDB_CLI")" . 2>&1 | tee "$log"
+        --build-arg "DUCKDB_CLI_URL=$base/$(basename "$DUCKDB_CLI")" \
+        --build-arg "CAUSAL_CONV1D_WHEEL_URL=$base/$(basename "$CAUSAL_CONV1D_WHEEL")" . 2>&1 | tee "$log"
     status=${PIPESTATUS[0]}
     kill "$server" 2>/dev/null
     wait "$server" 2>/dev/null || true
@@ -123,23 +129,24 @@ build_image() {
 # container -- for one cold rebuild. A running arm runs on the image it
 # pinned, so no rebuild is attempted beside it.
 rebuild_image() {
-    local digest=$1 running log
+    local running log
     running=$(running_arms | tr '\n' ' ')
     [ -z "$running" ] || die "the sandbox image must be rebuilt, but arms are running (${running% }) and the disk cannot hold a second image beside the one they run on; wait for them to end"
     log="logs/zgca/image_build_$(date -u +%Y%m%dT%H%M%SZ).log"
-    if ! build_image "$log" "$digest"; then
+    if ! build_image "$log" "$@"; then
         grep -q "No space left on device" "$log" || die "the image build failed (see $ROOT/$log)"
         echo "the build ran out of disk beside the previous image's layers: removing every unused image and stopped container, then building cold"
         docker container prune -f
         docker image prune -af
         df -h --output=target,size,used,avail,pcent / | sed 's/^/disk: /'
         log="logs/zgca/image_build_$(date -u +%Y%m%dT%H%M%SZ).log"
-        build_image "$log" "$digest" || die "the image build failed again on an empty store (see $ROOT/$log)"
+        build_image "$log" "$@" || die "the image build failed again on an empty store (see $ROOT/$log)"
     fi
 }
 
+# The two arguments are the pinned digests of the DuckDB CLI and the
+# causal-conv1d wheel the deploy shipped.
 prepare() {
-    local digest=$1
     cd "$ROOT"
     export DEBIAN_FRONTEND=noninteractive
     # The Agent's typed grep tool runs rg on the host; the worker refuses an
@@ -159,7 +166,7 @@ prepare() {
     if image_current; then
         echo "sandbox image $IMAGE carries this checkout's strategy contract"
     else
-        rebuild_image "$digest"
+        rebuild_image "$@"
         image_current || die "$IMAGE was rebuilt but does not carry this checkout's strategy contract"
     fi
     docker images --format 'image: {{.Repository}}:{{.Tag}} {{.ID}} {{.Size}}' "$IMAGE"
@@ -288,7 +295,7 @@ step=${1:-}
 case "$step" in
     dirs) dirs ;;
     tracked) tracked ;;
-    prepare) [ $# -eq 1 ] || die "prepare needs the pinned DuckDB CLI digest"; prepare "$1" ;;
+    prepare) [ $# -eq 2 ] || die "prepare needs the pinned DuckDB CLI and causal-conv1d wheel digests"; prepare "$1" "$2" ;;
     console-up) console_up ;;
     round) [ $# -ge 1 ] || die "round needs the round file"; round "$@" ;;
     status) status ;;
