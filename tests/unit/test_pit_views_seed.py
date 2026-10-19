@@ -681,19 +681,32 @@ def test_the_dry_run_prints_the_plan_and_builds_nothing(
     assert lines[1].startswith("[1/6] Y1 valid 20210701..20220630")
     assert json.loads(lines[-1])["status"] == "planned"
     assert not (tmp_path / "data/pit_views_seed/explore").exists()
+    # The workspace carries the release pin on to the build.
+    assert (tmp_path / "data/pit_views_seed/explore_workspace").is_dir()
 
 
-def test_the_prebuild_refuses_a_misaligned_geometry_before_pinning(
+def test_the_prebuild_refuses_a_misaligned_geometry_or_a_seed_inside_its_workspace_before_pinning(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     from scripts.data import prebuild_pit_views_seed as prebuild
 
     def refuse(**_kwargs: object) -> None:
-        raise AssertionError("no release may be pinned for a refused geometry")
+        raise AssertionError("no release may be pinned for a refused invocation")
 
     monkeypatch.setattr(prebuild, "ResearchPITSnapshotProvider", refuse)
     with pytest.raises(ValueError, match="twelve months after research"):
         prebuild.main(["--repo-root", str(tmp_path), "--forward-end", "20261231", "--dry-run"])
+    # A successful build removes its workspace, so the seed may not live in it.
+    workspace = tmp_path / "workspace"
+    with pytest.raises(ValueError, match="must not lie inside --workspace"):
+        prebuild.main(
+            [
+                "--repo-root", str(tmp_path),
+                "--seed", str(workspace / "pit_views"),
+                "--workspace", str(workspace),
+                "--dry-run",
+            ]
+        )
 
 
 def test_replay_manifest_matches_requires_phase_label():
@@ -954,9 +967,11 @@ def test_a_seed_whose_prebuild_did_not_finish_is_refused(
         prebuild, "prebuild_asof_stash", lambda **_kwargs: {"reused": False, "trade_days": 1}
     )
     seed = tmp_path / "seed"
+    workspace = tmp_path / "data/pit_views_seed/explore_workspace"
     argv = ["--repo-root", str(tmp_path), "--seed", str(seed)]
     with pytest.raises(ValueError, match="first decision view failed"):
         prebuild.main(argv)
+    assert workspace.is_dir()
     assert BindingProvider.config is not None
     assert (seed / "provider.json").is_file() and not (seed / "decision").exists()
     with pytest.raises(ValueError) as excinfo:
@@ -966,7 +981,7 @@ def test_a_seed_whose_prebuild_did_not_finish_is_refused(
     # Re-run to status ok: the marker goes and the same contract is accepted.
     BindingProvider.failing = False
     assert prebuild.main(argv) == 0
-    assert not (seed / UNFINISHED_BUILD_MARKER).exists()
+    assert not (seed / UNFINISHED_BUILD_MARKER).exists() and not workspace.exists()
     assert assert_seed_snapshot_config(seed, BindingProvider.config) == (
         "generation_test",
         str(tmp_path / "raw"),

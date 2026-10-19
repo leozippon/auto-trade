@@ -18,7 +18,9 @@ snapshot configuration therefore needs its own ``--seed``/``--workspace``
 directory: one tree binds one contract. ``--dry-run`` prints the plan and exits
 without building anything, using a scratch cache root so it never touches the
 seed; it still pins the release into the workspace, which the build then
-reuses.
+reuses. A build that reaches status ok removes the workspace, since the seed's
+``provider.json`` now records the release; a build that stops keeps it, so the
+rerun reuses the same pin.
 
 Each slot is prepared at its own anchor, which also builds the decision view at
 that anchor, so the Held-out slot leaves one decision view (at forward end)
@@ -140,7 +142,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--workspace",
         type=Path,
         default=None,
-        help="Scratch experiment dir for the research-release pin. "
+        help="Scratch experiment dir for the research-release pin, removed after a "
+        "successful build; must not contain --seed. "
         "Default: <repo>/data/pit_views_seed/explore_workspace",
     )
     parser.add_argument("--raw-dir", type=Path, default=None)
@@ -238,6 +241,9 @@ def main(argv: list[str] | None = None) -> int:
     repo_root = args.repo_root.resolve()
     seed = (args.seed or repo_root / DEFAULT_PIT_VIEWS_SEED).resolve()
     workspace = (args.workspace or repo_root / DEFAULT_PIT_VIEWS_SEED_WORKSPACE).resolve()
+    if seed.is_relative_to(workspace):
+        # A successful build removes the workspace, which would take the seed with it.
+        raise ValueError(f"--seed {seed} must not lie inside --workspace {workspace}")
     raw_dir = (args.raw_dir or repo_root / "data/raw").resolve()
     events_root = (
         args.fundamental_events_root or repo_root / "data/pit/fundamental_events"
@@ -345,6 +351,7 @@ def main(argv: list[str] | None = None) -> int:
         checked = assert_seed_views_share_types(seed)
         print(f"view types agree across {checked} decision/replay files", flush=True)
         (seed / UNFINISHED_BUILD_MARKER).unlink()
+        shutil.rmtree(workspace)
     print(
         json.dumps(
             {
