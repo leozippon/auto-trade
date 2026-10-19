@@ -26,6 +26,8 @@ BLOCKS = {
     ),
 }
 BACKUP_DIR = REPO_ROOT / ".runtime" / "crontab"
+# Every install backs up the whole table, so the newest few cover any rollback.
+BACKUP_KEEP = 5
 CRONTAB_LOCK = REPO_ROOT / ".runtime" / "crontab.lock"
 
 
@@ -128,11 +130,15 @@ def verify_installed_crontab(
 
 
 def write_private_backup(path: Path, content: str) -> None:
-    """Store the full user crontab without exposing unrelated job secrets."""
+    """Store the full user crontab without exposing unrelated job secrets, then
+    keep only the newest ``BACKUP_KEEP`` ``crontab-*.bak`` files beside it."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.parent.chmod(0o700)
     path.write_text(content, encoding="utf-8")
     path.chmod(0o600)
+    backups = sorted(path.parent.glob("crontab-*.bak"), key=lambda item: item.stat().st_mtime_ns)
+    for stale in backups[:-BACKUP_KEEP]:
+        stale.unlink()
 
 
 def planned_crontab(current: str, managed: str, *, remove: bool, begin: str, end: str) -> str:

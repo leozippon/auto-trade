@@ -1,6 +1,7 @@
 """Safety contract for the managed TuShare crontab installer."""
 
 import importlib.util
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -201,6 +202,28 @@ class CronInstallerTest(unittest.TestCase):
             installer.write_private_backup(path, "MAILTO=private@example.com\n")
             self.assertEqual(S_IMODE(path.parent.stat().st_mode), 0o700)
             self.assertEqual(S_IMODE(path.stat().st_mode), 0o600)
+
+    def test_only_the_newest_backups_are_kept(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            unrelated = directory / "notes.txt"
+            unrelated.write_text("kept\n", encoding="utf-8")
+            # Oldest first; alternating blocks make name order differ from age order.
+            blocks = ("research", "paper") * 3 + ("research",)
+            old = [
+                directory / f"crontab-{block}-2026100{day}-000000-1.bak"
+                for day, block in enumerate(blocks, start=1)
+            ]
+            for second, path in enumerate(old, start=1):
+                path.write_text("old\n", encoding="utf-8")
+                os.utime(path, (second, second))
+            newest = directory / "crontab-tushare-20261008-000000-2.bak"
+            installer.write_private_backup(newest, "current\n")
+            self.assertEqual(
+                {path.name for path in directory.glob("crontab-*.bak")},
+                {newest.name, *(path.name for path in old[1 - installer.BACKUP_KEEP :])},
+            )
+            self.assertTrue(unrelated.exists())
 
 
 if __name__ == "__main__":
