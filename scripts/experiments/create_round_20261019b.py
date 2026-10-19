@@ -2,10 +2,11 @@
 """The 2026-10-19 second round: the two proposals of round 20261019 on the A100 instance, models swapped.
 
 The same two packs, directives, geometry, boards and seed as round 20261019
-(`create_round_20261019.py`), on the ZGCA development instance with one A100,
-with the main-session models exchanged so that each proposal is researched by
-both models across the two rounds. Sub-agents and compaction run on
-DeepSeek-V4.1-Flash in both, since the instance has no local model.
+(`create_round_20261019.py`), on the ZGCA development instance with two
+A100s (auto-trade-dev-a100x2), with the main-session models exchanged so
+that each proposal is researched by both models across the two rounds.
+Sub-agents and compaction run on DeepSeek-V4.1-Flash in both, since the
+instance has no local model.
 
 | Arm | Pack | Main session | Sub-agents / compaction |
 | --- | --- | --- | --- |
@@ -14,14 +15,13 @@ DeepSeek-V4.1-Flash in both, since the instance has no local model.
 
 The host must name its card model (`AUTOTRADE_GPU_NAME=A100`) in the
 environment of both the console and this launcher, which `ops/zgca/zgca.py
-run` does. Each arm claims the one GPU, so the two cannot run together; the
-launcher takes experiment ids after the port, so one arm is created at a
-time:
+run` does. Each arm claims one of the two cards, so the two run together and
+one launcher run naming both ids creates them (the instance is not the
+workflow's default, so it is named):
 
-    python ops/zgca/zgca.py run scripts/experiments/create_round_20261019b.py hcm_lm_100k_8y_sol_zgca_20261019b
-    python ops/zgca/zgca.py run scripts/experiments/create_round_20261019b.py egcu_lm_100k_8y_opus_zgca_20261019b
+    python ops/zgca/zgca.py --instance mpo06t71crmmtdsrb98ckwk29 run scripts/experiments/create_round_20261019b.py hcm_lm_100k_8y_sol_zgca_20261019b egcu_lm_100k_8y_opus_zgca_20261019b
 
-(`--dry-run` before either reads the seed contract and smokes the starter.)
+(`--dry-run` before it reads the seed contract and smokes the starter.)
 
 Usage: create_round_20261019b.py <port> [--dry-run] [--fill] [experiment_id ...]
 """
