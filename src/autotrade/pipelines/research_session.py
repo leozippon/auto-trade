@@ -857,6 +857,9 @@ class LLMResearchDeveloper:
                     # What ``fit`` may spend those wall clocks on: the formal
                     # strategy container's own GPU allocation.
                     "strategy_gpu_count": self.strategy_gpu_count,
+                    # How many replays one batch_validate call runs at once,
+                    # and so the factor both wall clocks above are scaled by.
+                    "batch_validate_max_concurrency": request.batch_validate_max_concurrency,
                     # The totals above are the arm's; what earlier attempts
                     # already spent of them.
                     "used_before_this_attempt": used.to_record(),
@@ -1082,6 +1085,7 @@ class LLMResearchDeveloper:
                 workspace=safe,
                 modification_check_factory=check_for,
                 trace_emit=trace.emit,
+                max_concurrency=request.batch_validate_max_concurrency,
             ),
         ]
         null_control_tool = (

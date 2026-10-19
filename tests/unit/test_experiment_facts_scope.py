@@ -279,17 +279,17 @@ def test_the_facts_publish_the_strategy_containers_cpu_quota_and_batch_width() -
 
     The formal strategy container is started with a fixed CPU quota and has its
     OMP/MKL/OPENBLAS/NUMEXPR variables set from it; one session guessed half of
-    it and lost two backtest slots to fit timeouts. Both this quota and how many
-    replays a batch runs at once are read from the code that enforces them, so
-    the fact cannot drift from the container.
+    it and lost two backtest slots to fit timeouts. The quota is read from the
+    code that enforces it, and how many replays a batch runs at once from the
+    run manifest, which carries the arm's own width, so neither fact can drift
+    from what the containers get.
     """
 
     from autotrade.environment.sandbox import SandboxLimits
-    from autotrade.pipelines.session_tools import BATCH_VALIDATE_MAX_CONCURRENCY
 
-    budgets = _facts()["budgets"]
+    budgets = _facts(budgets={"batch_validate_max_concurrency": 5})["budgets"]
     assert budgets["strategy_cpus"] == SandboxLimits().cpus
-    assert budgets["batch_validate_max_concurrency"] == BATCH_VALIDATE_MAX_CONCURRENCY
+    assert budgets["batch_validate_max_concurrency"] == 5
     # The width alone would mislead: the fit clock the batch is judged against
     # scales with it, so the rule travels with the number.
     assert budgets["batch_validate_fit_timeout_note"] == BATCH_VALIDATE_FIT_TIMEOUT_NOTE

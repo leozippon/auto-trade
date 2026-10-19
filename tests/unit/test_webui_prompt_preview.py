@@ -31,6 +31,7 @@ from autotrade.agent.prompts import (
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.sandbox import SandboxLimits
 from autotrade.pipelines.config import (
+    DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
     DEFAULT_DEADLINE_GRACE_MINUTES,
     DEFAULT_RESEARCH_GEOMETRY,
     rolling_default,
@@ -38,7 +39,6 @@ from autotrade.pipelines.config import (
 )
 from autotrade.pipelines.hitl_state import build_session_plan
 from autotrade.pipelines.research_session import LINEAGE_NOTE
-from autotrade.pipelines.session_tools import BATCH_VALIDATE_MAX_CONCURRENCY
 from autotrade.webui.prompt_preview import RUNTIME_PLACEHOLDER, build_prompt_preview
 
 SESSION_KEY = "research"
@@ -197,7 +197,7 @@ def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path)
         "strategy_gpu_count": limits.gpu_count,
         "strategy_cpus": limits.cpus,
         "strategy_memory_bytes": limits.memory_bytes,
-        "batch_validate_max_concurrency": BATCH_VALIDATE_MAX_CONCURRENCY,
+        "batch_validate_max_concurrency": DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
         "batch_validate_fit_timeout_note": BATCH_VALIDATE_FIT_TIMEOUT_NOTE,
         "smoke_backtest_probe_note": SMOKE_PROBE_NOTE,
     }

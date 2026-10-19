@@ -61,6 +61,30 @@ DEFAULT_MAX_LLM_CALLS = 6400
 # What one arm's research session may spend on hosted model APIs, in USD at the
 # catalog's list prices (``environment.llm.pricing``); the local model is free.
 DEFAULT_MAX_API_SPEND_USD = 50.0
+# ``batch_validate``: one formal step that fans out a pre-registered candidate
+# set over one span. Audited sessions reached at most two formal Validations
+# each when every candidate was its own serial step, each branching off the
+# last, which made the evidence per decision too thin. A batch fixes the parent
+# and the span for every candidate, so their numbers are comparable, and
+# pre-registers each hypothesis before any result exists. One candidate is a
+# round too: the hypothesis is the same binding pre-registration at any width.
+BATCH_VALIDATE_MIN_CANDIDATES = 1
+# The session's replay-year budget is the real limit and is checked per call;
+# this cap only bounds what one observation may carry, and six screening
+# candidates already make a wide round.
+BATCH_VALIDATE_MAX_CANDIDATES = 6
+# Concurrent replays per batch, the arm's ``batch_validate_max_concurrency``
+# (1 up to the candidate cap; more workers than candidates run nothing). Each
+# replay holds its own result/as-of directory and its own strategy container —
+# two when the candidate declares fit, whose read-write state bind needs a
+# second worker — and the Timeview stash serializes part publication across
+# evaluations, so the bound is host capacity (up to two containers per replay
+# at SandboxLimits.cpus, and on a GPU arm every one of them on the arm's own
+# cards), not correctness — which only holds because both strategy deadlines
+# scale with the batch's own width (``session_tools._batch_replay_timeouts``);
+# a fixed clock made the outcome depend on how many siblings happened to share
+# the host.
+DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY = 3
 
 # Research on four July-June years, a twelve-month forward test after them,
 # and a Held-out quarter the replay clips to the release end
@@ -596,6 +620,9 @@ class RollingExperimentConfig:
     # ``run_null_control`` (``null_control.PANEL_DRAWS`` replays each); the
     # frozen node's block is reused at freeze. 0 leaves the tool out.
     max_null_controls: int = DEFAULT_MAX_NULL_CONTROLS
+    # Replays one ``batch_validate`` call runs at once (see
+    # ``DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY``).
+    batch_validate_max_concurrency: int = DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY
     max_llm_calls: int = DEFAULT_MAX_LLM_CALLS
     # Spent by the session's main, sub-agent and compaction calls together; the
     # NL gateway is not metered (it stays on the local model by round policy).
@@ -671,6 +698,16 @@ class RollingExperimentConfig:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} must be a non-negative integer")
+        width = self.batch_validate_max_concurrency
+        if (
+            isinstance(width, bool)
+            or not isinstance(width, int)
+            or not 1 <= width <= BATCH_VALIDATE_MAX_CANDIDATES
+        ):
+            raise ValueError(
+                "batch_validate_max_concurrency must be an integer from 1 to "
+                f"{BATCH_VALIDATE_MAX_CANDIDATES}"
+            )
         positive_spend_cap(self.max_api_spend_usd)
         benchmark_index_label(self.benchmark_index)
         object.__setattr__(self, "experiments_root", Path(self.experiments_root))
@@ -1059,6 +1096,11 @@ class ResearchSessionRequest:
     # Cap on the session's own ``run_null_control`` calls; the experiment default
     # is the single source (RollingExperimentConfig.max_null_controls).
     max_null_controls: int = RollingExperimentConfig.max_null_controls
+    # Replays one ``batch_validate`` call runs at once
+    # (RollingExperimentConfig.batch_validate_max_concurrency).
+    batch_validate_max_concurrency: int = (
+        RollingExperimentConfig.batch_validate_max_concurrency
+    )
     # The arm's API spend cap (RollingExperimentConfig.max_api_spend_usd), after
     # any HITL resource override.
     max_api_spend_usd: float = RollingExperimentConfig.max_api_spend_usd
@@ -1165,6 +1207,9 @@ ResearchDeveloper = Callable[[ResearchSessionRequest], ResearchSessionResult]
 
 
 __all__ = [
+    "BATCH_VALIDATE_MAX_CANDIDATES",
+    "BATCH_VALIDATE_MIN_CANDIDATES",
+    "DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY",
     "DEFAULT_DEADLINE_GRACE_MINUTES",
     "DEFAULT_MAX_API_SPEND_USD",
     "DEFAULT_MAX_LLM_CALLS",

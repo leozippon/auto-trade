@@ -22,7 +22,11 @@ from pathlib import Path
 from autotrade.environment.data.contracts import BENCHMARK_INDEXES
 from autotrade.environment.data.snapshot import DEFAULT_DATASETS, SELECTABLE_DATASETS
 from autotrade.environment.llm.model_profiles import MODEL_CHOICES, NL_MODEL_CHOICES
-from autotrade.pipelines.config import MANDATED_DEFAULTS, AcceptanceRules
+from autotrade.pipelines.config import (
+    BATCH_VALIDATE_MAX_CANDIDATES,
+    MANDATED_DEFAULTS,
+    AcceptanceRules,
+)
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
 from autotrade.pipelines.skills import (
     OPERATING_MEMORY_LIBRARY,
@@ -580,6 +584,9 @@ _FIELDS: list[dict[str, object]] = [
     },
     {"key": "gpu_count", "group": "运行控制", "label": "默认 GPU 数量", "type": "int", "min": 0, "max": 4,
      "help": "每个研究会话与正式回放 Sandbox 默认分配的 GPU 数量（0–4）；0 表示 CPU-only，不占用 L20。大于 0 时控制台在启动 Worker 前为本臂认领同样多张没人在用、也没被别的在跑臂认领的整卡，本臂的会话与回放只用这些卡；逐会话设置可覆盖此默认值。"},
+    {"key": "batch_validate_max_concurrency", "group": "运行控制", "label": "批验证并发回放数", "type": "int",
+     "min": 1, "max": BATCH_VALIDATE_MAX_CANDIDATES, "advanced": True,
+     "help": f"一次 batch_validate 同时回放的候选数（1–{BATCH_VALIDATE_MAX_CANDIDATES}）。每路各起自己的策略容器（声明 fit 的候选两个），GPU 臂的这些容器共用本臂认领的卡；单次 fit 与单日推断的超时按本批实际路数成倍放大。"},
     # 模型与上下文
     {
         "key": "model",

@@ -65,6 +65,9 @@ from autotrade.environment.tools.workspace import SafeWorkspace
 from .agent_views import NULL_CONTROL_KEYS, allowed_keys
 from .calendar import FULL_SPAN, yyyymmdd
 from .config import (
+    BATCH_VALIDATE_MAX_CANDIDATES,
+    BATCH_VALIDATE_MIN_CANDIDATES,
+    DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
     OFFLINE_TRIALS_PRICING,
     AcceptanceRules,
     ArtifactRevision,
@@ -1130,27 +1133,9 @@ def recorded_step(
     )
 
 
-# ``batch_validate``: one formal step that fans out a pre-registered candidate
-# set over one span. Audited sessions reached at most two formal Validations
-# each when every candidate was its own serial step, each branching off the
-# last, which made the evidence per decision too thin. A batch fixes the parent
-# and the span for every candidate, so their numbers are comparable, and
-# pre-registers each hypothesis before any result exists. One candidate is a
-# round too: the hypothesis is the same binding pre-registration at any width.
-BATCH_VALIDATE_MIN_CANDIDATES = 1
-# The session's replay-year budget is the real limit and is checked per call;
-# this cap only bounds what one observation may carry, and six screening
-# candidates already make a wide round.
-BATCH_VALIDATE_MAX_CANDIDATES = 6
-# Concurrent replays per batch. Each one holds its own result/as-of directory
-# and its own strategy container — two when the candidate declares fit, whose
-# read-write state bind needs a second worker — and the Timeview stash
-# serializes part publication across evaluations, so the bound is host capacity
-# (up to two containers per replay at SandboxLimits.cpus), not correctness —
-# which only holds because both strategy deadlines scale with the batch's own
-# width (``_batch_replay_timeouts``); a fixed clock made the outcome depend on
-# how many siblings happened to share the host.
-BATCH_VALIDATE_MAX_CONCURRENCY = 3
+# ``batch_validate``'s candidate range and replay width live with the arm's
+# other budgets (``config.BATCH_VALIDATE_MAX_CANDIDATES``,
+# ``RollingExperimentConfig.batch_validate_max_concurrency``).
 BATCH_NAME_MAX_CHARS = 40
 # A pre-registration is only binding if the falsification clause fits with it:
 # signal, holding, control, and what would refute the claim. It is bounded like
@@ -1591,11 +1576,15 @@ class BatchValidateTool(SessionTimeBudgetAware):
         workspace: SafeWorkspace,
         modification_check_factory: Callable[[Path], ModificationCheckTool],
         trace_emit: Callable[[str, dict[str, object]], object] | None = None,
+        max_concurrency: int = DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
     ) -> None:
         self.backtest = backtest
         self.workspace = workspace
         self.modification_check_factory = modification_check_factory
         self._trace_emit = trace_emit
+        # The arm's replay width (``batch_validate_max_concurrency``), already
+        # validated with its other budgets.
+        self.max_concurrency = max_concurrency
         # Per-session rejection counter, keyed by signature. Not persisted:
         # the loop it bounds is one session's retry loop.
         self._rejections: dict[tuple[str, str], int] = {}
@@ -2036,7 +2025,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
                 return None, exc, time.perf_counter() - started
             return evaluation, None, time.perf_counter() - started
 
-        workers = min(len(revisions), BATCH_VALIDATE_MAX_CONCURRENCY)
+        workers = min(len(revisions), self.max_concurrency)
         if workers <= 1:
             return [run_one(index) for index in range(len(revisions))]
         interrupt: SessionInterrupt | None = None

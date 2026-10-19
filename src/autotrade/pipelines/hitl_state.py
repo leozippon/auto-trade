@@ -123,6 +123,7 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "screen_boards": (),
     "max_replay_years": rolling_default("max_replay_years"),
     "max_null_controls": rolling_default("max_null_controls"),
+    "batch_validate_max_concurrency": rolling_default("batch_validate_max_concurrency"),
     "max_llm_calls": rolling_default("max_llm_calls"),
     "max_api_spend_usd": rolling_default("max_api_spend_usd"),
     "session_max_attempts": rolling_default("session_max_attempts"),

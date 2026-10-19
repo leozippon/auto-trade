@@ -33,7 +33,8 @@ DEADLINE_SECONDS_NOTE = (
 # caps move with it (pipelines.session_tools._batch_replay_timeouts).
 BATCH_VALIDATE_FIT_TIMEOUT_NOTE = (
     "`batch_validate` 并发回放期间，`strategy_fit_timeout_seconds` 与单次推断上限"
-    "`strategy_inference_timeout_seconds` 都按本批实际并发路数成倍放大（并发 3 路即 3 倍），"
+    "`strategy_inference_timeout_seconds` 都按本批实际并发路数成倍放大（路数取本批候选数与 "
+    "`batch_validate_max_concurrency` 中较小的一个，3 路即 3 倍），"
     "因为并发是环境引入的、不该记到策略头上；单个候选的调用两者都用基准值。"
 )
 
@@ -309,10 +310,6 @@ def _budget_facts(
     max_llm_calls: int | None,
     context_compaction: Mapping[str, object] | None,
 ) -> dict[str, object]:
-    # Local import: the pipelines package imports this module, so binding the
-    # batch cap at module scope would close an import cycle.
-    from autotrade.pipelines.session_tools import BATCH_VALIDATE_MAX_CONCURRENCY
-
     budgets = _as_mapping(manifest.get("budgets"))
     return compact_mapping(
         {
@@ -366,14 +363,15 @@ def _budget_facts(
             # under `shell` is measured against the number the formal replay
             # will enforce rather than extrapolated across two boundaries.
             "strategy_memory_bytes": SandboxLimits().memory_bytes,
-            # Replays one batch_validate call runs at once, each with its own
-            # strategy container (two when the candidate declares fit). The
-            # host is shared with the other running experiments, so wall clock
-            # per replay is not exclusive; the two strategy timeouts above are
+            # Replays one batch_validate call runs at once (the arm's
+            # ``batch_validate_max_concurrency``), each with its own strategy
+            # container (two when the candidate declares fit). The host is
+            # shared with the other running experiments, so wall clock per
+            # replay is not exclusive; the two strategy timeouts above are
             # measured on the strategy's own call and start only once the
             # worker holds the decision inputs, so neither bills container
             # scheduling or host contention to the strategy.
-            "batch_validate_max_concurrency": BATCH_VALIDATE_MAX_CONCURRENCY,
+            "batch_validate_max_concurrency": budgets.get("batch_validate_max_concurrency"),
             "batch_validate_fit_timeout_note": BATCH_VALIDATE_FIT_TIMEOUT_NOTE,
             "smoke_backtest_probe_note": SMOKE_PROBE_NOTE,
             "context_compaction": context_compaction,

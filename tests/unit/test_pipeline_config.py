@@ -24,6 +24,7 @@ from autotrade.pipelines import verdict
 from autotrade.pipelines.calendar import ResearchGeometry
 from autotrade.pipelines.config import (
     ACCEPTANCE_KEYS,
+    BATCH_VALIDATE_MAX_CANDIDATES,
     DEFAULT_RESEARCH_GEOMETRY,
     MANDATED_DEFAULTS,
     OFFLINE_TRIALS_PRICING,
@@ -401,6 +402,17 @@ class RollingExperimentConfigValidationTest(unittest.TestCase):
                         ValueError, f"{name} must be a non-negative integer"
                     ):
                         make_config(Path("/tmp"), **{name: value})
+
+    def test_batch_width_runs_from_one_to_the_candidate_cap(self) -> None:
+        name = "batch_validate_max_concurrency"
+        self.assertEqual(getattr(make_config(Path("/tmp")), name), 3)
+        for value in (1, BATCH_VALIDATE_MAX_CANDIDATES):
+            self.assertEqual(getattr(make_config(Path("/tmp"), **{name: value}), name), value)
+        for value in (0, BATCH_VALIDATE_MAX_CANDIDATES + 1, 2.0, True):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ValueError, f"{name} must be an integer from 1 to {BATCH_VALIDATE_MAX_CANDIDATES}"
+            ):
+                make_config(Path("/tmp"), **{name: value})
 
     def test_experiment_id_must_be_a_safe_path_component(self) -> None:
         for experiment_id in ("../escape", "with space", "sub/dir", "", "dot.name"):

@@ -164,6 +164,7 @@ _ALLOWED_PARAMS = {
     "window_months",
     "max_replay_years",
     "max_null_controls",
+    "batch_validate_max_concurrency",
     "max_llm_calls",
     "max_api_spend_usd",
     "session_max_attempts",
@@ -665,6 +666,10 @@ def resolve_worker_options(
         max_replay_years=_positive_int(knob("max_replay_years"), "max_replay_years"),
         max_null_controls=_nonnegative_int(
             knob("max_null_controls"), "max_null_controls"
+        ),
+        # Range-checked by the config itself (1 up to the candidate cap).
+        batch_validate_max_concurrency=_positive_int(
+            knob("batch_validate_max_concurrency"), "batch_validate_max_concurrency"
         ),
         max_llm_calls=_positive_int(knob("max_llm_calls"), "max_llm_calls"),
         max_api_spend_usd=_positive_float(knob("max_api_spend_usd"), "max_api_spend_usd"),

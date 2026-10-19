@@ -184,6 +184,7 @@ def _research_prompt(
             "strategy_inference_timeout_seconds": limits.timeout_seconds,
             "strategy_fit_timeout_seconds": limits.fit_timeout_seconds,
             "strategy_gpu_count": limits.gpu_count,
+            "batch_validate_max_concurrency": rolling.batch_validate_max_concurrency,
             "used_before_this_attempt": BudgetUsed().to_record(),
         },
     }

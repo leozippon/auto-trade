@@ -384,6 +384,7 @@ class RollingExperimentPipeline:
                     nl_failure_policy=self.config.nl_failure_policy,
                     finalize_before_deadline_seconds=self.config.finalize_before_deadline_seconds,
                     max_null_controls=self.config.max_null_controls,
+                    batch_validate_max_concurrency=self.config.batch_validate_max_concurrency,
                     progress_hook=progress,
                     skills_source_ref=(
                         str(current_skills.root) if current_skills.root is not None else ""

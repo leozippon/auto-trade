@@ -64,6 +64,7 @@ from autotrade.environment.tools.workspace import (
     SafeWorkspace,
 )
 from autotrade.pipelines.config import (
+    DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
     OFFLINE_TRIALS_PRICING,
     AcceptanceRules,
     BrokerProfile,
@@ -91,7 +92,6 @@ from autotrade.pipelines.session_tools import (
     BATCH_REJECTION_CHARGE_AFTER,
     BATCH_REJECTION_ESCALATE_AT,
     BATCH_VALIDATE_MAX_CANDIDATES,
-    BATCH_VALIDATE_MAX_CONCURRENCY,
     BUDGET_SPENT_NOTE,
     BatchValidateTool,
     EnvironmentBlocked,
@@ -348,6 +348,7 @@ class _Session:
         resources: Mapping[str, object] | None = None,
         alpha_scale: float = 0.0005,
         acceptance_rules: Mapping[str, object] | None = None,
+        max_concurrency: int = DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
     ) -> None:
         # Where the worker roots a session, as every session has one: the
         # freeze gate reads a nominee's strategy from its revision store.
@@ -438,6 +439,7 @@ class _Session:
                 if trace is not None
                 else None
             ),
+            max_concurrency=max_concurrency,
         )
         self.rollback = StepRollbackTool(
             self.tree,
@@ -978,32 +980,52 @@ class BatchValidateRunTest(unittest.TestCase):
             self.assertEqual(session.backtest.replay_years_used, 16)
             self.assertEqual(len(session.backtest.steps), 4)
 
-    def test_candidates_replay_concurrently_up_to_the_bound(self) -> None:
+    def test_candidates_replay_concurrently_up_to_the_arms_width(self) -> None:
         """The bound is host capacity, not correctness: each replay owns its
         result directory, as-of view and container, and the bookkeeping around
-        them stays on the calling thread."""
+        them stays on the calling thread. The width is the arm's own
+        ``batch_validate_max_concurrency``, and both strategy deadlines scale
+        with exactly the width it produced."""
+        fit_base = SandboxConfig().limits.fit_timeout_seconds
+        for width in (DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY, 5):
+            with self.subTest(width=width), TemporaryDirectory() as tmp:
+                self._replay_full_width(Path(tmp), width, fit_base)
+        # Width 1 is the serial path: one replay at a time, nothing scaled.
         with TemporaryDirectory() as tmp:
-            session = _Session(Path(tmp), rendezvous=BATCH_VALIDATE_MAX_CONCURRENCY)
-            names = [f"c{index}" for index in range(BATCH_VALIDATE_MAX_CANDIDATES)]
+            session = _Session(Path(tmp), max_concurrency=1)
+            names = [f"s{index}" for index in range(3)]
             for index, name in enumerate(names):
-                session.candidate(name, _strategy(str(index)))
-            # The rendezvous only completes if that many replays are in flight
-            # at once; a serialized implementation would time out and fail.
-            result = session.call(*names)
-            self.assertTrue(result.ok)
-            self.assertEqual(
-                result.value["complete_validations"], BATCH_VALIDATE_MAX_CANDIDATES
-            )
-            self.assertEqual(session.evaluator.peak, BATCH_VALIDATE_MAX_CONCURRENCY)
-            # Recording order follows the input, not whichever replay landed
-            # first, so the lineage is reproducible.
-            self.assertEqual(
-                [row["name"] for row in result.value["candidates"]], names
-            )
-            self.assertEqual(
-                [row["result_name"] for row in result.value["candidates"]],
-                [f"valid_{index + 1:03d}" for index in range(len(names))],
-            )
+                session.candidate(name, _strategy(f"9{index}"))
+            self.assertTrue(session.call(*names).ok)
+            self.assertEqual(session.evaluator.peak, 1)
+            self.assertEqual(session.evaluator.fit_timeouts, [fit_base] * 3)
+
+    def _replay_full_width(self, tmp: Path, width: int, fit_base: float) -> None:
+        session = _Session(tmp, rendezvous=width, max_concurrency=width)
+        names = [f"c{index}" for index in range(BATCH_VALIDATE_MAX_CANDIDATES)]
+        for index, name in enumerate(names):
+            session.candidate(name, _strategy(str(index)))
+        # The rendezvous only completes if that many replays are in flight
+        # at once; a serialized implementation would time out and fail.
+        result = session.call(*names)
+        self.assertTrue(result.ok)
+        self.assertEqual(
+            result.value["complete_validations"], BATCH_VALIDATE_MAX_CANDIDATES
+        )
+        self.assertEqual(session.evaluator.peak, width)
+        self.assertEqual(
+            session.evaluator.fit_timeouts,
+            [fit_base * width] * BATCH_VALIDATE_MAX_CANDIDATES,
+        )
+        # Recording order follows the input, not whichever replay landed
+        # first, so the lineage is reproducible.
+        self.assertEqual(
+            [row["name"] for row in result.value["candidates"]], names
+        )
+        self.assertEqual(
+            [row["result_name"] for row in result.value["candidates"]],
+            [f"valid_{index + 1:03d}" for index in range(len(names))],
+        )
 
     def test_both_strategy_deadlines_scale_with_the_batch_replay_width(self) -> None:
         """The contention a batch adds is the environment's, not the strategy's.
