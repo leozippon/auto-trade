@@ -52,7 +52,10 @@ except SandboxImageContractMismatch as exc:
 PY
 }
 
+# The first step of a deploy, before its first transfer: every transfer is an
+# rsync, which a fresh instance's image does not carry.
 dirs() {
+    command -v rsync >/dev/null || { echo "installing rsync"; apt-get -qq update && DEBIAN_FRONTEND=noninteractive apt-get -qq install -y rsync; }
     mkdir -p "$ROOT/data/research_releases" "$ROOT/experiments" "$ROOT/logs/workers" \
         "$ROOT/logs/webui" "$ROOT/logs/zgca" "$ROOT/.runtime/zgca"
 }
