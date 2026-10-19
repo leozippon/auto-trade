@@ -205,7 +205,6 @@ def _research_prompt(
     }
     _mark_runtime_only(facts)
     return build_system_prompt(
-        rolling.schedule,
         experiment_facts=facts,
         exploration_directive=rolling.research_directive,
         session_directive=directive,

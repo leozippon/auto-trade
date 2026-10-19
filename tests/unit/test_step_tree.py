@@ -431,7 +431,6 @@ class PromptCompositionTest(unittest.TestCase):
             first.index("# 决策合同"),
             first.index("# 原则"),
             first.index("# 工具与工作方式"),
-            first.index("# 角色与写权"),
             first.index("# 执行合同与边界"),
             first.index("# 禁止事项"),
             first.index("# 预算与事实"),

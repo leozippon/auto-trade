@@ -298,9 +298,8 @@ AGENT_TOOL_DESCRIPTION = (
     "只在需要改变范围、追加刚发现的约束或让它提前收尾汇报时使用；不为催促而发，"
     "后续任务用 resume 或新子代理，已完成的子代理不能 message。\n"
     # Roles are not described here: the same tool payload carries the generated
-    # per-role table on the ``agent`` property (``_role_schema_text``), and the
-    # system prompt carries ROLE_MATRIX_SECTION. A hand-written third copy could
-    # only drift from SUBAGENT_ROLE_TABLE.
+    # per-role table on the ``agent`` property (``_role_schema_text``); a
+    # hand-written copy could only drift from SUBAGENT_ROLE_TABLE.
     "轮次与思考：子代理拥有自己模型的完整上下文窗口、按该窗口推导的压缩阈值和与你相同的输出上限（达到阈值时自动压缩，不会因上下文写满而失败），"
     f"可以承担较大的有界块；省略 max_turns 时最多 {DEFAULT_SUBAGENT_MAX_ROUNDS} 轮：倒数第 {SUBAGENT_GRACE_ROUNDS} 轮起收到收尾提示，"
     "到上限后强制一次简洁总结。几个并行的有界子代理仍好过一个很长的串行子代理；确需更多轮次时显式给 max_turns。"
@@ -380,7 +379,7 @@ AGENT_TOOL_SPEC = ToolSpec(
                     "需要判断的任务保留默认；有界的机械工作显式给 low/medium，"
                     f"因为把 {AGENT_MAX_OUTPUT_TOKENS} token 的输出预算全部耗在思考里而发不出工具调用的一轮"
                     f"只得到最多 {SUBAGENT_MAX_TRUNCATION_CONTINUATIONS} 次强制简洁续写，之后记为 error。"
-                    "high 与 max 是 xhigh 的别名（本机模型没有独立的 high 档），会被接受并记为 xhigh；off 关闭扩展思考。"
+                    "high 与 max 是 xhigh 的别名，会被接受并记为 xhigh；off 关闭扩展思考。"
                 ),
             },
             "inherit_context": {
@@ -403,7 +402,7 @@ AGENT_TOOL_SPEC = ToolSpec(
     },
     example={
         "agent": "Explore",
-        "task": "读 workspace 根下 inputs/data_summary.json，返回可用字段、单位与 available_at 规则。",
+        "task": "读根 artifacts 下的 data_summary.json，返回可用字段、单位与 available_at 规则。",
         "description": "数据摘要与单位",
         "thinking": "medium",
     },

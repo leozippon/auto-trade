@@ -1183,7 +1183,6 @@ class LLMResearchDeveloper:
             llm=budgeted,
             tools=ToolRegistry(tools),
             system_prompt=build_system_prompt(
-                self.schedule,
                 experiment_facts=facts,
                 exploration_directive=self.research_directive,
                 session_directive=request.directive,
