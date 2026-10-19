@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import json
 import random
 import string
@@ -140,6 +141,16 @@ class _DeadlineHandler(BaseHTTPRequestHandler):
             return
         if self.path.startswith("/normal-chunked/"):
             self._write_chunked(_split_four(payload), delay=0.0)
+            return
+        if self.path.startswith("/cut-chunked/"):
+            # The first chunk, then the connection closes with no last chunk.
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            piece = _split_four(payload)[0]
+            self._write_pieces((f"{len(piece):x}\r\n".encode() + piece + b"\r\n",), delay=0.0)
+            self.close_connection = True
             return
         self.send_error(404)
 
@@ -635,6 +646,23 @@ def test_normal_chunked_response_completes_within_hard_deadline():
     with _provider_server() as root:
         proxy = _loopback_proxy(f"{root}/normal-chunked/v1", timeout=1.0)
         assert proxy.complete([ChatMessage("user", "complete")]).content == "ok"
+
+
+def test_a_response_cut_off_mid_body_is_a_retryable_failure():
+    """http.client's IncompleteRead is a transport fault, retried like a timeout."""
+    with _provider_server() as root:
+        proxy = _loopback_proxy(f"{root}/cut-chunked/v1", timeout=2.0)
+        with pytest.raises(LLMProxyError, match="closed mid-response: IncompleteRead") as caught:
+            proxy.complete([ChatMessage("user", "complete")])
+        assert caught.value.retryable is True
+    transport = FakeTransport([http.client.IncompleteRead(b"data: {"), _response({"content": "ok"})])
+    proxy = DeepSeekProxy(
+        make_config(max_retries=1, retry_backoff_seconds=0),
+        transport=transport,
+        sleep=lambda _seconds: None,
+    )
+    assert proxy.complete([ChatMessage("user", "complete")]).content == "ok"
+    assert len(transport.requests) == 2
 
 
 def test_standard_openai_http_error_retains_bounded_redacted_message():

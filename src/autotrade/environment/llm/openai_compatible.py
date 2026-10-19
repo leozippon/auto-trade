@@ -20,7 +20,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from dataclasses import fields as dataclass_fields
-from http.client import HTTPConnection, HTTPSConnection
+from http.client import HTTPConnection, HTTPException, HTTPSConnection
 from pathlib import Path
 from typing import Any, Protocol, cast
 from urllib.parse import urlsplit
@@ -633,7 +633,14 @@ class OpenAICompatibleProxy:
                 response = self._parse_response_payload(payload, stream=stream)
                 _remaining_call_seconds(call_deadline)
             # pi-lens-ignore: ast-grep:no-boolean-in-except
-            except (LLMProxyError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            except (
+                LLMProxyError,
+                HTTPException,
+                OSError,
+                RuntimeError,
+                TypeError,
+                ValueError,
+            ) as exc:
                 error = self._normalize_error(exc)
                 self._log_attempt(
                     log_path,
@@ -783,6 +790,17 @@ class OpenAICompatibleProxy:
             )
         if isinstance(exc, (TimeoutError, socket.timeout)):
             return LLMProxyError("provider call exceeded hard deadline", retryable=True)
+        if isinstance(exc, HTTPException):
+            # The connection closed mid-response (a chunked body cut short, no
+            # status line): a cut-off stream, which the retry policy covers.
+            return LLMProxyError(
+                self._bounded_runtime_error(
+                    self._redact_runtime_details(
+                        f"provider connection closed mid-response: {type(exc).__name__}: {exc}"
+                    )
+                ),
+                retryable=True,
+            )
         return LLMProxyError(
             self._bounded_runtime_error(
                 self._redact_runtime_details(f"provider response failed: {exc}")
