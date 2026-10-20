@@ -13,7 +13,7 @@ python ops/zgca/zgca.py down
 python ops/zgca/zgca.py --instance <平台实例 id> status
 ```
 
-在本机的 `quant` 环境里运行。除 `push` 外，脚本只用标准库和本检出里的模型档案，系统 `python3` 也能跑；`push` 要用控制台自己的“在跑”判定，那个模块依赖 numpy。`ZGCA_COMPUTE` 可以指向别处的 zgca-compute 检出，默认 `~/zgca-compute`；`ZGCA_GITHUB_PROXY` 是下载 GitHub 发布包时先试的代理前缀（例如 `https://ghfast.top/`）。实例缺省是 `auto-trade-dev-a100x2`（两张 A100-80G，平台 id `mpo06t71crmmtdsrb98ckwk29`）；放在子命令之前的 `--instance <平台实例 id>` 让同一个脚本驱动另一台，`instance` 和 `dev` 都被指到所选的这台，别的实例同时在跑也不会选错。开发机上的仓库根目录不随实例改变，缺省是 `/personal_fast_storage/auto-trade`；`ZGCA_REMOTE_ROOT=/personal_fast_storage/<名称>` 把所有传输和开发机步骤移到个人存储下的另一个目录（其他写法在动开发机之前就被拒绝），供验证部署与在用的树并存：同一资源区的实例看到的是同一份个人存储。
+在本机的 `quant` 环境里运行。除 `push` 外，脚本只用标准库和本检出里的模型档案，系统 `python3` 也能跑；`push` 要用控制台自己的“在跑”判定，那个模块依赖 numpy。`ZGCA_COMPUTE` 可以指向别处的 zgca-compute 检出，默认 `~/zgca-compute`；`ZGCA_GITHUB_PROXY` 是下载 GitHub 发布包时先试的代理前缀（例如 `https://ghfast.top/`）。实例缺省是 `auto-trade-dev-a100x2`（两张 A100-80G，平台 id `mpo06t71crmmtdsrb98ckwk29`）；放在子命令之前的 `--instance <平台实例 id>` 让同一个脚本驱动另一台，`instance` 和 `dev` 都被指到所选的这台，别的实例同时在跑也不会选错。开发机上的仓库根目录不随实例改变，缺省是 `/personal_fast_storage/auto-trade`；`ZGCA_REMOTE_ROOT=/personal_fast_storage/<名称>` 把所有传输和开发机步骤移到个人存储下的另一个目录（其他写法在动开发机之前就被拒绝），供验证部署与在用的树并存：同一资源区的实例看到的是同一份个人存储。另设的根要用 `--instance` 配一台非缺省的实例：沙箱镜像、tmux 会话和控制台端口属于实例而不属于根，缺省实例服务在用的树，在它上面另设根可能重建在跑臂所用的镜像（重建前的检查只看本根的臂）或经在用的控制台建臂，所以被拒绝。
 
 ## 各子命令
 

@@ -179,14 +179,14 @@ class ZgcaWorkflowTest(unittest.TestCase):
 
     def test_another_remote_root_takes_every_transfer_and_remote_step(self) -> None:
         """ZGCA_REMOTE_ROOT, e.g. a validation deploy beside the live tree on the zone's shared storage."""
-        other = "/personal_fast_storage/auto-trade-validate"
+        other, instance = "/personal_fast_storage/auto-trade-validate", "validationinstance01"
         self._tracked_repo()
         self._seed()
         self._pretrained()
         (self.repo / ".env").write_text(LOCAL_ENV, encoding="utf-8")
         self._arm("arm_here")
         for argv in (("deploy", "data/pit_views_seed_test"), ("push", "arm_here"), ("sync", "arm_there")):
-            code, err = self.run_main(*argv, ZGCA_REMOTE_ROOT=other)
+            code, err = self.run_main("--instance", instance, *argv, ZGCA_REMOTE_ROOT=other)
             self.assertEqual(code, 0, err)
         dev = self.calls("dev")
         self.assertEqual({self.step(call) for call in dev},
@@ -201,15 +201,23 @@ class ZgcaWorkflowTest(unittest.TestCase):
             elif args[0] == "put":
                 self.assertEqual(args[1], f"{other}/.env")
         # Unset is the default root; anything but a directory directly below
-        # personal storage is refused before any call, an empty value included.
+        # personal storage is refused before any call, an empty value included,
+        # and so is another root on the default instance, whose image, tmux
+        # sessions and console serve the live tree.
         self.log.unlink()
         for bad in ("", "auto-trade-validate", "/tmp/auto-trade", "/personal_fast_storage", "/personal_fast_storage/",
                     "/personal_fast_storage/../auto-trade", "/personal_fast_storage/a/b", "/personal_fast_storage/a b"):
             with self.subTest(root=bad):
-                code, err = self.run_main("status", ZGCA_REMOTE_ROOT=bad)
+                code, err = self.run_main("--instance", instance, "status", ZGCA_REMOTE_ROOT=bad)
                 self.assertEqual(code, 1)
                 self.assertIn("ZGCA_REMOTE_ROOT=", err)
-        self.assertFalse(self.calls())
+        for argv in (("status",), ("--instance", INSTANCE, "deploy", "data/pit_views_seed_test")):
+            with self.subTest(argv=argv):
+                code, err = self.run_main(*argv, ZGCA_REMOTE_ROOT=other)
+                self.assertEqual(code, 1)
+                self.assertIn(f"not the live tree's root, which the default instance {INSTANCE} serves", err)
+        self.assertEqual(self.run_main("status", ZGCA_REMOTE_ROOT=zgca.REMOTE_ROOT)[0], 0)
+        self.assertTrue(all(call["instance"] == INSTANCE for call in self.calls()))
 
     def test_deploy_run_and_sync_refuse_an_instance_that_is_not_running_before_any_transfer(self) -> None:
         self._tracked_repo()

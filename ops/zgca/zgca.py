@@ -15,9 +15,10 @@ prepares the instance (ripgrep, venv, sandbox image); push carries arms of
 this host a round names as lineage; a run starts the console and a round
 launcher in tmux with AUTOTRADE_GPU_NAME set; status and sync read and copy
 back. ZGCA_REMOTE_ROOT moves all of it to another root on the instance's
-personal storage (a validation deploy beside the live tree). Nothing here
-schedules, caches an endpoint, keeps a secret in the repository or changes
-how the executor isolates a strategy container. See ops/zgca/README.md.
+personal storage (a validation deploy beside the live tree, on an instance
+other than the default). Nothing here schedules, caches an endpoint, keeps a
+secret in the repository or changes how the executor isolates a strategy
+container. See ops/zgca/README.md.
 
 usage: zgca.py [--instance <id>] up | deploy <seed dir> | push <arm id>... |
        run <round file> [launcher args...] | status | sync <arm id> | down
@@ -156,6 +157,15 @@ class Workflow:
         if not REMOTE_ROOT_SHAPE.fullmatch(self.remote_root):
             raise WorkflowError(
                 f"{REMOTE_ROOT_ENV}={self.remote_root!r} is not a directory directly below /personal_fast_storage"
+            )
+        # An instance's sandbox image, tmux sessions and console port serve one
+        # root: another root there could rebuild the image the live arms run on
+        # (its guard sees only its own root's arms) or launch through the live
+        # console, so the default instance keeps the live tree's.
+        if self.remote_root != REMOTE_ROOT and self.instance == INSTANCE_ID:
+            raise WorkflowError(
+                f"{REMOTE_ROOT_ENV}={self.remote_root} is not the live tree's root, which the default instance "
+                f"{INSTANCE_ID} serves: name the instance this root is for with --instance"
             )
         for name in ("zenith", "dev", "instance"):
             if not os.access(self.tools / name, os.X_OK):
