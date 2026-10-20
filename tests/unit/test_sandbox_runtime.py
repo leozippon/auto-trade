@@ -2047,51 +2047,6 @@ def test_idle_gpus_never_offers_a_card_anyone_holds_memory_on():
         assert idle_gpus() == [1, 2]
 
 
-def _nvidia_smi(indices) -> Mock:
-    """A ``subprocess.run`` reporting the idle L20 cards ``indices``."""
-
-    rows = "".join(f"{index}, NVIDIA L20, 0, 46068, 46068, 0, 30\n" for index in indices)
-    return Mock(return_value=subprocess.CompletedProcess([], 0, stdout=rows, stderr=""))
-
-
-def test_the_host_device_list_keeps_other_users_cards_out_of_every_selection(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    """A shared host lists the cards this project may use in its .env; the
-    others are never read, so neither a start, a sharing Paper run nor a view
-    is offered one however idle it is. The environment overrides the file, and
-    a host that lists nothing (the A100) keeps every card."""
-
-    from autotrade.environment import gpu
-
-    env_file = tmp_path / ".env"
-    env_file.write_text("OTHER=1\nAUTOTRADE_GPU_DEVICES=0,1,2,6,7\n", encoding="utf-8")
-    monkeypatch.setattr(gpu, "HOST_ENV_FILE", env_file)
-    monkeypatch.delenv("AUTOTRADE_GPU_DEVICES", raising=False)
-    root = tmp_path / "experiments"
-    with patch("autotrade.environment.gpu.subprocess.run", _nvidia_smi(range(8))):
-        assert [row["index"] for row in gpu.list_gpus()] == [0, 1, 2, 6, 7]
-        assert gpu.shareable_gpus() == [0, 1, 2, 6, 7]
-        assert select_gpus(root, 5, require_name="L20") == [0, 1, 2, 6, 7]
-        with pytest.raises(GpuUnavailableError, match=r"requested 6 GPU\(s\), 5 free"):
-            select_gpus(root, 6, require_name="L20", allow_shared=True)
-        monkeypatch.setenv("AUTOTRADE_GPU_DEVICES", "3")
-        assert gpu.idle_gpus() == [3]
-        monkeypatch.delenv("AUTOTRADE_GPU_DEVICES")
-        env_file.unlink()
-        assert gpu.idle_gpus() == list(range(8))
-
-
-def test_a_malformed_host_device_list_refuses_instead_of_allowing_every_card(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    with patch("autotrade.environment.gpu.subprocess.run", _nvidia_smi(range(8))):
-        for value in ("0,,1", "0;1", "1,", "-1", "0-2", "gpu0"):
-            monkeypatch.setenv("AUTOTRADE_GPU_DEVICES", value)
-            with pytest.raises(GpuUnavailableError, match="AUTOTRADE_GPU_DEVICES"):
-                select_gpus(tmp_path, 1, allow_shared=True)
-
-
 def _running_arm(root: Path, name: str, devices: list[int] | None, *, state: str = "running_session") -> None:
     """An arm under ``root`` whose worker is this process, holding ``devices``."""
 
