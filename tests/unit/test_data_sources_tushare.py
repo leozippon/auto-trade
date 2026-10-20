@@ -7903,8 +7903,9 @@ class FullPortContractTest(unittest.TestCase):
         # 32 with the two research-history backfill jobs (2026-09-24); 31 since
         # the completed one-shot commit-identity migration job was retired; 32
         # with the margin available_at repair (2026-10-02); 33 with anns_d's
-        # own official-service job (2026-10-06).
-        self.assertEqual(len(config["jobs"]), 33)
+        # own official-service job (2026-10-06); 34 with the stk_holdertrade
+        # restatement re-pull (2026-10-20).
+        self.assertEqual(len(config["jobs"]), 34)
         for name, tier in (
             ("manual_history_backfill_reference", "reference"),
             ("manual_history_backfill_macro", "macro"),
@@ -7914,6 +7915,11 @@ class FullPortContractTest(unittest.TestCase):
             self.assertEqual(job["extra_args"][:2], ["--history-floor", "20140701"])
         self.assertIn("--no-include-intraday", config["jobs"]["cn_evening_full"]["extra_args"])
         self.assertEqual(config["jobs"]["manual_intraday_minutes"]["operation"], "intraday_by_date")
+        # The restatement re-pull rewrites one dataset's whole history; it must
+        # never widen to the other disclosure tables the nightly job shares.
+        restatement = config["jobs"]["manual_event_restatement_repair"]
+        self.assertEqual((restatement["operation"], restatement["tier"]), ("download_tier", "event_flow"))
+        self.assertEqual(restatement["extra_args"], ["--datasets", "stk_holdertrade", "--force"])
 
     def test_minute_job_runs_the_by_date_updater_as_a_mutating_job(self) -> None:
         context = cron_update.RunContext(

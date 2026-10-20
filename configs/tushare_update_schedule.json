@@ -532,6 +532,19 @@
       ],
       "lock_wait_seconds": 1800,
       "skip_if_already_ok": false
+    },
+    "manual_event_restatement_repair": {
+      "description": "Manual (not scheduled): forced whole-history re-pull of stk_holdertrade after an accepted vendor restatement (2026-10: daily rows with broker-branch seats replaced the per-announcement grain back to 2020). Follow the shrink-guard runbook first: archive and delete every month partition of the dataset, so no old-grain row survives a merge and the guard has nothing to refuse. The window runs from default_start_date to today unless --start-date/--end-date narrow it. Follow with cn_nightly_full_audit --force-run.",
+      "operation": "download_tier",
+      "tier": "event_flow",
+      "end_date_offset_days": 0,
+      "extra_args": [
+        "--datasets",
+        "stk_holdertrade",
+        "--force"
+      ],
+      "lock_wait_seconds": 1800,
+      "skip_if_already_ok": false
     }
   },
   "interfaces": [
