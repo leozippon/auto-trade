@@ -16,10 +16,9 @@ instance has no local model.
 The host must name its card model (`AUTOTRADE_GPU_NAME=A100`) in the
 environment of both the console and this launcher, which `ops/zgca/zgca.py
 run` does. Each arm claims one of the two cards, so the two run together and
-one launcher run naming both ids creates them (the instance is not the
-workflow's default, so it is named):
+one launcher run naming both ids creates them:
 
-    python ops/zgca/zgca.py --instance mpo06t71crmmtdsrb98ckwk29 run scripts/experiments/create_round_20261019b.py hcm_lm_100k_8y_sol_zgca_20261019b egcu_lm_100k_8y_opus_zgca_20261019b
+    python ops/zgca/zgca.py run scripts/experiments/create_round_20261019b.py hcm_lm_100k_8y_sol_zgca_20261019b egcu_lm_100k_8y_opus_zgca_20261019b
 
 (`--dry-run` before it reads the seed contract and smokes the starter.)
 
