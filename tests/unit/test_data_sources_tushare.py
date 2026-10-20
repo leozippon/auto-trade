@@ -7954,8 +7954,8 @@ class FullPortContractTest(unittest.TestCase):
         # the completed one-shot commit-identity migration job was retired; 32
         # with the margin available_at repair (2026-10-02); 33 with anns_d's
         # own official-service job (2026-10-06); 34 with the stk_holdertrade
-        # restatement re-pull (2026-10-20).
-        self.assertEqual(len(config["jobs"]), 34)
+        # restatement re-pull (2026-10-20); 35 with the top_list one.
+        self.assertEqual(len(config["jobs"]), 35)
         for name, tier in (
             ("manual_history_backfill_reference", "reference"),
             ("manual_history_backfill_macro", "macro"),
@@ -7970,6 +7970,14 @@ class FullPortContractTest(unittest.TestCase):
         restatement = config["jobs"]["manual_event_restatement_repair"]
         self.assertEqual((restatement["operation"], restatement["tier"]), ("download_tier", "event_flow"))
         self.assertEqual(restatement["extra_args"], ["--datasets", "stk_holdertrade", "--force"])
+        toplist = config["jobs"]["manual_toplist_restatement_repair"]
+        self.assertEqual((toplist["operation"], toplist["tier"]), ("download_tier", "board_trading"))
+        self.assertEqual(toplist["extra_args"], ["--datasets", "top_list", "--force"])
+        # top_list publishes at 20:00 on its trade date; ending on the last
+        # open date before today never writes an unpublished, empty day.
+        self.assertEqual(
+            (toplist["end_date_offset_days"], toplist["end_date_mode"]), (1, "sse_open_on_or_before")
+        )
 
     def test_minute_job_runs_the_by_date_updater_as_a_mutating_job(self) -> None:
         context = cron_update.RunContext(

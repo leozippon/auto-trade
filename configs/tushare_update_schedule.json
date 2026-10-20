@@ -545,6 +545,20 @@
       ],
       "lock_wait_seconds": 1800,
       "skip_if_already_ok": false
+    },
+    "manual_toplist_restatement_repair": {
+      "description": "Manual (not scheduled): forced whole-history re-pull of top_list after an accepted vendor restatement (2026-10: name carries the security's current name on historical rows; name is a value, not part of the business key). Follow the shrink-guard runbook first: archive and delete every trade_date partition of the dataset, so no row under an earlier name survives and the guard has nothing to refuse. The window runs from default_start_date to the last SSE open date before today (Asia/Shanghai), so it never requests a list the vendor has not published; the nightly window covers today. --start-date/--end-date narrow it. Follow with cn_nightly_full_audit --force-run.",
+      "operation": "download_tier",
+      "tier": "board_trading",
+      "end_date_offset_days": 1,
+      "end_date_mode": "sse_open_on_or_before",
+      "extra_args": [
+        "--datasets",
+        "top_list",
+        "--force"
+      ],
+      "lock_wait_seconds": 1800,
+      "skip_if_already_ok": false
     }
   },
   "interfaces": [
