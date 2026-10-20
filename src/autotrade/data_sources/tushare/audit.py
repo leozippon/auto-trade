@@ -901,7 +901,7 @@ def audit_business_payload(files: list[Path], api_name: str, check_name: str, ad
     that means every expected business field is absent; for families that
     request all vendor fields (fundamentals) the caller declares the payload
     mandatory via require_business_columns. Datasets whose whole contract is
-    the key set (suspend_d, block_trade, top_list, cn_schedule) pass both
+    the key set (suspend_d, block_trade, cn_schedule) pass both
     gates by construction."""
     path = newest_nonzero_partition(files)
     if path is None:

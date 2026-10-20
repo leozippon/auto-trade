@@ -1464,10 +1464,13 @@ BOARD_TRADING_SPECS = {
         strategy="trade_date",
         fields="trade_date,ts_code,name,close,pct_change,turnover_rate,amount,l_sell,l_buy,l_amount,net_amount,net_rate,amount_rate,float_values,reason",
         page_limit=10000,
+        # Every field but ``name``: a stock can list several times a day, so
+        # the figures stay in the key. ``name`` is a value: the vendor restated
+        # it to later names on historical rows (2026-10), which as a key field
+        # read as a removed plus an added row instead of a field revision.
         key_columns=(
             "trade_date",
             "ts_code",
-            "name",
             "close",
             "pct_change",
             "turnover_rate",

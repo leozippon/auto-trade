@@ -4860,6 +4860,50 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(event["added_rows_sample"][0]["key"], ["20200102", "000004.SZ"])
         self.assertEqual(event["removed_rows_sample"][0]["key"], ["20200102", "000003.SZ"])
 
+    def test_top_list_name_is_a_revisable_value_not_part_of_the_key(self):
+        # The vendor restates top_list.name to a later name on historical rows.
+        # As a key field every such restatement read as one removed plus one
+        # added key, which the sentinel escalated as a structural rewrite; as a
+        # value it is a ledgered field revision on an unchanged key.
+        spec = common.BOARD_TRADING_SPECS["top_list"]
+        self.assertNotIn("name", spec.key_columns)
+        self.assertEqual(set(spec.key_columns), set(spec.fields.split(",")) - {"name"})
+        keys = list(spec.key_columns)
+
+        def rows(names: list[str]) -> pd.DataFrame:
+            # One stock listed under two reasons on one day, plus 24 others.
+            records = []
+            for index, name in enumerate(names):
+                records.append({
+                    "trade_date": "20240611", "ts_code": f"{index:06d}.SZ", "name": name,
+                    "close": 10.0 + index, "pct_change": 10.0, "turnover_rate": 5.0,
+                    "amount": 1.0e8, "l_sell": 2.0e7, "l_buy": 3.0e7, "l_amount": 5.0e7,
+                    "net_amount": 1.0e7, "net_rate": 10.0, "amount_rate": 50.0,
+                    "float_values": 2.0e9, "reason": "日涨幅偏离值达到7%的前五只证券",
+                })
+            records.append({**records[0], "reason": "连续三个交易日内，涨幅偏离值累计达到20%的证券",
+                            "l_buy": 4.0e7, "l_amount": 6.0e7, "net_amount": 2.0e7})
+            return pd.DataFrame(records)
+
+        old_df = rows([f"旧名{index}" for index in range(25)])
+        new_df = rows([f"新名{index}" for index in range(25)])
+        self.assertFalse(old_df.duplicated(keys).any())
+        self.assertEqual(int(old_df.duplicated(["trade_date", "ts_code"]).sum()), 1)
+        event = common.build_revision_event(
+            dataset="top_list",
+            partition="trade_date=20240611",
+            path=self.raw_dir / "top_list" / "trade_date=20240611.parquet",
+            old_df=old_df,
+            new_df=new_df,
+            key_columns=keys,
+            source="unit",
+        )
+        self.assertIsNotNone(event)
+        self.assertEqual(event["comparison_issue"], "")
+        self.assertEqual((event["changed_keys"], event["added_keys"], event["removed_keys"]), (26, 0, 0))
+        self.assertEqual(event["changed_columns"], {"name": 26})
+        self.assertFalse(audit.sentinel_event_is_structural(event))
+
     def test_zero_ok_force_refresh_does_not_overwrite_existing_nonempty_partition(self):
         self._write_trade_cal("20200102")
         path = self.raw_dir / "limit_list_d" / "trade_date=20200102.parquet"
