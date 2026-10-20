@@ -179,23 +179,3 @@ HCM_LINEAGE = [
     "hcm_100k_8y_dsf_zgca_20261014c",
     "hcm_100k_8y_sol_dsf_zgca_20261014c",
 ]
-
-# Every arm that searched the fundamentals domain over the eight years as a
-# source of its own edge and recorded a non-control trial (rounds 20261005 to
-# 20261010): the open, event, industry-cycle and learning lanes. Left out:
-# fund_learn2_100k_8y_mimo_20261007, stopped before it recorded a trial, and
-# round 20261006's fundamentals tower, a block on the sequence bag that belongs
-# to the bag's lineage.
-FUNDAMENTALS_LINEAGE = [
-    "fund_open_100k_8y_qwen_20261005",
-    "fund_open_100k_8y_mimo_20261005",
-    "fund_event_100k_8y_qwen_20261005",
-    "fund_event_100k_8y_mimo_20261005",
-    "fund_event3_100k_8y_qwen_20261010",
-    "fund_event3_100k_8y_mimo_20261010",
-    "indcycle_100k_8y_qwen_20261009",
-    "indcycle_100k_8y_mimo_20261009",
-    "fund_learn_100k_8y_qwen_20261005",
-    "fund_learn_100k_8y_mimo_20261005",
-    "fund_learn2_100k_8y_qwen_20261007",
-]
