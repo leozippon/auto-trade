@@ -123,6 +123,7 @@ Rules:
 - `quantity` is a positive integer share count; booleans are not integers for this contract.
 - `execute_at` is a timezone-aware ISO-8601 string and cannot precede `context.inference_at`.
 - Additional JSON fields are preserved as order metadata. A short `reason` is useful for review.
+- The list one call returns, metadata included, serializes to at most 1,000,000 characters of JSON (counted in UTF-8 bytes), so keep metadata to short summaries rather than logs.
 
 A return value that breaks any of these rules fails the backtest at that decision; a well-formed order the Broker cannot fill is rejected on its own and the replay goes on.
 
