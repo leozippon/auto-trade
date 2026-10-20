@@ -8,7 +8,8 @@ container of that worker attaches exactly those; whatever else needs a card
 -- a Paper book's morning run, an operator's replay -- takes its cards there
 for one run and pins them the same way. Only the Paper run may opt into a
 card it shares when none is idle (``shareable_gpus``). A container that asks
-for a device and was given none refuses to start.
+for a device and was given none refuses to start. Cards the host keeps for
+other users are never read at all (``host_gpu_devices``).
 
 The cards are shared with services outside this project and are never
 reserved, so ``MIN_FREE_GPU_MEMORY_MIB`` is the memory a GPU strategy may
@@ -23,6 +24,9 @@ import os
 import re
 import subprocess
 from collections.abc import Sequence
+from pathlib import Path
+
+from .llm.openai_compatible import load_env_value
 
 # The device model this host's sandboxes run on: a case-insensitive substring
 # of the nvidia-smi name that every selection on the host filters by (the
@@ -37,6 +41,16 @@ def host_gpu_name() -> str:
     """The device-name filter this host's GPU selections use."""
 
     return os.environ.get(GPU_NAME_ENV, "").strip() or DEFAULT_GPU_NAME
+
+# The devices this project may use on a host it shares with other users: a
+# comma-separated list of nvidia-smi indices. It is applied where the devices
+# are read (``list_gpus``), so no selection, claim or view ever sees another
+# user's card, idle or not. Unlike the model name it is also read from the
+# repository's .env, so the console, its workers and every command-line run on
+# the host apply it however they were launched; unset or empty, every device
+# is the project's.
+GPU_DEVICES_ENV = "AUTOTRADE_GPU_DEVICES"
+HOST_ENV_FILE = Path(__file__).resolve().parents[3] / ".env"
 
 # The video memory a GPU strategy may count on while it runs. Sized for one
 # quarterly sequence-model refit on a 46 GiB L20 (a measured 9 GiB peak) with
@@ -73,8 +87,27 @@ class GpuUnavailableError(RuntimeError):
     pass
 
 
+def host_gpu_devices() -> frozenset[int] | None:
+    """The device indices this project may use on this host, ``None`` for all.
+
+    A value that is not a list of indices refuses rather than allowing every
+    card."""
+
+    value = load_env_value(GPU_DEVICES_ENV, HOST_ENV_FILE)
+    if not value:
+        return None
+    parts = [part.strip() for part in value.split(",")]
+    if not all(re.fullmatch(r"[0-9]+", part) for part in parts):
+        raise GpuUnavailableError(
+            f"{GPU_DEVICES_ENV}={value!r} is not a comma-separated list of nvidia-smi indices"
+        )
+    return frozenset(int(part) for part in parts)
+
+
 def list_gpus() -> list[dict[str, object]]:
-    """[{index, name, memory_used_mib, memory_free_mib, memory_total_mib, utilization_pct, temperature_c}] from nvidia-smi."""
+    """[{index, name, memory_used_mib, memory_free_mib, memory_total_mib, utilization_pct, temperature_c}]
+    from nvidia-smi, for the devices this project may use (``host_gpu_devices``)."""
+    allowed = host_gpu_devices()
     try:
         completed = subprocess.run(
             ["nvidia-smi", "--query-gpu=index,name,memory.used,memory.free,memory.total,utilization.gpu,temperature.gpu", "--format=csv,noheader,nounits"],
@@ -95,7 +128,7 @@ def list_gpus() -> list[dict[str, object]]:
         )
     if not gpus:
         raise GpuUnavailableError("nvidia-smi reported no GPUs")
-    return gpus
+    return [gpu for gpu in gpus if allowed is None or gpu["index"] in allowed]
 
 
 def idle_gpus(*, require_name: str | None = None) -> list[int]:
