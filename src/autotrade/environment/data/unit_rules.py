@@ -479,6 +479,9 @@ FIELD_RULES: tuple[FieldRule, ...] = (
               ("amount", "l_sell", "l_buy", "l_amount", "net_amount"), source_unit="CNY"),
     FieldRule("events.parquet", "top_list", ("float_values",), source_unit="CNY",
               status="inferred", evidence="median 6e9 at float-market-value scale"),
+    FieldRule("events.parquet", "top_list", ("name",), semantic="text",
+              note="the name as of the vendor's latest pull, not the day's; the day's name "
+                   "and ST status are the universe's"),
     FieldRule("events.parquet", "top_inst", ("buy", "sell", "net_buy"), source_unit="CNY"),
     FieldRule("events.parquet", "top_inst", ("buy_rate", "sell_rate"), source_unit="percent"),
     FieldRule("events.parquet", "kpl_list",
