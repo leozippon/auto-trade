@@ -118,13 +118,21 @@ def _remove_sandbox_tree(path: Path) -> bool:
 
 
 def _remove_readonly_tree(path: Path) -> None:
-    """Remove a host-owned tree containing frozen 0555 directories.
+    """Remove an experiment tree containing frozen 0555 directories.
 
     On Unix, unlinking a file depends on its parent directory's write bit, not
     the file's own mode. Frozen PIT/revision files can also be hard-linked into
     shared caches, so changing file modes here would mutate every link. Make
     only directories inside ``path`` writable before ``shutil.rmtree`` performs
     its symlink-safe traversal.
+
+    The tree can also hold directories a sandbox container created (a replay
+    killed mid-run leaves its ``state`` behind), owned by the container's
+    subuid: the host user can neither chmod nor empty them. A
+    ``PermissionError`` therefore hands the rest to
+    :func:`~autotrade.environment.sandbox.remove_sandbox_tree`, which removes
+    it through a container; whatever still remains is an error naming the
+    path, never a success.
     """
 
     def make_directories_writable(directory: Path) -> None:
@@ -145,8 +153,11 @@ def _remove_readonly_tree(path: Path) -> None:
         for child in children:
             make_directories_writable(child)
 
-    make_directories_writable(path)
-    shutil.rmtree(path)
+    try:
+        make_directories_writable(path)
+        shutil.rmtree(path)
+    except PermissionError:
+        _remove_sandbox_tree(path)
     if path.exists():
         raise OSError(f"experiment tree still exists after removal: {path}")
 

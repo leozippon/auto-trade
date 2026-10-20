@@ -10,6 +10,7 @@ forward seal and the best-experiment ranking are in
 from __future__ import annotations
 
 import argparse
+import errno
 import io
 import json
 import os
@@ -1018,6 +1019,74 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertIn("was not fully deleted", response.json()["detail"])
         self.assertIn("PermissionError", response.json()["detail"])
         self.assertTrue(directory.exists())
+
+    @unittest.skipIf(os.geteuid() == 0, "mode bits do not restrict root")
+    def test_delete_removes_container_owned_files_through_the_sandbox(self) -> None:
+        """A replay killed mid-run leaves its state directory owned by the
+        container's subuid: the host user can neither chmod nor empty it. The
+        delete removes it through a container, and when that fails too it is
+        a 500 naming the tree, never a success."""
+
+        import subprocess
+
+        directory = self.experiments_root / "exp_killed_replay"
+        write_json_atomic(
+            directory / "hitl/status.json",
+            {"schema_version": 1, "pid": 999_999_999, "state": "failed"},
+        )
+        state = directory / "artifacts/results/valid_killed/state"
+        (state / "model").mkdir(parents=True)
+        (state / "model/fit.pkl").write_bytes(b"fit")
+        (state / "model").chmod(0o555)
+        real_chmod = os.chmod
+
+        def host_chmod(path, mode, **kwargs):
+            if Path(path).is_relative_to(state):
+                raise PermissionError(errno.EPERM, "Operation not permitted", str(path))
+            real_chmod(path, mode, **kwargs)
+
+        purges: list[list[str]] = []
+        container_works = False
+
+        def docker(argv, **kwargs):
+            argv = list(argv)
+            if argv[1] != "run":  # the container listing finds nothing
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            purges.append(argv)
+            if not container_works:
+                return subprocess.CompletedProcess(argv, 125, "", "docker: unavailable")
+            # Root in the container's user namespace owns the subuid's files.
+            mount = Path(argv[argv.index("-v") + 1].removesuffix(":/purge"))
+            real_chmod(state / "model", 0o755)
+            for child in mount.iterdir():
+                shutil.rmtree(child)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        def delete():
+            with patch("os.chmod", side_effect=host_chmod), patch(
+                "subprocess.run", side_effect=docker
+            ):
+                return self.client.delete(
+                    "/api/experiments/exp_killed_replay",
+                    params={"confirm": "exp_killed_replay"},
+                )
+
+        response = delete()
+        self.assertEqual(response.status_code, 500, response.text)
+        self.assertIn(
+            f"experiment tree still exists after removal: {directory.resolve()}",
+            response.json()["detail"],
+        )
+        self.assertTrue((state / "model/fit.pkl").exists())
+        self.assertEqual(len(purges), 1)
+        self.assertEqual(purges[0][purges[0].index("--user") + 1], "0")
+        self.assertIn(f"{directory.resolve()}:/purge", purges[0])
+
+        container_works = True
+        response = delete()
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(len(purges), 2)
+        self.assertFalse(directory.exists())
 
     def test_delete_rejects_derived_sandbox_symlink_without_touching_target(
         self,
