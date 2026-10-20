@@ -52,6 +52,10 @@ python ops/zgca/zgca.py push hcm_100k_8y_sol_qwen_20261014d hcm_100k_8y_sol_dsf_
 
 2026-10-14 的手工部署要把种子 `provider.json`、两个 as-of stash `contract.json` 和 release `manifest.json` 里的绝对仓库路径改成开发机路径，还要建空的 `data/raw` 与 `data/pit/fundamental_events`。根因是 worker、种子链接和 stash 绑定把这些构建时记下的宿主路径当作契约来比较，并要求活数据湖的目录存在。自 0038e3f 起，release 由 generation id 标识，记录里的路径只作记录；manifest 的来源按相对仓库的位置比较；活数据湖的根目录不再要求存在，因为臂读的是钉住的 release。所以 `deploy` 原样复制，开发机上的记录也就不再因此而与本机不同。
 
+## 存储布局
+
+本项目在每个资源区只用个人存储：`/personal_fast_storage/auto-trade` 是这个区的仓库根，代码、`.env`、种子、release、预训练模型库、臂和日志都在这里，同一资源区的实例共用这一份。公共存储不放本项目的任何东西：组织的公共对象存储对组织内每个账户可读、没有删除接口，上传还可能产生费用；`/public_fast_storage` 是 POSIX 共享，资源区 5 的任何实例都能以 root 改写。由 TuShare 数据派生的种子和 release 受许可约束，只能放私有存储；开源的 Qwen 模型库和两个发布包放到公共存储也省不了什么，因为个人存储本来就服务同一资源区的每台实例。2026-10-14 测吞吐时在对象存储 `s-lzp26-probe/` 下留了六个零字节对象，无法删除。
+
 ## 一个周期的开销
 
 卡时规则见 `~/zgca-compute/README.md`。全新的根要把种子（约 16 GB）、release（约 48 GB）和预训练模型库（约 12 GB）全量传一遍，按那里记的 3.1–3.7 MB/s 要六到七小时：2026-10-19 向两卡实例部署时，种子用了 73 分钟，模型库 61 分钟（release 已在开发机上，比对 34 秒）。之后 `deploy` 只传差异，几分钟内完成。同一次部署里冷构建镜像约 6 分钟，缓存命中约 15 秒；起步策略的冒烟约两小时；一条 HCM 整期臂约七小时。
@@ -82,6 +86,6 @@ unset ZGCA_REMOTE_ROOT
 
 `deploy` 只在仍含受管文件的顶层目录里清理：整个退出版本库的顶层目录、仓库根下不再受管的文件和清理后留下的空目录仍留在开发机上。镜像只在合同指纹说它缺失或过期时重建，所以只改 Dockerfile、合同文件不变的改动不会让实例重建，要先在实例上删掉镜像 tag 再部署。控制台不随 `deploy` 重启，改了代码之后要在没有臂运行时 `~/zgca-compute/dev tmux kill-session -t autotrade-console` 再 `run`。`status` 只认 `create_round_*` 命名的启动器日志。
 
-模型服务的 key 在实例存在期间一直留在开发机的 `.env` 里（仅 root 可读），停机不清除；其中本机 vLLM 网关的 key 在开发机上没有用处（那里没有这个网关），但 worker 启动时要求每个角色都有凭据，而 NL 总在本机模型上。`sync` 不拉回开发机上的模型服务会话日志（`data/llm_conversations/`）：日志按服务方、模型、日期和 worker 进程号分文件，几条臂写在同一棵目录里，续跑换了进程号的旧文件也无从按臂认出，一条 gpt-6 臂就有数百 MB；要用时整棵取回，`~/zgca-compute/dev rsync -a dev:/personal_fast_storage/auto-trade/data/llm_conversations/ <本地目录>/`（有臂在跑时目录仍在增长，所以不用 `dev copy` 比对）。
+模型服务的 key 在实例存在期间一直留在开发机的 `.env` 里（仅 root 可读），停机不清除；其中本机 vLLM 网关的 key 只有在某个对话角色跑在本机模型上时 worker 才要求，开发机上没有这个网关，所以用不上。`sync` 不拉回开发机上的模型服务会话日志（`data/llm_conversations/`）：日志按服务方、模型、日期和 worker 进程号分文件，几条臂写在同一棵目录里，续跑换了进程号的旧文件也无从按臂认出，一条 gpt-6 臂就有数百 MB；要用时整棵取回，`~/zgca-compute/dev rsync -a dev:/personal_fast_storage/auto-trade/data/llm_conversations/ <本地目录>/`（有臂在跑时目录仍在增长，所以不用 `dev copy` 比对）。
 
 开发机上的容器遥测缺少峰值内存和 GPU 峰值，开发机上的一切又都以 root 运行，原因见工具包 README 的“火山平台 Docker”；所以在开发机宿主上跑单元测试时，依赖目录权限位的测试会失败，Docker 沙箱以 uid 61000 运行，不受影响。离线测试在 `tests/unit/test_zgca_workflow.py`，用模拟的 `instance` 和 `dev`，不访问网络也不启停实例；那些入口本身的测试在 `~/zgca-compute/tests`。
