@@ -78,9 +78,9 @@ def _protocol_cap_message(limit: int) -> str:
 
     The session reads this text, so it names the cap and the remedy. The cap
     counts the UTF-8 bytes the worker writes for one call: the returned orders
-    with their metadata, plus any NL requests. It stays a plain (environment)
-    ``StrategyExecutionError``, refunded, until the strategy contract README
-    states the cap.
+    with their metadata. The strategy contract README states it, so an overflow
+    is the strategy's own failure (``StrategyRaised``), charged like an
+    exception its code raised.
     """
 
     return (
@@ -93,10 +93,11 @@ class StrategyRaised(StrategyExecutionError):
     """The strategy's own code raised inside a ``fit`` or ``generate_orders`` call.
 
     That is a measurement of the strategy -- it cannot run on this data -- and,
-    with ``StrategyMemoryExceeded`` below, the only executor failure that is: a
-    timeout, a broken pipe, a worker that never started or broke protocol stays
-    a plain ``StrategyExecutionError``, because it measured the environment,
-    not the strategy.
+    with ``StrategyMemoryExceeded`` below and a call's output over the published
+    protocol cap (``_protocol_cap_message``), the only executor failure that is:
+    a timeout, a broken pipe, a worker that never started or broke protocol
+    stays a plain ``StrategyExecutionError``, because it measured the
+    environment, not the strategy.
     """
 
 
@@ -498,7 +499,7 @@ class DockerStrategyExecutor:
                 message, size = self._read_message(deadline)
                 consumed += size
                 if consumed > self.config.limits.max_output_chars:
-                    raise StrategyExecutionError(
+                    raise StrategyRaised(
                         _protocol_cap_message(self.config.limits.max_output_chars)
                     )
                 message_type = message.get("type")
@@ -809,7 +810,7 @@ class DockerStrategyExecutor:
                     del self._stdout_buffer[: newline + 1]
                     return line
                 if len(self._stdout_buffer) > self.config.limits.max_output_chars:
-                    raise StrategyExecutionError(
+                    raise StrategyRaised(
                         _protocol_cap_message(self.config.limits.max_output_chars)
                     )
                 remaining = deadline - time.monotonic()

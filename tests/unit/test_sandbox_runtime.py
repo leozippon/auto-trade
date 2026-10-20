@@ -1634,9 +1634,9 @@ def test_orders_over_the_protocol_cap_fail_with_a_message_naming_cap_and_remedy(
     tmp_path: Path,
 ):
     """A session that logs into order metadata meets the protocol cap on the
-    real worker; the error it reads names the cap and what to shrink. Until the
-    strategy contract states the cap, the overflow stays an environment
-    failure (refunded), not the strategy's own exception."""
+    real worker; the error it reads names the cap and what to shrink. The
+    strategy contract states the cap, so the overflow is the strategy's own
+    failure and is charged to it."""
     strategy = _strategy(
         tmp_path,
         """def generate_orders(context):
@@ -1659,16 +1659,20 @@ def test_orders_over_the_protocol_cap_fail_with_a_message_naming_cap_and_remedy(
     try:
         with (
             patch.object(executor, "_remove_container"),
-            pytest.raises(StrategyExecutionError) as failed,
+            pytest.raises(StrategyRaised) as failed,
         ):
             executor.execute(_context())
         assert (
             "strategy output of one call exceeded the 2,000-character protocol cap "
             "on orders plus metadata (counted in UTF-8 bytes); shrink metadata"
         ) == str(failed.value)
-        assert not raised_by_strategy(failed.value)
+        assert raised_by_strategy(failed.value)
     finally:
         executor.close()
+    # Charging it is fair only because the contract states this very cap.
+    readme = Path(__file__).resolve().parents[2] / "configs/agent_output_template/README.md"
+    stated = f"at most {SandboxLimits().max_output_chars:,} characters of JSON"
+    assert stated in readme.read_text(encoding="utf-8")
 
 
 def test_the_worker_answers_a_host_protocol_violation_and_a_strategy_raise_apart(
