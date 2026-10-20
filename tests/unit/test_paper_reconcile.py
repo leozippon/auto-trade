@@ -73,7 +73,6 @@ class _Data:
         self.release_end = release_end
         self.generation_id = f"gen_{release_end}"
         self.market = DailyMarketData(_bars([day for day in SESSIONS if day <= release_end]))
-        self.nl_query = None
 
     def context_data(self, inference_at):
         return StrategyDataView("", "", inference_at.isoformat())

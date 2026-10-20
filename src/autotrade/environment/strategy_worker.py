@@ -34,7 +34,6 @@ class Protocol:
         protocol_fd = os.dup(sys.stdout.fileno())
         os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
         self._output = os.fdopen(protocol_fd, "w", encoding="utf-8", buffering=1)
-        self._active_sequence: int | None = None
 
     def read(self) -> dict[str, object] | None:
         line = self._input.readline()
@@ -49,24 +48,6 @@ class Protocol:
         line = json.dumps(value, ensure_ascii=False, allow_nan=False)
         self._output.write(line + "\n")
         self._output.flush()
-
-    def nl_query(self, request: Mapping[str, object], **_kwargs: object) -> Mapping[str, object]:
-        sequence = self._active_sequence
-        if sequence is None:
-            raise WorkerProtocolError("NL request has no active strategy inference")
-        self.write({"type": "nl_request", "sequence": sequence, "request": dict(request)})
-        response = self.read()
-        if response is None or response.get("type") != "nl_response":
-            raise WorkerProtocolError("host did not return an NL response")
-        if response.get("sequence") != sequence:
-            raise WorkerProtocolError("host NL response sequence does not match request")
-        error = response.get("error")
-        if error is not None:
-            raise WorkerProtocolError(str(error))
-        result = response.get("result")
-        if not isinstance(result, Mapping):
-            raise WorkerProtocolError("host NL response result must be a JSON object")
-        return result
 
 
 _EXECUTE_KEYS = {
@@ -104,7 +85,7 @@ class BarStream:
         self._sequence = -1
         self._inference_at: datetime | None = None
 
-    def context(self, message: Mapping[str, object], protocol: Protocol) -> StrategyContext:
+    def context(self, message: Mapping[str, object]) -> StrategyContext:
         if set(message) != _EXECUTE_KEYS:
             raise WorkerProtocolError("execute message has missing or unsupported fields")
         if message.get("type") not in _CALL_KINDS:
@@ -160,7 +141,6 @@ class BarStream:
                 state_dir=raw_context.get("state_dir"),  # type: ignore[arg-type]
                 models_dir=raw_context.get("models_dir"),  # type: ignore[arg-type]
                 pretrained_dir=raw_context.get("pretrained_dir"),  # type: ignore[arg-type]
-                _nl_query=protocol.nl_query,
             )
         except StrategyContractError as exc:
             raise WorkerProtocolError(str(exc)) from exc
@@ -203,18 +183,14 @@ def run(strategy_path: str | Path) -> int:
                 raise WorkerProtocolError("expected execute or fit message")
             if kind == "fit" and strategy.fit is None:
                 raise WorkerProtocolError("strategy defines no fit(context)")
-            context = stream.context(message, protocol)
+            context = stream.context(message)
             sequence = message["sequence"]
-            protocol._active_sequence = sequence  # worker-private protocol state
-            try:
-                with contextlib.redirect_stdout(sys.stderr):
-                    if kind == "fit":
-                        strategy.fit(context)  # type: ignore[misc]
-                        response: dict[str, object] = {}
-                    else:
-                        response = {"orders": strategy.generate_orders(context)}
-            finally:
-                protocol._active_sequence = None
+            with contextlib.redirect_stdout(sys.stderr):
+                if kind == "fit":
+                    strategy.fit(context)  # type: ignore[misc]
+                    response: dict[str, object] = {}
+                else:
+                    response = {"orders": strategy.generate_orders(context)}
             protocol.write({"type": _CALL_KINDS[kind], "sequence": sequence, **response})
         except Exception as exc:  # noqa: BLE001 - isolate each untrusted strategy call
             # Two failures share this wire and they are not the same

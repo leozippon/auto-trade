@@ -31,8 +31,6 @@ from autotrade.environment.data.snapshot import (
     SnapshotConfig,
     load_snapshot_manifest,
 )
-from autotrade.environment.llm import LLMProxy
-from autotrade.environment.nl import NLConfig, NLService
 from autotrade.environment.replay.engine import StrategyDataView
 from autotrade.environment.replay.market import DailyMarketData
 from autotrade.environment.replay.timeview import Timeview
@@ -87,9 +85,6 @@ class BookPITData:
         snapshot_config: SnapshotConfig,
         start: str,
         trade_date: str,
-        nl_llm: LLMProxy | None = None,
-        nl_config: NLConfig | None = None,
-        nl_failure_policy: str = "return_error_with_audit",
         max_intraday_row_group_rows: int = 2_000_000,
     ) -> None:
         cache_root = Path(state_root).resolve() / PIT_CACHE_NAME
@@ -162,14 +157,6 @@ class BookPITData:
         )
         self._lock = _AsOfReadOnlyView(self.asof_dir)
         self._lock.lock()
-        window = sum(1 for day in self.sessions if start <= day <= trade_date)
-        self.nl_service = NLService.from_snapshot(
-            self.asof_dir,
-            llm=nl_llm,
-            config=(nl_config or NLConfig()).for_replay(window),
-            failure_policy=nl_failure_policy,
-        )
-        self.nl_query = self.nl_service.query
         self._refreshed: set[str] = set()
 
     def context_data(self, inference_at: datetime) -> StrategyDataView:
@@ -228,7 +215,6 @@ class BookPITData:
         }
 
     def close(self) -> None:
-        self.nl_service.close()
         _discard_ephemeral_asof(self.asof_dir)
 
 

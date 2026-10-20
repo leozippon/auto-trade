@@ -31,7 +31,6 @@ def _options(tmp_path: Path, **overrides: object) -> SimpleNamespace:
             max_llm_calls=800,
             max_research_minutes=20,
             strategy_fit_timeout_seconds=1800,
-            nl_failure_policy="fail",
             workspace_reference="configs/workspace_refs/pack",
             operating_memory="curated+graduated",
             benchmark_index=DEFAULT_BENCHMARK_INDEX,
@@ -54,7 +53,6 @@ def _options(tmp_path: Path, **overrides: object) -> SimpleNamespace:
         daily_path=tmp_path / "daily.parquet",
         execution_mode="sandbox",
         max_intraday_row_group_rows=2_000_000,
-        nl_config=object(),
     )
     for key, value in overrides.items():
         setattr(options, key, value)
@@ -196,7 +194,6 @@ def test_the_compaction_gateway_is_built_without_provider_retries(
     assert [role for role, _kwargs in roles] == [
         "main",
         "subagent",
-        "nl",
         "compact",
     ]
 

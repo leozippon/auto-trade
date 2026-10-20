@@ -19,7 +19,6 @@ from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.executor import raised_by_strategy
-from autotrade.environment.nl import NLConfig
 from autotrade.environment.replay import timeview as timeview_module
 from autotrade.environment.replay.engine import BacktestError
 from autotrade.environment.replay.null_control import (
@@ -194,7 +193,6 @@ def generate_orders(context):
         "fundamentals": len(pd.read_parquet(context.asof_dir + "/fundamentals")),
         "text": len(pd.read_parquet(context.asof_dir + "/text_index")),
         "universe": len(pd.read_parquet(context.asof_dir + "/universe")),
-        "nl": len(context.nl(query="visibletoken", mode="search")["evidence"]),
     }
     return [{
         "symbol": "000001.SZ",
@@ -210,7 +208,6 @@ def generate_orders(context):
     backend = PITDailyEvaluationBackend(
         tmp_path / "results",
         execution_mode="trusted",
-        nl_config=NLConfig(max_calls_per_decision=1, max_total_calls=2),
         max_intraday_row_group_rows=1,
         benchmark_index=DEFAULT_BENCHMARK_INDEX,
     )
@@ -248,7 +245,6 @@ def generate_orders(context):
         "fundamentals": 1,
         "text": 1,
         "universe": 1,
-        "nl": 1,
     }
     assert second["visible"] == {
         "daily": 2,
@@ -259,7 +255,6 @@ def generate_orders(context):
         "fundamentals": 2,
         "text": 2,
         "universe": 1,
-        "nl": 2,
     }
     assert record["pit"]["refresh_calls"] == 2
     assert record["pit"]["minute_total_rows"] == 2
@@ -392,7 +387,7 @@ def test_evaluation_summary_carries_the_whole_agent_visible_field_set(
 
     The Agent-visible projection is a fixed allowlist; a key nothing populates
     advertises telemetry that never shows up in a run manifest. This pins the
-    timing and NL cost block the whitelist promises, on a real two-day replay.
+    timing block the whitelist promises, on a real two-day replay.
     """
     snapshot, replay = _pit_slot_paths(
         tmp_path,
@@ -434,7 +429,6 @@ def test_evaluation_summary_carries_the_whole_agent_visible_field_set(
     revision.mkdir()
     (revision / "main.py").write_text(
         """def generate_orders(context):
-    context.nl(query="visibletoken", mode="search")
     return [{
         "symbol": "000001.SZ",
         "action": "buy",
@@ -447,7 +441,6 @@ def test_evaluation_summary_carries_the_whole_agent_visible_field_set(
     result = PITDailyEvaluationBackend(
         tmp_path / "results",
         execution_mode="trusted",
-        nl_config=NLConfig(),
         benchmark_index=DEFAULT_BENCHMARK_INDEX,
     ).evaluate(
         EvaluationRequest(
@@ -496,22 +489,9 @@ def test_evaluation_summary_carries_the_whole_agent_visible_field_set(
     # Backend setup and replay-loop phases share one breakdown, and the loop
     # phases cannot exceed the loop they were measured inside.
     assert {"replay_frames", "timeview_init", "style_analysis"} <= set(phases)
-    assert {"market_build", "data_view", "strategy", "broker", "nl"} <= set(phases)
+    assert {"market_build", "data_view", "strategy", "broker"} <= set(phases)
     loop = sum(phases[name] for name in ("data_view", "strategy", "broker"))
     assert loop <= float(summary["replay_wall_seconds"]) + 0.05
-    assert phases["nl"] <= phases["strategy"] + 0.05
-
-    # No LLM is configured, so the calls are counted but none reached a model.
-    assert summary["nl_calls"] == 2
-    assert summary["nl_executed_calls"] == 0
-    assert summary["nl_llm_calls"] == 0
-    assert summary["nl_budget_rejected_calls"] == 0
-    # The total ceiling is derived from this replay's own trading days, so the
-    # effective budget the summary echoes is the one the window earned.
-    assert summary["nl_max_total_calls"] == (
-        NLConfig().for_replay(int(summary["replayed_trade_days"])).max_total_calls
-    )
-    assert summary["nl_wall_seconds"] >= 0.0
 
     # The same block reaches the persisted result and the Agent-visible view.
     attachment = Path(result.result_ref).read_text(encoding="utf-8")
@@ -526,14 +506,6 @@ def test_evaluation_summary_carries_the_whole_agent_visible_field_set(
     assert record["pit"]["replay_slots"] == [replay.name]
     assert not {"decision_ref", "replay_ref"} & set(record["pit"])
     assert set(_agent_visible_backtest_summary(dict(summary))) == expected
-
-    # Every charged NL call is explained by exactly one outcome bucket.
-    assert summary["nl_search_calls"] == 2
-    assert summary["nl_calls"] == (
-        summary["nl_executed_calls"]
-        + summary["nl_search_calls"]
-        + summary["nl_evidence_gated_calls"]
-    )
 
 
 def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(

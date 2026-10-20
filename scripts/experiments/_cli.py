@@ -22,7 +22,7 @@ from pathlib import Path
 from autotrade.environment.broker import default_permitted_boards
 from autotrade.environment.data.contracts import BENCHMARK_INDEXES
 from autotrade.environment.data.snapshot import SnapshotConfig
-from autotrade.environment.llm import MODEL_CHOICES, NL_MODEL_CHOICES
+from autotrade.environment.llm import MODEL_CHOICES
 from autotrade.environment.runtime import write_json_atomic
 from autotrade.pipelines.calendar import GEOMETRY_PARAMETERS
 from autotrade.pipelines.config import AcceptanceRules
@@ -39,7 +39,6 @@ from autotrade.pipelines.worker import (
 # The console's defaults, so a headless run and a created arm agree.
 DEFAULT_AGENT_MODEL = str(WEB_CREATE_DEFAULTS["model"])
 DEFAULT_SUBAGENT_MODEL = str(WEB_CREATE_DEFAULTS["subagent_model"])
-DEFAULT_NL_MODEL = str(WEB_CREATE_DEFAULTS["nl_model"])
 DEFAULT_COMPACT_MODEL = str(WEB_CREATE_DEFAULTS["compact_model"])
 
 
@@ -236,12 +235,6 @@ def add_model_arguments(parser: argparse.ArgumentParser) -> None:
         help="Model the session's `agent` sub-agents run on (shared session quota).",
     )
     parser.add_argument(
-        "--nl-model",
-        default=DEFAULT_NL_MODEL,
-        choices=NL_MODEL_CHOICES,
-        help=f"NL Sub Agent model; defaults to {DEFAULT_NL_MODEL} (local models only).",
-    )
-    parser.add_argument(
         "--compact-model",
         default=DEFAULT_COMPACT_MODEL,
         choices=MODEL_CHOICES,
@@ -387,7 +380,6 @@ def _build_worker_params(
         "screen_boards": list(args.screen_boards),
         "model": args.model,
         "subagent_model": args.subagent_model,
-        "nl_model": args.nl_model,
         "compact_model": args.compact_model,
         "reasoning_effort": args.reasoning_effort,
         "no_thinking": bool(getattr(args, "no_thinking", False)),

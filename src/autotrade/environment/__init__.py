@@ -18,8 +18,6 @@ single-purpose components:
   that speaks the JSON order protocol.
 - ``tools/``: Agent-facing tool contracts dispatched by the session runner.
 - ``llm/``: host-side LLM provider boundary (keys never reach the sandbox).
-- ``nl/``: NL Sub Agent stack (engine, PIT text retrieval, company context,
-  host service).
 - ``broker.py``/``broker_core.py``: simulated Broker and its pure fill math.
 - ``sandbox.py``/``sandbox_images.py``/``executor.py``/``gpu.py``: sandbox
   lifecycle, derived images, command executors, GPU selection.

@@ -21,7 +21,7 @@ from pathlib import Path
 
 from autotrade.environment.data.contracts import BENCHMARK_INDEXES
 from autotrade.environment.data.snapshot import DEFAULT_DATASETS, SELECTABLE_DATASETS
-from autotrade.environment.llm.model_profiles import MODEL_CHOICES, NL_MODEL_CHOICES
+from autotrade.environment.llm.model_profiles import MODEL_CHOICES
 from autotrade.pipelines.config import (
     BATCH_VALIDATE_MAX_CANDIDATES,
     MANDATED_DEFAULTS,
@@ -250,7 +250,7 @@ _FIELDS: list[dict[str, object]] = [
         "group": "数据域",
         "label": "文本域",
         "type": "bool",
-        "help": "公告、新闻、研报、互动问答等文本证据；关闭后不加载（ctx.nl 检索也无文本可用）。",
+        "help": "公告、新闻、研报、互动问答等文本证据；关闭后不加载。",
     },
     {
         "key": "fundamental_datasets",
@@ -540,10 +540,6 @@ _FIELDS: list[dict[str, object]] = [
      "help": "研究会话的模型调用总次数上限，跨续跑累计；主循环、子代理与上下文压缩共享同一计数。"},
     {"key": "max_api_spend_usd", "group": "预算与验收", "label": "研究会话 API 花费上限（美元）", "type": "float",
      "help": "研究会话调用托管模型的累计花费上限，按目录标价计、跨续跑累计；主循环、子代理与上下文压缩共用，本地模型不计。用尽即以 deadline 结束本臂。"},
-    {"key": "nl_failure_policy", "group": "预算与验收", "label": "NL 失败策略", "type": "choice",
-     "choice_labels": {"return_error_with_audit": "返回可审计错误，策略自行降级（推荐）", "fail": "任一 NL 调用失败即终止回测"},
-     "choices": ["return_error_with_audit", "fail"],
-     "help": "策略内 ctx.nl() 调用失败时：返回带审计的错误结果（默认）或使回测失败。"},
     {"key": "finalize_before_deadline_seconds", "group": "预算与验收", "label": "硬收尾保留窗口（秒）", "type": "int", "advanced": True,
      "help": "距推理 deadline 该秒数且已有完整 Validation 时，只保留已有节点的回滚与显式结束；尚无完整节点时继续现有流程。"},
     {"key": "per_call_timeout_seconds", "group": "预算与验收", "label": "单次 LLM 调用超时（秒）", "type": "int", "advanced": True,
@@ -605,14 +601,6 @@ _FIELDS: list[dict[str, object]] = [
         "help": "研究会话用 agent 工具启动的子代理所用模型；共享父会话的调用配额与时间预算，压缩阈值按该模型的上下文窗口推导。",
     },
     {
-        "key": "nl_model",
-        "group": "模型与上下文",
-        "label": "NL 子代理模型",
-        "type": "choice",
-        "choices": list(NL_MODEL_CHOICES),
-        "help": "策略内 ctx.nl() 文本分析子代理模型。它也服务前推、Held-out 与 Paper 回放，且不计入 API 花费上限，所以只能用本机模型。",
-    },
-    {
         "key": "compact_model",
         "group": "模型与上下文",
         "label": "上下文压缩模型",
@@ -627,7 +615,7 @@ _FIELDS: list[dict[str, object]] = [
         "type": "choice",
         "choices": ["xhigh", "medium", "low"],
         "choice_labels": {"xhigh": "极高", "medium": "中", "low": "低"},
-        "help": "启用推理模式时 Agent 主对话与子代理的推理强度；三档即本机 Qwen 模板在线上真正区分的档位（旧参数中的 high/max 等同 xhigh）。推理只有开关、没有强度档的模型（mimo-v2.6-flash）不使用此项。NL 固定 medium。",
+        "help": "启用推理模式时 Agent 主对话与子代理的推理强度；三档即本机 Qwen 模板在线上真正区分的档位（旧参数中的 high/max 等同 xhigh）。推理只有开关、没有强度档的模型（mimo-v2.6-flash）不使用此项。",
     },
     {
         "key": "no_thinking",
@@ -635,7 +623,7 @@ _FIELDS: list[dict[str, object]] = [
         "label": "禁用推理模式",
         "type": "bool",
         "advanced": True,
-        "help": "关闭模型推理模式（Agent 与 NL 调用）。",
+        "help": "关闭模型推理模式（Agent 主对话与子代理）。",
     },
     {
         "key": "disable_context_compact",

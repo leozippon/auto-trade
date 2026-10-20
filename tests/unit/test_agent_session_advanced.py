@@ -1399,7 +1399,7 @@ def test_prompt_audit_snapshot_is_byte_exact():
     """PROMPTS.md is generated, so the freshness contract is byte equality.
 
     A substring check over SESSION_STATIC_SECTIONS only sees the fold sections —
-    which is exactly why a changed Meta prompt and a relocated NL prompt both
+    which is exactly why a changed Meta prompt and a relocated prompt both
     landed silently. Byte equality additionally catches a reordered section, a
     dropped section, a changed heading and a hand-edit of the snapshot."""
     repo_root, module = _export_prompts_module()
@@ -1439,7 +1439,6 @@ def _all_registrable_tool_names() -> set[str]:
 
     import autotrade.environment.tools as tools_pkg
     from autotrade.agent.subagent import AgentTool
-    from autotrade.environment.nl.engine import TEXT_RETRIEVE_TOOL
     from autotrade.environment.tools import SafeWorkspace, SearchRoots
     from autotrade.environment.tools.search import GlobTool, GrepTool, ReadFileTool
     from autotrade.pipelines.session_tools import (
@@ -1452,7 +1451,6 @@ def _all_registrable_tool_names() -> set[str]:
     # exported from the tools package, so read their names off the classes: a
     # rename must not silently drop one from this set.
     names = {
-        TEXT_RETRIEVE_TOOL,
         BatchValidateTool.spec.name,
         NullControlTool.spec.name,
         SmokeBacktestTool.spec.name,
@@ -1476,19 +1474,12 @@ def test_every_tool_named_in_a_prompt_is_registrable_in_that_session():
     `nl_query` / `finish` after the authoring stack was deleted: the prompt and
     the registry drifted apart with nothing comparing them."""
     from autotrade.agent.runner import _SESSION_TOOLS
-    from autotrade.environment.nl.engine import (
-        SUB_AGENT_SYSTEM_PROMPT,
-        TEXT_RETRIEVE_TOOL,
-    )
 
     registrable = _all_registrable_tool_names()
     # Every allowlisted name must correspond to a tool that exists.
     assert _SESSION_TOOLS <= registrable
 
-    sessions = (
-        ("fold", build_system_prompt(experiment_facts={}), _SESSION_TOOLS),
-        ("nl_sub_agent", SUB_AGENT_SYSTEM_PROMPT, {TEXT_RETRIEVE_TOOL}),
-    )
+    sessions = (("fold", build_system_prompt(experiment_facts={}), _SESSION_TOOLS),)
     for name, prompt, allowed in sessions:
         referenced = _prompt_tool_tokens(prompt) & registrable
         assert referenced, f"{name} prompt names no tool at all"
@@ -1499,18 +1490,15 @@ def test_every_tool_named_in_a_prompt_is_registrable_in_that_session():
 
 
 def test_the_prompt_tool_check_fails_on_a_tool_the_session_cannot_register():
-    """The mutation proves the check above can fail."""
+    """The mutation proves the check above can fail: an allowlist that lost a
+    tool the prompt still names."""
     from autotrade.agent.runner import _SESSION_TOOLS
 
     registrable = _all_registrable_tool_names()
-    # `text_retrieve` exists, but only the NL sub-agent may register it.
-    assert "text_retrieve" in registrable
-    mutated = (
-        build_system_prompt(experiment_facts={})
-        + "\n- 用 `text_retrieve` 检索证据。"
-    )
-    referenced = _prompt_tool_tokens(mutated) & registrable
-    assert sorted(referenced - set(_SESSION_TOOLS)) == ["text_retrieve"]
+    referenced = _prompt_tool_tokens(build_system_prompt(experiment_facts={})) & registrable
+    assert "run_null_control" in referenced
+    allowed = set(_SESSION_TOOLS) - {"run_null_control"}
+    assert sorted(referenced - allowed) == ["run_null_control"]
 
 
 def _context_runner(llm: ScriptedLLM, **config) -> AgentSessionRunner:

@@ -190,14 +190,12 @@ BASE_EXPECTED_DEFAULTS: dict[str, object] = {
     "inference_time": "08:30",
     "strategy_period": "day",
     # Every model role, as the console defaults it: the relay's
-    # DeepSeek-V4.1-Flash for the conversation roles, the local model for NL,
-    # the one role that must stay local. A role an arm does not name runs on
-    # these; spelled out as literals on purpose, since a change of a console
-    # default is exactly the drift this has to catch. An arm that wants the
-    # local model for a conversation role names it.
+    # DeepSeek-V4.1-Flash. A role an arm does not name runs on these; spelled
+    # out as literals on purpose, since a change of a console default is
+    # exactly the drift this has to catch. An arm that wants the local model
+    # for a role names it.
     "model": "DeepSeek-V4.1-Flash",
     "subagent_model": "DeepSeek-V4.1-Flash",
-    "nl_model": "qwen-3.8-27b-fp8",
     "compact_model": "DeepSeek-V4.1-Flash",
     # Left to the console, which stamps the boards the arm's initial cash
     # qualifies for (`broker.default_permitted_boards`); a round that wants
@@ -270,7 +268,6 @@ ROUND_REPORT_KEYS: tuple[str, ...] = (
     "strategy_period",
     "model",
     "subagent_model",
-    "nl_model",
     "compact_model",
 )
 

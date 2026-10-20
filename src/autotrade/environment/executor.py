@@ -484,9 +484,6 @@ class DockerStrategyExecutor:
         self._active_limit = f"{label} exceeded {timeout_seconds:g}s"
         expected = "fitted" if kind == "fit" else "orders"
         consumed = 0
-        # Host NL waits extend the deadline, so they are not the strategy's
-        # clock and must not land in the fit timing either.
-        nl_seconds = 0.0
         try:
             # Materializing and validating the request is the host's own work on
             # host-owned PIT data; only what happens from the hand-over onwards
@@ -512,40 +509,9 @@ class DockerStrategyExecutor:
                     or response_sequence != sequence
                 ):
                     raise StrategyExecutionError("worker response sequence does not match request")
-                if message_type == "nl_request":
-                    request = message.get("request")
-                    if not isinstance(request, Mapping):
-                        raise StrategyExecutionError("worker sent an invalid NL request")
-                    # Host NL is a trusted service with its own quotas. Its wait
-                    # is not untrusted strategy compute and must not burn the
-                    # strategy's own inference or fit cap.
-                    nl_started = time.monotonic()
-                    try:
-                        try:
-                            response = context.nl(**dict(request))
-                        except Exception as exc:  # noqa: BLE001 - host errors cross the protocol
-                            payload: dict[str, object] = {
-                                "type": "nl_response",
-                                "sequence": sequence,
-                                "error": str(exc),
-                            }
-                        else:
-                            payload = {
-                                "type": "nl_response",
-                                "sequence": sequence,
-                                "result": dict(response),
-                            }
-                    finally:
-                        waited = time.monotonic() - nl_started
-                        deadline += waited
-                        nl_seconds += waited
-                    self._send(payload, deadline)
-                    continue
                 if message_type == expected:
                     if kind == "fit":
-                        self._fit_seconds.append(
-                            round(time.monotonic() - started - nl_seconds, 1)
-                        )
+                        self._fit_seconds.append(round(time.monotonic() - started, 1))
                     self._transport_sequence = sequence
                     self._transport_inference_at = context.inference_at
                     self._transport_bars = context.bars

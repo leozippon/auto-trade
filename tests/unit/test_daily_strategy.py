@@ -190,19 +190,12 @@ def test_context_rejects_future_data_and_exposes_no_environment_handles():
     assert not hasattr(context, "broker")
     assert not hasattr(context, "shell")
     assert not hasattr(context, "web")
+    # The host NL interface was removed: no strategy can reach a model.
+    assert not hasattr(context, "nl")
 
 
-def test_context_record_round_trip_and_host_nl_pit_validation():
+def test_context_record_round_trip():
     inference_at = datetime(2026, 1, 2, 18, 0, tzinfo=CN_TZ)
-    observed = []
-
-    def nl_query(request, *, inference_at):
-        observed.append((request, inference_at))
-        return {
-            "text": "known",
-            "available_at": "2026-01-02T17:30:00+08:00",
-        }
-
     context = StrategyContext(
         inference_at=inference_at,
         bars=(
@@ -216,28 +209,13 @@ def test_context_record_round_trip_and_host_nl_pit_validation():
         snapshot_dir="/strategy-data/snapshot",
         asof_dir="/strategy-data/asof",
         asof_version="3",
-        _nl_query=nl_query,
     )
     record = context.to_record()
-    assert "_nl_query" not in record
-    restored = StrategyContext.from_record(record, nl_query=nl_query)
+    restored = StrategyContext.from_record(record)
     assert restored.to_record() == record
     assert restored.snapshot_dir == "/strategy-data/snapshot"
     assert restored.asof_dir == "/strategy-data/asof"
     assert restored.asof_version == "3"
-    nl_result = restored.nl(question="status")
-    assert type(nl_result) is dict
-    assert nl_result["text"] == "known"
-    assert observed == [({"question": "status"}, inference_at)]
-
-    def future_query(_request, *, inference_at):
-        return {"available_at": "2026-01-03T17:30:00+08:00"}
-
-    future = StrategyContext.from_record(record, nl_query=future_query)
-    with pytest.raises(StrategyContractError, match="not visible"):
-        future.nl(question="future")
-    with pytest.raises(StrategyContractError, match="not configured"):
-        StrategyContext.from_record(record).nl(question="missing")
     with pytest.raises(StrategyContractError, match="unsupported fields"):
         StrategyContext.from_record({**record, "broker": {}})
 

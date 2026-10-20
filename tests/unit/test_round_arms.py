@@ -58,7 +58,7 @@ from tests.unit.research_release_fixture import (
     publish_release,
 )
 
-MODEL_ROLES = ("model", "subagent_model", "nl_model", "compact_model")
+MODEL_ROLES = ("model", "subagent_model", "compact_model")
 # A four-digit calendar year, the shape every literal date in a directive takes.
 CALENDAR_YEAR = re.compile(r"(?<!\d)(?:19|20)\d{2}(?:\d{4})?(?!\d)")
 ROUND_FILES = sorted((REPO_ROOT / "scripts" / "experiments").glob("create_round_*.py"))
@@ -132,20 +132,16 @@ def _synthetic_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rnd: Round)
 
 
 @pytest.mark.parametrize("round_name", ROUND_IDS)
-def test_every_arm_runs_its_unnamed_roles_on_the_pinned_defaults_and_nl_locally(round_name: str) -> None:
+def test_every_arm_runs_its_unnamed_roles_on_the_pinned_defaults(round_name: str) -> None:
     """A role an arm does not name runs on the console default, which
     BASE_EXPECTED_DEFAULTS pins against drift, so another model is always an
-    arm's explicit declaration in its round file. Text-evidence scoring is never
-    hosted: it also runs in the forward and Held-out replays, whose data must not
-    leave the machine.
+    arm's explicit declaration in its round file.
     """
     rnd = ROUNDS[round_name]
     rnd.check_console_defaults()
-    assert BASE_EXPECTED_DEFAULTS["nl_model"] == LOCAL_QWEN_MODEL
     for experiment_id in (PROBE_ID, *rnd.arms):
         params = rnd.request_params(experiment_id)
         declared = rnd.arms.get(experiment_id, {})
-        assert params["nl_model"] == LOCAL_QWEN_MODEL, experiment_id
         for role in MODEL_ROLES:
             if role not in declared:
                 assert params[role] == BASE_EXPECTED_DEFAULTS[role], (experiment_id, role)

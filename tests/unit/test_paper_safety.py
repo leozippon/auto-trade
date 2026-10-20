@@ -31,7 +31,7 @@ def _setup(tmp_path, monkeypatch, *, losing=False):
     models.mkdir()
     (models / "weights.json").write_text('{"weight": 1}', encoding="utf-8")
     record = read_json(book.root / "book.json")
-    record.update(profile=asdict(PROFILE), models_dir="strategy/models", nl_gateway=None,
+    record.update(profile=asdict(PROFILE), models_dir="strategy/models",
                   artifact_fingerprint=artifact_fingerprint(book.strategy_path.parent, models))
     record["verdict_rules"]["max_drawdown"] = 0.005 if losing else 0.45
     write_json_atomic(book.root / "book.json", record)

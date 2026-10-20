@@ -131,8 +131,6 @@ FIVE_YEAR_FIXED_PIT_VIEWS_SEED = "data/pit_views_seed_research_5y_full_20261016"
 
 # The hosted arm of a pair: main session, sub-agents and compaction on MiMo, the
 # compaction threshold pinned to the local arms' value so both compact alike.
-# `nl_model` is left on the local default: text-evidence scoring also runs in
-# the forward and Held-out replays, whose data must not leave the machine.
 MIMO: dict[str, object] = {
     "model": "mimo-v2.6-flash",
     "subagent_model": "mimo-v2.6-flash",

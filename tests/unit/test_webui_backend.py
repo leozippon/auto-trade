@@ -47,6 +47,7 @@ from autotrade.pipelines.hitl_state import (
     status_pid_alive,
 )
 from autotrade.pipelines.ledger import ExperimentLedger
+from autotrade.pipelines.worker import RETIRED_NL_PARAMS
 from autotrade.webui.manager import (
     ARM_DISK_MARGIN_BYTES,
     MAX_RUNNING_EXPERIMENTS,
@@ -155,7 +156,6 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
     assert model_fields == [
         "model",
         "subagent_model",
-        "nl_model",
         "compact_model",
         "reasoning_effort",
         "no_thinking",
@@ -170,10 +170,6 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
     for role in ("model", "subagent_model", "compact_model"):
         assert fields[role]["default"] == "DeepSeek-V4.1-Flash", role
     assert fields["subagent_model"]["choices"] == fields["model"]["choices"]
-    assert fields["nl_model"]["default"] == LOCAL_QWEN_MODEL
-    # NL also answers in the forward and Held-out replays, unmetered: no
-    # hosted model is offered for it.
-    assert fields["nl_model"]["choices"] == [LOCAL_QWEN_MODEL]
     assert fields["reasoning_effort"]["default"] == "xhigh"
     # The local window's derived value, kept by the 1M-window defaults; an
     # empty field still derives it per role from the model windows.
@@ -187,13 +183,13 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
             "llm_model",
             "llm_max_response_tokens",
             "llm_temperature",
-            "nl_max_results",
-            "nl_max_calls_per_decision",
-            "nl_max_total_calls",
-            "nl_deadline_seconds",
+            *RETIRED_NL_PARAMS,
         }
         & fields.keys()
     )
+    # The host NL interface is gone: a create request naming one of its
+    # parameters is an unknown parameter, not a default to stamp.
+    assert not RETIRED_NL_PARAMS & set(WEB_CREATE_DEFAULTS)
     for key in (
         "max_research_minutes",
         "window_months",
@@ -278,7 +274,7 @@ def test_cli_exposes_distinct_session_and_subagent_model_choices() -> None:
     add_model_arguments(parser)
     defaults = parser.parse_args([])
     assert defaults.model == defaults.subagent_model == WEB_CREATE_DEFAULTS["model"]
-    assert defaults.nl_model == LOCAL_QWEN_MODEL
+    assert not hasattr(defaults, "nl_model")
     assert not hasattr(defaults, "meta_model")
     mixed = parser.parse_args(
         ["--model", "deepseek-flash", "--subagent-model", LOCAL_QWEN_MODEL]
@@ -392,7 +388,6 @@ def test_experiment_endpoint_creates_only_persistent_sandbox_research(tmp_path: 
                     "screen_boards": ["main", "gem"],
                     "model": "deepseek-flash",
                     "subagent_model": LOCAL_QWEN_MODEL,
-                    "nl_model": LOCAL_QWEN_MODEL,
                     "compact_model": "deepseek-flash",
                     "reasoning_effort": "high",
                     "no_thinking": True,
@@ -424,7 +419,7 @@ def test_experiment_endpoint_creates_only_persistent_sandbox_research(tmp_path: 
     assert params["screen_boards"] == ["main", "gem"]
     assert params["model"] == "deepseek-flash"
     assert params["subagent_model"] == LOCAL_QWEN_MODEL
-    assert params["nl_model"] == LOCAL_QWEN_MODEL
+    assert "nl_model" not in params
     assert params["compact_model"] == "deepseek-flash"
     assert params["reasoning_effort"] == "high"
     assert params["no_thinking"] is True
@@ -707,7 +702,7 @@ class WebuiBackendTest(unittest.TestCase):
             "local_dev",
         ):
             self.assertNotIn(hidden, fields, hidden)
-        for model_field in ("model", "subagent_model", "nl_model", "compact_model"):
+        for model_field in ("model", "subagent_model", "compact_model"):
             for retired in ("deepseek-chat", "deepseek-reasoner", "deepseek-v4-flash", "deepseek-v4-pro"):
                 self.assertNotIn(retired, fields[model_field]["choices"])
         visible_copy = "\n".join(

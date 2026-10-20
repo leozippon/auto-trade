@@ -118,11 +118,11 @@ RUNTIME_CACHE_DIR_NAMES = ("__pycache__",)
 RUNTIME_CACHE_SUFFIXES = (".pyc", ".pyo")
 # The Agent-visible projection of one ``backtest_summaries`` entry. Every key
 # here is produced end to end: the tool layer writes the record identity and
-# outcome, ``compute_return_stats`` writes the return/order/timing block, and
-# ``NLService.counters`` writes the ``nl_*`` block. A key that nothing populates
-# does not belong in this tuple — it would advertise telemetry that never
-# arrives. The run manifest also uses it to decide which structured (dict)
-# summary values of a completed Validation are worth carrying at all.
+# outcome and ``compute_return_stats`` writes the return/order/timing block. A
+# key that nothing populates does not belong in this tuple — it would advertise
+# telemetry that never arrives. The run manifest also uses it to decide which
+# structured (dict) summary values of a completed Validation are worth carrying
+# at all.
 AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS = (
     "result_name",
     "mode",
@@ -157,15 +157,6 @@ AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS = (
     # Container telemetry of the replay: peak memory against the limit in
     # force, per-fit seconds against the fit timeout, GPU headroom.
     "resources",
-    "nl_calls",
-    "nl_executed_calls",
-    "nl_search_calls",
-    "nl_llm_calls",
-    "nl_event_filter_calls",
-    "nl_evidence_gated_calls",
-    "nl_budget_rejected_calls",
-    "nl_wall_seconds",
-    "nl_max_total_calls",
 )
 TRACE_MAX_BYTES = 32 * 1024 * 1024
 TRACE_MAX_EVENT_BYTES = 256 * 1024
@@ -557,7 +548,6 @@ def _agent_visible_manifest(
             "modification_constraints",
             "acceptance_rules",
             "broker_profile",
-            "nl_failure_policy",
             "attempt",
             "record_failed_attempts",
             "budgets",

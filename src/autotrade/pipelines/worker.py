@@ -36,7 +36,6 @@ from autotrade.environment.llm import (
     DEFAULT_LLM_MAX_RETRIES,
     DEFAULT_LLM_RETRY_BACKOFF_SECONDS,
     LOCAL_QWEN_MODEL,
-    NL_MODEL_CHOICES,
     LLMProxy,
     build_model_gateway,
     canonicalize_model_name,
@@ -47,7 +46,6 @@ from autotrade.environment.llm.lighting import (
     LONG_CONTEXT_TIER_MODELS,
     SHORT_TIER_MAX_COMPACTION_THRESHOLD,
 )
-from autotrade.environment.nl import NLConfig
 from autotrade.environment.pretrained import pretrained_pin
 from autotrade.environment.runtime import utc_now_iso, write_json_atomic
 from autotrade.environment.sandbox import (
@@ -114,6 +112,21 @@ from .pit_views_seed import assert_seed_carries_bonus_split, assert_seed_snapsho
 from .research_session import LLMResearchDeveloper
 from .skills import latest_skills_snapshot, resolve_operating_memory
 
+# The parameters of the host NL interface (``context.nl()``), removed on
+# 2026-10-20 with the interface itself. Arms created before then carry some of
+# them in params.json; readers accept exactly these keys and derive nothing
+# from them, since nothing they configured still exists.
+RETIRED_NL_PARAMS = frozenset(
+    {
+        "nl_model",
+        "nl_failure_policy",
+        "nl_max_results",
+        "nl_max_calls_per_decision",
+        "nl_max_total_calls",
+        "nl_deadline_seconds",
+    }
+)
+
 _ALLOWED_PARAMS = {
     "experiment_id",
     *GEOMETRY_PARAMETERS,
@@ -155,10 +168,6 @@ _ALLOWED_PARAMS = {
     "screen_min_price",
     "screen_max_price",
     "screen_boards",
-    "nl_max_results",
-    "nl_max_calls_per_decision",
-    "nl_max_total_calls",
-    "nl_deadline_seconds",
     "max_intraday_row_group_rows",
     "developer_mode",
     "benchmark_index",
@@ -176,7 +185,6 @@ _ALLOWED_PARAMS = {
     "operating_memory",
     "lineage_arms",
     "record_failed_attempts",
-    "nl_failure_policy",
     "finalize_before_deadline_seconds",
     "per_call_timeout_seconds",
     "strategy_fit_timeout_seconds",
@@ -197,7 +205,6 @@ _ALLOWED_PARAMS = {
     "llm_max_response_tokens",
     "model",
     "subagent_model",
-    "nl_model",
     "compact_model",
     "reasoning_effort",
     "no_thinking",
@@ -214,17 +221,10 @@ _ALLOWED_PARAMS = {
     # Stamped by the console at creation (``environment.pretrained``).
     "pretrained_manifest_sha256",
     # Accepted so that an arm created before their retirement still loads;
-    # nothing reads them (``config.RETIRED_SWITCHES``).
+    # nothing reads them (``config.RETIRED_SWITCHES``, ``RETIRED_NL_PARAMS``).
     *RETIRED_SWITCHES,
+    *RETIRED_NL_PARAMS,
 }
-
-# Single source for the NL budget defaults advertised to experiment parameters.
-NL_DEFAULTS = NLConfig()
-
-# NL Sub Agent reasoning tier. Independent of the experiment's
-# ``reasoning_effort``, which governs the strategy-design dialogues; `medium` is
-# a native Qwen tier and passes through the shared gateway unmapped.
-NL_REASONING_EFFORT = "medium"
 
 # The experiment-level ``reasoning_effort`` offers exactly the levels that are
 # distinct on the wire for the local Qwen profile (its chat template knows
@@ -248,7 +248,6 @@ class LLMWorkerSettings:
     # The ``agent`` sub-agents of research sessions; they keep the parent's
     # call quota, budget wrapper and time budget on this gateway.
     subagent_model: str
-    nl_model: str
     compact_model: str
     timeout_seconds: float
     max_retries: int
@@ -270,7 +269,6 @@ class LLMWorkerSettings:
         models = {
             "main": self.model,
             "subagent": self.subagent_model,
-            "nl": self.nl_model,
             "compact": self.compact_model,
         }
         if role not in models:
@@ -325,12 +323,6 @@ class LLMWorkerSettings:
 
         if role == "compact" or not self.thinking_enabled:
             return None
-        if role == "nl":
-            # NL extracts evidence from already-retrieved PIT text and answers
-            # short or enum-bounded questions; it is also the only LLM
-            # inference inside a backtest's wall clock, so it runs at a
-            # deliberately lower effort than the strategy-design dialogues.
-            return NL_REASONING_EFFORT
         return self.reasoning_effort
 
     def compaction_for(self, role: str) -> ContextCompactionConfig:
@@ -391,7 +383,6 @@ class InteractiveWorkerOptions:
     # an optimisation, so a missing or non-matching default cold-builds.
     pit_views_seed_required: bool = False
     snapshot_config: SnapshotConfig = field(default_factory=SnapshotConfig)
-    nl_config: NLConfig = field(default_factory=NLConfig)
     max_intraday_row_group_rows: int = 2_000_000
     llm: LLMWorkerSettings | None = None
     agent_sandbox: SandboxSpec | None = None
@@ -693,7 +684,6 @@ def resolve_worker_options(
         record_failed_attempts=_strict_bool(
             knob("record_failed_attempts"), "record_failed_attempts"
         ),
-        nl_failure_policy=_nl_failure_policy(knob("nl_failure_policy")),
         finalize_before_deadline_seconds=_nonnegative_int(
             knob("finalize_before_deadline_seconds"),
             "finalize_before_deadline_seconds",
@@ -750,28 +740,6 @@ def resolve_worker_options(
         pit_views_seed=pit_views_seed,
         pit_views_seed_required=seed_generation is not None,
         snapshot_config=snapshot_config,
-        # NLConfig owns the NL budget defaults; an absent parameter keeps the
-        # shipped default rather than a second copy of it living here.
-        nl_config=NLConfig(
-            max_results=_positive_int(
-                params.get("nl_max_results", NL_DEFAULTS.max_results),
-                "nl_max_results",
-            ),
-            max_calls_per_decision=_positive_int(
-                params.get(
-                    "nl_max_calls_per_decision", NL_DEFAULTS.max_calls_per_decision
-                ),
-                "nl_max_calls_per_decision",
-            ),
-            max_total_calls=_optional_positive_int(
-                params.get("nl_max_total_calls", NL_DEFAULTS.max_total_calls),
-                "nl_max_total_calls",
-            ),
-            deadline_seconds=_positive_float(
-                params.get("nl_deadline_seconds", NL_DEFAULTS.deadline_seconds),
-                "nl_deadline_seconds",
-            ),
-        ),
         max_intraday_row_group_rows=_positive_int(
             params.get("max_intraday_row_group_rows", 2_000_000),
             "max_intraday_row_group_rows",
@@ -864,7 +832,6 @@ def build_experiment_pipeline(
     agent = options.developer_mode == "llm" and options.llm is not None
     main_gateway = llm or (options.llm.build_gateway("main") if agent else None)
     subagent_gateway = llm or (options.llm.build_gateway("subagent") if agent else None)
-    nl_gateway = llm or (options.llm.build_gateway("nl") if agent else None)
     # A failed compaction falls through to the emergency fit path by design;
     # provider retries would only add their full latency to that failure.
     compact_gateway = llm or (
@@ -897,9 +864,6 @@ def build_experiment_pipeline(
         evaluator = PITDailyEvaluationBackend(
             options.experiment_dir / "artifacts" / "results",
             execution_mode=options.execution_mode,
-            nl_llm=nl_gateway,
-            nl_config=options.nl_config,
-            nl_failure_policy=options.rolling.nl_failure_policy,
             max_intraday_row_group_rows=options.max_intraday_row_group_rows,
             sandbox=strategy_sandbox,
             benchmark_index=options.rolling.benchmark_index,
@@ -1379,16 +1343,6 @@ def _llm_settings(
     subagent_model = canonicalize_model_name(
         str(params.get("subagent_model") or fold_model)
     )
-    nl_model = canonicalize_model_name(
-        str(params.get("nl_model") or LOCAL_QWEN_MODEL)
-    )
-    if nl_model not in NL_MODEL_CHOICES:
-        raise ValueError(
-            f"nl_model {nl_model!r} is not allowed: context.nl() also runs in the "
-            "forward, held-out and Paper replays and is not metered by "
-            "max_api_spend_usd, so nl_model must be a local model "
-            f"({', '.join(NL_MODEL_CHOICES)})"
-        )
     compact_model = canonicalize_model_name(
         str(params.get("compact_model") or LOCAL_QWEN_MODEL)
     )
@@ -1419,7 +1373,6 @@ def _llm_settings(
         env_file=env_file,
         model=fold_model,
         subagent_model=subagent_model,
-        nl_model=nl_model,
         compact_model=compact_model,
         timeout_seconds=_positive_float(
             params.get(
@@ -1458,7 +1411,7 @@ def _llm_settings(
     # Whether the host holds a credential is deployment state, not a property
     # of a WebUI create request.  Every model/role combination is still
     # validated at preflight with a non-secret placeholder.
-    for role in ("main", "subagent", "nl", "compact"):
+    for role in ("main", "subagent", "compact"):
         settings.build_gateway(role, require_credentials=not preflight)
     # The Agent's typed grep tool runs ripgrep on this host (``tools.search``),
     # not in the sandbox image. Like a credential it is deployment state, so it
@@ -1697,18 +1650,6 @@ def _optional_positive_float(value: object, name: str) -> float | None:
     if value in (None, ""):
         return None
     return _positive_float(value, name)
-
-
-def _nl_failure_policy(value: object) -> str:
-    policy = str(value or "return_error_with_audit")
-    if policy not in NL_FAILURE_POLICIES:
-        raise ValueError(
-            f"nl_failure_policy must be one of {sorted(NL_FAILURE_POLICIES)}"
-        )
-    return policy
-
-
-NL_FAILURE_POLICIES = frozenset({"return_error_with_audit", "fail"})
 
 
 def _nonnegative_int(value: object, name: str) -> int:

@@ -21,7 +21,7 @@ narrower dependency key so minute updates do not invalidate unrelated work.
 
 Text bodies live under ``ctx.asof_dir/text_library``. Frozen snapshot body shards
 are hardlinked at start; replay body shards are copied only for newly visible
-``text_index`` rows, so direct text processing has the same PIT wall as ``ctx.nl``.
+``text_index`` rows, so text bodies obey the same PIT wall as the rest of the view.
 Durable part reuse is enabled only after the PIT backend directly validates the
 stash contract for the exact release, snapshot, replay slot, configuration, and
 schedule. Each part is then published under its own process lock.

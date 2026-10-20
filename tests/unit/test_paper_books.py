@@ -394,3 +394,41 @@ def test_a_book_of_an_older_schema_is_refused(tmp_path: Path):
     (book.root / BOOK_NAME).write_text(json.dumps({**record, "schema_version": 1}), encoding="utf-8")
     with pytest.raises(ValueError, match="unsupported Paper book schema 1"):
         load_book(book.root)
+
+
+def test_a_book_created_with_the_retired_nl_settings_loads_as_one_without_them(tmp_path: Path):
+    """Books created before the host NL interface was removed froze its
+    settings into book.json, in the shape below. Such a book loads to exactly
+    the book it would be without them, and a new book no longer writes them."""
+    book = _graduated_book(tmp_path)
+    record = read_json(book.root / BOOK_NAME)
+    retired = {"nl_gateway", "nl_config", "nl_failure_policy"}
+    assert not retired & set(record)
+    legacy = {
+        "nl_gateway": {
+            "model": "qwen-3.8-27b-fp8",
+            "env_file": str(tmp_path / ".env"),
+            "timeout_seconds": 3600.0,
+            "max_retries": 3,
+            "retry_backoff_seconds": 2.0,
+            "max_tokens": 32768,
+            "temperature": 0.0,
+            "thinking_enabled": True,
+            "reasoning_effort": "medium",
+        },
+        "nl_config": {
+            "max_results": 8,
+            "max_query_chars": 2000,
+            "max_record_chars": 4000,
+            "max_total_evidence_chars": 16000,
+            "max_llm_rounds": 3,
+            "deadline_seconds": 20.0,
+            "max_tokens": 1200,
+            "max_calls_per_decision": 10,
+            "max_total_calls": None,
+        },
+        "nl_failure_policy": "return_error_with_audit",
+    }
+    assert set(legacy) == retired
+    (book.root / BOOK_NAME).write_text(json.dumps({**record, **legacy}), encoding="utf-8")
+    assert load_book(book.root) == book

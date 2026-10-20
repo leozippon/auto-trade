@@ -537,7 +537,6 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
                 else {}
             ),
             "phase_seconds": phases,
-            "nl_calls": summary.get("nl_calls"),
             "asof_domains": [str(item) for item in pit.get("asof_domains") or ()],
             "asof_date_ranges": pit.get("asof_date_ranges") or {},
             "hint": _SMOKE_LAYOUT_HINT,

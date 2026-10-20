@@ -49,7 +49,6 @@ from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR, window_act
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
 from autotrade.environment.runtime import agent_trace_path, chmod_tree, utc_now_iso
 from autotrade.environment.step_tree import node_handle
-from autotrade.environment.strategy import NLQuery
 from autotrade.environment.strategy_loader import validate_strategy_package
 from autotrade.environment.tools.finish_session import offline_trials_count
 
@@ -143,14 +142,12 @@ class DailyStrategyPipeline:
         self,
         config: StrategyExperimentConfig,
         *,
-        nl_query: NLQuery | None = None,
         context_data: ContextDataProvider | None = None,
         execution_price: ExecutionPriceProvider | None = None,
         executor_factory: Callable[[StrategyExperimentConfig], StrategyExecutor]
         | None = None,
     ) -> None:
         self.config = config
-        self.nl_query = nl_query
         self.context_data = context_data
         self.execution_price = execution_price
         self.executor_factory = executor_factory
@@ -187,7 +184,6 @@ class DailyStrategyPipeline:
                         strategy=executor,
                         schedule=self.config.schedule,
                         profile=self.config.broker_profile,
-                        nl_query=self.nl_query,
                         context_data=self.context_data,
                         execution_price=self.execution_price,
                         corporate_actions=corporate_actions,
@@ -381,7 +377,6 @@ class RollingExperimentPipeline:
                     modification_constraints=self.config.step_constraints,
                     snapshot_config=_snapshot_config_record(self.snapshots),
                     record_failed_attempts=self.config.record_failed_attempts,
-                    nl_failure_policy=self.config.nl_failure_policy,
                     finalize_before_deadline_seconds=self.config.finalize_before_deadline_seconds,
                     max_null_controls=self.config.max_null_controls,
                     batch_validate_max_concurrency=self.config.batch_validate_max_concurrency,

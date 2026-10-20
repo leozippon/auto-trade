@@ -414,7 +414,6 @@ def _artifact_contract_facts(
                 else None
             ),
             "record_failed_attempts": manifest.get("record_failed_attempts"),
-            "nl_failure_policy": manifest.get("nl_failure_policy"),
         }
     )
 

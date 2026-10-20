@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time
 from itertools import chain
 from types import MappingProxyType
-from typing import Literal, Protocol
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -619,18 +619,9 @@ class AccountSnapshot:
         return cls(cash=record["cash"], positions=positions)  # type: ignore[arg-type]
 
 
-class NLQuery(Protocol):
-    def __call__(
-        self,
-        request: Mapping[str, object],
-        *,
-        inference_at: datetime,
-    ) -> Mapping[str, object]: ...
-
-
 @dataclass(frozen=True)
 class StrategyContext:
-    """Immutable PIT input with one narrow host-mediated NL capability."""
+    """Immutable PIT input of one strategy call."""
 
     inference_at: datetime
     bars: tuple[Mapping[str, object], ...]
@@ -644,7 +635,6 @@ class StrategyContext:
     state_dir: str = ""
     models_dir: str = ""
     pretrained_dir: str = ""
-    _nl_query: NLQuery | None = field(default=None, repr=False, compare=False)
     # The columnar store behind ``bars``; ``bars`` is its first len(bars) rows.
     _bars_table: BarTable = field(default_factory=BarTable, init=False, repr=False, compare=False)
 
@@ -685,18 +675,6 @@ class StrategyContext:
         rows = self.history(symbol)
         return rows[-1] if rows else None
 
-    def nl(self, **request: object) -> Mapping[str, object]:
-        """Make one JSON-only NL request through the trusted host service."""
-
-        if self._nl_query is None:
-            raise StrategyContractError("NL service is not configured for this strategy context")
-        normalized = _json_mapping(request, name="NL request")
-        _validate_pit_tree(normalized, inference_at=self.inference_at, name="NL request")
-        response = self._nl_query(normalized, inference_at=self.inference_at)
-        normalized_response = _json_mapping(response, name="NL response")
-        _validate_pit_tree(normalized_response, inference_at=self.inference_at, name="NL response")
-        return normalized_response
-
     def to_record(self) -> dict[str, object]:
         record = {
             "inference_at": self.inference_at.isoformat(),
@@ -712,12 +690,7 @@ class StrategyContext:
         return _json_mapping(record, name="strategy context")
 
     @classmethod
-    def from_record(
-        cls,
-        value: object,
-        *,
-        nl_query: NLQuery | None = None,
-    ) -> StrategyContext:
+    def from_record(cls, value: object) -> StrategyContext:
         record = _strict_record(
             value,
             required={
@@ -746,7 +719,6 @@ class StrategyContext:
             state_dir=record["state_dir"],  # type: ignore[arg-type]
             models_dir=record["models_dir"],  # type: ignore[arg-type]
             pretrained_dir=record["pretrained_dir"],  # type: ignore[arg-type]
-            _nl_query=nl_query,
         )
 
 
@@ -795,23 +767,6 @@ def _strict_json_identity(value: object) -> tuple[object, ...]:
             tuple((key, _strict_json_identity(item)) for key, item in sorted(value.items())),
         )
     raise StrategyContractError("strategy bar must contain only strict JSON values")
-
-
-def _validate_pit_tree(value: object, *, inference_at: datetime, name: str) -> None:
-    """Reject explicit availability timestamps later than the current PIT cut."""
-
-    if isinstance(value, Mapping):
-        available_at = value.get("available_at")
-        if (
-            available_at is not None
-            and _parse_datetime(available_at, f"{name} available_at") > inference_at
-        ):
-            raise StrategyContractError(f"{name} contains data not visible at inference time")
-        for child in value.values():
-            _validate_pit_tree(child, inference_at=inference_at, name=name)
-    elif isinstance(value, list):
-        for child in value:
-            _validate_pit_tree(child, inference_at=inference_at, name=name)
 
 
 StrategyFunction = Callable[[StrategyContext], Sequence[Mapping[str, object]]]

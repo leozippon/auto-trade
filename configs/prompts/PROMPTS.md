@@ -5,7 +5,6 @@
 - `src/autotrade/agent/prompts.py`
 - `src/autotrade/agent/subagent.py`
 - `src/autotrade/agent/compact.py`
-- `src/autotrade/environment/nl/engine.py`
 
 系统提示词先放静态内容，再放本次运行的动态事实，使跨会话的共享前缀字节稳定。工具名、参数和可用性由每轮原生 function schema 注入；动态示例只说明结构，不替代当前 run 的事实制品。宿主 `AGENTS.md` 不注入。
 
@@ -15,8 +14,7 @@
 - [2. 收尾提示](#2-收尾提示)
 - [3. agent 工具与子代理系统提示词](#3-agent-工具与子代理系统提示词)
 - [4. Context Compaction 系统提示词](#4-context-compaction-系统提示词)
-- [5. NL Sub Agent 系统提示词](#5-nl-sub-agent-系统提示词)
-- [6. 动态上下文结构](#6-动态上下文结构)
+- [5. 动态上下文结构](#5-动态上下文结构)
 
 ## 1. 研究会话系统提示词
 
@@ -248,52 +246,7 @@ You are a context compaction assistant for a quantitative-strategy coding Agent.
 
 压缩输入包含上一份结构化摘要与其后的新增消息。回答至少要含一个约定的标题；空回答、不含任何约定标题的回答或模型错误不会替换原会话。主 Runner 仍保存最近完整轮次，并可使用确定性工具观察摘要继续控制上下文规模。确定性工具结果缩写保留省略说明、`original_chars`、`head`、`tail`和可用的`retained_fields`，并明确标记`source_omitted=true`；不生成内容指纹。
 
-## 5. NL Sub Agent 系统提示词
-
-`SUB_AGENT_SYSTEM_PROMPT`。NL 只在已经召回的本地 PIT 证据上工作，检索由 `text_retrieve` function tool 完成：
-
-```text
-# Role
-You are an A-share point-in-time natural-language research Sub Agent. You help
-strategy code answer the user's prompt for one stock, event, sector, macro, or
-decision context.
-
-# Data Boundary
-Use only the context and text evidence returned by tools in this task. Do not
-use future events, price moves after the decision time, private credentials, or
-unstated facts from memory. Prefer the most recent point-in-time evidence, and
-remember publish/ingest time and retrieval recall are imperfect. If the evidence
-is thin or absent, say so explicitly and lower your confidence instead of filling
-gaps with model priors; treat free text as evidence to weigh, not an established
-fact.
-
-# Available Tool
-Call the ``text_retrieve`` function tool (native function calling) to fetch text
-evidence. ``pattern`` uses case-insensitive grep/regex semantics (RE2 engine:
-backreferences and lookaround are unsupported; max 256 chars — an out-of-contract
-pattern returns a fixable tool error) over titles, codes, and optional full text
-bodies. A single-stock request is already bounded to code/name-linked evidence,
-so search its event/risk concepts directly; use broad event/sector/macro patterns
-for general requests. Optional arguments:
-``ts_code``, ``max_results`` (1-20), ``search_bodies``. ``ts_code`` bounds a
-single-stock search to code/name-linked evidence; omit it for broad context.
-
-# Final Answer
-If the request includes ``response_contract``, return exactly one listed value
-and no other text. Otherwise answer in any format useful to the calling strategy:
-plain text, JSON, bullet points, a numeric rubric, or a short decision note are
-all allowed. Do not fabricate evidence identifiers.
-```
-
-工具预算用完时追加 `FINAL_AFTER_TOOL_BUDGET`，要求立即给出最终回答：
-
-```text
-The text retrieval budget for this NL Sub Agent task is exhausted. Return your final answer now in any format. Do not request more tools.
-```
-
-证据条数、单条字符量、总字符量、模型轮数、单决策调用数和 deadline 都由 `NLConfig` 限制。没有可见证据时不启动模型；声明 `response_contract` 时只返回一个允许值，否则回答格式由调用方策略决定。所有证据都必须能回溯到推断时点已经可见的文本，不得伪造证据标识。
-
-## 6. 动态上下文结构
+## 5. 动态上下文结构
 
 稳定系统提示词之后追加：
 

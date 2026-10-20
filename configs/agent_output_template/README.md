@@ -62,9 +62,8 @@ Each invocation receives an immutable market-level context:
 | `context.state_dir` | Per-replay state directory path string: writable while `fit` runs, read-only for `generate_orders`; nothing is there for a strategy without `fit` |
 | `context.models_dir` | Read-only path string of the artifact's `models/` directory; empty when the artifact has none |
 | `context.pretrained_dir` | Read-only path string of the pretrained-model store (see Pretrained models); empty when this arm mounts none |
-| `context.nl(...)` | Optional host-mediated local evidence query; absent configurations fail explicitly |
 
-Every bar has a timezone-aware `available_at` no later than `context.inference_at`. The host also rejects any explicit future `available_at` nested in an NL request or response.
+Every bar has a timezone-aware `available_at` no later than `context.inference_at`.
 
 The strategy receives no Broker, Shell, experiment controls or previous results. The runtime mounts this `output/` package read-only, the read-only snapshot/as-of directories, the read-only `models/` directory, the read-only pretrained-model store and the state directory (read-write only for `fit`); nothing else of the workspace is visible, so executable strategy logic must live in this package.
 
@@ -155,18 +154,6 @@ If the exact price source is absent or invalid, including when the required dail
 Initial cash is an experiment setting, so size from `context.account.cash` instead of assuming a fixed account; the run facts' `broker_replay` gives this arm's cash, commission, slippage, stamp duty and dividend-tax policy. The default cost profile uses 1 bp commission with a CNY 5 minimum, a 0.1 bp transfer fee, and 5 bp directional slippage. Sell stamp duty is **10 bp for executions before 2023-08-28 and 5 bp from 2023-08-28 onward** — size pre-cutover windows against the higher rate, because the Broker charges it. At the default profile a round trip of fills of at least CNY 50,000 each therefore costs about 22 bp before the cutover and 17 bp from it, slippage included; smaller fills pay more, because the commission minimum binds below that size.
 
 Each trading day opens with the T+1 release and ex-date settlement, then fills the orders due at or before the inference time, so `context.account` is the account as it stood at the decision. The Broker processes due orders sequentially and updates its true account after each fill, while `context.account` stays the snapshot taken before the call: batch sizing must not assume that later strategy statements can observe earlier fills. Read cash once, keep a local remaining budget, and leave room for price movement and fees.
-
-## Local evidence
-
-If configured, call the host evidence service with:
-
-```python
-result = context.nl(query="利润预告", mode="search", limit=5)
-```
-
-`mode="search"` returns bounded local evidence. `mode="answer"` allows a model to answer only from retrieved evidence and requires valid evidence citations. No evidence returns `status="no_evidence"` and does not invoke the model.
-
-Treat text as fallible supporting evidence. Publish time, ingest time, retrieval recall, model priors, parsing, and look-ahead contamination remain risks. NL never overrides cash, positions, tradability, costs, or PIT.
 
 ## Pretrained models
 

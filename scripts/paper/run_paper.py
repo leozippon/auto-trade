@@ -42,7 +42,6 @@ from _bootstrap import add_repo_src
 add_repo_src(__file__)
 
 from autotrade.environment.executor import StrategyExecutor
-from autotrade.environment.llm import build_model_gateway
 from autotrade.environment.replay.engine import StrategyDataView
 from autotrade.environment.sandbox import SandboxConfig
 from autotrade.environment.strategy import CN_TZ
@@ -266,9 +265,6 @@ def _run_book_locked(book_id: str, book: Book, trade_date: str, orders_dir: Path
             snapshot_config=book.snapshot_config,
             start=start,
             trade_date=target,
-            nl_llm=build_model_gateway(**book.nl_gateway) if book.nl_gateway else None,
-            nl_config=book.nl_config,
-            nl_failure_policy=book.nl_failure_policy,
             max_intraday_row_group_rows=book.max_intraday_row_group_rows,
         )
 

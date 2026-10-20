@@ -165,7 +165,6 @@ def _research_prompt(
         "acceptance_rules": rolling.acceptance.to_record(),
         "schedule": rolling.schedule.to_record(),
         "broker_profile": rolling.broker_profile.to_record(),
-        "nl_failure_policy": rolling.nl_failure_policy,
         "record_failed_attempts": rolling.record_failed_attempts,
         "attempt": 1,
         "finalize_before_deadline_seconds": rolling.finalize_before_deadline_seconds,

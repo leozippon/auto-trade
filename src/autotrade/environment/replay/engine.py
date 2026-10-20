@@ -17,7 +17,6 @@ from autotrade.environment.executor import (
 from autotrade.environment.strategy import (
     CN_TZ,
     AccountSnapshot,
-    NLQuery,
     StrategyContext,
     StrategyOrder,
     StrategySchedule,
@@ -106,7 +105,6 @@ class DailyReplayEngine:
         schedule: StrategySchedule,
         strategy: StrategyRunner,
         broker: DailyBroker | None = None,
-        nl_query: NLQuery | None = None,
         context_data: ContextDataProvider | None = None,
         execution_price: ExecutionPriceProvider | None = None,
         timer: PhaseTimer | None = None,
@@ -116,7 +114,6 @@ class DailyReplayEngine:
         self.schedule = schedule
         self.strategy = strategy
         self.broker = broker or DailyBroker()
-        self.nl_query = nl_query
         self.context_data = context_data
         self.execution_price = execution_price
         self.timer = timer if timer is not None else PhaseTimer()
@@ -207,7 +204,6 @@ class DailyReplayEngine:
             state_dir=fittable.context_state_dir if fittable is not None else "",
             models_dir=fittable.context_models_dir if fittable is not None else "",
             pretrained_dir=fittable.context_pretrained_dir if fittable is not None else "",
-            _nl_query=self.nl_query,
         )
         # fit receives the very context object generate_orders gets on this
         # day, so it cannot see one row more than the decision itself.
@@ -226,8 +222,6 @@ class DailyReplayEngine:
                 ) from _call_failure(exc)
             self._last_fit_date = trade_date
         try:
-            # Includes the host NL wait: ctx.nl() blocks inside the strategy
-            # call, and phase_seconds["nl"] reports that share separately.
             with self.timer.phase("strategy"):
                 if isinstance(self.strategy, StrategyExecutor):
                     payload = self.strategy.execute(context)
@@ -291,7 +285,6 @@ def run_daily_replay(
     strategy: StrategyRunner,
     schedule: StrategySchedule,
     profile: BrokerProfile | None = None,
-    nl_query: NLQuery | None = None,
     context_data: ContextDataProvider | None = None,
     execution_price: ExecutionPriceProvider | None = None,
     corporate_actions=None,
@@ -317,7 +310,6 @@ def run_daily_replay(
         schedule=schedule,
         strategy=strategy,
         broker=DailyBroker(profile),
-        nl_query=nl_query,
         context_data=context_data,
         execution_price=execution_price,
         timer=timer,

@@ -3,8 +3,7 @@
 All provider calls go through an :class:`LLMProxy`. API keys live only on the
 host side inside provider adapters; sandbox code never sees them. Callers are
 responsible for writing call details to the documented locations (main
-conversation -> agent_trace.jsonl ``llm_call`` events; NL Sub Agent ->
-``nl_tool/nl_llm_calls.jsonl``).
+conversation -> agent_trace.jsonl ``llm_call`` events).
 """
 
 from __future__ import annotations

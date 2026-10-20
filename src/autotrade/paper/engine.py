@@ -56,7 +56,6 @@ from autotrade.environment.sandbox import SandboxConfig
 from autotrade.environment.strategy import (
     CN_TZ,
     AccountSnapshot,
-    NLQuery,
     StrategyContext,
     StrategyOrder,
     StrategySchedule,
@@ -167,7 +166,6 @@ class PaperData(Protocol):
     # Last session whose daily bars the committed data contains.
     release_end: str
     generation_id: str
-    nl_query: NLQuery | None
 
     def context_data(self, inference_at: datetime) -> StrategyDataView: ...
 
@@ -558,7 +556,6 @@ class DailyPaperEngine:
             state_dir=fittable.context_state_dir if fittable is not None else "",
             models_dir=fittable.context_models_dir if fittable is not None else "",
             pretrained_dir=fittable.context_pretrained_dir if fittable is not None else "",
-            _nl_query=data.nl_query,
         )
 
     def _executor(self, view: StrategyDataView, state_dir: Path | None) -> StrategyExecutor:

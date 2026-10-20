@@ -47,7 +47,6 @@ from autotrade.environment.executor import (
     DockerStrategyExecutor,
     TrustedStrategyExecutor,
 )
-from autotrade.environment.nl import NLConfig, NLService
 from autotrade.environment.replay.engine import StrategyDataView
 from autotrade.environment.replay.null_control import (
     PANEL_DRAWS,
@@ -835,9 +834,6 @@ class PITDailyEvaluationBackend:
         *,
         execution_mode: str,
         sandbox: SandboxConfig | None = None,
-        nl_llm=None,
-        nl_config: NLConfig | None = None,
-        nl_failure_policy: str = "return_error_with_audit",
         max_intraday_row_group_rows: int = 2_000_000,
         benchmark_index: str,
     ) -> None:
@@ -852,9 +848,6 @@ class PITDailyEvaluationBackend:
         benchmark_index_label(benchmark_index)
         self.benchmark_index = benchmark_index
         self.sandbox = sandbox or SandboxConfig()
-        self.nl_llm = nl_llm
-        self.nl_config = nl_config or NLConfig()
-        self.nl_failure_policy = nl_failure_policy
         self.max_intraday_row_group_rows = int(max_intraday_row_group_rows)
 
     def evaluate(
@@ -976,14 +969,6 @@ class PITDailyEvaluationBackend:
         )
         lock = _AsOfReadOnlyView(asof_dir)
         lock.lock()
-        nl_service = NLService.from_snapshot(
-            asof_dir,
-            llm=self.nl_llm,
-            # The NL total budget belongs to this replay, not to a calendar: it
-            # scales with the trading days actually being replayed.
-            config=self.nl_config.for_replay(len(trade_days)),
-            failure_policy=self.nl_failure_policy,
-        )
         refreshed: set[str] = set()
 
         def context_data(inference_at: datetime) -> StrategyDataView:
@@ -1031,14 +1016,12 @@ class PITDailyEvaluationBackend:
             try:
                 replay = DailyStrategyPipeline(
                     config,
-                    nl_query=nl_service.query,
                     context_data=context_data,
                     execution_price=span.price_at if span.minute_sources else None,
                     executor_factory=executor_factory,
                 ).run(daily, corporate_actions=corporate_actions)
                 record = replay.to_record(start=replay_start, end=replay_end)
             finally:
-                nl_service.close()
                 lock.lock()
                 # The row groups this replay decoded are freed; hand their
                 # pages back to the OS instead of keeping them in the pool.
@@ -1128,7 +1111,6 @@ class PITDailyEvaluationBackend:
                 summary,
                 started_at=started_at,
                 setup_phases=timer.to_record(),
-                nl_counters=nl_service.counters(),
             )
             target = result_dir / "result.json"
             # The host-only slot list goes first: a completed record never

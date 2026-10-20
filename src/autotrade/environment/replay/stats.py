@@ -667,23 +667,17 @@ def finalize_summary_timing(
     *,
     started_at: str,
     setup_phases: Mapping[str, float] | None = None,
-    nl_counters: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Close one evaluation's timing block in its summary, in place.
 
     ``compute_return_stats`` only sees the replay loop. The evaluation backend
-    is the component that knows when the whole evaluation started, what it did
-    before and after the loop, and which NL service served it, so it closes the
-    block here rather than each backend assembling its own field names.
+    is the component that knows when the whole evaluation started and what it
+    did before and after the loop, so it closes the block here rather than each
+    backend assembling its own field names.
     """
     phases = dict(summary.get("phase_seconds") or {})
     for name, seconds in (setup_phases or {}).items():
         phases[name] = round(phases.get(name, 0.0) + float(seconds), 3)
-    if nl_counters:
-        nl_wall = nl_counters.get("nl_wall_seconds")
-        if isinstance(nl_wall, (int, float)) and not isinstance(nl_wall, bool):
-            phases["nl"] = round(float(nl_wall), 3)
-        summary.update(nl_counters)
     summary["phase_seconds"] = {name: phases[name] for name in sorted(phases)}
     summary["started_at"] = started_at
     summary["finished_at"] = utc_now_iso()

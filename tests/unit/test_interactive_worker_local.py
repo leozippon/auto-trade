@@ -24,7 +24,6 @@ from autotrade.environment.llm import (
     ScriptedLLM,
     ToolCall,
 )
-from autotrade.environment.nl import NLConfig
 from autotrade.environment.tools import CommandResult
 from autotrade.pipelines.hitl_state import (
     ControlState,
@@ -38,7 +37,7 @@ from autotrade.pipelines.interactive import InteractiveExperimentRunner
 from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.pipelines.research_session import SessionBudgetLLM, SessionCallBudget
 from autotrade.pipelines.worker import (
-    NL_REASONING_EFFORT,
+    RETIRED_NL_PARAMS,
     load_worker_options,
 )
 from autotrade.webui.manager import ExperimentManager
@@ -148,7 +147,6 @@ def test_worker_maps_model_context_params_to_role_gateways_and_compactor(
     params.update(
         {
             "model": "deepseek-flash",
-            "nl_model": LOCAL_QWEN_MODEL,
             "compact_model": "deepseek-flash",
             "reasoning_effort": "high",
             "no_thinking": True,
@@ -161,22 +159,20 @@ def test_worker_maps_model_context_params_to_role_gateways_and_compactor(
     )
     path.write_text(json.dumps(params), encoding="utf-8")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-only-key")
-    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
+    # No role runs on the local model, so its gateway key is not required.
+    monkeypatch.delenv("VLLM_API_KEY", raising=False)
 
     settings = load_worker_options(experiment, repo_root=repo).llm
     assert settings is not None
     assert settings.subagent_model == settings.model
     main = settings.build_gateway("main").config
-    nl = settings.build_gateway("nl").config
     compact = settings.build_gateway("compact").config
-    assert (main.model, nl.model, compact.model) == (
-        "deepseek-flash",
-        LOCAL_QWEN_MODEL,
-        "deepseek-flash",
-    )
-    assert main.thinking_enabled is False and nl.thinking_enabled is False
+    assert (main.model, compact.model) == ("deepseek-flash", "deepseek-flash")
+    assert main.thinking_enabled is False
     # Thinking is off, so no role sends a reasoning effort.
-    assert main.reasoning_effort is None and nl.reasoning_effort is None
+    assert main.reasoning_effort is None
+    with pytest.raises(ValueError, match="unknown model role: nl"):
+        settings.model_for("nl")
     assert compact.thinking_enabled is False and compact.reasoning_effort is None
     assert compact.max_tokens == 1_200
     assert settings.compact_enabled is True
@@ -189,53 +185,36 @@ def test_worker_maps_model_context_params_to_role_gateways_and_compactor(
 
 
 
-@pytest.mark.parametrize("hosted", ["deepseek-flash", "gpt-6-luna"])
-def test_worker_refuses_a_hosted_nl_model(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hosted: str
+def test_worker_accepts_and_ignores_the_retired_nl_params(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """NL answers in the forward and Held-out replays and is not metered, so a
-    hosted model may run every role but this one."""
+    """Arms created before the host NL interface was removed carry its
+    parameters. Such an arm loads exactly as one without them, whatever they
+    say (a hosted model, a failing policy, values no check would pass), and
+    no gateway is built for the retired role."""
     repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-only-key")
     path = experiment / "hitl/params.json"
     params = json.loads(path.read_text(encoding="utf-8"))
-    params["nl_model"] = hosted
+    params.update({"model": "deepseek-flash", "compact_model": "deepseek-flash"})
     path.write_text(json.dumps(params), encoding="utf-8")
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-only-key")
-    monkeypatch.setenv("LIGHTING_API_KEY", "test-only-key")
-    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
+    current = load_worker_options(experiment, repo_root=repo)
 
-    with pytest.raises(ValueError, match=f"nl_model '{hosted}' is not allowed"):
+    legacy = {
+        "nl_model": "gpt-6-luna",
+        "nl_failure_policy": "fail",
+        "nl_max_results": "not even a number",
+        "nl_max_calls_per_decision": 0,
+        "nl_max_total_calls": -1,
+        "nl_deadline_seconds": None,
+    }
+    assert set(legacy) == RETIRED_NL_PARAMS
+    path.write_text(json.dumps({**params, **legacy}), encoding="utf-8")
+    assert load_worker_options(experiment, repo_root=repo) == current
+
+    path.write_text(json.dumps({**params, "nl_query_budget": 1}), encoding="utf-8")
+    with pytest.raises(ValueError, match=r"unknown experiment parameters: \['nl_query_budget'\]"):
         load_worker_options(experiment, repo_root=repo)
-
-
-def test_nl_cost_controls_reach_the_worker_without_being_configured(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """NL is the only real model inference inside a backtest's wall clock.
-
-    Both of its cost controls have to hold with nothing configured: a real
-    per-backtest call ceiling, and a reasoning tier of its own instead of the
-    strategy-design dialogues' effort.
-    """
-    repo, experiment = _experiment(tmp_path, developer_mode="llm")
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-only-key")
-    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
-
-    options = load_worker_options(experiment, repo_root=repo)
-    # Unset: the evaluation backend derives it from each replay's own length.
-    assert options.nl_config.max_total_calls is None
-    assert options.nl_config.max_calls_per_decision == NLConfig().max_calls_per_decision
-
-    settings = options.llm
-    assert settings is not None
-    assert settings.reasoning_effort == "xhigh"
-    assert settings.thinking_enabled is True
-    # The default is the native `xhigh` tier and passes through the local Qwen
-    # profile unmapped; NL keeps its own native tier.
-    assert settings.build_gateway("main").config.reasoning_effort == "xhigh"
-    assert settings.build_gateway("nl").config.reasoning_effort == NL_REASONING_EFFORT
-    assert NL_REASONING_EFFORT == "medium"
 
 
 
@@ -250,7 +229,6 @@ def test_worker_canonicalizes_all_legacy_model_roles_without_rewriting_params(
         {
             "model": LEGACY_LOCAL_QWEN_MODEL,
             "subagent_model": LEGACY_LOCAL_QWEN_MODEL,
-            "nl_model": LEGACY_LOCAL_QWEN_MODEL,
             "compact_model": LEGACY_LOCAL_QWEN_MODEL,
             "compact_token_threshold": 20_000,
         }
@@ -265,9 +243,8 @@ def test_worker_canonicalizes_all_legacy_model_roles_without_rewriting_params(
     assert (
         options.llm.model,
         options.llm.subagent_model,
-        options.llm.nl_model,
         options.llm.compact_model,
-    ) == (LOCAL_QWEN_MODEL,) * 4
+    ) == (LOCAL_QWEN_MODEL,) * 3
     assert path.read_bytes() == persisted
 
 
@@ -321,7 +298,6 @@ def test_worker_resolves_mixed_local_and_deepseek_roles_with_real_timeout(
         {
             "model": LOCAL_QWEN_MODEL,
             "subagent_model": "deepseek-flash",
-            "nl_model": LOCAL_QWEN_MODEL,
             "compact_model": "deepseek-flash",
             "compact_token_threshold": 20_000,
             "per_call_timeout_seconds": 120,
@@ -336,13 +312,11 @@ def test_worker_resolves_mixed_local_and_deepseek_roles_with_real_timeout(
     assert options.llm is not None
     main = options.llm.build_gateway("main")
     subagent = options.llm.build_gateway("subagent")
-    nl = options.llm.build_gateway("nl")
     assert isinstance(main, OpenAICompatibleProxy)
     assert main.provider == "vllm"
     assert isinstance(subagent, DeepSeekProxy)
     assert subagent.provider == "deepseek"
     assert subagent.model == "deepseek-flash"
-    assert nl.provider == "vllm"
     assert main.config.max_tokens == 32_768
     assert main.config.timeout_seconds == 120
     assert main.config.reasoning_effort == "xhigh"
@@ -361,7 +335,6 @@ def test_worker_applies_local_output_cap_to_each_role_budget(
     params.update(
         {
             "model": LOCAL_QWEN_MODEL,
-            "nl_model": LOCAL_QWEN_MODEL,
             "compact_model": LOCAL_QWEN_MODEL,
             "compact_token_threshold": 20_000,
             "compact_max_tokens": 20_000,
@@ -374,9 +347,9 @@ def test_worker_applies_local_output_cap_to_each_role_budget(
     assert options.llm is not None
     assert options.llm.compaction.max_response_tokens == 20_000
     assert options.llm.max_tokens_for("main") == 32_768
-    assert options.llm.max_tokens_for("nl", requested=1_200) == 1_200
-    assert options.llm.max_tokens_for("nl", requested=20_000) == 20_000
-    for role in ("main", "subagent", "nl"):
+    assert options.llm.max_tokens_for("subagent", requested=1_200) == 1_200
+    assert options.llm.max_tokens_for("subagent", requested=20_000) == 20_000
+    for role in ("main", "subagent"):
         assert options.llm.build_gateway(role).config.max_tokens == 32_768
     assert options.llm.build_gateway("compact").config.max_tokens == 20_000
 
@@ -499,7 +472,6 @@ def test_worker_gives_subagents_their_own_gateway_and_compaction_budget(
         {
             "model": "deepseek-flash",
             "subagent_model": LOCAL_QWEN_MODEL,
-            "nl_model": LOCAL_QWEN_MODEL,
             "compact_model": LOCAL_QWEN_MODEL,
             "compact_max_tokens": 1_600,
         }
@@ -528,7 +500,7 @@ def test_worker_gives_subagents_their_own_gateway_and_compaction_budget(
     assert settings.compaction_for("main") == settings.compaction
     assert settings.compaction_for("subagent").token_threshold == 221_184
     with pytest.raises(ValueError, match="unknown conversation role"):
-        settings.compaction_for("nl")
+        settings.compaction_for("compact")
     # With a DeepSeek compaction model the parent compacts at its own bound
     # 1,048,576 − 32,768 − 8,192.
     settings = settings_for(compact_model="deepseek-flash")
@@ -554,15 +526,15 @@ def test_worker_gives_subagents_their_own_gateway_and_compaction_budget(
 
 def test_model_roles_share_one_session_call_budget():
     first = ScriptedLLM([ProviderResponse(content="main")])
-    second = ScriptedLLM([ProviderResponse(content="nl")])
+    second = ScriptedLLM([ProviderResponse(content="subagent")])
     shared = SessionCallBudget(
         max_calls=1, deadline=__import__("time").monotonic() + 10
     )
     main = SessionBudgetLLM(first, budget=shared)
-    nl = SessionBudgetLLM(second, budget=shared)
+    subagent = SessionBudgetLLM(second, budget=shared)
     main.complete([])
     with pytest.raises(RuntimeError, match="budget exhausted"):
-        nl.complete([])
+        subagent.complete([])
     assert shared.calls == 1
 
 
@@ -1180,16 +1152,13 @@ def test_preflight_narrows_exactly_three_things_and_nothing_else(
     (repo / "data/raw").mkdir(parents=True)
     (repo / "data/pit/fundamental_events").mkdir(parents=True)
 
-    # (2) the API keys: deployment state, reported by /api/health. The
-    # conversation roles default to the relay, NL to the local model.
+    # (2) the API keys: deployment state, reported by /api/health. Every
+    # role defaults to the relay, so its key is the only one required; the
+    # local gateway's VLLM_API_KEY stays unset through the next stage.
     assert resolve(True) is not None
     with pytest.raises(ValueError, match="requires an API key: set LIGHTING_API_KEY"):
         resolve(False)
     monkeypatch.setenv("LIGHTING_API_KEY", "test-only-key")
-    with pytest.raises(ValueError, match="requires an API key: set VLLM_API_KEY"):
-        resolve(False)
-
-    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
 
     # (3) the research-release pin and the release's reach into Held-out.
     assert resolve(True) is not None

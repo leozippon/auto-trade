@@ -1238,14 +1238,13 @@ def test_persistent_command_runner_rejects_an_empty_or_blank_argv():
     sandbox.exec_limited.assert_not_called()
 
 
-def test_worker_nl_protocol_and_host_order_revalidation(tmp_path: Path):
+def test_worker_protocol_and_host_order_revalidation(tmp_path: Path):
     strategy = _strategy(
         tmp_path,
         """def generate_orders(context):
     print("strategy output goes to stderr")
-    answer = context.nl(question="signal")
     return [{
-        "symbol": answer["symbol"],
+        "symbol": "000001.SZ",
         "action": "buy",
         "quantity": 100,
         "execute_at": "2026-01-02T09:30:00+08:00",
@@ -1262,23 +1261,6 @@ def test_worker_nl_protocol_and_host_order_revalidation(tmp_path: Path):
     assert process.stdin is not None
     assert process.stdout is not None
     process.stdin.write(json.dumps(_wire_request(_context())) + "\n")
-    process.stdin.flush()
-    request = json.loads(process.stdout.readline())
-    assert request == {
-        "type": "nl_request",
-        "sequence": 0,
-        "request": {"question": "signal"},
-    }
-    process.stdin.write(
-        json.dumps(
-            {
-                "type": "nl_response",
-                "sequence": 0,
-                "result": {"symbol": "000001.SZ"},
-            }
-        )
-        + "\n"
-    )
     process.stdin.flush()
     response = json.loads(process.stdout.readline())
     orders = validate_order_payload(response["orders"], inference_at=_context().inference_at)
@@ -1402,11 +1384,6 @@ def test_incremental_worker_receives_only_delta_and_rebuilds_full_history(tmp_pa
 
 
 def test_worker_bar_stream_rejects_inconsistent_updates_without_mutation():
-    class ProtocolStub:
-        @staticmethod
-        def nl_query(_request, **_kwargs):
-            return {}
-
     first_at = datetime(2026, 1, 2, 18, 0, tzinfo=CN_TZ)
     first_context = StrategyContext(
         inference_at=first_at,
@@ -1426,8 +1403,7 @@ def test_worker_bar_stream_rejects_inconsistent_updates_without_mutation():
         account=first_context.account,
     )
     stream = BarStream()
-    protocol = ProtocolStub()
-    assert len(stream.context(_wire_request(first_context), protocol).bars) == 1  # type: ignore[arg-type]
+    assert len(stream.context(_wire_request(first_context)).bars) == 1
     valid = _wire_request(
         later_context,
         sequence=1,
@@ -1468,11 +1444,11 @@ def test_worker_bar_stream_rejects_inconsistent_updates_without_mutation():
         invalid.append({**valid, **update})
     for request in invalid:
         with pytest.raises(WorkerProtocolError):
-            stream.context(request, protocol)  # type: ignore[arg-type]
+            stream.context(request)
 
-    restored = stream.context(valid, protocol)  # type: ignore[arg-type]
+    restored = stream.context(valid)
     assert len(restored.bars) == 1
-    replacement = stream.context(_wire_request(later_context), protocol)  # type: ignore[arg-type]
+    replacement = stream.context(_wire_request(later_context))
     assert len(replacement.bars) == 1
     assert replacement.latest("000001.SZ")["close"] == 11.0
 
@@ -1523,7 +1499,14 @@ def test_executor_rejects_strict_json_type_or_value_drift_in_cached_prefix(
     assert (request["reset"], request["base_count"], request["bars"]) == (False, 1, [])
 
 
-def test_host_nl_wait_does_not_consume_the_inference_cap(tmp_path: Path):
+def test_a_strategy_calling_the_removed_nl_interface_fails_as_its_own_error(
+    tmp_path: Path,
+):
+    """``context.nl()`` was removed with the host NL service. A strategy still
+    calling it fails at its first decision, through the real worker and host
+    executor, with an error that names the missing attribute and is charged to
+    the strategy."""
+
     strategy = _strategy(
         tmp_path,
         """def generate_orders(context):
@@ -1537,25 +1520,16 @@ def test_host_nl_wait_does_not_consume_the_inference_cap(tmp_path: Path):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    executor = _executor_for_process(process, limits=SandboxLimits(timeout_seconds=0.2))
-
-    def slow_nl(request, *, inference_at):
-        time.sleep(0.5)
-        return {"status": "ok", "query": request.get("query"), "evidence": []}
-
-    context = StrategyContext(
-        inference_at=datetime(2026, 1, 2, 8, 30, tzinfo=CN_TZ),
-        bars=(),
-        account=AccountSnapshot(cash=10_000, positions={}),
-        _nl_query=slow_nl,
-    )
-    started = time.monotonic()
+    executor = _executor_for_process(process, drain_stderr=True)
     try:
-        assert executor.execute(context) == []
+        with (
+            patch.object(executor, "_remove_container"),
+            pytest.raises(StrategyRaised, match="has no attribute 'nl'") as raised,
+        ):
+            executor.execute(_context())
+        assert raised_by_strategy(raised.value)
     finally:
         executor.close()
-    assert time.monotonic() - started >= 0.5
-    assert process.poll() == 0
 
 
 def test_inference_timeout_aborts_and_closes_worker():

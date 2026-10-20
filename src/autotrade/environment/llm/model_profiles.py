@@ -146,7 +146,7 @@ DEFAULT_LLM_RETRY_BACKOFF_SECONDS = 2.0
 # the ceiling is the practical per-round maximum the window leaves next to
 # the compaction threshold. A round that spends it all on reasoning costs
 # ~15 min at 25-40 tok/s — the accepted price of not cutting a long answer.
-# compact, NL and analysis keep their own budgets.
+# compact and analysis keep their own budgets.
 AGENT_MAX_OUTPUT_TOKENS = 32_768
 
 
@@ -213,16 +213,6 @@ def token_prices(provider: str, model: str) -> TokenPrices:
     if provider == ScriptedLLM.provider:
         return FREE
     return model_profile(model).prices
-
-
-# The NL role answers ``context.nl()`` in the forward, held-out and Paper
-# replays too, so its requests carry text from after the research period, and
-# its gateway is outside the session's API spend cap. Only a model whose
-# prices are FREE -- the one served on this machine -- may run it; the create
-# form, the CLI and the worker all read this list.
-NL_MODEL_CHOICES = tuple(
-    model for model in MODEL_CHOICES if model_profile(model).prices == FREE
-)
 
 
 def effective_max_output_tokens(model: str, requested: int) -> int:
@@ -346,7 +336,6 @@ __all__ = [
     "MIMO_PRO_MODEL",
     "MIN_CONTEXT_WINDOW_TOKENS",
     "MODEL_CHOICES",
-    "NL_MODEL_CHOICES",
     "ModelProfile",
     "build_model_gateway",
     "canonicalize_model_name",

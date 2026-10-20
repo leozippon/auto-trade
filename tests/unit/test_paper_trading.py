@@ -78,7 +78,6 @@ class _Data:
         self.release_end = release_end
         self.generation_id = f"gen_{release_end}"
         self.market = DailyMarketData(_bars([day for day in self.sessions if day <= release_end]))
-        self.nl_query = None
         self.views: list[str] = []
         self.closed = False
         self._execution_price = execution_price

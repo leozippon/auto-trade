@@ -25,7 +25,6 @@ from autotrade.environment.llm.lighting import (
     DEEPSEEK_FLASH_MODEL,
     SHORT_TIER_MAX_COMPACTION_THRESHOLD,
 )
-from autotrade.environment.llm.model_profiles import NL_MODEL_CHOICES
 from autotrade.environment.sandbox import SandboxSpec
 
 from .calendar import GEOMETRY_PARAMETERS
@@ -132,7 +131,6 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "max_api_spend_usd": rolling_default("max_api_spend_usd"),
     "session_max_attempts": rolling_default("session_max_attempts"),
     "max_research_minutes": rolling_default("max_research_minutes"),
-    "nl_failure_policy": rolling_default("nl_failure_policy"),
     "finalize_before_deadline_seconds": rolling_default("finalize_before_deadline_seconds"),
     "per_call_timeout_seconds": rolling_default("per_call_timeout_seconds"),
     "strategy_fit_timeout_seconds": rolling_default("strategy_fit_timeout_seconds"),
@@ -150,11 +148,9 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "permitted_boards": None,
     # The conversation roles run on the relay's DeepSeek-V4.1-Flash: hosted
     # APIs are the operating default, the local model the fallback once the
-    # API quota is exhausted. NL stays on the local model, the only one it may
-    # use (model_profiles.NL_MODEL_CHOICES).
+    # API quota is exhausted.
     "model": DEEPSEEK_FLASH_MODEL,
     "subagent_model": DEEPSEEK_FLASH_MODEL,
-    "nl_model": NL_MODEL_CHOICES[0],
     "compact_model": DEEPSEEK_FLASH_MODEL,
     "reasoning_effort": "xhigh",
     "no_thinking": False,
@@ -200,10 +196,6 @@ WEB_CLOSED_PARAMS = frozenset(
         "llm_model",
         "llm_temperature",
         "llm_max_response_tokens",
-        "nl_max_results",
-        "nl_max_calls_per_decision",
-        "nl_max_total_calls",
-        "nl_deadline_seconds",
         "agent_sandbox_image",
         "agent_sandbox_cpus",
         "agent_sandbox_memory",

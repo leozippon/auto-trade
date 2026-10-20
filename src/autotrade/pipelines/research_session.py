@@ -835,7 +835,6 @@ class LLMResearchDeveloper:
                 "acceptance_rules": dict(request.acceptance_rules),
                 "schedule": self.schedule.to_record(),
                 "broker_profile": self.broker_profile.to_record(),
-                "nl_failure_policy": request.nl_failure_policy,
                 "record_failed_attempts": request.record_failed_attempts,
                 "attempt": attempt,
                 "finalize_before_deadline_seconds": request.finalize_before_deadline_seconds,

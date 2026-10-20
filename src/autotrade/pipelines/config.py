@@ -624,8 +624,7 @@ class RollingExperimentConfig:
     # ``DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY``).
     batch_validate_max_concurrency: int = DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY
     max_llm_calls: int = DEFAULT_MAX_LLM_CALLS
-    # Spent by the session's main, sub-agent and compaction calls together; the
-    # NL gateway is not metered (it stays on the local model by round policy).
+    # Spent by the session's main, sub-agent and compaction calls together.
     max_api_spend_usd: float = DEFAULT_MAX_API_SPEND_USD
     # Attempts of the research session or of the forward replay before the
     # experiment fails with the last error.
@@ -640,9 +639,6 @@ class RollingExperimentConfig:
     # Wall clock for one ``fit(context)`` invocation of the formal strategy;
     # the executor default is the single source. A slower fit fails the backtest.
     strategy_fit_timeout_seconds: int = int(SandboxLimits().fit_timeout_seconds)
-    # Individual NL Sub Agent failures return audited error results by default
-    # so Agent code can decide whether to ignore, retry, or fail closed.
-    nl_failure_policy: str = "return_error_with_audit"
     # Optional experiment-level exploration direction injected into every
     # research session prompt. Per-session directives are additive.
     research_directive: str = ""
@@ -1091,7 +1087,6 @@ class ResearchSessionRequest:
     )
     snapshot_config: Mapping[str, object] = field(default_factory=dict)
     record_failed_attempts: bool = True
-    nl_failure_policy: str = "return_error_with_audit"
     finalize_before_deadline_seconds: int = 300
     # Cap on the session's own ``run_null_control`` calls; the experiment default
     # is the single source (RollingExperimentConfig.max_null_controls).

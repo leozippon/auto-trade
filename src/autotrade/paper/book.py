@@ -34,7 +34,6 @@ from pathlib import Path
 from autotrade.environment.artifacts import artifact_fingerprint
 from autotrade.environment.broker import BrokerProfile, default_permitted_boards
 from autotrade.environment.data.snapshot import SnapshotConfig
-from autotrade.environment.nl import NLConfig
 from autotrade.environment.replay.curve import result_curve
 from autotrade.environment.sandbox import SandboxConfig, SandboxLimits
 from autotrade.environment.strategy import CN_TZ, StrategySchedule
@@ -93,11 +92,6 @@ class Book:
     profile: BrokerProfile
     sandbox: SandboxConfig
     snapshot_config: SnapshotConfig
-    # build_model_gateway keyword arguments of the experiment's NL role, or
-    # None when the experiment had no LLM settings.
-    nl_gateway: dict[str, object] | None
-    nl_config: NLConfig
-    nl_failure_policy: str
     max_intraday_row_group_rows: int
     raw_dir: Path
     fundamental_events_root: Path
@@ -194,21 +188,6 @@ def create_book(
     if image:
         # The image the experiment's formal replays actually ran.
         sandbox = replace(sandbox, image=str(image))
-    llm = options.llm
-    nl_gateway = None
-    if llm is not None:
-        nl_model = llm.model_for("nl")
-        nl_gateway = {
-            "model": nl_model,
-            "env_file": str(Path(repo_root).resolve() / llm.env_file) if not Path(llm.env_file).is_absolute() else str(llm.env_file),
-            "timeout_seconds": llm.timeout_seconds,
-            "max_retries": llm.max_retries,
-            "retry_backoff_seconds": llm.retry_backoff_seconds,
-            "max_tokens": llm.max_tokens_for("nl", model=nl_model),
-            "temperature": llm.temperature,
-            "thinking_enabled": llm.thinking_enabled,
-            "reasoning_effort": llm.reasoning_effort_for("nl"),
-        }
 
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     copy = root / STRATEGY_COPY_NAME
@@ -244,9 +223,6 @@ def create_book(
             "pretrained_manifest_sha256": sandbox.pretrained_manifest_sha256,
         },
         "snapshot_config": asdict(options.snapshot_config),
-        "nl_gateway": nl_gateway,
-        "nl_config": asdict(options.nl_config),
-        "nl_failure_policy": options.rolling.nl_failure_policy,
         "max_intraday_row_group_rows": options.max_intraday_row_group_rows,
         "raw_dir": str(options.raw_dir),
         "fundamental_events_root": str(options.fundamental_events_root),
@@ -356,6 +332,10 @@ def load_book(state_root: str | Path) -> Book:
             "rules is not migrated; delete it and create it again"
         )
     sandbox = record["sandbox"]
+    # A book created before the host NL interface was removed (2026-10-20) also
+    # records ``nl_gateway``, ``nl_config`` and ``nl_failure_policy``. They
+    # configured a service that no longer exists, so they are deliberately
+    # left unread: such a book loads, and trades, exactly as one without them.
     return Book(
         root=root,
         experiment_id=str(record["experiment_id"]),
@@ -373,9 +353,6 @@ def load_book(state_root: str | Path) -> Book:
             pretrained_manifest_sha256=str(sandbox.get("pretrained_manifest_sha256") or ""),
         ),
         snapshot_config=SnapshotConfig(**_tuples(record["snapshot_config"])),
-        nl_gateway=dict(record["nl_gateway"]) if record.get("nl_gateway") else None,
-        nl_config=NLConfig(**record["nl_config"]),
-        nl_failure_policy=str(record["nl_failure_policy"]),
         max_intraday_row_group_rows=int(record["max_intraday_row_group_rows"]),
         raw_dir=Path(record["raw_dir"]),
         fundamental_events_root=Path(record["fundamental_events_root"]),
