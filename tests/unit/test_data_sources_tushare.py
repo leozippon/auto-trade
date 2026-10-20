@@ -27,8 +27,14 @@ from pyarrow.lib import ArrowInvalid
 
 from autotrade.data_sources.tushare import audit, common, cron_update, download
 from autotrade.data_sources.tushare import io as tushare_io
-from autotrade.environment.data.fundamental_events import FundamentalEventsBuilder, month_aligned_replace_window
-from autotrade.environment.data.snapshot import SELECTABLE_DATASETS, _require_event_months
+from autotrade.environment.data.fundamental_events import (
+    FundamentalEventsBuilder,
+    month_aligned_replace_window,
+)
+from autotrade.environment.data.snapshot import (
+    SELECTABLE_DATASETS,
+    _require_event_months,
+)
 
 
 class EmptyMinuteClient:

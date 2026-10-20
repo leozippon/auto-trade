@@ -477,9 +477,9 @@ def test_every_track_status_and_verdict_reason_has_a_console_label() -> None:
     source = ast.parse(Path(verdict.__file__).read_text(encoding="utf-8"))
     transitions = next(n for n in ast.walk(source) if isinstance(n, ast.FunctionDef) and n.name == "_first_transition")
     for node in ast.walk(transitions):
-        if isinstance(node, ast.Tuple) and len(node.elts) == 2 and all(isinstance(e, ast.Constant) for e in node.elts):
-            if node.elts[0].value in ("killed", "confirmed"):
-                reasons.add(node.elts[1].value)
+        is_pair = isinstance(node, ast.Tuple) and len(node.elts) == 2 and all(isinstance(e, ast.Constant) for e in node.elts)
+        if is_pair and node.elts[0].value in ("killed", "confirmed"):
+            reasons.add(node.elts[1].value)
     assert len(reasons) == 5, reasons
     assert reasons <= keys("const VERDICT_REASON_LABELS = {"), sorted(reasons)
     assert keys("const VERDICT_STATUS = {") == {"observing", "confirmed", "killed"}

@@ -1619,7 +1619,7 @@ class TuShareClient:
             self._throttle()
             try:
                 result_frame = self.pro.query(api_name, fields=fields, **(params or {}))
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - every vendor error is retried, then re-raised scrubbed
                 if attempt == retries:
                     # Raised without the chained original, whose text the
                     # traceback would print unscrubbed.

@@ -132,10 +132,10 @@ def test_the_ensemble_sleeves_are_the_frozen_strategies_but_for_their_imports() 
     assert len(recorded) == 11
     for (sleeve, name), prefix in recorded.items():
         copy = ENSEMBLE / "starter" / "sleeves" / sleeve / Path(name).name
-        original = re.sub(rf"^from sleeves\.{sleeve} import ", "from lib import ", copy.read_text(encoding="utf-8"), flags=re.M)
+        original = re.sub(rf"^from sleeves\.{sleeve} import ", "from lib import ", copy.read_text(encoding="utf-8"), flags=re.MULTILINE)
         if copy.name == "knobs.py":
-            assert re.search(r"^SEATS = 16$", original, flags=re.M), (sleeve, name)
-            original = re.sub(r"^SEATS = 16$", "SEATS = 30", original, flags=re.M)
+            assert re.search(r"^SEATS = 16$", original, flags=re.MULTILINE), (sleeve, name)
+            original = re.sub(r"^SEATS = 16$", "SEATS = 30", original, flags=re.MULTILINE)
         assert hashlib.sha256(original.encode("utf-8")).hexdigest()[:16] == prefix, (sleeve, name)
     for sleeve in ("b30", "esop60"):
         files = {path.name for path in (ENSEMBLE / "starter" / "sleeves" / sleeve).glob("*.py")}
@@ -222,7 +222,7 @@ def test_the_hcm_starter_carries_the_canonical_book_and_its_controls_are_knobs(m
     library = REPO_ROOT / "configs" / "starter_lib"
     for name in ("trade.py", "controls.py"):
         assert (HCM_14B / "starter" / "lib" / name).read_bytes() == (library / name).read_bytes(), name
-    assert re.search(r'^REFIT_PERIOD = "day"$', (HCM_14B / "starter" / "main.py").read_text(encoding="utf-8"), flags=re.M)
+    assert re.search(r'^REFIT_PERIOD = "day"$', (HCM_14B / "starter" / "main.py").read_text(encoding="utf-8"), flags=re.MULTILINE)
     _starter(monkeypatch, HCM_14B)
     from lib import hcm, knobs
 
