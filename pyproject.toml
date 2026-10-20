@@ -29,6 +29,7 @@ where = ["src"]
 # Run as `ruff check src scripts tests`. The target version comes from
 # requires-python.
 required-version = ">=0.16.0"
+cache-dir = ".runtime/cache/ruff"
 # The wrap width of sorted imports (and of `ruff format`, which is not
 # enforced). Long lines -- prompt text, messages, tables -- are house style, so
 # E501 is not selected.
@@ -85,6 +86,7 @@ extend-immutable-calls = ["fastapi.Body"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+cache_dir = ".runtime/cache/pytest"
 tmp_path_retention_count = 1
 filterwarnings = [
   # Dependency-owned deprecation emitted at fastapi/testclient import time; revisit when fastapi/starlette are next bumped.
