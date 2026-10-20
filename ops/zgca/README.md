@@ -54,7 +54,27 @@ python ops/zgca/zgca.py push hcm_100k_8y_sol_qwen_20261014d hcm_100k_8y_sol_dsf_
 
 ## 一个周期的开销
 
-卡时规则见 `~/zgca-compute/README.md`。按那里记的实测传输吞吐估算，首次传种子（约 16 GB）、release（约 48 GB）和预训练模型库（约 12 GB）要六到七小时；之后 `deploy` 只传差异，几分钟内完成。冷构建镜像约十分钟，缓存命中约 15 秒；起步策略的冒烟约两小时；一条 HCM 整期臂约七小时。
+卡时规则见 `~/zgca-compute/README.md`。全新的根要把种子（约 16 GB）、release（约 48 GB）和预训练模型库（约 12 GB）全量传一遍，按那里记的 3.1–3.7 MB/s 要六到七小时：2026-10-19 向两卡实例部署时，种子用了 73 分钟，模型库 61 分钟（release 已在开发机上，比对 34 秒）。之后 `deploy` 只传差异，几分钟内完成。同一次部署里冷构建镜像约 6 分钟，缓存命中约 15 秒；起步策略的冒烟约两小时；一条 HCM 整期臂约七小时。
+
+## 改动后的验证
+
+本工作流或工具包的 `instance`、`dev` 改过、只过了离线测试时，要在一台新实例上把整个周期跑一遍，部署到另设的根，不碰在用的树。截至 2026-10-20，平台没有给本账户分配不带 GPU 的规格，组织又只许同时开两卡（见工具包 README 的“配额、规格与存储”），所以等两卡实例 `down` 之后，按工具包 README 的创建步骤在资源区 5 用当前镜像建一台单卡（`A100-80GB-1`）实例 `auto-trade-validate`，再依次运行：
+
+```bash
+V=<新实例 id>
+export ZGCA_REMOTE_ROOT=/personal_fast_storage/auto-trade-validate ZGCA_GITHUB_PROXY=https://ghfast.top/
+python ops/zgca/zgca.py --instance $V up
+python ops/zgca/zgca.py --instance $V deploy data/pit_views_seed_research_8y_fundanns_20261019
+python ops/zgca/zgca.py --instance $V push range20_csi300_8y_20260927
+python ops/zgca/zgca.py --instance $V status
+~/zgca-compute/instance stop $V && ~/zgca-compute/instance start $V
+ZGCA_INSTANCE=$V ~/zgca-compute/dev bash -lc 'ls -d /personal_fast_storage/auto-trade-validate && rm -rf /personal_fast_storage/auto-trade-validate'
+python ops/zgca/zgca.py --instance $V down
+ssh-keygen -R zenith-$V -f ~/.config/zgca-compute/known_hosts
+unset ZGCA_REMOTE_ROOT
+```
+
+`deploy` 要跑六到七小时（见上一节），放进 tmux 或 nohup，输出写进 `logs/zgca/`；加上 venv 安装和冷构建镜像，整个验证约七卡时。按输出里的 UTC 时刻记下每步耗时，并核对：`dev bootstrap` 在新镜像上真的装了 rsync 和 tmux；每次 `dev copy` 和 `dev put` 都没有报差异或摘要不符（成功时它们不输出）；准备步骤在验证根的 `.venv` 建好 venv 并构建镜像；`push` 的臂（2026-10-20 本机最小的已结束、没有 Paper 账户的臂，不含 `pit_views/` 约 9 MB）送到后 `status` 数出一条已结束的臂；停机后立即启动时平台多半先拒绝，`instance` 应打印 “start refused for now … trying again”，退避后启动成功。验证根要在验证实例还在运行时删除，先 `ls -d` 确认路径。个人 Token 没有删除实例的接口，`down` 只是停机：停下的实例不计卡时，连续停满 30 天由平台软删除（此前连发三天提醒），7 天恢复期过后删除。
 
 ## 已接受的局限
 
