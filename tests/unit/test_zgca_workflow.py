@@ -56,8 +56,9 @@ if args[:1] == ["put"]:  # stdin is the file
     record["stdin"] = sys.stdin.buffer.read().decode()
 with open(os.environ["MOCK_LOG"], "a") as log:
     log.write(json.dumps(record) + "\n")
-if args[:2] == ["bash", "-lc"]:
-    sys.exit(int(os.environ.get("MOCK_STEP_EXIT_" + args[4].replace("-", "_").upper(), "0")))
+if "remote.sh" in args:  # env ZGCA_REMOTE_ROOT=<root> bash -lc <script> remote.sh <step> ...
+    step = args[args.index("remote.sh") + 1]
+    sys.exit(int(os.environ.get("MOCK_STEP_EXIT_" + step.replace("-", "_").upper(), "0")))
 sys.exit(int(os.environ.get("MOCK_DEV_EXIT_" + args[0].upper(), "0")))
 """
 PROXY = "https://proxy.invalid/"
@@ -110,10 +111,15 @@ class ZgcaWorkflowTest(unittest.TestCase):
         return [call for call in map(json.loads, lines) if tool is None or call["tool"] == tool]
 
     @staticmethod
-    def step(call: dict[str, object]) -> str:
-        """A call's command: the remote.sh step for `dev bash -lc`, else the entry's subcommand."""
+    def remote(call: dict[str, object]) -> list[str] | None:
+        """The remote.sh step and its arguments of a `dev env ZGCA_REMOTE_ROOT=<root> bash -lc <script> remote.sh ...` call, else None."""
         args = call["args"]
-        return args[4] if args[:2] == ["bash", "-lc"] else args[0]
+        return args[args.index("remote.sh") + 1:] if "remote.sh" in args else None
+
+    def step(self, call: dict[str, object]) -> str:
+        """A call's command: the remote.sh step for a remote step, else the entry's subcommand."""
+        remote = self.remote(call)
+        return remote[0] if remote is not None else call["args"][0]
 
     def run_main(self, *argv: str, **env: str) -> tuple[int, str]:
         """Run the CLI against the mocks; (exit code, stderr)."""
@@ -170,6 +176,40 @@ class ZgcaWorkflowTest(unittest.TestCase):
                 zgca.main(["--instance", bad, "status"], repo_root=self.repo, tools=self.tools)
             self.assertEqual(caught.exception.code, 2)
         self.assertEqual(len(self.calls()), 4)
+
+    def test_another_remote_root_takes_every_transfer_and_remote_step(self) -> None:
+        """ZGCA_REMOTE_ROOT, e.g. a validation deploy beside the live tree on the zone's shared storage."""
+        other = "/personal_fast_storage/auto-trade-validate"
+        self._tracked_repo()
+        self._seed()
+        self._pretrained()
+        (self.repo / ".env").write_text(LOCAL_ENV, encoding="utf-8")
+        self._arm("arm_here")
+        for argv in (("deploy", "data/pit_views_seed_test"), ("push", "arm_here"), ("sync", "arm_there")):
+            code, err = self.run_main(*argv, ZGCA_REMOTE_ROOT=other)
+            self.assertEqual(code, 0, err)
+        dev = self.calls("dev")
+        self.assertEqual({self.step(call) for call in dev},
+                         {"bootstrap", "dirs", "copy", "put", "tracked", "prepare", "report", "arm-state"})
+        for call in dev:
+            args = call["args"]
+            if self.remote(call) is not None:
+                self.assertEqual(args[:2], ["env", f"ZGCA_REMOTE_ROOT={other}"])
+            elif args[0] == "copy":
+                (remote,) = [arg for arg in args if arg.startswith("dev:")]
+                self.assertTrue(remote.startswith(f"dev:{other}/"), remote)
+            elif args[0] == "put":
+                self.assertEqual(args[1], f"{other}/.env")
+        # Unset is the default root; anything but a directory directly below
+        # personal storage is refused before any call, an empty value included.
+        self.log.unlink()
+        for bad in ("", "auto-trade-validate", "/tmp/auto-trade", "/personal_fast_storage", "/personal_fast_storage/",
+                    "/personal_fast_storage/../auto-trade", "/personal_fast_storage/a/b", "/personal_fast_storage/a b"):
+            with self.subTest(root=bad):
+                code, err = self.run_main("status", ZGCA_REMOTE_ROOT=bad)
+                self.assertEqual(code, 1)
+                self.assertIn("ZGCA_REMOTE_ROOT=", err)
+        self.assertFalse(self.calls())
 
     def test_deploy_run_and_sync_refuse_an_instance_that_is_not_running_before_any_transfer(self) -> None:
         self._tracked_repo()
@@ -263,14 +303,17 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         dev = self.calls("dev")
         self.assertTrue(all(call["instance"] == INSTANCE for call in dev))
-        self.assertEqual(dev[1]["args"][2], zgca.REMOTE_SCRIPT.read_text(encoding="utf-8"))
+        # Each remote step is this checkout's script in a login shell, told the root.
+        remote = zgca.REMOTE_ROOT
+        script = zgca.REMOTE_SCRIPT.read_text(encoding="utf-8")
+        for call in dev:
+            if self.remote(call) is not None:
+                self.assertEqual(call["args"][:6], ["env", f"ZGCA_REMOTE_ROOT={remote}", "bash", "-lc", script, "remote.sh"])
         # The base tools first; then transfers (by destination) and remote steps
         # in the order they ran: the tracked list lands before the `tracked`
         # step prunes by it, and both come before the seed, the release and the
         # pretrained store; the host report last.
-        remote = zgca.REMOTE_ROOT
-        ran = [call["args"][4:] if call["args"][:2] == ["bash", "-lc"] else call["args"][:1] + call["args"][1:][-1:]
-               for call in dev]
+        ran = [self.remote(call) or call["args"][:1] + call["args"][1:][-1:] for call in dev]
         self.assertEqual(ran, [
             ["bootstrap"], ["dirs"], ["copy", f"dev:{remote}/"], ["put", f"{remote}/.env"],
             ["copy", f"dev:{remote}/.runtime/zgca/"], ["tracked"],
@@ -336,8 +379,23 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self.assertEqual([path.name for path in state.iterdir()], [zgca.TRACKED_LIST_NAME])
         self.assertFalse(self.calls("dev"))
 
+    def test_the_remote_root_is_the_workflows_and_another_root_keeps_its_own_venv(self) -> None:
+        script = zgca.REMOTE_SCRIPT.read_text(encoding="utf-8")
+        self.assertEqual(script.count(f"ROOT={zgca.REMOTE_ROOT}\n"), 1)
+        probe = script.replace("\nstep=${1:-}\n", '\necho "$ROOT $VENV"; exit 0\n')
+        self.assertNotEqual(probe, script)
+        other = "/personal_fast_storage/auto-trade-validate"
+        live = f"{zgca.REMOTE_ROOT} /personal_fast_storage/envs/quant"
+        for given, expected in ((None, live), (zgca.REMOTE_ROOT, live), (other, f"{other} {other}/.venv")):
+            with self.subTest(root=given):
+                env = {name: value for name, value in os.environ.items() if name != "ZGCA_REMOTE_ROOT"}
+                shown = subprocess.run(["bash", "-c", probe, "remote.sh"], env=env | ({"ZGCA_REMOTE_ROOT": given} if given else {}),
+                                       capture_output=True, text=True, check=False)
+                self.assertEqual((shown.returncode, shown.stdout.strip()), (0, expected), shown.stderr)
+
     def test_the_tracked_step_removes_only_untracked_files_below_tracked_directories(self) -> None:
         root = Path(self.temp.name) / "instance"
+        env = {**os.environ, "ZGCA_REMOTE_ROOT": str(root)}
         files = {  # path on the instance: whether the shipped list names it
             "README.md": True,
             ".env": False,
@@ -356,13 +414,9 @@ class ZgcaWorkflowTest(unittest.TestCase):
             (root / name).write_text("", encoding="utf-8")
         (root / "scripts" / "alias.py").symlink_to("experiments/create_round_kept.py")
         (root / "scripts" / "data_link").symlink_to("../data")
-        script = zgca.REMOTE_SCRIPT.read_text(encoding="utf-8")
-        line = f"ROOT={zgca.REMOTE_ROOT}\n"
-        self.assertEqual(script.count(line), 1)
-        script = script.replace(line, f"ROOT={root}\n")
 
         def step() -> subprocess.CompletedProcess[str]:
-            return subprocess.run(["bash", "-c", script, "remote.sh", "tracked"], capture_output=True, text=True, check=False)
+            return subprocess.run(["bash", str(zgca.REMOTE_SCRIPT), "tracked"], env=env, capture_output=True, text=True, check=False)
 
         missing = step()
         self.assertEqual(missing.returncode, 1)
@@ -415,12 +469,12 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self.assertFalse(self.calls("dev"))
         code, err = self.run_main("run", "scripts/experiments/create_round_test.py", "--dry-run", "arm_one")
         self.assertEqual(code, 0, err)
-        steps = [call["args"][4:] for call in self.calls("dev")]
+        steps = [self.remote(call) for call in self.calls("dev")]
         self.assertEqual(steps, [["console-up"], ["round", "scripts/experiments/create_round_test.py", "--dry-run", "arm_one"]])
         code, err = self.run_main("run", "scripts/experiments/create_round_test.py", MOCK_STEP_EXIT_CONSOLE_UP="1")
         self.assertEqual(code, 1)
         self.assertIn("console-up failed", err)
-        self.assertEqual(self.calls()[-1]["args"][4], "console-up")
+        self.assertEqual(self.step(self.calls()[-1]), "console-up")
 
     def test_sync_pulls_an_instance_arm_and_refuses_to_overwrite_a_local_one(self) -> None:
         local = self.repo / "experiments" / "arm_local"
@@ -445,7 +499,7 @@ class ZgcaWorkflowTest(unittest.TestCase):
                 self.assertEqual(code, 0, err)
                 dev = self.calls("dev")
                 self.assertEqual([self.step(call) for call in dev], ["arm-state", "copy", "copy"])
-                self.assertEqual(dev[0]["args"][4:], ["arm-state", arm])
+                self.assertEqual(self.remote(dev[0]), ["arm-state", arm])
                 pull = dev[1]["args"]
                 self.assertEqual(pull[-2:], [f"dev:{zgca.REMOTE_ROOT}/experiments/{arm}/", f"{self.repo / 'experiments' / arm}/"])
                 self.assertEqual(pull[pull.index("--exclude") + 1], "/pit_views/")
@@ -485,14 +539,15 @@ class ZgcaWorkflowTest(unittest.TestCase):
         code, err = self.run_main("sync", "arm_running", MOCK_STEP_EXIT_ARM_STATE="1")
         self.assertEqual(code, 1)
         self.assertIn("remote step arm-state failed", err)
-        self.assertEqual([call["args"][:1] for call in self.calls("dev")], [["bash"]])
+        self.assertEqual([self.step(call) for call in self.calls("dev")], ["arm-state"])
 
     def test_the_arm_state_step_refuses_an_arm_whose_worker_runs(self) -> None:
         """The console's own notion of a running arm decides, run for real against a temporary root."""
         from autotrade.pipelines.hitl_state import proc_start_ticks
 
-        base = Path(self.temp.name)
-        root, venv = base / "instance", base / "venv"
+        # Another root than the default keeps its venv inside it.
+        root = Path(self.temp.name) / "instance"
+        venv = root / ".venv"
         (venv / "bin").mkdir(parents=True)
         (venv / "bin" / "python").write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8")
         (venv / "bin" / "python").chmod(0o700)
@@ -506,14 +561,10 @@ class ZgcaWorkflowTest(unittest.TestCase):
         for arm, record in arms.items():
             (root / "experiments" / arm / "hitl").mkdir(parents=True)
             (root / "experiments" / arm / "hitl" / "status.json").write_text(json.dumps(record), encoding="utf-8")
-        script = zgca.REMOTE_SCRIPT.read_text(encoding="utf-8")
-        for line, replacement in ((f"ROOT={zgca.REMOTE_ROOT}\n", f"ROOT={root}\n"),
-                                  ("VENV=/personal_fast_storage/envs/quant\n", f"VENV={venv}\n")):
-            self.assertEqual(script.count(line), 1)
-            script = script.replace(line, replacement)
+        env = {**os.environ, "ZGCA_REMOTE_ROOT": str(root)}
 
         def step(arm: str) -> subprocess.CompletedProcess[str]:
-            return subprocess.run(["bash", "-c", script, "remote.sh", "arm-state", arm], capture_output=True, text=True, check=False)
+            return subprocess.run(["bash", str(zgca.REMOTE_SCRIPT), "arm-state", arm], env=env, capture_output=True, text=True, check=False)
 
         refused = step("arm_live")
         self.assertEqual(refused.returncode, 1)
@@ -536,11 +587,8 @@ class ZgcaWorkflowTest(unittest.TestCase):
         build = logs / "image_build_20261019T200000Z.log"
         build.write_text("Successfully built\n", encoding="utf-8")
         os.utime(logs / "create_round_test_20261019T190000Z.log", (1, 1))
-        script = zgca.REMOTE_SCRIPT.read_text(encoding="utf-8")
-        for line, replacement in ((f"ROOT={zgca.REMOTE_ROOT}\n", f"ROOT={root}\n"),
-                                  ("VENV=/personal_fast_storage/envs/quant\n", f"VENV={root}/no-venv\n")):
-            script = script.replace(line, replacement)
-        shown = subprocess.run(["bash", "-c", script, "remote.sh", "status"], capture_output=True, text=True, check=False)
+        shown = subprocess.run(["bash", str(zgca.REMOTE_SCRIPT), "status"], env={**os.environ, "ZGCA_REMOTE_ROOT": str(root)},
+                               capture_output=True, text=True, check=False)
         self.assertEqual(shown.returncode, 0, shown.stderr)
         self.assertIn("round log: logs/zgca/create_round_test_20261019T190000Z.log\n  smoke\n  arms created\n  round-exit 0", shown.stdout)
         self.assertNotIn(build.name, shown.stdout)

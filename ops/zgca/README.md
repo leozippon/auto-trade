@@ -13,7 +13,7 @@ python ops/zgca/zgca.py down
 python ops/zgca/zgca.py --instance <平台实例 id> status
 ```
 
-在本机的 `quant` 环境里运行。除 `push` 外，脚本只用标准库和本检出里的模型档案，系统 `python3` 也能跑；`push` 要用控制台自己的“在跑”判定，那个模块依赖 numpy。`ZGCA_COMPUTE` 可以指向别处的 zgca-compute 检出，默认 `~/zgca-compute`；`ZGCA_GITHUB_PROXY` 是下载 GitHub 发布包时先试的代理前缀（例如 `https://ghfast.top/`）。实例缺省是 `auto-trade-dev-a100x2`（两张 A100-80G，平台 id `mpo06t71crmmtdsrb98ckwk29`）；放在子命令之前的 `--instance <平台实例 id>` 让同一个脚本驱动另一台，`instance` 和 `dev` 都被指到所选的这台，别的实例同时在跑也不会选错。开发机上的仓库根目录不随实例改变，总是 `/personal_fast_storage/auto-trade`。
+在本机的 `quant` 环境里运行。除 `push` 外，脚本只用标准库和本检出里的模型档案，系统 `python3` 也能跑；`push` 要用控制台自己的“在跑”判定，那个模块依赖 numpy。`ZGCA_COMPUTE` 可以指向别处的 zgca-compute 检出，默认 `~/zgca-compute`；`ZGCA_GITHUB_PROXY` 是下载 GitHub 发布包时先试的代理前缀（例如 `https://ghfast.top/`）。实例缺省是 `auto-trade-dev-a100x2`（两张 A100-80G，平台 id `mpo06t71crmmtdsrb98ckwk29`）；放在子命令之前的 `--instance <平台实例 id>` 让同一个脚本驱动另一台，`instance` 和 `dev` 都被指到所选的这台，别的实例同时在跑也不会选错。开发机上的仓库根目录不随实例改变，缺省是 `/personal_fast_storage/auto-trade`；`ZGCA_REMOTE_ROOT=/personal_fast_storage/<名称>` 把所有传输和开发机步骤移到个人存储下的另一个目录（其他写法在动开发机之前就被拒绝），供验证部署与在用的树并存：同一资源区的实例看到的是同一份个人存储。
 
 ## 各子命令
 
@@ -28,7 +28,7 @@ python ops/zgca/zgca.py --instance <平台实例 id> status
 | 两个发布包和受管文件清单 | 复制到开发机的 `.runtime/zgca/` |
 | 种子目录、该 release 目录、预训练模型库 | 精确镜像（`--delete`，硬链接保留） |
 
-TuShare 令牌、`HF_TOKEN` 等其余变量不离开本机。清单到位后、传种子之前，开发机按清单清理代码：在含受管文件的顶层目录里删除清单上没有的文件，运行时目录（`data/`、`experiments/`、`logs/`、`results/`、`.runtime/`）从不进入，符号链接、`__pycache__` 和 `*.egg-info` 保留，这样退役的轮次文件不会留在开发机上被启动器或测试读到。最后是准备步骤：装 ripgrep（worker 在会话开始前就拒绝没有 `rg` 的宿主）；venv 不存在或缺包时用开发机的 miniconda 建 `/personal_fast_storage/envs/quant`，以可编辑方式安装本仓库（平台 PyPI 镜像缺 tushare 1.4.29，所以加清华作为额外索引）；确认 Docker 可达，再用执行器自己的指纹检查判断沙箱镜像。镜像不存在、或者它烤入的策略契约与这份检出不一致，就按平台的构建办法（旧构建器、默认网桥、`--force-rm`）重建，两个发布包由开发机在网桥网关上临时提供；有臂在跑时拒绝重建，因为根盘容不下第二个镜像；构建因磁盘用尽失败时清掉不用的镜像和已停止的容器，冷构建一次。重建后再检查一次，仍不一致即失败。`deploy` 以 `dev report` 收尾。
+TuShare 令牌、`HF_TOKEN` 等其余变量不离开本机。清单到位后、传种子之前，开发机按清单清理代码：在含受管文件的顶层目录里删除清单上没有的文件，运行时目录（`data/`、`experiments/`、`logs/`、`results/`、`.runtime/`）从不进入，符号链接、`__pycache__` 和 `*.egg-info` 保留，这样退役的轮次文件不会留在开发机上被启动器或测试读到。最后是准备步骤：装 ripgrep（worker 在会话开始前就拒绝没有 `rg` 的宿主）；venv 不存在或缺包时用开发机的 miniconda 建 `/personal_fast_storage/envs/quant`（另设的根用自己里面的 `.venv`，以免改指在用的树所跑的那个），以可编辑方式安装本仓库（平台 PyPI 镜像缺 tushare 1.4.29，所以加清华作为额外索引）；确认 Docker 可达，再用执行器自己的指纹检查判断沙箱镜像。镜像不存在、或者它烤入的策略契约与这份检出不一致，就按平台的构建办法（旧构建器、默认网桥、`--force-rm`）重建，两个发布包由开发机在网桥网关上临时提供；有臂在跑时拒绝重建，因为根盘容不下第二个镜像；构建因磁盘用尽失败时清掉不用的镜像和已停止的容器，冷构建一次。重建后再检查一次，仍不一致即失败。`deploy` 以 `dev report` 收尾。
 
 `push <臂 id>...` 把本机的臂送到开发机，供在那里新建的臂当作谱系（`lineage_arms`）读取：新臂创建时要读它点名的每一条早先臂，它们必须在那台机器的 `experiments/` 下，而 `deploy` 不传实验目录。每条臂必须是本机的臂（`hitl/params.json` 记的实验根不是开发机的，从开发机同步来的副本一律拒绝），而且不在本机运行（控制台自己的规则：worker 活着且状态没有结束），全部核对通过才开始传；用 `dev copy` 复制，不含可从种子重建的 `pit_views/`，不带 `--delete`，在 `deploy` 之后运行。例如 2026-10-19 第二轮的 HCM 臂以 `_profiles.HCM_LINEAGE` 的四条臂为谱系，其中两条 `zgca_20261014c` 臂本来就建在开发机的个人存储上，只在本机的两条在 `run` 之前送过去：
 
@@ -58,7 +58,7 @@ python ops/zgca/zgca.py push hcm_100k_8y_sol_qwen_20261014d hcm_100k_8y_sol_dsf_
 
 ## 已接受的局限
 
-`/personal_fast_storage` 按资源区隔离、同一资源区内的实例共用，所以用 `--instance` 驱动的另一台若与缺省实例在同一资源区，两台读写的是同一个仓库根目录：代码、`.env`、种子、臂目录和日志都是同一份，一台上的 `deploy` 改的也是另一台正在用的代码，一台的 `status` 会把另一台在跑的臂标成 worker 已不在。两台同时跑臂时要放在不同资源区，或者同一时间只让一台有臂。
+`/personal_fast_storage` 按资源区隔离、同一资源区内的实例共用，所以用 `--instance` 驱动的另一台若与缺省实例在同一资源区，两台读写的是同一个仓库根目录：代码、`.env`、种子、臂目录和日志都是同一份，一台上的 `deploy` 改的也是另一台正在用的代码，一台的 `status` 会把另一台在跑的臂标成 worker 已不在。两台同时跑臂时要放在不同资源区，或者用 `ZGCA_REMOTE_ROOT` 给另一台一个自己的根，或者同一时间只让一台有臂。
 
 `deploy` 只在仍含受管文件的顶层目录里清理：整个退出版本库的顶层目录、仓库根下不再受管的文件和清理后留下的空目录仍留在开发机上。镜像只在合同指纹说它缺失或过期时重建，所以只改 Dockerfile、合同文件不变的改动不会让实例重建，要先在实例上删掉镜像 tag 再部署。控制台不随 `deploy` 重启，改了代码之后要在没有臂运行时 `~/zgca-compute/dev tmux kill-session -t autotrade-console` 再 `run`。`status` 只认 `create_round_*` 命名的启动器日志。
 

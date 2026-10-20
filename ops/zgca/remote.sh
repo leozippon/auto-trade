@@ -1,15 +1,24 @@
 #!/usr/bin/env bash
 # The instance-side half of ops/zgca/zgca.py: one step per call, sent by the
-# workflow as `bash -lc "$(cat remote.sh)" remote.sh <step> [args]` so the
-# platform's login environment (DOCKER_HOST) is present and the script is
-# always the local checkout's, never a stale copy on the instance. Runs as the
-# instance's root; everything persistent lives on /personal_fast_storage. The
-# generic host work (base tools, transfers, GPU/disk/tmux report) is
-# ~/zgca-compute's `dev`, which the workflow calls around these steps.
+# workflow as `env ZGCA_REMOTE_ROOT=<root> bash -lc "$(cat remote.sh)" remote.sh
+# <step> [args]` so the platform's login environment (DOCKER_HOST) is present
+# and the script is always the local checkout's, never a stale copy on the
+# instance. Runs as the instance's root; everything persistent lives on
+# /personal_fast_storage. The generic host work (base tools, transfers,
+# GPU/disk/tmux report) is ~/zgca-compute's `dev`, which the workflow calls
+# around these steps.
 set -euo pipefail
 
 ROOT=/personal_fast_storage/auto-trade
 VENV=/personal_fast_storage/envs/quant
+# The workflow passes its root as ZGCA_REMOTE_ROOT on every call. Another root
+# than this default (a validation deploy beside the live tree, which every
+# instance of the zone sees) keeps its venv inside it, so preparing it never
+# repoints the venv the live tree's console and arms run on.
+if [ "${ZGCA_REMOTE_ROOT:-$ROOT}" != "$ROOT" ]; then
+    ROOT=$ZGCA_REMOTE_ROOT
+    VENV=$ROOT/.venv
+fi
 BOX_PYTHON=/root/miniconda3/bin/python
 # The platform's PyPI mirror lacks tushare 1.4.29 (~/zgca-compute/README.md).
 EXTRA_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple

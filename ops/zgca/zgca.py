@@ -14,9 +14,10 @@ every new arm pins and mounts, prunes code the tree no longer tracks, then
 prepares the instance (ripgrep, venv, sandbox image); push carries arms of
 this host a round names as lineage; a run starts the console and a round
 launcher in tmux with AUTOTRADE_GPU_NAME set; status and sync read and copy
-back. Nothing here schedules, caches an endpoint, keeps a secret in the
-repository or changes how the executor isolates a strategy container. See
-ops/zgca/README.md.
+back. ZGCA_REMOTE_ROOT moves all of it to another root on the instance's
+personal storage (a validation deploy beside the live tree). Nothing here
+schedules, caches an endpoint, keeps a secret in the repository or changes
+how the executor isolates a strategy container. See ops/zgca/README.md.
 
 usage: zgca.py [--instance <id>] up | deploy <seed dir> | push <arm id>... |
        run <round file> [launcher args...] | status | sync <arm id> | down
@@ -45,6 +46,12 @@ INSTANCE_ID_SHAPE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 # The instance's persistent personal storage: the only place code, the .env,
 # seeds and releases go (~/zgca-compute/README.md, 配额、规格与存储).
 REMOTE_ROOT = "/personal_fast_storage/auto-trade"
+# Names another root directly below that storage for every transfer and
+# remote step, e.g. a validation deploy beside the live tree, which every
+# instance of the zone sees; remote.sh receives the root on each call and
+# keeps such a root's venv inside it.
+REMOTE_ROOT_ENV = "ZGCA_REMOTE_ROOT"
+REMOTE_ROOT_SHAPE = re.compile(r"^/personal_fast_storage/[A-Za-z0-9][A-Za-z0-9._-]*$")
 RELEASES = "data/research_releases"
 UNFINISHED_SEED_MARKER = "prebuild_unfinished.json"
 # The DuckDB CLI release the sandbox image installs (ops/docker/sandbox.Dockerfile,
@@ -143,8 +150,13 @@ class Workflow:
     repo_root: Path
     tools: Path
     instance: str = INSTANCE_ID
+    remote_root: str = REMOTE_ROOT
 
     def __post_init__(self) -> None:
+        if not REMOTE_ROOT_SHAPE.fullmatch(self.remote_root):
+            raise WorkflowError(
+                f"{REMOTE_ROOT_ENV}={self.remote_root!r} is not a directory directly below /personal_fast_storage"
+            )
         for name in ("zenith", "dev", "instance"):
             if not os.access(self.tools / name, os.X_OK):
                 raise WorkflowError(
@@ -184,9 +196,11 @@ class Workflow:
     # ----- instance shell and transfers -----
 
     def remote(self, step: str, *args: str) -> None:
-        """Run one step of remote.sh on the instance, in a login shell for the platform's environment."""
+        """Run one step of remote.sh on the instance, in a login shell for the platform's environment, under this workflow's root."""
         script = REMOTE_SCRIPT.read_text(encoding="utf-8")
-        completed = self.call("dev", "bash", "-lc", script, "remote.sh", step, *args)
+        completed = self.call(
+            "dev", "env", f"{REMOTE_ROOT_ENV}={self.remote_root}", "bash", "-lc", script, "remote.sh", step, *args,
+        )
         if completed.returncode != 0:
             raise WorkflowError(f"remote step {step} failed (exit {completed.returncode})")
 
@@ -283,21 +297,22 @@ class Workflow:
         manifest = self.state_dir / TRACKED_LIST_NAME
         manifest.write_bytes(listed.stdout)
         self.require_running()
+        root = self.remote_root
         self.dev("bootstrap")
         self.remote("dirs")
         say("deploy: tracked files")
-        self.dev("copy", *PRESERVE, f"--files-from={manifest}", "--from0", f"{self.repo_root}/", f"dev:{REMOTE_ROOT}/")
+        self.dev("copy", *PRESERVE, f"--files-from={manifest}", "--from0", f"{self.repo_root}/", f"dev:{root}/")
         say("deploy: .env (the model gateway keys only)")
-        self.dev("put", f"{REMOTE_ROOT}/.env", data=gateway_keys)
+        self.dev("put", f"{root}/.env", data=gateway_keys)
         say(f"deploy: {DUCKDB_CLI_NAME}, {CAUSAL_CONV1D_WHEEL_NAME} and {TRACKED_LIST_NAME}")
-        self.dev("copy", *PRESERVE, str(duckdb_cli), str(wheel), str(manifest), f"dev:{REMOTE_ROOT}/.runtime/zgca/")
+        self.dev("copy", *PRESERVE, str(duckdb_cli), str(wheel), str(manifest), f"dev:{root}/.runtime/zgca/")
         self.remote("tracked")
         say(f"deploy: {seed}")
-        self.dev("copy", *PRESERVE, "-H", "--delete", f"{seed_dir}/", f"dev:{REMOTE_ROOT}/{seed_path.as_posix()}/")
+        self.dev("copy", *PRESERVE, "-H", "--delete", f"{seed_dir}/", f"dev:{root}/{seed_path.as_posix()}/")
         say(f"deploy: {RELEASES}/{generation}")
-        self.dev("copy", *PRESERVE, "-H", "--delete", f"{release_dir}/", f"dev:{REMOTE_ROOT}/{RELEASES}/{generation}/")
+        self.dev("copy", *PRESERVE, "-H", "--delete", f"{release_dir}/", f"dev:{root}/{RELEASES}/{generation}/")
         say(f"deploy: {PRETRAINED}")
-        self.dev("copy", *PRESERVE, "-H", "--delete", f"{pretrained}/", f"dev:{REMOTE_ROOT}/{PRETRAINED}/")
+        self.dev("copy", *PRESERVE, "-H", "--delete", f"{pretrained}/", f"dev:{root}/{PRETRAINED}/")
         say("deploy: preparing the instance")
         self.remote("prepare", DUCKDB_CLI_SHA256, CAUSAL_CONV1D_WHEEL_SHA256)
         self.dev("report")
@@ -317,7 +332,7 @@ class Workflow:
                 created_under = json.loads((experiments / arm / "hitl" / "params.json").read_text(encoding="utf-8")).get("experiments_root")
             except (OSError, ValueError) as exc:
                 raise WorkflowError(f"experiments/{arm} is not a readable arm of this host ({exc})") from exc
-            if created_under == f"{REMOTE_ROOT}/experiments":
+            if created_under == f"{self.remote_root}/experiments":
                 raise WorkflowError(f"experiments/{arm} is a copy of an arm of the instance; its original is there")
         running = sorted(set(arms) & set(running_arms(experiments)))
         if running:
@@ -325,7 +340,7 @@ class Workflow:
         self.require_running()
         for arm in arms:
             say(f"push: experiments/{arm} (without pit_views)")
-            self.dev("copy", *PRESERVE, "--exclude", "/pit_views/", f"{experiments / arm}/", f"dev:{REMOTE_ROOT}/experiments/{arm}/")
+            self.dev("copy", *PRESERVE, "--exclude", "/pit_views/", f"{experiments / arm}/", f"dev:{self.remote_root}/experiments/{arm}/")
 
     def run(self, round_file: str, args: Sequence[str]) -> None:
         tracked = subprocess.run(
@@ -353,15 +368,15 @@ class Workflow:
                 created_under = json.loads((local / "hitl" / "params.json").read_text(encoding="utf-8")).get("experiments_root")
             except (OSError, ValueError) as exc:
                 raise WorkflowError(f"experiments/{arm} exists here and its hitl/params.json cannot say where it was created ({exc}); refusing to overwrite it") from exc
-            if created_under != f"{REMOTE_ROOT}/experiments":
+            if created_under != f"{self.remote_root}/experiments":
                 raise WorkflowError(f"experiments/{arm} is an arm of this host (created under {created_under}), not a copy from the instance; refusing to overwrite it")
         self.require_running()
         self.remote("arm-state", arm)
         local.parent.mkdir(parents=True, exist_ok=True)
-        self.dev("copy", *PRESERVE, "--exclude", "/pit_views/", f"dev:{REMOTE_ROOT}/experiments/{arm}/", f"{local}/")
+        self.dev("copy", *PRESERVE, "--exclude", "/pit_views/", f"dev:{self.remote_root}/experiments/{arm}/", f"{local}/")
         logs = self.repo_root / "logs" / "workers"
         logs.mkdir(parents=True, exist_ok=True)
-        self.dev("copy", *PRESERVE, f"dev:{REMOTE_ROOT}/logs/workers/{arm}.log", f"{logs / arm}.log")
+        self.dev("copy", *PRESERVE, f"dev:{self.remote_root}/logs/workers/{arm}.log", f"{logs / arm}.log")
         say(f"synced experiments/{arm} (without pit_views) and logs/workers/{arm}.log")
 
     def down(self) -> None:
@@ -398,6 +413,7 @@ def main(
             repo_root=repo_root,
             tools=tools or Path(os.environ.get("ZGCA_COMPUTE") or "~/zgca-compute").expanduser(),
             instance=options.instance,
+            remote_root=os.environ.get(REMOTE_ROOT_ENV, REMOTE_ROOT),
         )
         if options.command == "up":
             workflow.up()
