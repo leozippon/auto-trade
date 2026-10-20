@@ -3,13 +3,15 @@
 # workflow as `bash -lc "$(cat remote.sh)" remote.sh <step> [args]` so the
 # platform's login environment (DOCKER_HOST) is present and the script is
 # always the local checkout's, never a stale copy on the instance. Runs as the
-# instance's root; everything persistent lives on /personal_fast_storage.
+# instance's root; everything persistent lives on /personal_fast_storage. The
+# generic host work (base tools, transfers, GPU/disk/tmux report) is
+# ~/zgca-compute's `dev`, which the workflow calls around these steps.
 set -euo pipefail
 
 ROOT=/personal_fast_storage/auto-trade
 VENV=/personal_fast_storage/envs/quant
 BOX_PYTHON=/root/miniconda3/bin/python
-# The platform's PyPI mirror lacks tushare 1.4.29 (~/zgca-compute/NOTES.md).
+# The platform's PyPI mirror lacks tushare 1.4.29 (~/zgca-compute/README.md).
 EXTRA_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
 IMAGE=autotrade-sandbox:latest
 # Shipped by the deploy with the digests it pinned; GitHub and its release
@@ -52,10 +54,9 @@ except SandboxImageContractMismatch as exc:
 PY
 }
 
-# The first step of a deploy, before its first transfer: every transfer is an
-# rsync, which a fresh instance's image does not carry.
+# Before a deploy's first transfer (after `dev bootstrap`): the directories the
+# transfers and the steps write into.
 dirs() {
-    command -v rsync >/dev/null || { echo "installing rsync"; apt-get -qq update && DEBIAN_FRONTEND=noninteractive apt-get -qq install -y rsync; }
     mkdir -p "$ROOT/data/research_releases" "$ROOT/experiments" "$ROOT/logs/workers" \
         "$ROOT/logs/webui" "$ROOT/logs/zgca" "$ROOT/.runtime/zgca"
 }
@@ -153,9 +154,8 @@ prepare() {
     cd "$ROOT"
     export DEBIAN_FRONTEND=noninteractive
     # The Agent's typed grep tool runs rg on the host; the worker refuses an
-    # LLM arm without it (7fdf506).
+    # LLM arm without it (7fdf506). rsync and tmux come from `dev bootstrap`.
     command -v rg >/dev/null || { echo "installing ripgrep"; apt-get -qq update && apt-get -qq install -y ripgrep; }
-    command -v tmux >/dev/null || { echo "installing tmux"; apt-get -qq update && apt-get -qq install -y tmux; }
     if ! "$VENV/bin/python" -c 'import autotrade, fastapi, uvicorn, tushare' >/dev/null 2>&1; then
         [ -x "$BOX_PYTHON" ] || die "no interpreter at $BOX_PYTHON to create the venv from"
         [ -x "$VENV/bin/python" ] || { echo "creating venv $VENV"; "$BOX_PYTHON" -m venv "$VENV"; }
@@ -165,7 +165,6 @@ prepare() {
     "$VENV/bin/python" -c "import autotrade, sys; sys.exit(0 if autotrade.__file__.startswith('$ROOT/') else 1)" \
         || die "$VENV imports autotrade from outside $ROOT; remove the venv and deploy again"
     docker info >/dev/null 2>&1 || die "Docker is not reachable (DOCKER_HOST=${DOCKER_HOST:-unset})"
-    df -h --output=target,size,used,avail,pcent / "$(dirname "$ROOT")" | sed 's/^/disk: /'
     if image_current; then
         echo "sandbox image $IMAGE carries this checkout's strategy contract"
     else
@@ -173,8 +172,6 @@ prepare() {
         image_current || die "$IMAGE was rebuilt but does not carry this checkout's strategy contract"
     fi
     docker images --format 'image: {{.Repository}}:{{.Tag}} {{.ID}} {{.Size}}' "$IMAGE"
-    df -h --output=target,size,used,avail,pcent / | sed 's/^/disk: /'
-    nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader | sed 's/^/gpu: /'
 }
 
 console_up() {
@@ -210,9 +207,9 @@ round() {
     echo "round launcher started in tmux session $ROUND_SESSION; log $ROOT/$log"
 }
 
+# The project's part of `status`; `dev report` has shown GPUs, disks and tmux.
 status() {
     cd "$ROOT" 2>/dev/null || { echo "repository: not deployed at $ROOT"; return 0; }
-    echo "tmux sessions: $(tmux ls -F '#{session_name}' 2>/dev/null | tr '\n' ' ')"
     local record
     if [ ! -x "$VENV/bin/python" ]; then
         echo "venv: missing at $VENV (run deploy)"
@@ -254,16 +251,16 @@ for row in rows:
     print("  " + row)
 PY
     fi
-    nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu --format=csv,noheader | sed 's/^/gpu: /'
-    df -h --output=target,size,used,avail,pcent / "$(dirname "$ROOT")" | sed 's/^/disk: /'
     local image
     if image=$(docker images --format '{{.Repository}}:{{.Tag}} {{.ID}} {{.CreatedSince}}' "$IMAGE" 2>/dev/null); then
         echo "image: ${image:-$IMAGE absent (tags are lost across stop/start; deploy rebuilds it)}"
     else
         echo "image: docker unavailable"
     fi
+    # The newest launcher log `round` wrote (named after its create_round_*
+    # file); image build logs sit beside them.
     local latest
-    latest=$(ls -t logs/zgca/*.log 2>/dev/null | head -n 1 || true)
+    latest=$(ls -t logs/zgca/create_round_*.log 2>/dev/null | head -n 1 || true)
     if [ -n "$latest" ]; then echo "round log: $latest"; tail -n 3 "$latest" | sed 's/^/  /'; fi
 }
 
