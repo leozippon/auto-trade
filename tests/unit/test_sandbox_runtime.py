@@ -1656,6 +1656,47 @@ def test_a_worker_protocol_error_reply_is_an_environment_failure():
         executor.close()
 
 
+def test_orders_over_the_protocol_cap_fail_with_a_message_naming_cap_and_remedy(
+    tmp_path: Path,
+):
+    """A session that logs into order metadata meets the protocol cap on the
+    real worker; the error it reads names the cap and what to shrink. Until the
+    strategy contract states the cap, the overflow stays an environment
+    failure (refunded), not the strategy's own exception."""
+    strategy = _strategy(
+        tmp_path,
+        """def generate_orders(context):
+    return [{
+        "symbol": "000001.SZ",
+        "action": "buy",
+        "quantity": 100,
+        "execute_at": "2026-01-02T09:30:00+08:00",
+        "audit": ["event"] * 1000,
+    }]
+""",
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-m", "autotrade.environment.strategy_worker", str(strategy)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    executor = _executor_for_process(process, limits=SandboxLimits(max_output_chars=2_000))
+    try:
+        with (
+            patch.object(executor, "_remove_container"),
+            pytest.raises(StrategyExecutionError) as failed,
+        ):
+            executor.execute(_context())
+        assert (
+            "strategy output of one call exceeded the 2,000-character protocol cap "
+            "on orders plus metadata (counted in UTF-8 bytes); shrink metadata"
+        ) == str(failed.value)
+        assert not raised_by_strategy(failed.value)
+    finally:
+        executor.close()
+
+
 def test_the_worker_answers_a_host_protocol_violation_and_a_strategy_raise_apart(
     tmp_path: Path,
 ):

@@ -73,6 +73,22 @@ class StrategyExecutionError(RuntimeError):
     """A strategy executor cannot return a truthful order payload."""
 
 
+def _protocol_cap_message(limit: int) -> str:
+    """What a call whose protocol output outgrew ``max_output_chars`` reports.
+
+    The session reads this text, so it names the cap and the remedy. The cap
+    counts the UTF-8 bytes the worker writes for one call: the returned orders
+    with their metadata, plus any NL requests. It stays a plain (environment)
+    ``StrategyExecutionError``, refunded, until the strategy contract README
+    states the cap.
+    """
+
+    return (
+        f"strategy output of one call exceeded the {limit:,}-character protocol cap "
+        "on orders plus metadata (counted in UTF-8 bytes); shrink metadata"
+    )
+
+
 class StrategyRaised(StrategyExecutionError):
     """The strategy's own code raised inside a ``fit`` or ``generate_orders`` call.
 
@@ -485,7 +501,9 @@ class DockerStrategyExecutor:
                 message, size = self._read_message(deadline)
                 consumed += size
                 if consumed > self.config.limits.max_output_chars:
-                    raise StrategyExecutionError("strategy protocol output exceeded max_output_chars")
+                    raise StrategyExecutionError(
+                        _protocol_cap_message(self.config.limits.max_output_chars)
+                    )
                 message_type = message.get("type")
                 response_sequence = message.get("sequence")
                 if (message_type not in _WORKER_ERROR_TYPES or "sequence" in message) and (
@@ -825,7 +843,9 @@ class DockerStrategyExecutor:
                     del self._stdout_buffer[: newline + 1]
                     return line
                 if len(self._stdout_buffer) > self.config.limits.max_output_chars:
-                    raise StrategyExecutionError("strategy protocol line exceeded max_output_chars")
+                    raise StrategyExecutionError(
+                        _protocol_cap_message(self.config.limits.max_output_chars)
+                    )
                 remaining = deadline - time.monotonic()
                 if remaining <= 0 or not selector.select(remaining):
                     raise TimeoutError(self._timeout_message())
