@@ -21,12 +21,18 @@ recurrent states of its linear-attention layers, anything the contract's
 libraries build -- and keep them in `extra`, remembering that a trained
 encoder makes the cache in lib/encoder.py stale; then call
 `learn.save(context, state)`. The checkpoint under `context.state_dir` is the
-only carrier: the inference worker rebuilds from that directory and never
-sees this process's memory, and a Paper account replays its decisions one by
-one from it, so anything expensive is checkpointed, not recomputed. The hook
-runs only inside `fit`, the one place the state directory is writable, on
-the same morning and context as the day's decision; a rule whose decision
-needs more than the head's score changes lib/score.py to match.
+only carrier between days: the inference worker rebuilds from that directory
+and never sees this process's memory, and a Paper account replays its
+decisions one by one from it, so anything expensive is checkpointed, not
+recomputed. The directory lives for one replay and is discarded with it: a
+reading meant to outlast the replay -- the commits and rollbacks a rule made,
+say -- leaves only as order metadata (lib/score.py's `meta`, kept in the
+result's `executions[].metadata` on the days that trade), and one call's
+orders with their metadata are capped at 1,000,000 characters counted in
+UTF-8 bytes, so carry a short per-day summary, not the whole log on every
+order. The hook runs only inside `fit`, the one place the state directory is
+writable, on the same morning and context as the day's decision; a rule whose
+decision needs more than the head's score changes lib/score.py to match.
 
 The starter's body does nothing: the two shipped modes, "cold_quarter" and
 "frozen", are the controls, and the rule is the Agent's design.

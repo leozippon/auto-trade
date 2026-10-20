@@ -8,9 +8,13 @@ visible rows of `index_daily`, on adjusted prices (open and close times
 `adj_factor`). The ten features per name and day -- log returns over 1, 5, 20
 and 60 days, 20-day realised volatility, log 20-day turnover, the 5-day to
 60-day turnover ratio, log 20-day amount, log float market cap and log
-book-to-price -- are each standardised across the names of the day, clipped at
-CLIP standard deviations, and 0 where unknown. A name is `valid` on a day when
-it has a bar, its 20-day return and volatility, and its market cap.
+book-to-price -- are each standardised across the names with a bar that day,
+clipped at CLIP standard deviations, and 0 where unknown. A name without a bar
+(suspended, delisted) is left out of the day's mean and spread and reads 0:
+its forward-filled close would otherwise enter them, and a longer panel holds
+more such names, so the same name on the same day would read differently
+depending on how far back the panel starts. A name is `valid` on a day when it
+has a bar, its 20-day return and volatility, and its market cap.
 
 The label follows the residual-label operating memory: the HORIZON-day forward
 return from the next open, minus beta times the benchmark's, beta the trailing
@@ -77,8 +81,9 @@ def panel(context, days):
         np.log(circ),
         -np.log(np.where(raw["pb"] > 0, raw["pb"], np.nan)),
     ]
-    x = np.stack([_standardised(column) for column in columns], axis=-1).astype("float32")
-    valid = np.isfinite(close) & np.isfinite(columns[2]) & np.isfinite(vol20) & np.isfinite(circ)
+    bar = np.isfinite(close)
+    x = np.stack([_standardised(np.where(bar, column, np.nan)) for column in columns], axis=-1).astype("float32")
+    valid = bar & np.isfinite(columns[2]) & np.isfinite(vol20) & np.isfinite(circ)
     index = _index_bars(context, days).reindex(dates).to_numpy(dtype="float64")
     label = _residual_label(close, opened, index)
     horizon = knobs.HORIZON + 1

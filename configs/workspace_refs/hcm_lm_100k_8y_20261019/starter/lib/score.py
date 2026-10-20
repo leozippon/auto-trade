@@ -28,7 +28,10 @@ def score(context, codes):
     state = learn.load(context, dev)
     if state is None:
         raise RuntimeError("no fitted state under context.state_dir: fit(context) has not run in this replay")
-    panel = features.panel(context, features.HISTORY_DAYS + 1)
+    # A lead-in of another HISTORY_DAYS: read at exactly HISTORY_DAYS + 1 days,
+    # a name without a bar on the 60-day lag day lost the forward-filled close
+    # a fit's longer panel gives it, and that feature's cross-section moved.
+    panel = features.panel(context, 2 * features.HISTORY_DAYS + 1)
     calendar = panel.dates + [learn.today(context)]
     names = len(panel.codes)
     table, ids, _ = learn.texts(context, panel.codes, calendar, calendar[-knobs.TEXT_DAYS], dev)

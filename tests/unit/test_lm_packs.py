@@ -7,8 +7,10 @@ after the research period. The text helper dates a title by the first
 decision that can see it under the nightly node rule, refuses a title the
 decision could not see, collapses the vendor's prefixed duplicate onto the
 plain title, strips the issuer from a title, and keeps the newest titles per
-name within the text window. The daily fit routes to the hook in both modes
-and refits from scratch only when the cold-quarter mode meets a new quarter.
+name within the text window. A name without a bar on a day is left out of
+that day's standardisation, so a tradable name's features do not depend on how
+far back the panel reads. The daily fit routes to the hook in both modes and
+refits from scratch only when the cold-quarter mode meets a new quarter.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -52,9 +55,9 @@ def lib(monkeypatch: pytest.MonkeyPatch):
     _drop_packages()
     monkeypatch.setattr(sys, "dont_write_bytecode", True)
     monkeypatch.syspath_prepend(str(PACKS[0] / "starter"))
-    from lib import knobs, text
+    from lib import features, knobs, text
 
-    yield SimpleNamespace(knobs=knobs, text=text)
+    yield SimpleNamespace(features=features, knobs=knobs, text=text)
     _drop_packages()
 
 
@@ -165,6 +168,40 @@ def test_table_keeps_the_newest_titles_within_the_text_window(lib, monkeypatch: 
         [[2, 0], [-1, -1]],  # d2: the new title first, then one of d1's
         [[3, 2], [4, -1]],  # d3: d1 has left the window
     ]
+
+
+def test_a_long_suspended_name_leaves_the_others_features_alone(lib, tmp_path: Path) -> None:
+    """The last name trades only on the first 15 of 100 days: a 100-day panel
+    holds its forward-filled close, a 70-day one never sees it, and the five
+    names trading throughout must read the same features in both."""
+    rng = np.random.default_rng(7)
+    days = [day.strftime("%Y%m%d") for day in pd.bdate_range("2024-01-02", periods=100)]
+    codes = ["000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ", "000005.SZ", "000009.SZ"]
+    frames = []
+    for i, code in enumerate(codes):
+        n = 15 if code == "000009.SZ" else len(days)
+        close = 10.0 * np.exp(np.cumsum(rng.normal(0.0, 0.02 * (i + 1), n)))
+        frames.append(pd.DataFrame({
+            "ts_code": code, "trade_date": days[:n], "open": close * 0.99, "close": close, "adj_factor": 1.0,
+            "amount": rng.uniform(1e4, 1e5, n), "turnover_rate": rng.uniform(0.5, 5.0, n),
+            "circ_mv": rng.uniform(1e5, 1e6, n), "pb": rng.uniform(0.5, 5.0, n),
+        }))
+    (tmp_path / "daily").mkdir()
+    pd.concat(frames).to_parquet(tmp_path / "daily" / "part-0.parquet", index=False)
+    (tmp_path / "macro").mkdir()
+    level = 5000.0 * np.exp(np.cumsum(rng.normal(0.0, 0.01, len(days))))
+    pd.DataFrame({
+        "dataset": "index_daily", "ts_code": lib.knobs.INDEX, "trade_date": days, "open": level, "close": level,
+        "available_at": [f"{day[:4]}-{day[4:6]}-{day[6:]} 17:00:00+08:00" for day in days],
+    }).to_parquet(tmp_path / "macro" / "part-0.parquet", index=False)
+    context = SimpleNamespace(asof_dir=str(tmp_path), inference_at=datetime(2024, 5, 21, 8, 30, tzinfo=CN_TZ))
+
+    long, short = lib.features.panel(context, 100), lib.features.panel(context, 70)
+    assert long.dates[-1] == short.dates[-1] == days[-1] and short.codes == codes[:-1]
+    # The last ten days are past the 60-day history of the short panel too.
+    np.testing.assert_allclose(long.x[-10:, :-1], short.x[-10:], rtol=0, atol=1e-5)
+    np.testing.assert_array_equal(long.valid[-10:, :-1], short.valid[-10:])
+    assert not long.x[15:, -1].any() and not long.valid[15:, -1].any()
 
 
 @pytest.fixture
