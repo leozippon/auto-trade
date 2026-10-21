@@ -1377,7 +1377,7 @@ def audit_daily_cross_coverage(raw_dir: Path, trade_dates: set[str], args: argpa
     stk_limit_details = finish_coverage_acc(acc_stk_limit)
     add("warning" if daily_basic_details["left_only_rows"] or daily_basic_details["right_only_rows"] else "info", "daily_vs_daily_basic_coverage", "daily and daily_basic same-day code coverage", daily_basic_details)
     add("warning" if adj_details["right_only_rows"] else "info", "adj_factor_vs_daily_coverage", "adj_factor can validly exceed daily because factors may exist for non-trading/suspended names", adj_details)
-    add("warning" if stk_limit_details["right_only_rows"] else "info", "stk_limit_vs_daily_coverage", "stk_limit covers A/B shares and funds, so rows can exceed daily", stk_limit_details)
+    add("warning" if stk_limit_details["right_only_rows"] else "info", "stk_limit_vs_daily_coverage", "stk_limit also lists suspended names and B shares, so rows can exceed daily", stk_limit_details)
     return all_codes
 
 def audit_snapshot_unit_coverage(raw_dir: Path, file: str, add) -> int:
@@ -1511,7 +1511,7 @@ def audit_pit_availability(raw_dir: Path, add) -> None:
         "rules": {
             "daily": "officially loaded after market close around 15:00-16:00; do not use same-day values for 09:25 decisions",
             "daily_basic": "officially updated around 15:00-17:00; do not use same-day values for 09:25 decisions",
-            "stk_limit": "officially around 08:40 and covers A/B shares and funds; keep explicit available_at in PIT layer",
+            "stk_limit": "officially around 08:40 and covers A and B shares; keep explicit available_at in PIT layer",
             "suspend_d": "released around 08:45 as a trading constraint; zero rows mean no suspended names that day, not a missing partition",
             "adj_factor": "officially around 09:15-09:20, but raw trade_date alone is not enough for PIT-safe joins",
             "namechange": "use ann_date or a derived available_at; start_date can be a future effective date",

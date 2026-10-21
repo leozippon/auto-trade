@@ -559,6 +559,20 @@
       ],
       "lock_wait_seconds": 1800,
       "skip_if_already_ok": false
+    },
+    "manual_stklimit_restatement_repair": {
+      "description": "Manual (not scheduled): forced re-pull of stk_limit after an accepted vendor withdrawal (2026-09: fund, ETF and LOF rows, codes 15x-18x.SZ and 50x-58x.SH, left the whole history; A- and B-share rows are unchanged, and the snapshot joins stk_limit onto daily, which lists no funds). Follow the shrink-guard runbook first: archive and delete every trade_date partition the run re-pulls, so the guard has nothing to refuse. The window runs from default_start_date to the last SSE open date before today (Asia/Shanghai), leaving today's partition to the evening job; --start-date/--end-date set it to the archived partitions (the 2026-10-21 run: 20190626 to 20260811, every partition that still held fund rows). Follow with cn_nightly_full_audit --force-run.",
+      "operation": "download_tier",
+      "tier": "daily",
+      "end_date_offset_days": 1,
+      "end_date_mode": "sse_open_on_or_before",
+      "extra_args": [
+        "--datasets",
+        "stk_limit",
+        "--force"
+      ],
+      "lock_wait_seconds": 1800,
+      "skip_if_already_ok": false
     }
   },
   "interfaces": [
