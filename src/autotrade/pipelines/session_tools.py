@@ -27,7 +27,11 @@ from autotrade.environment.artifacts import (
     copy_artifact_snapshot,
 )
 from autotrade.environment.data.summary import HOST_PATH_RE
-from autotrade.environment.executor import raised_by_strategy, strategy_resources_of
+from autotrade.environment.executor import (
+    gpu_contended,
+    raised_by_strategy,
+    strategy_resources_of,
+)
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.replay.null_control import PANEL_DRAWS, NullControlSetupError
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
@@ -1203,6 +1207,43 @@ def _failure_cause(error: BaseException | None) -> str:
     )
 
 
+@dataclass(frozen=True)
+class _Replayed:
+    """One candidate's replay: its evaluation or the error it raised, and the
+    ``time.perf_counter`` window it ran in."""
+
+    evaluation: EvaluationResult | None
+    error: Exception | None
+    started: float
+    ended: float
+
+    @property
+    def seconds(self) -> float:
+        return self.ended - self.started
+
+    def overlaps(self, other: _Replayed) -> bool:
+        return self.started < other.ended and other.started < self.ended
+
+
+def _shared_gpu_note(siblings: Sequence[str]) -> str:
+    """What a candidate the shared card failed is told about its own batch.
+
+    Every leg of a batch attaches the arm's cards, so siblings that replayed
+    while it ran held memory on the same device. The CUDA report cannot say
+    whose memory filled the card -- a sibling's, the candidate's own other
+    strategy container's, or a process outside the arm -- so the note names
+    the siblings as sharers, not as the cause, and the failure stays the
+    environment's and is refunded like any other contention.
+    """
+
+    return (
+        f"; {', '.join(siblings)} of this batch replayed on the same GPU while this "
+        "candidate ran, so the memory it lacked may be held by its own batch: send "
+        "fewer GPU-heavy candidates per batch or lower their GPU memory "
+        "(each row's resources.peak_gpu_memory_bytes is its sampled peak)"
+    )
+
+
 # What every attempt's run-manifest row keeps of its candidate's registration.
 _BATCH_MANIFEST_KEYS = (
     "batch_id",
@@ -1639,8 +1680,9 @@ class BatchValidateTool(SessionTimeBudgetAware):
         # budget block reach the trace.
         refunded = sum(
             1
-            for evaluation, error, _seconds in outcomes
-            if evaluation is None and _failure_cause(error) == BATCH_FAILURE_ENVIRONMENT
+            for replayed in outcomes
+            if replayed.evaluation is None
+            and _failure_cause(replayed.error) == BATCH_FAILURE_ENVIRONMENT
         )
         if refunded:
             self.backtest.refund(refunded, span)
@@ -1651,10 +1693,10 @@ class BatchValidateTool(SessionTimeBudgetAware):
         rows: list[dict[str, object]] = []
         recorded: list[tuple[dict[str, object], StepResult]] = []
         try:
-            for candidate, check, revision, result_name, outcome in zip(
-                candidates, checks, revisions, result_names, outcomes, strict=True
+            for index, (candidate, check, revision, result_name, replayed) in enumerate(
+                zip(candidates, checks, revisions, result_names, outcomes, strict=True)
             ):
-                evaluation, error, seconds = outcome
+                evaluation, error = replayed.evaluation, replayed.error
                 # Every candidate — recorded or dead end — hangs off the node
                 # the batch started at, never off the sibling before it.
                 self.backtest.tree.set_position(parent_node_id)
@@ -1664,7 +1706,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
                     "path": candidate.path,
                     "control": candidate.control,
                     "result_name": result_name,
-                    "wall_seconds": round(seconds, 1),
+                    "wall_seconds": round(replayed.seconds, 1),
                 }
                 metadata = {
                     "batch_id": batch_id,
@@ -1676,7 +1718,18 @@ class BatchValidateTool(SessionTimeBudgetAware):
                     "span": span.label,
                 }
                 if evaluation is None:
-                    row.update(self._record_failure(result_name, error, metadata))
+                    shared = (
+                        [
+                            result_names[other]
+                            for other, sibling in enumerate(outcomes)
+                            if other != index and sibling.overlaps(replayed)
+                        ]
+                        if error is not None and gpu_contended(error)
+                        else []
+                    )
+                    row.update(
+                        self._record_failure(result_name, error, metadata, shared_gpu=shared)
+                    )
                 else:
                     row.update(
                         self._record_success(
@@ -1999,7 +2052,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
 
     def _replay(
         self, revisions: Sequence[ArtifactRevision], span: ReplaySpan
-    ) -> list[tuple[EvaluationResult | None, Exception | None, float]]:
+    ) -> list[_Replayed]:
         """Replay every committed revision over ``span``, bounded-concurrently.
 
         Each evaluation owns its result directory, its as-of view and its
@@ -2009,10 +2062,9 @@ class BatchValidateTool(SessionTimeBudgetAware):
         recorded lineage does not depend on which replay finished first.
         """
 
-        outcomes: list[tuple[EvaluationResult | None, Exception | None, float] | None]
-        outcomes = [None] * len(revisions)
+        outcomes: list[_Replayed | None] = [None] * len(revisions)
 
-        def run_one(index: int):
+        def run_one(index: int) -> _Replayed:
             started = time.perf_counter()
             try:
                 evaluation = self.backtest.evaluator.evaluate(
@@ -2021,8 +2073,8 @@ class BatchValidateTool(SessionTimeBudgetAware):
             except SessionInterrupt:
                 raise
             except Exception as exc:  # noqa: BLE001 - the text IS this row's result
-                return None, exc, time.perf_counter() - started
-            return evaluation, None, time.perf_counter() - started
+                return _Replayed(None, exc, started, time.perf_counter())
+            return _Replayed(evaluation, None, started, time.perf_counter())
 
         workers = min(len(revisions), self.max_concurrency)
         if workers <= 1:
@@ -2046,7 +2098,9 @@ class BatchValidateTool(SessionTimeBudgetAware):
         if interrupt is not None:
             raise interrupt
         return [
-            outcome if outcome is not None else (None, RuntimeError("replay did not run"), 0.0)
+            outcome
+            if outcome is not None
+            else _Replayed(None, RuntimeError("replay did not run"), 0.0, 0.0)
             for outcome in outcomes
         ]
 
@@ -2125,10 +2179,15 @@ class BatchValidateTool(SessionTimeBudgetAware):
         result_name: str,
         error: Exception | None,
         batch_metadata: Mapping[str, object],
+        *,
+        shared_gpu: Sequence[str] = (),
     ) -> dict[str, object]:
         if error is None:
             error = RuntimeError("unknown replay failure")
         public_error = _public_validation_error(error)
+        if shared_gpu:
+            # The dead-end node and the manifest keep the note with the error.
+            public_error += _shared_gpu_note(shared_gpu)
         cause = _failure_cause(error)
         request = self.backtest.request
         metadata = {

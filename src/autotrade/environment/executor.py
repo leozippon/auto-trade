@@ -11,7 +11,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -129,21 +129,32 @@ class GpuMemoryContention(StrategyExecutionError):
     """
 
 
-def raised_by_strategy(exc: BaseException) -> bool:
-    """Whether ``exc``, or anything it was raised from, is ``StrategyRaised``.
+def _cause_chain(exc: BaseException) -> Iterator[BaseException]:
+    """``exc`` and everything it was raised from, each once.
 
     Replay layers wrap an executor failure (``BacktestError`` and the
-    evaluator above it), so the classification is read off the whole chain.
+    evaluator above it), so what the executor raised is read off the whole
+    chain.
     """
 
     seen: set[int] = set()
     current: BaseException | None = exc
     while current is not None and id(current) not in seen:
-        if isinstance(current, StrategyRaised):
-            return True
+        yield current
         seen.add(id(current))
         current = current.__cause__ or current.__context__
-    return False
+
+
+def raised_by_strategy(exc: BaseException) -> bool:
+    """Whether ``exc``, or anything it was raised from, is ``StrategyRaised``."""
+
+    return any(isinstance(link, StrategyRaised) for link in _cause_chain(exc))
+
+
+def gpu_contended(exc: BaseException) -> bool:
+    """Whether ``exc``, or anything it was raised from, is ``GpuMemoryContention``."""
+
+    return any(isinstance(link, GpuMemoryContention) for link in _cause_chain(exc))
 
 
 # Where a failed replay carries its container telemetry. A replay that raises
@@ -171,20 +182,12 @@ def attach_strategy_resources(exc: BaseException, executor: object) -> None:
 
 
 def strategy_resources_of(exc: BaseException) -> dict[str, object]:
-    """Telemetry carried by ``exc`` or by anything it was raised from.
+    """Telemetry carried by ``exc`` or by anything it was raised from."""
 
-    Replay layers wrap an executor failure, so the block is read off the whole
-    chain for the same reason ``raised_by_strategy`` is.
-    """
-
-    seen: set[int] = set()
-    current: BaseException | None = exc
-    while current is not None and id(current) not in seen:
-        usage = getattr(current, _STRATEGY_RESOURCES, None)
+    for link in _cause_chain(exc):
+        usage = getattr(link, _STRATEGY_RESOURCES, None)
         if isinstance(usage, Mapping):
             return dict(usage)
-        seen.add(id(current))
-        current = current.__cause__ or current.__context__
     return {}
 
 

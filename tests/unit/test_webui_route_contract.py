@@ -583,6 +583,7 @@ def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) ->
         # The same threshold keys are served before the replay, from the plan.
         ("plan thresholds", criteria_thresholds, set(replay["thresholds"])),
         ("verdictStagePanel", reads("verdictStagePanel", "attempts"), set(detail["replay_attempts"])),
+        ("verdictStagePanel", reads("verdictStagePanel", "validations"), set(detail["research_validation_failures"])),
         ("verdictStagePanel", reads("verdictStagePanel", "research"), record),
         ("replaySpanBar", reads("replaySpanBar", "replay"), set(replay["replay"])),
         ("armEquityHost", reads("armEquityHost", "item"), set(detail)),

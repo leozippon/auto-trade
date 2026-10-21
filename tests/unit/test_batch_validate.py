@@ -1226,6 +1226,51 @@ class BatchValidateRunTest(unittest.TestCase):
             )
             self.assertEqual(session.backtest.replay_years_used, 1)
 
+    def test_a_leg_the_shared_card_failed_names_the_siblings_beside_it(self) -> None:
+        """Every leg of a batch attaches the arm's cards, so siblings that
+        replayed while a leg ran out of GPU memory held memory on the same
+        device. The leg's error names them, wherever it is read, so the Agent
+        can tell its own batch may have overcommitted the card. The CUDA
+        report cannot say whose memory filled it, so the failure stays the
+        environment's and is refunded. A failure of the strategy's own code
+        beside them, and a leg that ran alone, name nobody."""
+
+        note = "of this batch replayed on the same GPU while this candidate ran"
+        with TemporaryDirectory() as tmp:
+            session = _Session(
+                Path(tmp),
+                contention_markers=("999",),
+                strategy_fail_markers=("777",),
+                rendezvous=3,
+                max_concurrency=3,
+            )
+            session.candidate("gpu", _strategy("999"))
+            session.candidate("own", _strategy("777"))
+            session.candidate("ok", _strategy("1"))
+            # The rendezvous holds all three replays in flight at once.
+            result = session.call("gpu", "own", "ok", span="Y2")
+            gpu, own, ok = result.value["candidates"]
+            self.assertEqual((gpu["cause"], own["cause"]), ("environment", "strategy"))
+            self.assertIn(f"valid_002, valid_003 {note}", gpu["error"])
+            self.assertNotIn(note, own["error"])
+            self.assertEqual(ok["status"], "ok")
+            # The contended leg is refunded; the strategy's own failure is not.
+            self.assertEqual(session.backtest.replay_years_used, 2)
+            [dead_end] = [
+                node
+                for node in session.tree.nodes()
+                if node["result_name"] == "valid_001"
+            ]
+            self.assertEqual(dead_end["error"], gpu["error"])
+        with TemporaryDirectory() as tmp:
+            session = _Session(Path(tmp), contention_markers=("999",), max_concurrency=1)
+            session.candidate("gpu", _strategy("999"))
+            session.candidate("ok", _strategy("1"))
+            gpu, _ok = session.call("gpu", "ok", span="Y2").value["candidates"]
+            self.assertEqual(gpu["cause"], "environment")
+            self.assertIn("taken by another process", gpu["error"])
+            self.assertNotIn(note, gpu["error"])
+
     def test_a_timeout_gives_its_replay_years_back(self) -> None:
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp), fail_markers=("999",))

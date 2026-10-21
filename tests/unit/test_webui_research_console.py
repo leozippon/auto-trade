@@ -1274,6 +1274,78 @@ def test_the_step_tree_names_the_session_and_the_frozen_node(tmp_path: Path) -> 
     assert node["session_ref"].startswith("session_ref_")
 
 
+def test_a_failed_forward_replay_attempt_is_counted(tmp_path: Path) -> None:
+    """The verdict view's replay failures are the forward replay's
+    ``attempt_failed`` rows, which the pipeline writes under its stage name
+    (``forward``), not under the provider phase its replay reads (``heldout``):
+    filtering on the latter counted none, ever."""
+
+    directory = build_arm(tmp_path, "arm", "graduated")
+    assert experiment_detail(tmp_path, "arm")["replay_attempts"] == {
+        "failed": 0,
+        "last_error": None,
+    }
+    ledger = ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl")
+    for stage in ("research", "forward"):
+        # The attempt keys ``RollingExperimentPipeline`` writes on its failure path.
+        ledger.append(
+            {
+                "experiment_id": "arm",
+                "epoch_id": stage,
+                "fold_id": stage,
+                "run_id": f"run_{stage}_failed",
+                "session_key": stage,
+                "phase": stage,
+                "record_type": "attempt_failed",
+                "error": f"OSError: {stage} host lost",
+            }
+        )
+    assert experiment_detail(tmp_path, "arm")["replay_attempts"] == {
+        "failed": 1,
+        "last_error": "OSError: forward host lost",
+    }
+
+
+def test_failed_research_validations_are_counted_apart_from_the_replay(tmp_path: Path) -> None:
+    """A research Validation that fails is no attempt failure: it leaves its
+    dead-end node in the step tree and no ledger row, so the replay's attempt
+    counter read 0 for an arm whose four Validations had failed. The detail
+    counts them on their own -- how many, how many the environment failed and
+    refunded, and the last reason -- and leaves the replay counter alone."""
+
+    directory = build_arm(tmp_path, "arm", "graduated")
+    assert experiment_detail(tmp_path, "arm")["research_validation_failures"] == {
+        "failed": 0,
+        "environment": 0,
+        "last_error": None,
+    }
+    refs = AgentRefStore(directory)
+    tree = StepTree(directory / "steps")
+    for name, cause, error in (
+        ("valid_001", "strategy", "daily Validation failed: BacktestError: fit failed: label has 2937"),
+        ("valid_006", "environment", "daily Validation failed: CUDA out of memory: the device was taken"),
+    ):
+        # As ``batch_validate`` records a failed candidate.
+        tree.record_failed_attempt(
+            epoch_id="research",
+            session_ref=refs.get_or_create("session", "research"),
+            run_id=refs.get_or_create("run", "run_research"),
+            result_name=name,
+            error=error,
+            metadata={"batch_id": "batch_a", "candidate": name, "cause": cause},
+        )
+    detail = experiment_detail(tmp_path, "arm")
+    assert detail["research_validation_failures"] == {
+        "failed": 2,
+        "environment": 1,
+        "last_error": "daily Validation failed: CUDA out of memory: the device was taken",
+    }
+    assert detail["replay_attempts"] == {"failed": 0, "last_error": None}
+    # The step-tree view marks the same nodes failed.
+    nodes = step_tree_view(directory)["nodes"]
+    assert sum(node["status"] == "failed" for node in nodes) == 2
+
+
 def test_each_validation_shows_its_raw_excess_beside_its_active_figures(tmp_path: Path) -> None:
     build_arm(tmp_path, "arm", "graduated")
     detail = experiment_detail(tmp_path, "arm")

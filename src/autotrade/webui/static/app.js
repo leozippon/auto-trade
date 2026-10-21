@@ -3320,12 +3320,19 @@ function verdictStagePanel(detail) {
   const slices = forward ? forward.slices || {} : {};
   const research = ((detail.sessions || []).find((entry) => entry.kind === "research") || {}).record;
   const attempts = detail.replay_attempts || {};
+  const validations = detail.research_validation_failures || {};
   const badge =
     endingBadge(detail.ending) ||
     el("span", { class: "badge kind" }, STEP_STATUS_LABELS.undecided);
   const recordedAt = forward ? forward.recorded_at : research && research.arm_end ? research.recorded_at : null;
   const facts = [
     research && Number(research.attempts) > 1 ? kvRow("研究尝试", `${research.attempts} 次`) : null,
+    validations.failed
+      ? kvRow(
+          "验证失败",
+          `${validations.failed} 次${validations.environment ? `（环境 ${validations.environment} 次，已退还回放年）` : ""}${validations.last_error ? ` · ${validations.last_error}` : ""}`,
+        )
+      : null,
     attempts.failed
       ? kvRow("回放失败", `${attempts.failed} 次${attempts.last_error ? ` · ${attempts.last_error}` : ""}`)
       : null,
