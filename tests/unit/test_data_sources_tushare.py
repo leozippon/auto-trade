@@ -7955,8 +7955,8 @@ class FullPortContractTest(unittest.TestCase):
         # with the margin available_at repair (2026-10-02); 33 with anns_d's
         # own official-service job (2026-10-06); 34 with the stk_holdertrade
         # restatement re-pull (2026-10-20); 35 with the top_list one; 36 with
-        # the stk_limit one (2026-10-21).
-        self.assertEqual(len(config["jobs"]), 36)
+        # the stk_limit one (2026-10-21); 37 with the top-10 holder repair.
+        self.assertEqual(len(config["jobs"]), 37)
         for name, tier in (
             ("manual_history_backfill_reference", "reference"),
             ("manual_history_backfill_macro", "macro"),
@@ -7988,6 +7988,20 @@ class FullPortContractTest(unittest.TestCase):
         self.assertEqual(
             (stk_limit["end_date_offset_days"], stk_limit["end_date_mode"]), (1, "sse_open_on_or_before")
         )
+        # The top-10 repair must never widen to the three disclosure tables it
+        # shares the nightly job with, and through the tables' report lag its
+        # default window must begin exactly at the lake's floor.
+        top10 = config["jobs"]["manual_top10_holders_repair"]
+        self.assertEqual((top10["operation"], top10["tier"]), ("download_tier", "event_flow"))
+        self.assertEqual(top10["extra_args"], ["--datasets", "top10_holders", "top10_floatholders", "--force"])
+        self.assertNotIn("end_date_mode", top10)  # end_date is a report period, not a trade date
+        start = cron_update.resolve_job_start_date(top10, config, "20261021")
+        for name in ("top10_holders", "top10_floatholders"):
+            lag = timedelta(days=common.EVENT_FLOW_SPECS[name].report_lag_days)
+            self.assertEqual(
+                (datetime.strptime(start, "%Y%m%d") - lag).strftime("%Y%m%d"),  # noqa: DTZ007
+                config["default_start_date"],
+            )
 
     def test_minute_job_runs_the_by_date_updater_as_a_mutating_job(self) -> None:
         context = cron_update.RunContext(

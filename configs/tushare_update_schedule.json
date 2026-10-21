@@ -573,6 +573,21 @@
       ],
       "lock_wait_seconds": 1800,
       "skip_if_already_ok": false
+    },
+    "manual_top10_holders_repair": {
+      "description": "Manual (not scheduled): forced whole-history re-pull of top10_holders and top10_floatholders alone, once the owner accepts the restatement of to-do item 11: the 2026-07-11 initial pull left many report periods with partial holder lists and most non-quarter-end months empty, and the vendor has since reclassified holder_type and corrected a few holder names. Both tables filter start_date/end_date on the report period end_date, and their window starts report_lag_days (120) before the run's start date: start_date 20200430 begins it at report period 20200101, the lake's floor, and the run ends today; --start-date/--end-date narrow it. stk_holdernumber, stk_holdertrade and repurchase stay out: they share the nightly job but carry unreviewed 2026-06/07 removals. Partitions merge by window, so the shrink guard and the revision ledger see every removed key; archive by copying, not moving. Follow with cn_nightly_full_audit --force-run.",
+      "operation": "download_tier",
+      "tier": "event_flow",
+      "end_date_offset_days": 0,
+      "start_date": "20200430",
+      "extra_args": [
+        "--datasets",
+        "top10_holders",
+        "top10_floatholders",
+        "--force"
+      ],
+      "lock_wait_seconds": 1800,
+      "skip_if_already_ok": false
     }
   },
   "interfaces": [
