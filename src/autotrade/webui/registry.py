@@ -55,6 +55,7 @@ from autotrade.pipelines.hitl_state import (
 )
 from autotrade.pipelines.ledger import (
     ENVIRONMENT_BLOCKED,
+    FORWARD_STAGE,
     RESEARCH_SESSION_KEY,
     ExperimentLedger,
     experiment_verdict,
@@ -1264,7 +1265,9 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
         ),
         "sessions": sessions,
         "frozen": _frozen_view(identity, records),
-        "replay_attempts": _failed_attempts(identity, records, FORWARD_PHASE),
+        # Attempts carry the pipeline's stage, not the provider phase the
+        # replay reads (``FORWARD_PHASE``), so the stage is what selects them.
+        "replay_attempts": _failed_attempts(identity, records, FORWARD_STAGE),
     }
 
 

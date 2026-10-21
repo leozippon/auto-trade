@@ -1274,6 +1274,38 @@ def test_the_step_tree_names_the_session_and_the_frozen_node(tmp_path: Path) -> 
     assert node["session_ref"].startswith("session_ref_")
 
 
+def test_a_failed_forward_replay_attempt_is_counted(tmp_path: Path) -> None:
+    """The verdict view's replay failures are the forward replay's
+    ``attempt_failed`` rows, which the pipeline writes under its stage name
+    (``forward``), not under the provider phase its replay reads (``heldout``):
+    filtering on the latter counted none, ever."""
+
+    directory = build_arm(tmp_path, "arm", "graduated")
+    assert experiment_detail(tmp_path, "arm")["replay_attempts"] == {
+        "failed": 0,
+        "last_error": None,
+    }
+    ledger = ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl")
+    for stage in ("research", "forward"):
+        # The attempt keys ``RollingExperimentPipeline`` writes on its failure path.
+        ledger.append(
+            {
+                "experiment_id": "arm",
+                "epoch_id": stage,
+                "fold_id": stage,
+                "run_id": f"run_{stage}_failed",
+                "session_key": stage,
+                "phase": stage,
+                "record_type": "attempt_failed",
+                "error": f"OSError: {stage} host lost",
+            }
+        )
+    assert experiment_detail(tmp_path, "arm")["replay_attempts"] == {
+        "failed": 1,
+        "last_error": "OSError: forward host lost",
+    }
+
+
 def test_each_validation_shows_its_raw_excess_beside_its_active_figures(tmp_path: Path) -> None:
     build_arm(tmp_path, "arm", "graduated")
     detail = experiment_detail(tmp_path, "arm")
