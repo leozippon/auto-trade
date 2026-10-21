@@ -227,6 +227,9 @@ SNAPSHOT_EXCLUDED_COLUMNS: dict[str, tuple[str, ...]] = {
     # and imp_dg (institutional attention) is null-typed and all-NA in every
     # sampled partition 2022-2026.
     "report_rc": ("report_title", "name", "imp_dg"),
+    # The day's name and ST status come from namechange through the universe;
+    # the vendor restates this column to later names on historical rows.
+    "top_list": ("name",),
 }
 DomainBuildResult = tuple[dict[str, object], dict[str, object]]
 DomainBuildTask = tuple[

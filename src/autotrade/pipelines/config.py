@@ -47,7 +47,10 @@ ExecutionMode = Literal["sandbox", "trusted"]
 # v11 decision/replay view still carries his_high. A cached view, or a PIT view
 # seed, built under v11 must be rebuilt; SNAPSHOT_CACHE_FORMAT_VERSION is the
 # only reuse gate and nothing rebuilds a stale view automatically.
-SNAPSHOT_CACHE_FORMAT_VERSION = 12
+# v13: top_list.name leaves the events union (SNAPSHOT_EXCLUDED_COLUMNS). It is
+# the name as of the vendor's pull, not the day's, so a v12 view that loads
+# top_list carries later names and ST marks into history.
+SNAPSHOT_CACHE_FORMAT_VERSION = 13
 
 # Trailing wrap-up grace added to the research session budget. Not a console or
 # worker knob; ResearchSessionRequest carries the seconds to the Agent runner.

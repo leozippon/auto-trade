@@ -2217,6 +2217,52 @@ class SnapshotBuilderTest(unittest.TestCase):
                 self.assertNotIn(future, zero_meta["dataset_columns"]["cyq_perf"], future)
             self.assertIn("cost_50pct", zero_meta["dataset_columns"]["cyq_perf"])
 
+    def test_top_list_name_leaves_the_built_snapshot(self):
+        # SNAPSHOT_EXCLUDED_COLUMNS: top_list.name is the name as of the
+        # vendor's latest pull, so a historical row carries a later name and
+        # ST mark. The figures and the reason stay, and both of a stock's
+        # rows on one day survive. A v12 view still carries the column, so
+        # the exclusion moved SNAPSHOT_CACHE_FORMAT_VERSION too (v13).
+        from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION
+
+        self.assertGreaterEqual(SNAPSHOT_CACHE_FORMAT_VERSION, 13)
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            build_raw(raw)
+            row = {
+                "trade_date": "20211007", "ts_code": "000001.SZ", "name": "ST后来",
+                "close": 10.5, "pct_change": 10.0, "turnover_rate": 5.0, "amount": 1.0e8,
+                "l_sell": 2.0e7, "l_buy": 3.0e7, "l_amount": 5.0e7, "net_amount": 1.0e7,
+                "net_rate": 10.0, "amount_rate": 50.0, "float_values": 2.0e9,
+                "reason": "日涨幅偏离值达到7%的前五只证券",
+                "available_at": "2021-10-07 20:00:00+08:00",
+                "available_at_rule": "official_20_from:trade_date",
+            }
+            write(
+                raw / "top_list" / "trade_date=20211007.parquet",
+                pd.DataFrame([row, {**row, "reason": "连续三个交易日内，涨幅偏离值累计达到20%的证券"}]),
+            )
+            out = Path(tmp) / "snap"
+            config = replace(
+                CONFIG,
+                events_datasets=("top_list",),
+                macro_datasets=(),
+                text_datasets=(),
+                fundamental_datasets=(),
+                include_intraday=False,
+            )
+            manifest = SnapshotBuilder(raw, Path(tmp) / "fund_events").build_decision_snapshot(
+                DECISION, out, config
+            )
+            events = pd.read_parquet(out / "events.parquet")
+            columns = manifest["domains"]["events"]["dataset_columns"]["top_list"]
+            self.assertNotIn("name", events.columns)
+            self.assertNotIn("name", columns)
+            self.assertEqual(len(events[events["dataset"] == "top_list"]), 2)
+            for kept in ("reason", "l_buy", "l_sell", "net_amount", "float_values"):
+                self.assertIn(kept, events.columns, kept)
+                self.assertIn(kept, columns, kept)
+
     def test_incomplete_vendor_columns_never_reach_a_built_snapshot(self):
         # Every SNAPSHOT_EXCLUDED_COLUMNS entry that this fixture can cover is
         # gone from the written files AND from the manifest attribution, while
@@ -2377,7 +2423,7 @@ class SnapshotBuilderTest(unittest.TestCase):
                     {
                         "trade_date": "20211007",
                         "ts_code": "000001.SZ",
-                        "name": "a",
+                        "reason": "a",
                         "available_at": "2021-10-07 16:00:00+08:00",
                     }
                 ]),
@@ -2401,7 +2447,7 @@ class SnapshotBuilderTest(unittest.TestCase):
             self.assertEqual(list(union["dataset"]), ["block_trade", "top_list"])
             self.assertEqual(meta["datasets"], ["block_trade", "top_list"])
             self.assertIn("price", union.columns)
-            self.assertIn("name", union.columns)
+            self.assertIn("reason", union.columns)
 
     def test_news_text_guards_sources_window_and_dedup(self):
         with tempfile.TemporaryDirectory() as tmp:
