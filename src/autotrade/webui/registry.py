@@ -32,6 +32,7 @@ from autotrade.agent.runner import (
     LLM_CALL_BUDGET_EXHAUSTED,
 )
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME, STYLE_SCHEMA_VERSION
+from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools.report_issue import (
     ISSUE_REPORTS_NAME,
     issue_reports_path,
@@ -69,6 +70,7 @@ from autotrade.pipelines.ledger import (
 from autotrade.pipelines.pit_views_seed import FORWARD_PHASE, RESEARCH_PHASE
 from autotrade.pipelines.research_session import session_role_quotas
 from autotrade.pipelines.session_resume import STEP_SIDECAR_DIR
+from autotrade.pipelines.session_tools import BATCH_FAILURE_ENVIRONMENT
 from autotrade.pipelines.skills import latest_skills_snapshot
 from autotrade.pipelines.verdict import (
     CONDITIONS,
@@ -1220,6 +1222,31 @@ def _failed_attempts(
     }
 
 
+def _failed_validations(identity: PublicIdentity, directory: Path) -> dict[str, object]:
+    """How many of the research session's Validations failed, how many of those
+    the environment failed (their replay-years were refunded), and the last
+    one's reason. A failed Validation is no attempt failure and leaves no
+    ledger row: its one record is its dead-end node in the step tree (written
+    while ``record_failed_attempts`` is on, the default), the same nodes the
+    step-tree view marks failed."""
+
+    failed = [
+        node
+        for node in StepTree(directory / "steps").nodes()
+        if node.get("status") == "failed"
+    ]
+    last = failed[-1] if failed else None
+    return {
+        "failed": len(failed),
+        "environment": sum(
+            1
+            for node in failed
+            if _mapping(node.get("metadata")).get("cause") == BATCH_FAILURE_ENVIRONMENT
+        ),
+        "last_error": identity.public_text(str(last.get("error") or "")) or None if last else None,
+    }
+
+
 def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
     directory = resolve_experiment_dir(root, experiment_id)
     detail = {**summarize_experiment(directory), "archived": archive_marker(directory)}
@@ -1265,9 +1292,12 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
         ),
         "sessions": sessions,
         "frozen": _frozen_view(identity, records),
-        # Attempts carry the pipeline's stage, not the provider phase the
-        # replay reads (``FORWARD_PHASE``), so the stage is what selects them.
+        # Two different failures, kept apart: a forward replay attempt that
+        # raised before its record -- selected by the pipeline's stage, not by
+        # the provider phase the replay reads (``FORWARD_PHASE``) -- and a
+        # research Validation that failed.
         "replay_attempts": _failed_attempts(identity, records, FORWARD_STAGE),
+        "research_validation_failures": _failed_validations(identity, directory),
     }
 
 
