@@ -841,6 +841,10 @@ class EvaluationRequest:
     # order: the span runs as one replay from ``start`` (the first slot's
     # start) to ``end`` (the last slot's end).
     continuation: tuple[str, ...] = ()
+    # The cards this replay's strategy containers attach: a leg of a
+    # concurrent batch gets one of the arm's (``session_tools.leg_cards``);
+    # None attaches every card the evaluator's sandbox pins.
+    gpu_devices: tuple[int, ...] | None = None
 
 
 @dataclass(frozen=True)

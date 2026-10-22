@@ -65,16 +65,7 @@ UNFINISHED_SEED_MARKER = "prebuild_unfinished.json"
 DUCKDB_CLI_URL = "https://github.com/duckdb/duckdb/releases/download/v1.1.3/duckdb_cli-linux-amd64.zip"
 DUCKDB_CLI_NAME = "duckdb_cli-linux-amd64.zip"
 DUCKDB_CLI_SHA256 = "efd0fccdb1a28d9ec7a6ebfcde59900068b8ba43a846c9b553c0fd2bbe4acf43"
-# The causal-conv1d release wheel the image installs (build arg
-# CAUSAL_CONV1D_WHEEL_URL, whose default is this URL), fetched where GitHub is
-# reachable, verified against this digest, shipped and served to the build like
-# the DuckDB CLI (two independent routes, GitHub directly and its ghfast.top
-# proxy, agreed on it on 2026-10-19).
-CAUSAL_CONV1D_WHEEL_NAME = "causal_conv1d-1.7.0+cu12torch2.10cxx11abiTRUE-cp311-cp311-linux_x86_64.whl"
-CAUSAL_CONV1D_WHEEL_URL = f"https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.7.0/{CAUSAL_CONV1D_WHEEL_NAME}"
-CAUSAL_CONV1D_WHEEL_SHA256 = "b872d04d98c80856fd897660eac7129cc2ab51db9694530ce0cd24e1b57200fe"
-# A URL prefix tried before each release's own URL, e.g. https://ghfast.top/
-# (GitHub gave 34 KB/s on 2026-10-19, too slow for the wheel's 197 MB).
+# A URL prefix tried before each release's own URL, e.g. https://ghfast.top/.
 RELEASE_PROXY_ENV = "ZGCA_GITHUB_PROXY"
 # The pretrained-model store (environment.pretrained): the console stamps its
 # manifest digest into every arm it creates and every container compares it.
@@ -300,7 +291,6 @@ class Workflow:
         if listed.returncode != 0 or not listed.stdout:
             raise WorkflowError("git ls-files listed no tracked files in " + str(self.repo_root))
         duckdb_cli = self.release_file(DUCKDB_CLI_URL, DUCKDB_CLI_NAME, DUCKDB_CLI_SHA256)
-        wheel = self.release_file(CAUSAL_CONV1D_WHEEL_URL, CAUSAL_CONV1D_WHEEL_NAME, CAUSAL_CONV1D_WHEEL_SHA256)
         # The list rsync copies from is also what the instance keeps: shipped
         # beside the release files, it lets the `tracked` step remove what is no
         # longer tracked (a retired round file would otherwise stay and be read).
@@ -314,8 +304,8 @@ class Workflow:
         self.dev("copy", *PRESERVE, f"--files-from={manifest}", "--from0", f"{self.repo_root}/", f"dev:{root}/")
         say("deploy: .env (the model gateway keys only)")
         self.dev("put", f"{root}/.env", data=gateway_keys)
-        say(f"deploy: {DUCKDB_CLI_NAME}, {CAUSAL_CONV1D_WHEEL_NAME} and {TRACKED_LIST_NAME}")
-        self.dev("copy", *PRESERVE, str(duckdb_cli), str(wheel), str(manifest), f"dev:{root}/.runtime/zgca/")
+        say(f"deploy: {DUCKDB_CLI_NAME} and {TRACKED_LIST_NAME}")
+        self.dev("copy", *PRESERVE, str(duckdb_cli), str(manifest), f"dev:{root}/.runtime/zgca/")
         self.remote("tracked")
         say(f"deploy: {seed}")
         self.dev("copy", *PRESERVE, "-H", "--delete", f"{seed_dir}/", f"dev:{root}/{seed_path.as_posix()}/")
@@ -324,7 +314,7 @@ class Workflow:
         say(f"deploy: {PRETRAINED}")
         self.dev("copy", *PRESERVE, "-H", "--delete", f"{pretrained}/", f"dev:{root}/{PRETRAINED}/")
         say("deploy: preparing the instance")
-        self.remote("prepare", DUCKDB_CLI_SHA256, CAUSAL_CONV1D_WHEEL_SHA256)
+        self.remote("prepare", DUCKDB_CLI_SHA256)
         self.dev("report")
         say("deploy: done")
 

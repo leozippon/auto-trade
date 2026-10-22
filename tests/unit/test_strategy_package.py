@@ -348,6 +348,7 @@ def test_library_imports_and_booster_files_follow_the_rooted_io_rule():
         "import lightgbm as lgb\nimport xgboost\nimport statsmodels.api as sm\n"
         "from transformers import AutoModel, LlamaConfig\nfrom peft import LoraConfig, get_peft_model\n"
         "from accelerate import Accelerator\nfrom einops import rearrange\n"
+        "from vllm import LLM, SamplingParams\n"
         "from dataclasses import dataclass\nfrom typing import Sequence\n"
         "def fit(context):\n"
         "    lgb.Booster().save_model(context.state_dir + '/m.txt')\n"
@@ -391,11 +392,13 @@ def test_the_template_readme_states_the_enforced_import_allowlist():
 
 def test_budgets_come_from_one_source_each():
     limits = SandboxLimits()
-    assert (limits.cpus, limits.memory, limits.pids) == (8.0, "16g", 256)
+    assert (limits.cpus, limits.memory, limits.pids) == (8.0, "16g", 1024)
     # One CPU and memory boundary for both containers, so a session that
     # profiles its fit under `shell` measures against the ceiling the formal
     # replay enforces instead of extrapolating across two of them.
-    assert (limits.cpus, limits.memory) == (SandboxSpec().cpus, SandboxSpec().memory)
+    assert (limits.cpus, limits.memory, limits.pids) == (
+        SandboxSpec().cpus, SandboxSpec().memory, SandboxSpec().pids_limit
+    )
     assert (limits.timeout_seconds, limits.fit_timeout_seconds) == (360.0, 3600.0)
     # The pipeline knob defaults to the executor's fit wall clock and the
     # WebUI defaults read the pipeline dataclass.

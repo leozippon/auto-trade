@@ -1436,7 +1436,7 @@ def _llm_settings(
             params.get("agent_sandbox_memory", SandboxSpec().memory), "agent_sandbox_memory"
         ),
         pids_limit=_positive_int(
-            params.get("agent_sandbox_pids", 512), "agent_sandbox_pids"
+            params.get("agent_sandbox_pids", SandboxSpec().pids_limit), "agent_sandbox_pids"
         ),
         tmpfs_size=_memory_limit(
             params.get("agent_sandbox_tmpfs", "1g"), "agent_sandbox_tmpfs"

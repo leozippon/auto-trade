@@ -167,7 +167,7 @@ class LocalDailyEvaluationBackend:
             schedule=request.schedule,
             broker_profile=request.broker_profile,
             execution_mode=self.execution_mode,  # type: ignore[arg-type]
-            sandbox=self.sandbox,
+            sandbox=self.sandbox.on_devices(request.gpu_devices),
         )
         replay = DailyStrategyPipeline(
             config,

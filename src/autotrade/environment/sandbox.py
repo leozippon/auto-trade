@@ -12,7 +12,7 @@ import subprocess
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .gpu import GpuUnavailableError, device_request, host_gpu_name
@@ -187,10 +187,14 @@ class SandboxLimits:
     # containers use ~1.1 of the 8 cores and host CPU PSI is 0.
     cpus: float = 8.0
     memory: str = "16g"
-    # A fork-bomb guard, not a budget: one worker with torch, LightGBM and
-    # XGBoost thread pools at the CPU-derived thread cap plus PyArrow's own
-    # pool needs well over the 64 the single-threaded NumPy era allowed.
-    pids: int = 256
+    # A fork-bomb guard, not a budget, counting threads as well as processes:
+    # one worker with torch, LightGBM and XGBoost thread pools at the
+    # CPU-derived thread cap plus PyArrow's own pool needs well over the 64
+    # the single-threaded NumPy era allowed, and a vLLM engine run tensor
+    # parallel across two cards peaked at 280 (its engine and two GPU worker
+    # processes), past the 256 this was before. The session container runs
+    # the same engines under ``vllm serve`` and has the same guard.
+    pids: int = 1024
     # Wall clock for one ``generate_orders(context)`` call (published as
     # ``strategy_inference_timeout_seconds``) and for one ``fit(context)``
     # call; the pipeline knob ``strategy_fit_timeout_seconds`` sets the latter.
@@ -229,8 +233,9 @@ class SandboxLimits:
     gpu_name_filter: str | None = None
     # The devices every container of this evaluation attaches: the arm's
     # claimed cards, or the ones another caller took for this run
-    # (``pipelines.hitl_state.select_gpus``). The Environment chooses none, so
-    # a request for devices that names none here refuses to start.
+    # (``pipelines.hitl_state.select_gpus``), or one of them for a leg of a
+    # concurrent batch (``SandboxConfig.on_devices``). The Environment chooses
+    # none, so a request for devices that names none here refuses to start.
     gpu_devices: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
@@ -333,6 +338,21 @@ class SandboxConfig:
             raise ValueError("docker_executable must be non-empty")
         pretrained_pin(self.pretrained_manifest_sha256)
 
+    def on_devices(self, devices: tuple[int, ...] | None) -> SandboxConfig:
+        """This boundary with its containers attaching exactly ``devices``.
+
+        A leg of a concurrent batch replays on one card of the arm's claim
+        (``pipelines.session_tools.leg_cards``); None keeps every device the
+        limits pin, which is what a replay running alone attaches.
+        """
+
+        if devices is None:
+            return self
+        return replace(
+            self,
+            limits=replace(self.limits, gpu_count=len(devices), gpu_devices=tuple(devices)),
+        )
+
 
 @dataclass(frozen=True)
 class SandboxSpec:
@@ -346,8 +366,14 @@ class SandboxSpec:
     # ``SandboxLimits.cpus``/``memory``, whose rationale carries the sizing.
     cpus: float = 8.0
     memory: str = "16g"
-    pids_limit: int = 512
+    # ``SandboxLimits.pids``, whose rationale carries the sizing.
+    pids_limit: int = 1024
     tmpfs_size: str = "1g"
+    # /dev/shm, sized like the strategy container's (``SandboxLimits.shm_size``)
+    # for the same users: a model server the session runs across its cards
+    # (``vllm serve`` with tensor parallel) and multi-process data loading in
+    # a ``fit`` the session profiles. Docker's default is 64 MB.
+    shm_size: str = "2g"
     # "auto" asks for gpu_count devices and names none yet: whoever starts the
     # session pins them first (an arm's worker the cards the console claimed,
     # ``pipelines.worker.load_worker_options``), and a session still on "auto"
@@ -376,7 +402,10 @@ class SandboxSpec:
             raise ValueError("ordinary Agent sandboxes require network='none'")
         if isinstance(self.cpus, bool) or not math.isfinite(self.cpus) or self.cpus <= 0:
             raise ValueError("sandbox cpus must be positive")
-        if not _MEMORY_LIMIT.fullmatch(self.memory) or not _MEMORY_LIMIT.fullmatch(self.tmpfs_size):
+        if not all(
+            _MEMORY_LIMIT.fullmatch(value)
+            for value in (self.memory, self.tmpfs_size, self.shm_size)
+        ):
             raise ValueError("invalid Docker memory limit")
         if (
             isinstance(self.pids_limit, bool)
@@ -403,6 +432,7 @@ class SandboxSpec:
             "memory": self.memory,
             "pids_limit": self.pids_limit,
             "tmpfs_size": self.tmpfs_size,
+            "shm_size": self.shm_size,
             "gpu": self.gpu,
             "gpu_count": self.gpu_count,
             "gpu_name_filter": self.gpu_name_filter,
@@ -547,6 +577,7 @@ class DockerSandbox:
             # exec for Triton's kernel cache, as in the strategy container
             # (``executor.DockerStrategyExecutor.docker_command``).
             "--read-only", "--tmpfs", f"/tmp:rw,exec,nosuid,nodev,size={self.spec.tmpfs_size}",
+            "--shm-size", self.spec.shm_size,
             # Swap ceiling equal to the memory cap: see ``SandboxLimits.memory``
             # for why the two are the same number.
             "--cpus", f"{self.spec.cpus:g}", "--memory", self.spec.memory,

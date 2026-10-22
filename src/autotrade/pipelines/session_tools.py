@@ -10,6 +10,7 @@ into the Agent runner, so this module never imports it back.
 from __future__ import annotations
 
 import json
+import queue
 import shutil
 import time
 import uuid
@@ -1209,13 +1210,15 @@ def _failure_cause(error: BaseException | None) -> str:
 
 @dataclass(frozen=True)
 class _Replayed:
-    """One candidate's replay: its evaluation or the error it raised, and the
-    ``time.perf_counter`` window it ran in."""
+    """One candidate's replay: its evaluation or the error it raised, the
+    ``time.perf_counter`` window it ran in, and the card it was pinned to
+    (None: every card of the arm)."""
 
     evaluation: EvaluationResult | None
     error: Exception | None
     started: float
     ended: float
+    card: int | None = None
 
     @property
     def seconds(self) -> float:
@@ -1224,16 +1227,37 @@ class _Replayed:
     def overlaps(self, other: _Replayed) -> bool:
         return self.started < other.ended and other.started < self.ended
 
+    def shares_card_with(self, other: _Replayed) -> bool:
+        """Whether the two held a card at the same time."""
+
+        return self.overlaps(other) and (
+            self.card is None or other.card is None or self.card == other.card
+        )
+
+
+def leg_cards(devices: Sequence[int], width: int) -> list[int]:
+    """The card of each of a batch's ``width`` concurrent replay slots.
+
+    The arm's cards in turn, so with at least as many cards as slots no two
+    legs running at once share one, and with fewer they share evenly. A batch
+    running one replay at a time pins nothing: that replay attaches every card,
+    which is what lets one strategy run a model across them (tensor parallel).
+    """
+
+    if width <= 1 or not devices:
+        return []
+    return [devices[slot % len(devices)] for slot in range(width)]
+
 
 def _shared_gpu_note(siblings: Sequence[str]) -> str:
     """What a candidate the shared card failed is told about its own batch.
 
-    Every leg of a batch attaches the arm's cards, so siblings that replayed
-    while it ran held memory on the same device. The CUDA report cannot say
-    whose memory filled the card -- a sibling's, the candidate's own other
-    strategy container's, or a process outside the arm -- so the note names
-    the siblings as sharers, not as the cause, and the failure stays the
-    environment's and is refunded like any other contention.
+    The siblings that replayed on its card while it ran held memory on the
+    same device. The CUDA report cannot say whose memory filled the card -- a
+    sibling's, the candidate's own other strategy container's, or a process
+    outside the arm -- so the note names the siblings as sharers, not as the
+    cause, and the failure stays the environment's and is refunded like any
+    other contention.
     """
 
     return (
@@ -1722,7 +1746,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
                         [
                             result_names[other]
                             for other, sibling in enumerate(outcomes)
-                            if other != index and sibling.overlaps(replayed)
+                            if other != index and sibling.shares_card_with(replayed)
                         ]
                         if error is not None and gpu_contended(error)
                         else []
@@ -2063,20 +2087,34 @@ class BatchValidateTool(SessionTimeBudgetAware):
         """
 
         outcomes: list[_Replayed | None] = [None] * len(revisions)
+        workers = min(len(revisions), self.max_concurrency)
+        # One card per running leg, taken when the leg starts and handed back
+        # when it ends, so a leg never lands on a card another running leg
+        # holds while a free one waits.
+        free_cards: queue.SimpleQueue[int] = queue.SimpleQueue()
+        sandbox = getattr(self.backtest.evaluator, "sandbox", None)
+        devices = getattr(getattr(sandbox, "limits", None), "gpu_devices", ())
+        cards = leg_cards(devices, workers)
+        for card in cards:
+            free_cards.put(card)
 
         def run_one(index: int) -> _Replayed:
+            card = free_cards.get() if cards else None
+            request = self.backtest.validation_request(revisions[index], span)
+            if card is not None:
+                request = replace(request, gpu_devices=(card,))
             started = time.perf_counter()
             try:
-                evaluation = self.backtest.evaluator.evaluate(
-                    self.backtest.validation_request(revisions[index], span)
-                )
+                evaluation = self.backtest.evaluator.evaluate(request)
             except SessionInterrupt:
                 raise
             except Exception as exc:  # noqa: BLE001 - the text IS this row's result
-                return _Replayed(None, exc, started, time.perf_counter())
-            return _Replayed(evaluation, None, started, time.perf_counter())
+                return _Replayed(None, exc, started, time.perf_counter(), card)
+            finally:
+                if card is not None:
+                    free_cards.put(card)
+            return _Replayed(evaluation, None, started, time.perf_counter(), card)
 
-        workers = min(len(revisions), self.max_concurrency)
         if workers <= 1:
             return [run_one(index) for index in range(len(revisions))]
         interrupt: SessionInterrupt | None = None

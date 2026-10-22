@@ -3,12 +3,13 @@
 #   docker build --build-arg HTTP_PROXY --build-arg HTTPS_PROXY \
 #     --build-arg ALL_PROXY --build-arg NO_PROXY \
 #     -t autotrade-sandbox:latest -f ops/docker/sandbox.Dockerfile .
-# Package and release downloads default to mirrors, the causal-conv1d wheel to
-# its GitHub release, so the default bridge network is enough where GitHub is
-# reachable (CAUSAL_CONV1D_WHEEL_URL points it elsewhere). Proxy build args
-# without an explicit value forward the current process environment without
-# baking proxy credentials into the image; add --network=host only when that
-# proxy listens on the host's loopback.
+# Package and release downloads default to mirrors, so the default bridge
+# network is enough to build. It is not enough to build in reasonable time on
+# a rootless Docker whose bridge traffic goes through user-mode networking:
+# on the L20 host that measured 4 MB/s falling to 0.25 MB/s against 95 MB/s
+# with --network=host, and the vLLM layer downloads several GB, so build there
+# with --network=host. Proxy build args without an explicit value forward the
+# current process environment without baking proxy credentials into the image.
 # Nothing here needs BuildKit, so the classic builder (DOCKER_BUILDKIT=0) works.
 # Project-level build identity is assigned after a successful offline smoke
 # test by the host lifecycle; this build consumes the declared Python tag.
@@ -56,12 +57,14 @@ RUN sed -i \
 
 # Pinned research/DL stack. Data layer pins are the environment's
 # byte-format contract (parquet caches) and stay put; the DL family follows
-# "widely adopted, relatively recent": torch 2.10.0 is the last and most
-# mature release of the CUDA 12.8 line, and the boosting picks are the current
-# stable releases the ecosystem has settled on. The stack is what a formal
-# strategy may import (strategy_loader.ALLOWED_MODULES) plus the data tools the
-# Agent's shell uses; torch wheels carry their own CUDA runtime, so the image
-# needs no CUDA toolkit and is not tied to one GPU architecture.
+# the vLLM release below: torch 2.13.0 (CUDA 13.0 wheels, which need an NVIDIA
+# driver of the 580 series or later) and the torchvision it pins are exactly
+# what vLLM 0.27.1 requires, the combination the host's own vLLM service runs
+# on its L20s, and the boosting picks are the current stable releases the
+# ecosystem has settled on. The stack is what a formal strategy may import
+# (strategy_loader.ALLOWED_MODULES) plus the data tools the Agent's shell
+# uses; torch wheels carry their own CUDA runtime, so the image needs no system
+# CUDA toolkit and is not tied to one GPU architecture.
 RUN pip install --no-cache-dir -i ${PIP_INDEX_URL} \
         pandas==2.2.3 \
         numpy==2.1.3 \
@@ -70,46 +73,68 @@ RUN pip install --no-cache-dir -i ${PIP_INDEX_URL} \
         scipy==1.17.1 \
         scikit-learn==1.5.2 \
         statsmodels==0.14.4 \
-        torch==2.10.0 \
-        torchvision==0.25.0 \
+        torch==2.13.0 \
+        torchvision==0.28.0 \
         safetensors==0.8.0 \
         lightgbm==4.7.0 \
         xgboost==3.2.0
 
-# causal-conv1d publishes no wheel for this torch/CUDA pair on PyPI and the
-# image has no CUDA toolkit to build its sdist, so the layer below installs
-# the project's release wheel. Declared here rather than at the top so that
-# pointing it elsewhere leaves the layers above cached: the ZGCA deploy pins
-# the same file by digest, ships it and serves it from the instance host, like
-# the DuckDB CLI below (ops/zgca/zgca.py).
-ARG CAUSAL_CONV1D_WHEEL_URL=https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.7.0/causal_conv1d-1.7.0+cu12torch2.10cxx11abiTRUE-cp311-cp311-linux_x86_64.whl
-
-# Transformer and continual-learning stack: model families (transformers),
-# tensor rearrangement (einops), device and mixed-precision handling
-# (accelerate), parameter-efficient adapters (peft), and the fused kernels of
-# the Gated DeltaNet layers in the hybrid Qwen3.5 models of the pretrained
-# store (flash-linear-attention's Triton kernels, causal-conv1d's CUDA conv):
-# without the last two transformers falls back to a torch implementation that
-# ran out of 44 GiB training on 256 short titles. tokenizers and
-# huggingface_hub come with transformers, safetensors from the layer above;
-# peft 0.20.0 is the release cut while transformers 5.14 was current, and
-# flash-linear-attention 0.5.2 and causal-conv1d 1.7.0 the releases built for
-# torch 2.10. A layer of its own, so a host that already holds the layer above
-# (torch alone is several GB) rebuilds only this one. The installed set is its
-# constraint file: this layer can only add packages, and a requirement that
-# would move a pin of the layer above fails the build instead of replacing it.
+# vLLM, for in-process inference in a strategy (``from vllm import LLM``) and
+# for ``vllm serve`` on the session container's loopback, with the
+# transformers release the host's service runs it with. The installed set is
+# its constraint file: this layer can only add packages, and a requirement
+# that would move a pin of the layer above fails the build instead of
+# replacing it. Its CUDA 13 dependencies bring a pip-packaged CUDA toolkit
+# (nvcc included) under nvidia/cu13, which the next layer builds causal-conv1d
+# with. The FlashInfer release vLLM pins annotates one function with
+# ``array.array[int]``, which only Python 3.12 evaluates; postponed annotations
+# make the module importable on 3.11 (the host's own vLLM service carries the
+# same one-line change), and vLLM imports it on every engine start.
 RUN pip freeze > /tmp/installed.txt \
-    && curl -fL --retry 8 --retry-all-errors --retry-delay 3 --connect-timeout 30 --max-time 1200 \
-        "${CAUSAL_CONV1D_WHEEL_URL}" \
-        -o /tmp/causal_conv1d-1.7.0+cu12torch2.10cxx11abiTRUE-cp311-cp311-linux_x86_64.whl \
     && pip install --no-cache-dir -i ${PIP_INDEX_URL} -c /tmp/installed.txt \
-        transformers==5.14.1 \
+        vllm==0.27.1 \
+        transformers==5.15.0 \
+    && rm /tmp/installed.txt \
+    && sed -i '1i from __future__ import annotations' \
+        /usr/local/lib/python3.11/site-packages/flashinfer/comm/fd_exchange.py \
+    && python -c "import flashinfer.comm"
+
+# Transformer and continual-learning stack: tensor rearrangement (einops),
+# device and mixed-precision handling (accelerate), parameter-efficient
+# adapters (peft), and the fused kernels of the Gated DeltaNet layers in the
+# hybrid Qwen3.5 models of the pretrained store when transformers runs them
+# (flash-linear-attention's Triton kernels, causal-conv1d's CUDA conv):
+# without the last two transformers falls back to a torch implementation that
+# ran out of 44 GiB training on 256 short titles. vLLM carries kernels of its
+# own and needs neither. causal-conv1d publishes no wheel for torch 2.13, so
+# its PyPI source is compiled here against the torch above with the nvcc the
+# vLLM layer installed (no build isolation, so the build sees that torch);
+# the sources fix the architectures it compiles for, sm_80 code among them,
+# which the A100 runs natively and the L20 (sm_89) through binary
+# compatibility. That nvcc (13.4) is newer than the CUDA 13.0 runtime headers
+# torch pins, a pairing CCCL refuses unless told otherwise; the extension is
+# machine code for those fixed architectures, which CUDA's minor-version
+# compatibility runs on any CUDA 13 driver. The pip toolkit ships the runtime
+# library only under its versioned name, so the link gets an unversioned
+# alias in a scratch directory. A layer of its own, so a host that already
+# holds the layers above (several GB) rebuilds only this one, under the same
+# constraint rule.
+RUN pip freeze > /tmp/installed.txt \
+    && mkdir /tmp/cudart \
+    && ln -s /usr/local/lib/python3.11/site-packages/nvidia/cu13/lib/libcudart.so.13 /tmp/cudart/libcudart.so \
+    && CUDA_HOME=/usr/local/lib/python3.11/site-packages/nvidia/cu13 \
+        NVCC_APPEND_FLAGS=-DCCCL_DISABLE_CTK_COMPATIBILITY_CHECK \
+        LIBRARY_PATH=/tmp/cudart \
+        CAUSAL_CONV1D_FORCE_BUILD=TRUE \
+        MAX_JOBS=8 \
+        pip install --no-cache-dir --no-build-isolation -i ${PIP_INDEX_URL} -c /tmp/installed.txt \
         einops==0.8.2 \
         accelerate==1.14.0 \
         peft==0.20.0 \
         flash-linear-attention==0.5.2 \
-        /tmp/causal_conv1d-1.7.0+cu12torch2.10cxx11abiTRUE-cp311-cp311-linux_x86_64.whl \
-    && rm /tmp/installed.txt /tmp/causal_conv1d-1.7.0+cu12torch2.10cxx11abiTRUE-cp311-cp311-linux_x86_64.whl
+        causal-conv1d==1.7.0 \
+    && rm -r /tmp/installed.txt /tmp/cudart \
+    && python -c "import torch, causal_conv1d_cuda, fla, peft, vllm"
 
 # Both containers run without a network and the only pretrained weights are
 # the store an arm's containers mount read-only (environment.pretrained), so
@@ -118,10 +143,19 @@ RUN pip freeze > /tmp/installed.txt \
 # every other cache, and so does Triton's: it holds the launcher modules
 # Triton compiles for the kernels above and then loads, which is why both
 # containers mount their /tmp tmpfs with exec (environment.executor and
-# environment.sandbox); its default under the read-only home cannot be written.
+# environment.sandbox); its default under the read-only home cannot be written,
+# and neither can FlashInfer's, which vLLM creates on every engine start. vLLM
+# keeps its own caches under XDG_CACHE_HOME and reports no usage statistics.
+# Its default top-k/top-p sampler is a FlashInfer kernel compiled with nvcc at
+# every engine start, a toolchain the containers do not put on PATH; vLLM's
+# own sampler needs none and is what an engine here uses.
 ENV HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1 \
-    TRITON_CACHE_DIR=/tmp/cache/triton
+    TRITON_CACHE_DIR=/tmp/cache/triton \
+    FLASHINFER_WORKSPACE_BASE=/tmp/cache \
+    VLLM_USE_FLASHINFER_SAMPLER=0 \
+    VLLM_NO_USAGE_STATS=1 \
+    DO_NOT_TRACK=1
 
 # DuckDB CLI binary, pinned to the Python package version. The Agent's data-probe
 # guidance uses `duckdb -c "..."`; without the CLI it fails with exit 127 and the

@@ -19,7 +19,7 @@ python ops/zgca/zgca.py --instance <平台实例 id> status
 
 `up` 就是 `instance start`：已是 RUNNING 就只确认 SSH，否则发出一次启动请求（平台暂时拒绝时由 `instance` 退避重试），等到实例显示 RUNNING 且 SSH 能登录，最后打印本周卡时。
 
-`deploy <种子目录>` 先在本机核对：种子目录在 `data/` 下且预构建已完成（没有 `prebuild_unfinished.json`），它的 `provider.json` 指向的 research release 已经发布在 `data/research_releases/` 下，`.env` 存在且设了模型档案点名的键，预训练模型库 `data/pretrained/` 带着它的 `MANIFEST.sha256`（开发机上新建的臂钉住并挂载这份库）。镜像构建要装的 DuckDB CLI 发布包和 causal-conv1d 轮子（约 197 MB）都在 GitHub 上，开发机访问不到，所以由本机下载一次、缓存在 `.runtime/zgca/`：设了 `ZGCA_GITHUB_PROXY` 时先经代理、再直连 GitHub，只有与钉住的 SHA-256 相符的下载才进缓存，缓存里摘要不符的文件直接拒绝。核对都通过、实例在运行，才开始动开发机：先 `dev bootstrap`（新实例的镜像不带 rsync 和 tmux），建好运行时目录，再依次传输，每一次都由 `dev copy` 传完后以同样参数 dry-run 比对，有差异就停下：
+`deploy <种子目录>` 先在本机核对：种子目录在 `data/` 下且预构建已完成（没有 `prebuild_unfinished.json`），它的 `provider.json` 指向的 research release 已经发布在 `data/research_releases/` 下，`.env` 存在且设了模型档案点名的键，预训练模型库 `data/pretrained/` 带着它的 `MANIFEST.sha256`（开发机上新建的臂钉住并挂载这份库）。镜像构建要装的 DuckDB CLI 发布包在 GitHub 上，开发机访问不到，所以由本机下载一次、缓存在 `.runtime/zgca/`：设了 `ZGCA_GITHUB_PROXY` 时先经代理、再直连 GitHub，只有与钉住的 SHA-256 相符的下载才进缓存，缓存里摘要不符的文件直接拒绝（causal-conv1d 在镜像里从 PyPI 源码编译，开发机经清华镜像取得，不必带过去）。核对都通过、实例在运行，才开始动开发机：先 `dev bootstrap`（新实例的镜像不带 rsync 和 tmux），建好运行时目录，再依次传输，每一次都由 `dev copy` 传完后以同样参数 dry-run 比对，有差异就停下：
 
 | 内容 | 方式 |
 | --- | --- |
