@@ -279,7 +279,7 @@ class _Evaluator:
                 if marker in source:
                     killed = StrategyMemoryExceeded(
                         "Docker strategy fit failed: strategy worker was killed before a "
-                        "response (exit 137, SIGKILL): the container's 16g memory cap is "
+                        "response (exit 137, SIGKILL): the container's 32g memory cap is "
                         "what kills a worker this way"
                     )
                     raise _replay_failure(f"fit failed ({marker}): {killed}", killed)
@@ -1414,7 +1414,7 @@ class BatchValidateRunTest(unittest.TestCase):
             self.assertTrue(result.ok)
             rows = {row["name"]: row for row in result.value["candidates"]}
             self.assertEqual(rows["big"]["cause"], "strategy")
-            self.assertIn("16g memory cap", rows["big"]["error"])
+            self.assertIn("32g memory cap", rows["big"]["error"])
             self.assertEqual(result.value["replay_years_used"], 2)
             self.assertEqual(session.backtest.replay_years_used, 2)
 

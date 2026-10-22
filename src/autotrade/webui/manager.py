@@ -67,8 +67,8 @@ from .registry import experiment_state, read_ledger_records, worker_log_ref
 # (uses_local_model) and MAX_RUNNING_LOCAL_EXPERIMENTS local arms already run.
 # Runner memory does not bind (a runner holds 1-3 GiB since evaluation slots
 # stream instead of decoding whole, and an arm's replays run in containers
-# capped at 16 GiB). The local limit protects the shared local model service:
-# its aggregate generation throughput levels off at about 8 concurrent
+# under their own memory cap). The local limit protects the shared local model
+# service: its aggregate generation throughput levels off at about 8 concurrent
 # requests (~150 tok/s), while four parent conversations with their sub-agent
 # fan-out (at most 4 concurrent each) run 3-5 requests at a time (p50/p90) and
 # use about half of that. An arm whose main session and sub-agents are hosted

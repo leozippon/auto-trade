@@ -434,7 +434,7 @@ def test_the_pipeline_carries_container_telemetry_off_both_paths(tmp_path: Path)
     from autotrade.environment.executor import strategy_resources_of
     from autotrade.environment.replay.stats import compute_return_stats
 
-    usage = {"peak_memory_bytes": 7883149312, "memory_limit_bytes": 17179869184}
+    usage = {"peak_memory_bytes": 7883149312, "memory_limit_bytes": 34359738368}
 
     class _MeasuredExecutor:
         def __init__(self, *, fail: bool) -> None:
