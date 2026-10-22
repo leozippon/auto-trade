@@ -158,7 +158,7 @@ Each trading day opens with the T+1 release and ex-date settlement, then fills t
 
 ## Pretrained models
 
-The only pretrained weights available are four Hugging Face model directories in a read-only store, `context.pretrained_dir` for the strategy and `/mnt/pretrained` in the session's shell. In an arm whose `runtime_env.json` shows no `sandbox_spec.pretrained_manifest_sha256`, neither is mounted and `context.pretrained_dir` is empty.
+The only pretrained weights available are the ten Hugging Face model directories of a read-only store, `context.pretrained_dir` for the strategy and `/mnt/pretrained` in the session's shell; its `MANIFEST.sha256` lists every file. In an arm whose `runtime_env.json` shows no `sandbox_spec.pretrained_manifest_sha256`, neither is mounted and `context.pretrained_dir` is empty.
 
 | Directory | Parameters | Architecture |
 | --- | --- | --- |
@@ -166,8 +166,16 @@ The only pretrained weights available are four Hugging Face model directories in
 | `Qwen3-1.7B` | 1.7B | Qwen3: 28 standard attention layers |
 | `Qwen3.5-0.8B` | 0.8B | Qwen3.5: hybrid, 18 Gated DeltaNet (linear-attention) and 6 full-attention layers |
 | `Qwen3.5-2B` | 2B | Qwen3.5: hybrid, 18 Gated DeltaNet (linear-attention) and 6 full-attention layers |
+| `Qwen3.5-4B` | 4B | Qwen3.5: hybrid, 24 Gated DeltaNet and 8 full-attention layers |
+| `Qwen3.5-9B` | 9B | Qwen3.5: hybrid, 24 Gated DeltaNet and 8 full-attention layers |
+| `Qwen3.8-27B-FP8` | 27B | Qwen3.8: hybrid, 48 Gated DeltaNet and 16 gated-attention layers; block FP8 weights, about 28.5 GiB, one card |
+| `Qwen3.8-27B` | 27B | the same model in bfloat16, about 52 GiB: more than one card holds, so it runs across two (`tensor_parallel_size=2`) |
+| `Qwen3-Embedding-0.6B` | 0.6B | text embedding: Qwen3, 28 layers, last-token pooling, 1024 dimensions |
+| `Qwen3-Embedding-8B` | 8B | text embedding: Qwen3, 36 layers, last-token pooling, 4096 dimensions |
 
-The model cards publish no training-data cutoff; the release month bounds it — Qwen3-0.6B and Qwen3-1.7B were released in 2025-04, Qwen3.5-0.8B and Qwen3.5-2B in 2026-02 — so only replay dates after a model's release lie certainly beyond its training data.
+The Qwen3.5 and Qwen3.8 checkpoints are multimodal; they load and serve as text-only language models. The embedding models take the last token's hidden state (left padding), L2-normalised; a prefix of the vector, normalised again, is itself an embedding (their cards' Matryoshka training).
+
+The model cards publish no training-data cutoff; the release month bounds it — Qwen3-0.6B and Qwen3-1.7B were released in 2025-04, the Qwen3-Embedding models in 2025-06, Qwen3.5 in 2026-02 and Qwen3.8 in 2026-08 — so only replay dates after a model's release lie certainly beyond its training data.
 
 ```python
 import torch
