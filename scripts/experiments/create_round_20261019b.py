@@ -40,7 +40,7 @@ if str(_REPO_ROOT) not in sys.path:
 from scripts.experiments._profiles import FUND_TITLE_EIGHT_YEAR_100K, HCM_LINEAGE
 from scripts.experiments._round import Round
 
-PIT_VIEWS_SEED = "data/pit_views_seed_research_8y_fundanns_20261019"
+PIT_VIEWS_SEED = "data/pit_views_seed_research_8y_fundanns_20261022"
 OPUS = "claude-opus-5-5"
 SOL = "gpt-6.1-sol"
 FLASH = "DeepSeek-V4.1-Flash"
