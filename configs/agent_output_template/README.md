@@ -180,16 +180,44 @@ model = AutoModelForCausalLM.from_pretrained(root, dtype=torch.bfloat16)
 
 `AutoModelForCausalLM` loads the Qwen3.5 checkpoints as text-only language models. The hub is unreachable from both containers, so any other model id fails at once. `peft` is installed for adapters, and `flash-linear-attention` and `causal-conv1d` give the Qwen3.5 linear-attention layers their fused GPU kernels; each container compiles them on first use, so its first GPU forward and first backward each take up to about a minute longer, on the clock of the call that makes them. Whatever is trained during a replay is written under `context.state_dir` (`model.save_pretrained(context.state_dir + "/adapter")`, or a `torch.save` of the weights), never into the store.
 
+`vllm` runs a store model in process for batched generation. There is no model service and no network: the engine lives in the strategy's own container, on the card the replay attaches (see Runtime restrictions below for which cards a replay gets).
+
+```python
+from vllm import LLM, SamplingParams
+
+ENGINE = []  # one engine per container, kept for the following calls
+
+def engine(context):
+    if not ENGINE:
+        ENGINE.append(LLM(model=context.pretrained_dir + "/<model>", max_model_len=8192,
+                          max_num_seqs=128, enforce_eager=True, seed=SEED))
+    return ENGINE[0]
+
+outputs = engine(context).chat(
+    prompts,  # one message list per prompt, the same batch in the same order every time
+    SamplingParams(temperature=0.0, max_tokens=8, seed=SEED),
+    chat_template_kwargs={"enable_thinking": False},
+    use_tqdm=False,
+)
+texts = [output.outputs[0].text for output in outputs]
+```
+
+- `fit` and `generate_orders` run in two containers on the same card, and an engine claims 90% of its card's memory (`gpu_memory_utilization`), so build it in one of them: for example in `fit` with `REFIT_PERIOD = "day"`, writing the day's readings under `context.state_dir` for `generate_orders` to read.
+- Loading is slow and counts on the clock of the call that loads. Measured with Qwen3.8-27B-FP8 (FP8 weights, about 28.5 GiB) on one L20 under these container limits: about 3 minutes with `enforce_eager=True`, about 6.5 minutes without (torch.compile and CUDA-graph capture, redone in every container because their caches live in `/tmp`); reading the weights from a cold disk took about 70 seconds of either. Prefill then ran at about 2,300 prompt tokens per second eager and 3,200 compiled, for a batch of 20 prompts of about 1,000 tokens each. On one card this hybrid model's linear-attention state holds about 180 concurrent sequences, so `max_num_seqs` must stay below that (vLLM's default 256 refuses to start). The engine itself used about 5.7 GiB of the container's 16 GiB memory.
+- Reproducibility. With `enforce_eager=True`, temperature 0 and the same batch of prompts in the same order, outputs were identical in every container and on every card tried. A compiled engine (the default) reproduced its outputs only within the same engine. In both modes any other batch (one prompt alone, a subset, another order) changed most outputs. Since two replays of the same bytes must place the same orders, use eager mode and send each decision's prompts as one fixed batch (for example the day's shortlist sorted by code).
+- `chat_template_kwargs={"enable_thinking": False}` switches the Qwen3.5-family thinking block off; the template then renders an empty one and the answer follows it.
+- The `vllm` package is importable; its server (`vllm serve`) is a session tool, not something a strategy starts.
+
 ## Runtime restrictions
 
 The loader requires `main.py` to define one synchronous single-argument `generate_orders`, accepts at most one synchronous single-argument `fit`, and requires `REFIT_PERIOD`, when present, to be a single module-level assignment of a period literal or `None`. Supported imports, in every module of the package, are the package's own modules plus:
 
 ```text
 __future__, collections, dataclasses, datetime, decimal, functools, itertools, math, statistics, typing,
-numpy, pandas, scipy, sklearn, lightgbm, xgboost, statsmodels, torch, transformers, peft, accelerate, einops
+numpy, pandas, scipy, sklearn, lightgbm, xgboost, statsmodels, torch, transformers, peft, accelerate, einops, vllm
 ```
 
-Submodules of these libraries (`scipy.stats`, `sklearn.linear_model`, `torch.nn`) are covered. Both containers are offline, so a `transformers` model either loads from the pretrained store above or is built from its config (`AutoModel.from_config(LlamaConfig(...))`); a hub id passed to `from_pretrained` fails at once. GPU devices are visible to strategy code only when the run facts' `budgets.strategy_gpu_count` is above zero, so select the device from `torch.cuda.is_available()` and keep the CPU path working; on CPU, torch's thread count is tied to the container's CPU quota. Relative imports, dynamic import/execution, arbitrary file access, process calls, and general external I/O are rejected. Common NumPy and pandas load/save methods and pickle-based persistence outside those libraries (`pickle`, `joblib`, `read_pickle`/`to_pickle`) are blocked; the only supported strategy file I/O is the context-rooted form described above, so fitted parameters are persisted as NumPy arrays, as a `torch.save` checkpoint (a `peft` adapter's own weights from `get_peft_model_state_dict`), as a `save_pretrained` model directory, or as a LightGBM/XGBoost booster file written with `save_model(context.state_dir + "/model.txt")`.
+Submodules of these libraries (`scipy.stats`, `sklearn.linear_model`, `torch.nn`) are covered. Both containers are offline, so a `transformers` model either loads from the pretrained store above or is built from its config (`AutoModel.from_config(LlamaConfig(...))`); a hub id passed to `from_pretrained` fails at once. GPU devices are visible to strategy code only when the run facts' `budgets.strategy_gpu_count` is above zero, so select the device from `torch.cuda.is_available()` and keep the CPU path working; on CPU, torch's thread count is tied to the container's CPU quota. A replay running alone (a smoke backtest, a one-candidate batch, the forward replay) attaches all `budgets.strategy_gpu_count` cards, which is what lets one model run across them (`tensor_parallel_size`); the candidates of a `batch_validate` that replay side by side each attach one of the arm's cards, in turn, so they share a card only when the batch runs more candidates at once than the arm has cards. Read the count from `torch.cuda.device_count()` rather than assuming one. Relative imports, dynamic import/execution, arbitrary file access, process calls, and general external I/O are rejected. Common NumPy and pandas load/save methods and pickle-based persistence outside those libraries (`pickle`, `joblib`, `read_pickle`/`to_pickle`) are blocked; the only supported strategy file I/O is the context-rooted form described above, so fitted parameters are persisted as NumPy arrays, as a `torch.save` checkpoint (a `peft` adapter's own weights from `get_peft_model_state_dict`), as a `save_pretrained` model directory, or as a LightGBM/XGBoost booster file written with `save_model(context.state_dir + "/model.txt")`.
 
 Random draws must be reproducible, because two replays of the same span that place different orders are not reproducible evidence. Write the seed once, as one integer assignment to a seed name — `SEED`, `SEED_BASE`, or a name ending in `_SEED` or `_SEED_BASE` (`SEED_BASE = 1000`) — and derive every draw from it, optionally together with the decision date: `day = int(context.inference_at.strftime("%Y%m%d"))`, then `rng = np.random.default_rng([SEED_BASE, day])` with a further fixed integer for each independent stream, and an integer derived from the seed for any library that samples (`random_state=`, `seed=`, `torch.manual_seed`). Another draw of the same strategy is then that one line changed. Never seed from the wall clock or draw from numpy's unseeded global state (`np.random.choice`, `np.random.default_rng()`); `modification_check` refuses both.
 

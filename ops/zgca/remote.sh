@@ -23,12 +23,10 @@ BOX_PYTHON=/root/miniconda3/bin/python
 # The platform's PyPI mirror lacks tushare 1.4.29 (~/zgca-compute/README.md).
 EXTRA_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
 IMAGE=autotrade-sandbox:latest
-# Shipped by the deploy with the digests it pinned; GitHub and its release
+# Shipped by the deploy with the digest it pinned; GitHub and its release
 # proxies are not reliably reachable from the instance, so the build reads the
-# DuckDB CLI and the causal-conv1d wheel from this host over the bridge
-# network instead.
+# DuckDB CLI from this host over the bridge network instead.
 DUCKDB_CLI=.runtime/zgca/duckdb_cli-linux-amd64.zip
-CAUSAL_CONV1D_WHEEL=.runtime/zgca/causal_conv1d-1.7.0+cu12torch2.10cxx11abiTRUE-cp311-cp311-linux_x86_64.whl
 SERVE_PORT=8765
 PORT=38888
 GPU_NAME=A100
@@ -108,14 +106,12 @@ sys.stdout.writelines(f"{arm}\n" for arm in running_arms(sys.argv[1]))' "$ROOT/e
 
 # The legacy builder on the platform's bridge network (no buildx, no host
 # networking); --force-rm so a failed step leaves no multi-GB container behind.
-# The shipped DuckDB CLI and causal-conv1d wheel are served to the build from
-# this host, on the bridge gateway only, for the build's duration.
+# The shipped DuckDB CLI is served to the build from this host, on the bridge
+# gateway only, for the build's duration.
 build_image() {
-    local log=$1 duckdb_digest=$2 wheel_digest=$3 gateway server status base
+    local log=$1 duckdb_digest=$2 gateway server status base
     echo "$duckdb_digest  $DUCKDB_CLI" | sha256sum -c --quiet \
         || die "$ROOT/$DUCKDB_CLI is missing or is not the release the deploy pinned"
-    echo "$wheel_digest  $CAUSAL_CONV1D_WHEEL" | sha256sum -c --quiet \
-        || die "$ROOT/$CAUSAL_CONV1D_WHEEL is missing or is not the release the deploy pinned"
     gateway=$(docker network inspect bridge --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}')
     [ -n "$gateway" ] || die "the bridge network names no gateway to serve $(dirname "$DUCKDB_CLI") on"
     (cd "$(dirname "$DUCKDB_CLI")" && exec python3 -m http.server "$SERVE_PORT" --bind "$gateway" >/dev/null 2>&1) &
@@ -125,8 +121,7 @@ build_image() {
     base="http://$gateway:$SERVE_PORT"
     echo "building $IMAGE (log $ROOT/$log)"
     DOCKER_BUILDKIT=0 docker build --force-rm -t "$IMAGE" -f ops/docker/sandbox.Dockerfile \
-        --build-arg "DUCKDB_CLI_URL=$base/$(basename "$DUCKDB_CLI")" \
-        --build-arg "CAUSAL_CONV1D_WHEEL_URL=$base/$(basename "$CAUSAL_CONV1D_WHEEL")" . 2>&1 | tee "$log"
+        --build-arg "DUCKDB_CLI_URL=$base/$(basename "$DUCKDB_CLI")" . 2>&1 | tee "$log"
     status=${PIPESTATUS[0]}
     kill "$server" 2>/dev/null
     wait "$server" 2>/dev/null || true
@@ -157,8 +152,7 @@ rebuild_image() {
     fi
 }
 
-# The two arguments are the pinned digests of the DuckDB CLI and the
-# causal-conv1d wheel the deploy shipped.
+# The argument is the pinned digest of the DuckDB CLI the deploy shipped.
 prepare() {
     cd "$ROOT"
     export DEBIAN_FRONTEND=noninteractive
@@ -304,7 +298,7 @@ step=${1:-}
 case "$step" in
     dirs) dirs ;;
     tracked) tracked ;;
-    prepare) [ $# -eq 2 ] || die "prepare needs the pinned DuckDB CLI and causal-conv1d wheel digests"; prepare "$1" "$2" ;;
+    prepare) [ $# -eq 1 ] || die "prepare needs the pinned DuckDB CLI digest"; prepare "$1" ;;
     console-up) console_up ;;
     round) [ $# -ge 1 ] || die "round needs the round file"; round "$@" ;;
     status) status ;;

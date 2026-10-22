@@ -174,6 +174,9 @@ def test_persistent_sandbox_command_has_bounded_explicit_identity_mounts(tmp_pat
     # Docker mounts a tmpfs noexec unless told; Triton loads the launcher
     # modules it compiles from its cache there.
     assert command[command.index("--tmpfs") + 1] == "/tmp:rw,exec,nosuid,nodev,size=1g"
+    # The strategy container's /dev/shm, for a model server the session runs
+    # tensor parallel; Docker's 64 MB default is too small for it.
+    assert command[command.index("--shm-size") + 1] == SandboxLimits().shm_size
     assert command[command.index("--network") + 1] == "none"
     assert command[command.index("--cap-drop") + 1] == "ALL"
     assert command[command.index("--security-opt") + 1] == "no-new-privileges"
@@ -958,7 +961,7 @@ def test_docker_command_has_fail_closed_boundary(tmp_path: Path):
     assert "--pids-limit" in command
     assert command[command.index("--cpus") + 1] == "8"
     assert command[command.index("--memory") + 1] == "16g"
-    assert command[command.index("--pids-limit") + 1] == "256"
+    assert command[command.index("--pids-limit") + 1] == "1024"
     # Scratch large enough for the 8 CPUs the container is given: a 64 MB
     # /tmp and Docker's 64 MB default /dev/shm rule out multi-process training
     # inside fit() whatever else the boundary allows. Both are charged to the

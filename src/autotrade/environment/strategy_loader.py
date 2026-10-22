@@ -16,9 +16,11 @@ from typing import cast
 from .strategy import FitSchedule, StrategyContext, StrategyContractError, StrategyFunction
 
 # Pure-computation standard library plus the numerical/ML stack the sandbox
-# image ships, Transformer models and adapters included. Submodules
-# (``scipy.stats``, ``sklearn.linear_model``, ``torch.nn``) are covered by their
-# top-level name; modules that live inside the strategy package itself are
+# image ships, Transformer models and adapters included, and vLLM for running
+# a model of the pretrained store in process (``from vllm import LLM,
+# SamplingParams``). Submodules (``scipy.stats``, ``sklearn.linear_model``,
+# ``torch.nn``) are covered by their top-level name; modules that live inside
+# the strategy package itself are
 # added per package by ``local_modules``. The image's other packages (the hub
 # client, the serialization and tokenizer backends) stay out: the strategy's
 # file I/O is the context-rooted set below.
@@ -46,6 +48,7 @@ ALLOWED_MODULES = frozenset(
         "peft",
         "accelerate",
         "einops",
+        "vllm",
     }
 )
 FORBIDDEN_CALLS = frozenset({"compile", "eval", "exec", "open", "__import__"})
