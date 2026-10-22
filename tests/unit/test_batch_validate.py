@@ -51,7 +51,7 @@ from autotrade.environment.runtime import (
     utc_now_iso,
     write_json_atomic,
 )
-from autotrade.environment.sandbox import SandboxConfig
+from autotrade.environment.sandbox import SandboxConfig, SandboxLimits
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.environment.tools.base import ToolError, ToolRegistry
@@ -98,6 +98,7 @@ from autotrade.pipelines.session_tools import (
     NullControlTool,
     SessionValidations,
     another_batch_round_fits,
+    leg_cards,
     session_budget_status,
 )
 from autotrade.pipelines.verdict import (
@@ -1227,9 +1228,10 @@ class BatchValidateRunTest(unittest.TestCase):
             self.assertEqual(session.backtest.replay_years_used, 1)
 
     def test_a_leg_the_shared_card_failed_names_the_siblings_beside_it(self) -> None:
-        """Every leg of a batch attaches the arm's cards, so siblings that
-        replayed while a leg ran out of GPU memory held memory on the same
-        device. The leg's error names them, wherever it is read, so the Agent
+        """Legs of a batch that are not pinned to a card of their own (here the
+        arm pins none) attach the same cards, so siblings that replayed while a
+        leg ran out of GPU memory held memory on the same device. The leg's
+        error names them, wherever it is read, so the Agent
         can tell its own batch may have overcommitted the card. The CUDA
         report cannot say whose memory filled it, so the failure stays the
         environment's and is refunded. A failure of the strategy's own code
@@ -1270,6 +1272,70 @@ class BatchValidateRunTest(unittest.TestCase):
             self.assertEqual(gpu["cause"], "environment")
             self.assertIn("taken by another process", gpu["error"])
             self.assertNotIn(note, gpu["error"])
+
+    def test_concurrent_legs_each_take_one_card_of_the_arm(self) -> None:
+        """Legs replaying side by side are pinned to the arm's cards in turn, so
+        with as many cards as legs no two share one (to-do 32's pile-on onto the
+        first card); a replay running alone attaches every card, so one strategy
+        can still spread a model across them. A leg the shared card failed names
+        only the siblings that ran on its own card."""
+
+        note = "of this batch replayed on the same GPU while this candidate ran"
+        cards = SandboxConfig(limits=SandboxLimits(gpu_count=2, gpu_devices=(1, 4)))
+
+        def card_of(session: _Session) -> dict[str, tuple[int, ...] | None]:
+            return {
+                (Path(request.revision.output_path) / "main.py").read_text(
+                    encoding="utf-8"
+                ): request.gpu_devices
+                for request in session.evaluator.requests
+            }
+
+        with TemporaryDirectory() as tmp:
+            session = _Session(
+                Path(tmp), contention_markers=("999",), rendezvous=2, max_concurrency=2
+            )
+            session.evaluator.sandbox = cards
+            session.candidate("gpu", _strategy("999"))
+            session.candidate("ok", _strategy("2"))
+            gpu, ok = session.call("gpu", "ok", span="Y2").value["candidates"]
+            self.assertEqual(sorted(card_of(session).values()), [(1,), (4,)])
+            self.assertEqual((gpu["cause"], ok["status"]), ("environment", "ok"))
+            self.assertNotIn(note, gpu["error"])
+            session.evaluator.requests.clear()
+            session.candidate("alone", _strategy("3"))
+            self.assertTrue(session.call("alone", span="Y2").ok)
+            self.assertEqual(list(card_of(session).values()), [None])
+        with TemporaryDirectory() as tmp:
+            session = _Session(
+                Path(tmp), contention_markers=("999",), rendezvous=3, max_concurrency=3
+            )
+            session.evaluator.sandbox = cards
+            session.candidate("gpu", _strategy("999"))
+            session.candidate("x", _strategy("21"))
+            session.candidate("y", _strategy("22"))
+            rows = session.call("gpu", "x", "y", span="Y2").value["candidates"]
+            placed = card_of(session)
+            self.assertEqual(sorted(placed.values()), [(1,), (1,), (4,)])
+            beside = [
+                row["result_name"]
+                for row, marker in zip(rows[1:], ("21", "22"), strict=True)
+                if placed[_strategy(marker)] == placed[_strategy("999")]
+            ]
+            if beside:
+                self.assertIn(f"{beside[0]} {note}", rows[0]["error"])
+            else:
+                self.assertNotIn(note, rows[0]["error"])
+
+    def test_leg_cards_turn_through_the_arms_cards(self) -> None:
+        self.assertEqual(leg_cards((1, 4), 1), [])
+        self.assertEqual(leg_cards((1, 4), 2), [1, 4])
+        self.assertEqual(leg_cards((1, 4), 3), [1, 4, 1])
+        self.assertEqual(leg_cards((), 3), [])
+        config = SandboxConfig(limits=SandboxLimits(gpu_count=2, gpu_devices=(1, 4)))
+        self.assertIs(config.on_devices(None), config)
+        leg = config.on_devices((4,)).limits
+        self.assertEqual((leg.gpu_count, leg.gpu_devices), (1, (4,)))
 
     def test_a_timeout_gives_its_replay_years_back(self) -> None:
         with TemporaryDirectory() as tmp:

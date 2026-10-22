@@ -12,7 +12,7 @@ import subprocess
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .gpu import GpuUnavailableError, device_request, host_gpu_name
@@ -229,8 +229,9 @@ class SandboxLimits:
     gpu_name_filter: str | None = None
     # The devices every container of this evaluation attaches: the arm's
     # claimed cards, or the ones another caller took for this run
-    # (``pipelines.hitl_state.select_gpus``). The Environment chooses none, so
-    # a request for devices that names none here refuses to start.
+    # (``pipelines.hitl_state.select_gpus``), or one of them for a leg of a
+    # concurrent batch (``SandboxConfig.on_devices``). The Environment chooses
+    # none, so a request for devices that names none here refuses to start.
     gpu_devices: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
@@ -332,6 +333,21 @@ class SandboxConfig:
         if not self.docker_executable.strip():
             raise ValueError("docker_executable must be non-empty")
         pretrained_pin(self.pretrained_manifest_sha256)
+
+    def on_devices(self, devices: tuple[int, ...] | None) -> SandboxConfig:
+        """This boundary with its containers attaching exactly ``devices``.
+
+        A leg of a concurrent batch replays on one card of the arm's claim
+        (``pipelines.session_tools.leg_cards``); None keeps every device the
+        limits pin, which is what a replay running alone attaches.
+        """
+
+        if devices is None:
+            return self
+        return replace(
+            self,
+            limits=replace(self.limits, gpu_count=len(devices), gpu_devices=tuple(devices)),
+        )
 
 
 @dataclass(frozen=True)
