@@ -164,6 +164,41 @@ def gpu_contended(exc: BaseException) -> bool:
 _STRATEGY_RESOURCES = "strategy_resources"
 
 
+# The figures a worker reads off its own container with every answer
+# (``strategy_worker.container_resources``), under the keys the host's own
+# monitor reports them in.
+_WORKER_RESOURCE_KEYS = ("peak_memory_bytes", "memory_limit_bytes", "peak_gpu_memory_bytes")
+
+
+def _worker_resources(value: object) -> dict[str, int]:
+    """The well-formed part of a worker's ``resources`` reading.
+
+    Strategy code shares the worker's process and could rewrite the reading;
+    it is informational and decides nothing, so a malformed figure is left out
+    like one nobody measured, rather than failing the call it rode on.
+    """
+
+    if not isinstance(value, Mapping):
+        return {}
+    return {
+        name: number
+        for name in _WORKER_RESOURCE_KEYS
+        if isinstance(number := value.get(name), int)
+        and not isinstance(number, bool)
+        and number >= 0
+    }
+
+
+def _larger_of(*readings: Mapping[str, int]) -> dict[str, int]:
+    """Per key, the largest of several readings of the same evaluation."""
+
+    merged: dict[str, int] = {}
+    for reading in readings:
+        for name, value in reading.items():
+            merged[name] = max(merged.get(name, value), value)
+    return merged
+
+
 def strategy_resource_usage(executor: object) -> dict[str, object]:
     """Container telemetry of one replay's executor; empty when it has none.
 
@@ -358,6 +393,12 @@ class DockerStrategyExecutor:
             docker_executable=self.config.docker_executable,
             sample_gpu=bool(self.gpu_indices),
         )
+        # The worker's own reading of the same container, the largest of
+        # every answer so far. It stands only while no call is in flight: a
+        # call that never answered (its clock ran out, the memory cap killed
+        # it) is not in it, and the run's peak is then not this reading.
+        self._worker_reading: dict[str, int] = {}
+        self._call_in_flight = False
         # Wall clock of each completed ``fit`` roundtrip, measured on the same
         # clock ``fit_timeout_seconds`` bounds.
         self._fit_seconds: list[float] = []
@@ -497,6 +538,7 @@ class DockerStrategyExecutor:
             sequence = request["sequence"]
             started = time.monotonic()
             deadline = started + timeout_seconds
+            self._call_in_flight = True
             self._send(request, deadline)
             while True:
                 message, size = self._read_message(deadline)
@@ -513,6 +555,10 @@ class DockerStrategyExecutor:
                     or response_sequence != sequence
                 ):
                     raise StrategyExecutionError("worker response sequence does not match request")
+                self._worker_reading = _larger_of(
+                    self._worker_reading, _worker_resources(message.get("resources"))
+                )
+                self._call_in_flight = False
                 if message_type == expected:
                     if kind == "fit":
                         self._fit_seconds.append(round(time.monotonic() - started, 1))
@@ -627,26 +673,34 @@ class DockerStrategyExecutor:
     def resource_usage(self) -> dict[str, object]:
         """What this evaluation's strategy containers actually cost.
 
-        Read once at container end (``ContainerResourceMonitor``) and reported
-        beside the limits that were in force, so a replay that died on a clock
-        or a shared card says how close it was to which ceiling instead of
-        leaving the session to reconstruct it from a different container. A fit
+        Reported beside the limits that were in force, so a replay that died on
+        a clock or a shared card says how close it was to which ceiling instead
+        of leaving the session to reconstruct it from a different container.
+        Two readings of each container meet here, and each key takes the larger:
+        the host's (``ContainerResourceMonitor``), taken at container end and
+        so covering a call that never answered, where the host can see the
+        container's cgroup; and the worker's own with each answer, which every
+        host gets, including one whose Docker exposes no cgroup to it. A fit
         strategy runs two containers; the peaks are the higher of the two,
         because they are the same evaluation and the same host.
 
-        Only measured values appear: a figure the host could not read is left
+        Only measured values appear: a figure neither side could read is left
         out rather than reported as zero.
         """
 
         limits = self.config.limits
-        record: dict[str, object] = dict(self._monitor.record())
         worker = self._fit_worker
-        if worker is not None:
-            for name, value in worker._monitor.record().items():
-                current = record.get(name)
-                record[name] = (
-                    max(int(current), value) if isinstance(current, int) else value
-                )
+        containers = (self,) if worker is None else (self, worker)
+        record: dict[str, object] = dict(
+            _larger_of(
+                *(container._monitor.record() for container in containers),
+                *(
+                    container._worker_reading
+                    for container in containers
+                    if not container._call_in_flight
+                ),
+            )
+        )
         fit_seconds = list(self._fit_seconds) + (
             list(worker._fit_seconds) if worker is not None else []
         )

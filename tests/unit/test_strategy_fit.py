@@ -430,7 +430,11 @@ def test_worker_answers_fit_with_fitted_and_writes_state(tmp_path: Path):
     }
     process.stdin.write(json.dumps(message) + "\n")
     process.stdin.flush()
-    assert json.loads(process.stdout.readline()) == {"type": "fitted", "sequence": 0}
+    answer = json.loads(process.stdout.readline())
+    # Every answer also carries the worker's reading of its own cgroup, whose
+    # content depends on where this process runs.
+    assert isinstance(answer.pop("resources"), dict)
+    assert answer == {"type": "fitted", "sequence": 0}
     assert np.load(state / "seen.npy").tolist() == [0]
     process.stdin.write('{"type":"close"}\n')
     process.stdin.flush()

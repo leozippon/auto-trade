@@ -1240,7 +1240,7 @@ def _shared_gpu_note(siblings: Sequence[str]) -> str:
         f"; {', '.join(siblings)} of this batch replayed on the same GPU while this "
         "candidate ran, so the memory it lacked may be held by its own batch: send "
         "fewer GPU-heavy candidates per batch or lower their GPU memory "
-        "(each row's resources.peak_gpu_memory_bytes is its sampled peak)"
+        "(each row's resources.peak_gpu_memory_bytes is its measured peak)"
     )
 
 

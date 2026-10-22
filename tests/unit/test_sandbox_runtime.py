@@ -17,7 +17,7 @@ from unittest.mock import Mock, patch
 import pandas as pd
 import pytest
 
-from autotrade.environment import artifacts
+from autotrade.environment import artifacts, strategy_worker
 from autotrade.environment.artifacts import (
     ArtifactError,
     ArtifactSnapshotUnstable,
@@ -154,6 +154,8 @@ def _executor_for_process(
     executor.gpu_indices = []
     executor._fit_seconds = []
     executor._monitor = ContainerResourceMonitor(executor.container_name)
+    executor._worker_reading = {}
+    executor._call_in_flight = False
     executor._reset_transport_state()
     if drain_stderr:
         thread = threading.Thread(target=executor._drain_stderr, daemon=True)
@@ -1291,7 +1293,9 @@ def test_worker_protocol_isolated_from_raw_fd_one_writes(tmp_path: Path):
     assert process.stdout is not None
     process.stdin.write(json.dumps(_wire_request(_context())) + "\n")
     process.stdin.flush()
-    assert json.loads(process.stdout.readline()) == {"type": "orders", "sequence": 0, "orders": []}
+    response = json.loads(process.stdout.readline())
+    assert isinstance(response.pop("resources"), dict)
+    assert response == {"type": "orders", "sequence": 0, "orders": []}
     process.stdin.write('{"type":"close"}\n')
     process.stdin.flush()
     assert process.wait(timeout=5) == 0
@@ -2375,6 +2379,113 @@ def test_container_peak_memory_is_reported_only_where_it_was_measured(tmp_path: 
     absent.start()
     absent.stop()
     assert absent.record() == {}
+
+
+def _fake_cgroup(root: Path, files: dict[str, str]) -> Path:
+    for name, text in files.items():
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text(text, encoding="utf-8")
+    return root
+
+
+def test_the_worker_reads_its_own_cgroup_on_v2_v1_and_neither(tmp_path: Path, monkeypatch):
+    """Where the host cannot see a container's cgroup, the container still can.
+
+    A cgroup v2 container finds its high-water mark at the root of its own
+    cgroup, a v1 container under the memory controller; one exposing neither
+    reports no figure at all, never a zero.
+    """
+
+    # Video memory is read only off a strategy's own torch; keep it out here.
+    monkeypatch.delitem(sys.modules, "torch", raising=False)
+    v2 = _fake_cgroup(
+        tmp_path / "v2",
+        {"memory.peak": "7888896\n", "memory.max": "17179869184\n", "memory.current": "1\n"},
+    )
+    monkeypatch.setattr(strategy_worker, "CGROUP_ROOT", v2)
+    assert strategy_worker.container_resources() == {
+        "peak_memory_bytes": 7888896,
+        "memory_limit_bytes": 17179869184,
+    }
+    # No limit reads "max" on v2: the peak stands, the ceiling is left out.
+    (v2 / "memory.max").write_text("max\n", encoding="utf-8")
+    assert strategy_worker.container_resources() == {"peak_memory_bytes": 7888896}
+
+    v1 = _fake_cgroup(
+        tmp_path / "v1",
+        {
+            "memory/memory.max_usage_in_bytes": "6332416\n",
+            "memory/memory.limit_in_bytes": "1073741824\n",
+            "memory/memory.usage_in_bytes": "1\n",
+            "cpu/cpu.shares": "1024\n",
+        },
+    )
+    monkeypatch.setattr(strategy_worker, "CGROUP_ROOT", v1)
+    assert strategy_worker.container_resources() == {
+        "peak_memory_bytes": 6332416,
+        "memory_limit_bytes": 1073741824,
+    }
+
+    monkeypatch.setattr(strategy_worker, "CGROUP_ROOT", tmp_path / "absent")
+    assert strategy_worker.container_resources() == {}
+
+
+def test_the_workers_reading_reaches_resources_only_for_answered_calls(tmp_path: Path):
+    """The worker's reading crosses the real protocol into ``resource_usage``.
+
+    It rides on every answer, so it stands for the run only while the worker
+    has answered its last call. A call that ran out of its clock never
+    answered; its usage is in no reading the worker sent, so with no host-side
+    reading (as on a host whose Docker exposes no cgroup) the peak is absent
+    rather than the smaller figure of the calls before it.
+    """
+
+    root = _fake_cgroup(
+        tmp_path / "cgroup",
+        {
+            "memory/memory.max_usage_in_bytes": "6332416\n",
+            "memory/memory.limit_in_bytes": "17179869184\n",
+        },
+    )
+    strategy = _strategy(
+        tmp_path,
+        "CALLS = []\n\n\n"
+        "def generate_orders(context):\n"
+        "    CALLS.append(context.inference_at)\n"
+        "    while len(CALLS) > 1:\n"
+        "        pass\n"
+        "    return []\n",
+    )
+    boot = (
+        "from pathlib import Path\n"
+        "import autotrade.environment.strategy_worker as worker\n"
+        f"worker.CGROUP_ROOT = Path({str(root)!r})\n"
+        f"raise SystemExit(worker.main([{str(strategy)!r}]))\n"
+    )
+    limits = SandboxLimits(timeout_seconds=1.0, startup_timeout_seconds=30.0)
+    executor = _started_executor(strategy, [sys.executable, "-c", boot], limits)
+    try:
+        assert executor.execute(_context()) == []
+        usage = executor.resource_usage()
+        assert usage["peak_memory_bytes"] == 6332416
+        assert usage["memory_limit_bytes"] == 17179869184
+
+        later = StrategyContext(
+            inference_at=datetime(2026, 1, 5, 8, 30, tzinfo=CN_TZ),
+            bars=(),
+            account=AccountSnapshot(cash=10_000, positions={}),
+        )
+        with (
+            patch.object(DockerStrategyExecutor, "_remove_container"),
+            pytest.raises(StrategyExecutionError, match="exceeded"),
+        ):
+            executor.execute(later)
+        usage = executor.resource_usage()
+        assert "peak_memory_bytes" not in usage
+        assert "memory_limit_bytes" not in usage
+        assert usage["decision_timeout_seconds"] == 1.0
+    finally:
+        executor.close()
 
 
 def test_container_gpu_peak_counts_only_this_containers_own_processes(tmp_path: Path):

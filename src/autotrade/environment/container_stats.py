@@ -8,11 +8,17 @@ monitor resolves that directory once while the container is up and reads the
 peak once at its end -- one ``docker inspect`` per container start and two file
 reads per container end, whatever the replay costs.
 
-Video memory has no cgroup counterpart and the worker protocol reports none, so
-a GPU strategy's peak is sampled from the host instead: ``nvidia-smi`` lists the
-video memory each compute process holds and the container's own cgroup lists
-which host pids are its. A sampled peak can miss a spike between two samples, so
-it is a floor on what the container used, never an upper bound.
+Video memory has no cgroup counterpart, so a GPU strategy's peak is sampled
+from the host: ``nvidia-smi`` lists the video memory each compute process holds
+and the container's own cgroup lists which host pids are its. A sampled peak can
+miss a spike between two samples, so it is a floor on what the container used,
+never an upper bound.
+
+This is the host's half of the reading. The worker reports its own container's
+figures with every answer (``strategy_worker.container_resources``), which is
+all a host gets whose Docker exposes no container cgroup to it; the executor
+takes the larger of the two per key. What only the host sees is a call that
+never answered and the video memory outside the worker's torch allocator.
 
 Telemetry never decides a result, so an unreadable cgroup or an absent
 ``nvidia-smi`` leaves the field out rather than failing the replay. It is
