@@ -590,7 +590,7 @@
       "skip_if_already_ok": false
     },
     "manual_holdernumber_restatement_repair": {
-      "description": "Manual (not scheduled): forced whole-history re-pull of stk_holdernumber alone after an accepted vendor restatement (to-do item 11, 2026-10-21): the history before 202608 was landed through the old offset pager, which repeated rows and skipped as many, and the vendor has since moved many holder counts to another ann_date, dropped others and filled holder_num where it had served it empty. Follow the shrink-guard runbook first: archive and delete every month partition of the dataset, so each month is a fresh write of the vendor's current answer and the guard, which would refuse most months, has nothing to refuse. The window runs from default_start_date to today unless --start-date/--end-date narrow it. Follow with cn_nightly_full_audit --force-run.",
+      "description": "Manual (not scheduled): forced whole-history re-pull of stk_holdernumber alone after an accepted vendor restatement (to-do item 11, 2026-10-21): the history before 202608 was landed through the old offset pager, which repeated rows and skipped as many, and the vendor has since moved many holder counts to another ann_date, dropped others and filled holder_num where it had served it empty. Follow the shrink-guard runbook first: archive and delete every month partition of the dataset, so each month is a fresh write of the vendor's current answer and the guard has nothing to refuse. The window runs from default_start_date to today unless --start-date/--end-date narrow it. Follow with cn_nightly_full_audit --force-run.",
       "operation": "download_tier",
       "tier": "event_flow",
       "end_date_offset_days": 0,
@@ -603,7 +603,7 @@
       "skip_if_already_ok": false
     },
     "manual_repurchase_restatement_repair": {
-      "description": "Manual (not scheduled): forced whole-history re-pull of repurchase alone after an accepted vendor restatement (to-do item 11, 2026-10-21): rows last fetched before about 2026-07-20 differ from what the vendor serves now, which relabelled most progress rows from proc 实施 to 完成, gave plan rows an exp_date, changed price limits and dropped some rows. Follow the shrink-guard runbook first: archive and delete every month partition of the dataset, so each month is a fresh write of the vendor's current answer and the guard, which would refuse most months, has nothing to refuse. The window runs from default_start_date to today unless --start-date/--end-date narrow it. Follow with cn_nightly_full_audit --force-run.",
+      "description": "Manual (not scheduled): forced whole-history re-pull of repurchase alone after an accepted vendor restatement (to-do item 11, 2026-10-21): rows last fetched before about 2026-07-20 differ from what the vendor serves now, which relabelled most progress rows from proc 实施 to 完成, gave plan rows an exp_date, changed price limits and dropped some rows. Follow the shrink-guard runbook first: archive and delete every month partition of the dataset, so each month is a fresh write of the vendor's current answer and the guard has nothing to refuse. The window runs from default_start_date to today unless --start-date/--end-date narrow it. Follow with cn_nightly_full_audit --force-run.",
       "operation": "download_tier",
       "tier": "event_flow",
       "end_date_offset_days": 0,
