@@ -24,6 +24,75 @@ class WorkerProtocolError(RuntimeError):
     pass
 
 
+# The container's own cgroup, as the container sees it. The host cannot always
+# read it from outside (a Docker daemon in another PID namespace exposes none),
+# but the container always can, so every answer carries this reading.
+CGROUP_ROOT = Path("/sys/fs/cgroup")
+# Its memory high-water mark and ceiling: cgroup v2 keeps them at the root of
+# the container's cgroup, cgroup v1 under the memory controller. The first
+# layout whose high-water file reads is the one this host runs.
+_CGROUP_MEMORY_FILES = (
+    ("memory.peak", "memory.max"),
+    ("memory/memory.max_usage_in_bytes", "memory/memory.limit_in_bytes"),
+)
+
+
+def container_resources() -> dict[str, int]:
+    """This container's peaks so far, under the host's ``resources`` keys.
+
+    Only what was read appears: a cgroup that exposes neither layout, a
+    container without a memory limit and a strategy that never brought CUDA up
+    leave their keys out rather than report a zero nobody measured.
+    """
+
+    readings: dict[str, int] = {}
+    for peak_name, limit_name in _CGROUP_MEMORY_FILES:
+        peak = _cgroup_int(peak_name)
+        if peak is None:
+            continue
+        readings["peak_memory_bytes"] = peak
+        limit = _cgroup_int(limit_name)
+        if limit is not None:
+            readings["memory_limit_bytes"] = limit
+        break
+    gpu = _torch_reserved_peak()
+    if gpu is not None:
+        readings["peak_gpu_memory_bytes"] = gpu
+    return readings
+
+
+def _cgroup_int(name: str) -> int | None:
+    try:
+        return int((CGROUP_ROOT / name).read_text(encoding="utf-8"))
+    except (OSError, ValueError):  # absent, or v2's "max" for no limit
+        return None
+
+
+def _torch_reserved_peak() -> int | None:
+    """High-water mark of the strategy's torch allocator, summed over devices.
+
+    The driver lists a container's GPU processes by host pid, which nothing
+    inside the container can map to its own, so the allocator's own counter is
+    the one figure here that is certainly this container's. It is a floor: the
+    CUDA context and memory other libraries or processes hold are not in it.
+    Read only once the strategy has brought CUDA up itself; the worker never
+    imports torch or touches a device.
+    """
+
+    torch = sys.modules.get("torch")
+    if torch is None:
+        return None
+    try:
+        if not torch.cuda.is_initialized():
+            return None
+        return sum(
+            torch.cuda.max_memory_reserved(device)
+            for device in range(torch.cuda.device_count())
+        )
+    except Exception:  # noqa: BLE001 - a broken torch state must not cost the call its answer
+        return None
+
+
 class Protocol:
     def __init__(self) -> None:
         self._input = sys.stdin
@@ -191,7 +260,14 @@ def run(strategy_path: str | Path) -> int:
                     response: dict[str, object] = {}
                 else:
                     response = {"orders": strategy.generate_orders(context)}
-            protocol.write({"type": _CALL_KINDS[kind], "sequence": sequence, **response})
+            protocol.write(
+                {
+                    "type": _CALL_KINDS[kind],
+                    "sequence": sequence,
+                    **response,
+                    "resources": container_resources(),
+                }
+            )
         except Exception as exc:  # noqa: BLE001 - isolate each untrusted strategy call
             # Two failures share this wire and they are not the same
             # measurement. An exception out of strategy code is a reading of
@@ -203,6 +279,7 @@ def run(strategy_path: str | Path) -> int:
             error: dict[str, object] = {
                 "type": "protocol_error" if isinstance(exc, WorkerProtocolError) else "error",
                 "error": str(exc),
+                "resources": container_resources(),
             }
             if isinstance(message, Mapping):
                 sequence = message.get("sequence")
