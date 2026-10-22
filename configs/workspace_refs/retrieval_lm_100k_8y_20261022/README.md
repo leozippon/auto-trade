@@ -25,7 +25,7 @@ Q2–Q5 的主张都写成：候选在三处的朴素选名各比它的对照高
 ## 测试台：会话自己发现不了的事实
 
 - **卡。** 本臂认领两张 L20（每张约 44.4 GiB 可用），会话里 `nvidia-smi` 可查。批里并行回放的候选按顺序轮流各挂一张卡，一条腿（一个候选的拟合容器与推断容器）只用它那一张；单独一场回放（冒烟、只有一个候选的批）挂两张卡，可以张量并行（策略里 `torch.cuda.device_count()` 可查）。会话容器两张都挂。一条腿只能指望自己那张卡上自己放进去的东西：别指望卡上还有别人的空间，也别给另一条腿留。
-- **容器。** 策略容器（`fit` 与 `generate_orders` 跑在这里）8 CPU、32 GiB 内存（swap 同值，越界即被杀）、2 GiB 的 `/tmp`、2 GiB 的 `/dev/shm`、256 个进程，没有网络。本臂的 `fit` 每次至多 10,800 s、`generate_orders` 每次 360 s，两腿并行的批里各乘 2。会话容器 8 CPU、32 GiB、512 个进程、1 GiB 的 `/tmp`。
+- **容器。** 策略容器（`fit` 与 `generate_orders` 跑在这里）8 CPU、32 GiB 内存（swap 同值，越界即被杀）、2 GiB 的 `/tmp`、2 GiB 的 `/dev/shm`、1,024 个进程，没有网络。本臂的 `fit` 每次至多 10,800 s、`generate_orders` 每次 360 s，两腿并行的批里各乘 2。会话容器 8 CPU、32 GiB、1,024 个进程、1 GiB 的 `/tmp`。
 - **状态。** `context.state_dir` 只在 `fit` 里可写（`generate_orders` 里只读，内核挂载），每场回放开始时是空的、结束就丢弃，不跨回放保留任何东西。`fit` 与 `generate_orders` 在两个容器里，只通过 `state_dir` 通信。Paper 账户的拟合状态逐日保留；它每天早上新开推断 worker，把此前每一次决策按原顺序重发一遍来恢复模块状态（拟合 worker 不重放）：贵的东西在 `fit` 里算、落盘，`generate_orders` 只读。要留到回放之后的读数只有订单 metadata 一条路，一次调用的订单连同 metadata 至多 1,000,000 字节（按 UTF-8 计），按日写短摘要。
 - **合同。** `main.py` 的 `generate_orders(context)`、可选的 `fit(context)` 与字面量 `REFIT_PERIOD`；允许的库以 `output/README.md` 为准，`re`、`random`、`os`、`time`、`hashlib`、pickle、joblib 都不在其中，正则走 pandas 的字符串方法；文件只读 `context` 的目录、只写 `state_dir`，策略不能建目录、列目录或删文件（起步包的记忆因此把所有文件平放在 `state_dir` 下，由一个索引文件点名）；一条种子线。改完先过 `smoke_backtest`。
 - **文本。** `context.asof_dir + "/text_index"` 是 parquet 分片目录，列 `text_id, dataset, ts_codes, title, available_at, library_file`，`dataset == "anns_d"`，每个交易日约 3–4 千行。可见规则、副本与匿名化写在 `refs/starter/lib/text.py` 的模块说明里；`decision_days` 在 2018、2021、2024、2025 的四个决策日上对照真实的 as-of 视图逐行核对过（20261019 轮）。
