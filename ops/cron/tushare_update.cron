@@ -46,9 +46,17 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # margin sources are handled by the pre-open jobs below. stk_auction recheck
 # is cn_evening_auction_backfill, not this job. The 1-minute layer is not
 # landed here either: stk_mins carries a per-token daily request quota, so the
-# minutes land through the manual runner job manual_intraday_minutes, where a
-# quota stop cannot fail the update the morning Paper release depends on.
+# minutes land through their own job below, where a quota stop cannot fail the
+# update the morning Paper release depends on.
 35 23 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_evening_full
+
+# Land the 1-minute by-date layer through the last open day before today
+# (about 222 batched requests and 3 minutes a day; a quota stop exits 76 and
+# the next night resumes). It runs after the evening job and before the
+# derived build and the full audit, inside the evening node's window that the
+# replay gates minutes on, so the replay never sees minutes earlier than they
+# land.
+30 1 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_intraday_minutes
 
 # Refresh the six data-quality status files over the full retained window
 # after the evening chain has normally finished — every calendar day: the
@@ -57,7 +65,7 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # domains clamp their expectations internally, so weekend runs stay honest.
 30 2 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_full_audit
 
-# Reduce whatever minute partitions have landed (manual_intraday_minutes) to
+# Reduce whatever minute partitions have landed (cn_nightly_intraday_minutes) to
 # the derived stock-day tables (data/raw/intraday_flow, data/raw/intraday_stats).
 # Not a TuShare job: it fetches nothing and only reads the lake, so it is a
 # plain line rather than a runner job. It is incremental (existing trade dates

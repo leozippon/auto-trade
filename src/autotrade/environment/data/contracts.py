@@ -318,8 +318,10 @@ class RefreshNode:
 
 
 REFRESH_NODES: dict[str, RefreshNode] = {
-    # Evening rolling-window update: A-share daily core, minute history, money flow,
-    # block trade, holders/repurchase/float/top-list and macro.
+    # Evening rolling-window update: A-share daily core, money flow, block trade,
+    # holders/repurchase/float/top-list and macro. Minute history lands through
+    # cn_nightly_intraday_minutes (01:30), inside this node's window, and is
+    # gated on this node.
     # Real dispatches have exceeded the former 150-minute estimate (one reached
     # 169 minutes). Historical replays have no per-run completion ledger, so use
     # a conservative 210-minute fallback (03:05) rather than knowingly exposing
@@ -421,9 +423,10 @@ EVENT_DATASET_REFRESH_NODES: dict[str, tuple[str, ...]] = {
     # limit_list_ths / ths_hot / dc_hot / hm_detail / hm_list land in the
     # evening window only — the default node is already correct for them.
     # intraday_flow and intraday_stats keep the default node too: they are
-    # derived from the minute partitions cn_evening_full lands, and their build
-    # runs inside that night's window (ops/cron/tushare_update.cron), so their
-    # rows become queryable on the same boundary as the minutes they summarise.
+    # derived from the minute partitions cn_nightly_intraday_minutes lands
+    # inside the evening node's window, and their build runs inside that window
+    # as well (ops/cron/tushare_update.cron), so their rows become queryable on
+    # the same boundary as the minutes they summarise.
     # Ann-date disclosure tables land via their own natural-day job (weekend
     # announcements become visible the following pre-open, matching live).
     "top10_holders": ("cn_nightly_disclosure_full",),

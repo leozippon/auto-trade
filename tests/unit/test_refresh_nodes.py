@@ -3,7 +3,7 @@
 import json
 import re
 import unittest
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -77,6 +77,12 @@ def _cron_jobs() -> set[str]:
 # nodes and row-level available_at stamps, and precede no trading session —
 # so they define no visibility boundary of their own.
 MANUAL_REPAIR_JOBS = {name for name in _cron_jobs() if name.startswith("manual_")}
+
+# Landing jobs without a node of their own: each launches inside the window of
+# the node that gates what it lands, so the replay never sees rows earlier than
+# they land. The minute layer lands at 01:30 and intraday_1min is gated on the
+# evening node (23:35 launch, ready 03:05).
+IN_WINDOW_LANDING_JOBS = {"cn_nightly_intraday_minutes": EVENING_NODE}
 
 
 CRONTAB = REPO_ROOT / "ops" / "cron" / "tushare_update.cron"
@@ -208,10 +214,22 @@ class RefreshNodeDriftGuardTest(unittest.TestCase):
             schedule_jobs - MANUAL_REPAIR_JOBS,
             "ops/cron/tushare_update.cron jobs differ from configs/tushare_update_schedule.json scheduled jobs",
         )
-        for job in schedule_jobs - AUDIT_ONLY_JOBS - WEEKLY_DEEP_SWEEP_JOBS - MANUAL_REPAIR_JOBS:
+        for job in schedule_jobs - AUDIT_ONLY_JOBS - WEEKLY_DEEP_SWEEP_JOBS - MANUAL_REPAIR_JOBS - set(IN_WINDOW_LANDING_JOBS):
             self.assertIn(job, REFRESH_NODES, f"data-landing job {job!r} has no Timeview refresh node")
         for job in MANUAL_REPAIR_JOBS:
             self.assertNotIn(job, REFRESH_NODES, f"manual repair job {job!r} must not be a refresh node")
+
+    def test_in_window_landing_jobs_launch_before_their_node_is_ready(self) -> None:
+        cron_times = _crontab_job_times()
+        day = date(2026, 10, 21)
+        for job, node_name in IN_WINDOW_LANDING_JOBS.items():
+            node = REFRESH_NODES[node_name]
+            launch = datetime.combine(day, cron_times[job], tzinfo=CN_TZ)
+            if launch < node.start_at(day):
+                launch += timedelta(days=1)
+            self.assertLess(launch, node.ready_at(day), f"{job!r} launches after {node_name!r} is ready")
+            self.assertNotIn(job, REFRESH_NODES)
+        self.assertEqual(DOMAIN_REFRESH_NODES["intraday_1min"], (EVENING_NODE,))
 
     def test_managed_jobs_log_through_the_runner_only(self) -> None:
         # Every run writes its own log via the runner; cron lines carry no
