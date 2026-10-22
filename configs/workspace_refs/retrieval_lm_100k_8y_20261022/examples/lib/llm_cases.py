@@ -35,12 +35,13 @@ prompt passes it through `redact` first and accepts that a served model may
 recall an event from its words. A shortlisted name's reply that holds no
 number keeps its retrieval score, below every name the model scored.
 
-Determinism: an eager engine (no torch.compile, no CUDA graphs) without
-prefix caching, temperature 0 and the package's seed, and one batch per day
-in a fixed order (the shortlist's own). vLLM gives other tokens for the same
-prompt in a batch of another shape or order, and a compiled or prefix-caching
-engine differs between containers, so a replay of the same span reproduces
-its fills only under these settings (output/README.md, "Pretrained models").
+Determinism: an eager engine (no torch.compile, no CUDA graphs),
+temperature 0 and the package's seed, and one batch per day in a fixed order
+(the shortlist's own). vLLM gives other tokens for the same prompt in a batch
+of another shape or order, and a compiled engine differs between containers,
+so a replay of the same span reproduces its fills only under these settings
+(output/README.md, "Pretrained models"); prefix caching is off as well, which
+an eager engine does not need but which leaves one condition fewer to check.
 
 Cost: a 27B engine loads in minutes, once per fit worker (once per replay;
 each Paper morning starts a new worker). A chat here is about 400-600 prompt
