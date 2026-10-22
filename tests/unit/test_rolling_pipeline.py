@@ -801,7 +801,7 @@ def test_the_forward_replay_writes_nothing_a_session_can_read(tmp_path: Path):
 # an exception its code raised is: a verdict, not a rerun of the attempt.
 @pytest.mark.parametrize(
     "cause",
-    [StrategyRaised("boom"), StrategyMemoryExceeded("killed at the 16g memory cap")],
+    [StrategyRaised("boom"), StrategyMemoryExceeded("killed at the 32g memory cap")],
     ids=["raised", "memory_cap"],
 )
 def test_a_strategy_error_names_the_slice_it_raised_in_and_discards(

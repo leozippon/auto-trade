@@ -392,7 +392,7 @@ def test_the_template_readme_states_the_enforced_import_allowlist():
 
 def test_budgets_come_from_one_source_each():
     limits = SandboxLimits()
-    assert (limits.cpus, limits.memory, limits.pids) == (8.0, "16g", 1024)
+    assert (limits.cpus, limits.memory, limits.pids) == (8.0, "32g", 1024)
     # One CPU and memory boundary for both containers, so a session that
     # profiles its fit under `shell` measures against the ceiling the formal
     # replay enforces instead of extrapolating across two of them.

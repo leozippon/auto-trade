@@ -960,7 +960,7 @@ def test_docker_command_has_fail_closed_boundary(tmp_path: Path):
     assert "--memory" in command
     assert "--pids-limit" in command
     assert command[command.index("--cpus") + 1] == "8"
-    assert command[command.index("--memory") + 1] == "16g"
+    assert command[command.index("--memory") + 1] == "32g"
     assert command[command.index("--pids-limit") + 1] == "1024"
     # Scratch large enough for the 8 CPUs the container is given: a 64 MB
     # /tmp and Docker's 64 MB default /dev/shm rule out multi-process training
@@ -2403,12 +2403,12 @@ def test_the_worker_reads_its_own_cgroup_on_v2_v1_and_neither(tmp_path: Path, mo
     monkeypatch.delitem(sys.modules, "torch", raising=False)
     v2 = _fake_cgroup(
         tmp_path / "v2",
-        {"memory.peak": "7888896\n", "memory.max": "17179869184\n", "memory.current": "1\n"},
+        {"memory.peak": "7888896\n", "memory.max": "34359738368\n", "memory.current": "1\n"},
     )
     monkeypatch.setattr(strategy_worker, "CGROUP_ROOT", v2)
     assert strategy_worker.container_resources() == {
         "peak_memory_bytes": 7888896,
-        "memory_limit_bytes": 17179869184,
+        "memory_limit_bytes": 34359738368,
     }
     # No limit reads "max" on v2: the peak stands, the ceiling is left out.
     (v2 / "memory.max").write_text("max\n", encoding="utf-8")
@@ -2447,7 +2447,7 @@ def test_the_workers_reading_reaches_resources_only_for_answered_calls(tmp_path:
         tmp_path / "cgroup",
         {
             "memory/memory.max_usage_in_bytes": "6332416\n",
-            "memory/memory.limit_in_bytes": "17179869184\n",
+            "memory/memory.limit_in_bytes": "34359738368\n",
         },
     )
     strategy = _strategy(
@@ -2471,7 +2471,7 @@ def test_the_workers_reading_reaches_resources_only_for_answered_calls(tmp_path:
         assert executor.execute(_context()) == []
         usage = executor.resource_usage()
         assert usage["peak_memory_bytes"] == 6332416
-        assert usage["memory_limit_bytes"] == 17179869184
+        assert usage["memory_limit_bytes"] == 34359738368
 
         later = StrategyContext(
             inference_at=datetime(2026, 1, 5, 8, 30, tzinfo=CN_TZ),

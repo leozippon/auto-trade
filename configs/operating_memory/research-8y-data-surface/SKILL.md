@@ -54,7 +54,7 @@
 - 版本：每个版本一行、按自己的时间可见。更正版在更正日另起一行，此前只看得到首次公告的数值；按决策时点取最新版本就是同一 (`ts_code`, `end_date`) 按 `available_at` 取最后一行，取首次公告就取最早一行。`update_flag` 不表示是否修订（首个版本里也大量为 1），不要按它过滤。已上市公司约 1.3% 的报告期缺原版，到更正日才第一次出现。
 - 三大报表是年初至今累计（Q1、H1、前三季度、全年）：单季 = 本期 − 同年上一期，TTM = 本期 + 上年全年 − 上年同期。最新一期按 `end_date` 取，不按时间取（旧报告期的重述盖的是新日期）。公告事件用每期最早一行的 `available_at`，否则重述会被当成新公告。
 - 未来字段：`disclosure_date.actual_date` 是事后回填的实际披露日，97% 的行晚于本行盖章，Y1 视图里 3,055 行晚于决策日；只在它早于决策日时可用，计划日用 `pre_date`。`dividend` 的「预案」「股东大会通过」行偶尔带着事后填上的 `ex_date`/`record_date`/`pay_date`，除权安排只取「实施」行。
-- 读取：整表或不投影的读取会撑破策略容器的 16 GiB。研究期末视图 271 万行：整读、只按 `dataset == "fina_mainbz_vip"` 过滤不投影都被杀，`income_vip` 过滤不投影峰值 6.6 GiB，8 列投影读全表 0.84 GiB。一律 `pd.read_parquet(context.asof_dir + "/fundamentals", columns=[...], filters=[("dataset", "==", ...)])`，`available_at` 用 `pd.to_datetime(..., utc=True)` 解析后再与 `context.inference_at` 比较。目录每个交易日多一个分片，整期回放里两张表的投影读取平均每次 3–5 秒：只在调仓日读，不要每个决策日重读。
+- 读取：整表或不投影的读取内存代价极高。研究期末视图 271 万行，在策略容器上限还是 16 GiB 时实测：整读、只按 `dataset == "fina_mainbz_vip"` 过滤不投影都被杀，`income_vip` 过滤不投影峰值 6.6 GiB，8 列投影读全表 0.84 GiB；现行上限见运行事实 `budgets.strategy_memory_bytes`。一律 `pd.read_parquet(context.asof_dir + "/fundamentals", columns=[...], filters=[("dataset", "==", ...)])`，`available_at` 用 `pd.to_datetime(..., utc=True)` 解析后再与 `context.inference_at` 比较。目录每个交易日多一个分片，整期回放里两张表的投影读取平均每次 3–5 秒：只在调仓日读，不要每个决策日重读。
 
 ## 文本域 text_index：只在挂了公告标题的臂上
 

@@ -180,13 +180,17 @@ class SandboxLimits:
     # rule-based arms peak at 3.8 GiB (48% of the former 8 GiB cap), but the
     # two fit-bearing ML arms (``alpha158_lgbm``, ``gru_ranker``) peaked
     # 6.70-7.60 GiB, i.e. 85-95% of it -- a model only slightly larger would be
-    # an OOM kill rather than a slow replay. 16 GiB gives that class of arm
-    # room; the host carries it, since the worst case of four experiments each
-    # running one session plus three concurrent validation containers is
-    # 4 x 4 x 16 = 256 GiB against ~446 GiB available. CPU stays at 8: strategy
-    # containers use ~1.1 of the 8 cores and host CPU PSI is 0.
+    # an OOM kill rather than a slow replay, so the cap went to 16 GiB. An
+    # in-process vLLM engine then took it to 32 GiB: a retrieval arm's
+    # full-span leg peaked at 14.1 GiB of the 16 (cgroup reading, page cache
+    # included) and its in-context path adds about 2.5 GiB. The cap is a
+    # ceiling, not a reservation: with one session plus three concurrent
+    # validation containers per experiment at the cap, four experiments would
+    # hold 4 x 4 x 32 = 512 GiB, already past the 503 GiB host, which relies
+    # on containers not filling at once. CPU stays at 8: strategy containers
+    # use ~1.1 of the 8 cores and host CPU PSI is 0.
     cpus: float = 8.0
-    memory: str = "16g"
+    memory: str = "32g"
     # A fork-bomb guard, not a budget, counting threads as well as processes:
     # one worker with torch, LightGBM and XGBoost thread pools at the
     # CPU-derived thread cap plus PyArrow's own pool needs well over the 64
@@ -220,8 +224,7 @@ class SandboxLimits:
     # ``fit`` altogether -- a torch ``DataLoader(num_workers>0)`` and joblib's
     # memmapped parallel backend both fail on a 64 MB ``/dev/shm``, and any
     # spill or intermediate parquet fails on a 64 MB ``/tmp``. They are charged
-    # to the container's own ``memory`` cap, so 2 GB each is 4 GB of the 16 GB
-    # a strategy container may use, and only what it actually writes.
+    # to the container's own ``memory`` cap, and only what it actually writes.
     tmpfs_size: str = "2g"
     shm_size: str = "2g"
     # The experiment's own GPU request, carried over from its ``SandboxSpec``
@@ -365,7 +368,7 @@ class SandboxSpec:
     # One boundary with the strategy container: both must stay equal to
     # ``SandboxLimits.cpus``/``memory``, whose rationale carries the sizing.
     cpus: float = 8.0
-    memory: str = "16g"
+    memory: str = "32g"
     # ``SandboxLimits.pids``, whose rationale carries the sizing.
     pids_limit: int = 1024
     tmpfs_size: str = "1g"
