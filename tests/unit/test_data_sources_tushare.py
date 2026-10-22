@@ -1938,6 +1938,19 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 common.EVENT_FLOW_SPECS["new_share"],
             )
 
+    def test_event_date_column_is_stored_without_padding(self):
+        # A padded ann_date would be a second spelling of the business key and
+        # break any strict date parse of the column; a missing one stays missing.
+        rows = pd.DataFrame([
+            {"ts_code": "000004.SZ", "ann_date": "20250512 ", "end_date": "20250509", "holder_num": 30282},
+            {"ts_code": "000005.SZ", "ann_date": None, "end_date": "20250509", "holder_num": 1},
+        ])
+        out = common.augment_event_frame(rows, common.EVENT_FLOW_SPECS["stk_holdernumber"])
+        self.assertEqual(out.loc[0, "ann_date"], "20250512")
+        self.assertIsNone(out.loc[1, "ann_date"])
+        self.assertEqual(out.loc[0, "available_at"], "2025-05-12 23:59:59+08:00")
+        self.assertEqual(rows.loc[0, "ann_date"], "20250512 ")
+
     def test_margin_rows_become_visible_at_09_on_the_next_open_day(self):
         # The vendor serves T's SZSE/BSE margin rows with the next session's
         # pre-open: a Friday stays invisible to a Monday 08:30 decision, a
