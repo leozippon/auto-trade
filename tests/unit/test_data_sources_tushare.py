@@ -7955,8 +7955,9 @@ class FullPortContractTest(unittest.TestCase):
         # with the margin available_at repair (2026-10-02); 33 with anns_d's
         # own official-service job (2026-10-06); 34 with the stk_holdertrade
         # restatement re-pull (2026-10-20); 35 with the top_list one; 36 with
-        # the stk_limit one (2026-10-21); 37 with the top-10 holder repair.
-        self.assertEqual(len(config["jobs"]), 37)
+        # the stk_limit one (2026-10-21); 37 with the top-10 holder repair; 39
+        # with the stk_holdernumber and repurchase restatement re-pulls.
+        self.assertEqual(len(config["jobs"]), 39)
         for name, tier in (
             ("manual_history_backfill_reference", "reference"),
             ("manual_history_backfill_macro", "macro"),
@@ -7966,11 +7967,16 @@ class FullPortContractTest(unittest.TestCase):
             self.assertEqual(job["extra_args"][:2], ["--history-floor", "20140701"])
         self.assertIn("--no-include-intraday", config["jobs"]["cn_evening_full"]["extra_args"])
         self.assertEqual(config["jobs"]["manual_intraday_minutes"]["operation"], "intraday_by_date")
-        # The restatement re-pull rewrites one dataset's whole history; it must
+        # A restatement re-pull rewrites one dataset's whole history; it must
         # never widen to the other disclosure tables the nightly job shares.
-        restatement = config["jobs"]["manual_event_restatement_repair"]
-        self.assertEqual((restatement["operation"], restatement["tier"]), ("download_tier", "event_flow"))
-        self.assertEqual(restatement["extra_args"], ["--datasets", "stk_holdertrade", "--force"])
+        for name, dataset in (
+            ("manual_event_restatement_repair", "stk_holdertrade"),
+            ("manual_holdernumber_restatement_repair", "stk_holdernumber"),
+            ("manual_repurchase_restatement_repair", "repurchase"),
+        ):
+            restatement = config["jobs"][name]
+            self.assertEqual((restatement["operation"], restatement["tier"]), ("download_tier", "event_flow"))
+            self.assertEqual(restatement["extra_args"], ["--datasets", dataset, "--force"])
         toplist = config["jobs"]["manual_toplist_restatement_repair"]
         self.assertEqual((toplist["operation"], toplist["tier"]), ("download_tier", "board_trading"))
         self.assertEqual(toplist["extra_args"], ["--datasets", "top_list", "--force"])
