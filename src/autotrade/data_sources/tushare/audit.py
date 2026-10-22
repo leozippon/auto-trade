@@ -426,9 +426,10 @@ def audit_intraday_by_date(args: argparse.Namespace) -> int:
 
     paths = {trade_date: stk_mins_by_date_path(raw_dir, args.output_dataset, trade_date) for trade_date in trade_dates}
     present = [trade_date for trade_date in trade_dates if paths[trade_date].exists()]
-    # The layer lands only through the manual job manual_intraday_minutes, so
-    # open days after its newest partition are "not landed yet": a warning that
-    # names the extent, which keeps the nightly audit's errors for real defects.
+    # The layer lands only through its own nightly job cn_nightly_intraday_minutes,
+    # which a quota stop can leave behind, so open days after its newest
+    # partition are "not landed yet": a warning that names the extent, which
+    # keeps the nightly audit's errors for real defects.
     # A hole before the newest partition is a lost partition, and a window with
     # no partition at all has nothing to be stale against; both stay errors.
     stale = [trade_date for trade_date in trade_dates if present and trade_date > present[-1]]
@@ -466,7 +467,7 @@ def audit_intraday_by_date(args: argparse.Namespace) -> int:
         "zero_file_sample": zero_files[:20],
         "schema_missing_sample": schema_missing[:10],
     })
-    add("warning" if stale else "info", f"{args.output_dataset}_staleness", "open days after the newest intraday minute partition (landed only by manual_intraday_minutes)", {
+    add("warning" if stale else "info", f"{args.output_dataset}_staleness", "open days after the newest intraday minute partition (landed only by cn_nightly_intraday_minutes)", {
         "newest_trade_date": present[-1] if present else None,
         "stale_trade_dates": len(stale),
         "stale_first": stale[0] if stale else None,

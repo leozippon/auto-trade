@@ -79,7 +79,8 @@ FUND_TITLE_EIGHT_YEAR: dict[str, object] = {**FUND_EIGHT_YEAR, "include_text": T
 # Round 20261005's 100k bars on that geometry.
 FUND_TITLE_EIGHT_YEAR_100K: dict[str, object] = {**FUND_EIGHT_YEAR_100K, **FUND_TITLE_EIGHT_YEAR}
 
-FUND_TITLE_PIT_VIEWS_SEED = "data/pit_views_seed_research_8y_fundanns_20261014"
+# Its seed at snapshot cache format 13 on release 23a37706... (2026-10-22).
+FUND_TITLE_PIT_VIEWS_SEED = "data/pit_views_seed_research_8y_fundanns_20261022"
 
 # The five-year geometry (round 20261015): research on the five July-June years
 # from 2020-07, when the events domain begins, with a 72-month window (the
@@ -122,12 +123,12 @@ FIVE_YEAR: dict[str, object] = {
 # Round 20261005's 100k bars on the five-year geometry.
 FIVE_YEAR_100K: dict[str, object] = {**FUND_EIGHT_YEAR_100K, **FIVE_YEAR}
 
-# Its seed: the rebuild for the same selection (logs/data/seed_5y_full_20261016/)
-# of the one first prebuilt from release b5dc339b708d4a0ba962805828e973af
-# (logs/data/seed_5y_full_20261015/), which typed some events columns two ways
-# (string beside large_string), so every replay crossing 2022-07-01 failed
-# (logs/notes/review_20261008/asof_partition_defect.md).
-FIVE_YEAR_FIXED_PIT_VIEWS_SEED = "data/pit_views_seed_research_5y_full_20261016"
+# Its seed: the same selection at snapshot cache format 13 on release
+# 23a37706... (logs/data/seed_5y_full_20261022/), after the top-10, holder-count,
+# repurchase, stk_holdertrade, top_list and stk_limit re-pulls. Its format-11
+# predecessors on release b5dc339b... (logs/data/seed_5y_full_20261015/ and
+# 20261016/) are refused at the current format.
+FIVE_YEAR_FIXED_PIT_VIEWS_SEED = "data/pit_views_seed_research_5y_full_20261022"
 
 # The hosted arm of a pair: main session, sub-agents and compaction on MiMo, the
 # compaction threshold pinned to the local arms' value so both compact alike.

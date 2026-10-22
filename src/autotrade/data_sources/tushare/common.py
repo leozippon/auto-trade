@@ -2708,6 +2708,9 @@ def augment_event_frame(
     if "available_at_rule" not in out.columns:
         out["available_at_rule"] = "missing_source_date"
     if spec.date_column and spec.date_column in out.columns:
+        # The vendor has served a padded date ('20250512 ' in stk_holdernumber);
+        # stored as served, it is a second spelling of the key for every reader.
+        out[spec.date_column] = out[spec.date_column].map(lambda item: item.strip() if isinstance(item, str) else item)
         date_values = out[spec.date_column].astype(str).str.strip()
         derived = date_values.map(
             lambda item: official_available_at(item, spec.availability, trading_dates=trading_dates)

@@ -29,7 +29,7 @@
   },
   "jobs": {
     "cn_evening_full": {
-      "description": "Run one rolling-window retained-domain update after normal A-share, flow, block-trade and macro same-day releases should be available. Self-healing families are excluded like the natural-day tiers: stk_auction lands via cn_open_auction_capture_0927 + cn_evening_auction_backfill, the margin family via its pre-open jobs + cn_evening_margin_backfill, text via cn_nightly_text_full, the global tier via cn_nightly_global_full, and ann-date disclosure tables via cn_nightly_disclosure_full. The 1-minute layer is excluded too and lands via manual_intraday_minutes: stk_mins has a per-token daily request quota, and a minute backlog inside this job would fail the update that the morning Paper release depends on.",
+      "description": "Run one rolling-window retained-domain update after normal A-share, flow, block-trade and macro same-day releases should be available. Self-healing families are excluded like the natural-day tiers: stk_auction lands via cn_open_auction_capture_0927 + cn_evening_auction_backfill, the margin family via its pre-open jobs + cn_evening_margin_backfill, text via cn_nightly_text_full, the global tier via cn_nightly_global_full, and ann-date disclosure tables via cn_nightly_disclosure_full. The 1-minute layer is excluded too and lands via cn_nightly_intraday_minutes: stk_mins has a per-token daily request quota, and a minute backlog inside this job would fail the update that the morning Paper release depends on.",
       "end_date_offset_days": 0,
       "end_date_mode": "sse_open_on_or_before",
       "start_date_lookback_days": 30,
@@ -418,13 +418,13 @@
       "lock_wait_seconds": 1800,
       "skip_if_already_ok": false
     },
-    "manual_intraday_minutes": {
-      "description": "Manual (not scheduled): land the 1-minute by-date layer on its own, for every trading day in the window whose partition is missing or invalid. stk_mins enforces a per-token daily request quota (answer: '您今日stk_min额定额度已用完，请明日再试'), so the downloader asks for STK_MINS_BATCH_CODES codes per request and stops on the quota answer instead of retrying it; a stopped run keeps every day it wrote and the next run resumes. Run scripts/data/build_minute_derived.py after it.",
+    "cn_nightly_intraday_minutes": {
+      "description": "Land the 1-minute by-date layer on its own every night, after cn_evening_full and before build_minute_derived and the full audit, for every trading day in the trailing window whose partition is missing or invalid; the run ends on the last SSE open date before its launch date. It launches inside the evening node's window, so the replay keeps gating minutes on cn_evening_full. stk_mins enforces a per-token daily request quota (answer: '您今日stk_min额定额度已用完，请明日再试'), so the downloader asks for STK_MINS_BATCH_CODES codes per request and stops on the quota answer instead of retrying it; a stopped run keeps every day it wrote, exits 76 and the next night resumes. A gap older than the window needs --start-date.",
       "operation": "intraday_by_date",
       "end_date_offset_days": 1,
       "end_date_mode": "sse_open_on_or_before",
       "start_date_lookback_days": 30,
-      "lock_wait_seconds": 900,
+      "lock_wait_seconds": 1800,
       "skip_if_already_ok": true
     },
     "manual_event_available_at_repair": {
