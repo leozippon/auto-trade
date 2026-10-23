@@ -88,7 +88,7 @@
       "skip_if_already_ok": true
     },
     "cn_nightly_full_audit": {
-      "description": "Refresh the six data-quality status files (core market, fundamental raw, macro, intraday, event/flow, board trading) every calendar day; event/flow quality uses the latest-publishing next-morning margin boundary for the whole domain. The window end is a natural day because the global tier and the ann-date disclosure tables land every calendar evening: weekend-written rows must be formally audited before Monday's open, not consumed unaudited. Trading-day-bound domains clamp their expectation windows to the last open day internally, so weekend runs re-verify them without false findings. Text is natural-day data and is audited by cn_nightly_text_audit instead.",
+      "description": "Refresh the six data-quality status files (core market, fundamental raw, macro, intraday, event/flow, board trading) every calendar day; event/flow quality uses the latest-publishing next-morning margin boundary for the whole domain. The window end is a natural day because the global tier and the ann-date disclosure tables land every calendar day: weekend-written rows must be formally audited before Monday's open, not consumed unaudited. Trading-day-bound domains clamp their expectation windows to the last open day internally, so weekend runs re-verify them without false findings. Text is natural-day data and is audited by cn_nightly_text_audit instead.",
       "operation": "audit_full",
       "end_date_offset_days": 1,
       "event_flow_end_extra_offset_days": 1,
@@ -147,7 +147,7 @@
       "skip_if_already_ok": true
     },
     "cn_nightly_disclosure_full": {
-      "description": "Land the ann-date disclosure tables (holder counts/trades, top-10 holders, repurchases) every calendar evening. Roughly one row in ten carries a weekend announcement date, and their announcement TEXT already lands the same weekend via the text job; the structured tables must not wait for the next trading evening. Natural-day window (no end_date_mode); the evening update no longer covers these datasets.",
+      "description": "Land the ann-date disclosure tables (holder counts/trades, top-10 holders, repurchases) every calendar day at the end of the chain (09:45, after the morning's last Paper run and the pre-open jobs). The vendor restates these tables often, and a shrink-guard refusal leaves the lake dirty, which fences every later mutation and blocks pinning a release of the newest generation; at the end of the chain a refusal holds back nothing the next Paper run reads, and the operator has the day to repair it before the 23:15 chain. Roughly one row in ten carries a weekend announcement date, so the structured tables do not wait for a trading day. Natural-day window (no end_date_mode): a 09:45 run ends on its own calendar day, so it covers the previous evening's announcements. The evening update does not cover these datasets.",
       "operation": "download_event_flow",
       "end_date_offset_days": 0,
       "start_date_lookback_days": 30,

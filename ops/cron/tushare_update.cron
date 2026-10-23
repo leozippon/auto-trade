@@ -16,8 +16,9 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 
 # Natural-day landing jobs: these tiers publish on weekends and A-share
 # holidays, so each has its own calendar-day job that runs every night ahead
-# of the evening update (the jobs serialize on the updater lock).
-# 23:05 ann-date disclosure tables (holder counts/trades, top-10, repurchases).
+# of the evening update (the jobs serialize on the updater lock). The
+# ann-date disclosure tables are natural-day too, but land at the end of the
+# chain (09:45, below).
 # 23:15 text evidence -- report_rc only since 2026-09-10, the one text
 #       interface the token still holds.
 # 23:15 announcement titles (anns_d) from the official service with
@@ -26,7 +27,6 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 #       the two), so anns_d keeps the 23:15 visibility cutoff it always had.
 # 23:25 global tier (overseas indices, FX, US rates, economic calendar) --
 #       overseas sessions keep trading through A-share holidays.
-5 23 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_disclosure_full
 15 23 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_text_full
 15 23 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_anns_full
 25 23 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_global_full
@@ -112,6 +112,19 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # Late-day catch-up and source-correction rechecks happen in cn_evening_auction_backfill.
 27 9 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_open_auction_capture_0927
 31 9 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_open_auction_capture_0927
+
+# Ann-date disclosure tables (holder counts/trades, top-10 holders,
+# repurchases), every calendar day at the end of the chain: after the morning's
+# last Paper run (08:35, ops/cron/paper.cron) and the pre-open jobs, before the
+# evening chain. The vendor restates these tables often, and a shrink-guard
+# refusal leaves the lake dirty: the fence refuses every later mutation, and no
+# release can be pinned from a dirty generation, so at 23:05 one refusal held
+# back the bars, titles and fundamentals of the next Paper run (2026-10-22).
+# Here it can hold back nothing Paper reads that morning, and the operator has
+# the day to repair it before 23:15. Rows announced on day D land the next
+# morning: the replay node moves with this line, so they are visible from
+# D+1 09:55, one calendar day later than at 23:05.
+45 9 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_disclosure_full
 
 # Weekly deep sweeps (Saturday, market closed; end date resolves to Friday):
 # slow-moving per-code reference loops and the 90-day fundamental/dividend

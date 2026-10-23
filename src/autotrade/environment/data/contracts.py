@@ -337,10 +337,12 @@ REFRESH_NODES: dict[str, RefreshNode] = {
     # waits for the lock fetches later than the cutoff, never earlier.
     "cn_nightly_anns_full": RefreshNode("cn_nightly_anns_full", time(23, 15), 15),
     # Ann-date disclosure tables (holder counts/trades, top-10 holders,
-    # repurchases), every calendar evening: ~one row in ten announces on a
-    # weekend, and waiting for the next trading evening left the structured
-    # rows two days behind their own announcement text.
-    "cn_nightly_disclosure_full": RefreshNode("cn_nightly_disclosure_full", time(23, 5), 10),
+    # repurchases), every calendar day (~one row in ten announces on a
+    # weekend). The job runs at the end of the chain, after the morning's last
+    # Paper run, so a shrink-guard refusal there cannot fence the jobs Paper
+    # reads: rows announced on day D become visible at D+1 09:55, a calendar
+    # day later than the 23:05 slot it had until 2026-10-23.
+    "cn_nightly_disclosure_full": RefreshNode("cn_nightly_disclosure_full", time(9, 45), 10),
     # Global tier (overseas indices, FX, US rates, economic calendar), every
     # calendar evening: these sources publish through A-share holidays, and
     # the trading-day evening job alone left the first post-holiday open up to
@@ -427,8 +429,9 @@ EVENT_DATASET_REFRESH_NODES: dict[str, tuple[str, ...]] = {
     # inside the evening node's window, and their build runs inside that window
     # as well (ops/cron/tushare_update.cron), so their rows become queryable on
     # the same boundary as the minutes they summarise.
-    # Ann-date disclosure tables land via their own natural-day job (weekend
-    # announcements become visible the following pre-open, matching live).
+    # Ann-date disclosure tables land via their own natural-day job at 09:45
+    # (an announcement of day D, weekends included, becomes visible at D+1
+    # 09:55, matching live).
     "top10_holders": ("cn_nightly_disclosure_full",),
     "top10_floatholders": ("cn_nightly_disclosure_full",),
     "stk_holdernumber": ("cn_nightly_disclosure_full",),

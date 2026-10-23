@@ -86,6 +86,7 @@ IN_WINDOW_LANDING_JOBS = {"cn_nightly_intraday_minutes": EVENING_NODE}
 
 
 CRONTAB = REPO_ROOT / "ops" / "cron" / "tushare_update.cron"
+PAPER_CRONTAB = REPO_ROOT / "ops" / "cron" / "paper.cron"
 
 # Full dataset list a whole-tier download job lands, from the tushare
 # package's canonical tier definitions (single source with the downloader).
@@ -230,6 +231,33 @@ class RefreshNodeDriftGuardTest(unittest.TestCase):
             self.assertLess(launch, node.ready_at(day), f"{job!r} launches after {node_name!r} is ready")
             self.assertNotIn(job, REFRESH_NODES)
         self.assertEqual(DOMAIN_REFRESH_NODES["intraday_1min"], (EVENING_NODE,))
+
+    def test_disclosure_job_runs_at_the_end_of_the_chain(self) -> None:
+        # A shrink-guard refusal in the disclosure tables leaves the lake dirty,
+        # which fences every later mutation and keeps a release of the newest
+        # generation from being pinned. So the job launches after the morning's
+        # last Paper run and every other job launched before noon (the nightly
+        # chain and the pre-open jobs), and before every job launched from noon
+        # on (the evening chain, the Saturday sweeps): a refusal there never
+        # stands between a landing job and the Paper run that reads it.
+        launches = [
+            (time(int(match.group(2)), int(match.group(1))), match.group(3))
+            for line in CRONTAB.read_text(encoding="utf-8").splitlines()
+            if (match := _CRON_LINE.match(line))
+        ]
+        paper = [
+            time(int(hour), int(minute))
+            for minute, hour in re.findall(
+                r"^(\d{1,2})\s+(\d{1,2})\s+.*run_paper\.py run", PAPER_CRONTAB.read_text(encoding="utf-8"), re.MULTILINE
+            )
+        ]
+        (launch,) = {at for at, name in launches if name == "cn_nightly_disclosure_full"}
+        others = [at for at, name in launches if name != "cn_nightly_disclosure_full"]
+        noon = time(12, 0)
+        self.assertTrue(paper)
+        self.assertGreater(launch, max(paper))
+        self.assertGreater(launch, max(at for at in others if at < noon))
+        self.assertLess(launch, min(at for at in others if at >= noon))
 
     def test_managed_jobs_log_through_the_runner_only(self) -> None:
         # Every run writes its own log via the runner; cron lines carry no
