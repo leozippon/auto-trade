@@ -39,6 +39,8 @@ from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import write_json_atomic
 from autotrade.pipelines.config import DEFAULT_RESEARCH_GEOMETRY
 from autotrade.pipelines.hitl_state import (
+    ARCHIVED_NAME,
+    GPU_CLAIM_NAME,
     WEB_CREATE_DEFAULTS,
     ControlState,
     build_session_plan,
@@ -443,6 +445,36 @@ class WorkerLifecycleTest(unittest.TestCase):
         self.assertIsNone(control.request)
         self.assertEqual(
             control.directives, {"research": "keep the turnover down"}
+        )
+
+    def test_an_archived_arm_is_never_started_again(self) -> None:
+        """Archived is finished for good, and the prunes act on it: an arm
+        interrupted mid-research (its status still says running, its worker
+        is gone), which the console otherwise reads as resumable, is refused
+        on every start path before anything is claimed or spawned."""
+        self._install_worker_script()
+        write_json_atomic(
+            self.status_path,
+            {"schema_version": 1, "pid": 999_999_999, "state": "running_session"},
+        )
+        write_json_atomic(
+            self.hitl / ARCHIVED_NAME,
+            {"archived_at": "2026-10-24T00:00:00+00:00", "reason": "not resumed"},
+        )
+        for action in ("resume", "restart"):
+            refused = self._post(action=action)
+            self.assertEqual(refused.status_code, 400, refused.text)
+            self.assertIn("is archived", refused.json()["detail"])
+        with self.assertRaisesRegex(ManagerError, "is archived"):
+            manager_module.ExperimentManager(
+                self.repo_root, self.experiments_root
+            ).start_worker("exp_ctl")
+        # A spawn logs its start and publishes a launching status first.
+        self.assertFalse((self.repo_root / "logs/workers/exp_ctl.log").exists())
+        self.assertFalse((self.hitl / GPU_CLAIM_NAME).exists())
+        self.assertEqual(
+            json.loads(self.status_path.read_text(encoding="utf-8"))["state"],
+            "running_session",
         )
 
     def test_start_worker_keeps_worker_temp_files_off_the_shared_tmpfs(self) -> None:

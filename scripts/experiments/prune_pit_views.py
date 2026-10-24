@@ -10,13 +10,17 @@ seed, the rest cold-built). So once an arm is finished for good its views can
 go, together with the sandbox work root a worker left behind before it learned
 to release it. A worker that writes an arm's terminal status releases both
 itself, through the same ``release_pit_views``; this tool is for the arms that
-ended before it did, and for arms stopped after their verdict.
+ended before it did, for arms stopped after their verdict, and for archived
+arms.
 
-Finished for good means: hitl status ``completed`` or ``stopped``, no live
-worker, and a ledger verdict (``graduated``, ``discarded`` or
-``no_deliverable``), which rules out a pending forward replay. Anything else is
-kept, an arm whose status or ledger cannot be read is refused, and nothing
-outside ``pit_views/`` and ``.runtime/sandboxes/<id>`` is touched.
+Finished for good means no live worker and either the archive marker
+(``hitl/archived.json``, written by ``archive_arm.py``) or hitl status
+``completed`` or ``stopped`` with a ledger verdict (``graduated``,
+``discarded`` or ``no_deliverable``), which rules out a pending forward replay.
+Archiving is the operator's final word: the console never starts the arm's
+worker again, and one whose research was interrupted never gets a verdict. Anything else is kept, an arm
+whose status or ledger cannot be read is refused, and nothing outside
+``pit_views/`` and ``.runtime/sandboxes/<id>`` is touched.
 
 The default only reports, per arm and in total, the bytes deletion would free:
 an inode counts only when every hard link to it lies inside the deleted tree,
@@ -45,6 +49,7 @@ from autotrade.environment.sandbox import remove_sandbox_tree
 from autotrade.pipelines.hitl_state import (
     HITL_DIR_NAME,
     STATUS_NAME,
+    arm_is_archived,
     read_status,
     status_pid_alive,
 )
@@ -65,6 +70,8 @@ def kept_reason(directory: Path) -> str:
     status = read_status(directory / HITL_DIR_NAME / STATUS_NAME)
     if status_pid_alive(status):
         return f"live worker (pid {status.get('pid')})"
+    if arm_is_archived(directory):
+        return ""
     state = str(status.get("state") or "created")
     if state not in TERMINAL_STATES:
         return f"state {state!r} is not terminal"

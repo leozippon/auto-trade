@@ -46,6 +46,12 @@ SCHEDULE_NAME = "schedule.json"
 # (webui.manager.start_worker). That worker attaches exactly these to every
 # container it starts, and they are held while it lives (``gpu_claims``).
 GPU_CLAIM_NAME = "gpu_claim.json"
+# The marker the operator's archive (scripts/experiments/archive_arm.py) writes
+# in an arm's hitl/ directory, recording when and why; removing it restores the
+# arm. Archiving is the operator's final word that the arm is over: the console
+# lists it apart and never starts its worker again, and the derived-cache prunes
+# treat it as finished for good (``arm_is_archived``).
+ARCHIVED_NAME = "archived.json"
 LIVE_RUN_STATES = {"running_session"}
 # The states a worker ends in: an arm in one of them runs nothing.
 ENDED_STATES = frozenset({"completed", "failed", "stopped"})
@@ -361,6 +367,13 @@ def read_gpu_claim(hitl: str | Path) -> tuple[int, ...] | None:
     ):
         raise ValueError(f"malformed GPU claim in {path}")
     return tuple(devices)
+
+
+def arm_is_archived(directory: str | Path) -> bool:
+    """Whether the operator archived this arm: it carries ``ARCHIVED_NAME`` and
+    is finished for good, whatever its status and ledger say."""
+
+    return (Path(directory) / HITL_DIR_NAME / ARCHIVED_NAME).is_file()
 
 
 def running_arms(experiments_root: str | Path) -> list[str]:

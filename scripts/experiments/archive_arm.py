@@ -3,11 +3,13 @@
 
 An arm is archived by one marker file inside its own directory,
 ``hitl/archived.json``, which records when and why; ``--restore`` removes it.
-The directory never moves, so only the console's home list changes: it leaves
-the arm out (and never summarizes it) and offers it under 已归档 instead, and
-its experiment page still opens. Lineage, the consistency check, the round
-fill queue, the running caps, operating memory and Paper read the arm exactly
-as before. The console need not be running.
+The directory never moves. The console's home list leaves the arm out (and
+never summarizes it) and offers it under 已归档 instead, its experiment page
+still opens but the console never starts its worker again, and
+``prune_pit_views.py`` treats it as finished for good, so its derived PIT
+caches may go. Lineage, the consistency check, the round fill queue, the
+running caps, operating memory and Paper read the arm exactly as before. The
+console need not be running.
 
 Only an arm that is over and holds nothing live is archived. Every arm named
 is checked before anything changes, and the command refuses them all when one
@@ -34,10 +36,9 @@ add_repo_src(__file__)
 
 from autotrade.environment.runtime import write_json_atomic
 from autotrade.paper.books import PAPER_STATE_DIR, experiment_books
-from autotrade.pipelines.hitl_state import HITL_DIR_NAME
+from autotrade.pipelines.hitl_state import ARCHIVED_NAME, HITL_DIR_NAME
 from autotrade.pipelines.ledger import experiment_verdict
 from autotrade.webui.registry import (
-    ARCHIVED_NAME,
     experiment_state,
     read_ledger_records,
     resolve_experiment_dir,

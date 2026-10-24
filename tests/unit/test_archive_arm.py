@@ -3,7 +3,8 @@
 An archived arm keeps its directory and gains one marker file. The script
 refuses an arm that still holds something live, archives and restores
 idempotently, and the arm stays exactly what it was to everything but the
-console's home list: a lineage arm and an arm of the consistency check.
+console's home list, the console's start of its worker and the PIT-view prune:
+a lineage arm and an arm of the consistency check.
 """
 
 from __future__ import annotations

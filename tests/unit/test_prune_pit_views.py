@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from autotrade.environment.runtime import write_json_atomic
+from autotrade.pipelines.hitl_state import ARCHIVED_NAME
 from scripts.experiments import prune_pit_views as prune_tool
 from tests.unit.webui_research_arm import build_arm
 
@@ -123,6 +125,36 @@ def test_apply_deletes_the_caches_and_nothing_durable(
     # Idempotent: a second pass finds nothing left to free.
     assert prune_tool.prune(repo, apply=True) == 0
     assert "total: 0 finished arms" in capsys.readouterr().out
+
+
+def test_an_archived_arm_is_finished_for_good_unless_its_worker_lives(
+    repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Archiving is the operator's final word: an arm interrupted mid-research
+    (its status still says running, its worker is gone) never gets a verdict,
+    and a failed one is not resumed, so archived, both lose their caches. A
+    live worker keeps its views even on an archived arm."""
+
+    experiments = repo / "experiments"
+    write_json_atomic(
+        experiments / "arm_sealed" / "hitl" / "status.json",
+        {"schema_version": 1, "pid": 999_999_999, "state": "running_session"},
+    )
+    for arm in ("arm_sealed", "arm_broken", "arm_live"):
+        write_json_atomic(
+            experiments / arm / "hitl" / ARCHIVED_NAME,
+            {"archived_at": "2026-10-24T00:00:00+00:00", "reason": "not resumed"},
+        )
+    assert prune_tool.prune(repo, apply=True) == 0
+    lines = {line.split(":", 1)[0]: line for line in capsys.readouterr().out.splitlines()}
+    for arm in ("arm_sealed", "arm_broken"):
+        assert "freed" in lines[arm]
+        assert not (experiments / arm / "pit_views").exists()
+        assert (experiments / arm / "hitl" / ARCHIVED_NAME).is_file()
+    assert "live worker" in lines["arm_live"]
+    assert (experiments / "arm_live" / "pit_views" / "asof_stash").is_dir()
+    assert "total: 4 finished arms" in lines["total"]
+    assert "1 kept, 0 refused" in lines["total"]
 
 
 def test_an_arm_whose_state_cannot_be_read_is_refused(

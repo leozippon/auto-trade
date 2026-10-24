@@ -43,11 +43,13 @@ from autotrade.pipelines.calendar import FULL_SPAN
 from autotrade.pipelines.config import AcceptanceRules, acceptance_for, rolling_default
 from autotrade.pipelines.experiment import freeze_gate_for, neutralized
 from autotrade.pipelines.hitl_state import (
+    ARCHIVED_NAME,
     CONTROL_NAME,
     HITL_DIR_NAME,
     PARAMS_NAME,
     STATUS_NAME,
     WEB_CREATE_DEFAULTS,
+    arm_is_archived,
     read_control,
     read_gpu_claim,
     read_json,
@@ -643,14 +645,12 @@ def _listing_row(directory: Path) -> tuple[dict[str, object], tuple[object, ...]
     return row, None
 
 
-# An arm the operator archived (scripts/experiments/archive_arm.py) carries this
-# marker in its hitl/ directory, and removing the file restores it. The home
-# page lists such an arm only when asked for the archived ones, and the default
-# listing never summarizes it. Nothing outside the console's listing reads the
-# marker: lineage, the consistency check (scripts/dev/check_verdicts.py), the
-# round fill queue, operating memory and Paper see the arm as before, and its
-# experiment page still opens.
-ARCHIVED_NAME = "archived.json"
+# The console's side of archiving (``hitl_state.ARCHIVED_NAME``): the home page
+# lists an archived arm only when asked for the archived ones, the default
+# listing never summarizes it, its experiment page still opens, and the manager
+# never starts its worker again. Lineage, the consistency check
+# (scripts/dev/check_verdicts.py), the round fill queue, operating memory and
+# Paper see the arm as before.
 
 
 def archive_marker(directory: Path) -> dict[str, object] | None:
@@ -685,9 +685,7 @@ def _listing(
         directories = [
             path for path in root.iterdir() if path.is_dir() and not path.name.startswith(".")
         ]
-        shelved = {
-            path.name for path in directories if (path / HITL_DIR_NAME / ARCHIVED_NAME).is_file()
-        }
+        shelved = {path.name for path in directories if arm_is_archived(path)}
         rows: list[dict[str, object]] = []
         fresh: set[str] = set()
         kept: list[tuple[str, tuple[object, ...]]] = []

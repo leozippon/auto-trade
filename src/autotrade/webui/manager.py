@@ -44,6 +44,7 @@ from autotrade.pipelines.hitl_state import (
     WEB_INTERNAL_PARAMS,
     WEB_REQUIRED_PARAMS,
     ControlState,
+    arm_is_archived,
     control_lock,
     free_gpus,
     gpu_claims,
@@ -597,6 +598,12 @@ class ExperimentManager:
         with self._experiment_lock(experiment_id), self._slots:
             directory = self._experiment_dir(experiment_id)
             _modern_ref_store(directory)
+            # Archived is finished for good: the prunes may already have taken
+            # the views and release a worker would run on.
+            if arm_is_archived(directory):
+                raise ManagerError(
+                    f"experiment {experiment_id!r} is archived: an archived arm is never run again"
+                )
             status_path = directory / "hitl/status.json"
             status = _read_json(status_path)
             if _worker_live(status):
