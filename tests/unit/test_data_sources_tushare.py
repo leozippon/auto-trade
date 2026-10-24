@@ -7477,6 +7477,18 @@ class TuShareClientTest(unittest.TestCase):
             client.query("daily", {"trade_date": "20261023"}, "ts_code,close", retries=2)
         self.assertEqual(len(_VendorStub.requests), 2)
 
+    def test_a_code_0_answer_without_its_data_block_raises_instead_of_answering_empty(self) -> None:
+        _VendorStub.answers = [
+            (200, {"code": 0, "msg": "", "data": None}),
+            (200, {"code": 0, "msg": "", "data": {"fields": ["ts_code", "close"]}}),
+        ]
+        client = common.TuShareClient("secret", min_interval=0, timeout=5, endpoint=self.endpoint)
+        with patch.object(common.time, "sleep"), self.assertRaisesRegex(RuntimeError, "daily answered code 0 without a data block"):
+            client.query("daily", {"trade_date": "20261023"}, "ts_code,close", retries=2)
+        # A genuinely empty answer still carries its fields and an empty list.
+        _VendorStub.answers = [(200, {"code": 0, "msg": "", "data": {"fields": ["ts_code", "close"], "items": []}})]
+        self.assertEqual(client.query("daily", {"trade_date": "20261024"}, "ts_code,close").items, [])
+
     def test_an_answer_without_a_requested_field_is_defective(self) -> None:
         _VendorStub.answers = [(200, {"code": 0, "msg": "", "data": {"fields": ["ts_code"], "items": [["000001.SZ"]]}})]
         client = common.TuShareClient("secret", min_interval=0, timeout=5, endpoint=self.endpoint)

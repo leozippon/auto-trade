@@ -1603,8 +1603,13 @@ class TuShareClient:
         body = response.json()
         if body.get("code") != 0:
             raise RuntimeError(f"{api_name} answered code {body.get('code')}: {body.get('msg')}")
-        data = body.get("data") or {}
-        return ApiResult(list(data.get("fields") or []), list(data.get("items") or []))
+        # An empty answer still carries its fields and an empty item list; a
+        # missing or null block is a malformed answer (the SDK raised on it),
+        # never zero rows.
+        data = body.get("data")
+        if not (isinstance(data, dict) and isinstance(data.get("fields"), list) and isinstance(data.get("items"), list)):
+            raise RuntimeError(f"{api_name} answered code 0 without a data block of fields and items")
+        return ApiResult(list(data["fields"]), list(data["items"]))
 
     def query(self, api_name: str, params: dict[str, Any] | None = None, fields: str = "", retries: int = 5) -> ApiResult:
         for attempt in range(1, retries + 1):
