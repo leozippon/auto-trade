@@ -956,6 +956,92 @@ def test_hosted_claude_ids_reuse_the_chat_completions_contract(tmp_path: Path):
     assert response.usage == {"total_tokens": 442}
 
 
+def _tool_loop(*, notice: bool) -> list[ChatMessage]:
+    """An Agent-shaped conversation: two tool rounds, optionally a notice."""
+
+    messages = [
+        ChatMessage("system", "fixed system prompt"),
+        ChatMessage("user", "go"),
+    ]
+    for index, symbol in enumerate(("600519.SH", "600036.SH"), start=1):
+        call = ToolCall(f"toolu_{index}", "get_quote", {"symbol": symbol})
+        messages += [
+            ChatMessage("assistant", None, tool_calls=(call,)),
+            ChatMessage("tool", f'{{"close": {index}}}', tool_call_id=call.id),
+        ]
+    if notice:
+        messages.append(ChatMessage("user", '{"observation": "time_budget_notice"}'))
+    return messages
+
+
+def _chat_json(model: str) -> bytes:
+    return json.dumps(
+        {
+            "model": model,
+            "choices": [{"message": {"content": "done"}, "finish_reason": "stop"}],
+            "usage": {"total_tokens": 5},
+        }
+    ).encode()
+
+
+@pytest.mark.parametrize("notice", [False, True])
+def test_claude_ids_mark_only_the_latest_tool_result_for_the_prompt_cache(
+    tmp_path: Path, notice: bool
+):
+    proxy, transport = _proxy(
+        tmp_path, [_chat_json("claude-opus-5-5")], model="claude-opus-5-5"
+    )
+    messages = _tool_loop(notice=notice)
+
+    proxy.complete(messages)
+
+    body = transport.bodies[0]
+    expected = [message.to_record() for message in messages]
+    # The relay forwards the marker only from a tool message; the system
+    # prompt and every other message keep their plain string content.
+    expected[5]["content"] = [
+        {
+            "type": "text",
+            "text": '{"close": 2}',
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+    assert body["messages"] == expected
+    assert body["messages"][0] == {"role": "system", "content": "fixed system prompt"}
+    assert json.dumps(body).count("cache_control") == 1
+
+
+def test_claude_conversation_without_a_tool_result_carries_no_marker(tmp_path: Path):
+    proxy, transport = _proxy(
+        tmp_path, [_chat_json("claude-opus-5-5")], model="claude-opus-5-5"
+    )
+    messages = _tool_loop(notice=False)[:2]
+
+    proxy.complete(messages)
+
+    assert transport.bodies[0]["messages"] == [m.to_record() for m in messages]
+
+
+@pytest.mark.parametrize(
+    ("model", "reply"),
+    [
+        (RELAY_DEEPSEEK_MODEL, _chat_json(RELAY_DEEPSEEK_MODEL)),
+        (MODEL, _responses_json(content="done")),
+    ],
+    ids=["relay-deepseek", "gpt-6-responses"],
+)
+def test_other_relay_ids_send_no_cache_marker(tmp_path: Path, model: str, reply: bytes):
+    proxy, transport = _proxy(tmp_path, [reply], model=model)
+    messages = _tool_loop(notice=False)
+
+    proxy.complete(messages)
+
+    body = transport.bodies[0]
+    assert "cache_control" not in json.dumps(body)
+    if model == RELAY_DEEPSEEK_MODEL:
+        assert body["messages"] == [message.to_record() for message in messages]
+
+
 def test_relay_deepseek_id_uses_the_deepseek_dialect(tmp_path: Path):
     proxy, transport = _proxy(
         tmp_path,
