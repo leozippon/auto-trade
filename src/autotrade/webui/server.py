@@ -72,24 +72,32 @@ def _raw_generation_status(repo_root: Path) -> dict[str, object]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return {"state": "absent"}  # dev/test roots without a stamped lake
+        return {"state": "absent", "issues": []}  # dev/test roots without a stamped lake
     except (OSError, ValueError) as exc:
-        return {"state": "unreadable", "error": f"{type(exc).__name__}: {exc}"}
+        return {"state": "unreadable", "error": f"{type(exc).__name__}: {exc}", "issues": []}
     if not isinstance(payload, dict):
-        return {"state": "unreadable", "error": "stamp is not a JSON object"}
+        return {"state": "unreadable", "error": "stamp is not a JSON object", "issues": []}
     info: dict[str, object] = {"state": str(payload.get("state") or "unreadable")}
     for key in ("generation_id", "updated_at", "completed_at"):
         if payload.get(key):
             info[key] = payload[key]
+    issues = payload.get("issues") or []
+    info["issues"] = [
+        {key: str(issue.get(key) or "") for key in ("kind", "dataset", "partition", "since", "detail", "version")}
+        for issue in issues
+        if isinstance(issue, dict)
+    ] if isinstance(issues, list) else [{"kind": "unreadable", "dataset": "", "partition": "", "since": "", "detail": "issues is not a list", "version": ""}]
     return info
 
 
-# Raw-lake states that leave health ok. ``updating`` is the nightly write in
-# progress, not a fault: no console path reads the live lake -- an arm pins an
+# Raw-lake states that leave health ok. ``updating`` is a write in progress,
+# not a fault: no console path reads the live lake -- an arm pins an
 # already-published release (its seed's, or the last complete one while the
 # updater holds the lake) and Paper reads the newest committed one -- so it is
-# reported in ``raw_generation`` without degrading. ``dirty``, ``unreadable``
-# and any state this code does not know degrade.
+# reported in ``raw_generation`` without degrading. ``unreadable`` and any
+# state this code does not know degrade, and so does every open lake issue (a
+# defective vendor answer, a staged version awaiting an operator, a pending
+# whole-history re-pull), which health names.
 _HEALTHY_RAW_STATES = frozenset({"committed", "absent", "updating"})
 
 _UNREADABLE_HITL_HEALTH_ERROR = "HITL control plane is unreadable"
@@ -261,10 +269,14 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     def health() -> dict[str, object]:
         unreadable = _health_unreadable_experiments(manager.unreadable_experiments())
         raw_generation = _raw_generation_status(root)
-        # Honest status: degraded when the raw lake's last mutation failed or
-        # its stamp cannot be read (absent = dev/test roots without a lake), or
+        # Honest status: degraded while the raw lake has an open issue or its
+        # stamp cannot be read (absent = dev/test roots without a lake), or
         # when an experiment's control plane is unreadable.
-        healthy = raw_generation["state"] in _HEALTHY_RAW_STATES and not unreadable
+        healthy = (
+            raw_generation["state"] in _HEALTHY_RAW_STATES
+            and not raw_generation["issues"]
+            and not unreadable
+        )
         return {
             "status": "ok" if healthy else "degraded",
             **manager.running_slots(),
