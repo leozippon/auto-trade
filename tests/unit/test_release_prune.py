@@ -19,7 +19,11 @@ from unittest.mock import patch
 from autotrade.data_sources.tushare import cron_update, lake
 from autotrade.data_sources.tushare.io import UPDATER_LOCK_FD_ENV
 from autotrade.environment.data.research_release import pin_research_release
-from autotrade.pipelines.hitl_state import HITL_STATE_SCHEMA_VERSION
+from autotrade.pipelines.hitl_state import (
+    ARCHIVED_NAME,
+    HITL_STATE_SCHEMA_VERSION,
+    proc_start_ticks,
+)
 from tests.unit.research_release_fixture import (
     FUNDAMENTAL_EVENTS_ROOT,
     FUNDAMENTAL_EVENTS_STATUS,
@@ -116,6 +120,18 @@ class ReleasePruneTest(unittest.TestCase):
         })
         self.assertEqual([line["generation_id"] for line in lines if line["action"] == "remove"], ["g1", "g6"])
         self.assertEqual(result, {"mode": "dry_run", "releases": 7, "kept": 5, "unreferenced": 2, "leftovers": 0})
+        # An archived arm is over for good, whatever its status says, unless a
+        # worker still runs it.
+        self._arm("arm_archived", state="running_session")
+        self._pin(self.root / "experiments" / "arm_archived", "g6")
+        self._write(self.root / "experiments" / "arm_archived" / "hitl" / ARCHIVED_NAME, {"reason": "test"})
+        self.assertNotIn("g6", self.kept())
+        self._write(self.root / "experiments" / "arm_archived" / "hitl" / "status.json", {
+            "schema_version": HITL_STATE_SCHEMA_VERSION, "state": "running_session",
+            "pid": os.getpid(), "pid_start_ticks": proc_start_ticks(os.getpid()),
+        })
+        self.assertEqual(self.kept()["g6"], ["experiment arm_archived (running_session)"])
+        self._arm_ends("arm_archived")
         # A state retention cannot read is no proof the arm ended.
         (self.root / "experiments" / "arm_stopped" / "hitl" / "status.json").write_text("{", encoding="utf-8")
         self.assertEqual(self.kept()["g3"], ["experiment arm_stopped (unreadable)"])

@@ -23,8 +23,8 @@ scheduled job, so releases and Paper pins never see a half-applied command.
   consumer reads any more, oldest first. A release stays while the raw
   generation record names it, a seed (or a seed build's workspace pin) one or
   two levels under ``data/`` was built from it, an experiment under
-  ``experiments/`` that has not completed pinned it or names a seed built from
-  it, or a Paper book that is not killed has it pinned. The consumers are read
+  ``experiments/`` that has not ended pinned it or names a seed built from it,
+  or a Paper book that is not killed has it pinned. The consumers are read
   under the release registry lock and the updater lock, so a release a
   consumer records is never removed (``research_release``); a removal prints
   the bytes it freed, those of the files whose last link it removed. Nothing
@@ -63,8 +63,10 @@ from autotrade.pipelines.hitl_state import (
     HITL_DIR_NAME,
     PARAMS_NAME,
     STATUS_NAME,
+    arm_is_archived,
     read_json,
     read_status,
+    status_pid_alive,
 )
 
 from .common import (
@@ -107,8 +109,10 @@ from .versions import (
 MIGRATION_DEDUP_DATASETS = ("anns_d", "repurchase")
 # The one arm state the console neither runs nor resumes: it resumes stopped,
 # failed, interrupted and terminated arms (``webui.manager``), and an active
-# state whose worker died reads as interrupted. Any other state, an unknown
-# or unreadable one included, keeps the arm's release.
+# state whose worker died reads as interrupted. An arm has ended in this state,
+# or once archived (``hitl_state.arm_is_archived``: never started again) while
+# no worker still runs it; any other arm, one whose state is unknown or
+# unreadable included, keeps its release.
 ENDED_ARM_STATE = "completed"
 
 
@@ -320,10 +324,11 @@ def release_consumers(repo_root: Path, raw_dir: Path) -> dict[str, list[str]]:
         if directory.name.startswith(".") or not hitl.is_dir():
             continue
         try:
-            state = str(read_status(hitl / STATUS_NAME).get("state") or "created")
+            status = read_status(hitl / STATUS_NAME)
+            state = str(status.get("state") or "created")
         except (OSError, TypeError, ValueError):
-            state = "unreadable"
-        if state == ENDED_ARM_STATE:
+            status, state = {}, "unreadable"
+        if state == ENDED_ARM_STATE or (arm_is_archived(directory) and not status_pid_alive(status)):
             continue
         reason = f"experiment {directory.name} ({state})"
         keep(pinned_generation(directory), reason)

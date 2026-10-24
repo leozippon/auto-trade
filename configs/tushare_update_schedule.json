@@ -380,7 +380,7 @@
       "skip_if_already_ok": true
     },
     "cn_weekly_release_prune": {
-      "description": "Saturday research-release retention, the last step the weekly fundamental sweep chains (--then): scripts/data/tushare_lake.py prune-releases --apply removes, oldest first, every research release that no consumer records any more -- not the raw generation record, a seed under data/, an experiment that has not completed, or a Paper book that is not killed. It runs under the updater lock the runner passes to it and under the release registry lock, changes no partition and commits no generation, and logs each removal with the bytes it freed.",
+      "description": "Saturday research-release retention, the last step the weekly fundamental sweep chains (--then): scripts/data/tushare_lake.py prune-releases --apply removes, oldest first, every research release that no consumer records any more -- not the raw generation record, a seed under data/, an experiment that has not ended (completed, or archived with no live worker), or a Paper book that is not killed. It runs under the updater lock the runner passes to it and under the release registry lock, changes no partition and commits no generation, and logs each removal with the bytes it freed.",
       "operation": "prune_releases",
       "skip_if_already_ok": true
     },
