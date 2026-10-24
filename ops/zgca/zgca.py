@@ -9,16 +9,18 @@ plain commands for the steps of ops/zgca/remote.sh; both over `zenith`) and
 verifies its own result. up and down are `instance start` and `instance
 stop`; a deploy carries the tracked files, the model gateways' keys from the
 local .env (only the keys the model profiles name), the named PIT view seed
-and the research release that seed was built from, the pretrained-model store
-every new arm pins and mounts, prunes code the tree no longer tracks, then
-prepares the instance (ripgrep, venv, sandbox image); push carries arms of
-this host a round names as lineage; a run starts the console and a round
-launcher in tmux with AUTOTRADE_GPU_NAME set; status and sync read and copy
-back. ZGCA_REMOTE_ROOT moves all of it to another root on the instance's
-personal storage (a validation deploy beside the live tree, on an instance
-other than the default). Nothing here schedules, caches an endpoint, keeps a
-secret in the repository or changes how the executor isolates a strategy
-container. See ops/zgca/README.md.
+and the research release that seed was built from (without the text and
+minute datasets its configuration does not read), prunes code the tree no
+longer tracks, prepares the instance (ripgrep, venv, a sandbox image that runs
+on the instance's GPU driver), and last copies the pretrained-model store every
+new arm pins and mounts to the instance's own disk, or refuses when it does
+not fit there; push carries arms of this host a round names as lineage; a run
+starts the console and a round launcher in tmux with AUTOTRADE_GPU_NAME set;
+status and sync read and copy back. ZGCA_REMOTE_ROOT moves all of it to
+another root on the instance's personal storage (a validation deploy beside
+the live tree, on an instance other than the default). Nothing here
+schedules, caches an endpoint, keeps a secret in the repository or changes how
+the executor isolates a strategy container. See ops/zgca/README.md.
 
 usage: zgca.py [--instance <id>] up | deploy <seed dir> | push <arm id>... |
        run <round file> [launcher args...] | status | sync <arm id> | down
@@ -31,12 +33,13 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 # auto-trade-dev-a100x2: two Tesla-A100-80G in the Volcano zone, the default
 # of --instance; its id is the platform ledger id the API addresses it by, not
@@ -53,6 +56,15 @@ REMOTE_ROOT = "/personal_fast_storage/auto-trade"
 # keeps such a root's venv inside it.
 REMOTE_ROOT_ENV = "ZGCA_REMOTE_ROOT"
 REMOTE_ROOT_SHAPE = re.compile(r"^/personal_fast_storage/[A-Za-z0-9][A-Za-z0-9._-]*$")
+# The instance's own disk, which also holds its root and Docker's images
+# (~/zgca-compute/README.md, 火山平台 Docker): the pretrained store lives there,
+# in <LOCAL_DISK>/<name of the remote root>/pretrained, and the root's
+# data/pretrained links to it. remote.sh receives that directory on each call.
+LOCAL_DISK = "/ebs"
+LOCAL_ROOT_ENV = "ZGCA_LOCAL_ROOT"
+# Left free on that disk beside the store: the new layers of an image rebuild
+# and the containers' scratch. Filling it would stop Docker.
+LOCAL_DISK_RESERVE = 20 * 2**30
 RELEASES = "data/research_releases"
 UNFINISHED_SEED_MARKER = "prebuild_unfinished.json"
 # The DuckDB CLI release the sandbox image installs (ops/docker/sandbox.Dockerfile,
@@ -65,13 +77,24 @@ UNFINISHED_SEED_MARKER = "prebuild_unfinished.json"
 DUCKDB_CLI_URL = "https://github.com/duckdb/duckdb/releases/download/v1.1.3/duckdb_cli-linux-amd64.zip"
 DUCKDB_CLI_NAME = "duckdb_cli-linux-amd64.zip"
 DUCKDB_CLI_SHA256 = "efd0fccdb1a28d9ec7a6ebfcde59900068b8ba43a846c9b553c0fd2bbe4acf43"
-# A URL prefix tried before each release's own URL, e.g. https://ghfast.top/.
+# A URL prefix tried before a GitHub release's own URL, e.g. https://ghfast.top/.
 RELEASE_PROXY_ENV = "ZGCA_GITHUB_PROXY"
+# NVIDIA's CUDA forward-compatibility package for CUDA 13.0 (the user-mode
+# driver of the 580 series). The image's torch needs CUDA 13, the instance's
+# kernel driver is 535 (CUDA 12.2), and an A100 may run a newer user-mode
+# driver on an older kernel driver; the instance's image build installs it
+# (build arg CUDA_COMPAT_URL), other builds do not. Pinned to the digest of
+# NVIDIA's Debian 12 package index, after a probe on the instance on
+# 2026-10-24 (ops/zgca/README.md).
+CUDA_COMPAT_URL = "https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-compat-13-0_580.196.07-1_amd64.deb"
+CUDA_COMPAT_NAME = "cuda-compat-13-0_580.196.07-1_amd64.deb"
+CUDA_COMPAT_SHA256 = "d2d3262512046b23215ff197fe79a6ca0d44299ed0e665275ac05bb28b79e4e3"
 # The pretrained-model store (environment.pretrained): the console stamps its
 # manifest digest into every arm it creates and every container compares it.
 PRETRAINED = "data/pretrained"
 PRETRAINED_MANIFEST = "MANIFEST.sha256"
 TRACKED_LIST_NAME = "tracked.txt"
+GIB = 2**30
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 # Every transfer keeps contents, times and modes; the instance's root owns what lands there.
 PRESERVE = ("-a", "--no-owner", "--no-group")
@@ -129,6 +152,46 @@ def gateway_env(env_file: Path) -> bytes:
     return "".join(kept).encode("utf-8")
 
 
+def release_exclusions(provider: dict[str, object]) -> list[str]:
+    """The release's ``raw`` datasets a deploy of this seed leaves behind.
+
+    Only the text datasets and the minute bars, the bulk of a release, which
+    nothing reads unless the snapshot configuration names them; every other
+    dataset ships, since the release's readers also open some no configuration
+    names (the SSE calendar, the listing and industry tables). The seed's
+    ``provider.json`` records its configuration; an arm whose configuration
+    needs a dataset left behind is refused when it pins the release.
+    """
+
+    _with_project_src()
+    from autotrade.environment.data.intraday_flow import MINUTE_DATASET
+    from autotrade.environment.data.snapshot import SELECTABLE_DATASETS, SnapshotConfig
+    from autotrade.pipelines.pit_backend import required_release_raw_datasets
+
+    record = provider["snapshot_config"]
+    datasets = record["datasets"]
+    config = SnapshotConfig(
+        fundamental_datasets=tuple(datasets["fundamentals"]),
+        events_datasets=tuple(datasets["events"]),
+        macro_datasets=tuple(datasets["macro"]),
+        text_datasets=tuple(datasets["text"]),
+        include_intraday=bool(record["include_intraday"]),
+    )
+    required = set(required_release_raw_datasets(config))
+    return [name for name in (*SELECTABLE_DATASETS["text"], MINUTE_DATASET) if name not in required]
+
+
+def _tree_bytes(root: Path) -> int:
+    """The bytes of the regular files below ``root``, as remote.sh's local-disk step adds them up."""
+
+    return sum(
+        info.st_size
+        for directory, _, names in os.walk(root)
+        for info in (os.lstat(os.path.join(directory, name)) for name in names)
+        if stat.S_ISREG(info.st_mode)
+    )
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -169,6 +232,11 @@ class Workflow:
     def state_dir(self) -> Path:
         return self.repo_root / ".runtime" / "zgca"
 
+    @property
+    def local_root(self) -> str:
+        """This root's directory on the instance's own disk, apart from any other root's."""
+        return f"{LOCAL_DISK}/{PurePosixPath(self.remote_root).name}"
+
     # ----- platform entries -----
 
     def call(
@@ -196,14 +264,16 @@ class Workflow:
 
     # ----- instance shell and transfers -----
 
-    def remote(self, step: str, *args: str) -> None:
-        """Run one step of remote.sh on the instance, in a login shell for the platform's environment, under this workflow's root."""
+    def remote(self, step: str, *args: str, capture: bool = False) -> str:
+        """Run one step of remote.sh on the instance, in a login shell for the platform's environment, under this workflow's roots; its output when captured."""
         script = REMOTE_SCRIPT.read_text(encoding="utf-8")
         completed = self.call(
-            "dev", "env", f"{REMOTE_ROOT_ENV}={self.remote_root}", "bash", "-lc", script, "remote.sh", step, *args,
+            "dev", "env", f"{REMOTE_ROOT_ENV}={self.remote_root}", f"{LOCAL_ROOT_ENV}={self.local_root}",
+            "bash", "-lc", script, "remote.sh", step, *args, capture=capture,
         )
         if completed.returncode != 0:
             raise WorkflowError(f"remote step {step} failed (exit {completed.returncode})")
+        return (completed.stdout or b"").decode("utf-8", errors="replace")
 
     def dev(self, command: str, *args: str, data: bytes | None = None) -> None:
         """One `dev` primitive (bootstrap, copy, put, report), which verifies its own result and says why on stderr."""
@@ -214,9 +284,10 @@ class Workflow:
     def release_file(self, url: str, name: str, pinned: str) -> Path:
         """A verified release file the image build needs and the deploy ships, fetched once into the state directory.
 
-        The sources are tried in order, the proxy first when one is set; a
-        download lands beside the cache and enters it only with the pinned
-        digest, and a partial one is resumed by the next source.
+        The sources are tried in order, the proxy first when one is set and
+        the file is a GitHub release; a download lands beside the cache and
+        enters it only with the pinned digest, and a partial one is resumed by
+        the next source.
         """
 
         path = self.state_dir / name
@@ -224,7 +295,7 @@ class Workflow:
             self.state_dir.mkdir(parents=True, exist_ok=True)
             part = path.with_name(name + ".part")
             proxy = os.environ.get(RELEASE_PROXY_ENV, "")
-            sources = ([proxy + url] if proxy else []) + [url]
+            sources = ([proxy + url] if proxy and url.startswith("https://github.com/") else []) + [url]
             for source in sources:
                 say(f"deploy: fetching {source}")
                 fetched = subprocess.run(
@@ -266,14 +337,19 @@ class Workflow:
         if (seed_dir / UNFINISHED_SEED_MARKER).exists():
             raise WorkflowError(f"{seed} has an unfinished prebuild ({UNFINISHED_SEED_MARKER} is present)")
         try:
-            generation = str(json.loads((seed_dir / "provider.json").read_text(encoding="utf-8")).get("generation_id") or "")
+            provider = json.loads((seed_dir / "provider.json").read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             raise WorkflowError(f"{seed}/provider.json is unreadable: {exc}") from exc
+        generation = str(provider.get("generation_id") or "")
         if not SAFE_ID.fullmatch(generation):
             raise WorkflowError(f"{seed}/provider.json names no research release generation")
         release_dir = self.repo_root / RELEASES / generation
         if not (release_dir / "manifest.json").is_file():
             raise WorkflowError(f"{seed} was built from research release {generation}, which is not published at {release_dir}")
+        try:
+            excluded = release_exclusions(provider)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise WorkflowError(f"{seed}/provider.json records no usable snapshot configuration: {exc!r}") from exc
         env_file = self.repo_root / ".env"
         if not env_file.is_file():
             raise WorkflowError(f"{env_file} is missing: the instance's sessions read the same model gateway keys")
@@ -290,7 +366,9 @@ class Workflow:
         )
         if listed.returncode != 0 or not listed.stdout:
             raise WorkflowError("git ls-files listed no tracked files in " + str(self.repo_root))
+        store_bytes = _tree_bytes(pretrained)
         duckdb_cli = self.release_file(DUCKDB_CLI_URL, DUCKDB_CLI_NAME, DUCKDB_CLI_SHA256)
+        cuda_compat = self.release_file(CUDA_COMPAT_URL, CUDA_COMPAT_NAME, CUDA_COMPAT_SHA256)
         # The list rsync copies from is also what the instance keeps: shipped
         # beside the release files, it lets the `tracked` step remove what is no
         # longer tracked (a retired round file would otherwise stay and be read).
@@ -304,17 +382,34 @@ class Workflow:
         self.dev("copy", *PRESERVE, f"--files-from={manifest}", "--from0", f"{self.repo_root}/", f"dev:{root}/")
         say("deploy: .env (the model gateway keys only)")
         self.dev("put", f"{root}/.env", data=gateway_keys)
-        say(f"deploy: {DUCKDB_CLI_NAME} and {TRACKED_LIST_NAME}")
-        self.dev("copy", *PRESERVE, str(duckdb_cli), str(manifest), f"dev:{root}/.runtime/zgca/")
+        say(f"deploy: {DUCKDB_CLI_NAME}, {CUDA_COMPAT_NAME} and {TRACKED_LIST_NAME}")
+        self.dev("copy", *PRESERVE, str(duckdb_cli), str(cuda_compat), str(manifest), f"dev:{root}/.runtime/zgca/")
         self.remote("tracked")
         say(f"deploy: {seed}")
         self.dev("copy", *PRESERVE, "-H", "--delete", f"{seed_dir}/", f"dev:{root}/{seed_path.as_posix()}/")
-        say(f"deploy: {RELEASES}/{generation}")
-        self.dev("copy", *PRESERVE, "-H", "--delete", f"{release_dir}/", f"dev:{root}/{RELEASES}/{generation}/")
-        say(f"deploy: {PRETRAINED}")
-        self.dev("copy", *PRESERVE, "-H", "--delete", f"{pretrained}/", f"dev:{root}/{PRETRAINED}/")
+        # Excluded directories are also kept on the instance (--delete without
+        # --delete-excluded): another seed of the same release may read them.
+        say(f"deploy: {RELEASES}/{generation} without {', '.join(excluded) or 'nothing'}")
+        self.dev("copy", *PRESERVE, "-H", "--delete", *(f"--exclude=/raw/{name}/" for name in excluded),
+                 f"{release_dir}/", f"dev:{root}/{RELEASES}/{generation}/")
         say("deploy: preparing the instance")
-        self.remote("prepare", DUCKDB_CLI_SHA256)
+        self.remote("prepare", DUCKDB_CLI_SHA256, CUDA_COMPAT_SHA256)
+        # The store goes last and only where it fits, so the steps above are
+        # done whatever its size; a store that does not fit fails the deploy.
+        store = f"{self.local_root}/pretrained"
+        present, free = (int(field) for field in self.remote("local-disk", capture=True).split()[-2:])
+        missing = max(store_bytes - present, 0)
+        if missing + LOCAL_DISK_RESERVE > free:
+            self.dev("report")
+            raise WorkflowError(
+                f"the pretrained store does not fit on the instance's own disk: it needs {missing / GIB:.1f} GiB more "
+                f"({store_bytes / GIB:.1f} GiB in all, {present / GIB:.1f} GiB already in {store}) plus "
+                f"{LOCAL_DISK_RESERVE / GIB:.0f} GiB kept free for image rebuilds and container scratch, and "
+                f"{LOCAL_DISK} has {free / GIB:.1f} GiB free. Code, seed, release and image are deployed; the store "
+                "is not, so no arm can be created or started there until it has room and deploy runs again"
+            )
+        say(f"deploy: {PRETRAINED} to {store}")
+        self.dev("copy", *PRESERVE, "-H", "--delete", f"{pretrained}/", f"dev:{store}/")
         self.dev("report")
         say("deploy: done")
 
@@ -396,7 +491,7 @@ def main(
     )
     commands = parser.add_subparsers(dest="command", required=True, metavar="command")
     commands.add_parser("up", help="instance start: wait for RUNNING and SSH")
-    deploy = commands.add_parser("deploy", help="copy code, the model gateway keys, a seed and its release, the pretrained store; prepare ripgrep, venv, image")
+    deploy = commands.add_parser("deploy", help="copy code, the model gateway keys, a seed and its release; prepare ripgrep, venv, image; copy the pretrained store")
     deploy.add_argument("seed", help="PIT view seed directory, relative to the repository (data/pit_views_seed_...)")
     push = commands.add_parser("push", help="copy arms of this host to the instance (lineage of an arm created there)")
     push.add_argument("arms", nargs="+", metavar="arm", help="experiment id")

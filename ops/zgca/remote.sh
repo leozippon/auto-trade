@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # The instance-side half of ops/zgca/zgca.py: one step per call, sent by the
-# workflow as `env ZGCA_REMOTE_ROOT=<root> bash -lc "$(cat remote.sh)" remote.sh
-# <step> [args]` so the platform's login environment (DOCKER_HOST) is present
-# and the script is always the local checkout's, never a stale copy on the
-# instance. Runs as the instance's root; everything persistent lives on
-# /personal_fast_storage. The generic host work (base tools, transfers,
-# GPU/disk/tmux report) is ~/zgca-compute's `dev`, which the workflow calls
-# around these steps.
+# workflow as `env ZGCA_REMOTE_ROOT=<root> ZGCA_LOCAL_ROOT=<dir> bash -lc
+# "$(cat remote.sh)" remote.sh <step> [args]` so the platform's login
+# environment (DOCKER_HOST) is present and the script is always the local
+# checkout's, never a stale copy on the instance. Runs as the instance's root;
+# everything persistent lives on /personal_fast_storage except the pretrained
+# store, which is too large for the personal quota and lives on the instance's
+# own disk under ZGCA_LOCAL_ROOT, linked from the root's data/pretrained. The
+# generic host work (base tools, transfers, GPU/disk/tmux report) is
+# ~/zgca-compute's `dev`, which the workflow calls around these steps.
 set -euo pipefail
 
 ROOT=/personal_fast_storage/auto-trade
@@ -19,6 +21,8 @@ if [ "${ZGCA_REMOTE_ROOT:-$ROOT}" != "$ROOT" ]; then
     ROOT=$ZGCA_REMOTE_ROOT
     VENV=$ROOT/.venv
 fi
+# This root's directory on the instance's own disk (zgca.py's local_root).
+LOCAL=${ZGCA_LOCAL_ROOT:-}
 BOX_PYTHON=/root/miniconda3/bin/python
 # The platform's PyPI mirror lacks tushare 1.4.29 (~/zgca-compute/README.md).
 EXTRA_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
@@ -27,6 +31,9 @@ IMAGE=autotrade-sandbox:latest
 # proxies are not reliably reachable from the instance, so the build reads the
 # DuckDB CLI from this host over the bridge network instead.
 DUCKDB_CLI=.runtime/zgca/duckdb_cli-linux-amd64.zip
+# NVIDIA's CUDA 13.0 forward-compatibility package, shipped and served the
+# same way: the image's torch needs CUDA 13 and this host's driver is older.
+CUDA_COMPAT=.runtime/zgca/cuda-compat-13-0_580.196.07-1_amd64.deb
 SERVE_PORT=8765
 PORT=38888
 GPU_NAME=A100
@@ -37,6 +44,8 @@ HEALTH="http://127.0.0.1:$PORT/api/health"
 die() { echo "ERROR: $*" >&2; exit 1; }
 
 require_venv() { [ -x "$VENV/bin/python" ] || die "no venv at $VENV: run deploy first"; }
+
+require_local() { [ -n "$LOCAL" ] || die "ZGCA_LOCAL_ROOT is not set: zgca.py passes this root's directory on the instance's own disk"; }
 
 health() {
     "$VENV/bin/python" -c 'import sys, urllib.request; sys.stdout.write(urllib.request.urlopen(sys.argv[1], timeout=10).read().decode())' "$HEALTH" 2>/dev/null
@@ -62,10 +71,32 @@ PY
 }
 
 # Before a deploy's first transfer (after `dev bootstrap`): the directories the
-# transfers and the steps write into.
+# transfers and the steps write into, and data/pretrained as the link to the
+# store on the instance's own disk. Arms pin only the store's manifest digest
+# and containers bind the link's target, so nothing else knows where it is. A
+# real directory there (a store from before the move) is not touched.
 dirs() {
+    require_local
     mkdir -p "$ROOT/data/research_releases" "$ROOT/experiments" "$ROOT/logs/workers" \
-        "$ROOT/logs/webui" "$ROOT/logs/zgca" "$ROOT/.runtime/zgca"
+        "$ROOT/logs/webui" "$ROOT/logs/zgca" "$ROOT/.runtime/zgca" "$LOCAL/pretrained"
+    local link="$ROOT/data/pretrained"
+    if [ -L "$link" ]; then
+        [ "$(readlink "$link")" = "$LOCAL/pretrained" ] \
+            || die "$link links to $(readlink "$link"), not to the store's directory $LOCAL/pretrained; remove the link and deploy again"
+    elif [ -e "$link" ]; then
+        die "$link is a directory, but the store lives in $LOCAL/pretrained on the instance's own disk: move its models there (ops/zgca/README.md, 存储布局), remove it, and deploy again"
+    else
+        ln -s "$LOCAL/pretrained" "$link"
+    fi
+}
+
+# Bytes of the files already in the store's directory and bytes free on its
+# disk, for the deploy to decide whether the store fits (the disk is local, so
+# walking it is cheap).
+local_disk() {
+    require_local
+    [ -d "$LOCAL/pretrained" ] || die "no $LOCAL/pretrained: the dirs step creates it"
+    echo "$(find "$LOCAL/pretrained" -type f -printf '%s\n' | awk '{ s += $1 } END { printf "%d", s }') $(df -B1 --output=avail "$LOCAL" | tail -n 1 | tr -d ' ')"
 }
 
 # Keep only tracked files inside the top-level directories that hold them, by
@@ -106,12 +137,14 @@ sys.stdout.writelines(f"{arm}\n" for arm in running_arms(sys.argv[1]))' "$ROOT/e
 
 # The legacy builder on the platform's bridge network (no buildx, no host
 # networking); --force-rm so a failed step leaves no multi-GB container behind.
-# The shipped DuckDB CLI is served to the build from this host, on the bridge
-# gateway only, for the build's duration.
+# The shipped DuckDB CLI and CUDA compatibility package are served to the build
+# from this host, on the bridge gateway only, for the build's duration.
 build_image() {
-    local log=$1 duckdb_digest=$2 gateway server status base
+    local log=$1 duckdb_digest=$2 compat_digest=$3 gateway server status base
     echo "$duckdb_digest  $DUCKDB_CLI" | sha256sum -c --quiet \
         || die "$ROOT/$DUCKDB_CLI is missing or is not the release the deploy pinned"
+    echo "$compat_digest  $CUDA_COMPAT" | sha256sum -c --quiet \
+        || die "$ROOT/$CUDA_COMPAT is missing or is not the package the deploy pinned"
     gateway=$(docker network inspect bridge --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}')
     [ -n "$gateway" ] || die "the bridge network names no gateway to serve $(dirname "$DUCKDB_CLI") on"
     (cd "$(dirname "$DUCKDB_CLI")" && exec python3 -m http.server "$SERVE_PORT" --bind "$gateway" >/dev/null 2>&1) &
@@ -121,20 +154,21 @@ build_image() {
     base="http://$gateway:$SERVE_PORT"
     echo "building $IMAGE (log $ROOT/$log)"
     DOCKER_BUILDKIT=0 docker build --force-rm -t "$IMAGE" -f ops/docker/sandbox.Dockerfile \
-        --build-arg "DUCKDB_CLI_URL=$base/$(basename "$DUCKDB_CLI")" . 2>&1 | tee "$log"
+        --build-arg "DUCKDB_CLI_URL=$base/$(basename "$DUCKDB_CLI")" \
+        --build-arg "CUDA_COMPAT_URL=$base/$(basename "$CUDA_COMPAT")" . 2>&1 | tee "$log"
     status=${PIPESTATUS[0]}
     kill "$server" 2>/dev/null
     wait "$server" 2>/dev/null || true
     return "$status"
 }
 
-# The 20 GB root disk is also the image store: it holds one sandbox image and
-# its layer cache, not two. A rebuild that reuses the cache (a lost tag, a
-# contract-only change) fits beside the old layers; one that rebuilds the pip
-# layer does not and dies of ENOSPC after downloading everything. Nothing
-# predicts which it will be, so the build is tried as is and only an
-# out-of-disk failure clears the store -- every unused image and stopped
-# container -- for one cold rebuild. A running arm runs on the image it
+# The instance's own disk is also the image store, and the pretrained store
+# takes most of it: it holds one sandbox image and its layer cache, not two. A
+# rebuild that reuses the cache (a lost tag, a contract-only change) fits
+# beside the old layers; one that rebuilds the pip layer does not and dies of
+# ENOSPC after downloading everything. Nothing predicts which it will be, so
+# the build is tried as is and only an out-of-disk failure clears the store --
+# every unused image and stopped container -- for one cold rebuild. A running arm runs on the image it
 # pinned, so no rebuild is attempted beside it.
 rebuild_image() {
     local running log
@@ -152,7 +186,31 @@ rebuild_image() {
     fi
 }
 
-# The argument is the pinned digest of the DuckDB CLI the deploy shipped.
+# The image's CUDA must run on this host's driver: torch on one card, run as a
+# strategy container runs (read-only, no network, the agent user, a tmpfs
+# /tmp), with stdin held open until the container exits because the
+# platform's Docker proxy drops the output of a container whose stdin closed.
+gpu_check() {
+    "$VENV/bin/python" - "$IMAGE" <<'PY' || die "$IMAGE does not run on this host's GPU driver ($(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n 1)); the build installs the CUDA compatibility package $CUDA_COMPAT the deploy pins: check the build log under logs/zgca/, remove the image tag and deploy again"
+import subprocess
+import sys
+
+check = (
+    "import torch, vllm; "
+    "assert torch.cuda.is_available(), 'torch finds no usable GPU'; "
+    "x = torch.ones(1024, 1024, device='cuda'); "
+    "print('GPU check:', torch.cuda.get_device_name(0), 'torch', torch.__version__, "
+    "'CUDA', torch.version.cuda, 'vllm', vllm.__version__, 'matmul', float((x @ x).sum()))"
+)
+argv = ["docker", "run", "-i", "--rm", "--gpus", "device=0", "--network", "none", "--read-only",
+        "--tmpfs", "/tmp:rw,exec,size=1g", "--user", "61000", "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges", sys.argv[1], "python", "-c", check]
+sys.exit(subprocess.Popen(argv, stdin=subprocess.PIPE).wait())
+PY
+}
+
+# The arguments are the pinned digests of the DuckDB CLI and the CUDA
+# compatibility package the deploy shipped.
 prepare() {
     cd "$ROOT"
     export DEBIAN_FRONTEND=noninteractive
@@ -175,6 +233,7 @@ prepare() {
         image_current || die "$IMAGE was rebuilt but does not carry this checkout's strategy contract"
     fi
     docker images --format 'image: {{.Repository}}:{{.Tag}} {{.ID}} {{.Size}}' "$IMAGE"
+    gpu_check
 }
 
 console_up() {
@@ -298,7 +357,8 @@ step=${1:-}
 case "$step" in
     dirs) dirs ;;
     tracked) tracked ;;
-    prepare) [ $# -eq 1 ] || die "prepare needs the pinned DuckDB CLI digest"; prepare "$1" ;;
+    local-disk) local_disk ;;
+    prepare) [ $# -eq 2 ] || die "prepare needs the pinned DuckDB CLI and CUDA compatibility package digests"; prepare "$1" "$2" ;;
     console-up) console_up ;;
     round) [ $# -ge 1 ] || die "round needs the round file"; round "$@" ;;
     status) status ;;

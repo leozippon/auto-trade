@@ -56,8 +56,10 @@ if args[:1] == ["put"]:  # stdin is the file
     record["stdin"] = sys.stdin.buffer.read().decode()
 with open(os.environ["MOCK_LOG"], "a") as log:
     log.write(json.dumps(record) + "\n")
-if "remote.sh" in args:  # env ZGCA_REMOTE_ROOT=<root> bash -lc <script> remote.sh <step> ...
+if "remote.sh" in args:  # env ZGCA_REMOTE_ROOT=<root> ZGCA_LOCAL_ROOT=<dir> bash -lc <script> remote.sh <step> ...
     step = args[args.index("remote.sh") + 1]
+    if step == "local-disk":  # bytes already in the store's directory, bytes free on its disk
+        print(os.environ.get("MOCK_LOCAL_DISK", "0 100000000000000"))
     sys.exit(int(os.environ.get("MOCK_STEP_EXIT_" + step.replace("-", "_").upper(), "0")))
 sys.exit(int(os.environ.get("MOCK_DEV_EXIT_" + args[0].upper(), "0")))
 """
@@ -97,13 +99,14 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self.repo.mkdir()
         self.log = base / "calls.jsonl"
         self.env = {name: value for name, value in os.environ.items() if not name.startswith(("ZGCA_", "ZENITH_", "MOCK_"))}
-        # The release file the deploy ships (the DuckDB CLI) is a fixture here:
-        # the mock curl writes it and the pinned digest is the fixture's for
-        # the test's duration.
+        # The release files the deploy ships (the DuckDB CLI, the CUDA
+        # compatibility package) are a fixture here: the mock curl writes them
+        # and the pinned digests are the fixture's for the test's duration.
         body = "fixture, not a release file\n"
         self.env.update(MOCK_LOG=str(self.log), MOCK_CURL_BODY=body, PATH=str(self.tools) + os.pathsep + os.environ["PATH"])
-        self.addCleanup(setattr, zgca, "DUCKDB_CLI_SHA256", zgca.DUCKDB_CLI_SHA256)
-        zgca.DUCKDB_CLI_SHA256 = hashlib.sha256(body.encode()).hexdigest()
+        for name in ("DUCKDB_CLI_SHA256", "CUDA_COMPAT_SHA256"):
+            self.addCleanup(setattr, zgca, name, getattr(zgca, name))
+            setattr(zgca, name, hashlib.sha256(body.encode()).hexdigest())
 
     def calls(self, tool: str | None = None) -> list[dict[str, object]]:
         lines = self.log.read_text(encoding="utf-8").splitlines() if self.log.exists() else []
@@ -189,14 +192,16 @@ class ZgcaWorkflowTest(unittest.TestCase):
             self.assertEqual(code, 0, err)
         dev = self.calls("dev")
         self.assertEqual({self.step(call) for call in dev},
-                         {"bootstrap", "dirs", "copy", "put", "tracked", "prepare", "report", "arm-state"})
+                         {"bootstrap", "dirs", "copy", "put", "tracked", "prepare", "local-disk", "report", "arm-state"})
+        # Its directory on the instance's own disk is its own too.
+        local = "/ebs/auto-trade-validate"
         for call in dev:
             args = call["args"]
             if self.remote(call) is not None:
-                self.assertEqual(args[:2], ["env", f"ZGCA_REMOTE_ROOT={other}"])
+                self.assertEqual(args[:3], ["env", f"ZGCA_REMOTE_ROOT={other}", f"ZGCA_LOCAL_ROOT={local}"])
             elif args[0] == "copy":
                 (remote,) = [arg for arg in args if arg.startswith("dev:")]
-                self.assertTrue(remote.startswith(f"dev:{other}/"), remote)
+                self.assertTrue(remote.startswith((f"dev:{other}/", f"dev:{local}/")), remote)
             elif args[0] == "put":
                 self.assertEqual(args[1], f"{other}/.env")
         # Unset is the default root; anything but a directory directly below
@@ -245,10 +250,21 @@ class ZgcaWorkflowTest(unittest.TestCase):
         subprocess.run([*git, "add", "scripts"], cwd=self.repo, check=True)
         subprocess.run([*git, "commit", "-q", "-m", "fixture"], cwd=self.repo, check=True)
 
+    @staticmethod
+    def _provider(generation: str = "gen_test", *, text: tuple[str, ...] = ("anns_d",), intraday: bool = False) -> dict[str, object]:
+        """A seed's provider record, its snapshot configuration as the prebuild records it (the fields deploy reads)."""
+        return {
+            "generation_id": generation,
+            "snapshot_config": {
+                "datasets": {"events": [], "fundamentals": ["income_vip"], "macro": ["index_daily"], "text": list(text)},
+                "include_intraday": intraday,
+            },
+        }
+
     def _seed(self, name: str = "data/pit_views_seed_test", generation: str = "gen_test", *, release: bool = True) -> None:
         seed = self.repo / name
         seed.mkdir(parents=True, exist_ok=True)
-        (seed / "provider.json").write_text(json.dumps({"generation_id": generation}), encoding="utf-8")
+        (seed / "provider.json").write_text(json.dumps(self._provider(generation)), encoding="utf-8")
         if release:
             release_dir = self.repo / zgca.RELEASES / generation
             release_dir.mkdir(parents=True, exist_ok=True)
@@ -273,6 +289,9 @@ class ZgcaWorkflowTest(unittest.TestCase):
         refusals.append((self.run_main("deploy", "data/pit_views_seed_test"), "existing directory"))
         self._seed(release=False)
         refusals.append((self.run_main("deploy", "data/pit_views_seed_test"), "not published"))
+        self._seed()
+        (self.repo / "data/pit_views_seed_test" / "provider.json").write_text(json.dumps({"generation_id": "gen_test"}), encoding="utf-8")
+        refusals.append((self.run_main("deploy", "data/pit_views_seed_test"), "no usable snapshot configuration"))
         self._seed()
         (self.repo / "data/pit_views_seed_test" / zgca.UNFINISHED_SEED_MARKER).write_text("{}", encoding="utf-8")
         refusals.append((self.run_main("deploy", "data/pit_views_seed_test"), "unfinished prebuild"))
@@ -306,23 +325,26 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         dev = self.calls("dev")
         self.assertTrue(all(call["instance"] == INSTANCE for call in dev))
-        # Each remote step is this checkout's script in a login shell, told the root.
-        remote = zgca.REMOTE_ROOT
+        # Each remote step is this checkout's script in a login shell, told the
+        # root and the root's directory on the instance's own disk.
+        remote, local = zgca.REMOTE_ROOT, "/ebs/auto-trade"
         script = zgca.REMOTE_SCRIPT.read_text(encoding="utf-8")
         for call in dev:
             if self.remote(call) is not None:
-                self.assertEqual(call["args"][:6], ["env", f"ZGCA_REMOTE_ROOT={remote}", "bash", "-lc", script, "remote.sh"])
+                self.assertEqual(call["args"][:7], ["env", f"ZGCA_REMOTE_ROOT={remote}", f"ZGCA_LOCAL_ROOT={local}",
+                                                    "bash", "-lc", script, "remote.sh"])
         # The base tools first; then transfers (by destination) and remote steps
         # in the order they ran: the tracked list lands before the `tracked`
-        # step prunes by it, and both come before the seed, the release and the
-        # pretrained store; the host report last.
+        # step prunes by it, and both come before the seed and the release;
+        # then the image, and only then the pretrained store, to the
+        # instance's own disk once it is known to fit; the host report last.
         ran = [self.remote(call) or call["args"][:1] + call["args"][1:][-1:] for call in dev]
         self.assertEqual(ran, [
             ["bootstrap"], ["dirs"], ["copy", f"dev:{remote}/"], ["put", f"{remote}/.env"],
             ["copy", f"dev:{remote}/.runtime/zgca/"], ["tracked"],
             ["copy", f"dev:{remote}/data/pit_views_seed_test/"], ["copy", f"dev:{remote}/data/research_releases/gen_test/"],
-            ["copy", f"dev:{remote}/data/pretrained/"],
-            ["prepare", zgca.DUCKDB_CLI_SHA256], ["report"],
+            ["prepare", zgca.DUCKDB_CLI_SHA256, zgca.CUDA_COMPAT_SHA256], ["local-disk"],
+            ["copy", f"dev:{local}/pretrained/"], ["report"],
         ])
         # Only the keys the model profiles name leave this host, through the
         # owner-only put: nothing else from the .env.
@@ -335,8 +357,8 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self.assertIn(f"--files-from={manifest}", transfers[0]["args"])
         self.assertIn("--from0", transfers[0]["args"])
         self.assertEqual(
-            transfers[1]["args"][-3:-1],
-            [str(state / zgca.DUCKDB_CLI_NAME), str(manifest)],
+            transfers[1]["args"][-4:-1],
+            [str(state / zgca.DUCKDB_CLI_NAME), str(state / zgca.CUDA_COMPAT_NAME), str(manifest)],
         )
         # The seed, the release and the store are mirrored, hard links kept.
         for transfer in transfers[2:5]:
@@ -344,12 +366,60 @@ class ZgcaWorkflowTest(unittest.TestCase):
             self.assertIn("-H", transfer["args"])
         self.assertEqual(transfers[4]["args"][-2], f"{self.repo / zgca.PRETRAINED}/")
         self.assertNotIn("--delete", transfers[0]["args"])
-        # The release was fetched once, from its official URL, and is reused by the next deploy.
+        # The release leaves behind exactly the text and minute datasets the
+        # seed's configuration does not read, and keeps them where an earlier
+        # deploy put them (no --delete-excluded).
+        release = transfers[3]["args"]
+        self.assertEqual(
+            [arg for arg in release if arg.startswith("--exclude")],
+            [f"--exclude=/raw/{name}/" for name in ("research_report", "report_rc", "irm_qa_sh", "irm_qa_sz",
+                                                    "major_news", "news", "cctv_news", "npr", "stk_mins_1min_by_date")],
+        )
+        self.assertNotIn("--delete-excluded", release)
+        # The release files were fetched once, from their official URLs, and are reused by the next deploy.
         fetches = self.calls("curl")
-        self.assertEqual([call["args"][-1] for call in fetches], [zgca.DUCKDB_CLI_URL])
+        self.assertEqual([call["args"][-1] for call in fetches], [zgca.DUCKDB_CLI_URL, zgca.CUDA_COMPAT_URL])
         self.assertTrue((state / zgca.DUCKDB_CLI_NAME).is_file())
+        self.assertTrue((state / zgca.CUDA_COMPAT_NAME).is_file())
         self.assertEqual(self.run_main("deploy", "data/pit_views_seed_test")[0], 0)
-        self.assertEqual(len(self.calls("curl")), 1)
+        self.assertEqual(len(self.calls("curl")), 2)
+
+    def test_release_exclusions_follow_the_seeds_configuration(self) -> None:
+        """Only text and minute datasets the configuration does not name stay behind; a seed naming them takes them."""
+        self.assertEqual(
+            zgca.release_exclusions(self._provider(text=("anns_d", "major_news", "news"), intraday=True)),
+            ["research_report", "report_rc", "irm_qa_sh", "irm_qa_sz", "cctv_news", "npr"],
+        )
+        everything = zgca.release_exclusions(self._provider(text=()))
+        self.assertIn("stk_mins_1min_by_date", everything)
+        # Datasets every arm reads outside its configuration never stay behind.
+        for name in ("trade_cal", "stock_basic", "namechange", "index_member_all", "index_classify", "daily"):
+            self.assertNotIn(name, everything)
+
+    def test_deploy_finishes_everything_but_the_store_when_the_store_does_not_fit_and_fails(self) -> None:
+        self._tracked_repo()
+        self._seed()
+        self._pretrained()
+        (self.repo / ".env").write_text(LOCAL_ENV, encoding="utf-8")
+        store = sum(path.stat().st_size for path in (self.repo / zgca.PRETRAINED).rglob("*") if path.is_file())
+        reserve = zgca.LOCAL_DISK_RESERVE
+        # What is already there counts: exactly the reserve plus what is missing fits.
+        for present, free, fits in ((0, reserve + store, True), (0, reserve + store - 1, False),
+                                    (store, reserve, True), (store - 1, reserve, False)):
+            with self.subTest(present=present, free=free):
+                self.log.unlink(missing_ok=True)
+                code, err = self.run_main("deploy", "data/pit_views_seed_test", MOCK_LOCAL_DISK=f"{present} {free}")
+                ran = [self.remote(call) or call["args"][:1] + call["args"][1:][-1:] for call in self.calls("dev")]
+                done = ran.index(["local-disk"])
+                self.assertEqual(ran[done - 1], ["prepare", zgca.DUCKDB_CLI_SHA256, zgca.CUDA_COMPAT_SHA256])
+                if fits:
+                    self.assertEqual((code, ran[done + 1:]), (0, [["copy", "dev:/ebs/auto-trade/pretrained/"], ["report"]]), err)
+                else:
+                    # Everything else is done, the report shows the disks, and the deploy fails saying why.
+                    self.assertEqual((code, ran[done + 1:]), (1, [["report"]]))
+                    self.assertIn("the pretrained store does not fit on the instance's own disk", err)
+                    self.assertIn(f"{zgca.LOCAL_DISK} has {free / zgca.GIB:.1f} GiB free", err)
+                    self.assertIn("Code, seed, release and image are deployed; the store is not", err)
 
     def test_release_files_come_through_the_proxy_first_then_github_and_only_with_the_pinned_digest(self) -> None:
         self._tracked_repo()
@@ -357,11 +427,12 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self._pretrained()
         (self.repo / ".env").write_text(LOCAL_ENV, encoding="utf-8")
         state = self.repo / ".runtime" / "zgca"
-        urls = (zgca.DUCKDB_CLI_URL,)
-        # The deploy stops at the stopped instance, after fetching.
-        for answer, sources in (("", [PROXY + url for url in urls]),
-                                ("fail", [s for url in urls for s in (PROXY + url, url)]),
-                                ("wrong", [s for url in urls for s in (PROXY + url, url)])):
+        github, nvidia = zgca.DUCKDB_CLI_URL, zgca.CUDA_COMPAT_URL
+        # The deploy stops at the stopped instance, after fetching; the proxy
+        # is tried for the GitHub release only.
+        for answer, sources in (("", [PROXY + github, nvidia]),
+                                ("fail", [PROXY + github, github, nvidia]),
+                                ("wrong", [PROXY + github, github, nvidia])):
             with self.subTest(proxy=answer or "works"):
                 self.log.unlink(missing_ok=True)
                 code, err = self.run_main("deploy", "data/pit_views_seed_test", MOCK_STATE="STOPPED",
@@ -369,8 +440,9 @@ class ZgcaWorkflowTest(unittest.TestCase):
                 self.assertIn("not RUNNING", err)
                 self.assertEqual([call["args"][-1] for call in self.calls("curl")], sources)
                 self.assertEqual({path.name for path in state.iterdir()} - {zgca.TRACKED_LIST_NAME},
-                                 {zgca.DUCKDB_CLI_NAME})
+                                 {zgca.DUCKDB_CLI_NAME, zgca.CUDA_COMPAT_NAME})
                 (state / zgca.DUCKDB_CLI_NAME).unlink()
+                (state / zgca.CUDA_COMPAT_NAME).unlink()
         # No source with the pinned bytes: nothing enters the cache, nothing is shipped.
         self.log.unlink()
         code, err = self.run_main("deploy", "data/pit_views_seed_test", ZGCA_GITHUB_PROXY=PROXY,
@@ -432,13 +504,57 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self.assertEqual(left, set(files) - {"scripts/experiments/create_round_retired.py"}
                          | {"scripts/alias.py", "scripts/data_link", f".runtime/zgca/{zgca.TRACKED_LIST_NAME}"})
 
-    def test_the_image_build_and_the_instance_name_the_file_the_deploy_ships(self) -> None:
-        """Three places name one file: the Dockerfile fetches it by default,
-        the deploy pins and ships it, remote.sh verifies and serves it."""
+    def test_the_image_build_and_the_instance_name_the_files_the_deploy_ships(self) -> None:
+        """Three places name each file: the Dockerfile fetches the DuckDB CLI
+        by default and the compatibility package only when told, the deploy
+        pins and ships both, remote.sh verifies and serves them."""
         dockerfile = (REPO / "ops" / "docker" / "sandbox.Dockerfile").read_text(encoding="utf-8")
         self.assertIn(zgca.DUCKDB_CLI_URL, dockerfile)
+        self.assertIn("ARG CUDA_COMPAT_URL=\n", dockerfile)
+        self.assertIn("ENV LD_LIBRARY_PATH=${CUDA_COMPAT_URL:+/usr/local/cuda-compat}\n", dockerfile)
+        self.assertEqual(zgca.CUDA_COMPAT_URL.rsplit("/", 1)[1], zgca.CUDA_COMPAT_NAME)
         remote = zgca.REMOTE_SCRIPT.read_text(encoding="utf-8")
         self.assertIn(f"=.runtime/zgca/{zgca.DUCKDB_CLI_NAME}\n", remote)
+        self.assertIn(f"=.runtime/zgca/{zgca.CUDA_COMPAT_NAME}\n", remote)
+
+    def test_the_dirs_step_links_the_store_to_the_instance_disk_and_refuses_anything_else(self) -> None:
+        """Run for real against temporary roots: the link, its idempotence, and the refusals."""
+        base = Path(self.temp.name)
+        root, local = base / "instance", base / "ebs" / "instance"
+        env = {**os.environ, "ZGCA_REMOTE_ROOT": str(root), "ZGCA_LOCAL_ROOT": str(local)}
+
+        def step(name: str, environ: dict[str, str] = env) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(["bash", str(zgca.REMOTE_SCRIPT), name], env=environ, capture_output=True, text=True, check=False)
+
+        link = root / "data" / "pretrained"
+        for _ in range(2):
+            made = step("dirs")
+            self.assertEqual(made.returncode, 0, made.stderr)
+            self.assertEqual(os.readlink(link), str(local / "pretrained"))
+        (local / "pretrained" / "Model").mkdir()
+        (local / "pretrained" / "Model" / "config.json").write_text("{}\n", encoding="utf-8")
+        # Counted as the deploy counts the local store: the bytes of its files.
+        present, free = map(int, step("local-disk").stdout.split())
+        self.assertEqual(present, zgca._tree_bytes(local / "pretrained"))
+        self.assertEqual(present, 3)
+        self.assertGreater(free, 0)
+        link.unlink()
+        link.symlink_to(base / "elsewhere")
+        refused = step("dirs")
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn(f"not to the store's directory {local / 'pretrained'}", refused.stderr)
+        link.unlink()
+        link.mkdir()
+        refused = step("dirs")
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("is a directory, but the store lives in", refused.stderr)
+        self.assertTrue(link.is_dir() and not link.is_symlink())
+        unset = {name: value for name, value in env.items() if name != "ZGCA_LOCAL_ROOT"}
+        for name in ("dirs", "local-disk"):
+            with self.subTest(step=name):
+                refused = step(name, unset)
+                self.assertEqual(refused.returncode, 1)
+                self.assertIn("ZGCA_LOCAL_ROOT is not set", refused.stderr)
 
     def test_deploy_stops_at_the_first_primitive_that_fails(self) -> None:
         self._tracked_repo()
@@ -608,10 +724,10 @@ class ZgcaWorkflowTest(unittest.TestCase):
         remote = subprocess.run(["bash", str(zgca.REMOTE_SCRIPT), "bogus"], capture_output=True, text=True, check=False)
         self.assertEqual(remote.returncode, 1)
         self.assertIn("unknown remote step", remote.stderr)
-        # The build verifies and serves the shipped release file, so prepare takes its digest.
-        prepare = subprocess.run(["bash", str(zgca.REMOTE_SCRIPT), "prepare"], capture_output=True, text=True, check=False)
+        # The build verifies and serves the shipped release files, so prepare takes their digests.
+        prepare = subprocess.run(["bash", str(zgca.REMOTE_SCRIPT), "prepare", "0" * 64], capture_output=True, text=True, check=False)
         self.assertEqual(prepare.returncode, 1)
-        self.assertIn("pinned DuckDB CLI digest", prepare.stderr)
+        self.assertIn("pinned DuckDB CLI and CUDA compatibility package digests", prepare.stderr)
         self.assertEqual(subprocess.run(["bash", "-n", str(zgca.REMOTE_SCRIPT)], check=False).returncode, 0)
 
 

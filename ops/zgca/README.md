@@ -13,22 +13,26 @@ python ops/zgca/zgca.py down
 python ops/zgca/zgca.py --instance <平台实例 id> status
 ```
 
-在本机的 `quant` 环境里运行。除 `push` 外，脚本只用标准库和本检出里的模型档案，系统 `python3` 也能跑；`push` 要用控制台自己的“在跑”判定，那个模块依赖 numpy。`ZGCA_COMPUTE` 可以指向别处的 zgca-compute 检出，默认 `~/zgca-compute`；`ZGCA_GITHUB_PROXY` 是下载 GitHub 发布包时先试的代理前缀（例如 `https://ghfast.top/`）。实例缺省是 `auto-trade-dev-a100x2`（两张 A100-80G，平台 id `mpo06t71crmmtdsrb98ckwk29`）；放在子命令之前的 `--instance <平台实例 id>` 让同一个脚本驱动另一台，`instance` 和 `dev` 都被指到所选的这台，别的实例同时在跑也不会选错。开发机上的仓库根目录不随实例改变，缺省是 `/personal_fast_storage/auto-trade`；`ZGCA_REMOTE_ROOT=/personal_fast_storage/<名称>` 把所有传输和开发机步骤移到个人存储下的另一个目录（其他写法在动开发机之前就被拒绝），供验证部署与在用的树并存：同一资源区的实例看到的是同一份个人存储。另设的根要用 `--instance` 配一台非缺省的实例：沙箱镜像、tmux 会话和控制台端口属于实例而不属于根，缺省实例服务在用的树，在它上面另设根可能重建在跑臂所用的镜像（重建前的检查只看本根的臂）或经在用的控制台建臂，所以被拒绝。
+在本机的 `quant` 环境里运行。`deploy` 要读种子记下的快照配置，`push` 要用控制台自己的“在跑”判定，这两处的模块依赖 numpy 与 pandas；其余子命令只用标准库和本检出里的模型档案，系统 `python3` 也能跑。`ZGCA_COMPUTE` 可以指向别处的 zgca-compute 检出，默认 `~/zgca-compute`；`ZGCA_GITHUB_PROXY` 是下载 GitHub 发布包时先试的代理前缀（例如 `https://ghfast.top/`）。实例缺省是 `auto-trade-dev-a100x2`（两张 A100-80G，平台 id `mpo06t71crmmtdsrb98ckwk29`）；放在子命令之前的 `--instance <平台实例 id>` 让同一个脚本驱动另一台，`instance` 和 `dev` 都被指到所选的这台，别的实例同时在跑也不会选错。开发机上的仓库根目录不随实例改变，缺省是 `/personal_fast_storage/auto-trade`，预训练模型库则在实例自己的盘上（见[存储布局](#存储布局)）；`ZGCA_REMOTE_ROOT=/personal_fast_storage/<名称>` 把所有传输和开发机步骤移到个人存储下的另一个目录（其他写法在动开发机之前就被拒绝），供验证部署与在用的树并存：同一资源区的实例看到的是同一份个人存储。另设的根要用 `--instance` 配一台非缺省的实例：沙箱镜像、tmux 会话和控制台端口属于实例而不属于根，缺省实例服务在用的树，在它上面另设根可能重建在跑臂所用的镜像（重建前的检查只看本根的臂）或经在用的控制台建臂，所以被拒绝。
 
 ## 各子命令
 
 `up` 就是 `instance start`：已是 RUNNING 就只确认 SSH，否则发出一次启动请求（平台暂时拒绝时由 `instance` 退避重试），等到实例显示 RUNNING 且 SSH 能登录，最后打印本周卡时。
 
-`deploy <种子目录>` 先在本机核对：种子目录在 `data/` 下且预构建已完成（没有 `prebuild_unfinished.json`），它的 `provider.json` 指向的 research release 已经发布在 `data/research_releases/` 下，`.env` 存在且设了模型档案点名的键，预训练模型库 `data/pretrained/` 带着它的 `MANIFEST.sha256`（开发机上新建的臂钉住并挂载这份库）。镜像构建要装的 DuckDB CLI 发布包在 GitHub 上，开发机访问不到，所以由本机下载一次、缓存在 `.runtime/zgca/`：设了 `ZGCA_GITHUB_PROXY` 时先经代理、再直连 GitHub，只有与钉住的 SHA-256 相符的下载才进缓存，缓存里摘要不符的文件直接拒绝（causal-conv1d 在镜像里从 PyPI 源码编译，开发机经清华镜像取得，不必带过去）。核对都通过、实例在运行，才开始动开发机：先 `dev bootstrap`（新实例的镜像不带 rsync 和 tmux），建好运行时目录，再依次传输，每一次都由 `dev copy` 传完后以同样参数 dry-run 比对，有差异就停下：
+`deploy <种子目录>` 先在本机核对：种子目录在 `data/` 下且预构建已完成（没有 `prebuild_unfinished.json`），它的 `provider.json` 指向的 research release 已经发布在 `data/research_releases/` 下、并记着种子的快照配置，`.env` 存在且设了模型档案点名的键，预训练模型库 `data/pretrained/` 带着它的 `MANIFEST.sha256`（开发机上新建的臂钉住并挂载这份库）。镜像构建要装的两个文件开发机都取不到：GitHub 上的 DuckDB CLI 发布包，和 NVIDIA 的 CUDA 前向兼容包（见下文 [GPU 驱动](#gpu-驱动)）。所以由本机下载一次、缓存在 `.runtime/zgca/`：设了 `ZGCA_GITHUB_PROXY` 时 GitHub 的发布包先经代理、再直连，只有与钉住的 SHA-256 相符的下载才进缓存，缓存里摘要不符的文件直接拒绝（causal-conv1d 在镜像里从 PyPI 源码编译，开发机经清华镜像取得，不必带过去）。核对都通过、实例在运行，才开始动开发机：先 `dev bootstrap`（新实例的镜像不带 rsync 和 tmux），建好运行时目录，并让 `data/pretrained` 成为指向实例盘上模型库目录的链接（那里是真实目录或指向别处时拒绝），再依次传输，每一次都由 `dev copy` 传完后以同样参数 dry-run 比对，有差异就停下：
 
 | 内容 | 方式 |
 | --- | --- |
 | `git ls-files` 列出的受管文件 | 按清单复制，不删除开发机上的多余文件 |
 | 模型网关的 key：本机 `.env` 里模型档案点名的那些行（各档案的 key 与地址变量，加上中转站的备用 key） | `dev put` 写成开发机的 `.env`，仅 root 可读，本机不落临时文件，写完核对摘要 |
-| 两个发布包和受管文件清单 | 复制到开发机的 `.runtime/zgca/` |
-| 种子目录、该 release 目录、预训练模型库 | 精确镜像（`--delete`，硬链接保留） |
+| 两个构建用文件和受管文件清单 | 复制到开发机的 `.runtime/zgca/` |
+| 种子目录 | 精确镜像（`--delete`，硬链接保留） |
+| 该 release 目录 | 同上，但不带种子快照配置不读的文本数据集与分钟线（新闻与分钟线是 release 的大头：b50c220f 的 51.75 GB 里 38.5 GB）；跳过的目录在开发机上保留不删（`--delete` 不带 `--delete-excluded`），同一 release 的另一颗种子可能要读 |
+| 预训练模型库 | 最后一步，精确镜像到实例自己的盘 `/ebs/<根目录名>/pretrained`，只在放得下时（见下） |
 
-TuShare 令牌、`HF_TOKEN` 等其余变量不离开本机。清单到位后、传种子之前，开发机按清单清理代码：在含受管文件的顶层目录里删除清单上没有的文件，运行时目录（`data/`、`experiments/`、`logs/`、`results/`、`.runtime/`）从不进入，符号链接、`__pycache__` 和 `*.egg-info` 保留，这样退役的轮次文件不会留在开发机上被启动器或测试读到。最后是准备步骤：装 ripgrep（worker 在会话开始前就拒绝没有 `rg` 的宿主）；venv 不存在或缺包时用开发机的 miniconda 建 `/personal_fast_storage/envs/quant`（另设的根用自己里面的 `.venv`，以免改指在用的树所跑的那个），以可编辑方式安装本仓库（平台 PyPI 镜像缺 tushare 1.4.29，所以加清华作为额外索引）；确认 Docker 可达，再用执行器自己的指纹检查判断沙箱镜像。镜像不存在、或者它烤入的策略契约与这份检出不一致，就按平台的构建办法（旧构建器、默认网桥、`--force-rm`）重建，两个发布包由开发机在网桥网关上临时提供；有臂在跑时拒绝重建，因为根盘容不下第二个镜像；构建因磁盘用尽失败时清掉不用的镜像和已停止的容器，冷构建一次。重建后再检查一次，仍不一致即失败。`deploy` 以 `dev report` 收尾。
+TuShare 令牌、`HF_TOKEN` 等其余变量不离开本机。清单到位后、传种子之前，开发机按清单清理代码：在含受管文件的顶层目录里删除清单上没有的文件，运行时目录（`data/`、`experiments/`、`logs/`、`results/`、`.runtime/`）从不进入，符号链接、`__pycache__` 和 `*.egg-info` 保留，这样退役的轮次文件不会留在开发机上被启动器或测试读到。然后是准备步骤：装 ripgrep（worker 在会话开始前就拒绝没有 `rg` 的宿主）；venv 不存在或缺包时用开发机的 miniconda 建 `/personal_fast_storage/envs/quant`（另设的根用自己里面的 `.venv`，以免改指在用的树所跑的那个），以可编辑方式安装本仓库（平台 PyPI 镜像缺 tushare 1.4.29，所以加清华作为额外索引）；确认 Docker 可达，再用执行器自己的指纹检查判断沙箱镜像。镜像不存在、或者它烤入的策略契约与这份检出不一致，就按平台的构建办法（旧构建器、默认网桥、`--force-rm`）重建，DuckDB CLI 与兼容包由开发机在网桥网关上临时提供；有臂在跑时拒绝重建，因为实例盘容不下第二个镜像；构建因磁盘用尽失败时清掉不用的镜像和已停止的容器，冷构建一次。重建后再检查一次，仍不一致即失败。准备步骤最后在镜像里跑一次 GPU 检查，参数与策略容器相同（只读、断网、agent 用户、tmpfs 的 `/tmp`、一张卡）：torch 在卡上算一次矩阵乘、导入 vLLM，跑不起来就失败。
+
+模型库最后传：实例盘上的余量要容下库里还缺的字节，另留 20 GiB 给镜像重建的新层和容器的临时文件。容不下就不传库，打印 `dev report` 后以非零退出，写明还缺多少、盘上空多少：代码、种子、release 和镜像都已部署，库没有，开发机上就不能新建或启动任何臂（建臂要读库的清单）。这样放不下的库不会把盘写满，也不会让人误以为实例已就绪。`deploy` 以 `dev report` 收尾。
 
 `push <臂 id>...` 把本机的臂送到开发机，供在那里新建的臂当作谱系（`lineage_arms`）读取：新臂创建时要读它点名的每一条早先臂，它们必须在那台机器的 `experiments/` 下，而 `deploy` 不传实验目录。每条臂必须是本机的臂（`hitl/params.json` 记的实验根不是开发机的，从开发机同步来的副本一律拒绝），而且不在本机运行（控制台自己的规则：worker 活着且状态没有结束），全部核对通过才开始传；用 `dev copy` 复制，不含可从种子重建的 `pit_views/`，不带 `--delete`，在 `deploy` 之后运行。例如 2026-10-19 第二轮的 HCM 臂以 `_profiles.HCM_LINEAGE` 的四条臂为谱系，其中两条 `zgca_20261014c` 臂本来就建在开发机的个人存储上，只在本机的两条在 `run` 之前送过去：
 
@@ -44,6 +48,12 @@ python ops/zgca/zgca.py push hcm_100k_8y_sol_qwen_20261014d hcm_100k_8y_sol_dsf_
 
 `down` 就是 `instance stop`：等到 STOPPED 后打印卡时。它不问也不检查有没有臂在跑：先看 `status`，由调用者决定。
 
+## GPU 驱动
+
+镜像里的 torch 2.13 要 CUDA 13，开发机的内核驱动却是 535.129.03（CUDA 12.2）；`--gpus` 把宿主的这份驱动注入容器（2026-10-24 两卡实例上，容器里 `cuDriverGetVersion` 是 12020）。A100 是数据中心卡，可以用 NVIDIA 的前向兼容：较新的用户态驱动跑在较旧的内核驱动上。开发机的构建因此带上构建参数 `CUDA_COMPAT_URL`，Dockerfile 的最后一层把 `cuda-compat-13-0` 解到 `/usr/local/cuda-compat`，并只在这时把 `LD_LIBRARY_PATH` 指向它；平台的 GPU 钩子不会自己选用兼容库（同一天放在 `/usr/local/cuda/compat` 而不设 `LD_LIBRARY_PATH`，容器仍是 12020）。本机构建不传这个参数（驱动是 580 以上），那一层是空的。
+
+钉住的是 580.196.07（`zgca.py` 的 `CUDA_COMPAT_*`，摘要与 NVIDIA Debian 12 源的包索引一致）。2026-10-24 在两卡实例上先探测后钉住：580.65.06 与 580.196.07 两个包都在策略容器的参数下 `cuInit` 返回 0、驱动 API 版本 13000、两张卡各分配 1 GiB，旧镜像的 torch 2.10 在两张卡上算矩阵乘都正确，取较新的一个。平台若把内核驱动升到兼容包的版本或更高，兼容包就比内核驱动旧，NVIDIA 不支持这种组合，准备步骤的 GPU 检查会失败：那时换钉更新的兼容包，或在 `remote.sh` 里不再传这个参数。
+
 ## 幂等与失败
 
 启停的幂等意图（键何时写下、保留或删除）和平台暂时拒绝时的退避重试都由 `instance` 负责，见 `~/zgca-compute/README.md` 的“API 与生命周期”；启停没有确认到目标状态时，重跑同一个子命令即可。每一步都校验自己的结果，失败就以非零退出并说明原因，没有静默回退。
@@ -54,11 +64,17 @@ python ops/zgca/zgca.py push hcm_100k_8y_sol_qwen_20261014d hcm_100k_8y_sol_dsf_
 
 ## 存储布局
 
-本项目在每个资源区只用个人存储：`/personal_fast_storage/auto-trade` 是这个区的仓库根，代码、`.env`、种子、release、预训练模型库、臂和日志都在这里，同一资源区的实例共用这一份。公共存储不放本项目的任何东西：组织的公共对象存储对组织内每个账户可读、没有删除接口，上传还可能产生费用；`/public_fast_storage` 是 POSIX 共享，资源区 5 的任何实例都能以 root 改写。由 TuShare 数据派生的种子和 release 受许可约束，只能放私有存储；开源的 Qwen 模型库和两个发布包放到公共存储也省不了什么，因为个人存储本来就服务同一资源区的每台实例。2026-10-14 测吞吐时在对象存储 `s-lzp26-probe/` 下留了六个零字节对象，无法删除。
+本项目在每个资源区用两处存储。个人存储上的 `/personal_fast_storage/auto-trade` 是这个区的仓库根：代码、`.env`、种子、release、臂和日志都在这里，同一资源区的实例共用这一份。臂的 `pit_views/` 硬链接种子的文件，所以种子和 `experiments/` 必须在同一个文件系统上。
+
+预训练模型库放在实例自己的盘上，`/ebs/<根目录名>/pretrained`，仓库根的 `data/pretrained` 是指向它的链接。个人存储有约 100 GiB 的配额（工具包 README），而库已有十个模型、133.6 GiB。臂只钉住库清单的摘要，容器启动时解析这条链接、挂载它指向的目录，所以除了这条链接没有别处知道库在哪。容器挂载的只有库和臂的视图；release 只由宿主侧的 worker 读，所以留在个人存储上。
+
+实例盘同时是实例的根和 Docker 的镜像存储：2026-10-24 两卡实例的是按申请加的 100 GiB 数据盘（`df` 显示 99 GiB）。停机再开后盘上的内容都在，这是观察，不是平台保证；丢了就由 `deploy` 从本机重传。这块盘放不下完整的库再加一个约 15 GiB 的镜像。库放在哪里（更大的盘、按主机的子集或公共存储）由所有者决定；在那之前 `deploy` 在库这一步拒绝（见上），开发机上不能建臂。
+
+公共存储不放本项目的任何东西：组织的公共对象存储对组织内每个账户可读、没有删除接口，上传还可能产生费用；`/public_fast_storage` 是 POSIX 共享，资源区 5 的任何实例都能以 root 改写。由 TuShare 数据派生的种子和 release 受许可约束，只能放私有存储；开源模型库是否例外，是上面那个待定的选择。2026-10-14 测吞吐时在对象存储 `s-lzp26-probe/` 下留了六个零字节对象，无法删除。
 
 ## 一个周期的开销
 
-卡时规则见 `~/zgca-compute/README.md`。全新的根要把种子（约 16 GB）、release（约 48 GB）和预训练模型库（约 12 GB）全量传一遍，按那里记的 3.1–3.7 MB/s 要六到七小时：2026-10-19 向两卡实例部署时，种子用了 73 分钟，模型库 61 分钟（release 已在开发机上，比对 34 秒）。之后 `deploy` 只传差异，几分钟内完成。同一次部署里冷构建镜像约 6 分钟，缓存命中约 15 秒；起步策略的冒烟约两小时；一条 HCM 整期臂约七小时。
+卡时规则见 `~/zgca-compute/README.md`。全新的根要把种子（八年那颗约 17 GB）、release 里种子要读的部分（约 13 GB）和模型库（143.5 GB，放得下才传）传一遍。按那里记的 3.1–3.7 MB/s，种子与 release 要两个多小时，模型库要十一到十三小时；实例盘上已有的模型不再传。之后 `deploy` 只传差异，几分钟内完成。2026-10-19 向两卡实例部署时，种子用了 73 分钟，当时四个小模型的库 61 分钟；同一次部署里冷构建镜像约 6 分钟，缓存命中约 15 秒（那时的镜像还没有 vLLM）。起步策略的冒烟约两小时；一条 HCM 整期臂约七小时。
 
 ## 改动后的验证
 
@@ -78,11 +94,13 @@ ssh-keygen -R zenith-$V -f ~/.config/zgca-compute/known_hosts
 unset ZGCA_REMOTE_ROOT
 ```
 
-`deploy` 要跑六到七小时（见上一节），放进 tmux 或 nohup，输出写进 `logs/zgca/`；加上 venv 安装和冷构建镜像，整个验证约七卡时。按输出里的 UTC 时刻记下每步耗时，并核对：`dev bootstrap` 在新镜像上真的装了 rsync 和 tmux；每次 `dev copy` 和 `dev put` 都没有报差异或摘要不符（成功时它们不输出）；准备步骤在验证根的 `.venv` 建好 venv 并构建镜像；`push` 的臂（2026-10-20 本机最小的已结束、没有 Paper 账户的臂，不含 `pit_views/` 约 9 MB）送到后 `status` 数出一条已结束的臂；停机后立即启动时平台多半先拒绝，`instance` 应打印 “start refused for now … trying again”，退避后启动成功。验证根要在验证实例还在运行时删除，先 `ls -d` 确认路径。个人 Token 没有删除实例的接口，`down` 只是停机：停下的实例不计卡时，连续停满 30 天由平台软删除（此前连发三天提醒），7 天恢复期过后删除。
+验证实例要有能放下镜像和模型库的数据盘：只有约 20 GB 根盘的实例在镜像这一步就会耗尽磁盘，有盘但放不下库时 `deploy` 在库这一步按上文拒绝。`deploy` 要跑几个小时（见上一节），放进 tmux 或 nohup，输出写进 `logs/zgca/`；加上 venv 安装和冷构建镜像，整个验证约七卡时。按输出里的 UTC 时刻记下每步耗时，并核对：`dev bootstrap` 在新镜像上真的装了 rsync 和 tmux；每次 `dev copy` 和 `dev put` 都没有报差异或摘要不符（成功时它们不输出）；准备步骤在验证根的 `.venv` 建好 venv 并构建镜像；`push` 的臂（2026-10-20 本机最小的已结束、没有 Paper 账户的臂，不含 `pit_views/` 约 9 MB）送到后 `status` 数出一条已结束的臂；停机后立即启动时平台多半先拒绝，`instance` 应打印 “start refused for now … trying again”，退避后启动成功。验证根要在验证实例还在运行时删除，先 `ls -d` 确认路径。个人 Token 没有删除实例的接口，`down` 只是停机：停下的实例不计卡时，连续停满 30 天由平台软删除（此前连发三天提醒），7 天恢复期过后删除。
 
 ## 已接受的局限
 
 `/personal_fast_storage` 按资源区隔离、同一资源区内的实例共用，所以用 `--instance` 驱动的另一台若与缺省实例在同一资源区，两台读写的是同一个仓库根目录：代码、`.env`、种子、臂目录和日志都是同一份，一台上的 `deploy` 改的也是另一台正在用的代码，一台的 `status` 会把另一台在跑的臂标成 worker 已不在。两台同时跑臂时要放在不同资源区，或者用 `ZGCA_REMOTE_ROOT` 给另一台一个自己的根，或者同一时间只让一台有臂。
+
+实例盘上的模型库和镜像停机再开后仍在，这是观察而不是保证；丢了就要重传模型库。
 
 `deploy` 只在仍含受管文件的顶层目录里清理：整个退出版本库的顶层目录、仓库根下不再受管的文件和清理后留下的空目录仍留在开发机上。镜像只在合同指纹说它缺失或过期时重建，所以只改 Dockerfile、合同文件不变的改动不会让实例重建，要先在实例上删掉镜像 tag 再部署。控制台不随 `deploy` 重启，改了代码之后要在没有臂运行时 `~/zgca-compute/dev tmux kill-session -t autotrade-console` 再 `run`。`status` 只认 `create_round_*` 命名的启动器日志。
 

@@ -58,10 +58,10 @@ RUN sed -i \
 # Pinned research/DL stack. Data layer pins are the environment's
 # byte-format contract (parquet caches) and stay put; the DL family follows
 # the vLLM release below: torch 2.13.0 (CUDA 13.0 wheels, which need an NVIDIA
-# driver of the 580 series or later) and the torchvision it pins are exactly
-# what vLLM 0.27.1 requires, the combination the host's own vLLM service runs
-# on its L20s, and the boosting picks are the current stable releases the
-# ecosystem has settled on. The stack is what a formal strategy may import
+# driver of the 580 series or later, or the compatibility layer at the end)
+# and the torchvision it pins are exactly what vLLM 0.27.1 requires, the
+# combination the host's own vLLM service runs on its L20s, and the boosting
+# picks are the current stable releases the ecosystem has settled on. The stack is what a formal strategy may import
 # (strategy_loader.ALLOWED_MODULES) plus the data tools the Agent's shell
 # uses; torch wheels carry their own CUDA runtime, so the image needs no system
 # CUDA toolkit and is not tied to one GPU architecture.
@@ -225,3 +225,24 @@ WORKDIR /mnt/agent
 # Same layer verifies the binary; do not install via pip or at session start.
 RUN npm install -g --prefix /usr/local --no-fund --no-audit --registry "${NPM_CONFIG_REGISTRY}" pyright@1.1.411 \
     && /usr/local/bin/pyright --version
+
+# CUDA forward compatibility, for a host whose NVIDIA driver predates CUDA 13
+# (the ZGCA A100 instance runs 535): NVIDIA's cuda-compat package carries a
+# newer user-mode driver, which a datacenter GPU runs on its older kernel
+# driver. Only a build that names the package gets it -- ops/zgca serves the
+# pinned file to the instance's build -- and only then is LD_LIBRARY_PATH set
+# (to an empty value otherwise), since the host's GPU hook injects its own
+# older libcuda and does not pick up compat libraries by itself. Every other
+# build, the L20 host's (driver 580 or later) included, leaves this layer empty
+# and its containers on the driver the host injects. Last, so the layers above
+# stay shared with builds that do not name it.
+ARG CUDA_COMPAT_URL=
+RUN if [ -n "${CUDA_COMPAT_URL}" ]; then \
+        curl -fL --retry 8 --retry-all-errors --retry-delay 3 --connect-timeout 30 --max-time 600 \
+            "${CUDA_COMPAT_URL}" -o /tmp/cuda-compat.deb \
+        && dpkg-deb -x /tmp/cuda-compat.deb /tmp/cuda-compat \
+        && mv /tmp/cuda-compat/usr/local/cuda-*/compat /usr/local/cuda-compat \
+        && rm -r /tmp/cuda-compat /tmp/cuda-compat.deb \
+        && test -e /usr/local/cuda-compat/libcuda.so.1; \
+    fi
+ENV LD_LIBRARY_PATH=${CUDA_COMPAT_URL:+/usr/local/cuda-compat}
