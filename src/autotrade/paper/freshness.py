@@ -12,7 +12,13 @@ built, unless the pinned generation records for every dataset the book mounts
   job that was due before the decision's inference time (a refresh is a run
   whose whole pull of the dataset completed without a defective or staged
   partition), and
-- no open issue: no defect, no staged version, no pending history re-pull.
+- no open defect and no staged version: either means the visible partition
+  is not the vendor's current answer.
+
+A pending history re-pull does not refuse. It follows a restatement the run
+accepted, so the dataset's window months are current and its refresh has
+advanced; only months outside the window await convergence, as they did for
+every run before versioning. It stays an open issue for console health.
 
 A dataset's landing jobs are the refresh nodes the replay gates it on
 (``contracts``), with each node's launch time. A run of one is due on the
@@ -48,6 +54,8 @@ from autotrade.pipelines.pit_backend import required_release_raw_datasets
 from .engine import PaperDataNotReady
 
 SESSION_WINDOW = "sse_open_on_or_before"
+# The open issues that make a mounted dataset unready (see the docstring).
+REFUSING_ISSUES = frozenset({"defect", "staged"})
 
 
 def landing_nodes(config: SnapshotConfig) -> dict[str, tuple[str, ...]]:
@@ -120,7 +128,7 @@ def unready_datasets(
             lines.append(f"{dataset} last refreshed {when}, before the {node} run of {launch:%Y-%m-%d %H:%M}")
     mounted = set(required_release_raw_datasets(config))
     for issue in generation.get("issues") or []:
-        if isinstance(issue, dict) and issue.get("dataset") in mounted:
+        if isinstance(issue, dict) and issue.get("dataset") in mounted and issue.get("kind") in REFUSING_ISSUES:
             where = f" in {issue['partition']}" if issue.get("partition") else ""
             detail = issue.get("detail") or issue.get("version") or ""
             lines.append(f"{issue['dataset']} has an open {issue.get('kind')}{where}" + (f" ({detail})" if detail else ""))
@@ -135,7 +143,7 @@ def require_fresh_release(
     due_at: datetime,
 ) -> None:
     """Raise ``PaperDataNotReady`` naming every stale dataset and every open
-    issue of a mounted dataset (see the module docstring)."""
+    defect or staged version of a mounted dataset (see the module docstring)."""
 
     lines = unready_datasets(generation, config, schedule, sessions, due_at)
     if lines:

@@ -1,5 +1,6 @@
 """Paper refuses a pinned release unless every dataset it mounts was pulled
-whole since the landing run due before the decision, with no open issue."""
+whole since the landing run due before the decision, with no open defect or
+staged version."""
 
 from __future__ import annotations
 
@@ -53,6 +54,15 @@ def record(refreshed: dict[str, str], issues: list[dict] | None = None) -> dict:
 
 def test_a_release_every_landing_run_refreshed_is_ready():
     assert unready_datasets(record(FRESH), CONFIG, SCHEDULE, SESSIONS, MONDAY) == []
+    # A pending history re-pull follows an accepted restatement: the window
+    # is current, only older months await convergence, so Paper goes on. A
+    # staged version on the same dataset still refuses.
+    repull = {"kind": "history_repull", "dataset": "stk_holdernumber", "partition": "", "detail": "", "version": ""}
+    assert unready_datasets(record(FRESH, [repull]), CONFIG, SCHEDULE, SESSIONS, MONDAY) == []
+    staged = {**repull, "kind": "staged", "partition": "month=202610", "version": "20261025T014501000000Z-staged"}
+    assert unready_datasets(record(FRESH, [repull, staged]), CONFIG, SCHEDULE, SESSIONS, MONDAY) == [
+        "stk_holdernumber has an open staged in month=202610 (20261025T014501000000Z-staged)"
+    ]
     # The 09:45 disclosure run of the decision's own morning lands after it:
     # Sunday's run is the one due, Saturday's is not enough.
     stale = record({**FRESH, "stk_holdernumber": "2026-10-24T01:50:00+00:00"})
