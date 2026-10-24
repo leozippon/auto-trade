@@ -23,6 +23,7 @@ from autotrade.environment.data.contracts import (
     GENERATION_UPDATING,
     RAW_GENERATION_FILENAME,
 )
+from autotrade.environment.data.pit import complete_interrupted_commits
 
 from .audit import AUDIT_SUMMARY_RE
 from .common import (
@@ -760,7 +761,13 @@ def finish_raw_generation_update(
 ) -> dict:
     """End a job: publish a new generation when the lake may have changed
     (``commit``), else restore the previous identity; either way record the
-    per-dataset state and open issues the job leaves."""
+    per-dataset state and open issues the job leaves.
+
+    Restoring the identity is sound only over a record that was committed when
+    the job began: one left ``updating`` by a crashed run (or none at all)
+    describes a lake that may already differ from its id, so it always gets a
+    new one."""
+    commit = commit or previous.get("state") != GENERATION_COMMITTED
     payload = {
         "schema_version": GENERATION_SCHEMA_VERSION,
         "state": GENERATION_COMMITTED,
@@ -1139,6 +1146,9 @@ def _run(args: argparse.Namespace) -> int:
     returncode = 1
     state_recorded = False
     try:
+        swept = complete_interrupted_commits(raw_dir)
+        if any(swept.values()):
+            log_outcome(log_path, {"note": "interrupted_commits_rolled_forward", **swept, "job": ctx.job_name})
         job_state = read_job_state(ctx.job_name)
         generation = _read_raw_generation_file(raw_dir) if mutates_lake else {}
         generation_committed = str(generation.get("state", GENERATION_COMMITTED)) == GENERATION_COMMITTED

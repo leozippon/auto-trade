@@ -684,6 +684,9 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         )
 
         def publish(value: float) -> str:
+            # Each round starts from a fresh baseline landing, which has no
+            # observation table yet.
+            versions.observation_path(output).unlink(missing_ok=True)
             common.write_parquet(output, baseline, api_name="share_float", params={}, fields=list(baseline.columns))
             active = baseline.copy()
             active["float_share"] = value

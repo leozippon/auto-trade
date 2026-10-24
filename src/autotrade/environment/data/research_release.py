@@ -36,7 +36,10 @@ from autotrade.environment.data.contracts import (
     benchmark_index_label,
     require_committed_generation,
 )
-from autotrade.environment.data.pit import FIRST_SEEN_SUFFIX
+from autotrade.environment.data.pit import (
+    FIRST_SEEN_SUFFIX,
+    complete_interrupted_commits,
+)
 
 _SCHEMA_VERSION = 2
 _PIN_DIR_NAME = "research_release"
@@ -266,6 +269,11 @@ def pin_research_release(
                     with _exclusive_flock(release_root / ".registry.lock"):
                         shared = _load_global_release(release_root / generation_id)
                         if shared is None:
+                            # No writer runs under the shared lock: finish or
+                            # clear what a crashed one left, which the clone
+                            # would otherwise refuse until that partition is
+                            # written again.
+                            complete_interrupted_commits(raw_dir)
                             shared = _create_global_release(
                                 release_root=release_root,
                                 generation=generation,

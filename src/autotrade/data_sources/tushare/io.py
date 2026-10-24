@@ -15,31 +15,18 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-# The sidecar read contract is owned by the environment's PIT layer.
+# The sidecar read contract and the footer identity are owned by the
+# environment's PIT layer.
 from autotrade.environment.data.pit import (
+    WRITE_ID_METADATA_KEY,
     CorruptSidecarError,
     concat_rows,
     parquet_meta,
+    parquet_write_id,
 )
 
 _unique_jsonl_lock = threading.Lock()
 _unique_jsonl_state: dict[tuple[Path, str], tuple[int, int, int, set[str]]] = {}
-WRITE_ID_METADATA_KEY = b"autotrade.write_id"
-
-
-def parquet_write_id(path: Path) -> str:
-    """Return the UUID stamped in a Parquet footer, or ``""`` for legacy files."""
-    try:
-        metadata = pq.read_metadata(path).metadata or {}
-    except (OSError, pa.ArrowException):
-        return ""
-    value = metadata.get(WRITE_ID_METADATA_KEY, b"")
-    try:
-        return value.decode("ascii")
-    except (AttributeError, UnicodeDecodeError):
-        return ""
-
-
 def frames_content_equal(old_df: pd.DataFrame, new_df: pd.DataFrame) -> bool:
     """Order-insensitive whole-frame equality over the union of columns.
 

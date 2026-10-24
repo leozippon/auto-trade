@@ -61,6 +61,7 @@ import pyarrow.parquet as pq
 from autotrade.environment.data.pit import (
     FIRST_SEEN_SUFFIX,
     CorruptSidecarError,
+    complete_interrupted_commit,
     concat_rows,
     parquet_meta,
 )
@@ -69,7 +70,6 @@ from .io import (
     append_jsonl_unique,
     committed_partition_intact,
     frames_content_equal,
-    parquet_write_id,
     write_parquet,
 )
 
@@ -342,30 +342,6 @@ def _keep_version(path: Path, instant: str, kind: str) -> str:
     return version
 
 
-def complete_interrupted_commit(path: Path) -> None:
-    """Roll forward a commit that renamed its parquet but not its sidecar.
-
-    The writer stages the sidecar as ``.<sidecar>.<write_id>.tmp`` before the
-    parquet rename, so the sidecar belonging to the visible parquet is still
-    there when a crash fell between the two renames."""
-    path = Path(path)
-    if not path.exists():
-        return
-    footer = parquet_write_id(path)
-    if not footer:
-        return
-    try:
-        current = parquet_meta(path).get("write_id")
-    except CorruptSidecarError:
-        current = None
-    if current == footer:
-        return
-    meta = sidecar_path(path)
-    pending = meta.with_name(f".{meta.name}.{footer}.tmp")
-    if pending.exists():
-        os.replace(pending, meta)
-
-
 # ---------------------------------------------------------------- ledger and run report
 
 
@@ -477,15 +453,30 @@ def read_observations(path: Path) -> pd.DataFrame:
     """The observation rows of the visible partition at ``path``: its canonical
     business keys and ``first_seen_at``. Rows written by a commit that never
     became visible are left out; a partition without a table has none."""
-    obs = observation_path(Path(path))
+    path = Path(path)
+    obs = observation_path(path)
     if not obs.exists():
         return pd.DataFrame(columns=[FIRST_SEEN_COLUMN])
     frame = _read_table(obs)
-    try:
-        since = _instant(parquet_meta(Path(path)).get("visible_since")) if Path(path).exists() else None
-    except CorruptSidecarError:
-        since = None
-    return _visible_rows(frame, since)
+    if not path.exists():
+        # A first landing that crashed before its parquet rename.
+        return frame.iloc[:0]
+    return _visible_rows(frame, _required_visible_since(path, parquet_meta(path), rows=len(frame)))
+
+
+def _required_visible_since(path: Path, meta: dict[str, Any], *, rows: int) -> datetime | None:
+    """The visible partition's ``visible_since``. A table holding rows beside a
+    partition whose sidecar does not say when it became visible (missing,
+    unreadable or pre-versioning) cannot be filtered: refuse loudly rather than
+    read or rewrite it without its recorded first-seen times."""
+    since = _instant(meta.get("visible_since"))
+    if since is None and rows:
+        raise RuntimeError(
+            f"{observation_path(path)} holds {rows} first-seen rows but the sidecar of {path} records no "
+            "visible_since; repair the sidecar, or rebuild the table with "
+            "`scripts/data/tushare_lake.py rebuild-observations`"
+        )
+    return since
 
 
 def _visible_rows(frame: pd.DataFrame, since: datetime | None) -> pd.DataFrame:
@@ -509,12 +500,20 @@ def _record_observations(
     new_keys: pd.Index,
     key_columns: Sequence[str],
     instant: str,
-    visible_since: datetime | None,
+    meta: dict[str, Any] | None,
 ) -> None:
-    """Give every key in ``new_keys`` without a row the first-seen ``instant``."""
+    """Give every key in ``new_keys`` without a row the first-seen ``instant``.
+
+    ``meta`` is the visible partition's sidecar, ``None`` when there is no
+    visible partition yet (rows a crashed first landing left are dropped)."""
     keys = list(key_columns)
     obs = observation_path(path)
-    existing = _visible_rows(_read_table(obs), visible_since) if obs.exists() else pd.DataFrame(columns=[*keys, FIRST_SEEN_COLUMN])
+    if obs.exists():
+        table = _read_table(obs)
+        visible_since = _required_visible_since(path, meta, rows=len(table)) if meta is not None else None
+        existing = _visible_rows(table, visible_since)
+    else:
+        existing = pd.DataFrame(columns=[*keys, FIRST_SEEN_COLUMN])
     stale = obs.exists() and len(existing) != pq.ParquetFile(obs).metadata.num_rows
     known = pd.Index(_joined(existing.astype({column: str for column in keys}), keys)) if len(existing) else pd.Index([])
     fresh = pd.Index(new_keys).difference(known)
@@ -645,7 +644,8 @@ def publish(
             outcome = "restated" if diff.restates else "appended"
             if compare is None and _removes_most_keys(api_name, current, df, keys, diff):
                 return _stage(path, df, api_name=api_name, params=params, fields=fields, keys=keys, diff=diff,
-                              ledger=ledger, source=source, dropped=dropped, old_rows=len(current))
+                              ledger=ledger, source=source, dropped=dropped, old_rows=len(current),
+                              extra_metadata=extra_metadata, meta=meta)
     if dropped and outcome != "restated":
         append_event(ledger, revision_event(
             "deduplicated", dataset=dataset, partition=partition, source=source, key_columns=keys,
@@ -664,22 +664,15 @@ def publish(
     instant = utc_now()
     write_id = str(uuid.uuid4())
     superseded = _keep_version(path, instant, SUPERSEDED) if outcome == "restated" else ""
-    metadata = {**(extra_metadata or {}), "visible_since": instant}
+    metadata = _with_availability({**(extra_metadata or {}), "visible_since": instant}, meta, instant, len(df))
     if keys:
         metadata["key_columns"] = keys
         restated = write_id if outcome == "restated" else meta.get("restated_write_id")
         if restated:
             metadata["restated_write_id"] = restated
-    previous_availability = meta.get("availability")
-    if previous_availability and "availability" not in metadata:
-        # First-landing evidence describes the old payload; a changed payload
-        # was not knowable before this fetch.
-        metadata["availability"] = {
-            **previous_availability, "available_at": instant, "rule": "observed:source_revision_fetch", "row_count": len(df),
-        }
     if keys:
         new_keys = diff.added if diff is not None else pd.Index(key_strings(df, keys).unique())
-        _record_observations(path, new_keys, keys, instant, _instant(meta.get("visible_since")) if exists else None)
+        _record_observations(path, new_keys, keys, instant, meta if exists else None)
     write_parquet(path, df, api_name=api_name, params=params, fields=fields, extra_metadata=metadata, write_id=write_id, at=instant)
     if outcome == "restated":
         append_event(ledger, revision_event(
@@ -689,6 +682,16 @@ def publish(
         ))
     report_outcome(path, outcome, version=superseded)
     return outcome
+
+
+def _with_availability(metadata: dict[str, Any], meta: dict[str, Any], instant: str, rows: int) -> dict[str, Any]:
+    """``metadata`` with an availability record when the caller gave none but
+    the visible partition has one: first-landing evidence describes the old
+    payload, and a changed payload was not knowable before this fetch."""
+    previous = meta.get("availability")
+    if previous and "availability" not in metadata:
+        metadata["availability"] = {**previous, "available_at": instant, "rule": "observed:source_revision_fetch", "row_count": rows}
+    return metadata
 
 
 def _removes_most_keys(api_name: str, current: pd.DataFrame, df: pd.DataFrame, keys: list[str], diff: KeyDiff) -> bool:
@@ -718,7 +721,12 @@ def _stage(
     source: str,
     dropped: int,
     old_rows: int,
+    extra_metadata: dict[str, Any] | None,
+    meta: dict[str, Any],
 ) -> str:
+    """Keep a shrunk answer as a staged version with the metadata its
+    publication would have carried (an observed availability record
+    included), so a promotion restores exactly that commit."""
     staged = [version for version in list_versions(path) if version.endswith(STAGED)]
     if staged:
         latest = version_dir(path) / f"{staged[-1]}.parquet"
@@ -732,10 +740,10 @@ def _stage(
     write_id = str(uuid.uuid4())
     target = version_dir(path) / f"{version}.parquet"
     target.parent.mkdir(parents=True, exist_ok=True)
-    write_parquet(
-        target, df, api_name=api_name, params=params, fields=fields,
-        extra_metadata={"key_columns": keys, "restated_write_id": write_id}, write_id=write_id, at=instant,
+    metadata = _with_availability(
+        {**(extra_metadata or {}), "key_columns": keys, "restated_write_id": write_id}, meta, instant, len(df)
     )
+    write_parquet(target, df, api_name=api_name, params=params, fields=fields, extra_metadata=metadata, write_id=write_id, at=instant)
     append_event(ledger, revision_event(
         "staged", dataset=dataset_dir(path).name, partition=partition_id(path), source=source, key_columns=keys,
         diff=diff, old_rows=old_rows, new_rows=len(df), duplicate_rows_dropped=dropped, version=version,
@@ -766,7 +774,7 @@ def restore(path: Path, version: str, *, ledger: Path | str | None, source: str 
     instant = utc_now()
     superseded = _keep_version(path, instant, SUPERSEDED) if path.exists() else ""
     if keys:
-        _record_observations(path, diff.added, keys, instant, _instant(meta.get("visible_since")))
+        _record_observations(path, diff.added, keys, instant, meta if path.exists() else None)
     tmp = path.with_name(f".{path.name}.{uuid.uuid4()}.tmp")
     os.link(source_file, tmp)
     restored_meta = {**version_meta, "visible_since": instant}

@@ -215,6 +215,11 @@ INTRADAY_FLOW_CONTRACT = DatasetContract(
 # same build, so it takes the flow contract rather than restating it.
 INTRADAY_STATS_CONTRACT = replace(INTRADAY_FLOW_CONTRACT, dataset="intraday_stats")
 
+# Raw datasets written outside the updater (scripts/data/build_minute_derived.py,
+# launched from cron without the updater lock): no run records their refresh,
+# and a staged file in their directories may belong to a build still running.
+LOCALLY_DERIVED_DATASETS = frozenset({INTRADAY_FLOW_CONTRACT.dataset, INTRADAY_STATS_CONTRACT.dataset})
+
 
 def default_tushare_contracts() -> dict[str, DatasetContract]:
     return {

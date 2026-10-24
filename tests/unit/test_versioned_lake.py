@@ -18,6 +18,7 @@ import pandas as pd
 from autotrade.data_sources.tushare import common, cron_update, lake, versions
 from autotrade.data_sources.tushare import io as tushare_io
 from autotrade.environment.data import research_release
+from autotrade.environment.data.pit import complete_interrupted_commits
 
 KEYS = ["ts_code", "ann_date"]
 
@@ -220,6 +221,79 @@ class VersionedPartitionTest(unittest.TestCase):
         self.assertEqual(self.observed()["C"], self.visible_since())
         self.assertEqual(self.publish(restated), "unchanged")
 
+    def test_what_a_crash_leaves_is_rolled_forward_before_a_release_is_cut(self) -> None:
+        raw = self.root / "data" / "raw"
+        torn, unrenamed = raw / "repurchase" / "month=202610.parquet", raw / "repurchase" / "month=202609.parquet"
+        self.publish(rows(("A", "20261001", 1.0)), torn)
+        self.publish(rows(("A", "20260901", 1.0)), unrenamed)
+        real_replace = os.replace
+
+        def crash_at(suffix: str, target_path: Path):
+            def replace(source, target):
+                if Path(target) == target_path.with_name(target_path.name + suffix):
+                    raise OSError("crash")
+                return real_replace(source, target)
+            return replace
+
+        # Between the two renames, and before the first one.
+        with patch.object(tushare_io.os, "replace", side_effect=crash_at(".meta.json", torn)), self.assertRaises(OSError):
+            self.publish(rows(("A", "20261001", 2.0)), torn)
+        with patch.object(tushare_io.os, "replace", side_effect=crash_at("", unrenamed)), self.assertRaises(OSError):
+            self.publish(rows(("A", "20260901", 2.0)), unrenamed)
+        leftovers = sorted(path.name for path in torn.parent.iterdir() if path.name.endswith(".tmp"))
+        self.assertEqual(len(leftovers), 3)
+
+        lock = self.root / ".runtime" / "tushare" / "locks" / "tushare_update.lock"
+        lock.parent.mkdir(parents=True)
+        lock.touch()
+        (raw / ".raw_generation.json").write_text(json.dumps({"schema_version": 3, "state": "committed", "generation_id": "g1"}), encoding="utf-8")
+        (self.root / "data" / "pit" / "fundamental_events").mkdir(parents=True)
+        status = self.root / "results" / "data_quality" / "fundamental_events_status.json"
+        status.parent.mkdir(parents=True)
+        release = research_release.pin_research_release(
+            experiment_dir=self.root / "experiment", raw_dir=raw,
+            fundamental_events_root=self.root / "data" / "pit" / "fundamental_events", fundamental_events_status=status,
+        )
+        self.assertFalse(any(path.name.endswith(".tmp") for path in raw.rglob("*")))
+        cloned = Path(release.raw_dir) / "repurchase"
+        # The torn commit was finished, the one that never became visible dropped.
+        self.assertEqual(pd.read_parquet(cloned / torn.name)["vol"].tolist(), [2.0])
+        self.assertEqual(pd.read_parquet(cloned / unrenamed.name)["vol"].tolist(), [1.0])
+        self.assertTrue(common.committed_partition_intact(torn) and common.committed_partition_intact(unrenamed))
+        # A dataset built outside the updater lock may be mid-write: its
+        # staged files are left alone.
+        building = raw / "intraday_flow" / ".trade_date=20261023.parquet.0f1e2d3c.tmp"
+        building.parent.mkdir()
+        building.write_bytes(b"")
+        self.assertEqual(complete_interrupted_commits(raw), {"finished": 0, "removed": 0})
+        self.assertTrue(building.exists())
+
+    def test_observation_rows_are_never_dropped_for_an_unreadable_sidecar(self) -> None:
+        self.publish(rows(("A", "20261001", 1.0)))
+        table = versions.observation_path(self.path)
+        recorded = table.read_bytes()
+        sidecar = versions.sidecar_path(self.path)
+        sidecar.write_text("{", encoding="utf-8")
+        with self.assertRaises(common.CorruptSidecarError):
+            versions.read_observations(self.path)
+        with self.assertRaisesRegex(RuntimeError, "holds 1 first-seen rows but the sidecar .* records no visible_since"):
+            self.publish(rows(("A", "20261001", 1.0), ("B", "20261002", 2.0)))
+        sidecar.unlink()
+        with self.assertRaisesRegex(RuntimeError, "records no visible_since"):
+            versions.read_observations(self.path)
+        self.assertEqual(table.read_bytes(), recorded)
+
+    def test_a_staged_answer_keeps_the_metadata_its_publication_carries(self) -> None:
+        landed = {"available_at": "2026-10-23T09:29:00+08:00", "rule": "observed:capture"}
+        self.publish(rows(*[(code, "20261023", 1.0) for code in "ABC"]), extra_metadata={"availability": landed})
+        refetched = {"available_at": "2026-10-23T23:32:00+08:00", "rule": "observed:recheck"}
+        self.assertEqual(self.publish(rows(("A", "20261023", 1.0)), extra_metadata={"availability": refetched}), "staged")
+        (staged,) = versions.list_versions(self.path)
+        self.assertEqual(common.parquet_meta(versions.version_dir(self.path) / f"{staged}.parquet")["availability"], refetched)
+        with redirect_stdout(io.StringIO()):
+            versions.restore(self.path, staged, ledger=self.ledger)
+        self.assertEqual(common.parquet_meta(self.path)["availability"], refetched)
+
     def test_duplicate_keys_are_dropped_the_same_way_whatever_the_order(self) -> None:
         served = rows(("A", "20261001", 2.0), ("A", "20261001", 1.0), ("B", "20261002", 1.0))
         self.publish(served, deduplicate=True)
@@ -334,6 +408,31 @@ class RunnerFoldTest(unittest.TestCase):
         self.assertEqual(
             [(issue["kind"], issue["dataset"]) for issue in record["issues"]], [("history_repull", "stk_holdertrade")]
         )
+
+    def test_late_filings_are_appends_that_queue_no_history_repull(self) -> None:
+        # A key absent from the current version (a new announcement, a late
+        # filing for a past end_date) is vendor flow: no copy, no re-pull.
+        path = self.raw / "stk_holdertrade" / "month=202610.parquet"
+        with redirect_stdout(io.StringIO()):
+            versions.publish(path, rows(("A", "20261020", 1.0)), api_name="stk_holdertrade", params={}, fields=[],
+                             key_columns=KEYS, ledger=None)
+            outcome = versions.publish(path, rows(("A", "20261020", 1.0), ("B", "20260715", 2.0)),
+                                       api_name="stk_holdertrade", params={}, fields=[], key_columns=KEYS, ledger=None)
+        self.assertEqual((outcome, versions.list_versions(path)), ("appended", []))
+        record, commands = self._finish([self.outcome("stk_holdertrade", "month=202610", outcome)])
+        self.assertEqual((commands, record["issues"]), ([], []))
+
+    def test_a_no_mutation_exit_over_a_crashed_run_commits_a_new_generation(self) -> None:
+        with redirect_stdout(io.StringIO()):
+            kept = cron_update.finish_raw_generation_update(
+                self.raw, {"state": "committed", "generation_id": "old"}, {"job": "poll"}, commit=False, datasets={}, issues=[],
+            )
+            crashed = cron_update.finish_raw_generation_update(
+                self.raw, {"state": "updating", "generation_id": "old"}, {"job": "poll"}, commit=False, datasets={}, issues=[],
+            )
+        self.assertEqual(kept["generation_id"], "old")
+        self.assertNotEqual(crashed["generation_id"], "old")
+        self.assertEqual(crashed["state"], "committed")
 
 
 class MigrationTest(unittest.TestCase):

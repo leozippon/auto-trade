@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import warnings
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -8,8 +10,10 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
-from autotrade.environment.data.contracts import CN_TZ
+from autotrade.environment.data.contracts import CN_TZ, LOCALLY_DERIVED_DATASETS
 
 
 def concat_rows(frames: list[pd.DataFrame]) -> pd.DataFrame:
@@ -80,6 +84,90 @@ def parquet_meta(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise CorruptSidecarError(f"parquet sidecar is not a JSON object: {meta_path}")
     return payload
+
+
+WRITE_ID_METADATA_KEY = b"autotrade.write_id"
+
+
+def parquet_write_id(path: Path) -> str:
+    """Return the UUID stamped in a Parquet footer, or ``""`` for legacy files."""
+    try:
+        metadata = pq.read_metadata(path).metadata or {}
+    except (OSError, pa.ArrowException):
+        return ""
+    value = metadata.get(WRITE_ID_METADATA_KEY, b"")
+    try:
+        return value.decode("ascii")
+    except (AttributeError, UnicodeDecodeError):
+        return ""
+
+
+def complete_interrupted_commit(path: Path) -> None:
+    """Roll forward a commit that renamed its parquet but not its sidecar.
+
+    The writer stages the sidecar as ``.<sidecar>.<write_id>.tmp`` before the
+    parquet rename, so the sidecar belonging to the visible parquet is still
+    there when a crash fell between the two renames."""
+    path = Path(path)
+    if not path.exists():
+        return
+    footer = parquet_write_id(path)
+    if not footer:
+        return
+    try:
+        current = parquet_meta(path).get("write_id")
+    except CorruptSidecarError:
+        current = None
+    if current == footer:
+        return
+    meta = path.with_suffix(path.suffix + ".meta.json")
+    pending = meta.with_name(f".{meta.name}.{footer}.tmp")
+    try:
+        os.replace(pending, meta)
+    except FileNotFoundError:
+        pass
+
+
+# What a writer stages beside a partition before its renames: the parquet, its
+# observation table and its sidecar as ``.<file>.<token>.tmp``, and the raw
+# generation record as ``.raw_generation.json.tmp<pid>``.
+_STAGED_PARTITION_FILE = re.compile(r"^\.(?P<file>.+\.parquet(?:\.meta\.json|" + re.escape(FIRST_SEEN_SUFFIX) + r")?)\.(?P<token>[0-9A-Za-z-]+)\.tmp$")
+_STAGED_GENERATION_FILE = re.compile(r"^\.raw_generation\.json\.tmp\d+$")
+
+
+def complete_interrupted_commits(raw_dir: str | Path) -> dict[str, int]:
+    """Finish or clear what crashed writers left anywhere in ``raw_dir``.
+
+    A staged sidecar whose parquet is already visible completes its commit
+    (:func:`complete_interrupted_commit`); every other staged file belongs to a
+    write that never became visible and is removed. Call it only where no
+    writer can be running -- under the updater lock, held exclusively or
+    shared -- before reading partitions as consistent pairs: a leftover would
+    otherwise refuse every release until its partition is written again.
+    Idempotent; files of any other shape, and the directories of datasets
+    written without the lock, are left for the reader to refuse."""
+    finished = removed = 0
+    root = Path(raw_dir)
+    for directory, dirs, files in os.walk(root):
+        if Path(directory) == root:
+            dirs[:] = [name for name in dirs if name not in LOCALLY_DERIVED_DATASETS]
+        for name in files:
+            staged = _STAGED_PARTITION_FILE.match(name)
+            if staged is None and not _STAGED_GENERATION_FILE.match(name):
+                continue
+            leftover = Path(directory) / name
+            if staged is not None and staged["file"].endswith(".meta.json"):
+                partition = Path(directory) / staged["file"][: -len(".meta.json")]
+                complete_interrupted_commit(partition)
+                if not leftover.exists():
+                    finished += 1
+                    continue
+            try:
+                leftover.unlink()
+            except FileNotFoundError:
+                continue
+            removed += 1
+    return {"finished": finished, "removed": removed}
 
 
 def to_cn_timestamps(series: pd.Series) -> pd.Series:

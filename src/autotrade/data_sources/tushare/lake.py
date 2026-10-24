@@ -33,7 +33,11 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from autotrade.environment.data.contracts import GENERATION_SCHEMA_VERSION
+from autotrade.environment.data.contracts import (
+    GENERATION_COMMITTED,
+    GENERATION_SCHEMA_VERSION,
+)
+from autotrade.environment.data.pit import complete_interrupted_commits
 
 from .common import (
     EVENT_FLOW_SPECS,
@@ -98,6 +102,7 @@ def locked_generation(config: dict, raw_dir: Path, job: str) -> Iterator[dict]:
     says whether the lake changed (set it before changing anything)."""
     lock = acquire_lock("tushare_update", int(config.get("default_lock_wait_seconds", DEFAULT_LOCK_WAIT_SECONDS)))
     try:
+        complete_interrupted_commits(raw_dir)
         transaction = {"job": job, "start_date": "", "end_date": ""}
         previous = begin_raw_generation_update(raw_dir, transaction)
         state = {
@@ -237,7 +242,10 @@ def migrate(config_path: str, *, apply: bool) -> dict:
             "schema_version": {"from": previous.get("schema_version"), "to": GENERATION_SCHEMA_VERSION},
             "state_before": previous.get("state"),
             "generation_id_before": previous.get("generation_id"),
-            "new_generation": bool(state["commit"]) if state is not None else any(item["partitions"] for item in report["deduplicate"].values()),
+            # finish_raw_generation_update also commits over a record that was
+            # not committed when the command began.
+            "new_generation": any(item["partitions"] for item in report["deduplicate"].values())
+            or previous.get("state") != GENERATION_COMMITTED,
             "datasets": len(datasets),
             "datasets_without_refresh_time": sorted(name for name, entry in datasets.items() if "refreshed_at" not in entry),
         }
