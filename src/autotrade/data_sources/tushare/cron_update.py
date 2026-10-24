@@ -746,6 +746,8 @@ def begin_raw_generation_update(raw_dir: Path, transaction: dict) -> dict:
         "transaction": {**transaction, "started_at": utc_now()},
         "datasets": dict(previous.get("datasets") or {}),
         "issues": list(previous.get("issues") or []),
+        # The versioned era's start, which the job's writes read.
+        **({"versioned_since": previous["versioned_since"]} if previous.get("versioned_since") else {}),
     })
     return previous
 
@@ -758,10 +760,12 @@ def finish_raw_generation_update(
     commit: bool,
     datasets: dict,
     issues: list,
+    versioned_since: str | None = None,
 ) -> dict:
     """End a job: publish a new generation when the lake may have changed
     (``commit``), else restore the previous identity; either way record the
-    per-dataset state and open issues the job leaves.
+    per-dataset state and open issues the job leaves. The versioned era's
+    start carries over; only the migration passes ``versioned_since``.
 
     Restoring the identity is sound only over a record that was committed when
     the job began: one left ``updating`` by a crashed run (or none at all)
@@ -777,6 +781,9 @@ def finish_raw_generation_update(
         "datasets": datasets,
         "issues": issues,
     }
+    since = versioned_since or previous.get("versioned_since")
+    if since:
+        payload["versioned_since"] = since
     _write_raw_generation_file(raw_dir, payload)
     if commit:
         # Single-line JSON: everything the runner prints may be teed into the

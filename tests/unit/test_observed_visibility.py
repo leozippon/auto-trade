@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import shutil
 from contextlib import redirect_stdout
 from datetime import datetime
@@ -102,8 +103,13 @@ def build_index(raw: Path, events_root: Path) -> None:
 
 
 def lake(root: Path) -> tuple[Path, Path, Path]:
+    """The synthetic lake, migrated before the periods of every fixture
+    partition: writes record first-seen rows only for the versioned era."""
     raw = root / "raw"
     build_raw(raw)
+    (raw / ".raw_generation.json").write_text(json.dumps({
+        "schema_version": 3, "state": "committed", "generation_id": "g", "versioned_since": "20210601",
+    }), encoding="utf-8")
     events_root = root / "pit" / "fundamental_events"
     status = root / "quality" / "fundamental_events_status.json"
     status.parent.mkdir(parents=True)

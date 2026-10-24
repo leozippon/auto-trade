@@ -24,14 +24,22 @@ or was pulled, and by its kind: ``20261024T014501123456Z-superseded`` or
 ``20261024T014501123456Z-staged``. The pipeline never edits or deletes a
 version; a crash leaves at most one extra version behind.
 
-A keyed partition also carries an observation table next to it,
-``<name>.parquet.first_seen``: Parquet with the business-key columns (as
+A keyed partition of the versioned era also carries an observation table next
+to it, ``<name>.parquet.first_seen``: Parquet with the business-key columns (as
 canonical text) and ``first_seen_at``, the UTC instant at which the key first
-became part of the visible partition. Keys that were already visible when
-versioning started have no row. The table only grows, and it is written before
-the partition it describes, so a row whose ``first_seen_at`` is later than the
-partition's ``visible_since`` belongs to a write that never became visible and
-is ignored (:func:`read_observations`) and dropped by the next write.
+became part of the visible partition. The versioned era starts on the date the
+migration recorded as ``versioned_since`` in the generation record; a partition
+belongs to it when the period its id names (``month=``, ``year=``,
+``trade_date=``, ``period=`` ...; :func:`partition_period_end`) ends on or
+after that date, or when its id names no period (whole-history files such as
+``ts_code=<code>`` or ``share_float_complete``). Older periods never get rows,
+whenever their keys arrive -- a backfill, a history extension or a re-pull
+adding keys to a 2022 month follows the vendor's dates, like all history before
+versioning -- and neither do keys already visible when versioning started.
+The table only grows, and it is written before the partition it describes, so a
+row whose ``first_seen_at`` is later than the partition's ``visible_since``
+belongs to a write that never became visible and is ignored
+(:func:`read_observations`) and dropped by the next write.
 
 Every visible sidecar written here carries ``visible_since`` (when this content
 became the visible partition), the business ``key_columns`` and, once a
@@ -42,9 +50,11 @@ those, so it moves when history changes and not when rows are appended.
 
 from __future__ import annotations
 
+import calendar
 import hashlib
 import json
 import os
+import re
 import uuid
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -57,6 +67,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from autotrade.environment.data.contracts import RAW_GENERATION_FILENAME
 from autotrade.environment.data.pit import (
     FIRST_SEEN_COLUMN,
     KEY_SEPARATOR,
@@ -247,6 +258,46 @@ def dataset_dir(path: Path) -> Path:
 def partition_id(path: Path) -> str:
     """The partition relative to its dataset directory, without ``.parquet``."""
     return Path(path).relative_to(dataset_dir(path)).with_suffix("").as_posix()
+
+
+_DAY_PERIODS = frozenset({"trade_date", "date", "ann_date", "period"})
+_MONTH_PERIODS = frozenset({"month", "ann_month"})
+
+
+def partition_period_end(partition: str) -> str | None:
+    """The last day (YYYYMMDD) of the period a partition id names, or None
+    when it names none (a whole-history file, a code, an open-ended
+    ``range=<start>_latest``). ``period=`` is a fiscal period end."""
+    end = None
+    for part in partition.split("/"):
+        key, _, value = part.partition("=")
+        if key in _DAY_PERIODS and re.fullmatch(r"\d{8}", value):
+            end = value
+        elif key in _MONTH_PERIODS and re.fullmatch(r"\d{6}", value):
+            end = f"{value}{calendar.monthrange(int(value[:4]), int(value[4:]))[1]:02d}"
+        elif key == "year" and re.fullmatch(r"\d{4}", value):
+            end = f"{value}1231"
+        elif key == "range" and (closed := re.fullmatch(r"\d{6,8}_(\d{6}|\d{8})", value)):
+            last = closed.group(1)
+            end = last if len(last) == 8 else f"{last}{calendar.monthrange(int(last[:4]), int(last[4:]))[1]:02d}"
+    return end
+
+
+def versioned_since(raw_dir: Path) -> str | None:
+    """The first day (YYYYMMDD) of the lake's versioned era, as the migration
+    recorded it in the generation record; None before the migration."""
+    record = Path(raw_dir) / RAW_GENERATION_FILENAME
+    if not record.exists():
+        return None
+    return json.loads(record.read_text(encoding="utf-8")).get("versioned_since") or None
+
+
+def records_observations(path: Path) -> bool:
+    """Whether the partition at ``path`` belongs to the versioned era and so
+    keeps first-seen rows (see the module docstring)."""
+    since = versioned_since(dataset_dir(Path(path)).parent)
+    end = partition_period_end(partition_id(Path(path)))
+    return since is not None and (end is None or end >= since)
 
 
 def version_dir(path: Path) -> Path:
@@ -444,6 +495,10 @@ def rebuild_observations(path: Path) -> dict[str, int]:
     keys = list(meta.get("key_columns") or [])
     if not keys:
         raise RuntimeError(f"{path} records no business key columns; it has no observation table")
+    if not records_observations(path):
+        # A period before the versioned era keeps no rows, rebuilt or not.
+        observation_path(path).unlink(missing_ok=True)
+        return {"states": 0, "rows": 0}
     states = [version_dir(path) / f"{version}.parquet" for version in list_versions(path) if version.endswith(SUPERSEDED)]
     rows: dict[str, str] = {}
     previous: set[str] = set()
@@ -573,7 +628,7 @@ def publish(
         restated = write_id if outcome == "restated" else meta.get("restated_write_id")
         if restated:
             metadata["restated_write_id"] = restated
-    if keys:
+    if keys and records_observations(path):
         new_keys = diff.added if diff is not None else pd.Index(key_strings(df, keys).unique())
         _record_observations(path, new_keys, keys, instant, meta if exists else None)
     write_parquet(path, df, api_name=api_name, params=params, fields=fields, extra_metadata=metadata, write_id=write_id, at=instant)
@@ -676,7 +731,7 @@ def restore(path: Path, version: str, *, ledger: Path | str | None, source: str 
     diff = diff_frames(current, restored, keys) if keys else None
     instant = utc_now()
     superseded = _keep_version(path, instant, SUPERSEDED) if path.exists() else ""
-    if keys:
+    if keys and records_observations(path):
         _record_observations(path, diff.added, keys, instant, meta if path.exists() else None)
     tmp = path.with_name(f".{path.name}.{uuid.uuid4()}.tmp")
     os.link(source_file, tmp)
@@ -731,12 +786,15 @@ __all__ = [
     "diff_frames",
     "list_versions",
     "observation_path",
+    "partition_period_end",
     "publish",
     "read_observations",
     "rebuild_observations",
     "record_defect",
+    "records_observations",
     "report_complete",
     "restore",
     "revision_event",
     "version_dir",
+    "versioned_since",
 ]

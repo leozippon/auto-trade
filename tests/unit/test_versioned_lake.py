@@ -12,6 +12,7 @@ from contextlib import chdir, redirect_stdout
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -34,6 +35,10 @@ class VersionedPartitionTest(unittest.TestCase):
         self.raw = self.root / "raw"
         self.path = self.raw / "repurchase" / "month=202610.parquet"
         self.ledger = self.root / "revision_events.jsonl"
+        self.raw.mkdir(parents=True)
+        (self.raw / ".raw_generation.json").write_text(json.dumps({
+            "schema_version": 3, "state": "committed", "generation_id": "g", "versioned_since": "20260101",
+        }), encoding="utf-8")
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -518,6 +523,46 @@ class MigrationTest(unittest.TestCase):
         self.assertEqual({item["partitions"] for item in again["deduplicate"].values()}, {0})
         self.assertEqual(json.loads((self.raw / ".raw_generation.json").read_text(encoding="utf-8"))["generation_id"], record["generation_id"])
         self.assertEqual(len(versions.list_versions(self.raw / "anns_d" / "month=202610.parquet")), 1)
+        # The versioned era starts on the first migration's day and stays.
+        self.assertEqual(again["generation"]["versioned_since"], {"from": record["versioned_since"], "to": record["versioned_since"]})
+
+    def test_periods_before_the_versioned_era_never_get_observation_rows(self) -> None:
+        self.migrate(apply=True)
+        since = json.loads((self.raw / ".raw_generation.json").read_text(encoding="utf-8"))["versioned_since"]
+        self.assertEqual(since, datetime.now(versions.UTC).astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d"))
+        current = self.raw / "anns_d" / f"month={since[:6]}.parquet"
+        backfilled = self.raw / "anns_d" / "month=202103.parquet"
+        columns = ["ann_date", "ts_code", "name", "title", "url", "rec_time"]
+        keys = ["ts_code", "ann_date", "title"]
+
+        def publish(path: Path, rows: pd.DataFrame) -> str:
+            with redirect_stdout(io.StringIO()):
+                return versions.publish(path, rows, api_name="anns_d", params={}, fields=list(rows.columns), key_columns=keys, ledger=None)
+
+        # A month never pulled before, landed after the migration: its keys
+        # follow the vendor's dates, not the day the backfill ran.
+        old_month = pd.DataFrame([["20210301", "000002.SZ", "n", "t2", "u2", ""]], columns=columns)
+        self.assertEqual(publish(backfilled, old_month), "appended")
+        self.assertFalse(versions.observation_path(backfilled).exists())
+        self.assertTrue(versions.read_observations(backfilled).empty)
+        # A new key in the current month is observed when it lands; the keys
+        # it held before the migration still have no rows.
+        before = pd.read_parquet(current) if current.exists() else pd.DataFrame(columns=columns)
+        added = pd.concat([before, pd.DataFrame([[f"{since[:6]}01", "000009.SZ", "n", "t9", "u9", ""]], columns=columns)], ignore_index=True)
+        self.assertEqual(publish(current, added), "appended")
+        self.assertEqual(versions.read_observations(current)["ts_code"].tolist(), ["000009.SZ"])
+        # rebuild-observations applies the same rule.
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(versions.rebuild_observations(backfilled)["rows"], 0)
+            versions.rebuild_observations(current)
+        self.assertFalse(versions.observation_path(backfilled).exists())
+        self.assertEqual(versions.read_observations(current)["ts_code"].tolist(), ["000009.SZ"])
+        # Partition ids name their period; a whole-history file names none.
+        self.assertEqual(
+            [versions.partition_period_end(item) for item in ("month=202102", "year=2020", "ts_code=000001.SH/year=2023",
+             "trade_date=20261023", "period=20250930", "range=202001_latest", "ts_code=603838.SH", "share_float_complete")],
+            ["20210228", "20201231", "20231231", "20261023", "20250930", None, None, None],
+        )
 
 
 if __name__ == "__main__":

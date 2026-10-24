@@ -16,7 +16,9 @@ scheduled job, so releases and Paper pins never see a half-applied command.
   it: existing partitions become the current versions with no observation rows,
   the duplicate business keys of ``anns_d`` and ``repurchase`` are dropped
   (each changed partition kept as a superseded version, with a ledger event),
-  and the generation record is rewritten to schema 3. Idempotent.
+  and the generation record is rewritten to schema 3 with ``versioned_since``,
+  the day the versioned era starts (periods ending before it never get
+  observation rows). Idempotent: a second run keeps that day.
 """
 
 from __future__ import annotations
@@ -111,12 +113,14 @@ def locked_generation(config: dict, raw_dir: Path, job: str) -> Iterator[dict]:
             "datasets": {name: dict(entry) for name, entry in (previous.get("datasets") or {}).items()},
             "issues": [dict(issue) for issue in previous.get("issues") or []],
             "commit": False,
+            "versioned_since": previous.get("versioned_since"),
         }
         try:
             yield state
         finally:
             finish_raw_generation_update(
                 raw_dir, previous, transaction, commit=state["commit"], datasets=state["datasets"], issues=state["issues"],
+                versioned_since=state["versioned_since"],
             )
     finally:
         lock.release()
@@ -235,9 +239,13 @@ def migrate(config_path: str, *, apply: bool) -> dict:
             # recorded; the vintage always describes the lake as it now is.
             since = (known.get(dataset_dir.name) or {}).get("refreshed_at") or refreshed[dataset_dir.name]
             datasets[dataset_dir.name] = {"vintage": dataset_vintage(dataset_dir), **({"refreshed_at": since} if since else {})}
+        # The versioned era starts on the day of the first migration and never
+        # moves: periods ending before it keep no observation rows.
+        since = previous.get("versioned_since") or datetime.now(ZoneInfo(config.get("timezone", "Asia/Shanghai"))).strftime("%Y%m%d")
         if state is not None:
             state["datasets"] = datasets
             state["issues"] = list(previous.get("issues") or []) if previous.get("schema_version") == GENERATION_SCHEMA_VERSION else []
+            state["versioned_since"] = since
         report["generation"] = {
             "schema_version": {"from": previous.get("schema_version"), "to": GENERATION_SCHEMA_VERSION},
             "state_before": previous.get("state"),
@@ -247,6 +255,7 @@ def migrate(config_path: str, *, apply: bool) -> dict:
             "new_generation": any(item["partitions"] for item in report["deduplicate"].values())
             or previous.get("state") != GENERATION_COMMITTED,
             "datasets": len(datasets),
+            "versioned_since": {"from": previous.get("versioned_since"), "to": since},
             "datasets_without_refresh_time": sorted(name for name, entry in datasets.items() if "refreshed_at" not in entry),
         }
         return report
