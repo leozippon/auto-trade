@@ -25,8 +25,6 @@ from autotrade.environment.data.pit import (
 _unique_jsonl_lock = threading.Lock()
 _unique_jsonl_state: dict[tuple[Path, str], tuple[int, int, int, set[str]]] = {}
 WRITE_ID_METADATA_KEY = b"autotrade.write_id"
-MIGRATION_SIDECAR_FIELDS = ("api_name", "params", "fields", "fetched_at", "format")
-MIGRATION_AVAILABILITY_FIELDS = ("matched_at", "available_at", "rule", "landing_job", "row_count")
 
 
 def parquet_write_id(path: Path) -> str:
@@ -64,20 +62,6 @@ def frames_content_equal(old_df: pd.DataFrame, new_df: pd.DataFrame) -> bool:
     return canon(old_df) == canon(new_df)
 
 
-def _published_frame_equals(path: Path, df: pd.DataFrame) -> bool:
-    """Whether the already-published partition holds exactly this payload.
-
-    The decision is made on the full content itself. Only called when there is
-    landing evidence to preserve, so the extra read stays off the bulk download
-    path."""
-    if not path.exists():
-        return False
-    try:
-        return frames_content_equal(pd.read_parquet(path), df)
-    except (OSError, ValueError, pa.ArrowException):
-        return False
-
-
 def write_parquet(
     path: Path,
     df: pd.DataFrame,
@@ -86,56 +70,39 @@ def write_parquet(
     params: dict[str, Any],
     fields: list[str],
     extra_metadata: dict[str, Any] | None = None,
+    write_id: str | None = None,
+    at: str | None = None,
 ) -> dict[str, Any]:
-    """Atomically publish one Parquet/sidecar pair with a shared UUID identity."""
+    """Atomically publish one Parquet/sidecar pair with a shared UUID identity.
+
+    The parquet and the sidecar are each staged under a temporary name and
+    renamed into place, parquet first. ``at`` is the commit instant recorded
+    as ``fetched_at`` (now when omitted); ``write_id`` the commit identity
+    (fresh when omitted). The versioned write path (``versions.publish``)
+    supplies both so that what it records about the commit agrees with it."""
     path.parent.mkdir(parents=True, exist_ok=True)
     meta_path = path.with_suffix(path.suffix + ".meta.json")
-    previous_meta: dict[str, Any] = {}
-    if meta_path.exists():
-        try:
-            previous_meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            previous_meta = {}
-    previous_availability = previous_meta.get("availability")
-    payload_unchanged = bool(previous_availability) and _published_frame_equals(path, df)
-    write_id = str(uuid.uuid4())
+    write_id = write_id or str(uuid.uuid4())
     table = pa.Table.from_pandas(df, preserve_index=False)
     schema_metadata = dict(table.schema.metadata or {})
     schema_metadata[WRITE_ID_METADATA_KEY] = write_id.encode("ascii")
     table = table.replace_schema_metadata(schema_metadata)
     tmp = path.with_name(f".{path.name}.{write_id}.tmp")
     pq.write_table(table, tmp)
-    fetched_at = datetime.now(UTC).isoformat()
     meta = {
         "api_name": api_name,
         "params": dict(params),
         "fields": list(fields),
         "row_count": len(df),
         "write_id": write_id,
-        "fetched_at": fetched_at,
+        "fetched_at": at or datetime.now(UTC).isoformat(),
         "format": "parquet",
     }
     if extra_metadata:
-        reserved = {"api_name", "params", "fields", "row_count", "write_id", "fetched_at", "format"}
-        overlap = reserved.intersection(extra_metadata)
+        overlap = set(meta).intersection(extra_metadata)
         if overlap:
             raise ValueError(f"extra metadata cannot override commit fields: {sorted(overlap)}")
         meta.update(extra_metadata)
-    # Preserve first-landing evidence only while the payload is unchanged. A
-    # source revision was not knowable at the old timestamp, so a caller that
-    # does not provide fresh evidence is conservatively visible from this fetch.
-    if payload_unchanged:
-        meta["availability"] = previous_availability
-    elif previous_availability and "availability" not in (extra_metadata or {}):
-        revised = dict(previous_availability)
-        revised.update(
-            {
-                "available_at": fetched_at,
-                "rule": "observed:content_revision_fetch",
-                "row_count": len(df),
-            }
-        )
-        meta["availability"] = revised
     meta_tmp = meta_path.with_name(f".{meta_path.name}.{write_id}.tmp")
     meta_tmp.write_text(
         json.dumps(meta, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False),
@@ -229,43 +196,6 @@ def committed_partition_intact(path: Path) -> bool:
         and sidecar_id == footer_id
         and meta["row_count"] == row_count
     )
-
-
-def migrate_partition_identity(path: Path) -> str:
-    """Rewrite one legacy Parquet/sidecar pair with a UUID commit identity."""
-    path = Path(path)
-    old_meta = parquet_meta(path)
-    table = pq.ParquetFile(path).read()
-    write_id = str(uuid.uuid4())
-    schema_metadata = dict(table.schema.metadata or {})
-    schema_metadata[WRITE_ID_METADATA_KEY] = write_id.encode("ascii")
-    table = table.replace_schema_metadata(schema_metadata)
-    tmp = path.with_name(f".{path.name}.{write_id}.tmp")
-    pq.write_table(table, tmp)
-    preserved = {
-        key: old_meta[key]
-        for key in MIGRATION_SIDECAR_FIELDS
-        if key in old_meta
-    }
-    old_availability = old_meta.get("availability")
-    if isinstance(old_availability, dict):
-        availability = {
-            key: old_availability[key]
-            for key in MIGRATION_AVAILABILITY_FIELDS
-            if key in old_availability
-        }
-        if availability:
-            preserved["availability"] = availability
-    preserved.update(write_id=write_id, row_count=int(table.num_rows), format="parquet")
-    sidecar = path.with_suffix(path.suffix + ".meta.json")
-    sidecar_tmp = sidecar.with_name(f".{sidecar.name}.{write_id}.tmp")
-    sidecar_tmp.write_text(
-        json.dumps(preserved, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False),
-        encoding="utf-8",
-    )
-    os.replace(tmp, path)
-    os.replace(sidecar_tmp, sidecar)
-    return write_id
 
 
 def has_pagination_probe(path: Path) -> bool:

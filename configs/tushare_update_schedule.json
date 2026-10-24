@@ -109,7 +109,7 @@
       "skip_if_already_ok": true
     },
     "cn_nightly_anns_full": {
-      "description": "Land announcement titles (anns_d) every calendar evening from the official TuShare service with TUSHARE_TOKEN_TMP: the relay's permission for anns_d lapsed on 2026-09-10, and the official copy is the same announcement set (logs/data/anns_official_20261006/). It is its own job so that losing that token stops anns_d alone: the downloader proves access with one request before it writes, and a refusal exits 77, which restores the raw generation and records an error instead of fencing the lake. Natural-day window with a forced 30-day refresh like the text job, launched at the same 23:15 (the updater lock serialises the two), so anns_d keeps the visibility cutoff it has always had. The window ends on the next calendar day (offset -1): an evening disclosure is dated the following calendar day, and the vendor receives most of them that evening, so the 23:15 run lands every title the replay already shows at the next 08:30 decision. Such a title is stamped at its receive time (augment_text_frame), and the view cuts at the 23:15 launch, so fetching it early never makes it visible early.",
+      "description": "Land announcement titles (anns_d) every calendar evening from the official TuShare service with TUSHARE_TOKEN_TMP: the relay's permission for anns_d lapsed on 2026-09-10, and the official copy is the same announcement set (logs/data/anns_official_20261006/). It is its own job so that losing that token stops anns_d alone: the downloader proves access with one request before it writes, and a refusal exits 77, which keeps the raw generation and records an error. Natural-day window with a forced 30-day refresh like the text job, launched at the same 23:15 (the updater lock serialises the two), so anns_d keeps the visibility cutoff it has always had. The window ends on the next calendar day (offset -1): an evening disclosure is dated the following calendar day, and the vendor receives most of them that evening, so the 23:15 run lands every title the replay already shows at the next 08:30 decision. Such a title is stamped at its receive time (augment_text_frame), and the view cuts at the 23:15 launch, so fetching it early never makes it visible early.",
       "operation": "download_tier",
       "tier": "text_evidence",
       "end_date_offset_days": -1,
@@ -147,7 +147,7 @@
       "skip_if_already_ok": true
     },
     "cn_nightly_disclosure_full": {
-      "description": "Land the ann-date disclosure tables (holder counts/trades, top-10 holders, repurchases) every calendar day at the end of the chain (09:45, after the morning's last Paper run and the pre-open jobs). The vendor restates these tables often, and a shrink-guard refusal leaves the lake dirty, which fences every later mutation and blocks pinning a release of the newest generation; at the end of the chain a refusal holds back nothing the next Paper run reads, and the operator has the day to repair it before the 23:15 chain. Roughly one row in ten carries a weekend announcement date, so the structured tables do not wait for a trading day. Natural-day window (no end_date_mode): a 09:45 run ends on its own calendar day, so it covers the previous evening's announcements. The evening update does not cover these datasets.",
+      "description": "Land the ann-date disclosure tables (holder counts/trades, top-10 holders, repurchases) every calendar day at the end of the chain (09:45, after the morning's last Paper run and the pre-open jobs). The vendor restates these tables often: a restatement in the window is accepted as a new version and queues a whole-history re-pull of the dataset (history_repull on_restatement), which runs at the end of the same run. Roughly one row in ten carries a weekend announcement date, so the structured tables do not wait for a trading day. Natural-day window (no end_date_mode): a 09:45 run ends on its own calendar day, so it covers the previous evening's announcements. The evening update does not cover these datasets.",
       "operation": "download_event_flow",
       "end_date_offset_days": 0,
       "start_date_lookback_days": 30,
@@ -504,7 +504,7 @@
       "skip_if_already_ok": false
     },
     "manual_fundamental_restatement_repair": {
-      "description": "Manual (not scheduled): forced full re-pull of fina_mainbz_vip after accepting a vendor segment restatement. Follow the shrink-guard runbook first (verify the restatement at the source, then delete the frozen ts_code partitions); with the partitions gone the guard cannot block the fresh write. Follow with the fundamental audit.",
+      "description": "Manual (not scheduled): forced whole-history re-pull of fina_mainbz_vip (one request per ts_code) after a vendor segment restatement. Every partition is written through the versioned path, so restated partitions keep their superseded versions and the ledger records them. Follow with the fundamental audit.",
       "operation": "download_tier",
       "tier": "fundamental",
       "end_date_offset_days": 0,
@@ -533,21 +533,8 @@
       "lock_wait_seconds": 1800,
       "skip_if_already_ok": false
     },
-    "manual_event_restatement_repair": {
-      "description": "Manual (not scheduled): forced whole-history re-pull of stk_holdertrade after an accepted vendor restatement (2026-10: daily rows with broker-branch seats replaced the per-announcement grain back to 2020). Follow the shrink-guard runbook first: archive and delete every month partition of the dataset, so no old-grain row survives a merge and the guard has nothing to refuse. The window runs from default_start_date to today unless --start-date/--end-date narrow it. Follow with cn_nightly_full_audit --force-run.",
-      "operation": "download_tier",
-      "tier": "event_flow",
-      "end_date_offset_days": 0,
-      "extra_args": [
-        "--datasets",
-        "stk_holdertrade",
-        "--force"
-      ],
-      "lock_wait_seconds": 1800,
-      "skip_if_already_ok": false
-    },
     "manual_toplist_restatement_repair": {
-      "description": "Manual (not scheduled): forced whole-history re-pull of top_list after an accepted vendor restatement (2026-10: name carries the security's current name on historical rows; name is a value, not part of the business key). Follow the shrink-guard runbook first: archive and delete every trade_date partition of the dataset, so no row under an earlier name survives and the guard has nothing to refuse. The window runs from default_start_date to the last SSE open date before today (Asia/Shanghai), so it never requests a list the vendor has not published; the nightly window covers today. --start-date/--end-date narrow it. Follow with cn_nightly_full_audit --force-run.",
+      "description": "Manual (not scheduled): forced whole-history re-pull of top_list after a vendor restatement (2026-10: name carries the security's current name on historical rows; name is a value, not part of the business key). top_list is window_only (one request per trading day), so this is its convergence path; every partition is written through the versioned path and keeps its superseded version. The window runs from default_start_date to the last SSE open date before today (Asia/Shanghai), so it never requests a list the vendor has not published; the nightly window covers today. --start-date/--end-date narrow it. Follow with cn_nightly_full_audit --force-run.",
       "operation": "download_tier",
       "tier": "board_trading",
       "end_date_offset_days": 1,
@@ -561,7 +548,7 @@
       "skip_if_already_ok": false
     },
     "manual_stklimit_restatement_repair": {
-      "description": "Manual (not scheduled): forced re-pull of stk_limit after an accepted vendor withdrawal (2026-09: fund, ETF and LOF rows, codes 15x-18x.SZ and 50x-58x.SH, left the whole history; A- and B-share rows are unchanged, and the snapshot joins stk_limit onto daily, which lists no funds). Follow the shrink-guard runbook first: archive and delete every trade_date partition the run re-pulls, so the guard has nothing to refuse. The window runs from default_start_date to the last SSE open date before today (Asia/Shanghai), leaving today's partition to the evening job; --start-date/--end-date set it to the archived partitions (the 2026-10-21 run: 20190626 to 20260811, every partition that still held fund rows). Follow with cn_nightly_full_audit --force-run.",
+      "description": "Manual (not scheduled): forced re-pull of stk_limit after a vendor restatement (2026-09: fund, ETF and LOF rows, codes 15x-18x.SZ and 50x-58x.SH, left the whole history; A- and B-share rows are unchanged, and the snapshot joins stk_limit onto daily, which lists no funds). stk_limit is window_only (one request per trading day), so this is its convergence path; every partition is written through the versioned path and keeps its superseded version. The window runs from default_start_date to the last SSE open date before today (Asia/Shanghai), leaving today's partition to the evening job; --start-date/--end-date narrow it. Follow with cn_nightly_full_audit --force-run.",
       "operation": "download_tier",
       "tier": "daily",
       "end_date_offset_days": 1,
@@ -569,47 +556,6 @@
       "extra_args": [
         "--datasets",
         "stk_limit",
-        "--force"
-      ],
-      "lock_wait_seconds": 1800,
-      "skip_if_already_ok": false
-    },
-    "manual_top10_holders_repair": {
-      "description": "Manual (not scheduled): forced whole-history re-pull of top10_holders and top10_floatholders alone, once the owner accepts the restatement of to-do item 11: the 2026-07-11 initial pull left many report periods with partial holder lists and most non-quarter-end months empty, and the vendor has since reclassified holder_type and corrected a few holder names. Both tables filter start_date/end_date on the report period end_date, and their window starts report_lag_days (120) before the run's start date: start_date 20200430 begins it at report period 20200101, the lake's floor, and the run ends today; --start-date/--end-date narrow it. stk_holdernumber, stk_holdertrade and repurchase stay out: they share the nightly job, but each has its own restatement job. Partitions merge by window, so the shrink guard and the revision ledger see every removed key; archive by copying, not moving. Follow with cn_nightly_full_audit --force-run.",
-      "operation": "download_tier",
-      "tier": "event_flow",
-      "end_date_offset_days": 0,
-      "start_date": "20200430",
-      "extra_args": [
-        "--datasets",
-        "top10_holders",
-        "top10_floatholders",
-        "--force"
-      ],
-      "lock_wait_seconds": 1800,
-      "skip_if_already_ok": false
-    },
-    "manual_holdernumber_restatement_repair": {
-      "description": "Manual (not scheduled): forced whole-history re-pull of stk_holdernumber alone after an accepted vendor restatement (to-do item 11, 2026-10-21): the history before 202608 was landed through the old offset pager, which repeated rows and skipped as many, and the vendor has since moved many holder counts to another ann_date, dropped others and filled holder_num where it had served it empty. Follow the shrink-guard runbook first: archive and delete every month partition of the dataset, so each month is a fresh write of the vendor's current answer and the guard has nothing to refuse. The window runs from default_start_date to today unless --start-date/--end-date narrow it. Follow with cn_nightly_full_audit --force-run.",
-      "operation": "download_tier",
-      "tier": "event_flow",
-      "end_date_offset_days": 0,
-      "extra_args": [
-        "--datasets",
-        "stk_holdernumber",
-        "--force"
-      ],
-      "lock_wait_seconds": 1800,
-      "skip_if_already_ok": false
-    },
-    "manual_repurchase_restatement_repair": {
-      "description": "Manual (not scheduled): forced whole-history re-pull of repurchase alone after an accepted vendor restatement (to-do item 11, 2026-10-21): rows last fetched before about 2026-07-20 differ from what the vendor serves now, which relabelled most progress rows from proc 实施 to 完成, gave plan rows an exp_date, changed price limits and dropped some rows. Follow the shrink-guard runbook first: archive and delete every month partition of the dataset, so each month is a fresh write of the vendor's current answer and the guard has nothing to refuse. The window runs from default_start_date to today unless --start-date/--end-date narrow it. Follow with cn_nightly_full_audit --force-run.",
-      "operation": "download_tier",
-      "tier": "event_flow",
-      "end_date_offset_days": 0,
-      "extra_args": [
-        "--datasets",
-        "repurchase",
         "--force"
       ],
       "lock_wait_seconds": 1800,
@@ -624,6 +570,7 @@
       "frequency": "low_frequency",
       "official_update": "基础信息；官方建议本地保存后使用，未标具体入库时刻。",
       "cron_policy": "daily_force_refresh",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=25"
     },
     {
@@ -633,6 +580,7 @@
       "frequency": "low_frequency",
       "official_update": "上市公司基础信息；官方未标具体入库时刻。",
       "cron_policy": "daily_force_refresh",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=112"
     },
     {
@@ -642,6 +590,7 @@
       "frequency": "regular",
       "official_update": "交易日历；权限表为定期更新。",
       "cron_policy": "daily_skip_existing",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=26"
     },
     {
@@ -651,6 +600,7 @@
       "frequency": "trade_date",
       "official_update": "历史每天股票列表；官方未标具体入库时刻。",
       "cron_policy": "same_day_evening_recent_force_refresh_with_revision_ledger",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=262"
     },
     {
@@ -660,6 +610,7 @@
       "frequency": "event_driven",
       "official_update": "股票曾用名；公告驱动，官方未标具体入库时刻。",
       "cron_policy": "daily_force_refresh_slow",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=100"
     },
     {
@@ -669,6 +620,7 @@
       "frequency": "low_frequency",
       "official_update": "申万行业分类；全量分类，官方未标具体入库时刻。",
       "cron_policy": "daily_force_refresh",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=181"
     },
     {
@@ -678,6 +630,7 @@
       "frequency": "low_frequency",
       "official_update": "申万行业成分（SW2021，含 is_new=Y/N 两次拉取覆盖已调出成分）；全量数据，官方未标具体入库时刻。",
       "cron_policy": "daily_force_refresh",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=335"
     },
     {
@@ -687,6 +640,7 @@
       "frequency": "frozen_history",
       "official_update": "申万旧版（SW2014）行业成分；旧口径已于 2021-12-13 关闭，历史冻结。",
       "cron_policy": "download_once_skip_existing",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=182"
     },
     {
@@ -696,6 +650,7 @@
       "frequency": "low_frequency",
       "official_update": "同花顺概念与行业指数目录（exchange=A 全量分页）；官方入库时刻未收录，目录中 type=N/I 的指数驱动 ths_member 下载。",
       "cron_policy": "weekly_force_refresh",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=259"
     },
     {
@@ -705,6 +660,7 @@
       "frequency": "low_frequency",
       "official_update": "同花顺概念/行业指数成分；官方入库时刻未收录，按 ths_index 目录逐指数下载，与目录同批刷新。",
       "cron_policy": "weekly_force_refresh_with_ths_index",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=261"
     },
     {
@@ -714,6 +670,7 @@
       "frequency": "low_frequency",
       "official_update": "指数基础信息目录；官方入库时刻未收录，源端单次调用钳制 8000 行，必须分页取全量。",
       "cron_policy": "daily_force_refresh",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=94"
     },
     {
@@ -723,6 +680,7 @@
       "frequency": "monthly",
       "official_update": "核心宽基指数月度成分权重；源端单次调用钳制 7000 行，按 index_code×年分页下载。",
       "cron_policy": "daily_open_year_coverage_refresh_with_revision_ledger",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=96"
     },
     {
@@ -732,6 +690,7 @@
       "frequency": "trade_date",
       "official_update": "交易日每日15:00-16:00之间入库。",
       "cron_policy": "same_day_evening_recent_force_refresh",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=27"
     },
     {
@@ -741,6 +700,7 @@
       "frequency": "trade_date",
       "official_update": "盘前09:15-09:20完成当日复权因子入库。",
       "cron_policy": "same_day_evening_recent_force_refresh",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=28"
     },
     {
@@ -750,6 +710,7 @@
       "frequency": "trade_date",
       "official_update": "交易日每日15:00-17:00之间更新。",
       "cron_policy": "same_day_evening_recent_force_refresh",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=32"
     },
     {
@@ -759,6 +720,7 @@
       "frequency": "trade_date",
       "official_update": "每个交易日08:40左右更新当日涨跌停价格；权限表记为交易日09:00。",
       "cron_policy": "same_day_evening_recent_force_refresh",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=183"
     },
     {
@@ -768,6 +730,7 @@
       "frequency": "trade_date",
       "official_update": "交易日09:27-09:29可获取当日最终开盘集合竞价成交；历史从2025-01-16起可用。",
       "cron_policy": "same_day_poll_0927_then_retry_0931_and_2332_evening_backfill",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=369"
     },
     {
@@ -777,6 +740,7 @@
       "frequency": "event_driven",
       "official_update": "不定期。",
       "cron_policy": "same_day_evening_recent_force_refresh",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=214"
     },
     {
@@ -786,6 +750,7 @@
       "frequency": "trade_date",
       "official_update": "每日涨跌停、炸板数据；官方页面未标具体入库时刻。",
       "cron_policy": "same_day_evening_recent_force_refresh",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=298"
     },
     {
@@ -795,6 +760,7 @@
       "frequency": "filing_realtime",
       "official_update": "利润表；权限表为全部历史、实时更新。",
       "cron_policy": "daily_refresh_latest_6_report_periods",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=33"
     },
     {
@@ -804,6 +770,7 @@
       "frequency": "filing_realtime",
       "official_update": "资产负债表；权限表为全部历史、实时更新。",
       "cron_policy": "daily_refresh_latest_6_report_periods",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=36"
     },
     {
@@ -813,6 +780,7 @@
       "frequency": "filing_realtime",
       "official_update": "现金流量表；权限表为全部历史、实时更新。",
       "cron_policy": "daily_refresh_latest_6_report_periods",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=44"
     },
     {
@@ -822,6 +790,7 @@
       "frequency": "filing_realtime",
       "official_update": "财务指标；权限表为全部历史、随财报实时更新。",
       "cron_policy": "daily_refresh_latest_6_report_periods",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=79"
     },
     {
@@ -831,6 +800,7 @@
       "frequency": "filing_realtime",
       "official_update": "业绩预告；权限表为全部历史、实时更新。",
       "cron_policy": "daily_refresh_latest_3_announcement_months",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=45"
     },
     {
@@ -840,6 +810,7 @@
       "frequency": "filing_realtime",
       "official_update": "业绩快报；权限表为全部历史、实时更新。",
       "cron_policy": "daily_refresh_latest_3_announcement_months",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=46"
     },
     {
@@ -849,6 +820,7 @@
       "frequency": "filing_realtime",
       "official_update": "分红送股；权限表为全部历史、实时更新。",
       "cron_policy": "daily_refresh_recent_affected_codes_plus_90d_date_probe",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=103"
     },
     {
@@ -858,6 +830,7 @@
       "frequency": "filing_realtime",
       "official_update": "财务审计意见；权限表为全部历史、随财报实时更新。",
       "cron_policy": "daily_refresh_recent_affected_codes",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=80"
     },
     {
@@ -867,6 +840,7 @@
       "frequency": "filing_realtime",
       "official_update": "主营业务构成；权限表为全部历史、随财报实时更新。",
       "cron_policy": "daily_refresh_recent_affected_codes",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=81"
     },
     {
@@ -876,6 +850,7 @@
       "frequency": "regular",
       "official_update": "财报披露计划；权限表为全部历史、定期更新。",
       "cron_policy": "daily_refresh_latest_6_report_periods",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=162"
     },
     {
@@ -885,6 +860,7 @@
       "frequency": "trade_date",
       "official_update": "历史分钟数据每天收盘后处理更新，17:00-21:00之间完成。",
       "cron_policy": "manual_job_batched_codes_under_daily_request_quota",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=370"
     },
     {
@@ -894,6 +870,7 @@
       "frequency": "trade_date",
       "official_update": "融资融券交易汇总；权限表为每日09:00更新。",
       "cron_policy": "preopen_force_retry_0905_0915_then_audit_0920",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=58"
     },
     {
@@ -903,6 +880,7 @@
       "frequency": "trade_date",
       "official_update": "融资融券交易明细；权限表为每日09:00更新。",
       "cron_policy": "preopen_force_retry_0905_0915_then_audit_0920",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=59"
     },
     {
@@ -912,6 +890,7 @@
       "frequency": "trade_date",
       "official_update": "融资融券标的；官方页面标注每天盘前更新。",
       "cron_policy": "same_day_preopen_force_retry_0903_0913_plus_evening_margin_backfill",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=326"
     },
     {
@@ -921,6 +900,7 @@
       "frequency": "event_driven",
       "official_update": "前十大股东（季频，按公告日增量）；披露期更新。",
       "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "history_repull": "on_restatement",
       "doc_ref": "https://tushare.pro/document/2?doc_id=61"
     },
     {
@@ -930,6 +910,7 @@
       "frequency": "event_driven",
       "official_update": "前十大流通股东（季频，按公告日增量）；披露期更新。",
       "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "history_repull": "on_restatement",
       "doc_ref": "https://tushare.pro/document/2?doc_id=62"
     },
     {
@@ -939,6 +920,7 @@
       "frequency": "event_driven",
       "official_update": "股权质押明细（按公告日增量）。",
       "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "history_repull": "on_restatement",
       "doc_ref": "https://tushare.pro/document/2?doc_id=111"
     },
     {
@@ -948,6 +930,7 @@
       "frequency": "event_driven",
       "official_update": "机构调研记录；盘后更新。",
       "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=275"
     },
     {
@@ -957,6 +940,7 @@
       "frequency": "event_driven",
       "official_update": "IPO 新股列表（按上市日）。",
       "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=123"
     },
     {
@@ -966,6 +950,7 @@
       "frequency": "event_driven",
       "official_update": "券商月度金股组合；每月初更新。",
       "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=337"
     },
     {
@@ -975,6 +960,7 @@
       "frequency": "trade_date",
       "official_update": "个股资金流向；权限表为交易日19:00更新。",
       "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=170"
     },
     {
@@ -984,6 +970,7 @@
       "frequency": "trade_date",
       "official_update": "东财个股资金流向；盘后更新。",
       "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=339"
     },
     {
@@ -993,6 +980,7 @@
       "frequency": "trade_date",
       "official_update": "同花顺个股资金流向；盘后更新。",
       "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=344"
     },
     {
@@ -1002,6 +990,7 @@
       "frequency": "trade_date",
       "official_update": "东财行业/概念板块资金流向；盘后更新。",
       "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=343"
     },
     {
@@ -1011,6 +1000,7 @@
       "frequency": "trade_date",
       "official_update": "同花顺行业资金流向；盘后更新。",
       "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=341"
     },
     {
@@ -1020,6 +1010,7 @@
       "frequency": "trade_date",
       "official_update": "同花顺概念板块资金流向；盘后更新。",
       "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=342"
     },
     {
@@ -1029,6 +1020,7 @@
       "frequency": "trade_date",
       "official_update": "每日筹码分布汇总（成本分位/获利盘）；盘后更新。",
       "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=293"
     },
     {
@@ -1038,6 +1030,7 @@
       "frequency": "trade_date",
       "official_update": "备用日行情（31 派生列）；盘后更新。",
       "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=255"
     },
     {
@@ -1047,6 +1040,7 @@
       "frequency": "event_driven",
       "official_update": "股东人数；权限表为不定期更新。",
       "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "history_repull": "on_restatement",
       "doc_ref": "https://tushare.pro/document/2?doc_id=166"
     },
     {
@@ -1056,6 +1050,7 @@
       "frequency": "event_driven",
       "official_update": "股东增减持；权限表为交易日19:00更新。",
       "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "history_repull": "on_restatement",
       "doc_ref": "https://tushare.pro/document/2?doc_id=175"
     },
     {
@@ -1065,6 +1060,7 @@
       "frequency": "event_driven",
       "official_update": "股票回购；权限表为每日定时更新。",
       "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "history_repull": "on_restatement",
       "doc_ref": "https://tushare.pro/document/2?doc_id=124"
     },
     {
@@ -1074,6 +1070,7 @@
       "frequency": "regular",
       "official_update": "限售股解禁；权限表为定期更新。",
       "cron_policy": "daily_merge_recent_into_canonical",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=160"
     },
     {
@@ -1083,6 +1080,7 @@
       "frequency": "trade_date",
       "official_update": "大宗交易；权限表为每日21:00更新。",
       "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=161"
     },
     {
@@ -1092,7 +1090,8 @@
       "domain": "event_flow",
       "frequency": "trade_date",
       "official_update": "日频订单流（派生）；本地派生表，没有供应商接口和官方入库时刻；构建在分钟数据落地之后运行。",
-      "cron_policy": "derived_build_after_manual_minute_job"
+      "cron_policy": "derived_build_after_manual_minute_job",
+      "history_repull": "window_only"
     },
     {
       "dataset": "intraday_stats",
@@ -1101,7 +1100,8 @@
       "domain": "event_flow",
       "frequency": "trade_date",
       "official_update": "日内收益统计（派生）；本地派生表，没有供应商接口和官方入库时刻；与日频订单流同一构建，在分钟数据落地之后运行。",
-      "cron_policy": "derived_build_after_manual_minute_job"
+      "cron_policy": "derived_build_after_manual_minute_job",
+      "history_repull": "window_only"
     },
     {
       "dataset": "kpl_list",
@@ -1110,6 +1110,7 @@
       "frequency": "trade_date",
       "official_update": "开盘啦榜单数据；官方页面标注次日08:30更新。",
       "cron_policy": "next_morning_force_refresh_0850",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=347"
     },
     {
@@ -1119,6 +1120,7 @@
       "frequency": "trade_date",
       "official_update": "开盘啦概念成分与热度；次日 08:30 前更新。",
       "cron_policy": "evening_plus_next_day_preopen_force_refresh",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=351"
     },
     {
@@ -1128,6 +1130,7 @@
       "frequency": "trade_date",
       "official_update": "东财概念/行业板块指数日行情；盘后更新。",
       "cron_policy": "same_day_evening_recent_force_refresh",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=362"
     },
     {
@@ -1137,6 +1140,7 @@
       "frequency": "trade_date",
       "official_update": "东财板块成分（分页大表）；盘后更新。",
       "cron_policy": "same_day_evening_recent_force_refresh",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=363"
     },
     {
@@ -1146,6 +1150,7 @@
       "frequency": "trade_date",
       "official_update": "同花顺概念/行业指数日行情；盘后更新。",
       "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=260"
     },
     {
@@ -1155,6 +1160,7 @@
       "frequency": "trade_date",
       "official_update": "涨停股票连板天梯；官方页面未标具体入库时刻。",
       "cron_policy": "evening_update_plus_preopen_board_force",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=356"
     },
     {
@@ -1164,6 +1170,7 @@
       "frequency": "trade_date",
       "official_update": "涨停最强板块统计；官方页面未标具体入库时刻。",
       "cron_policy": "evening_update_plus_preopen_board_force",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=357"
     },
     {
@@ -1173,6 +1180,7 @@
       "frequency": "trade_date",
       "official_update": "同花顺涨跌停榜单；历史从20231101开始，增量每天16:00左右更新。",
       "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=355"
     },
     {
@@ -1182,6 +1190,7 @@
       "frequency": "trade_date",
       "official_update": "龙虎榜每日明细；权限表为每日20:00更新。",
       "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=106"
     },
     {
@@ -1191,6 +1200,7 @@
       "frequency": "trade_date",
       "official_update": "龙虎榜机构明细；权限表为每日20:00更新。",
       "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=107"
     },
     {
@@ -1200,6 +1210,7 @@
       "frequency": "low_frequency",
       "official_update": "市场游资名录；低频参考表，官方未标具体入库时刻。",
       "cron_policy": "daily_full_refresh",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=311"
     },
     {
@@ -1209,6 +1220,7 @@
       "frequency": "trade_date",
       "official_update": "游资交易每日明细；数据开始于2022年8月，官方页面未标具体入库时刻。",
       "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=312"
     },
     {
@@ -1218,6 +1230,7 @@
       "frequency": "intraday_and_evening",
       "official_update": "同花顺热榜；每日盘中提取4次、收盘后4次，最晚22:00/22:30附近。",
       "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=320"
     },
     {
@@ -1227,6 +1240,7 @@
       "frequency": "intraday_and_evening",
       "official_update": "东方财富热榜；每日盘中提取4次、收盘后4次，最晚22:00/22:30附近。",
       "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=321"
     },
     {
@@ -1236,6 +1250,7 @@
       "frequency": "trade_date",
       "official_update": "投资者互动问答；随发布滚动更新。历史冻结（权限已失）：截至 2026-08-13。",
       "cron_policy": "frozen_history_no_refresh",
+      "history_repull": "window_only",
       "status": "permission_denied",
       "status_since": "2026-09-10",
       "frozen_through": "20260813",
@@ -1248,6 +1263,7 @@
       "frequency": "trade_date",
       "official_update": "投资者互动问答；随发布滚动更新。历史冻结（权限已失）：截至 2026-08-13。",
       "cron_policy": "frozen_history_no_refresh",
+      "history_repull": "window_only",
       "status": "permission_denied",
       "status_since": "2026-09-10",
       "frozen_through": "20260813",
@@ -1260,6 +1276,7 @@
       "frequency": "event_driven",
       "official_update": "全量公告；官方页面提供发布时间字段rec_time，未标固定入库时刻。中转权限 2026-09-10 失效后，自 2026-10-06 起经官方服务以 TUSHARE_TOKEN_TMP 拉取（cn_nightly_anns_full）。",
       "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=176"
     },
     {
@@ -1269,6 +1286,7 @@
       "frequency": "near_realtime",
       "official_update": "新闻通讯；官方页面提供pub_time，未标固定入库时刻。历史冻结（仅 40 次/天官方赠送试用额度，不在购买范围内）：截至 2026-08-13。",
       "cron_policy": "frozen_history_no_refresh",
+      "history_repull": "window_only",
       "status": "trial_quota_only",
       "status_since": "2026-09-10",
       "frozen_through": "20260813",
@@ -1281,6 +1299,7 @@
       "frequency": "daily",
       "official_update": "新闻联播文字稿；按日期提取，官方未标具体入库时刻。历史冻结（权限已失）：截至 2026-08-13。",
       "cron_policy": "frozen_history_no_refresh",
+      "history_repull": "window_only",
       "status": "permission_denied",
       "status_since": "2026-09-10",
       "frozen_through": "20260813",
@@ -1293,6 +1312,7 @@
       "frequency": "event_driven",
       "official_update": "国家政策法规库；官方页面提供pubtime，未标固定入库时刻。历史冻结（权限已失）：截至 2026-08-13。",
       "cron_policy": "frozen_history_no_refresh",
+      "history_repull": "window_only",
       "status": "permission_denied",
       "status_since": "2026-09-10",
       "frozen_through": "20260813",
@@ -1305,6 +1325,7 @@
       "frequency": "daily",
       "official_update": "券商研究报告；增量每天两次更新。历史冻结（权限已失）：截至 2026-08-13。",
       "cron_policy": "frozen_history_no_refresh",
+      "history_repull": "window_only",
       "status": "permission_denied",
       "status_since": "2026-09-10",
       "frozen_through": "20260813",
@@ -1317,6 +1338,7 @@
       "frequency": "daily",
       "official_update": "卖方盈利预测；每天19:00-22:00更新当日数据。",
       "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=292"
     },
     {
@@ -1326,6 +1348,7 @@
       "frequency": "near_realtime",
       "official_update": "新闻快讯；官方页面提供datetime，未标固定入库时刻。历史冻结（权限已失）：截至 2026-08-13。",
       "cron_policy": "frozen_history_no_refresh",
+      "history_repull": "window_only",
       "status": "permission_denied",
       "status_since": "2026-09-10",
       "frozen_through": "20260813",
@@ -1338,6 +1361,7 @@
       "frequency": "monthly",
       "official_update": "中国经济数据发布日程；持续更新中。",
       "cron_policy": "daily_refresh_current_month",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=461"
     },
     {
@@ -1347,6 +1371,7 @@
       "frequency": "quarterly",
       "official_update": "GDP；官方页面未标固定入库时刻，按国家统计局发布节奏。",
       "cron_policy": "daily_skip_existing_and_refresh_open_periods",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=227"
     },
     {
@@ -1356,6 +1381,7 @@
       "frequency": "monthly",
       "official_update": "CPI；官方页面未标固定入库时刻，按统计数据发布节奏。",
       "cron_policy": "daily_skip_existing_and_refresh_open_months",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=228"
     },
     {
@@ -1365,6 +1391,7 @@
       "frequency": "monthly",
       "official_update": "PPI；官方页面未标固定入库时刻，按统计数据发布节奏。",
       "cron_policy": "daily_skip_existing_and_refresh_open_months",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=229"
     },
     {
@@ -1374,6 +1401,7 @@
       "frequency": "monthly",
       "official_update": "PMI；官方页面未标固定入库时刻，按统计数据发布节奏。",
       "cron_policy": "daily_skip_existing_and_refresh_open_months",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=325"
     },
     {
@@ -1383,6 +1411,7 @@
       "frequency": "monthly",
       "official_update": "货币供应量；官方页面未标固定入库时刻，按央行发布节奏。",
       "cron_policy": "daily_skip_existing_and_refresh_open_months",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=242"
     },
     {
@@ -1392,6 +1421,7 @@
       "frequency": "monthly",
       "official_update": "社会融资规模；官方页面未标固定入库时刻，按央行发布节奏。",
       "cron_policy": "daily_skip_existing_and_refresh_open_months",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=310"
     },
     {
@@ -1401,6 +1431,7 @@
       "frequency": "daily",
       "official_update": "SHIBOR利率；权限表为每日12:00。",
       "cron_policy": "evening_rolling_update",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=202"
     },
     {
@@ -1410,6 +1441,7 @@
       "frequency": "daily",
       "official_update": "SHIBOR报价；权限表为每日12:00。",
       "cron_policy": "evening_rolling_update",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=203"
     },
     {
@@ -1419,6 +1451,7 @@
       "frequency": "daily_or_monthly",
       "official_update": "LPR贷款基础利率；权限表为每日12:00。",
       "cron_policy": "evening_rolling_update",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=204"
     },
     {
@@ -1428,6 +1461,7 @@
       "frequency": "daily",
       "official_update": "债券回购日行情；官方页面未标具体入库时刻。",
       "cron_policy": "evening_rolling_update",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=256"
     },
     {
@@ -1437,6 +1471,7 @@
       "frequency": "daily",
       "official_update": "美国国债收益率曲线；官方页面未标具体入库时刻。",
       "cron_policy": "evening_rolling_update",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=218"
     },
     {
@@ -1446,6 +1481,7 @@
       "frequency": "daily",
       "official_update": "美国实际收益率曲线；官方页面未标具体入库时刻。",
       "cron_policy": "evening_rolling_update",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=219"
     },
     {
@@ -1455,6 +1491,7 @@
       "frequency": "daily",
       "official_update": "美国国债短期利率；官方页面未标具体入库时刻。",
       "cron_policy": "evening_rolling_update",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=220"
     },
     {
@@ -1464,6 +1501,7 @@
       "frequency": "daily",
       "official_update": "美国长期国债利率；官方页面未标具体入库时刻。",
       "cron_policy": "evening_rolling_update",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=222"
     },
     {
@@ -1473,6 +1511,7 @@
       "frequency": "daily",
       "official_update": "A股核心宽基指数日线（上证指数/上证50/沪深300/中证500/中证1000/创业板指/科创50）；收盘后官方发布。",
       "cron_policy": "evening_rolling_update",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=95"
     },
     {
@@ -1482,6 +1521,7 @@
       "frequency": "trade_date",
       "official_update": "重要指数每日估值指标；盘后更新。",
       "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=128"
     },
     {
@@ -1491,6 +1531,7 @@
       "frequency": "trade_date",
       "official_update": "申万行业指数日行情；盘后更新。",
       "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=311"
     },
     {
@@ -1500,6 +1541,7 @@
       "frequency": "trade_date",
       "official_update": "中信行业指数日行情；盘后更新。",
       "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=310"
     },
     {
@@ -1509,6 +1551,7 @@
       "frequency": "trade_date",
       "official_update": "沪深市场每日交易统计；盘后更新。",
       "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=215"
     },
     {
@@ -1518,6 +1561,7 @@
       "frequency": "trade_date",
       "official_update": "深圳市场每日交易概况；盘后更新。",
       "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=278"
     },
     {
@@ -1527,6 +1571,7 @@
       "frequency": "trade_date",
       "official_update": "东财全市场资金流向；盘后更新。",
       "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=345"
     },
     {
@@ -1536,6 +1581,7 @@
       "frequency": "daily",
       "official_update": "全球指数日线；官方页面未标具体入库时刻。",
       "cron_policy": "evening_rolling_update",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=211"
     },
     {
@@ -1545,6 +1591,7 @@
       "frequency": "daily",
       "official_update": "外汇日线；官方页面说明交易日期为GMT，未标具体入库时刻。",
       "cron_policy": "evening_rolling_update",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=179"
     },
     {
@@ -1554,6 +1601,7 @@
       "frequency": "event_driven",
       "official_update": "全球财经日历；包括经济事件数据更新，官方未标固定入库时刻。",
       "cron_policy": "evening_rolling_update",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=233"
     },
     {
@@ -1563,6 +1611,7 @@
       "frequency": "static",
       "official_update": "期货合约注册表（六所整表刷新）；随晚间滚动更新重拉。",
       "cron_policy": "evening_rolling_update",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=135"
     },
     {
@@ -1572,6 +1621,7 @@
       "frequency": "daily",
       "official_update": "期货主力连续合约映射；每日盘后更新。",
       "cron_policy": "evening_rolling_update",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=189"
     },
     {
@@ -1581,6 +1631,7 @@
       "frequency": "daily",
       "official_update": "期货日线行情（全市场，股指期货基差输入）；交易所结算后发布。",
       "cron_policy": "evening_rolling_update",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=138"
     },
     {
@@ -1590,6 +1641,7 @@
       "frequency": "static",
       "official_update": "期权合约注册表（限SSE/SZSE/CFFEX）；随晚间滚动更新重拉。",
       "cron_policy": "evening_rolling_update",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=158"
     },
     {
@@ -1599,6 +1651,7 @@
       "frequency": "daily",
       "official_update": "期权日线行情（限SSE/SZSE/CFFEX，PCR/IV输入）；交易所结算后发布。",
       "cron_policy": "evening_rolling_update",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=159"
     },
     {
@@ -1608,6 +1661,7 @@
       "frequency": "static",
       "official_update": "可转债注册表（当前状态表，历史回测禁用可变字段）；随晚间滚动更新重拉。",
       "cron_policy": "evening_rolling_update",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=185"
     },
     {
@@ -1617,6 +1671,7 @@
       "frequency": "daily",
       "official_update": "可转债日线（含转股价值与溢价率）；收盘后发布。",
       "cron_policy": "evening_rolling_update",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=187"
     },
     {
@@ -1626,6 +1681,7 @@
       "frequency": "event",
       "official_update": "可转债赎回公告（强赎/到期阶梯）；公告驱动，晚间披露为主。",
       "cron_policy": "evening_rolling_update",
+      "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=269"
     }
   ]

@@ -53,6 +53,13 @@ class CorruptSidecarError(RuntimeError):
     """A parquet sidecar exists but cannot be parsed: torn-write evidence."""
 
 
+# A keyed raw partition ``<name>.parquet`` may carry an observation table
+# beside it, ``<name>.parquet.first_seen``: the instant each business key first
+# became part of the visible partition (written by the ingest adapter's
+# versioned write path, data_sources/tushare/versions.py).
+FIRST_SEEN_SUFFIX = ".first_seen"
+
+
 def parquet_meta(path: Path) -> dict[str, Any]:
     """Read a raw-lake parquet's ``<file>.meta.json`` sidecar (empty if absent).
 

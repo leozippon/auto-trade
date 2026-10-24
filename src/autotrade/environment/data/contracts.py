@@ -14,24 +14,29 @@ CN_TZ = ZoneInfo("Asia/Shanghai")
 # ``autotrade.data_sources`` imports them so both sides cannot drift.
 # ---------------------------------------------------------------------------
 
-# Raw-lake generation stamp published by the cron updater after each fully
-# successful mutation run. One schema, one committed-acceptance rule: the
-# updater writes it, and every PIT consumer (snapshot builds, research-release
-# pinning) must apply the same strictness when reading it back.
+# Raw-lake generation stamp published by the cron updater when a mutating job
+# ends. One schema, one committed-acceptance rule: the updater writes it, and
+# every PIT consumer (snapshot builds, research-release pinning) must apply the
+# same strictness when reading it back. ``updating`` marks a job in progress
+# (or a runner that died mid-job): the lake may differ from ``generation_id``
+# until the next job commits. Schema 3 adds the per-dataset refresh times and
+# vintage ids and the open issues; releases published under schema 2 stay
+# readable.
 RAW_GENERATION_FILENAME = ".raw_generation.json"
-GENERATION_SCHEMA_VERSION = 2
+GENERATION_SCHEMA_VERSION = 3
+READABLE_GENERATION_SCHEMAS = frozenset({2, GENERATION_SCHEMA_VERSION})
 GENERATION_COMMITTED = "committed"
-GENERATION_IN_PROGRESS = frozenset({"updating", "dirty"})
+GENERATION_UPDATING = "updating"
 
 
 def require_committed_generation(payload: dict[str, object]) -> None:
-    """Fail unless ``payload`` is an explicit schema-v2 committed record.
+    """Fail unless ``payload`` is an explicit committed record.
 
     The updater always writes ``schema_version`` and ``state``; a stamp
     missing either is malformed, not implicitly committed.
     """
-    if payload.get("schema_version") != GENERATION_SCHEMA_VERSION or "state" not in payload:
-        raise RuntimeError("raw generation is not an explicit schema-v2 committed record")
+    if payload.get("schema_version") not in READABLE_GENERATION_SCHEMAS or "state" not in payload:
+        raise RuntimeError("raw generation is not an explicit committed record of a known schema")
     state = str(payload.get("state"))
     if state != GENERATION_COMMITTED:
         transaction = payload.get("transaction") or {}
@@ -57,6 +62,20 @@ def read_committed_raw_generation(raw_dir: str | Path | None) -> dict[str, objec
     except RuntimeError as exc:
         raise RuntimeError(f"{exc} path={path}") from None
     return payload
+
+
+def dataset_vintages(generation: dict[str, object] | None, datasets: object = None) -> dict[str, str]:
+    """The vintage id of each dataset a generation record carries (schema 3),
+    restricted to ``datasets`` when given; empty for older records."""
+    entries = (generation or {}).get("datasets") or {}
+    if not isinstance(entries, dict):
+        return {}
+    wanted = None if datasets is None else set(datasets)
+    return {
+        str(name): str(entry.get("vintage") or "")
+        for name, entry in sorted(entries.items())
+        if isinstance(entry, dict) and (wanted is None or name in wanted)
+    }
 
 
 # TuShare amount/vol can differ from the quoted cent price through rounding.
@@ -339,9 +358,9 @@ REFRESH_NODES: dict[str, RefreshNode] = {
     # Ann-date disclosure tables (holder counts/trades, top-10 holders,
     # repurchases), every calendar day (~one row in ten announces on a
     # weekend). The job runs at the end of the chain, after the morning's last
-    # Paper run, so a shrink-guard refusal there cannot fence the jobs Paper
-    # reads: rows announced on day D become visible at D+1 09:55, a calendar
-    # day later than the 23:05 slot it had until 2026-10-23.
+    # Paper run: rows announced on day D become visible at D+1 09:55 (an 08:30
+    # decision sees stk_holdertrade, stamped 19:00, from D+2 instead of D+1;
+    # the other tables are stamped 23:59:59 and stay at D+2).
     "cn_nightly_disclosure_full": RefreshNode("cn_nightly_disclosure_full", time(9, 45), 10),
     # Global tier (overseas indices, FX, US rates, economic calendar), every
     # calendar evening: these sources publish through A-share holidays, and

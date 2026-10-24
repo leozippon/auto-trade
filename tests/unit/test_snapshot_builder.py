@@ -1884,7 +1884,7 @@ class SnapshotBuilderTest(unittest.TestCase):
                 encoding="utf-8",
             )
             builder = SnapshotBuilder(raw, Path(tmp) / "fund_events")
-            with self.assertRaisesRegex(RuntimeError, "not an explicit schema-v2 committed record"):
+            with self.assertRaisesRegex(RuntimeError, "not an explicit committed record"):
                 builder.build_decision_snapshot(DECISION, Path(tmp) / "snap", CONFIG)
 
     def test_replay_slot_builds_corporate_actions_from_dividend_events(self):

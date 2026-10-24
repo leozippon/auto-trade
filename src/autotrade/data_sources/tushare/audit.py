@@ -70,9 +70,9 @@ from .common import (
     append_jsonl_unique,
     augment_board_frame,
     augment_event_frame,
-    build_revision_event,
     committed_partition_intact,
     date_range_days,
+    diff_frames,
     frame,
     has_pagination_probe,
     intraday_expected_codes_for_day,
@@ -92,6 +92,7 @@ from .common import (
     query_paged,
     read_many,
     retained_range_start,
+    revision_event,
     safe_partition_value,
     select_datasets,
     selected_board_dc_hot_markets,
@@ -243,10 +244,10 @@ def revision_sentinel_spec(dataset: str) -> Any:
 # from routine value recalculation (several computed feeds -- chip-distribution
 # percentiles, rolling flow sums, daily_basic ratios -- churn chronically and
 # stay ledgered warnings). The mass-rewrite signature is STRUCTURAL: dates
-# whose probe adds/removes a disproportionate share of the partition's keys
-# (the fina_mainbz restatement shape, same 20-key/20% thresholds as the shrink
-# guard). Escalate to error when at least this many probed dates AND this
-# share of the checked dates are structural rewrites.
+# whose probe adds/removes more than 20 keys and more than 20% of the
+# partition (the fina_mainbz restatement shape). Escalate to error when at
+# least this many probed dates AND this share of the checked dates are
+# structural rewrites.
 SENTINEL_MASSIVE_REVISION_MIN_DATES = 5
 SENTINEL_MASSIVE_REVISION_RATIO = 0.25
 
@@ -310,19 +311,24 @@ def audit_revision_sentinel(args: argparse.Namespace) -> int:
                 remote_zero.append(trade_date)
                 continue
             checked += 1
-            event = build_revision_event(
-                dataset=spec.api_name,
-                partition=f"trade_date={trade_date}",
-                path=path,
-                old_df=pd.read_parquet(path),
-                new_df=new_df,
-                key_columns=list(spec.key_columns),
-                source="sentinel_probe",
-            )
-            if event:
+            old_df = pd.read_parquet(path)
+            diff = diff_frames(old_df, new_df, list(spec.key_columns))
+            columns_changed = set(map(str, old_df.columns)) != set(map(str, new_df.columns))
+            if not diff.empty or columns_changed:
+                event = revision_event(
+                    "probe",
+                    dataset=spec.api_name,
+                    partition=f"trade_date={trade_date}",
+                    source="sentinel_probe",
+                    key_columns=list(spec.key_columns),
+                    diff=diff,
+                    old_rows=len(old_df),
+                    new_rows=len(new_df),
+                    detail="column set changed" if columns_changed else "",
+                )
                 append_jsonl_unique(ledger, event, key="event_id")
                 print("REVISION_ALERT " + json.dumps(
-                    {key: event.get(key) for key in ("event_id", "dataset", "partition", "severity", "comparison_issue")},
+                    {key: event[key] for key in ("dataset", "partition", "added_keys", "removed_keys", "changed_keys")},
                     ensure_ascii=False, sort_keys=True,
                 ))
                 events.append(event)

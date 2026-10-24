@@ -30,8 +30,8 @@ from autotrade.environment.data import (
 
 
 def _refuse_manual_production_write(args: argparse.Namespace) -> None:
-    """The cron runner is the ONLY production PIT write entrance (fence,
-    per-job state, alerting). Only a genuine runner child -- proven by the
+    """The cron runner is the ONLY production PIT write entrance (generation
+    record, per-job state, alerting). Only a genuine runner child -- proven by the
     inherited lock fd -- passes; non-production roots (tests, local lakes)
     and read-only audits pass."""
     from autotrade.data_sources.tushare.io import inherited_updater_lock_fd
@@ -50,7 +50,7 @@ def _refuse_manual_production_write(args: argparse.Namespace) -> None:
     raise SystemExit(
         "direct manual writes to the production PIT root are not supported; run\n"
         "  scripts/data/tushare_cron_update.py --job cn_nightly_pit_event_build "
-        "--end-date <YYYYMMDD>   # fence + state + alerts"
+        "--end-date <YYYYMMDD>   # generation + state + alerts"
     )
 
 

@@ -116,14 +116,10 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # Ann-date disclosure tables (holder counts/trades, top-10 holders,
 # repurchases), every calendar day at the end of the chain: after the morning's
 # last Paper run (08:35, ops/cron/paper.cron) and the pre-open jobs, before the
-# evening chain. The vendor restates these tables often, and a shrink-guard
-# refusal leaves the lake dirty: the fence refuses every later mutation, and no
-# release can be pinned from a dirty generation, so at 23:05 one refusal held
-# back the bars, titles and fundamentals of the next Paper run (2026-10-22).
-# Here it can hold back nothing Paper reads that morning, and the operator has
-# the day to repair it before 23:15. Rows announced on day D land the next
-# morning: the replay node moves with this line, so they are visible from
-# D+1 09:55, one calendar day later than at 23:05.
+# evening chain. A vendor restatement found here is accepted as a new version
+# and queues the dataset's whole-history re-pull, which runs at the end of the
+# same run. Rows announced on day D land the next morning: the replay node
+# moves with this line, so they are visible from D+1 09:55.
 45 9 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_disclosure_full
 
 # Weekly deep sweeps (Saturday, market closed; end date resolves to Friday):
@@ -141,7 +137,8 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # timeout. The deep audit re-fetches a large historical sample across the
 # daily/board/flat-event tiers and diffs it against the lake, so a massive
 # retroactive vendor update is caught within a week instead of waiting for the
-# nightly 12-date sample. A sweep that fails skips all three (its failure
-# fences the lake; rerun the sweep itself), a follow-up that fails does not
-# stop the next one, and the invocation exits non-zero either way.
+# nightly 12-date sample. The three follow even a sweep that fails (what it
+# wrote is committed and needs the audit and the rebuild), a follow-up that
+# fails does not stop the next one, and the invocation exits non-zero either
+# way.
 0 14 * * 6 cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_weekly_fundamental_deep --then cn_weekly_deep_audit --then cn_nightly_full_audit --then cn_nightly_pit_event_build

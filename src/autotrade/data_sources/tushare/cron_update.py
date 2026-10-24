@@ -19,26 +19,33 @@ from zoneinfo import ZoneInfo
 
 from autotrade.environment.data.contracts import (
     GENERATION_COMMITTED,
-    GENERATION_IN_PROGRESS,
     GENERATION_SCHEMA_VERSION,
+    GENERATION_UPDATING,
     RAW_GENERATION_FILENAME,
 )
 
 from .audit import AUDIT_SUMMARY_RE
 from .common import (
+    EVENT_FLOW_SPECS,
     MUTATED_NOT_READY_RETRY_EXIT_CODE,
     NO_MUTATION_FAILURE_EXIT_CODE,
     NO_MUTATION_RETRY_EXIT_CODE,
+    format_yyyymmdd,
     normalize_date_key,
+    parse_yyyymmdd,
     read_many,
 )
 from .io import UPDATER_LOCK_FD_ENV
+from .versions import RUN_REPORT_ENV, dataset_vintage
 
 DEFAULT_CONFIG = Path("configs/tushare_update_schedule.json")
 RUNTIME_ROOT = Path(".runtime/tushare")
 # One outcome file per job: jobs write disjoint files, so persisting state
 # needs no cross-job lock or merge protocol.
 JOB_STATE_ROOT = RUNTIME_ROOT / "jobs"
+# Per-run outcome reports of the child processes (versions.report_outcome),
+# folded into the generation record when the job ends and then removed.
+RUN_REPORT_ROOT = RUNTIME_ROOT / "runs"
 RUN_LOG_ROOT = Path("logs/tushare/cron")
 RUN_LOG_RETENTION_DAYS = 14
 DEFAULT_LOCK_WAIT_SECONDS = 900
@@ -95,7 +102,66 @@ def load_config(path: Path) -> dict:
             f"schedule config schema_version {version!r} != expected "
             f"{SCHEDULE_CONFIG_SCHEMA_VERSION}; regenerate or migrate {path}"
         )
+    history_repull_policy(config)
     return config
+
+
+# How a dataset's history converges after the vendor restates it. A
+# restatement found in the refresh window of an ``on_restatement`` dataset
+# queues a whole-history re-pull; a ``window_only`` dataset records it and
+# leaves older months at the vintage they were pulled at until an operator
+# re-pulls them. Only the month-partitioned event tables can be re-pulled whole
+# by one cheap request per month.
+HISTORY_REPULL_POLICIES = ("on_restatement", "window_only")
+
+
+def repullable_datasets() -> tuple[str, ...]:
+    return tuple(name for name, spec in EVENT_FLOW_SPECS.items() if spec.strategy == "range_month")
+
+
+def history_repull_policy(config: dict) -> dict[str, str]:
+    """Each scheduled dataset's declared ``history_repull`` policy."""
+    policies: dict[str, str] = {}
+    for entry in config.get("interfaces", []):
+        dataset = str(entry.get("dataset"))
+        policy = entry.get("history_repull")
+        if policy not in HISTORY_REPULL_POLICIES:
+            raise ValueError(f"interface {dataset} declares history_repull {policy!r}; expected one of {HISTORY_REPULL_POLICIES}")
+        if policy == "on_restatement" and dataset not in repullable_datasets():
+            raise ValueError(f"interface {dataset} cannot be re-pulled whole; only {repullable_datasets()} can")
+        policies[dataset] = policy
+    return policies
+
+
+def history_repull_command(config: dict, python: str, dataset: str, *, end_date: str, start_date: str | None = None) -> list[str]:
+    """The whole-history re-pull of one month-partitioned event table.
+
+    The window starts at the lake's history floor; a table filtered on the
+    report period starts its report lag later, so the first requested period
+    is the floor's, as the nightly window computes it."""
+    if dataset not in repullable_datasets():
+        raise ValueError(f"{dataset} cannot be re-pulled whole; only {repullable_datasets()} can")
+    spec = EVENT_FLOW_SPECS[dataset]
+    start = start_date or format_yyyymmdd(
+        parse_yyyymmdd(config["default_start_date"]) + timedelta(days=spec.report_lag_days)
+    )
+    return [
+        python,
+        "scripts/data/tushare_download.py",
+        "download",
+        "--tier",
+        "event_flow",
+        "--datasets",
+        dataset,
+        "--force",
+        "--start-date",
+        start,
+        "--end-date",
+        end_date,
+        "--raw-dir",
+        config.get("default_raw_dir", "data/raw"),
+        *config.get("default_update_args", []),
+    ]
 
 
 def resolve_sse_open_on_or_before(repo_root: Path, raw_dir: str, target_date: str) -> str:
@@ -213,7 +279,7 @@ def build_context(args: argparse.Namespace) -> RunContext:
 
 
 def build_audit_full_commands(ctx: RunContext) -> list[list[str]]:
-    """The six trading-day-bound raw status files.
+    """The six trading-day-bound raw status files, then the Paper vintage report.
 
     Text is deliberately absent: it is a natural-day domain audited by its own
     daily job, and this job's trading-day end date makes every weekend and
@@ -639,7 +705,7 @@ def utc_now() -> str:
 
 
 def _read_raw_generation_file(raw_dir: Path) -> dict:
-    """Writer-side lenient read: recovery must see updating/dirty/legacy states."""
+    """Writer-side lenient read: a job must see an ``updating`` record too."""
     path = raw_dir / RAW_GENERATION_FILENAME
     if not path.exists():
         return {}
@@ -657,102 +723,122 @@ def _write_raw_generation_file(raw_dir: Path, payload: dict) -> None:
     tmp.replace(path)
 
 
-def _restore_raw_generation_file(raw_dir: Path, payload: dict) -> None:
-    """Undo an updating fence after a child proves it performed no mutation."""
-    if payload:
-        _write_raw_generation_file(raw_dir, payload)
-    else:
-        (raw_dir / RAW_GENERATION_FILENAME).unlink(missing_ok=True)
+def begin_raw_generation_update(raw_dir: Path, transaction: dict) -> dict:
+    """Mark the lake as being written before the first child process starts;
+    the previous record is returned for the job's end.
+
+    No state refuses a job. Every partition write is an atomic version swap,
+    so a failed job leaves a consistent lake (older in what it did not reach,
+    which the per-dataset refresh times show), and the updater lock already
+    serialises writers. ``updating`` only tells consumers that the lake may
+    differ from ``generation_id`` until this job commits."""
+    previous = _read_raw_generation_file(raw_dir)
+    _write_raw_generation_file(raw_dir, {
+        "schema_version": GENERATION_SCHEMA_VERSION,
+        "state": GENERATION_UPDATING,
+        "generation_id": str(previous.get("generation_id", "")),
+        "completed_at": str(previous.get("completed_at", "")),
+        "updated_at": utc_now(),
+        "transaction": {**transaction, "started_at": utc_now()},
+        "datasets": dict(previous.get("datasets") or {}),
+        "issues": list(previous.get("issues") or []),
+    })
+    return previous
 
 
-def write_raw_generation(raw_dir: Path, *, transaction: dict | None = None) -> dict:
-    """Publish a committed generation after one fully-successful mutating job."""
+def finish_raw_generation_update(
+    raw_dir: Path,
+    previous: dict,
+    transaction: dict,
+    *,
+    commit: bool,
+    datasets: dict,
+    issues: list,
+) -> dict:
+    """End a job: publish a new generation when the lake may have changed
+    (``commit``), else restore the previous identity; either way record the
+    per-dataset state and open issues the job leaves."""
     payload = {
         "schema_version": GENERATION_SCHEMA_VERSION,
         "state": GENERATION_COMMITTED,
-        "generation_id": uuid.uuid4().hex,
-        "completed_at": utc_now(),
+        "generation_id": uuid.uuid4().hex if commit else str(previous.get("generation_id", "")),
+        "completed_at": utc_now() if commit else str(previous.get("completed_at", "")),
+        "transaction": transaction if commit else previous.get("transaction") or {},
+        "datasets": datasets,
+        "issues": issues,
     }
-    if transaction:
-        payload["transaction"] = dict(transaction)
     _write_raw_generation_file(raw_dir, payload)
-    # Single-line JSON: everything the runner prints may be teed into the
-    # dispatch log, which is a strict-JSONL contract.
-    print(json.dumps({
-        "note": "raw_generation_published",
-        "generation_id": payload["generation_id"],
-        "path": str(raw_dir / ".raw_generation.json"),
-        "updated_at": utc_now(),
-    }, ensure_ascii=False))
+    if commit:
+        # Single-line JSON: everything the runner prints may be teed into the
+        # dispatch log, which is a strict-JSONL contract.
+        print(json.dumps({
+            "note": "raw_generation_published",
+            "generation_id": payload["generation_id"],
+            "open_issues": len(issues),
+            "path": str(raw_dir / RAW_GENERATION_FILENAME),
+            "updated_at": utc_now(),
+        }, ensure_ascii=False))
     return payload
 
 
-def begin_raw_generation_update(raw_dir: Path, transaction: dict) -> dict:
-    """Mark the lake unavailable before the first child process can mutate it.
-
-    A dirty/updating transaction is recovered by the next run of the SAME JOB
-    NAME. An exact identity match (window and command) resumes the original
-    transaction; a same-job run with a different window or command supersedes
-    it as a fresh transaction and, on success, commits and clears the fence.
-    Supersession is sound because every partition write is atomic and
-    sidecar-attested (a dirty lake is incomplete, never corrupt) and the
-    nightly full-history audit independently verifies whatever a newer window
-    no longer covers. Job windows and explicit commands are recomputed daily, so
-    demanding an exact replay left a known-cause failure fencing the lake
-    until manual recovery. A DIFFERENT job must still never bless a
-    partially-updated lake left by an earlier failure.
-    """
-    previous = _read_raw_generation_file(raw_dir)
-    previous_state = str(previous.get("state", GENERATION_COMMITTED))
-    previous_transaction = previous.get("transaction") or {}
-    unfinished = previous_state in GENERATION_IN_PROGRESS
-    if unfinished and str(previous_transaction.get("job", "")) != str(transaction.get("job", "")):
-        failed_job = str(previous_transaction.get("job", "unknown"))
-        raise RuntimeError(
-            "raw lake has an unfinished mutation; rerun the original job before any other mutation: "
-            f"job={failed_job} state={previous_state}"
-        )
-    identity_keys = ("job", "start_date", "end_date", "commands", "config_identity")
-    resuming = unfinished and all(previous_transaction.get(key) == transaction.get(key) for key in identity_keys)
-    if unfinished and not resuming:
-        # Single-line JSON: runner stdout may be teed into a strict-JSONL log.
-        print(json.dumps({
-            "note": "raw_generation_dirty_superseded",
-            "previous_transaction_id": str(previous_transaction.get("transaction_id", "")),
-            "previous_window": f"{previous_transaction.get('start_date', '')}..{previous_transaction.get('end_date', '')}",
-            "previous_error": str(previous.get("error", ""))[:300],
-        }, ensure_ascii=False, sort_keys=True))
-    transaction = dict(transaction)
-    transaction["transaction_id"] = str(
-        previous_transaction.get("transaction_id") if resuming else uuid.uuid4().hex
-    )
-    transaction["started_at"] = str(
-        previous_transaction.get("started_at") if resuming else utc_now()
-    )
-    payload = {
-        "schema_version": GENERATION_SCHEMA_VERSION,
-        "state": "updating",
-        "generation_id": str(previous.get("generation_id", "")),
-        "completed_at": str(previous.get("completed_at", "")),
-        "updated_at": utc_now(),
-        "transaction": transaction,
-    }
-    _write_raw_generation_file(raw_dir, payload)
-    return transaction
+def new_run_report() -> Path:
+    RUN_REPORT_ROOT.mkdir(parents=True, exist_ok=True)
+    path = RUN_REPORT_ROOT / f"{uuid.uuid4().hex}.jsonl"
+    path.touch()
+    return path
 
 
-def mark_raw_generation_dirty(raw_dir: Path, transaction: dict, *, error: str) -> None:
-    previous = _read_raw_generation_file(raw_dir)
-    payload = {
-        "schema_version": GENERATION_SCHEMA_VERSION,
-        "state": "dirty",
-        "generation_id": str(previous.get("generation_id", "")),
-        "completed_at": str(previous.get("completed_at", "")),
-        "updated_at": utc_now(),
-        "transaction": dict(transaction),
-        "error": str(error)[:1000],
-    }
-    _write_raw_generation_file(raw_dir, payload)
+def read_run_report(path: Path | None) -> list[dict]:
+    """The partition outcomes a run's children reported; the file is removed."""
+    if path is None or not path.exists():
+        return []
+    outcomes = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    path.unlink()
+    return outcomes
+
+
+def _issue_key(issue: dict) -> tuple[str, str, str]:
+    return str(issue.get("kind")), str(issue.get("dataset")), str(issue.get("partition") or "")
+
+
+def fold_outcomes(datasets: dict, issues: list, outcomes: list[dict], *, refreshed: bool, at: str) -> tuple[set[str], set[str]]:
+    """Apply one batch of partition outcomes to the record's datasets and
+    issues; returns (datasets pulled, datasets restated).
+
+    A defect or a staged version opens an issue for its partition; any other
+    outcome for the partition closes them. A dataset counts as refreshed at
+    ``at`` when the batch succeeded (``refreshed``) and none of its partitions
+    was defective."""
+    open_issues = {_issue_key(issue): dict(issue) for issue in issues}
+    pulled: set[str] = set()
+    defective: set[str] = set()
+    restated: set[str] = set()
+    for outcome in outcomes:
+        dataset, partition, kind = str(outcome["dataset"]), str(outcome["partition"]), str(outcome["outcome"])
+        pulled.add(dataset)
+        if kind in {"defect", "staged"}:
+            key = (kind, dataset, partition)
+            issue = open_issues.get(key) or {"kind": kind, "dataset": dataset, "partition": partition, "since": outcome["at"]}
+            issue.update({"detail": outcome.get("detail", ""), "version": outcome.get("version", "")})
+            open_issues[key] = issue
+            if kind == "defect":
+                defective.add(dataset)
+            continue
+        open_issues.pop(("defect", dataset, partition), None)
+        open_issues.pop(("staged", dataset, partition), None)
+        if kind == "restated":
+            restated.add(dataset)
+    if refreshed:
+        for dataset in pulled - defective:
+            datasets.setdefault(dataset, {})["refreshed_at"] = at
+    issues[:] = sorted(open_issues.values(), key=_issue_key)
+    return pulled, restated
+
+
+def record_vintages(raw_dir: Path, datasets: dict, names: set[str]) -> None:
+    for name in sorted(names):
+        if (raw_dir / name).is_dir():
+            datasets.setdefault(name, {})["vintage"] = dataset_vintage(raw_dir / name)
 
 
 def log_outcome(log_path: Path, record: dict) -> None:
@@ -821,7 +907,14 @@ def run_probe(command: list[str], log_handle) -> None:
     subprocess.run(command, cwd=Path.cwd(), stdout=log_handle, stderr=subprocess.STDOUT, check=False)
 
 
-def run_update(ctx: RunContext, commands: list[list[str]], log_path: Path, *, lock_fd: int | None = None) -> int:
+def run_update(
+    ctx: RunContext,
+    commands: list[list[str]],
+    log_path: Path,
+    *,
+    lock_fd: int | None = None,
+    report: Path | None = None,
+) -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     started = utc_now()
     returncodes: list[int] = []
@@ -847,6 +940,8 @@ def run_update(ctx: RunContext, commands: list[list[str]], log_path: Path, *, lo
                 # The child inherits the held updater flock via pass_fds; the
                 # marker stops download.py from re-acquiring it (deadlock-safe).
                 env[UPDATER_LOCK_FD_ENV] = str(lock_fd)
+            if report is not None:
+                env[RUN_REPORT_ENV] = str(report.resolve())
             process = subprocess.run(
                 command,
                 cwd=ctx.repo_root,
@@ -884,6 +979,76 @@ def run_update(ctx: RunContext, commands: list[list[str]], log_path: Path, *, lo
         # Only a lone command can vouch that the run wrote nothing.
         return NO_MUTATION_FAILURE_EXIT_CODE
     return 1
+
+
+def run_history_repull(
+    ctx: RunContext,
+    dataset: str,
+    log_path: Path,
+    lock_fd: int,
+    datasets: dict,
+    issues: list,
+    *,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> tuple[int, set[str]]:
+    """Re-pull one dataset's whole history under the held lock and fold the
+    outcome; the pending re-pull closes when the run succeeds without a
+    defect. Returns the return code and the datasets the re-pull restated."""
+    end_date = end_date or datetime.now(ZoneInfo(ctx.timezone_name)).strftime("%Y%m%d")
+    report = new_run_report()
+    code = run_update(
+        ctx,
+        [history_repull_command(ctx.config, ctx.python, dataset, end_date=end_date, start_date=start_date)],
+        log_path,
+        lock_fd=lock_fd,
+        report=report,
+    )
+    _, restated = fold_outcomes(datasets, issues, read_run_report(report), refreshed=code == 0, at=utc_now())
+    defective = any(issue["kind"] == "defect" and issue["dataset"] == dataset for issue in issues)
+    if code == 0 and not defective:
+        issues[:] = [issue for issue in issues if _issue_key(issue) != ("history_repull", dataset, "")]
+    print(json.dumps({"note": "history_repull", "dataset": dataset, "returncode": code}, ensure_ascii=False))
+    return code, restated
+
+
+def finish_job(
+    ctx: RunContext,
+    raw_dir: Path,
+    previous: dict,
+    transaction: dict,
+    report: Path | None,
+    *,
+    commit: bool,
+    refreshed: bool,
+    log_path: Path,
+    lock_fd: int,
+    repull: bool = True,
+) -> dict:
+    """Fold a mutating job's partition outcomes into the generation record,
+    run the whole-history re-pulls it owes, and commit.
+
+    A restatement of an ``on_restatement`` dataset opens a pending re-pull. A
+    pending re-pull runs at the end of the next run that pulls its dataset --
+    this one, when the restatement was found here -- and stays open (and the
+    console degraded) until one succeeds. The re-pull's own restatements queue
+    nothing: it is the convergence."""
+    datasets = {name: dict(entry) for name, entry in (previous.get("datasets") or {}).items()}
+    issues = [dict(issue) for issue in previous.get("issues") or []]
+    pulled, restated = fold_outcomes(datasets, issues, read_run_report(report), refreshed=refreshed, at=utc_now())
+    policy = history_repull_policy(ctx.config)
+    open_keys = {_issue_key(issue) for issue in issues}
+    for dataset in sorted(restated):
+        if policy.get(dataset) == "on_restatement" and ("history_repull", dataset, "") not in open_keys:
+            issues.append({"kind": "history_repull", "dataset": dataset, "partition": "", "since": utc_now(), "detail": "", "version": ""})
+    issues.sort(key=_issue_key)
+    for dataset in sorted(pulled) if repull else ():
+        if any(_issue_key(issue) == ("history_repull", dataset, "") for issue in issues):
+            _, repull_restated = run_history_repull(ctx, dataset, log_path, lock_fd, datasets, issues)
+            restated |= repull_restated
+            commit = True
+    record_vintages(raw_dir, datasets, restated | {name for name in pulled if "vintage" not in datasets.get(name, {})})
+    return finish_raw_generation_update(raw_dir, previous, transaction, commit=commit, datasets=datasets, issues=issues)
 
 
 def should_skip_completed(ctx: RunContext, args: argparse.Namespace, job_state: dict, payload: dict) -> bool:
@@ -977,24 +1142,14 @@ def _run(args: argparse.Namespace) -> int:
         if should_skip_completed(ctx, args, job_state, payload) and generation_committed:
             log_outcome(log_path, {"status": "skipped_already_ok_after_lock", **payload})
             return 0
-        transaction = None
-        generation_before = generation
-        if mutates_lake:
-            transaction = begin_raw_generation_update(
-                raw_dir,
-                {
-                    "job": ctx.job_name,
-                    "start_date": ctx.start_date,
-                    "end_date": ctx.end_date,
-                    "commands": payload["commands"],
-                    "config_identity": payload["config_identity"],
-                },
-            )
+        transaction = {"job": ctx.job_name, "start_date": ctx.start_date, "end_date": ctx.end_date}
+        previous = begin_raw_generation_update(raw_dir, transaction) if mutates_lake else {}
+        report = new_run_report() if mutates_lake else None
         try:
-            returncode = run_update(ctx, commands, log_path, lock_fd=lock.fd)
-        except Exception as exc:
-            if transaction is not None:
-                mark_raw_generation_dirty(raw_dir, transaction, error=f"runner_exception: {exc}")
+            returncode = run_update(ctx, commands, log_path, lock_fd=lock.fd, report=report)
+        except Exception:
+            if mutates_lake:
+                finish_job(ctx, raw_dir, previous, transaction, report, commit=True, refreshed=False, log_path=log_path, lock_fd=lock.fd, repull=False)
             raise
         # Exit 75 asserts "no lake mutation happened"; only operations whose
         # download paths enforce that contract may restore the prior generation
@@ -1023,13 +1178,16 @@ def _run(args: argparse.Namespace) -> int:
             and ctx.job.get("tier") == "text_evidence"
             and len(commands) == 1
         )
-        if transaction is not None:
-            if no_mutation_retry or no_mutation_failure:
-                _restore_raw_generation_file(raw_dir, generation_before)
-            elif returncode == 0 or mutated_not_ready:
-                write_raw_generation(raw_dir, transaction=transaction)
-            else:
-                mark_raw_generation_dirty(raw_dir, transaction, error=f"job_returncode={returncode}")
+        if mutates_lake:
+            # Every outcome but a vouched no-mutation exit may have changed the
+            # lake, a failure included: the partitions it wrote are committed
+            # versions, and what it did not reach keeps its earlier refresh time.
+            finish_job(
+                ctx, raw_dir, previous, transaction, report,
+                commit=not (no_mutation_retry or no_mutation_failure),
+                refreshed=returncode == 0 or mutated_not_ready,
+                log_path=log_path, lock_fd=lock.fd,
+            )
         status = "ok" if returncode == 0 else (
             "not_ready" if no_mutation_retry or mutated_not_ready else "error"
         )
@@ -1056,11 +1214,10 @@ def _run(args: argparse.Namespace) -> int:
             # The outcome is already durably recorded (e.g. the final print
             # hit a broken pipe): never demote a recorded result.
             raise
-        # A pre-run abort (e.g. the dirty-lake fence in
-        # begin_raw_generation_update) used to propagate before the state
-        # writer ran, so the job state silently preserved a stale ``ok``
-        # while the job failed on every run. Record the failure and re-raise
-        # -- explicit failure over false success.
+        # A pre-run abort used to propagate before the state writer ran, so
+        # the job state silently preserved a stale ``ok`` while the job failed
+        # on every run. Record the failure and re-raise -- explicit failure
+        # over false success.
         record = record_job_state(ctx.job_name, {
             "status": "error",
             "returncode": 1,
@@ -1131,17 +1288,10 @@ def main() -> int:
     returncode = _run(args)
     if not args.then:
         return returncode
-    if returncode != 0:
-        # Nothing was committed, so nothing has to follow: the failure already
-        # fenced the lake, and the recovery is to rerun this same job.
-        print(json.dumps({
-            "status": "follow_ups_skipped",
-            "after": args.job,
-            "returncode": returncode,
-            "follow_ups": args.then,
-        }, ensure_ascii=False))
-        return returncode
-    return run_follow_ups(args)
+    # A failed primary still committed what it wrote, so its audit and rebuild
+    # follow it like a successful one's; the chain returns the first failure.
+    follow_ups = run_follow_ups(args)
+    return returncode or follow_ups
 
 
 if __name__ == "__main__":

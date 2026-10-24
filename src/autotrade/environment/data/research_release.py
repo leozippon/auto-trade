@@ -3,7 +3,8 @@
 The cron writer keeps ``data/raw`` as its live tree.  An experiment pins a
 committed generation into a shared hardlink checkpoint, then stores a durable
 experiment-local manifest.  Resume always reuses that manifest; a new
-experiment started during ``updating``/``dirty`` uses the last complete release.
+experiment started while the updater holds the lake (or a crashed run left it
+``updating``) uses the last complete release.
 An experiment that names the release it must read (the one its PIT view seed
 was built from) pins exactly that already-published release instead.
 """
@@ -35,6 +36,7 @@ from autotrade.environment.data.contracts import (
     benchmark_index_label,
     require_committed_generation,
 )
+from autotrade.environment.data.pit import FIRST_SEEN_SUFFIX
 
 _SCHEMA_VERSION = 2
 _PIN_DIR_NAME = "research_release"
@@ -747,7 +749,10 @@ def _clone_directory(
 
 def _should_hardlink(name: str, *, kind: str) -> bool:
     if kind == "raw":
-        return name.endswith((".parquet", ".parquet.meta.json"))
+        # A partition, its sidecar and its observation table are replaced by
+        # rename, never edited, so a hard link keeps the bytes it was cut with.
+        # The version store lives beside the raw tree, not in it.
+        return name.endswith((".parquet", ".parquet.meta.json", ".parquet" + FIRST_SEEN_SUFFIX))
     if kind == "pit":
         return name.endswith(".parquet")
     raise ValueError(f"unknown research-release tree kind: {kind}")
