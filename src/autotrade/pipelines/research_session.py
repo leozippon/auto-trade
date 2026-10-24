@@ -1245,7 +1245,7 @@ class LLMResearchDeveloper:
                 "node_id": step.step_id,
                 "revision_id": self.ref_store.get_or_create("strategy", step.revision_id),
                 "stats": batch_candidate_stats(step.validation.summary),
-                **batch_candidate_resources(step.validation.summary),
+                **batch_candidate_resources(step.validation.summary.get("resources")),
             }
             for step in request.steps_before
         ]

@@ -1143,12 +1143,30 @@ class BatchValidateRunTest(unittest.TestCase):
         Two arms sized a batch from a 3-day smoke and lost 20 replay-years to
         fits that ran past the concurrency-scaled cap, reasoning about a
         ceiling neither of them had measured.
+
+        The fit seconds ride as a summary: a daily refit over a full span is
+        a list of ~1,941 readings, re-sent with every later model call. The
+        completed row's result_ref keeps the list.
         """
 
+        fits = [335.7, 4.1, 3.9, 4.4, 1204.2]
         usage = {
             "peak_memory_bytes": 7_883_149_312,
             "memory_limit_bytes": 17_179_869_184,
-            "fit_seconds": [335.7, 1204.2],
+            "fit_seconds": fits,
+            "fit_timeout_seconds": 10_800.0,
+            "decision_timeout_seconds": 1_080.0,
+        }
+        summarised = {
+            "peak_memory_bytes": 7_883_149_312,
+            "memory_limit_bytes": 17_179_869_184,
+            "fit_seconds_summary": {
+                "count": 5,
+                "first": 335.7,
+                "p50": 4.4,
+                "p95": 1204.2,
+                "max": 1204.2,
+            },
             "fit_timeout_seconds": 10_800.0,
             "decision_timeout_seconds": 1_080.0,
         }
@@ -1158,11 +1176,17 @@ class BatchValidateRunTest(unittest.TestCase):
             session.candidate("slow", _strategy("999"))
             result = session.call("good", "slow", span="Y1")
             rows = {row["name"]: row for row in result.value["candidates"]}
-            self.assertEqual(rows["good"]["resources"], usage)
+            self.assertEqual(rows["good"]["resources"], summarised)
             self.assertNotIn("resources", rows["good"]["stats"])
+            record = json.loads(
+                (session.tree.root / rows["good"]["result_ref"]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(record["stats"]["resources"]["fit_seconds"], fits)
             self.assertEqual(rows["slow"]["status"], "failed")
             self.assertNotIn("stats", rows["slow"])
-            self.assertEqual(rows["slow"]["resources"], usage)
+            self.assertEqual(rows["slow"]["resources"], summarised)
 
     def test_a_row_without_telemetry_carries_no_empty_resources_block(self) -> None:
         """A replay that ran no container reports nothing, not zeros."""

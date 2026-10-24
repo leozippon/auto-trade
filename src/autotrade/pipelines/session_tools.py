@@ -1339,20 +1339,55 @@ def batch_candidate_stats(summary: Mapping[str, object]) -> dict[str, object]:
     return stats
 
 
-def batch_candidate_resources(summary: Mapping[str, object]) -> dict[str, object]:
+def batch_candidate_resources(
+    resources: Mapping[str, object] | None,
+) -> dict[str, object]:
     """A row's container telemetry, which rides beside its metrics, not in them.
 
     What the replay cost its container against the limits it ran under: the
-    peak memory and the per-fit seconds beside the ceilings this batch's own
+    peak memory and the fit seconds beside the ceilings this batch's own
     concurrency put them under. Two arms sized a batch from the session
     container's limits instead and lost 20 replay-years to timeouts. A failed
     candidate has no metrics but carries the same block from its exception, so
     every row keeps it in the one place — its own top level. Absent when the
     replay measured nothing.
+
+    The fit seconds ride as their summary, not as the per-fit list: a strategy
+    that refits daily reads 1,941 fits over an eight-year span, and because a
+    batch result is re-sent with every later model call, two arms' lists came
+    to about a fifth of their main input. A completed row's ``result_ref``
+    keeps the list under ``stats.resources``; ``smoke_backtest`` replays a few
+    days and returns it whole.
     """
 
-    resources = summary.get("resources")
-    return {"resources": resources} if resources else {}
+    if not resources:
+        return {}
+    block = dict(resources)
+    fits = block.pop("fit_seconds", None)
+    if fits:
+        block["fit_seconds_summary"] = _fit_seconds_summary(fits)
+    return {"resources": block}
+
+
+def _fit_seconds_summary(fits: Sequence[float]) -> dict[str, float]:
+    """How many fits ran and the first (the cold one), p50, p95 and max seconds.
+
+    The max is the reading the fit timeout bounds. Percentiles are taken at
+    nearest rank, so each is a measured fit rather than an interpolation.
+    """
+
+    ordered = sorted(fits)
+
+    def rank(percent: int) -> float:
+        return ordered[(percent * len(ordered) + 99) // 100 - 1]
+
+    return {
+        "count": len(ordered),
+        "first": fits[0],
+        "p50": rank(50),
+        "p95": rank(95),
+        "max": ordered[-1],
+    }
 
 
 @contextmanager
@@ -1510,9 +1545,11 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "carries its cause and its exact failure text instead — one failure never "
         "hides the others. Every row, failed ones included, also carries resources: "
         "what the replay cost the strategy container it ran in (peak memory against "
-        "that container's own limit, the seconds of each fit against the fit timeout "
-        "this batch's concurrency put in force, and for a GPU strategy its peak video "
-        "memory). "
+        "that container's own limit; fit_seconds_summary, the number of fits and the "
+        "first, p50, p95 and max seconds of one fit, the max being the one to read "
+        "against the fit timeout this batch's concurrency put in force; and for a GPU "
+        "strategy its peak video memory); a completed row's result_ref keeps the "
+        "per-fit list under stats.resources.fit_seconds. "
         "Each completed row's result_ref reads back that candidate's full "
         "replay record, and its daily_series (validation/active_daily.csv in the "
         "node's directory; pd.read_csv(path, dtype={'trade_date': str})) is the "
@@ -2196,7 +2233,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
                 "strategy", revision.revision_id
             ),
             "stats": batch_candidate_stats(evaluation.summary),
-            **batch_candidate_resources(evaluation.summary),
+            **batch_candidate_resources(evaluation.summary.get("resources")),
             "result_ref": public_result_ref,
             # Relative to the node's directory, which the prompt says how to reach.
             "daily_series": VALIDATION_DAILY_ATTACHMENT,
@@ -2267,9 +2304,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
         # result to carry it — and lands where a successful row keeps its own:
         # a fit that ran out of clock or a card that was taken says so here,
         # measured in the container it actually ran in.
-        resources = strategy_resources_of(error)
-        if resources:
-            row["resources"] = resources
+        row.update(batch_candidate_resources(strategy_resources_of(error)))
         return row
 
 
