@@ -12,6 +12,11 @@ that ``pandas.read_parquet`` concatenates into one table:
     simulation clock crosses a refresh node that covers the domain
     (``REFRESH_NODES`` in data/contracts.py).
 
+A replay row that carries ``first_seen_at`` (the lake first held its key after
+its ``available_at``: the vendor added it after the fact) is held back until the
+simulation clock reaches that instant as well: it becomes visible at the later
+of its refresh node and the moment the lake actually held it.
+
 Visibility only grows forward in time, so each replay row is written exactly once
 and unchanged domains cost nothing. Between the next pending refresh or row-level
 boundary (including observed auction availability), ``refresh`` is an O(1) no-op.
@@ -75,9 +80,12 @@ from autotrade.environment.data.contracts import (
     text_dataset_next_visible_boundary,
     text_dataset_visible_cutoff,
 )
-from autotrade.environment.data.pit import to_cn_timestamps
+from autotrade.environment.data.pit import FIRST_SEEN_COLUMN, to_cn_timestamps
 
 _EMPTY_INDICES = np.array([], dtype=np.int64)
+_EMPTY_KEYS = np.array([], dtype="datetime64[ns]")
+# Replay columns that only gate rows and never reach a published part.
+_GATE_COLUMNS = frozenset({"available_at", FIRST_SEEN_COLUMN})
 _ROW_AVAILABLE_AT = "row_available_at"
 # Rows per row group of a written part: pyarrow's ``write_table`` default, so
 # a part streamed row group by row group is byte for byte the file one
@@ -192,11 +200,43 @@ class _ReplaySegment:
     cursor: _SortedCursor | None
     cursors: dict[str, _SortedCursor]
     library_dir: Path | None = None
+    # Per row, when the lake first held it where that is later than its
+    # available_at (NaT elsewhere); None when no row of the slot has one.
+    first_seen: np.ndarray | None = None
+    # Rows their refresh node has released that the lake did not yet hold,
+    # keyed by first_seen.
+    held: _SortedCursor | None = None
 
     def has_pending(self) -> bool:
-        """Whether any row of the slot still waits for its refresh node."""
+        """Whether any row of the slot still waits for its refresh node or its first-seen time."""
         live = [self.cursor] if self.cursor is not None else list(self.cursors.values())
+        if self.held is not None:
+            live.append(self.held)
         return any(cursor.has_pending() for cursor in live)
+
+    def admit(self, released: np.ndarray, now: np.datetime64) -> np.ndarray:
+        """Of the rows their refresh node releases at ``now``, those the lake
+        already held, plus held rows it has come to hold since; the rest wait."""
+        if self.first_seen is None:
+            return released
+        seen = self.first_seen[released]
+        late = seen > now  # NaT (no later first-seen time) is never late
+        if late.any():
+            pending = self.held
+            self.held = _SortedCursor(
+                np.concatenate([pending.indices[pending.pos:] if pending else _EMPTY_INDICES, released[late]]),
+                np.concatenate([pending.keys[pending.pos:] if pending else _EMPTY_KEYS, seen[late]]),
+            )
+            released = released[~late]
+        if self.held is None:
+            return released
+        return np.concatenate([released, self.held.advance(now)])
+
+    def held_due(self, now: np.datetime64) -> bool:
+        return self.held is not None and self.held.has_pending() and bool(self.held.next_key() <= now)
+
+    def next_held(self) -> np.datetime64 | None:
+        return self.held.next_key() if self.held is not None else None
 
 
 def _range_indexed(frame: pd.DataFrame) -> pd.DataFrame:
@@ -210,6 +250,25 @@ def _range_indexed(frame: pd.DataFrame) -> pd.DataFrame:
 
 def _concat_slices(slices: list[pd.DataFrame]) -> pd.DataFrame:
     return slices[0] if len(slices) == 1 else pd.concat(slices, ignore_index=True)
+
+
+def _first_seen_keys(rows: ReplayRows) -> np.ndarray | None:
+    """Each row's ``first_seen_at`` as a UTC key, NaT where it has none;
+    None when the slot carries no such row."""
+    if FIRST_SEEN_COLUMN not in rows.columns:
+        return None
+    column = rows.column(FIRST_SEEN_COLUMN)
+    present = column.notna().to_numpy()
+    if not present.any():
+        return None
+    keys = np.full(len(column), np.datetime64("NaT"), dtype="datetime64[ns]")
+    keys[present] = _utc_ns(to_cn_timestamps(column[present]))
+    return keys
+
+
+def _earliest(*keys: np.datetime64 | None) -> np.datetime64 | None:
+    present = [key for key in keys if key is not None]
+    return min(present) if present else None
 
 
 def _dataset_cursors(datasets: np.ndarray, valid_indices: np.ndarray, keys_all: np.ndarray) -> dict[str, _SortedCursor]:
@@ -467,18 +526,19 @@ class _DomainView:
             return
         # The agent-facing schema drops the gating-only available_at unless the
         # frozen domain already carries it (events/macro/fundamentals do; daily
-        # does not).
+        # does not); first_seen_at never reaches it.
         if not self._columns:
-            self._columns = [column for column in rows.columns if column != "available_at"]
+            self._columns = [column for column in rows.columns if column not in _GATE_COLUMNS]
         self._require_schema_covers(rows.columns)
         available_at = to_cn_timestamps(rows.column("available_at"))
         valid = np.flatnonzero(available_at.notna().to_numpy())  # NaT rows never become visible
         keys = _utc_ns(available_at)
+        first_seen = _first_seen_keys(rows)
         if self.cutoff_key is not None:
-            self._segments.append(_ReplaySegment(rows, _SortedCursor(valid, keys[valid]), {}))
+            self._segments.append(_ReplaySegment(rows, _SortedCursor(valid, keys[valid]), {}, first_seen=first_seen))
         elif "dataset" in rows.columns:
             cursors = _dataset_cursors(rows.column("dataset").astype(str).to_numpy(), valid, keys)
-            self._segments.append(_ReplaySegment(rows, None, cursors))
+            self._segments.append(_ReplaySegment(rows, None, cursors, first_seen=first_seen))
         self._segments_changed()
 
     def release_published(self) -> None:
@@ -530,7 +590,7 @@ class _DomainView:
         # otherwise). Warn once per domain: the schema cannot change mid-replay.
         if getattr(self, "_schema_drop_warned", False):
             return
-        extra = sorted(set(columns) - set(self._columns) - {"available_at", "available_at_rule"})
+        extra = sorted(set(columns) - set(self._columns) - _GATE_COLUMNS - {"available_at_rule"})
         if extra:
             self._schema_drop_warned = True
             warnings.warn(
@@ -579,8 +639,9 @@ class _DomainView:
         if not self._segments:
             return False
         signature = self._signature(when)
-        if signature == self._last_signature:
-            return False  # this domain's covering node(s) have not advanced
+        now = _cutoff_ns(when)
+        if signature == self._last_signature and not any(segment.held_due(now) for segment in self._segments):
+            return False  # neither this domain's covering node(s) nor a held row's first-seen time has passed
         self._last_signature = signature
         taken: list[tuple[_ReplaySegment, np.ndarray]] = []
         for segment in self._segments:
@@ -745,6 +806,10 @@ class _DomainView:
         self._part_seq += 1
 
     def _newly_visible(self, segment: _ReplaySegment, when: pd.Timestamp) -> np.ndarray:
+        return segment.admit(self._released(segment, when), _cutoff_ns(when))
+
+    def _released(self, segment: _ReplaySegment, when: pd.Timestamp) -> np.ndarray:
+        """The rows whose refresh node has newly passed at ``when``."""
         if segment.cursor is not None:
             if self.cutoff_key == _ROW_AVAILABLE_AT:
                 return segment.cursor.advance(_cutoff_ns(when))
@@ -776,6 +841,9 @@ class _DomainView:
         return min(boundaries) if boundaries else None
 
     def _segment_boundary(self, segment: _ReplaySegment, when: pd.Timestamp) -> np.datetime64 | None:
+        return _earliest(self._node_boundary(segment, when), segment.next_held())
+
+    def _node_boundary(self, segment: _ReplaySegment, when: pd.Timestamp) -> np.datetime64 | None:
         if segment.cursor is not None:
             if not segment.cursor.has_pending():
                 return None
@@ -865,7 +933,7 @@ class _TextView:
             available_at = to_cn_timestamps(rows.column("available_at"))
             valid = np.flatnonzero(available_at.notna().to_numpy())
             cursors = _dataset_cursors(rows.column("dataset").astype(str).to_numpy(), valid, _utc_ns(available_at))
-            self._segments.append(_ReplaySegment(rows, None, cursors, library_dir))
+            self._segments.append(_ReplaySegment(rows, None, cursors, library_dir, first_seen=_first_seen_keys(rows)))
         self._segments_changed()
 
     def release_published(self) -> None:
@@ -891,7 +959,8 @@ class _TextView:
         if not self._segments:
             return False
         signature = tuple((d, str(text_dataset_visible_cutoff(d, when))) for d in self._dataset_names)
-        if signature == self._last_signature:
+        now = _cutoff_ns(when)
+        if signature == self._last_signature and not any(segment.held_due(now) for segment in self._segments):
             return False
         self._last_signature = signature
         visible: list[tuple[_ReplaySegment, pd.DataFrame]] = []
@@ -902,13 +971,14 @@ class _TextView:
                 if (cutoff := text_dataset_visible_cutoff(name, when)) is not None
                 and (indices := cursor.advance(_cutoff_ns(cutoff))).size
             ]
-            if parts:
-                newly = np.concatenate(parts)
+            newly = segment.admit(np.concatenate(parts) if parts else _EMPTY_INDICES, now)
+            if newly.size:
                 newly.sort()  # original frame order: parts read back exactly as the frame slice
                 visible.append((segment, pa.concat_tables(list(segment.rows.take(newly))).to_pandas()))
         if not visible:
             return False
         rows = _concat_slices([index_rows for _segment, index_rows in visible]).copy()
+        rows = rows.drop(columns=[FIRST_SEEN_COLUMN], errors="ignore")
         datasets = rows["dataset"].astype(str)
         # Every row this roll makes visible is relabelled onto the body part
         # this roll writes for its dataset, so the whole column is one string
@@ -987,13 +1057,13 @@ class _TextView:
     def next_boundary(self, when: pd.Timestamp) -> np.datetime64 | None:
         """Earliest pending text refresh-node boundary after ``when``."""
         boundaries = [
-            boundary
+            _cutoff_ns(boundary)
             for segment in self._segments
             for name, cursor in segment.cursors.items()
             if cursor.has_pending()
             and (boundary := text_dataset_next_visible_boundary(name, when)) is not None
         ]
-        return min(map(_cutoff_ns, boundaries)) if boundaries else None
+        return _earliest(*boundaries, *(segment.next_held() for segment in self._segments))
 
     def _write_bodies(
         self, dataset: str, sources: list[tuple[Path | None, set[str]]], path: Path

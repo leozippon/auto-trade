@@ -255,7 +255,9 @@ class ResearchPITSnapshotProvider:
                     raise RuntimeError(
                         f"PIT view cache {self.cache_root} was built under cache format "
                         f"{existing.get('schema_version')!r}, this code requires {record['schema_version']}: "
-                        "a view built under another format is never reused, so the cache must be rebuilt"
+                        "a view built under another format is never reused, so the cache must be rebuilt: "
+                        f"remove {self.cache_root} and its views are rebuilt from the pinned release on the "
+                        "next start (a PIT view seed is rebuilt under a new directory instead)"
                     )
                 if contract_identity(existing) != contract_identity(record):
                     raise RuntimeError("PIT view cache is already bound to a different release or configuration")
@@ -1451,7 +1453,10 @@ def _bind_asof_stash_contract(
     if wrong:
         raise RuntimeError(f"PIT provider contract has missing or unknown fields: {sorted(wrong)}")
     if provider_record.get("schema_version") != SNAPSHOT_CACHE_FORMAT_VERSION:
-        raise RuntimeError("PIT provider contract has an incompatible cache schema")
+        raise RuntimeError(
+            f"PIT view cache {cache_root} was built under cache format {provider_record.get('schema_version')!r}, "
+            f"this code requires {SNAPSHOT_CACHE_FORMAT_VERSION}: remove {cache_root} and rebuild it"
+        )
     configured_generation = str(provider_record.get("generation_id") or "")
     if not generation_id or configured_generation != generation_id:
         raise RuntimeError("PIT stash generation does not match the provider contract")
@@ -1499,6 +1504,12 @@ def _bind_asof_stash_contract(
             if not stash_dir.is_dir():
                 raise RuntimeError(f"PIT stash path is not a directory: {stash_dir}")
             existing = _read_json(contract_path)
+            recorded = existing.get("snapshot_cache_schema_version", SNAPSHOT_CACHE_FORMAT_VERSION)
+            if recorded != SNAPSHOT_CACHE_FORMAT_VERSION:
+                raise RuntimeError(
+                    f"PIT stash {stash_dir} was encoded under cache format {recorded!r}, this code requires "
+                    f"{SNAPSHOT_CACHE_FORMAT_VERSION}: remove {stash_dir} and its parts are encoded again"
+                )
             if contract_identity(existing) != contract_identity(contract):
                 raise RuntimeError(
                     f"PIT stash contract conflicts with requested semantics: {contract_path}"

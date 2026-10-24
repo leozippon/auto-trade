@@ -56,6 +56,8 @@ class FieldRule:
 COMMON_FIELD_SEMANTICS: tuple[tuple[str, str], ...] = (
     ("available_at_rule", "categorical"),
     ("available_at", "datetime"),
+    # Replay slots only: the Timeview's first-seen gate (environment.data.pit).
+    ("first_seen_at", "datetime"),
     ("available_month", "datetime"),
     ("dataset", "identifier"),
     ("ts_code", "identifier"),

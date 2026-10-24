@@ -925,8 +925,10 @@ def test_research_pit_provider_names_a_cache_format_mismatch(tmp_path: Path) -> 
     with pytest.raises(
         RuntimeError,
         match=rf"cache format {SNAPSHOT_CACHE_FORMAT_VERSION - 1}, this code requires {SNAPSHOT_CACHE_FORMAT_VERSION}",
-    ):
+    ) as refused:
         reopen()
+    # The refusal names the remedy.
+    assert f"remove {provider.cache_root} and its views are rebuilt" in str(refused.value)
     assert json.loads(contract.read_text(encoding="utf-8")) == older
     contract.write_text(json.dumps({**current, "generation_id": "another"}), encoding="utf-8")
     with pytest.raises(RuntimeError, match="already bound to a different release or configuration"):
@@ -1432,6 +1434,42 @@ def test_stash_contract_refuses_changed_config_or_generation(tmp_path: Path) -> 
             decision_manifest=changed_decision,
             replay_manifest=changed_replay,
         )
+
+
+def test_a_stash_encoded_under_another_cache_format_is_refused_naming_the_remedy(tmp_path: Path) -> None:
+    snapshot, replay = _pit_slot_paths(
+        tmp_path, decision="decision_one", replay="replay_one", generation_id="generation_one"
+    )
+    decision_manifest, replay_manifest = _stash_manifests("generation_one")
+    kwargs = {
+        "snapshot_dir": snapshot,
+        "replay_dir": replay,
+        "schedule": StrategySchedule("day", "08:30"),
+        "phase": "valid",
+        "generation_id": "generation_one",
+        "decision_manifest": decision_manifest,
+        "replay_manifest": replay_manifest,
+    }
+    stash = _bind_asof_stash_contract(**kwargs)
+    contract = stash / "contract.json"
+    record = json.loads(contract.read_text(encoding="utf-8"))
+    contract.write_text(
+        json.dumps({**record, "snapshot_cache_schema_version": SNAPSHOT_CACHE_FORMAT_VERSION - 1}), encoding="utf-8"
+    )
+    with pytest.raises(
+        RuntimeError,
+        match=rf"encoded under cache format {SNAPSHOT_CACHE_FORMAT_VERSION - 1}, this code requires "
+        rf"{SNAPSHOT_CACHE_FORMAT_VERSION}: remove .+ and its parts are encoded again",
+    ):
+        _bind_asof_stash_contract(**kwargs)
+    # A cache root rewritten under another format is refused before any stash.
+    cache_root = snapshot.parent.parent
+    provider = json.loads((cache_root / "provider.json").read_text(encoding="utf-8"))
+    (cache_root / "provider.json").write_text(
+        json.dumps({**provider, "schema_version": SNAPSHOT_CACHE_FORMAT_VERSION - 1}), encoding="utf-8"
+    )
+    with pytest.raises(RuntimeError, match=rf"built under cache format {SNAPSHOT_CACHE_FORMAT_VERSION - 1}.+remove"):
+        _bind_asof_stash_contract(**kwargs)
 
 
 def test_stash_contract_corruption_or_mismatch_fails(tmp_path: Path) -> None:

@@ -4,8 +4,10 @@ import json
 import os
 import re
 import warnings
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -60,8 +62,9 @@ class CorruptSidecarError(RuntimeError):
 # A keyed raw partition ``<name>.parquet`` may carry an observation table
 # beside it, ``<name>.parquet.first_seen``: the instant each business key first
 # became part of the visible partition (written by the ingest adapter's
-# versioned write path, data_sources/tushare/versions.py).
+# versioned write path, data_sources/tushare/versions.py; read here).
 FIRST_SEEN_SUFFIX = ".first_seen"
+FIRST_SEEN_COLUMN = "first_seen_at"
 
 
 def parquet_meta(path: Path) -> dict[str, Any]:
@@ -168,6 +171,189 @@ def complete_interrupted_commits(raw_dir: str | Path) -> dict[str, int]:
                 continue
             removed += 1
     return {"finished": finished, "removed": removed}
+
+
+
+# ---------------------------------------------------------------- observation tables
+#
+# The table holds the business-key columns in canonical text and
+# ``first_seen_at``, a UTC instant. Keys visible before versioning started have
+# no row. It is written before the partition it describes, so a row later than
+# the partition's ``visible_since`` belongs to a write that never became
+# visible and is not read. The PIT views make a row visible from the later of
+# its vendor-rule ``available_at`` and the first-seen time of its key
+# (docs/data-documentation.md §3.3).
+
+KEY_SEPARATOR = "\x1f"
+
+
+def canonical_revision_value(value: Any) -> str:
+    """One text form per value, so a re-serialised number or an empty marker
+    compares equal to the same value written another way."""
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    if text.lower() in {"nan", "none", "nat"}:
+        return ""
+    try:
+        decimal = Decimal(text)
+    except (InvalidOperation, ValueError):
+        return text
+    if not decimal.is_finite():
+        return text
+    normalized = format(decimal.normalize(), "f")
+    if "." in normalized:
+        normalized = normalized.rstrip("0").rstrip(".")
+    return normalized or "0"
+
+
+def canonical_series(series: pd.Series) -> pd.Series:
+    values = series.astype(object)
+    try:
+        mapping = {value: canonical_revision_value(value) for value in pd.unique(values)}
+        out = values.map(mapping)
+    except TypeError:  # unhashable cells
+        out = values.map(canonical_revision_value)
+    return out.where(values.notna(), "").astype(str)
+
+
+def canonical_keys(frame: pd.DataFrame, key_columns: Sequence[str]) -> pd.DataFrame:
+    """The business-key columns of ``frame`` in canonical text, the form the
+    observation table stores; a missing key column reads as empty text."""
+    return pd.DataFrame(
+        {
+            column: canonical_series(frame[column]) if column in frame.columns else pd.Series("", index=frame.index)
+            for column in key_columns
+        },
+        index=frame.index,
+    )
+
+
+def join_columns(frame: pd.DataFrame, columns: Sequence[str], separator: str = KEY_SEPARATOR) -> pd.Series:
+    if not columns:
+        return pd.Series("", index=frame.index, dtype=object)
+    first, *rest = columns
+    if not rest:
+        return frame[first].astype(str)
+    return frame[first].str.cat([frame[column] for column in rest], sep=separator)
+
+
+def key_strings(frame: pd.DataFrame, key_columns: Sequence[str]) -> pd.Series:
+    return join_columns(canonical_keys(frame, key_columns), list(key_columns))
+
+
+def observation_path(path: Path) -> Path:
+    return path.with_name(path.name + FIRST_SEEN_SUFFIX)
+
+
+def read_observations(path: Path, meta: dict[str, Any] | None = None) -> pd.DataFrame:
+    """The observation rows of the visible partition at ``path``: its canonical
+    business keys and ``first_seen_at``. Rows written by a commit that never
+    became visible are left out; a partition without a table has none.
+
+    The one rule for which rows of a table count, used by the versioned write
+    path (which passes the sidecar ``meta`` it has already read) and by the PIT
+    views alike."""
+    path = Path(path)
+    obs = observation_path(path)
+    if not obs.exists():
+        return pd.DataFrame(columns=[FIRST_SEEN_COLUMN])
+    frame = pq.read_table(obs).to_pandas()
+    if not path.exists():
+        # A first landing that crashed before its parquet rename.
+        return frame.iloc[:0]
+    since = _required_visible_since(path, parquet_meta(path) if meta is None else meta, rows=len(frame))
+    return _observations_up_to(frame, since)
+
+
+def _required_visible_since(path: Path, meta: dict[str, Any], *, rows: int) -> datetime | None:
+    """The visible partition's ``visible_since``. A table holding rows beside a
+    partition whose sidecar does not say when it became visible (missing,
+    unreadable or pre-versioning) cannot be filtered: refuse loudly rather than
+    read or rewrite it without its recorded first-seen times."""
+    try:
+        since = datetime.fromisoformat(str(meta["visible_since"])) if meta.get("visible_since") else None
+    except ValueError:
+        since = None
+    if since is None and rows:
+        raise RuntimeError(
+            f"{observation_path(path)} holds {rows} first-seen rows but the sidecar of {path} records no "
+            "visible_since; repair the sidecar, or rebuild the table with "
+            "`scripts/data/tushare_lake.py rebuild-observations`"
+        )
+    return since
+
+
+def _observations_up_to(frame: pd.DataFrame, since: datetime | None) -> pd.DataFrame:
+    """The rows of an observation table first seen no later than ``since``."""
+    if frame.empty:
+        return frame
+    if since is None:
+        return frame.iloc[:0]
+    stamps = pd.to_datetime(frame[FIRST_SEEN_COLUMN], utc=True, format="ISO8601")
+    return frame.loc[stamps <= pd.Timestamp(since)].reset_index(drop=True)
+
+
+def _first_seen_cn(stamps: pd.Series) -> pd.Series:
+    """Observation instants (UTC text) as CN timestamps rounded up to the
+    second, the precision of every view stamp: rounding up never shows a row
+    before the lake held it."""
+    return pd.to_datetime(stamps, utc=True, format="ISO8601").dt.ceil("s").dt.tz_convert(CN_TZ)
+
+
+def first_seen_later(path: Path, frame: pd.DataFrame, available_at: pd.Series) -> pd.Series | None:
+    """When the lake first held each row of ``frame``, the visible partition at
+    ``path``, where that is later than the row's vendor-rule ``available_at``.
+
+    A CN timestamp per row, NaT where the key was visible before versioning
+    started (no observation row) or was first seen no later than its stamp:
+    such a row keeps the vendor rule. ``None`` when no row is first seen later."""
+    observed = read_observations(path)
+    if observed.empty:
+        return None
+    keys = [column for column in observed.columns if column != FIRST_SEEN_COLUMN]
+    seen_at = _first_seen_cn(observed[FIRST_SEEN_COLUMN]).set_axis(
+        pd.Index(join_columns(observed[keys].astype(str), keys))
+    )
+    seen = key_strings(frame, keys).map(seen_at)
+    later = seen > to_cn_timestamps(available_at)
+    return seen.where(later) if later.any() else None
+
+
+def first_seen_between(path: Path, start: datetime, end: datetime) -> bool:
+    """Whether the partition at ``path`` records a key first seen inside
+    ``[start, end]``: such a partition can hold rows a view in that window
+    shows, whatever dates its name covers."""
+    obs = observation_path(Path(path))
+    if not obs.exists():
+        return False
+    seen = _first_seen_cn(pq.read_table(obs, columns=[FIRST_SEEN_COLUMN]).column(0).to_pandas())
+    return bool(((seen >= start) & (seen <= end)).any())
+
+
+def visible_from(frame: pd.DataFrame, available: pd.Series | None = None) -> pd.Series:
+    """When a view may first show each row of a frame that carries
+    ``available_at`` and possibly ``first_seen_at``: the later of the two.
+    ``available`` is the frame's ``available_at`` already parsed, if at hand."""
+    if available is None:
+        available = to_cn_timestamps(frame["available_at"])
+    if FIRST_SEEN_COLUMN not in frame.columns:
+        return available
+    present = frame[FIRST_SEEN_COLUMN].notna()
+    if not present.any():
+        return available
+    seen = to_cn_timestamps(frame.loc[present, FIRST_SEEN_COLUMN]).reindex(frame.index)
+    return available.mask(seen > available, seen)
+
+
+def stamp_text(stamps: pd.Series) -> pd.Series:
+    """CN timestamps as the views' stamp text, ``None`` for NaT."""
+    return stamps.dt.strftime("%Y-%m-%d %H:%M:%S+08:00").where(stamps.notna(), None)
 
 
 def to_cn_timestamps(series: pd.Series) -> pd.Series:

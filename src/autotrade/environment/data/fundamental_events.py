@@ -11,9 +11,13 @@ import pyarrow.parquet as pq
 from autotrade.data_quality import build_quality_report, write_quality_report
 from autotrade.environment.data.contracts import CN_TZ
 from autotrade.environment.data.pit import (
+    FIRST_SEEN_COLUMN,
     concat_rows,
+    first_seen_later,
     parquet_meta,
+    stamp_text,
     to_cn_timestamps,
+    visible_from,
     yyyymmdd,
 )
 
@@ -93,14 +97,16 @@ class FundamentalEventsBuilder:
         events = events[events["available_at"].astype(str).str.strip().ne("")].copy()
         if events.empty:
             return pd.DataFrame(columns=self._event_columns())
-        parsed = to_cn_timestamps(events["available_at"])
+        # A row whose key the lake first held after its vendor-rule stamp
+        # becomes visible then, and is filed under that month.
+        visible = visible_from(events)
         start = pd.Timestamp(yyyymmdd(config.start_date)).tz_localize(CN_TZ)
         end = pd.Timestamp(yyyymmdd(config.end_date)).tz_localize(CN_TZ) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
-        window = (parsed >= start) & (parsed <= end)
+        window = (visible >= start) & (visible <= end)
         events = events[window].copy()
         if events.empty:
             return pd.DataFrame(columns=self._event_columns())
-        events["available_month"] = parsed[window].dt.strftime("%Y%m")
+        events["available_month"] = visible[window].dt.strftime("%Y%m")
         # Same-timestamp statement corrections share the entire business key
         # (update_flag is deliberately not part of statement keys), and the
         # write-side collapse keeps the LAST row per key: rank vendor versions
@@ -200,6 +206,9 @@ class FundamentalEventsBuilder:
             df["available_at"], df["available_at_rule"] = _available_at_for_frame(
                 dataset, df, statement_availability
             )
+            first_seen = first_seen_later(path, df, df["available_at"])
+            if first_seen is not None:
+                df[FIRST_SEEN_COLUMN] = stamp_text(first_seen)
             df["business_key"] = _business_key_frame(dataset, df)
             frames.append(df)
         if not frames:
@@ -290,7 +299,8 @@ def audit_fundamental_events(events_root: str | Path, config: FundamentalEventsC
                 continue
             parsed = to_cn_timestamps(df["available_at"])
             unparseable += int(parsed.isna().sum())
-            outside_window += int(((parsed < start_ts) | (parsed > end_ts)).sum())
+            visible = visible_from(df, parsed)
+            outside_window += int(((visible < start_ts) | (visible > end_ts)).sum())
             expected_month = path.stem.split("=", 1)[1]
             wrong_partition += int((df["available_month"].astype(str) != expected_month).sum())
             wrong_dataset += int((df["dataset"].astype(str) != expected_dataset).sum())
@@ -382,8 +392,15 @@ def read_fundamental_events(
     min_available_at: str | None = None,
     require_partitions: bool = False,
     nat_counts: dict[str, int] | None = None,
+    observed: bool = True,
 ) -> pd.DataFrame:
     """Read the PIT event store up to ``max_available_at``.
+
+    A row counts from the later of its ``available_at`` and its
+    ``first_seen_at`` (when the lake first held a key after its vendor-rule
+    stamp), the instant its ``available_month`` partition is named by.
+    ``observed=False`` applies the vendor rule alone, so a row first seen
+    later is found too, in whatever later month it is filed.
 
     ``nat_counts`` is the same out-parameter the snapshot's raw-window reader
     takes: an unparseable stamp fails both bounds and is dropped in the
@@ -413,7 +430,7 @@ def read_fundamental_events(
         dataset_available_partition_count = 0
         for path in sorted(dataset_dir.glob("available_month=*.parquet")):
             month = path.stem.split("=", 1)[1]
-            if month > max_month:
+            if month > max_month and observed:
                 continue
             dataset_available_partition_count += 1
             available_partition_count += 1
@@ -443,9 +460,10 @@ def read_fundamental_events(
         if unparseable.any():
             for dataset, count in events.loc[unparseable, "dataset"].astype(str).value_counts().items():
                 nat_counts[str(dataset)] = nat_counts.get(str(dataset), 0) + int(count)
-    visible = parsed <= max_ts
+    instant = visible_from(events, parsed) if observed else parsed
+    visible = instant <= max_ts
     if min_ts is not None:
-        visible &= parsed >= min_ts
+        visible &= instant >= min_ts
     return events[visible].copy()
 
 

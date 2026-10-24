@@ -6,8 +6,10 @@ the book: a decision view anchored two sessions before the book's first
 decision and one replay slot from the session before it through the target
 session, whose own bars do not exist yet. Views are cached per release
 generation under the book's state root, and a run drops the caches of every
-older generation. A book whose decision view the fundamentals audit gate
-would refuse is refused when it is opened (``require_audited_fundamentals``).
+older generation and rebuilds that of its own generation when an earlier run
+wrote it under another view cache format. A book whose decision view the
+fundamentals audit gate would refuse is refused when it is opened
+(``require_audited_fundamentals``).
 """
 
 from __future__ import annotations
@@ -43,6 +45,7 @@ from autotrade.environment.strategy import CN_TZ
 from autotrade.paper.engine import PaperDataNotReady
 from autotrade.paper.freshness import require_fresh_release
 from autotrade.pipelines.calendar import load_sse_trading_days
+from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION
 from autotrade.pipelines.pit_backend import (
     HistoricalMinuteSource,
     ResearchPITSnapshotProvider,
@@ -306,7 +309,11 @@ def _pin_newest_release(
     fundamental_events_status: str | Path,
     snapshot_config: SnapshotConfig,
 ) -> Path:
-    """Pin the newest committed release into a directory named by its generation."""
+    """Pin the newest committed release into a directory named by its generation.
+
+    A directory an earlier run of the same generation left under another view
+    cache format is replaced: the provider never reuses such views, and an
+    unattended run rebuilds them rather than stop."""
 
     cache_root.mkdir(parents=True, exist_ok=True)
     staging = cache_root / f".pin-{uuid.uuid4().hex}"
@@ -320,6 +327,11 @@ def _pin_newest_release(
     # A lake without the updater's lock and generation marker (a local or
     # synthetic root) is read live, as pin_research_release defines it.
     target = cache_root / (release.generation_id or LIVE_GENERATION)
+    provider = target / "pit_views" / "provider.json"
+    if provider.exists() and (
+        json.loads(provider.read_text(encoding="utf-8")).get("schema_version") != SNAPSHOT_CACHE_FORMAT_VERSION
+    ):
+        _remove_tree(target)
     if target.exists():
         _remove_tree(staging)
     else:
