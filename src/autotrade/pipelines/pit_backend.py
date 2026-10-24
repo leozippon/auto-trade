@@ -31,7 +31,9 @@ import pyarrow.parquet as pq
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.contracts import (
     benchmark_index_label,
+    dataset_vintages,
     domain_visible_cutoff,
+    read_committed_raw_generation,
 )
 from autotrade.environment.data.pit import PITDataStore, to_cn_timestamps
 from autotrade.environment.data.research_release import (
@@ -89,7 +91,12 @@ from .config import (
     StrategyExperimentConfig,
 )
 from .experiment import DailyStrategyPipeline, null_control_seed
-from .pit_views_seed import contract_identity, pit_cache_provider_record, seed_pit_views
+from .pit_views_seed import (
+    PROVIDER_RECORD_ANNOTATIONS,
+    contract_identity,
+    pit_cache_provider_record,
+    seed_pit_views,
+)
 
 _PHASES = frozenset({"valid", "heldout", "paper"})
 # Manifest label of the unphased replay store. Never a phase, so a store can
@@ -237,6 +244,9 @@ class ResearchPITSnapshotProvider:
             generation_id=self.release.generation_id,
             release_raw_dir=self.release.raw_dir,
             snapshot_config=self.config,
+            vintages=dataset_vintages(
+                read_committed_raw_generation(self.release.raw_dir), required_release_raw_datasets(self.config)
+            ),
         )
         with _exclusive_lock(self.cache_root / ".provider.lock"):
             if path.exists():
@@ -1435,11 +1445,11 @@ def _bind_asof_stash_contract(
         "release_raw_dir",
         "snapshot_config",
     }
-    if set(provider_record) != expected_provider_keys:
-        raise RuntimeError(
-            "PIT provider contract has missing or unknown fields: "
-            f"{sorted(set(provider_record) ^ expected_provider_keys)}"
-        )
+    wrong = (expected_provider_keys - set(provider_record)) | (
+        set(provider_record) - expected_provider_keys - PROVIDER_RECORD_ANNOTATIONS
+    )
+    if wrong:
+        raise RuntimeError(f"PIT provider contract has missing or unknown fields: {sorted(wrong)}")
     if provider_record.get("schema_version") != SNAPSHOT_CACHE_FORMAT_VERSION:
         raise RuntimeError("PIT provider contract has an incompatible cache schema")
     configured_generation = str(provider_record.get("generation_id") or "")
