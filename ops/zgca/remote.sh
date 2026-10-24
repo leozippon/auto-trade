@@ -92,11 +92,12 @@ dirs() {
 
 # Bytes of the files already in the store's directory and bytes free on its
 # disk, for the deploy to decide whether the store fits (the disk is local, so
-# walking it is cheap).
+# walking it is cheap). The sum is printed as a float: mawk's %d stops at
+# 2^31 - 1.
 local_disk() {
     require_local
     [ -d "$LOCAL/pretrained" ] || die "no $LOCAL/pretrained: the dirs step creates it"
-    echo "$(find "$LOCAL/pretrained" -type f -printf '%s\n' | awk '{ s += $1 } END { printf "%d", s }') $(df -B1 --output=avail "$LOCAL" | tail -n 1 | tr -d ' ')"
+    echo "$(find "$LOCAL/pretrained" -type f -printf '%s\n' | awk '{ s += $1 } END { printf "%.0f", s }') $(df -B1 --output=avail "$LOCAL" | tail -n 1 | tr -d ' ')"
 }
 
 # Keep only tracked files inside the top-level directories that hold them, by

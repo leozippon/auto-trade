@@ -533,10 +533,13 @@ class ZgcaWorkflowTest(unittest.TestCase):
             self.assertEqual(os.readlink(link), str(local / "pretrained"))
         (local / "pretrained" / "Model").mkdir()
         (local / "pretrained" / "Model" / "config.json").write_text("{}\n", encoding="utf-8")
-        # Counted as the deploy counts the local store: the bytes of its files.
+        # Counted as the deploy counts the local store: the bytes of its files,
+        # past 2^31 too (a sparse file takes no disk).
+        with open(local / "pretrained" / "Model" / "model.safetensors", "wb") as large:
+            large.truncate(3 * 2**30)
         present, free = map(int, step("local-disk").stdout.split())
         self.assertEqual(present, zgca._tree_bytes(local / "pretrained"))
-        self.assertEqual(present, 3)
+        self.assertEqual(present, 3 + 3 * 2**30)
         self.assertGreater(free, 0)
         link.unlink()
         link.symlink_to(base / "elsewhere")
