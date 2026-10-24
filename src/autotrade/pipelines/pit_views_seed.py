@@ -31,6 +31,19 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from autotrade.environment.data.contracts import (
+    DOMAIN_REFRESH_NODES,
+    EVENING_NODE,
+    EVENT_DATASET_REFRESH_NODES,
+    INTRADAY_FLOW_CONTRACT,
+    INTRADAY_STATS_CONTRACT,
+    MACRO_DATASET_CONTRACTS,
+    MACRO_DATASET_REFRESH_NODES,
+    NODE_ACTIVE_WEEKDAYS,
+    REFRESH_NODES,
+    TEXT_DATASET_REFRESH_NODES,
+    TEXT_NODE,
+)
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.runtime import chmod_tree, rmtree_keeping_file_modes
 from autotrade.pipelines.calendar import ResearchGeometry, Slot
@@ -116,33 +129,122 @@ def plan_seed(geometry: ResearchGeometry, trading_days: Sequence[str]) -> SeedPl
     )
 
 
+def snapshot_timing_contract(config: SnapshotConfig) -> dict[str, object]:
+    """The refresh nodes and view-level stamps the views of ``config`` are
+    built under: each mounted domain or dataset with the nodes that gate it,
+    each such node's launch, duration and active weekdays, and the stamp rule
+    of every dataset the snapshot restamps. Node timing is in no cache key, so
+    a seed records this to be refused, by name, once the code's differs."""
+
+    assignment: dict[str, tuple[str, ...]] = {"daily": DOMAIN_REFRESH_NODES["daily"]}
+    if config.fundamental_datasets:
+        assignment["fundamentals"] = DOMAIN_REFRESH_NODES["fundamentals"]
+    if config.include_intraday:
+        assignment["intraday_1min"] = DOMAIN_REFRESH_NODES["intraday_1min"]
+    for dataset in config.events_datasets:
+        assignment[f"events/{dataset}"] = EVENT_DATASET_REFRESH_NODES.get(dataset, (EVENING_NODE,))
+    for dataset in config.macro_datasets:
+        assignment[f"macro/{dataset}"] = MACRO_DATASET_REFRESH_NODES.get(dataset, (EVENING_NODE,))
+    for dataset in config.text_datasets:
+        assignment[f"text/{dataset}"] = TEXT_DATASET_REFRESH_NODES.get(dataset, (TEXT_NODE,))
+    stamps = {
+        f"macro/{dataset}": MACRO_DATASET_CONTRACTS[dataset].rule
+        for dataset in config.macro_datasets
+        if dataset in MACRO_DATASET_CONTRACTS
+    }
+    for contract in (INTRADAY_FLOW_CONTRACT, INTRADAY_STATS_CONTRACT):
+        if contract.dataset in config.events_datasets:
+            stamps[f"events/{contract.dataset}"] = contract.rule
+    names = sorted({name for nodes in assignment.values() for name in nodes})
+    return {
+        "datasets": {name: list(nodes) for name, nodes in sorted(assignment.items())},
+        "nodes": {
+            name: {
+                "start": REFRESH_NODES[name].start.strftime("%H:%M"),
+                "duration_minutes": REFRESH_NODES[name].duration_minutes,
+                "weekdays": sorted(NODE_ACTIVE_WEEKDAYS[name]) if name in NODE_ACTIVE_WEEKDAYS else None,
+            }
+            for name in names
+        },
+        "stamps": dict(sorted(stamps.items())),
+    }
+
+
 def pit_cache_provider_record(
     *,
     generation_id: str,
     release_raw_dir: str | Path,
     snapshot_config: SnapshotConfig,
+    vintages: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
-    """The on-disk PIT cache contract written to ``provider.json``."""
+    """The on-disk PIT cache contract written to ``provider.json``.
+
+    ``vintages`` (the vendor vintage id of each dataset the configuration
+    mounts, from the release's generation record) and the timing contract are
+    recorded for the operator and the seed pre-flight; both follow from the
+    generation and the code, so neither is part of the identity."""
 
     return {
         "schema_version": SNAPSHOT_CACHE_FORMAT_VERSION,
         "generation_id": generation_id,
         "release_raw_dir": str(release_raw_dir),
         "snapshot_config": snapshot_config.to_record(),
+        "vintages": dict(vintages or {}),
+        "timing_contract": snapshot_timing_contract(snapshot_config),
     }
 
 
-def contract_identity(record: Mapping[str, object]) -> dict[str, object]:
-    """What a provider or as-of stash contract binds: everything but ``release_raw_dir``.
+# Provider fields that describe a cache without binding it.
+PROVIDER_RECORD_ANNOTATIONS = frozenset({"release_raw_dir", "vintages", "timing_contract"})
 
-    That field records where the release was when the views were built -- a
-    host path -- while ``generation_id`` already names the release itself. A
-    seed copied to another host together with its release, or an experiment
-    synced back from one, holds views that are still that release's, so the
-    path is kept for the operator and never compared.
+
+def contract_identity(record: Mapping[str, object]) -> dict[str, object]:
+    """What a provider or as-of stash contract binds: everything but its annotations.
+
+    ``release_raw_dir`` records where the release was when the views were
+    built -- a host path -- while ``generation_id`` already names the release
+    itself. A seed copied to another host together with its release, or an
+    experiment synced back from one, holds views that are still that
+    release's, so the path is kept for the operator and never compared. The
+    vintages and the timing contract follow from the generation and the code
+    (the pre-flight compares the timing contract itself), and a cache bound
+    before they were recorded carries neither.
     """
 
-    return {key: value for key, value in record.items() if key != "release_raw_dir"}
+    return {key: value for key, value in record.items() if key not in PROVIDER_RECORD_ANNOTATIONS}
+
+
+def assert_seed_timing_contract(seed: Path, snapshot_config: SnapshotConfig) -> None:
+    """Refuse a seed whose views were built under other refresh nodes or stamps.
+
+    The create-time pre-flight of a named seed: its recorded timing contract
+    must equal the one this code builds views under, or the first replay would
+    stop on a stash whose parts no longer match (or, without a prebuilt stash,
+    mix two timings). A seed built before seeds recorded the contract cannot
+    prove it and is refused too."""
+
+    record = _load_json(Path(seed) / "provider.json")
+    recorded = record.get("timing_contract")
+    expected = snapshot_timing_contract(snapshot_config)
+    if recorded == expected:
+        return
+    if not isinstance(recorded, Mapping):
+        raise ValueError(
+            f"PIT view seed {seed} records no snapshot timing contract (it was built before seeds recorded "
+            "their refresh nodes), so its views cannot be shown to match this code's; rebuild the seed under "
+            "a new directory"
+        )
+    differences = []
+    for section in ("nodes", "datasets", "stamps"):
+        before, after = recorded.get(section) or {}, expected.get(section) or {}
+        for name in sorted(set(before) | set(after)):
+            if before.get(name) != after.get(name):
+                label = "node" if section == "nodes" else "dataset" if section == "datasets" else "stamp of"
+                differences.append(f"{label} {name}: seed {json.dumps(before.get(name))} != code {json.dumps(after.get(name))}")
+    raise ValueError(
+        f"PIT view seed {seed} was built under another snapshot timing contract ({'; '.join(differences)}); "
+        "rebuild the seed under a new directory"
+    )
 
 
 def assert_seed_snapshot_config(
@@ -480,8 +582,10 @@ __all__ = [
     "SeedPlan",
     "assert_seed_carries_bonus_split",
     "assert_seed_snapshot_config",
+    "assert_seed_timing_contract",
     "assert_seed_views_share_types",
     "pit_cache_provider_record",
     "plan_seed",
     "seed_pit_views",
+    "snapshot_timing_contract",
 ]

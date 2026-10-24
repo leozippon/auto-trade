@@ -12,10 +12,11 @@ would refuse is refused when it is opened (``require_audited_fundamentals``).
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import uuid
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, time
 from pathlib import Path
 
@@ -23,7 +24,11 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from autotrade.data_sources.tushare.cron_update import DEFAULT_CONFIG
-from autotrade.environment.data.contracts import PIT_EVENT_NODE
+from autotrade.environment.data.contracts import (
+    PIT_EVENT_NODE,
+    RAW_GENERATION_FILENAME,
+    dataset_vintages,
+)
 from autotrade.environment.data.research_release import pin_research_release
 from autotrade.environment.data.snapshot import (
     FundamentalAuditScopeError,
@@ -36,6 +41,7 @@ from autotrade.environment.replay.market import DailyMarketData
 from autotrade.environment.replay.timeview import Timeview
 from autotrade.environment.strategy import CN_TZ
 from autotrade.paper.engine import PaperDataNotReady
+from autotrade.paper.freshness import require_fresh_release
 from autotrade.pipelines.calendar import load_sse_trading_days
 from autotrade.pipelines.pit_backend import (
     HistoricalMinuteSource,
@@ -85,8 +91,13 @@ class BookPITData:
         snapshot_config: SnapshotConfig,
         start: str,
         trade_date: str,
+        due_at: datetime,
+        schedule: Mapping[str, object],
         max_intraday_row_group_rows: int = 2_000_000,
     ) -> None:
+        """``due_at`` is the inference time of the decision on ``trade_date``
+        and ``schedule`` the updater's schedule: together they say which
+        landing runs the pinned release must hold (``paper.freshness``)."""
         cache_root = Path(state_root).resolve() / PIT_CACHE_NAME
         generation_dir = _pin_newest_release(
             cache_root,
@@ -105,6 +116,9 @@ class BookPITData:
         self.generation_id = provider.release.generation_id or LIVE_GENERATION
         if generation_dir.name != self.generation_id:
             raise RuntimeError(f"release pin {generation_dir} resolved to generation {self.generation_id}")
+        record = Path(provider.release.raw_dir) / RAW_GENERATION_FILENAME
+        self.generation = json.loads(record.read_text(encoding="utf-8")) if record.exists() else {}
+        self.vintages = dataset_vintages(self.generation, required_release_raw_datasets(snapshot_config))
         for entry in cache_root.iterdir():
             if entry != generation_dir:
                 _remove_tree(entry)
@@ -119,6 +133,10 @@ class BookPITData:
                 f"committed data ends at {self.release_end} (generation {self.generation_id}); "
                 f"the decision for {trade_date} needs sessions through {prior[-1]}"
             )
+        if record.exists():
+            # A local lake without a generation record records no refresh
+            # times; a stamped one must hold every mounted dataset fresh.
+            require_fresh_release(self.generation, snapshot_config, schedule, self.sessions, due_at)
         window_start, anchor = book_window(self.sessions, start)
         bundle = provider.prepare(
             phase=PAPER_PHASE,

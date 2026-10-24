@@ -41,6 +41,8 @@ from _bootstrap import add_repo_src
 
 add_repo_src(__file__)
 
+from autotrade.data_sources.tushare.audit import audit_summary_line
+from autotrade.data_sources.tushare.cron_update import DEFAULT_CONFIG, load_config
 from autotrade.environment.executor import StrategyExecutor
 from autotrade.environment.replay.engine import StrategyDataView
 from autotrade.environment.sandbox import SandboxConfig
@@ -79,12 +81,14 @@ from autotrade.paper.pit import BookPITData
 from autotrade.paper.storage import read_jsonl
 from autotrade.paper.titles import require_landed_titles
 from autotrade.paper.verdict import record_verdict, record_verdict_locked
+from autotrade.paper.vintages import vintage_report
 from autotrade.pipelines.calendar import load_sse_trading_days
 from autotrade.pipelines.hitl_state import select_gpus
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_STATE_ROOT = PAPER_STATE_DIR
 DEFAULT_ORDERS_DIR = Path("logs/paper")
+DEFAULT_VINTAGE_REPORT = Path("results/data_quality/paper_vintages.json")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -121,6 +125,11 @@ def build_parser() -> argparse.ArgumentParser:
     verdict = commands.add_parser("verdict", help="Read and record each book's Paper verdict; print it as JSON.")
     verdict.add_argument("--book", help="This book only; default: every book.")
     verdict.add_argument("--state-root", type=Path, default=DEFAULT_STATE_ROOT)
+    vintages = commands.add_parser(
+        "vintages", help="List the mounted datasets whose vintage changed since each live book's pinned release."
+    )
+    vintages.add_argument("--state-root", type=Path, default=DEFAULT_STATE_ROOT)
+    vintages.add_argument("--output", type=Path, default=DEFAULT_VINTAGE_REPORT)
     return parser
 
 
@@ -256,6 +265,8 @@ def _run_book_locked(book_id: str, book: Book, trade_date: str, orders_dir: Path
         print(f"[{book_id}] killed; nothing decided, exit sheet written to {write_orders(sheets, trade_date, text)}", file=sys.stderr)
         return
 
+    schedule = load_config(REPO_ROOT / DEFAULT_CONFIG)
+
     def data_factory(start: str, target: str) -> BookPITData:
         return BookPITData(
             state_root=book.root,
@@ -265,6 +276,8 @@ def _run_book_locked(book_id: str, book: Book, trade_date: str, orders_dir: Path
             snapshot_config=book.snapshot_config,
             start=start,
             trade_date=target,
+            due_at=book.schedule.at(target),
+            schedule=schedule,
             max_intraday_row_group_rows=book.max_intraday_row_group_rows,
         )
 
@@ -311,6 +324,16 @@ def verdict(args: argparse.Namespace) -> int:
     return 1 if failures else 0
 
 
+def vintages(args: argparse.Namespace) -> int:
+    report = vintage_report(args.state_root)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    changed = sum(len(entry["changed"]) for entry in report.values())
+    print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    print(audit_summary_line("paper_vintages", "changed" if changed else "ok", books=len(report), changed=changed))
+    return 0
+
+
 def run(args: argparse.Namespace) -> int:
     trade_date = args.trade_date or datetime.now(CN_TZ).strftime("%Y%m%d")
     book_ids = [validate_book_id(args.book)] if args.book else run_order(args.state_root)
@@ -330,7 +353,8 @@ def run(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return {"init": init, "run": run, "source-history": source_history, "verdict": verdict}[args.command](args)
+    commands = {"init": init, "run": run, "source-history": source_history, "verdict": verdict, "vintages": vintages}
+    return commands[args.command](args)
 
 
 if __name__ == "__main__":

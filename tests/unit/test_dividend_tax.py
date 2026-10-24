@@ -275,6 +275,7 @@ class _Data:
         self.sessions = sessions
         self.release_end = release_end
         self.generation_id = release_end
+        self.vintages: dict = {}
 
     def context_data(self, inference_at):
         return StrategyDataView()

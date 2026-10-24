@@ -166,6 +166,9 @@ class PaperData(Protocol):
     # Last session whose daily bars the committed data contains.
     release_end: str
     generation_id: str
+    # The vintage id of each dataset the book mounts (empty for a release
+    # without per-dataset state).
+    vintages: dict[str, str]
 
     def context_data(self, inference_at: datetime) -> StrategyDataView: ...
 
@@ -509,6 +512,7 @@ class DailyPaperEngine:
             "decided_at": datetime.now(CN_TZ).isoformat(),
             "data_through": prior,
             "generation_id": data.generation_id,
+            "vintages": dict(data.vintages),
             "cash": cash,
             "positions": dict(positions),
             "equity": broker.equity(),

@@ -15,17 +15,24 @@ import types
 import unittest
 from contextlib import chdir, redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
+from typing import ClassVar
 from unittest.mock import patch
 from urllib.parse import unquote
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-import tushare.pro.client as tushare_sdk
 from pyarrow.lib import ArrowInvalid
 
-from autotrade.data_sources.tushare import audit, common, cron_update, download
+from autotrade.data_sources.tushare import (
+    audit,
+    common,
+    cron_update,
+    download,
+    versions,
+)
 from autotrade.data_sources.tushare import io as tushare_io
 from autotrade.environment.data.fundamental_events import (
     FundamentalEventsBuilder,
@@ -35,6 +42,14 @@ from autotrade.environment.data.snapshot import (
     SELECTABLE_DATASETS,
     _require_event_months,
 )
+
+
+def commit_generation(raw_dir: Path) -> dict:
+    """A committed generation record, as a finished mutating job leaves it."""
+    with redirect_stdout(io.StringIO()):
+        return cron_update.finish_raw_generation_update(
+            raw_dir, {}, {"job": "fixture"}, commit=True, datasets={}, issues=[]
+        )
 
 
 class EmptyMinuteClient:
@@ -669,6 +684,9 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         )
 
         def publish(value: float) -> str:
+            # Each round starts from a fresh baseline landing, which has no
+            # observation table yet.
+            versions.observation_path(output).unlink(missing_ok=True)
             common.write_parquet(output, baseline, api_name="share_float", params={}, fields=list(baseline.columns))
             active = baseline.copy()
             active["float_share"] = value
@@ -1061,7 +1079,6 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             "ann_date",
             True,
             revision_ledger=None,
-            allow_empty_revision_overwrite=False,
         )
 
         self.assertTrue(result["skipped"])
@@ -1069,7 +1086,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertTrue(result["source_cap_risk"])
         self.assertEqual(common.parquet_rows(path), common.SHARE_FLOAT_ROW_LIMIT)
 
-    def test_share_float_nonempty_rejected_refresh_fails(self):
+    def test_share_float_extreme_shrink_is_staged_and_reported(self):
         path = self.raw_dir / "share_float_ann_date" / "ann_date=20200101.parquet"
         fields = common.SHARE_FLOAT_FIELDS.split(",")
         existing = pd.DataFrame([
@@ -1085,23 +1102,23 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                     common.SHARE_FLOAT_FIELDS.split(","),
                     [["000000.SZ", "20200101", "20200102", "h0", "type", 1.0, 0.1]])
 
-        # The guard keeps the old partition; that decision is REPORTED, not
-        # raised. Raising here aborted the whole run mid-loop, which made the
-        # ts_code rescue unreachable and left the lake dirty every time a
-        # capped partition rotated its keys.
-        result = download.query_share_float_to_path(
-            ShrunkClient(), path, {"ann_date": "20200101"}, "ann_date", True,
-            revision_ledger=self.root / "revision_events.jsonl",
-        )
-        self.assertTrue(result["guard_retained"])
+        # An answer removing most keys is staged and REPORTED, not raised:
+        # raising aborted the whole run mid-loop and made the ts_code rescue
+        # unreachable every time a capped partition rotated its keys.
+        with redirect_stdout(io.StringIO()):
+            result = download.query_share_float_to_path(
+                ShrunkClient(), path, {"ann_date": "20200101"}, "ann_date", True,
+                revision_ledger=self.root / "revision_events.jsonl",
+            )
+        self.assertTrue(result["staged"])
         self.assertTrue(result["skipped"])
         self.assertEqual(common.parquet_rows(path), 100)
-        self.assertEqual(result["rows"], 100)  # reports the RETAINED partition
+        self.assertEqual(result["rows"], 100)  # reports the visible partition
 
     def test_existing_partition_resume_reports_every_key(self):
         """A plain resume (partition present, no --force) returns early; the
-        caller reads guard_retained on every day, so omitting it there turned
-        the resume path into a KeyError."""
+        caller reads staged on every day, so omitting it there turned the
+        resume path into a KeyError."""
         path = self.raw_dir / "share_float_ann_date" / "ann_date=20200101.parquet"
         fields = common.SHARE_FLOAT_FIELDS.split(",")
         frame = pd.DataFrame([["000001.SZ", "20200101", "20200102", "h", "type", 1.0, 0.1]], columns=fields)
@@ -1116,18 +1133,16 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         result = download.query_share_float_to_path(
             Unused(), path, {"ann_date": "20200101"}, "ann_date", False,
         )
-        self.assertEqual(
-            sorted(result), ["guard_retained", "path", "rows", "skipped", "source_cap_risk"])
-        self.assertFalse(result["guard_retained"])
+        self.assertEqual(sorted(result), ["path", "rows", "skipped", "source_cap_risk", "staged"])
+        self.assertFalse(result["staged"])
         self.assertTrue(result["skipped"])
 
     def test_capped_new_response_on_small_partition_routes_to_rescue(self):
         """The 2026-08-13 incident class: a small early-evening partition, then
         the vendor's late fill pushes the day past the per-call cap. The
-        retained day's cap risk must come from the FETCHED response too --
-        classifying by the retained old rows escalated the exact case the
-        ts_code rescue exists for into an 'unrescuable retraction' that failed
-        the run and left the lake dirty."""
+        staged day's cap risk must come from the FETCHED response too --
+        classifying by the visible old rows hid the exact case the ts_code
+        rescue exists for."""
         day = "20200101"
         fields = common.SHARE_FLOAT_FIELDS.split(",")
         path = self.raw_dir / "share_float_ann_date" / f"ann_date={day}.parquet"
@@ -1149,24 +1164,24 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         args = argparse.Namespace(
             ann_start_date=day, ann_end_date=day, force=True,
             revision_ledger=self.root / "revision_events.jsonl",
-            allow_empty_revision_overwrite=False,
         )
         report: dict = {}
-        limit_hits = download.download_share_float_ann_dates(
-            CappedLateFillClient(), self.raw_dir, args, report)
+        with redirect_stdout(io.StringIO()):
+            limit_hits = download.download_share_float_ann_dates(
+                CappedLateFillClient(), self.raw_dir, args, report)
         self.assertEqual(limit_hits, [day])
-        self.assertEqual(report["ann_date"]["guard_retained_days"], [])
-        # The guard still retained the old partition; the rescue owns the repair.
+        self.assertEqual(report["ann_date"]["staged_days"], [])
+        # The answer was staged, so the old partition stays; the rescue owns the repair.
         self.assertEqual(common.parquet_rows(path), 100)
 
-    def test_capped_partition_retention_reaches_rescue_while_a_real_retraction_fails(self):
-        """A retained partition means one of two very different things.
+    def test_capped_staging_reaches_rescue_while_a_real_retraction_stays_staged(self):
+        """A staged answer means one of two very different things.
 
         Capped (the source truncated its answer and rotates which keys it
-        returns): recoverable by the per-ts_code rescue, so the run must carry
-        on and hand the day to it. Not capped: the source genuinely retracted
-        the keys, which no rescue can undo -- that needs an operator, so the
-        run fails, but only AFTER every recoverable day has been processed.
+        returns): recoverable by the per-ts_code rescue, so the run hands the
+        day to it. Not capped: the source genuinely retracted the keys, which
+        no rescue can undo -- the staged version waits for an operator, and
+        the run carries on.
         """
         fields = common.SHARE_FLOAT_FIELDS.split(",")
 
@@ -1192,16 +1207,15 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         args = argparse.Namespace(
             ann_start_date=capped_day, ann_end_date=retracted_day, force=True,
             revision_ledger=self.root / "revision_events.jsonl",
-            allow_empty_revision_overwrite=False,
         )
         report: dict = {}
-        with self.assertRaisesRegex(RuntimeError, "retained by the revision guard on non-capped"):
+        with redirect_stdout(io.StringIO()):
             download.download_share_float_ann_dates(ShrunkClient(), self.raw_dir, args, report)
 
-        # The capped day still reached the rescue list, and BOTH partitions were
-        # preserved -- the failure never cost data.
+        # The capped day reached the rescue list, and BOTH partitions were
+        # preserved.
         self.assertEqual(report["ann_date"]["limit_hit_days"], [capped_day])
-        self.assertEqual(report["ann_date"]["guard_retained_days"], [retracted_day])
+        self.assertEqual(report["ann_date"]["staged_days"], [retracted_day])
         self.assertEqual(
             common.parquet_rows(self.raw_dir / "share_float_ann_date" / f"ann_date={capped_day}.parquet"),
             common.SHARE_FLOAT_ROW_LIMIT,
@@ -1297,17 +1311,15 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         # A closed month whose sidecar records no coverage window must be
         # re-requested (its recorded pull may have stopped mid-month), then
         # skip forever once coverage is stamped. Skipping on bare file
-        # existence would freeze such a partition permanently.
-        existing = pd.DataFrame([{
-            "month": "202604",
-            "publish_date": "20260401",
-            "title": "old",
-            "issuing_org": "old",
-            "data_api": "cn_schedule",
-        }])
+        # existence would freeze such a partition permanently. The partitions
+        # hold what the vendor answers again, so the content is unchanged and
+        # only the sidecar records the coverage.
+        spec = common.MACRO_SPECS["cn_schedule"]
         for month in ("202604", "202605"):
             path = self.raw_dir / "cn_schedule" / f"month={month}.parquet"
-            frame = existing.assign(month=month)
+            frame = common.augment_macro_frame(
+                common.frame(CountingMacroClient().query("cn_schedule", {"m": month}, spec.fields)), spec
+            )
             common.write_parquet(
                 path,
                 frame,
@@ -1416,7 +1428,6 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             start_date="20260510",
             end_date="20260520",
             revision_ledger=str(self.root / "revision_events.jsonl"),
-            allow_empty_revision_overwrite=False,
         )
 
         merged = pd.read_parquet(path).sort_values("ts_code").reset_index(drop=True)
@@ -1436,7 +1447,6 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             force=True,
             page_limit=None,
             revision_ledger=str(self.root / "revision_events.jsonl"),
-            allow_empty_revision_overwrite=False,
             min_interval_seconds=0,
             timeout_seconds=1,
         )
@@ -1467,7 +1477,6 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             force=True,
             page_limit=None,
             revision_ledger=str(self.root / "revision_events.jsonl"),
-            allow_empty_revision_overwrite=False,
             min_interval_seconds=0,
             timeout_seconds=1,
         )
@@ -1510,7 +1519,6 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             force=True,
             page_limit=None,
             revision_ledger=str(self.root / "revision_events.jsonl"),
-            allow_empty_revision_overwrite=False,
             min_interval_seconds=0,
             timeout_seconds=1,
         )
@@ -1548,7 +1556,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(len(widened), 1)
         self.assertTrue(widened["volume"].isna().all())
 
-    def test_dup_key_identical_content_records_no_revision_event(self):
+    def test_dup_key_partitions_compare_as_multisets_of_rows(self):
         path = self.raw_dir / "dividend" / "ann_month=202001.parquet"
         rows = pd.DataFrame([
             {"ts_code": "000001.SZ", "ann_date": "20200105", "cash_div": 1.0},
@@ -1557,159 +1565,43 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         common.write_parquet(path, rows, api_name="dividend", params={}, fields=list(rows.columns))
         ledger = self.root / "dupkey_revision_events.jsonl"
 
-        output = io.StringIO()
-        with redirect_stdout(output):
-            did_write = common.write_parquet_revision_aware(
-                path, rows.copy(), api_name="dividend", params={}, fields=list(rows.columns), key_columns=["ts_code", "ann_date"], revision_ledger=ledger,
-            )
-        # Identical content with duplicate keys is not a revision: no event, no alert.
-        self.assertTrue(did_write)
+        def write(frame):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                outcome = common.publish(
+                    path, frame, api_name="dividend", params={}, fields=list(frame.columns),
+                    key_columns=["ts_code", "ann_date"], ledger=ledger,
+                )
+            return outcome, output.getvalue()
+
+        # Identical content with duplicate keys is not a revision.
+        self.assertEqual(write(rows.copy()), ("unchanged", ""))
         self.assertFalse(ledger.exists())
-        self.assertNotIn("REVISION_ALERT", output.getvalue())
 
         changed = rows.copy()
         changed.loc[1, "cash_div"] = 2.0
-        with redirect_stdout(io.StringIO()):
-            common.write_parquet_revision_aware(
-                path, changed, api_name="dividend", params={}, fields=list(changed.columns), key_columns=["ts_code", "ann_date"], revision_ledger=ledger,
-            )
+        self.assertEqual(write(changed)[0], "restated")
         event = json.loads(ledger.read_text(encoding="utf-8").splitlines()[0])
-        self.assertEqual(event["comparison_issue"], "duplicate_key_rows")
+        self.assertEqual((event["kind"], event["changed_keys"], event["removed_keys"]), ("restatement", 1, 0))
+        self.assertTrue(event["superseded_version"].endswith("-superseded"))
 
-        # Re-detecting the very same revision appends nothing: the ledger keys
-        # on the event's stable content, so an unchanged diff never duplicates.
-        with redirect_stdout(io.StringIO()):
-            common.write_parquet_revision_aware(
-                path, changed.copy(), api_name="dividend", params={}, fields=list(changed.columns), key_columns=["ts_code", "ann_date"], revision_ledger=ledger,
-            )
-        events = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()]
-        self.assertEqual(len(events), 1)
-
-        # A schema change (added column, even with empty values) is a revision
-        # despite identical row content on the shared columns.
-        widened = changed.copy()
-        widened["note"] = ""
-        with redirect_stdout(io.StringIO()):
-            common.write_parquet_revision_aware(
-                path, widened, api_name="dividend", params={}, fields=list(widened.columns), key_columns=["ts_code", "ann_date"], revision_ledger=ledger,
-            )
-        events = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()]
-        self.assertEqual(len(events), 2)
-
-    def test_revision_aware_writer_blocks_key_removal_overwrite(self):
-        path = self.raw_dir / "forecast_vip" / "ann_month=202001.parquet"
-        original = pd.DataFrame([
-            {"ts_code": "000001.SZ", "ann_date": "20200105", "type": "预增"},
-            {"ts_code": "000002.SZ", "ann_date": "20200110", "type": "预减"},
-        ])
-        common.write_parquet(path, original, api_name="forecast_vip", params={}, fields=list(original.columns))
-        truncated = pd.DataFrame([
-            {"ts_code": "000002.SZ", "ann_date": "20200110", "type": "预减"},
-            {"ts_code": "000003.SZ", "ann_date": "20200120", "type": "预增"},
-        ])
-        ledger = self.root / "removal_revision_events.jsonl"
-
-        output = io.StringIO()
-        # The refusal is the writer's own alarm: it names the dataset and
-        # partition and stops the caller instead of returning a value each
-        # download loop has to remember to check.
-        with redirect_stdout(output), self.assertRaises(common.BlockedOverwriteError) as ctx:
-            common.write_parquet_revision_aware(
-                path,
-                truncated,
-                api_name="forecast_vip",
-                params={"start_date": "20200110", "end_date": "20200131"},
-                fields=list(truncated.columns),
-                key_columns=["ts_code", "ann_date", "type"],
-                revision_ledger=ledger,
-            )
-
-        self.assertIn("skipped_key_removal_overwrite", str(ctx.exception))
-        self.assertIn("forecast_vip", str(ctx.exception))
-        self.assertIn("ann_month=202001", str(ctx.exception))
-        self.assertIn("skipped_key_removal_overwrite", output.getvalue())
-        self.assertTrue(pd.read_parquet(path).equals(original))
-        event = json.loads(ledger.read_text(encoding="utf-8").splitlines()[0])
-        self.assertEqual(event["write_action"], "skipped_key_removal_overwrite")
-        self.assertEqual(event["removed_keys"], 1)
-
-        with redirect_stdout(io.StringIO()), self.assertRaises(common.BlockedOverwriteError):
-            common.write_parquet_revision_aware(
-                path,
-                truncated,
-                api_name="forecast_vip",
-                params={"start_date": "20200110", "end_date": "20200131"},
-                fields=list(truncated.columns),
-                key_columns=["ts_code", "ann_date", "type"],
-                revision_ledger=ledger,
-            )
+        # The same answer again is unchanged: nothing written, nothing logged.
+        self.assertEqual(write(changed.copy())[0], "unchanged")
         self.assertEqual(len(ledger.read_text(encoding="utf-8").splitlines()), 1)
 
-        with redirect_stdout(io.StringIO()):
-            did_write = common.write_parquet_revision_aware(
-                path,
-                truncated,
-                api_name="forecast_vip",
-                params={"start_date": "20200110", "end_date": "20200131"},
-                fields=list(truncated.columns),
-                key_columns=["ts_code", "ann_date", "type"],
-                revision_ledger=ledger,
-                allow_key_removal_overwrite=True,
-            )
-        self.assertTrue(did_write)
-        self.assertEqual(set(pd.read_parquet(path)["ts_code"]), {"000002.SZ", "000003.SZ"})
-
-    def test_revision_aware_writer_blocks_disproportionate_shrink(self):
-        path = self.raw_dir / "repurchase" / "month=202001.parquet"
-        original = pd.DataFrame([
-            {"ts_code": f"{index:06d}.SZ", "ann_date": "20200105", "amount": 1.0}
-            for index in range(120)
-        ])
-        common.write_parquet(path, original, api_name="repurchase", params={}, fields=list(original.columns))
-        truncated = original.head(10)  # 110 keys removed: >20 keys and >20%
-        ledger = self.root / "shrink_revision_events.jsonl"
-
-        output = io.StringIO()
-        with redirect_stdout(output), self.assertRaises(common.BlockedOverwriteError) as ctx:
-            common.write_parquet_revision_aware(
-                path,
-                truncated,
-                api_name="repurchase",
-                params={},
-                fields=list(truncated.columns),
-                key_columns=["ts_code", "ann_date"],
-                revision_ledger=ledger,
-                allow_key_removal_overwrite=True,
-            )
-        self.assertIn("blocked_shrink_overwrite", str(ctx.exception))
-        self.assertIn("month=202001", str(ctx.exception))
-        self.assertIn("blocked_shrink_overwrite", output.getvalue())
-        self.assertTrue(pd.read_parquet(path).equals(original))
-        event = json.loads(ledger.read_text(encoding="utf-8").splitlines()[0])
-        self.assertEqual(event["write_action"], "blocked_shrink_overwrite")
-
-        # Paths that opt into source retractions still accept a proportionate
-        # correction; the generic daily path does not use this allowance.
-        small = original.head(115)
-        with redirect_stdout(io.StringIO()):
-            did_write = common.write_parquet_revision_aware(
-                path,
-                small,
-                api_name="repurchase",
-                params={},
-                fields=list(small.columns),
-                key_columns=["ts_code", "ann_date"],
-                revision_ledger=ledger,
-                allow_key_removal_overwrite=True,
-            )
-        self.assertTrue(did_write)
-        self.assertEqual(len(pd.read_parquet(path)), 115)
+        # An added column without values changes no key: it is written, but
+        # nothing is lost, so no version is kept and no event logged.
+        widened = changed.assign(note="")
+        self.assertEqual(write(widened)[0], "appended")
+        self.assertEqual(len(ledger.read_text(encoding="utf-8").splitlines()), 1)
+        self.assertIn("note", pd.read_parquet(path).columns)
 
     def test_vendor_backfill_of_a_key_field_is_not_a_retraction(self):
         # End of the H1-2026 reporting season: TuShare populated actual_date on
         # rows that had carried none. actual_date is part of disclosure_date's
-        # business key, so the enrichment read as a mass key removal and the
-        # shrink guard refused the write -- with no row and no company lost.
+        # business key, so the fill reads as every key removed and re-added;
+        # counted on the key minus that field nothing was removed, so the
+        # answer is accepted as a restatement instead of being staged.
         path = self.raw_dir / "disclosure_date" / "period=20260630.parquet"
         keys = ["ts_code", "end_date", "ann_date", "pre_date", "actual_date"]
         original = pd.DataFrame([
@@ -1729,30 +1621,21 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         backfilled = original.assign(actual_date="20260826")
         ledger = self.root / "backfill_revision_events.jsonl"
 
-        output = io.StringIO()
-        with redirect_stdout(output):
-            did_write = common.write_parquet_revision_aware(
-                path,
-                backfilled,
-                api_name="disclosure_date",
-                params={},
-                fields=list(backfilled.columns),
-                key_columns=keys,
-                revision_ledger=ledger,
-                allow_key_removal_overwrite=True,
+        with redirect_stdout(io.StringIO()):
+            outcome = common.publish(
+                path, backfilled, api_name="disclosure_date", params={}, fields=list(backfilled.columns),
+                key_columns=keys, ledger=ledger,
             )
-        self.assertTrue(did_write)
-        self.assertNotIn("blocked_shrink_overwrite", output.getvalue())
+        self.assertEqual(outcome, "restated")
         self.assertEqual(set(pd.read_parquet(path)["actual_date"]), {"20260826"})
-        # The ledger still records the full-key diff: the guard changed what it
-        # decides on, not what it reports.
+        # The ledger records the full-key diff: the staging rule changed what
+        # it decides on, not what the event reports.
         event = json.loads(ledger.read_text(encoding="utf-8").splitlines()[0])
-        self.assertEqual(event["removed_keys"], 120)
-        self.assertEqual(event["write_action"], "overwrite")
+        self.assertEqual((event["kind"], event["removed_keys"], event["added_keys"]), ("restatement", 120, 120))
 
-    def test_real_retraction_still_blocks_on_the_immutable_key_subset(self):
-        # Same dataset, same guard: when the stable identity itself disappears
-        # the shrink is real and must still be refused.
+    def test_real_retraction_is_staged_on_the_immutable_key_subset(self):
+        # Same dataset, same rule: when the stable identity itself disappears
+        # the shrink is real, and an answer removing most keys is staged.
         path = self.raw_dir / "disclosure_date" / "period=20260331.parquet"
         keys = ["ts_code", "end_date", "ann_date", "pre_date", "actual_date"]
         original = pd.DataFrame([
@@ -1772,20 +1655,15 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         truncated = original.head(10).assign(actual_date="20260426")
         ledger = self.root / "retraction_revision_events.jsonl"
 
-        output = io.StringIO()
-        with redirect_stdout(output), self.assertRaises(common.BlockedOverwriteError):
-            common.write_parquet_revision_aware(
-                path,
-                truncated,
-                api_name="disclosure_date",
-                params={},
-                fields=list(truncated.columns),
-                key_columns=keys,
-                revision_ledger=ledger,
-                allow_key_removal_overwrite=True,
+        with redirect_stdout(io.StringIO()):
+            outcome = common.publish(
+                path, truncated, api_name="disclosure_date", params={}, fields=list(truncated.columns),
+                key_columns=keys, ledger=ledger,
             )
-        self.assertIn("blocked_shrink_overwrite", output.getvalue())
+        self.assertEqual(outcome, "staged")
         self.assertTrue(pd.read_parquet(path).equals(original))
+        event = json.loads(ledger.read_text(encoding="utf-8").splitlines()[0])
+        self.assertEqual(event["kind"], "staged")
 
     def test_daily_audit_warns_on_exact_limit_without_pagination_probe(self):
         path = self.raw_dir / "daily" / "trade_date=20200102.parquet"
@@ -2019,7 +1897,11 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(set(live["available_at_rule"]), {"official_next_trading_day_09_from:trade_date"})
         self.assertEqual(live["rzye"].tolist(), [1.0, 1.0, 1.0])
         self.assertTrue(common.committed_partition_intact(friday))
-        self.assertEqual(common.parquet_meta(friday)["fetched_at"], fetched_at)
+        # A restamp is a restatement: the replaced partition is kept as a
+        # superseded version, and the release's hard link keeps the old bytes.
+        self.assertNotEqual(common.parquet_meta(friday)["fetched_at"], fetched_at)
+        (superseded,) = versions.list_versions(friday)
+        self.assertTrue(superseded.endswith("-superseded"))
         self.assertEqual(set(pd.read_parquet(release_copy)["available_at"]), {"2026-10-10 09:00:00+08:00"})
         self.assertEqual(common.repair_event_available_at(str(self.raw_dir), ["margin"])["files_rewritten"], 0)
 
@@ -2277,7 +2159,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         client = WeightClient()
         with patch.object(download, "DEFAULT_CN_INDEX_CODES", ["000300.SH"]):
             download.download_index_weight(
-                client, self.raw_dir, "20190101", "20211231", common.RESEARCH_HISTORY_FLOOR, False, None, False
+                client, self.raw_dir, "20190101", "20211231", common.RESEARCH_HISTORY_FLOOR, False, None
             )
             base = self.raw_dir / "index_weight" / "index_code=000300.SH"
             # The 2019 window is floored away; both years land as partitions.
@@ -2291,12 +2173,12 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             # the open year.
             calls_before = len(client.calls)
             download.download_index_weight(
-                client, self.raw_dir, "20190101", "20211231", common.RESEARCH_HISTORY_FLOOR, False, None, False
+                client, self.raw_dir, "20190101", "20211231", common.RESEARCH_HISTORY_FLOOR, False, None
             )
             self.assertEqual(len(client.calls), calls_before)
             source_rows[2022] = 3
             download.download_index_weight(
-                client, self.raw_dir, "20190101", "20221231", common.RESEARCH_HISTORY_FLOOR, False, None, False
+                client, self.raw_dir, "20190101", "20221231", common.RESEARCH_HISTORY_FLOOR, False, None
             )
             new_calls = client.calls[calls_before:]
             self.assertEqual({c["start_date"] for c in new_calls}, {"20220101"})
@@ -2308,7 +2190,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             source_rows[2019] = 5
             calls_before = len(client.calls)
             download.download_index_weight(
-                client, self.raw_dir, "20180701", "20191231", "20180701", False, None, False
+                client, self.raw_dir, "20180701", "20191231", "20180701", False, None
             )
             new_calls = client.calls[calls_before:]
             self.assertEqual({c["start_date"] for c in new_calls}, {"20180701", "20190101"})
@@ -2343,7 +2225,6 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 force=False,
                 page_limit=None,
                 revision_ledger=str(self.root / "revision_events.jsonl"),
-                allow_empty_revision_overwrite=False,
                 min_interval_seconds=0,
                 timeout_seconds=1,
                 **extra,
@@ -2360,71 +2241,56 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         )
         self.assertTrue((self.raw_dir / "index_dailybasic" / "ts_code=000905.SH" / "year=2017.parquet").exists())
 
-    def test_write_raw_generation_publishes_atomic_stamp(self):
+    def test_finished_job_publishes_atomic_stamp(self):
         raw = self.root / "genraw"
-        cron_update.write_raw_generation(raw)
-        first = json.loads((raw / ".raw_generation.json").read_text(encoding="utf-8"))
-        self.assertEqual(first["schema_version"], 2)
-        self.assertEqual(first["state"], "committed")
+        first = commit_generation(raw)
+        self.assertEqual(json.loads((raw / ".raw_generation.json").read_text(encoding="utf-8")), first)
+        self.assertEqual((first["schema_version"], first["state"]), (3, "committed"))
         self.assertTrue(first["generation_id"])
         self.assertTrue(first["completed_at"])
-        cron_update.write_raw_generation(raw)
-        second = json.loads((raw / ".raw_generation.json").read_text(encoding="utf-8"))
+        second = commit_generation(raw)
         self.assertNotEqual(first["generation_id"], second["generation_id"])
+        # A job that vouches it wrote nothing keeps the identity.
+        kept = cron_update.finish_raw_generation_update(
+            raw, second, {"job": "none"}, commit=False, datasets={}, issues=[]
+        )
+        self.assertEqual(
+            (kept["generation_id"], kept["completed_at"], kept["transaction"]),
+            (second["generation_id"], second["completed_at"], second["transaction"]),
+        )
         self.assertEqual(list((raw).glob(".raw_generation.json.tmp*")), [])
 
-    def test_raw_generation_failed_mutation_is_dirty_and_only_same_job_can_recover(self):
+    def test_no_generation_state_refuses_a_job(self):
+        # A job that died mid-run leaves the record ``updating``; the next job
+        # of any name begins, carries the per-dataset state and the open
+        # issues over, and its end commits a new generation.
         raw = self.root / "genraw"
-        cron_update.write_raw_generation(raw)
-        transaction = {
-            "job": "cn_evening_full",
-            "start_date": "20260601",
-            "end_date": "20260630",
-            "commands": [["python", "download.py", "cn_evening_full"]],
-            "config_identity": {"operation": "update"},
-        }
-        active = cron_update.begin_raw_generation_update(raw, transaction)
-        cron_update.mark_raw_generation_dirty(raw, active, error="step 2 failed")
-        dirty = json.loads((raw / ".raw_generation.json").read_text(encoding="utf-8"))
-        self.assertEqual(dirty["state"], "dirty")
-        self.assertEqual(dirty["transaction"]["job"], "cn_evening_full")
-
-        # A different job must never bless a partially-updated lake.
-        with self.assertRaisesRegex(RuntimeError, "rerun the original job"):
-            cron_update.begin_raw_generation_update(raw, {**transaction, "job": "another_job"})
-
-        # An exact identity match resumes the original transaction.
-        resumed = cron_update.begin_raw_generation_update(raw, transaction)
-        self.assertEqual(resumed["transaction_id"], active["transaction_id"])
-        cron_update.mark_raw_generation_dirty(raw, resumed, error="failed again")
-
-        # A same-job run with a newer window/command supersedes as a fresh
-        # transaction (daily-recomputed windows can never replay exactly), and
-        # its success commits and clears the fence.
-        superseding = {
-            **transaction,
-            "start_date": "20260602",
-            "end_date": "20260701",
-            "commands": [["python", "download.py", "cn_evening_full", "--force"]],
-        }
-        stdout = io.StringIO()
-        with redirect_stdout(stdout):
-            adopted = cron_update.begin_raw_generation_update(raw, superseding)
-        self.assertNotEqual(adopted["transaction_id"], active["transaction_id"])
-        note = json.loads(stdout.getvalue().splitlines()[0])
-        self.assertEqual(note["note"], "raw_generation_dirty_superseded")
-        self.assertEqual(note["previous_window"], "20260601..20260630")
-        self.assertEqual(note["previous_error"], "failed again")
+        datasets = {"anns_d": {"refreshed_at": "2026-10-23T15:30:00+00:00", "vintage": "abc"}}
+        issues = [{"kind": "staged", "dataset": "repurchase", "partition": "month=202610", "since": "", "detail": "", "version": "v"}]
         with redirect_stdout(io.StringIO()):
-            committed = cron_update.write_raw_generation(raw, transaction=adopted)
+            base = cron_update.finish_raw_generation_update(
+                raw, {}, {"job": "seed"}, commit=True, datasets=datasets, issues=issues
+            )
+        cron_update.begin_raw_generation_update(raw, {"job": "cn_evening_full", "start_date": "", "end_date": ""})
+        died = json.loads((raw / ".raw_generation.json").read_text(encoding="utf-8"))
+        self.assertEqual((died["state"], died["generation_id"]), ("updating", base["generation_id"]))
+
+        previous = cron_update.begin_raw_generation_update(raw, {"job": "another_job", "start_date": "", "end_date": ""})
+        self.assertEqual((previous["datasets"], previous["issues"]), (datasets, issues))
+        with redirect_stdout(io.StringIO()):
+            committed = cron_update.finish_raw_generation_update(
+                raw, previous, {"job": "another_job"}, commit=True, datasets=previous["datasets"], issues=previous["issues"]
+            )
         self.assertEqual(committed["state"], "committed")
-        self.assertNotEqual(committed["generation_id"], dirty["generation_id"])
+        self.assertNotEqual(committed["generation_id"], base["generation_id"])
+        self.assertEqual((committed["datasets"], committed["issues"]), (datasets, issues))
 
     def test_revision_sentinel_is_not_a_mutating_operation(self):
         self.assertNotIn("revision_sentinel", cron_update.MUTATING_OPERATIONS)
 
     def test_parquet_availability_survives_identical_refresh_but_moves_on_revision(self):
         path = self.raw_dir / "stk_auction" / "trade_date=20260713.parquet"
+        keys = list(common.DAILY_SPECS["stk_auction"].key_columns)
         first = pd.DataFrame(
             [{"trade_date": "20260713", "ts_code": "000001.SZ", "price": 10.0}]
         )
@@ -2432,33 +2298,21 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             "available_at": "2026-07-13T09:28:36+08:00",
             "rule": "observed:cn_open_auction_capture",
         }
-        common.write_parquet(
-            path,
-            first,
-            api_name="stk_auction",
-            params={},
-            fields=list(first.columns),
-            extra_metadata={"availability": availability},
-        )
-        common.write_parquet(
-            path,
-            first.copy(),
-            api_name="stk_auction",
-            params={},
-            fields=list(first.columns),
-        )
+
+        def write(frame, **extra):
+            with redirect_stdout(io.StringIO()):
+                return common.publish(
+                    path, frame, api_name="stk_auction", params={}, fields=list(frame.columns),
+                    key_columns=keys, ledger=None, **extra,
+                )
+
+        self.assertEqual(write(first, extra_metadata={"availability": availability}), "appended")
+        self.assertEqual(write(first.copy()), "unchanged")
         self.assertEqual(common.parquet_meta(path)["availability"], availability)
 
-        revised = first.assign(price=10.1)
-        common.write_parquet(
-            path,
-            revised,
-            api_name="stk_auction",
-            params={},
-            fields=list(revised.columns),
-        )
+        self.assertEqual(write(first.assign(price=10.1)), "restated")
         revised_availability = common.parquet_meta(path)["availability"]
-        self.assertEqual(revised_availability["rule"], "observed:content_revision_fetch")
+        self.assertEqual(revised_availability["rule"], "observed:source_revision_fetch")
         self.assertNotEqual(revised_availability["available_at"], availability["available_at"])
 
     def test_capture_open_auction_waits_for_stable_complete_frame(self):
@@ -2941,7 +2795,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         ):
             download.download_daily(args)
 
-    def test_non_trading_auction_job_skips_before_generation_fence(self):
+    def test_non_trading_auction_job_skips_before_the_generation_record(self):
         self._write_trade_cal("20260712", is_open="0")
         config_path = self.root / "auction_schedule.json"
         config_path.write_text(
@@ -2965,7 +2819,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             encoding="utf-8",
         )
         generation = self.raw_dir / ".raw_generation.json"
-        cron_update.write_raw_generation(self.raw_dir)
+        commit_generation(self.raw_dir)
         before = generation.read_bytes()
         args = argparse.Namespace(
             config=str(config_path),
@@ -2981,6 +2835,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             patch.object(cron_update, "parse_args", return_value=args),
             patch.object(cron_update.os, "chdir"),
             patch.object(cron_update, "JOB_STATE_ROOT", jobs_root),
+            patch.object(cron_update, "RUN_REPORT_ROOT", jobs_root.parent / "runs"),
             patch.object(cron_update, "RUN_LOG_ROOT", self.root / "logs" / "cron"),
             patch.object(cron_update, "acquire_lock", side_effect=AssertionError("must not lock")),
             redirect_stdout(io.StringIO()),
@@ -3023,7 +2878,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             encoding="utf-8",
         )
         generation = self.raw_dir / ".raw_generation.json"
-        cron_update.write_raw_generation(self.raw_dir)
+        commit_generation(self.raw_dir)
         before = json.loads(generation.read_text(encoding="utf-8"))
         args = argparse.Namespace(
             config=str(config_path),
@@ -3046,6 +2901,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             patch.object(cron_update, "parse_args", return_value=args),
             patch.object(cron_update.os, "chdir"),
             patch.object(cron_update, "JOB_STATE_ROOT", jobs_root),
+            patch.object(cron_update, "RUN_REPORT_ROOT", jobs_root.parent / "runs"),
             patch.object(cron_update, "RUN_LOG_ROOT", self.root / "logs" / "cron"),
             patch.object(cron_update, "acquire_lock", return_value=FakeLock()),
             patch.object(
@@ -3108,6 +2964,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             patch.object(cron_update, "parse_args", return_value=args),
             patch.object(cron_update.os, "chdir"),
             patch.object(cron_update, "JOB_STATE_ROOT", jobs_root),
+            patch.object(cron_update, "RUN_REPORT_ROOT", jobs_root.parent / "runs"),
             patch.object(cron_update, "RUN_LOG_ROOT", self.root / "logs" / "cron"),
             patch.object(cron_update, "acquire_lock", return_value=FakeLock()),
             patch.object(cron_update, "run_update", return_value=returncode) as runner,
@@ -3124,7 +2981,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self._write_trade_cal("20260807", is_open="1")
         config_path = self._write_event_flow_schedule("margin_retry")
         generation = self.raw_dir / ".raw_generation.json"
-        cron_update.write_raw_generation(self.raw_dir)
+        commit_generation(self.raw_dir)
         before = json.loads(generation.read_text(encoding="utf-8"))
         jobs_root = self.root / "runtime" / "jobs"
 
@@ -3160,7 +3017,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         # suppressing duplicate work at the same resolved end date.
         self._write_trade_cal("20260807", is_open="1")
         config_path = self._write_event_flow_schedule("margin_ok")
-        cron_update.write_raw_generation(self.raw_dir)
+        commit_generation(self.raw_dir)
         jobs_root = self.root / "runtime" / "jobs"
 
         self._run_job_once(config_path, "margin_ok", "20260807", 0, jobs_root)
@@ -3176,7 +3033,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self._write_trade_cal("20260807", is_open="1")
         config_path = self._write_event_flow_schedule("minutes", operation="intraday_by_date")
         generation = self.raw_dir / ".raw_generation.json"
-        cron_update.write_raw_generation(self.raw_dir)
+        commit_generation(self.raw_dir)
         jobs_root = self.root / "runtime" / "jobs"
 
         result, _, _ = self._run_job_once(
@@ -3189,12 +3046,12 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
     def test_mutated_not_ready_from_unexpected_operation_is_an_error(self):
         # Exit 76 only carries the commit-and-retry contract for the download
-        # path that enforces it; anywhere else it is an ordinary failure and
-        # must fence the lake rather than quietly commit.
+        # path that enforces it; anywhere else it is an ordinary failure,
+        # which commits what it wrote and records an error.
         self._write_trade_cal("20260807", is_open="1")
         config_path = self._write_event_flow_schedule("tier_job", operation="download_tier")
         generation = self.raw_dir / ".raw_generation.json"
-        cron_update.write_raw_generation(self.raw_dir)
+        commit_generation(self.raw_dir)
         jobs_root = self.root / "runtime" / "jobs"
 
         result, _, _ = self._run_job_once(
@@ -3205,7 +3062,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             jobs_root,
         )
         self.assertEqual(result, common.MUTATED_NOT_READY_RETRY_EXIT_CODE)
-        self.assertEqual(json.loads(generation.read_text(encoding="utf-8"))["state"], "dirty")
+        self.assertEqual(json.loads(generation.read_text(encoding="utf-8"))["state"], "committed")
         record = json.loads((jobs_root / "tier_job.json").read_text(encoding="utf-8"))
         self.assertEqual(record["status"], "error")
 
@@ -3230,7 +3087,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             }},
         }), encoding="utf-8")
         generation = self.raw_dir / ".raw_generation.json"
-        cron_update.write_raw_generation(self.raw_dir)
+        commit_generation(self.raw_dir)
         jobs_root = self.root / "runtime" / "jobs"
         self._run_job_once(config_path, "anns", "20261005", 0, jobs_root)
         landed = json.loads((jobs_root / "anns.json").read_text(encoding="utf-8"))
@@ -3249,17 +3106,20 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 (record["last_ok_at"], record["last_ok_end_date"]), (landed["updated_at"], "20261005")
             )
 
-    def test_no_mutation_failure_elsewhere_still_fences_the_lake(self):
+    def test_no_mutation_failure_elsewhere_commits_a_new_generation(self):
         # Exit 77 vouches for "nothing written" only where the text tier
-        # enforces it; any other job claiming it is an ordinary failure.
+        # enforces it; any other job claiming it is an ordinary failure,
+        # whose writes are committed under a new generation.
         config_path = self._write_event_flow_schedule("tier_job", operation="download_tier")
         generation = self.raw_dir / ".raw_generation.json"
-        cron_update.write_raw_generation(self.raw_dir)
+        before = commit_generation(self.raw_dir)
         result, _, _ = self._run_job_once(
             config_path, "tier_job", "20260807", common.NO_MUTATION_FAILURE_EXIT_CODE, self.root / "jobs"
         )
         self.assertEqual(result, common.NO_MUTATION_FAILURE_EXIT_CODE)
-        self.assertEqual(json.loads(generation.read_text(encoding="utf-8"))["state"], "dirty")
+        after = json.loads(generation.read_text(encoding="utf-8"))
+        self.assertEqual(after["state"], "committed")
+        self.assertNotEqual(after["generation_id"], before["generation_id"])
 
     def test_only_a_lone_command_passes_the_no_mutation_failure_through(self):
         ctx = cron_update.RunContext(
@@ -3287,7 +3147,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             raw_dir=str(self.raw_dir), datasets=datasets, news_src=[], major_news_src=[],
             start_date="20261001", end_date="20261006", force=True, page_limit=None,
             min_interval_seconds=0, timeout_seconds=5,
-            revision_ledger=str(self.root / "revision_events.jsonl"), allow_empty_revision_overwrite=False,
+            revision_ledger=str(self.root / "revision_events.jsonl"),
         )
 
     def test_each_text_dataset_goes_to_its_own_endpoint_with_its_own_token(self):
@@ -3301,14 +3161,14 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             sent.append((url, payload["api_name"], payload["token"]))
             fields = common.TEXT_SPECS[payload["api_name"]].fields.split(",")
             body = {"code": 0, "msg": "", "data": {"fields": fields, "items": []}}
-            return SimpleNamespace(text=json.dumps(body))
+            return SimpleNamespace(status_code=200, text=json.dumps(body), json=lambda: body)
 
         env = {"TUSHARE_TOKEN": "relay-dummy", "TUSHARE_TOKEN_TMP": "official-dummy",
                "TUSHARE_RELAY_URL": "https://relay.example"}
         with (
             chdir(self.root),
             patch.dict(os.environ, env, clear=True),
-            patch.object(tushare_sdk.requests, "post", side_effect=post),
+            patch.object(common.requests, "post", side_effect=post),
             redirect_stdout(io.StringIO()),
         ):
             self.assertEqual(download.download_text(self._text_args(["anns_d", "report_rc"])), 0)
@@ -3327,13 +3187,13 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         def post(url, **kwargs):
             sent.append(kwargs["json"]["api_name"])
             body = {"code": 40101, "msg": f"您的token不对，请确认。{token}", "data": None}
-            return SimpleNamespace(text=json.dumps(body, ensure_ascii=False))
+            return SimpleNamespace(status_code=200, text=json.dumps(body, ensure_ascii=False), json=lambda: body)
 
         out = io.StringIO()
         with (
             chdir(self.root),  # no .env here: the relay token is never needed
             patch.dict(os.environ, {"TUSHARE_TOKEN_TMP": token}, clear=True),
-            patch.object(tushare_sdk.requests, "post", side_effect=post),
+            patch.object(common.requests, "post", side_effect=post),
             patch.object(common.time, "sleep"),
             redirect_stdout(out),
         ):
@@ -3404,6 +3264,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             patch.object(cron_update, "parse_args", return_value=args),
             patch.object(cron_update.os, "chdir"),
             patch.object(cron_update, "JOB_STATE_ROOT", jobs_root),
+            patch.object(cron_update, "RUN_REPORT_ROOT", jobs_root.parent / "runs"),
             patch.object(cron_update, "RUN_LOG_ROOT", self.root / "logs" / "cron"),
             patch.object(cron_update, "acquire_lock", return_value=FakeLock()),
             patch.object(cron_update, "run_update", side_effect=concurrent_failure_writer),
@@ -3425,7 +3286,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             for seq in range(10):
                 cron_update.record_job_state(name, {"status": "ok", "seq": seq})
 
-        with patch.object(cron_update, "JOB_STATE_ROOT", jobs_root):
+        with patch.object(cron_update, "JOB_STATE_ROOT", jobs_root), patch.object(cron_update, "RUN_REPORT_ROOT", jobs_root.parent / "runs"):
             workers = [
                 threading.Thread(target=write_entries, args=(f"job_{index}",))
                 for index in range(4)
@@ -3526,7 +3387,10 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         commands = cron_update.build_job_commands(ctx)
 
-        self.assertEqual(len(commands), 6)
+        self.assertEqual(len(commands), 7)
+        # Last, the vintage report of the live Paper books, which reads no
+        # date window.
+        self.assertEqual(commands.pop(), ["/env/python", "scripts/paper/run_paper.py", "vintages"])
         command_text = [" ".join(command) for command in commands]
         self.assertIn("scripts/data/tushare_audit.py core-market", command_text[0])
         self.assertIn("scripts/data/tushare_audit.py fundamental-raw", command_text[1])
@@ -3589,6 +3453,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         with (
             patch.object(cron_update, "RUN_LOG_ROOT", log_root),
             patch.object(cron_update, "JOB_STATE_ROOT", jobs_root),
+            patch.object(cron_update, "RUN_REPORT_ROOT", jobs_root.parent / "runs"),
         ):
             cron_update.prune_run_logs(
                 now=baseline + (cron_update.RUN_LOG_RETENTION_DAYS + 1) * 86400,
@@ -3623,6 +3488,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             patch.object(cron_update.os, "chdir"),
             patch.object(cron_update, "RUN_LOG_ROOT", log_root),
             patch.object(cron_update, "JOB_STATE_ROOT", jobs_root),
+            patch.object(cron_update, "RUN_REPORT_ROOT", jobs_root.parent / "runs"),
             patch.object(cron_update, "should_skip_completed", return_value=True),
             patch.object(cron_update, "acquire_lock", side_effect=AssertionError("must not lock")),
             redirect_stdout(io.StringIO()) as output,
@@ -3641,6 +3507,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             patch.object(cron_update.os, "chdir"),
             patch.object(cron_update, "RUN_LOG_ROOT", log_root),
             patch.object(cron_update, "JOB_STATE_ROOT", jobs_root),
+            patch.object(cron_update, "RUN_REPORT_ROOT", jobs_root.parent / "runs"),
             patch.object(cron_update, "should_skip_completed", return_value=False),
             patch.object(cron_update, "acquire_lock", side_effect=RuntimeError("lock is held")),
             redirect_stdout(io.StringIO()),
@@ -3866,6 +3733,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             patch.object(cron_update, "parse_args", return_value=args("cn_nightly_pit_event_build")),
             patch.object(cron_update.os, "chdir"),
             patch.object(cron_update, "JOB_STATE_ROOT", jobs_root),
+            patch.object(cron_update, "RUN_REPORT_ROOT", jobs_root.parent / "runs"),
             patch.object(cron_update, "RUN_LOG_ROOT", self.root / "logs" / "cron"),
             patch.object(cron_update, "acquire_lock", return_value=FakeLock()),
             patch.object(cron_update, "run_update", return_value=0),
@@ -4239,12 +4107,17 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         original = pd.DataFrame([{"l1_code": "801010.SI", "ts_code": "000001.SZ", "in_date": "20200101", "out_date": ""}])
         original.to_parquet(path, index=False)
         classify = pd.DataFrame([{"index_code": "801010.SI", "level": "L1"}])
-        download.download_index_member_all(EmptyReferenceClient(), self.raw_dir, classify, True)
+        report = self.raw_dir.parent / "run_report.jsonl"
+        with patch.dict(os.environ, {versions.RUN_REPORT_ENV: str(report)}):
+            download.download_index_member_all(EmptyReferenceClient(), self.raw_dir, classify, True, ledger=None)
         self.assertTrue(pd.read_parquet(path).equals(original))
+        # The kept partition is an open defect, not a silent skip.
+        outcome = json.loads(report.read_text(encoding="utf-8"))
+        self.assertEqual((outcome["dataset"], outcome["outcome"]), ("index_member_all", "defect"))
         # An absent partition with an empty vendor response must fail fast.
         classify_missing = pd.DataFrame([{"index_code": "801999.SI", "level": "L1"}])
         with self.assertRaisesRegex(RuntimeError, "zero rows for required reference partition"):
-            download.download_index_member_all(EmptyReferenceClient(), self.raw_dir, classify_missing, True)
+            download.download_index_member_all(EmptyReferenceClient(), self.raw_dir, classify_missing, True, ledger=None)
 
     def test_trade_cal_force_refresh_merges_without_shrinking_year_partition(self):
         path = self.raw_dir / "trade_cal" / "exchange=SSE" / "year=2026.parquet"
@@ -4254,7 +4127,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         ]).to_parquet(path, index=False)
         client = TradeCalClient()
 
-        open_dates = download.download_trade_cal(client, self.raw_dir, "20260604", "20260604", force=True)
+        open_dates = download.download_trade_cal(client, self.raw_dir, "20260604", "20260604", force=True, ledger=None)
 
         refreshed = pd.read_parquet(path)
         self.assertEqual(sorted(refreshed["cal_date"].astype(str).tolist()), ["20260603", "20260604"])
@@ -4292,7 +4165,6 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             raw_dir=str(self.raw_dir),
             page_limit=None,
             revision_ledger=str(self.root / "revision_events.jsonl"),
-            allow_empty_revision_overwrite=False,
             reference_min_interval_seconds=None,
             min_interval_seconds=0,
             timeout_seconds=1,
@@ -4348,7 +4220,6 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             raw_dir=str(self.raw_dir),
             page_limit=None,
             revision_ledger=str(self.root / "revision_events.jsonl"),
-            allow_empty_revision_overwrite=False,
             reference_min_interval_seconds=None,
             min_interval_seconds=0,
             timeout_seconds=1,
@@ -4471,12 +4342,13 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         ledger_lines = (self.root / "revision_events.jsonl").read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(ledger_lines), 1)
         ledger_event = json.loads(ledger_lines[0])
-        self.assertEqual(ledger_event["schema_version"], 2)
-        self.assertEqual(ledger_event["write_action"], "overwrite")
+        self.assertEqual(ledger_event["schema_version"], 3)
+        self.assertEqual(ledger_event["kind"], "restatement")
         self.assertTrue(ledger_event["write_id"])
+        self.assertTrue(ledger_event["superseded_version"])
         self.assertEqual(set(pd.read_parquet(self.raw_dir / "daily" / "trade_date=20200102.parquet")["ts_code"]), {"999999.SZ"})
 
-    def test_daily_force_refresh_does_not_drop_existing_keys(self):
+    def test_daily_force_refresh_keeps_the_partition_a_removal_replaces(self):
         self._write_trade_cal("20200102")
         ledger = self.root / "daily_key_removal.jsonl"
         for dataset in ("daily", "adj_factor"):
@@ -4492,11 +4364,9 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 params={"trade_date": "20200102"},
                 fields=list(original.columns),
             )
-            output = io.StringIO()
-            # A forced re-pull that drops existing keys used to be counted as a
-            # zero-row partition, which reported the wrong cause (and said
-            # nothing at all for a zero_rows_ok dataset).
-            with redirect_stdout(output), self.assertRaises(common.BlockedOverwriteError) as ctx:
+            # A forced re-pull that drops half of the keys is a restatement:
+            # accepted, with the partition it replaces kept as a version.
+            with redirect_stdout(io.StringIO()):
                 download.download_trade_date_dataset(
                     DailyMarketClient(),
                     self.raw_dir,
@@ -4505,11 +4375,10 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                     True,
                     5000,
                     ledger,
-                    False,
                 )
-            self.assertIn("skipped_key_removal_overwrite", str(ctx.exception), dataset)
-            self.assertIn(dataset, str(ctx.exception))
-            kept = pd.read_parquet(path)
+            self.assertEqual(set(pd.read_parquet(path)["ts_code"]), {"000001.SZ"}, dataset)
+            (superseded,) = versions.list_versions(path)
+            kept = pd.read_parquet(versions.version_dir(path) / f"{superseded}.parquet")
             self.assertEqual(set(kept["ts_code"]), {"000001.SZ", "000002.SZ"}, dataset)
 
     def test_fundamental_update_refreshes_recent_periods_and_affected_ts_code_snapshots(self):
@@ -4571,7 +4440,6 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             min_interval_seconds=0,
             timeout_seconds=1,
             revision_ledger=None,
-            allow_empty_revision_overwrite=False,
         )
         client = FundamentalClient()
         with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=client):
@@ -4615,7 +4483,6 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             min_interval_seconds=0,
             timeout_seconds=1,
             revision_ledger=None,
-            allow_empty_revision_overwrite=False,
         )
         client = FundamentalClient()
 
@@ -4649,7 +4516,6 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             force=True,
             page_limit=None,
             revision_ledger=str(self.root / "revision_events.jsonl"),
-            allow_empty_revision_overwrite=False,
             min_interval_seconds=0,
             timeout_seconds=1,
         )
@@ -4794,51 +4660,31 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             audit.revision_sentinel_spec("ths_hot")
 
-    def test_revision_comparison_flags_missing_and_duplicate_keys(self):
-        missing = common.build_revision_event(
-            dataset="daily",
-            partition="trade_date=20200102",
-            path=self.raw_dir / "daily" / "trade_date=20200102.parquet",
-            old_df=pd.DataFrame([{"trade_date": "20200102", "open": 1.0}]),
-            new_df=pd.DataFrame([{"trade_date": "20200102", "ts_code": "000001.SZ", "open": 1.0}]),
-            key_columns=["trade_date", "ts_code"],
-            source="unit",
+    def test_key_comparison_handles_missing_key_columns_and_duplicate_keys(self):
+        # A missing key column reads as empty text: the old row's key differs.
+        missing = common.diff_frames(
+            pd.DataFrame([{"trade_date": "20200102", "open": 1.0}]),
+            pd.DataFrame([{"trade_date": "20200102", "ts_code": "000001.SZ", "open": 1.0}]),
+            ["trade_date", "ts_code"],
         )
-        self.assertIsNotNone(missing)
-        self.assertEqual(missing["comparison_issue"], "missing_key_columns")
-        self.assertEqual(missing["missing_key_columns_old"], ["ts_code"])
-
-        duplicate = common.build_revision_event(
-            dataset="daily",
-            partition="trade_date=20200102",
-            path=self.raw_dir / "daily" / "trade_date=20200102.parquet",
-            old_df=pd.DataFrame([
+        self.assertEqual((len(missing.removed), len(missing.added)), (1, 1))
+        # A repeated key compares as the multiset of its rows.
+        duplicate = common.diff_frames(
+            pd.DataFrame([
                 {"trade_date": "20200102", "ts_code": "000001.SZ", "open": 1.0},
                 {"trade_date": "20200102", "ts_code": "000001.SZ", "open": 1.0},
             ]),
-            new_df=pd.DataFrame([{"trade_date": "20200102", "ts_code": "000001.SZ", "open": 1.0}]),
-            key_columns=["trade_date", "ts_code"],
-            source="unit",
+            pd.DataFrame([{"trade_date": "20200102", "ts_code": "000001.SZ", "open": 1.0}]),
+            ["trade_date", "ts_code"],
         )
-        self.assertIsNotNone(duplicate)
-        self.assertEqual(duplicate["comparison_issue"], "duplicate_key_rows")
-        self.assertEqual(duplicate["duplicate_key_rows_old"], 1)
+        self.assertEqual((len(duplicate.changed), len(duplicate.removed), duplicate.changed_columns), (1, 0, {}))
 
     def test_revision_comparison_canonicalizes_numeric_values(self):
         old_df = pd.DataFrame([{"trade_date": "20200102", "ts_code": "000001.SZ", "adj_factor": 1}])
         new_df = pd.DataFrame([{"trade_date": "20200102", "ts_code": "000001.SZ", "adj_factor": 1.0}])
-        event = common.build_revision_event(
-            dataset="adj_factor",
-            partition="trade_date=20200102",
-            path=self.raw_dir / "adj_factor" / "trade_date=20200102.parquet",
-            old_df=old_df,
-            new_df=new_df,
-            key_columns=["trade_date", "ts_code"],
-            source="unit",
-        )
-        self.assertIsNone(event)
+        self.assertTrue(common.diff_frames(old_df, new_df, ["trade_date", "ts_code"]).empty)
 
-    def test_revision_event_records_changed_columns_and_row_samples(self):
+    def test_revision_event_records_counts_without_samples(self):
         old_df = pd.DataFrame([
             {"trade_date": "20200102", "ts_code": "000001.SZ", "close": 10.0, "amount": 100.0},
             {"trade_date": "20200102", "ts_code": "000002.SZ", "close": 20.0, "amount": 200.0},
@@ -4849,29 +4695,19 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             {"trade_date": "20200102", "ts_code": "000002.SZ", "close": 20.0, "amount": 201.5},
             {"trade_date": "20200102", "ts_code": "000004.SZ", "close": 40.0, "amount": 400.0},
         ])
-
-        event = common.build_revision_event(
-            dataset="daily",
-            partition="trade_date=20200102",
-            path=self.raw_dir / "daily" / "trade_date=20200102.parquet",
-            old_df=old_df,
-            new_df=new_df,
-            key_columns=["trade_date", "ts_code"],
-            source="unit",
+        diff = common.diff_frames(old_df, new_df, ["trade_date", "ts_code"])
+        event = common.revision_event(
+            "restatement", dataset="daily", partition="trade_date=20200102", source="unit",
+            key_columns=["trade_date", "ts_code"], diff=diff, old_rows=3, new_rows=3,
+            superseded_version="20261024T000000000000Z-superseded",
         )
 
-        self.assertIsNotNone(event)
         self.assertEqual(tuple(event), common.REVISION_EVENT_FIELDS)
         self.assertEqual(event["schema_version"], common.REVISION_EVENT_SCHEMA_VERSION)
-        self.assertIsNone(event["write_action"])
-        self.assertEqual(event["changed_keys"], 2)
-        self.assertEqual(event["added_keys"], 1)
-        self.assertEqual(event["removed_keys"], 1)
+        self.assertEqual((event["old_keys"], event["new_keys"]), (3, 3))
+        self.assertEqual((event["changed_keys"], event["added_keys"], event["removed_keys"]), (2, 1, 1))
         self.assertEqual(event["changed_columns"], {"amount": 1, "close": 1})
-        self.assertEqual(event["changed_columns_sample"][0]["key"], ["20200102", "000001.SZ"])
-        self.assertEqual(event["changed_columns_sample"][0]["changes"], [{"column": "close", "old": "10", "new": "10.5"}])
-        self.assertEqual(event["added_rows_sample"][0]["key"], ["20200102", "000004.SZ"])
-        self.assertEqual(event["removed_rows_sample"][0]["key"], ["20200102", "000003.SZ"])
+        self.assertFalse(any("sample" in field for field in event))
 
     def test_top_list_name_is_a_revisable_value_not_part_of_the_key(self):
         # The vendor restates top_list.name to a later name on historical rows.
@@ -4902,17 +4738,10 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         new_df = rows([f"新名{index}" for index in range(25)])
         self.assertFalse(old_df.duplicated(keys).any())
         self.assertEqual(int(old_df.duplicated(["trade_date", "ts_code"]).sum()), 1)
-        event = common.build_revision_event(
-            dataset="top_list",
-            partition="trade_date=20240611",
-            path=self.raw_dir / "top_list" / "trade_date=20240611.parquet",
-            old_df=old_df,
-            new_df=new_df,
-            key_columns=keys,
-            source="unit",
+        event = common.revision_event(
+            "probe", dataset="top_list", partition="trade_date=20240611", source="unit",
+            key_columns=keys, diff=common.diff_frames(old_df, new_df, keys), old_rows=len(old_df), new_rows=len(new_df),
         )
-        self.assertIsNotNone(event)
-        self.assertEqual(event["comparison_issue"], "")
         self.assertEqual((event["changed_keys"], event["added_keys"], event["removed_keys"]), (26, 0, 0))
         self.assertEqual(event["changed_columns"], {"name": 26})
         self.assertFalse(audit.sentinel_event_is_structural(event))
@@ -4929,7 +4758,6 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             end_date="20200102",
             datasets=["limit_list_d"],
             revision_ledger=str(self.root / "zero_ok_revision_events.jsonl"),
-            allow_empty_revision_overwrite=False,
             force=True,
             page_limit=10000,
             min_interval_seconds=0,
@@ -4941,11 +4769,13 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             with redirect_stdout(output):
                 self.assertEqual(download.download_board_trading(args), 0)
 
-        self.assertIn("skipped_empty_revision_overwrite", output.getvalue())
+        # An empty answer for a non-empty partition is a defect: the current
+        # version stays and the run goes on.
+        self.assertIn("empty answer for a partition holding 1 rows", output.getvalue())
         self.assertTrue(pd.read_parquet(path).equals(original))
         ledger = (self.root / "zero_ok_revision_events.jsonl").read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(ledger), 1)
-        self.assertEqual(json.loads(ledger[0])["removed_keys"], 1)
+        self.assertEqual(json.loads(ledger[0])["kind"], "defect")
 
     @staticmethod
     def _shrinking_client(api_name: str, keep: int, keyed_columns: dict[str, list[str]]):
@@ -4973,10 +4803,16 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         common.write_parquet(path, original, api_name=api_name, params={}, fields=list(original.columns))
         return original
 
-    def test_board_trading_blocked_shrink_fails_the_run(self):
-        # The board tier tracked nothing at all: a refused destructive overwrite
-        # was added straight into `written` and the job still exited 0, with two
-        # of these datasets (limit_list_d, kpl_list) in every default snapshot.
+    def _assert_staged(self, path: Path, original: pd.DataFrame, ledger: Path) -> None:
+        """An answer removing most keys stays out of the visible partition:
+        it is a staged version beside it, and the ledger names it."""
+        self.assertTrue(pd.read_parquet(path).equals(original))
+        staged = [version for version in versions.list_versions(path) if version.endswith("-staged")]
+        self.assertEqual(len(staged), 1)
+        events = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([(event["kind"], event["version"]) for event in events], [("staged", staged[0])])
+
+    def test_board_trading_extreme_shrink_is_staged_and_the_run_goes_on(self):
         self._write_trade_cal("20200102")
         path = self.raw_dir / "limit_list_d" / "trade_date=20200102.parquet"
         original = self._seed_shrinkable_partition(
@@ -4999,7 +4835,6 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             end_date="20200102",
             datasets=["limit_list_d"],
             revision_ledger=str(self.root / "board_revision_events.jsonl"),
-            allow_empty_revision_overwrite=False,
             force=True,
             page_limit=10000,
             min_interval_seconds=0,
@@ -5010,21 +4845,14 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             patch.object(download, "load_token", return_value="token"),
             patch.object(download, "TuShareClient", return_value=client),
             redirect_stdout(io.StringIO()),
-            self.assertRaises(common.BlockedOverwriteError) as ctx,
         ):
-            download.download_board_trading(args)
+            self.assertEqual(download.download_board_trading(args), 0)
 
-        self.assertIn("limit_list_d", str(ctx.exception))
-        self.assertIn("trade_date=20200102", str(ctx.exception))
-        self.assertTrue(pd.read_parquet(path).equals(original))
-        ledger = (self.root / "board_revision_events.jsonl").read_text(encoding="utf-8").splitlines()
-        self.assertEqual(json.loads(ledger[0])["write_action"], "blocked_shrink_overwrite")
+        self._assert_staged(path, original, self.root / "board_revision_events.jsonl")
 
-    def test_zero_rows_ok_event_dataset_blocked_shrink_fails_the_run(self):
-        # The event/flow escalation used to be gated on `zero_rows_ok`, an
-        # unrelated flag, which exempted nine of the thirteen trade-date event
-        # datasets from the alarm. Tolerating an EMPTY day says nothing about
-        # tolerating a refused destructive overwrite.
+    def test_zero_rows_ok_event_dataset_extreme_shrink_is_staged(self):
+        # Tolerating an EMPTY day says nothing about accepting an answer that
+        # removes most of a partition.
         self.assertTrue(common.EVENT_FLOW_SPECS["cyq_perf"].zero_rows_ok)
         self._write_trade_cal("20200102")
         path = self.raw_dir / "cyq_perf" / "trade_date=20200102.parquet"
@@ -5047,7 +4875,6 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             end_date="20200102",
             datasets=["cyq_perf"],
             revision_ledger=str(self.root / "cyq_revision_events.jsonl"),
-            allow_empty_revision_overwrite=False,
             force=True,
             page_limit=None,
             min_interval_seconds=0,
@@ -5059,15 +4886,12 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             patch.object(download, "load_token", return_value="token"),
             patch.object(download, "TuShareClient", return_value=client),
             redirect_stdout(io.StringIO()),
-            self.assertRaises(common.BlockedOverwriteError) as ctx,
         ):
             download.download_event_flow(args)
 
-        self.assertIn("cyq_perf", str(ctx.exception))
-        self.assertTrue(pd.read_parquet(path).equals(original))
+        self._assert_staged(path, original, self.root / "cyq_revision_events.jsonl")
 
-    def test_event_range_month_blocked_shrink_fails_the_run(self):
-        # range_month had no blocked tracking at all.
+    def test_event_range_month_extreme_shrink_is_staged(self):
         path = self.raw_dir / "repurchase" / "month=202001.parquet"
         original = self._seed_shrinkable_partition(
             path,
@@ -5088,8 +4912,8 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             "exp_date": ["", ""],
         })
 
-        with redirect_stdout(io.StringIO()), self.assertRaises(common.BlockedOverwriteError) as ctx:
-            download.download_event_range_month(
+        with redirect_stdout(io.StringIO()):
+            written = download.download_event_range_month(
                 client,
                 self.raw_dir,
                 common.EVENT_FLOW_SPECS["repurchase"],
@@ -5099,9 +4923,8 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 str(self.root / "range_month_revision_events.jsonl"),
             )
 
-        self.assertIn("repurchase", str(ctx.exception))
-        self.assertIn("month=202001", str(ctx.exception))
-        self.assertTrue(pd.read_parquet(path).equals(original))
+        self.assertEqual(written, 0)
+        self._assert_staged(path, original, self.root / "range_month_revision_events.jsonl")
 
     def test_event_range_month_counts_only_partitions_it_wrote(self):
         # `written` decides the event/flow no-mutation exit contract, so a
@@ -5210,18 +5033,25 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(sorted(landed["holder_num"].tolist()), list(range(6)))
         self.assertTrue(all(call["offset"] == 0 for call in client.calls))
 
-    def test_event_range_month_refuses_a_single_day_its_pager_repeats(self):
+    def test_event_range_month_records_a_day_its_pager_repeats_as_a_defect(self):
+        # A row served on two pages means as many rows are missing: the answer
+        # is defective, the month keeps its current version (here: none) and
+        # the defect is recorded instead of ending the run.
         spec = common.EVENT_FLOW_SPECS["stk_holdernumber"]
         client = TieUnstablePagingClient([
             {"ts_code": f"{index:06d}.SZ", "ann_date": "20260905", "end_date": "20260820", "holder_num": index}
             for index in range(5)
         ])
-        with redirect_stdout(io.StringIO()), self.assertRaisesRegex(RuntimeError, "on two pages"):
-            download.download_event_range_month(
-                client, self.raw_dir, spec, [("20260901", "20260930", "202609")], True, 4,
-                str(self.root / "paging_revision_events.jsonl"),
+        ledger = self.root / "paging_revision_events.jsonl"
+        with redirect_stdout(io.StringIO()):
+            written = download.download_event_range_month(
+                client, self.raw_dir, spec, [("20260901", "20260930", "202609")], True, 4, str(ledger),
             )
+        self.assertEqual(written, 0)
         self.assertFalse((self.raw_dir / "stk_holdernumber" / "month=202609.parquet").exists())
+        event = json.loads(ledger.read_text(encoding="utf-8").splitlines()[0])
+        self.assertEqual((event["kind"], event["partition"]), ("defect", "month=202609"))
+        self.assertIn("on two pages", event["detail"])
 
     def test_event_flow_report_period_window_reaches_back_by_the_disclosure_lag(self):
         # A nightly window over announcements must request every report period
@@ -5249,8 +5079,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(first_window("top10_floatholders"), ("20260517", "20260531"))
         self.assertEqual(first_window("repurchase"), ("20260914", "20260930"))
 
-    def test_bak_basic_blocked_shrink_fails_the_run(self):
-        # download_bak_basic discarded the writer's answer entirely.
+    def test_bak_basic_extreme_shrink_is_staged(self):
         path = self.raw_dir / "bak_basic" / "trade_date=20200102.parquet"
         original = self._seed_shrinkable_partition(
             path,
@@ -5266,32 +5095,31 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             "ts_code": ["000000.SZ", "000001.SZ"],
         })
 
-        with redirect_stdout(io.StringIO()), self.assertRaises(common.BlockedOverwriteError) as ctx:
+        with redirect_stdout(io.StringIO()):
             download.download_bak_basic(
                 client, self.raw_dir, ["20200102"], "20200102", True,
-                self.root / "bak_basic_revision_events.jsonl", False,
+                self.root / "bak_basic_revision_events.jsonl",
             )
 
-        self.assertIn("bak_basic", str(ctx.exception))
-        self.assertTrue(pd.read_parquet(path).equals(original))
+        self._assert_staged(path, original, self.root / "bak_basic_revision_events.jsonl")
 
-    def test_revision_aware_writer_empty_guard_does_not_depend_on_ledger(self):
+    def test_empty_answer_defect_does_not_depend_on_a_ledger(self):
         path = self.raw_dir / "limit_list_d" / "trade_date=20200102.parquet"
         original = pd.DataFrame([{"trade_date": "20200102", "ts_code": "000001.SZ", "limit": "U"}])
         common.write_parquet(path, original, api_name="limit_list_d", params={}, fields=list(original.columns))
 
-        did_write = common.write_parquet_revision_aware(
-            path,
-            pd.DataFrame(columns=list(original.columns)),
-            api_name="limit_list_d",
-            params={"trade_date": "20200102"},
-            fields=list(original.columns),
-            key_columns=["trade_date", "ts_code", "limit"],
-            revision_ledger=None,
-            allow_empty_revision_overwrite=False,
-        )
+        with redirect_stdout(io.StringIO()):
+            outcome = common.publish(
+                path,
+                pd.DataFrame(columns=list(original.columns)),
+                api_name="limit_list_d",
+                params={"trade_date": "20200102"},
+                fields=list(original.columns),
+                key_columns=["trade_date", "ts_code", "limit"],
+                ledger=None,
+            )
 
-        self.assertFalse(did_write)
+        self.assertEqual(outcome, "defect")
         self.assertTrue(pd.read_parquet(path).equals(original))
 
     def test_required_event_flow_zero_rows_raise_instead_of_cron_ok(self):
@@ -5651,14 +5479,15 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(severity, "error")
         self.assertEqual(details["missing_sample"], ["885002.TI"])  # type S intentionally not expected
 
-    def test_blocked_fundamental_shrink_overwrite_raises(self):
+    def test_fundamental_extreme_shrink_is_staged(self):
         spec = common.FUNDAMENTAL_SPECS["fina_mainbz_vip"]
         keys = list(spec.key_columns)
         d = self.raw_dir / spec.api_name
         d.mkdir(parents=True, exist_ok=True)
         old = pd.DataFrame({col: [f"{col}{i}" for i in range(40)] for col in keys})
         old["bz_sales"] = 1.0
-        old.to_parquet(d / "ts_code=000001.SZ.parquet", index=False)
+        path = d / "ts_code=000001.SZ.parquet"
+        common.write_parquet(path, old, api_name=spec.api_name, params={}, fields=list(old.columns))
 
         class ShrunkClient(EmptyTradeDateClient):
             def query(self, api_name, params=None, fields="", retries=5):
@@ -5667,15 +5496,12 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 rows = [[f"{col}{i}" if col in keys else "2.0" for col in columns] for i in range(3)]
                 return common.ApiResult(columns, rows)
 
-        # The guard keeps the old partition AND the run must fail loudly:
-        # swallowing the refusal froze fina_mainbz_vip at a stale vintage.
-        with self.assertRaises(common.BlockedOverwriteError) as ctx:
+        ledger = self.root / "fundamental_revision_events.jsonl"
+        with redirect_stdout(io.StringIO()):
             download.download_fundamental_ts_code_dataset(
-                ShrunkClient(), self.raw_dir, spec, ["000001.SZ"], True, 5000,
+                ShrunkClient(), self.raw_dir, spec, ["000001.SZ"], True, 5000, revision_ledger=ledger,
             )
-        self.assertIn("revision guard refused", str(ctx.exception))
-        self.assertIn("ts_code=000001.SZ", str(ctx.exception))
-        self.assertEqual(len(pd.read_parquet(d / "ts_code=000001.SZ.parquet")), 40)
+        self._assert_staged(path, old, ledger)
 
     def test_event_skip_reattempts_partition_without_intact_sidecar(self):
         # An interrupted write leaves a parquet without (or with a stale)
@@ -5726,7 +5552,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         ledger = self.root / "daily_skip_heal.jsonl"
         with redirect_stdout(io.StringIO()):
             zero_skipped = download.download_trade_date_dataset(
-                client, self.raw_dir, common.DAILY_SPECS["daily"], ["20200102"], False, 5000, ledger, False,
+                client, self.raw_dir, common.DAILY_SPECS["daily"], ["20200102"], False, 5000, ledger,
             )
         self.assertEqual([api for api, _ in client.calls], ["daily"])
         self.assertEqual(zero_skipped, 0)
@@ -5734,7 +5560,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         client.calls.clear()
         with redirect_stdout(io.StringIO()):
             download.download_trade_date_dataset(
-                client, self.raw_dir, common.DAILY_SPECS["daily"], ["20200102"], False, 5000, ledger, False,
+                client, self.raw_dir, common.DAILY_SPECS["daily"], ["20200102"], False, 5000, ledger,
             )
         self.assertEqual(client.calls, [])
         sidecar = path.with_suffix(path.suffix + ".meta.json")
@@ -5745,7 +5571,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         client.calls.clear()
         with redirect_stdout(io.StringIO()):
             download.download_trade_date_dataset(
-                client, self.raw_dir, common.DAILY_SPECS["daily"], ["20200102"], False, 5000, ledger, False,
+                client, self.raw_dir, common.DAILY_SPECS["daily"], ["20200102"], False, 5000, ledger,
             )
         self.assertEqual([api for api, _ in client.calls], ["daily"])
         self.assertTrue(common.committed_partition_intact(path))
@@ -5766,12 +5592,12 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         client = LimitClient()
         with redirect_stdout(io.StringIO()):
-            download.download_board_trade_date_dataset(client, self.raw_dir, spec, ["20200102"], False, 5000, None, False)
+            download.download_board_trade_date_dataset(client, self.raw_dir, spec, ["20200102"], False, 5000, None)
         self.assertEqual([api for api, _ in client.calls], ["limit_list_d"])
         self.assertTrue(common.committed_partition_intact(path))
         client.calls.clear()
         with redirect_stdout(io.StringIO()):
-            download.download_board_trade_date_dataset(client, self.raw_dir, spec, ["20200102"], False, 5000, None, False)
+            download.download_board_trade_date_dataset(client, self.raw_dir, spec, ["20200102"], False, 5000, None)
         self.assertEqual(client.calls, [])
 
     def test_share_float_skip_reattempts_partition_without_intact_sidecar(self):
@@ -5808,13 +5634,16 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         keys = list(spec.key_columns)
         path = self.raw_dir / spec.api_name / "period=20200331.parquet"
         path.parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame({col: ["x"] for col in keys}).to_parquet(path, index=False)
+        answer = ["000001.SZ", "20200430", "20200430", "20200331", "1", "1", "1"]
+        # The same row the vendor answers, written without a commit identity:
+        # the identical answer is committed again to heal the pair.
+        pd.DataFrame([answer], columns=keys).to_parquet(path, index=False)
         self.assertFalse(common.committed_partition_intact(path))
 
         class PeriodClient(EmptyTradeDateClient):
             def query(self, api_name, params=None, fields="", retries=5):
                 self.calls.append((api_name, dict(params or {})))
-                return common.ApiResult(keys, [["000001.SZ", "20200430", "20200430", "20200331", "1", "1", "1"]])
+                return common.ApiResult(keys, [answer])
 
         client = PeriodClient()
         with redirect_stdout(io.StringIO()):
@@ -5971,9 +5800,9 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertIn("not_ready_after_mutation", output.getvalue())
         self.assertNotIn("not_ready_no_mutation", output.getvalue())
 
-    def test_event_flow_blocked_shrink_raises_even_when_not_ready_enabled(self):
-        # A non-empty response refused by the destructive-shrink guard is a
-        # data-integrity alarm, never a "source not published yet" condition.
+    def test_event_flow_extreme_shrink_is_staged_not_a_not_ready_day(self):
+        # A non-empty answer removing most keys is staged for an operator; it
+        # is never a "source not published yet" condition.
         self._write_trade_cal_with_stamping_window("20200102")
         path = self.raw_dir / "margin" / "trade_date=20200102.parquet"
         original = pd.DataFrame(
@@ -6008,14 +5837,10 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         )
 
         with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=ShrunkMarginClient()):
-            output = io.StringIO()
-            with (
-                redirect_stdout(output),
-                self.assertRaisesRegex(common.BlockedOverwriteError, "revision guard refused"),
-            ):
-                download.download_event_flow(args)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(download.download_event_flow(args), 0)
 
-        self.assertTrue(pd.read_parquet(path).equals(original))
+        self._assert_staged(path, original, self.root / "shrink_revision_events.jsonl")
 
     def test_event_flow_zero_rows_not_ready_partial_write_reports_not_ready(self):
         self._write_trade_cal_with_stamping_window("20200102")
@@ -6928,11 +6753,10 @@ class _StubLock:
 
 
 class CronFailureRecordingTest(unittest.TestCase):
-    """A cron job that aborts before run_update (e.g. at the dirty-lake fence)
-    must still demote its per-job state record: during the
-    2026-07-23..29 outage, 9 of 14 jobs kept a week-old ``ok`` because the
-    fence RuntimeError propagated past the state writer (silent false
-    success)."""
+    """A cron job that aborts before run_update must still demote its per-job
+    state record: during the 2026-07-23..29 outage, 9 of 14 jobs kept a
+    week-old ``ok`` because a pre-run RuntimeError propagated past the state
+    writer (silent false success)."""
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -6973,32 +6797,29 @@ class CronFailureRecordingTest(unittest.TestCase):
             patch.object(cron_update.os, "chdir"),
             patch.object(cron_update, "prune_run_logs"),
             patch.object(cron_update, "JOB_STATE_ROOT", self.jobs_root),
+            patch.object(cron_update, "RUN_REPORT_ROOT", self.jobs_root.parent / "runs"),
             patch.object(cron_update, "RUN_LOG_ROOT", self.root / "logs" / "cron"),
             patch.object(cron_update, "acquire_lock", return_value=_StubLock()),
         )
 
-    def test_dirty_lake_fence_abort_records_error_state(self) -> None:
-        txn = cron_update.begin_raw_generation_update(self.raw_dir, {
-            "job": "other_job", "start_date": "20260601", "end_date": "20260701",
-            "commands": [["python", "download.py", "evening"]], "config_identity": {},
-        })
-        cron_update.mark_raw_generation_dirty(self.raw_dir, txn, error="boom")
-
+    def test_pre_run_abort_records_error_state(self) -> None:
+        commit_generation(self.raw_dir)
         patches = self._run_main()
-        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], \
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], \
+                patch.object(cron_update, "begin_raw_generation_update", side_effect=RuntimeError("record unwritable")), \
                 redirect_stdout(io.StringIO()), \
-                self.assertRaisesRegex(RuntimeError, "unfinished mutation"):
+                self.assertRaisesRegex(RuntimeError, "record unwritable"):
             cron_update.main()
 
         record = self._job_record()
         self.assertEqual(record["status"], "error")
-        self.assertIn("unfinished mutation", record["error"])
+        self.assertIn("record unwritable", record["error"])
         self.assertEqual(record["end_date"], "20260723")
 
     def test_nonzero_returncode_records_error(self) -> None:
-        cron_update.write_raw_generation(self.raw_dir)
+        before = commit_generation(self.raw_dir)
         patches = self._run_main()
-        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], \
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], \
                 patch.object(cron_update, "run_update", return_value=1), \
                 redirect_stdout(io.StringIO()):
             self.assertEqual(cron_update.main(), 1)
@@ -7008,9 +6829,11 @@ class CronFailureRecordingTest(unittest.TestCase):
         # No run log exists (run_update is stubbed): the summary falls back to
         # the exit code, so the state never records a content-free error.
         self.assertEqual(record["error"], "job_returncode=1")
+        # A failed job fences nothing: what it wrote is committed as a new
+        # generation, and the next job of any name runs.
         generation = json.loads((self.raw_dir / ".raw_generation.json").read_text(encoding="utf-8"))
-        self.assertEqual(generation["state"], "dirty")
-
+        self.assertEqual(generation["state"], "committed")
+        self.assertNotEqual(generation["generation_id"], before["generation_id"])
 
 
 class CronFollowUpChainTest(unittest.TestCase):
@@ -7029,7 +6852,7 @@ class CronFollowUpChainTest(unittest.TestCase):
         self.root = Path(self._tmp.name)
         self.raw_dir = self.root / "raw"
         self.raw_dir.mkdir(parents=True)
-        cron_update.write_raw_generation(self.raw_dir)
+        commit_generation(self.raw_dir)
         self.jobs_root = self.root / "runtime" / "jobs"
         self.config_path = self.root / "schedule.json"
         self.config_path.write_text(json.dumps({
@@ -7074,7 +6897,7 @@ class CronFollowUpChainTest(unittest.TestCase):
     def _run_main(self, then: list[str], codes: dict[str, int] | None = None) -> int:
         codes = codes or {}
 
-        def fake_run_update(ctx, commands, log_path, lock_fd=None):
+        def fake_run_update(ctx, commands, log_path, lock_fd=None, report=None):
             # The lock must be held while a step works and released before the
             # next one starts.
             self.assertEqual(self.locks["acquired"] - self.locks["released"], 1)
@@ -7086,6 +6909,7 @@ class CronFollowUpChainTest(unittest.TestCase):
             patch.object(cron_update.os, "chdir"),
             patch.object(cron_update, "prune_run_logs"),
             patch.object(cron_update, "JOB_STATE_ROOT", self.jobs_root),
+            patch.object(cron_update, "RUN_REPORT_ROOT", self.jobs_root.parent / "runs"),
             patch.object(cron_update, "RUN_LOG_ROOT", self.root / "logs" / "cron"),
             patch.object(cron_update, "acquire_lock", side_effect=self._lock),
             patch.object(cron_update, "run_update", side_effect=fake_run_update),
@@ -7120,18 +6944,13 @@ class CronFollowUpChainTest(unittest.TestCase):
         self.assertEqual(failed[-1]["status"], "error")
         self.assertEqual(failed[-1]["after"], "sweep")
 
-    def test_a_failed_primary_leaves_its_follow_ups_unrun(self) -> None:
+    def test_a_failed_primary_is_still_followed_by_its_follow_ups(self) -> None:
+        # What a failed sweep wrote is committed, so its audit and rebuild
+        # follow it; the invocation still reports the failure.
         self.assertEqual(self._run_main(["deep_audit", "rebuild"], {"sweep": 1}), 1)
-        self.assertEqual(self.ran, ["sweep"])
-        skipped = [
-            json.loads(line)
-            for line in self.output.splitlines()
-            if json.loads(line).get("status") == "follow_ups_skipped"
-        ]
-        self.assertEqual(skipped[0]["follow_ups"], ["deep_audit", "rebuild"])
-        # The failure fenced the lake; the recovery is to rerun this same job.
+        self.assertEqual(self.ran, ["sweep", "deep_audit", "rebuild"])
         generation = json.loads((self.raw_dir / ".raw_generation.json").read_text(encoding="utf-8"))
-        self.assertEqual(generation["state"], "dirty")
+        self.assertEqual(generation["state"], "committed")
 
     def test_an_unknown_follow_up_is_refused_before_the_primary_runs(self) -> None:
         with self.assertRaisesRegex(KeyError, "unknown --then job"):
@@ -7292,27 +7111,26 @@ class CorruptSidecarTest(unittest.TestCase):
 
     def test_revision_writer_heals_corrupt_sidecar_loudly(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "trade_date=20260101.parquet"
+            path = Path(tmp) / "raw" / "daily" / "trade_date=20260101.parquet"
+            path.parent.mkdir(parents=True)
             pd.DataFrame({"ts_code": ["000001.SZ"], "v": [1]}).to_parquet(path, index=False)
             Path(str(path) + ".meta.json").write_text("{broken", encoding="utf-8")
             out = io.StringIO()
             with redirect_stdout(out):
-                wrote = common.write_parquet_revision_aware(
+                outcome = common.publish(
                     path,
                     pd.DataFrame({"ts_code": ["000001.SZ"], "v": [2]}),
                     api_name="daily",
                     params={},
                     fields=["ts_code", "v"],
                     key_columns=["ts_code"],
-                    revision_ledger=Path(tmp) / "ledger.jsonl",
+                    ledger=Path(tmp) / "ledger.jsonl",
                 )
-            self.assertTrue(wrote)
+            self.assertEqual(outcome, "restated")
             alert_lines = [line for line in out.getvalue().splitlines() if "corrupt_sidecar_replaced" in line]
             self.assertEqual(len(alert_lines), 1)
             # The rewrite repaired the torn pair: the sidecar parses again.
-            from autotrade.environment.data.pit import parquet_meta
-
-            self.assertTrue(parquet_meta(path).get("write_id"))
+            self.assertTrue(common.committed_partition_intact(path))
 
     def test_audit_records_corrupt_sidecar_as_error(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -7592,27 +7410,96 @@ class ShareFloatUndatedDuplicateInvariantTest(unittest.TestCase):
         self.assertLess(vector[0], "20200102")  # undated sorts BELOW every real date
 
 
+class _VendorStub(BaseHTTPRequestHandler):
+    """A loopback stand-in for the vendor's HTTP API: every POST is recorded
+    and answered with the next queued (status, JSON body)."""
+
+    answers: ClassVar[list[tuple[int, dict]]] = []
+    requests: ClassVar[list[tuple[str, dict]]] = []
+
+    def do_POST(self) -> None:
+        length = int(self.headers.get("Content-Length") or 0)
+        type(self).requests.append((self.path, json.loads(self.rfile.read(length) or b"{}")))
+        status, body = type(self).answers.pop(0)
+        payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, *args) -> None:
+        return None
+
+
 class TuShareClientTest(unittest.TestCase):
     """The relay (中转) is the default transport; the official service serves
-    only the datasets that say so, each with its own token."""
+    only the datasets that say so, each with its own token. Requests go over
+    real HTTP to a loopback stub, never to the vendor."""
+
+    def setUp(self) -> None:
+        _VendorStub.answers, _VendorStub.requests = [], []
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), _VendorStub)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.endpoint = f"http://127.0.0.1:{self.server.server_address[1]}/dataapi"
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
 
     def test_official_client_pins_the_official_endpoint_and_its_own_token(self) -> None:
-        pro = SimpleNamespace(_DataApi__http_url=None, query=lambda *args, **kwargs: pd.DataFrame())
-        tokens = []
-        fake = SimpleNamespace(pro_api=lambda token, timeout: tokens.append(token) or pro)
         env = {"TUSHARE_TOKEN": "relay-dummy", "TUSHARE_TOKEN_TMP": "official-dummy",
                "TUSHARE_RELAY_URL": "https://relay.example"}
-        with (
-            tempfile.TemporaryDirectory() as tmp,
-            patch.dict(sys.modules, {"tushare": fake}),
-            patch.dict(os.environ, env, clear=True),
-        ):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, env, clear=True):
             client = common.official_client(Path(tmp), 0, 5)
-        self.assertEqual(pro._DataApi__http_url, common.OFFICIAL_TUSHARE_URL)
         self.assertEqual(client.endpoint, common.OFFICIAL_TUSHARE_URL)
+        self.assertEqual(client._token, "official-dummy")
         self.assertTrue(common.OFFICIAL_TUSHARE_URL.startswith("https://"))
-        self.assertEqual(tokens, ["official-dummy"])
         self.assertEqual([n for n, s in common.TEXT_SPECS.items() if s.official], ["anns_d"])
+
+    def test_a_request_carries_the_sdk_payload_to_the_pinned_endpoint(self) -> None:
+        _VendorStub.answers = [(200, {"code": 0, "msg": "", "data": {"fields": ["ts_code", "close"], "items": [["000001.SZ", 10.5]]}})]
+        client = common.TuShareClient("secret", min_interval=0, timeout=5, endpoint=self.endpoint)
+        result = client.query("daily", {"trade_date": "20261023"}, "ts_code,close")
+        self.assertEqual((result.fields, result.items), (["ts_code", "close"], [["000001.SZ", 10.5]]))
+        path, payload = _VendorStub.requests[0]
+        self.assertEqual(path, "/dataapi/daily")
+        self.assertEqual(payload, {
+            "api_name": "daily",
+            "token": "secret",
+            "params": {"trade_date": "20261023", "ts_type_name": self.endpoint},
+            "fields": "ts_code,close",
+        })
+
+    def test_an_http_error_status_raises_instead_of_answering_empty(self) -> None:
+        # The SDK answered any status >= 400 with an empty frame, which a
+        # writer cannot tell from a genuinely empty partition.
+        _VendorStub.answers = [(502, {"error": "bad gateway"}), (500, {"error": "boom"})]
+        client = common.TuShareClient("secret", min_interval=0, timeout=5, endpoint=self.endpoint)
+        with patch.object(common.time, "sleep"), self.assertRaisesRegex(RuntimeError, "daily failed after 2 attempts: daily answered HTTP 500"):
+            client.query("daily", {"trade_date": "20261023"}, "ts_code,close", retries=2)
+        self.assertEqual(len(_VendorStub.requests), 2)
+
+    def test_a_code_0_answer_without_its_data_block_raises_instead_of_answering_empty(self) -> None:
+        _VendorStub.answers = [
+            (200, {"code": 0, "msg": "", "data": None}),
+            (200, {"code": 0, "msg": "", "data": {"fields": ["ts_code", "close"]}}),
+        ]
+        client = common.TuShareClient("secret", min_interval=0, timeout=5, endpoint=self.endpoint)
+        with patch.object(common.time, "sleep"), self.assertRaisesRegex(RuntimeError, "daily answered code 0 without a data block"):
+            client.query("daily", {"trade_date": "20261023"}, "ts_code,close", retries=2)
+        # A genuinely empty answer still carries its fields and an empty list.
+        _VendorStub.answers = [(200, {"code": 0, "msg": "", "data": {"fields": ["ts_code", "close"], "items": []}})]
+        self.assertEqual(client.query("daily", {"trade_date": "20261024"}, "ts_code,close").items, [])
+
+    def test_an_answer_without_a_requested_field_is_defective(self) -> None:
+        _VendorStub.answers = [(200, {"code": 0, "msg": "", "data": {"fields": ["ts_code"], "items": [["000001.SZ"]]}})]
+        client = common.TuShareClient("secret", min_interval=0, timeout=5, endpoint=self.endpoint)
+        with self.assertRaisesRegex(common.DefectiveAnswer, r"without requested fields \['close'\]"):
+            client.query("daily", {"trade_date": "20261023"}, "ts_code,close")
+        # Casing alone is not a defect: the macro tier maps vendor casing.
+        _VendorStub.answers = [(200, {"code": 0, "msg": "", "data": {"fields": ["MONTH", "PMI"], "items": [["202609", 49.8]]}})]
+        self.assertEqual(client.query("cn_pmi", {}, "month,pmi").fields, ["MONTH", "PMI"])
 
     def test_each_token_is_read_from_its_own_line(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {}, clear=True):
@@ -7627,53 +7514,24 @@ class TuShareClientTest(unittest.TestCase):
 
     def test_token_never_reaches_an_error_or_its_traceback(self) -> None:
         token = "official-dummy-5f3a"
-
-        def query(api_name, fields="", **params):
-            raise ValueError(f"vendor echoed {token} for {api_name}")
-
-        pro = SimpleNamespace(_DataApi__http_url=None, query=query)
-        fake = SimpleNamespace(pro_api=lambda token, timeout: pro)
-        with patch.dict(sys.modules, {"tushare": fake}):
-            client = common.TuShareClient(token, min_interval=0, timeout=5, endpoint=common.OFFICIAL_TUSHARE_URL)
-            with self.assertRaises(RuntimeError) as caught:
-                client.query("anns_d", {"ann_date": "20230301"}, retries=1)
+        _VendorStub.answers = [(500, {"msg": f"vendor echoed {token} for anns_d"})]
+        client = common.TuShareClient(token, min_interval=0, timeout=5, endpoint=self.endpoint)
+        with self.assertRaises(RuntimeError) as caught:
+            client.query("anns_d", {"ann_date": "20230301"}, retries=1)
         rendered = "".join(traceback.format_exception(caught.exception))
         self.assertIn("vendor echoed <token> for anns_d", rendered)
         self.assertNotIn(token, rendered)
 
-    def test_sdk_uses_default_relay(self) -> None:
-        pro = SimpleNamespace(_DataApi__http_url=None, query=lambda *args, **kwargs: pd.DataFrame())
-        calls = []
-
-        def pro_api(token, timeout):
-            calls.append((token, timeout))
-            return pro
-
-        fake = SimpleNamespace(pro_api=pro_api)
-        with patch.dict(sys.modules, {"tushare": fake}), patch.dict(os.environ, {}, clear=True):
-            common.TuShareClient("secret", timeout=17)
-        self.assertEqual(pro._DataApi__http_url, common.DEFAULT_TUSHARE_RELAY_URL)
-        self.assertEqual(calls, [("secret", 17)])
-
-    def test_environment_overrides_relay(self) -> None:
-        pro = SimpleNamespace(_DataApi__http_url=None, query=lambda *args, **kwargs: pd.DataFrame())
-        fake = SimpleNamespace(pro_api=lambda token, timeout: pro)
-        with patch.dict(sys.modules, {"tushare": fake}), patch.dict(os.environ, {"TUSHARE_RELAY_URL": "https://relay.example/"}):
-            common.TuShareClient("secret")
-        self.assertEqual(pro._DataApi__http_url, "https://relay.example")
+    def test_the_relay_is_the_default_endpoint_and_the_environment_overrides_it(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(common.TuShareClient("secret", timeout=17).endpoint, common.DEFAULT_TUSHARE_RELAY_URL)
+        with patch.dict(os.environ, {"TUSHARE_RELAY_URL": "https://relay.example/"}):
+            self.assertEqual(common.TuShareClient("secret").endpoint, "https://relay.example")
 
     def test_timeout_must_be_positive_integer(self) -> None:
         for timeout in (0, -1, True, 1.5):
             with self.subTest(timeout=timeout), self.assertRaisesRegex(ValueError, "positive integer"):
                 common.TuShareClient("secret", timeout=timeout)  # type: ignore[arg-type]
-
-    def test_missing_sdk_fails_with_project_dependency_instruction(self) -> None:
-        with (
-            patch.dict(sys.modules, {"tushare": None}),
-            self.assertRaisesRegex(RuntimeError, "project's declared dependencies") as caught,
-        ):
-            common.TuShareClient("secret")
-        self.assertIsInstance(caught.exception.__cause__, ImportError)
 
     def test_download_cli_keeps_real_sdk_timeout_option(self) -> None:
         args = download.build_parser().parse_args(["download", "--tier", "daily", "--timeout-seconds", "23"])
@@ -7909,55 +7767,6 @@ class UuidCommitIdentityTest(unittest.TestCase):
         self.assertEqual(meta["params"]["filters"][0]["opaque_marker"], "source-value")
         self.assertEqual(meta["source_context"]["opaque_marker"], "landing-value")
 
-    def test_legacy_migration_reads_one_file_below_hive_style_directory(self) -> None:
-        path = self.root / "country=CN" / "month=202601.parquet"
-        path.parent.mkdir(parents=True)
-        pd.DataFrame({"country": ["CN"], "value": [1]}).to_parquet(path, index=False)
-        path.with_suffix(".parquet.meta.json").write_text(
-            json.dumps({"row_count": 1, "legacy_marker": "legacy"}),
-            encoding="utf-8",
-        )
-        tushare_io.migrate_partition_identity(path)
-        migrated = tushare_io.parquet_meta(path)
-        self.assertTrue(tushare_io.committed_partition_intact(path))
-        self.assertNotIn("legacy_marker", migrated)
-        self.assertEqual(pd.read_parquet(path)["country"].tolist(), ["CN"])
-
-    def test_legacy_migration_only_copies_supported_sidecar_schema(self) -> None:
-        path = self.root / "stk_auction" / "trade_date=20240102.parquet"
-        meta = tushare_io.write_parquet(
-            path,
-            pd.DataFrame({"trade_date": ["20240102"], "price": [10.0]}),
-            api_name="stk_auction",
-            params={},
-            fields=["trade_date", "price"],
-        )
-        sidecar = path.with_suffix(".parquet.meta.json")
-        meta["unknown_top_level"] = {"nested": "old-value"}
-        meta["availability"] = {
-            "available_at": "2024-01-02T09:29:00+08:00",
-            "rule": "observed:test",
-            "unknown_availability_field": {"nested": "old-value"},
-        }
-        sidecar.write_text(json.dumps(meta), encoding="utf-8")
-
-        self.assertTrue(tushare_io.committed_partition_intact(path))
-        tushare_io.migrate_partition_identity(path)
-
-        migrated = json.loads(sidecar.read_text(encoding="utf-8"))
-        self.assertTrue(tushare_io.committed_partition_intact(path))
-        self.assertNotIn("unknown_top_level", migrated)
-        self.assertEqual(
-            migrated["availability"],
-            {
-                "available_at": "2024-01-02T09:29:00+08:00",
-                "rule": "observed:test",
-            },
-        )
-        self.assertEqual(pd.read_parquet(path)["price"].tolist(), [10.0])
-
-
-class FullPortContractTest(unittest.TestCase):
     def test_schedule_retains_full_job_set(self) -> None:
         root = Path(__file__).resolve().parents[2]
         config = json.loads((root / "configs/tushare_update_schedule.json").read_text(encoding="utf-8"))
@@ -7969,8 +7778,10 @@ class FullPortContractTest(unittest.TestCase):
         # own official-service job (2026-10-06); 34 with the stk_holdertrade
         # restatement re-pull (2026-10-20); 35 with the top_list one; 36 with
         # the stk_limit one (2026-10-21); 37 with the top-10 holder repair; 39
-        # with the stk_holdernumber and repurchase restatement re-pulls.
-        self.assertEqual(len(config["jobs"]), 39)
+        # with the stk_holdernumber and repurchase restatement re-pulls; 35
+        # since the four disclosure-table re-pulls became the history_repull
+        # policy and its operator command (2026-10-24).
+        self.assertEqual(len(config["jobs"]), 35)
         for name, tier in (
             ("manual_history_backfill_reference", "reference"),
             ("manual_history_backfill_macro", "macro"),
@@ -7980,16 +7791,27 @@ class FullPortContractTest(unittest.TestCase):
             self.assertEqual(job["extra_args"][:2], ["--history-floor", "20140701"])
         self.assertIn("--no-include-intraday", config["jobs"]["cn_evening_full"]["extra_args"])
         self.assertEqual(config["jobs"]["cn_nightly_intraday_minutes"]["operation"], "intraday_by_date")
-        # A restatement re-pull rewrites one dataset's whole history; it must
-        # never widen to the other disclosure tables the nightly job shares.
-        for name, dataset in (
-            ("manual_event_restatement_repair", "stk_holdertrade"),
-            ("manual_holdernumber_restatement_repair", "stk_holdernumber"),
-            ("manual_repurchase_restatement_repair", "repurchase"),
-        ):
-            restatement = config["jobs"][name]
-            self.assertEqual((restatement["operation"], restatement["tier"]), ("download_tier", "event_flow"))
-            self.assertEqual(restatement["extra_args"], ["--datasets", dataset, "--force"])
+        # A history re-pull rewrites one dataset's whole history; it must never
+        # widen to the other disclosure tables the nightly job shares, and
+        # through a report lag its window must begin exactly at the lake's
+        # floor.
+        policy = cron_update.history_repull_policy(config)
+        self.assertEqual(set(policy), {item["dataset"] for item in config["interfaces"]})
+        on_restatement = sorted(name for name, value in policy.items() if value == "on_restatement")
+        self.assertEqual(on_restatement, sorted([
+            "pledge_detail", "repurchase", "stk_holdernumber", "stk_holdertrade", "top10_floatholders", "top10_holders",
+        ]))
+        for dataset in on_restatement:
+            command = cron_update.history_repull_command(config, "/env/python", dataset, end_date="20261024")
+            self.assertEqual(command[2:8], ["download", "--tier", "event_flow", "--datasets", dataset, "--force"])
+            start = command[command.index("--start-date") + 1]
+            lag = timedelta(days=common.EVENT_FLOW_SPECS[dataset].report_lag_days)
+            self.assertEqual(
+                (datetime.strptime(start, "%Y%m%d") - lag).strftime("%Y%m%d"),  # noqa: DTZ007
+                config["default_start_date"],
+            )
+        with self.assertRaisesRegex(ValueError, "cannot be re-pulled whole"):
+            cron_update.history_repull_command(config, "/env/python", "top_list", end_date="20261024")
         toplist = config["jobs"]["manual_toplist_restatement_repair"]
         self.assertEqual((toplist["operation"], toplist["tier"]), ("download_tier", "board_trading"))
         self.assertEqual(toplist["extra_args"], ["--datasets", "top_list", "--force"])
@@ -8007,20 +7829,6 @@ class FullPortContractTest(unittest.TestCase):
         self.assertEqual(
             (stk_limit["end_date_offset_days"], stk_limit["end_date_mode"]), (1, "sse_open_on_or_before")
         )
-        # The top-10 repair must never widen to the three disclosure tables it
-        # shares the nightly job with, and through the tables' report lag its
-        # default window must begin exactly at the lake's floor.
-        top10 = config["jobs"]["manual_top10_holders_repair"]
-        self.assertEqual((top10["operation"], top10["tier"]), ("download_tier", "event_flow"))
-        self.assertEqual(top10["extra_args"], ["--datasets", "top10_holders", "top10_floatholders", "--force"])
-        self.assertNotIn("end_date_mode", top10)  # end_date is a report period, not a trade date
-        start = cron_update.resolve_job_start_date(top10, config, "20261021")
-        for name in ("top10_holders", "top10_floatholders"):
-            lag = timedelta(days=common.EVENT_FLOW_SPECS[name].report_lag_days)
-            self.assertEqual(
-                (datetime.strptime(start, "%Y%m%d") - lag).strftime("%Y%m%d"),  # noqa: DTZ007
-                config["default_start_date"],
-            )
 
     def test_minute_job_runs_the_by_date_updater_as_a_mutating_job(self) -> None:
         context = cron_update.RunContext(
@@ -8058,31 +7866,6 @@ class FullPortContractTest(unittest.TestCase):
               "--datasets", "margin", "margin_detail"]],
         )
         self.assertIn(job["operation"], cron_update.MUTATING_OPERATIONS)
-
-    def test_generation_resume_uses_explicit_command_identity(self) -> None:
-        transaction = {
-            "job": "daily",
-            "start_date": "20240101",
-            "end_date": "20240102",
-            "commands": [["python", "download.py", "daily"]],
-            "config_identity": {"job": {"operation": "update"}},
-        }
-        with tempfile.TemporaryDirectory() as temporary:
-            raw = Path(temporary)
-            first = cron_update.begin_raw_generation_update(raw, transaction)
-            cron_update.mark_raw_generation_dirty(raw, first, error="interrupted")
-            with self.assertRaisesRegex(RuntimeError, "rerun the original job"):
-                cron_update.begin_raw_generation_update(raw, {**transaction, "job": "other"})
-            resumed = cron_update.begin_raw_generation_update(raw, transaction)
-            self.assertEqual(resumed["transaction_id"], first["transaction_id"])
-            cron_update.mark_raw_generation_dirty(raw, resumed, error="interrupted again")
-            output = io.StringIO()
-            with redirect_stdout(output):
-                superseded = cron_update.begin_raw_generation_update(
-                    raw, {**transaction, "commands": [["python", "download.py", "daily", "--force"]]}
-                )
-        self.assertNotEqual(superseded["transaction_id"], first["transaction_id"])
-        self.assertEqual(json.loads(output.getvalue())["note"], "raw_generation_dirty_superseded")
 
     def test_snapshot_inventory_retains_full_dataset_coverage(self) -> None:
         root = Path(__file__).resolve().parents[2]

@@ -108,7 +108,11 @@ from .pit_backend import (
     ResearchPITSnapshotProvider,
     required_release_raw_datasets,
 )
-from .pit_views_seed import assert_seed_carries_bonus_split, assert_seed_snapshot_config
+from .pit_views_seed import (
+    assert_seed_carries_bonus_split,
+    assert_seed_snapshot_config,
+    assert_seed_timing_contract,
+)
 from .research_session import LLMResearchDeveloper
 from .skills import latest_skills_snapshot, resolve_operating_memory
 
@@ -573,6 +577,11 @@ def resolve_worker_options(
     # slot's bonus shares.
     if pit_views_seed is not None and pit_views_seed.is_dir():
         assert_seed_carries_bonus_split(pit_views_seed)
+    # A named seed must have been built under this code's refresh nodes and
+    # stamps. Checked when an arm is created, never at a worker start: a
+    # running arm keeps the views it was created on.
+    if preflight and seed_generation is not None:
+        assert_seed_timing_contract(pit_views_seed, snapshot_config)
     default_geometry = rolling_default("geometry")
     geometry = ResearchGeometry(
         **{
@@ -1204,7 +1213,7 @@ def _repo_path(repo_root: Path, value: object, label: str) -> Path:
     """Resolve an input path without requiring the mutable live copy to exist.
 
     An experiment reads its data from a pinned immutable research release: a
-    dirty raw lake falls back to one, the quality status lives inside it, and
+    lake being written falls back to one, the quality status lives inside it, and
     a deployment that carries only releases and seeds (the A100 instance) has
     no live lake at all. Requiring the live roots here would refuse all of
     them; a read that does need the live lake fails where it reads.

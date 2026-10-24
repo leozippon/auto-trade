@@ -432,3 +432,33 @@ def test_a_book_created_with_the_retired_nl_settings_loads_as_one_without_them(t
     assert set(legacy) == retired
     (book.root / BOOK_NAME).write_text(json.dumps({**record, **legacy}), encoding="utf-8")
     assert load_book(book.root) == book
+
+
+def test_the_vintage_report_names_what_was_restated_since_each_pin(tmp_path: Path):
+    """The nightly audit's Paper vintage report: for each live book, the
+    datasets it mounts whose vintage moved since the release it last pinned."""
+
+    from autotrade.environment.data.contracts import RAW_GENERATION_FILENAME
+    from autotrade.paper.vintages import vintage_report
+    from autotrade.pipelines.pit_backend import required_release_raw_datasets
+
+    book = _graduated_book(tmp_path)
+    mounted = required_release_raw_datasets(book.snapshot_config)
+    release_raw = book.raw_dir.parent / "research_releases" / "gen_pinned" / "raw"
+    release_raw.mkdir(parents=True)
+
+    def record(path: Path, vintages: dict[str, str]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"schema_version": 3, "state": "committed", "datasets": {
+            name: {"vintage": value} for name, value in vintages.items()
+        }}), encoding="utf-8")
+
+    record(release_raw / RAW_GENERATION_FILENAME, {name: "v1" for name in mounted})
+    record(book.raw_dir / RAW_GENERATION_FILENAME, {**{name: "v1" for name in mounted}, mounted[0]: "v2", "unmounted": "v9"})
+    (book.root / "pit" / "gen_pinned").mkdir(parents=True)
+    assert vintage_report(paper_root(tmp_path)) == {
+        "exp": {"generation": "gen_pinned", "changed": [mounted[0]], "not_recorded": []},
+    }
+    # A release published before vintages were recorded cannot tell.
+    record(release_raw / RAW_GENERATION_FILENAME, {})
+    assert vintage_report(paper_root(tmp_path))["exp"]["not_recorded"] == sorted(mounted)

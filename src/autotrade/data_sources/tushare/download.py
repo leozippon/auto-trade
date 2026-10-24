@@ -32,12 +32,14 @@ from .common import (
     FUNDAMENTAL_SPECS,
     INDEX_WEIGHT_FIELDS,
     INDEX_WEIGHT_PAGE_LIMIT,
+    INTRADAY_DATASETS,
     MACRO_SPECS,
     MUTATED_NOT_READY_RETRY_EXIT_CODE,
     NO_MUTATION_FAILURE_EXIT_CODE,
     NO_MUTATION_RETRY_EXIT_CODE,
     OFFICIAL_TOKEN_ENV,
     PHYSICAL_IDENTITY_COLUMNS,
+    REFERENCE_DATASETS,
     REFERENCE_PAGE_LIMIT,
     RESEARCH_HISTORY_FLOOR,
     REVISION_EVENTS_PATH,
@@ -57,9 +59,10 @@ from .common import (
     TEXT_FETCHABLE_DATASETS,
     TEXT_SPECS,
     TRADE_DATE_PAGE_LIMIT,
+    WRITTEN_OUTCOMES,
     ApiResult,
-    BlockedOverwriteError,
     BoardTradingDataset,
+    DefectiveAnswer,
     EventDataset,
     FundamentalDataset,
     MacroDataset,
@@ -67,6 +70,7 @@ from .common import (
     TradeDateDataset,
     TuShareClient,
     active_year_windows,
+    answer_defects,
     as_datetime_window,
     augment_event_frame,
     augment_macro_frame,
@@ -96,9 +100,12 @@ from .common import (
     parquet_rows,
     parse_yyyymmdd,
     physical_identity_index,
+    publish,
     quarter_periods,
     query_paged,
     read_many,
+    record_defect,
+    report_complete,
     resolve_revision_ledger,
     retained_range_start,
     safe_partition_value,
@@ -127,7 +134,6 @@ from .common import (
     write_board_result,
     write_macro_result,
     write_parquet,
-    write_parquet_revision_aware,
     yyyymmdd_to_month,
     yyyymmdd_to_quarter,
 )
@@ -140,14 +146,15 @@ def write_reference_query_result(
     api_name: str,
     params: dict[str, Any],
     required_nonempty: bool,
+    ledger: Path | str | None,
 ) -> pd.DataFrame:
+    """Publish one unkeyed reference partition; an empty answer for a
+    partition holding rows is a recorded defect that keeps it."""
     df = frame(result)
-    if df.empty and path.exists():
-        print(f"{api_name} params={params} returned zero rows for existing partition; skipped_empty_reference_overwrite")
-        return pd.read_parquet(path)
-    if df.empty and required_nonempty:
+    if df.empty and required_nonempty and not path.exists():
         raise RuntimeError(f"{api_name} params={params} returned zero rows for required reference partition")
-    write_parquet(path, df, api_name=api_name, params=params, fields=result.fields)
+    if publish(path, df, api_name=api_name, params=params, fields=result.fields, key_columns=(), ledger=ledger) == "defect":
+        return pd.read_parquet(path)
     return df
 
 
@@ -175,6 +182,7 @@ def download_reference(args: argparse.Namespace) -> int:
             api_name="stock_basic",
             params=params,
             required_nonempty=status == "L",
+            ledger=revision_ledger,
         )
 
     company_fields = "ts_code,com_name,com_id,exchange,chairman,manager,secretary,reg_capital,setup_date,province,city,introduction"
@@ -190,9 +198,10 @@ def download_reference(args: argparse.Namespace) -> int:
             api_name="stock_company",
             params=params,
             required_nonempty=True,
+            ledger=revision_ledger,
         )
 
-    open_dates = download_trade_cal(client, raw_dir, args.start_date, trade_cal_end_date, should_force("trade_cal"))
+    open_dates = download_trade_cal(client, raw_dir, args.start_date, trade_cal_end_date, should_force("trade_cal"), ledger=revision_ledger)
     open_dates = [trade_date for trade_date in open_dates if trade_date <= args.end_date]
     if not args.skip_bak_basic:
         download_bak_basic(
@@ -202,14 +211,13 @@ def download_reference(args: argparse.Namespace) -> int:
             args.bak_start_date,
             should_force("bak_basic"),
             revision_ledger,
-            getattr(args, "allow_empty_revision_overwrite", False),
         )
-    download_namechange(client, raw_dir, should_force("namechange"))
-    classify = download_index_classify(client, raw_dir, should_force("index_classify"))
-    download_index_member_all(client, raw_dir, classify["SW2021"], should_force("index_member_all"))
-    download_index_member_history(client, raw_dir, classify["SW2014"], should_force("index_member"))
-    download_ths_catalog(client, raw_dir, should_force("ths_index"))
-    download_index_reference(client, raw_dir, should_force("index_basic"))
+    download_namechange(client, raw_dir, should_force("namechange"), ledger=revision_ledger)
+    classify = download_index_classify(client, raw_dir, should_force("index_classify"), ledger=revision_ledger)
+    download_index_member_all(client, raw_dir, classify["SW2021"], should_force("index_member_all"), ledger=revision_ledger)
+    download_index_member_history(client, raw_dir, classify["SW2014"], should_force("index_member"), ledger=revision_ledger)
+    download_ths_catalog(client, raw_dir, should_force("ths_index"), ledger=revision_ledger)
+    download_index_reference(client, raw_dir, should_force("index_basic"), ledger=revision_ledger)
     download_index_weight(
         client,
         raw_dir,
@@ -218,7 +226,6 @@ def download_reference(args: argparse.Namespace) -> int:
         history_floor(RESEARCH_HISTORY_FLOOR, args),
         should_force("index_weight"),
         revision_ledger,
-        getattr(args, "allow_empty_revision_overwrite", False),
     )
     print(f"reference download finished under {raw_dir}")
     return 0
@@ -260,7 +267,9 @@ def merge_trade_cal_partition(path: Path, refreshed: pd.DataFrame) -> pd.DataFra
         .reset_index(drop=True)
     )
 
-def download_trade_cal(client: TuShareClient, raw_dir: Path, start_date: str, end_date: str, force: bool) -> list[str]:
+def download_trade_cal(
+    client: TuShareClient, raw_dir: Path, start_date: str, end_date: str, force: bool, *, ledger: Path | str | None
+) -> list[str]:
     fields = "exchange,cal_date,is_open,pretrade_date"
     sse_open: set[str] = set()
     for exchange in ("SSE", "SZSE", "BSE"):
@@ -279,18 +288,24 @@ def download_trade_cal(client: TuShareClient, raw_dir: Path, start_date: str, en
                             if date_key
                         )
                     continue
-                result = client.query("trade_cal", params, fields)
-                df = merge_trade_cal_partition(path, frame(result))
-                meta_params = dict(params)
-                meta_params["merge_existing"] = True
-                write_parquet(path, df, api_name="trade_cal", params=meta_params, fields=fields.split(","))
+            merging = path.exists()
+            result = client.query("trade_cal", params, fields)
+            answer = frame(result)
+            df = merge_trade_cal_partition(path, answer)
+            if answer.empty and not df.empty:
+                # The year already holds days, so an empty answer is the
+                # vendor's fault: the partition keeps them.
+                record_defect(path, f"trade_cal params={params} returned zero rows for an existing partition", ledger=ledger, source="force_refresh")
             else:
-                result = client.query("trade_cal", params, fields)
-                df = merge_trade_cal_partition(path, frame(result))
-                meta_params = dict(params)
-                if path.exists():
-                    meta_params["merge_existing"] = True
-                write_parquet(path, df, api_name="trade_cal", params=meta_params, fields=result.fields)
+                publish(
+                    path,
+                    df,
+                    api_name="trade_cal",
+                    params={**params, "merge_existing": True} if merging else params,
+                    fields=fields.split(",") if merging else result.fields,
+                    key_columns=(),
+                    ledger=ledger,
+                )
             if exchange == "SSE" and not df.empty:
                 sse_open.update(
                     date_key
@@ -310,14 +325,16 @@ def sse_trade_cal_covers(raw_dir: Path, start_date: str, end_date: str) -> bool:
     dates = dates[dates != ""]
     return bool(not dates.empty and dates.min() <= start_date and dates.max() >= end_date)
 
-def ensure_trade_cal_coverage(client: TuShareClient, raw_dir: Path, start_date: str, end_date: str) -> bool:
+def ensure_trade_cal_coverage(
+    client: TuShareClient, raw_dir: Path, start_date: str, end_date: str, *, ledger: Path | str | None
+) -> bool:
     """Extend local SSE trade_cal when it lags; True means the lake was written."""
     if parse_yyyymmdd(start_date) > parse_yyyymmdd(end_date):
         return False
     if sse_trade_cal_covers(raw_dir, start_date, end_date):
         return False
     print(f"refreshing trade_cal coverage for {start_date}-{end_date}")
-    download_trade_cal(client, raw_dir, start_date, end_date, force=False)
+    download_trade_cal(client, raw_dir, start_date, end_date, force=False, ledger=ledger)
     return True
 
 def download_bak_basic(
@@ -327,7 +344,6 @@ def download_bak_basic(
     start_date: str,
     force: bool,
     revision_ledger: Path,
-    allow_empty_revision_overwrite: bool,
 ) -> None:
     fields = "trade_date,ts_code,name,industry,area,pe,float_share,total_share,total_assets,liquid_assets,fixed_assets,reserved,reserved_pershare,eps,bvps,pb,list_date,undp,per_undp,rev_yoy,profit_yoy,gpr,npr,holder_num"
     dates = [d for d in trade_dates if d >= start_date]
@@ -336,22 +352,21 @@ def download_bak_basic(
         if path.exists() and not force:
             continue
         params = {"trade_date": trade_date}
-        result = client.query("bak_basic", params, fields)
-        write_parquet_revision_aware(
-            path,
-            frame(result),
-            api_name="bak_basic",
-            params=params,
-            fields=result.fields,
-            key_columns=list(BAK_BASIC_SPEC.key_columns),
-            revision_ledger=revision_ledger,
-            allow_empty_revision_overwrite=allow_empty_revision_overwrite,
-            allow_key_removal_overwrite=True,
-        )
+        with answer_defects(path, ledger=revision_ledger):
+            result = client.query("bak_basic", params, fields)
+            publish(
+                path,
+                frame(result),
+                api_name="bak_basic",
+                params=params,
+                fields=result.fields,
+                key_columns=list(BAK_BASIC_SPEC.key_columns),
+                ledger=revision_ledger,
+            )
         if index % 250 == 0:
             print(f"bak_basic {index}/{len(dates)}")
 
-def download_namechange(client: TuShareClient, raw_dir: Path, force: bool) -> None:
+def download_namechange(client: TuShareClient, raw_dir: Path, force: bool, *, ledger: Path | str | None) -> None:
     path = raw_dir / "namechange" / "namechange.parquet"
     if path.exists() and not force:
         return
@@ -365,13 +380,18 @@ def download_namechange(client: TuShareClient, raw_dir: Path, force: bool) -> No
         if index % 500 == 0:
             print(f"namechange {index}")
     combined = concat_rows(frames) if frames else pd.DataFrame(columns=fields.split(","))
-    if combined.empty and path.exists():
-        print("namechange returned zero rows for existing partition; skipped_empty_reference_overwrite")
-        return
     deduped = combined.drop_duplicates().sort_values(["ts_code", "start_date", "name"], na_position="last").reset_index(drop=True)
-    write_parquet(path, deduped, api_name="namechange", params={"strategy": "per_ts_code_all_stock_basic"}, fields=fields.split(","))
+    publish(
+        path,
+        deduped,
+        api_name="namechange",
+        params={"strategy": "per_ts_code_all_stock_basic"},
+        fields=fields.split(","),
+        key_columns=(),
+        ledger=ledger,
+    )
 
-def download_index_classify(client: TuShareClient, raw_dir: Path, force: bool) -> dict[str, pd.DataFrame]:
+def download_index_classify(client: TuShareClient, raw_dir: Path, force: bool, *, ledger: Path | str | None) -> dict[str, pd.DataFrame]:
     """Both Shenwan classification vintages: SW2014 for pre-2021 history, SW2021 for the current scheme."""
     fields = "index_code,industry_name,level,industry_code,is_pub,parent_code,src"
     frames: dict[str, pd.DataFrame] = {}
@@ -388,10 +408,13 @@ def download_index_classify(client: TuShareClient, raw_dir: Path, force: bool) -
             api_name="index_classify",
             params=params,
             required_nonempty=True,
+            ledger=ledger,
         )
     return frames
 
-def download_index_member_all(client: TuShareClient, raw_dir: Path, classify: pd.DataFrame, force: bool) -> None:
+def download_index_member_all(
+    client: TuShareClient, raw_dir: Path, classify: pd.DataFrame, force: bool, *, ledger: Path | str | None
+) -> None:
     fields = "l1_code,l1_name,l2_code,l2_name,l3_code,l3_name,ts_code,name,in_date,out_date,is_new"
     l1_codes = classify.loc[classify["level"].astype(str) == "L1", "index_code"].dropna().astype(str).tolist()
     for code in sorted(l1_codes):
@@ -406,21 +429,25 @@ def download_index_member_all(client: TuShareClient, raw_dir: Path, classify: pd
             frames.append(frame(result))
         combined = concat_rows(frames).drop_duplicates()
         if combined.empty:
-            if path.exists():
-                print(f"index_member_all l1_code={code} returned zero rows for existing partition; skipped_empty_reference_overwrite")
-                continue
-            # A valid SW2021 L1 always has current members; an empty Y+N pull is a vendor failure.
-            raise RuntimeError(f"index_member_all l1_code={code} returned zero rows for required reference partition")
-        combined = combined.sort_values(["ts_code", "in_date"], na_position="last").reset_index(drop=True)
-        write_parquet(
+            if not path.exists():
+                # A valid SW2021 L1 always has current members; an empty Y+N pull is a vendor failure.
+                raise RuntimeError(f"index_member_all l1_code={code} returned zero rows for required reference partition")
+        else:
+            combined = combined.sort_values(["ts_code", "in_date"], na_position="last").reset_index(drop=True)
+        # An empty answer for the existing partition is a recorded defect that keeps it.
+        publish(
             path,
             combined,
             api_name="index_member_all",
             params={"l1_code": code, "is_new": ["Y", "N"]},
             fields=fields.split(","),
+            key_columns=(),
+            ledger=ledger,
         )
 
-def download_index_member_history(client: TuShareClient, raw_dir: Path, classify_sw2014: pd.DataFrame, force: bool) -> None:
+def download_index_member_history(
+    client: TuShareClient, raw_dir: Path, classify_sw2014: pd.DataFrame, force: bool, *, ledger: Path | str | None
+) -> None:
     """SW2014 L1 membership via the legacy index_member API. The old taxonomy
     closed on 20211213 (every retired index's members carry that out_date), so
     the history is frozen and only re-downloads under an explicit force."""
@@ -438,15 +465,16 @@ def download_index_member_history(client: TuShareClient, raw_dir: Path, classify
             api_name="index_member",
             params=params,
             required_nonempty=True,
+            ledger=ledger,
         )
 
-def download_ths_catalog(client: TuShareClient, raw_dir: Path, force: bool) -> None:
+def download_ths_catalog(client: TuShareClient, raw_dir: Path, force: bool, *, ledger: Path | str | None) -> None:
     """THS concept/industry index catalog + per-index membership."""
     path = raw_dir / "ths_index" / "catalog.parquet"
     fields = "ts_code,name,count,exchange,list_date,type"
     if not path.exists() or force:
         result, _pages = query_paged(client, "ths_index", {"exchange": "A"}, fields, REFERENCE_PAGE_LIMIT)
-        write_reference_query_result(path, result, api_name="ths_index", params={"exchange": "A"}, required_nonempty=True)
+        write_reference_query_result(path, result, api_name="ths_index", params={"exchange": "A"}, required_nonempty=True, ledger=ledger)
     catalog = pd.read_parquet(path)
     member_fields = "ts_code,con_code,con_name"
     # N = concept, I = industry; other types (S regional etc.) are noise for us.
@@ -457,11 +485,11 @@ def download_ths_catalog(client: TuShareClient, raw_dir: Path, force: bool) -> N
             continue
         result = client.query("ths_member", {"ts_code": code}, member_fields)
         write_reference_query_result(
-            member_path, result, api_name="ths_member", params={"ts_code": code}, required_nonempty=False
+            member_path, result, api_name="ths_member", params={"ts_code": code}, required_nonempty=False, ledger=ledger
         )
 
 
-def download_index_reference(client: TuShareClient, raw_dir: Path, force: bool) -> None:
+def download_index_reference(client: TuShareClient, raw_dir: Path, force: bool, *, ledger: Path | str | None) -> None:
     """Index metadata catalog. Must page: the unpaged call silently truncated
     at the vendor's 8,000-row cap (12,484 exist; the whole CI and NH families
     were missing)."""
@@ -469,7 +497,7 @@ def download_index_reference(client: TuShareClient, raw_dir: Path, force: bool) 
     fields = "ts_code,name,fullname,market,publisher,index_type,category,base_date,base_point,list_date,weight_rule,desc,exp_date"
     if not path.exists() or force:
         result, _pages = query_paged(client, "index_basic", {}, fields, REFERENCE_PAGE_LIMIT)
-        write_reference_query_result(path, result, api_name="index_basic", params={}, required_nonempty=True)
+        write_reference_query_result(path, result, api_name="index_basic", params={}, required_nonempty=True, ledger=ledger)
 
 
 def download_index_weight(
@@ -480,7 +508,6 @@ def download_index_weight(
     floor: str,
     force: bool,
     revision_ledger: Path | str | None,
-    allow_empty_revision_overwrite: bool,
 ) -> None:
     """Monthly core-index constituent weights, one partition per index per year,
     from the research-history ``floor`` on."""
@@ -499,26 +526,26 @@ def download_index_weight(
             if should_skip_existing_partition(path, force=force, requested_params=params):
                 skipped += 1
                 continue
-            result, pages = query_paged(client, "index_weight", params, INDEX_WEIGHT_FIELDS, INDEX_WEIGHT_PAGE_LIMIT)
-            meta_params = dict(params)
-            meta_params["pagination"] = {"page_limit": INDEX_WEIGHT_PAGE_LIMIT, "pages": pages}
-            df = frame(result)
-            did_write, rows = write_window_merged_partition(
-                path,
-                df,
-                api_name="index_weight",
-                params=meta_params,
-                fields=list(df.columns) if len(df.columns) else result.fields,
-                key_columns=["index_code", "con_code", "trade_date"],
-                date_columns=["trade_date"],
-                start_date=year_start,
-                end_date=year_end,
-                revision_ledger=revision_ledger,
-                allow_empty_revision_overwrite=allow_empty_revision_overwrite,
-            )
-            if did_write:
-                written += 1
-                total_rows += rows
+            with answer_defects(path, ledger=revision_ledger):
+                result, pages = query_paged(client, "index_weight", params, INDEX_WEIGHT_FIELDS, INDEX_WEIGHT_PAGE_LIMIT)
+                meta_params = dict(params)
+                meta_params["pagination"] = {"page_limit": INDEX_WEIGHT_PAGE_LIMIT, "pages": pages}
+                df = frame(result)
+                did_write, rows = write_window_merged_partition(
+                    path,
+                    df,
+                    api_name="index_weight",
+                    params=meta_params,
+                    fields=list(df.columns) if len(df.columns) else result.fields,
+                    key_columns=["index_code", "con_code", "trade_date"],
+                    date_columns=["trade_date"],
+                    start_date=year_start,
+                    end_date=year_end,
+                    revision_ledger=revision_ledger,
+                )
+                if did_write:
+                    written += 1
+                    total_rows += rows
     print(f"index_weight done codes={len(DEFAULT_CN_INDEX_CODES)} skipped={skipped} written={written} rows_written={total_rows}")
 
 
@@ -526,10 +553,10 @@ def download_daily(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
     raw_dir = repo_root / args.raw_dir
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
-    ensure_trade_cal_coverage(client, raw_dir, args.start_date, args.end_date)
+    revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
+    ensure_trade_cal_coverage(client, raw_dir, args.start_date, args.end_date, ledger=revision_ledger)
     trade_dates = load_sse_open_dates(raw_dir, args.start_date, args.end_date)
     refresh_datasets = set(getattr(args, "refresh_daily_datasets", None) or [])
-    revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
     required_zero_skipped: list[str] = []
     for dataset in selected_daily_datasets(args):
         if dataset == "stk_auction":
@@ -551,7 +578,6 @@ def download_daily(args: argparse.Namespace) -> int:
             args.force or dataset in refresh_datasets,
             args.page_limit,
             revision_ledger,
-            getattr(args, "allow_empty_revision_overwrite", False),
         )
         if zero_skipped and not spec.zero_rows_ok:
             required_zero_skipped.append(f"{spec.api_name}:{zero_skipped}")
@@ -696,9 +722,9 @@ def _publish_auction_frame(
     page_limit,
     landing_job: str,
     revision_ledger_arg,
-) -> tuple[bool, str]:
+) -> tuple[str, str]:
     """Canonical-order publish with observed availability, shared by the
-    pre-open capture and the evening recheck. Returns (wrote, landed_at)."""
+    pre-open capture and the evening recheck. Returns (outcome, landed_at)."""
     # Stable identity is key-based, so persist the same canonical order. A
     # source response that only reorders rows must remain byte-identical and
     # keep the first observed availability instead of looking like a revision.
@@ -714,18 +740,17 @@ def _publish_auction_frame(
     }
     revision_ledger = resolve_revision_ledger(raw_dir, revision_ledger_arg, repo_root=repo_root)
     spec = DAILY_SPECS["stk_auction"]
-    wrote = write_parquet_revision_aware(
+    outcome = publish(
         path,
         captured,
         api_name=spec.api_name,
         params={"trade_date": trade_date, "pagination": {"page_limit": page_limit, "pages": pages}},
         fields=result.fields,
         key_columns=list(spec.key_columns),
-        revision_ledger=revision_ledger,
-        allow_key_removal_overwrite=False,
+        ledger=revision_ledger,
         extra_metadata={"availability": availability},
     )
-    return bool(wrote), landed_at
+    return outcome, landed_at
 
 
 def capture_open_auction(args: argparse.Namespace) -> int:
@@ -814,7 +839,7 @@ def capture_open_auction(args: argparse.Namespace) -> int:
         return NO_MUTATION_RETRY_EXIT_CODE
 
     captured, result, pages = accepted
-    wrote, landed_at = _publish_auction_frame(
+    published, landed_at = _publish_auction_frame(
         raw_dir,
         repo_root,
         trade_date,
@@ -825,8 +850,8 @@ def capture_open_auction(args: argparse.Namespace) -> int:
         "cn_open_auction_capture_0927",
         getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
     )
-    if not wrote:
-        raise RuntimeError(f"stk_auction trade_date={trade_date} complete frame was not published")
+    if published not in WRITTEN_OUTCOMES | {"unchanged"}:
+        raise RuntimeError(f"stk_auction trade_date={trade_date} complete frame was not published: {published}")
     print(json.dumps({
         "status": "ok",
         "trade_date": trade_date,
@@ -904,31 +929,21 @@ def _recheck_stk_auction_day(args: argparse.Namespace, repo_root: Path, raw_dir:
             **outcome, "status": "recheck_unchanged", "rows": len(candidate),
         }, ensure_ascii=False, sort_keys=True))
         return 0
-    try:
-        wrote, landed_at = _publish_auction_frame(
-            raw_dir,
-            repo_root,
-            trade_date,
-            candidate,
-            result,
-            pages,
-            args.page_limit,
-            getattr(args, "landing_job", "cn_evening_auction_backfill"),
-            getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
-        )
-    except BlockedOverwriteError:
-        # The second sanctioned catch (see BlockedOverwriteError): this pass is
-        # a best-effort evening CORRECTION of an already-committed morning
-        # capture, and refusing a correction that would drop auction rows is its
-        # intended outcome, not an integrity alarm -- the authoritative morning
-        # partition stays on disk and the refusal is in the revision ledger. A
-        # truncated response large enough to matter is already rejected upstream
-        # by the completeness validation, and per this function's contract an
-        # unusable read must not poison the batch's other datasets.
-        print(json.dumps({**outcome, "status": "recheck_blocked_kept_existing"}, ensure_ascii=False, sort_keys=True))
-        return 0
-    if not wrote:
-        print(json.dumps({**outcome, "status": "recheck_empty_kept_existing"}, ensure_ascii=False, sort_keys=True))
+    published, landed_at = _publish_auction_frame(
+        raw_dir,
+        repo_root,
+        trade_date,
+        candidate,
+        result,
+        pages,
+        args.page_limit,
+        getattr(args, "landing_job", "cn_evening_auction_backfill"),
+        getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+    )
+    if published not in WRITTEN_OUTCOMES:
+        # Staged (a correction dropping most rows) or unchanged: the morning
+        # partition stays visible; a staged answer is an open issue.
+        print(json.dumps({**outcome, "status": f"recheck_{published}_kept_existing"}, ensure_ascii=False, sort_keys=True))
         return 0
     print(json.dumps({
         **outcome,
@@ -944,31 +959,35 @@ def date_series_in_window(series: pd.Series, start_date: str, end_date: str) -> 
     return keys.between(start_date, end_date)
 
 def merge_existing_window_rows(
-    path: Path,
+    existing: pd.DataFrame,
     refreshed: pd.DataFrame,
     *,
     start_date: str,
     end_date: str,
     date_columns: list[str],
     key_columns: list[str],
-) -> pd.DataFrame:
-    if not path.exists():
-        return refreshed
-    existing = pd.read_parquet(path)
+) -> tuple[pd.DataFrame, int]:
+    """The partition after replacing its rows inside the window with the
+    refreshed answer, and how many existing rows the window held.
+
+    ``key_columns`` (empty to keep every row) collapses rows sharing a key,
+    the refreshed row winning."""
     if existing.empty:
-        return refreshed
+        return refreshed, 0
     date_column = next((column for column in date_columns if column and (column in existing.columns or column in refreshed.columns)), "")
     if not date_column:
-        return refreshed
+        return refreshed, len(existing)
+    existing = existing.copy()
+    refreshed = refreshed.copy()
     if date_column not in existing.columns:
         existing[date_column] = ""
     if date_column not in refreshed.columns:
         refreshed[date_column] = ""
-    retained = existing[~date_series_in_window(existing[date_column], start_date, end_date)].copy()
-    merged = concat_rows([retained, refreshed])
+    inside = date_series_in_window(existing[date_column], start_date, end_date)
+    merged = concat_rows([existing[~inside], refreshed])
     if key_columns and set(key_columns).issubset(merged.columns):
         merged = merged.drop_duplicates(key_columns, keep="last")
-    return merged.reset_index(drop=True)
+    return merged.reset_index(drop=True), int(inside.sum())
 
 def write_window_merged_partition(
     path: Path,
@@ -982,39 +1001,47 @@ def write_window_merged_partition(
     start_date: str,
     end_date: str,
     revision_ledger: Path | str | None,
-    allow_empty_revision_overwrite: bool,
+    deduplicate: bool = False,
 ) -> tuple[bool, int]:
     """Merge the refreshed window into the partition. Returns (did_write, rows).
 
-    A caller must not infer the write from the row count: a partition legitimately
-    written with zero rows and one kept because the response was empty both report
-    zero rows, and counting the latter as written overstated the lake mutations the
-    event/flow no-mutation contract is decided on.
+    An empty answer for a window in which the partition holds rows is a
+    defective answer. A dataset whose key names one record (``deduplicate``)
+    leaves duplicate keys to the versioned write, which drops them
+    deterministically and counts them; any other keeps the refreshed row of a
+    repeated key.
     """
     df = refreshed
     meta_params = dict(params)
-    if path.exists() and (not refreshed.empty or allow_empty_revision_overwrite):
-        df = merge_existing_window_rows(
-            path,
+    current = None
+    if path.exists():
+        current = pd.read_parquet(path)
+        df, held = merge_existing_window_rows(
+            current,
             refreshed,
             start_date=start_date,
             end_date=end_date,
             date_columns=date_columns,
-            key_columns=key_columns,
+            key_columns=[] if deduplicate else key_columns,
         )
+        if refreshed.empty and held:
+            raise DefectiveAnswer(
+                f"{api_name} answered no rows for {start_date}-{end_date}, where the partition holds {held}"
+            )
         meta_params["merge_existing_window"] = {"start_date": start_date, "end_date": end_date}
-    written = write_parquet_revision_aware(
+    outcome = publish(
         path,
         df,
         api_name=api_name,
         params=meta_params,
         fields=list(df.columns) if len(df.columns) else fields,
         key_columns=key_columns,
-        revision_ledger=revision_ledger,
-        allow_empty_revision_overwrite=allow_empty_revision_overwrite,
-        allow_key_removal_overwrite=True,
+        ledger=revision_ledger,
+        deduplicate=deduplicate,
+        current=current,
     )
-    return bool(written), len(df) if written else 0
+    written = outcome in WRITTEN_OUTCOMES
+    return written, len(df) if written else 0
 
 def download_trade_date_dataset(
     client: TuShareClient,
@@ -1024,7 +1051,6 @@ def download_trade_date_dataset(
     force: bool,
     page_limit: int,
     revision_ledger: Path,
-    allow_empty_revision_overwrite: bool,
 ) -> int:
     page_limit = page_limit or TRADE_DATE_PAGE_LIMIT
     dataset_dir = raw_dir / spec.api_name
@@ -1042,34 +1068,36 @@ def download_trade_date_dataset(
                 print(f"{spec.api_name} {index}/{len(trade_dates)} skipped={skipped} written={written}")
             continue
         params = {"trade_date": trade_date}
-        try:
-            result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-        except Exception as exc:
-            raise RuntimeError(f"{spec.api_name} trade_date={trade_date} failed: {exc}") from exc
-        df = frame(result)
-        if getattr(spec, "dedup_exact", False) and not df.empty:
-            df = df.drop_duplicates().reset_index(drop=True)
-        if df.empty and not spec.zero_rows_ok:
-            zero_skipped += 1
-            print(f"{spec.api_name} trade_date={trade_date} returned zero rows; skipped_write")
-            continue
-        meta_params = dict(params)
-        meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-        did_write = write_parquet_revision_aware(
-            path,
-            df,
-            api_name=spec.api_name,
-            params=meta_params,
-            fields=result.fields,
-            key_columns=list(spec.key_columns),
-            revision_ledger=revision_ledger,
-            allow_empty_revision_overwrite=allow_empty_revision_overwrite,
-        )
-        if did_write:
-            total_rows += len(df)
-            written += 1
-        else:
-            zero_skipped += 1
+        with answer_defects(path, ledger=revision_ledger):
+            try:
+                result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
+            except DefectiveAnswer:
+                raise
+            except Exception as exc:
+                raise RuntimeError(f"{spec.api_name} trade_date={trade_date} failed: {exc}") from exc
+            df = frame(result)
+            if getattr(spec, "dedup_exact", False) and not df.empty:
+                df = df.drop_duplicates().reset_index(drop=True)
+            if df.empty and not spec.zero_rows_ok:
+                zero_skipped += 1
+                print(f"{spec.api_name} trade_date={trade_date} returned zero rows; skipped_write")
+                continue
+            meta_params = dict(params)
+            meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
+            outcome = publish(
+                path,
+                df,
+                api_name=spec.api_name,
+                params=meta_params,
+                fields=result.fields,
+                key_columns=list(spec.key_columns),
+                ledger=revision_ledger,
+            )
+            if outcome in WRITTEN_OUTCOMES:
+                total_rows += len(df)
+                written += 1
+            elif outcome == "defect":
+                zero_skipped += 1
         if index % 250 == 0:
             print(f"{spec.api_name} {index}/{len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows}")
     print(f"{spec.api_name} done dates={len(trade_dates)} skipped={skipped} written={written} zero_skipped={zero_skipped} rows_written={total_rows}")
@@ -1080,24 +1108,23 @@ def download_macro(args: argparse.Namespace) -> int:
     raw_dir = repo_root / args.raw_dir
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
     revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
-    allow_empty_revision_overwrite = getattr(args, "allow_empty_revision_overwrite", False)
     retained_start_date = getattr(args, "macro_start_date", None) or args.start_date
     for dataset in selected_macro_datasets(args):
         spec = MACRO_SPECS[dataset]
         spec_floor = history_floor(spec.start_date, args)
         start_date = max(args.start_date, spec_floor)
         if spec.strategy == "quarter_once":
-            download_macro_quarter_once(client, raw_dir, spec, max(retained_start_date, spec_floor), args.end_date, args.force, revision_ledger, allow_empty_revision_overwrite)
+            download_macro_quarter_once(client, raw_dir, spec, max(retained_start_date, spec_floor), args.end_date, args.force, revision_ledger)
         elif spec.strategy == "month_once":
-            download_macro_month_once(client, raw_dir, spec, max(retained_start_date, spec_floor), args.end_date, args.force, revision_ledger, allow_empty_revision_overwrite)
+            download_macro_month_once(client, raw_dir, spec, max(retained_start_date, spec_floor), args.end_date, args.force, revision_ledger)
         elif spec.strategy == "month_loop":
-            download_macro_month_loop(client, raw_dir, spec, start_date, args.end_date, args.force, revision_ledger, allow_empty_revision_overwrite)
+            download_macro_month_loop(client, raw_dir, spec, start_date, args.end_date, args.force, revision_ledger)
         elif spec.strategy == "trade_date":
-            download_macro_trade_date(client, raw_dir, spec, start_date, args.end_date, args.force, spec_page_limit(spec, args.page_limit), revision_ledger, allow_empty_revision_overwrite)
+            download_macro_trade_date(client, raw_dir, spec, start_date, args.end_date, args.force, spec_page_limit(spec, args.page_limit), revision_ledger)
         elif spec.strategy == "date_year":
-            download_macro_date_year(client, raw_dir, spec, start_date, args.end_date, args.force, spec_page_limit(spec, args.page_limit), revision_ledger, allow_empty_revision_overwrite)
+            download_macro_date_year(client, raw_dir, spec, start_date, args.end_date, args.force, spec_page_limit(spec, args.page_limit), revision_ledger)
         elif spec.strategy == "static_full":
-            download_macro_static_full(client, raw_dir, spec, spec_page_limit(spec, args.page_limit), revision_ledger, allow_empty_revision_overwrite)
+            download_macro_static_full(client, raw_dir, spec, spec_page_limit(spec, args.page_limit), revision_ledger)
         elif spec.strategy == "date_year_by_ts_code":
             if dataset == "index_global":
                 codes = selected_index_codes(args)
@@ -1107,15 +1134,15 @@ def download_macro(args: argparse.Namespace) -> int:
                 codes = selected_fx_codes(args)
             else:
                 raise RuntimeError(f"no ts_code universe defined for by-ts_code macro dataset {dataset!r}")
-            download_macro_date_year_by_ts_code(client, raw_dir, spec, start_date, args.end_date, args.force, spec_page_limit(spec, args.page_limit), codes, revision_ledger, allow_empty_revision_overwrite)
+            download_macro_date_year_by_ts_code(client, raw_dir, spec, start_date, args.end_date, args.force, spec_page_limit(spec, args.page_limit), codes, revision_ledger)
         elif spec.strategy == "eco_cal_month":
-            download_macro_eco_cal_month(client, raw_dir, spec, start_date, args.end_date, args.force, spec_page_limit(spec, args.page_limit), args, revision_ledger, allow_empty_revision_overwrite)
+            download_macro_eco_cal_month(client, raw_dir, spec, start_date, args.end_date, args.force, spec_page_limit(spec, args.page_limit), args, revision_ledger)
         else:
             raise RuntimeError(f"unsupported macro strategy {spec.strategy} for {dataset}")
     print(f"{args.tier} download finished under {raw_dir}")
     return 0
 
-def download_macro_quarter_once(client: TuShareClient, raw_dir: Path, spec: MacroDataset, start_date: str, end_date: str, force: bool, revision_ledger: Path | str | None = None, allow_empty_revision_overwrite: bool = False) -> None:
+def download_macro_quarter_once(client: TuShareClient, raw_dir: Path, spec: MacroDataset, start_date: str, end_date: str, force: bool, revision_ledger: Path | str | None = None) -> None:
     start_date = retained_range_start(raw_dir / spec.api_name, start_date)
     start_q = max(yyyymmdd_to_quarter(start_date), spec.start_quarter)
     end_q = yyyymmdd_to_quarter(end_date)
@@ -1124,12 +1151,13 @@ def download_macro_quarter_once(client: TuShareClient, raw_dir: Path, spec: Macr
     if should_skip_existing_partition(path, force=force, requested_params=coverage_params):
         return
     params = {"start_q": start_q, "end_q": end_q}
-    result = client.query(spec.api_name, params, spec.fields)
-    rows = write_macro_result(path, result, spec, {**params, **coverage_params}, revision_ledger, allow_empty_revision_overwrite)
-    prune_stale_range_files(path)
-    print(f"{spec.api_name} quarters {start_q}-{end_q} rows={rows}")
+    with answer_defects(path, ledger=revision_ledger):
+        result = client.query(spec.api_name, params, spec.fields)
+        rows = write_macro_result(path, result, spec, {**params, **coverage_params}, revision_ledger)
+        prune_stale_range_files(path)
+        print(f"{spec.api_name} quarters {start_q}-{end_q} rows={rows}")
 
-def download_macro_month_once(client: TuShareClient, raw_dir: Path, spec: MacroDataset, start_date: str, end_date: str, force: bool, revision_ledger: Path | str | None = None, allow_empty_revision_overwrite: bool = False) -> None:
+def download_macro_month_once(client: TuShareClient, raw_dir: Path, spec: MacroDataset, start_date: str, end_date: str, force: bool, revision_ledger: Path | str | None = None) -> None:
     start_date = retained_range_start(raw_dir / spec.api_name, start_date)
     start_m = max(yyyymmdd_to_month(start_date), spec.start_month)
     end_m = yyyymmdd_to_month(end_date)
@@ -1138,10 +1166,11 @@ def download_macro_month_once(client: TuShareClient, raw_dir: Path, spec: MacroD
     if should_skip_existing_partition(path, force=force, requested_params=coverage_params):
         return
     params = {"start_m": start_m, "end_m": end_m}
-    result = client.query(spec.api_name, params, spec.fields)
-    rows = write_macro_result(path, result, spec, {**params, **coverage_params}, revision_ledger, allow_empty_revision_overwrite)
-    prune_stale_range_files(path)
-    print(f"{spec.api_name} months {start_m}-{end_m} rows={rows}")
+    with answer_defects(path, ledger=revision_ledger):
+        result = client.query(spec.api_name, params, spec.fields)
+        rows = write_macro_result(path, result, spec, {**params, **coverage_params}, revision_ledger)
+        prune_stale_range_files(path)
+        print(f"{spec.api_name} months {start_m}-{end_m} rows={rows}")
 
 def prune_stale_range_files(canonical: Path) -> None:
     """A range dataset holds exactly ONE file (the canonical `range=*_latest`).
@@ -1163,36 +1192,33 @@ def download_macro_static_full(
     spec: MacroDataset,
     page_limit: int,
     revision_ledger: Path | str | None = None,
-    allow_empty_revision_overwrite: bool = False,
 ) -> None:
     """Full registry refresh: small reference tables (contract/bond registries,
     announcement ledgers) are re-pulled whole on every run and written through
-    the revision-aware overwrite (key-removal accepted as source correction;
-    the disproportionate-shrink guard still blocks transient truncation)."""
+    the versioned write path."""
     loops = spec.loop_values or ("",)
     for value in loops:
         params = {spec.loop_param: value} if value else {}
         name = f"{spec.loop_param}={safe_partition_value(value)}.parquet" if value else "full.parquet"
         path = raw_dir / spec.api_name / name
-        result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-        df = augment_macro_frame(frame(result), spec)
-        meta_params = dict(params)
-        meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-        did_write = write_parquet_revision_aware(
-            path,
-            df,
-            api_name=spec.api_name,
-            params=meta_params,
-            fields=list(df.columns),
-            key_columns=list(spec.key_columns),
-            revision_ledger=revision_ledger,
-            allow_empty_revision_overwrite=allow_empty_revision_overwrite,
-            allow_key_removal_overwrite=True,
-        )
-        print(f"{spec.api_name} {name} rows={len(df)} written={bool(did_write)}")
+        with answer_defects(path, ledger=revision_ledger):
+            result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
+            df = augment_macro_frame(frame(result), spec)
+            meta_params = dict(params)
+            meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
+            outcome = publish(
+                path,
+                df,
+                api_name=spec.api_name,
+                params=meta_params,
+                fields=list(df.columns),
+                key_columns=list(spec.key_columns),
+                ledger=revision_ledger,
+            )
+            print(f"{spec.api_name} {name} rows={len(df)} outcome={outcome}")
 
 
-def download_macro_month_loop(client: TuShareClient, raw_dir: Path, spec: MacroDataset, start_date: str, end_date: str, force: bool, revision_ledger: Path | str | None = None, allow_empty_revision_overwrite: bool = False) -> None:
+def download_macro_month_loop(client: TuShareClient, raw_dir: Path, spec: MacroDataset, start_date: str, end_date: str, force: bool, revision_ledger: Path | str | None = None) -> None:
     windows = month_windows(start_date, end_date)
     written = 0
     skipped = 0
@@ -1206,28 +1232,28 @@ def download_macro_month_loop(client: TuShareClient, raw_dir: Path, spec: MacroD
         if should_skip_existing_partition(path, force=force, requested_params=coverage_params):
             skipped += 1
             continue
-        params = {spec.month_param: month}
-        meta_params = {**params, **coverage_params}
-        result = client.query(spec.api_name, params, spec.fields)
-        df = augment_macro_frame(frame(result), spec)
-        did_write, rows = write_window_merged_partition(
-            path,
-            df,
-            api_name=spec.api_name,
-            params=meta_params,
-            fields=list(df.columns),
-            key_columns=list(spec.key_columns),
-            date_columns=[spec.date_column, spec.time_column, "available_at"],
-            start_date=window_start,
-            end_date=window_end,
-            revision_ledger=revision_ledger,
-            allow_empty_revision_overwrite=allow_empty_revision_overwrite,
-        )
-        if did_write:
-            written += 1
-            total_rows += rows
-        if index % 24 == 0:
-            print(f"{spec.api_name} months {index}/{len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
+        with answer_defects(path, ledger=revision_ledger):
+            params = {spec.month_param: month}
+            meta_params = {**params, **coverage_params}
+            result = client.query(spec.api_name, params, spec.fields)
+            df = augment_macro_frame(frame(result), spec)
+            did_write, rows = write_window_merged_partition(
+                path,
+                df,
+                api_name=spec.api_name,
+                params=meta_params,
+                fields=list(df.columns),
+                key_columns=list(spec.key_columns),
+                date_columns=[spec.date_column, spec.time_column, "available_at"],
+                start_date=window_start,
+                end_date=window_end,
+                revision_ledger=revision_ledger,
+            )
+            if did_write:
+                written += 1
+                total_rows += rows
+            if index % 24 == 0:
+                print(f"{spec.api_name} months {index}/{len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
     print(f"{spec.api_name} done months={len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
 
 def download_macro_trade_date(
@@ -1239,7 +1265,6 @@ def download_macro_trade_date(
     force: bool,
     page_limit: int,
     revision_ledger: Path | str | None = None,
-    allow_empty_revision_overwrite: bool = False,
 ) -> None:
     """Per-trade-date pulls for daily macro tables whose range endpoints cap the
     response server-side and ignore offset paging (ths/sw/ci index dailies:
@@ -1268,33 +1293,32 @@ def download_macro_trade_date(
         params = {"trade_date": trade_date}
         if loop_value:
             params[spec.loop_param] = loop_value
-        result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-        df = augment_macro_frame(frame(result), spec)
-        if df.empty:
-            print(f"{spec.api_name} trade_date={trade_date} returned zero rows; skipped_write")
-            continue
-        meta_params = dict(params)
-        meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-        did_write = write_parquet_revision_aware(
-            path,
-            df,
-            api_name=spec.api_name,
-            params=meta_params,
-            fields=list(df.columns),
-            key_columns=list(spec.key_columns),
-            revision_ledger=revision_ledger,
-            allow_empty_revision_overwrite=allow_empty_revision_overwrite,
-            allow_key_removal_overwrite=True,
-        )
-        if did_write:
-            written += 1
-            total_rows += len(df)
+        with answer_defects(path, ledger=revision_ledger):
+            result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
+            df = augment_macro_frame(frame(result), spec)
+            if df.empty:
+                print(f"{spec.api_name} trade_date={trade_date} returned zero rows; skipped_write")
+                continue
+            meta_params = dict(params)
+            meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
+            outcome = publish(
+                path,
+                df,
+                api_name=spec.api_name,
+                params=meta_params,
+                fields=list(df.columns),
+                key_columns=list(spec.key_columns),
+                ledger=revision_ledger,
+            )
+            if outcome in WRITTEN_OUTCOMES:
+                written += 1
+                total_rows += len(df)
         if index % 250 == 0:
             print(f"{spec.api_name} {index}/{len(tasks)} skipped={skipped} written={written} rows_written={total_rows}")
     print(f"{spec.api_name} done tasks={len(tasks)} skipped={skipped} written={written} rows_written={total_rows}")
 
 
-def download_macro_date_year(client: TuShareClient, raw_dir: Path, spec: MacroDataset, start_date: str, end_date: str, force: bool, page_limit: int, revision_ledger: Path | str | None = None, allow_empty_revision_overwrite: bool = False) -> None:
+def download_macro_date_year(client: TuShareClient, raw_dir: Path, spec: MacroDataset, start_date: str, end_date: str, force: bool, page_limit: int, revision_ledger: Path | str | None = None) -> None:
     written = 0
     skipped = 0
     total_rows = 0
@@ -1307,26 +1331,26 @@ def download_macro_date_year(client: TuShareClient, raw_dir: Path, spec: MacroDa
         if should_skip_existing_partition(path, force=force, requested_params=params):
             skipped += 1
             continue
-        result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-        meta_params = dict(params)
-        meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-        df = augment_macro_frame(frame(result), spec)
-        did_write, rows = write_window_merged_partition(
-            path,
-            df,
-            api_name=spec.api_name,
-            params=meta_params,
-            fields=list(df.columns),
-            key_columns=list(spec.key_columns),
-            date_columns=[spec.date_column, spec.time_column, "available_at"],
-            start_date=year_start,
-            end_date=year_end,
-            revision_ledger=revision_ledger,
-            allow_empty_revision_overwrite=allow_empty_revision_overwrite,
-        )
-        if did_write:
-            written += 1
-            total_rows += rows
+        with answer_defects(path, ledger=revision_ledger):
+            result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
+            meta_params = dict(params)
+            meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
+            df = augment_macro_frame(frame(result), spec)
+            did_write, rows = write_window_merged_partition(
+                path,
+                df,
+                api_name=spec.api_name,
+                params=meta_params,
+                fields=list(df.columns),
+                key_columns=list(spec.key_columns),
+                date_columns=[spec.date_column, spec.time_column, "available_at"],
+                start_date=year_start,
+                end_date=year_end,
+                revision_ledger=revision_ledger,
+            )
+            if did_write:
+                written += 1
+                total_rows += rows
     print(f"{spec.api_name} done years={int(end_date[:4]) - int(start_date[:4]) + 1} skipped={skipped} written={written} rows_written={total_rows}")
 
 def download_macro_date_year_by_ts_code(
@@ -1339,7 +1363,6 @@ def download_macro_date_year_by_ts_code(
     page_limit: int,
     codes: list[str],
     revision_ledger: Path | str | None = None,
-    allow_empty_revision_overwrite: bool = False,
 ) -> None:
     total_tasks = len(codes) * (int(end_date[:4]) - int(start_date[:4]) + 1)
     written = 0
@@ -1356,26 +1379,26 @@ def download_macro_date_year_by_ts_code(
             if should_skip_existing_partition(path, force=force, requested_params=params):
                 skipped += 1
                 continue
-            result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-            meta_params = dict(params)
-            meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-            df = augment_macro_frame(frame(result), spec)
-            did_write, rows = write_window_merged_partition(
-                path,
-                df,
-                api_name=spec.api_name,
-                params=meta_params,
-                fields=list(df.columns),
-                key_columns=list(spec.key_columns),
-                date_columns=[spec.date_column, spec.time_column, "available_at"],
-                start_date=year_start,
-                end_date=year_end,
-                revision_ledger=revision_ledger,
-                allow_empty_revision_overwrite=allow_empty_revision_overwrite,
-            )
-            if did_write:
-                written += 1
-                total_rows += rows
+            with answer_defects(path, ledger=revision_ledger):
+                result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
+                meta_params = dict(params)
+                meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
+                df = augment_macro_frame(frame(result), spec)
+                did_write, rows = write_window_merged_partition(
+                    path,
+                    df,
+                    api_name=spec.api_name,
+                    params=meta_params,
+                    fields=list(df.columns),
+                    key_columns=list(spec.key_columns),
+                    date_columns=[spec.date_column, spec.time_column, "available_at"],
+                    start_date=year_start,
+                    end_date=year_end,
+                    revision_ledger=revision_ledger,
+                )
+                if did_write:
+                    written += 1
+                    total_rows += rows
             if task_index % 25 == 0:
                 print(f"{spec.api_name} {task_index}/{total_tasks} skipped={skipped} written={written} rows_written={total_rows}")
     print(f"{spec.api_name} done tasks={total_tasks} skipped={skipped} written={written} rows_written={total_rows}")
@@ -1390,7 +1413,6 @@ def download_macro_eco_cal_month(
     page_limit: int,
     args: argparse.Namespace,
     revision_ledger: Path | str | None = None,
-    allow_empty_revision_overwrite: bool = False,
 ) -> None:
     countries = selected_eco_filter_values(args, "eco_country")
     currencies = selected_eco_filter_values(args, "eco_currency")
@@ -1427,47 +1449,47 @@ def download_macro_eco_cal_month(
                     # paging run, repeated pages are tolerated as expected
                     # source behavior, and the key dedup below collapses the
                     # duplicates.
-                    day_frames: list[pd.DataFrame] = []
-                    day_windows = 0
-                    pages_total = 0
-                    day = parse_yyyymmdd(start)
-                    last_day = parse_yyyymmdd(end)
-                    while day <= last_day:
-                        day_params = dict(params)
-                        day_params["start_date"] = day_params["end_date"] = format_yyyymmdd(day)
-                        result, pages = query_paged(client, spec.api_name, day_params, spec.fields, page_limit, allow_repeated_pages=True)
-                        pages_total += pages
-                        day_windows += 1
-                        day_frames.append(frame(result))
-                        day += timedelta(days=1)
-                    combined = pd.concat(day_frames, ignore_index=True)
-                    if not combined.empty:
-                        combined = combined.drop_duplicates(subset=list(spec.key_columns), keep="first", ignore_index=True)
-                    meta_params = dict(params)
-                    meta_params.update({
-                        "country_partition": country_part,
-                        "currency_partition": currency_part,
-                        "event_partition": event_part,
-                        "month": month,
-                        "pagination": {"page_limit": page_limit, "pages": pages_total, "day_windows": day_windows},
-                    })
-                    df = augment_macro_frame(combined, spec)
-                    did_write, rows = write_window_merged_partition(
-                        path,
-                        df,
-                        api_name=spec.api_name,
-                        params=meta_params,
-                        fields=list(df.columns),
-                        key_columns=list(spec.key_columns),
-                        date_columns=[spec.date_column, spec.time_column, "available_at"],
-                        start_date=start,
-                        end_date=end,
-                        revision_ledger=revision_ledger,
-                        allow_empty_revision_overwrite=allow_empty_revision_overwrite,
-                    )
-                    if did_write:
-                        written += 1
-                        total_rows += rows
+                    with answer_defects(path, ledger=revision_ledger):
+                        day_frames: list[pd.DataFrame] = []
+                        day_windows = 0
+                        pages_total = 0
+                        day = parse_yyyymmdd(start)
+                        last_day = parse_yyyymmdd(end)
+                        while day <= last_day:
+                            day_params = dict(params)
+                            day_params["start_date"] = day_params["end_date"] = format_yyyymmdd(day)
+                            result, pages = query_paged(client, spec.api_name, day_params, spec.fields, page_limit, allow_repeated_pages=True)
+                            pages_total += pages
+                            day_windows += 1
+                            day_frames.append(frame(result))
+                            day += timedelta(days=1)
+                        combined = pd.concat(day_frames, ignore_index=True)
+                        if not combined.empty:
+                            combined = combined.drop_duplicates(subset=list(spec.key_columns), keep="first", ignore_index=True)
+                        meta_params = dict(params)
+                        meta_params.update({
+                            "country_partition": country_part,
+                            "currency_partition": currency_part,
+                            "event_partition": event_part,
+                            "month": month,
+                            "pagination": {"page_limit": page_limit, "pages": pages_total, "day_windows": day_windows},
+                        })
+                        df = augment_macro_frame(combined, spec)
+                        did_write, rows = write_window_merged_partition(
+                            path,
+                            df,
+                            api_name=spec.api_name,
+                            params=meta_params,
+                            fields=list(df.columns),
+                            key_columns=list(spec.key_columns),
+                            date_columns=[spec.date_column, spec.time_column, "available_at"],
+                            start_date=start,
+                            end_date=end,
+                            revision_ledger=revision_ledger,
+                        )
+                        if did_write:
+                            written += 1
+                            total_rows += rows
                     if task_index % 24 == 0:
                         print(f"{spec.api_name} {task_index}/{total_tasks} skipped={skipped} written={written} rows_written={total_rows}")
     print(f"{spec.api_name} done tasks={total_tasks} skipped={skipped} written={written} rows_written={total_rows}")
@@ -1478,7 +1500,6 @@ def download_event_flow(args: argparse.Namespace) -> int:
     datasets = selected_event_flow_download_datasets(args)
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
     revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
-    allow_empty_revision_overwrite = getattr(args, "allow_empty_revision_overwrite", False)
     trade_dates: list[str] = []
     stamping_dates: list[str] | None = None
     trade_end_date = args.end_date
@@ -1495,7 +1516,7 @@ def download_event_flow(args: argparse.Namespace) -> int:
     stamping_end_date = format_yyyymmdd(parse_yyyymmdd(args.end_date) + timedelta(days=31))
     if has_trade_date_dataset or open_day_stamped:
         trade_cal_refreshed = ensure_trade_cal_coverage(
-            client, raw_dir, args.start_date, stamping_end_date if open_day_stamped else args.end_date
+            client, raw_dir, args.start_date, stamping_end_date if open_day_stamped else args.end_date, ledger=revision_ledger
         )
     if has_trade_date_dataset:
         latest_trade_calendar_date = latest_sse_calendar_date(raw_dir)
@@ -1527,7 +1548,6 @@ def download_event_flow(args: argparse.Namespace) -> int:
                 args.force,
                 spec_page_limit(spec, args.page_limit),
                 revision_ledger,
-                allow_empty_revision_overwrite,
                 trading_dates=stamping_dates,
             )
             total_written += written
@@ -1545,7 +1565,6 @@ def download_event_flow(args: argparse.Namespace) -> int:
                 args.force,
                 spec_page_limit(spec, args.page_limit),
                 revision_ledger,
-                allow_empty_revision_overwrite,
                 trading_dates=stamping_dates,
             )
         else:
@@ -1595,7 +1614,6 @@ def download_event_trade_date_dataset(
     force: bool,
     page_limit: int | None,
     revision_ledger: Path | str | None = None,
-    allow_empty_revision_overwrite: bool = False,
     *,
     trading_dates: list[str] | None = None,
 ) -> tuple[int, int]:
@@ -1623,42 +1641,41 @@ def download_event_trade_date_dataset(
                     print(f"{spec.api_name} {index}/{len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows}")
                 continue
         params = {"trade_date": trade_date}
-        result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-        meta_params = dict(params)
-        meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-        df = augment_event_frame(frame(result), spec, trading_dates=trading_dates)
-        if df.empty and not spec.zero_rows_ok:
-            zero_skipped += 1
-            total_pages += pages
-            print(f"{spec.api_name} trade_date={trade_date} returned zero rows; skipped_write")
-            continue
-        if not df.empty:
-            missing = margin_family_missing_exchanges(spec.api_name, trade_date, df)
-            if missing:
-                # Exchanges publish independently; a partial response poisons
-                # market-wide aggregates, so it rides the same not-ready/retry
-                # contract as an empty one instead of being committed.
+        with answer_defects(path, ledger=revision_ledger):
+            result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
+            meta_params = dict(params)
+            meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
+            df = augment_event_frame(frame(result), spec, trading_dates=trading_dates)
+            if df.empty and not spec.zero_rows_ok:
                 zero_skipped += 1
                 total_pages += pages
-                print(f"{spec.api_name} trade_date={trade_date} missing exchanges {missing}; skipped_write")
+                print(f"{spec.api_name} trade_date={trade_date} returned zero rows; skipped_write")
                 continue
-        did_write = write_parquet_revision_aware(
-            path,
-            df,
-            api_name=spec.api_name,
-            params=meta_params,
-            fields=list(df.columns),
-            key_columns=list(spec.key_columns),
-            revision_ledger=revision_ledger,
-            allow_empty_revision_overwrite=allow_empty_revision_overwrite,
-            allow_key_removal_overwrite=True,
-        )
-        if did_write:
-            total_rows += len(df)
-            written += 1
-        else:
-            zero_skipped += 1
-        total_pages += pages
+            if not df.empty:
+                missing = margin_family_missing_exchanges(spec.api_name, trade_date, df)
+                if missing:
+                    # Exchanges publish independently; a partial response poisons
+                    # market-wide aggregates, so it rides the same not-ready/retry
+                    # contract as an empty one instead of being committed.
+                    zero_skipped += 1
+                    total_pages += pages
+                    print(f"{spec.api_name} trade_date={trade_date} missing exchanges {missing}; skipped_write")
+                    continue
+            outcome = publish(
+                path,
+                df,
+                api_name=spec.api_name,
+                params=meta_params,
+                fields=list(df.columns),
+                key_columns=list(spec.key_columns),
+                ledger=revision_ledger,
+            )
+            if outcome in WRITTEN_OUTCOMES:
+                total_rows += len(df)
+                written += 1
+            elif outcome == "defect":
+                zero_skipped += 1
+            total_pages += pages
         if index % 250 == 0:
             print(f"{spec.api_name} {index}/{len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
     print(f"{spec.api_name} done dates={len(trade_dates)} skipped={skipped} written={written} zero_skipped={zero_skipped} rows_written={total_rows} pages={total_pages}")
@@ -1693,7 +1710,7 @@ def query_event_window(
         left, left_requests = query_event_window(client, spec, start_date, format_yyyymmdd(middle), page_limit)
         right, right_requests = query_event_window(client, spec, format_yyyymmdd(middle + timedelta(days=1)), end_date, page_limit)
         if left.items and right.items and left.fields != right.fields:
-            raise RuntimeError(f"{spec.api_name} returned inconsistent fields across {start_date}-{end_date}")
+            raise DefectiveAnswer(f"{spec.api_name} returned inconsistent fields across {start_date}-{end_date}")
         return ApiResult(left.fields or right.fields, left.items + right.items), 1 + left_requests + right_requests
     result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
     first_page: dict[str, int] = {}
@@ -1702,7 +1719,7 @@ def query_event_window(
         page = first_page.setdefault(json.dumps(row, ensure_ascii=False, default=str), index // page_limit)
         repeated += page != index // page_limit
     if repeated:
-        raise RuntimeError(
+        raise DefectiveAnswer(
             f"{spec.api_name} {start_date}: offset paging served {repeated} row(s) on two pages over {pages} pages, "
             "so as many rows are missing from the response; refusing to merge an incomplete day"
         )
@@ -1716,7 +1733,6 @@ def download_event_range_month(
     force: bool,
     page_limit: int,
     revision_ledger: Path | str | None = None,
-    allow_empty_revision_overwrite: bool = False,
     *,
     trading_dates: list[str] | None = None,
 ) -> int:
@@ -1730,28 +1746,29 @@ def download_event_range_month(
         if should_skip_existing_partition(path, force=force, requested_params=params):
             skipped += 1
             continue
-        result, pages = query_event_window(client, spec, start_date, end_date, page_limit)
-        meta_params = dict(params)
-        meta_params["month"] = month
-        meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-        df = augment_event_frame(frame(result), spec, trading_dates=trading_dates)
-        did_write, rows = write_window_merged_partition(
-            path,
-            df,
-            api_name=spec.api_name,
-            params=meta_params,
-            fields=list(df.columns),
-            key_columns=list(spec.key_columns),
-            date_columns=[spec.window_date_column or spec.date_column, spec.fallback_date_column, "available_at"],
-            start_date=start_date,
-            end_date=end_date,
-            revision_ledger=revision_ledger,
-            allow_empty_revision_overwrite=allow_empty_revision_overwrite,
-        )
-        if did_write:
-            written += 1
-            total_rows += rows
-        total_pages += pages
+        with answer_defects(path, ledger=revision_ledger):
+            result, pages = query_event_window(client, spec, start_date, end_date, page_limit)
+            meta_params = dict(params)
+            meta_params["month"] = month
+            meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
+            df = augment_event_frame(frame(result), spec, trading_dates=trading_dates)
+            did_write, rows = write_window_merged_partition(
+                path,
+                df,
+                api_name=spec.api_name,
+                params=meta_params,
+                fields=list(df.columns),
+                key_columns=list(spec.key_columns),
+                date_columns=[spec.window_date_column or spec.date_column, spec.fallback_date_column, "available_at"],
+                start_date=start_date,
+                end_date=end_date,
+                revision_ledger=revision_ledger,
+                deduplicate=spec.unique_key,
+            )
+            if did_write:
+                written += 1
+                total_rows += rows
+            total_pages += pages
         if index % 24 == 0:
             print(f"{spec.api_name} months {index}/{len(windows)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
     print(f"{spec.api_name} done months={len(windows)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
@@ -1763,10 +1780,9 @@ def download_board_trading(args: argparse.Namespace) -> int:
     datasets = selected_board_trading_datasets(args)
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
     revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
-    allow_empty_revision_overwrite = getattr(args, "allow_empty_revision_overwrite", False)
     trade_dates: list[str] = []
     if any(BOARD_TRADING_SPECS[name].strategy != "static_full" for name in datasets):
-        ensure_trade_cal_coverage(client, raw_dir, args.start_date, args.end_date)
+        ensure_trade_cal_coverage(client, raw_dir, args.start_date, args.end_date, ledger=revision_ledger)
         latest_trade_calendar_date = latest_sse_calendar_date(raw_dir)
         trade_end_date = min(args.end_date, latest_trade_calendar_date)
         if trade_end_date < args.end_date:
@@ -1783,31 +1799,32 @@ def download_board_trading(args: argparse.Namespace) -> int:
         dates = [trade_date for trade_date in trade_dates if start_date <= trade_date <= args.end_date]
         page_limit = spec_page_limit(spec, args.page_limit)
         if spec.strategy == "static_full":
-            download_board_static_dataset(client, raw_dir, spec, revision_ledger, allow_empty_revision_overwrite)
+            download_board_static_dataset(client, raw_dir, spec, revision_ledger)
         elif spec.strategy == "trade_date":
-            download_board_trade_date_dataset(client, raw_dir, spec, dates, args.force, page_limit, revision_ledger, allow_empty_revision_overwrite)
+            download_board_trade_date_dataset(client, raw_dir, spec, dates, args.force, page_limit, revision_ledger)
         elif spec.strategy == "trade_date_by_tag":
-            download_board_kpl_list(client, raw_dir, spec, dates, args.force, page_limit, selected_board_kpl_tags(args), revision_ledger, allow_empty_revision_overwrite)
+            download_board_kpl_list(client, raw_dir, spec, dates, args.force, page_limit, selected_board_kpl_tags(args), revision_ledger)
         elif spec.strategy == "trade_date_by_limit_type":
-            download_board_limit_list_ths(client, raw_dir, spec, dates, args.force, page_limit, selected_board_ths_limit_types(args), revision_ledger, allow_empty_revision_overwrite)
+            download_board_limit_list_ths(client, raw_dir, spec, dates, args.force, page_limit, selected_board_ths_limit_types(args), revision_ledger)
         elif spec.strategy == "trade_date_by_market":
-            download_board_hot_by_market(client, raw_dir, spec, dates, args.force, page_limit, selected_board_ths_hot_markets(args), selected_board_hot_is_new(args), revision_ledger, allow_empty_revision_overwrite)
+            download_board_hot_by_market(client, raw_dir, spec, dates, args.force, page_limit, selected_board_ths_hot_markets(args), selected_board_hot_is_new(args), revision_ledger)
         elif spec.strategy == "trade_date_by_market_hot_type":
-            download_board_dc_hot(client, raw_dir, spec, dates, args.force, page_limit, selected_board_dc_hot_markets(args), selected_board_dc_hot_types(args), selected_board_hot_is_new(args), revision_ledger, allow_empty_revision_overwrite)
+            download_board_dc_hot(client, raw_dir, spec, dates, args.force, page_limit, selected_board_dc_hot_markets(args), selected_board_dc_hot_types(args), selected_board_hot_is_new(args), revision_ledger)
         else:
             raise RuntimeError(f"unsupported board-trading strategy {spec.strategy} for {dataset}")
     print(f"board-trading download finished under {raw_dir}")
     return 0
 
-def download_board_static_dataset(client: TuShareClient, raw_dir: Path, spec: BoardTradingDataset, revision_ledger: Path | str | None = None, allow_empty_revision_overwrite: bool = False) -> None:
-    """Full-table refresh on every run; the revision-aware write refuses to
-    replace a non-empty partition with an empty vendor response."""
+def download_board_static_dataset(client: TuShareClient, raw_dir: Path, spec: BoardTradingDataset, revision_ledger: Path | str | None = None) -> None:
+    """Full-table refresh on every run; an empty answer for a non-empty
+    partition is a defect and keeps the current version."""
     path = raw_dir / spec.api_name / f"{spec.api_name}.parquet"
-    result = client.query(spec.api_name, {}, spec.fields)
-    rows = write_board_result(path, result, spec, {}, revision_ledger, allow_empty_revision_overwrite)
-    print(f"{spec.api_name} static rows={rows}")
+    with answer_defects(path, ledger=revision_ledger):
+        result = client.query(spec.api_name, {}, spec.fields)
+        rows = write_board_result(path, result, spec, {}, revision_ledger)
+        print(f"{spec.api_name} static rows={rows}")
 
-def download_board_trade_date_dataset(client: TuShareClient, raw_dir: Path, spec: BoardTradingDataset, trade_dates: list[str], force: bool, page_limit: int, revision_ledger: Path | str | None = None, allow_empty_revision_overwrite: bool = False) -> None:
+def download_board_trade_date_dataset(client: TuShareClient, raw_dir: Path, spec: BoardTradingDataset, trade_dates: list[str], force: bool, page_limit: int, revision_ledger: Path | str | None = None) -> None:
     written = 0
     skipped = 0
     total_rows = 0
@@ -1818,17 +1835,18 @@ def download_board_trade_date_dataset(client: TuShareClient, raw_dir: Path, spec
             skipped += 1
             continue
         params = {"trade_date": trade_date}
-        result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-        meta_params = dict(params)
-        meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-        total_rows += write_board_result(path, result, spec, meta_params, revision_ledger, allow_empty_revision_overwrite)
-        total_pages += pages
-        written += 1
+        with answer_defects(path, ledger=revision_ledger):
+            result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
+            meta_params = dict(params)
+            meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
+            total_rows += write_board_result(path, result, spec, meta_params, revision_ledger)
+            total_pages += pages
+            written += 1
         if index % 250 == 0:
             print(f"{spec.api_name} {index}/{len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
     print(f"{spec.api_name} done dates={len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
 
-def download_board_kpl_list(client: TuShareClient, raw_dir: Path, spec: BoardTradingDataset, trade_dates: list[str], force: bool, page_limit: int, tags: list[str], revision_ledger: Path | str | None = None, allow_empty_revision_overwrite: bool = False) -> None:
+def download_board_kpl_list(client: TuShareClient, raw_dir: Path, spec: BoardTradingDataset, trade_dates: list[str], force: bool, page_limit: int, tags: list[str], revision_ledger: Path | str | None = None) -> None:
     total_tasks = len(trade_dates) * len(tags)
     task_index = 0
     written = 0
@@ -1844,18 +1862,19 @@ def download_board_kpl_list(client: TuShareClient, raw_dir: Path, spec: BoardTra
                 skipped += 1
                 continue
             params = {"trade_date": trade_date, "tag": tag}
-            result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-            meta_params = dict(params)
-            meta_params["tag_partition"] = tag_part
-            meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-            total_rows += write_board_result(path, result, spec, meta_params, revision_ledger, allow_empty_revision_overwrite)
-            total_pages += pages
-            written += 1
+            with answer_defects(path, ledger=revision_ledger):
+                result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
+                meta_params = dict(params)
+                meta_params["tag_partition"] = tag_part
+                meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
+                total_rows += write_board_result(path, result, spec, meta_params, revision_ledger)
+                total_pages += pages
+                written += 1
             if task_index % 250 == 0:
                 print(f"{spec.api_name} {task_index}/{total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
     print(f"{spec.api_name} done tasks={total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
 
-def download_board_limit_list_ths(client: TuShareClient, raw_dir: Path, spec: BoardTradingDataset, trade_dates: list[str], force: bool, page_limit: int, limit_types: list[str], revision_ledger: Path | str | None = None, allow_empty_revision_overwrite: bool = False) -> None:
+def download_board_limit_list_ths(client: TuShareClient, raw_dir: Path, spec: BoardTradingDataset, trade_dates: list[str], force: bool, page_limit: int, limit_types: list[str], revision_ledger: Path | str | None = None) -> None:
     total_tasks = len(trade_dates) * len(limit_types)
     task_index = 0
     written = 0
@@ -1871,13 +1890,14 @@ def download_board_limit_list_ths(client: TuShareClient, raw_dir: Path, spec: Bo
                 skipped += 1
                 continue
             params = {"trade_date": trade_date, "limit_type": limit_type}
-            result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-            meta_params = dict(params)
-            meta_params["limit_type_partition"] = limit_type_part
-            meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-            total_rows += write_board_result(path, result, spec, meta_params, revision_ledger, allow_empty_revision_overwrite)
-            total_pages += pages
-            written += 1
+            with answer_defects(path, ledger=revision_ledger):
+                result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
+                meta_params = dict(params)
+                meta_params["limit_type_partition"] = limit_type_part
+                meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
+                total_rows += write_board_result(path, result, spec, meta_params, revision_ledger)
+                total_pages += pages
+                written += 1
             if task_index % 250 == 0:
                 print(f"{spec.api_name} {task_index}/{total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
     print(f"{spec.api_name} done tasks={total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
@@ -1892,7 +1912,6 @@ def download_board_hot_by_market(
     markets: list[str],
     is_new_values: list[str],
     revision_ledger: Path | str | None = None,
-    allow_empty_revision_overwrite: bool = False,
 ) -> None:
     total_tasks = len(trade_dates) * len(markets) * len(is_new_values)
     task_index = 0
@@ -1910,13 +1929,14 @@ def download_board_hot_by_market(
                     skipped += 1
                     continue
                 params = {"trade_date": trade_date, "market": market, "is_new": is_new}
-                result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-                meta_params = dict(params)
-                meta_params["market_partition"] = market_part
-                meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-                total_rows += write_board_result(path, result, spec, meta_params, revision_ledger, allow_empty_revision_overwrite)
-                total_pages += pages
-                written += 1
+                with answer_defects(path, ledger=revision_ledger):
+                    result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
+                    meta_params = dict(params)
+                    meta_params["market_partition"] = market_part
+                    meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
+                    total_rows += write_board_result(path, result, spec, meta_params, revision_ledger)
+                    total_pages += pages
+                    written += 1
                 if task_index % 250 == 0:
                     print(f"{spec.api_name} {task_index}/{total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
     print(f"{spec.api_name} done tasks={total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
@@ -1932,7 +1952,6 @@ def download_board_dc_hot(
     hot_types: list[str],
     is_new_values: list[str],
     revision_ledger: Path | str | None = None,
-    allow_empty_revision_overwrite: bool = False,
 ) -> None:
     total_tasks = len(trade_dates) * len(markets) * len(hot_types) * len(is_new_values)
     task_index = 0
@@ -1952,14 +1971,15 @@ def download_board_dc_hot(
                         skipped += 1
                         continue
                     params = {"trade_date": trade_date, "market": market, "hot_type": hot_type, "is_new": is_new}
-                    result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-                    meta_params = dict(params)
-                    meta_params["market_partition"] = market_part
-                    meta_params["hot_type_partition"] = hot_type_part
-                    meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-                    total_rows += write_board_result(path, result, spec, meta_params, revision_ledger, allow_empty_revision_overwrite)
-                    total_pages += pages
-                    written += 1
+                    with answer_defects(path, ledger=revision_ledger):
+                        result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
+                        meta_params = dict(params)
+                        meta_params["market_partition"] = market_part
+                        meta_params["hot_type_partition"] = hot_type_part
+                        meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
+                        total_rows += write_board_result(path, result, spec, meta_params, revision_ledger)
+                        total_pages += pages
+                        written += 1
                     if task_index % 250 == 0:
                         print(f"{spec.api_name} {task_index}/{total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
     print(f"{spec.api_name} done tasks={total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
@@ -1971,68 +1991,54 @@ def query_share_float_to_path(
     source: str,
     force: bool,
     revision_ledger: Path | str | None = None,
-    allow_empty_revision_overwrite: bool = False,
 ) -> dict[str, Any]:
     if not force and committed_partition_intact(path):
         rows = parquet_rows(path)
         # Every return of this function carries the same keys: the caller reads
-        # guard_retained on each day, so omitting it here turned a plain resume
+        # staged on each day, so omitting it here turned a plain resume
         # (partition present, no --force) into a KeyError.
         return {
             "path": str(path),
             "rows": rows,
             "skipped": True,
             "source_cap_risk": rows >= SHARE_FLOAT_ROW_LIMIT,
-            "guard_retained": False,
+            "staged": False,
         }
-    result = client.query("share_float", params, SHARE_FLOAT_FIELDS)
-    meta_params = dict(params)
-    meta_params["download_path"] = source
-    meta_params["row_limit"] = SHARE_FLOAT_ROW_LIMIT
-    df = augment_event_frame(frame(result), EVENT_FLOW_SPECS["share_float"])
-    try:
-        did_write = write_parquet_revision_aware(
+    outcome = "defect"
+    fetched = 0
+    with answer_defects(path, ledger=revision_ledger):
+        result = client.query("share_float", params, SHARE_FLOAT_FIELDS)
+        meta_params = dict(params)
+        meta_params["download_path"] = source
+        meta_params["row_limit"] = SHARE_FLOAT_ROW_LIMIT
+        df = augment_event_frame(frame(result), EVENT_FLOW_SPECS["share_float"])
+        fetched = len(df)
+        outcome = publish(
             path,
             df,
             api_name="share_float",
             params=meta_params,
             fields=list(df.columns),
             key_columns=list(EVENT_FLOW_SPECS["share_float"].key_columns),
-            revision_ledger=revision_ledger,
-            allow_empty_revision_overwrite=allow_empty_revision_overwrite,
-            allow_key_removal_overwrite=True,
+            ledger=revision_ledger,
         )
-        guard_retained = False
-    except BlockedOverwriteError:
-        # A guard decision is NOT a fetch failure: the writer deliberately kept
-        # the old partition and recorded a revision event. Letting the alarm
-        # abort the run mid-loop made the ts_code rescue below unreachable -- so
-        # a capped partition (the exact case the rescue exists for) could never
-        # be repaired and every attempt ended with the lake left dirty. The
-        # alarm is not dropped: the caller still ends the run non-zero for every
-        # day the rescue cannot explain (capped -> rescue by ts_code, otherwise
-        # a mass retraction an operator must rule on).
-        did_write = False
-        guard_retained = True
-    rows = len(df) if did_write else parquet_rows(path) if path.exists() else 0
+    written = outcome in WRITTEN_OUTCOMES
+    rows = fetched if written else parquet_rows(path) if path.exists() else 0
     return {
         "path": str(path),
         "rows": rows,
-        "skipped": not did_write,
+        "skipped": not written,
         # Cap risk must consider the FETCHED response, not only the rows kept
-        # on disk: a guard-retained day whose new pull sits at the per-call cap
-        # is the rotating-slice case the ts_code rescue exists for. Classifying
-        # it by the retained old rows escalated exactly that case (a small
-        # early-evening partition, then the vendor's late fill pushed the day
-        # past the cap) into an "unrescuable retraction" run failure.
-        "source_cap_risk": max(rows, len(df)) >= SHARE_FLOAT_ROW_LIMIT,
-        "guard_retained": guard_retained,
+        # on disk: a staged day whose new pull sits at the per-call cap is the
+        # rotating-slice case the ts_code rescue exists for.
+        "source_cap_risk": max(rows, fetched) >= SHARE_FLOAT_ROW_LIMIT,
+        "staged": outcome == "staged",
     }
 
 def download_share_float_ann_dates(client: TuShareClient, raw_dir: Path, args: argparse.Namespace, report: dict[str, Any]) -> list[str]:
     days = date_range_days(args.ann_start_date, args.ann_end_date)
     limit_hits: list[str] = []
-    unrescuable: list[str] = []
+    staged: list[str] = []
     written = 0
     skipped = 0
     total_rows = 0
@@ -2045,20 +2051,17 @@ def download_share_float_ann_dates(client: TuShareClient, raw_dir: Path, args: a
             "ann_date",
             args.force,
             getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
-            getattr(args, "allow_empty_revision_overwrite", False),
         )
         written += 0 if result["skipped"] else 1
         skipped += 1 if result["skipped"] else 0
         total_rows += int(result["rows"])
         if result["source_cap_risk"]:
             limit_hits.append(day)
-        elif result["guard_retained"]:
-            # Retained but NOT capped: the source really did drop a large share
-            # of the keys, which no rescue can repair because the ts_code path
-            # would only confirm the same retraction. This needs an operator
-            # ruling, so it must not pass silently -- it is raised after every
-            # recoverable day has been processed.
-            unrescuable.append(day)
+        elif result["staged"]:
+            # Staged but NOT capped: the source dropped most of the day's keys,
+            # which no ts_code rescue can repair. The staged version is an open
+            # issue for an operator to promote or leave.
+            staged.append(day)
         if index % 250 == 0:
             print(f"share_float ann_date {index}/{len(days)} skipped={skipped} written={written} rows_seen={total_rows} limit_hits={len(limit_hits)}")
     report["ann_date"] = {
@@ -2069,16 +2072,9 @@ def download_share_float_ann_dates(client: TuShareClient, raw_dir: Path, args: a
         "skipped": skipped,
         "rows_seen": total_rows,
         "limit_hit_days": limit_hits,
-        "guard_retained_days": unrescuable,
+        "staged_days": staged,
     }
     print(f"share_float ann_date done days={len(days)} skipped={skipped} written={written} rows_seen={total_rows} limit_hits={len(limit_hits)}")
-    if unrescuable:
-        raise RuntimeError(
-            "share_float refresh was retained by the revision guard on non-capped partitions "
-            f"{unrescuable}: the source retracted a disproportionate share of keys and no ts_code "
-            "rescue can recover it. Inspect the revision ledger, then delete the partition to "
-            "accept the retraction or keep the old data deliberately."
-        )
     return limit_hits
 
 def download_share_float_ts_code_rescue_by_date(
@@ -2091,7 +2087,6 @@ def download_share_float_ts_code_rescue_by_date(
     source: str,
     force: bool,
     revision_ledger: Path | str | None = None,
-    allow_empty_revision_overwrite: bool = False,
 ) -> dict[str, Any]:
     written = 0
     skipped = 0
@@ -2111,7 +2106,6 @@ def download_share_float_ts_code_rescue_by_date(
                 source,
                 force,
                 revision_ledger,
-                allow_empty_revision_overwrite,
             )
             written += 0 if result["skipped"] else 1
             skipped += 1 if result["skipped"] else 0
@@ -2468,7 +2462,7 @@ def write_share_float_union(raw_dir: Path, args: argparse.Namespace, report: dic
             f"(beyond {superseded_group_count} superseded re-dated groups) "
             f"using {len(files)} input files"
         )
-    published = write_parquet_revision_aware(
+    published = publish(
         output,
         union,
         api_name="share_float_complete",
@@ -2483,16 +2477,13 @@ def write_share_float_union(raw_dir: Path, args: argparse.Namespace, report: dic
         },
         fields=list(union.columns),
         key_columns=identity_columns,
-        revision_ledger=revision_ledger,
+        ledger=revision_ledger,
         source="share_float_union_merge",
-        allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
-        allow_key_removal_overwrite=True,
-        revision_comparison_old_df=revision_old,
-        revision_comparison_new_df=revision_new,
-        existing_df=existing,
+        compare=(revision_old, revision_new),
+        current=existing,
     )
-    if not published:
-        raise RuntimeError(f"share_float_complete merge was not published to {output}")
+    if published not in WRITTEN_OUTCOMES | {"unchanged"}:
+        raise RuntimeError(f"share_float_complete merge was not published to {output}: {published}")
     report["union"] = {
         "output": str(output),
         "input_files": len(files),
@@ -2551,7 +2542,6 @@ def download_share_float_complete(args: argparse.Namespace) -> int:
             source="ann_date_ts_code",
             force=args.force,
             revision_ledger=getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
-            allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
         )
     report["ann_date_ts_code_skipped_limit_days"] = skipped_ann_rescue
 
@@ -2565,11 +2555,13 @@ def download_share_float_complete(args: argparse.Namespace) -> int:
             source="float_date_ts_code",
             force=args.force,
             revision_ledger=getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
-            allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
         )
 
     if args.write_union:
         write_share_float_union(raw_dir, args, report)
+        report_complete(Path(args.union_output).parent.name)
+    if not args.skip_ann_date:
+        report_complete("share_float")
 
     if args.output:
         output = (repo_root / args.output).resolve()
@@ -2592,7 +2584,6 @@ def download_fundamental(args: argparse.Namespace) -> int:
     raw_dir = repo_root / args.raw_dir
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
     revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
-    allow_empty_revision_overwrite = getattr(args, "allow_empty_revision_overwrite", False)
     datasets = selected_fundamental_datasets(args.datasets)
     stock_codes: list[str] = []
     if any(FUNDAMENTAL_SPECS[name].strategy == "ts_code" for name in datasets):
@@ -2615,10 +2606,10 @@ def download_fundamental(args: argparse.Namespace) -> int:
 
     for dataset in period_datasets:
         spec = FUNDAMENTAL_SPECS[dataset]
-        download_fundamental_period_dataset(client, raw_dir, spec, periods, args.force, spec_page_limit(spec, args.page_limit), refresh_periods, revision_ledger, allow_empty_revision_overwrite)
+        download_fundamental_period_dataset(client, raw_dir, spec, periods, args.force, spec_page_limit(spec, args.page_limit), refresh_periods, revision_ledger)
     for dataset in ann_month_datasets:
         spec = FUNDAMENTAL_SPECS[dataset]
-        download_fundamental_ann_month_dataset(client, raw_dir, spec, windows, args.force, spec_page_limit(spec, args.page_limit), refresh_months, revision_ledger, allow_empty_revision_overwrite)
+        download_fundamental_ann_month_dataset(client, raw_dir, spec, windows, args.force, spec_page_limit(spec, args.page_limit), refresh_months, revision_ledger)
 
     affected_days = int(getattr(args, "fundamental_refresh_event_days", 90) or 0)
     affected_start = format_yyyymmdd(parse_yyyymmdd(args.end_date) - timedelta(days=max(affected_days, 1) - 1))
@@ -2642,7 +2633,7 @@ def download_fundamental(args: argparse.Namespace) -> int:
             force_codes = set(affected_codes)
             if dataset == "dividend":
                 force_codes.update(dividend_probe_codes)
-        download_fundamental_ts_code_dataset(client, raw_dir, spec, stock_codes, args.force, spec_page_limit(spec, args.page_limit), force_codes, revision_ledger, allow_empty_revision_overwrite)
+        download_fundamental_ts_code_dataset(client, raw_dir, spec, stock_codes, args.force, spec_page_limit(spec, args.page_limit), force_codes, revision_ledger)
     print(f"fundamental download finished under {raw_dir}")
     return 0
 
@@ -2775,7 +2766,6 @@ def download_fundamental_period_dataset(
     page_limit: int,
     force_periods: set[str] | None = None,
     revision_ledger: Path | str | None = None,
-    allow_empty_revision_overwrite: bool = False,
 ) -> None:
     force_periods = force_periods or set()
     written = 0
@@ -2787,24 +2777,23 @@ def download_fundamental_period_dataset(
             skipped += 1
             continue
         params = {spec.period_param: period}
-        result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-        df = frame(result)
-        meta_params = dict(params)
-        meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-        did_write = write_parquet_revision_aware(
-            path,
-            df,
-            api_name=spec.api_name,
-            params=meta_params,
-            fields=result.fields,
-            key_columns=list(spec.key_columns),
-            revision_ledger=revision_ledger,
-            allow_empty_revision_overwrite=allow_empty_revision_overwrite,
-            allow_key_removal_overwrite=True,
-        )
-        if did_write:
-            written += 1
-            total_rows += len(df)
+        with answer_defects(path, ledger=revision_ledger):
+            result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
+            df = frame(result)
+            meta_params = dict(params)
+            meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
+            outcome = publish(
+                path,
+                df,
+                api_name=spec.api_name,
+                params=meta_params,
+                fields=result.fields,
+                key_columns=list(spec.key_columns),
+                ledger=revision_ledger,
+            )
+            if outcome in WRITTEN_OUTCOMES:
+                written += 1
+                total_rows += len(df)
         if index % 16 == 0:
             print(f"{spec.api_name} periods {index}/{len(periods)} skipped={skipped} written={written} rows_written={total_rows}")
     print(f"{spec.api_name} done periods={len(periods)} skipped={skipped} written={written} rows_written={total_rows}")
@@ -2818,7 +2807,6 @@ def download_fundamental_ann_month_dataset(
     page_limit: int,
     force_months: set[str] | None = None,
     revision_ledger: Path | str | None = None,
-    allow_empty_revision_overwrite: bool = False,
 ) -> None:
     force_months = force_months or set()
     written = 0
@@ -2830,30 +2818,24 @@ def download_fundamental_ann_month_dataset(
         if ann_month not in force_months and should_skip_existing_partition(path, force=force, requested_params=params):
             skipped += 1
             continue
-        result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-        df = frame(result)
-        meta_params = dict(params)
-        meta_params["ann_month"] = ann_month
-        meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-        did_write = write_parquet_revision_aware(
-            path,
-            df,
-            api_name=spec.api_name,
-            params=meta_params,
-            fields=result.fields,
-            key_columns=list(spec.key_columns),
-            revision_ledger=revision_ledger,
-            allow_empty_revision_overwrite=allow_empty_revision_overwrite,
-            # Full-month re-pulls legitimately drop keys (forecast update_flag
-            # supersedes in place, retractions): same contract as every other
-            # whole-partition path, or the nightly 3-month refresh wedges on the
-            # first removed key. The disproportionate-shrink guard still blocks
-            # transient truncation.
-            allow_key_removal_overwrite=True,
-        )
-        if did_write:
-            written += 1
-            total_rows += len(df)
+        with answer_defects(path, ledger=revision_ledger):
+            result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
+            df = frame(result)
+            meta_params = dict(params)
+            meta_params["ann_month"] = ann_month
+            meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
+            outcome = publish(
+                path,
+                df,
+                api_name=spec.api_name,
+                params=meta_params,
+                fields=result.fields,
+                key_columns=list(spec.key_columns),
+                ledger=revision_ledger,
+            )
+            if outcome in WRITTEN_OUTCOMES:
+                written += 1
+                total_rows += len(df)
         if index % 24 == 0:
             print(f"{spec.api_name} months {index}/{len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
     print(f"{spec.api_name} done months={len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
@@ -2867,7 +2849,6 @@ def download_fundamental_ts_code_dataset(
     page_limit: int,
     force_codes: set[str] | None = None,
     revision_ledger: Path | str | None = None,
-    allow_empty_revision_overwrite: bool = False,
 ) -> None:
     force_codes = force_codes or set()
     written = 0
@@ -2881,24 +2862,23 @@ def download_fundamental_ts_code_dataset(
                 print(f"{spec.api_name} codes {index}/{len(stock_codes)} skipped={skipped} written={written}")
             continue
         params = {"ts_code": ts_code}
-        result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-        df = frame(result)
-        meta_params = dict(params)
-        meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-        did_write = write_parquet_revision_aware(
-            path,
-            df,
-            api_name=spec.api_name,
-            params=meta_params,
-            fields=result.fields,
-            key_columns=list(spec.key_columns),
-            revision_ledger=revision_ledger,
-            allow_empty_revision_overwrite=allow_empty_revision_overwrite,
-            allow_key_removal_overwrite=True,
-        )
-        if did_write:
-            written += 1
-            total_rows += len(df)
+        with answer_defects(path, ledger=revision_ledger):
+            result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
+            df = frame(result)
+            meta_params = dict(params)
+            meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
+            outcome = publish(
+                path,
+                df,
+                api_name=spec.api_name,
+                params=meta_params,
+                fields=result.fields,
+                key_columns=list(spec.key_columns),
+                ledger=revision_ledger,
+            )
+            if outcome in WRITTEN_OUTCOMES:
+                written += 1
+                total_rows += len(df)
         if index % 500 == 0:
             print(f"{spec.api_name} codes {index}/{len(stock_codes)} skipped={skipped} written={written} rows_written={total_rows}")
     print(f"{spec.api_name} done codes={len(stock_codes)} skipped={skipped} written={written} rows_written={total_rows}")
@@ -3005,7 +2985,6 @@ def write_stk_mins_by_date(
     source: str,
     params: dict[str, Any],
     revision_ledger: Path | str | None = None,
-    allow_empty_revision_overwrite: bool = False,
 ) -> None:
     meta_params = dict(params)
     meta_params.update({
@@ -3014,16 +2993,14 @@ def write_stk_mins_by_date(
         "source": source,
         "unit_rules": {"vol": "shares", "amount": "CNY", "available_at": "source trade_time bar close"},
     })
-    write_parquet_revision_aware(
+    publish(
         path,
         df,
         api_name=STK_MINS_API_NAME,
         params=meta_params,
         fields=list(df.columns),
         key_columns=["trade_date", "ts_code", "trade_time"],
-        revision_ledger=revision_ledger,
-        allow_empty_revision_overwrite=allow_empty_revision_overwrite,
-        allow_key_removal_overwrite=True,
+        ledger=revision_ledger,
     )
 
 def compact_intraday_by_date(args: argparse.Namespace) -> int:
@@ -3113,7 +3090,7 @@ def update_intraday_by_date(args: argparse.Namespace) -> int:
     raw_dir = (repo_root / args.raw_dir).resolve()
     revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
-    ensure_trade_cal_coverage(client, raw_dir, args.start_date, args.end_date)
+    ensure_trade_cal_coverage(client, raw_dir, args.start_date, args.end_date, ledger=revision_ledger)
     trade_dates = load_sse_open_dates(raw_dir, args.start_date, args.end_date)
     page_limit = min(args.page_limit or STK_MINS_PAGE_LIMIT, STK_MINS_PAGE_LIMIT)
     written = 0
@@ -3194,8 +3171,7 @@ def update_intraday_by_date(args: argparse.Namespace) -> int:
         if quota_error:
             # The quota holds until the vendor's next day, so the run stops
             # here: every day already written stays committed (76 = mutated,
-            # not ready) and the next run resumes at this day. A dirty lake
-            # would instead refuse every other writer until then.
+            # not ready) and the next run resumes at this day.
             print(json.dumps({
                 "status": "not_ready_after_mutation",
                 "note": "stk_mins_daily_quota_exhausted",
@@ -3240,12 +3216,12 @@ def update_intraday_by_date(args: argparse.Namespace) -> int:
             source="daily_incremental_update",
             params=params,
             revision_ledger=revision_ledger,
-            allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
         )
         written += 1
         total_rows += len(normalized)
         print(f"{args.output_dataset} trade_date={trade_date} written rows={len(normalized)} missing_codes={len(pending)}")
     print(f"{args.output_dataset} update finished dates={len(trade_dates)} written={written} skipped={skipped} rows_written={total_rows}")
+    report_complete(args.output_dataset)
     return 0
 
 def official_text_client(datasets: list[str], repo_root: Path, args: argparse.Namespace) -> TuShareClient:
@@ -3287,7 +3263,6 @@ def download_text(args: argparse.Namespace) -> int:
             )
             return NO_MUTATION_FAILURE_EXIT_CODE
     revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
-    allow_empty_revision_overwrite = getattr(args, "allow_empty_revision_overwrite", False)
     windows = month_windows(args.start_date, args.end_date)
     days = date_range_days(args.start_date, args.end_date)
     for dataset in datasets:
@@ -3298,13 +3273,13 @@ def download_text(args: argparse.Namespace) -> int:
         dataset_days = [d for d in days if d >= start_date]
         page_limit = spec_page_limit(spec, args.page_limit)
         if spec.strategy == "range_month":
-            download_text_range_month(client, raw_dir, spec, dataset_windows, args.force, page_limit, revision_ledger, allow_empty_revision_overwrite)
+            download_text_range_month(client, raw_dir, spec, dataset_windows, args.force, page_limit, revision_ledger)
         elif spec.strategy == "time_range_month":
-            download_text_time_range_month(client, raw_dir, spec, dataset_windows, args.force, page_limit, args.major_news_src, revision_ledger, allow_empty_revision_overwrite)
+            download_text_time_range_month(client, raw_dir, spec, dataset_windows, args.force, page_limit, args.major_news_src, revision_ledger)
         elif spec.strategy == "news_src_day":
-            download_text_news_src_day(client, raw_dir, spec, dataset_days, args.force, page_limit, args.news_src, revision_ledger, allow_empty_revision_overwrite)
+            download_text_news_src_day(client, raw_dir, spec, dataset_days, args.force, page_limit, args.news_src, revision_ledger)
         elif spec.strategy == "day":
-            download_text_day(client, raw_dir, spec, dataset_days, args.force, revision_ledger, allow_empty_revision_overwrite)
+            download_text_day(client, raw_dir, spec, dataset_days, args.force, revision_ledger)
         else:
             raise RuntimeError(f"unsupported text strategy {spec.strategy} for {dataset}")
     print(f"Text download finished under {raw_dir}")
@@ -3316,25 +3291,21 @@ def write_text_result(
     spec: TextDataset,
     params: dict[str, Any],
     revision_ledger: Path | str | None = None,
-    allow_empty_revision_overwrite: bool = False,
 ) -> int:
     df = augment_text_frame(frame(result), spec)
-    written = write_parquet_revision_aware(
+    outcome = publish(
         path,
         df,
         api_name=spec.api_name,
         params=params,
         fields=list(df.columns),
         key_columns=list(spec.key_columns),
-        revision_ledger=revision_ledger,
-        allow_empty_revision_overwrite=allow_empty_revision_overwrite,
-        allow_key_removal_overwrite=True,
+        ledger=revision_ledger,
+        deduplicate=spec.unique_key,
     )
-    if not written:
-        return 0
-    return len(df)
+    return len(df) if outcome in WRITTEN_OUTCOMES else 0
 
-def download_text_range_month(client: TuShareClient, raw_dir: Path, spec: TextDataset, windows: list[tuple[str, str, str]], force: bool, page_limit: int, revision_ledger: Path | str | None = None, allow_empty_revision_overwrite: bool = False) -> None:
+def download_text_range_month(client: TuShareClient, raw_dir: Path, spec: TextDataset, windows: list[tuple[str, str, str]], force: bool, page_limit: int, revision_ledger: Path | str | None = None) -> None:
     written = 0
     skipped = 0
     total_rows = 0
@@ -3344,31 +3315,32 @@ def download_text_range_month(client: TuShareClient, raw_dir: Path, spec: TextDa
         if should_skip_existing_partition(path, force=force, requested_params=params):
             skipped += 1
             continue
-        result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-        meta_params = dict(params)
-        meta_params["month"] = month
-        meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-        df = augment_text_frame(frame(result), spec)
-        did_write, rows = write_window_merged_partition(
-            path,
-            df,
-            api_name=spec.api_name,
-            params=meta_params,
-            fields=list(df.columns),
-            key_columns=list(spec.key_columns),
-            # range_month queries window on the DATE column (ann_date/report_date);
-            # retention must match it — keying on the collection-time column keeps
-            # out-of-window rec_time rows forever, so source revisions/retractions
-            # of anns_d/report_rc could never be purged.
-            date_columns=[spec.date_column, spec.time_column, "available_at"],
-            start_date=start_date,
-            end_date=end_date,
-            revision_ledger=revision_ledger,
-            allow_empty_revision_overwrite=allow_empty_revision_overwrite,
-        )
-        if did_write:
-            written += 1
-            total_rows += rows
+        with answer_defects(path, ledger=revision_ledger):
+            result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
+            meta_params = dict(params)
+            meta_params["month"] = month
+            meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
+            df = augment_text_frame(frame(result), spec)
+            did_write, rows = write_window_merged_partition(
+                path,
+                df,
+                api_name=spec.api_name,
+                params=meta_params,
+                fields=list(df.columns),
+                key_columns=list(spec.key_columns),
+                # range_month queries window on the DATE column (ann_date/report_date);
+                # retention must match it — keying on the collection-time column keeps
+                # out-of-window rec_time rows forever, so source revisions/retractions
+                # of anns_d/report_rc could never be purged.
+                date_columns=[spec.date_column, spec.time_column, "available_at"],
+                start_date=start_date,
+                end_date=end_date,
+                revision_ledger=revision_ledger,
+                deduplicate=spec.unique_key,
+            )
+            if did_write:
+                written += 1
+                total_rows += rows
         if index % 24 == 0:
             print(f"{spec.api_name} months {index}/{len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
     print(f"{spec.api_name} done months={len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
@@ -3382,7 +3354,6 @@ def download_text_time_range_month(
     page_limit: int,
     sources: list[str],
     revision_ledger: Path | str | None = None,
-    allow_empty_revision_overwrite: bool = False,
 ) -> None:
     source_values = sources or [""]
     for source in source_values:
@@ -3398,27 +3369,27 @@ def download_text_time_range_month(
             if should_skip_existing_partition(path, force=force, requested_params=params):
                 skipped += 1
                 continue
-            result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-            meta_params = dict(params)
-            meta_params["month"] = month
-            meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-            df = augment_text_frame(frame(result), spec)
-            did_write, rows = write_window_merged_partition(
-                path,
-                df,
-                api_name=spec.api_name,
-                params=meta_params,
-                fields=list(df.columns),
-                key_columns=list(spec.key_columns),
-                date_columns=[spec.time_column, spec.date_column, "available_at"],
-                start_date=start_date,
-                end_date=end_date,
-                revision_ledger=revision_ledger,
-                allow_empty_revision_overwrite=allow_empty_revision_overwrite,
-            )
-            if did_write:
-                written += 1
-                total_rows += rows
+            with answer_defects(path, ledger=revision_ledger):
+                result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
+                meta_params = dict(params)
+                meta_params["month"] = month
+                meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
+                df = augment_text_frame(frame(result), spec)
+                did_write, rows = write_window_merged_partition(
+                    path,
+                    df,
+                    api_name=spec.api_name,
+                    params=meta_params,
+                    fields=list(df.columns),
+                    key_columns=list(spec.key_columns),
+                    date_columns=[spec.time_column, spec.date_column, "available_at"],
+                    start_date=start_date,
+                    end_date=end_date,
+                    revision_ledger=revision_ledger,
+                )
+                if did_write:
+                    written += 1
+                    total_rows += rows
             if index % 24 == 0:
                 print(f"{spec.api_name}/{source_suffix} months {index}/{len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
         print(f"{spec.api_name}/{source_suffix} done months={len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
@@ -3432,7 +3403,6 @@ def download_text_news_src_day(
     page_limit: int,
     sources: list[str],
     revision_ledger: Path | str | None = None,
-    allow_empty_revision_overwrite: bool = False,
 ) -> None:
     for source in selected_news_sources(sources):
         source_suffix = f"src={safe_partition_value(source)}"
@@ -3445,18 +3415,19 @@ def download_text_news_src_day(
             if should_skip_existing_partition(path, force=force, requested_params=params):
                 skipped += 1
                 continue
-            result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-            meta_params = dict(params)
-            meta_params["date"] = day
-            meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-            rows = write_text_result(path, result, spec, meta_params, revision_ledger, allow_empty_revision_overwrite)
-            written += 1
-            total_rows += rows
+            with answer_defects(path, ledger=revision_ledger):
+                result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
+                meta_params = dict(params)
+                meta_params["date"] = day
+                meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
+                rows = write_text_result(path, result, spec, meta_params, revision_ledger)
+                written += 1
+                total_rows += rows
             if index % 250 == 0:
                 print(f"{spec.api_name}/{source_suffix} days {index}/{len(days)} skipped={skipped} written={written} rows_written={total_rows}")
         print(f"{spec.api_name}/{source_suffix} done days={len(days)} skipped={skipped} written={written} rows_written={total_rows}")
 
-def download_text_day(client: TuShareClient, raw_dir: Path, spec: TextDataset, days: list[str], force: bool, revision_ledger: Path | str | None = None, allow_empty_revision_overwrite: bool = False) -> None:
+def download_text_day(client: TuShareClient, raw_dir: Path, spec: TextDataset, days: list[str], force: bool, revision_ledger: Path | str | None = None) -> None:
     written = 0
     skipped = 0
     total_rows = 0
@@ -3466,10 +3437,11 @@ def download_text_day(client: TuShareClient, raw_dir: Path, spec: TextDataset, d
             skipped += 1
             continue
         params = {spec.date_column or "date": day}
-        result = client.query(spec.api_name, params, spec.fields)
-        rows = write_text_result(path, result, spec, params, revision_ledger, allow_empty_revision_overwrite)
-        written += 1
-        total_rows += rows
+        with answer_defects(path, ledger=revision_ledger):
+            result = client.query(spec.api_name, params, spec.fields)
+            rows = write_text_result(path, result, spec, params, revision_ledger)
+            written += 1
+            total_rows += rows
         if index % 250 == 0:
             print(f"{spec.api_name} days {index}/{len(days)} skipped={skipped} written={written} rows_written={total_rows}")
     print(f"{spec.api_name} done days={len(days)} skipped={skipped} written={written} rows_written={total_rows}")
@@ -3497,24 +3469,28 @@ def set_download_defaults(args: argparse.Namespace) -> None:
             args.page_limit = 10000
 
 def download_selected_tier(args: argparse.Namespace) -> int:
+    """Run one tier; when it returns 0, each dataset it pulled is reported to
+    the runner as complete (``versions.report_complete``)."""
     set_download_defaults(args)
-    if args.tier == "reference":
-        return download_reference(args)
-    if args.tier == "daily":
-        return download_daily(args)
-    if args.tier == "fundamental":
-        return download_fundamental(args)
-    if args.tier == "intraday":
-        return download_intraday(args)
-    if args.tier == "event_flow":
-        return download_event_flow(args)
-    if args.tier == "board_trading":
-        return download_board_trading(args)
-    if args.tier == "text_evidence":
-        return download_text(args)
-    if args.tier in {"macro", "global"}:
-        return download_macro(args)
-    raise RuntimeError(f"unknown download tier {args.tier}")
+    tiers = {
+        "reference": (download_reference, lambda: [d for d in REFERENCE_DATASETS if not (d == "bak_basic" and args.skip_bak_basic)]),
+        "daily": (download_daily, lambda: selected_daily_datasets(args)),
+        "fundamental": (download_fundamental, lambda: selected_fundamental_datasets(args.datasets)),
+        "intraday": (download_intraday, lambda: list(INTRADAY_DATASETS)),
+        "event_flow": (download_event_flow, lambda: selected_event_flow_download_datasets(args)),
+        "board_trading": (download_board_trading, lambda: selected_board_trading_datasets(args)),
+        "text_evidence": (download_text, lambda: selected_text_datasets(args.datasets, news_src=args.news_src, default=TEXT_FETCHABLE_DATASETS)),
+        "macro": (download_macro, lambda: selected_macro_datasets(args)),
+        "global": (download_macro, lambda: selected_macro_datasets(args)),
+    }
+    if args.tier not in tiers:
+        raise RuntimeError(f"unknown download tier {args.tier}")
+    run, pulled = tiers[args.tier]
+    code = run(args)
+    if code == 0:
+        for dataset in pulled():
+            report_complete(dataset)
+    return code
 
 def ns_from(args: argparse.Namespace, **overrides: Any) -> argparse.Namespace:
     values = vars(args).copy()
@@ -3605,7 +3581,6 @@ def update_share_float_complete_data(
             union_output=args.union_output,
             output=args.share_float_process_output,
             revision_ledger=revision_ledger,
-            allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
             min_interval_seconds=args.min_interval_seconds,
             timeout_seconds=args.timeout_seconds,
         ),
@@ -3641,7 +3616,6 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
             page_limit=args.page_limit,
             refresh_reference_datasets=getattr(args, "refresh_reference_datasets", []),
             revision_ledger=revision_ledger,
-            allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
             min_interval_seconds=getattr(args, "reference_min_interval_seconds", None) or args.min_interval_seconds,
             timeout_seconds=args.timeout_seconds,
         ),
@@ -3658,7 +3632,6 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
             datasets=args.daily_datasets,
             refresh_daily_datasets=getattr(args, "refresh_daily_datasets", []),
             revision_ledger=revision_ledger,
-            allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
             force=args.force,
             page_limit=args.page_limit,
             min_interval_seconds=args.min_interval_seconds,
@@ -3679,7 +3652,6 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
             force=force_open_window,
             page_limit=args.page_limit,
             revision_ledger=revision_ledger,
-            allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
             min_interval_seconds=args.min_interval_seconds,
             timeout_seconds=args.timeout_seconds,
         ),
@@ -3699,7 +3671,6 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
                 force=force_open_window,
                 page_limit=args.page_limit,
                 revision_ledger=revision_ledger,
-                allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
                 min_interval_seconds=args.min_interval_seconds,
                 timeout_seconds=args.timeout_seconds,
             ),
@@ -3717,7 +3688,6 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
             force=force_open_window,
             page_limit=args.page_limit,
             revision_ledger=revision_ledger,
-            allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
             min_interval_seconds=args.min_interval_seconds,
             timeout_seconds=args.timeout_seconds,
         ),
@@ -3736,7 +3706,6 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
                 force=force_open_window,
                 page_limit=args.page_limit,
                 revision_ledger=revision_ledger,
-                allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
                 min_interval_seconds=args.min_interval_seconds,
                 timeout_seconds=args.timeout_seconds,
             ),
@@ -3779,7 +3748,6 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
                 force=intraday_force,
                 force_from=intraday_force_from,
                 revision_ledger=revision_ledger,
-                allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
             ),
             summary,
         )
@@ -3798,7 +3766,6 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
                 force=force_open_window,
                 page_limit=args.page_limit,
                 revision_ledger=revision_ledger,
-                allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
                 min_interval_seconds=args.min_interval_seconds,
                 timeout_seconds=args.timeout_seconds,
             ),
@@ -3821,7 +3788,6 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
             force=args.force,
             page_limit=args.page_limit,
             revision_ledger=revision_ledger,
-            allow_empty_revision_overwrite=getattr(args, "allow_empty_revision_overwrite", False),
             min_interval_seconds=args.min_interval_seconds,
             timeout_seconds=args.timeout_seconds,
         ),
@@ -3850,7 +3816,6 @@ def add_download_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--datasets", nargs="+")
     parser.add_argument("--refresh-daily-datasets", nargs="+", choices=core.DAILY_DOWNLOAD_DATASETS, default=[])
     parser.add_argument("--revision-ledger", default=REVISION_EVENTS_PATH)
-    parser.add_argument("--allow-empty-revision-overwrite", action="store_true")
     parser.add_argument("--skip-bak-basic", action="store_true")
     parser.add_argument("--refresh-reference-datasets", nargs="+", choices=core.REFERENCE_DATASETS, default=[])
     parser.add_argument("--fundamental-refresh-period-count", type=int, default=0)
@@ -4005,7 +3970,6 @@ def add_update_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--union-output", default="data/raw/share_float_complete/share_float_complete.parquet")
     parser.add_argument("--share-float-process-output", help="Optional temporary process report path for share_float_complete.")
     parser.add_argument("--revision-ledger", default=REVISION_EVENTS_PATH)
-    parser.add_argument("--allow-empty-revision-overwrite", action="store_true")
     parser.add_argument("--skip-bak-basic", action="store_true")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--page-limit", type=int)
@@ -4056,7 +4020,6 @@ def add_intraday_parsers(sub: argparse._SubParsersAction) -> None:
     update.add_argument("--retry-delay-seconds", type=float, default=5.0)
     update.add_argument("--page-limit", type=int)
     update.add_argument("--revision-ledger", default=REVISION_EVENTS_PATH)
-    update.add_argument("--allow-empty-revision-overwrite", action="store_true")
     core.add_runtime_args(update, min_interval=core.MIN_REQUEST_INTERVAL_SECONDS, timeout=120)
 
 def add_share_float_parser(sub: argparse._SubParsersAction) -> None:
@@ -4083,7 +4046,6 @@ def add_share_float_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--write-union", action="store_true")
     parser.add_argument("--union-output", default="data/raw/share_float_complete/share_float_complete.parquet")
     parser.add_argument("--revision-ledger", default=REVISION_EVENTS_PATH)
-    parser.add_argument("--allow-empty-revision-overwrite", action="store_true")
     core.add_runtime_args(parser, min_interval=core.MIN_REQUEST_INTERVAL_SECONDS, timeout=90)
     parser.add_argument("--output", help="Optional process report path. No status file is written by default; event-flow audit checks the union artifact.")
 
@@ -4132,7 +4094,7 @@ def _production_repo_root() -> Path:
 def _refuse_manual_production_write(args: argparse.Namespace) -> None:
     """The cron runner is the ONLY production-lake write entrance.
 
-    It alone provides the generation fence, per-job state, failure alerting
+    It alone provides the generation record, per-job state, failure alerting
     and the exclusive flock; a direct manual command against production
     data/raw would bypass all four, so it is refused with the runner
     equivalent (data docs §2.2). Only a genuine runner child -- proven by the
@@ -4158,7 +4120,7 @@ def _refuse_manual_production_write(args: argparse.Namespace) -> None:
         return
     raise SystemExit(
         "direct manual writes to the production lake are not supported; run the "
-        "equivalent job through the cron runner (fence + state + alerts), e.g.:\n"
+        "equivalent job through the cron runner (generation + state + alerts), e.g.:\n"
         "  scripts/data/tushare_cron_update.py --job cn_evening_full "
         "--start-date <YYYYMMDD> --end-date <YYYYMMDD>   # full window incl. minute gap self-heal\n"
         "  scripts/data/tushare_cron_update.py --job cn_open_auction_capture_0927 "

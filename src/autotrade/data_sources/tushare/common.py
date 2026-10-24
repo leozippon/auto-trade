@@ -9,12 +9,10 @@ import json
 import os
 import re
 import time
-import uuid
 from bisect import bisect_right
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal, InvalidOperation
+from datetime import date, datetime, timedelta
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -22,6 +20,7 @@ from urllib.parse import quote
 
 import numpy as np
 import pandas as pd
+import requests
 
 # Raw-lake research contract values are owned by the environment's PIT layer;
 # the ingest adapter imports them so producer and consumer cannot drift.
@@ -41,11 +40,21 @@ from .io import (  # noqa: F401 -- re-exported via this hub (audit.py imports ha
     frames_content_equal,
     has_pagination_probe,
     inherited_updater_lock_fd,
-    migrate_partition_identity,
     parquet_meta,
     parquet_rows,
     read_many,
     write_parquet,
+)
+from .versions import (  # noqa: F401 -- re-exported via this hub
+    REVISION_EVENT_FIELDS,
+    REVISION_EVENT_SCHEMA_VERSION,
+    DefectiveAnswer,
+    answer_defects,
+    diff_frames,
+    publish,
+    record_defect,
+    report_complete,
+    revision_event,
 )
 
 DEFAULT_TUSHARE_RELAY_URL = "https://fast.xiaodefa.cn"
@@ -80,45 +89,9 @@ REVISION_EVENTS_PATH = "results/data_quality/revision_events.jsonl"
 
 REVISION_SUMMARY_PATH = "results/data_quality/revision_summary.json"
 
-# v2 drops the always-constant record_type/downstream_status and api_name
-# (verbatim duplicate of dataset); schema_version stays as the discriminator.
-REVISION_EVENT_SCHEMA_VERSION = 2
-REVISION_EVENT_FIELDS = (
-    "schema_version",
-    "event_id",
-    "detected_at",
-    "source",
-    "dataset",
-    "partition",
-    "path",
-    "severity",
-    "key_columns",
-    "old_rows",
-    "new_rows",
-    "changed_keys",
-    "added_keys",
-    "removed_keys",
-    "missing_key_columns_old",
-    "missing_key_columns_new",
-    "duplicate_key_rows_old",
-    "duplicate_key_rows_new",
-    "comparison_issue",
-    "affected_ts_codes",
-    "affected_ts_codes_sample",
-    "changed_keys_sample",
-    "added_keys_sample",
-    "removed_keys_sample",
-    "changed_columns",
-    "changed_columns_sample",
-    "added_rows_sample",
-    "removed_rows_sample",
-    "old_columns",
-    "new_columns",
-    "schema_changed",
-    "write_id",
-    "write_action",
-    "allow_empty_revision_overwrite",
-)
+# Partition outcomes (versions.publish) that changed the visible partition.
+WRITTEN_OUTCOMES = frozenset({"appended", "replaced", "restated"})
+
 MACRO_CONTEXT_STATUS_PATH = "results/data_quality/" + DOMAIN_STATUS_FILES["macro"]
 
 EVENT_FLOW_STATUS_PATH = "results/data_quality/" + DOMAIN_STATUS_FILES["events"]
@@ -559,6 +532,9 @@ class TextDataset:
     # Fetched from the official service with OFFICIAL_TOKEN_ENV instead of the
     # relay (the relay's permission for it lapsed).
     official: bool = False
+    # The business key names one record, so duplicate keys in an answer are
+    # artefacts and are dropped deterministically at ingest (versions.publish).
+    unique_key: bool = False
 
 @dataclass
 class MacroDataset:
@@ -654,6 +630,11 @@ class EventDataset:
     # Without it a 30-day nightly window never re-requested a quarter once 30
     # days had passed, and the 2026-06 top-10 tables held 444 of 59,204 rows.
     report_lag_days: int = 0
+    # The business key names one record, so duplicate keys in an answer are
+    # artefacts and are dropped deterministically at ingest (versions.publish).
+    # Off where rows legitimately share a key (block_trade repeats identical
+    # trades).
+    unique_key: bool = False
 
 @dataclass
 class BoardTradingDataset:
@@ -749,6 +730,7 @@ TEXT_SPECS = {
         start_date="20100101",
         time_column="rec_time",
         date_column="ann_date",
+        unique_key=True,
     ),
     "major_news": TextDataset(
         api_name="major_news",
@@ -1273,6 +1255,7 @@ EVENT_FLOW_SPECS = {
         key_columns=("ts_code", "ann_date", "end_date"),
         date_column="ann_date",
         zero_rows_ok=True,
+        unique_key=True,
     ),
     "top10_holders": EventDataset(
         api_name="top10_holders",
@@ -1285,6 +1268,7 @@ EVENT_FLOW_SPECS = {
         # annual reports are due 120 days after the period ends.
         window_date_column="end_date",
         report_lag_days=120,
+        unique_key=True,
     ),
     "top10_floatholders": EventDataset(
         api_name="top10_floatholders",
@@ -1297,6 +1281,7 @@ EVENT_FLOW_SPECS = {
         # annual reports are due 120 days after the period ends.
         window_date_column="end_date",
         report_lag_days=120,
+        unique_key=True,
     ),
     "pledge_detail": EventDataset(
         api_name="pledge_detail",
@@ -1352,6 +1337,7 @@ EVENT_FLOW_SPECS = {
         date_column="ann_date",
         zero_rows_ok=True,
         availability=AvailabilityRule("19:00:00", "official_19_from:ann_date"),
+        unique_key=True,
     ),
     "repurchase": EventDataset(
         api_name="repurchase",
@@ -1362,6 +1348,7 @@ EVENT_FLOW_SPECS = {
         date_column="ann_date",
         start_date="20110101",
         zero_rows_ok=True,
+        unique_key=True,
     ),
     "share_float": EventDataset(
         api_name="share_float",
@@ -1575,13 +1562,17 @@ DAILY_SPECS = {
 }
 
 class TuShareClient:
-    """TuShare SDK adapter whose HTTP transport is pinned to one endpoint.
+    """The TuShare data API over HTTP, pinned to one endpoint.
 
     The endpoint is the relay unless a caller names another (the official
-    service, for the datasets that use it). The token lives only in this
-    object: it is handed to the SDK client in memory (never ``set_token``,
-    which writes it to a file in the home directory) and scrubbed from any
-    error this adapter raises.
+    service, for the datasets that use it). Requests follow the vendor SDK's
+    wire protocol (a JSON POST to ``<endpoint>/<api_name>``), sent here rather
+    than through the SDK because the SDK answers an HTTP error status with an
+    empty frame, indistinguishable from an empty result. The token lives only
+    in this object and is scrubbed from any error this adapter raises.
+
+    An answer that lacks a requested field (compared case-insensitively, as
+    the macro tier normalises vendor casing) is a :class:`DefectiveAnswer`.
     """
 
     def __init__(
@@ -1593,35 +1584,39 @@ class TuShareClient:
     ) -> None:
         if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
             raise ValueError("TuShare timeout must be a positive integer number of seconds")
-        try:
-            import tushare as ts
-        except ImportError as exc:
-            raise RuntimeError(
-                "the tushare SDK is not installed; install the project's declared dependencies"
-            ) from exc
         self._token = token
-        self.pro = ts.pro_api(token, timeout=timeout)
-        # The endpoint is pinned by writing the SDK's name-mangled private
-        # attribute. Assigning it always "succeeds", so an SDK rename would
-        # silently create a dead attribute and send every request, token
-        # included, to the SDK's plain-HTTP default instead. Require the
-        # attribute to exist first, and refuse to start rather than reroute.
         self.endpoint = (endpoint or load_relay_url()).rstrip("/")
-        if not hasattr(self.pro, "_DataApi__http_url"):
-            raise RuntimeError(
-                "the tushare SDK no longer exposes _DataApi__http_url; the endpoint "
-                f"cannot be pinned to {self.endpoint} and requests would go elsewhere"
-            )
-        self.pro._DataApi__http_url = self.endpoint
         self.min_interval = max(0.0, float(min_interval))
         self.timeout = timeout
         self.last_call = 0.0
+
+    def _post(self, api_name: str, params: dict[str, Any], fields: str) -> ApiResult:
+        payload = {
+            "api_name": api_name,
+            "token": self._token,
+            # The SDK sends its endpoint as ts_type_name; the services expect it.
+            "params": {**params, "ts_type_name": self.endpoint},
+            "fields": fields,
+        }
+        response = requests.post(f"{self.endpoint}/{api_name}", json=payload, timeout=self.timeout)
+        if response.status_code >= 400:
+            raise RuntimeError(f"{api_name} answered HTTP {response.status_code}: {response.text[:200]}")
+        body = response.json()
+        if body.get("code") != 0:
+            raise RuntimeError(f"{api_name} answered code {body.get('code')}: {body.get('msg')}")
+        # An empty answer still carries its fields and an empty item list; a
+        # missing or null block is a malformed answer (the SDK raised on it),
+        # never zero rows.
+        data = body.get("data")
+        if not (isinstance(data, dict) and isinstance(data.get("fields"), list) and isinstance(data.get("items"), list)):
+            raise RuntimeError(f"{api_name} answered code 0 without a data block of fields and items")
+        return ApiResult(list(data["fields"]), list(data["items"]))
 
     def query(self, api_name: str, params: dict[str, Any] | None = None, fields: str = "", retries: int = 5) -> ApiResult:
         for attempt in range(1, retries + 1):
             self._throttle()
             try:
-                result_frame = self.pro.query(api_name, fields=fields, **(params or {}))
+                result = self._post(api_name, dict(params or {}), fields)
             except Exception as exc:  # noqa: BLE001 - every vendor error is retried, then re-raised scrubbed
                 if attempt == retries:
                     # Raised without the chained original, whose text the
@@ -1631,11 +1626,13 @@ class TuShareClient:
                     ) from None
                 time.sleep(2 * attempt)
                 continue
-            if not isinstance(result_frame, pd.DataFrame):
-                raise TypeError(
-                    f"TuShare {api_name} returned {type(result_frame).__name__}, expected DataFrame"
+            requested = {name.strip().lower() for name in fields.split(",") if name.strip()}
+            missing = requested - {str(name).lower() for name in result.fields}
+            if result.items and missing:
+                raise DefectiveAnswer(
+                    f"{api_name} answered without requested fields {sorted(missing)} (got {result.fields[:20]})"
                 )
-            return ApiResult(list(result_frame.columns), result_frame.to_numpy().tolist())
+            return result
         raise RuntimeError(f"{api_name} failed unexpectedly")
 
     def _throttle(self) -> None:
@@ -1689,8 +1686,8 @@ def query_paged(client: TuShareClient, api_name: str, params: dict[str, Any], fi
         result = client.query(api_name, page_params, fields)
         if not result_fields:
             result_fields = result.fields
-        elif result.fields != result_fields:
-            raise RuntimeError(f"{api_name} returned inconsistent fields while paging")
+        elif result.items and result.fields != result_fields:
+            raise DefectiveAnswer(f"{api_name} returned inconsistent fields while paging")
         page_payload = json.dumps(
             {"fields": result.fields, "items": result.items},
             ensure_ascii=False,
@@ -1703,7 +1700,7 @@ def query_paged(client: TuShareClient, api_name: str, params: dict[str, Any], fi
             # that serve heavily duplicated rows (eco_cal repeats each event
             # many times) legitimately produce identical pages; callers that
             # dedup by key opt out and rely on the offset safety limit below.
-            raise RuntimeError(
+            raise DefectiveAnswer(
                 f"{api_name} returned a repeated page while paging params={params}; "
                 f"offset={offset} page_limit={page_limit}"
             )
@@ -1711,457 +1708,21 @@ def query_paged(client: TuShareClient, api_name: str, params: dict[str, Any], fi
         all_items.extend(result.items)
         pages += 1
         if len(result.items) < page_limit:
+            if not result.items and all_items:
+                # The answer ended on a page boundary: an empty page is the
+                # only sign it is complete, and an error answered as an empty
+                # page reads the same. Read the boundary once more.
+                again = client.query(api_name, page_params, fields)
+                if again.items:
+                    raise DefectiveAnswer(
+                        f"{api_name} served rows at offset {offset} on a second read after an empty page; "
+                        f"params={params} page_limit={page_limit}"
+                    )
             break
         offset += page_limit
         if offset > 500000:
             raise RuntimeError(f"{api_name} pagination exceeded safety limit for params={params}")
     return ApiResult(result_fields, all_items), pages
-
-def canonical_revision_value(value: Any) -> str:
-    if value is None:
-        return ""
-    try:
-        if pd.isna(value):
-            return ""
-    except (TypeError, ValueError):
-        pass
-    text = str(value).strip()
-    if text.lower() in {"nan", "none", "nat"}:
-        return ""
-    try:
-        decimal = Decimal(text)
-    except (InvalidOperation, ValueError):
-        return text
-    if not decimal.is_finite():
-        return text
-    normalized = format(decimal.normalize(), "f")
-    if "." in normalized:
-        normalized = normalized.rstrip("0").rstrip(".")
-    return normalized or "0"
-
-REVISION_CHANGED_KEY_SAMPLE_SIZE = 5
-REVISION_CHANGED_COLUMN_SAMPLE_SIZE = 12
-REVISION_ADDED_REMOVED_ROW_SAMPLE_SIZE = 5
-
-
-def compare_keyed_frames(old_df: pd.DataFrame, new_df: pd.DataFrame, key_columns: list[str]) -> dict[str, Any]:
-    keys = list(key_columns)
-    missing_old = [column for column in keys if column not in old_df.columns]
-    missing_new = [column for column in keys if column not in new_df.columns]
-    old_columns = sorted(str(column) for column in old_df.columns)
-    new_columns = sorted(str(column) for column in new_df.columns)
-    # The column SET is compared explicitly and carried on the event. A keyed
-    # value diff cannot imply it: both frames are padded to the union before
-    # comparison, so an added/dropped empty column reads as identical content.
-    # It is also what makes two structurally identical diffs over different
-    # schemas distinct records in the append-once ledger.
-    schema_changed = old_columns != new_columns
-    base: dict[str, Any] = {
-        "key_columns": keys,
-        "old_rows": len(old_df),
-        "new_rows": len(new_df),
-        "old_columns": old_columns,
-        "new_columns": new_columns,
-        "schema_changed": schema_changed,
-        "missing_key_columns_old": missing_old,
-        "missing_key_columns_new": missing_new,
-        "duplicate_key_rows_old": 0,
-        "duplicate_key_rows_new": 0,
-        "comparison_issue": "",
-    }
-    if missing_old or missing_new:
-        return {
-            **base,
-            "changed": True,
-            "comparison_issue": "missing_key_columns",
-            "changed_keys": [],
-            "added_keys": [],
-            "removed_keys": [],
-            "changed_columns": {},
-            "changed_columns_sample": [],
-            "added_rows_sample": [],
-            "removed_rows_sample": [],
-        }
-    duplicate_old = int(old_df.duplicated(keys).sum()) if not old_df.empty else 0
-    duplicate_new = int(new_df.duplicated(keys).sum()) if not new_df.empty else 0
-    base["duplicate_key_rows_old"] = duplicate_old
-    base["duplicate_key_rows_new"] = duplicate_new
-    if duplicate_old or duplicate_new:
-        # Duplicate business keys prevent a keyed diff, but identical content
-        # is still decidable — and identical content is not a revision. Without
-        # this, every re-pull of a dup-key partition (dividend, news, ...)
-        # logged a false "revised" event on unchanged data.
-        return {
-            **base,
-            "changed": schema_changed or not frames_content_equal(old_df, new_df),
-            "comparison_issue": "duplicate_key_rows",
-            "changed_keys": [],
-            "added_keys": [],
-            "removed_keys": [],
-            "changed_columns": {},
-            "changed_columns_sample": [],
-            "added_rows_sample": [],
-            "removed_rows_sample": [],
-        }
-    value_columns = sorted((set(old_df.columns) | set(new_df.columns)) - set(keys))
-
-    def keyed_rows(df: pd.DataFrame) -> dict[tuple[str, ...], dict[str, str]]:
-        if df.empty:
-            return {}
-        normalized = df.copy()
-        for column in keys + value_columns:
-            if column not in normalized.columns:
-                normalized[column] = ""
-        normalized = normalized[keys + value_columns]
-        rows: dict[tuple[str, ...], dict[str, str]] = {}
-        for record in normalized.to_dict("records"):
-            key = tuple(canonical_revision_value(record[column]) for column in keys)
-            values = {column: canonical_revision_value(record[column]) for column in value_columns}
-            rows[key] = values
-        return rows
-
-    old_rows = keyed_rows(old_df)
-    new_rows = keyed_rows(new_df)
-    old_keys = set(old_rows)
-    new_keys = set(new_rows)
-    changed_keys = sorted(key for key in old_keys & new_keys if old_rows[key] != new_rows[key])
-    added_keys = sorted(new_keys - old_keys)
-    removed_keys = sorted(old_keys - new_keys)
-    changed_columns: dict[str, int] = {}
-    changed_columns_sample: list[dict[str, Any]] = []
-    for key in changed_keys:
-        changed_values = []
-        for column in value_columns:
-            old_value = old_rows[key].get(column, "")
-            new_value = new_rows[key].get(column, "")
-            if old_value == new_value:
-                continue
-            changed_columns[column] = changed_columns.get(column, 0) + 1
-            if len(changed_values) < REVISION_CHANGED_COLUMN_SAMPLE_SIZE:
-                changed_values.append({"column": column, "old": old_value, "new": new_value})
-        if changed_values and len(changed_columns_sample) < REVISION_CHANGED_KEY_SAMPLE_SIZE:
-            changed_columns_sample.append({"key": list(key), "changes": changed_values})
-    added_rows_sample = [
-        {"key": list(key), "values": new_rows[key]}
-        for key in added_keys[:REVISION_ADDED_REMOVED_ROW_SAMPLE_SIZE]
-    ]
-    removed_rows_sample = [
-        {"key": list(key), "values": old_rows[key]}
-        for key in removed_keys[:REVISION_ADDED_REMOVED_ROW_SAMPLE_SIZE]
-    ]
-    return {
-        **base,
-        "changed": bool(schema_changed or changed_keys or added_keys or removed_keys),
-        "changed_keys": changed_keys,
-        "added_keys": added_keys,
-        "removed_keys": removed_keys,
-        "changed_columns": changed_columns,
-        "changed_columns_sample": changed_columns_sample,
-        "added_rows_sample": added_rows_sample,
-        "removed_rows_sample": removed_rows_sample,
-    }
-
-# Business-key fields the vendor legitimately fills in later. They stay in the
-# key for the diff and the audit (two rows of one filing differ by them), but
-# the retraction guard must not read a backfill as a mass removal: when the
-# H1 reporting season closed TuShare populated ``disclosure_date.actual_date``
-# on 330 rows of period=20260630 and backfilled ``dividend.ann_date`` on 1990s
-# records across 51 ts_code partitions, and both re-pulls were refused as
-# destructive shrinks although no row and no company had disappeared. The
-# guard therefore decides on the key minus these fields.
-VENDOR_BACKFILLED_KEY_FIELDS: dict[str, tuple[str, ...]] = {
-    "disclosure_date": ("actual_date",),
-    "dividend": ("ann_date",),
-}
-
-
-def retraction_key_columns(dataset: str, key_columns: Iterable[str]) -> list[str]:
-    """The immutable subset of a business key, used to decide retractions."""
-    backfilled = VENDOR_BACKFILLED_KEY_FIELDS.get(dataset, ())
-    return [column for column in key_columns if column not in backfilled]
-
-
-def removed_business_keys(old_df: pd.DataFrame, new_df: pd.DataFrame, key_columns: list[str]) -> int | None:
-    """Business keys present in ``old_df`` and absent from ``new_df``.
-
-    A set difference rather than a keyed row diff, so it stays decidable on
-    keys that repeat. ``None`` means undecidable (a key column is absent from
-    one of the frames); the caller must then keep the conservative full-key
-    count rather than assume nothing was removed."""
-    if any(column not in old_df.columns or column not in new_df.columns for column in key_columns):
-        return None
-
-    def key_set(df: pd.DataFrame) -> set[tuple[str, ...]]:
-        if df.empty:
-            return set()
-        return {
-            tuple(canonical_revision_value(record[column]) for column in key_columns)
-            for record in df[key_columns].to_dict("records")
-        }
-
-    return len(key_set(old_df) - key_set(new_df))
-
-
-def revision_severity(dataset: str) -> str:
-    if dataset in {"daily", "stk_limit", "suspend_d"}:
-        return "high"
-    if dataset in {"adj_factor", "daily_basic", "limit_list_d", "share_float_complete"}:
-        return "medium"
-    return "low"
-
-
-def normalize_revision_event(event: dict[str, Any]) -> dict[str, Any]:
-    """Upgrade a revision event to the one fixed JSONL record schema."""
-    unknown = set(event) - set(REVISION_EVENT_FIELDS)
-    if unknown:
-        raise ValueError(f"unknown revision event fields: {sorted(unknown)}")
-    missing = set(REVISION_EVENT_FIELDS) - set(event)
-    if missing:
-        raise ValueError(f"missing revision event fields: {sorted(missing)}")
-    return {field: event[field] for field in REVISION_EVENT_FIELDS}
-
-
-def revision_event_id() -> str:
-    return str(uuid.uuid4())
-
-def build_revision_event(
-    *,
-    dataset: str,
-    partition: str,
-    path: Path,
-    old_df: pd.DataFrame,
-    new_df: pd.DataFrame,
-    key_columns: list[str],
-    source: str,
-) -> dict[str, Any] | None:
-    comparison = compare_keyed_frames(old_df, new_df, key_columns)
-    if not comparison.get("changed"):
-        return None
-    keys = comparison["key_columns"]
-    ts_code_index = keys.index("ts_code") if "ts_code" in keys else None
-    all_changed = comparison["changed_keys"] + comparison["added_keys"] + comparison["removed_keys"]
-    affected_codes = sorted(
-        {
-            key[ts_code_index]
-            for key in all_changed
-            if ts_code_index is not None and len(key) > ts_code_index and key[ts_code_index]
-        }
-    )
-    event = {
-        "schema_version": REVISION_EVENT_SCHEMA_VERSION,
-        "detected_at": datetime.now(UTC).isoformat(timespec="seconds"),
-        "source": source,
-        "dataset": dataset,
-        "partition": partition,
-        "path": str(path),
-        "severity": revision_severity(dataset),
-        "key_columns": keys,
-        "old_rows": comparison["old_rows"],
-        "new_rows": comparison["new_rows"],
-        "changed_keys": len(comparison["changed_keys"]),
-        "added_keys": len(comparison["added_keys"]),
-        "removed_keys": len(comparison["removed_keys"]),
-        "missing_key_columns_old": comparison.get("missing_key_columns_old", []),
-        "missing_key_columns_new": comparison.get("missing_key_columns_new", []),
-        "duplicate_key_rows_old": comparison.get("duplicate_key_rows_old", 0),
-        "duplicate_key_rows_new": comparison.get("duplicate_key_rows_new", 0),
-        "comparison_issue": comparison.get("comparison_issue", ""),
-        "affected_ts_codes": len(affected_codes),
-        "affected_ts_codes_sample": affected_codes[:20],
-        "changed_keys_sample": [list(key) for key in comparison["changed_keys"][:5]],
-        "added_keys_sample": [list(key) for key in comparison["added_keys"][:5]],
-        "removed_keys_sample": [list(key) for key in comparison["removed_keys"][:5]],
-        "changed_columns": comparison.get("changed_columns", {}),
-        "changed_columns_sample": comparison.get("changed_columns_sample", []),
-        "added_rows_sample": comparison.get("added_rows_sample", []),
-        "removed_rows_sample": comparison.get("removed_rows_sample", []),
-        "old_columns": comparison.get("old_columns", []),
-        "new_columns": comparison.get("new_columns", []),
-        "schema_changed": bool(comparison.get("schema_changed")),
-        "write_id": None,
-        "write_action": None,
-        "allow_empty_revision_overwrite": None,
-    }
-    event["event_id"] = revision_event_id()
-    return normalize_revision_event(event)
-
-def finalize_revision_event(
-    event: dict[str, Any],
-    *,
-    write_id: str | None,
-    write_action: str,
-    allow_empty_revision_overwrite: bool,
-) -> dict[str, Any]:
-    event.update({
-        "write_id": write_id,
-        "write_action": write_action,
-        "allow_empty_revision_overwrite": bool(allow_empty_revision_overwrite),
-    })
-    event["event_id"] = revision_event_id()
-    return normalize_revision_event(event)
-
-class BlockedOverwriteError(RuntimeError):
-    """The revision guard refused a destructive overwrite of an existing partition.
-
-    Raised by `write_parquet_revision_aware` itself so every download loop --
-    present and future -- fails loudly instead of folding the refusal into its
-    own "written" counter. Accepting a genuine source retraction means deleting
-    the named partition per the shrink-guard runbook and re-running the covering
-    job; `fina_mainbz_vip` has the preset repair job
-    `manual_fundamental_restatement_repair`.
-
-    Two callers catch it, each stating at its own catch site why a refusal is
-    that pass's intended outcome rather than an alarm. Every other caller lets
-    it end the run.
-    """
-
-def write_parquet_revision_aware(
-    path: Path,
-    df: pd.DataFrame,
-    *,
-    api_name: str,
-    params: dict[str, Any],
-    fields: list[str],
-    key_columns: list[str],
-    revision_ledger: Path | str | None,
-    source: str = "force_refresh",
-    allow_empty_revision_overwrite: bool = False,
-    allow_key_removal_overwrite: bool = False,
-    revision_comparison_old_df: pd.DataFrame | None = None,
-    revision_comparison_new_df: pd.DataFrame | None = None,
-    existing_df: pd.DataFrame | None = None,
-    extra_metadata: dict[str, Any] | None = None,
-) -> bool:
-    if (revision_comparison_old_df is None) != (revision_comparison_new_df is None):
-        raise ValueError("revision comparison frames must be provided together")
-    event: dict[str, Any] | None = None
-    write_action = "overwrite"
-    old_meta: dict[str, Any] = {}
-    if path.exists():
-        old_df = existing_df if existing_df is not None else pd.read_parquet(path)
-        try:
-            old_meta = parquet_meta(path)
-        except CorruptSidecarError as exc:
-            # Torn pair from a crashed writer: this rewrite repairs both files
-            # atomically, so proceed -- but loudly, never silently.
-            print("REVISION_ALERT " + json.dumps(
-                {"note": "corrupt_sidecar_replaced", "dataset": api_name,
-                 "partition": path.with_suffix("").name, "error": str(exc)[:300]},
-                ensure_ascii=False, sort_keys=True,
-            ))
-            old_meta = {}
-        if len(old_df) > 0 and df.empty and not allow_empty_revision_overwrite:
-            write_action = "skipped_empty_revision_overwrite"
-        compare_old = revision_comparison_old_df if revision_comparison_old_df is not None else old_df
-        compare_new = revision_comparison_new_df if revision_comparison_new_df is not None else df
-        event = build_revision_event(
-            dataset=api_name,
-            partition=path.with_suffix("").name,
-            path=path,
-            old_df=compare_old,
-            new_df=compare_new,
-            key_columns=key_columns,
-            source=source,
-        )
-        if event and revision_comparison_old_df is not None:
-            # The event diff is restricted to a caller-proven affected slice,
-            # while partition row counts continue to describe the durable file.
-            event["old_rows"] = len(old_df)
-            event["new_rows"] = len(df)
-        # A re-pull that DROPS existing keys is destructive (the ann_month
-        # truncated-window class silently deleted announcements). Blocked by
-        # default; accepting a genuine source retraction means deleting the
-        # partition file first or passing allow_key_removal_overwrite. The
-        # decision runs on the immutable subset of the key, so a vendor
-        # backfill of a key field is not mistaken for a retraction.
-        guard_keys = retraction_key_columns(api_name, key_columns)
-        removed = event["removed_keys"] if event else 0
-        removed_count = removed if isinstance(removed, int) else len(removed)
-        if removed_count and guard_keys != list(key_columns):
-            decided = removed_business_keys(compare_old, compare_new, guard_keys)
-            if decided is not None:
-                removed_count = decided
-        if write_action == "overwrite" and removed_count and not allow_key_removal_overwrite:
-            write_action = "skipped_key_removal_overwrite"
-        if write_action == "overwrite" and removed_count and allow_key_removal_overwrite:
-            # Full-partition pulls accept key removals as source corrections, but a
-            # transiently truncated (non-empty) response must not wipe a partition:
-            # a disproportionate shrink (>20 keys AND >20% of existing keys) blocks.
-            existing_cols = [col for col in guard_keys if col in old_df.columns]
-            old_key_count = len(old_df.drop_duplicates(existing_cols)) if existing_cols else len(old_df)
-            if removed_count > 20 and old_key_count > 0 and removed_count > 0.2 * old_key_count:
-                write_action = "blocked_shrink_overwrite"
-        if write_action == "skipped_empty_revision_overwrite":
-            if revision_ledger and event:
-                record = finalize_revision_event(
-                    event,
-                    write_id=None,
-                    write_action=write_action,
-                    allow_empty_revision_overwrite=allow_empty_revision_overwrite,
-                )
-                append_jsonl_unique(Path(revision_ledger), record, key="event_id")
-            print(f"{api_name} {path} returned zero rows for existing nonempty partition; skipped_empty_revision_overwrite")
-            return False
-        if write_action in ("skipped_key_removal_overwrite", "blocked_shrink_overwrite"):
-            if revision_ledger and event:
-                record = finalize_revision_event(
-                    event,
-                    write_id=None,
-                    write_action=write_action,
-                    allow_empty_revision_overwrite=allow_empty_revision_overwrite,
-                )
-                append_jsonl_unique(Path(revision_ledger), record, key="event_id")
-            # What the two refusals differ in is the reading that triggered
-            # them; the outcome and the remedy are one sentence for both.
-            reading = (
-                f"would remove {removed_count} of {old_key_count} existing keys"
-                if write_action == "blocked_shrink_overwrite"
-                else f"removes {removed_count} existing keys"
-            )
-            message = (
-                f"{api_name} {path} new pull {reading}: the revision guard refused "
-                f"this destructive overwrite ({write_action}) and kept the old "
-                "partition; review the revision ledger, and delete the partition to "
-                "accept a genuine source retraction, before retrying"
-            )
-            # The old partition is kept AND the run stops here. Reporting the
-            # refusal as an ordinary skip froze fina_mainbz_vip at a stale
-            # vintage for months while every job reported ok, so the alarm is
-            # raised where it is detected instead of relying on each download
-            # loop to notice and re-raise it.
-            print(message)
-            raise BlockedOverwriteError(message)
-    metadata = dict(extra_metadata or {})
-    previous_availability = old_meta.get("availability")
-    if previous_availability and "availability" not in metadata:
-        metadata["availability"] = dict(previous_availability)
-        if event:
-            metadata["availability"].update(
-                available_at=datetime.now(UTC).isoformat(),
-                rule="observed:source_revision_fetch",
-                row_count=len(df),
-            )
-    commit = write_parquet(
-        path,
-        df,
-        api_name=api_name,
-        params=params,
-        fields=fields,
-        extra_metadata=metadata,
-    )
-    if revision_ledger and event:
-        record = finalize_revision_event(
-            event,
-            write_id=str(commit["write_id"]),
-            write_action=write_action,
-            allow_empty_revision_overwrite=allow_empty_revision_overwrite,
-        )
-        append_jsonl_unique(Path(revision_ledger), record, key="event_id")
-        print("REVISION_ALERT " + json.dumps(
-            {key: record.get(key) for key in ("event_id", "dataset", "partition", "severity", "comparison_issue", "write_action")},
-            ensure_ascii=False, sort_keys=True,
-        ))
-    return True
 
 def load_stock_codes(raw_dir: Path) -> list[str]:
     files = sorted((raw_dir / "stock_basic").glob("list_status=*.parquet"))
@@ -2546,22 +2107,18 @@ def write_macro_result(
     spec: MacroDataset,
     params: dict[str, Any],
     revision_ledger: Path | str | None = None,
-    allow_empty_revision_overwrite: bool = False,
 ) -> int:
     df = augment_macro_frame(frame(result), spec)
-    written = write_parquet_revision_aware(
+    outcome = publish(
         path,
         df,
         api_name=spec.api_name,
         params=params,
         fields=list(df.columns),
         key_columns=list(spec.key_columns),
-        revision_ledger=revision_ledger,
-        allow_empty_revision_overwrite=allow_empty_revision_overwrite,
+        ledger=revision_ledger,
     )
-    if not written:
-        return 0
-    return len(df)
+    return len(df) if outcome in WRITTEN_OUTCOMES else 0
 
 def selected_event_flow_datasets(args: argparse.Namespace) -> list[str]:
     return select_datasets(args.datasets, default=EVENT_FLOW_DATASETS, allowed=EVENT_FLOW_SPECS, label="event/flow")
@@ -2772,25 +2329,18 @@ def write_board_result(
     spec: BoardTradingDataset,
     params: dict[str, Any],
     revision_ledger: Path | str | None = None,
-    allow_empty_revision_overwrite: bool = False,
 ) -> int:
     df = augment_board_frame(frame(result), spec, params)
-    # Board pulls cover their partition's full scope (request param == partition
-    # key), so removed keys can only be alerted source corrections.
-    written = write_parquet_revision_aware(
+    outcome = publish(
         path,
         df,
         api_name=spec.api_name,
         params=params,
         fields=list(df.columns),
         key_columns=list(spec.key_columns),
-        revision_ledger=revision_ledger,
-        allow_empty_revision_overwrite=allow_empty_revision_overwrite,
-        allow_key_removal_overwrite=True,
+        ledger=revision_ledger,
     )
-    if not written:
-        return 0
-    return len(df)
+    return len(df) if outcome in WRITTEN_OUTCOMES else 0
 
 def selected_intraday_datasets(values: Iterable[str] | None) -> list[str]:
     aliases = {"stk_mins": STK_MINS_DATASET}
@@ -3100,19 +2650,20 @@ def augment_text_frame(df: pd.DataFrame, spec: TextDataset) -> pd.DataFrame:
         )
     return df
 
-def refresh_sidecar_commit_identity(path: Path) -> None:
-    """Restamp an in-place local repair with one footer/sidecar UUID."""
-    migrate_partition_identity(path)
-
-
-def _rewrite_available_at(dataset_dir: Path, restamp: Callable[[pd.DataFrame], pd.DataFrame]) -> tuple[int, int]:
+def _rewrite_available_at(
+    dataset_dir: Path,
+    restamp: Callable[[pd.DataFrame], pd.DataFrame],
+    key_columns: Sequence[str],
+) -> tuple[int, int]:
     """Re-derive the two stamp columns of every partition under ``dataset_dir``.
 
-    A partition whose stamp or rule label differs is rewritten as a new file
-    renamed over the old path, so a release hard-linking the old file keeps
-    it. Only committed partitions are touched: the identity refresh would
-    otherwise bless a torn write. Returns (files rewritten, rows whose stamp moved).
+    A partition whose stamp or rule label differs is republished through the
+    versioned write path: the restamped rows are a restatement, so the old
+    partition is kept as a superseded version and the ledger records it. Only
+    committed partitions are touched. Returns (files rewritten, rows whose stamp
+    moved).
     """
+    ledger = resolve_revision_ledger(dataset_dir.parent, REVISION_EVENTS_PATH, repo_root=dataset_dir.parent.parent.parent)
     files = 0
     changed_rows = 0
     for path in sorted(dataset_dir.rglob("*.parquet")):
@@ -3122,16 +2673,22 @@ def _rewrite_available_at(dataset_dir: Path, restamp: Callable[[pd.DataFrame], p
         if frame.empty:
             continue
         before = frame.get("available_at", pd.Series("", index=frame.index)).astype(str)
-        before_rule = frame.get("available_at_rule", pd.Series("", index=frame.index)).astype(str)
         repaired = restamp(frame.drop(columns=[c for c in ("available_at", "available_at_rule") if c in frame.columns]))
-        delta = int((repaired["available_at"].astype(str) != before).sum())
-        if delta or (repaired["available_at_rule"].astype(str) != before_rule).any():
-            tmp = path.with_suffix(path.suffix + ".tmp")
-            repaired.to_parquet(tmp, index=False)
-            tmp.replace(path)
-            refresh_sidecar_commit_identity(path)
+        meta = parquet_meta(path)
+        outcome = publish(
+            path,
+            repaired,
+            api_name=str(meta.get("api_name") or dataset_dir.name),
+            params=dict(meta.get("params") or {}),
+            fields=list(meta.get("fields") or repaired.columns),
+            key_columns=key_columns,
+            ledger=ledger,
+            source="local_restamp",
+            current=frame,
+        )
+        if outcome in WRITTEN_OUTCOMES:
             files += 1
-            changed_rows += delta
+            changed_rows += int((repaired["available_at"].astype(str) != before).sum())
     return files, changed_rows
 
 
@@ -3149,7 +2706,7 @@ def repair_text_available_at(raw_dir: str, datasets: list[str]) -> dict[str, Any
         dataset_dir = Path(raw_dir) / dataset
         if not dataset_dir.exists():
             raise RuntimeError(f"missing dataset directory: {dataset_dir}")
-        files, changed_rows = _rewrite_available_at(dataset_dir, partial(augment_text_frame, spec=spec))
+        files, changed_rows = _rewrite_available_at(dataset_dir, partial(augment_text_frame, spec=spec), spec.key_columns)
         stats["datasets"][dataset] = {"files_rewritten": files, "rows_changed": changed_rows}
         stats["files_rewritten"] += files
         stats["rows_changed"] += changed_rows
@@ -3173,7 +2730,7 @@ def repair_event_available_at(raw_dir: str, datasets: list[str]) -> dict[str, An
             raise RuntimeError(f"no partitions under {raw / dataset}")
         open_dates = load_sse_open_dates(raw, partition_date(partitions[0]), latest_sse_calendar_date(raw))
         files, changed_rows = _rewrite_available_at(
-            raw / dataset, partial(augment_event_frame, spec=spec, trading_dates=open_dates)
+            raw / dataset, partial(augment_event_frame, spec=spec, trading_dates=open_dates), spec.key_columns
         )
         stats["datasets"][dataset] = {"files_rewritten": files, "rows_changed": changed_rows}
         stats["files_rewritten"] += files

@@ -1057,3 +1057,56 @@ def test_a_seed_whose_views_type_a_column_two_ways_keeps_its_unfinished_marker(
     WritingProvider.arrow_strings = False
     assert prebuild.main(argv) == 0
     assert not (seed / UNFINISHED_BUILD_MARKER).exists()
+
+
+def test_a_seed_built_under_other_refresh_nodes_is_refused_naming_the_node(tmp_path: Path) -> None:
+    """Node timing is in no cache key: on 10-23 the disclosure node moved and
+    the five-year seed's stashed parts no longer matched what this code
+    builds. The create-time pre-flight compares the seed's recorded timing
+    contract and names what differs."""
+
+    from autotrade.pipelines.pit_views_seed import assert_seed_timing_contract
+
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    config = SnapshotConfig(events_datasets=("stk_holdertrade",), text_datasets=("anns_d",))
+    record = pit_cache_provider_record(
+        generation_id="generation_test", release_raw_dir=tmp_path / "raw", snapshot_config=config
+    )
+    (seed / "provider.json").write_text(json.dumps(record), encoding="utf-8")
+    assert_seed_timing_contract(seed, config)
+
+    built_before = json.loads(json.dumps(record))
+    built_before["timing_contract"]["nodes"]["cn_nightly_disclosure_full"] = {
+        "start": "23:05", "duration_minutes": 10, "weekdays": None,
+    }
+    (seed / "provider.json").write_text(json.dumps(built_before), encoding="utf-8")
+    with pytest.raises(ValueError, match=r"node cn_nightly_disclosure_full: seed .*23:05.* != code .*09:45"):
+        assert_seed_timing_contract(seed, config)
+
+    # A seed built before seeds recorded the contract cannot prove it.
+    legacy = {key: value for key, value in record.items() if key != "timing_contract"}
+    (seed / "provider.json").write_text(json.dumps(legacy), encoding="utf-8")
+    with pytest.raises(ValueError, match="records no snapshot timing contract"):
+        assert_seed_timing_contract(seed, config)
+
+
+def test_the_timing_contract_names_only_what_the_selection_mounts() -> None:
+    from autotrade.pipelines.pit_views_seed import snapshot_timing_contract
+
+    titles_only = snapshot_timing_contract(SnapshotConfig(
+        events_datasets=(), macro_datasets=(), fundamental_datasets=(), text_datasets=("anns_d",),
+    ))
+    assert titles_only["datasets"] == {"daily": ["cn_evening_full"], "text/anns_d": ["cn_nightly_anns_full"]}
+    assert "cn_nightly_disclosure_full" not in titles_only["nodes"]
+
+
+def test_annotations_never_change_a_cache_binding(tmp_path: Path) -> None:
+    """Caches bound before provider records carried vintages and the timing
+    contract stay bound: running arms keep their views."""
+
+    from autotrade.pipelines.pit_views_seed import contract_identity
+
+    current = _record(tmp_path / "raw")
+    older = {key: current[key] for key in ("schema_version", "generation_id", "release_raw_dir", "snapshot_config")}
+    assert contract_identity(older) == contract_identity(current | {"vintages": {"daily": "abc"}})

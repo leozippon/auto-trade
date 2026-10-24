@@ -88,7 +88,7 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
     assert health["max_running_local_experiments"] == MAX_RUNNING_LOCAL_EXPERIMENTS
     assert health["running"] == health["running_local"] == []
     assert health["unreadable_experiments"] == []
-    assert health["raw_generation"] == {"state": "absent"}
+    assert health["raw_generation"] == {"state": "absent", "issues": []}
     schema = client.get("/api/parameter-schema").json()
     fields = {
         field["key"]: field for group in schema["groups"] for field in group["fields"]
@@ -1292,7 +1292,7 @@ class WebuiBackendTest(unittest.TestCase):
 
         # No stamp at all (dev/test roots without a lake): still healthy.
         payload = self.client.get("/api/health").json()
-        self.assertEqual(payload["raw_generation"], {"state": "absent"})
+        self.assertEqual(payload["raw_generation"], {"state": "absent", "issues": []})
         self.assertEqual(payload["status"], "ok")
         stamp = self.repo_root / "data" / "raw" / RAW_GENERATION_FILENAME
         stamp.parent.mkdir(parents=True, exist_ok=True)
@@ -1335,25 +1335,33 @@ class WebuiBackendTest(unittest.TestCase):
             json.dumps({"schema_version": 2, "state": "migrating"}), encoding="utf-8"
         )
         self.assertEqual(self.client.get("/api/health").json()["status"], "degraded")
-        # A dirty lake (aborted mutating cron) must degrade health — the
-        # 6-day production outage stayed green behind the hardcoded literal.
+        # An open lake issue degrades health and is named: a defective vendor
+        # answer, a staged version awaiting an operator, a pending re-pull.
+        issue = {
+            "kind": "staged",
+            "dataset": "repurchase",
+            "partition": "month=202610",
+            "since": "2026-10-24T01:46:00+00:00",
+            "detail": "",
+            "version": "20261024T014600000000Z-staged",
+        }
         stamp.write_text(
             json.dumps(
                 {
-                    "schema_version": 2,
-                    "state": "dirty",
-                    "generation_id": "gen43",
-                    "updated_at": "2026-07-23T00:00:00+00:00",
+                    "schema_version": 3,
+                    "state": "committed",
+                    "generation_id": "gen44",
+                    "completed_at": "2026-10-24T01:47:00+00:00",
+                    "datasets": {},
+                    "issues": [issue],
                 }
             ),
             encoding="utf-8",
         )
         payload = self.client.get("/api/health").json()
         self.assertEqual(payload["status"], "degraded")
-        self.assertEqual(payload["raw_generation"]["state"], "dirty")
-        self.assertEqual(
-            payload["raw_generation"]["updated_at"], "2026-07-23T00:00:00+00:00"
-        )
+        self.assertEqual(payload["raw_generation"]["state"], "committed")
+        self.assertEqual(payload["raw_generation"]["issues"], [issue])
         # A malformed stamp is reported, never a 500.
         stamp.write_text("{oops", encoding="utf-8")
         response = self.client.get("/api/health")

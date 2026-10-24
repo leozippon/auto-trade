@@ -72,6 +72,7 @@ class _Data:
         self.sessions = SESSIONS
         self.release_end = release_end
         self.generation_id = f"gen_{release_end}"
+        self.vintages: dict = {}
         self.market = DailyMarketData(_bars([day for day in SESSIONS if day <= release_end]))
 
     def context_data(self, inference_at):
