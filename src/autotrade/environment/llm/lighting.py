@@ -3,7 +3,8 @@
 The relay serves its gpt-6 family over ``/v1/responses`` — that family refuses
 function tools on Chat Completions — and its Anthropic ids and
 DeepSeek-V4.1-Flash over ``/v1/chat/completions``, with a primary credential
-and an alternate one.
+and an alternate one. The Anthropic ids' requests also mark a prompt-cache
+breakpoint, which the relay forwards to the upstream Messages API.
 """
 
 from __future__ import annotations
@@ -89,6 +90,12 @@ LONG_CONTEXT_TIER_MODELS = tuple(
     model for model in MODEL_CHOICES if model.startswith("gpt-6")
 )
 SHORT_TIER_MAX_COMPACTION_THRESHOLD = 221_184
+# The Anthropic ids. Their upstream caches only a prefix that ends at an
+# explicit ``cache_control`` breakpoint (the relay's other ids cache on their
+# own), so their requests mark one (see ``_mark_cache_breakpoint``).
+PROMPT_CACHE_MARKER_MODELS = tuple(
+    model for model in MODEL_CHOICES if model.startswith("claude-")
+)
 
 # The responses endpoint takes the shared effort scale narrowed to its own
 # tiers; the shared scale's top tier is xhigh.
@@ -185,11 +192,12 @@ def build_gateway(
 
 
 class LightingProxy(OpenAICompatibleProxy):
-    """The relay's own dialect, credential fallback and nothing else.
+    """The relay's own dialect, cache breakpoint and credential fallback.
 
-    Its Anthropic and DeepSeek ids use the shared Chat Completions dialects
-    unchanged; only the gpt-6 family replaces the request payload and the
-    response parser with the responses contract.
+    Its Anthropic and DeepSeek ids use the shared Chat Completions dialects,
+    the Anthropic ids with a cache breakpoint added to the payload; only the
+    gpt-6 family replaces the request payload and the response parser with
+    the responses contract.
     """
 
     def __init__(
@@ -283,13 +291,16 @@ class LightingProxy(OpenAICompatibleProxy):
         max_tokens: int,
     ) -> dict[str, object]:
         if self.config.request_dialect != RESPONSES_DIALECT:
-            return super()._build_request_body(
+            body = super()._build_request_body(
                 messages,
                 tools=tools,
                 tool_choice=tool_choice,
                 stream=stream,
                 max_tokens=max_tokens,
             )
+            if self.config.model in PROMPT_CACHE_MARKER_MODELS:
+                _mark_cache_breakpoint(body)
+            return body
         return _responses_body(
             self.config,
             messages,
@@ -317,6 +328,34 @@ def _log_credential_switch(model: str, error: LLMProxyError) -> None:
         f"(HTTP {error.status_code}); retrying with {API_KEY_ALT_ENV}",
         file=sys.stderr,
     )
+
+
+def _mark_cache_breakpoint(body: dict[str, object]) -> None:
+    """Mark the latest tool result as the Anthropic prompt-cache breakpoint.
+
+    The upstream renders tools, then system, then the conversation, and
+    caches the prefix up to a marked block; a later call that repeats the
+    prefix reads it from the cache. The relay forwards the marker only from a
+    tool message's content part and drops it from a system or user message
+    (probed 2026-10-23), so it goes on the latest tool result: the tail of a
+    tool-loop call, or the last block before the notices appended after it.
+    That one moving breakpoint also covers the fixed tools and system prompt;
+    a conversation with no tool result yet is not cached. The relay appears
+    to spread calls over upstream accounts with separate caches: in the probe
+    two of six repeats wrote the prefix again instead of reading it.
+    """
+
+    records = cast(list[dict[str, object]], body["messages"])
+    for record in reversed(records):
+        if record["role"] == "tool":
+            record["content"] = [
+                {
+                    "type": "text",
+                    "text": record["content"],
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
+            return
 
 
 def _responses_body(
