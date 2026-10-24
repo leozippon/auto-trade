@@ -513,6 +513,51 @@ def test_late_data_is_refused_before_any_pit_view_is_built(tmp_path: Path):
     assert not (tmp_path / "paper" / "pit" / "live" / "pit_views" / "decision").exists()
 
 
+def test_a_cache_of_its_generation_written_under_another_view_format_is_rebuilt(tmp_path: Path):
+    """Paper is unattended: views an earlier run of the same generation left
+    under another cache format are rebuilt, where the provider would refuse."""
+
+    from autotrade.paper.pit import BookPITData
+    from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION
+
+    from .test_snapshot_builder import (
+        build_fundamental_events,
+        build_raw,
+        write_fundamental_status,
+    )
+
+    raw = tmp_path / "data" / "raw"
+    build_raw(raw)
+    events_root = tmp_path / "data" / "pit" / "fundamental_events"
+    build_fundamental_events(events_root)
+    status = tmp_path / "results" / "data_quality" / "fundamental_events_status.json"
+    status.parent.mkdir(parents=True)
+    write_fundamental_status(status)
+    config = SnapshotConfig(
+        events_datasets=(), macro_datasets=(), text_datasets=(), fundamental_datasets=("income_vip",),
+        include_intraday=False, include_industry=False,
+    )
+    cache = tmp_path / "paper" / "pit" / "live" / "pit_views"
+    stale = cache / "decision" / "20211007T235959+0800" / "manifest.json"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("{}", encoding="utf-8")
+    (cache / "provider.json").write_text(
+        json.dumps({"schema_version": SNAPSHOT_CACHE_FORMAT_VERSION - 1, "generation_id": "", "snapshot_config": {}}),
+        encoding="utf-8",
+    )
+    data = BookPITData(
+        state_root=tmp_path / "paper", raw_dir=raw, fundamental_events_root=events_root,
+        fundamental_events_status=status, snapshot_config=config, start="20211011", trade_date="20211011",
+        due_at=datetime(2021, 10, 11, 8, 30, tzinfo=CN_TZ), schedule={},
+    )
+    try:
+        assert json.loads((cache / "provider.json").read_text(encoding="utf-8"))["schema_version"] == SNAPSHOT_CACHE_FORMAT_VERSION
+        assert not stale.exists()
+        assert (data.snapshot_dir / "manifest.json").is_file()
+    finally:
+        data.close()
+
+
 def test_a_release_holding_a_stale_dataset_is_refused_before_any_pit_view_is_built(tmp_path: Path):
     """The pin of a stamped lake checks every mounted dataset's refresh
     (paper.freshness): here the evening job landed the daily bars of

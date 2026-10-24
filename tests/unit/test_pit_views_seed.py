@@ -905,6 +905,7 @@ def test_a_seed_from_an_older_cache_format_is_refused_at_create_time(tmp_path: P
         assert_seed_snapshot_config(seed, wanted)
     message = str(excinfo.value)
     assert str(SNAPSHOT_CACHE_FORMAT_VERSION - 1) in message and str(SNAPSHOT_CACHE_FORMAT_VERSION) in message
+    assert "rebuild the seed under a new directory" in message
     assert seed_pit_views(tmp_path / "exp" / "pit_views", seed, expected_provider=stale | {
         "schema_version": SNAPSHOT_CACHE_FORMAT_VERSION
     }) is False
