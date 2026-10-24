@@ -52,8 +52,11 @@ MEMORY = "continuous"
 # Which outcomes a retrieval averages:
 #   "similar"  the retrieved cases' own outcomes
 #   "placebo"  the same retrieval, each case's outcome swapped for another
-#              case's of the same day by a fixed hash: random neighbours that
-#              keep the candidate's day-to-day score dynamics and turnover
+#              case's of the same day by a fixed hash: the candidate as it
+#              would be if similarity carried no information. It does not
+#              keep the candidate's turnover (a fixed random field over the
+#              keys moves slower: 112.9 vs 162.2 over the full span);
+#              refs/README.md Q2 exempts it from the turnover band.
 NEIGHBOURS = "similar"
 # False: keys are the price-volume pattern alone, the title encoder never
 # loaded -- the text-off twin of any candidate.
