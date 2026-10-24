@@ -80,10 +80,8 @@ from autotrade.environment.data.pit import (
     join_columns,
     key_strings,
     observation_path,
-    observations_up_to,
     parquet_meta,
     read_observations,
-    required_visible_since,
 )
 
 from .io import (
@@ -438,10 +436,6 @@ def answer_defects(path: Path, *, ledger: Path | str | None, source: str = "forc
 # ---------------------------------------------------------------- observations
 
 
-def _read_table(path: Path) -> pd.DataFrame:
-    return pq.read_table(path).to_pandas()
-
-
 def _write_table(path: Path, frame: pd.DataFrame) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{uuid.uuid4()}.tmp")
@@ -462,12 +456,7 @@ def _record_observations(
     visible partition yet (rows a crashed first landing left are dropped)."""
     keys = list(key_columns)
     obs = observation_path(path)
-    if obs.exists():
-        table = _read_table(obs)
-        visible_since = required_visible_since(path, meta, rows=len(table)) if meta is not None else None
-        existing = observations_up_to(table, visible_since)
-    else:
-        existing = pd.DataFrame(columns=[*keys, FIRST_SEEN_COLUMN])
+    existing = read_observations(path, meta)
     stale = obs.exists() and len(existing) != pq.ParquetFile(obs).metadata.num_rows
     known = pd.Index(join_columns(existing.astype({column: str for column in keys}), keys)) if len(existing) else pd.Index([])
     fresh = pd.Index(new_keys).difference(known)

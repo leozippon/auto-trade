@@ -251,10 +251,14 @@ def observation_path(path: Path) -> Path:
     return path.with_name(path.name + FIRST_SEEN_SUFFIX)
 
 
-def read_observations(path: Path) -> pd.DataFrame:
+def read_observations(path: Path, meta: dict[str, Any] | None = None) -> pd.DataFrame:
     """The observation rows of the visible partition at ``path``: its canonical
     business keys and ``first_seen_at``. Rows written by a commit that never
-    became visible are left out; a partition without a table has none."""
+    became visible are left out; a partition without a table has none.
+
+    The one rule for which rows of a table count, used by the versioned write
+    path (which passes the sidecar ``meta`` it has already read) and by the PIT
+    views alike."""
     path = Path(path)
     obs = observation_path(path)
     if not obs.exists():
@@ -263,10 +267,11 @@ def read_observations(path: Path) -> pd.DataFrame:
     if not path.exists():
         # A first landing that crashed before its parquet rename.
         return frame.iloc[:0]
-    return observations_up_to(frame, required_visible_since(path, parquet_meta(path), rows=len(frame)))
+    since = _required_visible_since(path, parquet_meta(path) if meta is None else meta, rows=len(frame))
+    return _observations_up_to(frame, since)
 
 
-def required_visible_since(path: Path, meta: dict[str, Any], *, rows: int) -> datetime | None:
+def _required_visible_since(path: Path, meta: dict[str, Any], *, rows: int) -> datetime | None:
     """The visible partition's ``visible_since``. A table holding rows beside a
     partition whose sidecar does not say when it became visible (missing,
     unreadable or pre-versioning) cannot be filtered: refuse loudly rather than
@@ -284,7 +289,7 @@ def required_visible_since(path: Path, meta: dict[str, Any], *, rows: int) -> da
     return since
 
 
-def observations_up_to(frame: pd.DataFrame, since: datetime | None) -> pd.DataFrame:
+def _observations_up_to(frame: pd.DataFrame, since: datetime | None) -> pd.DataFrame:
     """The rows of an observation table first seen no later than ``since``."""
     if frame.empty:
         return frame
