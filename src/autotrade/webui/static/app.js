@@ -2012,7 +2012,9 @@ async function renderArchivedPage() {
         { class: "page-head" },
         el("h2", {}, el("a", { class: "exp-back", href: "#/" }, "← 实验"), "已归档实验"),
       ),
-      rows.length ? experimentGrid(rows) : el("div", { class: "empty" }, "没有已归档的实验。"),
+      rows.length
+        ? experimentGrid(rows, { archived: true })
+        : el("div", { class: "empty" }, "没有已归档的实验。"),
     ),
   );
 }
@@ -2027,8 +2029,8 @@ function heroSignature(item) {
   ].join("|");
 }
 
-function experimentGrid(rows) {
-  return el("div", { class: "grid" }, ...rows.map(experimentCard));
+function experimentGrid(rows, options = {}) {
+  return el("div", { class: "grid" }, ...rows.map((row) => experimentCard(row, options)));
 }
 
 function endingLabel(ending) {
@@ -2214,8 +2216,9 @@ function cardEquityNode(item) {
    evidence and the curve — each only when the arm has it. A card shows every
    figure as one labelled value: no fraction, no figure against its limit or
    threshold (those are the experiment page's). The grid is rebuilt every
-   poll, so the activity clock needs no ticker. */
-function experimentCard(item) {
+   poll, so the activity clock needs no ticker. An archived arm (the archived
+   page's cards) offers no 恢复运行: the console never starts it again. */
+function experimentCard(item, { archived = false } = {}) {
   const readable = item.state !== "unreadable";
   const card = el(
     "div",
@@ -2242,7 +2245,7 @@ function experimentCard(item) {
     readable ? cardEquityNode(item) : null,
   );
   const actions = el("div", { class: "actions" });
-  if (item.kind === "hitl" && RESUMABLE_STATES.includes(item.state)) {
+  if (!archived && item.kind === "hitl" && RESUMABLE_STATES.includes(item.state)) {
     actions.append(
       el(
         "button",
@@ -3662,6 +3665,9 @@ function controlBar(detail, ...lead) {
   const control = detail.control || { request: null };
   const state = detail.state;
   const alive = detail.worker_alive;
+  // The console never starts an archived arm again (manager.start_worker), so
+  // it offers neither 重启 nor 恢复运行.
+  const archived = Boolean(detail.archived);
   const send = (payload, note) => sendControlAction(id, payload, note);
   const actions = el("div", { class: "control-actions" });
   const bar = el("div", { class: "control-bar" }, ...lead);
@@ -3752,72 +3758,73 @@ function controlBar(detail, ...lead) {
         "强制终止",
       ),
     );
-    actions.append(
-      el(
-        "button",
-        {
-          class: "btn",
-          onclick: () => {
-            showModal(
-              "重启 worker",
-              el(
-                "div",
-                {},
+    if (!archived)
+      actions.append(
+        el(
+          "button",
+          {
+            class: "btn",
+            onclick: () => {
+              showModal(
+                "重启 worker",
                 el(
-                  "p",
+                  "div",
                   {},
-                  "立即重启：终止 worker 并按账本恢复，被中断的会话整体重跑。",
+                  el(
+                    "p",
+                    {},
+                    "立即重启：终止 worker 并按账本恢复，被中断的会话整体重跑。",
+                  ),
+                  el(
+                    "p",
+                    {},
+                    "会话边界重启：当前会话落账后再换用新代码继续。",
+                  ),
                 ),
-                el(
-                  "p",
-                  {},
-                  "会话边界重启：当前会话落账后再换用新代码继续。",
-                ),
-              ),
-              [
-                el("button", { class: "btn", onclick: closeModal }, "取消"),
-                el(
-                  "button",
-                  {
-                    class: "btn",
-                    onclick: () => {
-                      closeModal();
-                      send(
-                        { action: "restart", at: "session_boundary" },
-                        "已请求会话边界重启：当前会话结束后自动换代码重启",
-                      );
+                [
+                  el("button", { class: "btn", onclick: closeModal }, "取消"),
+                  el(
+                    "button",
+                    {
+                      class: "btn",
+                      onclick: () => {
+                        closeModal();
+                        send(
+                          { action: "restart", at: "session_boundary" },
+                          "已请求会话边界重启：当前会话结束后自动换代码重启",
+                        );
+                      },
                     },
-                  },
-                  "会话边界重启",
-                ),
-                el(
-                  "button",
-                  {
-                    class: "btn primary",
-                    onclick: () => {
-                      closeModal();
-                      // The request blocks through the 30s SIGTERM grace; say so
-                      // up front, then report the actual outcome from the response.
-                      toast("正在重启 worker（优雅退出宽限最长约 30 秒）…");
-                      send(
-                        { action: "restart" },
-                        (result) =>
-                          `已重启 worker（pid ${result.spawned_pid}${
-                            result.escalated ? "；旧 worker 被强制终止" : ""
-                          }）`,
-                      );
+                    "会话边界重启",
+                  ),
+                  el(
+                    "button",
+                    {
+                      class: "btn primary",
+                      onclick: () => {
+                        closeModal();
+                        // The request blocks through the 30s SIGTERM grace; say so
+                        // up front, then report the actual outcome from the response.
+                        toast("正在重启 worker（优雅退出宽限最长约 30 秒）…");
+                        send(
+                          { action: "restart" },
+                          (result) =>
+                            `已重启 worker（pid ${result.spawned_pid}${
+                              result.escalated ? "；旧 worker 被强制终止" : ""
+                            }）`,
+                        );
+                      },
                     },
-                  },
-                  "立即重启",
-                ),
-              ],
-            );
+                    "立即重启",
+                  ),
+                ],
+              );
+            },
           },
-        },
-        "重启",
-      ),
-    );
-  } else if (RESUMABLE_STATES.includes(state)) {
+          "重启",
+        ),
+      );
+  } else if (!archived && RESUMABLE_STATES.includes(state)) {
     actions.append(
       el(
         "button",

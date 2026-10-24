@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -38,6 +40,7 @@ from autotrade.webui.registry import (
 )
 from autotrade.webui.server import create_app
 from autotrade.webui.steps import step_tree_view
+from tests.unit.test_webui_inject_message import _const_block, _fn
 from tests.unit.webui_research_arm import (
     ENVIRONMENT_BLOCKED_REASON,
     REPLAY,
@@ -960,6 +963,78 @@ def test_an_archived_arm_is_listed_only_on_request_and_its_page_still_opens(
     detail = client.get("/api/experiments/shelved").json()
     assert detail["archived"]["reason"] == "historical" and detail["stage"] == shelf["experiments"][0]["stage"]
     assert client.get("/api/experiments/ended").json()["archived"] is None
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node required for the JS check")
+def test_the_console_offers_no_start_for_an_archived_arm() -> None:
+    """The manager never starts an archived arm, so its experiment page offers
+    neither 重启 nor 恢复运行 and its card on the archived page no 恢复运行,
+    while the same arm not archived still gets them. The page and the cards
+    are rendered by the console's own functions on a minimal DOM."""
+
+    script = (
+        Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
+    ).read_text(encoding="utf-8")
+    assert "experimentGrid(rows, { archived: true })" in _fn(script, "renderArchivedPage")
+    # What a card shows beside its controls is not under test.
+    context = (
+        "experimentName",
+        "experimentBadges",
+        "armBadge",
+        "fmtTs",
+        "attentionLine",
+        "pipelineStepper",
+        "activityNode",
+        "budgetBars",
+        "evidenceTiles",
+        "cardEquityNode",
+    )
+    harness = "\n".join(
+        [
+            """
+const document = {
+  createElement: (tag) => ({
+    tag, nodeType: 1, style: {}, children: [],
+    append(...nodes) { this.children.push(...nodes); },
+    addEventListener() {}, setAttribute() {},
+  }),
+  createTextNode: (text) => ({ nodeType: 3, text }),
+};
+""",
+            *(f"const {name} = () => null;" for name in context),
+            _const_block(script, "RESUMABLE_STATES"),
+            *(_fn(script, name) for name in ("el", "controlBar", "experimentCard", "experimentGrid")),
+            """
+const buttons = (node) => node.nodeType !== 1 ? [] : node.tag === "button"
+  ? [node.children.map((child) => child.text || "").join("")]
+  : node.children.flatMap(buttons);
+const archived = { archived_at: "2026-10-24T00:00:00+00:00", reason: "not resumed" };
+const dead = {
+  experiment_id: "arm", kind: "hitl", state: "interrupted", worker_alive: false,
+  control: { request: null },
+};
+const live = { ...dead, state: "running_session", worker_alive: true };
+console.log(JSON.stringify({
+  dead: buttons(controlBar(dead)),
+  deadArchived: buttons(controlBar({ ...dead, archived })),
+  live: buttons(controlBar(live)),
+  liveArchived: buttons(controlBar({ ...live, archived })),
+  card: buttons(experimentGrid([dead])),
+  archivedCard: buttons(experimentGrid([dead], { archived: true })),
+}));
+""",
+        ]
+    )
+    result = subprocess.run(["node", "-e", harness], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "dead": ["恢复运行"],
+        "deadArchived": [],
+        "live": ["暂停", "停止", "强制终止", "重启"],
+        "liveArchived": ["暂停", "停止", "强制终止"],
+        "card": ["恢复运行", "删除"],
+        "archivedCard": ["删除"],
+    }
 
 
 def test_archiving_or_restoring_any_arm_changes_the_kept_digest(tmp_path: Path) -> None:
