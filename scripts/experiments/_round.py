@@ -651,6 +651,16 @@ RETIRED_IDS: frozenset[str] = frozenset(
         # Both arms of round 20261014c, on the A100 instance; ended no_deliverable, synced here.
         "hcm_100k_8y_dsf_zgca_20261014c",
         "hcm_100k_8y_sol_dsf_zgca_20261014c",
+        # Every arm of rounds 20261019, 20261019b (on the A100 instance) and
+        # 20261022, whose files left the tree on 2026-10-24. Five ended
+        # no_deliverable and stay on disk; the A100 arm
+        # egcu_lm_100k_8y_opus_zgca_20261019b was interrupted.
+        "egcu_lm_100k_8y_opus_zgca_20261019b",
+        "egcu_lm_100k_8y_sol_20261019",
+        "hcm_lm_100k_8y_opus_20261019",
+        "hcm_lm_100k_8y_sol_zgca_20261019b",
+        "retrieval_lm_100k_8y_opus_20261022",
+        "retrieval_lm_100k_8y_sol_20261022",
     }
 )
 
