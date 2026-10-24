@@ -12,6 +12,7 @@ would refuse is refused when it is opened (``require_audited_fundamentals``).
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import uuid
@@ -23,7 +24,11 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from autotrade.data_sources.tushare.cron_update import DEFAULT_CONFIG
-from autotrade.environment.data.contracts import PIT_EVENT_NODE
+from autotrade.environment.data.contracts import (
+    PIT_EVENT_NODE,
+    RAW_GENERATION_FILENAME,
+    dataset_vintages,
+)
 from autotrade.environment.data.research_release import pin_research_release
 from autotrade.environment.data.snapshot import (
     FundamentalAuditScopeError,
@@ -105,6 +110,9 @@ class BookPITData:
         self.generation_id = provider.release.generation_id or LIVE_GENERATION
         if generation_dir.name != self.generation_id:
             raise RuntimeError(f"release pin {generation_dir} resolved to generation {self.generation_id}")
+        record = Path(provider.release.raw_dir) / RAW_GENERATION_FILENAME
+        self.generation = json.loads(record.read_text(encoding="utf-8")) if record.exists() else {}
+        self.vintages = dataset_vintages(self.generation, required_release_raw_datasets(snapshot_config))
         for entry in cache_root.iterdir():
             if entry != generation_dir:
                 _remove_tree(entry)

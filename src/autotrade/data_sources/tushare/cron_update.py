@@ -366,6 +366,9 @@ def build_audit_full_commands(ctx: RunContext) -> list[list[str]]:
             "--raw-dir",
             raw_dir,
         ],
+        # Which datasets each live Paper book mounts changed vendor vintage
+        # since the release it last pinned (paper/vintages.py).
+        [ctx.python, "scripts/paper/run_paper.py", "vintages"],
     ]
 
 

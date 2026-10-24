@@ -224,6 +224,7 @@ def render_orders(book: Book, trade_date: str) -> str:
             f"（发布 {str(decision['generation_id'])[:12]}）"
             + _fit_note(decision, str(state.get("last_fit_date") or ""))
         ),
+        *_vintage_lines(decision),
         f"- 重放此前决策 {decision['replayed_calls']} 次，其中 {decision['replayed_matching_journal']} 次与模拟账户记录的订单一致",
         (
             f"- 账户（{_day(str(state.get('settled_through') or decision['data_through']))} 收盘估值）："
@@ -422,6 +423,16 @@ def _positions_after(positions: Mapping[str, int], orders: Iterable[Mapping[str,
         symbol, quantity = str(order["symbol"]), int(order["quantity"])
         result[symbol] = result.get(symbol, 0) + (quantity if order["action"] == "buy" else -quantity)
     return {symbol: quantity for symbol, quantity in sorted(result.items()) if quantity > 0}
+
+
+def _vintage_lines(decision: Mapping[str, object]) -> list[str]:
+    """The vendor vintage of each mounted dataset behind the decision: when a
+    re-issued decision stops matching the journal, the vintage that moved
+    names the data that changed."""
+    vintages = decision.get("vintages") or {}
+    if not isinstance(vintages, Mapping) or not vintages:
+        return []
+    return ["- 数据版本：" + "，".join(f"{name} {str(value)[:8]}" for name, value in sorted(vintages.items()))]
 
 
 def _fit_note(decision: Mapping[str, object], last_fit_date: str) -> str:

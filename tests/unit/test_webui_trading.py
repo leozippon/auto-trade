@@ -546,6 +546,8 @@ class _PnlData:
         self.sessions = PNL_SESSIONS
         self.release_end = release_end
         self.generation_id = release_end
+        self.generation: dict = {}
+        self.vintages: dict = {}
 
     def context_data(self, inference_at):
         return StrategyDataView()

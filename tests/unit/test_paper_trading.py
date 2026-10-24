@@ -77,6 +77,8 @@ class _Data:
         self.sessions = tuple(sessions)
         self.release_end = release_end
         self.generation_id = f"gen_{release_end}"
+        self.generation: dict = {}
+        self.vintages: dict = {}
         self.market = DailyMarketData(_bars([day for day in self.sessions if day <= release_end]))
         self.views: list[str] = []
         self.closed = False
@@ -512,3 +514,24 @@ def test_a_buy_of_a_name_currently_st_is_flagged():
     assert _action({"action": "buy", "name": "*ST华仪"}) == "买入（ST）"
     assert _action({"action": "buy", "name": "平安银行"}) == "买入"
     assert _action({"action": "sell", "name": "ST 华仪"}) == "卖出"
+
+
+def test_a_decision_records_and_its_sheet_names_the_vintages_behind_it(tmp_path: Path):
+    """A re-issued decision that stops matching the journal is attributable:
+    the decision row and the order sheet carry the vintage of each dataset
+    the book read, which moves only when the vendor restated its history."""
+
+    book = _Book(tmp_path, COUNTER_STRATEGY, sessions=("20260102", *SESSIONS))
+    built = book._data
+
+    def data_with_vintages(start: str, trade_date: str) -> _Data:
+        data = built(start, trade_date)
+        data.vintages = {"daily": "5f1e2d3c4b5a6978", "anns_d": "0a1b2c3d4e5f6071"}
+        return data
+
+    book.engine.data_factory = data_with_vintages
+    book.run("20260105")
+    (decision,) = book.state()["decisions"]
+    assert decision["vintages"] == {"daily": "5f1e2d3c4b5a6978", "anns_d": "0a1b2c3d4e5f6071"}
+    text = render_orders(_sheet_book(book), "20260105")
+    assert "- 数据版本：anns_d 0a1b2c3d，daily 5f1e2d3c" in text

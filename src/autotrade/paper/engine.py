@@ -166,6 +166,10 @@ class PaperData(Protocol):
     # Last session whose daily bars the committed data contains.
     release_end: str
     generation_id: str
+    # The pinned release's generation record, and the vintage id of each
+    # dataset the book mounts (empty for a release without per-dataset state).
+    generation: dict[str, object]
+    vintages: dict[str, str]
 
     def context_data(self, inference_at: datetime) -> StrategyDataView: ...
 
@@ -184,8 +188,9 @@ PaperDataFactory = Callable[[str, str], PaperData]
 ExecutorFactory = Callable[
     [Path, SandboxConfig, StrategyDataView, Path | None, Path | None], StrategyExecutor
 ]
-# A due decision's inference time -> None, or raises to refuse that decision.
-DecisionCheck = Callable[[datetime], None]
+# A due decision's inference time and the run's data -> None, or raises to
+# refuse that decision.
+DecisionCheck = Callable[[datetime, "PaperData"], None]
 
 
 def docker_executor(
@@ -375,7 +380,7 @@ class DailyPaperEngine:
             if self.decision_check is not None:
                 # After settling: a refused decision still books the sessions
                 # before it, and the next run decides it as a late one.
-                self.decision_check(self.schedule.at(trade_date))
+                self.decision_check(self.schedule.at(trade_date), data)
             self._decide(state, data, broker, pending, trade_date, prior)
 
     # --------------------------------------------------------------- settle
@@ -509,6 +514,7 @@ class DailyPaperEngine:
             "decided_at": datetime.now(CN_TZ).isoformat(),
             "data_through": prior,
             "generation_id": data.generation_id,
+            "vintages": dict(data.vintages),
             "cash": cash,
             "positions": dict(positions),
             "equity": broker.equity(),

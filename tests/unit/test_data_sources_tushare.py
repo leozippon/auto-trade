@@ -3384,7 +3384,10 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         commands = cron_update.build_job_commands(ctx)
 
-        self.assertEqual(len(commands), 6)
+        self.assertEqual(len(commands), 7)
+        # Last, the vintage report of the live Paper books, which reads no
+        # date window.
+        self.assertEqual(commands.pop(), ["/env/python", "scripts/paper/run_paper.py", "vintages"])
         command_text = [" ".join(command) for command in commands]
         self.assertIn("scripts/data/tushare_audit.py core-market", command_text[0])
         self.assertIn("scripts/data/tushare_audit.py fundamental-raw", command_text[1])
