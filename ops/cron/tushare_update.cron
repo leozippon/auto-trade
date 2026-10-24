@@ -140,5 +140,6 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # nightly 12-date sample. The three follow even a sweep that fails (what it
 # wrote is committed and needs the audit and the rebuild), a follow-up that
 # fails does not stop the next one, and the invocation exits non-zero either
-# way.
-0 14 * * 6 cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_weekly_fundamental_deep --then cn_weekly_deep_audit --then cn_nightly_full_audit --then cn_nightly_pit_event_build
+# way. Last, the weekly release retention removes the research releases no
+# consumer records any more (scripts/data/tushare_lake.py prune-releases).
+0 14 * * 6 cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_weekly_fundamental_deep --then cn_weekly_deep_audit --then cn_nightly_full_audit --then cn_nightly_pit_event_build --then cn_weekly_release_prune

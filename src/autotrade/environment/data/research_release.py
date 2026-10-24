@@ -7,6 +7,13 @@ experiment started while the updater holds the lake (or a crashed run left it
 ``updating``) uses the last complete release.
 An experiment that names the release it must read (the one its PIT view seed
 was built from) pins exactly that already-published release instead.
+
+Retention (``retire_research_releases``) removes the releases no consumer
+records any more. Every pin that does not hold the updater lock -- a named
+pin, the fallback to an existing release -- checks and records its release
+under the registry lock that retention holds while it reads the consumers and
+retires the rest, and retention holds the updater lock, which the pin of the
+newest generation needs: no pin can record a release retention is removing.
 """
 
 from __future__ import annotations
@@ -18,9 +25,9 @@ import re
 import shutil
 import stat
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -44,6 +51,10 @@ from autotrade.environment.data.pit import (
 _SCHEMA_VERSION = 2
 _PIN_DIR_NAME = "research_release"
 _MANIFEST_NAME = "manifest.json"
+_REGISTRY_LOCK_NAME = ".registry.lock"
+# A hidden directory in the registry with this suffix is a publication's
+# staging or a retired release: no pin or fallback scan reads it.
+_STAGING_SUFFIX = ".tmp"
 _SAFE_GENERATION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
@@ -53,6 +64,17 @@ class ResearchRelease:
     fundamental_events_root: Path
     fundamental_events_status: Path
     generation_id: str
+
+
+@dataclass(frozen=True)
+class PublishedRelease:
+    """One release in the registry, as retention saw it: why it stays (empty
+    when it goes) and where it now is (its retired name once retired)."""
+
+    generation_id: str
+    created_at: str
+    kept_for: tuple[str, ...]
+    path: Path
 
 
 @dataclass(frozen=True)
@@ -218,18 +240,19 @@ def pin_research_release(
 
         if generation_id is not None:
             _reject_unpinned_legacy_experiment(experiment_dir)
-            shared = _named_release(
-                generation_id,
-                raw_dir=raw_dir,
-                fundamental_events_root=fundamental_events_root,
-                fundamental_events_status=fundamental_events_status,
-                required_raw_datasets=required_raw_datasets,
-            )
-            # The live quality files describe the newest generation, so the
-            # named release's own baseline copy is the one that belongs to it.
-            return _publish_experiment_pin(
-                experiment_dir, shared, quality_source=shared.baseline_quality_dir
-            )
+            with _exclusive_flock(raw_dir.parent / "research_releases" / _REGISTRY_LOCK_NAME):
+                shared = _named_release(
+                    generation_id,
+                    raw_dir=raw_dir,
+                    fundamental_events_root=fundamental_events_root,
+                    fundamental_events_status=fundamental_events_status,
+                    required_raw_datasets=required_raw_datasets,
+                )
+                # The live quality files describe the newest generation, so the
+                # named release's own baseline copy is the one that belongs to it.
+                return _publish_experiment_pin(
+                    experiment_dir, shared, quality_source=shared.baseline_quality_dir
+                )
 
         update_lock = raw_dir.parent.parent / ".runtime" / "tushare" / "locks" / "tushare_update.lock"
         generation_path = raw_dir / RAW_GENERATION_FILENAME
@@ -266,7 +289,7 @@ def pin_research_release(
                 except RuntimeError:
                     pass
                 else:
-                    with _exclusive_flock(release_root / ".registry.lock"):
+                    with _exclusive_flock(release_root / _REGISTRY_LOCK_NAME):
                         shared = _load_global_release(release_root / generation_id)
                         if shared is None:
                             # No writer runs under the shared lock: finish or
@@ -298,23 +321,24 @@ def pin_research_release(
                         experiment_dir, shared, quality_source=fundamental_events_status.parent
                     )
 
-        shared = _select_existing_release(
-            release_root,
-            preferred_generation=str(observed.get("generation_id") or ""),
-            raw_dir=raw_dir,
-            fundamental_events_root=fundamental_events_root,
-            fundamental_events_status=fundamental_events_status,
-            required_raw_datasets=required_raw_datasets,
-        )
-        if shared is None:
-            raise RuntimeError(
-                "live research data is unavailable and no immutable release covers the configured "
-                f"raw datasets {sorted(required_raw_datasets)}; retry when the updater is idle so a "
-                "fresh release can be pinned"
+        with _exclusive_flock(release_root / _REGISTRY_LOCK_NAME):
+            shared = _select_existing_release(
+                release_root,
+                preferred_generation=str(observed.get("generation_id") or ""),
+                raw_dir=raw_dir,
+                fundamental_events_root=fundamental_events_root,
+                fundamental_events_status=fundamental_events_status,
+                required_raw_datasets=required_raw_datasets,
             )
-        return _publish_experiment_pin(
-            experiment_dir, shared, quality_source=shared.baseline_quality_dir
-        )
+            if shared is None:
+                raise RuntimeError(
+                    "live research data is unavailable and no immutable release covers the configured "
+                    f"raw datasets {sorted(required_raw_datasets)}; retry when the updater is idle so a "
+                    "fresh release can be pinned"
+                )
+            return _publish_experiment_pin(
+                experiment_dir, shared, quality_source=shared.baseline_quality_dir
+            )
 
 
 def published_research_release(
@@ -346,6 +370,98 @@ def published_research_release(
         fundamental_events_status=shared.baseline_quality_dir / shared.fundamental_status_name,
         generation_id=shared.generation_id,
     )
+
+
+def pinned_generation(directory: str | Path) -> str:
+    """The generation the research-release pin in ``directory`` records; empty
+    when it holds no pin (nothing pinned yet, or a lake read live)."""
+
+    manifest = Path(directory) / _PIN_DIR_NAME / _MANIFEST_NAME
+    if not manifest.is_file():
+        return ""
+    payload = _read_json(manifest, description="experiment research-release manifest")
+    generation_id = str(payload.get("generation_id") or "")
+    _validate_generation_text(generation_id)
+    return generation_id
+
+
+def retire_research_releases(
+    release_root: str | Path,
+    consumers: Callable[[], Mapping[str, Sequence[str]]],
+    *,
+    apply: bool,
+) -> tuple[list[PublishedRelease], list[Path]]:
+    """Every published release with what keeps it, oldest first; with
+    ``apply``, each one nothing keeps is taken out of the registry.
+
+    ``consumers`` says why each generation it names is still read. It is called
+    under the registry lock, and the caller holds the updater lock, so no pin
+    records a release between that read and its retirement (see the module
+    docstring). A retired release is renamed to a hidden staging name, which no
+    pin or fallback scan reads, so the caller deletes it with
+    ``remove_release_tree`` after the lock is released. The second list is
+    what an interrupted retirement or publication left in the registry, which
+    nothing can reach either.
+    """
+
+    root = Path(release_root)
+    with _exclusive_flock(root / _REGISTRY_LOCK_NAME):
+        kept = consumers()
+        releases = sorted(
+            (
+                PublishedRelease(
+                    generation_id=path.name,
+                    created_at=str(
+                        _read_json(path / _MANIFEST_NAME, description="research-release manifest").get("created_at")
+                        or ""
+                    ),
+                    kept_for=tuple(kept.get(path.name, ())),
+                    path=path,
+                )
+                for path in root.iterdir()
+                if not path.name.startswith(".")
+            ),
+            key=lambda release: (release.created_at, release.generation_id),
+        )
+        leftovers = sorted(
+            path for path in root.iterdir() if path.name.startswith(".") and path.name.endswith(_STAGING_SUFFIX)
+        )
+        if not apply:
+            return releases, leftovers
+        placed = []
+        for release in releases:
+            if not release.kept_for:
+                path = root / f".{release.generation_id}.{uuid.uuid4().hex[:10]}{_STAGING_SUFFIX}"
+                release.path.rename(path)
+                release = replace(release, path=path)
+            placed.append(release)
+        return placed, leftovers
+
+
+def remove_release_tree(path: str | Path) -> int:
+    """Delete one retired release (or staging) tree; return the bytes it freed.
+
+    A release is hard links into the raw lake and into other releases, so a
+    file frees its blocks only when this removes its last link: those are
+    counted as the walk unlinks them, with the directories' own blocks.
+    """
+
+    root = Path(path)
+    freed = 0
+    for directory, dirnames, filenames in os.walk(root, topdown=False):
+        for name in filenames:
+            entry = os.path.join(directory, name)
+            info = os.lstat(entry)
+            if info.st_nlink == 1:
+                freed += info.st_blocks * 512
+            os.unlink(entry)
+        for name in dirnames:
+            entry = os.path.join(directory, name)
+            freed += os.lstat(entry).st_blocks * 512
+            os.rmdir(entry)
+    freed += root.lstat().st_blocks * 512
+    root.rmdir()
+    return freed
 
 
 def _named_release(
@@ -424,7 +540,7 @@ def _create_global_release(
 ) -> _GlobalRelease:
     generation_id = _committed_generation_id(generation)
     target = release_root / generation_id
-    staging = release_root / f".{generation_id}.{uuid.uuid4().hex[:10]}.tmp"
+    staging = release_root / f".{generation_id}.{uuid.uuid4().hex[:10]}{_STAGING_SUFFIX}"
     if target.exists():
         loaded = _load_global_release(target)
         if loaded is None:

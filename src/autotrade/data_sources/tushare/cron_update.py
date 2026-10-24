@@ -584,6 +584,9 @@ def build_job_commands(ctx: RunContext) -> list[list[str]]:
         return [command]
     if operation == "audit_full":
         return build_audit_full_commands(ctx)
+    if operation == "prune_releases":
+        # Not a lake mutation: the child runs under the lock it inherits.
+        return [[ctx.python, "scripts/data/tushare_lake.py", "prune-releases", "--apply"]]
     raise ValueError(f"unsupported cron operation: {operation}")
 
 

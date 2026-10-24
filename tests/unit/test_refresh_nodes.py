@@ -44,13 +44,15 @@ CN_TZ = ZoneInfo("Asia/Shanghai")
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CRON_SCHEDULE = REPO_ROOT / "configs" / "tushare_update_schedule.json"
 
-# Jobs that only audit/compare existing data and land nothing new — never nodes.
+# Jobs that only audit/compare existing data (or retire research releases)
+# and land nothing new — never nodes.
 AUDIT_ONLY_JOBS = {
     "cn_nightly_full_audit",
     "cn_nightly_text_audit",
     "cn_daily_revision_sentinel",
     "cn_weekly_deep_audit",
     "cn_preopen_event_flow_audit_0920",
+    "cn_weekly_release_prune",
 }
 
 # Repair sweeps over already-node-governed data: they heal historical rows

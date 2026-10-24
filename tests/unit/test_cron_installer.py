@@ -49,7 +49,12 @@ class CronInstallerTest(unittest.TestCase):
         follow-ups, then scheduled 60-90 minutes after it, died on lock
         timeout: a generation was committed with sweep-mutated fundamentals,
         no rebuilt PIT events and no audit."""
-        follow_ups = ["cn_weekly_deep_audit", "cn_nightly_full_audit", "cn_nightly_pit_event_build"]
+        follow_ups = [
+            "cn_weekly_deep_audit",
+            "cn_nightly_full_audit",
+            "cn_nightly_pit_event_build",
+            "cn_weekly_release_prune",
+        ]
         lines = [
             line
             for line in installer.TEMPLATE.read_text(encoding="utf-8").splitlines()

@@ -19,6 +19,17 @@ scheduled job, so releases and Paper pins never see a half-applied command.
   and the generation record is rewritten to schema 3 with ``versioned_since``,
   the day the versioned era starts (periods ending before it never get
   observation rows). Idempotent: a second run keeps that day.
+* ``prune-releases [--dry-run | --apply]`` removes the research releases no
+  consumer reads any more, oldest first. A release stays while the raw
+  generation record names it, a seed (or a seed build's workspace pin) one or
+  two levels under ``data/`` was built from it, an experiment under
+  ``experiments/`` that has not completed pinned it or names a seed built from
+  it, or a Paper book that is not killed has it pinned. The consumers are read
+  under the release registry lock and the updater lock, so a release a
+  consumer records is never removed (``research_release``); a removal prints
+  the bytes it freed, those of the files whose last link it removed. Nothing
+  in the lake changes, so no generation is committed. The default is a dry
+  run; the weekly chain runs ``--apply`` last (``cn_weekly_release_prune``).
 """
 
 from __future__ import annotations
@@ -28,7 +39,7 @@ import json
 import os
 import sys
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -40,11 +51,27 @@ from autotrade.environment.data.contracts import (
     GENERATION_SCHEMA_VERSION,
 )
 from autotrade.environment.data.pit import complete_interrupted_commits
+from autotrade.environment.data.research_release import (
+    pinned_generation,
+    remove_release_tree,
+    retire_research_releases,
+)
+from autotrade.paper.book import book_status
+from autotrade.paper.books import PAPER_STATE_DIR, list_books
+from autotrade.paper.pit import PIT_CACHE_NAME
+from autotrade.pipelines.hitl_state import (
+    HITL_DIR_NAME,
+    PARAMS_NAME,
+    STATUS_NAME,
+    read_json,
+    read_status,
+)
 
 from .common import (
     EVENT_FLOW_SPECS,
     REVISION_EVENTS_PATH,
     TEXT_SPECS,
+    inherited_updater_lock_fd,
     parquet_meta,
     resolve_revision_ledger,
 )
@@ -78,6 +105,11 @@ from .versions import (
 # The two tables whose stored partitions still hold duplicate business keys
 # from before keys were deduplicated at ingest.
 MIGRATION_DEDUP_DATASETS = ("anns_d", "repurchase")
+# The one arm state the console neither runs nor resumes: it resumes stopped,
+# failed, interrupted and terminated arms (``webui.manager``), and an active
+# state whose worker died reads as interrupted. Any other state, an unknown
+# or unreadable one included, keeps the arm's release.
+ENDED_ARM_STATE = "completed"
 
 
 def _lake(config_path: str) -> tuple[dict, Path, Path]:
@@ -266,6 +298,112 @@ def migrate(config_path: str, *, apply: bool) -> dict:
         return run(state)
 
 
+def release_consumers(repo_root: Path, raw_dir: Path) -> dict[str, list[str]]:
+    """Why each generation is still read: the keep rules of ``prune-releases``."""
+
+    kept: dict[str, list[str]] = {}
+
+    def keep(generation: str, reason: str) -> None:
+        if generation:
+            kept.setdefault(generation, []).append(reason)
+
+    keep(str(_read_raw_generation_file(raw_dir).get("generation_id") or ""), "raw generation record")
+    data = repo_root / "data"
+    for directory in sorted(path for pattern in ("*", "*/*") for path in data.glob(pattern) if path.is_dir()):
+        name = directory.relative_to(repo_root)
+        if (directory / "provider.json").is_file():
+            keep(_seed_generation(directory), f"seed {name}")
+        keep(pinned_generation(directory), f"pin {name}")
+    experiments = repo_root / "experiments"
+    for directory in sorted(experiments.iterdir()) if experiments.is_dir() else ():
+        hitl = directory / HITL_DIR_NAME
+        if directory.name.startswith(".") or not hitl.is_dir():
+            continue
+        try:
+            state = str(read_status(hitl / STATUS_NAME).get("state") or "created")
+        except (OSError, TypeError, ValueError):
+            state = "unreadable"
+        if state == ENDED_ARM_STATE:
+            continue
+        reason = f"experiment {directory.name} ({state})"
+        keep(pinned_generation(directory), reason)
+        seed = read_json(hitl / PARAMS_NAME).get("pit_views_seed")
+        if isinstance(seed, str) and seed.strip() and (repo_root / seed.strip() / "provider.json").is_file():
+            keep(_seed_generation(repo_root / seed.strip()), reason)
+    paper = repo_root / PAPER_STATE_DIR
+    for book_id in list_books(paper):
+        try:
+            killed = book_status(paper / book_id) == "killed"
+        except (OSError, ValueError):
+            killed = False
+        if not killed:
+            for cache in sorted((paper / book_id / PIT_CACHE_NAME).glob("*")):
+                keep(pinned_generation(cache), f"Paper book {book_id}")
+    return kept
+
+
+def _seed_generation(seed: Path) -> str:
+    """The generation a seed's views were built from, as its ``provider.json`` records it."""
+    path = seed / "provider.json"
+    try:
+        return str(json.loads(path.read_text(encoding="utf-8")).get("generation_id") or "")
+    except (OSError, ValueError, AttributeError) as exc:
+        raise RuntimeError(f"cannot read the release seed record {path} names: {exc}") from exc
+
+
+@contextmanager
+def _updater_lock(config: dict, repo_root: Path) -> Iterator[None]:
+    """The updater lock for a command that changes no partition: the weekly
+    job's runner holds it for its child, a manual run takes it like every
+    operator command."""
+    if inherited_updater_lock_fd(repo_root) is not None:
+        yield
+        return
+    lock = acquire_lock("tushare_update", int(config.get("default_lock_wait_seconds", DEFAULT_LOCK_WAIT_SECONDS)))
+    try:
+        yield
+    finally:
+        lock.release()
+
+
+def prune_releases(config_path: str, *, apply: bool) -> dict:
+    """Remove the research releases no consumer reads any more (see the module docstring)."""
+    config, raw_dir, _ledger = _lake(config_path)
+    repo_root = Path.cwd()  # _lake works from the repository root
+    freed = 0
+
+    def removal(path: Path) -> dict:
+        nonlocal freed
+        if not apply:
+            return {"action": "remove"}
+        size = remove_release_tree(path)
+        freed += size
+        return {"action": "removed", "freed_bytes": size}
+
+    with _updater_lock(config, repo_root) if apply else nullcontext():
+        releases, leftovers = retire_research_releases(
+            raw_dir.parent / "research_releases", lambda: release_consumers(repo_root, raw_dir), apply=apply
+        )
+        for path in leftovers:
+            print(json.dumps({"leftover": path.name, **removal(path)}, ensure_ascii=False), flush=True)
+        for release in releases:
+            line = {"generation_id": release.generation_id, "created_at": release.created_at}
+            if release.kept_for:
+                line.update(action="keep", kept_for=list(release.kept_for))
+            else:
+                line.update(removal(release.path))
+            print(json.dumps(line, ensure_ascii=False), flush=True)
+    unreferenced = sum(not release.kept_for for release in releases)
+    return {
+        "mode": "apply" if apply else "dry_run",
+        "releases": len(releases),
+        "kept": len(releases) - unreferenced,
+        "unreferenced": unreferenced,
+        "leftovers": len(leftovers),
+        **({"freed_bytes": freed} if apply else {}),
+    }
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--config", default=str(DEFAULT_CONFIG))
@@ -286,6 +424,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     rebuild = sub.add_parser("rebuild-observations", help="rebuild a partition's observation table from its versions")
     rebuild.add_argument("dataset")
     rebuild.add_argument("partition")
+    prune = sub.add_parser("prune-releases", help="remove the research releases no consumer reads any more")
+    prune_mode = prune.add_mutually_exclusive_group()
+    prune_mode.add_argument("--dry-run", action="store_true", help="list what would be removed and why the rest stay (the default)")
+    prune_mode.add_argument("--apply", action="store_true", help="remove them under the updater and registry locks")
     return parser.parse_args(argv)
 
 
@@ -295,6 +437,8 @@ def main(argv: list[str] | None = None) -> int:
         return repull_dataset(args.config, args.dataset, start_date=args.start_date, end_date=args.end_date)
     if args.command == "migrate":
         result = migrate(args.config, apply=args.apply)
+    elif args.command == "prune-releases":
+        result = prune_releases(args.config, apply=args.apply)
     elif args.command in {"revert", "promote"}:
         kind = SUPERSEDED if args.command == "revert" else STAGED
         result = restore_partition(args.config, args.dataset, args.partition, args.version, kind=kind)

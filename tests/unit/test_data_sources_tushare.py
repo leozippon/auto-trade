@@ -7780,8 +7780,9 @@ class UuidCommitIdentityTest(unittest.TestCase):
         # the stk_limit one (2026-10-21); 37 with the top-10 holder repair; 39
         # with the stk_holdernumber and repurchase restatement re-pulls; 35
         # since the four disclosure-table re-pulls became the history_repull
-        # policy and its operator command (2026-10-24).
-        self.assertEqual(len(config["jobs"]), 35)
+        # policy and its operator command (2026-10-24); 36 with the weekly
+        # research-release retention.
+        self.assertEqual(len(config["jobs"]), 36)
         for name, tier in (
             ("manual_history_backfill_reference", "reference"),
             ("manual_history_backfill_macro", "macro"),

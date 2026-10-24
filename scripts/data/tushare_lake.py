@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Operator commands over the versioned TuShare raw lake (revert, promote, repull, migrate)."""
+"""Operator commands over the versioned TuShare raw lake (revert, promote, repull, rebuild-observations, migrate, prune-releases)."""
 
 from __future__ import annotations
 
