@@ -60,8 +60,9 @@ _DEEPSEEK_PROFILE = ModelProfile(
     default_base_url="https://api.deepseek.com",
     request_dialect="deepseek",
     # The weekday-peak rate (docs/deployment-documentation.md, list prices as
-    # of 2026-10-14); off-peak hours bill half, which the cap ignores.
-    prices=TokenPrices(0.30, 0.006, 1.20),
+    # of 2026-10-14); off-peak hours bill half, which the cap ignores. DeepSeek
+    # reports no cache write.
+    prices=TokenPrices(0.30, 0.006, 1.20, 0.30),
     # The account's GET /models reports these for deepseek-flash.
     context_window_tokens=1_048_576,
     max_output_tokens=393_216,
@@ -85,8 +86,9 @@ _MIMO_FLASH_PROFILE = ModelProfile(
     default_base_url="https://api.xiaomimimo.com/v1",
     request_dialect="mimo",
     # The domestic real-time list prices (docs/deployment-documentation.md,
-    # as of 2026-10-14), CNY 1.00 / 0.02 / 2.00 converted at 7.1.
-    prices=TokenPrices(0.141, 0.0028, 0.282),
+    # as of 2026-10-14), CNY 1.00 / 0.02 / 2.00 converted at 7.1. MiMo
+    # reports no cache write.
+    prices=TokenPrices(0.141, 0.0028, 0.282, 0.141),
     # Flash and Pro publish the same request contract, a "1M" window and a
     # 131,072-token completion ceiling (thinking tokens included); the
     # decimal reading of "1M" is the safe one.
@@ -97,7 +99,7 @@ _MIMO_PROFILES = {
     MIMO_FLASH_MODEL: _MIMO_FLASH_PROFILE,
     # Only the price differs: CNY 3.00 / 0.025 / 6.00 at 7.1.
     MIMO_PRO_MODEL: replace(
-        _MIMO_FLASH_PROFILE, prices=TokenPrices(0.423, 0.0035, 0.845)
+        _MIMO_FLASH_PROFILE, prices=TokenPrices(0.423, 0.0035, 0.845, 0.423)
     ),
 }
 _LIGHTING_PROFILES = {

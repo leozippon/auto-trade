@@ -39,6 +39,7 @@ from autotrade.environment.llm import (
     MalformedToolCallError,
     ProviderRefusalError,
     ToolCall,
+    cache_write_tokens,
     cached_prompt_tokens,
     clamp_requested_max_tokens,
     context_overflow_error,
@@ -308,7 +309,7 @@ class AgentSessionResult:
     status: str
     finish_value: dict[str, object]
     llm_calls: int
-    # Closed's session-summary ``token_usage`` block: the seven per-call totals
+    # Closed's session-summary ``token_usage`` block: the eight per-call totals
     # plus ``cache_hit_ratio`` and the Sub Agent roll-up.
     usage: dict[str, object] = field(default_factory=dict)
     context_compactions: int = 0
@@ -2120,12 +2121,19 @@ def _new_token_totals() -> dict[str, int]:
             "reasoning_tokens",
             "cache_hit_tokens",
             "cache_miss_tokens",
+            "cache_write_tokens",
         )
     }
 
 
 def _accumulate_usage(total: dict[str, int], usage: object) -> None:
     """Sum prompt/completion/reasoning/cache tokens across main-conversation calls.
+
+    A miss is a prompt token not read from the cache, the call's cache writes
+    included; hits and misses are summed only from a usage that reports a
+    cache count, because one without (vLLM) leaves its hit rate unknown, not
+    zero. Reasoning comes from ``completion_tokens_details`` or, in the
+    responses dialect, ``output_tokens_details``.
 
     Cache hits are only realized while the request prefix (system prompt +
     tool schemas + early history) stays byte-stable; semantic compaction and
@@ -2138,15 +2146,19 @@ def _accumulate_usage(total: dict[str, int], usage: object) -> None:
         value = usage.get(key)
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             total[key] += int(value)
-    total["cache_hit_tokens"] += cached_prompt_tokens(usage)
-    miss = usage.get("prompt_cache_miss_tokens")
-    if isinstance(miss, (int, float)) and not isinstance(miss, bool):
-        total["cache_miss_tokens"] += int(miss)
-    completion_details = usage.get("completion_tokens_details")
-    if isinstance(completion_details, dict):
-        reasoning = completion_details.get("reasoning_tokens")
+    cached = cached_prompt_tokens(usage)
+    prompt = usage.get("prompt_tokens")
+    if cached is not None:
+        total["cache_hit_tokens"] += cached
+        if isinstance(prompt, (int, float)) and not isinstance(prompt, bool):
+            total["cache_miss_tokens"] += max(int(prompt) - cached, 0)
+    total["cache_write_tokens"] += cache_write_tokens(usage)
+    for key in ("completion_tokens_details", "output_tokens_details"):
+        details = usage.get(key)
+        reasoning = details.get("reasoning_tokens") if isinstance(details, dict) else None
         if isinstance(reasoning, (int, float)) and not isinstance(reasoning, bool):
             total["reasoning_tokens"] += int(reasoning)
+            break
 
 
 def _accumulate_subagent_usage(

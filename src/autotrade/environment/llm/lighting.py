@@ -55,7 +55,7 @@ DEEPSEEK_FLASH_MODEL = "DeepSeek-V4.1-Flash"
 # ceilings; for the gpt-6 ids that is the project owner's figure (2026-10-14),
 # backed by the relay pricing a tier past 272k but not yet probed with such a
 # request. Prices are USD per million uncached prompt / cached prompt /
-# completion tokens from the relay's public
+# completion / cache-write tokens from the relay's public
 # ``GET https://lightingtheword.com/api/pricing`` as of 2026-10-14: a dated
 # snapshot, refreshed by hand when the relay's ``pricing_version`` moves. The
 # gpt-6 ids bill a request by its length: up to 272,000 prompt tokens at the
@@ -63,21 +63,23 @@ DEEPSEEK_FLASH_MODEL = "DeepSeek-V4.1-Flash"
 # times the completion price, which the spend cap does not model -- a
 # conversation on them must compact below that boundary (see
 # LONG_CONTEXT_TIER_MODELS). DeepSeek-V4.1-Flash is listed at its weekday-peak
-# rate (off-peak bills half). Cache writes are charged as uncached prompt (the
-# relay bills gpt-6.1-sol's at 2.5, not 2).
+# rate (off-peak bills half). Cache writes: gpt-6.1-sol's at the relay's 2.5;
+# the Claude ids' at 1.25 times the uncached prompt, Anthropic's rate for the
+# 5-minute TTL their breakpoint asks for; gpt-6-astra's and gpt-6-luna's are
+# not recorded, so they stay at the uncached prompt; DeepSeek reports none.
 MODEL_PROFILES: tuple[tuple[str, str, int, int, TokenPrices], ...] = (
-    ("gpt-6.1-sol", RESPONSES_DIALECT, 1_000_000, 128_000, TokenPrices(2.0, 0.1, 10.0)),
-    ("gpt-6-astra", RESPONSES_DIALECT, 1_000_000, 128_000, TokenPrices(10.0, 1.0, 50.0)),
-    ("gpt-6-luna", RESPONSES_DIALECT, 1_000_000, 128_000, TokenPrices(0.1, 0.01, 0.5)),
-    ("claude-fable-5-1", CHAT_DIALECT, 1_000_000, 128_000, TokenPrices(10.0, 0.25, 50.0)),
-    ("claude-sonnet-5-5", CHAT_DIALECT, 1_000_000, 128_000, TokenPrices(2.0, 0.2, 10.0)),
-    ("claude-opus-5-5", CHAT_DIALECT, 1_000_000, 128_000, TokenPrices(4.0, 0.2, 20.0)),
+    ("gpt-6.1-sol", RESPONSES_DIALECT, 1_000_000, 128_000, TokenPrices(2.0, 0.1, 10.0, 2.5)),
+    ("gpt-6-astra", RESPONSES_DIALECT, 1_000_000, 128_000, TokenPrices(10.0, 1.0, 50.0, 10.0)),
+    ("gpt-6-luna", RESPONSES_DIALECT, 1_000_000, 128_000, TokenPrices(0.1, 0.01, 0.5, 0.1)),
+    ("claude-fable-5-1", CHAT_DIALECT, 1_000_000, 128_000, TokenPrices(10.0, 0.25, 50.0, 12.5)),
+    ("claude-sonnet-5-5", CHAT_DIALECT, 1_000_000, 128_000, TokenPrices(2.0, 0.2, 10.0, 2.5)),
+    ("claude-opus-5-5", CHAT_DIALECT, 1_000_000, 128_000, TokenPrices(4.0, 0.2, 20.0, 5.0)),
     (
         DEEPSEEK_FLASH_MODEL,
         DEEPSEEK_DIALECT,
         1_000_000,
         384_000,
-        TokenPrices(0.2957, 0.0059, 1.1829),
+        TokenPrices(0.2957, 0.0059, 1.1829, 0.2957),
     ),
 )
 MODEL_CHOICES = tuple(profile[0] for profile in MODEL_PROFILES)

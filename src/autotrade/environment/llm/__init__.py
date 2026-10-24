@@ -21,7 +21,13 @@ from .openai_compatible import (
     OpenAICompatibleProxy,
     load_env_value,
 )
-from .pricing import ApiSpendExhausted, TokenPrices, billed_tokens, cached_prompt_tokens
+from .pricing import (
+    ApiSpendExhausted,
+    TokenPrices,
+    billed_tokens,
+    cache_write_tokens,
+    cached_prompt_tokens,
+)
 from .proxy import (
     CONTEXT_OUTPUT_MIN_TOKENS,
     CONTEXT_OUTPUT_TOKEN_MARGIN,
@@ -71,6 +77,7 @@ __all__ = [
     "ToolCall",
     "billed_tokens",
     "build_model_gateway",
+    "cache_write_tokens",
     "cached_prompt_tokens",
     "canonicalize_model_name",
     "clamp_requested_max_tokens",

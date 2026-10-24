@@ -2314,6 +2314,68 @@ def test_unfinished_session_end_still_reports_token_usage() -> None:
     assert ended["token_usage"]["llm_calls_with_usage"] == 1
 
 
+def test_session_token_usage_totals_cache_reads_misses_writes_and_reasoning() -> None:
+    """Each usage shape adds its own counters: the relay's Claude chat shape
+    and its responses dialect report reads, writes and reasoning in different
+    places, and a usage with no cache count (vLLM) adds no hit and no miss."""
+
+    claude = {
+        "prompt_tokens": 1_000,
+        "completion_tokens": 50,
+        "prompt_tokens_details": {"cached_tokens": 0},
+        "completion_tokens_details": {"reasoning_tokens": 0},
+        "billing_usage": {"claude_usage": {"cache_creation_input_tokens": 900}},
+    }
+    responses = {
+        "input_tokens": 1_000,
+        "output_tokens": 300,
+        "input_tokens_details": {"cached_tokens": 600, "cache_write_tokens": 300},
+        "output_tokens_details": {"reasoning_tokens": 200},
+        "prompt_tokens": 1_000,
+        "completion_tokens": 300,
+    }
+    vllm = {"prompt_tokens": 1_000, "completion_tokens": 100, "prompt_tokens_details": None}
+    runner = AgentSessionRunner(
+        llm=ScriptedLLM(
+            [
+                ProviderResponse(content="thinking aloud", usage=usage)
+                for usage in (claude, responses, vllm)
+            ]
+        ),
+        tools=ToolRegistry([_FinishStub("finish_session")]),
+        system_prompt="research",
+        config=_session_config(max_llm_calls=3),
+    )
+    events: list[tuple[str, dict[str, object]]] = []
+    runner.event_sink = lambda event, payload: events.append((event, payload))
+    with pytest.raises(AgentSessionBudgetExhausted, match="call budget"):
+        runner.run("go")
+    usage = next(
+        payload for event, payload in events if event == "session_end"
+    )["token_usage"]
+
+    assert {key: usage[key] for key in (
+        "llm_calls_with_usage",
+        "prompt_tokens",
+        "completion_tokens",
+        "reasoning_tokens",
+        "cache_hit_tokens",
+        "cache_miss_tokens",
+        "cache_write_tokens",
+    )} == {
+        "llm_calls_with_usage": 3,
+        "prompt_tokens": 3_000,
+        "completion_tokens": 450,
+        "reasoning_tokens": 200,
+        "cache_hit_tokens": 600,
+        # 1,000 unread on the Claude call, 400 on the responses one; none
+        # counted for vLLM, whose usage says nothing about its cache.
+        "cache_miss_tokens": 1_400,
+        "cache_write_tokens": 1_200,
+    }
+    assert usage["cache_hit_ratio"] == 0.2
+
+
 def test_inherit_context_fork_drops_the_unanswered_tool_calls() -> None:
     child = ScriptedLLM([ProviderResponse(content="forked")])
     runner = AgentSessionRunner(
