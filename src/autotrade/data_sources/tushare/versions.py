@@ -50,7 +50,6 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -59,11 +58,21 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from autotrade.environment.data.pit import (
-    FIRST_SEEN_SUFFIX,
+    FIRST_SEEN_COLUMN,
+    KEY_SEPARATOR,
     CorruptSidecarError,
+    canonical_keys,
+    canonical_revision_value,
+    canonical_series,
     complete_interrupted_commit,
     concat_rows,
+    join_columns,
+    key_strings,
+    observation_path,
+    observations_up_to,
     parquet_meta,
+    read_observations,
+    required_visible_since,
 )
 
 from .io import (
@@ -74,7 +83,6 @@ from .io import (
 )
 
 VERSION_ROOT_NAME = "raw_versions"
-FIRST_SEEN_COLUMN = "first_seen_at"
 SUPERSEDED = "superseded"
 STAGED = "staged"
 # An answer removing more than this share of the partition's current keys is
@@ -124,7 +132,6 @@ REVISION_EVENT_FIELDS = (
     "write_id",
 )
 
-_KEY_SEPARATOR = "\x1f"
 _ROW_SEPARATOR = "\x1e"
 
 
@@ -137,73 +144,6 @@ class DefectiveAnswer(RuntimeError):
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat(timespec="microseconds")
-
-
-def _instant(text: object) -> datetime | None:
-    try:
-        return datetime.fromisoformat(str(text)) if text else None
-    except ValueError:
-        return None
-
-
-def canonical_revision_value(value: Any) -> str:
-    """One text form per value, so a re-serialised number or an empty marker
-    compares equal to the same value written another way."""
-    if value is None:
-        return ""
-    try:
-        if pd.isna(value):
-            return ""
-    except (TypeError, ValueError):
-        pass
-    text = str(value).strip()
-    if text.lower() in {"nan", "none", "nat"}:
-        return ""
-    try:
-        decimal = Decimal(text)
-    except (InvalidOperation, ValueError):
-        return text
-    if not decimal.is_finite():
-        return text
-    normalized = format(decimal.normalize(), "f")
-    if "." in normalized:
-        normalized = normalized.rstrip("0").rstrip(".")
-    return normalized or "0"
-
-
-def _canonical_series(series: pd.Series) -> pd.Series:
-    values = series.astype(object)
-    try:
-        mapping = {value: canonical_revision_value(value) for value in pd.unique(values)}
-        out = values.map(mapping)
-    except TypeError:  # unhashable cells
-        out = values.map(canonical_revision_value)
-    return out.where(values.notna(), "").astype(str)
-
-
-def canonical_keys(frame: pd.DataFrame, key_columns: Sequence[str]) -> pd.DataFrame:
-    """The business-key columns of ``frame`` in canonical text, the form the
-    observation table stores; a missing key column reads as empty text."""
-    return pd.DataFrame(
-        {
-            column: _canonical_series(frame[column]) if column in frame.columns else pd.Series("", index=frame.index)
-            for column in key_columns
-        },
-        index=frame.index,
-    )
-
-
-def _joined(frame: pd.DataFrame, columns: Sequence[str], separator: str = _KEY_SEPARATOR) -> pd.Series:
-    if not columns:
-        return pd.Series("", index=frame.index, dtype=object)
-    first, *rest = columns
-    if not rest:
-        return frame[first].astype(str)
-    return frame[first].str.cat([frame[column] for column in rest], sep=separator)
-
-
-def key_strings(frame: pd.DataFrame, key_columns: Sequence[str]) -> pd.Series:
-    return _joined(canonical_keys(frame, key_columns), list(key_columns))
 
 
 @dataclass(frozen=True)
@@ -236,15 +176,15 @@ def diff_frames(old: pd.DataFrame, new: pd.DataFrame, key_columns: Sequence[str]
         frame = frame.reset_index(drop=True)
         return pd.DataFrame(
             {
-                column: _canonical_series(frame[column]) if column in frame.columns else pd.Series("", index=frame.index)
+                column: canonical_series(frame[column]) if column in frame.columns else pd.Series("", index=frame.index)
                 for column in columns
             },
             index=frame.index,
         )
 
     def signatures(frame: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
-        keyed = _joined(frame, keys)
-        values = _joined(frame, value_columns, _KEY_SEPARATOR)
+        keyed = join_columns(frame, keys)
+        values = join_columns(frame, value_columns, KEY_SEPARATOR)
         if keyed.is_unique:
             return pd.Series(values.to_numpy(), index=keyed.to_numpy(), dtype=object), keyed
         grouped = (
@@ -279,7 +219,7 @@ def deduplicate_keys(frame: pd.DataFrame, key_columns: Sequence[str]) -> tuple[p
     if frame.empty or not set(keys) <= set(frame.columns):
         return frame, 0
     frame = frame.reset_index(drop=True)
-    canonical = pd.DataFrame({column: _canonical_series(frame[column]) for column in frame.columns}, index=frame.index)
+    canonical = pd.DataFrame({column: canonical_series(frame[column]) for column in frame.columns}, index=frame.index)
     if not canonical.duplicated(keys).any():
         return frame, 0
     order = canonical.sort_values(list(canonical.columns), kind="stable")
@@ -293,10 +233,6 @@ def deduplicate_keys(frame: pd.DataFrame, key_columns: Sequence[str]) -> tuple[p
 
 def sidecar_path(path: Path) -> Path:
     return path.with_suffix(path.suffix + ".meta.json")
-
-
-def observation_path(path: Path) -> Path:
-    return path.with_name(path.name + FIRST_SEEN_SUFFIX)
 
 
 def dataset_dir(path: Path) -> Path:
@@ -455,45 +391,6 @@ def _read_table(path: Path) -> pd.DataFrame:
     return pq.read_table(path).to_pandas()
 
 
-def read_observations(path: Path) -> pd.DataFrame:
-    """The observation rows of the visible partition at ``path``: its canonical
-    business keys and ``first_seen_at``. Rows written by a commit that never
-    became visible are left out; a partition without a table has none."""
-    path = Path(path)
-    obs = observation_path(path)
-    if not obs.exists():
-        return pd.DataFrame(columns=[FIRST_SEEN_COLUMN])
-    frame = _read_table(obs)
-    if not path.exists():
-        # A first landing that crashed before its parquet rename.
-        return frame.iloc[:0]
-    return _visible_rows(frame, _required_visible_since(path, parquet_meta(path), rows=len(frame)))
-
-
-def _required_visible_since(path: Path, meta: dict[str, Any], *, rows: int) -> datetime | None:
-    """The visible partition's ``visible_since``. A table holding rows beside a
-    partition whose sidecar does not say when it became visible (missing,
-    unreadable or pre-versioning) cannot be filtered: refuse loudly rather than
-    read or rewrite it without its recorded first-seen times."""
-    since = _instant(meta.get("visible_since"))
-    if since is None and rows:
-        raise RuntimeError(
-            f"{observation_path(path)} holds {rows} first-seen rows but the sidecar of {path} records no "
-            "visible_since; repair the sidecar, or rebuild the table with "
-            "`scripts/data/tushare_lake.py rebuild-observations`"
-        )
-    return since
-
-
-def _visible_rows(frame: pd.DataFrame, since: datetime | None) -> pd.DataFrame:
-    if frame.empty:
-        return frame
-    if since is None:
-        return frame.iloc[:0]
-    stamps = pd.to_datetime(frame[FIRST_SEEN_COLUMN], utc=True, format="ISO8601")
-    return frame.loc[stamps <= pd.Timestamp(since)].reset_index(drop=True)
-
-
 def _write_table(path: Path, frame: pd.DataFrame) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{uuid.uuid4()}.tmp")
@@ -516,16 +413,16 @@ def _record_observations(
     obs = observation_path(path)
     if obs.exists():
         table = _read_table(obs)
-        visible_since = _required_visible_since(path, meta, rows=len(table)) if meta is not None else None
-        existing = _visible_rows(table, visible_since)
+        visible_since = required_visible_since(path, meta, rows=len(table)) if meta is not None else None
+        existing = observations_up_to(table, visible_since)
     else:
         existing = pd.DataFrame(columns=[*keys, FIRST_SEEN_COLUMN])
     stale = obs.exists() and len(existing) != pq.ParquetFile(obs).metadata.num_rows
-    known = pd.Index(_joined(existing.astype({column: str for column in keys}), keys)) if len(existing) else pd.Index([])
+    known = pd.Index(join_columns(existing.astype({column: str for column in keys}), keys)) if len(existing) else pd.Index([])
     fresh = pd.Index(new_keys).difference(known)
     if fresh.empty and not stale:
         return
-    rows = pd.DataFrame([key.split(_KEY_SEPARATOR) for key in fresh], columns=keys, dtype=str) if len(fresh) else pd.DataFrame(columns=keys, dtype=str)
+    rows = pd.DataFrame([key.split(KEY_SEPARATOR) for key in fresh], columns=keys, dtype=str) if len(fresh) else pd.DataFrame(columns=keys, dtype=str)
     rows[FIRST_SEEN_COLUMN] = instant
     frame = concat_rows([existing[[*keys, FIRST_SEEN_COLUMN]], rows]) if len(existing) else rows
     _write_table(obs, frame[[*keys, FIRST_SEEN_COLUMN]].astype(str))
@@ -558,7 +455,7 @@ def rebuild_observations(path: Path) -> dict[str, int]:
             for key in sorted(held - previous):
                 rows.setdefault(key, str(since))
         previous = held
-    frame = pd.DataFrame([key.split(_KEY_SEPARATOR) for key in rows], columns=keys, dtype=str)
+    frame = pd.DataFrame([key.split(KEY_SEPARATOR) for key in rows], columns=keys, dtype=str)
     frame[FIRST_SEEN_COLUMN] = list(rows.values())
     _write_table(observation_path(path), frame[[*keys, FIRST_SEEN_COLUMN]].astype(str))
     return {"states": len(states) + 1, "rows": len(frame)}

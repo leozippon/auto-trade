@@ -50,7 +50,10 @@ ExecutionMode = Literal["sandbox", "trusted"]
 # v13: top_list.name leaves the events union (SNAPSHOT_EXCLUDED_COLUMNS). It is
 # the name as of the vendor's pull, not the day's, so a v12 view that loads
 # top_list carries later names and ST marks into history.
-SNAPSHOT_CACHE_FORMAT_VERSION = 13
+# v14: a row whose key the raw lake first held after its vendor-date stamp
+# becomes visible only from that first-seen time, so a v13 view shows rows the
+# vendor added after the fact from their vendor date.
+SNAPSHOT_CACHE_FORMAT_VERSION = 14
 
 # Trailing wrap-up grace added to the research session budget. Not a console or
 # worker knob; ResearchSessionRequest carries the seconds to the Agent runner.

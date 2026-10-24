@@ -9,7 +9,11 @@ Builds the seven domain files plus universe and manifest for one decision time:
 Every row satisfies ``available_at <= decision_time``. Datasets whose raw rows
 carry an ``available_at`` column (events/macro/text/minute) are filtered on it;
 the daily core and the same-day macro tables (``MACRO_DATASET_CONTRACTS``) are
-stamped from the dataset contracts first. The normalized trading-file unit
+stamped from the dataset contracts first. A keyed row whose key the raw lake
+first held later than its ``available_at`` (an addition the vendor made after
+the fact) counts from that first-seen time instead, here and in the
+fundamental event store; replay slots keep the time as ``first_seen_at`` for
+the Timeview to gate on. The normalized trading-file unit
 contract covers daily, minute and auction data — every conversion is recorded
 in the manifest; events/macro/fundamentals/text keep TuShare per-source units
 and their domain meta carries ``units="source"`` (env docs §1.4). Replay slots
@@ -56,7 +60,15 @@ from autotrade.environment.data.fundamental_events import (
     FUNDAMENTAL_SIDECAR_COLUMNS,
     read_fundamental_events,
 )
-from autotrade.environment.data.pit import concat_rows, to_cn_timestamps, yyyymmdd
+from autotrade.environment.data.pit import (
+    FIRST_SEEN_COLUMN,
+    concat_rows,
+    first_seen_between,
+    first_seen_later,
+    stamp_text,
+    to_cn_timestamps,
+    yyyymmdd,
+)
 from autotrade.environment.data.research_release import (
     DOMAIN_REPORT_TYPES,
     DOMAIN_STATUS_FILES,
@@ -748,6 +760,8 @@ class SnapshotBuilder:
                 require_partitions=bool(config.fundamental_datasets),
                 nat_counts=nat_counts,
             )
+            # Resolved at the decision time: the first-seen gate is a replay column.
+            fundamentals = fundamentals.drop(columns=[FIRST_SEEN_COLUMN], errors="ignore")
             fundamentals = self._apply_screen(fundamentals, screened)
             fundamentals, dataset_columns = _apply_fundamental_exclusions(
                 fundamentals,
@@ -1098,7 +1112,9 @@ class SnapshotBuilder:
 
         def build_macro(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
             started = time.perf_counter()
-            macro, meta = self._build_available_at_domain(config.macro_datasets, period_end, window_floor)
+            macro, meta = self._build_available_at_domain(
+                config.macro_datasets, period_end, window_floor, keep_first_seen=True
+            )
             profile = _write_with_profile(
                 output_dir / "macro.parquet", macro, build_seconds=time.perf_counter() - started
             )
@@ -1132,6 +1148,9 @@ class SnapshotBuilder:
                 _fundamental_dataset_columns(self.raw_dir, tuple(config.fundamental_datasets)),
             )
             dataset_columns = _declare_present_inventory_columns(fundamentals, dataset_columns)
+            if FIRST_SEEN_COLUMN in fundamentals.columns:
+                # The Timeview's gate column: a first-seen time any dataset's rows may carry.
+                dataset_columns = {dataset: [*columns, FIRST_SEEN_COLUMN] for dataset, columns in dataset_columns.items()}
             profile = _write_with_profile(
                 output_dir / "fundamentals.parquet", fundamentals, build_seconds=time.perf_counter() - started
             )
@@ -1147,7 +1166,7 @@ class SnapshotBuilder:
         def build_events(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
             started = time.perf_counter()
             events, meta = self._build_available_at_domain(
-                config.events_datasets, period_end, window_floor, screen=screened
+                config.events_datasets, period_end, window_floor, screen=screened, keep_first_seen=True
             )
             meta = {**meta, "rows": len(events)}
             profile = _write_with_profile(
@@ -1157,7 +1176,7 @@ class SnapshotBuilder:
 
         def build_text(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
             started = time.perf_counter()
-            text_index, meta = self._build_text(config, period_end, window_floor, output_dir)
+            text_index, meta = self._build_text(config, period_end, window_floor, output_dir, keep_first_seen=True)
             profile = _write_with_profile(
                 output_dir / "text_index.parquet", text_index, build_seconds=time.perf_counter() - started
             )
@@ -1425,11 +1444,14 @@ class SnapshotBuilder:
                 "as a bonus issue. Rebuild the PIT dividend events through an earlier start "
                 "first (tushare_cron_update.py --job cn_nightly_pit_event_build --start-date <before the slot month>)."
             )
+        # The broker's truth follows the vendor rule: a dividend paid inside the
+        # slot is credited even when the lake first held its notice later.
         raw = read_fundamental_events(
             self.fundamental_events_root,
             period_end.isoformat(),
             datasets=("dividend",),
             require_partitions=False,
+            observed=False,
         )
         empty = pd.DataFrame(columns=list(self._CORPORATE_ACTION_COLUMNS))
         dropped = {"missing_ex_date": 0, "announced_after_ex_date": 0}
@@ -1781,6 +1803,7 @@ class SnapshotBuilder:
         lifetime_registries: bool = False,
         forward_events: bool = False,
         screen: frozenset[str] | None = None,
+        keep_first_seen: bool = False,
     ) -> tuple[pd.DataFrame, dict[str, object]]:
         def load_one(dataset: str) -> dict[str, object]:
             dataset_started = time.perf_counter()
@@ -1807,6 +1830,7 @@ class SnapshotBuilder:
                 local_nat,
                 forward_event_column=forward_column,
                 contract=contract,
+                keep_first_seen=keep_first_seen,
             )
             excluded = SNAPSHOT_EXCLUDED_COLUMNS.get(dataset, ())
             if excluded:
@@ -1930,7 +1954,18 @@ class SnapshotBuilder:
         nat_counts: dict[str, int] | None = None,
         forward_event_column: str | None = None,
         contract: DatasetContract | None = None,
+        keep_first_seen: bool = False,
     ) -> tuple[pd.DataFrame, dict[str, object]]:
+        """The rows of one dataset visible inside ``[window_start, decision_time]``.
+
+        A row is visible from its ``available_at`` or, where the lake first
+        held its key later than that, from that first-seen instant (a key the
+        vendor added after the fact); the instant also decides which window
+        the row falls in, so a partition whose name lies before the window is
+        read when it holds a key first seen inside it. ``keep_first_seen``
+        keeps that instant as the ``first_seen_at`` column a replay slot's
+        Timeview gates on; a decision view is resolved at its own time and
+        never carries it."""
         started = time.perf_counter()
         start_day = window_start.strftime("%Y%m%d")
         end_day = decision_time.strftime("%Y%m%d")
@@ -1938,6 +1973,7 @@ class SnapshotBuilder:
             path
             for path in sorted(dataset_dir.rglob("*.parquet"))
             if _partition_overlaps(path.stem, start_day, end_day)
+            or first_seen_between(path, window_start, decision_time)
         ]
         discover_seconds = time.perf_counter() - started
 
@@ -1955,7 +1991,9 @@ class SnapshotBuilder:
             # the conservative direction (hidden, never leaked), but counted so
             # an ingestion defect surfaces in the manifest instead of silently.
             nat = int(available.isna().sum())
-            in_window = available >= window_start
+            first_seen = first_seen_later(path, frame, available)
+            visible = available if first_seen is None else available.mask(first_seen.notna(), first_seen)
+            in_window = visible >= window_start
             if forward_event_column is not None:
                 if forward_event_column not in frame.columns:
                     raise ValueError(f"{path} has no {forward_event_column} column; cannot window forward events")
@@ -1963,7 +2001,10 @@ class SnapshotBuilder:
                 # the window if EITHER it was announced inside it or its event
                 # date has not fallen out of it. The PIT wall is unchanged.
                 in_window |= frame[forward_event_column].fillna("").astype(str) >= start_day
-            keep = frame[(available <= decision_time) & in_window]
+            rows = (visible <= decision_time) & in_window
+            keep = frame[rows]
+            if keep_first_seen and first_seen is not None and first_seen[rows].notna().any():
+                keep = keep.assign(**{FIRST_SEEN_COLUMN: stamp_text(first_seen[rows])})
             return (keep if not keep.empty else None), nat, source_rows
 
         # Partition files number in the thousands for daily-partitioned event
@@ -1998,7 +2039,13 @@ class SnapshotBuilder:
         }
 
     def _build_text(
-        self, config: SnapshotConfig, decision_time: datetime, window_start: pd.Timestamp, output_dir: Path
+        self,
+        config: SnapshotConfig,
+        decision_time: datetime,
+        window_start: pd.Timestamp,
+        output_dir: Path,
+        *,
+        keep_first_seen: bool = False,
     ) -> tuple[pd.DataFrame, dict[str, object]]:
         """Text index plus per-dataset body shards under text_library/.
 
@@ -2027,12 +2074,16 @@ class SnapshotBuilder:
                     source_dirs = sorted(p for p in dataset_dir.glob("src=*") if p.is_dir())
                 source_frames = []
                 for source_dir in source_dirs:
-                    source_rows, _ = self._read_dataset_window(source_dir, decision_time, news_start)
+                    source_rows, _ = self._read_dataset_window(
+                        source_dir, decision_time, news_start, keep_first_seen=keep_first_seen
+                    )
                     if not source_rows.empty:
                         source_frames.append(source_rows.assign(src=source_dir.name.split("=", 1)[1]))
                 rows = pd.concat(source_frames, ignore_index=True) if source_frames else pd.DataFrame()
             else:
-                rows, _ = self._read_dataset_window(dataset_dir, decision_time, window_start)
+                rows, _ = self._read_dataset_window(
+                    dataset_dir, decision_time, window_start, keep_first_seen=keep_first_seen
+                )
             if rows.empty:
                 continue
             if dataset in {"irm_qa_sh", "irm_qa_sz"}:
@@ -2083,18 +2134,19 @@ class SnapshotBuilder:
             ]
             library_file = f"{dataset}.parquet"
             _write(library_dir / library_file, pd.DataFrame({"text_id": text_ids, "body": bodies.values}))
-            index_frames.append(
-                pd.DataFrame(
-                    {
-                        "text_id": text_ids,
-                        "dataset": dataset,
-                        "ts_codes": rows.get("ts_code", pd.Series("", index=rows.index)).fillna("").astype(str).values,
-                        "title": titles.str.slice(0, 200).values,
-                        "available_at": available.values,
-                        "library_file": library_file,
-                    }
-                )
+            dataset_index = pd.DataFrame(
+                {
+                    "text_id": text_ids,
+                    "dataset": dataset,
+                    "ts_codes": rows.get("ts_code", pd.Series("", index=rows.index)).fillna("").astype(str).values,
+                    "title": titles.str.slice(0, 200).values,
+                    "available_at": available.values,
+                    "library_file": library_file,
+                }
             )
+            if FIRST_SEEN_COLUMN in rows.columns:
+                dataset_index[FIRST_SEEN_COLUMN] = rows[FIRST_SEEN_COLUMN].values
+            index_frames.append(dataset_index)
         index = pd.concat(index_frames, ignore_index=True) if index_frames else pd.DataFrame(
             columns=["text_id", "dataset", "ts_codes", "title", "available_at", "library_file"]
         )
