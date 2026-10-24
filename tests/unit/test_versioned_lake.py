@@ -347,22 +347,29 @@ class RunnerFoldTest(unittest.TestCase):
     def outcome(dataset: str, partition: str, kind: str, detail: str = "") -> dict:
         return {"dataset": dataset, "partition": partition, "outcome": kind, "detail": detail, "version": "", "at": "t"}
 
-    def test_partition_issues_open_and_close_and_refresh_needs_no_defect(self) -> None:
+    def test_partition_issues_open_and_close_and_refresh_needs_a_whole_clean_pull(self) -> None:
         datasets: dict = {}
         issues: list = []
         cron_update.fold_outcomes(datasets, issues, [
             self.outcome("anns_d", "month=202609", "appended"),
             self.outcome("anns_d", "month=202610", "defect", "empty answer"),
+            self.outcome("anns_d", "", "complete"),
             self.outcome("repurchase", "month=202610", "staged"),
-        ], refreshed=True, at="2026-10-24T15:30:00+00:00")
+            self.outcome("repurchase", "", "complete"),
+            # A tier that failed half way: partitions written, no completion.
+            self.outcome("moneyflow", "trade_date=20261023", "appended"),
+            # A complete pull that wrote nothing new.
+            self.outcome("daily", "", "complete"),
+        ], at="2026-10-24T15:30:00+00:00")
         self.assertEqual(
             [(issue["kind"], issue["dataset"], issue["partition"]) for issue in issues],
             [("defect", "anns_d", "month=202610"), ("staged", "repurchase", "month=202610")],
         )
-        self.assertNotIn("anns_d", datasets)
+        self.assertEqual(datasets, {"daily": {"refreshed_at": "2026-10-24T15:30:00+00:00"}})
         cron_update.fold_outcomes(datasets, issues, [
             self.outcome("anns_d", "month=202610", "unchanged"),
-        ], refreshed=True, at="2026-10-25T15:30:00+00:00")
+            self.outcome("anns_d", "", "complete"),
+        ], at="2026-10-25T15:30:00+00:00")
         self.assertEqual([issue["kind"] for issue in issues], ["staged"])
         self.assertEqual(datasets["anns_d"]["refreshed_at"], "2026-10-25T15:30:00+00:00")
 
@@ -383,8 +390,8 @@ class RunnerFoldTest(unittest.TestCase):
             redirect_stdout(io.StringIO()),
         ):
             record = cron_update.finish_job(
-                self.ctx, self.raw, {"generation_id": "old"}, {"job": "disclosure"}, report,
-                commit=True, refreshed=True, log_path=self.root / "job.log", lock_fd=7,
+                self.ctx, self.raw, {"state": "committed", "generation_id": "old"}, {"job": "disclosure"}, report,
+                commit=True, log_path=self.root / "job.log", lock_fd=7,
             )
         return record, commands
 

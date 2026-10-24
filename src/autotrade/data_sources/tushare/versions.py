@@ -92,9 +92,11 @@ VENDOR_BACKFILLED_KEY_FIELDS: dict[str, tuple[str, ...]] = {
 }
 # The runner names a per-run JSONL file here; every partition outcome of its
 # child processes is appended to it (one line each), and the runner folds them
-# into the generation record when the job ends.
+# into the generation record when the job ends. ``complete`` is the one
+# dataset-level outcome: the dataset's whole pull of this run returned without
+# an error (a defect in one of its partitions is reported separately).
 RUN_REPORT_ENV = "TUSHARE_RUN_REPORT"
-OUTCOMES = ("unchanged", "appended", "replaced", "restated", "staged", "defect")
+OUTCOMES = ("unchanged", "appended", "replaced", "restated", "staged", "defect", "complete")
 
 REVISION_EVENT_SCHEMA_VERSION = 3
 EVENT_KINDS = ("restatement", "staged", "defect", "deduplicated", "promotion", "revert", "probe")
@@ -399,20 +401,24 @@ def append_event(ledger: Path | str | None, event: dict[str, Any]) -> None:
 
 def report_outcome(path: Path, outcome: str, *, detail: str = "", version: str = "") -> None:
     """Append one partition outcome to the runner's run report, if any."""
-    if outcome not in OUTCOMES:
+    if outcome not in OUTCOMES or outcome == "complete":
         raise ValueError(f"unknown partition outcome: {outcome}")
+    _report(dataset_dir(path).name, partition_id(path), outcome, detail=detail, version=version)
+
+
+def report_complete(dataset: str) -> None:
+    """Record in the run report that ``dataset``'s whole pull returned without
+    an error. Only such a dataset, and only without a defective or staged
+    partition in the same run, counts as refreshed."""
+    _report(dataset, "", "complete")
+
+
+def _report(dataset: str, partition: str, outcome: str, *, detail: str = "", version: str = "") -> None:
     report = os.environ.get(RUN_REPORT_ENV, "")
     if not report:
         return
     line = json.dumps(
-        {
-            "dataset": dataset_dir(path).name,
-            "partition": partition_id(path),
-            "outcome": outcome,
-            "detail": detail,
-            "version": version,
-            "at": utc_now(),
-        },
+        {"dataset": dataset, "partition": partition, "outcome": outcome, "detail": detail, "version": version, "at": utc_now()},
         ensure_ascii=False,
         sort_keys=True,
     ) + "\n"
@@ -832,6 +838,7 @@ __all__ = [
     "read_observations",
     "rebuild_observations",
     "record_defect",
+    "report_complete",
     "restore",
     "revision_event",
     "version_dir",

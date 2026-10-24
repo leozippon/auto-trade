@@ -42,6 +42,7 @@ from _bootstrap import add_repo_src
 add_repo_src(__file__)
 
 from autotrade.data_sources.tushare.audit import audit_summary_line
+from autotrade.data_sources.tushare.cron_update import DEFAULT_CONFIG, load_config
 from autotrade.environment.executor import StrategyExecutor
 from autotrade.environment.replay.engine import StrategyDataView
 from autotrade.environment.sandbox import SandboxConfig
@@ -264,6 +265,8 @@ def _run_book_locked(book_id: str, book: Book, trade_date: str, orders_dir: Path
         print(f"[{book_id}] killed; nothing decided, exit sheet written to {write_orders(sheets, trade_date, text)}", file=sys.stderr)
         return
 
+    schedule = load_config(REPO_ROOT / DEFAULT_CONFIG)
+
     def data_factory(start: str, target: str) -> BookPITData:
         return BookPITData(
             state_root=book.root,
@@ -273,6 +276,8 @@ def _run_book_locked(book_id: str, book: Book, trade_date: str, orders_dir: Path
             snapshot_config=book.snapshot_config,
             start=start,
             trade_date=target,
+            due_at=book.schedule.at(target),
+            schedule=schedule,
             max_intraday_row_group_rows=book.max_intraday_row_group_rows,
         )
 
@@ -296,7 +301,7 @@ def _run_book_locked(book_id: str, book: Book, trade_date: str, orders_dir: Path
         profile=book.profile,
         sandbox=book.sandbox,
         executor_factory=_executor_on_free_gpus,
-        decision_check=lambda at, data: require_landed_titles(book.snapshot_config, at, REPO_ROOT, data.generation),
+        decision_check=lambda at: require_landed_titles(book.snapshot_config, at, REPO_ROOT),
         after_settlement=verdict_gate,
     )
     engine.run_day(trade_date, lock_held=True)

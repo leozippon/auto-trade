@@ -811,36 +811,41 @@ def _issue_key(issue: dict) -> tuple[str, str, str]:
     return str(issue.get("kind")), str(issue.get("dataset")), str(issue.get("partition") or "")
 
 
-def fold_outcomes(datasets: dict, issues: list, outcomes: list[dict], *, refreshed: bool, at: str) -> tuple[set[str], set[str]]:
-    """Apply one batch of partition outcomes to the record's datasets and
-    issues; returns (datasets pulled, datasets restated).
+def fold_outcomes(datasets: dict, issues: list, outcomes: list[dict], *, at: str) -> tuple[set[str], set[str]]:
+    """Apply one batch of outcomes to the record's datasets and issues;
+    returns (datasets pulled, datasets restated).
 
     A defect or a staged version opens an issue for its partition; any other
-    outcome for the partition closes them. A dataset counts as refreshed at
-    ``at`` when the batch succeeded (``refreshed``) and none of its partitions
-    was defective."""
+    outcome for the partition closes them. A dataset is refreshed at ``at``
+    only when its whole pull completed (a ``complete`` outcome, reported when
+    the tier that pulls it returned without an error) and none of its
+    partitions was defective or staged in the same batch: a job that failed
+    after landing the daily core refreshes the core and leaves the steps it
+    never finished at their earlier time."""
     open_issues = {_issue_key(issue): dict(issue) for issue in issues}
     pulled: set[str] = set()
-    defective: set[str] = set()
+    complete: set[str] = set()
+    withheld: set[str] = set()
     restated: set[str] = set()
     for outcome in outcomes:
         dataset, partition, kind = str(outcome["dataset"]), str(outcome["partition"]), str(outcome["outcome"])
         pulled.add(dataset)
+        if kind == "complete":
+            complete.add(dataset)
+            continue
         if kind in {"defect", "staged"}:
             key = (kind, dataset, partition)
             issue = open_issues.get(key) or {"kind": kind, "dataset": dataset, "partition": partition, "since": outcome["at"]}
             issue.update({"detail": outcome.get("detail", ""), "version": outcome.get("version", "")})
             open_issues[key] = issue
-            if kind == "defect":
-                defective.add(dataset)
+            withheld.add(dataset)
             continue
         open_issues.pop(("defect", dataset, partition), None)
         open_issues.pop(("staged", dataset, partition), None)
         if kind == "restated":
             restated.add(dataset)
-    if refreshed:
-        for dataset in pulled - defective:
-            datasets.setdefault(dataset, {})["refreshed_at"] = at
+    for dataset in complete - withheld:
+        datasets.setdefault(dataset, {})["refreshed_at"] = at
     issues[:] = sorted(open_issues.values(), key=_issue_key)
     return pulled, restated
 
@@ -1014,7 +1019,7 @@ def run_history_repull(
         lock_fd=lock_fd,
         report=report,
     )
-    _, restated = fold_outcomes(datasets, issues, read_run_report(report), refreshed=code == 0, at=utc_now())
+    _, restated = fold_outcomes(datasets, issues, read_run_report(report), at=utc_now())
     defective = any(issue["kind"] == "defect" and issue["dataset"] == dataset for issue in issues)
     if code == 0 and not defective:
         issues[:] = [issue for issue in issues if _issue_key(issue) != ("history_repull", dataset, "")]
@@ -1030,7 +1035,6 @@ def finish_job(
     report: Path | None,
     *,
     commit: bool,
-    refreshed: bool,
     log_path: Path,
     lock_fd: int,
     repull: bool = True,
@@ -1045,7 +1049,7 @@ def finish_job(
     nothing: it is the convergence."""
     datasets = {name: dict(entry) for name, entry in (previous.get("datasets") or {}).items()}
     issues = [dict(issue) for issue in previous.get("issues") or []]
-    pulled, restated = fold_outcomes(datasets, issues, read_run_report(report), refreshed=refreshed, at=utc_now())
+    pulled, restated = fold_outcomes(datasets, issues, read_run_report(report), at=utc_now())
     policy = history_repull_policy(ctx.config)
     open_keys = {_issue_key(issue) for issue in issues}
     for dataset in sorted(restated):
@@ -1162,7 +1166,7 @@ def _run(args: argparse.Namespace) -> int:
             returncode = run_update(ctx, commands, log_path, lock_fd=lock.fd, report=report)
         except Exception:
             if mutates_lake:
-                finish_job(ctx, raw_dir, previous, transaction, report, commit=True, refreshed=False, log_path=log_path, lock_fd=lock.fd, repull=False)
+                finish_job(ctx, raw_dir, previous, transaction, report, commit=True, log_path=log_path, lock_fd=lock.fd, repull=False)
             raise
         # Exit 75 asserts "no lake mutation happened"; only operations whose
         # download paths enforce that contract may restore the prior generation
@@ -1198,7 +1202,6 @@ def _run(args: argparse.Namespace) -> int:
             finish_job(
                 ctx, raw_dir, previous, transaction, report,
                 commit=not (no_mutation_retry or no_mutation_failure),
-                refreshed=returncode == 0 or mutated_not_ready,
                 log_path=log_path, lock_fd=lock.fd,
             )
         status = "ok" if returncode == 0 else (

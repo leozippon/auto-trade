@@ -32,12 +32,14 @@ from .common import (
     FUNDAMENTAL_SPECS,
     INDEX_WEIGHT_FIELDS,
     INDEX_WEIGHT_PAGE_LIMIT,
+    INTRADAY_DATASETS,
     MACRO_SPECS,
     MUTATED_NOT_READY_RETRY_EXIT_CODE,
     NO_MUTATION_FAILURE_EXIT_CODE,
     NO_MUTATION_RETRY_EXIT_CODE,
     OFFICIAL_TOKEN_ENV,
     PHYSICAL_IDENTITY_COLUMNS,
+    REFERENCE_DATASETS,
     REFERENCE_PAGE_LIMIT,
     RESEARCH_HISTORY_FLOOR,
     REVISION_EVENTS_PATH,
@@ -103,6 +105,7 @@ from .common import (
     query_paged,
     read_many,
     record_defect,
+    report_complete,
     resolve_revision_ledger,
     retained_range_start,
     safe_partition_value,
@@ -2556,6 +2559,9 @@ def download_share_float_complete(args: argparse.Namespace) -> int:
 
     if args.write_union:
         write_share_float_union(raw_dir, args, report)
+        report_complete(Path(args.union_output).parent.name)
+    if not args.skip_ann_date:
+        report_complete("share_float")
 
     if args.output:
         output = (repo_root / args.output).resolve()
@@ -3215,6 +3221,7 @@ def update_intraday_by_date(args: argparse.Namespace) -> int:
         total_rows += len(normalized)
         print(f"{args.output_dataset} trade_date={trade_date} written rows={len(normalized)} missing_codes={len(pending)}")
     print(f"{args.output_dataset} update finished dates={len(trade_dates)} written={written} skipped={skipped} rows_written={total_rows}")
+    report_complete(args.output_dataset)
     return 0
 
 def official_text_client(datasets: list[str], repo_root: Path, args: argparse.Namespace) -> TuShareClient:
@@ -3462,24 +3469,28 @@ def set_download_defaults(args: argparse.Namespace) -> None:
             args.page_limit = 10000
 
 def download_selected_tier(args: argparse.Namespace) -> int:
+    """Run one tier; when it returns 0, each dataset it pulled is reported to
+    the runner as complete (``versions.report_complete``)."""
     set_download_defaults(args)
-    if args.tier == "reference":
-        return download_reference(args)
-    if args.tier == "daily":
-        return download_daily(args)
-    if args.tier == "fundamental":
-        return download_fundamental(args)
-    if args.tier == "intraday":
-        return download_intraday(args)
-    if args.tier == "event_flow":
-        return download_event_flow(args)
-    if args.tier == "board_trading":
-        return download_board_trading(args)
-    if args.tier == "text_evidence":
-        return download_text(args)
-    if args.tier in {"macro", "global"}:
-        return download_macro(args)
-    raise RuntimeError(f"unknown download tier {args.tier}")
+    tiers = {
+        "reference": (download_reference, lambda: [d for d in REFERENCE_DATASETS if not (d == "bak_basic" and args.skip_bak_basic)]),
+        "daily": (download_daily, lambda: selected_daily_datasets(args)),
+        "fundamental": (download_fundamental, lambda: selected_fundamental_datasets(args.datasets)),
+        "intraday": (download_intraday, lambda: list(INTRADAY_DATASETS)),
+        "event_flow": (download_event_flow, lambda: selected_event_flow_download_datasets(args)),
+        "board_trading": (download_board_trading, lambda: selected_board_trading_datasets(args)),
+        "text_evidence": (download_text, lambda: selected_text_datasets(args.datasets, news_src=args.news_src, default=TEXT_FETCHABLE_DATASETS)),
+        "macro": (download_macro, lambda: selected_macro_datasets(args)),
+        "global": (download_macro, lambda: selected_macro_datasets(args)),
+    }
+    if args.tier not in tiers:
+        raise RuntimeError(f"unknown download tier {args.tier}")
+    run, pulled = tiers[args.tier]
+    code = run(args)
+    if code == 0:
+        for dataset in pulled():
+            report_complete(dataset)
+    return code
 
 def ns_from(args: argparse.Namespace, **overrides: Any) -> argparse.Namespace:
     values = vars(args).copy()

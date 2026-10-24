@@ -53,6 +53,7 @@ from .versions import (  # noqa: F401 -- re-exported via this hub
     diff_frames,
     publish,
     record_defect,
+    report_complete,
     revision_event,
 )
 

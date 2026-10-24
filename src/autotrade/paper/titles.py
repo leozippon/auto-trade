@@ -7,13 +7,10 @@ for an 08:30 decision, the 23:15 run of the evening before. The view assumes
 that run landed, as the research replays the strategy was validated on did.
 The job is separate from the rest of the lake (it has its own token), so it
 can fail while the lake still commits, and the view would then lack the newest
-titles without anything saying so; and a run can succeed while the vendor's
-answer for a month was defective, which keeps that month's earlier version. A
-decision is therefore refused unless both records agree that the titles
-landed: the job's latest success, as the scheduler records it, covers the end
-date the scheduler gives that run and finished after that run's launch, and
-the generation the run pinned records ``anns_d`` as refreshed after that
-launch. The sessions before it still settle: settling reads no titles.
+titles without anything saying so. A decision is therefore refused unless the
+job's latest success, as the scheduler records it, covers the end date the
+scheduler gives that run and finished after that run's launch. The sessions
+before it still settle: settling reads no titles.
 """
 
 from __future__ import annotations
@@ -44,15 +41,13 @@ from .engine import PaperTitlesNotLanded
 TITLES = "anns_d"
 
 
-def require_landed_titles(
-    config: SnapshotConfig, inference_at: datetime, repo_root: Path, generation: dict[str, object]
-) -> None:
+def require_landed_titles(config: SnapshotConfig, inference_at: datetime, repo_root: Path) -> None:
     """Raise ``PaperTitlesNotLanded`` unless every title the decision at
     ``inference_at`` assumes has landed; a book without titles passes.
 
     ``repo_root`` is the repository whose scheduler lands the titles: its
     schedule gives the end date of the due run, its job state the latest
-    success. ``generation`` is the record of the release the run pinned.
+    success.
     """
 
     if not (config.replay_include_text and TITLES in config.text_datasets):
@@ -77,31 +72,14 @@ def require_landed_titles(
     end, at = (state.get("end_date"), state.get("updated_at")) if ok else (
         state.get("last_ok_end_date"), state.get("last_ok_at")
     )
-    ran = bool(end and at and str(end) >= needed and datetime.fromisoformat(str(at)) >= node)
-    # The lake's side: the run refreshed the titles without a defective month.
-    refreshed = ((generation.get("datasets") or {}).get(TITLES) or {}).get("refreshed_at")
-    if ran and refreshed and datetime.fromisoformat(str(refreshed)) >= node:
+    if end and at and str(end) >= needed and datetime.fromisoformat(str(at)) >= node:
         return
     # The due run itself, forced past the scheduler's skip of a window it
     # already ran; a later run's window then differs, so it is not skipped.
     rerun = f"`python scripts/data/tushare_cron_update.py --job {job} --end-date {needed} --force-run`"
     then = "成功后再重跑 Paper（下面的命令）。"
     last = f"{_local(str(at))} 结束、覆盖到 {end} 的那一次" if end and at else "状态里没有记录"
-    if ran:
-        # The job succeeded, but the pinned generation does not record the
-        # titles as refreshed by that run.
-        issues = [
-            f"{issue.get('kind')} {issue.get('partition')}: {issue.get('detail') or issue.get('version')}"
-            for issue in generation.get("issues") or []
-            if isinstance(issue, dict) and issue.get("dataset") == TITLES
-        ]
-        recorded = f"最近刷新于 {_local(str(refreshed))}" if refreshed else "没有刷新时间（尚未迁移的数据湖：先运行 `python scripts/data/tushare_lake.py migrate --apply`）"
-        facts = (
-            f"它最近一次成功是{last}，但这次运行钉住的发布里 {TITLES} {recorded}"
-            + (f"，未结的问题：{'；'.join(issues)}" if issues else "")
-        )
-        action = f"处理：查看 {TITLES} 的问题（数据湖健康状态与修订台账），补跑这一轮 {rerun}，{then}"
-    elif not state or ok:
+    if not state or ok:
         facts = f"它最近一次成功是{last}，不包括这一轮" if state else "它没有任何运行记录"
         action = f"处理：确认标题任务已装进 crontab，补跑这一轮 {rerun}，{then}"
     else:

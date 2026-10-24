@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -11,7 +12,7 @@ from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.executor import TrustedStrategyExecutor
 from autotrade.environment.replay.engine import StrategyDataView
 from autotrade.environment.replay.market import DailyMarketData
-from autotrade.environment.strategy import StrategySchedule
+from autotrade.environment.strategy import CN_TZ, StrategySchedule
 from autotrade.paper import DailyPaperEngine, PaperEngineError
 from autotrade.paper.engine import PaperDataNotReady
 from autotrade.paper.orders import (
@@ -77,7 +78,6 @@ class _Data:
         self.sessions = tuple(sessions)
         self.release_end = release_end
         self.generation_id = f"gen_{release_end}"
-        self.generation: dict = {}
         self.vintages: dict = {}
         self.market = DailyMarketData(_bars([day for day in self.sessions if day <= release_end]))
         self.views: list[str] = []
@@ -462,6 +462,8 @@ def test_a_pre_open_book_reads_a_real_pit_window_without_the_session_bars(tmp_pa
         data_factory=lambda start, trade_date: built.append(BookPITData(
             state_root=state_root, raw_dir=raw, fundamental_events_root=events_root,
             fundamental_events_status=status, snapshot_config=config, start=start, trade_date=trade_date,
+            # A local lake records no refresh times, so no schedule is read.
+            due_at=datetime(2021, 10, 11, 8, 30, tzinfo=CN_TZ), schedule={},
         )) or built[-1],
         executor_factory=lambda *_mounts: MacroReader(),
     )
@@ -506,8 +508,62 @@ def test_late_data_is_refused_before_any_pit_view_is_built(tmp_path: Path):
                 include_intraday=False, include_industry=False,
             ),
             start="20211011", trade_date="20211011",
+            due_at=datetime(2021, 10, 11, 8, 30, tzinfo=CN_TZ), schedule={},
         )
     assert not (tmp_path / "paper" / "pit" / "live" / "pit_views" / "decision").exists()
+
+
+def test_a_release_holding_a_stale_dataset_is_refused_before_any_pit_view_is_built(tmp_path: Path):
+    """The pin of a stamped lake checks every mounted dataset's refresh
+    (paper.freshness): here the evening job landed the daily bars of
+    20211008 but its daily_basic pull did not complete."""
+
+    from autotrade.data_sources.tushare.cron_update import DEFAULT_CONFIG, load_config
+    from autotrade.paper.pit import BookPITData
+
+    from .test_snapshot_builder import (
+        build_fundamental_events,
+        build_raw,
+        write_fundamental_status,
+    )
+
+    raw = tmp_path / "data" / "raw"
+    build_raw(raw)
+    events_root = tmp_path / "data" / "pit" / "fundamental_events"
+    build_fundamental_events(events_root)
+    status = tmp_path / "results" / "data_quality" / "fundamental_events_status.json"
+    status.parent.mkdir(parents=True)
+    write_fundamental_status(status)
+    # A stamped lake: every partition has its sidecar, the updater lock
+    # exists and the generation record is committed.
+    for partition in raw.rglob("*.parquet"):
+        partition.with_suffix(".parquet.meta.json").write_text("{}\n", encoding="utf-8")
+    lock = tmp_path / ".runtime" / "tushare" / "locks" / "tushare_update.lock"
+    lock.parent.mkdir(parents=True)
+    lock.touch()
+    evening = "2021-10-08T15:50:00+00:00"
+    refreshed = {name: evening for name in ("daily", "adj_factor", "stk_limit", "suspend_d", "income_vip")}
+    refreshed["daily_basic"] = "2021-09-30T15:50:00+00:00"
+    (raw / ".raw_generation.json").write_text(json.dumps({
+        "schema_version": 3, "state": "committed", "generation_id": "g20211008",
+        "datasets": {name: {"refreshed_at": at, "vintage": "v"} for name, at in refreshed.items()}, "issues": [],
+    }), encoding="utf-8")
+    with pytest.raises(PaperDataNotReady, match=(
+        r"^generation g20211008 is not ready for the decision at 2021-10-11 08:30: daily_basic last refreshed "
+        r"2021-09-30 23:50, before the cn_evening_full run of 2021-10-08 23:35$"
+    )):
+        BookPITData(
+            state_root=tmp_path / "paper", raw_dir=raw, fundamental_events_root=events_root,
+            fundamental_events_status=status,
+            snapshot_config=SnapshotConfig(
+                events_datasets=(), macro_datasets=(), text_datasets=(), fundamental_datasets=("income_vip",),
+                include_intraday=False, include_industry=False,
+            ),
+            start="20211011", trade_date="20211011",
+            due_at=datetime(2021, 10, 11, 8, 30, tzinfo=CN_TZ),
+            schedule=load_config(Path(__file__).resolve().parents[2] / DEFAULT_CONFIG),
+        )
+    assert not (tmp_path / "paper" / "pit" / "g20211008" / "pit_views" / "decision").exists()
 
 
 def test_a_buy_of_a_name_currently_st_is_flagged():

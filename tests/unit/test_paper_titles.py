@@ -42,35 +42,20 @@ def _record(repo: Path, **state: object) -> None:
     path.write_text(json.dumps({"log_path": "logs/tushare/cron/anns.log", **state}), encoding="utf-8")
 
 
-def _generation(repo: Path) -> dict:
-    """The generation record of the release a run pins, as the lake left it."""
-
-    path = repo / "generation.json"
-    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-
-
-def _landed(repo: Path, finished: str, issues: list | None = None) -> None:
-    record = {"datasets": {"anns_d": {"refreshed_at": finished}}, "issues": issues or []}
-    (repo / "generation.json").write_text(json.dumps(record), encoding="utf-8")
-
-
 def _ok(repo: Path, end_date: str, finished: str) -> None:
-    """A successful title run: the scheduler's state and the lake's record."""
-
     _record(repo, status="ok", returncode=0, start_date="20200101", end_date=end_date, updated_at=finished)
-    _landed(repo, finished)
 
 
 def _refused(repo: Path, day: str) -> str:
     at = datetime.strptime(day, "%Y%m%d").replace(hour=8, minute=30, tzinfo=CN_TZ)
     with pytest.raises(PaperTitlesNotLanded) as caught:
-        require_landed_titles(TITLE_BOOK, at, repo, _generation(repo))
+        require_landed_titles(TITLE_BOOK, at, repo)
     return f"{caught.value}\n{caught.value.action}"
 
 
 def _decides(repo: Path, day: str, config: SnapshotConfig = TITLE_BOOK) -> None:
     at = datetime.strptime(day, "%Y%m%d").replace(hour=8, minute=30, tzinfo=CN_TZ)
-    require_landed_titles(config, at, repo, _generation(repo))
+    require_landed_titles(config, at, repo)
 
 
 def test_a_failed_title_run_refuses_the_decision_after_settling(tmp_path: Path, monkeypatch):
@@ -78,7 +63,7 @@ def test_a_failed_title_run_refuses_the_decision_after_settling(tmp_path: Path, 
     monkeypatch.setenv("TUSHARE_TOKEN_TMP", secret)
     repo = _repo(tmp_path)
     book = _Book(tmp_path, COUNTER_STRATEGY, sessions=("20260921", "20260922", "20260923", "20260924", "20260928"))
-    book.engine.decision_check = lambda at, _data: require_landed_titles(TITLE_BOOK, at, repo, _generation(repo))
+    book.engine.decision_check = lambda at: require_landed_titles(TITLE_BOOK, at, repo)
     _ok(repo, "20260923", "2026-09-22T15:16:00+00:00")  # 23:16 Beijing
     book.run("20260923")
 
@@ -177,24 +162,3 @@ def test_the_evening_run_fetches_the_titles_dated_for_the_next_decision(tmp_path
     assert "成功运行要覆盖到 20261008" in _refused(repo, "20261008")
     _ok(repo, ctx.end_date, "2026-10-07T15:20:00+00:00")
     _decides(repo, "20261008")
-
-
-def test_a_successful_run_with_a_defective_month_refuses_the_decision(tmp_path: Path):
-    """The job can succeed while the vendor's answer for a month was defective,
-    which keeps that month's earlier version: the pinned generation then does
-    not record the titles as refreshed by that run."""
-
-    repo = _repo(tmp_path)
-    _ok(repo, "20261024", "2026-10-22T15:16:00+00:00")
-    _record(repo, status="ok", returncode=0, start_date="20260924", end_date="20261024",
-            updated_at="2026-10-23T15:16:00+00:00")
-    defect = {"kind": "defect", "dataset": "anns_d", "partition": "month=202610", "detail": "empty answer"}
-    _landed(repo, "2026-10-22T15:16:00+00:00", [defect])
-    refusal = _refused(repo, "20261024")
-    assert "最近刷新于 2026-10-22 23:16" in refusal
-    assert "defect month=202610: empty answer" in refusal
-    _landed(repo, "2026-10-23T15:16:00+00:00")
-    _decides(repo, "20261024")
-    # A lake not yet migrated records no refresh time at all.
-    (repo / "generation.json").write_text(json.dumps({"schema_version": 2}), encoding="utf-8")
-    assert "tushare_lake.py migrate --apply" in _refused(repo, "20261024")

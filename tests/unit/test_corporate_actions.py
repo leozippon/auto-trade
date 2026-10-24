@@ -240,7 +240,6 @@ def test_paper_settles_the_ex_date_when_the_day_opens_and_journals_it(tmp_path: 
             self.sessions = ("20260102", *DAYS)
             self.release_end = release_end
             self.generation_id = release_end
-            self.generation: dict = {}
             self.vintages: dict = {}
 
         def context_data(self, inference_at):
