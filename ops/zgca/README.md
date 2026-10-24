@@ -4,7 +4,7 @@
 
 ```bash
 python ops/zgca/zgca.py up
-python ops/zgca/zgca.py deploy data/pit_views_seed_research_8y_fundanns_20261022
+python ops/zgca/zgca.py deploy data/pit_views_seed_research_8y_fundanns_20261024
 python ops/zgca/zgca.py push hcm_100k_8y_sol_qwen_20261014d hcm_100k_8y_sol_dsf_20261014d
 python ops/zgca/zgca.py run scripts/experiments/create_round_<轮次>.py --dry-run
 python ops/zgca/zgca.py status
@@ -84,7 +84,7 @@ python ops/zgca/zgca.py push hcm_100k_8y_sol_qwen_20261014d hcm_100k_8y_sol_dsf_
 V=<新实例 id>
 export ZGCA_REMOTE_ROOT=/personal_fast_storage/auto-trade-validate ZGCA_GITHUB_PROXY=https://ghfast.top/
 python ops/zgca/zgca.py --instance $V up
-python ops/zgca/zgca.py --instance $V deploy data/pit_views_seed_research_8y_fundanns_20261022
+python ops/zgca/zgca.py --instance $V deploy data/pit_views_seed_research_8y_fundanns_20261024
 python ops/zgca/zgca.py --instance $V push range20_csi300_8y_20260927
 python ops/zgca/zgca.py --instance $V status
 ~/zgca-compute/instance stop $V && ~/zgca-compute/instance start $V

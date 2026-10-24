@@ -71,16 +71,17 @@ FUND_EIGHT_YEAR_100K: dict[str, object] = {
 # The eight-year geometry with both the fundamentals domain (the default ten
 # datasets) and the vendor's announcement titles (round 20261014): the first
 # selection to mount statements and titles on one arm. Its seed is prebuilt
-# from the newest research release, whose fundamentals and titles both reach
-# back to 2016-01 and whose Broker corporate actions carry the bonus-share
-# column the dividend tax reads.
+# from a research release whose fundamentals and titles both reach back to
+# 2016-01 and whose Broker corporate actions carry the bonus-share column the
+# dividend tax reads.
 FUND_TITLE_EIGHT_YEAR: dict[str, object] = {**FUND_EIGHT_YEAR, "include_text": True, "text_datasets": ["anns_d"]}
 
 # Round 20261005's 100k bars on that geometry.
 FUND_TITLE_EIGHT_YEAR_100K: dict[str, object] = {**FUND_EIGHT_YEAR_100K, **FUND_TITLE_EIGHT_YEAR}
 
-# Its seed at snapshot cache format 13 on release 23a37706... (2026-10-22).
-FUND_TITLE_PIT_VIEWS_SEED = "data/pit_views_seed_research_8y_fundanns_20261022"
+# Its seed at snapshot cache format 14 (observed-era visibility) on release
+# b50c220f... (logs/data/seed_8y_fundanns_20261024/).
+FUND_TITLE_PIT_VIEWS_SEED = "data/pit_views_seed_research_8y_fundanns_20261024"
 
 # The five-year geometry (round 20261015): research on the five July-June years
 # from 2020-07, when the events domain begins, with a 72-month window (the
@@ -123,12 +124,9 @@ FIVE_YEAR: dict[str, object] = {
 # Round 20261005's 100k bars on the five-year geometry.
 FIVE_YEAR_100K: dict[str, object] = {**FUND_EIGHT_YEAR_100K, **FIVE_YEAR}
 
-# Its seed: the same selection at snapshot cache format 13 on release
-# 23a37706... (logs/data/seed_5y_full_20261022/), after the top-10, holder-count,
-# repurchase, stk_holdertrade, top_list and stk_limit re-pulls. Its format-11
-# predecessors on release b5dc339b... (logs/data/seed_5y_full_20261015/ and
-# 20261016/) are refused at the current format.
-FIVE_YEAR_FIXED_PIT_VIEWS_SEED = "data/pit_views_seed_research_5y_full_20261022"
+# Its seed: the same selection at snapshot cache format 14 (observed-era
+# visibility) on release eff3a1f9... (logs/data/seed_5y_full_20261024/).
+FIVE_YEAR_FIXED_PIT_VIEWS_SEED = "data/pit_views_seed_research_5y_full_20261024"
 
 # The hosted arm of a pair: main session, sub-agents and compaction on MiMo, the
 # compaction threshold pinned to the local arms' value so both compact alike.
