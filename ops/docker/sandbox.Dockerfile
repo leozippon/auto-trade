@@ -19,7 +19,6 @@ ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 ARG NPM_CONFIG_REGISTRY=https://registry.npmmirror.com
 ARG DEBIAN_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/debian
 ARG DEBIAN_SECURITY_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/debian-security
-ARG DUCKDB_CLI_URL=https://ghfast.top/https://github.com/duckdb/duckdb/releases/download/v1.1.3/duckdb_cli-linux-amd64.zip
 
 # The strategy container runs read-only with a /tmp tmpfs, so every cache the
 # interpreter and its libraries may touch is redirected there. PYTHONPATH makes
@@ -64,7 +63,14 @@ RUN sed -i \
 # picks are the current stable releases the ecosystem has settled on. The stack is what a formal strategy may import
 # (strategy_loader.ALLOWED_MODULES) plus the data tools the Agent's shell
 # uses; torch wheels carry their own CUDA runtime, so the image needs no system
-# CUDA toolkit and is not tied to one GPU architecture.
+# CUDA toolkit and is not tied to one GPU architecture. Every pip layer drops,
+# in the same step that installed them (a later step's deletion would not
+# shrink the layer), what no container runs: the packages' own test suites
+# (`tests` directories, about 200 MB across the stack; nothing imports them
+# outside their test runners) and here the AMD backend's device libraries and
+# headers that Triton ships beside its NVIDIA one. The AMD backend's Python
+# modules stay, because Triton imports every backend its entry points name;
+# it is never active on an NVIDIA host.
 RUN pip install --no-cache-dir -i ${PIP_INDEX_URL} \
         pandas==2.2.3 \
         numpy==2.1.3 \
@@ -77,49 +83,60 @@ RUN pip install --no-cache-dir -i ${PIP_INDEX_URL} \
         torchvision==0.28.0 \
         safetensors==0.8.0 \
         lightgbm==4.7.0 \
-        xgboost==3.2.0
+        xgboost==3.2.0 \
+    && rm -r /usr/local/lib/python3.11/site-packages/triton/backends/amd/lib \
+        /usr/local/lib/python3.11/site-packages/triton/backends/amd/include \
+    && find /usr/local/lib/python3.11/site-packages -type d -name tests -prune -not -path '*.dist-info*' -exec rm -rf {} +
 
 # vLLM, for in-process inference in a strategy (``from vllm import LLM``) and
 # for ``vllm serve`` on the session container's loopback, with the
-# transformers release the host's service runs it with. The installed set is
-# its constraint file: this layer can only add packages, and a requirement
-# that would move a pin of the layer above fails the build instead of
-# replacing it. Its CUDA 13 dependencies bring a pip-packaged CUDA toolkit
-# (nvcc included) under nvidia/cu13, which the next layer builds causal-conv1d
-# with. The FlashInfer release vLLM pins annotates one function with
+# transformers release the host's service runs it with, then the Transformer
+# and continual-learning stack: tensor rearrangement (einops), device and
+# mixed-precision handling (accelerate), parameter-efficient adapters (peft),
+# and the fused kernels of the Gated DeltaNet layers in the hybrid Qwen3.5 and
+# Qwen3.8 models of the pretrained store when transformers runs them
+# (flash-linear-attention's Triton kernels, causal-conv1d's CUDA conv): without
+# the last two transformers falls back to a torch implementation that ran out
+# of 44 GiB training on 256 short titles. vLLM carries kernels of its own and
+# needs neither. Each install's constraint file is the installed set, so this
+# step can only add packages, and a requirement that would move a pin of the
+# layer above fails the build instead of replacing it.
+#
+# The FlashInfer release vLLM pins annotates one function with
 # ``array.array[int]``, which only Python 3.12 evaluates; postponed annotations
 # make the module importable on 3.11 (the host's own vLLM service carries the
 # same one-line change), and vLLM imports it on every engine start.
-RUN pip freeze > /tmp/installed.txt \
-    && pip install --no-cache-dir -i ${PIP_INDEX_URL} -c /tmp/installed.txt \
-        vllm==0.27.1 \
-        transformers==5.15.0 \
-    && rm /tmp/installed.txt \
-    && sed -i '1i from __future__ import annotations' \
-        /usr/local/lib/python3.11/site-packages/flashinfer/comm/fd_exchange.py \
-    && python -c "import flashinfer.comm"
-
-# Transformer and continual-learning stack: tensor rearrangement (einops),
-# device and mixed-precision handling (accelerate), parameter-efficient
-# adapters (peft), and the fused kernels of the Gated DeltaNet layers in the
-# hybrid Qwen3.5 models of the pretrained store when transformers runs them
-# (flash-linear-attention's Triton kernels, causal-conv1d's CUDA conv):
-# without the last two transformers falls back to a torch implementation that
-# ran out of 44 GiB training on 256 short titles. vLLM carries kernels of its
-# own and needs neither. causal-conv1d publishes no wheel for torch 2.13, so
-# its PyPI source is compiled here against the torch above with the nvcc the
-# vLLM layer installed (no build isolation, so the build sees that torch);
-# the sources fix the architectures it compiles for, sm_80 code among them,
-# which the A100 runs natively and the L20 (sm_89) through binary
+#
+# causal-conv1d publishes no wheel for torch 2.13, so its PyPI source is
+# compiled against the torch above (no build isolation, so the build sees that
+# torch) with the pip-packaged CUDA compiler that vLLM's CUDA 13 dependencies
+# bring under nvidia/cu13 (they are there for the JIT kernel libraries humming
+# and TileLang, which vLLM selects for none of the store's models on an A100 or
+# an L20); the sources fix the architectures it compiles for, sm_80 code among
+# them, which the A100 runs natively and the L20 (sm_89) through binary
 # compatibility. That nvcc (13.4) is newer than the CUDA 13.0 runtime headers
 # torch pins, a pairing CCCL refuses unless told otherwise; the extension is
 # machine code for those fixed architectures, which CUDA's minor-version
 # compatibility runs on any CUDA 13 driver. The pip toolkit ships the runtime
-# library only under its versioned name, so the link gets an unversioned
-# alias in a scratch directory. A layer of its own, so a host that already
-# holds the layers above (several GB) rebuilds only this one, under the same
-# constraint rule.
+# library only under its versioned name, so the link gets an unversioned alias
+# in a scratch directory.
+#
+# One step, so that what only the build or other GPUs need leaves in the step
+# that installed it: the compiler (nvcc and its device front end cicc; Triton
+# compiles with the ptxas it ships, and C launcher stubs with the gcc above),
+# FlashAttention 3 (an sm_90-only build vLLM falls back from to FlashAttention
+# 2 on these cards), the CUDA 12 flavour of the CuTe DSL (it loads the newest
+# flavour the driver supports, and the image's torch needs a CUDA 13 driver),
+# the AMD device libraries of tokenspeed-triton, and the test suites. A path
+# that has moved fails the build rather than being skipped.
 RUN pip freeze > /tmp/installed.txt \
+    && pip install --no-cache-dir -i ${PIP_INDEX_URL} -c /tmp/installed.txt \
+        vllm==0.27.1 \
+        transformers==5.15.0 \
+    && sed -i '1i from __future__ import annotations' \
+        /usr/local/lib/python3.11/site-packages/flashinfer/comm/fd_exchange.py \
+    && python -c "import flashinfer.comm" \
+    && pip freeze > /tmp/installed.txt \
     && mkdir /tmp/cudart \
     && ln -s /usr/local/lib/python3.11/site-packages/nvidia/cu13/lib/libcudart.so.13 /tmp/cudart/libcudart.so \
     && CUDA_HOME=/usr/local/lib/python3.11/site-packages/nvidia/cu13 \
@@ -134,7 +151,15 @@ RUN pip freeze > /tmp/installed.txt \
         flash-linear-attention==0.5.2 \
         causal-conv1d==1.7.0 \
     && rm -r /tmp/installed.txt /tmp/cudart \
-    && python -c "import torch, causal_conv1d_cuda, fla, peft, vllm"
+    && pip uninstall -y nvidia-cuda-nvcc \
+    && rm /usr/local/lib/python3.11/site-packages/nvidia/cu13/nvvm/bin/cicc \
+        /usr/local/lib/python3.11/site-packages/vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so \
+    && rm -r /usr/local/lib/python3.11/site-packages/nvidia_cutlass_dsl/cu12 \
+        /usr/local/lib/python3.11/site-packages/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/_mlir_libs/_cutlass_ir.cu12.cpython-311-x86_64-linux-gnu.so \
+        /usr/local/lib/python3.11/site-packages/tokenspeed_triton/backends/amd/lib \
+        /usr/local/lib/python3.11/site-packages/tokenspeed_triton/backends/amd/include \
+    && find /usr/local/lib/python3.11/site-packages -type d -name tests -prune -not -path '*.dist-info*' -exec rm -rf {} + \
+    && python -c "import torch, causal_conv1d_cuda, fla, peft, vllm, triton, tokenspeed_triton, cutlass.cute"
 
 # Both containers run without a network and the only pretrained weights are
 # the store an arm's containers mount read-only (environment.pretrained), so
@@ -147,8 +172,8 @@ RUN pip freeze > /tmp/installed.txt \
 # and neither can FlashInfer's, which vLLM creates on every engine start. vLLM
 # keeps its own caches under XDG_CACHE_HOME and reports no usage statistics.
 # Its default top-k/top-p sampler is a FlashInfer kernel compiled with nvcc at
-# every engine start, a toolchain the containers do not put on PATH; vLLM's
-# own sampler needs none and is what an engine here uses.
+# every engine start, a toolchain the image does not carry; vLLM's own sampler
+# needs none and is what an engine here uses.
 ENV HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1 \
     TRITON_CACHE_DIR=/tmp/cache/triton \
@@ -161,6 +186,10 @@ ENV HF_HUB_OFFLINE=1 \
 # guidance uses `duckdb -c "..."`; without the CLI it fails with exit 127 and the
 # Agent wastes turns falling back. (curl is already installed; release zip extracted
 # with the bundled Python to avoid an extra apt dependency. Host is x86_64.)
+# Declared here rather than at the top: a build arg is part of the cache key of
+# every RUN after its declaration, so another download source (a mirror that
+# is down, the instance serving its shipped copy) rebuilds only from here.
+ARG DUCKDB_CLI_URL=https://ghfast.top/https://github.com/duckdb/duckdb/releases/download/v1.1.3/duckdb_cli-linux-amd64.zip
 RUN curl -fL --retry 8 --retry-all-errors --retry-delay 3 --connect-timeout 30 --max-time 600 \
         "${DUCKDB_CLI_URL}" \
         -o /tmp/duckdb_cli.zip \
