@@ -2187,8 +2187,11 @@ def _token_usage_summary(
 ) -> dict[str, object]:
     summary: dict[str, object] = dict(totals)
     prompt = int(totals.get("prompt_tokens", 0))
+    hits = int(totals.get("cache_hit_tokens", 0))
+    reported = hits + int(totals.get("cache_miss_tokens", 0))
+    # ``None`` when no call reported a cache count (vLLM): unknown, not zero.
     summary["cache_hit_ratio"] = (
-        round(int(totals.get("cache_hit_tokens", 0)) / prompt, 4) if prompt else 0.0
+        round(hits / prompt, 4) if prompt and reported else None
     )
     if subagent is not None:
         children = dict(subagent)

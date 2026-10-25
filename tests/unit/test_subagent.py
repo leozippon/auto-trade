@@ -2299,8 +2299,10 @@ def test_backtest_gate_keeps_its_batch_in_order_regardless_of_spec() -> None:
 
 
 def test_unfinished_session_end_still_reports_token_usage() -> None:
+    # vLLM's usage: prompt tokens but no cache count.
+    vllm = {"prompt_tokens": 1_000, "completion_tokens": 10}
     runner = AgentSessionRunner(
-        llm=ScriptedLLM([ProviderResponse(content="thinking aloud")]),
+        llm=ScriptedLLM([ProviderResponse(content="thinking aloud", usage=vllm)]),
         tools=ToolRegistry([_FinishStub("finish_session")]),
         system_prompt="research",
         config=_session_config(max_llm_calls=1),
@@ -2312,6 +2314,8 @@ def test_unfinished_session_end_still_reports_token_usage() -> None:
     ended = next(payload for event, payload in events if event == "session_end")
     assert ended["status"] == "call_budget_exhausted"
     assert ended["token_usage"]["llm_calls_with_usage"] == 1
+    # No call reported a cache count: the hit rate is unknown, never 0.0.
+    assert ended["token_usage"]["cache_hit_ratio"] is None
 
 
 def test_session_token_usage_totals_cache_reads_misses_writes_and_reasoning() -> None:
