@@ -204,7 +204,7 @@ def test_the_prompt_states_the_research_session_contract() -> None:
         "本臂只有这一个研究会话",
         "前推期与 Held-out 上被连续回放一次并裁决",
         "滚动重拟合",
-        "尾部窗口通常取 2–3 年、按季重训",
+        "用多长的历史、多快的节奏由策略自己决定",
         "不是替代它",
     ):
         assert clause in role, clause
@@ -223,10 +223,13 @@ def test_the_prompt_states_the_research_session_contract() -> None:
         "示例（只示形式）",
         # Screening saves replay years, not trials, and says so where it is advised.
         "筛选省的是回放年，不省试验",
-        # A pack is a direction and facts, not the arm's contract.
-        "它不是本臂的合同",
+        # The pack's direction binds what is researched, not how; beyond it a
+        # pack is facts, not the arm's contract.
+        "方向约束研究什么，不约束怎样做",
+        "下一轮测方向内一个还没测过的机制",
+        "包不是本臂的合同",
         "候选不限于包里列出的轴、对照或家族",
-        "包的文字只在 PIT 与数据边界、交易成本与资源上限上约束本臂",
+        "除方向之外，包的文字只在 PIT 与数据边界、交易成本与资源上限上约束本臂",
     ):
         assert clause in protocol, clause
     # The rules that bound a session to its pack's axes, family and stopping
@@ -239,6 +242,8 @@ def test_the_prompt_states_the_research_session_contract() -> None:
         "以包为准",
         "尽早让第一个真正的候选",
         "开放搜索（",
+        # The history length and refit pace are the strategy's own choice.
+        "按季重训",
     ):
         assert retired not in prompt, retired
     # The core scorer is the main Agent's own work; sub-agents do the routine.
