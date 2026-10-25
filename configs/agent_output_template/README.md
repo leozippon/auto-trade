@@ -158,35 +158,58 @@ Each trading day opens with the T+1 release and ex-date settlement, then fills t
 
 ## Pretrained models
 
-The only pretrained weights available are the three Hugging Face model directories of a read-only store, `context.pretrained_dir` for the strategy and `/mnt/pretrained` in the session's shell; its `MANIFEST.sha256` lists every file. In an arm whose `runtime_env.json` shows no `sandbox_spec.pretrained_manifest_sha256`, neither is mounted and `context.pretrained_dir` is empty.
+The only pretrained weights available are the six Hugging Face model directories of a read-only store, `context.pretrained_dir` for the strategy and `/mnt/pretrained` in the session's shell; its `MANIFEST.sha256` lists every file. In an arm whose `runtime_env.json` shows no `sandbox_spec.pretrained_manifest_sha256`, neither is mounted and `context.pretrained_dir` is empty.
 
 | Directory | Weights | Released | Architecture | Use |
 | --- | --- | --- | --- | --- |
 | `Qwen3.8-27B-FP8` | 27B parameters, block FP8, 28.8 GiB | 2026-08 | Qwen3.8: hybrid, 48 Gated DeltaNet (linear-attention) and 16 gated-attention layers | generation in process with `vllm` on one card (below) |
 | `Qwen3.5-2B` | 2B, bfloat16, 4.3 GiB | 2026-02 | Qwen3.5: hybrid, 18 Gated DeltaNet and 6 full-attention layers | hidden-state features, fine-tuning and adapters with `transformers` and `peft`; the 27B's architecture, so it also runs under `vllm` |
 | `Qwen3-Embedding-0.6B` | 0.6B, bfloat16, 1.1 GiB | 2025-06 | text embedding: Qwen3, 28 layers, last-token pooling, 1024 dimensions | text embeddings with `transformers`, on a card or on CPU |
+| `Qwen3-Embedding-4B` | 4B, bfloat16, 7.5 GiB | 2025-06 | text embedding: Qwen3, 36 layers, last-token pooling, 2560 dimensions | text embeddings with `transformers` |
+| `Qwen3-Reranker-4B` | 4B, bfloat16, 7.5 GiB | 2025-06 | reranker: a Qwen3 language model, 36 layers, that answers yes or no for one query-document pair | relevance scores of query-document pairs with `transformers` |
+| `timesfm-2.5-200m-transformers` | 231M, float32, 0.9 GiB | 2025-09 | TimesFM 2.5: decoder-only time-series transformer, 20 layers, input patches of 32 points, context up to 16,384 points | point and quantile forecasts of univariate series, 128 steps ahead, with `transformers` |
 
-The Qwen3.5 and Qwen3.8 checkpoints are multimodal; they load and serve as text-only language models. The embedding model takes the last token's hidden state (left padding), L2-normalised; a prefix of the vector, normalised again, is itself an embedding (its card's Matryoshka training).
+The Qwen3.5 and Qwen3.8 checkpoints are multimodal; they load and serve as text-only language models. The embedding models take the last token's hidden state (left padding), L2-normalised; a prefix of the vector, normalised again, is itself an embedding (their cards' Matryoshka training), and their cards put a one-line task instruction before a query (`Instruct: <task>\nQuery:<query>`) but not before a document. The reranker reads one pair through its own chat template and scores it as the probability of "yes" against "no" as the next token. TimesFM 2.5 forecasts each series from its own past alone; this directory is the 2026-02 `transformers` conversion of the 2025-09 checkpoint.
 
 The model cards publish no training-data cutoff; the release month bounds it, so only replay dates after a model's release lie certainly beyond its training data.
 
-The store held ten models until 2026-10-24. The other seven (Qwen3-0.6B, Qwen3-1.7B, Qwen3.5-0.8B, Qwen3.5-4B, Qwen3.5-9B, the bfloat16 Qwen3.8-27B and Qwen3-Embedding-8B) are gone, so a strategy or note from an earlier arm that loads one of them fails at once, and an arm created before the cut pinned the earlier store and can no longer start a container.
+The store held ten models until 2026-10-24, kept the first three rows of the table from that day and gained the last three on 2026-10-25, so a strategy or note from an earlier arm that loads a model no longer listed (Qwen3-0.6B, Qwen3-1.7B, Qwen3.5-0.8B, Qwen3.5-4B, Qwen3.5-9B, the bfloat16 Qwen3.8-27B, Qwen3-Embedding-8B) fails at once, and an arm created before either change pinned an earlier store and can no longer start a container.
 
 ```python
 import torch
-from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer, TimesFm2_5ModelForPrediction
 
 root = context.pretrained_dir + "/Qwen3.5-2B"
 tokenizer = AutoTokenizer.from_pretrained(root)
 model = AutoModelForCausalLM.from_pretrained(root, dtype=torch.bfloat16)
 
-encoder_root = context.pretrained_dir + "/Qwen3-Embedding-0.6B"
+encoder_root = context.pretrained_dir + "/Qwen3-Embedding-0.6B"  # "/Qwen3-Embedding-4B" loads the same way
 encoder_tokenizer = AutoTokenizer.from_pretrained(encoder_root, padding_side="left")
 encoder = AutoModel.from_pretrained(encoder_root, dtype=torch.bfloat16).eval()
 with torch.inference_mode():
     batch = encoder_tokenizer(titles, padding=True, truncation=True, max_length=128, return_tensors="pt")
     vectors = torch.nn.functional.normalize(encoder(**batch).last_hidden_state[:, -1].float(), dim=-1)
+
+ranker_root = context.pretrained_dir + "/Qwen3-Reranker-4B"
+ranker_tokenizer = AutoTokenizer.from_pretrained(ranker_root, padding_side="left")
+ranker = AutoModelForCausalLM.from_pretrained(ranker_root, dtype=torch.bfloat16).eval()
+no_yes = ranker_tokenizer.convert_tokens_to_ids(["no", "yes"])
+prompts = [ranker_tokenizer.apply_chat_template(
+    [{"role": "system", "content": instruction}, {"role": "query", "content": query}, {"role": "document", "content": document}],
+    tokenize=False) for query, document in pairs]
+with torch.inference_mode():
+    batch = ranker_tokenizer(prompts, padding=True, return_tensors="pt")
+    relevance = ranker(**batch, logits_to_keep=1).logits[:, -1, no_yes].float().softmax(-1)[:, 1]
+
+forecaster = TimesFm2_5ModelForPrediction.from_pretrained(context.pretrained_dir + "/timesfm-2.5-200m-transformers").eval()
+with torch.inference_mode():
+    forecast = forecaster(past_values=[torch.tensor(window, dtype=torch.float32) for window in windows], forecast_context_len=512)
+median, bands = forecast.mean_predictions, forecast.full_predictions  # (series, 128) and (series, 128, 10)
 ```
+
+`forecast_context_len` is a multiple of 32: shorter series are padded and longer ones cut to their last points; left at its default of 16,384, every series is padded to that length. `full_predictions` holds a mean forecast and the 10th to 90th percentiles (channels 0 and 1-9), and `mean_predictions` is its channel 5, the median; forecasts are clamped at zero when every input is non-negative (`truncate_negative=False` turns that off).
+
+Measured on one L20 under the strategy container's limits, with the files in the page cache: Qwen3-Embedding-4B loads in 4-8 seconds and embeds 256 announcement titles in 0.3 seconds at a peak of 8.3 GiB; Qwen3-Reranker-4B loads in about 4 seconds and scores 256 title pairs in 2.5 seconds at 12.9 GiB (64 pairs: 0.6 seconds, 8.9 GiB); TimesFM loads in under a second and forecasts 64 series of 512 points in 0.07 seconds at 1.1 GiB, against 3 seconds and 6.7 GiB at the default context. Each model's first call on a card takes 1.5-2 seconds longer. Under the 8-CPU quota without a card the two 4B models are slow in bfloat16 (8 titles took 14 seconds to embed, 8 pairs about 90 seconds to score) and faster loaded in float32 (2.8 and 18 seconds, holding about 16 GB of the container's memory); TimesFM forecast the 64 series in 2.5 seconds, and in 133 at the default context.
 
 `AutoModelForCausalLM` loads the Qwen3.5 checkpoints as text-only language models. The hub is unreachable from both containers, so any other model id fails at once. `peft` is installed for adapters, and `flash-linear-attention` and `causal-conv1d` give the Qwen3.5 linear-attention layers their fused GPU kernels; each container compiles them on first use, so its first GPU forward and first backward each take up to about a minute longer, on the clock of the call that makes them. Whatever is trained during a replay is written under `context.state_dir` (`model.save_pretrained(context.state_dir + "/adapter")`, or a `torch.save` of the weights), never into the store.
 
