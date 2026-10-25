@@ -175,6 +175,56 @@ class CronInstallerTest(unittest.TestCase):
             log = (root / "logs/research/cron.log").read_text(encoding="utf-8")
             self.assertTrue(log.endswith("fill first\nfill refused\nfill last\n"), log)
 
+    def test_the_housekeeping_job_compresses_only_old_conversation_logs(self) -> None:
+        """The weekly job line itself, run by bash in a stand-in repository: a
+        conversation log older than 14 days becomes a .zst that reads back byte
+        for byte, a younger log and any other file stay as they are, and a log
+        zstd cannot compress is kept and fails the run."""
+        import subprocess
+        import time
+
+        template, begin, end = installer.BLOCKS["housekeeping"]
+        block = installer.build_managed_block(template, begin, end)
+        paper = installer.build_managed_block(*installer.BLOCKS["paper"])
+        once = installer.replace_managed_block(f"0 1 * * * unrelated\n\n{paper}", block, begin=begin, end=end)
+        self.assertEqual(installer.replace_managed_block(once, block, begin=begin, end=end), once)
+        self.assertIn(paper, once)
+        jobs = [line for line in template.read_text(encoding="utf-8").splitlines() if line[:1].isdigit()]
+        self.assertEqual(len(jobs), 1)
+        # Once a week, on Sunday, into its own log.
+        self.assertEqual(jobs[0].split()[2:5], ["*", "*", "0"])
+        self.assertTrue(jobs[0].endswith(" >> logs/housekeeping/cron.log 2>&1"), jobs[0])
+        command = jobs[0].split(None, 5)[5]
+        with tempfile.TemporaryDirectory() as tmp:
+            logs = Path(tmp) / "data/llm_conversations/vllm/model"
+            logs.mkdir(parents=True)
+            content = {}
+            for name, age_days in (("old.jsonl", 15), ("young.jsonl", 13), ("old.txt", 15), ("clash.jsonl", 15)):
+                path = logs / name
+                path.write_text(f'{{"file": "{name}"}}\n' * 1000, encoding="utf-8")
+                stamp = time.time() - age_days * 86400
+                os.utime(path, (stamp, stamp))
+                content[name] = path.read_bytes()
+            (logs / "clash.jsonl.zst").write_bytes(b"taken")
+
+            def run() -> int:
+                env = {"PATH": os.environ["PATH"], "REPO_ROOT": tmp}
+                return subprocess.run(["bash", "-c", command], env=env, capture_output=True, timeout=120).returncode
+
+            self.assertNotEqual(run(), 0)
+            self.assertFalse((logs / "old.jsonl").exists())
+            restored = subprocess.run(["zstd", "-dc", str(logs / "old.jsonl.zst")], capture_output=True, check=True)
+            self.assertEqual(restored.stdout, content["old.jsonl"])
+            for name in ("young.jsonl", "old.txt", "clash.jsonl"):
+                self.assertEqual((logs / name).read_bytes(), content[name], name)
+            self.assertEqual((logs / "clash.jsonl.zst").read_bytes(), b"taken")
+            log = (Path(tmp) / "logs/housekeeping/cron.log").read_text(encoding="utf-8")
+            self.assertIn("clash.jsonl.zst already exists", log)
+            # Once the name is free the next run compresses it and succeeds.
+            (logs / "clash.jsonl.zst").unlink()
+            self.assertEqual(run(), 0)
+            self.assertEqual(sorted(path.name for path in logs.iterdir()), ["clash.jsonl.zst", "old.jsonl.zst", "old.txt", "young.jsonl"])
+
     def test_removing_a_block_keeps_every_other_entry_and_is_idempotent(self) -> None:
         """Pausing one managed job -- the research fill, while a stop window
         rebuilds the sandbox image -- must not touch the Paper or TuShare

@@ -1,0 +1,22 @@
+# ADM-Cube housekeeping: compress the provider conversation logs nothing reads.
+# Install or refresh with: /home/lzp/miniconda3/envs/quant/bin/python ops/cron/install_tushare_cron.py --block housekeeping
+#
+# data/llm_conversations is the redacted request/response audit log of every
+# provider, one JSONL file per process and UTC day, and it grows with every
+# arm. No code reads it, so once a week every file older than 14 days is
+# compressed in place to <file>.jsonl.zst (zstd keeps the original until the
+# compressed copy is complete; `zstd -dc` reads it back). The writer opens a
+# file only to append one record, under the day the request started, so a file
+# untouched for 14 days is never written again. A file zstd cannot compress
+# (say, its .zst name is taken) stays as it is, its error goes to the log and
+# the run exits non-zero.
+
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+CRON_TZ=Asia/Shanghai
+REPO_ROOT=/Data2/lzp/auto-trade
+
+# Sunday 12:00, clear of the nightly TuShare chain (23:15-09:45), the weekday
+# Paper runs and the Saturday sweeps. Lowest CPU and idle I/O priority; the
+# first pass took 25 minutes for 33.7 GiB (70x), a week's logs take minutes.
+0 12 * * 0 cd $REPO_ROOT && mkdir -p logs/housekeeping && { date -u; find data/llm_conversations -type f -name '*.jsonl' -mmin +20160 -exec nice -n 19 ionice -c3 zstd -19 --rm -T4 {} + < /dev/null; } >> logs/housekeeping/cron.log 2>&1

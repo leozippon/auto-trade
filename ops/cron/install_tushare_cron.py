@@ -24,6 +24,11 @@ BLOCKS = {
         "# BEGIN ADM-Cube research fill",
         "# END ADM-Cube research fill",
     ),
+    "housekeeping": (
+        REPO_ROOT / "ops/cron/housekeeping.cron",
+        "# BEGIN ADM-Cube housekeeping",
+        "# END ADM-Cube housekeeping",
+    ),
 }
 BACKUP_DIR = REPO_ROOT / ".runtime" / "crontab"
 # Every install backs up the whole table, so the newest few cover any rollback.
