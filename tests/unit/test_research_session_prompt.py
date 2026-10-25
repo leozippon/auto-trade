@@ -221,15 +221,28 @@ def test_the_prompt_states_the_research_session_contract() -> None:
         "机制家族指收益来源的经济解释",
         "同一特征集换个估计器不算",
         "示例（只示形式）",
-        # A pack's kill line ends what it names; its termination ends the arm.
-        "杀死线结束的是包写明的候选或家族，不是本臂",
-        '`finish_session(outcome="no_edge", reason=<触发它的读数>)`',
-        "参考包写定的更严条件以包为准",
+        # Screening saves replay years, not trials, and says so where it is advised.
+        "筛选省的是回放年，不省试验",
+        # A pack is a direction and facts, not the arm's contract.
+        "它不是本臂的合同",
+        "候选不限于包里列出的轴、对照或家族",
+        "包的文字只在 PIT 与数据边界、交易成本与资源上限上约束本臂",
     ):
         assert clause in protocol, clause
-    # A fixed family or line is stated once: what follows a falsified
-    # candidate, beside the pack rules it belongs with.
-    assert protocol.count("下一根登记轴") == 1
+    # The rules that bound a session to its pack's axes, family and stopping
+    # lines, and the push to validate the starter first, are gone.
+    for retired in (
+        "下一根登记轴",
+        "让位于包",
+        "不换家族",
+        "只在这些轴上",
+        "以包为准",
+        "尽早让第一个真正的候选",
+        "开放搜索（",
+    ):
+        assert retired not in prompt, retired
+    # The core scorer is the main Agent's own work; sub-agents do the routine.
+    assert "核心打分器（把可见数据变成选股分数的那段代码）由你亲自设计并写出" in role
     # The sections follow the Agent's decisions: what to test, whether a row
     # is evidence, what to nominate and when to end.
     evidence = prompt[prompt.index("# 证据标准") : prompt.index("# 决策合同")]
@@ -261,13 +274,27 @@ def test_the_prompt_states_the_research_session_contract() -> None:
         "按种子基配对后在至少两个种子基上都为正",
         # How a strategy writes its seed is the README's.
         "种子的写法见 `output/README.md`",
-        "参考包写定的更严复现规则以包为准，但免除不了这两节的条件",
-        "没有候选过检验时以 `no_edge` 结束是诚实的结果",
+        # The deflated bar governs the freeze, not whether to keep searching.
+        "这道门槛只决定能不能冻结，不决定要不要继续搜索",
+        # A node that fails only the deflation is a deliverable by incubation,
+        # and a no_edge names it first.
+        "只差去膨胀的节点也是本臂的交付，只是走孵化而不是冻结",
+        "`freeze_deflated_sharpe_below_threshold`",
+        "运营者可以孵化它",
+        "以 `no_edge` 结束时，`reason` 先点名这样的节点",
+        # An early finish owes the same account whichever outcome it takes.
+        "无论 `freeze` 还是 `no_edge`，`reason` 都要写明哪些假设未检验",
+        # Honesty is about the report, not about stopping.
+        "诚实指的是 `reason` 如实报告读数、试验数与没测过的东西，不是早停",
         # The arm's conclusion is the finish reason, not a skill.
         "本臂的结论与证据写进 `finish_session` 的 `reason`，不另写成 skill",
         "结束不需要先写 skill",
     ):
         assert clause in contract, clause
+    assert "诚实的结果" not in prompt
+    # The hard finalization replaces the system prompt, so it carries the
+    # incubation naming rule itself.
+    assert "freeze_deflated_sharpe_below_threshold" in prompts.HARD_FINALIZATION_SYSTEM_PROMPT
     # Each kind of statement has one home. Which conditions bind and at what
     # threshold is the arm's acceptance_rules fact: the prompt enumerates none
     # and carries no sentence that holds only for arms whose rules list an

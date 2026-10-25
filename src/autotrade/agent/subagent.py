@@ -282,7 +282,7 @@ AGENT_TOOL_DESCRIPTION = (
     "三种调用形状，参数名以下面为准：\n"
     "1. launch（省略 action 或 action=launch）：{\"agent\": <角色>, \"task\": <完整任务>}，"
     "可选 description、max_turns、thinking、inherit_context。"
-    "用于读库、探索、计算、实现或审计等能独立完成的任务：把大量阅读、计算和实现留在子代理里以保护主上下文；"
+    "用于读库、探索、计算、样板实现或审计等能独立完成的任务：把大量阅读与计算留在子代理里以保护主上下文；"
     "目标已知的单个文件直接用 read_file/grep/glob；不要重复子代理正在做的搜索。"
     f"同一轮可发起多个（默认同时运行 {DEFAULT_SUBAGENT_MAX_CONCURRENT} 个，超出排队），可写的子代理同样可以并行；"
     "并行的子代理范围须互斥，每个只写 task 指定的路径；"

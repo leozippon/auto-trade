@@ -741,21 +741,28 @@ def smoke(merged: Mapping[str, object]) -> str:
     """Replay an arm's starter on its seed before the arm is created; "" when it
     passed, else why not.
 
-    ``merged`` is the arm's validated params.json. The pack's ``starter/`` is
-    replayed by the host's own evaluator as a session's smoke_backtest and
-    Validation replay it: over the full research span, a few days from each
-    research-year start (the late-start path a defective seed breaks first),
-    then the whole span. The outcome is recorded once per seed contract,
-    geometry and starter bytes, so a pass is not replayed by the next timer run
-    and a failure is not retried until its record is deleted. A starter whose
-    arm asks for GPUs replays on idle cards it takes for the smoke; when too few
-    are idle, ``GpuUnavailableError`` propagates and nothing is recorded, so a
-    later run smokes the arm again.
+    ``merged`` is the arm's validated params.json. What the session's
+    ``output/`` starts as is replayed: the pack's ``starter/``, or the arm's
+    strategy template (``strategy_path``) when the pack ships no ``starter/``
+    or there is no pack. A ``starter/`` without ``main.py`` is refused, since
+    the session would silently start from the template instead. It is replayed
+    by the host's own evaluator as a session's smoke_backtest and Validation
+    replay it: over the full research span, a few days from each research-year
+    start (the late-start path a defective seed breaks first), then the whole
+    span. The outcome is recorded once per seed contract, geometry and starter
+    bytes, so a pass is not replayed by the next timer run and a failure is not
+    retried until its record is deleted. A starter whose arm asks for GPUs
+    replays on idle cards it takes for the smoke; when too few are idle,
+    ``GpuUnavailableError`` propagates and nothing is recorded, so a later run
+    smokes the arm again.
     """
 
-    starter = REPO_ROOT / str(merged["workspace_reference"]) / "starter"
-    if not (starter / "main.py").is_file():
-        return f"the pack has no starter to smoke: {starter} lacks main.py"
+    reference = str(merged.get("workspace_reference") or "")
+    starter = REPO_ROOT / reference / "starter"
+    if not reference or not starter.exists():
+        starter = (REPO_ROOT / str(merged["strategy_path"])).parent
+    elif not (starter / "main.py").is_file():
+        return f"the pack's starter cannot be smoked: {starter} lacks main.py"
     digest = hashlib.sha256(
         json.dumps({key: merged.get(key) for key in SMOKE_KEYS}, sort_keys=True, default=str).encode("utf-8")
     )

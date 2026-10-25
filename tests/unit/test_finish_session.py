@@ -280,6 +280,36 @@ def test_an_early_freeze_must_say_why_while_another_batch_fits(tmp_path: Path):
     ).invoke({"outcome": "freeze", "node_id": node}).finish
 
 
+def test_an_early_no_edge_owes_the_same_account_as_an_early_freeze(tmp_path: Path):
+    """Ending with no_edge also ends research for the whole arm, so with two
+    thirds of the replay years left it is refused, naming the early-finish
+    rule, until a reason says what stays untested; later the reason is still
+    required, as the evidence of the decision."""
+    tree = StepTree(tmp_path / "steps")
+    _node(tree, tmp_path, "a")
+
+    def status(remaining: int) -> SessionBudgetStatus:
+        return SessionBudgetStatus(
+            replay_years_remaining=remaining,
+            replay_years_total=24,
+            inference_seconds_remaining=5400.0,
+        )
+
+    early = _tool(tree, _Gate(set()), budget_status=lambda: status(16))
+    with pytest.raises(ToolError, match="more than a third") as refused:
+        early.invoke({"outcome": "no_edge"})
+    message = str(refused.value)
+    assert "this no_edge leaves 16/24 replay-years" in message and "90 min" in message
+    assert "naming the hypotheses that stay untested" in message
+    assert '"outcome": "no_edge"' in str(refused.value.retry_hint)
+    explained = early.invoke({"outcome": "no_edge", "reason": REASON})
+    assert explained.finish and explained.value["budget_at_finish"]["replay_years_remaining"] == 16
+    # Once no batch fits, the early rule lapses but the evidence is still owed.
+    late = _tool(tree, _Gate(set()), budget_status=lambda: status(16), another_round_fits=lambda: False)
+    with pytest.raises(ToolError, match="requires reason"):
+        late.invoke({"outcome": "no_edge"})
+
+
 def test_seed_replicates_are_resolved_and_go_to_the_gate(tmp_path: Path):
     """The tool resolves seed_replicates like node_id and hands them to the
     gate, which judges them. A nominee refused for want of them is told what

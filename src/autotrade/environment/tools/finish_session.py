@@ -19,12 +19,13 @@ from .node_reference import (
 # The outcomes the Agent may state; the Pipeline's SESSION_OUTCOMES adds the
 # host-recorded ``deadline``.
 FINISH_OUTCOMES = ("freeze", "no_edge")
-# A voluntary freeze that leaves more than this share of the replay-year budget
-# unused must say why. It is a justification, not a block, and it lapses once
+# A voluntary finish, a freeze or a no_edge alike, that leaves more than this
+# share of the replay-year budget unused must say why: both end research for
+# the whole arm. It is a justification, not a block, and it lapses once
 # another batch cannot fit.
 EARLY_FINISH_BUDGET_FRACTION = 1 / 3
 # One ``reason`` serves every justification -- the evidence behind ending the
-# arm, and the account of an early freeze -- and a one-word reason is none of
+# arm, and the account of an early finish -- and a one-word reason is none of
 # them. Its upper bound is the shared one every Agent-written justification
 # gets, so the reason and a candidate's hypothesis cannot drift apart.
 REASON_MIN_CHARS = 40
@@ -89,11 +90,14 @@ _DESCRIPTION = (
     "tested once on later data no session sees. node_id is the full id or the "
     "node's short handle (valid_002); it may be omitted only while "
     "this session has exactly one complete Validation. "
-    'outcome="no_edge" ends the arm without a deliverable and takes no node_id; '
+    'outcome="no_edge" ends the arm without freezing a node and takes no node_id; '
     "it needs at least one complete Validation of this session and a reason "
     f"({REASON_MIN_CHARS}-{REASON_MAX_CHARS} chars), the evidence behind the "
-    "decision; a freeze needs a reason only when it leaves more than a third of "
-    "the replay-year budget while another batch still fits. The reason is "
+    "decision. A finish of either outcome that leaves more than a third of the "
+    "replay-year budget while another batch still fits must name in its reason "
+    "the hypotheses that stay untested and why the remaining budget is better "
+    "left unused, and is refused without a reason; a freeze needs a reason only "
+    "then. The reason is "
     "recorded on the arm's session record and is where the arm's conclusion "
     "belongs; no skill is needed to finish, and none can be written after this call. "
     "offline_trials (0 to "
@@ -150,7 +154,9 @@ class FinishSessionTool:
                         "and its yearly blocks, null percentile, deflated Sharpe with "
                         "its trials) and what stays untested. "
                         "Required for a freeze only when it leaves more than a third "
-                        f"of the replay-year budget. {REASON_MIN_CHARS}-"
+                        "of the replay-year budget; such an early finish, of either "
+                        "outcome, names the hypotheses that stay untested and why "
+                        f"the remaining budget is better left unused. {REASON_MIN_CHARS}-"
                         f"{REASON_MAX_CHARS} characters."
                     ),
                 },
@@ -255,7 +261,7 @@ class FinishSessionTool:
                 ),
                 details={"freeze_gate": self._gate_record(gate), "passing_nodes": passing},
             )
-        budget = self._early_finish_budget(reason)
+        budget = self._early_finish_budget("freeze", reason)
         self.tree.set_position(node_id)
         return ToolResult(
             True,
@@ -289,6 +295,7 @@ class FinishSessionTool:
                 + (" and so must seed_replicates" if replicates else ""),
                 retry_hint='finish_session({"outcome": "no_edge", "reason": "<evidence>"})',
             )
+        budget = self._early_finish_budget("no_edge", reason)
         self._require_reason("no_edge", reason)
         candidates = self._session_candidates()
         if not candidates:
@@ -305,9 +312,9 @@ class FinishSessionTool:
                 "reason": reason,
                 "candidates_evaluated": len(candidates),
                 "terminal_offline_trials": offline_trials,
-                **self._budget_record(),
+                **budget,
                 "pipeline_outcome": (
-                    "The arm ends without a deliverable: no forward test."
+                    "The arm ends without a frozen artifact: no forward test."
                 ),
             },
             finish=True,
@@ -419,15 +426,13 @@ class FinishSessionTool:
             )
         return node
 
-    def _budget_record(self) -> dict[str, object]:
-        status = self._budget_status() if self._budget_status is not None else None
-        return {} if status is None else {"budget_at_finish": status.to_record()}
-
-    def _early_finish_budget(self, reason: str) -> dict[str, object]:
-        """The budget left at a freeze, refusing an early one that gives no reason.
+    def _early_finish_budget(self, outcome: str, reason: str) -> dict[str, object]:
+        """The budget left at a finish, refusing an early one that gives no reason.
 
         Early means more than a third of the replay-year budget is left while
-        another batch still fits. Without a wired budget nothing is refused.
+        another batch still fits. A freeze and a no_edge both end research for
+        the whole arm, so both owe the same account of what stays untested.
+        Without a wired budget nothing is refused.
         """
 
         status = self._budget_status() if self._budget_status is not None else None
@@ -437,16 +442,24 @@ class FinishSessionTool:
         if reason or not status.early_finish or not self._another_round_fits():
             return recorded
         minutes = max(status.inference_seconds_remaining, 0.0) / 60
+        freeze = outcome == "freeze"
         raise ToolError(
-            "finish_session refused: this freeze leaves "
+            f"finish_session refused: this {outcome} leaves "
             f"{status.replay_years_remaining}/{status.replay_years_total} replay-years "
             f"and about {minutes:.0f} min of inference time unused, more than a third "
-            "of the replay-year budget. Freezing ends research for the whole arm: "
-            "either run the rounds that still test the nominee, or call "
+            "of the replay-year budget. "
+            + ("Freezing" if freeze else "Ending with no_edge")
+            + " ends research for the whole arm: either run the rounds that still test "
+            + ("the nominee" if freeze else "the open hypotheses")
+            + ", or call "
             f"finish_session again with reason ({REASON_MIN_CHARS}-{REASON_MAX_CHARS} "
             "chars) naming the hypotheses that stay untested and why the remaining "
             "budget is better left unused.",
-            retry_hint='finish_session({"outcome": "freeze", "node_id": ..., "reason": "..."})',
+            retry_hint=(
+                'finish_session({"outcome": "freeze", "node_id": ..., "reason": "..."})'
+                if freeze
+                else 'finish_session({"outcome": "no_edge", "reason": "..."})'
+            ),
             details=status.to_record(),
         )
 

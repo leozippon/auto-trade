@@ -783,6 +783,36 @@ def test_the_smoke_is_recorded_once_per_seed_and_starter(tmp_path: Path, monkeyp
     assert "lacks main.py" in _round.smoke(merged)
 
 
+def test_a_pack_without_a_starter_smokes_the_template_and_a_broken_one_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A question-only pack, or no pack, starts its session's output/ from the
+    arm's strategy template, so that is what the smoke replays; a starter/
+    directory without main.py is refused before anything replays, because the
+    session would silently start from the template instead."""
+    monkeypatch.setattr(_round, "REPO_ROOT", tmp_path)
+    template = tmp_path / "configs" / "agent_output_template"
+    template.mkdir(parents=True)
+    (template / "main.py").write_text("def generate_orders(context):\n    return []\n", encoding="utf-8")
+    (tmp_path / "packs" / "question").mkdir(parents=True)
+    runs: list[str] = []
+
+    def replays(params: dict[str, object], directory: Path) -> str:
+        runs.append(str(directory.relative_to(tmp_path)))
+        return ""
+
+    monkeypatch.setattr(_round, "_smoke_replays", replays)
+    strategy = {"strategy_path": "configs/agent_output_template/main.py", "pit_views_seed": ""}
+    assert _round.smoke({"experiment_id": "question", "workspace_reference": "packs/question", **strategy}) == ""
+    assert _round.smoke({"experiment_id": "bare", "workspace_reference": "", **strategy}) == ""
+    # Both are the template's bytes on the same seed: one smoke serves both.
+    assert runs == ["configs/agent_output_template"]
+
+    (tmp_path / "packs" / "broken" / "starter" / "lib").mkdir(parents=True)
+    refused = _round.smoke({"experiment_id": "broken", "workspace_reference": "packs/broken", **strategy})
+    assert "lacks main.py" in refused and runs == ["configs/agent_output_template"]
+
+
 def test_a_gpu_smoke_pins_idle_cards_and_without_one_records_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -911,10 +941,13 @@ def test_an_arm_requests_a_gpu_exactly_when_its_starter_needs_cuda(
 ) -> None:
     """A starter with no CPU path fails every replay of an arm created without
     a card, and a card requested for a starter that never touches CUDA is taken
-    from the shared pool for nothing."""
+    from the shared pool for nothing. A pack without a starter is exempt: its
+    arm's card is for the code the Agent will write."""
     params = ROUNDS[round_name].request_params(experiment_id)
     starter = REPO_ROOT / str(params.get("workspace_reference") or "") / "starter"
-    needs_cuda = starter.is_dir() and any(
+    if not params.get("workspace_reference") or not starter.is_dir():
+        return
+    needs_cuda = any(
         "torch.cuda" in path.read_text(encoding="utf-8") for path in starter.rglob("*.py")
     )
     assert (int(params["gpu_count"]) >= 1) is needs_cuda, (experiment_id, params["gpu_count"])
