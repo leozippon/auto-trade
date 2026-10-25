@@ -2376,6 +2376,73 @@ def test_session_token_usage_totals_cache_reads_misses_writes_and_reasoning() ->
     assert usage["cache_hit_ratio"] == 0.2
 
 
+@pytest.mark.parametrize(
+    ("child_usages", "hits", "ratio"),
+    [
+        # DeepSeek's hit field and a Claude call that read nothing: a reported
+        # zero is a real zero and stays in the ratio.
+        (
+            (
+                {"prompt_tokens": 1_000, "completion_tokens": 10, "prompt_cache_hit_tokens": 750},
+                {"prompt_tokens": 1_000, "completion_tokens": 10, "prompt_tokens_details": {"cached_tokens": 0}},
+            ),
+            750,
+            0.375,
+        ),
+        # vLLM reports no cache count: the ratio is unknown, never 0.0.
+        (
+            (
+                {"prompt_tokens": 1_000, "completion_tokens": 10},
+                {"prompt_tokens": 1_000, "completion_tokens": 10, "prompt_tokens_details": None},
+            ),
+            None,
+            None,
+        ),
+    ],
+)
+def test_session_token_usage_reports_the_subagent_cache_hit_ratio(
+    child_usages: tuple[dict[str, object], ...], hits: int | None, ratio: float | None
+) -> None:
+    subagent = SubAgentEngine(
+        llm=ScriptedLLM(
+            [ProviderResponse(content="summary", usage=usage) for usage in child_usages]
+        ),
+        tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        config=SubAgentConfig(max_concurrent=2),
+    )
+    events: list[tuple[str, dict[str, object]]] = []
+    runner = AgentSessionRunner(
+        llm=ScriptedLLM(
+            [
+                ProviderResponse(
+                    tool_calls=(
+                        ToolCall("e1", "agent", {"agent": "Explore", "task": "a"}),
+                        ToolCall("e2", "agent", {"agent": "Explore", "task": "b"}),
+                    )
+                ),
+                ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {}),)),
+            ]
+        ),
+        tools=ToolRegistry([_FinishStub("finish_session")]),
+        system_prompt="research",
+        config=_session_config(),
+        subagent=subagent,
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+
+    result = runner.run("delegate")
+
+    children = next(payload for event, payload in events if event == "session_end")[
+        "token_usage"
+    ]["subagent"]
+    assert children["llm_calls"] == 2
+    assert children["prompt_tokens"] == 2_000
+    assert children.get("cache_hit_tokens") == hits
+    assert "cache_hit_ratio" in children
+    assert children["cache_hit_ratio"] == ratio
+    assert result.usage["subagent"] == children
+
+
 def test_inherit_context_fork_drops_the_unanswered_tool_calls() -> None:
     child = ScriptedLLM([ProviderResponse(content="forked")])
     runner = AgentSessionRunner(

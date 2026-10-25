@@ -34,6 +34,7 @@ from autotrade.environment.llm import (
     ProviderRefusalError,
     ProviderResponse,
     ToolCall,
+    cached_prompt_tokens,
     clamp_requested_max_tokens,
     context_request_fits,
     is_context_overflow_error,
@@ -1531,12 +1532,19 @@ def _clip_traced(value: object) -> object:
 
 
 def _add_usage(total: dict[str, int], usage: object) -> None:
+    """Sum one call's usage. ``cache_hit_tokens`` appears only once a call
+    reports a cache count: one without (vLLM) leaves the hit rate unknown,
+    not zero."""
+
     if not isinstance(usage, dict):
         return
-    for key in total:
+    for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
         value = usage.get(key)
         if isinstance(value, int) and not isinstance(value, bool):
             total[key] += value
+    cached = cached_prompt_tokens(usage)
+    if cached is not None:
+        total["cache_hit_tokens"] = total.get("cache_hit_tokens", 0) + cached
 
 
 def _reject_tool_call(spec: ToolSpec | None, *, allowed: frozenset[str]) -> str:

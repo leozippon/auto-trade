@@ -310,7 +310,7 @@ class AgentSessionResult:
     finish_value: dict[str, object]
     llm_calls: int
     # Closed's session-summary ``token_usage`` block: the eight per-call totals
-    # plus ``cache_hit_ratio`` and the Sub Agent roll-up.
+    # plus ``cache_hit_ratio`` and the Sub Agent roll-up with its own ratio.
     usage: dict[str, object] = field(default_factory=dict)
     context_compactions: int = 0
     steps_used: int = 0
@@ -2166,7 +2166,8 @@ def _accumulate_subagent_usage(
 ) -> None:
     """Sub Agent calls bill the same provider account but bypass
     ``_accumulate_usage``; without this the session summary understates real
-    cost by up to ~15% in observed sessions."""
+    cost by up to ~15% in observed sessions. ``cache_hit_tokens`` is summed
+    only from children that report it, so its absence means unknown."""
     calls = result.get("llm_calls")
     if isinstance(calls, (int, float)) and not isinstance(calls, bool):
         totals["llm_calls"] += int(calls)
@@ -2176,6 +2177,9 @@ def _accumulate_subagent_usage(
             value = usage.get(key)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 totals[key] += int(value)
+        cached = usage.get("cache_hit_tokens")
+        if isinstance(cached, int) and not isinstance(cached, bool):
+            totals["cache_hit_tokens"] = totals.get("cache_hit_tokens", 0) + cached
 
 
 def _token_usage_summary(
@@ -2187,7 +2191,15 @@ def _token_usage_summary(
         round(int(totals.get("cache_hit_tokens", 0)) / prompt, 4) if prompt else 0.0
     )
     if subagent is not None:
-        summary["subagent"] = dict(subagent)
+        children = dict(subagent)
+        child_prompt = int(subagent.get("prompt_tokens", 0))
+        # ``None`` when no child call reported a cache count: unknown, not zero.
+        children["cache_hit_ratio"] = (
+            round(int(subagent["cache_hit_tokens"]) / child_prompt, 4)
+            if "cache_hit_tokens" in subagent and child_prompt
+            else None
+        )
+        summary["subagent"] = children
         summary["total_tokens_including_subagents"] = int(
             totals.get("total_tokens", 0)
         ) + int(subagent.get("total_tokens", 0))
