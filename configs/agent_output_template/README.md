@@ -158,32 +158,34 @@ Each trading day opens with the T+1 release and ex-date settlement, then fills t
 
 ## Pretrained models
 
-The only pretrained weights available are the ten Hugging Face model directories of a read-only store, `context.pretrained_dir` for the strategy and `/mnt/pretrained` in the session's shell; its `MANIFEST.sha256` lists every file. In an arm whose `runtime_env.json` shows no `sandbox_spec.pretrained_manifest_sha256`, neither is mounted and `context.pretrained_dir` is empty.
+The only pretrained weights available are the three Hugging Face model directories of a read-only store, `context.pretrained_dir` for the strategy and `/mnt/pretrained` in the session's shell; its `MANIFEST.sha256` lists every file. In an arm whose `runtime_env.json` shows no `sandbox_spec.pretrained_manifest_sha256`, neither is mounted and `context.pretrained_dir` is empty.
 
-| Directory | Parameters | Architecture |
-| --- | --- | --- |
-| `Qwen3-0.6B` | 0.6B | Qwen3: 28 standard attention layers |
-| `Qwen3-1.7B` | 1.7B | Qwen3: 28 standard attention layers |
-| `Qwen3.5-0.8B` | 0.8B | Qwen3.5: hybrid, 18 Gated DeltaNet (linear-attention) and 6 full-attention layers |
-| `Qwen3.5-2B` | 2B | Qwen3.5: hybrid, 18 Gated DeltaNet (linear-attention) and 6 full-attention layers |
-| `Qwen3.5-4B` | 4B | Qwen3.5: hybrid, 24 Gated DeltaNet and 8 full-attention layers |
-| `Qwen3.5-9B` | 9B | Qwen3.5: hybrid, 24 Gated DeltaNet and 8 full-attention layers |
-| `Qwen3.8-27B-FP8` | 27B | Qwen3.8: hybrid, 48 Gated DeltaNet and 16 gated-attention layers; block FP8 weights, about 28.5 GiB, one card |
-| `Qwen3.8-27B` | 27B | the same model in bfloat16, about 52 GiB: more than one card holds, so it runs across two (`tensor_parallel_size=2`) |
-| `Qwen3-Embedding-0.6B` | 0.6B | text embedding: Qwen3, 28 layers, last-token pooling, 1024 dimensions |
-| `Qwen3-Embedding-8B` | 8B | text embedding: Qwen3, 36 layers, last-token pooling, 4096 dimensions |
+| Directory | Weights | Released | Architecture | Use |
+| --- | --- | --- | --- | --- |
+| `Qwen3.8-27B-FP8` | 27B parameters, block FP8, 28.8 GiB | 2026-08 | Qwen3.8: hybrid, 48 Gated DeltaNet (linear-attention) and 16 gated-attention layers | generation in process with `vllm` on one card (below) |
+| `Qwen3.5-2B` | 2B, bfloat16, 4.3 GiB | 2026-02 | Qwen3.5: hybrid, 18 Gated DeltaNet and 6 full-attention layers | hidden-state features, fine-tuning and adapters with `transformers` and `peft`; the 27B's architecture, so it also runs under `vllm` |
+| `Qwen3-Embedding-0.6B` | 0.6B, bfloat16, 1.1 GiB | 2025-06 | text embedding: Qwen3, 28 layers, last-token pooling, 1024 dimensions | text embeddings with `transformers`, on a card or on CPU |
 
-The Qwen3.5 and Qwen3.8 checkpoints are multimodal; they load and serve as text-only language models. The embedding models take the last token's hidden state (left padding), L2-normalised; a prefix of the vector, normalised again, is itself an embedding (their cards' Matryoshka training).
+The Qwen3.5 and Qwen3.8 checkpoints are multimodal; they load and serve as text-only language models. The embedding model takes the last token's hidden state (left padding), L2-normalised; a prefix of the vector, normalised again, is itself an embedding (its card's Matryoshka training).
 
-The model cards publish no training-data cutoff; the release month bounds it — Qwen3-0.6B and Qwen3-1.7B were released in 2025-04, the Qwen3-Embedding models in 2025-06, Qwen3.5 in 2026-02 and Qwen3.8 in 2026-08 — so only replay dates after a model's release lie certainly beyond its training data.
+The model cards publish no training-data cutoff; the release month bounds it, so only replay dates after a model's release lie certainly beyond its training data.
+
+The store held ten models until 2026-10-24. The other seven (Qwen3-0.6B, Qwen3-1.7B, Qwen3.5-0.8B, Qwen3.5-4B, Qwen3.5-9B, the bfloat16 Qwen3.8-27B and Qwen3-Embedding-8B) are gone, so a strategy or note from an earlier arm that loads one of them fails at once, and an arm created before the cut pinned the earlier store and can no longer start a container.
 
 ```python
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
 
-root = context.pretrained_dir + "/Qwen3.5-0.8B"
+root = context.pretrained_dir + "/Qwen3.5-2B"
 tokenizer = AutoTokenizer.from_pretrained(root)
 model = AutoModelForCausalLM.from_pretrained(root, dtype=torch.bfloat16)
+
+encoder_root = context.pretrained_dir + "/Qwen3-Embedding-0.6B"
+encoder_tokenizer = AutoTokenizer.from_pretrained(encoder_root, padding_side="left")
+encoder = AutoModel.from_pretrained(encoder_root, dtype=torch.bfloat16).eval()
+with torch.inference_mode():
+    batch = encoder_tokenizer(titles, padding=True, truncation=True, max_length=128, return_tensors="pt")
+    vectors = torch.nn.functional.normalize(encoder(**batch).last_hidden_state[:, -1].float(), dim=-1)
 ```
 
 `AutoModelForCausalLM` loads the Qwen3.5 checkpoints as text-only language models. The hub is unreachable from both containers, so any other model id fails at once. `peft` is installed for adapters, and `flash-linear-attention` and `causal-conv1d` give the Qwen3.5 linear-attention layers their fused GPU kernels; each container compiles them on first use, so its first GPU forward and first backward each take up to about a minute longer, on the clock of the call that makes them. Whatever is trained during a replay is written under `context.state_dir` (`model.save_pretrained(context.state_dir + "/adapter")`, or a `torch.save` of the weights), never into the store.
@@ -211,7 +213,7 @@ texts = [output.outputs[0].text for output in outputs]
 ```
 
 - `fit` and `generate_orders` run in two containers on the same card, and an engine claims 90% of its card's memory (`gpu_memory_utilization`), so build it in one of them: for example in `fit` with `REFIT_PERIOD = "day"`, writing the day's readings under `context.state_dir` for `generate_orders` to read.
-- Loading is slow and counts on the clock of the call that loads. Measured with Qwen3.8-27B-FP8 (FP8 weights, about 28.5 GiB) on one L20 under these container limits: about 3 minutes with `enforce_eager=True`, about 6.5 minutes without (torch.compile and CUDA-graph capture, redone in every container because their caches live in `/tmp`); reading the weights from a cold disk took about 70 seconds of either. Prefill then ran at about 2,300 prompt tokens per second eager and 3,200 compiled, for a batch of 20 prompts of about 1,000 tokens each. On one card this hybrid model's linear-attention state holds about 180 concurrent sequences, so `max_num_seqs` must stay below that (vLLM's default 256 refuses to start). With the engine loaded, a replay's fit container peaked at about 5.7 GiB of container memory.
+- Loading is slow and counts on the clock of the call that loads. Measured with Qwen3.8-27B-FP8 on one L20 under these container limits: about 3 minutes with `enforce_eager=True`, about 6.5 minutes without (torch.compile and CUDA-graph capture, redone in every container because their caches live in `/tmp`); reading the weights from a cold disk took about 70 seconds of either. Prefill then ran at about 2,300 prompt tokens per second eager and 3,200 compiled, for a batch of 20 prompts of about 1,000 tokens each. On one card this hybrid model's linear-attention state holds about 180 concurrent sequences, so `max_num_seqs` must stay below that (vLLM's default 256 refuses to start). With the engine loaded, a replay's fit container peaked at about 5.7 GiB of container memory.
 - Reproducibility. With `enforce_eager=True`, temperature 0 and the same batch of prompts in the same order, outputs were identical in every container and on every card tried. A compiled engine (the default) gave different outputs in another container, and with prefix caching on (vLLM's default) even when the same engine repeated a batch. In both modes any other batch (one prompt alone, a subset, another order) changed most outputs. Since two replays of the same bytes must place the same orders, use eager mode and send each decision's prompts as one fixed batch (for example the day's shortlist sorted by code).
 - `chat_template_kwargs={"enable_thinking": False}` switches the Qwen3.5-family thinking block off; the template then renders an empty one and the answer follows it.
 - The `vllm` package is importable; its server (`vllm serve`) is a session tool, not something a strategy starts.
