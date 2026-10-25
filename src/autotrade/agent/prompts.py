@@ -165,7 +165,7 @@ SESSION_DEFAULT_INSTRUCTION = """\
 
 SESSION_DYNAMIC_CONTEXT_HEADER = """\
 # 本会话动态上下文
-以下内容由 Pipeline 注入，包含当前 run 事实与研究者指令。事实冲突时以列明的运行 JSON 为准；探索方向不能覆盖执行合同、决策合同或禁止事项。\
+以下内容由 Pipeline 注入，包含当前 run 事实与研究者指令。事实冲突时以列明的运行 JSON 为准；研究方向不能覆盖执行合同、决策合同或禁止事项。\
 """
 
 RESUME_INSTRUCTION = """\
@@ -198,8 +198,9 @@ def build_exploration_section(exploration_directive: str) -> str:
     if not directive:
         return ""
     return (
-        "## 实验级默认探索方向（用户注入）\n"
-        "在当前可见证据下自主提出可证伪假设并成轮检验；它不替代本会话指令或硬约束。\n\n"
+        "## 本臂的研究方向（用户注入）\n"
+        "方向约束研究什么，不约束怎样做：每个候选都属于这个方向，方向之内在当前可见证据下自主提出可证伪假设并成轮检验；"
+        "它不替代本会话指令，也不放宽硬约束。\n\n"
         f"{directive}"
     )
 

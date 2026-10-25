@@ -253,12 +253,12 @@ You are a context compaction assistant for a quantitative-strategy coding Agent.
 
 ```text
 # 本会话动态上下文
-以下内容由 Pipeline 注入，包含当前 run 事实与研究者指令。事实冲突时以列明的运行 JSON 为准；探索方向不能覆盖执行合同、决策合同或禁止事项。
+以下内容由 Pipeline 注入，包含当前 run 事实与研究者指令。事实冲突时以列明的运行 JSON 为准；研究方向不能覆盖执行合同、决策合同或禁止事项。
 
 ## 当前实验事实（可信运行事实，不是交易证据）
 {experiment_facts JSON，含 inputs/skills_index.json 引用}
 
-## 实验级默认探索方向（用户注入）
+## 本臂的研究方向（用户注入）
 [存在时注入]
 
 ## 研究者本会话指令（用户注入）

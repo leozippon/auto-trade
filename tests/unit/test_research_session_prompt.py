@@ -242,10 +242,13 @@ def test_the_prompt_states_the_research_session_contract() -> None:
         "以包为准",
         "尽早让第一个真正的候选",
         "开放搜索（",
+        # The injected direction binds; it is no longer a "default".
+        "默认探索方向",
         # The history length and refit pace are the strategy's own choice.
         "按季重训",
     ):
         assert retired not in prompt, retired
+    assert "## 本臂的研究方向（用户注入）\n方向约束研究什么，不约束怎样做" in prompt
     # The core scorer is the main Agent's own work; sub-agents do the routine.
     assert "核心打分器（把可见数据变成选股分数的那段代码）由你亲自设计并写出" in role
     # The sections follow the Agent's decisions: what to test, whether a row

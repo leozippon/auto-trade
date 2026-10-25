@@ -200,7 +200,7 @@ def render() -> str:
             f"{SESSION_DYNAMIC_CONTEXT_HEADER.strip()}\n\n"
             "## 当前实验事实（可信运行事实，不是交易证据）\n"
             "{experiment_facts JSON，含 inputs/skills_index.json 引用}\n\n"
-            "## 实验级默认探索方向（用户注入）\n"
+            "## 本臂的研究方向（用户注入）\n"
             "[存在时注入]\n\n"
             "## 研究者本会话指令（用户注入）\n"
             "[存在时注入]"
