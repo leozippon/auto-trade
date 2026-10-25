@@ -120,7 +120,7 @@ _FIELDS: list[dict[str, object]] = [
         "required": True,
         "help": "YYYYMMDD，晚于前推期终点；回放截到已固定发布的最后一个交易日，截断会记在前推记录里。",
     },
-    {"key": "research_directive", "group": "基本与排程", "label": "默认探索方向", "type": "text",
+    {"key": "research_directive", "group": "基本与排程", "label": "研究方向", "type": "text",
      "optional": True, "wide": True,
      "help": "可选。作为实验级待检验主线注入研究会话的系统提示，详情页仍可在会话启动前追加假设。"},
     {
