@@ -661,6 +661,12 @@ RETIRED_IDS: frozenset[str] = frozenset(
         "hcm_lm_100k_8y_sol_zgca_20261019b",
         "retrieval_lm_100k_8y_opus_20261022",
         "retrieval_lm_100k_8y_sol_20261022",
+        # Both arms of round 20261025 on the A100 instance, created and
+        # withdrawn on 2026-10-25 before their first leg (terminated and
+        # archived there) when the owner narrowed the direction; round
+        # 20261025b replaces them.
+        "open_lm_100k_8y_opus_zgca_20261025",
+        "open_lm_100k_8y_sol_zgca_20261025",
     }
 )
 
