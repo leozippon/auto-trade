@@ -710,6 +710,57 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self.assertEqual(shown.returncode, 0, shown.stderr)
         self.assertIn("round log: logs/zgca/create_round_test_20261019T190000Z.log\n  smoke\n  arms created\n  round-exit 0", shown.stdout)
         self.assertNotIn(build.name, shown.stdout)
+        self.assertIn("fill: no session\n", shown.stdout)
+        # A fill log is newer but is not the round log; its last pass and its end are shown.
+        fill = logs / "fill_create_round_test_20261019T210000Z.log"
+        fill.write_text("fill create_round_test: slots; queue 1: 0 created, 1 pending (...)\n"
+                        "fill create_round_test: slots; queue 1: 1 created, 0 pending (...)\nround-exit 0\n", encoding="utf-8")
+        shown = subprocess.run(["bash", str(zgca.REMOTE_SCRIPT), "status"], env={**os.environ, "ZGCA_REMOTE_ROOT": str(root)},
+                               capture_output=True, text=True, check=False)
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertIn("round log: logs/zgca/create_round_test_20261019T190000Z.log", shown.stdout)
+        self.assertIn(f"fill: no session; last log logs/zgca/{fill.name}\n  fill create_round_test: slots; queue 1: 1 created, 0 pending (...)\n  round-exit 0", shown.stdout)
+
+    def test_a_fill_repeats_until_nothing_is_pending_and_ends_at_a_failed_pass(self) -> None:
+        """The round step's --fill loop, run for real against a temporary root with
+        tmux, sleep and the launcher stubbed: every pass appends to one log, the
+        loop sleeps between passes and ends at the first pass that reports 0
+        pending, or at the first that exits non-zero, which is never retried."""
+        temp = Path(self.temp.name)
+        root, stubs = temp / "instance", temp / "stubs"
+        for directory in (root / ".venv" / "bin", root / "scripts" / "experiments", root / "logs" / "zgca", stubs):
+            directory.mkdir(parents=True)
+        (root / "scripts" / "experiments" / "create_round_test.py").write_text("", encoding="utf-8")
+        scripts = {
+            # The console's health probe answers; each launcher pass prints and exits as planned.
+            root / ".venv" / "bin" / "python": '#!/bin/sh\n[ "$1" = -c ] && { echo "{}"; exit 0; }\n'
+            'n=$(($(cat "$PASSES" 2>/dev/null || echo 0) + 1)); echo $n >"$PASSES"\n'
+            'line=$(sed -n "${n}p" "$PLAN"); echo "${line#*|}"; exit "${line%%|*}"\n',
+            # No session exists yet; a new one runs its command at once, in its directory.
+            stubs / "tmux": '#!/bin/sh\n[ "$1" = new-session ] || exit 1\n'
+            'while [ $# -gt 1 ]; do [ "$1" = -c ] && { shift; cd "$1"; }; shift; done\nexec sh -c "$1"\n',
+            stubs / "sleep": '#!/bin/sh\necho "$1" >>"$SLEPT"\n',
+        }
+        for script, body in scripts.items():
+            script.write_text(body, encoding="utf-8")
+            script.chmod(0o700)
+        held = "fill create_round_test: slots; queue 1: 0 skipped (created already), 0 created, 0 refused, 1 pending (1 by the free GPUs)"
+        done = held.replace("0 created", "1 created").replace("1 pending", "0 pending")
+        env = {**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}", "ZGCA_REMOTE_ROOT": str(root),
+               "PLAN": str(temp / "plan"), "PASSES": str(temp / "passes"), "SLEPT": str(temp / "slept")}
+        for plan, ending in (([f"0|{held}", f"0|{held}", f"0|{done}"], "round-exit 0"),
+                             ([f"0|{held}", "1|arm_one: refused, HTTP 400"], "round-exit 1")):
+            with self.subTest(ending=ending):
+                for leftover in (temp / "passes", temp / "slept", *(root / "logs" / "zgca").glob("*.log")):
+                    leftover.unlink(missing_ok=True)
+                (temp / "plan").write_text("\n".join(plan) + "\n", encoding="utf-8")
+                shown = subprocess.run(["bash", str(zgca.REMOTE_SCRIPT), "round", "scripts/experiments/create_round_test.py", "--fill"],
+                                       env=env, capture_output=True, text=True, check=False)
+                self.assertEqual(shown.returncode, 0, shown.stderr)
+                self.assertIn("fill launcher started in tmux session autotrade-fill", shown.stdout)
+                (log,) = (root / "logs" / "zgca").glob("fill_create_round_test_*.log")
+                self.assertEqual(log.read_text(encoding="utf-8").splitlines(), [step.split("|", 1)[1] for step in plan] + [ending])
+                self.assertEqual((temp / "slept").read_text(encoding="utf-8").split(), ["600"] * (len(plan) - 1))
 
     def test_the_tools_must_exist_and_the_remote_script_rejects_unknown_steps(self) -> None:
         for name in ("zenith", "instance", "dev"):

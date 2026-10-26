@@ -15,12 +15,14 @@ longer tracks, prepares the instance (ripgrep, venv, a sandbox image that runs
 on the instance's GPU driver), and last copies the pretrained-model store every
 new arm pins and mounts to the instance's own disk, or refuses when it does
 not fit there; push carries arms of this host a round names as lineage; a run
-starts the console and a round launcher in tmux with AUTOTRADE_GPU_NAME set;
-status and sync read and copy back. ZGCA_REMOTE_ROOT moves all of it to
-another root on the instance's personal storage (a validation deploy beside
-the live tree, on an instance other than the default). Nothing here
-schedules, caches an endpoint, keeps a secret in the repository or changes how
-the executor isolates a strategy container. See ops/zgca/README.md.
+starts the console and a round launcher in tmux with AUTOTRADE_GPU_NAME set,
+and repeats a `--fill` launcher every ten minutes in a session of its own
+until its round has nothing pending; status and sync read and copy back.
+ZGCA_REMOTE_ROOT moves all of it to another root on the instance's personal
+storage (a validation deploy beside the live tree, on an instance other than
+the default). Beyond that fill loop nothing here schedules, caches an
+endpoint, keeps a secret in the repository or changes how the executor
+isolates a strategy container. See ops/zgca/README.md.
 
 usage: zgca.py [--instance <id>] up | deploy <seed dir> | push <arm id>... |
        run <round file> [launcher args...] | status | sync <arm id> | down
@@ -495,7 +497,7 @@ def main(
     deploy.add_argument("seed", help="PIT view seed directory, relative to the repository (data/pit_views_seed_...)")
     push = commands.add_parser("push", help="copy arms of this host to the instance (lineage of an arm created there)")
     push.add_argument("arms", nargs="+", metavar="arm", help="experiment id")
-    run = commands.add_parser("run", help="start the console if needed and a round launcher in tmux")
+    run = commands.add_parser("run", help="start the console if needed and a round launcher in tmux; --fill repeats it until nothing is pending")
     run.add_argument("round_file", help="scripts/experiments/create_round_*.py")
     run.add_argument("args", nargs=argparse.REMAINDER, help="launcher arguments after the port (--dry-run, --fill, arm ids)")
     commands.add_parser("status", help="instance, card-hours, GPU, disk, tmux, console, arms, image, round log")

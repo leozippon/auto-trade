@@ -39,6 +39,11 @@ PORT=38888
 GPU_NAME=A100
 CONSOLE_SESSION=autotrade-console
 ROUND_SESSION=autotrade-round
+# A `--fill` launcher repeats in a session of its own until its round has
+# nothing pending, so a later `run` of another round neither kills it nor
+# waits for it; FILL_INTERVAL is the local research-fill cron's period.
+FILL_SESSION=autotrade-fill
+FILL_INTERVAL=600
 HEALTH="http://127.0.0.1:$PORT/api/health"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -259,15 +264,33 @@ round() {
     cd "$ROOT"
     require_venv
     [ -f "$round_file" ] || die "$round_file is not on the instance: deploy first"
-    ! tmux has-session -t "$ROUND_SESSION" 2>/dev/null \
-        || die "a round launcher is still running in tmux session $ROUND_SESSION; wait for it (status shows its log) or kill the session"
+    # One `--fill` pass creates what the free slots and cards allow and leaves
+    # the rest pending (scripts/experiments/_round.py); nothing on the instance
+    # repeats it the way the local cron does, so a fill that is not a dry run
+    # loops in FILL_SESSION.
+    local session=$ROUND_SESSION fill=0 dry=0 prefix="" arg
+    for arg in "$@"; do
+        case "$arg" in --fill) fill=1 ;; --dry-run) dry=1 ;; esac
+    done
+    if [ "$fill$dry" = 10 ]; then session=$FILL_SESSION; prefix=fill_; fi
+    ! tmux has-session -t "$session" 2>/dev/null \
+        || die "a round launcher is still running in tmux session $session; wait for it (status shows its log) or kill the session"
     health >/dev/null || die "the console does not answer at $HEALTH"
-    local log command arg
-    log="logs/zgca/$(basename "$round_file" .py)_$(date -u +%Y%m%dT%H%M%SZ).log"
+    local log command
+    log="logs/zgca/$prefix$(basename "$round_file" .py)_$(date -u +%Y%m%dT%H%M%SZ).log"
     printf -v command 'AUTOTRADE_GPU_NAME=%q %q %q %q' "$GPU_NAME" "$VENV/bin/python" "$round_file" "$PORT"
     for arg in "$@"; do printf -v arg ' %q' "$arg"; command+=$arg; done
-    tmux new-session -d -s "$ROUND_SESSION" -c "$ROOT" "$command >$log 2>&1; echo round-exit \$? >>$log"
-    echo "round launcher started in tmux session $ROUND_SESSION; log $ROOT/$log"
+    if [ "$session" = "$FILL_SESSION" ]; then
+        # Every pass appends to one log. The loop ends at the first pass that
+        # leaves nothing pending, or at the first that exits non-zero: a
+        # refused creation must reach the operator, not be retried forever.
+        tmux new-session -d -s "$session" -c "$ROOT" \
+            "while :; do $command >>$log 2>&1 || { echo round-exit \$? >>$log; break; }; grep '; queue ' $log | tail -n 1 | grep -q ', 0 pending (' && { echo round-exit 0 >>$log; break; }; sleep $FILL_INTERVAL; done"
+        echo "fill launcher started in tmux session $session, one pass every $FILL_INTERVAL s until nothing is pending; log $ROOT/$log"
+    else
+        tmux new-session -d -s "$session" -c "$ROOT" "$command >$log 2>&1; echo round-exit \$? >>$log"
+        echo "round launcher started in tmux session $session; log $ROOT/$log"
+    fi
 }
 
 # The project's part of `status`; `dev report` has shown GPUs, disks and tmux.
@@ -325,6 +348,20 @@ PY
     local latest
     latest=$(ls -t logs/zgca/create_round_*.log 2>/dev/null | head -n 1 || true)
     if [ -n "$latest" ]; then echo "round log: $latest"; tail -n 3 "$latest" | sed 's/^/  /'; fi
+    # The fill loop: whether its session runs, and the newest fill log's last
+    # pass summary and, once it has ended, how.
+    latest=$(ls -t logs/zgca/fill_create_round_*.log 2>/dev/null | head -n 1 || true)
+    if tmux has-session -t "$FILL_SESSION" 2>/dev/null; then
+        echo "fill: running in tmux session $FILL_SESSION${latest:+; log $latest}"
+    else
+        echo "fill: no session${latest:+; last log $latest}"
+    fi
+    if [ -n "$latest" ]; then
+        local line pass end
+        pass=$(grep '; queue ' "$latest" | tail -n 1) || true
+        end=$(grep '^round-exit' "$latest" | tail -n 1) || true
+        for line in "$pass" "$end"; do [ -z "$line" ] || echo "  $line"; done
+    fi
 }
 
 # One arm's recorded state, and a refusal while it runs: a running arm

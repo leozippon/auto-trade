@@ -42,7 +42,9 @@ python ops/zgca/zgca.py push hcm_100k_8y_sol_qwen_20261014d hcm_100k_8y_sol_dsf_
 
 `run <轮次文件> [启动器参数...]` 要求轮次文件是仓库里的受管文件（否则 `deploy` 不会把它带过去）。它先确保控制台在 tmux 会话 `autotrade-console` 里以 `AUTOTRADE_GPU_NAME=A100` 运行并回答 `/api/health`，再把启动器放进 tmux 会话 `autotrade-round`，同样带着 `AUTOTRADE_GPU_NAME=A100`，端口由脚本补上，其余参数（`--dry-run`、`--fill`、臂 id）原样传给轮次文件；输出写到开发机的 `logs/zgca/<轮次文件名>_<UTC 时间>.log`，结束时追加一行 `round-exit <退出码>`。上一轮启动器还在跑时拒绝再启动。启动器创建臂之前要先做起步策略的冒烟回放，在 A100 上实测约两小时；通过的记录在开发机的 `logs/research/smoke/` 下按种子、几何与起步策略字节保存，下次直接复用。
 
-`status` 先用 `instance show` 打印实例状态与卡时；实例在运行时再用 `dev report` 打印 GPU、根盘与个人存储余量和 tmux 会话，然后打印控制台健康（含空闲槽位与空闲 GPU）、每条在跑臂的状态、阶段与心跳距今的秒数（worker 已不在却没有结束的臂单独标出）、沙箱镜像，以及最近一份 `create_round_*` 启动器日志的末尾三行（镜像构建日志也在同一目录，不算在内）。
+带 `--fill` 而不是 `--dry-run` 时，启动器改放进 tmux 会话 `autotrade-fill`，每十分钟跑一遍，直到轮次里没有待建的臂。一遍 `--fill` 只建当下空闲槽位与空闲卡容得下的臂，其余留作待建；本机由研究填充 cron（`ops/cron/research_fill.cron`）每十分钟再跑一遍，开发机上没有 crontab，所以由这个循环来跑。每一遍都追加到同一份 `logs/zgca/fill_<轮次文件名>_<UTC 时间>.log`：某一遍的汇总行报 `0 pending` 时循环以 `round-exit 0` 结束；某一遍以非零退出（创建被拒、控制台不回答）时循环以那个退出码结束，不再重试，留给操作者处理。它与 `autotrade-round` 分开，之后别的轮次的 `run` 既不等它也不会结束它；同一时间只有一个填充循环，要提前停下就 `~/zgca-compute/dev tmux kill-session -t autotrade-fill`。
+
+`status` 先用 `instance show` 打印实例状态与卡时；实例在运行时再用 `dev report` 打印 GPU、根盘与个人存储余量和 tmux 会话，然后打印控制台健康（含空闲槽位与空闲 GPU）、每条在跑臂的状态、阶段与心跳距今的秒数（worker 已不在却没有结束的臂单独标出）、沙箱镜像，最近一份 `create_round_*` 启动器日志的末尾三行（镜像构建日志也在同一目录，不算在内），以及填充循环：会话 `autotrade-fill` 是否在跑、最近一份填充日志的最后一行汇总，结束了的还有它的 `round-exit`。
 
 `sync <臂 id>` 把开发机上这条臂的实验目录（不含 `pit_views/`，那是可从种子重建的 12 GB 缓存）和 `logs/workers/<臂>.log` 用 `dev copy` 拉回本仓库。本地已有同名目录时，只有它的 `hitl/params.json` 记着开发机的实验根（即以前从开发机同步来的副本）才会更新，本机自己的臂一律拒绝覆盖。同步前先打印臂当前的状态；臂还在跑时拒绝同步，因为它的 `status.json` 每几秒改写一次、日志不断增长，拷贝过不了比对，等它结束再同步。“在跑”与 `status`、`push` 和镜像重建的判定都用控制台自己的规则（`hitl_state.running_arms`）。
 
@@ -102,7 +104,7 @@ unset ZGCA_REMOTE_ROOT
 
 实例盘上的模型库和镜像停机再开后仍在，这是观察而不是保证；丢了就要重传模型库。
 
-`deploy` 只在仍含受管文件的顶层目录里清理：整个退出版本库的顶层目录、仓库根下不再受管的文件和清理后留下的空目录仍留在开发机上。镜像只在合同指纹说它缺失或过期时重建，所以只改 Dockerfile、合同文件不变的改动不会让实例重建，要先在实例上删掉镜像 tag 再部署。控制台不随 `deploy` 重启，改了代码之后要在没有臂运行时 `~/zgca-compute/dev tmux kill-session -t autotrade-console` 再 `run`。`status` 只认 `create_round_*` 命名的启动器日志。
+`deploy` 只在仍含受管文件的顶层目录里清理：整个退出版本库的顶层目录、仓库根下不再受管的文件和清理后留下的空目录仍留在开发机上。镜像只在合同指纹说它缺失或过期时重建，所以只改 Dockerfile、合同文件不变的改动不会让实例重建，要先在实例上删掉镜像 tag 再部署。控制台不随 `deploy` 重启，改了代码之后要在没有臂运行时 `~/zgca-compute/dev tmux kill-session -t autotrade-console` 再 `run`。`status` 只认 `create_round_*` 与 `fill_create_round_*` 命名的启动器日志。
 
 模型服务的 key 在实例存在期间一直留在开发机的 `.env` 里（仅 root 可读），停机不清除；其中本机 vLLM 网关的 key 只有在某个对话角色跑在本机模型上时 worker 才要求，开发机上没有这个网关，所以用不上。`sync` 不拉回开发机上的模型服务会话日志（`data/llm_conversations/`）：日志按服务方、模型、日期和 worker 进程号分文件，几条臂写在同一棵目录里，续跑换了进程号的旧文件也无从按臂认出，一条 gpt-6 臂就有数百 MB；要用时整棵取回，`~/zgca-compute/dev rsync -a dev:/personal_fast_storage/auto-trade/data/llm_conversations/ <本地目录>/`（有臂在跑时目录仍在增长，所以不用 `dev copy` 比对）。
 
