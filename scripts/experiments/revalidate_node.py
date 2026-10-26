@@ -14,8 +14,11 @@ is recorded: ``--variant`` replays a modified copy of the node's ``output/``
 instead (an ablation; the reading keeps the diff against the recorded bytes),
 ``--seed`` gives the strategy's one seed line another integer (the one change
 a seed replicate may make, ``experiment.seed_change``), ``--slippage-bps``
-replaces the arm's slippage knob, and ``--start-day``/``--max-days`` truncate
-the replay to a window as a smoke does (no zero-skill panel then).
+replaces the arm's slippage knob, ``--gpus 0`` sets its ``gpu_count`` knob to 0
+(the containers attach no card, the CPU-only path of a ``gpu_count`` 0 arm;
+for a strategy that never touches a GPU, when no card is free), and
+``--start-day``/``--max-days`` truncate the replay to a window as a smoke does
+(no zero-skill panel then).
 
 Everything is written below ``.runtime/revalidate/<arm>/<node>/<label>/``:
 ``reading.json`` (what was replayed, then the result reference or the error),
@@ -24,7 +27,7 @@ views and the result, and ``active_daily.csv`` beside the result of a whole
 span. The arm's directory is only read. A label is used once.
 
 usage: revalidate_node.py --experiment <arm> --node valid_012 --label exact
-       [--span full] [--variant DIR] [--seed N] [--slippage-bps X]
+       [--span full] [--variant DIR] [--seed N] [--slippage-bps X] [--gpus 0]
        [--start-day YYYYMMDD] [--max-days N]
 """
 
@@ -180,6 +183,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--variant", type=Path, help="Modified copy of the node's output/ to replay.")
     parser.add_argument("--seed", type=int, help="New value of the strategy's one seed line.")
     parser.add_argument("--slippage-bps", type=float, help="Replaces the arm's slippage_bps.")
+    parser.add_argument("--gpus", type=int, choices=[0], help="0: attach no card (gpu_count 0).")
     parser.add_argument("--start-day", help="First trading day of a truncated window (YYYYMMDD).")
     parser.add_argument("--max-days", type=int, help="Trading days of a truncated window.")
     args = parser.parse_args(argv)
@@ -218,6 +222,7 @@ def main(argv: list[str] | None = None) -> int:
         "variant": None,
         "seed_line": None,
         "slippage_bps": params.get("slippage_bps") if args.slippage_bps is None else args.slippage_bps,
+        "gpu_count": params.get("gpu_count") if args.gpus is None else args.gpus,
         "started_at": utc_now_iso(),
         "status": "running",
     }
@@ -233,6 +238,7 @@ def main(argv: list[str] | None = None) -> int:
             "experiments_root": str(scratch),
             "work_root": str(out / "work"),
             **({} if args.slippage_bps is None else {"slippage_bps": args.slippage_bps}),
+            **({} if args.gpus is None else {"gpu_count": args.gpus}),
         }
         options = resolve_worker_options({**params, **overrides}, experiment_dir=experiment_dir, repo_root=REPO_ROOT)
         spec = options.agent_sandbox

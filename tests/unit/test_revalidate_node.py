@@ -51,7 +51,8 @@ def test_a_reading_goes_below_runtime_revalidate_once(tmp_path: Path, monkeypatc
 
 
 @pytest.mark.parametrize(
-    "extra", [["--max-days", "0"], ["--start-day", "2024-07-01"], ["--slippage-bps", "-1"], ["--seed", "x"]]
+    "extra",
+    [["--max-days", "0"], ["--start-day", "2024-07-01"], ["--slippage-bps", "-1"], ["--seed", "x"], ["--gpus", "1"]],
 )
 def test_bad_arguments_are_refused(extra: list[str]) -> None:
     with pytest.raises(SystemExit) as exit_info:
