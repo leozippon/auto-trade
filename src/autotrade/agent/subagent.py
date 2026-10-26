@@ -103,6 +103,13 @@ SUBAGENT_DESCRIPTION_MAX_CHARS = 200
 # before the child's next model round.
 SUBAGENT_STEER_MAX_CHARS = 2_000
 STEER_MESSAGE_LABEL = "[父代理指令]"
+# Opens an inherited-context child's task. The forked history ends in the
+# parent's own delegation turns; a bare task after it once let a child carry
+# on as the parent, relaunching `agent` instead of doing its task.
+INHERITED_CONTEXT_BOUNDARY = (
+    "以上是父 Agent 到分叉点为止的对话，仅作背景。"
+    "你是 `{role}` sub-agent，没有 `agent` 工具、不能委托，直接用自己的工具完成下面的任务："
+)
 # Characters of a child's final report delivered inline in the parent's
 # ``subagent_completed`` observation (Pi's preview-then-fetch shape). A longer
 # report is clipped there and spilled in full through the search tools'
@@ -756,6 +763,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
             # the tail is the parent's finalization window.
             started["parent_reserve_seconds"] = self.parent_reserve_seconds
         self._emit("subagent_task", started)
+        brief = task.strip()
         if transcript:
             # Resume: the child's own conversation continues; a transcript cut
             # off mid-batch still ends at its last answered turn.
@@ -764,20 +772,24 @@ class SubAgentEngine(SessionTimeBudgetAware):
             )
         else:
             messages = [ChatMessage("system", subagent_system_prompt(role))]
-            if inherit_context and parent_messages:
-                # The parent snapshot is taken mid-batch: its last assistant
-                # turn may carry tool calls (this launch among them) with no
-                # results yet, so the fork ends at the last answered turn.
-                messages.extend(
-                    drop_trailing_unanswered_tool_calls(
-                        [
-                            _copy_chat_message(message)
-                            for message in parent_messages
-                            if message.role != "system"
-                        ]
-                    )
+            # The parent snapshot is taken mid-batch: its last assistant turn
+            # may carry tool calls (this launch among them) with no results
+            # yet, so the fork ends at the last answered turn.
+            forked = (
+                drop_trailing_unanswered_tool_calls(
+                    [
+                        _copy_chat_message(message)
+                        for message in parent_messages
+                        if message.role != "system"
+                    ]
                 )
-        messages.append(ChatMessage("user", task.strip()))
+                if inherit_context and parent_messages
+                else []
+            )
+            if forked:
+                messages.extend(forked)
+                brief = f"{INHERITED_CONTEXT_BOUNDARY.format(role=role)}\n\n{brief}"
+        messages.append(ChatMessage("user", brief))
         usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         rounds = 0
         tool_calls_made = 0
@@ -1346,7 +1358,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
     ) -> list[tuple[ToolCall, dict[str, object], bool]]:
 
         rejections = [
-            _reject_tool_call(self.tools.spec(call.name), allowed=allowed)
+            _reject_tool_call(call.name, self.tools.spec(call.name), allowed=allowed)
             for call in calls
         ]
 
@@ -1547,9 +1559,14 @@ def _add_usage(total: dict[str, int], usage: object) -> None:
         total["cache_hit_tokens"] = total.get("cache_hit_tokens", 0) + cached
 
 
-def _reject_tool_call(spec: ToolSpec | None, *, allowed: frozenset[str]) -> str:
+def _reject_tool_call(
+    name: str, spec: ToolSpec | None, *, allowed: frozenset[str]
+) -> str:
     if spec is None:
-        return "unknown sub-agent tool"
+        return (
+            f"unknown sub-agent tool: {name}; sub-agents cannot delegate or call "
+            "parent-only tools, finish the task with your own tools"
+        )
     if spec.name not in allowed:
         return f"Sub-agent tool is not allowed: {spec.name}"
     return ""

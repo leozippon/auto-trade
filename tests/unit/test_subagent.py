@@ -29,6 +29,7 @@ from autotrade.agent.subagent import (
     AGENT_TOOL_SPEC,
     DEFAULT_SUBAGENT_MAX_CONCURRENT,
     DEFAULT_SUBAGENT_THINKING,
+    INHERITED_CONTEXT_BOUNDARY,
     STEER_MESSAGE_LABEL,
     SUBAGENT_DEGRADED_SUMMARY_ERROR,
     SUBAGENT_DEGRADED_SUMMARY_MARKER,
@@ -610,6 +611,28 @@ def test_subagent_unknown_tool_call_is_rejected_without_invoke() -> None:
     assert result["tool_calls"] == 0
 
 
+def test_subagent_agent_call_is_rejected_by_name() -> None:
+    llm = ScriptedLLM(
+        [
+            ProviderResponse(
+                tool_calls=(ToolCall("a", "agent", {"agent": "Explore", "task": "x"}),)
+            ),
+            ProviderResponse(content="did it myself"),
+        ]
+    )
+    SubAgentEngine(llm=llm, tools=ToolRegistry([DeclaredReadOnlyShell()])).run(
+        "inspect", role="Explore"
+    )
+    second = llm.calls[1]
+    assert isinstance(second, dict)
+    tool_message = second["messages"][-1]
+    assert tool_message.role == "tool"
+    record = json.loads(str(tool_message.content))
+    assert record["ok"] is False
+    assert record["error"].startswith("unknown sub-agent tool: agent;")
+    assert "cannot delegate" in record["error"]
+
+
 class _UnusedRunner:
     def run(self, argv, *, cwd, timeout_seconds, max_output_chars, input_text=None):
         raise AssertionError("runner is unused")
@@ -1154,17 +1177,23 @@ def test_subagent_defaults_are_xhigh_thinking_and_six_concurrent() -> None:
 
 
 def test_subagent_inherit_context_prepends_parent_digest() -> None:
-    llm = ScriptedLLM([ProviderResponse(content="used parent excerpt")])
-    result = SubAgentEngine(
-        llm=llm,
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
-    ).run(
+    llm = ScriptedLLM(
+        [
+            ProviderResponse(content="used parent excerpt"),
+            ProviderResponse(content="fresh"),
+        ]
+    )
+    engine = SubAgentEngine(llm=llm, tools=ToolRegistry([DeclaredReadOnlyShell()]))
+    launch = ToolCall("p1", "agent", {"agent": "Explore", "task": "earlier"})
+    result = engine.run(
         "summarize",
         role="Explore",
         inherit_context=True,
         parent_messages=[
             ChatMessage("system", "secret"),
             ChatMessage("user", "visible parent note"),
+            ChatMessage("assistant", "", tool_calls=(launch,)),
+            ChatMessage("tool", '{"ok": true}', tool_call_id="p1"),
         ],
         thinking="low",
         description="schema audit",
@@ -1180,7 +1209,19 @@ def test_subagent_inherit_context_prepends_parent_digest() -> None:
     contents = [str(msg.content) for msg in recorded]
     assert any("visible parent note" in text for text in contents)
     assert all("secret" not in text for text in contents)
-    assert any(msg.role == "user" for msg in recorded)
+    # The parent's own delegation turns precede one boundary that names the
+    # child's role and its missing `agent` tool.
+    assert recorded[-2].role == "tool"
+    assert recorded[-1].role == "user"
+    assert recorded[-1].content == (
+        f"{INHERITED_CONTEXT_BOUNDARY.format(role='Explore')}\n\nsummarize"
+    )
+    assert "`agent`" in recorded[-1].content
+    engine.run("summarize", role="Explore")
+    fresh = llm.calls[1]
+    assert isinstance(fresh, dict)
+    assert [msg.role for msg in fresh["messages"]] == ["system", "user"]
+    assert fresh["messages"][-1].content == "summarize"
 
 
 def test_subagent_arguments_are_validated_by_the_registry() -> None:
@@ -2477,7 +2518,10 @@ def test_inherit_context_fork_drops_the_unanswered_tool_calls() -> None:
     assert started.ok
     assert runner._wait_subagent_jobs()[-1]["ok"] is True
     request = child.calls[0]["messages"]
-    assert request[-1].role == "user" and request[-1].content == "fork"
+    assert request[-1].role == "user"
+    assert request[-1].content == (
+        f"{INHERITED_CONTEXT_BOUNDARY.format(role='Explore')}\n\nfork"
+    )
     assert all("secret contract" not in (m.content or "") for m in request)
     answered = {m.tool_call_id for m in request if m.role == "tool"}
     for message in request:
