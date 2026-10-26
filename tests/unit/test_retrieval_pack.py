@@ -8,8 +8,10 @@ Agent in one wording, and nothing before the facts names a model, so neither
 copy steers the session to one; round 20261026's directive starts with the
 same paragraph and adds only its call to explore, which names no model
 either, and its astra arm on the A100 instance sends what the local astra arm
-sent but for one card instead of two. No pack file cites a reading after the
-research period.
+sent but for one card instead of two. Rounds 20261027 and 20261027b send
+round 20261026's directive plus one sentence pointing at the record of closed
+families, word for word alike and naming no model, on the instance's card at
+six replays per batch. No pack file cites a reading after the research period.
 """
 
 from __future__ import annotations
@@ -17,7 +19,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from autotrade.environment.llm import MODEL_CHOICES
-from scripts.experiments import create_round_20261026
+from scripts.experiments import (
+    create_round_20261026,
+    create_round_20261027,
+    create_round_20261027b,
+)
 from scripts.experiments.create_round_20261025b import DIRECTIVE, PACK
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -70,6 +76,25 @@ def test_round_20261026_moves_astra_to_the_instance_unchanged_but_for_one_card()
         "gpu_count": 1,
         "experiment_id": moved,
     }
+
+
+def test_rounds_20261027_add_the_closed_families_and_name_no_model() -> None:
+    directive = create_round_20261027.DIRECTIVE
+    assert create_round_20261027b.DIRECTIVE == directive
+    extra = directive.removeprefix(create_round_20261026.DIRECTIVE)
+    assert extra != directive and "`refs/families.md`" in extra
+    for name in (*MODEL_CHOICES, "Qwen", "gemini", "gpt", "claude", "DeepSeek"):
+        assert name.lower() not in directive.lower(), name
+    for module in (create_round_20261027, create_round_20261027b):
+        for arm in module.ARMS:
+            params = module.ROUND.request_params(arm)
+            assert (
+                params["workspace_reference"],
+                params["research_directive"],
+                params["llm_key"],
+                params["gpu_count"],
+                params["batch_validate_max_concurrency"],
+            ) == (PACK, directive, "primary", 1, 6)
 
 
 def test_no_pack_file_cites_a_reading_after_the_research_period() -> None:
