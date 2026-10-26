@@ -275,7 +275,7 @@ def _streamed_text(text: str = "OK") -> bytes:
 
 
 def test_catalog_registers_every_relay_id_with_its_dialect_and_window():
-    assert len(MODEL_PROFILES) == 7
+    assert len(MODEL_PROFILES) == 8
     for model, dialect, window, output, prices in MODEL_PROFILES:
         assert model in MODEL_CHOICES
         profile = model_profile(model)

@@ -1,7 +1,7 @@
 """LightingTheWord (New API relay) gateway.
 
 The relay serves its gpt-6 family over ``/v1/responses`` — that family refuses
-function tools on Chat Completions — and its Anthropic ids and
+function tools on Chat Completions — and its Anthropic ids, gemini-4-argon and
 DeepSeek-V4.1-Flash over ``/v1/chat/completions``, with a primary credential
 and an alternate one. The Anthropic ids' requests also mark a prompt-cache
 breakpoint, which the relay forwards to the upstream Messages API.
@@ -54,19 +54,24 @@ DEEPSEEK_FLASH_MODEL = "DeepSeek-V4.1-Flash"
 # prices). Every relay id declares a 1M window, with the relay's own completion
 # ceilings; for the gpt-6 ids that is the project owner's figure (2026-10-14),
 # backed by the relay pricing a tier past 272k but not yet probed with such a
-# request. Prices are USD per million uncached prompt / cached prompt /
-# completion / cache-write tokens from the relay's public
-# ``GET https://lightingtheword.com/api/pricing`` as of 2026-10-14: a dated
+# request, and gemini-4-argon's upstream refuses a maxOutputTokens above
+# 1,048,576 (probed 2026-10-26), more than the window, which bounds it instead.
+# Prices are USD per million uncached prompt / cached prompt / completion /
+# cache-write tokens from the relay's public
+# ``GET https://lightingtheword.com/api/pricing`` as of 2026-10-14, and
+# gemini-4-argon's as of 2026-10-26 (``pricing_version`` a42d372c): a dated
 # snapshot, refreshed by hand when the relay's ``pricing_version`` moves. The
 # gpt-6 ids bill a request by its length: up to 272,000 prompt tokens at the
 # short-context tier listed here, a longer one at twice the prompt and 1.5
 # times the completion price, which the spend cap does not model -- a
 # conversation on them must compact below that boundary (see
-# LONG_CONTEXT_TIER_MODELS). DeepSeek-V4.1-Flash is listed at its weekday-peak
-# rate (off-peak bills half). Cache writes: gpt-6.1-sol's at the relay's 2.5;
-# the Claude ids' at 1.25 times the uncached prompt, Anthropic's rate for the
-# 5-minute TTL their breakpoint asks for; gpt-6-astra's and gpt-6-luna's are
-# not recorded, so they stay at the uncached prompt; DeepSeek reports none.
+# LONG_CONTEXT_TIER_MODELS). gemini-4-argon bills one tier at any length.
+# DeepSeek-V4.1-Flash is listed at its weekday-peak rate (off-peak bills half).
+# Cache writes: gpt-6.1-sol's at the relay's 2.5; the Claude ids' at 1.25 times
+# the uncached prompt, Anthropic's rate for the 5-minute TTL their breakpoint
+# asks for; gpt-6-astra's and gpt-6-luna's are not recorded, and
+# gemini-4-argon's price lists no cache-write term, so they stay at the
+# uncached prompt; DeepSeek reports none.
 MODEL_PROFILES: tuple[tuple[str, str, int, int, TokenPrices], ...] = (
     ("gpt-6.1-sol", RESPONSES_DIALECT, 1_000_000, 128_000, TokenPrices(2.0, 0.1, 10.0, 2.5)),
     ("gpt-6-astra", RESPONSES_DIALECT, 1_000_000, 128_000, TokenPrices(10.0, 1.0, 50.0, 10.0)),
@@ -74,6 +79,7 @@ MODEL_PROFILES: tuple[tuple[str, str, int, int, TokenPrices], ...] = (
     ("claude-fable-5-1", CHAT_DIALECT, 1_000_000, 128_000, TokenPrices(10.0, 0.25, 50.0, 12.5)),
     ("claude-sonnet-5-5", CHAT_DIALECT, 1_000_000, 128_000, TokenPrices(2.0, 0.2, 10.0, 2.5)),
     ("claude-opus-5-5", CHAT_DIALECT, 1_000_000, 128_000, TokenPrices(4.0, 0.2, 20.0, 5.0)),
+    ("gemini-4-argon", CHAT_DIALECT, 1_000_000, 1_000_000, TokenPrices(2.0, 0.1, 10.0, 2.0)),
     (
         DEEPSEEK_FLASH_MODEL,
         DEEPSEEK_DIALECT,
@@ -174,7 +180,8 @@ def build_gateway(
                 temperature=temperature,
                 thinking_enabled=thinking_enabled,
                 # Only the relay's two dialects that carry a level get one: the
-                # hosted Claude ids accept no reasoning control at all, and the
+                # hosted Claude ids accept no reasoning control at all,
+                # gemini-4-argon thinks at its upstream default, and the
                 # responses dialect sends no field when thinking is off (the
                 # gpt-6 family has no "none" tier except gpt-6-luna).
                 reasoning_effort=(
@@ -196,10 +203,10 @@ def build_gateway(
 class LightingProxy(OpenAICompatibleProxy):
     """The relay's own dialect, cache breakpoint and credential fallback.
 
-    Its Anthropic and DeepSeek ids use the shared Chat Completions dialects,
-    the Anthropic ids with a cache breakpoint added to the payload; only the
-    gpt-6 family replaces the request payload and the response parser with
-    the responses contract.
+    Its Anthropic, Gemini and DeepSeek ids use the shared Chat Completions
+    dialects, the Anthropic ids with a cache breakpoint added to the payload;
+    only the gpt-6 family replaces the request payload and the response parser
+    with the responses contract.
     """
 
     def __init__(
