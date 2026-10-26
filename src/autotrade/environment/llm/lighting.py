@@ -59,23 +59,23 @@ DEEPSEEK_FLASH_MODEL = "DeepSeek-V4.1-Flash"
 # Prices are USD per million uncached prompt / cached prompt / completion /
 # cache-write tokens from the relay's public
 # ``GET https://lightingtheword.com/api/pricing`` as of 2026-10-14, and
-# gemini-4-argon's as of 2026-10-26 (``pricing_version`` a42d372c): a dated
-# snapshot, refreshed by hand when the relay's ``pricing_version`` moves. The
-# gpt-6 ids bill a request by its length: up to 272,000 prompt tokens at the
+# gemini-4-argon's and the gpt-6-astra and gpt-6-luna cache writes as of
+# 2026-10-26 (``pricing_version`` a42d372c): a dated snapshot, refreshed by
+# hand when the relay's ``pricing_version`` moves. The gpt-6 ids bill a request by its length: up to 272,000 prompt tokens at the
 # short-context tier listed here, a longer one at twice the prompt and 1.5
 # times the completion price, which the spend cap does not model -- a
 # conversation on them must compact below that boundary (see
 # LONG_CONTEXT_TIER_MODELS). gemini-4-argon bills one tier at any length.
 # DeepSeek-V4.1-Flash is listed at its weekday-peak rate (off-peak bills half).
-# Cache writes: gpt-6.1-sol's at the relay's 2.5; the Claude ids' at 1.25 times
-# the uncached prompt, Anthropic's rate for the 5-minute TTL their breakpoint
-# asks for; gpt-6-astra's and gpt-6-luna's are not recorded, and
-# gemini-4-argon's price lists no cache-write term, so they stay at the
-# uncached prompt; DeepSeek reports none.
+# Cache writes: the gpt-6 ids' at the relay's own (1.25 times the uncached
+# prompt); the Claude ids' at 1.25 times the uncached prompt, Anthropic's rate
+# for the 5-minute TTL their breakpoint asks for; gemini-4-argon's price lists
+# no cache-write term, so it stays at the uncached prompt; DeepSeek reports
+# none.
 MODEL_PROFILES: tuple[tuple[str, str, int, int, TokenPrices], ...] = (
     ("gpt-6.1-sol", RESPONSES_DIALECT, 1_000_000, 128_000, TokenPrices(2.0, 0.1, 10.0, 2.5)),
-    ("gpt-6-astra", RESPONSES_DIALECT, 1_000_000, 128_000, TokenPrices(10.0, 1.0, 50.0, 10.0)),
-    ("gpt-6-luna", RESPONSES_DIALECT, 1_000_000, 128_000, TokenPrices(0.1, 0.01, 0.5, 0.1)),
+    ("gpt-6-astra", RESPONSES_DIALECT, 1_000_000, 128_000, TokenPrices(10.0, 1.0, 50.0, 12.5)),
+    ("gpt-6-luna", RESPONSES_DIALECT, 1_000_000, 128_000, TokenPrices(0.1, 0.01, 0.5, 0.125)),
     ("claude-fable-5-1", CHAT_DIALECT, 1_000_000, 128_000, TokenPrices(10.0, 0.25, 50.0, 12.5)),
     ("claude-sonnet-5-5", CHAT_DIALECT, 1_000_000, 128_000, TokenPrices(2.0, 0.2, 10.0, 2.5)),
     ("claude-opus-5-5", CHAT_DIALECT, 1_000_000, 128_000, TokenPrices(4.0, 0.2, 20.0, 5.0)),
