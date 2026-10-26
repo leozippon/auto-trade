@@ -61,12 +61,13 @@ DEEPSEEK_FLASH_MODEL = "DeepSeek-V4.1-Flash"
 # ``GET https://lightingtheword.com/api/pricing`` as of 2026-10-14, and
 # gemini-4-argon's and the gpt-6-astra and gpt-6-luna cache writes as of
 # 2026-10-26 (``pricing_version`` a42d372c): a dated snapshot, refreshed by
-# hand when the relay's ``pricing_version`` moves. The gpt-6 ids bill a request by its length: up to 272,000 prompt tokens at the
-# short-context tier listed here, a longer one at twice the prompt and 1.5
-# times the completion price, which the spend cap does not model -- a
-# conversation on them must compact below that boundary (see
-# LONG_CONTEXT_TIER_MODELS). gemini-4-argon bills one tier at any length.
-# DeepSeek-V4.1-Flash is listed at its weekday-peak rate (off-peak bills half).
+# hand when the relay's ``pricing_version`` moves. The gpt-6 ids bill a
+# request by its length: up to 272,000 prompt tokens at the short-context tier
+# listed here, a longer one at twice the prompt and 1.5 times the completion
+# price, which the spend cap does not model -- a conversation on them must
+# compact below that boundary (see LONG_CONTEXT_TIER_MODELS). gemini-4-argon
+# bills one tier at any length. DeepSeek-V4.1-Flash is listed at its
+# weekday-peak rate (off-peak bills half).
 # Cache writes: the gpt-6 ids' at the relay's own (1.25 times the uncached
 # prompt); the Claude ids' at 1.25 times the uncached prompt, Anthropic's rate
 # for the 5-minute TTL their breakpoint asks for; gemini-4-argon's price lists
