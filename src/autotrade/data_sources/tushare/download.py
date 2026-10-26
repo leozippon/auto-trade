@@ -84,6 +84,7 @@ from .common import (
     inherited_updater_lock_fd,
     intraday_expected_codes_for_day,
     latest_sse_calendar_date,
+    list_versions,
     load_minute_universe,
     load_sse_open_dates,
     load_stock_codes,
@@ -131,6 +132,7 @@ from .common import (
     stk_mins_by_date_path,
     undated_duplicate_mask,
     validate_stk_mins_by_date_frame,
+    version_dir,
     write_board_result,
     write_macro_result,
     write_parquet,
@@ -2013,6 +2015,11 @@ def query_share_float_to_path(
         meta_params["row_limit"] = SHARE_FLOAT_ROW_LIMIT
         df = augment_event_frame(frame(result), EVENT_FLOW_SPECS["share_float"])
         fetched = len(df)
+        # An answer at the per-call cap is a truncated slice whose content
+        # rotates as the vendor adds rows (2026-10: new IPO lock-ups of ~6,000
+        # holder rows pushed older codes out of five ann_date answers). Its
+        # missing keys are not a withdrawal, so it is published, never staged;
+        # the ts_code rescue recovers what it could not return.
         outcome = publish(
             path,
             df,
@@ -2021,6 +2028,7 @@ def query_share_float_to_path(
             fields=list(df.columns),
             key_columns=list(EVENT_FLOW_SPECS["share_float"].key_columns),
             ledger=revision_ledger,
+            truncated=fetched >= SHARE_FLOAT_ROW_LIMIT,
         )
     written = outcome in WRITTEN_OUTCOMES
     rows = fetched if written else parquet_rows(path) if path.exists() else 0
@@ -2058,9 +2066,9 @@ def download_share_float_ann_dates(client: TuShareClient, raw_dir: Path, args: a
         if result["source_cap_risk"]:
             limit_hits.append(day)
         elif result["staged"]:
-            # Staged but NOT capped: the source dropped most of the day's keys,
-            # which no ts_code rescue can repair. The staged version is an open
-            # issue for an operator to promote or leave.
+            # Only an uncapped answer is ever staged: the source dropped most of
+            # the day's keys, which no ts_code rescue can repair. The staged
+            # version is an open issue for an operator to promote or leave.
             staged.append(day)
         if index % 250 == 0:
             print(f"share_float ann_date {index}/{len(days)} skipped={skipped} written={written} rows_seen={total_rows} limit_hits={len(limit_hits)}")
@@ -2153,8 +2161,10 @@ def selected_share_float_rescue_dates(args: argparse.Namespace, ann_limit_hits: 
     auto: list[str] = []
     skipped_auto: list[str] = []
     if args.rescue_ann_limit_hits:
-        auto = ann_limit_hits[: args.max_ann_rescue_days]
-        skipped_auto = ann_limit_hits[args.max_ann_rescue_days :]
+        # Every limit-hit day: an unrescued capped day leaves the union without
+        # the rows the vendor could not return. --max-rescue-calls bounds the
+        # cost and fails the run explicitly when it would be exceeded.
+        auto = ann_limit_hits
     elif ann_limit_hits:
         skipped_auto = ann_limit_hits
     return unique_ordered(explicit + auto), skipped_auto
@@ -2183,11 +2193,22 @@ def read_ts_codes_from_parquet(path: Path, *, extra_filter: tuple[str, str] | No
     return unique_ordered(df["ts_code"].dropna().astype(str).str.strip().tolist())
 
 def share_float_self_candidate_codes(raw_dir: Path, date_param: str, dates: list[str]) -> dict[str, list[str]]:
+    """For an ann_date, every code a kept answer for the day carried: the
+    visible partition, its kept versions (a truncated answer that replaced it
+    leaves the codes it pushed out in the superseded one) and the day's ts_code
+    rescue partitions, so a code once seen stays a candidate."""
     candidates: dict[str, list[str]] = {date: [] for date in dates}
     for day in dates:
         if date_param == "ann_date":
             path = raw_dir / "share_float_ann_date" / f"ann_date={day}.parquet"
             candidates[day].extend(read_ts_codes_from_parquet(path))
+            for version in list_versions(path):
+                candidates[day].extend(read_ts_codes_from_parquet(version_dir(path) / f"{version}.parquet"))
+            rescue_dir = raw_dir / "share_float_ann_date_ts_code" / f"ann_date={day}"
+            candidates[day].extend(
+                item.name.removesuffix(".parquet").removeprefix("ts_code=")
+                for item in sorted(rescue_dir.glob("ts_code=*.parquet"))
+            )
         elif date_param == "float_date":
             # No self source: the legacy whole-day share_float/ dir was
             # archived out of the lake in 2026-05 and has no writer; float_date
@@ -3567,7 +3588,6 @@ def update_share_float_complete_data(
             skip_ann_date=False,
             rescue_ann_limit_hits=args.rescue_ann_limit_hits,
             rescue_ann_date=[],
-            max_ann_rescue_days=args.max_ann_rescue_days,
             float_rescue_date=[],
             rescue_universe=args.rescue_universe,
             rescue_code=[],
@@ -3964,7 +3984,6 @@ def add_update_parser(sub: argparse._SubParsersAction) -> None:
         help="Refresh recent share_float partitions and merge them into the durable share_float_complete baseline.",
     )
     parser.add_argument("--rescue-ann-limit-hits", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--max-ann-rescue-days", type=int, default=5)
     parser.add_argument("--rescue-universe", choices=["candidate", "explicit", "all_a"], default="candidate")
     parser.add_argument("--max-rescue-calls", type=int, default=50000)
     parser.add_argument("--union-output", default="data/raw/share_float_complete/share_float_complete.parquet")
@@ -4032,14 +4051,13 @@ def add_share_float_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--skip-ann-date", action="store_true")
     parser.add_argument("--rescue-ann-limit-hits", action="store_true", help="Retry ann_date partitions that hit 6000 rows by ann_date + ts_code.")
     parser.add_argument("--rescue-ann-date", action="append", default=[], help="Specific ann_date to retry by ts_code; repeatable.")
-    parser.add_argument("--max-ann-rescue-days", type=int, default=5, help="Safety cap for automatic ann_date + ts_code rescue days.")
     parser.add_argument("--float-rescue-date", action="append", default=[], help="Specific float_date to retry by ts_code; repeatable.")
     parser.add_argument("--rescue-universe", choices=["candidate", "explicit", "all_a"], default="candidate")
     parser.add_argument("--rescue-code", action="append", default=[])
     parser.add_argument("--rescue-codes-file")
     parser.add_argument("--no-anns-candidates", action="store_true")
     parser.add_argument("--no-cross-path-candidates", action="store_true")
-    parser.add_argument("--max-rescue-calls", type=int, default=50000)
+    parser.add_argument("--max-rescue-calls", type=int, default=50000, help="Bound on ts_code rescue calls; a run that would exceed it fails before rescuing.")
     parser.add_argument("--skip-float-date-union", action="store_true")
     parser.add_argument("--max-codes", type=int)
     parser.add_argument("--force", action="store_true")

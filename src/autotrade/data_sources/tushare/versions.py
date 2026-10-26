@@ -14,7 +14,9 @@ change of a partition goes through :func:`publish` (a vendor answer) or
   in which every existing key is present with unchanged values, keeps no copy:
   nothing is lost.
 * An answer that would remove more than half of the current keys is written as
-  a *staged* version and not made visible; an operator promotes it.
+  a *staged* version and not made visible; an operator promotes it. An answer
+  the caller marks truncated (cut at the vendor's per-call row cap) is exempt:
+  the keys it lacks prove nothing, so it is published like any other answer.
 
 Versions live outside the raw tree, under
 ``<raw>/../raw_versions/<dataset>/<partition>/<version>.parquet`` (with the
@@ -546,6 +548,7 @@ def publish(
     extra_metadata: dict[str, Any] | None = None,
     compare: tuple[pd.DataFrame, pd.DataFrame] | None = None,
     current: pd.DataFrame | None = None,
+    truncated: bool = False,
 ) -> str:
     """Make ``df`` the visible partition at ``path`` if the answer allows it.
 
@@ -561,7 +564,9 @@ def publish(
     holds every key the write affects (old rows, new rows); such a caller
     merges the answer into the partition itself and owns the shrink judgement,
     so a compared write is never staged. ``current`` is the visible frame when
-    the caller has already read it."""
+    the caller has already read it. ``truncated`` marks an answer cut at the
+    vendor's per-call row cap: the keys it lacks are not a withdrawal, so it is
+    never staged and the caller owns recovering them."""
     path = Path(path)
     keys = list(key_columns)
     dataset, partition = dataset_dir(path).name, partition_id(path)
@@ -589,7 +594,7 @@ def publish(
             outcome = "unchanged"
         else:
             outcome = "restated" if diff.restates else "appended"
-            if compare is None and _removes_most_keys(api_name, current, df, keys, diff):
+            if compare is None and not truncated and _removes_most_keys(api_name, current, df, keys, diff):
                 return _stage(path, df, api_name=api_name, params=params, fields=fields, keys=keys, diff=diff,
                               ledger=ledger, source=source, dropped=dropped, old_rows=len(current),
                               extra_metadata=extra_metadata, meta=meta)

@@ -51,10 +51,12 @@ from .versions import (  # noqa: F401 -- re-exported via this hub
     DefectiveAnswer,
     answer_defects,
     diff_frames,
+    list_versions,
     publish,
     record_defect,
     report_complete,
     revision_event,
+    version_dir,
 )
 
 DEFAULT_TUSHARE_RELAY_URL = "https://fast.xiaodefa.cn"

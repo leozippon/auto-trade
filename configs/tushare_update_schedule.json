@@ -538,6 +538,20 @@
       "lock_wait_seconds": 1800,
       "skip_if_already_ok": false
     },
+    "manual_share_float_repair": {
+      "description": "Manual (not scheduled): the share_float step of cn_evening_full on its own over the same 30-day window: forced ann_date pulls, the ts_code rescue of every day at the per-call cap, and the merge into share_float_complete. Re-runs share_float without repeating the whole evening job; --start-date/--end-date pin a past window.",
+      "operation": "share_float_complete",
+      "end_date_offset_days": 0,
+      "end_date_mode": "sse_open_on_or_before",
+      "start_date_lookback_days": 30,
+      "extra_args": [
+        "--rescue-ann-limit-hits",
+        "--force",
+        "--write-union"
+      ],
+      "lock_wait_seconds": 1800,
+      "skip_if_already_ok": false
+    },
     "manual_toplist_restatement_repair": {
       "description": "Manual (not scheduled): forced whole-history re-pull of top_list after a vendor restatement (2026-10: name carries the security's current name on historical rows; name is a value, not part of the business key). top_list is window_only (one request per trading day), so this is its convergence path; every partition is written through the versioned path and keeps its superseded version. The window runs from default_start_date to the last SSE open date before today (Asia/Shanghai), so it never requests a list the vendor has not published; the nightly window covers today. --start-date/--end-date narrow it. Follow with cn_nightly_full_audit --force-run.",
       "operation": "download_tier",

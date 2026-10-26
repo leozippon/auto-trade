@@ -54,7 +54,7 @@ DEFAULT_LOCK_WAIT_SECONDS = 900
 # generation on success; audit-only jobs must not churn snapshot cache keys.
 # The generation schema/state contract itself is owned by
 # autotrade.environment.data.contracts so writer and PIT consumers cannot drift.
-MUTATING_OPERATIONS = {"update", "download_tier", "download_event_flow", "intraday_by_date", "pit_event_pipeline", "auction_capture", "auction_recheck", "event_available_at_repair"}
+MUTATING_OPERATIONS = {"update", "download_tier", "download_event_flow", "intraday_by_date", "pit_event_pipeline", "auction_capture", "auction_recheck", "event_available_at_repair", "share_float_complete"}
 
 
 @dataclass
@@ -428,6 +428,27 @@ def build_job_commands(ctx: RunContext) -> list[list[str]]:
         command.extend(ctx.config.get("default_update_args", []))
         command.extend(ctx.job.get("extra_args", []))
         return [command]
+    if operation == "share_float_complete":
+        # The share_float step of the evening ``update`` on its own, over the
+        # same window for both date paths.
+        command = [
+            ctx.python,
+            "scripts/data/tushare_download.py",
+            "download-share-float-complete",
+            "--ann-start-date",
+            ctx.start_date,
+            "--ann-end-date",
+            ctx.end_date,
+            "--float-start-date",
+            ctx.start_date,
+            "--float-end-date",
+            ctx.end_date,
+            "--raw-dir",
+            raw_dir,
+        ]
+        command.extend(ctx.config.get("default_update_args", []))
+        command.extend(ctx.job.get("extra_args", []))
+        return [command]
     if operation == "intraday_by_date":
         # The minute layer on its own: its vendor quota must not be able to
         # fail the evening update that Paper's morning release depends on.
@@ -655,6 +676,7 @@ def job_config_identity(ctx: RunContext) -> dict:
         "auction_capture",
         "auction_recheck",
         "revision_sentinel",
+        "share_float_complete",
     }:
         shared_keys.add("default_update_args")
     if operation == "pit_event_pipeline":

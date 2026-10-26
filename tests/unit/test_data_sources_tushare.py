@@ -1137,51 +1137,55 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertFalse(result["staged"])
         self.assertTrue(result["skipped"])
 
-    def test_capped_new_response_on_small_partition_routes_to_rescue(self):
-        """The 2026-08-13 incident class: a small early-evening partition, then
-        the vendor's late fill pushes the day past the per-call cap. The
-        staged day's cap risk must come from the FETCHED response too --
-        classifying by the visible old rows hid the exact case the ts_code
-        rescue exists for."""
+    def test_capped_answer_is_published_and_every_code_it_replaced_stays_a_candidate(self):
+        """2026-10-26: new IPO lock-ups of ~6,000 holder rows pushed older codes
+        out of five capped ann_date answers, and the shrink guard staged each
+        one as a withdrawal. A capped answer proves nothing about the keys it
+        lacks: it is published, the replaced partition is kept as a superseded
+        version, and every code a kept answer for the day carried -- the new
+        answer, the replaced partition, an earlier rescue -- is a candidate."""
         day = "20200101"
         fields = common.SHARE_FLOAT_FIELDS.split(",")
         path = self.raw_dir / "share_float_ann_date" / f"ann_date={day}.parquet"
-        existing = pd.DataFrame([
-            [f"{index:06d}.SZ", day, "20200102", f"h{index}", "type", 1.0, 0.1]
-            for index in range(100)
-        ], columns=fields)
+        old_codes = [f"{index:06d}.SZ" for index in range(100)]
+        existing = pd.DataFrame([[code, day, "20200102", 1.0, 0.1, "h", "type"] for code in old_codes], columns=fields)
         existing = common.augment_event_frame(existing, common.EVENT_FLOW_SPECS["share_float"])
-        common.write_parquet(path, existing, api_name="share_float", params={},
-                             fields=list(existing.columns))
+        common.write_parquet(path, existing, api_name="share_float", params={}, fields=list(existing.columns))
+        rescued = self.raw_dir / "share_float_ann_date_ts_code" / f"ann_date={day}" / "ts_code=300227.SZ.parquet"
+        common.write_parquet(rescued, existing.head(1), api_name="share_float", params={}, fields=list(existing.columns))
 
-        class CappedLateFillClient:
+        class CappedNewIpoClient:
             def query(self, api_name, params=None, fields="", retries=5):
                 return common.ApiResult(
                     common.SHARE_FLOAT_FIELDS.split(","),
-                    [[f"{900000 + index:06d}.SZ", day, "20200103", f"n{index}", "type", 1.0, 0.1]
+                    [["301716.SZ", day, "20200103", 1.0, 0.1, f"n{index}", "type"]
                      for index in range(common.SHARE_FLOAT_ROW_LIMIT)])
 
         args = argparse.Namespace(
             ann_start_date=day, ann_end_date=day, force=True,
             revision_ledger=self.root / "revision_events.jsonl",
+            rescue_universe="candidate", rescue_code=[], rescue_codes_file=None,
+            no_anns_candidates=True, max_codes=None,
         )
         report: dict = {}
         with redirect_stdout(io.StringIO()):
-            limit_hits = download.download_share_float_ann_dates(
-                CappedLateFillClient(), self.raw_dir, args, report)
+            limit_hits = download.download_share_float_ann_dates(CappedNewIpoClient(), self.raw_dir, args, report)
         self.assertEqual(limit_hits, [day])
         self.assertEqual(report["ann_date"]["staged_days"], [])
-        # The answer was staged, so the old partition stays; the rescue owns the repair.
-        self.assertEqual(common.parquet_rows(path), 100)
+        self.assertEqual(common.parquet_rows(path), common.SHARE_FLOAT_ROW_LIMIT)
+        self.assertEqual([version.split("-")[-1] for version in download.list_versions(path)], ["superseded"])
+        events = [json.loads(line) for line in (self.root / "revision_events.jsonl").read_text().splitlines()]
+        self.assertEqual([event["kind"] for event in events], ["restatement"])
+
+        candidates, _ = download.select_share_float_rescue_date_codes(self.raw_dir, args, date_param="ann_date", dates=[day])
+        self.assertEqual(set(candidates[day]), {"301716.SZ", "300227.SZ", *old_codes})
 
     def test_capped_staging_reaches_rescue_while_a_real_retraction_stays_staged(self):
-        """A staged answer means one of two very different things.
-
-        Capped (the source truncated its answer and rotates which keys it
-        returns): recoverable by the per-ts_code rescue, so the run hands the
-        day to it. Not capped: the source genuinely retracted the keys, which
-        no rescue can undo -- the staged version waits for an operator, and
-        the run carries on.
+        """An uncapped answer that drops most keys is staged on both days, but
+        a day whose visible partition sits at the cap still reaches the rescue:
+        the union reads that partition as truncated. On the uncapped day the
+        source genuinely retracted the keys, which no rescue can undo -- the
+        staged version waits for an operator, and the run carries on.
         """
         fields = common.SHARE_FLOAT_FIELDS.split(",")
 
@@ -1220,6 +1224,45 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             common.parquet_rows(self.raw_dir / "share_float_ann_date" / f"ann_date={capped_day}.parquet"),
             common.SHARE_FLOAT_ROW_LIMIT,
         )
+
+    def test_every_capped_day_is_rescued_within_the_call_limit_or_the_run_fails(self):
+        """The 5-day rescue cap left four of nine capped days unrescued and
+        their new codes out of the union. Every limit-hit day is rescued; only
+        --max-rescue-calls bounds the cost, and a run that cannot rescue them
+        all fails before any rescue call instead of merging a truncated day."""
+        days = [f"202001{index:02d}" for index in range(1, 8)]
+
+        class CappedDaysClient:
+            def __init__(self):
+                self.calls = []
+
+            def query(self, api_name, params=None, fields="", retries=5):
+                self.calls.append(dict(params))
+                code = f"3000{params['ann_date'][-2:]}.SZ"
+                rows = 1 if "ts_code" in params else common.SHARE_FLOAT_ROW_LIMIT
+                return common.ApiResult(
+                    common.SHARE_FLOAT_FIELDS.split(","),
+                    [[code, params["ann_date"], "20200301", 1.0, 0.1, f"h{index}", "type"] for index in range(rows)])
+
+        def run(max_calls):
+            client = CappedDaysClient()
+            args = download.parse_args([
+                "download-share-float-complete", "--raw-dir", str(self.raw_dir),
+                "--ann-start-date", days[0], "--ann-end-date", days[-1],
+                "--rescue-ann-limit-hits", "--no-anns-candidates", "--force",
+                "--max-rescue-calls", str(max_calls), "--revision-ledger", str(self.root / "revision_events.jsonl"),
+            ])
+            with (
+                patch.object(download, "TuShareClient", return_value=client),
+                patch.object(download, "load_token", return_value="token"),
+                redirect_stdout(io.StringIO()),
+            ):
+                download.download_share_float_complete(args)
+            return {call["ann_date"] for call in client.calls if "ts_code" in call}
+
+        with self.assertRaisesRegex(RuntimeError, "would make 7 calls .* exceeding --max-rescue-calls=6"):
+            run(max_calls=6)
+        self.assertEqual(run(max_calls=7), set(days))
 
     def test_share_float_candidate_read_failure_is_not_silent(self):
         path = self.raw_dir / "anns_d" / "month=202001.parquet"
@@ -7781,8 +7824,9 @@ class UuidCommitIdentityTest(unittest.TestCase):
         # with the stk_holdernumber and repurchase restatement re-pulls; 35
         # since the four disclosure-table re-pulls became the history_repull
         # policy and its operator command (2026-10-24); 36 with the weekly
-        # research-release retention.
-        self.assertEqual(len(config["jobs"]), 36)
+        # research-release retention; 37 with the standalone share_float
+        # repair (2026-10-27).
+        self.assertEqual(len(config["jobs"]), 37)
         for name, tier in (
             ("manual_history_backfill_reference", "reference"),
             ("manual_history_backfill_macro", "macro"),
@@ -7830,6 +7874,18 @@ class UuidCommitIdentityTest(unittest.TestCase):
         self.assertEqual(
             (stk_limit["end_date_offset_days"], stk_limit["end_date_mode"]), (1, "sse_open_on_or_before")
         )
+        # share_float has no tier of its own: its manual job runs the evening
+        # step's command alone, as a mutating job, and the CLI accepts it.
+        share_float = cron_update.RunContext(
+            config=config, repo_root=root, python="/env/python", job_name="manual_share_float_repair",
+            job=config["jobs"]["manual_share_float_repair"], start_date="20260926", end_date="20261026",
+            timezone_name="Asia/Shanghai",
+        )
+        command = cron_update.build_job_commands(share_float)[0]
+        self.assertIn("share_float_complete", cron_update.MUTATING_OPERATIONS)
+        parsed = download.parse_args(command[2:])
+        self.assertEqual((parsed.command, parsed.ann_start_date, parsed.float_end_date), ("download-share-float-complete", "20260926", "20261026"))
+        self.assertTrue(parsed.rescue_ann_limit_hits and parsed.force and parsed.write_union)
 
     def test_minute_job_runs_the_by_date_updater_as_a_mutating_job(self) -> None:
         context = cron_update.RunContext(
