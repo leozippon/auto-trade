@@ -165,16 +165,20 @@ def _qwen_reasoning_effort(value: str | None) -> str:
     }.get(value or "", "xhigh")
 
 
-def _profile_api_key(
-    profile: ModelProfile, model: str, env_file: str | Path, *, required: bool
-) -> str:
-    """Resolve a provider's credential from the name its profile fixes."""
+# An arm's ``llm_key``: which relay credential its calls start on
+# (``lighting.LLM_KEY_ENVS``). Every other provider has one key, so only
+# ``primary`` applies to it.
+LLM_KEYS = tuple(_lighting.LLM_KEY_ENVS)
 
-    key = load_env_value(profile.api_key_env, env_file)
+
+def _api_key(key_env: str, model: str, env_file: str | Path, *, required: bool) -> str:
+    """Resolve a credential from a name a trusted profile fixes."""
+
+    key = load_env_value(key_env, env_file)
     if key or not required:
         return key
     raise ValueError(
-        f"model {model} requires an API key: set {profile.api_key_env} in the "
+        f"model {model} requires an API key: set {key_env} in the "
         f"environment or {env_file}"
     )
 
@@ -239,22 +243,34 @@ def build_model_gateway(
     reasoning_effort: str | None = None,
     conversation_log_dir: str | Path | None = "data/llm_conversations",
     require_credentials: bool = True,
+    llm_key: str = "primary",
 ) -> LLMProxy:
     """Build one role gateway from a catalog model name.
 
     Endpoint and credential environment keys are fixed by the trusted model
     profile for every provider; neither can be supplied by experiment
     parameters, so no configuration can point the Authorization header at a
-    secret the profile did not name.
+    secret the profile did not name. ``llm_key`` only chooses which of the
+    relay's two fixed keys a relay gateway starts on; any other provider
+    refuses ``alternate``, having one key.
     """
 
     model = canonicalize_model_name(model)
     profile = model_profile(model)
+    if llm_key not in LLM_KEYS:
+        raise ValueError(f"llm_key must be one of {', '.join(LLM_KEYS)}, got {llm_key!r}")
+    if llm_key != "primary" and profile.provider != "lighting":
+        raise ValueError(
+            f"llm_key {llm_key} chooses the relay's key, and model {model} is "
+            f"served by {profile.provider}, which has one"
+        )
     effective_max_tokens = effective_max_output_tokens(model, max_tokens)
-    key = (
-        _profile_api_key(profile, model, env_file, required=require_credentials)
-        or "preflight"
+    key_env = (
+        _lighting.LLM_KEY_ENVS[llm_key]
+        if profile.provider == "lighting"
+        else profile.api_key_env
     )
+    key = _api_key(key_env, model, env_file, required=require_credentials) or "preflight"
     base_url = (
         load_env_value(profile.base_url_env, env_file)
         if profile.base_url_env is not None
@@ -275,6 +291,7 @@ def build_model_gateway(
             thinking_enabled=thinking_enabled,
             reasoning_effort=reasoning_effort,
             conversation_log_dir=conversation_log_dir,
+            llm_key=llm_key,
         )
     if profile.provider == "deepseek":
         return cast(
@@ -332,6 +349,7 @@ __all__ = [
     "DEFAULT_LLM_MAX_RETRIES",
     "DEFAULT_LLM_RETRY_BACKOFF_SECONDS",
     "LEGACY_LOCAL_QWEN_MODEL",
+    "LLM_KEYS",
     "LOCAL_QWEN_MODEL",
     "MIMO_FLASH_MODEL",
     "MIMO_MODELS",

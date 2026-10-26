@@ -210,6 +210,7 @@ _ALLOWED_PARAMS = {
     "model",
     "subagent_model",
     "compact_model",
+    "llm_key",
     "reasoning_effort",
     "no_thinking",
     "disable_context_compact",
@@ -266,6 +267,8 @@ class LLMWorkerSettings:
     compaction: ContextCompactionConfig
     # The console's ``compact_token_threshold``; None = derived per role.
     compact_token_threshold: int | None = None
+    # The arm's ``llm_key``: which relay credential every role starts on.
+    llm_key: str = "primary"
 
     def model_for(self, role: str) -> str:
         """The model of one gateway role."""
@@ -320,6 +323,7 @@ class LLMWorkerSettings:
             thinking_enabled=self.thinking_enabled if role != "compact" else False,
             reasoning_effort=self.reasoning_effort_for(role),
             require_credentials=require_credentials,
+            llm_key=self.llm_key,
         )
 
     def reasoning_effort_for(self, role: str) -> str | None:
@@ -1416,6 +1420,8 @@ def _llm_settings(
         ),
         compaction=compaction,
         compact_token_threshold=configured_threshold,
+        # Checked by every role's gateway just below, pre-flight included.
+        llm_key=params.get("llm_key", "primary"),  # type: ignore[arg-type]
     )
     # Whether the host holds a credential is deployment state, not a property
     # of a WebUI create request.  Every model/role combination is still

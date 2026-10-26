@@ -21,7 +21,7 @@ from pathlib import Path
 
 from autotrade.environment.data.contracts import BENCHMARK_INDEXES
 from autotrade.environment.data.snapshot import DEFAULT_DATASETS, SELECTABLE_DATASETS
-from autotrade.environment.llm.model_profiles import MODEL_CHOICES
+from autotrade.environment.llm.model_profiles import LLM_KEYS, MODEL_CHOICES
 from autotrade.pipelines.config import (
     BATCH_VALIDATE_MAX_CANDIDATES,
     MANDATED_DEFAULTS,
@@ -607,6 +607,15 @@ _FIELDS: list[dict[str, object]] = [
         "type": "choice",
         "choices": list(MODEL_CHOICES),
         "help": "语义压缩长会话所用的低成本模型（不启用推理模式）。",
+    },
+    {
+        "key": "llm_key",
+        "group": "模型与上下文",
+        "label": "中转站 key",
+        "type": "choice",
+        "choices": list(LLM_KEYS),
+        "choice_labels": {"primary": "主 key", "alternate": "备用 key"},
+        "help": "本臂调用中转站模型时先用哪个 key：主 key 是 LIGHTING_API_KEY，备用 key 是 LIGHTING_API_KEY_ALT。另一个照旧作后备：先用的 key 被拒（401/402/403）或额度用尽时换它再发，此后一直用它。选备用 key 时每个模型角色都必须是中转站模型。",
     },
     {
         "key": "reasoning_effort",

@@ -158,6 +158,7 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
         "model",
         "subagent_model",
         "compact_model",
+        "llm_key",
         "reasoning_effort",
         "no_thinking",
         "disable_context_compact",
@@ -171,6 +172,11 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
     for role in ("model", "subagent_model", "compact_model"):
         assert fields[role]["default"] == "DeepSeek-V4.1-Flash", role
     assert fields["subagent_model"]["choices"] == fields["model"]["choices"]
+    # A choice between the relay's two keys, never a variable name.
+    assert (fields["llm_key"]["choices"], fields["llm_key"]["default"]) == (
+        ["primary", "alternate"],
+        "primary",
+    )
     assert fields["reasoning_effort"]["default"] == "xhigh"
     # The local window's derived value, kept by the 1M-window defaults; an
     # empty field still derives it per role from the model windows.
@@ -1489,6 +1495,29 @@ class WebuiBackendTest(unittest.TestCase):
             )
             with self.subTest(experiment=experiment_id):
                 self.assertEqual(written["permitted_boards"], boards)
+
+    def test_creation_stamps_the_arms_relay_key(self) -> None:
+        """``llm_key`` is written into params.json, where every worker
+        (re)start reads it: ``primary`` unless the request names
+        ``alternate``."""
+
+        manager = ExperimentManager(self.repo_root, self.experiments_root)
+        for experiment_id, request, key in (
+            ("exp_default_key", {}, "primary"),
+            ("exp_alternate_key", {"llm_key": "alternate"}, "alternate"),
+        ):
+            with (
+                patch.object(manager, "_preflight"),
+                patch.object(manager, "start_worker", return_value={"spawned": False}),
+            ):
+                manager.create_experiment(
+                    {"experiment_id": experiment_id, **DEFAULT_RESEARCH_GEOMETRY.to_record(), **request}
+                )
+            written = json.loads(
+                (self.experiments_root / experiment_id / "hitl/params.json").read_text(encoding="utf-8")
+            )
+            with self.subTest(experiment=experiment_id):
+                self.assertEqual(written["llm_key"], key)
 
     def test_create_records_the_lineage_into_the_new_arm_or_creates_nothing(self) -> None:
         """The lineage is read from the earlier arms once, while the arm is

@@ -158,6 +158,9 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "model": DEEPSEEK_FLASH_MODEL,
     "subagent_model": DEEPSEEK_FLASH_MODEL,
     "compact_model": DEEPSEEK_FLASH_MODEL,
+    # Which relay credential the arm's calls start on (``primary`` or
+    # ``alternate``); the other is the fallback.
+    "llm_key": "primary",
     "reasoning_effort": "xhigh",
     "no_thinking": False,
     "disable_context_compact": False,

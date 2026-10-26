@@ -121,6 +121,7 @@ def _proxy(
         LightingProxy(
             config,
             fallback_api_key=gateway.fallback_api_key,
+            fallback_key_env=gateway.fallback_key_env,
             transport=transport,
         ),
         transport,
@@ -773,6 +774,50 @@ def test_alternate_key_completes_after_a_rejected_primary(
     assert API_KEY_ALT_ENV in stderr
     assert "relay-alt" not in stderr
     assert "relay-primary" not in stderr
+
+
+def test_an_arm_on_the_alternate_key_falls_back_to_the_primary(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+):
+    """``llm_key`` alternate only swaps the order: the first call carries the
+    alternate key, a rejection moves to the primary, and the switch sticks."""
+
+    rejected = LLMProxyError("provider HTTP error 401", retryable=False, status_code=401)
+    proxy, transport = _proxy(
+        tmp_path,
+        [_responses_json(content="first"), rejected, _responses_json(content="moved"),
+         _responses_json(content="stays")],
+        llm_key="alternate",
+    )
+
+    assert proxy.complete([ChatMessage("user", "hi")]).content == "first"
+    assert proxy.complete([ChatMessage("user", "hi")]).content == "moved"
+    assert proxy.complete([ChatMessage("user", "hi")]).content == "stays"
+    assert _authorization(transport) == [
+        "Bearer relay-alt",
+        "Bearer relay-alt",
+        "Bearer relay-primary",
+        "Bearer relay-primary",
+    ]
+    stderr = capsys.readouterr().err
+    assert f"retrying with {API_KEY_ENV}" in stderr
+    assert "relay-alt" not in stderr
+    assert "relay-primary" not in stderr
+
+
+def test_llm_key_is_a_choice_of_the_relay_keys_only(tmp_path: Path):
+    env_file = _env(tmp_path)
+    with pytest.raises(ValueError, match="llm_key must be one of primary, alternate"):
+        build_model_gateway(MODEL, env_file=env_file, llm_key=API_KEY_ALT_ENV)
+    with pytest.raises(ValueError, match="llm_key alternate chooses the relay's key"):
+        build_model_gateway("deepseek-flash", env_file=env_file, llm_key="alternate")
+    with pytest.raises(ValueError, match=f"set {API_KEY_ALT_ENV}"):
+        build_model_gateway(
+            MODEL,
+            env_file=_env(tmp_path, f"{API_KEY_ENV}=relay-primary\n"),
+            conversation_log_dir=None,
+            llm_key="alternate",
+        )
 
 
 def test_quota_exhausted_400_also_switches_to_the_alternate_key(tmp_path: Path):

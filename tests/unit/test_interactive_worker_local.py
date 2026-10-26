@@ -287,6 +287,62 @@ def test_worker_ignores_historical_endpoint_and_credential_params(
 
 
 
+def test_llm_key_puts_every_relay_role_on_the_chosen_key_at_each_start(
+    tmp_path: Path, monkeypatch
+):
+    """The console's pre-flight accepts ``llm_key`` alternate and refuses
+    anything but the two choices; a worker start, and every restart, reads the
+    saved value from params.json, so each role's first relay call carries the
+    alternate key and the primary is its fallback."""
+
+    from autotrade.environment.llm.lighting import LightingProxy
+    from autotrade.pipelines.worker import resolve_worker_options
+
+    monkeypatch.setenv("LIGHTING_API_KEY", "test-primary")
+    monkeypatch.setenv("LIGHTING_API_KEY_ALT", "test-alternate")
+    console = tmp_path / "console"
+    experiments_root = console / "experiments"
+    experiments_root.mkdir(parents=True)
+
+    def preflight(**overrides):
+        return resolve_worker_options(
+            _console_params(console, experiments_root, **overrides),
+            experiment_dir=experiments_root / "narrowing",
+            repo_root=console,
+            preflight=True,
+        )
+
+    assert preflight(llm_key="alternate", model="gemini-4-argon").llm.llm_key == "alternate"
+    with pytest.raises(ValueError, match="llm_key must be one of primary, alternate"):
+        preflight(llm_key="LIGHTING_API_KEY_ALT")
+    with pytest.raises(ValueError, match="llm_key alternate chooses the relay's key"):
+        preflight(llm_key="alternate", compact_model=LOCAL_QWEN_MODEL)
+
+    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    path = experiment / "hitl/params.json"
+    params = json.loads(path.read_text(encoding="utf-8"))
+    params.update(
+        {
+            "model": "gemini-4-argon",
+            "subagent_model": "DeepSeek-V4.1-Flash",
+            "compact_model": "DeepSeek-V4.1-Flash",
+            "llm_key": "alternate",
+        }
+    )
+    path.write_text(json.dumps(params), encoding="utf-8")
+    for _start in range(2):
+        settings = load_worker_options(experiment, repo_root=repo).llm
+        assert settings is not None and settings.llm_key == "alternate"
+        for role in ("main", "subagent", "compact"):
+            gateway = settings.build_gateway(role)
+            assert isinstance(gateway, LightingProxy)
+            assert (gateway.config.api_key, gateway.fallback_api_key) == (
+                "test-alternate",
+                "test-primary",
+            )
+
+
+
 def test_worker_resolves_mixed_local_and_deepseek_roles_with_real_timeout(
     tmp_path: Path,
     monkeypatch,

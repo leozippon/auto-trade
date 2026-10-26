@@ -3,8 +3,10 @@
 The relay serves its gpt-6 family over ``/v1/responses`` — that family refuses
 function tools on Chat Completions — and its Anthropic ids, gemini-4-argon and
 DeepSeek-V4.1-Flash over ``/v1/chat/completions``, with a primary credential
-and an alternate one. The Anthropic ids' requests also mark a prompt-cache
-breakpoint, which the relay forwards to the upstream Messages API.
+and an alternate one: an arm's ``llm_key`` chooses which its calls start on,
+and the other is the fallback. The Anthropic ids' requests also mark a
+prompt-cache breakpoint, which the relay forwards to the upstream Messages
+API.
 """
 
 from __future__ import annotations
@@ -38,6 +40,9 @@ if TYPE_CHECKING:  # annotation-only: model_profiles imports this module
 
 API_KEY_ENV = "LIGHTING_API_KEY"
 API_KEY_ALT_ENV = "LIGHTING_API_KEY_ALT"
+# An arm's ``llm_key`` (a choice, never a variable name): the credential its
+# relay calls start on. The other one is the fallback.
+LLM_KEY_ENVS = {"primary": API_KEY_ENV, "alternate": API_KEY_ALT_ENV}
 BASE_URL_ENV = "LIGHTING_BASE_URL"
 DEFAULT_BASE_URL = "https://lightingtheword.com/v1"
 
@@ -118,7 +123,7 @@ _RESPONSES_REASONING_EFFORTS = {
 
 # A rejected or exhausted relay key answers with 401/402/403, or with a
 # 400/429 whose message names the account state ("insufficient quota",
-# "余额不足"). Only those attempts move to the alternate key; every other
+# "余额不足"). Only those attempts move to the fallback key; every other
 # failure keeps the shared provider semantics.
 _CREDENTIAL_STATUS_CODES = frozenset({401, 402, 403})
 _EXHAUSTED_ACCOUNT_MARKERS = (
@@ -157,13 +162,17 @@ def build_gateway(
     thinking_enabled: bool,
     reasoning_effort: str | None,
     conversation_log_dir: str | Path | None,
+    llm_key: str,
 ) -> LLMProxy:
     """Build one relay role gateway; called only by ``model_profiles``.
 
     The endpoint and both credentials come from the profile's fixed
     environment keys, so no experiment parameter can point them elsewhere.
+    ``api_key`` is the ``llm_key`` credential, already resolved; the other
+    one is read here as the fallback.
     """
 
+    fallback_key_env = API_KEY_ALT_ENV if llm_key == "primary" else API_KEY_ENV
     return cast(
         LLMProxy,
         LightingProxy(
@@ -196,7 +205,8 @@ def build_gateway(
                 conversation_log_dir=conversation_log_dir,
                 context_window_tokens=profile.context_window_tokens,
             ),
-            fallback_api_key=load_env_value(API_KEY_ALT_ENV, env_file),
+            fallback_api_key=load_env_value(fallback_key_env, env_file),
+            fallback_key_env=fallback_key_env,
         ),
     )
 
@@ -215,10 +225,13 @@ class LightingProxy(OpenAICompatibleProxy):
         config: OpenAICompatibleConfig,
         *,
         fallback_api_key: str = "",
+        fallback_key_env: str = API_KEY_ALT_ENV,
         **kwargs: Any,
     ) -> None:
         super().__init__(config, **kwargs)
         self.fallback_api_key = fallback_api_key
+        # Named in the switch's log line; the value never is.
+        self.fallback_key_env = fallback_key_env
 
     def with_thinking(
         self, *, enabled: bool, reasoning_effort: str | None
@@ -226,7 +239,7 @@ class LightingProxy(OpenAICompatibleProxy):
         """Clone with another thinking setting, keeping the relay behavior.
 
         The shared clone would return a plain Chat Completions proxy, which
-        would lose both the responses dialect and the alternate key.
+        would lose both the responses dialect and the fallback key.
         """
 
         return LightingProxy(
@@ -236,6 +249,7 @@ class LightingProxy(OpenAICompatibleProxy):
                 reasoning_effort=reasoning_effort,
             ),
             fallback_api_key=self.fallback_api_key,
+            fallback_key_env=self.fallback_key_env,
             transport=self._transport,
             sleep=self._sleep,
         )
@@ -263,13 +277,13 @@ class LightingProxy(OpenAICompatibleProxy):
                 or not is_credential_failure(error)
             ):
                 raise
-            _log_credential_switch(self.config.model, error)
-            # The switch is sticky: a rejected or exhausted primary stays so,
+            _log_credential_switch(self.config.model, error, self.fallback_key_env)
+            # The switch is sticky: a rejected or exhausted first key stays so,
             # and every later call of this gateway (and every clone made from
-            # it afterwards) starts on the alternate key, where a credential
+            # it afterwards) starts on the fallback key, where a credential
             # failure is final.
             self.config = replace(self.config, api_key=self.fallback_api_key)
-            # The alternate key is one more logical call: it logs its own
+            # The fallback key is one more logical call: it logs its own
             # attempts. When it is rejected too, the original credential error
             # is reported; any other failure (a context overflow, a transient
             # fault, a malformed reply) is the alternate call's own outcome and
@@ -330,12 +344,14 @@ class LightingProxy(OpenAICompatibleProxy):
         return _parse_responses(payload, expected_model=self.config.model)
 
 
-def _log_credential_switch(model: str, error: LLMProxyError) -> None:
+def _log_credential_switch(
+    model: str, error: LLMProxyError, fallback_key_env: str
+) -> None:
     """One operator line naming the switch; it never carries a credential."""
 
     print(
-        f"lighting: {model} rejected the primary credential "
-        f"(HTTP {error.status_code}); retrying with {API_KEY_ALT_ENV}",
+        f"lighting: {model} rejected its first credential "
+        f"(HTTP {error.status_code}); retrying with {fallback_key_env}",
         file=sys.stderr,
     )
 
@@ -799,6 +815,7 @@ __all__ = [
     "BASE_URL_ENV",
     "DEEPSEEK_FLASH_MODEL",
     "DEFAULT_BASE_URL",
+    "LLM_KEY_ENVS",
     "LONG_CONTEXT_TIER_MODELS",
     "MODEL_CHOICES",
     "MODEL_PROFILES",
