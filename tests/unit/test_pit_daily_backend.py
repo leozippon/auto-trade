@@ -2746,6 +2746,43 @@ def test_a_span_opens_a_slot_at_its_first_decision_and_reads_only_the_rows_it_pu
     )
 
 
+@pytest.mark.parametrize("mode", ["sandbox", "trusted"])
+def test_only_a_trusted_replay_relocks_the_asof_view_every_day(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    """The sandbox mounts the view read-only, so it skips the per-day chmod gate
+    whose tree walk grew quadratically over a span; a trusted replay keeps it."""
+
+    snapshot, slots = _write_span_release(tmp_path)
+    revision = _span_revision(tmp_path)
+    real_lock = _AsOfReadOnlyView.lock
+    locks: list[Path] = []
+
+    def counting_lock(self: _AsOfReadOnlyView) -> None:
+        locks.append(self.root)
+        real_lock(self)
+
+    monkeypatch.setattr(_AsOfReadOnlyView, "lock", counting_lock)
+    # Docker is not under test: the in-process executor stands in for the container.
+    monkeypatch.setattr(
+        pit_backend,
+        "DockerStrategyExecutor",
+        lambda path, _sandbox, *, state_dir, models_dir, **_: (
+            pit_backend.TrustedStrategyExecutor.from_path(
+                path, state_dir=state_dir, models_dir=models_dir
+            )
+        ),
+    )
+    result = PITDailyEvaluationBackend(
+        tmp_path / "results", execution_mode=mode, benchmark_index=DEFAULT_BENCHMARK_INDEX
+    ).evaluate(_span_request(snapshot, slots["a"], slots["b"], revision=revision))
+    days = json.loads(Path(result.result_ref).read_text(encoding="utf-8"))["pit"]["refresh_calls"]
+    assert days >= 2
+    # Trusted: before the first day, after every day, and after the replay.
+    # Sandbox: after the replay only.
+    assert len(locks) == (days + 2 if mode == "trusted" else 1)
+
+
 def test_a_strategy_exception_in_a_later_slot_is_the_strategys_own(tmp_path: Path) -> None:
     snapshot, slots = _write_span_release(tmp_path)
     source = _SPAN_STRATEGY.replace(

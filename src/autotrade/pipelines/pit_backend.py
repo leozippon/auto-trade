@@ -979,8 +979,14 @@ class PITDailyEvaluationBackend:
             max_intraday_row_group_rows=self.max_intraday_row_group_rows,
             timer=timer,
         )
+        # Only an in-process (trusted) strategy needs the chmod gate between
+        # refreshes. The sandbox mounts the view read-only, and the gate's
+        # per-day walk of the growing tree cost up to minutes per full-span
+        # leg; there the view is locked once, after the replay.
+        trusted = self.execution_mode == "trusted"
         lock = _AsOfReadOnlyView(asof_dir)
-        lock.lock()
+        if trusted:
+            lock.lock()
         refreshed: set[str] = set()
 
         def context_data(inference_at: datetime) -> StrategyDataView:
@@ -988,6 +994,9 @@ class PITDailyEvaluationBackend:
             if key in refreshed:
                 raise RuntimeError(f"Timeview refresh was requested twice for one daily inference: {key}")
             refreshed.add(key)
+            if not trusted:
+                path, version = span.refresh(inference_at)
+                return StrategyDataView(str(snapshot_dir), path, version)
             # Sub-phases of data_view: the as-of build dominated replay wall on
             # real runs, and "which of the three" is the whole diagnosis. A
             # later slot's opening lands in replay_frames, inside data_view.
@@ -1286,7 +1295,8 @@ class _AsOfReadOnlyView:
     reaches hundreds of thousands of files, which is how a single day's as-of
     build reached tens of seconds late in a replay. Discovery now walks with
     ``os.walk`` (no sort) and only newly-appeared files are chmod'ed, so the
-    per-day cost tracks what actually landed instead of the whole history.
+    chmod cost tracks what actually landed; the walk itself still visits the
+    whole tree, which is why only a trusted replay re-locks every day.
     """
 
     def __init__(self, root: Path) -> None:
