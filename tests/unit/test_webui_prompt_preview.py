@@ -21,6 +21,7 @@ from autotrade.agent.experiment_facts import (
     DEADLINE_SECONDS_NOTE,
     REPLAY_YEARS_NOTE,
     SMOKE_PROBE_NOTE,
+    strategy_container_note,
 )
 from autotrade.agent.prompts import (
     SESSION_DEFAULT_INSTRUCTION,
@@ -197,6 +198,7 @@ def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path)
         "strategy_gpu_count": limits.gpu_count,
         "strategy_cpus": limits.cpus,
         "strategy_memory_bytes": limits.memory_bytes,
+        "strategy_container_note": strategy_container_note(limits),
         "batch_validate_max_concurrency": DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
         "batch_validate_fit_timeout_note": BATCH_VALIDATE_FIT_TIMEOUT_NOTE,
         "smoke_backtest_probe_note": SMOKE_PROBE_NOTE,

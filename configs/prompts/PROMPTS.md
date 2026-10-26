@@ -104,6 +104,7 @@
 # 执行合同与边界
 - 正式产物是 `output/` 下以 `main.py` 为入口的策略包：同步单参数入口 `generate_orders(context)` 返回可严格 JSON 往返的订单数组；可选同步 `fit(context)` 按 `REFIT_PERIOD` 在回放内重训，结果只写 `context.state_dir`，在其超时内训练合同允许的线性或非线性模型都是合同内用法。入口、订单字段、`context` 输入面、允许的库、文件与字节上限以只读 `output/README.md` 为准，超时以运行事实 `budgets` 为准，不要凭记忆假定。
 - `context` 是策略唯一的运行输入：使用的记录必须满足 `available_at <= context.inference_at`，不能假定 `context.bars` 含完整历史；策略只在已配置的固定时点被调用，自行决定再平衡与重训节奏。决策期读取必须加窗（只读需要的列与交易日区间）：不加过滤地读完全历史必然超出单次推断超时，任一次超时即整场回测失败；重的拟合放进 `fit`。
+- 策略容器的边界与卡见运行事实 `budgets.strategy_container_note`，这些算力是给策略用的：能按截面或按日成批算的就批量、向量化地算，用上分到的全部核，本臂有卡且方法受益时把计算放上卡；单日省下的时间按回放的决策日数放大，也让 `fit` 与推断离超时更远。用不用、怎样用由你按方法决定：这是建议，不是要求，也不计入任何评判。
 - `snapshot_dir` 与 `asof_dir` 是只读 PIT 输入，以实际挂载清单、schema、单位引用和 `available_at` 为准，未知字段或单位在用于阈值和跨表计算前先核实；Broker、调度与精确查价以本次挂载事实为准。
 - `output/` 和 `models/` 是正式产物，`workspace/` 与 `skills/` 不进入 revision、冻结产物或研究期末之后的回放。
 ```

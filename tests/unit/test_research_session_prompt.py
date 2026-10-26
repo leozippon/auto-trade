@@ -331,6 +331,10 @@ def test_the_prompt_states_the_research_session_contract() -> None:
         assert "写好 skills" not in surface and "写进 skills" not in surface
     feedback = prompt[prompt.index("# 反馈通道") : prompt.index("# Step 产物树")]
     assert "只写挂载的运行记忆与数据引用里还没有的知识" in feedback
+    # Batching, the cores and the card are suggested, never required or scored.
+    runtime = prompt[prompt.index("# 执行合同与边界") : prompt.index("# 禁止事项")]
+    assert "`budgets.strategy_container_note`" in runtime
+    assert "这是建议，不是要求，也不计入任何评判" in runtime
     assert "`continue`" not in contract and "PRIOR" not in prompt
     facts = prompt[prompt.index("# 预算与事实") : prompt.index("# 反馈通道")]
     for fact in ("`budgets`", "`research_geometry`", "`arm`", "`artifact_contract`"):

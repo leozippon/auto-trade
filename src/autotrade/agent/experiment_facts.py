@@ -14,7 +14,11 @@ from autotrade.environment.broker_core import BONUS_SHARE_PAR_CNY, DIVIDEND_TAX_
 from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.replay.style import neutralization_method
-from autotrade.environment.sandbox import SCREENING_TOOL_MOUNT, SandboxLimits
+from autotrade.environment.sandbox import (
+    SCREENING_TOOL_MOUNT,
+    SandboxLimits,
+    container_thread_env,
+)
 
 EXPERIMENT_FACTS_SCHEMA_VERSION = 2
 
@@ -60,6 +64,35 @@ SMOKE_PROBE_NOTE = (
     "内存上限没有 swap 余量：越界即容器被 OOM kill（exit 137），该次调用显式失败、"
     "也拿不到峰值读数，所以峰值要留余量而不是贴着上限跑。"
 )
+
+
+def strategy_container_note(limits: SandboxLimits) -> str:
+    """What one candidate's replay runs on, in one passage beside its numbers.
+
+    The CPU quota, thread variables and memory cap are rendered from
+    ``limits`` and ``container_thread_env``, the very code the executor builds
+    each strategy container's flags from, so the passage cannot drift from
+    what a replay gets; the per-arm numbers (cards, batch width) are named by
+    their budgets keys. The structure it states is the executor's: a
+    ``fit``-bearing strategy gets a second container with the same boundary,
+    called before that day's decision (``replay.engine``), and a batch's legs
+    run concurrently, one card each in turn (``session_tools.leg_cards``).
+    """
+
+    threads = container_thread_env(limits.cpus)["OMP_NUM_THREADS"]
+    memory_gib = limits.memory_bytes / 1024**3
+    return (
+        "每个候选回放时，`generate_orders` 在一个策略容器里运行；定义了 `fit` 的候选另起一个边界相同的容器专跑 `fit`，"
+        "同一天先 `fit` 后决策，两者不同时计算。"
+        f"每个容器各有 {limits.cpus:g} 个 CPU 的配额（`strategy_cpus`），"
+        f"`OMP_NUM_THREADS`、`MKL_NUM_THREADS`、`OPENBLAS_NUM_THREADS` 与 `NUMEXPR_NUM_THREADS` 都设为 {threads}，"
+        f"内存上限 {memory_gib:g} GiB（`strategy_memory_bytes`），"
+        "并挂本臂的 `strategy_gpu_count` 张卡（为 0 时全在 CPU 上）：卡型与每张的显存在会话里用 `nvidia-smi` 看，"
+        "显存与同卡的其他腿、会话里起的进程共用。"
+        "一次 `batch_validate` 至多同时回放 `batch_validate_max_concurrency` 个候选，各有自己的容器；"
+        "单独的回放挂全部卡，并排回放的候选轮流各挂一张，多于卡数时几条腿同卡。"
+    )
+
 
 # Where the read roots are in the Sandbox filesystem. The root names are a
 # file-tool convention, not paths: two arms read `steps` as a shell path,
@@ -311,6 +344,7 @@ def _budget_facts(
     context_compaction: Mapping[str, object] | None,
 ) -> dict[str, object]:
     budgets = _as_mapping(manifest.get("budgets"))
+    limits = SandboxLimits()
     return compact_mapping(
         {
             # Pausable effective reasoning time: the main deadline PLUS the
@@ -349,20 +383,24 @@ def _budget_facts(
             # The totals above are the arm's, spent across every attempt of
             # its one session; what earlier attempts already used of them.
             "used_before_this_attempt": budgets.get("used_before_this_attempt"),
-            # CPU quota that same container is started with, and therefore the
-            # value its OMP/MKL/OPENBLAS/NUMEXPR thread variables carry. Read
+            # CPU quota that same container is started with, from which its
+            # OMP/MKL/OPENBLAS/NUMEXPR thread variables are derived. Read
             # from the environment's own SandboxLimits, the single source the
             # executor builds the `--cpus` flag from, so a strategy that sets
             # its own thread count has the real number instead of a guess: a
             # session that guessed low spent two backtest slots on fit
             # timeouts it had the cores to avoid.
-            "strategy_cpus": SandboxLimits().cpus,
+            "strategy_cpus": limits.cpus,
             # The memory ceiling of that same container, in the unit a replay
             # reports its measured peak in (``resources.peak_memory_bytes``).
             # The session container carries the same ceiling, so a fit profiled
             # under `shell` is measured against the number the formal replay
             # will enforce rather than extrapolated across two boundaries.
-            "strategy_memory_bytes": SandboxLimits().memory_bytes,
+            "strategy_memory_bytes": limits.memory_bytes,
+            # The two containers per candidate, their threads and cards, and
+            # the batch's concurrent legs, in one passage the system prompt
+            # points to when it suggests batching and using the cores and card.
+            "strategy_container_note": strategy_container_note(limits),
             # Replays one batch_validate call runs at once (the arm's
             # ``batch_validate_max_concurrency``), each with its own strategy
             # container (two when the candidate declares fit). The host is

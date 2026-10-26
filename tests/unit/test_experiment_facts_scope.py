@@ -316,6 +316,30 @@ def test_the_facts_publish_the_strategy_containers_memory_ceiling() -> None:
     assert "start" in SMOKE_PROBE_NOTE
 
 
+def test_the_container_note_renders_from_the_limits_the_executor_uses(monkeypatch) -> None:
+    """The prompt's suggestion to batch and use the cores and card points at a
+    passage whose numbers are the executor's own limits, not retyped prose:
+    a changed limit changes the prompt the session reads."""
+
+    import functools
+
+    from autotrade.agent import experiment_facts
+    from autotrade.environment.sandbox import SandboxLimits
+
+    prompt = build_system_prompt(experiment_facts=_facts())
+    note = _facts()["budgets"]["strategy_container_note"]
+    assert "8 个 CPU" in note and "都设为 8" in note and "内存上限 32 GiB" in note
+    assert note in prompt and "`budgets.strategy_container_note`" in prompt
+    monkeypatch.setattr(
+        experiment_facts,
+        "SandboxLimits",
+        functools.partial(SandboxLimits, cpus=2.5, memory="16g"),
+    )
+    changed = _facts()["budgets"]["strategy_container_note"]
+    assert "2.5 个 CPU" in changed and "都设为 3" in changed and "内存上限 16 GiB" in changed
+    assert build_system_prompt(experiment_facts=_facts()) != prompt
+
+
 def test_the_facts_place_every_read_root_in_the_shell_filesystem() -> None:
     """Root names are a tool convention, not paths.
 
