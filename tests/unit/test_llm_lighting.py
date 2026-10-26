@@ -1087,6 +1087,31 @@ def test_other_relay_ids_send_no_cache_marker(tmp_path: Path, model: str, reply:
         assert body["messages"] == [message.to_record() for message in messages]
 
 
+@pytest.mark.parametrize(
+    ("model", "reply", "temperature"),
+    [
+        ("gemini-4-argon", _chat_json("gemini-4-argon"), None),
+        ("claude-opus-5-5", _chat_json("claude-opus-5-5"), 0.0),
+        (RELAY_DEEPSEEK_MODEL, _chat_json(RELAY_DEEPSEEK_MODEL), 0.0),
+        (MODEL, _responses_json(content="done"), None),
+    ],
+    ids=["gemini", "claude", "relay-deepseek", "gpt-6-responses"],
+)
+def test_only_gemini_leaves_the_temperature_to_the_provider(
+    tmp_path: Path, model: str, reply: bytes, temperature: float | None
+):
+    """gemini-4-argon is sent no temperature; every other relay id sends what
+    it sent before (the Chat Completions ids the configured 0.0, the
+    responses dialect none)."""
+
+    proxy, transport = _proxy(tmp_path, [reply], model=model)
+
+    proxy.complete([ChatMessage("user", "hi")])
+
+    assert transport.bodies[0].get("temperature") == temperature
+    assert ("temperature" in transport.bodies[0]) is (temperature is not None)
+
+
 def test_relay_deepseek_id_uses_the_deepseek_dialect(tmp_path: Path):
     proxy, transport = _proxy(
         tmp_path,

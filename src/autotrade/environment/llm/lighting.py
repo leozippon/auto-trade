@@ -6,7 +6,10 @@ DeepSeek-V4.1-Flash over ``/v1/chat/completions``, with a primary credential
 and an alternate one: an arm's ``llm_key`` chooses which its calls start on,
 and the other is the fallback. The Anthropic ids' requests also mark a
 prompt-cache breakpoint, which the relay forwards to the upstream Messages
-API.
+API. The Claude ids and gemini-4-argon are sent no reasoning level, so an
+arm's ``reasoning_effort`` does not reach them: the Claude ids accept none,
+and gemini-4-argon thinks at Google's default and keeps the provider's
+default temperature as well.
 """
 
 from __future__ import annotations
@@ -110,6 +113,8 @@ SHORT_TIER_MAX_COMPACTION_THRESHOLD = 221_184
 PROMPT_CACHE_MARKER_MODELS = tuple(
     model for model in MODEL_CHOICES if model.startswith("claude-")
 )
+# No temperature: Google's Gemini 3 guide keeps the default 1.0 (lower can loop).
+PROVIDER_TEMPERATURE_MODELS = ("gemini-4-argon",)
 
 # The responses endpoint takes the shared effort scale narrowed to its own
 # tiers; the shared scale's top tier is xhigh.
@@ -324,6 +329,8 @@ class LightingProxy(OpenAICompatibleProxy):
             )
             if self.config.model in PROMPT_CACHE_MARKER_MODELS:
                 _mark_cache_breakpoint(body)
+            if self.config.model in PROVIDER_TEMPERATURE_MODELS:
+                del body["temperature"]
             return body
         return _responses_body(
             self.config,
@@ -819,6 +826,7 @@ __all__ = [
     "LONG_CONTEXT_TIER_MODELS",
     "MODEL_CHOICES",
     "MODEL_PROFILES",
+    "PROVIDER_TEMPERATURE_MODELS",
     "SHORT_TIER_MAX_COMPACTION_THRESHOLD",
     "LightingProxy",
     "build_gateway",
