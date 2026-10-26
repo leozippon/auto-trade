@@ -7,7 +7,9 @@ the README's direction paragraph word for word, so the direction reaches the
 Agent in one wording, and nothing before the facts names a model, so neither
 copy steers the session to one; round 20261026's directive starts with the
 same paragraph and adds only its call to explore, which names no model
-either. No pack file cites a reading after the research period.
+either, and its astra arm on the A100 instance sends what the local astra arm
+sent but for one card instead of two. No pack file cites a reading after the
+research period.
 """
 
 from __future__ import annotations
@@ -50,13 +52,24 @@ def test_round_20261026_starts_from_the_direction_and_names_no_model() -> None:
     for name in (*MODEL_CHOICES, "Qwen", "gemini", "gpt", "claude", "DeepSeek"):
         assert name.lower() not in directive.lower(), name
     arms = create_round_20261026.ARMS.values()
-    assert len(arms) == 3
+    assert len(arms) == 4
     for arm in arms:
         assert (arm["workspace_reference"], arm["research_directive"], arm["llm_key"]) == (
             PACK,
             directive,
             "alternate",
         )
+
+
+def test_round_20261026_moves_astra_to_the_instance_unchanged_but_for_one_card() -> None:
+    round_ = create_round_20261026.ROUND
+    local, moved = "retrieval_100k_8y_astra_20261026", "retrieval_100k_8y_astra_zgca_20261026"
+    assert round_.request_params(local)["gpu_count"] == 2
+    assert round_.request_params(moved) == {
+        **round_.request_params(local),
+        "gpu_count": 1,
+        "experiment_id": moved,
+    }
 
 
 def test_no_pack_file_cites_a_reading_after_the_research_period() -> None:

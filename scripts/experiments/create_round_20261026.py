@@ -1,7 +1,7 @@
 #!/usr/bin/env python
-"""The 2026-10-26 round: round 20261025b's retrieval direction on the local console, with gemini-4-argon, gpt-6-astra and claude-fable-5-1 and an emphasis on exploration.
+"""The 2026-10-26 round: round 20261025b's retrieval direction with gemini-4-argon, gpt-6-astra and claude-fable-5-1 and an emphasis on exploration, on the local console and, for gpt-6-astra, on the A100 instance.
 
-The three arms run round 20261025b's experiment as it stands -- the pack
+The arms run round 20261025b's experiment as it stands -- the pack
 `retrieval_100k_8y_20261025b`, the eight-year fundamentals-plus-titles
 geometry on a 100k account graded against CSI 1000
 (`FUND_TITLE_EIGHT_YEAR_100K`), main board and ChiNext, the 10-24 seed,
@@ -16,19 +16,35 @@ word for word followed by one sentence asking for exploration inside it.
 | `retrieval_100k_8y_argon_20261026` | gemini-4-argon | DeepSeek-V4.1-Flash |
 | `retrieval_100k_8y_astra_20261026` | gpt-6-astra | DeepSeek-V4.1-Flash |
 | `retrieval_100k_8y_fable_20261026` | claude-fable-5-1 | DeepSeek-V4.1-Flash |
+| `retrieval_100k_8y_astra_zgca_20261026` | gpt-6-astra | DeepSeek-V4.1-Flash |
+
+On the owner's instruction of 2026-10-26 the astra arm moved to the A100
+instance: the local `retrieval_100k_8y_astra_20261026` was terminated and
+archived, and `retrieval_100k_8y_astra_zgca_20261026`, identical to it except
+that it claims one A100 (`gpu_count` 1), is created on the instance.
 
 Key. Every role of every arm calls the relay with `LIGHTING_API_KEY_ALT`
 first (`llm_key` alternate, kept in the arm's params.json), with
 `LIGHTING_API_KEY` as the fallback when the alternate is rejected or runs dry.
 
-Cards. Each arm claims two L20s, whichever free ones the console takes when it
-starts the worker (`/api/health` lists them as `gpus_free`), so the round
-needs six free cards. A batch's three legs take the arm's two cards in turn,
-so two of them share one; a replay that runs alone attaches both.
+Cards. Each local arm claims two L20s, whichever free ones the console takes
+when it starts the worker (`/api/health` lists them as `gpus_free`). A batch's
+three legs take the arm's two cards in turn, so two of them share one; a
+replay that runs alone attaches both. The instance arm claims one A100, which
+every leg of a batch shares.
 
-Usage, against the local console on port 38888:
+Usage. The local arms, against the local console on port 38888:
 
-    ~/miniconda3/envs/quant/bin/python scripts/experiments/create_round_20261026.py 38888 [--dry-run] [experiment_id ...]
+    ~/miniconda3/envs/quant/bin/python scripts/experiments/create_round_20261026.py 38888 [--dry-run] retrieval_100k_8y_argon_20261026 ...
+
+The instance arm, through `ops/zgca/zgca.py run`, which sets
+`AUTOTRADE_GPU_NAME=A100` for the instance's console and this launcher:
+
+    ~/miniconda3/envs/quant/bin/python ops/zgca/zgca.py run scripts/experiments/create_round_20261026.py retrieval_100k_8y_astra_zgca_20261026
+
+Always name the arms: a run without ids creates every arm that has no
+directory on that host, the local arms on the instance and the instance arm on
+the L20s.
 
 `--dry-run` reads the seed contract and the template's smoke record and
 creates nothing.
@@ -79,6 +95,11 @@ ARMS: dict[str, dict[str, object]] = {
     }
     for name, model in (("argon", ARGON), ("astra", ASTRA), ("fable", FABLE))
 }
+# The astra arm on the A100 instance, on one of its cards.
+ARMS["retrieval_100k_8y_astra_zgca_20261026"] = {
+    **ARMS["retrieval_100k_8y_astra_20261026"],
+    "gpu_count": 1,
+}
 
 ROUND = Round(
     arms=ARMS,
@@ -86,7 +107,8 @@ ROUND = Round(
     overrides={
         **FUND_TITLE_EIGHT_YEAR_100K,
         "permitted_boards": ["main", "gem"],
-        # Two L20s per arm, claimed by the console when it starts the worker.
+        # Two L20s per local arm, claimed by the console when it starts the
+        # worker; the instance arm takes one A100 instead.
         "gpu_count": 2,
         "reasoning_effort": "xhigh",
     },
