@@ -60,7 +60,10 @@ from .test_batch_validate import _write_style_sidecar
 
 
 def _passing_gate(
-    node_id: str, seed_replicates: tuple[str, ...] = (), offline_trials: int = 0
+    node_id: str,
+    seed_replicates: tuple[str, ...] = (),
+    offline_trials: int = 0,
+    deterministic: bool = False,
 ) -> dict[str, object]:
     """A freeze gate every node passes: these tests are about the Runner."""
     return {"passed": True, "reasons": []}
@@ -901,7 +904,10 @@ def test_hard_finalization_labels_every_candidate_with_its_freeze_gate_verdict(
             )
 
     def gate(
-        node_id: str, seed_replicates: tuple[str, ...] = (), offline_trials: int = 0
+        node_id: str,
+        seed_replicates: tuple[str, ...] = (),
+        offline_trials: int = 0,
+        deterministic: bool = False,
     ) -> dict[str, object]:
         if node_id == strong_id:
             return {"passed": True, "reasons": []}

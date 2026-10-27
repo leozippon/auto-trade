@@ -462,7 +462,10 @@ class AcceptanceRules:
                     "nominee and its replicates must be >= the nominee's "
                     "information_ratio_bar, and every other condition here is "
                     "judged on the nominee itself. A nominee without fit needs "
-                    "none; replicates it names are held to the same rules"
+                    "none; replicates it names are held to the same rules. A "
+                    "nomination declared deterministic in finish_session (its "
+                    "package uses no randomness) is exempt from the replicate "
+                    "count and the seed mean, its own reading standing"
                 ),
                 "tracking_mandate": mandate,
                 "full_span_validations": (
@@ -1188,10 +1191,12 @@ class ResearchSessionResult:
     # Keyword-only from here: independent optional fields, so a new one can
     # never land in an older field's positional slot.
     _: KW_ONLY
-    # ``freeze``: the nominated Step, and the Steps it registered as its seed
-    # replicates (``experiment.freeze_gate_for``).
+    # ``freeze``: the nominated Step, the Steps it registered as its seed
+    # replicates, and whether it declared its package deterministic
+    # (``experiment.freeze_gate_for``).
     node_id: str | None = None
     seed_replicates: tuple[str, ...] = ()
+    deterministic: bool = False
     # The Agent's own account of its outcome.
     reason: str = ""
     finish_reason: str = ""

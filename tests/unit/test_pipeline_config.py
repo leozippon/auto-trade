@@ -297,6 +297,11 @@ class AcceptanceRulesTest(unittest.TestCase):
         self.assertIn(str(verdict.FREEZE_MIN_DSR_PROBABILITY), freeze["deflated_sharpe_probability"])
         self.assertIn(str(verdict.FREEZE_MIN_FULL_SPAN_VALIDATIONS), freeze["full_span_validations"])
         self.assertEqual(freeze["freezes_per_arm"], 1)
+        self.assertIn(
+            "declared deterministic in finish_session (its package uses no randomness) "
+            "is exempt from the replicate count and the seed mean",
+            freeze["seed_replicates"],
+        )
         # The drawdown limit is the gate's, stated once and from the same field
         # the forward and Held-out conditions below quote.
         self.assertIn("0.2", freeze["max_drawdown"])

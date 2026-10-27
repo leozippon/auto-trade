@@ -11,7 +11,10 @@ from autotrade.environment.tools.step_rollback import StepRollbackTool
 
 
 def _passing_gate(
-    node_id: str, seed_replicates: tuple[str, ...] = (), offline_trials: int = 0
+    node_id: str,
+    seed_replicates: tuple[str, ...] = (),
+    offline_trials: int = 0,
+    deterministic: bool = False,
 ) -> dict[str, object]:
     """A freeze gate every node passes."""
     return {"passed": True, "reasons": []}

@@ -871,10 +871,11 @@ CONDITIONS: tuple[Condition, ...] = (
     # The nominee's seed replicates (``experiment._seed_replicate_gate``): a
     # named replicate that is not one, a nominee that trains a model and names
     # none, and a mean active IR over the nominee and its replicates below
-    # the nominee's own bar.
+    # the nominee's own bar. A nomination declared deterministic (its package
+    # uses no randomness) is exempt from the last two: its own reading stands.
     Condition("seeds", "freeze_seed_replicate_invalid", lambda m, t: not _refused_replicate(m)),
-    Condition("seeds", "freeze_too_few_seed_replicates", lambda m, t: bool(m["replicates"]) or not m["trains_a_model"]),
-    Condition("seeds", "freeze_seed_mean_information_ratio_below_threshold", lambda m, t: not m["replicates"] or _refused_replicate(m) or _seed_mean_reaches_bar(m)),
+    Condition("seeds", "freeze_too_few_seed_replicates", lambda m, t: bool(m["replicates"]) or not m["trains_a_model"] or m["deterministic"]),
+    Condition("seeds", "freeze_seed_mean_information_ratio_below_threshold", lambda m, t: m["deterministic"] or not m["replicates"] or _refused_replicate(m) or _seed_mean_reaches_bar(m)),
     # F1/H1: the frozen strategy raised during the replay, which then has no
     # slice to judge (:func:`graduation_verdict`).
     Condition("replay", "forward_strategy_error", lambda m, t: m["strategy_error"] != "forward", "F1"),

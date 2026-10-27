@@ -57,7 +57,7 @@
 哪些条件约束本臂、阈值多少，只看运行事实 `acceptance_rules`：`freeze_gate` 是 `finish_session` 提名时执行的冻结门，`graduation` 是冻结产物随后被裁决的毕业条件，读数都量在 `graded_series` 定义的主动序列上。两节列出的每一条都按它写的阈值约束本臂，没列出的条件本臂没有。
 - 冻结门按本臂至今的全部试验去膨胀，试验数只增不减：每个验证行的 `selection_statistics.information_ratio_bar` 就是此刻一个完整研究期提名需要的主动信息比率。
 - 读数影响了提交什么的每个离线筛选配置（包括 `source_refs.signal_screen_ref` 的筛选脚本）都按 `offline_trials` 如实申报，计入试验数；少报就是瞒下了多重检验。
-- 定义了 `fit` 的提名要带种子复现，规则见 `acceptance_rules.freeze_gate`，种子的写法见 `output/README.md`。被冻结的是节点的不可变快照，工作副本不必先恢复到它。
+- 策略包含随机性（训练、采样）的提名要带种子复现，规则见 `acceptance_rules.freeze_gate`，种子的写法见 `output/README.md`；完全不含随机性的包以 `deterministic` 提名，不需要种子复现，这一声明记入账本，供运营者在上线前终审。被冻结的是节点的不可变快照，工作副本不必先恢复到它。
 - 冻结门拒绝一个完整研究期节点的原因只有 `freeze_deflated_sharpe_below_threshold`（训练模型的节点还可以有种子平均那一条，只要种子平均的主动信息比率不低于本臂未去膨胀的下限）时，它不能冻结，却仍是本臂的交付：本臂以 `no_edge` 或 `deadline` 结束之后，运营者可以把它孵化到 Paper 上裁决。冻结门的其余条件不随试验数变化，所以多搜索不会让这个交付变远。以 `no_edge` 结束时，`reason` 先点名这样的节点及其门读数，再写其余证据。
 ```
 

@@ -130,12 +130,15 @@ class SeedDeveloper:
     """Validates each scripted ``(source, span)`` and freezes ``nominee`` with
     the candidates ``replicates`` names as its seed replicates."""
 
-    def __init__(self, store, evaluator, candidates, *, nominee: int, replicates):
+    def __init__(
+        self, store, evaluator, candidates, *, nominee: int, replicates, deterministic: bool
+    ):
         self.store = store
         self.evaluator = evaluator
         self.candidates = candidates
         self.nominee = nominee
         self.replicates = tuple(replicates)
+        self.deterministic = deterministic
 
     def __call__(self, request: ResearchSessionRequest) -> ResearchSessionResult:
         steps = []
@@ -158,10 +161,11 @@ class SeedDeveloper:
             "freeze",
             node_id=steps[self.nominee].step_id,
             seed_replicates=tuple(steps[index].step_id for index in self.replicates),
+            deterministic=self.deterministic,
         )
 
 
-def _arm(tmp_path: Path, candidates, *, nominee=0, replicates=(), **replays):
+def _arm(tmp_path: Path, candidates, *, nominee=0, replicates=(), deterministic=False, **replays):
     config = RollingExperimentConfig(
         experiment_id="arm",
         experiments_root=tmp_path / "experiments",
@@ -175,7 +179,14 @@ def _arm(tmp_path: Path, candidates, *, nominee=0, replicates=(), **replays):
         snapshots=Snapshots(),
         artifacts=store,
         evaluator=evaluator,
-        developer=SeedDeveloper(store, evaluator, candidates, nominee=nominee, replicates=replicates),
+        developer=SeedDeveloper(
+            store,
+            evaluator,
+            candidates,
+            nominee=nominee,
+            replicates=replicates,
+            deterministic=deterministic,
+        ),
         trading_days=DAYS,
         ledger=ExperimentLedger(config.ledger_path),
     )
@@ -197,7 +208,8 @@ def test_a_model_nominee_freezes_with_its_seed_replicate_and_both_replay_forward
     gate = record["freeze_gate"]
     seeds = gate["seed_replicates"]
     assert gate["passed"] is True and gate["reasons"] == []
-    assert seeds["trains_a_model"] is True
+    assert seeds["trains_a_model"] is True and seeds["deterministic"] is False
+    assert record["frozen"]["deterministic"] is False
     assert [entry["seed_line"] for entry in seeds["replicates"]] == [
         "main.py: SEED_BASE = 2000",
         "main.py: SEED_BASE = 3000",
@@ -305,6 +317,57 @@ def test_a_nominee_above_its_bar_is_refused_when_its_seed_mean_is_below(tmp_path
     assert gate["information_ratio"] >= seeds["information_ratio_bar"]
     assert seeds["mean_information_ratio"] < seeds["information_ratio_bar"]
     assert gate["reasons"] == ["freeze_seed_mean_information_ratio_below_threshold"]
+
+
+@pytest.mark.parametrize("replicates", [(), (1,)], ids=["alone", "with_a_worse_seed"])
+def test_a_deterministic_model_nominee_owes_no_replicate_and_no_seed_mean(
+    tmp_path: Path, replicates
+):
+    """A nominee that trains a model but declares its package deterministic
+    freezes on its own reading: without a replicate, and with one whose mean
+    falls below the bar. The gate and the frozen block record the
+    declaration for the operator's review."""
+
+    pipeline, _evaluator = _arm(
+        tmp_path,
+        [(_source(1000), "full"), (_source(4000), "full")],
+        replicates=replicates,
+        deterministic=True,
+    )
+    record = pipeline.run_research_session()
+    gate = record["freeze_gate"]
+    seeds = gate["seed_replicates"]
+    assert gate["passed"] is True and gate["reasons"] == []
+    assert seeds["trains_a_model"] is True and seeds["deterministic"] is True
+    if replicates:
+        assert seeds["mean_information_ratio"] < seeds["information_ratio_bar"]
+    assert record["frozen"]["deterministic"] is True
+
+
+@pytest.mark.parametrize(
+    ("candidates", "replicates", "reason"),
+    [
+        (
+            [(_source(4000), "full"), (_source(1000), "full")],
+            (),
+            "freeze_information_ratio_below_threshold",
+        ),
+        (
+            [(_source(1000), "full"), (_source(3000, swaps=2), "full"), (_source(1000), "full")],
+            (2,),
+            "freeze_seed_replicate_invalid",
+        ),
+    ],
+    ids=["its_own_reading", "an_invalid_replicate"],
+)
+def test_a_deterministic_nominee_is_held_to_every_other_condition(
+    tmp_path: Path, candidates, replicates, reason
+):
+    gate = _refused(tmp_path, candidates, replicates=replicates, deterministic=True)
+    assert reason in gate["reasons"]
+    assert gate["seed_replicates"]["deterministic"] is True
+    assert "freeze_too_few_seed_replicates" not in gate["reasons"]
+    assert "freeze_seed_mean_information_ratio_below_threshold" not in gate["reasons"]
 
 
 def test_a_nominee_that_trains_no_model_is_judged_on_its_own_series(tmp_path: Path):

@@ -428,6 +428,7 @@ class RollingExperimentPipeline:
                         for slot in self.config.geometry.research_years
                     ],
                     seed_replicates=[by_step[step_id] for step_id in session.seed_replicates],
+                    deterministic=session.deterministic,
                     terminal_offline_trials=session.terminal_offline_trials,
                 )
                 if gate["passed"]:
@@ -628,6 +629,10 @@ class RollingExperimentPipeline:
                 "fit": fit is not None,
                 "refit_period": fit.refit_period if fit is not None else None,
             },
+            # The Agent's declaration that the package uses no randomness,
+            # which waived its seed replicates: the operator reviews it
+            # before the strategy goes live.
+            "deterministic": gate["seed_replicates"]["deterministic"],  # type: ignore[index]
             **({"seed_replicates": replicates} if replicates else {}),
         }
 
@@ -1355,6 +1360,7 @@ def freeze_gate_for(
     hard_reasons: Sequence[str] = (),
     years: Sequence[tuple[str, str]] = (),
     seed_replicates: Sequence[Mapping[str, object]] = (),
+    deterministic: bool = False,
     terminal_offline_trials: int = 0,
 ) -> dict[str, object]:
     """The freeze gate of one nominated Step against the whole arm
@@ -1370,7 +1376,8 @@ def freeze_gate_for(
     ``years`` the research years; the console, which reads only the deflated
     Sharpe of a running session's best node, passes the default rules and
     leaves the other two out. The measured gate also judges the nominee's
-    ``seed_replicates`` (rows of this session; :func:`_seed_replicate_gate`).
+    ``seed_replicates`` (rows of this session; :func:`_seed_replicate_gate`),
+    which a nomination declared ``deterministic`` does not owe.
     ``terminal_offline_trials`` is the terminal delta the session's finish
     declared, added to the arm's family once.
     """
@@ -1412,6 +1419,7 @@ def freeze_gate_for(
         fingerprinted(experiment_dir, [nominee])[0],
         fingerprinted(experiment_dir, seed_replicates),
         experiment_dir=experiment_dir,
+        deterministic=deterministic,
     )
 
 
@@ -1546,6 +1554,7 @@ def _seed_replicate_gate(
     replicates: Sequence[Mapping[str, object]],
     *,
     experiment_dir: str | Path,
+    deterministic: bool,
 ) -> dict[str, object]:
     """``gate`` with the seed-replicate conditions.
 
@@ -1559,7 +1568,10 @@ def _seed_replicate_gate(
     ``verdict.CONDITIONS`` are judged on it: a named replicate that is not
     one, a nominee that trains a model and names none, and a mean active IR
     over the nominee and its replicates below the nominee's own
-    ``information_ratio_bar``. Every other condition stays the nominee's own.
+    ``information_ratio_bar``. A nomination that declares its package
+    ``deterministic`` (no randomness, so a replicate would reproduce it
+    exactly) is exempt from the last two; the block records the declaration.
+    Every other condition stays the nominee's own.
     """
 
     main = Path(experiment_dir) / REVISIONS_DIR / str(nominee["revision_id"]) / "output" / "main.py"
@@ -1597,6 +1609,7 @@ def _seed_replicate_gate(
     )
     block = {
         "trains_a_model": trains,
+        "deterministic": deterministic,
         "replicates": entries,
         "mean_information_ratio": sum(ratios) / len(ratios) if entries and measured else None,  # type: ignore[arg-type]
         "information_ratio_bar": gate["deflated_sharpe"].get("information_ratio_bar"),  # type: ignore[union-attr]

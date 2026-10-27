@@ -688,9 +688,16 @@ class LLMResearchDeveloper:
                 run_ref=run_ref,
                 emit_event=emit_event,
             )
-            conversation_id, outcome, node_id, replicates, reason, finish_reason, terminal = (
-                self._run_agent(runner, request, resume=resume, used=used, run_ref=run_ref)
-            )
+            (
+                conversation_id,
+                outcome,
+                node_id,
+                replicates,
+                deterministic,
+                reason,
+                finish_reason,
+                terminal,
+            ) = self._run_agent(runner, request, resume=resume, used=used, run_ref=run_ref)
             return self._collect_result(
                 request,
                 local=local,
@@ -705,6 +712,7 @@ class LLMResearchDeveloper:
                 outcome=outcome,
                 node_id=node_id,
                 seed_replicates=replicates,
+                deterministic=deterministic,
                 reason=reason,
                 finish_reason=finish_reason,
                 terminal_offline_trials=terminal,
@@ -1244,11 +1252,12 @@ class LLMResearchDeveloper:
         resume: SessionResume | None,
         used: BudgetUsed,
         run_ref: str,
-    ) -> tuple[str, str, str | None, tuple[str, ...], str, str, int]:
+    ) -> tuple[str, str, str | None, tuple[str, ...], bool, str, str, int]:
         """Open the conversation, afresh or with the resume note over the last
         summary, and run it to its finish: the conversation id, the outcome,
-        the nominated node and its seed replicates, the reason, the finish
-        reason and the terminal offline-screen delta a finish declared."""
+        the nominated node, its seed replicates and whether it was declared
+        deterministic, the reason, the finish reason and the terminal
+        offline-screen delta a finish declared."""
 
         from autotrade.agent.compact import compaction_summary_message
         from autotrade.agent.prompts import (
@@ -1306,6 +1315,7 @@ class LLMResearchDeveloper:
             conversation_id = result.conversation_id
             outcome, node_id, reason = _session_outcome(result.finish_value)
             replicates = _seed_replicates(result.finish_value) if outcome == "freeze" else ()
+            deterministic = outcome == "freeze" and _deterministic(result.finish_value)
             terminal = _terminal_offline_trials(result.finish_value)
             finish_reason = "llm_agent_finish_session"
         except AgentSessionBudgetExhausted as exc:
@@ -1314,6 +1324,7 @@ class LLMResearchDeveloper:
             # are still the arm's trials.
             conversation_id = exc.conversation_id
             outcome, node_id, replicates, reason = "deadline", None, (), ""
+            deterministic = False
             terminal = 0
             finish_reason = exc.finish_reason
         except EnvironmentBlocked as exc:
@@ -1321,9 +1332,19 @@ class LLMResearchDeveloper:
             # on the environment, so the arm ends on that, not on research.
             conversation_id = runner.conversation_id
             outcome, node_id, replicates, reason = ENVIRONMENT_BLOCKED, None, (), exc.reason
+            deterministic = False
             terminal = 0
             finish_reason = ENVIRONMENT_BLOCKED
-        return conversation_id, outcome, node_id, replicates, reason, finish_reason, terminal
+        return (
+            conversation_id,
+            outcome,
+            node_id,
+            replicates,
+            deterministic,
+            reason,
+            finish_reason,
+            terminal,
+        )
 
     def _collect_result(
         self,
@@ -1341,6 +1362,7 @@ class LLMResearchDeveloper:
         outcome: str,
         node_id: str | None,
         seed_replicates: tuple[str, ...],
+        deterministic: bool,
         reason: str,
         finish_reason: str,
         terminal_offline_trials: int,
@@ -1383,6 +1405,7 @@ class LLMResearchDeveloper:
             outcome,
             node_id=node_id,
             seed_replicates=seed_replicates,
+            deterministic=deterministic,
             reason=reason,
             finish_reason=finish_reason,
             terminal_offline_trials=terminal_offline_trials,
@@ -1622,6 +1645,12 @@ def _seed_replicates(finish: Mapping[str, object]) -> tuple[str, ...]:
     """The seed replicates a ``finish_session`` freeze registered (full node ids)."""
 
     return tuple(str(item) for item in finish.get("seed_replicates") or ())  # type: ignore[union-attr]
+
+
+def _deterministic(finish: Mapping[str, object]) -> bool:
+    """Whether a ``finish_session`` freeze declared its package deterministic."""
+
+    return finish.get("deterministic") is True
 
 
 def _terminal_offline_trials(finish: Mapping[str, object]) -> int:

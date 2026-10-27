@@ -752,7 +752,11 @@ class SessionValidations:
             ) from exc
 
     def freeze_gate(
-        self, node_id: str, seed_replicates: Sequence[str] = (), offline_trials: int = 0
+        self,
+        node_id: str,
+        seed_replicates: Sequence[str] = (),
+        offline_trials: int = 0,
+        deterministic: bool = False,
     ) -> dict[str, object]:
         """The freeze gate as the Pipeline would read one Step of this session now.
 
@@ -760,9 +764,10 @@ class SessionValidations:
         recorded Steps and this session's completed ones, with the hard
         nomination rules of the run, so the Agent reads the verdict a freeze of
         this node would get today, with ``seed_replicates`` the Steps it would
-        register as its seed replicates and ``offline_trials`` the terminal
-        offline-screen delta a finish would declare. A node that is not a Step
-        of this session does not pass.
+        register as its seed replicates, ``offline_trials`` the terminal
+        offline-screen delta a finish would declare and ``deterministic`` its
+        declaration that the package uses no randomness. A node that is not a
+        Step of this session does not pass.
         """
 
         rows = {
@@ -781,6 +786,7 @@ class SessionValidations:
             hard_reasons=rules.evaluate(dict(nominee["summary"])),  # type: ignore[arg-type]
             years=[(year.start, year.end) for year in self.request.research_years],
             seed_replicates=[rows[step_id] for step_id in seed_replicates],
+            deterministic=deterministic,
             terminal_offline_trials=offline_trials,
         )
 

@@ -235,6 +235,11 @@ def test_the_prompt_states_the_research_session_contract() -> None:
         "包括 `source_refs.signal_screen_ref` 的筛选脚本",
         "按 `offline_trials` 如实申报",
         "种子的写法见 `output/README.md`",
+        # Only a package with randomness owes seed replicates; one without is
+        # nominated deterministic, which the ledger keeps for the operator.
+        "策略包含随机性（训练、采样）的提名要带种子复现",
+        "完全不含随机性的包以 `deterministic` 提名，不需要种子复现",
+        "这一声明记入账本，供运营者在上线前终审",
         # A node that fails only the deflation is a deliverable by incubation,
         # and a no_edge names it first.
         "却仍是本臂的交付",

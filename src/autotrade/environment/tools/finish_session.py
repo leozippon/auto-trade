@@ -36,12 +36,13 @@ REASON_MAX_CHARS = AGENT_JUSTIFICATION_MAX_CHARS
 OFFLINE_TRIALS_MAX = 10_000
 
 # The freeze gate as the Pipeline would read one node of this session now,
-# with the nodes it would register as its seed replicates and the terminal
-# offline screens this finish declares: ``passed``, ``reasons`` (named in
+# with the nodes it would register as its seed replicates, the terminal
+# offline screens this finish declares and whether the nomination declares
+# its package deterministic: ``passed``, ``reasons`` (named in
 # ``pipelines/verdict.py`` and ``pipelines/experiment.py``) and the gate's
 # numbers. The Environment never imports the Pipeline, so the gate is handed
 # over as a callable; the Pipeline recomputes it when it records the freeze.
-FreezeGate = Callable[[str, tuple[str, ...], int], Mapping[str, object]]
+FreezeGate = Callable[[str, tuple[str, ...], int, bool], Mapping[str, object]]
 
 # The gate's reasons that concern a nominee's seed replicates: a refusal that
 # names one points to the fact that defines a replicate.
@@ -90,6 +91,10 @@ _DESCRIPTION = (
     "tested once on later data no session sees. node_id is the full id or the "
     "node's short handle (valid_002); it may be omitted only while "
     "this session has exactly one complete Validation. "
+    "deterministic=true declares that the nominee's package uses no randomness "
+    "at all, so seed replicates would reproduce it exactly: the gate then asks "
+    "for none and reads the nominee alone, and the declaration is recorded in "
+    "the ledger for the operator's review before the strategy goes live. "
     'outcome="no_edge" ends the arm without freezing a node and takes no node_id; '
     "it needs at least one complete Validation of this session and a reason "
     f"({REASON_MIN_CHARS}-{REASON_MAX_CHARS} chars), the evidence behind the "
@@ -142,7 +147,18 @@ class FinishSessionTool:
                         "acceptance_rules.freeze_gate.seed_replicates defines "
                         "them, each a node id or short handle of this session; "
                         "required (at least one) when the nominee's main.py "
-                        "defines fit."
+                        "defines fit, unless deterministic is true."
+                    ),
+                },
+                "deterministic": {
+                    "type": "boolean",
+                    "description": (
+                        "freeze only: true declares that the nominee's package "
+                        "uses no randomness at all, so seed replicates would "
+                        "reproduce it exactly; the gate then waives the "
+                        "seed-replicate count and seed-mean conditions, and the "
+                        "declaration is recorded in the ledger for the "
+                        "operator's review. Default false."
                     ),
                 },
                 "reason": {
@@ -204,13 +220,19 @@ class FinishSessionTool:
         replicates = [str(item) for item in arguments.get("seed_replicates") or ()]  # type: ignore[union-attr]
         count = _terminal_offline_trials(arguments)
         if outcome == "freeze":
-            return self._freeze(node_id, reason, replicates, count)
+            deterministic = arguments.get("deterministic") is True
+            return self._freeze(node_id, reason, replicates, count, deterministic)
         return self._no_edge(node_id, reason, replicates, count)
 
     # ---- outcomes ----
 
     def _freeze(
-        self, reference: str, reason: str, replicate_refs: list[str], offline_trials: int
+        self,
+        reference: str,
+        reason: str,
+        replicate_refs: list[str],
+        offline_trials: int,
+        deterministic: bool,
     ) -> ToolResult:
         node_id = (
             self._reference(reference) if reference else self._sole_candidate()
@@ -219,7 +241,7 @@ class FinishSessionTool:
         replicates = tuple(self._reference(item) for item in replicate_refs)
         for replicate in replicates:
             self._complete_node(replicate)
-        gate = dict(self._freeze_gate(node_id, replicates, offline_trials))
+        gate = dict(self._freeze_gate(node_id, replicates, offline_trials, deterministic))
         if not gate.get("passed"):
             reasons = [str(item) for item in gate.get("reasons") or ()]
             passing = self._named(
@@ -228,7 +250,7 @@ class FinishSessionTool:
                     for candidate in self._session_candidates()
                     if candidate != node_id
                     and _passes_but_for_replicates(
-                        self._freeze_gate(candidate, (), offline_trials)
+                        self._freeze_gate(candidate, (), offline_trials, False)
                     )
                 ]
             )
@@ -272,6 +294,7 @@ class FinishSessionTool:
                 **session_handle(self.tree, node_id, session_ref=self.session_ref),
                 "revision_id": str(node["revision_id"]),
                 **({"seed_replicates": list(replicates)} if replicates else {}),
+                "deterministic": deterministic,
                 **({"reason": reason} if reason else {}),
                 "terminal_offline_trials": offline_trials,
                 **budget,

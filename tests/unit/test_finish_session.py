@@ -27,7 +27,11 @@ from autotrade.environment.tools.finish_session import (
 )
 from autotrade.environment.tools.step_rollback import StepRollbackTool
 from autotrade.pipelines.config import SESSION_OUTCOMES
-from autotrade.pipelines.research_session import _seed_replicates, _session_outcome
+from autotrade.pipelines.research_session import (
+    _deterministic,
+    _seed_replicates,
+    _session_outcome,
+)
 
 SESSION = "session_ref_ab"
 RUN = "run_x"
@@ -64,6 +68,7 @@ class _Gate:
         node_id: str,
         seed_replicates: tuple[str, ...] = (),
         offline_trials: int = 0,
+        deterministic: bool = False,
     ) -> dict[str, object]:
         if node_id in self.passing:
             return {
@@ -322,7 +327,10 @@ def test_seed_replicates_are_resolved_and_go_to_the_gate(tmp_path: Path):
     calls: list[tuple[str, tuple[str, ...], int]] = []
 
     def gate(
-        node_id: str, seed_replicates: tuple[str, ...] = (), offline_trials: int = 0
+        node_id: str,
+        seed_replicates: tuple[str, ...] = (),
+        offline_trials: int = 0,
+        deterministic: bool = False,
     ) -> dict[str, object]:
         calls.append((node_id, seed_replicates, offline_trials))
         if seed_replicates == (replicate,):
@@ -360,6 +368,51 @@ def test_seed_replicates_are_resolved_and_go_to_the_gate(tmp_path: Path):
         seeded.invoke({"outcome": "no_edge", "reason": REASON, "seed_replicates": [replicate]})
 
 
+def test_a_deterministic_declaration_is_the_nominees_and_reaches_the_pipeline(
+    tmp_path: Path,
+):
+    """deterministic goes to the gate with the nominee alone, never with the
+    alternates a refusal lists, and the freeze hands it to the Pipeline; a
+    nomination that omits it is not deterministic."""
+
+    tree = StepTree(tmp_path / "steps")
+    nominee = _node(tree, tmp_path, "a")
+    other = _node(tree, tmp_path, "b")
+    calls: list[tuple[str, bool]] = []
+
+    def gate(
+        node_id: str,
+        seed_replicates: tuple[str, ...] = (),
+        offline_trials: int = 0,
+        deterministic: bool = False,
+    ) -> dict[str, object]:
+        calls.append((node_id, deterministic))
+        return {
+            "passed": deterministic,
+            "reasons": [] if deterministic else ["freeze_too_few_seed_replicates"],
+        }
+
+    finish = _tool(tree, gate)  # type: ignore[arg-type]
+    registry = ToolRegistry([finish])
+    assert FinishSessionTool.spec.input_schema["properties"]["deterministic"]["type"] == "boolean"
+    assert "deterministic=true" in FinishSessionTool.spec.description
+    with pytest.raises(ToolError, match="freeze_too_few_seed_replicates"):
+        finish.invoke({"outcome": "freeze", "node_id": nominee})
+    assert calls == [(nominee, False), (other, False)]
+    refused = registry.invoke(
+        "finish_session", {"outcome": "freeze", "node_id": nominee, "deterministic": "yes"}
+    )
+    assert refused.ok is False
+
+    calls.clear()
+    frozen = registry.invoke(
+        "finish_session", {"outcome": "freeze", "node_id": "valid_a", "deterministic": True}
+    )
+    assert frozen.ok and frozen.finish
+    assert calls == [(nominee, True)]
+    assert frozen.value["deterministic"] is True and _deterministic(frozen.value) is True
+
+
 def test_offline_trials_reach_the_gate_before_it_verdicts(tmp_path: Path):
     """The terminal offline-screen delta is read by the gate before its
     verdict: a count that pushes the nominee over a bar is refused, an
@@ -372,7 +425,10 @@ def test_offline_trials_reach_the_gate_before_it_verdicts(tmp_path: Path):
     seen: list[tuple[str, tuple[str, ...], int]] = []
 
     def gate(
-        node_id: str, seed_replicates: tuple[str, ...] = (), offline_trials: int = 0
+        node_id: str,
+        seed_replicates: tuple[str, ...] = (),
+        offline_trials: int = 0,
+        deterministic: bool = False,
     ) -> dict[str, object]:
         seen.append((node_id, seed_replicates, offline_trials))
         passed = node_id == strong and offline_trials < 10
@@ -408,7 +464,10 @@ def test_offline_trials_is_optional_and_never_assumed(tmp_path: Path):
     calls: list[int] = []
 
     def gate(
-        node_id: str, seed_replicates: tuple[str, ...] = (), offline_trials: int = 0
+        node_id: str,
+        seed_replicates: tuple[str, ...] = (),
+        offline_trials: int = 0,
+        deterministic: bool = False,
     ) -> dict[str, object]:
         calls.append(offline_trials)
         return {"passed": True, "reasons": []}
