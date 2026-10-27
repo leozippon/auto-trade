@@ -27,6 +27,7 @@ from scripts.experiments import (
     create_round_20261026,
     create_round_20261027,
     create_round_20261027b,
+    create_round_20261027c,
 )
 from scripts.experiments.create_round_20261025b import DIRECTIVE, PACK
 
@@ -84,12 +85,18 @@ def test_round_20261026_moves_astra_to_the_instance_unchanged_but_for_one_card()
 
 def test_rounds_20261027_add_the_closed_families_and_name_no_model() -> None:
     directive = create_round_20261027.DIRECTIVE
-    assert create_round_20261027b.DIRECTIVE == directive
+    assert create_round_20261027b.DIRECTIVE == create_round_20261027c.DIRECTIVE == directive
     extra = directive.removeprefix(create_round_20261026.DIRECTIVE)
     assert extra != directive and "`refs/families.md`" in extra
     for name in (*MODEL_CHOICES, "Qwen", "gemini", "gpt", "claude", "DeepSeek"):
         assert name.lower() not in directive.lower(), name
-    for module in (create_round_20261027, create_round_20261027b):
+    # Round 20261027c is round 20261027's arm under another id, nothing else.
+    (argon,), (again,) = create_round_20261027.ARMS, create_round_20261027c.ARMS
+    assert again == f"{argon}c"
+    assert {**create_round_20261027c.ROUND.request_params(again), "experiment_id": argon} == (
+        create_round_20261027.ROUND.request_params(argon)
+    )
+    for module in (create_round_20261027, create_round_20261027b, create_round_20261027c):
         for arm in module.ARMS:
             params = module.ROUND.request_params(arm)
             assert (
