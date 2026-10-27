@@ -12,11 +12,16 @@ continual-learning line closed (`refs/families.md`). Everything else is round
 20261027's: the eight-year fundamentals-plus-titles geometry on a 100k account
 graded against CSI 1000 (`FUND_TITLE_EIGHT_YEAR_100K`), main board and ChiNext,
 the 10-24 seed, DeepSeek-V4.1-Flash sub-agents and compaction with the
-threshold pinned at 221,184, xhigh, the console's default budgets, no lineage
-and one A100 per arm -- except the relay's alternate key (`llm_key`
-alternate, `LIGHTING_API_KEY_ALT`; every role is a relay model, which that key
-requires) and four replays per batch (`batch_validate_max_concurrency` 4) on
-the arm's one card.
+threshold pinned at 221,184, xhigh, no lineage and one A100 per arm -- except
+the relay's alternate key (`llm_key` alternate, `LIGHTING_API_KEY_ALT`; every
+role is a relay model, which that key requires), four replays per batch
+(`batch_validate_max_concurrency` 4) on the arm's one card, and, by the
+owner's 2026-10-27 directive to give the Agent room for complex strategies,
+every per-arm budget at three times round 20261027's: 288 replay-years, 36
+null controls, USD 150 of API spend, 19,200 model calls, 7,200 minutes of
+pausable inference before `deadline`, and 10,800 s for one `fit` call. The
+strategy container's CPUs, memory and per-decision inference limit are the
+executor's (`SandboxLimits`), not per-arm parameters, and stay as they are.
 
 | Arm | Main session | Sub-agents / compaction |
 | --- | --- | --- |
@@ -105,6 +110,14 @@ ROUND = Round(
         # Four legs at once, all on that card.
         "batch_validate_max_concurrency": 4,
         "reasoning_effort": "xhigh",
+        # Three times round 20261027's budgets (the console defaults, and
+        # BASE_OVERRIDES for the last two of the session's).
+        "max_replay_years": 288,
+        "max_null_controls": 36,
+        "max_api_spend_usd": 150.0,
+        "max_llm_calls": 19_200,
+        "max_research_minutes": 7_200,
+        "strategy_fit_timeout_seconds": 10_800,
     },
 )
 

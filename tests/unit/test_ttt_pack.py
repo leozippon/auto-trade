@@ -8,7 +8,8 @@ text. The round's directive starts with the README's direction paragraph word
 for word and adds the call to explore and the pointer to the closed families;
 nothing before the README's facts names a model, and neither does the
 directive. Both arms are round 20261027's arm on this pack, with their own main
-model, the relay's alternate key and four replays per batch. The README ends
+model, the relay's alternate key, four replays per batch and three times every
+per-arm budget. The README ends
 with guidance the session may ignore. No file the pack's authors wrote cites a
 reading after the research period; the vendored papers and code are other
 people's text, left as published.
@@ -75,9 +76,31 @@ def test_the_directive_starts_with_the_packs_direction_and_names_no_model() -> N
         assert word not in DIRECTIVE, word
 
 
+# The per-arm budgets the owner's 2026-10-27 directive tripled for this round.
+TRIPLED = (
+    "max_replay_years",
+    "max_null_controls",
+    "max_api_spend_usd",
+    "max_llm_calls",
+    "max_research_minutes",
+    "strategy_fit_timeout_seconds",
+)
+
+
 def test_both_arms_are_round_20261027s_arm_on_this_pack_and_the_alternate_key() -> None:
+    """Their own model, this pack, the alternate key, four legs per batch and
+    three times every per-arm budget; nothing else differs."""
     (reference,) = create_round_20261027.ARMS
     base = create_round_20261027.ROUND.request_params(reference)
+    tripled = {key: 3 * base[key] for key in TRIPLED}
+    assert tripled == {
+        "max_replay_years": 288,
+        "max_null_controls": 36,
+        "max_api_spend_usd": 150.0,
+        "max_llm_calls": 19_200,
+        "max_research_minutes": 7_200,
+        "strategy_fit_timeout_seconds": 10_800,
+    }
     models = {
         "ttt_100k_8y_sol_zgca_20261028": "gpt-6.1-sol",
         "ttt_100k_8y_argon_zgca_20261028": "gemini-4-argon",
@@ -92,6 +115,7 @@ def test_both_arms_are_round_20261027s_arm_on_this_pack_and_the_alternate_key() 
             "workspace_reference": PACK,
             "research_directive": DIRECTIVE,
             "batch_validate_max_concurrency": 4,
+            **tripled,
         }
 
 
