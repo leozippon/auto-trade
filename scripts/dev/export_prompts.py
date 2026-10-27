@@ -24,19 +24,23 @@ add_repo_src(__file__)
 
 from autotrade.agent.compact import COMPACT_SYSTEM_PROMPT
 from autotrade.agent.prompts import (
+    EXPERIMENT_FACTS_HEADER,
     HARD_FINALIZATION_SYSTEM_PROMPT,
-    RUNTIME_SYSTEM_PROMPT,
     SESSION_DECISION_CONTRACT,
     SESSION_DEFAULT_INSTRUCTION,
     SESSION_DYNAMIC_CONTEXT_HEADER,
-    SESSION_FACTS_SECTION,
     SESSION_FEEDBACK_SECTION,
+    SESSION_PREAMBLE,
     SESSION_PROHIBITIONS,
-    SESSION_ROLE_SECTION,
     SESSION_STATIC_SECTIONS,
+    SESSION_STRATEGY_CONTRACT,
+    SESSION_SYSTEM_SECTION,
+    SESSION_TASK_SECTION,
     SESSION_WORKFLOW_SECTION,
     STEP_TREE_SECTION,
     WRAP_UP_PROMPT,
+    build_exploration_section,
+    build_session_directive_section,
 )
 from autotrade.agent.subagent import AGENT_TOOL_DESCRIPTION, subagent_system_prompt
 
@@ -51,14 +55,15 @@ def _block(text: str, language: str = "text") -> str:
 def render() -> str:
     # Guard the ordering the navigation and the section numbering encode.
     assert SESSION_STATIC_SECTIONS == (
-        SESSION_ROLE_SECTION,
+        SESSION_PREAMBLE,
+        SESSION_SYSTEM_SECTION,
+        SESSION_TASK_SECTION,
         SESSION_DECISION_CONTRACT,
-        SESSION_WORKFLOW_SECTION,
-        RUNTIME_SYSTEM_PROMPT,
+        SESSION_STRATEGY_CONTRACT,
         SESSION_PROHIBITIONS,
-        SESSION_FACTS_SECTION,
-        SESSION_FEEDBACK_SECTION,
+        SESSION_WORKFLOW_SECTION,
         STEP_TREE_SECTION,
+        SESSION_FEEDBACK_SECTION,
     ), "SESSION_STATIC_SECTIONS order changed; update the snapshot layout"
 
     parts = [
@@ -82,43 +87,45 @@ def render() -> str:
         "",
         "## 1. 研究会话系统提示词",
         "",
-        "八个稳定区块按「目的 → 决策合同 → 工具 → 执行合同 → 禁止事项 → 事实 → 反馈 → Step 树」的顺序拼接，再接动态上下文。提示只写宿主执行的规则与 Agent 自己查不到的事实：哪些条件约束本臂、阈值多少只在运行事实 `acceptance_rules` 里，参数与返回字段的含义只在工具的描述与 schema 里；怎样研究（方法、模型、核与卡的用法）由 Agent 自己决定，参考包可以给出可以不采纳的建议。",
+        "无标题的开场段与八个区块按「开场 → 系统 → 研究任务 → 结束会话 → 策略合同 → 禁止事项 → 使用工具 → Step 产物树 → 反馈通道」的顺序拼接，再接「环境」动态部分（第 5 节）。提示只写宿主执行的规则与 Agent 自己查不到的事实：哪些条件约束本臂、阈值多少只在运行事实 `acceptance_rules` 里，参数与返回字段的含义只在工具的描述与 schema 里；怎样研究（方法、模型、核与卡的用法）由 Agent 自己决定，参考包可以给出可以不采纳的建议。",
         "",
-        "### 1.1 身份与任务",
+        "### 1.1 开场段",
         "",
-        _block(SESSION_ROLE_SECTION),
+        _block(SESSION_PREAMBLE),
         "",
-        "### 1.2 决策合同",
+        "### 1.2 系统",
+        "",
+        _block(SESSION_SYSTEM_SECTION),
+        "",
+        "### 1.3 研究任务",
+        "",
+        _block(SESSION_TASK_SECTION),
+        "",
+        "### 1.4 结束会话",
         "",
         _block(SESSION_DECISION_CONTRACT),
         "",
-        "### 1.3 工具与工作方式",
+        "### 1.5 策略合同",
         "",
-        _block(SESSION_WORKFLOW_SECTION),
+        _block(SESSION_STRATEGY_CONTRACT),
         "",
-        "### 1.4 执行合同与边界",
-        "",
-        _block(RUNTIME_SYSTEM_PROMPT),
-        "",
-        "### 1.5 禁止事项",
+        "### 1.6 禁止事项",
         "",
         _block(SESSION_PROHIBITIONS),
         "",
-        "### 1.6 预算与事实",
+        "### 1.7 使用工具",
         "",
-        _block(SESSION_FACTS_SECTION),
-        "",
-        "### 1.7 反馈通道",
-        "",
-        _block(SESSION_FEEDBACK_SECTION),
+        _block(SESSION_WORKFLOW_SECTION),
         "",
         "### 1.8 Step 产物树",
         "",
-        "`STEP_TREE_SECTION`：",
-        "",
         _block(STEP_TREE_SECTION),
         "",
-        "### 1.9 默认用户指令",
+        "### 1.9 反馈通道",
+        "",
+        _block(SESSION_FEEDBACK_SECTION),
+        "",
+        "### 1.10 默认用户指令",
         "",
         "`SESSION_DEFAULT_INSTRUCTION`（首条用户消息）：",
         "",
@@ -174,16 +181,14 @@ def render() -> str:
         "",
         "## 5. 动态上下文结构",
         "",
-        "稳定系统提示词之后追加：",
+        "稳定系统提示词之后追加「环境」部分：",
         "",
         _block(
             f"{SESSION_DYNAMIC_CONTEXT_HEADER.strip()}\n\n"
-            "## 当前实验事实（可信运行事实，不是交易证据）\n"
+            f"{EXPERIMENT_FACTS_HEADER.strip()}\n\n"
             "{experiment_facts JSON，含 inputs/skills_index.json 引用}\n\n"
-            "## 本臂的研究方向（用户注入）\n"
-            "[存在时注入]\n\n"
-            "## 研究者本会话指令（用户注入）\n"
-            "[存在时注入]"
+            f"{build_exploration_section('[存在时注入]')}\n\n"
+            f"{build_session_directive_section('[存在时注入]')}"
         ),
         "",
         "`experiment_facts` 的主要分区包括：",

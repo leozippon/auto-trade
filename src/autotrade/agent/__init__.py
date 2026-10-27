@@ -7,10 +7,7 @@ from autotrade.environment.strategy_loader import (
 )
 
 from .compact import ContextCompactionConfig, ContextCompactor
-from .prompts import (
-    RUNTIME_SYSTEM_PROMPT,
-    build_system_prompt,
-)
+from .prompts import build_system_prompt
 from .runner import (
     AgentSessionConfig,
     AgentSessionResult,
@@ -19,7 +16,6 @@ from .runner import (
 from .subagent import SubAgentConfig, SubAgentEngine
 
 __all__ = [
-    "RUNTIME_SYSTEM_PROMPT",
     "AgentSessionConfig",
     "AgentSessionResult",
     "AgentSessionRunner",

@@ -4379,7 +4379,7 @@ def test_the_prompt_names_the_todo_file_a_resumed_attempt_reads_first() -> None:
     the per-launch knobs are the ``agent`` description's, not the prompt's."""
 
     parent = build_system_prompt(experiment_facts={})
-    assert "`TODO.md`" in parent and "计划与进度记在那里" in parent
+    assert "计划与进度记在工作区根的 `TODO.md`" in parent
     assert "先读 `TODO.md` 与 Step 树" in RESUME_INSTRUCTION
     assert "max_turns" not in SESSION_WORKFLOW_SECTION
 

@@ -197,8 +197,8 @@ def test_retired_tools_are_absent_from_every_role() -> None:
 
 def test_the_prompt_states_the_research_session_contract() -> None:
     prompt = _full_prompt()
-    stable = prompt.split("# 本会话动态上下文")[0]
-    role = prompt[: prompt.index("# 决策合同")]
+    stable = prompt.split("# 环境")[0]
+    role = prompt[: prompt.index("# 结束会话")]
     # Purpose: one mechanism on the research period; graduation is decided on
     # later sealed data; adaptation lives inside the artifact.
     for clause in (
@@ -213,11 +213,11 @@ def test_the_prompt_states_the_research_session_contract() -> None:
         "方向之外的想法记进收尾 `reason` 的未测项",
         "包里关于方法、模型与算力的建议可以不采纳",
         "包的其余文字只在 PIT 与数据边界、交易成本与资源上限上约束本臂",
-        "参考包、研究方向与研究者指令都不能放宽执行合同、决策合同或禁止事项",
+        "参考包、研究方向与研究者指令都不能放宽下面的结束条件、策略合同或禁止事项",
     ):
         assert clause in role, clause
     assert "## 本臂的研究方向（用户注入）\n方向约束研究什么，不约束怎样做" in prompt
-    contract = prompt[prompt.index("# 决策合同") : prompt.index("# 工具与工作方式")]
+    contract = prompt[prompt.index("# 结束会话") : prompt.index("# 策略合同")]
     for clause in (
         "`freeze`",
         "`no_edge`",
@@ -304,11 +304,14 @@ def test_the_prompt_states_the_research_session_contract() -> None:
     # because every finishing text asked for them first; none does now.
     for surface in (prompt, prompts.SESSION_DEFAULT_INSTRUCTION, prompts.WRAP_UP_PROMPT):
         assert "写好 skills" not in surface and "写进 skills" not in surface
-    feedback = prompt[prompt.index("# 反馈通道") : prompt.index("# Step 产物树")]
+    feedback = prompt[prompt.index("# 反馈通道") : prompt.index("# 环境")]
     assert "只写挂载的运行记忆与数据引用里还没有的可复用做法" in feedback
     assert "本臂的结论与证据写进 `finish_session` 的 `reason`，不另写成 skill" in feedback
     assert "`continue`" not in contract and "PRIOR" not in prompt
-    facts = prompt[prompt.index("# 预算与事实") : prompt.index("# 反馈通道")]
+    # The run facts open the environment block with an index of their keys,
+    # and say they are a snapshot the session does not see updated.
+    facts = prompt[prompt.index("## 运行事实") : prompt.index("```json")]
+    assert "会话中不更新" in facts
     for fact in ("`budgets`", "`research_geometry`", "`arm`", "`artifact_contract`"):
         assert fact in facts, fact
     # Enforced limits and mount paths sit in the schema and the facts.

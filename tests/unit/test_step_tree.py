@@ -274,7 +274,7 @@ class SessionFactsTest(unittest.TestCase):
         )
         prompt = build_system_prompt(experiment_facts=facts)
 
-        self.assertIn("当前实验事实", prompt)
+        self.assertIn("## 运行事实", prompt)
         self.assertEqual(facts["research_geometry"], RESEARCH_MANIFEST["research"])
         self.assertNotIn("session", facts["identity"])
         self.assertTrue(facts["identity"]["session_ref"].startswith("session_ref_"))
@@ -376,7 +376,7 @@ class PromptCompositionTest(unittest.TestCase):
     the right half of the prompt.
     """
 
-    MARKER = "# 本会话动态上下文"
+    MARKER = "# 环境"
 
     def test_the_step_tree_section_is_part_of_the_static_contract(self) -> None:
         prompt = build_system_prompt()
@@ -421,17 +421,18 @@ class PromptCompositionTest(unittest.TestCase):
         second_prefix, second_context = second.split(self.MARKER, 1)
         self.assertEqual(first_prefix, second_prefix)
         self.assertNotEqual(first_context, second_context)
-        # Purpose, decision contract, tools, constraints, facts, feedback,
-        # the Step tree -- then the per-run context.
+        # Opening paragraph, harness, task, ending, strategy contract,
+        # prohibitions, tools, the Step tree, feedback -- then the environment.
         order = [
-            first.index("# 身份与任务"),
-            first.index("# 决策合同"),
-            first.index("# 工具与工作方式"),
-            first.index("# 执行合同与边界"),
+            first.index("你是 A 股量化策略研究会话的主 Agent"),
+            first.index("# 系统"),
+            first.index("# 研究任务"),
+            first.index("# 结束会话"),
+            first.index("# 策略合同"),
             first.index("# 禁止事项"),
-            first.index("# 预算与事实"),
-            first.index("# 反馈通道"),
+            first.index("# 使用工具"),
             first.index("# Step 产物树"),
+            first.index("# 反馈通道"),
             first.index(self.MARKER),
         ]
         self.assertEqual(order, sorted(order))
