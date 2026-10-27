@@ -263,7 +263,12 @@ def read_observations(path: Path, meta: dict[str, Any] | None = None) -> pd.Data
     obs = observation_path(path)
     if not obs.exists():
         return pd.DataFrame(columns=[FIRST_SEEN_COLUMN])
-    frame = pq.read_table(obs).to_pandas()
+    # The file alone: ``pq.read_table`` would add the ``<key>=<value>`` names
+    # of its directories as hive partition columns, and a table beside
+    # ``ts_code=000001.SH/year=2026.parquet`` already stores ``ts_code`` as
+    # text, so the two types could not merge (2026-10-27: every write and
+    # snapshot read of such a partition failed once its table existed).
+    frame = pq.ParquetFile(obs).read().to_pandas()
     if not path.exists():
         # A first landing that crashed before its parquet rename.
         return frame.iloc[:0]
@@ -332,7 +337,7 @@ def first_seen_between(path: Path, start: datetime, end: datetime) -> bool:
     obs = observation_path(Path(path))
     if not obs.exists():
         return False
-    seen = _first_seen_cn(pq.read_table(obs, columns=[FIRST_SEEN_COLUMN]).column(0).to_pandas())
+    seen = _first_seen_cn(pq.ParquetFile(obs).read(columns=[FIRST_SEEN_COLUMN]).column(0).to_pandas())
     return bool(((seen >= start) & (seen <= end)).any())
 
 

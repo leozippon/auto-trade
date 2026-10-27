@@ -19,7 +19,10 @@ import pandas as pd
 from autotrade.data_sources.tushare import common, cron_update, lake, versions
 from autotrade.data_sources.tushare import io as tushare_io
 from autotrade.environment.data import research_release
-from autotrade.environment.data.pit import complete_interrupted_commits
+from autotrade.environment.data.pit import (
+    complete_interrupted_commits,
+    first_seen_between,
+)
 
 KEYS = ["ts_code", "ann_date"]
 
@@ -171,6 +174,24 @@ class VersionedPartitionTest(unittest.TestCase):
         self.assertEqual(
             list(versions.read_observations(self.path).columns), ["ts_code", "ann_date", versions.FIRST_SEEN_COLUMN]
         )
+
+    def test_a_partition_inside_a_key_directory_keeps_recording_and_reading_observations(self) -> None:
+        """2026-10-27: a partition under a ``<key>=<value>`` directory whose
+        table stores that key (``index_daily/ts_code=000001.SH/year=2026``,
+        ``eco_cal/country=...``) failed its second write and every snapshot
+        read once its observation table existed: the reader added the
+        directory name as a dictionary-typed hive column that could not merge
+        with the stored text column."""
+        path = self.raw / "index_daily" / "ts_code=000001.SH" / "year=2026.parquet"
+        self.publish(rows(("000001.SH", "20261026", 1.0)), path)
+        first = self.observed(path)
+        self.publish(rows(("000001.SH", "20261026", 1.0), ("000001.SH", "20261027", 2.0)), path)
+        table = versions.read_observations(path)
+        self.assertEqual(sorted(table["ann_date"]), ["20261026", "20261027"])
+        self.assertEqual(str(table["ts_code"].dtype), "object")
+        self.assertEqual(table.set_index("ann_date").loc["20261026", versions.FIRST_SEEN_COLUMN], first["000001.SH"])
+        cn = ZoneInfo("Asia/Shanghai")
+        self.assertTrue(first_seen_between(path, datetime(2026, 1, 1, tzinfo=cn), datetime(2027, 1, 1, tzinfo=cn)))
 
     def test_rebuilt_observations_are_never_earlier_than_the_recorded_ones(self) -> None:
         common.write_parquet(self.path, rows(("A", "20261001", 1.0)), api_name="repurchase", params={}, fields=[])
