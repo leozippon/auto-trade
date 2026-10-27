@@ -1,0 +1,101 @@
+# Config for multi-device full finetuning in full_finetune_distributed.py
+# using a Llama3 8B Instruct model
+#
+# This config assumes that you've run the following command before launching
+# this run:
+#   tune download meta-llama/Meta-Llama-3.2-8B-Instruct --output-dir /tmp/Meta-Llama-3.2-8B-Instruct --hf-token <HF_TOKEN>
+#
+# To launch on 4 devices, run the following command from root:
+#   tune run --nproc_per_node 4 full_finetune_distributed --config llama3/8B_full
+#
+# You can add specific overrides through the command line. For example
+# to override the checkpointer directory while launching training
+# you can run:
+#   tune run --nproc_per_node 4 full_finetune_distributed --config llama3/8B_full checkpointer.checkpoint_dir=<YOUR_CHECKPOINT_DIR>
+#
+# This config works best when the model is being fine-tuned on 2+ GPUs.
+# Single device full finetuning requires more memory optimizations. It's
+# best to use 8B_full_single_device.yaml for those cases
+
+
+# Tokenizer
+tokenizer:
+  _component_: torchtune.models.llama3.llama3_tokenizer
+  path: checkpoints/base/Llama-3.2-1B-Instruct/original/tokenizer.model
+  max_seq_len: null
+
+# Dataset
+dataset:
+  _component_: torchtune.datasets.arc_dataset
+  source: /raid/lingo/akyurek/git/arc/data/tasks/all_in_pm_fix_30/
+  train_on_input: False
+  unmask_outputs: True # we'll get loss from all outputs after the first demonstration, very hacky, tokenizer & formatting specific
+
+seed: 58
+shuffle: True
+
+# Model Arguments
+model:
+  _component_: torchtune.models.llama3_2.llama3_2_1b
+
+checkpointer:
+  _component_: torchtune.training.FullModelHFCheckpointer
+  checkpoint_dir: checkpoints/base/Llama-3.2.2-1B-Instruct
+  checkpoint_files: [
+    #  hf_model_0001_1.pt,
+    #  hf_model_0002_1.pt,
+    #  hf_model_0003_1.pt,
+    #  hf_model_0004_1.pt,
+    # "hf_model_0001_0.pt",
+    "model.safetensors",
+    #  model-00001-of-00004.safetensors,
+    #  model-00002-of-00004.safetensors,
+    #  model-00003-of-00004.safetensors,
+    #  model-00004-of-00004.safetensors,
+     # pytorch_model-0001-of-0004.bin,
+     # pytorch_model-0002-of-0004.bin,
+     # pytorch_model-0003-of-0004.bin,
+     # pytorch_model-0004-of-0004.bin,
+  ]
+  recipe_checkpoint: null
+  output_dir: experiments/pretrain/tasks_v1/
+  model_type: LLAMA3
+resume_from_checkpoint: False
+
+# Fine-tuning arguments
+batch_size: 4
+epochs: 4
+
+optimizer:
+  _component_: torch.optim.AdamW
+  lr: 2e-5
+  fused: True
+loss:
+  _component_: torch.nn.CrossEntropyLoss
+max_steps_per_epoch: null
+gradient_accumulation_steps: 4
+
+lr_scheduler:
+  _component_: torchtune.modules.get_cosine_schedule_with_warmup
+  num_warmup_steps: 2000
+# Training env
+device: cuda
+
+# Memory management
+enable_activation_checkpointing: True
+
+# Reduced precision
+dtype: bf16
+
+# Logging
+# Logging
+metric_logger:
+  _component_: torchtune.training.metric_logging.WandBLogger
+  project: ARCPT
+  entity: akyurek
+  job_type: PT
+  group: pretrain
+
+output_dir: experiments/pretrain/just_grids/
+log_every_n_steps: 1
+log_peak_memory_stats: False
