@@ -8,6 +8,7 @@ the benchmark's membership takes the decile's place.
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import datetime
 
 import numpy as np
@@ -20,6 +21,7 @@ from autotrade.environment.replay.market import DailyMarketData
 from autotrade.environment.replay.null_control import (
     MATCHED_DECILE,
     MATCHED_MEMBERSHIP,
+    PANEL_DRAWS,
     NullControlSetupError,
     RoundTrip,
     _candidate_pool,
@@ -41,12 +43,12 @@ CIRC_MV = {**{name: 1.0e9 for name in SMALL}, **{name: 5.0e10 for name in LARGE}
 BENCHMARK = {day: 0.001 for day in DAYS}
 
 
-def _sample_null_orders(skeleton, frame: pd.DataFrame, rng) -> dict[str, list[dict]]:
+def _sample_null_orders(skeleton, frame: pd.DataFrame, seed: int, draw: int) -> dict[str, list[dict]]:
     """One null draw of the whole skeleton, as ``run_null_control`` draws it."""
 
     universe = _Universe(frame)
     pools = [_candidate_pool(trip, universe) for trip in skeleton]
-    return _orders_from_pools(skeleton, pools, rng, _sellable(universe, frame))[0]
+    return _orders_from_pools(skeleton, pools, seed, draw, _sellable(universe, frame))[0]
 
 
 def _sellable(universe, frame: pd.DataFrame, corporate_actions=None):
@@ -171,11 +173,9 @@ def test_null_draws_replace_each_name_inside_its_size_decile():
         ("000001.SZ", DAYS[2], DAYS[9]),
         ("600001.SH", DAYS[4], None),
     ]
-    rng = np.random.default_rng(11)
-
     seen: set[str] = set()
-    for _ in range(50):
-        orders = _sample_null_orders(skeleton, frame, rng)
+    for draw in range(50):
+        orders = _sample_null_orders(skeleton, frame, 11, draw)
         assert sorted(orders) == [DAYS[2], DAYS[4], DAYS[9]]
         entry, holding, exit_ = orders[DAYS[2]][0], orders[DAYS[4]][0], orders[DAYS[9]][0]
         assert entry["symbol"] in set(SMALL) - {"000001.SZ"}
@@ -226,7 +226,7 @@ def test_null_quantities_follow_the_star_declaration_ladder():
     ]
 
     frame = pd.DataFrame(rows)
-    orders = _sample_null_orders(skeleton, frame, np.random.default_rng(3))
+    orders = _sample_null_orders(skeleton, frame, 3, 0)
 
     # 10 000 / 50 = 200 shares clears the STAR minimum declaration; the second
     # trip would buy at 100 and its 100 shares do not, so the name is not in
@@ -252,11 +252,11 @@ BOARD_NAMES = (
 )
 
 
-def _board_frame() -> pd.DataFrame:
-    """Six days of names on every board, one size bucket, no ex-date."""
+def _board_frame(days: int = 6) -> pd.DataFrame:
+    """``days`` days of names on every board, one size bucket, no ex-date."""
 
     rows = []
-    for offset, day in enumerate(DAYS[:6]):
+    for offset, day in enumerate(DAYS[:days]):
         for index, symbol in enumerate(BOARD_NAMES):
             price = 10.0 + index + 0.1 * offset
             rows.append(
@@ -285,10 +285,9 @@ def _board_draws(permitted_boards, draws: int, seed: int) -> list[list[tuple[str
     frame = _board_frame()
     universe = _Universe(frame)
     pools = [_candidate_pool(trip, universe, None, permitted_boards) for trip in _BOARD_SKELETON]
-    rng = np.random.default_rng(seed)
     result = []
-    for _ in range(draws):
-        orders, _dropped = _orders_from_pools(_BOARD_SKELETON, pools, rng, _sellable(universe, frame))
+    for draw in range(draws):
+        orders, _dropped = _orders_from_pools(_BOARD_SKELETON, pools, seed, draw, _sellable(universe, frame))
         result.append(
             [(order["symbol"], order["action"], order["quantity"]) for day in sorted(orders) for order in orders[day]]
         )
@@ -326,18 +325,138 @@ def test_the_panel_draws_only_on_the_boards_the_account_may_buy():
     assert block["dropped_trips_mean"] == 0.0
 
 
-def test_an_unrestricted_panel_draws_exactly_as_before_the_boards_existed():
-    """Pinned from the code before ``permitted_boards`` existed: an arm
-    without the key keeps its panel bit for bit."""
+def test_the_draws_are_pinned_to_the_seed_the_draw_and_the_trip():
+    """Pinned literals: a replacement is seeded from a blake2b digest of the
+    panel seed, the draw's index and the round trip, never from Python's
+    per-process ``hash``, so every process -- a rerun, a paired arm, a later
+    audit -- draws exactly these names."""
 
     assert _board_draws(None, 6, 7) == [
+        [("000002.SZ", "buy", 900), ("688002.SH", "buy", 406), ("000002.SZ", "sell", 900)],
+        [("688001.SH", "buy", 666), ("000001.SZ", "buy", 600), ("688001.SH", "sell", 666)],
         [("830002.BJ", "buy", 555), ("688002.SH", "buy", 406), ("830002.BJ", "sell", 555)],
-        [("688002.SH", "buy", 625), ("830002.BJ", "buy", 361), ("688002.SH", "sell", 625)],
-        [("688001.SH", "buy", 666), ("830001.BJ", "buy", 383), ("688001.SH", "sell", 666)],
-        [("830001.BJ", "buy", 588), ("000002.SZ", "buy", 500), ("830001.BJ", "sell", 588)],
-        [("000002.SZ", "buy", 900), ("600001.SH", "buy", 500), ("000002.SZ", "sell", 900)],
-        [("300001.SZ", "buy", 700), ("830001.BJ", "buy", 383), ("300001.SZ", "sell", 700)],
+        [("688002.SH", "buy", 625), ("600001.SH", "buy", 500), ("688002.SH", "sell", 625)],
+        [("830001.BJ", "buy", 588), ("600001.SH", "buy", 500), ("830001.BJ", "sell", 588)],
+        [("830001.BJ", "buy", 588), ("830001.BJ", "buy", 383), ("830001.BJ", "sell", 588)],
     ]
+
+
+def _replacement_names(skeleton, frame: pd.DataFrame, seed: int) -> list[dict[str, str]]:
+    """Per panel draw, the name each round trip bought, by its entry instant."""
+
+    universe = _Universe(frame)
+    pools = [_candidate_pool(trip, universe) for trip in skeleton]
+    sellable = _sellable(universe, frame)
+    names = []
+    for draw in range(PANEL_DRAWS):
+        orders, _dropped = _orders_from_pools(skeleton, pools, seed, draw, sellable)
+        names.append(
+            {
+                str(order["execute_at"]): str(order["symbol"])
+                for day in orders.values()
+                for order in day
+                if order["action"] == "buy"
+            }
+        )
+    return names
+
+
+def test_a_changed_round_trip_redraws_that_trip_alone():
+    """The defect this replaces: every trip of every draw took the next number
+    of one shared stream, so a replay with one buy more than its record (2 238
+    against 2 237) redrew all twenty draws from that buy on and moved the
+    panel's cumulative return by 23 points while the book itself moved 0.37
+    pp/yr. Now an added trip and a resized one change their own replacements,
+    and every other trip keeps its name in every draw."""
+
+    frame = _board_frame(12)
+    fills = [
+        _fill("000001.SZ", "buy", 1000, DAYS[1], "09:30", 10.1),
+        _fill("300001.SZ", "buy", 700, DAYS[2], "09:30", 13.2),
+        _fill("600001.SH", "buy", 800, DAYS[3], "09:30", 12.3),
+        _fill("000002.SZ", "buy", 900, DAYS[4], "09:30", 11.4),
+        _fill("300002.SZ", "buy", 600, DAYS[5], "09:30", 14.5),
+        _fill("000001.SZ", "sell", 1000, DAYS[8], "15:00", 10.8),
+        _fill("600001.SH", "sell", 800, DAYS[10], "15:00", 13.3),
+    ]
+    resized = [
+        _fill("600001.SH", "buy", 900, DAYS[3], "09:30", 12.3)
+        if fill["symbol"] == "600001.SH" and fill["action"] == "buy"
+        else _fill("600001.SH", "sell", 900, DAYS[10], "15:00", 13.3)
+        if fill["symbol"] == "600001.SH"
+        else fill
+        for fill in fills
+    ]
+    # The earliest entry of the window: in the shared stream every later
+    # trip of every draw would have moved one number down.
+    added = _fill("688001.SH", "buy", 300, DAYS[0], "09:30", 15.0)
+    base, _unpaired = trade_skeleton(fills)
+    variant, _unpaired = trade_skeleton([added, *resized])
+
+    before = _replacement_names(base, frame, 29)
+    after = _replacement_names(variant, frame, 29)
+
+    touched = {_at(DAYS[0], "09:30").isoformat(), _at(DAYS[3], "09:30").isoformat()}
+    for old, new in zip(before, after, strict=True):
+        assert set(new) == set(old) | touched
+        assert {key: name for key, name in new.items() if key not in touched} == {
+            key: name for key, name in old.items() if key not in touched
+        }
+    resized_entry = _at(DAYS[3], "09:30").isoformat()
+    assert any(old[resized_entry] != new[resized_entry] for old, new in zip(before, after))
+    # The identical trade list meets the identical draws, in whatever order
+    # its trips arrive.
+    assert _replacement_names(base, frame, 29) == before
+    assert _replacement_names(list(reversed(base)), frame, 29) == before
+
+
+def test_a_round_trip_draws_uniformly_and_afresh_in_every_draw():
+    """Across draws one trip's replacement is uniform over its pool, and the
+    equal parts of one entry sold in two exits still draw a name each."""
+
+    frame = _board_frame()
+    universe = _Universe(frame)
+    sellable = _sellable(universe, frame)
+    trip = _BOARD_SKELETON[0]
+    pool = _candidate_pool(trip, universe)
+    assert len(pool) == 8
+
+    picks = [
+        _orders_from_pools([trip], [pool], 13, draw, sellable)[0][trip.entry_date][0]["symbol"]
+        for draw in range(1600)
+    ]
+    counts = Counter(picks)
+    assert set(counts) == {symbol for symbol, _quantity in pool}
+    # 200 expected per name; 60 is about four and a half standard deviations.
+    assert all(abs(count - 200) < 60 for count in counts.values())
+    assert len(set(picks[:PANEL_DRAWS])) > 1
+
+    halves, _unpaired = trade_skeleton(
+        [
+            _fill("000001.SZ", "buy", 1000, DAYS[0], "09:30", 10.0),
+            _fill("000001.SZ", "sell", 500, DAYS[3], "15:00", 10.3),
+            _fill("000001.SZ", "sell", 500, DAYS[5], "15:00", 10.5),
+        ]
+    )
+    pools = [_candidate_pool(half, universe) for half in halves]
+    pairs = [
+        tuple(order["symbol"] for order in _orders_from_pools(halves, pools, 13, draw, sellable)[0][DAYS[0]])
+        for draw in range(PANEL_DRAWS)
+    ]
+    assert all(len(pair) == 2 for pair in pairs)
+    assert any(first != second for first, second in pairs)
+
+
+def test_identical_trades_meet_the_identical_panel():
+    """Two replays of one script are two results with one trade list, so
+    their panels agree to the last digit."""
+
+    arguments = (_frame(), BENCHMARK, BrokerProfile(), StrategySchedule("day", "08:30"))
+    first = run_null_control(_observed_result(), *arguments, seed=17, panel=True)
+    second = run_null_control(_observed_result(), *arguments, seed=17, panel=True)
+
+    assert first["k"] == PANEL_DRAWS
+    assert first == second
 
 
 def test_a_round_trip_too_small_to_buy_a_lot_is_counted_not_hidden():
@@ -416,10 +535,9 @@ def test_affordability_is_settled_in_the_pool_so_an_expensive_name_drops_no_trip
 
     # One lot of 000003.SZ costs 90 000 against the trip's 10 000.
     assert _pools(skeleton, frame) == [(("000002.SZ", 900),)]
-    rng = np.random.default_rng(5)
-    for _ in range(20):
+    for draw in range(20):
         orders, dropped = _orders_from_pools(
-            skeleton, _pools(skeleton, frame), rng, _sellable(_Universe(frame), frame)
+            skeleton, _pools(skeleton, frame), 5, draw, _sellable(_Universe(frame), frame)
         )
         assert dropped == 0
         assert orders[DAYS[1]][0]["symbol"] == "000002.SZ"
@@ -706,7 +824,7 @@ def test_a_null_exit_sells_the_bonus_shares_its_replacement_earned():
     single = [RoundTrip("000001.SZ", 100, 13.0, _at(DAYS[2], "09:30"), _at(DAYS[8], "15:00"))]
     pools = _pools(single, frame)
     assert pools == [(("000002.SZ", 100),)]
-    orders, _ = _orders_from_pools(single, pools, np.random.default_rng(1), sellable)
+    orders, _ = _orders_from_pools(single, pools, 1, 0, sellable)
     assert [order["quantity"] for order in orders[DAYS[8]]] == [130]
     run = replay(orders)
     assert [record["status"] for record in run.executions] == ["filled", "filled"]
@@ -720,7 +838,7 @@ def test_a_null_exit_sells_the_bonus_shares_its_replacement_earned():
         RoundTrip("000001.SZ", 100, 13.0, _at(DAYS[3], "09:30"), _at(DAYS[10], "15:00")),
     ]
     orders, _ = _orders_from_pools(
-        overlapping, _pools(overlapping, frame), np.random.default_rng(1), sellable
+        overlapping, _pools(overlapping, frame), 1, 0, sellable
     )
     assert [order["quantity"] for order in orders[DAYS[8]]] == [100]
     assert [order["quantity"] for order in orders[DAYS[10]]] == [100]

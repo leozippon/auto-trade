@@ -23,6 +23,7 @@ here can reach the result it measures.
 
 from __future__ import annotations
 
+import hashlib
 from bisect import bisect_left
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
@@ -60,6 +61,10 @@ PANEL_DRAWS = 20
 # side is the original's circulating market-cap decile of that day instead.
 # A profile that pins the boards its account may buy on
 # (``BrokerProfile.permitted_boards``) keeps the names of every other board out.
+# Which name of that pool a draw takes is a function of the seed, the draw's
+# index and the round trip's own identity (``_trip_seed``), not of the other
+# trips or their count: a book that differs in one round trip meets a panel
+# that differs in that trip's replacements alone.
 MATCHED_MEMBERSHIP = "index_membership+affordability"
 MATCHED_DECILE = "circ_mv_decile+affordability"
 _DECILES = 10
@@ -248,7 +253,6 @@ def run_null_control(
         return idle
     universe = _Universe(frame)
     pools = [_candidate_pool(trip, universe, members, profile.permitted_boards) for trip in skeleton]
-    rng = np.random.default_rng(seed)
 
     window_benchmark = _benchmark_return(dates, benchmark)
     observed = total_return_from_curve(result.equity_curve) - window_benchmark
@@ -270,11 +274,12 @@ def run_null_control(
     rejects: list[int] = []
     dropped: list[int] = []
     series: list[list[tuple[str, float]]] = []
-    for _ in range(k):
+    for draw in range(k):
         orders, dropped_trips = _orders_from_pools(
             skeleton,
             pools,
-            rng,
+            seed,
+            draw,
             lambda trip, symbol, quantity: universe.sellable_at_exit(
                 trip, symbol, quantity, market.cash_dividends_for_day
             ),
@@ -556,25 +561,33 @@ def _candidate_pool(
 def _orders_from_pools(
     skeleton: Sequence[RoundTrip],
     pools: Sequence[tuple[tuple[str, int], ...]],
-    rng: np.random.Generator,
+    seed: int,
+    draw: int,
     sellable: Callable[[RoundTrip, str, int], int],
 ) -> tuple[dict[str, list[dict[str, object]]], int]:
-    """One draw, and how many round trips it could not deploy.
+    """Draw number ``draw``, and how many round trips it could not deploy.
 
-    A trip with an empty pool is dropped; the count travels with the draw so
-    an under-deployed null is reported instead of silently shrinking the null
-    distribution. Each exit sells what its lot has become by then
-    (``sellable``, the Broker's own ex-date settlement of the drawn name).
+    Each trip takes a name uniformly from its own pool with a generator of its
+    own (``_trip_seed``). A trip with an empty pool is dropped; the count
+    travels with the draw so an under-deployed null is reported instead of
+    silently shrinking the null distribution. Each exit sells what its lot has
+    become by then (``sellable``, the Broker's own ex-date settlement of the
+    drawn name).
     """
 
     orders: dict[str, list[dict[str, object]]] = {}
     dropped = 0
     drawn: list[tuple[RoundTrip, str, int]] = []
     holders: dict[str, list[RoundTrip]] = {}
+    twins: dict[tuple[datetime, str, int], int] = {}
     for trip, pool in zip(skeleton, pools, strict=True):
+        identity = (trip.entry_at, trip.symbol, trip.quantity)
+        twin = twins.get(identity, 0)
+        twins[identity] = twin + 1
         if not pool:
             dropped += 1
             continue
+        rng = np.random.default_rng(_trip_seed(seed, draw, trip, twin))
         symbol, quantity = pool[int(rng.integers(len(pool)))]
         drawn.append((trip, symbol, quantity))
         holders.setdefault(symbol, []).append(trip)
@@ -605,6 +618,21 @@ def _orders_from_pools(
         # rejected for money its own sales are about to release.
         day.sort(key=lambda order: (str(order["execute_at"]), order["action"] == "buy"))
     return orders, dropped
+
+
+def _trip_seed(seed: int, draw: int, trip: RoundTrip, twin: int) -> int:
+    """The seed of one round trip's replacement in one draw.
+
+    A blake2b digest of the panel seed, the draw's index and the trip's own
+    identity -- its entry instant, symbol and shares -- so it is the same in
+    every process (Python's ``hash`` is salted per process) and blind to every
+    trip of another identity. ``twin`` numbers the trips of one identity in
+    skeleton order: an entry sold off in equal parts is several trips, and
+    each part still draws a name of its own.
+    """
+
+    key = f"{seed}|{draw}|{trip.entry_at.isoformat()}|{trip.symbol}|{trip.quantity}|{twin}"
+    return int.from_bytes(hashlib.blake2b(key.encode(), digest_size=16).digest(), "big")
 
 
 def _queue(
