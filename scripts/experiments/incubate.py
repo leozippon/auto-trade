@@ -9,7 +9,10 @@ the lucky best of many tries. The checks run in order before anything
 changes, each a refusal with a non-zero exit: the arm's verdict and no earlier
 incubation of the arm, no live worker, the node (and each
 ``--seed-replicate``) is a Step of the arm's research session, the entry
-screen passes on the arm's own pinned rules (``pipelines/incubation.py``), and
+screen passes on the arm's own pinned rules (``pipelines/incubation.py``;
+``--deterministic`` declares the node's package free of randomness, which
+waives the seed-replicate count and seed mean as the Agent's declaration does
+at a freeze, and the record's frozen block states it), and
 fewer than ``INCUBATING_BOOK_CAP`` other incubating Paper books are open
 (killed books do not count). GPUs are then taken for an arm that needs them,
 the node's bytes are frozen and replayed exactly as a frozen artifact is, on
@@ -104,6 +107,14 @@ def main() -> int:
         default=[],
         help="Step id of one of the node's seed replicates; repeat for each.",
     )
+    parser.add_argument(
+        "--deterministic",
+        action="store_true",
+        help=(
+            "Declare that the node's package uses no randomness: the entry screen "
+            "waives the seed-replicate count and seed mean, and the record states it."
+        ),
+    )
     parser.add_argument("--by", required=True, help="Who incubates the node.")
     parser.add_argument("--reason", required=True, help="Why, in a sentence or two.")
     parser.add_argument("--experiments-root", type=Path, default=REPO_ROOT / "experiments")
@@ -129,7 +140,13 @@ def main() -> int:
             if not params:
                 raise ValueError(f"missing experiment params: {params_path}")
             options = resolve_worker_options(params, experiment_dir=experiment_dir, repo_root=REPO_ROOT)
-            reading = incubation_entry(records, args.step, args.seed_replicate, config=options.rolling)
+            reading = incubation_entry(
+                records,
+                args.step,
+                args.seed_replicate,
+                config=options.rolling,
+                deterministic=args.deterministic,
+            )
             screen = reading["screen"]
             if args.dry_run:
                 print(
@@ -173,7 +190,11 @@ def main() -> int:
                 ref_store=AgentRefStore(experiment_dir),
             ).pipeline
             record = pipeline.incubate(
-                args.step, args.seed_replicate, incubated_by=args.by, reason=args.reason
+                args.step,
+                args.seed_replicate,
+                incubated_by=args.by,
+                reason=args.reason,
+                deterministic=args.deterministic,
             )
         elif record["source_step_id"] != args.step:
             raise ValueError(

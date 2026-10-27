@@ -208,8 +208,9 @@ def test_a_model_nominee_freezes_with_its_seed_replicate_and_both_replay_forward
     gate = record["freeze_gate"]
     seeds = gate["seed_replicates"]
     assert gate["passed"] is True and gate["reasons"] == []
-    assert seeds["trains_a_model"] is True and seeds["deterministic"] is False
-    assert record["frozen"]["deterministic"] is False
+    # Nothing was declared, so no record states a declaration.
+    assert seeds["trains_a_model"] is True and "deterministic" not in seeds
+    assert "deterministic" not in record["frozen"]
     assert [entry["seed_line"] for entry in seeds["replicates"]] == [
         "main.py: SEED_BASE = 2000",
         "main.py: SEED_BASE = 3000",

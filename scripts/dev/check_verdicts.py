@@ -208,6 +208,9 @@ def check_arm(arm: Path) -> list[Judgement]:
                     hard_reasons=rules.evaluate(dict(nominee["summary"])),
                     years=years,
                     seed_replicates=[steps[str(entry["step_id"])] for entry in named],
+                    deterministic=bool(
+                        (record["freeze_gate"].get("seed_replicates") or {}).get("deterministic")
+                    ),
                     terminal_offline_trials=recorded_terminal_offline_trials(records[: index + 1]),
                 ),
             )
@@ -227,7 +230,13 @@ def check_arm(arm: Path) -> list[Judgement]:
             replicates = [
                 str(item["source_step_id"]) for item in record["frozen"].get("seed_replicates") or ()
             ]
-            entry = incubation_entry(records, str(record["source_step_id"]), replicates, config=config)
+            entry = incubation_entry(
+                records,
+                str(record["source_step_id"]),
+                replicates,
+                config=config,
+                deterministic=bool(record["frozen"].get("deterministic")),
+            )
             judge("incubation.entry", record["entry"], entry["entry"])
             reading = record["forward_reading"]
             if reading.get("status") == "ok":

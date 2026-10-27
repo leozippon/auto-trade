@@ -874,8 +874,8 @@ CONDITIONS: tuple[Condition, ...] = (
     # the nominee's own bar. A nomination declared deterministic (its package
     # uses no randomness) is exempt from the last two: its own reading stands.
     Condition("seeds", "freeze_seed_replicate_invalid", lambda m, t: not _refused_replicate(m)),
-    Condition("seeds", "freeze_too_few_seed_replicates", lambda m, t: bool(m["replicates"]) or not m["trains_a_model"] or m["deterministic"]),
-    Condition("seeds", "freeze_seed_mean_information_ratio_below_threshold", lambda m, t: m["deterministic"] or not m["replicates"] or _refused_replicate(m) or _seed_mean_reaches_bar(m)),
+    Condition("seeds", "freeze_too_few_seed_replicates", lambda m, t: bool(m["replicates"]) or not m["trains_a_model"] or m.get("deterministic", False)),
+    Condition("seeds", "freeze_seed_mean_information_ratio_below_threshold", lambda m, t: m.get("deterministic", False) or not m["replicates"] or _refused_replicate(m) or _seed_mean_reaches_bar(m)),
     # F1/H1: the frozen strategy raised during the replay, which then has no
     # slice to judge (:func:`graduation_verdict`).
     Condition("replay", "forward_strategy_error", lambda m, t: m["strategy_error"] != "forward", "F1"),

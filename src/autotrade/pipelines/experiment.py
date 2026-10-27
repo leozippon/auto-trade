@@ -630,9 +630,13 @@ class RollingExperimentPipeline:
                 "refit_period": fit.refit_period if fit is not None else None,
             },
             # The Agent's declaration that the package uses no randomness,
-            # which waived its seed replicates: the operator reviews it
-            # before the strategy goes live.
-            "deterministic": gate["seed_replicates"]["deterministic"],  # type: ignore[index]
+            # which waived its seed replicates, only when made: the operator
+            # reviews it before the strategy goes live.
+            **(
+                {"deterministic": True}
+                if gate["seed_replicates"].get("deterministic")  # type: ignore[union-attr]
+                else {}
+            ),
             **({"seed_replicates": replicates} if replicates else {}),
         }
 
@@ -997,10 +1001,14 @@ class RollingExperimentPipeline:
         *,
         incubated_by: str,
         reason: str,
+        deterministic: bool = False,
     ) -> dict[str, object]:
         """Incubate one node of an arm whose research ended without a graduation.
 
-        The node must pass the entry screen (:func:`incubation_entry`). Its
+        The node must pass the entry screen (:func:`incubation_entry`), which
+        an operator who declares its package ``deterministic`` reads without
+        the seed-replicate count and seed mean; the frozen block then records
+        the declaration for the final review. Its
         revision and its seed replicates' are frozen as new artifacts and
         replayed once over forward and Held-out exactly as a frozen artifact
         is (:meth:`replay_frozen`), except that its Broker and zero-skill panel
@@ -1021,7 +1029,9 @@ class RollingExperimentPipeline:
         records = self.ledger.read()
         assert_no_frozen_artifact_mutation(records)
         require_incubable(records)
-        reading = incubation_entry(records, step_id, seed_replicates, config=self.config)
+        reading = incubation_entry(
+            records, step_id, seed_replicates, config=self.config, deterministic=deterministic
+        )
         screen: Mapping[str, object] = reading["screen"]  # type: ignore[assignment]
         if not screen["passed"]:
             raise ValueError(
@@ -1045,6 +1055,8 @@ class RollingExperimentPipeline:
 
         step: Mapping[str, object] = reading["step"]  # type: ignore[assignment]
         frozen = freeze(step)
+        if deterministic:
+            frozen["deterministic"] = True
         replicates = [freeze(row) for row in reading["seed_replicates"]]  # type: ignore[attr-defined]
         if replicates:
             frozen["seed_replicates"] = replicates
@@ -1429,13 +1441,15 @@ def incubation_entry(
     seed_replicates: Sequence[str] = (),
     *,
     config: RollingExperimentConfig,
+    deterministic: bool = False,
 ) -> dict[str, object]:
     """The entry screen of one node of a finished arm: its session row
     (``step``) and its seed replicates', the freeze gate on them as the arm's
     research session would have read it -- under the arm's own rules, against
     the records before that session and the session's Steps
-    (:func:`freeze_gate_for`) -- as ``entry`` with the reasons the screen
-    defers, and the screen (``incubation.entry_screen``).
+    (:func:`freeze_gate_for`), with the operator's ``deterministic``
+    declaration -- as ``entry`` with the reasons the screen defers, and the
+    screen (``incubation.entry_screen``).
 
     ``ValueError`` when the node or a replicate is not a Step of the session
     that ended the arm's research.
@@ -1467,6 +1481,7 @@ def incubation_entry(
         acceptance=config.acceptance,
         years=[(slot.start, slot.end) for slot in config.geometry.research_years],
         seed_replicates=replicates,
+        deterministic=deterministic,
         terminal_offline_trials=recorded_terminal_offline_trials(records),
     )
     screen = entry_screen(gate)
@@ -1570,8 +1585,8 @@ def _seed_replicate_gate(
     over the nominee and its replicates below the nominee's own
     ``information_ratio_bar``. A nomination that declares its package
     ``deterministic`` (no randomness, so a replicate would reproduce it
-    exactly) is exempt from the last two; the block records the declaration.
-    Every other condition stays the nominee's own.
+    exactly) is exempt from the last two; the block records the declaration
+    when it is made. Every other condition stays the nominee's own.
     """
 
     main = Path(experiment_dir) / REVISIONS_DIR / str(nominee["revision_id"]) / "output" / "main.py"
@@ -1609,7 +1624,7 @@ def _seed_replicate_gate(
     )
     block = {
         "trains_a_model": trains,
-        "deterministic": deterministic,
+        **({"deterministic": True} if deterministic else {}),
         "replicates": entries,
         "mean_information_ratio": sum(ratios) / len(ratios) if entries and measured else None,  # type: ignore[arg-type]
         "information_ratio_bar": gate["deflated_sharpe"].get("information_ratio_bar"),  # type: ignore[union-attr]

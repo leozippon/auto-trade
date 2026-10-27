@@ -39,6 +39,8 @@ from autotrade.pipelines.verdict import CONDITIONS, NOT_A_SESSION_STEP, UNMEASUR
 from tests.unit.paper_book_fixture import write_book_record
 from tests.unit.test_null_control import _board_draws
 from tests.unit.test_rolling_pipeline import CONFIG_PROFILE, _pipeline
+from tests.unit.test_seed_replicates import _arm as _seed_arm
+from tests.unit.test_seed_replicates import _source
 from tests.unit.webui_research_arm import build_arm
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -385,6 +387,65 @@ def test_the_command_refuses_at_the_cap_before_anything_changes(tmp_path: Path, 
     assert script.main() == 2
     assert f"the cap is {INCUBATING_BOOK_CAP}" in capsys.readouterr().err
     assert ledger.read() == before and _tree(tmp_path) == tree
+
+
+def _model_arm_without_a_replicate(tmp_path: Path):
+    """An arm whose nominee trains a model and named no seed replicate: the
+    gate refused it for that alone, so research ended without a deliverable."""
+
+    pipeline, _evaluator = _seed_arm(
+        tmp_path, [(_source(1000), "full"), (_source(1000, swaps=3), "full")]
+    )
+    assert pipeline.run_research_session()["freeze_gate"]["reasons"] == [
+        "freeze_too_few_seed_replicates"
+    ]
+    return pipeline
+
+
+def test_a_model_node_declared_deterministic_is_incubated_without_replicates(tmp_path: Path):
+    """The operator's declaration waives the seed-replicate count at the entry
+    screen, as the Agent's does at a freeze, and the record's frozen block
+    states it; without it the screen blocks the node as before."""
+
+    pipeline = _model_arm_without_a_replicate(tmp_path)
+    records = pipeline.ledger.read()
+    plain = incubation_entry(records, "research_step_0", config=pipeline.config)
+    assert plain["screen"]["blocking"] == ["freeze_too_few_seed_replicates"]
+    with pytest.raises(ValueError, match="blocks research_step_0: freeze_too_few_seed_replicates"):
+        pipeline.incubate("research_step_0", incubated_by="operator", reason="no randomness")
+    assert pipeline.ledger.read() == records
+
+    declared = incubation_entry(records, "research_step_0", config=pipeline.config, deterministic=True)
+    assert declared["screen"] == {"passed": True, "deferred": [], "blocking": []}
+    record = pipeline.incubate(
+        "research_step_0", incubated_by="operator", reason="no randomness", deterministic=True
+    )
+    assert record["frozen"]["deterministic"] is True and "seed_replicates" not in record["frozen"]
+    assert record["entry"]["seed_replicates"]["deterministic"] is True
+    assert record["forward_reading"]["status"] == "ok"
+    assert pipeline.ledger.read()[-1]["frozen"]["deterministic"] is True
+
+
+def test_the_command_hands_the_operators_declaration_to_the_entry_screen(
+    tmp_path: Path, monkeypatch, capsys
+):
+    pipeline = _model_arm_without_a_replicate(tmp_path)
+    hitl = pipeline.config.experiment_dir / "hitl"
+    hitl.mkdir(exist_ok=True)
+    (hitl / "params.json").write_text('{"experiment_id": "arm"}', encoding="utf-8")
+    script = _incubate_script()
+    monkeypatch.setattr(script, "resolve_worker_options", lambda *_args, **_kwargs: SimpleNamespace(rolling=pipeline.config))
+    command = [
+        "incubate.py", "--experiment", "arm", "--step", "research_step_0", "--by", "operator", "--reason", "r",
+        "--experiments-root", str(pipeline.config.experiments_root), "--dry-run",
+    ]
+    monkeypatch.setattr(sys, "argv", command)
+    assert script.main() == 2
+    assert json.loads(capsys.readouterr().out)["blocking"] == ["freeze_too_few_seed_replicates"]
+    monkeypatch.setattr(sys, "argv", [*command, "--deterministic"])
+    assert script.main() == 0
+    printed = json.loads(capsys.readouterr().out)
+    assert printed["passed"] is True and printed["gate"]["seed_replicates"]["deterministic"] is True
 
 
 def _incubated_arm(experiments: Path, passed: bool = True) -> Path:
