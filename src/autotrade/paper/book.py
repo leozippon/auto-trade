@@ -46,6 +46,7 @@ from autotrade.pipelines.ledger import (
     recorded_path,
 )
 from autotrade.pipelines.worker import (
+    _strategy_boundary,
     _strategy_sandbox_from_spec,
     resolve_worker_options,
 )
@@ -182,7 +183,7 @@ def create_book(
         permitted_boards = profile.permitted_boards or default_permitted_boards(profile.initial_cash)
     profile = replace(profile, permitted_boards=tuple(permitted_boards))
     sandbox = _strategy_sandbox_from_spec(
-        options.agent_sandbox, fit_timeout_seconds=options.rolling.strategy_fit_timeout_seconds
+        options.agent_sandbox, **_strategy_boundary(options.rolling)
     )
     image = read_json(experiment / "hitl" / "sandbox_image.json").get("image_ref")
     if image:

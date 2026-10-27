@@ -19,9 +19,13 @@ role is a relay model, which that key requires), four replays per batch
 owner's 2026-10-27 directive to give the Agent room for complex strategies,
 every per-arm budget at three times round 20261027's: 288 replay-years, 36
 null controls, USD 150 of API spend, 19,200 model calls, 7,200 minutes of
-pausable inference before `deadline`, and 10,800 s for one `fit` call. The
-strategy container's CPUs, memory and per-decision inference limit are the
-executor's (`SandboxLimits`), not per-arm parameters, and stay as they are.
+pausable inference before `deadline`, 10,800 s for one `fit` call and 1,080 s
+for one `generate_orders` call -- and a strategy container of 16 CPUs and
+64 GiB, twice the default, which the session container shares. These are
+ceilings, not reservations: a fit-bearing leg's two containers never compute
+at once, so one arm's four legs compute on at most 64 of the instance's 128
+CPUs, while the memory ceilings of both arms' containers together exceed its
+463 GiB and rely, as every arm already does, on containers not filling at once.
 
 | Arm | Main session | Sub-agents / compaction |
 | --- | --- | --- |
@@ -111,13 +115,18 @@ ROUND = Round(
         "batch_validate_max_concurrency": 4,
         "reasoning_effort": "xhigh",
         # Three times round 20261027's budgets (the console defaults, and
-        # BASE_OVERRIDES for the last two of the session's).
+        # BASE_OVERRIDES for the session's minutes and model calls).
         "max_replay_years": 288,
         "max_null_controls": 36,
         "max_api_spend_usd": 150.0,
         "max_llm_calls": 19_200,
         "max_research_minutes": 7_200,
         "strategy_fit_timeout_seconds": 10_800,
+        "strategy_inference_timeout_seconds": 1_080,
+        # The strategy (and session) container: twice the default CPUs and
+        # memory, so a per-day test-time update has the cores and room.
+        "strategy_cpus": 16,
+        "strategy_memory": "64g",
     },
 )
 

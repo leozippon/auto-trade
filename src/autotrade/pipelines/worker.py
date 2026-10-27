@@ -9,7 +9,7 @@ import shutil
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import pandas as pd
 
@@ -192,6 +192,9 @@ _ALLOWED_PARAMS = {
     "finalize_before_deadline_seconds",
     "per_call_timeout_seconds",
     "strategy_fit_timeout_seconds",
+    "strategy_inference_timeout_seconds",
+    "strategy_cpus",
+    "strategy_memory",
     "commission_bps",
     "slippage_bps",
     "permitted_boards",
@@ -707,6 +710,11 @@ def resolve_worker_options(
         strategy_fit_timeout_seconds=_positive_int(
             knob("strategy_fit_timeout_seconds"), "strategy_fit_timeout_seconds"
         ),
+        strategy_inference_timeout_seconds=_positive_int(
+            knob("strategy_inference_timeout_seconds"), "strategy_inference_timeout_seconds"
+        ),
+        strategy_cpus=_positive_float(knob("strategy_cpus"), "strategy_cpus"),
+        strategy_memory=_memory_limit(knob("strategy_memory"), "strategy_memory"),
         # A tracking mandate exactly where the request named a cap; every
         # limit absent or null takes its default (``config.acceptance_for``).
         acceptance=acceptance_for(
@@ -762,13 +770,33 @@ def resolve_worker_options(
     )
 
 
+def _strategy_boundary(rolling: RollingExperimentConfig) -> dict[str, Any]:
+    """The arm's strategy-container boundary as ``_strategy_sandbox_from_spec``
+    takes it: the one mapping every builder of an arm's strategy sandbox (the
+    pipeline, a Paper book, the console's prompt preview) passes on."""
+
+    return {
+        "fit_timeout_seconds": rolling.strategy_fit_timeout_seconds,
+        "inference_timeout_seconds": rolling.strategy_inference_timeout_seconds,
+        "cpus": rolling.strategy_cpus,
+        "memory": rolling.strategy_memory,
+    }
+
+
 def _strategy_sandbox_from_spec(
     spec: SandboxSpec | None,
     *,
     fit_timeout_seconds: float,
+    inference_timeout_seconds: float | None = None,
+    cpus: float | None = None,
+    memory: str | None = None,
     experiment_id: str | None = None,
 ) -> SandboxConfig:
     """The strategy container's boundary, derived from the Agent session's spec.
+
+    The wall clocks, CPU quota and memory ceiling are the arm's own
+    (``RollingExperimentConfig.strategy_*``); one left as None keeps the
+    executor's default (``SandboxLimits``), which is also the arm default.
 
     ``experiment_id`` labels every strategy container the experiment starts
     like its session container, so the console reclaims them together.
@@ -787,16 +815,23 @@ def _strategy_sandbox_from_spec(
     """
 
     labels = experiment_container_labels(experiment_id) if experiment_id else {}
+    boundary: dict[str, Any] = {"fit_timeout_seconds": float(fit_timeout_seconds)}
+    if inference_timeout_seconds is not None:
+        boundary["timeout_seconds"] = float(inference_timeout_seconds)
+    if cpus is not None:
+        boundary["cpus"] = float(cpus)
+    if memory is not None:
+        boundary["memory"] = memory
     if spec is None:
         return SandboxConfig(
             image=DEFAULT_IMAGE,
-            limits=SandboxLimits(fit_timeout_seconds=float(fit_timeout_seconds)),
+            limits=SandboxLimits(**boundary),
             labels=labels,
         )
     return SandboxConfig(
         image=spec.image,
         limits=SandboxLimits(
-            fit_timeout_seconds=float(fit_timeout_seconds),
+            **boundary,
             gpu_count=spec.gpu_count if spec.gpu is not None else 0,
             gpu_name_filter=spec.gpu_name_filter,
             gpu_devices=spec.gpu if isinstance(spec.gpu, tuple) else (),
@@ -854,7 +889,7 @@ def build_experiment_pipeline(
     )
     strategy_sandbox = _strategy_sandbox_from_spec(
         options.agent_sandbox,
-        fit_timeout_seconds=options.rolling.strategy_fit_timeout_seconds,
+        **_strategy_boundary(options.rolling),
         experiment_id=options.experiment_id,
     )
     if options.data_backend == "pit":
@@ -1442,14 +1477,15 @@ def _llm_settings(
     settings = replace(settings, compaction=settings.compaction_for("main"))
     _require_short_tier_compaction(settings)
     gpu_count = _gpu_count(params.get("gpu_count", SandboxSpec().gpu_count))
+    # One boundary with the strategy container: the arm's strategy CPUs and
+    # memory, unless the internal agent_sandbox_* knobs name others; an arm that
+    # names neither keeps the shared default.
+    cpus_key = "agent_sandbox_cpus" if "agent_sandbox_cpus" in params else "strategy_cpus"
+    memory_key = "agent_sandbox_memory" if "agent_sandbox_memory" in params else "strategy_memory"
     sandbox = SandboxSpec(
         image=str(params.get("agent_sandbox_image") or DEFAULT_IMAGE),
-        cpus=_positive_float(
-            params.get("agent_sandbox_cpus", SandboxSpec().cpus), "agent_sandbox_cpus"
-        ),
-        memory=_memory_limit(
-            params.get("agent_sandbox_memory", SandboxSpec().memory), "agent_sandbox_memory"
-        ),
+        cpus=_positive_float(params.get(cpus_key, SandboxSpec().cpus), cpus_key),
+        memory=_memory_limit(params.get(memory_key, SandboxSpec().memory), memory_key),
         pids_limit=_positive_int(
             params.get("agent_sandbox_pids", SandboxSpec().pids_limit), "agent_sandbox_pids"
         ),

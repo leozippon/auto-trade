@@ -14,11 +14,7 @@ from autotrade.environment.broker_core import BONUS_SHARE_PAR_CNY, DIVIDEND_TAX_
 from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.replay.style import neutralization_method
-from autotrade.environment.sandbox import (
-    SCREENING_TOOL_MOUNT,
-    SandboxLimits,
-    container_thread_env,
-)
+from autotrade.environment.sandbox import SCREENING_TOOL_MOUNT, container_thread_env
 
 EXPERIMENT_FACTS_SCHEMA_VERSION = 2
 
@@ -54,27 +50,28 @@ REPLAY_YEARS_NOTE = (
 )
 
 
-def strategy_container_note(limits: SandboxLimits) -> str:
+def strategy_container_note(cpus: float, memory_bytes: int) -> str:
     """What one candidate's replay runs on, in one passage beside its numbers.
 
     A fact, not advice: how to use the cores and cards is the session's call,
-    which a reference pack may suggest. The CPU quota, thread variables and
-    memory cap are rendered from ``limits`` and ``container_thread_env``, the
-    very code the executor builds each strategy container's flags from, so
-    the passage cannot drift from what a replay gets; the per-arm numbers
-    (cards, batch width) are named by their budgets keys. The structure it
-    states is the executor's: a ``fit``-bearing strategy gets a second
-    container with the same boundary, called before that day's decision
-    (``replay.engine``), and a batch's legs run concurrently, one card each in
-    turn (``session_tools.leg_cards``).
+    which a reference pack may suggest. The CPU quota and memory cap are the
+    arm's strategy container's own (``SandboxLimits``, as the run manifest
+    carries them) and the thread variables are rendered by
+    ``container_thread_env``, the very code the executor builds each strategy
+    container's flags from, so the passage cannot drift from what a replay
+    gets; the other per-arm numbers (cards, batch width) are named by their
+    budgets keys. The structure it states is the executor's: a ``fit``-bearing
+    strategy gets a second container with the same boundary, called before that
+    day's decision (``replay.engine``), and a batch's legs run concurrently, one
+    card each in turn (``session_tools.leg_cards``).
     """
 
-    threads = container_thread_env(limits.cpus)["OMP_NUM_THREADS"]
-    memory_gib = limits.memory_bytes / 1024**3
+    threads = container_thread_env(cpus)["OMP_NUM_THREADS"]
+    memory_gib = memory_bytes / 1024**3
     return (
         "每个候选回放时，`generate_orders` 在一个策略容器里运行；定义了 `fit` 的候选另起一个边界相同的容器专跑 `fit`，"
         "同一天先 `fit` 后决策，两者不同时计算。"
-        f"每个容器各有 {limits.cpus:g} 个 CPU 的配额（`strategy_cpus`），"
+        f"每个容器各有 {cpus:g} 个 CPU 的配额（`strategy_cpus`），"
         f"`OMP_NUM_THREADS`、`MKL_NUM_THREADS`、`OPENBLAS_NUM_THREADS` 与 `NUMEXPR_NUM_THREADS` 都设为 {threads}，"
         f"内存上限 {memory_gib:g} GiB（`strategy_memory_bytes`），"
         "并挂本臂的 `strategy_gpu_count` 张卡（为 0 时全在 CPU 上）：卡型与每张的显存在会话里用 `nvidia-smi` 看，"
@@ -334,7 +331,8 @@ def _budget_facts(
     context_compaction: Mapping[str, object] | None,
 ) -> dict[str, object]:
     budgets = _as_mapping(manifest.get("budgets"))
-    limits = SandboxLimits()
+    cpus = budgets.get("strategy_cpus")
+    memory_bytes = budgets.get("strategy_memory_bytes")
     return compact_mapping(
         {
             # Pausable effective reasoning time: the main deadline PLUS the
@@ -375,21 +373,26 @@ def _budget_facts(
             "used_before_this_attempt": budgets.get("used_before_this_attempt"),
             # CPU quota that same container is started with, from which its
             # OMP/MKL/OPENBLAS/NUMEXPR thread variables are derived. Read
-            # from the environment's own SandboxLimits, the single source the
-            # executor builds the `--cpus` flag from, so a strategy that sets
-            # its own thread count has the real number instead of a guess: a
-            # session that guessed low spent two backtest slots on fit
-            # timeouts it had the cores to avoid.
-            "strategy_cpus": limits.cpus,
+            # from the run manifest, which carries the evaluator's own
+            # SandboxLimits -- the arm's, and the single source the executor
+            # builds the `--cpus` flag from -- so a strategy that sets its own
+            # thread count has the real number instead of a guess: a session
+            # that guessed low spent two backtest slots on fit timeouts it had
+            # the cores to avoid.
+            "strategy_cpus": cpus,
             # The memory ceiling of that same container, in the unit a replay
             # reports its measured peak in (``resources.peak_memory_bytes``).
             # The session container carries the same ceiling, so a fit profiled
             # under `shell` is measured against the number the formal replay
             # will enforce rather than extrapolated across two boundaries.
-            "strategy_memory_bytes": limits.memory_bytes,
+            "strategy_memory_bytes": memory_bytes,
             # The two containers per candidate, their threads and cards, and
             # the batch's concurrent legs, in one passage.
-            "strategy_container_note": strategy_container_note(limits),
+            "strategy_container_note": (
+                strategy_container_note(float(cpus), int(memory_bytes))  # type: ignore[arg-type]
+                if cpus is not None and memory_bytes is not None
+                else None
+            ),
             # Replays one batch_validate call runs at once (the arm's
             # ``batch_validate_max_concurrency``), each with its own strategy
             # container (two when the candidate declares fit). The host is

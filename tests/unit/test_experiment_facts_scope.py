@@ -273,26 +273,35 @@ def test_a_cpu_only_experiment_still_states_its_strategy_gpu_count() -> None:
     assert "strategy_gpu_count" not in _facts(budgets={})["budgets"]
 
 
+# The strategy container's boundary as the run manifest carries it: the
+# evaluator's own SandboxLimits, which are the arm's (``strategy_cpus``,
+# ``strategy_memory``), here at the executor's defaults.
+CONTAINER = {"strategy_cpus": 8.0, "strategy_memory_bytes": 32 * 1024**3}
+
+
 def test_the_facts_publish_the_strategy_containers_cpu_quota_and_batch_width() -> None:
     """A session sizing its own thread pools must not have to guess.
 
-    The formal strategy container is started with a fixed CPU quota and has its
-    OMP/MKL/OPENBLAS/NUMEXPR variables set from it; one session guessed half of
-    it and lost two backtest slots to fit timeouts. The quota is read from the
-    code that enforces it, and how many replays a batch runs at once from the
-    run manifest, which carries the arm's own width, so neither fact can drift
-    from what the containers get.
+    The formal strategy container is started with the arm's CPU quota and has
+    its OMP/MKL/OPENBLAS/NUMEXPR variables set from it; one session guessed half
+    of it and lost two backtest slots to fit timeouts. The quota and how many
+    replays a batch runs at once both come from the run manifest, which carries
+    the evaluator's own limits and the arm's own width, so neither fact can
+    drift from what the containers get; a manifest without the quota states
+    none rather than a guessed default.
     """
 
-    from autotrade.environment.sandbox import SandboxLimits
-
-    budgets = _facts(budgets={"batch_validate_max_concurrency": 5})["budgets"]
-    assert budgets["strategy_cpus"] == SandboxLimits().cpus
+    budgets = _facts(
+        budgets={**CONTAINER, "strategy_cpus": 16.0, "batch_validate_max_concurrency": 5}
+    )["budgets"]
+    assert budgets["strategy_cpus"] == 16.0
     assert budgets["batch_validate_max_concurrency"] == 5
     # The width alone would mislead: the fit clock the batch is judged against
     # scales with it, so the rule travels with the number.
     assert budgets["batch_validate_fit_timeout_note"] == BATCH_VALIDATE_FIT_TIMEOUT_NOTE
-    assert "strategy_cpus" in build_system_prompt(experiment_facts=_facts())
+    assert "strategy_cpus" in build_system_prompt(experiment_facts=_facts(budgets=CONTAINER))
+    bare = _facts(budgets={})["budgets"]
+    assert "strategy_cpus" not in bare and "strategy_container_note" not in bare
 
 
 def test_the_facts_publish_the_strategy_containers_memory_ceiling() -> None:
@@ -300,42 +309,31 @@ def test_the_facts_publish_the_strategy_containers_memory_ceiling() -> None:
 
     An arm extrapolated a 7.34 GiB fit, compared it against a ceiling it had
     guessed, concluded the replay was swapping and spent hours on it. The
-    strategy container now carries the same limit as the session Sandbox, and
-    the fact states it in the unit a replay reports its measured peak in, so
-    the comparison needs no extrapolation at all.
+    strategy container carries the same limit as the session Sandbox, and the
+    fact states the arm's ceiling in the unit a replay reports its measured
+    peak in, so the comparison needs no extrapolation at all.
     """
 
-    from autotrade.environment.sandbox import SandboxLimits
-
-    budgets = _facts()["budgets"]
-    assert budgets["strategy_memory_bytes"] == SandboxLimits().memory_bytes
-    assert budgets["strategy_memory_bytes"] == 32 * 1024**3
+    budgets = _facts(budgets={**CONTAINER, "strategy_memory_bytes": 64 * 1024**3})["budgets"]
+    assert budgets["strategy_memory_bytes"] == 64 * 1024**3
     # How to probe a batch before sending it is advice a pack may give, not a
     # run fact.
     assert "smoke_backtest_probe_note" not in budgets
 
 
-def test_the_container_note_renders_from_the_limits_the_executor_uses(monkeypatch) -> None:
-    """The container passage's numbers are the executor's own limits, not
-    retyped prose: a changed limit changes the prompt the session reads."""
+def test_the_container_note_renders_from_the_arms_limits() -> None:
+    """The container passage's numbers are the arm's own limits as the run
+    manifest carries them, not retyped prose: other limits change the prompt
+    the session reads, thread variables included."""
 
-    import functools
-
-    from autotrade.agent import experiment_facts
-    from autotrade.environment.sandbox import SandboxLimits
-
-    prompt = build_system_prompt(experiment_facts=_facts())
-    note = _facts()["budgets"]["strategy_container_note"]
+    prompt = build_system_prompt(experiment_facts=_facts(budgets=CONTAINER))
+    note = _facts(budgets=CONTAINER)["budgets"]["strategy_container_note"]
     assert "8 个 CPU" in note and "都设为 8" in note and "内存上限 32 GiB" in note
     assert note in prompt
-    monkeypatch.setattr(
-        experiment_facts,
-        "SandboxLimits",
-        functools.partial(SandboxLimits, cpus=2.5, memory="16g"),
-    )
-    changed = _facts()["budgets"]["strategy_container_note"]
-    assert "2.5 个 CPU" in changed and "都设为 3" in changed and "内存上限 16 GiB" in changed
-    assert build_system_prompt(experiment_facts=_facts()) != prompt
+    changed = _facts(budgets={"strategy_cpus": 2.5, "strategy_memory_bytes": 16 * 1024**3})
+    note = changed["budgets"]["strategy_container_note"]
+    assert "2.5 个 CPU" in note and "都设为 3" in note and "内存上限 16 GiB" in note
+    assert build_system_prompt(experiment_facts=changed) != prompt
 
 
 def test_the_facts_place_every_read_root_in_the_shell_filesystem() -> None:

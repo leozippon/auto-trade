@@ -629,6 +629,42 @@ def test_experiment_gpu_request_reaches_the_formal_strategy_container() -> None:
     )
 
 
+def test_the_arms_boundary_reaches_the_strategy_containers_flags(tmp_path: Path) -> None:
+    """CPUs, memory and the per-call inference limit are the arm's: the docker
+    flags and thread variables of its strategy containers carry what the
+    builder is given, and a builder given none keeps the executor's defaults."""
+
+    default = _strategy_sandbox_from_spec(SandboxSpec(gpu=None), fit_timeout_seconds=3600).limits
+    executor = SandboxLimits()
+    assert (default.cpus, default.memory, default.timeout_seconds) == (
+        executor.cpus,
+        executor.memory,
+        executor.timeout_seconds,
+    )
+    config = _strategy_sandbox_from_spec(
+        SandboxSpec(gpu=None),
+        fit_timeout_seconds=10_800,
+        inference_timeout_seconds=1_080,
+        cpus=16,
+        memory="64g",
+    )
+    limits = config.limits
+    assert (limits.cpus, limits.memory, limits.timeout_seconds, limits.fit_timeout_seconds) == (
+        16.0,
+        "64g",
+        1080.0,
+        10800.0,
+    )
+    package = tmp_path / "output"
+    package.mkdir()
+    with patch.object(DockerStrategyExecutor, "_start"):
+        command = DockerStrategyExecutor(_strategy(package), config).docker_command()
+    assert command[command.index("--cpus") + 1] == "16"
+    assert command[command.index("--memory") + 1] == "64g"
+    assert command[command.index("--memory-swap") + 1] == "64g"
+    assert "OMP_NUM_THREADS=16" in command
+
+
 def test_the_consoles_claim_pins_every_container_of_the_arm() -> None:
     """A spec carrying the console's claim attaches exactly its devices: every
     strategy container, and a session that asks for fewer gets that many of

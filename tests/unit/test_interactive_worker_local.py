@@ -343,6 +343,73 @@ def test_llm_key_puts_every_relay_role_on_the_chosen_key_at_each_start(
 
 
 
+def test_an_arm_without_the_boundary_keys_keeps_todays_containers_and_one_with_them_gets_its_own(
+    tmp_path: Path, monkeypatch
+):
+    """The strategy container's CPUs, memory and per-call inference limit are
+    arm parameters. An arm whose params.json predates them -- every arm created
+    before them, running or resumable -- starts with exactly the executor's
+    defaults in its strategy and session containers; an arm that names them
+    gets them in both, and in the facts its sessions read (through the run
+    manifest, from the evaluator's own limits)."""
+
+    from types import SimpleNamespace
+
+    from autotrade.environment.sandbox import SandboxLimits, SandboxSpec
+    from autotrade.pipelines.research_session import LLMResearchDeveloper
+    from autotrade.pipelines.worker import (
+        _strategy_boundary,
+        _strategy_sandbox_from_spec,
+    )
+    from tests.unit.test_experiment_facts_scope import _facts
+
+    monkeypatch.setenv("LIGHTING_API_KEY", "test-primary")
+    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    path = experiment / "hitl/params.json"
+    params = json.loads(path.read_text(encoding="utf-8"))
+    params.update(dict.fromkeys(("model", "subagent_model", "compact_model"), "DeepSeek-V4.1-Flash"))
+
+    def start(**boundary: object):
+        path.write_text(json.dumps({**params, **boundary}), encoding="utf-8")
+        options = load_worker_options(experiment, repo_root=repo)
+        sandbox = _strategy_sandbox_from_spec(
+            options.agent_sandbox, **_strategy_boundary(options.rolling)
+        )
+        return sandbox.limits, options.agent_sandbox
+
+    limits, session = start()
+    executor = SandboxLimits()
+    assert (limits.cpus, limits.memory, limits.timeout_seconds, limits.fit_timeout_seconds) == (
+        executor.cpus,
+        executor.memory,
+        executor.timeout_seconds,
+        executor.fit_timeout_seconds,
+    )
+    assert (session.cpus, session.memory) == (SandboxSpec().cpus, SandboxSpec().memory)
+
+    limits, session = start(
+        strategy_cpus=16, strategy_memory="64g", strategy_inference_timeout_seconds=1080
+    )
+    assert (limits.cpus, limits.memory, limits.timeout_seconds) == (16.0, "64g", 1080.0)
+    assert (session.cpus, session.memory) == (16.0, "64g")
+    developer = SimpleNamespace(evaluator=SimpleNamespace(sandbox=SimpleNamespace(limits=limits)))
+    budgets = _facts(
+        budgets={
+            "strategy_cpus": LLMResearchDeveloper.strategy_cpus.fget(developer),
+            "strategy_memory_bytes": LLMResearchDeveloper.strategy_memory_bytes.fget(developer),
+            "strategy_inference_timeout_seconds": (
+                LLMResearchDeveloper.decision_timeout_seconds.fget(developer)
+            ),
+        }
+    )["budgets"]
+    assert (budgets["strategy_cpus"], budgets["strategy_memory_bytes"]) == (16.0, 64 * 1024**3)
+    assert budgets["strategy_inference_timeout_seconds"] == 1080.0
+    note = budgets["strategy_container_note"]
+    assert "16 个 CPU" in note and "都设为 16" in note and "内存上限 64 GiB" in note
+    with pytest.raises(ValueError, match="strategy_memory must be a positive Docker memory limit"):
+        start(strategy_memory="64 GB")
+
+
 def test_worker_resolves_mixed_local_and_deepseek_roles_with_real_timeout(
     tmp_path: Path,
     monkeypatch,

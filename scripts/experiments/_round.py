@@ -257,6 +257,9 @@ ROUND_REPORT_KEYS: tuple[str, ...] = (
     "max_llm_calls",
     "max_null_controls",
     "strategy_fit_timeout_seconds",
+    "strategy_inference_timeout_seconds",
+    "strategy_cpus",
+    "strategy_memory",
     "initial_cash",
     # null: the console stamps the boards the initial cash qualifies for.
     "permitted_boards",

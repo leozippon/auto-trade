@@ -8,8 +8,8 @@ text. The round's directive starts with the README's direction paragraph word
 for word and adds the call to explore and the pointer to the closed families;
 nothing before the README's facts names a model, and neither does the
 directive. Both arms are round 20261027's arm on this pack, with their own main
-model, the relay's alternate key, four replays per batch and three times every
-per-arm budget. The README ends
+model, the relay's alternate key, four replays per batch, three times every
+per-arm budget and a strategy container of twice the default CPUs and memory. The README ends
 with guidance the session may ignore. No file the pack's authors wrote cites a
 reading after the research period; the vendored papers and code are other
 people's text, left as published.
@@ -84,12 +84,14 @@ TRIPLED = (
     "max_llm_calls",
     "max_research_minutes",
     "strategy_fit_timeout_seconds",
+    "strategy_inference_timeout_seconds",
 )
 
 
 def test_both_arms_are_round_20261027s_arm_on_this_pack_and_the_alternate_key() -> None:
-    """Their own model, this pack, the alternate key, four legs per batch and
-    three times every per-arm budget; nothing else differs."""
+    """Their own model, this pack, the alternate key, four legs per batch,
+    three times every per-arm budget and a container of 16 CPUs and 64 GiB;
+    nothing else differs."""
     (reference,) = create_round_20261027.ARMS
     base = create_round_20261027.ROUND.request_params(reference)
     tripled = {key: 3 * base[key] for key in TRIPLED}
@@ -100,7 +102,9 @@ def test_both_arms_are_round_20261027s_arm_on_this_pack_and_the_alternate_key() 
         "max_llm_calls": 19_200,
         "max_research_minutes": 7_200,
         "strategy_fit_timeout_seconds": 10_800,
+        "strategy_inference_timeout_seconds": 1_080,
     }
+    assert (base["strategy_cpus"], base["strategy_memory"]) == (8.0, "32g")
     models = {
         "ttt_100k_8y_sol_zgca_20261028": "gpt-6.1-sol",
         "ttt_100k_8y_argon_zgca_20261028": "gemini-4-argon",
@@ -116,6 +120,8 @@ def test_both_arms_are_round_20261027s_arm_on_this_pack_and_the_alternate_key() 
             "research_directive": DIRECTIVE,
             "batch_validate_max_concurrency": 4,
             **tripled,
+            "strategy_cpus": 16,
+            "strategy_memory": "64g",
         }
 
 

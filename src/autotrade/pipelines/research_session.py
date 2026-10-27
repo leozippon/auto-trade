@@ -492,6 +492,22 @@ class LLMResearchDeveloper:
         return float(limits.fit_timeout_seconds)
 
     @property
+    def strategy_cpus(self) -> float:
+        """The formal strategy container's CPU quota, its thread variables' source."""
+
+        sandbox = getattr(self.evaluator, "sandbox", None)
+        limits = getattr(sandbox, "limits", None) or SandboxLimits()
+        return float(limits.cpus)
+
+    @property
+    def strategy_memory_bytes(self) -> int:
+        """The formal strategy container's memory ceiling, in bytes."""
+
+        sandbox = getattr(self.evaluator, "sandbox", None)
+        limits = getattr(sandbox, "limits", None) or SandboxLimits()
+        return int(limits.memory_bytes)
+
+    @property
     def strategy_gpu_count(self) -> int:
         """GPUs attached to the formal executor's strategy container.
 
@@ -856,6 +872,9 @@ class LLMResearchDeveloper:
                     # What ``fit`` may spend those wall clocks on: the formal
                     # strategy container's own GPU allocation.
                     "strategy_gpu_count": self.strategy_gpu_count,
+                    # The CPU quota and memory ceiling of that container.
+                    "strategy_cpus": self.strategy_cpus,
+                    "strategy_memory_bytes": self.strategy_memory_bytes,
                     # How many replays one batch_validate call runs at once,
                     # and so the factor both wall clocks above are scaled by.
                     "batch_validate_max_concurrency": request.batch_validate_max_concurrency,

@@ -100,13 +100,17 @@ class _SessionContext:
 
     @property
     def strategy_limits(self) -> SandboxLimits:
-        """The formal executor's strategy wall clocks, from the worker's own
-        sandbox derivation rather than a second copy of the defaults."""
-        from autotrade.pipelines.worker import _strategy_sandbox_from_spec
+        """The formal executor's strategy boundary (wall clocks, CPUs, memory),
+        from the worker's own sandbox derivation rather than a second copy of
+        the defaults."""
+        from autotrade.pipelines.worker import (
+            _strategy_boundary,
+            _strategy_sandbox_from_spec,
+        )
 
         return _strategy_sandbox_from_spec(
             self.options.agent_sandbox,
-            fit_timeout_seconds=self.rolling.strategy_fit_timeout_seconds,
+            **_strategy_boundary(self.rolling),
         ).limits
 
     @property
@@ -183,6 +187,8 @@ def _research_prompt(
             "strategy_inference_timeout_seconds": limits.timeout_seconds,
             "strategy_fit_timeout_seconds": limits.fit_timeout_seconds,
             "strategy_gpu_count": limits.gpu_count,
+            "strategy_cpus": limits.cpus,
+            "strategy_memory_bytes": limits.memory_bytes,
             "batch_validate_max_concurrency": rolling.batch_validate_max_concurrency,
             "used_before_this_attempt": BudgetUsed().to_record(),
         },
