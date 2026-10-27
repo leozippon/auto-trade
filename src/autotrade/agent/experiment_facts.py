@@ -53,30 +53,20 @@ REPLAY_YEARS_NOTE = (
     "因为它没有测出候选的任何信息——原样重投是合理的。"
 )
 
-# Why a rehearsal at the start of the research period does not size a batch.
-# alpha158_lgbm read 335.7 s off a 3-day smoke and then lost 12 replay-years to
-# fits that ran past the concurrency-scaled cap deep in the same span.
-SMOKE_PROBE_NOTE = (
-    "`smoke_backtest` 默认从研究期开头回放，训练窗随跨度增长的策略在研究期靠后要慢得多；"
-    "提交整期批次之前先用 `start` 指定研究期靠后的一个交易日再冒烟一次，"
-    "拿返回的 `resources.fit_seconds`、`peak_memory_bytes`（测得时才有）对照 `strategy_fit_timeout_seconds`"
-    "（并发放大见 `batch_validate_fit_timeout_note`）与 `strategy_memory_bytes`。"
-    "内存上限没有 swap 余量：越界即容器被 OOM kill（exit 137），该次调用显式失败、"
-    "也拿不到峰值读数，所以峰值要留余量而不是贴着上限跑。"
-)
-
 
 def strategy_container_note(limits: SandboxLimits) -> str:
     """What one candidate's replay runs on, in one passage beside its numbers.
 
-    The CPU quota, thread variables and memory cap are rendered from
-    ``limits`` and ``container_thread_env``, the very code the executor builds
-    each strategy container's flags from, so the passage cannot drift from
-    what a replay gets; the per-arm numbers (cards, batch width) are named by
-    their budgets keys. The structure it states is the executor's: a
-    ``fit``-bearing strategy gets a second container with the same boundary,
-    called before that day's decision (``replay.engine``), and a batch's legs
-    run concurrently, one card each in turn (``session_tools.leg_cards``).
+    A fact, not advice: how to use the cores and cards is the session's call,
+    which a reference pack may suggest. The CPU quota, thread variables and
+    memory cap are rendered from ``limits`` and ``container_thread_env``, the
+    very code the executor builds each strategy container's flags from, so
+    the passage cannot drift from what a replay gets; the per-arm numbers
+    (cards, batch width) are named by their budgets keys. The structure it
+    states is the executor's: a ``fit``-bearing strategy gets a second
+    container with the same boundary, called before that day's decision
+    (``replay.engine``), and a batch's legs run concurrently, one card each in
+    turn (``session_tools.leg_cards``).
     """
 
     threads = container_thread_env(limits.cpus)["OMP_NUM_THREADS"]
@@ -370,8 +360,8 @@ def _budget_facts(
             "strategy_inference_timeout_seconds": budgets.get(
                 "strategy_inference_timeout_seconds"
             ),
-            # The separate wall clock of one fit(context) call, which the
-            # prompts tell the agent to read before moving work into fit.
+            # The separate wall clock of one fit(context) call; a fit past it
+            # fails the whole backtest, as an inference past its own does.
             "strategy_fit_timeout_seconds": budgets.get(
                 "strategy_fit_timeout_seconds"
             ),
@@ -398,8 +388,7 @@ def _budget_facts(
             # will enforce rather than extrapolated across two boundaries.
             "strategy_memory_bytes": limits.memory_bytes,
             # The two containers per candidate, their threads and cards, and
-            # the batch's concurrent legs, in one passage the system prompt
-            # points to when it suggests batching and using the cores and card.
+            # the batch's concurrent legs, in one passage.
             "strategy_container_note": strategy_container_note(limits),
             # Replays one batch_validate call runs at once (the arm's
             # ``batch_validate_max_concurrency``), each with its own strategy
@@ -411,7 +400,6 @@ def _budget_facts(
             # scheduling or host contention to the strategy.
             "batch_validate_max_concurrency": budgets.get("batch_validate_max_concurrency"),
             "batch_validate_fit_timeout_note": BATCH_VALIDATE_FIT_TIMEOUT_NOTE,
-            "smoke_backtest_probe_note": SMOKE_PROBE_NOTE,
             "context_compaction": context_compaction,
         }
     )

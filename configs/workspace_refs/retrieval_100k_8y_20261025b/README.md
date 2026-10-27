@@ -60,3 +60,11 @@
 ## 种子
 
 `pit_views_seed_research_8y_fundanns_20261024`，每个决策视图回看 108 个月：日线（同一行并入每日指标、复权因子与涨跌停价）、逐研究年的 `universe`（名称、交易所、上市日、申万一级）、四张宏观表（`index_daily`、`index_dailybasic`、`index_weight`、`sw_daily`）、财务域十个数据集（`income_vip`、`balancesheet_vip`、`cashflow_vip`、`fina_indicator_vip`、`forecast_vip`、`express_vip`、`dividend`、`fina_audit`、`fina_mainbz_vip`、`disclosure_date`）与公告标题 `anns_d`。没有事件域（资金流、两融、龙虎榜、股东与质押）与分钟线；竞价只从 2025-01-16 起、每天 09:29 才可见，08:30 的决策看不到当天的。
+
+## 建议（可以不采纳）
+
+以下是此前各臂留下的做法与读数，不是要求：怎样做由会话决定，不采纳不影响任何评判。
+
+- **算力。** 策略容器的核、内存与卡见运行事实 `budgets.strategy_container_note`。能按截面或按日成批算的就批量、向量化地算，用满分到的核，方法受益时放上卡：单日省下的时间按约 1,941 个决策日放大，也让 `fit` 与推断离超时更远。案例库与训练窗随回放增长（见上面「随回放增长的状态」），所以提交整期批次之前，可以用 `smoke_backtest` 的 `start` 在研究期靠后的一天再冒烟一次，拿那里的 `fit` 秒数与内存峰值对照上限并留出余量。
+- **模型。** 用不用模型、用哪一个由会话决定，库里的模型与用法见 `output/README.md` 的「Pretrained models」。给标题或案例定义「相似」，嵌入模型最直接（`Qwen3-Embedding-0.6B` 便宜，`Qwen3-Embedding-4B` 更强）；给少量候选对打分可以用重排模型；价量序列可以试 TimesFM；27B 生成模型加载慢、占一张卡的大部分显存，适合每天一批、数量不多的调用。经预训练权重读出的东西都可能带着对研究期的记忆（见上面「预训练权重知道研究期」），值得配一个去掉模型或打乱输入的对照。会话里也可以起本机 `vllm serve` 做离线探查：只听 `127.0.0.1`，用 `setsid` 脱离、三个标准流都重定向到文件，就绪用一条有界的 `curl --retry` 等；它与正式回放共用本臂的卡，回放之前停掉它，或用 `--gpu-memory-utilization` 给回放留出显存。
+- **对照。** 筛选脚本（`source_refs.signal_screen_ref`）可以在花任何回放之前把很多想法筛到少数几个。去掉所登记机制的同一载体作对照，或用 `run_null_control` 的随机同名组合，能说明收益是不是来自这个机制。

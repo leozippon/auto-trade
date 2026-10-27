@@ -46,6 +46,7 @@ from autotrade.environment.tools import (
     FinishSessionTool,
     ReadFileTool,
     SafeWorkspace,
+    SandboxShellTool,
     SearchRoots,
     ToolRegistry,
     ToolResult,
@@ -1360,14 +1361,14 @@ def test_prompt_and_facts_encode_daily_json_and_hidden_stage_boundaries(
 def test_session_prompt_keeps_hard_boundaries_and_leaves_how_tos_mounted():
     prompt = build_system_prompt(experiment_facts={})
     for rule in (
-        "已挂载的事实、数据、起点产物与参考材料都是待检验输入",
         "从日期、路径、元数据和模型常识推断它们的行情",
         "正式回测不能由自建回放替代",
-        "不得用它启动后台任务、sleep/等待包装或轮询状态",
-        # Shell may tidy output/: every replay snapshots and checks the bytes.
-        "包括删除 `output/` 里不再需要的文件",
     ):
         assert rule in prompt
+    # The shell's foreground-only rule and its one exception are the tool's
+    # own description, not a second copy in the prompt.
+    assert "starting work in the background" in SandboxShellTool.spec.description
+    assert "starting work in the background" not in prompt
     assert "修改策略产物" not in prompt
     assert "pyright --project" not in prompt
     assert "pandas.read_parquet" not in prompt
@@ -1499,9 +1500,9 @@ def test_the_prompt_tool_check_fails_on_a_tool_the_session_cannot_register():
 
     registrable = _all_registrable_tool_names()
     referenced = _prompt_tool_tokens(build_system_prompt(experiment_facts={})) & registrable
-    assert "run_null_control" in referenced
-    allowed = set(_SESSION_TOOLS) - {"run_null_control"}
-    assert sorted(referenced - allowed) == ["run_null_control"]
+    assert "step_rollback" in referenced
+    allowed = set(_SESSION_TOOLS) - {"step_rollback"}
+    assert sorted(referenced - allowed) == ["step_rollback"]
 
 
 def _context_runner(llm: ScriptedLLM, **config) -> AgentSessionRunner:

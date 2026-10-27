@@ -12,7 +12,6 @@ from pathlib import Path
 from autotrade.agent.experiment_facts import (
     BATCH_VALIDATE_FIT_TIMEOUT_NOTE,
     SEARCH_ROOT_SHELL_NOTE,
-    SMOKE_PROBE_NOTE,
     build_experiment_facts,
 )
 from autotrade.agent.prompts import build_system_prompt
@@ -311,15 +310,14 @@ def test_the_facts_publish_the_strategy_containers_memory_ceiling() -> None:
     budgets = _facts()["budgets"]
     assert budgets["strategy_memory_bytes"] == SandboxLimits().memory_bytes
     assert budgets["strategy_memory_bytes"] == 32 * 1024**3
-    # And why a rehearsal at the start of the span does not size a batch.
-    assert budgets["smoke_backtest_probe_note"] == SMOKE_PROBE_NOTE
-    assert "start" in SMOKE_PROBE_NOTE
+    # How to probe a batch before sending it is advice a pack may give, not a
+    # run fact.
+    assert "smoke_backtest_probe_note" not in budgets
 
 
 def test_the_container_note_renders_from_the_limits_the_executor_uses(monkeypatch) -> None:
-    """The prompt's suggestion to batch and use the cores and card points at a
-    passage whose numbers are the executor's own limits, not retyped prose:
-    a changed limit changes the prompt the session reads."""
+    """The container passage's numbers are the executor's own limits, not
+    retyped prose: a changed limit changes the prompt the session reads."""
 
     import functools
 
@@ -329,7 +327,7 @@ def test_the_container_note_renders_from_the_limits_the_executor_uses(monkeypatc
     prompt = build_system_prompt(experiment_facts=_facts())
     note = _facts()["budgets"]["strategy_container_note"]
     assert "8 个 CPU" in note and "都设为 8" in note and "内存上限 32 GiB" in note
-    assert note in prompt and "`budgets.strategy_container_note`" in prompt
+    assert note in prompt
     monkeypatch.setattr(
         experiment_facts,
         "SandboxLimits",

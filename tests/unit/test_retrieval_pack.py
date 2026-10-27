@@ -11,13 +11,17 @@ either, and its astra arm on the A100 instance sends what the local astra arm
 sent but for one card instead of two. Rounds 20261027 and 20261027b send
 round 20261026's directive plus one sentence pointing at the record of closed
 families, word for word alike and naming no model, on the instance's card at
-six replays per batch. No pack file cites a reading after the research period.
+six replays per batch. After its facts the README ends with guidance on
+compute, models and controls that the session is free to ignore and the
+system prompt no longer carries. No pack file cites a reading after the
+research period.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
+from autotrade.agent.prompts import PROTOCOL_INSTRUCTION
 from autotrade.environment.llm import MODEL_CHOICES
 from scripts.experiments import (
     create_round_20261026,
@@ -95,6 +99,17 @@ def test_rounds_20261027_add_the_closed_families_and_name_no_model() -> None:
                 params["gpu_count"],
                 params["batch_validate_max_concurrency"],
             ) == (PACK, directive, "primary", 1, 6)
+
+
+def test_the_readme_ends_with_guidance_the_session_may_ignore() -> None:
+    readme = (PACK_DIR / "README.md").read_text(encoding="utf-8")
+    _, guidance = readme.split("\n## 建议（可以不采纳）\n", 1)
+    assert "\n## " not in guidance
+    assert "不是要求" in guidance and "不采纳不影响任何评判" in guidance
+    # What left the system prompt lives here once.
+    for advice in ("向量化", "`smoke_backtest` 的 `start`", "`vllm serve`", "`run_null_control`"):
+        assert advice in guidance, advice
+        assert advice not in PROTOCOL_INSTRUCTION, advice
 
 
 def test_no_pack_file_cites_a_reading_after_the_research_period() -> None:

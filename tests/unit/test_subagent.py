@@ -13,6 +13,7 @@ import pytest
 
 from autotrade.agent import subagent as subagent_module
 from autotrade.agent.prompts import (
+    RESUME_INSTRUCTION,
     SESSION_WORKFLOW_SECTION,
     TOOL_PATH_CHEAT_SHEET,
     TOOL_WRITE_CHEAT_SHEET,
@@ -827,12 +828,12 @@ def test_sessions_without_subagent_still_finish() -> None:
 
 
 def test_session_and_subagent_prompts_keep_roles() -> None:
-    # The pyright how-to assertion lives in test_sandbox_pyright.py.
+    # The pyright how-to assertion lives in test_sandbox_pyright.py. The
+    # sub-agent roles reach the parent through the `agent` schema's role
+    # table, and how to delegate is the parent's own call, so the system
+    # prompt names only the tool.
     parent = build_system_prompt(experiment_facts={})
-    for role in ("`Explore`", "`general-purpose`"):
-        assert role in parent
-    assert "保持自己的上下文精简" in parent
-    assert "`write_file`" in parent
+    assert "`agent`" in parent
     assert "`finish_session`" in parent
     assert "通常优先" not in parent
     for stale in (
@@ -2915,8 +2916,8 @@ def test_agent_description_states_role_capabilities_and_thinking_tiers() -> None
     thinking_field = AGENT_TOOL_SPEC.input_schema["properties"]["thinking"]["description"]
     assert "均为 xhigh" in thinking_field and continuations in thinking_field
     assert "显式给 low/medium" in thinking_field
+    # The call shapes and launch knobs live in the description alone.
     for prompt in (SESSION_WORKFLOW_SECTION,):
-        assert "action=message" in prompt
         assert "xhigh 只给纯文本" not in prompt
         assert "优先 `resume`" not in prompt
     # The role/write matrix reaches the model once per payload, generated from
@@ -3245,7 +3246,6 @@ def test_child_turns_default_to_48_with_grace_wrap_up() -> None:
     # bounded parallel children still beat one long serial child.
     assert "自己模型的完整上下文窗口" in AGENT_TOOL_DESCRIPTION
     assert "并行的有界子代理仍好过一个很长的串行子代理" in AGENT_TOOL_DESCRIPTION
-    assert "并行的有界子代理仍好过一个很长的串行子代理" in SESSION_WORKFLOW_SECTION
 
     busy = ScriptedLLM(
         [
@@ -4373,14 +4373,15 @@ def test_short_child_report_is_delivered_whole_and_no_store_is_explicit() -> Non
     assert len(completed["summary"]) == SUBAGENT_REPORT_MAX_CHARS
 
 
-def test_prompts_carry_the_todo_convention_and_per_launch_knobs() -> None:
+def test_the_prompt_names_the_todo_file_a_resumed_attempt_reads_first() -> None:
+    """A resumed attempt opens by reading ``TODO.md`` and the Step tree, so the
+    prompt says the plan lives there; how to keep it is the Agent's call, and
+    the per-launch knobs are the ``agent`` description's, not the prompt's."""
+
     parent = build_system_prompt(experiment_facts={})
-    for prompt, finish in ((parent, "finish_session"),):
-        assert "`TODO.md`（用 `write_file`/`edit_file` 维护）" in prompt
-        assert "每个任务一行，写明负责方、状态和一句话结果" in prompt
-        assert "上下文被压缩后它是恢复计划的依据" in prompt
-        assert f"`{finish}` 前核对全部条目" in prompt
-    assert "`thinking` 与 `max_turns` 由你按次决定" in SESSION_WORKFLOW_SECTION
+    assert "`TODO.md`" in parent and "计划与进度记在那里" in parent
+    assert "先读 `TODO.md` 与 Step 树" in RESUME_INSTRUCTION
+    assert "max_turns" not in SESSION_WORKFLOW_SECTION
 
 
 class _RecordingLLM:

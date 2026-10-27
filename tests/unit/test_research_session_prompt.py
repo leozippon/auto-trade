@@ -197,7 +197,8 @@ def test_retired_tools_are_absent_from_every_role() -> None:
 
 def test_the_prompt_states_the_research_session_contract() -> None:
     prompt = _full_prompt()
-    role = prompt[: prompt.index("# 研究协议")]
+    stable = prompt.split("# 本会话动态上下文")[0]
+    role = prompt[: prompt.index("# 决策合同")]
     # Purpose: one mechanism on the research period; graduation is decided on
     # later sealed data; adaptation lives inside the artifact.
     for clause in (
@@ -205,36 +206,63 @@ def test_the_prompt_states_the_research_session_contract() -> None:
         "前推期与 Held-out 上被连续回放一次并裁决",
         "滚动重拟合",
         "用多长的历史、多快的节奏由策略自己决定",
-        "不是替代它",
+        # The direction binds what is researched, not how: a pack's advice on
+        # method, models and compute is optional, and beyond it a pack binds
+        # only the data boundary, costs and resource limits.
+        "每个候选都属于这个方向",
+        "方向之外的想法记进收尾 `reason` 的未测项",
+        "包里关于方法、模型与算力的建议可以不采纳",
+        "包的其余文字只在 PIT 与数据边界、交易成本与资源上限上约束本臂",
+        "参考包、研究方向与研究者指令都不能放宽执行合同、决策合同或禁止事项",
     ):
         assert clause in role, clause
-    protocol = prompt[prompt.index("# 研究协议") : prompt.index("# 证据标准")]
+    assert "## 本臂的研究方向（用户注入）\n方向约束研究什么，不约束怎样做" in prompt
+    contract = prompt[prompt.index("# 决策合同") : prompt.index("# 工具与工作方式")]
     for clause in (
-        "`hypothesis` 参数就是有约束力的预登记记录",
-        "调用之后补写的笔记不算预登记",
-        "迭代用子区间，结论用全期",
+        "`freeze`",
+        "`no_edge`",
+        "之后没有别的会话接手",
         '`span="full"`',
-        "冻结只接受完整研究期节点",
-        "`run_null_control` 的随机同名组合对照",
-        "登记为 `control: true`",
-        "`source_refs.signal_screen_ref`",
-        "机制家族指收益来源的经济解释",
-        "同一特征集换个估计器不算",
-        "示例（只示形式）",
-        # Screening saves replay years, not trials, and says so where it is advised.
-        "筛选省的是回放年，不省试验",
-        # The pack's direction binds what is researched, not how; beyond it a
-        # pack is facts, not the arm's contract.
-        "方向约束研究什么，不约束怎样做",
-        "下一轮测方向内一个还没测过的机制",
-        "包不是本臂的合同",
-        "候选不限于包里列出的轴、对照或家族",
-        "除方向之外，包的文字只在 PIT 与数据边界、交易成本与资源上限上约束本臂",
+        "`deadline`",
+        "一条臂至多冻结一次",
+        # Which conditions bind is the acceptance_rules fact alone.
+        "只看运行事实 `acceptance_rules`",
+        "`freeze_gate` 是 `finish_session` 提名时执行的冻结门",
+        "`graded_series` 定义的主动序列",
+        "没列出的条件本臂没有",
+        "`selection_statistics.information_ratio_bar`",
+        # Screening saves replay years, not trials, and has one home.
+        "包括 `source_refs.signal_screen_ref` 的筛选脚本",
+        "按 `offline_trials` 如实申报",
+        "种子的写法见 `output/README.md`",
+        # A node that fails only the deflation is a deliverable by incubation,
+        # and a no_edge names it first.
+        "却仍是本臂的交付",
+        "`freeze_deflated_sharpe_below_threshold`",
+        "运营者可以把它孵化到 Paper 上裁决",
+        "多搜索不会让这个交付变远",
+        "以 `no_edge` 结束时，`reason` 先点名这样的节点",
     ):
-        assert clause in protocol, clause
-    # The rules that bound a session to its pack's axes, family and stopping
-    # lines, and the push to validate the starter first, are gone.
+        assert clause in contract, clause
+    # The hard finalization replaces the system prompt, so it carries the
+    # incubation naming rule itself.
+    assert "freeze_deflated_sharpe_below_threshold" in prompts.HARD_FINALIZATION_SYSTEM_PROMPT
+    # How to research is the Agent's own call, which a reference pack may
+    # suggest: the stable prompt carries no research protocol, evidence
+    # recipe, process quota, delegation style or compute advice, and none of
+    # the rules that bound a session to its pack's axes or a fixed refit pace.
     for retired in (
+        "# 研究协议",
+        "# 证据标准",
+        "# 原则",
+        "至少跑完两轮",
+        "比过对照",
+        "不得再以这个假设冻结",
+        "核心打分器",
+        "向量化",
+        "这是建议，不是要求",
+        "示例（只示形式）",
+        "诚实指的是",
         "下一根登记轴",
         "让位于包",
         "不换家族",
@@ -242,72 +270,14 @@ def test_the_prompt_states_the_research_session_contract() -> None:
         "以包为准",
         "尽早让第一个真正的候选",
         "开放搜索（",
-        # The injected direction binds; it is no longer a "default".
         "默认探索方向",
-        # The history length and refit pace are the strategy's own choice.
         "按季重训",
     ):
         assert retired not in prompt, retired
-    assert "## 本臂的研究方向（用户注入）\n方向约束研究什么，不约束怎样做" in prompt
-    # The core scorer is the main Agent's own work; sub-agents do the routine.
-    assert "核心打分器（把可见数据变成选股分数的那段代码）由你亲自设计并写出" in role
-    # The sections follow the Agent's decisions: what to test, whether a row
-    # is evidence, what to nominate and when to end.
-    evidence = prompt[prompt.index("# 证据标准") : prompt.index("# 决策合同")]
-    for clause in (
-        "`acceptance_rules.graded_series`",
-        "他只做多、不对冲",
-        "持有人却拿不到",
-        "在研究期前后两半与最后两个研究年上各自成立才算改进",
-        "中性化超额约为 0",
-        "半数以上研究年份的主动中性化超额为负",
-        "`excess_percentile` 在 0.5 附近",
-        "`selection_statistics.deflated_sharpe_probability`",
-        "`acceptance_rules.graduation.forward.minimum_detectable_excess`",
-    ):
-        assert clause in evidence, clause
-    contract = prompt[prompt.index("# 决策合同") : prompt.index("# 原则")]
-    for clause in (
-        "`freeze`",
-        "`no_edge`",
-        "之后没有别的会话接手",
-        "`deadline`",
-        "一条臂至多冻结一次",
-        "`acceptance_rules.freeze_gate`",
-        "`acceptance_rules.graduation`",
-        "没列出的条件本臂没有",
-        "`offline_trials` 必须如实申报",
-        "`selection_statistics.information_ratio_bar`",
-        "基准指数涨得最多的几个研究年",
-        "按种子基配对后在至少两个种子基上都为正",
-        # How a strategy writes its seed is the README's.
-        "种子的写法见 `output/README.md`",
-        # The deflated bar governs the freeze, not whether to keep searching.
-        "这道门槛只决定能不能冻结，不决定要不要继续搜索",
-        # A node that fails only the deflation is a deliverable by incubation,
-        # and a no_edge names it first.
-        "只差去膨胀的节点也是本臂的交付，只是走孵化而不是冻结",
-        "`freeze_deflated_sharpe_below_threshold`",
-        "运营者可以孵化它",
-        "以 `no_edge` 结束时，`reason` 先点名这样的节点",
-        # An early finish owes the same account whichever outcome it takes.
-        "无论 `freeze` 还是 `no_edge`，`reason` 都要写明哪些假设未检验",
-        # Honesty is about the report, not about stopping.
-        "诚实指的是 `reason` 如实报告读数、试验数与没测过的东西，不是早停",
-        # The arm's conclusion is the finish reason, not a skill.
-        "本臂的结论与证据写进 `finish_session` 的 `reason`，不另写成 skill",
-        "结束不需要先写 skill",
-    ):
-        assert clause in contract, clause
-    assert "诚实的结果" not in prompt
-    # The hard finalization replaces the system prompt, so it carries the
-    # incubation naming rule itself.
-    assert "freeze_deflated_sharpe_below_threshold" in prompts.HARD_FINALIZATION_SYSTEM_PROMPT
     # Each kind of statement has one home. Which conditions bind and at what
     # threshold is the arm's acceptance_rules fact: the prompt enumerates none
     # and carries no sentence that holds only for arms whose rules list an
     # optional condition, which a resumed older arm would misread.
-    stable = prompt.split("# 本会话动态上下文")[0]
     for statement in (
         "列有",
         "raw_excess_at_cost_stress",
@@ -320,32 +290,30 @@ def test_the_prompt_states_the_research_session_contract() -> None:
     ):
         assert statement not in stable, statement
     # A registration field is defined by its parameter, not here.
+    from autotrade.environment.tools.finish_session import FinishSessionTool
     from autotrade.pipelines.session_tools import BatchValidateTool
 
     offline = BatchValidateTool.spec.input_schema["properties"]["offline_trials"]
     assert "does NOT submit" in offline["description"]
     assert "**没有**提交" not in stable and "不重复申报" not in stable
+    # The early-finish account is enforced by finish_session and stated in its
+    # description; the prompt does not restate it.
+    assert "more than a third" in FinishSessionTool.spec.description
+    assert "三分之一" not in prompt
     # Round 20260927 wrote 296 skills, most re-deriving one data contract,
     # because every finishing text asked for them first; none does now.
     for surface in (prompt, prompts.SESSION_DEFAULT_INSTRUCTION, prompts.WRAP_UP_PROMPT):
         assert "写好 skills" not in surface and "写进 skills" not in surface
     feedback = prompt[prompt.index("# 反馈通道") : prompt.index("# Step 产物树")]
-    assert "只写挂载的运行记忆与数据引用里还没有的知识" in feedback
-    # Batching, the cores and the card are suggested, never required or scored.
-    runtime = prompt[prompt.index("# 执行合同与边界") : prompt.index("# 禁止事项")]
-    assert "`budgets.strategy_container_note`" in runtime
-    assert "这是建议，不是要求，也不计入任何评判" in runtime
+    assert "只写挂载的运行记忆与数据引用里还没有的可复用做法" in feedback
+    assert "本臂的结论与证据写进 `finish_session` 的 `reason`，不另写成 skill" in feedback
     assert "`continue`" not in contract and "PRIOR" not in prompt
     facts = prompt[prompt.index("# 预算与事实") : prompt.index("# 反馈通道")]
     for fact in ("`budgets`", "`research_geometry`", "`arm`", "`artifact_contract`"):
         assert fact in facts, fact
-    feedback = prompt[prompt.index("# 反馈通道") :]
-    assert "留给后来者的只有两处" in feedback
-    # Each shared rule has one home.
-    assert prompt.count("三分之一") == 1
     # Enforced limits and mount paths sit in the schema and the facts.
     assert "500 字符" not in prompt
-    assert "/mnt/tools/screen.py" not in prompt.split("# 本会话动态上下文")[0].split("# 工具与工作方式")[0]
+    assert "/mnt/tools/screen.py" not in stable
 
 
 # Forward and Held-out results never enter a session (agent-design §1.2): the

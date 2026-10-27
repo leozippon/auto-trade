@@ -20,7 +20,6 @@ from autotrade.agent.experiment_facts import (
     BATCH_VALIDATE_FIT_TIMEOUT_NOTE,
     DEADLINE_SECONDS_NOTE,
     REPLAY_YEARS_NOTE,
-    SMOKE_PROBE_NOTE,
     strategy_container_note,
 )
 from autotrade.agent.prompts import (
@@ -149,13 +148,11 @@ def test_research_preview_carries_every_current_prompt_section(tmp_path: Path):
     assert SESSION_DEFAULT_INSTRUCTION.strip() in prompt
     for tool in (
         "batch_validate",
+        "agent",
         "report_issue",
         "skill_feedback",
-        "modification_check",
-        "smoke_backtest",
         "step_rollback",
         "finish_session",
-        "write_skill",
     ):
         assert f"`{tool}`" in prompt
     for retired in RETIRED_WORDING:
@@ -201,7 +198,6 @@ def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path)
         "strategy_container_note": strategy_container_note(limits),
         "batch_validate_max_concurrency": DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
         "batch_validate_fit_timeout_note": BATCH_VALIDATE_FIT_TIMEOUT_NOTE,
-        "smoke_backtest_probe_note": SMOKE_PROBE_NOTE,
     }
     # The whole research period, read at research end.
     geometry = facts["research_geometry"]
