@@ -260,8 +260,8 @@ class _Evaluator:
             for marker in self.contention_markers:
                 if marker in source:
                     contention = GpuMemoryContention(
-                        "CUDA out of memory with 6195 MiB available to the "
-                        "strategy: the device was taken by another process"
+                        "CUDA out of memory with 6195 MiB available to this call: "
+                        "other processes on the card held the rest"
                     )
                     raise _replay_failure(
                         f"fit failed ({marker}): {contention}",
@@ -1238,7 +1238,7 @@ class BatchValidateRunTest(unittest.TestCase):
             self.assertIn("1 failed on the environment", str(error))
             row = error.details["candidates"][0]
             self.assertEqual(row["cause"], "environment")
-            self.assertIn("taken by another process", row["error"])
+            self.assertIn("other processes on the card held the rest", row["error"])
             self.assertEqual(session.backtest.replay_years_used, 0)
             self.assertEqual(error.details["replay_years_used"], 0)
             # The result name it spent is not reused: the dead end keeps it.
@@ -1294,7 +1294,7 @@ class BatchValidateRunTest(unittest.TestCase):
             session.candidate("ok", _strategy("1"))
             gpu, _ok = session.call("gpu", "ok", span="Y2").value["candidates"]
             self.assertEqual(gpu["cause"], "environment")
-            self.assertIn("taken by another process", gpu["error"])
+            self.assertIn("other processes on the card held the rest", gpu["error"])
             self.assertNotIn(note, gpu["error"])
 
     def test_concurrent_legs_each_take_one_card_of_the_arm(self) -> None:

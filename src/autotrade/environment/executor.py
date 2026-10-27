@@ -121,11 +121,11 @@ class _WorkerKilled(BrokenPipeError):
 
 
 class GpuMemoryContention(StrategyExecutionError):
-    """A strategy call ran out of GPU memory because the device was taken.
+    """A strategy call ran out of GPU memory with too little of the card to use.
 
-    The strategy had less than the promised free-memory floor to work with
-    (``environment.gpu.gpu_memory_contention``), so the failure measured the
-    shared card, not the strategy: an environment failure like a timeout.
+    The strategy had less than ``MIN_FREE_GPU_MEMORY_MIB`` to work with
+    (``environment.gpu.gpu_memory_contention``), so the failure is classed as
+    the shared card's, not the strategy's: an environment failure like a timeout.
     """
 
 

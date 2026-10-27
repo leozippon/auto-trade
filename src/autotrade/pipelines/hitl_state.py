@@ -443,8 +443,8 @@ def select_gpus(
 
     ``allow_shared`` lets a caller share cards when too few are free: it then
     gets the ``count`` matching cards no running arm claims that keep the most
-    free memory, each at least the ``MIN_FREE_GPU_MEMORY_MIB`` a GPU strategy
-    is promised (``gpu.shareable_gpus``). Only the Paper's morning run asks for
+    free memory, each with at least ``MIN_FREE_GPU_MEMORY_MIB`` free
+    (``gpu.shareable_gpus``). Only the Paper's morning run asks for
     it: on a shared machine an empty card is often unavailable, and a book
     without its card decides nothing that day. ``GpuUnavailableError`` names
     the free cards and who holds the rest when the request cannot be met, or

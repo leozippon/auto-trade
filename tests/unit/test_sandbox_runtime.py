@@ -1758,7 +1758,7 @@ _CUDA_OOM = (
 def test_a_cuda_out_of_memory_reply_on_a_taken_card_is_an_environment_failure(
     text: str, gpu_indices: list[int], environment: bool
 ):
-    """An out-of-memory error is the strategy's only when it had the promised
+    """An out-of-memory error is the strategy's only when it had at least the
     free-memory floor to work with; below it the shared card failed the call,
     and the attempt must fail and retry instead of scoring the strategy."""
     reply = {"type": "error", "sequence": 0, "error": text}

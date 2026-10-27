@@ -12,11 +12,11 @@ for a device and was given none refuses to start. A host shared with other
 users lists the cards this project may take (``allowed_gpus``); the rest are
 never read at all.
 
-The cards are shared with services outside this project and are never
-reserved, so ``MIN_FREE_GPU_MEMORY_MIB`` is the memory a GPU strategy may
-count on: a CUDA out-of-memory error whose own report shows the strategy had
-less than that to work with is contention (``gpu_memory_contention``), not a
-measurement of the strategy.
+The cards are shared -- by a batch's legs, and with services outside this
+project -- and nothing reserves memory on them. A CUDA out-of-memory error
+whose own report shows the strategy had less than ``MIN_FREE_GPU_MEMORY_MIB``
+to work with is classed as contention (``gpu_memory_contention``), an
+environment failure, rather than a measurement of the strategy.
 """
 
 from __future__ import annotations
@@ -54,9 +54,12 @@ def host_gpu_name() -> str:
 GPU_ALLOW_ENV = "AUTOTRADE_GPU_ALLOW"
 HOST_ENV_FILE = Path(__file__).resolve().parents[3] / ".env"
 
-# The video memory a GPU strategy may count on while it runs. Sized for one
-# quarterly sequence-model refit on a 46 GiB L20 (a measured 9 GiB peak) with
-# headroom for a second concurrent candidate on the same card.
+# The refund threshold for a CUDA out-of-memory failure: a strategy call that
+# had less than this to work with is classed as an environment failure
+# (``gpu_memory_contention``), so a batch leg's replay-years are refunded.
+# Nothing reserves it and no placement reads it. Sized for one quarterly
+# sequence-model refit on a 46 GiB L20 (a measured 9 GiB peak). The Paper's
+# morning run also requires it free on a card it shares (``shareable_gpus``).
 MIN_FREE_GPU_MEMORY_MIB = 12 * 1024
 # Memory a device may show in use and still be idle. Any process that opened a
 # CUDA context on it holds more (an idle strategy container's context is about
@@ -160,7 +163,7 @@ def idle_gpus(*, require_name: str | None = None) -> list[int]:
 def shareable_gpus(*, require_name: str | None = None) -> list[int]:
     """Indexes of the matching devices that keep ``MIN_FREE_GPU_MEMORY_MIB``
     free, the most free first: the cards a GPU strategy may share with
-    somebody else's work and still have the memory it is promised. Whether a
+    somebody else's work and still have that much to work with. Whether a
     caller may share at all is the selection's to decide, as is whether a
     running arm claims the card."""
     rows = [
@@ -192,9 +195,9 @@ def gpu_memory_contention(error_text: str) -> str | None:
     Reads PyTorch's own out-of-memory report, taken by the allocator at the
     failing call: the memory the strategy had to work with is the device's free
     memory plus what this process's PyTorch allocator already holds. Below
-    ``MIN_FREE_GPU_MEMORY_MIB`` the card was taken by someone else and the
-    failure measures the environment; at or above it the strategy exhausted the
-    memory it was promised, which is its own error. A report that does not carry
+    ``MIN_FREE_GPU_MEMORY_MIB`` the rest of the card was held by other processes
+    and the failure is classed as the environment's; at or above it the strategy
+    ran out of the memory it had, which is its own error. A report that does not carry
     both figures (another library, or a changed message format) is not judged
     and stays the strategy's error. Memory held by the same evaluation's other
     strategy container counts as someone else's, because the report cannot tell
@@ -208,7 +211,9 @@ def gpu_memory_contention(error_text: str) -> str | None:
     if available >= MIN_FREE_GPU_MEMORY_MIB:
         return None
     return (
-        f"CUDA out of memory with {available:.0f} MiB available to the strategy "
-        f"(device free plus its own PyTorch pool), below the {MIN_FREE_GPU_MEMORY_MIB} MiB "
-        "floor a GPU strategy is promised: the device was taken by another process"
+        f"CUDA out of memory with {available:.0f} MiB available to this call "
+        f"(device free plus its own PyTorch pool), under {MIN_FREE_GPU_MEMORY_MIB} MiB: "
+        "other processes on the card, the batch's other legs included, held the rest, so "
+        "the failure is classed as the environment's, not the strategy's (a batch_validate "
+        "leg's replay-years are refunded)"
     )
