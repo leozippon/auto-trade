@@ -24,7 +24,7 @@ from autotrade.pipelines.hitl_state import (
     write_control,
 )
 from autotrade.pipelines.ledger import ExperimentLedger
-from autotrade.webui.registry import list_experiments, summarize_experiment
+from autotrade.webui.registry import experiment_listing, summarize_experiment
 from autotrade.webui.server import create_app
 
 
@@ -53,7 +53,7 @@ def test_a_fold_era_params_file_is_flagged_unreadable_and_the_rest_still_list(tm
     root = tmp_path / "experiments"
     _experiment(root, "legacy", _FOLD_ERA)
     _experiment(root, "current", _CURRENT)
-    rows = {row["experiment_id"]: row for row in list_experiments(root)}
+    rows = {row["experiment_id"]: row for row in experiment_listing(root)["experiments"]}
     assert rows["legacy"]["state"] == "unreadable"
     assert "UnsupportedParamsError" in str(rows["legacy"]["error"])
     assert rows["current"]["state"] == "completed"

@@ -1,7 +1,3 @@
-# Consolidated unit tests: test_data_sources_tushare.py
-
-
-# Source: test_tushare_download_update_guards.py
 import argparse
 import importlib.util
 import io
@@ -6617,8 +6613,6 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(len(frame), 1)
         self.assertEqual(frame.loc[0, "title"], "标题")
 
-
-# Source: test_tushare_intraday_by_date.py
 
 def load_tushare_data_module():
     return types.SimpleNamespace(

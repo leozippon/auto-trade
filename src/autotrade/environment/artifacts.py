@@ -233,15 +233,6 @@ class FilesystemArtifactStore:
         models = directory / "models"
         return SimpleNamespace(revision_id=revision_id, output_path=output, models_path=models if models.is_dir() else None)
 
-    def revision_ids(self) -> list[str]:
-        """Every revision the store holds, in id order."""
-
-        return sorted(
-            directory.name
-            for directory in self.revisions_root.iterdir()
-            if (directory / "output").is_dir()
-        )
-
     def _intern(self, directory: Path) -> list[dict[str, object]]:
         """Store the revision's files by content hash and link the tree to them.
 

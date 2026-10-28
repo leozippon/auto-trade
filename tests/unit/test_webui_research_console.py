@@ -35,7 +35,7 @@ from autotrade.webui.registry import (
     ENDING_STATES,
     best_experiment,
     experiment_detail,
-    list_experiments,
+    experiment_listing,
     summarize_experiment,
 )
 from autotrade.webui.server import create_app
@@ -278,7 +278,7 @@ def test_every_way_an_arm_can_end_reads_as_one_ending_with_a_reason(tmp_path: Pa
         ("running", "research"),
     ):
         build_arm(tmp_path, experiment_id, stage)
-    rows = {row["experiment_id"]: row for row in list_experiments(tmp_path)}
+    rows = {row["experiment_id"]: row for row in experiment_listing(tmp_path)["experiments"]}
     assert rows["running"]["ending"] is None
     endings = {name: rows[name]["ending"] for name in ENDING_STATES}
     assert {name: ending["state"] for name, ending in endings.items()} == {
@@ -306,7 +306,7 @@ def test_every_way_an_arm_can_end_reads_as_one_ending_with_a_reason(tmp_path: Pa
     assert endings["environment_blocked"]["reason"] == ENVIRONMENT_BLOCKED_REASON
     assert endings["broken"]["reason"] == "RuntimeError: sandbox image is gone"
     # The homepage lists what can still run first, then the endings in order.
-    listed = [row["experiment_id"] for row in list_experiments(tmp_path)]
+    listed = [row["experiment_id"] for row in experiment_listing(tmp_path)["experiments"]]
     assert listed[-len(ENDING_STATES) :] == list(ENDING_STATES)
     assert "running" in listed[: -len(ENDING_STATES)]
     # The detail page reads the same projection as the card.
@@ -325,7 +325,7 @@ def test_the_home_list_flags_a_blocked_arm_and_an_unresolved_issue(tmp_path: Pat
     ended = build_arm(tmp_path, "ended", "no_deliverable")
 
     def attention() -> dict[str, object]:
-        rows = {row["experiment_id"]: row for row in list_experiments(tmp_path)}
+        rows = {row["experiment_id"]: row for row in experiment_listing(tmp_path)["experiments"]}
         return {name: rows[name]["attention"] for name in ("blocked", "stopped", "ended")}
 
     assert attention() == {
@@ -383,7 +383,7 @@ def test_a_withdrawn_graduation_reads_as_a_failure_everywhere(tmp_path: Path) ->
         )
     )
     arms = {"graduated", "refused", "withdrawn", "no_edge"}
-    rows = [row for row in list_experiments(tmp_path) if row["experiment_id"] in arms]
+    rows = [row for row in experiment_listing(tmp_path)["experiments"] if row["experiment_id"] in arms]
     withdrawn = next(row for row in rows if row["experiment_id"] == "withdrawn")
     # One ending word with the refusals; the reason says it had graduated and
     # why it no longer has, in the void's first sentence.
@@ -499,10 +499,10 @@ def test_the_listing_rederives_a_row_only_when_its_files_change(
         return summarize(directory)
 
     monkeypatch.setattr(registry, "summarize_experiment", counting)
-    first = {row["experiment_id"]: row for row in list_experiments(root)}
+    first = {row["experiment_id"]: row for row in experiment_listing(root)["experiments"]}
     assert sorted(derived) == ["ended", "running"]
     derived.clear()
-    second = {row["experiment_id"]: row for row in list_experiments(root)}
+    second = {row["experiment_id"]: row for row in experiment_listing(root)["experiments"]}
     assert derived == ["running"]
     assert second["ended"] == first["ended"]
     # The status changing under the arm reaches the very next poll.
@@ -511,7 +511,7 @@ def test_the_listing_rederives_a_row_only_when_its_files_change(
         {"schema_version": 1, "pid": 999_999_999, "state": "failed", "error": "RuntimeError: boom"},
     )
     derived.clear()
-    third = {row["experiment_id"]: row for row in list_experiments(root)}
+    third = {row["experiment_id"]: row for row in experiment_listing(root)["experiments"]}
     assert sorted(derived) == ["ended", "running"]
     assert third["ended"]["ending"] == {"state": "broken", "reason": "RuntimeError: boom"}
 
@@ -570,7 +570,7 @@ def test_the_listing_carries_the_budget_and_the_research_outcome(tmp_path: Path)
     judged_traces.mkdir(parents=True)
     (judged_traces / "run_research.jsonl").write_text('{"event_type": "session_start"}\n', encoding="utf-8")
     assert experiment_detail(tmp_path, "judged")["sessions"][0]["record"]["trace"] is True
-    rows = {row["experiment_id"]: row for row in list_experiments(tmp_path)}
+    rows = {row["experiment_id"]: row for row in experiment_listing(tmp_path)["experiments"]}
     assert rows["live"]["budget"] == {
         "inference_seconds": 3600.0,
         "llm_calls": 6400.0,
@@ -612,7 +612,7 @@ def test_a_terminated_session_shows_what_it_spent_and_no_record(tmp_path: Path) 
     (trace_dir / "run_research_cut.jsonl").write_text(
         json.dumps({"event_type": "llm_call", "budget_used": block}) + "\n", encoding="utf-8"
     )
-    row = {row["experiment_id"]: row for row in list_experiments(tmp_path)}["cut"]
+    row = {row["experiment_id"]: row for row in experiment_listing(tmp_path)["experiments"]}["cut"]
     detail = experiment_detail(tmp_path, "cut")
     assert (row["state"], row["worker_alive"], row["budget_used"]) == ("terminated", False, block)
     assert detail["budget_used"] == block
@@ -652,7 +652,7 @@ def test_the_listing_names_the_research_curve_and_the_replay_its_thresholds(tmp_
     build_arm(tmp_path, "researching", "research")
     build_arm(tmp_path, "frozen", "sealed")
     build_arm(tmp_path, "judged", "graduated")
-    rows = {row["experiment_id"]: row for row in list_experiments(tmp_path)}
+    rows = {row["experiment_id"]: row for row in experiment_listing(tmp_path)["experiments"]}
     assert rows["researching"]["research_result"] is None
     frozen_ref = _records(tmp_path / "frozen")[0]["frozen"]["research_result_ref"]
     assert rows["frozen"]["research_result"] == Path(str(frozen_ref)).parent.name
@@ -1105,7 +1105,7 @@ def test_a_fold_era_plan_is_listed_as_unreadable(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     build_arm(tmp_path, "current", "research")
-    rows = {row["experiment_id"]: row for row in list_experiments(tmp_path)}
+    rows = {row["experiment_id"]: row for row in experiment_listing(tmp_path)["experiments"]}
     assert rows["legacy"]["state"] == "unreadable"
     assert rows["current"]["stage"] == "research"
 
@@ -1122,7 +1122,7 @@ def test_only_a_graduate_is_the_best_experiment(tmp_path: Path) -> None:
         ("graduated", "graduated"),
     ):
         build_arm(tmp_path, experiment_id, stage)
-    rows = list_experiments(tmp_path)
+    rows = experiment_listing(tmp_path)["experiments"]
     assert best_experiment(rows) == {"experiment_id": "graduated"}
     # Every other ending is an arm the pipeline refused: with no graduate the
     # homepage crowns nobody, whatever bound the refused arm carries.
@@ -1149,7 +1149,7 @@ def test_a_running_arm_is_never_the_best_experiment(tmp_path: Path) -> None:
 
     build_arm(tmp_path, "early", "research", alive=True)
     build_arm(tmp_path, "sealed", "sealed", alive=True)
-    rows = list_experiments(tmp_path)
+    rows = experiment_listing(tmp_path)["experiments"]
     assert best_experiment(rows) is None
     listed = TestClient(create_app(tmp_path, tmp_path)).get("/api/experiments").json()
     assert listed["best"] is None
@@ -1280,7 +1280,7 @@ def test_the_listing_carries_the_freeze_and_the_best_candidate_so_far(
     build_arm(tmp_path, "researching", "research")
     build_arm(tmp_path, "frozen", "sealed")
     build_arm(tmp_path, "fresh", "created")
-    rows = {row["experiment_id"]: row for row in list_experiments(tmp_path)}
+    rows = {row["experiment_id"]: row for row in experiment_listing(tmp_path)["experiments"]}
     assert rows["researching"]["frozen_session"] is None
     assert rows["frozen"]["frozen_session"] == "research"
     # An arm without a recorded session has no record to read a candidate off.
@@ -1536,11 +1536,11 @@ def test_an_arm_carrying_the_retired_switches_reads_as_one_without_them(tmp_path
 
     build_arm(tmp_path, "current", "research")
     written(build_arm(tmp_path, "legacy", "research"), dict.fromkeys(RETIRED_SWITCHES, False))
-    rows = {row["experiment_id"]: row for row in list_experiments(tmp_path)}
+    rows = {row["experiment_id"]: row for row in experiment_listing(tmp_path)["experiments"]}
     assert rows["legacy"].get("state") != "unreadable"
     assert plan("legacy") == plan("current")
     assert not RETIRED_SWITCHES & set(plan("legacy"))
 
     written(build_arm(tmp_path, "unknown", "research"), {"require_heldout_magic": True})
-    unknown = {row["experiment_id"]: row for row in list_experiments(tmp_path)}["unknown"]
+    unknown = {row["experiment_id"]: row for row in experiment_listing(tmp_path)["experiments"]}["unknown"]
     assert unknown["state"] == "unreadable"

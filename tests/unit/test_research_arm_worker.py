@@ -657,10 +657,8 @@ def test_an_interrupted_llm_session_resumes_with_its_summary_budget_and_nodes(
     store = FilesystemArtifactStore(experiment / "artifacts" / "strategy")
     manifests = sorted(
         (
-            json.loads(
-                (store.revisions_root / revision_id / REVISION_MANIFEST_FILE).read_text(encoding="utf-8")
-            )
-            for revision_id in store.revision_ids()
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in store.revisions_root.glob(f"*/{REVISION_MANIFEST_FILE}")
         ),
         key=lambda manifest: str(manifest["created_at"]),
     )

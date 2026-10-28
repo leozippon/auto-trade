@@ -17,7 +17,7 @@ from pathlib import Path
 from autotrade.environment.runtime import utc_now_iso
 from autotrade.pipelines.ledger import ExperimentLedger, verdict_void
 from autotrade.pipelines.lineage import extract_lineage
-from autotrade.webui.registry import ARCHIVED_NAME, experiment_listing, list_experiments
+from autotrade.webui.registry import ARCHIVED_NAME, experiment_listing
 from scripts.dev.check_verdicts import current_arms
 from tests.unit.paper_book_fixture import paper_root, write_book_record
 from tests.unit.test_lineage import RESEARCH_END, RESEARCH_START, _arm
@@ -44,7 +44,7 @@ def _archive(tmp_path: Path, *arguments: str) -> subprocess.CompletedProcess[str
 
 
 def _listed(root: Path) -> list[str]:
-    return sorted(row["experiment_id"] for row in list_experiments(root))
+    return sorted(row["experiment_id"] for row in experiment_listing(root)["experiments"])
 
 
 def test_an_arm_holding_anything_live_is_refused_and_nothing_changes(tmp_path: Path) -> None:

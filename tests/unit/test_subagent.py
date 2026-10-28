@@ -60,10 +60,7 @@ from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.environment.tools import (
     CommandResult,
     EditFileTool,
-    GlobTool,
-    GrepTool,
     ModificationCheckTool,
-    ReadFileTool,
     SafeWorkspace,
     SandboxShellTool,
     SearchRoots,
@@ -80,10 +77,6 @@ from autotrade.pipelines.research_session import (
 )
 
 _STRATEGY = "def generate_orders(context):\n    return []\n"
-
-
-def _readonly_tools(roots: SearchRoots) -> list[object]:
-    return [ReadFileTool(roots), GrepTool(roots), GlobTool(roots)]
 
 
 def _session_config(**kwargs: object) -> AgentSessionConfig:

@@ -305,10 +305,6 @@ def version_dir(path: Path) -> Path:
     return ds.parent.parent / VERSION_ROOT_NAME / ds.name / partition_id(path)
 
 
-def version_root(raw_dir: Path) -> Path:
-    return Path(raw_dir).parent / VERSION_ROOT_NAME
-
-
 def _version_stamp(instant: str) -> str:
     return datetime.fromisoformat(instant).astimezone(UTC).strftime("%Y%m%dT%H%M%S%fZ")
 

@@ -540,9 +540,7 @@ def _verdict_view(
     return {**verdict, "void": void}
 
 
-def _paper_candidate_view(
-    directory: Path, records: list[dict[str, object]]
-) -> dict[str, object] | None:
+def _paper_candidate_view(records: list[dict[str, object]]) -> dict[str, object] | None:
     """The frozen artifact a graduate's Paper book is opened from."""
     candidate = paper_candidate(records)
     if candidate is None:
@@ -587,7 +585,7 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                 "ending": ending,
                 "attention": arm_attention(identity, directory, ending),
                 "forward": forward,
-                "paper_candidate": _paper_candidate_view(directory, records),
+                "paper_candidate": _paper_candidate_view(records),
             }
         )
     except Exception as exc:  # noqa: BLE001 - broken experiments remain inspectable and deletable
@@ -782,13 +780,6 @@ def _listing(
         repr((_PROCESS_NONCE, archived, sorted(kept), sorted(shelved))).encode()
     ).hexdigest()[:16]
     return rows, fresh, digest, len(shelved)
-
-
-def list_experiments(root: Path) -> list[dict[str, object]]:
-    """Every experiment not archived, newest first inside each
-    :func:`_ending_rank` group."""
-
-    return _listing(Path(root))[0]
 
 
 def experiment_listing(

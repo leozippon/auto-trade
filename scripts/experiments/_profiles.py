@@ -2,10 +2,10 @@
 
 A round file is its arms and their directives. The values several rounds share
 -- the eight-year geometry and dataset selection a seed was prebuilt for, the
-graduation bars, the round-level parameters, the hosted roles of a model pair,
-the lineage that grows as the arms searching one baseline close -- live here,
-and a round imports them from here and from `_round`, never from another round
-file, so a round can close without its values moving.
+graduation bars, the round-level parameters, the lineage that grows as the
+arms searching one baseline close -- live here, and a round imports them from
+here and from `_round`, never from another round file, so a round can close
+without its values moving.
 
 Arms have been created under every value below. A round that needs another
 value adds a new name rather than editing one in place.
@@ -82,89 +82,6 @@ FUND_TITLE_EIGHT_YEAR_100K: dict[str, object] = {**FUND_EIGHT_YEAR_100K, **FUND_
 # Its seed at snapshot cache format 14 (observed-era visibility) on release
 # b50c220f... (logs/data/seed_8y_fundanns_20261024/).
 FUND_TITLE_PIT_VIEWS_SEED = "data/pit_views_seed_research_8y_fundanns_20261024"
-
-# The five-year geometry (round 20261015): research on the five July-June years
-# from 2020-07, when the events domain begins, with a 72-month window (the
-# research years plus one warm-up year, as the four- and eight-year windows
-# have), the fundamentals domain (default ten), the announcement titles, the
-# eight-year surface's four macro tables, and the events domain: its default
-# fourteen datasets plus the two top-ten holder tables, which are complete
-# only as a union (docs/data-documentation.md §4), and the famous-trader seats.
-# The gates are GATES unchanged: a positive-year share of 0.75 already asks for
-# four of five years.
-FIVE_YEAR: dict[str, object] = {
-    **EIGHT_YEAR,
-    "research_start": "20200701",
-    "window_months": 72,
-    "include_fundamentals": True,
-    "include_events": True,
-    "events_datasets": [
-        "margin",
-        "margin_detail",
-        "moneyflow",
-        "cyq_perf",
-        "bak_daily",
-        "block_trade",
-        "stk_holdernumber",
-        "stk_holdertrade",
-        "new_share",
-        "share_float_complete",
-        "top_list",
-        "top_inst",
-        "limit_list_d",
-        "kpl_list",
-        "top10_holders",
-        "top10_floatholders",
-        "hm_detail",
-    ],
-    "include_text": True,
-    "text_datasets": ["anns_d"],
-}
-
-# Round 20261005's 100k bars on the five-year geometry.
-FIVE_YEAR_100K: dict[str, object] = {**FUND_EIGHT_YEAR_100K, **FIVE_YEAR}
-
-# Its seed: the same selection at snapshot cache format 14 (observed-era
-# visibility) on release eff3a1f9... (logs/data/seed_5y_full_20261024/).
-FIVE_YEAR_FIXED_PIT_VIEWS_SEED = "data/pit_views_seed_research_5y_full_20261024"
-
-# The hosted arm of a pair: main session, sub-agents and compaction on MiMo, the
-# compaction threshold pinned to the local arms' value so both compact alike.
-MIMO: dict[str, object] = {
-    "model": "mimo-v2.6-flash",
-    "subagent_model": "mimo-v2.6-flash",
-    "compact_model": "mimo-v2.6-flash",
-    "compact_token_threshold": 221_184,
-}
-
-# The title family's first stage: round 20261012's incentive-draft arms, the
-# 100k pair and the 500k arm. A later lane on the announcement titles over the
-# same eight years inherits all three; the console reads them only once they
-# have closed, so such an arm waits for the last of them.
-INCDRAFT_LINEAGE = [
-    "incdraft_100k_8y_qwen_20261012",
-    "incdraft_100k_8y_mimo_20261012",
-    "incdraft_500k_8y_qwen_20261012",
-]
-# Plus the two lanes that read the same titles beside the drafts and have
-# closed: round 20261012d's commitment-event map and round 20261012c's title
-# ranker. The title family through its second stage (round 20261013).
-TITLE_LINEAGE = [
-    *INCDRAFT_LINEAGE,
-    "titlemap_100k_8y_mimo_20261012",
-    "titlerank_100k_8y_qwen_20261012",
-]
-# Plus round 20261013's board-matched rerun and instrument split of the drafts:
-# the company-commitment titles through their third stage (round 20261014).
-COMMITMENT_LINEAGE = [*TITLE_LINEAGE, "incdraft2_100k_8y_qwen_20261013"]
-# Plus round 20261014's commitment arm, which selected the ESOP-draft book: the
-# searches that chose both Paper books, `b30` (incdraft_100k_8y_qwen_20261012)
-# and `esop60` (open_commit_100k_8y_qwen_20261014), the fixed sleeves of round
-# 20261015's ensemble arm.
-SLEEVE_LINEAGE = [*COMMITMENT_LINEAGE, "open_commit_100k_8y_qwen_20261014"]
-# Plus round 20261015's ensemble arm, which searched a third sleeve beside the
-# same two and closed: the lineage of a later sleeve search (round 20261008b).
-ENSEMBLE_LINEAGE = [*SLEEVE_LINEAGE, "open_ensemble_100k_8y_qwen_20261015"]
 
 # The four arms of rounds 20261014c and 20261014d that tested hierarchical
 # continual memory on a numeric model (one pack, nine full-span legs replayed

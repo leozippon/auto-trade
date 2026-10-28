@@ -1,7 +1,3 @@
-# Consolidated unit tests: test_environment.py
-
-
-# Source: test_auction_correction.py
 import json
 import tempfile
 import unittest
@@ -110,8 +106,6 @@ class AuctionCorrectionTest(unittest.TestCase):
         )
 
 
-
-# Source: test_pit_store.py
 class PITDataStoreTest(unittest.TestCase):
     def test_pit_store_handles_reversed_ranges_without_partition_reads(self):
         with tempfile.TemporaryDirectory() as tmp:

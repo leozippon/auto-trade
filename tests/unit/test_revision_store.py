@@ -39,6 +39,10 @@ def _working_artifact(root: Path, *, strategy: str = STRATEGY) -> tuple[Path, Pa
     return output, models
 
 
+def _revision_ids(store: FilesystemArtifactStore) -> list[str]:
+    return sorted(path.name for path in store.revisions_root.iterdir())
+
+
 def _manifest(store: FilesystemArtifactStore, revision_id: str) -> dict:
     """The manifest the store wrote beside the revision; there is no read API."""
 
@@ -113,7 +117,7 @@ def test_a_revision_manifest_records_its_parent_and_every_file_digest(tmp_path: 
         assert entry["size"] == object_path.stat().st_size
 
     assert _manifest(store, parent.revision_id)["parent_revision_id"] is None
-    assert store.revision_ids() == ["revision_child", "revision_parent"]
+    assert _revision_ids(store) == ["revision_child", "revision_parent"]
 
 
 def test_recorded_revisions_survive_the_end_of_session_prune(tmp_path: Path):
@@ -141,7 +145,7 @@ def test_recorded_revisions_survive_the_end_of_session_prune(tmp_path: Path):
 
     store.prune_superseded_frozen(keep_frozen_ids=("artifact_keep",))
 
-    assert store.revision_ids() == ["revision_a", "revision_b"]
+    assert _revision_ids(store) == ["revision_a", "revision_b"]
     assert store.revision("revision_a").output_path.joinpath("main.py").read_text(
         encoding="utf-8"
     ) == STRATEGY
@@ -216,7 +220,7 @@ def test_a_revision_written_before_the_object_store_stays_readable(tmp_path: Pat
     store.create_revision(output, models_path=models, revision_id="revision_modern")
 
     assert not (legacy / REVISION_MANIFEST_FILE).exists()
-    assert store.revision_ids() == ["revision_legacy", "revision_modern"]
+    assert _revision_ids(store) == ["revision_legacy", "revision_modern"]
     record = store.revision("revision_legacy")
     assert record.output_path.joinpath("main.py").read_text(encoding="utf-8") == STRATEGY
     assert record.models_path == legacy / "models"

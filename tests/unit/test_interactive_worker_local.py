@@ -42,8 +42,6 @@ from autotrade.pipelines.worker import (
 from autotrade.webui.manager import ExperimentManager
 from tests.unit.gpu_probe import stubbed_gpu_probe
 
-_FOLD_DELEGATION_ROLES = ("Explore", "general-purpose")
-
 
 def _experiment(
     tmp_path: Path, *, developer_mode: str = "baseline", max_replay_years: int = 1

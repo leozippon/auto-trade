@@ -332,7 +332,7 @@ class VersionedPartitionTest(unittest.TestCase):
     def test_releases_carry_observations_and_never_versions(self) -> None:
         self.publish(rows(("A", "20261001", 1.0)))
         self.publish(rows(("A", "20261001", 2.0)))
-        self.assertTrue(versions.version_root(self.raw).is_dir())
+        self.assertTrue(versions.version_dir(self.path).is_dir())
         release = self.root / "release" / "raw"
         research_release._clone_tree(self.raw, release, kind="raw")
         cloned = release / "repurchase"
