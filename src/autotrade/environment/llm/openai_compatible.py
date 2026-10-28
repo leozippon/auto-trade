@@ -15,6 +15,7 @@ import os
 import queue
 import re
 import socket
+import ssl
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -797,6 +798,20 @@ class OpenAICompatibleProxy:
                 self._bounded_runtime_error(
                     self._redact_runtime_details(
                         f"provider connection closed mid-response: {type(exc).__name__}: {exc}"
+                    )
+                ),
+                retryable=True,
+            )
+        if isinstance(exc, (ConnectionError, ssl.SSLEOFError)):
+            # The connection dropped under the call -- reset, aborted, refused,
+            # or a TLS session cut without close_notify ("EOF occurred in
+            # violation of protocol") -- a transport fault the relay clears on
+            # the next attempt, retried like a 5xx. A certificate or other TLS
+            # configuration error is not one and stays final below.
+            return LLMProxyError(
+                self._bounded_runtime_error(
+                    self._redact_runtime_details(
+                        f"provider connection dropped: {type(exc).__name__}: {exc}"
                     )
                 ),
                 retryable=True,

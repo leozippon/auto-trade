@@ -3,6 +3,7 @@ from __future__ import annotations
 import http.client
 import json
 import random
+import ssl
 import string
 import tempfile
 import threading
@@ -1065,6 +1066,39 @@ def test_transient_failures_back_off_exponentially_before_each_retry():
     assert proxy.complete([ChatMessage("user", "hello")]).content == "ok"
     assert len(transport.requests) == 4
     assert delays == [2.0, 4.0, 8.0]
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        ssl.SSLEOFError(8, "EOF occurred in violation of protocol (_ssl.c:2423)"),
+        ConnectionResetError(104, "Connection reset by peer"),
+        http.client.RemoteDisconnected("Remote end closed connection without response"),
+    ],
+)
+def test_a_dropped_connection_is_retried_and_the_call_completes(fault: Exception):
+    """A relay that drops the connection (TLS EOF, reset, disconnect) answers
+    the next attempt: the gateway retries with its backoff and the logical
+    call returns, so the runner sees one successful call and its
+    consecutive-failure streak resets instead of counting. A certificate error
+    is not a dropped connection and stays final."""
+    transport = FakeTransport([fault, fault, _response({"content": "ok"})])
+    delays: list[float] = []
+    proxy = DeepSeekProxy(
+        make_config(max_retries=3, retry_backoff_seconds=2.0, timeout_seconds=600),
+        transport=transport,
+        sleep=delays.append,
+    )
+    assert proxy.complete([ChatMessage("user", "hello")]).content == "ok"
+    assert len(transport.requests) == 3
+    assert delays == [2.0, 4.0]
+    certificate = ssl.SSLCertVerificationError(1, "certificate verify failed")
+    transport = FakeTransport([certificate, _response({"content": "ok"})])
+    proxy = DeepSeekProxy(make_config(max_retries=3, retry_backoff_seconds=0), transport=transport)
+    with pytest.raises(LLMProxyError) as caught:
+        proxy.complete([ChatMessage("user", "hello")])
+    assert caught.value.retryable is False
+    assert len(transport.requests) == 1
 
 
 def test_context_overflow_shrink_retries_without_backoff():
