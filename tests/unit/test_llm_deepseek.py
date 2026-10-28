@@ -16,7 +16,6 @@ import pytest
 
 from autotrade.environment.llm import (
     CONTEXT_OUTPUT_TOKEN_MARGIN,
-    LEGACY_LOCAL_QWEN_MODEL,
     LOCAL_QWEN_MODEL,
     MODEL_CHOICES,
     ChatMessage,
@@ -1790,25 +1789,6 @@ def test_model_factory_reads_local_endpoint_and_key_from_export_env(tmp_path: Pa
         == "bounded"
     )
     assert transport.requests[0][2]["max_tokens"] == 8_000
-
-
-def test_legacy_local_model_alias_builds_canonical_gateway(tmp_path: Path):
-    path = tmp_path / ".env"
-    path.write_text("VLLM_API_KEY=local-secret\n", encoding="utf-8")
-
-    proxy = build_model_gateway(
-        LEGACY_LOCAL_QWEN_MODEL,
-        env_file=path,
-        conversation_log_dir=tmp_path / "logs",
-    )
-
-    assert LEGACY_LOCAL_QWEN_MODEL not in MODEL_CHOICES
-    assert model_profile(LEGACY_LOCAL_QWEN_MODEL) == model_profile(LOCAL_QWEN_MODEL)
-    assert proxy.model == LOCAL_QWEN_MODEL
-    assert proxy.config.model == LOCAL_QWEN_MODEL
-    assert proxy._conversation_log_path("2026-08-27T00:00:00+00:00").parent == (
-        tmp_path / "logs" / "vllm" / LOCAL_QWEN_MODEL
-    )
 
 
 def test_model_factory_reads_deepseek_endpoint_from_fixed_env_key(tmp_path: Path):

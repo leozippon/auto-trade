@@ -38,7 +38,6 @@ from autotrade.environment.llm import (
     LOCAL_QWEN_MODEL,
     LLMProxy,
     build_model_gateway,
-    canonicalize_model_name,
     effective_max_output_tokens,
     model_profile,
 )
@@ -236,16 +235,15 @@ _ALLOWED_PARAMS = {
 
 # The experiment-level ``reasoning_effort`` offers exactly the levels that are
 # distinct on the wire for the local Qwen profile (its chat template knows
-# low/medium/xhigh; ``high`` was always sent as ``xhigh``). The legacy aliases
-# stay readable so existing params.json files keep launching.
+# low/medium/xhigh; ``high`` was always sent as ``xhigh``).
 REASONING_EFFORTS = ("low", "medium", "xhigh")
 DEFAULT_REASONING_EFFORT = "xhigh"
-LEGACY_REASONING_EFFORTS = {"high": "xhigh", "max": "xhigh"}
 
-# Historical snapshots may contain these former operator overrides. They are
-# deliberately ignored rather than interpreted or exposed: provider endpoints
-# and credentials now come only from the trusted model profile's fixed
-# environment keys, so no experiment parameter can redirect either.
+# Former operator overrides of the provider endpoint and credential. Endpoints
+# and credentials come only from the trusted model profile's fixed environment
+# keys, so no experiment parameter can redirect either: the allowed-parameter
+# check refuses these like any unknown key, and the CLI names them in its own
+# refusal.
 NON_PERSISTABLE_PARAMS = frozenset({"llm_api_key_env", "llm_base_url"})
 
 
@@ -448,9 +446,6 @@ def resolve_worker_options(
     without a named seed the release is not known until the pin, and that
     check waits for it. Every parameter check runs either way.
     """
-    params = {
-        key: value for key, value in params.items() if key not in NON_PERSISTABLE_PARAMS
-    }
 
     def knob(name: str) -> object:
         """One rolling-config knob, defaulted from the dataclass.
@@ -1385,15 +1380,9 @@ def _llm_settings(
     )
     if repository != env_file and repository not in env_file.parents:
         raise ValueError("llm_env_file must stay inside the repository")
-    fold_model = canonicalize_model_name(
-        str(params.get("model") or params.get("llm_model") or LOCAL_QWEN_MODEL)
-    )
-    subagent_model = canonicalize_model_name(
-        str(params.get("subagent_model") or fold_model)
-    )
-    compact_model = canonicalize_model_name(
-        str(params.get("compact_model") or LOCAL_QWEN_MODEL)
-    )
+    fold_model = str(params.get("model") or params.get("llm_model") or LOCAL_QWEN_MODEL)
+    subagent_model = str(params.get("subagent_model") or fold_model)
+    compact_model = str(params.get("compact_model") or LOCAL_QWEN_MODEL)
     compact_max_tokens = _positive_int(
         params.get("compact_max_tokens", 1_600),
         "compact_max_tokens",
@@ -1671,17 +1660,8 @@ def _strict_bool(value: object, name: str) -> bool:
 
 def _reasoning_effort(value: object) -> str:
     effort = str(value)
-    # Older params.json files may still carry the shared-scale aliases; on
-    # the wire they were never distinct from xhigh, so they stay valid and
-    # resolve to it rather than failing a running experiment.
-    if effort in LEGACY_REASONING_EFFORTS:
-        return LEGACY_REASONING_EFFORTS[effort]
     if effort not in REASONING_EFFORTS:
-        raise ValueError(
-            "reasoning_effort must be one of "
-            + ", ".join(REASONING_EFFORTS)
-            + " (legacy high/max resolve to xhigh)"
-        )
+        raise ValueError("reasoning_effort must be one of " + ", ".join(REASONING_EFFORTS))
     return effort
 
 

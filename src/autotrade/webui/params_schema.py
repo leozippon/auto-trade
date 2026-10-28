@@ -630,7 +630,7 @@ _FIELDS: list[dict[str, object]] = [
         "type": "choice",
         "choices": ["xhigh", "medium", "low"],
         "choice_labels": {"xhigh": "极高", "medium": "中", "low": "低"},
-        "help": "启用推理模式时 Agent 主对话与子代理的推理强度；三档即本机 Qwen 模板在线上真正区分的档位（旧参数中的 high/max 等同 xhigh）。推理只有开关、没有强度档的模型（mimo-v2.6-flash）不使用此项。",
+        "help": "启用推理模式时 Agent 主对话与子代理的推理强度；三档即本机 Qwen 模板在线上真正区分的档位。推理只有开关、没有强度档的模型（mimo-v2.6-flash）不使用此项。",
     },
     {
         "key": "no_thinking",

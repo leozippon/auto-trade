@@ -92,8 +92,7 @@ ACTIVE_STATES = ("launching", "initializing", "running_session", "paused")
 # Manager-written stub state between spawn and the worker's first status write
 # (interpreter start + imports take seconds). Stale = the worker never came up.
 LAUNCH_GRACE_SECONDS = 180.0
-# Operator-only keys plus retired sensitive configuration from historical
-# params files. The read model never echoes any of them back out.
+# Operator-only keys. The read model never echoes any of them back out.
 _PRIVATE_PARAMS = {
     "raw_dir",
     "fundamental_events_root",
@@ -103,9 +102,7 @@ _PRIVATE_PARAMS = {
     "local_dev",
     "experiments_root",
     "work_root",
-    "llm_api_key_env",
     "llm_env_file",
-    "llm_base_url",
 }
 # Replay result modes a style sidecar may carry: research and forward replays.
 _RESULT_MODES = frozenset({RESEARCH_PHASE, FORWARD_PHASE})

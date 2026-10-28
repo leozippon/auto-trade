@@ -18,7 +18,6 @@ from .pricing import FREE, TokenPrices
 from .proxy import LLMProxy, ScriptedLLM
 
 LOCAL_QWEN_MODEL = "qwen-3.8-27b-fp8"
-LEGACY_LOCAL_QWEN_MODEL = "qwen3.8-27b-local"
 # Xiaomi's hosted models; the API takes ids in lower case only.
 MIMO_FLASH_MODEL = "mimo-v2.6-flash"
 MIMO_PRO_MODEL = "mimo-v2.6-pro"
@@ -29,14 +28,6 @@ MODEL_CHOICES = (
     *MIMO_MODELS,
     *_lighting.MODEL_CHOICES,
 )
-
-
-def canonicalize_model_name(model: str) -> str:
-    """Map read-compatible legacy aliases to the current catalog name."""
-
-    if model == LEGACY_LOCAL_QWEN_MODEL:
-        return LOCAL_QWEN_MODEL
-    return model
 
 
 @dataclass(frozen=True)
@@ -194,7 +185,6 @@ def gateway_env_names() -> tuple[str, ...]:
 
 
 def model_profile(model: str) -> ModelProfile:
-    model = canonicalize_model_name(model)
     if model in _deepseek.MODEL_CHOICES:
         return _DEEPSEEK_PROFILE
     if model == LOCAL_QWEN_MODEL:
@@ -255,7 +245,6 @@ def build_model_gateway(
     refuses ``alternate``, having one key.
     """
 
-    model = canonicalize_model_name(model)
     profile = model_profile(model)
     if llm_key not in LLM_KEYS:
         raise ValueError(f"llm_key must be one of {', '.join(LLM_KEYS)}, got {llm_key!r}")
@@ -348,7 +337,6 @@ __all__ = [
     "AGENT_MAX_OUTPUT_TOKENS",
     "DEFAULT_LLM_MAX_RETRIES",
     "DEFAULT_LLM_RETRY_BACKOFF_SECONDS",
-    "LEGACY_LOCAL_QWEN_MODEL",
     "LLM_KEYS",
     "LOCAL_QWEN_MODEL",
     "MIMO_FLASH_MODEL",
@@ -358,7 +346,6 @@ __all__ = [
     "MODEL_CHOICES",
     "ModelProfile",
     "build_model_gateway",
-    "canonicalize_model_name",
     "effective_max_output_tokens",
     "gateway_env_names",
     "model_profile",

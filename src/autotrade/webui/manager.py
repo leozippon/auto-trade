@@ -23,10 +23,7 @@ from autotrade.environment.identity import (
     AgentRefStore,
     LegacyExperimentError,
 )
-from autotrade.environment.llm.model_profiles import (
-    LOCAL_QWEN_MODEL,
-    canonicalize_model_name,
-)
+from autotrade.environment.llm.model_profiles import LOCAL_QWEN_MODEL
 from autotrade.environment.runtime import utc_now_iso, write_json_atomic
 from autotrade.environment.sandbox import EXPERIMENT_LABEL, SandboxSpec
 from autotrade.environment.sandbox_images import reclaim_experiment_sandbox_images
@@ -295,8 +292,7 @@ def uses_local_model(params: Mapping[str, object]) -> bool:
 
     effective = {**WEB_CREATE_DEFAULTS, **params}
     return any(
-        canonicalize_model_name(str(effective.get(role) or LOCAL_QWEN_MODEL))
-        == LOCAL_QWEN_MODEL
+        str(effective.get(role) or LOCAL_QWEN_MODEL) == LOCAL_QWEN_MODEL
         for role in ("model", "subagent_model")
     )
 

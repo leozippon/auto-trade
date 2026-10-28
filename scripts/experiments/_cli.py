@@ -252,8 +252,7 @@ def add_model_arguments(parser: argparse.ArgumentParser) -> None:
         help=(
             "Reasoning effort for the Agent conversation and its sub-agents when "
             "thinking is enabled; default xhigh. These are the levels the local Qwen "
-            "template distinguishes on the wire (legacy high/max in params.json "
-            "resolve to xhigh)."
+            "template distinguishes on the wire."
         ),
     )
     parser.add_argument(

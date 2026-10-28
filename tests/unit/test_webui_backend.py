@@ -396,7 +396,7 @@ def test_experiment_endpoint_creates_only_persistent_sandbox_research(tmp_path: 
                     "model": "deepseek-flash",
                     "subagent_model": LOCAL_QWEN_MODEL,
                     "compact_model": "deepseek-flash",
-                    "reasoning_effort": "high",
+                    "reasoning_effort": "medium",
                     "no_thinking": True,
                     "disable_context_compact": False,
                     "compact_token_threshold": 90_000,
@@ -428,7 +428,7 @@ def test_experiment_endpoint_creates_only_persistent_sandbox_research(tmp_path: 
     assert params["subagent_model"] == LOCAL_QWEN_MODEL
     assert "nl_model" not in params
     assert params["compact_model"] == "deepseek-flash"
-    assert params["reasoning_effort"] == "high"
+    assert params["reasoning_effort"] == "medium"
     assert params["no_thinking"] is True
     assert params["compact_token_threshold"] == 90_000
 
@@ -749,9 +749,7 @@ class WebuiBackendTest(unittest.TestCase):
             "fundamental_events_status",
             "experiments_root",
             "work_root",
-            "llm_api_key_env",
             "llm_env_file",
-            "llm_base_url",
         )
         params = {
             "model": "deepseek-flash",
@@ -763,21 +761,6 @@ class WebuiBackendTest(unittest.TestCase):
             _public_params(params),
             {"model": "deepseek-flash", **DEFAULT_RESEARCH_GEOMETRY.to_record()},
         )
-
-    def test_historical_endpoint_is_absent_from_list_and_detail_api(self) -> None:
-        params_path = self.experiments_root / "exp_hitl/hitl/params.json"
-        params = json.loads(params_path.read_text(encoding="utf-8"))
-        private_endpoint = "https://historical-private.example.test/v1"
-        params["llm_base_url"] = private_endpoint
-        write_json_atomic(params_path, params)
-
-        listed = self.client.get("/api/experiments")
-        detail = self.client.get("/api/experiments/exp_hitl")
-        self.assertEqual(listed.status_code, 200)
-        self.assertEqual(detail.status_code, 200)
-        self.assertNotIn(private_endpoint, listed.text)
-        self.assertNotIn(private_endpoint, detail.text)
-        self.assertNotIn("llm_base_url", detail.json()["params"])
 
     # ---- result routes ---------------------------------------------------------
     def test_result_orders_rows_and_csv_export(self) -> None:

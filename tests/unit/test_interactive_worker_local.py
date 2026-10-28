@@ -16,7 +16,6 @@ import pytest
 
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm import (
-    LEGACY_LOCAL_QWEN_MODEL,
     LOCAL_QWEN_MODEL,
     DeepSeekProxy,
     OpenAICompatibleProxy,
@@ -148,7 +147,7 @@ def test_worker_maps_model_context_params_to_role_gateways_and_compactor(
         {
             "model": "deepseek-flash",
             "compact_model": "deepseek-flash",
-            "reasoning_effort": "high",
+            "reasoning_effort": "medium",
             "no_thinking": True,
             "disable_context_compact": False,
             "compact_token_threshold": 90_000,
@@ -218,72 +217,27 @@ def test_worker_accepts_and_ignores_the_retired_nl_params(
 
 
 
-def test_worker_canonicalizes_all_legacy_model_roles_without_rewriting_params(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    repo, experiment = _experiment(tmp_path, developer_mode="llm")
-    path = experiment / "hitl/params.json"
-    params = json.loads(path.read_text(encoding="utf-8"))
-    params.update(
-        {
-            "model": LEGACY_LOCAL_QWEN_MODEL,
-            "subagent_model": LEGACY_LOCAL_QWEN_MODEL,
-            "compact_model": LEGACY_LOCAL_QWEN_MODEL,
-            "compact_token_threshold": 20_000,
-        }
-    )
-    path.write_text(json.dumps(params), encoding="utf-8")
-    persisted = path.read_bytes()
-    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
 
-    options = load_worker_options(experiment, repo_root=repo)
-
-    assert options.llm is not None
-    assert (
-        options.llm.model,
-        options.llm.subagent_model,
-        options.llm.compact_model,
-    ) == (LOCAL_QWEN_MODEL,) * 3
-    assert path.read_bytes() == persisted
-
-
-
-def test_worker_ignores_historical_endpoint_and_credential_params(
-    tmp_path: Path,
-    monkeypatch,
-):
+def test_worker_refuses_endpoint_and_credential_params(tmp_path: Path) -> None:
     """Neither endpoint nor credential can be redirected by a params file.
 
-    Both keys are retired operator overrides that historical snapshots may
-    still carry. A ``llm_api_key_env`` naming any other variable in the
-    process environment would otherwise send that secret to the provider as a
-    bearer token, which is exactly what the trusted profile exists to prevent.
+    Both keys are retired operator overrides. A ``llm_api_key_env`` naming any
+    other variable in the process environment would send that secret to the
+    provider as a bearer token, which is exactly what the trusted profile
+    exists to prevent, so a params file carrying either does not load.
     """
-
-    from autotrade.pipelines.worker import _ALLOWED_PARAMS, NON_PERSISTABLE_PARAMS
 
     repo, experiment = _experiment(tmp_path, developer_mode="llm")
     path = experiment / "hitl/params.json"
     params = json.loads(path.read_text(encoding="utf-8"))
     params["llm_base_url"] = "https://untrusted-snapshot.example.test/v1"
     params["llm_api_key_env"] = "UNRELATED_SECRET"
-    params["subagent_model"] = "deepseek-flash"
     path.write_text(json.dumps(params), encoding="utf-8")
-    monkeypatch.setenv("UNRELATED_SECRET", "not-a-provider-credential")
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-test-key")
-    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
-    monkeypatch.setenv("VLLM_BASE_URL", "https://trusted-runtime.example.test/v1")
-
-    settings = load_worker_options(experiment, repo_root=repo).llm
-    assert settings is not None
-    for key in ("llm_base_url", "llm_api_key_env"):
-        assert key in NON_PERSISTABLE_PARAMS
-        assert key not in _ALLOWED_PARAMS
-    main = settings.build_gateway("main").config
-    assert main.base_url == "https://trusted-runtime.example.test/v1"
-    assert main.api_key == "local-test-key"
-    assert settings.build_gateway("subagent").config.api_key == "deepseek-test-key"
+    with pytest.raises(
+        ValueError,
+        match=r"unknown experiment parameters: \['llm_api_key_env', 'llm_base_url'\]",
+    ):
+        load_worker_options(experiment, repo_root=repo)
 
 
 
@@ -806,6 +760,8 @@ def test_session_boundary_restart_is_taken_before_the_next_session_starts(
     [
         ("model", "unknown-model", "unsupported model 'unknown-model'"),
         ("subagent_model", "unknown-model", "unsupported model 'unknown-model'"),
+        # The local model's name before 2026-08-20.
+        ("compact_model", "qwen3.8-27b-local", "unsupported model 'qwen3.8-27b-local'"),
         ("reasoning_effort", "ultra", "reasoning_effort"),
         ("no_thinking", 1, "must be a boolean"),
         ("compact_token_threshold", 0, "must be a positive integer"),
@@ -1324,12 +1280,12 @@ def test_compaction_gateway_makes_one_attempt(tmp_path: Path, monkeypatch):
 
 
 
-def test_worker_reasoning_effort_offers_wire_levels_and_maps_legacy_aliases(
+def test_worker_reasoning_effort_offers_exactly_the_wire_levels(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The console enum is exactly what the local Qwen template distinguishes;
-    older params.json files that still say high/max keep launching as xhigh."""
+    the shared-scale high/max are refused, not resolved."""
     from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
     from autotrade.pipelines.worker import DEFAULT_REASONING_EFFORT, REASONING_EFFORTS
     from autotrade.webui.params_schema import _FIELDS
@@ -1343,12 +1299,16 @@ def test_worker_reasoning_effort_offers_wire_levels_and_maps_legacy_aliases(
     path = experiment / "hitl/params.json"
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-only-key")
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
-    for configured, effective in (("max", "xhigh"), ("high", "xhigh"), ("medium", "medium")):
+    for effort in (*REASONING_EFFORTS, "high", "max"):
         params = json.loads(path.read_text(encoding="utf-8"))
-        params["reasoning_effort"] = configured
+        params["reasoning_effort"] = effort
         path.write_text(json.dumps(params), encoding="utf-8")
+        if effort not in REASONING_EFFORTS:
+            with pytest.raises(ValueError, match="reasoning_effort must be one of"):
+                load_worker_options(experiment, repo_root=repo)
+            continue
         settings = load_worker_options(experiment, repo_root=repo).llm
         assert settings is not None
-        assert settings.reasoning_effort == effective
-        assert settings.build_gateway("main").config.reasoning_effort == effective
+        assert settings.reasoning_effort == effort
+        assert settings.build_gateway("main").config.reasoning_effort == effort
 
