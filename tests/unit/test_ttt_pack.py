@@ -22,7 +22,7 @@ from pathlib import Path
 
 from autotrade.agent.prompts import PROTOCOL_INSTRUCTION
 from autotrade.environment.llm import MODEL_CHOICES
-from scripts.experiments import create_round_20261027
+from scripts.experiments import create_round_20261027, create_round_20261028b
 from scripts.experiments.create_round_20261028 import ARMS, DIRECTIVE, PACK, ROUND
 from tests.unit.test_retrieval_pack import AFTER_RESEARCH
 
@@ -123,6 +123,18 @@ def test_both_arms_are_round_20261027s_arm_on_this_pack_and_the_alternate_key() 
             "strategy_cpus": 16,
             "strategy_memory": "64g",
         }
+
+
+def test_round_20261028b_is_the_argon_arm_again_under_another_id() -> None:
+    """The relaunch after the relay's outage sends exactly what the failed
+    argon arm sent, but for its id."""
+    original = "ttt_100k_8y_argon_zgca_20261028"
+    (again,) = create_round_20261028b.ARMS
+    assert again == f"{original}b"
+    assert create_round_20261028b.DIRECTIVE == DIRECTIVE
+    assert {**create_round_20261028b.ROUND.request_params(again), "experiment_id": original} == (
+        ROUND.request_params(original)
+    )
 
 
 def test_the_readme_ends_with_guidance_the_session_may_ignore() -> None:
