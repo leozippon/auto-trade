@@ -93,31 +93,41 @@ class FundamentalEventsBuilder:
         frames = [frame for frame in frames if not frame.empty]
         if not frames:
             return pd.DataFrame(columns=self._event_columns())
+        # The row union of the ten datasets spans ~470 columns, almost all NA
+        # outside their own dataset: ~85 GB of object cells for ~3.9M events.
+        # Filter, window and order are therefore decided on a narrow key frame
+        # and the wide frame is copied once, by a single take; every full copy
+        # of it (a consolidating .copy() above all) cost minutes of kernel
+        # page-fault work and stretched the nightly build to 2 h 54 min on a
+        # loaded host (2026-10-28).
         events = concat_rows(frames)
-        events = events[events["available_at"].astype(str).str.strip().ne("")].copy()
-        if events.empty:
+        narrow = events[[column for column in ("available_at", FIRST_SEEN_COLUMN) if column in events.columns]]
+        narrow = narrow[narrow["available_at"].astype(str).str.strip().ne("")]
+        if narrow.empty:
             return pd.DataFrame(columns=self._event_columns())
         # A row whose key the lake first held after its vendor-rule stamp
         # becomes visible then, and is filed under that month.
-        visible = visible_from(events)
+        visible = visible_from(narrow)
         start = pd.Timestamp(yyyymmdd(config.start_date)).tz_localize(CN_TZ)
         end = pd.Timestamp(yyyymmdd(config.end_date)).tz_localize(CN_TZ) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
-        window = (visible >= start) & (visible <= end)
-        events = events[window].copy()
-        if events.empty:
+        visible = visible[(visible >= start) & (visible <= end)]
+        if visible.empty:
             return pd.DataFrame(columns=self._event_columns())
-        events["available_month"] = visible[window].dt.strftime("%Y%m")
+        keys = events.loc[visible.index, ["available_at", "dataset", "ts_code", "business_key"]]
         # Same-timestamp statement corrections share the entire business key
         # (update_flag is deliberately not part of statement keys), and the
         # write-side collapse keeps the LAST row per key: rank vendor versions
         # explicitly so the update_flag=1 revision survives instead of leaving
         # the outcome to raw response row order.
         if "update_flag" in events.columns:
-            events["_version_rank"] = pd.to_numeric(events["update_flag"], errors="coerce").fillna(-1.0)
+            keys = keys.assign(_version_rank=pd.to_numeric(events.loc[visible.index, "update_flag"], errors="coerce").fillna(-1.0))
         else:
-            events["_version_rank"] = -1.0
-        events = events.sort_values(["available_at", "dataset", "ts_code", "business_key", "_version_rank"])
-        events = events.drop(columns=["_version_rank"]).reset_index(drop=True)
+            keys = keys.assign(_version_rank=-1.0)
+        order = keys.sort_values(["available_at", "dataset", "ts_code", "business_key", "_version_rank"]).index
+        events = events.take(order)
+        # Not reset_index: without copy-on-write it deep-copies and consolidates.
+        events.index = pd.RangeIndex(len(events))
+        events["available_month"] = visible.loc[order].dt.strftime("%Y%m").to_numpy()
         collapsed = int(events.duplicated(["dataset", "business_key", "available_at"]).sum())
         if collapsed:
             print(f"fundamental_events build: {collapsed} same-key duplicate rows collapse to the highest version on write")

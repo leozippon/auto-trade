@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -23,7 +24,12 @@ from autotrade.environment.data.auction import (
     market_bucket,
 )
 from autotrade.environment.data.fundamental_events import read_fundamental_events
-from autotrade.environment.data.pit import CorruptSidecarError, to_cn_timestamps
+from autotrade.environment.data.pit import (
+    CorruptSidecarError,
+    concat_rows,
+    to_cn_timestamps,
+    visible_from,
+)
 
 
 class AuctionCorrectionTest(unittest.TestCase):
@@ -407,6 +413,54 @@ class FundamentalEventsBuilderTest(unittest.TestCase):
             report = audit_fundamental_events(output, config)
             self.assertEqual(report["status"], "error")
             self.assertEqual(report["findings"][-1]["details"]["backdated_available_at_rows"], 1)
+
+    def test_build_orders_the_wide_union_without_copying_it(self):
+        """The datasets' row union is ~470 columns wide and almost all NA
+        (~85 GB on the live lake); copying it whole stretched the nightly
+        build from 15 min to 2 h 54 min (2026-10-28). The build must still
+        equal the plain filter / window / version-ranked sort over that union,
+        while no frame as wide as the union is ever copied."""
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            (raw / "forecast_vip").mkdir(parents=True)
+            (raw / "dividend").mkdir(parents=True)
+            pd.DataFrame([
+                {"ts_code": "600157.SH", "ann_date": "20200110", "first_ann_date": "20200110", "end_date": "20191231", "type": "预增", "update_flag": "1"},
+                {"ts_code": "600157.SH", "ann_date": "20200110", "first_ann_date": "20200110", "end_date": "20191231", "type": "预增", "update_flag": "0"},
+                {"ts_code": "000001.SZ", "ann_date": "20200110", "first_ann_date": "20200110", "end_date": "20191231", "type": "略增", "update_flag": "0"},
+                {"ts_code": "600157.SH", "ann_date": "20200301", "first_ann_date": "20200301", "end_date": "20200331", "type": "预减", "update_flag": "0"},
+            ]).to_parquet(raw / "forecast_vip" / "ann_month=202001.parquet", index=False)
+            pd.DataFrame([
+                {"ts_code": "600157.SH", "end_date": "20191231", "ann_date": "20200110", "div_proc": "预案", "imp_ann_date": None, "cash_div": 0.1},
+                {"ts_code": "600157.SH", "end_date": "20191231", "ann_date": "20200110", "div_proc": "实施", "imp_ann_date": None, "cash_div": 0.1},
+            ]).to_parquet(raw / "dividend" / "ts_code=600157.SH.parquet", index=False)
+            builder = FundamentalEventsBuilder(raw)
+            config = FundamentalEventsConfig(start_date="20200101", end_date="20200131", datasets=("forecast_vip", "dividend"))
+
+            copied_widths: list[int] = []
+            copy = pd.DataFrame.copy
+
+            def recording_copy(frame, *args, **kwargs):
+                copied_widths.append(frame.shape[1])
+                return copy(frame, *args, **kwargs)
+
+            with patch.object(pd.DataFrame, "copy", recording_copy):
+                events = builder.build(config)
+
+            union = concat_rows([builder._read_dataset(dataset, {}) for dataset in config.datasets])
+            union = union[union["available_at"].astype(str).str.strip().ne("")]
+            visible = visible_from(union)
+            window = (visible >= pd.Timestamp("2020-01-01", tz="Asia/Shanghai")) & (visible < pd.Timestamp("2020-02-01", tz="Asia/Shanghai"))
+            expected = union[window].assign(
+                available_month=visible[window].dt.strftime("%Y%m"),
+                _rank=pd.to_numeric(union.loc[window, "update_flag"], errors="coerce").fillna(-1.0),
+            )
+            expected = expected.sort_values(["available_at", "dataset", "ts_code", "business_key", "_rank"])
+            expected = expected.drop(columns=["_rank"]).reset_index(drop=True)
+            pd.testing.assert_frame_equal(events, expected, check_exact=True)
+            self.assertEqual(list(events["dataset"]), ["dividend", "forecast_vip", "forecast_vip", "forecast_vip"])
+            self.assertEqual(list(events["update_flag"].iloc[1:]), ["0", "0", "1"])
+            self.assertLess(max(copied_widths), union.shape[1])
 
     def test_same_timestamp_statement_revision_wins_by_update_flag(self):
         """Same-announcement statement corrections share the whole business key;
