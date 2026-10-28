@@ -161,7 +161,11 @@ def test_a_result_without_a_style_sidecar_is_not_an_unknown_result(tmp_path: Pat
     assert present.status_code == 200
     assert present.json()["available"] is True
 
+    # A version-1 sidecar, written before the factor regression replaced the
+    # regressed blocks, holds the same series and is served alike.
     sidecar = directory / "artifacts/results" / name / "style_analysis.json"
+    sidecar.write_text(json.dumps({**json.loads(sidecar.read_text(encoding="utf-8")), "schema_version": 1}), encoding="utf-8")
+    assert client.get(f"/api/experiments/arm/results/{name}/style").json()["available"] is True
     sidecar.unlink()
     absent = client.get(f"/api/experiments/arm/results/{name}/style")
     assert absent.status_code == 200
@@ -1463,6 +1467,57 @@ def test_a_forward_record_without_the_holders_readings_shows_none(tmp_path: Path
     assert equity["panel"]["final"] == pytest.approx(
         float(np.prod([1.0 + value for _day, value in sidecar["panel_daily"]]) - 1.0), abs=1e-6
     )
+
+
+def test_a_record_read_on_the_retired_regressed_scale_shows_no_regressed_figure(tmp_path: Path) -> None:
+    """An arm judged before 2026-10-28 stored its step rows, gate, frozen
+    block and slices on the regressed scale and, when F8 refused it, a reason
+    no condition carries now. No such figure reaches a current label: step
+    rows and the frozen block are read off their own sidecars, as the gate
+    reads them; a slice keeps its plain readings, its F8 bound stands in F2's
+    place and F8's refusal is F2's."""
+
+    directory = build_arm(tmp_path, "arm", "graduated", seeded=True)
+    current = experiment_detail(tmp_path, "arm")
+    ledger_path = directory / "ledgers/experiment_ledger.jsonl"
+    records = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
+    research = next(row for row in records if row["record_type"] == "research_session")
+    for row in research["steps"]:
+        row["neutralized"] = {**row.pop("graded"), "information_ratio": 9.0}
+    gate = research["freeze_gate"]
+    gate.update(neutralized_excess=0.5, information_ratio=9.0)
+    gate["seed_replicates"]["mean_information_ratio"] = 9.0
+    frozen = research["frozen"]
+    frozen.update(neutralized_excess=frozen.pop("plain_excess"), information_ratio=9.0, tracking_error=0.9)
+    forward = records[-1]
+    block = forward["slices"]["forward"]
+    block.update(
+        neutralized_excess=0.5,
+        lower_bound=0.08,
+        plain_excess_lower_bound=-0.05,
+        information_ratio=9.0,
+        excess_at_cost_stress=0.4,
+    )
+    forward["verdict"].update(status="discarded", reasons=["forward_plain_excess_lower_bound_not_positive"])
+    ledger_path.write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in records), encoding="utf-8"
+    )
+
+    detail = experiment_detail(tmp_path, "arm")
+    shown = detail["forward"]["slices"]["forward"]
+    assert shown["lower_bound"] == -0.05 and shown["plain_excess"] == block["plain_excess"]
+    assert not {"neutralized_excess", "information_ratio", "excess_at_cost_stress", "plain_excess_lower_bound"} & set(shown)
+    assert detail["forward"]["verdict"]["reasons"] == ["forward_lower_bound_not_positive"]
+    assert summarize_experiment(directory)["ending"] == {"state": "rejected", "reason": "F2"}
+    figures = ("plain_excess", "tracking_error", "information_ratio")
+    assert {key: detail["frozen"][key] for key in figures} == {key: current["frozen"][key] for key in figures}
+    assert detail["frozen"]["forward_mde"] is None
+    assert detail["frozen"]["seed_replicates"]["mean_information_ratio"] is None
+    record, recorded = detail["sessions"][0]["record"], current["sessions"][0]["record"]
+    assert record["validations"] == recorded["validations"]
+    assert record["best"]["information_ratio"] == recorded["best"]["information_ratio"]
+    assert record["freeze_gate"]["information_ratio"] is None
+    assert record["freeze_gate"]["seed_replicates"]["mean_information_ratio"] is None
 
 
 def test_an_arm_carrying_the_retired_switches_reads_as_one_without_them(tmp_path: Path) -> None:

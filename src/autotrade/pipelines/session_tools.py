@@ -1637,7 +1637,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
             "candidates": [
                 {
                     "name": "value_quality",
-                    "hypothesis": "T-1 估值+质量 4 因子等权打分的中性化超额在两个年份都为正",
+                    "hypothesis": "T-1 估值+质量 4 因子等权打分的主动超额在两个年份都为正",
                     "path": "candidates/value_quality",
                     "control": False,
                 },

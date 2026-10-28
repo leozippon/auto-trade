@@ -66,7 +66,12 @@ BENCHMARK_LABEL = benchmark_index_label(BENCHMARK_TS_CODE)
 # verdict never waits on a replay it cannot read.
 MIN_REGRESSION_DAYS = 8
 STYLE_ARTIFACT_NAME = "style_analysis.json"
-STYLE_SCHEMA_VERSION = 1
+# 2 (2026-10-28): the strategy's ``factor_regression`` block and the compact
+# ``active_excess`` figures replace the regressed ``neutralized_excess`` blocks.
+# Both versions store the same daily series, which is all the gates read, so
+# a reader takes either (``READABLE_STYLE_SCHEMA_VERSIONS``).
+STYLE_SCHEMA_VERSION = 2
+READABLE_STYLE_SCHEMA_VERSIONS = (1, STYLE_SCHEMA_VERSION)
 _STYLE_COLUMNS = ("circ_mv", "pb", "turnover_rate")
 # Size factor of the factor regression: the small-minus-big daily spread of
 # the replay slot's OWN cross-section, equal-weighted inside each leg, the
@@ -758,6 +763,7 @@ __all__ = [
     "BENCHMARK_LABEL",
     "BENCHMARK_TS_CODE",
     "MIN_REGRESSION_DAYS",
+    "READABLE_STYLE_SCHEMA_VERSIONS",
     "STYLE_ARTIFACT_NAME",
     "STYLE_SCHEMA_VERSION",
     "active_analysis",

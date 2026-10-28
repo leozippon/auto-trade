@@ -150,7 +150,7 @@ _FIELDS: list[dict[str, object]] = [
             code: f"{label}（{code}）" for code, label in BENCHMARK_INDEXES.items()
         },
         "help": (
-            "本臂被度量的基准：风格归因与裁决中性化的基准腿，以及零技能对照组"
+            "本臂被度量的基准：风格归因与载荷回归的基准腿，以及零技能对照组"
             "按成分股替换选名的成分表。创建时校验该指数在本臂固定的数据发布中"
             "确实有 index_daily 与 index_weight 分区；成分股本身仍需在 macro "
             "数据集里选上 index_weight 才能被策略读到。"
@@ -463,9 +463,9 @@ _FIELDS: list[dict[str, object]] = [
     {
         "key": "cost_stress_multiplier",
         "group": "预算与验收",
-        "label": "毕业成本压力倍数",
+        "label": "成本压力倍数",
         "type": "float",
-        "help": "毕业裁决的成本压力：前推段中性化超额在滑点放大到该倍数后仍须为正（按该段换手定价）。",
+        "help": "冻结门与毕业裁决的成本压力：研究期与前推段的主动超额在滑点放大到该倍数后仍须为正（按各段自己的换手定价）。",
     },
     {
         "key": "min_active_ir",
@@ -486,7 +486,7 @@ _FIELDS: list[dict[str, object]] = [
         "group": "预算与验收",
         "label": "冻结门主动正数年比例",
         "type": "float",
-        "help": "主动中性化超额为正的研究年数不少于研究年数乘以该比例、向上取整。须在 (0, 1]。",
+        "help": "主动超额为正的研究年数不少于研究年数乘以该比例、向上取整。须在 (0, 1]。",
     },
     {
         "key": "min_full_span_validations",
@@ -501,7 +501,7 @@ _FIELDS: list[dict[str, object]] = [
         "group": "预算与验收",
         "label": "前推下界置信度",
         "type": "float",
-        "help": "前推期年化主动中性化超额单侧块自助下界的置信度，须在 (0, 1)。",
+        "help": "前推期年化主动超额（有种子复现时取逐日的种子平均）单侧块自助下界的置信度，须在 (0, 1)。",
     },
     {
         "key": "recency_months",
@@ -509,7 +509,7 @@ _FIELDS: list[dict[str, object]] = [
         "label": "前推近月窗口（月）",
         "type": "int",
         "min": 1,
-        "help": "前推期最后该数个日历月的主动中性化超额不得为负，整数且至少为 1。",
+        "help": "前推期最后该数个日历月的主动超额不得为负，整数且至少为 1。",
     },
     {
         "key": "min_mean_gross",
@@ -530,7 +530,7 @@ _FIELDS: list[dict[str, object]] = [
         "group": "预算与验收",
         "label": "Held-out 超额容差（标准误倍数）",
         "type": "float",
-        "help": "Held-out 主动中性化超额不得低于 −该值 × 前推期主动跟踪误差 / √年数，须为正。",
+        "help": "Held-out 主动超额不得低于 −该值 × 前推期主动跟踪误差 / √年数，须为正。",
     },
     {"key": "max_replay_years", "group": "预算与验收", "label": "研究会话回测预算（年）", "type": "int",
      "help": "一个候选在其验证区间覆盖的每个研究年份计 1：完整研究期计研究年数，一批按候选数乘年数预留；回测独立计时（墙钟回补推理 deadline）。"},

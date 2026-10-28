@@ -93,7 +93,7 @@ def test_daily_style_uses_replay_positions_and_frozen_slot_inputs(tmp_path: Path
         benchmark_index=BENCHMARK_TS_CODE,
     )
 
-    assert payload["schema_version"] == 1 and payload["mode"] == "valid"
+    assert payload["schema_version"] == 2 and payload["mode"] == "valid"
     assert payload["benchmark_regression"]["available"] is True
     assert payload["benchmark_regression"]["n_days"] == 10
     assert payload["benchmark_regression"]["beta"] == 2.0

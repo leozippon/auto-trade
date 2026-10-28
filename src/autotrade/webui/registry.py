@@ -31,7 +31,10 @@ from autotrade.agent.runner import (
     DEADLINE_GRACE_EXHAUSTED,
     LLM_CALL_BUDGET_EXHAUSTED,
 )
-from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME, STYLE_SCHEMA_VERSION
+from autotrade.environment.replay.style import (
+    READABLE_STYLE_SCHEMA_VERSIONS,
+    STYLE_ARTIFACT_NAME,
+)
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools.report_issue import (
     ISSUE_REPORTS_NAME,
@@ -132,6 +135,79 @@ _ENDING_ORDER = {state: index for index, state in enumerate(ENDING_STATES)}
 _CRITERION_CODES = {
     condition.reason: condition.code for condition in CONDITIONS if condition.code
 }
+# A reason a record judged before 2026-10-28 carries, by the condition that
+# judges the same reading now: F8's bound of the plain active mean is F2's.
+_RETIRED_REASONS = {"forward_plain_excess_lower_bound_not_positive": "forward_lower_bound_not_positive"}
+# What a slice read before then holds on the retired regressed scale (the
+# active series' intercept on the benchmark and the size factor, and the
+# figures built on it), which no current label may show.
+_REGRESSED_FIGURES = frozenset(
+    {
+        "neutralized_excess",
+        "information_ratio",
+        "tracking_error",
+        "lower_bound",
+        "plain_excess_lower_bound",
+        "recency_neutralized_excess",
+        "excess_at_cost_stress",
+        "tolerance",
+    }
+)
+
+
+def _regressed(block: Mapping[str, object]) -> bool:
+    """Whether a slice, freeze gate or frozen block was read before every
+    gate graded the active series as it is: such a block carries the
+    regression intercept ``neutralized_excess``."""
+
+    return "neutralized_excess" in block
+
+
+def _current_reasons(reasons: object) -> list[str]:
+    """Recorded reason tokens under today's names (``_RETIRED_REASONS``), once each."""
+
+    return list(dict.fromkeys(_RETIRED_REASONS.get(str(token), str(token)) for token in reasons or ()))  # type: ignore[union-attr]
+
+
+def _slice_view(block: Mapping[str, object]) -> dict[str, object]:
+    """A recorded forward or Held-out slice as the console shows it. One read
+    before 2026-10-28 keeps its plain and holder's readings and drops the
+    figures on the regressed scale; its F8 bound, the plain one, is what F2
+    reads now and stands in F2's place (``None`` on a slice judged before F8
+    existed)."""
+
+    if not _regressed(block):
+        return dict(block)
+    kept = {key: value for key, value in block.items() if key not in _REGRESSED_FIGURES}
+    return {**kept, "lower_bound": block.get("plain_excess_lower_bound")}
+
+
+# The graded figures of a recorded Validation row by its sidecar's path: a
+# sidecar never changes once written, so each is read once per process.
+_GRADED_CACHE: dict[str, dict[str, object] | None] = {}
+
+
+def _graded_rows(directory: Path, rows: Sequence[Mapping[str, object]]) -> list[Mapping[str, object]]:
+    """Recorded Validation rows, each with the graded figures the gate reads:
+    the ones a row carries, else those of its own style sidecar, read as
+    ``experiment.trial_rows`` reads them -- a row recorded before 2026-10-28
+    carries only the retired regressed ``neutralized`` block. A sidecar that
+    cannot be read shows no figures."""
+
+    completed: list[Mapping[str, object]] = []
+    for row in rows:
+        if "graded" not in row:
+            reference = str(row.get("validation_result_ref") or "")
+            if reference not in _GRADED_CACHE:
+                try:
+                    _GRADED_CACHE[reference] = validation_statistics(
+                        str(recorded_path(directory, reference))
+                    )
+                except (OSError, ValueError):
+                    _GRADED_CACHE[reference] = None
+            row = {**row, "graded": _GRADED_CACHE[reference]}
+        completed.append(row)
+    return completed
 # The budgets a research session can run out of, named as the reason line.
 _BUDGET_EXHAUSTED = {
     DEADLINE_GRACE_EXHAUSTED: "研究时长用尽",
@@ -364,8 +440,8 @@ def arm_ending(
         }
     if verdict["status"] == "discarded":
         codes = dict.fromkeys(
-            _CRITERION_CODES.get(str(token), str(token))
-            for token in verdict.get("reasons") or ()
+            _CRITERION_CODES.get(token, token)
+            for token in _current_reasons(verdict.get("reasons"))
         )
         return {"state": "rejected", "reason": " · ".join(codes)}
     if verdict["status"] == ENVIRONMENT_BLOCKED:
@@ -426,27 +502,30 @@ def _forward_view(
     identity: PublicIdentity, record: Mapping[str, object] | None
 ) -> dict[str, object] | None:
     """The forward record: replay span, slice statistics and verdict, as the
-    record stores them. ``None`` until the record exists, which is also when
-    the verdict does. A slice recorded before slices carried the holder's
-    readings shows none: nothing is read again from its replay."""
+    record stores them, a record from before 2026-10-28 on today's scale
+    (:func:`_slice_view`, :func:`_current_reasons`). ``None`` until the record
+    exists, which is also when the verdict does. A slice recorded before
+    slices carried the holder's readings shows none: nothing is read again
+    from its replay."""
 
     if record is None:
         return None
     null = _mapping(record.get("null_control"))
+    verdict = _mapping(record.get("verdict"))
     return {
         "recorded_at": record.get("recorded_at"),
         "error": identity.public_text(str(record.get("error") or "")) or None,
         "replay": dict(_mapping(record.get("replay"))),
         "result": _result_name(record.get("result_ref")),
         "slices": {
-            name: dict(block)
+            name: _slice_view(block)
             for name, block in _mapping(record.get("slices")).items()
             if isinstance(block, Mapping)
         },
         "refits_executed": record.get("refits_executed"),
         # Diagnostic: the forward slice's excess among random-name replays.
         "null_percentile": _number(_mapping(null.get("step")).get("excess_percentile")),
-        "verdict": dict(_mapping(record.get("verdict"))),
+        "verdict": {**verdict, "reasons": _current_reasons(verdict.get("reasons"))},
     }
 
 
@@ -898,14 +977,18 @@ def _recorded_best(directory: Path, record: Mapping[str, object]) -> dict[str, o
     """A recorded research session's best Validation, read off its ledger
     record alone, for the listing and the experiment page alike.
 
-    Its figures are the ones the record stores; its deflated Sharpe
-    probability and trials are those the session's own freeze gate recorded,
-    which exist only where the session nominated this node. Nothing is
-    measured again: a gate re-read under today's code would state numbers the
-    session never saw, so a figure the record does not hold is shown as none.
+    Its figures are the ones the record stores, or on a row recorded before
+    rows carried graded figures, the ones its own sidecar gives
+    (:func:`_graded_rows`); its deflated Sharpe probability and trials are
+    those the session's own freeze gate recorded, which exist only where the
+    session nominated this node. No gate is read again: a gate re-read under
+    today's code would state numbers the session never saw, so a figure the
+    record does not hold is shown as none.
     """
 
-    best = _best_row([row for row in record.get("steps") or () if isinstance(row, Mapping)])
+    best = _best_row(
+        _graded_rows(directory, [row for row in record.get("steps") or () if isinstance(row, Mapping)])
+    )
     if best is None:
         return None
     gate = _mapping(record.get("freeze_gate"))
@@ -1082,24 +1165,31 @@ def _verdict_thresholds(
     }
 
 
-def _seed_gate_view(identity: PublicIdentity, block: object) -> dict[str, object] | None:
+def _seed_gate_view(
+    identity: PublicIdentity, block: object, *, regressed: bool
+) -> dict[str, object] | None:
     """The freeze gate's seed-replicate reading (``experiment._seed_replicate_gate``)
     -- the replicates it read, each one's seed line and IR or the problem that
     refused it, their mean with the nominee and the bar -- or ``None`` for a
-    gate recorded before it read seed replicates."""
+    gate recorded before it read seed replicates. A gate that read the
+    retired regressed scale (``regressed``) shows none of its IRs."""
 
     seeds = _mapping(block)
     if not seeds:
         return None
+
+    def ratio(value: object) -> float | None:
+        return None if regressed else _number(value)
+
     return {
         "trains_a_model": bool(seeds.get("trains_a_model")),
-        "mean_information_ratio": _number(seeds.get("mean_information_ratio")),
+        "mean_information_ratio": ratio(seeds.get("mean_information_ratio")),
         "information_ratio_bar": _number(seeds.get("information_ratio_bar")),
         "replicates": [
             {
                 "step_id": entry.get("step_id"),
                 "seed_line": entry.get("seed_line"),
-                "information_ratio": _number(entry.get("information_ratio")),
+                "information_ratio": ratio(entry.get("information_ratio")),
                 "problem": identity.public_text(str(entry.get("problem") or "")) or None,
             }
             for entry in seeds.get("replicates") or ()
@@ -1111,7 +1201,7 @@ def _seed_gate_view(identity: PublicIdentity, block: object) -> dict[str, object
 def _research_session_view(
     directory: Path, identity: PublicIdentity, record: Mapping[str, object]
 ) -> dict[str, object]:
-    steps = [row for row in record.get("steps") or () if isinstance(row, Mapping)]
+    steps = _graded_rows(directory, [row for row in record.get("steps") or () if isinstance(row, Mapping)])
     gate = _mapping(record.get("freeze_gate"))
     run_id = str(record.get("run_id") or "")
     multiplier = _cost_stress_multiplier(directory)
@@ -1131,13 +1221,16 @@ def _research_session_view(
         "freeze_gate": (
             {
                 "passed": bool(gate.get("passed")),
-                "reasons": [str(reason) for reason in gate.get("reasons") or ()],
+                "reasons": _current_reasons(gate.get("reasons")),
                 "deflated_sharpe_probability": _number(
                     _mapping(gate.get("deflated_sharpe")).get("deflated_sharpe_probability")
                 ),
                 "full_span_validations": _number(gate.get("full_span_validations")),
                 "series": gate.get("series"),
-                "information_ratio": _number(gate.get("information_ratio")),
+                # A gate read before 2026-10-28 graded the regressed IR.
+                "information_ratio": (
+                    None if _regressed(gate) else _number(gate.get("information_ratio"))
+                ),
                 "positive_years": _number(gate.get("positive_years")),
                 "active_max_drawdown": _number(gate.get("active_max_drawdown")),
                 # Absent from a gate recorded before the condition read the
@@ -1155,7 +1248,9 @@ def _research_session_view(
                     key: _number(value)
                     for key, value in _mapping(gate.get("thresholds")).items()
                 },
-                "seed_replicates": _seed_gate_view(identity, gate.get("seed_replicates")),
+                "seed_replicates": _seed_gate_view(
+                    identity, gate.get("seed_replicates"), regressed=_regressed(gate)
+                ),
             }
             if gate
             else None
@@ -1172,14 +1267,25 @@ def _research_session_view(
 
 
 def _frozen_view(
-    identity: PublicIdentity, records: Sequence[Mapping[str, object]]
+    directory: Path, identity: PublicIdentity, records: Sequence[Mapping[str, object]]
 ) -> dict[str, object] | None:
-    """The frozen artifact and the research statistics it was frozen on."""
+    """The frozen artifact and the research statistics it was frozen on. A
+    block frozen before 2026-10-28 stored them on the retired regressed
+    scale: its graded figures are read off the nominee's own sidecar, as for
+    a step row (:func:`_graded_rows`), and its ``forward_mde``, built on the
+    regressed tracking error, is not shown."""
 
     row = frozen_record(records)
     if row is None:
         return None
     block = _mapping(row.get("frozen"))
+    regressed = _regressed(block)
+    if regressed:
+        [nominee] = _graded_rows(
+            directory, [{"validation_result_ref": block.get("research_result_ref")}]
+        )
+        retired = {"information_ratio": None, "tracking_error": None, "forward_mde": None}
+        block = {**block, **retired, **_mapping(nominee["graded"])}
     dsr = _mapping(block.get("deflated_sharpe"))
     fit = _mapping(block.get("fit_plan"))
     return {
@@ -1203,7 +1309,9 @@ def _frozen_view(
         # Frozen beside replicates: the gate's reading of them, for the seed
         # mean beside the nominee's IR and their bar. Absent on one seed.
         "seed_replicates": (
-            _seed_gate_view(identity, _mapping(row.get("freeze_gate")).get("seed_replicates"))
+            _seed_gate_view(
+                identity, _mapping(row.get("freeze_gate")).get("seed_replicates"), regressed=regressed
+            )
             if block.get("seed_replicates")
             else None
         ),
@@ -1293,7 +1401,7 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
             session_key=str(current) if isinstance(current, str) and current else None,
         ),
         "sessions": sessions,
-        "frozen": _frozen_view(identity, records),
+        "frozen": _frozen_view(directory, identity, records),
         # Two different failures, kept apart: a forward replay attempt that
         # raised before its record -- selected by the pipeline's stage, not by
         # the provider phase the replay reads (``FORWARD_PHASE``) -- and a
@@ -1368,7 +1476,10 @@ def result_style(root: Path, experiment_id: str, name: str) -> dict[str, object]
         payload = read_json(sidecar)
     except (OSError, TypeError, ValueError):
         return {"available": False, "reason": "unreadable"}
-    if payload.get("schema_version") != STYLE_SCHEMA_VERSION or payload.get("mode") not in _RESULT_MODES:
+    if (
+        payload.get("schema_version") not in READABLE_STYLE_SCHEMA_VERSIONS
+        or payload.get("mode") not in _RESULT_MODES
+    ):
         return {"available": False, "reason": "no_style_artifact"}
     payload["available"] = True
     return payload

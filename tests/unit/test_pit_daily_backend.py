@@ -231,7 +231,7 @@ def generate_orders(context):
     style = json.loads(
         (Path(result.result_ref).parent / "style_analysis.json").read_text(encoding="utf-8")
     )
-    assert style["schema_version"] == 1 and style["mode"] == "valid"
+    assert style["schema_version"] == 2 and style["mode"] == "valid"
     assert style["benchmark_regression"]["reason"] == "benchmark_unavailable"
     assert style["style"]["reason"] == "style_columns_unavailable"
     assert len(record["inference_dates"]) == 2

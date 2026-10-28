@@ -3238,7 +3238,7 @@ function stageHead(key, detail) {
 }
 
 /* 前推回放: the forward slice alone — its span (progress while replaying),
-   once recorded the holder's line and its seed replicates, F1–F8 and the
+   once recorded the holder's line and its seed replicates, F1–F7 and the
    slice's own statistics. */
 function forwardStagePanel(detail) {
   const { forward, replay, thresholds, progress } = replayContext(detail);
@@ -3254,7 +3254,7 @@ function forwardStagePanel(detail) {
     el(
       "div",
       { class: "section-gap" },
-      el("h4", { class: "subsection-title" }, forward ? "前推条件 F1–F8" : "前推条件 F1–F8 · 阈值"),
+      el("h4", { class: "subsection-title" }, forward ? "前推条件 F1–F7" : "前推条件 F1–F7 · 阈值"),
       checklist(forwardCriteria(f, detail.verdict, thresholds)),
     ),
     sliceStats(f, FORWARD_STAT_FIELDS, thresholds),
@@ -3291,7 +3291,7 @@ function heldoutStagePanel(detail) {
 }
 
 /* 裁决: how the arm ended — its ending badge and reason, then the criteria
-   that decided it, as the same F1–F8 and H1–H4 rows the two slice views draw,
+   that decided it, as the same F1–F7 and H1–H4 rows the two slice views draw,
    so all three stages read in one vocabulary; then what the arm cost and when
    it was recorded, and the Paper handoff. An ending no replay decided (研究
    delivered nothing, or the worker broke) has the reason alone. Before it
@@ -3353,7 +3353,7 @@ function verdictStagePanel(detail) {
         el(
           "div",
           { class: "meta-line" },
-          "前推 F1–F8 与 Held-out H1–H4 全部通过才毕业；策略异常直接未通过，其他失败按上限重试",
+          "前推 F1–F7 与 Held-out H1–H4 全部通过才毕业；策略异常直接未通过，其他失败按上限重试",
         ),
     facts.length ? el("table", { class: "kv section-gap" }, ...facts) : null,
     paperHandoff(detail),
