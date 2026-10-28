@@ -85,8 +85,8 @@ def test_the_seed_mean_defers_only_at_or_above_min_active_ir():
     assert incubation.entry_screen(_gate(seed_mean, mean=None))["blocking"] == [seed_mean]
 
 
-def _reading(*reasons: str, neutralized: float = 0.05, plain: float = 0.04, seed_mean: float | None = None):
-    forward: dict[str, object] = {"neutralized_excess": neutralized, "plain_excess": plain}
+def _reading(*reasons: str, plain: float = 0.04, seed_mean: float | None = None):
+    forward: dict[str, object] = {"plain_excess": plain}
     if seed_mean is not None:
         forward["seed_mean"] = {"plain_excess": seed_mean}
     return {"verdict": {"reasons": list(reasons)}, "slices": {"forward": forward}}
@@ -100,15 +100,21 @@ def test_each_forward_screen_reason_blocks(reason: str):
     assert incubation.forward_screen(reading) == {"passed": False, "reasons": [f"incubation_{reason}"]}
 
 
-def test_the_forward_screen_needs_positive_neutralized_and_plain_excess():
+def test_the_forward_screen_reads_the_active_excess_the_book_earned():
+    """One measure: the forward slice's active excess, the seed mean's where
+    the book has replicates. A book that lagged its panel is blocked, and a
+    regressed figure a reading recorded before 2026-10-28 stores beside it
+    is not read."""
+
     # A graduation reason outside the screen does not block.
     assert incubation.forward_screen(_reading("forward_lower_bound_not_positive"))["passed"] is True
-    assert incubation.forward_screen(_reading(neutralized=0.0))["reasons"] == [
-        incubation.NEUTRALIZED_EXCESS_NOT_POSITIVE
-    ]
-    assert incubation.forward_screen(_reading(plain=-0.01))["reasons"] == [
-        incubation.PLAIN_EXCESS_NOT_POSITIVE
-    ]
+    for plain in (0.0, -0.01):
+        assert incubation.forward_screen(_reading(plain=plain))["reasons"] == [
+            incubation.PLAIN_EXCESS_NOT_POSITIVE
+        ]
+    lagged = _reading(plain=-0.01)
+    lagged["slices"]["forward"]["neutralized_excess"] = 0.15
+    assert incubation.forward_screen(lagged)["reasons"] == [incubation.PLAIN_EXCESS_NOT_POSITIVE]
     # With seed replicates the seed mean's plain excess decides, not the book's.
     assert incubation.forward_screen(_reading(plain=-0.01, seed_mean=0.02))["passed"] is True
     assert incubation.forward_screen(_reading(plain=0.02, seed_mean=-0.01))["reasons"] == [
@@ -488,7 +494,8 @@ def test_a_rerun_opens_only_the_missing_book_and_appends_nothing(tmp_path: Path)
     opened = _rerun(tmp_path, record["source_step_id"])
     assert (opened["book"], opened["book_id"], opened["screen"]["passed"]) == ("opened", "inc", True)
     forward = record["forward_reading"]["slices"]["forward"]
-    assert opened["forward"]["neutralized_excess_per_year"] == forward["neutralized_excess"]
+    assert opened["forward"]["active_excess_per_year"] == forward["plain_excess"]
+    assert opened["forward"]["active_excess_per_year_lower_bound"] == forward["lower_bound"]
     assert opened["forward"]["panel_return"] == forward["raw_readings"]["panel_return"]
     assert opened["forward"]["account_return"] == forward["raw_readings"]["strategy_return"]
     book = tmp_path / "paper" / "inc"

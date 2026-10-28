@@ -166,7 +166,7 @@ class FinishSessionTool:
                     "minLength": REASON_MIN_CHARS,
                     "maxLength": REASON_MAX_CHARS,
                     "description": (
-                        "Required for no_edge: the evidence read (neutralized excess "
+                        "Required for no_edge: the evidence read (active excess "
                         "and its yearly blocks, null percentile, deflated Sharpe with "
                         "its trials) and what stays untested. "
                         "Required for a freeze only when it leaves more than a third "
@@ -544,11 +544,10 @@ def _gate_record(gate: Mapping[str, object]) -> dict[str, object]:
         "information_ratio_bar": dsr.get("information_ratio_bar"),
         "full_span_validations": gate.get("full_span_validations"),
         "information_ratio": gate.get("information_ratio"),
-        "neutralized_excess": gate.get("neutralized_excess"),
+        "plain_excess": gate.get("plain_excess"),
         "positive_years": gate.get("positive_years"),
         "active_max_drawdown": gate.get("active_max_drawdown"),
-        # Only on an arm whose rules hold the raw cost-stress condition.
-        "raw_excess_at_cost_stress": gate.get("raw_excess_at_cost_stress"),
+        "excess_at_cost_stress": gate.get("excess_at_cost_stress"),
         "unavailable_reason": dsr.get("unavailable_reason"),
         "thresholds": gate.get("thresholds"),
     }
@@ -568,7 +567,7 @@ def _gate_numbers(gate: Mapping[str, object]) -> str:
             "information_ratio_bar",
             "positive_years",
             "active_max_drawdown",
-            "raw_excess_at_cost_stress",
+            "excess_at_cost_stress",
         )
         if name in record
     ]

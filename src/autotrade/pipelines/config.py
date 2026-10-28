@@ -209,7 +209,7 @@ class AcceptanceRules:
     max_drawdown: float = _rule(0.45, "Equity drawdown limit of the freeze gate and the verdict.")
     cost_stress_multiplier: float = _rule(
         2.0,
-        "Forward verdict: multiple of the profile's slippage the neutralised excess must survive.",
+        "Freeze gate and forward verdict: multiple of the profile's slippage the active excess must survive.",
     )
     active_max_drawdown: float = _rule(
         0.30, "Drawdown limit of the active series (strategy minus zero-skill panel)."
@@ -389,20 +389,23 @@ class AcceptanceRules:
             }
         return {
             "graded_series": (
-                "every return statistic below is measured on the ACTIVE series: the "
-                "node's daily return minus the host's zero-skill panel composite, the "
+                "every return statistic below is measured on the ACTIVE series, as it "
+                "is, with no regression: the node's daily return after every cost "
+                "minus the host's zero-skill panel composite, the "
                 f"equal-weight mean of {verdict.PANEL_DRAWS} random-name copies of the "
                 "node's own filled trades (same entry and exit instants, same money per "
                 "round trip, same Broker and costs; each name replaced by one on the "
                 "same side of the arm's benchmark_index membership that one board lot "
                 "of that money could "
-                "buy). Every formal validation reports it as "
-                "benchmark.active_neutralized_excess, benchmark.active_tracking_error, "
+                "buy). Its annualized mean is the active excess, its annualized "
+                "standard deviation the active tracking error and their ratio the "
+                "active information ratio. Every formal validation reports them as "
+                "benchmark.active_excess, benchmark.active_tracking_error, "
                 "benchmark.active_information_ratio and benchmark.active_max_drawdown "
-                "(over the validation's own span), and per research year as "
-                "sub_windows[].active_neutralized_excess_return; "
-                "benchmark.panel_neutralized_excess is what zero skill earned in the "
-                "node's own shape. The strategy exposes nothing for this beyond its orders"
+                "(over the validation's own span), per research year as "
+                "sub_windows[].active_excess_return, and day by day as the "
+                "active_return of its daily_series. The strategy exposes nothing for "
+                "this beyond its orders"
             ),
             "freeze_gate": {
                 "span": f"the nominee replayed the whole research period (span={FULL_SPAN})",
@@ -418,7 +421,7 @@ class AcceptanceRules:
                     "the H of them validated on the host and the M - H declared "
                     "offline count as rho + (1 - rho) * H + (M - H) independent "
                     "trials, rho the mean pairwise correlation of the H trials' "
-                    "daily graded series, each over its longest validated span. "
+                    "daily active series, each over its longest validated span. "
                     f"{OFFLINE_TRIALS_PRICING} The dispersion"
                     " is the zero-skill sampling "
                     "error of an annualized IR over the nominee's days, "
@@ -429,7 +432,7 @@ class AcceptanceRules:
                     "every row, is the IR this asks of a full-span nominee now"
                 ),
                 "positive_years": (
-                    "active neutralized excess > 0 in at least "
+                    "active excess > 0 in at least "
                     f"{self.min_positive_year_share:.0%} of the research years, "
                     f"rounded up ({needed_positive} of {years})"
                 ),
@@ -440,13 +443,11 @@ class AcceptanceRules:
                 "max_drawdown": (
                     f"<= {self.max_drawdown}: equity drawdown over the research period"
                 ),
-                "raw_excess_at_cost_stress": (
-                    "> 0: the holder's money over the research period, not the "
-                    "active series -- the node's own equity return after every "
-                    "cost minus benchmark_index's price return, after charging "
-                    f"{self.cost_stress_multiplier} x the slippage on its "
-                    "turnover (raw_readings.raw_excess_at_cost_stress on its "
-                    "batch_validate row)"
+                "excess_at_cost_stress": (
+                    "> 0: active excess over the research period after charging "
+                    f"{self.cost_stress_multiplier} x the slippage on the node's own "
+                    "turnover (graduation_activity.active_excess_at_cost_stress on "
+                    "its batch_validate row)"
                 ),
                 "seed_replicates": (
                     "a nominee whose main.py defines fit (it trains a model) "
@@ -484,16 +485,20 @@ class AcceptanceRules:
                 "forward": {
                     "lower_bound": (
                         f"{self.forward_confidence:.0%} one-sided block-bootstrap "
-                        "lower bound of annualized active neutralized excess > 0"
+                        "lower bound of annualized active excess > 0. Where the "
+                        "freeze registered seed replicates the series is the "
+                        "day-by-day average over the frozen book and its "
+                        "replicates, each replayed exactly like the frozen book; "
+                        "every other condition reads the frozen book itself"
                     ),
                     "recency": (
-                        "active neutralized excess of the last "
+                        "active excess of the last "
                         f"{self.recency_months} months >= 0"
                     ),
                     "max_drawdown": f"<= {self.max_drawdown}",
                     "active_max_drawdown": f"<= {self.active_max_drawdown}",
                     "excess_at_cost_stress": (
-                        "active neutralized excess > 0 with slippage multiplied by "
+                        "active excess > 0 with slippage multiplied by "
                         f"{self.cost_stress_multiplier} on the strategy's own turnover"
                     ),
                     "round_trips": (
@@ -501,27 +506,6 @@ class AcceptanceRules:
                     ),
                     "mean_gross": f">= {self.min_mean_gross}",
                     "tracking_mandate": "as in freeze_gate, over the forward months",
-                    "plain_excess_lower_bound": (
-                        f"{self.forward_confidence:.0%} one-sided block-bootstrap "
-                        "lower bound > 0 of the frozen book's plain excess over "
-                        "the forward months: the annualized mean of its active "
-                        "series with no regression, its daily return after "
-                        "every cost minus its zero-skill panel's (on a "
-                        "batch_validate row, the mean of daily_series "
-                        f"active_return x {verdict.TRADING_DAYS_PER_YEAR}). "
-                        "Not raw_readings.plain_selection, which compounds the "
-                        "book and the panel each over the span before taking "
-                        "their difference. Selection in the holder's terms, "
-                        "positive beyond its own noise. Where the freeze "
-                        "registered seed replicates the "
-                        "series is the day-by-day average over the frozen "
-                        "book and its replicates, each replicate replayed "
-                        "exactly like the frozen book over the forward "
-                        "months and Held-out; a frozen book without "
-                        "replicates is judged on its own series. The "
-                        "neutralized conditions above are judged on the "
-                        "frozen book itself and must hold as well"
-                    ),
                     "strategy_error": "none",
                     "minimum_detectable_excess": (
                         "about 2.12 x research active tracking error / sqrt(years of "
@@ -530,8 +514,8 @@ class AcceptanceRules:
                     ),
                 },
                 "heldout": {
-                    "neutralized_excess": (
-                        f"active, >= -{self.heldout_tolerance_z} x forward active "
+                    "active_excess": (
+                        f">= -{self.heldout_tolerance_z} x forward active "
                         "tracking error / sqrt(years)"
                     ),
                     "max_drawdown": f"<= {self.max_drawdown}",
@@ -615,7 +599,7 @@ class RollingExperimentConfig:
     # decision view is the most history every domain carries.
     window_months: int = 24
     # The index this arm is measured against: the benchmark leg of the style
-    # attribution and of the verdict's neutralization, and the membership the
+    # attribution and of the factor loadings, and the membership the
     # zero-skill panel draws its replacements from. One of
     # ``contracts.BENCHMARK_INDEXES``.
     benchmark_index: str = DEFAULT_BENCHMARK_INDEX
@@ -987,7 +971,7 @@ class StepResult:
     # the same bytes, on any span, are one trial. ``None`` where the caller did
     # not commit the revision through a session (the host's deterministic
     # baseline); the trial family then reads it from the revision's manifest
-    # (``experiment.fingerprinted``).
+    # (``experiment.trial_rows``).
     fingerprint: str | None = None
 
 

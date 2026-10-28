@@ -53,8 +53,9 @@ COMMON = _MARKET.normal(0.0, 0.10 / SCALE, len(DAYS))
 
 
 def _payload(*, seed: int, loading: float, days=DAYS) -> dict[str, object]:
-    """One Validation's style sidecar over ``days``, with a zero-skill panel,
-    so the graded series is the active one, as on every Validation now."""
+    """One Validation's style sidecar over ``days``, with a zero-skill panel
+    that rides the book's factors, so the graded series is the active one, as
+    on every Validation now, and trials correlate through ``COMMON`` alone."""
 
     rng = np.random.default_rng(seed)
     keep = [index for index, day in enumerate(DAYS) if day in set(days)]
@@ -66,7 +67,7 @@ def _payload(*, seed: int, loading: float, days=DAYS) -> dict[str, object]:
         + loading * COMMON
         + math.sqrt(1.0 - loading**2) * noise
     )
-    panel = 0.7 * BENCHMARK + rng.normal(0.0, 0.02 / SCALE, len(DAYS))
+    panel = 0.8 * BENCHMARK + 0.3 * SIZE + rng.normal(0.0, 0.02 / SCALE, len(DAYS))
 
     def pairs(values) -> list[list[object]]:
         return [[DAYS[index], float(values[index])] for index in keep]
@@ -113,7 +114,7 @@ def _row(directory: Path, index: int, *, seed: int, loading: float, span: str = 
         "span": span,
         "summary": {"total_return": 0.1, "max_drawdown": 0.1},
         "validation_result_ref": str(result / "result.json"),
-        "neutralized": verdict.neutralized_statistics(payload),
+        "graded": verdict.graded_statistics(payload),
     }
 
 
@@ -215,7 +216,7 @@ def test_an_arm_without_a_lineage_deflates_over_its_own_family(tmp_path: Path) -
         for key in ("trials", "host_trials", "offline_trials", "controls", "trial_correlation_pairs")
     } == {"trials": 3, "host_trials": 2, "offline_trials": 1, "controls": 1, "trial_correlation_pairs": 1}
     correlation = dsr["trial_correlation"]
-    assert correlation == pytest.approx(0.25222736470355794, rel=1e-12)
+    assert correlation == pytest.approx(0.24988921031370137, rel=1e-12)
     assert dsr["effective_trials"] == pytest.approx(correlation + (1 - correlation) * 2 + 1)
     assert (dsr["lineage_trials"], dsr["lineage_arms"]) == (0, [])
     assert "lineage" not in arm_record(())
@@ -227,7 +228,7 @@ def test_a_correlated_lineage_adds_almost_nothing_and_an_independent_one_its_cou
     count one each."""
 
     nominee = _payload(seed=1, loading=0.0)
-    own = verdict.neutral_daily(nominee)
+    own = verdict.graded_daily(nominee)
 
     def gate(series) -> dict[str, object]:
         return verdict.freeze_gate(
@@ -249,7 +250,7 @@ def test_a_correlated_lineage_adds_almost_nothing_and_an_independent_one_its_cou
     assert copies["information_ratio_bar"] == pytest.approx(alone["information_ratio_bar"])
 
     independent = gate(
-        [verdict.neutral_daily(_payload(seed=10 + index, loading=0.0)) for index in range(8)]
+        [verdict.graded_daily(_payload(seed=10 + index, loading=0.0)) for index in range(8)]
     )
     assert independent["trials"] == 9
     assert independent["effective_trials"] == pytest.approx(9.0, abs=0.3)

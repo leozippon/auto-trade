@@ -13,7 +13,7 @@ from autotrade.environment.replay.style import (
     BENCHMARK_LABEL,
     BENCHMARK_TS_CODE,
     _benchmark_regression,
-    _neutralized_excess,
+    _factor_regression,
     _size_factor,
     benchmark_summary_block,
     daily_returns_from_curve,
@@ -109,10 +109,11 @@ def test_daily_style_uses_replay_positions_and_frozen_slot_inputs(tmp_path: Path
 
 
 def test_the_agent_reads_its_own_sector_concentration_beside_the_size_tilt(tmp_path: Path):
-    """The neutralization regresses on CSI 300 and size only, so a single-sector
-    book scores as alpha — the one artifact that cleared every gate was 82.5 %
-    banks. ``industries`` stays host-side, so the compact block carries the top
-    industry's weight, and the Agent-visible projection must keep it."""
+    """The zero-skill panel draws its names without regard to industry, so a
+    single-sector book's sector move scores as selection — the one artifact
+    that cleared every gate was 82.5 % banks. ``industries`` stays host-side,
+    so the compact block carries the top industry's weight, and the
+    Agent-visible projection must keep it."""
 
     days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2024-01-02", periods=10)]
     replay_dir = tmp_path / "replay"
@@ -377,7 +378,7 @@ def test_a_slot_benchmark_read_error_surfaces_instead_of_reading_as_no_benchmark
         slot_benchmark(truncated, benchmark_index=BENCHMARK_TS_CODE)
 
 
-def _neutralization_inputs(tmp_path: Path, days: list[str]) -> tuple[Path, pd.DataFrame]:
+def _regression_inputs(tmp_path: Path, days: list[str]) -> tuple[Path, pd.DataFrame]:
     """A replay slot whose cross-section has a real small-minus-big spread."""
     replay_dir = tmp_path / "replay"
     replay_dir.mkdir()
@@ -413,11 +414,12 @@ def _neutralization_inputs(tmp_path: Path, days: list[str]) -> tuple[Path, pd.Da
     return replay_dir, pd.DataFrame(rows)
 
 
-def test_neutralized_excess_removes_the_market_and_size_contributions(tmp_path: Path):
+def test_the_factor_regression_reads_the_market_and_size_loadings(tmp_path: Path):
     """A raw excess return cannot tell an edge from a small-cap or high-beta
-    tilt — the audited fold's apparent edge was mostly the latter."""
+    tilt, so the book's loadings on both ride beside it; the regression's
+    intercept grades nothing and is not reported."""
     days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2024-01-02", periods=20)]
-    replay_dir, daily = _neutralization_inputs(tmp_path, days)
+    replay_dir, daily = _regression_inputs(tmp_path, days)
     analysis = replay_style_analysis(
         _replay(days),
         daily,
@@ -426,34 +428,36 @@ def test_neutralized_excess_removes_the_market_and_size_contributions(tmp_path: 
         mode="valid",
         benchmark_index=BENCHMARK_TS_CODE,
     )
-    block = analysis["neutralized_excess"]
+    block = analysis["factor_regression"]
     assert block["available"] is True
     # The size legs are formed on the prior day's cap, so the window's first
     # day has no factor and the regression runs on the remaining days.
     assert block["n_days"] == len(days) - 1
     assert block["market_beta"] is not None
     assert block["size_beta"] is not None
-    # The method is stated with the number, not left to the reader.
+    assert set(block) == {
+        "method", "available", "reason", "n_days", "tracking_error", "market_beta", "size_beta", "r2",
+    }
+    # The method is stated with the numbers, not left to the reader.
     assert "沪深300" in block["method"] and "244" in block["method"]
     assert "前一交易日" in block["method"]
     assert analysis["size_factor_daily"]
     compact = benchmark_summary_block(analysis)
-    assert compact["neutralized_excess_return"] == block["neutralized_excess_return"]
-    assert compact["neutralized_excess_method"] == block["method"]
-    # It is a different number from the raw excess, not a relabelling of it.
-    assert compact["neutralized_excess_return"] != compact["excess_return"]
+    assert (compact["market_beta"], compact["size_beta"], compact["tracking_error"]) == (
+        block["market_beta"], block["size_beta"], block["tracking_error"],
+    )
 
 
-def test_the_agent_reads_the_size_loading_the_neutralization_divides_out(tmp_path: Path):
+def test_the_agent_reads_the_size_loading_beside_the_tilt(tmp_path: Path):
     """``size_tilt`` says which rung of the cap ladder the book stands on;
-    ``size_beta`` is its loading on the size spread — the quantity the
-    neutralization divides out and the one that produced the 2024-01 drawdown.
+    ``size_beta`` is its loading on the size spread — the one that produced
+    the 2024-01 drawdown.
     The two move in opposite directions across measured books, so a budget
     written on the visible tilt cannot reach the loading. It therefore rides in
     the compact block and through the Agent-visible whitelist."""
 
     days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2024-01-02", periods=20)]
-    replay_dir, daily = _neutralization_inputs(tmp_path, days)
+    replay_dir, daily = _regression_inputs(tmp_path, days)
     analysis = replay_style_analysis(
         _replay(days),
         daily,
@@ -463,7 +467,7 @@ def test_the_agent_reads_the_size_loading_the_neutralization_divides_out(tmp_pat
         benchmark_index=BENCHMARK_TS_CODE,
     )
 
-    size_beta = analysis["neutralized_excess"]["size_beta"]
+    size_beta = analysis["factor_regression"]["size_beta"]
     assert isinstance(size_beta, float)
     block = benchmark_summary_block(analysis)
     # Projected from the one computation point, not recomputed beside it, and
@@ -484,7 +488,7 @@ def test_the_agent_reads_the_size_loading_the_neutralization_divides_out(tmp_pat
         mode="valid",
         benchmark_index=BENCHMARK_TS_CODE,
     )
-    assert unmeasured["neutralized_excess"]["size_beta"] is None
+    assert unmeasured["factor_regression"]["size_beta"] is None
     unmeasured_block = benchmark_summary_block(unmeasured)
     assert unmeasured_block["size_beta"] is None
     assert batch_candidate_stats(
@@ -569,24 +573,23 @@ def test_size_beta_is_measured_on_the_decimal_pct_chg_scale(tmp_path: Path):
     # starts on the second day: the legs are formed on the prior day's cap.
     assert analysis["size_factor_daily"][0] == [days[1], pytest.approx(smb[1])]
 
-    block = analysis["neutralized_excess"]
+    block = analysis["factor_regression"]
     assert block["available"] is True and block["n_days"] == len(days) - 1
     assert block["market_beta"] == 0.8
     assert block["size_beta"] == 0.5
     assert block["r2"] == 1.0
-    assert block["neutralized_excess_return"] == round(alpha_daily * TRADING_DAYS_PER_YEAR, 4)
+    assert block["tracking_error"] == 0.0
 
-    # Rescaling the factor moves only its own coefficient: the neutralized
-    # excess, the market beta and the fit quality are scale-invariant, which is
-    # why the old bug corrupted ``size_beta`` alone.
+    # Rescaling the factor moves only its own coefficient: the market beta
+    # and the fit quality are scale-invariant, which is why the old bug
+    # corrupted ``size_beta`` alone.
     strategy = [(str(date), float(value)) for date, value in analysis["strategy_daily"]]
     benchmark = {str(date): float(value) for date, value in analysis["benchmark_daily"]}
     size = {str(date): float(value) for date, value in analysis["size_factor_daily"]}
-    rescaled = _neutralized_excess(strategy, benchmark, {k: v / 100.0 for k, v in size.items()})
+    rescaled = _factor_regression(strategy, benchmark, {k: v / 100.0 for k, v in size.items()})
     assert rescaled["size_beta"] == pytest.approx(50.0)
     assert rescaled["market_beta"] == block["market_beta"]
     assert rescaled["r2"] == block["r2"]
-    assert rescaled["neutralized_excess_return"] == block["neutralized_excess_return"]
 
 
 def test_size_legs_are_formed_on_the_prior_days_cap():
@@ -625,17 +628,18 @@ def test_size_legs_are_formed_on_the_prior_days_cap():
 
 
 @pytest.mark.parametrize("exposure", [0.0, 0.2])
-def test_cash_and_a_constant_low_beta_book_have_no_alpha_in_a_bear_market(exposure: float):
-    """A book that only scales the market shows no neutralized excess, however
-    much its raw excess flatters it because less capital was exposed."""
+def test_cash_and_a_constant_low_beta_book_load_on_the_market_alone(exposure: float):
+    """A book that only scales the market loads on it by its exposure and on
+    nothing else, however much its raw excess flatters it because less capital
+    was exposed."""
 
     dates = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2024-01-02", periods=24)]
     market = {day: (-0.012, 0.004, -0.006)[i % 3] for i, day in enumerate(dates)}
     size = {day: (0.005, -0.003, 0.002, -0.002)[i % 4] for i, day in enumerate(dates)}
     strategy = [(day, exposure * market[day]) for day in dates]
-    block = _neutralized_excess(strategy, market, size)
+    block = _factor_regression(strategy, market, size)
     assert block["available"] is True
-    assert block["neutralized_excess_return"] == 0.0
+    assert block["tracking_error"] == 0.0
     assert block["market_beta"] == exposure
     assert block["size_beta"] == 0.0
     # The raw benchmark excess is positive solely because less capital was exposed.
@@ -648,12 +652,12 @@ def test_cash_and_a_constant_low_beta_book_have_no_alpha_in_a_bear_market(exposu
     assert raw > benchmark
 
 
-def test_neutralized_excess_reports_missing_factors_instead_of_zero(tmp_path: Path):
+def test_the_factor_regression_reports_missing_factors_instead_of_zero(tmp_path: Path):
     days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2024-01-02", periods=20)]
-    # No macro.parquet: no benchmark, so no neutralization is possible.
+    # No macro.parquet: no benchmark, so no regression is possible.
     replay_dir = tmp_path / "empty_replay"
     replay_dir.mkdir()
-    _, daily = _neutralization_inputs(tmp_path, days)
+    _, daily = _regression_inputs(tmp_path, days)
     analysis = replay_style_analysis(
         _replay(days),
         daily,
@@ -662,21 +666,22 @@ def test_neutralized_excess_reports_missing_factors_instead_of_zero(tmp_path: Pa
         mode="valid",
         benchmark_index=BENCHMARK_TS_CODE,
     )
-    block = analysis["neutralized_excess"]
+    block = analysis["factor_regression"]
     assert block["available"] is False
     assert block["reason"] == "factors_unavailable"
-    assert block["neutralized_excess_return"] is None
+    assert (block["market_beta"], block["tracking_error"]) == (None, None)
     assert benchmark_summary_block(analysis) is None
 
 
 def test_the_sidecar_carries_the_panel_and_the_active_figures_the_verdict_grades(tmp_path: Path):
     """A formal replay's zero-skill panel is stored beside the strategy's own
     series, and the figures the Agent reads off it are the ones the verdict
-    measures: same regression, same tracking error, on strategy minus panel."""
+    measures: the mean, standard deviation and drawdown of strategy minus
+    panel, with no regression."""
     from autotrade.environment.replay.stats import attach_sub_window_benchmark
     from autotrade.environment.replay.style import active_analysis
     from autotrade.pipelines.config import AcceptanceRules
-    from autotrade.pipelines.verdict import freeze_gate, neutralized_statistics
+    from autotrade.pipelines.verdict import _mandate, freeze_gate, graded_statistics
 
     rng = np.random.default_rng(7)
     days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2024-01-02", periods=60)]
@@ -730,18 +735,16 @@ def test_the_sidecar_carries_the_panel_and_the_active_figures_the_verdict_grades
     }
     assert graded["strategy_daily"] == bare["strategy_daily"]
     compact = benchmark_summary_block(graded)
-    active = neutralized_statistics(graded)
-    own = neutralized_statistics(bare)
+    active = graded_statistics(graded)
+    own = graded_statistics(bare)
     assert (active["series"], own["series"]) == ("active", "absolute")
-    assert compact["active_neutralized_excess"] == active["neutralized_excess"]
+    assert compact["active_excess"] == round(active["plain_excess"], 4)
     assert compact["active_tracking_error"] == round(active["tracking_error"], 4)
     assert compact["active_information_ratio"] == round(active["information_ratio"], 4)
-    assert compact["tracking_error"] == round(own["tracking_error"], 4)
+    # The mandate's figures are the strategy's own regression's.
+    assert compact["tracking_error"] == round(_mandate(bare, "", "")["tracking_error"], 4)
     assert compact["market_beta"] == round(own["market_beta"], 3)
     assert compact["panel_draws"] == 20
-    assert compact["panel_neutralized_excess"] == graded["panel_neutralized_excess"][
-        "neutralized_excess_return"
-    ]
     # The active drawdown the freeze gate holds to its limit is the one the
     # Agent reads: two sessions rebuilt it from proxies because no row had it.
     gate = freeze_gate(graded, rules=AcceptanceRules(), trials=1, full_span_validations=2, summary={})
@@ -757,11 +760,10 @@ def test_the_sidecar_carries_the_panel_and_the_active_figures_the_verdict_grades
     # A replay without a panel states none of it, and nothing else moved.
     unpanelled = benchmark_summary_block(bare)
     assert set(compact) - set(unpanelled) == {
-        "active_neutralized_excess",
+        "active_excess",
         "active_tracking_error",
         "active_information_ratio",
         "active_max_drawdown",
-        "panel_neutralized_excess",
         "panel_draws",
     }
     assert {key: compact[key] for key in unpanelled} == unpanelled
@@ -774,9 +776,8 @@ def test_the_sidecar_carries_the_panel_and_the_active_figures_the_verdict_grades
         return attach_sub_window_benchmark(summary, analysis)["sub_windows"]
 
     [with_panel], [without] = year_rows(graded), year_rows(bare)
-    assert with_panel["active_neutralized_excess_return"] == active["neutralized_excess"]
-    assert "active_neutralized_excess_return" not in without
-    assert with_panel["neutralized_excess_return"] == without["neutralized_excess_return"]
+    assert with_panel["active_excess_return"] == round(active["plain_excess"], 6)
+    assert "active_excess_return" not in without
 
 
 def test_membership_is_read_from_the_decision_view_and_every_slot(tmp_path: Path):

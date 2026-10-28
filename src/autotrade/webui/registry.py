@@ -41,7 +41,7 @@ from autotrade.environment.tools.report_issue import (
 from autotrade.pipelines.agent_inbox import INBOX_NAME, inbox_public_view
 from autotrade.pipelines.calendar import FULL_SPAN
 from autotrade.pipelines.config import AcceptanceRules, acceptance_for, rolling_default
-from autotrade.pipelines.experiment import freeze_gate_for, neutralized
+from autotrade.pipelines.experiment import freeze_gate_for, validation_statistics
 from autotrade.pipelines.hitl_state import (
     ARCHIVED_NAME,
     CONTROL_NAME,
@@ -77,7 +77,7 @@ from autotrade.pipelines.skills import latest_skills_snapshot
 from autotrade.pipelines.verdict import (
     CONDITIONS,
     panel_return,
-    raw_excess_at_cost_stress,
+    summary_excess_at_cost_stress,
 )
 from autotrade.pipelines.worker import _ALLOWED_PARAMS
 
@@ -324,8 +324,8 @@ def arm_ending(
     for itself. A worker the host or the environment broke ended the process
     rather than the research, so its state is read before the ledger. Otherwise
     the verdict decides: a graduate is named by its forward year as the holder
-    reads it — the book, the benchmark, the book against its zero-skill panel
-    unregressed, then the neutralised IR the gate graded (``forward`` is
+    reads it — the book, the benchmark, the book against its zero-skill panel,
+    then the active IR the gate graded (``forward`` is
     :func:`_forward_view`, which carries those readings for every recorded
     slice) — a replay that refused one by the criteria it failed, a graduation
     the operator withdrew as a refusal whose reason says so with the void's
@@ -358,8 +358,8 @@ def arm_ending(
             "reason": (
                 f"前推 账户 {_percent(raw.get('strategy_return'))}"
                 f" · 基准 {_percent(raw.get('benchmark_return'))}"
-                f" · 对面板（未回归）{_percent(raw.get('plain_selection'))}"
-                f" · 中性化主动 IR {'—' if ratio is None else f'{ratio:.2f}'}"
+                f" · 对面板 {_percent(raw.get('plain_selection'))}"
+                f" · 主动 IR {'—' if ratio is None else f'{ratio:.2f}'}"
             ),
         }
     if verdict["status"] == "discarded":
@@ -791,32 +791,35 @@ def _cost_stress_multiplier(directory: Path) -> float:
 
 def _step_view(row: Mapping[str, object], multiplier: float) -> dict[str, object]:
     """One recorded Validation: its span, headline replay metrics, the raw
-    excess over the arm's benchmark plain and at the arm's cost stress
-    (``multiplier``; the freeze gate's raw condition), and the neutralised
-    figures the freeze gate counts."""
+    excess over the arm's benchmark, and the graded figures the freeze gate
+    counts, the active excess at the arm's cost stress (``multiplier``)
+    among them. A row recorded before rows carried graded figures shows
+    none: its stored ones were of the retired regressed measure."""
 
     summary = _mapping(row.get("summary"))
-    neutral = _mapping(row.get("neutralized"))
+    graded = _mapping(row.get("graded"))
     return {
         "step_id": row.get("step_id"),
         "span": row.get("span"),
         "total_return": _number(summary.get("total_return")),
         "excess_return": _number(_mapping(summary.get("benchmark")).get("excess_return")),
-        "raw_excess_at_cost_stress": raw_excess_at_cost_stress(
-            summary, cost_stress_multiplier=multiplier
+        "excess_at_cost_stress": (
+            summary_excess_at_cost_stress(graded, summary, cost_stress_multiplier=multiplier)
+            if _number(graded.get("plain_excess")) is not None
+            else None
         ),
         "sharpe": _number(summary.get("sharpe")),
         "max_drawdown": _number(summary.get("max_drawdown")),
-        "neutralized_excess": _number(neutral.get("neutralized_excess")),
-        "information_ratio": _number(neutral.get("information_ratio")),
+        "plain_excess": _number(graded.get("plain_excess")),
+        "information_ratio": _number(graded.get("information_ratio")),
         # ``active`` when the figures are of the node's return minus its
         # zero-skill panel; absent on a node recorded before panels existed.
-        "series": neutral.get("series"),
+        "series": graded.get("series"),
     }
 
 
 def _best_row(steps: Sequence[Mapping[str, object]]) -> Mapping[str, object] | None:
-    """A session's full-span Validation with the highest neutralised IR, or
+    """A session's full-span Validation with the highest active IR, or
     ``None`` when it ran no measurable one."""
 
     full = [
@@ -825,11 +828,11 @@ def _best_row(steps: Sequence[Mapping[str, object]]) -> Mapping[str, object] | N
         if row.get("span") == FULL_SPAN
         # A control can never be nominated, so it is never the arm's best.
         and row.get("control") is not True
-        and _number(_mapping(row.get("neutralized")).get("information_ratio")) is not None
+        and _number(_mapping(row.get("graded")).get("information_ratio")) is not None
     ]
     return max(
         full,
-        key=lambda row: float(row["neutralized"]["information_ratio"]),  # type: ignore[index]
+        key=lambda row: float(row["graded"]["information_ratio"]),  # type: ignore[index]
         default=None,
     )
 
@@ -965,8 +968,9 @@ _LIVE_BEST_CACHE: dict[tuple[str, bool, tuple[str, ...]], dict[str, object] | No
 def _live_steps(directory: Path) -> list[dict[str, object]]:
     """The research session's Validations recorded so far, from the host
     sidecars ``session_resume.record_step_sidecar`` writes, shaped like the
-    ledger's step rows with the neutralised figures the Pipeline records
-    (``experiment.neutralized``), so the same selection applies to both."""
+    ledger's step rows with the graded figures the Pipeline records
+    (``experiment.validation_statistics``), so the same selection applies to
+    both."""
 
     root = directory / STEP_SIDECAR_DIR
     if not root.is_dir():
@@ -981,7 +985,7 @@ def _live_steps(directory: Path) -> list[dict[str, object]]:
                 reference = str(
                     recorded_path(directory, str(record.get("result_ref") or ""))
                 )
-                figures = neutralized(reference)
+                figures = validation_statistics(reference)
             except OSError:
                 # The replay's style file is written before its sidecar; a
                 # node whose files are not readable yet is read next time.
@@ -992,7 +996,7 @@ def _live_steps(directory: Path) -> list[dict[str, object]]:
                 "span": record.get("span"),
                 "summary": dict(_mapping(record.get("summary"))),
                 "validation_result_ref": reference,
-                "neutralized": figures,
+                "graded": figures,
                 # What the freeze gate's trial family reads; absent (no
                 # control, undeclared) on a sidecar written before them.
                 **{
@@ -1136,9 +1140,9 @@ def _research_session_view(
                 "information_ratio": _number(gate.get("information_ratio")),
                 "positive_years": _number(gate.get("positive_years")),
                 "active_max_drawdown": _number(gate.get("active_max_drawdown")),
-                # Absent from a gate recorded before the raw condition; its
-                # thresholds carry the multiplier where it was judged.
-                "raw_excess_at_cost_stress": _number(gate.get("raw_excess_at_cost_stress")),
+                # Absent from a gate recorded before the condition read the
+                # active series; its thresholds carry the multiplier.
+                "excess_at_cost_stress": _number(gate.get("excess_at_cost_stress")),
                 "mandate": {
                     key: _number(value)
                     for key, value in _mapping(gate.get("mandate")).items()
@@ -1184,7 +1188,7 @@ def _frozen_view(
         "source_step_id": block.get("source_step_id"),
         "result": _result_name(block.get("research_result_ref")),
         "days": block.get("days"),
-        "neutralized_excess": _number(block.get("neutralized_excess")),
+        "plain_excess": _number(block.get("plain_excess")),
         "tracking_error": _number(block.get("tracking_error")),
         "information_ratio": _number(block.get("information_ratio")),
         "deflated_sharpe_probability": _number(dsr.get("deflated_sharpe_probability")),

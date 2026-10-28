@@ -72,7 +72,7 @@ BLOCKING = frozenset(
             "freeze_deflated_sharpe_unavailable",
             "freeze_too_few_positive_years",
             "freeze_active_drawdown_exceeded",
-            "freeze_raw_excess_not_positive_at_cost_stress",
+            "freeze_not_positive_at_cost_stress",
             "freeze_tracking_error_above_cap",
             "freeze_beta_outside_band",
             "freeze_seed_replicate_invalid",
@@ -98,7 +98,6 @@ FORWARD_BLOCKING = _known(
     ),
     _VERDICT_REASONS,
 )
-NEUTRALIZED_EXCESS_NOT_POSITIVE = f"{PREFIX}forward_neutralized_excess_not_positive"
 PLAIN_EXCESS_NOT_POSITIVE = f"{PREFIX}forward_plain_excess_not_positive"
 
 
@@ -144,17 +143,15 @@ def entry_screen(gate: Mapping[str, object]) -> dict[str, object]:
 def forward_screen(reading: Mapping[str, object]) -> dict[str, object]:
     """Pass unless the forward and Held-out reading (``experiment.replay_frozen``)
     shows a strategy error, a broken drawdown limit, or a forward slice whose
-    neutralised or plain excess is not positive -- the seed mean's plain
-    excess where the book has seed replicates. A cheap screen on a year the
-    book was not selected on; the confirmation is Paper's."""
+    plain excess is not positive -- the seed mean's where the book has seed
+    replicates. A cheap screen on a year the book was not selected on; the
+    confirmation is Paper's."""
 
     verdict_reasons = set(reading["verdict"]["reasons"])  # type: ignore[index]
     reasons = [f"{PREFIX}{reason}" for reason in FORWARD_BLOCKING if reason in verdict_reasons]
     slices = reading.get("slices")
     if isinstance(slices, Mapping):
         forward: Mapping[str, object] = slices["forward"]
-        if (_number(forward["neutralized_excess"]) or 0.0) <= 0:
-            reasons.append(NEUTRALIZED_EXCESS_NOT_POSITIVE)
         seed_mean = forward.get("seed_mean")
         plain = seed_mean["plain_excess"] if isinstance(seed_mean, Mapping) else forward["plain_excess"]
         if (_number(plain) or 0.0) <= 0:

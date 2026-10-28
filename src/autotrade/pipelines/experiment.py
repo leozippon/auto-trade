@@ -121,11 +121,11 @@ from .verdict import (
     forward_mde,
     forward_slice,
     freeze_gate,
+    graded_statistics,
     graduation_verdict,
     heldout_slice,
     information_ratio_bar,
     judge,
-    neutralized_statistics,
     trial_correlation,
     trial_family_statistics,
 )
@@ -396,7 +396,7 @@ class RollingExperimentPipeline:
                     f"of {budgets['max_replay_years']}"
                 )
             # Every row the ledger records names the bytes it replayed.
-            step_rows = fingerprinted(
+            step_rows = trial_rows(
                 self.config.experiment_dir,
                 [research_step_record(step) for step in session.steps],
             )
@@ -487,7 +487,7 @@ class RollingExperimentPipeline:
                 "terminal_offline_trials": session.terminal_offline_trials,
                 "steps": step_rows,
                 "trials_to_date": trial_family(
-                    fingerprinted(
+                    trial_rows(
                         self.config.experiment_dir, [*_recorded_steps(records), *step_rows]
                     ),
                     session.terminal_offline_trials,
@@ -617,7 +617,7 @@ class RollingExperimentPipeline:
             "series": gate["series"],
             "mandate": gate["mandate"],
             "days": gate["days"],
-            "neutralized_excess": gate["neutralized_excess"],
+            "plain_excess": gate["plain_excess"],
             "tracking_error": gate["tracking_error"],
             "information_ratio": gate["information_ratio"],
             "blocks": nominee.validation.summary.get("sub_windows"),
@@ -915,9 +915,8 @@ class RollingExperimentPipeline:
         Each seed replicate's completed replay is handed to both slices, named
         by its artifact and source Step: ``slices.<name>.seed_replicates`` and
         ``slices.<name>.seed_mean`` carry its readings and the mean with the
-        book, ``slices.forward.plain_excess_lower_bound`` what F8 judges on
-        them together, and the record's ``seed_replicates`` its result and
-        refits.
+        book, ``slices.forward.lower_bound`` what F2 judges on them together,
+        and the record's ``seed_replicates`` its result and refits.
         """
 
         replay, analysis = replay_and_analysis(result.result_ref)
@@ -1186,13 +1185,13 @@ def trial_fields(step: StepResult) -> dict[str, object]:
 def research_step_record(step: StepResult) -> dict[str, object]:
     """One completed Validation as the ledger's ``steps[]`` row.
 
-    ``neutralized`` carries the graded series' neutralised excess, residual
-    tracking error and IR over the span, from the replay's own style sidecar
-    (``None`` when they cannot be measured): the figures the freeze gate
-    counts. ``series`` inside it says whether that is the active series (the
-    replay carries a zero-skill panel) or the strategy's own. ``fingerprint``,
-    ``control``, ``batch_id`` and ``offline_trials`` are what the trial family
-    reads.
+    ``graded`` carries the graded series' plain excess, tracking error, IR
+    and loadings over the span (``verdict.graded_statistics``), from the
+    replay's own style sidecar (``None`` when they cannot be measured): the
+    figures the freeze gate counts. ``series`` inside it says whether that is
+    the active series (the replay carries a zero-skill panel) or the
+    strategy's own. ``fingerprint``, ``control``, ``batch_id`` and
+    ``offline_trials`` are what the trial family reads.
     """
 
     return {
@@ -1200,7 +1199,7 @@ def research_step_record(step: StepResult) -> dict[str, object]:
         "span": step.span,
         "summary": step.validation.summary,
         "validation_result_ref": step.validation.result_ref,
-        "neutralized": neutralized(step.validation.result_ref),
+        "graded": validation_statistics(step.validation.result_ref),
     }
 
 
@@ -1211,7 +1210,7 @@ def trial_family(
 
     A trial is a distinct strategy validated anywhere in the arm, on any span,
     in any attempt: the bytes its revision holds (``fingerprint``, which every
-    row must carry, :func:`fingerprinted`), not the revision, so validating
+    row must carry, :func:`trial_rows`), not the revision, so validating
     the same bytes again -- a probe's finalist on the full span -- is the same
     trial. Bytes whose every Validation was registered as a control are left
     out: a control is a comparison leg, not one of the configurations the
@@ -1310,26 +1309,35 @@ def recorded_terminal_offline_trials(records: Sequence[Mapping[str, object]]) ->
 def _measured_days(row: Mapping[str, object]) -> int:
     """How many days one Validation row's graded series measured (0 when none)."""
 
-    neutral = row.get("neutralized")
-    days = neutral.get("days") if isinstance(neutral, Mapping) else None
+    figures = row.get("graded")
+    days = figures.get("days") if isinstance(figures, Mapping) else None
     return days if isinstance(days, int) else 0
 
 
-def fingerprinted(
+def trial_rows(
     experiment_dir: str | Path, rows: Sequence[Mapping[str, object]]
 ) -> list[Mapping[str, object]]:
-    """``rows`` each with the artifact fingerprint :func:`trial_family` keys on:
-    the one a row carries, else the one the arm's revision store recorded for
-    its revision (``session_resume.revision_fingerprint``) -- a ledger row
-    written before rows carried it, or a Step of the host's deterministic
-    baseline."""
+    """``rows`` each with what the trial family and the freeze gate read of it.
 
-    return [
-        row
-        if row.get("fingerprint")
-        else {**row, "fingerprint": revision_fingerprint(experiment_dir, str(row["revision_id"]))}
-        for row in rows
-    ]
+    The artifact fingerprint :func:`trial_family` keys on: the one a row
+    carries, else the one the arm's revision store recorded for its revision
+    (``session_resume.revision_fingerprint``) -- a ledger row written before
+    rows carried it, or a Step of the host's deterministic baseline. And the
+    graded statistics the gate counts (``graded``,
+    :func:`research_step_record`): the ones a row carries, else those of its
+    style sidecar, read where the arm in ``experiment_dir`` now is -- a ledger
+    row written before rows carried them, whose ``neutralized`` block held the
+    retired regressed figures and is not read.
+    """
+
+    def completed(row: Mapping[str, object]) -> Mapping[str, object]:
+        if not row.get("fingerprint"):
+            row = {**row, "fingerprint": revision_fingerprint(experiment_dir, str(row["revision_id"]))}
+        if "graded" not in row:
+            row = {**row, "graded": _measured_or_none(_style_analysis(experiment_dir, row))}
+        return row
+
+    return [completed(row) for row in rows]
 
 
 def _arm_trials(
@@ -1343,12 +1351,12 @@ def _arm_trials(
     tuple[list[str], list[Mapping[str, object]], dict[str, object]],
 ]:
     """What an arm's freeze gate deflates over: its Validation rows, earlier
-    sessions' recorded Steps and this session's alike, fingerprinted from the
+    sessions' recorded Steps and this session's alike, completed from the
     revision store of the arm in ``experiment_dir`` where a row does not carry
     it; their :func:`trial_family`; and the lineage the ledger records, joined
     to that family (:func:`recorded_lineage`)."""
 
-    rows = fingerprinted(experiment_dir, [*_recorded_steps(records), *session_rows])
+    rows = trial_rows(experiment_dir, [*_recorded_steps(records), *session_rows])
     family = trial_family(rows, terminal_offline_trials)
     return (
         rows,
@@ -1413,7 +1421,7 @@ def freeze_gate_for(
             full_span_validations=sum(
                 1
                 for row in rows
-                if row.get("span") == FULL_SPAN and _finite_ir(row.get("neutralized"))
+                if row.get("span") == FULL_SPAN and _finite_ir(row.get("graded"))
             ),
             years=years,
             summary=summary if isinstance(summary, Mapping) else None,
@@ -1428,8 +1436,8 @@ def freeze_gate_for(
     }
     return _seed_replicate_gate(
         gate,
-        fingerprinted(experiment_dir, [nominee])[0],
-        fingerprinted(experiment_dir, seed_replicates),
+        trial_rows(experiment_dir, [nominee])[0],
+        trial_rows(experiment_dir, seed_replicates),
         experiment_dir=experiment_dir,
         deterministic=deterministic,
     )
@@ -1595,7 +1603,7 @@ def _seed_replicate_gate(
     entries: list[dict[str, object]] = []
     for row in replicates:
         step_id = str(row["step_id"])
-        neutral = row.get("neutralized")
+        figures = row.get("graded")
         entry: dict[str, object] = {"step_id": step_id}
         try:
             if step_id == nominee["step_id"]:
@@ -1608,12 +1616,12 @@ def _seed_replicate_gate(
             if fingerprint in seen:
                 raise ValueError(f"holds the same bytes as {seen[fingerprint]}")
             seen[fingerprint] = node_handle(step_id)
-            if not _finite_ir(neutral) or neutral.get("series") != gate.get("series"):  # type: ignore[union-attr]
+            if not _finite_ir(figures) or figures.get("series") != gate.get("series"):  # type: ignore[union-attr]
                 raise ValueError(f"has no measured {gate.get('series')} information ratio")
             entry["seed_line"] = seed_change(
                 experiment_dir, str(nominee["revision_id"]), str(row["revision_id"])
             )
-            entry["information_ratio"] = float(neutral["information_ratio"])  # type: ignore[index]
+            entry["information_ratio"] = float(figures["information_ratio"])  # type: ignore[index]
         except ValueError as exc:
             entry["problem"] = str(exc)
         entries.append(entry)
@@ -1877,8 +1885,19 @@ def _recorded_steps(records: Sequence[Mapping[str, object]]) -> list[Mapping[str
     ]
 
 
-def neutralized(result_ref: str) -> dict[str, object] | None:
-    """One validation's neutralised excess, tracking error and IR.
+def _measured_or_none(analysis: Mapping[str, object]) -> dict[str, object] | None:
+    """``verdict.graded_statistics`` of a whole sidecar; ``None`` when its
+    span cannot be measured."""
+
+    try:
+        return graded_statistics(analysis)
+    except ValueError:
+        return None
+
+
+def validation_statistics(result_ref: str) -> dict[str, object] | None:
+    """One validation's graded statistics: plain excess, tracking error, IR
+    and loadings (``verdict.graded_statistics``).
 
     Every successful replay writes its style sidecar, so a missing or
     unreadable one raises: dropping the row would silently narrow the freeze
@@ -1887,11 +1906,7 @@ def neutralized(result_ref: str) -> dict[str, object] | None:
     """
 
     path = Path(result_ref).parent / STYLE_ARTIFACT_NAME
-    analysis = json.loads(path.read_text(encoding="utf-8"))
-    try:
-        return neutralized_statistics(analysis)
-    except ValueError:
-        return None
+    return _measured_or_none(json.loads(path.read_text(encoding="utf-8")))
 
 
 def _finite_ir(block: object) -> bool:
@@ -2197,14 +2212,12 @@ def _session_budgets(
 __all__ = [
     "DailyStrategyPipeline",
     "RollingExperimentPipeline",
-    "fingerprinted",
     "freeze_gate_for",
     "full_span_bar",
     "incubation_entry",
     "judged_replay",
     "lineage_ledger_record",
     "lineage_summary",
-    "neutralized",
     "null_control_seed",
     "recorded_lineage",
     "replay_and_analysis",
@@ -2212,4 +2225,6 @@ __all__ = [
     "seed_change",
     "trial_family",
     "trial_fields",
+    "trial_rows",
+    "validation_statistics",
 ]

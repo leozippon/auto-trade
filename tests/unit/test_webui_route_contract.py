@@ -471,16 +471,15 @@ def test_every_track_status_and_verdict_reason_has_a_console_label() -> None:
     def keys(literal: str) -> set[str]:
         return set(re.findall(r"^  ([a-z_]+): ", _js_literal(literal, "\n};"), re.MULTILINE))
 
-    # Every reason string the checkpoint logic can write, and the one a
-    # regressed reading carries when it could not be measured.
-    reasons = {verdict.TOO_FEW_REGRESSION_DAYS}
+    # Every reason string the checkpoint logic can write.
+    reasons: set[str] = set()
     source = ast.parse(Path(verdict.__file__).read_text(encoding="utf-8"))
     transitions = next(n for n in ast.walk(source) if isinstance(n, ast.FunctionDef) and n.name == "_first_transition")
     for node in ast.walk(transitions):
         is_pair = isinstance(node, ast.Tuple) and len(node.elts) == 2 and all(isinstance(e, ast.Constant) for e in node.elts)
         if is_pair and node.elts[0].value in ("killed", "confirmed"):
             reasons.add(node.elts[1].value)
-    assert len(reasons) == 5, reasons
+    assert len(reasons) == 4, reasons
     assert reasons <= keys("const VERDICT_REASON_LABELS = {"), sorted(reasons)
     assert keys("const VERDICT_STATUS = {") == {"observing", "confirmed", "killed"}
     assert keys("const TRACK_LABELS = {") == {"graduated", "incubating"}

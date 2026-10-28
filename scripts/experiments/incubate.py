@@ -72,10 +72,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 def headline(block: object) -> dict[str, object] | None:
     """One slice's headline numbers, or None for a reading without slices
     (a strategy error). The account, index and zero-skill panel returns are
-    cumulative over the slice; the regressed (neutralised) and unregressed
-    (plain) active excess against the panel, with their bounds, are per-year
+    cumulative over the slice; the active excess against the panel and its
+    lower bound (F2's, over the node and its seed replicates) are per-year
     rates, so a Held-out quarter shows a rate four times its cumulative gap.
-    ``seed_mean_plain_excess_per_year`` is what the screen reads when the
+    ``seed_mean_active_excess_per_year`` is what the screen reads when the
     node has seed replicates."""
 
     if not isinstance(block, dict):
@@ -86,11 +86,9 @@ def headline(block: object) -> dict[str, object] | None:
         "account_return": raw.get("strategy_return"),
         "index_return": raw.get("benchmark_return"),
         "panel_return": raw.get("panel_return"),
-        "neutralized_excess_per_year": block.get("neutralized_excess"),
-        "neutralized_excess_per_year_lower_bound": block.get("lower_bound"),
-        "plain_excess_per_year": block.get("plain_excess"),
-        "plain_excess_per_year_lower_bound": block.get("plain_excess_lower_bound"),
-        "seed_mean_plain_excess_per_year": seed_mean.get("plain_excess") if isinstance(seed_mean, dict) else None,
+        "active_excess_per_year": block.get("plain_excess"),
+        "active_excess_per_year_lower_bound": block.get("lower_bound"),
+        "seed_mean_active_excess_per_year": seed_mean.get("plain_excess") if isinstance(seed_mean, dict) else None,
         "information_ratio": block.get("information_ratio"),
         "max_drawdown": block.get("max_drawdown"),
         "active_max_drawdown": block.get("active_max_drawdown"),

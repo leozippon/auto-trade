@@ -55,9 +55,8 @@ const VERDICT_STATUS = {
 const VERDICT_REASON_LABELS = {
   account_drawdown_exceeded: "账户回撤超限",
   active_drawdown_exceeded: "主动回撤超限",
-  both_kill_upper_bounds_below_zero: "两个读数的终止上界均低于 0",
-  both_confirm_lower_bounds_above_zero: "两个读数的确认下界均高于 0",
-  too_few_regression_days: "回归所需的交易日不足",
+  kill_upper_bound_below_zero: "主动超额的终止上界低于 0",
+  confirm_lower_bound_above_zero: "主动超额的确认下界高于 0",
 };
 // The conditions of the freeze gate and of the forward and Held-out verdict
 // (pipelines/verdict.py), keyed by the token the pipeline records when one
@@ -82,26 +81,23 @@ const REASON_LABELS = {
   freeze_active_drawdown_exceeded: "研究期主动回撤",
   freeze_tracking_error_above_cap: "研究期对基准指数跟踪误差",
   freeze_beta_outside_band: "研究期市场 β",
-  freeze_raw_excess_not_positive_at_cost_stress: (t) =>
-    `研究期滑点 ×${t.cost_stress_multiplier ?? "—"} 后对基准指数超额`,
+  freeze_not_positive_at_cost_stress: (t) => `研究期滑点 ×${t.cost_stress_multiplier ?? "—"} 后主动超额`,
   freeze_unmeasurable: "研究期统计可算",
   freeze_too_few_seed_replicates: "训练模型的提名登记了种子副本",
   freeze_seed_replicate_invalid: "种子副本只改种子一行",
   freeze_seed_mean_information_ratio_below_threshold: "研究期种子均值主动 IR",
   forward_strategy_error: "前推期策略无报错",
   heldout_strategy_error: "Held-out 期策略无报错",
-  forward_lower_bound_not_positive: (t) => `前推超额 ${fmtPct(t.forward_confidence, 0)} 下界`,
-  forward_recency_negative: (t) => `前推最近 ${t.recency_months ?? "—"} 个月超额`,
+  forward_lower_bound_not_positive: (t) => `前推主动超额 ${fmtPct(t.forward_confidence, 0)} 下界`,
+  forward_recency_negative: (t) => `前推最近 ${t.recency_months ?? "—"} 个月主动超额`,
   forward_max_drawdown_exceeded: "前推回撤",
   forward_active_drawdown_exceeded: "前推主动回撤",
-  forward_not_positive_at_cost_stress: (t) => `前推滑点 ×${t.cost_stress_multiplier ?? "—"} 后超额`,
+  forward_not_positive_at_cost_stress: (t) => `前推滑点 ×${t.cost_stress_multiplier ?? "—"} 后主动超额`,
   forward_too_few_round_trips: "前推回合数",
   forward_exposure_below_floor: "前推平均仓位",
   forward_tracking_error_above_cap: "前推对基准指数跟踪误差",
   forward_beta_outside_band: "前推市场 β",
-  forward_plain_excess_lower_bound_not_positive: (t) =>
-    `前推主动超额（未回归）${fmtPct(t.forward_confidence, 0)} 下界`,
-  heldout_excess_below_tolerance: "Held-out 超额",
+  heldout_excess_below_tolerance: "Held-out 主动超额",
   heldout_max_drawdown_exceeded: "Held-out 回撤",
   heldout_active_drawdown_exceeded: "Held-out 主动回撤",
   heldout_exposure_below_floor: "Held-out 平均仓位",
@@ -118,40 +114,34 @@ const ACTIVE_TITLE = "策略日收益减去零技能面板合成收益后的序�
 // from there.
 const DSR_TITLE = "去膨胀夏普概率（DSR）：按本臂试验数折减后，研究期 IR 仍高于 SR* 的概率";
 const TRIALS_TITLE = "DSR 据以折减的试验数：本臂验证过的不同策略版本";
-// The three neutralised figures the panels draw side by side, as
-// pipelines/verdict.py measures them: the excess is the intercept of the daily
-// regression on the arm's benchmark index and the size factor, the tracking error is that
-// regression's residual standard deviation annualised, and IR is their ratio.
-const NEUTRALIZED_EXCESS_TITLE = "剔除基准指数与规模暴露后的年化超额";
-const TRACKING_ERROR_TITLE = "中性化残差收益的年化标准差";
-const IR_TITLE = "中性化超额 ÷ 残差跟踪误差";
+// The three figures every gate reads off the active series, as
+// pipelines/verdict.py measures them: the series as it is, with no regression.
+const EXCESS_TITLE = "主动序列（账户日收益 − 零技能面板日收益，不做回归）的年化均值";
+const TRACKING_ERROR_TITLE = "主动序列日收益的年化标准差";
+const IR_TITLE = "主动超额 ÷ 主动跟踪误差";
 // The holder's money, which no active figure is: the account's own return
-// after every cost minus the benchmark index's price return over the same days
-// (pipelines/verdict.py raw_excess_at_cost_stress), at the arm's cost stress.
+// after every cost minus the benchmark index's price return over the same days.
 const RAW_EXCESS_TITLE = "账户自身扣费收益减基准指数（价格指数）同期收益，整段累计";
-const RAW_STRESS_TITLE = "滑点按成本压力倍数加价后的对基准指数超额，整段累计；冻结门的原始收益条件读它";
+// The cost-stress reading the freeze gate and F5 judge (verdict.py
+// `excess_at_cost_stress`), at the arm's multiplier.
+const STRESS_TITLE = "滑点按成本压力倍数加价后的年化主动超额；冻结门与前推裁决读的是同一个数";
 const PANEL_RETURN_TITLE = "零技能面板（同一成交骨架随机换名）自身扣费后的整段收益";
-// How the forward bound is drawn (verdict.py `_bootstrap_lower_bound`).
-const LOWER_BOUND_TITLE = "中性化超额的移动块自助法单侧下界";
-// A replay slice as the holder reads it (verdict.py `holder_readings` and
-// `slice_readings`): his own account against the benchmark first, then against
-// the zero-skill panel with no regression, then the neutralised figure the
-// gate grades — which credits back the market and size loadings the book did
-// not carry, a credit an unhedged long-only holder never receives.
+// What F2 judges (verdict.py `forward_lower_bound`): the lower bound of one
+// daily series' mean. The mean itself is the slice's `plain_excess`, or with
+// seed replicates `seed_mean.plain_excess`.
+const LOWER_BOUND_TITLE = "主动序列（登记了种子副本时为冻结产物与各副本逐日平均）年化均值的移动块自助法单侧下界";
+// A replay slice as the holder reads it (verdict.py `holder_readings`): his
+// own account against the benchmark first, then against the zero-skill panel,
+// then the active figures the gate grades.
 const HOLDER_TITLE = "冻结产物扣费后的账户收益与基准指数（价格指数）同期收益，切片内复利";
-const PLAIN_SELECTION_TITLE = "账户收益减零技能面板收益，不做回归：选的名字是否赢了同一骨架上的随机名字";
-const ACTIVE_BETA_TITLE = "主动序列（账户 − 面板）对基准指数的回归载荷；为负即持仓比随机副本更低 β，指数大涨时落后，中性化读数会把这部分记回";
-const NEUTRAL_IR_TITLE = "剔除基准与规模载荷后的主动超额 ÷ 残差跟踪误差；回归退回的 β 与规模部分持有人拿不到";
+const PLAIN_SELECTION_TITLE = "账户收益减零技能面板收益，各自复利：选的名字是否赢了同一骨架上的随机名字";
+const ACTIVE_BETA_TITLE = "主动序列（账户 − 面板）对基准指数的回归载荷，只作诊断：为负即持仓比随机副本更低 β，指数大涨时落后于面板";
 // A model-training nominee judged on its training seeds together
 // (pipelines/experiment.py `_seed_replicate_gate`, verdict.py `seed_mean` and
-// `plain_excess_lower_bound`): a seed replicate is the same strategy with only
-// its seed line changed.
+// `forward_lower_bound`): a seed replicate is the same strategy with only its
+// seed line changed.
 const SEED_IR_TITLE = "提名节点与它的种子副本（同一策略只换训练种子那一行）研究期主动 IR 的平均，须达到提名节点自己的 IR 门槛";
 const SEED_MEAN_TITLE = "冻结产物与它的种子副本各自读数的平均；只有登记了种子副本的提名才有";
-// What F8 judges (verdict.py `plain_excess_lower_bound`): the lower bound of
-// one daily series' mean, drawn as the neutralised bound is. The mean itself is
-// the slice's `plain_excess`, or with seed replicates `seed_mean.plain_excess`.
-const PLAIN_EXCESS_BOUND_TITLE = "冻结产物日收益减零技能面板日收益、不做回归的序列（登记了种子副本时为冻结产物与各副本逐日平均），其年化均值的移动块自助法单侧下界";
 
 function reasonLabel(reason, thresholds) {
   const label = REASON_LABELS[reason];
@@ -2099,7 +2089,7 @@ function accountTiles(name, slice) {
 
 /* The forward and Held-out slices the verdict read, as the holder reads them:
    his account and the benchmark first, then the account against the
-   zero-skill panel unregressed, then the neutralised IR the gate graded. Every
+   zero-skill panel, then the active IR the gate graded. Every
    tile is one figure: the account and its benchmark sit side by side, never
    joined into one value. Absent until the verdict exists, and for a replay
    the strategy's own error stopped. */
@@ -2110,18 +2100,18 @@ function forwardTiles(item) {
     ...accountTiles("前推", f),
     ...presentTiles([
       {
-        label: "前推对面板（未回归）",
+        label: "前推对面板",
         value: (f.raw_readings || {}).plain_selection,
         fmt: fmtPct,
         signed: true,
         title: PLAIN_SELECTION_TITLE,
       },
       {
-        label: "前推中性化主动 IR",
+        label: "前推主动 IR",
         value: f.information_ratio,
         fmt: fmtSharpe,
         signed: true,
-        title: NEUTRAL_IR_TITLE,
+        title: IR_TITLE,
       },
     ]),
     ...accountTiles("Held-out ", slices.heldout),
@@ -2138,8 +2128,8 @@ function evidenceTiles(item) {
   if (!best) return null;
   const tiles = presentTiles([
     {
-      label: "最佳候选中性化超额",
-      value: best.neutralized_excess,
+      label: "最佳候选主动超额",
+      value: best.plain_excess,
       fmt: fmtPct,
       signed: true,
       title: `${sessionLabel(best.session_key)} 中 IR 最高的全区间验证，研究期年化`,
@@ -2164,8 +2154,8 @@ function bestCandidateTiles(best, trials) {
   return statTilesRow(
     presentTiles([
       {
-        label: "最佳候选中性化超额",
-        value: best.neutralized_excess,
+        label: "最佳候选主动超额",
+        value: best.plain_excess,
         fmt: fmtPct,
         signed: true,
         title: "IR 最高的全区间验证，研究期年化",
@@ -2178,11 +2168,11 @@ function bestCandidateTiles(best, trials) {
         title: DSR_TITLE,
       },
       {
-        label: "成本压力下对基准超额",
-        value: best.raw_excess_at_cost_stress,
+        label: "成本压力下主动超额",
+        value: best.excess_at_cost_stress,
         fmt: fmtPct,
         signed: true,
-        title: RAW_STRESS_TITLE,
+        title: STRESS_TITLE,
       },
       {
         label: "面板自身收益",
@@ -2902,14 +2892,14 @@ function processRows(detail) {
     research: best
       ? el(
           "span",
-          { title: "IR 最高的全区间验证：研究期中性化超额与 DSR" },
-          `最佳候选 ${fmtPct(best.neutralized_excess)} · DSR ${fmtSharpe(best.deflated_sharpe_probability)}`,
+          { title: "IR 最高的全区间验证：研究期主动超额与 DSR" },
+          `最佳候选 ${fmtPct(best.plain_excess)} · DSR ${fmtSharpe(best.deflated_sharpe_probability)}`,
         )
       : record
         ? `验证 ${record.validations.length} 次 · 无全区间`
         : null,
     frozen: frozen
-      ? `${fmtPct(frozen.neutralized_excess)} · DSR ${fmtSharpe(frozen.deflated_sharpe_probability)}`
+      ? `${fmtPct(frozen.plain_excess)} · DSR ${fmtSharpe(frozen.deflated_sharpe_probability)}`
       : null,
     forward: replaySpanBar(replay, "forward", { mini: true, pending: !detail.forward }),
     heldout: replaySpanBar(replay, "heldout", { mini: true, pending: !detail.forward }),
@@ -2978,22 +2968,21 @@ function processListPanel(detail, selectedKey) {
 // whose name states a threshold reads it from the same `thresholds` block the
 // criteria do, so the table and the checklist above it never disagree.
 // The holder's readings lead: account, benchmark, the raw excess between them,
-// the panel and the plain selection against it, then the active series before
-// and after the regression that neutralises it.
+// the panel and the plain selection against it, then the active series the
+// gates grade and its market loading.
 const SLICE_ROWS = [
   ["strategy_return", "账户收益", fmtPct, true, HOLDER_TITLE],
   ["benchmark_return", "基准收益", fmtPct, true],
   ["raw_excess", "原始超额（账户 − 基准）", fmtPct, true],
   ["panel_return", "零技能面板收益", fmtPct, true, PANEL_RETURN_TITLE],
-  ["plain_selection", "对面板（账户 − 面板，未回归）", fmtPct, true, PLAIN_SELECTION_TITLE],
+  ["plain_selection", "对面板（账户 − 面板）", fmtPct, true, PLAIN_SELECTION_TITLE],
   ["market_beta", "主动市场 β（对面板）", fmtSharpe, true, ACTIVE_BETA_TITLE],
-  ["plain_excess", "主动超额（年化，未回归）", fmtPct, true],
+  ["plain_excess", "主动超额（年化）", fmtPct, true, EXCESS_TITLE],
   ["series", "评分序列", (value) => SERIES_LABELS[value] || String(value)],
   ["days", "交易日", String],
-  ["neutralized_excess", "中性化超额（年化）", fmtPct, true, NEUTRALIZED_EXCESS_TITLE],
-  ["information_ratio", "中性化主动 IR", fmtSharpe, true, NEUTRAL_IR_TITLE],
-  ["lower_bound", (t) => `${fmtPct(t.forward_confidence, 0)} 下界`, fmtPct, true],
-  ["recency_neutralized_excess", (t) => `最近 ${t.recency_months ?? "—"} 个月中性化超额`, fmtPct, true],
+  ["information_ratio", "主动 IR", fmtSharpe, true, IR_TITLE],
+  ["lower_bound", (t) => `${fmtPct(t.forward_confidence, 0)} 下界`, fmtPct, true, LOWER_BOUND_TITLE],
+  ["recency_plain_excess", (t) => `最近 ${t.recency_months ?? "—"} 个月主动超额`, fmtPct, true],
   ["tolerance", "容忍线", fmtPct],
   ["max_drawdown", "最大回撤", fmtPct],
   ["active_max_drawdown", "主动回撤", fmtPct],
@@ -3016,10 +3005,9 @@ const FORWARD_STAT_FIELDS = [
   ...HOLDER_STAT_FIELDS,
   "series",
   "days",
-  "neutralized_excess",
   "information_ratio",
   "lower_bound",
-  "recency_neutralized_excess",
+  "recency_plain_excess",
   "max_drawdown",
   "active_max_drawdown",
   "excess_at_cost_stress",
@@ -3030,7 +3018,6 @@ const HELDOUT_STAT_FIELDS = [
   ...HOLDER_STAT_FIELDS,
   "series",
   "days",
-  "neutralized_excess",
   "information_ratio",
   "tolerance",
   "max_drawdown",
@@ -3060,24 +3047,24 @@ function sliceStats(slice, fields, thresholds) {
 }
 
 /* A slice as one sentence in the holder's order: the account against the
-   benchmark, then against its zero-skill panel unregressed, then the
-   neutralised IR labelled as what it is. Null without readings. */
+   benchmark, then against its zero-skill panel, then the active series the
+   gate graded. Null without readings. */
 function holderLine(label, slice) {
   const raw = (slice || {}).raw_readings;
   if (!raw || raw.strategy_return === null || raw.strategy_return === undefined) return null;
-  const neutral = `中性化主动 IR ${fmtSharpe(slice.information_ratio)}（未回归主动 ${fmtPct(slice.plain_excess)}/年 → 中性化 ${fmtPct(slice.neutralized_excess)}/年，主动市场 β ${fmtSharpe(slice.market_beta)}）`;
+  const active = `主动超额 ${fmtPct(slice.plain_excess)}/年，主动 IR ${fmtSharpe(slice.information_ratio)}（主动市场 β ${fmtSharpe(slice.market_beta)}）`;
   return el(
     "div",
     { class: "meta-line" },
     `${label}：账户 ${fmtPct(raw.strategy_return)}，基准 ${fmtPct(raw.benchmark_return)}（原始超额 ${fmtPct(raw.raw_excess)}）；` +
-      `零技能面板 ${fmtPct(raw.panel_return)}（对面板 ${fmtPct(raw.plain_selection)}，未回归）；${neutral}`,
+      `零技能面板 ${fmtPct(raw.panel_return)}（对面板 ${fmtPct(raw.plain_selection)}）；${active}`,
   );
 }
 
 /* The frozen book beside its seed replicates and their mean, over the named
    slices (verdict.py `seed_replicate_slice` and `seed_mean`): one row per
    seed, one figure per cell — the account against the benchmark and against
-   its zero-skill panel, unregressed. Null for a record without replicates, so
+   its zero-skill panel, each compounded. Null for a record without replicates, so
    an arm frozen on one seed shows nothing in its place. */
 const SLICE_NAMES = { forward: "前推", heldout: "Held-out " };
 
@@ -3171,42 +3158,34 @@ function mandateRows(capToken, bandToken, measured, row, t) {
   ];
 }
 
-/* F1–F8 over the forward slice, as criterion rows: the 前推回放 view draws
+/* F1–F7 over the forward slice, as criterion rows: the 前推回放 view draws
    them alone, 裁决 draws them ahead of H1–H4, and neither restates a
-   threshold the other spells differently. F8, the plain-excess bound, is drawn
-   before the replay is judged and wherever the recorded slice carries it (a
-   slice recorded before F8 existed does not): the lower bound of the series
-   it judged, whose mean and seed count its hover states. */
+   threshold the other spells differently. F2's hover states the mean and the
+   seed count of the series it judged. */
 function forwardCriteria(f, verdict, thresholds) {
   const failed = failedReasons(verdict);
   const t = thresholds || {};
   const row = criteriaRow(f, failed, t);
   const seeds = (f && f.seed_mean) || null;
-  const plainBound = f ? f.plain_excess_lower_bound !== undefined : !verdict;
   return [
     ...(failed.has("forward_strategy_error")
       ? [{ ok: false, label: reasonLabel("forward_strategy_error"), value: null }]
       : []),
-    row("forward_lower_bound_not_positive", fmtPct(f && f.lower_bound), "> 0", LOWER_BOUND_TITLE),
-    row("forward_recency_negative", fmtPct(f && f.recency_neutralized_excess), "≥ 0"),
+    row(
+      "forward_lower_bound_not_positive",
+      fmtPct(f && f.lower_bound),
+      "> 0",
+      f
+        ? `${LOWER_BOUND_TITLE}；均值 ${fmtPct(seeds ? seeds.plain_excess : f.plain_excess)}/年，${seeds ? seeds.members : 1} 个种子`
+        : LOWER_BOUND_TITLE,
+    ),
+    row("forward_recency_negative", fmtPct(f && f.recency_plain_excess), "≥ 0"),
     row("forward_max_drawdown_exceeded", fmtPct(f && f.max_drawdown), thresholdCell("≤", t.max_drawdown)),
-    row("forward_not_positive_at_cost_stress", fmtPct(f && f.excess_at_cost_stress), "> 0"),
+    row("forward_not_positive_at_cost_stress", fmtPct(f && f.excess_at_cost_stress), "> 0", STRESS_TITLE),
     row("forward_too_few_round_trips", f && f.round_trips, thresholdCell("≥", t.min_round_trips, String)),
     row("forward_exposure_below_floor", fmtPct(f && f.mean_gross), thresholdCell("≥", t.min_mean_gross)),
     ...activeDrawdownRows("forward_active_drawdown_exceeded", f, row, t),
     ...mandateRows("forward_tracking_error_above_cap", "forward_beta_outside_band", f, row, t),
-    ...(plainBound
-      ? [
-          row(
-            "forward_plain_excess_lower_bound_not_positive",
-            fmtPct(f && f.plain_excess_lower_bound),
-            "> 0",
-            f
-              ? `${PLAIN_EXCESS_BOUND_TITLE}；均值 ${fmtPct(seeds ? seeds.plain_excess : f.plain_excess)}/年，${seeds ? seeds.members : 1} 个种子`
-              : PLAIN_EXCESS_BOUND_TITLE,
-          ),
-        ]
-      : []),
   ];
 }
 
@@ -3225,7 +3204,7 @@ function heldoutCriteria(h, verdict, thresholds) {
       : []),
     row(
       "heldout_excess_below_tolerance",
-      fmtPct(h && h.neutralized_excess),
+      fmtPct(h && h.plain_excess),
       h ? `≥ ${fmtPct(h.tolerance)}` : tolerance && `≥ ${tolerance}`,
       h ? tolerance || null : null,
     ),
@@ -3464,13 +3443,13 @@ function frozenPanel(detail) {
     statTilesRow(
       presentTiles([
         {
-          label: "研究期中性化超额（年化）",
-          value: frozen.neutralized_excess,
+          label: "研究期主动超额（年化）",
+          value: frozen.plain_excess,
           fmt: fmtPct,
           signed: true,
-          title: NEUTRALIZED_EXCESS_TITLE,
+          title: EXCESS_TITLE,
         },
-        { label: "残差跟踪误差", value: frozen.tracking_error, fmt: fmtPct, title: TRACKING_ERROR_TITLE },
+        { label: "主动跟踪误差", value: frozen.tracking_error, fmt: fmtPct, title: TRACKING_ERROR_TITLE },
         { label: "IR", value: frozen.information_ratio, fmt: fmtSharpe, signed: true, title: IR_TITLE },
         {
           label: "种子均值 IR",
@@ -3505,7 +3484,7 @@ function frozenPanel(detail) {
           label: "前推可检出超额",
           value: frozen.forward_mde,
           fmt: fmtPct,
-          title: "前推检验以 80% 功效能检出的最小年化中性化超额",
+          title: "前推检验以 80% 功效能检出的最小年化主动超额",
         },
       ]),
     ),
@@ -4005,10 +3984,10 @@ function freezeGateChecklist(gate) {
       ? []
       : [
           row(
-            "freeze_raw_excess_not_positive_at_cost_stress",
-            fmtPct(gate.raw_excess_at_cost_stress),
+            "freeze_not_positive_at_cost_stress",
+            fmtPct(gate.excess_at_cost_stress),
             "> 0",
-            RAW_STRESS_TITLE,
+            STRESS_TITLE,
           ),
         ]),
     ...mandateRows("freeze_tracking_error_above_cap", "freeze_beta_outside_band", gate, row, t),
@@ -4083,8 +4062,8 @@ function researchSessionPanel(detail, session) {
           { label: "Sharpe", num: true },
           { label: "回撤", num: true },
           { label: "对基准超额", num: true, title: RAW_EXCESS_TITLE },
-          { label: "成本压力下", num: true, title: RAW_STRESS_TITLE },
-          { label: "中性化超额", num: true, title: NEUTRALIZED_EXCESS_TITLE },
+          { label: "主动超额", num: true, title: EXCESS_TITLE },
+          { label: "成本压力下", num: true, title: STRESS_TITLE },
           { label: "IR", num: true, title: IR_TITLE },
         ],
         record.validations.map((row) => [
@@ -4103,12 +4082,12 @@ function researchSessionPanel(detail, session) {
           fmtPct(row.max_drawdown),
           { value: fmtPct(row.excess_return), cls: signCls(row.excess_return) },
           {
-            value: fmtPct(row.raw_excess_at_cost_stress),
-            cls: signCls(row.raw_excess_at_cost_stress),
+            value: fmtPct(row.plain_excess),
+            cls: signCls(row.plain_excess),
           },
           {
-            value: fmtPct(row.neutralized_excess),
-            cls: signCls(row.neutralized_excess),
+            value: fmtPct(row.excess_at_cost_stress),
+            cls: signCls(row.excess_at_cost_stress),
           },
           {
             value: fmtSharpe(row.information_ratio),
@@ -7723,8 +7702,7 @@ function paperHead(status, payload) {
 }
 
 /* The Paper verdict the morning run stored (paper/verdict.py), read as
-   written: where the book stands, and the plain and the regressed reading of
-   its active return side by side. A checkpoint acts only when both agree. */
+   written: where the book stands, and the reading of its active return. */
 function paperVerdictPanel(payload) {
   const title = "模拟验证";
   if (payload.state === "unreadable")
@@ -7743,7 +7721,7 @@ function paperVerdictPanel(payload) {
         "span",
         {
           class: "mode-note",
-          title: `每结算 ${rules.checkpoint_days ?? "—"} 个交易日设一个检查点；未回归与回归后两个读数必须同时满足，才会确认或按统计终止。`,
+          title: `每结算 ${rules.checkpoint_days ?? "—"} 个交易日设一个检查点；主动超额的确认下界高于 0 则确认，终止上界低于 0 则按统计终止。`,
         },
         "检查点规则",
       ),
@@ -7769,30 +7747,18 @@ function paperVerdictPanel(payload) {
       `已结算 ${verdict.days} 个交易日（${fmtDate(verdict.first_day)} 至 ${fmtDate(verdict.last_day)}） · 下一检查点 ${verdict.next_checkpoint} 个交易日`,
     ),
   );
-  const readings = [
-    ["未回归", verdict.plain],
-    ["回归后", verdict.regressed],
-  ].filter(([, reading]) => reading);
-  if (readings.length)
+  const reading = verdict.plain;
+  if (reading)
     panel.append(
       dataTable(
         [
-          { label: "读数" },
           { label: "年化均值", num: true, title: "每日主动收益的年化均值" },
-          { label: "确认下界", num: true, title: "高于 0 时支持确认" },
-          { label: "终止上界", num: true, title: "低于 0 时支持终止" },
+          { label: "确认下界", num: true, title: "高于 0 时确认" },
+          { label: "终止上界", num: true, title: "低于 0 时终止" },
         ],
-        readings.map(([label, reading]) => [
-          label,
-          fmtPct(reading.mean),
-          fmtPct(reading.confirm_lower_bound),
-          fmtPct(reading.kill_upper_bound),
-        ]),
+        [[fmtPct(reading.mean), fmtPct(reading.confirm_lower_bound), fmtPct(reading.kill_upper_bound)]],
       ),
     );
-  const unmeasured = (verdict.regressed || {}).reason;
-  if (unmeasured)
-    panel.append(el("div", { class: "hint" }, `回归后读数暂缺：${VERDICT_REASON_LABELS[unmeasured] || unmeasured}`));
   const tiles = presentTiles([
     { label: "账户收益", value: verdict.account_return, fmt: fmtPct, signed: true },
     { label: "指数收益", value: verdict.index_return, fmt: fmtPct, signed: true },

@@ -281,8 +281,8 @@ def test_every_way_an_arm_can_end_reads_as_one_ending_with_a_reason(tmp_path: Pa
         name: name for name in ENDING_STATES
     }
     # A graduate is named by its forward year as the holder reads it -- his
-    # account, the benchmark, the account against the zero-skill panel with
-    # no regression, then the neutralised IR the gate graded -- a refusal by
+    # account, the benchmark, the account against the zero-skill panel, then
+    # the active IR the gate graded -- a refusal by
     # the criteria it failed, and the three endings no replay decided by what
     # the record says: the Agent's first sentence, the budget, the error's
     # first line.
@@ -291,8 +291,8 @@ def test_every_way_an_arm_can_end_reads_as_one_ending_with_a_reason(tmp_path: Pa
     assert endings["graduated"]["reason"] == (
         f"前推 账户 {raw['strategy_return'] * 100:+.2f}%"
         f" · 基准 {raw['benchmark_return'] * 100:+.2f}%"
-        f" · 对面板（未回归）{raw['plain_selection'] * 100:+.2f}%"
-        f" · 中性化主动 IR {forward['information_ratio']:.2f}"
+        f" · 对面板 {raw['plain_selection'] * 100:+.2f}%"
+        f" · 主动 IR {forward['information_ratio']:.2f}"
     )
     assert endings["rejected"]["reason"].split(" · ")[0] == "F2"
     assert rows["graduated"]["paper_candidate"] is not None
@@ -441,14 +441,15 @@ def test_seed_replicates_are_shown_where_the_record_has_them_and_absent_otherwis
             (block["raw_readings"]["plain_selection"] + block["seed_replicates"][0]["raw_readings"]["plain_selection"]) / 2
         )
     assert forward["seed_mean"]["members"] == 2
-    assert isinstance(forward["plain_excess_lower_bound"], float)
-    assert registry._CRITERION_CODES["forward_plain_excess_lower_bound_not_positive"] == "F8"
-    # One seed: no replicate served, so nothing drawn; F8 reads the book alone.
+    assert isinstance(forward["lower_bound"], float)
+    assert registry._CRITERION_CODES["forward_lower_bound_not_positive"] == "F2"
+    assert "F8" not in registry._CRITERION_CODES.values()
+    # One seed: no replicate served, so nothing drawn; F2 reads the book alone.
     assert single["frozen"]["seed_replicates"] is None
     alone = single["sessions"][0]["record"]["freeze_gate"]["seed_replicates"]
     assert (alone["replicates"], alone["mean_information_ratio"]) == ([], None)
     assert "seed_mean" not in single["forward"]["slices"]["forward"]
-    assert isinstance(single["forward"]["slices"]["forward"]["plain_excess_lower_bound"], float)
+    assert isinstance(single["forward"]["slices"]["forward"]["lower_bound"], float)
 
     script = (
         Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
@@ -844,7 +845,7 @@ def test_an_ended_arm_is_read_off_its_ledger_and_never_judged_again(
     assert best["step_id"] == stored["nominated_step_id"]
     assert best["deflated_sharpe_probability"] == stored["freeze_gate"]["deflated_sharpe"]["deflated_sharpe_probability"]
     assert best["trials"] == stored["freeze_gate"]["deflated_sharpe"]["trials"]
-    assert best["information_ratio"] == stored["steps"][1]["neutralized"]["information_ratio"]
+    assert best["information_ratio"] == stored["steps"][1]["graded"]["information_ratio"]
     assert {"session_key": "research", **details["frozen"]["sessions"][0]["record"]["best"]} == best
     # A session that nominated nothing recorded no gate over its best, and
     # one stopped before its record has none either.
@@ -1185,7 +1186,7 @@ def test_a_home_card_shows_each_figure_alone_never_as_a_fraction() -> None:
     assert "activityNode(fresh.status)" in body("controlPanel")
     # One vocabulary for the best candidate: the card's four tiles are the
     # experiment page's first four, recorded or live.
-    labels = ("最佳候选中性化超额", "IR", "DSR", "累计试验")
+    labels = ("最佳候选主动超额", "IR", "DSR", "累计试验")
     for name in ("evidenceTiles", "bestCandidateTiles"):
         found = [label for label in labels if f'label: "{label}"' in body(name)]
         assert found == list(labels), name
@@ -1200,9 +1201,9 @@ def test_a_home_card_shows_each_figure_alone_never_as_a_fraction() -> None:
 
 
 def test_a_figure_whose_label_does_not_read_itself_is_glossed_once() -> None:
-    """IR is an acronym over a formula, 中性化超额 and 残差跟踪误差 name what was
-    regressed out, and the 下界 is a bootstrap percentile: none of the four can
-    be read off its own label. IR sat bare on all four of its sites while the
+    """IR is an acronym over a formula, 主动超额 and 主动跟踪误差 are statistics
+    of a series the host builds, and the 下界 is a bootstrap percentile: none
+    of the four can be read off its own label. IR sat bare on all four of its sites while the
     DSR beside it was fully explained. Each gloss is one shared constant, so no
     site can drift, and it hangs on the same `title` hover the console uses
     everywhere else — including on a checklist row, which had no slot for one.
@@ -1211,14 +1212,14 @@ def test_a_figure_whose_label_does_not_read_itself_is_glossed_once() -> None:
     script = (
         Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
     ).read_text(encoding="utf-8")
-    for name in ("IR_TITLE", "NEUTRALIZED_EXCESS_TITLE", "TRACKING_ERROR_TITLE", "LOWER_BOUND_TITLE"):
+    for name in ("IR_TITLE", "EXCESS_TITLE", "TRACKING_ERROR_TITLE", "LOWER_BOUND_TITLE"):
         assert script.count(f"const {name} = ") == 1, name
     for opening, glosses in (
         ("function evidenceTiles(", ("IR_TITLE",)),
-        ("function forwardTiles(", ("PLAIN_SELECTION_TITLE", "NEUTRAL_IR_TITLE")),
+        ("function forwardTiles(", ("PLAIN_SELECTION_TITLE", "IR_TITLE")),
         ("function bestCandidateTiles(", ("IR_TITLE", "DSR_TITLE", "TRIALS_TITLE")),
-        ("function researchSessionPanel(", ("IR_TITLE", "NEUTRALIZED_EXCESS_TITLE")),
-        ("function frozenPanel(", ("IR_TITLE", "NEUTRALIZED_EXCESS_TITLE", "TRACKING_ERROR_TITLE")),
+        ("function researchSessionPanel(", ("IR_TITLE", "EXCESS_TITLE")),
+        ("function frozenPanel(", ("IR_TITLE", "EXCESS_TITLE", "TRACKING_ERROR_TITLE")),
         ("function freezeGateChecklist(", ("DSR_TITLE",)),
         ("function forwardCriteria(", ("LOWER_BOUND_TITLE",)),
     ):
@@ -1287,7 +1288,7 @@ def test_the_listing_carries_the_freeze_and_the_best_candidate_so_far(
     # The card's four evidence tiles: a measurable candidate carries every
     # figure, so the card never draws a partial row.
     evidence = (
-        "neutralized_excess",
+        "plain_excess",
         "information_ratio",
         "deflated_sharpe_probability",
         "trials",
@@ -1425,7 +1426,7 @@ def test_each_validation_shows_its_raw_excess_beside_its_active_figures(tmp_path
     build_arm(tmp_path, "arm", "graduated")
     detail = experiment_detail(tmp_path, "arm")
     record = next(entry for entry in detail["sessions"] if entry["kind"] == "research")["record"]
-    assert {"excess_return", "raw_excess_at_cost_stress"} <= set(record["validations"][0])
+    assert {"excess_return", "plain_excess", "excess_at_cost_stress"} <= set(record["validations"][0])
     # The ledger holds no reading of the best candidate's panel.
     assert "panel_return" not in record["best"]
 
@@ -1452,7 +1453,7 @@ def test_a_forward_record_without_the_holders_readings_shows_none(tmp_path: Path
     assert detail["forward"]["slices"] == record["slices"]
     ending = summarize_experiment(directory)["ending"]["reason"]
     information_ratio = record["slices"]["forward"]["information_ratio"]
-    assert ending == f"前推 账户 — · 基准 — · 对面板（未回归）— · 中性化主动 IR {information_ratio:.2f}"
+    assert ending == f"前推 账户 — · 基准 — · 对面板 — · 主动 IR {information_ratio:.2f}"
     sidecar = json.loads(
         (Path(str(record["result_ref"])).parent / STYLE_ARTIFACT_NAME).read_text(encoding="utf-8")
     )

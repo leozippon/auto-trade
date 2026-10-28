@@ -8,8 +8,8 @@ them with the arm's own (``experiment.freeze_gate_for``).
 
 The lineage is read from the earlier arms once, when the console creates the
 arm, into a compact series file beside the arm's ledger holding the per-arm
-counts and, for each measurable trial, the daily neutralised graded series the
-gate correlates (``verdict.neutral_daily``) -- the same trials (distinct
+counts and, for each measurable trial, the daily graded series the gate
+correlates (``verdict.graded_daily``) -- the same trials (distinct
 non-control bytes, ``experiment.trial_family``), series and representative
 Validation (the longest span) the gate reads for the arm's own. From then on
 nothing reads the
@@ -33,10 +33,10 @@ from .config import DEFAULT_RESEARCH_GEOMETRY
 from .experiment import (
     _recorded_steps,
     _style_analysis,
-    fingerprinted,
     recorded_terminal_offline_trials,
     reference_pack,
     trial_family,
+    trial_rows,
 )
 from .hitl_state import read_json
 from .ledger import (
@@ -45,7 +45,7 @@ from .ledger import (
     ExperimentLedger,
     experiment_verdict,
 )
-from .verdict import neutral_daily
+from .verdict import graded_daily
 
 _ARM_ID = re.compile(r"[A-Za-z0-9_-]+")
 
@@ -83,7 +83,7 @@ def extract_lineage(
     identify its trials and have recorded at least one non-control trial. Per
     arm: its trial family
     (``experiment.trial_family`` over its research session's Validations,
-    fingerprinted from its own revision store, so the same bytes on two spans
+    identified from its own revision store, so the same bytes on two spans
     are one trial, controls are left out and declared offline screens count,
     exactly as for the arm's own, its terminal ``finish_session`` delta
     included), each trial's bytes and the reference pack
@@ -120,7 +120,7 @@ def extract_lineage(
                 "research, so its trials are not a lineage"
             )
         try:
-            rows = fingerprinted(directory, _recorded_steps(records))
+            rows = trial_rows(directory, _recorded_steps(records))
         except FileNotFoundError as exc:
             # An arm whose revisions were not kept cannot name its trials.
             raise ValueError(f"lineage arm {arm}: {exc}") from exc
@@ -131,7 +131,7 @@ def extract_lineage(
         for row in representatives:
             revision = str(row["revision_id"])
             try:
-                daily = neutral_daily(_style_analysis(directory, row))
+                daily = graded_daily(_style_analysis(directory, row))
             except ValueError:
                 continue
             outside = sorted(day for day in daily if not research_start <= day <= research_end)

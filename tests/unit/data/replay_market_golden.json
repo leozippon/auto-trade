@@ -623,7 +623,6 @@
     "return": 0.000685,
     "benchmark_return": null,
     "excess_return": null,
-    "neutralized_excess_return": null,
     "sharpe": 1.351186,
     "max_drawdown": 0.001337,
     "turnover": 0.189256,

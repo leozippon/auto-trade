@@ -37,9 +37,9 @@ from autotrade.pipelines.session_resume import REVISIONS_DIR
 from autotrade.pipelines.verdict import (
     forward_mde,
     forward_slice,
+    graded_statistics,
     graduation_verdict,
     heldout_slice,
-    neutralized_statistics,
 )
 
 STAGES = (
@@ -191,7 +191,7 @@ def _step(experiment_dir: Path, session: str, index: int, *, edge: float, seed: 
             "cost_sensitivity": {"slippage_bps": 5.0, "cost_per_bp_per_side": 1e-4},
         },
         "validation_result_ref": ref,
-        "neutralized": neutralized_statistics(_analysis(ref)),
+        "graded": graded_statistics(_analysis(ref)),
     }
 
 
@@ -277,7 +277,7 @@ def build_arm(
         # The seed replicate: the full-span step other than the nominee.
         replicate = steps[0]
         if seeded:
-            ratios = [gate["information_ratio"], replicate["neutralized"]["information_ratio"]]
+            ratios = [gate["information_ratio"], replicate["graded"]["information_ratio"]]
             gate = {
                 **gate,
                 "seed_replicates": {
@@ -304,7 +304,7 @@ def build_arm(
             "revision_id": nominee["revision_id"],
             "research_result_ref": nominee["validation_result_ref"],
             "days": gate["days"],
-            "neutralized_excess": gate["neutralized_excess"],
+            "plain_excess": gate["plain_excess"],
             "tracking_error": gate["tracking_error"],
             "information_ratio": gate["information_ratio"],
             "blocks": [
@@ -325,7 +325,7 @@ def build_arm(
                             "source_step_id": replicate["step_id"],
                             "revision_id": replicate["revision_id"],
                             "research_result_ref": replicate["validation_result_ref"],
-                            "information_ratio": replicate["neutralized"]["information_ratio"],
+                            "information_ratio": replicate["graded"]["information_ratio"],
                         }
                     ]
                 }

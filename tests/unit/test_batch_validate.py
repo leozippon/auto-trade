@@ -79,11 +79,11 @@ from autotrade.pipelines.config import (
 )
 from autotrade.pipelines.experiment import (
     freeze_gate_for,
-    neutralized,
     null_control_seed,
     research_step_record,
     trial_family,
     trial_fields,
+    validation_statistics,
 )
 from autotrade.pipelines.ledger import RESEARCH_STAGE, ExperimentLedger
 from autotrade.pipelines.session_resume import load_recorded_steps, resume_state
@@ -104,8 +104,8 @@ from autotrade.pipelines.session_tools import (
 from autotrade.pipelines.verdict import (
     ACTIVE_DAILY_COLUMNS,
     HOLDER_READINGS,
+    graded_statistics,
     information_ratio_bar,
-    neutralized_statistics,
 )
 
 PARENT_SOURCE ="def generate_orders(context):\n    return []\n"
@@ -123,12 +123,9 @@ def _strategy(marker: str) -> str:
     return f"def generate_orders(context):\n    _ = {marker}\n    return []\n"
 
 
-# What a replay's summary says of a book that beat its benchmark well clear of
-# the stressed slippage: the freeze gate's raw condition holds.
-ABOVE_THE_BENCHMARK = {
-    "benchmark": {"excess_return": 0.30},
-    "cost_sensitivity": {"slippage_bps": 5.0, "cost_per_bp_per_side": 1.2e-4},
-}
+# What a replay's summary says of its costs: the slippage the freeze gate's
+# cost stress charges again on the replay's turnover.
+COSTED = {"cost_sensitivity": {"slippage_bps": 5.0, "cost_per_bp_per_side": 1.2e-4}}
 
 
 def _summary(total_return: float) -> dict[str, object]:
@@ -317,11 +314,6 @@ def _write_style_sidecar(directory: Path, *, alpha: float, seed: int) -> None:
         "size_factor_daily": [[day, float(value)] for day, value in zip(days, size)],
         "panel_daily": [[day, float(value)] for day, value in zip(days, panel)],
     }
-    # The replay stores its active series' regression beside the series, as
-    # style.replay_style_analysis does (loadings to three decimals).
-    sidecar["active_neutralized_excess"] = {
-        "market_beta": round(float(neutralized_statistics(sidecar)["market_beta"]), 3)
-    }
     write_json_atomic(directory / "style_analysis.json", sidecar)
 
 
@@ -490,7 +482,7 @@ class _Session:
             "candidates": [
                 {
                     "name": name,
-                    "hypothesis": f"{name} earns a positive neutralized excess",
+                    "hypothesis": f"{name} earns a positive active excess",
                     "path": f"candidates/{name}",
                     "control": name in controls,
                 }
@@ -751,7 +743,7 @@ class FreezeThroughTheGateTest(unittest.TestCase):
         and no step_rollback comes first."""
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
-            session.evaluator.summary_extra = ABOVE_THE_BENCHMARK
+            session.evaluator.summary_extra = COSTED
             session.candidate("a", _strategy("1"))
             session.candidate("b", _strategy("2" * 60))
             value = session.call("a", "b").value
@@ -786,7 +778,7 @@ class ControlsAndOfflineScreensTest(unittest.TestCase):
     def test_a_control_is_recorded_is_no_trial_and_can_never_be_nominated(self) -> None:
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
-            session.evaluator.summary_extra = ABOVE_THE_BENCHMARK
+            session.evaluator.summary_extra = COSTED
             session.candidate("cand", _strategy("2" * 60))
             session.candidate("c_base", _strategy("1"))
             value = session.call("cand", "c_base", controls=("c_base",), offline_trials=3).value
@@ -1815,7 +1807,8 @@ class BatchValidateRunTest(unittest.TestCase):
             # every row.
             self.assertNotIn("note", activity)
             self.assertIn(
-                "graduation_activity, informational and no freeze-gate condition",
+                "graduation_activity: the row's own round trips per month and "
+                "mean gross exposure, which the freeze gate does not read",
                 BatchValidateTool.spec.description,
             )
             # Far below the floor, yet no gate reason speaks of activity.
@@ -1845,27 +1838,18 @@ class BatchValidateRunTest(unittest.TestCase):
     ) -> None:
         """Two sessions quoted 0.148 and 1.608 as one node's "cost stress": the
         graduation's active reading and the raw cumulative excess. Every row
-        now carries both, computed by the host under names that say which:
-        the raw excess over the benchmark at the arm's multiplier and the
-        active one the graduation judges. The holder's readings beside them
-        are the structure a forward slice carries, plain selection included,
-        so the row reads over research what the graduation reads forward."""
+        carries the one both gates judge, computed by the host: the active
+        excess at the arm's multiplier. The holder's readings beside it are
+        the structure a forward slice carries, plain selection included, so
+        the row reads over research what the graduation reads forward."""
         with TemporaryDirectory() as tmp:
             session = _Session(
                 Path(tmp), acceptance_rules={"max_drawdown": 0.25, "cost_stress_multiplier": 3.0}
             )
             # The fixture's replay turns its opening capital over 1.2 times.
-            session.evaluator.summary_extra = {
-                "benchmark": {"excess_return": 0.05},
-                "cost_sensitivity": {"slippage_bps": 5.0, "cost_per_bp_per_side": 1.2e-4},
-            }
+            session.evaluator.summary_extra = COSTED
             row = session.validate_one("a", _strategy("1"))
             raw = row["raw_readings"]
-            # Rows report six decimals.
-            self.assertAlmostEqual(
-                raw["raw_excess_at_cost_stress"], 0.05 - 2.0 * 5.0 * 1.2e-4, places=6
-            )
-            self.assertEqual(raw["cost_stress_multiplier"], 3.0)
             sidecar = json.loads(
                 (
                     Path(session.backtest.steps[0].validation.result_ref).parent
@@ -1879,16 +1863,9 @@ class BatchValidateRunTest(unittest.TestCase):
                 ) - 1.0
 
             # The holder's readings of the row's own span: each stored series
-            # compounded, and the two differences, unregressed.
+            # compounded, and the two differences.
             self.assertEqual(
-                list(raw),
-                [
-                    *HOLDER_READINGS,
-                    "raw_excess_at_cost_stress",
-                    "cost_stress_multiplier",
-                    "active_market_beta",
-                    "last_two_years",
-                ],
+                list(raw), [*HOLDER_READINGS, "active_market_beta", "last_two_years"]
             )
             book, benchmark, panel = (
                 compound(key) for key in ("strategy_daily", "benchmark_daily", "panel_daily")
@@ -1901,24 +1878,25 @@ class BatchValidateRunTest(unittest.TestCase):
                 ("plain_selection", book - panel),
             ):
                 self.assertAlmostEqual(raw[name], expected, places=6, msg=name)
-            statistics = neutralized_statistics(sidecar)
+            statistics = graded_statistics(sidecar)
             years = statistics["days"] / TRADING_DAYS_PER_YEAR
             activity = row["selection_statistics"]["graduation_activity"]
             self.assertAlmostEqual(
                 activity["active_excess_at_cost_stress"],
-                statistics["neutralized_excess"] - 2.0 * 5.0 * 1.2 * 1e-4 / years,
+                statistics["plain_excess"] - 2.0 * 5.0 * 1.2 * 1e-4 / years,
                 places=6,
             )
             self.assertEqual(activity["cost_stress_multiplier"], 3.0)
-            # These rules do not hold the raw condition, so no reason speaks of it.
-            self.assertNotIn(
-                "freeze_raw_excess_not_positive_at_cost_stress",
-                row["selection_statistics"]["freeze_gate_reasons"],
+            # The freeze gate judges that same reading of a full-span nominee.
+            self.assertEqual(
+                "freeze_not_positive_at_cost_stress"
+                in row["selection_statistics"]["freeze_gate_reasons"],
+                activity["active_excess_at_cost_stress"] <= 0,
             )
             # The book's market loading against its own panel is the active
-            # series' regression coefficient.
+            # series' regression coefficient, a diagnostic beside it.
             self.assertAlmostEqual(
-                raw["active_market_beta"], statistics["market_beta"], places=3
+                raw["active_market_beta"], statistics["market_beta"], places=6
             )
             # The last two research years read on their own: the same five
             # readings, the stored series compounded over Y3..Y4.
@@ -1938,13 +1916,7 @@ class BatchValidateRunTest(unittest.TestCase):
             # the last two years, so it has no line for them.
             probe = session.validate_one("b", _strategy("2"), span="Y1")
             self.assertEqual(
-                list(probe["raw_readings"]),
-                [
-                    *HOLDER_READINGS,
-                    "raw_excess_at_cost_stress",
-                    "cost_stress_multiplier",
-                    "active_market_beta",
-                ],
+                list(probe["raw_readings"]), [*HOLDER_READINGS, "active_market_beta"]
             )
             self.assertIn(
                 "active_excess_at_cost_stress",
@@ -1956,23 +1928,20 @@ class BatchValidateRunTest(unittest.TestCase):
                 <= set(row["stats"]["sub_windows"][0])
             )
 
-    def test_the_raw_condition_names_a_row_below_the_benchmark(self) -> None:
+    def test_the_cost_stress_names_a_row_whose_active_excess_it_erases(self) -> None:
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp), acceptance_rules={"max_drawdown": 0.25})
-            costs = {"slippage_bps": 5.0, "cost_per_bp_per_side": 1.2e-4}
-            session.evaluator.summary_extra = {
-                "benchmark": {"excess_return": 0.0005},
-                "cost_sensitivity": costs,
-            }
+            # The same edge, traded a hundred thousand times as much: the
+            # stressed slippage on that turnover erases it.
+            session.evaluator.summary_extra = {**COSTED, "turnover": 1.2e5}
             below = session.validate_one("below", _strategy("1"))
-            session.evaluator.summary_extra = {
-                "benchmark": {"excess_return": 0.30},
-                "cost_sensitivity": costs,
-            }
-            above = session.validate_one("above", _strategy("22"))
-            token = "freeze_raw_excess_not_positive_at_cost_stress"
+            session.evaluator.summary_extra = COSTED
+            above = session.validate_one("above", _strategy("2"))
+            token = "freeze_not_positive_at_cost_stress"
             self.assertIn(token, below["selection_statistics"]["freeze_gate_reasons"])
             self.assertNotIn(token, above["selection_statistics"]["freeze_gate_reasons"])
+            stressed = below["selection_statistics"]["graduation_activity"]["active_excess_at_cost_stress"]
+            self.assertLess(stressed, 0)
             # The gate still measured the refused row: its DSR is on the row.
             self.assertIsNotNone(below["selection_statistics"]["deflated_sharpe_probability"])
             # A nomination is refused naming the condition and its reading.
@@ -1982,8 +1951,11 @@ class BatchValidateRunTest(unittest.TestCase):
                 )
             self.assertEqual(refused.exception.error_type, "freeze_gate_refused")
             self.assertIn(token, str(refused.exception))
-            # 0.0005 less one more 5 bp per side on 1.2 turns of the capital.
-            self.assertIn("raw_excess_at_cost_stress=-0.0001", str(refused.exception))
+            gate = session.backtest.freeze_gate(str(below["node_id"]))
+            self.assertAlmostEqual(gate["excess_at_cost_stress"], stressed, places=6)
+            self.assertIn(
+                f"excess_at_cost_stress={gate['excess_at_cost_stress']:.4g}", str(refused.exception)
+            )
 
     def test_a_row_that_repeats_earlier_bytes_on_the_same_span_names_them(self) -> None:
         """A session spent 8 replay-years re-running the bytes of a node it
@@ -2032,16 +2004,11 @@ class BatchValidateRunTest(unittest.TestCase):
             )
 
 
-def _annualized_ir(neutral: pd.Series) -> float:
-    """The IR a session reads off ``active_neutralized``: its annualised mean
-    (which the gate rounds to four places) over its residual volatility
-    (three fitted coefficients)."""
+def _annualized_ir(active: pd.Series) -> float:
+    """The IR a session reads off ``active_return``: its annualised mean over
+    its annualised standard deviation."""
 
-    residual = neutral - neutral.mean()
-    tracking = math.sqrt(
-        float((residual**2).sum()) / (len(neutral) - 3) * TRADING_DAYS_PER_YEAR
-    )
-    return round(float(neutral.mean()) * TRADING_DAYS_PER_YEAR, 4) / tracking
+    return float(active.mean() / active.std(ddof=1)) * math.sqrt(TRADING_DAYS_PER_YEAR)
 
 
 class EnvironmentBlockedTest(unittest.TestCase):
@@ -2144,11 +2111,10 @@ class DailySeriesTest(unittest.TestCase):
                 np.testing.assert_allclose(
                     frame["active_return"], strategy - panel, rtol=1e-8, atol=1e-12
                 )
-                # The IR every row's ledger record carries (the gate rounds the
-                # neutralised excess to four places before dividing).
+                # The IR every row's ledger record carries.
                 self.assertAlmostEqual(
-                    _annualized_ir(frame["active_neutralized"]),
-                    neutralized(result_ref)["information_ratio"],
+                    _annualized_ir(frame["active_return"]),
+                    validation_statistics(result_ref)["information_ratio"],
                     delta=1e-6,
                 )
             # The full-span candidate is what the gate measures: the session
@@ -2156,7 +2122,7 @@ class DailySeriesTest(unittest.TestCase):
             [edge] = [row for row in full["candidates"] if row["name"] == "edge"]
             frame = pd.read_csv(session.tree.root / edge["node_id"] / edge["daily_series"])
             self.assertAlmostEqual(
-                _annualized_ir(frame["active_neutralized"]),
+                _annualized_ir(frame["active_return"]),
                 edge["selection_statistics"]["information_ratio"],
                 delta=1e-6,
             )

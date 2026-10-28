@@ -1,39 +1,39 @@
 """Verdict statistics of one arm: freeze gate, forward verdict, Held-out rule.
 
 Pure functions over frozen replay data (docs/pipeline-design.md: the freeze
-gate and the graduation verdict). The statistical
-return figures are the neutralised excess of ``environment/replay/style.py``: a
-daily return series regressed on the arm's benchmark and the replay size factor,
-the intercept annualised over ``TRADING_DAYS_PER_YEAR``. The holder's readings
-beside them are not regressed: :func:`holder_readings` compounds the book, the
-benchmark and the panel as stored, :func:`raw_excess_at_cost_stress` reads the
-replay's own excess and :func:`panel_return` the panel's. The inputs are the
-daily series a ``style_analysis.json`` sidecar stores, sliced by ``YYYYMMDD`` dates, so the
-forward and Held-out slices of one continuous replay are read from one sidecar.
+gate and the graduation verdict). Every gate grades one series, the ACTIVE
+one: the strategy's daily return minus the zero-skill panel composite the host
+drew from the strategy's own realized book
+(``environment/replay/null_control.py``), read as it is, with no regression.
+What zero skill earns in an account's own shape is a property of the window
+and the pool -- between -4 and +8 %/yr across the measured shapes -- so
+grading the strategy's own series grades that and not the strategy. The
+series' annualised mean is its plain excess, its annualised standard deviation
+its tracking error and their ratio its IR (``stats.plain_statistics``, the
+figures every replay reports), so a gate grades what the book's holder
+earned against zero skill. A sidecar written before replays carried a panel
+has none, and its statistics keep their former meaning: they are the
+strategy's own, and ``series`` says so.
 
-The graded series is the ACTIVE one: the strategy's daily return minus the
-zero-skill panel composite the host drew from the strategy's own realized book
-(``environment/replay/null_control.py``). What zero skill earns in an account's
-own shape is a property of the window and the pool -- between -4 and +8 %/yr
-across the measured shapes -- so grading the strategy's own series grades that
-and not the strategy. Tracking error against that benchmark and the market beta are
-read off the strategy's own series, where a tracking mandate limits them. A
-sidecar written before replays carried a panel has none, and its statistics
-keep their former meaning: they are the strategy's own, and ``series`` says so.
-
-Point estimates come from ``style.window_neutralized_excess`` itself, so every
-neutralised excess here equals the figure the replay reports for the same span.
-The bootstrap needs thousands of refits, so the same normal equations run
-vectorised in :func:`_fit`; one test pins it to the style figure.
+Beside that series, and grading nothing, a regression on the arm's benchmark
+and the replay size factor reads its two loadings: a diagnostic of what the
+market and size moves did to it. The same regression of the strategy's own
+series gives the residual tracking error and beta a tracking mandate limits.
+The holder's readings are not regressed either: :func:`holder_readings`
+compounds the book, the benchmark and the panel as stored and
+:func:`panel_return` reads the panel's. The inputs are the daily series a
+``style_analysis.json`` sidecar stores, sliced by ``YYYYMMDD`` dates, so the
+forward and Held-out slices of one continuous replay are read from one
+sidecar.
 
 The statistical definitions live here (DSR, the block bootstrap, the panel).
 The freeze, forward and Held-out bars are the arm's create-time rules, which
 every stage function takes whole (``rules``: a ``config.AcceptanceRules``);
 the module constants below are the defaults those fields take when a record
 omits them, and nothing here falls back to them. A slice that cannot be
-measured (too few days with both factors, collinear factors, a slice shorter
-than one bootstrap block) raises ``ValueError``: a verdict must never be read
-off a number that was not measured.
+measured (fewer than two days, a slice shorter than one bootstrap block)
+raises ``ValueError``: a verdict must never be read off a number that was not
+measured.
 """
 
 from __future__ import annotations
@@ -54,11 +54,13 @@ from autotrade.environment.replay.stats import (
     compounded_drawdown,
     compounded_path,
     compounded_return,
+    plain_statistics,
 )
 from autotrade.environment.replay.style import (
+    MIN_REGRESSION_DAYS,
     _series_pairs,
     active_analysis,
-    window_neutralized_excess,
+    window_plain_excess,
 )
 
 from .calendar import FULL_SPAN
@@ -72,7 +74,7 @@ if TYPE_CHECKING:
 # passes zero skill about 15 % of the time, so an arm's protection against a
 # false graduate when several arms share one forward window is this gate.
 FREEZE_MIN_ACTIVE_IR = 0.75
-# Active neutralised excess positive in three of four research years; another
+# Active plain excess positive in three of four research years; another
 # research length keeps the share, rounded up.
 FREEZE_MIN_POSITIVE_YEAR_SHARE = 0.75
 # At a threshold of 0.5 the deflated Sharpe's
@@ -96,10 +98,10 @@ BOOTSTRAP_DRAWS = 2_000
 RECENCY_MONTHS = 6
 MIN_ROUND_TRIPS_PER_MONTH = 1
 MIN_MEAN_GROSS = 0.5
-# Held-out: neutralised excess no worse than this many standard errors, the
+# Held-out: plain excess no worse than this many standard errors, the
 # standard error taken from the forward slice's tracking error.
 HELDOUT_TOLERANCE_Z = 1.28
-# Minimum detectable annualised neutralised excess at 80 % power and one-sided
+# Minimum detectable annualised plain excess at 80 % power and one-sided
 # 10 % (the frozen block's ``forward_mde``), in standard errors:
 # Φ⁻¹(0.90) + Φ⁻¹(0.80) = 2.12. F2 itself is a one-sided 20 % bound, so this
 # is a deliberately conservative planning figure (about 1.26 × the 1.68 the
@@ -117,7 +119,6 @@ ACTIVE_DAILY_COLUMNS = (
     "active_drawdown",
     "benchmark_return",
     "size_factor_return",
-    "active_neutralized",
 )
 
 
@@ -159,8 +160,9 @@ def _strategy_returns(
 def _regression_join(
     analysis: Mapping[str, object], start: str, end: str
 ) -> list[tuple[str, float, float, float]]:
-    """``(date, strategy, benchmark, size)`` of every day of the slice, joined
-    exactly as ``style.window_neutralized_excess`` joins them."""
+    """``(date, strategy, benchmark, size)`` of every day of the slice that
+    carries both factors, joined exactly as ``style._factor_regression``
+    joins them."""
 
     benchmark = dict(_series_pairs(analysis.get("benchmark_daily")))
     size = dict(_series_pairs(analysis.get("size_factor_daily")))
@@ -181,11 +183,8 @@ def _regression_rows(
 
 
 def _fit(rows: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Daily OLS intercept, market beta and size beta over the last two axes.
-
-    The two-regressor normal equations of ``style._neutralized_excess``,
-    batched over any leading axes so a bootstrap refits every draw at once.
-    """
+    """Daily OLS intercept, market beta and size beta over the last two axes:
+    the two-regressor normal equations of ``style._factor_regression``."""
 
     means = rows.mean(axis=-2)
     centered = rows - means[..., None, :]
@@ -204,32 +203,51 @@ def _fit(rows: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return intercept, market_beta, size_beta
 
 
+def _loadings(analysis: Mapping[str, object], start: str, end: str) -> dict[str, float] | None:
+    """The factor regression of a span's ``strategy_daily`` on the benchmark
+    and the size factor: its two loadings and its residual tracking error
+    (n − 3 degrees of freedom, annualised by √``TRADING_DAYS_PER_YEAR``).
+    ``None`` when fewer than ``MIN_REGRESSION_DAYS`` days carry both factors
+    or they are collinear. No gate grades it: the graded series' loadings are
+    a diagnostic, the strategy's own what a tracking mandate limits."""
+
+    rows = _regression_rows(analysis, start, end)
+    if len(rows) < MIN_REGRESSION_DAYS:
+        return None
+    try:
+        intercept, market_beta, size_beta = _fit(rows)
+    except ValueError:
+        return None
+    residual = rows[:, 0] - intercept - market_beta * rows[:, 1] - size_beta * rows[:, 2]
+    return {
+        "tracking_error": math.sqrt(
+            float(residual @ residual) / (len(rows) - 3) * TRADING_DAYS_PER_YEAR
+        ),
+        "market_beta": float(market_beta),
+        "size_beta": float(size_beta),
+    }
+
+
 def _measured(
     analysis: Mapping[str, object], start: str, end: str
-) -> tuple[dict[str, Any], np.ndarray, np.ndarray]:
-    """:func:`neutralized_statistics` of a span, with its regression rows and
-    daily neutralised series (strategy − β·benchmark − s·size, intercept included)."""
+) -> tuple[dict[str, Any], np.ndarray]:
+    """``stats.plain_statistics`` of a span's ``strategy_daily`` with its
+    loadings beside them (:func:`_loadings`, ``None`` each where they cannot
+    be fitted), and the daily series they read. ``ValueError`` when the span
+    holds fewer than two days."""
 
-    excess = window_neutralized_excess(analysis, start=start, end=end)
-    if excess is None:
+    daily = np.asarray([value for _date, value in _strategy_returns(analysis, start, end)])
+    statistics = plain_statistics(daily.tolist())
+    if statistics["plain_excess"] is None:
         raise ValueError(
-            f"neutralised excess of {start or 'start'}..{end or 'end'} is not measurable"
+            f"{start or 'start'}..{end or 'end'} holds fewer than two days to measure"
         )
-    rows = _regression_rows(analysis, start, end)
-    _intercept, market_beta, size_beta = _fit(rows)
-    neutral = rows[:, 0] - market_beta * rows[:, 1] - size_beta * rows[:, 2]
-    residual = neutral - neutral.mean()
-    tracking_error = math.sqrt(
-        float(residual @ residual) / (len(rows) - 3) * TRADING_DAYS_PER_YEAR
-    )
-    statistics = {
-        "days": len(rows),
-        "neutralized_excess": excess,
-        "tracking_error": tracking_error,
-        "information_ratio": excess / tracking_error if tracking_error > 0 else None,
-        "market_beta": float(market_beta),
-    }
-    return statistics, rows, neutral
+    loadings = _loadings(analysis, start, end) or {}
+    return {
+        **statistics,
+        "market_beta": loadings.get("market_beta"),
+        "size_beta": loadings.get("size_beta"),
+    }, daily
 
 
 def _graded(analysis: Mapping[str, object]) -> tuple[Mapping[str, object], str]:
@@ -239,17 +257,18 @@ def _graded(analysis: Mapping[str, object]) -> tuple[Mapping[str, object], str]:
     return (analysis, "absolute") if active is None else (active, "active")
 
 
-def neutralized_statistics(
+def graded_statistics(
     analysis: Mapping[str, object], *, start: str = "", end: str = ""
 ) -> dict[str, object]:
-    """Neutralised excess, residual tracking error, IR and beta of one span.
+    """What every gate reads of one span's graded series.
 
-    Of the graded series: the active one when the sidecar carries a zero-skill
-    panel, else the strategy's own, and ``series`` names which. An empty
-    ``start``/``end`` takes the whole analysis, as in
-    ``style.window_neutralized_excess``. ``tracking_error`` is the residual
-    standard deviation (n − 3 degrees of freedom) annualised by
-    √``TRADING_DAYS_PER_YEAR``; ``information_ratio`` is ``None`` when it is 0.
+    The graded series is the active one when the sidecar carries a zero-skill
+    panel, else the strategy's own, and ``series`` names which.
+    ``plain_excess`` is its annualised mean, ``tracking_error`` its
+    annualised standard deviation and ``information_ratio`` their ratio
+    (``None`` on a flat series), as ``stats.plain_statistics`` reads them;
+    ``market_beta`` and ``size_beta`` are its loadings (:func:`_loadings`),
+    which grade nothing. An empty ``start``/``end`` takes the whole analysis.
     """
 
     start = _date(start, "start") if start else ""
@@ -259,17 +278,20 @@ def neutralized_statistics(
 
 
 def _mandate(analysis: Mapping[str, object], start: str, end: str) -> dict[str, object]:
-    """The strategy's own tracking error and beta against its benchmark over a
-    span: what a tracking mandate limits, and what is reported, not graded,
-    where the rules set none."""
+    """The strategy's own residual tracking error and beta against its
+    benchmark over a span (:func:`_loadings`): what a tracking mandate
+    limits, and what is reported, not graded, where the rules set none.
+    ``None`` each where the regression cannot be fitted, which no mandate
+    passes."""
 
-    own = _measured(analysis, start, end)[0]
-    return {"tracking_error": own["tracking_error"], "market_beta": own["market_beta"]}
+    own = _loadings(analysis, start, end) or {}
+    return {"tracking_error": own.get("tracking_error"), "market_beta": own.get("market_beta")}
 
 
 def forward_mde(tracking_error: float, forward_days: int) -> float:
-    """Smallest annualised neutralised excess a forward test of
-    ``forward_days`` detects at 80 % power (``FORWARD_MDE_Z``)."""
+    """Smallest annualised plain excess a forward test of ``forward_days``
+    detects at 80 % power (``FORWARD_MDE_Z``), at the research period's
+    tracking error (the graded series' standard deviation)."""
 
     return (
         FORWARD_MDE_Z * tracking_error / math.sqrt(forward_days / TRADING_DAYS_PER_YEAR)
@@ -311,15 +333,16 @@ def null_sharpe_std(days: int) -> float:
     return math.sqrt(TRADING_DAYS_PER_YEAR / days)
 
 
-def neutral_daily(analysis: Mapping[str, object]) -> dict[str, float]:
-    """The daily neutralised graded series of a whole sidecar, by date: the
-    series whose annualised mean over its residual risk is the trial's IR.
-    ``ValueError`` when the sidecar's span is not measurable."""
+def graded_daily(analysis: Mapping[str, object]) -> dict[str, float]:
+    """The daily graded series of a whole sidecar, by date: the series whose
+    annualised mean over its standard deviation is the trial's IR.
+    ``ValueError`` when it holds fewer than two days."""
 
     graded, _series = _graded(analysis)
-    dates = [row[0] for row in _regression_join(graded, "", "")]
-    _statistics, _rows, neutral = _measured(graded, "", "")
-    return dict(zip(dates, (float(value) for value in neutral), strict=True))
+    daily = dict(_strategy_returns(graded, "", ""))
+    if len(daily) < 2:
+        raise ValueError("the graded series holds fewer than two days")
+    return daily
 
 
 def active_daily(analysis: Mapping[str, object]) -> pd.DataFrame:
@@ -328,15 +351,14 @@ def active_daily(analysis: Mapping[str, object]) -> pd.DataFrame:
     One row per replayed day (``ACTIVE_DAILY_COLUMNS``), every column read off
     the computations the gate itself runs on this sidecar: the strategy's
     return and the zero-skill panel composite as stored, the active return
-    :func:`style.active_analysis` grades, its :func:`stats.compounded_path`
-    (``active_cumulative`` is the equity minus 1, ``active_drawdown`` the loss
-    below the running peak, whose largest value is the gate's
-    ``active_max_drawdown``), the two regressors, and the
-    :func:`neutral_daily` series, whose annualised mean over its residual
-    volatility is the active IR. Only the composite of the panel is stored, so
+    :func:`style.active_analysis` grades -- its annualised mean over its
+    annualised standard deviation is the active IR -- its
+    :func:`stats.compounded_path` (``active_cumulative`` is the equity minus
+    1, ``active_drawdown`` the loss below the running peak, whose largest
+    value is the gate's ``active_max_drawdown``), and the two factors its
+    loadings are read against. Only the composite of the panel is stored, so
     no draw's names can be read back. Without a panel every ``active_*``
-    column is empty; ``active_neutralized`` is also empty on a day missing a
-    regressor and on a span the gate cannot measure.
+    column is empty.
     """
 
     frame = pd.DataFrame(
@@ -354,15 +376,9 @@ def active_daily(analysis: Mapping[str, object]) -> pd.DataFrame:
         # Day for day the strategy's own rows: active_analysis keeps their order.
         graded = [value for _date, value in _series_pairs(active["strategy_daily"])]
         path = compounded_path(graded)
-        try:
-            neutral = neutral_daily(analysis)
-        except ValueError:
-            # Unmeasurable: the gate reads no IR off this span either.
-            neutral = {}
         frame["active_return"] = graded
         frame["active_cumulative"] = [equity - 1.0 for equity, _drawdown in path]
         frame["active_drawdown"] = [drawdown for _equity, drawdown in path]
-        frame["active_neutralized"] = frame["trade_date"].map(neutral)
     return frame.reindex(columns=list(ACTIVE_DAILY_COLUMNS))
 
 
@@ -376,8 +392,8 @@ def trial_correlation(
     One analysis per trial (its validation sidecar), plus ``series``: trials
     already reduced to that daily series (an arm's lineage, extracted at its
     creation), which pair with the analyses and with each other alike. Each
-    series is the daily neutralised graded series (:func:`neutral_daily`), so
-    ρ̄ is the correlation of the very estimates the trials' IRs are. A pair is
+    series is the daily graded series (:func:`graded_daily`), so ρ̄ is the
+    correlation of the very series the trials' IRs are read off. A pair is
     correlated over the days both measured -- a sub-span trial against a
     full-span one over its own years; a pair sharing fewer than three days (two
     points correlate ±1 by construction) or flat over its overlap, and a trial
@@ -390,7 +406,7 @@ def trial_correlation(
     measured: list[Mapping[str, float]] = []
     for analysis in analyses:
         try:
-            measured.append(neutral_daily(analysis))
+            measured.append(graded_daily(analysis))
         except ValueError:
             continue
     measured.extend(series)
@@ -492,53 +508,50 @@ def information_ratio_bar(effective: float, days: int, probability: float) -> fl
 
 
 def excess_at_cost_stress(
-    neutralized_excess: float,
+    plain_excess: float,
     days: int,
     *,
     cost_stress_multiplier: float,
     slippage_bps: float,
     turnover: float,
 ) -> float:
-    """The graduation's cost-stress reading (F5) of one span: its annualised
-    neutralised excess (of the graded series) less ``(cost_stress_multiplier −
-    1) × slippage_bps`` more per side on ``turnover``, the span's traded
-    notional over its opening equity, annualised over its ``days`` measured
-    days. The forward slice judges it; a research row reports it."""
+    """The cost-stress reading of one span, which the freeze gate judges on
+    the research period and F5 on the forward months: the graded series'
+    annualised plain excess less ``(cost_stress_multiplier − 1) ×
+    slippage_bps`` more per side on ``turnover``, the span's traded notional
+    over its opening equity, annualised over its ``days`` days. A research
+    row reports it."""
 
     years = days / TRADING_DAYS_PER_YEAR
     return (
-        neutralized_excess
+        plain_excess
         - (cost_stress_multiplier - 1.0) * slippage_bps * turnover * 1e-4 / years
     )
 
 
-def raw_excess_at_cost_stress(
-    summary: Mapping[str, object], *, cost_stress_multiplier: float
+def summary_excess_at_cost_stress(
+    statistics: Mapping[str, object],
+    summary: Mapping[str, object],
+    *,
+    cost_stress_multiplier: float,
 ) -> float | None:
-    """The holder's money against the benchmark at the cost stress, over one
-    replay's span: its own equity return after every cost minus the arm's
-    ``benchmark_index`` price return over the same days
-    (``benchmark.excess_return``), less ``(cost_stress_multiplier − 1)`` times
-    the modelled slippage on its turnover (``cost_sensitivity``: the profile's
-    slippage and what one bp per side costs as a fraction of the opening
-    equity). Cumulative and not compounded, like
-    ``cost_sensitivity.excess_at_2x_slippage``, which it equals at a
-    multiplier of 2. ``None`` when the summary carries no benchmark excess or
-    no cost block."""
+    """:func:`excess_at_cost_stress` of one research replay: its graded
+    ``statistics`` (:func:`graded_statistics` of its span) at the slippage its
+    cost block records (``cost_sensitivity.slippage_bps``) on the replay's own
+    ``turnover``. ``None`` where the summary carries neither."""
 
-    benchmark = summary.get("benchmark")
     costs = summary.get("cost_sensitivity")
-    if not isinstance(benchmark, Mapping) or not isinstance(costs, Mapping):
+    slippage = costs.get("slippage_bps") if isinstance(costs, Mapping) else None
+    turnover = summary.get("turnover")
+    if not (_finite(slippage) and _finite(turnover)):
         return None
-    excess = benchmark.get("excess_return")
-    slippage = costs.get("slippage_bps")
-    per_bp = costs.get("cost_per_bp_per_side")
-    if not all(
-        isinstance(value, (int, float)) and not isinstance(value, bool)
-        for value in (excess, slippage, per_bp)
-    ):
-        return None
-    return float(excess) - (cost_stress_multiplier - 1.0) * float(slippage) * float(per_bp)  # type: ignore[arg-type]
+    return excess_at_cost_stress(
+        float(statistics["plain_excess"]),  # type: ignore[arg-type]
+        int(statistics["days"]),  # type: ignore[call-overload]
+        cost_stress_multiplier=cost_stress_multiplier,
+        slippage_bps=float(slippage),  # type: ignore[arg-type]
+        turnover=float(turnover),  # type: ignore[arg-type]
+    )
 
 
 def _compounded(series: object, start: str, end: str) -> float | None:
@@ -572,14 +585,14 @@ def holder_readings(
     return after its costs (``panel_return``), each compounded from the stored
     daily series over its days in ``start``..``end``; ``raw_excess`` is book
     minus benchmark and ``plain_selection`` book minus panel, cumulative
-    differences like ``benchmark.excess_return``. ``plain_selection`` is what
-    the active series says without its regression: whether the names the book
-    picked beat random names on its own skeleton. A series the sidecar does not
-    carry over the span reads ``None``, and so does every difference built on
-    it. Empty bounds take the whole sidecar.
+    differences like ``benchmark.excess_return``. ``plain_selection`` is the
+    active series compounded: whether the names the book picked beat random
+    names on its own skeleton. A series the sidecar does not carry over the
+    span reads ``None``, and so does every difference built on it. Empty bounds
+    take the whole sidecar.
 
     One structure wherever the holder is read: the ``raw_readings`` of a
-    forward or Held-out slice (:func:`slice_readings`), and of a research
+    forward or Held-out slice and of a seed replicate's, and of a research
     row over its span and its last two years
     (``session_tools.SessionValidations.raw_readings``).
     """
@@ -600,31 +613,6 @@ def holder_readings(
 HOLDER_READINGS = tuple(holder_readings({}))
 
 
-def slice_readings(
-    analysis: Mapping[str, object], *, start: str, end: str
-) -> dict[str, object]:
-    """The readings a forward or Held-out slice carries beside its statistics.
-
-    ``plain_excess`` is the graded series' annualised mean over the days the
-    regression reads, before the regression: ``neutralized_excess`` minus it
-    is what the market and size loadings were credited or charged, which an
-    unhedged holder never receives. ``raw_readings`` is
-    :func:`holder_readings` of the slice. Both are recomputable from a stored
-    sidecar, so a slice recorded before they existed reads the same numbers
-    on demand. ``ValueError`` when the slice has no regression day.
-    """
-
-    start, end = _span(start, end)
-    graded, _series = _graded(analysis)
-    rows = _regression_rows(graded, start, end)
-    if not len(rows):
-        raise ValueError(f"slice {start}..{end} has no day with both regressors")
-    return {
-        "plain_excess": float(rows[:, 0].mean()) * TRADING_DAYS_PER_YEAR,
-        "raw_readings": holder_readings(analysis, start=start, end=end),
-    }
-
-
 def seed_replicate_slice(
     analysis: Mapping[str, object], *, start: str, end: str
 ) -> dict[str, object]:
@@ -632,18 +620,17 @@ def seed_replicate_slice(
 
     A replicate is the book's strategy on another training seed, replayed
     exactly as the book is. Its slice carries what the book's own slice
-    reads -- the graded series' neutralised statistics and
-    :func:`slice_readings` -- and no condition: forward judges the book and
-    its replicates as one series (:func:`plain_excess_lower_bound`), never a
-    replicate on its own.
+    reads -- the graded series' statistics and the holder's readings -- and
+    no condition: F2 judges the book and its replicates as one series
+    (:func:`forward_lower_bound`), never a replicate on its own.
     """
 
     start, end = _span(start, end)
     return {
         "start": start,
         "end": end,
-        **neutralized_statistics(analysis, start=start, end=end),
-        **slice_readings(analysis, start=start, end=end),
+        **graded_statistics(analysis, start=start, end=end),
+        "raw_readings": holder_readings(analysis, start=start, end=end),
     }
 
 
@@ -691,18 +678,7 @@ def _with_seed_replicates(
     return {"seed_replicates": blocks, "seed_mean": seed_mean([readings, *blocks])}
 
 
-def _plain_active(analysis: Mapping[str, object], start: str, end: str) -> dict[str, float]:
-    """One book's daily plain active return over a slice, by date: its return
-    minus its zero-skill panel's, with no regression, on the days the slice's
-    regression reads. ``ValueError`` without a panel."""
-
-    active = active_analysis(analysis)
-    if active is None:
-        raise ValueError("a replay without a zero-skill panel has no plain excess to judge")
-    return {row[0]: row[1] for row in _regression_join(active, start, end)}
-
-
-def plain_excess_lower_bound(
+def forward_lower_bound(
     analyses: Sequence[Mapping[str, object]],
     *,
     start: str,
@@ -710,31 +686,36 @@ def plain_excess_lower_bound(
     seed_key: str,
     confidence: float,
 ) -> float:
-    """What the forward selection condition (F8) judges: the one-sided
-    ``confidence`` lower bound of the plain excess of ``analyses`` together.
+    """What F2 judges: the one-sided ``confidence`` lower bound of the plain
+    excess of ``analyses`` together.
 
-    The series is the daily plain active return (:func:`_plain_active`)
-    averaged day by day over ``analyses``: the frozen book's sidecar, then one
-    per seed replicate its freeze registered, so a book frozen with none is
-    judged on its own series. Its annualised mean is the slice's
-    ``plain_excess``, or with replicates ``seed_mean.plain_excess``, so the
-    record carries the bound alone, drawn as F2 draws its own
-    (:func:`bootstrap_lower_bound`: the same days, blocks, draws and
-    ``seed_key``) with the mean in place of the regression intercept. It is
+    The series is each sidecar's daily graded series over the slice, averaged
+    day by day over ``analyses``: the frozen book's sidecar, then one per seed
+    replicate its freeze registered, so a book frozen with none is judged on
+    its own series. Its annualised mean is the slice's ``plain_excess``, or
+    with replicates ``seed_mean.plain_excess``, so the record carries the
+    bound alone (:func:`bootstrap_lower_bound`, seeded by ``seed_key``). It is
     not ``raw_readings.plain_selection``, which compounds the book and the
     panel each over the span before taking their difference. A member whose
-    replay carries no panel or measured other days than the book's raises
-    ``ValueError``: a seed is never dropped from the mean.
+    replay graded another series (it carries no panel) or measured other days
+    than the book's raises ``ValueError``: a seed is never dropped from the
+    mean, nor averaged on another footing.
     """
 
-    members = [_plain_active(analysis, start, end) for analysis in analyses]
+    start, end = _span(start, end)
+    graded = [_graded(analysis) for analysis in analyses]
+    if any(series != graded[0][1] for _analysis, series in graded[1:]):
+        raise ValueError(
+            f"a seed replicate's replay graded another series than the frozen book's over {start}..{end}"
+        )
+    members = [dict(_strategy_returns(analysis, start, end)) for analysis, _series in graded]
     dates = list(members[0])
     if any(list(member) != dates for member in members[1:]):
         raise ValueError(
             f"a seed replicate measured other days than the frozen book over {start}..{end}"
         )
     daily = np.mean([list(member.values()) for member in members], axis=0)
-    return bootstrap_lower_bound(daily, seed_key, confidence=confidence, statistic=daily_mean)
+    return bootstrap_lower_bound(daily, seed_key, confidence=confidence)
 
 
 def _count(value: object, name: str, minimum: int) -> int:
@@ -815,11 +796,13 @@ def _probability(measured: Mapping[str, Any]) -> object:
 
 
 def _within_cap(measured: Mapping[str, Any], thresholds: Mapping[str, Any]) -> bool:
-    return measured["mandate"]["tracking_error"] <= thresholds["tracking_error_cap"]
+    value = measured["mandate"]["tracking_error"]
+    return value is not None and value <= thresholds["tracking_error_cap"]
 
 
 def _within_band(measured: Mapping[str, Any], thresholds: Mapping[str, Any]) -> bool:
-    return thresholds["beta_min"] <= measured["mandate"]["market_beta"] <= thresholds["beta_max"]
+    value = measured["mandate"]["market_beta"]
+    return value is not None and thresholds["beta_min"] <= value <= thresholds["beta_max"]
 
 
 def _refused_replicate(measured: Mapping[str, Any]) -> bool:
@@ -865,7 +848,7 @@ CONDITIONS: tuple[Condition, ...] = (
     Condition("freeze", "freeze_deflated_sharpe_below_threshold", lambda m, t: not isinstance(_probability(m), float) or not _probability(m) < t["min_deflated_sharpe_probability"]),
     Condition("freeze", "freeze_too_few_positive_years", lambda m, t: m["positive_years"] >= t["min_positive_years"]),
     Condition("freeze", "freeze_active_drawdown_exceeded", lambda m, t: m["active_max_drawdown"] <= t["active_max_drawdown"]),
-    Condition("freeze", "freeze_raw_excess_not_positive_at_cost_stress", lambda m, t: _positive(m["raw_excess_at_cost_stress"])),
+    Condition("freeze", "freeze_not_positive_at_cost_stress", lambda m, t: _positive(m["excess_at_cost_stress"])),
     Condition("freeze", "freeze_tracking_error_above_cap", _within_cap, requires=_CAP),
     Condition("freeze", "freeze_beta_outside_band", _within_band, requires=_CAP),
     # The nominee's seed replicates (``experiment._seed_replicate_gate``): a
@@ -880,11 +863,11 @@ CONDITIONS: tuple[Condition, ...] = (
     # slice to judge (:func:`graduation_verdict`).
     Condition("replay", "forward_strategy_error", lambda m, t: m["strategy_error"] != "forward", "F1"),
     Condition("replay", "heldout_strategy_error", lambda m, t: m["strategy_error"] != "heldout", "H1"),
-    # The forward slice (:func:`forward_slice`). F2-F7 read the frozen book;
-    # F8 reads the book and its seed replicates as one series
-    # (:func:`plain_excess_lower_bound`).
+    # The forward slice (:func:`forward_slice`). F2 reads the frozen book and
+    # its seed replicates as one series (:func:`forward_lower_bound`); F3-F7
+    # read the frozen book.
     Condition("forward", "forward_lower_bound_not_positive", lambda m, t: m["lower_bound"] > 0, "F2"),
-    Condition("forward", "forward_recency_negative", lambda m, t: m["recency_neutralized_excess"] >= 0, "F3"),
+    Condition("forward", "forward_recency_negative", lambda m, t: m["recency_plain_excess"] >= 0, "F3"),
     Condition("forward", "forward_max_drawdown_exceeded", lambda m, t: m["max_drawdown"] <= t["max_drawdown"], "F4"),
     Condition("forward", "forward_active_drawdown_exceeded", lambda m, t: m["active_max_drawdown"] <= t["active_max_drawdown"], "F4"),
     Condition("forward", "forward_not_positive_at_cost_stress", lambda m, t: m["excess_at_cost_stress"] > 0, "F5"),
@@ -892,9 +875,8 @@ CONDITIONS: tuple[Condition, ...] = (
     Condition("forward", "forward_exposure_below_floor", lambda m, t: m["mean_gross"] >= t["min_mean_gross"], "F6"),
     Condition("forward", "forward_tracking_error_above_cap", _within_cap, "F7", requires=_CAP),
     Condition("forward", "forward_beta_outside_band", _within_band, "F7", requires=_CAP),
-    Condition("forward", "forward_plain_excess_lower_bound_not_positive", lambda m, t: m["plain_excess_lower_bound"] > 0, "F8"),
     # The Held-out slice (:func:`heldout_slice`).
-    Condition("heldout", "heldout_excess_below_tolerance", lambda m, t: m["neutralized_excess"] >= m["tolerance"], "H2"),
+    Condition("heldout", "heldout_excess_below_tolerance", lambda m, t: m["plain_excess"] >= m["tolerance"], "H2"),
     Condition("heldout", "heldout_max_drawdown_exceeded", lambda m, t: m["max_drawdown"] <= t["max_drawdown"], "H3"),
     Condition("heldout", "heldout_active_drawdown_exceeded", lambda m, t: m["active_max_drawdown"] <= t["active_max_drawdown"], "H3"),
     Condition("heldout", "heldout_exposure_below_floor", lambda m, t: m["mean_gross"] >= t["min_mean_gross"], "H4"),
@@ -968,17 +950,18 @@ def freeze_gate(
 
     ``full_span_validations`` counts the arm's measurable full-span
     validations, controls included; ``years`` are the research years'
-    ``(start, end)`` bounds. On the graded series the gate asks for an IR of at
-    least ``min_active_ir``, a deflated Sharpe probability of at least
-    ``min_dsr_probability``, at least ``min_full_span_validations`` full-span
-    validations, a positive neutralised excess in ``min_positive_year_share``
-    of the research years, and a drawdown within ``active_max_drawdown``; on
-    the strategy's own series, for the tracking mandate when one is set. It
-    also asks the holder's money to beat the benchmark:
-    :func:`raw_excess_at_cost_stress` of the nominee's ``summary`` at
-    ``cost_stress_multiplier`` above zero, the multiplier stated among the
-    thresholds. The equity drawdown is the caller's hard nomination rule
-    (``config.AcceptanceRules.evaluate``).
+    ``(start, end)`` bounds. On the graded series, read as it is
+    (:func:`graded_statistics`), the gate asks for an IR of at least
+    ``min_active_ir``, a deflated Sharpe probability of at least
+    ``min_dsr_probability`` (the DSR reads the same daily series), at least
+    ``min_full_span_validations`` full-span validations, a positive plain
+    excess in ``min_positive_year_share`` of the research years, a drawdown
+    within ``active_max_drawdown`` and a plain excess still above zero at the
+    cost stress (:func:`summary_excess_at_cost_stress` of the nominee's
+    ``summary`` at ``cost_stress_multiplier``, the multiplier stated among the
+    thresholds), the reading F5 judges forward; on the strategy's own series,
+    for the tracking mandate when one is set. The equity drawdown is the
+    caller's hard nomination rule (``config.AcceptanceRules.evaluate``).
     """
 
     family = trial_family_statistics(
@@ -991,7 +974,7 @@ def freeze_gate(
     )
     full_span_validations = _count(full_span_validations, "full_span_validations", 0)
     graded, series = _graded(analysis)
-    statistics, _rows, neutral = _measured(graded, "", "")
+    statistics, daily = _measured(graded, "", "")
     effective = float(family.pop("effective_trials"))  # type: ignore[arg-type]
     dispersion = null_sharpe_std(int(statistics["days"]))
     dsr = {
@@ -1000,29 +983,29 @@ def freeze_gate(
             observed_sharpe=statistics["information_ratio"],
             effective_trials=effective,
             trial_sharpe_std=dispersion,
-            returns=neutral,
+            returns=daily,
         ),
         "information_ratio_bar": information_ratio_bar(
             effective, int(statistics["days"]), rules.min_dsr_probability
         ),
     }
     year_excess = [
-        window_neutralized_excess(graded, start=start, end=end)
+        window_plain_excess(graded, start=start, end=end)
         for start, end in (_span(*year) for year in years)
     ]
     if summary is None:
-        raise ValueError("the raw cost-stress condition needs the nominee's summary")
+        raise ValueError("the cost-stress condition needs the nominee's summary")
     measured = {
         "series": series,
         **statistics,
-        "year_neutralized_excess": year_excess,
+        "year_plain_excess": year_excess,
         "positive_years": sum(1 for value in year_excess if value is not None and value > 0),
         "active_max_drawdown": _max_slice_drawdown(graded, "", ""),
         "mandate": _mandate(analysis, "", ""),
         "full_span_validations": full_span_validations,
         "deflated_sharpe": dsr,
-        "raw_excess_at_cost_stress": raw_excess_at_cost_stress(
-            summary, cost_stress_multiplier=rules.cost_stress_multiplier
+        "excess_at_cost_stress": summary_excess_at_cost_stress(
+            statistics, summary, cost_stress_multiplier=rules.cost_stress_multiplier
         ),
     }
     thresholds = {
@@ -1040,51 +1023,31 @@ def freeze_gate(
     return {"passed": not reasons, "reasons": reasons, **measured, "thresholds": thresholds}
 
 
-# Refit the draws in batches holding at most this many bytes of resampled rows.
-# Every reduction in ``_fit`` runs within one draw, so the batched bound is the
-# same float as a single batch; only the peak footprint differs. It has to: one
-# batch of all 2,000 draws is a ~12 MB resample plus ~25 MB of elementwise
-# temporaries, and blocks that large are handed back to the kernel when freed,
-# so every verdict faults them in again. On a loaded host that fault path costs
-# far more than the arithmetic it feeds -- 30 forward bootstraps measured 0.9 s
-# of user time against 108 s of system time. Staying under glibc's default
-# 128 KiB mmap/trim threshold keeps the batch inside the allocator's arena,
-# where it is reused instead: the same 30 bootstraps then take 0.7 s in total.
+# Read the draws in batches holding at most this many bytes of resampled days.
+# Every mean runs within one draw, so the batched bound is the same float as a
+# single batch; only the peak footprint differs. It has to: one batch of all
+# 2,000 draws is megabytes of resample and index, and blocks that large are
+# handed back to the kernel when freed, so every verdict faults them in again.
+# On a loaded host that fault path costs far more than the arithmetic it feeds
+# -- 30 forward bootstraps once measured 0.9 s of user time against 108 s of
+# system time. Staying under glibc's default 128 KiB mmap/trim threshold keeps
+# the batch inside the allocator's arena, where it is reused instead.
 _BOOTSTRAP_BATCH_BYTES = 128 * 1024
 
 
-def _intercept(rows: np.ndarray) -> np.ndarray:
-    """F2's statistic: the regression intercept of ``(strategy, benchmark,
-    size)`` rows."""
-
-    return _fit(rows)[0]
-
-
-def daily_mean(series: np.ndarray) -> np.ndarray:
-    """F8's statistic: the mean of a daily series."""
-
-    return series.mean(axis=-1)
-
-
-def bootstrap_lower_bound(
-    rows: np.ndarray,
-    seed_key: str,
-    *,
-    confidence: float,
-    statistic: Callable[[np.ndarray], np.ndarray] = _intercept,
-) -> float:
-    """One-sided ``confidence`` lower bound of an annualised daily figure.
+def bootstrap_lower_bound(series: np.ndarray, seed_key: str, *, confidence: float) -> float:
+    """One-sided ``confidence`` lower bound of a daily series' annualised mean.
 
     Moving-block bootstrap: ``BOOTSTRAP_DRAWS`` resamples of whole days in
-    blocks of ``BOOTSTRAP_BLOCK_DAYS`` consecutive days, ``statistic`` read on
-    each (over the day axis, any draws ahead of it), the bound read as the
-    percentile. The generator is seeded from a SHA-256 of ``seed_key`` (the
-    frozen artifact id), so one artifact always gets the same bound, and two
-    statistics over the same days resample the same days. The draws run in
-    batches of ``_BOOTSTRAP_BATCH_BYTES``, which does not move the bound.
+    blocks of ``BOOTSTRAP_BLOCK_DAYS`` consecutive days, the mean read on
+    each, the bound read as the percentile. The generator is seeded from a
+    SHA-256 of ``seed_key`` (the frozen artifact id), so one artifact always
+    gets the same bound, and two series over the same days resample the same
+    days. The draws run in batches of ``_BOOTSTRAP_BATCH_BYTES``, which does
+    not move the bound.
     """
 
-    days = len(rows)
+    days = len(series)
     if days < BOOTSTRAP_BLOCK_DAYS:
         raise ValueError(
             f"forward slice has {days} measured days, fewer than one bootstrap block"
@@ -1098,47 +1061,13 @@ def bootstrap_lower_bound(
         0, days - BOOTSTRAP_BLOCK_DAYS + 1, size=(BOOTSTRAP_DRAWS, blocks)
     )
     offsets = np.arange(BOOTSTRAP_BLOCK_DAYS)
-    batch = max(1, _BOOTSTRAP_BATCH_BYTES // rows.nbytes)
+    batch = max(1, _BOOTSTRAP_BATCH_BYTES // series.nbytes)
     estimates = np.empty(BOOTSTRAP_DRAWS)
     for first in range(0, BOOTSTRAP_DRAWS, batch):
         drawn = starts[first : first + batch]
         index = (drawn[:, :, None] + offsets).reshape(len(drawn), -1)[:, :days]
-        estimates[first : first + len(drawn)] = statistic(rows[index])
+        estimates[first : first + len(drawn)] = series[index].mean(axis=-1)
     return float(np.quantile(estimates, 1.0 - confidence)) * TRADING_DAYS_PER_YEAR
-
-
-def neutralized_interval(
-    analysis: Mapping[str, object],
-    *,
-    start: str = "",
-    end: str = "",
-    seed_key: str,
-    lower_confidence: float,
-    upper_confidence: float,
-) -> dict[str, object]:
-    """The neutralised excess of ``analysis``'s ``strategy_daily`` over a span,
-    its two loadings, and a one-sided bound on each side of it.
-
-    ``lower_bound`` is F2's bound at ``lower_confidence``
-    (:func:`bootstrap_lower_bound` of the regression intercept);
-    ``upper_bound`` the ``upper_confidence`` upper bound, the negated lower
-    bound of the regression of the negated series -- the fit is linear in
-    it -- on the same resampled days. An empty ``start``/``end`` takes the
-    whole analysis. ``ValueError`` when the span cannot be measured or is
-    shorter than one bootstrap block.
-    """
-
-    statistics, rows, _neutral = _measured(analysis, start, end)
-    _intercept_daily, market_beta, size_beta = _fit(rows)
-    negated = rows * np.array([-1.0, 1.0, 1.0])
-    return {
-        "days": statistics["days"],
-        "neutralized_excess": statistics["neutralized_excess"],
-        "market_beta": float(market_beta),
-        "size_beta": float(size_beta),
-        "lower_bound": bootstrap_lower_bound(rows, seed_key, confidence=lower_confidence),
-        "upper_bound": -bootstrap_lower_bound(negated, seed_key, confidence=upper_confidence),
-    }
 
 
 def _max_slice_drawdown(analysis: Mapping[str, object], start: str, end: str) -> float:
@@ -1166,29 +1095,29 @@ def forward_slice(
     mean_gross: float,
     seed_replicates: Sequence[tuple[Mapping[str, object], Mapping[str, object]]] = (),
 ) -> dict[str, object]:
-    """Statistics and failed conditions F2–F8 of the forward slice under the
+    """Statistics and failed conditions F2–F7 of the forward slice under the
     arm's ``rules`` (docs/pipeline-design.md, the graduation verdict).
 
-    The lower bound, the recency window, the cost stress and
-    ``active_max_drawdown`` are read off the graded series; ``max_drawdown``
-    limits the equity itself and the tracking mandate, when one is set, the
-    strategy's own tracking error and beta over the slice. Those conditions
-    read the book alone. ``seed_replicates`` are the seed replicates the
-    freeze registered, replayed like the book, each as what names it and its
-    replay's sidecar; with any, the slice carries their slices and the
-    :func:`seed_mean` with the book. F8 reads ``plain_excess_lower_bound``
-    (:func:`plain_excess_lower_bound` of the book and those replicates, at
-    ``forward_confidence``), which must be above zero: selection in plain
-    terms, with its uncertainty, on the seeds together. The holder's readings
-    (:func:`slice_readings`) ride on every slice.
-    ``start``/``end`` are the slice's calendar bounds; the recency window is
-    the last ``recency_months`` calendar months ending in ``end``'s month.
-    ``turnover`` (traded notional over the slice's opening equity),
+    The graded series is read as it is (:func:`graded_statistics`). F2 reads
+    ``lower_bound``, the ``forward_confidence`` lower bound of its plain
+    excess over the book and the seed replicates the freeze registered
+    together (:func:`forward_lower_bound`), which must be above zero.
+    ``seed_replicates`` are those replicates, replayed like the book, each as
+    what names it and its replay's sidecar; with any, the slice also carries
+    their own slices and the :func:`seed_mean` with the book. The recency
+    window, the cost stress and ``active_max_drawdown`` read the book's own
+    graded series; ``max_drawdown`` limits the equity itself and the tracking
+    mandate, when one is set, the strategy's own tracking error and beta over
+    the slice. The holder's readings (:func:`holder_readings`) ride on every
+    slice. ``start``/``end`` are the slice's calendar bounds; the recency
+    window is the last ``recency_months`` calendar months ending in ``end``'s
+    month. ``turnover`` (traded notional over the slice's opening equity),
     ``round_trips`` and ``mean_gross`` are the slice's own figures from the
     replay; ``slippage_bps`` is the Broker profile's. The cost stress charges
     ``(cost_stress_multiplier − 1) × slippage_bps × turnover × 1e−4``,
-    annualised over the slice's measured days, against the neutralised excess.
-    F1 (strategy error) is :func:`graduation_verdict`'s.
+    annualised over the slice's days, against the plain excess
+    (:func:`excess_at_cost_stress`). F1 (strategy error) is
+    :func:`graduation_verdict`'s.
     """
 
     start, end = _span(start, end)
@@ -1204,29 +1133,27 @@ def forward_slice(
             f"round_trips must be a non-negative integer, got {round_trips!r}"
         )
     graded, series = _graded(analysis)
-    statistics, rows, _neutral = _measured(graded, start, end)
-    lower_bound = bootstrap_lower_bound(rows, seed_key, confidence=rules.forward_confidence)
+    statistics, _daily = _measured(graded, start, end)
     recency_month = _month_index(end) - (rules.recency_months - 1)
     recency_start = f"{recency_month // 12:04d}{recency_month % 12 + 1:02d}01"
-    recency_excess = window_neutralized_excess(
-        graded, start=max(start, recency_start), end=end
-    )
+    recency_excess = window_plain_excess(graded, start=max(start, recency_start), end=end)
     if recency_excess is None:
-        raise ValueError(
-            f"neutralised excess of the recency window from {recency_start} is not measurable"
-        )
+        raise ValueError(f"the recency window from {recency_start} holds fewer than two days")
     drawdown = _max_slice_drawdown(analysis, start, end)
     active_drawdown = _max_slice_drawdown(graded, start, end)
     mandate = _mandate(analysis, start, end)
     stressed_excess = excess_at_cost_stress(
-        statistics["neutralized_excess"],
-        len(rows),
+        statistics["plain_excess"],
+        statistics["days"],
         cost_stress_multiplier=rules.cost_stress_multiplier,
         slippage_bps=slippage_bps,
         turnover=turnover,
     )
     months = _month_index(end) - _month_index(start) + 1
-    readings = slice_readings(analysis, start=start, end=end)
+    readings = {
+        "plain_excess": statistics["plain_excess"],
+        "raw_readings": holder_readings(analysis, start=start, end=end),
+    }
     measured = {
         "start": start,
         "end": end,
@@ -1234,16 +1161,15 @@ def forward_slice(
         **statistics,
         **readings,
         **_with_seed_replicates(readings, seed_replicates, start, end),
-        "plain_excess_lower_bound": plain_excess_lower_bound(
+        "lower_bound": forward_lower_bound(
             [analysis, *(sidecar for _identity, sidecar in seed_replicates)],
             start=start,
             end=end,
             seed_key=seed_key,
             confidence=rules.forward_confidence,
         ),
-        "lower_bound": lower_bound,
         "recency_start": recency_start,
-        "recency_neutralized_excess": recency_excess,
+        "recency_plain_excess": recency_excess,
         "max_drawdown": drawdown,
         "active_max_drawdown": active_drawdown,
         "mandate": mandate,
@@ -1285,15 +1211,14 @@ def heldout_slice(
     """Statistics and failed conditions H2–H4 of the Held-out slice under the
     arm's ``rules`` (docs/pipeline-design.md, the graduation verdict).
 
-    Non-catastrophic only: the graded neutralised excess must be at least
+    Non-catastrophic only: the graded series' plain excess must be at least
     −``heldout_tolerance_z`` × ``forward_tracking_error`` / √(measured years),
     the equity drawdown within ``max_drawdown``, the graded series' drawdown
     within ``active_max_drawdown`` and the mean gross exposure at least
     ``min_mean_gross``. H1 (strategy error) is :func:`graduation_verdict`'s.
-    The holder's readings
-    (:func:`slice_readings`) are reported, not judged; so are the seed
-    replicates' slices and their :func:`seed_mean` with the book, which the
-    slice carries as :func:`forward_slice` does.
+    The holder's readings (:func:`holder_readings`) are reported, not judged;
+    so are the seed replicates' slices and their :func:`seed_mean` with the
+    book, which the slice carries as :func:`forward_slice` does.
     """
 
     start, end = _span(start, end)
@@ -1302,15 +1227,18 @@ def heldout_slice(
     )
     mean_gross = _non_negative(mean_gross, "mean_gross")
     graded, series = _graded(analysis)
-    statistics, rows, _neutral = _measured(graded, start, end)
+    statistics, _daily = _measured(graded, start, end)
     tolerance = (
         -rules.heldout_tolerance_z
         * forward_tracking_error
-        / math.sqrt(len(rows) / TRADING_DAYS_PER_YEAR)
+        / math.sqrt(statistics["days"] / TRADING_DAYS_PER_YEAR)
     )
     drawdown = _max_slice_drawdown(analysis, start, end)
     active_drawdown = _max_slice_drawdown(graded, start, end)
-    readings = slice_readings(analysis, start=start, end=end)
+    readings = {
+        "plain_excess": statistics["plain_excess"],
+        "raw_readings": holder_readings(analysis, start=start, end=end),
+    }
     measured = {
         "start": start,
         "end": end,
@@ -1344,8 +1272,8 @@ def _signed(value: object, unit: str, *, scale: float = 100.0, digits: int = 1) 
 
 def holder_line(block: Mapping[str, Any]) -> str:
     """One slice in words, the holder's reading first: the book against the
-    benchmark, then against its zero-skill panel, then the graded series
-    before and after the regression that neutralises it."""
+    benchmark, then against its zero-skill panel, then the graded series the
+    verdict read, with its IR and its market loading."""
 
     raw = block.get("raw_readings") or {}
     return (
@@ -1354,10 +1282,9 @@ def holder_line(block: Mapping[str, Any]) -> str:
         f"(raw excess {_signed(raw.get('raw_excess'), ' points')}); "
         f"zero-skill panel {_signed(raw.get('panel_return'), '%')} "
         f"(plain selection {_signed(raw.get('plain_selection'), ' points')}); "
-        f"{block.get('series')} series {_signed(block.get('plain_excess'), '%/yr')} unregressed, "
-        f"{_signed(block.get('neutralized_excess'), '%/yr')} neutralised "
-        f"(market loading {_signed(block.get('market_beta'), '', scale=1.0, digits=2)}, "
-        f"IR {_signed(block.get('information_ratio'), '', scale=1.0, digits=2)})"
+        f"{block.get('series')} series {_signed(block.get('plain_excess'), '%/yr')} "
+        f"(IR {_signed(block.get('information_ratio'), '', scale=1.0, digits=2)}, "
+        f"market loading {_signed(block.get('market_beta'), '', scale=1.0, digits=2)})"
     )
 
 
@@ -1367,7 +1294,7 @@ def graduation_verdict(
     heldout: Mapping[str, Any] | None,
     strategy_error: Literal["forward", "heldout"] | None = None,
 ) -> dict[str, object]:
-    """``graduated`` iff F1–F8 and H1–H4 all hold, else ``discarded``.
+    """``graduated`` iff F1–F7 and H1–H4 all hold, else ``discarded``.
 
     ``strategy_error`` names the slice in which the strategy raised (F1/H1).
     A replay that raised produced no result, so it comes with no slice at all.

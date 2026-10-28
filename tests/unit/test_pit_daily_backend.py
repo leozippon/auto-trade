@@ -2549,8 +2549,8 @@ def test_an_arm_replays_grades_and_records_its_own_benchmark_index(tmp_path: Pat
     # The benchmark leg is the arm's own series, not the other index's.
     assert {value for _day, value in graded["benchmark_daily"]} == {-0.0125}
     assert {value for _day, value in plain["benchmark_daily"]} == {0.005}
-    assert "中证500" in graded["neutralized_excess"]["method"]
-    assert "沪深300" in plain["neutralized_excess"]["method"]
+    assert "中证500" in graded["factor_regression"]["method"]
+    assert "沪深300" in plain["factor_regression"]["method"]
     # The panel draws replacements from each arm's own membership.
     assert graded["panel"]["matched"] == "index_membership+affordability"
     assert plain["panel"]["matched"] == "index_membership+affordability"
@@ -2574,7 +2574,7 @@ def test_no_grading_path_takes_a_default_benchmark_index() -> None:
     import inspect
 
     from autotrade.environment.replay.style import (
-        neutralization_method,
+        regression_method,
         replay_style_analysis,
         slot_benchmark,
         slot_membership,
@@ -2589,7 +2589,7 @@ def test_no_grading_path_takes_a_default_benchmark_index() -> None:
         replay_style_analysis,
         slot_benchmark,
         slot_membership,
-        neutralization_method,
+        regression_method,
     ):
         parameter = inspect.signature(required).parameters["benchmark_index"]
         assert parameter.default is inspect.Parameter.empty, required.__name__

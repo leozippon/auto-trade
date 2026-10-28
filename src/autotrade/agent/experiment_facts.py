@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from autotrade.environment.broker_core import BONUS_SHARE_PAR_CNY, DIVIDEND_TAX_TIERS
 from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.identity import AgentRefStore
-from autotrade.environment.replay.style import neutralization_method
+from autotrade.environment.replay.style import regression_method
 from autotrade.environment.sandbox import SCREENING_TOOL_MOUNT, container_thread_env
 
 EXPERIMENT_FACTS_SCHEMA_VERSION = 2
@@ -195,14 +195,14 @@ def build_experiment_facts(
         ),
         "broker_replay": _broker_replay_facts(manifest),
         # The index this arm is measured against: the benchmark leg of every
-        # neutralized excess below, and the membership the zero-skill panel
+        # factor loading below, and the membership the zero-skill panel
         # draws its replacement names from. A manifest written before the
         # parameter existed reads as the default, which is what those arms ran.
         "benchmark_index": benchmark_index,
-        # The caliber every ``neutralized_excess_return`` in this session was
-        # computed under. One sentence, naming that benchmark: stating it here
-        # keeps it out of every backtest summary.
-        "neutralized_excess_method": neutralization_method(benchmark_index),
+        # The caliber every factor loading and residual tracking error in this
+        # session was computed under. One sentence, naming that benchmark:
+        # stating it here keeps it out of every backtest summary.
+        "regression_method": regression_method(benchmark_index),
         "runtime_tools": _runtime_tool_facts(runtime_env, manifest=manifest),
     }
     return compact_mapping(facts)

@@ -282,7 +282,7 @@ def main(argv: list[str] | None = None) -> int:
                 "total_return": stats.get("total_return"),
                 "max_drawdown": stats.get("max_drawdown"),
                 "active_information_ratio": benchmark.get("active_information_ratio"),
-                "active_neutralized_excess": benchmark.get("active_neutralized_excess"),
+                "active_excess": benchmark.get("active_excess"),
             }
         )
     )

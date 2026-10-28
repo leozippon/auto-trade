@@ -360,10 +360,10 @@ def sub_window_stats(
     gets the replayed span instead, which reports the two end years partial
     unless the replay itself reaches the calendar bounds.
 
-    ``benchmark_return`` / ``excess_return`` / ``neutralized_excess_return``
-    stay ``None`` until the evaluation backend joins the benchmark and size
-    series in (``attach_sub_window_benchmark``): the replay itself never reads
-    an index or a cross-section. ``panel_return`` is added there too, on a
+    ``benchmark_return`` / ``excess_return`` stay ``None`` until the
+    evaluation backend joins the benchmark series in
+    (``attach_sub_window_benchmark``): the replay itself never reads an index.
+    ``panel_return`` and ``active_excess_return`` are added there too, on a
     replay that carries a panel.
     """
 
@@ -401,7 +401,6 @@ def sub_window_stats(
                 "return": _round(closing / opening - 1.0 if opening > 0 else 0.0),
                 "benchmark_return": None,
                 "excess_return": None,
-                "neutralized_excess_return": None,
                 "sharpe": _round(_annualized_sharpe(opening, equities)),
                 "max_drawdown": _round(_max_drawdown(opening, equities)),
                 "turnover": _round(
@@ -417,31 +416,27 @@ def sub_window_stats(
 def attach_sub_window_benchmark(
     summary: dict[str, object], style_analysis: Mapping[str, object]
 ) -> dict[str, object]:
-    """Fill each sub-window's benchmark, excess and neutralized excess, in place.
+    """Fill each sub-window's benchmark and excess, in place.
 
-    ``compute_return_stats`` sees only the replay; the benchmark and size-factor
-    series are read once, host-side, by ``replay_style_analysis``. The
-    evaluation backend owns both, so it closes the sub-window block here rather
-    than each backend — or each reader — re-deriving the join. A slot without a
-    usable benchmark leaves the fields ``None`` rather than reporting a
-    fabricated zero.
+    ``compute_return_stats`` sees only the replay; the benchmark series is read
+    once, host-side, by ``replay_style_analysis``. The evaluation backend owns
+    both, so it closes the sub-window block here rather than each backend — or
+    each reader — re-deriving the join. A slot without a usable benchmark
+    leaves the fields ``None`` rather than reporting a fabricated zero.
 
-    The neutralized figure is the same two-regressor attribution the whole
-    window carries, re-run on the year's own days
-    (``style.window_neutralized_excess``): the raw excess of a single year
-    cannot separate an edge from a size or beta tilt any better than a whole
-    window's can. A replay that carries a zero-skill panel gets the same figure
-    for its active series beside it, which is the one the freeze gate counts
-    positive years on, and the panel composite's own return over the year,
-    compounded like the benchmark's: the year's return, its benchmark and its
-    panel side by side are the holder's account, the index and zero skill on
-    the same skeleton.
+    A replay that carries a zero-skill panel also gets the year's active excess
+    (``style.window_plain_excess`` of its active series: the annualised mean
+    of the book's daily return minus the panel's, no regression), the figure
+    the freeze gate counts positive years on, and the panel composite's own
+    return over the year, compounded like the benchmark's: the year's return,
+    its benchmark and its panel side by side are the holder's account, the
+    index and zero skill on the same skeleton.
     """
 
     # Deferred: ``style`` imports this module for the trading-day constant and
-    # the equity-curve helpers, so the attribution function it owns can only be
-    # reached from here at call time.
-    from .style import _series_pairs, active_analysis, window_neutralized_excess
+    # the equity-curve helpers, so the functions it owns can only be reached
+    # from here at call time.
+    from .style import _series_pairs, active_analysis, window_plain_excess
 
     rows = summary.get("sub_windows")
     if not isinstance(rows, list):
@@ -478,13 +473,9 @@ def attach_sub_window_benchmark(
         row["benchmark_return"] = _round(benchmark)
         if isinstance(own, (int, float)) and not isinstance(own, bool):
             row["excess_return"] = _round(float(own) - benchmark)
-        row["neutralized_excess_return"] = window_neutralized_excess(
-            style_analysis, start=start, end=end
-        )
         if active is not None:
-            row["active_neutralized_excess_return"] = window_neutralized_excess(
-                active, start=start, end=end
-            )
+            excess = window_plain_excess(active, start=start, end=end)
+            row["active_excess_return"] = None if excess is None else _round(excess)
             row["panel_return"] = _round(
                 compounded_return(
                     value
@@ -656,6 +647,34 @@ def compounded_drawdown(returns: Iterable[float]) -> float:
     """
 
     return max((drawdown for _equity, drawdown in compounded_path(returns)), default=0.0)
+
+
+def plain_statistics(returns: Iterable[float]) -> dict[str, float | int | None]:
+    """One daily return series read as it is, with no regression.
+
+    ``plain_excess`` is its annualised mean, ``tracking_error`` its annualised
+    standard deviation (n − 1 degrees of freedom) and ``information_ratio``
+    their ratio, ``None`` on a flat series; each annualised over
+    ``TRADING_DAYS_PER_YEAR``. Of the active series -- a book's daily return
+    minus its zero-skill panel's -- these are the figures every replay reports
+    and every gate grades (``pipelines/verdict.py``). Fewer than two days
+    measure none of them.
+    """
+
+    values = [float(value) for value in returns]
+    days = len(values)
+    if days < 2:
+        return {"days": days, "plain_excess": None, "tracking_error": None, "information_ratio": None}
+    mean = math.fsum(values) / days
+    deviation = math.sqrt(math.fsum((value - mean) ** 2 for value in values) / (days - 1))
+    excess = mean * TRADING_DAYS_PER_YEAR
+    tracking_error = deviation * math.sqrt(TRADING_DAYS_PER_YEAR)
+    return {
+        "days": days,
+        "plain_excess": excess,
+        "tracking_error": tracking_error,
+        "information_ratio": excess / tracking_error if tracking_error > 0 else None,
+    }
 
 
 def _round(value: float) -> float:

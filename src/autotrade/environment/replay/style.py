@@ -21,8 +21,9 @@ attribution computation and touches no raw data.
 
 A formal replay's sidecar also carries its zero-skill panel
 (``null_control.run_null_control``): the composite's daily return beside the
-strategy's own, and the same attribution run on the active series (strategy
-minus composite), which is what ``pipelines/verdict.py`` grades.
+strategy's own, and the active series (strategy minus composite) read as it
+is (``stats.plain_statistics``), which is what ``pipelines/verdict.py``
+grades.
 
 Everything degrades to None/empty blocks when inputs are missing —
 attribution is advisory and must never fail a backtest.
@@ -49,6 +50,7 @@ from .stats import (
     TRADING_DAYS_PER_YEAR,
     ReplayResult,
     compounded_drawdown,
+    plain_statistics,
     total_return_from_curve,
 )
 
@@ -58,17 +60,17 @@ from .stats import (
 # by omission.
 BENCHMARK_TS_CODE = DEFAULT_BENCHMARK_INDEX
 BENCHMARK_LABEL = benchmark_index_label(BENCHMARK_TS_CODE)
-# The fewest overlapping days the attribution regresses on: a span shorter than
-# this has no neutralised excess. The Held-out slot is refused below it
-# (``pipelines.calendar.ResearchGeometry.heldout``), so a verdict never waits
-# on a replay it cannot read.
+# The fewest overlapping days the factor regression runs on: a span shorter
+# than this has no loadings and no residual tracking error. The Held-out slot
+# is refused below it (``pipelines.calendar.ResearchGeometry.heldout``), so a
+# verdict never waits on a replay it cannot read.
 MIN_REGRESSION_DAYS = 8
 STYLE_ARTIFACT_NAME = "style_analysis.json"
 STYLE_SCHEMA_VERSION = 1
 _STYLE_COLUMNS = ("circ_mv", "pb", "turnover_rate")
-# Size-factor proxy for the neutralized excess return: the small-minus-big
-# daily spread of the replay slot's OWN cross-section, equal-weighted inside
-# each leg, the legs formed on the previous trading day's float cap. The
+# Size factor of the factor regression: the small-minus-big daily spread of
+# the replay slot's OWN cross-section, equal-weighted inside each leg, the
+# legs formed on the previous trading day's float cap. The
 # audited edge read as a small-cap / low-beta tilt rather than proven alpha,
 # and a raw excess return cannot tell those apart. This is not a Barra or
 # Fama-French factor and the result says so in ``method``.
@@ -76,18 +78,20 @@ _SIZE_FACTOR_QUANTILE = 0.3
 _SIZE_FACTOR_MIN_NAMES = 30
 
 
-def neutralization_method(benchmark_index: str) -> str:
-    """The caliber sentence every ``neutralized_excess_return`` is computed under.
+def regression_method(benchmark_index: str) -> str:
+    """The caliber sentence every factor loading and residual tracking error
+    is computed under.
 
     Names the arm's own benchmark: the market leg is index-specific, the size
     leg is built from the replay's own cross-section whatever the benchmark is.
     """
 
     return (
-        f"日度策略收益对{benchmark_index_label(benchmark_index)}收益与规模因子"
+        f"日度收益对{benchmark_index_label(benchmark_index)}收益与规模因子"
         "（本回放槽全市场截面、不是本臂股票池，"
         "按前一交易日流通市值分组：最小 30% 等权减最大 30% 等权）"
-        f"的二元 OLS，截距按 {TRADING_DAYS_PER_YEAR} 个交易日年化"
+        "的二元 OLS，给出两个载荷与残差跟踪误差"
+        f"（按 {TRADING_DAYS_PER_YEAR} 个交易日年化）；它只作诊断与跟踪授权，不进评分"
     )
 
 
@@ -337,20 +341,18 @@ def _size_factor(replay_daily: pd.DataFrame) -> dict[str, float]:
     return result
 
 
-def _neutralized_excess(
+def _factor_regression(
     strategy: list[tuple[str, float]],
     benchmark: Mapping[str, float],
     size: Mapping[str, float],
 ) -> dict[str, object]:
-    """Excess return left after the market-beta and size contributions.
+    """The strategy's loadings on the benchmark and the size factor.
 
     Two-regressor OLS through the normal equations, so a collinear or degenerate
     pair is reported as a reason instead of raising: attribution is advisory and
-    must never fail a backtest. The figure is the daily intercept times the
-    trading days of a year -- an arithmetic, annualized number, not the
-    compounded window excess beside it: a book with a large loading on a factor
-    that moved a lot in the window shows a large intercept the raw excess does
-    not, and on a short window the annualization scales the intercept up.
+    must never fail a backtest. It reports the two loadings, the residual
+    standard deviation annualised (what a tracking mandate caps) and R²; its
+    intercept grades nothing, so it is not reported.
     """
 
     rows = [
@@ -363,9 +365,7 @@ def _neutralized_excess(
         "available": False,
         "reason": "factors_unavailable" if not days else "insufficient_overlapping_days",
         "n_days": days,
-        "neutralized_excess_return": None,
         "tracking_error": None,
-        "information_ratio": None,
         "market_beta": None,
         "size_beta": None,
         "r2": None,
@@ -387,18 +387,14 @@ def _neutralized_excess(
         return result
     market_beta = (s22 * s1y - s12 * s2y) / determinant
     size_beta = (s11 * s2y - s12 * s1y) / determinant
-    alpha_daily = mean_y - market_beta * mean_1 - size_beta * mean_2
     residual = syy - market_beta * s1y - size_beta * s2y
-    excess = round(alpha_daily * TRADING_DAYS_PER_YEAR, 4)
-    # The residual standard deviation the verdict calls tracking error: three
-    # fitted coefficients, annualized by the square root of the trading year.
+    # The residual standard deviation a tracking mandate caps: three fitted
+    # coefficients, annualized by the square root of the trading year.
     tracking_error = math.sqrt(max(residual, 0.0) / (days - 3) * TRADING_DAYS_PER_YEAR)
     result.update(
         available=True,
         reason=None,
-        neutralized_excess_return=excess,
         tracking_error=round(tracking_error, 4),
-        information_ratio=round(excess / tracking_error, 4) if tracking_error > 0 else None,
         market_beta=round(market_beta, 3),
         size_beta=round(size_beta, 3),
         r2=round(1.0 - residual / syy, 3) if syy > 0 else None,
@@ -520,10 +516,11 @@ def _style_exposures(
         "days": days,
         "tilts": {key: round(total / days, 3) for key, total in tilt_sums.items()},
         # The largest single SW L1 industry's share of the book, averaged over
-        # decision days. The neutralization regresses on the benchmark and size only,
-        # so a single-sector book scores as alpha; the only frozen artifact that
-        # cleared every gate was 82.5 % banks. ``industries`` stays host-side,
-        # so this one scalar is what the compact block carries to the Agent.
+        # decision days. The zero-skill panel draws its names without regard
+        # to industry, so a single-sector book's sector move scores as
+        # selection; the only frozen artifact that cleared every gate was
+        # 82.5 % banks. ``industries`` stays host-side, so this one scalar is
+        # what the compact block carries to the Agent.
         "top_industry_weight": round(max(industry_sums.values()) / days, 3),
         "industries": sorted(
             (
@@ -559,35 +556,32 @@ def replay_style_analysis(
     knowing what it was graded against.
     ``panel`` is the replay's zero-skill panel block
     (``null_control.run_null_control(..., panel=True)``): its two daily series
-    are stored beside the strategy's, and the same attribution is run on the
-    composite and on the active series (strategy minus composite), which is
-    the series the verdict grades. A truncated smoke replay passes none.
+    are stored beside the strategy's, and the active series (strategy minus
+    composite), the series the verdict grades, is read as it is. A truncated
+    smoke replay passes none.
     """
 
     label = benchmark_index_label(benchmark_index)
-    # The caliber every neutralized block below is labelled with.
-    method = neutralization_method(benchmark_index)
+    # The caliber of the factor regression below.
+    method = regression_method(benchmark_index)
     strategy = daily_returns_from_curve(replay.equity_curve)
     benchmark = slot_benchmark(replay_dir, benchmark_index=benchmark_index)
     regression = _benchmark_regression(strategy, benchmark)
     size = _size_factor(replay_daily)
-    neutralized = {"method": method, **_neutralized_excess(strategy, benchmark, size)}
+    factors = {"method": method, **_factor_regression(strategy, benchmark, size)}
     panel_blocks: dict[str, object] = {}
     panel_compact: dict[str, object] = {}
     if panel is not None:
-        composite = _series_pairs(panel.get("panel_daily"))
         graded = active_analysis(
             {"strategy_daily": strategy, "panel_daily": panel.get("panel_daily")}
         )
-        active = {
-            "method": method,
-            **_neutralized_excess(
-                _series_pairs(graded["strategy_daily"]) if graded else [],
-                benchmark,
-                size,
-            ),
-        }
-        zero_skill = {"method": method, **_neutralized_excess(composite, benchmark, size)}
+        active = [value for _date, value in _series_pairs(graded["strategy_daily"])] if graded else []
+        plain = plain_statistics(active)
+
+        def rounded(key: str) -> float | None:
+            value = plain[key]
+            return None if value is None else round(float(value), 4)
+
         panel_blocks = {
             "panel": {
                 key: value
@@ -596,25 +590,16 @@ def replay_style_analysis(
             },
             "panel_daily": panel.get("panel_daily"),
             "panel_draw_sd": panel.get("panel_draw_sd"),
-            "active_neutralized_excess": active,
-            "panel_neutralized_excess": zero_skill,
         }
         panel_compact = {
             # What the freeze gate and the verdict grade: the strategy's daily
-            # return minus the zero-skill panel composite of its own book.
-            "active_neutralized_excess": active.get("neutralized_excess_return"),
-            "active_tracking_error": active.get("tracking_error"),
-            "active_information_ratio": active.get("information_ratio"),
-            # The drawdown the freeze gate holds to active_max_drawdown, so
-            # the Agent reads the number it is graded on, not a proxy.
-            "active_max_drawdown": (
-                compounded_drawdown(
-                    value for _date, value in _series_pairs(graded["strategy_daily"])
-                )
-                if graded
-                else None
-            ),
-            "panel_neutralized_excess": zero_skill.get("neutralized_excess_return"),
+            # return minus the zero-skill panel composite of its own book,
+            # read as it is, and its drawdown, which the freeze gate holds to
+            # active_max_drawdown: the Agent reads the numbers it is graded on.
+            "active_excess": rounded("plain_excess"),
+            "active_tracking_error": rounded("tracking_error"),
+            "active_information_ratio": rounded("information_ratio"),
+            "active_max_drawdown": compounded_drawdown(active) if graded else None,
             "panel_draws": panel.get("k"),
         }
     style = _style_exposures(
@@ -636,7 +621,7 @@ def replay_style_analysis(
         "mode": mode,
         "benchmark": {"ts_code": benchmark_index, "label": label},
         "benchmark_regression": regression,
-        "neutralized_excess": neutralized,
+        "factor_regression": factors,
         "style": style,
         "strategy_daily": [[date, value] for date, value in strategy],
         "benchmark_daily": [[date, benchmark[date]] for date, _ in strategy if date in benchmark],
@@ -645,25 +630,21 @@ def replay_style_analysis(
         "compact": {
             "benchmark_return": benchmark_return,
             "excess_return": excess_return,
-            # The raw excess cannot separate an edge from a small-cap or
-            # high-beta tilt, so the neutralized figure rides beside it
-            # wherever the raw one is read.
-            "neutralized_excess_return": neutralized.get("neutralized_excess_return"),
-            "neutralized_excess_method": method,
             # The two figures a tracking mandate limits: the residual standard
-            # deviation of that regression and its loading on the benchmark.
-            "tracking_error": neutralized.get("tracking_error"),
-            "market_beta": neutralized.get("market_beta"),
+            # deviation of the strategy's own factor regression and its
+            # loading on the benchmark.
+            "tracking_error": factors.get("tracking_error"),
+            "market_beta": factors.get("market_beta"),
             **panel_compact,
             "beta": regression.get("beta"),
             "n_days": regression.get("n_days"),
             "size_tilt": tilts.get("size") if isinstance(tilts, Mapping) else None,
             # ``size_tilt`` says which rung of the cap ladder the book stands
-            # on; ``size_beta`` is the loading the neutralization actually
-            # divides out. Across measured books the two move in opposite
+            # on; ``size_beta`` is the book's loading on the size factor.
+            # Across measured books the two move in opposite
             # directions, so a budget written on the tilt cannot reach the
             # loading that produces a size-driven drawdown.
-            "size_beta": neutralized.get("size_beta"),
+            "size_beta": factors.get("size_beta"),
             "top_industry_weight": style.get("top_industry_weight"),
         },
         "created_at": utc_now_iso(),
@@ -695,8 +676,8 @@ def active_analysis(analysis: Mapping[str, object]) -> dict[str, object] | None:
 
     Active is the strategy's daily return minus the zero-skill panel composite
     of the same day, so every reader of ``strategy_daily`` -- the sub-span
-    regression below, the verdict's bootstrap and drawdown -- measures the
-    active series through the code that measures the strategy's own. ``None``
+    figure below, the verdict's statistics, bootstrap and drawdown -- measures
+    the active series through the code that measures the strategy's own. ``None``
     when the sidecar carries no panel (a truncated smoke replay, or a replay
     recorded before panels existed). A panel that misses one of the strategy's
     days raises: a day graded against nothing would read as pure skill.
@@ -715,39 +696,26 @@ def active_analysis(analysis: Mapping[str, object]) -> dict[str, object] | None:
     }
 
 
-def window_neutralized_excess(
+def window_plain_excess(
     analysis: Mapping[str, object], *, start: str = "", end: str = ""
 ) -> float | None:
-    """The neutralized excess of one span of an existing style analysis.
+    """The annualised mean of one span of a stored analysis's ``strategy_daily``,
+    with no regression (``stats.plain_statistics``).
 
-    The sidecar stores the three daily series the attribution was run on, so
-    any sub-span of it can be re-regressed without replaying anything: the same
-    two-regressor OLS, the same annualization, just fewer days. This is the one
-    computation point for a span narrower than the whole window -- the
-    per-quarter figure ``attach_sub_window_benchmark`` writes into a result, and
-    the same figure the ledger derives for a transition recorded before results
-    carried it. ``None`` when the span has too few overlapping days to regress
-    (a transition graded on an unmeasurable number must not silently fall back
-    to the raw excess). An empty ``start``/``end`` takes the whole window.
+    Of an active analysis (:func:`active_analysis`) it is the plain active
+    excess every gate grades: the one computation point for a span narrower
+    than the whole window -- the per-year figure ``attach_sub_window_benchmark``
+    writes into a result, and the verdict's research years and recency window.
+    ``None`` when the span holds fewer than two days. An empty
+    ``start``/``end`` takes the whole window.
     """
 
-    strategy = [
-        (date, value)
+    value = plain_statistics(
+        value
         for date, value in _series_pairs(analysis.get("strategy_daily"))
         if (not start or date >= start) and (not end or date <= end)
-    ]
-    benchmark = dict(_series_pairs(analysis.get("benchmark_daily")))
-    size = dict(_series_pairs(analysis.get("size_factor_daily")))
-    if not strategy or not benchmark or not size:
-        return None
-    value = _neutralized_excess(strategy, benchmark, size).get("neutralized_excess_return")
-    return (
-        float(value)
-        if isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(float(value))
-        else None
-    )
+    )["plain_excess"]
+    return None if value is None else float(value)
 
 
 def benchmark_summary_block(analysis: Mapping[str, object]) -> dict[str, object] | None:
@@ -795,10 +763,10 @@ __all__ = [
     "active_analysis",
     "benchmark_summary_block",
     "daily_returns_from_curve",
-    "neutralization_method",
+    "regression_method",
     "replay_style_analysis",
     "slot_benchmark",
     "slot_membership",
-    "window_neutralized_excess",
+    "window_plain_excess",
     "write_style_rollup",
 ]

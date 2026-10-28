@@ -68,9 +68,11 @@ from autotrade.pipelines.hitl_state import HITL_DIR_NAME, PARAMS_NAME
 from autotrade.pipelines.ledger import recorded_path
 
 # When the current rules took effect: the last rule change folded into them
-# (summing an arm's declared offline screens instead of taking the maximum
-# per reference pack, 74777f3) governs every arm created from this instant on.
-CURRENT_RULES_SINCE = datetime.fromisoformat("2026-10-13T15:53:08+00:00")
+# (every gate grading the active series as it is, with no regression, instead
+# of its regression intercept) governs every arm created from this instant on.
+# An arm created before it was judged under rules since retired, so its
+# stored readings differ by the rule, not by a defect.
+CURRENT_RULES_SINCE = datetime.fromisoformat("2026-10-28T15:36:00+00:00")
 
 
 class Judgement(NamedTuple):

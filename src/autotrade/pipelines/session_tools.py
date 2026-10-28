@@ -96,10 +96,9 @@ from .skills import _assert_skills_absent_from_formal
 from .verdict import (
     NOT_A_SESSION_STEP,
     active_daily,
-    excess_at_cost_stress,
+    graded_statistics,
     holder_readings,
-    neutralized_statistics,
-    raw_excess_at_cost_stress,
+    summary_excess_at_cost_stress,
 )
 
 
@@ -115,30 +114,16 @@ def _step_analysis(step: StepResult) -> dict[str, object]:
 
 
 def _active_excess_at_cost_stress(step: StepResult, multiplier: float) -> float | None:
-    """``verdict.excess_at_cost_stress`` of one Validation over its own span:
-    the graded series' neutralised excess and measured days, the replay's
-    turnover and the slippage its cost block records; ``None`` where one of
-    them is not measured."""
+    """``verdict.summary_excess_at_cost_stress`` of one Validation over its
+    own span: the reading the freeze gate judges of a full-span nominee;
+    ``None`` where the span or the replay's costs are not measured."""
 
-    summary = step.validation.summary
-    costs = summary.get("cost_sensitivity")
-    slippage = costs.get("slippage_bps") if isinstance(costs, Mapping) else None
-    turnover = summary.get("turnover")
-    if not all(
-        isinstance(value, (int, float)) and not isinstance(value, bool)
-        for value in (slippage, turnover)
-    ):
-        return None
     try:
-        statistics = neutralized_statistics(_step_analysis(step))
+        statistics = graded_statistics(_step_analysis(step))
     except ValueError:
         return None
-    return excess_at_cost_stress(
-        float(statistics["neutralized_excess"]),  # type: ignore[arg-type]
-        int(statistics["days"]),  # type: ignore[call-overload]
-        cost_stress_multiplier=multiplier,
-        slippage_bps=float(slippage),  # type: ignore[arg-type]
-        turnover=float(turnover),  # type: ignore[arg-type]
+    return summary_excess_at_cost_stress(
+        statistics, step.validation.summary, cost_stress_multiplier=multiplier
     )
 
 
@@ -866,7 +851,8 @@ class SessionValidations:
         and the cost stress is ``verdict.excess_at_cost_stress`` on the graded
         series over this span's turnover (a replay opens at the initial cash,
         so ``turnover`` is the span's notional over its opening equity) --
-        beside the arm's thresholds. They gate nothing.
+        beside the arm's thresholds. Only the cost stress is also a freeze
+        condition, judged on a full-span nominee's own reading of it.
         """
 
         summary = step.validation.summary
@@ -897,18 +883,19 @@ class SessionValidations:
         book, the benchmark and the zero-skill panel as stored, the raw excess
         and the plain selection), in the structure a forward slice carries
         them, so a row reads over research what the graduation reads forward.
-        Beside them the raw excess at the arm's cost stress
-        (``verdict.raw_excess_at_cost_stress``, the reading the freeze gate's
-        raw condition judges), the book's market loading relative to its
-        panel (the market coefficient of the active series' regression, from
-        the sidecar) and, on a row whose span covers them, the same holder's
-        readings of the last two research years on their own
-        (``last_two_years``). Rows report six decimals.
+        Beside them the book's market loading relative to its panel (the
+        benchmark coefficient of the active series' factor regression,
+        ``verdict.graded_statistics``; a diagnostic no gate reads) and, on a
+        row whose span covers them, the same holder's readings of the last two
+        research years on their own (``last_two_years``). Rows report six
+        decimals.
         """
 
-        multiplier = self.rules.cost_stress_multiplier
         analysis = _step_analysis(step)
-        active = analysis.get("active_neutralized_excess")
+        try:
+            loading = graded_statistics(analysis).get("market_beta")
+        except ValueError:
+            loading = None
 
         def held(start: str = "", end: str = "") -> dict[str, float | None]:
             readings = holder_readings(analysis, start=start, end=end)
@@ -916,15 +903,7 @@ class SessionValidations:
 
         readings: dict[str, object] = {
             **held(),
-            "raw_excess_at_cost_stress": _rounded(
-                raw_excess_at_cost_stress(
-                    step.validation.summary, cost_stress_multiplier=multiplier
-                )
-            ),
-            "cost_stress_multiplier": multiplier,
-            "active_market_beta": (
-                active.get("market_beta") if isinstance(active, Mapping) else None
-            ),
+            "active_market_beta": _rounded(loading),  # type: ignore[arg-type]
         }
         years = self.request.research_years
         first = max(len(years) - 2, 0)
@@ -1310,20 +1289,19 @@ BATCH_CANDIDATE_SUMMARY_KEYS = (
 # A multi-year span has one sub-window row per July-June year, and a batch
 # multiplies that by the number of candidates. A row keeps the columns a
 # screening comparison is made on; the node's result.json keeps the full table.
-# The neutralized figures ride with the raw one because the freeze gate and the
-# verdict read them, the active one above all -- it is the series they grade:
-# a comparison made on the raw column alone reads a different number than they
-# will. The year's benchmark and panel returns ride beside the book's own, so
-# each year reads as the holder's account, the index and zero skill on the
-# same skeleton without a regression in between.
+# The active excess rides with the raw one because the freeze gate and the
+# verdict read it -- it is the series they grade, and the freeze gate counts
+# its positive years: a comparison made on the raw column alone reads a
+# different number than they will. The year's benchmark and panel returns ride
+# beside the book's own, so each year reads as the holder's account, the index
+# and zero skill on the same skeleton.
 BATCH_SUB_WINDOW_KEYS = (
     "label",
     "return",
     "benchmark_return",
     "panel_return",
     "excess_return",
-    "neutralized_excess_return",
-    "active_neutralized_excess_return",
+    "active_excess_return",
     "sharpe",
 )
 
@@ -1514,37 +1492,34 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "candidate: node id with its short handle (valid_002, which every tool "
         "taking a node_id accepts), headline metrics, the per-year return, "
         "benchmark_return, panel_return (the zero-skill panel's own), excess, "
-        "neutralized excess and Sharpe of sub_windows, the provisional "
+        "active excess and Sharpe of sub_windows, the provisional "
         "selection_statistics (the freeze gate as it would read this node now, "
         "which the freeze recomputes; every row, sub-span and refused rows "
         "included, carries information_ratio_bar, the active IR a full-span "
         "non-control nominee needs now, beside trials and effective_trials -- on a "
         "row the gate does not measure it is that full-span bar, not the row's "
-        "own; and graduation_activity, informational and no freeze-gate "
-        "condition: the row's own round trips per month, mean gross exposure and "
-        "active_excess_at_cost_stress (annualised active neutralized excess after "
+        "own; and graduation_activity: the row's own round trips per month and "
+        "mean gross exposure, which the freeze gate does not read, and "
+        "active_excess_at_cost_stress (annualised active excess after "
         "cost_stress_multiplier x the slippage on the span's turnover, computed as "
-        "the graduation computes it) beside the thresholds "
+        "the freeze gate and the graduation compute it), beside the thresholds "
         "acceptance_rules.graduation.forward applies to the frozen artifact over "
         "the forward months), raw_readings (the holder's money, which active "
         "readings are not, under the names a forward slice carries: "
         "strategy_return, benchmark_return and panel_return, what the book after "
         "every cost, benchmark_index and the zero-skill panel after its costs each "
         "compounded to over the span, with raw_excess, book minus benchmark, and "
-        "plain_selection, book minus panel with no regression; "
-        "raw_excess_at_cost_stress, the span's own equity return after every cost "
-        "minus benchmark_index's price return over the same days, less "
-        "(cost_stress_multiplier - 1) x the slippage on its turnover, cumulative; "
+        "plain_selection, book minus panel, both compounded; "
         "active_market_beta, the book's market loading relative to its panel: the "
-        "benchmark coefficient of the active series' regression over the span; "
+        "benchmark coefficient of the active series' factor regression over the "
+        "span, a diagnostic no gate reads; "
         "and on a row covering them last_two_years, the same five readings from "
         "strategy_return to plain_selection over the last two research years "
         "alone; the rest of that picture is in "
         "stats: total_return and annualized_return after every cost, "
         "benchmark.benchmark_return and benchmark.excess_return over the same "
         "days, and cost_sensitivity.excess_at_2x_slippage, the raw cumulative "
-        "excess at twice the slippage, which gates nothing and equals "
-        "raw_excess_at_cost_stress only at a multiplier of 2), same_bytes_as when "
+        "excess at twice the slippage, which gates nothing), same_bytes_as when "
         "the row repeats the bytes and span of earlier nodes (named: a "
         "deterministic strategy reads exactly as they did, so it is no new "
         "evidence), and wall seconds; a failed candidate's row "
@@ -1564,9 +1539,9 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "(their difference), active_cumulative and active_drawdown (its compounded "
         "path and the loss below its running peak, whose maximum is "
         "active_max_drawdown), benchmark_return and size_factor_return (the two "
-        "regressors) and active_neutralized (active_return net of the span's "
-        "fitted loadings; its annualised mean over its volatility is the active "
-        "IR). Selection stays yours: finish_session nominates a row as it "
+        "factors its loadings are read against); the annualised mean of "
+        "active_return over its annualised volatility is the active IR. "
+        "Selection stays yours: finish_session nominates a row as it "
         "is, and step_rollback(node_id) restores one as the working copy to build "
         "on.",
         {

@@ -146,7 +146,7 @@ def test_the_trace_and_its_transcript_stop_together_at_the_session_cap(tmp_path:
 
 def test_the_session_reads_its_transcript_through_the_trace_root(tmp_path: Path):
     writer = _writer(tmp_path)
-    writer.emit("tool_call", {"call_index": 7, "tool": "batch_validate", "result": {"neutralized_excess": 0.041}})
+    writer.emit("tool_call", {"call_index": 7, "tool": "batch_validate", "result": {"active_excess": 0.041}})
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     roots = SearchRoots(SafeWorkspace(workspace), trace_root=agent_transcript_dir(tmp_path / "artifacts"))
@@ -154,10 +154,10 @@ def test_the_session_reads_its_transcript_through_the_trace_root(tmp_path: Path)
     assert "trace" in roots.names
     read = registry.invoke("read_file", {"root": "trace", "path": "run_ref_x.txt"})
     assert read.ok, read.error
-    assert "batch_validate" in read.value["content"] and '"neutralized_excess": 0.041' in read.value["content"]
+    assert "batch_validate" in read.value["content"] and '"active_excess": 0.041' in read.value["content"]
     found = registry.invoke(
         "grep",
-        {"root": "trace", "path": "run_ref_x.txt", "pattern": "neutralized_excess", "output_mode": "content"},
+        {"root": "trace", "path": "run_ref_x.txt", "pattern": "active_excess", "output_mode": "content"},
     )
     assert found.ok, found.error
     assert "0.041" in json.dumps(found.value)

@@ -12,7 +12,7 @@ import pandas as pd
 import pytest
 
 from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR
-from autotrade.environment.replay.style import window_neutralized_excess
+from autotrade.environment.replay.style import window_plain_excess
 from autotrade.pipelines import verdict
 from autotrade.pipelines.config import ACCEPTANCE_KEYS, AcceptanceRules
 
@@ -29,11 +29,14 @@ FORWARD_DAYS = _weekdays(FORWARD_START, FORWARD_END)
 HELDOUT_DAYS = _weekdays(HELDOUT_START, HELDOUT_END)
 
 
-def _segment(days, alpha, rng, *, te=0.13, exact=False, beta=0.8):
-    """A book with annualised neutralised excess ``alpha`` on CSI 300 and size.
+def _segment(days, alpha, rng, *, te=0.13, exact=False, beta=0.0, size_beta=0.0):
+    """A book whose daily series has annualised mean ``alpha`` and standard
+    deviation about ``te`` beside its loadings: ``beta`` on CSI 300 and
+    ``size_beta`` on size, which add their own variance.
 
-    ``exact`` projects the noise off the design, so the segment's own OLS
-    intercept is ``alpha`` to floating precision.
+    ``exact`` demeans the factors and projects the noise off the design, so
+    the segment's own annualised mean -- and its OLS intercept -- is
+    ``alpha`` to floating precision.
     """
 
     n = len(days)
@@ -41,9 +44,11 @@ def _segment(days, alpha, rng, *, te=0.13, exact=False, beta=0.8):
     size = rng.normal(0.0, 0.10 / SCALE, n)
     noise = rng.normal(0.0, te / SCALE, n)
     if exact:
+        benchmark -= benchmark.mean()
+        size -= size.mean()
         design = np.column_stack([np.ones(n), benchmark, size])
         noise -= design @ np.linalg.lstsq(design, noise, rcond=None)[0]
-    strategy = alpha / TRADING_DAYS_PER_YEAR + beta * benchmark + 0.3 * size + noise
+    strategy = alpha / TRADING_DAYS_PER_YEAR + beta * benchmark + size_beta * size + noise
     return list(days), strategy, benchmark, size
 
 
@@ -71,10 +76,10 @@ def _ruled(arguments):
 
 
 def _gate(analysis, **arguments):
-    """The freeze gate of ``analysis``; a nominee whose summary the raw
-    condition passes unless the test names one."""
+    """The freeze gate of ``analysis``; a nominee whose summary charges its
+    cost stress on a modest turnover unless the test names one."""
 
-    arguments.setdefault("summary", _raw_summary(1.0))
+    arguments.setdefault("summary", _summary())
     return verdict.freeze_gate(analysis, **_ruled(arguments))
 
 
@@ -85,8 +90,8 @@ def _heldout(analysis, **overrides):
 
 def _forward(analysis, **overrides):
     """The forward slice of ``analysis``. A forward replay always carries its
-    zero-skill panel, and F8 reads it: a sidecar built without one gets a
-    panel of zeros, which leaves every graded figure the book's own
+    zero-skill panel: a sidecar built without one gets a panel of zeros, which
+    leaves every graded figure the book's own
     (:func:`test_a_zero_panel_reproduces_the_ungraded_figures_exactly`)."""
 
     if "panel_daily" not in analysis:
@@ -110,12 +115,14 @@ def _split(days, boundary="20260101"):
     ]
 
 
-def test_statistics_match_the_style_regression():
+def test_statistics_are_the_series_as_it_is_and_its_loadings_beside_it():
+    """The graded figures are the series' own mean and standard deviation,
+    with no regression; the factor regression only reports its loadings, and
+    the strategy's own residual tracking error and beta form the mandate."""
+
     rng = np.random.default_rng(11)
-    analysis = _analysis(_segment(FORWARD_DAYS, 0.07, rng))
-    stats = verdict.neutralized_statistics(
-        analysis, start=FORWARD_START, end=FORWARD_END
-    )
+    analysis = _analysis(_segment(FORWARD_DAYS, 0.07, rng, beta=0.8, size_beta=0.3))
+    stats = verdict.graded_statistics(analysis, start=FORWARD_START, end=FORWARD_END)
 
     strategy = np.array([value for _, value in analysis["strategy_daily"]])
     design = np.column_stack(
@@ -126,21 +133,22 @@ def test_statistics_match_the_style_regression():
         ]
     )
     coefficients, residual_ss, _, _ = np.linalg.lstsq(design, strategy, rcond=None)
-    rows = verdict._regression_rows(analysis, FORWARD_START, FORWARD_END)
 
-    assert stats["neutralized_excess"] == window_neutralized_excess(analysis)
-    # The vectorised refit the bootstrap uses is the style regression.
-    assert (
-        round(float(verdict._fit(rows)[0]) * TRADING_DAYS_PER_YEAR, 4)
-        == stats["neutralized_excess"]
-    )
-    assert coefficients[0] * TRADING_DAYS_PER_YEAR == pytest.approx(
-        stats["neutralized_excess"], abs=1e-4
-    )
-    expected_te = math.sqrt(residual_ss[0] / (len(strategy) - 3)) * SCALE
-    assert stats["tracking_error"] == pytest.approx(expected_te, rel=1e-9)
-    assert stats["information_ratio"] == pytest.approx(
-        stats["neutralized_excess"] / expected_te
+    assert stats["series"] == "absolute" and stats["days"] == len(strategy)
+    assert stats["plain_excess"] == pytest.approx(strategy.mean() * TRADING_DAYS_PER_YEAR, rel=1e-12)
+    assert stats["plain_excess"] == window_plain_excess(analysis)
+    assert stats["tracking_error"] == pytest.approx(strategy.std(ddof=1) * SCALE, rel=1e-12)
+    assert stats["information_ratio"] == pytest.approx(stats["plain_excess"] / stats["tracking_error"])
+    # The loadings ride as a diagnostic; their variance stays in the series.
+    assert (stats["market_beta"], stats["size_beta"]) == pytest.approx(tuple(coefficients[1:]), rel=1e-9)
+    assert stats["tracking_error"] > math.sqrt(residual_ss[0] / (len(strategy) - 3)) * SCALE * 1.5
+    mandate = verdict._mandate(analysis, FORWARD_START, FORWARD_END)
+    assert mandate == pytest.approx(
+        {
+            "tracking_error": math.sqrt(residual_ss[0] / (len(strategy) - 3)) * SCALE,
+            "market_beta": coefficients[1],
+        },
+        rel=1e-9,
     )
 
 
@@ -151,41 +159,13 @@ def test_bootstrap_bound_is_fixed_by_the_artifact_id(monkeypatch):
     first = _forward(analysis, seed_key="artifact-1")["lower_bound"]
     assert _forward(analysis, seed_key="artifact-1")["lower_bound"] == first
     assert _forward(analysis, seed_key="artifact-2")["lower_bound"] != first
-    assert first < window_neutralized_excess(analysis)
+    assert first < window_plain_excess(analysis)
 
-    # The refits are batched only to bound the resample's footprint, and every
+    # The draws are batched only to bound the resample's footprint, and every
     # reduction stays inside one draw, so the batch size must not move a frozen
     # artifact's bound by even one ULP. One draw per batch is the extreme.
     monkeypatch.setattr(verdict, "_BOOTSTRAP_BATCH_BYTES", 1)
     assert _forward(analysis, seed_key="artifact-1")["lower_bound"] == first
-
-
-def test_the_neutralized_interval_reads_the_forward_regression_on_both_sides():
-    rng = np.random.default_rng(13)
-    analysis = _analysis(_segment(FORWARD_DAYS, 0.05, rng))
-    forward = _forward(analysis, forward_confidence=0.8)
-    interval = verdict.neutralized_interval(
-        analysis, seed_key="artifact-1", lower_confidence=0.8, upper_confidence=0.8
-    )
-    # F2's own figures, and the planted loadings (0.8 on the index, 0.3 on size).
-    assert (interval["days"], interval["neutralized_excess"], interval["lower_bound"]) == (
-        forward["days"], forward["neutralized_excess"], forward["lower_bound"]
-    )
-    assert interval["market_beta"] == pytest.approx(0.8, abs=0.1)
-    assert interval["size_beta"] == pytest.approx(0.3, abs=0.2)
-    assert interval["lower_bound"] < interval["neutralized_excess"] < interval["upper_bound"]
-
-    # The fit is linear in the series: the upper bound is the negated series'
-    # lower bound, and a prefix is read through ``end`` alone.
-    negated = {**analysis, "strategy_daily": [[day, -value] for day, value in analysis["strategy_daily"]]}
-    mirror = verdict.neutralized_interval(
-        negated, seed_key="artifact-1", lower_confidence=0.8, upper_confidence=0.8
-    )
-    assert mirror["lower_bound"] == pytest.approx(-interval["upper_bound"], abs=1e-12)
-    prefix = verdict.neutralized_interval(
-        analysis, end="20251231", seed_key="artifact-1", lower_confidence=0.8, upper_confidence=0.8
-    )
-    assert prefix["days"] == len([day for day in FORWARD_DAYS if day <= "20251231"])
 
 
 def test_forward_pass_rates_match_the_design_simulation():
@@ -225,7 +205,7 @@ def test_recency_rejects_an_edge_that_collapsed_in_the_last_six_months(
     result = _forward(analysis)
 
     assert result["recency_start"] == "20260101"
-    assert result["recency_neutralized_excess"] == pytest.approx(recent_alpha, abs=1e-4)
+    assert result["recency_plain_excess"] == pytest.approx(recent_alpha, abs=1e-9)
     assert result["lower_bound"] > 0
     assert result["reasons"] == ([] if recency_passes else ["forward_recency_negative"])
 
@@ -247,7 +227,7 @@ def test_each_forward_condition_fails_at_its_boundary():
     ]
 
     years = base["days"] / TRADING_DAYS_PER_YEAR
-    breakeven = base["neutralized_excess"] * years / (10.0 * 1e-4)
+    breakeven = base["plain_excess"] * years / (10.0 * 1e-4)
     below = _forward(analysis, turnover=breakeven * (1 - 1e-6))
     assert below["reasons"] == []
     assert below["excess_at_cost_stress"] == pytest.approx(0.0, abs=1e-6)
@@ -368,7 +348,7 @@ def test_the_freeze_gate_deflates_by_the_null_sampling_error_at_the_trial_count(
     rng = np.random.default_rng(71)
     research = _weekdays("20210701", "20250630")
     analysis = _analysis(_segment(research, 0.16, rng, exact=True))
-    statistics = verdict.neutralized_statistics(analysis)
+    statistics = verdict.graded_statistics(analysis)
     information_ratio = statistics["information_ratio"]
     null = math.sqrt(TRADING_DAYS_PER_YEAR / statistics["days"])
 
@@ -453,7 +433,7 @@ def test_the_dispersion_does_not_depend_on_what_else_the_arm_validated():
     controls, copies = family([0.02, 0.0]), family([0.125, 0.12])
     spreads = [
         np.std(
-            [verdict.neutralized_statistics(item)["information_ratio"] for item in (nominee, *group)],
+            [verdict.graded_statistics(item)["information_ratio"] for item in (nominee, *group)],
             ddof=1,
         )
         for group in (controls, copies)
@@ -476,7 +456,7 @@ def test_the_effective_trial_count_reads_the_correlation_of_the_trials_series():
 
     def trial(loading, seed, own_days=days):
         noise = np.random.default_rng(seed).normal(0.0, 0.10 / SCALE, len(days))
-        series = 0.1 / TRADING_DAYS_PER_YEAR + 0.8 * benchmark + loading * common
+        series = 0.1 / TRADING_DAYS_PER_YEAR + loading * common
         series = series + math.sqrt(1 - loading**2) * noise
         keep = [index for index, day in enumerate(days) if day in set(own_days)]
         return _analysis(
@@ -497,7 +477,7 @@ def test_the_effective_trial_count_reads_the_correlation_of_the_trials_series():
     )
 
     # Identical trials are one trial; opposite ones are not fewer than two.
-    assert verdict.trial_correlation([shared[0], shared[0]]) == (1.0, 1)
+    assert verdict.trial_correlation([shared[0], shared[0]]) == (pytest.approx(1.0), 1)
     assert verdict.effective_trials(4, 1.0) == 1.0
     mirrored = {
         **shared[0],
@@ -525,7 +505,7 @@ def test_a_declared_offline_trial_is_priced_as_one_independent_trial():
     rng = np.random.default_rng(7)
     book = _analysis(_segment(_weekdays("20210701", "20250630"), 0.1, rng))
     copies = [book, {**book, "strategy_daily": [[day, 2 * value] for day, value in book["strategy_daily"]]}]
-    inherited = [verdict.neutral_daily(book)]
+    inherited = [verdict.graded_daily(book)]
     family = {
         "trials": 2,
         "offline_trials": 3,
@@ -572,8 +552,8 @@ def test_a_zero_panel_reproduces_the_ungraded_figures_exactly():
     zeros every statistic, bound and reason is the float it was without one,
     and only ``series`` and the panel's own reading tell the two records
     apart: a book without a panel has no plain selection, one against a zero
-    panel selects exactly its own return. A forward slice without a panel is
-    not judged at all, since F8 reads it."""
+    panel selects exactly its own return. A forward slice reads the same with
+    or without it."""
     rng = np.random.default_rng(101)
     research = _weekdays("20210701", "20250630")
     analysis = _analysis(_segment(research, 0.16, rng))
@@ -607,9 +587,19 @@ def test_a_zero_panel_reproduces_the_ungraded_figures_exactly():
             active_max_drawdown=0.3,
         )
 
-    with pytest.raises(ValueError, match="no plain excess to judge"):
-        _forward({**forward, "panel_daily": []})
-    for read in (gate, heldout, verdict.neutralized_statistics):
+    def forward_slice(sidecar):
+        arguments = {
+            "start": FORWARD_START,
+            "end": FORWARD_END,
+            "seed_key": "artifact-1",
+            "slippage_bps": 10.0,
+            "turnover": 5.0,
+            "round_trips": 12,
+            "mean_gross": 1.0,
+        }
+        return verdict.forward_slice(sidecar, **_ruled(arguments))
+
+    for read in (gate, heldout, forward_slice, verdict.graded_statistics):
         sidecar = analysis if read is gate else forward
         zeros = _with_panel(sidecar, np.zeros(len(sidecar["strategy_daily"])))
         own, graded = read(sidecar), read(zeros)
@@ -631,27 +621,26 @@ def test_the_graded_series_is_the_strategy_minus_its_panel():
     rng = np.random.default_rng(102)
     research = _weekdays("20210701", "20250630")
     days, active, benchmark, size = _segment(research, 0.06, rng, te=0.05, beta=0.05)
-    _days, panel, _b, _s = _segment(research, 0.04, np.random.default_rng(103), beta=0.9)
+    _days, panel, _b, _s = _segment(
+        research, 0.04, np.random.default_rng(103), beta=0.9, size_beta=0.3
+    )
     # The panel rides the same factors as the book it was drawn from.
     panel = panel - _b * 0.9 - _s * 0.3 + benchmark * 0.9 + size * 0.3
     book = _with_panel(_analysis((days, active + panel, benchmark, size)), panel)
     alone = _analysis((days, active, benchmark, size))
 
-    graded = verdict.neutralized_statistics(book)
+    graded = verdict.graded_statistics(book)
     assert graded["series"] == "active"
-    for key in ("days", "neutralized_excess"):
-        assert graded[key] == verdict.neutralized_statistics(alone)[key]
-    assert graded["tracking_error"] == pytest.approx(
-        verdict.neutralized_statistics(alone)["tracking_error"], rel=1e-9
-    )
+    assert graded["days"] == verdict.graded_statistics(alone)["days"]
+    for key in ("plain_excess", "tracking_error", "market_beta"):
+        assert graded[key] == pytest.approx(verdict.graded_statistics(alone)[key], rel=1e-9)
 
     gate = _gate(book, trials=2, full_span_validations=2, years=RESEARCH_YEARS)
-    own = verdict.neutralized_statistics({**book, "panel_daily": []})
-    assert gate["mandate"] == {
-        "tracking_error": own["tracking_error"],
-        "market_beta": own["market_beta"],
-    }
+    own = verdict.graded_statistics({**book, "panel_daily": []})
+    assert gate["mandate"]["market_beta"] == pytest.approx(own["market_beta"], rel=1e-12)
     assert gate["mandate"]["market_beta"] == pytest.approx(0.95, abs=0.03)
+    # The mandate's tracking error is the residual one, below the series' own.
+    assert gate["mandate"]["tracking_error"] < own["tracking_error"]
     assert gate["active_max_drawdown"] == pytest.approx(
         verdict._max_slice_drawdown(alone, "", ""), rel=1e-9
     )
@@ -659,7 +648,7 @@ def test_the_graded_series_is_the_strategy_minus_its_panel():
     # A day the panel does not cover would be graded against nothing.
     short = {**book, "panel_daily": book["panel_daily"][:-1]}
     with pytest.raises(ValueError, match="zero-skill panel has no return"):
-        verdict.neutralized_statistics(short)
+        verdict.graded_statistics(short)
 
 
 def test_the_freeze_gate_refuses_zero_skill_an_uneven_edge_and_a_broken_mandate():
@@ -675,7 +664,7 @@ def test_the_freeze_gate_refuses_zero_skill_an_uneven_edge_and_a_broken_mandate(
             _segment(year_days(index), alpha, rng, te=te, exact=True, beta=0.0)
             for index, alpha in enumerate(alphas)
         ]
-        active = np.concatenate([segment[1] - 0.3 * segment[3] for segment in segments])
+        active = np.concatenate([segment[1] for segment in segments])
         benchmark = np.concatenate([segment[2] for segment in segments])
         size = np.concatenate([segment[3] for segment in segments])
         panel = panel_alpha / TRADING_DAYS_PER_YEAR + beta * benchmark
@@ -707,9 +696,9 @@ def test_the_freeze_gate_refuses_zero_skill_an_uneven_edge_and_a_broken_mandate(
     lottery = gate(book([0.0, 0.0, 0.0, 0.0], seed=112))
     assert "freeze_information_ratio_below_threshold" in lottery["reasons"]
     assert "freeze_too_few_positive_years" in lottery["reasons"]
-    assert verdict.neutralized_statistics({**book([0.0] * 4, seed=112), "panel_daily": []})[
-        "neutralized_excess"
-    ] == pytest.approx(0.03, abs=1e-4)
+    assert verdict.graded_statistics({**book([0.0] * 4, seed=112), "panel_daily": []})[
+        "plain_excess"
+    ] == pytest.approx(0.03, abs=1e-9)
 
     # The same total edge earned in two years of four.
     uneven = gate(book([0.30, 0.22, -0.06, -0.06], seed=113))
@@ -756,7 +745,8 @@ def test_the_freeze_gate_refuses_zero_skill_an_uneven_edge_and_a_broken_mandate(
 def test_the_freeze_gate_names_a_deflated_sharpe_it_cannot_compute():
     """A book identical to its zero-skill panel grades an all-zero active
     series: no tracking error, so no IR and no deflated Sharpe probability. The
-    gate says the probability is unavailable rather than judging a ``None``."""
+    gate says the probability is unavailable rather than judging a ``None``,
+    and an excess of zero does not survive the cost stress."""
 
     research = _weekdays("20210701", "20250630")
     days, strategy, benchmark, size = _segment(research, 0.10, np.random.default_rng(116))
@@ -771,6 +761,7 @@ def test_the_freeze_gate_names_a_deflated_sharpe_it_cannot_compute():
     assert gate["reasons"] == [
         "freeze_information_ratio_below_threshold",
         "freeze_deflated_sharpe_unavailable",
+        "freeze_not_positive_at_cost_stress",
     ]
 
 
@@ -862,41 +853,42 @@ def test_an_unmeasurable_slice_raises_instead_of_judging():
     rng = np.random.default_rng(91)
     analysis = _analysis(_segment(FORWARD_DAYS, 0.10, rng))
 
-    with pytest.raises(ValueError, match="not measurable"):
-        _forward(analysis, start="20250701", end="20250708")
+    with pytest.raises(ValueError, match="fewer than two days"):
+        _forward(analysis, start="20250701", end="20250701")
     with pytest.raises(ValueError, match="bootstrap block"):
         _forward(analysis, start="20250701", end="20250718")
-    with pytest.raises(ValueError, match="not measurable"):
-        _forward({**analysis, "size_factor_daily": []})
     with pytest.raises(ValueError, match="YYYYMMDD"):
         _forward(analysis, end="2026-06-30")
+    # The factors are diagnostics: without them the slice is judged all the
+    # same, its loadings unmeasured, and a mandate it cannot be read on fails.
+    bare = _forward({**analysis, "size_factor_daily": []})
+    assert bare["reasons"] == _forward(analysis)["reasons"]
+    assert (bare["market_beta"], bare["size_beta"]) == (None, None)
+    assert bare["mandate"] == {"tracking_error": None, "market_beta": None}
+    assert _forward(
+        {**analysis, "size_factor_daily": []}, tracking_error_cap=1.0, beta_min=-5.0, beta_max=5.0
+    )["reasons"][-2:] == ["forward_tracking_error_above_cap", "forward_beta_outside_band"]
 
 
-def _raw_summary(excess, *, slippage_bps=5.0, turnover=40.0):
-    """The two summary blocks the raw cost-stress reading takes."""
+def _summary(*, slippage_bps=5.0, turnover=40.0):
+    """The two summary fields the freeze gate's cost stress reads."""
 
-    return {
-        "turnover": turnover,
-        "benchmark": {"excess_return": excess},
-        "cost_sensitivity": {
-            "slippage_bps": slippage_bps,
-            "cost_per_bp_per_side": turnover * 1e-4,
-            "excess_at_2x_slippage": excess - slippage_bps * turnover * 1e-4,
-        },
-    }
+    return {"turnover": turnover, "cost_sensitivity": {"slippage_bps": slippage_bps}}
 
 
-def test_the_raw_condition_judges_the_holders_money():
-    """A book can beat a panel that loses 12 %/yr and still make nothing: the
-    dividend-event graduate's active IR was 1.71 on a raw eight-year return of
-    -0.8 %. The gate refuses a nominee whose own equity, after the stressed
-    slippage, did not beat the benchmark, and states the multiplier it read."""
+def test_the_freeze_cost_stress_is_the_active_excess_after_the_stressed_slippage():
+    """The gate reads the cost stress off the series it grades, as F5 does
+    forward: the active excess, less the stressed slippage on the nominee's
+    own turnover, must stay above zero. The holder's raw excess is reported,
+    not judged, and the gate states the multiplier it read."""
 
     research = _weekdays("20210701", "20250630")
     rng = np.random.default_rng(116)
-    days, active, benchmark, size = _segment(research, 0.10, rng, te=0.05, exact=True, beta=0.0)
+    days, active, benchmark, size = _segment(research, 0.10, rng, te=0.05, exact=True)
     panel = 0.03 / TRADING_DAYS_PER_YEAR + benchmark
     sidecar = _with_panel(_analysis((days, active + panel, benchmark, size)), panel)
+    statistics = verdict.graded_statistics(sidecar)
+    assert statistics["plain_excess"] == pytest.approx(0.10, abs=1e-9)
 
     def gate(summary=None, **rules):
         return _gate(
@@ -908,49 +900,49 @@ def test_the_raw_condition_judges_the_holders_money():
             **rules,
         )
 
-    # At a multiplier of 3 the 40-turn book pays two more 5 bp per side: 4 %.
-    costs = 2.0 * 5.0 * 40.0 * 1e-4
-    assert verdict.raw_excess_at_cost_stress(
-        _raw_summary(0.10), cost_stress_multiplier=3.0
-    ) == pytest.approx(0.10 - costs)
-    # At 2 it is the replay's own excess_at_2x_slippage.
-    summary = _raw_summary(0.10)
-    assert verdict.raw_excess_at_cost_stress(summary, cost_stress_multiplier=2.0) == (
-        pytest.approx(summary["cost_sensitivity"]["excess_at_2x_slippage"])
+    # At a multiplier of 3 the book pays two more 5 bp per side on its turnover.
+    breakeven = 0.10 * statistics["days"] / TRADING_DAYS_PER_YEAR / (2.0 * 5.0 * 1e-4)
+    over = breakeven * (1 + 1e-6)
+    below = gate(_summary(turnover=over), cost_stress_multiplier=3.0)
+    assert below["reasons"] == ["freeze_not_positive_at_cost_stress"]
+    assert below["excess_at_cost_stress"] == verdict.excess_at_cost_stress(
+        statistics["plain_excess"],
+        statistics["days"],
+        cost_stress_multiplier=3.0,
+        slippage_bps=5.0,
+        turnover=over,
     )
-    assert verdict.raw_excess_at_cost_stress({"turnover": 1.0}, cost_stress_multiplier=2.0) is None
-
-    below = gate(_raw_summary(costs - 0.01), cost_stress_multiplier=3.0)
-    assert below["reasons"] == ["freeze_raw_excess_not_positive_at_cost_stress"]
-    assert below["raw_excess_at_cost_stress"] == pytest.approx(-0.01)
+    assert -1e-6 < below["excess_at_cost_stress"] < 0
     assert below["thresholds"]["cost_stress_multiplier"] == 3.0
-    # Above zero passes; exactly zero, or a reading the summary cannot give, does not.
-    assert gate(_raw_summary(costs + 0.01), cost_stress_multiplier=3.0)["passed"]
-    assert gate(_raw_summary(costs), cost_stress_multiplier=3.0)["reasons"] == [
-        "freeze_raw_excess_not_positive_at_cost_stress"
-    ]
-    assert gate({})["reasons"] == ["freeze_raw_excess_not_positive_at_cost_stress"]
+    assert gate(_summary(turnover=breakeven * (1 - 1e-6)), cost_stress_multiplier=3.0)["passed"]
+    # A summary without the turnover or the slippage gives no reading, which never passes.
+    assert gate({})["reasons"] == ["freeze_not_positive_at_cost_stress"]
+    assert gate({})["excess_at_cost_stress"] is None
     with pytest.raises(ValueError, match="summary"):
         gate(None)
 
 
 def test_the_graduations_cost_stress_is_one_formula_for_a_row_and_a_forward_slice():
-    """The forward slice's F5 reading and a research row's report are the same
-    function of the graded series, the turnover and the slippage."""
+    """The forward slice's F5 reading, the freeze gate's and a research row's
+    report are the same function of the graded series, the turnover and the
+    slippage."""
 
     rng = np.random.default_rng(117)
     analysis = _analysis(_segment(FORWARD_DAYS, 0.10, rng, exact=True))
     block = _forward(analysis, turnover=30.0, slippage_bps=5.0, cost_stress_multiplier=2.0)
-    statistics = verdict.neutralized_statistics(analysis, start=FORWARD_START, end=FORWARD_END)
+    statistics = verdict.graded_statistics(_with_panel(analysis, np.zeros(len(FORWARD_DAYS))))
     assert block["excess_at_cost_stress"] == verdict.excess_at_cost_stress(
-        statistics["neutralized_excess"],
+        statistics["plain_excess"],
         statistics["days"],
         cost_stress_multiplier=2.0,
         slippage_bps=5.0,
         turnover=30.0,
     )
+    assert block["excess_at_cost_stress"] == verdict.summary_excess_at_cost_stress(
+        statistics, _summary(turnover=30.0), cost_stress_multiplier=2.0
+    )
     assert block["excess_at_cost_stress"] == pytest.approx(
-        statistics["neutralized_excess"] - 5.0 * 30.0 * 1e-4 / (statistics["days"] / TRADING_DAYS_PER_YEAR)
+        0.10 - 5.0 * 30.0 * 1e-4 / (statistics["days"] / TRADING_DAYS_PER_YEAR)
     )
 
 
@@ -964,9 +956,10 @@ def test_the_panel_return_is_what_the_panel_composite_compounded_to():
 
 def _rally_book(rng, *, alpha, active_beta, days=FORWARD_DAYS):
     """A book whose selection earns ``alpha`` a year after the regression but
-    holds lower-beta names than its random copies (``active_beta`` < 0) in a
-    year the benchmark rallies about 45 %: the neutralised reading credits
-    the lag back, the holder does not get it."""
+    holds lower-beta names than its random copies (``active_beta`` < 0) while
+    the benchmark rallies about 45 % a year: a regression intercept would
+    credit the lag back, the holder does not get it, and neither does the
+    series the gates grade."""
 
     n = len(days)
     benchmark = rng.normal(0.0015, 0.01, n)
@@ -989,32 +982,80 @@ def _selection_book(rng, mean, *, days=FORWARD_DAYS):
     return _with_panel(_analysis((list(days), panel + active, benchmark, size)), panel)
 
 
-def test_plain_selection_refuses_a_book_the_regression_carried():
-    """F8: the neutralised conditions pass a book that lost to its own panel
-    in a rally because its negative active market loading is credited back;
-    plain selection refuses it, and the holder's readings say why."""
+def _intercept(analysis, start="", end=""):
+    """The annualised intercept of the graded series on the benchmark and the
+    size factor: what a regressed grade would have read."""
+
+    graded, _series = verdict._graded(analysis)
+    rows = verdict._regression_rows(graded, start, end)
+    return float(verdict._fit(rows)[0]) * TRADING_DAYS_PER_YEAR
+
+
+def test_the_freeze_gate_grades_a_negative_market_loading_on_what_it_earned():
+    """Four research years of a rally book whose selection a regression would
+    credit with about 12 %/yr, held in lower-beta names than its random
+    copies: the gate's IR, deflated Sharpe and positive years read the series
+    the holder earned against those copies, which lost, and refuse it. The
+    loading rides beside them as a diagnostic."""
+
+    research = _weekdays("20210701", "20250630")
+    book = _rally_book(np.random.default_rng(124), alpha=0.12, active_beta=-0.5, days=research)
+    gate = _gate(book, trials=1, full_span_validations=2, years=RESEARCH_YEARS)
+    active = np.array(
+        [own - drawn for (_day, own), (_same, drawn) in zip(book["strategy_daily"], book["panel_daily"], strict=True)]
+    )
+
+    assert _intercept(book) > 0.07
+    assert gate["plain_excess"] == pytest.approx(active.mean() * TRADING_DAYS_PER_YEAR, rel=1e-12)
+    assert gate["plain_excess"] < 0
+    assert gate["information_ratio"] == pytest.approx(
+        gate["plain_excess"] / (active.std(ddof=1) * SCALE), rel=1e-12
+    )
+    assert gate["deflated_sharpe"]["return_days"] == len(active)
+    assert gate["market_beta"] == pytest.approx(-0.5, abs=0.05)
+    assert gate["positive_years"] < 3
+    assert {
+        "freeze_information_ratio_below_threshold",
+        "freeze_deflated_sharpe_below_threshold",
+        "freeze_too_few_positive_years",
+        "freeze_not_positive_at_cost_stress",
+    } <= set(gate["reasons"])
+
+
+def test_f2_grades_a_negative_market_loading_on_what_it_earned():
+    """A book that lost to its own panel in a rally because it held
+    lower-beta names: a regressed reading would pass it, F2 reads the series
+    the holder earned and refuses it, and the holder's readings say why."""
 
     rng = np.random.default_rng(118)
     book = _rally_book(rng, alpha=0.12, active_beta=-0.5)
     judged = _forward(book)
     raw = judged["raw_readings"]
-    # The neutralised reading passes, the plain one is negative.
-    assert judged["reasons"] == ["forward_plain_excess_lower_bound_not_positive"]
-    assert judged["lower_bound"] > 0 and judged["neutralized_excess"] > 0
-    assert judged["market_beta"] < 0
+    assert _intercept(book, FORWARD_START, FORWARD_END) > 0
+    assert judged["market_beta"] == pytest.approx(-0.5, abs=0.05)
     assert raw["plain_selection"] < 0
-    assert judged["plain_excess"] < 0 < judged["neutralized_excess"]
-    assert judged["plain_excess_lower_bound"] < 0
-
-    # Without a panel there is no plain excess: the slice is not judged.
-    with pytest.raises(ValueError, match="no plain excess to judge"):
-        _forward({**book, "panel_daily": []})
+    assert judged["lower_bound"] < judged["plain_excess"] < 0
+    assert "forward_lower_bound_not_positive" in judged["reasons"]
 
 
-def test_plain_selection_is_judged_on_the_lower_bound_of_its_mean():
-    """F8 asks for more than a positive mean: the one-sided bound of the
-    judged series' mean, drawn as F2 draws its own, must be above zero. A book
-    frozen with no replicate is judged on its own series."""
+def test_heldout_grades_a_negative_market_loading_on_what_it_earned():
+    """H2 reads the plain series too: a book that lagged its panel through a
+    Held-out rally on its lower-beta names falls below the tolerance its
+    regression intercept would clear."""
+
+    book = _rally_book(
+        np.random.default_rng(123), alpha=0.0, active_beta=-0.5, days=FORWARD_DAYS + HELDOUT_DAYS
+    )
+    heldout = _heldout(book, forward_tracking_error=0.05)
+    assert heldout["plain_excess"] < heldout["tolerance"] < _intercept(book, HELDOUT_START, HELDOUT_END)
+    assert heldout["market_beta"] < 0
+    assert heldout["reasons"] == ["heldout_excess_below_tolerance"]
+
+
+def test_f2_is_judged_on_the_lower_bound_of_the_plain_mean():
+    """F2 asks for more than a positive mean: the one-sided bound of the
+    judged series' mean must be above zero. A book frozen with no replicate
+    is judged on its own series."""
 
     rng = np.random.default_rng(122)
 
@@ -1024,15 +1065,15 @@ def test_plain_selection_is_judged_on_the_lower_bound_of_its_mean():
     # A mean above zero inside its own noise is refused.
     thin = judged(0.01)
     assert thin["plain_excess"] == pytest.approx(0.01, rel=1e-9)
-    assert thin["plain_excess_lower_bound"] < 0 < thin["plain_excess"]
-    assert "forward_plain_excess_lower_bound_not_positive" in thin["reasons"]
+    assert thin["lower_bound"] < 0 < thin["plain_excess"]
+    assert "forward_lower_bound_not_positive" in thin["reasons"]
     # One clear of its noise passes.
     clear = judged(0.15)
-    assert 0 < clear["plain_excess_lower_bound"] < clear["plain_excess"]
+    assert 0 < clear["lower_bound"] < clear["plain_excess"]
     assert clear["reasons"] == []
 
-    # The bound is the documented procedure on the plain series: F2's blocks,
-    # draws and artifact seed, the mean in place of the intercept.
+    # The bound is the documented procedure on the plain series: blocks of
+    # BOOTSTRAP_BLOCK_DAYS, BOOTSTRAP_DRAWS draws, the artifact seed.
     book = _selection_book(rng, 0.05)
     series = np.array(
         [
@@ -1048,19 +1089,19 @@ def test_plain_selection_is_judged_on_the_lower_bound_of_its_mean():
     )
     index = (starts[:, :, None] + np.arange(verdict.BOOTSTRAP_BLOCK_DAYS)).reshape(len(starts), -1)
     means = series[index[:, : len(series)]].mean(axis=1)
-    assert bound["plain_excess_lower_bound"] == pytest.approx(
+    assert bound["lower_bound"] == pytest.approx(
         float(np.quantile(means, 0.1)) * TRADING_DAYS_PER_YEAR, rel=1e-12
     )
-    assert _forward(book, seed_key="artifact-2")["plain_excess_lower_bound"] != pytest.approx(
-        _forward(book)["plain_excess_lower_bound"]
+    assert _forward(book, seed_key="artifact-2")["lower_bound"] != pytest.approx(
+        _forward(book)["lower_bound"]
     )
 
 
 def test_the_holders_readings_are_the_stored_series_compounded():
     """Every reading is the stored daily series compounded over the slice's own
     days, the differences are cumulative, and the plain excess is the graded
-    series' mean over the days the regression reads; the verdict states them
-    in words for both slices."""
+    series' mean over the slice's days; the verdict states them in words for
+    both slices."""
 
     rng = np.random.default_rng(119)
     book = _rally_book(rng, alpha=0.05, active_beta=-0.3, days=FORWARD_DAYS + HELDOUT_DAYS)
@@ -1107,13 +1148,13 @@ def test_the_holders_readings_are_the_stored_series_compounded():
     assert f"plain selection {(strategy - panel) * 100:+.1f} points" in lines["forward"]
 
 
-def test_plain_selection_judges_the_book_and_its_seed_replicates_as_one_series():
+def test_f2_judges_the_book_and_its_seed_replicates_as_one_daily_series():
     """With seed replicates the forward slice carries each one's readings and
-    their mean with the book, and F8 judges the day-by-day mean series: a
-    seed mean above zero whose bound is not above zero is refused, whatever
-    the frozen seed read alone; a replicate that cannot be read is never
-    dropped from the mean, the slice is not judged. Held-out reports the
-    replicates, unjudged."""
+    their mean with the book, and F2 judges the day-by-day mean of their
+    active series: a seed mean above zero whose bound is not above zero is
+    refused, whatever the frozen seed read alone; a replicate that cannot be
+    read alike is never dropped from the mean, the slice is not judged.
+    Held-out reports the replicates, unjudged."""
 
     rng = np.random.default_rng(121)
     book = _selection_book(rng, 0.12)
@@ -1123,7 +1164,7 @@ def test_plain_selection_judges_the_book_and_its_seed_replicates_as_one_series()
 
     alone = _forward(book)
     assert "seed_replicates" not in alone and "seed_mean" not in alone
-    assert alone["plain_excess_lower_bound"] > 0
+    assert alone["lower_bound"] > 0
     assert alone["reasons"] == []
 
     # The frozen seed clears the bound alone; with the other two seeds the
@@ -1133,12 +1174,22 @@ def test_plain_selection_judges_the_book_and_its_seed_replicates_as_one_series()
     mean = sunk["seed_mean"]
     assert mean["members"] == 3
     assert mean["plain_excess"] == pytest.approx((0.12 - 0.03 - 0.07) / 3, rel=1e-9)
-    assert sunk["plain_excess_lower_bound"] < 0 < mean["plain_excess"]
-    assert sunk["reasons"] == ["forward_plain_excess_lower_bound_not_positive"]
+    assert sunk["lower_bound"] < 0 < mean["plain_excess"]
+    assert sunk["reasons"] == ["forward_lower_bound_not_positive"]
     assert [block["artifact_id"] for block in sunk["seed_replicates"]] == ["b", "c"]
     assert sunk["seed_replicates"][0]["plain_excess"] == pytest.approx(-0.03, rel=1e-9)
+    # The bound is drawn on the day-by-day mean of the three active series.
+    members = [book, *(sidecar for _identity, sidecar in others)]
+    daily = np.mean(
+        [
+            [own - drawn for (_day, own), (_same, drawn) in zip(m["strategy_daily"], m["panel_daily"], strict=True)]
+            for m in members
+        ],
+        axis=0,
+    )
+    assert sunk["lower_bound"] == verdict.bootstrap_lower_bound(daily, "artifact-1", confidence=0.8)
     # Every other reading and condition stays the book's own.
-    added = ("reasons", "seed_replicates", "seed_mean", "plain_excess_lower_bound")
+    added = ("reasons", "seed_replicates", "seed_mean", "lower_bound")
     assert {key: value for key, value in sunk.items() if key not in added} == {
         key: value for key, value in alone.items() if key not in added
     }
@@ -1148,10 +1199,10 @@ def test_plain_selection_judges_the_book_and_its_seed_replicates_as_one_series()
         book,
         seed_replicates=[replicate(_selection_book(rng, 0.10)), replicate(_selection_book(rng, 0.08))],
     )
-    assert agreed["plain_excess_lower_bound"] > 0 and agreed["reasons"] == []
+    assert agreed["lower_bound"] > 0 and agreed["reasons"] == []
 
     # A replicate without a panel, or one that measured other days.
-    with pytest.raises(ValueError, match="no plain excess to judge"):
+    with pytest.raises(ValueError, match="another series"):
         _forward(book, seed_replicates=[replicate({**others[0][1], "panel_daily": []})])
     short = _selection_book(rng, 0.10, days=FORWARD_DAYS[:-1])
     with pytest.raises(ValueError, match="measured other days than the frozen book"):
@@ -1161,16 +1212,16 @@ def test_plain_selection_judges_the_book_and_its_seed_replicates_as_one_series()
     long_book, long_other = _selection_book(rng, 0.10, days=span), _selection_book(rng, -0.50, days=span)
     heldout = _heldout(long_book, forward_tracking_error=0.05, seed_replicates=[replicate(long_other)])
     assert heldout["seed_mean"]["members"] == 2
-    assert "plain_excess_lower_bound" not in heldout
-    assert not any("selection" in reason for reason in heldout["reasons"])
+    assert "lower_bound" not in heldout
+    assert heldout["reasons"] == []
     assert verdict.graduation_verdict(forward=sunk, heldout=heldout)["reasons"][0] == (
-        "forward_plain_excess_lower_bound_not_positive"
+        "forward_lower_bound_not_positive"
     )
 
 
 def test_the_condition_table_is_the_one_list_of_what_a_record_can_carry():
     """Every condition has its own reason token. A graduation condition names
-    its criterion, F1..F8 and H1..H4 between them, and no freeze condition
+    its criterion, F1..F7 and H1..H4 between them, and no freeze condition
     does. The only optional conditions are the tracking mandate's, which its
     cap turns on. The Environment's copy of the seed reasons (it cannot import
     the Pipeline) is the table's."""
@@ -1184,7 +1235,7 @@ def test_the_condition_table_is_the_one_list_of_what_a_record_can_carry():
         stages.setdefault(condition.stage, []).append(condition)
     graduation = [*stages["replay"], *stages["forward"], *stages["heldout"]]
     assert sorted({condition.code for condition in graduation}) == [
-        *(f"F{number}" for number in range(1, 9)),
+        *(f"F{number}" for number in range(1, 8)),
         *(f"H{number}" for number in range(1, 5)),
     ]
     # ``forward_...`` is an F criterion, ``heldout_...`` an H one.
@@ -1201,14 +1252,13 @@ def test_a_stage_records_its_failures_in_the_tables_order_and_judges_nothing_tha
 
     failing = {
         "lower_bound": -0.1,
-        "recency_neutralized_excess": -0.1,
+        "recency_plain_excess": -0.1,
         "max_drawdown": 0.9,
         "active_max_drawdown": 0.9,
         "excess_at_cost_stress": -0.1,
         "round_trips": 0,
         "mean_gross": 0.1,
         "mandate": {"tracking_error": 0.5, "market_beta": 2.0},
-        "plain_excess_lower_bound": -0.1,
     }
     mandate = {"tracking_error_cap": 0.08, "beta_min": 0.85, "beta_max": 1.15}
     thresholds = {

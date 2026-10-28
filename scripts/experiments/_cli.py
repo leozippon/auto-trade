@@ -116,7 +116,7 @@ def add_schedule_arguments(parser: argparse.ArgumentParser) -> None:
         default=str(WEB_CREATE_DEFAULTS["benchmark_index"]),
         help=(
             "The index this arm is measured against: the benchmark leg of the style "
-            "attribution and the verdict's neutralization, and the membership the "
+            "attribution and the factor loadings, and the membership the "
             "zero-skill panel draws replacements from."
         ),
     )

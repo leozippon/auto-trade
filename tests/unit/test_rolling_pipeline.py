@@ -100,7 +100,7 @@ class Evaluator:
     """Writes a result record and its style sidecar for the requested span.
 
     The daily strategy return is ``alpha`` plus CSI 300 and size exposure plus
-    noise, so the sidecar carries a measurable neutralised excess and IR.
+    noise, so the sidecar carries a measurable active excess and IR.
     ``alpha`` is read from the revision's ``main.py`` (``# alpha=<value>``).
     """
 
@@ -151,9 +151,10 @@ def _write_result(directory: Path, days: list[str], *, alpha: float, seed: int) 
         "sharpe": 1.0,
         "order_count": len(executions),
         "sub_windows": [],
-        # What the freeze gate's raw condition reads: the book against its
-        # benchmark, and the slippage on its turnover.
         "benchmark": {"excess_return": total_return - float(np.prod(1 + benchmark) - 1)},
+        # What the freeze gate's cost stress reads: the slippage, charged
+        # again on the replay's turnover.
+        "turnover": 1.0,
         "cost_sensitivity": {"slippage_bps": 5.0, "cost_per_bp_per_side": 1e-4},
     }
     (directory / "result.json").write_text(
@@ -385,7 +386,7 @@ def test_a_nominee_below_the_deflated_sharpe_threshold_is_not_frozen(tmp_path: P
         "freeze_deflated_sharpe_below_threshold",
         "freeze_too_few_positive_years",
         "freeze_active_drawdown_exceeded",
-        "freeze_raw_excess_not_positive_at_cost_stress",
+        "freeze_not_positive_at_cost_stress",
     ]
     assert record["frozen"] is None
     assert record["arm_end"]["status"] == "no_deliverable"
@@ -856,12 +857,13 @@ def test_an_unmeasurable_slice_fails_the_attempt(tmp_path: Path):
             result = super().evaluate(request)
             sidecar = Path(result.result_ref).parent / "style_analysis.json"
             analysis = json.loads(sidecar.read_text(encoding="utf-8"))
-            analysis["size_factor_daily"] = []
+            # A day the panel does not cover would be graded against nothing.
+            analysis["panel_daily"] = analysis["panel_daily"][:-1]
             sidecar.write_text(json.dumps(analysis), encoding="utf-8")
             return result
 
     pipeline.evaluator = Unmeasurable(evaluator.root / "unmeasurable")
-    with pytest.raises(ValueError, match="not measurable"):
+    with pytest.raises(ValueError, match="zero-skill panel has no return"):
         pipeline.run_forward()
     assert [row["record_type"] for row in ledger.read()][-1] == "attempt_failed"
     assert forward_record(ledger.read()) is None
@@ -981,4 +983,4 @@ def test_a_step_row_refuses_a_missing_style_sidecar(tmp_path: Path):
     with pytest.raises(FileNotFoundError):
         research_step_record(step)
     (tmp_path / STYLE_ARTIFACT_NAME).write_text("{}", encoding="utf-8")
-    assert research_step_record(step)["neutralized"] is None
+    assert research_step_record(step)["graded"] is None

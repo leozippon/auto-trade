@@ -35,7 +35,7 @@ from autotrade.pipelines.research_session import (
 
 SESSION = "session_ref_ab"
 RUN = "run_x"
-REASON = "neutralized excess is negative in three of four research years; the null percentile is 0.48"
+REASON = "active excess is negative in three of four research years; the null percentile is 0.48"
 
 
 def _node(tree: StepTree, root: Path, marker: str, *, session: str = SESSION, run: str = RUN) -> str:

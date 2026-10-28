@@ -316,26 +316,31 @@ class AcceptanceRulesTest(unittest.TestCase):
         rendered = json.dumps(facts)
         self.assertIsNone(re.search(r"20\d{6}", rendered))
 
-    def test_the_raw_condition_is_stated_at_the_arms_multiplier(self) -> None:
+    def test_the_freeze_cost_stress_is_stated_at_the_arms_multiplier(self) -> None:
         stated = acceptance_for({"cost_stress_multiplier": 3.0}).agent_facts()["freeze_gate"][
-            "raw_excess_at_cost_stress"
+            "excess_at_cost_stress"
         ]
         self.assertIn("> 0", stated)
         self.assertIn("3.0", stated)
-        self.assertIn("raw_readings.raw_excess_at_cost_stress", stated)
+        self.assertIn("graduation_activity.active_excess_at_cost_stress", stated)
 
-    def test_plain_selection_is_stated_as_a_rule_over_the_seeds_together(self) -> None:
-        """The forward plain-excess bound is told as a rule with no figure,
-        over the frozen book and its seed replicates averaged day by day."""
+    def test_one_series_is_stated_and_f2_reads_the_seeds_together(self) -> None:
+        """Every gate grades the active series as it is: the facts name it
+        once, name no regressed figure, and tell the forward bound as a rule
+        with no figure, over the frozen book and its seed replicates averaged
+        day by day."""
 
-        stated = AcceptanceRules().agent_facts()["graduation"]["forward"]["plain_excess_lower_bound"]
-        self.assertIn("lower bound > 0", stated)
-        self.assertIn("with no regression", stated)
-        # Its research-period reading, and the row field of a similar name
-        # that it is not.
-        self.assertIn("daily_series active_return", stated)
-        self.assertIn("Not raw_readings.plain_selection", stated)
-        self.assertIn("average over the frozen book and its replicates", stated)
+        facts = AcceptanceRules().agent_facts()
+        graded = facts["graded_series"]
+        self.assertIn("with no regression", graded)
+        for field in ("benchmark.active_excess", "sub_windows[].active_excess_return", "daily_series"):
+            self.assertIn(field, graded)
+        self.assertNotIn("neutral", json.dumps(facts).lower())
+        forward = facts["graduation"]["forward"]
+        self.assertNotIn("plain_excess_lower_bound", forward)
+        stated = forward["lower_bound"]
+        self.assertIn("lower bound of annualized active excess > 0", stated)
+        self.assertIn("day-by-day average over the frozen book and its replicates", stated)
         self.assertIsNone(re.search(r"\d\.\d", stated))
 
     def test_offline_pricing_is_stated_once(self) -> None:

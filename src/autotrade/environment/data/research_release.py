@@ -144,7 +144,7 @@ def require_benchmark_index(
     verdict. A release that predates an index therefore has to be refused where
     the arm names it -- and so does one whose history of the index starts
     inside the research period: without a bar before ``research_start`` the
-    first research year has no benchmark return to neutralize against, and
+    first research year has no benchmark return to read against, and
     without a constituent section dated before it the zero-skill panel has no
     membership to match the first entries on. Only the datasets the arm
     actually consumes are checked (``datasets`` is its

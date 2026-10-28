@@ -699,7 +699,7 @@ def test_an_interrupted_session_without_a_checkpoint_resumes_from_the_note_alone
     assert failed["record_type"] == "attempt_failed"
     assert not (experiment / "steps" / "tree.json").is_file()
 
-    reason = "neutralized excess is negative in three of four research years; the null percentile is 0.48"
+    reason = "active excess is negative in three of four research years; the null percentile is 0.48"
     second_llm = _NominatingLLM(
         [
             ProviderResponse(tool_calls=(VALIDATE_WORKING_COPY,)),
@@ -926,7 +926,7 @@ def test_attempts_that_fail_before_the_workspace_is_seeded_leave_a_fresh_start(
     assert workspace.is_dir() and not (workspace / "output" / "main.py").exists()
     monkeypatch.setattr(research_session, "copy_artifact", copy_artifact)
 
-    reason = "neutralized excess is negative in three of four research years; the null percentile is 0.48"
+    reason = "active excess is negative in three of four research years; the null percentile is 0.48"
     llm = _NominatingLLM(
         [
             ProviderResponse(tool_calls=(VALIDATE_WORKING_COPY,)),
@@ -984,7 +984,7 @@ def test_the_llm_session_validates_a_multi_year_span_is_refused_by_the_gate_and_
                 "candidates": [
                     {
                         "name": "working_copy",
-                        "hypothesis": f"the working copy earns a positive neutralized excess over {span}",
+                        "hypothesis": f"the working copy earns a positive active excess over {span}",
                         "path": "output",
                         "control": False,
                     }
@@ -1123,7 +1123,7 @@ def test_a_span_the_host_cannot_replay_ends_the_arm_environment_blocked(
                         "candidates": [
                             {
                                 "name": "working_copy",
-                                "hypothesis": f"the working copy earns a positive neutralized excess over {span}",
+                                "hypothesis": f"the working copy earns a positive active excess over {span}",
                                 "path": "output",
                                 "control": False,
                             }
