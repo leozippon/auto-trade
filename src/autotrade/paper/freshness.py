@@ -111,7 +111,7 @@ def unready_datasets(
         return [
             (
                 f"its record (schema {generation.get('schema_version')}) predates per-dataset refresh times; "
-                "run `python scripts/data/tushare_lake.py migrate --apply` once, then the nightly chain"
+                "rebuild the generation"
             )
         ]
     entries = generation.get("datasets") or {}

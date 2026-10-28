@@ -30,8 +30,8 @@ A keyed partition of the versioned era also carries an observation table next
 to it, ``<name>.parquet.first_seen``: Parquet with the business-key columns (as
 canonical text) and ``first_seen_at``, the UTC instant at which the key first
 became part of the visible partition. The versioned era starts on the date the
-migration recorded as ``versioned_since`` in the generation record; a partition
-belongs to it when the period its id names (``month=``, ``year=``,
+generation record names as ``versioned_since``, the day versioning began; a
+partition belongs to it when the period its id names (``month=``, ``year=``,
 ``trade_date=``, ``period=`` ...; :func:`partition_period_end`) ends on or
 after that date, or when its id names no period (whole-history files such as
 ``ts_code=<code>`` or ``share_float_complete``). Older periods never get rows,
@@ -284,8 +284,8 @@ def partition_period_end(partition: str) -> str | None:
 
 
 def versioned_since(raw_dir: Path) -> str | None:
-    """The first day (YYYYMMDD) of the lake's versioned era, as the migration
-    recorded it in the generation record; None before the migration."""
+    """The first day (YYYYMMDD) of the lake's versioned era, as the generation
+    record names it; None for a record that names none."""
     record = Path(raw_dir) / RAW_GENERATION_FILENAME
     if not record.exists():
         return None

@@ -79,7 +79,7 @@ def test_a_release_every_landing_run_refreshed_is_ready():
 
 
 def test_a_record_without_refresh_times_asks_for_the_migration():
-    with pytest.raises(PaperDataNotReady, match=r"predates per-dataset refresh times; run `python scripts/data/tushare_lake\.py migrate --apply`"):
+    with pytest.raises(PaperDataNotReady, match=r"predates per-dataset refresh times; rebuild the generation"):
         require_fresh_release({"schema_version": 2, "state": "committed", "generation_id": "g"}, CONFIG, SCHEDULE, SESSIONS, MONDAY)
 
 

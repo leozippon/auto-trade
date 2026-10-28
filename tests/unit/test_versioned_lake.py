@@ -8,7 +8,7 @@ import json
 import os
 import tempfile
 import unittest
-from contextlib import chdir, redirect_stdout
+from contextlib import redirect_stdout
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from autotrade.data_sources.tushare import common, cron_update, lake, versions
+from autotrade.data_sources.tushare import common, cron_update, versions
 from autotrade.data_sources.tushare import io as tushare_io
 from autotrade.environment.data import research_release
 from autotrade.environment.data.pit import (
@@ -344,6 +344,40 @@ class VersionedPartitionTest(unittest.TestCase):
         self.assertEqual(os.stat(cloned / observations.name).st_ino, os.stat(observations).st_ino)
         self.assertFalse(any("raw_versions" in str(path) for path in release.rglob("*")))
 
+    def test_periods_before_the_versioned_era_never_get_observation_rows(self) -> None:
+        columns = ["ann_date", "ts_code", "name", "title", "url", "rec_time"]
+        keys = ["ts_code", "ann_date", "title"]
+        current = self.raw / "anns_d" / "month=202601.parquet"
+        backfilled = self.raw / "anns_d" / "month=202103.parquet"
+
+        def publish(path: Path, frame: pd.DataFrame) -> str:
+            with redirect_stdout(io.StringIO()):
+                return versions.publish(path, frame, api_name="anns_d", params={}, fields=columns, key_columns=keys, ledger=None)
+
+        # A month never pulled before, landed in the versioned era (from
+        # 20260101): its keys follow the vendor's dates, not the day the
+        # backfill ran.
+        old_month = pd.DataFrame([["20210301", "000002.SZ", "n", "t2", "u2", ""]], columns=columns)
+        self.assertEqual(publish(backfilled, old_month), "appended")
+        self.assertFalse(versions.observation_path(backfilled).exists())
+        self.assertTrue(versions.read_observations(backfilled).empty)
+        # A new key in a versioned month is observed when it lands.
+        added = pd.DataFrame([["20260105", "000009.SZ", "n", "t9", "u9", ""]], columns=columns)
+        self.assertEqual(publish(current, added), "appended")
+        self.assertEqual(versions.read_observations(current)["ts_code"].tolist(), ["000009.SZ"])
+        # rebuild-observations applies the same rule.
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(versions.rebuild_observations(backfilled)["rows"], 0)
+            versions.rebuild_observations(current)
+        self.assertFalse(versions.observation_path(backfilled).exists())
+        self.assertEqual(versions.read_observations(current)["ts_code"].tolist(), ["000009.SZ"])
+        # Partition ids name their period; a whole-history file names none.
+        self.assertEqual(
+            [versions.partition_period_end(item) for item in ("month=202102", "year=2020", "ts_code=000001.SH/year=2023",
+             "trade_date=20261023", "period=20250930", "range=202001_latest", "ts_code=603838.SH", "share_float_complete")],
+            ["20210228", "20201231", "20231231", "20261023", "20250930", None, None, None],
+        )
+
 
 class RunnerFoldTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -466,124 +500,6 @@ class RunnerFoldTest(unittest.TestCase):
         self.assertEqual(kept["generation_id"], "old")
         self.assertNotEqual(crashed["generation_id"], "old")
         self.assertEqual(crashed["state"], "committed")
-
-
-class MigrationTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self._tmp.name)
-        self.raw = self.root / "data" / "raw"
-        anns = pd.DataFrame(
-            [["20261001", "000001.SZ", "n", "t1", "u1", ""], ["20261001", "000001.SZ", "n", "t1", "u1", ""],
-             ["20261002", "000002.SZ", "n", "t2", "u2", ""]],
-            columns=["ann_date", "ts_code", "name", "title", "url", "rec_time"],
-        )
-        common.write_parquet(self.raw / "anns_d" / "month=202610.parquet", anns, api_name="anns_d", params={}, fields=list(anns.columns))
-        common.write_parquet(self.raw / "anns_d" / "month=202609.parquet", anns.iloc[[2]], api_name="anns_d", params={}, fields=list(anns.columns))
-        repurchase = pd.DataFrame(
-            [["000001.SZ", "20261001", "", "实施", "", 1.0], ["000001.SZ", "20261001", "", "实施", "", 2.0]],
-            columns=["ts_code", "ann_date", "end_date", "proc", "exp_date", "vol"],
-        )
-        common.write_parquet(self.raw / "repurchase" / "month=202610.parquet", repurchase, api_name="repurchase", params={}, fields=list(repurchase.columns))
-        (self.raw / ".raw_generation.json").write_text(json.dumps({
-            "schema_version": 2, "state": "committed", "generation_id": "g2", "completed_at": "2026-10-23T00:00:00+00:00",
-        }), encoding="utf-8")
-        self.config = self.root / "schedule.json"
-        self.config.write_text(json.dumps({
-            "schema_version": 1, "repo_root": str(self.root), "default_raw_dir": "data/raw",
-            "default_start_date": "20200101", "default_lock_wait_seconds": 0, "jobs": {},
-            "revision_monitor": {"ledger_path": str(self.root / "ledger.jsonl")},
-        }), encoding="utf-8")
-
-    def tearDown(self) -> None:
-        self._tmp.cleanup()
-
-    def migrate(self, apply: bool) -> dict:
-        # The command works from the lake's repository root; chdir restores
-        # this process's directory before the temporary root is deleted.
-        with (
-            chdir(self.root),
-            patch.object(cron_update, "RUNTIME_ROOT", self.root / ".runtime" / "tushare"),
-            redirect_stdout(io.StringIO()),
-        ):
-            return lake.migrate(str(self.config), apply=apply)
-
-    def test_dry_run_changes_nothing_and_apply_is_idempotent(self) -> None:
-        def state() -> dict[str, tuple[int, int]]:
-            return {str(path): (path.stat().st_ino, path.stat().st_size) for path in sorted(self.raw.rglob("*")) if path.is_file()}
-
-        before = state()
-        landed = max(
-            json.loads(path.read_text(encoding="utf-8"))["fetched_at"]
-            for path in (self.raw / "anns_d").glob("*.meta.json")
-        )
-        report = self.migrate(apply=False)
-        self.assertEqual(report["deduplicate"]["anns_d"], {"partitions": 1, "duplicate_rows": 1, "rows_before": 3})
-        self.assertEqual(report["deduplicate"]["repurchase"], {"partitions": 1, "duplicate_rows": 1, "rows_before": 2})
-        self.assertEqual(state(), before)
-        self.assertFalse(versions.version_root(self.raw).exists())
-
-        self.migrate(apply=True)
-        record = json.loads((self.raw / ".raw_generation.json").read_text(encoding="utf-8"))
-        self.assertEqual((record["schema_version"], record["state"], record["issues"]), (3, "committed", []))
-        self.assertNotEqual(record["generation_id"], "g2")
-        self.assertEqual(set(record["datasets"]), {"anns_d", "repurchase"})
-        # The refresh time is the last landing, not the deduplication commit.
-        self.assertEqual(record["datasets"]["anns_d"]["refreshed_at"], datetime.fromisoformat(landed).isoformat())
-        self.assertEqual(len(pd.read_parquet(self.raw / "anns_d" / "month=202610.parquet")), 2)
-        self.assertEqual(pd.read_parquet(self.raw / "repurchase" / "month=202610.parquet")["vol"].tolist(), [1.0])
-        for dataset in ("anns_d", "repurchase"):
-            (version,) = versions.list_versions(self.raw / dataset / "month=202610.parquet")
-            self.assertTrue(version.endswith("-superseded"))
-        events = [json.loads(line) for line in (self.root / "ledger.jsonl").read_text(encoding="utf-8").splitlines()]
-        self.assertEqual([(event["kind"], event["source"], event["duplicate_rows_dropped"]) for event in events], [("restatement", "migration", 1)] * 2)
-        # Keys visible before versioning have no observation rows.
-        self.assertFalse(versions.observation_path(self.raw / "anns_d" / "month=202610.parquet").exists())
-
-        again = self.migrate(apply=True)
-        self.assertEqual({item["partitions"] for item in again["deduplicate"].values()}, {0})
-        self.assertEqual(json.loads((self.raw / ".raw_generation.json").read_text(encoding="utf-8"))["generation_id"], record["generation_id"])
-        self.assertEqual(len(versions.list_versions(self.raw / "anns_d" / "month=202610.parquet")), 1)
-        # The versioned era starts on the first migration's day and stays.
-        self.assertEqual(again["generation"]["versioned_since"], {"from": record["versioned_since"], "to": record["versioned_since"]})
-
-    def test_periods_before_the_versioned_era_never_get_observation_rows(self) -> None:
-        self.migrate(apply=True)
-        since = json.loads((self.raw / ".raw_generation.json").read_text(encoding="utf-8"))["versioned_since"]
-        self.assertEqual(since, datetime.now(versions.UTC).astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d"))
-        current = self.raw / "anns_d" / f"month={since[:6]}.parquet"
-        backfilled = self.raw / "anns_d" / "month=202103.parquet"
-        columns = ["ann_date", "ts_code", "name", "title", "url", "rec_time"]
-        keys = ["ts_code", "ann_date", "title"]
-
-        def publish(path: Path, rows: pd.DataFrame) -> str:
-            with redirect_stdout(io.StringIO()):
-                return versions.publish(path, rows, api_name="anns_d", params={}, fields=list(rows.columns), key_columns=keys, ledger=None)
-
-        # A month never pulled before, landed after the migration: its keys
-        # follow the vendor's dates, not the day the backfill ran.
-        old_month = pd.DataFrame([["20210301", "000002.SZ", "n", "t2", "u2", ""]], columns=columns)
-        self.assertEqual(publish(backfilled, old_month), "appended")
-        self.assertFalse(versions.observation_path(backfilled).exists())
-        self.assertTrue(versions.read_observations(backfilled).empty)
-        # A new key in the current month is observed when it lands; the keys
-        # it held before the migration still have no rows.
-        before = pd.read_parquet(current) if current.exists() else pd.DataFrame(columns=columns)
-        added = pd.concat([before, pd.DataFrame([[f"{since[:6]}01", "000009.SZ", "n", "t9", "u9", ""]], columns=columns)], ignore_index=True)
-        self.assertEqual(publish(current, added), "appended")
-        self.assertEqual(versions.read_observations(current)["ts_code"].tolist(), ["000009.SZ"])
-        # rebuild-observations applies the same rule.
-        with redirect_stdout(io.StringIO()):
-            self.assertEqual(versions.rebuild_observations(backfilled)["rows"], 0)
-            versions.rebuild_observations(current)
-        self.assertFalse(versions.observation_path(backfilled).exists())
-        self.assertEqual(versions.read_observations(current)["ts_code"].tolist(), ["000009.SZ"])
-        # Partition ids name their period; a whole-history file names none.
-        self.assertEqual(
-            [versions.partition_period_end(item) for item in ("month=202102", "year=2020", "ts_code=000001.SH/year=2023",
-             "trade_date=20261023", "period=20250930", "range=202001_latest", "ts_code=603838.SH", "share_float_complete")],
-            ["20210228", "20201231", "20231231", "20261023", "20250930", None, None, None],
-        )
 
 
 if __name__ == "__main__":

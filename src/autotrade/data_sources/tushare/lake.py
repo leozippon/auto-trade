@@ -12,13 +12,6 @@ scheduled job, so releases and Paper pins never see a half-applied command.
   ``on_restatement`` dataset runs the same command unattended).
 * ``rebuild-observations DATASET PARTITION`` rebuilds a partition's
   observation table from its version history.
-* ``migrate --dry-run | --apply`` starts versioning on a lake written before
-  it: existing partitions become the current versions with no observation rows,
-  the duplicate business keys of ``anns_d`` and ``repurchase`` are dropped
-  (each changed partition kept as a superseded version, with a ledger event),
-  and the generation record is rewritten to schema 3 with ``versioned_since``,
-  the day the versioned era starts (periods ending before it never get
-  observation rows). Idempotent: a second run keeps that day.
 * ``prune-releases [--dry-run | --apply]`` removes the research releases no
   consumer reads any more, oldest first. A release stays while the raw
   generation record names it, a seed (or a seed build's workspace pin) one or
@@ -44,12 +37,6 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-import pandas as pd
-
-from autotrade.environment.data.contracts import (
-    GENERATION_COMMITTED,
-    GENERATION_SCHEMA_VERSION,
-)
 from autotrade.environment.data.pit import complete_interrupted_commits
 from autotrade.environment.data.research_release import (
     pinned_generation,
@@ -70,11 +57,8 @@ from autotrade.pipelines.hitl_state import (
 )
 
 from .common import (
-    EVENT_FLOW_SPECS,
     REVISION_EVENTS_PATH,
-    TEXT_SPECS,
     inherited_updater_lock_fd,
-    parquet_meta,
     resolve_revision_ledger,
 )
 from .cron_update import (
@@ -96,17 +80,10 @@ from .cron_update import (
 from .versions import (
     STAGED,
     SUPERSEDED,
-    dataset_vintage,
-    deduplicate_keys,
-    partition_id,
-    publish,
     rebuild_observations,
     restore,
 )
 
-# The two tables whose stored partitions still hold duplicate business keys
-# from before keys were deduplicated at ingest.
-MIGRATION_DEDUP_DATASETS = ("anns_d", "repurchase")
 # The one arm state the console neither runs nor resumes: it resumes stopped,
 # failed, interrupted and terminated arms (``webui.manager``), and an active
 # state whose worker died reads as interrupted. An arm has ended in this state,
@@ -149,14 +126,12 @@ def locked_generation(config: dict, raw_dir: Path, job: str) -> Iterator[dict]:
             "datasets": {name: dict(entry) for name, entry in (previous.get("datasets") or {}).items()},
             "issues": [dict(issue) for issue in previous.get("issues") or []],
             "commit": False,
-            "versioned_since": previous.get("versioned_since"),
         }
         try:
             yield state
         finally:
             finish_raw_generation_update(
                 raw_dir, previous, transaction, commit=state["commit"], datasets=state["datasets"], issues=state["issues"],
-                versioned_since=state["versioned_since"],
             )
     finally:
         lock.release()
@@ -210,96 +185,6 @@ def rebuild_partition_observations(config_path: str, dataset: str, partition: st
         state["commit"] = True
         stats = rebuild_observations(path)
     return {"status": "ok", "dataset": dataset, "partition": partition, **stats}
-
-
-def _latest_commit(dataset_dir: Path) -> str | None:
-    """The latest commit time a dataset's sidecars record: the best evidence of
-    its last refresh a lake written before refresh times were recorded has."""
-    latest: datetime | None = None
-    for meta_path in dataset_dir.rglob("*.parquet.meta.json"):
-        fetched = json.loads(meta_path.read_text(encoding="utf-8")).get("fetched_at")
-        try:
-            instant = datetime.fromisoformat(str(fetched)) if fetched else None
-        except ValueError:
-            instant = None
-        if instant is not None and (latest is None or instant > latest):
-            latest = instant
-    return latest.isoformat() if latest is not None else None
-
-
-def _dedup_spec(dataset: str) -> list[str]:
-    spec = TEXT_SPECS.get(dataset) or EVENT_FLOW_SPECS.get(dataset)
-    if spec is None or not spec.unique_key:
-        raise RuntimeError(f"{dataset} has no unique business key to deduplicate on")
-    return list(spec.key_columns)
-
-
-def migrate(config_path: str, *, apply: bool) -> dict:
-    """Start versioning on the lake (see the module docstring)."""
-    config, raw_dir, ledger = _lake(config_path)
-
-    def run(state: dict | None) -> dict:
-        report: dict = {"mode": "apply" if apply else "dry_run", "raw_dir": str(raw_dir), "deduplicate": {}}
-        dataset_dirs = sorted(path for path in raw_dir.iterdir() if path.is_dir() and not path.name.startswith("."))
-        # Read before the deduplication commits, which are no vendor refresh.
-        refreshed = {path.name: _latest_commit(path) for path in dataset_dirs}
-        for dataset in MIGRATION_DEDUP_DATASETS:
-            keys = _dedup_spec(dataset)
-            partitions = []
-            for path in sorted((raw_dir / dataset).glob("*.parquet")):
-                frame = pd.read_parquet(path)
-                _, dropped = deduplicate_keys(frame, keys)
-                if not dropped:
-                    continue
-                entry = {"partition": partition_id(path), "rows": len(frame), "duplicate_rows": dropped}
-                if state is not None:
-                    state["commit"] = True
-                    meta = parquet_meta(path)
-                    entry["outcome"] = publish(
-                        path, frame, api_name=str(meta.get("api_name") or dataset), params=dict(meta.get("params") or {}),
-                        fields=list(meta.get("fields") or frame.columns), key_columns=keys, ledger=ledger,
-                        source="migration", deduplicate=True, current=frame,
-                    )
-                partitions.append(entry)
-                print(json.dumps({"dataset": dataset, **entry}, ensure_ascii=False))
-            report["deduplicate"][dataset] = {
-                "partitions": len(partitions),
-                "duplicate_rows": sum(item["duplicate_rows"] for item in partitions),
-                "rows_before": sum(item["rows"] for item in partitions),
-            }
-        previous = _read_raw_generation_file(raw_dir) if state is None else state["previous"]
-        known = (previous.get("datasets") or {}) if previous.get("schema_version") == GENERATION_SCHEMA_VERSION else {}
-        datasets = {}
-        for dataset_dir in dataset_dirs:
-            # A record already at schema 3 keeps the refresh times the runner
-            # recorded; the vintage always describes the lake as it now is.
-            since = (known.get(dataset_dir.name) or {}).get("refreshed_at") or refreshed[dataset_dir.name]
-            datasets[dataset_dir.name] = {"vintage": dataset_vintage(dataset_dir), **({"refreshed_at": since} if since else {})}
-        # The versioned era starts on the day of the first migration and never
-        # moves: periods ending before it keep no observation rows.
-        since = previous.get("versioned_since") or datetime.now(ZoneInfo(config.get("timezone", "Asia/Shanghai"))).strftime("%Y%m%d")
-        if state is not None:
-            state["datasets"] = datasets
-            state["issues"] = list(previous.get("issues") or []) if previous.get("schema_version") == GENERATION_SCHEMA_VERSION else []
-            state["versioned_since"] = since
-        report["generation"] = {
-            "schema_version": {"from": previous.get("schema_version"), "to": GENERATION_SCHEMA_VERSION},
-            "state_before": previous.get("state"),
-            "generation_id_before": previous.get("generation_id"),
-            # finish_raw_generation_update also commits over a record that was
-            # not committed when the command began.
-            "new_generation": any(item["partitions"] for item in report["deduplicate"].values())
-            or previous.get("state") != GENERATION_COMMITTED,
-            "datasets": len(datasets),
-            "versioned_since": {"from": previous.get("versioned_since"), "to": since},
-            "datasets_without_refresh_time": sorted(name for name, entry in datasets.items() if "refreshed_at" not in entry),
-        }
-        return report
-
-    if not apply:
-        return run(None)
-    with locked_generation(config, raw_dir, "operator:migrate") as state:
-        return run(state)
 
 
 def release_consumers(repo_root: Path, raw_dir: Path) -> dict[str, list[str]]:
@@ -413,10 +298,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--config", default=str(DEFAULT_CONFIG))
     sub = parser.add_subparsers(dest="command", required=True)
-    migrate_parser = sub.add_parser("migrate", help="start versioning on a lake written before it")
-    mode = migrate_parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--dry-run", action="store_true", help="report what the migration would change, change nothing")
-    mode.add_argument("--apply", action="store_true", help="run the migration under the updater lock")
     for verb, kind in (("revert", SUPERSEDED), ("promote", STAGED)):
         command = sub.add_parser(verb, help=f"make a {kind} version the visible partition")
         command.add_argument("dataset")
@@ -440,9 +321,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if args.command == "repull":
         return repull_dataset(args.config, args.dataset, start_date=args.start_date, end_date=args.end_date)
-    if args.command == "migrate":
-        result = migrate(args.config, apply=args.apply)
-    elif args.command == "prune-releases":
+    if args.command == "prune-releases":
         result = prune_releases(args.config, apply=args.apply)
     elif args.command in {"revert", "promote"}:
         kind = SUPERSEDED if args.command == "revert" else STAGED
