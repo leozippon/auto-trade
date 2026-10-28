@@ -412,36 +412,44 @@ class ResearchReleaseTest(unittest.TestCase):
             self._pin("exp1")
 
     def test_pinned_release_verifies_against_its_own_manifest_set(self) -> None:
-        # Frozen releases published under an earlier audit taxonomy (e.g. the
-        # retired base_research_status.json) stay verifiable: a pin is
-        # self-describing and is never re-judged against the live taxonomy.
+        # A pin is self-describing and is never re-judged against the live
+        # taxonomy: a release that recorded fewer files than the taxonomy now
+        # names stays verifiable.
         from autotrade.environment.data import research_release as rr
 
-        legacy_dir = self.root / "legacy_quality"
-        legacy_dir.mkdir()
-        legacy_types = {
-            "base_research_status.json": "base_research",
+        subset_dir = self.root / "subset_quality"
+        subset_dir.mkdir()
+        recorded = {
+            "core_market_status.json": "core_market",
             "fundamental_events_status.json": "fundamental_events",
         }
         inventory: dict[str, bool] = {}
-        for name, report_type in legacy_types.items():
-            path = legacy_dir / name
+        for name, report_type in recorded.items():
+            path = subset_dir / name
             path.write_text(
                 json.dumps(self._quality_report(report_type)) + "\n", encoding="utf-8"
             )
             inventory[name] = True
 
-        rr._verify_quality_files(legacy_dir, inventory, "fundamental_events_status.json")
+        rr._verify_quality_files(subset_dir, inventory, "fundamental_events_status.json")
 
         # A record that omits the declared fundamentals status stays invalid.
-        partial = {"base_research_status.json": True}
+        partial = {"core_market_status.json": True}
         with self.assertRaisesRegex(RuntimeError, "quality file set is invalid"):
-            rr._verify_quality_files(legacy_dir, partial, "fundamental_events_status.json")
+            rr._verify_quality_files(subset_dir, partial, "fundamental_events_status.json")
 
         # A file the record says is absent must not silently reappear.
-        reappeared = {**inventory, "base_research_status.json": False}
+        reappeared = {**inventory, "core_market_status.json": False}
         with self.assertRaisesRegex(RuntimeError, "unexpected quality file"):
-            rr._verify_quality_files(legacy_dir, reappeared, "fundamental_events_status.json")
+            rr._verify_quality_files(subset_dir, reappeared, "fundamental_events_status.json")
+
+        # A filename outside the taxonomy has no report type to verify against.
+        (subset_dir / "base_research_status.json").write_text(
+            json.dumps(self._quality_report("base_research")) + "\n", encoding="utf-8"
+        )
+        unknown = {**inventory, "base_research_status.json": True}
+        with self.assertRaisesRegex(RuntimeError, "unknown quality status filename"):
+            rr._verify_quality_files(subset_dir, unknown, "fundamental_events_status.json")
 
     def test_pinned_quality_inventory_rejects_path_traversal_names(self) -> None:
         from autotrade.environment.data import research_release as rr

@@ -41,13 +41,9 @@ def test_trace_stats_counts_unique_subagent_tasks_not_calls(tmp_path: Path) -> N
         tmp_path / "run.jsonl",
         [
             {
-                "event_type": "subagent_task_started",
-                "task_id": "agent_a",
-                "parent_call_id": "call_1",
-            },
-            {
                 "event_type": "subagent_task",
                 "task_id": "agent_a",
+                "parent_call_id": "call_1",
                 "status": "started",
             },
             {"event_type": "subagent_llm", "task_id": "agent_a"},
@@ -95,7 +91,7 @@ def test_trace_stats_old_trace_without_start_still_counts_unique_task(
                 "task": "do not parse this as a task id",
             },
             {"event_type": "subagent_llm", "task_id": "  "},
-            {"event_type": "subagent_task_started", "task": "missing id"},
+            {"event_type": "subagent_task", "task": "missing id"},
             {"event_type": "subagent", "task_id": 12},
         ],
     )
@@ -121,7 +117,7 @@ def test_trace_stats_ignores_non_subagent_events(tmp_path: Path) -> None:
 
 def test_trace_stats_incrementally_dedups_appended_events(tmp_path: Path) -> None:
     path = tmp_path / "live.jsonl"
-    _write_trace(path, [{"event_type": "subagent_task_started", "task_id": "agent_a"}])
+    _write_trace(path, [{"event_type": "subagent_task", "task_id": "agent_a", "status": "started"}])
     assert trace_stats(path)["subagent_tasks"] == 1
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps({"event_type": "subagent_llm", "task_id": "agent_a"}) + "\n")
@@ -188,12 +184,12 @@ def test_trace_stats_recomputes_when_cached_summary_lacks_subagent_field(
 ) -> None:
     path = _write_trace(
         tmp_path / "legacy_cache.jsonl",
-        [{"event_type": "subagent_task_started", "task_id": "agent_a"}],
+        [{"event_type": "subagent_task", "task_id": "agent_a", "status": "started"}],
     )
     key = str(path.resolve())
     traces._STATS_CACHE[key] = {
         "offset": path.stat().st_size,
-        "counts": {"subagent_task_started": 1},
+        "counts": {"subagent_task": 1},
         "tool_counts": {},
         "llm_total_tokens": 0,
         "prompt_tokens": 0,
@@ -204,7 +200,7 @@ def test_trace_stats_recomputes_when_cached_summary_lacks_subagent_field(
         counts = stats["counts"]
         assert isinstance(counts, dict)
         assert stats["subagent_tasks"] == 1
-        assert counts["subagent_task_started"] == 1
+        assert counts["subagent_task"] == 1
     finally:
         traces._STATS_CACHE.pop(key, None)
 
@@ -489,17 +485,12 @@ def test_project_subagent_emits_one_card_per_task_id() -> None:
     blocks = project_trace_blocks(
         [
             {
-                "event_type": "subagent_task_started",
+                "event_type": "subagent_task",
                 "task_id": "agent_new",
+                "status": "started",
                 "description": "inspect schema",
             },
             {"event_type": "subagent_llm", "task_id": "agent_new"},
-            {
-                "event_type": "subagent_tool_started",
-                "task_id": "agent_new",
-                "tool": "grep",
-                "tool_call_id": "g1",
-            },
             {
                 "event_type": "subagent_tool",
                 "task_id": "agent_new",
@@ -678,13 +669,7 @@ def test_project_subagent_internal_tools_stay_on_subagent_card() -> None:
                 "tool": "agent",
                 "tool_call_id": "e1",
             },
-            {"event_type": "subagent_task_started", "task_id": "agent_a"},
-            {
-                "event_type": "subagent_tool_started",
-                "task_id": "agent_a",
-                "tool": "grep",
-                "tool_call_id": "g1",
-            },
+            {"event_type": "subagent_task", "task_id": "agent_a", "status": "started"},
             {
                 "event_type": "subagent_tool",
                 "task_id": "agent_a",
@@ -915,7 +900,7 @@ def test_project_subagent_finishing_after_a_compaction_keeps_its_one_card() -> N
 
     blocks = project_trace_blocks(
         [
-            {"event_type": "subagent_task_started", "task_id": "agent_a", "ts": "t1", "role": "explore"},
+            {"event_type": "subagent_task", "task_id": "agent_a", "status": "started", "ts": "t1", "role": "explore"},
             {"event_type": "subagent_llm", "task_id": "agent_a", "round": 1, "usage": {"prompt_tokens": 10, "completion_tokens": 2}},
             {"event_type": "context_compaction", "ts": "t2", "trigger": "agent", "status": "ok"},
             {"event_type": "subagent", "task_id": "agent_a", "ts": "t3", "status": "completed", "rounds": 3, "llm_calls": 3, "tool_calls": 5, "summary": "done"},
@@ -1212,10 +1197,10 @@ def test_project_subagent_running_card_accumulates_progress() -> None:
                 "result": {"ok": True},
             },
             {
-                "event_type": "subagent_tool_started",
+                "event_type": "subagent_tool",
                 "task_id": "agent_live",
                 "tool": "shell",
-                "tool_call_id": "s1",
+                "result": {"ok": False, "error": "exit 1"},
             },
             {
                 "event_type": "subagent_llm",
@@ -1240,7 +1225,7 @@ def test_project_subagent_running_card_accumulates_progress() -> None:
         "completion_tokens": 300,
         "total_tokens": 3300,
     }
-    assert card["last_tool"] == {"name": "shell", "status": "running"}
+    assert card["last_tool"] == {"name": "shell", "status": "failed"}
 
 
 def test_project_subagent_finished_card_prefers_terminal_totals() -> None:
@@ -1495,28 +1480,13 @@ def test_trace_replay_threads_detail_and_clamps_the_block_window() -> None:
     assert traces.MAX_BLOCK_READ_BYTES == 32 * 1024 * 1024
 
 
-def _child_events(*, terminal: bool = True, legacy: bool = False) -> list[dict[str, object]]:
+def _child_events(*, terminal: bool = True) -> list[dict[str, object]]:
     """One Fold child's own records, plus a parent event it must ignore."""
 
-    names = (
-        {
-            "task": "explore_task",
-            "llm": "explore_llm",
-            "tool": "explore_tool",
-            "end": "explore",
-        }
-        if legacy
-        else {
-            "task": "subagent_task",
-            "llm": "subagent_llm",
-            "tool": "subagent_tool",
-            "end": "subagent",
-        }
-    )
     events: list[dict[str, object]] = [
         {"event_type": "llm_call", "content": "parent turn"},
         {
-            "event_type": names["task"],
+            "event_type": "subagent_task",
             "ts": "2026-09-01T10:00:00+00:00",
             "task_id": "agent_1",
             "status": "started",
@@ -1527,7 +1497,7 @@ def _child_events(*, terminal: bool = True, legacy: bool = False) -> list[dict[s
             "description": "因子实现",
         },
         {
-            "event_type": names["llm"],
+            "event_type": "subagent_llm",
             "ts": "2026-09-01T10:00:20+00:00",
             "task_id": "agent_1",
             "round": 1,
@@ -1536,7 +1506,7 @@ def _child_events(*, terminal: bool = True, legacy: bool = False) -> list[dict[s
             "usage": {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110},
         },
         {
-            "event_type": names["tool"],
+            "event_type": "subagent_tool",
             "ts": "2026-09-01T10:00:25+00:00",
             "task_id": "agent_1",
             "round": 1,
@@ -1545,7 +1515,7 @@ def _child_events(*, terminal: bool = True, legacy: bool = False) -> list[dict[s
             "result": {"ok": True, "value": {"lines": 40}},
         },
         {
-            "event_type": names["tool"],
+            "event_type": "subagent_tool",
             "ts": "2026-09-01T10:00:26+00:00",
             "task_id": "agent_1",
             "round": 1,
@@ -1554,7 +1524,7 @@ def _child_events(*, terminal: bool = True, legacy: bool = False) -> list[dict[s
             "result": {"ok": False, "error": "no match"},
         },
         {
-            "event_type": names["llm"],
+            "event_type": "subagent_llm",
             "ts": "2026-09-01T10:01:00+00:00",
             "task_id": "agent_1",
             "round": 2,
@@ -1599,7 +1569,7 @@ def _child_events(*, terminal: bool = True, legacy: bool = False) -> list[dict[s
                 },
             },
             {
-                "event_type": names["end"],
+                "event_type": "subagent",
                 "ts": "2026-09-01T10:02:00+00:00",
                 "task_id": "agent_1",
                 "status": "completed",
@@ -1662,16 +1632,6 @@ def test_project_subagent_trace_orders_rounds_tools_and_summary() -> None:
     assert header["usage"]["total_tokens"] == 330
     assert header["started_at"] == "2026-09-01T10:00:00+00:00"
     assert header["ended_at"] == "2026-09-01T10:02:00+00:00"
-
-
-def test_project_subagent_trace_legacy_explore_events_project_the_same() -> None:
-    current = traces.project_subagent_trace(_child_events(), "agent_1")
-    legacy = traces.project_subagent_trace(_child_events(legacy=True), "agent_1")
-    assert [block["kind"] for block in legacy["blocks"]] == [
-        block["kind"] for block in current["blocks"]
-    ]
-    assert legacy["header"]["status"] == "completed"
-    assert legacy["header"]["usage"]["total_tokens"] == 330
 
 
 def test_project_subagent_trace_running_child_has_no_report_yet() -> None:

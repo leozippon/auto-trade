@@ -38,7 +38,6 @@ from autotrade.data_quality import read_quality_report
 from autotrade.environment.data.contracts import (
     DOMAIN_REPORT_TYPES,
     DOMAIN_STATUS_FILES,
-    LEGACY_STATUS_REPORT_TYPES,
     RAW_GENERATION_FILENAME,
     benchmark_index_label,
     require_committed_generation,
@@ -973,9 +972,6 @@ def _quality_report_type(name: str, fundamental_status_name: str) -> str:
     for domain, filename in DOMAIN_STATUS_FILES.items():
         if filename == name:
             return DOMAIN_REPORT_TYPES[domain]
-    if name in LEGACY_STATUS_REPORT_TYPES:
-        # Pinned releases published under an earlier taxonomy stay readable.
-        return LEGACY_STATUS_REPORT_TYPES[name]
     raise RuntimeError(f"unknown quality status filename: {name!r}")
 
 

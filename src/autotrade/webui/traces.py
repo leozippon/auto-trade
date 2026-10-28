@@ -303,7 +303,7 @@ def project_trace_blocks(events: object) -> list[dict[str, object]]:
             state = subagents.get(task_id)
             if state is None:
                 state = subagents[task_id] = _SubagentState()
-            if _event_kind(event) in {"subagent_tool", "subagent_tool_started"}:
+            if kind == "subagent_tool":
                 state.tools.add(event, seq)
             _observe_subagent(interval, state, event, task_id, seq)
             continue
@@ -357,8 +357,8 @@ def project_subagent_trace(events: object, task_id: str) -> dict[str, object]:
         if _subagent_event_task_id(event) != task_id:
             continue
         matched += 1
-        kind = _event_kind(event)
-        if kind in {"subagent_tool", "subagent_tool_started"}:
+        kind = str(event.get("event_type") or "")
+        if kind == "subagent_tool":
             state.tools.add(event, seq)
             tools.add(event, seq)
             calls.append(_subagent_call_row(event))
@@ -571,7 +571,7 @@ def trace_stats(path: Path) -> dict[str, object]:
                     totals = _as_mapping(event.get("usage_totals"))
                     if totals:
                         subagent_usage[task_id] = _usage_row(totals)
-                elif _event_kind(event) == "subagent_llm" and task_id not in ended_ids:
+                elif kind == "subagent_llm" and task_id not in ended_ids:
                     _add_usage(
                         subagent_usage.setdefault(task_id, _new_usage()),
                         _as_mapping(event.get("usage")),
@@ -698,34 +698,14 @@ def _is_main_agent_llm_call(event: dict[str, object]) -> bool:
     return not (isinstance(task_id, str) and task_id.strip())
 
 
-_LEGACY_SUBAGENT_KINDS = {
-    "explore": "subagent",
-    "explore_task": "subagent_task",
-    "explore_task_started": "subagent_task_started",
-    "explore_llm": "subagent_llm",
-    "explore_tool": "subagent_tool",
-    "explore_tool_started": "subagent_tool_started",
-    "explore_attempt": "subagent_attempt",
-}
-
-
-def _event_kind(event: dict[str, object]) -> str:
-    """The event type, with the pre-rename ``explore_*`` names of traces
-    written by earlier sessions mapped onto the current ``subagent_*`` names."""
-
-    kind = str(event.get("event_type") or "")
-    return _LEGACY_SUBAGENT_KINDS.get(kind, kind)
-
-
 def _subagent_event_task_id(event: dict[str, object]) -> str | None:
     """Return a unique sub-agent task id, or None.
 
-    The count is launched tasks, not sub-agent LLM or tool calls. Prefer
-    ``subagent_task_started`` when present; older traces may omit the start
-    record, so any ``subagent`` / ``subagent_*`` event with a non-empty
-    ``task_id`` joins the same set. Prompt text is never parsed.
+    The count is launched tasks, not sub-agent LLM or tool calls: any
+    ``subagent`` / ``subagent_*`` event with a non-empty ``task_id`` joins the
+    same set. Prompt text is never parsed.
     """
-    kind = _event_kind(event)
+    kind = str(event.get("event_type") or "")
     if kind != "subagent" and not kind.startswith("subagent_"):
         return None
     value = event.get("task_id")
@@ -957,7 +937,7 @@ def _observe_subagent(
 
     phase = _subagent_phase(event)
     _absorb_subagent_text(state, event)
-    if _event_kind(event) == "subagent_llm":
+    if event.get("event_type") == "subagent_llm":
         state.llm_calls += 1
         state.rounds = max(state.rounds, _as_int(event.get("round")), state.llm_calls)
         _add_usage(state.usage, _as_mapping(event.get("usage")))
@@ -1061,10 +1041,8 @@ def _refresh_subagent_block(state: _SubagentState) -> None:
 
 
 def _subagent_phase(event: dict[str, object]) -> str:
-    kind = _event_kind(event)
+    kind = str(event.get("event_type") or "")
     status = str(event.get("status") or "").strip().lower()
-    if kind == "subagent_task_started":
-        return "started"
     if kind == "subagent":
         return "ended"
     if kind == "subagent_task":

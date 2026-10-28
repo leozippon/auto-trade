@@ -107,13 +107,6 @@ DOMAIN_REPORT_TYPES: dict[str, str] = {
     "text": "text_evidence",
     "fundamentals": "fundamental_events",
 }
-# Frozen research releases are self-describing (verified against their own
-# manifest set), so retired filenames must stay resolvable to their report
-# type for as long as a pinned release may reference them.
-LEGACY_STATUS_REPORT_TYPES: dict[str, str] = {
-    "base_research_status.json": "base_research",
-}
-
 # The A-share benchmark indexes the lake carries, code to display label. The
 # ingest adapter downloads exactly these for `index_daily` (partitioned by
 # `ts_code`) and `index_weight` (by `index_code`), and an arm's
