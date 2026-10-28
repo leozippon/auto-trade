@@ -469,8 +469,8 @@ def arm_attention(
     Two things raise it and nothing else does: an arm the host ended on the
     environment, which needs a fix and a re-run rather than a reading, and an
     arm that can still run while an issue report its session filed is
-    unresolved -- until ``scripts/experiments/resolve_issue.py`` answers it or
-    the arm ends.
+    unresolved -- until ``scripts/experiments/resolve_feedback.py issue``
+    answers it or the arm ends.
     """
 
     if ending is not None:

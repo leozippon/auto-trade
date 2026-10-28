@@ -12,10 +12,10 @@ Host-side telemetry only: a report changes no artifact, budget, or result, and
 is never mounted or projected back into any session's inputs — it is operator
 telemetry, not memory and not a results channel.
 
-The researcher answers a report in the same log: ``resolve_issue.py`` appends a
-``record_type: "resolution"`` line naming the report, the outcome and a short
-note. Nothing is rewritten — the filed report stays exactly as the session
-wrote it, and the console joins the two on read.
+The researcher answers a report in the same log: ``resolve_feedback.py issue``
+appends a ``record_type: "resolution"`` line naming the report, the outcome
+and a short note. Nothing is rewritten — the filed report stays exactly as the
+session wrote it, and the console joins the two on read.
 """
 
 from __future__ import annotations

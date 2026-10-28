@@ -6,9 +6,10 @@ changes. It never touches the run manifest or any artifact, it never reaches a
 mounted workspace, and the console lists it through the same public projection
 as every other Agent-authored string.
 
-The answer travels the same log: the researcher's ``resolve_issue.py`` appends
-a resolution line, the report itself is never rewritten, and the console joins
-the two and hides what is settled.
+The answer travels the same log: the researcher's ``resolve_feedback.py``
+appends a resolution line, the report itself is never rewritten, and the
+console joins the two and hides what is settled. The page and the resolver
+are shared with ``skill_feedback``, and their tests here run on both channels.
 """
 
 from __future__ import annotations
@@ -17,6 +18,8 @@ import json
 import subprocess
 import sys
 import threading
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -39,7 +42,13 @@ from autotrade.environment.tools.report_issue import (
     issue_reports_path,
     read_issue_reports,
 )
+from autotrade.environment.tools.skill_feedback import (
+    append_skill_feedback_resolution,
+    read_skill_feedback,
+    skill_feedback_path,
+)
 from autotrade.webui import issues
+from autotrade.webui import skill_feedback as skill_projection
 from autotrade.webui.server import create_app
 
 from .test_operating_memory import (
@@ -47,6 +56,7 @@ from .test_operating_memory import (
     _repo_with_library,
     _workspace,
 )
+from .test_skill_feedback import _filed
 
 SESSION_KEY = "s1"
 
@@ -313,41 +323,7 @@ def test_the_listing_projects_labels_and_scrubs_host_paths(tmp_path: Path) -> No
         issues.issue_reports(experiments, limit=0)
 
 
-def test_an_unreadable_log_is_named_not_dropped(tmp_path: Path) -> None:
-    experiments = tmp_path / "experiments"
-    good = _console_experiment(experiments, "expA")
-    broken = _console_experiment(experiments, "expB")
-    _file_report(good)
-    issue_reports_path(broken).parent.mkdir(parents=True, exist_ok=True)
-    issue_reports_path(broken).write_text("not json\n", encoding="utf-8")
-    payload = issues.issue_reports(experiments)
-    assert [item["experiment_id"] for item in payload["reports"]] == ["expA"]
-    assert [item["experiment_id"] for item in payload["unreadable"]] == ["expB"]
-    assert "unreadable" in str(payload["unreadable"][0]["error"])
-
-
-def test_the_endpoint_serves_the_listing_read_only(tmp_path: Path) -> None:
-    experiments = tmp_path / "experiments"
-    directory = _console_experiment(experiments, "expA")
-    _file_report(directory)
-    client = TestClient(create_app(tmp_path, experiments))
-    payload = client.get("/api/issue-reports").json()
-    assert payload["total"] == 1
-    report = payload["reports"][0]
-    assert report["experiment_id"] == "expA"
-    assert report["category"] == "data"
-    assert report["summary"] and report["evidence"] and report["recorded_at"]
-    # The raw run id never crosses the HTTP boundary.
-    assert "run_raw" not in json.dumps(payload)
-    assert client.get("/api/issue-reports", params={"experiment_id": "expA"}).json()["total"] == 1
-    assert client.get("/api/issue-reports", params={"experiment_id": "missing"}).status_code == 404
-    assert client.get("/api/issue-reports", params={"limit": 0}).status_code == 422
-
-
 # ---- answering a report ----------------------------------------------------
-
-RESOLVE_SCRIPT = Path(__file__).resolve().parents[2] / "scripts/experiments/resolve_issue.py"
-
 
 def test_a_resolution_is_a_second_line_and_the_report_stays_as_filed(
     tmp_path: Path,
@@ -441,106 +417,166 @@ def test_the_reader_fails_fast_on_a_resolution_naming_no_report(
         read_issue_reports(path)
 
 
+# ---- both channels: the console page and the resolver ----------------------
+#
+# ``report_issue`` and ``skill_feedback`` share the log, the page and the
+# resolver (``feedback_log``, ``feedback_page``, ``resolve_feedback.py``); each
+# test below runs once per channel.
+
+RESOLVE_SCRIPT = Path(__file__).resolve().parents[2] / "scripts/experiments/resolve_feedback.py"
+
+
+@dataclass(frozen=True)
+class _Channel:
+    log: str  # the resolver's log argument
+    file: Callable[..., dict[str, object]]
+    path: Callable[[Path], Path]
+    read: Callable[[Path], list[dict[str, object]]]
+    resolve: Callable[..., dict[str, object]]
+    page: Callable[..., dict[str, object]]
+    endpoint: str
+    repaired: str  # the outcome that names a repair
+    label: str
+
+
+CHANNELS = [
+    pytest.param(
+        _Channel(
+            "issue", _file_report, issue_reports_path, read_issue_reports,
+            append_issue_resolution, issues.issue_reports, "/api/issue-reports",
+            "fixed", "issue report",
+        ),
+        id="issue",
+    ),
+    pytest.param(
+        _Channel(
+            "skill", _filed, skill_feedback_path, read_skill_feedback,
+            append_skill_feedback_resolution, skill_projection.skill_feedback,
+            "/api/skill-feedback", "skill_updated", "skill feedback",
+        ),
+        id="skill",
+    ),
+]
+
+
+@pytest.mark.parametrize("channel", CHANNELS)
+def test_an_unreadable_log_is_named_not_dropped(tmp_path: Path, channel: _Channel) -> None:
+    experiments = tmp_path / "experiments"
+    good = _console_experiment(experiments, "expA")
+    broken = _console_experiment(experiments, "expB")
+    channel.file(good)
+    channel.path(broken).parent.mkdir(parents=True, exist_ok=True)
+    channel.path(broken).write_text("not json\n", encoding="utf-8")
+    payload = channel.page(experiments)
+    assert [item["experiment_id"] for item in payload["reports"]] == ["expA"]
+    assert [item["experiment_id"] for item in payload["unreadable"]] == ["expB"]
+    error = str(payload["unreadable"][0]["error"])
+    assert "unreadable" in error and str(tmp_path) not in error
+
+
+@pytest.mark.parametrize("channel", CHANNELS)
 def test_resolved_reports_leave_the_default_page_and_come_back_on_request(
-    tmp_path: Path,
+    tmp_path: Path, channel: _Channel
 ) -> None:
     experiments = tmp_path / "experiments"
     directory = _console_experiment(experiments, "expA")
-    _file_report(directory, report_id="issue_open", summary="未处置的一条。")
-    _file_report(directory, report_id="issue_done", summary="已处置的一条。")
-    append_issue_resolution(
-        issue_reports_path(directory),
-        report_id="issue_done",
-        outcome="not_a_defect",
-        note="按设计：244 是固定年化常数，窗口长度不是年化因子。",
+    channel.file(directory, report_id="report_open")
+    channel.file(directory, report_id="report_done")
+    channel.resolve(
+        channel.path(directory),
+        report_id="report_done",
+        outcome=channel.repaired,
+        note="commit 10e541f：按工具上限改写。",
     )
-    default = issues.issue_reports(experiments)
-    assert [item["report_id"] for item in default["reports"]] == ["issue_open"]
+    default = channel.page(experiments)
+    assert [item["report_id"] for item in default["reports"]] == ["report_open"]
     assert default["total"] == 1 and default["resolved"] == 1
     assert default["reports"][0]["outcome"] == ""
-    full = issues.issue_reports(experiments, include_resolved=True)
+    full = channel.page(experiments, include_resolved=True)
     assert full["total"] == 2 and full["resolved"] == 1
-    done = next(item for item in full["reports"] if item["report_id"] == "issue_done")
-    assert done["outcome"] == "not_a_defect"
-    assert str(done["resolution"]).startswith("按设计")
+    done = next(item for item in full["reports"] if item["report_id"] == "report_done")
+    assert done["outcome"] == channel.repaired
+    assert str(done["resolution"]).startswith("commit 10e541f")
     assert done["resolved_at"]
 
 
-def test_the_endpoint_serves_the_resolution_the_page_reads_and_takes_no_writes(
-    tmp_path: Path,
-) -> None:
+@pytest.mark.parametrize("channel", CHANNELS)
+def test_the_endpoint_serves_the_page_read_only(tmp_path: Path, channel: _Channel) -> None:
     experiments = tmp_path / "experiments"
     directory = _console_experiment(experiments, "expA")
-    _file_report(directory, report_id="issue_done")
-    append_issue_resolution(
-        issue_reports_path(directory),
-        report_id="issue_done",
+    channel.file(directory, report_id="report_open")
+    channel.file(directory, report_id="report_done")
+    channel.resolve(
+        channel.path(directory),
+        report_id="report_done",
         outcome="accepted_limitation",
         note="合同如此，代价与影响都已记录。",
     )
     client = TestClient(create_app(tmp_path, experiments))
-    default = client.get("/api/issue-reports").json()
-    assert default["reports"] == [] and default["total"] == 0
-    assert default["resolved"] == 1
-    payload = client.get(
-        "/api/issue-reports", params={"include_resolved": "true"}
-    ).json()
-    report = payload["reports"][0]
-    assert report["outcome"] == "accepted_limitation"
-    assert report["resolution"].startswith("合同如此")
-    assert report["resolved_at"]
+    payload = client.get(channel.endpoint).json()
+    assert payload["total"] == 1 and payload["resolved"] == 1
+    [report] = payload["reports"]
+    assert report["experiment_id"] == "expA" and report["report_id"] == "report_open"
+    assert report["evidence"] and report["recorded_at"]
+    # The raw run id never crosses the HTTP boundary.
+    assert "run_raw" not in json.dumps(payload, ensure_ascii=False)
+    full = client.get(channel.endpoint, params={"include_resolved": "true"}).json()
+    done = next(item for item in full["reports"] if item["report_id"] == "report_done")
+    assert done["outcome"] == "accepted_limitation"
+    assert done["resolution"].startswith("合同如此") and done["resolved_at"]
+    assert client.get(channel.endpoint, params={"experiment_id": "expA"}).json()["total"] == 1
+    assert client.get(channel.endpoint, params={"experiment_id": "missing"}).status_code == 404
+    assert client.get(channel.endpoint, params={"limit": 0}).status_code == 422
     # The console reads; only the shell writes.
-    assert client.post("/api/issue-reports", json={}).status_code in (404, 405)
+    assert client.post(channel.endpoint, json={}).status_code in (404, 405)
 
 
-def test_the_cli_records_a_resolution_and_refuses_the_rest(tmp_path: Path) -> None:
+@pytest.mark.parametrize("channel", CHANNELS)
+def test_the_cli_records_a_resolution_and_refuses_the_rest(
+    tmp_path: Path, channel: _Channel
+) -> None:
     """The researcher's only entry point, run the way it is documented."""
 
     experiments = tmp_path / "experiments"
     directory = _console_experiment(experiments, "expA")
-    _file_report(directory, report_id="issue_cli")
+    channel.file(directory, report_id="report_cli")
 
-    def resolve(*arguments: str) -> subprocess.CompletedProcess[str]:
+    def resolve(
+        report: str, outcome: str, note: str, experiment: str = "expA"
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
                 sys.executable,
                 str(RESOLVE_SCRIPT),
+                channel.log,
                 "--experiments-root",
                 str(experiments),
-                *arguments,
+                "--experiment", experiment,
+                "--report", report,
+                "--outcome", outcome,
+                "--note", note,
             ],
             capture_output=True,
             text=True,
             check=False,
         )
 
-    recorded = resolve(
-        "--experiment", "expA",
-        "--report", "issue_cli",
-        "--outcome", "fixed",
-        "--note", "commit 10e541f：Test figure 检查改为整词匹配。",
-    )
+    recorded = resolve("report_cli", channel.repaired, "commit 10e541f：整词匹配。")
     assert recorded.returncode == 0, recorded.stderr
-    assert json.loads(recorded.stdout)["outcome"] == "fixed"
-    [report] = read_issue_reports(issue_reports_path(directory))
-    assert report["outcome"] == "fixed"
+    assert json.loads(recorded.stdout)["outcome"] == channel.repaired
+    [report] = channel.read(channel.path(directory))
+    assert report["outcome"] == channel.repaired
     assert str(report["resolution"]).startswith("commit 10e541f")
 
-    again = resolve(
-        "--experiment", "expA", "--report", "issue_cli",
-        "--outcome", "fixed", "--note", "重复一次。",
-    )
+    again = resolve("report_cli", "not_a_defect", "重复一次。")
     assert again.returncode == 2 and "already resolved" in again.stderr
-    ghost = resolve(
-        "--experiment", "expA", "--report", "issue_nope",
-        "--outcome", "fixed", "--note", "不存在的报告。",
-    )
-    assert ghost.returncode == 2 and "unknown issue report" in ghost.stderr
-    elsewhere = resolve(
-        "--experiment", "expZ", "--report", "issue_cli",
-        "--outcome", "fixed", "--note", "不存在的实验。",
-    )
+    ghost = resolve("report_nope", "not_a_defect", "不存在的报告。")
+    assert ghost.returncode == 2 and f"unknown {channel.label}" in ghost.stderr
+    elsewhere = resolve("report_cli", "not_a_defect", "不存在的实验。", experiment="expZ")
     assert elsewhere.returncode == 2 and "unknown experiment" in elsewhere.stderr
+    # Each log keeps its own vocabulary: the other log's repair is refused.
+    other = "skill_updated" if channel.repaired == "fixed" else "fixed"
+    foreign = resolve("report_cli", other, "别的账本的结论。")
+    assert foreign.returncode == 2 and "outcome must be one of" in foreign.stderr
     # Only the one accepted resolution reached the log.
-    assert len(issue_reports_path(directory).read_text(encoding="utf-8").splitlines()) == 2
-
+    assert len(channel.path(directory).read_text(encoding="utf-8").splitlines()) == 2

@@ -6335,7 +6335,7 @@ function memorySection(title, note, ...panels) {
 const FEEDBACK_CHANNELS = {
   issue: {
     title: "问题反馈",
-    note: "处置：scripts/experiments/resolve_issue.py",
+    note: "处置：scripts/experiments/resolve_feedback.py issue",
     path: "/api/issue-reports",
     loading: "加载问题反馈…",
     empty: "会话没有报告过问题",
@@ -6343,7 +6343,7 @@ const FEEDBACK_CHANNELS = {
   },
   skill: {
     title: "技能反馈",
-    note: "处置：scripts/experiments/resolve_skill_feedback.py",
+    note: "处置：scripts/experiments/resolve_feedback.py skill",
     path: "/api/skill-feedback",
     loading: "加载技能反馈…",
     empty: "会话没有反驳过挂载条目",

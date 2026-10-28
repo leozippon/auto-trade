@@ -16,12 +16,9 @@ projected for the console and never read back by any session.
 from __future__ import annotations
 
 import json
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
 
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import RunManifest, append_versioned_jsonl
@@ -32,20 +29,15 @@ from autotrade.environment.tools.skill_feedback import (
     SKILL_CLAIMS,
     SKILL_FEEDBACK_SCHEMA_VERSION,
     SkillFeedbackTool,
-    append_skill_feedback_resolution,
     read_skill_feedback,
     skill_feedback_path,
 )
 from autotrade.pipelines.skills import MemorySource, mounted_skill_refs
 from autotrade.webui import skill_feedback as projection
-from autotrade.webui.server import create_app
 
 SESSION_KEY = "research"
 CURATED = "curated/grid-plateau-selection"
 GRADUATED = "momentum_20260101/same-window-parent-control"
-RESOLVE_SCRIPT = (
-    Path(__file__).resolve().parents[2] / "scripts/experiments/resolve_skill_feedback.py"
-)
 # A real report: what was tried, what the reading was, what it contradicts.
 EVIDENCE = (
     "条目要求单参数网格不超过四点；本会话把 5 点网格一次提交 batch_validate（node_7f3a），"
@@ -326,121 +318,14 @@ def test_the_listing_splits_the_reference_labels_the_session_and_scrubs_paths(
         )
 
 
-def test_an_unreadable_log_is_named_not_dropped(tmp_path: Path) -> None:
+def test_a_claim_no_code_can_label_is_named_unreadable(tmp_path: Path) -> None:
+    """A line that passed the version gate but carries a claim no code can
+    label is corruption, and is named rather than guessed at. The rest of the
+    page and the resolver are shared with ``report_issue`` and tested there on
+    both channels."""
+
     experiments = tmp_path / "experiments"
-    good = _console_experiment(experiments, "expA")
-    broken = _console_experiment(experiments, "expB")
-    corrupt = _console_experiment(experiments, "expC")
-    _filed(good)
-    skill_feedback_path(broken).parent.mkdir(parents=True, exist_ok=True)
-    skill_feedback_path(broken).write_text("not json\n", encoding="utf-8")
-    # A line that passed the version gate but carries a claim no code can label
-    # is corruption too, and is named rather than guessed at.
-    _filed(corrupt, claim="confirmed")
+    _filed(_console_experiment(experiments, "expA"), claim="confirmed")
     payload = projection.skill_feedback(experiments)
-    assert [item["experiment_id"] for item in payload["reports"]] == ["expA"]
-    named = {str(item["experiment_id"]) for item in payload["unreadable"]}
-    assert named == {"expB", "expC"}
-    assert "unreadable" in str(payload["unreadable"][0]["error"])
-    assert str(tmp_path) not in str(payload["unreadable"][0]["error"])
-
-
-def test_resolved_reports_leave_the_default_page_and_come_back_on_request(
-    tmp_path: Path,
-) -> None:
-    experiments = tmp_path / "experiments"
-    directory = _console_experiment(experiments, "expA")
-    _filed(directory, report_id="skillfb_open")
-    _filed(directory, report_id="skillfb_done", skill=GRADUATED, origin="graduated")
-    append_skill_feedback_resolution(
-        skill_feedback_path(directory),
-        report_id="skillfb_done",
-        outcome="skill_updated",
-        note="commit 10e541f：条目改写为按工具上限说明网格点数。",
-    )
-    default = projection.skill_feedback(experiments)
-    assert [item["report_id"] for item in default["reports"]] == ["skillfb_open"]
-    assert default["total"] == 1 and default["resolved"] == 1
-    full = projection.skill_feedback(experiments, include_resolved=True)
-    assert full["total"] == 2 and full["resolved"] == 1
-    done = next(item for item in full["reports"] if item["report_id"] == "skillfb_done")
-    assert done["outcome"] == "skill_updated"
-    assert str(done["resolution"]).startswith("commit 10e541f")
-    assert done["resolved_at"]
-
-
-def test_the_endpoint_serves_the_listing_read_only(tmp_path: Path) -> None:
-    experiments = tmp_path / "experiments"
-    directory = _console_experiment(experiments, "expA")
-    _filed(directory)
-    client = TestClient(create_app(tmp_path, experiments))
-    payload = client.get("/api/skill-feedback").json()
-    assert payload["total"] == 1 and payload["resolved"] == 0
-    assert payload["limit"] == projection.MAX_SKILL_FEEDBACK_PAGE
-    report = payload["reports"][0]
-    assert report["experiment_id"] == "expA"
-    assert report["claim"] == "outdated"
-    assert report["skill"] == CURATED and report["name"] == "grid-plateau-selection"
-    assert report["origin"] == "curated" and report["evidence"]
-    # The raw run id never crosses the HTTP boundary.
-    assert "run_raw" not in json.dumps(payload, ensure_ascii=False)
-    assert client.get("/api/skill-feedback", params={"limit": 0}).status_code == 422
-    assert client.get(
-        "/api/skill-feedback", params={"experiment_id": "nope"}
-    ).status_code == 404
-    # The console reads; only the shell writes.
-    assert client.post("/api/skill-feedback", json={}).status_code in (404, 405)
-
-
-# ---- the researcher's answer -----------------------------------------------
-
-
-def test_the_cli_records_a_resolution_and_refuses_the_rest(tmp_path: Path) -> None:
-    experiments = tmp_path / "experiments"
-    directory = _console_experiment(experiments, "expA")
-    _filed(directory, report_id="skillfb_cli")
-
-    def resolve(*arguments: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            [
-                sys.executable,
-                str(RESOLVE_SCRIPT),
-                "--experiments-root",
-                str(experiments),
-                *arguments,
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-
-    recorded = resolve(
-        "--experiment", "expA",
-        "--report", "skillfb_cli",
-        "--outcome", "skill_updated",
-        "--note", "commit 10e541f：精选库条目已改写。",
-    )
-    assert recorded.returncode == 0, recorded.stderr
-    assert json.loads(recorded.stdout)["outcome"] == "skill_updated"
-    [report] = read_skill_feedback(skill_feedback_path(directory))
-    assert report["outcome"] == "skill_updated"
-    assert str(report["resolution"]).startswith("commit 10e541f")
-
-    again = resolve(
-        "--experiment", "expA", "--report", "skillfb_cli",
-        "--outcome", "not_a_defect", "--note", "重复一次。",
-    )
-    assert again.returncode == 2 and "already resolved" in again.stderr
-    ghost = resolve(
-        "--experiment", "expA", "--report", "skillfb_nope",
-        "--outcome", "not_a_defect", "--note", "不存在的报告。",
-    )
-    assert ghost.returncode == 2 and "unknown skill feedback" in ghost.stderr
-    elsewhere = resolve(
-        "--experiment", "expZ", "--report", "skillfb_cli",
-        "--outcome", "not_a_defect", "--note", "不存在的实验。",
-    )
-    assert elsewhere.returncode == 2 and "unknown experiment" in elsewhere.stderr
-    # Only the one accepted resolution reached the log.
-    text = skill_feedback_path(directory).read_text(encoding="utf-8")
-    assert len(text.splitlines()) == 2
+    assert payload["reports"] == []
+    assert [item["experiment_id"] for item in payload["unreadable"]] == ["expA"]

@@ -735,7 +735,8 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         """Agent-filed issue reports across experiments, newest first, resolved
         ones only when asked for. Read-only: a report and its resolution are
         append-only operator telemetry, and the resolution is recorded from the
-        shell (``scripts/experiments/resolve_issue.py``), never from a browser."""
+        shell (``scripts/experiments/resolve_feedback.py issue``), never from a
+        browser."""
 
         if experiment_id is not None:
             _experiment_dir(experiment_id)
@@ -760,7 +761,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         ones only when asked for. Read-only on the same terms as the issue
         reports: the report and its resolution are append-only operator
         telemetry, and the resolution is recorded from the shell
-        (``scripts/experiments/resolve_skill_feedback.py``), never from a
+        (``scripts/experiments/resolve_feedback.py skill``), never from a
         browser."""
 
         if experiment_id is not None:

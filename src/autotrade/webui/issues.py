@@ -8,8 +8,8 @@ every other projection, Agent-authored text leaves the host through
 :class:`PublicIdentity`, and an experiment whose log cannot be read is named
 rather than silently dropped.
 
-A report the researcher has answered (``scripts/experiments/resolve_issue.py``
-appends the resolution line) carries its outcome and note here; the listing
+A report the researcher has answered (``scripts/experiments/resolve_feedback.py
+issue`` appends the resolution line) carries its outcome and note here; the listing
 itself follows the one rule in :mod:`autotrade.webui.feedback_page`.
 """
 
