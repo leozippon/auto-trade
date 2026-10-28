@@ -76,11 +76,8 @@ SUBAGENT_THINKING_LEVELS = ("off", "low", "medium", "xhigh")
 # was low on the wire, high and max were xhigh.
 _LEGACY_THINKING_ALIASES = {"minimal": "low", "high": "xhigh", "max": "xhigh"}
 # Children a parent may run at once; the rest queue in the same pool.
-# Six because the cap, not the model gateway, was the binding constraint:
-# realized sub-agent concurrency was 1.47x against a cap of 4 while the
-# gateway's measured soft knee is 16-20 streams across all arms. Several
-# writable children may run together as long as each writes only its own
-# task path; the shared call-budget share is unchanged, so a wider round
+# Several writable children may run together as long as each writes only its
+# own task path; the shared call-budget share is unchanged, so a wider round
 # spends the same quota sooner rather than more of it.
 DEFAULT_SUBAGENT_MAX_CONCURRENT = 6
 # Global default child turn budget (the last tier of the launch precedence:

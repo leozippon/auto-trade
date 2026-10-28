@@ -61,9 +61,10 @@ DEEPSEEK_FLASH_MODEL = "DeepSeek-V4.1-Flash"
 # (relay model id, request dialect, context window, max output tokens, list
 # prices). Every relay id declares a 1M window, with the relay's own completion
 # ceilings; for the gpt-6 ids that is the project owner's figure (2026-10-14),
-# backed by the relay pricing a tier past 272k but not yet probed with such a
-# request, and gemini-4-argon's upstream refuses a maxOutputTokens above
-# 1,048,576 (probed 2026-10-26), more than the window, which bounds it instead.
+# backed by the relay pricing a tier past 272k but, as of that date, not probed
+# with such a request, and gemini-4-argon's upstream refuses a maxOutputTokens
+# above 1,048,576 (probed 2026-10-26), more than the window, which bounds it
+# instead.
 # Prices are USD per million uncached prompt / cached prompt / completion /
 # cache-write tokens from the relay's public
 # ``GET https://lightingtheword.com/api/pricing`` as of 2026-10-14, and
