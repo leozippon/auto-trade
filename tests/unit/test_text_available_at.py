@@ -49,9 +49,11 @@ class TextAvailableAtPlausibilityTest(unittest.TestCase):
 
     def test_repair_rewrites_only_changed_partitions(self):
         with tempfile.TemporaryDirectory() as tmp:
-            raw = Path(tmp)
+            # The lake keeps replaced partitions beside the raw root
+            # (``raw_versions``), so the root is a level below the directory.
+            raw = Path(tmp) / "raw"
             dataset_dir = raw / "anns_d"
-            dataset_dir.mkdir()
+            dataset_dir.mkdir(parents=True)
             stale = anns_frame([("20200110", "000001.SZ", "n", "t", "u", "2025-07-05 06:55:56")])
             stale["available_at"] = "2025-07-05 06:55:56"
             stale["available_at_rule"] = "source:rec_time"
@@ -63,6 +65,8 @@ class TextAvailableAtPlausibilityTest(unittest.TestCase):
             self.assertEqual(stats["rows_changed"], 1)
             repaired = pd.read_parquet(dataset_dir / "month=202001.parquet")
             self.assertEqual(repaired.loc[0, "available_at"], "2020-01-10 23:59:59+08:00")
+            # The rewrite is a restatement: the replaced partition is kept.
+            self.assertEqual(len(list((Path(tmp) / "raw_versions").rglob("*-superseded.parquet"))), 1)
             again = core.repair_text_available_at(str(raw), ["anns_d"])
             self.assertEqual(again["files_rewritten"], 0)
 
