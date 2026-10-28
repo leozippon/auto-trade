@@ -2091,67 +2091,30 @@ def test_the_host_gpu_name_setting_moves_every_selection_to_that_model(
     assert SandboxSpec().gpu_name_filter == "L20"
 
 
-def _nvidia_smi(indices) -> Mock:
-    """A ``subprocess.run`` reporting the idle L20 cards ``indices``."""
+def _nvidia_smi(used: dict[int, int]) -> Mock:
+    """A ``subprocess.run`` reporting L20 cards, ``index -> memory used (MiB)``."""
 
-    rows = "".join(f"{index}, NVIDIA L20, 0, 46068, 46068, 0, 30\n" for index in indices)
+    rows = "".join(f"{index}, NVIDIA L20, {mib}, {46068 - mib}, 46068, 0, 30\n" for index, mib in used.items())
     return Mock(return_value=subprocess.CompletedProcess([], 0, stdout=rows, stderr=""))
 
 
-def test_the_host_card_allow_list_keeps_every_other_card_out_of_every_selection(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    """A shared host lists the cards this project may take in its .env; the
-    others are never read, so neither a start, a sharing Paper run nor the
-    console's free cards ever offer one however idle it is. The environment
-    overrides the file, and a host that lists nothing keeps every card."""
+def test_every_reported_card_is_a_candidate_and_a_card_in_use_is_passed_over(tmp_path: Path):
+    """No list of cards: every card nvidia-smi reports is a candidate. On a
+    host shared with other tenants a card somebody holds memory on -- 30 GB
+    of a job, or one CUDA context above the idle threshold -- is passed over
+    for an idle one by a start and the console's free cards; only a caller
+    that opts into sharing takes one, by the free-memory rule."""
 
     from autotrade.environment import gpu
 
-    env_file = tmp_path / ".env"
-    env_file.write_text("OTHER=1\nAUTOTRADE_GPU_ALLOW= 4, 5,7\n", encoding="utf-8")
-    monkeypatch.setattr(gpu, "HOST_ENV_FILE", env_file)
-    monkeypatch.delenv("AUTOTRADE_GPU_ALLOW", raising=False)
     root = tmp_path / "experiments"
-    with patch("autotrade.environment.gpu.subprocess.run", _nvidia_smi(range(8))):
-        assert gpu.allowed_gpus() == frozenset({4, 5, 7})
-        assert [row["index"] for row in gpu.list_gpus()] == [4, 5, 7]
-        assert gpu.shareable_gpus() == [4, 5, 7]
-        assert free_gpus(root, require_name="L20") == [4, 5, 7]
-        assert select_gpus(root, 2, require_name="L20") == [4, 5]
-        with pytest.raises(GpuUnavailableError, match=r"requested 4 GPU\(s\), 3 free \(4, 5, 7\)"):
-            select_gpus(root, 4, require_name="L20", allow_shared=True)
-        monkeypatch.setenv("AUTOTRADE_GPU_ALLOW", "3")
-        assert gpu.idle_gpus() == [3]
-        monkeypatch.delenv("AUTOTRADE_GPU_ALLOW")
-        env_file.unlink()
-        assert gpu.allowed_gpus() is None
-        assert gpu.idle_gpus() == list(range(8))
-
-
-def test_a_malformed_or_absent_card_in_the_allow_list_refuses_every_selection(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    """Neither a value that is not a list of indices nor a card the host does
-    not have falls back to allowing every card: every selection refuses, and
-    a malformed value is refused before nvidia-smi is asked."""
-
-    from autotrade.environment import gpu
-
-    monkeypatch.setattr(gpu, "HOST_ENV_FILE", tmp_path / "absent.env")
-    for value in ("0,,1", "0;1", "1,", "-1", "0-2", "gpu0", "4 5"):
-        monkeypatch.setenv("AUTOTRADE_GPU_ALLOW", value)
-        with (
-            patch("autotrade.environment.gpu.subprocess.run", side_effect=AssertionError("probed")),
-            pytest.raises(GpuUnavailableError, match="AUTOTRADE_GPU_ALLOW=.* is not a comma-separated list"),
-        ):
-            select_gpus(tmp_path, 1, allow_shared=True)
-    monkeypatch.setenv("AUTOTRADE_GPU_ALLOW", "4,8,9")
-    with (
-        patch("autotrade.environment.gpu.subprocess.run", _nvidia_smi(range(8))),
-        pytest.raises(GpuUnavailableError, match=r"names card\(s\) 8, 9 this host does not have"),
-    ):
-        select_gpus(tmp_path, 1)
+    with patch("autotrade.environment.gpu.subprocess.run", _nvidia_smi({0: 30_000, 1: 0, 2: 300, 3: 0})):
+        assert [row["index"] for row in gpu.list_gpus()] == [0, 1, 2, 3]
+        assert free_gpus(root, require_name="L20") == [1, 3]
+        assert select_gpus(root, 2, require_name="L20") == [1, 3]
+        with pytest.raises(GpuUnavailableError, match=r"requested 3 GPU\(s\), 2 free \(1, 3\)"):
+            select_gpus(root, 3, require_name="L20")
+        assert select_gpus(root, 3, require_name="L20", allow_shared=True) == [1, 3, 2]
 
 
 def test_idle_gpus_never_offers_a_card_anyone_holds_memory_on():
