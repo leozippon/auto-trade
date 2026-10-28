@@ -93,6 +93,7 @@
       "end_date_offset_days": 1,
       "event_flow_end_extra_offset_days": 1,
       "fail_fast": false,
+      "lock_wait_seconds": 10800,
       "skip_if_already_ok": true
     },
     "cn_nightly_text_full": {
@@ -177,6 +178,7 @@
       "description": "Refresh text_evidence_status.json every calendar day over the natural-day window the text job has landed. Sole producer of that status file: the trading-day full audit cannot cover a domain whose partitions appear on days it never runs.",
       "operation": "audit_text",
       "end_date_offset_days": 1,
+      "lock_wait_seconds": 10800,
       "skip_if_already_ok": true
     },
     "cn_weekly_deep_audit": {
@@ -221,7 +223,7 @@
       "end_date_offset_days": 1,
       "end_date_mode": "sse_open_on_or_before",
       "extra_args": [],
-      "lock_wait_seconds": 1800,
+      "lock_wait_seconds": 10800,
       "skip_if_already_ok": true
     },
     "cn_nightly_pit_event_build": {
@@ -232,7 +234,7 @@
       "end_date_mode": "sse_open_on_or_before",
       "fundamental_events_root": "data/pit/fundamental_events",
       "fundamental_events_status": "results/data_quality/fundamental_events_status.json",
-      "lock_wait_seconds": 1800,
+      "lock_wait_seconds": 10800,
       "skip_if_already_ok": true
     },
     "cn_preopen_board_backfill_0850": {
@@ -429,7 +431,7 @@
       "end_date_offset_days": 1,
       "end_date_mode": "sse_open_on_or_before",
       "start_date_lookback_days": 30,
-      "lock_wait_seconds": 1800,
+      "lock_wait_seconds": 10800,
       "skip_if_already_ok": true
     },
     "manual_event_available_at_repair": {
