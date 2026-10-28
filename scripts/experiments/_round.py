@@ -670,6 +670,15 @@ RETIRED_IDS: frozenset[str] = frozenset(
         # 20261025b replaces them.
         "open_lm_100k_8y_opus_zgca_20261025",
         "open_lm_100k_8y_sol_zgca_20261025",
+        # Every arm of rounds 20261025b, 20261027b and 20261027c on the A100
+        # instance, whose files left the tree on 2026-10-28. All ended (the
+        # opus arm no_deliverable on 10-26, the sol arms no_edge, the argon
+        # arm rejected); their instance directories were deleted on 10-28,
+        # and the copies synced here stay on disk.
+        "retrieval_100k_8y_argon_zgca_20261027c",
+        "retrieval_100k_8y_opus_zgca_20261025b",
+        "retrieval_100k_8y_sol_zgca_20261025b",
+        "retrieval_100k_8y_sol_zgca_20261027b",
     }
 )
 

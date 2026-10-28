@@ -79,6 +79,9 @@ ARMS: dict[str, dict[str, object]] = {
     },
 }
 
+# The arm has been created and has ended, so the round is closed: its
+# directory on the instance was deleted on 2026-10-28, and a fill would read
+# it as pending.
 ROUND = Round(
     arms=ARMS,
     pit_views_seed=FUND_TITLE_PIT_VIEWS_SEED,
@@ -92,6 +95,7 @@ ROUND = Round(
         "batch_validate_max_concurrency": 6,
         "reasoning_effort": "xhigh",
     },
+    closed=True,
 )
 
 

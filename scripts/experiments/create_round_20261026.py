@@ -101,6 +101,9 @@ ARMS["retrieval_100k_8y_astra_zgca_20261026"] = {
     "gpu_count": 1,
 }
 
+# Every arm has been created, so the round is closed: the instance arm's
+# directory was deleted there on 2026-10-28, and a fill would read it as
+# pending. A rerun of the Fable arm is a new id in a new round file.
 ROUND = Round(
     arms=ARMS,
     pit_views_seed=FUND_TITLE_PIT_VIEWS_SEED,
@@ -112,6 +115,7 @@ ROUND = Round(
         "gpu_count": 2,
         "reasoning_effort": "xhigh",
     },
+    closed=True,
 )
 
 

@@ -2,16 +2,15 @@
 
 What must hold. The pack is its README and the record of closed families,
 nothing a session would start from: no starter, so the session's `output/`
-begins as the contract template, and no rules file. The round's directive is
-the README's direction paragraph word for word, so the direction reaches the
-Agent in one wording, and nothing before the facts names a model, so neither
-copy steers the session to one; round 20261026's directive starts with the
-same paragraph and adds only its call to explore, which names no model
-either, and its astra arm on the A100 instance sends what the local astra arm
-sent but for one card instead of two. Rounds 20261027 and 20261027b send
-round 20261026's directive plus one sentence pointing at the record of closed
-families, word for word alike and naming no model, on the instance's card at
-six replays per batch. After its facts the README ends with guidance on
+begins as the contract template, and no rules file. Nothing before the facts
+names a model, so the README does not steer the session to one. Round
+20261026's directive starts with the README's direction paragraph word for
+word, so the direction reaches the Agent in one wording, and adds only its
+call to explore, which names no model either; its astra arm on the A100
+instance sends what the local astra arm sent but for one card instead of two.
+Round 20261027 sends round 20261026's directive plus one sentence pointing at
+the record of closed families, naming no model, on the instance's card at six
+replays per batch. After its facts the README ends with guidance on
 compute, models and controls that the session is free to ignore and the
 system prompt no longer carries. No pack file cites a reading after the
 research period.
@@ -23,14 +22,9 @@ from pathlib import Path
 
 from autotrade.agent.prompts import PROTOCOL_INSTRUCTION
 from autotrade.environment.llm import MODEL_CHOICES
-from scripts.experiments import (
-    create_round_20261026,
-    create_round_20261027,
-    create_round_20261027b,
-    create_round_20261027c,
-)
-from scripts.experiments.create_round_20261025b import DIRECTIVE, PACK
+from scripts.experiments import create_round_20261026, create_round_20261027
 
+PACK = "configs/workspace_refs/retrieval_100k_8y_20261025b"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PACK_DIR = REPO_ROOT / PACK
 # How a reading after the research period is quoted; the other pack tests
@@ -49,9 +43,8 @@ def _head_and_direction() -> tuple[str, str]:
     return head, head.split("\n## 方向\n\n", 1)[1].split("\n\n", 1)[0]
 
 
-def test_the_directive_is_the_packs_direction_and_names_no_model() -> None:
-    head, direction = _head_and_direction()
-    assert direction == DIRECTIVE
+def test_nothing_before_the_facts_names_a_model() -> None:
+    head, _ = _head_and_direction()
     assert "Qwen" not in head
 
 
@@ -83,29 +76,21 @@ def test_round_20261026_moves_astra_to_the_instance_unchanged_but_for_one_card()
     }
 
 
-def test_rounds_20261027_add_the_closed_families_and_name_no_model() -> None:
+def test_round_20261027_adds_the_closed_families_and_names_no_model() -> None:
     directive = create_round_20261027.DIRECTIVE
-    assert create_round_20261027b.DIRECTIVE == create_round_20261027c.DIRECTIVE == directive
     extra = directive.removeprefix(create_round_20261026.DIRECTIVE)
     assert extra != directive and "`refs/families.md`" in extra
     for name in (*MODEL_CHOICES, "Qwen", "gemini", "gpt", "claude", "DeepSeek"):
         assert name.lower() not in directive.lower(), name
-    # Round 20261027c is round 20261027's arm under another id, nothing else.
-    (argon,), (again,) = create_round_20261027.ARMS, create_round_20261027c.ARMS
-    assert again == f"{argon}c"
-    assert {**create_round_20261027c.ROUND.request_params(again), "experiment_id": argon} == (
-        create_round_20261027.ROUND.request_params(argon)
-    )
-    for module in (create_round_20261027, create_round_20261027b, create_round_20261027c):
-        for arm in module.ARMS:
-            params = module.ROUND.request_params(arm)
-            assert (
-                params["workspace_reference"],
-                params["research_directive"],
-                params["llm_key"],
-                params["gpu_count"],
-                params["batch_validate_max_concurrency"],
-            ) == (PACK, directive, "primary", 1, 6)
+    for arm in create_round_20261027.ARMS:
+        params = create_round_20261027.ROUND.request_params(arm)
+        assert (
+            params["workspace_reference"],
+            params["research_directive"],
+            params["llm_key"],
+            params["gpu_count"],
+            params["batch_validate_max_concurrency"],
+        ) == (PACK, directive, "primary", 1, 6)
 
 
 def test_the_readme_ends_with_guidance_the_session_may_ignore() -> None:
