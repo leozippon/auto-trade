@@ -15,7 +15,8 @@ longer tracks, prepares the instance (ripgrep, venv, a sandbox image that runs
 on the instance's GPU driver), and last copies the pretrained-model store every
 new arm pins and mounts to the instance's own disk, or refuses when it does
 not fit there; push carries arms of this host a round names as lineage; a run
-starts the console and a round launcher in tmux with AUTOTRADE_GPU_NAME set,
+starts the console (restarting it onto the deployed checkout when no arm
+runs) and a round launcher in tmux with AUTOTRADE_GPU_NAME set,
 and repeats a `--fill` launcher every ten minutes in a session of its own
 until its round has nothing pending; status and sync read and copy back.
 ZGCA_REMOTE_ROOT moves all of it to another root on the instance's personal
@@ -497,7 +498,7 @@ def main(
     deploy.add_argument("seed", help="PIT view seed directory, relative to the repository (data/pit_views_seed_...)")
     push = commands.add_parser("push", help="copy arms of this host to the instance (lineage of an arm created there)")
     push.add_argument("arms", nargs="+", metavar="arm", help="experiment id")
-    run = commands.add_parser("run", help="start the console if needed and a round launcher in tmux; --fill repeats it until nothing is pending")
+    run = commands.add_parser("run", help="start the console, or restart it when no arm runs, then a round launcher in tmux; --fill repeats it until nothing is pending")
     run.add_argument("round_file", help="scripts/experiments/create_round_*.py")
     run.add_argument("args", nargs=argparse.REMAINDER, help="launcher arguments after the port (--dry-run, --fill, arm ids)")
     commands.add_parser("status", help="instance, card-hours, GPU, disk, tmux, console, arms, image, round log")

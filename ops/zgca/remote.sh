@@ -242,13 +242,34 @@ prepare() {
     gpu_check
 }
 
+# The console in tmux session CONSOLE_SESSION, answering /api/health. A console
+# serves the code it was started with, and `run` comes here before every
+# launcher, so with no arm running an existing console is restarted onto the
+# checkout the last deploy shipped before any arm is created: one left from
+# before a deploy validated creations against the old parameter schema and
+# refused them. While arms run it is kept, on the code it was started with.
 console_up() {
     cd "$ROOT"
     require_venv
-    if ! tmux has-session -t "$CONSOLE_SESSION" 2>/dev/null; then
+    local started="console started in tmux session $CONSOLE_SESSION (logs/webui/console.log)" running
+    if tmux has-session -t "$CONSOLE_SESSION" 2>/dev/null; then
+        running=$(running_arms | tr '\n' ' ')
+        if [ -n "$running" ]; then
+            started=""
+            echo "console kept: arms are running (${running% }), so it serves the code it was started with until they end"
+        else
+            tmux kill-session -t "$CONSOLE_SESSION"
+            # The old process must let go of the port first, or the health
+            # check below would read it instead of the new one.
+            for _ in $(seq 1 30); do health >/dev/null || break; sleep 1; done
+            ! health >/dev/null || die "the console killed in tmux session $CONSOLE_SESSION still answers at $HEALTH"
+            started="console restarted on the current checkout in tmux session $CONSOLE_SESSION (no arm running)"
+        fi
+    fi
+    if [ -n "$started" ]; then
         tmux new-session -d -s "$CONSOLE_SESSION" -c "$ROOT" \
             "AUTOTRADE_GPU_NAME=$GPU_NAME exec $VENV/bin/python -B scripts/webui/run_webui.py --host 127.0.0.1 --port $PORT >>logs/webui/console.log 2>&1"
-        echo "console started in tmux session $CONSOLE_SESSION (logs/webui/console.log)"
+        echo "$started"
     fi
     local record
     for _ in $(seq 1 30); do

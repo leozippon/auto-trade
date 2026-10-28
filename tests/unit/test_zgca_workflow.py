@@ -762,6 +762,47 @@ class ZgcaWorkflowTest(unittest.TestCase):
                 self.assertEqual(log.read_text(encoding="utf-8").splitlines(), [step.split("|", 1)[1] for step in plan] + [ending])
                 self.assertEqual((temp / "slept").read_text(encoding="utf-8").split(), ["600"] * (len(plan) - 1))
 
+    def test_console_up_restarts_an_idle_console_onto_the_checkout_and_keeps_a_busy_one(self) -> None:
+        """A console serves the code it was started with: with no arm running an
+        existing one is killed, its port let go and a new one started before any
+        arm is created; with arms running it is kept. Run for real against a
+        temporary root with tmux, sleep and the venv's python stubbed."""
+        temp = Path(self.temp.name)
+        root, stubs = temp / "instance", temp / "stubs"
+        for directory in (root / ".venv" / "bin", stubs):
+            directory.mkdir(parents=True)
+        scripts = {
+            # running_arms lists $ARMS; the health probe answers while $UP exists.
+            root / ".venv" / "bin" / "python": '#!/bin/sh\ncase "$2" in *running_arms*) cat "$ARMS" ;;\n'
+            '*) [ -f "$UP" ] || exit 1; echo "{}" ;; esac\n',
+            # has-session answers $HAS; killing a session takes the console down, a new one brings it up.
+            stubs / "tmux": '#!/bin/sh\necho "$1" >>"$CALLS"\ncase "$1" in has-session) exit "$HAS" ;;\n'
+            'kill-session) rm -f "$UP" ;; new-session) touch "$UP" ;; esac\n',
+            stubs / "sleep": "#!/bin/sh\n",
+        }
+        for script, body in scripts.items():
+            script.write_text(body, encoding="utf-8")
+            script.chmod(0o700)
+        cases = (
+            ("1", "", "console started in tmux session autotrade-console", ["has-session", "new-session"]),
+            ("0", "", "console restarted on the current checkout", ["has-session", "kill-session", "new-session"]),
+            ("0", "arm_a\narm_b\n", "console kept: arms are running (arm_a arm_b)", ["has-session"]),
+        )
+        for has, arms, said, calls in cases:
+            with self.subTest(said=said):
+                (temp / "arms").write_text(arms, encoding="utf-8")
+                (temp / "calls").unlink(missing_ok=True)
+                (temp / "up").unlink(missing_ok=True)
+                if has == "0":  # an existing console answers
+                    (temp / "up").touch()
+                env = {**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}", "ZGCA_REMOTE_ROOT": str(root), "HAS": has,
+                       "ARMS": str(temp / "arms"), "UP": str(temp / "up"), "CALLS": str(temp / "calls")}
+                shown = subprocess.run(["bash", str(zgca.REMOTE_SCRIPT), "console-up"], env=env, capture_output=True, text=True, check=False)
+                self.assertEqual(shown.returncode, 0, shown.stderr)
+                self.assertIn(said, shown.stdout)
+                self.assertIn("console health: {}", shown.stdout)
+                self.assertEqual((temp / "calls").read_text(encoding="utf-8").split(), calls)
+
     def test_the_tools_must_exist_and_the_remote_script_rejects_unknown_steps(self) -> None:
         for name in ("zenith", "instance", "dev"):
             with self.subTest(tool=name):
