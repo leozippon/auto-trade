@@ -54,6 +54,14 @@ python scripts/webui/run_webui.py
 
 It listens on `127.0.0.1:38888` and refuses any non-loopback bind. Create an experiment from the homepage: its research, forward and Held-out dates, the models and the budgets. The console then spawns a detached worker process, and the experiment detail page shows live status, agent traces and validation results, the forward verdict once the replay has run, and the controls for pausing, stopping, restarting and injecting a message into the running session.
 
+A GPU arm is placed on a card that keeps `AUTOTRADE_GPU_MIN_FREE_GIB` GiB free (12 by default), not only on a card nobody uses, so a host whose cards all carry other people's work still runs arms; a card a running arm already holds is never taken. Set the margin in the console's environment, and restart the console for it to take effect:
+
+```bash
+AUTOTRADE_GPU_MIN_FREE_GIB=12 python scripts/webui/run_webui.py
+```
+
+It is an admission margin, not a cap on the strategy: nothing reserves the memory, and the arm shares the card with whatever else runs on it.
+
 Arms that belong together are created from a checked-in round file, which fixes their shared dates, dataset selection and prebuilt view seed; `--dry-run` validates all of it offline before anything is sent to the console:
 
 ```bash

@@ -2211,6 +2211,51 @@ def test_only_a_caller_that_opts_in_shares_a_card(tmp_path: Path):
             select_gpus(root, 1, require_name="H100", allow_shared=True)
 
 
+def test_an_admission_margin_makes_a_shared_card_takeable_without_opting_in(tmp_path: Path):
+    """A caller whose need is a margin, not the whole card, passes one: cards
+    keeping at least that much free are candidates, the most free first, and the
+    running arms' claims still exclude a card. The boundary is inclusive, a card
+    short of it is never taken however few are left, and without the argument
+    nothing changes."""
+
+    root = tmp_path / "experiments"
+    _running_arm(root, "holder", [3])
+    roster = gpu_roster(idle=(), busy=[1, 2, 3, 4])
+    roster[0]["memory_free_mib"] = MIN_FREE_GPU_MEMORY_MIB  # card 1: exactly the margin
+    roster[1]["memory_free_mib"] = MIN_FREE_GPU_MEMORY_MIB - 1  # card 2: one MiB short
+    roster[2]["memory_free_mib"] = 40_000  # card 3: the most, but claimed
+    roster[3]["memory_free_mib"] = 20_000  # card 4
+    margin = MIN_FREE_GPU_MEMORY_MIB
+    with patch("autotrade.environment.gpu.list_gpus", return_value=roster):
+        assert free_gpus(root, require_name="L20") == []  # whole-card rule unchanged
+        assert free_gpus(root, require_name="L20", min_free_memory_mib=margin) == [4, 1]
+        assert select_gpus(root, 1, require_name="L20", min_free_memory_mib=margin) == [4]
+        assert select_gpus(root, 2, require_name="L20", min_free_memory_mib=margin) == [4, 1]
+        with pytest.raises(GpuUnavailableError) as refused:
+            select_gpus(root, 3, require_name="L20", min_free_memory_mib=margin)
+        assert f"a card is free only when it keeps {margin} MiB free" in str(refused.value)
+        assert "claimed by running arms: holder [3]" in str(refused.value)
+
+
+def test_the_console_gpu_margin_setting_defaults_to_the_promised_memory(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The console's admission margin is one host setting: unset, a card must
+    keep what a GPU strategy is promised anyway (12 GiB); a positive whole
+    number of GiB moves it, and anything else is refused instead of quietly
+    choosing a rule for the operator."""
+    from autotrade.environment import gpu
+
+    monkeypatch.delenv(gpu.MIN_FREE_GPU_GIB_ENV, raising=False)
+    assert gpu.host_min_free_gpu_memory_mib() == gpu.MIN_FREE_GPU_MEMORY_MIB
+    monkeypatch.setenv(gpu.MIN_FREE_GPU_GIB_ENV, "20")
+    assert gpu.host_min_free_gpu_memory_mib() == 20 * 1024
+    for bad in ("0", "-4", "twelve"):
+        monkeypatch.setenv(gpu.MIN_FREE_GPU_GIB_ENV, bad)
+        with pytest.raises(ValueError, match=gpu.MIN_FREE_GPU_GIB_ENV):
+            gpu.host_min_free_gpu_memory_mib()
+
+
 def test_a_paper_run_takes_free_cards_only_when_a_container_starts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

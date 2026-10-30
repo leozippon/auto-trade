@@ -51,7 +51,7 @@ from autotrade.pipelines.hitl_state import (
 from autotrade.webui import manager as manager_module
 from autotrade.webui.manager import ManagerError
 from autotrade.webui.server import create_app
-from tests.unit.gpu_probe import stubbed_gpu_probe
+from tests.unit.gpu_probe import gpu_roster, stubbed_gpu_probe
 
 SRC_ROOT = str(Path(autotrade.__file__).resolve().parents[1])
 
@@ -793,14 +793,25 @@ class CreatePreflightTest(unittest.TestCase):
                     manager.create_experiment({**payload, "experiment_id": "shared_body_2"})
         self.assertFalse((self.experiments_root / "shared_body_2").exists())
 
-    def test_a_gpu_arm_gets_an_unused_card_and_holds_it_while_its_worker_lives(self) -> None:
-        """A card somebody else uses is never handed out, a card a running arm
-        holds is never handed out again even while it shows nothing in use, and
-        a GPU arm with no such card left is refused before anything is written
-        while a CPU arm is still created. The worker is a real detached child,
-        so the hold ends exactly when it dies."""
-        # Cards 0 and 1 carry another process's memory; card 2 is unused.
-        with stubbed_gpu_probe([2], busy=[0, 1]):
+    def test_a_gpu_arm_gets_a_card_it_can_use_and_holds_it_while_its_worker_lives(self) -> None:
+        """A card somebody else uses is passed over while it keeps less than the
+        console's admission margin free, one that keeps more is taken, a card a
+        running arm holds is never handed out again even while it shows nothing
+        in use, and a GPU arm with no such card left is refused before anything
+        is written while a CPU arm is still created. The margin is a start-up
+        setting of the console, so the health view and the claim a start writes
+        are the same selection. The worker is a real detached child, so the hold
+        ends exactly when it dies."""
+        from autotrade.environment.gpu import MIN_FREE_GPU_MEMORY_MIB
+
+        # Card 0 carries a tenant's 38 GiB (8 GiB free: under the 12 GiB
+        # margin), card 1 a tenant's 20 GiB (26 GiB free: above it), card 2 is
+        # unused.
+        roster = gpu_roster([2], busy=[0, 1])  # cards 0, 1, 2 in index order
+        for row, mib in zip(roster, (38_000, 20_000, 0)):
+            row["memory_used_mib"] = mib
+            row["memory_free_mib"] = 46_068 - mib
+        with patch("autotrade.environment.gpu.list_gpus", return_value=roster):
             first = self._create()
             self.assertEqual(first.status_code, 200, first.text)
             pid = int(first.json()["spawned_pid"])
@@ -808,16 +819,39 @@ class CreatePreflightTest(unittest.TestCase):
             claim = self.experiments_root / "preflight_demo/hitl/gpu_claim.json"
             self.assertEqual(json.loads(claim.read_text(encoding="utf-8"))["devices"], [2])
             health = self.client.get("/api/health").json()
-            self.assertEqual(health["gpus_free"], [])
+            self.assertEqual(health["gpus_free"], [1])
+            self.assertEqual(health["gpu_min_free_mib"], MIN_FREE_GPU_MEMORY_MIB)
             self.assertEqual(health["gpu_claims"], {"preflight_demo": [2]})
+
+            shared = self._create(experiment_id="gpu_shared")
+            self.assertEqual(shared.status_code, 200, shared.text)
+            shared_pid = int(shared.json()["spawned_pid"])
+            self.addCleanup(self._kill_pid, shared_pid)
+            claim = self.experiments_root / "gpu_shared/hitl/gpu_claim.json"
+            self.assertEqual(json.loads(claim.read_text(encoding="utf-8"))["devices"], [1])
+            self.assertEqual(self.client.get("/api/health").json()["gpus_free"], [])
 
             refused = self._create(experiment_id="gpu_behind")
             self.assertEqual(refused.status_code, 400, refused.text)
             detail = refused.json()["detail"]
             self.assertIn("当前 GPU 无法满足实验默认分配", detail)
             self.assertIn("requested 1 GPU(s), 0 free (none)", detail)
-            self.assertIn("claimed by running arms: preflight_demo [2]", detail)
+            self.assertIn(
+                f"a card is free only when it keeps {MIN_FREE_GPU_MEMORY_MIB} MiB free", detail
+            )
+            self.assertIn("claimed by running arms: gpu_shared [1]; preflight_demo [2]", detail)
             self.assertFalse((self.experiments_root / "gpu_behind").exists())
+
+            # The margin is what the console was started with: raising it in
+            # the environment moves the health view and the refusal together.
+            with patch.dict(os.environ, {"AUTOTRADE_GPU_MIN_FREE_GIB": "30"}):
+                health = self.client.get("/api/health").json()
+                self.assertEqual(health["gpu_min_free_mib"], 30 * 1024)
+                self.assertEqual(health["gpus_free"], [])
+                raised = self._create(experiment_id="gpu_margin")
+                self.assertEqual(raised.status_code, 400, raised.text)
+                self.assertIn("keeps 30720 MiB free", raised.json()["detail"])
+                self.assertFalse((self.experiments_root / "gpu_margin").exists())
 
             cpu = self._create(experiment_id="cpu_behind", gpu_count=0)
             self.assertEqual(cpu.status_code, 200, cpu.text)

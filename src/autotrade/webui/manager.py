@@ -17,7 +17,7 @@ from pathlib import Path
 
 from autotrade.environment import pretrained
 from autotrade.environment.broker import default_permitted_boards
-from autotrade.environment.gpu import GpuUnavailableError
+from autotrade.environment.gpu import GpuUnavailableError, host_min_free_gpu_memory_mib
 from autotrade.environment.identity import (
     LEGACY_EXPERIMENT_MESSAGE,
     AgentRefStore,
@@ -73,8 +73,9 @@ from .registry import experiment_state, read_ledger_records, worker_log_ref
 # leaves that service almost idle, so only the total limit, which protects the
 # host's page cache and IO, applies to it. Measured rationale:
 # docs/deployment-documentation.md. GPUs are not a count: a GPU arm starts only
-# on whole cards nobody else uses or holds, and keeps them while its worker
-# lives (hitl_state.select_gpus).
+# on cards no running arm holds that keep the console's admission margin free
+# (``AUTOTRADE_GPU_MIN_FREE_GIB``), and keeps them while its worker lives
+# (hitl_state.select_gpus).
 MAX_RUNNING_EXPERIMENTS = 8
 MAX_RUNNING_LOCAL_EXPERIMENTS = 4
 # What one new arm writes of its own before its first validation: the PIT views
@@ -515,27 +516,41 @@ class ExperimentManager:
 
         ``gpus_free`` is the one selection's free cards in the order a start
         takes them (``hitl_state.free_gpus``: matching the sandbox device
-        filter, nobody holding memory on them, claimed by no running arm) and
-        ``gpu_claims`` every running arm's devices. When the devices cannot be
-        read no card is free and ``gpu_error`` says why.
+        filter, keeping ``gpu_min_free_mib`` free, claimed by no running arm)
+        and ``gpu_claims`` every running arm's devices. ``gpu_min_free_mib`` is
+        the admission margin this console was started with
+        (``AUTOTRADE_GPU_MIN_FREE_GIB``, 12 GiB unset): a card another tenant
+        holds is passed over only while it keeps less than that free. When the
+        devices cannot be read no card is free and ``gpu_error`` says why.
         """
 
         claims = gpu_claims(self.experiments_root)
         try:
-            free = free_gpus(self.experiments_root, require_name=SandboxSpec().gpu_name_filter)
-        except GpuUnavailableError as exc:
+            margin = host_min_free_gpu_memory_mib()
+            free = free_gpus(
+                self.experiments_root,
+                require_name=SandboxSpec().gpu_name_filter,
+                min_free_memory_mib=margin,
+            )
+        except (GpuUnavailableError, ValueError) as exc:
             return {"gpus_free": [], "gpu_claims": claims, "gpu_error": str(exc)}
-        return {"gpus_free": free, "gpu_claims": claims}
+        return {"gpus_free": free, "gpu_claims": claims, "gpu_min_free_mib": margin}
 
     def _claimable_gpus(self, count: int) -> list[int]:
         """The ``count`` cards a GPU arm starting now takes, or a refusal
-        naming the free cards and the running arms that hold the rest."""
+        naming the free cards and the running arms that hold the rest.
+
+        The same admission margin ``gpu_slots`` reports, so the cards the
+        health view offers are exactly the ones a start claims."""
 
         try:
             return select_gpus(
-                self.experiments_root, count, require_name=SandboxSpec().gpu_name_filter
+                self.experiments_root,
+                count,
+                require_name=SandboxSpec().gpu_name_filter,
+                min_free_memory_mib=host_min_free_gpu_memory_mib(),
             )
-        except GpuUnavailableError as exc:
+        except (GpuUnavailableError, ValueError) as exc:
             raise ManagerError(f"当前 GPU 无法满足实验默认分配：{exc}") from exc
 
     def running_experiments(self) -> list[str]:
