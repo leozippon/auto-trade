@@ -224,7 +224,7 @@ def test_the_dry_run_refuses_a_research_period_that_is_not_whole_years(
     _synthetic_repo(tmp_path, monkeypatch, rnd)
     shifted = Round(pit_views_seed=rnd.pit_views_seed, overrides={"research_end": "20250331"})
     assert shifted.main(["launcher", "0", "--dry-run"]) == 1
-    assert "whole July-June years" in capsys.readouterr().err
+    assert "whole years" in capsys.readouterr().err
 
 
 # The eight-year research period the backfilled lake opens: research from
@@ -673,7 +673,7 @@ def test_a_fill_stops_at_an_arm_the_preflight_refuses(
         "1 created, 1 refused, 1 pending (0 held by the local-model limit, 0 by the free GPUs, 0 by an unfinished seed)"
     )
     assert "fill_second: parameters rejected" in captured.err
-    assert "whole July-June years" in captured.err
+    assert "whole years" in captured.err
 
 
 def test_a_fill_dry_run_plans_without_creating(

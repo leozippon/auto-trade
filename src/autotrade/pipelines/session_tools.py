@@ -857,7 +857,7 @@ class SessionValidations:
 
         summary = step.validation.summary
         rules = self.rules
-        # Research years are whole July-June years: twelve calendar months each.
+        # Each research year is twelve calendar months, whatever month it starts.
         months = 12 * research_span(self.request.research_years, step.span).slots
         trips = summary.get("trade_count")
         exposure = summary.get("exposure")

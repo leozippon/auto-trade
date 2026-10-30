@@ -1,8 +1,8 @@
 """The research calendar: SSE trading days and the research geometry.
 
-An arm researches on whole July-June years, freezes at most once, and the frozen
-artifact is then replayed once, continuously, over the twelve months after
-research and the Held-out period after those:
+An arm researches on whole years that begin on the first of a month, freezes
+at most once, and the frozen artifact is then replayed once, continuously,
+over the twelve months after research and the Held-out period after those:
 
     research  research_start .. research_end    one slot per year, Y1..Yn
     forward   research_end+1 .. forward_end     slot F
@@ -112,6 +112,12 @@ def _next_day(day: str) -> str:
     return (date.fromisoformat(day) + timedelta(days=1)).strftime("%Y%m%d")
 
 
+def _plus_years(month_start: date, years: int) -> date:
+    """The same month-start ``years`` later. ``month_start`` is day 1."""
+
+    return date(month_start.year + years, month_start.month, 1)
+
+
 @dataclass(frozen=True)
 class Slot:
     """One replay slot: ``start..end``, read on top of the view at its anchor."""
@@ -146,10 +152,12 @@ class Slot:
 class ResearchGeometry:
     """Research, forward and Held-out dates of one arm, as ``YYYYMMDD``.
 
-    Refused unless research runs from a July 1 to a June 30 (whole July-June
-    years, so every block is comparable), the forward period is exactly the
-    twelve months after research, and Held-out ends after the forward period.
-    The stages are contiguous by construction and cannot overlap.
+    Refused unless research runs from the first of a month to the day before
+    that same month at least one year later (whole years, so every block is
+    comparable), the forward period is exactly the twelve months after research,
+    and Held-out ends after the forward period. The stages are contiguous by
+    construction and cannot overlap. The day after research end is that
+    anniversary month-start, so February and leap days need no special case.
     """
 
     research_start: str
@@ -166,16 +174,20 @@ class ResearchGeometry:
                 date.fromisoformat(value)
             except ValueError:
                 raise ValueError(f"{name} is not a calendar date: {value!r}") from None
+        start = date.fromisoformat(self.research_start)
+        anniversary = date.fromisoformat(self.research_end) + timedelta(days=1)
         if (
-            self.research_start[4:] != "0701"
-            or self.research_end[4:] != "0630"
-            or self.research_end < self.research_start
+            start.day != 1
+            or anniversary.day != 1
+            or anniversary.month != start.month
+            or anniversary.year <= start.year
         ):
             raise ValueError(
-                "research must run from a July 1 to a later June 30 so its blocks are "
-                f"whole July-June years, got {self.research_start}..{self.research_end}"
+                "research must run from the first of a month to the day before that "
+                "same month at least one year later, so its blocks are whole years, "
+                f"got {self.research_start}..{self.research_end}"
             )
-        forward_end = f"{int(self.research_end[:4]) + 1}0630"
+        forward_end = (_plus_years(anniversary, 1) - timedelta(days=1)).strftime("%Y%m%d")
         if self.forward_end != forward_end:
             raise ValueError(
                 "the forward period is the twelve months after research: "
@@ -204,11 +216,16 @@ class ResearchGeometry:
 
     @property
     def research_years(self) -> tuple[Slot, ...]:
-        first, last = int(self.research_start[:4]), int(self.research_end[:4])
-        return tuple(
-            Slot(f"Y{index}", f"{year}0701", f"{year + 1}0630", f"{year + 1}0630")
-            for index, year in enumerate(range(first, last), start=1)
-        )
+        start = date.fromisoformat(self.research_start)
+        # forward_start is the anniversary month-start: research end plus one day.
+        years = date.fromisoformat(self.forward_start).year - start.year
+        slots = []
+        for index in range(1, years + 1):
+            opened = _plus_years(start, index - 1)
+            closed = _plus_years(start, index) - timedelta(days=1)
+            begin, finish = opened.strftime("%Y%m%d"), closed.strftime("%Y%m%d")
+            slots.append(Slot(f"Y{index}", begin, finish, finish))
+        return tuple(slots)
 
     @property
     def forward(self) -> Slot:

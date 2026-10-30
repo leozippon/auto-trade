@@ -950,7 +950,7 @@ def test_worker_params_reject_unknown_keys_fold_era_keys_and_a_bad_geometry(tmp_
         with pytest.raises(ValueError, match="unknown experiment parameters"):
             load_worker_options(experiment, repo_root=repo)
     for key, value, message in (
-        ("research_start", "20210101", "July 1"),
+        ("research_start", "20210101", "first of a month"),
         ("forward_end", "20261231", "twelve months after research"),
         ("research_end", 20250630, "YYYYMMDD string"),
         ("max_research_minutes", 0, "max_research_minutes must be a positive integer"),

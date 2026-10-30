@@ -94,9 +94,9 @@ def test_each_slot_starts_the_instant_the_previous_one_ends() -> None:
 @pytest.mark.parametrize(
     ("change", "message"),
     [
-        ({"research_start": "20210101"}, "whole July-June years"),
-        ({"research_end": "20241231"}, "whole July-June years"),
-        ({"research_end": "20200630", "forward_end": "20210630"}, "whole July-June years"),
+        ({"research_start": "20210101"}, "whole years"),
+        ({"research_end": "20241231"}, "whole years"),
+        ({"research_end": "20200630", "forward_end": "20210630"}, "whole years"),
         ({"forward_end": "20261231"}, "twelve months after research"),
         ({"forward_end": "20250630"}, "twelve months after research"),
         ({"heldout_end": "20260630"}, "Held-out follows the forward period"),
@@ -111,6 +111,45 @@ def test_a_misaligned_or_disordered_geometry_is_refused(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         dataclasses.replace(DEFAULT_RESEARCH_GEOMETRY, **change)
+
+
+def test_whole_years_follow_the_start_month_and_a_leap_day_boundary() -> None:
+    """August anniversaries of nine and ten years, a strict twelve-month
+    forward period, and one year that ends on a leap day."""
+
+    nine = ResearchGeometry("20160801", "20250731", "20260731", "20261031")
+    ten = ResearchGeometry("20150801", "20250731", "20260731", "20261031")
+    assert [(slot.label, slot.start, slot.end) for slot in nine.research_years[:1]] == [
+        ("Y1", "20160801", "20170731")
+    ]
+    assert [(slot.label, slot.start, slot.end) for slot in nine.research_years[-1:]] == [
+        ("Y9", "20240801", "20250731")
+    ]
+    assert len(nine.research_years) == 9
+    assert (ten.research_years[0].start, ten.research_years[-1].label, ten.research_years[-1].end) == (
+        "20150801",
+        "Y10",
+        "20250731",
+    )
+    assert len(ten.research_years) == 10
+    assert (nine.forward.start, nine.forward.end, nine.heldout_start) == (
+        "20250801",
+        "20260731",
+        "20260801",
+    )
+    leap = ResearchGeometry("20230301", "20240229", "20250228", "20250331")
+    assert (leap.research_years[0].start, leap.research_years[0].end) == ("20230301", "20240229")
+    assert (leap.forward.start, leap.forward.end) == ("20240301", "20250228")
+    for dates in (
+        ("20160801", "20250630", "20260630", "20260930"),
+        ("20160815", "20250731", "20260731", "20261031"),
+        ("20230301", "20240228", "20250228", "20250331"),
+        ("20160801", "20170730", "20180730", "20181031"),
+    ):
+        with pytest.raises(ValueError, match="whole years"):
+            ResearchGeometry(*dates)
+    with pytest.raises(ValueError, match="twelve months after research"):
+        ResearchGeometry("20160801", "20250731", "20260630", "20261031")
 
 
 def test_heldout_is_clipped_to_the_release_and_refused_below_what_grading_reads() -> None:

@@ -1305,7 +1305,7 @@ def test_the_listing_carries_the_freeze_and_the_best_candidate_so_far(
 @pytest.mark.parametrize(
     ("patch", "message"),
     [
-        ({"research_start": "20210101"}, "July 1"),
+        ({"research_start": "20210101"}, "first of a month"),
         ({"forward_end": "20270630"}, "forward_end must be 20260630"),
         ({"heldout_end": "20260630"}, "Held-out follows the forward period"),
         ({"research_end": "20250631"}, "not a calendar date"),

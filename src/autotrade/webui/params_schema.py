@@ -94,7 +94,7 @@ _FIELDS: list[dict[str, object]] = [
         "label": "研究期起点",
         "type": "string",
         "required": True,
-        "help": "YYYYMMDD，必须是 7 月 1 日。研究期按整年（7 月至次年 6 月）切块，研究会话只看研究期末的决策视图、只回放研究期。",
+        "help": "YYYYMMDD，必须是某月 1 日。研究期从这一天起按完整十二个月切块，研究会话只看研究期末的决策视图、只回放研究期。",
     },
     {
         "key": "research_end",
@@ -102,7 +102,7 @@ _FIELDS: list[dict[str, object]] = [
         "label": "研究期终点",
         "type": "string",
         "required": True,
-        "help": "YYYYMMDD，必须是某个 6 月 30 日，且晚于起点。",
+        "help": "YYYYMMDD，必须是起点同一月份至少一个完整周年后的前一天。",
     },
     {
         "key": "forward_end",
@@ -110,7 +110,7 @@ _FIELDS: list[dict[str, object]] = [
         "label": "前推期终点",
         "type": "string",
         "required": True,
-        "help": "YYYYMMDD，必须是研究期终点之后第 12 个月的 6 月 30 日。冻结产物从研究期终点次日起连续回放到这里，再接着回放 Held-out。",
+        "help": "YYYYMMDD，必须是研究期终点之后恰好十二个月的那一天。冻结产物从研究期终点次日起连续回放到这里，再接着回放 Held-out。",
     },
     {
         "key": "heldout_end",

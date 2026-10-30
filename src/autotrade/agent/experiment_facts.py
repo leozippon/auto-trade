@@ -236,7 +236,7 @@ def _research_scope(
     period = research.get("research_period")
     research_sentence = (
         f"The arm's one research session researches the period {period}, one "
-        "July-June year per label, and ends by freezing one full-period node "
+        "complete year per label, and ends by freezing one full-period node "
         "through the freeze gate or by ending the arm without one; no "
         "other session follows, and the frozen artifact is judged only on later, "
         "sealed data."
