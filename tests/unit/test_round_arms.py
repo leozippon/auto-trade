@@ -20,12 +20,14 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from autotrade.environment.data.contracts import BENCHMARK_INDEXES
 from autotrade.environment.executor import _strategy_gpus
-from autotrade.environment.gpu import GpuUnavailableError
+from autotrade.environment.gpu import GpuUnavailableError, host_min_free_gpu_memory_mib
 from autotrade.environment.llm.model_profiles import LOCAL_QWEN_MODEL, MIMO_FLASH_MODEL
+from autotrade.environment.replay.style import MIN_REGRESSION_DAYS
 from autotrade.environment.sandbox import SandboxSpec
 from autotrade.environment.strategy_loader import validate_strategy_package
 from autotrade.pipelines.config import (
@@ -55,6 +57,7 @@ from scripts.experiments._round import (
 )
 from tests.unit.research_release_fixture import (
     BACKFILLED_HISTORY_START,
+    HELDOUT_REACHING_DAYS,
     publish_release,
 )
 
@@ -94,20 +97,31 @@ def _synthetic_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rnd: Round)
     own tree gets one for its own selection, while an arm that names the
     round's tree with another selection is still refused. The contract is what
     the prebuild writes to ``provider.json``, over the one published release
-    they all name, which reaches the round's Held-out and holds benchmark
-    history back to the backfill floor, as the lake now does; a tree needs
-    nothing else for the create-time pre-flight to accept it. Every arm's
-    reference pack exists, as the repository holds them, and its starter's
-    smoke passes (the replay needs the host's sandbox; the smoke step is
-    tested on its own below). Returns the round's tree.
+    they all name, which reaches every geometry in the round's Held-out and
+    holds benchmark history back to the backfill floor, as the lake now does; a
+    tree needs nothing else for the create-time pre-flight to accept it. Its
+    trading days are the fixture's default ones plus the business days right
+    after each geometry's forward period, so a round grading Held-out on its own
+    dates finds the least it needs. Every arm's reference pack exists, as the
+    repository holds them, and its starter's smoke passes (the replay needs the
+    host's sandbox; the smoke step is tested on its own below). Returns the
+    round's tree.
     """
     monkeypatch.setattr(_round, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(_round, "EXPERIMENTS_ROOT", tmp_path / "experiments")
     monkeypatch.setattr(_round, "smoke", lambda merged: "")
     configs = {}
+    days = set(HELDOUT_REACHING_DAYS)
     for experiment_id in (PROBE_ID, *rnd.arms):
         params = rnd.request_params(experiment_id)
         configs.setdefault(str(params["pit_views_seed"]), _snapshot_config(params))
+        days.update(
+            day.strftime("%Y%m%d")
+            for day in pd.bdate_range(
+                pd.Timestamp(str(params["forward_end"])) + pd.Timedelta(days=1),
+                periods=MIN_REGRESSION_DAYS,
+            )
+        )
         if params["workspace_reference"]:
             # Arms that are independent seeds of one search share a pack.
             (tmp_path / str(params["workspace_reference"])).mkdir(parents=True, exist_ok=True)
@@ -117,6 +131,7 @@ def _synthetic_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rnd: Round)
         datasets=dict.fromkeys(
             name for config in configs.values() for name in required_release_raw_datasets(config)
         ),
+        trading_days=sorted(days),
         history_start=BACKFILLED_HISTORY_START,
     )
     for name, config in configs.items():
@@ -177,7 +192,7 @@ def test_a_round_dry_runs_against_its_seed_contract(
     out = capsys.readouterr().out.splitlines()
     assert "release synthetic, which every arm pins" in out[0]
     report = json.loads(out[1])
-    assert report["research_end"] == BASE_OVERRIDES["research_end"]
+    assert report["research_end"] == rnd.request_params(PROBE_ID)["research_end"]
     assert report["pit_views_seed"] == rnd.pit_views_seed
     # The boards the round names, or null where it leaves them to the capital.
     assert report["permitted_boards"] == rnd.common_overrides.get("permitted_boards")
@@ -813,13 +828,17 @@ def test_a_pack_without_a_starter_smokes_the_template_and_a_broken_one_is_refuse
     assert "lacks main.py" in refused and runs == ["configs/agent_output_template"]
 
 
-def test_a_gpu_smoke_pins_idle_cards_and_without_one_records_nothing(
+def test_a_gpu_smoke_pins_admissible_cards_and_without_one_records_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A GPU arm's spec names no device ("auto"), and a strategy container
-    given none refuses to start, so the smoke takes idle cards and pins them on
-    every strategy container. With none idle the arm is refused for this run
-    only: nothing is recorded, and the next run smokes it again."""
+    given none refuses to start, so the smoke takes free cards and pins them on
+    every strategy container. It takes them under the console's own admission
+    margin (``AUTOTRADE_GPU_MIN_FREE_GIB``), so a shared card the console would
+    start the arm on is not refused for being busy. With too few admissible the
+    arm is refused for this run only: nothing is recorded, and the next run
+    smokes it again."""
+    monkeypatch.setenv("AUTOTRADE_GPU_MIN_FREE_GIB", "20")
     monkeypatch.setattr(_round, "REPO_ROOT", tmp_path)
     starter = tmp_path / "packs" / "arm" / "starter"
     starter.mkdir(parents=True)
@@ -843,8 +862,12 @@ def test_a_gpu_smoke_pins_idle_cards_and_without_one_records_nothing(
     monkeypatch.setattr(_round, "build_experiment_pipeline", assemble)
     cards: list[int] = []
 
-    def select(root: Path, count: int, *, require_name: str | None = None) -> list[int]:
+    def select(
+        root: Path, count: int, *, require_name: str | None = None, min_free_memory_mib: int | None = None
+    ) -> list[int]:
         assert (root, count, require_name) == (_round.EXPERIMENTS_ROOT, 1, requested.gpu_name_filter)
+        # The console's margin, read through its own entry point, not a copy.
+        assert min_free_memory_mib == host_min_free_gpu_memory_mib() == 20 * 1024
         if len(cards) < count:
             raise GpuUnavailableError("0 free GPU(s); held: open_x [5]")
         return cards[:count]
@@ -854,6 +877,13 @@ def test_a_gpu_smoke_pins_idle_cards_and_without_one_records_nothing(
     with pytest.raises(GpuUnavailableError):
         _round.smoke(merged)
     assert not assembled and not list(records.glob("*.json"))
+
+    # A margin that cannot be read is the same refusal, not a smoke verdict.
+    monkeypatch.setenv("AUTOTRADE_GPU_MIN_FREE_GIB", "20 GiB")
+    with pytest.raises(GpuUnavailableError, match="positive whole number of GiB"):
+        _round.smoke(merged)
+    assert not assembled and not list(records.glob("*.json"))
+    monkeypatch.setenv("AUTOTRADE_GPU_MIN_FREE_GIB", "20")
 
     cards.append(5)
     assert "RuntimeError: assembled" in _round.smoke(merged)
@@ -867,8 +897,8 @@ def test_a_gpu_smoke_pins_idle_cards_and_without_one_records_nothing(
     monkeypatch.setattr(_round, "smoke", busy)
     assert rnd.main(["launcher", "0"]) == 1 and posted == []
     assert (
-        "fill_first: no GPU is idle for the starter's smoke, so nothing was smoked, recorded or sent:"
-        " 0 free GPU(s); held: open_x [5]"
+        "fill_first: no GPU is admissible for the starter's smoke, so nothing was smoked,"
+        " recorded or sent: 0 free GPU(s); held: open_x [5]"
     ) in capsys.readouterr().err
 
 
