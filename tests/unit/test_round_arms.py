@@ -1163,3 +1163,54 @@ def test_a_starter_carries_the_canonical_book_byte_for_byte(pack: Path) -> None:
         f"{pack.name} edits its copy of configs/starter_lib/ ({', '.join(differing)}): copy the "
         "canonical file unchanged, or change it there first"
     )
+
+
+# Round 20261102 researches the ten-year memory direction on a CNY 200k
+# account: the account is its one departure from round 20261031, which shares
+# its geometry, seed and pack skeleton on the 100k account.
+ROUND_200K = "create_round_20261102"
+ROUND_100K_10Y = "create_round_20261031"
+PACK_200K = "configs/workspace_refs/memory_200k_rolling_20261102"
+PACK_100K_10Y = "configs/workspace_refs/memory_100k_rolling_20261031"
+
+
+def test_the_200k_round_changes_only_the_account_pack_and_arm_ids() -> None:
+    """Keep the research setup while changing capital and leaving allocation free."""
+    rnd = ROUNDS[ROUND_200K]
+    earlier = ROUNDS[ROUND_100K_10Y]
+    assert len(rnd.arms) == 2 and len(earlier.arms) == 2
+    now = rnd.request_params("memory_200k_10y_argon_local_20261102")
+    before = earlier.request_params("memory_100k_10y_argon_local_20261031")
+    assert set(now) == set(before)
+    assert {key for key in now if now[key] != before[key]} == {
+        "experiment_id",
+        "initial_cash",
+        "workspace_reference",
+    }
+    assert now["initial_cash"] == 200_000
+    assert before["initial_cash"] == 100_000
+    assert now["workspace_reference"] == PACK_200K
+    assert rnd.pit_views_seed == earlier.pit_views_seed
+    for experiment_id in rnd.arms:
+        params = rnd.request_params(experiment_id)
+        assert "200k" in experiment_id and experiment_id.endswith("_20261102")
+        assert params["max_total_holdings"] is None
+        assert params["max_single_name_weight"] is None
+        assert params["permitted_boards"] == ["main", "gem"]
+
+
+def test_the_200k_pack_copies_the_owner_note_and_keeps_no_earlier_quota() -> None:
+    """The isolated pack preserves the owner note without old quotas or future results."""
+    from tests.unit.test_retrieval_pack import AFTER_RESEARCH
+
+    pack = REPO_ROOT / PACK_200K
+    source = REPO_ROOT / PACK_100K_10Y
+    assert (pack / "memory-framework.md").read_bytes() == (source / "memory-framework.md").read_bytes()
+    readme = (pack / "README.md").read_text(encoding="utf-8")
+    assert "20 万元" in readme
+    assert "10 万元" not in readme
+    for marker in ("12–30", "45 元", "50 元", "±25"):
+        assert marker not in readme, marker
+    # The taxes that move with the date and the run are the host's.
+    assert "运行事实" in readme and "印花税" in readme and "红利税" in readme
+    assert not [word for word in AFTER_RESEARCH if word in readme]
