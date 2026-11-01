@@ -5927,7 +5927,7 @@ function kvRow(key, value) {
   return el("tr", {}, el("td", {}, key), el("td", {}, value));
 }
 
-/* Per July-June year breakdown of one replay (stats.sub_windows): the same
+/* Per-year breakdown of one replay (stats.sub_windows): the same
    figures as the whole window, one row per year. "部分" marks a year the
    window does not span end to end; 超额 is against the arm's benchmark. */
 function subWindowSection(title, rows) {

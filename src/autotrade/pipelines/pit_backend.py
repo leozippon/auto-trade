@@ -1041,7 +1041,11 @@ class PITDailyEvaluationBackend:
                     execution_price=span.price_at if span.minute_sources else None,
                     executor_factory=executor_factory,
                 ).run(daily, corporate_actions=corporate_actions)
-                record = replay.to_record(start=replay_start, end=replay_end)
+                record = replay.to_record(
+                    start=replay_start,
+                    end=replay_end,
+                    year_windows=request.year_windows,
+                )
             finally:
                 lock.lock()
                 # The row groups this replay decoded are freed; hand their

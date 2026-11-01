@@ -23,11 +23,15 @@ TRADING_DAYS_PER_YEAR = 244
 # Position-reducing verbs; fills here are strategy-initiated exits.
 _EXIT_ACTIONS = frozenset({"sell"})
 
-# Sub-window granularity of every replay result: the July-June years research,
-# the forward period and Held-out are laid out in (pipelines/calendar.py). One
+# Sub-window granularity of every replay result: the years its window is laid
+# out in (``pipelines/calendar.py ResearchGeometry.research_years``). One
 # whole-window number cannot separate a persistent edge from one good year, so
-# every result also carries the same metrics per July-June year of its window.
-SUB_WINDOW_KIND = "july_june_year"
+# every result also carries the same metrics per research year of its window.
+RESEARCH_YEAR_KIND = "research_year"
+# A replay over no research years -- the forward and Held-out span, a plain
+# daily file -- has none to report, so its rows fall back to the calendar
+# July-June years of its own window and say that is what they are.
+JULY_JUNE_KIND = "july_june_year"
 # Sub-window figures are read as a table, not compounded further: six decimals
 # keep the block small enough to ride inline in an Agent observation.
 _SUB_WINDOW_DIGITS = 6
@@ -75,14 +79,22 @@ class ReplayResult:
     # executor. Empty for an in-process replay, which has no container.
     resources: Mapping[str, object] = field(default_factory=dict)
 
-    def to_record(self, *, start: str = "", end: str = "") -> dict[str, object]:
+    def to_record(
+        self,
+        *,
+        start: str = "",
+        end: str = "",
+        year_windows: Sequence[tuple[str, str]] = (),
+    ) -> dict[str, object]:
         return {
             "equity_curve": list(self.equity_curve),
             "executions": list(self.executions),
             "corporate_actions": list(self.corporate_actions),
             "inference_dates": list(self.inference_dates),
             "pending_orders": list(self.pending_orders),
-            "stats": compute_return_stats(self, start=start, end=end),
+            "stats": compute_return_stats(
+                self, start=start, end=end, year_windows=year_windows
+            ),
         }
 
 
@@ -101,13 +113,19 @@ def total_return_from_curve(curve: Sequence[Mapping[str, object]]) -> float:
 
 
 def compute_return_stats(
-    result: ReplayResult, *, start: str = "", end: str = ""
+    result: ReplayResult,
+    *,
+    start: str = "",
+    end: str = "",
+    year_windows: Sequence[tuple[str, str]] = (),
 ) -> dict[str, object]:
     """The minimum return statistics from docs/environment-design.md §3.8.
 
-    ``start``/``end`` are the replay window that was requested (``YYYYMMDD``),
-    which only the evaluation backend knows; they decide which quarters
-    ``sub_windows`` reports as partial.
+    ``start``/``end`` are the replay window that was requested (``YYYYMMDD``)
+    and ``year_windows`` the years it was requested over, as ``(start, end)``
+    calendar bounds in order. Only the evaluation backend, which owns the
+    request, knows either; together they decide which years ``sub_windows``
+    reports and which of them the window covers only in part.
     """
     curve = result.equity_curve
     orders = result.executions
@@ -206,9 +224,17 @@ def compute_return_stats(
         "win_rate": float(wins / len(realized)) if realized else 0.0,
         "pnl_concentration": pnl_concentration,
         "exposure": exposure,
-        # Fixed-cost (four rows per replayed year) and therefore inline, unlike
-        # weekly_returns / per_stock which scale with the window and the book.
-        "sub_windows": sub_window_stats(curve, orders, initial=initial, start=start, end=end),
+        # Fixed-cost (one row per year of the window) and therefore inline,
+        # unlike weekly_returns / per_stock which scale with the window and the
+        # book.
+        "sub_windows": sub_window_stats(
+            curve,
+            orders,
+            initial=initial,
+            start=start,
+            end=end,
+            year_windows=year_windows,
+        ),
         "weekly_returns": _weekly_returns(curve, initial),
         "trade_count": len(realized),
         "turnover": float(traded_notional / initial) if initial > 0 else 0.0,
@@ -344,23 +370,35 @@ def sub_window_stats(
     initial: float,
     start: str = "",
     end: str = "",
+    year_windows: Sequence[tuple[str, str]] = (),
 ) -> list[dict[str, object]]:
-    """Per July-June year of the replay window, the same metrics as the whole.
+    """Per year of the replay window, the same metrics as the whole.
 
-    A row is labelled by its calendar months (``202107-202206``). Each row
-    compounds from the equity the year opened at (the previous year's close,
-    or the initial equity), so the rows chain back to ``total_return``;
-    ``turnover`` and ``trade_count`` keep the whole-window denominators and
-    therefore sum to the whole-window figures.
+    ``year_windows`` is the ``(start, end)`` calendar bounds (``YYYYMMDD``) of
+    the years the replay was requested over, in order: the arm's research years
+    (``ResearchGeometry.research_years``), carried on the evaluation request so
+    the rows divide the replay by the years it really has instead of assuming
+    they begin in July. A row is labelled by its months
+    (``201508-201607``) and keeps its year's bounds even where the replay covers
+    only part of that year. Each row compounds from the equity the year opened
+    at (the previous year's close, or the initial equity), so the rows chain
+    back to ``total_return``; ``turnover`` and ``trade_count`` keep the
+    whole-window denominators and therefore sum to the whole-window figures.
 
     ``partial`` marks a year the requested replay window ``start..end``
     (``YYYYMMDD`` calendar dates) does not span end to end — interior years
     never are. It must be measured against those calendar bounds, not against
     the first and last trading day: a window opening on the first trading day
-    of a year covers that year completely even though that day is rarely July
-    1. A caller that cannot state the requested window leaves both empty and
-    gets the replayed span instead, which reports the two end years partial
-    unless the replay itself reaches the calendar bounds.
+    of a year covers that year completely even though that day is rarely the
+    first of the month. A caller that cannot state the requested window leaves
+    both empty and gets the replayed span instead, which reports the end years
+    partial unless the replay itself reaches the calendar bounds.
+
+    A replay with no research years to report -- the forward and Held-out span,
+    a plain daily file -- states none, and its rows fall back to the calendar
+    July-June years of its own window, labelled ``july_june_year`` rather than
+    as research years. Those rows are a reading of the replay, not a claim that
+    the window is made of July-June years.
 
     ``benchmark_return`` / ``excess_return`` stay ``None`` until the
     evaluation backend joins the benchmark series in
@@ -375,27 +413,34 @@ def sub_window_stats(
     )
     if not rows:
         return []
-    buckets: dict[int, list[Mapping[str, object]]] = {}
+    windows = (
+        [_window_bounds(item) for item in year_windows]
+        if year_windows
+        else _july_june_windows(str(rows[0]["trade_date"]), str(rows[-1]["trade_date"]))
+    )
+    buckets: list[list[Mapping[str, object]]] = [[] for _ in windows]
     for row in rows:
-        buckets.setdefault(_block_key(str(row["trade_date"])), []).append(row)
-    traded, exits = _block_order_totals(executions)
-    keys = sorted(buckets)
+        buckets[_window_index(str(row["trade_date"]), windows)].append(row)
+    traded, exits = _window_order_totals(executions, windows)
+    kind = RESEARCH_YEAR_KIND if year_windows else JULY_JUNE_KIND
     window_start = _window_bound(start, "start") or str(rows[0]["trade_date"])
     window_end = _window_bound(end, "end") or str(rows[-1]["trade_date"])
     out: list[dict[str, object]] = []
     opening = initial
-    for key in keys:
-        block_rows = buckets[key]
+    for index, ((year_start, year_end), block_rows) in enumerate(
+        zip(windows, buckets, strict=True)
+    ):
+        if not block_rows:
+            continue
         equities = [float(row["equity"]) for row in block_rows]
         closing = equities[-1]
-        calendar_start, calendar_end = f"{key}0701", f"{key + 1}0630"
         # Every year is compared against the window itself; an interior one is
         # inside both bounds and therefore never partial.
-        partial = window_start > calendar_start or window_end < calendar_end
+        partial = window_start > year_start or window_end < year_end
         out.append(
             {
-                "kind": SUB_WINDOW_KIND,
-                "label": f"{key}07-{key + 1}06",
+                "kind": kind,
+                "label": f"{year_start[:6]}-{year_end[:6]}",
                 "start": str(block_rows[0]["trade_date"]),
                 "end": str(block_rows[-1]["trade_date"]),
                 "trade_days": len(block_rows),
@@ -405,10 +450,8 @@ def sub_window_stats(
                 "excess_return": None,
                 "sharpe": _round(_annualized_sharpe(opening, equities)),
                 "max_drawdown": _round(_max_drawdown(opening, equities)),
-                "turnover": _round(
-                    traded.get(key, 0.0) / initial if initial > 0 else 0.0
-                ),
-                "trade_count": exits.get(key, 0),
+                "turnover": _round(traded[index] / initial if initial > 0 else 0.0),
+                "trade_count": exits[index],
             }
         )
         opening = closing
@@ -553,30 +596,73 @@ def _window_bound(value: str, name: str) -> str:
     return text
 
 
-def _block_key(trade_date: str) -> int:
+def _window_bounds(window: tuple[str, str]) -> tuple[str, str]:
+    """One requested research year as two ordered ``YYYYMMDD`` bounds."""
+
+    start = _window_bound(window[0], "start")
+    end = _window_bound(window[1], "end")
+    if not start or not end or start > end:
+        raise ValueError(
+            f"a sub-window must be two ordered YYYYMMDD dates, got {window!r}"
+        )
+    return start, end
+
+
+def _july_year(trade_date: str) -> int:
     """The calendar year a July-June year starts in."""
 
     year, month = int(trade_date[:4]), int(trade_date[4:6])
     return year if month >= 7 else year - 1
 
 
-def _block_order_totals(
-    executions: Sequence[Mapping[str, object]],
-) -> tuple[dict[int, float], dict[int, int]]:
-    """Filled notional and realized exits per July-June year, by fill date."""
+def _july_june_windows(first_day: str, last_day: str) -> list[tuple[str, str]]:
+    """The calendar July-June years a replay without research years spans.
 
-    traded: dict[int, float] = {}
-    exits: dict[int, int] = {}
+    The one fallback of :func:`sub_window_stats`, for a replay whose request
+    states no years of its own: its rows are still the July-June calendar
+    blocks of a window nobody stated the geometry of, never research years.
+    """
+
+    return [
+        (f"{year}0701", f"{year + 1}0630")
+        for year in range(_july_year(first_day), _july_year(last_day) + 1)
+    ]
+
+
+def _window_index(day: str, windows: Sequence[tuple[str, str]]) -> int:
+    """Which year of ``windows`` covers ``day``.
+
+    A day outside every year is refused rather than dropped: it would silently
+    leave its fill and its equity out of the chain back to the whole window.
+    """
+
+    for index, (start, end) in enumerate(windows):
+        if start <= day <= end:
+            return index
+    raise ValueError(
+        f"replay day {day} is outside the requested years "
+        f"{windows[0][0]}..{windows[-1][1]}"
+    )
+
+
+def _window_order_totals(
+    executions: Sequence[Mapping[str, object]],
+    windows: Sequence[tuple[str, str]],
+) -> tuple[list[float], list[int]]:
+    """Filled notional and realized exits per year, by fill date."""
+
+    traded = [0.0] * len(windows)
+    exits = [0] * len(windows)
     for order in executions:
         if str(order.get("status") or "") != "filled":
             continue
         day = _fill_date(order)
         if not day:
             continue
-        key = _block_key(day)
-        traded[key] = traded.get(key, 0.0) + _filled_notional(order)
+        index = _window_index(day, windows)
+        traded[index] += _filled_notional(order)
         if order.get("realized_pnl") is not None:
-            exits[key] = exits.get(key, 0) + 1
+            exits[index] += 1
     return traded, exits
 
 

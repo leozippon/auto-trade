@@ -1,18 +1,27 @@
-"""Per July-June year sub-window breakdown of one replay window.
+"""Per research year sub-window breakdown of one replay window.
 
 A whole-window number alone cannot say whether an edge persisted or one
 stretch of market carried it, so every replay result carries the same metrics
-per July-June year, the blocks research, forward and Held-out are laid out in.
-These tests pin the properties that make the rows readable next to the
-whole-window figures — they chain back to ``total_return``, their turnover and
-trade counts sum to the whole-window ones, and an absent benchmark stays absent
-instead of becoming zero.
+per research year of its window, the years the arm's own geometry lays out
+(``pipelines/calendar.py ResearchGeometry.research_years``). These tests pin the
+properties that make the rows readable next to the whole-window figures — they
+use the years the replay was requested over, they chain back to
+``total_return``, their turnover and trade counts sum to the whole-window ones,
+and an absent benchmark stays absent instead of becoming zero.
 """
 
 from __future__ import annotations
 
+import json
+import shutil
+import tempfile
 import unittest
+from pathlib import Path
 
+import pandas as pd
+
+from autotrade.environment.broker import BrokerProfile
+from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.replay.stats import (
     ReplayResult,
     attach_sub_window_benchmark,
@@ -20,6 +29,15 @@ from autotrade.environment.replay.stats import (
     sub_window_stats,
     window_activity,
 )
+from autotrade.environment.strategy import StrategySchedule
+from autotrade.pipelines.calendar import ResearchGeometry
+from autotrade.pipelines.config import (
+    ArtifactRevision,
+    ReplaySpan,
+    SnapshotBundle,
+    research_span,
+)
+from autotrade.pipelines.local_backend import LocalDailyEvaluationBackend
 
 # Two July-June years, opened at 1000 and closed at 900. The first
 # round-trips to its opening equity (up 10%, back down); the second spikes then
@@ -80,8 +98,12 @@ class SubWindowStatsTest(unittest.TestCase):
     def test_partial_is_measured_against_the_requested_window(self) -> None:
         # The year's first trading day is the 4th: a replay of the whole year
         # covers it end to end all the same.
+        later = tuple(row for row in _CURVE if row["trade_date"] >= "20220701")
+        executions = tuple(
+            order for order in _EXECUTIONS if order["matched_at"] >= "2022-07"
+        )
         whole = sub_window_stats(
-            _CURVE[2:], _EXECUTIONS, initial=1000.0, start="20220701", end="20230630"
+            later, executions, initial=1000.0, start="20220701", end="20230630"
         )
         self.assertEqual([row["label"] for row in whole], ["202207-202306"])
         self.assertFalse(whole[0]["partial"])
@@ -89,7 +111,7 @@ class SubWindowStatsTest(unittest.TestCase):
         # covers only part of it.
         for start, end in (("20220801", "20230630"), ("20220701", "20230629")):
             rows = sub_window_stats(
-                _CURVE[2:], _EXECUTIONS, initial=1000.0, start=start, end=end
+                later, executions, initial=1000.0, start=start, end=end
             )
             self.assertTrue(rows[0]["partial"], (start, end))
 
@@ -237,6 +259,348 @@ class SubWindowBenchmarkTest(unittest.TestCase):
             [row["label"] for row in record["stats"]["sub_windows"]],
             ["202107-202206", "202207-202306"],
         )
+
+
+# A ten-year arm laid out from 1 August, the geometry that made the hardcoded
+# July boundary wrong: 20150801..20250731 is exactly ten whole years, and its
+# last one ends on 31 July instead of leaving a 23-day July tail.
+AUGUST_GEOMETRY = ResearchGeometry(
+    research_start="20150801",
+    research_end="20250731",
+    forward_end="20260731",
+    heldout_end="20261031",
+)
+
+
+def _year_windows(geometry: ResearchGeometry) -> tuple[tuple[str, str], ...]:
+    """The ``(start, end)`` bounds of a geometry's research years."""
+
+    return tuple((slot.start, slot.end) for slot in geometry.research_years)
+
+
+def _trading_days(start: str, end: str) -> list[str]:
+    return [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range(start, end)]
+
+
+def _path_curve(
+    days: list[str], *, opening: float = 1000.0, daily: float = 0.0004
+) -> tuple[dict[str, object], ...]:
+    """One end-of-day equity path over ``days``, opened at ``opening``."""
+
+    equity = opening
+    rows = []
+    for day in days:
+        equity *= 1.0 + daily
+        rows.append(
+            {
+                "trade_date": day,
+                "initial_equity": opening,
+                "equity": equity,
+                "cash": equity * 0.5,
+            }
+        )
+    return tuple(rows)
+
+
+def _stamp(day: str) -> str:
+    return f"{day[:4]}-{day[4:6]}-{day[6:]}T09:30:00+08:00"
+
+
+def _round_trips(
+    windows: tuple[tuple[str, str], ...], days: list[str]
+) -> tuple[dict[str, object], ...]:
+    """One buy and one realised exit per year, on the first and last day it holds."""
+
+    orders: list[dict[str, object]] = []
+    for start, end in windows:
+        first = next(day for day in days if start <= day <= end)
+        last = max(day for day in days if start <= day <= end)
+        orders.append(
+            {
+                "status": "filled",
+                "action": "buy",
+                "price": 10.0,
+                "quantity": 100,
+                "matched_at": _stamp(first),
+            }
+        )
+        orders.append(
+            {
+                "status": "filled",
+                "action": "sell",
+                "price": 11.0,
+                "quantity": 100,
+                "realized_pnl": 100.0,
+                "matched_at": _stamp(last),
+            }
+        )
+    return tuple(orders)
+
+
+class SubWindowResearchYearTest(unittest.TestCase):
+    """The rows are the arm's own research years, not July-June calendar blocks."""
+
+    def setUp(self) -> None:
+        self.windows = _year_windows(AUGUST_GEOMETRY)
+        self.days = _trading_days(
+            AUGUST_GEOMETRY.research_start, AUGUST_GEOMETRY.research_end
+        )
+
+    def rows(
+        self, windows: tuple[tuple[str, str], ...], days: list[str]
+    ) -> list[dict[str, object]]:
+        return sub_window_stats(
+            _path_curve(days),
+            _round_trips(windows, days),
+            initial=1000.0,
+            start=windows[0][0],
+            end=windows[-1][1],
+            year_windows=windows,
+        )
+
+    def test_one_row_per_research_year_of_a_month_start_geometry(self) -> None:
+        rows = self.rows(self.windows, self.days)
+        self.assertEqual(
+            [row["label"] for row in rows],
+            [f"{start[:6]}-{end[:6]}" for start, end in self.windows],
+        )
+        self.assertEqual(len(rows), 10)
+        self.assertEqual([row["kind"] for row in rows], ["research_year"] * 10)
+        # The window spans every year end to end, so none is partial, and the
+        # last row ends on the geometry's own last day: no July tail block.
+        self.assertEqual([row["partial"] for row in rows], [False] * 10)
+        self.assertEqual((rows[0]["start"], rows[-1]["end"]), ("20150803", "20250731"))
+        self.assertTrue(all(int(row["trade_days"]) > 200 for row in rows))
+
+    def test_a_span_of_the_last_four_years_is_four_whole_rows(self) -> None:
+        windows = self.windows[6:]
+        days = [day for day in self.days if day >= windows[0][0]]
+        rows = self.rows(windows, days)
+        self.assertEqual(
+            [row["label"] for row in rows],
+            [f"{start[:6]}-{end[:6]}" for start, end in windows],
+        )
+        # Each row holds every trading day of its own year: the span is not
+        # re-split into calendar blocks plus a leftover tail.
+        self.assertEqual(
+            [row["trade_days"] for row in rows],
+            [
+                len([day for day in days if start <= day <= end])
+                for start, end in windows
+            ],
+        )
+        self.assertFalse(any(row["partial"] for row in rows))
+
+    def test_a_window_cut_inside_one_year_keeps_that_years_bounds(self) -> None:
+        days = [day for day in self.days if "20160301" <= day <= "20160630"]
+        rows = sub_window_stats(
+            _path_curve(days),
+            (),
+            initial=1000.0,
+            start="20160301",
+            end="20160630",
+            year_windows=self.windows,
+        )
+        [row] = rows
+        # A probe inside the first research year reports that year, marked
+        # partial, rather than a year re-anchored on the probe's own dates.
+        self.assertEqual(row["label"], "201508-201607")
+        self.assertEqual(row["kind"], "research_year")
+        self.assertTrue(row["partial"])
+        self.assertEqual((row["start"], row["end"]), (days[0], days[-1]))
+
+    def test_a_leap_day_belongs_to_the_year_that_contains_it(self) -> None:
+        geometry = ResearchGeometry("20160201", "20200131", "20210131", "20210430")
+        windows = _year_windows(geometry)
+        self.assertEqual(
+            windows,
+            (
+                ("20160201", "20170131"),
+                ("20170201", "20180131"),
+                ("20180201", "20190131"),
+                ("20190201", "20200131"),
+            ),
+        )
+        days = ["20160226", "20160229", "20160301", "20170131", "20170201", "20200131"]
+        rows = sub_window_stats(
+            _path_curve(days),
+            (),
+            initial=1000.0,
+            start=geometry.research_start,
+            end=geometry.research_end,
+            year_windows=windows,
+        )
+        # The empty third year reports no row; the others hold the days that
+        # fall inside them, leap day included.
+        self.assertEqual(
+            [row["label"] for row in rows],
+            ["201602-201701", "201702-201801", "201902-202001"],
+        )
+        self.assertEqual(
+            [row["trade_days"] for row in rows],
+            [4, 1, 1],
+        )
+        self.assertEqual([row["partial"] for row in rows], [False, False, False])
+
+    def test_the_rows_compound_and_sum_back_to_the_whole_window(self) -> None:
+        curve = _path_curve(self.days)
+        executions = _round_trips(self.windows, self.days)
+        whole = compute_return_stats(
+            ReplayResult(curve, executions, (), ()),
+            start=AUGUST_GEOMETRY.research_start,
+            end=AUGUST_GEOMETRY.research_end,
+            year_windows=self.windows,
+        )
+        rows = whole["sub_windows"]
+        compounded = 1.0
+        for row in rows:
+            compounded *= 1.0 + float(row["return"])
+        # Row returns are rounded to six decimals, and ten of them compound
+        # the rounding up: the chain is checked at that tolerance, not exactly.
+        self.assertAlmostEqual(compounded - 1.0, whole["total_return"], places=4)
+        self.assertAlmostEqual(
+            sum(float(row["turnover"]) for row in rows), whole["turnover"], places=5
+        )
+        self.assertEqual(
+            sum(int(row["trade_count"]) for row in rows), whole["trade_count"]
+        )
+
+    def test_the_years_ride_in_the_persisted_replay_record(self) -> None:
+        result = ReplayResult(
+            _path_curve(self.days),
+            _round_trips(self.windows, self.days),
+            (),
+            (),
+        )
+        record = result.to_record(
+            start=AUGUST_GEOMETRY.research_start,
+            end=AUGUST_GEOMETRY.research_end,
+            year_windows=self.windows,
+        )
+        self.assertEqual(len(record["stats"]["sub_windows"]), 10)
+        self.assertEqual(record["stats"]["sub_windows"][-1]["label"], "202408-202507")
+
+    def test_explicit_july_june_years_read_as_the_calendar_fallback(self) -> None:
+        """A July-June geometry keeps the rows it always had; only the kind says
+        whether they are research years or a calendar fallback."""
+
+        fallback = sub_window_stats(_CURVE, _EXECUTIONS, initial=1000.0)
+        explicit = sub_window_stats(
+            _CURVE,
+            _EXECUTIONS,
+            initial=1000.0,
+            year_windows=(("20210701", "20220630"), ("20220701", "20230630")),
+        )
+        self.assertEqual(
+            [{key: value for key, value in row.items() if key != "kind"} for row in explicit],
+            [{key: value for key, value in row.items() if key != "kind"} for row in fallback],
+        )
+        self.assertEqual([row["kind"] for row in fallback], ["july_june_year"] * 2)
+        self.assertEqual([row["kind"] for row in explicit], ["research_year"] * 2)
+
+    def test_a_day_outside_the_declared_years_is_refused(self) -> None:
+        with self.assertRaisesRegex(ValueError, "outside the requested years"):
+            sub_window_stats(
+                ({"trade_date": "20220704", "equity": 100.0},),
+                (),
+                initial=1000.0,
+                year_windows=(("20220801", "20230630"),),
+            )
+
+    def test_a_malformed_year_is_refused(self) -> None:
+        curve = ({"trade_date": "20220704", "equity": 100.0},)
+        with self.assertRaisesRegex(ValueError, "two ordered YYYYMMDD dates"):
+            sub_window_stats(
+                curve, (), initial=1000.0, year_windows=(("20230101", "20220701"),)
+            )
+        with self.assertRaisesRegex(ValueError, "must be YYYYMMDD"):
+            sub_window_stats(
+                curve, (), initial=1000.0, year_windows=(("2022-08-01", "20230630"),)
+            )
+
+
+IDLE_STRATEGY = """def generate_orders(context):
+    return []
+"""
+
+
+class SubWindowRequestTest(unittest.TestCase):
+    """The years travel from the span request through the backend into stats.
+
+    The statistics cannot see the geometry; the only thing that can tell them
+    what years to divide a replay by is the request the backend is handed.
+    """
+
+    GEOMETRY = ResearchGeometry(
+        research_start="20150801",
+        research_end="20170731",
+        forward_end="20180731",
+        heldout_end="20181031",
+    )
+
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp(prefix="sub_window_stats_"))
+        self.addCleanup(shutil.rmtree, self.root, True)
+        days = _trading_days(self.GEOMETRY.research_start, self.GEOMETRY.research_end)
+        daily = self.root / "daily.parquet"
+        pd.DataFrame(
+            {
+                "trade_date": days,
+                "symbol": ["000001.SZ"] * len(days),
+                "open": [10.0] * len(days),
+                "close": [10.5] * len(days),
+                "pre_close": [10.5] * len(days),
+            }
+        ).to_parquet(daily, index=False)
+        strategy = self.root / "strategy"
+        strategy.mkdir()
+        (strategy / "main.py").write_text(IDLE_STRATEGY, encoding="utf-8")
+        self.revision = ArtifactRevision("r1", strategy, None)
+        snapshot = SnapshotBundle("snap", str(daily), str(daily))
+        self.years = tuple(
+            ReplaySpan(slot.label, "valid", slot.start, slot.end, snapshot)
+            for slot in self.GEOMETRY.research_years
+        )
+        self.backend = LocalDailyEvaluationBackend(
+            daily,
+            self.root / "results",
+            execution_mode="trusted",
+            benchmark_index=DEFAULT_BENCHMARK_INDEX,
+        )
+
+    def evaluate(self, **kwargs: object) -> list[dict[str, object]]:
+        span = research_span(self.years, "full")
+        result = self.backend.evaluate(
+            span.request(
+                self.revision,
+                schedule=StrategySchedule("day", "09:00"),
+                broker_profile=BrokerProfile(initial_cash=100_000),
+            ),
+            **kwargs,  # type: ignore[arg-type]
+        )
+        record = json.loads(Path(result.result_ref).read_text(encoding="utf-8"))
+        return record["stats"]["sub_windows"]
+
+    def test_the_research_years_reach_the_stats_through_the_request(self) -> None:
+        rows = self.evaluate()
+        self.assertEqual(
+            [row["label"] for row in rows],
+            [
+                f"{slot.start[:6]}-{slot.end[:6]}"
+                for slot in self.GEOMETRY.research_years
+            ],
+        )
+        self.assertEqual([row["kind"] for row in rows], ["research_year"] * 2)
+        self.assertEqual([row["partial"] for row in rows], [False, False])
+
+    def test_a_truncated_probe_keeps_the_year_it_was_cut_from(self) -> None:
+        second = self.GEOMETRY.research_years[1]
+        rows = self.evaluate(max_days=5, start_day="20160901")
+        [row] = rows
+        self.assertEqual(row["label"], f"{second.start[:6]}-{second.end[:6]}")
+        self.assertTrue(row["partial"])
+        self.assertEqual(row["start"], "20160901")
+        self.assertLessEqual(row["end"], second.end)
 
 
 class WindowActivityTest(unittest.TestCase):

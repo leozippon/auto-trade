@@ -173,7 +173,9 @@ class LocalDailyEvaluationBackend:
             config,
             executor_factory=self.executor_factory,
         ).run(frame)
-        record = replay.to_record(start=replay_start, end=replay_end)
+        record = replay.to_record(
+            start=replay_start, end=replay_end, year_windows=request.year_windows
+        )
         with timer.phase("style_analysis"):
             style = replay_style_analysis(
                 replay,

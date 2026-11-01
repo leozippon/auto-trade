@@ -843,6 +843,12 @@ class EvaluationRequest:
     # order: the span runs as one replay from ``start`` (the first slot's
     # start) to ``end`` (the last slot's end).
     continuation: tuple[str, ...] = ()
+    # The research years this replay covers, as ``(start, end)`` calendar
+    # bounds in order, which is how the sub-window statistics divide the
+    # window. Empty when the request is not over research years -- the forward
+    # and Held-out span, a plain daily file -- so a replay can never report
+    # years it does not have.
+    year_windows: tuple[tuple[str, str], ...] = ()
     # The cards this replay's strategy containers attach: a leg of a
     # concurrent batch gets one of the arm's (``session_tools.leg_cards``);
     # None attaches every card the evaluator's sandbox pins.
@@ -864,6 +870,11 @@ class ReplaySpan:
     end: str
     snapshot: SnapshotBundle
     continuation: tuple[str, ...] = ()
+    # The research years the span is made of, as ``(start, end)`` bounds in
+    # order; empty for a span that is not over research years (the forward and
+    # Held-out span). It rides on the evaluation request so the sub-window
+    # statistics use the years the arm really researches.
+    year_windows: tuple[tuple[str, str], ...] = ()
 
     @property
     def slots(self) -> int:
@@ -887,6 +898,7 @@ class ReplaySpan:
             schedule=schedule,
             broker_profile=broker_profile,
             continuation=self.continuation,
+            year_windows=self.year_windows,
         )
 
 
@@ -932,6 +944,9 @@ def research_span(years: Sequence[ReplaySpan], label: str) -> ReplaySpan:
         end=chosen[-1].end,
         snapshot=chosen[0].snapshot,
         continuation=tuple(year.snapshot.replay_ref for year in chosen[1:]),
+        # Each chosen span is one research year of the geometry, so its own
+        # bounds are that year's: the one place the years are read from.
+        year_windows=tuple((year.start, year.end) for year in chosen),
     )
 
 

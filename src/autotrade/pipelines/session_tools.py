@@ -1286,7 +1286,7 @@ BATCH_CANDIDATE_SUMMARY_KEYS = (
     "pnl_concentration",
     "sub_windows",
 )
-# A multi-year span has one sub-window row per July-June year, and a batch
+# A multi-year span has one sub-window row per research year, and a batch
 # multiplies that by the number of candidates. A row keeps the columns a
 # screening comparison is made on; the node's result.json keeps the full table.
 # The active excess rides with the raw one because the freeze gate and the
