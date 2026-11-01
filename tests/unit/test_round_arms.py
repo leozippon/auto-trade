@@ -1165,42 +1165,52 @@ def test_a_starter_carries_the_canonical_book_byte_for_byte(pack: Path) -> None:
     )
 
 
-# Round 20261102 researches the ten-year memory direction on a CNY 200k
-# account: the account is its one departure from round 20261031, which shares
-# its geometry, seed and pack skeleton on the 100k account.
+# Round 20261102 frees the ten-year research direction from a specification:
+# it starts one session, gpt-6-astra on the local console, on a CNY 200k
+# account, and its pack frames the owner's memory note as a reference rather
+# than an implementation list. Beside round 20261031, which shares its
+# geometry and seed on the 100k account, the account, the pack, the id and the
+# direction text are the only differences.
 ROUND_200K = "create_round_20261102"
 ROUND_100K_10Y = "create_round_20261031"
 PACK_200K = "configs/workspace_refs/memory_200k_rolling_20261102"
 PACK_100K_10Y = "configs/workspace_refs/memory_100k_rolling_20261031"
+ASTRA_200K = "memory_200k_10y_astra_local_20261102"
+ASTRA_100K_10Y = "memory_100k_10y_astra_local_20261031"
 
 
-def test_the_200k_round_changes_only_the_account_pack_and_arm_ids() -> None:
-    """Keep the research setup while changing capital and leaving allocation free."""
+def test_the_200k_round_uses_one_astra_experiment() -> None:
+    """Keep the research setup while changing capital, pack and direction text."""
     rnd = ROUNDS[ROUND_200K]
     earlier = ROUNDS[ROUND_100K_10Y]
-    assert len(rnd.arms) == 2 and len(earlier.arms) == 2
-    now = rnd.request_params("memory_200k_10y_argon_local_20261102")
-    before = earlier.request_params("memory_100k_10y_argon_local_20261031")
+    # One session, on the key and the model the operator starts by hand.
+    assert list(rnd.arms) == [ASTRA_200K]
+    assert ASTRA_100K_10Y in earlier.arms
+    now = rnd.request_params(ASTRA_200K)
+    before = earlier.request_params(ASTRA_100K_10Y)
     assert set(now) == set(before)
     assert {key for key in now if now[key] != before[key]} == {
         "experiment_id",
         "initial_cash",
         "workspace_reference",
+        "research_directive",
     }
     assert now["initial_cash"] == 200_000
     assert before["initial_cash"] == 100_000
     assert now["workspace_reference"] == PACK_200K
     assert rnd.pit_views_seed == earlier.pit_views_seed
-    for experiment_id in rnd.arms:
-        params = rnd.request_params(experiment_id)
-        assert "200k" in experiment_id and experiment_id.endswith("_20261102")
-        assert params["max_total_holdings"] is None
-        assert params["max_single_name_weight"] is None
-        assert params["permitted_boards"] == ["main", "gem"]
+    assert (now["model"], now["llm_key"], now["reasoning_effort"]) == ("gpt-6-astra", "alternate", "xhigh")
+    assert (now["subagent_model"], now["compact_model"]) == ("DeepSeek-V4.1-Flash",) * 2
+    assert now["compact_token_threshold"] == 221_184
+    assert "200k" in ASTRA_200K and ASTRA_200K.endswith("_20261102")
+    # The session decides how many names it holds and how heavy each is.
+    assert now["max_total_holdings"] is None
+    assert now["max_single_name_weight"] is None
+    assert now["permitted_boards"] == ["main", "gem"]
 
 
 def test_the_200k_pack_copies_the_owner_note_and_keeps_no_earlier_quota() -> None:
-    """The isolated pack preserves the owner note without old quotas or future results."""
+    """Preserve the owner note without old quotas, future results or ambiguous terms."""
     from tests.unit.test_retrieval_pack import AFTER_RESEARCH
 
     pack = REPO_ROOT / PACK_200K
@@ -1214,3 +1224,7 @@ def test_the_200k_pack_copies_the_owner_note_and_keeps_no_earlier_quota() -> Non
     # The taxes that move with the date and the run are the host's.
     assert "运行事实" in readme and "印花税" in readme and "红利税" in readme
     assert not [word for word in AFTER_RESEARCH if word in readme]
+    # The note is a reference the session may argue with, and the pack speaks
+    # the round's words; either anchor alone is too short to be a snapshot.
+    assert "工作假说" in readme
+    assert not [word for word in ("臂", "席位", "零技能") if word in readme]
