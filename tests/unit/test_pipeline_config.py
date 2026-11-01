@@ -18,6 +18,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from autotrade.environment.broker import BrokerProfile
+from autotrade.environment.gpu import host_min_free_gpu_memory_mib
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.pipelines import verdict
 from autotrade.pipelines.calendar import ResearchGeometry
@@ -33,7 +34,7 @@ from autotrade.pipelines.config import (
     acceptance_for,
 )
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
-from tests.unit.gpu_probe import stubbed_gpu_probe
+from tests.unit.gpu_probe import gpu_roster, stubbed_gpu_probe
 
 #: The console create form is seeded from the pinned explore profile so a
 #: new experiment hardlinks the PIT view seed. Period, screen, compact, and
@@ -937,10 +938,15 @@ class ConsoleParameterSurfaceTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(tmp)
+            # A busy card is still eligible unless its free memory is below the margin.
+            kept = host_min_free_gpu_memory_mib() - 1
+            roster = gpu_roster([0], busy=[1])
+            short = next(row for row in roster if row["index"] == 1)
+            short["memory_used_mib"] = int(short["memory_total_mib"]) - kept
+            short["memory_free_mib"] = kept
             with (
                 patch.object(ExperimentManager, "start_worker", return_value={"spawned": False}),
-                # One idle card, one another process uses.
-                stubbed_gpu_probe([0], busy=[1]),
+                patch("autotrade.environment.gpu.list_gpus", return_value=roster),
             ):
                 response = TestClient(create_app(repo_root)).post(
                     "/api/experiments",
@@ -953,8 +959,9 @@ class ConsoleParameterSurfaceTest(unittest.TestCase):
                     },
                 )
             self.assertEqual(response.status_code, 400, response.text)
-            self.assertIn("当前 GPU 无法满足实验默认分配", response.json()["detail"])
-            self.assertIn("requested 2 GPU(s), 1 free (0)", response.json()["detail"])
+            detail = response.json()["detail"]
+            self.assertIn("当前 GPU 无法满足实验默认分配", detail)
+            self.assertIn("requested 2 GPU(s), 1 free (0)", detail)
             self.assertFalse((repo_root / "experiments/params_gpu").exists())
 
 
