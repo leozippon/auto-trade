@@ -539,7 +539,8 @@ class _PnlData:
                         "down_limit": round(pre_close * 0.9, 2),
                     })
         actions = pd.DataFrame(
-            [{"ts_code": PNL_B, "ex_date": "20260107", "cash_per_share": 0.5, "bonus_per_share": 0.0}]
+            [{"ts_code": PNL_B, "ex_date": "20260107", "record_date": "20260106",
+              "cash_per_share": 0.5, "bonus_per_share": 0.0}]
         )
         columns = ["ts_code", "trade_date", "open", "close", "pre_close", "up_limit", "down_limit"]
         self.market = DailyMarketData(pd.DataFrame(rows, columns=columns), actions)
@@ -671,6 +672,31 @@ def test_a_taxed_book_shows_the_dividend_tax_in_its_costs_and_its_names(tmp_path
     [fill] = [row for row in day["fills"] if row["symbol"] == PNL_B]
     assert fill["dividend_tax"] == pytest.approx(50.0)
     assert fill["cost"] == pytest.approx(sale["commission"] + sale["stamp_duty"] + 50.0)
+
+
+def test_withholding_is_counted_once_in_performance_and_instrument_cash_flows(tmp_path: Path):
+    root = _pnl_book(tmp_path, dividend_tax=True)
+    # Add an already-settled withholding expense without changing gross cash
+    # credits or fill records, exactly as the engine journals that expense.
+    journal = root / "corporate_actions_20260107.jsonl"
+    [action] = read_jsonl(journal)[0]
+    action["dividend_tax_withheld"] = 12.5
+    journal.write_text(json.dumps(action) + "\n", encoding="utf-8")
+    state_path = root / trading.PAPER_STATE_NAME
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["account"]["cash"] -= 12.5
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    equity_path = root / trading.EQUITY_JOURNAL_NAME
+    rows = read_jsonl(equity_path)[0]
+    rows[-1]["cash"] -= 12.5
+    rows[-1]["equity"] -= 12.5
+    equity_path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    payload = trading.pnl_payload(tmp_path, BOOK)
+    b = next(row for row in payload["instruments"] if row["symbol"] == PNL_B)
+    assert b["dividends"] == 250.0
+    assert b["dividend_tax"] == 62.5
+    assert payload["residual"] == 0.0
+    assert trading.performance_payload(tmp_path, BOOK)["statistics"]["dividend_tax"] == 62.5
 
 
 def test_a_book_is_switched_to_real_fills_recorded_and_compared_through_the_console(tmp_path: Path, monkeypatch):

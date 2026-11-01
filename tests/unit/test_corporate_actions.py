@@ -117,6 +117,7 @@ def test_replay_settles_the_ex_date_from_pre_close_and_the_slot_cash_table():
             "quantity_before": 1000,
             "quantity_after": 2000,
             "cash_credit": pytest.approx(500.0),
+            "dividend_tax_withheld": 0.0,
         },
     )
     record = result.to_record()

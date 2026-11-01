@@ -17,6 +17,7 @@ from datetime import date, datetime, time
 import numpy as np
 import pandas as pd
 
+from autotrade.environment.distributions import Distribution, distribution_record_date
 from autotrade.environment.strategy import (
     CN_TZ,
     BarTable,
@@ -46,7 +47,7 @@ class DailyMarketData:
         column existed leaves it unknown. A formal replay slot always passes the
         table; None is only for synthetic frames in unit tests and the
         single-file ``daily`` Paper backend, which have no dividends at all."""
-        self._cash_dividends, self._bonus_shares = _distributions_by_ex_date(corporate_actions)
+        self._distributions = _distributions_by_ex_date(corporate_actions)
         columns = list(daily.columns)
         symbol_source = "symbol"
         if "symbol" not in columns and "ts_code" in columns:
@@ -122,15 +123,16 @@ class DailyMarketData:
     def cash_dividends_for_day(self, trade_date: str) -> Mapping[str, float]:
         """Cash dividend per share of every name going ex on ``trade_date``."""
 
-        return self._cash_dividends.get(str(trade_date), {})
+        return {
+            symbol: event.cash_per_share
+            for symbol, event in self.distributions_for_day(trade_date).items()
+            if event.cash_per_share
+        }
 
-    def bonus_shares_for_day(self, trade_date: str) -> Mapping[str, float] | None:
-        """Bonus shares (送股) per share of every name going ex on
-        ``trade_date``, or None when the ex-date table does not carry them."""
+    def distributions_for_day(self, trade_date: str) -> Mapping[str, Distribution]:
+        """One parsed source for the Broker and the null panel's cash projection."""
 
-        if self._bonus_shares is None:
-            return None
-        return self._bonus_shares.get(str(trade_date), {})
+        return self._distributions.get(str(trade_date), {})
 
     def visible_at(self, inference_at: datetime) -> _BarPrefix:
         if inference_at.tzinfo is None or inference_at.utcoffset() is None:
@@ -162,52 +164,49 @@ class _DayBars(Mapping[str, Mapping[str, object]]):
 
 def _distributions_by_ex_date(
     actions: pd.DataFrame | None,
-) -> tuple[dict[str, dict[str, float]], dict[str, dict[str, float]] | None]:
-    """``{ex_date: {symbol: per share}}`` of cash and of bonus shares from a
-    corporate-actions frame; the bonus map is None when the frame has no
-    ``bonus_per_share`` column.
-
-    Zero amounts carry nothing the Broker needs from the table and are
-    skipped; several events of one name on one ex-date share the record-date
-    share base and are summed.
-    """
+) -> dict[str, dict[str, Distribution]]:
+    """Parse once; refuse taxable rows without an unambiguous record date."""
 
     if actions is None:
-        return {}, {}
+        return {}
     symbol_column = "symbol" if "symbol" in actions.columns else "ts_code"
     missing = [
-        column
-        for column in (symbol_column, "ex_date", "cash_per_share")
+        column for column in (symbol_column, "ex_date", "cash_per_share")
         if column not in actions.columns
     ]
     if missing:
         raise ValueError(f"corporate actions missing columns: {missing}")
     has_bonus = "bonus_per_share" in actions.columns
-    cash_out: dict[str, dict[str, float]] = {}
-    bonus_out: dict[str, dict[str, float]] = {}
-    for symbol, ex_date, cash, bonus in zip(
-        actions[symbol_column],
-        actions["ex_date"],
-        actions["cash_per_share"],
-        actions["bonus_per_share"] if has_bonus else [0.0] * len(actions),
-        strict=True,
-    ):
-        for out, column, value in (
-            (cash_out, "cash_per_share", cash),
-            (bonus_out, "bonus_per_share", bonus),
-        ):
+    out: dict[str, dict[str, Distribution]] = {}
+    for row in actions.to_dict("records"):
+        symbol, ex_date = _symbol_text(row[symbol_column]), _date_text(row["ex_date"])
+        amounts = []
+        for column in ("cash_per_share", "bonus_per_share"):
+            value = row.get(column, 0.0)
             try:
                 amount = float(value)
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"invalid {column} for {symbol} on {ex_date}: {value!r}") from exc
             if not math.isfinite(amount) or amount < 0:
                 raise ValueError(f"invalid {column} for {symbol} on {ex_date}: {value!r}")
-            if amount == 0.0:
-                continue
-            day = out.setdefault(_date_text(ex_date), {})
-            key = _symbol_text(symbol)
-            day[key] = day.get(key, 0.0) + amount
-    return cash_out, bonus_out if has_bonus else None
+            amounts.append(amount)
+        cash, bonus = amounts
+        record_date = None
+        if cash or bonus:
+            try:
+                record_date = distribution_record_date([_date_text(row.get("record_date"))])
+            except ValueError as exc:
+                raise ValueError(f"{symbol} on {ex_date}: invalid dividend record_date: {exc}") from exc
+        day = out.setdefault(ex_date, {})
+        previous = day.get(symbol, Distribution(bonus_per_share=0.0 if has_bonus else None))
+        if record_date and previous.record_date:
+            record_date = distribution_record_date([record_date, previous.record_date])
+        day[symbol] = Distribution(
+            cash_per_share=previous.cash_per_share + cash,
+            bonus_per_share=((previous.bonus_per_share or 0.0) + bonus) if has_bonus else None,
+            record_date=record_date or previous.record_date,
+        )
+    return out
 
 
 def _normalized_codes(series: pd.Series, normalize: Callable[[object], str]) -> tuple[np.ndarray, list[str]]:

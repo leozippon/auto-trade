@@ -570,7 +570,12 @@ class DefaultsDriftTest(unittest.TestCase):
         self.assertEqual(current.rolling.acceptance, AcceptanceRules())
         policy = _broker_replay_facts({"broker_profile": profile.to_record()})["dividend_tax_policy"]
         self.assertTrue(policy["charged"])
-        self.assertEqual(policy["rate_by_months_held_at_most"], {"1": 0.2, "12": 0.1})
+        self.assertEqual(policy["record_date_cutover"], "20150908")
+        old, new = policy["rules"]["2012_85"], policy["rules"]["2015_101"]
+        self.assertEqual(old["withholding_rate"], 0.05)
+        self.assertEqual(new["withholding_rate"], 0.0)
+        self.assertEqual(old["final_rate_by_months_held_at_most"], {"1": 0.2, "12": 0.1})
+        self.assertEqual((old["final_rate_beyond"], new["final_rate_beyond"]), (0.05, 0.0))
 
     def test_the_permitted_boards_are_pinned_per_arm_and_stated_only_where_pinned(self) -> None:
         """An arm without the key buys on every board and its facts say nothing

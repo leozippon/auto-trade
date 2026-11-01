@@ -88,6 +88,7 @@ from autotrade.environment.data.units import (
     normalize_daily_units,
     validate_snapshot_units,
 )
+from autotrade.environment.distributions import distribution_record_date
 from autotrade.environment.runtime import new_id, utc_now_iso
 
 SNAPSHOT_DOMAIN_WORKERS = 3
@@ -1494,13 +1495,22 @@ class SnapshotBuilder:
         frame = frame[(frame["cash_per_share"] > 0.0) | (frame["stock_per_share"] > 0.0)]
         if frame.empty:
             return empty, meta
+        # Taxable rows must retain one proven record-date share base. Never
+        # pick the first date (or the ex-date) to guess a tax regime.
+        for (symbol, ex_date), group in frame.groupby(["ts_code", "ex_date"]):
+            taxable = group[(group["cash_per_share"] > 0.0) | (group["bonus_per_share"] > 0.0)]
+            try:
+                record_date = distribution_record_date(taxable["record_date"]) if not taxable.empty else ""
+            except ValueError as exc:
+                raise ValueError(f"{symbol} on {ex_date}: {exc}") from exc
+            frame.loc[group.index, "record_date"] = record_date
         out = (
             frame.groupby(["ts_code", "ex_date"], as_index=False)
             .agg(
                 cash_per_share=("cash_per_share", "sum"),
                 stock_per_share=("stock_per_share", "sum"),
                 bonus_per_share=("bonus_per_share", "sum"),
-                record_date=("record_date", "first"),
+                record_date=("record_date", "max"),
                 pay_date=("pay_date", "first"),
                 div_listdate=("div_listdate", "max"),
             )

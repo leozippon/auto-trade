@@ -1946,6 +1946,18 @@ class SnapshotBuilderTest(unittest.TestCase):
             meta = manifest["domains"]["corporate_actions"]
             self.assertEqual(meta["rows"], 1)
             self.assertEqual(meta["dropped"]["announced_after_ex_date"], 1)
+            # Validate before aggregation: neither an unknown date nor a
+            # conflicting entitlement may disappear behind groupby(first).
+            for dates in (("",), ("20150907", "20150908")):
+                with self.subTest(record_dates=dates):
+                    write(events_root / "dividend" / "available_month=202109.parquet", pd.DataFrame([
+                        dividend(record_date=day, end_date=f"2020{index + 1:02d}28", business_key=f"bad{index}")
+                        for index, day in enumerate(dates)
+                    ]))
+                    with self.assertRaisesRegex(ValueError, "record_date|dividend tax date"):
+                        SnapshotBuilder(raw, events_root)._build_corporate_actions(
+                            "20211007", "20211011", pd.Timestamp("2021-10-11T23:59:59", tz=CN_TZ)
+                        )
 
     def test_replay_refuses_a_dividend_store_that_does_not_precede_the_slot(self):
         # The ex-date table is the Broker's only cash-dividend source. A store

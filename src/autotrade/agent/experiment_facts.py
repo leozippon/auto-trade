@@ -10,8 +10,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from autotrade.environment.broker_core import BONUS_SHARE_PAR_CNY, DIVIDEND_TAX_TIERS
 from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
+from autotrade.environment.dividend_tax import (
+    BONUS_SHARE_PAR_CNY,
+    DIVIDEND_TAX_CUTOVER,
+    NEW_RULE,
+    OLD_RULE,
+)
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.replay.style import regression_method
 from autotrade.environment.sandbox import SCREENING_TOOL_MOUNT, container_thread_env
@@ -479,13 +484,25 @@ def _broker_replay_facts(manifest: Mapping[str, object]) -> dict[str, object]:
             "dividend_tax_policy": (
                 {
                     "charged": True,
-                    "charged_at": "each_sale_on_the_dividends_its_shares_received_fifo",
+                    "charged_at": "old_rule_withholding_on_ex_date_then_fifo_sale_supplement",
+                    "regime_selected_by": "dividend_record_date_not_ex_date_or_sale_date",
+                    "record_date_cutover": DIVIDEND_TAX_CUTOVER,
+                    "holding_period": "acquisition_through_day_before_sale_natural_months_and_years",
                     "taxable_income_per_share": "gross_cash_dividend_plus_bonus_shares_times_par",
                     "bonus_share_par_cny": BONUS_SHARE_PAR_CNY,
-                    "rate_by_months_held_at_most": {
-                        str(months): rate for months, rate in DIVIDEND_TAX_TIERS
+                    "rules": {
+                        rule.key: {
+                            "record_dates": "before_cutover_since_2013" if rule == OLD_RULE else "from_cutover",
+                            "withholding_rate": rule.withholding_rate,
+                            "final_rate_by_months_held_at_most": {
+                                str(months): rate for months, rate in rule.tiers
+                            },
+                            "final_rate_beyond": rule.rate_beyond,
+                            "sale_supplement": "final_rate_minus_withholding_rate",
+                        }
+                        for rule in (OLD_RULE, NEW_RULE)
                     },
-                    "rate_beyond": 0.0,
+                    "conventions": "ex_date_cash_settlement_bonus_shares_keep_original_acquisition_date_conversions_not_income",
                 }
                 if profile.get("dividend_tax") is True
                 else {"charged": False}

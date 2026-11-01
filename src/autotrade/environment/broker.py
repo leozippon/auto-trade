@@ -11,13 +11,18 @@ from types import MappingProxyType
 
 from autotrade.environment.broker_core import (
     BOARDS,
-    BONUS_SHARE_PAR_CNY,
     STAMP_DUTY_CUTOVER,
     CostModel,
     board_of,
-    dividend_tax_rate,
     reduce_amount_reject,
     validate_buy_lot,
+)
+from autotrade.environment.distributions import Distribution
+from autotrade.environment.dividend_tax import (
+    BONUS_SHARE_PAR_CNY,
+    OLD_RULE,
+    dividend_tax_due,
+    dividend_tax_rule,
 )
 from autotrade.environment.strategy import StrategyOrder
 
@@ -75,8 +80,8 @@ class BrokerProfile:
     slippage_bps: float = 5.0
     max_total_holdings: int | None = None
     max_single_name_weight: float | None = None
-    # The individual dividend tax, charged at each sale on the dividends the
-    # sold shares received (``broker_core.dividend_tax_rate``). Every arm's
+    # Individual dividend tax under the record date's rule (dividend_tax.py),
+    # withheld on old-rule distributions and supplemented at sales. Every arm's
     # account pays it (``worker.resolve_worker_options``), and so does every
     # Paper book opened from one; it reads each ex-date's bonus shares, which
     # a bare Broker over data without an ex-date table does not have, so the
@@ -164,9 +169,10 @@ class Lot:
     quantity: int
     # Trade date of the buy (YYYYMMDD); shares an ex-date adds to the lot keep it.
     acquired: str
-    # Dividend income these shares received while held (gross cash plus the
-    # par value of bonus shares, CNY), taxed when they are sold.
-    dividend_income: float = 0.0
+    # Gross cash plus bonus shares at par, separated by the record-date rule.
+    # The old-rule base has already paid 5%; no redundant withheld ledger.
+    dividend_income_new: float = 0.0
+    dividend_income_old: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -181,6 +187,7 @@ class CorporateAction:
     quantity_before: int
     quantity_after: int
     cash_credit: float
+    dividend_tax_withheld: float = 0.0
 
     def to_record(self) -> dict[str, object]:
         return {
@@ -192,6 +199,7 @@ class CorporateAction:
             "quantity_before": self.quantity_before,
             "quantity_after": self.quantity_after,
             "cash_credit": self.cash_credit,
+            "dividend_tax_withheld": self.dividend_tax_withheld,
         }
 
 
@@ -259,7 +267,8 @@ class DailyBroker:
         trade_date: str,
         bars: Mapping[str, Mapping[str, object]],
         cash_dividends: Mapping[str, float] | None = None,
-        bonus_shares: Mapping[str, float] | None = None,
+        *,
+        distributions: Mapping[str, Distribution] | None = None,
     ) -> None:
         """Enter ``trade_date``: release the T+1 locks, then settle ex-dates.
 
@@ -273,24 +282,24 @@ class DailyBroker:
         cash dividend alone never changes the share count: the declared cash is
         credited in full even where the exchange's reset is smaller. Shares
         created on the ex-date stay locked until the next day, exactly like a
-        same-day buy.
+        same-day buy. The dividend tax follows what is delivered: the cash in
+        every case, a bonus share's par value only where the reset creates the
+        share.
 
-        ``bonus_shares`` maps a symbol to its bonus shares (送股) per share
-        going ex on this day, apart from capital-reserve conversions (转增).
-        Only the dividend tax reads it, so a profile that charges the tax
-        refuses a day without it rather than treat every share leg as tax-free.
+        ``distributions`` is the authoritative ex-date source: gross cash,
+        bonus shares apart from conversions, and record date. Taxed profiles
+        require it; ``cash_dividends`` alone is only for untaxed synthetic use.
         """
         if self._current_day == trade_date:
             return
-        if self.profile.dividend_tax and bonus_shares is None:
-            raise ValueError(
-                f"{trade_date}: the dividend tax needs each ex-date's bonus shares apart from "
-                "capital-reserve conversions, and this replay's ex-date table does not carry "
-                "bonus_per_share; a replay slot built before that column existed must be rebuilt"
-            )
+        if self.profile.dividend_tax and distributions is None:
+            raise ValueError(f"{trade_date}: dividend tax requires record-dated distributions")
+        if distributions is not None and cash_dividends is not None:
+            raise ValueError("pass distributions or cash_dividends, not both")
         self._current_day = str(trade_date)
-        dividends = cash_dividends or {}
-        bonuses = bonus_shares or {}
+        events = distributions if distributions is not None else {
+            symbol: Distribution(cash_per_share=cash) for symbol, cash in (cash_dividends or {}).items()
+        }
         for symbol, position in self.positions.items():
             position.available_quantity = position.quantity
             bar = bars.get(symbol)
@@ -298,15 +307,14 @@ class DailyBroker:
             # resets the name, so there is no ex-date to settle either.
             if bar is not None:
                 self._settle_ex_date(
-                    position, bar, dividends.get(symbol, 0.0), bonuses.get(symbol, 0.0)
+                    position, bar, events.get(symbol, Distribution())
                 )
 
     def _settle_ex_date(
         self,
         position: Position,
         bar: Mapping[str, object],
-        cash_per_share: object,
-        bonus_per_share: object,
+        distribution: Distribution,
     ) -> None:
         symbol, day = position.symbol, self._current_day
         pre_close = _price(bar.get("pre_close"))
@@ -315,7 +323,11 @@ class DailyBroker:
                 f"{symbol} on {day}: the day's bar has no usable pre_close, so a held "
                 "position cannot be carried across the day"
             )
-        for name, value in (("cash dividend", cash_per_share), ("bonus shares", bonus_per_share)):
+        cash_per_share, bonus_per_share = distribution.cash_per_share, distribution.bonus_per_share
+        if self.profile.dividend_tax and bonus_per_share is None:
+            raise ValueError(f"{symbol} on {day}: ex-date table lacks bonus_per_share; rebuild the replay slot")
+        for name, value in (("cash dividend", cash_per_share),
+                            ("bonus shares", 0.0 if bonus_per_share is None else bonus_per_share)):
             if (
                 isinstance(value, bool)
                 or not isinstance(value, (int, float))
@@ -330,11 +342,23 @@ class DailyBroker:
             ratio = ex_date_share_multiplier(last_close, pre_close, cash_per_share)
         except ValueError as exc:
             raise ValueError(f"{symbol} on {day}: {exc}") from None
+        # Income is what the holder actually receives: the cash dividend, and
+        # the bonus shares' par value only when the exchange's reset does grant
+        # them. A ratio of None delivers no share, so a per-share bonus the
+        # reset does not show (a flat quote, or a fall the cash explains) is not
+        # income and carries no tax base, exactly as before the tax existed.
+        income_per_share = cash_per_share + (
+            (bonus_per_share or 0.0) * BONUS_SHARE_PAR_CNY if ratio is not None else 0.0
+        )
+        rule = None
+        if self.profile.dividend_tax and income_per_share:
+            rule = dividend_tax_rule(distribution.record_date or "")
+        withheld = position.quantity * income_per_share * rule.withholding_rate if rule else 0.0
         if ratio is None:
             # No share change: no exchange price reset, or a reset that is a
             # cash dividend alone. A cash dividend the table records for today
             # is credited in full either way.
-            if cash_per_share == 0.0:
+            if not income_per_share:
                 return
             quantity_after = quantity_before
             credit = quantity_before * cash_per_share
@@ -350,6 +374,9 @@ class DailyBroker:
             # what it was worth at the last close once the dividend and
             # the fractional share are paid in cash.
             credit = quantity_before * last_close - quantity_after * pre_close
+        if self.cash + credit < withheld - 1e-9:
+            raise ValueError(f"{symbol} on {day}: insufficient cash for dividend tax withholding {withheld}")
+        if ratio is not None:
             position.quantity = quantity_after
             position.available_quantity = min(position.available_quantity, quantity_after)
             position.last_price = pre_close
@@ -358,11 +385,9 @@ class DailyBroker:
         position.average_cost = (
             position.average_cost * quantity_before - credit
         ) / quantity_after
-        self.cash += credit
+        self.cash += credit - withheld
         if self.profile.dividend_tax:
-            # Bonus shares are income only where the share leg created shares.
-            bonus = float(bonus_per_share) if ratio is not None else 0.0
-            self._settle_lots(symbol, cash_per_share + bonus * BONUS_SHARE_PAR_CNY, ratio)
+            self._settle_lots(symbol, income_per_share, ratio, old_rule=rule == OLD_RULE)
         self.corporate_actions.append(
             CorporateAction(
                 trade_date=str(day),
@@ -373,10 +398,13 @@ class DailyBroker:
                 quantity_before=quantity_before,
                 quantity_after=quantity_after,
                 cash_credit=credit,
+                dividend_tax_withheld=withheld,
             )
         )
 
-    def _settle_lots(self, symbol: str, income_per_share: float, ratio: float | None) -> None:
+    def _settle_lots(
+        self, symbol: str, income_per_share: float, ratio: float | None, *, old_rule: bool
+    ) -> None:
         """Credit one ex-date's dividend income to each lot of ``symbol`` and
         carry the share leg into the lots.
 
@@ -388,7 +416,11 @@ class DailyBroker:
         held = settled = 0
         kept: list[Lot] = []
         for lot in self.lots[symbol]:
-            lot.dividend_income += lot.quantity * income_per_share
+            income = lot.quantity * income_per_share
+            if old_rule:
+                lot.dividend_income_old += income
+            else:
+                lot.dividend_income_new += income
             if ratio is not None:
                 held += lot.quantity
                 previous, settled = settled, ex_date_shares(held, ratio)
@@ -406,11 +438,14 @@ class DailyBroker:
         while quantity:
             lot = lots[0]
             taken = min(quantity, lot.quantity)
-            income = lot.dividend_income * taken / lot.quantity
-            if income:
-                tax += income * dividend_tax_rate(lot.acquired, str(self._current_day))
+            old_income = lot.dividend_income_old * taken / lot.quantity
+            new_income = lot.dividend_income_new * taken / lot.quantity
+            tax += dividend_tax_due(
+                lot.acquired, str(self._current_day), old_income=old_income, new_income=new_income
+            )
             lot.quantity -= taken
-            lot.dividend_income -= income
+            lot.dividend_income_old -= old_income
+            lot.dividend_income_new -= new_income
             quantity -= taken
             if lot.quantity == 0:
                 lots.pop(0)
@@ -428,12 +463,41 @@ class DailyBroker:
 
         A profile without the dividend tax keeps no ledger; with it, every held
         name's lots must add up to its quantity and no other name may have any.
+        Legacy zero-income lots are unambiguous. Nonzero legacy income must be
+        classified offline using its actual distributions, never today's date
+        or even acquisition alone: ex-date settlement does not enforce record-
+        date entitlement and can credit a pre-acquisition record date.
         """
 
-        lots = {
-            str(symbol): [Lot(int(row["quantity"]), str(row["acquired"]), float(row["dividend_income"])) for row in rows]
-            for symbol, rows in records.items()
-        }
+        lots: dict[str, list[Lot]] = {}
+        for symbol, rows in records.items():
+            restored = []
+            for row in rows:
+                complete = "dividend_income_new" in row and "dividend_income_old" in row
+                legacy_zero = (
+                    "dividend_income_new" not in row and "dividend_income_old" not in row
+                    and row.get("dividend_income") == 0.0
+                )
+                if not complete and not legacy_zero:
+                    raise ValueError(
+                        "unclassified dividend tax ledger: checkpoint needs explicit dividend_income_new "
+                        "and dividend_income_old; verify historical income provenance before an offline conversion"
+                    )
+                quantity = row["quantity"]
+                new = row["dividend_income_new"] if complete else 0.0
+                old = row["dividend_income_old"] if complete else 0.0
+                if isinstance(quantity, bool) or not isinstance(quantity, int):
+                    raise ValueError("invalid quantity in lot ledger")
+                if (isinstance(new, bool) or not isinstance(new, (int, float))
+                        or isinstance(old, bool) or not isinstance(old, (int, float))):
+                    raise ValueError("invalid dividend tax income in lot ledger")
+                lot = Lot(quantity, str(row["acquired"]), float(new), float(old))
+                if any(not math.isfinite(value) or value < 0 for value in (
+                    lot.dividend_income_new, lot.dividend_income_old
+                )):
+                    raise ValueError("invalid dividend tax income in lot ledger")
+                restored.append(lot)
+            lots[str(symbol)] = restored
         expected = (
             {symbol: position.quantity for symbol, position in self.positions.items()}
             if self.profile.dividend_tax

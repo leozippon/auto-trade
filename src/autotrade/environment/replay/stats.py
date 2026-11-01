@@ -131,7 +131,10 @@ def compute_return_stats(
         for order in orders
         if order.get("status") == "filled" and order.get("realized_pnl") is not None
     ]
-    long_pnl = sum(float(order["realized_pnl"]) for order in realized)
+    withheld = sum(float(action.get("dividend_tax_withheld") or 0.0) for action in result.corporate_actions)
+    # Withholding is an immediate cash expense, not part of the gross cash
+    # credit/cost basis or a sale's supplement-only realized P&L.
+    long_pnl = sum(float(order["realized_pnl"]) for order in realized) - withheld
     wins = sum(1 for order in realized if float(order["realized_pnl"]) > 0)
     per_stock = [
         {
@@ -160,7 +163,7 @@ def compute_return_stats(
     traded_notional = 0.0
     fees_paid = 0.0
     stamp_duty_paid = 0.0
-    dividend_tax_paid = 0.0
+    dividend_tax_paid = withheld
     for order in orders:
         group = "exit" if str(order.get("action") or "") in _EXIT_ACTIONS else "entry"
         bucket = order_lifecycle[group]
@@ -216,8 +219,7 @@ def compute_return_stats(
         "reject_counts": reject_counts,
         "fees_paid": fees_paid,
         "stamp_duty_paid": stamp_duty_paid,
-        # Charged at each sale on the dividends the sold shares received;
-        # shares still held at the end owe nothing yet.
+        # Distribution withholding plus sale-time supplements, each once.
         "dividend_tax_paid": dividend_tax_paid,
         "decision_calls": len(result.inference_dates),
         "per_stock": per_stock,

@@ -148,8 +148,7 @@ class DailyReplayEngine:
                 self.broker.open_day(
                     trade_date,
                     bars,
-                    market.cash_dividends_for_day(trade_date),
-                    market.bonus_shares_for_day(trade_date),
+                    distributions=market.distributions_for_day(trade_date),
                 )
                 self._match_due(inference_at, market)
             if due:

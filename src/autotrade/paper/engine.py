@@ -396,7 +396,7 @@ class DailyPaperEngine:
         bars = market.bars_for_day(day)
         settled_actions = len(broker.corporate_actions)
         broker.open_day(
-            day, bars, market.cash_dividends_for_day(day), market.bonus_shares_for_day(day)
+            day, bars, distributions=market.distributions_for_day(day)
         )
         # Opening the day is the only step that changes the account without a
         # fill, so its ex-date settlements are journaled like executions.
@@ -714,7 +714,10 @@ class DailyPaperEngine:
         lots = raw.get("lots") or {}
         if not isinstance(lots, dict):
             raise PaperEngineError("persisted lot ledger is invalid")
-        broker.restore_lots(lots)
+        try:
+            broker.restore_lots(lots)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise PaperEngineError(f"persisted dividend tax ledger cannot be restored: {exc}") from exc
         broker._current_day = str(raw.get("current_day") or "") or None
         return broker
 

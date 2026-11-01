@@ -738,8 +738,11 @@ def performance_payload(repo_root: Path, book: str, env: str = "paper") -> dict[
         else None
     )
     executions = [row for day in _dates(root, "executions_") for row in read_jsonl(root / f"executions_{day}.jsonl")[0]]
+    actions = [row for day in _dates(root, "corporate_actions_")
+               for row in read_jsonl(root / f"corporate_actions_{day}.jsonl")[0]]
     stats = compute_return_stats(
-        ReplayResult(equity_curve=tuple(curve), executions=tuple(executions), inference_dates=(), pending_orders=())
+        ReplayResult(equity_curve=tuple(curve), executions=tuple(executions), inference_dates=(),
+                     pending_orders=(), corporate_actions=tuple(actions))
     )
     covered = benchmark is not None and len(benchmark_rows) == len(returns)
     enough = len(curve) >= MIN_STATISTICS_DAYS
@@ -928,7 +931,9 @@ def _instrument_flows(root: Path) -> dict[str, dict[str, float]]:
             stamp_duty=_number(row.get("stamp_duty")), dividend_tax=_dividend_tax(row),
             realized_pnl=realized)
     for name, row in _journal_rows(root, "corporate_actions_"):
-        add(name, row, dividends=_number(row.get("cash_credit")))
+        withheld = _number(row.get("dividend_tax_withheld", 0.0))
+        add(name, row, dividends=_number(row.get("cash_credit")),
+            dividend_tax=withheld, realized_pnl=-withheld if withheld is not None else None)
     # A real-fill book's corrections move the same money a fill does.
     corrections, skipped = read_jsonl(root / fills.CORRECTIONS_NAME)
     if skipped:
@@ -961,7 +966,8 @@ def pnl_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str, obj
     close) — less the initial cash; the engine has no deposits or withdrawals.
     A name's total is its unrealized P&L against the Broker's average cost plus
     the realized P&L its sells journaled. That cost carries the buy fees and is
-    lowered by ex-date cash, and a sale's realized P&L is net of its fees, so
+    lowered by gross ex-date cash, withholding is an immediate realized expense,
+    and a sale's realized P&L is net of its fees and supplement, so
     the fees, stamp duty and dividends listed per name are already inside the
     total, and the names sum to the account total. ``residual`` is the cent
     amount they do not reconcile by: the engine books no cash that belongs to
