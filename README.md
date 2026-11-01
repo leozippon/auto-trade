@@ -4,7 +4,9 @@ ADMCubeQuant is a research system in which an LLM agent designs and tests A-shar
 
 The agent works inside a networkless Docker sandbox. Everything it can read is a point-in-time snapshot built from a local TuShare data lake: every row carries the timestamp at which it actually became available, so a strategy can never see a number that did not exist yet at the moment it claims to decide. The agent writes a strategy package exposing `generate_orders(context)` (and optionally `fit(context)`), backtests it against a simulated A-share broker (price limits, suspensions, lot sizes, stamp duty), and iterates.
 
-An experiment is one research arm on fixed dates. The agent works through one research session on a research period of whole years that start on the first of a month (2021-07 to 2025-06 by default), with arm-level budgets of inference time, replay-years, null controls, model calls and hosted-model API spend (50 USD by default, priced from the model catalog; local models are free); the session compacts its own context on the host's notice and can read its own transcript back, and an attempt that fails is resumed in place from its last compaction summary, its workspace and the tree of validated candidates. The session may nominate one validated candidate for freezing, and the freeze is accepted only if its research-period result clears a deflated-Sharpe gate that charges every distinct strategy the arm validated, plus any declared offline screens and the trials of earlier arms it declares as its lineage. The frozen strategy is then replayed once, without the agent, as one continuous book over the twelve months after research and the Held-out quarter after those. It graduates only if the forward slice holds up statistically (a positive bootstrap lower bound on its active excess return, its daily return minus that of a zero-skill panel drawn on its own trades, a non-negative last six months, positive active excess under doubled slippage, enough trading and exposure, drawdown inside the limit) and the Held-out slice shows no catastrophic failure. A graduate opens its own paper-trading book on the frozen artifact. A local web console drives all of this.
+An experiment comprises a research session on fixed dates, at most one finalized strategy package, a continuous forward backtest and an acceptance decision. The agent works through the session on a research period of whole years that start on the first of a month (2021-07 to 2025-06 by default), with experiment-level budgets of inference time, backtest-years, randomized controls, model calls and hosted-model API spend (50 USD by default, priced from the model catalog; local models are free); the session compacts its own context on the host's notice and can read its own transcript back, and an attempt that fails is resumed in place from its last compaction summary, its workspace and the tree of validated candidates. The session may nominate one validated candidate for finalization, which requires its research-period result to pass a deflated-Sharpe test that charges every distinct strategy the experiment validated, plus any declared offline screens and the trials of earlier experiments it declares as its trial family (lineage).
+
+The finalized strategy package is then backtested once, without the agent, as one continuous portfolio over the following twelve months and the Held-out quarter. It passes out-of-sample acceptance only if the forward period meets the statistical and risk conditions: a positive bootstrap lower bound on daily returns relative to randomized stock-selection controls matched to its own trades, non-negative excess in the last six months, positive excess under doubled slippage, sufficient trading and exposure, and drawdown within the limit. The Held-out period must show no catastrophic failure. A passing strategy starts a paper-trading account using the finalized package. A local web console drives this process.
 
 Live trading is deliberately not implemented. The console has a live-trading page, but it is an empty frontend placeholder: no backend, no broker connection, no order path.
 
@@ -14,7 +16,7 @@ Live trading is deliberately not implemented. The console has a live-trading pag
 | --- | --- |
 | `src/autotrade/agent/` | Agent session runner, prompts, sub-agent and context-compaction machinery |
 | `src/autotrade/environment/` | PIT snapshot building, unit registry, sandbox, trusted tools, broker and replay engine, LLM gateway |
-| `src/autotrade/pipelines/` | Research calendar, research sessions, freeze, forward replay and verdict, ledger, interactive worker |
+| `src/autotrade/pipelines/` | Research calendar, sessions, strategy finalization, forward evaluation and acceptance, ledger, interactive worker |
 | `src/autotrade/data_sources/tushare/` | TuShare download, audit and scheduled-update logic |
 | `src/autotrade/webui/` | Console backend and static frontend |
 | `src/autotrade/paper/` | Paper-trading engine |
@@ -40,7 +42,7 @@ Build the sandbox image before running anything that executes strategy code or s
 docker build -t autotrade-sandbox:latest -f ops/docker/sandbox.Dockerfile .
 ```
 
-Copy `.env.example` to `.env` and fill in the credentials you need: a TuShare token for data, and a model endpoint. Model serving is external to this repository — the default local Qwen model is reached through a gateway at `VLLM_BASE_URL`, and hosted models (DeepSeek, Xiaomi MiMo, and GPT-6, Claude and DeepSeek ids through the LightingTheWord relay) can be selected per arm and per role. The console fails to start a session rather than silently falling back when a selected model has no key.
+Copy `.env.example` to `.env` and fill in the credentials you need: a TuShare token for data, and a model endpoint. Model serving is external to this repository — the default local Qwen model is reached through a gateway at `VLLM_BASE_URL`, and hosted models (DeepSeek, Xiaomi MiMo, and GPT-6, Claude and DeepSeek ids through the LightingTheWord relay) can be selected per experiment and per role. The console fails to start a session rather than silently falling back when a selected model has no key.
 
 Data is not bundled. The lake is populated by the TuShare download and audit scripts under `scripts/data/`, normally installed as a nightly cron job via `ops/cron/`.
 
@@ -54,15 +56,15 @@ python scripts/webui/run_webui.py
 
 It listens on `127.0.0.1:38888` and refuses any non-loopback bind. Create an experiment from the homepage: its research, forward and Held-out dates, the models and the budgets. The console then spawns a detached worker process, and the experiment detail page shows live status, agent traces and validation results, the forward verdict once the replay has run, and the controls for pausing, stopping, restarting and injecting a message into the running session.
 
-A GPU arm is placed on a card that keeps `AUTOTRADE_GPU_MIN_FREE_GIB` GiB free (12 by default), not only on a card nobody uses, so a host whose cards all carry other people's work still runs arms; a card a running arm already holds is never taken. Set the margin in the console's environment, and restart the console for it to take effect. Use the same setting for round-launcher commands, whose starter smoke uses the same admission rule:
+An experiment that needs a GPU is placed on a card that keeps `AUTOTRADE_GPU_MIN_FREE_GIB` GiB free (12 by default), not only on a card nobody uses, so a host whose cards all carry other people's work still runs experiments; a card a running experiment already holds is never taken. Set the margin in the console's environment, and restart the console for it to take effect. Use the same setting for round-launcher commands, whose starter smoke uses the same admission rule:
 
 ```bash
 AUTOTRADE_GPU_MIN_FREE_GIB=12 python scripts/webui/run_webui.py
 ```
 
-It is an admission margin, not a cap on the strategy: nothing reserves the memory, and the arm shares the card with whatever else runs on it.
+It is an admission margin, not a cap on the strategy: nothing reserves the memory, and the experiment shares the card with whatever else runs on it.
 
-Arms that belong together are created from a checked-in round file, which fixes their shared dates, dataset selection and prebuilt view seed; `--dry-run` validates all of it offline before anything is sent to the console:
+Experiments that belong together are created from a checked-in round file, which fixes their shared dates, dataset selection and prebuilt view seed; `--dry-run` validates all of it offline before anything is sent to the console:
 
 ```bash
 python scripts/experiments/create_round_<round id>.py 38888 --dry-run
