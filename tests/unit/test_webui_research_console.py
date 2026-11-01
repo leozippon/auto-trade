@@ -389,7 +389,7 @@ def test_a_withdrawn_graduation_reads_as_a_failure_everywhere(tmp_path: Path) ->
     # why it no longer has, in the void's first sentence.
     assert withdrawn["ending"] == {
         "state": "rejected",
-        "reason": "毕业后复核未通过：复跑计入股息税后研究期主动 IR 为 −1.80",
+        "reason": "验收通过后复核未通过：复跑计入股息税后研究期主动 IR 为 −1.80",
     }
     # Listed in the failures' group, newest first inside it, ahead of the
     # endings nobody decided whatever its date.
@@ -539,7 +539,7 @@ def test_an_arm_whose_nomination_the_freeze_gate_refused_reads_as_rejected(
     )
     assert summarize_experiment(directory)["ending"] == {
         "state": "rejected",
-        "reason": "提名未通过冻结门",
+        "reason": "提名未通过定版检验",
     }
 
 

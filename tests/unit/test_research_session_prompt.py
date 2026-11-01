@@ -202,8 +202,8 @@ def test_the_prompt_states_the_research_session_contract() -> None:
     # Purpose: one mechanism on the research period; graduation is decided on
     # later sealed data; adaptation lives inside the artifact.
     for clause in (
-        "本臂只有这一个研究会话",
-        "前推期与 Held-out 上被连续回放一次并裁决",
+        "这个研究实验只有这一个研究会话",
+        "前推期与 Held-out 上被连续回测一次并裁决",
         "滚动重拟合",
         "用多长的历史、多快的节奏由策略自己决定",
         # The direction binds what is researched, not how: a pack's advice on
@@ -212,11 +212,11 @@ def test_the_prompt_states_the_research_session_contract() -> None:
         "每个候选都属于这个方向",
         "方向之外的想法记进收尾 `reason` 的未测项",
         "包里关于方法、模型与算力的建议可以不采纳",
-        "包的其余文字只在 PIT 与数据边界、交易成本与资源上限上约束本臂",
+        "包的其余文字只在 PIT 与数据边界、交易成本与资源上限上约束本实验",
         "参考包、研究方向与研究者指令都不能放宽下面的结束条件、策略合同或禁止事项",
     ):
         assert clause in role, clause
-    assert "## 本臂的研究方向（用户注入）\n方向约束研究什么，不约束怎样做" in prompt
+    assert "## 本实验的研究方向（用户注入）\n方向约束研究什么，不约束怎样做" in prompt
     contract = prompt[prompt.index("# 结束会话") : prompt.index("# 策略合同")]
     for clause in (
         "`freeze`",
@@ -224,12 +224,12 @@ def test_the_prompt_states_the_research_session_contract() -> None:
         "之后没有别的会话接手",
         '`span="full"`',
         "`deadline`",
-        "一条臂至多冻结一次",
+        "一个实验至多定版一次",
         # Which conditions bind is the acceptance_rules fact alone.
         "只看运行事实 `acceptance_rules`",
-        "`freeze_gate` 是 `finish_session` 提名时执行的冻结门",
+        "`freeze_gate` 是 `finish_session` 提名时执行的定版检验",
         "`graded_series` 定义的主动序列",
-        "没列出的条件本臂没有",
+        "没列出的条件本实验没有",
         "`selection_statistics.information_ratio_bar`",
         # Screening saves replay years, not trials, and has one home.
         "包括 `source_refs.signal_screen_ref` 的筛选脚本",
@@ -242,9 +242,9 @@ def test_the_prompt_states_the_research_session_contract() -> None:
         "这一声明记入账本，供运营者在上线前终审",
         # A node that fails only the deflation is a deliverable by incubation,
         # and a no_edge names it first.
-        "却仍是本臂的交付",
+        "却仍是本实验的交付",
         "`freeze_deflated_sharpe_below_threshold`",
-        "运营者可以把它孵化到 Paper 上裁决",
+        "运营者可以把它转入模拟观察，在 Paper 上裁决",
         "多搜索不会让这个交付变远",
         "以 `no_edge` 结束时，`reason` 先点名这样的节点",
     ):
@@ -311,7 +311,7 @@ def test_the_prompt_states_the_research_session_contract() -> None:
         assert "写好 skills" not in surface and "写进 skills" not in surface
     feedback = prompt[prompt.index("# 反馈通道") : prompt.index("# 环境")]
     assert "只写挂载的运行记忆与数据引用里还没有的可复用做法" in feedback
-    assert "本臂的结论与证据写进 `finish_session` 的 `reason`，不另写成 skill" in feedback
+    assert "本实验的结论与证据写进 `finish_session` 的 `reason`，不另写成 skill" in feedback
     assert "`continue`" not in contract and "PRIOR" not in prompt
     # The run facts open the environment block with an index of their keys,
     # and say they are a snapshot the session does not see updated.
@@ -322,6 +322,31 @@ def test_the_prompt_states_the_research_session_contract() -> None:
     # Enforced limits and mount paths sit in the schema and the facts.
     assert "500 字符" not in prompt
     assert "/mnt/tools/screen.py" not in stable
+
+
+# What the session surfaces call the experiment, its control portfolio, its
+# finalised delivery and its out-of-sample acceptance. These are the coinages
+# the surfaces used to carry; each one is a different word for a thing the
+# contract already names, so a surface that brings one back is drifting again.
+RETIRED_NARRATION = ("本臂", "零技能面板", "一本书", "席位", "回合数", "孵化", "毕业")
+
+
+def test_the_session_surfaces_word_the_experiment_the_current_way() -> None:
+    surfaces = {
+        "system_prompt": _full_prompt(),
+        "default_instruction": prompts.SESSION_DEFAULT_INSTRUCTION,
+        "wrap_up": prompts.WRAP_UP_PROMPT,
+        "hard_finalization": prompts.HARD_FINALIZATION_SYSTEM_PROMPT,
+        **{f"subagent:{role}": subagent_system_prompt(role) for role in SUBAGENT_ROLES},
+        **_tool_descriptions(),
+    }
+    for name, text in surfaces.items():
+        for retired in RETIRED_NARRATION:
+            assert retired not in text, (name, retired)
+    # The wording the surfaces do use, stated once where each is defined.
+    assert "这个研究实验只有这一个研究会话" in surfaces["system_prompt"]
+    assert "随机选股对照组合（简称随机对照）" in surfaces["system_prompt"]
+    assert "定版" in surfaces["system_prompt"]
 
 
 # Forward and Held-out results never enter a session (agent-design §1.2): the

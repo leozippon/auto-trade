@@ -681,6 +681,9 @@ RETIRED_IDS: frozenset[str] = frozenset(
         "retrieval_100k_8y_opus_zgca_20261025b",
         "retrieval_100k_8y_sol_zgca_20261025b",
         "retrieval_100k_8y_sol_zgca_20261027b",
+        # Withdrawn from round 20261102's queue before it was created, when the
+        # round was narrowed to the Astra experiment alone.
+        "memory_200k_10y_argon_local_20261102",
     }
 )
 

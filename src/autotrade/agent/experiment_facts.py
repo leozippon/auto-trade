@@ -37,7 +37,7 @@ DEADLINE_SECONDS_NOTE = (
 # environment, not the strategy, creates the contention a batch adds, so both
 # caps move with it (pipelines.session_tools._batch_replay_timeouts).
 BATCH_VALIDATE_FIT_TIMEOUT_NOTE = (
-    "`batch_validate` 并发回放期间，`strategy_fit_timeout_seconds` 与单次推断上限"
+    "`batch_validate` 并发回测期间，`strategy_fit_timeout_seconds` 与单次推断上限"
     "`strategy_inference_timeout_seconds` 都按本批实际并发路数成倍放大（路数取本批候选数与 "
     "`batch_validate_max_concurrency` 中较小的一个，3 路即 3 倍），"
     "因为并发是环境引入的、不该记到策略头上；单个候选的调用两者都用基准值。"
@@ -46,11 +46,11 @@ BATCH_VALIDATE_FIT_TIMEOUT_NOTE = (
 # How ``budgets.max_replay_years`` is spent, including the one case a claimed
 # replay-year comes back (pipelines.session_tools.BatchValidateTool).
 REPLAY_YEARS_NOTE = (
-    "一个候选按其 span 覆盖的研究年份计 replay-year：一年的 span 计 1，完整研究期计研究年数；"
+    "一个候选按其 span 覆盖的研究年份计回测年：一年的 span 计 1，完整研究期计研究年数；"
     "一批的花费是候选数乘年数，开跑前整批预留；`smoke_backtest` 与 `run_null_control` 不计。"
-    "回放失败的候选按失败归属结算：策略自身抛错，以及策略容器越过内存上限 `strategy_memory_bytes` "
-    "被 OOM kill（exit 137，那次回放没有峰值读数），都是策略自己的失败（行内 `cause: strategy`），照样花掉；"
-    "环境失败（行内 `cause: environment`，如策略超时、共享 GPU 被别的进程占走、沙箱没起来）退还其回放年，"
+    "回测失败的候选按失败归属结算：策略自身抛错，以及策略容器越过内存上限 `strategy_memory_bytes` "
+    "被 OOM kill（exit 137，那次回测没有峰值读数），都是策略自己的失败（行内 `cause: strategy`），照样花掉；"
+    "环境失败（行内 `cause: environment`，如策略超时、共享 GPU 被别的进程占走、沙箱没起来）退还其回测年，"
     "因为它没有测出候选的任何信息——原样重投是合理的。"
 )
 
@@ -74,15 +74,15 @@ def strategy_container_note(cpus: float, memory_bytes: int) -> str:
     threads = container_thread_env(cpus)["OMP_NUM_THREADS"]
     memory_gib = memory_bytes / 1024**3
     return (
-        "每个候选回放时，`generate_orders` 在一个策略容器里运行；定义了 `fit` 的候选另起一个边界相同的容器专跑 `fit`，"
+        "每个候选回测时，`generate_orders` 在一个策略容器里运行；定义了 `fit` 的候选另起一个边界相同的容器专跑 `fit`，"
         "同一天先 `fit` 后决策，两者不同时计算。"
         f"每个容器各有 {cpus:g} 个 CPU 的配额（`strategy_cpus`），"
         f"`OMP_NUM_THREADS`、`MKL_NUM_THREADS`、`OPENBLAS_NUM_THREADS` 与 `NUMEXPR_NUM_THREADS` 都设为 {threads}，"
         f"内存上限 {memory_gib:g} GiB（`strategy_memory_bytes`），"
-        "并挂本臂的 `strategy_gpu_count` 张卡（为 0 时全在 CPU 上）：卡型与每张的显存在会话里用 `nvidia-smi` 看，"
+        "并挂本实验的 `strategy_gpu_count` 张卡（为 0 时全在 CPU 上）：卡型与每张的显存在会话里用 `nvidia-smi` 看，"
         "显存与同卡的其他腿、会话里起的进程共用。"
-        "一次 `batch_validate` 至多同时回放 `batch_validate_max_concurrency` 个候选，各有自己的容器；"
-        "单独的回放挂全部卡，并排回放的候选轮流各挂一张，多于卡数时几条腿同卡。"
+        "一次 `batch_validate` 至多同时回测 `batch_validate_max_concurrency` 个候选，各有自己的容器；"
+        "单独的回测挂全部卡，并排回测的候选轮流各挂一张，多于卡数时几条腿同卡。"
     )
 
 
@@ -100,8 +100,8 @@ SEARCH_ROOT_SHELL_NOTE = (
 # What a session knows about the periods after research end: that they exist
 # and are sealed, never their dates, slots or results.
 SEALED_PERIODS_NOTE = (
-    "研究期末之后是前推期与 Held-out：冻结产物在那里被连续回放一次并裁决是否毕业；"
-    "它们的日期、数据、回放槽与结果不进入任何会话。"
+    "研究期末之后是前推期与 Held-out：定版产物在那里被连续回测一次并裁决是否通过样本外验收；"
+    "它们的日期、数据、回测区间与结果不进入任何会话。"
 )
 
 
@@ -200,7 +200,7 @@ def build_experiment_facts(
         ),
         "broker_replay": _broker_replay_facts(manifest),
         # The index this arm is measured against: the benchmark leg of every
-        # factor loading below, and the membership the zero-skill panel
+        # factor loading below, and the membership the random-selection control
         # draws its replacement names from. A manifest written before the
         # parameter existed reads as the default, which is what those arms ran.
         "benchmark_index": benchmark_index,
@@ -240,9 +240,9 @@ def _research_scope(
     research = _as_mapping(manifest.get("research"))
     period = research.get("research_period")
     research_sentence = (
-        f"The arm's one research session researches the period {period}, one "
+        f"The experiment's one research session researches the period {period}, one "
         "complete year per label, and ends by freezing one full-period node "
-        "through the freeze gate or by ending the arm without one; no "
+        "through the freeze gate or by ending the experiment without one; no "
         "other session follows, and the frozen artifact is judged only on later, "
         "sealed data."
         if period
@@ -458,7 +458,7 @@ PERMITTED_BOARDS_RULE = (
     "The account may buy only names listed on these boards (main = Shanghai and Shenzhen "
     "main boards, gem = ChiNext, star = STAR Market, bj = Beijing Stock Exchange): a buy of "
     "a name on any other board is rejected whole as board_not_permitted, a sale never is, "
-    "and the zero-skill panel draws its replacement names from these boards only."
+    "and the random-selection control draws its replacement names from these boards only."
 )
 
 

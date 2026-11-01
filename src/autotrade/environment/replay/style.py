@@ -93,7 +93,7 @@ def regression_method(benchmark_index: str) -> str:
 
     return (
         f"日度收益对{benchmark_index_label(benchmark_index)}收益与规模因子"
-        "（本回放槽全市场截面、不是本臂股票池，"
+        "（本回放槽全市场截面、不是本实验股票池，"
         "按前一交易日流通市值分组：最小 30% 等权减最大 30% 等权）"
         "的二元 OLS，给出两个载荷与残差跟踪误差"
         f"（按 {TRADING_DAYS_PER_YEAR} 个交易日年化）；它只作诊断与跟踪授权，不进评分"

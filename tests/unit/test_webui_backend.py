@@ -445,12 +445,19 @@ def test_static_console_keeps_macro_style_surfaces_without_closed_capabilities(
     for label in (
         "实验流程",
         "Step 产物树",
-        "冻结产物",
+        "定版产物",
         "Paper 建账户",
     ):
         assert label in script
     # The Fold-era console is gone.
     for retired in ("Fold 策略分析", "样本外过渡", "揭示测试结果", "提前收官", "回滚到此 Fold"):
+        assert retired not in script
+    # The console words one experiment, one control portfolio and one
+    # out-of-sample acceptance; the coinages it used to carry are retired
+    # labels, not an alternative spelling of the same thing.
+    for label in ("随机对照组合", "验收通过", "定版检验"):
+        assert label in script
+    for retired in ("零技能面板", "本臂", "一本书", "席位", "回合数", "孵化中", "毕业于"):
         assert retired not in script
     # The console has no research-report surface.
     assert "研究报告" not in script

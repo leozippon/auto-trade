@@ -67,7 +67,7 @@ def _data_summary(rows: dict[str, int]) -> dict[str, object]:
 def test_the_session_facts_state_the_research_period_and_the_session_place() -> None:
     facts = _facts()
     scope = facts["research_scope"]
-    assert "one research session researches the period 20210701..20250630" in scope["research"]
+    assert "The experiment's one research session researches the period 20210701..20250630" in scope["research"]
     assert "no other session follows" in scope["research"]
     assert "sealed data" in scope["research"]
     assert scope["universe"].startswith("The universe is unfiltered")
@@ -192,7 +192,7 @@ def test_the_replay_year_budget_travels_with_how_it_is_spent() -> None:
     budgets = _facts(budgets={"max_replay_years": 24, "max_null_controls": 3})["budgets"]
     assert budgets["max_replay_years"] == 24
     assert budgets["max_null_controls"] == 3
-    assert "replay-year" in budgets["max_replay_years_note"]
+    assert "回测年" in budgets["max_replay_years_note"]
     assert "max_replay_years_note" not in _facts(budgets={})["budgets"]
 
 

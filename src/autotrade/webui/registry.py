@@ -421,7 +421,7 @@ def arm_ending(
     if verdict["status"] == "voided":
         void = _mapping(verdict.get("void"))
         reason = _reason_line(identity.public_text(str(void.get("reason") or "")))
-        return {"state": "rejected", "reason": f"毕业后复核未通过：{reason}"}
+        return {"state": "rejected", "reason": f"验收通过后复核未通过：{reason}"}
     if verdict["status"] == "graduated":
         judged = _mapping(_mapping(_mapping(forward).get("slices")).get("forward"))
         raw = _mapping(judged.get("raw_readings"))
@@ -457,7 +457,7 @@ def arm_ending(
     if session.get("outcome") == "deadline":
         finish = str(session.get("finish_reason") or "")
         return {"state": "budget_exhausted", "reason": _BUDGET_EXHAUSTED.get(finish, finish)}
-    return {"state": "rejected", "reason": "提名未通过冻结门"}
+    return {"state": "rejected", "reason": "提名未通过定版检验"}
 
 
 def arm_attention(

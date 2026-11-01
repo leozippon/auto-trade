@@ -94,7 +94,7 @@ _FIELDS: list[dict[str, object]] = [
         "label": "研究期起点",
         "type": "string",
         "required": True,
-        "help": "YYYYMMDD，必须是某月 1 日。研究期从这一天起按完整十二个月切块，研究会话只看研究期末的决策视图、只回放研究期。",
+        "help": "YYYYMMDD，必须是某月 1 日。研究期从这一天起按完整十二个月切块，研究会话只看研究期末的决策视图、只回测研究期。",
     },
     {
         "key": "research_end",
@@ -110,7 +110,7 @@ _FIELDS: list[dict[str, object]] = [
         "label": "前推期终点",
         "type": "string",
         "required": True,
-        "help": "YYYYMMDD，必须是研究期终点之后恰好十二个月的那一天。冻结产物从研究期终点次日起连续回放到这里，再接着回放 Held-out。",
+        "help": "YYYYMMDD，必须是研究期终点之后恰好十二个月的那一天。定版产物从研究期终点次日起连续回测到这里，再接着回测 Held-out。",
     },
     {
         "key": "heldout_end",
@@ -118,7 +118,7 @@ _FIELDS: list[dict[str, object]] = [
         "label": "Held-out 终点",
         "type": "string",
         "required": True,
-        "help": "YYYYMMDD，晚于前推期终点；回放截到已固定发布的最后一个交易日，截断会记在前推记录里。",
+        "help": "YYYYMMDD，晚于前推期终点；回测截到已固定发布的最后一个交易日，截断会记在前推记录里。",
     },
     {"key": "research_directive", "group": "基本与排程", "label": "研究方向", "type": "text",
      "optional": True, "wide": True,
@@ -150,8 +150,8 @@ _FIELDS: list[dict[str, object]] = [
             code: f"{label}（{code}）" for code, label in BENCHMARK_INDEXES.items()
         },
         "help": (
-            "本臂被度量的基准：风格归因与载荷回归的基准腿，以及零技能对照组"
-            "按成分股替换选名的成分表。创建时校验该指数在本臂固定的数据发布中"
+            "本实验被度量的基准：风格归因与载荷回归的基准腿，以及随机对照组合"
+            "按成分股替换选名的成分表。创建时校验该指数在本实验固定的数据发布中"
             "确实有 index_daily 与 index_weight 分区；成分股本身仍需在 macro "
             "数据集里选上 index_weight 才能被策略读到。"
         ),
@@ -243,7 +243,7 @@ _FIELDS: list[dict[str, object]] = [
         "group": "数据域",
         "label": "事件/资金域",
         "type": "bool",
-        "help": "两融、资金流、股东、龙虎榜、打板情绪等事件面板；关闭后决策快照与回放均不加载。",
+        "help": "两融、资金流、股东、龙虎榜、打板情绪等事件面板；关闭后决策快照与回测均不加载。",
     },
     {
         "key": "include_text",
@@ -335,15 +335,15 @@ _FIELDS: list[dict[str, object]] = [
     {
         "key": "pit_views_seed",
         "group": "数据域",
-        "label": "PIT 视图种子目录",
+        "label": "预构建 PIT 数据视图目录",
         "type": "string",
         "advanced": True,
         "help": (
-            "仓库相对路径，指向本实验硬链接决策/回放视图的预构建种子。默认种子只按默认数据集集合构建："
-            "改动上面任一数据集子集、数据域开关或窗口后，必须先用 scripts/data/prebuild_pit_views_seed.py "
-            "以同一套参数预构建一棵新种子并填在这里，否则本实验会逐个区间冷构建（数小时）。"
-            "填写的目录必须存在，且其记录的快照配置与本实验逐字一致，否则创建直接失败。"
-            "填写后本实验固定该种子构建时的 research release（而非最新数据批次），"
+            "仓库相对路径，指向本实验通过硬链接复用的预构建决策/回测视图。默认视图只含默认数据集集合："
+            "改动数据集、数据域开关或窗口后，需用 scripts/data/prebuild_pit_views_seed.py "
+            "按相同参数生成新的视图目录；不复用预构建视图时会逐区间构建（可能耗时数小时）。"
+            "目录必须存在，记录的快照配置须与本实验一致，否则创建失败。"
+            "本实验使用这些视图构建时固定的 research release，而非最新数据批次；"
             "该 release 未发布或在 Held-out 内不足两个交易日时同样创建失败。"
         ),
     },
@@ -420,7 +420,7 @@ _FIELDS: list[dict[str, object]] = [
         "label": "跟踪误差上限（对基准指数）",
         "type": "float",
         "optional": True,
-        "help": "跟踪授权的开关：填入即为本臂设定跟踪授权——策略自身对本臂基准指数的残差跟踪误差上限（0.08 = 8%/年），研究期与前推期都要满足。留空即不设授权，跟踪误差与 β 只报告、不评级。没有上限却填 β 区间会被拒绝。",
+        "help": "跟踪授权的开关：填入即为本实验设定跟踪授权——策略自身对本实验基准指数的残差跟踪误差上限（0.08 = 8%/年），研究期与前推期都要满足。留空即不设授权，跟踪误差与 β 只报告、不评级。没有上限却填 β 区间会被拒绝。",
     },
     {
         "key": "max_drawdown",
@@ -429,7 +429,7 @@ _FIELDS: list[dict[str, object]] = [
         "type": "float",
         "optional": True,
         "placeholder": "留空：0.45",
-        "help": "权益回撤上限（0.45 = 45%），冻结门、前推与 Held-out 三段都不得超过。留空取 0.45，与有没有跟踪授权无关。",
+        "help": "权益回撤上限（0.45 = 45%），定版检验、前推与 Held-out 三段都不得超过。留空取 0.45，与有没有跟踪授权无关。",
     },
     {
         "key": "active_max_drawdown",
@@ -438,7 +438,7 @@ _FIELDS: list[dict[str, object]] = [
         "type": "float",
         "optional": True,
         "placeholder": "留空：0.30",
-        "help": "主动序列（策略日收益减零技能面板合成收益）累计净值的回撤上限，同样约束三段。留空取 0.30，与有没有跟踪授权无关。",
+        "help": "主动序列（策略日收益减随机对照组合合成收益）累计净值的回撤上限，同样约束三段。留空取 0.30，与有没有跟踪授权无关。",
     },
     {
         "key": "beta_min",
@@ -465,36 +465,36 @@ _FIELDS: list[dict[str, object]] = [
         "group": "预算与验收",
         "label": "成本压力倍数",
         "type": "float",
-        "help": "冻结门与毕业裁决的成本压力：研究期与前推段的主动超额在滑点放大到该倍数后仍须为正（按各段自己的换手定价）。",
+        "help": "定版检验与样本外验收裁决的成本压力：研究期与前推段的主动超额在滑点放大到该倍数后仍须为正（按各段自己的换手定价）。",
     },
     {
         "key": "min_active_ir",
         "group": "预算与验收",
-        "label": "冻结门最低主动信息比率",
+        "label": "定版检验最低主动信息比率",
         "type": "float",
-        "help": "提名节点研究期主动信息比率下限。创建时写入本臂，盖章后不随默认值漂移。",
+        "help": "提名节点研究期主动信息比率下限。创建时写入本实验，盖章后不随默认值漂移。",
     },
     {
         "key": "min_dsr_probability",
         "group": "预算与验收",
-        "label": "冻结门最低 DSR 概率",
+        "label": "定版检验最低 DSR 概率",
         "type": "float",
         "help": "提名节点研究期主动信息比率的去膨胀夏普概率下限，须在 (0, 1]。",
     },
     {
         "key": "min_positive_year_share",
         "group": "预算与验收",
-        "label": "冻结门主动正数年比例",
+        "label": "定版检验主动正数年比例",
         "type": "float",
         "help": "主动超额为正的研究年数不少于研究年数乘以该比例、向上取整。须在 (0, 1]。",
     },
     {
         "key": "min_full_span_validations",
         "group": "预算与验收",
-        "label": "冻结门最少完整研究期验证数",
+        "label": "定版检验最少完整研究期验证数",
         "type": "int",
         "min": 1,
-        "help": "本臂可测的完整研究期验证数下限（提名计入），整数且至少为 1。",
+        "help": "本实验可测的完整研究期验证数下限（提名计入），整数且至少为 1。",
     },
     {
         "key": "forward_confidence",
@@ -521,9 +521,9 @@ _FIELDS: list[dict[str, object]] = [
     {
         "key": "min_round_trips_per_month",
         "group": "预算与验收",
-        "label": "前推每月最少回合数",
+        "label": "前推每月最少往返交易数",
         "type": "float",
-        "help": "前推期完成回合数按月计的下限；0 表示不要求交易次数。",
+        "help": "前推期完成往返交易数按月计的下限；0 表示不要求交易次数。",
     },
     {
         "key": "heldout_tolerance_z",
@@ -535,17 +535,17 @@ _FIELDS: list[dict[str, object]] = [
     {"key": "max_replay_years", "group": "预算与验收", "label": "研究会话回测预算（年）", "type": "int",
      "help": "一个候选在其验证区间覆盖的每个研究年份计 1：完整研究期计研究年数，一批按候选数乘年数预留；回测独立计时（墙钟回补推理 deadline）。"},
     {"key": "max_null_controls", "group": "预算与验收", "label": "按需随机对照次数上限", "type": "int",
-     "help": "研究会话内 run_null_control 工具的调用上限（冻结节点复用其结果）；0 表示不注册该工具。"},
+     "help": "研究会话内 run_null_control 工具的调用上限（定版节点复用其结果）；0 表示不注册该工具。"},
     {"key": "max_llm_calls", "group": "预算与验收", "label": "研究会话模型调用上限", "type": "int",
      "help": "研究会话的模型调用总次数上限，跨续跑累计；主循环、子代理与上下文压缩共享同一计数。"},
     {"key": "max_api_spend_usd", "group": "预算与验收", "label": "研究会话 API 花费上限（美元）", "type": "float",
-     "help": "研究会话调用托管模型的累计花费上限，按目录标价计、跨续跑累计；主循环、子代理与上下文压缩共用，本地模型不计。用尽即以 deadline 结束本臂。"},
+     "help": "研究会话调用托管模型的累计花费上限，按目录标价计、跨续跑累计；主循环、子代理与上下文压缩共用，本地模型不计。用尽即以 deadline 结束本实验。"},
     {"key": "finalize_before_deadline_seconds", "group": "预算与验收", "label": "硬收尾保留窗口（秒）", "type": "int", "advanced": True,
      "help": "距推理 deadline 该秒数且已有完整 Validation 时，只保留已有节点的回滚与显式结束；尚无完整节点时继续现有流程。"},
     {"key": "per_call_timeout_seconds", "group": "预算与验收", "label": "单次 LLM 调用超时（秒）", "type": "int", "advanced": True,
      "help": "Agent 主对话单次模型 API 调用的硬超时；默认 3600 秒，与本机网关非流式读超时一致。"},
     {"key": "strategy_fit_timeout_seconds", "group": "预算与验收", "label": "单次策略 fit 超时（秒）", "type": "int", "advanced": True,
-     "help": "正式策略可选 fit(context) 单次调用的墙钟上限：回放开始前先训练一次模型，之后按 REFIT_PERIOD 在新周期首个决策日重训；超时或异常即整场回测失败。generate_orders 的单日推断上限是另一项 `strategy_inference_timeout_seconds`。"},
+     "help": "正式策略可选 fit(context) 单次调用的墙钟上限：回测开始前先训练一次模型，之后按 REFIT_PERIOD 在新周期首个决策日重训；超时或异常即整场回测失败。generate_orders 的单日推断上限是另一项 `strategy_inference_timeout_seconds`。"},
     {"key": "strategy_inference_timeout_seconds", "group": "预算与验收", "label": "单次策略推断超时（秒）", "type": "int", "advanced": True,
      "help": "正式策略 generate_orders(context) 单次调用的墙钟上限；超时即整场回测失败。批量验证并发时与 fit 上限一起按并发路数放大。"},
     {"key": "strategy_cpus", "group": "预算与验收", "label": "策略容器 CPU 配额", "type": "float", "advanced": True,
@@ -575,20 +575,20 @@ _FIELDS: list[dict[str, object]] = [
         "choice_labels": {
             "none": "不挂载",
             "curated": "只挂载精选条目",
-            "curated+graduated": "精选条目 + 毕业实验的 skills",
+            "curated+graduated": "精选条目 + 验收通过实验的 skills",
         },
         "help": (
             "把跨实验知识只读挂载进每个研究会话工作区："
             f"精选库是仓库里人工维护的 {len(_OPERATING_MEMORY_ENTRIES)} 条运行经验；"
-            "毕业层是前推与 Held-out 判定为 graduated 的实验自己写下的 skills，"
+            "验收层是前推与 Held-out 判定为 graduated（验收通过）的实验自己写下的 skills，"
             "带来源实验与判定标记，由 Agent 自行取舍。会话不能改写或删除挂载内容。"
         ),
     },
     {"key": "gpu_count", "group": "运行控制", "label": "默认 GPU 数量", "type": "int", "min": 0, "max": 4,
-     "help": "每个研究会话与正式回放 Sandbox 默认分配的 GPU 数量（0–4）；0 表示 CPU-only，不占用 L20。大于 0 时控制台在启动 Worker 前为本臂认领同样多张没人在用、也没被别的在跑臂认领的整卡，本臂的会话与回放只用这些卡；逐会话设置可覆盖此默认值。"},
-    {"key": "batch_validate_max_concurrency", "group": "运行控制", "label": "批验证并发回放数", "type": "int",
+     "help": "每个研究会话与正式回测 Sandbox 默认分配的 GPU 数量（0–4）；0 表示 CPU-only，不占用 L20。大于 0 时控制台在启动 Worker 前为本实验认领同样多张卡：显存余量不低于准入门槛（`AUTOTRADE_GPU_MIN_FREE_GIB`，未设时取默认门槛），且没有被别的在跑实验认领；卡上可以有其他进程在用，门槛只是准入余量，不独占也不预留显存。本实验的会话与回测只用这些卡；逐会话设置可覆盖此默认值。"},
+    {"key": "batch_validate_max_concurrency", "group": "运行控制", "label": "批验证并发回测数", "type": "int",
      "min": 1, "max": BATCH_VALIDATE_MAX_CANDIDATES, "advanced": True,
-     "help": f"一次 batch_validate 同时回放的候选数（1–{BATCH_VALIDATE_MAX_CANDIDATES}）。每路各起自己的策略容器（声明 fit 的候选两个），GPU 臂的这些容器共用本臂认领的卡；单次 fit 与单日推断的超时按本批实际路数成倍放大。"},
+     "help": f"一次 batch_validate 同时回测的候选数（1–{BATCH_VALIDATE_MAX_CANDIDATES}）。每路各起自己的策略容器（声明 fit 的候选两个），GPU 实验的这些容器共用本实验认领的卡；单次 fit 与单日推断的超时按本批实际路数成倍放大。"},
     # 模型与上下文
     {
         "key": "model",
@@ -621,7 +621,7 @@ _FIELDS: list[dict[str, object]] = [
         "type": "choice",
         "choices": list(LLM_KEYS),
         "choice_labels": {"primary": "主 key", "alternate": "备用 key"},
-        "help": "本臂调用中转站模型时先用哪个 key：主 key 是 LIGHTING_API_KEY，备用 key 是 LIGHTING_API_KEY_ALT。另一个照旧作后备：先用的 key 被拒（401/402/403）或额度用尽时换它再发，此后一直用它。选备用 key 时每个模型角色都必须是中转站模型。",
+        "help": "本实验调用中转站模型时先用哪个 key：主 key 是 LIGHTING_API_KEY，备用 key 是 LIGHTING_API_KEY_ALT。另一个照旧作后备：先用的 key 被拒（401/402/403）或额度用尽时换它再发，此后一直用它。选备用 key 时每个模型角色都必须是中转站模型。",
     },
     {
         "key": "reasoning_effort",

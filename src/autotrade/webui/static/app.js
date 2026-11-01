@@ -21,7 +21,7 @@ const STATE_LABELS = {
 // How the research session ended (pipelines/config.py SESSION_OUTCOMES). A
 // session that ended the arm says it in the arm's own ending word below.
 const OUTCOME_LABELS = {
-  freeze: "提名冻结",
+  freeze: "提名定版",
   no_edge: "未发现超额",
   deadline: "预算耗尽",
   environment_blocked: "环境阻断",
@@ -32,7 +32,7 @@ const OUTCOME_LABELS = {
 // 裁决 view. A graduation withdrawn afterwards is a failure, `rejected`, and
 // only its reason says it had graduated.
 const ENDING_LABELS = {
-  graduated: "毕业",
+  graduated: "验收通过",
   rejected: "未通过",
   no_edge: "未发现超额",
   budget_exhausted: "预算耗尽",
@@ -44,8 +44,8 @@ const ENDING_LABELS = {
 // and the reason a terminal row or an unmeasured reading carries. A value not
 // listed renders as written.
 const TRACK_LABELS = {
-  graduated: "毕业",
-  incubating: "孵化中",
+  graduated: "验收通过",
+  incubating: "模拟观察中",
 };
 const VERDICT_STATUS = {
   observing: ["stopped", "观察中"],
@@ -93,7 +93,7 @@ const REASON_LABELS = {
   forward_max_drawdown_exceeded: "前推回撤",
   forward_active_drawdown_exceeded: "前推主动回撤",
   forward_not_positive_at_cost_stress: (t) => `前推滑点 ×${t.cost_stress_multiplier ?? "—"} 后主动超额`,
-  forward_too_few_round_trips: "前推回合数",
+  forward_too_few_round_trips: "前推往返交易数",
   forward_exposure_below_floor: "前推平均仓位",
   forward_tracking_error_above_cap: "前推对基准指数跟踪误差",
   forward_beta_outside_band: "前推市场 β",
@@ -105,18 +105,18 @@ const REASON_LABELS = {
 // An arm judged on its active series -- its daily return minus the zero-skill
 // panel the host drew from its own book -- records `series: "active"`; an arm
 // judged before panels existed records nothing, and its figures are its own.
-const SERIES_LABELS = { active: "主动（策略 − 零技能面板）", absolute: "策略自身" };
-const ACTIVE_TITLE = "策略日收益减去零技能面板合成收益后的序列；面板由宿主按该策略自己的成交骨架随机换名回放得到";
+const SERIES_LABELS = { active: "主动（策略 − 随机对照组合）", absolute: "策略自身" };
+const ACTIVE_TITLE = "策略日收益减去随机对照组合合成收益后的序列；对照组合由宿主按该策略自己的成交骨架随机换名回放得到";
 // The figures whose name does not already say what they are, each worded once
 // so every tile, column and criterion row that draws one says the same thing.
 // A gloss states no threshold: the freeze gate's own limits are carried by the
 // gate record, and the checklist draws both the measured value and the limit
 // from there.
-const DSR_TITLE = "去膨胀夏普概率（DSR）：按本臂试验数折减后，研究期 IR 仍高于 SR* 的概率";
-const TRIALS_TITLE = "DSR 据以折减的试验数：本臂验证过的不同策略版本";
+const DSR_TITLE = "去膨胀夏普概率（DSR）：按本实验试验数折减后，研究期 IR 仍高于 SR* 的概率";
+const TRIALS_TITLE = "DSR 据以折减的试验数：本实验验证过的不同策略版本";
 // The three figures every gate reads off the active series, as
 // pipelines/verdict.py measures them: the series as it is, with no regression.
-const EXCESS_TITLE = "主动序列（账户日收益 − 零技能面板日收益，不做回归）的年化均值";
+const EXCESS_TITLE = "主动序列（账户日收益 − 随机对照组合日收益，不做回归）的年化均值";
 const TRACKING_ERROR_TITLE = "主动序列日收益的年化标准差";
 const IR_TITLE = "主动超额 ÷ 主动跟踪误差";
 // The holder's money, which no active figure is: the account's own return
@@ -124,24 +124,24 @@ const IR_TITLE = "主动超额 ÷ 主动跟踪误差";
 const RAW_EXCESS_TITLE = "账户自身扣费收益减基准指数（价格指数）同期收益，整段累计";
 // The cost-stress reading the freeze gate and F5 judge (verdict.py
 // `excess_at_cost_stress`), at the arm's multiplier.
-const STRESS_TITLE = "滑点按成本压力倍数加价后的年化主动超额；冻结门与前推裁决读的是同一个数";
-const PANEL_RETURN_TITLE = "零技能面板（同一成交骨架随机换名）自身扣费后的整段收益";
+const STRESS_TITLE = "滑点按成本压力倍数加价后的年化主动超额；定版检验与前推裁决读的是同一个数";
+const PANEL_RETURN_TITLE = "随机对照组合（同一成交骨架随机换名）自身扣费后的整段收益";
 // What F2 judges (verdict.py `forward_lower_bound`): the lower bound of one
 // daily series' mean. The mean itself is the slice's `plain_excess`, or with
 // seed replicates `seed_mean.plain_excess`.
-const LOWER_BOUND_TITLE = "主动序列（登记了种子副本时为冻结产物与各副本逐日平均）年化均值的移动块自助法单侧下界";
+const LOWER_BOUND_TITLE = "主动序列（登记了种子副本时为定版产物与各副本逐日平均）年化均值的移动块自助法单侧下界";
 // A replay slice as the holder reads it (verdict.py `holder_readings`): his
 // own account against the benchmark first, then against the zero-skill panel,
 // then the active figures the gate grades.
-const HOLDER_TITLE = "冻结产物扣费后的账户收益与基准指数（价格指数）同期收益，切片内复利";
-const PLAIN_SELECTION_TITLE = "账户收益减零技能面板收益，各自复利：选的名字是否赢了同一骨架上的随机名字";
-const ACTIVE_BETA_TITLE = "主动序列（账户 − 面板）对基准指数的回归载荷，只作诊断：为负即持仓比随机副本更低 β，指数大涨时落后于面板";
+const HOLDER_TITLE = "定版产物扣费后的账户收益与基准指数（价格指数）同期收益，切片内复利";
+const PLAIN_SELECTION_TITLE = "账户收益减随机对照组合收益，各自复利：选的名字是否赢了同一骨架上的随机名字";
+const ACTIVE_BETA_TITLE = "主动序列（账户 − 随机对照）对基准指数的回归载荷，只作诊断；为负表示相对随机对照的市场暴露较低，涨市中可能因此落后";
 // A model-training nominee judged on its training seeds together
 // (pipelines/experiment.py `_seed_replicate_gate`, verdict.py `seed_mean` and
 // `forward_lower_bound`): a seed replicate is the same strategy with only its
 // seed line changed.
 const SEED_IR_TITLE = "提名节点与它的种子副本（同一策略只换训练种子那一行）研究期主动 IR 的平均，须达到提名节点自己的 IR 门槛";
-const SEED_MEAN_TITLE = "冻结产物与它的种子副本各自读数的平均；只有登记了种子副本的提名才有";
+const SEED_MEAN_TITLE = "定版产物与它的种子副本各自读数的平均；只有登记了种子副本的提名才有";
 
 function reasonLabel(reason, thresholds) {
   const label = REASON_LABELS[reason];
@@ -160,8 +160,8 @@ const ENVIRONMENT_STAGE_LABELS = {
   subagent_wait: "等待子代理",
   backtest: "执行验证回测",
   agent_complete: "Agent 推理完成",
-  freezing: "冻结策略",
-  forward_replay: "前推与 Held-out 连续回放",
+  freezing: "定版策略",
+  forward_replay: "前推与 Held-out 连续回测",
   verdict: "裁决",
   publishing: "结果落盘",
   session_retry: "会话失败重试",
@@ -324,8 +324,8 @@ function stepKeyFromUrl(segment) {
    map is the console's vocabulary only. */
 const STEP_LABELS = {
   research: "研究",
-  frozen: "冻结",
-  forward: "前推回放",
+  frozen: "定版",
+  forward: "前推回测",
   heldout: "Held-out",
   verdict: "裁决",
 };
@@ -748,7 +748,7 @@ function chainEquity(research, forward) {
 /* One curve per arm: the research-period validation of the candidate the
    tiles name, in-sample and drawn under a band that says so, and once the
    ledger names the replay the forward and Held-out slices compounded on after
-   a 冻结 divider, the Held-out divider where that slice begins. Null until the
+   a 定版 divider, the Held-out divider where that slice begins. Null until the
    arm has a curve at all. `lazy` fetches the curve only when its box comes
    near the screen; a `mini` curve is drawn on a sample of its days. */
 function armEquityHost(item, opts = {}) {
@@ -770,7 +770,7 @@ function armEquityHost(item, opts = {}) {
             ? [{ from: strategy.dates[0], to: strategy.dates[strategy.dates.length - 1], label: "研究期 · 样本内" }]
             : [];
         const markers = [];
-        if (after && before && replay.start) markers.push({ date: replay.start, label: "冻结" });
+        if (after && before && replay.start) markers.push({ date: replay.start, label: "定版" });
         if (after && replay.heldout_start) markers.push({ date: replay.heldout_start, label: "Held-out" });
         host.replaceChildren(equityChart(chainEquity(before, after), { ...opts, markers, bands }));
       })
@@ -1475,7 +1475,7 @@ function spanBar(start, end, segments, ticks, { mini = false, pending = false, p
         ? el("span", {
             class: "span-progress",
             style: `width:${(Math.max(0, Math.min(1, progress)) * 100).toFixed(1)}%`,
-            title: `回放进度 ${Math.round(Math.max(0, Math.min(1, progress)) * 100)}%`,
+            title: `回测进度 ${Math.round(Math.max(0, Math.min(1, progress)) * 100)}%`,
           })
         : null,
     ),
@@ -1727,9 +1727,9 @@ const STEP_STATUS_LABELS = {
   skipped: "未运行",
   // The freeze has not been decided yet; the replay waits on that decision.
   awaiting_nomination: "待定",
-  awaiting_freeze: "待冻结",
-  frozen: "已冻结",
-  not_frozen: "未冻结",
+  awaiting_freeze: "待定版",
+  frozen: "已定版",
+  not_frozen: "未定版",
   sealed: "封存中",
   replayed: "已回放",
   not_replayed: "不回放",
@@ -2344,7 +2344,7 @@ function confirmDeleteExperiment(experimentId) {
       el(
         "p",
         {},
-        `此操作会永久删除 experiments/${experimentId}/ 目录（含账本、冻结策略与全部运行产物），不可恢复。`,
+        `此操作会永久删除 experiments/${experimentId}/ 目录（含账本、定版策略与全部运行产物），不可恢复。`,
       ),
       el("p", {}, "输入实验名以确认："),
       el("div", { class: "field" }, input),
@@ -2974,9 +2974,9 @@ const SLICE_ROWS = [
   ["strategy_return", "账户收益", fmtPct, true, HOLDER_TITLE],
   ["benchmark_return", "基准收益", fmtPct, true],
   ["raw_excess", "原始超额（账户 − 基准）", fmtPct, true],
-  ["panel_return", "零技能面板收益", fmtPct, true, PANEL_RETURN_TITLE],
-  ["plain_selection", "对面板（账户 − 面板）", fmtPct, true, PLAIN_SELECTION_TITLE],
-  ["market_beta", "主动市场 β（对面板）", fmtSharpe, true, ACTIVE_BETA_TITLE],
+  ["panel_return", "随机对照组合收益", fmtPct, true, PANEL_RETURN_TITLE],
+  ["plain_selection", "对随机对照（账户 − 对照组合）", fmtPct, true, PLAIN_SELECTION_TITLE],
+  ["market_beta", "主动市场 β（对随机对照）", fmtSharpe, true, ACTIVE_BETA_TITLE],
   ["plain_excess", "主动超额（年化）", fmtPct, true, EXCESS_TITLE],
   ["series", "评分序列", (value) => SERIES_LABELS[value] || String(value)],
   ["days", "交易日", String],
@@ -2987,7 +2987,7 @@ const SLICE_ROWS = [
   ["max_drawdown", "最大回撤", fmtPct],
   ["active_max_drawdown", "主动回撤", fmtPct],
   ["excess_at_cost_stress", (t) => `滑点 ×${t.cost_stress_multiplier ?? "—"} 后超额`, fmtPct, true],
-  ["round_trips", "回合数", String],
+  ["round_trips", "往返交易数", String],
   ["mean_gross", "平均仓位", fmtPct],
 ];
 
@@ -3057,7 +3057,7 @@ function holderLine(label, slice) {
     "div",
     { class: "meta-line" },
     `${label}：账户 ${fmtPct(raw.strategy_return)}，基准 ${fmtPct(raw.benchmark_return)}（原始超额 ${fmtPct(raw.raw_excess)}）；` +
-      `零技能面板 ${fmtPct(raw.panel_return)}（对面板 ${fmtPct(raw.plain_selection)}）；${active}`,
+      `随机对照组合 ${fmtPct(raw.panel_return)}（对随机对照 ${fmtPct(raw.plain_selection)}）；${active}`,
   );
 }
 
@@ -3085,11 +3085,11 @@ function seedReadingsTable(slices, names) {
       { label: "种子" },
       ...shown.flatMap((name) => [
         { label: `${SLICE_NAMES[name]}对基准`, num: true, title: RAW_EXCESS_TITLE },
-        { label: `${SLICE_NAMES[name]}对面板`, num: true, title: PLAIN_SELECTION_TITLE },
+        { label: `${SLICE_NAMES[name]}对随机对照`, num: true, title: PLAIN_SELECTION_TITLE },
       ]),
     ],
     [
-      [{ value: "冻结产物" }, ...figures((slice) => slice)],
+      [{ value: "定版产物" }, ...figures((slice) => slice)],
       ...(first.seed_replicates || []).map((replicate, index) => [
         {
           value: String(replicate.source_step_id || "").split("__").pop(),
@@ -3158,7 +3158,7 @@ function mandateRows(capToken, bandToken, measured, row, t) {
   ];
 }
 
-/* F1–F7 over the forward slice, as criterion rows: the 前推回放 view draws
+/* F1–F7 over the forward slice, as criterion rows: the 前推回测 view draws
    them alone, 裁决 draws them ahead of H1–H4, and neither restates a
    threshold the other spells differently. F2's hover states the mean and the
    seed count of the series it judged. */
@@ -3237,7 +3237,7 @@ function stageHead(key, detail) {
   return panelHead(STEP_LABELS[key], el("span", { class: "badge kind" }, step.status));
 }
 
-/* 前推回放: the forward slice alone — its span (progress while replaying),
+/* 前推回测: the forward slice alone — its span (progress while replaying),
    once recorded the holder's line and its seed replicates, F1–F7 and the
    slice's own statistics. */
 function forwardStagePanel(detail) {
@@ -3277,7 +3277,7 @@ function heldoutStagePanel(detail) {
     { class: "panel section-gap" },
     stageHead("heldout", detail),
     replaySpanBar(replay, "heldout", { pending: !forward, progress }),
-    el("div", { class: "meta-line" }, "与前推是同一次连续回放的尾段，同一个裁决"),
+    el("div", { class: "meta-line" }, "与前推是同一次连续回测的尾段，同一个裁决"),
     holderLine("Held-out", h),
     seedReadingsTable((forward || {}).slices, ["heldout"]),
     el(
@@ -3312,11 +3312,11 @@ function verdictStagePanel(detail) {
     validations.failed
       ? kvRow(
           "验证失败",
-          `${validations.failed} 次${validations.environment ? `（环境 ${validations.environment} 次，已退还回放年）` : ""}${validations.last_error ? ` · ${validations.last_error}` : ""}`,
+          `${validations.failed} 次${validations.environment ? `（环境 ${validations.environment} 次，已退还回测年）` : ""}${validations.last_error ? ` · ${validations.last_error}` : ""}`,
         )
       : null,
     attempts.failed
-      ? kvRow("回放失败", `${attempts.failed} 次${attempts.last_error ? ` · ${attempts.last_error}` : ""}`)
+      ? kvRow("回测失败", `${attempts.failed} 次${attempts.last_error ? ` · ${attempts.last_error}` : ""}`)
       : null,
     recordedAt ? kvRow("记录于", fmtTs(recordedAt)) : null,
   ].filter(Boolean);
@@ -3329,7 +3329,7 @@ function verdictStagePanel(detail) {
     { class: "panel section-gap" },
     panelHead(STEP_LABELS.verdict, badge),
     withdrawn
-      ? el("div", { class: "hint warn" }, `毕业于 ${fmtTs(withdrawn.recorded_at)} 撤销，记为未通过；以下是回放当时的读数与判定`)
+      ? el("div", { class: "hint warn" }, `验收通过的结论已于 ${fmtTs(withdrawn.recorded_at)} 撤销，记为未通过；以下保留回测当时的读数与判定`)
       : null,
     withdrawn
       ? el(
@@ -3353,7 +3353,7 @@ function verdictStagePanel(detail) {
         el(
           "div",
           { class: "meta-line" },
-          "前推 F1–F7 与 Held-out H1–H4 全部通过才毕业；策略异常直接未通过，其他失败按上限重试",
+          "前推 F1–F7 与 Held-out H1–H4 全部通过才算验收通过；策略异常直接未通过，其他失败按上限重试",
         ),
     facts.length ? el("table", { class: "kv section-gap" }, ...facts) : null,
     paperHandoff(detail),
@@ -3429,7 +3429,7 @@ function frozenPanel(detail) {
     "div",
     { class: "panel section-gap" },
     panelHead(
-      "冻结产物",
+      "定版产物",
       el("span", { class: "spacer" }),
       el(
         "a",
@@ -3462,7 +3462,7 @@ function frozenPanel(detail) {
           label: "IR 门槛",
           value: seeds.information_ratio_bar,
           fmt: fmtSharpe,
-          title: "DSR 达到门槛时的研究期 IR，按本臂试验数折算；提名节点与种子均值都须达到",
+          title: "DSR 达到门槛时的研究期 IR，按本实验试验数折算；提名节点与种子均值都须达到",
         },
         {
           label: "DSR",
@@ -3504,7 +3504,7 @@ function frozenPanel(detail) {
       ? dataTable(
           [{ label: "种子" }, { label: "种子行" }, { label: "研究期 IR", num: true, title: IR_TITLE }],
           [
-            [{ value: "冻结产物", title: frozen.source_step_id || null }, "—", { value: fmtSharpe(frozen.information_ratio), cls: signCls(frozen.information_ratio) }],
+            [{ value: "定版产物", title: frozen.source_step_id || null }, "—", { value: fmtSharpe(frozen.information_ratio), cls: signCls(frozen.information_ratio) }],
             ...seeds.replicates.map((entry) => [
               { value: String(entry.step_id).split("__").pop(), title: entry.step_id },
               entry.seed_line,
@@ -3833,7 +3833,7 @@ function stepPlaceholder(detail, key, title) {
 
 /* The right pane of the process grid: whichever step the reader selected. The
    research session has its own panel, the freeze opens the frozen artifact,
-   and 前推回放, Held-out and 裁决 each open their own stage view. */
+   and 前推回测, Held-out and 裁决 each open their own stage view. */
 function sessionDetailPanel(detail, selectedKey) {
   // Flex column with a uniform card gap: whichever cards are present, the
   // first one's top aligns with the process list in the left grid column.
@@ -3846,7 +3846,7 @@ function sessionDetailPanel(detail, selectedKey) {
     return panel;
   }
   if (selectedKey === "frozen") {
-    panel.append(frozenPanel(detail) || stepPlaceholder(detail, "frozen", "冻结产物"));
+    panel.append(frozenPanel(detail) || stepPlaceholder(detail, "frozen", "定版产物"));
     return panel;
   }
   if (selectedKey === "forward") {
@@ -4035,7 +4035,7 @@ function researchSessionPanel(detail, session) {
       ? el(
           "div",
           { class: "section-gap" },
-          el("h4", { class: "subsection-title" }, "冻结门"),
+          el("h4", { class: "subsection-title" }, "定版检验"),
           freezeGateChecklist(gate),
         )
       : null,
@@ -4199,7 +4199,7 @@ function gpuAllocationRow(detail, session, send) {
     { class: "section-gap" },
     el(
       "h4",
-      { class: "subsection-title", title: "本会话只用本臂认领的卡，按认领顺序取；条越长剩余显存越多" },
+      { class: "subsection-title", title: "本会话只用本实验认领的卡，按认领顺序取；条越长剩余显存越多" },
       "本会话 GPU 分配",
     ),
   );
@@ -5759,7 +5759,7 @@ function stepTreeRow(
       el("span", { class: "badge state-running_session" }, "当前位置"),
     );
   if (node.frozen)
-    badges.push(el("span", { class: "badge state-completed" }, "已冻结"));
+    badges.push(el("span", { class: "badge state-completed" }, "已定版"));
   if (failed) badges.push(el("span", { class: "badge state-failed" }, "失败"));
   const actions = el("span", { class: "step-actions" });
   if (node.has_snapshot) {
@@ -5865,7 +5865,7 @@ function showStepTip(detail, node, row) {
     ),
     line("最大回撤", fmtPct(m.max_drawdown)),
     line("记录于", fmtTs(node.created_at)),
-    node.frozen ? line("冻结", "本节点是冻结产物") : null,
+    node.frozen ? line("定版", "本节点是定版产物") : null,
     node.status === "failed" ? line("失败原因", node.error || "—") : null,
     node.has_snapshot ? null : line("快照", "无（失败尝试不留产物）"),
   );
@@ -5908,7 +5908,7 @@ function openStepNodeModal(detail, payload, node) {
       ),
       kvRow("最大回撤", fmtPct(m.max_drawdown)),
       kvRow("记录时间", fmtTs(node.created_at)),
-      node.frozen ? kvRow("冻结", "本节点是冻结产物") : null,
+      node.frozen ? kvRow("定版", "本节点是定版产物") : null,
       node.status === "failed" ? kvRow("失败原因", node.error || "—") : null,
       kvRow("附件", (node.attachments || []).join("、") || "—"),
       kvRow("revision", el("code", {}, String(node.strategy_ref || "—"))),
@@ -5940,7 +5940,7 @@ function subWindowSection(title, rows) {
       [
         { label: "年度" },
         { label: "收益", num: true, title: "年度开盘权益起算的区间收益" },
-        { label: "超额", num: true, title: "相对本臂基准指数的超额收益" },
+        { label: "超额", num: true, title: "相对本实验基准指数的超额收益" },
         { label: "Sharpe", num: true, title: "年度内日收益的年化 Sharpe" },
         { label: "回撤", num: true, title: "年度内峰谷回撤" },
         { label: "换手", num: true, title: "成交名义额 / 初始资金" },
@@ -6092,8 +6092,8 @@ const STYLE_REASON_TITLES = {
   insufficient_overlapping_days: "与基准指数重叠的交易日不足 8 天，β、α 与 R² 不计算",
   benchmark_variance_zero: "同窗基准指数收益没有可回归的波动，β、α 与 R² 不计算",
   style_columns_unavailable: "回放槽缺少市值、PB 或换手截面，风格暴露为空",
-  no_holdings: "该回放没有持仓，风格暴露为空",
-  no_valued_holdings: "该回放的持仓没有可用收盘价，风格暴露为空",
+  no_holdings: "该回测没有持仓，风格暴露为空",
+  no_valued_holdings: "该回测的持仓没有可用收盘价，风格暴露为空",
 };
 
 /* Render scheduled and matched ISO timestamps in Asia/Shanghai. */
@@ -6204,7 +6204,7 @@ function ordersNode(experimentId, result) {
 
 /* ---------------- 演化 ----------------
    One stable two-pane layout. The left pane is the whole catalogue — the
-   curated 精选库 above, the 毕业层候选 the tier admits below — and the right
+   curated 精选库 above, the 验收层候选 the tier admits below — and the right
    pane is a single viewer/editor surface with a fixed head, toolbar and body,
    so selecting anything swaps only what those three hosts contain: the page
    header, the notice and both pane widths never move.
@@ -6626,7 +6626,7 @@ function memoryNavPanel() {
       el("div", { class: "field memory-filter" }, filter),
     ),
     memoryView.listHost,
-    el("h4", { class: "section-gap" }, "毕业层候选"),
+    el("h4", { class: "section-gap" }, "验收层候选"),
     memoryView.candidateHost,
   );
 }
@@ -6695,7 +6695,7 @@ function renderMemoryCandidates() {
   const nodes = [];
   if (tier.error)
     nodes.push(
-      el("div", { class: "hint warn" }, `毕业层不可解析：${tier.error}`),
+      el("div", { class: "hint warn" }, `验收层不可解析：${tier.error}`),
     );
   let shown = 0;
   for (const row of listed) {
@@ -6712,8 +6712,8 @@ function renderMemoryCandidates() {
         "div",
         { class: "hint" },
         row.heldout_end
-          ? `只挂给研究期末不早于 ${row.heldout_end} 的臂（Held-out 止于该日）`
-          : "Held-out 结束日未知：任何臂都不挂载",
+          ? `只挂给研究期末不早于 ${row.heldout_end} 的实验（Held-out 止于该日）`
+          : "Held-out 结束日未知：任何实验都不挂载",
       ),
     );
     for (const skill of skills)
@@ -6767,7 +6767,7 @@ function candidateAsideReason(row) {
   if (!row.verdict) return el("span", { class: "hint" }, "无裁决");
   // Why the tier declines it, not how it ended: that word is on its own page.
   // A withdrawn graduation is no graduate here either.
-  if (row.verdict !== "graduated") return el("span", { class: "hint" }, "未毕业");
+  if (row.verdict !== "graduated") return el("span", { class: "hint" }, "未通过验收");
   return el("span", { class: "hint" }, "无已发布 skill 条目");
 }
 
@@ -6937,7 +6937,7 @@ function curatedEntryView(entry) {
 function candidateEntryView(selection, entry) {
   return {
     title: entry.title || entry.name,
-    meta: skillMeta(entry, `毕业层 ${selection.experiment_id} 的 skill，只读`),
+    meta: skillMeta(entry, `验收层 ${selection.experiment_id} 的 skill，只读`),
     buttons: [
       el(
         "button",
@@ -7193,12 +7193,12 @@ function mountedMemoryPanel(detail) {
 
 function mountedSourceLabel(source) {
   if (source.origin === "curated") return "精选库";
-  const label = `毕业实验 ${source.source || "—"}`;
+  const label = `验收通过实验 ${source.source || "—"}`;
   // The snapshot holds it, the arm's mount refused it (operating_memory_refused).
   if (source.mounted === false)
     return `${label} · 未挂载：${
       source.heldout_end
-        ? `Held-out 止于 ${source.heldout_end}，晚于本臂研究期末`
+        ? `Held-out 止于 ${source.heldout_end}，晚于本实验研究期末`
         : "Held-out 结束日未知"
     }`;
   return label;
@@ -7291,7 +7291,7 @@ function mountedMemorySection(detail, payload) {
   const summary = [
     "已挂载记忆",
     snapshot.mode || payload.mode || "—",
-    `精选 ${curated} · 毕业 ${graduated}`,
+    `精选 ${curated} · 验收通过 ${graduated}`,
   ].join(" · ");
   const fold = el(
     "details",
@@ -8638,7 +8638,7 @@ function bookCurveChart(chart, source, opts) {
         {
           from: line.dates[0],
           to: line.dates[line.dates.length - 1],
-          label: "源实验 · 样本外回放",
+          label: "源实验 · 样本外回测",
         },
       ],
       markers: [

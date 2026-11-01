@@ -16,7 +16,7 @@ from pathlib import Path
 from .style import BENCHMARK_LABEL, STYLE_ARTIFACT_NAME
 
 STRATEGY_LABEL = "策略"
-PANEL_LABEL = "零技能面板"
+PANEL_LABEL = "随机对照组合"
 
 
 def _finite(value: object) -> float | None:
