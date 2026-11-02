@@ -80,18 +80,20 @@ arm and whether it takes a free slot. The research cron
 (`ops/cron/research_fill.cron`) runs it over several round files in turn.
 
 Before an arm is created, and on every dry-run reading of it, `smoke` replays
-its pack's starter through the host's own evaluator on the arm's seed: a few
-days from each research-year start inside the full span, and the full span
-once. A seed whose views break the replay (round 20261015's five-year seed
-failed every replay crossing 2022-07-01, the untouched starter included)
-refuses the arm with the failure instead of letting a session discover it.
-The outcome is recorded under logs/research/smoke/, keyed by the seed, its
-contract, the geometry and the starter's bytes: a pass is not replayed again,
-and a failure keeps refusing until its record is deleted. A GPU arm's starter
-replays on cards the smoke takes for its duration, admitted as the console
-admits them (``gpu.host_min_free_gpu_memory_mib``: the cards that keep its
-margin free and that no running arm claims); with too few of those the arm is
-refused for that run only, and nothing is recorded.
+what the arm's `output/` starts as -- its pack's starter, else the contract
+template -- through the host's own evaluator on the arm's seed: a few days from
+each research-year start inside the full span, and the full span once. A seed
+whose views break the replay (round 20261015's five-year seed failed every
+replay crossing 2022-07-01, the untouched starter included) refuses the arm
+with the failure instead of letting a session discover it. The smoke exercises
+only what that strategy does; the contract template trades nothing (see
+`smoke`). The outcome is recorded under logs/research/smoke/, keyed by the
+seed, its contract, the geometry and the starter's bytes: a pass is not
+replayed again, and a failure keeps refusing until its record is deleted. A GPU
+arm's starter replays on cards the smoke takes for its duration, admitted as
+the console admits them (``gpu.host_min_free_gpu_memory_mib``: the cards that
+keep its margin free and that no running arm claims); with too few of those the
+arm is refused for that run only, and nothing is recorded.
 
 RETIRED_IDS records the experiment ids that have been used and archived, or
 withdrawn from a round's queue, or defined by a round whose file has left the
@@ -681,8 +683,20 @@ RETIRED_IDS: frozenset[str] = frozenset(
         "retrieval_100k_8y_opus_zgca_20261025b",
         "retrieval_100k_8y_sol_zgca_20261025b",
         "retrieval_100k_8y_sol_zgca_20261027b",
+        # Every arm of rounds 20261026, 20261027, 20261030 and 20261031, whose
+        # files and packs left the tree on 2026-11-02. None is running; the
+        # directories that remain stay on disk.
+        "memory_100k_10y_argon_local_20261031",
+        "memory_100k_10y_astra_local_20261031",
+        "memory_100k_8y_argon_local_20261030",
+        "memory_100k_8y_astra_local_20261030",
+        "retrieval_100k_8y_argon_20261026",
+        "retrieval_100k_8y_argon_zgca_20261027",
+        "retrieval_100k_8y_astra_20261026",
+        "retrieval_100k_8y_astra_zgca_20261026",
+        "retrieval_100k_8y_fable_20261026",
         # Withdrawn from round 20261102's queue before it was created, when the
-        # round was narrowed to the Astra experiment alone.
+        # round was narrowed to Astra experiments alone.
         "memory_200k_10y_argon_local_20261102",
     }
 )
@@ -772,14 +786,18 @@ def smoke(merged: Mapping[str, object]) -> str:
     by the host's own evaluator as a session's smoke_backtest and Validation
     replay it: over the full research span, a few days from each research-year
     start (the late-start path a defective seed breaks first), then the whole
-    span. The outcome is recorded once per seed contract, geometry and starter
-    bytes, so a pass is not replayed by the next timer run and a failure is not
-    retried until its record is deleted. A starter whose arm asks for GPUs
-    replays on cards it takes for the smoke under the console's admission margin
-    (``gpu.host_min_free_gpu_memory_mib``); when too few pass it,
-    ``GpuUnavailableError`` propagates and nothing is recorded, so a later run
-    smokes the arm again. An admission setting that cannot be read is refused
-    the same way: it is no verdict on the starter either.
+    span. The contract template reads nothing and places no orders, so its
+    smoke shows only that the seed's views build for every decision, the
+    strategy container starts and the contract holds; a seed defect that only a
+    strategy's own reads, its ``fit`` or the order and fill path would hit is
+    not caught. The outcome is recorded once per seed contract, geometry and
+    starter bytes, so a pass is not replayed by the next timer run and a
+    failure is not retried until its record is deleted. A starter whose arm
+    asks for GPUs replays on cards it takes for the smoke under the console's
+    admission margin (``gpu.host_min_free_gpu_memory_mib``); when too few pass
+    it, ``GpuUnavailableError`` propagates and nothing is recorded, so a later
+    run smokes the arm again. An admission setting that cannot be read is
+    refused the same way: it is no verdict on the starter either.
     """
 
     reference = str(merged.get("workspace_reference") or "")

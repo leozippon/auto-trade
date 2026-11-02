@@ -46,6 +46,7 @@ from autotrade.webui.manager import (
     MAX_RUNNING_LOCAL_EXPERIMENTS,
 )
 from scripts.experiments import _round
+from scripts.experiments._profiles import FUND_TITLE_EIGHT_YEAR_100K
 from scripts.experiments._round import (
     BASE_EXPECTED_DEFAULTS,
     BASE_OVERRIDES,
@@ -55,6 +56,7 @@ from scripts.experiments._round import (
     Round,
     archived_ids,
 )
+from tests.unit.reference_pack_fixture import AFTER_RESEARCH
 from tests.unit.research_release_fixture import (
     BACKFILLED_HISTORY_START,
     HELDOUT_REACHING_DAYS,
@@ -1146,18 +1148,12 @@ CANONICAL_BOOK = {
 
 @pytest.mark.parametrize("pack", PACKS, ids=lambda path: path.name)
 def test_a_starter_carries_the_canonical_book_byte_for_byte(pack: Path) -> None:
-    """A starter file named like one in configs/starter_lib/ is that file.
-
-    Files under ``starter/sleeves/`` are frozen copies of another arm's
-    strategy artifact (round 20261015's ensemble pack): they are compared with
-    that artifact (tests/unit/test_open_packs.py), not with this library."""
+    """A starter file named like one in configs/starter_lib/ is that file."""
     assert CANONICAL_BOOK, "configs/starter_lib/ holds no canonical module"
     differing = [
         str(path.relative_to(pack))
         for path in sorted((pack / "starter").rglob("*"))
-        if path.name in CANONICAL_BOOK
-        and path.relative_to(pack / "starter").parts[0] != "sleeves"
-        and path.read_bytes() != CANONICAL_BOOK[path.name]
+        if path.name in CANONICAL_BOOK and path.read_bytes() != CANONICAL_BOOK[path.name]
     ]
     assert not differing, (
         f"{pack.name} edits its copy of configs/starter_lib/ ({', '.join(differing)}): copy the "
@@ -1166,56 +1162,48 @@ def test_a_starter_carries_the_canonical_book_byte_for_byte(pack: Path) -> None:
 
 
 # Round 20261102 frees the ten-year research direction from a specification:
-# it starts one session, gpt-6-astra on the local console, on a CNY 200k
-# account, and its pack frames the owner's memory note as a reference rather
-# than an implementation list. Beside round 20261031, which shares its
-# geometry and seed on the 100k account, the account, the pack, the id and the
-# direction text are the only differences.
+# it starts three identical sessions, gpt-6-astra on the local console, on a
+# CNY 200k account, and its pack frames the owner's memory note as a reference
+# rather than an implementation list.
 ROUND_200K = "create_round_20261102"
-ROUND_100K_10Y = "create_round_20261031"
 PACK_200K = "configs/workspace_refs/memory_200k_rolling_20261102"
-PACK_100K_10Y = "configs/workspace_refs/memory_100k_rolling_20261031"
 ASTRA_200K = "memory_200k_10y_astra_local_20261102"
-ASTRA_100K_10Y = "memory_100k_10y_astra_local_20261031"
 
 
-def test_the_200k_round_uses_one_astra_experiment() -> None:
-    """Keep the research setup while changing capital, pack and direction text."""
+def test_the_200k_round_runs_three_identical_astra_experiments() -> None:
+    """Three experiments that send one request but for their ids: the shared
+    selection on a ten-year geometry, with the account and the budgets raised."""
     rnd = ROUNDS[ROUND_200K]
-    earlier = ROUNDS[ROUND_100K_10Y]
-    # One session, on the key and the model the operator starts by hand.
-    assert list(rnd.arms) == [ASTRA_200K]
-    assert ASTRA_100K_10Y in earlier.arms
+    arms = [ASTRA_200K, f"{ASTRA_200K}b", f"{ASTRA_200K}c"]
+    assert list(rnd.arms) == arms
     now = rnd.request_params(ASTRA_200K)
-    before = earlier.request_params(ASTRA_100K_10Y)
-    assert set(now) == set(before)
-    assert {key for key in now if now[key] != before[key]} == {
-        "experiment_id",
+    for arm in arms[1:]:
+        assert rnd.request_params(arm) == {**now, "experiment_id": arm}
+    # The dataset selection, benchmark and bars are the profile's.
+    assert {key for key, value in FUND_TITLE_EIGHT_YEAR_100K.items() if now[key] != value} == {
+        "research_start",
+        "research_end",
+        "forward_end",
+        "heldout_end",
+        "window_months",
         "initial_cash",
-        "workspace_reference",
-        "research_directive",
+        "max_replay_years",
     }
     assert now["initial_cash"] == 200_000
-    assert before["initial_cash"] == 100_000
     assert now["workspace_reference"] == PACK_200K
-    assert rnd.pit_views_seed == earlier.pit_views_seed
     assert (now["model"], now["llm_key"], now["reasoning_effort"]) == ("gpt-6-astra", "alternate", "xhigh")
     assert (now["subagent_model"], now["compact_model"]) == ("DeepSeek-V4.1-Flash",) * 2
     assert now["compact_token_threshold"] == 221_184
-    assert "200k" in ASTRA_200K and ASTRA_200K.endswith("_20261102")
     # The session decides how many names it holds and how heavy each is.
     assert now["max_total_holdings"] is None
     assert now["max_single_name_weight"] is None
     assert now["permitted_boards"] == ["main", "gem"]
 
 
-def test_the_200k_pack_copies_the_owner_note_and_keeps_no_earlier_quota() -> None:
+def test_the_200k_pack_carries_the_owner_note_and_keeps_no_earlier_quota() -> None:
     """Preserve the owner note without old quotas, future results or ambiguous terms."""
-    from tests.unit.test_retrieval_pack import AFTER_RESEARCH
-
     pack = REPO_ROOT / PACK_200K
-    source = REPO_ROOT / PACK_100K_10Y
-    assert (pack / "memory-framework.md").read_bytes() == (source / "memory-framework.md").read_bytes()
+    assert (pack / "memory-framework.md").is_file()
     readme = (pack / "README.md").read_text(encoding="utf-8")
     assert "20 万元" in readme
     assert "10 万元" not in readme

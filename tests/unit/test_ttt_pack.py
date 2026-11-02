@@ -7,12 +7,13 @@ contract template. Every vendored repository carries its licence and only
 text. The round's directive starts with the README's direction paragraph word
 for word and adds the call to explore and the pointer to the closed families;
 nothing before the README's facts names a model, and neither does the
-directive. Both arms are round 20261027's arm on this pack, with their own main
-model, the relay's alternate key, four replays per batch, three times every
-per-arm budget and a strategy container of twice the default CPUs and memory. The README ends
-with guidance the session may ignore. No file the pack's authors wrote cites a
-reading after the research period; the vendored papers and code are other
-people's text, left as published.
+directive. Both arms send the eight-year fundamentals-plus-titles selection on
+one A100 at xhigh, with their own main model, the relay's alternate key, four
+replays per batch, three times every per-arm budget and a strategy container of
+twice the default CPUs and memory. The README ends with guidance the session
+may ignore. No file the pack's authors wrote cites a reading after the research
+period; the vendored papers and code are other people's text, left as
+published.
 """
 
 from __future__ import annotations
@@ -22,16 +23,21 @@ from pathlib import Path
 
 from autotrade.agent.prompts import PROTOCOL_INSTRUCTION
 from autotrade.environment.llm import MODEL_CHOICES
-from scripts.experiments import create_round_20261027, create_round_20261028b
+from scripts.experiments import create_round_20261028b
+from scripts.experiments._profiles import (
+    FUND_TITLE_EIGHT_YEAR_100K,
+    FUND_TITLE_PIT_VIEWS_SEED,
+)
+from scripts.experiments._round import PROBE_ID, Round
 from scripts.experiments.create_round_20261028 import ARMS, DIRECTIVE, PACK, ROUND
-from tests.unit.test_retrieval_pack import AFTER_RESEARCH
+from tests.unit.reference_pack_fixture import AFTER_RESEARCH
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PACK_DIR = REPO_ROOT / PACK
 MODEL_NAMES = (*MODEL_CHOICES, "Qwen", "gemini", "gpt", "claude", "DeepSeek")
-# The files the pack's authors wrote, which the retrieval pack's guard against
-# quoting a reading after the research period covers; the rest of papers/ and
-# code/ is vendored text, where "held-out" is ordinary vocabulary.
+# The files the pack's authors wrote, which the guard against quoting a
+# reading after the research period covers; the rest of papers/ and code/ is
+# vendored text, where "held-out" is ordinary vocabulary.
 AUTHORED = ("README.md", "families.md", "papers/INDEX.md", "code/INDEX.md")
 
 
@@ -88,12 +94,20 @@ TRIPLED = (
 )
 
 
-def test_both_arms_are_round_20261027s_arm_on_this_pack_and_the_alternate_key() -> None:
+def test_both_arms_send_the_selection_on_one_card_and_their_own_choices() -> None:
     """Their own model, this pack, the alternate key, four legs per batch,
     three times every per-arm budget and a container of 16 CPUs and 64 GiB;
-    nothing else differs."""
-    (reference,) = create_round_20261027.ARMS
-    base = create_round_20261027.ROUND.request_params(reference)
+    nothing else differs from the eight-year fundamentals-plus-titles selection
+    on one A100 at xhigh with the console's defaults."""
+    base = Round(
+        pit_views_seed=FUND_TITLE_PIT_VIEWS_SEED,
+        overrides={
+            **FUND_TITLE_EIGHT_YEAR_100K,
+            "permitted_boards": ["main", "gem"],
+            "gpu_count": 1,
+            "reasoning_effort": "xhigh",
+        },
+    ).request_params(PROBE_ID)
     tripled = {key: 3 * base[key] for key in TRIPLED}
     assert tripled == {
         "max_replay_years": 288,
@@ -115,6 +129,9 @@ def test_both_arms_are_round_20261027s_arm_on_this_pack_and_the_alternate_key() 
             **base,
             "experiment_id": arm,
             "model": model,
+            "subagent_model": "DeepSeek-V4.1-Flash",
+            "compact_model": "DeepSeek-V4.1-Flash",
+            "compact_token_threshold": 221_184,
             "llm_key": "alternate",
             "workspace_reference": PACK,
             "research_directive": DIRECTIVE,

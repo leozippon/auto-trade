@@ -1,25 +1,15 @@
-"""The open-exploration packs of rounds 20261014 and 20261008b: one common contract per round, one direction per pack.
+"""The open-exploration packs of round 20261014 that the Paper books started from: one common contract, one direction per pack.
 
-What must hold. Within a round the packs give a direction each and share the
-rules file and the record of occupied and closed directions byte for byte,
-since a pack is mounted alone and cannot point at another. Each starter is a
-valid strategy package; a round whose arms claim a card ships the device
-helper and one that claims none ships no CUDA path. Round 20261008b's starters
-share every common module, carry the events helper exactly in the five-year
-packs, and their built-in shuffled control keeps a name's
-stand-in from one review to the next. The ensemble pack's fixed sleeves are
-the frozen Paper strategies, changed only in their import lines and their seat
-counts, and its legs run the candidate and the two required controls on the
-same account. The read helpers return only visible rows, matched as asked. The
-combined book gives each sleeve its own holdings and cash and never lets one
-sleeve trade another's names. No pack cites a reading after the research
-period.
+What must hold. The packs give a direction each and share the rules file, the
+record of occupied and closed directions and the starter byte for byte, since
+a pack is mounted alone and cannot point at another. The starter is a valid
+strategy package. Its read helpers return only visible rows, matched as asked,
+and its device helper falls back to the CPU. No pack cites a reading after the
+research period.
 """
 
 from __future__ import annotations
 
-import hashlib
-import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -30,17 +20,11 @@ import pytest
 
 from autotrade.environment.strategy import CN_TZ
 from autotrade.environment.strategy_loader import validate_strategy_package
+from tests.unit.reference_pack_fixture import AFTER_RESEARCH
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REFS = REPO_ROOT / "configs" / "workspace_refs"
-PACKS_14 = [REFS / f"open_{name}_100k_8y_20261014" for name in ("free", "commit", "avoid", "earnings", "adapt")]
-FIVE_YEAR_08B = [REFS / f"open_{name}_100k_5y_20261008b" for name in ("tables", "exclude")]
-EIGHT_YEAR_08B = [REFS / f"open_{name}_100k_8y_20261008b" for name in ("guidance", "capital")]
-ENSEMBLE = REFS / "open_ensemble_100k_8y_20261008b"
-PACKS_08B = [*FIVE_YEAR_08B, *EIGHT_YEAR_08B, ENSEMBLE]
-# Round 20261014b: the hierarchical-continual-memory arm, one pack whose
-# starter trains daily and whose controls are knob settings.
-HCM_14B = REFS / "hcm_100k_8y_20261014b"
+PACKS_14 = [REFS / f"open_{name}_100k_8y_20261014" for name in ("free", "commit")]
 COMMON = ("families.md", "references/open-rules.md")
 
 
@@ -48,102 +32,29 @@ def _files(root: Path) -> dict[str, bytes]:
     return {str(path.relative_to(root)): path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
 
 
-@pytest.mark.parametrize("packs", [PACKS_14, PACKS_08B], ids=["20261014", "20261008b"])
-def test_a_round_shares_one_contract(packs: list[Path]) -> None:
-    for pack in packs[1:]:
+def test_the_round_shares_one_contract_and_one_starter() -> None:
+    for pack in PACKS_14[1:]:
         for name in COMMON:
-            assert (pack / name).read_bytes() == (packs[0] / name).read_bytes(), (pack.name, name)
+            assert (pack / name).read_bytes() == (PACKS_14[0] / name).read_bytes(), (pack.name, name)
+        assert _files(pack / "starter") == _files(PACKS_14[0] / "starter"), pack.name
 
 
-@pytest.mark.parametrize("pack", PACKS_14[1:], ids=lambda path: path.name)
-def test_round_20261014_ships_one_starter(pack: Path) -> None:
-    assert _files(pack / "starter") == _files(PACKS_14[0] / "starter"), pack.name
-
-
-def test_round_20261008b_starters_share_their_common_modules() -> None:
-    """The five starters agree on every module they share, the four non-ensemble
-    ones on their entry module too; only the five-year packs read the events
-    domain, and no starter keeps a device helper, since no arm has a card."""
-    reference = _files(EIGHT_YEAR_08B[0] / "starter")
-    for pack in PACKS_08B:
-        files = _files(pack / "starter")
-        shared = {name for name in files if name.startswith("lib/") and name in reference}
-        assert shared >= {"lib/controls.py", "lib/trade.py", "lib/score.py", "lib/titles.py", "lib/fund.py"}, pack.name
-        assert {name: files[name] for name in shared} == {name: reference[name] for name in shared}, pack.name
-        assert ("lib/events.py" in files) is (pack in FIVE_YEAR_08B), pack.name
-        assert "lib/device.py" not in files, pack.name
-        if pack != ENSEMBLE:
-            assert files["main.py"] == reference["main.py"], pack.name
-    events = {(pack / "starter" / "lib" / "events.py").read_bytes() for pack in FIVE_YEAR_08B}
-    assert len(events) == 1
-
-
-def test_the_starter_control_keeps_each_stand_in_from_review_to_review(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`knobs.SHUFFLE` runs the held shuffle over the day's tradable names: the
-    same scores give the same stand-ins on any day, so a keep-band book keeps
-    the candidate's holding period."""
-    _starter(monkeypatch, EIGHT_YEAR_08B[0])
-    from lib import controls, score
-
-    codes = [f"{i:06d}.SZ" for i in range(1, 31)]
-    values = pd.Series([float(i) if i % 4 else float("nan") for i in range(30)], index=codes)
-    first = score.shuffle(values, datetime(2024, 3, 11, 8, 30, tzinfo=CN_TZ))
-    assert first.equals(score.shuffle(values, datetime(2024, 4, 1, 8, 30, tzinfo=CN_TZ)))
-    assert first.equals(controls.held_shuffle(values, values.index))
-    assert sorted(first) == sorted(values.dropna())
-    _drop_packages()
-
-
-@pytest.mark.parametrize("pack", [*PACKS_14, *PACKS_08B, HCM_14B], ids=lambda path: path.name)
+@pytest.mark.parametrize("pack", PACKS_14, ids=lambda path: path.name)
 def test_the_starter_is_a_valid_package(pack: Path) -> None:
     validate_strategy_package(pack / "starter" / "main.py")
 
 
 def test_no_pack_cites_a_reading_after_the_research_period() -> None:
-    for pack in [*PACKS_14, *PACKS_08B, HCM_14B]:
+    for pack in PACKS_14:
         for path in pack.rglob("*"):
             if path.is_file() and path.suffix in (".md", ".py"):
                 text = path.read_text(encoding="utf-8")
-                for word in ("前推", "Held-out", "held-out", "forward IR", "F2 下界", "样本外读数"):
+                for word in AFTER_RESEARCH:
                     assert word not in text, (pack.name, path.name, word)
 
 
-# The frozen artifacts' files by their SHA-256 prefix, as the ensemble README
-# records them; the sleeves differ from them in their import lines and in the
-# seat count of their knobs (16, where both artifacts hold 30).
-SLEEVE_HASH_ROW = re.compile(r"^\| `([a-z/_.]+)`(?:（`b30`）/ `([a-z/_.]+)`（`esop60`）)? \| `([0-9a-f]{16}|—)` \| `([0-9a-f]{16})` \|$")
-
-
-def _recorded_hashes() -> dict[tuple[str, str], str]:
-    recorded: dict[tuple[str, str], str] = {}
-    for line in (ENSEMBLE / "README.md").read_text(encoding="utf-8").splitlines():
-        line = line.replace("| — |", "| `—` |")
-        match = SLEEVE_HASH_ROW.match(line)
-        if match:
-            b30_file, esop_file, b30_hash, esop_hash = match.groups()
-            if b30_hash != "—":
-                recorded[("b30", b30_file)] = b30_hash
-            recorded[("esop60", esop_file or b30_file)] = esop_hash
-    return recorded
-
-
-def test_the_ensemble_sleeves_are_the_frozen_strategies_but_for_their_imports() -> None:
-    recorded = _recorded_hashes()
-    assert len(recorded) == 11
-    for (sleeve, name), prefix in recorded.items():
-        copy = ENSEMBLE / "starter" / "sleeves" / sleeve / Path(name).name
-        original = re.sub(rf"^from sleeves\.{sleeve} import ", "from lib import ", copy.read_text(encoding="utf-8"), flags=re.MULTILINE)
-        if copy.name == "knobs.py":
-            assert re.search(r"^SEATS = 16$", original, flags=re.MULTILINE), (sleeve, name)
-            original = re.sub(r"^SEATS = 16$", "SEATS = 30", original, flags=re.MULTILINE)
-        assert hashlib.sha256(original.encode("utf-8")).hexdigest()[:16] == prefix, (sleeve, name)
-    for sleeve in ("b30", "esop60"):
-        files = {path.name for path in (ENSEMBLE / "starter" / "sleeves" / sleeve).glob("*.py")}
-        assert files == {Path(name).name for (owner, name) in recorded if owner == sleeve} | {"__init__.py"}
-
-
 def _drop_packages() -> None:
-    for name in [module for module in sys.modules if module.split(".", 1)[0] in ("lib", "sleeves")]:
+    for name in [module for module in sys.modules if module.split(".", 1)[0] == "lib"]:
         sys.modules.pop(name)
 
 
@@ -213,269 +124,3 @@ def test_a_title_stamped_after_the_decision_fails_the_read(lib, tmp_path: Path) 
 def test_the_device_falls_back_to_the_cpu(lib, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(lib.device.torch.cuda, "is_available", lambda: False)
     assert lib.device.device().type == "cpu"
-
-
-def test_the_hcm_starter_carries_the_canonical_book_and_its_controls_are_knobs(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The HCM starter ships the canonical book byte for byte, keeps one daily
-    refit literal for every control, and maps the update knob onto the three
-    parameter groups' schedules as the README's table says."""
-    library = REPO_ROOT / "configs" / "starter_lib"
-    for name in ("trade.py", "controls.py"):
-        assert (HCM_14B / "starter" / "lib" / name).read_bytes() == (library / name).read_bytes(), name
-    assert re.search(r'^REFIT_PERIOD = "day"$', (HCM_14B / "starter" / "main.py").read_text(encoding="utf-8"), flags=re.MULTILINE)
-    _starter(monkeypatch, HCM_14B)
-    from lib import hcm, knobs
-
-    assert (knobs.UPDATE, knobs.STATE, knobs.MEMORY) == ("graded", "carried", True)
-    graded = hcm._schedule()
-    assert graded == {"head": (knobs.HEAD_LR, knobs.HEAD_PERIOD), "body": (knobs.BODY_LR, knobs.BODY_PERIOD), "input": (knobs.INPUT_LR, knobs.INPUT_PERIOD)}
-    monkeypatch.setattr(knobs, "UPDATE", "reversed")
-    reversed_schedule = hcm._schedule()
-    assert (reversed_schedule["input"], reversed_schedule["head"]) == (graded["head"], graded["input"])
-    monkeypatch.setattr(knobs, "UPDATE", "uniform")
-    assert set(hcm._schedule().values()) == {graded["head"]}
-    _drop_packages()
-
-
-def test_the_hcm_store_retrieves_only_labels_known_on_the_query_day(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An episode enters retrieval only from its due day on, so the memory
-    signal never carries a label the query day could not have seen; a query
-    with no eligible neighbour reads 0; the reservoir keeps every episode
-    while it has room."""
-    import numpy as np
-    import torch
-
-    _starter(monkeypatch, HCM_14B)
-    from lib import model
-
-    store = model.Store(size=8, hidden=4, device=torch.device("cpu"))
-    # Two episodes per direction: a twin due in January and one due in February.
-    emb = torch.eye(4).repeat(2, 1)
-    labels = torch.tensor([0.4, 0.2, 0.1, 0.3, -0.4, -0.2, -0.1, -0.3])
-    day = torch.tensor([20240101] * 8)
-    due = torch.tensor([20240131] * 4 + [20240229] * 4)
-    store.add(emb, emb, labels, day, due, np.random.default_rng(0))
-    assert store.filled == 8
-    query = torch.eye(4)
-    early = store.signal(query, torch.full((4,), 20240131), k=1)
-    assert early.tolist() == pytest.approx([0.4, 0.2, 0.1, 0.3])  # the February twin is not due yet
-    late = store.signal(query, torch.full((4,), 20240229), k=2)
-    assert late.tolist() == pytest.approx([0.0] * 4)  # both twins are due and their labels cancel
-    assert store.signal(query, torch.full((4,), 20231231), k=2).tolist() == [0.0] * 4
-    _drop_packages()
-
-
-def test_the_hcm_slow_groups_accumulate_their_gradient_across_daily_fits(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Every daily fit rebuilds the model from the state directory, so a
-    group between two of its steps carries its gradient through the
-    checkpoint: fits that reload between days end bitwise where one process
-    holding the model in memory does, with the input group's gradient still
-    pending."""
-    import torch
-    from torch.nn import functional
-
-    _starter(monkeypatch, HCM_14B)
-    from lib import features, hcm, knobs, model
-
-    cpu = torch.device("cpu")
-    torch.manual_seed(0)
-    net = model.HCM(features.FEATURES, knobs.HIDDEN)
-    context = SimpleNamespace(state_dir=str(tmp_path))
-    store = model.Store(4, knobs.HIDDEN, cpu)
-    hcm._save(context, {"model": net, "optim": hcm._optimisers(net), "store": store, "codes": [], "ring": None,
-                        "ring_dates": None, "seen": None, "last_day": "", "steps": 0, "quarter": ""})
-    warm = hcm.load(context, cpu)
-
-    def fit(ckpt: dict, x: torch.Tensor, y: torch.Tensor) -> None:
-        net = ckpt["model"]
-        score = net.score(net.embed(net.run(x, torch.zeros(x.shape[1], knobs.HIDDEN))), torch.zeros(x.shape[1]))
-        functional.mse_loss(score, y).backward()
-        ckpt["steps"] += 1
-        hcm._step(ckpt["optim"], net, ckpt["steps"])
-
-    # The body steps once on the first BODY_PERIOD days' summed gradient; the
-    # input group, INPUT_PERIOD days apart, steps on none of them.
-    assert knobs.BODY_PERIOD < knobs.INPUT_PERIOD
-    for _ in range(knobs.BODY_PERIOD + 1):
-        x, y = torch.randn(3, 16, features.FEATURES), torch.randn(16)
-        fit(warm, x, y)
-        cold = hcm.load(context, cpu)
-        fit(cold, x, y)
-        hcm._save(context, cold)
-    cold = hcm.load(context, cpu)
-    assert all(parameter.grad is not None for parameter in model.groups(cold["model"])["input"])
-    for (name, a), b in zip(warm["model"].named_parameters(), cold["model"].parameters()):
-        assert torch.equal(a, b), name
-        assert (a.grad is None and b.grad is None) or torch.equal(a.grad, b.grad), name
-    _drop_packages()
-
-
-def test_the_hcm_daily_sequence_steps_the_state_as_the_roll_does(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """In carried mode a daily fit replays the matured day's SEQ_DAYS from the
-    state the ring stored SEQ_DAYS days earlier; with the weights frozen it
-    must end bitwise on the state the roll stored for that day, for a name
-    suspended inside the window as for one never missing a bar, or training
-    fits another recurrence than the decision reads. Window mode steps every
-    day, so its daily sequence is the decision's own unmasked recurrence."""
-    import numpy as np
-    import torch
-
-    _starter(monkeypatch, HCM_14B)
-    from lib import features, hcm, knobs, model
-
-    cpu = torch.device("cpu")
-    monkeypatch.setattr(knobs, "UPDATE", "frozen")
-    monkeypatch.setattr(knobs, "MEMORY", True)
-    # One RECENT_DAYS read in which only day `matured`, HORIZON + 1 days
-    # before the newest bar, carries a label.
-    days, newest = hcm.RECENT_DAYS, hcm.RECENT_DAYS - 1
-    matured = newest - knobs.HORIZON - 1
-    window = slice(matured - knobs.SEQ_DAYS + 1, matured + 1)
-    dates = list(pd.bdate_range("2020-01-02", periods=days).strftime("%Y%m%d"))
-    x = np.random.default_rng(0).standard_normal((days, 2, features.FEATURES)).astype("float32")
-    valid = np.ones((days, 2), dtype=bool)
-    valid[matured - 5:matured - 3, 1] = False  # name 1 is suspended for two days inside the window
-    label = np.full((days, 2), np.nan, dtype="float32")
-    label[matured] = [0.25, -0.25]
-    due = [dates[newest] if i == matured else None for i in range(days)]
-    panel = features.Panel(dates, ["000001.SZ", "000002.SZ"], x, valid, label, due)
-    monkeypatch.setattr(features, "panel", lambda context, count: panel)
-    torch.manual_seed(0)
-    net = model.HCM(features.FEATURES, knobs.HIDDEN).eval()
-    context = SimpleNamespace(state_dir=str(tmp_path))
-
-    def daily(state: str) -> dict:
-        monkeypatch.setattr(knobs, "STATE", state)
-        start = newest - knobs.SEQ_DAYS - hcm.RING  # the ring stands before the window and is rolled through it
-        ring = torch.zeros(hcm.RING, 2, knobs.HIDDEN) if state == "carried" else None
-        ckpt = {"model": net, "optim": None, "store": model.Store(4, knobs.HIDDEN, cpu), "codes": panel.codes,
-                "ring": ring, "ring_dates": dates[start - hcm.RING + 1:start + 1] if ring is not None else [],
-                "seen": torch.zeros(2, dtype=torch.int64) if ring is not None else None,
-                "last_day": dates[matured - 1], "steps": 0}
-        hcm._continue(context, cpu, np.random.default_rng(0), ckpt)
-        assert ckpt["last_day"] == dates[matured] and ckpt["store"].filled == 2
-        return ckpt
-
-    carried = daily("carried")
-    rolled = carried["ring"][carried["ring_dates"].index(dates[matured])]
-    gap = [carried["ring_dates"].index(dates[i]) for i in (matured - 6, matured - 4)]
-    assert torch.equal(carried["ring"][gap[0], 1], carried["ring"][gap[1], 1])  # the roll held name 1 still
-    for name in (0, 1):
-        assert torch.equal(carried["store"].hin[name], rolled[name]), name
-    stepped = daily("window")["store"].hin[:2]
-    with torch.no_grad():
-        assert torch.equal(stepped, net.run(torch.as_tensor(x[window]), torch.zeros(2, knobs.HIDDEN)))
-    _drop_packages()
-
-
-# (dataset, code, available_at, change_ratio) in the events domain.
-EVENTS = [
-    ("stk_holdertrade", "000001.SZ", "2024-03-01 19:00:00+08:00", 0.5),
-    ("stk_holdertrade", "000002.SZ", "2024-03-08 19:00:00+08:00", 1.5),
-    # 23:30 on 03-07 UTC is 07:30 on 03-08 local: inside the window by local day.
-    ("stk_holdertrade", "000003.SZ", "2024-03-07 23:30:00+00:00", 2.5),
-    ("block_trade", "000004.SZ", "2024-03-08 21:00:00+08:00", None),
-]
-
-
-def test_the_events_helper_reads_one_dataset_by_local_day_and_refuses_the_future(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    _starter(monkeypatch, FIVE_YEAR_08B[0])
-    from lib import events
-
-    (tmp_path / "events").mkdir()
-    frame = pd.DataFrame(EVENTS, columns=["dataset", "ts_code", "available_at", "change_ratio"])
-    frame.to_parquet(tmp_path / "events" / "part-0.parquet", index=False)
-    context = SimpleNamespace(asof_dir=str(tmp_path), inference_at=DECISION)
-    rows = events.read(context, "stk_holdertrade", ["change_ratio"], since="20240308")
-    assert rows[["ts_code", "change_ratio"]].values.tolist() == [["000002.SZ", 1.5], ["000003.SZ", 2.5]]
-    assert len(events.read(context, "stk_holdertrade", ["change_ratio"])) == 3
-    early = SimpleNamespace(asof_dir=str(tmp_path), inference_at=datetime(2024, 3, 8, 8, 30, tzinfo=CN_TZ))
-    with pytest.raises(RuntimeError, match="stamped after this decision"):
-        events.read(early, "stk_holdertrade", ["change_ratio"])
-    _drop_packages()
-
-
-def test_the_combined_book_gives_each_sleeve_its_own_holdings_and_cash(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Ownership is the first claim, the rest goes to the last sleeve; cash is
-    each share of the account's value less the sleeve's holdings; a buy of a
-    name another sleeve holds or already bought is dropped, and a sleeve that
-    sells a name it does not hold stops the book."""
-    _starter(monkeypatch, ENSEMBLE)
-    from lib import combine
-
-    (tmp_path / "daily").mkdir()
-    pd.DataFrame(
-        {"ts_code": ["A", "B", "C", "D"], "trade_date": "20240308", "close": [10.0, 20.0, 5.0, 8.0]}
-    ).to_parquet(tmp_path / "daily" / "part-0.parquet", index=False)
-    seen = {}
-
-    def sleeve(name, buys, sells=()):
-        def run(context):
-            seen[name] = (context.account.cash, dict(context.account.positions))
-            return [{"symbol": code, "action": "sell", "quantity": 100} for code in sells] + [
-                {"symbol": code, "action": "buy", "quantity": 100} for code in buys
-            ]
-
-        return run
-
-    first = combine.Sleeve("first", sleeve("first", ["D", "B"], sells=["A"]), lambda context, codes: {"A", "C"} & set(codes), 0.6)
-    last = combine.Sleeve("last", sleeve("last", ["D", "C"]), lambda context, codes: pytest.fail("never asked"), 0.4)
-    context = SimpleNamespace(
-        asof_dir=str(tmp_path), inference_at=DECISION, account=combine.Account(cash=4_000.0, positions={"A": 100, "B": 100})
-    )
-    orders = combine.combine(context, [first, last])
-    # A is claimed by the first sleeve, B by nobody: it goes to the last.
-    # The account is worth 4,000 + 1,000 + 2,000 = 7,000: the first asks
-    # 4,200 - 1,000, the last 2,800 - 2,000, together 4,000 = the cash.
-    assert seen == {"first": (3_200.0, {"A": 100}), "last": (800.0, {"B": 100})}
-    assert [(o["sleeve"], o["action"], o["symbol"]) for o in orders] == [
-        ("first", "sell", "A"),
-        ("first", "buy", "D"),
-        ("last", "buy", "C"),
-    ]
-    rogue = combine.Sleeve("last", sleeve("last", [], sells=["A"]), None, 0.4)
-    with pytest.raises(RuntimeError, match="does not hold"):
-        combine.combine(context, [first, rogue])
-    with pytest.raises(ValueError, match="sum to at most 1"):
-        combine.combine(context, [first, combine.Sleeve("last", last.run, None, 0.5)])
-    _drop_packages()
-
-
-def test_the_ensemble_legs_keep_the_seats_and_scale_the_shares(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The candidate is every sleeve; "without" spends the merged book's share
-    on the given sleeves alone, in their proportions; a given sleeve alone
-    takes the whole of it. The shipped package is the given sleeves at 16
-    seats each, the 36-seat ceiling leaving room for a sleeve of the arm's."""
-    _starter(monkeypatch, ENSEMBLE)
-    import main
-    from lib import combine
-    from sleeves.b30 import knobs as b30_knobs
-    from sleeves.esop60 import knobs as esop60_knobs
-
-    def run(context: object) -> list[dict[str, object]]:
-        return []
-
-    sleeves = [
-        combine.Sleeve("esop60", run, None, 0.35),
-        combine.Sleeve("own", run, None, 0.3),
-        combine.Sleeve("b30", run, None, 0.35),
-    ]
-    assert combine.leg(sleeves, "merged") == sleeves
-    without = combine.leg(sleeves, "without")
-    assert [sleeve.name for sleeve in without] == ["esop60", "b30"]
-    assert [sleeve.share for sleeve in without] == pytest.approx([0.5, 0.5])
-    assert [(sleeve.name, sleeve.share) for sleeve in combine.leg(sleeves, "b30")] == [("b30", pytest.approx(1.0))]
-    with pytest.raises(ValueError, match="leg must be"):
-        combine.leg(sleeves, "own")
-    assert main.LEG == "merged" and [sleeve.name for sleeve in main.SLEEVES] == ["esop60", "b30"]
-    assert b30_knobs.SEATS == esop60_knobs.SEATS == 16
-    sys.modules.pop("main")
-    _drop_packages()
