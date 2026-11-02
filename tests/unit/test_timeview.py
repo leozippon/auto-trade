@@ -1006,3 +1006,101 @@ def test_a_part_larger_than_a_row_group_streams_into_the_row_groups_one_write_wo
         row_group_size=3,
     )
     assert part.read_bytes() == reference.read_bytes()
+
+
+# Six weeks across two month ends: one events part and one text index part per
+# morning refresh. Events have a frozen part 0 and parts whose ``score``/``note``
+# columns are null-typed on some days and typed on others; text has no frozen
+# index, so its first replay part is part 0.
+_MONTH_DAYS = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2022-01-24", "2022-03-08")]
+
+
+def _month_view(root: Path, host: str, stash: Path | None) -> Timeview:
+    events = _events_slot(_MONTH_DAYS, scores=True)
+    events.loc[events["trade_date"] < "20220215", "score"] = None
+    text = pd.DataFrame(
+        [
+            {
+                "text_id": f"n{day}", "dataset": "news", "ts_codes": TS, "title": day,
+                "available_at": f"{day[:4]}-{day[4:6]}-{day[6:]}T22:00:00+08:00",
+                "library_file": "news.parquet",
+            }
+            for day in _MONTH_DAYS
+        ]
+    )
+    replay = _events_rows(root, f"{host}_slot", events)
+    library = root / f"{host}_slot" / "text_library"
+    _write(library / "news.parquet", pd.DataFrame({"text_id": text["text_id"], "body": text["title"] + " body"}))
+    _write(root / f"{host}_slot" / "text_index.parquet", text)
+    replay["text_index"] = ReplayRows(root / f"{host}_slot" / "text_index.parquet")
+    return Timeview(
+        host_dir=root / host,
+        snapshot_dir=_events_snapshot(root),
+        replay=replay,
+        replay_text_library_dir=library,
+        stash_dir=stash,
+    )
+
+
+def _month_reads(view: Timeview) -> list[tuple[str, pd.DataFrame, pd.DataFrame, pd.DataFrame]]:
+    """Per morning decision: the version, both directories, and a filtered column read."""
+
+    reads = []
+    for day in _MONTH_DAYS:
+        asof, version = view.refresh(_when(f"{day[:4]}-{day[4:6]}-{day[6:]} 09:10:00"))
+        events = Path(asof) / "events"
+        reads.append(
+            (
+                version,
+                pd.read_parquet(events),
+                pd.read_parquet(Path(asof) / "text_index"),
+                pd.read_parquet(events, columns=["trade_date", "score"], filters=[("trade_date", ">=", "20220201")]),
+            )
+        )
+    return reads
+
+
+def _assert_same_reads(actual, expected) -> None:
+    assert len(actual) == len(expected)
+    for (version, *frames), (expected_version, *expected_frames) in zip(actual, expected, strict=True):
+        assert version == expected_version
+        for frame, expected_frame in zip(frames, expected_frames, strict=True):
+            pd.testing.assert_frame_equal(frame, expected_frame)
+
+
+def test_finished_months_merge_into_one_part_and_every_decision_reads_the_same_rows(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from autotrade.environment.replay import timeview as module
+
+    with monkeypatch.context() as unmerged:
+        unmerged.setattr(module._MonthParts, "published", lambda *_args: None)
+        expected = _month_reads(_month_view(tmp_path, "daily_parts", None))
+    _assert_same_reads(_month_reads(_month_view(tmp_path, "merged", None)), expected)
+    # January (6 days) and February (20) are one part each; March is still open.
+    march = [f"part_{seq:04d}.parquet" for seq in range(27, 33)]
+    assert sorted(path.name for path in (tmp_path / "merged" / "events").iterdir()) == [
+        "part_0000.parquet", "part_0001_0006.parquet", "part_0007_0026.parquet", *march
+    ]
+    # Without a frozen index the first replay part (the evening of 24 January,
+    # read on the 25th) is part 0 and stays alone.
+    assert sorted(path.name for path in (tmp_path / "merged" / "text_index").iterdir()) == [
+        "part_0000.parquet", "part_0001_0004.parquet", "part_0005_0024.parquet",
+        *(f"part_{seq:04d}.parquet" for seq in range(25, 31)),
+    ]
+
+    # Through the stash: the first backtest publishes each merged month, the
+    # next links it instead of rewriting the month.
+    stash = tmp_path / "stash"
+    stash.mkdir()
+    (stash / "contract.json").write_text(json.dumps({"validated": True}), encoding="utf-8")
+    _assert_same_reads(_month_reads(_month_view(tmp_path, "cold", stash)), expected)
+
+    def refuse(*_args):
+        raise AssertionError("a stash hit rewrote a merged month")
+
+    monkeypatch.setattr(module, "_write_merged", refuse)
+    _assert_same_reads(_month_reads(_month_view(tmp_path, "warm", stash)), expected)
+    for domain, merged in (("events", "0007_0026"), ("text_index", "0005_0024")):
+        published = stash / domain / f"merged_{merged}.parquet"
+        assert (tmp_path / "warm" / domain / f"part_{merged}.parquet").stat().st_ino == published.stat().st_ino

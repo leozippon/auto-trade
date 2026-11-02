@@ -10,7 +10,10 @@ that ``pandas.read_parquet`` concatenates into one table:
     (zero-copy);
   * later parts are write-once replay-slot increments, appended only when the
     simulation clock crosses a refresh node that covers the domain
-    (``REFRESH_NODES`` in data/contracts.py).
+    (``REFRESH_NODES`` in data/contracts.py);
+  * once the clock reaches a new calendar month, the parts of the month before
+    are merged into one (``_MonthParts``): a directory read opens every
+    part's footer, so its cost follows the part count, not the rows it reads.
 
 A replay row that carries ``first_seen_at`` (the lake first held its key after
 its ``available_at``: the vendor added it after the fact) is held back until the
@@ -508,6 +511,7 @@ class _DomainView:
         self._segments: list[_ReplaySegment] = []
         self._dataset_names: list[str] = []
         self._part_seq = 0
+        self._months = _MonthParts(out_dir, label=f"domain {name!r}")
         self._last_signature: object = object()  # sentinel: force the first roll
         self._frozen_schema: pa.Schema | None = None
         self._columns = self._init_frozen_part(frozen_file)
@@ -654,6 +658,7 @@ class _DomainView:
         # The rows are read only if the part has to be encoded: a stash hit
         # hardlinks the part and touches no row group.
         self._write_part(
+            when,
             sum(int(newly.size) for _segment, newly in taken),
             lambda: (table for segment, newly in taken for table in segment.rows.take(newly)),
         )
@@ -692,6 +697,7 @@ class _DomainView:
             return False
 
         self._write_part(
+            when,
             sum(len(frame) for frame in newly),
             lambda: (pa.Table.from_pandas(frame, preserve_index=False) for frame in newly),
         )
@@ -719,23 +725,6 @@ class _DomainView:
         # dropped gating columns.
         return pa.schema(fields)
 
-    @staticmethod
-    def _project(table: pa.Table, schema: pa.Schema) -> pa.Table:
-        """One slice on the part schema.
-
-        In Arrow: ``DataFrame.reindex(columns=...)`` rebuilt every block of
-        the slice, 18-73 s on one day of minute bars (~700k rows over seven
-        object columns) and 95 % of replay wall, against 0.3 s for selecting
-        the converted arrays.
-        """
-        arrays = [
-            table.column(name).cast(field.type)
-            if name in table.column_names
-            else pa.nulls(table.num_rows, type=field.type)
-            for name, field in zip(schema.names, schema, strict=True)
-        ]
-        return pa.Table.from_arrays(arrays, schema=schema)
-
     def _write_slices(self, slices: Callable[[], Iterator[pa.Table]], row_count: int, path: Path) -> None:
         """Encode one part from its slices, one row group resident at a time.
 
@@ -753,7 +742,7 @@ class _DomainView:
         """
         if row_count <= _PART_ROW_GROUP_ROWS:
             unified = pa.concat_tables(list(slices()), promote_options="default")
-            pq.write_table(self._project(unified, self._part_schema(unified.schema)).combine_chunks(), path)
+            pq.write_table(_project(unified, self._part_schema(unified.schema)).combine_chunks(), path)
             return
         schema = self._part_schema(
             pa.unify_schemas([table.schema for table in slices()], promote_options="default")
@@ -762,7 +751,7 @@ class _DomainView:
             buffered: list[pa.Table] = []
             rows = 0
             for table in slices():
-                buffered.append(self._project(table, schema))
+                buffered.append(_project(table, schema))
                 rows += table.num_rows
                 while rows >= _PART_ROW_GROUP_ROWS:
                     whole = pa.concat_tables(buffered)
@@ -776,7 +765,9 @@ class _DomainView:
             if buffered:
                 writer.write_table(pa.concat_tables(buffered).combine_chunks(), row_group_size=_PART_ROW_GROUP_ROWS)
 
-    def _write_part(self, row_count: int, slices: Callable[[], Iterator[pa.Table]]) -> None:
+    def _write_part(
+        self, when: pd.Timestamp, row_count: int, slices: Callable[[], Iterator[pa.Table]]
+    ) -> None:
         """Write the next part, reusing the run-level stash when one is present.
 
         The PIT backend has already bound the stash to the exact semantic
@@ -803,6 +794,7 @@ class _DomainView:
                     write=write,
                     label=f"domain {self.name!r} {name}",
                 )
+        self._months.published(self._part_seq, when, row_count, self._stash_dir)
         self._part_seq += 1
 
     def _newly_visible(self, segment: _ReplaySegment, when: pd.Timestamp) -> np.ndarray:
@@ -906,6 +898,7 @@ class _TextView:
         self._segments: list[_ReplaySegment] = []
         self._dataset_names: list[str] = []
         self._part_seq = 0
+        self._months = _MonthParts(out_index_dir, label="text index")
         self._last_signature: object = object()
         self._init_frozen(frozen_index_file, frozen_library_dir)
         self.continue_slot(
@@ -1012,6 +1005,8 @@ class _TextView:
             _write_frame(rows, self.out_index_dir / index_name)
         else:
             self._publish_roll(rows, groups, index_name=index_name, suffix=suffix)
+        # Only the index is merged: its rows name their body parts, which stay.
+        self._months.published(self._part_seq, when, len(rows), self._stash_index_dir)
         self._part_seq += 1
         return True
 
@@ -1099,6 +1094,96 @@ class _TextView:
             if body.empty or "text_id" not in body.columns:
                 return pd.DataFrame(columns=["text_id", "body"])
             return body.loc[body["text_id"].astype(str).isin(text_ids)]
+
+
+def _project(table: pa.Table, schema: pa.Schema) -> pa.Table:
+    """``table`` on ``schema``: each column cast by name, absent ones null.
+
+    In Arrow: ``DataFrame.reindex(columns=...)`` rebuilt every block of the
+    slice, 18-73 s on one day of minute bars (~700k rows over seven object
+    columns) and 95 % of replay wall, against 0.3 s for selecting the
+    converted arrays.
+    """
+    arrays = [
+        table.column(name).cast(field.type)
+        if name in table.column_names
+        else pa.nulls(table.num_rows, type=field.type)
+        for name, field in zip(schema.names, schema, strict=True)
+    ]
+    return pa.Table.from_arrays(arrays, schema=schema)
+
+
+class _MonthParts:
+    """Merges the parts one view publishes in a calendar month into one part.
+
+    A filtered read of a domain directory opens every part's footer to prune
+    it, so its cost follows the part count -- one per refresh that published
+    rows, about 2,400 over a ten-year span -- rather than the rows it returns:
+    a typical short read of the real daily view took 0.36-0.40 s over daily
+    parts and 0.03 s over monthly ones. When a view publishes the first part
+    of a new month, the parts of the month before are therefore rewritten, in
+    order, as one part ``part_<first>_<last>`` and removed. The name sorts
+    exactly where theirs did and is new, so a trusted replay's read-only gate,
+    which locks each file name once, locks it too. Every column of the merged
+    part is cast to the schema of part 0, as a directory read casts every
+    part, so the directory reads back the same rows in the same order with
+    the same types. Part 0 (the frozen snapshot, or the first replay part of
+    a domain without one) is never merged: its schema is the one every read
+    takes. A merge lands with a new part, so ``asof_version`` already moves.
+
+    A merged part is published through the stash like any other part (as
+    ``merged_<first>_<last>``, row-count checked), so a later backtest under
+    the same contract links it instead of rewriting the month.
+    """
+
+    def __init__(self, out_dir: Path, *, label: str) -> None:
+        self.out_dir = out_dir
+        self.label = label
+        self._month: tuple[int, int] | None = None
+        self._first = self._last = 0
+        self._rows = 0
+
+    def published(self, seq: int, when: pd.Timestamp, rows: int, stash_dir: Path | None) -> None:
+        """Record part ``seq`` of ``rows`` rows, published at ``when``."""
+        if seq == 0:
+            return
+        month = (when.year, when.month)
+        if month != self._month:
+            if self._last > self._first:
+                self._merge(stash_dir)
+            self._month, self._first, self._rows = month, seq, 0
+        self._last = seq
+        self._rows += rows
+
+    def _merge(self, stash_dir: Path | None) -> None:
+        first, last = self._first, self._last
+        sources = [self.out_dir / f"part_{seq:04d}.parquet" for seq in range(first, last + 1)]
+        out = self.out_dir / f"part_{first:04d}_{last:04d}.parquet"
+        write = partial(_write_merged, sources, pq.read_schema(self.out_dir / "part_0000.parquet"))
+        if stash_dir is None:
+            write(out)
+        else:
+            name = f"merged_{first:04d}_{last:04d}.parquet"
+            stash_dir.mkdir(parents=True, exist_ok=True)
+            with _exclusive_part_lock(stash_dir / f".{name}.lock"):
+                _publish_checked_part(
+                    stash_dir / name,
+                    out,
+                    row_count=self._rows,
+                    write=write,
+                    label=f"{self.label} {name}",
+                )
+        for source in sources:
+            source.unlink()
+
+
+def _write_merged(sources: Sequence[Path], schema: pa.Schema, path: Path) -> None:
+    """Concatenate ``sources`` on ``schema``, one row group resident at a time."""
+    with pq.ParquetWriter(path, schema) as writer:
+        for source in sources:
+            part = pq.ParquetFile(source)
+            for group in range(part.num_row_groups):
+                writer.write_table(_project(part.read_row_group(group), schema))
 
 
 def _write_frame(frame: pd.DataFrame, path: Path) -> None:

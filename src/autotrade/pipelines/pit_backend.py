@@ -1658,7 +1658,9 @@ def _stash_part_counts(stash_dir: Path) -> dict[str, int]:
 
     return {
         # Text body parts are named ``<dataset>__part_NNNN.parquet``; every
-        # other domain writes a bare ``part_NNNN.parquet``.
+        # other domain writes a bare ``part_NNNN.parquet``. A month's parts
+        # merged into one (``merged_<first>_<last>.parquet``) are derived from
+        # these and not counted: a missing one is simply written again.
         domain.name: len(list(domain.glob("*part_*.parquet")))
         for domain in sorted(stash_dir.iterdir())
         if domain.is_dir() and not domain.is_symlink()
