@@ -1107,10 +1107,17 @@ class AgentSessionRunner:
 
         def run_one(index: int) -> tuple[ToolCall, dict[str, object]]:
             call = calls[index]
-            self._emit(
-                "tool_call_started",
-                {"tool": call.name, "tool_call_id": call.id, "status": "running"},
-            )
+            started: dict[str, object] = {
+                "tool": call.name,
+                "tool_call_id": call.id,
+                "status": "running",
+            }
+            if call.name in _VALIDATION_TOOLS:
+                # A batch runs for hours, and the tool_call event that also
+                # carries its arguments comes only once it returns: record its
+                # candidates, hypotheses, controls and offline_trials now.
+                started["arguments"] = sanitize_for_log(dict(call.arguments))
+            self._emit("tool_call_started", started)
             phase_error = self._finalization_call_error(call)
             if phase_error:
                 return call, {"ok": False, "error": phase_error}

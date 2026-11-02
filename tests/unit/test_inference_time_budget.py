@@ -284,6 +284,13 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
     trace_text = trace_path.read_text(encoding="utf-8")
     assert host_result_ref not in trace_text
     events = [json.loads(line) for line in trace_text.splitlines()]
+    # A batch's arguments are on record when it starts, not only when it returns.
+    started = [event for event in events if event.get("event_type") == "tool_call_started"]
+    assert [(event["tool_call_id"], event.get("arguments")) for event in started] == [
+        ("bad", working_copy),
+        ("fixed", working_copy),
+        ("done", None),
+    ]
     successful = next(
         event
         for event in events
