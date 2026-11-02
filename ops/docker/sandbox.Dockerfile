@@ -198,6 +198,12 @@ RUN curl -fL --retry 8 --retry-all-errors --retry-delay 3 --connect-timeout 30 -
     && rm /tmp/duckdb_cli.zip \
     && duckdb -c "select 1"
 
+# `free` is the resource check the research packs run. It is a sandbox tool,
+# not part of the strategy contract, so it stays off the heavy install layer.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends procps \
+    && rm -rf /var/lib/apt/lists/*
+
 # Trusted host-side runtime baked in: the strategy worker, the loader and the
 # strategy context, loaded as `python -m autotrade.environment.strategy_worker`
 # in the strategy container. Standard-library plus the pinned data stack only;
