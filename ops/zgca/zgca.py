@@ -44,9 +44,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
-# auto-trade-dev-a100x2: two Tesla-A100-80G in the Volcano zone, the default
-# of --instance; its id is the platform ledger id the API addresses it by, not
-# a secret.
+# auto-trade-dev-a100x2, the default of --instance, in the Volcano zone: one
+# Tesla-A100-80G since 2026-11-02 (the name keeps the two cards it was created
+# with); its id is the platform ledger id the API addresses it by, not a secret.
 INSTANCE_ID = "mpo06t71crmmtdsrb98ckwk29"
 # The platform's own shape for an instance id (~/zgca-compute/dev).
 INSTANCE_ID_SHAPE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
@@ -490,7 +490,7 @@ def main(
     parser = argparse.ArgumentParser(prog="zgca.py", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "--instance", type=instance_id, default=INSTANCE_ID,
-        help=f"platform id of the instance every step addresses (default {INSTANCE_ID}, auto-trade-dev-a100x2)",
+        help=f"platform id of the instance every step addresses (default {INSTANCE_ID}: auto-trade-dev-a100x2, one A100-80G despite its name)",
     )
     commands = parser.add_subparsers(dest="command", required=True, metavar="command")
     commands.add_parser("up", help="instance start: wait for RUNNING and SSH")

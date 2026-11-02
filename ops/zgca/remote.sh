@@ -24,7 +24,7 @@ fi
 # This root's directory on the instance's own disk (zgca.py's local_root).
 LOCAL=${ZGCA_LOCAL_ROOT:-}
 BOX_PYTHON=/root/miniconda3/bin/python
-# The platform's PyPI mirror lacks tushare 1.4.29 (~/zgca-compute/README.md).
+# The platform's PyPI mirror lacks tushare 1.4.29 (~/zgca-compute/PLATFORM_RECORDS.md).
 EXTRA_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
 IMAGE=autotrade-sandbox:latest
 # Shipped by the deploy with the digest it pinned; GitHub and its release

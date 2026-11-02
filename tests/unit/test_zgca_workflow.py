@@ -6,7 +6,7 @@ their arguments and the instance they were pointed at, and answer from the
 environment; both are tested for real in ~/zgca-compute. The mock `zenith`
 only records, since the workflow reaches the API through those two. The
 remote script's `tracked`, `arm-state` and `status` steps run for real
-against a temporary root.
+against a temporary root, `status` with a stub `docker` so no daemon is asked.
 """
 
 from __future__ import annotations
@@ -705,9 +705,15 @@ class ZgcaWorkflowTest(unittest.TestCase):
         build = logs / "image_build_20261019T200000Z.log"
         build.write_text("Successfully built\n", encoding="utf-8")
         os.utime(logs / "create_round_test_20261019T190000Z.log", (1, 1))
-        shown = subprocess.run(["bash", str(zgca.REMOTE_SCRIPT), "status"], env={**os.environ, "ZGCA_REMOTE_ROOT": str(root)},
-                               capture_output=True, text=True, check=False)
+        # The image line asks Docker; a stub answers for the host's daemon.
+        stubs = Path(self.temp.name) / "stubs"
+        stubs.mkdir()
+        (stubs / "docker").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        (stubs / "docker").chmod(0o700)
+        env = {**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}", "ZGCA_REMOTE_ROOT": str(root)}
+        shown = subprocess.run(["bash", str(zgca.REMOTE_SCRIPT), "status"], env=env, capture_output=True, text=True, check=False)
         self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertIn("image: docker unavailable\n", shown.stdout)
         self.assertIn("round log: logs/zgca/create_round_test_20261019T190000Z.log\n  smoke\n  arms created\n  round-exit 0", shown.stdout)
         self.assertNotIn(build.name, shown.stdout)
         self.assertIn("fill: no session\n", shown.stdout)
@@ -715,8 +721,7 @@ class ZgcaWorkflowTest(unittest.TestCase):
         fill = logs / "fill_create_round_test_20261019T210000Z.log"
         fill.write_text("fill create_round_test: slots; queue 1: 0 created, 1 pending (...)\n"
                         "fill create_round_test: slots; queue 1: 1 created, 0 pending (...)\nround-exit 0\n", encoding="utf-8")
-        shown = subprocess.run(["bash", str(zgca.REMOTE_SCRIPT), "status"], env={**os.environ, "ZGCA_REMOTE_ROOT": str(root)},
-                               capture_output=True, text=True, check=False)
+        shown = subprocess.run(["bash", str(zgca.REMOTE_SCRIPT), "status"], env=env, capture_output=True, text=True, check=False)
         self.assertEqual(shown.returncode, 0, shown.stderr)
         self.assertIn("round log: logs/zgca/create_round_test_20261019T190000Z.log", shown.stdout)
         self.assertIn(f"fill: no session; last log logs/zgca/{fill.name}\n  fill create_round_test: slots; queue 1: 1 created, 0 pending (...)\n  round-exit 0", shown.stdout)
