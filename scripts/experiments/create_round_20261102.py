@@ -1,8 +1,9 @@
 #!/usr/bin/env python
 """The 2026-11-02 round: free exploration around the memory framework on a ten-year window at a CNY 200k account, gpt-6-astra on the local console.
 
-One experiment mounts `memory_200k_rolling_20261102`. The pack states the
-direction and carries the owner's memory note; this file does not copy either.
+Three experiments, identical but for their ids, mount
+`memory_200k_rolling_20261102`. The pack states the direction and carries the
+owner's memory note; this file does not copy either.
 The note is a reference to think with, not a specification to build: the
 session may take the idea it finds useful, argue against it, or propose a
 strategy and a learning scheme that keeps none of its structure, and it is not
@@ -36,15 +37,15 @@ Creation requires a complete prebuild and a published release covering the
 requested dates. The release is read from the seed's `provider.json` at
 pre-flight, not selected from the mutable lake.
 
-The one experiment runs gpt-6-astra, the main session the operator starts on
-this machine; `memory_200k_10y_astra_local_20261102` is its id. Sub-agents and
-compaction stay on DeepSeek-V4.1-Flash, the compaction threshold at 221,184,
-reasoning at xhigh. `llm_key` alternate starts every relay role on
-`LIGHTING_API_KEY_ALT`; the primary key remains the relay's existing fallback.
-Nothing queues this round: the fill cron lists no round file, so no second
-experiment is created automatically.
+Each experiment runs gpt-6-astra, the main session the operator starts on this
+machine; their ids are `memory_200k_10y_astra_local_20261102` and the same with
+`b` and `c` appended. Sub-agents and compaction stay on DeepSeek-V4.1-Flash,
+the compaction threshold at 221,184, reasoning at xhigh. `llm_key` alternate
+starts every relay role on `LIGHTING_API_KEY_ALT`; the primary key remains the
+relay's existing fallback. All three were created on 2026-11-02. Nothing
+queues this round: the fill cron lists no round file.
 
-The figures below are this round's create defaults, not a host limit. The
+The figures below are this round's create defaults, not a host limit. An
 experiment's own entry overrides any of them, including `gpu_count`,
 `batch_validate_max_concurrency`, `strategy_cpus` and `strategy_memory`, and
 that entry is what the existing console create accepts. This round's default is
@@ -60,8 +61,12 @@ Create through the existing console round entry, not a separate launcher:
     ~/miniconda3/envs/quant/bin/python scripts/experiments/create_round_20261102.py <port> [--dry-run] [--fill]
 
 `--dry-run` reads the seed contract and, unless a smoke record already covers
-this template, replays the template starter. It creates nothing, and it cannot
-pass before the seed's prebuild has finished.
+this template, replays the contract template from every research-year start
+and over the full span. The template reads nothing and places no orders, so
+that smoke shows only that the seed's views build for every decision, the
+strategy container starts and the contract holds; it exercises no `fit`, no
+data read by a strategy and no order or fill. It creates nothing, and it
+cannot pass before the seed's prebuild has finished.
 """
 
 from __future__ import annotations
@@ -95,8 +100,9 @@ DIRECTIVE = (
     "数据边界、对照归因与验收要求见参考包；以宿主真实记账验证，不另加门槛。"
 )
 
-ARMS: dict[str, dict[str, object]] = {
-    "memory_200k_10y_astra_local_20261102": {
+
+def _arm() -> dict[str, object]:
+    return {
         "model": ASTRA,
         "subagent_model": FLASH,
         "compact_model": FLASH,
@@ -104,7 +110,13 @@ ARMS: dict[str, dict[str, object]] = {
         "llm_key": "alternate",
         "workspace_reference": PACK,
         "research_directive": DIRECTIVE,
-    },
+    }
+
+
+ARMS: dict[str, dict[str, object]] = {
+    "memory_200k_10y_astra_local_20261102": _arm(),
+    "memory_200k_10y_astra_local_20261102b": _arm(),
+    "memory_200k_10y_astra_local_20261102c": _arm(),
 }
 
 ROUND = Round(

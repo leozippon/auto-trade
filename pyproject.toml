@@ -36,8 +36,9 @@ cache-dir = ".runtime/cache/ruff"
 line-length = 88
 # Never lint or fix these, even when a tool names them explicitly: reference
 # packs are immutable records, the starter lib is byte-copied into them, round
-# files are frozen queues, and the strategy contract modules and output
-# template are baked into the sandbox image (an edit forces a rebuild).
+# files are frozen queues, the strategy contract modules and the output
+# template's README are baked into the sandbox image (an edit forces a
+# rebuild), and the template's main.py is the file every session starts from.
 force-exclude = true
 extend-exclude = [
   "external_references",

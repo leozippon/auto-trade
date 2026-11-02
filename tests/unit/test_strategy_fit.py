@@ -618,24 +618,24 @@ def _evaluate(tmp_path: Path, revision: Path, snapshot: Path, replay: Path, days
     return result, json.loads(Path(result.result_ref).read_text(encoding="utf-8"))
 
 
-def test_template_passes_modification_check_and_a_short_pit_smoke_replay(tmp_path: Path):
+def test_template_passes_modification_check_and_replays_without_trading(tmp_path: Path):
+    """The template every session starts from clears the static gate and
+    replays on the PIT path with no fit and no order."""
     output = tmp_path / "revision" / "output"
     shutil.copytree(TEMPLATE, output, ignore=shutil.ignore_patterns("__pycache__"))
     models = tmp_path / "revision" / "models"
     models.mkdir()
     check = ModificationCheckTool(output, models_dir=models).invoke({})
-    assert check.value["fit"] == {"refit_period": "quarter"}
+    assert check.value["fit"] is None
 
     days = ["20240328", "20240329", "20240401", "20240402"]
     snapshot, replay = _pit_bundle(tmp_path, days)
     result, record = _evaluate(tmp_path, output, snapshot, replay, days, max_days=3)
     summary = result.summary
     assert summary["replayed_trade_days"] == 3
-    assert summary["phase_seconds"]["fit"] > 0
-    assert summary["order_count"] >= 1
-    assert any(execution["status"] == "filled" for execution in record["executions"])
-    result_dir = Path(result.result_ref).parent
-    assert not (result_dir / "state").exists()
+    assert "fit" not in summary["phase_seconds"]
+    assert summary["order_count"] == 0
+    assert record["executions"] == []
 
 
 def _readme_example_package(output: Path) -> list[str]:
@@ -652,7 +652,7 @@ def _readme_example_package(output: Path) -> list[str]:
 
 def test_readme_package_example_passes_modification_check_and_a_short_pit_smoke_replay(tmp_path: Path):
     """The README's scikit-learn example is a real two-module package: it clears the
-    same static gate and replays on the same PIT path as the shipped baseline."""
+    static gate, fits, and its orders fill on the PIT replay path."""
 
     output = tmp_path / "revision" / "output"
     assert sorted(_readme_example_package(output)) == ["lib/ranker.py", "main.py"]
@@ -669,6 +669,7 @@ def test_readme_package_example_passes_modification_check_and_a_short_pit_smoke_
     assert result.summary["phase_seconds"]["fit"] > 0
     assert result.summary["order_count"] >= 1
     assert any(execution["status"] == "filled" for execution in record["executions"])
+    assert not (Path(result.result_ref).parent / "state").exists()
 
 
 README_SEEDED_STRATEGY = '''import numpy as np
