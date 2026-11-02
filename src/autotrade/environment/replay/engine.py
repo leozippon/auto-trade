@@ -9,7 +9,9 @@ from time import perf_counter
 
 from autotrade.environment.broker import BrokerProfile, DailyBroker
 from autotrade.environment.executor import (
+    DockerStrategyExecutor,
     FittableStrategyExecutor,
+    StrategyCall,
     StrategyExecutionError,
     StrategyExecutor,
     StrategyRaised,
@@ -193,9 +195,10 @@ class DailyReplayEngine:
         if not isinstance(data_view, StrategyDataView):
             raise BacktestError("context_data must return StrategyDataView")
         fittable = self._fittable
-        context = StrategyContext(
+        call = StrategyCall(
             inference_at=inference_at,
-            bars=market.visible_at(inference_at),
+            bar_table=market.bar_table,
+            bar_count=market.visible_count(inference_at),
             account=AccountSnapshot(cash=cash, positions=positions),
             snapshot_dir=data_view.snapshot_dir,
             asof_dir=data_view.asof_dir,
@@ -203,6 +206,11 @@ class DailyReplayEngine:
             state_dir=fittable.context_state_dir if fittable is not None else "",
             models_dir=fittable.context_models_dir if fittable is not None else "",
             pretrained_dir=fittable.context_pretrained_dir if fittable is not None else "",
+        )
+        # The Docker executor ships the bars its worker lacks straight from
+        # the table; a strategy in this process reads them as a tuple.
+        context: StrategyContext | StrategyCall = (
+            call if isinstance(self.strategy, DockerStrategyExecutor) else call.context()
         )
         # fit receives the very context object generate_orders gets on this
         # day, so it cannot see one row more than the decision itself.

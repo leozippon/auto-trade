@@ -35,6 +35,7 @@ from autotrade.environment.executor import (
     ExecResult,
     GpuMemoryContention,
     PersistentCommandRunner,
+    StrategyCall,
     StrategyExecutionError,
     StrategyMemoryExceeded,
     StrategyRaised,
@@ -1423,7 +1424,7 @@ def test_incremental_worker_receives_only_delta_and_rebuilds_full_history(tmp_pa
     finally:
         executor.close()
     assert executor._transport_sequence == -1
-    assert executor._transport_bars == ()
+    assert executor._transport_count == 0
 
 
 def test_worker_bar_stream_rejects_inconsistent_updates_without_mutation():
@@ -1523,22 +1524,22 @@ def test_executor_rejects_strict_json_type_or_value_drift_in_cached_prefix(
             account=AccountSnapshot(cash=10_000, positions={}),
         )
 
-    initial = context(2, original)
+    initial = StrategyCall.of(context(2, original))
     request, last_available_at = executor._prepare_execute(initial)
     executor._transport_sequence = request["sequence"]
     executor._transport_inference_at = initial.inference_at
-    executor._transport_bars = initial.bars
-    executor._transport_table = initial._bars_table
+    executor._transport_count = initial.bar_count
+    executor._transport_table = initial.bar_table
     executor._transport_last_available_at = last_available_at
 
     with pytest.raises(StrategyExecutionError, match="changed before base_count"):
-        executor._prepare_execute(context(5, revised))
+        executor._prepare_execute(StrategyCall.of(context(5, revised)))
     assert executor._transport_sequence == 0
     assert executor._transport_inference_at == initial.inference_at
-    assert executor._transport_bars is initial.bars
-    assert executor._transport_table is initial._bars_table
+    assert executor._transport_count == initial.bar_count
+    assert executor._transport_table is initial.bar_table
     # An equal prefix built separately is accepted on its values.
-    request, _ = executor._prepare_execute(context(5, original))
+    request, _ = executor._prepare_execute(StrategyCall.of(context(5, original)))
     assert (request["reset"], request["base_count"], request["bars"]) == (False, 1, [])
 
 

@@ -27,7 +27,14 @@ from .gpu import GpuUnavailableError, device_request, gpu_memory_contention
 from .pretrained import PretrainedStoreError, require_pretrained_store
 from .runtime import chmod_tree
 from .sandbox import DockerSandbox, SandboxConfig, SandboxLimits, container_thread_env
-from .strategy import BarTable, FitSchedule, StrategyContext, StrategyFunction
+from .strategy import (
+    AccountSnapshot,
+    BarTable,
+    FitSchedule,
+    StrategyContext,
+    StrategyFunction,
+    _require_cn_datetime,
+)
 from .strategy_loader import load_strategy_module, validate_strategy_package
 
 if TYPE_CHECKING:
@@ -224,6 +231,65 @@ def strategy_resources_of(exc: BaseException) -> dict[str, object]:
         if isinstance(usage, Mapping):
             return dict(usage)
     return {}
+
+
+@dataclass(frozen=True)
+class StrategyCall:
+    """One decision's strategy input on the host, its bars still in their table.
+
+    The bars are the first ``bar_count`` rows of ``bar_table``. The Docker
+    executor ships the rows its worker does not hold yet straight from the
+    table's columns, so a replay builds no per-bar object on the host: at the
+    end of a ten-year span that was two copies of a ~10M-row tuple and a
+    ~10M-object row cache per decision, which also slowed every collection.
+    ``context()`` builds the ``StrategyContext`` a strategy running in this
+    process reads instead.
+    """
+
+    inference_at: datetime
+    bar_table: BarTable
+    bar_count: int
+    account: AccountSnapshot
+    snapshot_dir: str = ""
+    asof_dir: str = ""
+    asof_version: str = "0"
+    state_dir: str = ""
+    models_dir: str = ""
+    pretrained_dir: str = ""
+
+    def __post_init__(self) -> None:
+        # The instant the worker is sent, normalized as a context normalizes it.
+        object.__setattr__(
+            self, "inference_at", _require_cn_datetime(self.inference_at, "inference_at")
+        )
+
+    @classmethod
+    def of(cls, context: StrategyContext) -> StrategyCall:
+        return cls(
+            inference_at=context.inference_at,
+            bar_table=context._bars_table,
+            bar_count=len(context.bars),
+            account=context.account,
+            snapshot_dir=context.snapshot_dir,
+            asof_dir=context.asof_dir,
+            asof_version=context.asof_version,
+            state_dir=context.state_dir,
+            models_dir=context.models_dir,
+            pretrained_dir=context.pretrained_dir,
+        )
+
+    def context(self) -> StrategyContext:
+        return StrategyContext(
+            inference_at=self.inference_at,
+            bars=self.bar_table.rows(self.bar_count),
+            account=self.account,
+            snapshot_dir=self.snapshot_dir,
+            asof_dir=self.asof_dir,
+            asof_version=self.asof_version,
+            state_dir=self.state_dir,
+            models_dir=self.models_dir,
+            pretrained_dir=self.pretrained_dir,
+        )
 
 
 @runtime_checkable
@@ -489,7 +555,7 @@ class DockerStrategyExecutor:
         ])
         return command
 
-    def fit(self, context: StrategyContext) -> None:
+    def fit(self, context: StrategyContext | StrategyCall) -> None:
         if self.fit_schedule is None:
             raise StrategyExecutionError("strategy defines no fit(context)")
         if self._closed:
@@ -514,16 +580,17 @@ class DockerStrategyExecutor:
             self._abort()
             raise
 
-    def execute(self, context: StrategyContext) -> object:
+    def execute(self, context: StrategyContext | StrategyCall) -> object:
         return self._roundtrip(
             context, kind="execute", timeout_seconds=self.config.limits.timeout_seconds
         )
 
     def _roundtrip(
-        self, context: StrategyContext, *, kind: str, timeout_seconds: float
+        self, context: StrategyContext | StrategyCall, *, kind: str, timeout_seconds: float
     ) -> object:
         if self._closed or self._process is None:
             raise StrategyExecutionError("Docker strategy executor is closed")
+        call = context if isinstance(context, StrategyCall) else StrategyCall.of(context)
         label = "strategy fit" if kind == "fit" else "strategy inference"
         # The message a deadline miss reports, read by _write/_read_line.
         self._active_limit = f"{label} exceeded {timeout_seconds:g}s"
@@ -533,7 +600,7 @@ class DockerStrategyExecutor:
             # Materializing and validating the request is the host's own work on
             # host-owned PIT data; only what happens from the hand-over onwards
             # is the strategy's, so its clock starts here and not before.
-            request, last_available_at = self._prepare_execute(context)
+            request, last_available_at = self._prepare_execute(call)
             request["type"] = kind
             sequence = request["sequence"]
             started = time.monotonic()
@@ -563,9 +630,9 @@ class DockerStrategyExecutor:
                     if kind == "fit":
                         self._fit_seconds.append(round(time.monotonic() - started, 1))
                     self._transport_sequence = sequence
-                    self._transport_inference_at = context.inference_at
-                    self._transport_bars = context.bars
-                    self._transport_table = context._bars_table
+                    self._transport_inference_at = call.inference_at
+                    self._transport_count = call.bar_count
+                    self._transport_table = call.bar_table
                     self._transport_last_available_at = last_available_at
                     return message.get("orders")
                 if message_type == "protocol_error":
@@ -603,13 +670,13 @@ class DockerStrategyExecutor:
 
     def _prepare_execute(
         self,
-        context: StrategyContext,
+        context: StrategyCall,
     ) -> tuple[dict[str, object], datetime | None]:
         reset = self._transport_sequence < 0
         sequence = 0 if reset else self._transport_sequence + 1
-        base_count = 0 if reset else len(self._transport_bars)
-        table = context._bars_table
-        total_count = len(context.bars)
+        base_count = 0 if reset else self._transport_count
+        table = context.bar_table
+        total_count = context.bar_count
         if len(table) < total_count:
             raise StrategyExecutionError("strategy bar PIT metadata is inconsistent")
         if not reset:
@@ -645,7 +712,7 @@ class DockerStrategyExecutor:
             last_available_at,
         )
 
-    def _context_record(self, context: StrategyContext) -> dict[str, object]:
+    def _context_record(self, context: StrategyCall) -> dict[str, object]:
         record = {
             "inference_at": context.inference_at.isoformat(),
             "account": context.account.to_record(),
@@ -938,7 +1005,7 @@ class DockerStrategyExecutor:
         self._active_limit: str | None = None
         self._transport_sequence = -1
         self._transport_inference_at = None
-        self._transport_bars = ()
+        self._transport_count = 0
         self._transport_table = BarTable()
         self._transport_last_available_at = None
 
@@ -1265,6 +1332,7 @@ __all__ = [
     "FittableStrategyExecutor",
     "GpuMemoryContention",
     "PersistentCommandRunner",
+    "StrategyCall",
     "StrategyExecutionError",
     "StrategyExecutor",
     "StrategyMemoryExceeded",

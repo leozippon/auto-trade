@@ -13,8 +13,10 @@ bit for bit.
 
 from __future__ import annotations
 
+import inspect
 import json
 import math
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -24,14 +26,17 @@ import pandas as pd
 import pytest
 
 from autotrade.environment.broker import BrokerProfile
-from autotrade.environment.replay import DailyMarketData, run_daily_replay
+from autotrade.environment.executor import TrustedStrategyExecutor
+from autotrade.environment.replay import DailyMarketData, engine, run_daily_replay
 from autotrade.environment.strategy import (
     CN_TZ,
     AccountSnapshot,
+    BarTable,
     StrategyContext,
     StrategyContractError,
     StrategySchedule,
 )
+from tests.unit.test_sandbox_runtime import _executor_for_process
 
 GOLDEN = Path(__file__).with_name("data") / "replay_market_golden.json"
 SYMBOLS = ("000001.SZ", "600000.SH", "688001.SH", "830000.BJ", "300001.SZ")
@@ -128,10 +133,10 @@ def scripted_strategy(context: StrategyContext) -> list[dict[str, object]]:
     return orders
 
 
-def replay_record() -> dict[str, object]:
+def replay_record(strategy=scripted_strategy) -> dict[str, object]:
     result = run_daily_replay(
         daily=synthetic_daily(),
-        strategy=scripted_strategy,
+        strategy=strategy,
         schedule=StrategySchedule("day", "08:30"),
         profile=BrokerProfile(initial_cash=200_000.0),
     )
@@ -163,6 +168,78 @@ def test_columnar_market_reproduces_the_golden_replay_exactly() -> None:
         "invalid_buy_lot",
     } <= reasons
     assert len(record["pending_orders"]) == 1
+
+
+_GOLDEN_KEYS = ("executions", "equity_curve", "pending_orders", "inference_dates", "stats")
+
+
+def _strategy_file(root: Path) -> Path:
+    """``scripted_strategy`` as a strategy file the sandbox loader accepts."""
+
+    source = inspect.getsource(scripted_strategy).replace("def scripted_strategy(", "def generate_orders(")
+    path = root / "main.py"
+    path.write_text(
+        "from __future__ import annotations\n\n"
+        "from datetime import datetime, timedelta, timezone\n\n"
+        "import pandas as pd\n\n"
+        "CN_TZ = timezone(timedelta(hours=8))\n"
+        f"_SCRIPT = {_SCRIPT!r}\n\n\n{source}",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _worker_replay(strategy_file: Path) -> tuple[dict[str, object], list[dict[str, object]]]:
+    """The golden replay through a local strategy worker (the sandbox protocol
+    without Docker), and every request the host sent it."""
+
+    process = subprocess.Popen(
+        [sys.executable, "-m", "autotrade.environment.strategy_worker", str(strategy_file)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    executor = _executor_for_process(process, drain_stderr=True)
+    sent: list[dict[str, object]] = []
+    send = executor._send
+
+    def capture(message, deadline):
+        sent.append(json.loads(json.dumps(message)))
+        send(message, deadline)
+
+    executor._send = capture  # type: ignore[method-assign]
+    try:
+        return replay_record(executor), sent
+    finally:
+        executor.close()
+
+
+def test_the_sandbox_worker_fills_the_golden_replay_from_the_host_table(tmp_path: Path, monkeypatch) -> None:
+    """Same strategy bytes, same fills, in this process and through the worker.
+
+    The sandbox path ships each decision's new bars straight from the host's
+    columnar table, never building a bar tuple on the host, and sends exactly
+    the requests it sent when the host materialized every context.
+    """
+
+    golden = json.loads(GOLDEN.read_text(encoding="utf-8"))
+    expected = {key: golden[key] for key in _GOLDEN_KEYS}
+    strategy_file = _strategy_file(tmp_path)
+    in_process = replay_record(TrustedStrategyExecutor.from_path(strategy_file))
+    assert {key: in_process[key] for key in _GOLDEN_KEYS} == expected
+
+    def refuse(*_args):
+        raise AssertionError("the host materialized the bars of a sandbox decision")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(BarTable, "rows", refuse)
+        worker, sent = _worker_replay(strategy_file)
+    assert {key: worker[key] for key in _GOLDEN_KEYS} == expected
+    # The host as it was: a materialized context for every sandbox decision.
+    monkeypatch.setattr(engine, "DockerStrategyExecutor", type("NotTheSandbox", (), {}))
+    _record, sent_from_contexts = _worker_replay(strategy_file)
+    assert len(sent) == len(expected["inference_dates"])
+    assert sent == sent_from_contexts
 
 
 def test_day_bars_and_visibility_are_lazy_views_over_one_columnar_store() -> None:

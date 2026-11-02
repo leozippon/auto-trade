@@ -134,11 +134,21 @@ class DailyMarketData:
 
         return self._distributions.get(str(trade_date), {})
 
-    def visible_at(self, inference_at: datetime) -> _BarPrefix:
+    @property
+    def bar_table(self) -> BarTable:
+        """Every bar of the window, in arrival order."""
+
+        return self._table
+
+    def visible_count(self, inference_at: datetime) -> int:
+        """How many leading rows of ``bar_table`` are available at ``inference_at``."""
+
         if inference_at.tzinfo is None or inference_at.utcoffset() is None:
             raise StrategyContractError("inference_at must include a timezone")
-        cutoff = _epoch_us(inference_at)
-        return self._table.rows(int(np.searchsorted(self._chunk.epoch, cutoff, side="right")))
+        return int(np.searchsorted(self._chunk.epoch, _epoch_us(inference_at), side="right"))
+
+    def visible_at(self, inference_at: datetime) -> _BarPrefix:
+        return self._table.rows(self.visible_count(inference_at))
 
 
 class _DayBars(Mapping[str, Mapping[str, object]]):
