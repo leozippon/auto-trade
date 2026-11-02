@@ -281,7 +281,8 @@ class SessionFactsTest(unittest.TestCase):
         self.assertEqual(facts["arm"]["trials_to_date"], 5)
         self.assertIs(facts["arm"]["frozen"], False)
         self.assertEqual(facts["budgets"]["max_replay_years"], 24)
-        self.assertIn("replay-year", facts["budgets"]["max_replay_years_note"])
+        self.assertIn("计回测年", facts["budgets"]["max_replay_years_note"])
+        self.assertIn("cause: environment", facts["budgets"]["max_replay_years_note"])
         self.assertEqual(
             facts["artifact_contract"]["start"],
             {
