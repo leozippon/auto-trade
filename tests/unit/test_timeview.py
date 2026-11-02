@@ -841,31 +841,40 @@ def test_slices_of_two_slots_unify_as_their_decoded_frames_concatenate(tmp_path:
 
 
 def test_a_stash_hit_reads_no_replay_rows(tmp_path: Path, monkeypatch) -> None:
+    from autotrade.environment.replay import timeview as module
+
     stash = tmp_path / "stash"
     stash.mkdir()
     (stash / "contract.json").write_text(json.dumps({"validated": True}), encoding="utf-8")
-    frames = {name: frame for name, frame in _replay_frames().items() if name != "text_index"}
+    library = tmp_path / "library"
+    _write(
+        library / "news.parquet",
+        pd.DataFrame([{"text_id": "news_early", "body": "early body"}, {"text_id": "news_late", "body": "late body"}]),
+    )
 
     def rolled(host: str) -> dict[str, int]:
         view = Timeview(
             host_dir=tmp_path / host,
             snapshot_dir=_frozen_snapshot(tmp_path),
-            replay=_replay_rows(tmp_path / host, frames),
+            replay=_replay_rows(tmp_path / host),
+            replay_text_library_dir=library,
             stash_dir=stash,
         )
         asof, _ = view.refresh(_when("2022-01-06 09:10:00"))
         return {
             str(path.relative_to(asof)): path.stat().st_ino
-            for path in sorted(Path(asof).rglob("part_*.parquet"))
+            for path in sorted(Path(asof).rglob("*part_*.parquet"))
         }
 
     first = rolled("first")
     assert any(key.startswith("events/part_") for key in first)
+    assert {"text_index/part_0001.parquet", "text_library/news__part_0001.parquet"} <= set(first)
 
-    def refuse(self: ReplayRows, indices):
-        raise AssertionError(f"a stash hit read {self.path.name}")
+    def refuse(*args):
+        raise AssertionError(f"a stash hit read replay rows: {args}")
 
     monkeypatch.setattr(ReplayRows, "take", refuse)
+    monkeypatch.setattr(module._TextView, "_read_body_rows", staticmethod(refuse))
     assert rolled("second") == first  # the same inodes: hardlinked, never re-encoded
 
 
@@ -1090,17 +1099,26 @@ def test_finished_months_merge_into_one_part_and_every_decision_reads_the_same_r
     ]
 
     # Through the stash: the first backtest publishes each merged month, the
-    # next links it instead of rewriting the month.
+    # next links it, and every other part, without reading a replay row.
     stash = tmp_path / "stash"
     stash.mkdir()
     (stash / "contract.json").write_text(json.dumps({"validated": True}), encoding="utf-8")
     _assert_same_reads(_month_reads(_month_view(tmp_path, "cold", stash)), expected)
 
-    def refuse(*_args):
-        raise AssertionError("a stash hit rewrote a merged month")
+    def refuse(*args):
+        raise AssertionError(f"a stash hit re-read or rewrote a part: {args}")
 
     monkeypatch.setattr(module, "_write_merged", refuse)
+    monkeypatch.setattr(ReplayRows, "take", refuse)
+    monkeypatch.setattr(module._TextView, "_read_body_rows", staticmethod(refuse))
     _assert_same_reads(_month_reads(_month_view(tmp_path, "warm", stash)), expected)
     for domain, merged in (("events", "0007_0026"), ("text_index", "0005_0024")):
         published = stash / domain / f"merged_{merged}.parquet"
         assert (tmp_path / "warm" / domain / f"part_{merged}.parquet").stat().st_ino == published.stat().st_ino
+    # What a hit links is, byte for byte, what decoding the rows writes.
+    for domain in ("events", "text_index", "text_library"):
+        decoded, linked = (
+            {path.name: path.read_bytes() for path in (tmp_path / host / domain).iterdir()}
+            for host in ("merged", "warm")
+        )
+        assert linked == decoded

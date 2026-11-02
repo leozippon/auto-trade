@@ -65,7 +65,7 @@ import warnings
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from functools import partial
+from functools import cache, partial
 from pathlib import Path
 
 import numpy as np
@@ -203,6 +203,9 @@ class _ReplaySegment:
     cursor: _SortedCursor | None
     cursors: dict[str, _SortedCursor]
     library_dir: Path | None = None
+    # Each row's dataset (text index segments only): names a roll's body
+    # parts without decoding its rows.
+    datasets: np.ndarray | None = None
     # Per row, when the lake first held it where that is later than its
     # available_at (NaT elsewhere); None when no row of the slot has one.
     first_seen: np.ndarray | None = None
@@ -925,8 +928,13 @@ class _TextView:
         if rows is not None and not rows.empty and required.issubset(rows.columns):
             available_at = to_cn_timestamps(rows.column("available_at"))
             valid = np.flatnonzero(available_at.notna().to_numpy())
-            cursors = _dataset_cursors(rows.column("dataset").astype(str).to_numpy(), valid, _utc_ns(available_at))
-            self._segments.append(_ReplaySegment(rows, None, cursors, library_dir, first_seen=_first_seen_keys(rows)))
+            datasets = rows.column("dataset").astype(str).to_numpy()
+            cursors = _dataset_cursors(datasets, valid, _utc_ns(available_at))
+            self._segments.append(
+                _ReplaySegment(
+                    rows, None, cursors, library_dir, first_seen=_first_seen_keys(rows), datasets=datasets
+                )
+            )
         self._segments_changed()
 
     def release_published(self) -> None:
@@ -956,7 +964,7 @@ class _TextView:
         if signature == self._last_signature and not any(segment.held_due(now) for segment in self._segments):
             return False
         self._last_signature = signature
-        visible: list[tuple[_ReplaySegment, pd.DataFrame]] = []
+        taken: list[tuple[_ReplaySegment, np.ndarray]] = []
         for segment in self._segments:
             parts = [
                 indices
@@ -967,54 +975,78 @@ class _TextView:
             newly = segment.admit(np.concatenate(parts) if parts else _EMPTY_INDICES, now)
             if newly.size:
                 newly.sort()  # original frame order: parts read back exactly as the frame slice
-                visible.append((segment, pa.concat_tables(list(segment.rows.take(newly))).to_pandas()))
-        if not visible:
+                taken.append((segment, newly))
+        if not taken:
             return False
+        suffix = f"__part_{self._part_seq:04d}.parquet"
+        index_name = f"part_{self._part_seq:04d}.parquet"
+        row_count = sum(int(newly.size) for _segment, newly in taken)
+        # The body parts this roll writes, one per dataset it makes visible.
+        datasets = sorted(
+            {str(name) for segment, newly in taken for name in np.unique(segment.datasets[newly])}
+        )
+        # The rows are decoded only if a part has to be encoded: a stash hit
+        # links the whole roll and reads nothing.
+        decoded = cache(partial(self._decode, taken, datasets, suffix))
+        if self._stash_index_dir is None or self._stash_library_dir is None:
+            rows, groups = decoded()
+            for dataset in datasets:
+                self._write_bodies(dataset, groups[dataset], self.out_library_dir / f"{dataset}{suffix}")
+            _write_frame(rows, self.out_index_dir / index_name)
+        else:
+            self._publish_roll(datasets, decoded, row_count=row_count, index_name=index_name, suffix=suffix)
+        # Only the index is merged: its rows name their body parts, which stay.
+        self._months.published(self._part_seq, when, row_count, self._stash_index_dir)
+        self._part_seq += 1
+        return True
+
+    @staticmethod
+    def _decode(
+        taken: list[tuple[_ReplaySegment, np.ndarray]], datasets: list[str], suffix: str
+    ) -> tuple[pd.DataFrame, dict[str, list[tuple[Path | None, set[str]]]]]:
+        """One roll's index rows, relabelled onto its body parts, and the text
+        ids each dataset's body part takes from each slot's library."""
+
+        visible = [
+            (segment, pa.concat_tables(list(segment.rows.take(newly))).to_pandas())
+            for segment, newly in taken
+        ]
         rows = _concat_slices([index_rows for _segment, index_rows in visible]).copy()
         rows = rows.drop(columns=[FIRST_SEEN_COLUMN], errors="ignore")
-        datasets = rows["dataset"].astype(str)
+        labels = rows["dataset"].astype(str)
+        if sorted(set(labels)) != datasets:
+            raise RuntimeError(
+                f"text index rows name datasets {sorted(set(labels))}, their cursors {datasets}"
+            )
         # Every row this roll makes visible is relabelled onto the body part
         # this roll writes for its dataset, so the whole column is one string
         # concatenation instead of a per-row lookup (0.30 s/day measured on a
         # real slot, ~73 s per replay).
-        suffix = f"__part_{self._part_seq:04d}.parquet"
-        rows["library_file"] = datasets + suffix
+        rows["library_file"] = labels + suffix
         # A dataset's body part is cut from the library of each slot whose
         # index rows it makes visible, in slot order.
-        groups = [
-            (
-                dataset,
-                [
-                    (segment.library_dir, text_ids)
-                    for segment, index_rows in visible
-                    if (
-                        text_ids := set(
-                            index_rows.loc[
-                                index_rows["dataset"].astype(str) == dataset, "text_id"
-                            ].astype(str)
-                        )
+        groups = {
+            dataset: [
+                (segment.library_dir, text_ids)
+                for segment, index_rows in visible
+                if (
+                    text_ids := set(
+                        index_rows.loc[
+                            index_rows["dataset"].astype(str) == dataset, "text_id"
+                        ].astype(str)
                     )
-                ],
-            )
-            for dataset in sorted(set(datasets))
-        ]
-        index_name = f"part_{self._part_seq:04d}.parquet"
-        if self._stash_index_dir is None or self._stash_library_dir is None:
-            for dataset, group in groups:
-                self._write_bodies(dataset, group, self.out_library_dir / f"{dataset}{suffix}")
-            _write_frame(rows, self.out_index_dir / index_name)
-        else:
-            self._publish_roll(rows, groups, index_name=index_name, suffix=suffix)
-        # Only the index is merged: its rows name their body parts, which stay.
-        self._months.published(self._part_seq, when, len(rows), self._stash_index_dir)
-        self._part_seq += 1
-        return True
+                )
+            ]
+            for dataset in datasets
+        }
+        return rows, groups
 
     def _publish_roll(
         self,
-        rows: pd.DataFrame,
-        groups: list[tuple[str, list[tuple[Path | None, set[str]]]]],
+        datasets: list[str],
+        decoded: Callable[[], tuple[pd.DataFrame, dict[str, list[tuple[Path | None, set[str]]]]]],
         *,
+        row_count: int,
         index_name: str,
         suffix: str,
     ) -> None:
@@ -1022,10 +1054,12 @@ class _TextView:
 
         Each part is a pure function of the semantic contract the PIT backend
         already bound, so a part an earlier backtest encoded is hardlinked
-        instead of re-read and re-encoded. The whole roll is published under
-        one lock, and the index part -- which fixes the visibility slice the
-        body parts are cut from -- carries the same footer row-count check the
-        numeric domains use.
+        instead of re-read and re-encoded, and a roll whose parts are all in
+        the stash never decodes its index rows (``decoded`` runs only for a
+        missing part). The whole roll is published under one lock, and the
+        index part -- which fixes the visibility slice the body parts are cut
+        from -- carries the same footer row-count check the numeric domains
+        use.
         """
 
         stash_index = self._stash_index_dir
@@ -1033,19 +1067,23 @@ class _TextView:
         assert stash_index is not None and stash_library is not None
         stash_index.mkdir(parents=True, exist_ok=True)
         stash_library.mkdir(parents=True, exist_ok=True)
+
+        def write_bodies(dataset: str, path: Path) -> None:
+            self._write_bodies(dataset, decoded()[1][dataset], path)
+
         with _exclusive_part_lock(stash_index / f".{index_name}.lock"):
-            for dataset, group in groups:
+            for dataset in datasets:
                 name = f"{dataset}{suffix}"
                 _publish_part(
                     stash_library / name,
                     self.out_library_dir / name,
-                    write=partial(self._write_bodies, dataset, group),
+                    write=partial(write_bodies, dataset),
                 )
             _publish_checked_part(
                 stash_index / index_name,
                 self.out_index_dir / index_name,
-                row_count=len(rows),
-                write=partial(_write_frame, rows),
+                row_count=row_count,
+                write=lambda path: _write_frame(decoded()[0], path),
                 label=f"text index {index_name}",
             )
 
