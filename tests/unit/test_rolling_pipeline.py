@@ -460,8 +460,8 @@ def _interrupted_attempt(
     ``capped`` leaves instead what an attempt that filled its trace leaves:
     the terminal marker, and nothing of what it spent afterwards."""
 
-    from autotrade.environment.runtime import agent_trace_path
     from autotrade.environment.step_tree import StepTree
+    from autotrade.environment.trace import agent_trace_path
     from autotrade.pipelines.session_resume import record_step_sidecar
 
     def crash(_request):

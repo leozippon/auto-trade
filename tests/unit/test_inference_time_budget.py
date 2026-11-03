@@ -26,7 +26,6 @@ from autotrade.environment.llm import (
     ScriptedLLM,
     ToolCall,
 )
-from autotrade.environment.runtime import AgentTraceWriter
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.environment.time_budget import InferenceTimeBudget
@@ -38,6 +37,7 @@ from autotrade.environment.tools import (
     ToolResult,
     ToolSpec,
 )
+from autotrade.environment.trace import AgentTraceWriter
 from autotrade.pipelines.config import (
     EvaluationResult,
     ReplaySpan,

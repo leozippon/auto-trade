@@ -47,7 +47,7 @@ from autotrade.environment.replay.engine import BacktestError
 from autotrade.environment.replay.null_control import NullControlSetupError
 from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR
 from autotrade.environment.replay.style import active_analysis
-from autotrade.environment.runtime import agent_trace_path, utc_now_iso
+from autotrade.environment.runtime import utc_now_iso
 from autotrade.environment.sandbox import SandboxConfig, SandboxSpec
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.time_budget import InferenceTimeBudget
@@ -60,6 +60,7 @@ from autotrade.environment.tools.workspace import (
     WORKSPACE_MIN_FREE_BYTES,
     SafeWorkspace,
 )
+from autotrade.environment.trace import agent_trace_path
 from autotrade.pipelines.config import (
     DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
     BrokerProfile,

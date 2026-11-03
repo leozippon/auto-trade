@@ -34,8 +34,8 @@ from autotrade.common.records import (
     write_json_atomic,
 )
 from autotrade.environment.artifacts import REVISION_MANIFEST_FILE
-from autotrade.environment.runtime import agent_trace_path
 from autotrade.environment.step_tree import StepTree
+from autotrade.environment.trace import agent_trace_path
 
 from .config import BudgetUsed, EvaluationResult, SessionResume, StepResult
 from .ledger import Stage, recorded_path

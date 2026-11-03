@@ -49,9 +49,10 @@ from autotrade.environment.replay import (
 from autotrade.environment.replay.engine import BacktestError
 from autotrade.environment.replay.stats import window_activity
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
-from autotrade.environment.runtime import agent_trace_path, chmod_tree, utc_now_iso
+from autotrade.environment.runtime import chmod_tree, utc_now_iso
 from autotrade.environment.step_tree import node_handle
 from autotrade.environment.strategy_loader import validate_strategy_package
+from autotrade.environment.trace import agent_trace_path
 
 from .agent_inbox import expire_experiment_session_inbox
 from .calendar import FULL_SPAN, Slot
