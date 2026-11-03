@@ -48,8 +48,11 @@ def test_every_console_surface_is_read_off_the_record() -> None:
         *NON_PERSISTABLE_PARAMS,
     }
     assert WEB_REQUIRED_PARAMS == {"experiment_id", *CREATE_RULES, "research_start", "research_end", "forward_end", "heldout_end"}
-    # The three required rules keep no value anywhere.
+    # The rules a create request must state, sealed_years and
+    # ablation_required, have no value anywhere; alpha, the third required
+    # rule, carries the console's value 0.05 and is no create-time requirement.
     assert all(WEB_CREATE_DEFAULTS[name] is None for name in ("experiment_id", *CREATE_RULES))
+    assert WEB_CREATE_DEFAULTS["alpha"] == 0.05 and "alpha" not in WEB_REQUIRED_PARAMS
 
 
 def test_a_created_arm_reads_back_to_the_parameters_it_states() -> None:
@@ -61,11 +64,12 @@ def test_a_created_arm_reads_back_to_the_parameters_it_states() -> None:
     assert params.data.screen_boards == ("main",)
     assert params.acceptance.sealed_years == CREATE_RULES["sealed_years"]
     assert params.environment.data_backend == "pit"
-    assert params.to_record() == {key: value for key, value in created.items() if not key.startswith("_")} | {
-        "screen_boards": ["main"],
-        **{key: list(value) for key, value in created.items() if isinstance(value, tuple)},
-    }
-    assert ArmParams.from_record(params.to_record()) == params
+    # Every parameter holds what the file states, or its default where the
+    # file states nothing (the host parameters a create never writes).
+    for name, spec in PARAMETERS.items():
+        owner = params if spec.group is None else getattr(params, spec.group)
+        stated = created.get(name, spec.default)
+        assert getattr(owner, name) == (tuple(stated) if isinstance(stated, list) else stated), name
 
 
 def test_an_arm_created_before_a_parameter_existed_still_loads() -> None:
@@ -90,11 +94,10 @@ def test_an_arm_created_before_a_parameter_existed_still_loads() -> None:
     params = ArmParams.from_record(legacy)
 
     assert params.retired.min_dsr_probability == 0.975
+    assert params.retired.recency_months == 6
+    assert params.retired.nl_max_results is None
     assert params.acceptance.sealed_years is None
     assert params.environment.daily_path is None
-    record = params.to_record()
-    assert record["recency_months"] == 6
-    assert "daily_path" not in record and "nl_max_results" not in record
 
 
 @pytest.mark.parametrize(

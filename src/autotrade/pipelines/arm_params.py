@@ -35,7 +35,6 @@ from types import UnionType
 from typing import Any, Union, get_args, get_origin, get_type_hints
 
 from autotrade.common.ids import EXPERIMENT_ID, is_experiment_id
-from autotrade.common.records import dataclass_record
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.llm.lighting import (
@@ -368,8 +367,9 @@ RetiredParams.__doc__ = (
 
 @dataclass(frozen=True, kw_only=True)
 class ArmParams:
-    """One arm's parameters, grouped. ``to_record``/``from_record`` are the
-    flat params.json form."""
+    """One arm's parameters, grouped; ``from_record`` reads the flat
+    params.json form. Nothing writes a file from the record: the console
+    and the command line write the request they validated through it."""
 
     experiment_id: str | None = _param(required=True)
     geometry: GeometryParams = field(default_factory=GeometryParams)
@@ -409,25 +409,6 @@ class ArmParams:
         }
         return cls(**top, **groups)  # type: ignore[arg-type]
 
-    def to_record(self) -> dict[str, object]:
-        """The flat params.json form: every console parameter, and every other
-        parameter that is set."""
-
-        flat: dict[str, object] = {}
-        for name, spec in PARAMETERS.items():
-            owner = self if spec.group is None else getattr(self, spec.group)
-            value = getattr(owner, name)
-            if value is None and spec.surface is not Surface.CONSOLE:
-                continue
-            flat[name] = dataclass_record(_Value(value))["value"]
-        return flat
-
-
-@dataclass(frozen=True)
-class _Value:
-    # One parameter's value, rendered the way ``common.records`` renders a
-    # field (tuples as lists).
-    value: object
 
 
 @dataclass(frozen=True)
