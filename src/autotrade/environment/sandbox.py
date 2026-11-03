@@ -22,6 +22,7 @@ from autotrade.common.records import (
     write_json_atomic,
 )
 
+from .commands import CommandResult
 from .gpu import GpuUnavailableError, device_request, host_gpu_name
 from .pretrained import pretrained_pin, require_pretrained_store
 from .runtime import (
@@ -662,7 +663,7 @@ class DockerSandbox:
         timeout_seconds: float = 30.0,
         max_output_chars: int,
         input_text: str | None = None,
-    ):
+    ) -> CommandResult:
         from .executor import (
             _HOST_TIMEOUT_BUFFER_SECONDS,
             _run_limited_capture,

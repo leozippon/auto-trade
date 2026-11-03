@@ -15,8 +15,9 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, Self, runtime_checkable
+from typing import Protocol, Self, runtime_checkable
 
+from .commands import CommandResult
 from .container_stats import ContainerResourceMonitor
 from .contract_fingerprint import (
     SandboxImageContractMismatch,
@@ -44,9 +45,6 @@ from .strategy_worker import (
     PROTOCOL_ERROR_REPLY,
     RESOURCE_KEYS,
 )
-
-if TYPE_CHECKING:
-    from .tools.base import CommandResult
 
 _HOST_TIMEOUT_BUFFER_SECONDS = 15.0
 _PROCESS_STOP_TIMEOUT_SECONDS = 2.0
@@ -1120,9 +1118,6 @@ def _run_limited_capture(
     124 is a timeout, the host's own here or the container's ``timeout``
     (``_with_container_timeout``).
     """
-    # CommandResult belongs to the tool layer, which imports this module
-    # (tools/search.py); importing it at the top would be a cycle.
-    from .tools.base import CommandResult
 
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
