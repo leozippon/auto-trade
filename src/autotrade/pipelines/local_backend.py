@@ -33,7 +33,6 @@ from autotrade.environment.strategy_loader import validate_strategy_package
 
 from .calendar import replay_window, yyyymmdd
 from .config import (
-    ArtifactRevision,
     EvaluationBackend,
     EvaluationRequest,
     EvaluationResult,
@@ -253,11 +252,8 @@ class DeterministicBaselineDeveloper:
         )
         steps: list[StepResult] = []
         for index in (1, 2):
-            revision = self.artifact_store.create_revision(source, models_path=None)
-            typed_revision = ArtifactRevision(
-                str(revision.revision_id),
-                Path(revision.output_path),
-                Path(revision.models_path) if revision.models_path is not None else None,
+            typed_revision, _fingerprint = self.artifact_store.create_revision(
+                source, models_path=None
             )
             validation = self.evaluator.evaluate(
                 request.validation.request(

@@ -23,6 +23,8 @@ import pandas as pd
 
 from autotrade.common.records import read_json_object
 from autotrade.environment.artifacts import (
+    ArtifactRevision,
+    FrozenArtifact,
     copy_artifact,
     copy_model_artifacts,
     model_artifact_delta,
@@ -55,13 +57,11 @@ from .agent_inbox import expire_experiment_session_inbox
 from .calendar import FULL_SPAN, Slot
 from .config import (
     AcceptanceRules,
-    ArtifactRevision,
     ArtifactStore,
     BudgetUsed,
     EvaluationBackend,
     EvaluationRequest,
     EvaluationResult,
-    FrozenArtifact,
     ReplaySpan,
     ResearchDeveloper,
     ResearchSessionRequest,
@@ -640,8 +640,7 @@ class RollingExperimentPipeline:
             run_id=run_id,
             step_id=step_id,
         )
-        models = Path(stored.model_path) if stored.model_path is not None else None
-        return artifact_id, Path(stored.path), models
+        return artifact_id, stored.path, stored.model_path
 
     # ---- forward -------------------------------------------------------
 
@@ -1080,19 +1079,10 @@ class RollingExperimentPipeline:
 
         if not isinstance(block, Mapping):
             raise TypeError("frozen record carries no frozen block")
-        stored = self.artifacts.frozen(
+        return self.artifacts.frozen(
             str(block["artifact_id"]),
             expected_path=recorded_path(self.config.experiment_dir, str(block["output_path"])),
             experiment_id=self.config.experiment_id,
-        )
-        return FrozenArtifact(
-            str(stored.artifact_id),
-            Path(stored.path),
-            Path(stored.model_path) if stored.model_path is not None else None,
-            str(stored.source_run_id),
-            str(stored.source_fold_id),
-            str(stored.source_step_id),
-            str(stored.revision_id),
         )
 
     # ---- shared --------------------------------------------------------

@@ -59,9 +59,9 @@ def test_two_revisions_sharing_a_file_store_its_bytes_once(tmp_path: Path):
 
     output, models = _working_artifact(tmp_path / "work")
     store = FilesystemArtifactStore(tmp_path / "store")
-    first = store.create_revision(output, models_path=models, revision_id="revision_a")
+    first, _first_fingerprint = store.create_revision(output, models_path=models, revision_id="revision_a")
     (output / "lib" / "features.py").write_text(HELPER + "VALUE_40 = 40\n", encoding="utf-8")
-    second = store.create_revision(
+    second, _second_fingerprint = store.create_revision(
         output, models_path=models, revision_id="revision_b", parent_revision_id="revision_a"
     )
 
@@ -90,8 +90,8 @@ def test_two_revisions_sharing_a_file_store_its_bytes_once(tmp_path: Path):
 def test_a_revision_manifest_records_its_parent_and_every_file_digest(tmp_path: Path):
     output, models = _working_artifact(tmp_path / "work")
     store = FilesystemArtifactStore(tmp_path / "store")
-    parent = store.create_revision(output, models_path=models, revision_id="revision_parent")
-    child = store.create_revision(
+    parent, _parent_fingerprint = store.create_revision(output, models_path=models, revision_id="revision_parent")
+    child, child_fingerprint = store.create_revision(
         output,
         models_path=models,
         revision_id="revision_child",
@@ -100,7 +100,7 @@ def test_a_revision_manifest_records_its_parent_and_every_file_digest(tmp_path: 
 
     manifest = _manifest(store, child.revision_id)
     assert manifest["parent_revision_id"] == "revision_parent"
-    assert manifest["fingerprint"] == child.fingerprint == artifact_fingerprint(output, models)
+    assert manifest["fingerprint"] == child_fingerprint == artifact_fingerprint(output, models)
     assert manifest["created_at"]
     assert [entry["path"] for entry in manifest["files"]] == [
         "output/README.md",
@@ -163,7 +163,7 @@ def test_freezing_a_shared_revision_copies_the_bytes_it_locks(tmp_path: Path):
 
     output, models = _working_artifact(tmp_path / "work")
     store = FilesystemArtifactStore(tmp_path / "store")
-    revision = store.create_revision(output, models_path=models, revision_id="revision_a")
+    revision, revision_fingerprint = store.create_revision(output, models_path=models, revision_id="revision_a")
     frozen = store.freeze_revision(
         revision.revision_id,
         artifact_id="artifact_001",
@@ -176,7 +176,7 @@ def test_freezing_a_shared_revision_copies_the_bytes_it_locks(tmp_path: Path):
 
     assert (Path(frozen.path) / "main.py").read_text(encoding="utf-8") == STRATEGY
     assert (Path(frozen.model_path) / "weights.npy").read_bytes() == b"\x93NUMPY parameters"
-    assert artifact_fingerprint(frozen.path, frozen.model_path) == revision.fingerprint
+    assert artifact_fingerprint(frozen.path, frozen.model_path) == revision_fingerprint
     assert (Path(frozen.path) / "main.py").stat().st_ino != (
         revision.output_path / "main.py"
     ).stat().st_ino
@@ -189,7 +189,7 @@ def test_discarding_a_revision_leaves_the_bytes_it_shared_read_only(tmp_path: Pa
 
     output, models = _working_artifact(tmp_path / "work")
     store = FilesystemArtifactStore(tmp_path / "store")
-    kept = store.create_revision(output, models_path=models, revision_id="revision_keep")
+    kept, _kept_fingerprint = store.create_revision(output, models_path=models, revision_id="revision_keep")
     store.create_revision(
         output, models_path=models, revision_id="revision_drop", parent_revision_id="revision_keep"
     )

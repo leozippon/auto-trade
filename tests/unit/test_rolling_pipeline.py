@@ -25,7 +25,6 @@ from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
 from autotrade.environment.strategy import CN_TZ
 from autotrade.pipelines.calendar import FULL_SPAN, ResearchGeometry
 from autotrade.pipelines.config import (
-    ArtifactRevision,
     EvaluationRequest,
     EvaluationResult,
     ResearchSessionRequest,
@@ -226,8 +225,7 @@ class Developer:
             source = self.store.root.parent / "candidates" / f"{request.run_id}_{number}"
             source.mkdir(parents=True)
             (source / "main.py").write_text(f"{MAIN}# alpha={alpha}\n", encoding="utf-8")
-            revision = self.store.create_revision(source)
-            typed = ArtifactRevision(str(revision.revision_id), Path(revision.output_path))
+            typed, _fingerprint = self.store.create_revision(source)
             validation = self.evaluator.evaluate(
                 request.validation.request(typed, schedule=CONFIG_SCHEDULE, broker_profile=CONFIG_PROFILE)
             )
@@ -502,8 +500,7 @@ def _interrupted_attempt(
     source = pipeline.config.experiment_dir.parent / "candidates" / "earlier"
     source.mkdir(parents=True)
     (source / "main.py").write_text(f"{MAIN}# alpha=0.0011\n", encoding="utf-8")
-    revision = pipeline.artifacts.create_revision(source)
-    typed = ArtifactRevision(str(revision.revision_id), Path(revision.output_path))
+    typed, _fingerprint = pipeline.artifacts.create_revision(source)
     validation = pipeline.evaluator.evaluate(
         pipeline.developer.requests[0].validation.request(typed, schedule=CONFIG_SCHEDULE, broker_profile=CONFIG_PROFILE)
         if pipeline.developer.requests

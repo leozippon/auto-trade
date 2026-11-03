@@ -26,7 +26,6 @@ import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
 
 from autotrade.common.records import read_json_object, write_json_atomic
 
@@ -144,6 +143,28 @@ class ModelArtifacts:
     total_bytes: int
 
 
+@dataclass(frozen=True)
+class ArtifactRevision:
+    """One immutable snapshot of a working artifact, as a replay reads it."""
+
+    revision_id: str
+    output_path: Path
+    models_path: Path | None = None
+
+
+@dataclass(frozen=True)
+class FrozenArtifact:
+    """A revision frozen as the arm's deliverable, with the Step it came from."""
+
+    artifact_id: str
+    path: Path
+    model_path: Path | None
+    source_run_id: str
+    source_fold_id: str
+    source_step_id: str
+    revision_id: str = ""
+
+
 def new_revision_id(prefix: str = "artifact") -> str:
     return f"{prefix}_{uuid.uuid4().hex[:16]}"
 
@@ -173,13 +194,13 @@ class FilesystemArtifactStore:
         models_path: str | Path | None = None,
         revision_id: str | None = None,
         parent_revision_id: str | None = None,
-    ):
-        """Snapshot a working artifact into a new immutable revision.
+    ) -> tuple[ArtifactRevision, str]:
+        """Snapshot a working artifact into a new immutable revision; return it
+        and the snapshot's fingerprint.
 
-        The returned record carries the snapshot's ``fingerprint``: the
-        evaluated bytes are addressed by content, not by the directory they
-        were copied from, so a caller can prove the revision it replays is the
-        one it approved.
+        The evaluated bytes are addressed by content, not by the directory
+        they were copied from, so with the fingerprint a caller can prove the
+        revision it replays is the one it approved.
 
         The snapshot is then interned into ``objects/`` and its manifest
         written beside the trees, naming ``parent_revision_id`` — the artifact
@@ -211,9 +232,7 @@ class FilesystemArtifactStore:
             self.discard_revision(revision_id)
             raise
         chmod_tree(directory, file_mode=0o444, dir_mode=0o555)
-        record = self.revision(revision_id)
-        record.fingerprint = fingerprint
-        return record
+        return self.revision(revision_id), fingerprint
 
     def discard_revision(self, revision_id: str) -> None:
         """Drop a candidate revision that was never recorded as a Validation.
@@ -226,13 +245,13 @@ class FilesystemArtifactStore:
         if directory.is_dir():
             self._discard_directory(directory)
 
-    def revision(self, revision_id: str):
+    def revision(self, revision_id: str) -> ArtifactRevision:
         directory = self._id_path(self.revisions_root, revision_id)
         output = directory / "output"
         if not output.is_dir():
             raise KeyError(f"unknown artifact revision: {revision_id}")
         models = directory / "models"
-        return SimpleNamespace(revision_id=revision_id, output_path=output, models_path=models if models.is_dir() else None)
+        return ArtifactRevision(revision_id, output, models if models.is_dir() else None)
 
     def _intern(self, directory: Path) -> list[dict[str, object]]:
         """Store the revision's files by content hash and link the tree to them.
@@ -268,7 +287,7 @@ class FilesystemArtifactStore:
         fold_id: str,
         run_id: str,
         step_id: str,
-    ):
+    ) -> FrozenArtifact:
         revision = self.revision(revision_id)
         directory = self._id_path(self.frozen_root, artifact_id)
         if directory.exists():
@@ -284,7 +303,7 @@ class FilesystemArtifactStore:
             json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )
         chmod_tree(directory, file_mode=0o444, dir_mode=0o555)
-        return SimpleNamespace(
+        return FrozenArtifact(
             artifact_id=artifact_id, path=directory / "output", model_path=directory / "models",
             source_run_id=run_id, source_fold_id=fold_id, source_step_id=step_id,
             revision_id=revision_id,
@@ -309,7 +328,7 @@ class FilesystemArtifactStore:
         *,
         expected_path: str | Path | None = None,
         experiment_id: str | None = None,
-    ):
+    ) -> FrozenArtifact:
         """Load a frozen artifact after validating identity and immutability."""
 
         directory = self._id_path(self.frozen_root, artifact_id)
@@ -340,7 +359,7 @@ class FilesystemArtifactStore:
         if models.exists():
             load_model_artifacts(models, revision_id=artifact_id)
         _assert_readonly_tree(resolved)
-        return SimpleNamespace(
+        return FrozenArtifact(
             artifact_id=artifact_id,
             path=output,
             model_path=models if models.is_dir() else None,

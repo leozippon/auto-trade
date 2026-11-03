@@ -54,7 +54,7 @@ from _bootstrap import add_repo_src
 REPO_ROOT = add_repo_src(__file__)
 
 from autotrade.common.records import read_json_object, write_json_atomic
-from autotrade.environment.artifacts import FilesystemArtifactStore
+from autotrade.environment.artifacts import ArtifactRevision, FilesystemArtifactStore
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import utc_now_iso
 from autotrade.environment.sandbox import GpuMode
@@ -63,7 +63,7 @@ from autotrade.environment.sandbox_images import (
     prepare_experiment_sandbox_image,
 )
 from autotrade.environment.step_tree import node_handle
-from autotrade.pipelines.config import ArtifactRevision, research_span
+from autotrade.pipelines.config import research_span
 from autotrade.pipelines.experiment import _SEED_LINE, _SEED_NAME
 from autotrade.pipelines.hitl_state import select_gpus
 from autotrade.pipelines.ledger import ExperimentLedger

@@ -16,6 +16,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from autotrade.common.records import HOST_PATH_RE
+from autotrade.environment.artifacts import ArtifactRevision
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.data.snapshot import SnapshotConfig
@@ -36,7 +37,6 @@ from autotrade.environment.strategy import StrategySchedule
 from autotrade.pipelines import pit_backend
 from autotrade.pipelines.config import (
     SNAPSHOT_CACHE_FORMAT_VERSION,
-    ArtifactRevision,
     EvaluationRequest,
     SnapshotBundle,
 )

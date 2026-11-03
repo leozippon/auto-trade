@@ -11,7 +11,11 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from autotrade.common.ids import EXPERIMENT_ID, is_experiment_id
-from autotrade.environment.artifacts import ModificationConstraints
+from autotrade.environment.artifacts import (
+    ArtifactRevision,
+    FrozenArtifact,
+    ModificationConstraints,
+)
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.contracts import (
     DEFAULT_BENCHMARK_INDEX,
@@ -771,31 +775,9 @@ class SnapshotProvider(Protocol):
     def prepare_decision(self, *, decision_time: datetime) -> SnapshotBundle: ...
 
 
-@dataclass(frozen=True)
-class ArtifactRevision:
-    revision_id: str
-    output_path: Path
-    models_path: Path | None = None
-
-
-@dataclass(frozen=True)
-class FrozenArtifact:
-    artifact_id: str
-    path: Path
-    model_path: Path | None
-    source_run_id: str
-    source_fold_id: str
-    source_step_id: str
-    revision_id: str = ""
-
-
 class ArtifactStore(Protocol):
-    """What the Pipeline may read off an artifact store's records.
-
-    Structural, not nominal: a store answers with its own record type (the
-    filesystem store returns a plain namespace), so these annotations name the
-    fields a caller may rely on, never an ``isinstance``.
-    """
+    """The artifact store the Pipeline freezes and reloads through
+    (``environment.artifacts.FilesystemArtifactStore``)."""
 
     def revision(self, revision_id: str) -> ArtifactRevision: ...
 

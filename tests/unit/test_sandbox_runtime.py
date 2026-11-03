@@ -748,7 +748,7 @@ def test_filesystem_artifact_store_freezes_explicit_revision_identity(tmp_path: 
     output.mkdir()
     (output / "main.py").write_text("def generate_orders(context):\n    return []\n", encoding="utf-8")
     store = FilesystemArtifactStore(tmp_path / "store")
-    revision = store.create_revision(output, revision_id="revision_001")
+    revision, _fingerprint = store.create_revision(output, revision_id="revision_001")
     frozen = store.freeze_revision(
         revision.revision_id,
         artifact_id="artifact_001",
@@ -774,7 +774,7 @@ def test_frozen_artifacts_copy_to_writable_fold_workspace_without_mutating_sourc
     (source / "README.md").write_text("contract\n", encoding="utf-8")
     (models / "weights.bin").write_bytes(b"parent-model")
     store = FilesystemArtifactStore(tmp_path / "store")
-    revision = store.create_revision(source, models_path=models, revision_id="revision_parent")
+    revision, _fingerprint = store.create_revision(source, models_path=models, revision_id="revision_parent")
     frozen = store.freeze_revision(
         revision.revision_id,
         artifact_id="artifact_parent",
@@ -839,7 +839,7 @@ def test_real_inherited_fold_workspace_is_writable_only_inside_agent_boundary(tm
     (source / "README.md").write_text("read only\n", encoding="utf-8")
     (source_models / "weights.bin").write_bytes(b"parent")
     store = FilesystemArtifactStore(tmp_path / "store")
-    revision = store.create_revision(source, models_path=source_models, revision_id="revision_parent")
+    revision, _fingerprint = store.create_revision(source, models_path=source_models, revision_id="revision_parent")
     frozen = store.freeze_revision(
         revision.revision_id,
         artifact_id="artifact_parent",
@@ -1217,9 +1217,9 @@ def test_an_evaluation_snapshot_is_immutable_and_keeps_the_bytes_it_fingerprinte
     working copy but not this tree."""
     output, models = _working_artifact(tmp_path)
     store = FilesystemArtifactStore(tmp_path / "store")
-    revision = store.create_revision(output, models_path=models)
+    revision, fingerprint = store.create_revision(output, models_path=models)
 
-    assert revision.fingerprint == artifact_fingerprint(output, models)
+    assert fingerprint == artifact_fingerprint(output, models)
 
     # The Agent keeps working while the replay runs.
     (output / "main.py").write_text(STRATEGY_BODY + "# later\n", encoding="utf-8")
@@ -1229,9 +1229,9 @@ def test_an_evaluation_snapshot_is_immutable_and_keeps_the_bytes_it_fingerprinte
     assert (revision.models_path / "weights.bin").read_bytes() == b"parent"
     assert (
         artifact_fingerprint(revision.output_path, revision.models_path)
-        == revision.fingerprint
+        == fingerprint
     )
-    assert artifact_fingerprint(output, models) != revision.fingerprint
+    assert artifact_fingerprint(output, models) != fingerprint
 
     # uid 61000 owns nothing here and every path denies writes, so no process in
     # the session can reach the evaluated bytes even by path.
@@ -1260,10 +1260,10 @@ def test_a_write_during_the_snapshot_is_retaken_once(tmp_path: Path):
 
     store = FilesystemArtifactStore(tmp_path / "store")
     with patch.object(artifacts, "copy_model_artifacts", write_then_copy):
-        revision = store.create_revision(output, models_path=models)
+        revision, fingerprint = store.create_revision(output, models_path=models)
 
     assert (revision.output_path / "main.py").read_text(encoding="utf-8") == moved
-    assert revision.fingerprint == artifact_fingerprint(output, models)
+    assert fingerprint == artifact_fingerprint(output, models)
 
 
 def test_a_source_that_never_settles_fails_explicitly_and_leaves_no_revision(

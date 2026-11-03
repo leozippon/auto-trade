@@ -23,6 +23,7 @@ from autotrade.agent.compact import safe_error_summary
 from autotrade.common.records import read_json_object, redact_host_paths
 from autotrade.environment.artifacts import (
     READONLY_FILES,
+    ArtifactRevision,
     ArtifactSnapshotUnstable,
     FilesystemArtifactStore,
     copy_artifact_snapshot,
@@ -70,7 +71,6 @@ from .config import (
     BATCH_VALIDATE_MIN_CANDIDATES,
     DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
     AcceptanceRules,
-    ArtifactRevision,
     EvaluationBackend,
     EvaluationRequest,
     EvaluationResult,
@@ -848,26 +848,19 @@ class SessionValidations:
         It also records the artifact it descends from, so the revisions the arm
         keeps form the same lineage the Step tree draws.
         """
-        revision = self.artifact_store.create_revision(
+        revision, snapshot = self.artifact_store.create_revision(
             source_output,
             models_path=self.models_dir,
             parent_revision_id=self._parent_revision_id(),
         )
-        if revision.fingerprint != fingerprint:
-            self.artifact_store.discard_revision(str(revision.revision_id))
+        if snapshot != fingerprint:
+            self.artifact_store.discard_revision(revision.revision_id)
             raise ArtifactSnapshotUnstable(
                 f"{label} changed between modification_check and the "
                 "Validation snapshot"
             )
-        typed = ArtifactRevision(
-            str(revision.revision_id),
-            Path(revision.output_path),
-            Path(revision.models_path)
-            if revision.models_path is not None
-            else None,
-        )
-        _assert_skills_absent_from_formal(typed.output_path, typed.models_path)
-        return typed
+        _assert_skills_absent_from_formal(revision.output_path, revision.models_path)
+        return revision
 
     def _parent_revision_id(self) -> str | None:
         """The revision the working artifact descends from.

@@ -125,7 +125,7 @@ REPO_ROOT = add_repo_src(__file__)
 from autotrade.common.ids import is_experiment_id
 from autotrade.common.records import read_json_object
 from autotrade.environment import pretrained
-from autotrade.environment.artifacts import FilesystemArtifactStore
+from autotrade.environment.artifacts import ArtifactRevision, FilesystemArtifactStore
 from autotrade.environment.gpu import GpuUnavailableError, host_min_free_gpu_memory_mib
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import rmtree_keeping_file_modes
@@ -133,7 +133,6 @@ from autotrade.environment.sandbox import GpuMode
 from autotrade.pipelines.calendar import FULL_SPAN
 from autotrade.pipelines.config import (
     SNAPSHOT_CACHE_FORMAT_VERSION,
-    ArtifactRevision,
     acceptance_for,
     research_span,
 )
