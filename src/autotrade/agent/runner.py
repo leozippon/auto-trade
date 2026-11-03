@@ -571,8 +571,8 @@ class AgentSessionRunner:
                     {
                         "call_index": llm_calls + 1,
                         "status": "running",
-                        "provider": getattr(self.llm, "provider", ""),
-                        "model": getattr(self.llm, "model", ""),
+                        "provider": self.llm.provider,
+                        "model": self.llm.model,
                     },
                 )
                 response = self.llm.complete(
@@ -594,8 +594,8 @@ class AgentSessionRunner:
                 failure: dict[str, object] = {
                     "call_index": llm_calls,
                     "status": "error",
-                    "provider": getattr(self.llm, "provider", ""),
-                    "model": getattr(self.llm, "model", ""),
+                    "provider": self.llm.provider,
+                    "model": self.llm.model,
                     "error": error,
                 }
                 if malformed:
@@ -696,7 +696,7 @@ class AgentSessionRunner:
                 {
                     "call_index": llm_calls,
                     "status": "ok",
-                    "provider": getattr(self.llm, "provider", ""),
+                    "provider": self.llm.provider,
                     "model": response.model,
                     "usage": dict(response.usage),
                     "content": response.content,

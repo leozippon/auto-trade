@@ -298,8 +298,8 @@ class SessionBudgetLLM(SessionTimeBudgetAware):
         self.delegate = delegate
         self.budget = budget
         self.role = role
-        self.provider = str(getattr(delegate, "provider", ""))
-        self.model = str(getattr(delegate, "model", ""))
+        self.provider = str(delegate.provider)
+        self.model = str(delegate.model)
         # Resolved once from the configured model: a gateway outside the
         # catalog has no price and fails here, before the session's first call.
         self.prices = token_prices(self.provider, self.model)
@@ -828,11 +828,11 @@ class LLMResearchDeveloper:
                 "session_key": request.session_key,
                 "kind": RESEARCH_STAGE,
                 "llm": {
-                    "provider": str(getattr(self.llm, "provider", "")),
-                    "model": str(getattr(self.llm, "model", "")),
+                    "provider": str(self.llm.provider),
+                    "model": str(self.llm.model),
                     "subagent": {
-                        "provider": str(getattr(self.subagent_llm, "provider", "")),
-                        "model": str(getattr(self.subagent_llm, "model", "")),
+                        "provider": str(self.subagent_llm.provider),
+                        "model": str(self.subagent_llm.model),
                     },
                 },
                 "conversation_id": request.run_id,

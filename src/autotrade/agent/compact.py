@@ -264,8 +264,8 @@ class ContextCompactor(SessionTimeBudgetAware):
             event = {
                 **decision,
                 "status": "error",
-                "provider": getattr(self.llm, "provider", ""),
-                "model": getattr(self.llm, "model", ""),
+                "provider": self.llm.provider,
+                "model": self.llm.model,
                 "started_at": started_at,
                 "completed_at": datetime.now(UTC).isoformat(),
                 "error": safe_error_summary(exc),
@@ -289,7 +289,7 @@ class ContextCompactor(SessionTimeBudgetAware):
         event = {
             **decision,
             "status": "ok",
-            "provider": getattr(self.llm, "provider", ""),
+            "provider": self.llm.provider,
             "model": response.model,
             "started_at": started_at,
             "completed_at": datetime.now(UTC).isoformat(),
