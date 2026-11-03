@@ -58,7 +58,12 @@ ExecutionMode = Literal["sandbox", "trusted"]
 # v14: a row whose key the raw lake first held after its vendor-date stamp
 # becomes visible only from that first-seen time, so a v13 view shows rows the
 # vendor added after the fact from their vendor date.
-SNAPSHOT_CACHE_FORMAT_VERSION = 14
+# v15: a fina_indicator_vip row is visible no earlier than the latest statement
+# announcement of its period (the vendor files restated indicators under the
+# original ann_date); a v14 view shows restated indicators up to years early.
+# The stamp lives in the PIT event index a release clones, so only a view built
+# from a release whose index this code wrote carries it.
+SNAPSHOT_CACHE_FORMAT_VERSION = 15
 
 # Trailing wrap-up grace added to the research session budget. Not a console or
 # worker knob; ResearchSessionRequest carries the seconds to the Agent runner.

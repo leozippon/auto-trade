@@ -408,6 +408,129 @@ class FundamentalEventsBuilderTest(unittest.TestCase):
             self.assertEqual(report["status"], "error")
             self.assertEqual(report["findings"][-1]["details"]["backdated_available_at_rows"], 1)
 
+    def test_fina_indicator_row_waits_for_the_latest_statement_of_its_period(self):
+        """fina_indicator_vip has no f_ann_date, and the vendor files restated
+        figures under the original ann_date (300243.SZ 2016Q1: restated eps
+        under 2016-04-26, the restating income version 2017-04-27). A row is
+        visible no earlier than its period's latest statement announcement;
+        an earlier statement never moves it backwards, a later indicator row
+        of the same period does not move it at all, and forecast and express
+        keep their own ann_date."""
+        from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION
+
+        # A v14 view carries the ann_date-only stamps (v15).
+        self.assertGreaterEqual(SNAPSHOT_CACHE_FORMAT_VERSION, 15)
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            for dataset in ("income_vip", "cashflow_vip", "fina_indicator_vip", "forecast_vip", "express_vip"):
+                (raw / dataset).mkdir(parents=True)
+            statement = {"end_date": "20160331", "report_type": "1", "comp_type": "1", "end_type": "1"}
+            pd.DataFrame([
+                # The original and the restating version of one period.
+                {"ts_code": "300243.SZ", "ann_date": "20160426", "f_ann_date": "20160426", **statement},
+                {"ts_code": "300243.SZ", "ann_date": "20170427", "f_ann_date": "20170427", **statement},
+                # A statement announced before the indicator's own ann_date.
+                {"ts_code": "000002.SZ", "ann_date": "20160420", "f_ann_date": "20160420", **statement},
+                {"ts_code": "000004.SZ", "ann_date": "20160429", "f_ann_date": "20160429", **statement},
+                {"ts_code": "000005.SZ", "ann_date": "20160427", "f_ann_date": "20160427", **statement},
+            ]).to_parquet(raw / "income_vip" / "period=20160331.parquet", index=False)
+            # The latest of the three statements decides, not the income one.
+            pd.DataFrame([
+                {"ts_code": "000004.SZ", "ann_date": "20160830", "f_ann_date": "20160830", **statement},
+            ]).to_parquet(raw / "cashflow_vip" / "period=20160331.parquet", index=False)
+            pd.DataFrame([
+                {"ts_code": "300243.SZ", "ann_date": "20160426", "end_date": "20160331", "eps": 0.044},
+                {"ts_code": "000002.SZ", "ann_date": "20160428", "end_date": "20160331", "eps": 0.1},
+                # No statement for the period at all, and a later indicator
+                # row of it: each keeps its own ann_date.
+                {"ts_code": "000003.SZ", "ann_date": "20160425", "end_date": "20160331", "eps": 0.2},
+                {"ts_code": "000003.SZ", "ann_date": "20170420", "end_date": "20160331", "eps": 0.25},
+                {"ts_code": "000004.SZ", "ann_date": "20160429", "end_date": "20160331", "eps": 0.3},
+                # No ann_date: invisible as before, never dated by the join.
+                {"ts_code": "000005.SZ", "ann_date": "", "end_date": "20160331", "eps": 0.4},
+            ]).to_parquet(raw / "fina_indicator_vip" / "period=20160331.parquet", index=False)
+            pd.DataFrame([
+                {"ts_code": "300243.SZ", "ann_date": "20160410", "first_ann_date": "20160410",
+                 "end_date": "20160331", "type": "预增", "update_flag": "0"},
+            ]).to_parquet(raw / "forecast_vip" / "ann_month=201604.parquet", index=False)
+            pd.DataFrame([
+                {"ts_code": "300243.SZ", "ann_date": "20160415", "end_date": "20160331"},
+            ]).to_parquet(raw / "express_vip" / "ann_month=201604.parquet", index=False)
+
+            datasets = ("income_vip", "cashflow_vip", "fina_indicator_vip", "forecast_vip", "express_vip")
+            config = FundamentalEventsConfig(start_date="20160101", end_date="20171231", datasets=datasets)
+            builder = FundamentalEventsBuilder(raw)
+            events = builder.build(config)
+
+            def stamps(dataset: str) -> dict[tuple[str, str], tuple[str, str, str]]:
+                rows = events[events["dataset"] == dataset]
+                return {
+                    (code, ann): (at, rule, month)
+                    for code, ann, at, rule, month in zip(
+                        rows["ts_code"], rows["ann_date"], rows["available_at"],
+                        rows["available_at_rule"], rows["available_month"],
+                    )
+                }
+
+            joined = "fallback_joined_statement_available_at"
+            self.assertEqual(stamps("fina_indicator_vip"), {
+                ("300243.SZ", "20160426"): ("2017-04-27T18:00:00+08:00", joined, "201704"),
+                ("000002.SZ", "20160428"): ("2016-04-28T18:00:00+08:00", "source:ann_date", "201604"),
+                ("000003.SZ", "20160425"): ("2016-04-25T18:00:00+08:00", "source:ann_date", "201604"),
+                ("000003.SZ", "20170420"): ("2017-04-20T18:00:00+08:00", "source:ann_date", "201704"),
+                ("000004.SZ", "20160429"): ("2016-08-30T18:00:00+08:00", joined, "201608"),
+            })
+            self.assertEqual(stamps("forecast_vip"), {
+                ("300243.SZ", "20160410"): ("2016-04-10T18:00:00+08:00", "source:ann_date", "201604"),
+            })
+            self.assertEqual(stamps("express_vip"), {
+                ("300243.SZ", "20160415"): ("2016-04-15T18:00:00+08:00", "source:ann_date", "201604"),
+            })
+
+            # The joined rule is one the audit allows on fina_indicator rows.
+            output = Path(tmp) / "pit"
+            builder.write_partitioned(events, output)
+            report = audit_fundamental_events(output, config)
+            fina = next(f for f in report["findings"] if f["check"] == "fina_indicator_vip_pit_events")
+            self.assertEqual(fina["details"]["disallowed_available_at_rule_rows"], 0)
+
+    def test_audit_and_mainbz_join_indicator_stamps_the_indicator_floor_ignores(self):
+        """A period announced only by fina_indicator rows: fina_audit and
+        fina_mainbz_vip rows without their own ann_date still take the latest
+        of them (``with_indicators``), while the earlier indicator row keeps
+        its own stamp (the floor is ``statements`` alone)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            for dataset in ("fina_indicator_vip", "fina_audit", "fina_mainbz_vip"):
+                (raw / dataset).mkdir(parents=True)
+            period = {"ts_code": "000007.SZ", "end_date": "20160331"}
+            pd.DataFrame([
+                {**period, "ann_date": "20160425", "eps": 0.2},
+                {**period, "ann_date": "20170420", "eps": 0.25},
+            ]).to_parquet(raw / "fina_indicator_vip" / "period=20160331.parquet", index=False)
+            pd.DataFrame([{**period, "ann_date": "", "audit_result": "标准无保留意见"}]).to_parquet(
+                raw / "fina_audit" / "ts_code=000007.SZ.parquet", index=False
+            )
+            pd.DataFrame([{**period, "ann_date": "", "bz_item": "产品A", "bz_code": "A", "curr_type": "CNY"}]).to_parquet(
+                raw / "fina_mainbz_vip" / "ts_code=000007.SZ.parquet", index=False
+            )
+
+            events = FundamentalEventsBuilder(raw).build(FundamentalEventsConfig(
+                start_date="20160101", end_date="20171231",
+                datasets=("fina_indicator_vip", "fina_audit", "fina_mainbz_vip"),
+            ))
+
+            joined = "fallback_joined_statement_available_at"
+            self.assertEqual(
+                sorted(zip(events["dataset"], events["ann_date"], events["available_at"], events["available_at_rule"])),
+                [
+                    ("fina_audit", "", "2017-04-20T18:00:00+08:00", joined),
+                    ("fina_indicator_vip", "20160425", "2016-04-25T18:00:00+08:00", "source:ann_date"),
+                    ("fina_indicator_vip", "20170420", "2017-04-20T18:00:00+08:00", "source:ann_date"),
+                    ("fina_mainbz_vip", "", "2017-04-20T18:00:00+08:00", joined),
+                ],
+            )
+
     def test_build_orders_the_wide_union_without_copying_it(self):
         """The datasets' row union is ~470 columns wide and almost all NA
         (~85 GB on the live lake); copying it whole stretched the nightly
@@ -441,7 +564,8 @@ class FundamentalEventsBuilderTest(unittest.TestCase):
             with patch.object(pd.DataFrame, "copy", recording_copy):
                 events = builder.build(config)
 
-            union = concat_rows([builder._read_dataset(dataset, {}) for dataset in config.datasets])
+            statements = builder._statement_availability()
+            union = concat_rows([builder._read_dataset(dataset, statements) for dataset in config.datasets])
             union = union[union["available_at"].astype(str).str.strip().ne("")]
             visible = visible_from(union)
             window = (visible >= pd.Timestamp("2020-01-01", tz="Asia/Shanghai")) & (visible < pd.Timestamp("2020-02-01", tz="Asia/Shanghai"))

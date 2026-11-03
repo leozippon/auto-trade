@@ -772,10 +772,12 @@ CONDITIONS: tuple[Condition, ...] = (
     # The hard nomination rules, on the nominee's replay summary
     # (``config.AcceptanceRules.evaluate``). A non-finite metric, because every
     # IEEE comparison against NaN is False, so it would otherwise pass every
-    # threshold; and a drawdown over the limit F4/H3 enforce forward:
-    # freezing a book that already breached it spends the sealed reading on a
-    # candidate the verdict must reject. ``sharpe`` is read only for
-    # finiteness.
+    # threshold; and an equity drawdown over ``max_drawdown`` across the
+    # nominee's span, the account limit Paper also kills a running book at.
+    # It is the only drawdown this table judges: forward and Held-out
+    # drawdowns are recorded, and the verdict's one performance condition is
+    # the sealed residual information ratio (the SEALED stage below).
+    # ``sharpe`` is read only for finiteness.
     Condition(ConditionStage.NOMINATION, ConditionReason.NON_FINITE_TOTAL_RETURN, lambda m, t: _finite(m.get("total_return"))),
     Condition(ConditionStage.NOMINATION, ConditionReason.NON_FINITE_MAX_DRAWDOWN, lambda m, t: _finite(m.get("max_drawdown"))),
     Condition(ConditionStage.NOMINATION, ConditionReason.NON_FINITE_SHARPE, lambda m, t: m.get("sharpe") is None or _finite(m["sharpe"])),

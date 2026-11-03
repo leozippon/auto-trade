@@ -642,10 +642,12 @@ def replay_style_analysis(
             "panel_draw_sd": panel.get("panel_draw_sd"),
         }
         panel_compact = {
-            # What the freeze gate and the verdict grade: the strategy's daily
-            # return minus the zero-skill panel composite of its own book,
-            # read as it is, and its drawdown, which the freeze gate holds to
-            # active_max_drawdown: the Agent reads the numbers it is graded on.
+            # The graded series: the strategy's daily return minus the
+            # zero-skill panel composite of its own book, read as it is; the
+            # sealed gate regresses it on the factor legs. Its drawdown is
+            # reported beside it and judged by neither the freeze registration
+            # (which holds the equity drawdown to max_drawdown) nor the
+            # verdict: the Agent reads the series it is graded on.
             "active_excess": rounded("plain_excess"),
             "active_tracking_error": rounded("tracking_error"),
             "active_information_ratio": rounded("information_ratio"),
