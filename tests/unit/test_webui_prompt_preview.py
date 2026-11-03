@@ -38,7 +38,6 @@ from autotrade.pipelines.config import (
     session_deadline_seconds,
 )
 from autotrade.pipelines.hitl_state import build_session_plan
-from autotrade.pipelines.research_session import LINEAGE_NOTE
 from autotrade.webui.prompt_preview import RUNTIME_PLACEHOLDER, build_prompt_preview
 from tests.unit.acceptance_fixture import REQUIRED_RULES
 
@@ -201,11 +200,14 @@ def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path)
         "batch_validate_max_concurrency": DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
         "batch_validate_fit_timeout_note": BATCH_VALIDATE_FIT_TIMEOUT_NOTE,
     }
-    # The whole research period, read at research end.
+    # The visible years, read at their end; the sealed year is named, never
+    # offered.
     geometry = facts["research_geometry"]
-    assert geometry["research_period"] == f"{GEOMETRY.research_start}..{GEOMETRY.research_end}"
-    assert geometry["decision_time"] == GEOMETRY.research_decision_time.isoformat()
-    assert [year["label"] for year in geometry["years"]] == ["Y1", "Y2", "Y3", "Y4"]
+    visible, [sealed] = GEOMETRY.split_sealed(REQUIRED_RULES["sealed_years"])
+    assert geometry["research_period"] == f"{GEOMETRY.research_start}..{visible[-1].end}"
+    assert geometry["sealed_years"]["period"] == f"{sealed.start}..{GEOMETRY.research_end}"
+    assert geometry["decision_time"] == sealed.anchor.isoformat()
+    assert [year["label"] for year in geometry["years"]] == ["Y1", "Y2", "Y3"]
     assert "session" not in facts["identity"]
     assert facts["budgets"]["used_before_this_attempt"]["replay_years"] == 0
     # Runtime-only facts are marked, never invented.
@@ -278,37 +280,3 @@ def _facts(prompt: str) -> dict:
     body = prompt.split("```json\n", 1)[1].split("\n```", 1)[0]
     return json.loads(body)
 
-
-def test_preview_shows_the_lineage_the_session_will_see(tmp_path: Path):
-    """An arm created with a lineage carries its creation-time series file and
-    an empty ledger until it runs; the preview projects the same ``arm.lineage``
-    fact the session is given, before and after the pipeline records it, and an
-    arm without one shows none."""
-    from autotrade.pipelines.experiment import lineage_ledger_record
-    from autotrade.pipelines.ledger import ExperimentLedger
-    from autotrade.pipelines.lineage import write_lineage
-
-    assert "lineage" not in _facts(str(_preview(tmp_path / "plain")["prompt"]))["arm"]
-
-    directory, repo = _experiment(tmp_path / "with", lineage_arms=["earlier"])
-    arm = {
-        "experiment_id": "earlier",
-        "host_trials": 3,
-        "offline_trials": 2,
-        "controls": 1,
-        "undeclared_offline_validations": 0,
-        "fingerprints": ["bytes_a", "bytes_b", "bytes_c"],
-        "workspace_reference": "",
-    }
-    write_lineage(directory, {"arms": [arm], "series": []})
-    expected = {
-        "arms": ["earlier"],
-        "trials": 5,
-        "effective_trials": 5.0,
-        "note": LINEAGE_NOTE,
-    }
-    assert _facts(_preview_of(directory, repo, SESSION_KEY))["arm"]["lineage"] == expected
-    ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl").append(
-        lineage_ledger_record(directory, workspace_reference="")
-    )
-    assert _facts(_preview_of(directory, repo, SESSION_KEY))["arm"]["lineage"] == expected

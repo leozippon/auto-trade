@@ -1,8 +1,10 @@
 """``finish_session``: the two ways the research session ends.
 
-The tool decides nothing about the market: it refuses a freeze the gate
-rejects and an unexplained decision, and it hands the Pipeline an outcome the
-pipeline records as ``freeze`` or ``no_edge``.
+The tool decides nothing about the market: it refuses a freeze that does not
+register and an unexplained decision, ends the session on every freeze that
+registers, whatever the node's readings, and hands the Pipeline an outcome it
+records as ``freeze`` or ``no_edge``. It returns no reading of the sealed
+years: the host reads them after the session has ended.
 """
 
 from __future__ import annotations
@@ -19,7 +21,6 @@ from autotrade.environment.tools.base import (
     ToolRegistry,
 )
 from autotrade.environment.tools.finish_session import (
-    OFFLINE_TRIALS_MAX,
     REASON_MAX_CHARS,
     REASON_MIN_CHARS,
     FinishSessionTool,
@@ -58,7 +59,8 @@ def _node(tree: StepTree, root: Path, marker: str, *, session: str = SESSION, ru
 
 
 class _Gate:
-    """The Pipeline's gate as the tool sees it: node id -> verdict."""
+    """The Pipeline's registration as the tool sees it: node id -> verdict.
+    A node in ``passing`` registers; any other is refused, for its span."""
 
     def __init__(self, passing: set[str]) -> None:
         self.passing = passing
@@ -67,33 +69,15 @@ class _Gate:
         self,
         node_id: str,
         seed_replicates: tuple[str, ...] = (),
-        offline_trials: int = 0,
         deterministic: bool = False,
     ) -> dict[str, object]:
         if node_id in self.passing:
-            return {
-                "passed": True,
-                "reasons": [],
-                "full_span_validations": 2,
-                "information_ratio": 0.9,
-                "deflated_sharpe": {"deflated_sharpe_probability": 0.71, "trials": 5},
-            }
-        return {
-            "passed": False,
-            "reasons": [
-                "freeze_deflated_sharpe_below_threshold",
-                "freeze_active_drawdown_exceeded",
-            ],
-            "full_span_validations": 2,
-            "information_ratio": 0.2,
-            "positive_years": 5,
-            "active_max_drawdown": 0.369,
-            "deflated_sharpe": {"deflated_sharpe_probability": 0.12, "trials": 5},
-        }
+            return {"passed": True, "reasons": []}
+        return {"passed": False, "reasons": ["freeze_needs_full_span_validation"]}
 
 
 def _tool(tree: StepTree, gate: _Gate, **kwargs: object) -> FinishSessionTool:
-    return FinishSessionTool(tree, session_ref=SESSION, freeze_gate=gate, **kwargs)  # type: ignore[arg-type]
+    return FinishSessionTool(tree, session_ref=SESSION, registration=gate, **kwargs)  # type: ignore[arg-type]
 
 
 def test_every_outcome_maps_to_the_pipeline_outcome_it_names(tmp_path: Path):
@@ -112,7 +96,11 @@ def test_every_outcome_maps_to_the_pipeline_outcome_it_names(tmp_path: Path):
         "no_edge": ("no_edge", None, REASON),
     }
     assert all(result.ok and result.finish for result in results.values())
-    assert results["freeze"].value["freeze_gate"]["deflated_sharpe_probability"] == 0.71
+    # The freeze returns no score of any kind: the sealed years are read by
+    # the host after the session has ended, once.
+    frozen = results["freeze"].value
+    assert not {"freeze_gate", "registration", "residual_reading", "information_ratio"} & set(frozen)
+    assert "once on the sealed years" in frozen["pipeline_outcome"]
     # The outcome is required; the retired outcomes (the multi-session
     # ``continue`` among them) are not in the enum.
     for arguments in (
@@ -124,7 +112,10 @@ def test_every_outcome_maps_to_the_pipeline_outcome_it_names(tmp_path: Path):
         assert registry.invoke("finish_session", arguments).ok is False
 
 
-def test_a_nomination_the_gate_rejects_is_refused_with_its_reasons_and_numbers(tmp_path: Path):
+def test_a_nomination_that_does_not_register_is_refused_with_its_reasons_alone(tmp_path: Path):
+    """A refusal names the registration's reasons and no number: registration
+    reads no score, and no other node is offered as one that would pass."""
+
     tree = StepTree(tmp_path / "steps")
     weak = _node(tree, tmp_path, "weak")
     strong = _node(tree, tmp_path, "strong")
@@ -132,20 +123,36 @@ def test_a_nomination_the_gate_rejects_is_refused_with_its_reasons_and_numbers(t
     with pytest.raises(ToolError) as refused:
         finish.invoke({"outcome": "freeze", "node_id": weak})
     message = str(refused.value)
-    assert refused.value.error_type == "freeze_gate_refused"
-    assert "freeze_deflated_sharpe_below_threshold" in message
-    assert "deflated_sharpe_probability=0.12" in message and "trials=5" in message
-    # Every reason comes with the number it was refused on.
-    assert "active_max_drawdown=0.369" in message and "positive_years=5" in message
-    # Passing nodes are named the way the Agent can type them back.
-    assert node_handle(strong) in message
-    assert refused.value.details["passing_nodes"] == [node_handle(strong)]
-    assert refused.value.details["freeze_gate"]["reasons"] == [
-        "freeze_deflated_sharpe_below_threshold",
-        "freeze_active_drawdown_exceeded",
-    ]
-    # Nothing ended: the tree still points where it was, and the passing node freezes.
+    assert refused.value.error_type == "freeze_registration_refused"
+    assert "freeze_needs_full_span_validation" in message
+    assert "=" not in message and node_handle(strong) not in message
+    assert refused.value.details == {
+        "registration": {"passed": False, "reasons": ["freeze_needs_full_span_validation"]}
+    }
+    # Nothing ended: the node that registers freezes and ends the session.
     assert finish.invoke({"outcome": "freeze", "node_id": strong}).finish
+
+
+def test_a_freeze_that_registers_ends_the_session_whatever_its_readings(tmp_path: Path):
+    """Registration is the only thing a freeze is checked for: a node whose
+    replay lost money every year registers and ends the session as one that
+    earned. The budget left is recorded with it, never a reason to refuse."""
+
+    tree = StepTree(tmp_path / "steps")
+    losing = _node(tree, tmp_path, "losing")
+    budget = SessionBudgetStatus(
+        replay_years_remaining=20, replay_years_total=24, inference_seconds_remaining=5400.0
+    )
+    frozen = _tool(tree, _Gate({losing}), budget_status=lambda: budget).invoke(
+        {"outcome": "freeze", "node_id": losing}
+    )
+    assert frozen.ok and frozen.finish
+    assert frozen.value["budget_at_finish"]["replay_years_remaining"] == 20
+    assert "reason" not in frozen.value
+    # The retired early-finish account is no parameter, and no schema field
+    # declares offline screens any more.
+    properties = FinishSessionTool.spec.input_schema["properties"]
+    assert set(properties) == {"outcome", "node_id", "seed_replicates", "deterministic", "reason"}
 
 
 def test_no_edge_names_no_node_and_needs_a_reason_and_a_validation(tmp_path: Path):
@@ -259,80 +266,23 @@ def test_a_node_is_named_by_its_short_handle_only_while_it_is_unambiguous(tmp_pa
         rollback.invoke({"node_id": "valid_zz"})
 
 
-def test_an_early_freeze_must_say_why_while_another_batch_fits(tmp_path: Path):
-    tree = StepTree(tmp_path / "steps")
-    node = _node(tree, tmp_path, "a")
-
-    def status(remaining: int) -> SessionBudgetStatus:
-        return SessionBudgetStatus(
-            replay_years_remaining=remaining,
-            replay_years_total=24,
-            inference_seconds_remaining=5400.0,
-        )
-
-    early = _tool(tree, _Gate({node}), budget_status=lambda: status(12))
-    with pytest.raises(ToolError, match="again with reason") as refused:
-        early.invoke({"outcome": "freeze", "node_id": node})
-    assert "12/24 replay-years" in str(refused.value) and "90 min" in str(refused.value)
-    explained = early.invoke({"outcome": "freeze", "node_id": node, "reason": REASON})
-    assert explained.value["budget_at_finish"]["replay_years_remaining"] == 12
-    # Exactly a third left, or no batch left to run, needs no reason.
-    assert _tool(tree, _Gate({node}), budget_status=lambda: status(8)).invoke(
-        {"outcome": "freeze", "node_id": node}
-    ).finish
-    assert _tool(
-        tree, _Gate({node}), budget_status=lambda: status(12), another_round_fits=lambda: False
-    ).invoke({"outcome": "freeze", "node_id": node}).finish
-
-
-def test_an_early_no_edge_owes_the_same_account_as_an_early_freeze(tmp_path: Path):
-    """Ending with no_edge also ends research for the whole arm, so with two
-    thirds of the replay years left it is refused, naming the early-finish
-    rule, until a reason says what stays untested; later the reason is still
-    required, as the evidence of the decision."""
-    tree = StepTree(tmp_path / "steps")
-    _node(tree, tmp_path, "a")
-
-    def status(remaining: int) -> SessionBudgetStatus:
-        return SessionBudgetStatus(
-            replay_years_remaining=remaining,
-            replay_years_total=24,
-            inference_seconds_remaining=5400.0,
-        )
-
-    early = _tool(tree, _Gate(set()), budget_status=lambda: status(16))
-    with pytest.raises(ToolError, match="more than a third") as refused:
-        early.invoke({"outcome": "no_edge"})
-    message = str(refused.value)
-    assert "this no_edge leaves 16/24 replay-years" in message and "90 min" in message
-    assert "naming the hypotheses that stay untested" in message
-    assert '"outcome": "no_edge"' in str(refused.value.retry_hint)
-    explained = early.invoke({"outcome": "no_edge", "reason": REASON})
-    assert explained.finish and explained.value["budget_at_finish"]["replay_years_remaining"] == 16
-    # Once no batch fits, the early rule lapses but the evidence is still owed.
-    late = _tool(tree, _Gate(set()), budget_status=lambda: status(16), another_round_fits=lambda: False)
-    with pytest.raises(ToolError, match="requires reason"):
-        late.invoke({"outcome": "no_edge"})
-
-
-def test_seed_replicates_are_resolved_and_go_to_the_gate(tmp_path: Path):
+def test_seed_replicates_are_resolved_and_go_to_the_registration(tmp_path: Path):
     """The tool resolves seed_replicates like node_id and hands them to the
-    gate, which judges them. A nominee refused for want of them is told what
-    a replicate is, a node that fails only for want of them is listed as
-    passing, and the freeze hands the Pipeline their full ids."""
+    registration, which checks them. A nominee refused for want of them is
+    told what a replicate is, and the freeze hands the Pipeline their full
+    ids."""
 
     tree = StepTree(tmp_path / "steps")
     nominee = _node(tree, tmp_path, "a")
     replicate = _node(tree, tmp_path, "b")
-    calls: list[tuple[str, tuple[str, ...], int]] = []
+    calls: list[tuple[str, tuple[str, ...]]] = []
 
     def gate(
         node_id: str,
         seed_replicates: tuple[str, ...] = (),
-        offline_trials: int = 0,
         deterministic: bool = False,
     ) -> dict[str, object]:
-        calls.append((node_id, seed_replicates, offline_trials))
+        calls.append((node_id, seed_replicates))
         if seed_replicates == (replicate,):
             return {"passed": True, "reasons": []}
         return {
@@ -343,9 +293,9 @@ def test_seed_replicates_are_resolved_and_go_to_the_gate(tmp_path: Path):
 
     seeded = _tool(tree, gate)  # type: ignore[arg-type]
     assert "seed_replicates" in FinishSessionTool.spec.input_schema["properties"]
-    # The rule a replicate meets is the arm's freeze_gate fact, stated there
-    # alone: the schema and a refusal that concerns one point to it.
-    fact = "acceptance_rules.freeze_gate.seed_replicates"
+    # The rule a replicate meets is the arm's freeze_registration fact, stated
+    # there alone: the schema and a refusal that concerns one point to it.
+    fact = "acceptance_rules.freeze_registration.seed_replicates"
     assert "seed name" not in seeded.spec.description
     assert fact in str(seeded.spec.input_schema["properties"]["seed_replicates"]["description"])
     with pytest.raises(ToolError) as refused:
@@ -353,7 +303,6 @@ def test_seed_replicates_are_resolved_and_go_to_the_gate(tmp_path: Path):
     message = str(refused.value)
     assert "freeze_too_few_seed_replicates" in message and fact in message
     assert "seed name" not in message
-    assert refused.value.details["passing_nodes"] == [node_handle(replicate)]
     assert '"seed_replicates"' in str(refused.value.retry_hint)
 
     calls.clear()
@@ -362,7 +311,7 @@ def test_seed_replicates_are_resolved_and_go_to_the_gate(tmp_path: Path):
         {"outcome": "freeze", "node_id": "valid_a", "seed_replicates": ["valid_b"]},
     )
     assert finish.ok and finish.finish
-    assert calls == [(nominee, (replicate,), 0)]
+    assert calls == [(nominee, (replicate,))]
     assert _seed_replicates(finish.value) == (replicate,)
     with pytest.raises(ToolError, match="so must seed_replicates"):
         seeded.invoke({"outcome": "no_edge", "reason": REASON, "seed_replicates": [replicate]})
@@ -371,19 +320,18 @@ def test_seed_replicates_are_resolved_and_go_to_the_gate(tmp_path: Path):
 def test_a_deterministic_declaration_is_the_nominees_and_reaches_the_pipeline(
     tmp_path: Path,
 ):
-    """deterministic goes to the gate with the nominee alone, never with the
-    alternates a refusal lists, and the freeze hands it to the Pipeline; a
-    nomination that omits it is not deterministic."""
+    """deterministic goes to the registration with the nominee, and the
+    freeze hands it to the Pipeline; a nomination that omits it is not
+    deterministic."""
 
     tree = StepTree(tmp_path / "steps")
     nominee = _node(tree, tmp_path, "a")
-    other = _node(tree, tmp_path, "b")
+    _node(tree, tmp_path, "b")
     calls: list[tuple[str, bool]] = []
 
     def gate(
         node_id: str,
         seed_replicates: tuple[str, ...] = (),
-        offline_trials: int = 0,
         deterministic: bool = False,
     ) -> dict[str, object]:
         calls.append((node_id, deterministic))
@@ -398,7 +346,7 @@ def test_a_deterministic_declaration_is_the_nominees_and_reaches_the_pipeline(
     assert "deterministic=true" in FinishSessionTool.spec.description
     with pytest.raises(ToolError, match="freeze_too_few_seed_replicates"):
         finish.invoke({"outcome": "freeze", "node_id": nominee})
-    assert calls == [(nominee, False), (other, False)]
+    assert calls == [(nominee, False)]
     refused = registry.invoke(
         "finish_session", {"outcome": "freeze", "node_id": nominee, "deterministic": "yes"}
     )
@@ -411,79 +359,3 @@ def test_a_deterministic_declaration_is_the_nominees_and_reaches_the_pipeline(
     assert frozen.ok and frozen.finish
     assert calls == [(nominee, True)]
     assert frozen.value["deterministic"] is True and _deterministic(frozen.value) is True
-
-
-def test_offline_trials_reach_the_gate_before_it_verdicts(tmp_path: Path):
-    """The terminal offline-screen delta is read by the gate before its
-    verdict: a count that pushes the nominee over a bar is refused, an
-    alternate candidate is compared at the same count, and the accepted
-    freeze carries the count the Pipeline persists."""
-
-    tree = StepTree(tmp_path / "steps")
-    weak = _node(tree, tmp_path, "weak")
-    strong = _node(tree, tmp_path, "strong")
-    seen: list[tuple[str, tuple[str, ...], int]] = []
-
-    def gate(
-        node_id: str,
-        seed_replicates: tuple[str, ...] = (),
-        offline_trials: int = 0,
-        deterministic: bool = False,
-    ) -> dict[str, object]:
-        seen.append((node_id, seed_replicates, offline_trials))
-        passed = node_id == strong and offline_trials < 10
-        return {
-            "passed": passed,
-            "reasons": [] if passed else ["freeze_deflated_sharpe_below_threshold"],
-            "deflated_sharpe": {"trials": 5 + offline_trials},
-        }
-
-    finish = _tool(tree, gate)  # type: ignore[arg-type]
-    with pytest.raises(ToolError) as refused:
-        finish.invoke({"outcome": "freeze", "node_id": weak, "offline_trials": 5})
-    assert "trials=10" in str(refused.value)
-    # The alternate candidate the refusal lists was read at the same count.
-    assert node_handle(strong) in str(refused.value)
-    assert seen[-1] == (strong, (), 5)
-
-    with pytest.raises(ToolError) as over:
-        finish.invoke({"outcome": "freeze", "node_id": strong, "offline_trials": 12})
-    assert "trials=17" in str(over.value)
-
-    frozen = finish.invoke({"outcome": "freeze", "node_id": strong, "offline_trials": 5})
-    assert frozen.value["terminal_offline_trials"] == 5
-
-
-def test_offline_trials_is_optional_and_never_assumed(tmp_path: Path):
-    """The parameter is optional and defaults to 0; an explicitly null or
-    malformed count is refused rather than read as none. Both outcomes carry
-    the count, so the Pipeline persists it whether the arm froze or ended."""
-
-    tree = StepTree(tmp_path / "steps")
-    node = _node(tree, tmp_path, "a")
-    calls: list[int] = []
-
-    def gate(
-        node_id: str,
-        seed_replicates: tuple[str, ...] = (),
-        offline_trials: int = 0,
-        deterministic: bool = False,
-    ) -> dict[str, object]:
-        calls.append(offline_trials)
-        return {"passed": True, "reasons": []}
-
-    finish = _tool(tree, gate)  # type: ignore[arg-type]
-    assert finish.invoke({"outcome": "freeze", "node_id": node}).value["terminal_offline_trials"] == 0
-    assert finish.invoke({"outcome": "no_edge", "reason": REASON}).value["terminal_offline_trials"] == 0
-    assert calls == [0]
-
-    for invalid in (None, True, False, 1.5, -1, OFFLINE_TRIALS_MAX + 1):
-        with pytest.raises(ToolError) as bad:
-            finish.invoke({"outcome": "no_edge", "reason": REASON, "offline_trials": invalid})
-        assert bad.value.error_type == "schema_error"
-        assert bad.value.blocked_target == "offline_trials"
-
-    at_cap = finish.invoke(
-        {"outcome": "no_edge", "reason": REASON, "offline_trials": OFFLINE_TRIALS_MAX}
-    )
-    assert at_cap.value["terminal_offline_trials"] == OFFLINE_TRIALS_MAX

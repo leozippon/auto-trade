@@ -68,6 +68,7 @@ from .calendar import (
 from .config import (
     ACCEPTANCE_KEYS,
     DEFAULT_PIT_VIEWS_SEED,
+    RETIRED_RULES,
     RETIRED_SWITCHES,
     RollingExperimentConfig,
     acceptance_for,
@@ -96,7 +97,6 @@ from .ledger import (
     paper_candidate,
     research_records,
 )
-from .lineage import extract_lineage, lineage_arm_ids
 from .local_backend import (
     DeterministicBaselineDeveloper,
     LocalDailyEvaluationBackend,
@@ -186,7 +186,6 @@ _ALLOWED_PARAMS = {
     "research_directive",
     "workspace_reference",
     "operating_memory",
-    "lineage_arms",
     "record_failed_attempts",
     "finalize_before_deadline_seconds",
     "per_call_timeout_seconds",
@@ -227,9 +226,12 @@ _ALLOWED_PARAMS = {
     "agent_sandbox_tmpfs",
     # Stamped by the console at creation (``environment.pretrained``).
     "pretrained_manifest_sha256",
-    # Accepted so that an arm created before their retirement still loads;
-    # nothing reads them (``config.RETIRED_SWITCHES``, ``RETIRED_NL_PARAMS``).
+    # Accepted so that an arm created before their retirement still lists in
+    # the console (and, but for the retired rules, still loads); nothing reads
+    # them (``config.RETIRED_SWITCHES``, ``config.RETIRED_RULES``,
+    # ``RETIRED_NL_PARAMS``).
     *RETIRED_SWITCHES,
+    *RETIRED_RULES,
     *RETIRED_NL_PARAMS,
 }
 
@@ -645,16 +647,6 @@ def resolve_worker_options(
         # The release must reach into Held-out; the forward replay clips the
         # Held-out slot to its last trading day.
         geometry.heldout(trading_days)
-    lineage_arms = lineage_arm_ids(knob("lineage_arms"), experiment_id)
-    if preflight and lineage_arms:
-        # Read once more, for real, when the console creates the arm; after
-        # that the arm reads only its own ledger (pipelines/lineage.py).
-        extract_lineage(
-            directory.parent,
-            lineage_arms,
-            research_start=geometry.research_start,
-            research_end=geometry.research_end,
-        )
     schedule = StrategySchedule(
         str(params.get("strategy_period") or "day"),  # type: ignore[arg-type]
         str(params.get("inference_time") or "08:30"),
@@ -691,7 +683,6 @@ def resolve_worker_options(
             params.get("workspace_reference"), repository
         ),
         operating_memory=resolve_operating_memory(params.get("operating_memory")),
-        lineage_arms=lineage_arms,
         record_failed_attempts=_strict_bool(
             knob("record_failed_attempts"), "record_failed_attempts"
         ),

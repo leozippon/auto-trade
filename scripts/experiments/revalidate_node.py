@@ -7,10 +7,11 @@ is replayed by the evaluator a session's ``batch_validate`` calls, assembled
 from the arm's own ``hitl/params.json`` exactly as the round smoke assembles a
 scratch experiment (``_round._smoke_replays``): the arm's PIT view seed
 hardlinked in, the arm's own sandbox image and pretrained-store pin, cards
-taken by ``hitl_state.select_gpus``. A span is a research span (``full``,
-``Yk`` or ``Yi..Yj``), so nothing past research end is ever replayed here; the
-designed path to forward and Held-out is ``incubate.py``. What may be changed
-is recorded: ``--variant`` replays a modified copy of the node's ``output/``
+taken by ``hitl_state.select_gpus``. A span is a span of the visible research
+years (``full``, ``Yk`` or ``Yi..Yj``), resolved as the session resolved it,
+so nothing past them is ever replayed here; the only path to the sealed years,
+forward and Held-out is the arm's own forward stage. What may be changed is
+recorded: ``--variant`` replays a modified copy of the node's ``output/``
 instead (an ablation; the reading keeps the diff against the recorded bytes),
 ``--seed`` gives the strategy's one seed line another integer (the one change
 a seed replicate may make, ``experiment.seed_change``), ``--slippage-bps``
@@ -246,7 +247,7 @@ def main(argv: list[str] | None = None) -> int:
             if spec.gpu == "auto":
                 devices = select_gpus(EXPERIMENTS_ROOT, spec.gpu_count, require_name=spec.gpu_name_filter)
                 spec = replace(spec, gpu=tuple(devices))
-            # The arm's own image tag, as its worker and incubate.py resolve it.
+            # The arm's own image tag, as its worker resolves it.
             shutil.copyfile(arm / "hitl" / SANDBOX_IMAGE_STATE_NAME, experiment_dir / "hitl" / SANDBOX_IMAGE_STATE_NAME)
             spec = prepare_experiment_sandbox_image(spec, experiment_id=args.experiment, experiment_dir=experiment_dir)
             options = replace(options, agent_sandbox=spec)
@@ -259,6 +260,7 @@ def main(argv: list[str] | None = None) -> int:
             store=FilesystemArtifactStore(experiment_dir / "artifacts" / "strategy"),
             ref_store=AgentRefStore(experiment_dir),
         ).pipeline
+        # The spans the session resolved a node's span over: its visible years.
         _, years = pipeline.research_inputs()
         request = research_span(years, args.span).request(
             revision, schedule=options.rolling.schedule, broker_profile=options.rolling.broker_profile

@@ -75,8 +75,8 @@ def test_the_session_facts_state_the_research_period_and_the_session_place() -> 
     assert "every trading day at 08:30" in scope["strategy_cadence"]
     assert "own rebalance cadence" in scope["strategy_cadence"]
     assert "session" not in facts["identity"]
-    assert facts["visibility_policy"]["research_period_visible"] is True
-    assert "不进入任何会话" in facts["visibility_policy"]["after_research_end"]
+    assert facts["visibility_policy"]["visible_research_period"] is True
+    assert "不进入任何会话" in facts["visibility_policy"]["after_visible_research_period"]
     rendered = json.dumps(facts, ensure_ascii=False)
     for later in ("2026", "202507", "2025-07"):
         assert later not in rendered
@@ -360,7 +360,8 @@ def test_an_early_research_year_does_not_advertise_history_before_the_store() ->
     record = research_geometry_record(
         [SimpleNamespace(label="Y1", start="20170701", end="20180630")],
         window_months=108,
-        decision_time="2025-06-30T23:59:59+08:00",
+        decision_time="2018-06-30T23:59:59+08:00",
+        sealed=("20180701", "20190630"),
     )
     # 108 months before 2017-06-30 is 2008-07-01. Daily bars start in 2010.
     assert record["years"][0]["input_window"] == "20100101..20170630"
@@ -372,6 +373,7 @@ def test_an_early_research_year_does_not_advertise_history_before_the_store() ->
     later = research_geometry_record(
         [SimpleNamespace(label="Y1", start="20220701", end="20230630")],
         window_months=24,
-        decision_time="2024-06-30T23:59:59+08:00",
+        decision_time="2023-06-30T23:59:59+08:00",
+        sealed=("20230701", "20240630"),
     )
     assert later["years"][0]["input_window"] == "20200701..20220630"

@@ -1,45 +1,39 @@
-"""Verdict statistics of one arm: freeze gate, forward verdict, Held-out rule.
+"""Verdict statistics of one arm: the sealed gate, the forward verdict, Held-out.
 
-Pure functions over frozen replay data (docs/pipeline-design.md: the freeze
-gate and the graduation verdict). Every gate grades one series, the ACTIVE
-one: the strategy's daily return minus the zero-skill panel composite the host
-drew from the strategy's own realized book
-(``environment/replay/null_control.py``), read as it is, with no regression.
-What zero skill earns in an account's own shape is a property of the window
-and the pool -- between -4 and +8 %/yr across the measured shapes -- so
-grading the strategy's own series grades that and not the strategy. The
-series' annualised mean is its plain excess, its annualised standard deviation
-its tracking error and their ratio its IR (``stats.plain_statistics``, the
-figures every replay reports), so a gate grades what the book's holder
-earned against zero skill. A sidecar written before replays carried a panel
-has none, and its statistics keep their former meaning: they are the
-strategy's own, and ``series`` says so.
+Pure functions over frozen replay data (docs/pipeline-design.md). Every
+statistic grades one series, the ACTIVE one: the strategy's daily return
+minus the zero-skill panel composite the host drew from the strategy's own
+realized book (``environment/replay/null_control.py``). What zero skill earns
+in an account's own shape is a property of the window and the pool, so the
+panel removes what the universe construction hands any zero-skill book (lot
+affordability, boards, equal weighting, the book's own schedule and cash).
 
-Beside that series, and grading nothing, a regression on the arm's benchmark
-and the replay size factor reads its two loadings: a diagnostic of what the
-market and size moves did to it. The same regression of the strategy's own
-series gives the residual tracking error and beta a tracking mandate limits.
-The holder's readings are not regressed either: :func:`holder_readings`
-compounds the book, the benchmark and the panel as stored and
-:func:`panel_return` reads the panel's. The inputs are the daily series a
+The sealed gate reads the factor residual of that series: OLS on the arm's
+benchmark (market), the size and the value legs of the replay's own
+cross-section (``style.FACTOR_SERIES``) removes style, and the residual
+information ratio over the sealed research years is held to
+``z(1 − alpha) / √years`` (:func:`residual_statistics`, :func:`residual_bar`).
+It is the verdict's only performance condition (:func:`sealed_slice`). The
+forward and Held-out slices read the series as it is: its annualised mean is
+its plain excess, its annualised standard deviation its tracking error and
+their ratio its IR (``stats.plain_statistics``). The holder's readings are not
+regressed either: :func:`holder_readings` compounds the book, the benchmark
+and the panel as stored. The inputs are the daily series a
 ``style_analysis.json`` sidecar stores, sliced by ``YYYYMMDD`` dates, so the
 forward and Held-out slices of one continuous replay are read from one
 sidecar.
 
-The statistical definitions live here (DSR, the block bootstrap, the panel).
-The freeze, forward and Held-out bars are the arm's create-time rules, which
-every stage function takes whole (``rules``: a ``config.AcceptanceRules``);
-the module constants below are the defaults those fields take when a record
-omits them, and nothing here falls back to them. A slice that cannot be
-measured (fewer than two days, a slice shorter than one bootstrap block)
-raises ``ValueError``: a verdict must never be read off a number that was not
-measured.
+The rules are the arm's create-time rules, which every stage function takes
+whole (``rules``: a ``config.AcceptanceRules``); the module constants below
+are the defaults those fields take, and nothing here falls back to them. A
+slice that cannot be measured (fewer than two days, a slice shorter than one
+bootstrap block) raises ``ValueError``: a verdict must never be read off a
+number that was not measured.
 """
 
 from __future__ import annotations
 
 import hashlib
-import itertools
 import math
 from collections.abc import Callable, Mapping, Sequence
 from statistics import NormalDist
@@ -62,7 +56,6 @@ from autotrade.environment.replay.style import (
     _series_pairs,
     active_analysis,
     factor_ols,
-    window_plain_excess,
 )
 
 from .calendar import FULL_SPAN
@@ -71,33 +64,10 @@ if TYPE_CHECKING:
     # ``config`` reads this module's constants for its defaults.
     from .config import AcceptanceRules
 
-# Freeze gate (docs/pipeline-design.md), calibrated on its zero-skill pass rate
-# and its power, not on the record of earlier freezes. The forward test alone
-# passes zero skill about 15 % of the time, so an arm's protection against a
-# false graduate when several arms share one forward window is this gate.
-FREEZE_MIN_ACTIVE_IR = 0.75
-# Active plain excess positive in three of four research years; another
-# research length keeps the share, rounded up.
-FREEZE_MIN_POSITIVE_YEAR_SHARE = 0.75
-# At a threshold of 0.5 the deflated Sharpe's
-# ``√(T−1)/√(variance_term)`` factor cancels and the gate degenerates into
-# ``SR >= SR*`` -- a point comparison that knows nothing about the estimate's
-# sampling error. 0.975 asks the nominee's IR to clear SR* by 1.96 of its
-# zero-skill standard errors: over four research years (standard error ≈ 0.5)
-# an IR of about 0.98 at one effective trial, 1.24 at two, 1.41 at three and
-# 1.58 at five. Recalibrated on 42 arms' own series (DSR1): with the arm's
-# best non-control trial nominated, zero skill passes the gate's statistical
-# conditions 2.6 % of the time and a true active IR of 1.0 about 61 %, against
-# 4.0 % and 44 % for the former rule at 0.90 and 7.5 % and 73 % for this rule
-# at 0.90; the record's failure mode is false positives (six freezes, all
-# discarded forward).
-FREEZE_MIN_DSR_PROBABILITY = 0.975
-FREEZE_MIN_FULL_SPAN_VALIDATIONS = 2
 # Forward verdict (docs/pipeline-design.md, the graduation verdict).
 FORWARD_CONFIDENCE = 0.80
 BOOTSTRAP_BLOCK_DAYS = 20
 BOOTSTRAP_DRAWS = 2_000
-RECENCY_MONTHS = 6
 MIN_ROUND_TRIPS_PER_MONTH = 1
 MIN_MEAN_GROSS = 0.5
 # Held-out: plain excess no worse than this many standard errors, the
@@ -110,7 +80,6 @@ HELDOUT_TOLERANCE_Z = 1.28
 # applied gate would give), not F2's own bar.
 FORWARD_MDE_Z = 2.12
 
-_EULER_MASCHERONI = 0.5772156649015329
 # The columns of one validation's daily graded series (:func:`active_daily`).
 ACTIVE_DAILY_COLUMNS = (
     "trade_date",
@@ -339,6 +308,15 @@ def _mandate(analysis: Mapping[str, object], start: str, end: str) -> dict[str, 
     return {"tracking_error": own.get("tracking_error"), "market_beta": own.get("market_beta")}
 
 
+def registered_mandate(analysis: Mapping[str, object], *, rules: AcceptanceRules) -> dict[str, object]:
+    """The tracking mandate over a nominee's whole span (:func:`_mandate`)
+    and the ``freeze`` conditions it fails, judged only where the rules set a
+    mandate: the registration's one reading of the strategy's own series."""
+
+    measured = {"mandate": _mandate(analysis, "", "")}
+    return {**measured, "reasons": judge("freeze", measured, rules.mandate, rules)}
+
+
 def forward_mde(tracking_error: float, forward_days: int) -> float:
     """Smallest annualised plain excess a forward test of ``forward_days``
     detects at 80 % power (``FORWARD_MDE_Z``), at the research period's
@@ -347,53 +325,6 @@ def forward_mde(tracking_error: float, forward_days: int) -> float:
     return (
         FORWARD_MDE_Z * tracking_error / math.sqrt(forward_days / TRADING_DAYS_PER_YEAR)
     )
-
-
-def expected_max_sharpe(trials: float) -> float:
-    """Expected maximum of ``trials`` independent standard normal draws.
-
-    Bailey & López de Prado (2014)'s approximation
-    ``(1−γ)·Φ⁻¹(1 − 1/N) + γ·Φ⁻¹(1 − 1/(N·e))`` with γ the Euler-Mascheroni
-    constant, for a real N: an effective trial count need not be whole. The
-    approximation turns negative below N ≈ 1.3, where it is floored at 0, the
-    expectation of one draw -- the maximum of a few near-identical trials is no
-    lower than that of one.
-    """
-
-    if trials <= 1.0:
-        return 0.0
-    normal = NormalDist()
-    value = (1.0 - _EULER_MASCHERONI) * normal.inv_cdf(
-        1.0 - 1.0 / trials
-    ) + _EULER_MASCHERONI * normal.inv_cdf(1.0 - 1.0 / (trials * math.e))
-    return max(value, 0.0)
-
-
-def null_sharpe_std(days: int) -> float:
-    """Sampling standard deviation of an annualised Sharpe (IR) estimated from
-    ``days`` daily returns of zero skill: √(``TRADING_DAYS_PER_YEAR`` / days).
-
-    The dispersion √V of the False-Strategy null the deflated Sharpe tests:
-    under zero skill the trials' IRs scatter by their estimation error alone,
-    so √V is a property of the span, not of which trials an arm happened to
-    run (≈ 0.5 over four research years).
-    """
-
-    if isinstance(days, bool) or not isinstance(days, int) or days < 2:
-        raise ValueError(f"days must be an integer >= 2, got {days!r}")
-    return math.sqrt(TRADING_DAYS_PER_YEAR / days)
-
-
-def graded_daily(analysis: Mapping[str, object]) -> dict[str, float]:
-    """The daily graded series of a whole sidecar, by date: the series whose
-    annualised mean over its standard deviation is the trial's IR.
-    ``ValueError`` when it holds fewer than two days."""
-
-    graded, _series = _graded(analysis)
-    daily = dict(_strategy_returns(graded, "", ""))
-    if len(daily) < 2:
-        raise ValueError("the graded series holds fewer than two days")
-    return daily
 
 
 def active_daily(analysis: Mapping[str, object]) -> pd.DataFrame:
@@ -434,131 +365,6 @@ def active_daily(analysis: Mapping[str, object]) -> pd.DataFrame:
     return frame.reindex(columns=list(ACTIVE_DAILY_COLUMNS))
 
 
-def trial_correlation(
-    analyses: Sequence[Mapping[str, object]],
-    series: Sequence[Mapping[str, float]] = (),
-) -> tuple[float, int]:
-    """Mean pairwise correlation ρ̄ of the trials' daily graded series, and the
-    number of pairs it averages.
-
-    One analysis per trial (its validation sidecar), plus ``series``: trials
-    already reduced to that daily series (an arm's lineage, extracted at its
-    creation), which pair with the analyses and with each other alike. Each
-    series is the daily graded series (:func:`graded_daily`), so ρ̄ is the
-    correlation of the very series the trials' IRs are read off. A pair is
-    correlated over the days both measured -- a sub-span trial against a
-    full-span one over its own years; a pair sharing fewer than three days (two
-    points correlate ±1 by construction) or flat over its overlap, and a trial
-    whose span is unmeasurable, add no pair. The mean is clipped into [0, 1]: M
-    trials that hedge each other are not more than M independent ones.
-    ``(0.0, 0)`` when no pair is measured (one trial, or none measurable), which
-    makes the effective count the raw one.
-    """
-
-    measured: list[Mapping[str, float]] = []
-    for analysis in analyses:
-        try:
-            measured.append(graded_daily(analysis))
-        except ValueError:
-            continue
-    measured.extend(series)
-    correlations: list[float] = []
-    for first, second in itertools.combinations(measured, 2):
-        common = sorted(first.keys() & second.keys())
-        if len(common) < 3:
-            continue
-        x = np.fromiter((first[date] for date in common), dtype=float)
-        y = np.fromiter((second[date] for date in common), dtype=float)
-        if not (x.std() > 0 and y.std() > 0):
-            continue
-        correlations.append(float(np.corrcoef(x, y)[0, 1]))
-    if not correlations:
-        return 0.0, 0
-    return min(max(float(np.mean(correlations)), 0.0), 1.0), len(correlations)
-
-
-def effective_trials(measured: int, correlation: float, unmeasured: int = 0) -> float:
-    """Bailey & López de Prado (2014, App. A.3, eq. 9): ``measured`` trials
-    with mean pairwise correlation ρ̄ count as ρ̄ + (1 − ρ̄)·``measured``
-    independent ones -- one when they are identical, all of them when
-    independent -- and each of the ``unmeasured`` trials, whose correlation
-    nothing measured, as one more."""
-
-    return correlation + (1.0 - correlation) * measured + unmeasured
-
-
-def deflated_sharpe(
-    *,
-    observed_sharpe: float | None,
-    effective_trials: float,
-    trial_sharpe_std: float,
-    returns: np.ndarray,
-) -> dict[str, object]:
-    """Deflated Sharpe ratio of one selected series among ``effective_trials``
-    independent trials.
-
-    Bailey & López de Prado (2014). Sharpes are annualised; the formula runs
-    per period. With E[max_N] of :func:`expected_max_sharpe`,
-
-        SR* = √V · E[max_N]
-        P   = Φ[ (SR − SR*)·√(T−1) / √(1 − γ₃·SR + (γ₄−1)/4·SR²) ]
-
-    with γ₃ the skew and γ₄ the (normal = 3) kurtosis of the T returns.
-    ``deflated_sharpe_probability`` is ``None`` whenever it is undefined, and
-    ``unavailable_reason`` names why.
-    """
-
-    scale = math.sqrt(TRADING_DAYS_PER_YEAR)
-    sharpe_star = trial_sharpe_std * expected_max_sharpe(effective_trials)
-    block: dict[str, object] = {
-        "deflated_sharpe_probability": None,
-        "effective_trials": effective_trials,
-        "trial_sharpe_std": trial_sharpe_std,
-        "sharpe_star": sharpe_star,
-        "observed_sharpe": observed_sharpe,
-        "return_days": len(returns),
-        "return_skew": None,
-        "return_kurtosis": None,
-        "unavailable_reason": None,
-    }
-    if observed_sharpe is None:
-        block["unavailable_reason"] = "no_observed_sharpe"
-        return block
-    centered = returns - returns.mean()
-    second = float(np.mean(centered**2))
-    if second <= 0:
-        block["unavailable_reason"] = "zero_return_variance"
-        return block
-    skew = float(np.mean(centered**3)) / second**1.5
-    kurtosis = float(np.mean(centered**4)) / second**2
-    block["return_skew"] = skew
-    block["return_kurtosis"] = kurtosis
-    sharpe = observed_sharpe / scale
-    variance_term = 1.0 - skew * sharpe + (kurtosis - 1.0) / 4.0 * sharpe**2
-    if variance_term <= 0:
-        block["unavailable_reason"] = "undefined_sharpe_variance"
-        return block
-    statistic = (
-        (sharpe - sharpe_star / scale)
-        * math.sqrt(len(returns) - 1)
-        / math.sqrt(variance_term)
-    )
-    block["deflated_sharpe_probability"] = NormalDist().cdf(statistic)
-    return block
-
-
-def information_ratio_bar(effective: float, days: int, probability: float) -> float | None:
-    """The research IR at which the deflated Sharpe probability reaches
-    ``probability`` at ``effective`` trials over ``days``, for normal returns:
-    √V·(E[max] + Φ⁻¹(p)). ``None`` at p = 1, which no IR reaches."""
-
-    if probability >= 1.0:
-        return None
-    return null_sharpe_std(days) * (
-        expected_max_sharpe(effective) + NormalDist().inv_cdf(probability)
-    )
-
-
 def excess_at_cost_stress(
     plain_excess: float,
     days: int,
@@ -567,8 +373,8 @@ def excess_at_cost_stress(
     slippage_bps: float,
     turnover: float,
 ) -> float:
-    """The cost-stress reading of one span, which the freeze gate judges on
-    the research period and F5 on the forward months: the graded series'
+    """The cost-stress reading of one span, which a research row reports and
+    F5 reads on the forward months: the graded series'
     annualised plain excess less ``(cost_stress_multiplier − 1) ×
     slippage_bps`` more per side on ``turnover``, the span's traded notional
     over its opening equity, annualised over its ``days`` days. A research
@@ -770,48 +576,6 @@ def forward_lower_bound(
     return bootstrap_lower_bound(daily, seed_key, confidence=confidence)
 
 
-def _count(value: object, name: str, minimum: int) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
-        raise ValueError(f"{name} must be an integer >= {minimum}, got {value!r}")
-    return value
-
-
-def trial_family_statistics(
-    *,
-    trials: int,
-    offline_trials: int = 0,
-    trial_analyses: Sequence[Mapping[str, object]] = (),
-    lineage_trials: int = 0,
-    lineage_offline_trials: int = 0,
-    lineage_series: Sequence[Mapping[str, float]] = (),
-) -> dict[str, object]:
-    """M, its parts, ρ̄ and N_eff of an arm's trial family (:func:`freeze_gate`
-    names the parts); what the gate deflates over and what the IR bar a
-    full-span nominee faces is read at.
-
-    ``lineage_offline_trials`` is the part of ``lineage_trials`` the lineage
-    arms declared offline. The declared offline trials, the arm's own and the
-    lineage's, have no series, so nothing measured their correlation: each
-    counts as one independent trial, and ρ̄ prices the validated ones alone."""
-
-    trials = _count(trials, "trials", 1)
-    offline_trials = _count(offline_trials, "offline_trials", 0)
-    lineage_trials = _count(lineage_trials, "lineage_trials", 0)
-    lineage_offline_trials = _count(lineage_offline_trials, "lineage_offline_trials", 0)
-    correlation, pairs = trial_correlation(trial_analyses, lineage_series)
-    total = trials + offline_trials + lineage_trials
-    unmeasured = offline_trials + lineage_offline_trials
-    return {
-        "trials": total,
-        "host_trials": trials,
-        "offline_trials": offline_trials,
-        "lineage_trials": lineage_trials,
-        "trial_correlation": correlation,
-        "trial_correlation_pairs": pairs,
-        "effective_trials": effective_trials(total - unmeasured, correlation, unmeasured),
-    }
-
-
 class Condition(NamedTuple):
     """One condition a stage judges on what it measured.
 
@@ -837,16 +601,6 @@ def _finite(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
-def _positive(value: object) -> bool:
-    """A reading above zero. One that was not measured never passes."""
-
-    return value is not None and value > 0  # type: ignore[operator]
-
-
-def _probability(measured: Mapping[str, Any]) -> object:
-    return measured["deflated_sharpe"]["deflated_sharpe_probability"]
-
-
 def _within_cap(measured: Mapping[str, Any], thresholds: Mapping[str, Any]) -> bool:
     value = measured["mandate"]["tracking_error"]
     return value is not None and value <= thresholds["tracking_error_cap"]
@@ -861,65 +615,53 @@ def _refused_replicate(measured: Mapping[str, Any]) -> bool:
     return any("problem" in entry for entry in measured["replicates"])
 
 
-def _seed_mean_reaches_bar(measured: Mapping[str, Any]) -> bool:
-    mean, bar = measured["mean_information_ratio"], measured["information_ratio_bar"]
-    return mean is not None and isinstance(bar, (int, float)) and mean >= bar
-
-
 _CAP = "tracking_error_cap"
-# Not a condition's: what a gate that was never read off a nominee records.
-# The session reads a node that is not one of its Steps; the nominee's
-# statistics could not be measured.
+# Not a condition's: what a registration that was never read off a nominee
+# records. The session reads a node that is not one of its Steps; the
+# nominee's statistics could not be measured.
 NOT_A_SESSION_STEP = "freeze_needs_a_step_of_this_session"
 UNMEASURABLE = "freeze_unmeasurable"
 
-# Every condition the freeze gate and the graduation verdict judge, by stage
-# and, within a stage, in the order its failures are recorded. The one list of
-# the reason tokens a record can carry: each stage reads its failures off it
-# (:func:`judge`), and the console's criterion codes and labels, the Agent's
-# facts and the tests are checked against it.
+# Every condition the freeze registration and the graduation verdict judge,
+# by stage and, within a stage, in the order its failures are recorded. The
+# one list of the reason tokens a record can carry: each stage reads its
+# failures off it (:func:`judge`), and the console's criterion codes and
+# labels, the Agent's facts and the tests are checked against it.
 CONDITIONS: tuple[Condition, ...] = (
     # The hard nomination rules, on the nominee's replay summary
     # (``config.AcceptanceRules.evaluate``). A non-finite metric, because every
     # IEEE comparison against NaN is False, so it would otherwise pass every
-    # threshold; and a research-period drawdown over the limit F4/H3 enforce
-    # forward: freezing a book that already breached it spends a forward test
-    # on a candidate the verdict must reject. ``sharpe`` is read only for
-    # finiteness: how much edge is enough is the deflated Sharpe's question.
+    # threshold; and a drawdown over the limit F4/H3 enforce forward:
+    # freezing a book that already breached it spends the sealed reading on a
+    # candidate the verdict must reject. ``sharpe`` is read only for
+    # finiteness.
     Condition("nomination", "non_finite_total_return", lambda m, t: _finite(m.get("total_return"))),
     Condition("nomination", "non_finite_max_drawdown", lambda m, t: _finite(m.get("max_drawdown"))),
     Condition("nomination", "non_finite_sharpe", lambda m, t: m.get("sharpe") is None or _finite(m["sharpe"])),
     Condition("nomination", "max_drawdown_above_limit", lambda m, t: not (_finite(m.get("max_drawdown")) and abs(m["max_drawdown"]) > t["max_drawdown"])),
-    # How the nominee was registered (``experiment.freeze_gate_for``).
+    # How the nominee was registered (``experiment.freeze_registration``).
     Condition("registration", "freeze_needs_full_span_validation", lambda m, t: m.get("span") == FULL_SPAN),
     Condition("registration", "freeze_nominee_is_control", lambda m, t: m.get("control") is not True),
-    # The freeze gate, on the nominee's research period (:func:`freeze_gate`).
-    Condition("freeze", "freeze_too_few_full_span_validations", lambda m, t: m["full_span_validations"] >= t["min_full_span_validations"]),
-    Condition("freeze", "freeze_information_ratio_below_threshold", lambda m, t: m["information_ratio"] is not None and m["information_ratio"] >= t["min_information_ratio"]),
-    Condition("freeze", "freeze_deflated_sharpe_unavailable", lambda m, t: isinstance(_probability(m), float)),
-    Condition("freeze", "freeze_deflated_sharpe_below_threshold", lambda m, t: not isinstance(_probability(m), float) or not _probability(m) < t["min_deflated_sharpe_probability"]),
-    Condition("freeze", "freeze_too_few_positive_years", lambda m, t: m["positive_years"] >= t["min_positive_years"]),
-    Condition("freeze", "freeze_active_drawdown_exceeded", lambda m, t: m["active_max_drawdown"] <= t["active_max_drawdown"]),
-    Condition("freeze", "freeze_not_positive_at_cost_stress", lambda m, t: _positive(m["excess_at_cost_stress"])),
+    # The tracking mandate over the nominee's span, when the rules set one.
     Condition("freeze", "freeze_tracking_error_above_cap", _within_cap, requires=_CAP),
     Condition("freeze", "freeze_beta_outside_band", _within_band, requires=_CAP),
-    # The nominee's seed replicates (``experiment._seed_replicate_gate``): a
-    # named replicate that is not one, a nominee that trains a model and names
-    # none, and a mean active IR over the nominee and its replicates below
-    # the nominee's own bar. A nomination declared deterministic (its package
-    # uses no randomness) is exempt from the last two: its own reading stands.
+    # The nominee's seed replicates (``experiment._seed_replicates``): a named
+    # replicate that is not one, and a nominee that trains a model and names
+    # none, unless the nomination declared its package deterministic.
     Condition("seeds", "freeze_seed_replicate_invalid", lambda m, t: not _refused_replicate(m)),
     Condition("seeds", "freeze_too_few_seed_replicates", lambda m, t: bool(m["replicates"]) or not m["trains_a_model"] or m.get("deterministic", False)),
-    Condition("seeds", "freeze_seed_mean_information_ratio_below_threshold", lambda m, t: m.get("deterministic", False) or not m["replicates"] or _refused_replicate(m) or _seed_mean_reaches_bar(m)),
-    # F1/H1: the frozen strategy raised during the replay, which then has no
-    # slice to judge (:func:`graduation_verdict`).
+    # The sealed gate (:func:`sealed_slice`): the frozen book's residual IR
+    # over the sealed years against its bar, unread when the book raised.
+    Condition("sealed", "sealed_strategy_error", lambda m, t: m.get("strategy_error") is not True, "S"),
+    Condition("sealed", "sealed_residual_ir_below_bar", lambda m, t: m.get("strategy_error") is True or m["residual_information_ratio"] >= m["bar"], "S"),
+    # F1/H1: the frozen strategy raised during the forward replay, which then
+    # has no slice to judge (:func:`graduation_verdict`).
     Condition("replay", "forward_strategy_error", lambda m, t: m["strategy_error"] != "forward", "F1"),
     Condition("replay", "heldout_strategy_error", lambda m, t: m["strategy_error"] != "heldout", "H1"),
     # The forward slice (:func:`forward_slice`). F2 reads the frozen book and
-    # its seed replicates as one series (:func:`forward_lower_bound`); F3-F7
+    # its seed replicates as one series (:func:`forward_lower_bound`); F4-F7
     # read the frozen book.
     Condition("forward", "forward_lower_bound_not_positive", lambda m, t: m["lower_bound"] > 0, "F2"),
-    Condition("forward", "forward_recency_negative", lambda m, t: m["recency_plain_excess"] >= 0, "F3"),
     Condition("forward", "forward_max_drawdown_exceeded", lambda m, t: m["max_drawdown"] <= t["max_drawdown"], "F4"),
     Condition("forward", "forward_active_drawdown_exceeded", lambda m, t: m["active_max_drawdown"] <= t["active_max_drawdown"], "F4"),
     Condition("forward", "forward_not_positive_at_cost_stress", lambda m, t: m["excess_at_cost_stress"] > 0, "F5"),
@@ -960,119 +702,6 @@ def judge(
         and _on(condition, rules)
         and not condition.holds(measured, thresholds)
     ]
-
-
-def freeze_gate(
-    analysis: Mapping[str, object],
-    *,
-    rules: AcceptanceRules,
-    trials: int,
-    full_span_validations: int,
-    offline_trials: int = 0,
-    trial_analyses: Sequence[Mapping[str, object]] = (),
-    lineage_trials: int = 0,
-    lineage_offline_trials: int = 0,
-    lineage_series: Sequence[Mapping[str, float]] = (),
-    years: Sequence[tuple[str, str]] = (),
-    summary: Mapping[str, object] | None = None,
-) -> dict[str, object]:
-    """Freeze gate of one nominee under the arm's ``rules``
-    (docs/pipeline-design.md).
-
-    ``analysis`` is the nominee's full-span validation sidecar, read whole.
-    The deflated Sharpe deflates over the arm's trial family
-    (:func:`trial_family_statistics`): ``trials`` distinct non-control
-    strategies validated anywhere in the arm (the nominee among them), the
-    ``offline_trials`` its batches declared screening offline and the
-    ``lineage_trials`` of the earlier arms it was created to inherit
-    (``lineage_offline_trials`` of them declared offline), M in all, counted
-    at their effective number ρ̄ + (1 − ρ̄)·M, where ρ̄ is
-    :func:`trial_correlation` over ``trial_analyses`` (one sidecar per
-    trial) and ``lineage_series`` (one reduced series per measurable lineage
-    trial). The declared offline trials, which have no series, are left out
-    of M in that formula and count one each; the caller has joined the
-    lineage to the arm's own family, so each strategy's bytes come once, with
-    one series (``experiment.recorded_lineage``). The dispersion √V is the zero-skill sampling error
-    of an IR over the nominee's own measured days (:func:`null_sharpe_std`), so
-    neither controls nor near-copies of the nominee move the bar through it.
-    ``information_ratio_bar`` is the research IR at which the probability
-    reaches ``rules.min_dsr_probability`` for normal returns,
-    √V·(E[max] + Φ⁻¹(p)); the nominee's own skew and kurtosis move the applied
-    bar by hundredths.
-
-    ``full_span_validations`` counts the arm's measurable full-span
-    validations, controls included; ``years`` are the research years'
-    ``(start, end)`` bounds. On the graded series, read as it is
-    (:func:`graded_statistics`), the gate asks for an IR of at least
-    ``min_active_ir``, a deflated Sharpe probability of at least
-    ``min_dsr_probability`` (the DSR reads the same daily series), at least
-    ``min_full_span_validations`` full-span validations, a positive plain
-    excess in ``min_positive_year_share`` of the research years, a drawdown
-    within ``active_max_drawdown`` and a plain excess still above zero at the
-    cost stress (:func:`summary_excess_at_cost_stress` of the nominee's
-    ``summary`` at ``cost_stress_multiplier``, the multiplier stated among the
-    thresholds), the reading F5 judges forward; on the strategy's own series,
-    for the tracking mandate when one is set. The equity drawdown is the
-    caller's hard nomination rule (``config.AcceptanceRules.evaluate``).
-    """
-
-    family = trial_family_statistics(
-        trials=trials,
-        offline_trials=offline_trials,
-        trial_analyses=trial_analyses,
-        lineage_trials=lineage_trials,
-        lineage_offline_trials=lineage_offline_trials,
-        lineage_series=lineage_series,
-    )
-    full_span_validations = _count(full_span_validations, "full_span_validations", 0)
-    graded, series = _graded(analysis)
-    statistics, daily = _measured(graded, "", "")
-    effective = float(family.pop("effective_trials"))  # type: ignore[arg-type]
-    dispersion = null_sharpe_std(int(statistics["days"]))
-    dsr = {
-        **family,
-        **deflated_sharpe(
-            observed_sharpe=statistics["information_ratio"],
-            effective_trials=effective,
-            trial_sharpe_std=dispersion,
-            returns=daily,
-        ),
-        "information_ratio_bar": information_ratio_bar(
-            effective, int(statistics["days"]), rules.min_dsr_probability
-        ),
-    }
-    year_excess = [
-        window_plain_excess(graded, start=start, end=end)
-        for start, end in (_span(*year) for year in years)
-    ]
-    if summary is None:
-        raise ValueError("the cost-stress condition needs the nominee's summary")
-    measured = {
-        "series": series,
-        **statistics,
-        "year_plain_excess": year_excess,
-        "positive_years": sum(1 for value in year_excess if value is not None and value > 0),
-        "active_max_drawdown": _max_slice_drawdown(graded, "", ""),
-        "mandate": _mandate(analysis, "", ""),
-        "full_span_validations": full_span_validations,
-        "deflated_sharpe": dsr,
-        "excess_at_cost_stress": summary_excess_at_cost_stress(
-            statistics, summary, cost_stress_multiplier=rules.cost_stress_multiplier
-        ),
-    }
-    thresholds = {
-        "min_information_ratio": rules.min_active_ir,
-        "min_deflated_sharpe_probability": rules.min_dsr_probability,
-        "min_full_span_validations": rules.min_full_span_validations,
-        "min_positive_years": math.ceil(rules.min_positive_year_share * len(year_excess)),
-        "research_years": len(year_excess),
-        "active_max_drawdown": rules.active_max_drawdown,
-        **rules.mandate,
-        "panel_draws": PANEL_DRAWS,
-        "cost_stress_multiplier": rules.cost_stress_multiplier,
-    }
-    reasons = judge("freeze", measured, thresholds, rules)
-    return {"passed": not reasons, "reasons": reasons, **measured, "thresholds": thresholds}
 
 
 # Read the draws in batches holding at most this many bytes of resampled days.
@@ -1156,14 +785,13 @@ def forward_slice(
     together (:func:`forward_lower_bound`), which must be above zero.
     ``seed_replicates`` are those replicates, replayed like the book, each as
     what names it and its replay's sidecar; with any, the slice also carries
-    their own slices and the :func:`seed_mean` with the book. The recency
-    window, the cost stress and ``active_max_drawdown`` read the book's own
-    graded series; ``max_drawdown`` limits the equity itself and the tracking
-    mandate, when one is set, the strategy's own tracking error and beta over
-    the slice. The holder's readings (:func:`holder_readings`) ride on every
-    slice. ``start``/``end`` are the slice's calendar bounds; the recency
-    window is the last ``recency_months`` calendar months ending in ``end``'s
-    month. ``turnover`` (traded notional over the slice's opening equity),
+    their own slices and the :func:`seed_mean` with the book. The cost stress
+    and ``active_max_drawdown`` read the book's own graded series;
+    ``max_drawdown`` limits the equity itself and the tracking mandate, when
+    one is set, the strategy's own tracking error and beta over the slice.
+    The holder's readings (:func:`holder_readings`) ride on every slice.
+    ``start``/``end`` are the slice's calendar bounds. ``turnover`` (traded
+    notional over the slice's opening equity),
     ``round_trips`` and ``mean_gross`` are the slice's own figures from the
     replay; ``slippage_bps`` is the Broker profile's. The cost stress charges
     ``(cost_stress_multiplier − 1) × slippage_bps × turnover × 1e−4``,
@@ -1186,11 +814,6 @@ def forward_slice(
         )
     graded, series = _graded(analysis)
     statistics, _daily = _measured(graded, start, end)
-    recency_month = _month_index(end) - (rules.recency_months - 1)
-    recency_start = f"{recency_month // 12:04d}{recency_month % 12 + 1:02d}01"
-    recency_excess = window_plain_excess(graded, start=max(start, recency_start), end=end)
-    if recency_excess is None:
-        raise ValueError(f"the recency window from {recency_start} holds fewer than two days")
     drawdown = _max_slice_drawdown(analysis, start, end)
     active_drawdown = _max_slice_drawdown(graded, start, end)
     mandate = _mandate(analysis, start, end)
@@ -1220,8 +843,6 @@ def forward_slice(
             seed_key=seed_key,
             confidence=rules.forward_confidence,
         ),
-        "recency_start": recency_start,
-        "recency_plain_excess": recency_excess,
         "max_drawdown": drawdown,
         "active_max_drawdown": active_drawdown,
         "mandate": mandate,
@@ -1234,7 +855,6 @@ def forward_slice(
         "forward_confidence": rules.forward_confidence,
         "bootstrap_block_days": BOOTSTRAP_BLOCK_DAYS,
         "bootstrap_draws": BOOTSTRAP_DRAWS,
-        "recency_months": rules.recency_months,
         "max_drawdown": rules.max_drawdown,
         "active_max_drawdown": rules.active_max_drawdown,
         **rules.mandate,
@@ -1340,20 +960,76 @@ def holder_line(block: Mapping[str, Any]) -> str:
     )
 
 
+def sealed_slice(
+    analysis: Mapping[str, object],
+    *,
+    rules: AcceptanceRules,
+    start: str,
+    end: str,
+    seed_replicates: Sequence[tuple[Mapping[str, object], Mapping[str, object]]] = (),
+) -> dict[str, object]:
+    """The sealed gate on the frozen book's replay over the sealed years.
+
+    The book's graded series over ``start``..``end`` read through
+    :func:`residual_reading` at the rules' ``alpha``: its residual
+    information ratio against the bar for the slice's length, the one
+    performance condition of the verdict. The holder's readings ride beside
+    it; ``seed_replicates`` (what names each and its replay's sidecar) are
+    read the same way and reported, never judged.
+    """
+
+    start, end = _span(start, end)
+    reading = residual_reading(analysis, start=start, end=end, alpha=rules.alpha)
+    measured = {
+        "start": start,
+        "end": end,
+        **reading,
+        "raw_readings": holder_readings(analysis, start=start, end=end),
+        **(
+            {
+                "seed_replicates": [
+                    {
+                        **identity,
+                        **residual_reading(sidecar, start=start, end=end, alpha=rules.alpha),
+                    }
+                    for identity, sidecar in seed_replicates
+                ]
+            }
+            if seed_replicates
+            else {}
+        ),
+    }
+    thresholds = {"alpha": rules.alpha, "bar": reading["bar"], "sealed_years": rules.sealed_years}
+    return {**measured, "reasons": judge("sealed", measured, thresholds), "thresholds": thresholds}
+
+
+def sealed_strategy_error(*, start: str, end: str, error: str) -> dict[str, object]:
+    """The sealed gate on a frozen book that raised during its replay over
+    the sealed years: no reading, and the gate fails."""
+
+    start, end = _span(start, end)
+    measured = {"start": start, "end": end, "strategy_error": True, "error": error}
+    return {**measured, "reasons": judge("sealed", measured, {}), "thresholds": {}}
+
+
 def graduation_verdict(
     *,
+    sealed: Mapping[str, Any],
     forward: Mapping[str, Any] | None,
     heldout: Mapping[str, Any] | None,
     strategy_error: Literal["forward", "heldout"] | None = None,
 ) -> dict[str, object]:
-    """``graduated`` iff F1–F7 and H1–H4 all hold, else ``discarded``.
+    """``graduated`` iff the sealed gate, F1–F7 and H1–H4 all hold, else
+    ``discarded``.
 
-    ``strategy_error`` names the slice in which the strategy raised (F1/H1).
-    A replay that raised produced no result, so it comes with no slice at all.
-    ``reasons`` lists every failed condition in F-then-H order; ``thresholds``
-    merges the slices' own. A measured verdict also states each slice's
-    :func:`holder_line`, so the ledger says in words what the holder's account
-    did beside the codes that decided it.
+    ``sealed`` is the sealed gate's block (:func:`sealed_slice`, or
+    :func:`sealed_strategy_error`). ``strategy_error`` names the slice of the
+    forward replay in which the strategy raised (F1/H1); a replay that raised
+    produced no result, so it comes with no forward or Held-out slice at
+    all. ``reasons`` lists every failed condition, the sealed gate's first;
+    ``thresholds`` merges the blocks' own. A measured verdict also states
+    each slice's :func:`holder_line`, so the ledger says in words what the
+    holder's account did beside the codes that decided it.
     """
 
     if strategy_error not in (None, "forward", "heldout"):
@@ -1363,8 +1039,8 @@ def graduation_verdict(
     measured = strategy_error is None
     if (forward is not None, heldout is not None) != (measured, measured):
         raise ValueError(f"slices given do not match strategy_error={strategy_error!r}")
-    reasons = judge("replay", {"strategy_error": strategy_error}, {})
-    thresholds: dict[str, object] = {}
+    reasons = [*sealed["reasons"], *judge("replay", {"strategy_error": strategy_error}, {})]
+    thresholds: dict[str, object] = {**sealed["thresholds"]}
     for block in (forward, heldout):
         if block is not None:
             reasons.extend(block["reasons"])

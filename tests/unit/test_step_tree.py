@@ -229,19 +229,22 @@ RESEARCH_MANIFEST = {
     "fold_id": "research",
     "kind": "research",
     "research": {
-        "decision_time": "2025-06-30T23:59:59+08:00",
-        "input_window": "20230701..20250630",
-        "research_period": "20210701..20250630",
+        "decision_time": "2024-06-30T23:59:59+08:00",
+        "input_window": "20220701..20240630",
+        "research_period": "20210701..20240630",
+        "sealed_years": {
+            "period": "20240701..20250630",
+            "note": "the trailing research years the host reads once after the freeze",
+        },
         "years": [
             {"label": "Y1", "start": "20210701", "end": "20220630"},
             {"label": "Y2", "start": "20220701", "end": "20230630"},
             {"label": "Y3", "start": "20230701", "end": "20240630"},
-            {"label": "Y4", "start": "20240701", "end": "20250630"},
         ],
-        "spans": "full (every year), one year such as Y1, or contiguous years such as Y1..Y4",
+        "spans": "full (every year), one year such as Y1, or contiguous years such as Y1..Y3",
     },
     "start": {"kind": "step_node", "node_id": "research__session_ref_x__run_ref_y__valid_003"},
-    "arm": {"frozen": False, "freezes_per_arm": 1, "trials_to_date": 5, "full_span_validations_to_date": 2},
+    "arm": {"frozen": False, "freezes_per_arm": 1, "validations_to_date": 5, "full_span_validations_to_date": 2},
     "snapshot_config": {
         "decision_windows": {
             "daily_months": 24,
@@ -279,7 +282,7 @@ class SessionFactsTest(unittest.TestCase):
         self.assertEqual(facts["research_geometry"], RESEARCH_MANIFEST["research"])
         self.assertNotIn("session", facts["identity"])
         self.assertTrue(facts["identity"]["session_ref"].startswith("session_ref_"))
-        self.assertEqual(facts["arm"]["trials_to_date"], 5)
+        self.assertEqual(facts["arm"]["validations_to_date"], 5)
         self.assertIs(facts["arm"]["frozen"], False)
         self.assertEqual(facts["budgets"]["max_replay_years"], 24)
         self.assertIn("计回测年", facts["budgets"]["max_replay_years_note"])
@@ -292,8 +295,8 @@ class SessionFactsTest(unittest.TestCase):
                 "model_artifacts_empty": True,
             },
         )
-        self.assertIn("freeze_gate", facts["artifact_contract"]["acceptance_rules"])
-        self.assertIn("20210701..20250630", facts["research_scope"]["research"])
+        self.assertIn("sealed_gate", facts["artifact_contract"]["acceptance_rules"])
+        self.assertIn("20210701..20240630", facts["research_scope"]["research"])
         self.assertIn("one research session", facts["research_scope"]["research"])
         # The periods after research end exist and are sealed: no date of them.
         for later in ("2025-07", "202507", "2026", "20260630", "20260930"):

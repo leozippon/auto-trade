@@ -332,7 +332,6 @@ class AgentSessionRunner:
         conversation_id: str | None = None,
         event_sink: Callable[[str, dict[str, object]], None] | None = None,
         inbox: AgentInboxHook | None = None,
-        freeze_gate: Callable[[str], Mapping[str, object]] | None = None,
         trace_ref: str | None = None,
     ) -> None:
         self.llm = llm
@@ -386,10 +385,6 @@ class AgentSessionRunner:
         self.event_sink = event_sink
         self.inbox = inbox
         self._complete_validation_nodes: list[dict[str, object]] = []
-        # The freeze gate as the Pipeline reads a node now, wired in as
-        # node id -> verdict so each enumerated candidate says whether a
-        # freeze of it would pass.
-        self._freeze_gate = freeze_gate
         self._hard_finalization = False
         self._hard_finalization_context_initialized = False
         self._wrap_up_sent = False
@@ -984,17 +979,14 @@ class AgentSessionRunner:
             self._complete_validation_nodes.append(entry)
 
     def _finalization_candidates(self) -> list[dict[str, object]]:
-        """The nodes hard finalization may name, with their freeze-gate verdict.
-
-        Each entry says whether a freeze of it would pass the gate, so the
-        choice between freezing, continuing and ending the arm is not made
-        blind to the gate.
-        """
+        """The nodes hard finalization may name, each with its short handle
+        where it is unambiguous. No gate reading rides on them: the only
+        performance reading is the sealed one, which no session sees."""
 
         handles = unique_handles(
             str(candidate["node_id"]) for candidate in self._complete_validation_nodes
         )
-        candidates = [
+        return [
             {
                 **candidate,
                 **(
@@ -1005,25 +997,6 @@ class AgentSessionRunner:
             }
             for candidate in self._complete_validation_nodes
         ]
-        gate = self._freeze_gate
-        if gate is None:
-            return candidates
-        annotated: list[dict[str, object]] = []
-        for candidate in candidates:
-            verdict = gate(str(candidate["node_id"]))
-            passed = bool(verdict.get("passed"))
-            annotated.append(
-                {
-                    **candidate,
-                    "passes_freeze_gate": passed,
-                    **(
-                        {"freeze_gate_reasons": [str(item) for item in verdict.get("reasons") or ()]}
-                        if not passed
-                        else {}
-                    ),
-                }
-            )
-        return annotated
 
     def _activate_hard_finalization_if_ready(self, remaining: float) -> bool:
         """Switch to the restricted finalization view inside the finalize window.
@@ -1075,14 +1048,13 @@ class AgentSessionRunner:
             "remaining_inference_seconds": round(max(remaining, 0.0), 6),
             "selection_contract": (
                 "Decide yourself: finish_session with outcome=\"freeze\" and a "
-                "listed node_id whose passes_freeze_gate is true, or outcome="
-                "\"no_edge\" with a reason. The Runner does not rank or "
-                "auto-submit candidates; a node with passes_freeze_gate=false "
-                "cannot be frozen, except that one whose only freeze_gate_reason "
-                "is freeze_too_few_seed_replicates is read alone: name its seed "
-                "replicates in seed_replicates and the gate judges them together, "
-                "or, if its package uses no randomness, nominate it with "
-                "deterministic=true."
+                "listed node_id that registers (acceptance_rules."
+                "freeze_registration: a full-span, non-control node, with its seed "
+                "replicates in seed_replicates when it trains a model, or "
+                "deterministic=true if its package uses no randomness), or "
+                "outcome=\"no_edge\" with a reason. The Runner does not rank or "
+                "auto-submit candidates; finish_session refuses a node that does "
+                "not register and names why."
             ),
             "complete_validation_candidates": self._finalization_candidates(),
             "available_tools": sorted(self._finalization_tool_names()),
@@ -1115,7 +1087,7 @@ class AgentSessionRunner:
             if call.name in _VALIDATION_TOOLS:
                 # A batch runs for hours, and the tool_call event that also
                 # carries its arguments comes only once it returns: record its
-                # candidates, hypotheses, controls and offline_trials now.
+                # candidates, hypotheses, controls and span now.
                 started["arguments"] = sanitize_for_log(dict(call.arguments))
             self._emit("tool_call_started", started)
             phase_error = self._finalization_call_error(call)

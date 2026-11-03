@@ -54,7 +54,6 @@ from autotrade.pipelines.hitl_state import (
     write_gpu_claim,
 )
 from autotrade.pipelines.ledger import research_over
-from autotrade.pipelines.lineage import extract_lineage, lineage_arm_ids, write_lineage
 from autotrade.pipelines.skills import create_operating_memory_snapshot
 
 from .public_identity import PublicIdentity
@@ -436,18 +435,6 @@ class ExperimentManager:
                     repo_root=self.repo_root,
                     experiments_root=self.experiments_root,
                 )
-                # A lineage is read from the earlier arms here, once, into a
-                # file beside this arm's ledger; nothing reads them again.
-                if merged.get("lineage_arms"):
-                    write_lineage(
-                        directory,
-                        extract_lineage(
-                            self.experiments_root,
-                            lineage_arm_ids(merged["lineage_arms"], experiment_id),
-                            research_start=str(merged["research_start"]),
-                            research_end=str(merged["research_end"]),
-                        ),
-                    )
             except Exception:
                 self._discard_half_created(directory)
                 raise

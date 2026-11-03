@@ -38,7 +38,6 @@ from autotrade.pipelines.config import (
     AcceptanceRules,
     acceptance_for,
 )
-from autotrade.pipelines.experiment import lineage_ledger_record
 from autotrade.pipelines.hitl_state import (
     WEB_CREATE_DEFAULTS,
     StatusReporter,
@@ -58,7 +57,7 @@ from autotrade.webui.manager import (
 )
 from autotrade.webui.public_identity import PublicIdentity
 from autotrade.webui.server import create_app, is_loopback_host
-from tests.unit.acceptance_fixture import REQUIRED_RULES
+from tests.unit.acceptance_fixture import CREATE_RULES, REQUIRED_RULES
 from tests.unit.gpu_probe import stubbed_gpu_probe
 from tests.unit.webui_research_arm import build_arm
 
@@ -103,18 +102,17 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
     assert "mandate_paired" not in fields["max_drawdown"]
     assert fields["beta_min"]["mandate_paired"] is True
     for key in (
-        "min_active_ir",
-        "min_dsr_probability",
-        "min_positive_year_share",
-        "min_full_span_validations",
+        "sealed_years",
+        "alpha",
         "forward_confidence",
-        "recency_months",
         "min_mean_gross",
         "min_round_trips_per_month",
         "heldout_tolerance_z",
     ):
         assert key in fields
         assert fields[key]["default"] == WEB_CREATE_DEFAULTS[key]
+    # The retired deflated-Sharpe bars are no form field.
+    assert not {"min_active_ir", "min_dsr_probability", "recency_months"} & set(fields)
     assert [group["name"] for group in schema["groups"]] == [
         "基本与排程",
         "数据窗口",
@@ -387,7 +385,7 @@ def test_experiment_endpoint_creates_only_persistent_sandbox_research(tmp_path: 
             json={
                 "params": {
                     "experiment_id": "persistent_demo",
-                    **DEFAULT_RESEARCH_GEOMETRY.to_record(),
+                    **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES,
                     "strategy_period": "quarter",
                     "inference_time": "23:59",
                     "daily_window_months": 18,
@@ -456,7 +454,7 @@ def test_static_console_keeps_macro_style_surfaces_without_closed_capabilities(
     # The console words one experiment, one control portfolio and one
     # out-of-sample acceptance; the coinages it used to carry are retired
     # labels, not an alternative spelling of the same thing.
-    for label in ("随机对照组合", "验收通过", "定版检验"):
+    for label in ("随机对照组合", "验收通过", "定版登记"):
         assert label in script
     for retired in ("零技能面板", "本臂", "一本书", "席位", "回合数", "孵化中", "毕业于"):
         assert retired not in script
@@ -761,13 +759,13 @@ class WebuiBackendTest(unittest.TestCase):
         )
         params = {
             "model": "deepseek-flash",
-            **DEFAULT_RESEARCH_GEOMETRY.to_record(),
+            **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES,
             "_created_at": "2026-09-13T00:00:00+00:00",
             **{key: f"secret-{key}" for key in operator_only},
         }
         self.assertEqual(
             _public_params(params),
-            {"model": "deepseek-flash", **DEFAULT_RESEARCH_GEOMETRY.to_record()},
+            {"model": "deepseek-flash", **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES},
         )
 
     # ---- result routes ---------------------------------------------------------
@@ -1415,7 +1413,7 @@ class WebuiBackendTest(unittest.TestCase):
                 json={
                     "params": {
                         "experiment_id": "exp_new",
-                        **DEFAULT_RESEARCH_GEOMETRY.to_record(),
+                        **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES,
                     }
                 },
             )
@@ -1434,7 +1432,7 @@ class WebuiBackendTest(unittest.TestCase):
         for experiment_id, request in (
             ("exp_untracked", {}),
             ("exp_tracked", {"tracking_error_cap": 0.08}),
-            ("exp_tight_ir", {"min_active_ir": 1.1}),
+            ("exp_strict_alpha", {"alpha": 0.01}),
         ):
             expected = acceptance_for({**REQUIRED_RULES, **request}).to_record()
             with (
@@ -1444,7 +1442,7 @@ class WebuiBackendTest(unittest.TestCase):
                 manager.create_experiment(
                     {
                         "experiment_id": experiment_id,
-                        **DEFAULT_RESEARCH_GEOMETRY.to_record(),
+                        **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES,
                         **request,
                     }
                 )
@@ -1479,7 +1477,7 @@ class WebuiBackendTest(unittest.TestCase):
                 patch.object(manager, "start_worker", return_value={"spawned": False}),
             ):
                 manager.create_experiment(
-                    {"experiment_id": experiment_id, **DEFAULT_RESEARCH_GEOMETRY.to_record(), **request}
+                    {"experiment_id": experiment_id, **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES, **request}
                 )
             written = json.loads(
                 (self.experiments_root / experiment_id / "hitl/params.json").read_text(encoding="utf-8")
@@ -1502,49 +1500,13 @@ class WebuiBackendTest(unittest.TestCase):
                 patch.object(manager, "start_worker", return_value={"spawned": False}),
             ):
                 manager.create_experiment(
-                    {"experiment_id": experiment_id, **DEFAULT_RESEARCH_GEOMETRY.to_record(), **request}
+                    {"experiment_id": experiment_id, **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES, **request}
                 )
             written = json.loads(
                 (self.experiments_root / experiment_id / "hitl/params.json").read_text(encoding="utf-8")
             )
             with self.subTest(experiment=experiment_id):
                 self.assertEqual(written["llm_key"], key)
-
-    def test_create_records_the_lineage_into_the_new_arm_or_creates_nothing(self) -> None:
-        """The lineage is read from the earlier arms once, while the arm is
-        created, into a file beside its ledger, and the ledger stays empty
-        until the arm runs; one that cannot be read leaves no arm."""
-
-        from tests.unit.test_lineage import _arm
-
-        _arm(
-            self.experiments_root,
-            "earlier_arm",
-            [{"seed": 1, "loading": 0.5, "control": True}, {"seed": 2, "loading": 0.5}],
-        )
-        manager = ExperimentManager(self.repo_root, self.experiments_root)
-        geometry = DEFAULT_RESEARCH_GEOMETRY.to_record()
-        with (
-            patch.object(manager, "_preflight"),
-            patch.object(manager, "start_worker", return_value={"spawned": False}),
-        ):
-            manager.create_experiment(
-                {"experiment_id": "exp_heir", **geometry, "lineage_arms": ["earlier_arm"]}
-            )
-            with self.assertRaisesRegex(ValueError, "lineage arm gone does not exist"):
-                manager.create_experiment(
-                    {"experiment_id": "exp_orphan", **geometry, "lineage_arms": ["gone"]}
-                )
-        directory = self.experiments_root / "exp_heir"
-        params = json.loads((directory / "hitl/params.json").read_text(encoding="utf-8"))
-        self.assertEqual(params["lineage_arms"], ["earlier_arm"])
-        self.assertEqual(
-            ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl").read(), []
-        )
-        record = lineage_ledger_record(directory, workspace_reference="")
-        self.assertEqual((record["arms"], record["trials"]), (["earlier_arm"], 1))
-        self.assertTrue(Path(str(record["series_ref"])).is_relative_to(directory))
-        self.assertFalse((self.experiments_root / "exp_orphan").exists())
 
     # ---- running-arm limits ------------------------------------------------------
     def _running_arms(self, *, local: int, hosted: int) -> list[str]:
@@ -1578,7 +1540,7 @@ class WebuiBackendTest(unittest.TestCase):
             return manager.create_experiment(
                 {
                     "experiment_id": experiment_id,
-                    **DEFAULT_RESEARCH_GEOMETRY.to_record(),
+                    **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES,
                     **roles,
                 }
             )
@@ -1669,7 +1631,7 @@ class WebuiBackendTest(unittest.TestCase):
 
         needed = WORKSPACE_MIN_FREE_BYTES + ARM_DISK_MARGIN_BYTES
         usage = shutil.disk_usage(self.repo_root)
-        request = {"experiment_id": "exp_low_disk", **DEFAULT_RESEARCH_GEOMETRY.to_record()}
+        request = {"experiment_id": "exp_low_disk", **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES}
         with (
             patch(
                 "autotrade.webui.manager.shutil.disk_usage",

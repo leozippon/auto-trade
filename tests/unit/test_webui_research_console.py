@@ -40,6 +40,7 @@ from autotrade.webui.registry import (
 )
 from autotrade.webui.server import create_app
 from autotrade.webui.steps import step_tree_view
+from tests.unit.acceptance_fixture import CREATE_RULES
 from tests.unit.test_webui_inject_message import _const_block, _fn
 from tests.unit.webui_research_arm import (
     ENVIRONMENT_BLOCKED_REASON,
@@ -90,20 +91,17 @@ def test_the_best_candidate_carries_the_deflated_sharpe_the_gate_gave_the_nomine
     assert record["attempts"] == 1
     assert record["budget_used"]["replay_years"] == 8
     assert record["best"]["step_id"] == record["nominated_step_id"]
-    assert record["best"]["trials"] == 3
+    # No trial count and no deflated Sharpe since the sealed gate.
+    assert (record["best"]["trials"], record["best"]["deflated_sharpe_probability"]) == (None, None)
     # Research results are development evidence: readable as they land.
     client = TestClient(create_app(tmp_path, tmp_path))
     name = Path(str(_records(tmp_path / "arm")[0]["steps"][0]["validation_result_ref"])).parent.name
     assert client.get(f"/api/experiments/arm/results/{name}/equity").status_code == 200
     # The record says whether its trace is on disk; this synthetic arm has none.
     assert record["trace"] is False
-    ledger_gate = _records(tmp_path / "arm")[0]["freeze_gate"]
-    assert record["best"]["deflated_sharpe_probability"] == pytest.approx(
-        ledger_gate["deflated_sharpe"]["deflated_sharpe_probability"]
-    )
-    assert record["freeze_gate"]["deflated_sharpe_probability"] == pytest.approx(
-        ledger_gate["deflated_sharpe"]["deflated_sharpe_probability"]
-    )
+    # The freeze is a registration: it passed, and it carries no score.
+    assert record["freeze_gate"]["passed"] is True
+    assert record["freeze_gate"]["deflated_sharpe_probability"] is None
     # A sub-span Validation is listed but never the best full-span candidate.
     assert {row["span"] for row in record["validations"]} == {"full", "Y3"}
 
@@ -120,7 +118,7 @@ def test_a_frozen_arm_is_sealed_until_its_verdict_exists(tmp_path: Path) -> None
     assert frozen["session_key"] == "research"
     assert frozen["strategy_ref"].startswith("strategy_ref_")
     assert "strategy_research_abc" not in json.dumps(detail)
-    assert frozen["full_span_validations"] == 2
+    assert frozen["full_span_validations"] is None
     assert frozen["null_percentile"] == 0.81
     assert frozen["forward_mde"] > 0
     assert frozen["blocks"][0]["label"] == "202407-202506"
@@ -298,7 +296,8 @@ def test_every_way_an_arm_can_end_reads_as_one_ending_with_a_reason(tmp_path: Pa
         f" · 对面板 {raw['plain_selection'] * 100:+.2f}%"
         f" · 主动 IR {forward['information_ratio']:.2f}"
     )
-    assert endings["rejected"]["reason"].split(" · ")[0] == "F2"
+    # The sealed gate failed first, and leads the reasons.
+    assert endings["rejected"]["reason"].split(" · ")[0] == "S"
     assert rows["graduated"]["paper_candidate"] is not None
     assert endings["no_edge"]["reason"] == "没有候选值得冻结"
     assert endings["budget_exhausted"]["reason"] == "模型调用次数用尽"
@@ -433,10 +432,9 @@ def test_seed_replicates_are_shown_where_the_record_has_them_and_absent_otherwis
     gate = seeded["sessions"][0]["record"]["freeze_gate"]["seed_replicates"]
     frozen = seeded["frozen"]["seed_replicates"]
     forward = seeded["forward"]["slices"]["forward"]
-    assert frozen == gate and gate["information_ratio_bar"] is not None
-    assert gate["mean_information_ratio"] == pytest.approx(
-        (seeded["frozen"]["information_ratio"] + gate["replicates"][0]["information_ratio"]) / 2
-    )
+    # Registration reads the replicates and judges no seed mean against a bar.
+    assert frozen == gate
+    assert (gate["mean_information_ratio"], gate["information_ratio_bar"]) == (None, None)
     assert gate["replicates"][0]["seed_line"] == "main.py: SEED_BASE = 2000"
     for name in ("forward", "heldout"):
         block = seeded["forward"]["slices"][name]
@@ -539,7 +537,7 @@ def test_an_arm_whose_nomination_the_freeze_gate_refused_reads_as_rejected(
     )
     assert summarize_experiment(directory)["ending"] == {
         "state": "rejected",
-        "reason": "提名未通过定版检验",
+        "reason": "提名未通过定版登记",
     }
 
 
@@ -694,12 +692,12 @@ def test_the_listing_names_the_research_curve_and_the_replay_its_thresholds(tmp_
     assert (untracked["max_drawdown"], untracked["active_max_drawdown"]) == (0.45, 0.30)
     assert untracked["tracking_error_cap"] is None
     path.write_text(json.dumps(params), encoding="utf-8")
-    assert (preview["min_round_trips"], preview["min_mean_gross"], preview["recency_months"]) == (12, 0.5, 6)
+    assert (preview["min_round_trips"], preview["min_mean_gross"]) == (12, 0.5)
     # The record's own block carries the same keys; its parameter-derived
     # values are the arm's (the synthetic arm was judged at a 90% drawdown cap).
     recorded = experiment_detail(tmp_path, "judged")["forward"]["verdict"]["thresholds"]
     assert set(preview) <= set(recorded)
-    for key in ("forward_confidence", "recency_months", "min_round_trips", "min_mean_gross", "heldout_tolerance_z"):
+    for key in ("forward_confidence", "min_round_trips", "min_mean_gross", "heldout_tolerance_z"):
         assert recorded[key] == pytest.approx(preview[key]), key
 
 
@@ -742,8 +740,8 @@ def test_a_running_session_serves_its_best_candidate_and_the_record_keeps_it(tmp
     live = summarize_experiment(directory)
     assert live["research_best"]["step_id"] == steps[1]["step_id"]
     assert live["research_best"]["session_key"] == "research"
-    assert live["research_best"]["trials"] == 3
-    assert live["research_best"]["deflated_sharpe_probability"] is not None
+    # No gate is read over a running session.
+    assert (live["research_best"]["trials"], live["research_best"]["deflated_sharpe_probability"]) == (None, None)
     assert live["research_best"]["panel_return"] is None  # these sidecars carry no panel
     assert live["research_result"] == Path(str(steps[1]["validation_result_ref"])).parent.name
     client = TestClient(create_app(tmp_path, tmp_path))
@@ -824,17 +822,12 @@ def test_an_ended_arm_is_read_off_its_ledger_and_never_judged_again(
             result.unlink()
 
     calls: list[str] = []
-    gate, panel = registry.freeze_gate_for, registry.panel_return
-
-    def gated(*args: object, **kwargs: object) -> object:
-        calls.append("freeze_gate_for")
-        return gate(*args, **kwargs)
+    panel = registry.panel_return
 
     def paneled(*args: object, **kwargs: object) -> object:
         calls.append("panel_return")
         return panel(*args, **kwargs)
 
-    monkeypatch.setattr(registry, "freeze_gate_for", gated)
     monkeypatch.setattr(registry, "panel_return", paneled)
     monkeypatch.setattr(registry, "_SUMMARY_CACHE", {})
     client = TestClient(create_app(tmp_path, root))
@@ -843,12 +836,11 @@ def test_an_ended_arm_is_read_off_its_ledger_and_never_judged_again(
     assert calls == []
     assert all(row.get("state") != "unreadable" for row in rows.values())
 
-    # The nominee is the best candidate: its deflated Sharpe is the gate's.
+    # The nominee is the best candidate; registration recorded no score of it.
     stored = _records(root / "frozen")[0]
     best = rows["frozen"]["research_best"]
     assert best["step_id"] == stored["nominated_step_id"]
-    assert best["deflated_sharpe_probability"] == stored["freeze_gate"]["deflated_sharpe"]["deflated_sharpe_probability"]
-    assert best["trials"] == stored["freeze_gate"]["deflated_sharpe"]["trials"]
+    assert (best["deflated_sharpe_probability"], best["trials"]) == (None, None)
     assert best["information_ratio"] == stored["steps"][1]["graded"]["information_ratio"]
     assert {"session_key": "research", **details["frozen"]["sessions"][0]["record"]["best"]} == best
     # A session that nominated nothing recorded no gate over its best, and
@@ -865,14 +857,15 @@ def test_an_ended_arm_is_read_off_its_ledger_and_never_judged_again(
         assert details[name]["forward"]["slices"] == forward["slices"]
         assert details[name]["forward"]["verdict"] == forward["verdict"]
 
-    # A running session is gated now, over the Validations it has so far.
+    # A running session reads its best candidate and what its panel earned,
+    # and no gate.
     running = build_arm(root, "running", "research", alive=True)
     _sidecar(running, _step(running, "research", 0, edge=0.002, seed=3))
     live = client.get("/api/experiments").json()
-    assert calls[:1] == ["freeze_gate_for"]
-    assert next(row for row in live["experiments"] if row["experiment_id"] == "running")[
-        "research_best"
-    ]["deflated_sharpe_probability"] is not None
+    assert calls[:1] == ["panel_return"]
+    running_best = next(row for row in live["experiments"] if row["experiment_id"] == "running")["research_best"]
+    assert running_best["information_ratio"] is not None
+    assert running_best["deflated_sharpe_probability"] is None
 
 
 def test_a_page_poll_keeps_one_request_in_flight() -> None:
@@ -964,7 +957,7 @@ def test_an_archived_arm_is_listed_only_on_request_and_its_page_still_opens(
     shelf = client.get("/api/experiments", params={"archived": 1}).json()
     assert [row["experiment_id"] for row in shelf["experiments"]] == ["shelved"]
     assert shelf["archived"] == 1
-    assert shelf["experiments"][0]["research_best"]["deflated_sharpe_probability"] is not None
+    assert shelf["experiments"][0]["research_best"]["information_ratio"] is not None
     detail = client.get("/api/experiments/shelved").json()
     assert detail["archived"]["reason"] == "historical" and detail["stage"] == shelf["experiments"][0]["stage"]
     assert client.get("/api/experiments/ended").json()["archived"] is None
@@ -1294,8 +1287,6 @@ def test_the_listing_carries_the_freeze_and_the_best_candidate_so_far(
     evidence = (
         "plain_excess",
         "information_ratio",
-        "deflated_sharpe_probability",
-        "trials",
     )
     for field in ("step_id", *evidence):
         assert best[field] == session_best[field], field
@@ -1319,7 +1310,7 @@ def test_the_create_form_refuses_a_geometry_the_worker_refuses(
         json={
             "params": {
                 "experiment_id": "geometry",
-                **DEFAULT_RESEARCH_GEOMETRY.to_record(),
+                **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES,
                 **patch,
             }
         },

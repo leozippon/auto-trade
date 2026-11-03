@@ -19,45 +19,36 @@ from .node_reference import (
 # The outcomes the Agent may state; the Pipeline's SESSION_OUTCOMES adds the
 # host-recorded ``deadline``.
 FINISH_OUTCOMES = ("freeze", "no_edge")
-# A voluntary finish, a freeze or a no_edge alike, that leaves more than this
-# share of the replay-year budget unused must say why: both end research for
-# the whole arm. It is a justification, not a block, and it lapses once
-# another batch cannot fit.
-EARLY_FINISH_BUDGET_FRACTION = 1 / 3
 # One ``reason`` serves every justification -- the evidence behind ending the
-# arm, and the account of an early finish -- and a one-word reason is none of
-# them. Its upper bound is the shared one every Agent-written justification
-# gets, so the reason and a candidate's hypothesis cannot drift apart.
+# arm -- and a one-word reason is none. Its upper bound is the shared one
+# every Agent-written justification gets, so the reason and a candidate's
+# hypothesis cannot drift apart.
 REASON_MIN_CHARS = 40
 REASON_MAX_CHARS = AGENT_JUSTIFICATION_MAX_CHARS
-# The most terminal offline screens one finish may declare, the same cap a batch
-# declaration carries (``pipelines.session_tools.BATCH_OFFLINE_TRIALS_MAX``):
-# one source, so the two ways of declaring screens cannot drift apart.
-OFFLINE_TRIALS_MAX = 10_000
 
-# The freeze gate as the Pipeline would read one node of this session now,
-# with the nodes it would register as its seed replicates, the terminal
-# offline screens this finish declares and whether the nomination declares
+# Whether one node of this session registers for a freeze, with the nodes it
+# would register as its seed replicates and whether the nomination declares
 # its package deterministic: ``passed``, ``reasons`` (named in
-# ``pipelines/verdict.py`` and ``pipelines/experiment.py``) and the gate's
-# numbers. The Environment never imports the Pipeline, so the gate is handed
-# over as a callable; the Pipeline recomputes it when it records the freeze.
-FreezeGate = Callable[[str, tuple[str, ...], int, bool], Mapping[str, object]]
+# ``pipelines/verdict.py`` and ``pipelines/experiment.py``) and what the
+# registration read of the replicates. Registration only, never a score. The
+# Environment never imports the Pipeline, so the check is handed over as a
+# callable; the Pipeline checks again when it records the freeze.
+Registration = Callable[[str, tuple[str, ...], bool], Mapping[str, object]]
 
-# The gate's reasons that concern a nominee's seed replicates: a refusal that
-# names one points to the fact that defines a replicate.
+# The registration's reasons that concern a nominee's seed replicates: a
+# refusal that names one points to the fact that defines a replicate.
 SEED_REASONS = frozenset(
     {
         "freeze_seed_replicate_invalid",
         "freeze_too_few_seed_replicates",
-        "freeze_seed_mean_information_ratio_below_threshold",
     }
 )
 
 
 @dataclass(frozen=True)
 class SessionBudgetStatus:
-    """What the session has left when ``finish_session`` is called."""
+    """What the session has left when ``finish_session`` is called: recorded
+    on the finish, never a reason to refuse one."""
 
     replay_years_remaining: int
     replay_years_total: int
@@ -70,55 +61,39 @@ class SessionBudgetStatus:
         )
         return record
 
-    @property
-    def early_finish(self) -> bool:
-        return (
-            self.replay_years_total > 0
-            and self.replay_years_remaining
-            > self.replay_years_total * EARLY_FINISH_BUDGET_FRACTION
-        )
-
 
 _DESCRIPTION = (
     "End the arm's research session with one outcome; no other session follows. "
     'outcome="freeze" nominates node_id, a complete Validation of this session '
-    "that replayed the whole research period (span=full), and succeeds only if "
-    "that node passes the freeze gate: every condition the "
-    "acceptance_rules.freeze_gate fact lists for this arm, at its threshold. A "
-    "nomination that fails the gate "
-    "is refused with its named reasons and numbers and the session goes on; a "
-    "freeze ends research for the whole arm, and the frozen artifact is then "
-    "tested once on later data no session sees. node_id is the full id or the "
-    "node's short handle (valid_002); it may be omitted only while "
-    "this session has exactly one complete Validation. "
-    "deterministic=true declares that the nominee's package uses no randomness "
-    "at all, so seed replicates would reproduce it exactly: the gate then asks "
-    "for none and reads the nominee alone, and the declaration is recorded in "
-    "the ledger for the operator's review before the strategy goes live. "
+    "that replayed the whole visible research period (span=full), and succeeds "
+    "only if that node registers: every condition the "
+    "acceptance_rules.freeze_registration fact lists for this arm. Registration "
+    "reads no score: a nomination that does not register is refused with its "
+    "named reasons and the session goes on, and one that registers ends the "
+    "session at once. The host then reads the frozen node once on the sealed "
+    "research years (acceptance_rules.sealed_gate); this call returns no reading "
+    "and there is no second one. node_id is the full id or the node's short "
+    "handle (valid_002); it may be omitted only while this session has exactly "
+    "one complete Validation. deterministic=true declares that the nominee's "
+    "package uses no randomness at all, so seed replicates would reproduce it "
+    "exactly: registration then asks for none, and the declaration is recorded "
+    "in the ledger for the operator's review before the strategy goes live. "
     'outcome="no_edge" ends the arm without freezing a node and takes no node_id; '
     "it needs at least one complete Validation of this session and a reason "
     f"({REASON_MIN_CHARS}-{REASON_MAX_CHARS} chars), the evidence behind the "
-    "decision. A finish of either outcome that leaves more than a third of the "
-    "replay-year budget while another batch still fits must name in its reason "
-    "the hypotheses that stay untested and why the remaining budget is better "
-    "left unused, and is refused without a reason; a freeze needs a reason only "
-    "then. The reason is "
-    "recorded on the arm's session record and is where the arm's conclusion "
-    "belongs; no skill is needed to finish, and none can be written after this call. "
-    "offline_trials (0 to "
-    f"{OFFLINE_TRIALS_MAX}) declares the candidate configurations screened "
-    "offline on research-period data whose readings shaped this session and "
-    "that no batch declared through batch_validate, each once: they are added "
-    "to the arm's freeze-gate trial count once, as batch declarations are. "
-    "The call starts only after every background sub-agent has finished, is "
-    "refused while one is still running, and once it succeeds the remaining tool "
-    "calls of the turn are cancelled."
+    "decision. The reason is recorded on the arm's session record and is where "
+    "the arm's conclusion belongs; a freeze may carry one too. No skill is "
+    "needed to finish, and none can be written after this call. The call starts "
+    "only after every background sub-agent has finished, is refused while one is "
+    "still running, and once it succeeds the remaining tool calls of the turn "
+    "are cancelled."
 )
 
 
 class FinishSessionTool:
-    # The rule a replicate meets is the arm's ``acceptance_rules.freeze_gate``
-    # fact, which the parameter and a refusal that concerns one point to.
+    # The rule a replicate meets is the arm's
+    # ``acceptance_rules.freeze_registration`` fact, which the parameter and a
+    # refusal that concerns one point to.
     spec = ToolSpec(
         "finish_session",
         _DESCRIPTION,
@@ -129,7 +104,7 @@ class FinishSessionTool:
                     "type": "string",
                     "enum": list(FINISH_OUTCOMES),
                     "description": (
-                        "freeze: nominate node_id for the freeze gate. no_edge: end "
+                        "freeze: nominate node_id and end the session. no_edge: end "
                         "the arm without a deliverable."
                     ),
                 },
@@ -144,10 +119,10 @@ class FinishSessionTool:
                     "items": {"type": "string", "minLength": 1, "maxLength": 500},
                     "description": (
                         "freeze only: the nominee's seed replicates as "
-                        "acceptance_rules.freeze_gate.seed_replicates defines "
-                        "them, each a node id or short handle of this session; "
-                        "required (at least one) when the nominee's main.py "
-                        "defines fit, unless deterministic is true."
+                        "acceptance_rules.freeze_registration.seed_replicates "
+                        "defines them, each a node id or short handle of this "
+                        "session; required (at least one) when the nominee's "
+                        "main.py defines fit, unless deterministic is true."
                     ),
                 },
                 "deterministic": {
@@ -155,9 +130,8 @@ class FinishSessionTool:
                     "description": (
                         "freeze only: true declares that the nominee's package "
                         "uses no randomness at all, so seed replicates would "
-                        "reproduce it exactly; the gate then waives the "
-                        "seed-replicate count and seed-mean conditions, and the "
-                        "declaration is recorded in the ledger for the "
+                        "reproduce it exactly; registration then asks for none, "
+                        "and the declaration is recorded in the ledger for the "
                         "operator's review. Default false."
                     ),
                 },
@@ -166,29 +140,9 @@ class FinishSessionTool:
                     "minLength": REASON_MIN_CHARS,
                     "maxLength": REASON_MAX_CHARS,
                     "description": (
-                        "Required for no_edge: the evidence read (active excess "
-                        "and its yearly blocks, null percentile, deflated Sharpe with "
-                        "its trials) and what stays untested. "
-                        "Required for a freeze only when it leaves more than a third "
-                        "of the replay-year budget; such an early finish, of either "
-                        "outcome, names the hypotheses that stay untested and why "
-                        f"the remaining budget is better left unused. {REASON_MIN_CHARS}-"
-                        f"{REASON_MAX_CHARS} characters."
-                    ),
-                },
-                "offline_trials": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": OFFLINE_TRIALS_MAX,
-                    "description": (
-                        "The whole number (0 to "
-                        f"{OFFLINE_TRIALS_MAX}) of candidate configurations "
-                        "screened offline on research-period data whose readings "
-                        "shaped this session and that no earlier batch declared "
-                        "through batch_validate: declare each once here, at the "
-                        "terminal call, and never a screen a batch already "
-                        "declared. They are added to the arm's freeze-gate trial "
-                        "count once. Default 0."
+                        "Required for no_edge, optional for a freeze: the "
+                        "evidence read and what stays untested. "
+                        f"{REASON_MIN_CHARS}-{REASON_MAX_CHARS} characters."
                     ),
                 },
             },
@@ -203,14 +157,12 @@ class FinishSessionTool:
         tree: StepTree,
         *,
         session_ref: str,
-        freeze_gate: FreezeGate,
-        another_round_fits: Callable[[], bool] | None = None,
+        registration: Registration,
         budget_status: Callable[[], SessionBudgetStatus] | None = None,
     ) -> None:
         self.tree = tree
         self.session_ref = session_ref
-        self._freeze_gate = freeze_gate
-        self._another_round_fits = another_round_fits or (lambda: True)
+        self._registration = registration
         self._budget_status = budget_status
 
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
@@ -218,11 +170,10 @@ class FinishSessionTool:
         reason = str(arguments.get("reason") or "").strip()
         node_id = str(arguments.get("node_id") or "")
         replicates = [str(item) for item in arguments.get("seed_replicates") or ()]  # type: ignore[union-attr]
-        count = _terminal_offline_trials(arguments)
         if outcome == "freeze":
             deterministic = arguments.get("deterministic") is True
-            return self._freeze(node_id, reason, replicates, count, deterministic)
-        return self._no_edge(node_id, reason, replicates, count)
+            return self._freeze(node_id, reason, replicates, deterministic)
+        return self._no_edge(node_id, reason, replicates)
 
     # ---- outcomes ----
 
@@ -231,7 +182,6 @@ class FinishSessionTool:
         reference: str,
         reason: str,
         replicate_refs: list[str],
-        offline_trials: int,
         deterministic: bool,
     ) -> ToolResult:
         node_id = (
@@ -241,49 +191,32 @@ class FinishSessionTool:
         replicates = tuple(self._reference(item) for item in replicate_refs)
         for replicate in replicates:
             self._complete_node(replicate)
-        gate = dict(self._freeze_gate(node_id, replicates, offline_trials, deterministic))
-        if not gate.get("passed"):
-            reasons = [str(item) for item in gate.get("reasons") or ()]
-            passing = self._named(
-                [
-                    candidate
-                    for candidate in self._session_candidates()
-                    if candidate != node_id
-                    and _passes_but_for_replicates(
-                        self._freeze_gate(candidate, (), offline_trials, False)
-                    )
-                ]
-            )
+        if reason:
+            self._require_reason("freeze", reason)
+        registration = dict(self._registration(node_id, replicates, deterministic))
+        if not registration.get("passed"):
+            reasons = [str(item) for item in registration.get("reasons") or ()]
             seeds = SEED_REASONS.intersection(reasons)
             raise ToolError(
-                f"finish_session refused: {self._named([node_id])[0]} fails the freeze gate "
-                f"({', '.join(reasons) or 'no reason recorded'}); "
-                f"{_gate_numbers(gate)}. "
+                f"finish_session refused: {self._named([node_id])[0]} does not register "
+                f"for a freeze ({', '.join(reasons) or 'no reason recorded'}). "
                 + (
-                    f"{self._seed_text(gate)} A seed replicate is what "
-                    "acceptance_rules.freeze_gate.seed_replicates defines. "
+                    f"{self._seed_text(registration)} A seed replicate is what "
+                    "acceptance_rules.freeze_registration.seed_replicates defines. "
                     if seeds
                     else ""
                 )
-                + (
-                    "These nodes of this session pass it now (one that trains a "
-                    f"model once its seed replicates hold up): {', '.join(passing)}. "
-                    if passing
-                    else "No node of this session passes it now. "
-                )
-                + "Nominate a passing node, validate what the gate lacks (a "
-                "full-span validation, a control, a seed replicate), or finish "
-                "with no_edge.",
-                error_type="freeze_gate_refused",
+                + "Nominate a node that registers, validate what registration lacks "
+                "(a full-span validation, a seed replicate), or finish with no_edge.",
+                error_type="freeze_registration_refused",
                 retry_hint=(
                     'finish_session({"outcome": "freeze", "node_id": "<nominee>", '
                     '"seed_replicates": ["<replicate>"]})'
                     if seeds
                     else 'finish_session({"outcome": "no_edge", "reason": "<evidence>"})'
                 ),
-                details={"freeze_gate": self._gate_record(gate), "passing_nodes": passing},
+                details={"registration": self._registration_record(registration)},
             )
-        budget = self._early_finish_budget("freeze", reason)
         self.tree.set_position(node_id)
         return ToolResult(
             True,
@@ -296,21 +229,18 @@ class FinishSessionTool:
                 **({"seed_replicates": list(replicates)} if replicates else {}),
                 "deterministic": deterministic,
                 **({"reason": reason} if reason else {}),
-                "terminal_offline_trials": offline_trials,
-                **budget,
-                "freeze_gate": self._gate_record(gate),
+                **self._budget(),
                 "pipeline_outcome": (
                     f"The Pipeline freezes {node_id} as the arm's artifact"
                     + (" with its seed replicates" if replicates else "")
-                    + "; research ends and no further session runs."
+                    + "; research ends, no further session runs, and the host reads "
+                    "the frozen artifact once on the sealed years."
                 ),
             },
             finish=True,
         )
 
-    def _no_edge(
-        self, node_id: str, reason: str, replicates: list[str], offline_trials: int
-    ) -> ToolResult:
+    def _no_edge(self, node_id: str, reason: str, replicates: list[str]) -> ToolResult:
         if node_id or replicates:
             raise ToolError(
                 'finish_session: outcome="no_edge" nominates nothing, so node_id must '
@@ -318,7 +248,6 @@ class FinishSessionTool:
                 + (" and so must seed_replicates" if replicates else ""),
                 retry_hint='finish_session({"outcome": "no_edge", "reason": "<evidence>"})',
             )
-        budget = self._early_finish_budget("no_edge", reason)
         self._require_reason("no_edge", reason)
         candidates = self._session_candidates()
         if not candidates:
@@ -334,10 +263,10 @@ class FinishSessionTool:
                 "outcome": "no_edge",
                 "reason": reason,
                 "candidates_evaluated": len(candidates),
-                "terminal_offline_trials": offline_trials,
-                **budget,
+                **self._budget(),
                 "pipeline_outcome": (
-                    "The arm ends without a frozen artifact: no forward test."
+                    "The arm ends without a frozen artifact: no sealed reading and no "
+                    "forward test."
                 ),
             },
             finish=True,
@@ -363,11 +292,15 @@ class FinishSessionTool:
             offered=self._session_candidates(),
         )
 
-    def _gate_record(self, gate: Mapping[str, object]) -> dict[str, object]:
-        """:func:`_gate_record` with seed replicates named by their handles."""
+    def _registration_record(self, registration: Mapping[str, object]) -> dict[str, object]:
+        """The registration's verdict and what it read of the seed replicates,
+        named by their handles."""
 
-        record = _gate_record(gate)
-        block = gate.get("seed_replicates")
+        record: dict[str, object] = {
+            "passed": bool(registration.get("passed")),
+            "reasons": [str(item) for item in registration.get("reasons") or ()],
+        }
+        block = registration.get("seed_replicates")
         if isinstance(block, Mapping):
             record["seed_replicates"] = {
                 **block,
@@ -378,30 +311,19 @@ class FinishSessionTool:
             }
         return record
 
-    def _seed_text(self, gate: Mapping[str, object]) -> str:
-        """What the gate read off the nominee's seed replicates, in one sentence."""
+    def _seed_text(self, registration: Mapping[str, object]) -> str:
+        """What registration read off the nominee's seed replicates, in one sentence."""
 
-        block = gate.get("seed_replicates")
+        block = registration.get("seed_replicates")
         block = block if isinstance(block, Mapping) else {}
         parts = [
             f"{self._named([str(entry['step_id'])])[0]} "
-            + (
-                str(entry["problem"])
-                if "problem" in entry
-                else f"reads IR {float(entry['information_ratio']):.4g} ({entry['seed_line']})"
-            )
+            + (str(entry["problem"]) if "problem" in entry else f"registers ({entry['seed_line']})")
             for entry in block.get("replicates") or ()  # type: ignore[union-attr]
         ]
-        mean = block.get("mean_information_ratio")
-        bar = block.get("information_ratio_bar")
         return (
             "Seed replicates: "
             + ("; ".join(parts) if parts else "none named, and the nominee trains a model")
-            + (
-                f"; mean IR {mean:.4g} against the nominee's bar {bar:.4g}"
-                if isinstance(mean, float) and isinstance(bar, float)
-                else ""
-            )
             + "."
         )
 
@@ -449,140 +371,20 @@ class FinishSessionTool:
             )
         return node
 
-    def _early_finish_budget(self, outcome: str, reason: str) -> dict[str, object]:
-        """The budget left at a finish, refusing an early one that gives no reason.
-
-        Early means more than a third of the replay-year budget is left while
-        another batch still fits. A freeze and a no_edge both end research for
-        the whole arm, so both owe the same account of what stays untested.
-        Without a wired budget nothing is refused.
-        """
+    def _budget(self) -> dict[str, object]:
+        """The budget left at the finish, recorded with it; nothing without a
+        wired budget."""
 
         status = self._budget_status() if self._budget_status is not None else None
-        if status is None:
-            return {}
-        recorded: dict[str, object] = {"budget_at_finish": status.to_record()}
-        if reason or not status.early_finish or not self._another_round_fits():
-            return recorded
-        minutes = max(status.inference_seconds_remaining, 0.0) / 60
-        freeze = outcome == "freeze"
-        raise ToolError(
-            f"finish_session refused: this {outcome} leaves "
-            f"{status.replay_years_remaining}/{status.replay_years_total} replay-years "
-            f"and about {minutes:.0f} min of inference time unused, more than a third "
-            "of the replay-year budget. "
-            + ("Freezing" if freeze else "Ending with no_edge")
-            + " ends research for the whole arm: either run the rounds that still test "
-            + ("the nominee" if freeze else "the open hypotheses")
-            + ", or call "
-            f"finish_session again with reason ({REASON_MIN_CHARS}-{REASON_MAX_CHARS} "
-            "chars) naming the hypotheses that stay untested and why the remaining "
-            "budget is better left unused.",
-            retry_hint=(
-                'finish_session({"outcome": "freeze", "node_id": ..., "reason": "..."})'
-                if freeze
-                else 'finish_session({"outcome": "no_edge", "reason": "..."})'
-            ),
-            details=status.to_record(),
-        )
-
-
-def offline_trials_count(value: object, *, where: str) -> int:
-    """``value`` as a declared offline-screen count (0 to ``OFFLINE_TRIALS_MAX``).
-
-    The one rule the two places a session declares offline screens and every
-    reader of them share: a whole number in range, never a bool, ``None`` or a
-    negative count. ``where`` names the declaration in the refusal, and an
-    invalid count fails rather than falling back to 0.
-    """
-
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int)
-        or not 0 <= value <= OFFLINE_TRIALS_MAX
-    ):
-        raise ValueError(
-            f"{where} must be the whole number (0 to {OFFLINE_TRIALS_MAX}) of "
-            f"candidate configurations screened offline; got {value!r}"
-        )
-    return value
-
-
-def _terminal_offline_trials(arguments: Mapping[str, object]) -> int:
-    """The finish's terminal offline-screen delta: 0 when the parameter is
-    omitted, refused when it is present but not a valid count."""
-
-    try:
-        return offline_trials_count(
-            arguments.get("offline_trials", 0), where="finish_session: offline_trials"
-        )
-    except ValueError as exc:
-        raise ToolError(
-            str(exc), error_type="schema_error", blocked_target="offline_trials"
-        ) from exc
-
-
-def _passes_but_for_replicates(gate: Mapping[str, object]) -> bool:
-    """Whether a node passes the gate read alone, or fails it only for want of
-    the seed replicates a model-training nominee must name."""
-
-    reasons = {str(item) for item in gate.get("reasons") or ()}
-    return bool(gate.get("passed")) or reasons == {"freeze_too_few_seed_replicates"}
-
-
-def _gate_record(gate: Mapping[str, object]) -> dict[str, object]:
-    """The gate's verdict and numbers, bounded for an observation."""
-
-    dsr = gate.get("deflated_sharpe")
-    dsr = dsr if isinstance(dsr, Mapping) else {}
-    record = {
-        "passed": bool(gate.get("passed")),
-        "reasons": [str(item) for item in gate.get("reasons") or ()],
-        "deflated_sharpe_probability": dsr.get("deflated_sharpe_probability"),
-        "trials": dsr.get("trials"),
-        "effective_trials": dsr.get("effective_trials"),
-        "information_ratio_bar": dsr.get("information_ratio_bar"),
-        "full_span_validations": gate.get("full_span_validations"),
-        "information_ratio": gate.get("information_ratio"),
-        "plain_excess": gate.get("plain_excess"),
-        "positive_years": gate.get("positive_years"),
-        "active_max_drawdown": gate.get("active_max_drawdown"),
-        "excess_at_cost_stress": gate.get("excess_at_cost_stress"),
-        "unavailable_reason": dsr.get("unavailable_reason"),
-        "thresholds": gate.get("thresholds"),
-    }
-    return {key: value for key, value in record.items() if value is not None}
-
-
-def _gate_numbers(gate: Mapping[str, object]) -> str:
-    record = _gate_record(gate)
-    parts = [
-        f"{name}={record[name]:.4g}" if isinstance(record[name], float) else f"{name}={record[name]}"
-        for name in (
-            "deflated_sharpe_probability",
-            "trials",
-            "effective_trials",
-            "full_span_validations",
-            "information_ratio",
-            "information_ratio_bar",
-            "positive_years",
-            "active_max_drawdown",
-            "excess_at_cost_stress",
-        )
-        if name in record
-    ]
-    return "readings: " + (", ".join(parts) if parts else "none measurable")
+        return {} if status is None else {"budget_at_finish": status.to_record()}
 
 
 __all__ = [
-    "EARLY_FINISH_BUDGET_FRACTION",
     "FINISH_OUTCOMES",
-    "OFFLINE_TRIALS_MAX",
     "REASON_MAX_CHARS",
     "REASON_MIN_CHARS",
     "SEED_REASONS",
     "FinishSessionTool",
-    "FreezeGate",
+    "Registration",
     "SessionBudgetStatus",
-    "offline_trials_count",
 ]

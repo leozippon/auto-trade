@@ -309,7 +309,8 @@ def add_acceptance_arguments(parser: argparse.ArgumentParser) -> None:
     where the console has none.
     """
     for rule in fields(AcceptanceRules):
-        kind = int if isinstance(rule.default, int) else float
+        # The module postpones annotations, so a rule's type is its name.
+        kind = int if rule.type == "int" else float
         required = rule.name in REQUIRED_ACCEPTANCE_KEYS
         default = WEB_CREATE_DEFAULTS[rule.name] if required else None
         parser.add_argument(

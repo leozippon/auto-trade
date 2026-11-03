@@ -395,18 +395,19 @@ def test_the_worker_refuses_a_release_that_does_not_reach_heldout(tmp_path: Path
         load_worker_options(experiment, repo_root=repo)
 
 
-def test_the_llm_research_session_mounts_only_the_research_end_view_and_freezes(
+def test_the_llm_research_session_mounts_only_the_visible_years_and_freezes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synthetic_provider
 ):
     """One scripted Agent session through the real Agent adapter.
 
-    It validates the working copy twice (the gate needs two full-span
-    validations) and freezes the second node through the gate, which then
-    runs forward. The session's ``/mnt/snapshot`` is the decision view at
-    research end, the two snapshot slot mounts stay empty, and no replay slot
-    appears anywhere in the session's runtime tree. A graduated sibling
-    experiment's skills are mounted as operating memory and named in the run
-    manifest.
+    It validates the working copy twice and freezes the second node, which
+    registers and then runs forward: the sealed year first, then forward and
+    Held-out. The session's ``/mnt/snapshot`` is the decision view at the end
+    of the visible year, the two snapshot slot mounts stay empty, no replay
+    slot appears anywhere in the session's runtime tree, and the strategy the
+    session replayed never saw a bar of the sealed year. A graduated sibling
+    experiment's skills, graded before the visible year ends, are mounted as
+    operating memory and named in the run manifest.
     """
 
     from autotrade.environment.llm import ProviderResponse, ToolCall
@@ -423,7 +424,7 @@ def test_the_llm_research_session_mounts_only_the_research_end_view_and_freezes(
     repo, experiment = make_arm(tmp_path, developer_mode="llm", max_replay_years=2)
     # The assertions below read the session tree. A finished arm otherwise deletes it.
     monkeypatch.setattr(worker, "release_finished_sandbox", lambda _options: None)
-    _experiment_with_skill(repo / "experiments", "adopted")
+    _experiment_with_skill(repo / "experiments", "adopted", heldout_end="20230331")
     # Graduated on a window that reaches past this arm's research end.
     _experiment_with_skill(
         repo / "experiments", "graded_on_our_window", heldout_end=GEOMETRY["heldout_end"]
@@ -518,7 +519,9 @@ def test_the_llm_research_session_mounts_only_the_research_end_view_and_freezes(
     assert "/Data2" not in transcript_text and str(options.work_root) not in transcript_text
     assert research_row["agent_trace_ref"].endswith(f"{research_row['run_id']}.jsonl")
 
-    research_anchor = decision_anchor(GEOMETRY["research_end"]).isoformat()
+    # The test rules seal the second research year: the session sees Y1.
+    first_sealed, visible_end = "20230701", "20230630"
+    research_anchor = decision_anchor(visible_end).isoformat()
     root = options.work_root / options.experiment_id / "research"
     view = json.loads((root / "runtime" / "current_snapshot" / "manifest.json").read_text(encoding="utf-8"))
     assert (view["kind"], view["decision_time"]) == ("decision_input", research_anchor)
@@ -531,16 +534,25 @@ def test_the_llm_research_session_mounts_only_the_research_end_view_and_freezes(
     assert all(item.get("kind") != "replay_slot" for item in manifests)
     for step in research_row["steps"]:
         replayed = json.loads(Path(step["validation_result_ref"]).read_text(encoding="utf-8"))
-        assert all(
-            name.split("_")[1] <= GEOMETRY["research_end"]
-            for name in replayed["pit"]["replay_slots"]
-        )
+        assert all(name.split("_")[1] <= visible_end for name in replayed["pit"]["replay_slots"])
+        # The probe: the last bar the strategy was asked to decide on, and the
+        # last day its book was marked, are both before the first sealed day.
+        decided = max(str(day)[:10].replace("-", "") for day in replayed["inference_dates"])
+        marked = max(str(row["trade_date"]) for row in replayed["equity_curve"])
+        assert decided < first_sealed and marked < first_sealed, (decided, marked)
+    # The forward stage read the sealed year once, after the session ended.
+    sealed = replay["sealed"]
+    assert (sealed["start"], sealed["end"]) == (first_sealed, GEOMETRY["research_end"])
+    assert sealed["slice"]["residual_information_ratio"] >= sealed["slice"]["bar"]
     # Everything the model read, tool schemas included, is research-session
-    # vocabulary and names no date after research end.
+    # vocabulary, names the sealed year only by its dates and no date after
+    # research end, and never a reading of the sealed year.
     read = _model_input(llm)
     assert retired_vocabulary(read) == []
+    assert f"{first_sealed}..{GEOMETRY['research_end']}" in read
     for later in ("20240701", "2024-07-01", GEOMETRY["forward_end"], GEOMETRY["heldout_end"], RELEASE_END):
         assert later not in read
+    assert f"{sealed['slice']['residual_information_ratio']:.4f}" not in read
 
 
 def _resume_script_summary() -> str:
@@ -621,8 +633,8 @@ def test_an_interrupted_llm_session_resumes_with_its_summary_budget_and_nodes(
     record = records[1]
     assert record["attempts"] == 2 and record["outcome"] == "freeze"
     assert record["steps"][0]["step_id"] == node["node_id"]
-    # Both attempts validated the same working copy: two revisions, one trial.
-    assert record["trials_to_date"] == 1 and record["freeze_gate"]["passed"] is True
+    # Both attempts validated the same working copy: two revisions, one set of bytes.
+    assert len(record["steps"]) == 2 and record["freeze_gate"]["passed"] is True
     assert len({row["revision_id"] for row in record["steps"]}) == 2
     assert len({row["fingerprint"] for row in record["steps"]}) == 1
     assert record["budget_used"]["replay_years"] == 2
@@ -644,8 +656,7 @@ def test_an_interrupted_llm_session_resumes_with_its_summary_budget_and_nodes(
     assert facts["arm"] == {
         "frozen": False,
         "freezes_per_arm": 1,
-        "trials_to_date": 1,
-        "controls_to_date": 0,
+        "validations_to_date": 1,
         "full_span_validations_to_date": 1,
     }
     assert facts["budgets"]["used_before_this_attempt"]["replay_years"] == 1
@@ -717,7 +728,7 @@ def test_an_interrupted_session_without_a_checkpoint_resumes_from_the_note_alone
     record = records[1]
     assert record["attempts"] == 2 and record["outcome"] == "no_edge"
     assert record["arm_end"] == {"status": "no_deliverable", "reason": f"no_edge: {reason}"}
-    assert record["trials_to_date"] == 1
+    assert len(record["steps"]) == 1
     # Three failed calls of the first attempt, then this attempt's.
     assert record["budget_used"]["llm_calls"] == 3 + len(second_llm.calls)
     assert result["verdict"]["status"] == "no_deliverable"
@@ -728,7 +739,7 @@ def test_an_interrupted_session_without_a_checkpoint_resumes_from_the_note_alone
     assert "中断前没有压缩摘要" in note and "模型调用 3/40" in note
     facts = json.loads(opening[0].content.split("```json\n", 1)[1].split("\n```", 1)[0])
     assert facts["budgets"]["used_before_this_attempt"]["llm_calls"] == 3
-    assert facts["arm"]["trials_to_date"] == 0
+    assert facts["arm"]["validations_to_date"] == 0
     assert not (options.work_root / options.experiment_id).exists()
 
 
@@ -952,17 +963,16 @@ def _model_input(llm) -> str:
     )
 
 
-def test_the_llm_session_validates_a_multi_year_span_is_refused_by_the_gate_and_ends_the_arm(
+def test_a_nomination_that_does_not_register_is_refused_and_the_arm_ends_with_no_edge(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synthetic_provider
 ):
     """The no_edge outcome through the real worker.
 
-    On a two-year research period the session validates its working copy on
-    Y2 and on the full span, which replays both research years as one book; a
-    freeze of the full-span node is refused by the Pipeline's own gate with
-    its named reason (one full-span validation), the session validates the
-    full span again and ends the arm with no_edge: the arm has no deliverable
-    and nothing is replayed after research end.
+    The session validates its working copy as a control; a freeze of that
+    node is refused at registration with its named reason, which carries no
+    reading of any kind; the session validates the working copy again and
+    ends the arm with no_edge: no deliverable, and nothing is replayed after
+    the visible year -- not the sealed year, not forward.
     """
 
     from autotrade.environment.llm import ProviderResponse, ToolCall
@@ -972,19 +982,17 @@ def test_the_llm_session_validates_a_multi_year_span_is_refused_by_the_gate_and_
         _NoShellRunner,
     )
 
-    def validate(span: str) -> ToolCall:
+    def validate(name: str, *, control: bool) -> ToolCall:
         return ToolCall(
-            f"valid_{span}",
+            f"valid_{name}",
             "batch_validate",
             {
-                "span": span,
-                "offline_trials": 0,
                 "candidates": [
                     {
-                        "name": "working_copy",
-                        "hypothesis": f"the working copy earns a positive active excess over {span}",
+                        "name": name,
+                        "hypothesis": "the working copy earns a positive active excess",
                         "path": "output",
-                        "control": False,
+                        "control": control,
                     }
                 ],
             },
@@ -993,20 +1001,15 @@ def test_the_llm_session_validates_a_multi_year_span_is_refused_by_the_gate_and_
     def finish(**arguments: object) -> ProviderResponse:
         return ProviderResponse(tool_calls=(ToolCall("finish", "finish_session", dict(arguments)),))
 
-    repo, experiment = make_arm(
-        tmp_path,
-        developer_mode="llm",
-        research_start="20220701",
-        max_replay_years=6,
-    )
+    repo, experiment = make_arm(tmp_path, developer_mode="llm", max_replay_years=6)
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     options = load_worker_options(experiment, repo_root=repo)
     llm = _NominatingLLM(
         [
-            ProviderResponse(tool_calls=(validate("Y2"), validate("full"))),
+            ProviderResponse(tool_calls=(validate("working_copy", control=True),)),
             finish(outcome="freeze", node_id=LAST_WORKING_COPY_NODE),
-            ProviderResponse(tool_calls=(validate("full"),)),
-            finish(outcome="no_edge", reason="完整研究期上复核后，本机制没有稳定的中性化超额，参考包的终止条件已满足，结束本臂。"),
+            ProviderResponse(tool_calls=(validate("working_copy", control=False),)),
+            finish(outcome="no_edge", reason="完整可见研究期上复核后，本机制没有稳定的主动超额，参考包的终止条件已满足，结束本臂。"),
         ]
     )
     result = run_local_interactive_worker(
@@ -1016,36 +1019,31 @@ def test_the_llm_session_validates_a_multi_year_span_is_refused_by_the_gate_and_
     records = ExperimentLedger(options.rolling.ledger_path).read()
     assert [row["record_type"] for row in records] == ["research_session"]
     [record] = records
-    assert [step["span"] for step in record["steps"]] == ["Y2", "full", "full"]
-    # One working copy validated on three spans is one trial.
-    assert (record["outcome"], record["frozen"], record["trials_to_date"]) == ("no_edge", None, 1)
+    assert [(step["span"], step["control"]) for step in record["steps"]] == [("full", True), ("full", False)]
+    assert (record["outcome"], record["frozen"]) == ("no_edge", None)
     assert result["verdict"] == {"status": "no_deliverable", "reasons": [f"no_edge: {record['reason']}"]}
+    # The session prepared no view of the sealed year and no forward slot.
     assert all(item[0] != "heldout" for item in synthetic_provider.requests)
+    assert all(start < "20230701" for phase, start, _end, _decision in synthetic_provider.requests if phase == "valid")
 
-    # The refusal the model read names the gate's reason and its numbers.
+    # The refusal the model read names the registration's reason and nothing measured.
     refusal = next(
         message.content
         for call in llm.calls
         for message in call["messages"]
-        if "freeze_gate_refused" in (message.content or "")
+        if "does not register for a freeze" in (message.content or "")
     )
-    assert "freeze_too_few_full_span_validations" in refusal and "full_span_validations=1" in refusal
-    assert "no_edge" in refusal and "continue" not in refusal
+    assert "freeze_nominee_is_control" in refusal and "no_edge" in refusal
+    assert "information_ratio" not in refusal and "continue" not in refusal
 
-    # Y2 replayed one slot; the full span replayed Y1 and then Y2 as one book.
-    year, full, _again = (
-        json.loads(Path(step["validation_result_ref"]).read_text(encoding="utf-8")) for step in record["steps"]
-    )
-    assert [name.split("_")[:2] for name in year["pit"]["replay_slots"]] == [["20230701", "20240630"]]
-    assert [name.split("_")[:2] for name in full["pit"]["replay_slots"]] == [
-        ["20220701", "20230630"],
-        ["20230701", "20240630"],
-    ]
-    assert full["equity_curve"][0]["trade_date"] == "20220701"
-    assert full["equity_curve"][-1]["trade_date"] <= GEOMETRY["research_end"]
-    assert [row["label"] for row in full["stats"]["sub_windows"]] == ["202207-202306", "202307-202406"]
+    # The full span is the visible year, one slot, one book.
+    first = json.loads(Path(record["steps"][0]["validation_result_ref"]).read_text(encoding="utf-8"))
+    assert [name.split("_")[:2] for name in first["pit"]["replay_slots"]] == [["20220701", "20230630"]]
+    assert first["equity_curve"][0]["trade_date"] == "20220701"
+    assert first["equity_curve"][-1]["trade_date"] <= "20230630"
 
-    # The session's facts: one session, started from the template, no trials yet.
+    # The session's facts: one session, started from the template, the
+    # visible year and the sealed year's dates, no Validation yet.
     system = next(
         message.content
         for call in llm.calls
@@ -1055,23 +1053,19 @@ def test_the_llm_session_validates_a_multi_year_span_is_refused_by_the_gate_and_
     facts = json.loads(system.split("```json\n", 1)[1].split("\n```", 1)[0])
     assert "session" not in facts["identity"] and "earlier_sessions" not in facts
     assert facts["artifact_contract"]["start"]["kind"] == "template"
-    assert [year["label"] for year in facts["research_geometry"]["years"]] == ["Y1", "Y2"]
-    assert facts["research_geometry"]["research_period"] == "20220701..20240630"
-    # Each year names the history of the view its replay starts from: the
-    # arm's window_months (24) ending on the anchor that view was prepared at,
-    # not the research-end view's window.
-    anchors = {
-        start: decision.strftime("%Y%m%d")
-        for phase, start, _end, decision in synthetic_provider.requests
-        if phase == "valid"
+    assert [year["label"] for year in facts["research_geometry"]["years"]] == ["Y1"]
+    assert facts["research_geometry"]["research_period"] == "20220701..20230630"
+    assert facts["research_geometry"]["sealed_years"]["period"] == "20230701..20240630"
+    assert facts["research_geometry"]["input_window"] == "20210701..20230630"
+    assert facts["arm"] == {
+        "frozen": False,
+        "freezes_per_arm": 1,
+        "validations_to_date": 0,
+        "full_span_validations_to_date": 0,
     }
-    assert anchors == {"20220701": "20220630", "20230701": "20230630"}
-    assert [(year["start"], year["input_window"]) for year in facts["research_geometry"]["years"]] == [
-        ("20220701", "20200701..20220630"),
-        ("20230701", "20210701..20230630"),
-    ]
-    assert facts["research_geometry"]["input_window"] == "20220701..20240630"
-    assert facts["arm"]["trials_to_date"] == 0 and facts["arm"]["full_span_validations_to_date"] == 0
+    gate = facts["artifact_contract"]["acceptance_rules"]["sealed_gate"]
+    assert (gate["alpha"], gate["sealed_years"], gate["bar_over_sealed_years"]) == (0.05, 1, 1.645)
+    assert "## 封存检验" in system and "封存的 1 年约 1.645" in system
 
     read = _model_input(llm)
     assert retired_vocabulary(read) == []
@@ -1082,32 +1076,30 @@ def test_the_llm_session_validates_a_multi_year_span_is_refused_by_the_gate_and_
 def test_a_span_the_host_cannot_replay_ends_the_arm_environment_blocked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synthetic_provider, capsys
 ):
-    """Round 20261015 through the real worker: every replay crossing into Y2
-    fails in the host's as-of merge. The session validates Y1, then the full
-    span fails on the environment twice; the second ends the session without
-    another model call, and the arm ends ``environment_blocked`` -- not
-    ``no_deliverable`` -- with the host's reason in its ledger record, its
-    terminal status, the worker log and the console's attention line. No
-    replay follows and the arm is never incubated."""
+    """Round 20261015 through the real worker: every replay of the visible
+    year fails in the host's as-of merge. The full span fails on the
+    environment twice; the second ends the session without another model
+    call, and the arm ends ``environment_blocked`` -- not ``no_deliverable``
+    -- with the host's reason in its ledger record, its terminal status, the
+    worker log and the console's attention line. No replay follows."""
 
     import pyarrow as pa
 
     from autotrade.environment.llm import ProviderResponse, ToolCall
     from autotrade.pipelines import pit_backend
-    from autotrade.pipelines.ledger import require_incubable
     from autotrade.webui.registry import summarize_experiment
     from tests.unit.test_interactive_worker_local import _NominatingLLM, _NoShellRunner
 
     real_evaluate = pit_backend.PITDailyEvaluationBackend.evaluate
 
-    def merge_breaks_past_y1(self, request, **kwargs):
-        if request.end > "20230630":
+    def merge_breaks(self, request, **kwargs):
+        if request.end > "20230331":
             raise pa.ArrowTypeError(
                 "Unable to merge: Field dataset has incompatible types: large_string vs string"
             )
         return real_evaluate(self, request, **kwargs)
 
-    monkeypatch.setattr(pit_backend.PITDailyEvaluationBackend, "evaluate", merge_breaks_past_y1)
+    monkeypatch.setattr(pit_backend.PITDailyEvaluationBackend, "evaluate", merge_breaks)
 
     def validate(span: str) -> ProviderResponse:
         return ProviderResponse(
@@ -1117,7 +1109,6 @@ def test_a_span_the_host_cannot_replay_ends_the_arm_environment_blocked(
                     "batch_validate",
                     {
                         "span": span,
-                        "offline_trials": 0,
                         "candidates": [
                             {
                                 "name": "working_copy",
@@ -1131,20 +1122,18 @@ def test_a_span_the_host_cannot_replay_ends_the_arm_environment_blocked(
             )
         )
 
-    repo, experiment = make_arm(
-        tmp_path, developer_mode="llm", research_start="20220701", max_replay_years=6
-    )
+    repo, experiment = make_arm(tmp_path, developer_mode="llm", max_replay_years=6)
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     options = load_worker_options(experiment, repo_root=repo)
     never = ProviderResponse(
         tool_calls=(ToolCall("finish", "finish_session", {"outcome": "no_edge", "reason": "x" * 60}),)
     )
-    llm = _NominatingLLM([validate("Y1"), validate("full"), validate("full"), never])
+    llm = _NominatingLLM([validate("full"), validate("full"), never])
     result = run_local_interactive_worker(
         options, llm=llm, command_runner_factory=lambda _workspace: _NoShellRunner()
     )
 
-    assert len(llm.calls) == 3
+    assert len(llm.calls) == 2
     [record] = ExperimentLedger(options.rolling.ledger_path).read()
     reason = record["reason"]
     assert reason.startswith("span full: 2 batches failed on the environment in every candidate")
@@ -1155,16 +1144,14 @@ def test_a_span_the_host_cannot_replay_ends_the_arm_environment_blocked(
         None,
     )
     assert record["arm_end"] == {"status": "environment_blocked", "reason": reason}
-    assert [step["span"] for step in record["steps"]] == ["Y1"]
-    # The failed batches were refunded: only Y1's replay-year was spent.
-    assert record["budget_used"]["replay_years"] == 1
+    assert record["steps"] == []
+    # The failed batches were refunded: no replay-year was spent.
+    assert record["budget_used"]["replay_years"] == 0
     verdict = {"status": "environment_blocked", "reasons": [reason]}
     assert result["verdict"] == verdict
     assert read_status(experiment / "hitl" / "status.json")["verdict"] == verdict
     assert f"arm environment_blocked: {reason}" in capsys.readouterr().err
     assert all(item[0] != "heldout" for item in synthetic_provider.requests)
-    with pytest.raises(ValueError, match="only an arm whose verdict is no_deliverable or discarded"):
-        require_incubable([record])
     row = summarize_experiment(experiment)
     assert row["ending"] == {"state": "environment_blocked", "reason": reason}
     assert row["attention"] == {"reason": reason}

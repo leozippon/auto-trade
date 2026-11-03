@@ -54,7 +54,7 @@ from autotrade.pipelines.session_tools import (
     BatchValidateTool,
     SessionValidations,
 )
-from tests.unit.acceptance_fixture import RULES
+from tests.unit.acceptance_fixture import RULES, SEALED_PERIOD
 
 from .fixtures_sandbox import PassingModificationCheck
 from .test_batch_validate import _write_style_sidecar
@@ -63,10 +63,9 @@ from .test_batch_validate import _write_style_sidecar
 def _passing_gate(
     node_id: str,
     seed_replicates: tuple[str, ...] = (),
-    offline_trials: int = 0,
     deterministic: bool = False,
 ) -> dict[str, object]:
-    """A freeze gate every node passes: these tests are about the Runner."""
+    """A registration every node passes: these tests are about the Runner."""
     return {"passed": True, "reasons": []}
 
 
@@ -153,6 +152,7 @@ def _research_request() -> ResearchSessionRequest:
         record_failed_attempts=False,
         benchmark_index=DEFAULT_BENCHMARK_INDEX,
         acceptance_rules=RULES.to_record(),
+        sealed_period=SEALED_PERIOD,
     )
 
 
@@ -209,7 +209,6 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
         experiment_dir=experiment,
     )
     working_copy = {
-        "offline_trials": 0,
         "candidates": [
             {"name": "working_copy", "hypothesis": "h", "path": "output", "control": False}
         ],
@@ -249,7 +248,7 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
         tools=ToolRegistry(
             [
                 batch,
-                FinishSessionTool(tree, session_ref=fold_ref, freeze_gate=_passing_gate),
+                FinishSessionTool(tree, session_ref=fold_ref, registration=_passing_gate),
             ]
         ),
         system_prompt="repair a failed validation and finish",
@@ -400,7 +399,7 @@ def test_complete_node_enters_hard_finalization_without_compaction_or_research(
                     models,
                     session_ref="session_ref_current",
                 ),
-                FinishSessionTool(tree, session_ref="session_ref_current", freeze_gate=_passing_gate),
+                FinishSessionTool(tree, session_ref="session_ref_current", registration=_passing_gate),
             ]
         ),
         system_prompt="research before finishing",
@@ -512,7 +511,7 @@ def test_a_validation_completing_inside_the_grace_keeps_the_conversation(
         tools=ToolRegistry(
             [
                 SlowValidation(),
-                FinishSessionTool(tree, session_ref="fold_grace", freeze_gate=_passing_gate),
+                FinishSessionTool(tree, session_ref="fold_grace", registration=_passing_gate),
             ]
         ),
         system_prompt="fold system prompt",
@@ -862,12 +861,13 @@ def _no_op_strategy(path: Path) -> Path:
     return path
 
 
-def test_hard_finalization_labels_every_candidate_with_its_freeze_gate_verdict(
+def test_hard_finalization_lists_every_candidate_without_a_gate_reading(
     tmp_path: Path,
 ) -> None:
-    """The choice made in the finalize window is not blind to the gate: each
-    listed node says whether a freeze of it would pass, and the node_id enum
-    covers exactly the session's complete Validations."""
+    """The finalize window lists the session's complete Validations by id
+    and handle and carries no gate reading of any kind; the node_id enum
+    covers exactly those Validations, and the registration refuses a node
+    that does not register."""
 
     clock = FakeClock()
     time_budget = InferenceTimeBudget(duration_seconds=10.0, clock=clock)
@@ -915,12 +915,11 @@ def test_hard_finalization_labels_every_candidate_with_its_freeze_gate_verdict(
     def gate(
         node_id: str,
         seed_replicates: tuple[str, ...] = (),
-        offline_trials: int = 0,
         deterministic: bool = False,
     ) -> dict[str, object]:
         if node_id == strong_id:
             return {"passed": True, "reasons": []}
-        return {"passed": False, "reasons": ["freeze_deflated_sharpe_below_threshold"]}
+        return {"passed": False, "reasons": ["freeze_needs_full_span_validation"]}
 
     scripted = ScriptedLLM(
         [
@@ -942,7 +941,7 @@ def test_hard_finalization_labels_every_candidate_with_its_freeze_gate_verdict(
             [
                 TwoValidations(),
                 StepRollbackTool(tree, output, models, session_ref="session_ref_current"),
-                FinishSessionTool(tree, session_ref="session_ref_current", freeze_gate=gate),
+                FinishSessionTool(tree, session_ref="session_ref_current", registration=gate),
             ]
         ),
         system_prompt="finish this session",
@@ -955,7 +954,6 @@ def test_hard_finalization_labels_every_candidate_with_its_freeze_gate_verdict(
         ),
         time_budget=time_budget,
         event_sink=lambda event, payload: events.append((event, payload)),
-        freeze_gate=gate,
     )
 
     result = runner.run("finish")
@@ -966,10 +964,11 @@ def test_hard_finalization_labels_every_candidate_with_its_freeze_gate_verdict(
     assert payload["observation"] == "session_hard_finalization"
     candidates = payload["complete_validation_candidates"]
     assert [candidate["node_id"] for candidate in candidates] == [weak_id, strong_id]
-    assert candidates[0]["passes_freeze_gate"] is False
-    assert candidates[0]["freeze_gate_reasons"] == ["freeze_deflated_sharpe_below_threshold"]
-    assert candidates[1]["passes_freeze_gate"] is True
-    assert "freeze_gate_reasons" not in candidates[1]
+    assert not any(
+        key in candidate
+        for candidate in candidates
+        for key in ("passes_freeze_gate", "freeze_gate_reasons", "residual_reading")
+    )
     finish_schema = next(
         item
         for item in scripted.calls[1]["tools"]
@@ -1182,7 +1181,7 @@ def test_the_parent_stops_waiting_for_a_child_at_the_finalization_boundary(
                     models,
                     session_ref="session_ref_current",
                 ),
-                FinishSessionTool(tree, session_ref="session_ref_current", freeze_gate=_passing_gate),
+                FinishSessionTool(tree, session_ref="session_ref_current", registration=_passing_gate),
             ]
         ),
         system_prompt="fold",

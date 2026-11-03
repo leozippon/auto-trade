@@ -43,12 +43,8 @@ from autotrade.environment.tools.report_issue import (
 )
 from autotrade.pipelines.agent_inbox import INBOX_NAME, inbox_public_view
 from autotrade.pipelines.calendar import FULL_SPAN
-from autotrade.pipelines.config import (
-    acceptance_default,
-    acceptance_for,
-    rolling_default,
-)
-from autotrade.pipelines.experiment import freeze_gate_for, validation_statistics
+from autotrade.pipelines.config import defaulted_acceptance, rolling_default
+from autotrade.pipelines.experiment import validation_statistics
 from autotrade.pipelines.hitl_state import (
     ARCHIVED_NAME,
     CONTROL_NAME,
@@ -71,7 +67,6 @@ from autotrade.pipelines.ledger import (
     experiment_verdict,
     forward_record,
     frozen_record,
-    lineage_record,
     paper_candidate,
     recorded_path,
     research_records,
@@ -461,7 +456,7 @@ def arm_ending(
     if session.get("outcome") == "deadline":
         finish = str(session.get("finish_reason") or "")
         return {"state": "budget_exhausted", "reason": _BUDGET_EXHAUSTED.get(finish, finish)}
-    return {"state": "rejected", "reason": "提名未通过定版检验"}
+    return {"state": "rejected", "reason": "提名未通过定版登记"}
 
 
 def arm_attention(
@@ -516,6 +511,7 @@ def _forward_view(
     return {
         "recorded_at": record.get("recorded_at"),
         "error": identity.public_text(str(record.get("error") or "")) or None,
+        "sealed": _sealed_view(identity, record.get("sealed")),
         "replay": dict(_mapping(record.get("replay"))),
         "result": _result_name(record.get("result_ref")),
         "slices": {
@@ -527,6 +523,52 @@ def _forward_view(
         # Diagnostic: the forward slice's excess among random-name replays.
         "null_percentile": _number(_mapping(null.get("step")).get("excess_percentile")),
         "verdict": {**verdict, "reasons": _current_reasons(verdict.get("reasons"))},
+    }
+
+
+# What a sealed reading states, as ``verdict.sealed_slice`` records it.
+SEALED_FIELDS = (
+    "start",
+    "end",
+    "days",
+    "years",
+    "residual_information_ratio",
+    "residual_excess",
+    "residual_tracking_error",
+    "market_beta",
+    "size_beta",
+    "value_beta",
+    "bar",
+)
+
+
+def _sealed_view(identity: PublicIdentity, block: object) -> dict[str, object] | None:
+    """The forward record's sealed reading: the frozen book's residual IR on
+    the sealed years against its bar, whether it passed, its seed replicates'
+    readings beside it, or the strategy error that left it unread. ``None``
+    on a record written before the sealed gate."""
+
+    sealed = _mapping(block)
+    if not sealed:
+        return None
+    reading = _mapping(sealed.get("slice"))
+    return {
+        "label": sealed.get("label"),
+        "result": _result_name(sealed.get("result_ref")),
+        **{name: reading.get(name) for name in SEALED_FIELDS},
+        "passed": not reading.get("reasons"),
+        "reasons": [str(reason) for reason in reading.get("reasons") or ()],
+        "strategy_error": bool(reading.get("strategy_error")),
+        "error": identity.public_text(str(reading.get("error") or "")) or None,
+        "seed_replicates": [
+            {
+                "source_step_id": entry.get("source_step_id"),
+                "residual_information_ratio": _number(entry.get("residual_information_ratio")),
+                "bar": _number(entry.get("bar")),
+            }
+            for entry in reading.get("seed_replicates") or ()
+            if isinstance(entry, Mapping)
+        ],
     }
 
 
@@ -860,8 +902,8 @@ def _cost_stress_multiplier(directory: Path) -> float:
     of the rules, so an arm stamped before a rule became required still
     lists."""
 
-    value = read_json(directory / HITL_DIR_NAME / PARAMS_NAME).get("cost_stress_multiplier")
-    return float(value if value is not None else acceptance_default("cost_stress_multiplier"))  # type: ignore[arg-type]
+    params = read_json(directory / HITL_DIR_NAME / PARAMS_NAME)
+    return float(defaulted_acceptance(params)["cost_stress_multiplier"])  # type: ignore[arg-type]
 
 
 def _step_view(row: Mapping[str, object], multiplier: float) -> dict[str, object]:
@@ -913,23 +955,13 @@ def _best_row(steps: Sequence[Mapping[str, object]]) -> Mapping[str, object] | N
 
 
 def _live_candidate(
-    directory: Path,
-    records: Sequence[Mapping[str, object]],
-    steps: Sequence[Mapping[str, object]],
-    *,
-    gated: bool,
+    directory: Path, steps: Sequence[Mapping[str, object]], *, running: bool
 ) -> dict[str, object] | None:
-    """An unrecorded session's best Validation so far and, ``gated`` while
-    its worker runs, the deflated Sharpe probability the freeze gate gives it
-    now, the trials it deflates against and what its zero-skill panel earned.
-
-    The gate is the pipeline's own (``experiment.freeze_gate_for``) over the
-    arm's lineage and the Validations recorded so far, as the session reads
-    it; no threshold moves the deflated Sharpe, so the default rules. A
-    session whose worker no longer runs is judged by nothing: an arm stopped
-    mid-session under rules since retired would otherwise show numbers its
-    session never saw.
-    """
+    """An unrecorded session's best Validation so far and, while its worker
+    is ``running``, what its zero-skill panel earned. No gate is read: a
+    freeze is a registration, and the one performance reading, on the sealed
+    years, exists only after the session has ended. A session whose worker
+    no longer runs is read off its own files alone."""
 
     best = _best_row(steps)
     if best is None:
@@ -937,21 +969,11 @@ def _live_candidate(
     view = {
         **_step_view(best, _cost_stress_multiplier(directory)),
         "result": _result_name(best.get("validation_result_ref")),
+        "deflated_sharpe_probability": None,
+        "trials": None,
     }
-    if not gated:
-        return {**view, "deflated_sharpe_probability": None, "trials": None}
-    lineage = lineage_record(records)
-    try:
-        gate = freeze_gate_for(
-            [lineage] if lineage is not None else [],
-            steps,
-            best,
-            experiment_dir=directory,
-            acceptance=acceptance_for(read_json(directory / HITL_DIR_NAME / PARAMS_NAME)),
-        )
-    except (OSError, ValueError):
-        gate = {}
-    dsr = _mapping(gate.get("deflated_sharpe"))
+    if not running:
+        return view
     try:
         sidecar = json.loads(
             (Path(str(best["validation_result_ref"])).parent / STYLE_ARTIFACT_NAME).read_text(
@@ -960,13 +982,8 @@ def _live_candidate(
         )
     except (OSError, ValueError):
         sidecar = {}
-    return {
-        **view,
-        # What the zero-skill panel itself earned over the same span.
-        "panel_return": panel_return(sidecar),
-        "deflated_sharpe_probability": _number(dsr.get("deflated_sharpe_probability")),
-        "trials": dsr.get("trials"),
-    }
+    # What the zero-skill panel itself earned over the same span.
+    return {**view, "panel_return": panel_return(sidecar)}
 
 
 def _recorded_best(directory: Path, record: Mapping[str, object]) -> dict[str, object] | None:
@@ -1018,10 +1035,10 @@ def _research_best(
     The recorded research session's, read off its record as the experiment
     page reads it (:func:`_recorded_best`), so both surfaces name one number;
     before the session is recorded, the same choice over the Validations it
-    has recorded so far (:func:`_live_steps`), gated now while its worker is
-    ``running``, so the card, the tiles and the curve follow the research as
-    it happens. ``None`` while no measurable full-span Validation exists —
-    the card then shows no research evidence rather than a dash.
+    has recorded so far (:func:`_live_steps`), so the card, the tiles and
+    the curve follow the research as it happens. ``None`` while no
+    measurable full-span Validation exists — the card then shows no research
+    evidence rather than a dash.
     """
 
     research = research_records(records)
@@ -1031,15 +1048,14 @@ def _research_best(
             return {"session_key": record.get("session_key"), **best}
     if research:
         return None
-    best = _live_best(directory, records, gated=running)
+    best = _live_best(directory, running=running)
     return {"session_key": RESEARCH_SESSION_KEY, **best} if best is not None else None
 
 
 # A recorded Validation is immutable: its sidecar and its result's style file
 # are read once per node and kept for the process lifetime, and the best
-# candidate (with the freeze gate the Pipeline computes for it) is kept per
-# node set, so a listing poll of a running arm re-reads nothing until the
-# session records another node.
+# candidate is kept per node set, so a listing poll of a running arm re-reads
+# nothing until the session records another node.
 _LIVE_STEP_CACHE: dict[tuple[str, str], dict[str, object]] = {}
 _LIVE_BEST_CACHE: dict[tuple[str, bool, tuple[str, ...]], dict[str, object] | None] = {}
 
@@ -1076,25 +1092,20 @@ def _live_steps(directory: Path) -> list[dict[str, object]]:
                 "summary": dict(_mapping(record.get("summary"))),
                 "validation_result_ref": reference,
                 "graded": figures,
-                # What the freeze gate's trial family reads; absent (no
-                # control, undeclared) on a sidecar written before them.
-                **{
-                    name: record.get(name)
-                    for name in ("control", "batch_id", "offline_trials")
-                },
+                # A control is never the arm's best; absent on a sidecar
+                # written before controls were registered.
+                **{name: record.get(name) for name in ("control", "batch_id")},
             }
             _LIVE_STEP_CACHE[key] = row
         rows.append(row)
     return rows
 
 
-def _live_best(
-    directory: Path, records: Sequence[Mapping[str, object]], *, gated: bool
-) -> dict[str, object] | None:
+def _live_best(directory: Path, *, running: bool) -> dict[str, object] | None:
     steps = _live_steps(directory)
-    key = (str(directory), gated, tuple(sorted(str(row.get("step_id")) for row in steps)))
+    key = (str(directory), running, tuple(sorted(str(row.get("step_id")) for row in steps)))
     if key not in _LIVE_BEST_CACHE:
-        _LIVE_BEST_CACHE[key] = _live_candidate(directory, records, steps, gated=gated)
+        _LIVE_BEST_CACHE[key] = _live_candidate(directory, steps, running=running)
     return _LIVE_BEST_CACHE[key]
 
 
@@ -1125,39 +1136,33 @@ def _verdict_thresholds(
 ) -> dict[str, object]:
     """The graduation thresholds the replay will be held to, from the arm's
     own stamped rules, so the console lists the criteria before the replay
-    has run. The forward record's own block replaces them once it exists."""
+    has run. The forward record's own block replaces them once it exists.
 
-    effective = {**WEB_CREATE_DEFAULTS, **params}
+    The rules are read as the arm's params resolve them without the
+    required ones (``config.defaulted_acceptance``), never through the
+    console's creation defaults: an arm created before a rule became required
+    still shows the limits it was created with."""
+
+    rules = defaulted_acceptance(params)
     months = _months_between(replay.get("start"), replay.get("forward_end"))
-    rules = acceptance_for(effective)
     # An arm created since the five limits reached the create form states all
     # of them; an earlier arm's params.json carries its equity drawdown limit
-    # alone, and that is all it is held to. Statistical bars always resolve
-    # (missing keys take today's defaults) so the listing matches the worker.
-    # Freeze-gate knobs stay off this preview: they are not forward criteria.
-    limits: dict[str, object] = {"max_drawdown": _number(effective.get("max_drawdown"))}
-    if "active_max_drawdown" in params:
-        record = rules.to_record()
-        limits = {
-            key: record[key]
-            for key in (
-                "max_drawdown",
-                "active_max_drawdown",
-                "tracking_error_cap",
-                "beta_min",
-                "beta_max",
-            )
-        }
+    # alone, and that is all it is held to.
+    names = ("max_drawdown", "active_max_drawdown", "tracking_error_cap", "beta_min", "beta_max")
+    limits = (
+        {name: rules[name] for name in names}
+        if "active_max_drawdown" in params
+        else {"max_drawdown": _number(params.get("max_drawdown"))}
+    )
     return {
-        "forward_confidence": rules.forward_confidence,
-        "recency_months": rules.recency_months,
+        "forward_confidence": rules["forward_confidence"],
         **limits,
-        "cost_stress_multiplier": rules.cost_stress_multiplier,
+        "cost_stress_multiplier": rules["cost_stress_multiplier"],
         "min_round_trips": (
-            rules.min_round_trips_per_month * months if months else None
+            float(rules["min_round_trips_per_month"]) * months if months else None  # type: ignore[arg-type]
         ),
-        "min_mean_gross": rules.min_mean_gross,
-        "heldout_tolerance_z": rules.heldout_tolerance_z,
+        "min_mean_gross": rules["min_mean_gross"],
+        "heldout_tolerance_z": rules["heldout_tolerance_z"],
     }
 
 

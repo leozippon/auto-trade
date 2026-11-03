@@ -48,11 +48,12 @@ REVISIONS_DIR = Path("artifacts") / "strategy" / "revisions"
 
 def revision_fingerprint(experiment_dir: str | Path, revision_id: str) -> str:
     """The artifact fingerprint of the bytes one recorded revision holds, as its
-    manifest records it: the identity of the strategy a Validation replayed, so
-    two Validations of the same bytes are one trial (``experiment.trial_family``).
+    manifest records it: the identity of the strategy a Validation replayed,
+    which a seed replicate's registration compares
+    (``experiment.freeze_registration``).
 
     A revision with no manifest is one the host cannot identify, so it raises
-    instead of counting the Validation as a strategy of its own.
+    instead of reading the Validation as a strategy of its own.
     """
 
     path = Path(experiment_dir) / REVISIONS_DIR / revision_id / REVISION_MANIFEST_FILE
@@ -82,7 +83,6 @@ def record_step_sidecar(experiment_dir: str | Path, step: StepResult) -> Path:
             "result_ref": step.validation.result_ref,
             "control": step.control,
             "batch_id": step.batch_id,
-            "offline_trials": step.offline_trials,
         },
     )
     return path
@@ -93,8 +93,8 @@ def load_recorded_steps(experiment_dir: str | Path) -> tuple[StepResult, ...]:
     in tree order, rebuilt from the published tree and the sidecars.
 
     A complete node without its sidecar is a validation the host cannot
-    account for, so it fails the attempt instead of silently narrowing the
-    trial pool the freeze gate deflates over. A sidecar's result reference is
+    account for, so it fails the attempt instead of silently dropping it.
+    A sidecar's result reference is
     read where the arm is now (``ledger.recorded_path``), so an arm moved
     since its interrupted attempt resumes in place; one that names nothing
     inside the arm raises ``FileNotFoundError``.
@@ -120,11 +120,10 @@ def load_recorded_steps(experiment_dir: str | Path) -> tuple[StepResult, ...]:
                     str(recorded_path(directory, str(record["result_ref"]))),
                 ),
                 span=str(record["span"]),
-                # A sidecar written before batches registered controls and
-                # declared offline screens has neither: no control, undeclared.
+                # A sidecar written before batches registered controls has
+                # none: no control.
                 control=record.get("control") is True,
                 batch_id=record.get("batch_id"),
-                offline_trials=record.get("offline_trials"),
                 fingerprint=revision_fingerprint(directory, str(record["revision_id"])),
             )
         )

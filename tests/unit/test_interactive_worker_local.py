@@ -800,7 +800,6 @@ VALIDATE_WORKING_COPY = ToolCall(
     "valid",
     "batch_validate",
     {
-        "offline_trials": 0,
         "candidates": [
             {
                 "name": "working_copy",
@@ -1042,7 +1041,11 @@ def test_webui_persistent_create_uses_available_worker_entrypoint(
     )
     with stubbed_gpu_probe():
         created = manager.create_experiment(
-            {"experiment_id": "worker_smoke", "initial_control_mode": "manual"}
+            {
+                "experiment_id": "worker_smoke",
+                "initial_control_mode": "manual",
+                "sealed_years": REQUIRED_RULES["sealed_years"],
+            }
         )
     assert created["spawned"] is True
     assert created["worker"] == "worker_smoke"
@@ -1182,6 +1185,8 @@ def _console_params(repo: Path, experiments_root: Path, **overrides) -> dict:
             "experiments_root": str(experiments_root),
             "work_root": str(repo / ".runtime/sandboxes"),
             "_creation_surface": "webui",
+            # The rule a create request must state (``WEB_REQUIRED_PARAMS``).
+            "sealed_years": REQUIRED_RULES["sealed_years"],
         }
     )
     params.update(overrides)

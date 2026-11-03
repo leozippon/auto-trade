@@ -69,10 +69,9 @@ class FakeInbox:
 def _passing_gate(
     node_id: str,
     seed_replicates: tuple[str, ...] = (),
-    offline_trials: int = 0,
     deterministic: bool = False,
 ) -> dict[str, object]:
-    """A freeze gate every node passes: these tests are about the Runner."""
+    """A registration every node passes: these tests are about the Runner."""
     return {"passed": True, "reasons": []}
 
 
@@ -111,7 +110,7 @@ def _finish_tool(root: Path) -> tuple[FinishSessionTool, str]:
         revision_id=new_revision_id("revision"),
         metrics={"total_return": 0.01},
     )
-    return FinishSessionTool(tree, session_ref="session_ref_ab", freeze_gate=_passing_gate), node_id
+    return FinishSessionTool(tree, session_ref="session_ref_ab", registration=_passing_gate), node_id
 
 
 def _user_texts(messages: list[ChatMessage]) -> list[str]:

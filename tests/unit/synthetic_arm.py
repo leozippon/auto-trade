@@ -30,16 +30,16 @@ from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION, SnapshotBu
 from tests.unit.acceptance_fixture import REQUIRED_RULES
 
 GENERATION = "synthetic_generation"
+# Two research years: the session sees Y1 and the test rules seal Y2.
 GEOMETRY = {
-    "research_start": "20230701",
+    "research_start": "20220701",
     "research_end": "20240630",
     "forward_end": "20250630",
     "heldout_end": "20250930",
 }
 # The release ends inside Held-out.
 RELEASE_END = "20250912"
-# History starts two months before a two-year research period (20220701) so
-# an arm may also research Y1..Y2 of the same market.
+# History starts two months before the research period (20220701).
 FIRST_DAY = date(2022, 5, 2)
 SYMBOLS = [f"{number:06d}.SZ" for number in range(1, 31)]
 EDGE_SYMBOL = SYMBOLS[0]

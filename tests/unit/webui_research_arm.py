@@ -4,9 +4,10 @@ The console reads experiments only through their files: ``hitl/`` control
 plane, the ledger and the result artifacts it names. ``build_arm`` writes those
 for one arm at a chosen stage — researching, frozen with the forward replay
 sealed, or with its verdict — from synthetic daily series, and computes every
-recorded statistic with the pipeline's own functions (``freeze_gate_for``,
-``forward_slice``, ``heldout_slice``, ``graduation_verdict``), so a projection
-test reads the same numbers a real arm would carry.
+recorded statistic with the pipeline's own functions
+(``freeze_registration``, ``sealed_slice``, ``forward_slice``,
+``heldout_slice``, ``graduation_verdict``), so a projection test reads the
+same numbers a real arm would carry.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME, STYLE_SCHEMA
 from autotrade.environment.runtime import write_json_atomic
 from autotrade.pipelines.calendar import FULL_SPAN
 from autotrade.pipelines.config import DEFAULT_RESEARCH_GEOMETRY, AcceptanceRules
-from autotrade.pipelines.experiment import freeze_gate_for
+from autotrade.pipelines.experiment import freeze_registration
 from autotrade.pipelines.hitl_state import (
     ControlState,
     build_session_plan,
@@ -40,6 +41,8 @@ from autotrade.pipelines.verdict import (
     graded_statistics,
     graduation_verdict,
     heldout_slice,
+    residual_reading,
+    sealed_slice,
 )
 from tests.unit.acceptance_fixture import REQUIRED_RULES
 
@@ -88,6 +91,11 @@ REPLAY = {
 # The rules every recorded statistic of the arm is judged under: drawdown
 # limits wide enough that the synthetic series' edge alone decides.
 RULES = AcceptanceRules(**REQUIRED_RULES, max_drawdown=0.9, active_max_drawdown=0.9)
+# The sealed research year of the default geometry under the fixture's rules.
+SEALED = (
+    GEOMETRY.split_sealed(RULES.sealed_years)[1][0].start,
+    GEOMETRY.split_sealed(RULES.sealed_years)[1][-1].end,
+)
 
 
 def _business_days(start: str, count: int) -> list[str]:
@@ -281,11 +289,11 @@ def build_arm(
             _step(directory, "research", 2, edge=0.001, seed=4, span="Y3"),
         ]
         nominee = steps[1]
-        gate = freeze_gate_for([], steps, nominee, experiment_dir=directory, acceptance=RULES)
+        gate = freeze_registration(nominee, experiment_dir=directory, acceptance=RULES)
+        statistics = nominee["graded"]
         # The seed replicate: the full-span step other than the nominee.
         replicate = steps[0]
         if seeded:
-            ratios = [gate["information_ratio"], replicate["graded"]["information_ratio"]]
             gate = {
                 **gate,
                 "seed_replicates": {
@@ -294,11 +302,9 @@ def build_arm(
                         {
                             "step_id": replicate["step_id"],
                             "seed_line": "main.py: SEED_BASE = 2000",
-                            "information_ratio": ratios[1],
+                            "information_ratio": replicate["graded"]["information_ratio"],
                         }
                     ],
-                    "mean_information_ratio": sum(ratios) / len(ratios),
-                    "information_ratio_bar": gate["deflated_sharpe"]["information_ratio_bar"],
                 },
             }
         output = directory / "artifacts/strategy/frozen/strategy_research_abc/output"
@@ -311,17 +317,20 @@ def build_arm(
             "source_step_id": nominee["step_id"],
             "revision_id": nominee["revision_id"],
             "research_result_ref": nominee["validation_result_ref"],
-            "days": gate["days"],
-            "plain_excess": gate["plain_excess"],
-            "tracking_error": gate["tracking_error"],
-            "information_ratio": gate["information_ratio"],
+            "series": statistics["series"],
+            "mandate": gate["mandate"],
+            "days": statistics["days"],
+            "plain_excess": statistics["plain_excess"],
+            "tracking_error": statistics["tracking_error"],
+            "information_ratio": statistics["information_ratio"],
+            "residual_reading": residual_reading(
+                _analysis(nominee["validation_result_ref"]), alpha=RULES.alpha
+            ),
             "blocks": [
                 {"kind": "year", "label": "202407-202506", "start": "20240701", "end": "20241217", "trade_days": 120, "partial": True, "return": 0.2, "excess_return": 0.1, "sharpe": 1.2, "max_drawdown": 0.05, "turnover": 1.0, "trade_count": 3}
             ],
             "null_control": {"excess_percentile": 0.81},
-            "deflated_sharpe": gate["deflated_sharpe"],
-            "full_span_validations": gate["full_span_validations"],
-            "forward_mde": forward_mde(float(gate["tracking_error"]), 242),
+            "forward_mde": forward_mde(float(statistics["tracking_error"]), 242),
             "fit_plan": {"fit": seeded, "refit_period": "quarter" if seeded else None},
             **(
                 {
@@ -346,8 +355,7 @@ def build_arm(
                 experiment_id,
                 outcome="freeze",
                 steps=steps,
-                trials_to_date=3,
-                nominated_step_id=nominee["step_id"],
+                                nominated_step_id=nominee["step_id"],
                 freeze_gate=gate,
                 frozen=frozen,
             )
@@ -359,7 +367,6 @@ def build_arm(
                 experiment_id,
                 outcome="no_edge",
                 steps=[],
-                trials_to_date=0,
                 reason="没有候选值得冻结。三年都测过了，最好的一个也只有 +0.3%/年。",
                 arm_end={"status": "no_deliverable", "reason": "no_edge: nothing survived"},
             )
@@ -372,7 +379,6 @@ def build_arm(
                 outcome="deadline",
                 finish_reason="llm_call_budget_exhausted",
                 steps=[],
-                trials_to_date=0,
                 reason=None,
                 arm_end={
                     "status": "no_deliverable",
@@ -388,7 +394,6 @@ def build_arm(
                 outcome="environment_blocked",
                 finish_reason="environment_blocked",
                 steps=[],
-                trials_to_date=0,
                 reason=ENVIRONMENT_BLOCKED_REASON,
                 arm_end={"status": "environment_blocked", "reason": ENVIRONMENT_BLOCKED_REASON},
             )
@@ -443,6 +448,14 @@ def build_arm(
                     "refits_executed": {"forward": 0, "heldout": 0},
                 }
             )
+        # The sealed reading: the frozen book replayed over the sealed year.
+        sealed_ref = write_result(
+            directory, "valid", start=SEALED[0], days=250, edge=2 * edge, seed=11
+        )
+        _with_panel(sealed_ref, 0.9, series="benchmark_daily")
+        sealed = sealed_slice(
+            _analysis(sealed_ref), rules=RULES, start=SEALED[0], end=SEALED[1]
+        )
         analysis = _analysis(ref)
         forward = forward_slice(
             analysis,
@@ -475,6 +488,13 @@ def build_arm(
                 "session_key": "forward",
                 "artifact_id": "strategy_research_abc",
                 "replay": REPLAY,
+                "sealed": {
+                    "label": "Y4",
+                    "start": SEALED[0],
+                    "end": SEALED[1],
+                    "result_ref": sealed_ref,
+                    "slice": sealed,
+                },
                 "status": "ok",
                 "error": None,
                 "result_ref": ref,
@@ -482,7 +502,7 @@ def build_arm(
                 "refits_executed": {"forward": 0, "heldout": 0},
                 **({"seed_replicates": replicate_rows} if replicate_rows else {}),
                 "null_control": {"k": 500, "excess_percentile": 0.9, "step": {"excess_percentile": 0.77}},
-                "verdict": graduation_verdict(forward=forward, heldout=heldout),
+                "verdict": graduation_verdict(sealed=sealed, forward=forward, heldout=heldout),
             }
         )
         current = ""

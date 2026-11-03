@@ -34,7 +34,7 @@ from autotrade.pipelines.session_tools import (
     SMOKE_BACKTEST_MAX_DAYS,
     SmokeBacktestTool,
 )
-from tests.unit.acceptance_fixture import RULES
+from tests.unit.acceptance_fixture import RULES, SEALED_PERIOD
 
 from .test_inference_time_budget import FakeClock
 
@@ -99,6 +99,7 @@ def _tool(
         deadline_seconds=1200.0,
         benchmark_index=DEFAULT_BENCHMARK_INDEX,
         acceptance_rules=RULES.to_record(),
+        sealed_period=SEALED_PERIOD,
     )
     seeded = readonly_baseline(output)
     return SmokeBacktestTool(

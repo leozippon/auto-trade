@@ -106,42 +106,35 @@ def test_the_audit_parser_exposes_every_create_time_gate() -> None:
     created and nothing can move them afterwards, so a field the parser does
     not expose pins every audited arm at its default. The flags are read off
     the rules' own fields: unset is ``None`` (the worker's default), a count
-    parses as an integer and a limit as a float."""
+    parses as an integer and a limit as a float. A rule without a default
+    takes the console's creation value, and is a required flag where the
+    console has none."""
 
     parser = argparse.ArgumentParser()
     add_acceptance_arguments(parser)
-    unset = vars(parser.parse_args([]))
-    # A rule without a default takes the console's creation value.
+    with pytest.raises(SystemExit):
+        parser.parse_args([])
+    unset = vars(parser.parse_args(["--sealed-years=5"]))
     assert unset == {
         rule.name: WEB_CREATE_DEFAULTS[rule.name] if rule.name in REQUIRED_ACCEPTANCE_KEYS else None
         for rule in fields(AcceptanceRules)
-    }
+    } | {"sealed_years": 5}
     assert all(action.help for action in parser._actions)
 
     chosen = parser.parse_args(
-        [
-            "--recency-months=3",
-            "--min-full-span-validations=4",
-            "--max-drawdown=0.3",
-            "--tracking-error-cap=0.08",
-        ]
+        ["--sealed-years=2", "--max-drawdown=0.3", "--tracking-error-cap=0.08"]
     )
     named = {
         key: value
         for key, value in vars(chosen).items()
         if value is not None and key not in REQUIRED_ACCEPTANCE_KEYS
     }
-    assert named == {
-        "recency_months": 3,
-        "min_full_span_validations": 4,
-        "max_drawdown": 0.3,
-        "tracking_error_cap": 0.08,
-    }
-    assert type(chosen.recency_months) is int and type(chosen.max_drawdown) is float
+    assert named == {"max_drawdown": 0.3, "tracking_error_cap": 0.08}
+    assert type(chosen.sealed_years) is int and type(chosen.max_drawdown) is float
     # The rules accept what the parser hands them.
     AcceptanceRules(**REQUIRED_RULES, **{"beta_min": 0.85, "beta_max": 1.15, **named})
     with pytest.raises(SystemExit):
-        parser.parse_args(["--recency-months=2.5"])
+        parser.parse_args(["--sealed-years=2.5"])
 
 
 def test_an_arm_created_from_the_command_line_holds_the_consoles_creation_rules(
@@ -161,13 +154,13 @@ def test_an_arm_created_from_the_command_line_holds_the_consoles_creation_rules(
         _cli.add_snapshot_window_arguments(parser)
         _cli.add_model_arguments(parser)
         add_acceptance_arguments(parser)
-        args = parser.parse_args(["--experiment-id", "audit", *flags])
+        args = parser.parse_args(["--experiment-id", "audit", "--sealed-years=1", *flags])
         return _cli._build_worker_params(args, repo_root=tmp_path)
 
     created = params()
     assert acceptance_for(created) == AcceptanceRules(**REQUIRED_RULES)
     assert not RETIRED_SWITCHES & set(created)
-    assert acceptance_for(params("--recency-months=3")).recency_months == 3
+    assert acceptance_for(params("--max-drawdown=0.3")).max_drawdown == 0.3
 
 
 def test_the_compaction_gateway_is_built_without_provider_retries(

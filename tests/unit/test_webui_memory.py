@@ -48,6 +48,7 @@ from autotrade.pipelines.skills import (
 )
 from autotrade.webui import memory
 from autotrade.webui.server import create_app
+from tests.unit.acceptance_fixture import CREATE_RULES
 
 HOST_PATH = "/Data2/lzp/ADMCubeQuant/experiments/adopted/artifacts"
 SESSION_KEY = "research"
@@ -545,7 +546,7 @@ def test_creating_an_experiment_freezes_its_operating_memory(tmp_path: Path) -> 
     manager = ExperimentManager(tmp_path, experiments)
     params = {
         "experiment_id": "exp_frozen",
-        **DEFAULT_RESEARCH_GEOMETRY.to_record(),
+        **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES,
     }
     with (
         patch.object(manager, "_preflight"),

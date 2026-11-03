@@ -53,10 +53,7 @@ from autotrade.environment.tools.base import (
     ToolResult,
     ToolSpec,
 )
-from autotrade.environment.tools.finish_session import (
-    OFFLINE_TRIALS_MAX,
-    SessionBudgetStatus,
-)
+from autotrade.environment.tools.finish_session import SessionBudgetStatus
 from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.environment.tools.node_reference import (
     NODE_REFERENCE_DESCRIPTION,
@@ -73,7 +70,6 @@ from .config import (
     BATCH_VALIDATE_MAX_CANDIDATES,
     BATCH_VALIDATE_MIN_CANDIDATES,
     DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
-    OFFLINE_TRIALS_PRICING,
     AcceptanceRules,
     ArtifactRevision,
     EvaluationBackend,
@@ -85,8 +81,7 @@ from .config import (
     research_span,
 )
 from .experiment import (
-    freeze_gate_for,
-    full_span_bar,
+    freeze_registration,
     null_control_seed,
     research_step_record,
 )
@@ -98,6 +93,7 @@ from .verdict import (
     active_daily,
     graded_statistics,
     holder_readings,
+    residual_reading,
     summary_excess_at_cost_stress,
 )
 
@@ -115,8 +111,8 @@ def _step_analysis(step: StepResult) -> dict[str, object]:
 
 def _active_excess_at_cost_stress(step: StepResult, multiplier: float) -> float | None:
     """``verdict.summary_excess_at_cost_stress`` of one Validation over its
-    own span: the reading the freeze gate judges of a full-span nominee;
-    ``None`` where the span or the replay's costs are not measured."""
+    own span: the reading F5 takes of the frozen book forward; ``None``
+    where the span or the replay's costs are not measured."""
 
     try:
         statistics = graded_statistics(_step_analysis(step))
@@ -569,9 +565,10 @@ def _smoke_pit(result_dir: Path) -> dict[str, object]:
 # Agent-readable reference to the full result, so the attachment site and the
 # returned reference must name the same file.
 VALIDATION_RESULT_ATTACHMENT = "validation/result.json"
-# Beside it, the series the freeze gate grades, day by day (``verdict.
-# active_daily``): without it a session rebuilt proxies from its own equity
-# curve to find when a drawdown happened or which period drives a reading.
+# Beside it, the graded series day by day with the factor legs it is
+# regressed on (``verdict.active_daily``): without it a session rebuilt proxies
+# from its own equity curve to find when a drawdown happened or which period
+# drives a reading.
 # Only a research Validation is recorded here; the forward and Held-out replay
 # writes to the host's results root and never to a Step tree.
 VALIDATION_DAILY_ATTACHMENT = "validation/active_daily.csv"
@@ -588,7 +585,7 @@ REPLAY_SCALED_SUMMARY_BLOCKS = ("per_stock", "weekly_returns")
 def write_active_daily(result_ref: str) -> Path:
     """Write one completed Validation's daily graded series beside its result.
 
-    Read off the style sidecar the freeze gate itself reads, through a
+    Read off the style sidecar the verdict itself reads, through a
     temporary name, so a failure leaves no partial file behind.
     """
 
@@ -629,20 +626,12 @@ def manifest_backtest_stats(summary: Mapping[str, object]) -> dict[str, object]:
     }
 
 
-# What a candidate row's provisional selection block is, and is not.
-SELECTION_STATISTICS_NOTE = (
-    "provisional: the freeze gate as it would read this node now, over every "
-    "strategy the arm has validated so far; the freeze recomputes it"
-)
-# A row the gate refuses before measuring it still shows the bar.
-UNMEASURED_SELECTION_NOTE = (
-    "provisional: the freeze gate measures no nominee on this row (see "
-    "freeze_gate_reasons), so it has no deflated_sharpe_probability. "
-    "information_ratio_bar is the FULL-SPAN bar: the active IR a full-span, "
-    "non-control nominee needs now, at the arm's trials so far (trials, "
-    "effective_trials) and the research period's length. It is not a bar for "
-    "this row, which cannot be nominated as it is; a strategy validated later "
-    "joins the trials and moves it"
+# What a row's residual reading is, and is not.
+RESIDUAL_READING_NOTE = (
+    "the sealed gate's statistic over this row's own visible span: bar is "
+    "z(1 - alpha) / sqrt(years) for this span's length, the same formula the "
+    "sealed gate applies to the sealed years; a reading of the visible years, "
+    "not a verdict"
 )
 # A row whose bytes and span repeat an earlier node of the arm.
 SAME_BYTES_NOTE = (
@@ -703,8 +692,6 @@ class SessionValidations:
         self.steps: list[StepResult] = list(request.steps_before)
         # Candidates reserved so far, which names each result.
         self.candidates_started = 0
-        # The full-span bar at a count of Steps (:meth:`nominee_bar`).
-        self._full_span_bar: tuple[int, dict[str, object]] | None = None
 
     @property
     def replay_years_remaining(self) -> int:
@@ -736,23 +723,18 @@ class SessionValidations:
                 str(exc), error_type="schema_error", blocked_target="span"
             ) from exc
 
-    def freeze_gate(
+    def registration(
         self,
         node_id: str,
         seed_replicates: Sequence[str] = (),
-        offline_trials: int = 0,
         deterministic: bool = False,
     ) -> dict[str, object]:
-        """The freeze gate as the Pipeline would read one Step of this session now.
-
-        The Pipeline's own gate (``experiment.freeze_gate_for``) over the arm's
-        recorded Steps and this session's completed ones, with the hard
-        nomination rules of the run, so the Agent reads the verdict a freeze of
-        this node would get today, with ``seed_replicates`` the Steps it would
-        register as its seed replicates, ``offline_trials`` the terminal
-        offline-screen delta a finish would declare and ``deterministic`` its
-        declaration that the package uses no randomness. A node that is not a
-        Step of this session does not pass.
+        """Whether one Step of this session registers for a freeze, as the
+        Pipeline reads it (``experiment.freeze_registration``), with
+        ``seed_replicates`` the Steps it would register as its seed
+        replicates and ``deterministic`` its declaration that the package
+        uses no randomness. Registration only, never a score. A node that is
+        not a Step of this session does not register.
         """
 
         rows = {
@@ -760,19 +742,12 @@ class SessionValidations:
         }
         if any(step_id not in rows for step_id in (node_id, *seed_replicates)):
             return {"passed": False, "reasons": [NOT_A_SESSION_STEP]}
-        nominee = rows[node_id]
-        rules = self.rules
-        return freeze_gate_for(
-            self.ledger.read(),
-            list(rows.values()),
-            nominee,
+        return freeze_registration(
+            rows[node_id],
             experiment_dir=self.experiment_dir,
-            acceptance=rules,
-            hard_reasons=rules.evaluate(dict(nominee["summary"])),  # type: ignore[arg-type]
-            years=[(year.start, year.end) for year in self.request.research_years],
+            acceptance=self.rules,
             seed_replicates=[rows[step_id] for step_id in seed_replicates],
             deterministic=deterministic,
-            terminal_offline_trials=offline_trials,
         )
 
     @property
@@ -782,98 +757,33 @@ class SessionValidations:
 
         return AcceptanceRules.from_record(self.request.acceptance_rules)
 
-    def nominee_bar(self) -> dict[str, object]:
-        """The trials, effective trials and active-IR bar a full-span nominee
-        faces now (``experiment.full_span_bar``), over the same Steps and
-        ledger as :meth:`freeze_gate`. Read once per count of Steps: the rows
-        of one batch share it, and on a long lineage one reading costs seconds.
+    def residual_reading(self, step: StepResult) -> dict[str, object]:
+        """The sealed gate's statistic over one row's own span.
+
+        ``verdict.residual_reading`` of the row's graded series at the arm's
+        ``alpha``: the residual IR, the three betas and the bar for the
+        span's length, beside the active excess after the cost stress on the
+        span's turnover (``verdict.summary_excess_at_cost_stress``, the
+        reading F5 takes forward). No pass or fail: the session reads the
+        same statistic the sealed gate grades, on its visible years only.
+        ``unmeasured`` names why a span the statistic cannot read has none.
         """
 
-        if self._full_span_bar is None or self._full_span_bar[0] != len(self.steps):
-            self._full_span_bar = (
-                len(self.steps),
-                full_span_bar(
-                    self.ledger.read(),
-                    [research_step_record(item) for item in self.steps],
-                    experiment_dir=self.experiment_dir,
-                    research_years=len(self.request.research_years),
-                    acceptance=self.rules,
-                ),
-            )
-        return self._full_span_bar[1]
-
-    def selection_statistics(self, step: StepResult) -> dict[str, object]:
-        """The provisional freeze-gate reading one candidate row carries.
-
-        Every row carries the bar a full-span nominee faces now: the gate's own
-        figures where it measured this node, else :meth:`nominee_bar`, with
-        a note that says the bar is not this row's.
-        """
-
-        gate = self.freeze_gate(step.step_id)
-        dsr = gate.get("deflated_sharpe")
-        measured = isinstance(dsr, Mapping)
-        family = dsr if measured else self.nominee_bar()
-        return {
-            "freeze_gate_passed": gate["passed"],
-            "freeze_gate_reasons": gate["reasons"],
-            # The graded series and the two figures the gate reads off it
-            # beside the deflated Sharpe: absent on a span the gate refuses
-            # before measuring.
-            "series": gate.get("series"),
-            "information_ratio": gate.get("information_ratio"),
-            "positive_years": gate.get("positive_years"),
-            "deflated_sharpe_probability": (
-                dsr.get("deflated_sharpe_probability") if measured else None  # type: ignore[union-attr]
-            ),
-            # M, what it counts as independently, and the IR the gate's DSR
-            # threshold asks of a full-span nominee at that count.
-            "trials": family["trials"],  # type: ignore[index]
-            "effective_trials": family["effective_trials"],  # type: ignore[index]
-            "information_ratio_bar": family["information_ratio_bar"],  # type: ignore[index]
-            "full_span_validations": gate.get("full_span_validations"),
-            "graduation_activity": self.graduation_activity(step),
-            "note": SELECTION_STATISTICS_NOTE if measured else UNMEASURED_SELECTION_NOTE,
-        }
-
-    def graduation_activity(self, step: StepResult) -> dict[str, object]:
-        """One node's readings of the graduation's activity and cost-stress
-        conditions, over its own span.
-
-        A freeze is judged once on the forward months, where too few round
-        trips, too little exposure or an edge that the cost stress erases
-        fails it whatever the excess; one frozen arm traded 0.86 round trips a
-        month over its research period and then failed
-        ``forward_too_few_round_trips``. The readings use the forward slice's
-        own definitions -- ``round_trips`` is the replay's realised exits
-        (``trade_count``), ``mean_gross`` its mean gross exposure
-        (``exposure.avg_gross``), the round-trip floor is per calendar month,
-        and the cost stress is ``verdict.excess_at_cost_stress`` on the graded
-        series over this span's turnover (a replay opens at the initial cash,
-        so ``turnover`` is the span's notional over its opening equity) --
-        beside the arm's thresholds. Only the cost stress is also a freeze
-        condition, judged on a full-span nominee's own reading of it.
-        """
-
-        summary = step.validation.summary
         rules = self.rules
-        # Each research year is twelve calendar months, whatever month it starts.
-        months = 12 * research_span(self.request.research_years, step.span).slots
-        trips = summary.get("trade_count")
-        exposure = summary.get("exposure")
-        gross = exposure.get("avg_gross") if isinstance(exposure, Mapping) else None
+        try:
+            reading: dict[str, object] = {
+                key: _rounded(value) if isinstance(value, float) else value
+                for key, value in residual_reading(_step_analysis(step), alpha=rules.alpha).items()
+            }
+        except ValueError as exc:
+            reading = {"unmeasured": str(exc)}
         return {
-            "round_trips": trips,
-            "round_trips_per_month": (
-                round(trips / months, 3) if isinstance(trips, int) else None
-            ),
-            "min_round_trips_per_month": rules.min_round_trips_per_month,
-            "mean_gross": round(gross, 3) if isinstance(gross, (int, float)) else None,
-            "min_mean_gross": rules.min_mean_gross,
+            **reading,
             "active_excess_at_cost_stress": _rounded(
                 _active_excess_at_cost_stress(step, rules.cost_stress_multiplier)
             ),
             "cost_stress_multiplier": rules.cost_stress_multiplier,
+            "note": RESIDUAL_READING_NOTE,
         }
 
     def raw_readings(self, step: StepResult) -> dict[str, object]:
@@ -1109,7 +1019,6 @@ def recorded_step(
     span = str(metadata.get("span") or "")
     if not span:
         raise ValueError("a recorded Validation needs its span in metadata")
-    offline = metadata.get("offline_trials")
     return StepResult(
         node_id,
         revision_id,
@@ -1117,7 +1026,6 @@ def recorded_step(
         span=span,
         control=metadata.get("control") is True,
         batch_id=str(metadata["batch_id"]) if metadata.get("batch_id") else None,
-        offline_trials=offline if isinstance(offline, int) else None,
         fingerprint=fingerprint,
     )
 
@@ -1131,10 +1039,6 @@ BATCH_NAME_MAX_CHARS = 40
 # every other Agent-written justification, by what one such statement needs
 # rather than by what one line is.
 BATCH_HYPOTHESIS_MAX_CHARS = AGENT_JUSTIFICATION_MAX_CHARS
-# A declared offline screen is a count of candidate configurations; beyond
-# this the freeze gate's bar already exceeds any IR on record (about 2.5 over
-# four years), so a larger figure is a typo, not a screen.
-BATCH_OFFLINE_TRIALS_MAX = OFFLINE_TRIALS_MAX
 # Repeated identical rejections. A refused batch is free by design — nothing is
 # committed and no slot is spent — which is also why nothing bounded the retry
 # loop: one audited session spent 3.89 h of 10.17 h on 128 consecutive
@@ -1259,7 +1163,6 @@ _BATCH_MANIFEST_KEYS = (
     "candidate",
     "hypothesis",
     "control",
-    "offline_trials",
     "span",
 )
 # The per-candidate projection an observation carries: a batch multiplies the
@@ -1289,10 +1192,9 @@ BATCH_CANDIDATE_SUMMARY_KEYS = (
 # A multi-year span has one sub-window row per research year, and a batch
 # multiplies that by the number of candidates. A row keeps the columns a
 # screening comparison is made on; the node's result.json keeps the full table.
-# The active excess rides with the raw one because the freeze gate and the
-# verdict read it -- it is the series they grade, and the freeze gate counts
-# its positive years: a comparison made on the raw column alone reads a
-# different number than they will. The year's benchmark and panel returns ride
+# The active excess rides with the raw one because the verdict reads it -- it
+# is the series it grades: a comparison made on the raw column alone reads a
+# different number than it will. The year's benchmark and panel returns ride
 # beside the book's own, so each year reads as the holder's account, the index
 # and zero skill on the same skeleton.
 BATCH_SUB_WINDOW_KEYS = (
@@ -1450,10 +1352,11 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "batch_validate",
         "Replay "
         f"{BATCH_VALIDATE_MIN_CANDIDATES}-{BATCH_VALIDATE_MAX_CANDIDATES} "
-        "PRE-REGISTERED candidates over one span of the research period in one "
-        "call; this is the only way to create a selectable node. span is full (the "
-        "whole research period, the default), one research year such as Y2, or "
-        "contiguous years such as Y2..Y4, as the research_geometry fact lists them; "
+        "PRE-REGISTERED candidates over one span of the visible research period in "
+        "one call; this is the only way to create a selectable node. span is full "
+        "(the whole visible research period, the default), one research year such "
+        "as Y2, or contiguous years such as Y2..Y4, as the research_geometry fact "
+        "lists them; the sealed years are never a span; "
         "each span is replayed as one continuous book from the decision view at "
         "its first year. Each candidate is {name, hypothesis, path, control}, as their "
         "parameters define them: path is a "
@@ -1462,8 +1365,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "you; models/ is shared with the working copy), or output itself to "
         "validate the working copy as it stands; build such a directory by copying "
         "output/, the code you have been editing, not refs/, which only holds the "
-        "pack this arm started from. offline_trials, defined by its parameter, "
-        "declares the batch's offline screening. The batch costs one "
+        "pack this arm started from. The batch costs one "
         "replay-year per candidate per year of the span, reserved before anything "
         "runs; a candidate whose replay completes becomes its own immutable "
         "revision and Step node under the CURRENT node as shared parent, recorded "
@@ -1492,27 +1394,23 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "candidate: node id with its short handle (valid_002, which every tool "
         "taking a node_id accepts), headline metrics, the per-year return, "
         "benchmark_return, panel_return (the zero-skill panel's own), excess, "
-        "active excess and Sharpe of sub_windows, the provisional "
-        "selection_statistics (the freeze gate as it would read this node now, "
-        "which the freeze recomputes; every row, sub-span and refused rows "
-        "included, carries information_ratio_bar, the active IR a full-span "
-        "non-control nominee needs now, beside trials and effective_trials -- on a "
-        "row the gate does not measure it is that full-span bar, not the row's "
-        "own; and graduation_activity: the row's own round trips per month and "
-        "mean gross exposure, which the freeze gate does not read, and "
-        "active_excess_at_cost_stress (annualised active excess after "
-        "cost_stress_multiplier x the slippage on the span's turnover, computed as "
-        "the freeze gate and the graduation compute it), beside the thresholds "
-        "acceptance_rules.graduation.forward applies to the frozen artifact over "
-        "the forward months), raw_readings (the holder's money, which active "
+        "active excess and Sharpe of sub_windows, residual_reading (the sealed "
+        "gate's statistic over the row's own span, as acceptance_rules.sealed_gate "
+        "defines it: residual_information_ratio, residual_excess, "
+        "residual_tracking_error, market_beta, size_beta and value_beta of the "
+        "active series regressed on the market, size and value legs, days and "
+        "years, and bar, z(1 - alpha) / sqrt(years) for this span's length; beside "
+        "them active_excess_at_cost_stress, the annualised active excess after "
+        "cost_stress_multiplier x the slippage on the span's turnover; a reading, "
+        "never a pass or a fail), raw_readings (the holder's money, which active "
         "readings are not, under the names a forward slice carries: "
         "strategy_return, benchmark_return and panel_return, what the book after "
         "every cost, benchmark_index and the zero-skill panel after its costs each "
         "compounded to over the span, with raw_excess, book minus benchmark, and "
         "plain_selection, book minus panel, both compounded; "
         "active_market_beta, the book's market loading relative to its panel: the "
-        "benchmark coefficient of the active series' factor regression over the "
-        "span, a diagnostic no gate reads; "
+        "market coefficient of the active series' factor regression over the "
+        "span; "
         "and on a row covering them last_two_years, the same five readings from "
         "strategy_return to plain_selection over the last two research years "
         "alone; the rest of that picture is in "
@@ -1534,13 +1432,14 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "Each completed row's result_ref reads back that candidate's full "
         "replay record, and its daily_series (validation/active_daily.csv in the "
         "node's directory; pd.read_csv(path, dtype={'trade_date': str})) is the "
-        "series the freeze gate grades, one row per trading day of the span: "
-        "strategy_return, panel_return (the zero-skill composite), active_return "
-        "(their difference), active_cumulative and active_drawdown (its compounded "
-        "path and the loss below its running peak, whose maximum is "
-        "active_max_drawdown), benchmark_return and size_factor_return (the two "
-        "factors its loadings are read against); the annualised mean of "
-        "active_return over its annualised volatility is the active IR. "
+        "graded series, one row per trading day of the span: strategy_return, "
+        "panel_return (the zero-skill composite), active_return (their "
+        "difference), active_cumulative and active_drawdown (its compounded path "
+        "and the loss below its running peak, whose maximum is "
+        "active_max_drawdown), benchmark_return, size_factor_return and "
+        "value_factor_return (the three legs residual_reading regresses it on); "
+        "the annualised mean of active_return over its annualised volatility is "
+        "the active IR. "
         "Selection stays yours: finish_session nominates a row as it "
         "is, and step_rollback(node_id) restores one as the working copy to build "
         "on.",
@@ -1552,9 +1451,9 @@ class BatchValidateTool(SessionTimeBudgetAware):
                     "minLength": 1,
                     "maxLength": 20,
                     "description": (
-                        "full (default), one research year Yk, or contiguous years "
-                        "Yi..Yj. Iterate on years; a freeze needs a full-span "
-                        "validation."
+                        "full (default: every visible research year), one research "
+                        "year Yk, or contiguous years Yi..Yj. Iterate on years; a "
+                        "freeze needs a full-span validation."
                     ),
                 },
                 "candidates": {
@@ -1596,11 +1495,10 @@ class BatchValidateTool(SessionTimeBudgetAware):
                                     "true registers a comparison leg (a "
                                     "baseline, the mechanism-removed carrier, a "
                                     "placebo): it replays and costs "
-                                    "replay-years like any candidate but is no "
-                                    "freeze-gate trial and can never be "
-                                    "nominated or frozen, so a real candidate "
-                                    "registered as a control forfeits its "
-                                    "nomination; false for a candidate."
+                                    "replay-years like any candidate but can "
+                                    "never be nominated or frozen, so a real "
+                                    "candidate registered as a control forfeits "
+                                    "its nomination; false for a candidate."
                                 ),
                             },
                         },
@@ -1608,32 +1506,13 @@ class BatchValidateTool(SessionTimeBudgetAware):
                         "additionalProperties": False,
                     },
                 },
-                "offline_trials": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": BATCH_OFFLINE_TRIALS_MAX,
-                    "description": (
-                        "Candidate configurations screened offline on "
-                        "research-period data (a pack's screening gate, a "
-                        "parameter grid and a probe script all count) whose "
-                        "reading shaped what this batch submits and that this "
-                        "batch does NOT submit (rejected or deferred). A "
-                        "submitted candidate counts as a host trial once "
-                        "validated and is not declared; controls never count; "
-                        "each configuration is declared once, in the first "
-                        "batch that records a Validation after its screen; 0 "
-                        "only if nothing was screened. Summed over batches into "
-                        f"the arm's freeze-gate trial count. {OFFLINE_TRIALS_PRICING}"
-                    ),
-                },
             },
-            "required": ["candidates", "offline_trials"],
+            "required": ["candidates"],
             "additionalProperties": False,
         },
         mutating=True,
         example={
             "span": "Y3..Y4",
-            "offline_trials": 4,
             "candidates": [
                 {
                     "name": "value_quality",
@@ -1694,7 +1573,6 @@ class BatchValidateTool(SessionTimeBudgetAware):
         # the same rejection can also repeat forever: ``_rejected`` counts it.
         try:
             span = self.backtest.span(arguments.get("span", FULL_SPAN))
-            offline_trials = _batch_offline_trials(arguments)
             candidates = self._parse(arguments)
             for candidate in candidates:
                 supply_readonly_files(
@@ -1755,7 +1633,6 @@ class BatchValidateTool(SessionTimeBudgetAware):
                     "candidate": candidate.name,
                     "hypothesis": candidate.hypothesis,
                     "control": candidate.control,
-                    "offline_trials": offline_trials,
                     "source_path": candidate.path,
                     "span": span.label,
                 }
@@ -1791,28 +1668,21 @@ class BatchValidateTool(SessionTimeBudgetAware):
             # the Agent moves it deliberately with step_rollback once it picks
             # a winner.
             self.backtest.tree.set_position(parent_node_id)
-        # Every row of the round deflates against the same trial pool: the
-        # whole batch is complete by the time the table is returned.
         for row, step in recorded:
             row["raw_readings"] = self.backtest.raw_readings(step)
-            row["selection_statistics"] = self.backtest.selection_statistics(step)
+            row["residual_reading"] = self.backtest.residual_reading(step)
         if not recorded:
             charged = len(rows) - refunded
             if refunded == len(rows):
                 self._environment_blocked(span, rows)
-            # The trial family reads a batch's declaration from its recorded
-            # Validations, so a batch that recorded none counted none of it.
             raise ToolError(
                 f"batch_validate: all {len(rows)} candidates failed their "
                 f"Validation; {charged} of them raised in their own code and "
                 f"kept the replay-years, {refunded} failed on the environment "
-                "and got them back. No Validation was recorded, so this batch's "
-                f"offline_trials={offline_trials} was not counted: declare those "
-                "configurations again in the next batch",
+                "and got them back. No Validation was recorded",
                 error_type="validation_failed",
                 details={
                     "batch_id": batch_id,
-                    "offline_trials_recorded": False,
                     "candidates": rows,
                     "replay_years_used": self.backtest.replay_years_used,
                     "replay_years_remaining": self.backtest.replay_years_remaining,
@@ -1832,7 +1702,6 @@ class BatchValidateTool(SessionTimeBudgetAware):
                     "end": span.end,
                     "years": span.slots,
                 },
-                "offline_trials": offline_trials,
                 "candidates": rows,
                 "complete_validations": len(recorded),
                 "failed": len(rows) - len(recorded),
@@ -1914,8 +1783,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
             if not isinstance(control, bool):
                 raise ToolError(
                     f"candidate {index} needs control: true for a registered "
-                    "comparison leg (never a freeze-gate trial, never "
-                    "nominatable) or false for a candidate",
+                    "comparison leg (never nominatable) or false for a candidate",
                     error_type="schema_error",
                     blocked_target="control",
                 )
@@ -2298,30 +2166,10 @@ BUDGET_SPENT_NOTE = (
 )
 
 
-def another_batch_round_fits(backtest: SessionValidations) -> bool:
-    """Whether the session could still run one more ``batch_validate`` round.
-
-    ``finish_session`` asks an early freeze for a reason only while this is
-    true. It stops being true inside the deadline window — the finalize reserve
-    before the main deadline, and the wrap-up grace behind it, where the Runner
-    itself asks the session to finish — and once the replay-year budget cannot
-    hold the smallest batch, one candidate on one year.
-    """
-
-    request = backtest.request
-    main_remaining = backtest.time_budget.remaining() - request.deadline_grace_seconds
-    if main_remaining <= request.finalize_before_deadline_seconds:
-        return False
-    return backtest.replay_years_remaining >= 1
-
-
 def session_budget_status(backtest: SessionValidations) -> SessionBudgetStatus:
-    """What this session still has when ``finish_session`` is called.
-
-    The inference time is the same main-window figure ``another_batch_round_fits``
-    reasons about: the grace reserve behind the deadline is wrap-up time, not
-    budget the session chose to leave unused.
-    """
+    """What this session still has when ``finish_session`` is called: the
+    replay-years and the main window's inference time, the grace reserve
+    behind the deadline being wrap-up time, not budget left unused."""
 
     request = backtest.request
     return SessionBudgetStatus(
@@ -2399,7 +2247,7 @@ class NullControlTool(SessionTimeBudgetAware):
             "added nothing the timing and sizing did not — the null's mean and p05/p95, "
             "rejects_mean, dropped_trips_mean). Every formal validation already "
             "reports the node against a panel of the same construction "
-            "(benchmark.active_*), which is what the freeze gate grades; this "
+            "(benchmark.active_*), which is the series the verdict grades; this "
             "percentile is a second, descriptive reading of it. Costs well under a "
             "minute of host replay per research year (the session clock pauses like a "
             f"formal backtest), consumes no replay-years and is capped at {max_calls} per "
@@ -2524,29 +2372,6 @@ def _rejection_recovery(error_type: str) -> str:
         "Recovery: read the error text above and change the input it names; "
         "the call shape is not the problem."
     )
-
-
-def _batch_offline_trials(arguments: Mapping[str, object]) -> int:
-    """The batch's declared offline screens: a whole number, never assumed."""
-
-    value = arguments.get("offline_trials")
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int)
-        or not 0 <= value <= BATCH_OFFLINE_TRIALS_MAX
-    ):
-        raise ToolError(
-            "batch_validate needs offline_trials: the whole number (0 to "
-            f"{BATCH_OFFLINE_TRIALS_MAX}) of candidate configurations screened "
-            "offline on research-period data whose reading shaped this batch and "
-            "that this batch does not submit, each declared once, in the first "
-            "batch that records a Validation after its screen, 0 only if "
-            f"nothing was screened; got {value!r}. It is added to the arm's "
-            "freeze-gate trial count",
-            error_type="schema_error",
-            blocked_target="offline_trials",
-        )
-    return value
 
 
 def _batch_text(

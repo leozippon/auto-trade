@@ -16,9 +16,9 @@ from autotrade.environment.data.contracts import (
     DEFAULT_BENCHMARK_INDEX,
     benchmark_index_label,
 )
+from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR
 from autotrade.environment.sandbox import SandboxConfig, SandboxLimits
 from autotrade.environment.strategy import StrategySchedule
-from autotrade.environment.tools.finish_session import offline_trials_count
 
 from . import verdict
 from .calendar import FULL_SPAN, ResearchGeometry
@@ -181,52 +181,45 @@ def _required(text: str) -> Any:
     return field(kw_only=True, metadata={"help": text})
 
 
-# How the freeze gate prices a declared offline screen against one run on the
-# host (``verdict.trial_family_statistics``), in the one sentence the Agent's
-# facts and batch_validate's offline_trials parameter state.
-OFFLINE_TRIALS_PRICING = (
-    "A screen declared in offline_trials is priced as independent, one effective trial "
-    "each; a screen run on the host as a candidate is priced by its measured correlation "
-    "with the other trials, which is the reason to run screens that are near-copies of "
-    "each other on the host."
-)
-
-
 @dataclass(frozen=True)
 class AcceptanceRules:
-    """The arm's create-time gates for the freeze nomination and the verdict.
+    """The arm's create-time rules for the freeze registration and the verdict.
 
-    A nominated research node fails the freeze gate on a non-finite metric or a
-    research-period drawdown over ``max_drawdown`` (``evaluate``). Every other
-    freeze, forward and Held-out threshold is a field here, stamped into
-    ``params.json`` at creation so a later change to the defaults cannot move
-    an arm that already exists. Statistical definitions (the DSR formula, the
-    bootstrap, the panel) stay in ``pipelines/verdict.py``. Every field is a
-    limit something enforces.
+    A nominated research node is refused at registration on a non-finite
+    metric or a drawdown over ``max_drawdown`` over its span (``evaluate``),
+    and on a broken tracking mandate when one is set. Its one performance
+    test is the sealed gate: the factor-residual information ratio of the
+    frozen node over the ``sealed_years`` trailing research years, read once
+    by the host after the freeze, against ``verdict.residual_bar`` at
+    ``alpha``. Every forward and Held-out threshold is a field here too,
+    stamped into ``params.json`` at creation so a later change to the
+    defaults cannot move an arm that already exists. Statistical definitions
+    (the residual statistic, the bootstrap, the panel) stay in
+    ``pipelines/verdict.py``. Every field is a limit something enforces.
 
     This is the one declaration of the rules. The record (``to_record``), the
     parameters a worker accepts (``ACCEPTANCE_KEYS``), the console's creation
     defaults (``hitl_state.WEB_CREATE_DEFAULTS``) and the audit entrypoint's
     flags (``scripts/experiments/_cli.py``) are read off its fields, and the
-    verdict functions take the rules whole. A numeric default is today's
-    verdict constant, so a record written before the field existed is judged
-    as it was.
+    verdict functions take the rules whole. A rule without a default
+    (``REQUIRED_ACCEPTANCE_KEYS``) is named by every record, so a record
+    written before it existed is refused rather than judged under it.
     """
 
-    # Over the research period, forward and Held-out alike.
-    max_drawdown: float = _rule(0.45, "Equity drawdown limit of the freeze gate and the verdict.")
+    # Over the nominee's span and forward, and the Paper book's kill limits.
+    max_drawdown: float = _rule(0.45, "Equity drawdown limit of the freeze registration and the verdict.")
     cost_stress_multiplier: float = _rule(
         2.0,
-        "Freeze gate and forward verdict: multiple of the profile's slippage the active excess must survive.",
+        "Forward verdict: multiple of the profile's slippage the active excess must survive.",
     )
     active_max_drawdown: float = _rule(
         0.30, "Drawdown limit of the active series (strategy minus zero-skill panel)."
     )
     # The tracking mandate: the strategy's own residual tracking error against
-    # the arm's benchmark and its market beta, over the research period and
-    # again forward. ``None`` means no mandate: both are measured and
-    # reported, not graded. The band is set exactly when the cap is -- a cap
-    # alone is cheapest to meet by dropping beta.
+    # the factor legs and its market beta, over the nominee's span and again
+    # forward. ``None`` means no mandate: both are measured and reported, not
+    # graded. The band is set exactly when the cap is -- a cap alone is
+    # cheapest to meet by dropping beta.
     tracking_error_cap: float | None = _rule(
         None,
         "Tracking mandate: residual tracking error cap against the arm's benchmark index; "
@@ -234,31 +227,8 @@ class AcceptanceRules:
     )
     beta_min: float | None = _rule(None, "Tracking mandate: lower end of the market beta band.")
     beta_max: float | None = _rule(None, "Tracking mandate: upper end of the market beta band.")
-    # ``min_dsr_probability`` moved from 0.90 to 0.975 with the DSR1
-    # recalibration, and only arms that ended before the field was recorded
-    # omit it.
-    min_active_ir: float = _rule(
-        verdict.FREEZE_MIN_ACTIVE_IR,
-        "Freeze gate: minimum research-period active information ratio.",
-    )
-    min_dsr_probability: float = _rule(
-        verdict.FREEZE_MIN_DSR_PROBABILITY,
-        "Freeze gate: minimum deflated Sharpe probability of that IR.",
-    )
-    min_positive_year_share: float = _rule(
-        verdict.FREEZE_MIN_POSITIVE_YEAR_SHARE,
-        "Freeze gate: share of research years whose active excess must be positive.",
-    )
-    min_full_span_validations: int = _rule(
-        verdict.FREEZE_MIN_FULL_SPAN_VALIDATIONS,
-        "Freeze gate: minimum measurable full-span validations in the arm.",
-    )
     forward_confidence: float = _rule(
         verdict.FORWARD_CONFIDENCE, "Forward verdict: one-sided block-bootstrap confidence."
-    )
-    recency_months: int = _rule(
-        verdict.RECENCY_MONTHS,
-        "Forward verdict: trailing calendar months whose active excess must be non-negative.",
     )
     min_mean_gross: float = _rule(
         verdict.MIN_MEAN_GROSS, "Forward and Held-out: minimum mean gross exposure."
@@ -271,9 +241,13 @@ class AcceptanceRules:
         verdict.HELDOUT_TOLERANCE_Z,
         "Held-out: tolerated shortfall in standard errors of forward tracking error.",
     )
-    # The sealed gate's significance level (``verdict.residual_bar``).
+    # The sealed gate (``verdict.residual_bar``): its significance level, and
+    # how many trailing research years the session never sees.
     alpha: float = _required(
         "Sealed gate: one-sided significance level of the residual information ratio."
+    )
+    sealed_years: int = _required(
+        "Sealed gate: trailing research years sealed from the session and read once after the freeze."
     )
 
     def __post_init__(self) -> None:
@@ -289,32 +263,11 @@ class AcceptanceRules:
                 raise ValueError(f"{name} must be between zero and one")
         if self.cost_stress_multiplier < 1:
             raise ValueError("cost_stress_multiplier must be at least one")
-        _finite_number(self.min_active_ir, "min_active_ir")
-        object.__setattr__(
-            self,
-            "min_dsr_probability",
-            _open_unit(self.min_dsr_probability, "min_dsr_probability", include_one=True),
-        )
-        object.__setattr__(
-            self,
-            "min_positive_year_share",
-            _open_unit(self.min_positive_year_share, "min_positive_year_share", include_one=True),
-        )
-        object.__setattr__(
-            self,
-            "min_full_span_validations",
-            _whole_int(self.min_full_span_validations, "min_full_span_validations"),
-        )
-        if self.min_full_span_validations < 1:
-            raise ValueError("min_full_span_validations must be an integer >= 1")
         object.__setattr__(
             self,
             "forward_confidence",
             _open_unit(self.forward_confidence, "forward_confidence", include_one=False),
         )
-        object.__setattr__(self, "recency_months", _whole_int(self.recency_months, "recency_months"))
-        if self.recency_months < 1:
-            raise ValueError("recency_months must be an integer >= 1")
         object.__setattr__(
             self, "min_mean_gross", _open_unit(self.min_mean_gross, "min_mean_gross", include_one=True)
         )
@@ -327,6 +280,9 @@ class AcceptanceRules:
             raise ValueError("heldout_tolerance_z must be positive")
         object.__setattr__(self, "heldout_tolerance_z", z_score)
         object.__setattr__(self, "alpha", _open_unit(self.alpha, "alpha", include_one=False))
+        object.__setattr__(self, "sealed_years", _whole_int(self.sealed_years, "sealed_years"))
+        if self.sealed_years < 1:
+            raise ValueError("sealed_years must be an integer >= 1")
         if any(value is None for value in mandate):
             if any(value is not None for value in mandate):
                 raise ValueError(
@@ -359,10 +315,10 @@ class AcceptanceRules:
 
         Run manifests and ``hitl/params.json`` are read back long after they
         were written, so a record that carries a retired key (the former
-        ``min_return``/``min_sharpe`` targets, the ``RETIRED_SWITCHES``) must
-        still rebuild the rules it does name. A record that lacks a required
-        rule (``REQUIRED_ACCEPTANCE_KEYS``) is refused: it was written under
-        rules these are not.
+        ``min_return``/``min_sharpe`` targets, the deflated-Sharpe bars, the
+        ``RETIRED_SWITCHES``) must still rebuild the rules it does name. A
+        record that lacks a required rule (``REQUIRED_ACCEPTANCE_KEYS``) is
+        refused: it was written under rules these are not.
         """
 
         missing = [
@@ -375,20 +331,12 @@ class AcceptanceRules:
             )
         return cls(**{rule.name: record[rule.name] for rule in fields(cls) if rule.name in record})  # type: ignore[arg-type]
 
-    def agent_facts(self, *, research_years: int | None = None) -> dict[str, object]:
+    def agent_facts(self) -> dict[str, object]:
         """The ``acceptance_rules`` run fact, derived from these rules so no
         prompt restates a threshold. Rules only: no forward or Held-out date
-        appears here. ``research_years`` is the arm's own year count when the
-        caller has it; otherwise the default research geometry's."""
+        appears here, and the sealed years' dates are the research
+        geometry's (``research_session.research_geometry_record``)."""
 
-        years = (
-            research_years
-            if research_years is not None
-            else len(DEFAULT_RESEARCH_GEOMETRY.research_years)
-        )
-        if isinstance(years, bool) or not isinstance(years, int) or years < 1:
-            raise ValueError("research_years must be a positive integer")
-        needed_positive = math.ceil(self.min_positive_year_share * years)
         if self.tracking_error_cap is None:
             mandate: object = (
                 "none for this arm: benchmark.tracking_error and "
@@ -398,79 +346,74 @@ class AcceptanceRules:
             mandate = {
                 "tracking_error": (
                     f"<= {self.tracking_error_cap}: the node's own residual tracking "
-                    "error against the arm's benchmark_index "
-                    "(benchmark.tracking_error)"
+                    "error against the factor legs (benchmark.tracking_error)"
                 ),
                 "market_beta": (
                     f"within {self.beta_min}..{self.beta_max} "
                     "(benchmark.market_beta)"
                 ),
                 "role": (
-                    "a constraint the book must satisfy over the research period "
+                    "a constraint the book must satisfy over the nominee's span "
                     "and again forward; meeting it is not evidence of skill"
                 ),
             }
+        years = TRADING_DAYS_PER_YEAR
         return {
             "graded_series": (
-                "every return statistic below is measured on the ACTIVE series, as it "
-                "is, with no regression: the node's daily return after every cost "
-                "minus the host's zero-skill panel composite, the "
-                f"equal-weight mean of {verdict.PANEL_DRAWS} random-name copies of the "
-                "node's own filled trades (same entry and exit instants, same money per "
-                "round trip, same Broker and costs; each name replaced by one on the "
-                "same side of the arm's benchmark_index membership that one board lot "
-                "of that money could "
-                "buy). Its annualized mean is the active excess, its annualized "
-                "standard deviation the active tracking error and their ratio the "
-                "active information ratio. Every formal validation reports them as "
-                "benchmark.active_excess, benchmark.active_tracking_error, "
-                "benchmark.active_information_ratio and benchmark.active_max_drawdown "
-                "(over the validation's own span), per research year as "
-                "sub_windows[].active_excess_return, and day by day as the "
-                "active_return of its daily_series. The strategy exposes nothing for "
-                "this beyond its orders"
+                "every return statistic below is measured on the ACTIVE series: the "
+                "node's daily return after every cost minus the host's zero-skill panel "
+                f"composite, the equal-weight mean of {verdict.PANEL_DRAWS} random-name "
+                "copies of the node's own filled trades (same entry and exit instants, "
+                "same money per round trip, same Broker and costs; each name replaced by "
+                "one on the same side of the arm's benchmark_index membership that one "
+                "board lot of that money could buy). Its annualized mean is the active "
+                "excess, its annualized standard deviation the active tracking error "
+                "and their ratio the active information ratio. Every formal validation "
+                "reports them as benchmark.active_excess, "
+                "benchmark.active_tracking_error, benchmark.active_information_ratio "
+                "and benchmark.active_max_drawdown (over the validation's own span), "
+                "per research year as sub_windows[].active_excess_return, and day by "
+                "day as the active_return of its daily_series. The strategy exposes "
+                "nothing for this beyond its orders"
             ),
-            "freeze_gate": {
-                "span": f"the nominee replayed the whole research period (span={FULL_SPAN})",
+            "sealed_gate": {
+                "statistic": (
+                    "the residual information ratio of the active series: its daily "
+                    "return regressed by OLS on an intercept, the benchmark_index return "
+                    "(market), the size leg and the value leg (regression_method), the "
+                    f"intercept times sqrt({years}) over the residual standard deviation; "
+                    f"years = trading days / {years}"
+                ),
+                "bar": "z(1 - alpha) / sqrt(years)",
+                "alpha": self.alpha,
+                "sealed_years": self.sealed_years,
+                "bar_over_sealed_years": round(
+                    verdict.residual_bar(float(self.sealed_years), self.alpha), 3
+                ),
+                "bar_over_one_year": round(verdict.residual_bar(1.0, self.alpha), 3),
+                "passes": (
+                    "the frozen node's residual information ratio over the sealed years "
+                    "is at least the bar for their length; the only performance "
+                    "condition of the verdict"
+                ),
+                "read": (
+                    "once, by the host, after the freeze has ended the session: the "
+                    "frozen node and its seed replicates replayed over the sealed years "
+                    "as one continuous book each. No session sees the "
+                    "sealed years, their data or the reading, and there is no second "
+                    "reading"
+                ),
+                "on_visible_spans": (
+                    "every batch_validate row reports the same statistic over its own "
+                    "span (residual_reading) with the bar for that span's length"
+                ),
+            },
+            "freeze_registration": {
+                "span": f"the nominee replayed the whole visible research period (span={FULL_SPAN})",
+                "control": "a node registered as a control (control: true) is never nominated",
                 "finite_metrics": "total_return/max_drawdown/sharpe must be finite",
-                "active_information_ratio": f">= {self.min_active_ir}",
-                "deflated_sharpe_probability": (
-                    f">= {self.min_dsr_probability} for the nominee's "
-                    "research-period active IR. Trials M = distinct non-control "
-                    "strategies (distinct bytes) validated in the arm on any span "
-                    "-- the same bytes validated again, on another span or "
-                    "after a control registration, are the same trial -- plus every "
-                    "batch's declared offline_trials; "
-                    "the H of them validated on the host and the M - H declared "
-                    "offline count as rho + (1 - rho) * H + (M - H) independent "
-                    "trials, rho the mean pairwise correlation of the H trials' "
-                    "daily active series, each over its longest validated span. "
-                    f"{OFFLINE_TRIALS_PRICING} The dispersion"
-                    " is the zero-skill sampling "
-                    "error of an annualized IR over the nominee's days, "
-                    f"sqrt({verdict.TRADING_DAYS_PER_YEAR} / days), about 0.5 over "
-                    "four years. A control "
-                    "(control: true in batch_validate) is no trial and can never "
-                    "be nominated. selection_statistics.information_ratio_bar, on "
-                    "every row, is the IR this asks of a full-span nominee now"
-                ),
-                "positive_years": (
-                    "active excess > 0 in at least "
-                    f"{self.min_positive_year_share:.0%} of the research years, "
-                    f"rounded up ({needed_positive} of {years})"
-                ),
-                "active_max_drawdown": (
-                    f"<= {self.active_max_drawdown}: drawdown of the cumulative active "
-                    "series over the research period (benchmark.active_max_drawdown)"
-                ),
                 "max_drawdown": (
-                    f"<= {self.max_drawdown}: equity drawdown over the research period"
-                ),
-                "excess_at_cost_stress": (
-                    "> 0: active excess over the research period after charging "
-                    f"{self.cost_stress_multiplier} x the slippage on the node's own "
-                    "turnover (graduation_activity.active_excess_at_cost_stress on "
-                    "its batch_validate row)"
+                    f"<= {self.max_drawdown}: equity drawdown over the nominee's span"
                 ),
                 "seed_replicates": (
                     "a nominee whose main.py defines fit (it trains a model) "
@@ -481,30 +424,24 @@ class AcceptanceRules:
                     "changed, an integer assignment to a seed name (SEED, "
                     "SEED_BASE, or one ending in _SEED or _SEED_BASE; e.g. "
                     "SEED_BASE = 1000 in the nominee, 2000 in a replicate), "
-                    "and whose bytes differ from every other "
-                    "registered one; the mean active information ratio over the "
-                    "nominee and its replicates must be >= the nominee's "
-                    "information_ratio_bar, and every other condition here is "
-                    "judged on the nominee itself. A nominee without fit needs "
-                    "none; replicates it names are held to the same rules. A "
-                    "nomination declared deterministic in finish_session (its "
-                    "package uses no randomness) is exempt from the replicate "
-                    "count and the seed mean, its own reading standing"
+                    "and whose bytes differ from every other registered one. "
+                    "Replicates are frozen and replayed on the sealed years beside "
+                    "the nominee and reported; the gate reads the nominee. A "
+                    "nominee without fit needs none, and a nomination declared "
+                    "deterministic in finish_session (its package uses no "
+                    "randomness) owes none"
                 ),
                 "tracking_mandate": mandate,
-                "full_span_validations": (
-                    f">= {self.min_full_span_validations} in the arm, the "
-                    "nominee and controls included"
-                ),
-                "freezes_per_arm": 1,
+                "freezes_per_arm": "1: a freeze that registers ends the session",
             },
             "graduation": {
                 "evaluated_on": (
-                    "one continuous replay of the frozen artifact over the twelve "
-                    "months after research end and then Held-out, graded on its "
-                    "active series against a panel drawn from that replay; no "
-                    "session sees either period"
+                    "after the sealed reading, one continuous replay of the frozen "
+                    "artifact over the twelve months after research end and then "
+                    "Held-out, graded on its active series against a panel drawn from "
+                    "that replay; no session sees either period"
                 ),
+                "sealed_gate": "passes (sealed_gate above)",
                 "forward": {
                     "lower_bound": (
                         f"{self.forward_confidence:.0%} one-sided block-bootstrap "
@@ -513,10 +450,6 @@ class AcceptanceRules:
                         "day-by-day average over the frozen book and its "
                         "replicates, each replayed exactly like the frozen book; "
                         "every other condition reads the frozen book itself"
-                    ),
-                    "recency": (
-                        "active excess of the last "
-                        f"{self.recency_months} months >= 0"
                     ),
                     "max_drawdown": f"<= {self.max_drawdown}",
                     "active_max_drawdown": f"<= {self.active_max_drawdown}",
@@ -528,7 +461,7 @@ class AcceptanceRules:
                         f">= {self.min_round_trips_per_month} per month"
                     ),
                     "mean_gross": f">= {self.min_mean_gross}",
-                    "tracking_mandate": "as in freeze_gate, over the forward months",
+                    "tracking_mandate": "as in freeze_registration, over the forward months",
                     "strategy_error": "none",
                     "minimum_detectable_excess": (
                         "about 2.12 x research active tracking error / sqrt(years of "
@@ -550,7 +483,7 @@ class AcceptanceRules:
         }
 
     def evaluate(self, summary: dict[str, object]) -> list[str]:
-        """The hard reasons a nomination is refused (``experiment.freeze_gate_for``):
+        """The hard reasons a nomination is refused (``experiment.freeze_registration``):
         the ``nomination`` conditions of ``verdict.CONDITIONS``, a non-finite
         metric and a research-period drawdown over ``max_drawdown``, read off
         the nominee's replay summary. Only a summary from a completed
@@ -592,6 +525,22 @@ RETIRED_SWITCHES = frozenset(
     }
 )
 
+# The rules and the create parameter retired on 2026-11-03 with the
+# deflated-Sharpe freeze gate, its trial family and its lineage, when the
+# sealed gate replaced them. Every params.json written before then carries
+# them; readers accept exactly these keys beside ``RETIRED_SWITCHES`` and
+# derive nothing from them, so an earlier arm still lists in the console.
+RETIRED_RULES = frozenset(
+    {
+        "min_active_ir",
+        "min_dsr_probability",
+        "min_positive_year_share",
+        "min_full_span_validations",
+        "recency_months",
+        "lineage_arms",
+    }
+)
+
 # The beta band that travels with a tracking mandate when the create request
 # names a cap and leaves the band blank. A cap alone is cheapest to meet by
 # dropping beta. Drawdowns are not here: they stay the rules' own 45 % / 30 %
@@ -618,15 +567,31 @@ def acceptance_for(params: Mapping[str, object]) -> AcceptanceRules:
     a beta band named without a cap is refused by ``AcceptanceRules`` itself.
     """
 
+    return AcceptanceRules.from_record(
+        {
+            **defaulted_acceptance(params),
+            **{key: params[key] for key in REQUIRED_ACCEPTANCE_KEYS if params.get(key) is not None},
+        }
+    )
+
+
+def defaulted_acceptance(params: Mapping[str, object]) -> dict[str, object]:
+    """Every rule that has a default, as :func:`acceptance_for` resolves it
+    from an arm's parameters: the value they name, else the default, and a
+    blank beta band beside a named cap filled from ``MANDATED_DEFAULTS``.
+    Read without the required rules, so a reader that needs only these (the
+    console's threshold preview) reads an arm stamped before a rule became
+    required as it was stamped."""
+
     rules = {
         rule.name: rule.default for rule in fields(AcceptanceRules) if rule.default is not MISSING
     }
-    rules.update({key: params[key] for key in ACCEPTANCE_KEYS if params.get(key) is not None})
+    rules.update({key: params[key] for key in rules if params.get(key) is not None})
     if rules["tracking_error_cap"] is not None:
         for key, value in MANDATED_DEFAULTS.items():
             if params.get(key) is None:
                 rules[key] = value
-    return AcceptanceRules.from_record(rules)
+    return rules
 
 
 @dataclass(frozen=True)
@@ -692,11 +657,6 @@ class RollingExperimentConfig:
     # the curated repository library alone, plus the skills of every graduated
     # experiment, or nothing.
     operating_memory: str = DEFAULT_OPERATING_MEMORY
-    # Earlier arms on the same research period whose non-control trials join
-    # this arm's freeze-gate family. Extracted into the arm's own ledger at
-    # creation (``pipelines/lineage.py``); the research session refuses to run
-    # when the ledger does not record exactly these.
-    lineage_arms: tuple[str, ...] = ()
     # Also record failed validation attempts as lightweight dead-end nodes
     # (no output snapshot) so later sessions can see what was already tried.
     record_failed_attempts: bool = True
@@ -752,6 +712,8 @@ class RollingExperimentConfig:
             )
         positive_spend_cap(self.max_api_spend_usd)
         benchmark_index_label(self.benchmark_index)
+        # The sealed years must leave at least one visible year.
+        self.geometry.split_sealed(self.acceptance.sealed_years)
         object.__setattr__(self, "experiments_root", Path(self.experiments_root))
 
     @property
@@ -1014,20 +976,14 @@ class StepResult:
     validation: EvaluationResult
     # The ``ReplaySpan.label`` the validation replayed.
     span: str
-    # Registered by the Agent as a comparison leg: never nominated, and not a
-    # trial of the freeze gate (``experiment.trial_family``).
+    # Registered by the Agent as a comparison leg: never nominated.
     control: bool = False
-    # The ``batch_validate`` call that recorded it, and the candidate
-    # configurations that call declared as screened offline but not submitted.
-    # ``None`` on a Validation recorded before batches declared them; it reads
-    # as 0.
+    # The ``batch_validate`` call that recorded it.
     batch_id: str | None = None
-    offline_trials: int | None = None
-    # The artifact fingerprint of the bytes the revision holds: Validations of
-    # the same bytes, on any span, are one trial. ``None`` where the caller did
-    # not commit the revision through a session (the host's deterministic
-    # baseline); the trial family then reads it from the revision's manifest
-    # (``experiment.trial_rows``).
+    # The artifact fingerprint of the bytes the revision holds. ``None`` where
+    # the caller did not commit the revision through a session (the host's
+    # deterministic baseline); the ledger row then reads it from the
+    # revision's manifest (``experiment.completed_rows``).
     fingerprint: str | None = None
 
 
@@ -1104,8 +1060,8 @@ class SessionResume:
     transcripts: tuple[str, ...]
 
 
-# How the research session ended. ``freeze`` nominates a node for the freeze
-# gate, ``no_edge`` ends the arm without a deliverable, ``deadline`` is a
+# How the research session ended. ``freeze`` nominates a node that registered
+# for the freeze, ``no_edge`` ends the arm without a deliverable, ``deadline`` is a
 # session whose budget (the wrap-up grace, the model-call budget or the API
 # spend cap) ran out before it finished, and ``environment_blocked`` one the
 # host ended because its replays on one span kept failing on the environment
@@ -1117,13 +1073,14 @@ SESSION_OUTCOMES = ("freeze", "no_edge", "deadline", ENVIRONMENT_BLOCKED)
 class ResearchSessionRequest:
     experiment_id: str
     run_id: str
-    # The Agent's only data view: the decision view at research end, anchored
-    # at ``decision_time``.
+    # The Agent's only data view: the decision view at the end of the visible
+    # research years, anchored at ``decision_time``.
     snapshot: SnapshotBundle
     decision_time: datetime
-    # The research years in order, one single-slot span each (labels Y1..Yn):
-    # every span a Validation may replay is resolved from them
-    # (``research_span``).
+    # The visible research years in order, one single-slot span each (labels
+    # Y1..Yk): every span a Validation may replay is resolved from them
+    # (``research_span``), so ``full`` is the visible period. The sealed
+    # years after them are never among them.
     research_years: tuple[ReplaySpan, ...]
     # Months of history every decision view carries up to its anchor
     # (``RollingExperimentConfig.window_months``): the research-end view the
@@ -1149,6 +1106,10 @@ class ResearchSessionRequest:
     # The arm's ``AcceptanceRules.to_record()``; no default, as the rules
     # carry required keys.
     acceptance_rules: Mapping[str, object] = field(kw_only=True)
+    # The sealed research years' calendar bounds (``YYYYMMDD``, start and
+    # end): the dates the session is told are sealed, never a span it can
+    # replay.
+    sealed_period: tuple[str, str] = field(kw_only=True)
     modification_constraints: ModificationConstraints = field(
         default_factory=ModificationConstraints
     )
@@ -1177,7 +1138,7 @@ class ResearchSessionRequest:
     # host path through Agent-visible facts or manifests.
     skills_source_ref: str = ""
     # What the session's earlier attempts consumed and recorded: the live
-    # counters continue from these amounts, the freeze gate and the finish
+    # counters continue from these amounts, the registration and the finish
     # tool see these Validations, and ``resume`` says how the last attempt
     # stopped. All empty on a first attempt.
     budget_used: BudgetUsed = field(default_factory=BudgetUsed)
@@ -1186,7 +1147,7 @@ class ResearchSessionRequest:
 
     @property
     def validation(self) -> ReplaySpan:
-        """The whole research period as one span."""
+        """The whole visible research period as one span."""
 
         return research_span(self.research_years, FULL_SPAN)
 
@@ -1235,7 +1196,7 @@ class ResearchSessionResult:
     _: KW_ONLY
     # ``freeze``: the nominated Step, the Steps it registered as its seed
     # replicates, and whether it declared its package deterministic
-    # (``experiment.freeze_gate_for``).
+    # (``experiment.freeze_registration``).
     node_id: str | None = None
     seed_replicates: tuple[str, ...] = ()
     deterministic: bool = False
@@ -1252,19 +1213,10 @@ class ResearchSessionResult:
     # The session's cumulative spend at its end, and which attempt ended it.
     budget_used: BudgetUsed = field(default_factory=BudgetUsed)
     attempt: int = 1
-    # The candidate configurations screened offline on research-period data
-    # whose readings shaped this session and that no batch declared through
-    # ``batch_validate``: the terminal delta the session's ``finish_session``
-    # declared, added to the arm's trial family once (0 when it declared none).
-    terminal_offline_trials: int = 0
 
     def __post_init__(self) -> None:
         if self.outcome not in SESSION_OUTCOMES:
             raise ValueError(f"unknown research session outcome: {self.outcome!r}")
-        offline_trials_count(
-            self.terminal_offline_trials,
-            where="ResearchSessionResult.terminal_offline_trials",
-        )
 
 
 ResearchDeveloper = Callable[[ResearchSessionRequest], ResearchSessionResult]
@@ -1282,6 +1234,7 @@ __all__ = [
     "DEFAULT_MAX_RESEARCH_MINUTES",
     "DEFAULT_RESEARCH_GEOMETRY",
     "REQUIRED_ACCEPTANCE_KEYS",
+    "RETIRED_RULES",
     "SESSION_OUTCOMES",
     "AcceptanceRules",
     "ArtifactRevision",
@@ -1304,6 +1257,7 @@ __all__ = [
     "StrategyExperimentConfig",
     "acceptance_default",
     "acceptance_for",
+    "defaulted_acceptance",
     "positive_spend_cap",
     "research_span",
     "rolling_default",

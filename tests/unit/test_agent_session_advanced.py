@@ -59,10 +59,9 @@ from autotrade.pipelines.research_session import SessionBudgetLLM, SessionCallBu
 def _passing_gate(
     node_id: str,
     seed_replicates: tuple[str, ...] = (),
-    offline_trials: int = 0,
     deterministic: bool = False,
 ) -> dict[str, object]:
-    """A freeze gate every node passes: these tests are about the Runner."""
+    """A registration every node passes: these tests are about the Runner."""
     return {"passed": True, "reasons": []}
 
 
@@ -88,7 +87,7 @@ def finish_session_tool(root: Path) -> tuple[FinishSessionTool, str]:
         revision_id=new_revision_id("revision"),
         metrics={"total_return": 0.01},
     )
-    return FinishSessionTool(tree, session_ref="session_ref_ab", freeze_gate=_passing_gate), node_id
+    return FinishSessionTool(tree, session_ref="session_ref_ab", registration=_passing_gate), node_id
 
 
 class DeclaredReadOnlyShell:
@@ -325,7 +324,6 @@ def test_a_resumed_attempt_opens_with_its_preamble_and_seeded_candidates(tmp_pat
         system_prompt="inspect",
         config=AgentSessionConfig(max_llm_calls=4),
         event_sink=lambda event, payload: events.append((event, payload)),
-        freeze_gate=_passing_gate,
     )
     checkpoint = compaction_summary_message(SUMMARY, kind="resume", trace_ref="run_ref_first")
     result = runner.run(
@@ -1346,7 +1344,7 @@ def test_prompt_and_facts_encode_daily_json_and_hidden_stage_boundaries(
     # The prohibition list carries the item-6 execution-model rules.
     prohibitions = prompt[prompt.index("# 禁止事项") :]
     for rule in (
-        "读取研究期末之后的任何数据、前推期或 Held-out",
+        "读取可见研究年之后的任何数据（封存研究年、前推期或 Held-out）",
         "绕过 `available_at`",
         "把历史分钟、竞价或事件时间当成策略执行时钟",
         "伪造工具结果",
@@ -1357,8 +1355,8 @@ def test_prompt_and_facts_encode_daily_json_and_hidden_stage_boundaries(
         ref_store=AgentRefStore(tmp_path / "experiment"),
         runtime_env={"sandbox_spec": {"network": "none"}},
     )
-    assert facts["visibility_policy"]["research_period_visible"] is True
-    assert "不进入任何会话" in facts["visibility_policy"]["after_research_end"]
+    assert facts["visibility_policy"]["visible_research_period"] is True
+    assert "不进入任何会话" in facts["visibility_policy"]["after_visible_research_period"]
 
 
 def test_session_prompt_keeps_hard_boundaries_and_leaves_how_tos_mounted():

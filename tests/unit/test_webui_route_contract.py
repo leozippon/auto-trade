@@ -495,7 +495,6 @@ def test_a_criterion_that_names_a_threshold_words_it_from_the_record() -> None:
     labels = _js_literal("const REASON_LABELS = {", "\n};")
     for token, key in (
         ("forward_lower_bound_not_positive", "forward_confidence"),
-        ("forward_recency_negative", "recency_months"),
         ("forward_not_positive_at_cost_stress", "cost_stress_multiplier"),
     ):
         [line] = [row for row in labels.splitlines() if row.strip().startswith(f"{token}:")]
@@ -611,6 +610,7 @@ def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) ->
     from autotrade.pipelines.verdict import CONDITIONS
 
     checked = set(re.findall(r'"((?:forward|heldout)_[a-z_]+)"', _js_function_body("forwardCriteria") + _js_function_body("heldoutCriteria")))
+    checked |= set(re.findall(r'"(sealed_[a-z_]+)"', _js_function_body("sealedReadingBlock")))
     checked |= {f"{where}_strategy_error" for where in ("forward", "heldout")}
     assert {condition.reason for condition in CONDITIONS if condition.code} <= checked
     # The budget bars read the keys both the totals and the usage block carry.

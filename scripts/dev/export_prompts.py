@@ -87,7 +87,7 @@ def render() -> str:
         "",
         "## 1. 研究会话系统提示词",
         "",
-        "无标题的开场段与八个区块按「开场 → 系统 → 研究任务 → 结束会话 → 策略合同 → 禁止事项 → 使用工具 → Step 产物树 → 反馈通道」的顺序拼接，再接「环境」动态部分（第 5 节）。提示只写宿主执行的规则与 Agent 自己查不到的事实：哪些条件约束本实验、阈值多少只在运行事实 `acceptance_rules` 里，参数与返回字段的含义只在工具的描述与 schema 里；怎样研究（方法、模型、核与卡的用法）由 Agent 自己决定，参考包可以给出可以不采纳的建议。",
+        "无标题的开场段与八个区块按「开场 → 系统 → 研究任务 → 结束会话 → 策略合同 → 禁止事项 → 使用工具 → Step 产物树 → 反馈通道」的顺序拼接，再接「环境」动态部分（第 5 节）。提示只写宿主执行的规则与 Agent 自己查不到的事实：哪些条件约束本实验、阈值多少只在运行事实 `acceptance_rules` 与由它生成的「封存检验」段里，参数与返回字段的含义只在工具的描述与 schema 里；怎样研究（方法、模型、核与卡的用法）由 Agent 自己决定，参考包可以给出可以不采纳的建议。",
         "",
         "### 1.1 开场段",
         "",
@@ -147,7 +147,7 @@ def render() -> str:
         "",
         _block(HARD_FINALIZATION_SYSTEM_PROMPT),
         "",
-        "用户消息由 Runner 确定性生成，只包含候选节点、revision、有界验证指标与每个节点此刻的定版检验结论（`passes_freeze_gate`）。工具面只保留 `finish_session`；模型仍自行选择结局，Runner 不排名或自动提交。尚无完整节点时不会进入该状态。是否调用过 `agent` 不影响进入硬收尾。",
+        "用户消息由 Runner 确定性生成，只包含候选节点、revision 与有界验证指标，不带任何检验结论。工具面只保留 `finish_session`；模型仍自行选择结局，Runner 不排名或自动提交。尚无完整节点时不会进入该状态。是否调用过 `agent` 不影响进入硬收尾。",
         "",
         "## 3. agent 工具与子代理系统提示词",
         "",
@@ -187,6 +187,7 @@ def render() -> str:
             f"{SESSION_DYNAMIC_CONTEXT_HEADER.strip()}\n\n"
             f"{EXPERIMENT_FACTS_HEADER.strip()}\n\n"
             "{experiment_facts JSON，含 inputs/skills_index.json 引用}\n\n"
+            "## 封存检验\n{由 research_geometry 与 acceptance_rules.sealed_gate 生成：可见与封存研究年的日期、统计量、门槛数值、每次只读一次}\n\n"
             f"{build_exploration_section('[存在时注入]')}\n\n"
             f"{build_session_directive_section('[存在时注入]')}"
         ),
@@ -197,13 +198,13 @@ def render() -> str:
         "| --- | --- |",
         "| `identity` | experiment、run 与会话引用 |",
         "| `source_refs` | 运行 manifest、runtime environment、data summary、skills 索引与信号筛选脚本的受信引用 |",
-        "| `visibility_policy` | 研究期可见、研究期末之后封存，以及正式策略读取根 |",
-        "| `research_geometry` | 决策时点、输入窗口、研究期、各研究年份与 span 写法；只有研究期日期 |",
+        "| `visibility_policy` | 可见研究期、之后的封存研究年与研究期末之后封存，以及正式策略读取根 |",
+        "| `research_geometry` | 决策时点、输入窗口、可见研究期、各研究年份、封存研究年的日期与 span 写法；没有研究期末之后的日期 |",
         "| `visible_timeline` | 快照窗口、日级时钟与历史研究域可用性 |",
         "| `research_scope` | 研究期与会话结局、股票池和调用节奏各一句 |",
-        "| `arm` | 本实验尚未定版、至多定版一次，以及至今的试验数与完整研究期验证数 |",
+        "| `arm` | 本实验尚未定版、只定版一次，以及至今的验证数与完整研究期验证数 |",
         "| `budgets` | deadline、回测年、随机对照、模型调用、API 花费上限、策略容器超时与资源、压缩预算 |",
-        "| `artifact_contract` | 必需入口、订单返回合同、起点、修改约束、定版检验与样本外验收条件 |",
+        "| `artifact_contract` | 必需入口、订单返回合同、起点、修改约束、封存检验、定版登记与样本外验收条件 |",
         "| `broker_replay` | 资金、费用、手数、T+1、调度（`schedule`）与精确执行价格来源 |",
         "| `runtime_tools` | Python、已装依赖、可用本地工具、网络模式和安装策略，以及各读文件根在 `shell` 里的挂载路径 |",
         "| `workspace` / `forbidden` | 工作区索引与禁止访问的范围 |",

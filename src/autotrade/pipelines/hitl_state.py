@@ -63,8 +63,10 @@ ENDED_STATES = frozenset({"completed", "failed", "stopped"})
 # (``config.REQUIRED_ACCEPTANCE_KEYS``), which the rules themselves leave
 # without a default. The sealed gate's level is one for the whole program, so
 # that every sealed reading is judged at the same level
-# (``_round.BASE_EXPECTED_DEFAULTS`` pins it).
-_REQUIRED_ACCEPTANCE_DEFAULTS: dict[str, object] = {"alpha": 0.05}
+# (``_round.BASE_EXPECTED_DEFAULTS`` pins it). How many research years are
+# sealed depends on the arm's geometry, so the console has no value for it:
+# every create request states it (``WEB_REQUIRED_PARAMS``).
+_REQUIRED_ACCEPTANCE_DEFAULTS: dict[str, object] = {"alpha": 0.05, "sealed_years": None}
 
 
 def _acceptance_defaults() -> dict[str, object]:
@@ -109,9 +111,6 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "research_directive": rolling_default("research_directive"),
     "workspace_reference": rolling_default("workspace_reference"),
     "operating_memory": rolling_default("operating_memory"),
-    # Earlier arms on the same research period whose trials join this arm's
-    # freeze-gate family; read once, at creation (pipelines/lineage.py).
-    "lineage_arms": rolling_default("lineage_arms"),
     "strategy_period": "day",
     "inference_time": "08:30",
     # Sets nothing since the approval mode was removed; still written because
@@ -236,7 +235,13 @@ WEB_CLOSED_PARAMS = frozenset(
     }
 )
 
-WEB_REQUIRED_PARAMS = frozenset({"experiment_id", *GEOMETRY_PARAMETERS})
+WEB_REQUIRED_PARAMS = frozenset(
+    {
+        "experiment_id",
+        *GEOMETRY_PARAMETERS,
+        *(name for name, value in _REQUIRED_ACCEPTANCE_DEFAULTS.items() if value is None),
+    }
+)
 
 
 @dataclass

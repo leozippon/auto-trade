@@ -33,7 +33,6 @@ from autotrade.pipelines.hitl_state import (
     read_control,
     read_json,
 )
-from autotrade.pipelines.ledger import lineage_record
 
 from .registry import read_ledger_records
 
@@ -131,7 +130,7 @@ def _research_prompt(
     directive: str,
     resource_override: object,
 ) -> str:
-    from autotrade.pipelines.experiment import _session_budgets, lineage_ledger_record
+    from autotrade.pipelines.experiment import _session_budgets
     from autotrade.pipelines.research_session import (
         arm_record,
         research_geometry_record,
@@ -143,28 +142,24 @@ def _research_prompt(
     geometry = rolling.geometry
     budgets = _session_budgets(rolling, resource_override)
     limits = context.strategy_limits
-    # The pipeline records the lineage when the research session starts; until
-    # then the preview reads the same figures off the creation-time file.
-    lineage = lineage_record(context.records)
-    if lineage is None and rolling.lineage_arms:
-        lineage = lineage_ledger_record(
-            context.options.experiment_dir,
-            workspace_reference=rolling.workspace_reference,
-        )
+    # The session sees the visible years, as ``experiment.research_inputs``
+    # hands them to it.
+    visible, sealed = geometry.split_sealed(rolling.acceptance.sealed_years)
     manifest: dict[str, object] = {
         "experiment_id": rolling.experiment_id,
         "epoch_id": "research",
         "fold_id": context.session_key,
         "kind": "research",
         "research": research_geometry_record(
-            geometry.research_years,
+            visible,
             window_months=rolling.window_months,
-            decision_time=geometry.research_decision_time.isoformat(),
+            decision_time=sealed[0].anchor.isoformat(),
+            sealed=(sealed[0].start, sealed[-1].end),
         ),
         "benchmark_index": rolling.benchmark_index,
         "snapshot_config": context.options.snapshot_config.to_record(),
         "start": start_record(),
-        "arm": arm_record((), lineage),
+        "arm": arm_record(()),
         "modification_constraints": rolling.step_constraints.to_record(),
         "acceptance_rules": rolling.acceptance.to_record(),
         "schedule": rolling.schedule.to_record(),

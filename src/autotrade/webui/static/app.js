@@ -86,10 +86,13 @@ const REASON_LABELS = {
   freeze_too_few_seed_replicates: "训练模型的提名登记了种子副本",
   freeze_seed_replicate_invalid: "种子副本只改种子一行",
   freeze_seed_mean_information_ratio_below_threshold: "研究期种子均值主动 IR",
+  sealed_strategy_error: "封存年份策略无报错",
+  sealed_residual_ir_below_bar: "封存年份残差 IR",
   forward_strategy_error: "前推期策略无报错",
   heldout_strategy_error: "Held-out 期策略无报错",
   forward_lower_bound_not_positive: (t) => `前推主动超额 ${fmtPct(t.forward_confidence, 0)} 下界`,
-  forward_recency_negative: (t) => `前推最近 ${t.recency_months ?? "—"} 个月主动超额`,
+  // F3, retired with the sealed gate; a verdict recorded before it may carry it.
+  forward_recency_negative: "前推近月主动超额",
   forward_max_drawdown_exceeded: "前推回撤",
   forward_active_drawdown_exceeded: "前推主动回撤",
   forward_not_positive_at_cost_stress: (t) => `前推滑点 ×${t.cost_stress_multiplier ?? "—"} 后主动超额`,
@@ -124,7 +127,7 @@ const IR_TITLE = "主动超额 ÷ 主动跟踪误差";
 const RAW_EXCESS_TITLE = "账户自身扣费收益减基准指数（价格指数）同期收益，整段累计";
 // The cost-stress reading the freeze gate and F5 judge (verdict.py
 // `excess_at_cost_stress`), at the arm's multiplier.
-const STRESS_TITLE = "滑点按成本压力倍数加价后的年化主动超额；定版检验与前推裁决读的是同一个数";
+const STRESS_TITLE = "滑点按成本压力倍数加价后的年化主动超额；研究期每次验证与前推裁决读的是同一个数";
 const PANEL_RETURN_TITLE = "随机对照组合（同一成交骨架随机换名）自身扣费后的整段收益";
 // What F2 judges (verdict.py `forward_lower_bound`): the lower bound of one
 // daily series' mean. The mean itself is the slice's `plain_excess`, or with
@@ -161,6 +164,7 @@ const ENVIRONMENT_STAGE_LABELS = {
   backtest: "执行验证回测",
   agent_complete: "Agent 推理完成",
   freezing: "定版策略",
+  sealed_replay: "封存研究年回测",
   forward_replay: "前推与 Held-out 连续回测",
   verdict: "裁决",
   publishing: "结果落盘",
@@ -174,6 +178,7 @@ const ENVIRONMENT_STAGE_ICONS = {
   backtest: "📊",
   agent_complete: "🤖",
   freezing: "❄",
+  sealed_replay: "▶",
   forward_replay: "▶",
   verdict: "⚖",
   publishing: "💾",
@@ -186,6 +191,7 @@ const PREP_ENVIRONMENT_STAGES = new Set([
   "sandbox_layout",
   "pit_view",
   "sandbox_start",
+  "sealed_replay",
   "forward_replay",
   "verdict",
   "session_retry",
@@ -2982,7 +2988,6 @@ const SLICE_ROWS = [
   ["days", "交易日", String],
   ["information_ratio", "主动 IR", fmtSharpe, true, IR_TITLE],
   ["lower_bound", (t) => `${fmtPct(t.forward_confidence, 0)} 下界`, fmtPct, true, LOWER_BOUND_TITLE],
-  ["recency_plain_excess", (t) => `最近 ${t.recency_months ?? "—"} 个月主动超额`, fmtPct, true],
   ["tolerance", "容忍线", fmtPct],
   ["max_drawdown", "最大回撤", fmtPct],
   ["active_max_drawdown", "主动回撤", fmtPct],
@@ -3007,7 +3012,6 @@ const FORWARD_STAT_FIELDS = [
   "days",
   "information_ratio",
   "lower_bound",
-  "recency_plain_excess",
   "max_drawdown",
   "active_max_drawdown",
   "excess_at_cost_stress",
@@ -3179,7 +3183,6 @@ function forwardCriteria(f, verdict, thresholds) {
         ? `${LOWER_BOUND_TITLE}；均值 ${fmtPct(seeds ? seeds.plain_excess : f.plain_excess)}/年，${seeds ? seeds.members : 1} 个种子`
         : LOWER_BOUND_TITLE,
     ),
-    row("forward_recency_negative", fmtPct(f && f.recency_plain_excess), "≥ 0"),
     row("forward_max_drawdown_exceeded", fmtPct(f && f.max_drawdown), thresholdCell("≤", t.max_drawdown)),
     row("forward_not_positive_at_cost_stress", fmtPct(f && f.excess_at_cost_stress), "> 0", STRESS_TITLE),
     row("forward_too_few_round_trips", f && f.round_trips, thresholdCell("≥", t.min_round_trips, String)),
@@ -3240,6 +3243,40 @@ function stageHead(key, detail) {
 /* 前推回测: the forward slice alone — its span (progress while replaying),
    once recorded the holder's line and its seed replicates, F1–F7 and the
    slice's own statistics. */
+/* The sealed reading S: the frozen book's factor-residual IR on the sealed
+   research years against its bar, read once in the forward stage before the
+   forward replay, with its seed replicates' readings beside it. Absent on an
+   arm judged before the sealed gate. */
+function sealedReadingBlock(forward) {
+  const s = (forward || {}).sealed;
+  if (!s) return null;
+  return el(
+    "div",
+    { class: "section-gap" },
+    el("h4", { class: "subsection-title" }, `封存读数 S · ${s.start || "—"}–${s.end || "—"}`),
+    s.strategy_error ? el("div", { class: "hint warn" }, `策略报错：${s.error || "—"}`) : null,
+    checklist([
+      s.strategy_error
+        ? { ok: false, label: reasonLabel("sealed_strategy_error"), value: null }
+        : {
+            ok: Boolean(s.passed),
+            label: reasonLabel("sealed_residual_ir_below_bar"),
+            value: fmtSharpe(s.residual_information_ratio),
+            threshold: `≥ ${fmtSharpe(s.bar)}`,
+          },
+    ]),
+    s.strategy_error
+      ? null
+      : kvRow(
+          "三因子载荷",
+          `市场 ${fmtSharpe(s.market_beta)} · 规模 ${fmtSharpe(s.size_beta)} · 价值 ${fmtSharpe(s.value_beta)}`,
+        ),
+    ...(s.seed_replicates || []).map((item) =>
+      kvRow(`种子副本 ${item.source_step_id || "—"}`, `残差 IR ${fmtSharpe(item.residual_information_ratio)}`),
+    ),
+  );
+}
+
 function forwardStagePanel(detail) {
   const { forward, replay, thresholds, progress } = replayContext(detail);
   const f = ((forward || {}).slices || {}).forward;
@@ -3247,6 +3284,7 @@ function forwardStagePanel(detail) {
     "div",
     { class: "panel section-gap" },
     stageHead("forward", detail),
+    sealedReadingBlock(forward),
     replaySpanBar(replay, "forward", { pending: !forward, progress }),
     forward && forward.error ? el("div", { class: "hint warn" }, `策略报错：${forward.error}`) : null,
     holderLine("前推", f),
@@ -3924,12 +3962,15 @@ function sessionDetailPanel(detail, selectedKey) {
   return panel;
 }
 
-/* The freeze gate as the pipeline judged the nomination: the two measured
-   criteria always, a failed precondition only when it failed. Where the arm
-   holds seed replicates the gate records them (`seed_replicates`): a missing
-   or invalid replicate is a precondition, each invalid one's problem in the
-   row's hover, and the seed-mean IR against the nominee's IR bar is a row
-   whenever replicates were read. */
+/* The freeze gate as the pipeline judged the nomination: a failed
+   precondition only when it failed, and the conditions the record's own
+   thresholds state. A registration (since the sealed gate, 2026-11-03)
+   states only its drawdown limit and mandate; a deflated-Sharpe gate before
+   it also states its full-span count, DSR and IR bars. Where the arm holds
+   seed replicates the gate records them (`seed_replicates`): a missing or
+   invalid replicate is a precondition, each invalid one's problem in the
+   row's hover, and an earlier gate's seed-mean IR against the nominee's IR
+   bar is a row whenever it read one. */
 function freezeGateChecklist(gate) {
   const failed = new Set(gate.reasons || []);
   const t = gate.thresholds || {};
@@ -3954,21 +3995,29 @@ function freezeGateChecklist(gate) {
       label: reasonLabel(token),
       title: token === "freeze_seed_replicate_invalid" ? problems || null : null,
     })),
-    {
-      ok: !failed.has("freeze_too_few_full_span_validations"),
-      label: reasonLabel("freeze_too_few_full_span_validations"),
-      value: gate.full_span_validations ?? "—",
-      threshold: `≥ ${t.min_full_span_validations ?? "—"}`,
-    },
-    {
-      ok: failed.has("freeze_deflated_sharpe_unavailable")
-        ? null
-        : !failed.has("freeze_deflated_sharpe_below_threshold"),
-      label: reasonLabel("freeze_deflated_sharpe_below_threshold"),
-      value: fmtSharpe(gate.deflated_sharpe_probability),
-      threshold: `≥ ${t.min_deflated_sharpe_probability ?? "—"}`,
-      title: DSR_TITLE,
-    },
+    ...(t.min_full_span_validations === undefined
+      ? []
+      : [
+          {
+            ok: !failed.has("freeze_too_few_full_span_validations"),
+            label: reasonLabel("freeze_too_few_full_span_validations"),
+            value: gate.full_span_validations ?? "—",
+            threshold: `≥ ${t.min_full_span_validations ?? "—"}`,
+          },
+        ]),
+    ...(t.min_deflated_sharpe_probability === undefined
+      ? []
+      : [
+          {
+            ok: failed.has("freeze_deflated_sharpe_unavailable")
+              ? null
+              : !failed.has("freeze_deflated_sharpe_below_threshold"),
+            label: reasonLabel("freeze_deflated_sharpe_below_threshold"),
+            value: fmtSharpe(gate.deflated_sharpe_probability),
+            threshold: `≥ ${t.min_deflated_sharpe_probability ?? "—"}`,
+            title: DSR_TITLE,
+          },
+        ]),
     // The conditions a gate recorded since the active series is graded states
     // in its own thresholds; an earlier gate states none and draws none.
     ...(t.min_information_ratio === undefined || t.min_information_ratio === null
@@ -4035,7 +4084,7 @@ function researchSessionPanel(detail, session) {
       ? el(
           "div",
           { class: "section-gap" },
-          el("h4", { class: "subsection-title" }, "定版检验"),
+          el("h4", { class: "subsection-title" }, "定版登记"),
           freezeGateChecklist(gate),
         )
       : null,

@@ -50,7 +50,7 @@ from autotrade.environment.tools.workspace import (
     LOW_DISK_SPACE,
     WORKSPACE_MIN_FREE_BYTES,
 )
-from tests.unit.acceptance_fixture import RULES
+from tests.unit.acceptance_fixture import RULES, SEALED_PERIOD
 
 from .fixtures_sandbox import PassingModificationCheck
 
@@ -59,10 +59,9 @@ RG_AVAILABLE = shutil.which("rg") is not None
 def _passing_gate(
     node_id: str,
     seed_replicates: tuple[str, ...] = (),
-    offline_trials: int = 0,
     deterministic: bool = False,
 ) -> dict[str, object]:
-    """A freeze gate every node passes: these tests are about the Runner."""
+    """A registration every node passes: these tests are about the Runner."""
     return {"passed": True, "reasons": []}
 
 
@@ -1261,7 +1260,7 @@ class TerminalToolWriteLockTest(unittest.TestCase):
             revision_id=new_revision_id("revision"),
             metrics={},
         )
-        finish = FinishSessionTool(tree, session_ref="session_ref_ab", freeze_gate=_passing_gate)
+        finish = FinishSessionTool(tree, session_ref="session_ref_ab", registration=_passing_gate)
         return workspace, roots, finish, node_id
 
     def test_finish_locks_mutating_tools_and_leaves_reads_open(self) -> None:
@@ -2023,6 +2022,7 @@ def _fold_backtest_tool(
         deadline_seconds=600.0,
         benchmark_index=DEFAULT_BENCHMARK_INDEX,
         acceptance_rules=RULES.to_record(),
+        sealed_period=SEALED_PERIOD,
     )
     # The experiment the worker roots a session in: the freeze gate reads a
     # nominee's strategy from its revision store.
@@ -2053,7 +2053,6 @@ def _fold_backtest_tool(
 
 
 WORKING_COPY = {
-    "offline_trials": 0,
     "candidates": [
         {"name": "working_copy", "hypothesis": "h", "path": "output", "control": False}
     ],

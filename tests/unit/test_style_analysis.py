@@ -23,7 +23,6 @@ from autotrade.environment.replay.style import (
     write_style_rollup,
 )
 from autotrade.pipelines.session_tools import batch_candidate_stats
-from tests.unit.acceptance_fixture import REQUIRED_RULES
 
 # Forty names make a cross-section, ordered by float cap (slot 0 smallest).
 # Twelve are cheap and twelve dear on book-to-price, each set split evenly
@@ -740,8 +739,11 @@ def test_the_sidecar_carries_the_panel_and_the_active_figures_the_verdict_grades
     panel, with no regression."""
     from autotrade.environment.replay.stats import attach_sub_window_benchmark
     from autotrade.environment.replay.style import active_analysis
-    from autotrade.pipelines.config import AcceptanceRules
-    from autotrade.pipelines.verdict import _mandate, freeze_gate, graded_statistics
+    from autotrade.pipelines.verdict import (
+        _mandate,
+        _max_slice_drawdown,
+        graded_statistics,
+    )
 
     rng = np.random.default_rng(7)
     days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2024-01-02", periods=60)]
@@ -805,10 +807,9 @@ def test_the_sidecar_carries_the_panel_and_the_active_figures_the_verdict_grades
     assert compact["tracking_error"] == round(_mandate(bare, "", "")["tracking_error"], 4)
     assert compact["market_beta"] == round(own["market_beta"], 3)
     assert compact["panel_draws"] == 20
-    # The active drawdown the freeze gate holds to its limit is the one the
-    # Agent reads: two sessions rebuilt it from proxies because no row had it.
-    gate = freeze_gate(graded, rules=AcceptanceRules(**REQUIRED_RULES), trials=1, full_span_validations=2, summary={})
-    assert compact["active_max_drawdown"] == gate["active_max_drawdown"]
+    # The active drawdown the verdict holds to its limit is the one the Agent
+    # reads: two sessions rebuilt it from proxies because no row had it.
+    assert compact["active_max_drawdown"] == _max_slice_drawdown(active_analysis(graded), "", "")
     active_curve = np.concatenate(
         [[1.0], np.cumprod(1.0 + np.asarray(
             [value for _day, value in active_analysis(graded)["strategy_daily"]]
