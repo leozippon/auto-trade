@@ -1624,7 +1624,7 @@ def result_style(root: Path, experiment_id: str, name: str) -> dict[str, object]
     sidecar = ledger_result(root, experiment_id, name).parent / STYLE_ARTIFACT_NAME
     try:
         payload = read_json_object(sidecar, missing_ok=True)
-    except (OSError, TypeError, ValueError):
+    except (OSError, ValueError):
         return {"available": False, "reason": "unreadable"}
     if (
         payload.get("schema_version") not in READABLE_STYLE_SCHEMA_VERSIONS

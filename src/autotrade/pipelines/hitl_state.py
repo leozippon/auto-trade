@@ -250,7 +250,7 @@ def running_arms(experiments_root: str | Path) -> list[str]:
             continue
         try:
             status = read_json_object(directory / HITL_DIR_NAME / STATUS_NAME, missing_ok=True)
-        except (OSError, TypeError, ValueError):
+        except (OSError, ValueError):
             continue
         if status_pid_alive(status) and status.get("state") not in ENDED_STATES:
             running.append(directory.name)
