@@ -87,6 +87,7 @@ class FakeClock:
 class TimedLLM:
     # A clocked scripted double, which the session spend meter prices as free.
     provider = ScriptedLLM.provider
+    model = ScriptedLLM.model
 
     def __init__(self, delegate: ScriptedLLM, clock: FakeClock, seconds: float) -> None:
         self.delegate = delegate
@@ -123,6 +124,7 @@ class RecordingShell:
 class ScheduledTimedLLM:
     # A clocked scripted double, which the session spend meter prices as free.
     provider = ScriptedLLM.provider
+    model = ScriptedLLM.model
 
     def __init__(
         self, delegate: ScriptedLLM, clock: FakeClock, seconds: list[float]
