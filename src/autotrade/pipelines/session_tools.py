@@ -63,6 +63,7 @@ from autotrade.environment.tools.node_reference import (
     session_node_reference,
 )
 from autotrade.environment.tools.workspace import SafeWorkspace
+from autotrade.environment.trace import TraceEvent
 
 from .agent_views import NULL_CONTROL_KEYS, allowed_keys
 from .calendar import FULL_SPAN, yyyymmdd
@@ -1528,7 +1529,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
         backtest: SessionValidations,
         workspace: SafeWorkspace,
         modification_check_factory: Callable[[Path], ModificationCheckTool],
-        trace_emit: Callable[[str, dict[str, object]], object] | None = None,
+        trace_emit: Callable[[TraceEvent, dict[str, object]], object] | None = None,
         max_concurrency: int = DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
     ) -> None:
         self.backtest = backtest
@@ -1724,7 +1725,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
         )
         if self._trace_emit is not None:
             self._trace_emit(
-                "environment_blocked",
+                TraceEvent.ENVIRONMENT_BLOCKED,
                 {"tool": "batch_validate", "span": span.label, "batches": count, "reason": reason},
             )
         raise EnvironmentBlocked(reason)
@@ -1876,7 +1877,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
         )
         if self._trace_emit is not None:
             self._trace_emit(
-                "batch_rejection_escalated",
+                TraceEvent.BATCH_REJECTION_ESCALATED,
                 {
                     "tool": "batch_validate",
                     "error_type": exc.error_type,

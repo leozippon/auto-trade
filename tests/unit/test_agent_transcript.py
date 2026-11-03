@@ -24,6 +24,7 @@ from autotrade.environment.tools import (
 )
 from autotrade.environment.trace import (
     AgentTraceWriter,
+    TraceEvent,
     agent_transcript_dir,
     render_transcript_block,
 )
@@ -89,6 +90,24 @@ def test_every_event_lands_as_one_readable_block_named_by_the_run_ref(tmp_path: 
     assert "run_raw" not in text and "event_id" not in text and "session_ref_ab" not in text
     jsonl = (tmp_path / "artifacts" / "traces" / "run_raw.jsonl").read_text(encoding="utf-8")
     assert len(jsonl.splitlines()) == 4
+
+
+def test_an_event_the_trace_does_not_declare_is_refused_before_anything_is_written(
+    tmp_path: Path,
+):
+    writer = _writer(tmp_path)
+    with pytest.raises(ValueError, match="is not a valid TraceEvent"):
+        writer.emit("llm_cal", {"call_index": 1})
+    assert not (tmp_path / "artifacts" / "traces").exists()
+    assert not (tmp_path / "artifacts" / "transcripts").exists()
+
+    # A declared event is written by its name, in the JSONL and the transcript.
+    record = writer.emit(TraceEvent.LLM_CALL, {"call_index": 1})
+    assert type(record["event_type"]) is str and record["event_type"] == "llm_call"
+    line = (tmp_path / "artifacts" / "traces" / "run_raw.jsonl").read_text(encoding="utf-8")
+    assert json.loads(line)["event_type"] == "llm_call"
+    transcript = tmp_path / "artifacts" / "transcripts" / "run_ref_x.txt"
+    assert transcript.read_text(encoding="utf-8").splitlines()[0].split()[2] == "llm_call"
 
 
 def test_long_fields_are_clipped_and_the_transcript_rotates_into_readable_parts(

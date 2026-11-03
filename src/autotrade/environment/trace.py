@@ -12,10 +12,57 @@ import json
 import os
 import threading
 from collections.abc import Collection, Mapping
+from enum import StrEnum
 from pathlib import Path
 
 from autotrade.common.records import redact_host_paths
 from autotrade.environment.runtime import new_id, sanitize_for_log, utc_now_iso
+
+
+class TraceEvent(StrEnum):
+    """Every ``event_type`` an AgentTrace carries; the writer refuses any
+    other name. The console's trace views also group them by name: a
+    ``*_started`` event is a call or phase still running, and ``subagent``
+    and ``subagent_*`` events are a sub-agent's."""
+
+    # The session loop (``agent.runner``).
+    SESSION_START = "session_start"
+    SESSION_END = "session_end"
+    LLM_CALL_STARTED = "llm_call_started"
+    LLM_CALL = "llm_call"
+    OUTPUT_TRUNCATED = "output_truncated"
+    TOOL_CALL_STARTED = "tool_call_started"
+    TOOL_CALL = "tool_call"
+    TOOL_SKIPPED = "tool_skipped"
+    USER_MESSAGE = "user_message"
+    TIME_BUDGET_NOTICE = "time_budget_notice"
+    WRAP_UP_STARTED = "wrap_up_started"
+    HARD_FINALIZATION_STARTED = "hard_finalization_started"
+    CONTEXT_COMPACTION = "context_compaction"
+    CONTEXT_EDIT = "context_edit"
+    CONTEXT_NOTICE = "context_notice"
+    CONTEXT_OUTPUT_CLAMPED = "context_output_clamped"
+    SUBAGENT_ATTEMPT = "subagent_attempt"
+    SUBAGENT_WAIT_STARTED = "subagent_wait_started"
+    # Sub-agents (``agent.subagent``); a steer is emitted by both sides.
+    SUBAGENT = "subagent"
+    SUBAGENT_TASK = "subagent_task"
+    SUBAGENT_STEER = "subagent_steer"
+    SUBAGENT_WRAP_UP = "subagent_wrap_up"
+    SUBAGENT_LLM = "subagent_llm"
+    SUBAGENT_LLM_ERROR = "subagent_llm_error"
+    SUBAGENT_OUTPUT_TRUNCATED = "subagent_output_truncated"
+    SUBAGENT_TOOL = "subagent_tool"
+    SUBAGENT_CONTEXT_COMPACTION = "subagent_context_compaction"
+    SUBAGENT_CONTEXT_EDIT = "subagent_context_edit"
+    # The research session, its tools and the worker around it.
+    SESSION_ERROR = "session_error"
+    ENVIRONMENT_STAGE = "environment_stage"
+    ENVIRONMENT_BLOCKED = "environment_blocked"
+    BATCH_REJECTION_ESCALATED = "batch_rejection_escalated"
+    # The writer's own marker: the trace is full and stops here.
+    TRACE_LIMIT_REACHED = "trace_limit_reached"
+
 
 TRACE_MAX_BYTES = 32 * 1024 * 1024
 TRACE_MAX_EVENT_BYTES = 256 * 1024
@@ -178,7 +225,10 @@ class AgentTraceWriter:
             self._lock = _TRACE_LOCKS.setdefault(key, threading.Lock())
         self._full = False
 
-    def emit(self, event_type: str, payload: dict[str, object]) -> dict[str, object]:
+    def emit(self, event_type: TraceEvent, payload: dict[str, object]) -> dict[str, object]:
+        # A name the trace does not declare is refused before anything is
+        # written: every reader of the trace reads the declared set.
+        event_type = TraceEvent(event_type)
         sanitized = sanitize_for_log(payload)
         if not isinstance(sanitized, dict):
             raise TypeError("trace payload must sanitize to an object")
@@ -228,7 +278,7 @@ class AgentTraceWriter:
             if self._full or current + len(encoded) > self.max_bytes:
                 if not self._full:
                     marker = {
-                        "event_type": "trace_limit_reached",
+                        "event_type": str(TraceEvent.TRACE_LIMIT_REACHED),
                         "ts": utc_now_iso(),
                         "event_id": new_id("event"),
                         **self.ids,

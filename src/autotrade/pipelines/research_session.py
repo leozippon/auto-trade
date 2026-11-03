@@ -89,6 +89,7 @@ from autotrade.environment.tools.step_rollback import StepRollbackTool
 from autotrade.environment.tools.workspace import SafeWorkspace
 from autotrade.environment.trace import (
     AgentTraceWriter,
+    TraceEvent,
     agent_trace_path,
     agent_transcript_dir,
 )
@@ -706,7 +707,7 @@ class LLMResearchDeveloper:
             )
         except Exception as exc:
             emit_event(
-                "session_error",
+                TraceEvent.SESSION_ERROR,
                 {"status": "error", "error": f"{type(exc).__name__}: {exc}"},
             )
             raise
@@ -1141,7 +1142,7 @@ class LLMResearchDeveloper:
         shared_budget: SessionCallBudget,
         time_budget: InferenceTimeBudget,
         run_ref: str,
-        emit_event: Callable[[str, dict[str, object]], None],
+        emit_event: Callable[[TraceEvent, dict[str, object]], None],
     ) -> AgentSessionRunner:
         """The Agent loop: the role gateways under the shared call budget, the
         sub-agent engine, compaction and the inbox, over the session prompt."""
@@ -1825,7 +1826,7 @@ def _environment_phase(
 
 # The events that carry the session's cumulative spend, so a resumed attempt
 # reads it off the last one an interrupted attempt wrote.
-BUDGET_EVENTS = frozenset({"llm_call", "tool_call", "session_end", "session_error"})
+BUDGET_EVENTS = frozenset({TraceEvent.LLM_CALL, TraceEvent.TOOL_CALL, TraceEvent.SESSION_END, TraceEvent.SESSION_ERROR})
 
 
 def _agent_event_sink(
@@ -1835,26 +1836,26 @@ def _agent_event_sink(
     *,
     budget_used: Callable[[], dict[str, object]] | None = None,
 ):
-    def emit(event_type: str, payload: dict[str, object]) -> None:
+    def emit(event_type: TraceEvent, payload: dict[str, object]) -> None:
         if budget_used is not None and event_type in BUDGET_EVENTS:
             payload = {**payload, "budget_used": budget_used()}
         trace.emit(event_type, payload)
         if progress_hook is None:
             return
-        if event_type == "llm_call_started":
+        if event_type == TraceEvent.LLM_CALL_STARTED:
             stage = "llm_call"
-        elif event_type == "tool_call_started":
+        elif event_type == TraceEvent.TOOL_CALL_STARTED:
             stage = (
                 "backtest"
                 if payload.get("tool") in ("batch_validate", "smoke_backtest")
                 else "tool_call"
             )
-        elif event_type == "subagent_wait_started":
+        elif event_type == TraceEvent.SUBAGENT_WAIT_STARTED:
             # The parent is idle waiting on a child. Without its own stage the
             # console kept showing the preceding llm_call, so a yielding parent
             # looked like a single model call running for tens of minutes.
             stage = "subagent_wait"
-        elif event_type == "session_end":
+        elif event_type == TraceEvent.SESSION_END:
             stage = "agent_complete"
         else:
             return
