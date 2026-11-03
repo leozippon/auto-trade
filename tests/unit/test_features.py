@@ -494,6 +494,43 @@ class FundamentalEventsBuilderTest(unittest.TestCase):
             fina = next(f for f in report["findings"] if f["check"] == "fina_indicator_vip_pit_events")
             self.assertEqual(fina["details"]["disallowed_available_at_rule_rows"], 0)
 
+    def test_audit_and_mainbz_join_indicator_stamps_the_indicator_floor_ignores(self):
+        """A period announced only by fina_indicator rows: fina_audit and
+        fina_mainbz_vip rows without their own ann_date still take the latest
+        of them (``with_indicators``), while the earlier indicator row keeps
+        its own stamp (the floor is ``statements`` alone)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            for dataset in ("fina_indicator_vip", "fina_audit", "fina_mainbz_vip"):
+                (raw / dataset).mkdir(parents=True)
+            period = {"ts_code": "000007.SZ", "end_date": "20160331"}
+            pd.DataFrame([
+                {**period, "ann_date": "20160425", "eps": 0.2},
+                {**period, "ann_date": "20170420", "eps": 0.25},
+            ]).to_parquet(raw / "fina_indicator_vip" / "period=20160331.parquet", index=False)
+            pd.DataFrame([{**period, "ann_date": "", "audit_result": "标准无保留意见"}]).to_parquet(
+                raw / "fina_audit" / "ts_code=000007.SZ.parquet", index=False
+            )
+            pd.DataFrame([{**period, "ann_date": "", "bz_item": "产品A", "bz_code": "A", "curr_type": "CNY"}]).to_parquet(
+                raw / "fina_mainbz_vip" / "ts_code=000007.SZ.parquet", index=False
+            )
+
+            events = FundamentalEventsBuilder(raw).build(FundamentalEventsConfig(
+                start_date="20160101", end_date="20171231",
+                datasets=("fina_indicator_vip", "fina_audit", "fina_mainbz_vip"),
+            ))
+
+            joined = "fallback_joined_statement_available_at"
+            self.assertEqual(
+                sorted(zip(events["dataset"], events["ann_date"], events["available_at"], events["available_at_rule"])),
+                [
+                    ("fina_audit", "", "2017-04-20T18:00:00+08:00", joined),
+                    ("fina_indicator_vip", "20160425", "2016-04-25T18:00:00+08:00", "source:ann_date"),
+                    ("fina_indicator_vip", "20170420", "2017-04-20T18:00:00+08:00", "source:ann_date"),
+                    ("fina_mainbz_vip", "", "2017-04-20T18:00:00+08:00", joined),
+                ],
+            )
+
     def test_build_orders_the_wide_union_without_copying_it(self):
         """The datasets' row union is ~470 columns wide and almost all NA
         (~85 GB on the live lake); copying it whole stretched the nightly
