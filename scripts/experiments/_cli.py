@@ -24,6 +24,7 @@ from autotrade.environment.broker import default_permitted_boards
 from autotrade.environment.data.contracts import BENCHMARK_INDEXES
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.llm import MODEL_CHOICES
+from autotrade.environment.sandbox import GpuMode
 from autotrade.pipelines.calendar import GEOMETRY_PARAMETERS
 from autotrade.pipelines.config import AcceptanceRules
 from autotrade.pipelines.hitl_state import (
@@ -439,7 +440,7 @@ def build_worker_options(
     write_json_atomic(experiment_dir / "hitl" / "params.json", params)
     options = load_worker_options(experiment_dir, repo_root=repo_root)
     spec = options.agent_sandbox
-    if spec is None or spec.gpu != "auto":
+    if spec is None or spec.gpu != GpuMode.AUTO:
         return options
     devices = select_gpus(
         experiment_dir.parent, spec.gpu_count, require_name=spec.gpu_name_filter

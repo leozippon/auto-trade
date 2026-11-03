@@ -4,8 +4,10 @@ One reader and one atomic writer serve every JSON record file the host keeps;
 a module that owes its callers another error type translates the reader's
 ``ValueError`` at its own boundary. Redaction scrubs host paths out of text
 that leaves the host process. A frozen dataclass whose fields are JSON scalars,
-tuples or string-keyed mappings persists as ``dataclass_record`` and comes back
-through ``dataclass_from_record``, which refuses a missing or unknown key.
+tuples, string-keyed mappings or such dataclasses persists as
+``dataclass_record`` and comes back through ``dataclass_from_record``, which
+refuses a missing or unknown key (a nested dataclass is rebuilt by its owner's
+``from_record`` and handed in).
 """
 
 from __future__ import annotations
@@ -132,8 +134,9 @@ def redact_host_paths(text: str) -> str:
 
 
 def dataclass_record(instance: object) -> dict[str, object]:
-    """Every init field of a flat dataclass by name, tuples as lists: the JSON
-    record ``dataclass_from_record`` inverts."""
+    """Every init field of a dataclass by name, tuples as lists and a nested
+    dataclass as its own record: the JSON record ``dataclass_from_record``
+    inverts."""
 
     if not is_dataclass(instance) or isinstance(instance, type):
         raise TypeError(f"not a dataclass instance: {instance!r}")
@@ -155,8 +158,8 @@ def dataclass_from_record(cls: type[T], record: object) -> T:
 
 
 def _json_value(value: object) -> object:
-    if is_dataclass(value):
-        raise TypeError(f"a flat dataclass record cannot hold a nested dataclass: {value!r}")
+    if is_dataclass(value) and not isinstance(value, type):
+        return dataclass_record(value)
     if isinstance(value, tuple | list):
         return [_json_value(item) for item in value]
     if isinstance(value, Mapping):

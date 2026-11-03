@@ -35,7 +35,7 @@ from autotrade.environment.executor import (
 )
 from autotrade.environment.replay import BacktestError, run_daily_replay
 from autotrade.environment.runtime import chmod_tree
-from autotrade.environment.sandbox import SandboxConfig, SandboxLimits
+from autotrade.environment.sandbox import SandboxConfig, SandboxSpec
 from autotrade.environment.strategy import (
     CN_TZ,
     AccountSnapshot,
@@ -375,9 +375,7 @@ def test_fit_worker_shares_the_inference_container_gpu_devices(tmp_path: Path):
     path.write_text(FIT_STRATEGY, encoding="utf-8")
     state = tmp_path / "state"
     state.mkdir()
-    config = SandboxConfig(
-        limits=SandboxLimits(gpu_count=1, gpu_name_filter="L20", gpu_devices=(3,))
-    )
+    config = SandboxConfig(spec=SandboxSpec(gpu=(3,), gpu_count=1, gpu_name_filter="L20"))
     context = StrategyContext(
         inference_at=datetime(2024, 3, 28, 8, 30, tzinfo=CN_TZ),
         bars=(),
@@ -442,14 +440,14 @@ def test_worker_answers_fit_with_fitted_and_writes_state(tmp_path: Path):
 
 
 def test_fit_timeout_fails_explicitly_and_aborts_the_worker():
-    limits = SandboxLimits(timeout_seconds=30.0, fit_timeout_seconds=0.05)
+    config = SandboxConfig(timeout_seconds=30.0, fit_timeout_seconds=0.05)
     process = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(60)"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    executor = _executor_for_process(process, limits=limits)
+    executor = _executor_for_process(process, config=config)
     executor.fit_schedule = FitSchedule(None)
     started = time.monotonic()
     with (
@@ -463,7 +461,7 @@ def test_fit_timeout_fails_explicitly_and_aborts_the_worker():
                 account=AccountSnapshot(cash=1.0, positions={}),
             ),
             kind="fit",
-            timeout_seconds=limits.fit_timeout_seconds,
+            timeout_seconds=config.fit_timeout_seconds,
         )
     assert time.monotonic() - started < 5
     assert process.poll() is not None and executor._closed is True
@@ -507,7 +505,7 @@ def generate_orders(context):
     state.mkdir()
     state.chmod(0o777)
     executor = DockerStrategyExecutor(
-        strategy, SandboxConfig(limits=SandboxLimits(fit_timeout_seconds=120.0)), state_dir=state
+        strategy, SandboxConfig(fit_timeout_seconds=120.0), state_dir=state
     )
     try:
         context = StrategyContext(

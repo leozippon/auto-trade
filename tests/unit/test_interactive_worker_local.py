@@ -307,7 +307,7 @@ def test_an_arm_without_the_boundary_keys_keeps_todays_containers_and_one_with_t
 
     from types import SimpleNamespace
 
-    from autotrade.environment.sandbox import SandboxLimits, SandboxSpec
+    from autotrade.environment.sandbox import SandboxConfig, SandboxSpec
     from autotrade.pipelines.research_session import LLMResearchDeveloper
     from autotrade.pipelines.worker import (
         _strategy_boundary,
@@ -327,24 +327,24 @@ def test_an_arm_without_the_boundary_keys_keeps_todays_containers_and_one_with_t
         sandbox = _strategy_sandbox_from_spec(
             options.agent_sandbox, **_strategy_boundary(options.rolling)
         )
-        return sandbox.limits, options.agent_sandbox
+        return sandbox, options.agent_sandbox
 
-    limits, session = start()
-    executor = SandboxLimits()
-    assert (limits.cpus, limits.memory, limits.timeout_seconds, limits.fit_timeout_seconds) == (
-        executor.cpus,
-        executor.memory,
+    strategy, session = start()
+    executor = SandboxConfig()
+    assert (strategy.spec.cpus, strategy.spec.memory, strategy.timeout_seconds, strategy.fit_timeout_seconds) == (
+        executor.spec.cpus,
+        executor.spec.memory,
         executor.timeout_seconds,
         executor.fit_timeout_seconds,
     )
     assert (session.cpus, session.memory) == (SandboxSpec().cpus, SandboxSpec().memory)
 
-    limits, session = start(
+    strategy, session = start(
         strategy_cpus=16, strategy_memory="64g", strategy_inference_timeout_seconds=1080
     )
-    assert (limits.cpus, limits.memory, limits.timeout_seconds) == (16.0, "64g", 1080.0)
+    assert (strategy.spec.cpus, strategy.spec.memory, strategy.timeout_seconds) == (16.0, "64g", 1080.0)
     assert (session.cpus, session.memory) == (16.0, "64g")
-    developer = SimpleNamespace(evaluator=SimpleNamespace(sandbox=SimpleNamespace(limits=limits)))
+    developer = SimpleNamespace(evaluator=SimpleNamespace(sandbox=strategy))
     budgets = _facts(
         budgets={
             "strategy_cpus": LLMResearchDeveloper.strategy_cpus.fget(developer),

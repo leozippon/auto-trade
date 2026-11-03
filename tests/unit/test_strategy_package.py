@@ -21,7 +21,7 @@ from autotrade.environment.executor import (
     DockerStrategyExecutor,
     TrustedStrategyExecutor,
 )
-from autotrade.environment.sandbox import SandboxLimits, SandboxSpec
+from autotrade.environment.sandbox import SandboxConfig, SandboxSpec
 from autotrade.environment.strategy import CN_TZ, AccountSnapshot, StrategyContext
 from autotrade.environment.strategy_loader import (
     ALLOWED_MODULES,
@@ -391,22 +391,23 @@ def test_the_template_readme_states_the_enforced_import_allowlist():
 
 
 def test_budgets_come_from_one_source_each():
-    limits = SandboxLimits()
+    executor = SandboxConfig()
+    limits = executor.spec
     assert (limits.cpus, limits.memory, limits.pids) == (8.0, "32g", 1024)
     # One CPU and memory boundary for both containers, so a session that
     # profiles its fit under `shell` measures against the ceiling the formal
     # replay enforces instead of extrapolating across two of them.
     assert (limits.cpus, limits.memory, limits.pids) == (
-        SandboxSpec().cpus, SandboxSpec().memory, SandboxSpec().pids_limit
+        SandboxSpec().cpus, SandboxSpec().memory, SandboxSpec().pids
     )
-    assert (limits.timeout_seconds, limits.fit_timeout_seconds) == (360.0, 3600.0)
+    assert (executor.timeout_seconds, executor.fit_timeout_seconds) == (360.0, 3600.0)
     # The pipeline knob defaults to the executor's fit wall clock and the
     # WebUI defaults read the pipeline dataclass.
-    assert rolling_default("strategy_fit_timeout_seconds") == limits.fit_timeout_seconds
+    assert rolling_default("strategy_fit_timeout_seconds") == executor.fit_timeout_seconds
     strategy_config = _strategy_sandbox_from_spec(
         None, fit_timeout_seconds=rolling_default("strategy_fit_timeout_seconds")
     )
-    assert strategy_config.limits == limits
+    assert strategy_config == executor
     for name in ("max_research_minutes", "max_replay_years", "max_llm_calls", "max_null_controls", "max_api_spend_usd"):
         assert WEB_CREATE_DEFAULTS[name] == rolling_default(name)
     assert (

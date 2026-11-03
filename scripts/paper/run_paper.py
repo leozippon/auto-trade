@@ -29,7 +29,6 @@ import argparse
 import json
 import subprocess
 import sys
-from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -46,7 +45,7 @@ from autotrade.data_sources.tushare.audit import audit_summary_line
 from autotrade.data_sources.tushare.cron_update import DEFAULT_CONFIG, load_config
 from autotrade.environment.executor import StrategyExecutor
 from autotrade.environment.replay.engine import StrategyDataView
-from autotrade.environment.sandbox import SandboxConfig
+from autotrade.environment.sandbox import GpuMode, SandboxConfig
 from autotrade.paper.book import (
     SOURCE_HISTORY_NAME,
     VERDICT_LOG_NAME,
@@ -163,7 +162,7 @@ def init(args: argparse.Namespace) -> int:
         f"created Paper book {book.root.name} at {book.root}: {book.experiment_id}/{book.artifact_id} "
         f"({book.candidate_source}), initial cash {book.profile.initial_cash:,.2f}, profile {book.profile.profile_id}, "
         f"commission {book.profile.commission_bps} bps, slippage {book.profile.slippage_bps} bps, "
-        f"fit timeout {book.sandbox.limits.fit_timeout_seconds:g}s, image {book.sandbox.image}"
+        f"fit timeout {book.sandbox.fit_timeout_seconds:g}s, image {book.sandbox.spec.image}"
     )
     return 0
 
@@ -218,15 +217,15 @@ def _executor_on_free_gpus(
     unavailable, and a book without its card decides nothing that day.
     """
 
-    limits = sandbox.limits
-    if limits.gpu_count > 0:
+    spec = sandbox.spec
+    if spec.gpu == GpuMode.AUTO:
         devices = select_gpus(
             REPO_ROOT / "experiments",
-            limits.gpu_count,
-            require_name=limits.gpu_name_filter,
+            spec.gpu_count,
+            require_name=spec.gpu_name_filter,
             allow_shared=True,
         )
-        sandbox = replace(sandbox, limits=replace(limits, gpu_devices=tuple(devices)))
+        sandbox = sandbox.on_devices(tuple(devices))
     return docker_executor(strategy_path, sandbox, view, state_dir, models_dir)
 
 

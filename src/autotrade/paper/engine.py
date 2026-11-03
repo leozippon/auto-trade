@@ -247,8 +247,8 @@ class DailyPaperEngine:
         # A book that pinned the pretrained store refuses the run here, before
         # any data is built, when the store is gone or is another one; every
         # strategy container checks it again as it starts.
-        if self.sandbox.pretrained_manifest_sha256:
-            require_pretrained_store(self.sandbox.pretrained_manifest_sha256)
+        if self.sandbox.spec.pretrained_manifest_sha256:
+            require_pretrained_store(self.sandbox.spec.pretrained_manifest_sha256)
         self.executor_factory = executor_factory or docker_executor
         self.decision_check = decision_check
         # Reads the reconciled settlement journals under the writer lock.

@@ -49,7 +49,7 @@ add_repo_src(__file__)
 from autotrade.common.records import read_json_object
 from autotrade.environment.artifacts import FilesystemArtifactStore
 from autotrade.environment.identity import AgentRefStore
-from autotrade.environment.sandbox import SandboxSpec
+from autotrade.environment.sandbox import GpuMode, SandboxSpec
 from autotrade.environment.sandbox_images import prepare_experiment_sandbox_image
 from autotrade.paper.book import require_incubating_place
 from autotrade.paper.books import (
@@ -170,7 +170,7 @@ def main() -> int:
             require_incubating_place(args.paper_state_root, book_id)
             # No console claims cards for this run: take them as _cli does.
             spec = options.agent_sandbox
-            if spec is not None and spec.gpu == "auto":
+            if spec is not None and spec.gpu == GpuMode.AUTO:
                 devices = select_gpus(args.experiments_root, spec.gpu_count, require_name=spec.gpu_name_filter)
                 options = replace(options, agent_sandbox=replace(spec, gpu=tuple(devices)))
             if options.execution_mode == "sandbox" or options.developer_mode == "llm":

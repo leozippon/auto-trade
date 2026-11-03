@@ -56,7 +56,7 @@ from autotrade.environment.runtime import (
 from autotrade.environment.sandbox import (
     DockerSandbox,
     LocalSandbox,
-    SandboxLimits,
+    SandboxConfig,
     SandboxSpec,
     experiment_container_labels,
     link_copytree,
@@ -422,6 +422,14 @@ def build_subagent_tools(
     ]
 
 
+
+def _strategy_sandbox(evaluator: object) -> SandboxConfig:
+    """The formal executor's strategy container: the evaluator's own, or the
+    executor's default for one that runs none (trusted mode, test doubles)."""
+
+    sandbox = getattr(evaluator, "sandbox", None)
+    return sandbox if isinstance(sandbox, SandboxConfig) else SandboxConfig()
+
 class LLMResearchDeveloper:
     """Adapter from the native Agent loop to ``ResearchDeveloper``."""
 
@@ -479,33 +487,25 @@ class LLMResearchDeveloper:
     def decision_timeout_seconds(self) -> float:
         """The formal executor's per-decision inference wall clock."""
 
-        sandbox = getattr(self.evaluator, "sandbox", None)
-        limits = getattr(sandbox, "limits", None) or SandboxLimits()
-        return float(limits.timeout_seconds)
+        return float(_strategy_sandbox(self.evaluator).timeout_seconds)
 
     @property
     def fit_timeout_seconds(self) -> float:
         """The formal executor's wall clock for one strategy ``fit(context)``."""
 
-        sandbox = getattr(self.evaluator, "sandbox", None)
-        limits = getattr(sandbox, "limits", None) or SandboxLimits()
-        return float(limits.fit_timeout_seconds)
+        return float(_strategy_sandbox(self.evaluator).fit_timeout_seconds)
 
     @property
     def strategy_cpus(self) -> float:
         """The formal strategy container's CPU quota, its thread variables' source."""
 
-        sandbox = getattr(self.evaluator, "sandbox", None)
-        limits = getattr(sandbox, "limits", None) or SandboxLimits()
-        return float(limits.cpus)
+        return float(_strategy_sandbox(self.evaluator).spec.cpus)
 
     @property
     def strategy_memory_bytes(self) -> int:
         """The formal strategy container's memory ceiling, in bytes."""
 
-        sandbox = getattr(self.evaluator, "sandbox", None)
-        limits = getattr(sandbox, "limits", None) or SandboxLimits()
-        return int(limits.memory_bytes)
+        return int(_strategy_sandbox(self.evaluator).spec.memory_bytes)
 
     @property
     def strategy_gpu_count(self) -> int:
@@ -518,9 +518,7 @@ class LLMResearchDeveloper:
         override may move on its own.
         """
 
-        sandbox = getattr(self.evaluator, "sandbox", None)
-        limits = getattr(sandbox, "limits", None) or SandboxLimits()
-        return int(limits.gpu_count)
+        return int(_strategy_sandbox(self.evaluator).spec.gpu_count)
 
     def __call__(self, request: ResearchSessionRequest) -> ResearchSessionResult:
         root, resume, attempt = self._resolve_resume(request)

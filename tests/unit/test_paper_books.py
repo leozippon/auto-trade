@@ -22,6 +22,7 @@ from autotrade.environment.artifacts import artifact_fingerprint
 from autotrade.environment.broker import BrokerProfile, DailyBroker
 from autotrade.environment.broker_core import board_of
 from autotrade.environment.data.snapshot import SnapshotConfig
+from autotrade.environment.sandbox import SandboxConfig
 from autotrade.environment.strategy import CN_TZ
 from autotrade.paper import fills
 from autotrade.paper.book import (
@@ -402,15 +403,48 @@ def test_a_book_of_an_older_schema_is_refused(tmp_path: Path):
         load_book(book.root)
 
 
+def schema_2_record(record: dict[str, object], book: Book) -> dict[str, object]:
+    """``record``, a schema-3 book.json of ``book``, in the layout schema 2
+    wrote and every live book predating schema 3 has."""
+
+    spec = book.sandbox.spec
+    return {
+        **record,
+        "schema_version": 2,
+        "snapshot_config": dataclass_record(book.snapshot_config),
+        "sandbox": {
+            "image": spec.image,
+            "docker_executable": spec.docker_executable,
+            "pretrained_manifest_sha256": spec.pretrained_manifest_sha256,
+            "limits": {
+                "cpus": spec.cpus,
+                "memory": spec.memory,
+                "pids": spec.pids,
+                "timeout_seconds": book.sandbox.timeout_seconds,
+                "fit_timeout_seconds": book.sandbox.fit_timeout_seconds,
+                "startup_timeout_seconds": book.sandbox.startup_timeout_seconds,
+                "max_output_chars": book.sandbox.max_output_chars,
+                "tmpfs_size": spec.tmpfs_size,
+                "shm_size": spec.shm_size,
+                "gpu_count": spec.gpu_count,
+                "gpu_name_filter": spec.gpu_name_filter,
+                "gpu_devices": list(spec.gpu) if isinstance(spec.gpu, tuple) else [],
+            },
+        },
+    }
+
+
 def test_a_schema_2_book_loads_as_the_book_it_was(tmp_path: Path):
-    """Schema 2 stored the snapshot configuration's fields (the live books
-    predate schema 3); such a book loads to the book schema 3 stores, and its
-    profile and configuration records round-trip."""
+    """Schema 2 stored the snapshot configuration's fields and the sandbox's
+    image/limits layout (the live books predate schema 3); such a book loads
+    to the book schema 3 stores, and the profile, configuration and sandbox
+    records round-trip."""
     book = _graduated_book(tmp_path)
     record = read_json_object(book.root / BOOK_NAME)
     assert BrokerProfile.from_record(record["profile"]) == book.profile
     assert SnapshotConfig.from_record(record["snapshot_config"]).to_record() == record["snapshot_config"]
-    legacy = {**record, "schema_version": 2, "snapshot_config": dataclass_record(book.snapshot_config)}
+    assert SandboxConfig.from_record(record["sandbox"]) == book.sandbox
+    legacy = schema_2_record(record, book)
     (book.root / BOOK_NAME).write_text(json.dumps(legacy), encoding="utf-8")
     assert load_book(book.root) == book
     del legacy["snapshot_config"]["screen_boards"]

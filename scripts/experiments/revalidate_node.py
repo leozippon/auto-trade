@@ -56,6 +56,7 @@ from autotrade.common.records import read_json_object
 from autotrade.environment.artifacts import FilesystemArtifactStore
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import utc_now_iso, write_json_atomic
+from autotrade.environment.sandbox import GpuMode
 from autotrade.environment.sandbox_images import (
     SANDBOX_IMAGE_STATE_NAME,
     prepare_experiment_sandbox_image,
@@ -244,7 +245,7 @@ def main(argv: list[str] | None = None) -> int:
         options = resolve_worker_options({**params, **overrides}, experiment_dir=experiment_dir, repo_root=REPO_ROOT)
         spec = options.agent_sandbox
         if spec is not None:
-            if spec.gpu == "auto":
+            if spec.gpu == GpuMode.AUTO:
                 devices = select_gpus(EXPERIMENTS_ROOT, spec.gpu_count, require_name=spec.gpu_name_filter)
                 spec = replace(spec, gpu=tuple(devices))
             # The arm's own image tag, as its worker and incubate.py resolve it.

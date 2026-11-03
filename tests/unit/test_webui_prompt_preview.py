@@ -29,7 +29,7 @@ from autotrade.agent.prompts import (
     STEP_TREE_SECTION,
 )
 from autotrade.environment.identity import AgentRefStore
-from autotrade.environment.sandbox import SandboxLimits
+from autotrade.environment.sandbox import SandboxConfig
 from autotrade.pipelines.config import (
     DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
     DEFAULT_DEADLINE_GRACE_MINUTES,
@@ -162,7 +162,7 @@ def test_research_preview_carries_every_current_prompt_section(tmp_path: Path):
 def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path):
     prompt = str(_preview(tmp_path)["prompt"])
     facts = _facts(prompt)
-    limits = SandboxLimits()
+    sandbox = SandboxConfig()
     assert facts["budgets"] == {
         "context_compaction": facts["budgets"]["context_compaction"],
         "deadline_seconds": session_deadline_seconds(
@@ -191,11 +191,11 @@ def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path)
         "strategy_fit_timeout_seconds": float(
             rolling_default("strategy_fit_timeout_seconds")
         ),
-        "strategy_inference_timeout_seconds": limits.timeout_seconds,
-        "strategy_gpu_count": limits.gpu_count,
-        "strategy_cpus": limits.cpus,
-        "strategy_memory_bytes": limits.memory_bytes,
-        "strategy_container_note": strategy_container_note(limits.cpus, limits.memory_bytes),
+        "strategy_inference_timeout_seconds": sandbox.timeout_seconds,
+        "strategy_gpu_count": sandbox.spec.gpu_count,
+        "strategy_cpus": sandbox.spec.cpus,
+        "strategy_memory_bytes": sandbox.spec.memory_bytes,
+        "strategy_container_note": strategy_container_note(sandbox.spec.cpus, sandbox.spec.memory_bytes),
         "batch_validate_max_concurrency": DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
         "batch_validate_fit_timeout_note": BATCH_VALIDATE_FIT_TIMEOUT_NOTE,
     }
