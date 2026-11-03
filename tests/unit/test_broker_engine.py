@@ -11,8 +11,10 @@ against the real Broker rather than a projection of it.
 
 from __future__ import annotations
 
+import json
 import math
 import unittest
+from dataclasses import fields
 from datetime import datetime
 
 from autotrade.environment.broker import (
@@ -27,7 +29,6 @@ from autotrade.environment.broker_core import (
     LOT_SIZE,
     STAMP_DUTY_CUTOVER,
     STAR_MIN_LOT_SIZE,
-    CostModel,
     board_of,
     is_bse_market,
     is_star_market,
@@ -177,8 +178,8 @@ class BrokerEligibilityTest(unittest.TestCase):
         # 10.009999999999998 against a 10.01 cap, and 20 * (1 - 5 bps) is
         # 19.990000000000002 against a 19.99 floor. Both must reject, while a
         # fill genuinely inside the limit keeps its old economics.
-        self.assertLess(CostModel(slippage_bps=10.0).fill_price(10.0, action="buy"), 10.01)
-        self.assertGreater(CostModel(slippage_bps=5.0).fill_price(20.0, action="sell"), 19.99)
+        self.assertLess(BrokerProfile(slippage_bps=10.0).fill_price(10.0, action="buy"), 10.01)
+        self.assertGreater(BrokerProfile(slippage_bps=5.0).fill_price(20.0, action="sell"), 19.99)
 
         buyer = _broker(initial_cash=1_000_000, slippage_bps=10)
         blocked = buyer.execute(_order(), _bar(up_limit=10.01), matched_at=MATCHED_AT, raw_price=10.0)
@@ -314,31 +315,31 @@ class BuyLotLadderTest(unittest.TestCase):
         self.assertIsNone(reduce_amount_reject(50, 50, "830000.BJ"))
 
 
-class CostModelTest(unittest.TestCase):
+class BrokerProfileCostTest(unittest.TestCase):
     def test_slippage_is_directional(self) -> None:
-        costs = CostModel(slippage_bps=10.0)
-        self.assertAlmostEqual(costs.fill_price(100.0, action="buy"), 100.1)
-        self.assertAlmostEqual(costs.fill_price(100.0, action="sell"), 99.9)
+        profile = BrokerProfile(slippage_bps=10.0)
+        self.assertAlmostEqual(profile.fill_price(100.0, action="buy"), 100.1)
+        self.assertAlmostEqual(profile.fill_price(100.0, action="sell"), 99.9)
         for bad in (0.0, -1.0, float("nan"), float("inf")):
             with self.subTest(price=bad), self.assertRaises(ValueError):
-                costs.fill_price(bad, action="buy")
+                profile.fill_price(bad, action="buy")
 
     def test_commission_has_a_minimum_and_transfer_fee_applies_both_sides(self) -> None:
-        costs = CostModel(commission_bps=1.0, min_commission_cny=5.0, transfer_fee_bps=0.1)
-        self.assertAlmostEqual(costs.commission(1_000.0), 5.0)  # minimum wins
-        self.assertAlmostEqual(costs.commission(100_000.0), 10.0)
-        self.assertAlmostEqual(costs.transfer_fee(100_000.0), 1.0)
-        self.assertAlmostEqual(costs.trade_fee(100_000.0), 11.0)
-        buy_fee, buy_duty = costs.fees(100_000.0, action="buy", trade_date="20260105")
+        profile = BrokerProfile(commission_bps=1.0, min_commission_cny=5.0, transfer_fee_bps=0.1)
+        self.assertAlmostEqual(profile.commission(1_000.0), 5.0)  # minimum wins
+        self.assertAlmostEqual(profile.commission(100_000.0), 10.0)
+        self.assertAlmostEqual(profile.transfer_fee(100_000.0), 1.0)
+        self.assertAlmostEqual(profile.trade_fee(100_000.0), 11.0)
+        buy_fee, buy_duty = profile.fees(100_000.0, action="buy", trade_date="20260105")
         self.assertAlmostEqual(buy_fee, 11.0)
         self.assertEqual(buy_duty, 0.0)  # 印花税 sell-side only
 
     def test_stamp_duty_follows_the_2023_08_28_cutover(self) -> None:
-        costs = CostModel()
+        profile = BrokerProfile()
         self.assertEqual(STAMP_DUTY_CUTOVER, "20230828")
-        self.assertAlmostEqual(costs.stamp_duty_on_sale(100_000.0, "20230827"), 100.0)  # 10 bps
-        self.assertAlmostEqual(costs.stamp_duty_on_sale(100_000.0, STAMP_DUTY_CUTOVER), 50.0)
-        self.assertAlmostEqual(costs.stamp_duty_on_sale(100_000.0, "20260105"), 50.0)
+        self.assertAlmostEqual(profile.stamp_duty_on_sale(100_000.0, "20230827"), 100.0)  # 10 bps
+        self.assertAlmostEqual(profile.stamp_duty_on_sale(100_000.0, STAMP_DUTY_CUTOVER), 50.0)
+        self.assertAlmostEqual(profile.stamp_duty_on_sale(100_000.0, "20260105"), 50.0)
 
     def test_broker_prices_the_duty_from_the_trading_day(self) -> None:
         for trade_date, expected in (("20230825", 100.0), ("20230828", 50.0)):
@@ -362,35 +363,36 @@ class CostModelTest(unittest.TestCase):
                 self.assertAlmostEqual(sold.stamp_duty, expected)
 
     def test_fees_reject_a_non_positive_or_non_finite_notional(self) -> None:
-        costs = CostModel()
+        profile = BrokerProfile()
         for bad in (0.0, -1.0, float("nan")):
             with self.subTest(notional=bad), self.assertRaises(ValueError):
-                costs.fees(bad, action="buy", trade_date="20260105")
+                profile.fees(bad, action="buy", trade_date="20260105")
 
 
 class BrokerProfileValidationTest(unittest.TestCase):
-    def test_record_round_trips_every_constructor_field_and_names_the_cutover(self) -> None:
-        profile = BrokerProfile(
-            initial_cash=250_000.0,
-            commission_bps=2.5,
-            min_commission_cny=1.0,
-            stamp_duty_sell_bps_before_cutover=10.0,
-            stamp_duty_sell_bps_from_cutover=5.0,
-            transfer_fee_bps=0.2,
-            slippage_bps=3.0,
-        )
-        record = profile.to_record()
-        self.assertEqual(record["initial_cash"], 250_000.0)
-        self.assertEqual(record["commission_bps"], 2.5)
-        self.assertEqual(record["transfer_fee_bps"], 0.2)
-        self.assertEqual(record["stamp_duty_cutover_date"], STAMP_DUTY_CUTOVER)
-        # Every constructor field surfaces in the manifest record.
-        for name in (
-            "initial_cash", "commission_bps", "min_commission_cny",
-            "stamp_duty_sell_bps_before_cutover", "stamp_duty_sell_bps_from_cutover",
-            "transfer_fee_bps", "slippage_bps",
+    def test_the_record_round_trips_and_refuses_another_key_set(self) -> None:
+        for profile in (
+            BrokerProfile(
+                initial_cash=250_000.0,
+                commission_bps=2.5,
+                min_commission_cny=1.0,
+                transfer_fee_bps=0.2,
+                slippage_bps=3.0,
+                max_total_holdings=5,
+                dividend_tax=True,
+            ),
+            BrokerProfile(permitted_boards=("gem", "main")),
         ):
-            self.assertIn(name, record)
+            with self.subTest(profile=profile):
+                record = json.loads(json.dumps(profile.to_record()))
+                self.assertEqual(BrokerProfile.from_record(record), profile)
+                self.assertEqual(set(record), {item.name for item in fields(BrokerProfile)})
+        record = BrokerProfile().to_record()
+        with self.assertRaisesRegex(ValueError, "unknown keys \\['stamp_duty_cutover_date'\\]"):
+            BrokerProfile.from_record({**record, "stamp_duty_cutover_date": STAMP_DUTY_CUTOVER})
+        del record["dividend_tax"]
+        with self.assertRaisesRegex(ValueError, "missing keys \\['dividend_tax'\\]"):
+            BrokerProfile.from_record(record)
 
     def test_initial_cash_must_be_a_positive_finite_number(self) -> None:
         for value in (0, -1.0, float("nan"), float("inf"), True):

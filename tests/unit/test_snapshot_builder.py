@@ -3200,3 +3200,29 @@ def test_a_replay_rolls_across_the_slot_where_a_dataset_starts(tmp_path):
     assert len(events) == 6
     hm = events[events["dataset"] == "hm_detail"]
     assert hm["hm_name"].tolist() == ["x"] and hm["buy_amount"].tolist() == [1200.0]
+
+
+class SnapshotConfigRecordTest(unittest.TestCase):
+    def test_the_record_round_trips_and_refuses_another_key_set(self) -> None:
+        config = SnapshotConfig(
+            window_months=24,
+            daily_window_months=18,
+            text_window_months=6,
+            news_sources=("cls",),
+            include_intraday=True,
+            replay_include_minutes=True,
+            screen_exclude_st=True,
+            screen_min_price=2.0,
+            screen_boards=("main", "gem"),
+        )
+        record = json.loads(json.dumps(config.to_record()))
+        rebuilt = SnapshotConfig.from_record(record)
+        self.assertEqual(rebuilt.to_record(), record)
+        for domain in ("daily", "fundamentals", "events", "macro", "text"):
+            self.assertEqual(rebuilt.months_for(domain), config.months_for(domain))
+        self.assertEqual(SnapshotConfig.from_record(SnapshotConfig().to_record()).to_record(), SnapshotConfig().to_record())
+        with self.assertRaisesRegex(ValueError, "universe_screen record has missing keys \\['boards'\\]"):
+            screen = {key: value for key, value in record["universe_screen"].items() if key != "boards"}
+            SnapshotConfig.from_record({**record, "universe_screen": screen})
+        with self.assertRaisesRegex(ValueError, "unknown keys \\['window_months'\\]"):
+            SnapshotConfig.from_record({**record, "window_months": 24})

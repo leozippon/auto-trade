@@ -40,6 +40,7 @@ from autotrade.pipelines.worker import (
     load_worker_options,
 )
 from autotrade.webui.manager import ExperimentManager
+from tests.unit.acceptance_fixture import CREATE_RULES, REQUIRED_RULES
 from tests.unit.gpu_probe import stubbed_gpu_probe
 
 
@@ -82,6 +83,7 @@ def _experiment(
                 "inference_time": "08:30",
                 "initial_cash": 100_000,
                 "max_replay_years": max_replay_years,
+                **REQUIRED_RULES,
             }
         ),
         encoding="utf-8",
@@ -307,7 +309,7 @@ def test_an_arm_without_the_boundary_keys_keeps_todays_containers_and_one_with_t
 
     from types import SimpleNamespace
 
-    from autotrade.environment.sandbox import SandboxLimits, SandboxSpec
+    from autotrade.environment.sandbox import SandboxConfig, SandboxSpec
     from autotrade.pipelines.research_session import LLMResearchDeveloper
     from autotrade.pipelines.worker import (
         _strategy_boundary,
@@ -327,24 +329,24 @@ def test_an_arm_without_the_boundary_keys_keeps_todays_containers_and_one_with_t
         sandbox = _strategy_sandbox_from_spec(
             options.agent_sandbox, **_strategy_boundary(options.rolling)
         )
-        return sandbox.limits, options.agent_sandbox
+        return sandbox, options.agent_sandbox
 
-    limits, session = start()
-    executor = SandboxLimits()
-    assert (limits.cpus, limits.memory, limits.timeout_seconds, limits.fit_timeout_seconds) == (
-        executor.cpus,
-        executor.memory,
+    strategy, session = start()
+    executor = SandboxConfig()
+    assert (strategy.spec.cpus, strategy.spec.memory, strategy.timeout_seconds, strategy.fit_timeout_seconds) == (
+        executor.spec.cpus,
+        executor.spec.memory,
         executor.timeout_seconds,
         executor.fit_timeout_seconds,
     )
     assert (session.cpus, session.memory) == (SandboxSpec().cpus, SandboxSpec().memory)
 
-    limits, session = start(
+    strategy, session = start(
         strategy_cpus=16, strategy_memory="64g", strategy_inference_timeout_seconds=1080
     )
-    assert (limits.cpus, limits.memory, limits.timeout_seconds) == (16.0, "64g", 1080.0)
+    assert (strategy.spec.cpus, strategy.spec.memory, strategy.timeout_seconds) == (16.0, "64g", 1080.0)
     assert (session.cpus, session.memory) == (16.0, "64g")
-    developer = SimpleNamespace(evaluator=SimpleNamespace(sandbox=SimpleNamespace(limits=limits)))
+    developer = SimpleNamespace(evaluator=SimpleNamespace(sandbox=strategy))
     budgets = _facts(
         budgets={
             "strategy_cpus": LLMResearchDeveloper.strategy_cpus.fget(developer),
@@ -798,7 +800,6 @@ VALIDATE_WORKING_COPY = ToolCall(
     "valid",
     "batch_validate",
     {
-        "offline_trials": 0,
         "candidates": [
             {
                 "name": "working_copy",
@@ -1040,7 +1041,11 @@ def test_webui_persistent_create_uses_available_worker_entrypoint(
     )
     with stubbed_gpu_probe():
         created = manager.create_experiment(
-            {"experiment_id": "worker_smoke", "initial_control_mode": "manual"}
+            {
+                "experiment_id": "worker_smoke",
+                "initial_control_mode": "manual",
+                **CREATE_RULES,
+            }
         )
     assert created["spawned"] is True
     assert created["worker"] == "worker_smoke"
@@ -1180,6 +1185,8 @@ def _console_params(repo: Path, experiments_root: Path, **overrides) -> dict:
             "experiments_root": str(experiments_root),
             "work_root": str(repo / ".runtime/sandboxes"),
             "_creation_surface": "webui",
+            # The rules a create request must state (``WEB_REQUIRED_PARAMS``).
+            **CREATE_RULES,
         }
     )
     params.update(overrides)

@@ -17,7 +17,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from autotrade.environment.data.contracts import CN_TZ
+from autotrade.common.time import CN_TZ
 from autotrade.pipelines import calendar
 from autotrade.pipelines.calendar import ResearchGeometry, load_sse_trading_days
 from autotrade.pipelines.config import DEFAULT_RESEARCH_GEOMETRY

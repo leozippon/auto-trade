@@ -444,9 +444,8 @@ def test_every_reason_the_pipeline_records_has_a_console_label() -> None:
 
     from autotrade.pipelines.config import SESSION_OUTCOMES
     from autotrade.pipelines.verdict import CONDITIONS, UNMEASURABLE
-
     recorded = {condition.reason for condition in CONDITIONS} | {UNMEASURABLE}
-    assert "forward_lower_bound_not_positive" in recorded
+    assert {"sealed_residual_ir_below_bar", "replicate_strategy_error"} <= recorded
     labels = _reason_tokens()
     assert recorded <= labels, sorted(recorded - labels)
     outcomes = set(
@@ -493,17 +492,12 @@ def test_a_criterion_that_names_a_threshold_words_it_from_the_record() -> None:
     block, and the multiplier is now stated in the name alone, not twice."""
 
     labels = _js_literal("const REASON_LABELS = {", "\n};")
-    for token, key in (
-        ("forward_lower_bound_not_positive", "forward_confidence"),
-        ("forward_recency_negative", "recency_months"),
-        ("forward_not_positive_at_cost_stress", "cost_stress_multiplier"),
-    ):
+    for token, key in (("freeze_not_positive_at_cost_stress", "cost_stress_multiplier"),):
         [line] = [row for row in labels.splitlines() if row.strip().startswith(f"{token}:")]
         assert "(t) =>" in line and f"t.{key}" in line, token
         # A missing threshold reads as the console's own dash, not as a default.
         assert "fmtPct(" in line or '?? "—"' in line, token
     assert "加倍" not in labels + _js_literal("const SLICE_ROWS = [", "\n];")
-    assert "滑点 ×" not in _js_function_body("forwardCriteria")
     # The home card's tile and the best-experiment trophy name the confidence in
     # plain text: the listing does not carry the block, and the constant is a
     # pipeline one. They must still read as the constant the pipeline uses.
@@ -543,9 +537,11 @@ def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) ->
     gate = set(research["record"]["freeze_gate"])
     forward = set(detail["forward"])
     slices = detail["forward"]["slices"]
-    # A slice's statistics table reads its holder's readings as rows of its own.
+    # A slice's statistics table reads its holder's readings, and its residual
+    # reading's, as rows of its own.
     slice_served = {
-        name: set(block) | set(block["raw_readings"]) for name, block in slices.items()
+        name: set(block) | set(block["raw_readings"]) | set(block["residual_reading"])
+        for name, block in slices.items()
     }
     slice_fields = slice_served["forward"] | slice_served["heldout"]
     budget = set(detail["budget"]) & set(detail["budget_used"])
@@ -562,7 +558,8 @@ def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) ->
         )
     )
     assert "cost_stress_multiplier" in labelled
-    criteria_thresholds = reads("forwardCriteria", "t") | reads("heldoutCriteria", "t") | labelled
+    # A statistics row reads the slice's own parameters.
+    slice_labelled = set(re.findall(r"\bt\.([a-z_]+)", _js_literal("const SLICE_ROWS = [", "\n];")))
 
     for name, read, served in (
         ("frozenPanel", reads("frozenPanel", "frozen"), frozen),
@@ -576,11 +573,11 @@ def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) ->
         ("forwardStagePanel", reads("forwardStagePanel", "forward"), forward),
         ("replayContext", reads("replayContext", "forward"), forward),
         ("verdictStagePanel", reads("verdictStagePanel", "forward"), forward),
-        ("forwardCriteria", reads("forwardCriteria", "f"), set(slices["forward"])),
-        ("heldoutCriteria", reads("heldoutCriteria", "h"), set(slices["heldout"])),
-        ("criteria thresholds", criteria_thresholds, set(detail["forward"]["verdict"]["thresholds"])),
-        # The same threshold keys are served before the replay, from the plan.
-        ("plan thresholds", criteria_thresholds, set(replay["thresholds"])),
+        ("sliceStats", slice_labelled, set(slices["forward"]["parameters"])),
+        ("sealedCriterion", reads("sealedCriterion", "s"), set(detail["forward"]["sealed"])),
+        ("sealedWindowBlock", reads("sealedWindowBlock", "w"), set(detail["readouts"]["sealed_window"])),
+        ("sealedWindowBlock", reads("sealedWindowBlock", "row"), set(detail["readouts"]["sealed_window"]["readings"][0])),
+        ("forwardPoolBlock", reads("forwardPoolBlock", "p"), set(detail["readouts"]["forward_pool"])),
         ("verdictStagePanel", reads("verdictStagePanel", "attempts"), set(detail["replay_attempts"])),
         ("verdictStagePanel", reads("verdictStagePanel", "validations"), set(detail["research_validation_failures"])),
         ("verdictStagePanel", reads("verdictStagePanel", "research"), record),
@@ -590,6 +587,8 @@ def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) ->
     ):
         assert read, name
         assert read <= served, (name, sorted(read - served))
+    # The same threshold keys are served before the replay, from the plan.
+    assert set(replay["thresholds"]) == set(detail["forward"]["verdict"]["thresholds"])
     # The stage views' statistics rows are statistics their own slice carries,
     # and every row defined is one a view selects: two rows (残差跟踪误差, IR)
     # sat in the table definition that neither stage ever drew.
@@ -607,12 +606,12 @@ def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) ->
     assert forward_rows <= slice_served["forward"]
     assert heldout_rows <= slice_served["heldout"]
     assert slice_rows == forward_rows | heldout_rows, sorted(slice_rows ^ (forward_rows | heldout_rows))
-    # Every graduation criterion the pipeline can fail is a line of the checklist.
+    # Every criterion the verdict can fail is a line of its checklist.
     from autotrade.pipelines.verdict import CONDITIONS
 
-    checked = set(re.findall(r'"((?:forward|heldout)_[a-z_]+)"', _js_function_body("forwardCriteria") + _js_function_body("heldoutCriteria")))
-    checked |= {f"{where}_strategy_error" for where in ("forward", "heldout")}
-    assert {condition.reason for condition in CONDITIONS if condition.code} <= checked
+    checked = set(re.findall(r'"(sealed_[a-z_]+)"', _js_function_body("sealedCriterion")))
+    checked |= set(re.findall(r'"([a-z]+_strategy_error)"', _js_function_body("validityCriteria")))
+    assert {condition.reason for condition in CONDITIONS if condition.code} == checked
     # The budget bars read the keys both the totals and the usage block carry.
     bars = set(re.findall(r'^  \["([a-z_]+)",', _js_literal("const BUDGET_ROWS = [", "\n];"), re.MULTILINE))
     assert bars and bars <= budget, sorted(bars - budget)

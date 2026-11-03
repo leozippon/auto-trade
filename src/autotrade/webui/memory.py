@@ -26,9 +26,11 @@ import threading
 from collections.abc import Mapping
 from pathlib import Path
 
+from autotrade.common.records import read_json_object
 from autotrade.environment.runtime import chmod_tree
+from autotrade.pipelines.calendar import GEOMETRY_PARAMETERS, ResearchGeometry
 from autotrade.pipelines.config import rolling_default
-from autotrade.pipelines.hitl_state import HITL_DIR_NAME, PARAMS_NAME, read_json
+from autotrade.pipelines.hitl_state import HITL_DIR_NAME, PARAMS_NAME
 from autotrade.pipelines.ledger import experiment_verdict
 from autotrade.pipelines.skills import (
     CURATED_MEMORY_SOURCE,
@@ -283,17 +285,27 @@ def experiment_memory(experiments_root: Path, experiment_id: str) -> dict[str, o
     """
 
     directory = resolve_experiment_dir(Path(experiments_root), experiment_id)
-    params = read_json(directory / HITL_DIR_NAME / PARAMS_NAME)
-    # The arm's research end, resolved as the worker resolves it: the mount
-    # admits a graduated source only when its Held-out ended by this day.
-    research_end = str(
-        params.get("research_end", rolling_default("geometry").research_end)  # type: ignore[attr-defined]
+    params = read_json_object(directory / HITL_DIR_NAME / PARAMS_NAME, missing_ok=True)
+    # The day the session's mount admits against, resolved as the worker
+    # resolves it: a graduated source is mounted only when its Held-out ended
+    # by the end of the research years the session sees -- the visible years
+    # of an arm that seals some, the whole research period of one created
+    # before the sealed gate.
+    default_geometry = rolling_default("geometry")
+    geometry = ResearchGeometry(
+        **{name: params.get(name, getattr(default_geometry, name)) for name in GEOMETRY_PARAMETERS}
+    )
+    sealed_years = params.get("sealed_years")
+    admitted_by = (
+        geometry.research_end
+        if sealed_years is None
+        else geometry.split_sealed(int(sealed_years))[0][-1].end  # type: ignore[call-overload]
     )
     payload: dict[str, object] = {
         "experiment_id": experiment_id,
         "mode": resolve_operating_memory(params.get("operating_memory")),
         "default_mode": DEFAULT_OPERATING_MEMORY,
-        "research_end": research_end,
+        "admitted_by": admitted_by,
         # A count, not a projection: the collected runs no longer answer what was
         # mounted, they only say how many sessions have run against the snapshot.
         "sessions_seen": len(
@@ -305,7 +317,7 @@ def experiment_memory(experiments_root: Path, experiment_id: str) -> dict[str, o
         record = read_operating_memory_snapshot(directory)
         if record is not None:
             sources = snapshot_memory_sources(record, directory)
-            mounted, _refused = admit_memory_sources(sources, research_end)
+            mounted, _refused = admit_memory_sources(sources, admitted_by)
             payload["snapshot"] = {
                 "created_at": str(record.get("created_at") or ""),
                 "created_from": str(record.get("created_from") or ""),

@@ -31,6 +31,12 @@ import subprocess
 import threading
 from pathlib import Path
 
+from .strategy_worker import (
+    MEMORY_LIMIT_BYTES,
+    PEAK_GPU_MEMORY_BYTES,
+    PEAK_MEMORY_BYTES,
+)
+
 HOST_CGROUP_ROOT = Path("/sys/fs/cgroup")
 # How often a GPU container's own compute processes are polled. One
 # ``nvidia-smi`` call per sample per container: at three concurrent candidates
@@ -90,9 +96,9 @@ class ContainerResourceMonitor:
         return {
             name: value
             for name, value in (
-                ("peak_memory_bytes", self._peak_memory),
-                ("memory_limit_bytes", self._memory_limit),
-                ("peak_gpu_memory_bytes", self._peak_gpu_memory),
+                (PEAK_MEMORY_BYTES, self._peak_memory),
+                (MEMORY_LIMIT_BYTES, self._memory_limit),
+                (PEAK_GPU_MEMORY_BYTES, self._peak_gpu_memory),
             )
             if value is not None
         }

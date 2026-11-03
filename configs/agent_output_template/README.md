@@ -75,7 +75,7 @@ The two path strings have **different layouts**, and mixing them up is the singl
 
 | Path | Layout | Read it as |
 | --- | --- | --- |
-| `context.asof_dir` | one **directory of parquet parts per domain**: `asof_dir/daily/part_0000.parquet`, `part_0001.parquet`, … | `pd.read_parquet(context.asof_dir + "/daily")` — pass the **directory**, pandas concatenates the parts |
+| `context.asof_dir` | one **directory of parquet parts per domain**: `asof_dir/daily/part_0000.parquet` plus later parts, renamed as each finished month is merged into one | `pd.read_parquet(context.asof_dir + "/daily")` — pass the **directory**, pandas concatenates the parts |
 | `context.snapshot_dir` | one **flat file per domain**: `snapshot_dir/daily.parquet` | `pd.read_parquet(context.snapshot_dir + "/daily.parquet")` |
 
 `context.asof_dir + "/daily.parquet"` does not exist and raises `FileNotFoundError`. `modification_check` rejects that spelling before a backtest starts. The same applies to every as-of domain (`daily`, `events`, `macro`, `fundamentals`, `intraday_1min`, `auction`, `text_index`, `universe`); only text bodies under `asof_dir/text_library/` are individual `<name>.parquet` shards.

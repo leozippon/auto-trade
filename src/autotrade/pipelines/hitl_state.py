@@ -29,9 +29,11 @@ from autotrade.environment.sandbox import SandboxSpec
 
 from .calendar import GEOMETRY_PARAMETERS
 from .config import (
+    ACCEPTANCE_KEYS,
     DEFAULT_PIT_VIEWS_SEED,
     DEFAULT_RESEARCH_GEOMETRY,
-    AcceptanceRules,
+    REQUIRED_ACCEPTANCE_KEYS,
+    acceptance_default,
     rolling_default,
 )
 from .ledger import FORWARD_SESSION_KEY, RESEARCH_SESSION_KEY
@@ -57,9 +59,25 @@ LIVE_RUN_STATES = {"running_session"}
 ENDED_STATES = frozenset({"completed", "failed", "stopped"})
 
 
+# The console's own value of each required acceptance rule
+# (``config.REQUIRED_ACCEPTANCE_KEYS``), which the rules themselves leave
+# without a default. The sealed gate's level is one for the whole program, so
+# that every sealed reading is judged at the same level
+# (``_round.BASE_EXPECTED_DEFAULTS`` pins it). How many research years are
+# sealed depends on the arm's geometry and whether a freeze registers an
+# ablation on the round's research question, so the console has no value for
+# either: every create request states them (``WEB_REQUIRED_PARAMS``).
+_REQUIRED_ACCEPTANCE_DEFAULTS: dict[str, object] = {
+    "alpha": 0.05,
+    "sealed_years": None,
+    "ablation_required": None,
+}
+
+
 def _acceptance_defaults() -> dict[str, object]:
     """The acceptance block of the creation defaults, read off the rules' own
-    declaration (``config.AcceptanceRules``).
+    declaration (``config.AcceptanceRules``) and, for a rule without a
+    default, the console's own value above.
 
     The limits a request may leave blank come first: the tracking mandate,
     which naming ``tracking_error_cap`` switches on (a blank beta band then
@@ -69,8 +87,15 @@ def _acceptance_defaults() -> dict[str, object]:
     (``config.acceptance_for``).
     """
 
+    if set(_REQUIRED_ACCEPTANCE_DEFAULTS) != set(REQUIRED_ACCEPTANCE_KEYS):
+        raise RuntimeError("every required acceptance rule needs its console value")
     rules = {
-        **AcceptanceRules().to_record(),
+        **{
+            name: _REQUIRED_ACCEPTANCE_DEFAULTS[name]
+            if name in REQUIRED_ACCEPTANCE_KEYS
+            else acceptance_default(name)
+            for name in ACCEPTANCE_KEYS
+        },
         "max_drawdown": None,
         "active_max_drawdown": None,
     }
@@ -91,9 +116,6 @@ WEB_CREATE_DEFAULTS: dict[str, object] = {
     "research_directive": rolling_default("research_directive"),
     "workspace_reference": rolling_default("workspace_reference"),
     "operating_memory": rolling_default("operating_memory"),
-    # Earlier arms on the same research period whose trials join this arm's
-    # freeze-gate family; read once, at creation (pipelines/lineage.py).
-    "lineage_arms": rolling_default("lineage_arms"),
     "strategy_period": "day",
     "inference_time": "08:30",
     # Sets nothing since the approval mode was removed; still written because
@@ -218,7 +240,13 @@ WEB_CLOSED_PARAMS = frozenset(
     }
 )
 
-WEB_REQUIRED_PARAMS = frozenset({"experiment_id", *GEOMETRY_PARAMETERS})
+WEB_REQUIRED_PARAMS = frozenset(
+    {
+        "experiment_id",
+        *GEOMETRY_PARAMETERS,
+        *(name for name, value in _REQUIRED_ACCEPTANCE_DEFAULTS.items() if value is None),
+    }
+)
 
 
 @dataclass

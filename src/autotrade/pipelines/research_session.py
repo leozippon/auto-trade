@@ -22,6 +22,7 @@ import pandas as pd
 
 from autotrade.agent.compact import ContextCompactionConfig
 from autotrade.agent.experiment_facts import build_experiment_facts
+from autotrade.common.records import read_json_object_or_empty, write_json_atomic
 from autotrade.environment.artifacts import (
     WORKSPACE_DIR_MODE,
     WORKSPACE_FILE_MODE,
@@ -51,12 +52,11 @@ from autotrade.environment.runtime import (
     agent_trace_path,
     agent_transcript_dir,
     chmod_tree,
-    write_json_atomic,
 )
 from autotrade.environment.sandbox import (
     DockerSandbox,
     LocalSandbox,
-    SandboxLimits,
+    SandboxConfig,
     SandboxSpec,
     experiment_container_labels,
     link_copytree,
@@ -74,10 +74,7 @@ from autotrade.environment.tools.base import (
 )
 from autotrade.environment.tools.compact import CompactTool
 from autotrade.environment.tools.files import EditFileTool, WriteFileTool
-from autotrade.environment.tools.finish_session import (
-    FinishSessionTool,
-    offline_trials_count,
-)
+from autotrade.environment.tools.finish_session import FinishSessionTool
 from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.environment.tools.report_issue import (
     ReportIssueTool,
@@ -116,12 +113,10 @@ from .config import (
     StepResult,
     positive_spend_cap,
 )
-from .experiment import trial_family, trial_fields
 from .ledger import (
     ENVIRONMENT_BLOCKED,
     RESEARCH_STAGE,
     ExperimentLedger,
-    lineage_record,
 )
 from .session_tools import (
     BatchValidateTool,
@@ -129,7 +124,6 @@ from .session_tools import (
     NullControlTool,
     SessionValidations,
     SmokeBacktestTool,
-    another_batch_round_fits,
     batch_candidate_resources,
     batch_candidate_stats,
     session_budget_status,
@@ -298,8 +292,8 @@ class SessionBudgetLLM(SessionTimeBudgetAware):
         self.delegate = delegate
         self.budget = budget
         self.role = role
-        self.provider = str(getattr(delegate, "provider", ""))
-        self.model = str(getattr(delegate, "model", ""))
+        self.provider = str(delegate.provider)
+        self.model = str(delegate.model)
         # Resolved once from the configured model: a gateway outside the
         # catalog has no price and fails here, before the session's first call.
         self.prices = token_prices(self.provider, self.model)
@@ -422,6 +416,14 @@ def build_subagent_tools(
     ]
 
 
+
+def _strategy_sandbox(evaluator: object) -> SandboxConfig:
+    """The formal executor's strategy container: the evaluator's own, or the
+    executor's default for one that runs none (trusted mode, test doubles)."""
+
+    sandbox = getattr(evaluator, "sandbox", None)
+    return sandbox if isinstance(sandbox, SandboxConfig) else SandboxConfig()
+
 class LLMResearchDeveloper:
     """Adapter from the native Agent loop to ``ResearchDeveloper``."""
 
@@ -479,33 +481,25 @@ class LLMResearchDeveloper:
     def decision_timeout_seconds(self) -> float:
         """The formal executor's per-decision inference wall clock."""
 
-        sandbox = getattr(self.evaluator, "sandbox", None)
-        limits = getattr(sandbox, "limits", None) or SandboxLimits()
-        return float(limits.timeout_seconds)
+        return float(_strategy_sandbox(self.evaluator).timeout_seconds)
 
     @property
     def fit_timeout_seconds(self) -> float:
         """The formal executor's wall clock for one strategy ``fit(context)``."""
 
-        sandbox = getattr(self.evaluator, "sandbox", None)
-        limits = getattr(sandbox, "limits", None) or SandboxLimits()
-        return float(limits.fit_timeout_seconds)
+        return float(_strategy_sandbox(self.evaluator).fit_timeout_seconds)
 
     @property
     def strategy_cpus(self) -> float:
         """The formal strategy container's CPU quota, its thread variables' source."""
 
-        sandbox = getattr(self.evaluator, "sandbox", None)
-        limits = getattr(sandbox, "limits", None) or SandboxLimits()
-        return float(limits.cpus)
+        return float(_strategy_sandbox(self.evaluator).spec.cpus)
 
     @property
     def strategy_memory_bytes(self) -> int:
         """The formal strategy container's memory ceiling, in bytes."""
 
-        sandbox = getattr(self.evaluator, "sandbox", None)
-        limits = getattr(sandbox, "limits", None) or SandboxLimits()
-        return int(limits.memory_bytes)
+        return int(_strategy_sandbox(self.evaluator).spec.memory_bytes)
 
     @property
     def strategy_gpu_count(self) -> int:
@@ -518,9 +512,7 @@ class LLMResearchDeveloper:
         override may move on its own.
         """
 
-        sandbox = getattr(self.evaluator, "sandbox", None)
-        limits = getattr(sandbox, "limits", None) or SandboxLimits()
-        return int(limits.gpu_count)
+        return int(_strategy_sandbox(self.evaluator).spec.gpu_count)
 
     def __call__(self, request: ResearchSessionRequest) -> ResearchSessionResult:
         root, resume, attempt = self._resolve_resume(request)
@@ -694,9 +686,9 @@ class LLMResearchDeveloper:
                 node_id,
                 replicates,
                 deterministic,
+                ablation,
                 reason,
                 finish_reason,
-                terminal,
             ) = self._run_agent(runner, request, resume=resume, used=used, run_ref=run_ref)
             return self._collect_result(
                 request,
@@ -713,9 +705,9 @@ class LLMResearchDeveloper:
                 node_id=node_id,
                 seed_replicates=replicates,
                 deterministic=deterministic,
+                ablation=ablation,
                 reason=reason,
                 finish_reason=finish_reason,
-                terminal_offline_trials=terminal,
             )
         except Exception as exc:
             emit_event(
@@ -830,11 +822,11 @@ class LLMResearchDeveloper:
                 "session_key": request.session_key,
                 "kind": RESEARCH_STAGE,
                 "llm": {
-                    "provider": str(getattr(self.llm, "provider", "")),
-                    "model": str(getattr(self.llm, "model", "")),
+                    "provider": str(self.llm.provider),
+                    "model": str(self.llm.model),
                     "subagent": {
-                        "provider": str(getattr(self.subagent_llm, "provider", "")),
-                        "model": str(getattr(self.subagent_llm, "model", "")),
+                        "provider": str(self.subagent_llm.provider),
+                        "model": str(self.subagent_llm.model),
                     },
                 },
                 "conversation_id": request.run_id,
@@ -844,6 +836,7 @@ class LLMResearchDeveloper:
                     request.research_years,
                     window_months=request.window_months,
                     decision_time=request.decision_time.isoformat(),
+                    sealed=request.sealed_period,
                 ),
                 # The index this arm is graded against; the Agent-visible facts
                 # publish it so a session designs against the same benchmark
@@ -854,7 +847,7 @@ class LLMResearchDeveloper:
                     "decision_input": {"snapshot_id": request.snapshot.snapshot_id}
                 },
                 "start": start_record(),
-                "arm": arm_record(request.steps_before, lineage_record(self.ledger.read())),
+                "arm": arm_record(request.steps_before),
                 "modification_constraints": request.modification_constraints.to_record(),
                 "acceptance_rules": dict(request.acceptance_rules),
                 "schedule": self.schedule.to_record(),
@@ -1126,15 +1119,13 @@ class LLMResearchDeveloper:
             StepRollbackTool(tree, output_dir, models_dir, session_ref=session_ref)
         )
         # Matches the opaque session ref the step tree stores, so the
-        # current-session check compares like with like. One gate for the
-        # session: ``finish_session`` refuses a failing nomination with it,
-        # and the Runner labels every hard-finalization candidate with it.
+        # current-session check compares like with like. ``finish_session``
+        # refuses a nomination that does not register with it.
         tools.append(
             FinishSessionTool(
                 tree,
                 session_ref=session_ref,
-                freeze_gate=backtest.freeze_gate,
-                another_round_fits=lambda: another_batch_round_fits(backtest),
+                registration=backtest.registration,
                 budget_status=lambda: session_budget_status(backtest),
             )
         )
@@ -1240,7 +1231,6 @@ class LLMResearchDeveloper:
                 session_key=request.session_key,
                 run_id=request.run_id,
             ),
-            freeze_gate=backtest.freeze_gate,
             trace_ref=run_ref,
         )
 
@@ -1252,12 +1242,11 @@ class LLMResearchDeveloper:
         resume: SessionResume | None,
         used: BudgetUsed,
         run_ref: str,
-    ) -> tuple[str, str, str | None, tuple[str, ...], bool, str, str, int]:
+    ) -> tuple[str, str, str | None, tuple[str, ...], bool, str | None, str, str]:
         """Open the conversation, afresh or with the resume note over the last
         summary, and run it to its finish: the conversation id, the outcome,
-        the nominated node, its seed replicates and whether it was declared
-        deterministic, the reason, the finish reason and the terminal
-        offline-screen delta a finish declared."""
+        the nominated node, its seed replicates, whether it was declared
+        deterministic and its ablation, the reason and the finish reason."""
 
         from autotrade.agent.compact import compaction_summary_message
         from autotrade.agent.prompts import (
@@ -1316,7 +1305,7 @@ class LLMResearchDeveloper:
             outcome, node_id, reason = _session_outcome(result.finish_value)
             replicates = _seed_replicates(result.finish_value) if outcome == "freeze" else ()
             deterministic = outcome == "freeze" and _deterministic(result.finish_value)
-            terminal = _terminal_offline_trials(result.finish_value)
+            ablation = _ablation(result.finish_value) if outcome == "freeze" else None
             finish_reason = "llm_agent_finish_session"
         except AgentSessionBudgetExhausted as exc:
             # The session closed on an exhausted budget (its wrap-up grace,
@@ -1324,16 +1313,14 @@ class LLMResearchDeveloper:
             # are still the arm's trials.
             conversation_id = exc.conversation_id
             outcome, node_id, replicates, reason = "deadline", None, (), ""
-            deterministic = False
-            terminal = 0
+            deterministic, ablation = False, None
             finish_reason = exc.finish_reason
         except EnvironmentBlocked as exc:
             # The host ended the session: its replays on one span kept failing
             # on the environment, so the arm ends on that, not on research.
             conversation_id = runner.conversation_id
             outcome, node_id, replicates, reason = ENVIRONMENT_BLOCKED, None, (), exc.reason
-            deterministic = False
-            terminal = 0
+            deterministic, ablation = False, None
             finish_reason = ENVIRONMENT_BLOCKED
         return (
             conversation_id,
@@ -1341,9 +1328,9 @@ class LLMResearchDeveloper:
             node_id,
             replicates,
             deterministic,
+            ablation,
             reason,
             finish_reason,
-            terminal,
         )
 
     def _collect_result(
@@ -1363,9 +1350,9 @@ class LLMResearchDeveloper:
         node_id: str | None,
         seed_replicates: tuple[str, ...],
         deterministic: bool,
+        ablation: str | None,
         reason: str,
         finish_reason: str,
-        terminal_offline_trials: int,
     ) -> ResearchSessionResult:
         """Re-index the skills the session left, check its nomination, publish
         its step tree and collect its run directory: the session's result."""
@@ -1385,10 +1372,11 @@ class LLMResearchDeveloper:
         )
         steps = tuple(backtest.steps)
         recorded = {step.step_id for step in steps}
-        if outcome == "freeze" and not {node_id, *seed_replicates} <= recorded:
+        named = {node_id, *seed_replicates, *([ablation] if ablation else [])}
+        if outcome == "freeze" and not named <= recorded:
             raise RuntimeError(
-                "finish_session nominated a node or seed replicate absent from this "
-                "session's Validations"
+                "finish_session nominated a node, seed replicate or ablation absent "
+                "from this session's Validations"
             )
         manifest.update(
             conversation_id=conversation_id,
@@ -1406,9 +1394,9 @@ class LLMResearchDeveloper:
             node_id=node_id,
             seed_replicates=seed_replicates,
             deterministic=deterministic,
+            ablation=ablation,
             reason=reason,
             finish_reason=finish_reason,
-            terminal_offline_trials=terminal_offline_trials,
             # The nulls the session already drew, for the freeze to reuse.
             null_controls=(
                 dict(null_control_tool.blocks)
@@ -1499,8 +1487,8 @@ class LLMResearchDeveloper:
             **build_experiment_facts(
                 manifest=dict(manifest.data),
                 ref_store=self.ref_store,
-                runtime_env=_read_json_if_exists(paths.runtime_env),
-                data_summary=_read_json_if_exists(paths.data_summary),
+                runtime_env=read_json_object_or_empty(paths.runtime_env),
+                data_summary=read_json_object_or_empty(paths.data_summary),
                 max_llm_calls=request.max_llm_calls,
                 context_compaction={
                     "enabled": self.compact_llm is not None,
@@ -1526,17 +1514,24 @@ def session_fact_blocks(workspace: str | Path) -> dict[str, object]:
 
 
 def research_geometry_record(
-    years: Sequence[object], *, window_months: int, decision_time: str
+    years: Sequence[object],
+    *,
+    window_months: int,
+    decision_time: str,
+    sealed: tuple[str, str],
 ) -> dict[str, object]:
     """The research period as a session may know it: research dates only.
 
-    ``years`` are the research years in order, anything with ``label``,
-    ``start`` and ``end``. Every decision view carries the ``window_months``
-    of history that end on its anchor day: ``input_window`` is the research-end
-    view's, and each year's ``input_window`` is that of the view its replay
-    starts from, anchored the day before the year starts. The periods after
-    research end exist and are sealed; neither their dates nor their slots are
-    named anywhere a session can read.
+    ``years`` are the visible research years in order, anything with
+    ``label``, ``start`` and ``end``. Every decision view carries the
+    ``window_months`` of history that end on its anchor day: ``input_window``
+    is the session's view, at the end of the visible years, and each year's
+    ``input_window`` is that of the view its replay starts from, anchored the
+    day before the year starts. ``sealed`` bounds the sealed research years
+    after them: their dates are stated so the session knows what it is
+    graded on, and nothing of them is replayable or readable. The periods
+    after research end exist and are sealed too; neither their dates nor
+    their slots are named anywhere a session can read.
     """
 
     def input_window(end: str) -> str:
@@ -1554,6 +1549,14 @@ def research_geometry_record(
             "macro": dict.fromkeys(BACKFILLED_MACRO_DATASETS, MACRO_HISTORY_START),
         },
         "research_period": f"{first.start}..{last.end}",  # type: ignore[attr-defined]
+        "sealed_years": {
+            "period": f"{sealed[0]}..{sealed[1]}",
+            "note": (
+                "the trailing research years the host reads once after the freeze "
+                "(acceptance_rules.sealed_gate); no view, span, tool or reading of this "
+                "session reaches them"
+            ),
+        },
         "years": [
             {
                 "label": year.label,  # type: ignore[attr-defined]
@@ -1584,48 +1587,17 @@ def start_record() -> dict[str, object]:
     return {"kind": "template", "template_ref": "agent_output_template"}
 
 
-# What an arm's lineage fact means for its freeze gate, and how its trials
-# join the arm's own (``experiment.recorded_lineage``).
-LINEAGE_NOTE = (
-    "the non-control trials of these earlier arms on the same research period "
-    "join this arm's freeze-gate trial family: selection_statistics."
-    "information_ratio_bar already counts them. Strategy bytes validated both "
-    "here and in a lineage arm, or in two lineage arms, are one trial, and "
-    "each arm's declared offline screens count as that arm declared them: "
-    "screens are summed per arm, never merged across arms"
-)
+def arm_record(steps: Sequence[StepResult]) -> dict[str, object]:
+    """The arm's state when the attempt starts: nothing frozen yet (a session
+    only runs while nothing is), one freeze per arm, and the Validations the
+    session's earlier attempts recorded."""
 
-
-def arm_record(
-    steps: Sequence[StepResult], lineage: Mapping[str, object] | None = None
-) -> dict[str, object]:
-    """The arm's selection state when the attempt starts.
-
-    Trials are the freeze gate's trial family over the session's earlier
-    attempts (``experiment.trial_family``): distinct non-control strategies
-    (by artifact fingerprint, whatever the span) plus the offline screens
-    their batches declared; controls are counted apart. A
-    session only runs while nothing is frozen. ``lineage`` is the ledger's
-    ``lineage`` record of an arm created with one: the earlier arms whose
-    trials the gate adds to these, how many and what they count as, with the
-    note that says so (``LINEAGE_NOTE``), so no prompt sentence holds only for
-    the arms that have one.
-    """
-
-    family = trial_family([trial_fields(step) for step in steps])
-    record: dict[str, object] = {
+    return {
         "frozen": False,
         "freezes_per_arm": 1,
-        "trials_to_date": family["trials"],
-        "controls_to_date": family["controls"],
+        "validations_to_date": len(steps),
         "full_span_validations_to_date": sum(1 for step in steps if step.span == FULL_SPAN),
     }
-    if lineage is not None:
-        record["lineage"] = {
-            **{key: lineage[key] for key in ("arms", "trials", "effective_trials")},
-            "note": LINEAGE_NOTE,
-        }
-    return record
 
 
 # The read-only facts file of a session, under ``workspace/inputs``.
@@ -1633,7 +1605,8 @@ SESSION_CONTEXT_NAME = "session_context.json"
 
 # The ``forbidden`` fact of a research session.
 SESSION_FORBIDDEN = [
-    "data_after_research_end",
+    "data_after_the_visible_research_years",
+    "sealed_research_years",
     "forward_period",
     "heldout",
     "external_network",
@@ -1653,21 +1626,11 @@ def _deterministic(finish: Mapping[str, object]) -> bool:
     return finish.get("deterministic") is True
 
 
-def _terminal_offline_trials(finish: Mapping[str, object]) -> int:
-    """The terminal offline-screen delta a ``finish_session`` declared, or 0.
+def _ablation(finish: Mapping[str, object]) -> str | None:
+    """The ablation a ``finish_session`` freeze registered (a full node id)."""
 
-    A finish that does not carry the field (a host outcome that never went
-    through the tool) declares none. A finish that carries it is read through
-    the one validator the tool itself uses: a malformed count fails here
-    rather than being silently dropped from the trial family.
-    """
-
-    if "terminal_offline_trials" not in finish:
-        return 0
-    return offline_trials_count(
-        finish["terminal_offline_trials"],
-        where="the finish's terminal_offline_trials",
-    )
+    ablation = finish.get("ablation")
+    return None if ablation is None else str(ablation)
 
 
 def _session_outcome(finish: Mapping[str, object]) -> tuple[str, str | None, str]:
@@ -1911,16 +1874,6 @@ def _agent_event_sink(
         progress_hook(stage, public)
 
     return emit
-
-
-def _read_json_if_exists(path: Path) -> dict[str, object]:
-    try:
-        if not path.exists():
-            return {}
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
 
 
 __all__ = [

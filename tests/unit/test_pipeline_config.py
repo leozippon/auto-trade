@@ -13,7 +13,7 @@ import json
 import math
 import re
 import unittest
-from dataclasses import MISSING, asdict, fields, replace
+from dataclasses import MISSING, fields, replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -27,13 +27,13 @@ from autotrade.pipelines.config import (
     BATCH_VALIDATE_MAX_CANDIDATES,
     DEFAULT_RESEARCH_GEOMETRY,
     MANDATED_DEFAULTS,
-    OFFLINE_TRIALS_PRICING,
     RETIRED_SWITCHES,
     AcceptanceRules,
     RollingExperimentConfig,
     acceptance_for,
 )
-from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
+from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS, WEB_REQUIRED_PARAMS
+from tests.unit.acceptance_fixture import CREATE_RULES, REQUIRED_RULES
 from tests.unit.gpu_probe import gpu_roster, stubbed_gpu_probe
 
 #: The console create form is seeded from the pinned explore profile so a
@@ -76,6 +76,7 @@ def make_config(root: Path, **overrides: object) -> RollingExperimentConfig:
     values: dict[str, object] = {
         "experiment_id": "exp",
         "experiments_root": root / "experiments",
+        "acceptance": AcceptanceRules(**REQUIRED_RULES),
     }
     values.update(overrides)
     return RollingExperimentConfig(**values)
@@ -99,7 +100,7 @@ class AcceptanceRulesTest(unittest.TestCase):
     def test_nan_metrics_are_hard_rejects(self) -> None:
         # NaN compares False against every threshold; without the finiteness
         # guard a NaN total_return would pass acceptance outright.
-        rules = AcceptanceRules()
+        rules = AcceptanceRules(**REQUIRED_RULES)
         summary = {"total_return": math.nan, "sharpe": 1.0, "max_drawdown": 0.1}
         self.assertEqual(rules.evaluate(summary), ["non_finite_total_return"])
         for key in ("sharpe", "max_drawdown"):
@@ -113,7 +114,7 @@ class AcceptanceRulesTest(unittest.TestCase):
         )
 
     def test_finite_metrics_keep_threshold_semantics(self) -> None:
-        rules = AcceptanceRules(max_drawdown=0.25)
+        rules = AcceptanceRules(**REQUIRED_RULES, max_drawdown=0.25)
         ok = {"total_return": 0.02, "sharpe": 0.5, "max_drawdown": 0.1}
         self.assertEqual(rules.evaluate(ok), [])
         # A drawdown breach is a HARD reject, sign-independent: F4/H3 enforce
@@ -127,7 +128,7 @@ class AcceptanceRulesTest(unittest.TestCase):
                 )
         # It is the round's own limit, not a constant.
         self.assertEqual(
-            AcceptanceRules(max_drawdown=0.35).evaluate({**ok, "max_drawdown": 0.30}), []
+            AcceptanceRules(**REQUIRED_RULES, max_drawdown=0.35).evaluate({**ok, "max_drawdown": 0.30}), []
         )
         # A modest or negative result is not refused here: how much edge is
         # enough is the deflated Sharpe's question, asked by the gate itself.
@@ -142,7 +143,7 @@ class AcceptanceRulesTest(unittest.TestCase):
 
     def test_absent_sharpe_is_not_an_integrity_failure(self) -> None:
         self.assertEqual(
-            AcceptanceRules().evaluate({"total_return": 0.02, "max_drawdown": 0.1}), []
+            AcceptanceRules(**REQUIRED_RULES).evaluate({"total_return": 0.02, "max_drawdown": 0.1}), []
         )
 
     def test_rule_values_must_be_finite_and_ranged(self) -> None:
@@ -160,25 +161,22 @@ class AcceptanceRulesTest(unittest.TestCase):
             {**band, "beta_min": 1.15},
             {**band, "tracking_error_cap": 0.0},
             {**band, "tracking_error_cap": math.inf},
-            {"min_active_ir": math.nan},
-            {"min_dsr_probability": 0.0},
-            {"min_dsr_probability": 1.5},
-            {"min_positive_year_share": 0.0},
-            {"min_full_span_validations": 0},
-            {"min_full_span_validations": 2.5},
+            {"alpha": math.nan},
+            {"alpha": 0.0},
+            {"alpha": 1.0},
+            {"sealed_years": 0},
+            {"sealed_years": 2.5},
+            {"ablation_required": 1},
+            {"ablation_required": "true"},
             {"forward_confidence": 0.0},
             {"forward_confidence": 1.0},
-            {"recency_months": 0},
-            {"min_mean_gross": 0.0},
-            {"min_round_trips_per_month": -0.1},
-            {"heldout_tolerance_z": 0.0},
         ):
             with self.subTest(**kwargs), self.assertRaises(ValueError):
-                AcceptanceRules(**kwargs)
-        self.assertEqual(AcceptanceRules(**band).mandate, band)
+                AcceptanceRules(**{**REQUIRED_RULES, **kwargs})
+        self.assertEqual(AcceptanceRules(**REQUIRED_RULES, **band).mandate, band)
 
     def test_record_round_trips_every_threshold(self) -> None:
-        rules = AcceptanceRules(
+        rules = AcceptanceRules(**REQUIRED_RULES,
             max_drawdown=0.3,
             cost_stress_multiplier=3.0,
             active_max_drawdown=0.12,
@@ -189,7 +187,7 @@ class AcceptanceRulesTest(unittest.TestCase):
         self.assertEqual(
             rules.to_record(),
             {
-                **AcceptanceRules().to_record(),
+                **AcceptanceRules(**REQUIRED_RULES).to_record(),
                 "max_drawdown": 0.3,
                 "cost_stress_multiplier": 3.0,
                 "active_max_drawdown": 0.12,
@@ -199,56 +197,68 @@ class AcceptanceRulesTest(unittest.TestCase):
             },
         )
         self.assertEqual(AcceptanceRules.from_record(rules.to_record()), rules)
-        # Every params.json and run manifest written before the active series
-        # was graded names the equity limit and the cost stress alone, and many
-        # still carry the retired targets: such a record rebuilds the rules it
-        # does name, with no tracking mandate.
+        # A params.json or run manifest written before the required rules
+        # existed -- every arm created under the deflated-Sharpe gate -- is
+        # refused, never read under a value it did not state.
+        for missing in REQUIRED_RULES:
+            stated = {key: value for key, value in REQUIRED_RULES.items() if key != missing}
+            with self.assertRaisesRegex(ValueError, f"lack the required {missing}"):
+                AcceptanceRules.from_record({"max_drawdown": 0.25, "min_active_ir": 0.75, **stated})
+            with self.assertRaisesRegex(ValueError, f"lack the required {missing}"):
+                acceptance_for({"max_drawdown": 0.25, **stated})
+            with self.assertRaises(TypeError):
+                AcceptanceRules(max_drawdown=0.25, **stated)  # type: ignore[arg-type]
+        # A record that states them rebuilds the rules it names, retired bars
+        # ignored, with no tracking mandate, and the forward bars it leaves out
+        # resolve to today's defaults.
         old = AcceptanceRules.from_record(
-            {"min_return": 0.01, "min_sharpe": 0.2, "max_drawdown": 0.25, "cost_stress_multiplier": 2.0}
+            {
+                "min_return": 0.01,
+                "max_drawdown": 0.25,
+                "min_dsr_probability": 0.975,
+                "min_mean_gross": 0.5,
+                "heldout_tolerance_z": 1.28,
+                **REQUIRED_RULES,
+            }
         )
-        self.assertEqual(old, AcceptanceRules(max_drawdown=0.25))
+        self.assertEqual(old, AcceptanceRules(**REQUIRED_RULES, max_drawdown=0.25))
         self.assertIsNone(old.tracking_error_cap)
-        # A params.json written before the statistical bars were fields still
-        # resolves to today's defaults, so the arm is judged as it was.
-        self.assertEqual(old.min_active_ir, verdict.FREEZE_MIN_ACTIVE_IR)
-        self.assertEqual(old.min_dsr_probability, verdict.FREEZE_MIN_DSR_PROBABILITY)
-        self.assertEqual(old.min_positive_year_share, verdict.FREEZE_MIN_POSITIVE_YEAR_SHARE)
-        self.assertEqual(old.min_full_span_validations, verdict.FREEZE_MIN_FULL_SPAN_VALIDATIONS)
         self.assertEqual(old.forward_confidence, verdict.FORWARD_CONFIDENCE)
-        self.assertEqual(old.recency_months, verdict.RECENCY_MONTHS)
-        self.assertEqual(old.min_mean_gross, verdict.MIN_MEAN_GROSS)
-        self.assertEqual(old.min_round_trips_per_month, verdict.MIN_ROUND_TRIPS_PER_MONTH)
-        self.assertEqual(old.heldout_tolerance_z, verdict.HELDOUT_TOLERANCE_Z)
-        self.assertEqual(acceptance_for({"max_drawdown": 0.25}), AcceptanceRules(max_drawdown=0.25))
+        self.assertEqual(acceptance_for({**REQUIRED_RULES, "max_drawdown": 0.25}), AcceptanceRules(**REQUIRED_RULES, max_drawdown=0.25))
 
     def test_the_tracking_mandate_is_set_by_hand_and_never_by_the_capital(self) -> None:
         """One switch, and it is the operator's: naming a ``tracking_error_cap``
         is what turns the mandate on. No account size appears in the rule, so
         the same request gives the same gates on any capital."""
 
-        free = AcceptanceRules().to_record()
+        free = AcceptanceRules(**REQUIRED_RULES).to_record()
         tracking = {**free, "tracking_error_cap": 0.08, **MANDATED_DEFAULTS}
         # No cap: no mandate, whatever the request says about the account.
-        self.assertEqual(acceptance_for({}).to_record(), free)
-        self.assertEqual(AcceptanceRules().to_record(), free)
+        self.assertEqual(acceptance_for(REQUIRED_RULES).to_record(), free)
+        self.assertEqual(AcceptanceRules(**REQUIRED_RULES).to_record(), free)
         for cash in (0, 100_000, 149_999, 150_000, 1_000_000, 10_000_000):
             with self.subTest(cash=cash):
-                self.assertEqual(acceptance_for({"initial_cash": cash}).to_record(), free)
+                self.assertEqual(acceptance_for({**REQUIRED_RULES, "initial_cash": cash}).to_record(), free)
                 self.assertEqual(
-                    acceptance_for({"initial_cash": cash, "tracking_error_cap": 0.08}).to_record(),
+                    acceptance_for({**REQUIRED_RULES, "initial_cash": cash, "tracking_error_cap": 0.08}).to_record(),
                     tracking,
                 )
                 self.assertEqual(tracking["max_drawdown"], 0.45)
                 self.assertEqual(tracking["active_max_drawdown"], 0.30)
-        # A request that names the limits as nulls keeps the same defaults.
-        self.assertEqual(acceptance_for(dict.fromkeys(free)).to_record(), free)
+        # A request that names the defaulted limits as nulls keeps the same
+        # defaults; a required rule named as null is a rule not stated.
+        self.assertEqual(
+            acceptance_for({**dict.fromkeys(free), **REQUIRED_RULES}).to_record(), free
+        )
+        with self.assertRaisesRegex(ValueError, "lack the required alpha"):
+            acceptance_for(dict.fromkeys(free))
         # A cap fills a blank beta band; drawdowns stay 0.45 / 0.30 unless named.
         self.assertEqual(
-            acceptance_for({"tracking_error_cap": 0.08, "max_drawdown": 0.3, "beta_min": 0.9}).to_record(),
+            acceptance_for({**REQUIRED_RULES, "tracking_error_cap": 0.08, "max_drawdown": 0.3, "beta_min": 0.9}).to_record(),
             {**tracking, "max_drawdown": 0.3, "beta_min": 0.9},
         )
         self.assertEqual(
-            acceptance_for({"max_drawdown": 0.3, "active_max_drawdown": 0.2}).to_record(),
+            acceptance_for({**REQUIRED_RULES, "max_drawdown": 0.3, "active_max_drawdown": 0.2}).to_record(),
             {**free, "max_drawdown": 0.3, "active_max_drawdown": 0.2},
         )
         # A band without a cap is refused, and so is a cap of zero: absence is
@@ -263,91 +273,91 @@ class AcceptanceRulesTest(unittest.TestCase):
                 acceptance_for(overrides)
 
     def test_the_agent_facts_state_the_rules_from_their_single_sources(self) -> None:
-        """The ``acceptance_rules`` fact is derived, never retyped: the freeze
-        gate and verdict thresholds come from ``verdict`` and this experiment's
-        own rules, and no date of any period appears in it."""
+        """The ``acceptance_rules`` fact is derived, never retyped: the sealed
+        gate's statistic and bar come from ``verdict`` and this experiment's
+        own rules, registration lists only what it checks, and no date of any
+        period appears in it."""
 
-        rules = AcceptanceRules(
+        rules = AcceptanceRules(**{**REQUIRED_RULES, "sealed_years": 5},
             max_drawdown=0.2, cost_stress_multiplier=3.0, active_max_drawdown=0.11
         )
         facts = rules.agent_facts()
-        freeze = facts["freeze_gate"]
+        self.assertEqual(sorted(facts), ["freeze_registration", "graded_series", "graduation", "sealed_gate"])
         self.assertIn(str(verdict.PANEL_DRAWS), facts["graded_series"])
         self.assertIn("benchmark.active_information_ratio", facts["graded_series"])
-        self.assertIn(str(verdict.FREEZE_MIN_ACTIVE_IR), freeze["active_information_ratio"])
-        self.assertIn("75%", freeze["positive_years"])
-        self.assertIn("3 of 4", freeze["positive_years"])
-        tighter = AcceptanceRules(min_active_ir=1.1, min_positive_year_share=0.5)
-        tight_facts = tighter.agent_facts(research_years=4)["freeze_gate"]
-        self.assertIn("1.1", tight_facts["active_information_ratio"])
-        self.assertIn("2 of 4", tight_facts["positive_years"])
-        self.assertIn("0.11", freeze["active_max_drawdown"])
-        self.assertEqual(facts["graduation"]["forward"]["active_max_drawdown"], "<= 0.11")
-        self.assertEqual(facts["graduation"]["heldout"]["active_max_drawdown"], "<= 0.11")
+        sealed = facts["sealed_gate"]
+        self.assertIn("intercept times sqrt(244) over the residual standard deviation", sealed["statistic"])
+        self.assertIn("the size leg and the value leg", sealed["statistic"])
+        self.assertEqual(sealed["bar"], "z(1 - alpha) / sqrt(years)")
+        self.assertEqual((sealed["alpha"], sealed["sealed_years"]), (0.05, 5))
+        self.assertEqual(sealed["bar_over_sealed_years"], round(verdict.residual_bar(5.0, 0.05), 3))
+        self.assertEqual(sealed["bar_over_one_year"], 1.645)
+        self.assertIn("there is no second reading", sealed["read"])
+        self.assertIn("residual_reading", sealed["on_visible_spans"])
+        registration = facts["freeze_registration"]
+        self.assertEqual(
+            sorted(registration),
+            [
+                "ablation",
+                "control",
+                "finite_metrics",
+                "freezes_per_arm",
+                "max_drawdown",
+                "seed_replicates",
+                "span",
+                "tracking_mandate",
+            ],
+        )
+        # An arm that asks for no ablation says so; one that asks defines it.
+        self.assertIn("takes no ablation", registration["ablation"])
+        asked = AcceptanceRules(**{**REQUIRED_RULES, "ablation_required": True}).agent_facts()
+        ablation = asked["freeze_registration"]["ablation"]
+        self.assertTrue(ablation["required"])
+        self.assertIn("exactly one line changed", ablation["definition"])
+        self.assertIn("never gates", ablation["reading"])
+        self.assertIn("span=full", registration["span"])
+        self.assertIn("finite", registration["finite_metrics"])
+        self.assertIn("0.2", registration["max_drawdown"])
+        self.assertIn("ends the session", registration["freezes_per_arm"])
+        self.assertIn(
+            "declared deterministic in finish_session (its package uses no randomness) owes none",
+            registration["seed_replicates"],
+        )
         # No mandate is said in words; a mandate states its two limits and that
         # meeting them is not evidence.
-        self.assertIn("reported, not graded", freeze["tracking_mandate"])
-        mandate = acceptance_for({"tracking_error_cap": 0.08}).agent_facts()["freeze_gate"][
-            "tracking_mandate"
-        ]
+        self.assertIn("reported, not graded", registration["tracking_mandate"])
+        mandate = acceptance_for({**REQUIRED_RULES, "tracking_error_cap": 0.08}).agent_facts()[
+            "freeze_registration"
+        ]["tracking_mandate"]
         self.assertIn("<= 0.08", mandate["tracking_error"])
         self.assertIn("0.85..1.15", mandate["market_beta"])
         self.assertIn("not evidence", mandate["role"])
-        self.assertIn("span=full", freeze["span"])
-        self.assertIn("finite", freeze["finite_metrics"])
-        self.assertIn(str(verdict.FREEZE_MIN_DSR_PROBABILITY), freeze["deflated_sharpe_probability"])
-        self.assertIn(str(verdict.FREEZE_MIN_FULL_SPAN_VALIDATIONS), freeze["full_span_validations"])
-        self.assertEqual(freeze["freezes_per_arm"], 1)
-        self.assertIn(
-            "declared deterministic in finish_session (its package uses no randomness) "
-            "is exempt from the replicate count and the seed mean",
-            freeze["seed_replicates"],
-        )
-        # The drawdown limit is the gate's, stated once and from the same field
-        # the forward and Held-out conditions below quote.
-        self.assertIn("0.2", freeze["max_drawdown"])
-        self.assertEqual(facts["graduation"]["forward"]["max_drawdown"], "<= 0.2")
-        # The gate states every rule it enforces and no rule it does not.
-        self.assertEqual(sorted(facts), ["freeze_gate", "graded_series", "graduation"])
-        graduation = facts["graduation"]
-        self.assertIn("tracking error", graduation["forward"]["minimum_detectable_excess"])
-        self.assertEqual(graduation["forward"]["max_drawdown"], "<= 0.2")
-        self.assertIn("3.0", graduation["forward"]["excess_at_cost_stress"])
-        self.assertEqual(graduation["heldout"]["max_drawdown"], "<= 0.2")
+        # The forward readings are stated with what they are taken at, and no
+        # bar: none is judged.
+        self.assertIn("slippage multiplied by 3.0", facts["graduation"]["reported"])
+        self.assertNotIn("<=", json.dumps(facts["graduation"]))
         rendered = json.dumps(facts)
         self.assertIsNone(re.search(r"20\d{6}", rendered))
+        for retired in ("deflated", "trials", "offline", "positive_years", "information_ratio_bar"):
+            self.assertNotIn(retired, rendered)
 
-    def test_the_freeze_cost_stress_is_stated_at_the_arms_multiplier(self) -> None:
-        stated = acceptance_for({"cost_stress_multiplier": 3.0}).agent_facts()["freeze_gate"][
-            "excess_at_cost_stress"
-        ]
-        self.assertIn("> 0", stated)
-        self.assertIn("3.0", stated)
-        self.assertIn("graduation_activity.active_excess_at_cost_stress", stated)
+    def test_one_series_is_stated_and_the_sealed_gate_alone_admits(self) -> None:
+        """Every reading is of the active series: the facts name it once and
+        no neutralized figure. Graduation is the sealed gate's alone; the
+        forward bound and the cost stress are stated as readings, over the
+        frozen book and its seed replicates, that decide nothing."""
 
-    def test_one_series_is_stated_and_f2_reads_the_seeds_together(self) -> None:
-        """Every gate grades the active series as it is: the facts name it
-        once, name no regressed figure, and tell the forward bound as a rule
-        with no figure, over the frozen book and its seed replicates averaged
-        day by day."""
-
-        facts = AcceptanceRules().agent_facts()
+        facts = AcceptanceRules(**REQUIRED_RULES).agent_facts()
         graded = facts["graded_series"]
-        self.assertIn("with no regression", graded)
         for field in ("benchmark.active_excess", "sub_windows[].active_excess_return", "daily_series"):
             self.assertIn(field, graded)
         self.assertNotIn("neutral", json.dumps(facts).lower())
-        forward = facts["graduation"]["forward"]
-        self.assertNotIn("plain_excess_lower_bound", forward)
-        stated = forward["lower_bound"]
-        self.assertIn("lower bound of annualized active excess > 0", stated)
-        self.assertIn("day-by-day average over the frozen book and its replicates", stated)
-        self.assertIsNone(re.search(r"\d\.\d", stated))
-
-    def test_offline_pricing_is_stated_once(self) -> None:
-        facts = json.dumps(AcceptanceRules().agent_facts())
-        self.assertEqual(facts.count(OFFLINE_TRIALS_PRICING), 1)
-        self.assertIn("rho + (1 - rho) * H + (M - H) independent trials", facts)
+        graduation = facts["graduation"]
+        self.assertEqual(sorted(graduation), ["admits", "reported"])
+        self.assertIn("exactly when the sealed gate passes", graduation["admits"])
+        self.assertIn("80% block-bootstrap lower bound", graduation["reported"])
+        self.assertIn("frozen book and its seed replicates", graduation["reported"])
+        self.assertIn("none decides the verdict", graduation["reported"])
 
     def test_a_record_with_a_retired_key_still_rebuilds_the_rules(self) -> None:
         rules = AcceptanceRules.from_record(
@@ -356,15 +366,16 @@ class AcceptanceRulesTest(unittest.TestCase):
                 "heldout_min_trades": 5,
                 "confirmation_folds": 2,
                 **dict.fromkeys(RETIRED_SWITCHES, False),
+                **REQUIRED_RULES,
             }
         )
-        self.assertEqual(rules, AcceptanceRules(max_drawdown=0.2))
+        self.assertEqual(rules, AcceptanceRules(**REQUIRED_RULES, max_drawdown=0.2))
 
     def test_the_cost_stress_multiplier_must_be_a_stress(self) -> None:
         with self.assertRaisesRegex(ValueError, "cost_stress_multiplier must be at least one"):
-            AcceptanceRules(cost_stress_multiplier=0.5)
+            AcceptanceRules(**REQUIRED_RULES, cost_stress_multiplier=0.5)
         with self.assertRaisesRegex(ValueError, "cost_stress_multiplier must be finite"):
-            AcceptanceRules(cost_stress_multiplier=float("nan"))
+            AcceptanceRules(**REQUIRED_RULES, cost_stress_multiplier=float("nan"))
 
 
 class RollingExperimentConfigValidationTest(unittest.TestCase):
@@ -453,14 +464,17 @@ class DefaultsDriftTest(unittest.TestCase):
             if key not in WEB_CREATE_DEFAULTS:
                 continue
             self.assertEqual(WEB_CREATE_DEFAULTS[key], getattr(profile, key), key)
-        rules = AcceptanceRules().to_record()
+        rules = AcceptanceRules(**REQUIRED_RULES).to_record()
         # A retired switch is no parameter a request can name.
         self.assertFalse(RETIRED_SWITCHES & set(WEB_CREATE_DEFAULTS))
         # Drawdowns and the mandate switch stay empty so the form does not pin
-        # a mandate onto every arm. Every other rule shows what an empty
-        # request would stamp.
-        blank = {"max_drawdown", "active_max_drawdown", "tracking_error_cap", "beta_min", "beta_max"}
+        # a mandate onto every arm, and the sealed years and the ablation have
+        # no console value: every request states them (WEB_REQUIRED_PARAMS).
+        # Every other rule shows what an empty request would stamp.
+        stated = {"sealed_years", "ablation_required"}
+        blank = {"max_drawdown", "active_max_drawdown", "tracking_error_cap", "beta_min", "beta_max", *stated}
         self.assertEqual(set(rules), set(ACCEPTANCE_KEYS))
+        self.assertLessEqual(stated, WEB_REQUIRED_PARAMS)
         for key, value in rules.items():
             if key in blank:
                 self.assertIsNone(WEB_CREATE_DEFAULTS[key], key)
@@ -490,6 +504,7 @@ class DefaultsDriftTest(unittest.TestCase):
                 {
                     "experiment_id": "defaults_demo",
                     "strategy_path": "configs/agent_output_template/main.py",
+                    **REQUIRED_RULES,
                     "data_backend": "pit",
                     "raw_dir": "data/raw",
                     "fundamental_events_root": "data/pit/fundamental_events",
@@ -512,11 +527,7 @@ class DefaultsDriftTest(unittest.TestCase):
                 )
         # A request that names no limit gets the rules' own defaults, mandate
         # off, on whatever capital the Broker profile carries.
-        self.assertEqual(options.rolling.acceptance, AcceptanceRules())
-        self.assertEqual(
-            RollingExperimentConfig("demo", Path("experiments")).acceptance,
-            AcceptanceRules(),
-        )
+        self.assertEqual(options.rolling.acceptance, AcceptanceRules(**REQUIRED_RULES))
 
     def test_the_retired_switches_are_accepted_and_inert_and_any_other_key_refused(self) -> None:
         """Every params.json written before 2026-10-07 carries the retired
@@ -532,6 +543,7 @@ class DefaultsDriftTest(unittest.TestCase):
         base = {
             "experiment_id": "legacy_demo",
             "strategy_path": "configs/agent_output_template/main.py",
+            **REQUIRED_RULES,
             "data_backend": "pit",
             "raw_dir": "data/raw",
             "fundamental_events_root": "data/pit/fundamental_events",
@@ -568,7 +580,7 @@ class DefaultsDriftTest(unittest.TestCase):
                 options({**base, "require_heldout_magic": True})
         profile = current.rolling.broker_profile
         self.assertTrue(profile.dividend_tax)
-        self.assertEqual(current.rolling.acceptance, AcceptanceRules())
+        self.assertEqual(current.rolling.acceptance, AcceptanceRules(**REQUIRED_RULES))
         policy = _broker_replay_facts({"broker_profile": profile.to_record()})["dividend_tax_policy"]
         self.assertTrue(policy["charged"])
         self.assertEqual(policy["record_date_cutover"], "20150908")
@@ -593,6 +605,7 @@ class DefaultsDriftTest(unittest.TestCase):
         base = {
             "experiment_id": "boards_demo",
             "strategy_path": "configs/agent_output_template/main.py",
+            **REQUIRED_RULES,
             "data_backend": "pit",
             "raw_dir": "data/raw",
             "fundamental_events_root": "data/pit/fundamental_events",
@@ -621,11 +634,11 @@ class DefaultsDriftTest(unittest.TestCase):
                 with self.subTest(value=value), self.assertRaisesRegex(ValueError, message):
                     profile({**base, "permitted_boards": value})
         self.assertIsNone(recorded.permitted_boards)
-        self.assertNotIn("permitted_boards", recorded.to_record())
+        self.assertIsNone(recorded.to_record()["permitted_boards"])
         self.assertEqual(pinned.permitted_boards, ("main", "gem"))
         self.assertEqual(pinned.to_record()["permitted_boards"], ["main", "gem"])
         # A profile read back from the JSON a Paper book keeps is the same profile.
-        self.assertEqual(BrokerProfile(**json.loads(json.dumps(asdict(pinned)))), pinned)
+        self.assertEqual(BrokerProfile.from_record(json.loads(json.dumps(pinned.to_record()))), pinned)
         # The run facts state the boards only where the profile pins them.
         self.assertNotIn("permitted_boards", _broker_replay_facts({"broker_profile": recorded.to_record()}))
         self.assertEqual(
@@ -656,6 +669,7 @@ class DefaultsDriftTest(unittest.TestCase):
                     "cost_stress_multiplier": 3.0,
                     "max_drawdown": 0.2,
                     "strategy_path": "configs/agent_output_template/main.py",
+                    **REQUIRED_RULES,
                     "data_backend": "pit",
                     "raw_dir": "data/raw",
                     "fundamental_events_root": "data/pit/fundamental_events",
@@ -672,7 +686,7 @@ class DefaultsDriftTest(unittest.TestCase):
         # The two the request names; it named no cap, so no tracking mandate.
         self.assertEqual(
             options.rolling.acceptance,
-            replace(AcceptanceRules(), max_drawdown=0.2, cost_stress_multiplier=3.0),
+            replace(AcceptanceRules(**REQUIRED_RULES), max_drawdown=0.2, cost_stress_multiplier=3.0),
         )
 
     def test_the_console_create_form_is_seeded_with_the_research_preset(self) -> None:
@@ -912,7 +926,7 @@ class ConsoleParameterSurfaceTest(unittest.TestCase):
                     json={
                         "params": {
                             "experiment_id": "params_demo",
-                            **DEFAULT_RESEARCH_GEOMETRY.to_record(),
+                            **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES,
                             **overrides,
                         }
                     },
@@ -953,7 +967,7 @@ class ConsoleParameterSurfaceTest(unittest.TestCase):
                     json={
                         "params": {
                             "experiment_id": "params_gpu",
-                            **DEFAULT_RESEARCH_GEOMETRY.to_record(),
+                            **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES,
                             "gpu_count": 2,
                         }
                     },
@@ -1005,6 +1019,7 @@ PIT_SEED_BASE_PARAMS = {
     "raw_dir": "data/raw",
     "fundamental_events_root": "data/pit/fundamental_events",
     "fundamental_events_status": "results/data_quality/fundamental_events_status.json",
+    **REQUIRED_RULES,
 }
 
 
@@ -1277,82 +1292,6 @@ class PitViewsSeedParameterTest(unittest.TestCase):
                 )
             )
             self.assertEqual(pin["generation_id"], "gen_newer")
-
-    def test_an_arm_created_with_a_lineage_pins_its_seed_release_at_worker_start(self) -> None:
-        """Console create with ``lineage_arms`` and a named seed, then the
-        worker's start: the create leaves the ledger empty (the lineage is a
-        file beside it), so the release pin finds no ledger records, pins the
-        seed's release and the worker proceeds -- also after the research
-        session has recorded the lineage. A ledger holding a research session
-        and no pin is still refused: that arm ran on a data generation nobody
-        recorded."""
-        import shutil
-        import tempfile
-
-        from autotrade.pipelines.experiment import lineage_ledger_record
-        from autotrade.pipelines.ledger import ExperimentLedger
-        from autotrade.pipelines.worker import load_worker_options
-        from autotrade.webui.manager import ExperimentManager
-        from tests.unit.test_lineage import _arm
-
-        with tempfile.TemporaryDirectory() as tmp:
-            repo_root = Path(tmp)
-            experiments = repo_root / "experiments"
-            template = repo_root / "configs/agent_output_template/main.py"
-            template.parent.mkdir(parents=True)
-            template.write_text("def generate_orders(context):\n    return []\n", encoding="utf-8")
-            selection = {
-                "include_fundamentals": False,
-                "include_events": False,
-                "include_text": False,
-                "include_intraday": False,
-            }
-            self._seed(repo_root, "pit_views_seed_lineage", selection)
-            _arm(experiments, "earlier_arm", [{"seed": 1, "loading": 0.5}])
-            manager = ExperimentManager(repo_root, experiments)
-            with patch.object(manager, "start_worker", return_value={"spawned": False}):
-                manager.create_experiment(
-                    {
-                        "experiment_id": "heir",
-                        **DEFAULT_RESEARCH_GEOMETRY.to_record(),
-                        **selection,
-                        "pit_views_seed": "data/pit_views_seed_lineage",
-                        "lineage_arms": ["earlier_arm"],
-                        "gpu_count": 0,
-                    }
-                )
-            directory = experiments / "heir"
-            ledger = ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl")
-            self.assertEqual(ledger.read(), [])
-            # A worker start resolves the model gateway before it pins.
-            (repo_root / ".env").write_text(
-                "VLLM_API_KEY=placeholder\nLIGHTING_API_KEY=placeholder\n", encoding="utf-8"
-            )
-            options = load_worker_options(directory, repo_root=repo_root)
-            pin = json.loads((directory / "research_release/manifest.json").read_text(encoding="utf-8"))
-            self.assertEqual(pin["generation_id"], "gen_seed")
-            self.assertEqual(options.rolling.lineage_arms, ("earlier_arm",))
-            # What the research session writes first; a later worker start resumes.
-            ledger.append(lineage_ledger_record(directory, workspace_reference=""))
-            load_worker_options(directory, repo_root=repo_root)
-
-            ran = experiments / "ran_unpinned"
-            shutil.copytree(directory / "hitl", ran / "hitl")
-            params = json.loads((ran / "hitl/params.json").read_text(encoding="utf-8"))
-            params.update(experiment_id="ran_unpinned", lineage_arms=[])
-            (ran / "hitl/params.json").write_text(json.dumps(params), encoding="utf-8")
-            ExperimentLedger(ran / "ledgers/experiment_ledger.jsonl").append(
-                {
-                    "record_type": "research_session",
-                    "experiment_id": "ran_unpinned",
-                    "epoch_id": "research",
-                    "fold_id": "research",
-                    "run_id": "run_ran_unpinned",
-                    "steps": [],
-                }
-            )
-            with self.assertRaisesRegex(ValueError, "ledger records but no research-release pin"):
-                load_worker_options(ran, repo_root=repo_root)
 
     def test_a_named_seed_whose_release_cannot_serve_fails_the_create(self) -> None:
         import shutil

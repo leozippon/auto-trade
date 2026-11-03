@@ -14,6 +14,7 @@ from typing import Any, NamedTuple
 import pandas as pd
 
 from autotrade.agent.compact import ContextCompactionConfig
+from autotrade.common.records import read_json_object, write_json_atomic
 from autotrade.environment.artifacts import (
     FilesystemArtifactStore,
 )
@@ -46,11 +47,12 @@ from autotrade.environment.llm.lighting import (
     SHORT_TIER_MAX_COMPACTION_THRESHOLD,
 )
 from autotrade.environment.pretrained import pretrained_pin
-from autotrade.environment.runtime import utc_now_iso, write_json_atomic
+from autotrade.environment.runtime import utc_now_iso
 from autotrade.environment.sandbox import (
     DEFAULT_IMAGE,
+    STRATEGY_TMPFS_SIZE,
+    GpuMode,
     SandboxConfig,
-    SandboxLimits,
     SandboxSpec,
     experiment_container_labels,
     remove_sandbox_tree,
@@ -68,6 +70,7 @@ from .calendar import (
 from .config import (
     ACCEPTANCE_KEYS,
     DEFAULT_PIT_VIEWS_SEED,
+    RETIRED_RULES,
     RETIRED_SWITCHES,
     RollingExperimentConfig,
     acceptance_for,
@@ -81,7 +84,6 @@ from .hitl_state import (
     build_session_plan,
     planned_sessions,
     read_gpu_claim,
-    read_json,
     read_status,
 )
 from .interactive import InteractiveExperimentRunner
@@ -96,7 +98,6 @@ from .ledger import (
     paper_candidate,
     research_records,
 )
-from .lineage import extract_lineage, lineage_arm_ids
 from .local_backend import (
     DeterministicBaselineDeveloper,
     LocalDailyEvaluationBackend,
@@ -186,7 +187,6 @@ _ALLOWED_PARAMS = {
     "research_directive",
     "workspace_reference",
     "operating_memory",
-    "lineage_arms",
     "record_failed_attempts",
     "finalize_before_deadline_seconds",
     "per_call_timeout_seconds",
@@ -227,9 +227,12 @@ _ALLOWED_PARAMS = {
     "agent_sandbox_tmpfs",
     # Stamped by the console at creation (``environment.pretrained``).
     "pretrained_manifest_sha256",
-    # Accepted so that an arm created before their retirement still loads;
-    # nothing reads them (``config.RETIRED_SWITCHES``, ``RETIRED_NL_PARAMS``).
+    # Accepted so that an arm created before their retirement still lists in
+    # the console (and, but for the retired rules, still loads); nothing reads
+    # them (``config.RETIRED_SWITCHES``, ``config.RETIRED_RULES``,
+    # ``RETIRED_NL_PARAMS``).
     *RETIRED_SWITCHES,
+    *RETIRED_RULES,
     *RETIRED_NL_PARAMS,
 }
 
@@ -404,7 +407,7 @@ def load_worker_options(
 ) -> InteractiveWorkerOptions:
     directory = Path(experiment_dir).resolve(strict=True)
     params_path = directory / "hitl" / "params.json"
-    params = read_json(params_path)
+    params = read_json_object(params_path, missing_ok=True)
     if not params:
         raise ValueError(f"missing experiment params: {params_path}")
     options = resolve_worker_options(params, experiment_dir=directory, repo_root=repo_root)
@@ -645,16 +648,6 @@ def resolve_worker_options(
         # The release must reach into Held-out; the forward replay clips the
         # Held-out slot to its last trading day.
         geometry.heldout(trading_days)
-    lineage_arms = lineage_arm_ids(knob("lineage_arms"), experiment_id)
-    if preflight and lineage_arms:
-        # Read once more, for real, when the console creates the arm; after
-        # that the arm reads only its own ledger (pipelines/lineage.py).
-        extract_lineage(
-            directory.parent,
-            lineage_arms,
-            research_start=geometry.research_start,
-            research_end=geometry.research_end,
-        )
     schedule = StrategySchedule(
         str(params.get("strategy_period") or "day"),  # type: ignore[arg-type]
         str(params.get("inference_time") or "08:30"),
@@ -691,7 +684,6 @@ def resolve_worker_options(
             params.get("workspace_reference"), repository
         ),
         operating_memory=resolve_operating_memory(params.get("operating_memory")),
-        lineage_arms=lineage_arms,
         record_failed_attempts=_strict_bool(
             knob("record_failed_attempts"), "record_failed_attempts"
         ),
@@ -711,13 +703,9 @@ def resolve_worker_options(
         strategy_cpus=_positive_float(knob("strategy_cpus"), "strategy_cpus"),
         strategy_memory=_memory_limit(knob("strategy_memory"), "strategy_memory"),
         # A tracking mandate exactly where the request named a cap; every
-        # limit absent or null takes its default (``config.acceptance_for``).
-        acceptance=acceptance_for(
-            {
-                name: None if params.get(name) is None else _finite_float(params[name], name)
-                for name in ACCEPTANCE_KEYS
-            }
-        ),
+        # limit absent or null takes its default, and the rules check each
+        # value's type and range (``config.acceptance_for``).
+        acceptance=acceptance_for(params),
         schedule=schedule,
         broker_profile=BrokerProfile(
             initial_cash=initial_cash,
@@ -791,7 +779,10 @@ def _strategy_sandbox_from_spec(
 
     The wall clocks, CPU quota and memory ceiling are the arm's own
     (``RollingExperimentConfig.strategy_*``); one left as None keeps the
-    executor's default (``SandboxLimits``), which is also the arm default.
+    executor's default (``SandboxConfig``, ``SandboxSpec``), which is also the
+    arm default. The process guard, ``/dev/shm`` and the user are the
+    container defaults and ``/tmp`` is ``STRATEGY_TMPFS_SIZE``, whatever the
+    session container was given.
 
     ``experiment_id`` labels every strategy container the experiment starts
     like its session container, so the console reclaims them together.
@@ -803,37 +794,35 @@ def _strategy_sandbox_from_spec(
     A spec carrying the devices taken for this run (a tuple of indexes: the
     console's claim, see ``load_worker_options``, or another caller's
     ``hitl_state.select_gpus``) pins every strategy container to them; a spec
-    that names none leaves the container none, and it refuses to start.
+    still on ``GpuMode.AUTO`` leaves the container none, and it refuses to
+    start.
 
     The arm's pretrained-store pin travels the same way, so every strategy
     container mounts the store the session container does.
     """
 
-    labels = experiment_container_labels(experiment_id) if experiment_id else {}
-    boundary: dict[str, Any] = {"fit_timeout_seconds": float(fit_timeout_seconds)}
-    if inference_timeout_seconds is not None:
-        boundary["timeout_seconds"] = float(inference_timeout_seconds)
+    session = spec if spec is not None else SandboxSpec(gpu=None)
+    resources: dict[str, Any] = {}
     if cpus is not None:
-        boundary["cpus"] = float(cpus)
+        resources["cpus"] = float(cpus)
     if memory is not None:
-        boundary["memory"] = memory
-    if spec is None:
-        return SandboxConfig(
-            image=DEFAULT_IMAGE,
-            limits=SandboxLimits(**boundary),
-            labels=labels,
-        )
+        resources["memory"] = memory
+    clocks: dict[str, Any] = {"fit_timeout_seconds": float(fit_timeout_seconds)}
+    if inference_timeout_seconds is not None:
+        clocks["timeout_seconds"] = float(inference_timeout_seconds)
     return SandboxConfig(
-        image=spec.image,
-        limits=SandboxLimits(
-            **boundary,
-            gpu_count=spec.gpu_count if spec.gpu is not None else 0,
-            gpu_name_filter=spec.gpu_name_filter,
-            gpu_devices=spec.gpu if isinstance(spec.gpu, tuple) else (),
+        spec=SandboxSpec(
+            image=session.image,
+            docker_executable=session.docker_executable,
+            pretrained_manifest_sha256=session.pretrained_manifest_sha256,
+            gpu=session.gpu,
+            gpu_count=session.gpu_count,
+            gpu_name_filter=session.gpu_name_filter,
+            tmpfs_size=STRATEGY_TMPFS_SIZE,
+            **resources,
         ),
-        docker_executable=spec.docker_executable,
-        labels=labels,
-        pretrained_manifest_sha256=spec.pretrained_manifest_sha256,
+        labels=experiment_container_labels(experiment_id) if experiment_id else {},
+        **clocks,
     )
 
 
@@ -1475,13 +1464,13 @@ def _llm_settings(
         image=str(params.get("agent_sandbox_image") or DEFAULT_IMAGE),
         cpus=_positive_float(params.get(cpus_key, SandboxSpec().cpus), cpus_key),
         memory=_memory_limit(params.get(memory_key, SandboxSpec().memory), memory_key),
-        pids_limit=_positive_int(
-            params.get("agent_sandbox_pids", SandboxSpec().pids_limit), "agent_sandbox_pids"
+        pids=_positive_int(
+            params.get("agent_sandbox_pids", SandboxSpec().pids), "agent_sandbox_pids"
         ),
         tmpfs_size=_memory_limit(
             params.get("agent_sandbox_tmpfs", "1g"), "agent_sandbox_tmpfs"
         ),
-        gpu=None if gpu_count == 0 else "auto",
+        gpu=None if gpu_count == 0 else GpuMode.AUTO,
         gpu_count=gpu_count,
         # The store the arm pinned at creation; an arm created before the store
         # has none and its containers mount nothing.

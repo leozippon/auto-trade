@@ -4,21 +4,18 @@
 The consistency check of the gate code (``pipelines/verdict.py``,
 ``config.py``, ``experiment.py``). An arm keeps everything its readings were
 read from -- ``hitl/params.json``, the ledger's Steps with their style
-sidecars and revisions, the lineage series, the replays' results -- so each
-reading of an arm created under the current rules is judged again by this
-code, CPU only, and compared with the ledger key for key:
+sidecars and revisions, the replays' results -- so each reading of an arm
+created under the current rules is judged again by this code, CPU only, and
+compared with the ledger key for key:
 
-- a research session's freeze gate (``experiment.freeze_gate_for``),
-- a completed forward record's slices and verdict (``experiment.judged_replay``),
-- an incubation record's entry gate (``experiment.incubation_entry``) and the
-  slices and verdict of its replay,
-- a lineage record's figures (``experiment.lineage_summary``).
+- a research session's freeze registration (``experiment.freeze_registration``),
+- a forward record's sealed reading (``experiment.judged_sealed``), its
+  ablation's increment where it froze one (``experiment.judged_ablation``)
+  and, where its forward replay completed, its slices and verdict
+  (``experiment.judged_replay``).
 
-An arm created before ``CURRENT_RULES_SINCE`` was judged under rules since
-retired and is never judged again: its readings are what its ledger says. A
-reading written before the switches were retired states the two boolean
-ones in its thresholds (``config.RETIRED_SWITCHES``); those keys are dropped
-from the stored side and nothing else is.
+An arm whose rules state no ``sealed_years`` was judged under rules since
+retired and is never judged again: its readings are what its ledger says.
 
 Run it by hand before landing a change to the gate code, from a checkout
 whose ``experiments/`` holds the arms, or with ``--experiments``:
@@ -35,7 +32,6 @@ import json
 import math
 import sys
 from collections.abc import Mapping, Sequence
-from datetime import datetime
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -48,31 +44,16 @@ from _bootstrap import add_repo_src
 REPO_ROOT = add_repo_src(__file__)
 
 from autotrade.environment.broker import BrokerProfile
-from autotrade.pipelines.calendar import GEOMETRY_PARAMETERS, ResearchGeometry
-from autotrade.pipelines.config import (
-    DEFAULT_RESEARCH_GEOMETRY,
-    RETIRED_SWITCHES,
-    AcceptanceRules,
-    RollingExperimentConfig,
-    acceptance_for,
-)
+from autotrade.pipelines.config import AcceptanceRules, acceptance_for
 from autotrade.pipelines.experiment import (
-    freeze_gate_for,
-    incubation_entry,
+    freeze_registration,
+    judged_ablation,
     judged_replay,
-    lineage_summary,
-    recorded_terminal_offline_trials,
+    judged_sealed,
     replay_and_analysis,
 )
 from autotrade.pipelines.hitl_state import HITL_DIR_NAME, PARAMS_NAME
 from autotrade.pipelines.ledger import recorded_path
-
-# When the current rules took effect: the last rule change folded into them
-# (every gate grading the active series as it is, with no regression, instead
-# of its regression intercept) governs every arm created from this instant on.
-# An arm created before it was judged under rules since retired, so its
-# stored readings differ by the rule, not by a defect.
-CURRENT_RULES_SINCE = datetime.fromisoformat("2026-10-28T15:36:00+00:00")
 
 
 class Judgement(NamedTuple):
@@ -85,15 +66,17 @@ class Judgement(NamedTuple):
 
 
 def current_arms(experiments: Path) -> list[Path]:
-    """The arms under ``experiments`` created under the current rules."""
+    """The arms under ``experiments`` judged under the current rules: those
+    whose rules state ``sealed_years`` (the sealed gate's, which the session
+    sees the visible research years under, a freeze registers and the
+    frozen artifact's sealed reading judges). An arm created before then was
+    judged under rules since retired, so its stored readings differ by the
+    rule, not by a defect."""
 
     arms = []
     for path in sorted(Path(experiments).iterdir()):
         params = path / HITL_DIR_NAME / PARAMS_NAME
-        if not params.is_file():
-            continue
-        created = json.loads(params.read_text(encoding="utf-8")).get("_created_at")
-        if created and datetime.fromisoformat(str(created)) >= CURRENT_RULES_SINCE:
+        if params.is_file() and json.loads(params.read_text(encoding="utf-8")).get("sealed_years") is not None:
             arms.append(path)
     return arms
 
@@ -102,23 +85,6 @@ def _stored(value: object) -> Any:
     """``value`` as a ledger line stores it: through JSON."""
 
     return json.loads(json.dumps(value))
-
-
-def _without_retired(value: object) -> object:
-    """A stored reading without the retired switches its thresholds state."""
-
-    if isinstance(value, Mapping):
-        return {
-            key: (
-                {name: item for name, item in inner.items() if name not in RETIRED_SWITCHES}
-                if key == "thresholds" and isinstance(inner, Mapping)
-                else _without_retired(inner)
-            )
-            for key, inner in value.items()
-        }
-    if isinstance(value, list):
-        return [_without_retired(item) for item in value]
-    return value
 
 
 def differences(stored: object, now: object, path: str = "") -> list[str]:
@@ -148,11 +114,35 @@ def differences(stored: object, now: object, path: str = "") -> list[str]:
     return [] if type(stored) is type(now) and (stored == now or nan) else [path or "the reading"]
 
 
+def _sealed(arm: Path, record: Mapping[str, Any], rules: AcceptanceRules) -> dict[str, object]:
+    """The sealed block of one stored forward record of ``arm``, judged again."""
+
+    sealed = record["sealed"]
+    return judged_sealed(
+        str(recorded_path(arm, str(sealed["result_ref"]))),
+        rules=rules,
+        start=str(sealed["start"]),
+        end=str(sealed["end"]),
+        seed_replicates=[
+            (
+                {key: row[key] for key in ("artifact_id", "source_step_id")},
+                str(recorded_path(arm, str(row["result_ref"]))),
+            )
+            for row in sealed.get("seed_replicates") or ()
+            if row.get("result_ref")
+        ],
+    )
+
+
 def _replayed(
-    arm: Path, record: Mapping[str, Any], rules: AcceptanceRules, slippage_bps: float
+    arm: Path,
+    record: Mapping[str, Any],
+    rules: AcceptanceRules,
+    slippage_bps: float,
+    sealed: Mapping[str, object],
 ) -> dict[str, object]:
-    """The slices and verdict of one stored forward replay (a forward record
-    or an incubation's reading) of ``arm``, judged again."""
+    """The slices and verdict of one stored forward replay of ``arm``,
+    judged again with its ``sealed`` block."""
 
     replay, analysis = replay_and_analysis(str(recorded_path(arm, str(record["result_ref"]))))
     spans = record["replay"]
@@ -160,6 +150,7 @@ def _replayed(
         replay,
         analysis,
         rules=rules,
+        sealed=sealed,
         forward=(spans["start"], spans["forward_end"]),
         heldout=(spans["heldout_start"], spans["replay_end"]),
         seed_key=str(record["artifact_id"]),
@@ -170,7 +161,16 @@ def _replayed(
                 replay_and_analysis(str(recorded_path(arm, str(row["result_ref"]))))[1],
             )
             for row in record.get("seed_replicates") or ()
+            if row.get("result_ref")
         ],
+        strategy_errors=(
+            ("replicate",)
+            if any(
+                row.get("strategy_error")
+                for row in (*(record["sealed"].get("seed_replicates") or ()), *(record.get("seed_replicates") or ()))
+            )
+            else ()
+        ),
     )
 
 
@@ -182,75 +182,54 @@ def check_arm(arm: Path) -> list[Judgement]:
     lines = ledger.read_text(encoding="utf-8").splitlines() if ledger.is_file() else []
     records = [json.loads(line) for line in lines if line]
     rules = acceptance_for(params)
-    geometry = ResearchGeometry(
-        **{name: params.get(name, getattr(DEFAULT_RESEARCH_GEOMETRY, name)) for name in GEOMETRY_PARAMETERS}
-    )
-    years = [(slot.start, slot.end) for slot in geometry.research_years]
     slippage = float(params.get("slippage_bps", BrokerProfile().slippage_bps))
     found: list[Judgement] = []
 
     def judge(reading: str, stored: object, now: object) -> None:
-        found.append(Judgement(arm.name, reading, differences(_without_retired(stored), _stored(now))))
+        found.append(Judgement(arm.name, reading, differences(stored, _stored(now))))
 
-    for index, record in enumerate(records):
+    for record in records:
         kind = record.get("record_type")
         if kind == "research_session" and isinstance(record.get("freeze_gate"), dict):
             steps = {str(row["step_id"]): row for row in record["steps"]}
             nominee = steps[str(record["nominated_step_id"])]
-            named = (record["freeze_gate"].get("seed_replicates") or {}).get("replicates") or ()
+            seeds = record["freeze_gate"].get("seed_replicates") or {}
+            ablation = record["freeze_gate"].get("ablation") or {}
             judge(
-                "freeze_gate",
+                "freeze_registration",
                 record["freeze_gate"],
-                freeze_gate_for(
-                    records[:index],
-                    list(steps.values()),
+                freeze_registration(
                     nominee,
                     experiment_dir=arm,
                     acceptance=rules,
-                    hard_reasons=rules.evaluate(dict(nominee["summary"])),
-                    years=years,
-                    seed_replicates=[steps[str(entry["step_id"])] for entry in named],
-                    deterministic=bool(
-                        (record["freeze_gate"].get("seed_replicates") or {}).get("deterministic")
-                    ),
-                    terminal_offline_trials=recorded_terminal_offline_trials(records[: index + 1]),
+                    seed_replicates=[steps[str(entry["step_id"])] for entry in seeds.get("replicates") or ()],
+                    deterministic=bool(seeds.get("deterministic")),
+                    ablation=steps[str(ablation["step_id"])] if "step_id" in ablation else None,
                 ),
             )
-        elif kind == "forward" and record.get("status") == "ok":
-            judge(
-                "forward",
-                {key: record[key] for key in ("slices", "verdict")},
-                _replayed(arm, record, rules, slippage),
-            )
-        elif kind == "incubation":
-            config = RollingExperimentConfig(
-                experiment_id=arm.name,
-                experiments_root=arm.parent,
-                geometry=geometry,
-                acceptance=rules,
-            )
-            replicates = [
-                str(item["source_step_id"]) for item in record["frozen"].get("seed_replicates") or ()
-            ]
-            entry = incubation_entry(
-                records,
-                str(record["source_step_id"]),
-                replicates,
-                config=config,
-                deterministic=bool(record["frozen"].get("deterministic")),
-            )
-            judge("incubation.entry", record["entry"], entry["entry"])
-            reading = record["forward_reading"]
-            if reading.get("status") == "ok":
+        elif kind == "forward" and isinstance(record.get("sealed"), Mapping):
+            stored = record["sealed"]["slice"]
+            sealed = stored if stored.get("strategy_error") else _sealed(arm, record, rules)
+            judge("sealed", stored, sealed)
+            control = record["sealed"].get("ablation") or {}
+            if control.get("result_ref"):
                 judge(
-                    "incubation.forward_reading",
-                    {key: reading[key] for key in ("slices", "verdict")},
-                    _replayed(arm, reading, rules, slippage),
+                    "ablation",
+                    control["increment"],
+                    judged_ablation(
+                        str(recorded_path(arm, str(record["sealed"]["result_ref"]))),
+                        str(recorded_path(arm, str(control["result_ref"]))),
+                        rules=rules,
+                        start=str(record["sealed"]["start"]),
+                        end=str(record["sealed"]["end"]),
+                    )["increment"],
                 )
-        elif kind == "lineage":
-            series = recorded_path(arm, str(record["series_ref"]))
-            summary = lineage_summary(json.loads(series.read_text(encoding="utf-8")))
-            judge("lineage", {key: record[key] for key in summary}, summary)
+            if record.get("status") == "ok":
+                judge(
+                    "forward",
+                    {key: record[key] for key in ("slices", "verdict")},
+                    _replayed(arm, record, rules, slippage, sealed),
+                )
     return found
 
 
@@ -271,7 +250,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             detail = f": differs at {item.differences[:20]}" if item.differences else ""
             print(f"{'different' if item.differences else 'identical':<10} {item.reading:<27} {item.arm}{detail}")
     print(
-        f"{len(arms)} arms created since {CURRENT_RULES_SINCE.isoformat()}: "
+        f"{len(arms)} arms under the sealed gate: "
         f"{count} stored readings, {count - failed} identical, {failed} different"
     )
     return 1 if failed else 0

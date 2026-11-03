@@ -19,13 +19,14 @@ import argparse
 from dataclasses import fields, replace
 from pathlib import Path
 
+from autotrade.common.records import write_json_atomic
 from autotrade.environment.broker import default_permitted_boards
 from autotrade.environment.data.contracts import BENCHMARK_INDEXES
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.llm import MODEL_CHOICES
-from autotrade.environment.runtime import write_json_atomic
+from autotrade.environment.sandbox import GpuMode
 from autotrade.pipelines.calendar import GEOMETRY_PARAMETERS
-from autotrade.pipelines.config import AcceptanceRules
+from autotrade.pipelines.config import REQUIRED_ACCEPTANCE_KEYS, AcceptanceRules
 from autotrade.pipelines.hitl_state import (
     WEB_CREATE_DEFAULTS,
     select_gpus,
@@ -298,17 +299,35 @@ def add_research_directive_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _boolean(text: str) -> bool:
+    """``true`` or ``false``, nothing else."""
+
+    if text not in ("true", "false"):
+        raise argparse.ArgumentTypeError(f"expected true or false, got {text!r}")
+    return text == "true"
+
+
 def add_acceptance_arguments(parser: argparse.ArgumentParser) -> None:
     """One flag per acceptance rule, read off the rules' own declaration.
 
     Unset takes the default of ``autotrade.pipelines.config.acceptance_for``:
     a tracking mandate only where ``--tracking-error-cap`` is given, drawdowns
-    0.45 / 0.30 unless named and the statistical bars at today's constants.
+    0.45 / 0.30 unless named and the statistical bars at today's constants. A
+    rule without a default (``REQUIRED_ACCEPTANCE_KEYS``) takes the console's
+    creation value, as a console-created arm does, and is a required flag
+    where the console has none.
     """
     for rule in fields(AcceptanceRules):
-        kind = int if isinstance(rule.default, int) else float
+        # The module postpones annotations, so a rule's type is its name.
+        kind = {"int": int, "bool": _boolean}.get(str(rule.type), float)
+        required = rule.name in REQUIRED_ACCEPTANCE_KEYS
+        default = WEB_CREATE_DEFAULTS[rule.name] if required else None
         parser.add_argument(
-            f"--{rule.name.replace('_', '-')}", type=kind, default=None, help=rule.metadata["help"]
+            f"--{rule.name.replace('_', '-')}",
+            type=kind,
+            default=default,
+            required=required and default is None,
+            help=rule.metadata["help"],
         )
 
 
@@ -439,7 +458,7 @@ def build_worker_options(
     write_json_atomic(experiment_dir / "hitl" / "params.json", params)
     options = load_worker_options(experiment_dir, repo_root=repo_root)
     spec = options.agent_sandbox
-    if spec is None or spec.gpu != "auto":
+    if spec is None or spec.gpu != GpuMode.AUTO:
         return options
     devices = select_gpus(
         experiment_dir.parent, spec.gpu_count, require_name=spec.gpu_name_filter

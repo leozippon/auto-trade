@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import errno
 import fcntl
-import json
 import math
 import os
 import shutil
@@ -28,6 +27,8 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from autotrade.common.records import read_json_object, write_json_atomic
+from autotrade.common.time import CN_TZ
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.contracts import (
     benchmark_index_label,
@@ -76,10 +77,9 @@ from autotrade.environment.runtime import (
     new_id,
     rmtree_keeping_file_modes,
     utc_now_iso,
-    write_json_atomic,
 )
 from autotrade.environment.sandbox import SandboxConfig
-from autotrade.environment.strategy import CN_TZ, StrategySchedule
+from autotrade.environment.strategy import StrategySchedule
 from autotrade.environment.strategy_loader import validate_strategy_package
 
 from .calendar import replay_window, yyyymmdd
@@ -250,7 +250,7 @@ class ResearchPITSnapshotProvider:
         )
         with _exclusive_lock(self.cache_root / ".provider.lock"):
             if path.exists():
-                existing = _read_json(path)
+                existing = read_json_object(path)
                 if existing.get("schema_version") != record["schema_version"]:
                     raise RuntimeError(
                         f"PIT view cache {self.cache_root} was built under cache format "
@@ -1186,7 +1186,7 @@ class PITDailyEvaluationBackend:
         result_json = _result_json(result_path)
         try:
             decision_dir, replay_dirs = _result_replay_slots(result_json)
-            record = _read_json(result_json)
+            record = read_json_object(result_json)
             daily = _span_daily(replay_dirs, start, end)
             benchmark = slot_benchmark(replay_dirs, benchmark_index=self.benchmark_index)
             membership = slot_membership(
@@ -1454,7 +1454,7 @@ def _bind_asof_stash_contract(
 
     stash_dir = _asof_stash_dir(snapshot_dir, replay_dir, schedule, phase, window_start)
     cache_root = Path(snapshot_dir).resolve().parent.parent
-    provider_record = _read_json(cache_root / "provider.json")
+    provider_record = read_json_object(cache_root / "provider.json")
     expected_provider_keys = {
         "schema_version",
         "generation_id",
@@ -1517,7 +1517,7 @@ def _bind_asof_stash_contract(
         if stash_dir.exists():
             if not stash_dir.is_dir():
                 raise RuntimeError(f"PIT stash path is not a directory: {stash_dir}")
-            existing = _read_json(contract_path)
+            existing = read_json_object(contract_path)
             recorded = existing.get("snapshot_cache_schema_version", SNAPSHOT_CACHE_FORMAT_VERSION)
             if recorded != SNAPSHOT_CACHE_FORMAT_VERSION:
                 raise RuntimeError(
@@ -1658,7 +1658,9 @@ def _stash_part_counts(stash_dir: Path) -> dict[str, int]:
 
     return {
         # Text body parts are named ``<dataset>__part_NNNN.parquet``; every
-        # other domain writes a bare ``part_NNNN.parquet``.
+        # other domain writes a bare ``part_NNNN.parquet``. A month's parts
+        # merged into one (``merged_<first>_<last>.parquet``) are derived from
+        # these and not counted: a missing one is simply written again.
         domain.name: len(list(domain.glob("*part_*.parquet")))
         for domain in sorted(stash_dir.iterdir())
         if domain.is_dir() and not domain.is_symlink()
@@ -1682,7 +1684,7 @@ def _finished_stash_prebuild(
     path = stash_dir / _STASH_PREBUILD_RECORD
     if not path.is_file():
         return None
-    record = _read_json(path)
+    record = read_json_object(path)
     if record.get("start") != start or record.get("end") != end:
         return None
     if "trade_days" not in record:
@@ -1921,7 +1923,7 @@ def _result_replay_slots(result_json: Path) -> tuple[Path | None, tuple[Path, ..
             f"completed result has no {REPLAY_SLOTS_SIDECAR}, so its PIT replay "
             f"slots are unknown: {result_json}"
         )
-    record = _read_json(sidecar)
+    record = read_json_object(sidecar)
     slots = record.get("replay_slots")
     if not isinstance(slots, list) or not slots:
         raise ValueError(f"{sidecar} names no PIT replay slot")
@@ -1930,16 +1932,6 @@ def _result_replay_slots(result_json: Path) -> tuple[Path | None, tuple[Path, ..
         Path(str(decision)).resolve(strict=True) if decision else None,
         tuple(Path(str(slot)).resolve(strict=True) for slot in slots),
     )
-
-
-def _read_json(path: Path) -> dict[str, object]:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"invalid PIT cache record {path}: {exc}") from exc
-    if not isinstance(value, dict):
-        raise TypeError(f"PIT cache record is not an object: {path}")
-    return value
 
 
 @contextmanager

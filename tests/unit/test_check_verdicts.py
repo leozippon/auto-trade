@@ -20,7 +20,6 @@ from autotrade.environment.runtime import utc_now_iso
 from autotrade.pipelines import worker
 from autotrade.pipelines.worker import load_worker_options, run_local_interactive_worker
 from scripts.dev.check_verdicts import (
-    CURRENT_RULES_SINCE,
     check_arm,
     current_arms,
     main,
@@ -64,8 +63,8 @@ def _record(records: list[dict], kind: str) -> dict:
 
 def test_every_reading_of_a_current_arm_reproduces(arm: Path) -> None:
     judgements = check_arm(arm)
-    assert [item.reading for item in judgements] == ["freeze_gate", "forward"]
-    assert [item.differences for item in judgements] == [[], []]
+    assert [item.reading for item in judgements] == ["freeze_registration", "sealed", "forward"]
+    assert [item.differences for item in judgements] == [[], [], []]
     assert current_arms(arm.parent) == [arm]
     assert main(["--experiments", str(arm.parent)]) == 0
 
@@ -84,7 +83,11 @@ def test_a_moved_arm_is_judged_from_where_it_now_lives(arm: Path, tmp_path: Path
     records = [json.loads(line) for line in (copy / LEDGER).read_text(encoding="utf-8").splitlines()]
     assert _record(records, "forward")["result_ref"].startswith(str(gone))
     judgements = check_arm(copy)
-    assert [(item.reading, item.differences) for item in judgements] == [("freeze_gate", []), ("forward", [])]
+    assert [(item.reading, item.differences) for item in judgements] == [
+        ("freeze_registration", []),
+        ("sealed", []),
+        ("forward", []),
+    ]
 
     def elsewhere(records: list[dict]) -> None:
         moved(records)
@@ -96,46 +99,32 @@ def test_a_moved_arm_is_judged_from_where_it_now_lives(arm: Path, tmp_path: Path
 
 
 def test_a_tampered_reading_is_named_and_fails_the_run(arm: Path, tmp_path: Path) -> None:
-    """One bit of a stored probability and a recorded status are enough. The
-    switches a reading written before their retirement states in its
-    thresholds are the one thing dropped before comparing."""
+    """One bit of a stored sealed reading, a registration's verdict and a
+    recorded status are enough."""
 
     def tampered(records: list[dict]) -> None:
-        gate = _record(records, "research_session")["freeze_gate"]
-        dsr = gate["deflated_sharpe"]
-        dsr["deflated_sharpe_probability"] = math.nextafter(dsr["deflated_sharpe_probability"], 0.0)
-        gate["thresholds"]["require_seed_replicates"] = True
+        _record(records, "research_session")["freeze_gate"]["passed"] = False
         forward = _record(records, "forward")
+        reading = forward["sealed"]["slice"]
+        reading["residual_information_ratio"] = math.nextafter(reading["residual_information_ratio"], 0.0)
         forward["verdict"]["status"] = "graduated" if forward["verdict"]["status"] != "graduated" else "discarded"
-        forward["verdict"]["thresholds"]["require_forward_plain_selection"] = True
 
     copy = _copy(arm, tmp_path / "experiments", tampered)
     judgements = {item.reading: item.differences for item in check_arm(copy)}
     assert judgements == {
-        "freeze_gate": ["deflated_sharpe.deflated_sharpe_probability"],
+        "freeze_registration": ["passed"],
+        "sealed": ["residual_information_ratio"],
         "forward": ["verdict.status"],
     }
     assert main(["--experiments", str(copy.parent)]) == 1
 
 
 def test_an_arm_created_under_retired_rules_is_not_judged(arm: Path, tmp_path: Path) -> None:
+    """An arm is judged by the rules it states, whenever it was created: one
+    whose rules name no sealed years is never judged again."""
+
     root = tmp_path / "experiments"
-    earlier = CURRENT_RULES_SINCE.replace(year=CURRENT_RULES_SINCE.year - 1).isoformat()
-    _copy(arm, root, _created_at=earlier)
+    _copy(arm, root, sealed_years=None)
     assert current_arms(root) == []
     assert main(["--experiments", str(root)]) == 0
 
-
-def test_a_terminal_offline_delta_is_rejudged_from_the_record(arm: Path, tmp_path: Path) -> None:
-    """The re-judge reads the declared terminal delta off the research-session
-    record, so a gate stored without it no longer reproduces once the record
-    declares screens."""
-
-    def declared(records: list[dict]) -> None:
-        _record(records, "research_session")["terminal_offline_trials"] = 5
-
-    copy = _copy(arm, tmp_path / "experiments", declared)
-    judgements = {item.reading: item.differences for item in check_arm(copy)}
-    assert judgements["freeze_gate"]
-    assert any("trials" in path for path in judgements["freeze_gate"])
-    assert main(["--experiments", str(copy.parent)]) == 1

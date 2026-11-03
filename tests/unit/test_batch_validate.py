@@ -19,7 +19,6 @@ import math
 import threading
 import unittest
 from collections.abc import Mapping
-from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -46,12 +45,13 @@ from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.replay.engine import BacktestError
 from autotrade.environment.replay.null_control import NullControlSetupError
 from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR
+from autotrade.environment.replay.style import active_analysis
 from autotrade.environment.runtime import (
     agent_trace_path,
     utc_now_iso,
     write_json_atomic,
 )
-from autotrade.environment.sandbox import SandboxConfig, SandboxLimits
+from autotrade.environment.sandbox import SandboxConfig, SandboxSpec
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.environment.tools.base import ToolError, ToolRegistry
@@ -65,8 +65,6 @@ from autotrade.environment.tools.workspace import (
 )
 from autotrade.pipelines.config import (
     DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
-    OFFLINE_TRIALS_PRICING,
-    AcceptanceRules,
     BrokerProfile,
     BudgetUsed,
     EvaluationResult,
@@ -78,11 +76,8 @@ from autotrade.pipelines.config import (
     StrategySchedule,
 )
 from autotrade.pipelines.experiment import (
-    freeze_gate_for,
     null_control_seed,
     research_step_record,
-    trial_family,
-    trial_fields,
     validation_statistics,
 )
 from autotrade.pipelines.ledger import RESEARCH_STAGE, ExperimentLedger
@@ -97,16 +92,18 @@ from autotrade.pipelines.session_tools import (
     EnvironmentBlocked,
     NullControlTool,
     SessionValidations,
-    another_batch_round_fits,
     leg_cards,
     session_budget_status,
 )
 from autotrade.pipelines.verdict import (
     ACTIVE_DAILY_COLUMNS,
     HOLDER_READINGS,
+    _max_slice_drawdown,
     graded_statistics,
-    information_ratio_bar,
+    residual_reading,
+    residual_statistics,
 )
+from tests.unit.acceptance_fixture import REQUIRED_RULES, SEALED_PERIOD
 
 PARENT_SOURCE ="def generate_orders(context):\n    return []\n"
 # A four-year research period, one slot per July-June year.
@@ -238,8 +235,8 @@ class _Evaluator:
             self.calls += 1
             self.requests.append(request)
             self._arrived += 1
-            self.fit_timeouts.append(self.sandbox.limits.fit_timeout_seconds)
-            self.inference_timeouts.append(self.sandbox.limits.timeout_seconds)
+            self.fit_timeouts.append(self.sandbox.fit_timeout_seconds)
+            self.inference_timeouts.append(self.sandbox.timeout_seconds)
             call_index = self.calls
             arrival = self._arrived
             self.active += 1
@@ -312,6 +309,10 @@ def _write_style_sidecar(directory: Path, *, alpha: float, seed: int) -> None:
         "strategy_daily": [[day, float(value)] for day, value in zip(days, strategy)],
         "benchmark_daily": [[day, float(value)] for day, value in zip(days, benchmark)],
         "size_factor_daily": [[day, float(value)] for day, value in zip(days, size)],
+        "value_factor_daily": [
+            [day, float(value)]
+            for day, value in zip(days, np.random.default_rng(seed + 10_000).normal(0.0, 0.003, len(days)))
+        ],
         "panel_daily": [[day, float(value)] for day, value in zip(days, panel)],
     }
     write_json_atomic(directory / "style_analysis.json", sidecar)
@@ -387,7 +388,8 @@ class _Session:
             deadline_grace_seconds=60.0,
             finalize_before_deadline_seconds=30,
             record_failed_attempts=record_failed_attempts,
-            acceptance_rules=dict(acceptance_rules or {"max_drawdown": 0.25}),
+            acceptance_rules={**REQUIRED_RULES, **(acceptance_rules or {"max_drawdown": 0.25})},
+            sealed_period=SEALED_PERIOD,
             budget_used=budget_used or BudgetUsed(),
             steps_before=steps_before,
             resume=resume,
@@ -443,8 +445,7 @@ class _Session:
         self.finish = FinishSessionTool(
             self.tree,
             session_ref=self.backtest.ref_store.get_or_create("session", "research"),
-            freeze_gate=self.backtest.freeze_gate,
-            another_round_fits=lambda: another_batch_round_fits(self.backtest),
+            registration=self.backtest.registration,
             budget_status=lambda: session_budget_status(self.backtest),
         )
 
@@ -475,10 +476,8 @@ class _Session:
         *names: str,
         span: str | None = None,
         controls: tuple[str, ...] = (),
-        offline_trials: int = 0,
     ) -> object:
         arguments: dict[str, object] = {
-            "offline_trials": offline_trials,
             "candidates": [
                 {
                     "name": name,
@@ -581,7 +580,7 @@ class BatchValidateRefusalTest(unittest.TestCase):
             session = _Session(Path(tmp))
             (session.output / "main.py").write_text(_strategy("4"), encoding="utf-8")
             result = session.batch.invoke(
-                {"offline_trials": 0, "candidates": [{"name": "live", "hypothesis": "h", "path": "output", "control": False}]}
+                {"candidates": [{"name": "live", "hypothesis": "h", "path": "output", "control": False}]}
             )
             self.assertTrue(result.ok, result.error)
             row = result.value["candidates"][0]
@@ -589,7 +588,7 @@ class BatchValidateRefusalTest(unittest.TestCase):
             self.assertEqual(node["metadata"]["source_path"], "output")
             with self.assertRaises(ToolError) as caught:
                 session.batch.invoke(
-                    {"offline_trials": 0, "candidates": [{"name": "m", "hypothesis": "h", "path": "models", "control": False}]}
+                    {"candidates": [{"name": "m", "hypothesis": "h", "path": "models", "control": False}]}
                 )
             self.assertIn("reserved workspace root", str(caught.exception))
 
@@ -618,7 +617,6 @@ class BatchValidateRefusalTest(unittest.TestCase):
             with self.assertRaises(ToolError) as caught:
                 session.batch.invoke(
                     {
-                        "offline_trials": 0,
                         "candidates": [
                             {
                                 "name": "one",
@@ -644,7 +642,6 @@ class BatchValidateRefusalTest(unittest.TestCase):
             with self.assertRaises(ToolError) as caught:
                 session.batch.invoke(
                     {
-                        "offline_trials": 0,
                         "candidates": [
                             {"name": "one", "hypothesis": "h", "path": "candidates/a", "control": False},
                             {"name": "two", "hypothesis": "h", "path": "candidates/a", "control": False},
@@ -718,22 +715,23 @@ class BatchValidateSpanTest(unittest.TestCase):
             self.assertEqual((calls[0]["start"], calls[0]["end"]), ("20230701", "20240630"))
 
 
-class FreezeThroughTheGateTest(unittest.TestCase):
-    """The finish tool reads the Pipeline's own gate over the session's Steps."""
+class FreezeThroughTheRegistrationTest(unittest.TestCase):
+    """The finish tool reads the Pipeline's own registration over the session's
+    Steps, and a freeze that registers ends the session whatever it read."""
 
-    def test_the_gate_refuses_a_sub_span_node_and_a_lone_full_span_validation(self) -> None:
+    def test_a_sub_span_node_does_not_register_and_a_lone_full_span_one_does(self) -> None:
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
             year = session.validate_one("year", _strategy("1"), span="Y2")["node_id"]
             with self.assertRaises(ToolError) as sub_span:
                 session.finish.invoke({"outcome": "freeze", "node_id": year})
             self.assertIn("freeze_needs_full_span_validation", str(sub_span.exception))
+            self.assertEqual(sub_span.exception.error_type, "freeze_registration_refused")
+            # One full-span validation is enough: no count of validations, no
+            # score and no other node's reading stands between it and a freeze.
             full = session.validate_one("full", _strategy("22"))["node_id"]
-            with self.assertRaises(ToolError) as lone:
-                session.finish.invoke({"outcome": "freeze", "node_id": full})
-            self.assertIn("freeze_too_few_full_span_validations", str(lone.exception))
-            self.assertIn("full_span_validations=1", str(lone.exception))
-            self.assertEqual(lone.exception.details["passing_nodes"], [])
+            finished = session.finish.invoke({"outcome": "freeze", "node_id": full})
+            self.assertTrue(finished.finish)
 
     def test_a_full_span_winner_among_two_freezes_without_restoring_the_working_copy(
         self,
@@ -748,8 +746,8 @@ class FreezeThroughTheGateTest(unittest.TestCase):
             session.candidate("b", _strategy("2" * 60))
             value = session.call("a", "b").value
             winner = value["candidates"][1]["node_id"]
-            gate = session.backtest.freeze_gate(str(winner))
-            self.assertTrue(gate["passed"], gate)
+            registration = session.backtest.registration(str(winner))
+            self.assertTrue(registration["passed"], registration)
             finished = session.finish.invoke(
                 {
                     "outcome": "freeze",
@@ -759,7 +757,6 @@ class FreezeThroughTheGateTest(unittest.TestCase):
             )
             self.assertTrue(finished.finish)
             self.assertEqual(finished.value["node_id"], winner)
-            self.assertEqual(finished.value["freeze_gate"]["full_span_validations"], 2)
             self.assertEqual(
                 finished.value["revision_id"],
                 str(session.tree.get_node(winner)["revision_id"]),
@@ -770,19 +767,17 @@ class FreezeThroughTheGateTest(unittest.TestCase):
             )
 
 
-class ControlsAndOfflineScreensTest(unittest.TestCase):
-    """The trial family the freeze gate deflates over: a registered control is
-    recorded, costs its replay-years, is no trial and never nominates; declared
-    offline screens are trials, once per batch and cumulative over batches."""
+class ControlsTest(unittest.TestCase):
+    """A registered control is recorded, costs its replay-years and never
+    nominates."""
 
-    def test_a_control_is_recorded_is_no_trial_and_can_never_be_nominated(self) -> None:
+    def test_a_control_is_recorded_and_can_never_be_nominated(self) -> None:
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
             session.evaluator.summary_extra = COSTED
             session.candidate("cand", _strategy("2" * 60))
             session.candidate("c_base", _strategy("1"))
-            value = session.call("cand", "c_base", controls=("c_base",), offline_trials=3).value
-            self.assertEqual(value["offline_trials"], 3)
+            value = session.call("cand", "c_base", controls=("c_base",)).value
             # Charged like any candidate: two candidates x four years.
             self.assertEqual(session.backtest.replay_years_used, 8)
             cand, control = value["candidates"]
@@ -790,150 +785,41 @@ class ControlsAndOfflineScreensTest(unittest.TestCase):
             for row, step in zip(value["candidates"], session.backtest.steps, strict=True):
                 node = session.tree.get_node(str(row["node_id"]))
                 self.assertEqual(node["metadata"]["control"], row["control"])
-                self.assertEqual(node["metadata"]["offline_trials"], 3)
+                self.assertNotIn("offline_trials", node["metadata"])
                 ledger_row = research_step_record(step)
                 self.assertEqual(
-                    (ledger_row["control"], ledger_row["batch_id"], ledger_row["offline_trials"]),
-                    (row["control"], value["batch_id"], 3),
+                    (ledger_row["control"], ledger_row["batch_id"]),
+                    (row["control"], value["batch_id"]),
                 )
-            # M = one non-control revision + three screened offline; the
-            # control still counts toward the full-span validations.
-            statistics = cand["selection_statistics"]
-            self.assertEqual(statistics["trials"], 4)
-            self.assertEqual(statistics["effective_trials"], 4)
-            self.assertEqual(statistics["full_span_validations"], 2)
-            self.assertTrue(statistics["freeze_gate_passed"], statistics)
-            self.assertEqual(
-                control["selection_statistics"]["freeze_gate_reasons"],
-                ["freeze_nominee_is_control"],
-            )
             with self.assertRaises(ToolError) as refused:
                 session.finish.invoke(
                     {"outcome": "freeze", "node_id": control["node_id"], "reason": "x" * 40}
                 )
-            self.assertEqual(refused.exception.error_type, "freeze_gate_refused")
+            self.assertEqual(refused.exception.error_type, "freeze_registration_refused")
             self.assertIn("freeze_nominee_is_control", str(refused.exception))
-            # Rows and refusals name a node by the short handle the tools accept.
+            # Rows name a node by the short handle the tools accept.
             self.assertEqual(cand["handle"], cand["result_name"])
-            self.assertEqual(refused.exception.details["passing_nodes"], [cand["handle"]])
-            # A later batch's screens add to the earlier ones, once per batch
-            # however many candidates it carries.
-            session.candidate("v2", _strategy("3" * 60))
-            session.candidate("v3", _strategy("4" * 60))
-            later = session.call("v2", "v3", offline_trials=2).value["candidates"]
-            gate = session.backtest.freeze_gate(str(later[0]["node_id"]))
-            self.assertEqual(
-                {key: gate["deflated_sharpe"][key] for key in ("host_trials", "offline_trials", "trials", "controls")},
-                {"host_trials": 3, "offline_trials": 5, "trials": 8, "controls": 1},
-            )
-            self.assertEqual(gate["deflated_sharpe"]["trial_correlation_pairs"], 3)
 
-    def test_the_same_bytes_validated_again_are_the_same_trial(self) -> None:
-        """A trial is the bytes, not the revision: the probe-then-full workflow
-        the packs ask for is one search, and a control re-registered as a
-        candidate is counted once, as the candidate it became."""
-
-        with TemporaryDirectory() as tmp:
-            experiment = Path(tmp) / "experiment"
-            session = _Session(Path(tmp), experiment_dir=experiment)
-            # One strategy probed on two years, then run on the full span.
-            session.candidate("a", _strategy("1"))
-            session.call("a", span="Y1..Y2")
-            full = session.call("a").value["candidates"][0]
-            self.assertEqual(full["selection_statistics"]["trials"], 1)
-            # Three different probes, then the winner on the full span: three.
-            for name, marker in (("b", "22"), ("c", "333")):
-                session.candidate(name, _strategy(marker))
-            session.call("a", "b", "c", span="Y1..Y2")
-            winner = session.call("b").value["candidates"][0]
-            dsr = session.backtest.freeze_gate(str(winner["node_id"]))["deflated_sharpe"]
-            self.assertEqual((dsr["host_trials"], dsr["controls"]), (3, 0))
-            # A control registered first and then submitted as a candidate.
-            session.candidate("d", _strategy("4444"))
-            session.call("d", span="Y1..Y2", controls=("d",))
-            self.assertEqual(
-                session.backtest.freeze_gate(str(winner["node_id"]))["deflated_sharpe"]["controls"], 1
-            )
-            again = session.call("d").value["candidates"][0]
-            dsr = session.backtest.freeze_gate(str(again["node_id"]))["deflated_sharpe"]
-            self.assertEqual((dsr["host_trials"], dsr["controls"]), (4, 0))
-            # Eight revisions, four strategies; the Steps a resumed attempt reads
-            # back, which the arm's run facts count, name the same bytes.
-            self.assertEqual(len({step.revision_id for step in session.backtest.steps}), 8)
-            reloaded = load_recorded_steps(experiment)
-            self.assertEqual(
-                [step.fingerprint for step in reloaded],
-                [step.fingerprint for step in session.backtest.steps],
-            )
-            self.assertEqual(trial_family([trial_fields(step) for step in reloaded])["trials"], 4)
-
-    def test_a_declared_screen_is_priced_as_independent_where_it_is_declared(self) -> None:
-        """Each declared screen adds one effective trial and the validated
-        ones keep their measured correlation; the offline_trials parameter
-        states that once."""
-
-        with TemporaryDirectory() as tmp:
-            session = _Session(Path(tmp), acceptance_rules={"max_drawdown": 0.25})
-            told = json.dumps(session.batch.spec.provider_record()).count(OFFLINE_TRIALS_PRICING)
-            self.assertEqual(told, 1)
-            session.candidate("v1", _strategy("2" * 60))
-            session.candidate("v2", _strategy("3" * 60))
-            row = session.call("v1", "v2", offline_trials=3).value["candidates"][0]
-            reading = session.backtest.freeze_gate(str(row["node_id"]))["deflated_sharpe"]
-            rho = reading["trial_correlation"]
-            self.assertEqual(reading["trials"], 5)
-            self.assertAlmostEqual(reading["effective_trials"], rho + (1 - rho) * 2 + 3)
-
-    def test_a_wholly_failed_batch_s_screens_count_once_when_declared_again(self) -> None:
-        """No Step, no declaration: the next batch repeats it and M holds it once."""
-
-        with TemporaryDirectory() as tmp:
-            session = _Session(Path(tmp), strategy_fail_markers=("9" * 5,))
-            session.candidate("bad", _strategy("9" * 5))
-            with self.assertRaises(ToolError) as caught:
-                session.call("bad", offline_trials=5)
-            self.assertIs(caught.exception.details["offline_trials_recorded"], False)
-            self.assertEqual(session.backtest.steps, [])
-            session.candidate("good", _strategy("2" * 60))
-            row = session.call("good", offline_trials=5).value["candidates"][0]
-            dsr = session.backtest.freeze_gate(str(row["node_id"]))["deflated_sharpe"]
-            self.assertEqual(
-                (dsr["host_trials"], dsr["offline_trials"], dsr["trials"]), (1, 5, 6)
-            )
-            self.assertEqual(row["selection_statistics"]["trials"], 6)
-
-    def test_an_undeclared_or_malformed_registration_is_refused_before_anything_runs(
+    def test_a_registration_without_its_control_flag_is_refused_before_anything_runs(
         self,
     ) -> None:
         schema = BatchValidateTool.spec.input_schema
-        self.assertIn("offline_trials", schema["required"])
-        # A configuration screened offline and then submitted counts once, as
-        # the host trial it becomes. The parameter is its one definition.
-        self.assertIn("does NOT submit", schema["properties"]["offline_trials"]["description"])
-        self.assertIn("offline_trials, defined by its parameter", BatchValidateTool.spec.description)
-        self.assertNotIn("does NOT submit", BatchValidateTool.spec.description)
+        # Offline screens are no longer declared: nothing in the schema asks.
+        self.assertNotIn("offline_trials", schema["properties"])
+        self.assertEqual(schema["required"], ["candidates"])
         self.assertIn("control", schema["properties"]["candidates"]["items"]["required"])
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
             session.candidate("a", _strategy("5"))
             candidate = {"name": "a", "hypothesis": "h", "path": "candidates/a"}
-            for arguments, target in (
-                ({"candidates": [{**candidate, "control": False}]}, "offline_trials"),
-                ({"offline_trials": -1, "candidates": [{**candidate, "control": False}]}, "offline_trials"),
-                ({"offline_trials": True, "candidates": [{**candidate, "control": False}]}, "offline_trials"),
-                ({"offline_trials": 1.5, "candidates": [{**candidate, "control": False}]}, "offline_trials"),
-                ({"offline_trials": 0, "candidates": [candidate]}, "control"),
-                ({"offline_trials": 0, "candidates": [{**candidate, "control": "no"}]}, "control"),
+            for arguments in (
+                {"candidates": [candidate]},
+                {"candidates": [{**candidate, "control": "no"}]},
             ):
                 with self.assertRaises(ToolError) as caught:
                     session.batch.invoke(arguments)
                 self.assertEqual(caught.exception.error_type, "schema_error")
-                self.assertEqual(caught.exception.blocked_target, target)
-            with self.assertRaises(ToolError) as typo:
-                session.batch.invoke(
-                    {"offline_trials": 10_001, "candidates": [{**candidate, "control": False}]}
-                )
-            self.assertIn("screened offline", str(typo.exception))
+                self.assertEqual(caught.exception.blocked_target, "control")
             self.assertEqual(session.backtest.replay_years_used, 0)
             self.assertEqual(session.evaluator.calls, 0)
 
@@ -979,7 +865,7 @@ class BatchValidateRunTest(unittest.TestCase):
         them stays on the calling thread. The width is the arm's own
         ``batch_validate_max_concurrency``, and both strategy deadlines scale
         with exactly the width it produced."""
-        fit_base = SandboxConfig().limits.fit_timeout_seconds
+        fit_base = SandboxConfig().fit_timeout_seconds
         for width in (DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY, 5):
             with self.subTest(width=width), TemporaryDirectory() as tmp:
                 self._replay_full_width(Path(tmp), width, fit_base)
@@ -1034,9 +920,9 @@ class BatchValidateRunTest(unittest.TestCase):
         lifetime.
         """
 
-        limits = SandboxConfig().limits
-        fit_base = limits.fit_timeout_seconds
-        inference_base = limits.timeout_seconds
+        config = SandboxConfig()
+        fit_base = config.fit_timeout_seconds
+        inference_base = config.timeout_seconds
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
             # A one-candidate round: nothing else is running, so nothing is scaled.
@@ -1061,10 +947,10 @@ class BatchValidateRunTest(unittest.TestCase):
                 # Restored the moment the pool is done, so the next serial
                 # replay is not evaluated against a widened clock.
                 self.assertEqual(
-                    session.evaluator.sandbox.limits.fit_timeout_seconds, fit_base
+                    session.evaluator.sandbox.fit_timeout_seconds, fit_base
                 )
                 self.assertEqual(
-                    session.evaluator.sandbox.limits.timeout_seconds, inference_base
+                    session.evaluator.sandbox.timeout_seconds, inference_base
                 )
             # Everything else about the boundary is untouched.
             self.assertEqual(session.evaluator.sandbox, SandboxConfig())
@@ -1200,14 +1086,9 @@ class BatchValidateRunTest(unittest.TestCase):
             session.candidate("a", _strategy("1"))
             session.candidate("b", _strategy("2"))
             with self.assertRaises(ToolError) as caught:
-                session.call("a", "b", offline_trials=3)
+                session.call("a", "b")
             error = caught.exception
             self.assertIn("all 2 candidates failed", str(error))
-            # The declaration rides on recorded Validations, and there are
-            # none: the refusal says it was not counted and must be repeated.
-            self.assertIs(error.details["offline_trials_recorded"], False)
-            self.assertIn("offline_trials=3 was not counted", str(error))
-            self.assertIn("again in the next batch", str(error))
             rows = error.details["candidates"]
             self.assertEqual([row["status"] for row in rows], ["failed", "failed"])
             # Honest accounting: both strategies raised, so the replays measured
@@ -1297,7 +1178,7 @@ class BatchValidateRunTest(unittest.TestCase):
         only the siblings that ran on its own card."""
 
         note = "of this batch replayed on the same GPU while this candidate ran"
-        cards = SandboxConfig(limits=SandboxLimits(gpu_count=2, gpu_devices=(1, 4)))
+        cards = SandboxConfig(spec=SandboxSpec(gpu=(1, 4), gpu_count=2))
 
         def card_of(session: _Session) -> dict[str, tuple[int, ...] | None]:
             return {
@@ -1348,10 +1229,10 @@ class BatchValidateRunTest(unittest.TestCase):
         self.assertEqual(leg_cards((1, 4), 2), [1, 4])
         self.assertEqual(leg_cards((1, 4), 3), [1, 4, 1])
         self.assertEqual(leg_cards((), 3), [])
-        config = SandboxConfig(limits=SandboxLimits(gpu_count=2, gpu_devices=(1, 4)))
+        config = SandboxConfig(spec=SandboxSpec(gpu=(1, 4), gpu_count=2))
         self.assertIs(config.on_devices(None), config)
-        leg = config.on_devices((4,)).limits
-        self.assertEqual((leg.gpu_count, leg.gpu_devices), (1, (4,)))
+        leg = config.on_devices((4,)).spec
+        self.assertEqual((leg.gpu_count, leg.gpu), (1, (4,)))
 
     def test_a_timeout_gives_its_replay_years_back(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1705,133 +1586,40 @@ class BatchValidateRunTest(unittest.TestCase):
                 record = json.loads(attachment.read_text(encoding="utf-8"))
                 self.assertIn("sub_windows", record["stats"])
 
-    def test_each_row_carries_the_provisional_freeze_gate_over_the_arm(
+    def test_each_row_carries_the_sealed_statistic_on_its_span_and_no_verdict(
         self,
     ) -> None:
-        """Every revision the arm has validated so far is the trial pool, the
-        whole batch included, so the rows of one round are gated against the
-        same N and say how many that was."""
+        """A row reads the sealed gate's statistic over its own visible span --
+        the residual IR, the three betas and the bar for that span's length --
+        and nothing that passes or fails: no gate field, no trial count, no
+        bar from other rows."""
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
-            first = session.validate_one("first", _strategy("333"))
-            statistics = first["selection_statistics"]
-            self.assertEqual(statistics["trials"], 1)
-            self.assertEqual(statistics["full_span_validations"], 1)
-            self.assertFalse(statistics["freeze_gate_passed"])
-            self.assertIn(
-                "freeze_too_few_full_span_validations", statistics["freeze_gate_reasons"]
-            )
-            session.candidate("a", _strategy("1"))
-            session.candidate("b", _strategy("22"))
-            value = session.call("a", "b").value
-            for row in value["candidates"]:
-                statistics = row["selection_statistics"]
-                self.assertEqual(statistics["trials"], 3)
-                self.assertEqual(statistics["full_span_validations"], 3)
-                self.assertTrue(0.0 <= statistics["deflated_sharpe_probability"] <= 1.0)
-                self.assertIn("the freeze recomputes it", statistics["note"])
+            full = session.validate_one("full", _strategy("333"))
+            year = session.validate_one("year", _strategy("4"), span="Y2")
+            for row in (full, year):
+                reading = row["residual_reading"]
+                sidecar = json.loads(
+                    (
+                        Path(session.backtest.steps[-1 if row is year else 0].validation.result_ref).parent
+                        / "style_analysis.json"
+                    ).read_text(encoding="utf-8")
+                )
+                expected = residual_reading(sidecar, alpha=REQUIRED_RULES["alpha"])
+                for key in (
+                    "residual_information_ratio",
+                    "market_beta",
+                    "size_beta",
+                    "value_beta",
+                    "bar",
+                    "years",
+                ):
+                    self.assertAlmostEqual(reading[key], expected[key], places=6, msg=key)
+                self.assertIn("not a verdict", reading["note"])
+                flat = json.dumps(row)
+                for word in ("passed", "freeze_gate", "trials", "selection_statistics", "deflated"):
+                    self.assertNotIn(word, flat)
                 self.assertNotIn("vs_parent", row)
-
-    def test_every_row_shows_the_bar_a_full_span_nominee_faces_now(self) -> None:
-        """A sub-span row and a full-span row a hard rule refuses carry no
-        measured DSR, yet each shows the full-span bar, labelled as such: before
-        any full-span validation at the research period's nominal length, then
-        exactly the bar the gate applies to a full-span nominee."""
-
-        with TemporaryDirectory() as tmp:
-            session = _Session(Path(tmp))
-            session.candidate("a", _strategy("1"))
-            session.candidate("b", _strategy("22"))
-            for row in session.call("a", "b", span="Y1..Y2").value["candidates"]:
-                statistics = row["selection_statistics"]
-                self.assertIn("freeze_needs_full_span_validation", statistics["freeze_gate_reasons"])
-                self.assertIsNone(statistics["deflated_sharpe_probability"])
-                self.assertEqual(statistics["trials"], 2)
-                self.assertEqual(
-                    statistics["information_ratio_bar"],
-                    information_ratio_bar(
-                        statistics["effective_trials"],
-                        TRADING_DAYS_PER_YEAR * len(YEARS),
-                        AcceptanceRules().min_dsr_probability,
-                    ),
-                )
-                self.assertIn("FULL-SPAN bar", statistics["note"])
-                self.assertIn("cannot be nominated as it is", statistics["note"])
-            # The equity drawdown breaks the run's limit on every full span.
-            relaxed = session.backtest.request
-            session.backtest.request = replace(relaxed, acceptance_rules={"max_drawdown": 0.01})
-            session.candidate("c", _strategy("333"))
-            refused = session.call("a", "c").value["candidates"]
-            session.candidate("d", _strategy("4444"))
-            probe = session.call("d", span="Y3").value["candidates"][0]
-            session.backtest.request = relaxed
-            applied = session.backtest.freeze_gate(str(refused[0]["node_id"]))["deflated_sharpe"]
-            for row in (*refused, probe):
-                statistics = row["selection_statistics"]
-                self.assertIsNone(statistics["deflated_sharpe_probability"])
-                self.assertIn("FULL-SPAN bar", statistics["note"])
-            for row in refused:
-                self.assertIn("max_drawdown_above_limit", row["selection_statistics"]["freeze_gate_reasons"])
-                self.assertEqual(row["selection_statistics"]["trials"], 3)
-            # Four strategies now, over the days a full span measured: the
-            # bar the gate applies to a full-span nominee, to the bit.
-            self.assertEqual(
-                {key: probe["selection_statistics"][key] for key in ("trials", "effective_trials", "information_ratio_bar")},
-                {key: applied[key] for key in ("trials", "effective_trials", "information_ratio_bar")},
-            )
-
-    def test_a_full_span_row_reads_the_graduation_activity_beside_its_lines(
-        self,
-    ) -> None:
-        """A frozen arm that traded 0.86 round trips a month over research then
-        failed the forward floor of one a month: the session could not see that
-        margin. A full-span row now reads the forward slice's activity
-        conditions on its own replay -- realised exits per calendar month, mean
-        gross exposure -- beside the arm's thresholds, and gates nothing."""
-        with TemporaryDirectory() as tmp:
-            session = _Session(Path(tmp))
-            full = session.validate_one("full", _strategy("1"))
-            statistics = full["selection_statistics"]
-            activity = statistics["graduation_activity"]
-            rules = AcceptanceRules()
-            # The fixture's replay books 3 realised exits over four research years.
-            self.assertEqual(activity["round_trips"], 3)
-            self.assertEqual(activity["round_trips_per_month"], round(3 / 48, 3))
-            self.assertEqual(
-                activity["min_round_trips_per_month"], rules.min_round_trips_per_month
-            )
-            self.assertEqual(activity["min_mean_gross"], rules.min_mean_gross)
-            # The fixture reports no exposure block: unmeasured, not zero.
-            self.assertIsNone(activity["mean_gross"])
-            # What the block is for is said once, in the description, not on
-            # every row.
-            self.assertNotIn("note", activity)
-            self.assertIn(
-                "graduation_activity: the row's own round trips per month and "
-                "mean gross exposure, which the freeze gate does not read",
-                BatchValidateTool.spec.description,
-            )
-            # Far below the floor, yet no gate reason speaks of activity.
-            self.assertFalse(
-                any(
-                    "round_trip" in reason or "gross" in reason
-                    for reason in statistics["freeze_gate_reasons"]
-                )
-            )
-            # The mean gross is the replay's own exposure.avg_gross.
-            step = session.backtest.steps[0]
-            exposed = replace(
-                step,
-                validation=replace(
-                    step.validation,
-                    summary={**step.validation.summary, "exposure": {"avg_gross": 0.90586}},
-                ),
-            )
-            self.assertEqual(session.backtest.graduation_activity(exposed)["mean_gross"], 0.906)
-            # A sub-span row reads the same conditions over its own months.
-            year = session.validate_one("year", _strategy("2"), span="Y1")
-            probe = year["selection_statistics"]["graduation_activity"]
-            self.assertEqual(probe["round_trips_per_month"], round(3 / 12, 3))
 
     def test_every_row_reads_the_holders_money_and_the_graduations_cost_stress(
         self,
@@ -1880,19 +1668,13 @@ class BatchValidateRunTest(unittest.TestCase):
                 self.assertAlmostEqual(raw[name], expected, places=6, msg=name)
             statistics = graded_statistics(sidecar)
             years = statistics["days"] / TRADING_DAYS_PER_YEAR
-            activity = row["selection_statistics"]["graduation_activity"]
+            reading = row["residual_reading"]
             self.assertAlmostEqual(
-                activity["active_excess_at_cost_stress"],
+                reading["active_excess_at_cost_stress"],
                 statistics["plain_excess"] - 2.0 * 5.0 * 1.2 * 1e-4 / years,
                 places=6,
             )
-            self.assertEqual(activity["cost_stress_multiplier"], 3.0)
-            # The freeze gate judges that same reading of a full-span nominee.
-            self.assertEqual(
-                "freeze_not_positive_at_cost_stress"
-                in row["selection_statistics"]["freeze_gate_reasons"],
-                activity["active_excess_at_cost_stress"] <= 0,
-            )
+            self.assertEqual(reading["cost_stress_multiplier"], 3.0)
             # The book's market loading against its own panel is the active
             # series' regression coefficient, a diagnostic beside it.
             self.assertAlmostEqual(
@@ -1918,17 +1700,14 @@ class BatchValidateRunTest(unittest.TestCase):
             self.assertEqual(
                 list(probe["raw_readings"]), [*HOLDER_READINGS, "active_market_beta"]
             )
-            self.assertIn(
-                "active_excess_at_cost_stress",
-                probe["selection_statistics"]["graduation_activity"],
-            )
+            self.assertIn("active_excess_at_cost_stress", probe["residual_reading"])
             # A row's year carries the benchmark and the panel beside its return.
             self.assertTrue(
                 {"return", "benchmark_return", "panel_return"}
                 <= set(row["stats"]["sub_windows"][0])
             )
 
-    def test_the_cost_stress_names_a_row_whose_active_excess_it_erases(self) -> None:
+    def test_the_cost_stress_is_read_on_every_row_and_never_refuses_a_freeze(self) -> None:
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp), acceptance_rules={"max_drawdown": 0.25})
             # The same edge, traded a hundred thousand times as much: the
@@ -1937,25 +1716,11 @@ class BatchValidateRunTest(unittest.TestCase):
             below = session.validate_one("below", _strategy("1"))
             session.evaluator.summary_extra = COSTED
             above = session.validate_one("above", _strategy("2"))
-            token = "freeze_not_positive_at_cost_stress"
-            self.assertIn(token, below["selection_statistics"]["freeze_gate_reasons"])
-            self.assertNotIn(token, above["selection_statistics"]["freeze_gate_reasons"])
-            stressed = below["selection_statistics"]["graduation_activity"]["active_excess_at_cost_stress"]
-            self.assertLess(stressed, 0)
-            # The gate still measured the refused row: its DSR is on the row.
-            self.assertIsNotNone(below["selection_statistics"]["deflated_sharpe_probability"])
-            # A nomination is refused naming the condition and its reading.
-            with self.assertRaises(ToolError) as refused:
-                session.finish.invoke(
-                    {"outcome": "freeze", "node_id": below["node_id"], "reason": "x" * 40}
-                )
-            self.assertEqual(refused.exception.error_type, "freeze_gate_refused")
-            self.assertIn(token, str(refused.exception))
-            gate = session.backtest.freeze_gate(str(below["node_id"]))
-            self.assertAlmostEqual(gate["excess_at_cost_stress"], stressed, places=6)
-            self.assertIn(
-                f"excess_at_cost_stress={gate['excess_at_cost_stress']:.4g}", str(refused.exception)
-            )
+            self.assertLess(below["residual_reading"]["active_excess_at_cost_stress"], 0)
+            self.assertGreater(above["residual_reading"]["active_excess_at_cost_stress"], 0)
+            # A reading, not a condition: the node registers and freezes.
+            finished = session.finish.invoke({"outcome": "freeze", "node_id": below["node_id"]})
+            self.assertTrue(finished.finish)
 
     def test_a_row_that_repeats_earlier_bytes_on_the_same_span_names_them(self) -> None:
         """A session spent 8 replay-years re-running the bytes of a node it
@@ -1989,7 +1754,6 @@ class BatchValidateRunTest(unittest.TestCase):
                     "run_id",
                     "parent_node_id",
                     "span",
-                    "offline_trials",
                     "complete_validations",
                     "failed",
                     "replay_years_used",
@@ -2117,19 +1881,28 @@ class DailySeriesTest(unittest.TestCase):
                     validation_statistics(result_ref)["information_ratio"],
                     delta=1e-6,
                 )
-            # The full-span candidate is what the gate measures: the session
-            # reads its IR off the row and the gate holds its drawdown.
+            # The full-span candidate: the file reproduces the active
+            # drawdown the verdict holds to its limit, and the residual
+            # reading off the series and the three legs beside it.
             [edge] = [row for row in full["candidates"] if row["name"] == "edge"]
             frame = pd.read_csv(session.tree.root / edge["node_id"] / edge["daily_series"])
-            self.assertAlmostEqual(
-                _annualized_ir(frame["active_return"]),
-                edge["selection_statistics"]["information_ratio"],
-                delta=1e-6,
+            sidecar = json.loads(
+                (Path(steps[edge["node_id"]].validation.result_ref).parent / "style_analysis.json")
+                .read_text(encoding="utf-8")
             )
-            gate = session.backtest.freeze_gate(edge["node_id"])
-            self.assertGreater(gate["active_max_drawdown"], 0.0)
+            drawdown = _max_slice_drawdown(active_analysis(sidecar), "", "")
+            self.assertGreater(drawdown, 0.0)
+            self.assertAlmostEqual(frame["active_drawdown"].max(), drawdown, delta=1e-9)
+            legs = frame[["benchmark_return", "size_factor_return", "value_factor_return"]].dropna()
+            kept = frame.loc[legs.index, "active_return"]
+            reading = residual_statistics(
+                kept, legs["benchmark_return"], legs["size_factor_return"], legs["value_factor_return"],
+                alpha=REQUIRED_RULES["alpha"],
+            )
             self.assertAlmostEqual(
-                frame["active_drawdown"].max(), gate["active_max_drawdown"], delta=1e-9
+                reading["residual_information_ratio"],
+                edge["residual_reading"]["residual_information_ratio"],
+                places=5,
             )
             equity = 1.0 + frame["active_cumulative"]
             np.testing.assert_allclose(
@@ -2407,7 +2180,6 @@ class RepeatedRejectionTest(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             session = self._readonly_loop(tmp)
             reserved = {
-                "offline_trials": 0,
                 "candidates": [
                     {"name": "a", "hypothesis": "h", "path": "candidates/a", "control": False},
                     {"name": "live", "hypothesis": "h", "path": "models", "control": False},
@@ -2573,56 +2345,6 @@ class NullControlToolTest(unittest.TestCase):
         self.assertNotIn(name, _VALIDATION_TOOLS)
 
 
-class AnotherRoundFitsTest(unittest.TestCase):
-    """``another_batch_round_fits`` waives the early-freeze reason: true while
-    the session could still run one more round, false once the replay-year
-    budget or the deadline window rules one out."""
-
-    def _no_edge(self, session: _Session) -> object:
-        return session.finish.invoke(
-            {
-                "outcome": "no_edge",
-                "reason": "one round resolved the pre-registered hypotheses of this session",
-            }
-        )
-
-    def test_a_round_still_fits_while_budget_and_time_allow(self) -> None:
-        with TemporaryDirectory() as tmp:
-            session = _Session(Path(tmp), max_replay_years=24)
-            session.candidate("a", _strategy("1"))
-            session.candidate("b", _strategy("22"))
-            session.call("a", "b")
-            self.assertTrue(another_batch_round_fits(session.backtest))
-            # One completed round is a legal finish: no round floor remains.
-            self.assertTrue(self._no_edge(session).finish)
-
-    def test_no_round_fits_when_the_budget_cannot_hold_another(self) -> None:
-        with TemporaryDirectory() as tmp:
-            # Eight replay-years: one two-candidate full-period round leaves
-            # nothing for even a one-candidate, one-year round.
-            session = _Session(Path(tmp), max_replay_years=8)
-            session.candidate("a", _strategy("1"))
-            session.candidate("b", _strategy("22"))
-            session.call("a", "b")
-            self.assertFalse(another_batch_round_fits(session.backtest))
-            self.assertTrue(self._no_edge(session).finish)
-
-    def test_no_round_fits_inside_the_deadline_window(self) -> None:
-        with TemporaryDirectory() as tmp:
-            # 80 s of budget minus the 60 s grace leaves 20 s before the main
-            # deadline, inside the 30 s finalize reserve.
-            session = _Session(Path(tmp), deadline_seconds=80.0)
-            session.candidate("a", _strategy("1"))
-            session.candidate("b", _strategy("22"))
-            session.call("a", "b")
-            self.assertFalse(another_batch_round_fits(session.backtest))
-            self.assertTrue(self._no_edge(session).finish)
-
-
-if __name__ == "__main__":
-    unittest.main()
-
-
 class RecordedValidationDurabilityTest(unittest.TestCase):
     """Every recorded Validation is made durable at once: the experiment's
     tree carries the node, a host-only sidecar carries what the Pipeline needs
@@ -2648,52 +2370,3 @@ class RecordedValidationDurabilityTest(unittest.TestCase):
             self.assertTrue(all(Path(step.validation.result_ref).is_file() for step in steps))
             # Host-only: the sidecars sit beside the run markers, never in a mount.
             self.assertTrue((experiment / ".host" / "steps").is_dir())
-
-    def test_a_validation_recorded_before_the_registration_reads_as_undeclared(self) -> None:
-        """Sidecars and ledger rows written before candidates registered
-        controls and batches declared offline screens still parse: no control,
-        no screens, and the gate's record says how many rows declared none."""
-
-        with TemporaryDirectory() as tmp:
-            experiment = Path(tmp) / "experiment"
-            session = _Session(Path(tmp), experiment_dir=experiment)
-            session.candidate("a", _strategy("2" * 60))
-            session.candidate("b", _strategy("22"))
-            session.call("a", "b", controls=("b",), offline_trials=4)
-            steps = load_recorded_steps(experiment)
-            self.assertEqual([(step.control, step.offline_trials) for step in steps], [(False, 4), (True, 4)])
-            sidecar = experiment / ".host" / "steps" / f"{steps[1].step_id}.json"
-            old = json.loads(sidecar.read_text(encoding="utf-8"))
-            for key in ("control", "batch_id", "offline_trials"):
-                old.pop(key)
-            write_json_atomic(sidecar, old)
-            rows = [research_step_record(step) for step in load_recorded_steps(experiment)]
-            self.assertEqual(
-                [(row["control"], row["batch_id"], row["offline_trials"]) for row in rows[1:]],
-                [(False, None, None)],
-            )
-            # The formerly flagged leg is a trial again; the declared batch
-            # still counts its screens once.
-            gate = freeze_gate_for(
-                [], rows, rows[0], experiment_dir=experiment, acceptance=AcceptanceRules()
-            )
-            dsr = gate["deflated_sharpe"]
-            self.assertEqual(
-                (dsr["host_trials"], dsr["offline_trials"], dsr["trials"], dsr["controls"]),
-                (2, 4, 6, 0),
-            )
-            self.assertEqual(dsr["undeclared_offline_validations"], 1)
-            # An old ledger row carries none of the keys at all; its bytes are
-            # read off the arm's revision manifests.
-            legacy = [
-                {
-                    key: value
-                    for key, value in row.items()
-                    if key not in ("fingerprint", "control", "batch_id", "offline_trials")
-                }
-                for row in rows
-            ]
-            dsr = freeze_gate_for(
-                [], legacy, legacy[0], experiment_dir=experiment, acceptance=AcceptanceRules()
-            )["deflated_sharpe"]
-            self.assertEqual((dsr["trials"], dsr["undeclared_offline_validations"]), (2, 2))

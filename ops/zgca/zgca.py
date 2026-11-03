@@ -14,7 +14,7 @@ minute datasets its configuration does not read), prunes code the tree no
 longer tracks, prepares the instance (ripgrep, venv, a sandbox image that runs
 on the instance's GPU driver), and last copies the pretrained-model store every
 new arm pins and mounts to the instance's own disk, or refuses when it does
-not fit there; push carries arms of this host a round names as lineage; a run
+not fit there; push carries ended arms of this host to the instance; a run
 starts the console (restarting it onto the deployed checkout when no arm
 runs) and a round launcher in tmux with AUTOTRADE_GPU_NAME set,
 and repeats a `--fill` launcher every ten minutes in a session of its own
@@ -417,7 +417,7 @@ class Workflow:
         say("deploy: done")
 
     def push(self, arms: Sequence[str]) -> None:
-        """Copy arms of this host to the instance, where an arm naming them as lineage is created."""
+        """Copy ended arms of this host to the instance."""
         # The console's own notion of a running arm; its module needs the project's environment (numpy).
         _with_project_src()
         from autotrade.pipelines.hitl_state import running_arms
@@ -496,7 +496,7 @@ def main(
     commands.add_parser("up", help="instance start: wait for RUNNING and SSH")
     deploy = commands.add_parser("deploy", help="copy code, the model gateway keys, a seed and its release; prepare ripgrep, venv, image; copy the pretrained store")
     deploy.add_argument("seed", help="PIT view seed directory, relative to the repository (data/pit_views_seed_...)")
-    push = commands.add_parser("push", help="copy arms of this host to the instance (lineage of an arm created there)")
+    push = commands.add_parser("push", help="copy ended arms of this host to the instance")
     push.add_argument("arms", nargs="+", metavar="arm", help="experiment id")
     run = commands.add_parser("run", help="start the console, or restart it when no arm runs, then a round launcher in tmux; --fill repeats it until nothing is pending")
     run.add_argument("round_file", help="scripts/experiments/create_round_*.py")

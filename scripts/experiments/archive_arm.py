@@ -34,7 +34,7 @@ from _bootstrap import add_repo_src
 
 add_repo_src(__file__)
 
-from autotrade.environment.runtime import write_json_atomic
+from autotrade.common.records import write_json_atomic
 from autotrade.paper.books import PAPER_STATE_DIR, experiment_books
 from autotrade.pipelines.hitl_state import ARCHIVED_NAME, HITL_DIR_NAME
 from autotrade.pipelines.ledger import experiment_verdict

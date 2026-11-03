@@ -203,7 +203,8 @@ def test_the_prompt_states_the_research_session_contract() -> None:
     # later sealed data; adaptation lives inside the artifact.
     for clause in (
         "这个研究实验只有这一个研究会话",
-        "前推期与 Held-out 上被连续回测一次并裁决",
+        "只看定版产物在会话看不到的封存研究年上被宿主读的那一次",
+        "之后它还会在研究期之后的前推期与 Held-out 上被连续回测，读数只报告",
         "滚动重拟合",
         "用多长的历史、多快的节奏由策略自己决定",
         # The direction binds what is researched, not how: a pack's advice on
@@ -224,34 +225,38 @@ def test_the_prompt_states_the_research_session_contract() -> None:
         "之后没有别的会话接手",
         '`span="full"`',
         "`deadline`",
-        "一个实验至多定版一次",
-        # Which conditions bind is the acceptance_rules fact alone.
-        "只看运行事实 `acceptance_rules`",
-        "`freeze_gate` 是 `finish_session` 提名时执行的定版检验",
+        "一个实验只定版一次",
+        "会话随即结束",
+        # Which conditions bind is the sealed gate section and the
+        # acceptance_rules fact alone.
+        "「封存检验」与运行事实 `acceptance_rules`",
+        "`freeze_registration` 是 `finish_session` 提名时只做的登记检查",
         "`graded_series` 定义的主动序列",
         "没列出的条件本实验没有",
-        "`selection_statistics.information_ratio_bar`",
-        # Screening saves replay years, not trials, and has one home.
-        "包括 `source_refs.signal_screen_ref` 的筛选脚本",
-        "按 `offline_trials` 如实申报",
+        "登记不看业绩",
         "种子的写法见 `output/README.md`",
         # Only a package with randomness owes seed replicates; one without is
         # nominated deterministic, which the ledger keeps for the operator.
         "策略包含随机性（训练、采样）的提名要带种子复现",
         "完全不含随机性的包以 `deterministic` 提名，不需要种子复现",
         "这一声明记入账本，供运营者在上线前终审",
-        # A node that fails only the deflation is a deliverable by incubation,
-        # and a no_edge names it first.
-        "却仍是本实验的交付",
-        "`freeze_deflated_sharpe_below_threshold`",
-        "运营者可以把它转入模拟观察，在 Paper 上裁决",
-        "多搜索不会让这个交付变远",
-        "以 `no_edge` 结束时，`reason` 先点名这样的节点",
+        # Budget use is observed, never an objective.
+        "研究里用多少回测年、跑多少候选，只是记录，不进验收",
     ):
         assert clause in contract, clause
-    # The hard finalization replaces the system prompt, so it carries the
-    # incubation naming rule itself.
-    assert "freeze_deflated_sharpe_below_threshold" in prompts.HARD_FINALIZATION_SYSTEM_PROMPT
+    # Nothing of the retired deflation, its trial count or its incubation
+    # route survives anywhere the session reads.
+    for retired in (
+        "offline_trials",
+        "information_ratio_bar",
+        "selection_statistics",
+        "去膨胀",
+        "试验数",
+        "passes_freeze_gate",
+        "模拟观察",
+    ):
+        for surface in (prompt, prompts.HARD_FINALIZATION_SYSTEM_PROMPT, prompts.WRAP_UP_PROMPT):
+            assert retired not in surface, retired
     # How to research is the Agent's own call, which a reference pack may
     # suggest: the stable prompt carries no research protocol, evidence
     # recipe, process quota, delegation style or compute advice, and none of
@@ -298,12 +303,10 @@ def test_the_prompt_states_the_research_session_contract() -> None:
     from autotrade.environment.tools.finish_session import FinishSessionTool
     from autotrade.pipelines.session_tools import BatchValidateTool
 
-    offline = BatchValidateTool.spec.input_schema["properties"]["offline_trials"]
-    assert "does NOT submit" in offline["description"]
+    assert "offline_trials" not in BatchValidateTool.spec.input_schema["properties"]
     assert "**没有**提交" not in stable and "不重复申报" not in stable
-    # The early-finish account is enforced by finish_session and stated in its
-    # description; the prompt does not restate it.
-    assert "more than a third" in FinishSessionTool.spec.description
+    # Budget use is observed: no tool asks for an account of an early finish.
+    assert "more than a third" not in FinishSessionTool.spec.description
     assert "三分之一" not in prompt
     # Round 20260927 wrote 296 skills, most re-deriving one data contract,
     # because every finishing text asked for them first; none does now.
@@ -357,7 +360,7 @@ FIGURE = re.compile(r"\d+\.\d+|\d\s*%")
 # The row blocks the host builds; a path the contract names under them must
 # exist on a real row, so a renamed field cannot leave the contract pointing
 # at nothing (``raw_readings.last_two_years.return`` did).
-ROW_BLOCKS = ("selection_statistics", "raw_readings")
+ROW_BLOCKS = ("residual_reading", "raw_readings")
 
 
 def _contract_texts() -> dict[str, str]:
@@ -400,3 +403,56 @@ def test_the_contract_quotes_no_forward_figure_and_names_only_real_row_fields() 
         for key in path.split("."):
             assert isinstance(node, dict) and key in node, path
             node = node[key]
+
+
+def test_the_sealed_gate_is_stated_with_this_runs_years_and_numbers() -> None:
+    """The rule paragraph tells the session, concretely: which years it sees
+    and which are sealed, the statistic, the bar as a number for the sealed
+    span (and for one year), that validation shows the same statistic on
+    visible spans, that one freeze ends the session and that there is no
+    second reading. Its numbers are the facts' own."""
+
+    from autotrade.pipelines.calendar import ResearchGeometry
+    from autotrade.pipelines.config import AcceptanceRules
+    from autotrade.pipelines.research_session import research_geometry_record
+
+    geometry = ResearchGeometry("20150801", "20250731", "20260731", "20261031")
+    rules = AcceptanceRules(alpha=0.05, sealed_years=5, ablation_required=False)
+    visible, sealed = geometry.split_sealed(rules.sealed_years)
+    facts = {
+        "research_geometry": research_geometry_record(
+            visible,
+            window_months=132,
+            decision_time=sealed[0].anchor.isoformat(),
+            sealed=(sealed[0].start, sealed[-1].end),
+        ),
+        "artifact_contract": {"acceptance_rules": rules.agent_facts()},
+    }
+    prompt = prompts.build_system_prompt(experiment_facts=facts)
+    section = prompt[prompt.index("## 封存检验") :]
+    for clause in (
+        "会话只看得到前 5 个研究年 20150801..20200731",
+        "之后的 5 个研究年 20200801..20250731 被封存",
+        "对市场（`benchmark_index` 收益）、规模与价值三条因子腿做 OLS 后的残差信息比率",
+        "截距 × √244 ÷ 残差标准差",
+        "α = 0.05",
+        "封存的 5 年约 0.736",
+        "一年区间约 1.645",
+        "`batch_validate` 在每个可见区间上报告同一个统计量（`residual_reading`）",
+        "一次 `freeze` 即结束会话",
+        "会话拿不到封存读数，也没有第二次读取",
+    ):
+        assert clause in section, clause
+    gate = facts["artifact_contract"]["acceptance_rules"]["sealed_gate"]
+    assert (gate["alpha"], gate["sealed_years"], gate["bar_over_sealed_years"]) == (0.05, 5, 0.736)
+    # An ablation is stated exactly where the arm asks for one.
+    assert "消融" not in section
+    asked = AcceptanceRules(alpha=0.05, sealed_years=5, ablation_required=True)
+    prompt = prompts.build_system_prompt(
+        experiment_facts={**facts, "artifact_contract": {"acceptance_rules": asked.agent_facts()}}
+    )
+    section = prompt[prompt.index("## 封存检验") :]
+    assert "定版时还须登记一个消融对照（`finish_session` 的 `ablation`）" in section
+    assert "只记录，不参与裁决" in section
+    # Facts without a sealed gate add no section.
+    assert "## 封存检验" not in _full_prompt()

@@ -28,7 +28,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from autotrade.environment.data.contracts import CN_TZ
+from autotrade.common.time import CN_TZ
 from autotrade.environment.replay.style import MIN_REGRESSION_DAYS
 
 # Snapshot anchor time of day: close of business, not an intraday moment.
@@ -226,6 +226,24 @@ class ResearchGeometry:
             begin, finish = opened.strftime("%Y%m%d"), closed.strftime("%Y%m%d")
             slots.append(Slot(f"Y{index}", begin, finish, finish))
         return tuple(slots)
+
+    def split_sealed(self, sealed_years: int) -> tuple[tuple[Slot, ...], tuple[Slot, ...]]:
+        """The research years a session sees, and the trailing
+        ``sealed_years`` it never sees, which the host reads once after the
+        freeze. ``ValueError`` unless at least one year is sealed and at
+        least one stays visible."""
+
+        years = self.research_years
+        if (
+            isinstance(sealed_years, bool)
+            or not isinstance(sealed_years, int)
+            or not 1 <= sealed_years < len(years)
+        ):
+            raise ValueError(
+                f"sealed_years must seal at least one of the {len(years)} research "
+                f"years and leave at least one visible, got {sealed_years!r}"
+            )
+        return years[:-sealed_years], years[-sealed_years:]
 
     @property
     def forward(self) -> Slot:

@@ -10,9 +10,16 @@ import pytest
 from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.sandbox import SandboxSpec
 from autotrade.pipelines import worker as worker_module
-from autotrade.pipelines.config import RETIRED_SWITCHES, AcceptanceRules, acceptance_for
+from autotrade.pipelines.config import (
+    REQUIRED_ACCEPTANCE_KEYS,
+    RETIRED_SWITCHES,
+    AcceptanceRules,
+    acceptance_for,
+)
+from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
 from scripts.experiments import _cli, run_audit_session
 from scripts.experiments._cli import add_acceptance_arguments
+from tests.unit.acceptance_fixture import REQUIRED_RULES
 
 
 class _ProviderConstructed(RuntimeError):
@@ -99,34 +106,37 @@ def test_the_audit_parser_exposes_every_create_time_gate() -> None:
     created and nothing can move them afterwards, so a field the parser does
     not expose pins every audited arm at its default. The flags are read off
     the rules' own fields: unset is ``None`` (the worker's default), a count
-    parses as an integer and a limit as a float."""
+    parses as an integer and a limit as a float. A rule without a default
+    takes the console's creation value, and is a required flag where the
+    console has none."""
 
     parser = argparse.ArgumentParser()
     add_acceptance_arguments(parser)
-    unset = vars(parser.parse_args([]))
-    assert unset == {rule.name: None for rule in fields(AcceptanceRules)}
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--sealed-years=5"])
+    unset = vars(parser.parse_args(["--sealed-years=5", "--ablation-required=false"]))
+    assert unset == {
+        rule.name: WEB_CREATE_DEFAULTS[rule.name] if rule.name in REQUIRED_ACCEPTANCE_KEYS else None
+        for rule in fields(AcceptanceRules)
+    } | {"sealed_years": 5, "ablation_required": False}
     assert all(action.help for action in parser._actions)
 
     chosen = parser.parse_args(
-        [
-            "--recency-months=3",
-            "--min-full-span-validations=4",
-            "--max-drawdown=0.3",
-            "--tracking-error-cap=0.08",
-        ]
+        ["--sealed-years=2", "--ablation-required=true", "--max-drawdown=0.3", "--tracking-error-cap=0.08"]
     )
-    named = {key: value for key, value in vars(chosen).items() if value is not None}
-    assert named == {
-        "recency_months": 3,
-        "min_full_span_validations": 4,
-        "max_drawdown": 0.3,
-        "tracking_error_cap": 0.08,
+    named = {
+        key: value
+        for key, value in vars(chosen).items()
+        if value is not None and key not in REQUIRED_ACCEPTANCE_KEYS
     }
-    assert type(chosen.recency_months) is int and type(chosen.max_drawdown) is float
+    assert named == {"max_drawdown": 0.3, "tracking_error_cap": 0.08}
+    assert type(chosen.sealed_years) is int and type(chosen.max_drawdown) is float
+    assert chosen.ablation_required is True
     # The rules accept what the parser hands them.
-    AcceptanceRules(**{"beta_min": 0.85, "beta_max": 1.15, **named})
-    with pytest.raises(SystemExit):
-        parser.parse_args(["--recency-months=2.5"])
+    AcceptanceRules(**REQUIRED_RULES, **{"beta_min": 0.85, "beta_max": 1.15, **named})
+    for wrong in ("--sealed-years=2.5", "--ablation-required=1"):
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--ablation-required=false", "--sealed-years=1", wrong])
 
 
 def test_an_arm_created_from_the_command_line_holds_the_consoles_creation_rules(
@@ -146,13 +156,15 @@ def test_an_arm_created_from_the_command_line_holds_the_consoles_creation_rules(
         _cli.add_snapshot_window_arguments(parser)
         _cli.add_model_arguments(parser)
         add_acceptance_arguments(parser)
-        args = parser.parse_args(["--experiment-id", "audit", *flags])
+        args = parser.parse_args(
+            ["--experiment-id", "audit", "--sealed-years=1", "--ablation-required=false", *flags]
+        )
         return _cli._build_worker_params(args, repo_root=tmp_path)
 
     created = params()
-    assert acceptance_for(created) == AcceptanceRules()
+    assert acceptance_for(created) == AcceptanceRules(**REQUIRED_RULES)
     assert not RETIRED_SWITCHES & set(created)
-    assert acceptance_for(params("--recency-months=3")).recency_months == 3
+    assert acceptance_for(params("--max-drawdown=0.3")).max_drawdown == 0.3
 
 
 def test_the_compaction_gateway_is_built_without_provider_retries(
@@ -238,8 +250,8 @@ def test_the_assembled_session_mounts_the_image_refs_and_memory_it_was_given(
     build = _build(options)
 
     assert build.trading_days == ["20240102"]
-    assert build.pipeline.evaluator.sandbox.image == "audit-image:test"
-    assert build.pipeline.evaluator.sandbox.limits.fit_timeout_seconds == 1800
+    assert build.pipeline.evaluator.sandbox.spec.image == "audit-image:test"
+    assert build.pipeline.evaluator.sandbox.fit_timeout_seconds == 1800
     developer = captured["developer"]
     assert developer["sandbox_spec"] is options.agent_sandbox
     assert developer["evaluator"] is build.pipeline.evaluator

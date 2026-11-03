@@ -270,8 +270,6 @@ class DeterministicBaselineDeveloper:
                     typed_revision.revision_id,
                     validation,
                     span=request.validation.label,
-                    # The host's own deterministic replay: nothing was screened.
-                    offline_trials=0,
                 )
             )
         return ResearchSessionResult(

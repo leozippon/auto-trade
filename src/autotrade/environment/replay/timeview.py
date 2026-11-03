@@ -10,7 +10,10 @@ that ``pandas.read_parquet`` concatenates into one table:
     (zero-copy);
   * later parts are write-once replay-slot increments, appended only when the
     simulation clock crosses a refresh node that covers the domain
-    (``REFRESH_NODES`` in data/contracts.py).
+    (``REFRESH_NODES`` in data/contracts.py);
+  * once the clock reaches a new calendar month, the parts of the month before
+    are merged into one (``_MonthParts``): a directory read opens every
+    part's footer, so its cost follows the part count, not the rows it reads.
 
 A replay row that carries ``first_seen_at`` (the lake first held its key after
 its ``available_at``: the vendor added it after the fact) is held back until the
@@ -62,7 +65,7 @@ import warnings
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from functools import partial
+from functools import cache, partial
 from pathlib import Path
 
 import numpy as np
@@ -200,6 +203,9 @@ class _ReplaySegment:
     cursor: _SortedCursor | None
     cursors: dict[str, _SortedCursor]
     library_dir: Path | None = None
+    # Each row's dataset (text index segments only): names a roll's body
+    # parts without decoding its rows.
+    datasets: np.ndarray | None = None
     # Per row, when the lake first held it where that is later than its
     # available_at (NaT elsewhere); None when no row of the slot has one.
     first_seen: np.ndarray | None = None
@@ -508,6 +514,7 @@ class _DomainView:
         self._segments: list[_ReplaySegment] = []
         self._dataset_names: list[str] = []
         self._part_seq = 0
+        self._months = _MonthParts(out_dir, label=f"domain {name!r}")
         self._last_signature: object = object()  # sentinel: force the first roll
         self._frozen_schema: pa.Schema | None = None
         self._columns = self._init_frozen_part(frozen_file)
@@ -654,6 +661,7 @@ class _DomainView:
         # The rows are read only if the part has to be encoded: a stash hit
         # hardlinks the part and touches no row group.
         self._write_part(
+            when,
             sum(int(newly.size) for _segment, newly in taken),
             lambda: (table for segment, newly in taken for table in segment.rows.take(newly)),
         )
@@ -692,6 +700,7 @@ class _DomainView:
             return False
 
         self._write_part(
+            when,
             sum(len(frame) for frame in newly),
             lambda: (pa.Table.from_pandas(frame, preserve_index=False) for frame in newly),
         )
@@ -719,23 +728,6 @@ class _DomainView:
         # dropped gating columns.
         return pa.schema(fields)
 
-    @staticmethod
-    def _project(table: pa.Table, schema: pa.Schema) -> pa.Table:
-        """One slice on the part schema.
-
-        In Arrow: ``DataFrame.reindex(columns=...)`` rebuilt every block of
-        the slice, 18-73 s on one day of minute bars (~700k rows over seven
-        object columns) and 95 % of replay wall, against 0.3 s for selecting
-        the converted arrays.
-        """
-        arrays = [
-            table.column(name).cast(field.type)
-            if name in table.column_names
-            else pa.nulls(table.num_rows, type=field.type)
-            for name, field in zip(schema.names, schema, strict=True)
-        ]
-        return pa.Table.from_arrays(arrays, schema=schema)
-
     def _write_slices(self, slices: Callable[[], Iterator[pa.Table]], row_count: int, path: Path) -> None:
         """Encode one part from its slices, one row group resident at a time.
 
@@ -753,7 +745,7 @@ class _DomainView:
         """
         if row_count <= _PART_ROW_GROUP_ROWS:
             unified = pa.concat_tables(list(slices()), promote_options="default")
-            pq.write_table(self._project(unified, self._part_schema(unified.schema)).combine_chunks(), path)
+            pq.write_table(_project(unified, self._part_schema(unified.schema)).combine_chunks(), path)
             return
         schema = self._part_schema(
             pa.unify_schemas([table.schema for table in slices()], promote_options="default")
@@ -762,7 +754,7 @@ class _DomainView:
             buffered: list[pa.Table] = []
             rows = 0
             for table in slices():
-                buffered.append(self._project(table, schema))
+                buffered.append(_project(table, schema))
                 rows += table.num_rows
                 while rows >= _PART_ROW_GROUP_ROWS:
                     whole = pa.concat_tables(buffered)
@@ -776,7 +768,9 @@ class _DomainView:
             if buffered:
                 writer.write_table(pa.concat_tables(buffered).combine_chunks(), row_group_size=_PART_ROW_GROUP_ROWS)
 
-    def _write_part(self, row_count: int, slices: Callable[[], Iterator[pa.Table]]) -> None:
+    def _write_part(
+        self, when: pd.Timestamp, row_count: int, slices: Callable[[], Iterator[pa.Table]]
+    ) -> None:
         """Write the next part, reusing the run-level stash when one is present.
 
         The PIT backend has already bound the stash to the exact semantic
@@ -803,6 +797,7 @@ class _DomainView:
                     write=write,
                     label=f"domain {self.name!r} {name}",
                 )
+        self._months.published(self._part_seq, when, row_count, self._stash_dir)
         self._part_seq += 1
 
     def _newly_visible(self, segment: _ReplaySegment, when: pd.Timestamp) -> np.ndarray:
@@ -906,6 +901,7 @@ class _TextView:
         self._segments: list[_ReplaySegment] = []
         self._dataset_names: list[str] = []
         self._part_seq = 0
+        self._months = _MonthParts(out_index_dir, label="text index")
         self._last_signature: object = object()
         self._init_frozen(frozen_index_file, frozen_library_dir)
         self.continue_slot(
@@ -932,8 +928,13 @@ class _TextView:
         if rows is not None and not rows.empty and required.issubset(rows.columns):
             available_at = to_cn_timestamps(rows.column("available_at"))
             valid = np.flatnonzero(available_at.notna().to_numpy())
-            cursors = _dataset_cursors(rows.column("dataset").astype(str).to_numpy(), valid, _utc_ns(available_at))
-            self._segments.append(_ReplaySegment(rows, None, cursors, library_dir, first_seen=_first_seen_keys(rows)))
+            datasets = rows.column("dataset").astype(str).to_numpy()
+            cursors = _dataset_cursors(datasets, valid, _utc_ns(available_at))
+            self._segments.append(
+                _ReplaySegment(
+                    rows, None, cursors, library_dir, first_seen=_first_seen_keys(rows), datasets=datasets
+                )
+            )
         self._segments_changed()
 
     def release_published(self) -> None:
@@ -963,7 +964,7 @@ class _TextView:
         if signature == self._last_signature and not any(segment.held_due(now) for segment in self._segments):
             return False
         self._last_signature = signature
-        visible: list[tuple[_ReplaySegment, pd.DataFrame]] = []
+        taken: list[tuple[_ReplaySegment, np.ndarray]] = []
         for segment in self._segments:
             parts = [
                 indices
@@ -974,52 +975,78 @@ class _TextView:
             newly = segment.admit(np.concatenate(parts) if parts else _EMPTY_INDICES, now)
             if newly.size:
                 newly.sort()  # original frame order: parts read back exactly as the frame slice
-                visible.append((segment, pa.concat_tables(list(segment.rows.take(newly))).to_pandas()))
-        if not visible:
+                taken.append((segment, newly))
+        if not taken:
             return False
+        suffix = f"__part_{self._part_seq:04d}.parquet"
+        index_name = f"part_{self._part_seq:04d}.parquet"
+        row_count = sum(int(newly.size) for _segment, newly in taken)
+        # The body parts this roll writes, one per dataset it makes visible.
+        datasets = sorted(
+            {str(name) for segment, newly in taken for name in np.unique(segment.datasets[newly])}
+        )
+        # The rows are decoded only if a part has to be encoded: a stash hit
+        # links the whole roll and reads nothing.
+        decoded = cache(partial(self._decode, taken, datasets, suffix))
+        if self._stash_index_dir is None or self._stash_library_dir is None:
+            rows, groups = decoded()
+            for dataset in datasets:
+                self._write_bodies(dataset, groups[dataset], self.out_library_dir / f"{dataset}{suffix}")
+            _write_frame(rows, self.out_index_dir / index_name)
+        else:
+            self._publish_roll(datasets, decoded, row_count=row_count, index_name=index_name, suffix=suffix)
+        # Only the index is merged: its rows name their body parts, which stay.
+        self._months.published(self._part_seq, when, row_count, self._stash_index_dir)
+        self._part_seq += 1
+        return True
+
+    @staticmethod
+    def _decode(
+        taken: list[tuple[_ReplaySegment, np.ndarray]], datasets: list[str], suffix: str
+    ) -> tuple[pd.DataFrame, dict[str, list[tuple[Path | None, set[str]]]]]:
+        """One roll's index rows, relabelled onto its body parts, and the text
+        ids each dataset's body part takes from each slot's library."""
+
+        visible = [
+            (segment, pa.concat_tables(list(segment.rows.take(newly))).to_pandas())
+            for segment, newly in taken
+        ]
         rows = _concat_slices([index_rows for _segment, index_rows in visible]).copy()
         rows = rows.drop(columns=[FIRST_SEEN_COLUMN], errors="ignore")
-        datasets = rows["dataset"].astype(str)
+        labels = rows["dataset"].astype(str)
+        if sorted(set(labels)) != datasets:
+            raise RuntimeError(
+                f"text index rows name datasets {sorted(set(labels))}, their cursors {datasets}"
+            )
         # Every row this roll makes visible is relabelled onto the body part
         # this roll writes for its dataset, so the whole column is one string
         # concatenation instead of a per-row lookup (0.30 s/day measured on a
         # real slot, ~73 s per replay).
-        suffix = f"__part_{self._part_seq:04d}.parquet"
-        rows["library_file"] = datasets + suffix
+        rows["library_file"] = labels + suffix
         # A dataset's body part is cut from the library of each slot whose
         # index rows it makes visible, in slot order.
-        groups = [
-            (
-                dataset,
-                [
-                    (segment.library_dir, text_ids)
-                    for segment, index_rows in visible
-                    if (
-                        text_ids := set(
-                            index_rows.loc[
-                                index_rows["dataset"].astype(str) == dataset, "text_id"
-                            ].astype(str)
-                        )
+        groups = {
+            dataset: [
+                (segment.library_dir, text_ids)
+                for segment, index_rows in visible
+                if (
+                    text_ids := set(
+                        index_rows.loc[
+                            index_rows["dataset"].astype(str) == dataset, "text_id"
+                        ].astype(str)
                     )
-                ],
-            )
-            for dataset in sorted(set(datasets))
-        ]
-        index_name = f"part_{self._part_seq:04d}.parquet"
-        if self._stash_index_dir is None or self._stash_library_dir is None:
-            for dataset, group in groups:
-                self._write_bodies(dataset, group, self.out_library_dir / f"{dataset}{suffix}")
-            _write_frame(rows, self.out_index_dir / index_name)
-        else:
-            self._publish_roll(rows, groups, index_name=index_name, suffix=suffix)
-        self._part_seq += 1
-        return True
+                )
+            ]
+            for dataset in datasets
+        }
+        return rows, groups
 
     def _publish_roll(
         self,
-        rows: pd.DataFrame,
-        groups: list[tuple[str, list[tuple[Path | None, set[str]]]]],
+        datasets: list[str],
+        decoded: Callable[[], tuple[pd.DataFrame, dict[str, list[tuple[Path | None, set[str]]]]]],
         *,
+        row_count: int,
         index_name: str,
         suffix: str,
     ) -> None:
@@ -1027,10 +1054,12 @@ class _TextView:
 
         Each part is a pure function of the semantic contract the PIT backend
         already bound, so a part an earlier backtest encoded is hardlinked
-        instead of re-read and re-encoded. The whole roll is published under
-        one lock, and the index part -- which fixes the visibility slice the
-        body parts are cut from -- carries the same footer row-count check the
-        numeric domains use.
+        instead of re-read and re-encoded, and a roll whose parts are all in
+        the stash never decodes its index rows (``decoded`` runs only for a
+        missing part). The whole roll is published under one lock, and the
+        index part -- which fixes the visibility slice the body parts are cut
+        from -- carries the same footer row-count check the numeric domains
+        use.
         """
 
         stash_index = self._stash_index_dir
@@ -1038,19 +1067,23 @@ class _TextView:
         assert stash_index is not None and stash_library is not None
         stash_index.mkdir(parents=True, exist_ok=True)
         stash_library.mkdir(parents=True, exist_ok=True)
+
+        def write_bodies(dataset: str, path: Path) -> None:
+            self._write_bodies(dataset, decoded()[1][dataset], path)
+
         with _exclusive_part_lock(stash_index / f".{index_name}.lock"):
-            for dataset, group in groups:
+            for dataset in datasets:
                 name = f"{dataset}{suffix}"
                 _publish_part(
                     stash_library / name,
                     self.out_library_dir / name,
-                    write=partial(self._write_bodies, dataset, group),
+                    write=partial(write_bodies, dataset),
                 )
             _publish_checked_part(
                 stash_index / index_name,
                 self.out_index_dir / index_name,
-                row_count=len(rows),
-                write=partial(_write_frame, rows),
+                row_count=row_count,
+                write=lambda path: _write_frame(decoded()[0], path),
                 label=f"text index {index_name}",
             )
 
@@ -1099,6 +1132,96 @@ class _TextView:
             if body.empty or "text_id" not in body.columns:
                 return pd.DataFrame(columns=["text_id", "body"])
             return body.loc[body["text_id"].astype(str).isin(text_ids)]
+
+
+def _project(table: pa.Table, schema: pa.Schema) -> pa.Table:
+    """``table`` on ``schema``: each column cast by name, absent ones null.
+
+    In Arrow: ``DataFrame.reindex(columns=...)`` rebuilt every block of the
+    slice, 18-73 s on one day of minute bars (~700k rows over seven object
+    columns) and 95 % of replay wall, against 0.3 s for selecting the
+    converted arrays.
+    """
+    arrays = [
+        table.column(name).cast(field.type)
+        if name in table.column_names
+        else pa.nulls(table.num_rows, type=field.type)
+        for name, field in zip(schema.names, schema, strict=True)
+    ]
+    return pa.Table.from_arrays(arrays, schema=schema)
+
+
+class _MonthParts:
+    """Merges the parts one view publishes in a calendar month into one part.
+
+    A filtered read of a domain directory opens every part's footer to prune
+    it, so its cost follows the part count -- one per refresh that published
+    rows, about 2,400 over a ten-year span -- rather than the rows it returns:
+    a typical short read of the real daily view took 0.36-0.40 s over daily
+    parts and 0.03 s over monthly ones. When a view publishes the first part
+    of a new month, the parts of the month before are therefore rewritten, in
+    order, as one part ``part_<first>_<last>`` and removed. The name sorts
+    exactly where theirs did and is new, so a trusted replay's read-only gate,
+    which locks each file name once, locks it too. Every column of the merged
+    part is cast to the schema of part 0, as a directory read casts every
+    part, so the directory reads back the same rows in the same order with
+    the same types. Part 0 (the frozen snapshot, or the first replay part of
+    a domain without one) is never merged: its schema is the one every read
+    takes. A merge lands with a new part, so ``asof_version`` already moves.
+
+    A merged part is published through the stash like any other part (as
+    ``merged_<first>_<last>``, row-count checked), so a later backtest under
+    the same contract links it instead of rewriting the month.
+    """
+
+    def __init__(self, out_dir: Path, *, label: str) -> None:
+        self.out_dir = out_dir
+        self.label = label
+        self._month: tuple[int, int] | None = None
+        self._first = self._last = 0
+        self._rows = 0
+
+    def published(self, seq: int, when: pd.Timestamp, rows: int, stash_dir: Path | None) -> None:
+        """Record part ``seq`` of ``rows`` rows, published at ``when``."""
+        if seq == 0:
+            return
+        month = (when.year, when.month)
+        if month != self._month:
+            if self._last > self._first:
+                self._merge(stash_dir)
+            self._month, self._first, self._rows = month, seq, 0
+        self._last = seq
+        self._rows += rows
+
+    def _merge(self, stash_dir: Path | None) -> None:
+        first, last = self._first, self._last
+        sources = [self.out_dir / f"part_{seq:04d}.parquet" for seq in range(first, last + 1)]
+        out = self.out_dir / f"part_{first:04d}_{last:04d}.parquet"
+        write = partial(_write_merged, sources, pq.read_schema(self.out_dir / "part_0000.parquet"))
+        if stash_dir is None:
+            write(out)
+        else:
+            name = f"merged_{first:04d}_{last:04d}.parquet"
+            stash_dir.mkdir(parents=True, exist_ok=True)
+            with _exclusive_part_lock(stash_dir / f".{name}.lock"):
+                _publish_checked_part(
+                    stash_dir / name,
+                    out,
+                    row_count=self._rows,
+                    write=write,
+                    label=f"{self.label} {name}",
+                )
+        for source in sources:
+            source.unlink()
+
+
+def _write_merged(sources: Sequence[Path], schema: pa.Schema, path: Path) -> None:
+    """Concatenate ``sources`` on ``schema``, one row group resident at a time."""
+    with pq.ParquetWriter(path, schema) as writer:
+        for source in sources:
+            part = pq.ParquetFile(source)
+            for group in range(part.num_row_groups):
+                writer.write_table(_project(part.read_row_group(group), schema))
 
 
 def _write_frame(frame: pd.DataFrame, path: Path) -> None:

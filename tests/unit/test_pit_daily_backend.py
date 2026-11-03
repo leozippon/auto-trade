@@ -231,7 +231,7 @@ def generate_orders(context):
     style = json.loads(
         (Path(result.result_ref).parent / "style_analysis.json").read_text(encoding="utf-8")
     )
-    assert style["schema_version"] == 2 and style["mode"] == "valid"
+    assert style["schema_version"] == 3 and style["mode"] == "valid"
     assert style["benchmark_regression"]["reason"] == "benchmark_unavailable"
     assert style["style"]["reason"] == "style_columns_unavailable"
     assert len(record["inference_dates"]) == 2
@@ -1492,7 +1492,7 @@ def test_stash_contract_corruption_or_mismatch_fails(tmp_path: Path) -> None:
     stash = _bind_asof_stash_contract(**kwargs)
     contract = stash / "contract.json"
     contract.write_text("{broken", encoding="utf-8")
-    with pytest.raises(RuntimeError, match="invalid PIT cache record"):
+    with pytest.raises(ValueError, match="unreadable JSON record"):
         _bind_asof_stash_contract(**kwargs)
 
     contract.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")

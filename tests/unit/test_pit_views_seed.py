@@ -712,7 +712,7 @@ def test_the_prebuild_refuses_a_misaligned_geometry_or_a_seed_inside_its_workspa
 def test_replay_manifest_matches_requires_phase_label():
     from datetime import datetime
 
-    from autotrade.environment.data.contracts import CN_TZ
+    from autotrade.common.time import CN_TZ
     from autotrade.pipelines.pit_backend import _replay_manifest_matches
 
     decision = datetime(2021, 12, 31, 23, 59, 59, tzinfo=CN_TZ)

@@ -85,22 +85,15 @@ const REASON_LABELS = {
   freeze_unmeasurable: "研究期统计可算",
   freeze_too_few_seed_replicates: "训练模型的提名登记了种子副本",
   freeze_seed_replicate_invalid: "种子副本只改种子一行",
+  freeze_ablation_missing: "本实验要求的消融对照已登记",
+  freeze_ablation_invalid: "消融对照只改提名一行",
   freeze_seed_mean_information_ratio_below_threshold: "研究期种子均值主动 IR",
+  sealed_strategy_error: "封存年份策略无报错",
+  sealed_unmeasurable: "封存年份残差可读（不是全程空仓）",
+  sealed_residual_ir_below_bar: "封存年份残差 IR",
   forward_strategy_error: "前推期策略无报错",
   heldout_strategy_error: "Held-out 期策略无报错",
-  forward_lower_bound_not_positive: (t) => `前推主动超额 ${fmtPct(t.forward_confidence, 0)} 下界`,
-  forward_recency_negative: (t) => `前推最近 ${t.recency_months ?? "—"} 个月主动超额`,
-  forward_max_drawdown_exceeded: "前推回撤",
-  forward_active_drawdown_exceeded: "前推主动回撤",
-  forward_not_positive_at_cost_stress: (t) => `前推滑点 ×${t.cost_stress_multiplier ?? "—"} 后主动超额`,
-  forward_too_few_round_trips: "前推往返交易数",
-  forward_exposure_below_floor: "前推平均仓位",
-  forward_tracking_error_above_cap: "前推对基准指数跟踪误差",
-  forward_beta_outside_band: "前推市场 β",
-  heldout_excess_below_tolerance: "Held-out 主动超额",
-  heldout_max_drawdown_exceeded: "Held-out 回撤",
-  heldout_active_drawdown_exceeded: "Held-out 主动回撤",
-  heldout_exposure_below_floor: "Held-out 平均仓位",
+  replicate_strategy_error: "种子副本回测无报错",
 };
 // An arm judged on its active series -- its daily return minus the zero-skill
 // panel the host drew from its own book -- records `series: "active"`; an arm
@@ -124,7 +117,7 @@ const IR_TITLE = "主动超额 ÷ 主动跟踪误差";
 const RAW_EXCESS_TITLE = "账户自身扣费收益减基准指数（价格指数）同期收益，整段累计";
 // The cost-stress reading the freeze gate and F5 judge (verdict.py
 // `excess_at_cost_stress`), at the arm's multiplier.
-const STRESS_TITLE = "滑点按成本压力倍数加价后的年化主动超额；定版检验与前推裁决读的是同一个数";
+const STRESS_TITLE = "滑点按成本压力倍数加价后的年化主动超额；研究期每次验证与前推裁决读的是同一个数";
 const PANEL_RETURN_TITLE = "随机对照组合（同一成交骨架随机换名）自身扣费后的整段收益";
 // What F2 judges (verdict.py `forward_lower_bound`): the lower bound of one
 // daily series' mean. The mean itself is the slice's `plain_excess`, or with
@@ -161,6 +154,7 @@ const ENVIRONMENT_STAGE_LABELS = {
   backtest: "执行验证回测",
   agent_complete: "Agent 推理完成",
   freezing: "定版策略",
+  sealed_replay: "封存研究年回测",
   forward_replay: "前推与 Held-out 连续回测",
   verdict: "裁决",
   publishing: "结果落盘",
@@ -174,6 +168,7 @@ const ENVIRONMENT_STAGE_ICONS = {
   backtest: "📊",
   agent_complete: "🤖",
   freezing: "❄",
+  sealed_replay: "▶",
   forward_replay: "▶",
   verdict: "⚖",
   publishing: "💾",
@@ -186,6 +181,7 @@ const PREP_ENVIRONMENT_STAGES = new Set([
   "sandbox_layout",
   "pit_view",
   "sandbox_start",
+  "sealed_replay",
   "forward_replay",
   "verdict",
   "session_retry",
@@ -2135,13 +2131,6 @@ function evidenceTiles(item) {
       title: `${sessionLabel(best.session_key)} 中 IR 最高的全区间验证，研究期年化`,
     },
     { label: "IR", value: best.information_ratio, fmt: fmtSharpe, signed: true, title: IR_TITLE },
-    {
-      label: "DSR",
-      value: best.deflated_sharpe_probability,
-      fmt: fmtSharpe,
-      title: DSR_TITLE,
-    },
-    { label: "累计试验", value: best.trials, fmt: String, title: TRIALS_TITLE },
   ]);
   return tiles.length ? statTilesRow(tiles) : null;
 }
@@ -2981,9 +2970,8 @@ const SLICE_ROWS = [
   ["series", "评分序列", (value) => SERIES_LABELS[value] || String(value)],
   ["days", "交易日", String],
   ["information_ratio", "主动 IR", fmtSharpe, true, IR_TITLE],
+  ["residual_information_ratio", "残差 IR（三因子）", fmtSharpe, true],
   ["lower_bound", (t) => `${fmtPct(t.forward_confidence, 0)} 下界`, fmtPct, true, LOWER_BOUND_TITLE],
-  ["recency_plain_excess", (t) => `最近 ${t.recency_months ?? "—"} 个月主动超额`, fmtPct, true],
-  ["tolerance", "容忍线", fmtPct],
   ["max_drawdown", "最大回撤", fmtPct],
   ["active_max_drawdown", "主动回撤", fmtPct],
   ["excess_at_cost_stress", (t) => `滑点 ×${t.cost_stress_multiplier ?? "—"} 后超额`, fmtPct, true],
@@ -3006,8 +2994,8 @@ const FORWARD_STAT_FIELDS = [
   "series",
   "days",
   "information_ratio",
+  "residual_information_ratio",
   "lower_bound",
-  "recency_plain_excess",
   "max_drawdown",
   "active_max_drawdown",
   "excess_at_cost_stress",
@@ -3019,7 +3007,7 @@ const HELDOUT_STAT_FIELDS = [
   "series",
   "days",
   "information_ratio",
-  "tolerance",
+  "residual_information_ratio",
   "max_drawdown",
   "active_max_drawdown",
   "mean_gross",
@@ -3030,8 +3018,13 @@ const HELDOUT_STAT_FIELDS = [
    as rows of the same table. */
 function sliceStats(slice, fields, thresholds) {
   if (!slice) return null;
-  const t = thresholds || {};
-  const values = { ...slice, ...(slice.raw_readings || {}) };
+  // A slice recorded since 2026-11-03 states what its readings were taken at.
+  const t = { ...(slice.parameters || {}), ...(thresholds || {}) };
+  const values = {
+    ...slice,
+    ...(slice.raw_readings || {}),
+    residual_information_ratio: (slice.residual_reading || {}).residual_information_ratio,
+  };
   const rows = SLICE_ROWS.filter(
     ([field]) => fields.includes(field) && values[field] !== null && values[field] !== undefined,
   );
@@ -3158,62 +3151,6 @@ function mandateRows(capToken, bandToken, measured, row, t) {
   ];
 }
 
-/* F1–F7 over the forward slice, as criterion rows: the 前推回测 view draws
-   them alone, 裁决 draws them ahead of H1–H4, and neither restates a
-   threshold the other spells differently. F2's hover states the mean and the
-   seed count of the series it judged. */
-function forwardCriteria(f, verdict, thresholds) {
-  const failed = failedReasons(verdict);
-  const t = thresholds || {};
-  const row = criteriaRow(f, failed, t);
-  const seeds = (f && f.seed_mean) || null;
-  return [
-    ...(failed.has("forward_strategy_error")
-      ? [{ ok: false, label: reasonLabel("forward_strategy_error"), value: null }]
-      : []),
-    row(
-      "forward_lower_bound_not_positive",
-      fmtPct(f && f.lower_bound),
-      "> 0",
-      f
-        ? `${LOWER_BOUND_TITLE}；均值 ${fmtPct(seeds ? seeds.plain_excess : f.plain_excess)}/年，${seeds ? seeds.members : 1} 个种子`
-        : LOWER_BOUND_TITLE,
-    ),
-    row("forward_recency_negative", fmtPct(f && f.recency_plain_excess), "≥ 0"),
-    row("forward_max_drawdown_exceeded", fmtPct(f && f.max_drawdown), thresholdCell("≤", t.max_drawdown)),
-    row("forward_not_positive_at_cost_stress", fmtPct(f && f.excess_at_cost_stress), "> 0", STRESS_TITLE),
-    row("forward_too_few_round_trips", f && f.round_trips, thresholdCell("≥", t.min_round_trips, String)),
-    row("forward_exposure_below_floor", fmtPct(f && f.mean_gross), thresholdCell("≥", t.min_mean_gross)),
-    ...activeDrawdownRows("forward_active_drawdown_exceeded", f, row, t),
-    ...mandateRows("forward_tracking_error_above_cap", "forward_beta_outside_band", f, row, t),
-  ];
-}
-
-/* H1–H4 over the Held-out slice, the same rows for the same two views. */
-function heldoutCriteria(h, verdict, thresholds) {
-  const failed = failedReasons(verdict);
-  const t = thresholds || {};
-  const row = criteriaRow(h, failed, t);
-  // How the tolerance is drawn. It is the threshold until the slice is
-  // measured; after that the row states the resolved figure and keeps the
-  // rule behind it, which is otherwise nowhere on the page.
-  const tolerance = t.heldout_tolerance_z ? `−${t.heldout_tolerance_z} × 前推跟踪误差 / √年` : "";
-  return [
-    ...(failed.has("heldout_strategy_error")
-      ? [{ ok: false, label: reasonLabel("heldout_strategy_error"), value: null }]
-      : []),
-    row(
-      "heldout_excess_below_tolerance",
-      fmtPct(h && h.plain_excess),
-      h ? `≥ ${fmtPct(h.tolerance)}` : tolerance && `≥ ${tolerance}`,
-      h ? tolerance || null : null,
-    ),
-    row("heldout_max_drawdown_exceeded", fmtPct(h && h.max_drawdown), thresholdCell("≤", t.max_drawdown)),
-    row("heldout_exposure_below_floor", fmtPct(h && h.mean_gross), thresholdCell("≥", t.min_mean_gross)),
-    ...activeDrawdownRows("heldout_active_drawdown_exceeded", h, row, t),
-  ];
-}
-
 /* What the three replay stages share: the plan's replay span, the thresholds
    (the record's own once it exists), and how far a running replay has got. */
 function replayContext(detail) {
@@ -3240,6 +3177,111 @@ function stageHead(key, detail) {
 /* 前推回测: the forward slice alone — its span (progress while replaying),
    once recorded the holder's line and its seed replicates, F1–F7 and the
    slice's own statistics. */
+/* The sealed reading S: the frozen book's factor-residual IR on the sealed
+   research years against its bar, read once in the forward stage before the
+   forward replay, with its seed replicates' readings beside it. Absent on an
+   arm judged before the sealed gate. */
+/* The verdict's validity conditions as checklist rows: neither the frozen book
+   nor a seed replicate raised in its own code after the freeze. */
+function validityCriteria(verdict) {
+  const failed = new Set((verdict || {}).reasons || []);
+  return ["forward_strategy_error", "heldout_strategy_error", "replicate_strategy_error"].map((token) => ({
+    ok: !failed.has(token),
+    label: reasonLabel(token),
+    value: null,
+  }));
+}
+
+/* The verdict's performance condition, S, as a checklist row. */
+function sealedCriterion(s) {
+  if (s.strategy_error) return { ok: false, label: reasonLabel("sealed_strategy_error"), value: null };
+  return s.unmeasurable
+    ? { ok: false, label: reasonLabel("sealed_unmeasurable"), value: null }
+    : {
+        ok: Boolean(s.passed),
+        label: reasonLabel("sealed_residual_ir_below_bar"),
+        value: fmtSharpe(s.residual_information_ratio),
+        threshold: `≥ ${fmtSharpe(s.bar)}`,
+      };
+}
+
+function sealedReadingBlock(forward, readouts) {
+  const s = (forward || {}).sealed;
+  if (!s) return null;
+  return el(
+    "div",
+    { class: "section-gap" },
+    el("h4", { class: "subsection-title" }, `封存读数 S · ${s.start || "—"}–${s.end || "—"}`),
+    s.strategy_error ? el("div", { class: "hint warn" }, `策略报错：${s.error || "—"}`) : null,
+    checklist([sealedCriterion(s)]),
+    s.strategy_error
+      ? null
+      : kvRow(
+          "三因子载荷",
+          `市场 ${fmtSharpe(s.market_beta)} · 规模 ${fmtSharpe(s.size_beta)} · 价值 ${fmtSharpe(s.value_beta)}`,
+        ),
+    ...(s.seed_replicates || []).map((item) =>
+      kvRow(`种子副本 ${item.source_step_id || "—"}`, `残差 IR ${fmtSharpe(item.residual_information_ratio)}`),
+    ),
+    s.ablation ? kvRow(`消融增量 ${s.ablation.source_step_id || "—"}`, ablationIncrementText(s.ablation)) : null,
+    sealedWindowBlock(readouts),
+  );
+}
+
+/* Whether the verdict reads the sealed gate alone: an arm created since
+   2026-11-03, whose thresholds are the sealed gate's. Its forward and
+   Held-out readings are reported, never judged. */
+function sealedOnly(thresholds) {
+  return (thresholds || {}).sealed_years !== undefined;
+}
+
+/* Every sealed reading the arms recorded over this arm's sealed window, with
+   its one-sided null p-value, and how many there are: what a single reading
+   is weighed against. Nothing is adjusted and no bar moves. */
+function sealedWindowBlock(readouts) {
+  const w = (readouts || {}).sealed_window;
+  if (!w || !w.count) return null;
+  return el(
+    "div",
+    { class: "section-gap" },
+    el("h4", { class: "subsection-title" }, `同一封存窗口的全部读数 · ${w.count} 个`),
+    dataTable(
+      [{ label: "实验" }, { label: "残差 IR", num: true }, { label: "年数", num: true }, { label: "p 值", num: true }, { label: "S" }],
+      w.readings.map((row) => [
+        { value: row.experiment_id },
+        { value: fmtSharpe(row.residual_information_ratio) },
+        { value: fmtSharpe(row.years) },
+        { value: row.p_value === null || row.p_value === undefined ? "—" : row.p_value.toFixed(3) },
+        { value: row.passed ? "通过" : "未通过" },
+      ]),
+      { fit: true },
+    ),
+  );
+}
+
+/* The forward-year residual readings of every frozen strategy replayed over
+   this arm's forward months, pooled: reported, never judged. */
+function forwardPoolBlock(readouts) {
+  const p = (readouts || {}).forward_pool;
+  if (!p) return null;
+  const pooled = p.count
+    ? `${p.count} 个冻结策略 · 合并残差 IR ${fmtSharpe(p.residual_information_ratio)} · z = ${fmtSharpe(p.z)} · p = ${p.p_value.toFixed(3)}`
+    : "尚无可合并的读数";
+  return el(
+    "table",
+    { class: "kv section-gap" },
+    kvRow("前推合并读数", p.raised ? `${pooled} · 另有 ${p.raised} 个前推回测策略报错，不计入` : pooled),
+  );
+}
+
+/* The ablation's sealed reading: the increment of the one line it changes,
+   reported beside the gate and never judged. */
+function ablationIncrementText(a) {
+  if (a.strategy_error) return `消融策略报错：${a.error || "—"}`;
+  if (a.unmeasured) return `未测得：${a.unmeasured}`;
+  return `残差 IR ${fmtSharpe(a.residual_information_ratio)} · t = ${fmtSharpe(a.t_statistic)}（只报告，不参与裁决）`;
+}
+
 function forwardStagePanel(detail) {
   const { forward, replay, thresholds, progress } = replayContext(detail);
   const f = ((forward || {}).slices || {}).forward;
@@ -3247,17 +3289,14 @@ function forwardStagePanel(detail) {
     "div",
     { class: "panel section-gap" },
     stageHead("forward", detail),
+    sealedReadingBlock(forward, detail.readouts),
     replaySpanBar(replay, "forward", { pending: !forward, progress }),
     forward && forward.error ? el("div", { class: "hint warn" }, `策略报错：${forward.error}`) : null,
     holderLine("前推", f),
     seedReadingsTable((forward || {}).slices, ["forward"]),
-    el(
-      "div",
-      { class: "section-gap" },
-      el("h4", { class: "subsection-title" }, forward ? "前推条件 F1–F7" : "前推条件 F1–F7 · 阈值"),
-      checklist(forwardCriteria(f, detail.verdict, thresholds)),
-    ),
+    sealedOnly(thresholds) ? el("div", { class: "meta-line section-gap" }, "前推读数只报告，不参与裁决") : null,
     sliceStats(f, FORWARD_STAT_FIELDS, thresholds),
+    sealedOnly(thresholds) ? forwardPoolBlock(detail.readouts) : null,
     forward && forward.result ? styleCard(detail.experiment_id, forward.result) : null,
     forward && forward.result
       ? Object.assign(
@@ -3268,7 +3307,7 @@ function forwardStagePanel(detail) {
   );
 }
 
-/* Held-out: the tail of the same replay — its span, H1–H4 and its statistics. */
+/* Held-out: the tail of the same replay — its span and its statistics. */
 function heldoutStagePanel(detail) {
   const { forward, replay, thresholds, progress } = replayContext(detail);
   const h = ((forward || {}).slices || {}).heldout;
@@ -3280,25 +3319,20 @@ function heldoutStagePanel(detail) {
     el("div", { class: "meta-line" }, "与前推是同一次连续回测的尾段，同一个裁决"),
     holderLine("Held-out", h),
     seedReadingsTable((forward || {}).slices, ["heldout"]),
-    el(
-      "div",
-      { class: "section-gap" },
-      el("h4", { class: "subsection-title" }, forward ? "Held-out 条件 H1–H4" : "Held-out 条件 H1–H4 · 阈值"),
-      checklist(heldoutCriteria(h, detail.verdict, thresholds)),
-    ),
+    sealedOnly(thresholds) ? el("div", { class: "meta-line section-gap" }, "Held-out 读数只报告，不参与裁决") : null,
     sliceStats(h, HELDOUT_STAT_FIELDS, thresholds),
   );
 }
 
-/* 裁决: how the arm ended — its ending badge and reason, then the criteria
-   that decided it, as the same F1–F7 and H1–H4 rows the two slice views draw,
-   so all three stages read in one vocabulary; then what the arm cost and when
-   it was recorded, and the Paper handoff. An ending no replay decided (研究
-   delivered nothing, or the worker broke) has the reason alone. Before it
-   exists, the rule and 待判定. */
+/* 裁决: how the arm ended — its ending badge and reason, then the criterion
+   that decided it, the sealed gate's S row as the 前推 view draws it (a
+   record judged before 2026-11-03 names its F/H criteria in its reason);
+   then what the arm cost and when it was recorded, and the Paper handoff. An
+   ending no replay decided (研究 delivered nothing, or the worker broke) has
+   the reason alone. Before it exists, the rule and 待判定. */
 function verdictStagePanel(detail) {
   const verdict = detail.verdict || {};
-  const { forward, thresholds } = replayContext(detail);
+  const { forward } = replayContext(detail);
   const slices = forward ? forward.slices || {} : {};
   const research = ((detail.sessions || []).find((entry) => entry.kind === "research") || {}).record;
   const attempts = detail.replay_attempts || {};
@@ -3344,16 +3378,15 @@ function verdictStagePanel(detail) {
     forward ? holderLine("前推", slices.forward) : null,
     forward ? holderLine("Held-out", slices.heldout) : null,
     seedReadingsTable(slices, ["forward", "heldout"]),
-    forward
-      ? checklist([
-          ...forwardCriteria(slices.forward, verdict, thresholds),
-          ...heldoutCriteria(slices.heldout, verdict, thresholds),
-        ])
+    // A record judged since 2026-11-03 has the sealed gate's one row; one
+    // judged before names the F/H criteria that refused it in its reason.
+    forward && forward.sealed
+      ? checklist([sealedCriterion(forward.sealed), ...validityCriteria(verdict)])
       : endingReason(detail) ||
         el(
           "div",
           { class: "meta-line" },
-          "前推 F1–F7 与 Held-out H1–H4 全部通过才算验收通过；策略异常直接未通过，其他失败按上限重试",
+          "封存检验 S 通过即验收通过；前推与 Held-out 读数只报告，不参与裁决；回测失败按上限重试",
         ),
     facts.length ? el("table", { class: "kv section-gap" }, ...facts) : null,
     paperHandoff(detail),
@@ -3924,12 +3957,15 @@ function sessionDetailPanel(detail, selectedKey) {
   return panel;
 }
 
-/* The freeze gate as the pipeline judged the nomination: the two measured
-   criteria always, a failed precondition only when it failed. Where the arm
-   holds seed replicates the gate records them (`seed_replicates`): a missing
-   or invalid replicate is a precondition, each invalid one's problem in the
-   row's hover, and the seed-mean IR against the nominee's IR bar is a row
-   whenever replicates were read. */
+/* The freeze gate as the pipeline judged the nomination: a failed
+   precondition only when it failed, and the conditions the record's own
+   thresholds state. A registration (since the sealed gate, 2026-11-03)
+   states only its drawdown limit and mandate; a deflated-Sharpe gate before
+   it also states its full-span count, DSR and IR bars. Where the arm holds
+   seed replicates the gate records them (`seed_replicates`): a missing or
+   invalid replicate is a precondition, each invalid one's problem in the
+   row's hover, and an earlier gate's seed-mean IR against the nominee's IR
+   bar is a row whenever it read one. */
 function freezeGateChecklist(gate) {
   const failed = new Set(gate.reasons || []);
   const t = gate.thresholds || {};
@@ -3939,6 +3975,7 @@ function freezeGateChecklist(gate) {
     .filter((entry) => entry.problem)
     .map((entry) => `${String(entry.step_id).split("__").pop()}：${entry.problem}`)
     .join("\n");
+  const ablation = gate.ablation || {};
   const preconditions = [
     "freeze_needs_full_span_validation",
     "freeze_nominee_is_control",
@@ -3946,29 +3983,44 @@ function freezeGateChecklist(gate) {
     "freeze_deflated_sharpe_unavailable",
     "freeze_too_few_seed_replicates",
     "freeze_seed_replicate_invalid",
+    "freeze_ablation_missing",
+    "freeze_ablation_invalid",
   ].filter((token) => failed.has(token));
   const seedMean = "freeze_seed_mean_information_ratio_below_threshold";
   return checklist([
     ...preconditions.map((token) => ({
       ok: false,
       label: reasonLabel(token),
-      title: token === "freeze_seed_replicate_invalid" ? problems || null : null,
+      title:
+        token === "freeze_seed_replicate_invalid"
+          ? problems || null
+          : token === "freeze_ablation_invalid"
+            ? ablation.problem || null
+            : null,
     })),
-    {
-      ok: !failed.has("freeze_too_few_full_span_validations"),
-      label: reasonLabel("freeze_too_few_full_span_validations"),
-      value: gate.full_span_validations ?? "—",
-      threshold: `≥ ${t.min_full_span_validations ?? "—"}`,
-    },
-    {
-      ok: failed.has("freeze_deflated_sharpe_unavailable")
-        ? null
-        : !failed.has("freeze_deflated_sharpe_below_threshold"),
-      label: reasonLabel("freeze_deflated_sharpe_below_threshold"),
-      value: fmtSharpe(gate.deflated_sharpe_probability),
-      threshold: `≥ ${t.min_deflated_sharpe_probability ?? "—"}`,
-      title: DSR_TITLE,
-    },
+    ...(t.min_full_span_validations === undefined
+      ? []
+      : [
+          {
+            ok: !failed.has("freeze_too_few_full_span_validations"),
+            label: reasonLabel("freeze_too_few_full_span_validations"),
+            value: gate.full_span_validations ?? "—",
+            threshold: `≥ ${t.min_full_span_validations ?? "—"}`,
+          },
+        ]),
+    ...(t.min_deflated_sharpe_probability === undefined
+      ? []
+      : [
+          {
+            ok: failed.has("freeze_deflated_sharpe_unavailable")
+              ? null
+              : !failed.has("freeze_deflated_sharpe_below_threshold"),
+            label: reasonLabel("freeze_deflated_sharpe_below_threshold"),
+            value: fmtSharpe(gate.deflated_sharpe_probability),
+            threshold: `≥ ${t.min_deflated_sharpe_probability ?? "—"}`,
+            title: DSR_TITLE,
+          },
+        ]),
     // The conditions a gate recorded since the active series is graded states
     // in its own thresholds; an earlier gate states none and draws none.
     ...(t.min_information_ratio === undefined || t.min_information_ratio === null
@@ -4035,7 +4087,7 @@ function researchSessionPanel(detail, session) {
       ? el(
           "div",
           { class: "section-gap" },
-          el("h4", { class: "subsection-title" }, "定版检验"),
+          el("h4", { class: "subsection-title" }, "定版登记"),
           freezeGateChecklist(gate),
         )
       : null,

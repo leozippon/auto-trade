@@ -23,6 +23,7 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
+from autotrade.common.records import HOST_PATH_MARKER
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.replay.engine import StrategyDataView
 from autotrade.environment.replay.market import DailyMarketData
@@ -109,6 +110,17 @@ def test_the_book_panel_is_a_whitelist_of_the_frozen_identity(tmp_path: Path):
     }
     assert (payload["start_date"], payload["settled_through"]) == ("20260105", "20260105")
     assert "/private/lake" not in json.dumps(payload)
+
+
+def test_a_broken_book_record_reads_unreadable_without_its_host_path(tmp_path: Path):
+    root = engine_book(tmp_path, "20260105")
+    for content in ("{broken", "[1, 2]"):
+        (root / "book.json").write_text(content, encoding="utf-8")
+        payload = trading.book_payload(tmp_path, BOOK)
+        assert payload["state"] == "unreadable" and payload["error"]
+        response = TestClient(create_app(tmp_path)).get(f"/api/trading/paper/books/{BOOK}/book")
+        for text in (json.dumps(payload), response.text):
+            assert str(tmp_path) not in text and HOST_PATH_MARKER in text
 
 
 def test_the_book_and_its_card_carry_the_stored_verdict_as_written(tmp_path: Path):

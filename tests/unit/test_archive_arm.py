@@ -4,7 +4,7 @@ An archived arm keeps its directory and gains one marker file. The script
 refuses an arm that still holds something live, archives and restores
 idempotently, and the arm stays exactly what it was to everything but the
 console's home list, the console's start of its worker and the PIT-view prune:
-a lineage arm and an arm of the consistency check.
+it stays an arm of the consistency check.
 """
 
 from __future__ import annotations
@@ -16,11 +16,9 @@ from pathlib import Path
 
 from autotrade.environment.runtime import utc_now_iso
 from autotrade.pipelines.ledger import ExperimentLedger, verdict_void
-from autotrade.pipelines.lineage import extract_lineage
 from autotrade.webui.registry import ARCHIVED_NAME, experiment_listing
 from scripts.dev.check_verdicts import current_arms
 from tests.unit.paper_book_fixture import paper_root, write_book_record
-from tests.unit.test_lineage import RESEARCH_END, RESEARCH_START, _arm
 from tests.unit.webui_research_arm import build_arm
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts/experiments/archive_arm.py"
@@ -109,17 +107,14 @@ def test_archive_and_restore_are_idempotent_and_move_only_the_home_list(tmp_path
     assert experiment_listing(root)["archived"] == 1
 
 
-def test_an_archived_arm_stays_a_lineage_arm_and_in_the_consistency_check(tmp_path: Path) -> None:
+def test_an_archived_arm_stays_in_the_consistency_check(tmp_path: Path) -> None:
     root = tmp_path / "experiments"
-    ancestor = _arm(root, "ancestor", [{"seed": 2, "loading": 0.6}, {"seed": 3, "loading": 0.4}])
-    params = ancestor / "hitl/params.json"
+    arm = build_arm(root, "current", "discarded")
+    params = arm / "hitl/params.json"
     params.write_text(
         json.dumps({**json.loads(params.read_text(encoding="utf-8")), "_created_at": utc_now_iso()}),
         encoding="utf-8",
     )
-    period = {"research_start": RESEARCH_START, "research_end": RESEARCH_END}
-    before = extract_lineage(root, ["ancestor"], **period)
-    archived = _archive(tmp_path, "ancestor", "--reason", "historical")
+    archived = _archive(tmp_path, "current", "--reason", "historical")
     assert archived.returncode == 0, archived.stderr
-    assert extract_lineage(root, ["ancestor"], **period) == before
-    assert current_arms(root) == [ancestor]
+    assert current_arms(root) == [arm]

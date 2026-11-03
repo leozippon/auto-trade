@@ -4,9 +4,10 @@ One JSONL file per experiment. The pipeline writes three record types:
 
 - ``research_session``: the arm's one research session, its outcome and the
   Steps of every attempt; it carries the arm's ``frozen`` block when the
-  nominee passed the freeze gate, otherwise ``arm_end``;
-- ``forward``: the continuous forward and Held-out replay of the frozen
-  artifact, its two slices and the graduation verdict;
+  nominee registered for the freeze, otherwise ``arm_end``;
+- ``forward``: the frozen artifact's reading on the sealed research years,
+  then its continuous forward and Held-out replay, the two slices and the
+  graduation verdict;
 - ``attempt_failed``: a session or replay that raised before its business
   record. It carries the error evidence and is ignored by every reader of the
   business types, so the attempt is re-runnable but auditable. A run killed
@@ -18,21 +19,13 @@ An operator may append one more, by hand and never by the pipeline:
 ``verdict_void`` withdraws a recorded graduation that later evidence showed
 was not one (who, when, why, and where the evidence is). The forward record
 stays as produced; :func:`experiment_verdict` reads the arm as ``voided``.
-An operator may also incubate one node of an arm whose research ended without
-a graduation (``scripts/experiments/incubate.py``): the pipeline then appends
-``incubation``, at most once per arm, with the node's entry-screen reading,
-the artifact it froze for it, the forward and Held-out reading of that
-artifact and the forward screen on it (``pipelines/incubation.py``). The
-arm's verdict is untouched; :func:`incubation_candidate` reads what Paper
-opens a book from.
-
-An arm created with ``lineage_arms`` also gets ``lineage``: the earlier arms
-whose research-period trials join its freeze-gate family, with a reference to
-the series the console extracted from them at creation
-(``pipelines/lineage.py``). The pipeline appends it before the arm's research
-session, after the worker pinned its research release, so a created arm's
-ledger stays empty until the arm runs: an unpinned ledger with records is a
-legacy arm to the release pin and the identity store.
+Until 2026-11-03 an operator could incubate one node of an arm whose research
+ended without a graduation, which appended ``incubation`` (the node's
+entry-screen reading, the artifact it froze, its forward and Held-out reading
+and the forward screen on it); nothing appends one any more, and the
+frozen-tree prune keeps what one froze (:func:`incubation_record`). An arm
+created before then with ``lineage_arms`` may also carry a ``lineage``
+record, which nothing reads.
 
 Every record carries the link keys ``experiment_id``, ``epoch_id``, ``fold_id``
 and ``run_id``: ``epoch_id`` names the stage (``research`` or ``forward``) and
@@ -71,45 +64,25 @@ FORWARD_STAGE = "forward"
 # research session and the forward replay.
 RESEARCH_SESSION_KEY = "research"
 FORWARD_SESSION_KEY = "forward"
-LINEAGE_RECORD_TYPE = "lineage"
-# Beside the ledger: the lineage series the console extracts at creation.
-LINEAGE_SERIES_NAME = "lineage_series.json"
 # An operator's withdrawal of a recorded graduation (:func:`verdict_void_record`).
 VERDICT_VOID_RECORD_TYPE = "verdict_void"
-# An operator's incubation of one node of a finished arm; its link keys are
-# ``epoch_id=forward``, ``fold_id=incubation`` and ``run_id=incubation_<hex>``.
+# An operator's incubation of one node of a finished arm, recorded before
+# 2026-11-03; its link keys are ``epoch_id=forward``, ``fold_id=incubation``
+# and ``run_id=incubation_<hex>``.
 INCUBATION_RECORD_TYPE = "incubation"
-INCUBATION_FIELDS = (
-    "incubated_by",
-    "reason",
-    "source_step_id",
-    "revision_id",
-    "entry",
-    "frozen",
-    # The boards the replay ran on and its book pins, and their origin
-    # (``incubation.incubation_boards``).
-    "permitted_boards",
-    "forward_reading",
-    "screen",
-)
 # How a research session ends the arm without a freeze (``arm_end.status``).
 # ``no_deliverable`` is a research outcome: the Agent's no_edge, a spent budget,
-# a nomination the freeze gate refused. ``environment_blocked`` is not one: the
+# a nomination that did not register. ``environment_blocked`` is not one: the
 # host kept failing the session's replays on one span and ended the session
 # (``session_tools.EnvironmentBlocked``), so nothing there was tested. Such an
-# arm is never incubated, is refused as a lineage arm
-# (``lineage.extract_lineage``) and is flagged on the console's home list.
+# arm is flagged on the console's home list.
 ENVIRONMENT_BLOCKED = "environment_blocked"
 ARM_END_STATUSES = ("no_deliverable", ENVIRONMENT_BLOCKED)
-# The verdicts an arm can be incubated from: research is over, nothing graduated.
-INCUBABLE_VERDICTS = ("no_deliverable", "discarded")
 PIPELINE_RECORD_TYPES = (
     "research_session",
     "forward",
     "attempt_failed",
-    LINEAGE_RECORD_TYPE,
     VERDICT_VOID_RECORD_TYPE,
-    INCUBATION_RECORD_TYPE,
 )
 FOLD_ERA_RECORD_TYPES = (
     "fold",
@@ -260,18 +233,6 @@ def forward_record(records: Sequence[Mapping[str, object]]) -> dict[str, object]
     return rows[0] if rows else None
 
 
-def lineage_record(records: Sequence[Mapping[str, object]]) -> dict[str, object] | None:
-    """The arm's recorded lineage, or None for an arm created without one.
-
-    Written once, at creation; two are a corrupt ledger and raise.
-    """
-
-    rows = [dict(record) for record in records if record.get("record_type") == LINEAGE_RECORD_TYPE]
-    if len(rows) > 1:
-        raise ValueError("the ledger holds more than one lineage for one arm")
-    return rows[0] if rows else None
-
-
 def verdict_void_record(records: Sequence[Mapping[str, object]]) -> dict[str, object] | None:
     """The operator's void of the arm's graduation, or None. At most one."""
 
@@ -292,22 +253,6 @@ def incubation_record(records: Sequence[Mapping[str, object]]) -> dict[str, obje
     if len(rows) > 1:
         raise ValueError("the ledger holds more than one incubation for one arm")
     return rows[0] if rows else None
-
-
-def require_incubable(records: Sequence[Mapping[str, object]]) -> None:
-    """Refuse an incubation of an arm whose research is not over, that
-    graduated (voided or not), or that already incubated a node: one
-    incubation per arm, so its nodes never shop the forward window."""
-
-    verdict = experiment_verdict(records)
-    status = None if verdict is None else verdict["status"]
-    if status not in INCUBABLE_VERDICTS:
-        raise ValueError(
-            f"only an arm whose verdict is {' or '.join(INCUBABLE_VERDICTS)} can be "
-            f"incubated; this arm's verdict is {status!r}"
-        )
-    if incubation_record(records) is not None:
-        raise ValueError("the arm already incubated a node; one incubation per arm")
 
 
 def research_over(records: Sequence[Mapping[str, object]]) -> bool:
@@ -382,28 +327,6 @@ def paper_candidate(records: Sequence[Mapping[str, object]]) -> dict[str, object
     }
 
 
-def incubation_candidate(records: Sequence[Mapping[str, object]]) -> dict[str, object] | None:
-    """What Paper opens an incubating book from, else None: the artifact the
-    incubation froze, in :func:`paper_candidate`'s shape, its seed
-    replicates' frozen blocks, the boards the replay ran on, and under
-    ``forward`` the forward reading, which names its replay result and span
-    as a forward record does. None when the arm incubated nothing or its
-    forward screen blocked."""
-
-    record = incubation_record(records)
-    if record is None or not record["screen"]["passed"]:  # type: ignore[index]
-        return None
-    block: Mapping[str, object] = record["frozen"]  # type: ignore[assignment]
-    return {
-        "artifact_id": str(block["artifact_id"]),
-        "output_path": str(block["output_path"]),
-        "models_path": str(block.get("models_path") or "") or None,
-        "seed_replicates": [dict(item) for item in block.get("seed_replicates") or ()],  # type: ignore[union-attr]
-        "permitted_boards": list(record["permitted_boards"]["boards"]),  # type: ignore[index]
-        "forward": dict(record["forward_reading"]),  # type: ignore[arg-type]
-    }
-
-
 class ExperimentLedger:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -427,15 +350,8 @@ class ExperimentLedger:
             and forward_record(self.read()) is not None
         ):
             raise ValueError("the arm already has its forward verdict")
-        if record_type == LINEAGE_RECORD_TYPE and lineage_record(self.read()) is not None:
-            raise ValueError("the arm already records its lineage")
         if record_type == VERDICT_VOID_RECORD_TYPE:
             require_voidable(self.read(), record)
-        if record_type == INCUBATION_RECORD_TYPE:
-            missing = [key for key in INCUBATION_FIELDS if not str(record.get(key) or "").strip()]
-            if missing:
-                raise ValueError(f"an incubation record must state {missing}")
-            require_incubable(self.read())
         append_versioned_jsonl(
             self.path, record, schema_version=LEDGER_RECORD_SCHEMA_VERSION
         )
@@ -488,8 +404,8 @@ def verdict_void(
     """The record that withdraws one arm's recorded graduation.
 
     Appended once, by an operator (``scripts/experiments/void_graduation.py``),
-    never by a run: its ``run_id`` names the record type, as a lineage record
-    names its own. ``recorded_at`` is the append's stamp.
+    never by a run: its ``run_id`` names the record type. ``recorded_at`` is
+    the append's stamp.
     """
 
     return {

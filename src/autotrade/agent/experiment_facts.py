@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from autotrade.environment.broker_core import STAMP_DUTY_CUTOVER
 from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.dividend_tax import (
     BONUS_SHARE_PAR_CNY,
@@ -60,7 +61,7 @@ def strategy_container_note(cpus: float, memory_bytes: int) -> str:
 
     A fact, not advice: how to use the cores and cards is the session's call,
     which a reference pack may suggest. The CPU quota and memory cap are the
-    arm's strategy container's own (``SandboxLimits``, as the run manifest
+    arm's strategy container's own (``SandboxConfig.spec``, as the run manifest
     carries them) and the thread variables are rendered by
     ``container_thread_env``, the very code the executor builds each strategy
     container's flags from, so the passage cannot drift from what a replay
@@ -97,11 +98,13 @@ SEARCH_ROOT_SHELL_NOTE = (
     "transcript 只能用 `read_file`/`grep` 读。"
 )
 
-# What a session knows about the periods after research end: that they exist
-# and are sealed, never their dates, slots or results.
+# What a session knows about the years it does not see: the sealed research
+# years by their dates (``research_geometry.sealed_years``), the periods after
+# research end only as sealed, never their dates, slots or results.
 SEALED_PERIODS_NOTE = (
-    "研究期末之后是前推期与 Held-out：定版产物在那里被连续回测一次并裁决是否通过样本外验收；"
-    "它们的日期、数据、回测区间与结果不进入任何会话。"
+    "可见研究期之后是封存研究年（research_geometry.sealed_years），研究期末之后是前推期与 Held-out："
+    "定版产物先在封存研究年上被宿主读一次，再在前推期与 Held-out 上被连续回测并裁决；"
+    "这些年份的数据、回测区间与结果不进入任何会话，前推期与 Held-out 的日期也不进入。"
 )
 
 
@@ -170,8 +173,8 @@ def build_experiment_facts(
             ),
         },
         "visibility_policy": {
-            "research_period_visible": True,
-            "after_research_end": SEALED_PERIODS_NOTE,
+            "visible_research_period": True,
+            "after_visible_research_period": SEALED_PERIODS_NOTE,
             "formal_strategy_read_roots": ["snapshot_dir", "asof_dir"],
         },
         "research_geometry": _as_mapping(manifest.get("research")) or None,
@@ -181,9 +184,9 @@ def build_experiment_facts(
         "research_scope": _research_scope(
             manifest=manifest, snapshot_config=snapshot_config
         ),
-        # The arm's selection state at session start: nothing frozen yet, and
-        # the trial pool the freeze gate deflates over before this session.
-        # ``False`` and zero counts are facts, not absences.
+        # The arm's state at session start: nothing frozen yet, and the
+        # Validations earlier attempts recorded. ``False`` and zero counts are
+        # facts, not absences.
         "arm": dict(_as_mapping(manifest.get("arm"))) or None,
         "budgets": _budget_facts(
             manifest,
@@ -241,10 +244,11 @@ def _research_scope(
     period = research.get("research_period")
     research_sentence = (
         f"The experiment's one research session researches the period {period}, one "
-        "complete year per label, and ends by freezing one full-period node "
-        "through the freeze gate or by ending the experiment without one; no "
-        "other session follows, and the frozen artifact is judged only on later, "
-        "sealed data."
+        "complete year per label, and ends by freezing one full-period node that "
+        "registers or by ending the experiment without one; no other session "
+        "follows, and the frozen artifact is judged only on sealed data: the "
+        "sealed research years after this period (research_geometry.sealed_years), "
+        "then the periods after research end."
         if period
         else None
     )
@@ -379,7 +383,7 @@ def _budget_facts(
             # CPU quota that same container is started with, from which its
             # OMP/MKL/OPENBLAS/NUMEXPR thread variables are derived. Read
             # from the run manifest, which carries the evaluator's own
-            # SandboxLimits -- the arm's, and the single source the executor
+            # strategy SandboxSpec -- the arm's, and the single source the executor
             # builds the `--cpus` flag from -- so a strategy that sets its own
             # thread count has the real number instead of a guess: a session
             # that guessed low spent two backtest slots on fit timeouts it had
@@ -424,13 +428,10 @@ def _artifact_contract_facts(
 
     start = dict(_as_mapping(manifest.get("start")))
     start["model_artifacts_empty"] = model_artifacts_empty
-    # The freeze gate the finish tool enforces and the graduation rules the
-    # frozen artifact is judged by later, both derived from the run's own
-    # rules. Rules only: no date after research end.
+    # The registration the finish tool enforces, the sealed gate and the
+    # graduation rules the frozen artifact is judged by later, all derived
+    # from the run's own rules. Rules only: no date after research end.
     acceptance = _as_mapping(manifest.get("acceptance_rules"))
-    research = _as_mapping(manifest.get("research"))
-    year_rows = research.get("years")
-    research_years = len(year_rows) if isinstance(year_rows, list) and year_rows else None
     return compact_mapping(
         {
             "required_entry": "output/main.py",
@@ -441,11 +442,7 @@ def _artifact_contract_facts(
             "start": compact_mapping(start),
             "modification_constraints": manifest.get("modification_constraints"),
             "acceptance_rules": (
-                AcceptanceRules.from_record(acceptance).agent_facts(
-                    research_years=research_years
-                )
-                if acceptance
-                else None
+                AcceptanceRules.from_record(acceptance).agent_facts() if acceptance else None
             ),
             "record_failed_attempts": manifest.get("record_failed_attempts"),
         }
@@ -476,7 +473,7 @@ def _broker_replay_facts(manifest: Mapping[str, object]) -> dict[str, object]:
                 {
                     "sell_bps_before_cutover": profile.get("stamp_duty_sell_bps_before_cutover"),
                     "sell_bps_from_cutover": profile.get("stamp_duty_sell_bps_from_cutover"),
-                    "cutover_date": profile.get("stamp_duty_cutover_date"),
+                    "cutover_date": STAMP_DUTY_CUTOVER,
                 }
             ),
             "slippage_bps": profile.get("slippage_bps"),

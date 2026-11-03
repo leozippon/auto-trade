@@ -27,18 +27,19 @@ import pandas as pd
 from autotrade.environment.runtime import chmod_tree
 from autotrade.environment.strategy import CN_TZ
 from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION, SnapshotBundle
+from tests.unit.acceptance_fixture import REQUIRED_RULES
 
 GENERATION = "synthetic_generation"
+# Two research years: the session sees Y1 and the test rules seal Y2.
 GEOMETRY = {
-    "research_start": "20230701",
+    "research_start": "20220701",
     "research_end": "20240630",
     "forward_end": "20250630",
     "heldout_end": "20250930",
 }
 # The release ends inside Held-out.
 RELEASE_END = "20250912"
-# History starts two months before a two-year research period (20220701) so
-# an arm may also research Y1..Y2 of the same market.
+# History starts two months before the research period (20220701).
 FIRST_DAY = date(2022, 5, 2)
 SYMBOLS = [f"{number:06d}.SZ" for number in range(1, 31)]
 EDGE_SYMBOL = SYMBOLS[0]
@@ -104,6 +105,9 @@ def _market() -> tuple[pd.DataFrame, pd.DataFrame]:
                     "pre_close": pre_close,
                     "pct_chg": round(close / pre_close - 1.0, 6),
                     "circ_mv": base_cap * close / 10.0,
+                    # Book-to-price spread over the names, independent of
+                    # size, so the slot's value leg is a real spread.
+                    "pb": (1.0 + (index * 7) % len(SYMBOLS) / 10.0) * close / 10.0,
                     "up_limit": round(pre_close * 1.1, 2),
                     "down_limit": round(pre_close * 0.9, 2),
                     "available_at": f"{day[:4]}-{day[4:6]}-{day[6:]}T17:30:00+08:00",
@@ -256,6 +260,7 @@ def make_arm(tmp_path: Path, **params: object) -> tuple[Path, Path]:
                 "include_events": False,
                 "include_text": False,
                 "include_intraday": False,
+                **REQUIRED_RULES,
                 **GEOMETRY,
                 **params,
             }

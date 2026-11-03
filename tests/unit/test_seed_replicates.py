@@ -1,9 +1,10 @@
-"""Seed replicates: a strategy that trains a model is judged on its seeds together.
+"""Seed replicates: a strategy that trains a model is frozen with its seeds.
 
 The arm's own pipeline runs end to end -- the real artifact store, ledger,
-freeze gate and verdict -- over scripted Validations whose daily active return
-is set per training seed (``SEED_BASE`` in the candidate's ``main.py``) and per
-stage, so the readings each seed gets are known before the gate reads them.
+freeze registration, sealed reading and verdict -- over scripted Validations
+whose daily active return is set per training seed (``SEED_BASE`` in the
+candidate's ``main.py``) and per stage, so the readings each seed gets are
+known before the pipeline reads them.
 """
 
 from __future__ import annotations
@@ -15,7 +16,10 @@ from pathlib import Path
 import pytest
 
 from autotrade.environment.artifacts import FilesystemArtifactStore
+from autotrade.environment.executor import StrategyRaised
+from autotrade.environment.replay.engine import BacktestError
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
+from autotrade.environment.runtime import utc_now_iso
 from autotrade.pipelines.config import (
     ArtifactRevision,
     EvaluationRequest,
@@ -32,7 +36,10 @@ from autotrade.pipelines.ledger import (
     ExperimentLedger,
     experiment_verdict,
     forward_record,
+    paper_candidate,
 )
+from scripts.dev.check_verdicts import check_arm
+from tests.unit.acceptance_fixture import REQUIRED_RULES
 from tests.unit.test_rolling_pipeline import (
     CONFIG_PROFILE,
     CONFIG_SCHEDULE,
@@ -47,6 +54,7 @@ FIT = '''REFIT_PERIOD = "quarter"
 SEED_BASE = {seed}
 SEEDS_PER_HEAD = {heads}
 MAX_SWAPS = {swaps}
+MECHANISM = {mechanism}
 
 
 def fit(context):
@@ -59,18 +67,19 @@ def generate_orders(context):
 NO_FIT = '''SEED_BASE = {seed}
 SEEDS_PER_HEAD = {heads}
 MAX_SWAPS = {swaps}
+MECHANISM = {mechanism}
 
 
 def generate_orders(context):
     return []
 '''
-# Daily active return by stage and training seed: research Validations replay
-# in mode ``valid``, the forward stage in ``heldout``. An active return of
-# 0.0009 a day or more reads an IR above 3.5 over the two research years, far
-# above any bar the few trials here set; -0.0010 reads near -3.9. Forward,
-# seed 1000 beats its panel well clear of its noise, seed 2000 barely and seed
-# 3000 loses nearly as much as the other two win: their mean stays above zero
-# and inside its noise.
+# Daily active return by stage and training seed: research Validations and the
+# sealed reading replay research years in mode ``valid``, the forward stage in
+# ``heldout``. An active return of 0.0009 a day or more reads a residual IR far
+# above the one-year bar; -0.0010 reads far below zero. Forward, seed 1000
+# beats its panel well clear of its noise, seed 2000 barely and seed 3000
+# loses nearly as much as the other two win: their mean stays above zero and
+# inside its noise.
 ALPHAS = {
     ("valid", 1000): 0.0012,
     ("valid", 2000): 0.0010,
@@ -80,10 +89,15 @@ ALPHAS = {
     ("heldout", 2000): 0.0002,
     ("heldout", 3000): -0.0014,
 }
+# A candidate with its mechanism switched off (``MECHANISM = False``, an
+# ablation) earns this daily active return whatever its seed.
+ABLATED = {"valid": 0.0003, "heldout": 0.0}
 
 
-def _source(seed: int, *, swaps: int = 4, heads: int = 2, fit: bool = True) -> str:
-    return (FIT if fit else NO_FIT).format(seed=seed, swaps=swaps, heads=heads)
+def _source(
+    seed: int, *, swaps: int = 4, heads: int = 2, fit: bool = True, mechanism: bool = True
+) -> str:
+    return (FIT if fit else NO_FIT).format(seed=seed, swaps=swaps, heads=heads, mechanism=mechanism)
 
 
 class SeedEvaluator:
@@ -91,13 +105,20 @@ class SeedEvaluator:
     exposure, so the active series is the seed's daily ``alpha`` plus noise."""
 
     def __init__(
-        self, root: Path, *, fail_seed: int | None = None, bare_seed: int | None = None
+        self,
+        root: Path,
+        *,
+        fail_seed: int | None = None,
+        bare_seed: int | None = None,
+        raise_seed: tuple[int, str] | None = None,
     ) -> None:
         self.root = root
         self.requests: list[EvaluationRequest] = []
         # Forward, this seed's replay raises; that one's stores no panel.
         self.fail_seed = fail_seed
         self.bare_seed = bare_seed
+        # (seed, start): that seed's own code raises in the replay from start.
+        self.raise_seed = raise_seed
 
     def evaluate(self, request: EvaluationRequest) -> EvaluationResult:
         self.requests.append(request)
@@ -105,11 +126,15 @@ class SeedEvaluator:
         seed = int(re.search(r"SEED_BASE = (\d+)", source)[1])  # type: ignore[index]
         if seed == self.fail_seed and request.mode == "heldout":
             raise TimeoutError("strategy inference exceeded 360s")
+        if (seed, request.start) == self.raise_seed:
+            raise BacktestError("generate_orders raised") from StrategyRaised("KeyError: 'close'")
+        ablated = "MECHANISM = False" in source
         result = _write_result(
             self.root / f"{request.mode}_{len(self.requests):03d}",
             [day for day in DAYS if request.start <= day <= min(request.end, RELEASE_END)],
-            alpha=ALPHAS[(request.mode, seed)],
-            seed=len(self.requests),
+            alpha=ABLATED[request.mode] if ablated else ALPHAS[(request.mode, seed)],
+            # The draw is the seed's and the stage's, whatever replayed before.
+            seed=seed + (28 if request.mode == "heldout" else 0) + (50 if ablated else 0),
         )
         sidecar = Path(result.result_ref).parent / STYLE_ARTIFACT_NAME
         analysis = json.loads(sidecar.read_text(encoding="utf-8"))
@@ -128,10 +153,19 @@ class SeedEvaluator:
 
 class SeedDeveloper:
     """Validates each scripted ``(source, span)`` and freezes ``nominee`` with
-    the candidates ``replicates`` names as its seed replicates."""
+    the candidates ``replicates`` names as its seed replicates and the one
+    ``ablation`` names as its ablation."""
 
     def __init__(
-        self, store, evaluator, candidates, *, nominee: int, replicates, deterministic: bool
+        self,
+        store,
+        evaluator,
+        candidates,
+        *,
+        nominee: int,
+        replicates,
+        deterministic: bool,
+        ablation: int | None = None,
     ):
         self.store = store
         self.evaluator = evaluator
@@ -139,6 +173,7 @@ class SeedDeveloper:
         self.nominee = nominee
         self.replicates = tuple(replicates)
         self.deterministic = deterministic
+        self.ablation = ablation
 
     def __call__(self, request: ResearchSessionRequest) -> ResearchSessionResult:
         steps = []
@@ -162,15 +197,26 @@ class SeedDeveloper:
             node_id=steps[self.nominee].step_id,
             seed_replicates=tuple(steps[index].step_id for index in self.replicates),
             deterministic=self.deterministic,
+            ablation=None if self.ablation is None else steps[self.ablation].step_id,
         )
 
 
-def _arm(tmp_path: Path, candidates, *, nominee=0, replicates=(), deterministic=False, **replays):
+def _arm(
+    tmp_path: Path,
+    candidates,
+    *,
+    nominee=0,
+    replicates=(),
+    deterministic=False,
+    ablation=None,
+    ablation_required=False,
+    **replays,
+):
     config = RollingExperimentConfig(
         experiment_id="arm",
         experiments_root=tmp_path / "experiments",
         geometry=GEOMETRY,
-        acceptance=acceptance_for({}),
+        acceptance=acceptance_for({**REQUIRED_RULES, "ablation_required": ablation_required}),
     )
     store = FilesystemArtifactStore(config.experiment_dir / "artifacts" / "strategy")
     evaluator = SeedEvaluator(config.experiment_dir / "artifacts" / "results", **replays)
@@ -186,6 +232,7 @@ def _arm(tmp_path: Path, candidates, *, nominee=0, replicates=(), deterministic=
             nominee=nominee,
             replicates=replicates,
             deterministic=deterministic,
+            ablation=ablation,
         ),
         trading_days=DAYS,
         ledger=ExperimentLedger(config.ledger_path),
@@ -194,10 +241,10 @@ def _arm(tmp_path: Path, candidates, *, nominee=0, replicates=(), deterministic=
 
 
 def test_a_model_nominee_freezes_with_its_seed_replicate_and_both_replay_forward(tmp_path: Path):
-    """The registered replicates are checked, counted in the seed mean, frozen
-    beside the nominee, and replayed exactly like it; the forward record
-    carries their readings and the series the seeds are judged on together,
-    whose mean above zero does not graduate a book while its bound is not."""
+    """The registered replicates are checked, frozen beside the nominee, and
+    replayed exactly like it on the sealed years and then forward; the
+    forward record carries their readings beside the nominee's, and a seed
+    mean whose bound is below zero decides nothing: the sealed gate passed."""
 
     pipeline, evaluator = _arm(
         tmp_path,
@@ -215,9 +262,8 @@ def test_a_model_nominee_freezes_with_its_seed_replicate_and_both_replay_forward
         "main.py: SEED_BASE = 2000",
         "main.py: SEED_BASE = 3000",
     ]
-    ratios = [gate["information_ratio"], *(entry["information_ratio"] for entry in seeds["replicates"])]
-    assert seeds["mean_information_ratio"] == pytest.approx(sum(ratios) / 3)
-    assert seeds["mean_information_ratio"] >= seeds["information_ratio_bar"]
+    # Registration reads no score: no bar, and no mean over the seeds.
+    assert "mean_information_ratio" not in seeds and "information_ratio_bar" not in seeds
     frozen = record["frozen"]
     assert [item["source_step_id"] for item in frozen["seed_replicates"]] == [
         "research_step_1",
@@ -229,13 +275,22 @@ def test_a_model_nominee_freezes_with_its_seed_replicate_and_both_replay_forward
     forward = pipeline.run_forward()
     replays = evaluator.requests[research:]
 
-    # Three replays of one span, under one Broker, the nominee first.
-    assert [request.revision.revision_id for request in replays] == [
-        frozen["artifact_id"],
-        *(item["artifact_id"] for item in frozen["seed_replicates"]),
-    ]
+    # Three replays of the sealed years, then three of forward and Held-out,
+    # each under one Broker, the nominee first.
+    artifacts = [frozen["artifact_id"], *(item["artifact_id"] for item in frozen["seed_replicates"])]
+    assert [request.revision.revision_id for request in replays] == artifacts * 2
     shapes = [(r.mode, r.start, r.end, r.continuation, r.broker_profile) for r in replays]
-    assert shapes == [shapes[0]] * 3
+    assert shapes[:3] == [shapes[0]] * 3 and shapes[3:] == [shapes[3]] * 3
+    sealed = forward["sealed"]
+    assert (shapes[0][1], shapes[0][2]) == (sealed["start"], sealed["end"]) == ("20230701", "20240630")
+    assert [row["source_step_id"] for row in sealed["seed_replicates"]] == [
+        "research_step_1",
+        "research_step_2",
+    ]
+    readings = sealed["slice"]["seed_replicates"]
+    assert [row["source_step_id"] for row in readings] == ["research_step_1", "research_step_2"]
+    assert all(row["residual_information_ratio"] > row["bar"] for row in readings)
+    assert sealed["slice"]["reasons"] == []
     assert [row["source_step_id"] for row in forward["seed_replicates"]] == [
         "research_step_1",
         "research_step_2",
@@ -251,12 +306,12 @@ def test_a_model_nominee_freezes_with_its_seed_replicate_and_both_replay_forward
             )
     block = forward["slices"]["forward"]
     # The nominee itself beat its panel, and so does the mean over the three
-    # seeds; the mean's lower bound does not clear zero.
+    # seeds; the mean's lower bound does not clear zero, and is reported.
     assert block["raw_readings"]["plain_selection"] > 0
     assert block["seed_mean"]["raw_readings"]["plain_selection"] > 0
     assert block["lower_bound"] < 0 < block["seed_mean"]["plain_excess"]
-    assert forward["verdict"]["reasons"] == ["forward_lower_bound_not_positive"]
-    assert experiment_verdict(pipeline.ledger.read())["status"] == "discarded"
+    assert forward["verdict"]["reasons"] == []
+    assert experiment_verdict(pipeline.ledger.read())["status"] == "graduated"
 
 
 def test_seeds_that_agree_forward_graduate_together(tmp_path: Path):
@@ -291,9 +346,8 @@ def test_a_model_nominee_without_a_replicate_is_refused(tmp_path: Path):
         ((_source(2000, swaps=3), "full"), "more than one line"),
         ((_source(1000, swaps=3), "full"), "does not give a seed name"),
         ((_source(1000, heads=4), "full"), "does not give a seed name"),
-        ((_source(2000), "Y2"), "replayed span Y2, not full"),
     ],
-    ids=["same_bytes", "seed_and_a_knob", "a_knob_not_the_seed", "a_seed_count", "another_span"],
+    ids=["same_bytes", "seed_and_a_knob", "a_knob_not_the_seed", "a_seed_count"],
 )
 def test_a_replicate_that_is_not_the_nominee_on_another_seed_is_refused(
     tmp_path: Path, replicate, problem
@@ -308,25 +362,24 @@ def test_a_replicate_that_is_not_the_nominee_on_another_seed_is_refused(
     assert problem in entry["problem"]
 
 
-def test_a_nominee_above_its_bar_is_refused_when_its_seed_mean_is_below(tmp_path: Path):
-    gate = _refused(
-        tmp_path,
-        [(_source(1000), "full"), (_source(4000), "full")],
-        replicates=(1,),
+def test_a_replicate_that_loses_does_not_hold_back_the_registration(tmp_path: Path):
+    """Registration reads no score: a valid replicate whose seed loses what
+    the nominee's wins registers beside it."""
+
+    pipeline, _evaluator = _arm(
+        tmp_path, [(_source(1000), "full"), (_source(4000), "full")], replicates=(1,)
     )
-    seeds = gate["seed_replicates"]
-    assert gate["information_ratio"] >= seeds["information_ratio_bar"]
-    assert seeds["mean_information_ratio"] < seeds["information_ratio_bar"]
-    assert gate["reasons"] == ["freeze_seed_mean_information_ratio_below_threshold"]
+    record = pipeline.run_research_session()
+    assert record["freeze_gate"]["passed"] is True
+    assert [item["source_step_id"] for item in record["frozen"]["seed_replicates"]] == [
+        "research_step_1"
+    ]
 
 
 @pytest.mark.parametrize("replicates", [(), (1,)], ids=["alone", "with_a_worse_seed"])
-def test_a_deterministic_model_nominee_owes_no_replicate_and_no_seed_mean(
-    tmp_path: Path, replicates
-):
+def test_a_deterministic_model_nominee_owes_no_replicate(tmp_path: Path, replicates):
     """A nominee that trains a model but declares its package deterministic
-    freezes on its own reading: without a replicate, and with one whose mean
-    falls below the bar. The gate and the frozen block record the
+    freezes without a replicate. The gate and the frozen block record the
     declaration for the operator's review."""
 
     pipeline, _evaluator = _arm(
@@ -340,35 +393,18 @@ def test_a_deterministic_model_nominee_owes_no_replicate_and_no_seed_mean(
     seeds = gate["seed_replicates"]
     assert gate["passed"] is True and gate["reasons"] == []
     assert seeds["trains_a_model"] is True and seeds["deterministic"] is True
-    if replicates:
-        assert seeds["mean_information_ratio"] < seeds["information_ratio_bar"]
     assert record["frozen"]["deterministic"] is True
 
 
-@pytest.mark.parametrize(
-    ("candidates", "replicates", "reason"),
-    [
-        (
-            [(_source(4000), "full"), (_source(1000), "full")],
-            (),
-            "freeze_information_ratio_below_threshold",
-        ),
-        (
-            [(_source(1000), "full"), (_source(3000, swaps=2), "full"), (_source(1000), "full")],
-            (2,),
-            "freeze_seed_replicate_invalid",
-        ),
-    ],
-    ids=["its_own_reading", "an_invalid_replicate"],
-)
-def test_a_deterministic_nominee_is_held_to_every_other_condition(
-    tmp_path: Path, candidates, replicates, reason
-):
-    gate = _refused(tmp_path, candidates, replicates=replicates, deterministic=True)
-    assert reason in gate["reasons"]
+def test_a_deterministic_nominee_is_held_to_its_replicates_validity(tmp_path: Path):
+    gate = _refused(
+        tmp_path,
+        [(_source(1000), "full"), (_source(3000, swaps=2), "full"), (_source(1000), "full")],
+        replicates=(2,),
+        deterministic=True,
+    )
+    assert gate["reasons"] == ["freeze_seed_replicate_invalid"]
     assert gate["seed_replicates"]["deterministic"] is True
-    assert "freeze_too_few_seed_replicates" not in gate["reasons"]
-    assert "freeze_seed_mean_information_ratio_below_threshold" not in gate["reasons"]
 
 
 def test_a_nominee_that_trains_no_model_is_judged_on_its_own_series(tmp_path: Path):
@@ -387,11 +423,45 @@ def test_a_nominee_that_trains_no_model_is_judged_on_its_own_series(tmp_path: Pa
     assert "seed_replicates" not in record["frozen"]
     research = len(evaluator.requests)
     forward = pipeline.run_forward()
-    assert len(evaluator.requests) == research + 1
+    # One sealed replay, one forward.
+    assert len(evaluator.requests) == research + 2
     block = forward["slices"]["forward"]
     assert "seed_mean" not in block
     assert 0 < block["lower_bound"] < block["plain_excess"]
     assert forward["verdict"]["status"] == "graduated"
+
+
+@pytest.mark.parametrize("start", ["20230701", "20240701"], ids=["on_the_sealed_years", "forward"])
+def test_a_replicate_whose_own_code_raises_is_a_verdict_and_never_graduates(tmp_path: Path, start):
+    """A seed replicate that raises in its own code, on the sealed years or
+    forward, is read, not retried: the record names it, it leaves every seed
+    mean, and the verdict discards the arm, whatever the nominee read."""
+
+    pipeline, _evaluator = _arm(
+        tmp_path,
+        [(_source(1000), "full"), (_source(2000), "full")],
+        replicates=(1,),
+        raise_seed=(2000, start),
+    )
+    pipeline.run_research_session()
+    forward = pipeline.run_forward()
+    sealed = start == forward["sealed"]["start"]
+    rows = forward["sealed"]["seed_replicates"] if sealed else forward["seed_replicates"]
+    [raised] = rows
+    assert raised["source_step_id"] == "research_step_1" and raised["result_ref"] is None
+    assert raised["strategy_error"] is True and "generate_orders raised" in raised["error"]
+    assert forward["sealed"]["slice"]["reasons"] == []
+    if not sealed:
+        assert "seed_mean" not in forward["slices"]["forward"]
+    assert forward["verdict"]["status"] == "discarded"
+    assert forward["verdict"]["reasons"] == ["replicate_strategy_error"]
+    assert paper_candidate(pipeline.ledger.read()) is None
+    # The consistency check reads the same verdict off the stored replays.
+    arm = pipeline.config.experiment_dir
+    (arm / "hitl" / "params.json").write_text(
+        json.dumps({**REQUIRED_RULES, "_created_at": utc_now_iso()}), encoding="utf-8"
+    )
+    assert [item.differences for item in check_arm(arm)] == [[], [], []]
 
 
 @pytest.mark.parametrize(
@@ -404,7 +474,7 @@ def test_a_nominee_that_trains_no_model_is_judged_on_its_own_series(tmp_path: Pa
         ),
         ({"bare_seed": 2000}, ValueError, "graded another series than the frozen book"),
     ],
-    ids=["its_replay_fails", "its_replay_has_no_panel"],
+    ids=["the_host_fails_its_replay", "its_replay_has_no_panel"],
 )
 def test_a_replicate_missing_from_the_mean_fails_the_stage_and_leaves_no_verdict(
     tmp_path: Path, replays, error, message

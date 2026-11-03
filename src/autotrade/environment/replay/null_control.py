@@ -32,6 +32,7 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 
+from autotrade.common.time import CN_TZ
 from autotrade.environment.broker import (
     BrokerProfile,
     ex_date_share_multiplier,
@@ -44,7 +45,7 @@ from autotrade.environment.broker_core import (
     is_bse_market,
     is_star_market,
 )
-from autotrade.environment.strategy import CN_TZ, StrategyContext, StrategySchedule
+from autotrade.environment.strategy import StrategyContext, StrategySchedule
 
 from .engine import run_daily_replay
 from .market import DailyMarketData

@@ -18,6 +18,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from autotrade.common.time import CN_TZ
 from autotrade.data_sources.tushare.common import (
     NO_MUTATION_FAILURE_EXIT_CODE,
     OFFICIAL_TOKEN_ENV,
@@ -34,7 +35,6 @@ from autotrade.environment.data.contracts import (
     node_visible_cutoff,
 )
 from autotrade.environment.data.snapshot import SnapshotConfig
-from autotrade.environment.strategy import CN_TZ
 
 from .engine import PaperTitlesNotLanded
 

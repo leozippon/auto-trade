@@ -48,6 +48,7 @@ from autotrade.pipelines.skills import (
 )
 from autotrade.webui import memory
 from autotrade.webui.server import create_app
+from tests.unit.acceptance_fixture import CREATE_RULES
 
 HOST_PATH = "/Data2/lzp/ADMCubeQuant/experiments/adopted/artifacts"
 SESSION_KEY = "research"
@@ -334,7 +335,16 @@ def test_held_is_not_mounted_the_page_says_which_arms_mount_a_source(
     # Params without a research end take the pipeline default, as the worker does.
     _params(current, operating_memory="curated+graduated")
     payload = memory.experiment_memory(experiments, "current")
-    assert payload["research_end"] == DEFAULT_RESEARCH_GEOMETRY.research_end
+    assert payload["admitted_by"] == DEFAULT_RESEARCH_GEOMETRY.research_end
+    # A sealed arm admits against the end of the years its session sees, as
+    # the session's mount does: a source whose Held-out ended in the sealed
+    # years is refused.
+    _params(current, operating_memory="curated+graduated", sealed_years=2)
+    payload = memory.experiment_memory(experiments, "current")
+    visible_end = DEFAULT_RESEARCH_GEOMETRY.split_sealed(2)[0][-1].end
+    assert payload["admitted_by"] == visible_end == "20230630"
+    sources = {source["source"]: source for source in payload["snapshot"]["sources"]}
+    assert sources["early"]["mounted"] is False and sources["curated"]["mounted"] is True
 
 
 def test_an_arm_without_a_verdict_publishes_none_and_mounts_nothing(
@@ -545,7 +555,7 @@ def test_creating_an_experiment_freezes_its_operating_memory(tmp_path: Path) -> 
     manager = ExperimentManager(tmp_path, experiments)
     params = {
         "experiment_id": "exp_frozen",
-        **DEFAULT_RESEARCH_GEOMETRY.to_record(),
+        **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES,
     }
     with (
         patch.object(manager, "_preflight"),

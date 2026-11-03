@@ -24,7 +24,6 @@ import pandas as pd
 import pytest
 
 from autotrade.environment.data.contracts import BENCHMARK_INDEXES
-from autotrade.environment.executor import _strategy_gpus
 from autotrade.environment.gpu import GpuUnavailableError, host_min_free_gpu_memory_mib
 from autotrade.environment.llm.model_profiles import LOCAL_QWEN_MODEL, MIMO_FLASH_MODEL
 from autotrade.environment.replay.style import MIN_REGRESSION_DAYS
@@ -56,6 +55,7 @@ from scripts.experiments._round import (
     Round,
     archived_ids,
 )
+from tests.unit.acceptance_fixture import CREATE_RULES
 from tests.unit.reference_pack_fixture import AFTER_RESEARCH
 from tests.unit.research_release_fixture import (
     BACKFILLED_HISTORY_START,
@@ -66,6 +66,17 @@ from tests.unit.research_release_fixture import (
 MODEL_ROLES = ("model", "subagent_model", "compact_model")
 # A four-digit calendar year, the shape every literal date in a directive takes.
 CALENDAR_YEAR = re.compile(r"(?<!\d)(?:19|20)\d{2}(?:\d{4})?(?!\d)")
+
+
+def _sealed_round(**fields: object) -> Round:
+    """A synthetic round that states how many research years it seals and
+    whether a freeze registers an ablation, as every round must (neither
+    rule has a console default)."""
+
+    overrides = {**CREATE_RULES, **dict(fields.pop("overrides", {}) or {})}  # type: ignore[call-overload]
+    return Round(overrides=overrides, **fields)  # type: ignore[arg-type]
+
+
 ROUND_FILES = sorted((REPO_ROOT / "scripts" / "experiments").glob("create_round_*.py"))
 
 
@@ -178,18 +189,9 @@ def test_a_round_dry_runs_against_its_seed_contract(
 ) -> None:
     """What `--dry-run` reports on a finished seed for this round's selection:
     the shared parameters pass the console's own pre-flight, geometry included,
-    and every arm passes after them. Each lineage arm a round names exists, as
-    the experiments it continues do."""
-    from tests.unit.test_lineage import _arm
-
+    and every arm passes after them."""
     rnd = ROUNDS[round_name]
     _synthetic_repo(tmp_path, monkeypatch, rnd)
-    for experiment_id in rnd.arms:
-        params = rnd.request_params(experiment_id)
-        for seed, name in enumerate(params.get("lineage_arms") or ()):
-            if not (tmp_path / "experiments" / name).exists():
-                research = (str(params["research_start"]), str(params["research_end"]))
-                _arm(tmp_path / "experiments", name, [{"seed": seed, "loading": 0.5}], research=research)
     assert rnd.main(["launcher", "0", "--dry-run"]) == 0
     out = capsys.readouterr().out.splitlines()
     assert "release synthetic, which every arm pins" in out[0]
@@ -203,9 +205,9 @@ def test_a_round_dry_runs_against_its_seed_contract(
 def test_the_dry_run_refuses_a_seed_built_for_another_selection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    rnd = Round(pit_views_seed="data/seed_probe", overrides={"text_datasets": ["report_rc"]})
+    rnd = _sealed_round(pit_views_seed="data/seed_probe", overrides={"text_datasets": ["report_rc"]})
     _synthetic_repo(tmp_path, monkeypatch, rnd)
-    other = Round(pit_views_seed=rnd.pit_views_seed, overrides={"text_datasets": ["anns_d"]})
+    other = _sealed_round(pit_views_seed=rnd.pit_views_seed, overrides={"text_datasets": ["anns_d"]})
     assert other.main(["launcher", "0", "--dry-run"]) == 1
     assert "different snapshot configuration" in capsys.readouterr().err
 
@@ -215,7 +217,7 @@ def test_the_dry_run_refuses_a_seed_whose_release_is_not_published(
 ) -> None:
     """Every arm pins the release its seed was built from, so a release this
     repository does not hold is refused before anything is POSTed."""
-    rnd = Round(pit_views_seed="data/seed_probe")
+    rnd = _sealed_round(pit_views_seed="data/seed_probe")
     _synthetic_repo(tmp_path, monkeypatch, rnd)
     shutil.rmtree(tmp_path / "data" / "research_releases" / "synthetic")
     assert rnd.main(["launcher", "0", "--dry-run"]) == 1
@@ -226,7 +228,7 @@ def test_the_dry_run_refuses_a_seed_whose_build_did_not_finish(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A contract and no views: the prebuild failed on its first view."""
-    rnd = Round(pit_views_seed="data/seed_probe")
+    rnd = _sealed_round(pit_views_seed="data/seed_probe")
     seed = _synthetic_repo(tmp_path, monkeypatch, rnd)
     (seed / UNFINISHED_BUILD_MARKER).write_text("{}", encoding="utf-8")
     assert rnd.main(["launcher", "0", "--dry-run"]) == 1
@@ -237,9 +239,9 @@ def test_the_dry_run_refuses_a_seed_whose_build_did_not_finish(
 def test_the_dry_run_refuses_a_research_period_that_is_not_whole_years(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    rnd = Round(pit_views_seed="data/seed_probe")
+    rnd = _sealed_round(pit_views_seed="data/seed_probe")
     _synthetic_repo(tmp_path, monkeypatch, rnd)
-    shifted = Round(pit_views_seed=rnd.pit_views_seed, overrides={"research_end": "20250331"})
+    shifted = _sealed_round(pit_views_seed=rnd.pit_views_seed, overrides={"research_end": "20250331"})
     assert shifted.main(["launcher", "0", "--dry-run"]) == 1
     assert "whole years" in capsys.readouterr().err
 
@@ -264,7 +266,7 @@ def test_an_eight_year_round_dry_runs_on_the_backfilled_release(
     """Every benchmark but STAR 50 has history before 2017-07 in the backfilled
     lake -- CSI 1000's constituents from their first section in 2014-10 -- so
     an eight-year arm on any of them passes the create pre-flight."""
-    rnd = Round(
+    rnd = _sealed_round(
         arms={
             f"eight_year_{code[:6]}": {"benchmark_index": code}
             for code in BENCHMARK_INDEXES
@@ -288,7 +290,7 @@ def test_an_eight_year_round_refuses_star_50_and_fundamentals(
     missing fundamental history itself (no PIT partition before the first
     decision view) is refused only when that view is built, which no dry-run
     reaches."""
-    rnd = Round(
+    rnd = _sealed_round(
         arms={
             "eight_year_star50": {"benchmark_index": STAR_50},
             "eight_year_fundamentals": {"benchmark_index": "000905.SH", "include_fundamentals": True},
@@ -320,7 +322,7 @@ def test_an_arm_mounts_the_pack_named_after_it_unless_it_names_another(
     request byte for byte without it; an arm or a round that names another
     pack, or "" for none, keeps it; and a default pack that is not there is
     refused like a named one."""
-    rnd = Round(
+    rnd = _sealed_round(
         arms={
             "conventional": {},
             "elsewhere": {"workspace_reference": "configs/workspace_refs/shared"},
@@ -334,7 +336,7 @@ def test_an_arm_mounts_the_pack_named_after_it_unless_it_names_another(
         "packless": "",
     }
     assert rnd.request_params(PROBE_ID)["workspace_reference"] == WEB_CREATE_DEFAULTS["workspace_reference"]
-    shared = Round(arms={"seed_a": {}}, overrides={"workspace_reference": "configs/workspace_refs/shared"})
+    shared = _sealed_round(arms={"seed_a": {}}, overrides={"workspace_reference": "configs/workspace_refs/shared"})
     assert shared.request_params("seed_a")["workspace_reference"] == "configs/workspace_refs/shared"
     _synthetic_repo(tmp_path, monkeypatch, rnd)
     (tmp_path / "configs/workspace_refs/conventional").rmdir()
@@ -344,47 +346,9 @@ def test_an_arm_mounts_the_pack_named_after_it_unless_it_names_another(
     assert err.splitlines()[-1] == "refused: conventional"
 
 
-def test_a_dry_run_reads_each_lineage_and_refuses_one_by_name(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """An arm names its lineage as a list of experiment ids. The dry-run reads
-    those arms through the console's own pre-flight and prints what they add
-    to the arm's freeze gate; a lineage arm that was never created refuses the
-    arm that names it, before anything is sent."""
-    from tests.unit.test_lineage import DAYS, _arm
-
-    rnd = Round(
-        arms={
-            "heir": {"lineage_arms": ["earlier_one", "earlier_two"]},
-            "orphan": {"lineage_arms": ["never_created"]},
-        },
-        pit_views_seed="data/seed_probe",
-    )
-    _synthetic_repo(tmp_path, monkeypatch, rnd)
-    for name, seed in (("earlier_one", 1), ("earlier_two", 2)):
-        _arm(
-            tmp_path / "experiments",
-            name,
-            [{"seed": seed, "loading": 0.5, "control": True}, {"seed": seed + 10, "loading": 0.5}],
-        )
-    assert rnd.main(["launcher", "0", "--dry-run"]) == 1
-    captured = capsys.readouterr()
-    [line] = [line for line in captured.out.splitlines() if line.startswith("  lineage: ")]
-    reading = json.loads(line.removeprefix("  lineage: "))
-    assert '"lineage_arms": ["earlier_one", "earlier_two"]' in captured.out
-    assert (reading["trials"], reading["host_trials"], reading["controls"]) == (2, 2, 2)
-    assert 1.0 < reading["effective_trials"] <= 2.0
-    assert reading["bar_days"] == len(DAYS)
-    assert reading["information_ratio_bar_floor"] > 0.98
-    assert "orphan: parameters rejected, nothing was sent: lineage arm never_created does not exist" in (
-        captured.err
-    )
-    assert captured.err.splitlines()[-1] == "refused: orphan"
-
-
 def test_a_round_without_arms_is_never_posted() -> None:
     with pytest.raises(SystemExit, match="no arms to create"):
-        Round().main(["launcher", "0"])
+        _sealed_round().main(["launcher", "0"])
 
 
 def test_a_closed_round_refuses_every_mode(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -397,7 +361,7 @@ def test_a_closed_round_refuses_every_mode(monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.setattr(_round, "health", unreachable)
     monkeypatch.setattr(_round, "post", unreachable)
-    rnd = Round(arms={"done": {}}, closed=True)
+    rnd = _sealed_round(arms={"done": {}}, closed=True)
     for flags in ([], ["done"], ["--dry-run"], ["--fill"], ["--fill", "--dry-run"]):
         with pytest.raises(SystemExit, match="this round is closed"):
             rnd.main(["launcher", "0", *flags])
@@ -420,26 +384,26 @@ def test_a_drifted_console_default_stops_the_launcher(monkeypatch: pytest.Monkey
     """A round's queued arms are created days after its first ones, with the
     defaults the console then has. A default the round relies on that moved
     stops a round that has not decided it for itself."""
-    Round().check_console_defaults()
+    _sealed_round().check_console_defaults()
 
     monkeypatch.setitem(_round.WEB_CREATE_DEFAULTS, "max_null_controls", 6)
     drift = '"max_null_controls": {"round": "12", "console": "6"}'
     with pytest.raises(SystemExit, match=re.escape(drift)):
-        Round().check_console_defaults()
-    Round(overrides={"max_null_controls": 6}).check_console_defaults()
+        _sealed_round().check_console_defaults()
+    _sealed_round(overrides={"max_null_controls": 6}).check_console_defaults()
 
 
 def test_a_round_leaves_the_boards_to_the_capital_unless_it_names_them(monkeypatch: pytest.MonkeyPatch) -> None:
     """A round's request leaves the boards null, so the console stamps the ones
     the arm's capital qualifies for; a console that stamped others by default
     would move the round's queued arms, and stops it."""
-    rnd = Round()
+    rnd = _sealed_round()
     assert rnd.request_params(PROBE_ID)["permitted_boards"] is None
-    assert Round(overrides={"permitted_boards": ["main"]}).request_params(PROBE_ID)["permitted_boards"] == ["main"]
+    assert _sealed_round(overrides={"permitted_boards": ["main"]}).request_params(PROBE_ID)["permitted_boards"] == ["main"]
     monkeypatch.setitem(_round.WEB_CREATE_DEFAULTS, "permitted_boards", ["main"])
     with pytest.raises(SystemExit, match="permitted_boards"):
         rnd.check_console_defaults()
-    Round(overrides={"permitted_boards": ["main"]}).check_console_defaults()
+    _sealed_round(overrides={"permitted_boards": ["main"]}).check_console_defaults()
 
 
 # --fill reads the arm list as a queue against the live console, so these are
@@ -472,7 +436,7 @@ def _fill_round(
     like the round). The returned list records, in
     order, the ids a create request was actually sent for.
     """
-    rnd = Round(arms=arms or {arm: dict(LOCAL_ROLES) for arm in FILL_ARMS}, pit_views_seed="data/seed_probe")
+    rnd = _sealed_round(arms=arms or {arm: dict(LOCAL_ROLES) for arm in FILL_ARMS}, pit_views_seed="data/seed_probe")
     _synthetic_repo(tmp_path, monkeypatch, rnd)
     for experiment_id in created:
         (tmp_path / "experiments" / experiment_id).mkdir(parents=True)
@@ -848,7 +812,7 @@ def test_a_gpu_smoke_pins_admissible_cards_and_without_one_records_nothing(
     merged = {"experiment_id": "arm", "workspace_reference": "packs/arm", "pit_views_seed": "", "gpu_count": 1}
     requested = SandboxSpec(gpu="auto", gpu_count=1)
     with pytest.raises(GpuUnavailableError):
-        _strategy_gpus(_strategy_sandbox_from_spec(requested, fit_timeout_seconds=1).limits)
+        _strategy_sandbox_from_spec(requested, fit_timeout_seconds=1).spec.devices()
 
     @dataclass(frozen=True)
     class Options:
@@ -889,7 +853,7 @@ def test_a_gpu_smoke_pins_admissible_cards_and_without_one_records_nothing(
 
     cards.append(5)
     assert "RuntimeError: assembled" in _round.smoke(merged)
-    assert _strategy_gpus(_strategy_sandbox_from_spec(assembled[0], fit_timeout_seconds=1).limits) == [5]
+    assert _strategy_sandbox_from_spec(assembled[0], fit_timeout_seconds=1).spec.devices() == [5]
 
     rnd, posted = _fill_round(tmp_path, monkeypatch, local=0)
 
@@ -928,7 +892,7 @@ def test_an_arm_is_tracked_only_when_it_names_a_tracking_error_cap() -> None:
         "beta_max",
     )
     assert all(key in WEB_CREATE_DEFAULTS and key not in BASE_OVERRIDES for key in optional)
-    rnd = Round(
+    rnd = _sealed_round(
         arms={
             "large": {"initial_cash": 1_000_000},
             "small": {"initial_cash": 100_000},
@@ -946,7 +910,9 @@ def test_an_arm_is_tracked_only_when_it_names_a_tracking_error_cap() -> None:
     assert [rnd.request_params("large")[key] for key in optional] == [None] * len(optional)
     # The account decides nothing: two arms an order of magnitude apart, both
     # silent about the mandate, are judged by exactly the same rules.
-    assert rules("large") == rules("small") == acceptance_for({}).to_record()
+    assert rules("large") == rules("small") == acceptance_for(
+        {"alpha": WEB_CREATE_DEFAULTS["alpha"], "sealed_years": 1, "ablation_required": False}
+    ).to_record()
     tracked = rules("tracked")
     assert (tracked["tracking_error_cap"], tracked["beta_min"], tracked["beta_max"]) == (
         0.08,
@@ -997,7 +963,7 @@ def test_an_arm_may_run_its_own_account_and_an_arm_that_states_none_inherits() -
     """
     assert "initial_cash" in WEB_CREATE_DEFAULTS
     assert "initial_cash" not in WEB_CLOSED_PARAMS
-    rnd = Round(
+    rnd = _sealed_round(
         arms={"states_it": {"initial_cash": 250_000}, "states_none": {}},
         overrides={"initial_cash": 100_000},
     )
@@ -1054,7 +1020,7 @@ def test_no_round_reuses_an_experiment_id() -> None:
             assert experiment_id not in seen, (experiment_id, seen.get(experiment_id), round_name)
             seen[experiment_id] = round_name
     with pytest.raises(ValueError, match="already used and archived"):
-        Round(arms={min(RETIRED_IDS): {}})
+        _sealed_round(arms={min(RETIRED_IDS): {}})
     archived = archived_ids()
     if not archived:
         pytest.skip("logs/archive/ is not present, so archived ids cannot be cross-checked")
@@ -1216,3 +1182,27 @@ def test_the_200k_pack_carries_the_owner_note_and_keeps_no_earlier_quota() -> No
     # the round's words; either anchor alone is too short to be a snapshot.
     assert "工作假说" in readme
     assert not [word for word in ("臂", "席位", "零技能") if word in readme]
+
+
+def test_a_round_that_states_no_sealed_years_or_ablation_rule_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The console has no value for ``sealed_years`` or ``ablation_required``
+    and the launcher sets neither: a round that does not state both is
+    refused before anything is sent, and one that states them passes the
+    same pre-flight."""
+
+    rnd = Round(pit_views_seed="data/seed_probe")
+    _synthetic_repo(tmp_path, monkeypatch, rnd)
+    for key in CREATE_RULES:
+        assert rnd.request_params(PROBE_ID).get(key) is None
+    params, reason = rnd.validated(PROBE_ID)
+    assert params is None
+    assert "missing required experiment parameters: ablation_required, sealed_years" in reason
+    half = Round(pit_views_seed="data/seed_probe", overrides={"sealed_years": 1})
+    params, reason = half.validated(PROBE_ID)
+    assert params is None and reason.endswith("missing required experiment parameters: ablation_required")
+    stated = _sealed_round(pit_views_seed="data/seed_probe")
+    params, reason = stated.validated(PROBE_ID)
+    assert reason == "" and params is not None
+    assert (params["sealed_years"], params["ablation_required"]) == (1, False)

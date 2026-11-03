@@ -19,7 +19,6 @@ newest generation needs: no pin can record a release retention is removing.
 from __future__ import annotations
 
 import fcntl
-import json
 import os
 import re
 import shutil
@@ -34,6 +33,7 @@ from pathlib import Path
 import pandas as pd
 import pyarrow.parquet as pq
 
+from autotrade.common.records import read_json_object, write_json_atomic
 from autotrade.data_quality import read_quality_report
 from autotrade.environment.data.contracts import (
     DOMAIN_REPORT_TYPES,
@@ -568,7 +568,7 @@ def _create_global_release(
                 "quality_dir": str(quality_dir),
             },
         }
-        _write_json(staging / _MANIFEST_NAME, manifest)
+        write_json_atomic(staging / _MANIFEST_NAME, manifest, default=None)
         staging.rename(target)
         published = _load_global_release(target)
         if published is None:  # Defensive: staging was fully validated before rename.
@@ -598,7 +598,7 @@ def _publish_experiment_pin(
             staging / "quality",
             fundamental_status_name=shared.fundamental_status_name,
         )
-        _write_json(
+        write_json_atomic(
             staging / _MANIFEST_NAME,
             {
                 "schema_version": _SCHEMA_VERSION,
@@ -607,6 +607,7 @@ def _publish_experiment_pin(
                 "created_at": _utc_now(),
                 "quality_files": quality_files,
             },
+            default=None,
         )
         staging.rename(target)
         return _load_experiment_pin(
@@ -992,20 +993,12 @@ def _read_generation(path: Path) -> dict[str, object]:
 
 
 def _read_json(path: Path, *, description: str) -> dict[str, object]:
+    """The record at ``path``, or this module's ``RuntimeError`` naming it."""
+
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"invalid {description}: {path}: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise RuntimeError(f"invalid {description}: expected object at {path}")
-    return payload
-
-
-def _write_json(path: Path, payload: dict[str, object]) -> None:
-    path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
+        return read_json_object(path)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"invalid {description}: {exc}") from exc
 
 
 def _utc_now() -> str:

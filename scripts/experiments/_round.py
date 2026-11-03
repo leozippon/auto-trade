@@ -15,20 +15,20 @@ carries the research geometry, the account, the cost stress and the
 per-session budgets, and BASE_EXPECTED_DEFAULTS pins the console creation
 defaults every round relies on -- above all the model roles an arm does not
 name, so a change of the console's model defaults must stop the launcher
-rather than silently move an arm onto another model. A round states what it decides for
-itself in `overrides`, and anything it states there stops being an expected
-default. What several rounds
-send alike -- a geometry, the graduation bars, a model pair's hosted roles, a
-lineage -- lives in `_profiles.py`; an open round imports from there and from
-here, never from another round file.
+rather than silently move an arm onto another model, and the sealed gate's
+level. A round states what it decides for itself in `overrides`, and anything
+it states there stops being an expected default; the rules the console has no
+value for (`sealed_years`) it must state, or every request is refused. What
+several rounds send alike -- a geometry, a model pair's hosted roles -- lives
+in `_profiles.py`; an open round imports from there and from here, never from
+another round file.
 
 A round's id is the day it is launched, in Beijing time, with a letter suffix
 (b, c, ...) when that id is already taken -- by an earlier round of the same
 day, or by one of the rounds 20261008 to 20261015 that were named ahead of the
 calendar between 2026-10-03 and 10-08 -- and its arms' ids end in it. Nothing
 reads an order into these ids: the queue is the arm order of a round file,
-lineages name their arms, and RETIRED_IDS and the reuse check compare whole
-ids.
+and RETIRED_IDS and the reuse check compare whole ids.
 
 A round whose arms have all been created is marked `closed`, and so is one
 whose remaining arms are withdrawn: they leave its arm list and their ids go
@@ -53,11 +53,7 @@ and stay at POST time.
 `--dry-run` judges the round before its arms: a probe request carrying only
 what every arm shares goes through the same pre-flight, so the geometry and the
 seed contract are read even for a round that has no arms yet. Such a round can
-be dry-run but not created. An arm that names `lineage_arms` passes the same
-pre-flight only when every one of them exists, researched the same period and
-recorded a non-control trial, and its dry-run reading adds a `lineage:` line:
-the trials and effective trials the console will record for it, and the IR bar
-at that count alone.
+be dry-run but not created.
 
 `--fill` reads the arm list as an ordered queue and keeps the console's running
 slots occupied: it asks /api/health how many are free under each of the two
@@ -134,12 +130,10 @@ from autotrade.environment.runtime import rmtree_keeping_file_modes
 from autotrade.pipelines.calendar import FULL_SPAN
 from autotrade.pipelines.config import (
     SNAPSHOT_CACHE_FORMAT_VERSION,
-    AcceptanceRules,
     ArtifactRevision,
     acceptance_for,
     research_span,
 )
-from autotrade.pipelines.experiment import lineage_summary
 from autotrade.pipelines.hitl_state import (
     WEB_CLOSED_PARAMS,
     WEB_CREATE_DEFAULTS,
@@ -148,9 +142,7 @@ from autotrade.pipelines.hitl_state import (
     select_gpus,
 )
 from autotrade.pipelines.ledger import ExperimentLedger
-from autotrade.pipelines.lineage import extract_lineage
 from autotrade.pipelines.pit_views_seed import UNFINISHED_BUILD_MARKER
-from autotrade.pipelines.verdict import information_ratio_bar
 from autotrade.pipelines.worker import build_experiment_pipeline, resolve_worker_options
 
 # The console's own id, local-arm and GPU-request rules; importing them keeps
@@ -185,7 +177,7 @@ BASE_EXPECTED_DEFAULTS: dict[str, object] = {
     # Replay-years the research session may spend on validations; the packs
     # size their rounds against it.
     "max_replay_years": 96,
-    # Derived from SandboxLimits.fit_timeout_seconds; packs promise the Agent a
+    # Derived from SandboxConfig.fit_timeout_seconds; packs promise the Agent a
     # fit budget of this size.
     "strategy_fit_timeout_seconds": 3600,
     "operating_memory": "curated+graduated",
@@ -205,6 +197,9 @@ BASE_EXPECTED_DEFAULTS: dict[str, object] = {
     # qualifies for (`broker.default_permitted_boards`); a round that wants
     # others names them.
     "permitted_boards": None,
+    # The sealed gate's one-sided level, one for every round so that every
+    # sealed reading is judged at the same level.
+    "alpha": 0.05,
 }
 
 # What every round decides the same way. Values, not commentary.
@@ -846,7 +841,7 @@ def smoke(merged: Mapping[str, object]) -> str:
 
 def _smoke_replays(merged: Mapping[str, object], starter: Path) -> str:
     """The replays of :func:`smoke`, in a scratch experiment assembled exactly
-    as the worker and incubate.py assemble one (its seed hardlinked in, the
+    as the worker assembles one (its seed hardlinked in, the
     configured sandbox image, the pretrained store pinned as the console will
     pin it, no Agent run); "" or the first failure."""
 
@@ -891,7 +886,9 @@ def _smoke_replays(merged: Mapping[str, object], starter: Path) -> str:
         ).pipeline
         output = scratch / "output"
         shutil.copytree(starter, output, ignore=shutil.ignore_patterns("__pycache__"))
-        _, years = pipeline.research_inputs()
+        # Every research year the arm replays, the sealed ones too: the
+        # forward stage replays those on the same seed.
+        years = pipeline.research_spans(options.rolling.geometry.research_years)
         request = research_span(years, FULL_SPAN).request(
             ArtifactRevision("smoke", output),
             schedule=options.rolling.schedule,
@@ -921,35 +918,6 @@ def seed_ready(seed: str) -> bool:
 
     root = REPO_ROOT / seed
     return not seed or ((root / "provider.json").is_file() and not (root / UNFINISHED_BUILD_MARKER).exists())
-
-
-def _lineage_reading(merged: Mapping[str, object], rules: AcceptanceRules) -> dict[str, object]:
-    """What an arm's ``lineage_arms`` would add to its freeze gate.
-
-    The figures the console records when it creates the arm, and the IR bar at
-    the lineage's effective trial count over the longest lineage series: a
-    floor, since each trial of the arm's own can only raise it.
-    """
-    extraction = extract_lineage(
-        EXPERIMENTS_ROOT,
-        list(merged["lineage_arms"]),  # type: ignore[call-overload]
-        research_start=str(merged["research_start"]),
-        research_end=str(merged["research_end"]),
-    )
-    summary = lineage_summary(extraction)
-    days = max((len(item["daily"]) for item in extraction["series"]), default=0)  # type: ignore[attr-defined]
-    return {
-        # The arms themselves are on the line above, as `lineage_arms`.
-        **{key: value for key, value in summary.items() if key != "arms"},
-        "information_ratio_bar_floor": (
-            information_ratio_bar(
-                float(summary["effective_trials"]), days, rules.min_dsr_probability  # type: ignore[arg-type]
-            )
-            if days >= 2
-            else None
-        ),
-        "bar_days": days,
-    }
 
 
 def _now() -> str:
@@ -1323,8 +1291,6 @@ class Round:
                 # whatever the arm names, mandate included.
                 rules = acceptance_for(merged)
                 print("  acceptance:", json.dumps(rules.to_record(), ensure_ascii=False))
-                if merged.get("lineage_arms"):
-                    print("  lineage:", json.dumps(_lineage_reading(merged, rules), ensure_ascii=False))
                 print(f"  directive: {len(directive.splitlines())} lines, {len(directive)} chars")
                 for line in directive.splitlines():
                     print("   |", line)

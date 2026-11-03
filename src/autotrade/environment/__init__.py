@@ -19,8 +19,9 @@ single-purpose components:
 - ``tools/``: Agent-facing tool contracts dispatched by the session runner.
 - ``llm/``: host-side LLM provider boundary (keys never reach the sandbox).
 - ``broker.py``/``broker_core.py``: simulated Broker and its pure fill math.
-- ``sandbox.py``/``sandbox_images.py``/``executor.py``/``gpu.py``: sandbox
-  lifecycle, derived images, command executors, GPU selection.
+- ``sandbox.py``/``sandbox_images.py``/``executor.py``/``commands.py``/``gpu.py``:
+  sandbox lifecycle, derived images, command executors and their result,
+  GPU selection.
 - ``contract_fingerprint.py``: digests of the strategy contract a sandbox image
   carries — the runtime modules it bakes, checked before every strategy
   container start, and the Agent-facing contract text, checked where an Agent

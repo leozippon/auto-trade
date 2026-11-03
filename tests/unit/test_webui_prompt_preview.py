@@ -29,7 +29,7 @@ from autotrade.agent.prompts import (
     STEP_TREE_SECTION,
 )
 from autotrade.environment.identity import AgentRefStore
-from autotrade.environment.sandbox import SandboxLimits
+from autotrade.environment.sandbox import SandboxConfig
 from autotrade.pipelines.config import (
     DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
     DEFAULT_DEADLINE_GRACE_MINUTES,
@@ -38,8 +38,8 @@ from autotrade.pipelines.config import (
     session_deadline_seconds,
 )
 from autotrade.pipelines.hitl_state import build_session_plan
-from autotrade.pipelines.research_session import LINEAGE_NOTE
 from autotrade.webui.prompt_preview import RUNTIME_PLACEHOLDER, build_prompt_preview
+from tests.unit.acceptance_fixture import REQUIRED_RULES
 
 SESSION_KEY = "research"
 
@@ -120,6 +120,7 @@ def _experiment(tmp_path: Path, **overrides: object) -> tuple[Path, Path]:
         "include_text": False,
         "include_intraday": False,
         "gpu_count": 0,
+        **REQUIRED_RULES,
     }
     params.update(overrides)
     (hitl / "params.json").write_text(json.dumps(params), encoding="utf-8")
@@ -162,7 +163,7 @@ def test_research_preview_carries_every_current_prompt_section(tmp_path: Path):
 def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path):
     prompt = str(_preview(tmp_path)["prompt"])
     facts = _facts(prompt)
-    limits = SandboxLimits()
+    sandbox = SandboxConfig()
     assert facts["budgets"] == {
         "context_compaction": facts["budgets"]["context_compaction"],
         "deadline_seconds": session_deadline_seconds(
@@ -191,19 +192,22 @@ def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path)
         "strategy_fit_timeout_seconds": float(
             rolling_default("strategy_fit_timeout_seconds")
         ),
-        "strategy_inference_timeout_seconds": limits.timeout_seconds,
-        "strategy_gpu_count": limits.gpu_count,
-        "strategy_cpus": limits.cpus,
-        "strategy_memory_bytes": limits.memory_bytes,
-        "strategy_container_note": strategy_container_note(limits.cpus, limits.memory_bytes),
+        "strategy_inference_timeout_seconds": sandbox.timeout_seconds,
+        "strategy_gpu_count": sandbox.spec.gpu_count,
+        "strategy_cpus": sandbox.spec.cpus,
+        "strategy_memory_bytes": sandbox.spec.memory_bytes,
+        "strategy_container_note": strategy_container_note(sandbox.spec.cpus, sandbox.spec.memory_bytes),
         "batch_validate_max_concurrency": DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
         "batch_validate_fit_timeout_note": BATCH_VALIDATE_FIT_TIMEOUT_NOTE,
     }
-    # The whole research period, read at research end.
+    # The visible years, read at their end; the sealed year is named, never
+    # offered.
     geometry = facts["research_geometry"]
-    assert geometry["research_period"] == f"{GEOMETRY.research_start}..{GEOMETRY.research_end}"
-    assert geometry["decision_time"] == GEOMETRY.research_decision_time.isoformat()
-    assert [year["label"] for year in geometry["years"]] == ["Y1", "Y2", "Y3", "Y4"]
+    visible, [sealed] = GEOMETRY.split_sealed(REQUIRED_RULES["sealed_years"])
+    assert geometry["research_period"] == f"{GEOMETRY.research_start}..{visible[-1].end}"
+    assert geometry["sealed_years"]["period"] == f"{sealed.start}..{GEOMETRY.research_end}"
+    assert geometry["decision_time"] == sealed.anchor.isoformat()
+    assert [year["label"] for year in geometry["years"]] == ["Y1", "Y2", "Y3"]
     assert "session" not in facts["identity"]
     assert facts["budgets"]["used_before_this_attempt"]["replay_years"] == 0
     # Runtime-only facts are marked, never invented.
@@ -276,37 +280,3 @@ def _facts(prompt: str) -> dict:
     body = prompt.split("```json\n", 1)[1].split("\n```", 1)[0]
     return json.loads(body)
 
-
-def test_preview_shows_the_lineage_the_session_will_see(tmp_path: Path):
-    """An arm created with a lineage carries its creation-time series file and
-    an empty ledger until it runs; the preview projects the same ``arm.lineage``
-    fact the session is given, before and after the pipeline records it, and an
-    arm without one shows none."""
-    from autotrade.pipelines.experiment import lineage_ledger_record
-    from autotrade.pipelines.ledger import ExperimentLedger
-    from autotrade.pipelines.lineage import write_lineage
-
-    assert "lineage" not in _facts(str(_preview(tmp_path / "plain")["prompt"]))["arm"]
-
-    directory, repo = _experiment(tmp_path / "with", lineage_arms=["earlier"])
-    arm = {
-        "experiment_id": "earlier",
-        "host_trials": 3,
-        "offline_trials": 2,
-        "controls": 1,
-        "undeclared_offline_validations": 0,
-        "fingerprints": ["bytes_a", "bytes_b", "bytes_c"],
-        "workspace_reference": "",
-    }
-    write_lineage(directory, {"arms": [arm], "series": []})
-    expected = {
-        "arms": ["earlier"],
-        "trials": 5,
-        "effective_trials": 5.0,
-        "note": LINEAGE_NOTE,
-    }
-    assert _facts(_preview_of(directory, repo, SESSION_KEY))["arm"]["lineage"] == expected
-    ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl").append(
-        lineage_ledger_record(directory, workspace_reference="")
-    )
-    assert _facts(_preview_of(directory, repo, SESSION_KEY))["arm"]["lineage"] == expected

@@ -35,6 +35,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 
+from autotrade.common.time import CN_TZ
 from autotrade.data_sources.tushare.common import STK_MINS_BY_DATE_DATASET, TEXT_SPECS
 from autotrade.environment.data.contracts import (
     DOMAIN_REFRESH_NODES,
@@ -48,7 +49,6 @@ from autotrade.environment.data.contracts import (
     TEXT_NODE,
 )
 from autotrade.environment.data.snapshot import SnapshotConfig
-from autotrade.environment.strategy import CN_TZ
 from autotrade.pipelines.pit_backend import required_release_raw_datasets
 
 from .engine import PaperDataNotReady

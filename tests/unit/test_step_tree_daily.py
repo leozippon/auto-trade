@@ -13,10 +13,10 @@ from autotrade.environment.tools.step_rollback import StepRollbackTool
 def _passing_gate(
     node_id: str,
     seed_replicates: tuple[str, ...] = (),
-    offline_trials: int = 0,
     deterministic: bool = False,
+    ablation: str | None = None,
 ) -> dict[str, object]:
-    """A freeze gate every node passes."""
+    """A registration every node passes."""
     return {"passed": True, "reasons": []}
 
 
@@ -55,7 +55,7 @@ def test_step_revision_can_be_selected_and_restored(tmp_path: Path):
     assert stat.S_IMODE((work_models / "weights.bin").stat().st_mode) == 0o666
     assert stat.S_IMODE(tree.node_models_dir(node).stat().st_mode) == 0o555
     assert stat.S_IMODE((tree.node_models_dir(node) / "weights.bin").stat().st_mode) == 0o444
-    finished = FinishSessionTool(tree, session_ref="fold_2026Q1", freeze_gate=_passing_gate).invoke({"outcome": "freeze"})
+    finished = FinishSessionTool(tree, session_ref="fold_2026Q1", registration=_passing_gate).invoke({"outcome": "freeze"})
     assert finished.finish and finished.value["revision_id"] == "revision_a"
 
 
@@ -97,7 +97,7 @@ def test_step_rollback_refuses_a_node_outside_the_current_session(tmp_path: Path
     registry = ToolRegistry(
         [
             StepRollbackTool(tree, work, session_ref="fold_2026Q1"),
-            FinishSessionTool(tree, session_ref="fold_2026Q1", freeze_gate=_passing_gate),
+            FinishSessionTool(tree, session_ref="fold_2026Q1", registration=_passing_gate),
         ]
     )
     position = tree.current_node_id

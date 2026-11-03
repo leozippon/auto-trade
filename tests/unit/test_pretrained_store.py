@@ -47,8 +47,10 @@ from autotrade.pipelines.worker import (
     resolve_worker_options,
 )
 from autotrade.webui.server import create_app
+from tests.unit.acceptance_fixture import CREATE_RULES
 from tests.unit.gpu_probe import stubbed_gpu_probe
 from tests.unit.paper_book_fixture import paper_root
+from tests.unit.test_paper_books import schema_2_record
 from tests.unit.webui_research_arm import build_arm
 
 OTHER_PIN = "0" * 64
@@ -86,7 +88,7 @@ def test_a_pin_is_empty_or_a_sha256_hex_digest() -> None:
         with pytest.raises(ValueError, match="pretrained_manifest_sha256"):
             pretrained_pin(bad)
     with pytest.raises(ValueError, match="pretrained_manifest_sha256"):
-        SandboxConfig(pretrained_manifest_sha256="abc")
+        SandboxConfig(spec=SandboxSpec(gpu=None, pretrained_manifest_sha256="abc"))
 
 
 # ----- strategy containers -----
@@ -96,7 +98,7 @@ def test_a_pinned_strategy_container_mounts_the_store_read_only(tmp_path: Path) 
     strategy = _strategy(tmp_path)
     with patch.object(DockerStrategyExecutor, "_start"):
         pinned = DockerStrategyExecutor(
-            strategy, SandboxConfig(pretrained_manifest_sha256=manifest_digest())
+            strategy, SandboxConfig(spec=SandboxSpec(gpu=None, pretrained_manifest_sha256=manifest_digest()))
         )
         unpinned = DockerStrategyExecutor(strategy)
     store = pretrained.PRETRAINED_STORE.resolve()
@@ -133,7 +135,7 @@ def test_no_strategy_container_starts_on_a_missing_or_different_store(
             patch.object(DockerStrategyExecutor, "_start") as start,
             pytest.raises(StrategyExecutionError, match=reason),
         ):
-            DockerStrategyExecutor(strategy, SandboxConfig(pretrained_manifest_sha256=pinned))
+            DockerStrategyExecutor(strategy, SandboxConfig(spec=SandboxSpec(gpu=None, pretrained_manifest_sha256=pinned)))
         start.assert_not_called()
 
 
@@ -199,7 +201,7 @@ def _create(client: TestClient, experiment_id: str, **params: object):
     with stubbed_gpu_probe():
         return client.post(
             "/api/experiments",
-            json={"params": {"experiment_id": experiment_id, **DEFAULT_RESEARCH_GEOMETRY.to_record(), **params}},
+            json={"params": {"experiment_id": experiment_id, **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES, **params}},
         )
 
 
@@ -235,7 +237,7 @@ def test_the_pin_reaches_the_session_and_every_strategy_container(tmp_path: Path
     pinned = spec(pretrained_manifest_sha256=OTHER_PIN)
     assert pinned.pretrained_manifest_sha256 == OTHER_PIN
     strategy = _strategy_sandbox_from_spec(pinned, fit_timeout_seconds=60)
-    assert strategy.pretrained_manifest_sha256 == OTHER_PIN
+    assert strategy.spec.pretrained_manifest_sha256 == OTHER_PIN
     assert spec().pretrained_manifest_sha256 == ""
     with pytest.raises(ValueError, match="pretrained_manifest_sha256"):
         spec(pretrained_manifest_sha256="latest")
@@ -253,13 +255,15 @@ def test_a_book_keeps_its_arms_pin_and_an_older_book_mounts_nothing(tmp_path: Pa
         repo_root=tmp_path,
         track="graduated",
     )
-    assert book.sandbox.pretrained_manifest_sha256 == manifest_digest()
+    assert book.sandbox.spec.pretrained_manifest_sha256 == manifest_digest()
     record_path = book.root / "book.json"
     record = json.loads(record_path.read_text(encoding="utf-8"))
-    assert record["sandbox"]["pretrained_manifest_sha256"] == manifest_digest()
-    del record["sandbox"]["pretrained_manifest_sha256"]
-    record_path.write_text(json.dumps(record), encoding="utf-8")
-    assert load_book(book.root).sandbox.pretrained_manifest_sha256 == ""
+    assert record["sandbox"]["spec"]["pretrained_manifest_sha256"] == manifest_digest()
+    # A schema-2 book created before the store existed has no pin at all.
+    older = schema_2_record(record, book)
+    del older["sandbox"]["pretrained_manifest_sha256"]
+    record_path.write_text(json.dumps(older), encoding="utf-8")
+    assert load_book(book.root).sandbox.spec.pretrained_manifest_sha256 == ""
 
 
 def test_a_paper_run_of_a_pinned_book_refuses_a_different_store(tmp_path: Path) -> None:
@@ -269,7 +273,7 @@ def test_a_paper_run_of_a_pinned_book_refuses_a_different_store(tmp_path: Path) 
             strategy_revision="strategy_research_abc",
             state_root=tmp_path / "book",
             data_factory=lambda start, target: pytest.fail("no data before the store check"),
-            sandbox=SandboxConfig(pretrained_manifest_sha256=pin),
+            sandbox=SandboxConfig(spec=SandboxSpec(gpu=None, pretrained_manifest_sha256=pin)),
         )
 
     engine(manifest_digest())

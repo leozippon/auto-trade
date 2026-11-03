@@ -7,9 +7,9 @@ docs/parameters-reference.md.
 
 Deliberately NOT exposed in the form: ``experiments_root``/``work_root`` are
 force-overwritten with manager-owned values on creation (ExperimentManager);
-``workspace_reference`` and ``lineage_arms`` are persisted and accepted by
-create/worker but have no form field, so a round file or a create request
-sets them; and ``WEB_INTERNAL_PARAMS``
+``workspace_reference`` is persisted and accepted by create/worker but has
+no form field, so a round file or a create request sets it; and
+``WEB_INTERNAL_PARAMS``
 describe the only supported research environment — the console API rejects them
 outright, so they can only be set in a worker-side ``params.json``.
 """
@@ -25,7 +25,7 @@ from autotrade.environment.llm.model_profiles import LLM_KEYS, MODEL_CHOICES
 from autotrade.pipelines.config import (
     BATCH_VALIDATE_MAX_CANDIDATES,
     MANDATED_DEFAULTS,
-    AcceptanceRules,
+    acceptance_default,
 )
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
 from autotrade.pipelines.skills import (
@@ -420,7 +420,7 @@ _FIELDS: list[dict[str, object]] = [
         "label": "跟踪误差上限（对基准指数）",
         "type": "float",
         "optional": True,
-        "help": "跟踪授权的开关：填入即为本实验设定跟踪授权——策略自身对本实验基准指数的残差跟踪误差上限（0.08 = 8%/年），研究期与前推期都要满足。留空即不设授权，跟踪误差与 β 只报告、不评级。没有上限却填 β 区间会被拒绝。",
+        "help": "跟踪授权的开关：填入即为本实验设定跟踪授权——策略自身对本实验基准指数的残差跟踪误差上限（0.08 = 8%/年），定版登记时提名节点须满足，前推期只报告。留空即不设授权，跟踪误差与 β 只报告、不评级。没有上限却填 β 区间会被拒绝。",
     },
     {
         "key": "max_drawdown",
@@ -429,7 +429,7 @@ _FIELDS: list[dict[str, object]] = [
         "type": "float",
         "optional": True,
         "placeholder": "留空：0.45",
-        "help": "权益回撤上限（0.45 = 45%），定版检验、前推与 Held-out 三段都不得超过。留空取 0.45，与有没有跟踪授权无关。",
+        "help": "权益回撤上限（0.45 = 45%）：定版登记时提名节点不得超过，Paper 账户也按它止损；前推与 Held-out 只报告。留空取 0.45，与有没有跟踪授权无关。",
     },
     {
         "key": "active_max_drawdown",
@@ -438,7 +438,7 @@ _FIELDS: list[dict[str, object]] = [
         "type": "float",
         "optional": True,
         "placeholder": "留空：0.30",
-        "help": "主动序列（策略日收益减随机对照组合合成收益）累计净值的回撤上限，同样约束三段。留空取 0.30，与有没有跟踪授权无关。",
+        "help": "主动序列（策略日收益减随机对照组合合成收益）累计净值的回撤上限，Paper 账户按它止损；前推与 Held-out 只报告。留空取 0.30，与有没有跟踪授权无关。",
     },
     {
         "key": "beta_min",
@@ -465,72 +465,38 @@ _FIELDS: list[dict[str, object]] = [
         "group": "预算与验收",
         "label": "成本压力倍数",
         "type": "float",
-        "help": "定版检验与样本外验收裁决的成本压力：研究期与前推段的主动超额在滑点放大到该倍数后仍须为正（按各段自己的换手定价）。",
+        "help": "成本压力读数的滑点倍数：研究期每次验证与前推段报告滑点放大到该倍数后的主动超额（按各段自己的换手定价），只报告，不参与裁决。",
     },
     {
-        "key": "min_active_ir",
+        "key": "sealed_years",
         "group": "预算与验收",
-        "label": "定版检验最低主动信息比率",
-        "type": "float",
-        "help": "提名节点研究期主动信息比率下限。创建时写入本实验，盖章后不随默认值漂移。",
-    },
-    {
-        "key": "min_dsr_probability",
-        "group": "预算与验收",
-        "label": "定版检验最低 DSR 概率",
-        "type": "float",
-        "help": "提名节点研究期主动信息比率的去膨胀夏普概率下限，须在 (0, 1]。",
-    },
-    {
-        "key": "min_positive_year_share",
-        "group": "预算与验收",
-        "label": "定版检验主动正数年比例",
-        "type": "float",
-        "help": "主动超额为正的研究年数不少于研究年数乘以该比例、向上取整。须在 (0, 1]。",
-    },
-    {
-        "key": "min_full_span_validations",
-        "group": "预算与验收",
-        "label": "定版检验最少完整研究期验证数",
+        "label": "封存研究年数",
         "type": "int",
         "min": 1,
-        "help": "本实验可测的完整研究期验证数下限（提名计入），整数且至少为 1。",
+        "required": True,
+        "help": "研究期最后这么多个研究年对会话封存：会话只看得到之前的年份，定版后由宿主在封存年份上读一次残差信息比率作为唯一的业绩检验。至少 1，且须留至少一个可见研究年；必填。",
+    },
+    {
+        "key": "ablation_required",
+        "group": "预算与验收",
+        "label": "定版须登记消融对照",
+        "type": "bool",
+        "required": True,
+        "help": "开启时，定版须同时登记一个消融对照：提名节点只改一行（关掉其赖以成立的机制，如 MECHANISM = False）的完整可见期验证。它随提名冻结、在封存研究年上回放，增量（提名主动序列减消融主动序列的残差信息比率）及其 t 统计量只记录、不参与裁决。检验某一研究假设的轮次开启，开放探索的轮次关闭；必填。",
+    },
+    {
+        "key": "alpha",
+        "group": "预算与验收",
+        "label": "封存检验显著性水平",
+        "type": "float",
+        "help": "封存年份上残差信息比率的单侧显著性水平，须在 (0, 1)；门槛为 z(1−α)/√年数。全项目共用一个值，各轮的封存读数才能放在一起比。",
     },
     {
         "key": "forward_confidence",
         "group": "预算与验收",
         "label": "前推下界置信度",
         "type": "float",
-        "help": "前推期年化主动超额（有种子复现时取逐日的种子平均）单侧块自助下界的置信度，须在 (0, 1)。",
-    },
-    {
-        "key": "recency_months",
-        "group": "预算与验收",
-        "label": "前推近月窗口（月）",
-        "type": "int",
-        "min": 1,
-        "help": "前推期最后该数个日历月的主动超额不得为负，整数且至少为 1。",
-    },
-    {
-        "key": "min_mean_gross",
-        "group": "预算与验收",
-        "label": "最低平均总仓位",
-        "type": "float",
-        "help": "前推期与 Held-out 平均总仓位下限，须在 (0, 1]。",
-    },
-    {
-        "key": "min_round_trips_per_month",
-        "group": "预算与验收",
-        "label": "前推每月最少往返交易数",
-        "type": "float",
-        "help": "前推期完成往返交易数按月计的下限；0 表示不要求交易次数。",
-    },
-    {
-        "key": "heldout_tolerance_z",
-        "group": "预算与验收",
-        "label": "Held-out 超额容差（标准误倍数）",
-        "type": "float",
-        "help": "Held-out 主动超额不得低于 −该值 × 前推期主动跟踪误差 / √年数，须为正。",
+        "help": "前推期年化主动超额（有种子复现时取逐日的种子平均）单侧块自助下界的置信度，须在 (0, 1)。下界只报告，不参与裁决。",
     },
     {"key": "max_replay_years", "group": "预算与验收", "label": "研究会话回测预算（年）", "type": "int",
      "help": "一个候选在其验证区间覆盖的每个研究年份计 1：完整研究期计研究年数，一批按候选数乘年数预留；回测独立计时（墙钟回补推理 deadline）。"},
@@ -720,7 +686,7 @@ def parameter_schema() -> dict[str, object]:
         # drawdowns keep a static placeholder and are not in this map.
         "acceptance_defaults": {
             "mandated": dict(MANDATED_DEFAULTS),
-            "unmandated": {key: getattr(AcceptanceRules(), key) for key in MANDATED_DEFAULTS},
+            "unmandated": {key: acceptance_default(key) for key in MANDATED_DEFAULTS},
         },
         "groups": [{"name": name, "fields": entries} for name, entries in groups.items() if entries],
     }

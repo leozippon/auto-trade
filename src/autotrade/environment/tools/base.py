@@ -8,6 +8,7 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from autotrade.environment.commands import CommandResult
 from autotrade.environment.runtime import redact_host_paths
 from autotrade.environment.time_budget import (
     SessionTimeBudgetAware,
@@ -68,30 +69,6 @@ class ToolSchemaError(ToolError):
     def __init__(self, message: str, **kwargs: object) -> None:
         kwargs.setdefault("error_type", "schema_error")
         super().__init__(message, **kwargs)  # type: ignore[arg-type]
-
-
-@dataclass(frozen=True)
-class CommandResult:
-    exit_code: int
-    stdout: str = ""
-    stderr: str = ""
-    timed_out: bool = False
-    # The runner discarded output beyond its capture cap: the stream held
-    # here is a prefix of what the command produced, not the whole of it.
-    stdout_truncated: bool = False
-    stderr_truncated: bool = False
-
-    def __post_init__(self) -> None:
-        if isinstance(self.exit_code, bool) or not isinstance(self.exit_code, int):
-            raise TypeError("exit_code must be an integer")
-
-    def to_record(self) -> dict[str, object]:
-        return {
-            "exit_code": self.exit_code,
-            "stdout": self.stdout,
-            "stderr": self.stderr,
-            "timed_out": self.timed_out,
-        }
 
 
 class ToolResultStore(Protocol):

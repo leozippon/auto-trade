@@ -2,8 +2,7 @@
 
 A round file is its arms and their directives. The values several rounds share
 -- the eight-year geometry and dataset selection a seed was prebuilt for, the
-graduation bars, the round-level parameters, the lineage that grows as the
-arms searching one baseline close -- live here, and a round imports them from
+graduation bars and the round-level parameters -- live here, and a round imports them from
 here and from `_round`, never from another round file, so a round can close
 without its values moving.
 
@@ -41,7 +40,9 @@ FUND_EIGHT_YEAR: dict[str, object] = {**EIGHT_YEAR, "include_fundamentals": True
 
 # Create-time graduation bars, named on every arm so the request records a
 # choice. They were the console's creation defaults when round 20260927 first
-# named them.
+# named them. All but forward_confidence were retired with the sealed gate on
+# 2026-11-03 (config.RETIRED_RULES), and the console refuses a create request
+# that names them.
 GATES: dict[str, object] = {
     "min_active_ir": 0.75,
     "min_dsr_probability": 0.975,
@@ -82,14 +83,3 @@ FUND_TITLE_EIGHT_YEAR_100K: dict[str, object] = {**FUND_EIGHT_YEAR_100K, **FUND_
 # Its seed at snapshot cache format 14 (observed-era visibility) on release
 # b50c220f... (logs/data/seed_8y_fundanns_20261024/).
 FUND_TITLE_PIT_VIEWS_SEED = "data/pit_views_seed_research_8y_fundanns_20261024"
-
-# The four arms of rounds 20261014c and 20261014d that tested hierarchical
-# continual memory on a numeric model (one pack, nine full-span legs replayed
-# on two card models): the family a later HCM arm on another carrier
-# continues (round 20261019).
-HCM_LINEAGE = [
-    "hcm_100k_8y_sol_qwen_20261014d",
-    "hcm_100k_8y_sol_dsf_20261014d",
-    "hcm_100k_8y_dsf_zgca_20261014c",
-    "hcm_100k_8y_sol_dsf_zgca_20261014c",
-]
