@@ -22,7 +22,7 @@ from autotrade.environment.artifacts import artifact_fingerprint
 from autotrade.environment.broker import BrokerProfile, DailyBroker
 from autotrade.environment.broker_core import board_of
 from autotrade.environment.data.snapshot import SnapshotConfig
-from autotrade.environment.sandbox import SandboxConfig
+from autotrade.environment.sandbox import GpuMode, SandboxConfig
 from autotrade.environment.strategy import CN_TZ
 from autotrade.paper import fills
 from autotrade.paper.book import (
@@ -450,6 +450,43 @@ def test_a_schema_2_book_loads_as_the_book_it_was(tmp_path: Path):
     del legacy["snapshot_config"]["screen_boards"]
     (book.root / BOOK_NAME).write_text(json.dumps(legacy), encoding="utf-8")
     with pytest.raises(ValueError, match="missing keys \\['screen_boards'\\]"):
+        load_book(book.root)
+
+
+@pytest.mark.parametrize(
+    ("count", "devices", "gpu"),
+    [(0, [], None), (1, [], GpuMode.AUTO), (2, [3, 5], (3, 5))],
+    ids=["cpu", "unpinned", "pinned"],
+)
+def test_a_schema_2_books_gpu_request_reads_as_the_spec_it_named(
+    tmp_path: Path, count: int, devices: list[int], gpu: object
+):
+    """Schema 2 named the GPU request as a count and pinned devices. A count
+    with no devices, which two of the live books carry, is a request the run
+    pins (``GpuMode.AUTO``); pinned devices stay pinned; no count is CPU-only."""
+    book = _graduated_book(tmp_path)
+    legacy = schema_2_record(read_json_object(book.root / BOOK_NAME), book)
+    legacy["sandbox"]["limits"].update(gpu_count=count, gpu_devices=devices)
+    (book.root / BOOK_NAME).write_text(json.dumps(legacy), encoding="utf-8")
+    spec = load_book(book.root).sandbox.spec
+    assert (spec.gpu, spec.gpu_count) == (gpu, count)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda limits: limits.pop("pids"),
+        lambda limits: limits.update(pids_limit=limits.pop("pids")),
+        lambda limits: limits.update(extra=1),
+    ],
+    ids=["missing", "renamed", "unknown"],
+)
+def test_a_schema_2_book_with_other_limits_keys_is_refused(tmp_path: Path, change):
+    book = _graduated_book(tmp_path)
+    legacy = schema_2_record(read_json_object(book.root / BOOK_NAME), book)
+    change(legacy["sandbox"]["limits"])
+    (book.root / BOOK_NAME).write_text(json.dumps(legacy), encoding="utf-8")
+    with pytest.raises(ValueError, match="schema-2 Paper sandbox limits must hold exactly"):
         load_book(book.root)
 
 

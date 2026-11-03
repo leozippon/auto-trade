@@ -709,9 +709,10 @@ class DailyPaperEngine:
                 raise PaperEngineError("persisted position is invalid")
             position = Position(**item)
             broker.positions[position.symbol] = position
-        # An account checkpointed before the ledger existed has no "lots"; it
-        # was untaxed, and an untaxed profile keeps no ledger.
-        lots = raw.get("lots") or {}
+        # Every checkpoint carries its lot ledger, empty when the profile is
+        # untaxed; one written before the ledger existed is refused earlier,
+        # by its profile record (``_load_state``).
+        lots = raw.get("lots")
         if not isinstance(lots, dict):
             raise PaperEngineError("persisted lot ledger is invalid")
         try:

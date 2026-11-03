@@ -368,6 +368,18 @@ def test_a_book_checkpointed_before_the_tax_existed_is_refused(tmp_path: Path):
     assert json.loads(path.read_text(encoding="utf-8")) == state
 
 
+def test_a_checkpoint_without_its_lot_ledger_is_refused(tmp_path: Path):
+    engine = _paper(tmp_path, UNTAXED)
+    for day in PAPER_SESSIONS[1:4]:
+        engine.run_day(day)
+    path = tmp_path / "paper" / ".paper_state.json"
+    state = json.loads(path.read_text(encoding="utf-8"))
+    del state["account"]["lots"]
+    path.write_text(json.dumps(state), encoding="utf-8")
+    with pytest.raises(PaperEngineError, match="persisted lot ledger is invalid"):
+        _paper(tmp_path, UNTAXED).run_day(PAPER_SESSIONS[4])
+
+
 def test_old_rule_withholds_cash_before_a_pre_cutover_short_sale():
     frame = _frame({SYMBOL: [("20150803", 10.0, 10.0), ("20150804", 9.0, 9.0), ("20150817", 9.0, 9.0)]})
     orders = {"20150803": [("buy", 1000, "09:30")], "20150817": [("sell", 1000, "09:30")]}
