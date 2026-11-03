@@ -31,7 +31,11 @@ from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
-from autotrade.common.records import read_json_object, write_json_atomic
+from autotrade.common.records import (
+    dataclass_from_record,
+    read_json_object,
+    write_json_atomic,
+)
 from autotrade.common.time import CN_TZ
 from autotrade.environment.artifacts import artifact_fingerprint
 from autotrade.environment.broker import BrokerProfile, default_permitted_boards
@@ -58,8 +62,11 @@ from .storage import read_jsonl
 
 BOOK_NAME = "book.json"
 # 2: the track and the pinned verdict rules. An older book is refused, never
-# migrated: its verdict would be read by rules nobody pinned.
-BOOK_SCHEMA_VERSION = 2
+# migrated: its verdict would be read by rules nobody pinned. 3: the snapshot
+# configuration as its own record (``SnapshotConfig.to_record``) where 2
+# stored its fields; a schema-2 book is read in 3's form
+# (``_schema_2_upgraded``) and its file is never rewritten.
+BOOK_SCHEMA_VERSION = 3
 STRATEGY_COPY_NAME = "strategy"
 TRACKS = ("graduated", "incubating")
 # Incubating books open at once; a killed book does not count.
@@ -216,7 +223,7 @@ def create_book(
         # continues the copied out-of-sample curve against the same benchmark
         # instead of splicing two different indexes into one line.
         "benchmark_index": options.rolling.benchmark_index,
-        "profile": asdict(profile),
+        "profile": profile.to_record(),
         "sandbox": {
             "image": sandbox.image,
             "docker_executable": sandbox.docker_executable,
@@ -225,7 +232,7 @@ def create_book(
             # existed has no key and mounts nothing.
             "pretrained_manifest_sha256": sandbox.pretrained_manifest_sha256,
         },
-        "snapshot_config": asdict(options.snapshot_config),
+        "snapshot_config": options.snapshot_config.to_record(),
         "max_intraday_row_group_rows": options.max_intraday_row_group_rows,
         "raw_dir": str(options.raw_dir),
         "fundamental_events_root": str(options.fundamental_events_root),
@@ -330,10 +337,12 @@ def load_book(state_root: str | Path) -> Book:
     record = read_json_object(root / BOOK_NAME, missing_ok=True)
     if not record:
         raise FileNotFoundError(f"no Paper book at {root}; create one with `run_paper.py init`")
+    if record.get("schema_version") == 2:
+        record = _schema_2_upgraded(record)
     if record.get("schema_version") != BOOK_SCHEMA_VERSION:
         raise ValueError(
             f"unsupported Paper book schema {record.get('schema_version')!r} in {root / BOOK_NAME} "
-            f"(this code reads {BOOK_SCHEMA_VERSION}): a book without a track and pinned verdict "
+            f"(this code reads 2 and {BOOK_SCHEMA_VERSION}): a book without a track and pinned verdict "
             "rules is not migrated; delete it and create it again"
         )
     sandbox = record["sandbox"]
@@ -350,14 +359,14 @@ def load_book(state_root: str | Path) -> Book:
         strategy_path=root / str(record["strategy_path"]),
         models_dir=root / str(record["models_dir"]) if record.get("models_dir") else None,
         schedule=StrategySchedule(**record["schedule"]),
-        profile=BrokerProfile(**record["profile"]),
+        profile=BrokerProfile.from_record(record["profile"]),
         sandbox=SandboxConfig(
             image=str(sandbox["image"]),
             docker_executable=str(sandbox["docker_executable"]),
             limits=SandboxLimits(**_tuples(sandbox["limits"])),
             pretrained_manifest_sha256=str(sandbox.get("pretrained_manifest_sha256") or ""),
         ),
-        snapshot_config=SnapshotConfig(**_tuples(record["snapshot_config"])),
+        snapshot_config=SnapshotConfig.from_record(record["snapshot_config"]),
         max_intraday_row_group_rows=int(record["max_intraday_row_group_rows"]),
         raw_dir=Path(record["raw_dir"]),
         fundamental_events_root=Path(record["fundamental_events_root"]),
@@ -416,6 +425,15 @@ def require_incubating_place(paper_root: str | Path, book_id: str) -> None:
             f"{len(others)} incubating Paper books are open ({', '.join(others)}), "
             f"the cap is {INCUBATING_BOOK_CAP}; a book frees its place when it is killed"
         )
+
+
+def _schema_2_upgraded(record: dict[str, object]) -> dict[str, object]:
+    """A schema-2 book's record in schema 3's form: 2 stored the snapshot
+    configuration's fields, which come back strictly as the configuration
+    whose record 3 stores."""
+
+    snapshot_config = dataclass_from_record(SnapshotConfig, record["snapshot_config"])
+    return {**record, "schema_version": BOOK_SCHEMA_VERSION, "snapshot_config": snapshot_config.to_record()}
 
 
 def _tuples(record: dict[str, object]) -> dict[str, object]:

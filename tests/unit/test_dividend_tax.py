@@ -350,14 +350,10 @@ def test_a_taxed_paper_book_carries_its_lots_across_runs(tmp_path: Path):
     assert state["account"]["cash"] == pytest.approx(100_000.0 - 10_000.0 + 500.0 + 2000 * 4.8 - 160.0)
 
 
-def test_a_book_checkpointed_before_the_tax_existed_runs_on_unchanged(tmp_path: Path):
-    """Its state has no profile field and no ledger: it is the untaxed book it
-    always was, and it may not be reopened as a taxed one."""
-
-    reference = tmp_path / "reference"
-    reference.mkdir()
-    for day in PAPER_SESSIONS[1:]:
-        _paper(reference, UNTAXED).run_day(day)
+def test_a_book_checkpointed_before_the_tax_existed_is_refused(tmp_path: Path):
+    """Its state's profile has no ``dividend_tax`` field. The profile record is
+    read strictly, so the account is refused rather than read as untaxed by
+    default, taxed or not, and the state is left as it was."""
 
     engine = _paper(tmp_path, UNTAXED)
     for day in PAPER_SESSIONS[1:4]:
@@ -365,14 +361,11 @@ def test_a_book_checkpointed_before_the_tax_existed_runs_on_unchanged(tmp_path: 
     path = tmp_path / "paper" / ".paper_state.json"
     state = json.loads(path.read_text(encoding="utf-8"))
     del state["profile"]["dividend_tax"]
-    del state["account"]["lots"]
     path.write_text(json.dumps(state), encoding="utf-8")
-    with pytest.raises(PaperEngineError, match="Broker profile differs"):
-        _paper(tmp_path, TAXED).run_day(PAPER_SESSIONS[4])
-    _paper(tmp_path, UNTAXED).run_day(PAPER_SESSIONS[4])
-
-    assert _state(tmp_path)["account"] == _state(reference)["account"]
-    assert _state(tmp_path)["account"]["cash"] == pytest.approx(100_000.0 - 10_000.0 + 500.0 + 2000 * 4.8)
+    for profile in (TAXED, UNTAXED):
+        with pytest.raises(PaperEngineError, match=r"missing keys \['dividend_tax'\]"):
+            _paper(tmp_path, profile).run_day(PAPER_SESSIONS[4])
+    assert json.loads(path.read_text(encoding="utf-8")) == state
 
 
 def test_old_rule_withholds_cash_before_a_pre_cutover_short_sale():

@@ -11,8 +11,10 @@ against the real Broker rather than a projection of it.
 
 from __future__ import annotations
 
+import json
 import math
 import unittest
+from dataclasses import fields
 from datetime import datetime
 
 from autotrade.environment.broker import (
@@ -368,28 +370,29 @@ class BrokerProfileCostTest(unittest.TestCase):
 
 
 class BrokerProfileValidationTest(unittest.TestCase):
-    def test_record_round_trips_every_constructor_field_and_names_the_cutover(self) -> None:
-        profile = BrokerProfile(
-            initial_cash=250_000.0,
-            commission_bps=2.5,
-            min_commission_cny=1.0,
-            stamp_duty_sell_bps_before_cutover=10.0,
-            stamp_duty_sell_bps_from_cutover=5.0,
-            transfer_fee_bps=0.2,
-            slippage_bps=3.0,
-        )
-        record = profile.to_record()
-        self.assertEqual(record["initial_cash"], 250_000.0)
-        self.assertEqual(record["commission_bps"], 2.5)
-        self.assertEqual(record["transfer_fee_bps"], 0.2)
-        self.assertEqual(record["stamp_duty_cutover_date"], STAMP_DUTY_CUTOVER)
-        # Every constructor field surfaces in the manifest record.
-        for name in (
-            "initial_cash", "commission_bps", "min_commission_cny",
-            "stamp_duty_sell_bps_before_cutover", "stamp_duty_sell_bps_from_cutover",
-            "transfer_fee_bps", "slippage_bps",
+    def test_the_record_round_trips_and_refuses_another_key_set(self) -> None:
+        for profile in (
+            BrokerProfile(
+                initial_cash=250_000.0,
+                commission_bps=2.5,
+                min_commission_cny=1.0,
+                transfer_fee_bps=0.2,
+                slippage_bps=3.0,
+                max_total_holdings=5,
+                dividend_tax=True,
+            ),
+            BrokerProfile(permitted_boards=("gem", "main")),
         ):
-            self.assertIn(name, record)
+            with self.subTest(profile=profile):
+                record = json.loads(json.dumps(profile.to_record()))
+                self.assertEqual(BrokerProfile.from_record(record), profile)
+                self.assertEqual(set(record), {item.name for item in fields(BrokerProfile)})
+        record = BrokerProfile().to_record()
+        with self.assertRaisesRegex(ValueError, "unknown keys \\['stamp_duty_cutover_date'\\]"):
+            BrokerProfile.from_record({**record, "stamp_duty_cutover_date": STAMP_DUTY_CUTOVER})
+        del record["dividend_tax"]
+        with self.assertRaisesRegex(ValueError, "missing keys \\['dividend_tax'\\]"):
+            BrokerProfile.from_record(record)
 
     def test_initial_cash_must_be_a_positive_finite_number(self) -> None:
         for value in (0, -1.0, float("nan"), float("inf"), True):

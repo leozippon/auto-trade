@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from autotrade.environment.broker_core import STAMP_DUTY_CUTOVER
 from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.dividend_tax import (
     BONUS_SHARE_PAR_CNY,
@@ -476,7 +477,7 @@ def _broker_replay_facts(manifest: Mapping[str, object]) -> dict[str, object]:
                 {
                     "sell_bps_before_cutover": profile.get("stamp_duty_sell_bps_before_cutover"),
                     "sell_bps_from_cutover": profile.get("stamp_duty_sell_bps_from_cutover"),
-                    "cutover_date": profile.get("stamp_duty_cutover_date"),
+                    "cutover_date": STAMP_DUTY_CUTOVER,
                 }
             ),
             "slippage_bps": profile.get("slippage_bps"),

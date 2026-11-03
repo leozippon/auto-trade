@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from types import MappingProxyType
 
+from autotrade.common.records import dataclass_from_record, dataclass_record
 from autotrade.environment.broker_core import (
     BOARDS,
     STAMP_DUTY_CUTOVER,
@@ -126,23 +127,14 @@ class BrokerProfile:
                 raise ValueError(f"{name} must be a non-negative finite number")
 
     def to_record(self) -> dict[str, object]:
-        return {
-            "profile_id": self.profile_id,
-            "source": self.source,
-            "initial_cash": self.initial_cash,
-            "commission_bps": self.commission_bps,
-            "min_commission_cny": self.min_commission_cny,
-            "stamp_duty_sell_bps_before_cutover": self.stamp_duty_sell_bps_before_cutover,
-            "stamp_duty_sell_bps_from_cutover": self.stamp_duty_sell_bps_from_cutover,
-            "stamp_duty_cutover_date": STAMP_DUTY_CUTOVER,
-            "transfer_fee_bps": self.transfer_fee_bps,
-            "slippage_bps": self.slippage_bps,
-            "max_total_holdings": self.max_total_holdings,
-            "max_single_name_weight": self.max_single_name_weight,
-            "dividend_tax": self.dividend_tax,
-            # Absent, like the parameter itself, on an unrestricted account.
-            **({} if self.permitted_boards is None else {"permitted_boards": list(self.permitted_boards)}),
-        }
+        """Every field by name: the one record of a profile, in a run
+        manifest and a Paper book alike, which ``from_record`` inverts."""
+
+        return dataclass_record(self)
+
+    @classmethod
+    def from_record(cls, record: object) -> BrokerProfile:
+        return dataclass_from_record(cls, record)
 
     # ---- the account's cost math, priced from the fields above ----
 

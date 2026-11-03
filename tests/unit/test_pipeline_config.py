@@ -13,7 +13,7 @@ import json
 import math
 import re
 import unittest
-from dataclasses import MISSING, asdict, fields, replace
+from dataclasses import MISSING, fields, replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -621,11 +621,11 @@ class DefaultsDriftTest(unittest.TestCase):
                 with self.subTest(value=value), self.assertRaisesRegex(ValueError, message):
                     profile({**base, "permitted_boards": value})
         self.assertIsNone(recorded.permitted_boards)
-        self.assertNotIn("permitted_boards", recorded.to_record())
+        self.assertIsNone(recorded.to_record()["permitted_boards"])
         self.assertEqual(pinned.permitted_boards, ("main", "gem"))
         self.assertEqual(pinned.to_record()["permitted_boards"], ["main", "gem"])
         # A profile read back from the JSON a Paper book keeps is the same profile.
-        self.assertEqual(BrokerProfile(**json.loads(json.dumps(asdict(pinned)))), pinned)
+        self.assertEqual(BrokerProfile.from_record(json.loads(json.dumps(pinned.to_record()))), pinned)
         # The run facts state the boards only where the profile pins them.
         self.assertNotIn("permitted_boards", _broker_replay_facts({"broker_profile": recorded.to_record()}))
         self.assertEqual(

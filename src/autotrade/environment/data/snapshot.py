@@ -578,6 +578,12 @@ class SnapshotConfig:
         return _window_start(decision_time, self.months_for(domain))
 
     def to_record(self) -> dict[str, object]:
+        """The configuration's one record: what a PIT view cache binds, what
+        a run manifest and the Agent's facts show, and what a Paper book
+        stores. It names each domain's resolved window rather than the shared
+        base, so ``from_record`` rebuilds a configuration that builds the same
+        snapshots and has this same record."""
+
         return {
             "decision_windows": {
                 "daily_months": self.months_for("daily"),
@@ -617,6 +623,88 @@ class SnapshotConfig:
                 "include_fundamentals": self.replay_include_fundamentals,
             },
         }
+
+    @classmethod
+    def from_record(cls, record: object) -> SnapshotConfig:
+        """The configuration ``record`` names; a missing or unknown key at any
+        level fails. The daily window becomes the base and every other
+        domain's window is explicit."""
+
+        top = _record_section(record, "SnapshotConfig", _SNAPSHOT_RECORD_KEYS)
+        windows = _record_section(top["decision_windows"], "decision_windows", _WINDOW_RECORD_KEYS)
+        datasets = _record_section(top["datasets"], "datasets", ("events", "macro", "text", "fundamentals"))
+        screen = _record_section(top["universe_screen"], "universe_screen", _SCREEN_RECORD_KEYS)
+        replay = _record_section(top["replay"], "replay", _REPLAY_RECORD_KEYS)
+        return cls(
+            window_months=windows["daily_months"],
+            fundamentals_window_months=windows["fundamentals_months"],
+            events_window_months=windows["events_months"],
+            macro_window_months=windows["macro_months"],
+            text_window_months=windows["text_months"],
+            intraday_trade_days=windows["intraday_trade_days"],
+            events_datasets=tuple(datasets["events"]),
+            macro_datasets=tuple(datasets["macro"]),
+            text_datasets=tuple(datasets["text"]),
+            fundamental_datasets=tuple(datasets["fundamentals"]),
+            news_sources=tuple(top["news_sources"]),
+            news_window_months=top["news_window_months"],
+            include_intraday=top["include_intraday"],
+            include_industry=top["include_industry"],
+            text_body_chars=top["text_body_chars"],
+            replay_include_events=replay["include_events"],
+            replay_include_text=replay["include_text"],
+            replay_include_minutes=replay["include_minutes"],
+            replay_include_macro=replay["include_macro"],
+            replay_include_fundamentals=replay["include_fundamentals"],
+            screen_exclude_st=screen["exclude_st"],
+            screen_exclude_new_listed_days=screen["exclude_new_listed_days"],
+            screen_min_circ_mv_yi=screen["min_circ_mv_yi"],
+            screen_max_circ_mv_yi=screen["max_circ_mv_yi"],
+            screen_min_price=screen["min_price"],
+            screen_max_price=screen["max_price"],
+            screen_boards=tuple(screen["boards"]),
+        )
+
+
+_SNAPSHOT_RECORD_KEYS = (
+    "decision_windows",
+    "datasets",
+    "news_sources",
+    "news_window_months",
+    "include_intraday",
+    "include_industry",
+    "text_body_chars",
+    "universe_screen",
+    "replay",
+)
+_WINDOW_RECORD_KEYS = (
+    "daily_months",
+    "fundamentals_months",
+    "events_months",
+    "macro_months",
+    "text_months",
+    "intraday_trade_days",
+)
+_SCREEN_RECORD_KEYS = (
+    "exclude_st",
+    "exclude_new_listed_days",
+    "min_circ_mv_yi",
+    "max_circ_mv_yi",
+    "min_price",
+    "max_price",
+    "boards",
+)
+_REPLAY_RECORD_KEYS = ("include_events", "include_text", "include_minutes", "include_macro", "include_fundamentals")
+
+
+def _record_section(value: object, name: str, keys: tuple[str, ...]) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{name} record must be a JSON object")
+    missing = sorted(set(keys) - set(value))
+    unknown = sorted(set(value) - set(keys))
+    if missing or unknown:
+        raise ValueError(f"{name} record has missing keys {missing} and unknown keys {unknown}")
+    return value
 
 
 @dataclass

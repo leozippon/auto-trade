@@ -12,11 +12,16 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from autotrade.common.records import read_json_object, write_json_atomic
+from autotrade.common.records import (
+    dataclass_record,
+    read_json_object,
+    write_json_atomic,
+)
 from autotrade.data_sources.tushare.cron_update import resolve_job_start_date
 from autotrade.environment.artifacts import artifact_fingerprint
-from autotrade.environment.broker import DailyBroker
+from autotrade.environment.broker import BrokerProfile, DailyBroker
 from autotrade.environment.broker_core import board_of
+from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.strategy import CN_TZ
 from autotrade.paper import fills
 from autotrade.paper.book import (
@@ -248,7 +253,7 @@ def _kill(root: Path, day: str = "20260105") -> None:
 def test_a_new_book_carries_its_track_and_pins_its_verdict_rules(tmp_path: Path):
     book = _graduated_book(tmp_path)
     record = read_json_object(book.root / BOOK_NAME)
-    assert record["schema_version"] == 2 and record["candidate_source"] == book.candidate_source == "graduated"
+    assert record["schema_version"] == 3 and record["candidate_source"] == book.candidate_source == "graduated"
     rules = record["verdict_rules"]
     assert (rules["checkpoint_days"], rules["kill_confidence"], rules["confirm_confidence"]) == (126, 0.841, 0.977)
     assert (rules["max_drawdown"], rules["active_max_drawdown"]) == (0.45, 0.30)
@@ -394,6 +399,23 @@ def test_a_book_of_an_older_schema_is_refused(tmp_path: Path):
     record = read_json_object(book.root / BOOK_NAME)
     (book.root / BOOK_NAME).write_text(json.dumps({**record, "schema_version": 1}), encoding="utf-8")
     with pytest.raises(ValueError, match="unsupported Paper book schema 1"):
+        load_book(book.root)
+
+
+def test_a_schema_2_book_loads_as_the_book_it_was(tmp_path: Path):
+    """Schema 2 stored the snapshot configuration's fields (the live books
+    predate schema 3); such a book loads to the book schema 3 stores, and its
+    profile and configuration records round-trip."""
+    book = _graduated_book(tmp_path)
+    record = read_json_object(book.root / BOOK_NAME)
+    assert BrokerProfile.from_record(record["profile"]) == book.profile
+    assert SnapshotConfig.from_record(record["snapshot_config"]).to_record() == record["snapshot_config"]
+    legacy = {**record, "schema_version": 2, "snapshot_config": dataclass_record(book.snapshot_config)}
+    (book.root / BOOK_NAME).write_text(json.dumps(legacy), encoding="utf-8")
+    assert load_book(book.root) == book
+    del legacy["snapshot_config"]["screen_boards"]
+    (book.root / BOOK_NAME).write_text(json.dumps(legacy), encoding="utf-8")
+    with pytest.raises(ValueError, match="missing keys \\['screen_boards'\\]"):
         load_book(book.root)
 
 

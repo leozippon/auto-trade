@@ -637,7 +637,7 @@ class DailyPaperEngine:
             "strategy_revision": self.strategy_revision,
             "strategy_path": str(self.strategy_path),
             "schedule": self.schedule.to_record(),
-            "profile": asdict(self.profile),
+            "profile": self.profile.to_record(),
             "start_date": "",
             "settled_through": "",
             "decisions": [],
@@ -674,11 +674,10 @@ class DailyPaperEngine:
             raise PaperEngineError("strategy path differs from the persisted Paper account")
         if state.get("schedule") != self.schedule.to_record():
             raise PaperEngineError("strategy schedule differs from the persisted Paper account")
-        # Compared as profiles, not as records: a field added to the profile
-        # later is absent from an older book's record and reads as its default,
-        # exactly as the book's own book.json does.
+        # Read strictly, as the book's own book.json is: a profile field added
+        # later fails an older account here instead of reading as a default.
         try:
-            persisted = BrokerProfile(**(state.get("profile") or {}))
+            persisted = BrokerProfile.from_record(state.get("profile"))
         except (TypeError, ValueError) as exc:
             raise PaperEngineError(f"persisted Broker profile is invalid: {exc}") from exc
         if persisted != self.profile:
