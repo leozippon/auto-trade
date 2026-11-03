@@ -35,6 +35,7 @@ from autotrade.environment.runtime import (
 from autotrade.environment.tools.workspace import WORKSPACE_MIN_FREE_BYTES
 from autotrade.pipelines.config import (
     DEFAULT_RESEARCH_GEOMETRY,
+    RETIRED_RULES,
     AcceptanceRules,
     acceptance_for,
 )
@@ -101,18 +102,11 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
     assert fields["active_max_drawdown"]["placeholder"] == "留空：0.30"
     assert "mandate_paired" not in fields["max_drawdown"]
     assert fields["beta_min"]["mandate_paired"] is True
-    for key in (
-        "sealed_years",
-        "alpha",
-        "forward_confidence",
-        "min_mean_gross",
-        "min_round_trips_per_month",
-        "heldout_tolerance_z",
-    ):
+    for key in ("sealed_years", "ablation_required", "alpha", "forward_confidence"):
         assert key in fields
         assert fields[key]["default"] == WEB_CREATE_DEFAULTS[key]
-    # The retired deflated-Sharpe bars are no form field.
-    assert not {"min_active_ir", "min_dsr_probability", "recency_months"} & set(fields)
+    # The retired bars are no form field.
+    assert not RETIRED_RULES & set(fields)
     assert [group["name"] for group in schema["groups"]] == [
         "基本与排程",
         "数据窗口",

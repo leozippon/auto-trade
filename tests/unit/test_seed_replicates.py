@@ -229,7 +229,8 @@ def _arm(
 def test_a_model_nominee_freezes_with_its_seed_replicate_and_both_replay_forward(tmp_path: Path):
     """The registered replicates are checked, frozen beside the nominee, and
     replayed exactly like it on the sealed years and then forward; the
-    forward record carries their readings beside the nominee's."""
+    forward record carries their readings beside the nominee's, and a seed
+    mean whose bound is below zero decides nothing: the sealed gate passed."""
 
     pipeline, evaluator = _arm(
         tmp_path,
@@ -291,12 +292,12 @@ def test_a_model_nominee_freezes_with_its_seed_replicate_and_both_replay_forward
             )
     block = forward["slices"]["forward"]
     # The nominee itself beat its panel, and so does the mean over the three
-    # seeds; the mean's lower bound does not clear zero.
+    # seeds; the mean's lower bound does not clear zero, and is reported.
     assert block["raw_readings"]["plain_selection"] > 0
     assert block["seed_mean"]["raw_readings"]["plain_selection"] > 0
     assert block["lower_bound"] < 0 < block["seed_mean"]["plain_excess"]
-    assert forward["verdict"]["reasons"] == ["forward_lower_bound_not_positive"]
-    assert experiment_verdict(pipeline.ledger.read())["status"] == "discarded"
+    assert forward["verdict"]["reasons"] == []
+    assert experiment_verdict(pipeline.ledger.read())["status"] == "graduated"
 
 
 def test_seeds_that_agree_forward_graduate_together(tmp_path: Path):

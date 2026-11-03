@@ -206,19 +206,20 @@ class AcceptanceRules:
     written before it existed is refused rather than judged under it.
     """
 
-    # Over the nominee's span and forward, and the Paper book's kill limits.
-    max_drawdown: float = _rule(0.45, "Equity drawdown limit of the freeze registration and the verdict.")
+    # The registration's limit over the nominee's span, and the Paper book's
+    # kill limits.
+    max_drawdown: float = _rule(0.45, "Equity drawdown limit of the freeze registration and of Paper.")
     cost_stress_multiplier: float = _rule(
         2.0,
-        "Forward verdict: multiple of the profile's slippage the active excess must survive.",
+        "Forward reading: multiple of the profile's slippage its reported active excess is stressed at.",
     )
     active_max_drawdown: float = _rule(
-        0.30, "Drawdown limit of the active series (strategy minus zero-skill panel)."
+        0.30, "Paper's drawdown limit of the active series (strategy minus zero-skill panel)."
     )
     # The tracking mandate: the strategy's own residual tracking error against
-    # the factor legs and its market beta, over the nominee's span and again
-    # forward. ``None`` means no mandate: both are measured and reported, not
-    # graded. The band is set exactly when the cap is -- a cap alone is
+    # the factor legs and its market beta over the nominee's span, a
+    # registration check, and reported forward. ``None`` means no mandate:
+    # both are measured and reported, not graded. The band is set exactly when the cap is -- a cap alone is
     # cheapest to meet by dropping beta.
     tracking_error_cap: float | None = _rule(
         None,
@@ -228,18 +229,8 @@ class AcceptanceRules:
     beta_min: float | None = _rule(None, "Tracking mandate: lower end of the market beta band.")
     beta_max: float | None = _rule(None, "Tracking mandate: upper end of the market beta band.")
     forward_confidence: float = _rule(
-        verdict.FORWARD_CONFIDENCE, "Forward verdict: one-sided block-bootstrap confidence."
-    )
-    min_mean_gross: float = _rule(
-        verdict.MIN_MEAN_GROSS, "Forward and Held-out: minimum mean gross exposure."
-    )
-    min_round_trips_per_month: float = _rule(
-        verdict.MIN_ROUND_TRIPS_PER_MONTH,
-        "Forward verdict: minimum completed round trips per month.",
-    )
-    heldout_tolerance_z: float = _rule(
-        verdict.HELDOUT_TOLERANCE_Z,
-        "Held-out: tolerated shortfall in standard errors of forward tracking error.",
+        verdict.FORWARD_CONFIDENCE,
+        "Forward reading: one-sided block-bootstrap confidence of its reported lower bound.",
     )
     # The sealed gate (``verdict.residual_bar``): its significance level, and
     # how many trailing research years the session never sees.
@@ -274,17 +265,6 @@ class AcceptanceRules:
             "forward_confidence",
             _open_unit(self.forward_confidence, "forward_confidence", include_one=False),
         )
-        object.__setattr__(
-            self, "min_mean_gross", _open_unit(self.min_mean_gross, "min_mean_gross", include_one=True)
-        )
-        trips = _finite_number(self.min_round_trips_per_month, "min_round_trips_per_month")
-        if trips < 0:
-            raise ValueError("min_round_trips_per_month must be at least zero")
-        object.__setattr__(self, "min_round_trips_per_month", trips)
-        z_score = _finite_number(self.heldout_tolerance_z, "heldout_tolerance_z")
-        if not z_score > 0:
-            raise ValueError("heldout_tolerance_z must be positive")
-        object.__setattr__(self, "heldout_tolerance_z", z_score)
         object.__setattr__(self, "alpha", _open_unit(self.alpha, "alpha", include_one=False))
         object.__setattr__(self, "sealed_years", _whole_int(self.sealed_years, "sealed_years"))
         if self.sealed_years < 1:
@@ -465,50 +445,23 @@ class AcceptanceRules:
                 "freezes_per_arm": "1: a freeze that registers ends the session",
             },
             "graduation": {
-                "evaluated_on": (
+                "admits": (
+                    "exactly when the sealed gate passes (sealed_gate above): the "
+                    "verdict's one condition"
+                ),
+                "reported": (
                     "after the sealed reading, one continuous replay of the frozen "
                     "artifact over the twelve months after research end and then "
                     "Held-out, graded on its active series against a panel drawn from "
-                    "that replay; no session sees either period"
+                    "that replay; no session sees either period. Its readings -- the "
+                    "sealed_gate statistic, the "
+                    f"{self.forward_confidence:.0%} block-bootstrap lower bound of "
+                    "active excess over the frozen book and its seed replicates, the "
+                    "active excess with slippage multiplied by "
+                    f"{self.cost_stress_multiplier}, drawdowns, round trips, exposure "
+                    "and tracking -- are recorded, and the forward statistic is pooled "
+                    "across frozen strategies; none decides the verdict"
                 ),
-                "sealed_gate": "passes (sealed_gate above)",
-                "forward": {
-                    "lower_bound": (
-                        f"{self.forward_confidence:.0%} one-sided block-bootstrap "
-                        "lower bound of annualized active excess > 0. Where the "
-                        "freeze registered seed replicates the series is the "
-                        "day-by-day average over the frozen book and its "
-                        "replicates, each replayed exactly like the frozen book; "
-                        "every other condition reads the frozen book itself"
-                    ),
-                    "max_drawdown": f"<= {self.max_drawdown}",
-                    "active_max_drawdown": f"<= {self.active_max_drawdown}",
-                    "excess_at_cost_stress": (
-                        "active excess > 0 with slippage multiplied by "
-                        f"{self.cost_stress_multiplier} on the strategy's own turnover"
-                    ),
-                    "round_trips": (
-                        f">= {self.min_round_trips_per_month} per month"
-                    ),
-                    "mean_gross": f">= {self.min_mean_gross}",
-                    "tracking_mandate": "as in freeze_registration, over the forward months",
-                    "strategy_error": "none",
-                    "minimum_detectable_excess": (
-                        "about 2.12 x research active tracking error / sqrt(years of "
-                        "forward data): a lower active tracking error is what makes a "
-                        "real edge detectable"
-                    ),
-                },
-                "heldout": {
-                    "active_excess": (
-                        f">= -{self.heldout_tolerance_z} x forward active "
-                        "tracking error / sqrt(years)"
-                    ),
-                    "max_drawdown": f"<= {self.max_drawdown}",
-                    "active_max_drawdown": f"<= {self.active_max_drawdown}",
-                    "mean_gross": f">= {self.min_mean_gross}",
-                    "strategy_error": "none",
-                },
             },
         }
 
@@ -556,10 +509,11 @@ RETIRED_SWITCHES = frozenset(
 )
 
 # The rules and the create parameter retired on 2026-11-03 with the
-# deflated-Sharpe freeze gate, its trial family and its lineage, when the
-# sealed gate replaced them. Every params.json written before then carries
-# them; readers accept exactly these keys beside ``RETIRED_SWITCHES`` and
-# derive nothing from them, so an earlier arm still lists in the console.
+# deflated-Sharpe freeze gate, its trial family and its lineage, and the
+# forward and Held-out bars, when the sealed gate became the verdict's one
+# condition. Every params.json written before then carries them; readers
+# accept exactly these keys beside ``RETIRED_SWITCHES`` and derive nothing
+# from them, so an earlier arm still lists in the console.
 RETIRED_RULES = frozenset(
     {
         "min_active_ir",
@@ -568,6 +522,9 @@ RETIRED_RULES = frozenset(
         "min_full_span_validations",
         "recency_months",
         "lineage_arms",
+        "min_mean_gross",
+        "min_round_trips_per_month",
+        "heldout_tolerance_z",
     }
 )
 

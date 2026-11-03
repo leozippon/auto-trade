@@ -474,7 +474,6 @@ def build_arm(
             rules=RULES,
             start=REPLAY["heldout_start"],
             end=REPLAY["replay_end"],
-            forward_tracking_error=float(forward["tracking_error"]),
             mean_gross=0.9,
             seed_replicates=replicates,
         )

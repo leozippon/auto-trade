@@ -1,4 +1,5 @@
-"""Verdict statistics of one arm: the sealed gate, the forward verdict, Held-out.
+"""Verdict statistics of one arm: the sealed gate, and the forward and
+Held-out readings reported beside it.
 
 Pure functions over frozen replay data (docs/pipeline-design.md). Every
 statistic grades one series, the ACTIVE one: the strategy's daily return
@@ -13,11 +14,13 @@ benchmark (market), the size and the value legs of the replay's own
 cross-section (``style.FACTOR_SERIES``) removes style, and the residual
 information ratio over the sealed research years is held to
 ``z(1 − alpha) / √years`` (:func:`residual_statistics`, :func:`residual_bar`).
-It is the verdict's only performance condition (:func:`sealed_slice`). The
-forward and Held-out slices read the series as it is: its annualised mean is
-its plain excess, its annualised standard deviation its tracking error and
-their ratio its IR (``stats.plain_statistics``). The holder's readings are not
-regressed either: :func:`holder_readings` compounds the book, the benchmark
+It is the verdict's one condition (:func:`sealed_slice`,
+:func:`graduation_verdict`). The forward and Held-out slices are reported,
+never judged: they read the series as it is -- its annualised mean is its
+plain excess, its annualised standard deviation its tracking error and their
+ratio its IR (``stats.plain_statistics``) -- and its residual reading, which
+:func:`pooled_reading` pools across frozen strategies. The holder's readings
+are not regressed either: :func:`holder_readings` compounds the book, the benchmark
 and the panel as stored. The inputs are the daily series a
 ``style_analysis.json`` sidecar stores, sliced by ``YYYYMMDD`` dates, so the
 forward and Held-out slices of one continuous replay are read from one
@@ -37,7 +40,7 @@ import hashlib
 import math
 from collections.abc import Callable, Mapping, Sequence
 from statistics import NormalDist
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -64,20 +67,15 @@ if TYPE_CHECKING:
     # ``config`` reads this module's constants for its defaults.
     from .config import AcceptanceRules
 
-# Forward verdict (docs/pipeline-design.md, the graduation verdict).
+# The forward slice's block-bootstrap lower bound (reported, never judged).
 FORWARD_CONFIDENCE = 0.80
 BOOTSTRAP_BLOCK_DAYS = 20
 BOOTSTRAP_DRAWS = 2_000
-MIN_ROUND_TRIPS_PER_MONTH = 1
-MIN_MEAN_GROSS = 0.5
-# Held-out: plain excess no worse than this many standard errors, the
-# standard error taken from the forward slice's tracking error.
-HELDOUT_TOLERANCE_Z = 1.28
 # Minimum detectable annualised plain excess at 80 % power and one-sided
 # 10 % (the frozen block's ``forward_mde``), in standard errors:
-# Φ⁻¹(0.90) + Φ⁻¹(0.80) = 2.12. F2 itself is a one-sided 20 % bound, so this
-# is a deliberately conservative planning figure (about 1.26 × the 1.68 the
-# applied gate would give), not F2's own bar.
+# Φ⁻¹(0.90) + Φ⁻¹(0.80) = 2.12. The reported F2 is a one-sided 20 % bound, so
+# this is a deliberately conservative planning figure (about 1.26 × the 1.68
+# that bound would give).
 FORWARD_MDE_Z = 2.12
 
 # The columns of one validation's daily graded series (:func:`active_daily`).
@@ -258,6 +256,57 @@ def ablation_increment(
         "series": series,
         **reading,
         "t_statistic": reading["residual_information_ratio"] * math.sqrt(reading["years"]),
+    }
+
+
+def _reported_residual(
+    analysis: Mapping[str, object], *, start: str, end: str, alpha: float
+) -> dict[str, object]:
+    """:func:`residual_reading` of a reported slice, or why it could not be
+    read under ``unmeasured``: a reading nothing judges never fails a stage."""
+
+    try:
+        return residual_reading(analysis, start=start, end=end, alpha=alpha)
+    except ValueError as exc:
+        return {"unmeasured": str(exc)}
+
+
+def null_p_value(residual_information_ratio: float, years: float) -> float:
+    """The one-sided p-value of a residual reading under the null of no
+    residual skill, whose residual IR is normal with standard deviation
+    ``1 / √years`` (:func:`residual_bar`): ``1 − Φ(IR × √years)``."""
+
+    return 1.0 - NormalDist().cdf(residual_information_ratio * math.sqrt(years))
+
+
+def pooled_reading(readings: Sequence[Mapping[str, object]]) -> dict[str, object]:
+    """Residual readings of independent frozen strategies pooled into one.
+
+    Each reading's residual IR is, under the null, normal with standard
+    deviation ``1 / √years``, so the pool weighs each by its years: the
+    pooled IR is ``Σ years × IR / Σ years``, its z-score the pooled IR ×
+    √(Σ years) and its one-sided p-value :func:`null_p_value`. A reading
+    that states no IR (``unmeasured``) is left out and counted. One forward
+    year cannot certify a strategy; the pool of every frozen strategy's
+    forward year is what the forward stage reads.
+    """
+
+    measured = [
+        (float(item["residual_information_ratio"]), float(item["years"]))  # type: ignore[arg-type]
+        for item in readings
+        if item.get("residual_information_ratio") is not None
+    ]
+    years = sum(length for _ratio, length in measured)
+    pooled: dict[str, object] = {"count": len(measured), "unmeasured": len(readings) - len(measured)}
+    if not measured:
+        return pooled
+    ratio = sum(value * length for value, length in measured) / years
+    return {
+        **pooled,
+        "years": years,
+        "residual_information_ratio": ratio,
+        "z": ratio * math.sqrt(years),
+        "p_value": null_p_value(ratio, years),
     }
 
 
@@ -694,26 +743,6 @@ CONDITIONS: tuple[Condition, ...] = (
     # over the sealed years against its bar, unread when the book raised.
     Condition("sealed", "sealed_strategy_error", lambda m, t: m.get("strategy_error") is not True, "S"),
     Condition("sealed", "sealed_residual_ir_below_bar", lambda m, t: m.get("strategy_error") is True or m["residual_information_ratio"] >= m["bar"], "S"),
-    # F1/H1: the frozen strategy raised during the forward replay, which then
-    # has no slice to judge (:func:`graduation_verdict`).
-    Condition("replay", "forward_strategy_error", lambda m, t: m["strategy_error"] != "forward", "F1"),
-    Condition("replay", "heldout_strategy_error", lambda m, t: m["strategy_error"] != "heldout", "H1"),
-    # The forward slice (:func:`forward_slice`). F2 reads the frozen book and
-    # its seed replicates as one series (:func:`forward_lower_bound`); F4-F7
-    # read the frozen book.
-    Condition("forward", "forward_lower_bound_not_positive", lambda m, t: m["lower_bound"] > 0, "F2"),
-    Condition("forward", "forward_max_drawdown_exceeded", lambda m, t: m["max_drawdown"] <= t["max_drawdown"], "F4"),
-    Condition("forward", "forward_active_drawdown_exceeded", lambda m, t: m["active_max_drawdown"] <= t["active_max_drawdown"], "F4"),
-    Condition("forward", "forward_not_positive_at_cost_stress", lambda m, t: m["excess_at_cost_stress"] > 0, "F5"),
-    Condition("forward", "forward_too_few_round_trips", lambda m, t: m["round_trips"] >= t["min_round_trips"], "F6"),
-    Condition("forward", "forward_exposure_below_floor", lambda m, t: m["mean_gross"] >= t["min_mean_gross"], "F6"),
-    Condition("forward", "forward_tracking_error_above_cap", _within_cap, "F7", requires=_CAP),
-    Condition("forward", "forward_beta_outside_band", _within_band, "F7", requires=_CAP),
-    # The Held-out slice (:func:`heldout_slice`).
-    Condition("heldout", "heldout_excess_below_tolerance", lambda m, t: m["plain_excess"] >= m["tolerance"], "H2"),
-    Condition("heldout", "heldout_max_drawdown_exceeded", lambda m, t: m["max_drawdown"] <= t["max_drawdown"], "H3"),
-    Condition("heldout", "heldout_active_drawdown_exceeded", lambda m, t: m["active_max_drawdown"] <= t["active_max_drawdown"], "H3"),
-    Condition("heldout", "heldout_exposure_below_floor", lambda m, t: m["mean_gross"] >= t["min_mean_gross"], "H4"),
 )
 
 
@@ -799,10 +828,6 @@ def _max_slice_drawdown(analysis: Mapping[str, object], start: str, end: str) ->
     )
 
 
-def _month_index(date: str) -> int:
-    return int(date[:4]) * 12 + int(date[4:6]) - 1
-
-
 def forward_slice(
     analysis: Mapping[str, object],
     *,
@@ -816,28 +841,29 @@ def forward_slice(
     mean_gross: float,
     seed_replicates: Sequence[tuple[Mapping[str, object], Mapping[str, object]]] = (),
 ) -> dict[str, object]:
-    """Statistics and failed conditions F2–F7 of the forward slice under the
-    arm's ``rules`` (docs/pipeline-design.md, the graduation verdict).
+    """The forward slice's readings under the arm's ``rules``: reported,
+    never judged (docs/pipeline-design.md, the graduation verdict).
 
-    The graded series is read as it is (:func:`graded_statistics`). F2 reads
+    The graded series is read as it is (:func:`graded_statistics`) and
+    through the sealed gate's statistic (``residual_reading``, what
+    :func:`pooled_reading` pools across frozen strategies). F2 is
     ``lower_bound``, the ``forward_confidence`` lower bound of its plain
     excess over the book and the seed replicates the freeze registered
-    together (:func:`forward_lower_bound`), which must be above zero.
-    ``seed_replicates`` are those replicates, replayed like the book, each as
-    what names it and its replay's sidecar; with any, the slice also carries
-    their own slices and the :func:`seed_mean` with the book. The cost stress
-    and ``active_max_drawdown`` read the book's own graded series;
-    ``max_drawdown`` limits the equity itself and the tracking mandate, when
-    one is set, the strategy's own tracking error and beta over the slice.
-    The holder's readings (:func:`holder_readings`) ride on every slice.
-    ``start``/``end`` are the slice's calendar bounds. ``turnover`` (traded
-    notional over the slice's opening equity),
-    ``round_trips`` and ``mean_gross`` are the slice's own figures from the
-    replay; ``slippage_bps`` is the Broker profile's. The cost stress charges
-    ``(cost_stress_multiplier − 1) × slippage_bps × turnover × 1e−4``,
-    annualised over the slice's days, against the plain excess
-    (:func:`excess_at_cost_stress`). F1 (strategy error) is
-    :func:`graduation_verdict`'s.
+    together (:func:`forward_lower_bound`). ``seed_replicates`` are those
+    replicates, replayed like the book, each as what names it and its
+    replay's sidecar; with any, the slice also carries their own slices and
+    the :func:`seed_mean` with the book. F5, the cost stress, and the active
+    drawdown read the book's own graded series; the equity drawdown, the
+    strategy's own tracking error and beta (``mandate``), the round trips and
+    the mean gross exposure are read beside them. The holder's readings
+    (:func:`holder_readings`) ride on every slice. ``start``/``end`` are the
+    slice's calendar bounds. ``turnover`` (traded notional over the slice's
+    opening equity), ``round_trips`` and ``mean_gross`` are the slice's own
+    figures from the replay; ``slippage_bps`` is the Broker profile's. The
+    cost stress charges ``(cost_stress_multiplier − 1) × slippage_bps ×
+    turnover × 1e−4``, annualised over the slice's days, against the plain
+    excess (:func:`excess_at_cost_stress`). ``parameters`` states what the
+    readings were taken at.
     """
 
     start, end = _span(start, end)
@@ -864,18 +890,18 @@ def forward_slice(
         slippage_bps=slippage_bps,
         turnover=turnover,
     )
-    months = _month_index(end) - _month_index(start) + 1
     readings = {
         "plain_excess": statistics["plain_excess"],
         "raw_readings": holder_readings(analysis, start=start, end=end),
     }
-    measured = {
+    return {
         "start": start,
         "end": end,
         "series": series,
         **statistics,
         **readings,
         **_with_seed_replicates(readings, seed_replicates, start, end),
+        "residual_reading": _reported_residual(analysis, start=start, end=end, alpha=rules.alpha),
         "lower_bound": forward_lower_bound(
             [analysis, *(sidecar for _identity, sidecar in seed_replicates)],
             start=start,
@@ -890,23 +916,13 @@ def forward_slice(
         "turnover": turnover,
         "round_trips": round_trips,
         "mean_gross": mean_gross,
-    }
-    thresholds = {
-        "forward_confidence": rules.forward_confidence,
-        "bootstrap_block_days": BOOTSTRAP_BLOCK_DAYS,
-        "bootstrap_draws": BOOTSTRAP_DRAWS,
-        "max_drawdown": rules.max_drawdown,
-        "active_max_drawdown": rules.active_max_drawdown,
-        **rules.mandate,
-        "panel_draws": PANEL_DRAWS,
-        "cost_stress_multiplier": rules.cost_stress_multiplier,
-        "min_round_trips": rules.min_round_trips_per_month * months,
-        "min_mean_gross": rules.min_mean_gross,
-    }
-    return {
-        **measured,
-        "reasons": judge("forward", measured, thresholds, rules),
-        "thresholds": thresholds,
+        "parameters": {
+            "forward_confidence": rules.forward_confidence,
+            "bootstrap_block_days": BOOTSTRAP_BLOCK_DAYS,
+            "bootstrap_draws": BOOTSTRAP_DRAWS,
+            "panel_draws": PANEL_DRAWS,
+            "cost_stress_multiplier": rules.cost_stress_multiplier,
+        },
     }
 
 
@@ -916,63 +932,40 @@ def heldout_slice(
     rules: AcceptanceRules,
     start: str,
     end: str,
-    forward_tracking_error: float,
     mean_gross: float,
     seed_replicates: Sequence[tuple[Mapping[str, object], Mapping[str, object]]] = (),
 ) -> dict[str, object]:
-    """Statistics and failed conditions H2–H4 of the Held-out slice under the
-    arm's ``rules`` (docs/pipeline-design.md, the graduation verdict).
+    """The Held-out slice's readings under the arm's ``rules``: reported,
+    never judged (docs/pipeline-design.md, the graduation verdict).
 
-    Non-catastrophic only: the graded series' plain excess must be at least
-    −``heldout_tolerance_z`` × ``forward_tracking_error`` / √(measured years),
-    the equity drawdown within ``max_drawdown``, the graded series' drawdown
-    within ``active_max_drawdown`` and the mean gross exposure at least
-    ``min_mean_gross``. H1 (strategy error) is :func:`graduation_verdict`'s.
-    The holder's readings (:func:`holder_readings`) are reported, not judged;
-    so are the seed replicates' slices and their :func:`seed_mean` with the
-    book, which the slice carries as :func:`forward_slice` does.
+    The graded series' statistics and its residual reading, the equity and
+    the graded series' drawdowns and the mean gross exposure, the holder's
+    readings (:func:`holder_readings`), and the seed replicates' slices and
+    their :func:`seed_mean` with the book, which the slice carries as
+    :func:`forward_slice` does.
     """
 
     start, end = _span(start, end)
-    forward_tracking_error = _non_negative(
-        forward_tracking_error, "forward_tracking_error"
-    )
     mean_gross = _non_negative(mean_gross, "mean_gross")
     graded, series = _graded(analysis)
     statistics, _daily = _measured(graded, start, end)
-    tolerance = (
-        -rules.heldout_tolerance_z
-        * forward_tracking_error
-        / math.sqrt(statistics["days"] / TRADING_DAYS_PER_YEAR)
-    )
     drawdown = _max_slice_drawdown(analysis, start, end)
     active_drawdown = _max_slice_drawdown(graded, start, end)
     readings = {
         "plain_excess": statistics["plain_excess"],
         "raw_readings": holder_readings(analysis, start=start, end=end),
     }
-    measured = {
+    return {
         "start": start,
         "end": end,
         "series": series,
         **statistics,
         **readings,
         **_with_seed_replicates(readings, seed_replicates, start, end),
-        "tolerance": tolerance,
+        "residual_reading": _reported_residual(analysis, start=start, end=end, alpha=rules.alpha),
         "max_drawdown": drawdown,
         "active_max_drawdown": active_drawdown,
         "mean_gross": mean_gross,
-    }
-    thresholds = {
-        "heldout_tolerance_z": rules.heldout_tolerance_z,
-        "max_drawdown": rules.max_drawdown,
-        "active_max_drawdown": rules.active_max_drawdown,
-        "min_mean_gross": rules.min_mean_gross,
-    }
-    return {
-        **measured,
-        "reasons": judge("heldout", measured, thresholds, rules),
-        "thresholds": thresholds,
     }
 
 
@@ -1055,49 +1048,29 @@ def sealed_strategy_error(*, start: str, end: str, error: str) -> dict[str, obje
 def graduation_verdict(
     *,
     sealed: Mapping[str, Any],
-    forward: Mapping[str, Any] | None,
-    heldout: Mapping[str, Any] | None,
-    strategy_error: Literal["forward", "heldout"] | None = None,
+    forward: Mapping[str, Any] | None = None,
+    heldout: Mapping[str, Any] | None = None,
 ) -> dict[str, object]:
-    """``graduated`` iff the sealed gate, F1–F7 and H1–H4 all hold, else
-    ``discarded``.
+    """``graduated`` exactly when the sealed gate passes, else ``discarded``.
 
     ``sealed`` is the sealed gate's block (:func:`sealed_slice`, or
-    :func:`sealed_strategy_error`). ``strategy_error`` names the slice of the
-    forward replay in which the strategy raised (F1/H1); a replay that raised
-    produced no result, so it comes with no forward or Held-out slice at
-    all. ``reasons`` lists every failed condition, the sealed gate's first;
-    ``thresholds`` merges the blocks' own. A measured verdict also states
+    :func:`sealed_strategy_error`), and its reasons are the verdict's. The
+    forward and Held-out slices (:func:`forward_slice`, :func:`heldout_slice`)
+    are reported, never judged -- a forward replay in which the strategy
+    raised has none, and its record says so -- and a measured verdict states
     each slice's :func:`holder_line`, so the ledger says in words what the
-    holder's account did beside the codes that decided it.
+    holder's account did beside the code that decided it.
     """
 
-    if strategy_error not in (None, "forward", "heldout"):
-        raise ValueError(
-            f"strategy_error must be forward, heldout or None, got {strategy_error!r}"
-        )
-    measured = strategy_error is None
-    if (forward is not None, heldout is not None) != (measured, measured):
-        raise ValueError(f"slices given do not match strategy_error={strategy_error!r}")
-    reasons = [*sealed["reasons"], *judge("replay", {"strategy_error": strategy_error}, {})]
-    thresholds: dict[str, object] = {**sealed["thresholds"]}
-    for block in (forward, heldout):
-        if block is not None:
-            reasons.extend(block["reasons"])
-            thresholds.update(block["thresholds"])
+    reasons = list(sealed["reasons"])
+    lines = {
+        name: holder_line(block)
+        for name, block in (("forward", forward), ("heldout", heldout))
+        if block is not None
+    }
     return {
         "status": "discarded" if reasons else "graduated",
         "reasons": reasons,
-        "thresholds": thresholds,
-        **(
-            {
-                "holder_line": {
-                    name: holder_line(block)
-                    for name, block in (("forward", forward), ("heldout", heldout))
-                    if block is not None
-                }
-            }
-            if measured
-            else {}
-        ),
+        "thresholds": dict(sealed["thresholds"]),
+        **({"holder_line": lines} if lines else {}),
     }

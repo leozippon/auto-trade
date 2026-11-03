@@ -203,8 +203,8 @@ def test_the_prompt_states_the_research_session_contract() -> None:
     # later sealed data; adaptation lives inside the artifact.
     for clause in (
         "这个研究实验只有这一个研究会话",
-        "定版产物先在会话看不到的封存研究年上被宿主读一次",
-        "再在研究期之后的前推期与 Held-out 上被连续回测并裁决",
+        "只看定版产物在会话看不到的封存研究年上被宿主读的那一次",
+        "之后它还会在研究期之后的前推期与 Held-out 上被连续回测，读数只报告",
         "滚动重拟合",
         "用多长的历史、多快的节奏由策略自己决定",
         # The direction binds what is researched, not how: a pack's advice on

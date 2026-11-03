@@ -43,7 +43,11 @@ from autotrade.environment.tools.report_issue import (
 )
 from autotrade.pipelines.agent_inbox import INBOX_NAME, inbox_public_view
 from autotrade.pipelines.calendar import FULL_SPAN
-from autotrade.pipelines.config import defaulted_acceptance, rolling_default
+from autotrade.pipelines.config import (
+    acceptance_for,
+    defaulted_acceptance,
+    rolling_default,
+)
 from autotrade.pipelines.experiment import validation_statistics
 from autotrade.pipelines.hitl_state import (
     ARCHIVED_NAME,
@@ -78,7 +82,10 @@ from autotrade.pipelines.session_tools import BATCH_FAILURE_ENVIRONMENT
 from autotrade.pipelines.skills import latest_skills_snapshot
 from autotrade.pipelines.verdict import (
     CONDITIONS,
+    null_p_value,
     panel_return,
+    pooled_reading,
+    residual_bar,
     summary_excess_at_cost_stress,
 )
 from autotrade.pipelines.worker import _ALLOWED_PARAMS
@@ -131,6 +138,27 @@ _ENDING_ORDER = {state: index for index, state in enumerate(ENDING_STATES)}
 _CRITERION_CODES = {
     condition.reason: condition.code for condition in CONDITIONS if condition.code
 }
+# The codes of the forward and Held-out conditions retired on 2026-11-03,
+# which the verdicts recorded before then carry.
+_CRITERION_CODES.update(
+    {
+        "forward_strategy_error": "F1",
+        "heldout_strategy_error": "H1",
+        "forward_lower_bound_not_positive": "F2",
+        "forward_recency_negative": "F3",
+        "forward_max_drawdown_exceeded": "F4",
+        "forward_active_drawdown_exceeded": "F4",
+        "forward_not_positive_at_cost_stress": "F5",
+        "forward_too_few_round_trips": "F6",
+        "forward_exposure_below_floor": "F6",
+        "forward_tracking_error_above_cap": "F7",
+        "forward_beta_outside_band": "F7",
+        "heldout_excess_below_tolerance": "H2",
+        "heldout_max_drawdown_exceeded": "H3",
+        "heldout_active_drawdown_exceeded": "H3",
+        "heldout_exposure_below_floor": "H4",
+    }
+)
 # A reason a record judged before 2026-10-28 carries, by the condition that
 # judges the same reading now: F8's bound of the plain active mean is F2's.
 _RETIRED_REASONS = {"forward_plain_excess_lower_bound_not_positive": "forward_lower_bound_not_positive"}
@@ -1137,48 +1165,108 @@ def _research_result(
     return str(best["result"]) if best and best.get("result") else None
 
 
-def _months_between(start: object, end: object) -> int | None:
-    """Calendar months from ``start``'s month through ``end``'s, YYYYMMDD."""
+def _verdict_thresholds(params: Mapping[str, object]) -> dict[str, object]:
+    """What the forward stage will judge, from the arm's own stamped rules,
+    so the console states it before the replay has run; the forward record's
+    own block replaces it once it exists. An arm created under the sealed
+    gate is judged on it alone: its level, its sealed years and the bar for
+    them (``verdict.sealed_slice``). An arm created before it states none:
+    it can no longer run a forward stage."""
 
-    try:
-        first, last = str(start), str(end)
-        return (int(last[:4]) * 12 + int(last[4:6])) - (int(first[:4]) * 12 + int(first[4:6])) + 1
-    except ValueError:
-        return None
-
-
-def _verdict_thresholds(
-    params: Mapping[str, object], replay: Mapping[str, object]
-) -> dict[str, object]:
-    """The graduation thresholds the replay will be held to, from the arm's
-    own stamped rules, so the console lists the criteria before the replay
-    has run. The forward record's own block replaces them once it exists.
-
-    The rules are read as the arm's params resolve them without the
-    required ones (``config.defaulted_acceptance``), never through the
-    console's creation defaults: an arm created before a rule became required
-    still shows the limits it was created with."""
-
-    rules = defaulted_acceptance(params)
-    months = _months_between(replay.get("start"), replay.get("forward_end"))
-    # An arm created since the five limits reached the create form states all
-    # of them; an earlier arm's params.json carries its equity drawdown limit
-    # alone, and that is all it is held to.
-    names = ("max_drawdown", "active_max_drawdown", "tracking_error_cap", "beta_min", "beta_max")
-    limits = (
-        {name: rules[name] for name in names}
-        if "active_max_drawdown" in params
-        else {"max_drawdown": _number(params.get("max_drawdown"))}
-    )
+    if params.get("sealed_years") is None:
+        return {}
+    rules = acceptance_for(params)
     return {
-        "forward_confidence": rules["forward_confidence"],
-        **limits,
-        "cost_stress_multiplier": rules["cost_stress_multiplier"],
-        "min_round_trips": (
-            float(rules["min_round_trips_per_month"]) * months if months else None  # type: ignore[arg-type]
+        "alpha": rules.alpha,
+        "bar": residual_bar(float(rules.sealed_years), rules.alpha),
+        "sealed_years": rules.sealed_years,
+    }
+
+
+# The forward record of each arm's ledger, by the ledger's size and mtime: the
+# readouts below read every arm, and an arm page polls them.
+_FORWARD_RECORDS: dict[Path, tuple[tuple[int, int], Mapping[str, object] | None]] = {}
+
+
+def _arm_forward_records(root: Path) -> tuple[list[tuple[str, Mapping[str, object]]], int]:
+    """The forward record of every arm under ``root`` that has one, by
+    experiment id, archived arms included, and how many arms' ledgers could
+    not be read (a readout counts them rather than skip them silently)."""
+
+    found: list[tuple[str, Mapping[str, object]]] = []
+    unreadable = 0
+    for directory in sorted(path for path in root.iterdir() if path.is_dir()):
+        ledger = directory / "ledgers" / "experiment_ledger.jsonl"
+        if not ledger.is_file():
+            continue
+        stat = ledger.stat()
+        signature = (stat.st_mtime_ns, stat.st_size)
+        cached = _FORWARD_RECORDS.get(ledger)
+        if cached is None or cached[0] != signature:
+            try:
+                cached = (signature, forward_record(read_ledger_records(directory)))
+            except (OSError, ValueError):
+                unreadable += 1
+                continue
+            _FORWARD_RECORDS[ledger] = cached
+        if cached[1] is not None:
+            found.append((directory.name, cached[1]))
+    return found, unreadable
+
+
+def _forward_readouts(root: Path, record: Mapping[str, object] | None) -> dict[str, object] | None:
+    """What every arm under ``root`` read over this arm's sealed and forward
+    windows, beside its own forward record; ``None`` before that record, or
+    for a record written before the sealed gate.
+
+    ``sealed_window``: every frozen nominee's sealed reading over the same
+    sealed years, its residual IR, years and one-sided null p-value
+    (``verdict.null_p_value``), and how many there are. No reading is
+    adjusted for the others and no bar moves with their count; the count is
+    what a p-value is weighed against. ``forward_pool``: every frozen
+    nominee's residual reading over the same forward months, pooled
+    (``verdict.pooled_reading``): one forward year cannot certify a strategy.
+    """
+
+    sealed = _mapping(_mapping(record).get("sealed"))
+    if not sealed:
+        return None
+    window = _mapping(sealed.get("slice"))
+    forward = _mapping(_mapping(_mapping(record).get("slices")).get("forward"))
+    records, unreadable = _arm_forward_records(root)
+    readings: list[dict[str, object]] = []
+    pooled: list[dict[str, object]] = []
+    for experiment_id, other in records:
+        block = _mapping(_mapping(other.get("sealed")).get("slice"))
+        if block and (block.get("start"), block.get("end")) == (window.get("start"), window.get("end")):
+            ratio, years = _number(block.get("residual_information_ratio")), _number(block.get("years"))
+            readings.append(
+                {
+                    "experiment_id": experiment_id,
+                    "residual_information_ratio": ratio,
+                    "years": years,
+                    "passed": not block.get("reasons"),
+                    "p_value": None if ratio is None or not years else null_p_value(ratio, years),
+                }
+            )
+        mine = _mapping(_mapping(other.get("slices")).get("forward"))
+        span = (mine.get("start"), mine.get("end"))
+        if forward and other.get("sealed") and span == (forward.get("start"), forward.get("end")):
+            pooled.append(dict(_mapping(mine.get("residual_reading"))))
+    readings.sort(key=lambda row: (row["p_value"] is None, row["p_value"] or 0.0))
+    return {
+        "sealed_window": {
+            "start": window.get("start"),
+            "end": window.get("end"),
+            "count": len(readings),
+            "readings": readings,
+        },
+        "forward_pool": (
+            {"start": forward.get("start"), "end": forward.get("end"), **pooled_reading(pooled)}
+            if forward
+            else None
         ),
-        "min_mean_gross": rules["min_mean_gross"],
-        "heldout_tolerance_z": rules["heldout_tolerance_z"],
+        "unreadable_arms": unreadable,
     }
 
 
@@ -1414,7 +1502,7 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
         if planned["kind"] == "forward":
             replay = dict(_mapping(planned.get("replay")))
             entry["replay"] = replay
-            entry["thresholds"] = _verdict_thresholds(params, replay)
+            entry["thresholds"] = _verdict_thresholds(params)
         sessions.append(entry)
     raw_status = _mapping(experiment_state(directory).get("status"))
     current = raw_status.get("session_key")
@@ -1432,6 +1520,7 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
         ),
         "sessions": sessions,
         "frozen": _frozen_view(directory, identity, records),
+        "readouts": _forward_readouts(root, forward_record(records)),
         # Two different failures, kept apart: a forward replay attempt that
         # raised before its record -- selected by the pipeline's stage, not by
         # the provider phase the replay reads (``FORWARD_PHASE``) -- and a

@@ -170,9 +170,6 @@ class AcceptanceRulesTest(unittest.TestCase):
             {"ablation_required": "true"},
             {"forward_confidence": 0.0},
             {"forward_confidence": 1.0},
-            {"min_mean_gross": 0.0},
-            {"min_round_trips_per_month": -0.1},
-            {"heldout_tolerance_z": 0.0},
         ):
             with self.subTest(**kwargs), self.assertRaises(ValueError):
                 AcceptanceRules(**{**REQUIRED_RULES, **kwargs})
@@ -215,14 +212,18 @@ class AcceptanceRulesTest(unittest.TestCase):
         # ignored, with no tracking mandate, and the forward bars it leaves out
         # resolve to today's defaults.
         old = AcceptanceRules.from_record(
-            {"min_return": 0.01, "max_drawdown": 0.25, "min_dsr_probability": 0.975, **REQUIRED_RULES}
+            {
+                "min_return": 0.01,
+                "max_drawdown": 0.25,
+                "min_dsr_probability": 0.975,
+                "min_mean_gross": 0.5,
+                "heldout_tolerance_z": 1.28,
+                **REQUIRED_RULES,
+            }
         )
         self.assertEqual(old, AcceptanceRules(**REQUIRED_RULES, max_drawdown=0.25))
         self.assertIsNone(old.tracking_error_cap)
         self.assertEqual(old.forward_confidence, verdict.FORWARD_CONFIDENCE)
-        self.assertEqual(old.min_mean_gross, verdict.MIN_MEAN_GROSS)
-        self.assertEqual(old.min_round_trips_per_month, verdict.MIN_ROUND_TRIPS_PER_MONTH)
-        self.assertEqual(old.heldout_tolerance_z, verdict.HELDOUT_TOLERANCE_Z)
         self.assertEqual(acceptance_for({**REQUIRED_RULES, "max_drawdown": 0.25}), AcceptanceRules(**REQUIRED_RULES, max_drawdown=0.25))
 
     def test_the_tracking_mandate_is_set_by_hand_and_never_by_the_capital(self) -> None:
@@ -331,36 +332,32 @@ class AcceptanceRulesTest(unittest.TestCase):
         self.assertIn("<= 0.08", mandate["tracking_error"])
         self.assertIn("0.85..1.15", mandate["market_beta"])
         self.assertIn("not evidence", mandate["role"])
-        graduation = facts["graduation"]
-        self.assertEqual(graduation["forward"]["active_max_drawdown"], "<= 0.11")
-        self.assertEqual(graduation["heldout"]["active_max_drawdown"], "<= 0.11")
-        self.assertIn("tracking error", graduation["forward"]["minimum_detectable_excess"])
-        self.assertEqual(graduation["forward"]["max_drawdown"], "<= 0.2")
-        self.assertIn("3.0", graduation["forward"]["excess_at_cost_stress"])
-        self.assertEqual(graduation["heldout"]["max_drawdown"], "<= 0.2")
-        self.assertNotIn("recency", graduation["forward"])
+        # The forward readings are stated with what they are taken at, and no
+        # bar: none is judged.
+        self.assertIn("slippage multiplied by 3.0", facts["graduation"]["reported"])
+        self.assertNotIn("<=", json.dumps(facts["graduation"]))
         rendered = json.dumps(facts)
         self.assertIsNone(re.search(r"20\d{6}", rendered))
         for retired in ("deflated", "trials", "offline", "positive_years", "information_ratio_bar"):
             self.assertNotIn(retired, rendered)
 
-    def test_one_series_is_stated_and_f2_reads_the_seeds_together(self) -> None:
-        """Every gate grades the active series: the facts name it once, name
-        no neutralized figure, and tell the forward bound as a rule with no
-        figure, over the frozen book and its seed replicates averaged day by
-        day."""
+    def test_one_series_is_stated_and_the_sealed_gate_alone_admits(self) -> None:
+        """Every reading is of the active series: the facts name it once and
+        no neutralized figure. Graduation is the sealed gate's alone; the
+        forward bound and the cost stress are stated as readings, over the
+        frozen book and its seed replicates, that decide nothing."""
 
         facts = AcceptanceRules(**REQUIRED_RULES).agent_facts()
         graded = facts["graded_series"]
         for field in ("benchmark.active_excess", "sub_windows[].active_excess_return", "daily_series"):
             self.assertIn(field, graded)
         self.assertNotIn("neutral", json.dumps(facts).lower())
-        forward = facts["graduation"]["forward"]
-        self.assertNotIn("plain_excess_lower_bound", forward)
-        stated = forward["lower_bound"]
-        self.assertIn("lower bound of annualized active excess > 0", stated)
-        self.assertIn("day-by-day average over the frozen book and its replicates", stated)
-        self.assertIsNone(re.search(r"\d\.\d", stated))
+        graduation = facts["graduation"]
+        self.assertEqual(sorted(graduation), ["admits", "reported"])
+        self.assertIn("exactly when the sealed gate passes", graduation["admits"])
+        self.assertIn("80% block-bootstrap lower bound", graduation["reported"])
+        self.assertIn("frozen book and its seed replicates", graduation["reported"])
+        self.assertIn("none decides the verdict", graduation["reported"])
 
     def test_a_record_with_a_retired_key_still_rebuilds_the_rules(self) -> None:
         rules = AcceptanceRules.from_record(

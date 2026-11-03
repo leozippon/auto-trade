@@ -94,9 +94,6 @@ def _ruled(arguments):
     return {**arguments, "rules": rules}
 
 
-# A sealed gate that passed, for the verdicts a test reads for their forward
-# and Held-out conditions.
-PASSED_SEALED = {"reasons": [], "thresholds": {}}
 
 
 def _heldout(analysis, **overrides):
@@ -287,122 +284,40 @@ def test_bootstrap_bound_is_fixed_by_the_artifact_id(monkeypatch):
     # artifact's bound by even one ULP. One draw per batch is the extreme.
     monkeypatch.setattr(verdict, "_BOOTSTRAP_BATCH_BYTES", 1)
     assert _forward(analysis, seed_key="artifact-1")["lower_bound"] == first
+def test_the_forward_slice_reports_its_readings_and_judges_none():
+    """F2-F7 are read and recorded, never judged: the slice carries no
+    reasons, and the figures each retired condition read are the slice's
+    own, with what they were taken at."""
 
-
-def test_forward_pass_rates_match_the_design_simulation():
-    """The design simulation at TE 13 %: nulls pass ≈ 0.18, a steady 8 %/yr edge ≈ 0.38.
-
-    F4–F6 are held passing so only the bootstrap bound and the recency check
-    decide; the bounds are loose around the design figures, the seeds fixed.
-    """
-
-    def pass_rate(alpha, seed, draws=150):
-        rng = np.random.default_rng(seed)
-        passed = 0
-        for index in range(draws):
-            analysis = _analysis(_segment(FORWARD_DAYS, alpha, rng))
-            passed += not _forward(analysis, seed_key=f"artifact-{index}")["reasons"]
-        return passed / draws
-
-    null = pass_rate(0.0, seed=21)
-    edge = pass_rate(0.08, seed=22)
-    assert 0.10 <= null <= 0.26
-    assert 0.28 <= edge <= 0.50
-
-
-def test_each_forward_condition_fails_at_its_boundary():
     rng = np.random.default_rng(41)
     analysis = _analysis(_segment(FORWARD_DAYS, 0.30, rng, te=0.05))
-    base = _forward(analysis)
-    assert base["reasons"] == []
+    base = _forward(analysis, round_trips=7, mean_gross=0.4)
+    assert "reasons" not in base and "thresholds" not in base
+    assert (base["round_trips"], base["mean_gross"]) == (7, 0.4)
+    assert base["parameters"] == {
+        "forward_confidence": 0.8,
+        "bootstrap_block_days": verdict.BOOTSTRAP_BLOCK_DAYS,
+        "bootstrap_draws": verdict.BOOTSTRAP_DRAWS,
+        "panel_draws": verdict.PANEL_DRAWS,
+        "cost_stress_multiplier": 2.0,
+    }
 
     returns = np.array([value for _, value in analysis["strategy_daily"]])
     equity = np.cumprod(1.0 + returns)
     peaks = np.maximum.accumulate(np.concatenate([[1.0], equity]))[1:]
-    drawdown = float(np.max(1.0 - equity / peaks))
-    assert base["max_drawdown"] == pytest.approx(drawdown)
-    assert _forward(analysis, max_drawdown=base["max_drawdown"])["reasons"] == []
-    assert _forward(analysis, max_drawdown=base["max_drawdown"] - 1e-9)["reasons"] == [
-        "forward_max_drawdown_exceeded"
-    ]
+    assert base["max_drawdown"] == pytest.approx(float(np.max(1.0 - equity / peaks)))
 
     years = base["days"] / TRADING_DAYS_PER_YEAR
     breakeven = base["plain_excess"] * years / (10.0 * 1e-4)
-    below = _forward(analysis, turnover=breakeven * (1 - 1e-6))
-    assert below["reasons"] == []
-    assert below["excess_at_cost_stress"] == pytest.approx(0.0, abs=1e-6)
-    assert _forward(analysis, turnover=breakeven * (1 + 1e-6))["reasons"] == [
-        "forward_not_positive_at_cost_stress"
-    ]
+    assert _forward(analysis, turnover=breakeven)["excess_at_cost_stress"] == pytest.approx(0.0, abs=1e-9)
     # No stress beyond the modelled slippage when the multiplier is one.
-    assert (
-        _forward(analysis, turnover=breakeven * 2, cost_stress_multiplier=1.0)[
-            "reasons"
-        ]
-        == []
+    assert _forward(analysis, turnover=breakeven * 2, cost_stress_multiplier=1.0)[
+        "excess_at_cost_stress"
+    ] == pytest.approx(base["plain_excess"])
+    # The sealed gate's statistic over the forward months, for the pool.
+    assert base["residual_reading"] == verdict.residual_reading(
+        _with_panel(analysis, np.zeros(len(FORWARD_DAYS))), start=FORWARD_START, end=FORWARD_END, alpha=0.05
     )
-
-    assert _forward(analysis, round_trips=11)["reasons"] == [
-        "forward_too_few_round_trips"
-    ]
-    assert base["thresholds"]["min_round_trips"] == 12
-    assert _forward(analysis, mean_gross=0.5)["reasons"] == []
-    assert _forward(analysis, mean_gross=0.4999)["reasons"] == [
-        "forward_exposure_below_floor"
-    ]
-
-    null = _analysis(_segment(FORWARD_DAYS, 0.0, rng, exact=True))
-    assert "forward_lower_bound_not_positive" in _forward(null)["reasons"]
-
-
-def test_heldout_tolerates_noise_but_not_a_collapse():
-    rng = np.random.default_rng(51)
-    forward_te = 0.13
-    tolerance = (
-        -verdict.HELDOUT_TOLERANCE_Z
-        * forward_te
-        / math.sqrt(len(HELDOUT_DAYS) / TRADING_DAYS_PER_YEAR)
-    )
-    assert tolerance == pytest.approx(-0.357, abs=0.005)  # ≈ −37 %/yr over 53 days
-
-    def heldout(alpha, **overrides):
-        analysis = _analysis(
-            _segment(FORWARD_DAYS, 0.10, rng),
-            _segment(HELDOUT_DAYS, alpha, rng, te=0.05, exact=True),
-        )
-        return _heldout(analysis, forward_tracking_error=forward_te, **overrides)
-
-    inside = heldout(tolerance + 0.0003)
-    assert inside["days"] == len(HELDOUT_DAYS) == 53
-    assert inside["tolerance"] == pytest.approx(tolerance)
-    assert inside["reasons"] == []
-    assert heldout(tolerance - 0.0003)["reasons"] == ["heldout_excess_below_tolerance"]
-    assert heldout(0.0, max_drawdown=0.0)["reasons"] == [
-        "heldout_max_drawdown_exceeded"
-    ]
-    assert heldout(0.0, active_max_drawdown=0.0)["reasons"] == [
-        "heldout_active_drawdown_exceeded"
-    ]
-    assert heldout(0.0, mean_gross=0.49)["reasons"] == ["heldout_exposure_below_floor"]
-
-
-def _expected_max(trials):
-    """The Bailey-López de Prado expected maximum, written out independently."""
-
-    gamma, normal = 0.5772156649015329, NormalDist()
-    return (1 - gamma) * normal.inv_cdf(1 - 1 / trials) + gamma * normal.inv_cdf(
-        1 - 1 / (trials * math.e)
-    )
-
-
-RESEARCH_YEARS = [
-    ("20210701", "20220630"),
-    ("20220701", "20230630"),
-    ("20230701", "20240630"),
-    ("20240701", "20250630"),
-]
-
-
 def _with_panel(analysis, panel):
     return {
         **analysis,
@@ -431,6 +346,10 @@ def test_a_zero_panel_reproduces_the_ungraded_figures_exactly():
 
     def without_series(block):
         kept = {key: value for key, value in block.items() if key != "series"}
+        if "residual_reading" in kept:
+            kept["residual_reading"] = {
+                key: value for key, value in kept["residual_reading"].items() if key != "series"
+            }
         if "raw_readings" in kept:
             kept["raw_readings"] = {
                 key: value
@@ -441,7 +360,7 @@ def test_a_zero_panel_reproduces_the_ungraded_figures_exactly():
 
     def heldout(sidecar):
         return _heldout(
-            sidecar, forward_tracking_error=0.1, max_drawdown=0.2, active_max_drawdown=0.2
+            sidecar, max_drawdown=0.2, active_max_drawdown=0.2
         )
 
     def forward_slice(sidecar):
@@ -512,86 +431,57 @@ def test_the_graded_series_is_the_strategy_minus_its_panel():
         verdict.graded_statistics(short)
 
 
-def test_the_forward_mandate_and_active_drawdown_fail_at_their_boundaries():
+def test_the_forward_mandate_and_active_drawdown_are_reported_whatever_the_rules():
     rng = np.random.default_rng(121)
     days, active, benchmark, size, _value = _segment(FORWARD_DAYS, 0.30, rng, te=0.05, beta=0.0)
     panel = 1.0 * benchmark
     book = _with_panel(_analysis((days, active + panel, benchmark, size)), panel)
     base = _forward(book)
 
-    assert base["reasons"] == [] and base["series"] == "active"
+    assert base["series"] == "active"
     assert base["max_drawdown"] != base["active_max_drawdown"]
-    assert _forward(book, active_max_drawdown=base["active_max_drawdown"])["reasons"] == []
-    assert _forward(book, active_max_drawdown=base["active_max_drawdown"] - 1e-9)[
-        "reasons"
-    ] == ["forward_active_drawdown_exceeded"]
-    band = {"beta_min": 0.85, "beta_max": 1.15}
-    own_te = base["mandate"]["tracking_error"]
-    assert _forward(book, tracking_error_cap=own_te, **band)["reasons"] == []
-    assert _forward(book, tracking_error_cap=own_te - 1e-9, **band)["reasons"] == [
-        "forward_tracking_error_above_cap"
-    ]
-    assert _forward(book, tracking_error_cap=own_te, beta_min=1.05, beta_max=1.15)[
-        "reasons"
-    ] == ["forward_beta_outside_band"]
-    assert base["thresholds"]["tracking_error_cap"] is None
-    assert _forward(book, mean_gross=0.6)["reasons"] == []
-    assert _forward(book, mean_gross=0.6, min_mean_gross=0.7)["reasons"] == [
-        "forward_exposure_below_floor"
-    ]
+    # A tight mandate and drawdown limit move no reading and judge nothing.
+    tight = _forward(
+        book,
+        active_max_drawdown=base["active_max_drawdown"] / 2,
+        tracking_error_cap=base["mandate"]["tracking_error"] / 2,
+        beta_min=1.05,
+        beta_max=1.15,
+    )
+    assert tight == base
 
 
-def test_graduation_lists_every_failed_condition_and_a_strategy_error_discards():
+def test_the_verdict_admits_exactly_when_the_sealed_gate_passes():
+    """The sealed gate is the verdict's one condition: a book whose forward
+    and Held-out slices read badly on every retired condition -- a negative
+    F2 bound, a negative F5 excess, no trades, a collapse -- graduates when
+    its sealed reading passes, and one that reads well forward is discarded
+    when it does not. F2 and F5 are in the record, never in the reasons."""
+
     rng = np.random.default_rng(81)
     analysis = _analysis(
-        _segment(FORWARD_DAYS, 0.30, rng, te=0.05),
-        _segment(HELDOUT_DAYS, 0.0, rng, te=0.05, exact=True),
+        _segment(FORWARD_DAYS, -0.30, rng, te=0.05),
+        _segment(HELDOUT_DAYS, -0.50, rng, te=0.05, exact=True),
     )
-    forward = _forward(analysis)
+    forward = _forward(analysis, turnover=40.0, round_trips=0, mean_gross=0.05)
+    heldout = _heldout(analysis, mean_gross=0.05)
+    assert forward["lower_bound"] < 0 and forward["excess_at_cost_stress"] < 0
+    assert heldout["plain_excess"] < 0 and "reasons" not in heldout
 
-    def heldout(mean_gross, **rules):
-        return _heldout(
-            analysis,
-            forward_tracking_error=forward["tracking_error"],
-            mean_gross=mean_gross,
-            **rules,
-        )
-
-    graduated = verdict.graduation_verdict(sealed=PASSED_SEALED, forward=forward, heldout=heldout(1.0))
+    passed = {"reasons": [], "thresholds": {"alpha": 0.05, "bar": 0.736, "sealed_years": 5}}
+    refused = {**passed, "reasons": ["sealed_residual_ir_below_bar"]}
+    graduated = verdict.graduation_verdict(sealed=passed, forward=forward, heldout=heldout)
     assert graduated["status"] == "graduated" and graduated["reasons"] == []
-    assert graduated["thresholds"]["forward_confidence"] == 0.8
-    assert graduated["thresholds"]["heldout_tolerance_z"] == 1.28
-    tight_heldout = heldout(0.6, min_mean_gross=0.7)
-    assert "heldout_exposure_below_floor" in tight_heldout["reasons"]
-
-    weak_forward = _forward(analysis, round_trips=0, mean_gross=0.1)
-    discarded = verdict.graduation_verdict(sealed=PASSED_SEALED, forward=weak_forward, heldout=heldout(0.2))
-    assert discarded["status"] == "discarded"
-    assert discarded["reasons"] == [
-        "forward_too_few_round_trips",
-        "forward_exposure_below_floor",
-        "heldout_exposure_below_floor",
-    ]
-
-    crashed = verdict.graduation_verdict(
-        sealed=PASSED_SEALED, forward=None, heldout=None, strategy_error="forward"
-    )
-    assert crashed == {
-        "status": "discarded",
-        "reasons": ["forward_strategy_error"],
-        "thresholds": {},
+    assert graduated["thresholds"] == passed["thresholds"]
+    assert set(graduated["holder_line"]) == {"forward", "heldout"}
+    discarded = verdict.graduation_verdict(sealed=refused, forward=forward, heldout=heldout)
+    assert discarded == {**graduated, "status": "discarded", "reasons": refused["reasons"]}
+    # A forward replay that raised has no slice; the sealed gate still decides.
+    assert verdict.graduation_verdict(sealed=passed) == {
+        "status": "graduated",
+        "reasons": [],
+        "thresholds": passed["thresholds"],
     }
-    late = verdict.graduation_verdict(sealed=PASSED_SEALED, forward=None, heldout=None, strategy_error="heldout"
-    )
-    assert late["status"] == "discarded" and late["reasons"] == [
-        "heldout_strategy_error"
-    ]
-    # A replay that raised produced no result: no slice rides with the error.
-    with pytest.raises(ValueError, match="do not match"):
-        verdict.graduation_verdict(sealed=PASSED_SEALED, forward=forward, heldout=None, strategy_error="heldout"
-        )
-    with pytest.raises(ValueError, match="do not match"):
-        verdict.graduation_verdict(sealed=PASSED_SEALED, forward=forward, heldout=None)
 
 
 def test_an_unmeasurable_slice_raises_instead_of_judging():
@@ -604,15 +494,13 @@ def test_an_unmeasurable_slice_raises_instead_of_judging():
         _forward(analysis, start="20250701", end="20250718")
     with pytest.raises(ValueError, match="YYYYMMDD"):
         _forward(analysis, end="2026-06-30")
-    # The factors are diagnostics: without them the slice is judged all the
-    # same, its loadings unmeasured, and a mandate it cannot be read on fails.
+    # The factors are diagnostics: without them the slice is read all the
+    # same, its loadings and its residual reading unmeasured.
     bare = _forward({**analysis, "size_factor_daily": []})
-    assert bare["reasons"] == _forward(analysis)["reasons"]
+    assert bare["lower_bound"] == _forward(analysis)["lower_bound"]
     assert (bare["market_beta"], bare["size_beta"]) == (None, None)
     assert bare["mandate"] == {"tracking_error": None, "market_beta": None}
-    assert _forward(
-        {**analysis, "size_factor_daily": []}, tracking_error_cap=1.0, beta_min=-5.0, beta_max=5.0
-    )["reasons"][-2:] == ["forward_tracking_error_above_cap", "forward_beta_outside_band"]
+    assert "unmeasured" in bare["residual_reading"]
 
 
 def _summary(*, slippage_bps=5.0, turnover=40.0):
@@ -703,42 +591,38 @@ def test_f2_grades_a_negative_market_loading_on_what_it_earned():
     assert judged["market_beta"] == pytest.approx(-0.5, abs=0.05)
     assert raw["plain_selection"] < 0
     assert judged["lower_bound"] < judged["plain_excess"] < 0
-    assert "forward_lower_bound_not_positive" in judged["reasons"]
 
 
-def test_heldout_grades_a_negative_market_loading_on_what_it_earned():
-    """H2 reads the plain series too: a book that lagged its panel through a
-    Held-out rally on its lower-beta names falls below the tolerance its
-    regression intercept would clear."""
+def test_heldout_reads_a_negative_market_loading_on_what_it_earned():
+    """Held-out reads the plain series too: a book that lagged its panel
+    through a Held-out rally on its lower-beta names reads below zero where
+    its regression intercept would not."""
 
     book = _rally_book(
         np.random.default_rng(123), alpha=0.0, active_beta=-0.5, days=FORWARD_DAYS + HELDOUT_DAYS
     )
-    heldout = _heldout(book, forward_tracking_error=0.05)
-    assert heldout["plain_excess"] < heldout["tolerance"] < _intercept(book, HELDOUT_START, HELDOUT_END)
+    heldout = _heldout(book)
+    assert heldout["plain_excess"] < 0 < _intercept(book, HELDOUT_START, HELDOUT_END)
     assert heldout["market_beta"] < 0
-    assert heldout["reasons"] == ["heldout_excess_below_tolerance"]
 
 
-def test_f2_is_judged_on_the_lower_bound_of_the_plain_mean():
-    """F2 asks for more than a positive mean: the one-sided bound of the
-    judged series' mean must be above zero. A book frozen with no replicate
-    is judged on its own series."""
+def test_f2_is_the_lower_bound_of_the_plain_mean():
+    """F2 reports more than a positive mean: the one-sided bound of the
+    graded series' mean. A book frozen with no replicate is read on its own
+    series."""
 
     rng = np.random.default_rng(122)
 
     def judged(mean, **overrides):
         return _forward(_selection_book(rng, mean), **overrides)
 
-    # A mean above zero inside its own noise is refused.
+    # A mean above zero inside its own noise reads a negative bound.
     thin = judged(0.01)
     assert thin["plain_excess"] == pytest.approx(0.01, rel=1e-9)
     assert thin["lower_bound"] < 0 < thin["plain_excess"]
-    assert "forward_lower_bound_not_positive" in thin["reasons"]
-    # One clear of its noise passes.
+    # One clear of its noise reads a positive one.
     clear = judged(0.15)
     assert 0 < clear["lower_bound"] < clear["plain_excess"]
-    assert clear["reasons"] == []
 
     # The bound is the documented procedure on the plain series: blocks of
     # BOOTSTRAP_BLOCK_DAYS, BOOTSTRAP_DRAWS draws, the artifact seed.
@@ -804,11 +688,12 @@ def test_the_holders_readings_are_the_stored_series_compounded():
     # A span with no stored day reads nothing rather than zero.
     assert verdict.holder_readings(book, start="20300101", end="20301231") == dict.fromkeys(raw)
 
-    heldout = _heldout(book, forward_tracking_error=forward["tracking_error"])
+    heldout = _heldout(book)
     assert heldout["raw_readings"]["strategy_return"] == pytest.approx(
         compound("strategy_daily", HELDOUT_START, HELDOUT_END), rel=1e-12
     )
-    lines = verdict.graduation_verdict(sealed=PASSED_SEALED, forward=forward, heldout=heldout)["holder_line"]
+    passed = {"reasons": [], "thresholds": {}}
+    lines = verdict.graduation_verdict(sealed=passed, forward=forward, heldout=heldout)["holder_line"]
     assert set(lines) == {"forward", "heldout"}
     assert lines["forward"].startswith(
         f"{FORWARD_START}..{FORWARD_END}: book {strategy * 100:+.1f}% against benchmark {benchmark * 100:+.1f}%"
@@ -816,13 +701,12 @@ def test_the_holders_readings_are_the_stored_series_compounded():
     assert f"plain selection {(strategy - panel) * 100:+.1f} points" in lines["forward"]
 
 
-def test_f2_judges_the_book_and_its_seed_replicates_as_one_daily_series():
+def test_f2_reads_the_book_and_its_seed_replicates_as_one_daily_series():
     """With seed replicates the forward slice carries each one's readings and
-    their mean with the book, and F2 judges the day-by-day mean of their
-    active series: a seed mean above zero whose bound is not above zero is
-    refused, whatever the frozen seed read alone; a replicate that cannot be
-    read alike is never dropped from the mean, the slice is not judged.
-    Held-out reports the replicates, unjudged."""
+    their mean with the book, and F2 bounds the day-by-day mean of their
+    active series, whatever the frozen seed read alone; a replicate that
+    cannot be read alike is never dropped from the mean, the slice is not
+    read. Held-out reports the replicates too."""
 
     rng = np.random.default_rng(121)
     book = _selection_book(rng, 0.12)
@@ -833,7 +717,6 @@ def test_f2_judges_the_book_and_its_seed_replicates_as_one_daily_series():
     alone = _forward(book)
     assert "seed_replicates" not in alone and "seed_mean" not in alone
     assert alone["lower_bound"] > 0
-    assert alone["reasons"] == []
 
     # The frozen seed clears the bound alone; with the other two seeds the
     # mean is still above zero, and no longer clear of its noise.
@@ -843,7 +726,6 @@ def test_f2_judges_the_book_and_its_seed_replicates_as_one_daily_series():
     assert mean["members"] == 3
     assert mean["plain_excess"] == pytest.approx((0.12 - 0.03 - 0.07) / 3, rel=1e-9)
     assert sunk["lower_bound"] < 0 < mean["plain_excess"]
-    assert sunk["reasons"] == ["forward_lower_bound_not_positive"]
     assert [block["artifact_id"] for block in sunk["seed_replicates"]] == ["b", "c"]
     assert sunk["seed_replicates"][0]["plain_excess"] == pytest.approx(-0.03, rel=1e-9)
     # The bound is drawn on the day-by-day mean of the three active series.
@@ -856,8 +738,8 @@ def test_f2_judges_the_book_and_its_seed_replicates_as_one_daily_series():
         axis=0,
     )
     assert sunk["lower_bound"] == verdict.bootstrap_lower_bound(daily, "artifact-1", confidence=0.8)
-    # Every other reading and condition stays the book's own.
-    added = ("reasons", "seed_replicates", "seed_mean", "lower_bound")
+    # Every other reading stays the book's own.
+    added = ("seed_replicates", "seed_mean", "lower_bound")
     assert {key: value for key, value in sunk.items() if key not in added} == {
         key: value for key, value in alone.items() if key not in added
     }
@@ -867,7 +749,7 @@ def test_f2_judges_the_book_and_its_seed_replicates_as_one_daily_series():
         book,
         seed_replicates=[replicate(_selection_book(rng, 0.10)), replicate(_selection_book(rng, 0.08))],
     )
-    assert agreed["lower_bound"] > 0 and agreed["reasons"] == []
+    assert agreed["lower_bound"] > 0
 
     # A replicate without a panel, or one that measured other days.
     with pytest.raises(ValueError, match="another series"):
@@ -878,76 +760,34 @@ def test_f2_judges_the_book_and_its_seed_replicates_as_one_daily_series():
 
     span = FORWARD_DAYS + HELDOUT_DAYS
     long_book, long_other = _selection_book(rng, 0.10, days=span), _selection_book(rng, -0.50, days=span)
-    heldout = _heldout(long_book, forward_tracking_error=0.05, seed_replicates=[replicate(long_other)])
+    heldout = _heldout(long_book, seed_replicates=[replicate(long_other)])
     assert heldout["seed_mean"]["members"] == 2
     assert "lower_bound" not in heldout
-    assert heldout["reasons"] == []
-    assert verdict.graduation_verdict(sealed=PASSED_SEALED, forward=sunk, heldout=heldout)["reasons"][0] == (
-        "forward_lower_bound_not_positive"
-    )
 
 
 def test_the_condition_table_is_the_one_list_of_what_a_record_can_carry():
-    """Every condition has its own reason token. A graduation condition names
-    its criterion, F1..F7 and H1..H4 between them, and no freeze condition
-    does. The only optional conditions are the tracking mandate's, which its
-    cap turns on. The Environment's copy of the seed reasons (it cannot import
-    the Pipeline) is the table's."""
+    """Every condition has its own reason token. The verdict has one
+    criterion, S, the sealed gate's, and no registration condition has a
+    code. The only optional conditions are the tracking mandate's, which its
+    cap turns on. The Environment's copies of the seed and the ablation
+    reasons (it cannot import the Pipeline) are the table's."""
 
-    from autotrade.environment.tools.finish_session import SEED_REASONS
+    from autotrade.environment.tools.finish_session import (
+        ABLATION_REASONS,
+        SEED_REASONS,
+    )
 
     reasons = [condition.reason for condition in verdict.CONDITIONS]
     assert len(reasons) == len(set(reasons))
     stages: dict[str, list[verdict.Condition]] = {}
     for condition in verdict.CONDITIONS:
         stages.setdefault(condition.stage, []).append(condition)
-    graduation = [*stages["sealed"], *stages["replay"], *stages["forward"], *stages["heldout"]]
-    # F3 (recency) was retired with the sealed gate.
-    assert sorted({condition.code for condition in graduation}) == [
-        *(f"F{number}" for number in (1, 2, 4, 5, 6, 7)),
-        *(f"H{number}" for number in range(1, 5)),
-        "S",
-    ]
-    # ``forward_...`` is an F criterion, ``heldout_...`` an H one and
-    # ``sealed_...`` the sealed gate's.
-    assert all(condition.code[0] == condition.reason[0].upper() for condition in graduation)
-    assert not any(c.code for c in verdict.CONDITIONS if c not in graduation)
+    assert list(stages) == ["nomination", "registration", "freeze", "seeds", "ablation", "sealed"]
+    assert {condition.code for condition in stages["sealed"]} == {"S"}
+    assert not any(c.code for c in verdict.CONDITIONS if c.stage != "sealed")
     assert {condition.requires for condition in verdict.CONDITIONS} == {"", "tracking_error_cap"}
     assert {condition.reason for condition in stages["seeds"]} == SEED_REASONS
-
-
-def test_a_stage_records_its_failures_in_the_tables_order_and_judges_nothing_that_is_off():
-    """One judge path. A block that fails every forward condition records all
-    of them in the table's order; under rules without a tracking mandate the
-    same block records the others alone."""
-
-    failing = {
-        "lower_bound": -0.1,
-        "max_drawdown": 0.9,
-        "active_max_drawdown": 0.9,
-        "excess_at_cost_stress": -0.1,
-        "round_trips": 0,
-        "mean_gross": 0.1,
-        "mandate": {"tracking_error": 0.5, "market_beta": 2.0},
-    }
-    mandate = {"tracking_error_cap": 0.08, "beta_min": 0.85, "beta_max": 1.15}
-    thresholds = {
-        "max_drawdown": 0.45,
-        "active_max_drawdown": 0.3,
-        "min_round_trips": 12.0,
-        "min_mean_gross": 0.5,
-        **mandate,
-    }
-    forward = [condition for condition in verdict.CONDITIONS if condition.stage == "forward"]
-
-    assert verdict.judge("forward", failing, thresholds, AcceptanceRules(**REQUIRED_RULES, **mandate)) == [
-        c.reason for c in forward
-    ]
-    assert verdict.judge("forward", failing, thresholds, AcceptanceRules(**REQUIRED_RULES)) == [
-        condition.reason for condition in forward if not condition.requires
-    ]
-
-
+    assert {condition.reason for condition in stages["ablation"]} == ABLATION_REASONS
 def test_the_sealed_gate_holds_the_residual_ir_to_its_bar_and_leads_the_verdict():
     """The sealed gate reads the frozen book's active series over the sealed
     years through the residual statistic at the rules' alpha: a book whose
@@ -977,12 +817,32 @@ def test_the_sealed_gate_holds_the_residual_ir_to_its_bar_and_leads_the_verdict(
 
     forward = _forward(_selection_book(np.random.default_rng(3), 0.40))
     heldout = _heldout(
-        _selection_book(np.random.default_rng(4), 0.40, days=FORWARD_DAYS + HELDOUT_DAYS),
-        forward_tracking_error=0.05,
+        _selection_book(np.random.default_rng(4), 0.40, days=FORWARD_DAYS + HELDOUT_DAYS)
     )
-    assert forward["reasons"] == [] and heldout["reasons"] == []
     passed = verdict.graduation_verdict(sealed=edge, forward=forward, heldout=heldout)
     assert passed["status"] == "graduated"
     for block in (flat, raised):
         refused = verdict.graduation_verdict(sealed=block, forward=forward, heldout=heldout)
         assert refused["status"] == "discarded" and refused["reasons"] == block["reasons"]
+
+
+def test_a_reading_is_weighed_by_its_null_p_value_and_readings_pool_by_their_years():
+    """Under the null a residual IR over ``years`` is normal with standard
+    deviation 1/sqrt(years): its one-sided p-value is 1 - Phi(IR sqrt(years)),
+    at the bar exactly alpha. Readings of independent strategies pool by
+    their years; one that states no IR is counted, not pooled."""
+
+    assert verdict.null_p_value(verdict.residual_bar(5.0, 0.05), 5.0) == pytest.approx(0.05)
+    assert verdict.null_p_value(0.0, 3.0) == pytest.approx(0.5)
+    readings = [
+        {"residual_information_ratio": 1.0, "years": 1.0},
+        {"residual_information_ratio": -0.5, "years": 1.0},
+        {"residual_information_ratio": 0.4, "years": 2.0},
+        {"unmeasured": "fewer than 60 days"},
+    ]
+    pooled = verdict.pooled_reading(readings)
+    assert (pooled["count"], pooled["unmeasured"], pooled["years"]) == (3, 1, 4.0)
+    assert pooled["residual_information_ratio"] == pytest.approx((1.0 - 0.5 + 0.8) / 4.0)
+    assert pooled["z"] == pytest.approx(pooled["residual_information_ratio"] * 2.0)
+    assert pooled["p_value"] == pytest.approx(1.0 - NormalDist().cdf(pooled["z"]))
+    assert verdict.pooled_reading([]) == {"count": 0, "unmeasured": 0}

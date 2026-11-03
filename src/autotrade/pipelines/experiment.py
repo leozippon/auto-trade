@@ -762,10 +762,12 @@ class RollingExperimentPipeline:
         when frozen, replayed the same way and reported as the increment of
         the line it changes (:func:`judged_ablation`). Then, whether or not
         the sealed gate passed, one continuous replay over the ``forward`` and
-        ``heldout`` slots and each replicate's, judged with the sealed block
-        (:meth:`_judge`). The strategy's own exception in either replay is a
-        reading (``verdict.sealed_strategy_error``, or the forward record's
-        ``strategy_error`` status); a failure that measured nothing raises,
+        ``heldout`` slots and each replicate's, read and reported beside the
+        verdict, which is the sealed gate's (:meth:`_judge`). The strategy's
+        own exception in either replay is a reading
+        (``verdict.sealed_strategy_error``, or the forward record's
+        ``strategy_error`` status naming the slice it raised in, which no
+        condition reads); a failure that measured nothing raises,
         and so does any replicate's failure. Frozen trees that changed during
         a replay fail closed after the integrity row (the body of what
         :meth:`run_forward` appends) is handed to ``integrity_failure``, when
@@ -925,18 +927,18 @@ class RollingExperimentPipeline:
         if error is not None:
             if not raised_by_strategy(error):
                 raise error
-            where = "heldout" if _failure_day(error) >= heldout.start else "forward"
             return {
                 **base,
                 "status": STRATEGY_ERROR,
+                # The slice the strategy raised in, reported: the verdict
+                # reads the sealed gate alone.
+                "strategy_error": "heldout" if _failure_day(error) >= heldout.start else "forward",
                 "error": _error_text(error),
                 "result_ref": None,
                 "slices": None,
                 "refits_executed": None,
                 "null_control": None,
-                "verdict": graduation_verdict(
-                    sealed=sealed_block, forward=None, heldout=None, strategy_error=where
-                ),
+                "verdict": graduation_verdict(sealed=sealed_block),
             }
         assert result is not None
         replays = replicate_results(span, "forward_replay")
@@ -973,15 +975,15 @@ class RollingExperimentPipeline:
         broker_profile: BrokerProfile,
         seed_replicates: Sequence[tuple[FrozenArtifact, EvaluationResult]] = (),
     ) -> dict[str, object]:
-        """The two slices of one completed forward replay through
-        ``broker_profile`` and the verdict on them with the ``sealed`` block.
+        """The two reported slices of one completed forward replay through
+        ``broker_profile``, and the verdict, which reads the ``sealed`` block.
 
         A slice that cannot be measured raises ``ValueError``, which fails the
         attempt: a verdict is never read off a number that was not measured.
         Each seed replicate's completed replay is handed to both slices, named
         by its artifact and source Step: ``slices.<name>.seed_replicates`` and
         ``slices.<name>.seed_mean`` carry its readings and the mean with the
-        book, ``slices.forward.lower_bound`` what F2 judges on them together,
+        book, ``slices.forward.lower_bound`` the F2 bound over them together,
         and the record's ``seed_replicates`` its result and refits.
         """
 
@@ -1587,9 +1589,9 @@ def judged_replay(
     seed_replicates: Sequence[tuple[Mapping[str, object], Mapping[str, object]]] = (),
 ) -> dict[str, object]:
     """The ``slices`` and ``verdict`` of one completed forward replay: its
-    result ``replay`` and style sidecar ``analysis``, judged under ``rules``
+    result ``replay`` and style sidecar ``analysis``, read under ``rules``
     over the ``forward`` and ``heldout`` bounds, each slice with its activity,
-    and the verdict with the ``sealed`` gate's block.
+    and the verdict, which is the ``sealed`` gate's block alone.
 
     What a forward record stores, so a stored replay is judged again by this
     same function (``scripts/dev/check_verdicts.py``). ``seed_key`` is the
@@ -1619,7 +1621,6 @@ def judged_replay(
         rules=rules,
         start=heldout[0],
         end=heldout[1],
-        forward_tracking_error=float(forward_block["tracking_error"]),  # type: ignore[arg-type]
         mean_gross=float(activity["heldout"]["mean_gross"]),  # type: ignore[arg-type]
         seed_replicates=seed_replicates,
     )

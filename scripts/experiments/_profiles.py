@@ -40,9 +40,9 @@ FUND_EIGHT_YEAR: dict[str, object] = {**EIGHT_YEAR, "include_fundamentals": True
 
 # Create-time graduation bars, named on every arm so the request records a
 # choice. They were the console's creation defaults when round 20260927 first
-# named them. The IR, DSR, positive-year, full-span and recency bars were
-# retired with the sealed gate on 2026-11-03 (config.RETIRED_RULES), and the
-# console refuses a create request that names them.
+# named them. All but forward_confidence were retired with the sealed gate on
+# 2026-11-03 (config.RETIRED_RULES), and the console refuses a create request
+# that names them.
 GATES: dict[str, object] = {
     "min_active_ir": 0.75,
     "min_dsr_probability": 0.975,

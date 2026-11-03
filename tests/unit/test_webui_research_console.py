@@ -40,7 +40,7 @@ from autotrade.webui.registry import (
 )
 from autotrade.webui.server import create_app
 from autotrade.webui.steps import step_tree_view
-from tests.unit.acceptance_fixture import CREATE_RULES
+from tests.unit.acceptance_fixture import CREATE_RULES, REQUIRED_RULES
 from tests.unit.test_webui_inject_message import _const_block, _fn
 from tests.unit.webui_research_arm import (
     ENVIRONMENT_BLOCKED_REASON,
@@ -228,7 +228,7 @@ def test_the_verdict_opens_the_forward_replay(tmp_path: Path, status: str) -> No
     assert forward["replay"] == REPLAY
     assert forward["verdict"]["status"] == status
     assert forward["slices"]["forward"]["lower_bound"] == record["slices"]["forward"]["lower_bound"]
-    assert forward["slices"]["heldout"]["tolerance"] == record["slices"]["heldout"]["tolerance"]
+    assert forward["slices"]["heldout"]["residual_reading"] == record["slices"]["heldout"]["residual_reading"]
     assert forward["null_percentile"] == 0.77
     assert "result_ref" not in json.dumps(detail)
     client = TestClient(create_app(tmp_path, tmp_path))
@@ -243,7 +243,8 @@ def test_the_verdict_opens_the_forward_replay(tmp_path: Path, status: str) -> No
         assert detail["verdict"]["reasons"] == []
         assert detail["paper_candidate"] == {"artifact_id": "strategy_research_abc"}
     else:
-        assert "forward_lower_bound_not_positive" in detail["verdict"]["reasons"]
+        # The sealed gate alone decides: this book read below its bar.
+        assert detail["verdict"]["reasons"] == ["sealed_residual_ir_below_bar"]
         assert detail["paper_candidate"] is None
 
 
@@ -642,10 +643,8 @@ def test_the_listing_names_the_research_curve_and_the_replay_its_thresholds(tmp_
     """The one curve per arm starts from the research-period validation of the
     candidate the tiles name — the frozen artifact's own once the arm froze —
     and the replay's step lists the thresholds the verdict will hold it to
-    before the record exists, from the arm's parameters and the pipeline's
-    constants; the record's own block carries the same keys afterwards."""
-
-    from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
+    before the record exists, from the arm's parameters; the record's own
+    block carries the same keys afterwards."""
 
     build_arm(tmp_path, "researching", "research")
     build_arm(tmp_path, "frozen", "sealed")
@@ -657,48 +656,23 @@ def test_the_listing_names_the_research_curve_and_the_replay_its_thresholds(tmp_
     # This arm nominated its best candidate, so both names agree.
     assert rows["frozen"]["research_best"]["result"] == rows["frozen"]["research_result"]
 
+    # The verdict is the sealed gate's alone: the step lists its level, its
+    # sealed years and the bar for them, and the record's own block carries
+    # the same keys, its bar for the days the sealed replay read.
     preview = experiment_detail(tmp_path, "researching")["sessions"][1]["thresholds"]
-    # This arm's params.json was written before the five limits reached the
-    # create form: it names none of them, and the console attributes none to it.
-    assert preview["max_drawdown"] is None
-    assert not {"active_max_drawdown", "tracking_error_cap"} & set(preview)
-    assert preview["cost_stress_multiplier"] == pytest.approx(WEB_CREATE_DEFAULTS["cost_stress_multiplier"])
-    # One created since states all five, and the console lists the rules that
-    # arm's own parameters resolve to -- a mandate only where it named a cap.
+    assert preview == {
+        "alpha": REQUIRED_RULES["alpha"],
+        "bar": pytest.approx(1.6449, abs=1e-4),
+        "sealed_years": REQUIRED_RULES["sealed_years"],
+    }
+    recorded = experiment_detail(tmp_path, "judged")["forward"]["verdict"]["thresholds"]
+    assert set(recorded) == set(preview)
+    assert (recorded["alpha"], recorded["sealed_years"]) == (preview["alpha"], preview["sealed_years"])
+    # An arm created before the sealed gate can run no forward stage: none.
     path = tmp_path / "researching/hitl/params.json"
     params = json.loads(path.read_text(encoding="utf-8"))
-    stated_keys = ("max_drawdown", "active_max_drawdown", "tracking_error_cap", "beta_min", "beta_max")
-    derived = dict.fromkeys(stated_keys)
-    path.write_text(
-        json.dumps(
-            {**params, **derived, "initial_cash": 1_000_000,
-             "tracking_error_cap": 0.08, "max_drawdown": 0.3}
-        ),
-        encoding="utf-8",
-    )
-    stated = experiment_detail(tmp_path, "researching")["sessions"][1]["thresholds"]
-    assert {key: stated[key] for key in derived} == {
-        "max_drawdown": 0.3,
-        "active_max_drawdown": 0.30,
-        "tracking_error_cap": 0.08,
-        "beta_min": 0.85,
-        "beta_max": 1.15,
-    }
-    # The same arm without a cap: no mandate, on the very same capital.
-    path.write_text(
-        json.dumps({**params, **derived, "initial_cash": 1_000_000}), encoding="utf-8"
-    )
-    untracked = experiment_detail(tmp_path, "researching")["sessions"][1]["thresholds"]
-    assert (untracked["max_drawdown"], untracked["active_max_drawdown"]) == (0.45, 0.30)
-    assert untracked["tracking_error_cap"] is None
-    path.write_text(json.dumps(params), encoding="utf-8")
-    assert (preview["min_round_trips"], preview["min_mean_gross"]) == (12, 0.5)
-    # The record's own block carries the same keys; its parameter-derived
-    # values are the arm's (the synthetic arm was judged at a 90% drawdown cap).
-    recorded = experiment_detail(tmp_path, "judged")["forward"]["verdict"]["thresholds"]
-    assert set(preview) <= set(recorded)
-    for key in ("forward_confidence", "min_round_trips", "min_mean_gross", "heldout_tolerance_z"):
-        assert recorded[key] == pytest.approx(preview[key]), key
+    path.write_text(json.dumps({key: params[key] for key in params if key not in REQUIRED_RULES}), encoding="utf-8")
+    assert experiment_detail(tmp_path, "researching")["sessions"][1]["thresholds"] == {}
 
 
 def _sidecar(directory: Path, row: dict[str, object]) -> Path:
@@ -1218,7 +1192,6 @@ def test_a_figure_whose_label_does_not_read_itself_is_glossed_once() -> None:
         ("function researchSessionPanel(", ("IR_TITLE", "EXCESS_TITLE")),
         ("function frozenPanel(", ("IR_TITLE", "EXCESS_TITLE", "TRACKING_ERROR_TITLE")),
         ("function freezeGateChecklist(", ("DSR_TITLE",)),
-        ("function forwardCriteria(", ("LOWER_BOUND_TITLE",)),
     ):
         body = script.split(opening, 1)[1].split("\nfunction ", 1)[0]
         for gloss in glosses:
@@ -1243,11 +1216,11 @@ def test_an_experiment_card_wears_the_ending_as_a_badge_alone() -> None:
     assert script.count("endingReason(") == 3
 
 
-def test_the_three_replay_stage_views_speak_one_criteria_vocabulary() -> None:
-    """前推回放, Held-out and 裁决 draw the criteria the same way: every view
-    renders the shared F1–F6 / H1–H4 rows as a checklist, so a threshold is
-    spelled once and the verdict cannot drift back into a chip row of its own
-    that states the same limits differently."""
+def test_the_three_replay_stage_views_read_the_sealed_gate_alone() -> None:
+    """前推回放, Held-out and 裁决 judge nothing of their own: the verdict
+    draws the sealed gate's one S row as the 前推 view does, so its bar is
+    spelled once, and the two slice views say their readings are reported,
+    never judged."""
 
     script = (
         Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
@@ -1256,11 +1229,12 @@ def test_the_three_replay_stage_views_speak_one_criteria_vocabulary() -> None:
         name: script.split(f"function {name}(", 1)[1].split("\nfunction ", 1)[0]
         for name in ("forwardStagePanel", "heldoutStagePanel", "verdictStagePanel")
     }
-    assert "checklist(forwardCriteria(" in bodies["forwardStagePanel"]
-    assert "checklist(heldoutCriteria(" in bodies["heldoutStagePanel"]
     verdict = bodies["verdictStagePanel"]
-    assert "forwardCriteria(" in verdict and "heldoutCriteria(" in verdict
-    # The thresholds reach the verdict as those rows' own threshold column.
+    assert "checklist([sealedCriterion(forward.sealed)])" in verdict
+    assert "checklist([sealedCriterion(s)])" in script
+    for name in ("forwardStagePanel", "heldoutStagePanel"):
+        assert "只报告，不参与裁决" in bodies[name]
+    assert "forwardCriteria" not in script and "heldoutCriteria" not in script
     assert "chip" not in verdict and "thresholdChips" not in script
 
 
@@ -1535,3 +1509,40 @@ def test_an_arm_carrying_the_retired_switches_reads_as_one_without_them(tmp_path
     written(build_arm(tmp_path, "unknown", "research"), {"require_heldout_magic": True})
     unknown = {row["experiment_id"]: row for row in experiment_listing(tmp_path)["experiments"]}["unknown"]
     assert unknown["state"] == "unreadable"
+
+
+def test_every_sealed_reading_of_a_window_is_listed_with_its_p_value_and_count(tmp_path: Path) -> None:
+    """The multiplicity readout: an arm's verdict view lists every frozen
+    nominee's sealed reading over the same sealed years, archived arms
+    included, with its one-sided null p-value and how many there are, and
+    pools the forward-year readings of every frozen strategy over the same
+    forward months. Nothing is adjusted: each arm keeps its own verdict."""
+
+    from autotrade.pipelines.verdict import null_p_value, pooled_reading
+
+    build_arm(tmp_path, "good", "graduated")
+    build_arm(tmp_path, "bad", "discarded")
+    build_arm(tmp_path, "early", "research")
+    readouts = experiment_detail(tmp_path, "good")["readouts"]
+    window = readouts["sealed_window"]
+    assert window["count"] == 2 and readouts["unreadable_arms"] == 0
+    by_arm = {row["experiment_id"]: row for row in window["readings"]}
+    assert set(by_arm) == {"good", "bad"}
+    for name in ("good", "bad"):
+        block = _records(tmp_path / name)[-1]["sealed"]["slice"]
+        assert by_arm[name]["p_value"] == pytest.approx(
+            null_p_value(block["residual_information_ratio"], block["years"])
+        )
+        assert by_arm[name]["passed"] is (block["reasons"] == [])
+    # Most significant first.
+    assert [row["p_value"] for row in window["readings"]] == sorted(row["p_value"] for row in window["readings"])
+    pooled = pooled_reading(
+        [_records(tmp_path / name)[-1]["slices"]["forward"]["residual_reading"] for name in ("bad", "good")]
+    )
+    assert readouts["forward_pool"] == {
+        "start": REPLAY["start"],
+        "end": REPLAY["forward_end"],
+        **{key: pytest.approx(value) for key, value in pooled.items()},
+    }
+    # An arm without a forward record has no readout.
+    assert experiment_detail(tmp_path, "early")["readouts"] is None

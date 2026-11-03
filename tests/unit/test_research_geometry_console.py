@@ -26,7 +26,7 @@ from autotrade.pipelines.hitl_state import (
 from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.webui.registry import experiment_listing, summarize_experiment
 from autotrade.webui.server import create_app
-from tests.unit.acceptance_fixture import CREATE_RULES
+from tests.unit.acceptance_fixture import REQUIRED_RULES
 
 
 def _experiment(root: Path, experiment_id: str, params: dict[str, object]) -> Path:
@@ -40,7 +40,8 @@ def _experiment(root: Path, experiment_id: str, params: dict[str, object]) -> Pa
     return directory
 
 
-_CURRENT = {**DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES}
+# What the console stamps: the geometry and every required rule.
+_CURRENT = {**DEFAULT_RESEARCH_GEOMETRY.to_record(), **REQUIRED_RULES}
 _FOLD_ERA = {
     "fold_period": "year",
     "development_first_period": "2022",

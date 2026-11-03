@@ -111,6 +111,8 @@ class Evaluator:
         self.root = root
         self.requests: list[EvaluationRequest] = []
         self.raise_with = raise_with
+        # The one replay mode ``raise_with`` is raised in, when set.
+        self.raise_in: str | None = None
         # Every replay this evaluator ran, which names its result: a test may
         # clear ``requests`` between stages.
         self.count = 0
@@ -118,7 +120,7 @@ class Evaluator:
     def evaluate(self, request: EvaluationRequest) -> EvaluationResult:
         self.requests.append(request)
         self.count += 1
-        if self.raise_with is not None:
+        if self.raise_with is not None and self.raise_in in (None, request.mode):
             raise self.raise_with
         source = (Path(request.revision.output_path) / "main.py").read_text(encoding="utf-8")
         alpha = float(source.split("# alpha=")[1].split()[0]) if "# alpha=" in source else 0.0
@@ -690,7 +692,6 @@ def test_the_forward_replay_is_one_span_from_forward_start_to_the_release(tmp_pa
     assert reading["reasons"] == (
         [] if reading["residual_information_ratio"] >= reading["bar"] else ["sealed_residual_ir_below_bar"]
     )
-    assert record["verdict"]["reasons"][: len(reading["reasons"])] == reading["reasons"]
     assert (request.mode, request.start, request.end) == ("heldout", "20240701", RELEASE_END)
     assert request.continuation == (f"replay/heldout/20250701_{RELEASE_END}",)
     assert request.revision.revision_id == frozen["artifact_id"]
@@ -707,31 +708,20 @@ def test_the_forward_replay_is_one_span_from_forward_start_to_the_release(tmp_pa
     assert (forward["start"], forward["end"]) == ("20240701", "20250630")
     assert (heldout["start"], heldout["end"]) == ("20250701", RELEASE_END)
     assert forward["activity"]["round_trips"] > 0
-    # The Held-out tolerance is scaled by the forward slice's tracking error.
-    assert heldout["tolerance"] < 0
-    # The verdict is held to the arm's own rules and its record states them.
+    # Both slices are read and reported, their residual reading beside them.
+    for block in (forward, heldout):
+        assert "reasons" not in block and block["residual_reading"]["series"] == "active"
+    # The verdict is the sealed gate's alone, under the arm's own rules, and
+    # the record states them.
     rules = CONFIG_ACCEPTANCE.to_record()
     assert record["initial_cash"] == CONFIG_PROFILE.initial_cash
     assert record["acceptance_rules"] == rules
-    graduation_keys = (
-        "max_drawdown",
-        "active_max_drawdown",
-        "tracking_error_cap",
-        "beta_min",
-        "beta_max",
-        "cost_stress_multiplier",
-        "forward_confidence",
-        "min_mean_gross",
-        "heldout_tolerance_z",
-        "alpha",
-        "sealed_years",
-    )
-    assert {key: record["verdict"]["thresholds"][key] for key in graduation_keys} == {
-        key: rules[key] for key in graduation_keys
-    }
+    assert record["verdict"]["thresholds"] == reading["thresholds"]
+    assert record["verdict"]["reasons"] == reading["reasons"]
+    assert forward["parameters"]["cost_stress_multiplier"] == rules["cost_stress_multiplier"]
     assert set(forward["mandate"]) == {"tracking_error", "market_beta"}
     assert record["refits_executed"] == {"forward": 0, "heldout": 0}
-    assert record["verdict"]["status"] in {"graduated", "discarded"}
+    assert record["verdict"]["status"] == ("discarded" if reading["reasons"] else "graduated")
     assert experiment_verdict(ledger.read())["status"] == record["verdict"]["status"]
     assert forward_record(ledger.read())["run_id"] == record["run_id"]
     with pytest.raises(RuntimeError, match="already recorded"):
@@ -824,7 +814,7 @@ def test_the_forward_replay_writes_nothing_a_session_can_read(tmp_path: Path):
     [StrategyRaised("boom"), StrategyMemoryExceeded("killed at the 32g memory cap")],
     ids=["raised", "memory_cap"],
 )
-def test_a_strategy_error_names_the_slice_it_raised_in_and_discards(
+def test_a_strategy_error_names_the_slice_it_raised_in_and_the_sealed_gate_decides(
     tmp_path: Path, cause: StrategyRaised
 ):
     pipeline, _snapshots, evaluator, _developer, ledger = _freezing(tmp_path)
@@ -838,19 +828,25 @@ def test_a_strategy_error_names_the_slice_it_raised_in_and_discards(
 
     record = pipeline.run_forward()
 
-    assert record["status"] == "strategy_error"
+    assert (record["status"], record["strategy_error"]) == ("strategy_error", "heldout")
     assert record["slices"] is None
     # The book raised in its sealed replay too: no reading there, a failed
     # sealed gate, and the forward replay still ran and raised.
     assert record["sealed"]["result_ref"] is None
     assert record["sealed"]["slice"]["strategy_error"] is True
-    assert record["verdict"] == {
-        "status": "discarded",
-        "reasons": ["sealed_strategy_error", "heldout_strategy_error"],
-        "thresholds": {},
-    }
+    assert record["verdict"] == {"status": "discarded", "reasons": ["sealed_strategy_error"], "thresholds": {}}
     assert experiment_verdict(ledger.read())["status"] == "discarded"
     assert paper_candidate(ledger.read()) is None
+
+    # A book that passed its sealed gate and raised only in Held-out: the
+    # error is reported with its slice, and the sealed gate alone decides.
+    pipeline, _snapshots, evaluator, _developer, ledger = _freezing(tmp_path / "late")
+    pipeline.run_research_session()
+    evaluator.raise_with, evaluator.raise_in = failure, "heldout"
+    record = pipeline.run_forward()
+    assert (record["status"], record["strategy_error"]) == ("strategy_error", "heldout")
+    assert record["sealed"]["slice"]["reasons"] == []
+    assert record["verdict"]["status"] == "graduated" and record["verdict"]["reasons"] == []
 
 
 def test_an_environment_failure_fails_the_attempt_and_leaves_no_verdict(tmp_path: Path):
