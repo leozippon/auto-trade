@@ -407,13 +407,6 @@ class SandboxConfig:
         ):
             raise ValueError("sandbox max_output_chars must be a positive integer")
 
-    @property
-    def limits(self) -> SandboxSpec:
-        """``spec`` under its former name, read by tests/unit/test_round_arms.py
-        (owned by the research-gate branch) until it reads ``spec``."""
-
-        return self.spec
-
     def on_devices(self, devices: tuple[int, ...] | None) -> SandboxConfig:
         """This boundary with its containers attaching exactly ``devices``.
 

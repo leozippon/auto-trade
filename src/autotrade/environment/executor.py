@@ -26,7 +26,7 @@ from .contract_fingerprint import (
 from .gpu import device_request, gpu_memory_contention
 from .pretrained import PretrainedStoreError, require_pretrained_store
 from .runtime import chmod_tree
-from .sandbox import DockerSandbox, SandboxConfig, SandboxSpec, container_thread_env
+from .sandbox import DockerSandbox, SandboxConfig, container_thread_env
 from .strategy import (
     AccountSnapshot,
     BarTable,
@@ -446,9 +446,10 @@ class DockerStrategyExecutor:
         self._state_writable = state_writable
         self._fit_worker: DockerStrategyExecutor | None = None
         # Read before the container exists and rendered into its run arguments
-        # below. A request that was given no device fails right here, so a
-        # replay never silently trains on CPU instead of the GPU it asked for.
-        self.gpu_indices = _strategy_gpus(self.config.spec)
+        # below. A request that was given no device fails right here
+        # (``SandboxSpec.devices``), so a replay never silently trains on CPU
+        # instead of the GPU it asked for.
+        self.gpu_indices = self.config.spec.devices()
         self.container_name = f"autotrade-strategy-{uuid.uuid4().hex}"
         # Host-side telemetry of this container: what it actually cost, beside
         # the limits it was started with. Bound once the container is up.
@@ -1240,13 +1241,6 @@ def _pinned_store(pin: str) -> Path | None:
         return require_pretrained_store(pin)
     except PretrainedStoreError as exc:
         raise StrategyExecutionError(str(exc)) from exc
-
-
-def _strategy_gpus(spec: SandboxSpec) -> list[int]:
-    """The devices this strategy container attaches: the ones its spec pins
-    (``SandboxSpec.devices``), whoever pinned them."""
-
-    return spec.devices()
 
 
 def _require_local_image(config: SandboxConfig) -> str:

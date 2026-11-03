@@ -24,7 +24,6 @@ import pandas as pd
 import pytest
 
 from autotrade.environment.data.contracts import BENCHMARK_INDEXES
-from autotrade.environment.executor import _strategy_gpus
 from autotrade.environment.gpu import GpuUnavailableError, host_min_free_gpu_memory_mib
 from autotrade.environment.llm.model_profiles import LOCAL_QWEN_MODEL, MIMO_FLASH_MODEL
 from autotrade.environment.replay.style import MIN_REGRESSION_DAYS
@@ -848,7 +847,7 @@ def test_a_gpu_smoke_pins_admissible_cards_and_without_one_records_nothing(
     merged = {"experiment_id": "arm", "workspace_reference": "packs/arm", "pit_views_seed": "", "gpu_count": 1}
     requested = SandboxSpec(gpu="auto", gpu_count=1)
     with pytest.raises(GpuUnavailableError):
-        _strategy_gpus(_strategy_sandbox_from_spec(requested, fit_timeout_seconds=1).limits)
+        _strategy_sandbox_from_spec(requested, fit_timeout_seconds=1).spec.devices()
 
     @dataclass(frozen=True)
     class Options:
@@ -889,7 +888,7 @@ def test_a_gpu_smoke_pins_admissible_cards_and_without_one_records_nothing(
 
     cards.append(5)
     assert "RuntimeError: assembled" in _round.smoke(merged)
-    assert _strategy_gpus(_strategy_sandbox_from_spec(assembled[0], fit_timeout_seconds=1).limits) == [5]
+    assert _strategy_sandbox_from_spec(assembled[0], fit_timeout_seconds=1).spec.devices() == [5]
 
     rnd, posted = _fill_round(tmp_path, monkeypatch, local=0)
 

@@ -692,17 +692,16 @@ def test_the_consoles_claim_pins_every_container_of_the_arm() -> None:
     strategy container, and a session that asks for fewer gets that many of
     the arm's own cards, never another one. A spec without a claim gives its
     strategy containers no device."""
-    from autotrade.environment.executor import _strategy_gpus
     from autotrade.pipelines.research_session import LLMResearchDeveloper
 
     claimed = SandboxSpec(gpu=(3, 6), gpu_count=2)
     spec = _strategy_sandbox_from_spec(claimed, fit_timeout_seconds=60).spec
     assert (spec.gpu_count, spec.gpu) == (2, (3, 6))
-    assert _strategy_gpus(spec) == [3, 6]
+    assert spec.devices() == [3, 6]
     unclaimed = _strategy_sandbox_from_spec(SandboxSpec(gpu_count=2), fit_timeout_seconds=60)
     assert unclaimed.spec.gpu == GpuMode.AUTO
     with pytest.raises(GpuUnavailableError, match="was given no device"):
-        _strategy_gpus(unclaimed.spec)
+        unclaimed.spec.devices()
 
     def session(count: int) -> SandboxSpec:
         return LLMResearchDeveloper._session_sandbox_spec(
