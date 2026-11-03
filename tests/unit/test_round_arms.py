@@ -29,9 +29,11 @@ from autotrade.environment.llm.model_profiles import LOCAL_QWEN_MODEL, MIMO_FLAS
 from autotrade.environment.replay.style import MIN_REGRESSION_DAYS
 from autotrade.environment.sandbox import SandboxSpec
 from autotrade.environment.strategy_loader import validate_strategy_package
+from autotrade.pipelines.calendar import GEOMETRY_PARAMETERS, ResearchGeometry
 from autotrade.pipelines.config import (
     DEFAULT_RESEARCH_GEOMETRY,
     SNAPSHOT_CACHE_FORMAT_VERSION,
+    acceptance_for,
 )
 from autotrade.pipelines.hitl_state import WEB_CLOSED_PARAMS, WEB_CREATE_DEFAULTS
 from autotrade.pipelines.pit_backend import required_release_raw_datasets
@@ -1182,6 +1184,71 @@ def test_the_200k_pack_carries_the_owner_note_and_keeps_no_earlier_quota() -> No
     # the round's words; either anchor alone is too short to be a snapshot.
     assert "工作假说" in readme
     assert not [word for word in ("臂", "席位", "零技能") if word in readme]
+
+
+# Round 20261103, the first under the sealed gate: four gpt-6-astra experiments
+# on the ten-year geometry with its last five years sealed, two on a pack that
+# frames no mechanism and two on the memory hypothesis, which alone registers
+# an ablation at freeze.
+ROUND_SEALED = "create_round_20261103"
+ABLATION_BY_PACK = {
+    "configs/workspace_refs/open_200k_sealed_20261103": False,
+    "configs/workspace_refs/memory_200k_sealed_20261103": True,
+}
+# The curated operating memory retired with the sealed gate: it described the
+# data surface of the whole research window, sealed years included.
+RETIRED_SKILL = "research-8y-data-surface"
+# A literal date: a year, with its month where one follows it (2020-08,
+# 20200801, 2020 年 8 月).
+LITERAL_DATE = re.compile(
+    r"(?<!\d)((?:19|20)\d{2})(?:[-/.]?(0[1-9]|1[0-2])(?:\d{2})?|\s*年\s*(\d{1,2})\s*月)?(?!\d)"
+)
+
+
+def test_the_sealed_round_registers_an_ablation_exactly_on_the_memory_pack() -> None:
+    """Two experiments per pack that send one request but for their ids, five
+    of the ten research years sealed at the program's alpha; the memory pack's
+    freeze owes an ablation and the open pack's takes none."""
+    rnd = ROUNDS[ROUND_SEALED]
+    by_pack: dict[str, list[dict[str, object]]] = {}
+    for arm in rnd.arms:
+        params = rnd.request_params(arm)
+        by_pack.setdefault(str(params["workspace_reference"]), []).append(params)
+    assert {pack: len(requests) for pack, requests in by_pack.items()} == dict.fromkeys(ABLATION_BY_PACK, 2)
+    for pack, (first, second) in by_pack.items():
+        assert second == {**first, "experiment_id": second["experiment_id"]}
+        assert first["ablation_required"] is ABLATION_BY_PACK[pack]
+        assert acceptance_for(first).ablation_required is ABLATION_BY_PACK[pack]
+        assert (first["research_start"], first["research_end"]) == ("20150801", "20250731")
+        assert (first["sealed_years"], first["alpha"]) == (5, BASE_EXPECTED_DEFAULTS["alpha"])
+        assert (first["model"], first["reasoning_effort"]) == ("gpt-6-astra", "xhigh")
+
+
+def _sealed_months(params: dict[str, object]) -> tuple[tuple[int, int], tuple[int, int]]:
+    """The first and last (year, month) of the research years ``params`` seals."""
+    geometry = ResearchGeometry(**{name: str(params[name]) for name in GEOMETRY_PARAMETERS})
+    _, sealed = geometry.split_sealed(int(params["sealed_years"]))  # type: ignore[call-overload]
+    return (int(sealed[0].start[:4]), int(sealed[0].start[4:6])), (int(sealed[-1].end[:4]), int(sealed[-1].end[4:6]))
+
+
+@pytest.mark.parametrize("pack", sorted(ABLATION_BY_PACK), ids=lambda path: Path(path).name)
+def test_a_sealed_pack_dates_nothing_inside_the_sealed_years(pack: str) -> None:
+    """A session must learn nothing of the sealed years: no file of its pack
+    names a date inside them (a bare year counts when any of it is sealed),
+    cites the retired operating memory that described them or quotes a
+    post-research reading, and none asks for novelty, which the gate does not
+    read."""
+    first, last = _sealed_months(ROUNDS[ROUND_SEALED].request_params(PROBE_ID))
+    files = [path for path in sorted((REPO_ROOT / pack).rglob("*")) if path.is_file()]
+    assert files
+    for path in files:
+        text = path.read_text(encoding="utf-8")
+        for match in LITERAL_DATE.finditer(text):
+            year, month = int(match.group(1)), match.group(2) or match.group(3)
+            inside = first <= (year, int(month)) <= last if month else first[0] <= year <= last[0]
+            assert not inside, (path.name, match.group(0))
+        assert RETIRED_SKILL not in text, path.name
+        assert not [word for word in (*AFTER_RESEARCH, "新意", "创新") if word in text], path.name
 
 
 def test_a_round_that_states_no_sealed_years_or_ablation_rule_is_refused(

@@ -1,8 +1,8 @@
 """What the rounds send alike, stated once.
 
 A round file is its arms and their directives. The values several rounds share
--- the eight-year geometry and dataset selection a seed was prebuilt for, the
-graduation bars and the round-level parameters -- live here, and a round imports them from
+-- the geometry and dataset selection a seed was prebuilt for, the graduation
+bars and the round-level parameters -- live here, and a round imports them from
 here and from `_round`, never from another round file, so a round can close
 without its values moving.
 
@@ -83,3 +83,30 @@ FUND_TITLE_EIGHT_YEAR_100K: dict[str, object] = {**FUND_EIGHT_YEAR_100K, **FUND_
 # Its seed at snapshot cache format 14 (observed-era visibility) on release
 # b50c220f... (logs/data/seed_8y_fundanns_20261024/).
 FUND_TITLE_PIT_VIEWS_SEED = "data/pit_views_seed_research_8y_fundanns_20261024"
+
+# The same selection on ten August-July research years from 2015-08 (rounds
+# 20261031 and 20261102): the twelve forward months after them, a Held-out
+# quarter the replay clips to the release end, and decision views reaching 132
+# months back from the research end, the ten years plus the one their start
+# reads, a window every domain inherits. Part of the seed's contract, like
+# EIGHT_YEAR; the seed is prebuilt from release 65fd45b510dd4d0787eabcb1c4c092db.
+FUND_TITLE_TEN_YEAR: dict[str, object] = {
+    **FUND_TITLE_EIGHT_YEAR,
+    "research_start": "20150801",
+    "research_end": "20250731",
+    "forward_end": "20260731",
+    "heldout_end": "20261031",
+    "window_months": 132,
+}
+FUND_TITLE_TEN_YEAR_PIT_VIEWS_SEED = "data/pit_views_seed_research_10y_fundanns_20261031"
+
+# That selection graded against CSI 1000 under the sealed gate: the drawdown
+# limits round 20261005 set for the index (FUND_EIGHT_YEAR_100K), without the
+# GATES bars the console now refuses. The account and the budgets are the
+# round's.
+FUND_TITLE_TEN_YEAR_CSI1000: dict[str, object] = {
+    **FUND_TITLE_TEN_YEAR,
+    "benchmark_index": CSI1000,
+    "max_drawdown": 0.55,
+    "active_max_drawdown": 0.30,
+}
