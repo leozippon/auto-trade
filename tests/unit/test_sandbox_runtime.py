@@ -32,7 +32,6 @@ from autotrade.environment.artifacts import (
 from autotrade.environment.container_stats import ContainerResourceMonitor
 from autotrade.environment.executor import (
     DockerStrategyExecutor,
-    ExecResult,
     GpuMemoryContention,
     PersistentCommandRunner,
     StrategyCall,
@@ -344,9 +343,15 @@ def test_bounded_capture_streams_output_without_a_communicate_buffer(tmp_path: P
         timeout_seconds=30.0,
         max_output_chars=64,
     )
-    assert result.exit_code == 0
+    assert result.exit_code == 0 and not result.timed_out
     assert len(result.stdout) == 64 and result.stdout_truncated
     assert len(result.stderr) == 64 and result.stderr_truncated
+    slow = _run_limited_capture(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        timeout_seconds=0.2,
+        max_output_chars=64,
+    )
+    assert (slow.exit_code, slow.timed_out) == (124, True)
 
 
 def test_persistent_sandbox_start_records_tag_session_and_runtime_probe(tmp_path: Path):
@@ -388,14 +393,15 @@ def test_persistent_sandbox_start_records_tag_session_and_runtime_probe(tmp_path
 
 def test_persistent_command_timeout_keeps_sandbox_for_followup_work():
     sandbox = Mock()
-    sandbox.exec_limited.return_value = ExecResult(124, "partial", "timed out")
+    timed_out = CommandResult(124, "partial", "timed out", timed_out=True)
+    sandbox.exec_limited.return_value = timed_out
     result = PersistentCommandRunner(sandbox).run(
         ["python", "-c", "pass"],
         cwd=".",
         timeout_seconds=1,
         max_output_chars=100,
     )
-    assert result == CommandResult(124, "partial", "timed out", timed_out=True)
+    assert result is timed_out
     sandbox.stop.assert_not_called()
 
 

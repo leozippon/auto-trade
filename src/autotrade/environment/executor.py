@@ -1081,34 +1081,15 @@ class PersistentCommandRunner:
         max_output_chars: int,
         input_text: str | None = None,
     ) -> CommandResult:
-        from .tools.base import CommandResult
-
         if not argv or any(not str(item) for item in argv):
             raise ValueError("argv must contain non-empty strings")
-        completed = self.sandbox.exec_limited(
+        return self.sandbox.exec_limited(
             tuple(map(str, argv)),
             cwd=cwd,
             timeout_seconds=timeout_seconds,
             max_output_chars=max_output_chars,
             input_text=input_text,
         )
-        return CommandResult(
-            completed.exit_code,
-            completed.stdout,
-            completed.stderr,
-            timed_out=completed.exit_code == 124,
-            stdout_truncated=completed.stdout_truncated,
-            stderr_truncated=completed.stderr_truncated,
-        )
-
-
-@dataclass(frozen=True)
-class ExecResult:
-    exit_code: int
-    stdout: str
-    stderr: str
-    stdout_truncated: bool = False
-    stderr_truncated: bool = False
 
 
 def _with_container_timeout(argv: Sequence[str], timeout_seconds: float) -> list[str]:
@@ -1129,12 +1110,17 @@ def _run_limited_capture(
     timeout_seconds: float,
     max_output_chars: int,
     stdin: int = subprocess.DEVNULL,
-) -> ExecResult:
+) -> CommandResult:
     """Run a command while bounding retained stdout and stderr.
 
     ``stdin`` is handed to the command as is; an attached Docker command gets
-    one that stays open while it runs (``sandbox.attached_stdin``).
+    one that stays open while it runs (``sandbox.attached_stdin``). Exit code
+    124 is a timeout, the host's own here or the container's ``timeout``
+    (``_with_container_timeout``).
     """
+    # CommandResult belongs to the tool layer, which imports this module
+    # (tools/search.py); importing it at the top would be a cycle.
+    from .tools.base import CommandResult
 
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds must be positive")
@@ -1207,12 +1193,13 @@ def _run_limited_capture(
     else:
         return_code = process.wait()
     close_process_pipes(process)
-    return ExecResult(
+    return CommandResult(
         return_code,
         stdout.decode("utf-8", errors="replace"),
         stderr.decode("utf-8", errors="replace"),
-        stdout_truncated,
-        stderr_truncated,
+        timed_out=return_code == 124,
+        stdout_truncated=stdout_truncated,
+        stderr_truncated=stderr_truncated,
     )
 
 
@@ -1313,7 +1300,6 @@ __all__ = [
     "CONTAINER_STRATEGY_DIR",
     "IMPORTED_RUNTIME_FINGERPRINT",
     "DockerStrategyExecutor",
-    "ExecResult",
     "FittableStrategyExecutor",
     "GpuMemoryContention",
     "PersistentCommandRunner",
