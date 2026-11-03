@@ -14,7 +14,7 @@ compared with the ledger key for key:
   and, where its forward replay completed, its slices and verdict
   (``experiment.judged_replay``).
 
-An arm created before ``CURRENT_RULES_SINCE`` was judged under rules since
+An arm whose rules state no ``sealed_years`` was judged under rules since
 retired and is never judged again: its readings are what its ledger says.
 
 Run it by hand before landing a change to the gate code, from a checkout
@@ -32,7 +32,6 @@ import json
 import math
 import sys
 from collections.abc import Mapping, Sequence
-from datetime import datetime
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -56,15 +55,6 @@ from autotrade.pipelines.experiment import (
 from autotrade.pipelines.hitl_state import HITL_DIR_NAME, PARAMS_NAME
 from autotrade.pipelines.ledger import recorded_path
 
-# When the current rules took effect: the last rule change folded into them
-# (the sealed gate: the session sees the visible research years only, a freeze
-# is a registration, and the frozen artifact's factor-residual reading on the
-# sealed years is the verdict's performance condition) governs every arm
-# created from this instant on. An arm created before it was judged under
-# rules since retired, so its stored readings differ by the rule, not by a
-# defect.
-CURRENT_RULES_SINCE = datetime.fromisoformat("2026-11-03T00:00:00+00:00")
-
 
 class Judgement(NamedTuple):
     """One stored reading judged again: where it is, and the paths at which
@@ -76,15 +66,17 @@ class Judgement(NamedTuple):
 
 
 def current_arms(experiments: Path) -> list[Path]:
-    """The arms under ``experiments`` created under the current rules."""
+    """The arms under ``experiments`` judged under the current rules: those
+    whose rules state ``sealed_years`` (the sealed gate's, which the session
+    sees the visible research years under, a freeze registers and the
+    frozen artifact's sealed reading judges). An arm created before then was
+    judged under rules since retired, so its stored readings differ by the
+    rule, not by a defect."""
 
     arms = []
     for path in sorted(Path(experiments).iterdir()):
         params = path / HITL_DIR_NAME / PARAMS_NAME
-        if not params.is_file():
-            continue
-        created = json.loads(params.read_text(encoding="utf-8")).get("_created_at")
-        if created and datetime.fromisoformat(str(created)) >= CURRENT_RULES_SINCE:
+        if params.is_file() and json.loads(params.read_text(encoding="utf-8")).get("sealed_years") is not None:
             arms.append(path)
     return arms
 
@@ -258,7 +250,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             detail = f": differs at {item.differences[:20]}" if item.differences else ""
             print(f"{'different' if item.differences else 'identical':<10} {item.reading:<27} {item.arm}{detail}")
     print(
-        f"{len(arms)} arms created since {CURRENT_RULES_SINCE.isoformat()}: "
+        f"{len(arms)} arms under the sealed gate: "
         f"{count} stored readings, {count - failed} identical, {failed} different"
     )
     return 1 if failed else 0

@@ -445,8 +445,6 @@ def test_seed_replicates_are_shown_where_the_record_has_them_and_absent_otherwis
         )
     assert forward["seed_mean"]["members"] == 2
     assert isinstance(forward["lower_bound"], float)
-    assert registry._CRITERION_CODES["forward_lower_bound_not_positive"] == "F2"
-    assert "F8" not in registry._CRITERION_CODES.values()
     # One seed: no replicate served, so nothing drawn; F2 reads the book alone.
     assert single["frozen"]["seed_replicates"] is None
     alone = single["sessions"][0]["record"]["freeze_gate"]["seed_replicates"]
@@ -714,8 +712,8 @@ def test_a_running_session_serves_its_best_candidate_and_the_record_keeps_it(tmp
     live = summarize_experiment(directory)
     assert live["research_best"]["step_id"] == steps[1]["step_id"]
     assert live["research_best"]["session_key"] == "research"
-    # No gate is read over a running session.
-    assert (live["research_best"]["trials"], live["research_best"]["deflated_sharpe_probability"]) == (None, None)
+    # No gate is read over a running session, and none is served.
+    assert not {"trials", "deflated_sharpe_probability"} & set(live["research_best"])
     assert live["research_best"]["panel_return"] is None  # these sidecars carry no panel
     assert live["research_result"] == Path(str(steps[1]["validation_result_ref"])).parent.name
     client = TestClient(create_app(tmp_path, tmp_path))
@@ -821,10 +819,10 @@ def test_an_ended_arm_is_read_off_its_ledger_and_never_judged_again(
     # one stopped before its record has none either.
     unnominated = rows["no_edge"]["research_best"]
     assert unnominated["step_id"] == steps[1]["step_id"]
-    assert (unnominated["deflated_sharpe_probability"], unnominated["trials"]) == (None, None)
+    assert (unnominated.get("deflated_sharpe_probability"), unnominated.get("trials")) == (None, None)
     stopped = rows["stopped"]["research_best"]
     assert stopped["information_ratio"] is not None
-    assert (stopped["deflated_sharpe_probability"], stopped["trials"]) == (None, None)
+    assert not {"trials", "deflated_sharpe_probability"} & set(stopped)
     # The forward slices and verdict are the record's, key for key.
     for name in ("graduate", "refused"):
         forward = _records(root / name)[-1]
@@ -839,7 +837,7 @@ def test_an_ended_arm_is_read_off_its_ledger_and_never_judged_again(
     assert calls[:1] == ["panel_return"]
     running_best = next(row for row in live["experiments"] if row["experiment_id"] == "running")["research_best"]
     assert running_best["information_ratio"] is not None
-    assert running_best["deflated_sharpe_probability"] is None
+    assert "deflated_sharpe_probability" not in running_best
 
 
 def test_a_page_poll_keeps_one_request_in_flight() -> None:
@@ -1155,13 +1153,14 @@ def test_a_home_card_shows_each_figure_alone_never_as_a_fraction() -> None:
     budget = re.sub(r"\s+", " ", body("budgetBars"))
     assert "mini ? row.spent" in budget and "mini ? `${row.label}已用 ${row.spent}`" in budget
     assert "activityNode(fresh.status)" in body("controlPanel")
-    # One vocabulary for the best candidate: the card's four tiles are the
-    # experiment page's first four, recorded or live.
+    # One vocabulary for the best candidate: the card's two tiles are the
+    # experiment page's first two; a session recorded under the
+    # deflated-Sharpe gate shows its DSR and trial count on its own page.
     labels = ("最佳候选主动超额", "IR", "DSR", "累计试验")
-    for name in ("evidenceTiles", "bestCandidateTiles"):
+    for name, shown in (("evidenceTiles", labels[:2]), ("bestCandidateTiles", labels)):
         found = [label for label in labels if f'label: "{label}"' in body(name)]
-        assert found == list(labels), name
-        assert "DSR_TITLE" in body(name) and "TRIALS_TITLE" in body(name), name
+        assert found == list(shown), name
+    assert "DSR_TITLE" not in body("evidenceTiles") and "TRIALS_TITLE" not in body("evidenceTiles")
     assert "bestCandidateTiles(best, record.trials_to_date)" in body("researchSessionPanel")
     assert "bestCandidateTiles(detail.research_best)" in body("sessionDetailPanel")
     # The gloss says what the figure is; the gate's own limits and measured
@@ -1472,8 +1471,13 @@ def test_a_record_read_on_the_retired_regressed_scale_shows_no_regressed_figure(
     shown = detail["forward"]["slices"]["forward"]
     assert shown["lower_bound"] == -0.05 and shown["plain_excess"] == block["plain_excess"]
     assert not {"neutralized_excess", "information_ratio", "excess_at_cost_stress", "plain_excess_lower_bound"} & set(shown)
-    assert detail["forward"]["verdict"]["reasons"] == ["forward_lower_bound_not_positive"]
-    assert summarize_experiment(directory)["ending"] == {"state": "rejected", "reason": "F2"}
+    # The verdict's reasons are shown as recorded.
+    assert detail["forward"]["verdict"]["reasons"] == ["forward_plain_excess_lower_bound_not_positive"]
+    # A retired token has no code: the ending names it as recorded.
+    assert summarize_experiment(directory)["ending"] == {
+        "state": "rejected",
+        "reason": "forward_plain_excess_lower_bound_not_positive",
+    }
     figures = ("plain_excess", "tracking_error", "information_ratio")
     assert {key: detail["frozen"][key] for key in figures} == {key: current["frozen"][key] for key in figures}
     assert detail["frozen"]["forward_mde"] is None

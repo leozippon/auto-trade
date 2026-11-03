@@ -22,9 +22,8 @@ stays as produced; :func:`experiment_verdict` reads the arm as ``voided``.
 Until 2026-11-03 an operator could incubate one node of an arm whose research
 ended without a graduation, which appended ``incubation`` (the node's
 entry-screen reading, the artifact it froze, its forward and Held-out reading
-and the forward screen on it); nothing appends one any more, and
-:func:`incubation_candidate` reads what Paper opens a book from where one was
-recorded. An arm created before then with ``lineage_arms`` may also carry a
+and the forward screen on it); nothing appends one any more, and the
+frozen-tree prune keeps what one froze (:func:`incubation_record`). An arm created before then with ``lineage_arms`` may also carry a
 ``lineage`` record, which nothing reads.
 
 Every record carries the link keys ``experiment_id``, ``epoch_id``, ``fold_id``
@@ -324,28 +323,6 @@ def paper_candidate(records: Sequence[Mapping[str, object]]) -> dict[str, object
         "artifact_id": str(block["artifact_id"]),
         "output_path": str(block["output_path"]),
         "models_path": str(block.get("models_path") or "") or None,
-    }
-
-
-def incubation_candidate(records: Sequence[Mapping[str, object]]) -> dict[str, object] | None:
-    """What Paper opens an incubating book from, else None: the artifact the
-    incubation froze, in :func:`paper_candidate`'s shape, its seed
-    replicates' frozen blocks, the boards the replay ran on, and under
-    ``forward`` the forward reading, which names its replay result and span
-    as a forward record does. None when the arm incubated nothing or its
-    forward screen blocked."""
-
-    record = incubation_record(records)
-    if record is None or not record["screen"]["passed"]:  # type: ignore[index]
-        return None
-    block: Mapping[str, object] = record["frozen"]  # type: ignore[assignment]
-    return {
-        "artifact_id": str(block["artifact_id"]),
-        "output_path": str(block["output_path"]),
-        "models_path": str(block.get("models_path") or "") or None,
-        "seed_replicates": [dict(item) for item in block.get("seed_replicates") or ()],  # type: ignore[union-attr]
-        "permitted_boards": list(record["permitted_boards"]["boards"]),  # type: ignore[index]
-        "forward": dict(record["forward_reading"]),  # type: ignore[arg-type]
     }
 
 

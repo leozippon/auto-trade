@@ -138,28 +138,8 @@ _ENDING_ORDER = {state: index for index, state in enumerate(ENDING_STATES)}
 _CRITERION_CODES = {
     condition.reason: condition.code for condition in CONDITIONS if condition.code
 }
-# The codes of the forward and Held-out conditions retired on 2026-11-03,
-# which the verdicts recorded before then carry.
-_CRITERION_CODES.update(
-    {
-        "forward_lower_bound_not_positive": "F2",
-        "forward_recency_negative": "F3",
-        "forward_max_drawdown_exceeded": "F4",
-        "forward_active_drawdown_exceeded": "F4",
-        "forward_not_positive_at_cost_stress": "F5",
-        "forward_too_few_round_trips": "F6",
-        "forward_exposure_below_floor": "F6",
-        "forward_tracking_error_above_cap": "F7",
-        "forward_beta_outside_band": "F7",
-        "heldout_excess_below_tolerance": "H2",
-        "heldout_max_drawdown_exceeded": "H3",
-        "heldout_active_drawdown_exceeded": "H3",
-        "heldout_exposure_below_floor": "H4",
-    }
-)
-# A reason a record judged before 2026-10-28 carries, by the condition that
-# judges the same reading now: F8's bound of the plain active mean is F2's.
-_RETIRED_REASONS = {"forward_plain_excess_lower_bound_not_positive": "forward_lower_bound_not_positive"}
+# A verdict recorded before 2026-11-03 may carry a retired forward or
+# Held-out token, which has no code: the reason shows the token as recorded.
 # What a slice read before then holds on the retired regressed scale (the
 # active series' intercept on the benchmark and the size factor, and the
 # figures built on it), which no current label may show.
@@ -185,10 +165,10 @@ def _regressed(block: Mapping[str, object]) -> bool:
     return "neutralized_excess" in block
 
 
-def _current_reasons(reasons: object) -> list[str]:
-    """Recorded reason tokens under today's names (``_RETIRED_REASONS``), once each."""
+def _recorded_reasons(reasons: object) -> list[str]:
+    """Recorded reason tokens as recorded, once each."""
 
-    return list(dict.fromkeys(_RETIRED_REASONS.get(str(token), str(token)) for token in reasons or ()))  # type: ignore[union-attr]
+    return list(dict.fromkeys(str(token) for token in reasons or ()))  # type: ignore[union-attr]
 
 
 def _slice_view(block: Mapping[str, object]) -> dict[str, object]:
@@ -463,7 +443,7 @@ def arm_ending(
     if verdict["status"] == "discarded":
         codes = dict.fromkeys(
             _CRITERION_CODES.get(token, token)
-            for token in _current_reasons(verdict.get("reasons"))
+            for token in _recorded_reasons(verdict.get("reasons"))
         )
         return {"state": "rejected", "reason": " · ".join(codes)}
     if verdict["status"] == ENVIRONMENT_BLOCKED:
@@ -525,7 +505,7 @@ def _forward_view(
 ) -> dict[str, object] | None:
     """The forward record: replay span, slice statistics and verdict, as the
     record stores them, a record from before 2026-10-28 on today's scale
-    (:func:`_slice_view`, :func:`_current_reasons`). ``None`` until the record
+    (:func:`_slice_view`, :func:`_recorded_reasons`). ``None`` until the record
     exists, which is also when the verdict does. A slice recorded before
     slices carried the holder's readings shows none: nothing is read again
     from its replay."""
@@ -548,7 +528,7 @@ def _forward_view(
         "refits_executed": record.get("refits_executed"),
         # Diagnostic: the forward slice's excess among random-name replays.
         "null_percentile": _number(_mapping(null.get("step")).get("excess_percentile")),
-        "verdict": {**verdict, "reasons": _current_reasons(verdict.get("reasons"))},
+        "verdict": {**verdict, "reasons": _recorded_reasons(verdict.get("reasons"))},
     }
 
 
@@ -1012,8 +992,6 @@ def _live_candidate(
     view = {
         **_step_view(best, _cost_stress_multiplier(directory)),
         "result": _result_name(best.get("validation_result_ref")),
-        "deflated_sharpe_probability": None,
-        "trials": None,
     }
     if not running:
         return view
@@ -1336,7 +1314,7 @@ def _research_session_view(
         "freeze_gate": (
             {
                 "passed": bool(gate.get("passed")),
-                "reasons": _current_reasons(gate.get("reasons")),
+                "reasons": _recorded_reasons(gate.get("reasons")),
                 "deflated_sharpe_probability": _number(
                     _mapping(gate.get("deflated_sharpe")).get("deflated_sharpe_probability")
                 ),

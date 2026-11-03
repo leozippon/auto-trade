@@ -94,20 +94,6 @@ const REASON_LABELS = {
   forward_strategy_error: "前推期策略无报错",
   heldout_strategy_error: "Held-out 期策略无报错",
   replicate_strategy_error: "种子副本回测无报错",
-  forward_lower_bound_not_positive: (t) => `前推主动超额 ${fmtPct(t.forward_confidence, 0)} 下界`,
-  // F3, retired with the sealed gate; a verdict recorded before it may carry it.
-  forward_recency_negative: "前推近月主动超额",
-  forward_max_drawdown_exceeded: "前推回撤",
-  forward_active_drawdown_exceeded: "前推主动回撤",
-  forward_not_positive_at_cost_stress: (t) => `前推滑点 ×${t.cost_stress_multiplier ?? "—"} 后主动超额`,
-  forward_too_few_round_trips: "前推往返交易数",
-  forward_exposure_below_floor: "前推平均仓位",
-  forward_tracking_error_above_cap: "前推对基准指数跟踪误差",
-  forward_beta_outside_band: "前推市场 β",
-  heldout_excess_below_tolerance: "Held-out 主动超额",
-  heldout_max_drawdown_exceeded: "Held-out 回撤",
-  heldout_active_drawdown_exceeded: "Held-out 主动回撤",
-  heldout_exposure_below_floor: "Held-out 平均仓位",
 };
 // An arm judged on its active series -- its daily return minus the zero-skill
 // panel the host drew from its own book -- records `series: "active"`; an arm
@@ -2145,13 +2131,6 @@ function evidenceTiles(item) {
       title: `${sessionLabel(best.session_key)} 中 IR 最高的全区间验证，研究期年化`,
     },
     { label: "IR", value: best.information_ratio, fmt: fmtSharpe, signed: true, title: IR_TITLE },
-    {
-      label: "DSR",
-      value: best.deflated_sharpe_probability,
-      fmt: fmtSharpe,
-      title: DSR_TITLE,
-    },
-    { label: "累计试验", value: best.trials, fmt: String, title: TRIALS_TITLE },
   ]);
   return tiles.length ? statTilesRow(tiles) : null;
 }

@@ -20,7 +20,6 @@ from autotrade.environment.runtime import utc_now_iso
 from autotrade.pipelines import worker
 from autotrade.pipelines.worker import load_worker_options, run_local_interactive_worker
 from scripts.dev.check_verdicts import (
-    CURRENT_RULES_SINCE,
     check_arm,
     current_arms,
     main,
@@ -121,9 +120,11 @@ def test_a_tampered_reading_is_named_and_fails_the_run(arm: Path, tmp_path: Path
 
 
 def test_an_arm_created_under_retired_rules_is_not_judged(arm: Path, tmp_path: Path) -> None:
+    """An arm is judged by the rules it states, whenever it was created: one
+    whose rules name no sealed years is never judged again."""
+
     root = tmp_path / "experiments"
-    earlier = CURRENT_RULES_SINCE.replace(year=CURRENT_RULES_SINCE.year - 1).isoformat()
-    _copy(arm, root, _created_at=earlier)
+    _copy(arm, root, sealed_years=None)
     assert current_arms(root) == []
     assert main(["--experiments", str(root)]) == 0
 

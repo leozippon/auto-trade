@@ -444,12 +444,8 @@ def test_every_reason_the_pipeline_records_has_a_console_label() -> None:
 
     from autotrade.pipelines.config import SESSION_OUTCOMES
     from autotrade.pipelines.verdict import CONDITIONS, UNMEASURABLE
-    from autotrade.webui.registry import _CRITERION_CODES
-
-    # The verdict's own conditions, and the forward and Held-out ones the
-    # records judged before 2026-11-03 still carry.
-    recorded = {condition.reason for condition in CONDITIONS} | {UNMEASURABLE} | set(_CRITERION_CODES)
-    assert {"sealed_residual_ir_below_bar", "forward_lower_bound_not_positive"} <= recorded
+    recorded = {condition.reason for condition in CONDITIONS} | {UNMEASURABLE}
+    assert {"sealed_residual_ir_below_bar", "replicate_strategy_error"} <= recorded
     labels = _reason_tokens()
     assert recorded <= labels, sorted(recorded - labels)
     outcomes = set(
@@ -496,10 +492,7 @@ def test_a_criterion_that_names_a_threshold_words_it_from_the_record() -> None:
     block, and the multiplier is now stated in the name alone, not twice."""
 
     labels = _js_literal("const REASON_LABELS = {", "\n};")
-    for token, key in (
-        ("forward_lower_bound_not_positive", "forward_confidence"),
-        ("forward_not_positive_at_cost_stress", "cost_stress_multiplier"),
-    ):
+    for token, key in (("freeze_not_positive_at_cost_stress", "cost_stress_multiplier"),):
         [line] = [row for row in labels.splitlines() if row.strip().startswith(f"{token}:")]
         assert "(t) =>" in line and f"t.{key}" in line, token
         # A missing threshold reads as the console's own dash, not as a default.
