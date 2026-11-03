@@ -142,8 +142,6 @@ _CRITERION_CODES = {
 # which the verdicts recorded before then carry.
 _CRITERION_CODES.update(
     {
-        "forward_strategy_error": "F1",
-        "heldout_strategy_error": "H1",
         "forward_lower_bound_not_positive": "F2",
         "forward_recency_negative": "F3",
         "forward_max_drawdown_exceeded": "F4",
@@ -1226,16 +1224,24 @@ def _forward_readouts(root: Path, record: Mapping[str, object] | None) -> dict[s
     what a p-value is weighed against. ``forward_pool``: every frozen
     nominee's residual reading over the same forward months, pooled
     (``verdict.pooled_reading``): one forward year cannot certify a strategy.
+    A nominee that raised in its forward replay has no reading, and is
+    counted under ``raised`` rather than left out silently.
     """
 
     sealed = _mapping(_mapping(record).get("sealed"))
     if not sealed:
         return None
     window = _mapping(sealed.get("slice"))
-    forward = _mapping(_mapping(_mapping(record).get("slices")).get("forward"))
+
+    def forward_months(row: Mapping[str, object]) -> tuple[object, object]:
+        replay = _mapping(row.get("replay"))
+        return replay.get("start"), replay.get("forward_end")
+
+    months = forward_months(_mapping(record))
     records, unreadable = _arm_forward_records(root)
     readings: list[dict[str, object]] = []
     pooled: list[dict[str, object]] = []
+    raised = 0
     for experiment_id, other in records:
         block = _mapping(_mapping(other.get("sealed")).get("slice"))
         if block and (block.get("start"), block.get("end")) == (window.get("start"), window.get("end")):
@@ -1249,10 +1255,12 @@ def _forward_readouts(root: Path, record: Mapping[str, object] | None) -> dict[s
                     "p_value": None if ratio is None or not years else null_p_value(ratio, years),
                 }
             )
-        mine = _mapping(_mapping(other.get("slices")).get("forward"))
-        span = (mine.get("start"), mine.get("end"))
-        if forward and other.get("sealed") and span == (forward.get("start"), forward.get("end")):
-            pooled.append(dict(_mapping(mine.get("residual_reading"))))
+        if other.get("sealed") and forward_months(other) == months:
+            mine = _mapping(_mapping(other.get("slices")).get("forward"))
+            if mine:
+                pooled.append(dict(_mapping(mine.get("residual_reading"))))
+            else:
+                raised += 1
     readings.sort(key=lambda row: (row["p_value"] is None, row["p_value"] or 0.0))
     return {
         "sealed_window": {
@@ -1261,11 +1269,12 @@ def _forward_readouts(root: Path, record: Mapping[str, object] | None) -> dict[s
             "count": len(readings),
             "readings": readings,
         },
-        "forward_pool": (
-            {"start": forward.get("start"), "end": forward.get("end"), **pooled_reading(pooled)}
-            if forward
-            else None
-        ),
+        "forward_pool": {
+            "start": months[0],
+            "end": months[1],
+            **pooled_reading(pooled),
+            "raised": raised,
+        },
         "unreadable_arms": unreadable,
     }
 

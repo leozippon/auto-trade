@@ -16,7 +16,10 @@ from pathlib import Path
 import pytest
 
 from autotrade.environment.artifacts import FilesystemArtifactStore
+from autotrade.environment.executor import StrategyRaised
+from autotrade.environment.replay.engine import BacktestError
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
+from autotrade.environment.runtime import utc_now_iso
 from autotrade.pipelines.config import (
     ArtifactRevision,
     EvaluationRequest,
@@ -33,7 +36,9 @@ from autotrade.pipelines.ledger import (
     ExperimentLedger,
     experiment_verdict,
     forward_record,
+    paper_candidate,
 )
+from scripts.dev.check_verdicts import check_arm
 from tests.unit.acceptance_fixture import REQUIRED_RULES
 from tests.unit.test_rolling_pipeline import (
     CONFIG_PROFILE,
@@ -100,13 +105,20 @@ class SeedEvaluator:
     exposure, so the active series is the seed's daily ``alpha`` plus noise."""
 
     def __init__(
-        self, root: Path, *, fail_seed: int | None = None, bare_seed: int | None = None
+        self,
+        root: Path,
+        *,
+        fail_seed: int | None = None,
+        bare_seed: int | None = None,
+        raise_seed: tuple[int, str] | None = None,
     ) -> None:
         self.root = root
         self.requests: list[EvaluationRequest] = []
         # Forward, this seed's replay raises; that one's stores no panel.
         self.fail_seed = fail_seed
         self.bare_seed = bare_seed
+        # (seed, start): that seed's own code raises in the replay from start.
+        self.raise_seed = raise_seed
 
     def evaluate(self, request: EvaluationRequest) -> EvaluationResult:
         self.requests.append(request)
@@ -114,6 +126,8 @@ class SeedEvaluator:
         seed = int(re.search(r"SEED_BASE = (\d+)", source)[1])  # type: ignore[index]
         if seed == self.fail_seed and request.mode == "heldout":
             raise TimeoutError("strategy inference exceeded 360s")
+        if (seed, request.start) == self.raise_seed:
+            raise BacktestError("generate_orders raised") from StrategyRaised("KeyError: 'close'")
         ablated = "MECHANISM = False" in source
         result = _write_result(
             self.root / f"{request.mode}_{len(self.requests):03d}",
@@ -417,6 +431,39 @@ def test_a_nominee_that_trains_no_model_is_judged_on_its_own_series(tmp_path: Pa
     assert forward["verdict"]["status"] == "graduated"
 
 
+@pytest.mark.parametrize("start", ["20230701", "20240701"], ids=["on_the_sealed_years", "forward"])
+def test_a_replicate_whose_own_code_raises_is_a_verdict_and_never_graduates(tmp_path: Path, start):
+    """A seed replicate that raises in its own code, on the sealed years or
+    forward, is read, not retried: the record names it, it leaves every seed
+    mean, and the verdict discards the arm, whatever the nominee read."""
+
+    pipeline, _evaluator = _arm(
+        tmp_path,
+        [(_source(1000), "full"), (_source(2000), "full")],
+        replicates=(1,),
+        raise_seed=(2000, start),
+    )
+    pipeline.run_research_session()
+    forward = pipeline.run_forward()
+    sealed = start == forward["sealed"]["start"]
+    rows = forward["sealed"]["seed_replicates"] if sealed else forward["seed_replicates"]
+    [raised] = rows
+    assert raised["source_step_id"] == "research_step_1" and raised["result_ref"] is None
+    assert raised["strategy_error"] is True and "generate_orders raised" in raised["error"]
+    assert forward["sealed"]["slice"]["reasons"] == []
+    if not sealed:
+        assert "seed_mean" not in forward["slices"]["forward"]
+    assert forward["verdict"]["status"] == "discarded"
+    assert forward["verdict"]["reasons"] == ["replicate_strategy_error"]
+    assert paper_candidate(pipeline.ledger.read()) is None
+    # The consistency check reads the same verdict off the stored replays.
+    arm = pipeline.config.experiment_dir
+    (arm / "hitl" / "params.json").write_text(
+        json.dumps({**REQUIRED_RULES, "_created_at": utc_now_iso()}), encoding="utf-8"
+    )
+    assert [item.differences for item in check_arm(arm)] == [[], [], []]
+
+
 @pytest.mark.parametrize(
     ("replays", "error", "message"),
     [
@@ -427,7 +474,7 @@ def test_a_nominee_that_trains_no_model_is_judged_on_its_own_series(tmp_path: Pa
         ),
         ({"bare_seed": 2000}, ValueError, "graded another series than the frozen book"),
     ],
-    ids=["its_replay_fails", "its_replay_has_no_panel"],
+    ids=["the_host_fails_its_replay", "its_replay_has_no_panel"],
 )
 def test_a_replicate_missing_from_the_mean_fails_the_stage_and_leaves_no_verdict(
     tmp_path: Path, replays, error, message

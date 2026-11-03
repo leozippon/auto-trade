@@ -617,6 +617,7 @@ def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) ->
     from autotrade.pipelines.verdict import CONDITIONS
 
     checked = set(re.findall(r'"(sealed_[a-z_]+)"', _js_function_body("sealedCriterion")))
+    checked |= set(re.findall(r'"([a-z]+_strategy_error)"', _js_function_body("validityCriteria")))
     assert {condition.reason for condition in CONDITIONS if condition.code} == checked
     # The budget bars read the keys both the totals and the usage block carry.
     bars = set(re.findall(r'^  \["([a-z_]+)",', _js_literal("const BUDGET_ROWS = [", "\n];"), re.MULTILINE))

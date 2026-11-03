@@ -814,7 +814,7 @@ def test_the_forward_replay_writes_nothing_a_session_can_read(tmp_path: Path):
     [StrategyRaised("boom"), StrategyMemoryExceeded("killed at the 32g memory cap")],
     ids=["raised", "memory_cap"],
 )
-def test_a_strategy_error_names_the_slice_it_raised_in_and_the_sealed_gate_decides(
+def test_a_strategy_error_names_the_slice_it_raised_in_and_discards(
     tmp_path: Path, cause: StrategyRaised
 ):
     pipeline, _snapshots, evaluator, _developer, ledger = _freezing(tmp_path)
@@ -834,19 +834,26 @@ def test_a_strategy_error_names_the_slice_it_raised_in_and_the_sealed_gate_decid
     # sealed gate, and the forward replay still ran and raised.
     assert record["sealed"]["result_ref"] is None
     assert record["sealed"]["slice"]["strategy_error"] is True
-    assert record["verdict"] == {"status": "discarded", "reasons": ["sealed_strategy_error"], "thresholds": {}}
+    assert record["verdict"] == {
+        "status": "discarded",
+        "reasons": ["sealed_strategy_error", "heldout_strategy_error"],
+        "thresholds": {},
+    }
     assert experiment_verdict(ledger.read())["status"] == "discarded"
     assert paper_candidate(ledger.read()) is None
 
-    # A book that passed its sealed gate and raised only in Held-out: the
-    # error is reported with its slice, and the sealed gate alone decides.
+    # A book that passed its sealed gate and raised only in Held-out is
+    # discarded too, and no Paper book is opened for it.
     pipeline, _snapshots, evaluator, _developer, ledger = _freezing(tmp_path / "late")
     pipeline.run_research_session()
     evaluator.raise_with, evaluator.raise_in = failure, "heldout"
     record = pipeline.run_forward()
     assert (record["status"], record["strategy_error"]) == ("strategy_error", "heldout")
     assert record["sealed"]["slice"]["reasons"] == []
-    assert record["verdict"]["status"] == "graduated" and record["verdict"]["reasons"] == []
+    assert record["verdict"]["status"] == "discarded"
+    assert record["verdict"]["reasons"] == ["heldout_strategy_error"]
+    assert experiment_verdict(ledger.read())["status"] == "discarded"
+    assert paper_candidate(ledger.read()) is None
 
 
 def test_an_environment_failure_fails_the_attempt_and_leaves_no_verdict(tmp_path: Path):

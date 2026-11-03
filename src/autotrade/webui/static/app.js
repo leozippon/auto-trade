@@ -92,6 +92,7 @@ const REASON_LABELS = {
   sealed_residual_ir_below_bar: "封存年份残差 IR",
   forward_strategy_error: "前推期策略无报错",
   heldout_strategy_error: "Held-out 期策略无报错",
+  replicate_strategy_error: "种子副本回测无报错",
   forward_lower_bound_not_positive: (t) => `前推主动超额 ${fmtPct(t.forward_confidence, 0)} 下界`,
   // F3, retired with the sealed gate; a verdict recorded before it may carry it.
   forward_recency_negative: "前推近月主动超额",
@@ -3200,7 +3201,18 @@ function stageHead(key, detail) {
    research years against its bar, read once in the forward stage before the
    forward replay, with its seed replicates' readings beside it. Absent on an
    arm judged before the sealed gate. */
-/* The verdict's one condition, S, as a checklist row. */
+/* The verdict's validity conditions as checklist rows: neither the frozen book
+   nor a seed replicate raised in its own code after the freeze. */
+function validityCriteria(verdict) {
+  const failed = new Set((verdict || {}).reasons || []);
+  return ["forward_strategy_error", "heldout_strategy_error", "replicate_strategy_error"].map((token) => ({
+    ok: !failed.has(token),
+    label: reasonLabel(token),
+    value: null,
+  }));
+}
+
+/* The verdict's performance condition, S, as a checklist row. */
 function sealedCriterion(s) {
   return s.strategy_error
     ? { ok: false, label: reasonLabel("sealed_strategy_error"), value: null }
@@ -3271,15 +3283,13 @@ function sealedWindowBlock(readouts) {
 function forwardPoolBlock(readouts) {
   const p = (readouts || {}).forward_pool;
   if (!p) return null;
+  const pooled = p.count
+    ? `${p.count} 个冻结策略 · 合并残差 IR ${fmtSharpe(p.residual_information_ratio)} · z = ${fmtSharpe(p.z)} · p = ${p.p_value.toFixed(3)}`
+    : "尚无可合并的读数";
   return el(
     "table",
     { class: "kv section-gap" },
-    kvRow(
-      "前推合并读数",
-      p.count
-        ? `${p.count} 个冻结策略 · 合并残差 IR ${fmtSharpe(p.residual_information_ratio)} · z = ${fmtSharpe(p.z)} · p = ${p.p_value.toFixed(3)}`
-        : "尚无可合并的读数",
-    ),
+    kvRow("前推合并读数", p.raised ? `${pooled} · 另有 ${p.raised} 个前推回测策略报错，不计入` : pooled),
   );
 }
 
@@ -3390,7 +3400,7 @@ function verdictStagePanel(detail) {
     // A record judged since 2026-11-03 has the sealed gate's one row; one
     // judged before names the F/H criteria that refused it in its reason.
     forward && forward.sealed
-      ? checklist([sealedCriterion(forward.sealed)])
+      ? checklist([sealedCriterion(forward.sealed), ...validityCriteria(verdict)])
       : endingReason(detail) ||
         el(
           "div",

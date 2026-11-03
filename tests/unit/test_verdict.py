@@ -452,11 +452,12 @@ def test_the_forward_mandate_and_active_drawdown_are_reported_whatever_the_rules
 
 
 def test_the_verdict_admits_exactly_when_the_sealed_gate_passes():
-    """The sealed gate is the verdict's one condition: a book whose forward
-    and Held-out slices read badly on every retired condition -- a negative
-    F2 bound, a negative F5 excess, no trades, a collapse -- graduates when
-    its sealed reading passes, and one that reads well forward is discarded
-    when it does not. F2 and F5 are in the record, never in the reasons."""
+    """The sealed gate is the verdict's one performance condition: a book
+    whose forward and Held-out slices read badly on every retired condition
+    -- a negative F2 bound, a negative F5 excess, no trades, a collapse --
+    graduates when its sealed reading passes, and one that reads well
+    forward is discarded when it does not. F2 and F5 are in the record,
+    never in the reasons; a strategy error is."""
 
     rng = np.random.default_rng(81)
     analysis = _analysis(
@@ -476,12 +477,18 @@ def test_the_verdict_admits_exactly_when_the_sealed_gate_passes():
     assert set(graduated["holder_line"]) == {"forward", "heldout"}
     discarded = verdict.graduation_verdict(sealed=refused, forward=forward, heldout=heldout)
     assert discarded == {**graduated, "status": "discarded", "reasons": refused["reasons"]}
-    # A forward replay that raised has no slice; the sealed gate still decides.
-    assert verdict.graduation_verdict(sealed=passed) == {
-        "status": "graduated",
-        "reasons": [],
-        "thresholds": passed["thresholds"],
-    }
+    # A frozen book that raised in its own code after the freeze is never
+    # admitted, its sealed reading's reasons first.
+    raised = verdict.graduation_verdict(sealed=passed, strategy_errors=("heldout",))
+    assert raised == {"status": "discarded", "reasons": ["heldout_strategy_error"], "thresholds": passed["thresholds"]}
+    both = verdict.graduation_verdict(sealed=refused, strategy_errors=("replicate", "forward"))
+    assert both["reasons"] == [
+        "sealed_residual_ir_below_bar",
+        "forward_strategy_error",
+        "replicate_strategy_error",
+    ]
+    with pytest.raises(ValueError, match="strategy_errors"):
+        verdict.graduation_verdict(sealed=passed, strategy_errors=("sealed",))
 
 
 def test_an_unmeasurable_slice_raises_instead_of_judging():
@@ -766,8 +773,9 @@ def test_f2_reads_the_book_and_its_seed_replicates_as_one_daily_series():
 
 
 def test_the_condition_table_is_the_one_list_of_what_a_record_can_carry():
-    """Every condition has its own reason token. The verdict has one
-    criterion, S, the sealed gate's, and no registration condition has a
+    """Every condition has its own reason token. The verdict's criteria are
+    the sealed gate's, S, and the validity conditions, F1, H1 and R1 (no
+    frozen book raised after the freeze); no registration condition has a
     code. The only optional conditions are the tracking mandate's, which its
     cap turns on. The Environment's copies of the seed and the ablation
     reasons (it cannot import the Pipeline) are the table's."""
@@ -782,9 +790,13 @@ def test_the_condition_table_is_the_one_list_of_what_a_record_can_carry():
     stages: dict[str, list[verdict.Condition]] = {}
     for condition in verdict.CONDITIONS:
         stages.setdefault(condition.stage, []).append(condition)
-    assert list(stages) == ["nomination", "registration", "freeze", "seeds", "ablation", "sealed"]
+    assert list(stages) == ["nomination", "registration", "freeze", "seeds", "ablation", "sealed", "validity"]
     assert {condition.code for condition in stages["sealed"]} == {"S"}
-    assert not any(c.code for c in verdict.CONDITIONS if c.stage != "sealed")
+    assert [condition.code for condition in stages["validity"]] == ["F1", "H1", "R1"]
+    assert {condition.reason for condition in stages["validity"]} == {
+        f"{place}_strategy_error" for place in verdict.STRATEGY_ERROR_PLACES
+    }
+    assert not any(c.code for c in verdict.CONDITIONS if c.stage not in ("sealed", "validity"))
     assert {condition.requires for condition in verdict.CONDITIONS} == {"", "tracking_error_cap"}
     assert {condition.reason for condition in stages["seeds"]} == SEED_REASONS
     assert {condition.reason for condition in stages["ablation"]} == ABLATION_REASONS

@@ -1230,7 +1230,7 @@ def test_the_three_replay_stage_views_read_the_sealed_gate_alone() -> None:
         for name in ("forwardStagePanel", "heldoutStagePanel", "verdictStagePanel")
     }
     verdict = bodies["verdictStagePanel"]
-    assert "checklist([sealedCriterion(forward.sealed)])" in verdict
+    assert "checklist([sealedCriterion(forward.sealed), ...validityCriteria(verdict)])" in verdict
     assert "checklist([sealedCriterion(s)])" in script
     for name in ("forwardStagePanel", "heldoutStagePanel"):
         assert "只报告，不参与裁决" in bodies[name]
@@ -1543,6 +1543,16 @@ def test_every_sealed_reading_of_a_window_is_listed_with_its_p_value_and_count(t
         "start": REPLAY["start"],
         "end": REPLAY["forward_end"],
         **{key: pytest.approx(value) for key, value in pooled.items()},
+        "raised": 0,
     }
+    # A nominee that raised in its forward replay has no reading to pool and
+    # is counted, never left out silently.
+    crashed = build_arm(tmp_path, "crashed", "discarded")
+    ledger = crashed / "ledgers/experiment_ledger.jsonl"
+    lines = ledger.read_text(encoding="utf-8").splitlines()
+    record = {**json.loads(lines[-1]), "status": "strategy_error", "strategy_error": "forward", "slices": None}
+    ledger.write_text("\n".join([*lines[:-1], json.dumps(record)]) + "\n", encoding="utf-8")
+    pool = experiment_detail(tmp_path, "good")["readouts"]["forward_pool"]
+    assert (pool["count"], pool["raised"]) == (2, 1)
     # An arm without a forward record has no readout.
     assert experiment_detail(tmp_path, "early")["readouts"] is None

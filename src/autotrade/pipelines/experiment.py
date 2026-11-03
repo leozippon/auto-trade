@@ -838,22 +838,41 @@ class RollingExperimentPipeline:
                 ) from error
             return result, error
 
-        def replicate_results(over: ReplaySpan, stage: str) -> list[tuple[FrozenArtifact, EvaluationResult]]:
+        def replicate_results(
+            over: ReplaySpan, stage: str
+        ) -> tuple[list[tuple[FrozenArtifact, EvaluationResult]], list[dict[str, object]]]:
+            """Every seed replicate replayed over ``over``: the completed
+            replays, and a row for each replicate that raised in its own code,
+            which is a reading (``replicate_strategy_error``) and leaves it
+            out of every seed mean. A failure that measured nothing raises: a
+            replicate is never dropped for want of the host."""
+
             completed: list[tuple[FrozenArtifact, EvaluationResult]] = []
+            raised: list[dict[str, object]] = []
             for index, item in enumerate(replicates, start=1):
                 _publish_progress(
                     progress, stage, run_id=run_id, seed_replicate=f"{index}/{len(replicates)}"
                 )
                 item_result, item_error = replay(item, over)
                 if item_error is not None:
-                    raise RuntimeError(
-                        f"seed replicate {item.source_step_id} ({item.artifact_id}) did "
-                        f"not complete its {stage} replay, and its reading is never "
-                        f"dropped: {_error_text(item_error)}"
-                    ) from item_error
+                    if not raised_by_strategy(item_error):
+                        raise RuntimeError(
+                            f"seed replicate {item.source_step_id} ({item.artifact_id}) did "
+                            f"not complete its {stage} replay, and its reading is never "
+                            f"dropped: {_error_text(item_error)}"
+                        ) from item_error
+                    raised.append(
+                        {
+                            **_replicate_identity(item),
+                            "result_ref": None,
+                            "strategy_error": True,
+                            "error": _error_text(item_error),
+                        }
+                    )
+                    continue
                 assert item_result is not None
                 completed.append((item, item_result))
-            return completed
+            return completed, raised
 
         _publish_progress(progress, "sealed_replay", run_id=run_id)
         sealed_result, sealed_error = replay(artifact, sealed)
@@ -862,6 +881,7 @@ class RollingExperimentPipeline:
             "start": sealed.start,
             "end": sealed.end,
         }
+        sealed_raised: list[dict[str, object]] = []
         if sealed_error is not None:
             if not raised_by_strategy(sealed_error):
                 raise sealed_error
@@ -871,7 +891,7 @@ class RollingExperimentPipeline:
             sealed_record.update(result_ref=None, slice=sealed_block)
         else:
             assert sealed_result is not None
-            sealed_replicates = replicate_results(sealed, "sealed_replay")
+            sealed_replicates, sealed_raised = replicate_results(sealed, "sealed_replay")
             sealed_block = judged_sealed(
                 sealed_result.result_ref,
                 rules=self.config.acceptance,
@@ -887,11 +907,14 @@ class RollingExperimentPipeline:
                 **(
                     {
                         "seed_replicates": [
-                            {**_replicate_identity(item), "result_ref": item_result.result_ref}
-                            for item, item_result in sealed_replicates
+                            *(
+                                {**_replicate_identity(item), "result_ref": item_result.result_ref}
+                                for item, item_result in sealed_replicates
+                            ),
+                            *sealed_raised,
                         ]
                     }
-                    if sealed_replicates
+                    if replicates
                     else {}
                 ),
                 slice=sealed_block,
@@ -927,21 +950,24 @@ class RollingExperimentPipeline:
         if error is not None:
             if not raised_by_strategy(error):
                 raise error
+            where = "heldout" if _failure_day(error) >= heldout.start else "forward"
             return {
                 **base,
                 "status": STRATEGY_ERROR,
-                # The slice the strategy raised in, reported: the verdict
-                # reads the sealed gate alone.
-                "strategy_error": "heldout" if _failure_day(error) >= heldout.start else "forward",
+                # The slice the frozen book raised in.
+                "strategy_error": where,
                 "error": _error_text(error),
                 "result_ref": None,
                 "slices": None,
                 "refits_executed": None,
                 "null_control": None,
-                "verdict": graduation_verdict(sealed=sealed_block),
+                "verdict": graduation_verdict(
+                    sealed=sealed_block,
+                    strategy_errors=(where, *(("replicate",) if sealed_raised else ())),
+                ),
             }
         assert result is not None
-        replays = replicate_results(span, "forward_replay")
+        replays, forward_raised = replicate_results(span, "forward_replay")
         _publish_progress(progress, "verdict", run_id=run_id)
         return {
             **base,
@@ -953,6 +979,8 @@ class RollingExperimentPipeline:
                 heldout=heldout,
                 broker_profile=broker_profile,
                 seed_replicates=replays,
+                raised_replicates=forward_raised,
+                replicate_raised=bool(sealed_raised or forward_raised),
             ),
         }
 
@@ -974,9 +1002,12 @@ class RollingExperimentPipeline:
         heldout: Slot,
         broker_profile: BrokerProfile,
         seed_replicates: Sequence[tuple[FrozenArtifact, EvaluationResult]] = (),
+        raised_replicates: Sequence[Mapping[str, object]] = (),
+        replicate_raised: bool = False,
     ) -> dict[str, object]:
         """The two reported slices of one completed forward replay through
-        ``broker_profile``, and the verdict, which reads the ``sealed`` block.
+        ``broker_profile``, and the verdict on the ``sealed`` block and on
+        whether a seed replicate raised in any replay (``replicate_raised``).
 
         A slice that cannot be measured raises ``ValueError``, which fails the
         attempt: a verdict is never read off a number that was not measured.
@@ -984,7 +1015,9 @@ class RollingExperimentPipeline:
         by its artifact and source Step: ``slices.<name>.seed_replicates`` and
         ``slices.<name>.seed_mean`` carry its readings and the mean with the
         book, ``slices.forward.lower_bound`` the F2 bound over them together,
-        and the record's ``seed_replicates`` its result and refits.
+        and the record's ``seed_replicates`` its result and refits; a
+        replicate that raised in this replay (``raised_replicates``) is a row
+        there and in no slice.
         """
 
         replay, analysis = replay_and_analysis(result.result_ref)
@@ -1014,7 +1047,9 @@ class RollingExperimentPipeline:
             seed_key=artifact.artifact_id,
             slippage_bps=broker_profile.slippage_bps,
             seed_replicates=replicates,
+            strategy_errors=("replicate",) if replicate_raised else (),
         )
+        replicate_rows.extend(dict(row) for row in raised_replicates)
         return {
             "status": "ok",
             "error": None,
@@ -1587,16 +1622,19 @@ def judged_replay(
     seed_key: str,
     slippage_bps: float,
     seed_replicates: Sequence[tuple[Mapping[str, object], Mapping[str, object]]] = (),
+    strategy_errors: Sequence[str] = (),
 ) -> dict[str, object]:
     """The ``slices`` and ``verdict`` of one completed forward replay: its
     result ``replay`` and style sidecar ``analysis``, read under ``rules``
     over the ``forward`` and ``heldout`` bounds, each slice with its activity,
-    and the verdict, which is the ``sealed`` gate's block alone.
+    and the verdict on the ``sealed`` gate's block and ``strategy_errors``
+    (``verdict.graduation_verdict``).
 
     What a forward record stores, so a stored replay is judged again by this
     same function (``scripts/dev/check_verdicts.py``). ``seed_key`` is the
     frozen artifact's id, ``slippage_bps`` the Broker's and
-    ``seed_replicates`` what names each replicate with its replay's sidecar.
+    ``seed_replicates`` what names each completed replicate with its replay's
+    sidecar.
     """
 
     curve, executions = replay["equity_curve"], replay["executions"]
@@ -1629,7 +1667,12 @@ def judged_replay(
             "forward": {**forward_block, "activity": activity["forward"]},
             "heldout": {**heldout_block, "activity": activity["heldout"]},
         },
-        "verdict": graduation_verdict(sealed=sealed, forward=forward_block, heldout=heldout_block),
+        "verdict": graduation_verdict(
+            sealed=sealed,
+            forward=forward_block,
+            heldout=heldout_block,
+            strategy_errors=strategy_errors,
+        ),
     }
 
 

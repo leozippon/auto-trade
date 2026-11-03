@@ -137,6 +137,7 @@ def _sealed(arm: Path, record: Mapping[str, Any], rules: AcceptanceRules) -> dic
                 str(recorded_path(arm, str(row["result_ref"]))),
             )
             for row in sealed.get("seed_replicates") or ()
+            if row.get("result_ref")
         ],
     )
 
@@ -168,7 +169,16 @@ def _replayed(
                 replay_and_analysis(str(recorded_path(arm, str(row["result_ref"]))))[1],
             )
             for row in record.get("seed_replicates") or ()
+            if row.get("result_ref")
         ],
+        strategy_errors=(
+            ("replicate",)
+            if any(
+                row.get("strategy_error")
+                for row in (*(record["sealed"].get("seed_replicates") or ()), *(record.get("seed_replicates") or ()))
+            )
+            else ()
+        ),
     )
 
 

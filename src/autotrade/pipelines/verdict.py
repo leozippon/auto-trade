@@ -14,8 +14,9 @@ benchmark (market), the size and the value legs of the replay's own
 cross-section (``style.FACTOR_SERIES``) removes style, and the residual
 information ratio over the sealed research years is held to
 ``z(1 − alpha) / √years`` (:func:`residual_statistics`, :func:`residual_bar`).
-It is the verdict's one condition (:func:`sealed_slice`,
-:func:`graduation_verdict`). The forward and Held-out slices are reported,
+It is the verdict's one performance condition (:func:`sealed_slice`,
+:func:`graduation_verdict`); the other is that no frozen book raised in its
+own code during the forward stage. The forward and Held-out slices are reported,
 never judged: they read the series as it is -- its annualised mean is its
 plain excess, its annualised standard deviation its tracking error and their
 ratio its IR (``stats.plain_statistics``) -- and its residual reading, which
@@ -743,6 +744,13 @@ CONDITIONS: tuple[Condition, ...] = (
     # over the sealed years against its bar, unread when the book raised.
     Condition("sealed", "sealed_strategy_error", lambda m, t: m.get("strategy_error") is not True, "S"),
     Condition("sealed", "sealed_residual_ir_below_bar", lambda m, t: m.get("strategy_error") is True or m["residual_information_ratio"] >= m["bar"], "S"),
+    # A frozen book that raised in its own code during a forward-stage replay
+    # (:func:`graduation_verdict`): the frozen book's forward replay, in the
+    # slice it raised in, or a seed replicate's sealed or forward replay. No
+    # reading of such a book is complete, so it is never admitted.
+    Condition("validity", "forward_strategy_error", lambda m, t: "forward" not in m["strategy_errors"], "F1"),
+    Condition("validity", "heldout_strategy_error", lambda m, t: "heldout" not in m["strategy_errors"], "H1"),
+    Condition("validity", "replicate_strategy_error", lambda m, t: "replicate" not in m["strategy_errors"], "R1"),
 )
 
 
@@ -1045,24 +1053,40 @@ def sealed_strategy_error(*, start: str, end: str, error: str) -> dict[str, obje
     return {**measured, "reasons": judge("sealed", measured, {}), "thresholds": {}}
 
 
+# Where a frozen book can raise in its own code during the forward stage.
+STRATEGY_ERROR_PLACES = ("forward", "heldout", "replicate")
+
+
 def graduation_verdict(
     *,
     sealed: Mapping[str, Any],
     forward: Mapping[str, Any] | None = None,
     heldout: Mapping[str, Any] | None = None,
+    strategy_errors: Sequence[str] = (),
 ) -> dict[str, object]:
-    """``graduated`` exactly when the sealed gate passes, else ``discarded``.
+    """``graduated`` exactly when the sealed gate passes and no frozen book
+    raised, else ``discarded``.
 
     ``sealed`` is the sealed gate's block (:func:`sealed_slice`, or
-    :func:`sealed_strategy_error`), and its reasons are the verdict's. The
-    forward and Held-out slices (:func:`forward_slice`, :func:`heldout_slice`)
-    are reported, never judged -- a forward replay in which the strategy
-    raised has none, and its record says so -- and a measured verdict states
-    each slice's :func:`holder_line`, so the ledger says in words what the
-    holder's account did beside the code that decided it.
+    :func:`sealed_strategy_error`), whose reasons come first.
+    ``strategy_errors`` names where a frozen book raised in its own code
+    (``STRATEGY_ERROR_PLACES``): the frozen book's forward replay in its
+    ``forward`` or ``heldout`` slice, or a seed ``replicate``'s sealed or
+    forward replay; each adds its ``validity`` reason. The forward and
+    Held-out slices (:func:`forward_slice`, :func:`heldout_slice`) are
+    reported, never judged -- a forward replay in which the frozen book
+    raised has none -- and a measured verdict states each slice's
+    :func:`holder_line`, so the ledger says in words what the holder's
+    account did beside the codes that decided it.
     """
 
-    reasons = list(sealed["reasons"])
+    unknown = sorted(set(strategy_errors) - set(STRATEGY_ERROR_PLACES))
+    if unknown:
+        raise ValueError(f"strategy_errors must name {STRATEGY_ERROR_PLACES}, got {unknown}")
+    reasons = [
+        *sealed["reasons"],
+        *judge("validity", {"strategy_errors": frozenset(strategy_errors)}, {}),
+    ]
     lines = {
         name: holder_line(block)
         for name, block in (("forward", forward), ("heldout", heldout))

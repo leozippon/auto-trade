@@ -446,8 +446,9 @@ class AcceptanceRules:
             },
             "graduation": {
                 "admits": (
-                    "exactly when the sealed gate passes (sealed_gate above): the "
-                    "verdict's one condition"
+                    "exactly when the sealed gate passes (sealed_gate above) and "
+                    "neither the frozen node nor a seed replicate raised in its own "
+                    "code in any replay after the freeze"
                 ),
                 "reported": (
                     "after the sealed reading, one continuous replay of the frozen "
