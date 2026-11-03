@@ -16,7 +16,7 @@ import json
 import os
 import re
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import TypeVar
@@ -57,15 +57,22 @@ def read_json_object_or_empty(path: str | Path) -> dict[str, object]:
 
 
 def write_json_atomic(
-    path: str | Path, payload: object, *, sort_keys: bool = True, private: bool = False
+    path: str | Path,
+    payload: object,
+    *,
+    sort_keys: bool = True,
+    private: bool = False,
+    default: Callable[[object], object] | None = str,
 ) -> None:
     """Publish one JSON file atomically.
 
     ``sort_keys`` keeps a record diffable; pass False for a file whose builder
     orders keys deliberately (an index the Agent reads in chunks needs its
     identifying keys first). ``private`` makes the file owner-only and creates
-    missing parents owner-only. NaN is refused: in a record it is an upstream
-    bug.
+    missing parents owner-only. ``default`` renders a value JSON has no type
+    for (``str``: paths, timestamps); None refuses it with ``TypeError``, for
+    a record whose every value must already be JSON. NaN is refused: in a
+    record it is an upstream bug.
     """
 
     target = Path(path)
@@ -80,7 +87,7 @@ def write_json_atomic(
                 ensure_ascii=False,
                 indent=2,
                 sort_keys=sort_keys,
-                default=str,
+                default=default,
                 allow_nan=False,
             )
             + "\n",

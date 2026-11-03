@@ -9,11 +9,14 @@ import shutil
 import tempfile
 import time
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 
 from autotrade.data_quality import build_quality_report
+from autotrade.environment.data import research_release
 from autotrade.environment.data.research_release import (
     DOMAIN_REPORT_TYPES,
     DOMAIN_STATUS_FILES,
@@ -96,6 +99,16 @@ class ResearchReleaseTest(unittest.TestCase):
             fundamental_events_status=self.status,
             required_raw_datasets=required,
         )
+
+    def test_a_manifest_value_json_has_no_type_for_fails_the_publish(self) -> None:
+        # A release manifest is read back as written; a value rendered by str()
+        # would read back as another type, so the write refuses it instead.
+        with (
+            patch.object(research_release, "_utc_now", return_value=datetime(2026, 1, 3, tzinfo=UTC)),
+            self.assertRaisesRegex(TypeError, "not JSON serializable"),
+        ):
+            self._pin("strict")
+        self.assertFalse((self.root / "experiments" / "strict" / "research_release").exists())
 
     def test_committed_release_hardlinks_only_parquet_contract_files(self) -> None:
         live_parquet = self.raw / "daily" / "trade_date=20260102.parquet"

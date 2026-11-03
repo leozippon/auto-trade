@@ -568,7 +568,7 @@ def _create_global_release(
                 "quality_dir": str(quality_dir),
             },
         }
-        write_json_atomic(staging / _MANIFEST_NAME, manifest)
+        write_json_atomic(staging / _MANIFEST_NAME, manifest, default=None)
         staging.rename(target)
         published = _load_global_release(target)
         if published is None:  # Defensive: staging was fully validated before rename.
@@ -607,6 +607,7 @@ def _publish_experiment_pin(
                 "created_at": _utc_now(),
                 "quality_files": quality_files,
             },
+            default=None,
         )
         staging.rename(target)
         return _load_experiment_pin(
