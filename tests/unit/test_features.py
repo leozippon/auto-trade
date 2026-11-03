@@ -1212,14 +1212,12 @@ class UnitRegistryProjectionTest(unittest.TestCase):
                     views={"snapshot": (view, "/mnt/snapshot")},
                 )
 
-        for manifest in (None, "", '{"kind": "decision"', "not json at all"):
+        # A JSON document that is not an object cannot carry a manifest either.
+        broken = (None, "", '{"kind": "decision"', "not json at all", "[]", '"decision"', "null")
+        for manifest in broken:
             with self.subTest(manifest=manifest), self.assertRaises(RuntimeError) as caught:
                 build(manifest)
             self.assertIn("manifest is unreadable", str(caught.exception))
-        # A JSON document that is not an object cannot carry a manifest either.
-        for manifest in ("[]", '"decision"', "null"):
-            with self.subTest(manifest=manifest), self.assertRaises(TypeError):
-                build(manifest)
         # The same view with a readable manifest still builds.
         build('{"kind": "decision"}')
 
