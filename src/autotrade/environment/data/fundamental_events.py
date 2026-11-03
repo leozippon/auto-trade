@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, time
 from pathlib import Path
+from typing import NamedTuple
 
 import pandas as pd
 import pyarrow.parquet as pq
@@ -71,6 +72,20 @@ RAW_PATTERNS = {
     "fina_mainbz_vip": "ts_code=*.parquet",
     "disclosure_date": "period=*.parquet",
 }
+
+
+_STATEMENT_DATASETS = ("income_vip", "balancesheet_vip", "cashflow_vip")
+
+
+class StatementAvailability(NamedTuple):
+    """The latest announcement stamp per ``(ts_code, end_date)``, resolved once
+    over the whole raw history (``FundamentalEventsBuilder._statement_availability``)."""
+
+    # Of the three statements: the floor of every fina_indicator_vip stamp.
+    statements: dict[tuple[str, str], str]
+    # Of the statements and fina_indicator_vip: what a fina_audit or
+    # fina_mainbz_vip row without its own ann_date is stamped at.
+    with_indicators: dict[tuple[str, str], str]
 
 
 @dataclass(frozen=True)
@@ -199,7 +214,7 @@ class FundamentalEventsBuilder:
                 written.append(path)
         return written
 
-    def _read_dataset(self, dataset: str, statement_availability: dict[tuple[str, str], str]) -> pd.DataFrame:
+    def _read_dataset(self, dataset: str, statement_availability: StatementAvailability) -> pd.DataFrame:
         dataset_dir = self.raw_dir / dataset
         if not dataset_dir.exists():
             return pd.DataFrame(columns=self._event_columns())
@@ -225,14 +240,16 @@ class FundamentalEventsBuilder:
             return pd.DataFrame(columns=self._event_columns())
         return concat_rows(frames)
 
-    def _statement_availability(self) -> dict[tuple[str, str], str]:
+    def _statement_availability(self) -> StatementAvailability:
         """Latest statement announcement per ``(ts_code, end_date)``.
 
-        The fina_audit / fina_mainbz_vip rules join against this when the vendor
-        left their own ann_date blank.
+        The fina_audit / fina_mainbz_vip rules join against it when the vendor
+        left their own ann_date blank; the fina_indicator_vip rule floors every
+        row's stamp at the statements' alone, so a later indicator row of the
+        same period never hides an earlier one.
         """
         keyed: list[pd.DataFrame] = []
-        for dataset in ("income_vip", "balancesheet_vip", "cashflow_vip", "fina_indicator_vip"):
+        for dataset in (*_STATEMENT_DATASETS, "fina_indicator_vip"):
             dataset_dir = self.raw_dir / dataset
             if not dataset_dir.exists():
                 continue
@@ -245,8 +262,9 @@ class FundamentalEventsBuilder:
                 df = pd.read_parquet(path, columns=[column for column in wanted if column in present])
                 if df.empty:
                     continue
-                available, _rules = _available_at_for_frame(dataset, df, {})
+                available, _rules = _available_at_for_frame(dataset, df, None)
                 frame = pd.DataFrame({
+                    "dataset": dataset,
                     "ts_code": _column_text(df, "ts_code"),
                     "end_date": _clean_date_frame(df, "end_date"),
                     "available_at": available,
@@ -254,11 +272,19 @@ class FundamentalEventsBuilder:
                 keyed.append(frame[frame["ts_code"].ne("") & frame["end_date"].ne("") & frame["available_at"].ne("")])
         combined = concat_rows(keyed) if keyed else pd.DataFrame()
         if combined.empty:
-            return {}
+            return StatementAvailability({}, {})
         # Latest stamp wins per key, resolved once over the whole history: every
         # stamp is a same-clock ISO value, so a string sort is chronological.
-        combined = combined.sort_values("available_at").drop_duplicates(["ts_code", "end_date"], keep="last")
-        return dict(zip(zip(combined["ts_code"], combined["end_date"]), combined["available_at"]))
+        combined = combined.sort_values("available_at")
+
+        def latest(frame: pd.DataFrame) -> dict[tuple[str, str], str]:
+            frame = frame.drop_duplicates(["ts_code", "end_date"], keep="last")
+            return dict(zip(zip(frame["ts_code"], frame["end_date"]), frame["available_at"]))
+
+        return StatementAvailability(
+            statements=latest(combined[combined["dataset"].isin(_STATEMENT_DATASETS)]),
+            with_indicators=latest(combined),
+        )
 
     @staticmethod
     def _event_columns() -> list[str]:
@@ -481,13 +507,31 @@ def read_fundamental_events(
 # rule below is a frame operation: a per-row dict of the whole vendor schema
 # cost 18 minutes of the nightly PIT event build on its own.
 def _available_at_for_frame(
-    dataset: str, frame: pd.DataFrame, statement_availability: dict[tuple[str, str], str]
+    dataset: str, frame: pd.DataFrame, statement_availability: StatementAvailability | None
 ) -> tuple[pd.Series, pd.Series]:
-    """``(available_at, available_at_rule)`` for one raw dataset's frame."""
-    if dataset in {"income_vip", "balancesheet_vip", "cashflow_vip"}:
+    """``(available_at, available_at_rule)`` for one raw dataset's frame.
+
+    ``None`` for ``statement_availability`` applies each dataset's own dates
+    alone: how the statement map itself is built.
+    """
+    if dataset in _STATEMENT_DATASETS:
         return _first_available_frame(frame, ("f_ann_date", "ann_date"), "source:f_ann_date_or_ann_date")
     if dataset == "fina_indicator_vip":
-        return _first_available_frame(frame, ("ann_date",), "source:ann_date")
+        # The table has no f_ann_date and the vendor files a restated indicator
+        # under the period's ORIGINAL ann_date, so ann_date alone showed
+        # restated figures years early (300243.SZ 2016Q1: the eps of the
+        # 2017-04-27 income restatement under ann_date 2016-04-26). A row is
+        # therefore visible no earlier than its period's latest statement
+        # announcement; the original figures are not in the lake, so the
+        # restated row is held back rather than shown under the original date.
+        available, rules = _first_available_frame(frame, ("ann_date",), "source:ann_date")
+        stamped = available.ne("")
+        if stamped.any() and statement_availability is not None:
+            joined = _joined_statement_available_at(frame, stamped, statement_availability.statements)
+            later = joined.gt(available)
+            available = available.mask(later, joined)
+            rules = rules.mask(later, "fallback_joined_statement_available_at")
+        return available, rules
     if dataset in {"forecast_vip", "express_vip"}:
         # Each VERSION becomes visible at its OWN announcement date. Using
         # first_ann_date backdated revised figures to the first announcement
@@ -510,14 +554,10 @@ def _available_at_for_frame(
     if dataset in {"fina_audit", "fina_mainbz_vip"}:
         available, rules = _first_available_frame(frame, ("ann_date",), "source:ann_date")
         missing = available.eq("")
-        if missing.any() and statement_availability:
-            keys = zip(_column_text(frame, "ts_code")[missing], _clean_date_frame(frame, "end_date")[missing])
-            joined = pd.Series(
-                [statement_availability.get(key, "") for key in keys],
-                index=frame.index[missing],
-                dtype=object,
+        if missing.any() and statement_availability is not None:
+            available = available.mask(
+                missing, _joined_statement_available_at(frame, missing, statement_availability.with_indicators)
             )
-            available = available.mask(missing, joined)
             rules = rules.mask(missing & available.ne(""), "fallback_joined_statement_available_at")
         return available, rules
     if dataset == "disclosure_date":
@@ -526,6 +566,17 @@ def _available_at_for_frame(
         pd.Series("", index=frame.index, dtype=object),
         pd.Series("unsupported_dataset", index=frame.index, dtype=object),
     )
+
+
+def _joined_statement_available_at(
+    frame: pd.DataFrame, rows: pd.Series, latest: dict[tuple[str, str], str]
+) -> pd.Series:
+    """``latest`` (a ``StatementAvailability`` map) of each selected row's
+    ``(ts_code, end_date)``; blank outside ``rows`` and for a period it lacks."""
+    joined = pd.Series("", index=frame.index, dtype=object)
+    keys = zip(_column_text(frame, "ts_code")[rows], _clean_date_frame(frame, "end_date")[rows])
+    joined[rows] = [latest.get(key, "") for key in keys]
+    return joined
 
 
 def _first_available_frame(frame: pd.DataFrame, columns: tuple[str, ...], rule: str) -> tuple[pd.Series, pd.Series]:

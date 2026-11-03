@@ -1683,7 +1683,7 @@ def audit_fundamental_unit_and_pit_semantics(raw_dir: Path, add) -> None:
         "unit_rules": fundamental_unit_rules(),
         "pit_rules": {
             "income_vip/balancesheet_vip/cashflow_vip": "use f_ann_date first, then ann_date; choose the latest visible version at decision time",
-            "fina_indicator_vip": "no f_ann_date in local schema; use ann_date conservatively and expect duplicate same-period rows",
+            "fina_indicator_vip": "no f_ann_date in local schema and restated values sit under the original ann_date; visible from the later of ann_date and the period's latest statement announcement; expect duplicate same-period rows",
             "forecast_vip": "PIT visibility = each version's own ann_date (first_ann_date is a series attribute, never an availability floor); keep update_flag/type; it is an event table, not a final statement table",
             "express_vip": "use ann_date; it is a preliminary result table and may differ from later statements",
             "dividend": "use imp_ann_date, ex_date, record_date, and pay_date according to field meaning; ann_date can be blank",
