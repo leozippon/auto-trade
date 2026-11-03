@@ -99,6 +99,7 @@ from .calendar import (
     DAILY_HISTORY_START,
     FULL_SPAN,
     MACRO_HISTORY_START,
+    Slot,
     anchor_before,
     months_before,
     yyyymmdd,
@@ -107,6 +108,7 @@ from .config import (
     DEFAULT_MAX_API_SPEND_USD,
     BudgetUsed,
     EvaluationBackend,
+    ReplaySpan,
     ResearchSessionRequest,
     ResearchSessionResult,
     SessionResume,
@@ -1510,7 +1512,7 @@ def session_fact_blocks(workspace: str | Path) -> dict[str, object]:
 
 
 def research_geometry_record(
-    years: Sequence[object],
+    years: Sequence[Slot] | Sequence[ReplaySpan],
     *,
     window_months: int,
     decision_time: str,
@@ -1518,8 +1520,9 @@ def research_geometry_record(
 ) -> dict[str, object]:
     """The research period as a session may know it: research dates only.
 
-    ``years`` are the visible research years in order, anything with
-    ``label``, ``start`` and ``end``. Every decision view carries the
+    ``years`` are the visible research years in order: their slots (the
+    console's prompt preview) or the one-year spans a session replays them as
+    (``ResearchSessionRequest.research_years``). Every decision view carries the
     ``window_months`` of history that end on its anchor day: ``input_window``
     is the session's view, at the end of the visible years, and each year's
     ``input_window`` is that of the view its replay starts from, anchored the
@@ -1539,12 +1542,12 @@ def research_geometry_record(
     first, last = years[0], years[-1]
     return {
         "decision_time": decision_time,
-        "input_window": input_window(last.end),  # type: ignore[attr-defined]
+        "input_window": input_window(last.end),
         "history_floors": {
             "daily": DAILY_HISTORY_START,
             "macro": dict.fromkeys(BACKFILLED_MACRO_DATASETS, MACRO_HISTORY_START),
         },
-        "research_period": f"{first.start}..{last.end}",  # type: ignore[attr-defined]
+        "research_period": f"{first.start}..{last.end}",
         "sealed_years": {
             "period": f"{sealed[0]}..{sealed[1]}",
             "note": (
@@ -1555,11 +1558,11 @@ def research_geometry_record(
         },
         "years": [
             {
-                "label": year.label,  # type: ignore[attr-defined]
-                "start": year.start,  # type: ignore[attr-defined]
-                "end": year.end,  # type: ignore[attr-defined]
+                "label": year.label,
+                "start": year.start,
+                "end": year.end,
                 "input_window": input_window(
-                    anchor_before(year.start).strftime("%Y%m%d")  # type: ignore[attr-defined]
+                    anchor_before(year.start).strftime("%Y%m%d")
                 ),
             }
             for year in years
