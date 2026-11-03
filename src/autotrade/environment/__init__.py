@@ -26,7 +26,7 @@ single-purpose components:
   carries — the runtime modules it bakes, checked before every strategy
   container start, and the Agent-facing contract text, checked where an Agent
   reads it.
-- ``runtime.py``/``identity.py``/``artifacts.py``/``step_tree.py``:
-  cross-cutting run primitives (paths/manifest/trace, agent-visible refs,
-  artifact contracts, validated-step lineage).
+- ``runtime.py``/``trace.py``/``identity.py``/``artifacts.py``/``step_tree.py``:
+  cross-cutting run primitives (paths/manifest, the Agent trace and transcript,
+  agent-visible refs, artifact contracts, validated-step lineage).
 """
