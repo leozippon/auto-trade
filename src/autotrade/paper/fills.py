@@ -582,7 +582,7 @@ class RealFills:
             return dict(_NOTHING)
         _clock, action, _symbol = parse_key(key)
         notional = float(record.price) * record.quantity
-        commission, stamp = broker.profile.costs.fees(notional, action=action, trade_date=session)
+        commission, stamp = broker.profile.fees(notional, action=action, trade_date=session)
         applied = entry["real"]
         # The tax a sale paid depends on its share count only; a changed count
         # is refused where it is booked.

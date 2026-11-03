@@ -6,13 +6,11 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from functools import cached_property
 from types import MappingProxyType
 
 from autotrade.environment.broker_core import (
     BOARDS,
     STAMP_DUTY_CUTOVER,
-    CostModel,
     board_of,
     reduce_amount_reject,
     validate_buy_lot,
@@ -115,8 +113,17 @@ class BrokerProfile:
             or self.max_single_name_weight <= 0
         ):
             raise ValueError("max_single_name_weight must be a positive finite number")
-        # Building the cost model validates the cost fields at construction.
-        self.costs  # noqa: B018
+        for name in (
+            "commission_bps",
+            "min_commission_cny",
+            "stamp_duty_sell_bps_before_cutover",
+            "stamp_duty_sell_bps_from_cutover",
+            "transfer_fee_bps",
+            "slippage_bps",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be a non-negative finite number")
 
     def to_record(self) -> dict[str, object]:
         return {
@@ -137,16 +144,43 @@ class BrokerProfile:
             **({} if self.permitted_boards is None else {"permitted_boards": list(self.permitted_boards)}),
         }
 
-    @cached_property
-    def costs(self) -> CostModel:
-        return CostModel(
-            commission_bps=self.commission_bps,
-            min_commission_cny=self.min_commission_cny,
-            stamp_duty_sell_bps_before_cutover=self.stamp_duty_sell_bps_before_cutover,
-            stamp_duty_sell_bps_from_cutover=self.stamp_duty_sell_bps_from_cutover,
-            transfer_fee_bps=self.transfer_fee_bps,
-            slippage_bps=self.slippage_bps,
+    # ---- the account's cost math, priced from the fields above ----
+
+    def fill_price(self, price: float, *, action: str) -> float:
+        if not math.isfinite(price) or price <= 0:
+            raise ValueError("market price must be a positive finite number")
+        direction = 1.0 if action == "buy" else -1.0
+        return float(price) * (1.0 + direction * self.slippage_bps / 10_000.0)
+
+    def commission(self, notional: float) -> float:
+        return max(notional * self.commission_bps / 10_000.0, self.min_commission_cny)
+
+    def transfer_fee(self, notional: float) -> float:
+        # 过户费 0.01‰ = 0.1 bps by default, both buy and sell side.
+        return notional * self.transfer_fee_bps / 10_000.0
+
+    def trade_fee(self, notional: float) -> float:
+        return self.commission(notional) + self.transfer_fee(notional)
+
+    def stamp_duty_on_sale(self, notional: float, trade_date: str) -> float:
+        bps = (
+            self.stamp_duty_sell_bps_from_cutover
+            if str(trade_date) >= STAMP_DUTY_CUTOVER
+            else self.stamp_duty_sell_bps_before_cutover
         )
+        return notional * bps / 10_000.0
+
+    def fees(self, notional: float, *, action: str, trade_date: str) -> tuple[float, float]:
+        """Fee and stamp duty for one fill.
+
+        The first element is the whole trade fee (佣金 plus 过户费), matching how
+        the fill's cash movement is settled; ``stamp_duty`` is sell-side only and
+        follows the 2023-08-28 cutover.
+        """
+        if not math.isfinite(notional) or notional <= 0:
+            raise ValueError("notional must be a positive finite number")
+        stamp_duty = self.stamp_duty_on_sale(notional, trade_date) if action == "sell" else 0.0
+        return self.trade_fee(notional), stamp_duty
 
 
 @dataclass
@@ -538,14 +572,14 @@ class DailyBroker:
         assert bar is not None
         base_price = _price(raw_price)
         assert base_price is not None
-        fill_price = self.profile.costs.fill_price(base_price, action=order.action)
+        fill_price = self.profile.fill_price(base_price, action=order.action)
         limit_reason = _price_limit_reject(order.action, fill_price, bar)
         if limit_reason is not None:
             return self._record(order, matched_at, status="rejected", reason=limit_reason)
         notional = fill_price * order.quantity
         if self._current_day is None:
             raise RuntimeError("open_day must set the trading day before an order is executed")
-        commission, stamp_duty = self.profile.costs.fees(
+        commission, stamp_duty = self.profile.fees(
             notional, action=order.action, trade_date=self._current_day
         )
         realized_pnl: float | None = None
