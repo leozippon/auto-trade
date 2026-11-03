@@ -61,6 +61,7 @@ from .common import (
     TEXT_SPECS,
     TRADE_DATE_PAGE_LIMIT,
     DatasetSpec,
+    FetchStrategy,
     TuShareClient,
     active_year_windows,
     append_jsonl_unique,
@@ -227,7 +228,7 @@ def revision_sentinel_spec(dataset: str) -> Any:
     if dataset in DAILY_SPECS:
         return DAILY_SPECS[dataset]
     spec = BOARD_TRADING_SPECS.get(dataset) or EVENT_FLOW_SPECS.get(dataset)
-    if spec is None or spec.strategy != "trade_date":
+    if spec is None or spec.strategy != FetchStrategy.TRADE_DATE:
         raise RuntimeError(f"revision sentinel supports daily, board and event datasets with a plain trade_date strategy; got {dataset}")
     return spec
 
@@ -1633,8 +1634,8 @@ def audit_fundamental_cap_plateau(period_rows: dict[str, dict[str, int]], add) -
 
 def audit_fundamental_completeness(raw_dir: Path, args: argparse.Namespace, add) -> None:
     stock_codes = load_stock_codes(raw_dir)
-    period_datasets = [name for name, spec in FUNDAMENTAL_SPECS.items() if spec.strategy == "period"]
-    ann_month_datasets = [name for name, spec in FUNDAMENTAL_SPECS.items() if spec.strategy == "ann_month"]
+    period_datasets = [name for name, spec in FUNDAMENTAL_SPECS.items() if spec.strategy == FetchStrategy.PERIOD]
+    ann_month_datasets = [name for name, spec in FUNDAMENTAL_SPECS.items() if spec.strategy == FetchStrategy.ANN_MONTH]
     period_values = existing_partition_values(raw_dir, period_datasets, "period")
     ann_values = existing_partition_values(raw_dir, ann_month_datasets, "ann_month")
     all_periods = sorted({value for values in period_values.values() for value in values if value})
@@ -1662,11 +1663,11 @@ def audit_fundamental_completeness(raw_dir: Path, args: argparse.Namespace, add)
     statement_period_rows: dict[str, dict[str, int]] = {}
     for dataset in selected_fundamental_datasets(getattr(args, "fundamental_datasets", None)):
         spec = FUNDAMENTAL_SPECS[dataset]
-        if spec.strategy == "period":
+        if spec.strategy == FetchStrategy.PERIOD:
             row_counts = audit_fundamental_dataset(raw_dir, spec, periods, "period", add)
             if dataset in FUNDAMENTAL_STATEMENT_DATASETS:
                 statement_period_rows[dataset] = row_counts
-        elif spec.strategy == "ann_month":
+        elif spec.strategy == FetchStrategy.ANN_MONTH:
             audit_fundamental_dataset(raw_dir, spec, months, "ann_month", add)
         else:
             audit_fundamental_dataset(raw_dir, spec, set(stock_codes), "ts_code", add)
@@ -1963,21 +1964,21 @@ def expected_text_paths(raw_dir: Path, spec: DatasetSpec, start_date: str, end_d
         end_date = min(end_date, spec.frozen_through)
         if end_date < start:
             return set()
-    if spec.strategy in {"range_month", "time_range_month"}:
+    if spec.strategy in {FetchStrategy.RANGE_MONTH, FetchStrategy.TIME_RANGE_MONTH}:
         months = [month for _, _, month in month_windows(start, end_date)]
-        if spec.strategy == "time_range_month":
+        if spec.strategy == FetchStrategy.TIME_RANGE_MONTH:
             sources = args.major_news_src or [""]
             return {raw_dir / spec.api_name / (f"src={safe_partition_value(source)}" if source else "src=all") / f"month={month}.parquet" for source in sources for month in months}
         return {raw_dir / spec.api_name / f"month={month}.parquet" for month in months}
-    if spec.strategy == "news_src_month":
+    if spec.strategy == FetchStrategy.NEWS_SRC_MONTH:
         sources = selected_news_sources(getattr(args, "news_src", []))
         months = [month for _, _, month in month_windows(start, end_date)]
         return {raw_dir / spec.api_name / f"src={safe_partition_value(source)}" / f"month={month}.parquet" for source in sources for month in months}
-    if spec.strategy == "news_src_day":
+    if spec.strategy == FetchStrategy.NEWS_SRC_DAY:
         sources = selected_news_sources(getattr(args, "news_src", []))
         days = date_range_days(start, end_date)
         return {raw_dir / spec.api_name / f"src={safe_partition_value(source)}" / f"date={day}.parquet" for source in sources for day in days}
-    if spec.strategy == "day":
+    if spec.strategy == FetchStrategy.DAY:
         return {raw_dir / spec.api_name / f"date={day}.parquet" for day in date_range_days(start, end_date)}
     raise RuntimeError(f"unsupported text strategy {spec.strategy} for {spec.api_name}")
 
@@ -2052,7 +2053,7 @@ def selected_audit_macro_datasets(args: argparse.Namespace) -> list[str]:
 
 def expected_macro_paths(raw_dir: Path, spec: DatasetSpec, start_date: str, end_date: str, args: argparse.Namespace) -> set[Path]:
     start = max(start_date, spec.start_date)
-    if spec.strategy in {"quarter_once", "month_once"}:
+    if spec.strategy in {FetchStrategy.QUARTER_ONCE, FetchStrategy.MONTH_ONCE}:
         # Mirrors the downloader's retained floor: range pulls always cover
         # [floor, latest] and land in ONE canonical file regardless of the
         # audit window, so the expectation must not follow start/end_date --
@@ -2060,16 +2061,16 @@ def expected_macro_paths(raw_dir: Path, spec: DatasetSpec, start_date: str, end_
         retained = retained_range_start(
             raw_dir / spec.api_name, max(min(start_date, RESEARCH_HISTORY_FLOOR), spec.start_date)
         )
-        if spec.strategy == "quarter_once":
+        if spec.strategy == FetchStrategy.QUARTER_ONCE:
             start_q = max(yyyymmdd_to_quarter(retained), spec.start_quarter)
             return {raw_dir / spec.api_name / f"range={start_q}_latest.parquet"}
         start_m = max(yyyymmdd_to_month(retained), spec.start_month)
         return {raw_dir / spec.api_name / f"range={start_m}_latest.parquet"}
-    if spec.strategy == "month_loop":
+    if spec.strategy == FetchStrategy.MONTH_LOOP:
         return {raw_dir / spec.api_name / f"month={month}.parquet" for _, _, month in month_windows(start, end_date)}
-    if spec.strategy == "date_year":
+    if spec.strategy == FetchStrategy.DATE_YEAR:
         return {raw_dir / spec.api_name / f"year={year}.parquet" for year in range(int(start[:4]), int(end_date[:4]) + 1)}
-    if spec.strategy == "trade_date":
+    if spec.strategy == FetchStrategy.TRADE_DATE:
         open_dates = load_sse_open_dates(raw_dir, start, end_date)
         if spec.loop_values:
             return {
@@ -2079,12 +2080,12 @@ def expected_macro_paths(raw_dir: Path, spec: DatasetSpec, start_date: str, end_
                 if d >= spec.loop_start_date(value)
             }
         return {raw_dir / spec.api_name / f"trade_date={d}.parquet" for d in open_dates}
-    if spec.strategy == "static_full":
+    if spec.strategy == FetchStrategy.STATIC_FULL:
         directory = raw_dir / spec.api_name
         if spec.loop_values:
             return {directory / f"{spec.loop_param}={safe_partition_value(value)}.parquet" for value in spec.loop_values}
         return {directory / "full.parquet"}
-    if spec.strategy == "date_year_by_ts_code":
+    if spec.strategy == FetchStrategy.DATE_YEAR_BY_TS_CODE:
         if spec.api_name == "index_global":
             codes = selected_index_codes(args)
         elif spec.api_name in ("index_daily", "index_dailybasic"):
@@ -2096,7 +2097,7 @@ def expected_macro_paths(raw_dir: Path, spec: DatasetSpec, start_date: str, end_
             for ts_code in codes
             for year in range(int(start[:4]), int(end_date[:4]) + 1)
         }
-    if spec.strategy == "eco_cal_month":
+    if spec.strategy == FetchStrategy.ECO_CAL_MONTH:
         countries = selected_eco_filter_values(args, "eco_country")
         currencies = selected_eco_filter_values(args, "eco_currency")
         events = selected_eco_filter_values(args, "eco_event")
@@ -2181,7 +2182,7 @@ def audit_macro_completeness(raw_dir: Path, args: argparse.Namespace, add) -> No
     for dataset in datasets:
         spec = MACRO_SPECS[dataset]
         expected = expected_macro_paths(raw_dir, spec, args.start_date, covered_end, args)
-        if spec.strategy in {"quarter_once", "month_once"}:
+        if spec.strategy in {FetchStrategy.QUARTER_ONCE, FetchStrategy.MONTH_ONCE}:
             # Extra range files duplicate the whole series in snapshot domain
             # unions; the downloader prunes them, so any survivor is an error.
             stale = sorted(
@@ -2246,13 +2247,13 @@ def audit_macro_only(args: argparse.Namespace) -> int:
 
 def expected_event_paths(raw_dir: Path, spec: DatasetSpec, start_date: str, end_date: str) -> set[Path]:
     start = max(start_date, spec.start_date)
-    if spec.strategy == "trade_date":
+    if spec.strategy == FetchStrategy.TRADE_DATE:
         trade_end_date = min(end_date, latest_sse_calendar_date(raw_dir))
         trade_dates = load_sse_open_dates(raw_dir, start, trade_end_date)
         return {raw_dir / spec.api_name / f"trade_date={trade_date}.parquet" for trade_date in trade_dates}
-    if spec.strategy == "range_month":
+    if spec.strategy == FetchStrategy.RANGE_MONTH:
         return {raw_dir / spec.api_name / f"month={month}.parquet" for _, _, month in month_windows(start, end_date)}
-    if spec.strategy == "day":
+    if spec.strategy == FetchStrategy.DAY:
         return {raw_dir / spec.api_name / f"date={day}.parquet" for day in date_range_days(start, end_date)}
     raise RuntimeError(f"unsupported event/flow strategy {spec.strategy} for {spec.api_name}")
 
@@ -2319,11 +2320,11 @@ def event_pit_rules() -> dict[str, str]:
     }
 
 def event_partition_prefix(spec: DatasetSpec) -> str:
-    if spec.strategy == "trade_date":
+    if spec.strategy == FetchStrategy.TRADE_DATE:
         return "trade_date"
-    if spec.strategy == "range_month":
+    if spec.strategy == FetchStrategy.RANGE_MONTH:
         return "month"
-    if spec.strategy == "day":
+    if spec.strategy == FetchStrategy.DAY:
         return "date"
     raise RuntimeError(f"unsupported event/flow strategy {spec.strategy} for {spec.api_name}")
 
@@ -2553,7 +2554,7 @@ def audit_event_flow_only(args: argparse.Namespace) -> int:
     for dataset in datasets:
         spec = EVENT_FLOW_SPECS[dataset]
         rule = spec.availability
-        if open_dates and spec.strategy == "trade_date" and rule is not None and rule.rule.startswith("official_"):
+        if open_dates and spec.strategy == FetchStrategy.TRADE_DATE and rule is not None and rule.rule.startswith("official_"):
             dataset_ends[dataset] = latest_published_trade_date(open_dates, covered_end, rule, as_of)
     add("info", "event_flow_expected_scope", "TuShare event/flow datasets included in this audit", {
         "datasets": datasets,
@@ -2611,33 +2612,33 @@ def audit_event_flow_only(args: argparse.Namespace) -> int:
 
 def expected_board_paths(raw_dir: Path, spec: DatasetSpec, start_date: str, end_date: str, args: argparse.Namespace) -> set[Path]:
     start = max(start_date, spec.start_date)
-    if spec.strategy == "static_full":
+    if spec.strategy == FetchStrategy.STATIC_FULL:
         return {raw_dir / spec.api_name / f"{spec.api_name}.parquet"}
     if start > end_date:
         return set()
     trade_dates = load_sse_open_dates(raw_dir, start, end_date)
-    if spec.strategy == "trade_date":
+    if spec.strategy == FetchStrategy.TRADE_DATE:
         return {raw_dir / spec.api_name / f"trade_date={trade_date}.parquet" for trade_date in trade_dates}
-    if spec.strategy == "trade_date_by_tag":
+    if spec.strategy == FetchStrategy.TRADE_DATE_BY_TAG:
         return {
             raw_dir / spec.api_name / f"tag={safe_partition_value(tag)}" / f"trade_date={trade_date}.parquet"
             for tag in selected_board_kpl_tags(args)
             for trade_date in trade_dates
         }
-    if spec.strategy == "trade_date_by_limit_type":
+    if spec.strategy == FetchStrategy.TRADE_DATE_BY_LIMIT_TYPE:
         return {
             raw_dir / spec.api_name / f"limit_type={safe_partition_value(limit_type)}" / f"trade_date={trade_date}.parquet"
             for limit_type in selected_board_ths_limit_types(args)
             for trade_date in trade_dates
         }
-    if spec.strategy == "trade_date_by_market":
+    if spec.strategy == FetchStrategy.TRADE_DATE_BY_MARKET:
         return {
             raw_dir / spec.api_name / f"market={safe_partition_value(market)}" / f"is_new={is_new}" / f"trade_date={trade_date}.parquet"
             for market in selected_board_ths_hot_markets(args)
             for is_new in selected_board_hot_is_new(args)
             for trade_date in trade_dates
         }
-    if spec.strategy == "trade_date_by_market_hot_type":
+    if spec.strategy == FetchStrategy.TRADE_DATE_BY_MARKET_HOT_TYPE:
         return {
             raw_dir / spec.api_name / f"market={safe_partition_value(market)}" / f"hot_type={safe_partition_value(hot_type)}" / f"is_new={is_new}" / f"trade_date={trade_date}.parquet"
             for market in selected_board_dc_hot_markets(args)
@@ -2661,11 +2662,11 @@ def audit_board_dataset(raw_dir: Path, spec: DatasetSpec, expected_paths: set[Pa
         pit_rules=board_pit_rules().get(spec.api_name, {}),
         partitions_message="board-trading partition inventory",
         keys_message="board-trading key and PIT checks",
-        availability_required=spec.strategy != "static_full",
+        availability_required=spec.strategy != FetchStrategy.STATIC_FULL,
         # Flat trade-date datasets get the trailing-zero stale-feed detector;
         # nested tag/market strategies stay opted out (an individual pool or
         # tag legitimately goes quiet for long stretches).
-        zero_rows_ok=spec.zero_rows_ok if spec.strategy == "trade_date" else None,
+        zero_rows_ok=spec.zero_rows_ok if spec.strategy == FetchStrategy.TRADE_DATE else None,
     ))
 
 
@@ -3046,8 +3047,8 @@ def add_revision_parser(sub: argparse._SubParsersAction) -> None:
         "--datasets",
         nargs="+",
         choices=core.DAILY_REQUIRED_DATASETS
-        + sorted(name for name, spec in core.BOARD_TRADING_SPECS.items() if spec.strategy == "trade_date")
-        + sorted(name for name, spec in core.EVENT_FLOW_SPECS.items() if spec.strategy == "trade_date"),
+        + sorted(name for name, spec in core.BOARD_TRADING_SPECS.items() if spec.strategy == FetchStrategy.TRADE_DATE)
+        + sorted(name for name, spec in core.EVENT_FLOW_SPECS.items() if spec.strategy == FetchStrategy.TRADE_DATE),
     )
     revision.add_argument("--sample-size", type=int, default=12, help="Deterministic sample size per dataset; <=0 checks all dates.")
     revision.add_argument("--seed", help="Deterministic sampling seed. Defaults to --end-date.")

@@ -64,6 +64,7 @@ from .common import (
     ApiResult,
     DatasetSpec,
     DefectiveAnswer,
+    FetchStrategy,
     TuShareClient,
     active_year_windows,
     answer_defects,
@@ -1111,19 +1112,19 @@ def download_macro(args: argparse.Namespace) -> int:
         spec = MACRO_SPECS[dataset]
         spec_floor = history_floor(spec.start_date, args)
         start_date = max(args.start_date, spec_floor)
-        if spec.strategy == "quarter_once":
+        if spec.strategy == FetchStrategy.QUARTER_ONCE:
             download_macro_quarter_once(client, raw_dir, spec, max(retained_start_date, spec_floor), args.end_date, args.force, revision_ledger)
-        elif spec.strategy == "month_once":
+        elif spec.strategy == FetchStrategy.MONTH_ONCE:
             download_macro_month_once(client, raw_dir, spec, max(retained_start_date, spec_floor), args.end_date, args.force, revision_ledger)
-        elif spec.strategy == "month_loop":
+        elif spec.strategy == FetchStrategy.MONTH_LOOP:
             download_macro_month_loop(client, raw_dir, spec, start_date, args.end_date, args.force, revision_ledger)
-        elif spec.strategy == "trade_date":
+        elif spec.strategy == FetchStrategy.TRADE_DATE:
             download_macro_trade_date(client, raw_dir, spec, start_date, args.end_date, args.force, spec_page_limit(spec, args.page_limit), revision_ledger)
-        elif spec.strategy == "date_year":
+        elif spec.strategy == FetchStrategy.DATE_YEAR:
             download_macro_date_year(client, raw_dir, spec, start_date, args.end_date, args.force, spec_page_limit(spec, args.page_limit), revision_ledger)
-        elif spec.strategy == "static_full":
+        elif spec.strategy == FetchStrategy.STATIC_FULL:
             download_macro_static_full(client, raw_dir, spec, spec_page_limit(spec, args.page_limit), revision_ledger)
-        elif spec.strategy == "date_year_by_ts_code":
+        elif spec.strategy == FetchStrategy.DATE_YEAR_BY_TS_CODE:
             if dataset == "index_global":
                 codes = selected_index_codes(args)
             elif dataset in ("index_daily", "index_dailybasic"):
@@ -1133,7 +1134,7 @@ def download_macro(args: argparse.Namespace) -> int:
             else:
                 raise RuntimeError(f"no ts_code universe defined for by-ts_code macro dataset {dataset!r}")
             download_macro_date_year_by_ts_code(client, raw_dir, spec, start_date, args.end_date, args.force, spec_page_limit(spec, args.page_limit), codes, revision_ledger)
-        elif spec.strategy == "eco_cal_month":
+        elif spec.strategy == FetchStrategy.ECO_CAL_MONTH:
             download_macro_eco_cal_month(client, raw_dir, spec, start_date, args.end_date, args.force, spec_page_limit(spec, args.page_limit), args, revision_ledger)
         else:
             raise RuntimeError(f"unsupported macro strategy {spec.strategy} for {dataset}")
@@ -1502,7 +1503,7 @@ def download_event_flow(args: argparse.Namespace) -> int:
     stamping_dates: list[str] | None = None
     trade_end_date = args.end_date
     trade_cal_refreshed = False
-    has_trade_date_dataset = any(EVENT_FLOW_SPECS[name].strategy == "trade_date" for name in datasets)
+    has_trade_date_dataset = any(EVENT_FLOW_SPECS[name].strategy == FetchStrategy.TRADE_DATE for name in datasets)
     # Rules counted in open days (margin's next open day, new_share's second)
     # stamp from the calendar after the window. A 31-day calendar request
     # comfortably spans regular exchange holidays; the stamper still fails
@@ -1536,7 +1537,7 @@ def download_event_flow(args: argparse.Namespace) -> int:
     for dataset in datasets:
         spec = EVENT_FLOW_SPECS[dataset]
         start_date = max(args.start_date, spec.start_date)
-        if spec.strategy == "trade_date":
+        if spec.strategy == FetchStrategy.TRADE_DATE:
             dates = [d for d in trade_dates if start_date <= d <= trade_end_date]
             written, zero_skipped = download_event_trade_date_dataset(
                 client,
@@ -1551,7 +1552,7 @@ def download_event_flow(args: argparse.Namespace) -> int:
             total_written += written
             if zero_skipped and not spec.zero_rows_ok:
                 required_zero_skipped.append(f"{spec.api_name}:{zero_skipped}")
-        elif spec.strategy == "range_month":
+        elif spec.strategy == FetchStrategy.RANGE_MONTH:
             window_start = format_yyyymmdd(parse_yyyymmdd(args.start_date) - timedelta(days=spec.report_lag_days))
             windows = month_windows(window_start, args.end_date)
             dataset_windows = [(s, e, m) for s, e, m in windows if e >= max(window_start, spec.start_date)]
@@ -1779,7 +1780,7 @@ def download_board_trading(args: argparse.Namespace) -> int:
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
     revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
     trade_dates: list[str] = []
-    if any(BOARD_TRADING_SPECS[name].strategy != "static_full" for name in datasets):
+    if any(BOARD_TRADING_SPECS[name].strategy != FetchStrategy.STATIC_FULL for name in datasets):
         ensure_trade_cal_coverage(client, raw_dir, args.start_date, args.end_date, ledger=revision_ledger)
         latest_trade_calendar_date = latest_sse_calendar_date(raw_dir)
         trade_end_date = min(args.end_date, latest_trade_calendar_date)
@@ -1796,17 +1797,17 @@ def download_board_trading(args: argparse.Namespace) -> int:
         start_date = max(args.start_date, history_floor(spec.start_date, args))
         dates = [trade_date for trade_date in trade_dates if start_date <= trade_date <= args.end_date]
         page_limit = spec_page_limit(spec, args.page_limit)
-        if spec.strategy == "static_full":
+        if spec.strategy == FetchStrategy.STATIC_FULL:
             download_board_static_dataset(client, raw_dir, spec, revision_ledger)
-        elif spec.strategy == "trade_date":
+        elif spec.strategy == FetchStrategy.TRADE_DATE:
             download_board_trade_date_dataset(client, raw_dir, spec, dates, args.force, page_limit, revision_ledger)
-        elif spec.strategy == "trade_date_by_tag":
+        elif spec.strategy == FetchStrategy.TRADE_DATE_BY_TAG:
             download_board_kpl_list(client, raw_dir, spec, dates, args.force, page_limit, selected_board_kpl_tags(args), revision_ledger)
-        elif spec.strategy == "trade_date_by_limit_type":
+        elif spec.strategy == FetchStrategy.TRADE_DATE_BY_LIMIT_TYPE:
             download_board_limit_list_ths(client, raw_dir, spec, dates, args.force, page_limit, selected_board_ths_limit_types(args), revision_ledger)
-        elif spec.strategy == "trade_date_by_market":
+        elif spec.strategy == FetchStrategy.TRADE_DATE_BY_MARKET:
             download_board_hot_by_market(client, raw_dir, spec, dates, args.force, page_limit, selected_board_ths_hot_markets(args), selected_board_hot_is_new(args), revision_ledger)
-        elif spec.strategy == "trade_date_by_market_hot_type":
+        elif spec.strategy == FetchStrategy.TRADE_DATE_BY_MARKET_HOT_TYPE:
             download_board_dc_hot(client, raw_dir, spec, dates, args.force, page_limit, selected_board_dc_hot_markets(args), selected_board_dc_hot_types(args), selected_board_hot_is_new(args), revision_ledger)
         else:
             raise RuntimeError(f"unsupported board-trading strategy {spec.strategy} for {dataset}")
@@ -2603,7 +2604,7 @@ def download_fundamental(args: argparse.Namespace) -> int:
     revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
     datasets = selected_fundamental_datasets(args.datasets)
     stock_codes: list[str] = []
-    if any(FUNDAMENTAL_SPECS[name].strategy == "ts_code" for name in datasets):
+    if any(FUNDAMENTAL_SPECS[name].strategy == FetchStrategy.TS_CODE for name in datasets):
         explicit_codes = [str(code).strip() for code in (getattr(args, "codes", None) or []) if str(code).strip()]
         stock_codes = sorted(set(explicit_codes)) if explicit_codes else load_stock_codes(raw_dir)
         if args.max_codes:
@@ -2613,13 +2614,13 @@ def download_fundamental(args: argparse.Namespace) -> int:
     periods = sorted(set(quarter_periods(args.start_date, args.end_date)) | refresh_periods)
     windows = fundamental_ann_month_windows(args.start_date, args.end_date, refresh_months)
 
-    unsupported = [dataset for dataset in datasets if FUNDAMENTAL_SPECS[dataset].strategy not in {"period", "ann_month", "ts_code"}]
+    unsupported = [dataset for dataset in datasets if FUNDAMENTAL_SPECS[dataset].strategy not in {FetchStrategy.PERIOD, FetchStrategy.ANN_MONTH, FetchStrategy.TS_CODE}]
     if unsupported:
         raise RuntimeError(f"unsupported fundamental strategy for datasets: {unsupported}")
 
-    period_datasets = [dataset for dataset in datasets if FUNDAMENTAL_SPECS[dataset].strategy == "period"]
-    ann_month_datasets = [dataset for dataset in datasets if FUNDAMENTAL_SPECS[dataset].strategy == "ann_month"]
-    ts_code_datasets = [dataset for dataset in datasets if FUNDAMENTAL_SPECS[dataset].strategy == "ts_code"]
+    period_datasets = [dataset for dataset in datasets if FUNDAMENTAL_SPECS[dataset].strategy == FetchStrategy.PERIOD]
+    ann_month_datasets = [dataset for dataset in datasets if FUNDAMENTAL_SPECS[dataset].strategy == FetchStrategy.ANN_MONTH]
+    ts_code_datasets = [dataset for dataset in datasets if FUNDAMENTAL_SPECS[dataset].strategy == FetchStrategy.TS_CODE]
 
     for dataset in period_datasets:
         spec = FUNDAMENTAL_SPECS[dataset]
@@ -3289,13 +3290,13 @@ def download_text(args: argparse.Namespace) -> int:
         dataset_windows = [(s, e, m) for s, e, m in windows if e >= start_date]
         dataset_days = [d for d in days if d >= start_date]
         page_limit = spec_page_limit(spec, args.page_limit)
-        if spec.strategy == "range_month":
+        if spec.strategy == FetchStrategy.RANGE_MONTH:
             download_text_range_month(client, raw_dir, spec, dataset_windows, args.force, page_limit, revision_ledger)
-        elif spec.strategy == "time_range_month":
+        elif spec.strategy == FetchStrategy.TIME_RANGE_MONTH:
             download_text_time_range_month(client, raw_dir, spec, dataset_windows, args.force, page_limit, args.major_news_src, revision_ledger)
-        elif spec.strategy == "news_src_day":
+        elif spec.strategy == FetchStrategy.NEWS_SRC_DAY:
             download_text_news_src_day(client, raw_dir, spec, dataset_days, args.force, page_limit, args.news_src, revision_ledger)
-        elif spec.strategy == "day":
+        elif spec.strategy == FetchStrategy.DAY:
             download_text_day(client, raw_dir, spec, dataset_days, args.force, revision_ledger)
         else:
             raise RuntimeError(f"unsupported text strategy {spec.strategy} for {dataset}")
@@ -4077,7 +4078,7 @@ def add_repair_text_parser(sub: argparse._SubParsersAction) -> None:
     core.add_raw_arg(event)
     event.add_argument(
         "--datasets", nargs="+", required=True,
-        choices=sorted(name for name, spec in EVENT_FLOW_SPECS.items() if spec.strategy == "trade_date"),
+        choices=sorted(name for name, spec in EVENT_FLOW_SPECS.items() if spec.strategy == FetchStrategy.TRADE_DATE),
     )
 
 def build_parser() -> argparse.ArgumentParser:
