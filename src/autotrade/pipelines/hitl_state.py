@@ -29,9 +29,11 @@ from autotrade.environment.sandbox import SandboxSpec
 
 from .calendar import GEOMETRY_PARAMETERS
 from .config import (
+    ACCEPTANCE_KEYS,
     DEFAULT_PIT_VIEWS_SEED,
     DEFAULT_RESEARCH_GEOMETRY,
-    AcceptanceRules,
+    REQUIRED_ACCEPTANCE_KEYS,
+    acceptance_default,
     rolling_default,
 )
 from .ledger import FORWARD_SESSION_KEY, RESEARCH_SESSION_KEY
@@ -57,9 +59,18 @@ LIVE_RUN_STATES = {"running_session"}
 ENDED_STATES = frozenset({"completed", "failed", "stopped"})
 
 
+# The console's own value of each required acceptance rule
+# (``config.REQUIRED_ACCEPTANCE_KEYS``), which the rules themselves leave
+# without a default. The sealed gate's level is one for the whole program, so
+# that every sealed reading is judged at the same level
+# (``_round.BASE_EXPECTED_DEFAULTS`` pins it).
+_REQUIRED_ACCEPTANCE_DEFAULTS: dict[str, object] = {"alpha": 0.05}
+
+
 def _acceptance_defaults() -> dict[str, object]:
     """The acceptance block of the creation defaults, read off the rules' own
-    declaration (``config.AcceptanceRules``).
+    declaration (``config.AcceptanceRules``) and, for a rule without a
+    default, the console's own value above.
 
     The limits a request may leave blank come first: the tracking mandate,
     which naming ``tracking_error_cap`` switches on (a blank beta band then
@@ -69,8 +80,15 @@ def _acceptance_defaults() -> dict[str, object]:
     (``config.acceptance_for``).
     """
 
+    if set(_REQUIRED_ACCEPTANCE_DEFAULTS) != set(REQUIRED_ACCEPTANCE_KEYS):
+        raise RuntimeError("every required acceptance rule needs its console value")
     rules = {
-        **AcceptanceRules().to_record(),
+        **{
+            name: _REQUIRED_ACCEPTANCE_DEFAULTS[name]
+            if name in REQUIRED_ACCEPTANCE_KEYS
+            else acceptance_default(name)
+            for name in ACCEPTANCE_KEYS
+        },
         "max_drawdown": None,
         "active_max_drawdown": None,
     }

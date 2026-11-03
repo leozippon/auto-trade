@@ -205,6 +205,9 @@ BASE_EXPECTED_DEFAULTS: dict[str, object] = {
     # qualifies for (`broker.default_permitted_boards`); a round that wants
     # others names them.
     "permitted_boards": None,
+    # The sealed gate's one-sided level, one for every round so that every
+    # sealed reading is judged at the same level.
+    "alpha": 0.05,
 }
 
 # What every round decides the same way. Values, not commentary.

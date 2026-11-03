@@ -777,8 +777,8 @@ class SessionValidations:
 
     @property
     def rules(self) -> AcceptanceRules:
-        """The run's acceptance rules. A request that states none is judged
-        under the rules' own defaults, as a record that omits a key is."""
+        """The run's acceptance rules (``AcceptanceRules.from_record``, which
+        refuses a record without a required rule)."""
 
         return AcceptanceRules.from_record(self.request.acceptance_rules)
 

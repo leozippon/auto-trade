@@ -9,6 +9,7 @@ from autotrade.environment.artifacts import new_revision_id
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import RunManifest
 from autotrade.environment.step_tree import StepTree
+from tests.unit.acceptance_fixture import REQUIRED_RULES
 
 from .test_artifacts import write_artifact
 
@@ -251,7 +252,7 @@ RESEARCH_MANIFEST = {
             "intraday_trade_days": 21,
         }
     },
-    "acceptance_rules": {"min_return": 0.0},
+    "acceptance_rules": {"min_return": 0.0, **REQUIRED_RULES},
     "budgets": {"max_replay_years": 24, "max_null_controls": 3, "deadline_seconds": 43800.0},
 }
 

@@ -58,6 +58,7 @@ from autotrade.webui.manager import (
 )
 from autotrade.webui.public_identity import PublicIdentity
 from autotrade.webui.server import create_app, is_loopback_host
+from tests.unit.acceptance_fixture import REQUIRED_RULES
 from tests.unit.gpu_probe import stubbed_gpu_probe
 from tests.unit.webui_research_arm import build_arm
 
@@ -1435,7 +1436,7 @@ class WebuiBackendTest(unittest.TestCase):
             ("exp_tracked", {"tracking_error_cap": 0.08}),
             ("exp_tight_ir", {"min_active_ir": 1.1}),
         ):
-            expected = acceptance_for(request).to_record()
+            expected = acceptance_for({**REQUIRED_RULES, **request}).to_record()
             with (
                 patch.object(manager, "_preflight"),
                 patch.object(manager, "start_worker", return_value={"spawned": False}),
@@ -1458,7 +1459,7 @@ class WebuiBackendTest(unittest.TestCase):
                 self.assertEqual(acceptance_for(written).to_record(), expected)
         # The default capital is CNY 1,000,000 and buys no mandate at all.
         self.assertEqual(
-            acceptance_for({}).to_record(), AcceptanceRules().to_record()
+            acceptance_for(REQUIRED_RULES).to_record(), AcceptanceRules(**REQUIRED_RULES).to_record()
         )
 
     def test_creation_stamps_the_boards_the_initial_cash_qualifies_for(self) -> None:

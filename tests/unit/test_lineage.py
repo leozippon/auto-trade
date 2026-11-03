@@ -39,6 +39,7 @@ from autotrade.pipelines.lineage import (
 )
 from autotrade.pipelines.research_session import LINEAGE_NOTE, arm_record
 from autotrade.pipelines.session_resume import REVISIONS_DIR, STEP_SIDECAR_DIR
+from tests.unit.acceptance_fixture import REQUIRED_RULES
 
 RESEARCH_START, RESEARCH_END = "20210701", "20250630"
 DAYS = [day.strftime("%Y%m%d") for day in pd.bdate_range(RESEARCH_START, RESEARCH_END)]
@@ -209,7 +210,7 @@ def test_an_arm_without_a_lineage_deflates_over_its_own_family(tmp_path: Path) -
 
     rows = _own_rows(tmp_path / "new_arm")
     dsr = freeze_gate_for(
-        [], rows, rows[1], experiment_dir=tmp_path / "new_arm", acceptance=AcceptanceRules()
+        [], rows, rows[1], experiment_dir=tmp_path / "new_arm", acceptance=AcceptanceRules(**REQUIRED_RULES)
     )["deflated_sharpe"]
     assert {
         key: dsr[key]
@@ -233,7 +234,7 @@ def test_a_correlated_lineage_adds_almost_nothing_and_an_independent_one_its_cou
     def gate(series) -> dict[str, object]:
         return verdict.freeze_gate(
             nominee,
-            rules=AcceptanceRules(),
+            rules=AcceptanceRules(**REQUIRED_RULES),
             trials=1,
             trial_analyses=[nominee],
             lineage_trials=len(series),
@@ -306,14 +307,14 @@ def test_the_recorded_lineage_joins_the_family_and_outlives_its_arms(tmp_path: P
     shutil.rmtree(first)
     shutil.rmtree(second)
     records = ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl").read()
-    dsr = freeze_gate_for(records, own, own[1], experiment_dir=arm, acceptance=AcceptanceRules())["deflated_sharpe"]
+    dsr = freeze_gate_for(records, own, own[1], experiment_dir=arm, acceptance=AcceptanceRules(**REQUIRED_RULES))["deflated_sharpe"]
     assert dsr["lineage_arms"] == ["first", "second"]
     assert (dsr["trials"], dsr["host_trials"], dsr["offline_trials"], dsr["lineage_trials"]) == (9, 2, 1, 6)
     assert dsr["controls"] == 1
     # The same formula and series as if every trial were the arm's own.
     direct = verdict.freeze_gate(
         _analysis(own[1]),
-        rules=AcceptanceRules(),
+        rules=AcceptanceRules(**REQUIRED_RULES),
         trials=2 + 3,
         offline_trials=1 + 3,
         trial_analyses=[_analysis(own[1]), _analysis(own[2]), *lineage_analyses],
@@ -351,7 +352,7 @@ def test_a_moved_tree_reads_its_lineage_and_gate_where_the_arms_now_live(tmp_pat
     own = _own_rows(old / "new_arm")
     extraction = extract_lineage(old, ["first"], research_start=RESEARCH_START, research_end=RESEARCH_END)
     _record(old / "new_arm", extraction)
-    rules = AcceptanceRules()
+    rules = AcceptanceRules(**REQUIRED_RULES)
     before = freeze_gate_for(
         ExperimentLedger(old / "new_arm/ledgers/experiment_ledger.jsonl").read(),
         own,
@@ -445,7 +446,7 @@ def test_bytes_validated_in_two_arms_are_one_trial(tmp_path: Path) -> None:
     ]
     _record(arm, extraction)
     records = ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl").read()
-    joined = freeze_gate_for(records, own, own[1], experiment_dir=arm, acceptance=AcceptanceRules())[
+    joined = freeze_gate_for(records, own, own[1], experiment_dir=arm, acceptance=AcceptanceRules(**REQUIRED_RULES))[
         "deflated_sharpe"
     ]
     assert (joined["trials"], joined["host_trials"], joined["lineage_trials"]) == (4, 2, 2)
@@ -454,7 +455,7 @@ def test_bytes_validated_in_two_arms_are_one_trial(tmp_path: Path) -> None:
     )
     direct = verdict.freeze_gate(
         _analysis(own[1]),
-        rules=AcceptanceRules(),
+        rules=AcceptanceRules(**REQUIRED_RULES),
         trials=4,
         trial_analyses=[_analysis(own[1]), _analysis(qwen[0]), _analysis(qwen[1]), _analysis(mimo[1])],
         full_span_validations=1,
@@ -485,7 +486,7 @@ def test_each_arms_declared_screens_count_as_its_own(tmp_path: Path) -> None:
     own = [_row(arm, 0, seed=101, loading=0.5, offline=8)]
     _record(arm, extraction, pack="configs/workspace_refs/star")
     records = ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl").read()
-    rules = AcceptanceRules()
+    rules = AcceptanceRules(**REQUIRED_RULES)
     dsr = freeze_gate_for(records, own, own[0], experiment_dir=arm, acceptance=rules)["deflated_sharpe"]
     # The arm's own 8 stay its own; the lineage adds its four strategies and
     # 17 + 20 + 6 + 2 screens as four distinct per-arm searches.
@@ -591,7 +592,7 @@ def test_the_console_listing_counts_the_lineage_as_the_gate_does(tmp_path: Path)
     root = tmp_path / "experiments"
     _arm(root, "first", [{"seed": 2, "loading": 0.6}, {"seed": 3, "loading": 0.6}])
     arm = root / "new_arm"
-    write_json_atomic(arm / "hitl/params.json", {"experiment_id": "new_arm"})
+    write_json_atomic(arm / "hitl/params.json", {"experiment_id": "new_arm", **REQUIRED_RULES})
     own = _own_rows(arm)
     _record(arm, extract_lineage(root, ["first"], research_start=RESEARCH_START, research_end=RESEARCH_END))
     for row in own:
@@ -604,7 +605,7 @@ def test_the_console_listing_counts_the_lineage_as_the_gate_does(tmp_path: Path)
         )
     ledger = ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl")
     best = _research_best(arm, ledger.read(), running=True)
-    dsr = freeze_gate_for(ledger.read(), own, own[1], experiment_dir=arm, acceptance=AcceptanceRules())["deflated_sharpe"]
+    dsr = freeze_gate_for(ledger.read(), own, own[1], experiment_dir=arm, acceptance=AcceptanceRules(**REQUIRED_RULES))["deflated_sharpe"]
     assert dsr["lineage_trials"] == 2
     assert best["step_id"] == own[1]["step_id"]
     assert best["trials"] == dsr["trials"] == 5
@@ -680,10 +681,10 @@ def test_a_terminals_declared_screens_are_inherited_once(tmp_path: Path) -> None
     own = [_row(arm, 0, seed=101, loading=0.5, offline=0)]
     _record(arm, extraction)
     records = ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl").read()
-    first = freeze_gate_for(records, own, own[0], experiment_dir=arm, acceptance=AcceptanceRules())[
+    first = freeze_gate_for(records, own, own[0], experiment_dir=arm, acceptance=AcceptanceRules(**REQUIRED_RULES))[
         "deflated_sharpe"
     ]
-    second = freeze_gate_for(records, own, own[0], experiment_dir=arm, acceptance=AcceptanceRules())[
+    second = freeze_gate_for(records, own, own[0], experiment_dir=arm, acceptance=AcceptanceRules(**REQUIRED_RULES))[
         "deflated_sharpe"
     ]
     assert first == second

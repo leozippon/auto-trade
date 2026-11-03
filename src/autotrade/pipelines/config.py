@@ -173,6 +173,14 @@ def _rule(default: object, text: str) -> Any:
     return field(default=default, metadata={"help": text})
 
 
+def _required(text: str) -> Any:
+    """One acceptance rule without a default (``REQUIRED_ACCEPTANCE_KEYS``):
+    every record and every create request names it, so a record written
+    before the rule existed is refused rather than read under a default."""
+
+    return field(kw_only=True, metadata={"help": text})
+
+
 # How the freeze gate prices a declared offline screen against one run on the
 # host (``verdict.trial_family_statistics``), in the one sentence the Agent's
 # facts and batch_validate's offline_trials parameter state.
@@ -263,6 +271,10 @@ class AcceptanceRules:
         verdict.HELDOUT_TOLERANCE_Z,
         "Held-out: tolerated shortfall in standard errors of forward tracking error.",
     )
+    # The sealed gate's significance level (``verdict.residual_bar``).
+    alpha: float = _required(
+        "Sealed gate: one-sided significance level of the residual information ratio."
+    )
 
     def __post_init__(self) -> None:
         mandate = (self.tracking_error_cap, self.beta_min, self.beta_max)
@@ -314,6 +326,7 @@ class AcceptanceRules:
         if not z_score > 0:
             raise ValueError("heldout_tolerance_z must be positive")
         object.__setattr__(self, "heldout_tolerance_z", z_score)
+        object.__setattr__(self, "alpha", _open_unit(self.alpha, "alpha", include_one=False))
         if any(value is None for value in mandate):
             if any(value is not None for value in mandate):
                 raise ValueError(
@@ -347,9 +360,19 @@ class AcceptanceRules:
         Run manifests and ``hitl/params.json`` are read back long after they
         were written, so a record that carries a retired key (the former
         ``min_return``/``min_sharpe`` targets, the ``RETIRED_SWITCHES``) must
-        still rebuild the rules it does name.
+        still rebuild the rules it does name. A record that lacks a required
+        rule (``REQUIRED_ACCEPTANCE_KEYS``) is refused: it was written under
+        rules these are not.
         """
 
+        missing = [
+            rule.name for rule in fields(cls) if rule.default is MISSING and rule.name not in record
+        ]
+        if missing:
+            raise ValueError(
+                f"the acceptance rules lack the required {', '.join(missing)}: a record "
+                "written before those rules existed is not read under them"
+            )
         return cls(**{rule.name: record[rule.name] for rule in fields(cls) if rule.name in record})  # type: ignore[arg-type]
 
     def agent_facts(self, *, research_years: int | None = None) -> dict[str, object]:
@@ -539,6 +562,20 @@ class AcceptanceRules:
 # Every rule's name, in declaration order: the keys of a rules record and of
 # the arm parameters that set one.
 ACCEPTANCE_KEYS: tuple[str, ...] = tuple(rule.name for rule in fields(AcceptanceRules))
+# The rules without a default, which every record and create request names.
+REQUIRED_ACCEPTANCE_KEYS: tuple[str, ...] = tuple(
+    rule.name for rule in fields(AcceptanceRules) if rule.default is MISSING
+)
+
+
+def acceptance_default(name: str) -> object:
+    """The default of one acceptance rule; ``KeyError`` for a required one."""
+
+    rule = next(rule for rule in fields(AcceptanceRules) if rule.name == name)
+    if rule.default is MISSING:
+        raise KeyError(f"{name} is a required acceptance rule and has no default")
+    return rule.default
+
 
 # The per-arm on/off switches retired on 2026-10-07, when what they switched on
 # became the only rules (docs/pipeline-design.md §6). Every params.json written
@@ -576,17 +613,20 @@ def acceptance_for(params: Mapping[str, object]) -> AcceptanceRules:
     just not graded.
 
     Only the rules' own keys are read; one that is absent or ``None`` takes the
-    field default (today's verdict constants for the statistical bars), and a
-    beta band named without a cap is refused by ``AcceptanceRules`` itself.
+    field default (today's verdict constants for the statistical bars), a
+    required rule (``REQUIRED_ACCEPTANCE_KEYS``) has none and is refused, and
+    a beta band named without a cap is refused by ``AcceptanceRules`` itself.
     """
 
-    rules = AcceptanceRules().to_record()
-    rules.update({key: params[key] for key in rules if params.get(key) is not None})
+    rules = {
+        rule.name: rule.default for rule in fields(AcceptanceRules) if rule.default is not MISSING
+    }
+    rules.update({key: params[key] for key in ACCEPTANCE_KEYS if params.get(key) is not None})
     if rules["tracking_error_cap"] is not None:
         for key, value in MANDATED_DEFAULTS.items():
             if params.get(key) is None:
                 rules[key] = value
-    return AcceptanceRules(**rules)  # type: ignore[arg-type]
+    return AcceptanceRules.from_record(rules)
 
 
 @dataclass(frozen=True)
@@ -663,8 +703,9 @@ class RollingExperimentConfig:
     schedule: StrategySchedule = field(default_factory=StrategySchedule)
     broker_profile: BrokerProfile = field(default_factory=BrokerProfile)
     # The arm's effective rules (``acceptance_for``): a tracking mandate only
-    # when the create request named a ``tracking_error_cap``.
-    acceptance: AcceptanceRules = field(default_factory=AcceptanceRules)
+    # when the create request named a ``tracking_error_cap``. No default: the
+    # rules carry required keys only an arm's own parameters can state.
+    acceptance: AcceptanceRules = field(kw_only=True)
     step_constraints: ModificationConstraints = field(
         default_factory=ModificationConstraints
     )
@@ -1105,7 +1146,9 @@ class ResearchSessionRequest:
     # None keeps the experiment default. The session takes that many of the
     # cards its arm holds.
     sandbox_gpu_count: int | None = None
-    acceptance_rules: Mapping[str, object] = field(default_factory=dict)
+    # The arm's ``AcceptanceRules.to_record()``; no default, as the rules
+    # carry required keys.
+    acceptance_rules: Mapping[str, object] = field(kw_only=True)
     modification_constraints: ModificationConstraints = field(
         default_factory=ModificationConstraints
     )
@@ -1238,6 +1281,7 @@ __all__ = [
     "DEFAULT_MAX_REPLAY_YEARS",
     "DEFAULT_MAX_RESEARCH_MINUTES",
     "DEFAULT_RESEARCH_GEOMETRY",
+    "REQUIRED_ACCEPTANCE_KEYS",
     "SESSION_OUTCOMES",
     "AcceptanceRules",
     "ArtifactRevision",
@@ -1258,6 +1302,8 @@ __all__ = [
     "SnapshotProvider",
     "StepResult",
     "StrategyExperimentConfig",
+    "acceptance_default",
+    "acceptance_for",
     "positive_spend_cap",
     "research_span",
     "rolling_default",

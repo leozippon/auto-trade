@@ -26,6 +26,7 @@ from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools import ModificationCheckTool, ToolRegistry
 from autotrade.pipelines.config import RollingExperimentConfig
 from autotrade.pipelines.ledger import ExperimentLedger
+from tests.unit.acceptance_fixture import RULES
 
 from .fixtures_sandbox import PassingModificationCheck
 
@@ -125,6 +126,7 @@ class RecordFailedAttemptsTest(unittest.TestCase):
             deadline_seconds=1200.0,
             record_failed_attempts=record_failed_attempts,
             benchmark_index=DEFAULT_BENCHMARK_INDEX,
+            acceptance_rules=RULES.to_record(),
         )
 
         raised = error or RuntimeError(f"validation blew up at {HOST_RESULT_PATH}")
@@ -257,7 +259,7 @@ class RecordFailedAttemptsTest(unittest.TestCase):
             )
 
     def test_the_config_default_records_them(self) -> None:
-        config = RollingExperimentConfig("exp", Path("/tmp/experiments"))
+        config = RollingExperimentConfig("exp", Path("/tmp/experiments"), acceptance=RULES)
         self.assertTrue(config.record_failed_attempts)
 
 

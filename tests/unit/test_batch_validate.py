@@ -107,6 +107,7 @@ from autotrade.pipelines.verdict import (
     graded_statistics,
     information_ratio_bar,
 )
+from tests.unit.acceptance_fixture import REQUIRED_RULES
 
 PARENT_SOURCE ="def generate_orders(context):\n    return []\n"
 # A four-year research period, one slot per July-June year.
@@ -312,6 +313,10 @@ def _write_style_sidecar(directory: Path, *, alpha: float, seed: int) -> None:
         "strategy_daily": [[day, float(value)] for day, value in zip(days, strategy)],
         "benchmark_daily": [[day, float(value)] for day, value in zip(days, benchmark)],
         "size_factor_daily": [[day, float(value)] for day, value in zip(days, size)],
+        "value_factor_daily": [
+            [day, float(value)]
+            for day, value in zip(days, np.random.default_rng(seed + 10_000).normal(0.0, 0.003, len(days)))
+        ],
         "panel_daily": [[day, float(value)] for day, value in zip(days, panel)],
     }
     write_json_atomic(directory / "style_analysis.json", sidecar)
@@ -387,7 +392,7 @@ class _Session:
             deadline_grace_seconds=60.0,
             finalize_before_deadline_seconds=30,
             record_failed_attempts=record_failed_attempts,
-            acceptance_rules=dict(acceptance_rules or {"max_drawdown": 0.25}),
+            acceptance_rules={**REQUIRED_RULES, **(acceptance_rules or {"max_drawdown": 0.25})},
             budget_used=budget_used or BudgetUsed(),
             steps_before=steps_before,
             resume=resume,
@@ -1752,14 +1757,16 @@ class BatchValidateRunTest(unittest.TestCase):
                     information_ratio_bar(
                         statistics["effective_trials"],
                         TRADING_DAYS_PER_YEAR * len(YEARS),
-                        AcceptanceRules().min_dsr_probability,
+                        AcceptanceRules(**REQUIRED_RULES).min_dsr_probability,
                     ),
                 )
                 self.assertIn("FULL-SPAN bar", statistics["note"])
                 self.assertIn("cannot be nominated as it is", statistics["note"])
             # The equity drawdown breaks the run's limit on every full span.
             relaxed = session.backtest.request
-            session.backtest.request = replace(relaxed, acceptance_rules={"max_drawdown": 0.01})
+            session.backtest.request = replace(
+                relaxed, acceptance_rules={**REQUIRED_RULES, "max_drawdown": 0.01}
+            )
             session.candidate("c", _strategy("333"))
             refused = session.call("a", "c").value["candidates"]
             session.candidate("d", _strategy("4444"))
@@ -1793,7 +1800,7 @@ class BatchValidateRunTest(unittest.TestCase):
             full = session.validate_one("full", _strategy("1"))
             statistics = full["selection_statistics"]
             activity = statistics["graduation_activity"]
-            rules = AcceptanceRules()
+            rules = AcceptanceRules(**REQUIRED_RULES)
             # The fixture's replay books 3 realised exits over four research years.
             self.assertEqual(activity["round_trips"], 3)
             self.assertEqual(activity["round_trips_per_month"], round(3 / 48, 3))
@@ -2675,7 +2682,7 @@ class RecordedValidationDurabilityTest(unittest.TestCase):
             # The formerly flagged leg is a trial again; the declared batch
             # still counts its screens once.
             gate = freeze_gate_for(
-                [], rows, rows[0], experiment_dir=experiment, acceptance=AcceptanceRules()
+                [], rows, rows[0], experiment_dir=experiment, acceptance=AcceptanceRules(**REQUIRED_RULES)
             )
             dsr = gate["deflated_sharpe"]
             self.assertEqual(
@@ -2694,6 +2701,6 @@ class RecordedValidationDurabilityTest(unittest.TestCase):
                 for row in rows
             ]
             dsr = freeze_gate_for(
-                [], legacy, legacy[0], experiment_dir=experiment, acceptance=AcceptanceRules()
+                [], legacy, legacy[0], experiment_dir=experiment, acceptance=AcceptanceRules(**REQUIRED_RULES)
             )["deflated_sharpe"]
             self.assertEqual((dsr["trials"], dsr["undeclared_offline_validations"]), (2, 2))

@@ -50,6 +50,7 @@ from autotrade.environment.tools.workspace import (
     LOW_DISK_SPACE,
     WORKSPACE_MIN_FREE_BYTES,
 )
+from tests.unit.acceptance_fixture import RULES
 
 from .fixtures_sandbox import PassingModificationCheck
 
@@ -2021,6 +2022,7 @@ def _fold_backtest_tool(
         max_llm_calls=3,
         deadline_seconds=600.0,
         benchmark_index=DEFAULT_BENCHMARK_INDEX,
+        acceptance_rules=RULES.to_record(),
     )
     # The experiment the worker roots a session in: the freeze gate reads a
     # nominee's strategy from its revision store.

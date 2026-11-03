@@ -41,6 +41,7 @@ from autotrade.pipelines.verdict import (
     graduation_verdict,
     heldout_slice,
 )
+from tests.unit.acceptance_fixture import REQUIRED_RULES
 
 STAGES = (
     "created",
@@ -74,6 +75,7 @@ PARAMS: dict[str, object] = {
     # the live PIT audit, which a fixture repository does not have
     # (test_paper_books covers that check).
     "include_fundamentals": False,
+    **REQUIRED_RULES,
 }
 REPLAY = {
     "start": "20250701",
@@ -85,7 +87,7 @@ REPLAY = {
 }
 # The rules every recorded statistic of the arm is judged under: drawdown
 # limits wide enough that the synthetic series' edge alone decides.
-RULES = AcceptanceRules(max_drawdown=0.9, active_max_drawdown=0.9)
+RULES = AcceptanceRules(**REQUIRED_RULES, max_drawdown=0.9, active_max_drawdown=0.9)
 
 
 def _business_days(start: str, count: int) -> list[str]:
@@ -154,6 +156,12 @@ def write_result(
             "strategy_daily": [[day, float(value)] for day, value in zip(dates, strategy, strict=True)],
             "benchmark_daily": [[day, float(value)] for day, value in zip(dates, benchmark, strict=True)],
             "size_factor_daily": [[day, float(value)] for day, value in zip(dates, size, strict=True)],
+            "value_factor_daily": [
+                [day, float(value)]
+                for day, value in zip(
+                    dates, np.random.default_rng(len(dates)).normal(0.0, 0.003, len(dates)), strict=True
+                )
+            ],
         },
     )
     return str(result_dir / "result.json")

@@ -10,9 +10,16 @@ import pytest
 from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.sandbox import SandboxSpec
 from autotrade.pipelines import worker as worker_module
-from autotrade.pipelines.config import RETIRED_SWITCHES, AcceptanceRules, acceptance_for
+from autotrade.pipelines.config import (
+    REQUIRED_ACCEPTANCE_KEYS,
+    RETIRED_SWITCHES,
+    AcceptanceRules,
+    acceptance_for,
+)
+from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
 from scripts.experiments import _cli, run_audit_session
 from scripts.experiments._cli import add_acceptance_arguments
+from tests.unit.acceptance_fixture import REQUIRED_RULES
 
 
 class _ProviderConstructed(RuntimeError):
@@ -104,7 +111,11 @@ def test_the_audit_parser_exposes_every_create_time_gate() -> None:
     parser = argparse.ArgumentParser()
     add_acceptance_arguments(parser)
     unset = vars(parser.parse_args([]))
-    assert unset == {rule.name: None for rule in fields(AcceptanceRules)}
+    # A rule without a default takes the console's creation value.
+    assert unset == {
+        rule.name: WEB_CREATE_DEFAULTS[rule.name] if rule.name in REQUIRED_ACCEPTANCE_KEYS else None
+        for rule in fields(AcceptanceRules)
+    }
     assert all(action.help for action in parser._actions)
 
     chosen = parser.parse_args(
@@ -115,7 +126,11 @@ def test_the_audit_parser_exposes_every_create_time_gate() -> None:
             "--tracking-error-cap=0.08",
         ]
     )
-    named = {key: value for key, value in vars(chosen).items() if value is not None}
+    named = {
+        key: value
+        for key, value in vars(chosen).items()
+        if value is not None and key not in REQUIRED_ACCEPTANCE_KEYS
+    }
     assert named == {
         "recency_months": 3,
         "min_full_span_validations": 4,
@@ -124,7 +139,7 @@ def test_the_audit_parser_exposes_every_create_time_gate() -> None:
     }
     assert type(chosen.recency_months) is int and type(chosen.max_drawdown) is float
     # The rules accept what the parser hands them.
-    AcceptanceRules(**{"beta_min": 0.85, "beta_max": 1.15, **named})
+    AcceptanceRules(**REQUIRED_RULES, **{"beta_min": 0.85, "beta_max": 1.15, **named})
     with pytest.raises(SystemExit):
         parser.parse_args(["--recency-months=2.5"])
 
@@ -150,7 +165,7 @@ def test_an_arm_created_from_the_command_line_holds_the_consoles_creation_rules(
         return _cli._build_worker_params(args, repo_root=tmp_path)
 
     created = params()
-    assert acceptance_for(created) == AcceptanceRules()
+    assert acceptance_for(created) == AcceptanceRules(**REQUIRED_RULES)
     assert not RETIRED_SWITCHES & set(created)
     assert acceptance_for(params("--recency-months=3")).recency_months == 3
 

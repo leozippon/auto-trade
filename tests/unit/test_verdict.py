@@ -12,9 +12,10 @@ import pandas as pd
 import pytest
 
 from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR
-from autotrade.environment.replay.style import window_plain_excess
+from autotrade.environment.replay.style import factor_ols, window_plain_excess
 from autotrade.pipelines import verdict
 from autotrade.pipelines.config import ACCEPTANCE_KEYS, AcceptanceRules
+from tests.unit.acceptance_fixture import REQUIRED_RULES
 
 SCALE = math.sqrt(TRADING_DAYS_PER_YEAR)
 FORWARD_START, FORWARD_END = "20250701", "20260630"
@@ -29,39 +30,57 @@ FORWARD_DAYS = _weekdays(FORWARD_START, FORWARD_END)
 HELDOUT_DAYS = _weekdays(HELDOUT_START, HELDOUT_END)
 
 
-def _segment(days, alpha, rng, *, te=0.13, exact=False, beta=0.0, size_beta=0.0):
+def _segment(days, alpha, rng, *, te=0.13, exact=False, beta=0.0, size_beta=0.0, value_beta=0.0):
     """A book whose daily series has annualised mean ``alpha`` and standard
-    deviation about ``te`` beside its loadings: ``beta`` on CSI 300 and
-    ``size_beta`` on size, which add their own variance.
+    deviation about ``te`` beside its loadings: ``beta`` on CSI 300,
+    ``size_beta`` on size and ``value_beta`` on value, which add their own
+    variance.
 
-    ``exact`` demeans the factors and projects the noise off the design, so
-    the segment's own annualised mean -- and its OLS intercept -- is
-    ``alpha`` to floating precision.
+    ``exact`` demeans the market and size legs and projects the noise off
+    them, so the segment's own annualised mean is ``alpha`` to floating
+    precision. The value leg comes from a generator of its own, so ``rng``
+    draws what it drew before the leg existed.
     """
 
     n = len(days)
     benchmark = rng.normal(0.0, 0.20 / SCALE, n)
     size = rng.normal(0.0, 0.10 / SCALE, n)
     noise = rng.normal(0.0, te / SCALE, n)
+    value = np.random.default_rng(n).normal(0.0, 0.08 / SCALE, n)
     if exact:
         benchmark -= benchmark.mean()
         size -= size.mean()
         design = np.column_stack([np.ones(n), benchmark, size])
         noise -= design @ np.linalg.lstsq(design, noise, rcond=None)[0]
-    strategy = alpha / TRADING_DAYS_PER_YEAR + beta * benchmark + size_beta * size + noise
-    return list(days), strategy, benchmark, size
+    strategy = (
+        alpha / TRADING_DAYS_PER_YEAR + beta * benchmark + size_beta * size + value_beta * value + noise
+    )
+    return list(days), strategy, benchmark, size, value
 
 
 def _analysis(*segments):
+    """A sidecar of ``segments``, each ``(days, strategy, benchmark, size)``
+    with ``value`` as a fifth item where the test names one; a segment that
+    names none gets a value leg of independent noise the book does not load
+    on, so the three-factor fit is defined."""
+
+    def legs(segment):
+        if len(segment) == 5:
+            return segment
+        days = segment[0]
+        noise = np.random.default_rng(len(days) + 1).normal(0.0, 0.08 / SCALE, len(days))
+        return (*segment, noise)
+
     rows = [
-        (day, value, bench, size)
-        for days, strategy, benchmark, factor in segments
-        for day, value, bench, size in zip(days, strategy, benchmark, factor)
+        row
+        for days, strategy, benchmark, size, value in map(legs, segments)
+        for row in zip(days, strategy, benchmark, size, value)
     ]
     return {
-        "strategy_daily": [[day, float(value)] for day, value, _, _ in rows],
-        "benchmark_daily": [[day, float(bench)] for day, _, bench, _ in rows],
-        "size_factor_daily": [[day, float(size)] for day, _, _, size in rows],
+        "strategy_daily": [[row[0], float(row[1])] for row in rows],
+        "benchmark_daily": [[row[0], float(row[2])] for row in rows],
+        "size_factor_daily": [[row[0], float(row[3])] for row in rows],
+        "value_factor_daily": [[row[0], float(row[4])] for row in rows],
     }
 
 
@@ -71,7 +90,7 @@ def _ruled(arguments):
     so each test judges the condition it is about."""
 
     named = {key: arguments.pop(key) for key in list(arguments) if key in ACCEPTANCE_KEYS}
-    rules = AcceptanceRules(**{"max_drawdown": 1.0, "active_max_drawdown": 1.0, **named})
+    rules = AcceptanceRules(**REQUIRED_RULES, **{"max_drawdown": 1.0, "active_max_drawdown": 1.0, **named})
     return {**arguments, "rules": rules}
 
 
@@ -121,7 +140,7 @@ def test_statistics_are_the_series_as_it_is_and_its_loadings_beside_it():
     the strategy's own residual tracking error and beta form the mandate."""
 
     rng = np.random.default_rng(11)
-    analysis = _analysis(_segment(FORWARD_DAYS, 0.07, rng, beta=0.8, size_beta=0.3))
+    analysis = _analysis(_segment(FORWARD_DAYS, 0.07, rng, beta=0.8, size_beta=0.3, value_beta=-0.2))
     stats = verdict.graded_statistics(analysis, start=FORWARD_START, end=FORWARD_END)
 
     strategy = np.array([value for _, value in analysis["strategy_daily"]])
@@ -130,6 +149,7 @@ def test_statistics_are_the_series_as_it_is_and_its_loadings_beside_it():
             np.ones(len(strategy)),
             [value for _, value in analysis["benchmark_daily"]],
             [value for _, value in analysis["size_factor_daily"]],
+            [value for _, value in analysis["value_factor_daily"]],
         ]
     )
     coefficients, residual_ss, _, _ = np.linalg.lstsq(design, strategy, rcond=None)
@@ -140,16 +160,76 @@ def test_statistics_are_the_series_as_it_is_and_its_loadings_beside_it():
     assert stats["tracking_error"] == pytest.approx(strategy.std(ddof=1) * SCALE, rel=1e-12)
     assert stats["information_ratio"] == pytest.approx(stats["plain_excess"] / stats["tracking_error"])
     # The loadings ride as a diagnostic; their variance stays in the series.
-    assert (stats["market_beta"], stats["size_beta"]) == pytest.approx(tuple(coefficients[1:]), rel=1e-9)
-    assert stats["tracking_error"] > math.sqrt(residual_ss[0] / (len(strategy) - 3)) * SCALE * 1.5
+    assert (stats["market_beta"], stats["size_beta"], stats["value_beta"]) == pytest.approx(
+        tuple(coefficients[1:]), rel=1e-9
+    )
+    assert stats["tracking_error"] > math.sqrt(residual_ss[0] / (len(strategy) - 4)) * SCALE * 1.5
     mandate = verdict._mandate(analysis, FORWARD_START, FORWARD_END)
     assert mandate == pytest.approx(
         {
-            "tracking_error": math.sqrt(residual_ss[0] / (len(strategy) - 3)) * SCALE,
+            "tracking_error": math.sqrt(residual_ss[0] / (len(strategy) - 4)) * SCALE,
             "market_beta": coefficients[1],
         },
         rel=1e-9,
     )
+
+
+def test_the_residual_statistic_recovers_a_known_alpha_and_betas():
+    """The one statistic the sealed gate grades: OLS of a daily series on the
+    three legs, its intercept annualised over its residual standard deviation
+    annualised, with the bar z(1 - alpha) / sqrt(years) beside it."""
+
+    rng = np.random.default_rng(5)
+    days = 5 * TRADING_DAYS_PER_YEAR
+    market = rng.normal(0.0, 0.20 / SCALE, days)
+    size = rng.normal(0.0, 0.10 / SCALE, days)
+    value = rng.normal(0.0, 0.08 / SCALE, days)
+    noise = rng.normal(0.0, 0.10 / SCALE, days)
+    design = np.column_stack([np.ones(days), market, size, value])
+    # Noise orthogonal to the design: the fit returns the coefficients exactly.
+    noise -= design @ np.linalg.lstsq(design, noise, rcond=None)[0]
+    active = 0.06 / TRADING_DAYS_PER_YEAR + 0.3 * market - 0.4 * size + 0.25 * value + noise
+
+    reading = verdict.residual_statistics(active, market, size, value, alpha=0.05)
+
+    sigma = math.sqrt(float(noise @ noise) / (days - 4))
+    assert reading["days"] == days and reading["years"] == pytest.approx(5.0)
+    assert reading["market_beta"] == pytest.approx(0.3, abs=1e-12)
+    assert reading["size_beta"] == pytest.approx(-0.4, abs=1e-12)
+    assert reading["value_beta"] == pytest.approx(0.25, abs=1e-12)
+    assert reading["residual_excess"] == pytest.approx(0.06, abs=1e-12)
+    assert reading["residual_tracking_error"] == pytest.approx(sigma * SCALE, rel=1e-12)
+    assert reading["residual_information_ratio"] == pytest.approx(0.06 / (sigma * SCALE), rel=1e-9)
+    assert reading["bar"] == pytest.approx(NormalDist().inv_cdf(0.95) / math.sqrt(5.0))
+    assert reading["bar"] == pytest.approx(0.7356, abs=1e-4)
+
+    # The bar follows the pinned alpha and the span's length, and nothing else.
+    assert verdict.residual_bar(1.0, 0.05) == pytest.approx(1.6449, abs=1e-4)
+    assert verdict.residual_bar(5.0, 0.025) == pytest.approx(NormalDist().inv_cdf(0.975) / math.sqrt(5.0))
+    one_year = verdict.residual_statistics(
+        active[:TRADING_DAYS_PER_YEAR],
+        market[:TRADING_DAYS_PER_YEAR],
+        size[:TRADING_DAYS_PER_YEAR],
+        value[:TRADING_DAYS_PER_YEAR],
+        alpha=0.05,
+    )
+    assert one_year["years"] == 1.0 and one_year["bar"] == pytest.approx(1.6449, abs=1e-4)
+
+    # A sidecar's graded series over a slice reads the same statistic.
+    analysis = {
+        "strategy_daily": [[f"d{index:05d}", float(item)] for index, item in enumerate(active)],
+        "benchmark_daily": [[f"d{index:05d}", float(item)] for index, item in enumerate(market)],
+        "size_factor_daily": [[f"d{index:05d}", float(item)] for index, item in enumerate(size)],
+        "value_factor_daily": [[f"d{index:05d}", float(item)] for index, item in enumerate(value)],
+    }
+    assert verdict.residual_reading(analysis, alpha=0.05) == {"series": "absolute", **reading}
+
+    with pytest.raises(ValueError, match="collinear"):
+        verdict.residual_statistics(active, market, market * 2.0, value, alpha=0.05)
+    with pytest.raises(ValueError, match="fewer than"):
+        verdict.residual_statistics(active[:5], market[:5], size[:5], value[:5], alpha=0.05)
+    with pytest.raises(ValueError, match="alpha"):
+        verdict.residual_bar(5.0, 0.0)
 
 
 def test_bootstrap_bound_is_fixed_by_the_artifact_id(monkeypatch):
@@ -427,7 +507,7 @@ def test_the_dispersion_does_not_depend_on_what_else_the_arm_validated():
             _analysis(
                 (days, strategy + alpha / TRADING_DAYS_PER_YEAR, benchmark, size)
             )
-            for alpha, (days, strategy, benchmark, size) in zip(alphas, noise, strict=True)
+            for alpha, (days, strategy, benchmark, size, _value) in zip(alphas, noise, strict=True)
         ]
 
     controls, copies = family([0.02, 0.0]), family([0.125, 0.12])
@@ -451,7 +531,7 @@ def test_the_dispersion_does_not_depend_on_what_else_the_arm_validated():
 def test_the_effective_trial_count_reads_the_correlation_of_the_trials_series():
     research = _weekdays("20210701", "20250630")
     rng = np.random.default_rng(91)
-    days, _own, benchmark, size = _segment(research, 0.0, rng)
+    days, _own, benchmark, size, _value = _segment(research, 0.0, rng)
     common = rng.normal(0.0, 0.10 / SCALE, len(days))
 
     def trial(loading, seed, own_days=days):
@@ -620,8 +700,8 @@ def test_the_graded_series_is_the_strategy_minus_its_panel():
     the strategy's own, which the panel must not move."""
     rng = np.random.default_rng(102)
     research = _weekdays("20210701", "20250630")
-    days, active, benchmark, size = _segment(research, 0.06, rng, te=0.05, beta=0.05)
-    _days, panel, _b, _s = _segment(
+    days, active, benchmark, size, _value = _segment(research, 0.06, rng, te=0.05, beta=0.05)
+    _days, panel, _b, _s, _v = _segment(
         research, 0.04, np.random.default_rng(103), beta=0.9, size_beta=0.3
     )
     # The panel rides the same factors as the book it was drawn from.
@@ -749,7 +829,7 @@ def test_the_freeze_gate_names_a_deflated_sharpe_it_cannot_compute():
     and an excess of zero does not survive the cost stress."""
 
     research = _weekdays("20210701", "20250630")
-    days, strategy, benchmark, size = _segment(research, 0.10, np.random.default_rng(116))
+    days, strategy, benchmark, size, _value = _segment(research, 0.10, np.random.default_rng(116))
     copy = _with_panel(_analysis((days, strategy, benchmark, size)), strategy)
 
     gate = _gate(copy, trials=2, full_span_validations=2)
@@ -767,7 +847,7 @@ def test_the_freeze_gate_names_a_deflated_sharpe_it_cannot_compute():
 
 def test_the_forward_mandate_and_active_drawdown_fail_at_their_boundaries():
     rng = np.random.default_rng(121)
-    days, active, benchmark, size = _segment(FORWARD_DAYS, 0.30, rng, te=0.05, beta=0.0)
+    days, active, benchmark, size, _value = _segment(FORWARD_DAYS, 0.30, rng, te=0.05, beta=0.0)
     panel = 1.0 * benchmark
     book = _with_panel(_analysis((days, active + panel, benchmark, size)), panel)
     base = _forward(book)
@@ -884,7 +964,7 @@ def test_the_freeze_cost_stress_is_the_active_excess_after_the_stressed_slippage
 
     research = _weekdays("20210701", "20250630")
     rng = np.random.default_rng(116)
-    days, active, benchmark, size = _segment(research, 0.10, rng, te=0.05, exact=True)
+    days, active, benchmark, size, _value = _segment(research, 0.10, rng, te=0.05, exact=True)
     panel = 0.03 / TRADING_DAYS_PER_YEAR + benchmark
     sidecar = _with_panel(_analysis((days, active + panel, benchmark, size)), panel)
     statistics = verdict.graded_statistics(sidecar)
@@ -983,12 +1063,12 @@ def _selection_book(rng, mean, *, days=FORWARD_DAYS):
 
 
 def _intercept(analysis, start="", end=""):
-    """The annualised intercept of the graded series on the benchmark and the
-    size factor: what a regressed grade would have read."""
+    """The annualised intercept of the graded series on the three factor
+    legs: what a regressed grade would have read."""
 
     graded, _series = verdict._graded(analysis)
     rows = verdict._regression_rows(graded, start, end)
-    return float(verdict._fit(rows)[0]) * TRADING_DAYS_PER_YEAR
+    return float(factor_ols(rows[:, 0], rows[:, 1:])[0][0]) * TRADING_DAYS_PER_YEAR
 
 
 def test_the_freeze_gate_grades_a_negative_market_loading_on_what_it_earned():
@@ -1270,9 +1350,9 @@ def test_a_stage_records_its_failures_in_the_tables_order_and_judges_nothing_tha
     }
     forward = [condition for condition in verdict.CONDITIONS if condition.stage == "forward"]
 
-    assert verdict.judge("forward", failing, thresholds, AcceptanceRules(**mandate)) == [
+    assert verdict.judge("forward", failing, thresholds, AcceptanceRules(**REQUIRED_RULES, **mandate)) == [
         c.reason for c in forward
     ]
-    assert verdict.judge("forward", failing, thresholds, AcceptanceRules()) == [
+    assert verdict.judge("forward", failing, thresholds, AcceptanceRules(**REQUIRED_RULES)) == [
         condition.reason for condition in forward if not condition.requires
     ]

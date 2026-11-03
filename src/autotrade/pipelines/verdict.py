@@ -57,9 +57,11 @@ from autotrade.environment.replay.stats import (
     plain_statistics,
 )
 from autotrade.environment.replay.style import (
+    FACTOR_SERIES,
     MIN_REGRESSION_DAYS,
     _series_pairs,
     active_analysis,
+    factor_ols,
     window_plain_excess,
 )
 
@@ -119,6 +121,7 @@ ACTIVE_DAILY_COLUMNS = (
     "active_drawdown",
     "benchmark_return",
     "size_factor_return",
+    "value_factor_return",
 )
 
 
@@ -157,74 +160,123 @@ def _strategy_returns(
     ]
 
 
-def _regression_join(
-    analysis: Mapping[str, object], start: str, end: str
-) -> list[tuple[str, float, float, float]]:
-    """``(date, strategy, benchmark, size)`` of every day of the slice that
-    carries both factors, joined exactly as ``style._factor_regression``
-    joins them."""
-
-    benchmark = dict(_series_pairs(analysis.get("benchmark_daily")))
-    size = dict(_series_pairs(analysis.get("size_factor_daily")))
-    return [
-        (date, value, benchmark[date], size[date])
-        for date, value in _strategy_returns(analysis, start, end)
-        if date in benchmark and date in size
-    ]
-
-
 def _regression_rows(
     analysis: Mapping[str, object], start: str, end: str
 ) -> np.ndarray:
-    """``(strategy, benchmark, size)`` rows of the slice (:func:`_regression_join`)."""
+    """``(strategy, market, size, value)`` rows of every day of the slice that
+    carries all three legs (``style.FACTOR_SERIES``), joined exactly as
+    ``style._factor_regression`` joins them. A sidecar written before the
+    value leg existed carries none and yields no row."""
 
-    rows = [row[1:] for row in _regression_join(analysis, start, end)]
-    return np.asarray(rows, dtype=float).reshape(-1, 3)
+    legs = [dict(_series_pairs(analysis.get(series))) for _name, series in FACTOR_SERIES]
+    rows = [
+        (value, *(leg[date] for leg in legs))
+        for date, value in _strategy_returns(analysis, start, end)
+        if all(date in leg for leg in legs)
+    ]
+    return np.asarray(rows, dtype=float).reshape(-1, 1 + len(FACTOR_SERIES))
 
 
-def _fit(rows: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Daily OLS intercept, market beta and size beta over the last two axes:
-    the two-regressor normal equations of ``style._factor_regression``."""
+def residual_bar(years: float, alpha: float) -> float:
+    """The residual IR a reading over ``years`` must reach to be significant
+    at the one-sided level ``alpha`` under the null of zero residual skill:
+    ``z(1 − alpha) / √years``. A null reading's residual IR is normal with
+    standard deviation ``1 / √years`` (an annualised IR read off ``years ×
+    TRADING_DAYS_PER_YEAR`` days): 1.645 for one year and 0.735 for five at
+    alpha 0.05."""
 
-    means = rows.mean(axis=-2)
-    centered = rows - means[..., None, :]
-    y, market, size = centered[..., 0], centered[..., 1], centered[..., 2]
-    s11 = (market * market).sum(axis=-1)
-    s22 = (size * size).sum(axis=-1)
-    s12 = (market * size).sum(axis=-1)
-    s1y = (market * y).sum(axis=-1)
-    s2y = (size * y).sum(axis=-1)
-    determinant = s11 * s22 - s12 * s12
-    if not np.all(determinant > 0):
-        raise ValueError("benchmark and size factor are collinear in the slice")
-    market_beta = (s22 * s1y - s12 * s2y) / determinant
-    size_beta = (s11 * s2y - s12 * s1y) / determinant
-    intercept = means[..., 0] - market_beta * means[..., 1] - size_beta * means[..., 2]
-    return intercept, market_beta, size_beta
+    if not (isinstance(years, (int, float)) and years > 0):
+        raise ValueError(f"years must be positive, got {years!r}")
+    if not 0 < alpha < 1:
+        raise ValueError(f"alpha must be in (0, 1), got {alpha!r}")
+    return NormalDist().inv_cdf(1.0 - alpha) / math.sqrt(years)
+
+
+def residual_statistics(
+    active: Sequence[float],
+    market: Sequence[float],
+    size: Sequence[float],
+    value: Sequence[float],
+    *,
+    alpha: float,
+) -> dict[str, float]:
+    """The factor-residual reading of one daily series: the one statistic
+    the sealed gate grades, every validation reports and the ablation
+    increment is read with.
+
+    ``active`` is the daily active series (the strategy's return minus its
+    zero-skill panel composite, ``series: active``; for an increment, the
+    nominee's minus its ablation's) and ``market``, ``size`` and ``value``
+    the three legs over the same days. OLS of the series on an intercept and
+    the legs (``style.factor_ols``) gives the three betas and the residuals;
+    the residual information ratio is the intercept annualised over the
+    residual standard deviation annualised, ``intercept × √244 / σ̂`` with σ̂
+    on n − 4 degrees of freedom. ``years`` is days / 244 and ``bar`` the
+    :func:`residual_bar` at ``alpha`` for that length. ``ValueError`` on
+    series of unequal length, fewer than ``MIN_REGRESSION_DAYS`` days,
+    collinear legs or a series the legs explain exactly.
+    """
+
+    y = np.asarray(active, dtype=float)
+    legs = np.column_stack(
+        [np.asarray(market, dtype=float), np.asarray(size, dtype=float), np.asarray(value, dtype=float)]
+    )
+    if legs.shape[0] != len(y):
+        raise ValueError("the active series and the three legs cover different days")
+    days = len(y)
+    if days < MIN_REGRESSION_DAYS:
+        raise ValueError(f"{days} day(s) carry every factor leg, fewer than {MIN_REGRESSION_DAYS}")
+    coefficients, residual = factor_ols(y, legs)
+    sigma = math.sqrt(float(residual @ residual) / (days - len(coefficients)))
+    if not sigma > 0:
+        raise ValueError("the factor legs explain the series exactly: no residual to read")
+    scale = math.sqrt(TRADING_DAYS_PER_YEAR)
+    years = days / TRADING_DAYS_PER_YEAR
+    return {
+        "days": days,
+        "years": years,
+        "residual_excess": float(coefficients[0]) * TRADING_DAYS_PER_YEAR,
+        "residual_tracking_error": sigma * scale,
+        "residual_information_ratio": float(coefficients[0]) * scale / sigma,
+        **{name: float(beta) for (name, _series), beta in zip(FACTOR_SERIES, coefficients[1:], strict=True)},
+        "bar": residual_bar(years, alpha),
+    }
+
+
+def residual_reading(
+    analysis: Mapping[str, object], *, start: str = "", end: str = "", alpha: float
+) -> dict[str, object]:
+    """:func:`residual_statistics` of one sidecar's graded series over a
+    slice (empty bounds take the whole sidecar), with ``series`` naming it:
+    the active series where the sidecar carries a panel. ``ValueError`` where
+    it cannot be read (see :func:`residual_statistics`)."""
+
+    graded, series = _graded(analysis)
+    rows = _regression_rows(graded, start, end)
+    return {"series": series, **residual_statistics(*rows.T, alpha=alpha)}
 
 
 def _loadings(analysis: Mapping[str, object], start: str, end: str) -> dict[str, float] | None:
-    """The factor regression of a span's ``strategy_daily`` on the benchmark
-    and the size factor: its two loadings and its residual tracking error
-    (n − 3 degrees of freedom, annualised by √``TRADING_DAYS_PER_YEAR``).
-    ``None`` when fewer than ``MIN_REGRESSION_DAYS`` days carry both factors
-    or they are collinear. No gate grades it: the graded series' loadings are
-    a diagnostic, the strategy's own what a tracking mandate limits."""
+    """The factor regression of a span's ``strategy_daily`` on the market,
+    size and value legs (``style.factor_ols``): its three loadings and its
+    residual tracking error (n − 4 degrees of freedom, annualised by
+    √``TRADING_DAYS_PER_YEAR``). ``None`` when fewer than
+    ``MIN_REGRESSION_DAYS`` days carry every leg or they are collinear: the
+    graded series' loadings are a diagnostic, the strategy's own what a
+    tracking mandate limits."""
 
     rows = _regression_rows(analysis, start, end)
     if len(rows) < MIN_REGRESSION_DAYS:
         return None
     try:
-        intercept, market_beta, size_beta = _fit(rows)
+        coefficients, residual = factor_ols(rows[:, 0], rows[:, 1:])
     except ValueError:
         return None
-    residual = rows[:, 0] - intercept - market_beta * rows[:, 1] - size_beta * rows[:, 2]
     return {
         "tracking_error": math.sqrt(
-            float(residual @ residual) / (len(rows) - 3) * TRADING_DAYS_PER_YEAR
+            float(residual @ residual) / (len(rows) - len(coefficients)) * TRADING_DAYS_PER_YEAR
         ),
-        "market_beta": float(market_beta),
-        "size_beta": float(size_beta),
+        **{name: float(beta) for (name, _series), beta in zip(FACTOR_SERIES, coefficients[1:], strict=True)},
     }
 
 
@@ -245,8 +297,7 @@ def _measured(
     loadings = _loadings(analysis, start, end) or {}
     return {
         **statistics,
-        "market_beta": loadings.get("market_beta"),
-        "size_beta": loadings.get("size_beta"),
+        **{name: loadings.get(name) for name, _series in FACTOR_SERIES},
     }, daily
 
 
@@ -267,8 +318,8 @@ def graded_statistics(
     ``plain_excess`` is its annualised mean, ``tracking_error`` its
     annualised standard deviation and ``information_ratio`` their ratio
     (``None`` on a flat series), as ``stats.plain_statistics`` reads them;
-    ``market_beta`` and ``size_beta`` are its loadings (:func:`_loadings`),
-    which grade nothing. An empty ``start``/``end`` takes the whole analysis.
+    ``market_beta``, ``size_beta`` and ``value_beta`` are its loadings
+    (:func:`_loadings`). An empty ``start``/``end`` takes the whole analysis.
     """
 
     start = _date(start, "start") if start else ""
@@ -355,7 +406,7 @@ def active_daily(analysis: Mapping[str, object]) -> pd.DataFrame:
     annualised standard deviation is the active IR -- its
     :func:`stats.compounded_path` (``active_cumulative`` is the equity minus
     1, ``active_drawdown`` the loss below the running peak, whose largest
-    value is the gate's ``active_max_drawdown``), and the two factors its
+    value is the ``active_max_drawdown``), and the three factor legs its
     loadings are read against. Only the composite of the panel is stored, so
     no draw's names can be read back. Without a panel every ``active_*``
     column is empty.
@@ -369,6 +420,7 @@ def active_daily(analysis: Mapping[str, object]) -> pd.DataFrame:
         ("panel_return", "panel_daily"),
         ("benchmark_return", "benchmark_daily"),
         ("size_factor_return", "size_factor_daily"),
+        ("value_factor_return", "value_factor_daily"),
     ):
         frame[column] = frame["trade_date"].map(dict(_series_pairs(analysis.get(key))))
     active = active_analysis(analysis)

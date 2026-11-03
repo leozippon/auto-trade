@@ -15,6 +15,7 @@ from autotrade.environment.replay.style import (
     _benchmark_regression,
     _factor_regression,
     _size_factor,
+    _value_factor,
     benchmark_summary_block,
     daily_returns_from_curve,
     replay_style_analysis,
@@ -22,6 +23,18 @@ from autotrade.environment.replay.style import (
     write_style_rollup,
 )
 from autotrade.pipelines.session_tools import batch_candidate_stats
+from tests.unit.acceptance_fixture import REQUIRED_RULES
+
+# Forty names make a cross-section, ordered by float cap (slot 0 smallest).
+# Twelve are cheap and twelve dear on book-to-price, each set split evenly
+# between the small and the big size legs and between the slots below and
+# above 20, so the size and the value spreads move independently of each other.
+CHEAP = frozenset({0, 1, 2, 12, 13, 14, 20, 21, 22, 28, 29, 30})
+DEAR = frozenset({3, 4, 5, 15, 16, 17, 23, 24, 25, 31, 32, 33})
+
+
+def _pb(slot: int) -> float:
+    return 0.5 if slot in CHEAP else 4.0 if slot in DEAR else 1.0
 
 
 def _replay(days: list[str], *, with_holdings: bool = True) -> ReplayResult:
@@ -93,7 +106,7 @@ def test_daily_style_uses_replay_positions_and_frozen_slot_inputs(tmp_path: Path
         benchmark_index=BENCHMARK_TS_CODE,
     )
 
-    assert payload["schema_version"] == 2 and payload["mode"] == "valid"
+    assert payload["schema_version"] == 3 and payload["mode"] == "valid"
     assert payload["benchmark_regression"]["available"] is True
     assert payload["benchmark_regression"]["n_days"] == 10
     assert payload["benchmark_regression"]["beta"] == 2.0
@@ -404,11 +417,15 @@ def _regression_inputs(tmp_path: Path, days: list[str]) -> tuple[Path, pd.DataFr
                     "ts_code": f"{slot:06d}.SZ",
                     "close": 10.0,
                     "circ_mv": 100.0 * (slot + 1),
-                    "pb": 1.0,
+                    "pb": _pb(slot),
                     "turnover_rate": 1.0,
                     # daily.parquet stores pct_chg as a decimal fraction:
-                    # +0.6% / -0.4%, not 0.6 / -0.4.
-                    "pct_chg": (0.006 if slot < 20 else -0.004) * (1 if index % 2 else -1),
+                    # +0.6% / -0.4%, not 0.6 / -0.4. The size spread runs on
+                    # another period than the market's and the cheap names
+                    # add a value spread on a third, so no two legs are
+                    # collinear.
+                    "pct_chg": (0.006 if slot < 20 else -0.004) * (1.0, 1.0, -1.0, 0.5)[index % 4]
+                    + ((0.002, -0.001, 0.0005)[index % 3] if slot in CHEAP else 0.0),
                 }
             )
     return replay_dir, pd.DataFrame(rows)
@@ -435,17 +452,19 @@ def test_the_factor_regression_reads_the_market_and_size_loadings(tmp_path: Path
     assert block["n_days"] == len(days) - 1
     assert block["market_beta"] is not None
     assert block["size_beta"] is not None
+    assert block["value_beta"] is not None
     assert set(block) == {
-        "method", "available", "reason", "n_days", "tracking_error", "market_beta", "size_beta", "r2",
+        "method", "available", "reason", "n_days", "tracking_error",
+        "market_beta", "size_beta", "value_beta", "r2",
     }
     # The method is stated with the numbers, not left to the reader.
     assert "沪深300" in block["method"] and "244" in block["method"]
     assert "前一交易日" in block["method"]
-    assert analysis["size_factor_daily"]
+    assert analysis["size_factor_daily"] and analysis["value_factor_daily"]
     compact = benchmark_summary_block(analysis)
-    assert (compact["market_beta"], compact["size_beta"], compact["tracking_error"]) == (
-        block["market_beta"], block["size_beta"], block["tracking_error"],
-    )
+    assert (
+        compact["market_beta"], compact["size_beta"], compact["value_beta"], compact["tracking_error"]
+    ) == (block["market_beta"], block["size_beta"], block["value_beta"], block["tracking_error"])
 
 
 def test_the_agent_reads_the_size_loading_beside_the_tilt(tmp_path: Path):
@@ -503,13 +522,14 @@ def test_size_beta_is_measured_on_the_decimal_pct_chg_scale(tmp_path: Path):
     load, on the same scale as the strategy and benchmark returns; the size
     factor used to be divided by 100 again, which left ``size_beta`` inflated
     100x (live windows reported 36-91 for what is really 0.36-0.91). Daily
-    returns are built here as ``alpha + 0.8 * market + 0.5 * smb`` exactly, so
-    every coefficient is known in advance.
+    returns are built here as ``alpha + 0.8 * market + 0.5 * smb + 0.3 * hml``
+    exactly, so every coefficient is known in advance.
     """
     days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2024-01-02", periods=24)]
     market_percent = [0.5, -0.3, 0.8, -0.6, 0.2, -0.1]
-    # A different period, so market and size are not collinear.
+    # Different periods, so market, size and value are not collinear.
     smb = [0.004, -0.002, -0.003, 0.001]
+    hml = [0.002, -0.001, 0.003, -0.002, 0.0005]
     alpha_daily = 0.0002
 
     replay_dir = tmp_path / "replay"
@@ -528,7 +548,9 @@ def test_size_beta_is_measured_on_the_decimal_pct_chg_scale(tmp_path: Path):
     ).to_parquet(replay_dir / "macro.parquet", index=False)
 
     # 40 names ordered by circ_mv: the small 30% all move by the day's spread
-    # and the big 30% do not, so small-minus-big is exactly ``smb``.
+    # and the big 30% do not, so small-minus-big is exactly ``smb``; the cheap
+    # names alone also move by the value spread, so high-minus-low
+    # book-to-price is exactly ``hml``.
     daily = pd.DataFrame(
         [
             {
@@ -536,9 +558,10 @@ def test_size_beta_is_measured_on_the_decimal_pct_chg_scale(tmp_path: Path):
                 "ts_code": f"{slot:06d}.SZ",
                 "close": 10.0,
                 "circ_mv": 100.0 * (slot + 1),
-                "pb": 1.0,
+                "pb": _pb(slot),
                 "turnover_rate": 1.0,
-                "pct_chg": smb[index % len(smb)] if slot < 20 else 0.0,
+                "pct_chg": (smb[index % len(smb)] if slot < 20 else 0.0)
+                + (hml[index % len(hml)] if slot in CHEAP else 0.0),
             }
             for index, day in enumerate(days)
             for slot in range(40)
@@ -549,7 +572,9 @@ def test_size_beta_is_measured_on_the_decimal_pct_chg_scale(tmp_path: Path):
     curve = []
     for index, day in enumerate(days):
         market = market_percent[index % len(market_percent)] / 100.0
-        equity *= 1.0 + alpha_daily + 0.8 * market + 0.5 * smb[index % len(smb)]
+        equity *= (
+            1.0 + alpha_daily + 0.8 * market + 0.5 * smb[index % len(smb)] + 0.3 * hml[index % len(hml)]
+        )
         curve.append(
             {
                 "trade_date": day,
@@ -572,11 +597,13 @@ def test_size_beta_is_measured_on_the_decimal_pct_chg_scale(tmp_path: Path):
     # The published factor series is the raw decimal spread, not a percent. It
     # starts on the second day: the legs are formed on the prior day's cap.
     assert analysis["size_factor_daily"][0] == [days[1], pytest.approx(smb[1])]
+    assert analysis["value_factor_daily"][0] == [days[1], pytest.approx(hml[1])]
 
     block = analysis["factor_regression"]
     assert block["available"] is True and block["n_days"] == len(days) - 1
     assert block["market_beta"] == 0.8
     assert block["size_beta"] == 0.5
+    assert block["value_beta"] == 0.3
     assert block["r2"] == 1.0
     assert block["tracking_error"] == 0.0
 
@@ -586,7 +613,10 @@ def test_size_beta_is_measured_on_the_decimal_pct_chg_scale(tmp_path: Path):
     strategy = [(str(date), float(value)) for date, value in analysis["strategy_daily"]]
     benchmark = {str(date): float(value) for date, value in analysis["benchmark_daily"]}
     size = {str(date): float(value) for date, value in analysis["size_factor_daily"]}
-    rescaled = _factor_regression(strategy, benchmark, {k: v / 100.0 for k, v in size.items()})
+    value = {str(date): float(item) for date, item in analysis["value_factor_daily"]}
+    rescaled = _factor_regression(
+        strategy, benchmark, {k: v / 100.0 for k, v in size.items()}, value
+    )
     assert rescaled["size_beta"] == pytest.approx(50.0)
     assert rescaled["market_beta"] == block["market_beta"]
     assert rescaled["r2"] == block["r2"]
@@ -627,6 +657,34 @@ def test_size_legs_are_formed_on_the_prior_days_cap():
     assert _size_factor(shuffled) == _size_factor(pd.DataFrame(rows))
 
 
+def test_value_legs_are_formed_on_the_prior_days_book_to_price():
+    """High minus low book-to-price (1 / pb), sorted on the previous day's pb
+    as the size legs are on the previous day's cap, and a name whose pb is
+    not positive has no book-to-price and sits out."""
+
+    rows = []
+    for slot in range(40):
+        code = f"{slot:06d}.SZ"
+        # pb 1..40: slots 0..11 are the cheap (high book-to-price) leg and
+        # 28..39 the dear one; the cheapest name re-rates on day two.
+        pb = float(slot + 1)
+        rows.append({"ts_code": code, "trade_date": "20240102", "pb": pb, "pct_chg": 0.0})
+        gain = 0.5 if slot == 0 else 0.0
+        rows.append(
+            {"ts_code": code, "trade_date": "20240103", "pb": pb * (1.0 + gain), "pct_chg": gain}
+        )
+    factor = _value_factor(pd.DataFrame(rows))
+    assert list(factor) == ["20240103"]
+    # Sorted on day one's pb the winner stays in the cheap leg of twelve.
+    assert factor["20240103"] == pytest.approx(0.5 / 12)
+
+    # A negative-book name is no cheapest name: it never enters a leg.
+    loss = [{**row, "pb": -3.0, "pct_chg": 9.0} for row in rows if row["ts_code"] == "000039.SZ"]
+    kept = [row for row in rows if row["ts_code"] != "000039.SZ"]
+    assert "20240103" in _value_factor(pd.DataFrame([*kept, *loss]))
+    assert _value_factor(pd.DataFrame([*kept, *loss]))["20240103"] == pytest.approx(0.5 / 12)
+
+
 @pytest.mark.parametrize("exposure", [0.0, 0.2])
 def test_cash_and_a_constant_low_beta_book_load_on_the_market_alone(exposure: float):
     """A book that only scales the market loads on it by its exposure and on
@@ -636,12 +694,14 @@ def test_cash_and_a_constant_low_beta_book_load_on_the_market_alone(exposure: fl
     dates = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2024-01-02", periods=24)]
     market = {day: (-0.012, 0.004, -0.006)[i % 3] for i, day in enumerate(dates)}
     size = {day: (0.005, -0.003, 0.002, -0.002)[i % 4] for i, day in enumerate(dates)}
+    value = {day: (0.002, -0.004, 0.001, 0.003, -0.002)[i % 5] for i, day in enumerate(dates)}
     strategy = [(day, exposure * market[day]) for day in dates]
-    block = _factor_regression(strategy, market, size)
+    block = _factor_regression(strategy, market, size, value)
     assert block["available"] is True
     assert block["tracking_error"] == 0.0
     assert block["market_beta"] == exposure
     assert block["size_beta"] == 0.0
+    assert block["value_beta"] == 0.0
     # The raw benchmark excess is positive solely because less capital was exposed.
     raw = 1.0
     for _, value in strategy:
@@ -698,7 +758,7 @@ def test_the_sidecar_carries_the_panel_and_the_active_figures_the_verdict_grades
     daily = pd.DataFrame(
         [
             {"trade_date": day, "ts_code": f"{slot:06d}.SZ", "close": 10.0,
-             "circ_mv": 100.0 * (slot + 1), "pb": 1.0, "turnover_rate": 1.0,
+             "circ_mv": 100.0 * (slot + 1), "pb": _pb(slot), "turnover_rate": 1.0,
              "pct_chg": float(rng.normal(0.0, 0.01))}
             for day in days
             for slot in range(40)
@@ -747,7 +807,7 @@ def test_the_sidecar_carries_the_panel_and_the_active_figures_the_verdict_grades
     assert compact["panel_draws"] == 20
     # The active drawdown the freeze gate holds to its limit is the one the
     # Agent reads: two sessions rebuilt it from proxies because no row had it.
-    gate = freeze_gate(graded, rules=AcceptanceRules(), trials=1, full_span_validations=2, summary={})
+    gate = freeze_gate(graded, rules=AcceptanceRules(**REQUIRED_RULES), trials=1, full_span_validations=2, summary={})
     assert compact["active_max_drawdown"] == gate["active_max_drawdown"]
     active_curve = np.concatenate(
         [[1.0], np.cumprod(1.0 + np.asarray(

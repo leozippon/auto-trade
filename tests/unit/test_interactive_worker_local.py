@@ -40,6 +40,7 @@ from autotrade.pipelines.worker import (
     load_worker_options,
 )
 from autotrade.webui.manager import ExperimentManager
+from tests.unit.acceptance_fixture import REQUIRED_RULES
 from tests.unit.gpu_probe import stubbed_gpu_probe
 
 
@@ -82,6 +83,7 @@ def _experiment(
                 "inference_time": "08:30",
                 "initial_cash": 100_000,
                 "max_replay_years": max_replay_years,
+                **REQUIRED_RULES,
             }
         ),
         encoding="utf-8",

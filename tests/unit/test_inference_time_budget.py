@@ -54,6 +54,7 @@ from autotrade.pipelines.session_tools import (
     BatchValidateTool,
     SessionValidations,
 )
+from tests.unit.acceptance_fixture import RULES
 
 from .fixtures_sandbox import PassingModificationCheck
 from .test_batch_validate import _write_style_sidecar
@@ -151,6 +152,7 @@ def _research_request() -> ResearchSessionRequest:
         deadline_seconds=2.0,
         record_failed_attempts=False,
         benchmark_index=DEFAULT_BENCHMARK_INDEX,
+        acceptance_rules=RULES.to_record(),
     )
 
 

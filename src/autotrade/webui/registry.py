@@ -43,7 +43,11 @@ from autotrade.environment.tools.report_issue import (
 )
 from autotrade.pipelines.agent_inbox import INBOX_NAME, inbox_public_view
 from autotrade.pipelines.calendar import FULL_SPAN
-from autotrade.pipelines.config import AcceptanceRules, acceptance_for, rolling_default
+from autotrade.pipelines.config import (
+    acceptance_default,
+    acceptance_for,
+    rolling_default,
+)
 from autotrade.pipelines.experiment import freeze_gate_for, validation_statistics
 from autotrade.pipelines.hitl_state import (
     ARCHIVED_NAME,
@@ -851,9 +855,13 @@ def resolve_experiment_dir(root: Path, experiment_id: str) -> Path:
 
 
 def _cost_stress_multiplier(directory: Path) -> float:
-    """The arm's cost-stress multiplier as its worker resolves it."""
+    """The arm's cost-stress multiplier as its worker resolves it: the value
+    its params name, else the rule's default. Read alone, without the rest
+    of the rules, so an arm stamped before a rule became required still
+    lists."""
 
-    return acceptance_for(read_json(directory / HITL_DIR_NAME / PARAMS_NAME)).cost_stress_multiplier
+    value = read_json(directory / HITL_DIR_NAME / PARAMS_NAME).get("cost_stress_multiplier")
+    return float(value if value is not None else acceptance_default("cost_stress_multiplier"))  # type: ignore[arg-type]
 
 
 def _step_view(row: Mapping[str, object], multiplier: float) -> dict[str, object]:
@@ -939,7 +947,7 @@ def _live_candidate(
             steps,
             best,
             experiment_dir=directory,
-            acceptance=AcceptanceRules(),
+            acceptance=acceptance_for(read_json(directory / HITL_DIR_NAME / PARAMS_NAME)),
         )
     except (OSError, ValueError):
         gate = {}

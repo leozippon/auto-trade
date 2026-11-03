@@ -25,7 +25,7 @@ from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.llm import MODEL_CHOICES
 from autotrade.environment.runtime import write_json_atomic
 from autotrade.pipelines.calendar import GEOMETRY_PARAMETERS
-from autotrade.pipelines.config import AcceptanceRules
+from autotrade.pipelines.config import REQUIRED_ACCEPTANCE_KEYS, AcceptanceRules
 from autotrade.pipelines.hitl_state import (
     WEB_CREATE_DEFAULTS,
     select_gpus,
@@ -303,12 +303,21 @@ def add_acceptance_arguments(parser: argparse.ArgumentParser) -> None:
 
     Unset takes the default of ``autotrade.pipelines.config.acceptance_for``:
     a tracking mandate only where ``--tracking-error-cap`` is given, drawdowns
-    0.45 / 0.30 unless named and the statistical bars at today's constants.
+    0.45 / 0.30 unless named and the statistical bars at today's constants. A
+    rule without a default (``REQUIRED_ACCEPTANCE_KEYS``) takes the console's
+    creation value, as a console-created arm does, and is a required flag
+    where the console has none.
     """
     for rule in fields(AcceptanceRules):
         kind = int if isinstance(rule.default, int) else float
+        required = rule.name in REQUIRED_ACCEPTANCE_KEYS
+        default = WEB_CREATE_DEFAULTS[rule.name] if required else None
         parser.add_argument(
-            f"--{rule.name.replace('_', '-')}", type=kind, default=None, help=rule.metadata["help"]
+            f"--{rule.name.replace('_', '-')}",
+            type=kind,
+            default=default,
+            required=required and default is None,
+            help=rule.metadata["help"],
         )
 
 

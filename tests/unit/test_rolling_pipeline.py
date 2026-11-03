@@ -53,6 +53,7 @@ from autotrade.pipelines.ledger import (
     paper_candidate,
     research_over,
 )
+from tests.unit.acceptance_fixture import REQUIRED_RULES, RULES
 
 GEOMETRY = ResearchGeometry(
     research_start="20220701",
@@ -174,6 +175,13 @@ def _write_result(directory: Path, days: list[str], *, alpha: float, seed: int) 
                 "strategy_daily": [[day, float(value)] for day, value in zip(days, strategy)],
                 "benchmark_daily": [[day, float(value)] for day, value in zip(days, benchmark)],
                 "size_factor_daily": [[day, float(value)] for day, value in zip(days, size)],
+                # A value leg the book does not load on, from its own draws.
+                "value_factor_daily": [
+                    [day, float(value)]
+                    for day, value in zip(
+                        days, np.random.default_rng(seed + 10_000).normal(0.0, 0.003, len(days))
+                    )
+                ],
                 # The zero-skill panel: random names on the book's skeleton,
                 # riding the market as the book does.
                 "panel_daily": [[day, float(0.9 * value)] for day, value in zip(days, benchmark)],
@@ -225,13 +233,13 @@ class Developer:
         )
 
 
-_DEFAULT = RollingExperimentConfig(experiment_id="arm", experiments_root=Path("unused"))
+_DEFAULT = RollingExperimentConfig(experiment_id="arm", experiments_root=Path("unused"), acceptance=RULES)
 CONFIG_SCHEDULE = _DEFAULT.schedule
 CONFIG_PROFILE = _DEFAULT.broker_profile
 # A mandated arm end to end. The operator named a tracking_error_cap at
 # creation, which is the only thing that turns the mandate on; a blank beta
 # band is filled, drawdowns stay the rules' own 0.45 / 0.30.
-CONFIG_ACCEPTANCE = acceptance_for({"tracking_error_cap": 0.08})
+CONFIG_ACCEPTANCE = acceptance_for({**REQUIRED_RULES, "tracking_error_cap": 0.08})
 
 
 def _pipeline(
@@ -959,7 +967,7 @@ def test_an_unreadable_run_marker_becomes_one_attempt_failed_and_is_cleared(tmp_
 
 def test_session_budgets_honor_nondefault_deadline_grace(tmp_path: Path):
     config = replace(
-        RollingExperimentConfig(experiment_id="arm", experiments_root=tmp_path),
+        RollingExperimentConfig(experiment_id="arm", experiments_root=tmp_path, acceptance=RULES),
         max_research_minutes=60,
         deadline_grace_minutes=5,
     )

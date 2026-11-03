@@ -946,7 +946,9 @@ def test_an_arm_is_tracked_only_when_it_names_a_tracking_error_cap() -> None:
     assert [rnd.request_params("large")[key] for key in optional] == [None] * len(optional)
     # The account decides nothing: two arms an order of magnitude apart, both
     # silent about the mandate, are judged by exactly the same rules.
-    assert rules("large") == rules("small") == acceptance_for({}).to_record()
+    assert rules("large") == rules("small") == acceptance_for(
+        {"alpha": WEB_CREATE_DEFAULTS["alpha"]}
+    ).to_record()
     tracked = rules("tracked")
     assert (tracked["tracking_error_cap"], tracked["beta_min"], tracked["beta_max"]) == (
         0.08,

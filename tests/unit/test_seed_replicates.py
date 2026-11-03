@@ -33,6 +33,7 @@ from autotrade.pipelines.ledger import (
     experiment_verdict,
     forward_record,
 )
+from tests.unit.acceptance_fixture import REQUIRED_RULES
 from tests.unit.test_rolling_pipeline import (
     CONFIG_PROFILE,
     CONFIG_SCHEDULE,
@@ -170,7 +171,7 @@ def _arm(tmp_path: Path, candidates, *, nominee=0, replicates=(), deterministic=
         experiment_id="arm",
         experiments_root=tmp_path / "experiments",
         geometry=GEOMETRY,
-        acceptance=acceptance_for({}),
+        acceptance=acceptance_for(REQUIRED_RULES),
     )
     store = FilesystemArtifactStore(config.experiment_dir / "artifacts" / "strategy")
     evaluator = SeedEvaluator(config.experiment_dir / "artifacts" / "results", **replays)

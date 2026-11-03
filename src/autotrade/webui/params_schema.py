@@ -25,7 +25,7 @@ from autotrade.environment.llm.model_profiles import LLM_KEYS, MODEL_CHOICES
 from autotrade.pipelines.config import (
     BATCH_VALIDATE_MAX_CANDIDATES,
     MANDATED_DEFAULTS,
-    AcceptanceRules,
+    acceptance_default,
 )
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
 from autotrade.pipelines.skills import (
@@ -468,6 +468,13 @@ _FIELDS: list[dict[str, object]] = [
         "help": "定版检验与样本外验收裁决的成本压力：研究期与前推段的主动超额在滑点放大到该倍数后仍须为正（按各段自己的换手定价）。",
     },
     {
+        "key": "alpha",
+        "group": "预算与验收",
+        "label": "封存检验显著性水平",
+        "type": "float",
+        "help": "封存年份上残差信息比率的单侧显著性水平，须在 (0, 1)；门槛为 z(1−α)/√年数。全项目共用一个值，各轮的封存读数才能放在一起比。",
+    },
+    {
         "key": "min_active_ir",
         "group": "预算与验收",
         "label": "定版检验最低主动信息比率",
@@ -720,7 +727,7 @@ def parameter_schema() -> dict[str, object]:
         # drawdowns keep a static placeholder and are not in this map.
         "acceptance_defaults": {
             "mandated": dict(MANDATED_DEFAULTS),
-            "unmandated": {key: getattr(AcceptanceRules(), key) for key in MANDATED_DEFAULTS},
+            "unmandated": {key: acceptance_default(key) for key in MANDATED_DEFAULTS},
         },
         "groups": [{"name": name, "fields": entries} for name, entries in groups.items() if entries],
     }

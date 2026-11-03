@@ -40,6 +40,7 @@ from autotrade.pipelines.config import (
 from autotrade.pipelines.hitl_state import build_session_plan
 from autotrade.pipelines.research_session import LINEAGE_NOTE
 from autotrade.webui.prompt_preview import RUNTIME_PLACEHOLDER, build_prompt_preview
+from tests.unit.acceptance_fixture import REQUIRED_RULES
 
 SESSION_KEY = "research"
 
@@ -120,6 +121,7 @@ def _experiment(tmp_path: Path, **overrides: object) -> tuple[Path, Path]:
         "include_text": False,
         "include_intraday": False,
         "gpu_count": 0,
+        **REQUIRED_RULES,
     }
     params.update(overrides)
     (hitl / "params.json").write_text(json.dumps(params), encoding="utf-8")
