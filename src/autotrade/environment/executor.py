@@ -36,6 +36,14 @@ from .strategy import (
     _require_cn_datetime,
 )
 from .strategy_loader import load_strategy_module, validate_strategy_package
+from .strategy_worker import (
+    CALL_REPLIES,
+    CLOSE_REQUEST,
+    ERROR_REPLIES,
+    ERROR_REPLY,
+    PROTOCOL_ERROR_REPLY,
+    RESOURCE_KEYS,
+)
 
 if TYPE_CHECKING:
     from .tools.base import CommandResult
@@ -51,10 +59,6 @@ _PROCESS_STOP_TIMEOUT_SECONDS = 2.0
 # *before* reading anything is its import failure, which carries no sequence —
 # that is how a dead worker is told apart from a ready one.
 _READY_SEQUENCE = -1
-# The worker's two failure replies. Both may arrive without a sequence (an
-# import failure before the first read, a line the worker could not parse at
-# all), so neither is held to the sequence check that every other message is.
-_WORKER_ERROR_TYPES = frozenset({"error", "protocol_error"})
 # What ``docker run`` reports when the container's main process was SIGKILLed.
 # With swap pinned to the memory cap (``SandboxSpec.memory``) that is what
 # the container's own memory boundary looks like from here.
@@ -171,12 +175,6 @@ def gpu_contended(exc: BaseException) -> bool:
 _STRATEGY_RESOURCES = "strategy_resources"
 
 
-# The figures a worker reads off its own container with every answer
-# (``strategy_worker.container_resources``), under the keys the host's own
-# monitor reports them in.
-_WORKER_RESOURCE_KEYS = ("peak_memory_bytes", "memory_limit_bytes", "peak_gpu_memory_bytes")
-
-
 def _worker_resources(value: object) -> dict[str, int]:
     """The well-formed part of a worker's ``resources`` reading.
 
@@ -189,7 +187,7 @@ def _worker_resources(value: object) -> dict[str, int]:
         return {}
     return {
         name: number
-        for name in _WORKER_RESOURCE_KEYS
+        for name in RESOURCE_KEYS
         if isinstance(number := value.get(name), int)
         and not isinstance(number, bool)
         and number >= 0
@@ -594,7 +592,7 @@ class DockerStrategyExecutor:
         label = "strategy fit" if kind == "fit" else "strategy inference"
         # The message a deadline miss reports, read by _write/_read_line.
         self._active_limit = f"{label} exceeded {timeout_seconds:g}s"
-        expected = "fitted" if kind == "fit" else "orders"
+        expected = CALL_REPLIES[kind]
         consumed = 0
         try:
             # Materializing and validating the request is the host's own work on
@@ -616,7 +614,10 @@ class DockerStrategyExecutor:
                     )
                 message_type = message.get("type")
                 response_sequence = message.get("sequence")
-                if (message_type not in _WORKER_ERROR_TYPES or "sequence" in message) and (
+                # The worker's two failure replies may arrive without a sequence
+                # (an import failure before the first read, a line it could not
+                # parse at all), so neither is held to the sequence check.
+                if (message_type not in ERROR_REPLIES or "sequence" in message) and (
                     isinstance(response_sequence, bool)
                     or not isinstance(response_sequence, int)
                     or response_sequence != sequence
@@ -635,7 +636,7 @@ class DockerStrategyExecutor:
                     self._transport_table = call.bar_table
                     self._transport_last_available_at = last_available_at
                     return message.get("orders")
-                if message_type == "protocol_error":
+                if message_type == PROTOCOL_ERROR_REPLY:
                     # The worker could not speak to the message this host sent
                     # it. That measures the environment exactly as a timeout
                     # does, so the replay year is refunded rather than charged
@@ -645,7 +646,7 @@ class DockerStrategyExecutor:
                         f"Docker {label} failed: strategy worker rejected the host "
                         f"protocol: {detail}"
                     )
-                if message_type == "error":
+                if message_type == ERROR_REPLY:
                     # The worker's reply to a call whose strategy code raised.
                     text = str(message.get("error") or "strategy worker failed")
                     contention = gpu_memory_contention(text) if self.gpu_indices else None
@@ -794,7 +795,7 @@ class DockerStrategyExecutor:
                 try:
                     self._write(
                         process.stdin,
-                        {"type": "close"},
+                        {"type": CLOSE_REQUEST},
                         time.monotonic() + _PROCESS_STOP_TIMEOUT_SECONDS,
                     )
                 except (BrokenPipeError, OSError):

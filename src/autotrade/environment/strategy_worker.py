@@ -24,6 +24,48 @@ class WorkerProtocolError(RuntimeError):
     pass
 
 
+# The JSON-lines protocol between the host (``executor.DockerStrategyExecutor``)
+# and this worker. The host imports these names, so both ends speak one
+# definition; they live here because this module runs inside the sandbox image,
+# where no other host module exists.
+#
+# A request: ``type`` (a key of ``CALL_REPLIES``), its ``sequence``, the bar
+# stream's ``reset``/``base_count``/``total_count``, the decision ``context``
+# (``CONTEXT_KEYS``) and the appended ``bars``. ``CLOSE_REQUEST`` ends the
+# worker; any other type is refused, which is what the host's readiness probe
+# relies on.
+REQUEST_KEYS = frozenset({"type", "sequence", "reset", "base_count", "total_count", "context", "bars"})
+CONTEXT_KEYS = frozenset(
+    {
+        "inference_at",
+        "account",
+        "snapshot_dir",
+        "asof_dir",
+        "asof_version",
+        "state_dir",
+        "models_dir",
+        "pretrained_dir",
+    }
+)
+CLOSE_REQUEST = "close"
+# ``execute`` runs generate_orders and answers ``orders``; ``fit`` runs the
+# optional fit entrypoint over the same context shape and answers ``fitted``.
+CALL_REPLIES = {"execute": "orders", "fit": "fitted"}
+# The two failure replies. ``error``: the strategy's own code raised (or its
+# module failed to import); ``protocol_error``: a message this worker cannot
+# speak to, which the host built.
+ERROR_REPLY = "error"
+PROTOCOL_ERROR_REPLY = "protocol_error"
+ERROR_REPLIES = frozenset({ERROR_REPLY, PROTOCOL_ERROR_REPLY})
+# What every reply carries under ``resources``: this container's memory peak and
+# ceiling and the strategy's torch allocator peak, under the keys the host's
+# own monitor reports them in.
+PEAK_MEMORY_BYTES = "peak_memory_bytes"
+MEMORY_LIMIT_BYTES = "memory_limit_bytes"
+PEAK_GPU_MEMORY_BYTES = "peak_gpu_memory_bytes"
+RESOURCE_KEYS = (PEAK_MEMORY_BYTES, MEMORY_LIMIT_BYTES, PEAK_GPU_MEMORY_BYTES)
+
+
 # The container's own cgroup, as the container sees it. The host cannot always
 # read it from outside (a Docker daemon in another PID namespace exposes none),
 # but the container always can, so every answer carries this reading.
@@ -50,14 +92,14 @@ def container_resources() -> dict[str, int]:
         peak = _cgroup_int(peak_name)
         if peak is None:
             continue
-        readings["peak_memory_bytes"] = peak
+        readings[PEAK_MEMORY_BYTES] = peak
         limit = _cgroup_int(limit_name)
         if limit is not None:
-            readings["memory_limit_bytes"] = limit
+            readings[MEMORY_LIMIT_BYTES] = limit
         break
     gpu = _torch_reserved_peak()
     if gpu is not None:
-        readings["peak_gpu_memory_bytes"] = gpu
+        readings[PEAK_GPU_MEMORY_BYTES] = gpu
     return readings
 
 
@@ -119,30 +161,6 @@ class Protocol:
         self._output.flush()
 
 
-_EXECUTE_KEYS = {
-    "type",
-    "sequence",
-    "reset",
-    "base_count",
-    "total_count",
-    "context",
-    "bars",
-}
-_CONTEXT_KEYS = {
-    "inference_at",
-    "account",
-    "snapshot_dir",
-    "asof_dir",
-    "asof_version",
-    "state_dir",
-    "models_dir",
-    "pretrained_dir",
-}
-# ``execute`` runs generate_orders and answers ``orders``; ``fit`` runs the
-# optional fit entrypoint over the same context shape and answers ``fitted``.
-_CALL_KINDS = {"execute": "orders", "fit": "fitted"}
-
-
 class BarStream:
     """Worker-owned append-only bars, independent of strategy module state."""
 
@@ -155,9 +173,9 @@ class BarStream:
         self._inference_at: datetime | None = None
 
     def context(self, message: Mapping[str, object]) -> StrategyContext:
-        if set(message) != _EXECUTE_KEYS:
+        if set(message) != REQUEST_KEYS:
             raise WorkerProtocolError("execute message has missing or unsupported fields")
-        if message.get("type") not in _CALL_KINDS:
+        if message.get("type") not in CALL_REPLIES:
             raise WorkerProtocolError("expected execute or fit message")
         sequence = _integer(message.get("sequence"), "sequence")
         base_count = _integer(message.get("base_count"), "base_count")
@@ -181,7 +199,7 @@ class BarStream:
             previous_inference = self._inference_at
 
         raw_context = message.get("context")
-        if not isinstance(raw_context, dict) or set(raw_context) != _CONTEXT_KEYS:
+        if not isinstance(raw_context, dict) or set(raw_context) != CONTEXT_KEYS:
             raise WorkerProtocolError("execute context has missing or unsupported fields")
         inference_at = _parse_datetime(raw_context.get("inference_at"), "inference_at")
         if previous_inference is not None and inference_at <= previous_inference:
@@ -236,16 +254,16 @@ def run(strategy_path: str | Path) -> int:
         # The only message written before the first request is read, and the
         # only one that carries no ``sequence``: that is how the host's
         # readiness handshake tells a dead worker from a running one.
-        protocol.write({"type": "error", "error": f"strategy import failed: {exc}"})
+        protocol.write({"type": ERROR_REPLY, "error": f"strategy import failed: {exc}"})
         return 1
     while True:
         message: dict[str, object] | None = None
         try:
             message = protocol.read()
-            if message is None or message.get("type") == "close":
+            if message is None or message.get("type") == CLOSE_REQUEST:
                 return 0
             kind = message.get("type")
-            if kind not in _CALL_KINDS:
+            if kind not in CALL_REPLIES:
                 # Reaching this line already proves the module import finished,
                 # so the host probes readiness with an unknown message type and
                 # reads the echoed sequence out of the error below.
@@ -262,7 +280,7 @@ def run(strategy_path: str | Path) -> int:
                     response = {"orders": strategy.generate_orders(context)}
             protocol.write(
                 {
-                    "type": _CALL_KINDS[kind],
+                    "type": CALL_REPLIES[kind],
                     "sequence": sequence,
                     **response,
                     "resources": container_resources(),
@@ -277,7 +295,7 @@ def run(strategy_path: str | Path) -> int:
             # charging the second one to the candidate costs it a replay year
             # for a failure it did not cause.
             error: dict[str, object] = {
-                "type": "protocol_error" if isinstance(exc, WorkerProtocolError) else "error",
+                "type": PROTOCOL_ERROR_REPLY if isinstance(exc, WorkerProtocolError) else ERROR_REPLY,
                 "error": str(exc),
                 "resources": container_resources(),
             }
