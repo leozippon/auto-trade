@@ -13,6 +13,7 @@ from bisect import bisect_right
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from enum import StrEnum
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -532,6 +533,36 @@ OFFICIAL_LATEST_2230 = AvailabilityRule("22:30:00", "official_latest_2230_from:t
 OFFICIAL_16 = AvailabilityRule("16:00:00", "official_16_from:trade_date")
 
 
+class FetchStrategy(StrEnum):
+    """How a dataset's requests cover its history (one request per trade
+    date, per report period, per month window, ...). The download and audit
+    code of the spec's family dispatches on it, and an audit report records
+    it by value."""
+
+    # The per-trade-date daily family, whose one way needs no name.
+    DAILY_FAMILY = ""
+    TRADE_DATE = "trade_date"
+    TRADE_DATE_BY_TAG = "trade_date_by_tag"
+    TRADE_DATE_BY_LIMIT_TYPE = "trade_date_by_limit_type"
+    TRADE_DATE_BY_MARKET = "trade_date_by_market"
+    TRADE_DATE_BY_MARKET_HOT_TYPE = "trade_date_by_market_hot_type"
+    PERIOD = "period"
+    ANN_MONTH = "ann_month"
+    TS_CODE = "ts_code"
+    DAY = "day"
+    RANGE_MONTH = "range_month"
+    TIME_RANGE_MONTH = "time_range_month"
+    NEWS_SRC_DAY = "news_src_day"
+    NEWS_SRC_MONTH = "news_src_month"
+    MONTH_LOOP = "month_loop"
+    MONTH_ONCE = "month_once"
+    QUARTER_ONCE = "quarter_once"
+    DATE_YEAR = "date_year"
+    DATE_YEAR_BY_TS_CODE = "date_year_by_ts_code"
+    STATIC_FULL = "static_full"
+    ECO_CAL_MONTH = "eco_cal_month"
+
+
 @dataclass(frozen=True)
 class DatasetSpec:
     """How one vendor dataset is fetched, keyed and audited.
@@ -544,9 +575,7 @@ class DatasetSpec:
     """
 
     api_name: str
-    # The fetch strategy (``trade_date``, ``period``, ``range_month``, ...);
-    # empty for the per-trade-date daily family, which has one.
-    strategy: str = ""
+    strategy: FetchStrategy = FetchStrategy.DAILY_FAMILY
     key_columns: tuple[str, ...] = ("trade_date", "ts_code")
     fields: str = ""
     # Measured per-call cap for sources that silently truncate large requests
@@ -605,6 +634,11 @@ class DatasetSpec:
     # days had passed, and the 2026-06 top-10 tables held 444 of 59,204 rows.
     report_lag_days: int = 0
 
+    def __post_init__(self) -> None:
+        # An undeclared strategy is refused when the registry is built, not
+        # at the first download or audit dispatch that reaches it.
+        object.__setattr__(self, "strategy", FetchStrategy(self.strategy))
+
     def loop_start_date(self, value: str) -> str:
         if self.loop_start_dates:
             if len(self.loop_start_dates) != len(self.loop_values):
@@ -619,17 +653,17 @@ class DatasetSpec:
 FUNDAMENTAL_SPECS = {
     "income_vip": DatasetSpec(
         api_name="income_vip",
-        strategy="period",
+        strategy=FetchStrategy.PERIOD,
         key_columns=("ts_code", "ann_date", "f_ann_date", "end_date", "report_type", "comp_type", "end_type"),
     ),
     "balancesheet_vip": DatasetSpec(
         api_name="balancesheet_vip",
-        strategy="period",
+        strategy=FetchStrategy.PERIOD,
         key_columns=("ts_code", "ann_date", "f_ann_date", "end_date", "report_type", "comp_type", "end_type"),
     ),
     "cashflow_vip": DatasetSpec(
         api_name="cashflow_vip",
-        strategy="period",
+        strategy=FetchStrategy.PERIOD,
         key_columns=("ts_code", "ann_date", "f_ann_date", "end_date", "report_type", "comp_type", "end_type"),
         # Measured per-call cap (probed 2026-08-10): a 7,000-row request
         # returns at most 6,400 rows, a silently truncated "short" page that
@@ -640,37 +674,37 @@ FUNDAMENTAL_SPECS = {
     ),
     "fina_indicator_vip": DatasetSpec(
         api_name="fina_indicator_vip",
-        strategy="period",
+        strategy=FetchStrategy.PERIOD,
         key_columns=("ts_code", "ann_date", "end_date"),
     ),
     "forecast_vip": DatasetSpec(
         api_name="forecast_vip",
-        strategy="ann_month",
+        strategy=FetchStrategy.ANN_MONTH,
         key_columns=("ts_code", "ann_date", "end_date", "type", "first_ann_date", "update_flag"),
     ),
     "express_vip": DatasetSpec(
         api_name="express_vip",
-        strategy="ann_month",
+        strategy=FetchStrategy.ANN_MONTH,
         key_columns=("ts_code", "ann_date", "end_date"),
     ),
     "dividend": DatasetSpec(
         api_name="dividend",
-        strategy="ts_code",
+        strategy=FetchStrategy.TS_CODE,
         key_columns=("ts_code", "end_date", "ann_date", "div_proc", "record_date", "ex_date", "pay_date"),
     ),
     "fina_audit": DatasetSpec(
         api_name="fina_audit",
-        strategy="ts_code",
+        strategy=FetchStrategy.TS_CODE,
         key_columns=("ts_code", "ann_date", "end_date"),
     ),
     "fina_mainbz_vip": DatasetSpec(
         api_name="fina_mainbz_vip",
-        strategy="ts_code",
+        strategy=FetchStrategy.TS_CODE,
         key_columns=("ts_code", "end_date", "bz_item", "bz_code", "curr_type"),
     ),
     "disclosure_date": DatasetSpec(
         api_name="disclosure_date",
-        strategy="period",
+        strategy=FetchStrategy.PERIOD,
         key_columns=("ts_code", "end_date", "ann_date", "pre_date", "actual_date"),
         period_param="end_date",
     ),
@@ -690,7 +724,7 @@ TEXT_SPECS = {
     "anns_d": DatasetSpec(
         api_name="anns_d",
         official=True,
-        strategy="range_month",
+        strategy=FetchStrategy.RANGE_MONTH,
         fields="ann_date,ts_code,name,title,url,rec_time",
         page_limit=2000,
         key_columns=("ann_date", "ts_code", "title", "url"),
@@ -702,7 +736,7 @@ TEXT_SPECS = {
     "major_news": DatasetSpec(
         api_name="major_news",
         frozen_through=TEXT_ACCESS_LOST_THROUGH,
-        strategy="time_range_month",
+        strategy=FetchStrategy.TIME_RANGE_MONTH,
         fields="title,pub_time,src,content",
         page_limit=400,
         key_columns=("pub_time", "src", "title"),
@@ -712,7 +746,7 @@ TEXT_SPECS = {
     "cctv_news": DatasetSpec(
         api_name="cctv_news",
         frozen_through=TEXT_ACCESS_LOST_THROUGH,
-        strategy="day",
+        strategy=FetchStrategy.DAY,
         fields="date,title,content",
         key_columns=("date", "title"),
         start_date="20170101",
@@ -721,7 +755,7 @@ TEXT_SPECS = {
     "npr": DatasetSpec(
         api_name="npr",
         frozen_through=TEXT_ACCESS_LOST_THROUGH,
-        strategy="range_month",
+        strategy=FetchStrategy.RANGE_MONTH,
         fields="pubtime,title,pcode,puborg,ptype,url,content_html",
         page_limit=500,
         key_columns=("pubtime", "pcode", "title"),
@@ -731,7 +765,7 @@ TEXT_SPECS = {
     "research_report": DatasetSpec(
         api_name="research_report",
         frozen_through=TEXT_ACCESS_LOST_THROUGH,
-        strategy="range_month",
+        strategy=FetchStrategy.RANGE_MONTH,
         fields="trade_date,abstr,title,report_type,author,name,ts_code,inst_csname,ind_name,url",
         page_limit=1000,
         key_columns=("trade_date", "report_type", "title", "inst_csname", "ts_code"),
@@ -740,7 +774,7 @@ TEXT_SPECS = {
     ),
     "report_rc": DatasetSpec(
         api_name="report_rc",
-        strategy="range_month",
+        strategy=FetchStrategy.RANGE_MONTH,
         fields="ts_code,name,report_date,report_title,report_type,classify,org_name,author_name,quarter,op_rt,op_pr,tp,np,eps,pe,rd,roe,ev_ebitda,rating,max_price,min_price,imp_dg,create_time",
         page_limit=3000,
         key_columns=("ts_code", "report_date", "report_title", "org_name", "author_name", "quarter"),
@@ -751,7 +785,7 @@ TEXT_SPECS = {
     "irm_qa_sh": DatasetSpec(
         api_name="irm_qa_sh",
         frozen_through=TEXT_ACCESS_LOST_THROUGH,
-        strategy="day",
+        strategy=FetchStrategy.DAY,
         fields="ts_code,name,trade_date,q,a,pub_time",
         key_columns=("trade_date", "ts_code", "q"),
         start_date="20220101",
@@ -761,7 +795,7 @@ TEXT_SPECS = {
     "irm_qa_sz": DatasetSpec(
         api_name="irm_qa_sz",
         frozen_through=TEXT_ACCESS_LOST_THROUGH,
-        strategy="day",
+        strategy=FetchStrategy.DAY,
         fields="ts_code,name,trade_date,q,a,pub_time,industry",
         key_columns=("trade_date", "ts_code", "q"),
         start_date="20220101",
@@ -771,7 +805,7 @@ TEXT_SPECS = {
     "news": DatasetSpec(
         api_name="news",
         frozen_through=TEXT_ACCESS_LOST_THROUGH,
-        strategy="news_src_day",
+        strategy=FetchStrategy.NEWS_SRC_DAY,
         fields="datetime,content,title,channels",
         page_limit=1500,
         key_columns=("datetime", "title"),
@@ -791,7 +825,7 @@ TEXT_FETCHABLE_DATASETS = [name for name, spec in TEXT_SPECS.items() if not spec
 MACRO_SPECS = {
     "cn_schedule": DatasetSpec(
         api_name="cn_schedule",
-        strategy="month_loop",
+        strategy=FetchStrategy.MONTH_LOOP,
         fields="month,publish_date,title,issuing_org,data_api",
         # The source keeps no schedule rows before 2026 (observed rolling
         # retention, not a declared floor): months 202001-202512 always
@@ -802,7 +836,7 @@ MACRO_SPECS = {
     ),
     "cn_gdp": DatasetSpec(
         api_name="cn_gdp",
-        strategy="quarter_once",
+        strategy=FetchStrategy.QUARTER_ONCE,
         fields="quarter,gdp,gdp_yoy,pi,pi_yoy,si,si_yoy,ti,ti_yoy",
         key_columns=("quarter",),
         date_column="quarter",
@@ -810,49 +844,49 @@ MACRO_SPECS = {
     ),
     "cn_cpi": DatasetSpec(
         api_name="cn_cpi",
-        strategy="month_once",
+        strategy=FetchStrategy.MONTH_ONCE,
         fields="month,nt_val,nt_yoy,nt_mom,nt_accu,town_val,town_yoy,town_mom,town_accu,cnt_val,cnt_yoy,cnt_mom,cnt_accu",
         key_columns=("month",),
         date_column="month",
     ),
     "cn_ppi": DatasetSpec(
         api_name="cn_ppi",
-        strategy="month_once",
+        strategy=FetchStrategy.MONTH_ONCE,
         fields="month,ppi_yoy,ppi_mp_yoy,ppi_mp_qm_yoy,ppi_mp_rm_yoy,ppi_mp_p_yoy,ppi_cg_yoy,ppi_cg_f_yoy,ppi_cg_c_yoy,ppi_cg_adu_yoy,ppi_cg_dcg_yoy,ppi_mom,ppi_mp_mom,ppi_mp_qm_mom,ppi_mp_rm_mom,ppi_mp_p_mom,ppi_cg_mom,ppi_cg_f_mom,ppi_cg_c_mom,ppi_cg_adu_mom,ppi_cg_dcg_mom,ppi_accu,ppi_mp_accu,ppi_mp_qm_accu,ppi_mp_rm_accu,ppi_mp_p_accu,ppi_cg_accu,ppi_cg_f_accu,ppi_cg_c_accu,ppi_cg_adu_accu,ppi_cg_dcg_accu",
         key_columns=("month",),
         date_column="month",
     ),
     "cn_pmi": DatasetSpec(
         api_name="cn_pmi",
-        strategy="month_once",
+        strategy=FetchStrategy.MONTH_ONCE,
         fields="month,pmi010000,pmi010400,pmi010500,pmi010900,pmi011000,pmi011200,pmi011300,pmi011600,pmi020100,pmi020200,pmi020300,pmi020400,pmi020600,pmi030000",
         key_columns=("month",),
         date_column="month",
     ),
     "cn_m": DatasetSpec(
         api_name="cn_m",
-        strategy="month_once",
+        strategy=FetchStrategy.MONTH_ONCE,
         fields="month,m0,m0_yoy,m0_mom,m1,m1_yoy,m1_mom,m2,m2_yoy,m2_mom",
         key_columns=("month",),
         date_column="month",
     ),
     "sf_month": DatasetSpec(
         api_name="sf_month",
-        strategy="month_once",
+        strategy=FetchStrategy.MONTH_ONCE,
         fields="month,inc_month,inc_cumval,stk_endval",
         key_columns=("month",),
         date_column="month",
     ),
     "shibor": DatasetSpec(
         api_name="shibor",
-        strategy="date_year",
+        strategy=FetchStrategy.DATE_YEAR,
         fields="date,on,1w,2w,1m,3m,6m,9m,1y",
         key_columns=("date",),
         date_column="date",
     ),
     "shibor_quote": DatasetSpec(
         api_name="shibor_quote",
-        strategy="date_year",
+        strategy=FetchStrategy.DATE_YEAR,
         fields="date,bank,on_b,on_a,1w_b,1w_a,2w_b,2w_a,1m_b,1m_a,3m_b,3m_a,6m_b,6m_a,9m_b,9m_a,1y_b,1y_a",
         # Measured per-call cap; a larger request returns one silently
         # truncated "short" page and query_paged stops after it.
@@ -862,14 +896,14 @@ MACRO_SPECS = {
     ),
     "shibor_lpr": DatasetSpec(
         api_name="shibor_lpr",
-        strategy="date_year",
+        strategy=FetchStrategy.DATE_YEAR,
         fields="date,1y,5y",
         key_columns=("date",),
         date_column="date",
     ),
     "repo_daily": DatasetSpec(
         api_name="repo_daily",
-        strategy="date_year",
+        strategy=FetchStrategy.DATE_YEAR,
         fields="ts_code,trade_date,repo_maturity,pre_close,open,high,low,close,weight,weight_r,amount,num",
         # Measured per-call cap (see shibor_quote note).
         page_limit=2000,
@@ -878,7 +912,7 @@ MACRO_SPECS = {
     ),
     "us_tycr": DatasetSpec(
         api_name="us_tycr",
-        strategy="date_year",
+        strategy=FetchStrategy.DATE_YEAR,
         # m4 (the 4-month CMT) has never been returned by the vendor for any
         # year in the lake; requesting it only trips the schema audit.
         fields="date,m1,m2,m3,m6,y1,y2,y3,y5,y7,y10,y20,y30",
@@ -887,14 +921,14 @@ MACRO_SPECS = {
     ),
     "us_trycr": DatasetSpec(
         api_name="us_trycr",
-        strategy="date_year",
+        strategy=FetchStrategy.DATE_YEAR,
         fields="date,y5,y7,y10,y20,y30",
         key_columns=("date",),
         date_column="date",
     ),
     "us_tbr": DatasetSpec(
         api_name="us_tbr",
-        strategy="date_year",
+        strategy=FetchStrategy.DATE_YEAR,
         # w17_bd/w17_ce (the 17-week tenor) have never been returned by the
         # vendor for any year in the lake.
         fields="date,w4_bd,w4_ce,w8_bd,w8_ce,w13_bd,w13_ce,w26_bd,w26_ce,w52_bd,w52_ce",
@@ -903,21 +937,21 @@ MACRO_SPECS = {
     ),
     "us_tltr": DatasetSpec(
         api_name="us_tltr",
-        strategy="date_year",
+        strategy=FetchStrategy.DATE_YEAR,
         fields="date,ltc,cmt,e_factor",
         key_columns=("date",),
         date_column="date",
     ),
     "index_daily": DatasetSpec(
         api_name="index_daily",
-        strategy="date_year_by_ts_code",
+        strategy=FetchStrategy.DATE_YEAR_BY_TS_CODE,
         fields="ts_code,trade_date,open,close,high,low,pre_close,change,pct_chg,vol,amount",
         key_columns=("trade_date", "ts_code"),
         date_column="trade_date",
     ),
     "broker_recommend": DatasetSpec(
         api_name="broker_recommend",
-        strategy="month_loop",
+        strategy=FetchStrategy.MONTH_LOOP,
         fields="month,broker,ts_code,name",
         start_date="20190101",
         key_columns=("month", "broker", "ts_code"),
@@ -926,7 +960,7 @@ MACRO_SPECS = {
     ),
     "ths_daily": DatasetSpec(
         api_name="ths_daily",
-        strategy="trade_date",
+        strategy=FetchStrategy.TRADE_DATE,
         fields="ts_code,trade_date,open,high,low,close,pre_close,avg_price,change,pct_change,vol,turnover_rate",
         start_date="20190101",
         key_columns=("trade_date", "ts_code"),
@@ -934,7 +968,7 @@ MACRO_SPECS = {
     ),
     "index_dailybasic": DatasetSpec(
         api_name="index_dailybasic",
-        strategy="date_year_by_ts_code",
+        strategy=FetchStrategy.DATE_YEAR_BY_TS_CODE,
         fields="ts_code,trade_date,total_mv,float_mv,total_share,float_share,free_share,turnover_rate,turnover_rate_f,pe,pe_ttm,pb",
         start_date="20190101",
         key_columns=("trade_date", "ts_code"),
@@ -942,7 +976,7 @@ MACRO_SPECS = {
     ),
     "sw_daily": DatasetSpec(
         api_name="sw_daily",
-        strategy="trade_date",
+        strategy=FetchStrategy.TRADE_DATE,
         fields="ts_code,trade_date,name,open,low,high,close,change,pct_change,vol,amount,pe,pb,float_mv,total_mv",
         start_date="20190101",
         key_columns=("trade_date", "ts_code"),
@@ -950,7 +984,7 @@ MACRO_SPECS = {
     ),
     "ci_daily": DatasetSpec(
         api_name="ci_daily",
-        strategy="trade_date",
+        strategy=FetchStrategy.TRADE_DATE,
         fields="ts_code,trade_date,open,low,high,close,pre_close,change,pct_change,vol,amount",
         start_date="20190101",
         key_columns=("trade_date", "ts_code"),
@@ -958,7 +992,7 @@ MACRO_SPECS = {
     ),
     "daily_info": DatasetSpec(
         api_name="daily_info",
-        strategy="date_year",
+        strategy=FetchStrategy.DATE_YEAR,
         fields="trade_date,ts_code,ts_name,com_count,total_share,float_share,total_mv,float_mv,amount,vol,trans_count,pe,tr,exchange",
         start_date="20190101",
         # Measured per-call cap (see shibor_quote note).
@@ -968,7 +1002,7 @@ MACRO_SPECS = {
     ),
     "sz_daily_info": DatasetSpec(
         api_name="sz_daily_info",
-        strategy="date_year",
+        strategy=FetchStrategy.DATE_YEAR,
         fields="trade_date,ts_code,count,amount,vol,total_share,total_mv,float_share,float_mv",
         start_date="20190101",
         # Measured per-call cap (see shibor_quote note).
@@ -978,7 +1012,7 @@ MACRO_SPECS = {
     ),
     "moneyflow_mkt_dc": DatasetSpec(
         api_name="moneyflow_mkt_dc",
-        strategy="date_year",
+        strategy=FetchStrategy.DATE_YEAR,
         fields="trade_date,close_sh,pct_change_sh,close_sz,pct_change_sz,net_amount,net_amount_rate,buy_elg_amount,buy_elg_amount_rate,buy_lg_amount,buy_lg_amount_rate,buy_md_amount,buy_md_amount_rate,buy_sm_amount,buy_sm_amount_rate",
         start_date="20190101",
         key_columns=("trade_date",),
@@ -986,21 +1020,21 @@ MACRO_SPECS = {
     ),
     "index_global": DatasetSpec(
         api_name="index_global",
-        strategy="date_year_by_ts_code",
+        strategy=FetchStrategy.DATE_YEAR_BY_TS_CODE,
         fields="ts_code,trade_date,open,close,high,low,pre_close,change,pct_chg,swing,vol,amount",
         key_columns=("trade_date", "ts_code"),
         date_column="trade_date",
     ),
     "fx_daily": DatasetSpec(
         api_name="fx_daily",
-        strategy="date_year_by_ts_code",
+        strategy=FetchStrategy.DATE_YEAR_BY_TS_CODE,
         fields="ts_code,trade_date,bid_open,bid_close,bid_high,bid_low,ask_open,ask_close,ask_high,ask_low,tick_qty",
         key_columns=("trade_date", "ts_code"),
         date_column="trade_date",
     ),
     "eco_cal": DatasetSpec(
         api_name="eco_cal",
-        strategy="eco_cal_month",
+        strategy=FetchStrategy.ECO_CAL_MONTH,
         fields="date,time,currency,country,event,value,pre_value,fore_value",
         # The API returns at most 100 rows per call regardless of the
         # requested limit; a larger page size makes query_paged stop after
@@ -1017,7 +1051,7 @@ MACRO_SPECS = {
     # list/announcement dates. ----
     "fut_basic": DatasetSpec(
         api_name="fut_basic",
-        strategy="static_full",
+        strategy=FetchStrategy.STATIC_FULL,
         # ``trade_time_desc`` was dropped from the request on 2026-09-10: the
         # vendor stopped returning it and nothing reads it.
         fields="ts_code,symbol,exchange,name,fut_code,multiplier,trade_unit,per_unit,quote_unit,d_month,list_date,delist_date,last_ddate",
@@ -1029,7 +1063,7 @@ MACRO_SPECS = {
     ),
     "fut_mapping": DatasetSpec(
         api_name="fut_mapping",
-        strategy="trade_date",
+        strategy=FetchStrategy.TRADE_DATE,
         fields="ts_code,trade_date,mapping_ts_code",
         page_limit=2000,
         key_columns=("trade_date", "ts_code"),
@@ -1037,7 +1071,7 @@ MACRO_SPECS = {
     ),
     "fut_daily": DatasetSpec(
         api_name="fut_daily",
-        strategy="trade_date",
+        strategy=FetchStrategy.TRADE_DATE,
         fields="ts_code,trade_date,pre_close,pre_settle,open,high,low,close,settle,change1,change2,vol,amount,oi,oi_chg,delv_settle",
         page_limit=2000,
         key_columns=("trade_date", "ts_code"),
@@ -1045,7 +1079,7 @@ MACRO_SPECS = {
     ),
     "opt_basic": DatasetSpec(
         api_name="opt_basic",
-        strategy="static_full",
+        strategy=FetchStrategy.STATIC_FULL,
         fields="ts_code,symbol,exchange,name,per_unit,opt_code,opt_type,call_put,exercise_type,exercise_price,s_month,maturity_date,list_price,list_date,delist_date,last_edate,last_ddate,quote_unit,min_price_chg",
         page_limit=10000,
         key_columns=("ts_code",),
@@ -1057,7 +1091,7 @@ MACRO_SPECS = {
     ),
     "opt_daily": DatasetSpec(
         api_name="opt_daily",
-        strategy="trade_date",
+        strategy=FetchStrategy.TRADE_DATE,
         fields="ts_code,trade_date,exchange,pre_settle,pre_close,open,high,low,close,settle,vol,amount,oi",
         page_limit=15000,
         key_columns=("trade_date", "ts_code"),
@@ -1073,7 +1107,7 @@ MACRO_SPECS = {
     ),
     "cb_basic": DatasetSpec(
         api_name="cb_basic",
-        strategy="static_full",
+        strategy=FetchStrategy.STATIC_FULL,
         # conv_price/clauses are the fields the conversion-premium and
         # redemption-event signals need; stk_code links CB -> underlying stock.
         fields="ts_code,bond_short_name,cb_code,cb_type,stk_code,stk_short_name,maturity,par,issue_price,issue_size,remain_size,value_date,maturity_date,rate_type,coupon_rate,pay_per_year,list_date,delist_date,exchange,conv_start_date,conv_end_date,first_conv_price,conv_price,put_clause,maturity_call_price,call_clause,reset_clause,guarantor,issue_rating,newest_rating,rating_comp",
@@ -1085,7 +1119,7 @@ MACRO_SPECS = {
         api_name="cb_daily",
         # bond_value/cb_value/cb_over_rate are non-default display fields and
         # must be requested explicitly.
-        strategy="trade_date",
+        strategy=FetchStrategy.TRADE_DATE,
         fields="ts_code,trade_date,pre_close,open,high,low,close,change,pct_chg,vol,amount,bond_value,bond_over_rate,cb_value,cb_over_rate",
         page_limit=2000,
         key_columns=("trade_date", "ts_code"),
@@ -1094,7 +1128,7 @@ MACRO_SPECS = {
     ),
     "cb_call": DatasetSpec(
         api_name="cb_call",
-        strategy="static_full",
+        strategy=FetchStrategy.STATIC_FULL,
         fields="ts_code,call_type,is_call,ann_date,call_date,call_price,call_price_tax,call_vol,call_amount,payment_date,call_reg_date",
         page_limit=2000,
         # The staged is_call states of one bond are separate announcements.
@@ -1106,7 +1140,7 @@ MACRO_SPECS = {
 EVENT_FLOW_SPECS = {
     "margin": DatasetSpec(
         api_name="margin",
-        strategy="trade_date",
+        strategy=FetchStrategy.TRADE_DATE,
         fields="trade_date,exchange_id,rzye,rzmre,rzche,rqye,rqmcl,rzrqye,rqyl",
         page_limit=4000,
         key_columns=("trade_date", "exchange_id"),
@@ -1116,7 +1150,7 @@ EVENT_FLOW_SPECS = {
     ),
     "margin_detail": DatasetSpec(
         api_name="margin_detail",
-        strategy="trade_date",
+        strategy=FetchStrategy.TRADE_DATE,
         fields="trade_date,ts_code,name,rzye,rqye,rzmre,rqyl,rzche,rqchl,rqmcl,rzrqye",
         page_limit=6000,
         key_columns=("trade_date", "ts_code"),
@@ -1126,7 +1160,7 @@ EVENT_FLOW_SPECS = {
     ),
     "margin_secs": DatasetSpec(
         api_name="margin_secs",
-        strategy="trade_date",
+        strategy=FetchStrategy.TRADE_DATE,
         fields="trade_date,ts_code,name,exchange",
         page_limit=6000,
         key_columns=("trade_date", "ts_code", "exchange"),
@@ -1136,7 +1170,7 @@ EVENT_FLOW_SPECS = {
     ),
     "moneyflow": DatasetSpec(
         api_name="moneyflow",
-        strategy="trade_date",
+        strategy=FetchStrategy.TRADE_DATE,
         fields="ts_code,trade_date,buy_sm_vol,buy_sm_amount,sell_sm_vol,sell_sm_amount,buy_md_vol,buy_md_amount,sell_md_vol,sell_md_amount,buy_lg_vol,buy_lg_amount,sell_lg_vol,sell_lg_amount,buy_elg_vol,buy_elg_amount,sell_elg_vol,sell_elg_amount,net_mf_vol,net_mf_amount",
         page_limit=5000,
         key_columns=("trade_date", "ts_code"),
@@ -1146,7 +1180,7 @@ EVENT_FLOW_SPECS = {
     ),
     "moneyflow_dc": DatasetSpec(
         api_name="moneyflow_dc",
-        strategy="trade_date",
+        strategy=FetchStrategy.TRADE_DATE,
         fields="trade_date,ts_code,name,pct_change,close,net_amount,net_amount_rate,buy_elg_amount,buy_elg_amount_rate,buy_lg_amount,buy_lg_amount_rate,buy_md_amount,buy_md_amount_rate,buy_sm_amount,buy_sm_amount_rate",
         page_limit=6000,
         key_columns=("trade_date", "ts_code"),
@@ -1156,7 +1190,7 @@ EVENT_FLOW_SPECS = {
     ),
     "moneyflow_ths": DatasetSpec(
         api_name="moneyflow_ths",
-        strategy="trade_date",
+        strategy=FetchStrategy.TRADE_DATE,
         fields="trade_date,ts_code,name,pct_change,latest,net_amount,net_d5_amount,buy_lg_amount,buy_lg_amount_rate,buy_md_amount,buy_md_amount_rate,buy_sm_amount,buy_sm_amount_rate",
         page_limit=6000,
         key_columns=("trade_date", "ts_code"),
@@ -1166,7 +1200,7 @@ EVENT_FLOW_SPECS = {
     ),
     "moneyflow_ind_dc": DatasetSpec(
         api_name="moneyflow_ind_dc",
-        strategy="trade_date",
+        strategy=FetchStrategy.TRADE_DATE,
         fields="trade_date,content_type,ts_code,name,pct_change,close,net_amount,net_amount_rate,buy_elg_amount,buy_elg_amount_rate,buy_lg_amount,buy_lg_amount_rate,buy_md_amount,buy_md_amount_rate,buy_sm_amount,buy_sm_amount_rate,buy_sm_amount_stock,rank",
         page_limit=5000,
         key_columns=("trade_date", "content_type", "ts_code"),
@@ -1176,7 +1210,7 @@ EVENT_FLOW_SPECS = {
     ),
     "moneyflow_ind_ths": DatasetSpec(
         api_name="moneyflow_ind_ths",
-        strategy="trade_date",
+        strategy=FetchStrategy.TRADE_DATE,
         fields="trade_date,ts_code,industry,lead_stock,close,pct_change,company_num,pct_change_stock,close_price,net_buy_amount,net_sell_amount,net_amount",
         page_limit=5000,
         key_columns=("trade_date", "ts_code"),
@@ -1186,7 +1220,7 @@ EVENT_FLOW_SPECS = {
     ),
     "moneyflow_cnt_ths": DatasetSpec(
         api_name="moneyflow_cnt_ths",
-        strategy="trade_date",
+        strategy=FetchStrategy.TRADE_DATE,
         fields="trade_date,ts_code,name,lead_stock,close_price,pct_change,industry_index,company_num,pct_change_stock,net_buy_amount,net_sell_amount,net_amount",
         page_limit=5000,
         key_columns=("trade_date", "ts_code"),
@@ -1196,7 +1230,7 @@ EVENT_FLOW_SPECS = {
     ),
     "cyq_perf": DatasetSpec(
         api_name="cyq_perf",
-        strategy="trade_date",
+        strategy=FetchStrategy.TRADE_DATE,
         fields="ts_code,trade_date,his_low,his_high,cost_5pct,cost_15pct,cost_50pct,cost_85pct,cost_95pct,weight_avg,winner_rate",
         page_limit=6000,
         key_columns=("trade_date", "ts_code"),
@@ -1206,7 +1240,7 @@ EVENT_FLOW_SPECS = {
     ),
     "bak_daily": DatasetSpec(
         api_name="bak_daily",
-        strategy="trade_date",
+        strategy=FetchStrategy.TRADE_DATE,
         fields="ts_code,trade_date,name,pct_change,close,change,open,high,low,pre_close,vol_ratio,turn_over,swing,vol,amount,selling,buying,total_share,float_share,pe,industry,area,float_mv,total_mv,avg_price,strength,activity,avg_turnover,attack,interval_3,interval_6",
         page_limit=6000,
         key_columns=("trade_date", "ts_code"),
@@ -1216,7 +1250,7 @@ EVENT_FLOW_SPECS = {
     ),
     "stk_holdernumber": DatasetSpec(
         api_name="stk_holdernumber",
-        strategy="range_month",
+        strategy=FetchStrategy.RANGE_MONTH,
         fields="ts_code,ann_date,end_date,holder_num",
         page_limit=3000,
         key_columns=("ts_code", "ann_date", "end_date"),
@@ -1226,7 +1260,7 @@ EVENT_FLOW_SPECS = {
     ),
     "top10_holders": DatasetSpec(
         api_name="top10_holders",
-        strategy="range_month",
+        strategy=FetchStrategy.RANGE_MONTH,
         fields="ts_code,ann_date,end_date,holder_name,hold_amount,hold_ratio,hold_float_ratio,hold_change,holder_type",
         page_limit=5000,
         key_columns=("ts_code", "ann_date", "end_date", "holder_name"),
@@ -1239,7 +1273,7 @@ EVENT_FLOW_SPECS = {
     ),
     "top10_floatholders": DatasetSpec(
         api_name="top10_floatholders",
-        strategy="range_month",
+        strategy=FetchStrategy.RANGE_MONTH,
         fields="ts_code,ann_date,end_date,holder_name,hold_amount,hold_ratio,hold_float_ratio,hold_change,holder_type",
         page_limit=5000,
         key_columns=("ts_code", "ann_date", "end_date", "holder_name"),
@@ -1252,7 +1286,7 @@ EVENT_FLOW_SPECS = {
     ),
     "pledge_detail": DatasetSpec(
         api_name="pledge_detail",
-        strategy="range_month",
+        strategy=FetchStrategy.RANGE_MONTH,
         fields="ts_code,ann_date,holder_name,pledge_amount,start_date,end_date,is_release,release_date,pledgor,holding_amount,pledged_amount,p_total_ratio,h_total_ratio,is_buyback",
         # Measured per-call cap (probed 2026-08-10): a 3,000-row request
         # returns at most 1,500 rows, a silently truncated "short" page that
@@ -1263,7 +1297,7 @@ EVENT_FLOW_SPECS = {
     ),
     "stk_surv": DatasetSpec(
         api_name="stk_surv",
-        strategy="trade_date",
+        strategy=FetchStrategy.TRADE_DATE,
         fields="ts_code,name,surv_date,fund_visitors,rece_place,rece_mode,rece_org,org_type,comp_rece",
         # Measured per-call cap (probed 2026-08-10): a 3,000-row request
         # returns at most 400 rows, a silently truncated "short" page that
@@ -1281,7 +1315,7 @@ EVENT_FLOW_SPECS = {
     ),
     "new_share": DatasetSpec(
         api_name="new_share",
-        strategy="range_month",
+        strategy=FetchStrategy.RANGE_MONTH,
         fields="ts_code,sub_code,name,ipo_date,issue_date,amount,market_amount,price,pe,limit_amount,funds,ballot",
         page_limit=2000,
         key_columns=("ts_code",),
@@ -1297,7 +1331,7 @@ EVENT_FLOW_SPECS = {
     ),
     "stk_holdertrade": DatasetSpec(
         api_name="stk_holdertrade",
-        strategy="range_month",
+        strategy=FetchStrategy.RANGE_MONTH,
         fields="ts_code,ann_date,holder_name,holder_type,in_de,change_vol,change_ratio,after_share,after_ratio,avg_price,total_share,begin_date,close_date",
         page_limit=3000,
         key_columns=("ts_code", "ann_date", "holder_name", "holder_type", "in_de", "begin_date", "close_date"),
@@ -1308,7 +1342,7 @@ EVENT_FLOW_SPECS = {
     ),
     "repurchase": DatasetSpec(
         api_name="repurchase",
-        strategy="range_month",
+        strategy=FetchStrategy.RANGE_MONTH,
         fields="ts_code,ann_date,end_date,proc,exp_date,vol,amount,high_limit,low_limit",
         page_limit=2000,
         key_columns=("ts_code", "ann_date", "end_date", "proc", "exp_date"),
@@ -1319,7 +1353,7 @@ EVENT_FLOW_SPECS = {
     ),
     "share_float": DatasetSpec(
         api_name="share_float",
-        strategy="day",
+        strategy=FetchStrategy.DAY,
         fields=SHARE_FLOAT_FIELDS,
         page_limit=6000,
         key_columns=("ts_code", "ann_date", "float_date", "holder_name", "share_type"),
@@ -1329,7 +1363,7 @@ EVENT_FLOW_SPECS = {
     ),
     "block_trade": DatasetSpec(
         api_name="block_trade",
-        strategy="trade_date",
+        strategy=FetchStrategy.TRADE_DATE,
         fields="ts_code,trade_date,price,vol,amount,buyer,seller",
         page_limit=1000,
         key_columns=("trade_date", "ts_code", "price", "vol", "amount", "buyer", "seller"),
@@ -1342,7 +1376,7 @@ EVENT_FLOW_SPECS = {
 BOARD_TRADING_SPECS = {
     "kpl_list": DatasetSpec(
         api_name="kpl_list",
-        strategy="trade_date_by_tag",
+        strategy=FetchStrategy.TRADE_DATE_BY_TAG,
         fields="ts_code,name,trade_date,lu_time,ld_time,open_time,last_time,lu_desc,tag,theme,net_change,bid_amount,status,bid_change,bid_turnover,lu_bid_vol,pct_chg,bid_pct_chg,rt_pct_chg,limit_order,amount,turnover_rate,free_float,lu_limit_order",
         page_limit=8000,
         key_columns=("trade_date", "ts_code", "tag", "status", "lu_time", "open_time", "last_time"),
@@ -1352,7 +1386,7 @@ BOARD_TRADING_SPECS = {
     ),
     "kpl_concept_cons": DatasetSpec(
         api_name="kpl_concept_cons",
-        strategy="trade_date",
+        strategy=FetchStrategy.TRADE_DATE,
         fields="ts_code,name,con_name,con_code,trade_date,desc,hot_num",
         page_limit=3000,
         key_columns=("trade_date", "con_code", "ts_code"),
@@ -1362,7 +1396,7 @@ BOARD_TRADING_SPECS = {
     ),
     "dc_index": DatasetSpec(
         api_name="dc_index",
-        strategy="trade_date",
+        strategy=FetchStrategy.TRADE_DATE,
         fields="ts_code,trade_date,name,leading,leading_code,pct_change,leading_pct,total_mv,turnover_rate,up_num,down_num,idx_type,level",
         page_limit=5000,
         key_columns=("trade_date", "ts_code"),
@@ -1372,7 +1406,7 @@ BOARD_TRADING_SPECS = {
     ),
     "dc_member": DatasetSpec(
         api_name="dc_member",
-        strategy="trade_date",
+        strategy=FetchStrategy.TRADE_DATE,
         fields="trade_date,ts_code,con_code,name",
         page_limit=8000,
         key_columns=("trade_date", "ts_code", "con_code"),
@@ -1382,7 +1416,7 @@ BOARD_TRADING_SPECS = {
     ),
     "limit_step": DatasetSpec(
         api_name="limit_step",
-        strategy="trade_date",
+        strategy=FetchStrategy.TRADE_DATE,
         fields="ts_code,name,trade_date,nums",
         page_limit=2000,
         key_columns=("trade_date", "ts_code", "nums"),
@@ -1391,7 +1425,7 @@ BOARD_TRADING_SPECS = {
     ),
     "limit_cpt_list": DatasetSpec(
         api_name="limit_cpt_list",
-        strategy="trade_date",
+        strategy=FetchStrategy.TRADE_DATE,
         fields="ts_code,name,trade_date,days,up_stat,cons_nums,up_nums,pct_chg,rank",
         page_limit=2000,
         key_columns=("trade_date", "ts_code", "rank"),
@@ -1400,7 +1434,7 @@ BOARD_TRADING_SPECS = {
     ),
     "limit_list_d": DatasetSpec(
         api_name="limit_list_d",
-        strategy="trade_date",
+        strategy=FetchStrategy.TRADE_DATE,
         fields="trade_date,ts_code,industry,name,close,pct_chg,amount,limit_amount,float_mv,total_mv,turnover_ratio,fd_amount,first_time,last_time,open_times,up_stat,limit_times,limit",
         page_limit=5000,
         key_columns=("trade_date", "ts_code", "limit"),
@@ -1410,7 +1444,7 @@ BOARD_TRADING_SPECS = {
     ),
     "limit_list_ths": DatasetSpec(
         api_name="limit_list_ths",
-        strategy="trade_date_by_limit_type",
+        strategy=FetchStrategy.TRADE_DATE_BY_LIMIT_TYPE,
         fields="trade_date,ts_code,name,price,pct_chg,open_num,lu_desc,limit_type,tag,status,limit_order,limit_amount,turnover_rate,free_float,lu_limit_order,limit_up_suc_rate,turnover,market_type,rise_rate,sum_float,first_lu_time,last_lu_time,first_ld_time,last_ld_time",
         page_limit=8000,
         # The four ``first_lu_time``/``last_ld_time`` columns are still
@@ -1427,7 +1461,7 @@ BOARD_TRADING_SPECS = {
     ),
     "top_list": DatasetSpec(
         api_name="top_list",
-        strategy="trade_date",
+        strategy=FetchStrategy.TRADE_DATE,
         fields="trade_date,ts_code,name,close,pct_change,turnover_rate,amount,l_sell,l_buy,l_amount,net_amount,net_rate,amount_rate,float_values,reason",
         page_limit=10000,
         # Every field but ``name``: a stock can list several times a day, so
@@ -1457,7 +1491,7 @@ BOARD_TRADING_SPECS = {
     ),
     "top_inst": DatasetSpec(
         api_name="top_inst",
-        strategy="trade_date",
+        strategy=FetchStrategy.TRADE_DATE,
         fields="trade_date,ts_code,exalter,buy,buy_rate,sell,sell_rate,net_buy,side,reason",
         page_limit=10000,
         key_columns=("trade_date", "ts_code", "exalter", "buy", "sell", "net_buy", "side", "reason"),
@@ -1468,7 +1502,7 @@ BOARD_TRADING_SPECS = {
     ),
     "hm_list": DatasetSpec(
         api_name="hm_list",
-        strategy="static_full",
+        strategy=FetchStrategy.STATIC_FULL,
         fields="name,desc,orgs",
         page_limit=1000,
         key_columns=("name",),
@@ -1477,7 +1511,7 @@ BOARD_TRADING_SPECS = {
     ),
     "hm_detail": DatasetSpec(
         api_name="hm_detail",
-        strategy="trade_date",
+        strategy=FetchStrategy.TRADE_DATE,
         fields="trade_date,ts_code,ts_name,buy_amount,sell_amount,net_amount,hm_name,hm_orgs",
         page_limit=10000,
         key_columns=("trade_date", "ts_code", "hm_name", "hm_orgs"),
@@ -1486,7 +1520,7 @@ BOARD_TRADING_SPECS = {
     ),
     "ths_hot": DatasetSpec(
         api_name="ths_hot",
-        strategy="trade_date_by_market",
+        strategy=FetchStrategy.TRADE_DATE_BY_MARKET,
         fields="trade_date,data_type,ts_code,ts_name,rank,pct_change,current_price,hot,concept,rank_time,rank_reason",
         page_limit=2000,
         key_columns=("trade_date", "data_type", "ts_code", "rank_time", "rank"),
@@ -1497,7 +1531,7 @@ BOARD_TRADING_SPECS = {
     ),
     "dc_hot": DatasetSpec(
         api_name="dc_hot",
-        strategy="trade_date_by_market_hot_type",
+        strategy=FetchStrategy.TRADE_DATE_BY_MARKET_HOT_TYPE,
         fields="trade_date,data_type,ts_code,ts_name,rank,pct_change,current_price,hot,concept,rank_time",
         page_limit=2000,
         key_columns=("trade_date", "data_type", "ts_code", "rank_time", "rank"),
@@ -2312,7 +2346,7 @@ def augment_board_frame(df: pd.DataFrame, spec: DatasetSpec, params: dict[str, A
         mask = missing & available.astype(str).str.strip().ne("")
         out.loc[mask, "available_at"] = available[mask]
         out.loc[mask, "available_at_rule"] = rules[mask]
-    if spec.strategy == "static_full" and out["available_at"].astype(str).str.strip().eq("").all():
+    if spec.strategy == FetchStrategy.STATIC_FULL and out["available_at"].astype(str).str.strip().eq("").all():
         out["available_at_rule"] = "static_reference_no_pit_time"
     return out
 
@@ -2716,7 +2750,7 @@ def repair_event_available_at(raw_dir: str, datasets: list[str]) -> dict[str, An
     stats: dict[str, Any] = {"datasets": {}, "files_rewritten": 0, "rows_changed": 0}
     for dataset in datasets:
         spec = EVENT_FLOW_SPECS.get(dataset)
-        if spec is None or spec.strategy != "trade_date":
+        if spec is None or spec.strategy != FetchStrategy.TRADE_DATE:
             raise RuntimeError(f"event available_at repair covers trade-date event datasets; got {dataset}")
         partitions = sorted((raw / dataset).glob("trade_date=*.parquet"))
         if not partitions:

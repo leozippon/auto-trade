@@ -44,7 +44,7 @@ from _bootstrap import add_repo_src
 REPO_ROOT = add_repo_src(__file__)
 
 from autotrade.common.records import read_json_object
-from autotrade.environment.broker import BrokerProfile
+from autotrade.pipelines.arm_params import read_param
 from autotrade.pipelines.config import AcceptanceRules, acceptance_for
 from autotrade.pipelines.experiment import (
     freeze_registration,
@@ -183,7 +183,7 @@ def check_arm(arm: Path) -> list[Judgement]:
     lines = ledger.read_text(encoding="utf-8").splitlines() if ledger.is_file() else []
     records = [json.loads(line) for line in lines if line]
     rules = acceptance_for(params)
-    slippage = float(params.get("slippage_bps", BrokerProfile().slippage_bps))
+    slippage = float(read_param(params, "slippage_bps"))  # type: ignore[arg-type]
     found: list[Judgement] = []
 
     def judge(reading: str, stored: object, now: object) -> None:

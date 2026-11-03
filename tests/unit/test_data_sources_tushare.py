@@ -314,6 +314,20 @@ class TieUnstablePagingClient:
         return common.ApiResult(names, [[row.get(name, "") for name in names] for row in page])
 
 
+class FetchStrategyTest(unittest.TestCase):
+    def test_a_spec_holds_its_strategy_as_the_member_its_family_dispatches_on(self):
+        spec = common.DatasetSpec("income_vip", strategy="period")
+
+        self.assertIs(spec.strategy, common.FetchStrategy.PERIOD)
+        # Recorded by value: the audit report and every message keep the string.
+        self.assertEqual(json.dumps({"strategy": spec.strategy}), '{"strategy": "period"}')
+        self.assertIs(common.DatasetSpec("daily").strategy, common.FetchStrategy.DAILY_FAMILY)
+
+    def test_a_spec_naming_no_strategy_is_refused_when_built(self):
+        with self.assertRaisesRegex(ValueError, "is not a valid FetchStrategy"):
+            common.DatasetSpec("income_vip", strategy="perod")
+
+
 class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

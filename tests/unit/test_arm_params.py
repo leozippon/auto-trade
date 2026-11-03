@@ -19,6 +19,9 @@ from autotrade.pipelines.arm_params import (
     Surface,
     console_request,
     parameters,
+    read_param,
+    read_param_or_default,
+    session_models,
 )
 from autotrade.pipelines.hitl_state import (
     WEB_CLOSED_PARAMS,
@@ -149,3 +152,33 @@ def test_an_undeclared_key_is_refused_and_a_stamp_is_skipped() -> None:
 def test_a_create_request_states_only_console_parameters(request_: dict[str, object], message: str) -> None:
     with pytest.raises(ValueError, match=message):
         _created(**request_)
+
+
+def test_a_reader_takes_the_one_declared_default_for_a_key_the_file_leaves_out() -> None:
+    created = _created()
+    # What the console stamps is what a reader of a file without the key reads.
+    for name in set(parameters(Surface.CONSOLE)) - {"experiment_id", *CREATE_RULES}:
+        assert read_param({}, name) == created[name] == PARAMETERS[name].default, name
+    # A stated value, null included, reads as stated; a reader that takes an
+    # empty value as unset gets the default for it too.
+    assert read_param({"compact_token_threshold": None}, "compact_token_threshold") is None
+    assert read_param({"compact_token_threshold": 5}, "compact_token_threshold") == 5
+    assert read_param_or_default({"strategy_period": ""}, "strategy_period") == "day"
+    assert read_param_or_default({"developer_mode": None}, "developer_mode") == "baseline"
+    # A host parameter the console never writes declares the worker's value.
+    assert read_param({}, "work_root") == ".runtime/sandboxes"
+    with pytest.raises(KeyError):
+        read_param({"no_such_parameter": 1}, "no_such_parameter")
+
+
+def test_the_session_roles_take_their_defaults_and_derive_only_what_they_name() -> None:
+    flash = PARAMETERS["model"].default
+    assert session_models({}) == (flash, flash, PARAMETERS["compact_model"].default)
+    assert session_models({"model": "m", "subagent_model": "", "compact_model": None}) == (
+        "m",
+        "m",
+        PARAMETERS["compact_model"].default,
+    )
+    # A worker-side llm_model stands in for an empty main role only.
+    assert session_models({"llm_model": "x"})[0] == "x"
+    assert session_models({"model": "m", "llm_model": "x"})[0] == "m"

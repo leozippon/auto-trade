@@ -33,8 +33,12 @@ from pathlib import Path
 
 from autotrade.agent.runner import AgentSessionBudgetExhausted
 from autotrade.environment.identity import AgentRefStore
-from autotrade.environment.runtime import AgentTraceWriter, agent_transcript_dir
 from autotrade.environment.tools.base import SessionInterrupt
+from autotrade.environment.trace import (
+    AgentTraceWriter,
+    TraceEvent,
+    agent_transcript_dir,
+)
 
 from .hitl_state import (
     ArmState,
@@ -255,7 +259,7 @@ class InteractiveExperimentRunner:
                         ),
                     )
                     trace.emit(
-                        "environment_stage",
+                        TraceEvent.ENVIRONMENT_STAGE,
                         {
                             "stage": stage,
                             **{

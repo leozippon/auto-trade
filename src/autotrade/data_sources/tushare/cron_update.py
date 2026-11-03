@@ -32,6 +32,7 @@ from .common import (
     MUTATED_NOT_READY_RETRY_EXIT_CODE,
     NO_MUTATION_FAILURE_EXIT_CODE,
     NO_MUTATION_RETRY_EXIT_CODE,
+    FetchStrategy,
     format_yyyymmdd,
     normalize_date_key,
     parse_yyyymmdd,
@@ -118,7 +119,7 @@ HISTORY_REPULL_POLICIES = ("on_restatement", "window_only")
 
 
 def repullable_datasets() -> tuple[str, ...]:
-    return tuple(name for name, spec in EVENT_FLOW_SPECS.items() if spec.strategy == "range_month")
+    return tuple(name for name, spec in EVENT_FLOW_SPECS.items() if spec.strategy == FetchStrategy.RANGE_MONTH)
 
 
 def history_repull_policy(config: dict) -> dict[str, str]:

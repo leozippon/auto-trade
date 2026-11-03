@@ -57,6 +57,7 @@ from autotrade.environment.tools.base import (
     is_sequential_tool,
 )
 from autotrade.environment.tools.search import trace_read_stub
+from autotrade.environment.trace import TraceEvent
 
 from .compact import (
     ContextCompactor,
@@ -643,7 +644,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
         config: SubAgentConfig | None = None,
         deadline_at: datetime | None = None,
         time_budget: InferenceTimeBudget | None = None,
-        event_sink: Callable[[str, dict[str, object]], None] | None = None,
+        event_sink: Callable[[TraceEvent, dict[str, object]], None] | None = None,
         cancel_event: threading.Event | None = None,
         compactor: ContextCompactor | None = None,
     ) -> None:
@@ -759,7 +760,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
             # Why a child can end while the session clock still shows time:
             # the tail is the parent's finalization window.
             started["parent_reserve_seconds"] = self.parent_reserve_seconds
-        self._emit("subagent_task", started)
+        self._emit(TraceEvent.SUBAGENT_TASK, started)
         brief = task.strip()
         if transcript:
             # Resume: the child's own conversation continues; a transcript cut
@@ -818,7 +819,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                     steers += 1
                     messages.append(ChatMessage("user", f"{STEER_MESSAGE_LABEL} {text}"))
                     self._emit(
-                        "subagent_steer",
+                        TraceEvent.SUBAGENT_STEER,
                         {
                             "task_id": task_id,
                             "role": role,
@@ -844,7 +845,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                         )
                     )
                     self._emit(
-                        "subagent_wrap_up",
+                        TraceEvent.SUBAGENT_WRAP_UP,
                         {
                             "task_id": task_id,
                             "role": role,
@@ -891,7 +892,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                         failure["error_type"] = "malformed_tool_call"
                     elif refused:
                         failure["error_type"] = "provider_refusal"
-                    self._emit("subagent_llm_error", failure)
+                    self._emit(TraceEvent.SUBAGENT_LLM_ERROR, failure)
                     if self._cancelled():
                         status = "cancelled"
                         error = "Sub-agent cancelled"
@@ -968,7 +969,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                     )
                 )
                 self._emit(
-                    "subagent_llm",
+                    TraceEvent.SUBAGENT_LLM,
                     {
                         "task_id": task_id,
                         "role": role,
@@ -1002,7 +1003,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                                 dict(response.usage).get("completion_tokens") or 0
                             )
                             self._emit(
-                                "subagent_output_truncated",
+                                TraceEvent.SUBAGENT_OUTPUT_TRUNCATED,
                                 {
                                     "task_id": task_id,
                                     "role": role,
@@ -1067,7 +1068,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                         )
                     )
                     self._emit(
-                        "subagent_tool",
+                        TraceEvent.SUBAGENT_TOOL,
                         {
                             "task_id": task_id,
                             "role": role,
@@ -1115,7 +1116,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                 llm_calls += 1
                 _add_usage(usage, response.usage)
                 self._emit(
-                    "subagent_llm",
+                    TraceEvent.SUBAGENT_LLM,
                     {
                         "task_id": task_id,
                         "role": role,
@@ -1189,7 +1190,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
         if error:
             result["error"] = error
         self._emit(
-            "subagent",
+            TraceEvent.SUBAGENT,
             {
                 **result,
                 "parent_call_id": parent_call_id,
@@ -1240,7 +1241,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                 # Nested: the compaction record's own ``status``/``summary``
                 # must not read as the child's outcome or report.
                 self._emit(
-                    "subagent_context_compaction",
+                    TraceEvent.SUBAGENT_CONTEXT_COMPACTION,
                     {**identity, "compaction": dict(result.event)},
                 )
                 messages = list(result.messages)
@@ -1253,7 +1254,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
             result_store=self.tools.result_store(),
         )
         if edit:
-            self._emit("subagent_context_edit", {**identity, "context_edit": edit})
+            self._emit(TraceEvent.SUBAGENT_CONTEXT_EDIT, {**identity, "context_edit": edit})
             output_tokens = self._output_tokens(llm, messages, provider_tools)
         return messages, output_tokens
 
@@ -1286,7 +1287,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
             )
             if result is not None:
                 self._emit(
-                    "subagent_context_compaction",
+                    TraceEvent.SUBAGENT_CONTEXT_COMPACTION,
                     {**identity, "compaction": dict(result.event)},
                 )
                 compacted = result.event.get("status") == "ok" and tuple(
@@ -1303,7 +1304,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
         )
         if edit:
             self._emit(
-                "subagent_context_edit",
+                TraceEvent.SUBAGENT_CONTEXT_EDIT,
                 {
                     **identity,
                     "context_edit": {
@@ -1432,7 +1433,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
             if spec.name not in allowed:
                 raise ValueError(f"Sub-agent tool is not allowed: {spec.name}")
 
-    def _emit(self, event: str, payload: dict[str, object]) -> None:
+    def _emit(self, event: TraceEvent, payload: dict[str, object]) -> None:
         if self.event_sink is not None:
             self.event_sink(event, dict(payload))
 

@@ -24,6 +24,7 @@ from typing import ClassVar
 import numpy as np
 import pandas as pd
 
+from autotrade.environment.llm import LOCAL_QWEN_MODEL
 from autotrade.environment.runtime import chmod_tree
 from autotrade.environment.strategy import CN_TZ
 from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION, SnapshotBundle
@@ -252,6 +253,10 @@ def make_arm(tmp_path: Path, **params: object) -> tuple[Path, Path]:
                 "data_backend": "pit",
                 "execution_mode": "trusted",
                 "developer_mode": "baseline",
+                # The local model the tests' VLLM credential serves; a file
+                # that leaves the roles out runs on the hosted default.
+                "model": LOCAL_QWEN_MODEL,
+                "compact_model": LOCAL_QWEN_MODEL,
                 "initial_cash": 1_000_000,
                 # No tracking_error_cap: a one-name book cannot track CSI 300,
                 # and the capital buys no mandate of its own.

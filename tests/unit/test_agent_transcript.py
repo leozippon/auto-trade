@@ -14,18 +14,19 @@ from pathlib import Path
 
 import pytest
 
-from autotrade.environment import runtime
-from autotrade.environment.runtime import (
-    AgentTraceWriter,
-    agent_transcript_dir,
-    render_transcript_block,
-)
+from autotrade.environment import trace
 from autotrade.environment.tools import (
     GrepTool,
     ReadFileTool,
     SafeWorkspace,
     SearchRoots,
     ToolRegistry,
+)
+from autotrade.environment.trace import (
+    AgentTraceWriter,
+    TraceEvent,
+    agent_transcript_dir,
+    render_transcript_block,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -91,11 +92,29 @@ def test_every_event_lands_as_one_readable_block_named_by_the_run_ref(tmp_path: 
     assert len(jsonl.splitlines()) == 4
 
 
+def test_an_event_the_trace_does_not_declare_is_refused_before_anything_is_written(
+    tmp_path: Path,
+):
+    writer = _writer(tmp_path)
+    with pytest.raises(ValueError, match="is not a valid TraceEvent"):
+        writer.emit("llm_cal", {"call_index": 1})
+    assert not (tmp_path / "artifacts" / "traces").exists()
+    assert not (tmp_path / "artifacts" / "transcripts").exists()
+
+    # A declared event is written by its name, in the JSONL and the transcript.
+    record = writer.emit(TraceEvent.LLM_CALL, {"call_index": 1})
+    assert type(record["event_type"]) is str and record["event_type"] == "llm_call"
+    line = (tmp_path / "artifacts" / "traces" / "run_raw.jsonl").read_text(encoding="utf-8")
+    assert json.loads(line)["event_type"] == "llm_call"
+    transcript = tmp_path / "artifacts" / "transcripts" / "run_ref_x.txt"
+    assert transcript.read_text(encoding="utf-8").splitlines()[0].split()[2] == "llm_call"
+
+
 def test_long_fields_are_clipped_and_the_transcript_rotates_into_readable_parts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    monkeypatch.setattr(runtime, "TRANSCRIPT_PART_MAX_BYTES", 2_000)
-    writer = _writer(tmp_path, max_event_bytes=runtime.TRACE_MAX_EVENT_BYTES)
+    monkeypatch.setattr(trace, "TRANSCRIPT_PART_MAX_BYTES", 2_000)
+    writer = _writer(tmp_path, max_event_bytes=trace.TRACE_MAX_EVENT_BYTES)
     for index in range(6):
         writer.emit("llm_call", {"call_index": index, "content": f"turn {index} " + "x" * 600})
     parts = sorted((tmp_path / "artifacts" / "transcripts").glob("run_ref_x*.txt"))
@@ -110,10 +129,10 @@ def test_long_fields_are_clipped_and_the_transcript_rotates_into_readable_parts(
     # Every part is a whole number of blocks, so no event is cut in two.
     for part in parts:
         assert part.read_text(encoding="utf-8").startswith("=== ")
-    huge = "y" * (runtime.TRACE_CONTENT_PREVIEW_CHARS + 50)
+    huge = "y" * (trace.TRACE_CONTENT_PREVIEW_CHARS + 50)
     block = render_transcript_block({"ts": "t", "event_type": "llm_call", "content": huge})
     assert "[... 50 more characters in the host trace]" in block
-    assert block.count("y") == runtime.TRACE_CONTENT_PREVIEW_CHARS
+    assert block.count("y") == trace.TRACE_CONTENT_PREVIEW_CHARS
 
 
 def test_the_trace_and_its_transcript_stop_together_at_the_session_cap(tmp_path: Path):

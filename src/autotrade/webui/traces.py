@@ -9,6 +9,7 @@ import threading
 from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 
+from autotrade.environment.trace import TraceEvent
 from autotrade.pipelines.hitl_state import read_status, status_pid_alive
 
 DEFAULT_PAGE_BYTES = 512 * 1024
@@ -55,7 +56,7 @@ def read_initial_prompt(path: Path) -> dict[str, object]:
     with Path(path).open("rb") as handle:
         for raw in handle:
             event = _decode_event(raw)
-            if event.get("event_type") != "session_start":
+            if event.get("event_type") != TraceEvent.SESSION_START:
                 continue
             system = event.get("system_prompt")
             instruction = event.get("instruction")
@@ -256,7 +257,7 @@ def project_trace_blocks(events: object) -> list[dict[str, object]]:
                 }
             )
             continue
-        if kind == "user_message":
+        if kind == TraceEvent.USER_MESSAGE:
             blocks.extend(interval.flush())
             blocks.append(
                 {
@@ -269,11 +270,11 @@ def project_trace_blocks(events: object) -> list[dict[str, object]]:
                 }
             )
             continue
-        if kind == "context_compaction":
+        if kind == TraceEvent.CONTEXT_COMPACTION:
             blocks.extend(interval.flush())
             blocks.append(_compaction_block(event))
             continue
-        if kind == "context_notice":
+        if kind == TraceEvent.CONTEXT_NOTICE:
             blocks.extend(interval.flush())
             blocks.append(
                 {
@@ -303,11 +304,11 @@ def project_trace_blocks(events: object) -> list[dict[str, object]]:
             state = subagents.get(task_id)
             if state is None:
                 state = subagents[task_id] = _SubagentState()
-            if kind == "subagent_tool":
+            if kind == TraceEvent.SUBAGENT_TOOL:
                 state.tools.add(event, seq)
             _observe_subagent(interval, state, event, task_id, seq)
             continue
-        if kind in {"tool_call_started", "tool_call"}:
+        if kind in {TraceEvent.TOOL_CALL_STARTED, TraceEvent.TOOL_CALL}:
             interval.tools.add(event, seq)
     blocks.extend(interval.flush())
     return blocks
@@ -358,15 +359,15 @@ def project_subagent_trace(events: object, task_id: str) -> dict[str, object]:
             continue
         matched += 1
         kind = str(event.get("event_type") or "")
-        if kind == "subagent_tool":
+        if kind == TraceEvent.SUBAGENT_TOOL:
             state.tools.add(event, seq)
             tools.add(event, seq)
             calls.append(_subagent_call_row(event))
         _observe_subagent(header_interval, state, event, task_id, seq)
-        if kind == "subagent_llm":
+        if kind == TraceEvent.SUBAGENT_LLM:
             flush_tools()
             blocks.append(_subagent_round_block(event))
-        elif kind == "subagent_wrap_up":
+        elif kind == TraceEvent.SUBAGENT_WRAP_UP:
             flush_tools()
             blocks.append(
                 _marker_block(
@@ -376,7 +377,7 @@ def project_subagent_trace(events: object, task_id: str) -> dict[str, object]:
                     f"{_as_int(event.get('rounds_limit'))}：已要求子代理立即收尾。",
                 )
             )
-        elif kind == "subagent_steer":
+        elif kind == TraceEvent.SUBAGENT_STEER:
             flush_tools()
             chars = _as_int(event.get("chars"))
             blocks.append(
@@ -388,7 +389,7 @@ def project_subagent_trace(events: object, task_id: str) -> dict[str, object]:
                     else f"已排队（{chars} 字符），子代理下一轮前读取。",
                 )
             )
-        elif kind == "subagent_context_compaction":
+        elif kind == TraceEvent.SUBAGENT_CONTEXT_COMPACTION:
             flush_tools()
             compaction = _as_mapping(event.get("compaction"))
             blocks.append(
@@ -571,15 +572,15 @@ def trace_stats(path: Path) -> dict[str, object]:
                     totals = _as_mapping(event.get("usage_totals"))
                     if totals:
                         subagent_usage[task_id] = _usage_row(totals)
-                elif kind == "subagent_llm" and task_id not in ended_ids:
+                elif kind == TraceEvent.SUBAGENT_LLM and task_id not in ended_ids:
                     _add_usage(
                         subagent_usage.setdefault(task_id, _new_usage()),
                         _as_mapping(event.get("usage")),
                     )
-            if kind == "tool_call":
+            if kind == TraceEvent.TOOL_CALL:
                 tool = str(event.get("tool") or "unknown")
                 tool_counts[tool] = _as_int(tool_counts.get(tool)) + 1
-            elif kind == "llm_call":
+            elif kind == TraceEvent.LLM_CALL:
                 usage = _as_mapping(event.get("usage"))
                 if usage:
                     total += _as_int(usage.get("total_tokens"))
@@ -618,7 +619,7 @@ def trace_stats(path: Path) -> dict[str, object]:
             "subagent_total_tokens": sum(
                 _usage_total(row) for row in subagent_usage.values()
             ),
-            "compact_ops": _as_int(counts.get("context_compaction")),
+            "compact_ops": _as_int(counts.get(TraceEvent.CONTEXT_COMPACTION)),
         }
 
 
@@ -690,7 +691,7 @@ def _decode_event(raw: bytes) -> dict[str, object]:
 def _is_main_agent_llm_call(event: dict[str, object]) -> bool:
     """Parent-session ``llm_call`` rows; sub-agent child calls carry a task id."""
 
-    if str(event.get("event_type") or "") != "llm_call":
+    if str(event.get("event_type") or "") != TraceEvent.LLM_CALL:
         return False
     if _subagent_event_task_id(event) is not None:
         return False
@@ -706,7 +707,7 @@ def _subagent_event_task_id(event: dict[str, object]) -> str | None:
     same set. Prompt text is never parsed.
     """
     kind = str(event.get("event_type") or "")
-    if kind != "subagent" and not kind.startswith("subagent_"):
+    if kind != TraceEvent.SUBAGENT and not kind.startswith("subagent_"):
         return None
     value = event.get("task_id")
     if not isinstance(value, str):
@@ -937,7 +938,7 @@ def _observe_subagent(
 
     phase = _subagent_phase(event)
     _absorb_subagent_text(state, event)
-    if event.get("event_type") == "subagent_llm":
+    if event.get("event_type") == TraceEvent.SUBAGENT_LLM:
         state.llm_calls += 1
         state.rounds = max(state.rounds, _as_int(event.get("round")), state.llm_calls)
         _add_usage(state.usage, _as_mapping(event.get("usage")))
@@ -1043,9 +1044,9 @@ def _refresh_subagent_block(state: _SubagentState) -> None:
 def _subagent_phase(event: dict[str, object]) -> str:
     kind = str(event.get("event_type") or "")
     status = str(event.get("status") or "").strip().lower()
-    if kind == "subagent":
+    if kind == TraceEvent.SUBAGENT:
         return "ended"
-    if kind == "subagent_task":
+    if kind == TraceEvent.SUBAGENT_TASK:
         return "ended" if status in _TERMINAL_SUBAGENT else "started"
     if status in _TERMINAL_SUBAGENT:
         return "ended"
@@ -1058,7 +1059,7 @@ def _terminal_status(event: dict[str, object]) -> str:
 
 
 def _agent_output_text(event: dict[str, object]) -> str | None:
-    if str(event.get("event_type") or "") != "llm_call":
+    if str(event.get("event_type") or "") != TraceEvent.LLM_CALL:
         return None
     text = event.get("content")
     if isinstance(text, str) and text.strip():

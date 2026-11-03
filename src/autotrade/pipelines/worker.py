@@ -33,10 +33,6 @@ from autotrade.environment.data.snapshot import (
 )
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm import (
-    AGENT_MAX_OUTPUT_TOKENS,
-    DEFAULT_LLM_MAX_RETRIES,
-    DEFAULT_LLM_RETRY_BACKOFF_SECONDS,
-    LOCAL_QWEN_MODEL,
     LLMProxy,
     build_model_gateway,
     effective_max_output_tokens,
@@ -49,7 +45,6 @@ from autotrade.environment.llm.lighting import (
 from autotrade.environment.pretrained import pretrained_pin
 from autotrade.environment.runtime import utc_now_iso
 from autotrade.environment.sandbox import (
-    DEFAULT_IMAGE,
     STRATEGY_TMPFS_SIZE,
     GpuMode,
     SandboxConfig,
@@ -61,7 +56,7 @@ from autotrade.environment.sandbox_images import prepare_experiment_sandbox_imag
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.environment.tools.base import CommandRunner
 
-from .arm_params import ArmParams
+from .arm_params import ArmParams, read_param, read_param_or_default, session_models
 from .calendar import (
     GEOMETRY_PARAMETERS,
     ResearchGeometry,
@@ -72,7 +67,6 @@ from .config import (
     DEFAULT_PIT_VIEWS_SEED,
     RollingExperimentConfig,
     acceptance_for,
-    rolling_default,
 )
 from .experiment import RollingExperimentPipeline
 from .hitl_state import (
@@ -119,7 +113,6 @@ from .skills import latest_skills_snapshot, resolve_operating_memory
 # distinct on the wire for the local Qwen profile (its chat template knows
 # low/medium/xhigh; ``high`` was always sent as ``xhigh``).
 REASONING_EFFORTS = ("low", "medium", "xhigh")
-DEFAULT_REASONING_EFFORT = "xhigh"
 
 @dataclass(frozen=True)
 class LLMWorkerSettings:
@@ -321,23 +314,18 @@ def resolve_worker_options(
     check waits for it. Every parameter check runs either way.
     """
 
-    def knob(name: str) -> object:
-        """One rolling-config knob, defaulted from the dataclass.
-
-        ``RollingExperimentConfig`` is the single source of truth for the
-        pipeline defaults. A second literal here would silently reconfigure
-        every experiment whose ``params.json`` predates the knob.
-        """
-        return params.get(name, rolling_default(name))
-
     directory = Path(experiment_dir).resolve()
     repository = Path(repo_root).resolve(strict=True)
     # The deployment's template file is identical for every create on a host,
     # so its absence is not a property of the request.
     repo_file = _repo_path if preflight else _repo_file
     # Every key a parameter, every value of its declared type
-    # (``arm_params.ArmParams``); the checks below read the file itself, so an
-    # arm created before a parameter existed keeps the worker's own fallback.
+    # (``arm_params.ArmParams``). The checks below read the file through
+    # ``read_param``: a key it leaves out takes the parameter's one declared
+    # default (for a pipeline knob ``RollingExperimentConfig``'s), never a
+    # literal of the worker's own that could silently reconfigure every
+    # experiment whose params.json predates the key; a value it states, null
+    # included, is checked as stated.
     ArmParams.from_record(params)
     if params.get("_creation_surface") == "webui":
         altered = [
@@ -361,11 +349,7 @@ def resolve_worker_options(
             raise ValueError(
                 "experiments_root does not match the experiment directory parent"
             )
-    work_root = _path_value(
-        params.get("work_root", ".runtime/sandboxes"),
-        repository,
-        "work_root",
-    )
+    work_root = _path_value(read_param(params, "work_root"), repository, "work_root")
     if repository != work_root and repository not in work_root.parents:
         raise ValueError("work_root must stay inside the repository")
     baseline_value = params.get("baseline_strategy_path", params.get("strategy_path"))
@@ -375,7 +359,7 @@ def resolve_worker_options(
         production_raw = repository / "data" / "raw"
         data_backend = (
             "pit"
-            if str(params.get("developer_mode") or "baseline") == "llm"
+            if str(read_param_or_default(params, "developer_mode")) == "llm"
             and production_raw.is_dir()
             else "daily"
         )
@@ -388,10 +372,10 @@ def resolve_worker_options(
         if data_backend == "daily"
         else None
     )
-    execution_mode = str(params.get("execution_mode") or "sandbox")
+    execution_mode = str(read_param_or_default(params, "execution_mode"))
     if execution_mode not in {"sandbox", "trusted"}:
         raise ValueError("execution_mode must be sandbox or trusted")
-    developer_mode = str(params.get("developer_mode") or "baseline")
+    developer_mode = str(read_param_or_default(params, "developer_mode"))
     if developer_mode not in {"baseline", "llm"}:
         raise ValueError("developer_mode must be baseline or llm")
     llm_settings, sandbox_spec = (
@@ -402,31 +386,20 @@ def resolve_worker_options(
     snapshot_config = _snapshot_config(params)
     # The arm's benchmark: refused here if it is not an index the lake carries,
     # and checked against the pinned release's partitions below.
-    benchmark_index = str(knob("benchmark_index"))
+    benchmark_index = str(read_param(params, "benchmark_index"))
     benchmark_index_label(benchmark_index)
     raw_dir = (
-        _repo_path(repository, params.get("raw_dir", "data/raw"), "raw_dir")
+        _repo_path(repository, read_param(params, "raw_dir"), "raw_dir")
         if data_backend == "pit"
         else None
     )
     events_root = (
-        _repo_path(
-            repository,
-            params.get("fundamental_events_root", "data/pit/fundamental_events"),
-            "fundamental_events_root",
-        )
+        _repo_path(repository, read_param(params, "fundamental_events_root"), "fundamental_events_root")
         if data_backend == "pit"
         else None
     )
     events_status = (
-        _repo_path(
-            repository,
-            params.get(
-                "fundamental_events_status",
-                "results/data_quality/fundamental_events_status.json",
-            ),
-            "fundamental_events_status",
-        )
+        _repo_path(repository, read_param(params, "fundamental_events_status"), "fundamental_events_status")
         if data_backend == "pit"
         else None
     )
@@ -444,7 +417,7 @@ def resolve_worker_options(
     ):
         raise ValueError("pit_cache_root must stay inside the experiment directory")
     pit_views_seed, seed_generation = (
-        _pit_views_seed(params.get("pit_views_seed"), repository, snapshot_config)
+        _pit_views_seed(read_param(params, "pit_views_seed"), repository, snapshot_config)
         if data_backend == "pit"
         else (None, None)
     )
@@ -457,13 +430,7 @@ def resolve_worker_options(
     # running arm keeps the views it was created on.
     if preflight and seed_generation is not None:
         assert_seed_timing_contract(pit_views_seed, snapshot_config)
-    default_geometry = rolling_default("geometry")
-    geometry = ResearchGeometry(
-        **{
-            name: params.get(name, getattr(default_geometry, name))
-            for name in GEOMETRY_PARAMETERS
-        }
-    )
+    geometry = ResearchGeometry(**{name: read_param(params, name) for name in GEOMETRY_PARAMETERS})
     # None: a pre-flight without a named seed reads no data (see the docstring).
     trading_days: list[str] | None = None
     if data_backend == "daily":
@@ -519,59 +486,55 @@ def resolve_worker_options(
         # Held-out slot to its last trading day.
         geometry.heldout(trading_days)
     schedule = StrategySchedule(
-        str(params.get("strategy_period") or "day"),  # type: ignore[arg-type]
-        str(params.get("inference_time") or "08:30"),
+        str(read_param_or_default(params, "strategy_period")),  # type: ignore[arg-type]
+        str(read_param_or_default(params, "inference_time")),
     )
-    initial_cash = _positive_float(
-        params.get("initial_cash", 1_000_000), "initial_cash"
-    )
+    initial_cash = _positive_float(read_param(params, "initial_cash"), "initial_cash")
     rolling = RollingExperimentConfig(
         experiment_id=experiment_id,
         experiments_root=directory.parent,
         geometry=geometry,
         benchmark_index=benchmark_index,
-        window_months=_positive_int(knob("window_months"), "window_months"),
-        max_replay_years=_positive_int(knob("max_replay_years"), "max_replay_years"),
+        window_months=_positive_int(read_param(params, "window_months"), "window_months"),
+        max_replay_years=_positive_int(read_param(params, "max_replay_years"), "max_replay_years"),
         max_null_controls=_nonnegative_int(
-            knob("max_null_controls"), "max_null_controls"
+            read_param(params, "max_null_controls"), "max_null_controls"
         ),
         # Range-checked by the config itself (1 up to the candidate cap).
         batch_validate_max_concurrency=_positive_int(
-            knob("batch_validate_max_concurrency"), "batch_validate_max_concurrency"
+            read_param(params, "batch_validate_max_concurrency"), "batch_validate_max_concurrency"
         ),
-        max_llm_calls=_positive_int(knob("max_llm_calls"), "max_llm_calls"),
-        max_api_spend_usd=_positive_float(knob("max_api_spend_usd"), "max_api_spend_usd"),
+        max_llm_calls=_positive_int(read_param(params, "max_llm_calls"), "max_llm_calls"),
+        max_api_spend_usd=_positive_float(read_param(params, "max_api_spend_usd"), "max_api_spend_usd"),
         session_max_attempts=_positive_int(
-            knob("session_max_attempts"), "session_max_attempts"
+            read_param(params, "session_max_attempts"), "session_max_attempts"
         ),
         max_research_minutes=_positive_int(
-            knob("max_research_minutes"), "max_research_minutes"
+            read_param(params, "max_research_minutes"), "max_research_minutes"
         ),
-        research_directive=str(
-            params.get("research_directive") or ""
-        ),
+        research_directive=str(read_param_or_default(params, "research_directive")),
         workspace_reference=_optional_workspace_reference(
-            params.get("workspace_reference"), repository
+            read_param(params, "workspace_reference"), repository
         ),
-        operating_memory=resolve_operating_memory(params.get("operating_memory")),
+        operating_memory=resolve_operating_memory(read_param(params, "operating_memory")),
         record_failed_attempts=_strict_bool(
-            knob("record_failed_attempts"), "record_failed_attempts"
+            read_param(params, "record_failed_attempts"), "record_failed_attempts"
         ),
         finalize_before_deadline_seconds=_nonnegative_int(
-            knob("finalize_before_deadline_seconds"),
+            read_param(params, "finalize_before_deadline_seconds"),
             "finalize_before_deadline_seconds",
         ),
         per_call_timeout_seconds=_positive_int(
-            knob("per_call_timeout_seconds"), "per_call_timeout_seconds"
+            read_param(params, "per_call_timeout_seconds"), "per_call_timeout_seconds"
         ),
         strategy_fit_timeout_seconds=_positive_int(
-            knob("strategy_fit_timeout_seconds"), "strategy_fit_timeout_seconds"
+            read_param(params, "strategy_fit_timeout_seconds"), "strategy_fit_timeout_seconds"
         ),
         strategy_inference_timeout_seconds=_positive_int(
-            knob("strategy_inference_timeout_seconds"), "strategy_inference_timeout_seconds"
+            read_param(params, "strategy_inference_timeout_seconds"), "strategy_inference_timeout_seconds"
         ),
-        strategy_cpus=_positive_float(knob("strategy_cpus"), "strategy_cpus"),
-        strategy_memory=_memory_limit(knob("strategy_memory"), "strategy_memory"),
+        strategy_cpus=_positive_float(read_param(params, "strategy_cpus"), "strategy_cpus"),
+        strategy_memory=_memory_limit(read_param(params, "strategy_memory"), "strategy_memory"),
         # A tracking mandate exactly where the request named a cap; every
         # limit absent or null takes its default, and the rules check each
         # value's type and range (``config.acceptance_for``).
@@ -579,20 +542,16 @@ def resolve_worker_options(
         schedule=schedule,
         broker_profile=BrokerProfile(
             initial_cash=initial_cash,
-            commission_bps=_nonnegative_float(
-                params.get("commission_bps", 1.0), "commission_bps"
-            ),
-            slippage_bps=_nonnegative_float(
-                params.get("slippage_bps", 5.0), "slippage_bps"
-            ),
+            commission_bps=_nonnegative_float(read_param(params, "commission_bps"), "commission_bps"),
+            slippage_bps=_nonnegative_float(read_param(params, "slippage_bps"), "slippage_bps"),
             dividend_tax=True,
             # Stamped at creation; an arm without the key buys on every board.
             permitted_boards=stamped_permitted_boards(params),
             max_total_holdings=_optional_positive_int(
-                params.get("max_total_holdings"), "max_total_holdings"
+                read_param(params, "max_total_holdings"), "max_total_holdings"
             ),
             max_single_name_weight=_optional_positive_float(
-                params.get("max_single_name_weight"), "max_single_name_weight"
+                read_param(params, "max_single_name_weight"), "max_single_name_weight"
             ),
         ),
     )
@@ -615,8 +574,7 @@ def resolve_worker_options(
         pit_views_seed_required=seed_generation is not None,
         snapshot_config=snapshot_config,
         max_intraday_row_group_rows=_positive_int(
-            params.get("max_intraday_row_group_rows", 2_000_000),
-            "max_intraday_row_group_rows",
+            read_param(params, "max_intraday_row_group_rows"), "max_intraday_row_group_rows"
         ),
         llm=llm_settings,
         agent_sandbox=sandbox_spec,
@@ -1131,16 +1089,14 @@ def _path_value(value: object, repo_root: Path, name: str) -> Path:
 def _snapshot_config(params: dict[str, object]) -> SnapshotConfig:
     """Map persisted WebUI/CLI parameters to the exact PIT snapshot contract."""
 
-    base = SnapshotConfig()
-
     def enabled(name: str) -> bool:
-        value = params.get(name, True)
+        value = read_param(params, name)
         if type(value) is not bool:
             raise ValueError(f"{name} must be boolean")
         return value
 
     def selection(name: str, allowed: tuple[str, ...]) -> tuple[str, ...]:
-        value = params.get(name, ())
+        value = read_param(params, name)
         if value in (None, ""):
             selected: tuple[str, ...] = ()
         elif isinstance(value, (list, tuple)):
@@ -1168,32 +1124,29 @@ def _snapshot_config(params: dict[str, object]) -> SnapshotConfig:
     include_events = enabled("include_events")
     include_text = enabled("include_text")
     include_intraday = enabled("include_intraday")
-    screen_exclude_st = params.get("screen_exclude_st", False)
+    screen_exclude_st = read_param(params, "screen_exclude_st")
     if type(screen_exclude_st) is not bool:
         raise ValueError("screen_exclude_st must be boolean")
     screen_boards = selection("screen_boards", BOARDS)
     return SnapshotConfig(
-        window_months=_positive_int(
-            params.get("window_months", rolling_default("window_months")), "window_months"
-        ),
+        window_months=_positive_int(read_param(params, "window_months"), "window_months"),
         daily_window_months=_optional_positive_int(
-            params.get("daily_window_months"), "daily_window_months"
+            read_param(params, "daily_window_months"), "daily_window_months"
         ),
         fundamentals_window_months=_optional_positive_int(
-            params.get("fundamentals_window_months"), "fundamentals_window_months"
+            read_param(params, "fundamentals_window_months"), "fundamentals_window_months"
         ),
         events_window_months=_optional_positive_int(
-            params.get("events_window_months"), "events_window_months"
+            read_param(params, "events_window_months"), "events_window_months"
         ),
         macro_window_months=_optional_positive_int(
-            params.get("macro_window_months"), "macro_window_months"
+            read_param(params, "macro_window_months"), "macro_window_months"
         ),
         text_window_months=_optional_positive_int(
-            params.get("text_window_months"), "text_window_months"
+            read_param(params, "text_window_months"), "text_window_months"
         ),
         intraday_trade_days=_positive_int(
-            params.get("intraday_trade_days", base.intraday_trade_days),
-            "intraday_trade_days",
+            read_param(params, "intraday_trade_days"), "intraday_trade_days"
         ),
         fundamental_datasets=datasets(
             "fundamental_datasets", include_fundamentals, "fundamentals"
@@ -1209,20 +1162,20 @@ def _snapshot_config(params: dict[str, object]) -> SnapshotConfig:
         replay_include_minutes=include_intraday,
         screen_exclude_st=screen_exclude_st,
         screen_exclude_new_listed_days=_nonnegative_int(
-            params.get("screen_exclude_new_listed_days", 0),
+            read_param(params, "screen_exclude_new_listed_days"),
             "screen_exclude_new_listed_days",
         ),
         screen_min_circ_mv_yi=_optional_nonnegative_float(
-            params.get("screen_min_circ_mv_yi"), "screen_min_circ_mv_yi"
+            read_param(params, "screen_min_circ_mv_yi"), "screen_min_circ_mv_yi"
         ),
         screen_max_circ_mv_yi=_optional_nonnegative_float(
-            params.get("screen_max_circ_mv_yi"), "screen_max_circ_mv_yi"
+            read_param(params, "screen_max_circ_mv_yi"), "screen_max_circ_mv_yi"
         ),
         screen_min_price=_optional_nonnegative_float(
-            params.get("screen_min_price"), "screen_min_price"
+            read_param(params, "screen_min_price"), "screen_min_price"
         ),
         screen_max_price=_optional_nonnegative_float(
-            params.get("screen_max_price"), "screen_max_price"
+            read_param(params, "screen_max_price"), "screen_max_price"
         ),
         screen_boards=screen_boards,
     )
@@ -1234,35 +1187,29 @@ def _llm_settings(
     *,
     preflight: bool = False,
 ) -> tuple[LLMWorkerSettings, SandboxSpec]:
-    env_file = _path_value(
-        params.get("llm_env_file", ".env"), repository, "llm_env_file"
-    )
+    env_file = _path_value(read_param(params, "llm_env_file"), repository, "llm_env_file")
     if repository != env_file and repository not in env_file.parents:
         raise ValueError("llm_env_file must stay inside the repository")
-    fold_model = str(params.get("model") or params.get("llm_model") or LOCAL_QWEN_MODEL)
-    subagent_model = str(params.get("subagent_model") or fold_model)
-    compact_model = str(params.get("compact_model") or LOCAL_QWEN_MODEL)
+    fold_model, subagent_model, compact_model = session_models(params)
     compact_max_tokens = _positive_int(
-        params.get("compact_max_tokens", 1_600),
-        "compact_max_tokens",
+        read_param(params, "compact_max_tokens"), "compact_max_tokens"
     )
     # None = derived from the model windows; ``compaction_for`` sets the
     # effective per-role value either way.
     configured_threshold = _optional_positive_int(
-        params.get("compact_token_threshold"), "compact_token_threshold"
+        read_param(params, "compact_token_threshold"), "compact_token_threshold"
     )
     compaction = ContextCompactionConfig(
         token_threshold=configured_threshold or ContextCompactionConfig.token_threshold,
         keep_recent_messages=_positive_int(
-            params.get("compact_keep_recent_messages", 12),
+            read_param(params, "compact_keep_recent_messages"),
             "compact_keep_recent_messages",
         ),
         max_response_tokens=effective_max_output_tokens(
             compact_model, compact_max_tokens
         ),
         max_calls=_nonnegative_int(
-            params.get("compact_max_calls", 8),
-            "compact_max_calls",
+            read_param(params, "compact_max_calls"), "compact_max_calls"
         ),
     )
     settings = LLMWorkerSettings(
@@ -1271,40 +1218,28 @@ def _llm_settings(
         subagent_model=subagent_model,
         compact_model=compact_model,
         timeout_seconds=_positive_float(
-            params.get(
-                "llm_timeout_seconds",
-                params.get("per_call_timeout_seconds", 3600),
-            ),
+            params.get("llm_timeout_seconds", read_param(params, "per_call_timeout_seconds")),
             "llm_timeout_seconds",
         ),
-        max_retries=_nonnegative_int(
-            params.get("llm_max_retries", DEFAULT_LLM_MAX_RETRIES), "llm_max_retries"
-        ),
+        max_retries=_nonnegative_int(read_param(params, "llm_max_retries"), "llm_max_retries"),
         retry_backoff_seconds=_nonnegative_float(
-            params.get("llm_retry_backoff_seconds", DEFAULT_LLM_RETRY_BACKOFF_SECONDS),
-            "llm_retry_backoff_seconds",
+            read_param(params, "llm_retry_backoff_seconds"), "llm_retry_backoff_seconds"
         ),
         temperature=_bounded_float(
-            params.get("llm_temperature", 0.0), "llm_temperature", 0.0, 2.0
+            read_param(params, "llm_temperature"), "llm_temperature", 0.0, 2.0
         ),
         max_response_tokens=_positive_int(
-            params.get("llm_max_response_tokens", AGENT_MAX_OUTPUT_TOKENS),
-            "llm_max_response_tokens",
+            read_param(params, "llm_max_response_tokens"), "llm_max_response_tokens"
         ),
-        thinking_enabled=not _strict_bool(
-            params.get("no_thinking", False), "no_thinking"
-        ),
-        reasoning_effort=_reasoning_effort(
-            params.get("reasoning_effort", DEFAULT_REASONING_EFFORT)
-        ),
+        thinking_enabled=not _strict_bool(read_param(params, "no_thinking"), "no_thinking"),
+        reasoning_effort=_reasoning_effort(read_param(params, "reasoning_effort")),
         compact_enabled=not _strict_bool(
-            params.get("disable_context_compact", False),
-            "disable_context_compact",
+            read_param(params, "disable_context_compact"), "disable_context_compact"
         ),
         compaction=compaction,
         compact_token_threshold=configured_threshold,
         # Checked by every role's gateway just below, pre-flight included.
-        llm_key=params.get("llm_key", "primary"),  # type: ignore[arg-type]
+        llm_key=read_param(params, "llm_key"),  # type: ignore[arg-type]
     )
     # Whether the host holds a credential is deployment state, not a property
     # of a WebUI create request.  Every model/role combination is still
@@ -1324,27 +1259,23 @@ def _llm_settings(
     settings.compaction_for("subagent")
     settings = replace(settings, compaction=settings.compaction_for("main"))
     _require_short_tier_compaction(settings)
-    gpu_count = _gpu_count(params.get("gpu_count", SandboxSpec().gpu_count))
+    gpu_count = _gpu_count(read_param(params, "gpu_count"))
     # One boundary with the strategy container: the arm's strategy CPUs and
     # memory, unless the internal agent_sandbox_* knobs name others; an arm that
     # names neither keeps the shared default.
     cpus_key = "agent_sandbox_cpus" if "agent_sandbox_cpus" in params else "strategy_cpus"
     memory_key = "agent_sandbox_memory" if "agent_sandbox_memory" in params else "strategy_memory"
     sandbox = SandboxSpec(
-        image=str(params.get("agent_sandbox_image") or DEFAULT_IMAGE),
-        cpus=_positive_float(params.get(cpus_key, SandboxSpec().cpus), cpus_key),
-        memory=_memory_limit(params.get(memory_key, SandboxSpec().memory), memory_key),
-        pids=_positive_int(
-            params.get("agent_sandbox_pids", SandboxSpec().pids), "agent_sandbox_pids"
-        ),
-        tmpfs_size=_memory_limit(
-            params.get("agent_sandbox_tmpfs", "1g"), "agent_sandbox_tmpfs"
-        ),
+        image=str(read_param_or_default(params, "agent_sandbox_image")),
+        cpus=_positive_float(read_param(params, cpus_key), cpus_key),
+        memory=_memory_limit(read_param(params, memory_key), memory_key),
+        pids=_positive_int(read_param(params, "agent_sandbox_pids"), "agent_sandbox_pids"),
+        tmpfs_size=_memory_limit(read_param(params, "agent_sandbox_tmpfs"), "agent_sandbox_tmpfs"),
         gpu=None if gpu_count == 0 else GpuMode.AUTO,
         gpu_count=gpu_count,
         # The store the arm pinned at creation; an arm created before the store
         # has none and its containers mount nothing.
-        pretrained_manifest_sha256=pretrained_pin(params.get("pretrained_manifest_sha256")),
+        pretrained_manifest_sha256=pretrained_pin(read_param(params, "pretrained_manifest_sha256")),
     )
     return settings, sandbox
 

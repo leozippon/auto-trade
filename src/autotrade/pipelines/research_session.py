@@ -46,13 +46,7 @@ from autotrade.environment.llm.model_profiles import (
     token_prices,
 )
 from autotrade.environment.llm.pricing import FREE, ApiSpendExhausted, billed_tokens
-from autotrade.environment.runtime import (
-    AgentTraceWriter,
-    RunManifest,
-    agent_trace_path,
-    agent_transcript_dir,
-    chmod_tree,
-)
+from autotrade.environment.runtime import RunManifest, chmod_tree
 from autotrade.environment.sandbox import (
     DockerSandbox,
     LocalSandbox,
@@ -93,12 +87,19 @@ from autotrade.environment.tools.skill_feedback import (
 )
 from autotrade.environment.tools.step_rollback import StepRollbackTool
 from autotrade.environment.tools.workspace import SafeWorkspace
+from autotrade.environment.trace import (
+    AgentTraceWriter,
+    TraceEvent,
+    agent_trace_path,
+    agent_transcript_dir,
+)
 
 from .calendar import (
     BACKFILLED_MACRO_DATASETS,
     DAILY_HISTORY_START,
     FULL_SPAN,
     MACRO_HISTORY_START,
+    Slot,
     anchor_before,
     months_before,
     yyyymmdd,
@@ -107,6 +108,7 @@ from .config import (
     DEFAULT_MAX_API_SPEND_USD,
     BudgetUsed,
     EvaluationBackend,
+    ReplaySpan,
     ResearchSessionRequest,
     ResearchSessionResult,
     SessionResume,
@@ -707,7 +709,7 @@ class LLMResearchDeveloper:
             )
         except Exception as exc:
             emit_event(
-                "session_error",
+                TraceEvent.SESSION_ERROR,
                 {"status": "error", "error": f"{type(exc).__name__}: {exc}"},
             )
             raise
@@ -1142,7 +1144,7 @@ class LLMResearchDeveloper:
         shared_budget: SessionCallBudget,
         time_budget: InferenceTimeBudget,
         run_ref: str,
-        emit_event: Callable[[str, dict[str, object]], None],
+        emit_event: Callable[[TraceEvent, dict[str, object]], None],
     ) -> AgentSessionRunner:
         """The Agent loop: the role gateways under the shared call budget, the
         sub-agent engine, compaction and the inbox, over the session prompt."""
@@ -1510,7 +1512,7 @@ def session_fact_blocks(workspace: str | Path) -> dict[str, object]:
 
 
 def research_geometry_record(
-    years: Sequence[object],
+    years: Sequence[Slot] | Sequence[ReplaySpan],
     *,
     window_months: int,
     decision_time: str,
@@ -1518,8 +1520,9 @@ def research_geometry_record(
 ) -> dict[str, object]:
     """The research period as a session may know it: research dates only.
 
-    ``years`` are the visible research years in order, anything with
-    ``label``, ``start`` and ``end``. Every decision view carries the
+    ``years`` are the visible research years in order: their slots (the
+    console's prompt preview) or the one-year spans a session replays them as
+    (``ResearchSessionRequest.research_years``). Every decision view carries the
     ``window_months`` of history that end on its anchor day: ``input_window``
     is the session's view, at the end of the visible years, and each year's
     ``input_window`` is that of the view its replay starts from, anchored the
@@ -1539,12 +1542,12 @@ def research_geometry_record(
     first, last = years[0], years[-1]
     return {
         "decision_time": decision_time,
-        "input_window": input_window(last.end),  # type: ignore[attr-defined]
+        "input_window": input_window(last.end),
         "history_floors": {
             "daily": DAILY_HISTORY_START,
             "macro": dict.fromkeys(BACKFILLED_MACRO_DATASETS, MACRO_HISTORY_START),
         },
-        "research_period": f"{first.start}..{last.end}",  # type: ignore[attr-defined]
+        "research_period": f"{first.start}..{last.end}",
         "sealed_years": {
             "period": f"{sealed[0]}..{sealed[1]}",
             "note": (
@@ -1555,11 +1558,11 @@ def research_geometry_record(
         },
         "years": [
             {
-                "label": year.label,  # type: ignore[attr-defined]
-                "start": year.start,  # type: ignore[attr-defined]
-                "end": year.end,  # type: ignore[attr-defined]
+                "label": year.label,
+                "start": year.start,
+                "end": year.end,
                 "input_window": input_window(
-                    anchor_before(year.start).strftime("%Y%m%d")  # type: ignore[attr-defined]
+                    anchor_before(year.start).strftime("%Y%m%d")
                 ),
             }
             for year in years
@@ -1826,7 +1829,7 @@ def _environment_phase(
 
 # The events that carry the session's cumulative spend, so a resumed attempt
 # reads it off the last one an interrupted attempt wrote.
-BUDGET_EVENTS = frozenset({"llm_call", "tool_call", "session_end", "session_error"})
+BUDGET_EVENTS = frozenset({TraceEvent.LLM_CALL, TraceEvent.TOOL_CALL, TraceEvent.SESSION_END, TraceEvent.SESSION_ERROR})
 
 
 def _agent_event_sink(
@@ -1836,26 +1839,26 @@ def _agent_event_sink(
     *,
     budget_used: Callable[[], dict[str, object]] | None = None,
 ):
-    def emit(event_type: str, payload: dict[str, object]) -> None:
+    def emit(event_type: TraceEvent, payload: dict[str, object]) -> None:
         if budget_used is not None and event_type in BUDGET_EVENTS:
             payload = {**payload, "budget_used": budget_used()}
         trace.emit(event_type, payload)
         if progress_hook is None:
             return
-        if event_type == "llm_call_started":
+        if event_type == TraceEvent.LLM_CALL_STARTED:
             stage = "llm_call"
-        elif event_type == "tool_call_started":
+        elif event_type == TraceEvent.TOOL_CALL_STARTED:
             stage = (
                 "backtest"
                 if payload.get("tool") in ("batch_validate", "smoke_backtest")
                 else "tool_call"
             )
-        elif event_type == "subagent_wait_started":
+        elif event_type == TraceEvent.SUBAGENT_WAIT_STARTED:
             # The parent is idle waiting on a child. Without its own stage the
             # console kept showing the preceding llm_call, so a yielding parent
             # looked like a single model call running for tens of minutes.
             stage = "subagent_wait"
-        elif event_type == "session_end":
+        elif event_type == TraceEvent.SESSION_END:
             stage = "agent_complete"
         else:
             return

@@ -67,6 +67,7 @@ from autotrade.environment.tools.base import (
     is_sequential_tool,
 )
 from autotrade.environment.tools.search import trace_read_stub
+from autotrade.environment.trace import TraceEvent
 
 from .compact import (
     DEFAULT_COMPACTION_TOKEN_THRESHOLD,
@@ -193,7 +194,7 @@ _BACKTEST_TOOLS = ("smoke_backtest", "batch_validate")
 # The trace events that carry one tool outcome. The session_end tool_failures
 # scalar and the Agent Trace summary must count the same events, or an audit
 # that reads only the scalar undercounts a session whose children did the work.
-_TOOL_OUTCOME_EVENTS = frozenset({"tool_call", "subagent_tool"})
+_TOOL_OUTCOME_EVENTS = frozenset({TraceEvent.TOOL_CALL, TraceEvent.SUBAGENT_TOOL})
 
 
 def _failed_tool_event(payload: Mapping[str, object]) -> bool:
@@ -330,7 +331,7 @@ class AgentSessionRunner:
         subagent: SubAgentEngine | None = None,
         time_budget: InferenceTimeBudget | None = None,
         conversation_id: str | None = None,
-        event_sink: Callable[[str, dict[str, object]], None] | None = None,
+        event_sink: Callable[[TraceEvent, dict[str, object]], None] | None = None,
         inbox: AgentInboxHook | None = None,
         trace_ref: str | None = None,
     ) -> None:
@@ -499,7 +500,7 @@ class AgentSessionRunner:
         self._cancelled.clear()
         self._session_closed = False
         self._emit(
-            "session_start",
+            TraceEvent.SESSION_START,
             {
                 "system_prompt": self.system_prompt,
                 "instruction": instruction.strip(),
@@ -535,7 +536,7 @@ class AgentSessionRunner:
                     messages.append(ChatMessage("user", WRAP_UP_PROMPT))
                     self._wrap_up_sent = True
                     self._emit(
-                        "wrap_up_started",
+                        TraceEvent.WRAP_UP_STARTED,
                         {
                             "remaining_seconds": round(remaining, 6),
                             "grace_seconds": self.config.deadline_grace_seconds,
@@ -562,7 +563,7 @@ class AgentSessionRunner:
                     allow_semantic_compaction=not self._hard_finalization,
                 )
                 self._emit(
-                    "llm_call_started",
+                    TraceEvent.LLM_CALL_STARTED,
                     {
                         "call_index": llm_calls + 1,
                         "status": "running",
@@ -599,7 +600,7 @@ class AgentSessionRunner:
                     failure["error_type"] = "malformed_tool_call"
                 elif isinstance(exc, ProviderRefusalError):
                     failure["error_type"] = "provider_refusal"
-                self._emit("llm_call", failure)
+                self._emit(TraceEvent.LLM_CALL, failure)
                 if is_context_overflow_error(exc):
                     if not context_overflow_recovery_used:
                         messages, progressed = self._recover_context_overflow(
@@ -687,7 +688,7 @@ class AgentSessionRunner:
                 )
             )
             self._emit(
-                "llm_call",
+                TraceEvent.LLM_CALL,
                 {
                     "call_index": llm_calls,
                     "status": "ok",
@@ -705,7 +706,7 @@ class AgentSessionRunner:
                     # not let the next turn silently repeat the same.
                     completion = int(dict(response.usage).get("completion_tokens") or 0)
                     self._emit(
-                        "output_truncated",
+                        TraceEvent.OUTPUT_TRUNCATED,
                         {
                             "call_index": llm_calls,
                             "completion_tokens": completion,
@@ -778,7 +779,7 @@ class AgentSessionRunner:
                 if call.name == "agent":
                     traced_arguments.pop("task", None)
                 self._emit(
-                    "tool_call",
+                    TraceEvent.TOOL_CALL,
                     {
                         "call_index": llm_calls,
                         "tool_call_id": call.id,
@@ -881,7 +882,7 @@ class AgentSessionRunner:
         )
         messages.append(ChatMessage("user", json.dumps(payload, ensure_ascii=False)))
         self._emit(
-            "time_budget_notice",
+            TraceEvent.TIME_BUDGET_NOTICE,
             {
                 key: value
                 for key, value in payload.items()
@@ -1026,7 +1027,7 @@ class AgentSessionRunner:
         self._hard_finalization = True
         self._hard_finalization_context_initialized = False
         self._emit(
-            "hard_finalization_started",
+            TraceEvent.HARD_FINALIZATION_STARTED,
             {
                 "remaining_seconds": round(max(remaining, 0.0), 6),
                 "main_deadline_remaining_seconds": round(main_remaining, 6),
@@ -1090,7 +1091,7 @@ class AgentSessionRunner:
                 # carries its arguments comes only once it returns: record its
                 # candidates, hypotheses, controls and span now.
                 started["arguments"] = sanitize_for_log(dict(call.arguments))
-            self._emit("tool_call_started", started)
+            self._emit(TraceEvent.TOOL_CALL_STARTED, started)
             phase_error = self._finalization_call_error(call)
             if phase_error:
                 return call, {"ok": False, "error": phase_error}
@@ -1264,7 +1265,7 @@ class AgentSessionRunner:
         for call in calls:
             skipped.append((call, dict(record)))
             self._emit(
-                "tool_skipped",
+                TraceEvent.TOOL_SKIPPED,
                 {
                     "tool_call_id": call.id,
                     "tool": call.name,
@@ -1291,7 +1292,7 @@ class AgentSessionRunner:
             interrupt = bool(getattr(item, "interrupt", False))
             messages.append(ChatMessage("user", text))
             self._emit(
-                "user_message",
+                TraceEvent.USER_MESSAGE,
                 {
                     "message_id": message_id,
                     "interrupt": interrupt,
@@ -1469,7 +1470,7 @@ class AgentSessionRunner:
             job.steer.append(text)
             child_queued = not job.future.running()
         self._emit(
-            "subagent_steer",
+            TraceEvent.SUBAGENT_STEER,
             {
                 "task_id": task_id,
                 "role": job.role,
@@ -1647,7 +1648,7 @@ class AgentSessionRunner:
         if not pending:
             return
         self._emit(
-            "subagent_wait_started",
+            TraceEvent.SUBAGENT_WAIT_STARTED,
             {"pending": len(pending), "wait_floor_seconds": round(floor, 6)},
         )
         for future in pending:
@@ -1769,7 +1770,7 @@ class AgentSessionRunner:
                     )
                     if key in report
                 )
-            self._emit("subagent_attempt", attempt)
+            self._emit(TraceEvent.SUBAGENT_ATTEMPT, attempt)
             finished.append(record)
         return finished
 
@@ -1793,7 +1794,7 @@ class AgentSessionRunner:
             }
             job.record = record
             self._emit(
-                "subagent_attempt",
+                TraceEvent.SUBAGENT_ATTEMPT,
                 {
                     "attempt": job.attempt,
                     "role": job.role,
@@ -1823,7 +1824,7 @@ class AgentSessionRunner:
                 "token_usage", _token_usage_summary(self._usage, self._subagent_totals)
             )
             payload.setdefault("tool_failures", self._tool_failures)
-            self._emit("session_end", payload)
+            self._emit(TraceEvent.SESSION_END, payload)
         finally:
             # Collecting a child and writing the terminal event both touch the
             # trace sink and the result store; a failure there still leaves the
@@ -1912,7 +1913,7 @@ class AgentSessionRunner:
             "replaced_call_range": [self._compacted_through_call + 1, self._llm_calls],
             **event,
         }
-        self._emit("context_compaction", payload)
+        self._emit(TraceEvent.CONTEXT_COMPACTION, payload)
         if progressed:
             self._compacted_through_call = self._llm_calls
             self._context_notice_sent = False
@@ -1954,7 +1955,7 @@ class AgentSessionRunner:
         }
         messages.append(ChatMessage("user", json.dumps(payload, ensure_ascii=False)))
         self._emit(
-            "context_notice",
+            TraceEvent.CONTEXT_NOTICE,
             {key: value for key, value in payload.items() if key not in ("observation", "message")},
         )
         return messages
@@ -1995,7 +1996,7 @@ class AgentSessionRunner:
             result_store=self.tools.result_store(),
         )
         if edit:
-            self._emit("context_edit", edit)
+            self._emit(TraceEvent.CONTEXT_EDIT, edit)
         fits, prompt_tokens, context_window = context_request_fits(
             self.llm,
             messages,
@@ -2020,7 +2021,7 @@ class AgentSessionRunner:
         )
         if prompt_fits and available >= CONTEXT_OUTPUT_MIN_TOKENS:
             self._emit(
-                "context_output_clamped",
+                TraceEvent.CONTEXT_OUTPUT_CLAMPED,
                 {
                     "estimated_prompt_tokens": prompt_tokens,
                     "context_window": context_window,
@@ -2061,7 +2062,7 @@ class AgentSessionRunner:
         )
         if edit:
             self._emit(
-                "context_edit",
+                TraceEvent.CONTEXT_EDIT,
                 {**edit, "reason": "provider_context_overflow_recovery"},
             )
         return recovered, compacted or bool(edit)
@@ -2077,16 +2078,16 @@ class AgentSessionRunner:
         if producing and "finish_session" not in names:
             raise ValueError(f"a session with {producing[0]} requires finish_session")
 
-    def _locked_event_sink(self, event: str, payload: dict[str, object]) -> None:
+    def _locked_event_sink(self, event: TraceEvent, payload: dict[str, object]) -> None:
         with self._event_lock:
             if event in _TOOL_OUTCOME_EVENTS and _failed_tool_event(payload):
                 self._tool_failures += 1
             if self.event_sink is not None:
                 self.event_sink(event, payload)
 
-    def _emit(self, event: str, payload: dict[str, object]) -> None:
+    def _emit(self, event: TraceEvent, payload: dict[str, object]) -> None:
         record = dict(payload)
-        if event == "session_end" and self.subagent is not None:
+        if event == TraceEvent.SESSION_END and self.subagent is not None:
             record["subagent_attempts"] = self._subagent_attempts
             record["subagent_roles"] = sorted(self._subagent_roles)
         self._locked_event_sink(event, record)

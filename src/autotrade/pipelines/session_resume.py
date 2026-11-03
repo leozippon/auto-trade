@@ -34,8 +34,8 @@ from autotrade.common.records import (
     write_json_atomic,
 )
 from autotrade.environment.artifacts import REVISION_MANIFEST_FILE
-from autotrade.environment.runtime import agent_trace_path
 from autotrade.environment.step_tree import StepTree
+from autotrade.environment.trace import TraceEvent, agent_trace_path
 
 from .config import BudgetUsed, EvaluationResult, SessionResume, StepResult
 from .ledger import Stage, recorded_path
@@ -179,7 +179,7 @@ def resume_state(
         path = agent_trace_path(Path(experiment_dir) / "artifacts", run_id)
         run_ref = ""
         for event in _trace_events(path):
-            if event.get("event_type") == "trace_limit_reached":
+            if event.get("event_type") == TraceEvent.TRACE_LIMIT_REACHED:
                 raise RuntimeError(
                     f"attempt trace {run_id} reached its size cap; the spend it "
                     "records is not what the attempt actually used, so the "
@@ -191,7 +191,7 @@ def resume_state(
                 budget = BudgetUsed.from_record(used)
                 budget_at = _moment(event.get("ts"), f"a budget event of trace {run_id}")
             if (
-                event.get("event_type") == "context_compaction"
+                event.get("event_type") == TraceEvent.CONTEXT_COMPACTION
                 and event.get("status") == "ok"
                 and isinstance(event.get("summary"), str)
                 and event["summary"].strip()

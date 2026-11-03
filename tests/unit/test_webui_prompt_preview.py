@@ -29,6 +29,7 @@ from autotrade.agent.prompts import (
     STEP_TREE_SECTION,
 )
 from autotrade.environment.identity import AgentRefStore
+from autotrade.environment.llm import LOCAL_QWEN_MODEL
 from autotrade.environment.sandbox import SandboxConfig
 from autotrade.pipelines.config import (
     DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
@@ -112,6 +113,10 @@ def _experiment(tmp_path: Path, **overrides: object) -> tuple[Path, Path]:
         "fundamental_events_status": "results/data_quality/fundamental_events_status.json",
         "execution_mode": "sandbox",
         "developer_mode": "llm",
+        # The local model the fixture's VLLM credential serves; a file that
+        # leaves the roles out runs on the hosted default.
+        "model": LOCAL_QWEN_MODEL,
+        "compact_model": LOCAL_QWEN_MODEL,
         **GEOMETRY.to_record(),
         # Keeps the pinned release to the core datasets the fixture provides.
         "include_fundamentals": False,

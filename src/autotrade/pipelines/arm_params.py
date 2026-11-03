@@ -12,9 +12,12 @@ A value reads back as the type its field declares or as null, which every
 reader of the file takes as unset (as it takes an empty string for a
 parameter that is not text). A key no field declares is refused. Keys
 beginning with ``_`` are the file's own stamps (who created it and when),
-not parameters. Missing keys take their field's default: an arm created
-before a parameter existed still loads, and the worker applies its own
-fallback where it has one, so an older arm replays as it did.
+not parameters. A missing key takes its field's default. That is the
+parameter's one default: the console stamps it at creation, and the worker
+reads it for a file that leaves the key out (:func:`read_param`), so an arm
+created before a parameter existed still loads and runs on it. A parameter
+the worker derives from another one when unset says so beside its field (the
+sub-agent role runs on the main model, :func:`session_models`).
 """
 
 from __future__ import annotations
@@ -41,7 +44,12 @@ from autotrade.environment.llm.lighting import (
     DEEPSEEK_FLASH_MODEL,
     SHORT_TIER_MAX_COMPACTION_THRESHOLD,
 )
-from autotrade.environment.sandbox import SandboxSpec
+from autotrade.environment.llm.model_profiles import (
+    AGENT_MAX_OUTPUT_TOKENS,
+    DEFAULT_LLM_MAX_RETRIES,
+    DEFAULT_LLM_RETRY_BACKOFF_SECONDS,
+)
+from autotrade.environment.sandbox import DEFAULT_IMAGE, SandboxSpec
 
 from .config import (
     ACCEPTANCE_KEYS,
@@ -86,8 +94,12 @@ def _param(
     return field(default=default, metadata={"surface": surface, "required": required, "stamp": stamp})
 
 
-def _host() -> Any:
-    return _param(surface=Surface.HOST)
+def _host(default: object = None) -> Any:
+    """A host parameter. ``default`` is what the worker reads when a
+    params.json leaves it out; None where the worker derives it from another
+    parameter or it has none."""
+
+    return _param(default, surface=Surface.HOST)
 
 
 # The parameters of the host NL interface (``context.nl()``), removed on
@@ -206,11 +218,12 @@ class SandboxParams:
     strategy_cpus: float = _param(rolling_default("strategy_cpus"))
     strategy_memory: str = _param(rolling_default("strategy_memory"))
     gpu_count: int = _param(SandboxSpec().gpu_count)
-    agent_sandbox_image: str | None = _host()
+    agent_sandbox_image: str | None = _host(DEFAULT_IMAGE)
+    # Left out: the strategy container's strategy_cpus and strategy_memory.
     agent_sandbox_cpus: float | None = _host()
     agent_sandbox_memory: str | None = _host()
-    agent_sandbox_pids: int | None = _host()
-    agent_sandbox_tmpfs: str | None = _host()
+    agent_sandbox_pids: int | None = _host(SandboxSpec().pids)
+    agent_sandbox_tmpfs: str | None = _host(SandboxSpec().tmpfs_size)
     # Stamped by the console at creation from the host's pretrained store
     # (``environment.pretrained``), never requested.
     pretrained_manifest_sha256: str | None = _host()
@@ -240,6 +253,7 @@ class AgentParams:
     # APIs are the operating default, the local model the fallback once the
     # API quota is exhausted.
     model: str = _param(DEEPSEEK_FLASH_MODEL)
+    # Left out or empty: the main model (:func:`session_models`).
     subagent_model: str = _param(DEEPSEEK_FLASH_MODEL)
     compact_model: str = _param(DEEPSEEK_FLASH_MODEL)
     # Which relay credential the arm's calls start on (``primary`` or
@@ -256,17 +270,23 @@ class AgentParams:
     compact_keep_recent_messages: int = _param(10)
     compact_max_tokens: int = _param(10_000)
     compact_max_calls: int = _param(10)
-    llm_env_file: str | None = _host()
+    llm_env_file: str | None = _host(".env")
+    # Stands in for a main role the file leaves out or empty (:func:`session_models`).
     llm_model: str | None = _host()
+    # Left out: per_call_timeout_seconds.
     llm_timeout_seconds: float | None = _host()
-    llm_max_retries: int | None = _host()
-    llm_retry_backoff_seconds: float | None = _host()
-    llm_temperature: float | None = _host()
-    llm_max_response_tokens: int | None = _host()
+    llm_max_retries: int | None = _host(DEFAULT_LLM_MAX_RETRIES)
+    llm_retry_backoff_seconds: float | None = _host(DEFAULT_LLM_RETRY_BACKOFF_SECONDS)
+    llm_temperature: float | None = _host(0.0)
+    llm_max_response_tokens: int | None = _host(AGENT_MAX_OUTPUT_TOKENS)
 
 
-def _managed(value: str) -> Any:
-    return _param(surface=Surface.MANAGED, stamp=value)
+def _managed(stamp: str, *, default: object = MISSING) -> Any:
+    """A console-managed parameter the console stamps as ``stamp``.
+    ``default``, what the worker reads when a worker-side params.json leaves
+    it out, is the stamp unless named."""
+
+    return _param(stamp if default is MISSING else default, surface=Surface.MANAGED, stamp=stamp)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -275,20 +295,23 @@ class EnvironmentParams:
     stamps the only supported research environment; the rest belongs to a
     worker-side params.json or the command line."""
 
-    strategy_path: str | None = _managed("configs/agent_output_template/main.py")
-    data_backend: str | None = _managed("pit")
+    strategy_path: str | None = _managed("configs/agent_output_template/main.py", default=None)
+    # Left out: pit for an LLM arm on a host with the raw lake, else daily.
+    data_backend: str | None = _managed("pit", default=None)
     raw_dir: str | None = _managed("data/raw")
     fundamental_events_root: str | None = _managed("data/pit/fundamental_events")
     fundamental_events_status: str | None = _managed(
         "results/data_quality/fundamental_events_status.json"
     )
     execution_mode: str | None = _managed("sandbox")
-    developer_mode: str | None = _managed("llm")
+    developer_mode: str | None = _managed("llm", default="baseline")
+    # Left out: strategy_path.
     baseline_strategy_path: str | None = _host()
     daily_path: str | None = _host()
+    # Left out: the experiment directory's pit_views.
     pit_cache_root: str | None = _host()
     experiments_root: str | None = _host()
-    work_root: str | None = _host()
+    work_root: str | None = _host(".runtime/sandboxes")
 
 
 # The console's own value of each required acceptance rule
@@ -521,6 +544,39 @@ def managed_values() -> dict[str, object]:
     return {name: PARAMETERS[name].stamp for name in parameters(Surface.MANAGED)}
 
 
+def read_param(params: Mapping[str, object], name: str) -> object:
+    """Parameter ``name`` as a params.json states it, null included, or its
+    declared default when the file leaves it out. A name no parameter
+    declares raises ``KeyError``."""
+
+    return params.get(name, PARAMETERS[name].default)
+
+
+def read_param_or_default(params: Mapping[str, object], name: str) -> object:
+    """:func:`read_param`, with a stated null or empty string also taking
+    the declared default: for a parameter whose reader takes an empty value
+    as unset."""
+
+    value = read_param(params, name)
+    return PARAMETERS[name].default if value in (None, "") else value
+
+
+def session_models(params: Mapping[str, object]) -> tuple[str, str, str]:
+    """The models an arm's main, sub-agent and compaction roles run on.
+
+    A role the file leaves out or empty takes its default, except that a
+    worker-side ``llm_model`` stands in for the main role and the sub-agent
+    role runs on the main model.
+    """
+
+    main = str(params.get("model") or params.get("llm_model") or PARAMETERS["model"].default)
+    return (
+        main,
+        str(params.get("subagent_model") or main),
+        str(read_param_or_default(params, "compact_model")),
+    )
+
+
 def console_request(
     request: Mapping[str, object],
     *,
@@ -594,4 +650,7 @@ __all__ = [
     "console_request",
     "managed_values",
     "parameters",
+    "read_param",
+    "read_param_or_default",
+    "session_models",
 ]
