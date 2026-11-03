@@ -39,6 +39,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from autotrade.common.records import read_json_object
 from autotrade.common.time import CN_TZ
 from autotrade.data_quality import read_quality_report
 from autotrade.environment.broker_core import BOARDS, board_of
@@ -2640,7 +2641,7 @@ def load_snapshot_manifest(snapshot_dir: str | Path) -> dict[str, object]:
     path = Path(snapshot_dir) / "manifest.json"
     if not path.exists():
         raise FileNotFoundError(f"snapshot manifest missing: {path}")
-    return json.loads(path.read_text(encoding="utf-8"))
+    return read_json_object(path)
 
 
 def _partition_overlaps(stem: str, start_day: str, end_day: str) -> bool:
@@ -2847,7 +2848,7 @@ def _declare_present_inventory_columns(
     inventory_path = Path(__file__).resolve().parents[4] / "configs" / "data" / "snapshot_columns.json"
     if not inventory_path.is_file():
         return dataset_columns
-    inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    inventory = read_json_object(inventory_path)
     owned = inventory.get("files", {}).get("fundamentals.parquet", {})
     out = {dataset: list(columns) for dataset, columns in dataset_columns.items()}
     for column in extra:

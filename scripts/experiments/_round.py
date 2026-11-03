@@ -122,11 +122,14 @@ from _bootstrap import add_repo_src
 
 REPO_ROOT = add_repo_src(__file__)
 
+from autotrade.common.ids import is_experiment_id
+from autotrade.common.records import read_json_object
 from autotrade.environment import pretrained
 from autotrade.environment.artifacts import FilesystemArtifactStore
 from autotrade.environment.gpu import GpuUnavailableError, host_min_free_gpu_memory_mib
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import rmtree_keeping_file_modes
+from autotrade.environment.sandbox import GpuMode
 from autotrade.pipelines.calendar import FULL_SPAN
 from autotrade.pipelines.config import (
     SNAPSHOT_CACHE_FORMAT_VERSION,
@@ -147,7 +150,6 @@ from autotrade.pipelines.worker import build_experiment_pipeline, resolve_worker
 
 # The console's own id, local-arm and GPU-request rules; importing them keeps
 # this module from growing a second copy of the create contract.
-from autotrade.webui.manager import _ID as EXPERIMENT_ID_RE
 from autotrade.webui.manager import gpu_request, uses_local_model
 
 EXPERIMENTS_ROOT = REPO_ROOT / "experiments"
@@ -735,7 +737,7 @@ def normalize(params: dict[str, object]) -> dict[str, object]:
     if missing:
         raise ValueError("missing required experiment parameters: " + ", ".join(missing))
     experiment_id = str(params.get("experiment_id") or "").strip()
-    if not EXPERIMENT_ID_RE.fullmatch(experiment_id):
+    if not is_experiment_id(experiment_id):
         raise ValueError("experiment_id must match [A-Za-z0-9][A-Za-z0-9_-]{0,99}")
     merged.update(
         {
@@ -812,7 +814,7 @@ def smoke(merged: Mapping[str, object]) -> str:
             digest.update(str(path.relative_to(starter)).encode("utf-8") + b"\0" + path.read_bytes())
     record_path = REPO_ROOT / "logs" / "research" / "smoke" / f"{digest.hexdigest()[:20]}.json"
     if record_path.is_file():
-        record = json.loads(record_path.read_text(encoding="utf-8"))
+        record = read_json_object(record_path)
         if record["passed"]:
             return ""
         return f"{record['failure']} (recorded {record_path.relative_to(REPO_ROOT)}; delete it to smoke again)"
@@ -864,7 +866,7 @@ def _smoke_replays(merged: Mapping[str, object], starter: Path) -> str:
         # The admission margin is the console's own, so a card the console would
         # start the arm on is not refused here for being busy.
         spec = options.agent_sandbox
-        if spec is not None and spec.gpu == "auto":
+        if spec is not None and spec.gpu == GpuMode.AUTO:
             try:
                 margin = host_min_free_gpu_memory_mib()
             except ValueError as exc:
@@ -1115,8 +1117,8 @@ class Round:
                 " written its contract yet, so the round is refused below"
             )
         try:
-            record = json.loads(provider.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+            record = read_json_object(provider)
+        except (OSError, ValueError) as exc:
             return f"seed {self.pit_views_seed}: provider.json unreadable ({exc}); the round is refused below"
         version = record.get("schema_version")
         if version != SNAPSHOT_CACHE_FORMAT_VERSION:

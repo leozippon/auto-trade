@@ -9,7 +9,6 @@ strategy content; it only prepares, freezes, replays and records.
 from __future__ import annotations
 
 import hashlib
-import json
 import math
 import re
 import sys
@@ -22,6 +21,7 @@ from tempfile import TemporaryDirectory
 
 import pandas as pd
 
+from autotrade.common.records import read_json_object
 from autotrade.environment.artifacts import (
     copy_artifact,
     copy_model_artifacts,
@@ -1385,7 +1385,7 @@ def seed_change(experiment_dir: str | Path, nominee_revision: str, replicate_rev
 def _revision_files(directory: Path) -> dict[str, str]:
     """``path -> sha256`` of every file one recorded revision holds."""
 
-    manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+    manifest = read_json_object(directory / "manifest.json")
     return {str(entry["path"]): str(entry["sha256"]) for entry in manifest["files"]}
 
 
@@ -1508,7 +1508,7 @@ def _style_analysis(experiment_dir: str | Path, row: Mapping[str, object]) -> di
     (``ledger.recorded_path``)."""
 
     result = recorded_path(experiment_dir, str(row["validation_result_ref"]))
-    return json.loads((result.parent / STYLE_ARTIFACT_NAME).read_text(encoding="utf-8"))
+    return read_json_object(result.parent / STYLE_ARTIFACT_NAME)
 
 
 def null_control_seed(key: str, role: str) -> int:
@@ -1545,7 +1545,7 @@ def validation_statistics(result_ref: str) -> dict[str, object] | None:
     """
 
     path = Path(result_ref).parent / STYLE_ARTIFACT_NAME
-    return _measured_or_none(json.loads(path.read_text(encoding="utf-8")))
+    return _measured_or_none(read_json_object(path))
 
 
 def replay_and_analysis(result_ref: str) -> tuple[dict[str, object], dict[str, object]]:
@@ -1553,8 +1553,8 @@ def replay_and_analysis(result_ref: str) -> tuple[dict[str, object], dict[str, o
 
     path = Path(result_ref)
     return (
-        json.loads(path.read_text(encoding="utf-8")),
-        json.loads((path.parent / STYLE_ARTIFACT_NAME).read_text(encoding="utf-8")),
+        read_json_object(path),
+        read_json_object(path.parent / STYLE_ARTIFACT_NAME),
     )
 
 

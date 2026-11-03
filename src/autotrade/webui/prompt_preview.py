@@ -103,13 +103,13 @@ class _SessionContext:
         from the worker's own sandbox derivation rather than a second copy of
         the defaults."""
         from autotrade.pipelines.worker import (
-            _strategy_boundary,
-            _strategy_sandbox_from_spec,
+            strategy_boundary,
+            strategy_sandbox_from_spec,
         )
 
-        return _strategy_sandbox_from_spec(
+        return strategy_sandbox_from_spec(
             self.options.agent_sandbox,
-            **_strategy_boundary(self.rolling),
+            **strategy_boundary(self.rolling),
         )
 
     @property

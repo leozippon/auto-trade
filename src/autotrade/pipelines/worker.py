@@ -753,8 +753,8 @@ def resolve_worker_options(
     )
 
 
-def _strategy_boundary(rolling: RollingExperimentConfig) -> dict[str, Any]:
-    """The arm's strategy-container boundary as ``_strategy_sandbox_from_spec``
+def strategy_boundary(rolling: RollingExperimentConfig) -> dict[str, Any]:
+    """The arm's strategy-container boundary as ``strategy_sandbox_from_spec``
     takes it: the one mapping every builder of an arm's strategy sandbox (the
     pipeline, a Paper book, the console's prompt preview) passes on."""
 
@@ -766,7 +766,7 @@ def _strategy_boundary(rolling: RollingExperimentConfig) -> dict[str, Any]:
     }
 
 
-def _strategy_sandbox_from_spec(
+def strategy_sandbox_from_spec(
     spec: SandboxSpec | None,
     *,
     fit_timeout_seconds: float,
@@ -871,9 +871,9 @@ def build_experiment_pipeline(
         if agent and options.llm.compact_enabled
         else None
     )
-    strategy_sandbox = _strategy_sandbox_from_spec(
+    strategy_sandbox = strategy_sandbox_from_spec(
         options.agent_sandbox,
-        **_strategy_boundary(options.rolling),
+        **strategy_boundary(options.rolling),
         experiment_id=options.experiment_id,
     )
     if options.data_backend == "pit":

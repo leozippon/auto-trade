@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
+from autotrade.common.records import read_json_object
 from autotrade.common.time import CN_TZ
 from autotrade.environment.data.pit import concat_rows
 
@@ -3518,7 +3519,7 @@ def sidecar_params(path: Path) -> dict[str, Any]:
     if not meta_path.exists():
         return {}
     try:
-        return json.loads(meta_path.read_text(encoding="utf-8")).get("params") or {}
+        return read_json_object(meta_path).get("params") or {}
     except Exception:  # noqa: BLE001 - unreadable sidecar is treated as having no params
         return {}
 

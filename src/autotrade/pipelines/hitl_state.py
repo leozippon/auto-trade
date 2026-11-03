@@ -3,16 +3,15 @@
 from __future__ import annotations
 
 import fcntl
-import json
 import os
 import threading
-import uuid
 from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from autotrade.common.records import read_json_object, write_json_atomic
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.gpu import (
@@ -290,7 +289,7 @@ class ControlState:
 
 
 def read_control(path: str | Path) -> ControlState:
-    payload = read_json(path)
+    payload = read_json_object(path, missing_ok=True)
     _require_version(payload, Path(path))
     if not payload:
         return ControlState()
@@ -314,7 +313,7 @@ def write_control(path: str | Path, state: ControlState) -> None:
     """Write the control file, stamping the state with this write's time."""
 
     state.updated_at = _now()
-    _write_json(Path(path), state.to_record())
+    write_json_atomic(Path(path), state.to_record())
 
 
 @contextmanager
@@ -364,24 +363,14 @@ def consume_restart_request(path: str | Path) -> bool:
         return True
 
 
-def read_json(path: str | Path) -> dict[str, object]:
-    target = Path(path)
-    if not target.exists():
-        return {}
-    payload = json.loads(target.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise TypeError(f"expected JSON object in {target}")
-    return payload
-
-
 def read_status(path: str | Path) -> dict[str, object]:
-    payload = read_json(path)
+    payload = read_json_object(path, missing_ok=True)
     _require_version(payload, Path(path))
     return payload
 
 
 def write_gpu_claim(hitl: str | Path, devices: list[int]) -> None:
-    _write_json(
+    write_json_atomic(
         Path(hitl) / GPU_CLAIM_NAME,
         {"devices": [int(device) for device in devices], "claimed_at": _now()},
     )
@@ -390,7 +379,7 @@ def write_gpu_claim(hitl: str | Path, devices: list[int]) -> None:
 def read_gpu_claim(hitl: str | Path) -> tuple[int, ...] | None:
     """The devices of an arm's GPU claim, or ``None`` when it has none."""
     path = Path(hitl) / GPU_CLAIM_NAME
-    payload = read_json(path)
+    payload = read_json_object(path, missing_ok=True)
     if not payload:
         return None
     devices = payload.get("devices")
@@ -422,7 +411,7 @@ def running_arms(experiments_root: str | Path) -> list[str]:
         if not directory.is_dir() or directory.name.startswith("."):
             continue
         try:
-            status = read_json(directory / HITL_DIR_NAME / STATUS_NAME)
+            status = read_json_object(directory / HITL_DIR_NAME / STATUS_NAME, missing_ok=True)
         except (OSError, TypeError, ValueError):
             continue
         if status_pid_alive(status) and status.get("state") not in ENDED_STATES:
@@ -610,7 +599,7 @@ class StatusReporter:
             self._write_locked()
 
     def _write_locked(self) -> None:
-        _write_json(
+        write_json_atomic(
             self.path,
             {
                 **self._state,
@@ -718,26 +707,6 @@ def _require_version(payload: dict[str, object], path: Path) -> None:
         or payload["schema_version"] != HITL_STATE_SCHEMA_VERSION
     ):
         raise ValueError(f"incompatible HITL state in {path}")
-
-
-def _write_json(path: Path, payload: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        temporary.write_text(
-            json.dumps(
-                payload,
-                ensure_ascii=False,
-                sort_keys=True,
-                allow_nan=False,
-                default=str,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        temporary.replace(path)
-    finally:
-        temporary.unlink(missing_ok=True)
 
 
 def _string_map(value: object) -> dict[str, str]:

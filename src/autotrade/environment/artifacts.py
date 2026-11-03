@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
-from autotrade.common.records import write_json_atomic
+from autotrade.common.records import read_json_object, write_json_atomic
 
 from .runtime import (
     RUNTIME_CACHE_DIR_NAMES,
@@ -326,10 +326,10 @@ class FilesystemArtifactStore:
         if expected_path is not None and Path(expected_path).resolve(strict=True) != output:
             raise ArtifactError(f"frozen artifact path mismatch: {artifact_id}")
         try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+            manifest = read_json_object(manifest_path)
+        except (OSError, ValueError) as exc:
             raise ArtifactError(f"invalid frozen artifact manifest: {artifact_id}") from exc
-        if not isinstance(manifest, dict) or manifest.get("artifact_id") != artifact_id:
+        if manifest.get("artifact_id") != artifact_id:
             raise ArtifactError(f"frozen artifact manifest identity mismatch: {artifact_id}")
         if experiment_id is not None and manifest.get("experiment_id") != experiment_id:
             raise ArtifactError(f"frozen artifact belongs to another experiment: {artifact_id}")

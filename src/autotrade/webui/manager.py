@@ -13,7 +13,7 @@ import time
 from collections.abc import Mapping
 from pathlib import Path
 
-from autotrade.common.ids import EXPERIMENT_ID, is_experiment_id
+from autotrade.common.ids import is_experiment_id
 from autotrade.common.records import read_json_object_or_empty, write_json_atomic
 from autotrade.environment import pretrained
 from autotrade.environment.broker import default_permitted_boards
@@ -89,9 +89,6 @@ ARM_DISK_MARGIN_BYTES = 3 * 1024**3
 _TERMINATE_GRACE_SECONDS = 10.0
 _RESTART_GRACE_SECONDS = 30.0
 _SIGKILL_EXIT_SECONDS = 5.0
-# Read under this name by scripts/experiments/_round.py until it imports
-# autotrade.common.ids itself.
-_ID = EXPERIMENT_ID
 _TERMINAL_RESUMABLE_STATES = (
     "stopped",
     "failed",

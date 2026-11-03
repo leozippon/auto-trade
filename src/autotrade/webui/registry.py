@@ -31,6 +31,8 @@ from autotrade.agent.runner import (
     DEADLINE_GRACE_EXHAUSTED,
     LLM_CALL_BUDGET_EXHAUSTED,
 )
+from autotrade.common.ids import is_experiment_id
+from autotrade.common.records import read_json_object
 from autotrade.environment.replay.style import (
     READABLE_STYLE_SCHEMA_VERSIONS,
     STYLE_ARTIFACT_NAME,
@@ -59,7 +61,6 @@ from autotrade.pipelines.hitl_state import (
     arm_is_archived,
     read_control,
     read_gpu_claim,
-    read_json,
     read_status,
     status_pid_alive,
 )
@@ -93,7 +94,6 @@ from autotrade.pipelines.worker import _ALLOWED_PARAMS
 from .public_identity import PublicIdentity
 from .traces import resolve_trace_path, trace_stats
 
-_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$")
 ACTIVE_STATES = ("launching", "initializing", "running_session", "paused")
 # Manager-written stub state between spawn and the worker's first status write
 # (interpreter start + imports take seconds). Stale = the worker never came up.
@@ -625,7 +625,7 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
         state = experiment_state(directory)
         records = read_ledger_records(directory)
         skills = latest_skills_snapshot(records, experiment_dir=directory).stats
-        params = read_json(directory / HITL_DIR_NAME / PARAMS_NAME)
+        params = read_json_object(directory / HITL_DIR_NAME / PARAMS_NAME, missing_ok=True)
         _require_supported_params(params)
         raw_status = state.get("status")
         status = identity.public_status(raw_status) if isinstance(raw_status, Mapping) else {}
@@ -800,7 +800,7 @@ def archive_marker(directory: Path) -> dict[str, object] | None:
     """The arm's archive marker (when and why), or None when it is not archived."""
 
     path = Path(directory) / HITL_DIR_NAME / ARCHIVED_NAME
-    return read_json(path) if path.is_file() else None
+    return read_json_object(path, missing_ok=True) if path.is_file() else None
 
 
 # Rows kept by another process were derived by the code that process ran, so a
@@ -908,7 +908,7 @@ def best_experiment(rows: Sequence[Mapping[str, object]]) -> dict[str, object] |
 
 
 def resolve_experiment_dir(root: Path, experiment_id: str) -> Path:
-    if not _ID.fullmatch(experiment_id):
+    if not is_experiment_id(experiment_id):
         raise ValueError(f"invalid experiment id: {experiment_id!r}")
     root = Path(root).resolve()
     path = (root / experiment_id).resolve()
@@ -925,7 +925,7 @@ def _cost_stress_multiplier(directory: Path) -> float:
     of the rules, so an arm stamped before a rule became required still
     lists."""
 
-    params = read_json(directory / HITL_DIR_NAME / PARAMS_NAME)
+    params = read_json_object(directory / HITL_DIR_NAME / PARAMS_NAME, missing_ok=True)
     return float(defaulted_acceptance(params)["cost_stress_multiplier"])  # type: ignore[arg-type]
 
 
@@ -1096,7 +1096,7 @@ def _live_steps(directory: Path) -> list[dict[str, object]]:
         key = (str(directory), path.stem)
         row = _LIVE_STEP_CACHE.get(key)
         if row is None:
-            record = read_json(path)
+            record = read_json_object(path, missing_ok=True)
             try:
                 reference = str(
                     recorded_path(directory, str(record.get("result_ref") or ""))
@@ -1479,7 +1479,7 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
     records = read_ledger_records(directory)
     research = research_records(records)
     hitl = directory / HITL_DIR_NAME
-    params = read_json(hitl / PARAMS_NAME)
+    params = read_json_object(hitl / PARAMS_NAME, missing_ok=True)
     sessions: list[dict[str, object]] = []
     for planned in identity.sessions:
         key = str(planned["session_key"])
@@ -1580,7 +1580,7 @@ def result_style(root: Path, experiment_id: str, name: str) -> dict[str, object]
 
     sidecar = ledger_result(root, experiment_id, name).parent / STYLE_ARTIFACT_NAME
     try:
-        payload = read_json(sidecar)
+        payload = read_json_object(sidecar, missing_ok=True)
     except (OSError, TypeError, ValueError):
         return {"available": False, "reason": "unreadable"}
     if (
@@ -1602,7 +1602,7 @@ def result_orders(
     """
     path = ledger_result(root, experiment_id, name)
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = read_json_object(path)
     except (OSError, ValueError) as exc:
         raise KeyError(f"unreadable result: {name}") from exc
     rows = payload.get("executions") if isinstance(payload, dict) else None

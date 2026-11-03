@@ -69,6 +69,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from autotrade.common.records import read_json_object
 from autotrade.environment.data.contracts import RAW_GENERATION_FILENAME
 from autotrade.environment.data.pit import (
     FIRST_SEEN_COLUMN,
@@ -289,7 +290,7 @@ def versioned_since(raw_dir: Path) -> str | None:
     record = Path(raw_dir) / RAW_GENERATION_FILENAME
     if not record.exists():
         return None
-    return json.loads(record.read_text(encoding="utf-8")).get("versioned_since") or None
+    return read_json_object(record).get("versioned_since") or None
 
 
 def records_observations(path: Path) -> bool:
@@ -490,7 +491,7 @@ def rebuild_observations(path: Path) -> dict[str, int]:
     rows: dict[str, str] = {}
     previous: set[str] = set()
     for state in [*states, path]:
-        state_meta = json.loads(sidecar_path(state).read_text(encoding="utf-8"))
+        state_meta = read_json_object(sidecar_path(state))
         held = set(key_strings(pd.read_parquet(state, columns=[c for c in keys if c in pq.ParquetFile(state).schema_arrow.names]), keys))
         since = state_meta.get("visible_since")
         if since:
@@ -713,7 +714,7 @@ def restore(path: Path, version: str, *, ledger: Path | str | None, source: str 
     if not source_file.is_file() or not sidecar_path(source_file).is_file():
         raise FileNotFoundError(f"version {version} of {path} does not exist: {source_file}")
     complete_interrupted_commit(path)
-    version_meta = json.loads(sidecar_path(source_file).read_text(encoding="utf-8"))
+    version_meta = read_json_object(sidecar_path(source_file))
     meta = _read_meta(path) if path.exists() else {}
     keys = list(version_meta.get("key_columns") or meta.get("key_columns") or [])
     restored = pd.read_parquet(source_file)
@@ -753,7 +754,7 @@ def dataset_vintage(dataset_path: Path) -> str:
     dataset_path = Path(dataset_path)
     entries: list[str] = []
     for meta_path in sorted(dataset_path.rglob("*.parquet.meta.json")):
-        payload = json.loads(meta_path.read_text(encoding="utf-8"))
+        payload = read_json_object(meta_path)
         if payload.get("restated_write_id"):
             entries.append(f"{meta_path.relative_to(dataset_path).as_posix()}\t{payload['restated_write_id']}")
     digest = hashlib.sha256("\n".join([dataset_path.name, *entries]).encode("utf-8"))

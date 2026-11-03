@@ -236,7 +236,7 @@ def _seed_generation(seed: Path) -> str:
     """The generation a seed's views were built from, as its ``provider.json`` records it."""
     path = seed / "provider.json"
     try:
-        return str(json.loads(path.read_text(encoding="utf-8")).get("generation_id") or "")
+        return str(read_json_object(path).get("generation_id") or "")
     except (OSError, ValueError, AttributeError) as exc:
         raise RuntimeError(f"cannot read the release seed record {path} names: {exc}") from exc
 

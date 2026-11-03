@@ -9,7 +9,6 @@ into the Agent runner, so this module never imports it back.
 
 from __future__ import annotations
 
-import json
 import queue
 import shutil
 import time
@@ -21,7 +20,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 
 from autotrade.agent.compact import safe_error_summary
-from autotrade.common.records import redact_host_paths
+from autotrade.common.records import read_json_object, redact_host_paths
 from autotrade.environment.artifacts import (
     READONLY_FILES,
     ArtifactSnapshotUnstable,
@@ -106,7 +105,7 @@ def _step_analysis(step: StepResult) -> dict[str, object]:
     """The style sidecar beside one recorded Validation's result."""
 
     result_dir = Path(step.validation.result_ref).parent
-    return json.loads((result_dir / STYLE_ARTIFACT_NAME).read_text(encoding="utf-8"))
+    return read_json_object(result_dir / STYLE_ARTIFACT_NAME)
 
 
 def _active_excess_at_cost_stress(step: StepResult, multiplier: float) -> float | None:
@@ -553,7 +552,7 @@ def _smoke_pit(result_dir: Path) -> dict[str, object]:
     replay exposed under asof_dir and, for a smoke run, each one's date range
     on its last day (``pit_backend.asof_date_ranges``)."""
     try:
-        record = json.loads((result_dir / "result.json").read_text(encoding="utf-8"))
+        record = read_json_object(result_dir / "result.json")
     except (OSError, ValueError):
         return {}
     pit = record.get("pit")
@@ -590,7 +589,7 @@ def write_active_daily(result_ref: str) -> Path:
     """
 
     result_dir = Path(result_ref).parent
-    analysis = json.loads((result_dir / STYLE_ARTIFACT_NAME).read_text(encoding="utf-8"))
+    analysis = read_json_object(result_dir / STYLE_ARTIFACT_NAME)
     target = result_dir / PurePosixPath(VALIDATION_DAILY_ATTACHMENT).name
     staging = target.with_name(f".{target.name}.{uuid.uuid4().hex[:8]}.tmp")
     try:

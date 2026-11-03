@@ -10,9 +10,9 @@ from. The nightly full audit writes this report before the morning runs.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
+from autotrade.common.records import read_json_object
 from autotrade.environment.data.contracts import (
     RAW_GENERATION_FILENAME,
     dataset_vintages,
@@ -25,7 +25,7 @@ from .pit import LIVE_GENERATION, PIT_CACHE_NAME
 
 
 def _record(path: Path) -> dict[str, object]:
-    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    return read_json_object(path, missing_ok=True)
 
 
 def book_vintage_changes(book_root: str | Path) -> dict[str, object]:

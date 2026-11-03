@@ -9,7 +9,6 @@ config knobs in and records the result.
 from __future__ import annotations
 
 import fcntl
-import json
 import re
 import subprocess
 import uuid
@@ -18,7 +17,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
-from autotrade.common.records import write_json_atomic
+from autotrade.common.records import read_json_object, write_json_atomic
 
 from .runtime import utc_now_iso
 from .sandbox import SandboxSpec, probe_image_runtime
@@ -46,13 +45,9 @@ def _image_state_lock(experiment_dir: Path) -> Iterator[None]:
 
 def _load_image_state(path: Path, *, experiment_id: str) -> dict[str, object]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        payload = read_json_object(path)
+    except (OSError, ValueError) as exc:
         raise RuntimeError(f"invalid persisted sandbox image state: {path}") from exc
-    if not isinstance(payload, dict):
-        raise RuntimeError(
-            f"invalid persisted sandbox image state: {path}"
-        )
     image_ref = payload.get("image_ref")
     generation_id = payload.get("build_generation_id")
     if payload.get("experiment_id") != experiment_id:
@@ -173,7 +168,7 @@ def reclaim_experiment_sandbox_images(
     """
 
     try:
-        payload = json.loads(_image_state_path(experiment_dir).read_text(encoding="utf-8"))
+        payload = read_json_object(_image_state_path(experiment_dir))
     except (OSError, ValueError):
         return []
     owned = payload.get("owned_image_refs") if isinstance(payload, dict) else None

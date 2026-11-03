@@ -312,8 +312,8 @@ def test_an_arm_without_the_boundary_keys_keeps_todays_containers_and_one_with_t
     from autotrade.environment.sandbox import SandboxConfig, SandboxSpec
     from autotrade.pipelines.research_session import LLMResearchDeveloper
     from autotrade.pipelines.worker import (
-        _strategy_boundary,
-        _strategy_sandbox_from_spec,
+        strategy_boundary,
+        strategy_sandbox_from_spec,
     )
     from tests.unit.test_experiment_facts_scope import _facts
 
@@ -326,8 +326,8 @@ def test_an_arm_without_the_boundary_keys_keeps_todays_containers_and_one_with_t
     def start(**boundary: object):
         path.write_text(json.dumps({**params, **boundary}), encoding="utf-8")
         options = load_worker_options(experiment, repo_root=repo)
-        sandbox = _strategy_sandbox_from_spec(
-            options.agent_sandbox, **_strategy_boundary(options.rolling)
+        sandbox = strategy_sandbox_from_spec(
+            options.agent_sandbox, **strategy_boundary(options.rolling)
         )
         return sandbox, options.agent_sandbox
 

@@ -28,7 +28,11 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 
-from autotrade.common.records import redact_host_paths, write_json_atomic
+from autotrade.common.records import (
+    read_json_object,
+    redact_host_paths,
+    write_json_atomic,
+)
 from autotrade.environment.artifacts import REVISION_MANIFEST_FILE
 from autotrade.environment.runtime import agent_trace_path
 from autotrade.environment.step_tree import StepTree
@@ -55,7 +59,7 @@ def revision_fingerprint(experiment_dir: str | Path, revision_id: str) -> str:
 
     path = Path(experiment_dir) / REVISIONS_DIR / revision_id / REVISION_MANIFEST_FILE
     try:
-        manifest = json.loads(path.read_text(encoding="utf-8"))
+        manifest = read_json_object(path)
     except FileNotFoundError as exc:
         raise FileNotFoundError(
             f"revision {revision_id} has no manifest ({path}): the bytes it "
@@ -107,7 +111,7 @@ def load_recorded_steps(experiment_dir: str | Path) -> tuple[StepResult, ...]:
                 f"step node {node_id} is recorded without its host sidecar; the "
                 "session cannot resume with a validation it cannot account for"
             )
-        record = json.loads(sidecar.read_text(encoding="utf-8"))
+        record = read_json_object(sidecar)
         steps.append(
             StepResult(
                 str(record["step_id"]),

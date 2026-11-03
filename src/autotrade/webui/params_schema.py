@@ -16,9 +16,9 @@ outright, so they can only be set in a worker-side ``params.json``.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
+from autotrade.common.records import read_json_object
 from autotrade.environment.data.contracts import BENCHMARK_INDEXES
 from autotrade.environment.data.snapshot import DEFAULT_DATASETS, SELECTABLE_DATASETS
 from autotrade.environment.llm.model_profiles import LLM_KEYS, MODEL_CHOICES
@@ -62,7 +62,7 @@ def _dataset_labels() -> dict[str, str]:
     raw API names (display-only concern)."""
 
     try:
-        interfaces = json.loads(_SCHEDULE_REGISTRY.read_text(encoding="utf-8"))["interfaces"]
+        interfaces = read_json_object(_SCHEDULE_REGISTRY)["interfaces"]
     except (OSError, ValueError, KeyError):
         return {}
     labels: dict[str, str] = {}

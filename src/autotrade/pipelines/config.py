@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
+from autotrade.common.ids import EXPERIMENT_ID, is_experiment_id
 from autotrade.environment.artifacts import ModificationConstraints
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.contracts import (
@@ -659,10 +660,8 @@ class RollingExperimentConfig:
     )
 
     def __post_init__(self) -> None:
-        if not re.fullmatch(r"[A-Za-z0-9_-]+", self.experiment_id):
-            raise ValueError(
-                "experiment_id must contain only letters, digits, underscore, or dash"
-            )
+        if not is_experiment_id(self.experiment_id):
+            raise ValueError(f"experiment_id must match {EXPERIMENT_ID.pattern}")
         if not isinstance(self.geometry, ResearchGeometry):
             raise TypeError("geometry must be a ResearchGeometry")
         for name in (

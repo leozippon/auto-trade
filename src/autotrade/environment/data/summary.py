@@ -6,7 +6,7 @@ import json
 from collections.abc import Mapping
 from pathlib import Path
 
-from autotrade.common.records import redact_host_paths
+from autotrade.common.records import read_json_object, redact_host_paths
 from autotrade.environment.data.units import (
     AGENT_UNIT_CONTRACT,
     build_unit_reference,
@@ -317,9 +317,7 @@ def _read_manifest(view_dir: Path) -> dict[str, object]:
     """
     path = view_dir / "manifest.json"
     try:
-        manifest = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        manifest = read_json_object(path)
+    except (OSError, ValueError) as exc:
         raise RuntimeError(f"snapshot view manifest is unreadable: {path}: {exc}") from exc
-    if not isinstance(manifest, dict):
-        raise TypeError(f"snapshot view manifest is not a JSON object: {path}")
     return manifest

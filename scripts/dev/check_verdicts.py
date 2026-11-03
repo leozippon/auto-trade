@@ -43,6 +43,7 @@ from _bootstrap import add_repo_src
 
 REPO_ROOT = add_repo_src(__file__)
 
+from autotrade.common.records import read_json_object
 from autotrade.environment.broker import BrokerProfile
 from autotrade.pipelines.config import AcceptanceRules, acceptance_for
 from autotrade.pipelines.experiment import (
@@ -76,7 +77,7 @@ def current_arms(experiments: Path) -> list[Path]:
     arms = []
     for path in sorted(Path(experiments).iterdir()):
         params = path / HITL_DIR_NAME / PARAMS_NAME
-        if params.is_file() and json.loads(params.read_text(encoding="utf-8")).get("sealed_years") is not None:
+        if params.is_file() and read_json_object(params).get("sealed_years") is not None:
             arms.append(path)
     return arms
 
@@ -177,7 +178,7 @@ def _replayed(
 def check_arm(arm: Path) -> list[Judgement]:
     """Every stored reading of one arm against today's reading of it."""
 
-    params = json.loads((arm / HITL_DIR_NAME / PARAMS_NAME).read_text(encoding="utf-8"))
+    params = read_json_object(arm / HITL_DIR_NAME / PARAMS_NAME)
     ledger = arm / "ledgers" / "experiment_ledger.jsonl"
     lines = ledger.read_text(encoding="utf-8").splitlines() if ledger.is_file() else []
     records = [json.loads(line) for line in lines if line]

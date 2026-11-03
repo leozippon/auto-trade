@@ -111,7 +111,7 @@ def copy_revision(experiment_dir: Path, row: dict, dest: Path) -> ArtifactRevisi
     its manifest, whose fingerprint must be the one the ledger recorded."""
 
     source = experiment_dir / REVISIONS_DIR / str(row["revision_id"])
-    manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
+    manifest = read_json_object(source / "manifest.json")
     if manifest["fingerprint"] != row["fingerprint"]:
         raise ValueError(f"revision {row['revision_id']} is not the bytes the ledger recorded for the Step")
     for entry in manifest["files"]:

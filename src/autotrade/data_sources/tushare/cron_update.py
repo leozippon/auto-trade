@@ -17,6 +17,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from autotrade.common.records import read_json_object
 from autotrade.environment.data.contracts import (
     GENERATION_COMMITTED,
     GENERATION_SCHEMA_VERSION,
@@ -96,7 +97,7 @@ SCHEDULE_CONFIG_SCHEMA_VERSION = 1
 def load_config(path: Path) -> dict:
     if not path.exists():
         raise FileNotFoundError(f"schedule config not found: {path}")
-    config = json.loads(path.read_text(encoding="utf-8"))
+    config = read_json_object(path)
     version = config.get("schema_version")
     if version != SCHEDULE_CONFIG_SCHEMA_VERSION:
         raise ValueError(
@@ -622,8 +623,8 @@ def read_job_state(job_name: str, repo_root: Path = Path()) -> dict:
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+        return read_json_object(path)
+    except ValueError:
         # A torn per-job file only costs this one job its skip record: the
         # next run re-executes (jobs are idempotent) and rewrites it.
         print(json.dumps({"note": "corrupt_job_state_ignored", "path": str(path)}, ensure_ascii=False))
@@ -739,8 +740,8 @@ def _read_raw_generation_file(raw_dir: Path) -> dict:
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        return read_json_object(path)
+    except (OSError, ValueError) as exc:
         raise RuntimeError(f"invalid raw generation record: {path}: {exc}") from exc
 
 
@@ -931,8 +932,8 @@ def prune_run_logs(*, now: float | None = None) -> None:
     if JOB_STATE_ROOT.exists():
         for state_file in JOB_STATE_ROOT.glob("*.json"):
             try:
-                record = json.loads(state_file.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+                record = read_json_object(state_file)
+            except (OSError, ValueError):
                 continue
             if isinstance(record, dict) and record.get("log_path"):
                 referenced.add(Path(str(record["log_path"])).resolve())
