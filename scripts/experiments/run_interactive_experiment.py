@@ -41,7 +41,7 @@ REPO_ROOT = add_repo_src(__file__)
 
 from autotrade.common.records import read_json_object, write_json_atomic
 from autotrade.environment.runtime import utc_now_iso
-from autotrade.pipelines.hitl_state import StatusReporter
+from autotrade.pipelines.hitl_state import ArmState, StatusReporter
 from autotrade.pipelines.worker import load_worker_options, run_local_interactive_worker
 
 
@@ -92,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
     status_path = experiment_dir / "hitl" / "status.json"
     bootstrap = StatusReporter(status_path)
     bootstrap.start()
-    bootstrap.set(state="preparing", phase="strict_params_and_pit_data")
+    bootstrap.set(state=ArmState.PREPARING, phase="strict_params_and_pit_data")
     try:
         options = load_worker_options(experiment_dir, repo_root=args.repo_root)
         bootstrap.stop()
@@ -119,7 +119,7 @@ def main(argv: list[str] | None = None) -> int:
         status.update(
             {
                 "schema_version": 1,
-                "state": "terminated",
+                "state": ArmState.TERMINATED,
                 "error": None,
                 "terminated_at": utc_now_iso(),
             }
@@ -133,7 +133,7 @@ def main(argv: list[str] | None = None) -> int:
             status_path,
             {
                 "schema_version": 1,
-                "state": "failed",
+                "state": ArmState.FAILED,
                 "pid": os.getpid(),
                 "failed_at": utc_now_iso(),
                 "error": f"{type(exc).__name__}: {exc}",

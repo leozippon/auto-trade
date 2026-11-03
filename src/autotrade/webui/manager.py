@@ -40,6 +40,7 @@ from autotrade.pipelines.hitl_state import (
     WEB_CREATE_DEFAULTS,
     WEB_INTERNAL_PARAMS,
     WEB_REQUIRED_PARAMS,
+    ArmState,
     ControlState,
     arm_is_archived,
     control_lock,
@@ -90,11 +91,11 @@ _TERMINATE_GRACE_SECONDS = 10.0
 _RESTART_GRACE_SECONDS = 30.0
 _SIGKILL_EXIT_SECONDS = 5.0
 _TERMINAL_RESUMABLE_STATES = (
-    "stopped",
-    "failed",
-    "interrupted",
-    "terminated",
-    "created",
+    ArmState.STOPPED,
+    ArmState.FAILED,
+    ArmState.INTERRUPTED,
+    ArmState.TERMINATED,
+    ArmState.CREATED,
 )
 _ACTIONS = {
     "pause",
@@ -451,7 +452,7 @@ class ExperimentManager:
             write_json_atomic(hitl / "params.json", merged)
             write_control(hitl / "control.json", ControlState())
             write_json_atomic(
-                hitl / "status.json", {"schema_version": 1, "state": "created"}
+                hitl / "status.json", {"schema_version": 1, "state": ArmState.CREATED}
             )
             spawn = (
                 self.start_worker(experiment_id)
@@ -579,7 +580,7 @@ class ExperimentManager:
             if not entry.is_dir() or entry.name.startswith("."):
                 continue
             state = experiment_state(entry)
-            if state.get("state") == "unreadable":
+            if state.get("state") == ArmState.UNREADABLE:
                 broken.append(
                     {
                         "experiment_id": entry.name,
@@ -667,7 +668,7 @@ class ExperimentManager:
                 status_path,
                 {
                     "schema_version": 1,
-                    "state": "launching",
+                    "state": ArmState.LAUNCHING,
                     "pid": process.pid,
                     "pid_start_ticks": proc_start_ticks(process.pid),
                     "launched_at": utc_now_iso(),
@@ -923,7 +924,7 @@ class ExperimentManager:
             # and the user cannot tell whether termination worked.
             status = read_json_object_or_empty(status_path)
             status.update(
-                {"state": "terminated", "error": None, "terminated_at": utc_now_iso()}
+                {"state": ArmState.TERMINATED, "error": None, "terminated_at": utc_now_iso()}
             )
             write_json_atomic(status_path, status)
         return result
@@ -1003,7 +1004,7 @@ class ExperimentManager:
             directory = self._experiment_dir(experiment_id)
             _modern_ref_store(directory)
             state = experiment_state(directory)
-            if state.get("worker_alive") or state.get("state") == "launching":
+            if state.get("worker_alive") or state.get("state") == ArmState.LAUNCHING:
                 raise ManagerError(
                     f"experiment {experiment_id!r} has a live worker; stop or terminate it before deleting"
                 )
@@ -1075,9 +1076,9 @@ class ExperimentManager:
 
 def _worker_live(status: Mapping[str, object]) -> bool:
     return str(status.get("state") or "") not in {
-        "completed",
-        "failed",
-        "stopped",
-        "terminated",
-        "interrupted",
+        ArmState.COMPLETED,
+        ArmState.FAILED,
+        ArmState.STOPPED,
+        ArmState.TERMINATED,
+        ArmState.INTERRUPTED,
     } and status_pid_alive(status)

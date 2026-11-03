@@ -80,6 +80,7 @@ from .experiment import RollingExperimentPipeline
 from .hitl_state import (
     SCHEDULE_NAME,
     WEB_INTERNAL_PARAMS,
+    ArmState,
     PlannedSession,
     build_session_plan,
     planned_sessions,
@@ -1001,7 +1002,7 @@ def run_local_interactive_worker(
             hitl / "status.json",
             {
                 "schema_version": 1,
-                "state": "failed",
+                "state": ArmState.FAILED,
                 "pid": os.getpid(),
                 "error": f"{type(exc).__name__}: {exc}",
             },
@@ -1186,7 +1187,7 @@ def _terminal_status(
     frozen = frozen_record(records)
     return {
         "schema_version": 1,
-        "state": "completed",
+        "state": ArmState.COMPLETED,
         "pid": os.getpid(),
         "completed_at": source.get("completed_at") or utc_now_iso(),
         "developer_mode": developer_mode or source.get("developer_mode"),

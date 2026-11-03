@@ -443,8 +443,8 @@ def test_every_reason_the_pipeline_records_has_a_console_label() -> None:
     that could not be measured -- and every session outcome too."""
 
     from autotrade.pipelines.config import SESSION_OUTCOMES
-    from autotrade.pipelines.verdict import CONDITIONS, UNMEASURABLE
-    recorded = {condition.reason for condition in CONDITIONS} | {UNMEASURABLE}
+    from autotrade.pipelines.verdict import CONDITIONS, ConditionReason
+    recorded = {condition.reason for condition in CONDITIONS} | {ConditionReason.UNMEASURABLE}
     assert {"sealed_residual_ir_below_bar", "replicate_strategy_error"} <= recorded
     labels = _reason_tokens()
     assert recorded <= labels, sorted(recorded - labels)

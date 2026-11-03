@@ -40,6 +40,7 @@ from __future__ import annotations
 import hashlib
 import math
 from collections.abc import Callable, Mapping, Sequence
+from enum import StrEnum
 from statistics import NormalDist
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -63,6 +64,7 @@ from autotrade.environment.replay.style import (
 )
 
 from .calendar import FULL_SPAN
+from .ledger import VerdictStatus
 
 if TYPE_CHECKING:
     # ``config`` reads this module's constants for its defaults.
@@ -416,7 +418,7 @@ def registered_mandate(analysis: Mapping[str, object], *, rules: AcceptanceRules
     mandate: the registration's one reading of the strategy's own series."""
 
     measured = {"mandate": _mandate(analysis, "", "")}
-    return {**measured, "reasons": judge("freeze", measured, rules.mandate, rules)}
+    return {**measured, "reasons": judge(ConditionStage.FREEZE, measured, rules.mandate, rules)}
 
 
 def forward_mde(tracking_error: float, forward_days: int) -> float:
@@ -678,6 +680,48 @@ def forward_lower_bound(
     return bootstrap_lower_bound(daily, seed_key, confidence=confidence)
 
 
+class ConditionStage(StrEnum):
+    """The stage that judges a condition (:func:`judge`)."""
+
+    NOMINATION = "nomination"
+    REGISTRATION = "registration"
+    FREEZE = "freeze"
+    SEEDS = "seeds"
+    ABLATION = "ablation"
+    SEALED = "sealed"
+    VALIDITY = "validity"
+
+
+class ConditionReason(StrEnum):
+    """Every reason token a freeze registration or a verdict records: one per
+    condition of :data:`CONDITIONS`, and the two a registration records when
+    it never read a nominee. The values are persisted in ledger records."""
+
+    NON_FINITE_TOTAL_RETURN = "non_finite_total_return"
+    NON_FINITE_MAX_DRAWDOWN = "non_finite_max_drawdown"
+    NON_FINITE_SHARPE = "non_finite_sharpe"
+    MAX_DRAWDOWN_ABOVE_LIMIT = "max_drawdown_above_limit"
+    FREEZE_NEEDS_FULL_SPAN_VALIDATION = "freeze_needs_full_span_validation"
+    FREEZE_NOMINEE_IS_CONTROL = "freeze_nominee_is_control"
+    FREEZE_TRACKING_ERROR_ABOVE_CAP = "freeze_tracking_error_above_cap"
+    FREEZE_BETA_OUTSIDE_BAND = "freeze_beta_outside_band"
+    FREEZE_SEED_REPLICATE_INVALID = "freeze_seed_replicate_invalid"
+    FREEZE_TOO_FEW_SEED_REPLICATES = "freeze_too_few_seed_replicates"
+    FREEZE_ABLATION_INVALID = "freeze_ablation_invalid"
+    FREEZE_ABLATION_MISSING = "freeze_ablation_missing"
+    SEALED_STRATEGY_ERROR = "sealed_strategy_error"
+    SEALED_UNMEASURABLE = "sealed_unmeasurable"
+    SEALED_RESIDUAL_IR_BELOW_BAR = "sealed_residual_ir_below_bar"
+    FORWARD_STRATEGY_ERROR = "forward_strategy_error"
+    HELDOUT_STRATEGY_ERROR = "heldout_strategy_error"
+    REPLICATE_STRATEGY_ERROR = "replicate_strategy_error"
+    # Not a condition's: what a registration that was never read off a
+    # nominee records. The session read a node that is not one of its Steps;
+    # the nominee's statistics could not be measured.
+    NOT_A_SESSION_STEP = "freeze_needs_a_step_of_this_session"
+    UNMEASURABLE = "freeze_unmeasurable"
+
+
 class Condition(NamedTuple):
     """One condition a stage judges on what it measured.
 
@@ -689,8 +733,8 @@ class Condition(NamedTuple):
     Held-out condition belongs to (docs/pipeline-design.md).
     """
 
-    stage: str
-    reason: str
+    stage: ConditionStage
+    reason: ConditionReason
     holds: Callable[[Mapping[str, Any], Mapping[str, Any]], bool]
     code: str = ""
     requires: str = ""
@@ -718,11 +762,6 @@ def _refused_replicate(measured: Mapping[str, Any]) -> bool:
 
 
 _CAP = "tracking_error_cap"
-# Not a condition's: what a registration that was never read off a nominee
-# records. The session reads a node that is not one of its Steps; the
-# nominee's statistics could not be measured.
-NOT_A_SESSION_STEP = "freeze_needs_a_step_of_this_session"
-UNMEASURABLE = "freeze_unmeasurable"
 
 # Every condition the freeze registration and the graduation verdict judge,
 # by stage and, within a stage, in the order its failures are recorded. The
@@ -737,38 +776,38 @@ CONDITIONS: tuple[Condition, ...] = (
     # freezing a book that already breached it spends the sealed reading on a
     # candidate the verdict must reject. ``sharpe`` is read only for
     # finiteness.
-    Condition("nomination", "non_finite_total_return", lambda m, t: _finite(m.get("total_return"))),
-    Condition("nomination", "non_finite_max_drawdown", lambda m, t: _finite(m.get("max_drawdown"))),
-    Condition("nomination", "non_finite_sharpe", lambda m, t: m.get("sharpe") is None or _finite(m["sharpe"])),
-    Condition("nomination", "max_drawdown_above_limit", lambda m, t: not (_finite(m.get("max_drawdown")) and abs(m["max_drawdown"]) > t["max_drawdown"])),
+    Condition(ConditionStage.NOMINATION, ConditionReason.NON_FINITE_TOTAL_RETURN, lambda m, t: _finite(m.get("total_return"))),
+    Condition(ConditionStage.NOMINATION, ConditionReason.NON_FINITE_MAX_DRAWDOWN, lambda m, t: _finite(m.get("max_drawdown"))),
+    Condition(ConditionStage.NOMINATION, ConditionReason.NON_FINITE_SHARPE, lambda m, t: m.get("sharpe") is None or _finite(m["sharpe"])),
+    Condition(ConditionStage.NOMINATION, ConditionReason.MAX_DRAWDOWN_ABOVE_LIMIT, lambda m, t: not (_finite(m.get("max_drawdown")) and abs(m["max_drawdown"]) > t["max_drawdown"])),
     # How the nominee was registered (``experiment.freeze_registration``).
-    Condition("registration", "freeze_needs_full_span_validation", lambda m, t: m.get("span") == FULL_SPAN),
-    Condition("registration", "freeze_nominee_is_control", lambda m, t: m.get("control") is not True),
+    Condition(ConditionStage.REGISTRATION, ConditionReason.FREEZE_NEEDS_FULL_SPAN_VALIDATION, lambda m, t: m.get("span") == FULL_SPAN),
+    Condition(ConditionStage.REGISTRATION, ConditionReason.FREEZE_NOMINEE_IS_CONTROL, lambda m, t: m.get("control") is not True),
     # The tracking mandate over the nominee's span, when the rules set one.
-    Condition("freeze", "freeze_tracking_error_above_cap", _within_cap, requires=_CAP),
-    Condition("freeze", "freeze_beta_outside_band", _within_band, requires=_CAP),
+    Condition(ConditionStage.FREEZE, ConditionReason.FREEZE_TRACKING_ERROR_ABOVE_CAP, _within_cap, requires=_CAP),
+    Condition(ConditionStage.FREEZE, ConditionReason.FREEZE_BETA_OUTSIDE_BAND, _within_band, requires=_CAP),
     # The nominee's seed replicates (``experiment._seed_replicates``): a named
     # replicate that is not one, and a nominee that trains a model and names
     # none, unless the nomination declared its package deterministic.
-    Condition("seeds", "freeze_seed_replicate_invalid", lambda m, t: not _refused_replicate(m)),
-    Condition("seeds", "freeze_too_few_seed_replicates", lambda m, t: bool(m["replicates"]) or not m["trains_a_model"] or m.get("deterministic", False)),
+    Condition(ConditionStage.SEEDS, ConditionReason.FREEZE_SEED_REPLICATE_INVALID, lambda m, t: not _refused_replicate(m)),
+    Condition(ConditionStage.SEEDS, ConditionReason.FREEZE_TOO_FEW_SEED_REPLICATES, lambda m, t: bool(m["replicates"]) or not m["trains_a_model"] or m.get("deterministic", False)),
     # The nominee's ablation (``experiment._ablation``): named exactly where
     # the rules require one, and then the nominee with one line changed.
-    Condition("ablation", "freeze_ablation_invalid", lambda m, t: "problem" not in m),
-    Condition("ablation", "freeze_ablation_missing", lambda m, t: "step_id" in m or not m["required"]),
+    Condition(ConditionStage.ABLATION, ConditionReason.FREEZE_ABLATION_INVALID, lambda m, t: "problem" not in m),
+    Condition(ConditionStage.ABLATION, ConditionReason.FREEZE_ABLATION_MISSING, lambda m, t: "step_id" in m or not m["required"]),
     # The sealed gate (:func:`sealed_slice`): the frozen book's residual IR
     # over the sealed years against its bar, unread when the book raised or
     # its own series left nothing to read.
-    Condition("sealed", "sealed_strategy_error", lambda m, t: m.get("strategy_error") is not True, "S"),
-    Condition("sealed", "sealed_unmeasurable", lambda m, t: m.get("unmeasurable") is not True, "S"),
-    Condition("sealed", "sealed_residual_ir_below_bar", lambda m, t: m.get("strategy_error") is True or m.get("unmeasurable") is True or m["residual_information_ratio"] >= m["bar"], "S"),
+    Condition(ConditionStage.SEALED, ConditionReason.SEALED_STRATEGY_ERROR, lambda m, t: m.get("strategy_error") is not True, "S"),
+    Condition(ConditionStage.SEALED, ConditionReason.SEALED_UNMEASURABLE, lambda m, t: m.get("unmeasurable") is not True, "S"),
+    Condition(ConditionStage.SEALED, ConditionReason.SEALED_RESIDUAL_IR_BELOW_BAR, lambda m, t: m.get("strategy_error") is True or m.get("unmeasurable") is True or m["residual_information_ratio"] >= m["bar"], "S"),
     # A frozen book that raised in its own code during a forward-stage replay
     # (:func:`graduation_verdict`): the frozen book's forward replay, in the
     # slice it raised in, or a seed replicate's sealed or forward replay. No
     # reading of such a book is complete, so it is never admitted.
-    Condition("validity", "forward_strategy_error", lambda m, t: "forward" not in m["strategy_errors"], "F1"),
-    Condition("validity", "heldout_strategy_error", lambda m, t: "heldout" not in m["strategy_errors"], "H1"),
-    Condition("validity", "replicate_strategy_error", lambda m, t: "replicate" not in m["strategy_errors"], "R1"),
+    Condition(ConditionStage.VALIDITY, ConditionReason.FORWARD_STRATEGY_ERROR, lambda m, t: "forward" not in m["strategy_errors"], "F1"),
+    Condition(ConditionStage.VALIDITY, ConditionReason.HELDOUT_STRATEGY_ERROR, lambda m, t: "heldout" not in m["strategy_errors"], "H1"),
+    Condition(ConditionStage.VALIDITY, ConditionReason.REPLICATE_STRATEGY_ERROR, lambda m, t: "replicate" not in m["strategy_errors"], "R1"),
 )
 
 
@@ -780,7 +819,7 @@ def _on(condition: Condition, rules: AcceptanceRules | None) -> bool:
 
 
 def judge(
-    stage: str,
+    stage: ConditionStage,
     measured: Mapping[str, Any],
     thresholds: Mapping[str, Any],
     rules: AcceptanceRules | None = None,
@@ -1067,10 +1106,10 @@ def sealed_slice(
     except ExactFit as exc:
         measured = {"start": start, "end": end, "unmeasurable": True, "error": str(exc), **readings}
         thresholds = {"alpha": rules.alpha, "sealed_years": rules.sealed_years}
-        return {**measured, "reasons": judge("sealed", measured, thresholds), "thresholds": thresholds}
+        return {**measured, "reasons": judge(ConditionStage.SEALED, measured, thresholds), "thresholds": thresholds}
     measured = {"start": start, "end": end, **reading, **readings}
     thresholds = {"alpha": rules.alpha, "bar": reading["bar"], "sealed_years": rules.sealed_years}
-    return {**measured, "reasons": judge("sealed", measured, thresholds), "thresholds": thresholds}
+    return {**measured, "reasons": judge(ConditionStage.SEALED, measured, thresholds), "thresholds": thresholds}
 
 
 def sealed_strategy_error(*, start: str, end: str, error: str) -> dict[str, object]:
@@ -1079,7 +1118,7 @@ def sealed_strategy_error(*, start: str, end: str, error: str) -> dict[str, obje
 
     start, end = _span(start, end)
     measured = {"start": start, "end": end, "strategy_error": True, "error": error}
-    return {**measured, "reasons": judge("sealed", measured, {}), "thresholds": {}}
+    return {**measured, "reasons": judge(ConditionStage.SEALED, measured, {}), "thresholds": {}}
 
 
 # Where a frozen book can raise in its own code during the forward stage.
@@ -1114,7 +1153,7 @@ def graduation_verdict(
         raise ValueError(f"strategy_errors must name {STRATEGY_ERROR_PLACES}, got {unknown}")
     reasons = [
         *sealed["reasons"],
-        *judge("validity", {"strategy_errors": frozenset(strategy_errors)}, {}),
+        *judge(ConditionStage.VALIDITY, {"strategy_errors": frozenset(strategy_errors)}, {}),
     ]
     lines = {
         name: holder_line(block)
@@ -1122,7 +1161,7 @@ def graduation_verdict(
         if block is not None
     }
     return {
-        "status": "discarded" if reasons else "graduated",
+        "status": VerdictStatus.DISCARDED if reasons else VerdictStatus.GRADUATED,
         "reasons": reasons,
         "thresholds": dict(sealed["thresholds"]),
         **({"holder_line": lines} if lines else {}),

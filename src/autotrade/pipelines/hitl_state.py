@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 
 from autotrade.common.records import read_json_object, write_json_atomic
@@ -35,7 +36,7 @@ from .config import (
     acceptance_default,
     rolling_default,
 )
-from .ledger import FORWARD_SESSION_KEY, RESEARCH_SESSION_KEY
+from .ledger import SessionKind
 
 HITL_STATE_SCHEMA_VERSION = 1
 HITL_DIR_NAME = "hitl"
@@ -53,9 +54,31 @@ GPU_CLAIM_NAME = "gpu_claim.json"
 # lists it apart and never starts its worker again, and the derived-cache prunes
 # treat it as finished for good (``arm_is_archived``).
 ARCHIVED_NAME = "archived.json"
-LIVE_RUN_STATES = {"running_session"}
+
+
+class ArmState(StrEnum):
+    """An arm's ``state`` in ``status.json``, as its worker, the console and
+    the operator's tools write it, plus the two the console derives when it
+    reads one: ``interrupted`` (an active state whose worker died) and
+    ``unreadable`` (a status file it cannot read). The values are persisted."""
+
+    CREATED = "created"
+    LAUNCHING = "launching"
+    PREPARING = "preparing"
+    INITIALIZING = "initializing"
+    RUNNING_SESSION = "running_session"
+    PAUSED = "paused"
+    STOPPED = "stopped"
+    FAILED = "failed"
+    COMPLETED = "completed"
+    TERMINATED = "terminated"
+    INTERRUPTED = "interrupted"
+    UNREADABLE = "unreadable"
+
+
+LIVE_RUN_STATES = {ArmState.RUNNING_SESSION}
 # The states a worker ends in: an arm in one of them runs nothing.
-ENDED_STATES = frozenset({"completed", "failed", "stopped"})
+ENDED_STATES = frozenset({ArmState.COMPLETED, ArmState.FAILED, ArmState.STOPPED})
 
 
 # The console's own value of each required acceptance rule
@@ -537,7 +560,7 @@ class StatusReporter:
         self.heartbeat_seconds = heartbeat_seconds
         pid = os.getpid()
         self._state: dict[str, object] = {
-            "state": "initializing",
+            "state": ArmState.INITIALIZING,
             "pid": pid,
             "pid_start_ticks": proc_start_ticks(pid),
             "session_key": None,
@@ -613,17 +636,16 @@ class StatusReporter:
 class PlannedSession:
     """One entry of the plan of record: the research session or the forward replay."""
 
-    session_key: str
-    # ``research`` or ``forward``.
-    kind: str
+    session_key: SessionKind
+    kind: SessionKind
 
 
 def planned_sessions() -> tuple[PlannedSession, ...]:
     """The arm's plan: its one research session, then the forward replay."""
 
     return (
-        PlannedSession(RESEARCH_SESSION_KEY, "research"),
-        PlannedSession(FORWARD_SESSION_KEY, "forward"),
+        PlannedSession(SessionKind.RESEARCH, SessionKind.RESEARCH),
+        PlannedSession(SessionKind.FORWARD, SessionKind.FORWARD),
     )
 
 

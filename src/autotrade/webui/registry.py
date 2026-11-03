@@ -58,6 +58,7 @@ from autotrade.pipelines.hitl_state import (
     PARAMS_NAME,
     STATUS_NAME,
     WEB_CREATE_DEFAULTS,
+    ArmState,
     arm_is_archived,
     read_control,
     read_gpu_claim,
@@ -66,9 +67,10 @@ from autotrade.pipelines.hitl_state import (
 )
 from autotrade.pipelines.ledger import (
     ENVIRONMENT_BLOCKED,
-    FORWARD_STAGE,
-    RESEARCH_SESSION_KEY,
     ExperimentLedger,
+    SessionKind,
+    Stage,
+    VerdictStatus,
     experiment_verdict,
     forward_record,
     frozen_record,
@@ -94,7 +96,12 @@ from autotrade.pipelines.worker import _ALLOWED_PARAMS
 from .public_identity import PublicIdentity
 from .traces import resolve_trace_path, trace_stats
 
-ACTIVE_STATES = ("launching", "initializing", "running_session", "paused")
+ACTIVE_STATES = (
+    ArmState.LAUNCHING,
+    ArmState.INITIALIZING,
+    ArmState.RUNNING_SESSION,
+    ArmState.PAUSED,
+)
 # Manager-written stub state between spawn and the worker's first status write
 # (interpreter start + imports take seconds). Stale = the worker never came up.
 LAUNCH_GRACE_SECONDS = 180.0
@@ -284,7 +291,7 @@ def experiment_state(
     except (OSError, ValueError) as exc:
         return {
             "kind": "hitl",
-            "state": "unreadable",
+            "state": ArmState.UNREADABLE,
             "worker_alive": False,
             "error": f"{type(exc).__name__}: {exc}",
         }
@@ -292,18 +299,18 @@ def experiment_state(
     if not status:
         result: dict[str, object] = {
             "kind": "hitl",
-            "state": "created",
+            "state": ArmState.CREATED,
             "worker_alive": False,
             "status": {},
         }
     else:
         alive = status_pid_alive(status)
         state = str(status.get("state") or "unknown")
-        if state == "launching" and not alive:
+        if state == ArmState.LAUNCHING and not alive:
             if _age_seconds(status.get("launched_at")) > LAUNCH_GRACE_SECONDS:
-                state = "interrupted"
+                state = ArmState.INTERRUPTED
         elif state in ACTIVE_STATES and not alive:
-            state = "interrupted"
+            state = ArmState.INTERRUPTED
         result = {"kind": "hitl", "state": state, "worker_alive": alive, "status": status}
     if log_ref:
         result["worker_log"] = log_ref
@@ -413,7 +420,7 @@ def arm_ending(
     on the environment by the host's own reason.
     """
 
-    if str(state.get("state") or "") == "failed":
+    if str(state.get("state") or "") == ArmState.FAILED:
         error = str(_mapping(state.get("status")).get("error") or "")
         if not error:
             failures = _attempt_failures(records)
@@ -423,11 +430,11 @@ def arm_ending(
     verdict = experiment_verdict(records)
     if verdict is None:
         return None
-    if verdict["status"] == "voided":
+    if verdict["status"] == VerdictStatus.VOIDED:
         void = _mapping(verdict.get("void"))
         reason = _reason_line(identity.public_text(str(void.get("reason") or "")))
         return {"state": "rejected", "reason": f"验收通过后复核未通过：{reason}"}
-    if verdict["status"] == "graduated":
+    if verdict["status"] == VerdictStatus.GRADUATED:
         judged = _mapping(_mapping(_mapping(forward).get("slices")).get("forward"))
         raw = _mapping(judged.get("raw_readings"))
         ratio = _number(judged.get("information_ratio"))
@@ -440,13 +447,13 @@ def arm_ending(
                 f" · 主动 IR {'—' if ratio is None else f'{ratio:.2f}'}"
             ),
         }
-    if verdict["status"] == "discarded":
+    if verdict["status"] == VerdictStatus.DISCARDED:
         codes = dict.fromkeys(
             _CRITERION_CODES.get(token, token)
             for token in _recorded_reasons(verdict.get("reasons"))
         )
         return {"state": "rejected", "reason": " · ".join(codes)}
-    if verdict["status"] == ENVIRONMENT_BLOCKED:
+    if verdict["status"] == VerdictStatus.ENVIRONMENT_BLOCKED:
         # The host's reason names the span and the error, like a broken
         # worker's: the error is what the operator acts on, so it is not cut.
         reasons = verdict.get("reasons")
@@ -660,7 +667,7 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
     except Exception as exc:  # noqa: BLE001 - broken experiments remain inspectable and deletable
         summary.update(
             {
-                "state": "unreadable",
+                "state": ArmState.UNREADABLE,
                 "worker_alive": False,
                 "error": f"{type(exc).__name__}: experiment state is unreadable",
             }
@@ -709,7 +716,7 @@ def _budget_used(
         if isinstance(block, Mapping):
             return dict(block)
     status = _mapping(raw_status)
-    if status.get("session_key") != RESEARCH_SESSION_KEY:
+    if status.get("session_key") != SessionKind.RESEARCH:
         return None
     run_id = status.get("run_id")
     path = resolve_trace_path(directory, str(run_id)) if isinstance(run_id, str) else None
@@ -781,7 +788,7 @@ def _listing_row(directory: Path) -> tuple[dict[str, object], tuple[object, ...]
     if cached is not None and cached[0] == signature:
         return cached[1], signature
     row = summarize_experiment(directory)
-    if row.get("worker_alive") is False and row.get("state") not in ("launching", "unreadable"):
+    if row.get("worker_alive") is False and row.get("state") not in (ArmState.LAUNCHING, ArmState.UNREADABLE):
         _SUMMARY_CACHE[directory] = (signature, row)
         return row, signature
     _SUMMARY_CACHE.pop(directory, None)
@@ -1070,7 +1077,7 @@ def _research_best(
     if research:
         return None
     best = _live_best(directory, running=running)
-    return {"session_key": RESEARCH_SESSION_KEY, **best} if best is not None else None
+    return {"session_key": SessionKind.RESEARCH, **best} if best is not None else None
 
 
 # A recorded Validation is immutable: its sidecar and its result's style file
@@ -1466,7 +1473,7 @@ def _failed_validations(identity: PublicIdentity, directory: Path) -> dict[str, 
 def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
     directory = resolve_experiment_dir(root, experiment_id)
     detail = {**summarize_experiment(directory), "archived": archive_marker(directory)}
-    if detail.get("state") == "unreadable":
+    if detail.get("state") == ArmState.UNREADABLE:
         return {
             **detail,
             "params": {},
@@ -1513,7 +1520,7 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
         # raised before its record -- selected by the pipeline's stage, not by
         # the provider phase the replay reads (``FORWARD_PHASE``) -- and a
         # research Validation that failed.
-        "replay_attempts": _failed_attempts(identity, records, FORWARD_STAGE),
+        "replay_attempts": _failed_attempts(identity, records, Stage.FORWARD),
         "research_validation_failures": _failed_validations(identity, directory),
     }
 

@@ -84,11 +84,11 @@ from .experiment import (
     null_control_seed,
     research_step_record,
 )
-from .ledger import RESEARCH_STAGE, ExperimentLedger
+from .ledger import ExperimentLedger, Stage
 from .session_resume import record_step_sidecar
 from .skills import _assert_skills_absent_from_formal
 from .verdict import (
-    NOT_A_SESSION_STEP,
+    ConditionReason,
     active_daily,
     graded_statistics,
     holder_readings,
@@ -743,7 +743,7 @@ class SessionValidations:
         }
         named = (node_id, *seed_replicates, *([ablation] if ablation else []))
         if any(step_id not in rows for step_id in named):
-            return {"passed": False, "reasons": [NOT_A_SESSION_STEP]}
+            return {"passed": False, "reasons": [ConditionReason.NOT_A_SESSION_STEP]}
         return freeze_registration(
             rows[node_id],
             experiment_dir=self.experiment_dir,
@@ -898,7 +898,7 @@ class SessionValidations:
         committed bytes' (:meth:`commit_revision`)."""
         node_id = self.tree.record_step(
             revision.output_path,
-            epoch_id=RESEARCH_STAGE,
+            epoch_id=Stage.RESEARCH,
             # The session id is opaqued like every other Agent-visible id.
             session_ref=self.session_ref,
             run_id=self.ref_store.get_or_create("run", self.request.run_id),
@@ -2117,7 +2117,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
             # record_failed_attempt leaves the tree position alone by design,
             # so a dead end never becomes anybody's parent.
             self.backtest.tree.record_failed_attempt(
-                epoch_id=RESEARCH_STAGE,
+                epoch_id=Stage.RESEARCH,
                 session_ref=self.backtest.ref_store.get_or_create(
                     "session", request.session_key
                 ),

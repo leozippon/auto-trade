@@ -51,6 +51,7 @@ from autotrade.pipelines.hitl_state import (
     HITL_DIR_NAME,
     PARAMS_NAME,
     STATUS_NAME,
+    ArmState,
     arm_is_archived,
     read_status,
     status_pid_alive,
@@ -83,14 +84,6 @@ from .versions import (
     rebuild_observations,
     restore,
 )
-
-# The one arm state the console neither runs nor resumes: it resumes stopped,
-# failed, interrupted and terminated arms (``webui.manager``), and an active
-# state whose worker died reads as interrupted. An arm has ended in this state,
-# or once archived (``hitl_state.arm_is_archived``: never started again) while
-# no worker still runs it; any other arm, one whose state is unknown or
-# unreadable included, keeps its release.
-ENDED_ARM_STATE = "completed"
 
 
 def _lake(config_path: str) -> tuple[dict, Path, Path]:
@@ -210,10 +203,14 @@ def release_consumers(repo_root: Path, raw_dir: Path) -> dict[str, list[str]]:
             continue
         try:
             status = read_status(hitl / STATUS_NAME)
-            state = str(status.get("state") or "created")
+            state = str(status.get("state") or ArmState.CREATED)
         except (OSError, TypeError, ValueError):
-            status, state = {}, "unreadable"
-        if state == ENDED_ARM_STATE or (arm_is_archived(directory) and not status_pid_alive(status)):
+            status, state = {}, ArmState.UNREADABLE
+        # An arm has ended once completed (the console neither runs nor
+        # resumes it) or archived while no worker still runs it; any other
+        # arm, one whose state is unknown or unreadable included, keeps its
+        # release.
+        if state == ArmState.COMPLETED or (arm_is_archived(directory) and not status_pid_alive(status)):
             continue
         reason = f"experiment {directory.name} ({state})"
         keep(pinned_generation(directory), reason)

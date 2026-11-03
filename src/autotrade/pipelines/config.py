@@ -27,7 +27,7 @@ from autotrade.environment.strategy import StrategySchedule
 
 from . import verdict
 from .calendar import FULL_SPAN, ResearchGeometry
-from .ledger import ENVIRONMENT_BLOCKED, RESEARCH_SESSION_KEY
+from .ledger import ENVIRONMENT_BLOCKED, SessionKind
 from .skills import DEFAULT_OPERATING_MEMORY
 
 ExecutionMode = Literal["sandbox", "trusted"]
@@ -478,7 +478,7 @@ class AcceptanceRules:
         the nominee's replay summary. Only a summary from a completed
         evaluation reaches here; an aborted replay never produces one."""
 
-        return verdict.judge("nomination", summary, {"max_drawdown": self.max_drawdown})
+        return verdict.judge(verdict.ConditionStage.NOMINATION, summary, {"max_drawdown": self.max_drawdown})
 
 
 # Every rule's name, in declaration order: the keys of a rules record and of
@@ -1101,7 +1101,7 @@ class ResearchSessionRequest:
         repr=False,
         compare=False,
     )
-    session_key: str = RESEARCH_SESSION_KEY
+    session_key: str = SessionKind.RESEARCH
     # Trusted host source for the current experiment-level skills snapshot.
     # The sandbox adapter copies it to workspace/skills but never exposes this
     # host path through Agent-visible facts or manifests.

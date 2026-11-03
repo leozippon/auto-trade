@@ -77,7 +77,7 @@ from autotrade.pipelines.experiment import (
     research_step_record,
     validation_statistics,
 )
-from autotrade.pipelines.ledger import RESEARCH_STAGE, ExperimentLedger
+from autotrade.pipelines.ledger import ExperimentLedger, Stage
 from autotrade.pipelines.session_resume import load_recorded_steps, resume_state
 from autotrade.pipelines.session_tools import (
     BATCH_HYPOTHESIS_MAX_CHARS,
@@ -1364,7 +1364,7 @@ class BatchValidateRunTest(unittest.TestCase):
                 [
                     {
                         "record_type": "attempt_failed",
-                        "phase": RESEARCH_STAGE,
+                        "phase": Stage.RESEARCH,
                         "run_id": "run_batch",
                         "error": "RuntimeError: session container died",
                     }
@@ -1427,7 +1427,7 @@ class BatchValidateRunTest(unittest.TestCase):
                 [
                     {
                         "record_type": "attempt_failed",
-                        "phase": RESEARCH_STAGE,
+                        "phase": Stage.RESEARCH,
                         "run_id": "run_batch",
                         "error": "the run marker of a killed attempt",
                     }
@@ -1495,7 +1495,7 @@ class BatchValidateRunTest(unittest.TestCase):
             failed = [
                 {
                     "record_type": "attempt_failed",
-                    "phase": RESEARCH_STAGE,
+                    "phase": Stage.RESEARCH,
                     "run_id": "run_batch",
                     "error": "the run marker of a killed attempt",
                 }
@@ -1556,7 +1556,7 @@ class BatchValidateRunTest(unittest.TestCase):
                     [
                         {
                             "record_type": "attempt_failed",
-                            "phase": RESEARCH_STAGE,
+                            "phase": Stage.RESEARCH,
                             "run_id": "run_batch",
                         }
                     ],

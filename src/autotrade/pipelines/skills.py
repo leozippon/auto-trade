@@ -29,7 +29,12 @@ from autotrade.environment.tools.skills_policy import (
 )
 from autotrade.environment.tools.workspace import SafeWorkspace
 
-from .ledger import ExperimentLedger, experiment_verdict, forward_record
+from .ledger import (
+    ExperimentLedger,
+    VerdictStatus,
+    experiment_verdict,
+    forward_record,
+)
 
 SKILLS_DIRNAME = "skills"
 OPERATING_MEMORY_DIRNAME = "memory"
@@ -434,7 +439,7 @@ def experiment_graduated(records: Sequence[Mapping[str, object]]) -> bool:
     """
 
     verdict = experiment_verdict(records)
-    return verdict is not None and verdict.get("status") == "graduated"
+    return verdict is not None and verdict.get("status") == VerdictStatus.GRADUATED
 
 
 def curated_memory_source(repo_root: str | Path | None) -> MemorySource | None:
