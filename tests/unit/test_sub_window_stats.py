@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from autotrade.environment.artifacts import ArtifactRevision
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.replay.stats import (
@@ -31,12 +32,7 @@ from autotrade.environment.replay.stats import (
 )
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.pipelines.calendar import ResearchGeometry
-from autotrade.pipelines.config import (
-    ArtifactRevision,
-    ReplaySpan,
-    SnapshotBundle,
-    research_span,
-)
+from autotrade.pipelines.config import ReplaySpan, SnapshotBundle, research_span
 from autotrade.pipelines.local_backend import LocalDailyEvaluationBackend
 
 # Two July-June years, opened at 1000 and closed at 900. The first

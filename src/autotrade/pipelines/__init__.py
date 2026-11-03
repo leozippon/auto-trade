@@ -7,10 +7,10 @@ keeps ``import autotrade.pipelines`` from pulling the worker's provider
 gateways and sandbox-image machinery into every reader of a ledger.
 """
 
+from autotrade.environment.artifacts import ArtifactRevision, FrozenArtifact
+
 from .config import (
-    ArtifactRevision,
     EvaluationResult,
-    FrozenArtifact,
     RollingExperimentConfig,
     StepResult,
     StrategyExperimentConfig,

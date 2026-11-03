@@ -24,6 +24,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from autotrade.environment.artifacts import ArtifactRevision
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.executor import (
@@ -53,7 +54,6 @@ from autotrade.environment.tools import ToolError
 from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.pipelines.config import (
     AcceptanceRules,
-    ArtifactRevision,
     EvaluationRequest,
     SnapshotBundle,
 )

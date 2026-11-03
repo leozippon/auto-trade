@@ -122,23 +122,22 @@ from _bootstrap import add_repo_src
 
 REPO_ROOT = add_repo_src(__file__)
 
+from autotrade.common.records import read_json_object
 from autotrade.environment import pretrained
-from autotrade.environment.artifacts import FilesystemArtifactStore
+from autotrade.environment.artifacts import ArtifactRevision, FilesystemArtifactStore
 from autotrade.environment.gpu import GpuUnavailableError, host_min_free_gpu_memory_mib
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import rmtree_keeping_file_modes
+from autotrade.environment.sandbox import GpuMode
+from autotrade.pipelines.arm_params import Surface, console_request, parameters
 from autotrade.pipelines.calendar import FULL_SPAN
 from autotrade.pipelines.config import (
     SNAPSHOT_CACHE_FORMAT_VERSION,
-    ArtifactRevision,
     acceptance_for,
     research_span,
 )
 from autotrade.pipelines.hitl_state import (
-    WEB_CLOSED_PARAMS,
     WEB_CREATE_DEFAULTS,
-    WEB_INTERNAL_PARAMS,
-    WEB_REQUIRED_PARAMS,
     select_gpus,
 )
 from autotrade.pipelines.ledger import ExperimentLedger
@@ -147,7 +146,6 @@ from autotrade.pipelines.worker import build_experiment_pipeline, resolve_worker
 
 # The console's own id, local-arm and GPU-request rules; importing them keeps
 # this module from growing a second copy of the create contract.
-from autotrade.webui.manager import _ID as EXPERIMENT_ID_RE
 from autotrade.webui.manager import gpu_request, uses_local_model
 
 EXPERIMENTS_ROOT = REPO_ROOT / "experiments"
@@ -231,6 +229,15 @@ BASE_OVERRIDES: dict[str, object] = {
     "max_research_minutes": 2400,
     "max_llm_calls": 6400,
 }
+
+# Both tables name console parameters of the arm record
+# (pipelines/arm_params.py): a pin or an override of anything else is a typo
+# that would otherwise surface only when a round runs.
+_NOT_CONSOLE = sorted(
+    {*BASE_EXPECTED_DEFAULTS, *BASE_OVERRIDES} - set(parameters(Surface.CONSOLE))
+)
+if _NOT_CONSOLE:
+    raise RuntimeError(f"not console parameters of the arm record: {_NOT_CONSOLE}")
 
 # Reported once per round on --dry-run: what every arm shares.
 ROUND_REPORT_KEYS: tuple[str, ...] = (
@@ -724,31 +731,16 @@ def normalize(params: dict[str, object]) -> dict[str, object]:
     resolve_worker_options pre-flight. The console's duplicate-directory and
     running-slot checks need the live deployment and stay at POST time.
     """
-    closed = sorted(set(params) & WEB_CLOSED_PARAMS)
-    if closed:
-        raise ValueError("console-managed parameters are not accepted: " + ", ".join(closed))
-    unknown = sorted(set(params) - set(WEB_CREATE_DEFAULTS))
-    if unknown:
-        raise ValueError("unknown experiment parameters: " + ", ".join(unknown))
-    merged = {**WEB_CREATE_DEFAULTS, **params}
-    missing = sorted(key for key in WEB_REQUIRED_PARAMS if merged.get(key) in (None, ""))
-    if missing:
-        raise ValueError("missing required experiment parameters: " + ", ".join(missing))
-    experiment_id = str(params.get("experiment_id") or "").strip()
-    if not EXPERIMENT_ID_RE.fullmatch(experiment_id):
-        raise ValueError("experiment_id must match [A-Za-z0-9][A-Za-z0-9_-]{0,99}")
-    merged.update(
-        {
-            **WEB_INTERNAL_PARAMS,
-            "experiment_id": experiment_id,
-            "experiments_root": str(EXPERIMENTS_ROOT),
-            "work_root": str(REPO_ROOT / ".runtime/sandboxes"),
-            "_creation_surface": "webui",
-        }
+    merged = console_request(
+        params,
+        defaults=WEB_CREATE_DEFAULTS,
+        experiments_root=str(EXPERIMENTS_ROOT),
+        work_root=str(REPO_ROOT / ".runtime/sandboxes"),
     )
+    merged["_creation_surface"] = "webui"
     resolve_worker_options(
         merged,
-        experiment_dir=EXPERIMENTS_ROOT / experiment_id,
+        experiment_dir=EXPERIMENTS_ROOT / str(merged["experiment_id"]),
         repo_root=REPO_ROOT,
         preflight=True,
     )
@@ -812,7 +804,7 @@ def smoke(merged: Mapping[str, object]) -> str:
             digest.update(str(path.relative_to(starter)).encode("utf-8") + b"\0" + path.read_bytes())
     record_path = REPO_ROOT / "logs" / "research" / "smoke" / f"{digest.hexdigest()[:20]}.json"
     if record_path.is_file():
-        record = json.loads(record_path.read_text(encoding="utf-8"))
+        record = read_json_object(record_path)
         if record["passed"]:
             return ""
         return f"{record['failure']} (recorded {record_path.relative_to(REPO_ROOT)}; delete it to smoke again)"
@@ -864,7 +856,7 @@ def _smoke_replays(merged: Mapping[str, object], starter: Path) -> str:
         # The admission margin is the console's own, so a card the console would
         # start the arm on is not refused here for being busy.
         spec = options.agent_sandbox
-        if spec is not None and spec.gpu == "auto":
+        if spec is not None and spec.gpu == GpuMode.AUTO:
             try:
                 margin = host_min_free_gpu_memory_mib()
             except ValueError as exc:
@@ -1115,8 +1107,8 @@ class Round:
                 " written its contract yet, so the round is refused below"
             )
         try:
-            record = json.loads(provider.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+            record = read_json_object(provider)
+        except (OSError, ValueError) as exc:
             return f"seed {self.pit_views_seed}: provider.json unreadable ({exc}); the round is refused below"
         version = record.get("schema_version")
         if version != SNAPSHOT_CACHE_FORMAT_VERSION:

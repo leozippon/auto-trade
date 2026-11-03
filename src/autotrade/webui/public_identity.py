@@ -23,6 +23,7 @@ from autotrade.environment.identity import (
     LegacyExperimentError,
 )
 from autotrade.pipelines.hitl_state import HITL_DIR_NAME, SCHEDULE_NAME
+from autotrade.pipelines.ledger import SessionKind
 
 _PATH_KEYS = frozenset(
     {
@@ -71,10 +72,6 @@ _WINDOWS_PATH = re.compile(
     r"[^\s\"'`<>|()\[\]{},;]+"
 )
 
-# The planned session kinds of a research arm (pipelines/hitl_state.py).
-SESSION_KINDS = frozenset({"research", "forward"})
-
-
 class PublicIdentity:
     """Validated experiment public projection and host resolver."""
 
@@ -109,7 +106,7 @@ class PublicIdentity:
             if not isinstance(raw, dict):
                 raise ValueError("experiment session plan is invalid")
             key = str(raw.get("session_key") or "")
-            if not key or str(raw.get("kind") or "") not in SESSION_KINDS:
+            if not key or str(raw.get("kind") or "") not in set(SessionKind):
                 raise ValueError("experiment session plan contains an invalid session")
             if any(entry["session_key"] == key for entry in self.sessions):
                 raise ValueError("experiment session plan contains duplicate identities")

@@ -16,12 +16,12 @@ from __future__ import annotations
 
 import csv
 import hashlib
-import json
 import math
 import re
 import threading
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
@@ -31,6 +31,8 @@ from autotrade.agent.runner import (
     DEADLINE_GRACE_EXHAUSTED,
     LLM_CALL_BUDGET_EXHAUSTED,
 )
+from autotrade.common.ids import is_experiment_id
+from autotrade.common.records import dataclass_record, read_json_object
 from autotrade.environment.replay.style import (
     READABLE_STYLE_SCHEMA_VERSIONS,
     STYLE_ARTIFACT_NAME,
@@ -42,6 +44,7 @@ from autotrade.environment.tools.report_issue import (
     read_issue_reports,
 )
 from autotrade.pipelines.agent_inbox import INBOX_NAME, inbox_public_view
+from autotrade.pipelines.arm_params import PARAMETERS
 from autotrade.pipelines.calendar import FULL_SPAN
 from autotrade.pipelines.config import (
     acceptance_for,
@@ -56,18 +59,19 @@ from autotrade.pipelines.hitl_state import (
     PARAMS_NAME,
     STATUS_NAME,
     WEB_CREATE_DEFAULTS,
+    ArmState,
     arm_is_archived,
     read_control,
     read_gpu_claim,
-    read_json,
     read_status,
     status_pid_alive,
 )
 from autotrade.pipelines.ledger import (
     ENVIRONMENT_BLOCKED,
-    FORWARD_STAGE,
-    RESEARCH_SESSION_KEY,
     ExperimentLedger,
+    SessionKind,
+    Stage,
+    VerdictStatus,
     experiment_verdict,
     forward_record,
     frozen_record,
@@ -88,13 +92,16 @@ from autotrade.pipelines.verdict import (
     residual_bar,
     summary_excess_at_cost_stress,
 )
-from autotrade.pipelines.worker import _ALLOWED_PARAMS
 
 from .public_identity import PublicIdentity
 from .traces import resolve_trace_path, trace_stats
 
-_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$")
-ACTIVE_STATES = ("launching", "initializing", "running_session", "paused")
+ACTIVE_STATES = (
+    ArmState.LAUNCHING,
+    ArmState.INITIALIZING,
+    ArmState.RUNNING_SESSION,
+    ArmState.PAUSED,
+)
 # Manager-written stub state between spawn and the worker's first status write
 # (interpreter start + imports take seconds). Stale = the worker never came up.
 LAUNCH_GRACE_SECONDS = 180.0
@@ -228,7 +235,7 @@ class UnsupportedParamsError(ValueError):
 
 def _require_supported_params(params: Mapping[str, object]) -> None:
     unknown = sorted(
-        key for key in params if not str(key).startswith("_") and key not in _ALLOWED_PARAMS
+        key for key in params if not str(key).startswith("_") and key not in PARAMETERS
     )
     if unknown:
         raise UnsupportedParamsError(f"unsupported experiment parameters: {unknown}")
@@ -284,7 +291,7 @@ def experiment_state(
     except (OSError, ValueError) as exc:
         return {
             "kind": "hitl",
-            "state": "unreadable",
+            "state": ArmState.UNREADABLE,
             "worker_alive": False,
             "error": f"{type(exc).__name__}: {exc}",
         }
@@ -292,18 +299,18 @@ def experiment_state(
     if not status:
         result: dict[str, object] = {
             "kind": "hitl",
-            "state": "created",
+            "state": ArmState.CREATED,
             "worker_alive": False,
             "status": {},
         }
     else:
         alive = status_pid_alive(status)
         state = str(status.get("state") or "unknown")
-        if state == "launching" and not alive:
+        if state == ArmState.LAUNCHING and not alive:
             if _age_seconds(status.get("launched_at")) > LAUNCH_GRACE_SECONDS:
-                state = "interrupted"
+                state = ArmState.INTERRUPTED
         elif state in ACTIVE_STATES and not alive:
-            state = "interrupted"
+            state = ArmState.INTERRUPTED
         result = {"kind": "hitl", "state": state, "worker_alive": alive, "status": status}
     if log_ref:
         result["worker_log"] = log_ref
@@ -413,7 +420,7 @@ def arm_ending(
     on the environment by the host's own reason.
     """
 
-    if str(state.get("state") or "") == "failed":
+    if str(state.get("state") or "") == ArmState.FAILED:
         error = str(_mapping(state.get("status")).get("error") or "")
         if not error:
             failures = _attempt_failures(records)
@@ -423,11 +430,11 @@ def arm_ending(
     verdict = experiment_verdict(records)
     if verdict is None:
         return None
-    if verdict["status"] == "voided":
+    if verdict["status"] == VerdictStatus.VOIDED:
         void = _mapping(verdict.get("void"))
         reason = _reason_line(identity.public_text(str(void.get("reason") or "")))
         return {"state": "rejected", "reason": f"验收通过后复核未通过：{reason}"}
-    if verdict["status"] == "graduated":
+    if verdict["status"] == VerdictStatus.GRADUATED:
         judged = _mapping(_mapping(_mapping(forward).get("slices")).get("forward"))
         raw = _mapping(judged.get("raw_readings"))
         ratio = _number(judged.get("information_ratio"))
@@ -440,13 +447,13 @@ def arm_ending(
                 f" · 主动 IR {'—' if ratio is None else f'{ratio:.2f}'}"
             ),
         }
-    if verdict["status"] == "discarded":
+    if verdict["status"] == VerdictStatus.DISCARDED:
         codes = dict.fromkeys(
             _CRITERION_CODES.get(token, token)
             for token in _recorded_reasons(verdict.get("reasons"))
         )
         return {"state": "rejected", "reason": " · ".join(codes)}
-    if verdict["status"] == ENVIRONMENT_BLOCKED:
+    if verdict["status"] == VerdictStatus.ENVIRONMENT_BLOCKED:
         # The host's reason names the span and the error, like a broken
         # worker's: the error is what the operator acts on, so it is not cut.
         reasons = verdict.get("reasons")
@@ -625,7 +632,7 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
         state = experiment_state(directory)
         records = read_ledger_records(directory)
         skills = latest_skills_snapshot(records, experiment_dir=directory).stats
-        params = read_json(directory / HITL_DIR_NAME / PARAMS_NAME)
+        params = read_json_object(directory / HITL_DIR_NAME / PARAMS_NAME, missing_ok=True)
         _require_supported_params(params)
         raw_status = state.get("status")
         status = identity.public_status(raw_status) if isinstance(raw_status, Mapping) else {}
@@ -660,7 +667,7 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
     except Exception as exc:  # noqa: BLE001 - broken experiments remain inspectable and deletable
         summary.update(
             {
-                "state": "unreadable",
+                "state": ArmState.UNREADABLE,
                 "worker_alive": False,
                 "error": f"{type(exc).__name__}: experiment state is unreadable",
             }
@@ -709,7 +716,7 @@ def _budget_used(
         if isinstance(block, Mapping):
             return dict(block)
     status = _mapping(raw_status)
-    if status.get("session_key") != RESEARCH_SESSION_KEY:
+    if status.get("session_key") != SessionKind.RESEARCH:
         return None
     run_id = status.get("run_id")
     path = resolve_trace_path(directory, str(run_id)) if isinstance(run_id, str) else None
@@ -781,7 +788,7 @@ def _listing_row(directory: Path) -> tuple[dict[str, object], tuple[object, ...]
     if cached is not None and cached[0] == signature:
         return cached[1], signature
     row = summarize_experiment(directory)
-    if row.get("worker_alive") is False and row.get("state") not in ("launching", "unreadable"):
+    if row.get("worker_alive") is False and row.get("state") not in (ArmState.LAUNCHING, ArmState.UNREADABLE):
         _SUMMARY_CACHE[directory] = (signature, row)
         return row, signature
     _SUMMARY_CACHE.pop(directory, None)
@@ -800,7 +807,7 @@ def archive_marker(directory: Path) -> dict[str, object] | None:
     """The arm's archive marker (when and why), or None when it is not archived."""
 
     path = Path(directory) / HITL_DIR_NAME / ARCHIVED_NAME
-    return read_json(path) if path.is_file() else None
+    return read_json_object(path, missing_ok=True) if path.is_file() else None
 
 
 # Rows kept by another process were derived by the code that process ran, so a
@@ -908,7 +915,7 @@ def best_experiment(rows: Sequence[Mapping[str, object]]) -> dict[str, object] |
 
 
 def resolve_experiment_dir(root: Path, experiment_id: str) -> Path:
-    if not _ID.fullmatch(experiment_id):
+    if not is_experiment_id(experiment_id):
         raise ValueError(f"invalid experiment id: {experiment_id!r}")
     root = Path(root).resolve()
     path = (root / experiment_id).resolve()
@@ -925,37 +932,76 @@ def _cost_stress_multiplier(directory: Path) -> float:
     of the rules, so an arm stamped before a rule became required still
     lists."""
 
-    params = read_json(directory / HITL_DIR_NAME / PARAMS_NAME)
+    params = read_json_object(directory / HITL_DIR_NAME / PARAMS_NAME, missing_ok=True)
     return float(defaulted_acceptance(params)["cost_stress_multiplier"])  # type: ignore[arg-type]
 
 
-def _step_view(row: Mapping[str, object], multiplier: float) -> dict[str, object]:
-    """One recorded Validation: its span, headline replay metrics, the raw
-    excess over the arm's benchmark, and the graded figures the freeze gate
-    counts, the active excess at the arm's cost stress (``multiplier``)
-    among them. A row recorded before rows carried graded figures shows
-    none: its stored ones were of the retired regressed measure."""
+@dataclass(frozen=True)
+class ValidationView:
+    """One recorded Validation as the console shows it: its span, headline
+    replay metrics, the raw excess over the arm's benchmark, and the graded
+    figures, the active excess at the arm's cost stress among them. A row
+    recorded before rows carried graded figures shows none: its stored ones
+    were of the retired regressed measure."""
 
-    summary = _mapping(row.get("summary"))
-    graded = _mapping(row.get("graded"))
-    return {
-        "step_id": row.get("step_id"),
-        "span": row.get("span"),
-        "total_return": _number(summary.get("total_return")),
-        "excess_return": _number(_mapping(summary.get("benchmark")).get("excess_return")),
-        "excess_at_cost_stress": (
-            summary_excess_at_cost_stress(graded, summary, cost_stress_multiplier=multiplier)
-            if _number(graded.get("plain_excess")) is not None
-            else None
-        ),
-        "sharpe": _number(summary.get("sharpe")),
-        "max_drawdown": _number(summary.get("max_drawdown")),
-        "plain_excess": _number(graded.get("plain_excess")),
-        "information_ratio": _number(graded.get("information_ratio")),
-        # ``active`` when the figures are of the node's return minus its
-        # zero-skill panel; absent on a node recorded before panels existed.
-        "series": graded.get("series"),
-    }
+    step_id: object
+    span: object
+    total_return: float | None
+    excess_return: float | None
+    excess_at_cost_stress: float | None
+    sharpe: float | None
+    max_drawdown: float | None
+    plain_excess: float | None
+    information_ratio: float | None
+    # ``active`` when the figures are of the node's return minus its
+    # zero-skill panel; None on a node recorded before panels existed.
+    series: object
+
+    @classmethod
+    def of(cls, row: Mapping[str, object], multiplier: float) -> ValidationView:
+        """The view of one step row, the cost stress at ``multiplier``."""
+
+        summary = _mapping(row.get("summary"))
+        graded = _mapping(row.get("graded"))
+        return cls(
+            step_id=row.get("step_id"),
+            span=row.get("span"),
+            total_return=_number(summary.get("total_return")),
+            excess_return=_number(_mapping(summary.get("benchmark")).get("excess_return")),
+            excess_at_cost_stress=(
+                summary_excess_at_cost_stress(graded, summary, cost_stress_multiplier=multiplier)
+                if _number(graded.get("plain_excess")) is not None
+                else None
+            ),
+            sharpe=_number(summary.get("sharpe")),
+            max_drawdown=_number(summary.get("max_drawdown")),
+            plain_excess=_number(graded.get("plain_excess")),
+            information_ratio=_number(graded.get("information_ratio")),
+            series=graded.get("series"),
+        )
+
+
+@dataclass(frozen=True)
+class BestCandidate:
+    """A research session's best full-span Validation: the listing's
+    ``research_best`` and a research record's ``best``. Served flat: the
+    session, the Validation's figures, then the fields below."""
+
+    session_key: object
+    validation: ValidationView
+    # The replay result the Validation recorded.
+    result: str | None
+    # What the zero-skill panel earned over the span, read while the session
+    # still runs; None otherwise.
+    panel_return: float | None = None
+    # A session recorded under the retired deflated-Sharpe gate (before
+    # 2026-11-03) stored these for the node it nominated; None otherwise.
+    deflated_sharpe_probability: float | None = None
+    trials: object = None
+
+    def to_record(self) -> dict[str, object]:
+        record = dataclass_record(self)
+        return {"session_key": record.pop("session_key"), **record.pop("validation"), **record}  # type: ignore[dict-item]
 
 
 def _best_row(steps: Sequence[Mapping[str, object]]) -> Mapping[str, object] | None:
@@ -979,7 +1025,7 @@ def _best_row(steps: Sequence[Mapping[str, object]]) -> Mapping[str, object] | N
 
 def _live_candidate(
     directory: Path, steps: Sequence[Mapping[str, object]], *, running: bool
-) -> dict[str, object] | None:
+) -> BestCandidate | None:
     """An unrecorded session's best Validation so far and, while its worker
     is ``running``, what its zero-skill panel earned. No gate is read: a
     freeze is a registration, and the one performance reading, on the sealed
@@ -989,25 +1035,24 @@ def _live_candidate(
     best = _best_row(steps)
     if best is None:
         return None
-    view = {
-        **_step_view(best, _cost_stress_multiplier(directory)),
-        "result": _result_name(best.get("validation_result_ref")),
-    }
-    if not running:
-        return view
-    try:
-        sidecar = json.loads(
-            (Path(str(best["validation_result_ref"])).parent / STYLE_ARTIFACT_NAME).read_text(
-                encoding="utf-8"
+    sidecar: Mapping[str, object] = {}
+    if running:
+        try:
+            sidecar = read_json_object(
+                Path(str(best["validation_result_ref"])).parent / STYLE_ARTIFACT_NAME
             )
-        )
-    except (OSError, ValueError):
-        sidecar = {}
-    # What the zero-skill panel itself earned over the same span.
-    return {**view, "panel_return": panel_return(sidecar)}
+        except (OSError, ValueError):
+            pass
+    return BestCandidate(
+        session_key=SessionKind.RESEARCH,
+        validation=ValidationView.of(best, _cost_stress_multiplier(directory)),
+        result=_result_name(best.get("validation_result_ref")),
+        # What the zero-skill panel itself earned over the same span.
+        panel_return=panel_return(sidecar) if running else None,
+    )
 
 
-def _recorded_best(directory: Path, record: Mapping[str, object]) -> dict[str, object] | None:
+def _recorded_best(directory: Path, record: Mapping[str, object]) -> BestCandidate | None:
     """A recorded research session's best Validation, read off its ledger
     record alone, for the listing and the experiment page alike.
 
@@ -1028,12 +1073,13 @@ def _recorded_best(directory: Path, record: Mapping[str, object]) -> dict[str, o
     gate = _mapping(record.get("freeze_gate"))
     nominated = best.get("step_id") == record.get("nominated_step_id")
     dsr = _mapping(gate.get("deflated_sharpe")) if nominated else {}
-    return {
-        **_step_view(best, _cost_stress_multiplier(directory)),
-        "result": _result_name(best.get("validation_result_ref")),
-        "deflated_sharpe_probability": _number(dsr.get("deflated_sharpe_probability")),
-        "trials": dsr.get("trials"),
-    }
+    return BestCandidate(
+        session_key=record.get("session_key"),
+        validation=ValidationView.of(best, _cost_stress_multiplier(directory)),
+        result=_result_name(best.get("validation_result_ref")),
+        deflated_sharpe_probability=_number(dsr.get("deflated_sharpe_probability")),
+        trials=dsr.get("trials"),
+    )
 
 
 def _frozen_session(records: Sequence[Mapping[str, object]]) -> str | None:
@@ -1063,14 +1109,11 @@ def _research_best(
     """
 
     research = research_records(records)
-    for record in reversed(research):
-        best = _recorded_best(directory, record)
-        if best is not None:
-            return {"session_key": record.get("session_key"), **best}
-    if research:
-        return None
-    best = _live_best(directory, running=running)
-    return {"session_key": RESEARCH_SESSION_KEY, **best} if best is not None else None
+    recorded = (_recorded_best(directory, record) for record in reversed(research))
+    best = next((item for item in recorded if item is not None), None)
+    if best is None and not research:
+        best = _live_best(directory, running=running)
+    return best.to_record() if best is not None else None
 
 
 # A recorded Validation is immutable: its sidecar and its result's style file
@@ -1078,7 +1121,7 @@ def _research_best(
 # candidate is kept per node set, so a listing poll of a running arm re-reads
 # nothing until the session records another node.
 _LIVE_STEP_CACHE: dict[tuple[str, str], dict[str, object]] = {}
-_LIVE_BEST_CACHE: dict[tuple[str, bool, tuple[str, ...]], dict[str, object] | None] = {}
+_LIVE_BEST_CACHE: dict[tuple[str, bool, tuple[str, ...]], BestCandidate | None] = {}
 
 
 def _live_steps(directory: Path) -> list[dict[str, object]]:
@@ -1096,7 +1139,7 @@ def _live_steps(directory: Path) -> list[dict[str, object]]:
         key = (str(directory), path.stem)
         row = _LIVE_STEP_CACHE.get(key)
         if row is None:
-            record = read_json(path)
+            record = read_json_object(path, missing_ok=True)
             try:
                 reference = str(
                     recorded_path(directory, str(record.get("result_ref") or ""))
@@ -1122,7 +1165,7 @@ def _live_steps(directory: Path) -> list[dict[str, object]]:
     return rows
 
 
-def _live_best(directory: Path, *, running: bool) -> dict[str, object] | None:
+def _live_best(directory: Path, *, running: bool) -> BestCandidate | None:
     steps = _live_steps(directory)
     key = (str(directory), running, tuple(sorted(str(row.get("step_id")) for row in steps)))
     if key not in _LIVE_BEST_CACHE:
@@ -1365,8 +1408,8 @@ def _research_session_view(
         "arm_end": identity.public_record(record["arm_end"])  # type: ignore[arg-type]
         if isinstance(record.get("arm_end"), Mapping)
         else None,
-        "validations": [_step_view(row, multiplier) for row in steps],
-        "best": _recorded_best(directory, record),
+        "validations": [dataclass_record(ValidationView.of(row, multiplier)) for row in steps],
+        "best": best.to_record() if (best := _recorded_best(directory, record)) is not None else None,
         "attempts": record.get("attempts"),
         "budget_used": _mapping(record.get("budget_used")) or None,
     }
@@ -1466,7 +1509,7 @@ def _failed_validations(identity: PublicIdentity, directory: Path) -> dict[str, 
 def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
     directory = resolve_experiment_dir(root, experiment_id)
     detail = {**summarize_experiment(directory), "archived": archive_marker(directory)}
-    if detail.get("state") == "unreadable":
+    if detail.get("state") == ArmState.UNREADABLE:
         return {
             **detail,
             "params": {},
@@ -1479,7 +1522,7 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
     records = read_ledger_records(directory)
     research = research_records(records)
     hitl = directory / HITL_DIR_NAME
-    params = read_json(hitl / PARAMS_NAME)
+    params = read_json_object(hitl / PARAMS_NAME, missing_ok=True)
     sessions: list[dict[str, object]] = []
     for planned in identity.sessions:
         key = str(planned["session_key"])
@@ -1513,7 +1556,7 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
         # raised before its record -- selected by the pipeline's stage, not by
         # the provider phase the replay reads (``FORWARD_PHASE``) -- and a
         # research Validation that failed.
-        "replay_attempts": _failed_attempts(identity, records, FORWARD_STAGE),
+        "replay_attempts": _failed_attempts(identity, records, Stage.FORWARD),
         "research_validation_failures": _failed_validations(identity, directory),
     }
 
@@ -1580,8 +1623,8 @@ def result_style(root: Path, experiment_id: str, name: str) -> dict[str, object]
 
     sidecar = ledger_result(root, experiment_id, name).parent / STYLE_ARTIFACT_NAME
     try:
-        payload = read_json(sidecar)
-    except (OSError, TypeError, ValueError):
+        payload = read_json_object(sidecar, missing_ok=True)
+    except (OSError, ValueError):
         return {"available": False, "reason": "unreadable"}
     if (
         payload.get("schema_version") not in READABLE_STYLE_SCHEMA_VERSIONS
@@ -1602,7 +1645,7 @@ def result_orders(
     """
     path = ledger_result(root, experiment_id, name)
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = read_json_object(path)
     except (OSError, ValueError) as exc:
         raise KeyError(f"unreadable result: {name}") from exc
     rows = payload.get("executions") if isinstance(payload, dict) else None

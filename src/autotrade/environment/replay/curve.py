@@ -9,9 +9,10 @@ curve out.
 
 from __future__ import annotations
 
-import json
 import math
 from pathlib import Path
+
+from autotrade.common.records import read_json_object
 
 from .style import BENCHMARK_LABEL, STYLE_ARTIFACT_NAME
 
@@ -30,7 +31,7 @@ def read_result(path: Path) -> dict[str, object]:
     """One ``result.json``; an unreadable or non-object file reads as empty."""
 
     try:
-        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        payload = read_json_object(Path(path))
     except (OSError, ValueError):
         return {}
     return payload if isinstance(payload, dict) else {}

@@ -28,18 +28,22 @@ def read_json_object(path: str | Path, *, missing_ok: bool = False) -> dict[str,
     """The JSON object stored at ``path``.
 
     A missing file raises ``FileNotFoundError``, or reads as ``{}`` when
-    ``missing_ok``. An unreadable file, invalid JSON and a payload that is not
-    an object raise ``ValueError`` naming the path.
+    ``missing_ok``. Text that is not UTF-8 JSON and a payload that is not an
+    object raise ``ValueError`` naming the path. Any other ``OSError``
+    (permission denied, an I/O error) propagates as it is: the file may hold
+    a valid record the host could not read, which is no malformed record.
     """
 
     target = Path(path)
     try:
-        value = json.loads(target.read_text(encoding="utf-8"))
+        text = target.read_text(encoding="utf-8")
     except FileNotFoundError:
         if missing_ok:
             return {}
         raise
-    except (OSError, ValueError) as exc:
+    try:
+        value = json.loads(text)
+    except ValueError as exc:
         raise ValueError(f"unreadable JSON record {target}: {exc}") from exc
     if not isinstance(value, dict):
         raise ValueError(f"JSON record is not an object: {target}")

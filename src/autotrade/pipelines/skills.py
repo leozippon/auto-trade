@@ -12,7 +12,6 @@ and only the writable ``skills/`` tree is ever published as a generation.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import shutil
@@ -22,7 +21,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from autotrade.common.records import write_json_atomic
+from autotrade.common.records import read_json_object, write_json_atomic
 from autotrade.environment.runtime import chmod_tree, utc_now_iso
 from autotrade.environment.tools.base import ToolError, ToolResult, ToolSpec
 from autotrade.environment.tools.skills_policy import (
@@ -30,7 +29,12 @@ from autotrade.environment.tools.skills_policy import (
 )
 from autotrade.environment.tools.workspace import SafeWorkspace
 
-from .ledger import ExperimentLedger, experiment_verdict, forward_record
+from .ledger import (
+    ExperimentLedger,
+    VerdictStatus,
+    experiment_verdict,
+    forward_record,
+)
 
 SKILLS_DIRNAME = "skills"
 OPERATING_MEMORY_DIRNAME = "memory"
@@ -435,7 +439,7 @@ def experiment_graduated(records: Sequence[Mapping[str, object]]) -> bool:
     """
 
     verdict = experiment_verdict(records)
-    return verdict is not None and verdict.get("status") == "graduated"
+    return verdict is not None and verdict.get("status") == VerdictStatus.GRADUATED
 
 
 def curated_memory_source(repo_root: str | Path | None) -> MemorySource | None:
@@ -677,9 +681,7 @@ def read_operating_memory_snapshot(
     path = operating_memory_snapshot_path(experiment_dir)
     if not path.is_file():
         return None
-    record = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(record, dict):
-        raise ValueError("operating memory snapshot must be a JSON object")
+    record = read_json_object(path)
     if int(record.get("schema_version") or 0) != OPERATING_MEMORY_SNAPSHOT_SCHEMA:
         raise ValueError("operating memory snapshot has an unknown schema_version")
     return record

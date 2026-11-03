@@ -43,8 +43,8 @@ from autotrade.paper.book import create_book, load_book
 from autotrade.paper.engine import DailyPaperEngine
 from autotrade.pipelines.config import DEFAULT_RESEARCH_GEOMETRY
 from autotrade.pipelines.worker import (
-    _strategy_sandbox_from_spec,
     resolve_worker_options,
+    strategy_sandbox_from_spec,
 )
 from autotrade.webui.server import create_app
 from tests.unit.acceptance_fixture import CREATE_RULES
@@ -236,7 +236,7 @@ def test_the_pin_reaches_the_session_and_every_strategy_container(tmp_path: Path
 
     pinned = spec(pretrained_manifest_sha256=OTHER_PIN)
     assert pinned.pretrained_manifest_sha256 == OTHER_PIN
-    strategy = _strategy_sandbox_from_spec(pinned, fit_timeout_seconds=60)
+    strategy = strategy_sandbox_from_spec(pinned, fit_timeout_seconds=60)
     assert strategy.spec.pretrained_manifest_sha256 == OTHER_PIN
     assert spec().pretrained_manifest_sha256 == ""
     with pytest.raises(ValueError, match="pretrained_manifest_sha256"):

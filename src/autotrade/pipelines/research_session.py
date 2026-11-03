@@ -113,11 +113,7 @@ from .config import (
     StepResult,
     positive_spend_cap,
 )
-from .ledger import (
-    ENVIRONMENT_BLOCKED,
-    RESEARCH_STAGE,
-    ExperimentLedger,
-)
+from .ledger import ENVIRONMENT_BLOCKED, ExperimentLedger, Stage
 from .session_tools import (
     BatchValidateTool,
     EnvironmentBlocked,
@@ -765,10 +761,10 @@ class LLMResearchDeveloper:
             agent_trace_path(self.artifact_store.root.parent, request.run_id),
             ids={
                 "experiment_id": request.experiment_id,
-                "epoch_id": RESEARCH_STAGE,
+                "epoch_id": Stage.RESEARCH,
                 "session_ref": session_ref,
                 "run_id": run_ref,
-                "session_kind": RESEARCH_STAGE,
+                "session_kind": Stage.RESEARCH,
             },
             transcript_dir=transcripts,
         )
@@ -813,14 +809,14 @@ class LLMResearchDeveloper:
             paths.run_manifest,
             {
                 "experiment_id": request.experiment_id,
-                "epoch_id": RESEARCH_STAGE,
+                "epoch_id": Stage.RESEARCH,
                 # Raw on the host manifest (issue reports link on it);
                 # RunManifest's Agent-visible view and build_experiment_facts
                 # both project it through the experiment reference store.
                 "fold_id": request.session_key,
                 "run_id": request.run_id,
                 "session_key": request.session_key,
-                "kind": RESEARCH_STAGE,
+                "kind": Stage.RESEARCH,
                 "llm": {
                     "provider": str(self.llm.provider),
                     "model": str(self.llm.model),
@@ -1464,7 +1460,7 @@ class LLMResearchDeveloper:
             )
         install_agent_data_contract(
             local.paths,
-            kind=RESEARCH_STAGE,
+            kind=Stage.RESEARCH,
             session_ref=self.ref_store.get_or_create("session", request.session_key),
             views={"snapshot": (target, "/mnt/snapshot")},
         )

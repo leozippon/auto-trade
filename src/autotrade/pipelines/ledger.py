@@ -46,24 +46,35 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
+from enum import StrEnum
 from pathlib import Path
 
+from autotrade.common.records import write_json_atomic
 from autotrade.environment.runtime import (
     append_versioned_jsonl,
     read_versioned_jsonl,
     utc_now_iso,
-    write_json_atomic,
 )
 
 # Stamped on every appended record; bump when the record shape changes.
 LEDGER_RECORD_SCHEMA_VERSION = 1
-# The stage names the link key ``epoch_id`` carries.
-RESEARCH_STAGE = "research"
-FORWARD_STAGE = "forward"
-# The two planned sessions' keys, also their ``fold_id``: the arm's one
-# research session and the forward replay.
-RESEARCH_SESSION_KEY = "research"
-FORWARD_SESSION_KEY = "forward"
+
+
+class Stage(StrEnum):
+    """The stage a record belongs to: the link key ``epoch_id``."""
+
+    RESEARCH = "research"
+    FORWARD = "forward"
+
+
+class SessionKind(StrEnum):
+    """The arm's two planned sessions, the research session and the forward
+    replay: each one's kind and key, which is also its records' ``fold_id``."""
+
+    RESEARCH = "research"
+    FORWARD = "forward"
+
+
 # An operator's withdrawal of a recorded graduation (:func:`verdict_void_record`).
 VERDICT_VOID_RECORD_TYPE = "verdict_void"
 # An operator's incubation of one node of a finished arm, recorded before
@@ -76,8 +87,23 @@ INCUBATION_RECORD_TYPE = "incubation"
 # host kept failing the session's replays on one span and ended the session
 # (``session_tools.EnvironmentBlocked``), so nothing there was tested. Such an
 # arm is flagged on the console's home list.
-ENVIRONMENT_BLOCKED = "environment_blocked"
-ARM_END_STATUSES = ("no_deliverable", ENVIRONMENT_BLOCKED)
+
+
+class VerdictStatus(StrEnum):
+    """An arm's verdict (:func:`experiment_verdict`): the forward record's
+    ``graduated`` or ``discarded``, ``voided`` over a withdrawn graduation,
+    or the ``arm_end`` status of a research session that ended the arm."""
+
+    GRADUATED = "graduated"
+    DISCARDED = "discarded"
+    VOIDED = "voided"
+    NO_DELIVERABLE = "no_deliverable"
+    ENVIRONMENT_BLOCKED = "environment_blocked"
+
+
+# Also the research session's outcome that ends the arm with this status.
+ENVIRONMENT_BLOCKED = VerdictStatus.ENVIRONMENT_BLOCKED
+ARM_END_STATUSES = (VerdictStatus.NO_DELIVERABLE, VerdictStatus.ENVIRONMENT_BLOCKED)
 PIPELINE_RECORD_TYPES = (
     "research_session",
     "forward",
@@ -286,10 +312,10 @@ def experiment_verdict(
         reasons = [str(reason) for reason in verdict.get("reasons") or ()]
         if void is None:
             return {"status": status, "reasons": reasons}
-        if status != "graduated":
+        if status != VerdictStatus.GRADUATED:
             raise ValueError(f"a verdict void stands on a {status!r} verdict, not a graduation")
         return {
-            "status": "voided",
+            "status": VerdictStatus.VOIDED,
             "reasons": reasons,
             "void": {key: void.get(key) for key in VERDICT_VOID_FIELDS},
         }
@@ -314,7 +340,7 @@ def paper_candidate(records: Sequence[Mapping[str, object]]) -> dict[str, object
     """The artifact Paper pins: the frozen artifact of a graduated arm, else None."""
 
     verdict = experiment_verdict(records)
-    if verdict is None or verdict["status"] != "graduated":
+    if verdict is None or verdict["status"] != VerdictStatus.GRADUATED:
         return None
     frozen = frozen_record(records)
     if frozen is None:
@@ -411,8 +437,8 @@ def verdict_void(
     return {
         "record_type": VERDICT_VOID_RECORD_TYPE,
         "experiment_id": experiment_id,
-        "epoch_id": FORWARD_STAGE,
-        "fold_id": FORWARD_SESSION_KEY,
+        "epoch_id": Stage.FORWARD,
+        "fold_id": SessionKind.FORWARD,
         "run_id": VERDICT_VOID_RECORD_TYPE,
         "voided_by": voided_by,
         "reason": reason,
@@ -432,7 +458,7 @@ def require_voidable(
     if verdict_void_record(records) is not None:
         raise ValueError("the arm's graduation is already voided")
     verdict = experiment_verdict(records)
-    if verdict is None or verdict["status"] != "graduated":
+    if verdict is None or verdict["status"] != VerdictStatus.GRADUATED:
         status = None if verdict is None else verdict["status"]
         raise ValueError(f"only a recorded graduation can be voided; the arm's verdict is {status!r}")
 

@@ -18,7 +18,6 @@ comparable.
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import uuid
@@ -26,13 +25,9 @@ from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
+from autotrade.common.records import read_json_object, write_json_atomic
 from autotrade.environment.artifacts import copy_artifact, copy_model_artifacts
-from autotrade.environment.runtime import (
-    chmod_tree,
-    sanitize_for_log,
-    utc_now_iso,
-    write_json_atomic,
-)
+from autotrade.environment.runtime import chmod_tree, sanitize_for_log, utc_now_iso
 
 TREE_FILE = "tree.json"
 # Node subdirectories reserved for the snapshot itself; attachments must not
@@ -52,18 +47,32 @@ def node_in_session(node: Mapping[str, object], *, session_ref: str) -> bool:
     return node.get("session_ref") == session_ref
 
 
+_NODE_ID_SEPARATOR = "__"
+
+
+def build_node_id(epoch_id: str, session_ref: str, run_id: str, result_name: str) -> str:
+    """A Step node's id: its four parts joined (``node_handle`` reads the last).
+
+    ``result_name`` (``valid_NNN``) is unique only within one run's results
+    directory; a retried attempt of the same session starts again at
+    ``valid_001``, so the run id is part of the node's identity.
+    """
+
+    return _NODE_ID_SEPARATOR.join((epoch_id, session_ref, run_id, result_name))
+
+
 def node_handle(node_id: str) -> str:
     """A Step node's short handle: the result name its id ends with (``valid_002``).
 
-    A node id joins four opaque parts (``<epoch>__<session_ref>__<run_ref>__
-    <result name>``) and runs past a hundred characters, which the session's
-    model mistypes; the result name is the part that tells one Validation of
-    a session from another. Each attempt numbers its results from
-    ``valid_001``, so a resumed attempt can repeat an earlier attempt's handle
-    -- a handle names a node only where no other node of the session shares it.
+    A node id joins four opaque parts (``build_node_id``) and runs past a
+    hundred characters, which the session's model mistypes; the result name
+    is the part that tells one Validation of a session from another. Each
+    attempt numbers its results from ``valid_001``, so a resumed attempt can
+    repeat an earlier attempt's handle -- a handle names a node only where no
+    other node of the session shares it.
     """
 
-    return str(node_id).rsplit("__", 1)[-1]
+    return str(node_id).rsplit(_NODE_ID_SEPARATOR, 1)[-1]
 
 
 def unique_handles(node_ids: Iterable[str]) -> dict[str, str]:
@@ -125,7 +134,7 @@ class StepTree:
         self.root = Path(root)
         self.tree_path = self.root / TREE_FILE
         if self.tree_path.exists():
-            self.data = json.loads(self.tree_path.read_text(encoding="utf-8"))
+            self.data = read_json_object(self.tree_path)
         else:
             self.data = {"current_node_id": None, "nodes": []}
 
@@ -145,12 +154,7 @@ class StepTree:
         attachments: dict[str, str | Path] | None = None,
         metadata: Mapping[str, object] | None = None,
     ) -> str:
-        # result_name (valid_NNN) is only unique within one run's results dir;
-        # the same session re-executed (a retried attempt) starts again at
-        # valid_001, so the run id must be part of the node identity.
-        node_id = f"{epoch_id}__{session_ref}__{run_id}__{result_name}"
-        if any(node["node_id"] == node_id for node in self.data["nodes"]):
-            raise ValueError(f"step tree node already exists: {node_id}")
+        node_id = self._new_node_id(epoch_id, session_ref, run_id, result_name)
         node_dir = self.root / node_id
         copy_artifact(output_root, node_dir / NODE_OUTPUT_DIR)
         if models_root is not None and Path(models_root).exists():
@@ -215,9 +219,7 @@ class StepTree:
         leaves ``current_node_id`` unchanged: a failed attempt must never become
         the working position or a parent candidate.
         """
-        node_id = f"{epoch_id}__{session_ref}__{run_id}__{result_name}"
-        if any(node["node_id"] == node_id for node in self.data["nodes"]):
-            raise ValueError(f"step tree node already exists: {node_id}")
+        node_id = self._new_node_id(epoch_id, session_ref, run_id, result_name)
         self.data["nodes"].append(
             {
                 "node_id": node_id,
@@ -239,6 +241,14 @@ class StepTree:
             }
         )
         self.save()
+        return node_id
+
+    def _new_node_id(
+        self, epoch_id: str, session_ref: str, run_id: str, result_name: str
+    ) -> str:
+        node_id = build_node_id(epoch_id, session_ref, run_id, result_name)
+        if any(node["node_id"] == node_id for node in self.data["nodes"]):
+            raise ValueError(f"step tree node already exists: {node_id}")
         return node_id
 
     def set_position(self, node_id: str | None) -> None:

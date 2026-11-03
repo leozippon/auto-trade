@@ -12,13 +12,14 @@ from typing import cast
 import pytest
 from fastapi.testclient import TestClient
 
+from autotrade.common.records import write_json_atomic
 from autotrade.environment.identity import (
     LEGACY_EXPERIMENT_MESSAGE,
     AgentRefStore,
     AgentRefStoreError,
     LegacyExperimentError,
 )
-from autotrade.environment.runtime import SandboxPaths, write_json_atomic
+from autotrade.environment.runtime import SandboxPaths
 from autotrade.environment.step_tree import NODE_OUTPUT_DIR, StepTree
 from autotrade.pipelines.hitl_state import ControlState, write_control
 from autotrade.pipelines.worker import (

@@ -13,7 +13,7 @@ import time
 from collections.abc import Mapping
 from pathlib import Path
 
-from autotrade.common.ids import EXPERIMENT_ID, is_experiment_id
+from autotrade.common.ids import is_experiment_id
 from autotrade.common.records import read_json_object_or_empty, write_json_atomic
 from autotrade.environment import pretrained
 from autotrade.environment.broker import default_permitted_boards
@@ -33,13 +33,12 @@ from autotrade.pipelines.agent_inbox import (
     InboxError,
     enqueue_inbox_message,
 )
+from autotrade.pipelines.arm_params import console_request
 from autotrade.pipelines.config import acceptance_for
 from autotrade.pipelines.hitl_state import (
     LIVE_RUN_STATES,
-    WEB_CLOSED_PARAMS,
     WEB_CREATE_DEFAULTS,
-    WEB_INTERNAL_PARAMS,
-    WEB_REQUIRED_PARAMS,
+    ArmState,
     ControlState,
     arm_is_archived,
     control_lock,
@@ -89,15 +88,12 @@ ARM_DISK_MARGIN_BYTES = 3 * 1024**3
 _TERMINATE_GRACE_SECONDS = 10.0
 _RESTART_GRACE_SECONDS = 30.0
 _SIGKILL_EXIT_SECONDS = 5.0
-# Read under this name by scripts/experiments/_round.py until it imports
-# autotrade.common.ids itself.
-_ID = EXPERIMENT_ID
 _TERMINAL_RESUMABLE_STATES = (
-    "stopped",
-    "failed",
-    "interrupted",
-    "terminated",
-    "created",
+    ArmState.STOPPED,
+    ArmState.FAILED,
+    ArmState.INTERRUPTED,
+    ArmState.TERMINATED,
+    ArmState.CREATED,
 )
 _ACTIONS = {
     "pause",
@@ -375,43 +371,23 @@ class ExperimentManager:
     def create_experiment(self, params: dict[str, object]) -> dict[str, object]:
         # Request-shape validation is a pure function of params and needs no
         # lock; only the id has to be valid before one can be taken.
-        console_managed = sorted(set(params) & WEB_CLOSED_PARAMS)
-        if console_managed:
-            raise ManagerError(
-                "console-managed parameters are not accepted: "
-                + ", ".join(console_managed)
+        try:
+            merged = console_request(
+                params,
+                defaults=WEB_CREATE_DEFAULTS,
+                experiments_root=str(self.experiments_root),
+                work_root=str(self.repo_root / ".runtime/sandboxes"),
             )
-        unknown = sorted(set(params) - set(WEB_CREATE_DEFAULTS))
-        if unknown:
-            raise ManagerError("unknown experiment parameters: " + ", ".join(unknown))
-        merged = {**WEB_CREATE_DEFAULTS, **params}
-        missing = sorted(
-            key for key in WEB_REQUIRED_PARAMS if merged.get(key) in (None, "")
-        )
-        if missing:
-            raise ManagerError(
-                "missing required experiment parameters: " + ", ".join(missing)
-            )
-        experiment_id = str(params.get("experiment_id") or "").strip()
-        if not is_experiment_id(experiment_id):
-            raise ManagerError(
-                "experiment_id must match [A-Za-z0-9][A-Za-z0-9_-]{0,99} (letters, digits, _ and -)"
-            )
+        except ValueError as exc:
+            raise ManagerError(str(exc)) from exc
+        experiment_id = str(merged["experiment_id"])
         with self._experiment_lock(experiment_id), self._slots:
             directory = self.experiments_root / experiment_id
             if directory.exists():
                 raise ManagerError(f"experiment {experiment_id!r} already exists")
             self._require_running_slot(local=uses_local_model(merged))
             self._require_free_space()
-            merged.update(
-                {
-                    **WEB_INTERNAL_PARAMS,
-                    "experiment_id": experiment_id,
-                    "experiments_root": str(self.experiments_root),
-                    "work_root": str(self.repo_root / ".runtime/sandboxes"),
-                    "_creation_surface": "webui",
-                }
-            )
+            merged["_creation_surface"] = "webui"
             self._preflight(merged, directory)
             # The pretrained store every container of this arm will mount,
             # pinned by its manifest's digest before anything is written: each
@@ -454,7 +430,7 @@ class ExperimentManager:
             write_json_atomic(hitl / "params.json", merged)
             write_control(hitl / "control.json", ControlState())
             write_json_atomic(
-                hitl / "status.json", {"schema_version": 1, "state": "created"}
+                hitl / "status.json", {"schema_version": 1, "state": ArmState.CREATED}
             )
             spawn = (
                 self.start_worker(experiment_id)
@@ -582,7 +558,7 @@ class ExperimentManager:
             if not entry.is_dir() or entry.name.startswith("."):
                 continue
             state = experiment_state(entry)
-            if state.get("state") == "unreadable":
+            if state.get("state") == ArmState.UNREADABLE:
                 broken.append(
                     {
                         "experiment_id": entry.name,
@@ -670,7 +646,7 @@ class ExperimentManager:
                 status_path,
                 {
                     "schema_version": 1,
-                    "state": "launching",
+                    "state": ArmState.LAUNCHING,
                     "pid": process.pid,
                     "pid_start_ticks": proc_start_ticks(process.pid),
                     "launched_at": utc_now_iso(),
@@ -926,7 +902,7 @@ class ExperimentManager:
             # and the user cannot tell whether termination worked.
             status = read_json_object_or_empty(status_path)
             status.update(
-                {"state": "terminated", "error": None, "terminated_at": utc_now_iso()}
+                {"state": ArmState.TERMINATED, "error": None, "terminated_at": utc_now_iso()}
             )
             write_json_atomic(status_path, status)
         return result
@@ -1006,7 +982,7 @@ class ExperimentManager:
             directory = self._experiment_dir(experiment_id)
             _modern_ref_store(directory)
             state = experiment_state(directory)
-            if state.get("worker_alive") or state.get("state") == "launching":
+            if state.get("worker_alive") or state.get("state") == ArmState.LAUNCHING:
                 raise ManagerError(
                     f"experiment {experiment_id!r} has a live worker; stop or terminate it before deleting"
                 )
@@ -1078,9 +1054,9 @@ class ExperimentManager:
 
 def _worker_live(status: Mapping[str, object]) -> bool:
     return str(status.get("state") or "") not in {
-        "completed",
-        "failed",
-        "stopped",
-        "terminated",
-        "interrupted",
+        ArmState.COMPLETED,
+        ArmState.FAILED,
+        ArmState.STOPPED,
+        ArmState.TERMINATED,
+        ArmState.INTERRUPTED,
     } and status_pid_alive(status)

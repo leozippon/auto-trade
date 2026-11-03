@@ -52,9 +52,9 @@ from autotrade.pipelines.ledger import (
     recorded_path,
 )
 from autotrade.pipelines.worker import (
-    _strategy_boundary,
-    _strategy_sandbox_from_spec,
     resolve_worker_options,
+    strategy_boundary,
+    strategy_sandbox_from_spec,
 )
 
 from .pit import require_audited_fundamentals
@@ -193,8 +193,8 @@ def create_book(
     if permitted_boards is None:
         permitted_boards = profile.permitted_boards or default_permitted_boards(profile.initial_cash)
     profile = replace(profile, permitted_boards=tuple(permitted_boards))
-    sandbox = _strategy_sandbox_from_spec(
-        options.agent_sandbox, **_strategy_boundary(options.rolling)
+    sandbox = strategy_sandbox_from_spec(
+        options.agent_sandbox, **strategy_boundary(options.rolling)
     )
     image = read_json_object(experiment / "hitl" / "sandbox_image.json", missing_ok=True).get("image_ref")
     if image:

@@ -14,7 +14,6 @@ fundamentals audit gate would refuse is refused when it is opened
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import uuid
@@ -25,6 +24,7 @@ from pathlib import Path
 import pandas as pd
 import pyarrow.parquet as pq
 
+from autotrade.common.records import read_json_object
 from autotrade.common.time import CN_TZ
 from autotrade.data_sources.tushare.cron_update import DEFAULT_CONFIG
 from autotrade.environment.data.contracts import (
@@ -120,7 +120,7 @@ class BookPITData:
         if generation_dir.name != self.generation_id:
             raise RuntimeError(f"release pin {generation_dir} resolved to generation {self.generation_id}")
         record = Path(provider.release.raw_dir) / RAW_GENERATION_FILENAME
-        self.generation = json.loads(record.read_text(encoding="utf-8")) if record.exists() else {}
+        self.generation = read_json_object(record, missing_ok=True)
         self.vintages = dataset_vintages(self.generation, required_release_raw_datasets(snapshot_config))
         for entry in cache_root.iterdir():
             if entry != generation_dir:
@@ -329,7 +329,7 @@ def _pin_newest_release(
     target = cache_root / (release.generation_id or LIVE_GENERATION)
     provider = target / "pit_views" / "provider.json"
     if provider.exists() and (
-        json.loads(provider.read_text(encoding="utf-8")).get("schema_version") != SNAPSHOT_CACHE_FORMAT_VERSION
+        read_json_object(provider).get("schema_version") != SNAPSHOT_CACHE_FORMAT_VERSION
     ):
         _remove_tree(target)
     if target.exists():

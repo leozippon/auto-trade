@@ -53,17 +53,17 @@ from _bootstrap import add_repo_src
 
 REPO_ROOT = add_repo_src(__file__)
 
-from autotrade.common.records import read_json_object
-from autotrade.environment.artifacts import FilesystemArtifactStore
+from autotrade.common.records import read_json_object, write_json_atomic
+from autotrade.environment.artifacts import ArtifactRevision, FilesystemArtifactStore
 from autotrade.environment.identity import AgentRefStore
-from autotrade.environment.runtime import utc_now_iso, write_json_atomic
+from autotrade.environment.runtime import utc_now_iso
 from autotrade.environment.sandbox import GpuMode
 from autotrade.environment.sandbox_images import (
     SANDBOX_IMAGE_STATE_NAME,
     prepare_experiment_sandbox_image,
 )
 from autotrade.environment.step_tree import node_handle
-from autotrade.pipelines.config import ArtifactRevision, research_span
+from autotrade.pipelines.config import research_span
 from autotrade.pipelines.experiment import _SEED_LINE, _SEED_NAME
 from autotrade.pipelines.hitl_state import select_gpus
 from autotrade.pipelines.ledger import ExperimentLedger
@@ -111,7 +111,7 @@ def copy_revision(experiment_dir: Path, row: dict, dest: Path) -> ArtifactRevisi
     its manifest, whose fingerprint must be the one the ledger recorded."""
 
     source = experiment_dir / REVISIONS_DIR / str(row["revision_id"])
-    manifest = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
+    manifest = read_json_object(source / "manifest.json")
     if manifest["fingerprint"] != row["fingerprint"]:
         raise ValueError(f"revision {row['revision_id']} is not the bytes the ledger recorded for the Step")
     for entry in manifest["files"]:

@@ -7143,7 +7143,7 @@ class CorruptSidecarTest(unittest.TestCase):
             with self.assertRaisesRegex(CorruptSidecarError, "unreadable parquet sidecar"):
                 parquet_meta(path)
             sidecar.write_text('["not", "an", "object"]', encoding="utf-8")
-            with self.assertRaisesRegex(CorruptSidecarError, "not a JSON object"):
+            with self.assertRaisesRegex(CorruptSidecarError, "unreadable parquet sidecar.*not an object"):
                 parquet_meta(path)
 
     def test_revision_writer_heals_corrupt_sidecar_loudly(self):

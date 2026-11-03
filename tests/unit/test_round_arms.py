@@ -41,7 +41,7 @@ from autotrade.pipelines.pit_views_seed import (
     UNFINISHED_BUILD_MARKER,
     pit_cache_provider_record,
 )
-from autotrade.pipelines.worker import _snapshot_config, _strategy_sandbox_from_spec
+from autotrade.pipelines.worker import _snapshot_config, strategy_sandbox_from_spec
 from autotrade.webui.manager import (
     MAX_RUNNING_EXPERIMENTS,
     MAX_RUNNING_LOCAL_EXPERIMENTS,
@@ -814,7 +814,7 @@ def test_a_gpu_smoke_pins_admissible_cards_and_without_one_records_nothing(
     merged = {"experiment_id": "arm", "workspace_reference": "packs/arm", "pit_views_seed": "", "gpu_count": 1}
     requested = SandboxSpec(gpu="auto", gpu_count=1)
     with pytest.raises(GpuUnavailableError):
-        _strategy_sandbox_from_spec(requested, fit_timeout_seconds=1).spec.devices()
+        strategy_sandbox_from_spec(requested, fit_timeout_seconds=1).spec.devices()
 
     @dataclass(frozen=True)
     class Options:
@@ -855,7 +855,7 @@ def test_a_gpu_smoke_pins_admissible_cards_and_without_one_records_nothing(
 
     cards.append(5)
     assert "RuntimeError: assembled" in _round.smoke(merged)
-    assert _strategy_sandbox_from_spec(assembled[0], fit_timeout_seconds=1).spec.devices() == [5]
+    assert strategy_sandbox_from_spec(assembled[0], fit_timeout_seconds=1).spec.devices() == [5]
 
     rnd, posted = _fill_round(tmp_path, monkeypatch, local=0)
 

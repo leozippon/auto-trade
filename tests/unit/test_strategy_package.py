@@ -37,7 +37,7 @@ from autotrade.pipelines.experiment import (
     _session_budgets,
 )
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
-from autotrade.pipelines.worker import _strategy_sandbox_from_spec
+from autotrade.pipelines.worker import strategy_sandbox_from_spec
 
 from .fixtures_sandbox import TEMPLATE_DIR, docker_available
 
@@ -404,7 +404,7 @@ def test_budgets_come_from_one_source_each():
     # The pipeline knob defaults to the executor's fit wall clock and the
     # WebUI defaults read the pipeline dataclass.
     assert rolling_default("strategy_fit_timeout_seconds") == executor.fit_timeout_seconds
-    strategy_config = _strategy_sandbox_from_spec(
+    strategy_config = strategy_sandbox_from_spec(
         None, fit_timeout_seconds=rolling_default("strategy_fit_timeout_seconds")
     )
     assert strategy_config == executor

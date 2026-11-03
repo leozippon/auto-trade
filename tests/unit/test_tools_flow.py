@@ -1631,7 +1631,7 @@ class ToolResultContractTest(unittest.TestCase):
             self.assertIn(unknown.value["error_type"], ("path_error", "schema_error"))
 
     def test_not_found_hint_lists_the_nearest_existing_directory(self) -> None:
-        from autotrade.environment.runtime import HOST_PATH_RE
+        from autotrade.common.records import HOST_PATH_RE
 
         with tempfile.TemporaryDirectory() as tmp:
             paths, registry = self._layout(tmp)
@@ -1828,7 +1828,7 @@ class SpillAndRootContractTest(unittest.TestCase):
         return paths, SearchRoots(workspace, paths=paths)
 
     def test_spilled_result_is_a_readable_reference_without_host_path_or_pid(self) -> None:
-        from autotrade.environment.runtime import HOST_PATH_RE
+        from autotrade.common.records import HOST_PATH_RE
 
         with tempfile.TemporaryDirectory() as tmp:
             paths, roots = self._layout(tmp)
@@ -1911,7 +1911,7 @@ class SpillAndRootContractTest(unittest.TestCase):
             self.assertIn("snapshot", roots.names)
 
     def test_errors_carry_a_correct_example_and_no_host_path(self) -> None:
-        from autotrade.environment.runtime import HOST_PATH_RE
+        from autotrade.common.records import HOST_PATH_RE
 
         with tempfile.TemporaryDirectory() as tmp:
             paths, roots = self._layout(tmp)
@@ -1952,9 +1952,9 @@ def _fold_backtest_tool(
     working copy is its one candidate (``WORKING_COPY``)."""
     from datetime import UTC
 
+    from autotrade.common.records import write_json_atomic
     from autotrade.environment.artifacts import FilesystemArtifactStore
     from autotrade.environment.identity import AgentRefStore
-    from autotrade.environment.runtime import write_json_atomic
     from autotrade.environment.step_tree import StepTree
     from autotrade.environment.time_budget import InferenceTimeBudget
     from autotrade.pipelines.config import (

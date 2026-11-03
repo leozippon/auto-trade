@@ -28,13 +28,17 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 
-from autotrade.common.records import redact_host_paths, write_json_atomic
+from autotrade.common.records import (
+    read_json_object,
+    redact_host_paths,
+    write_json_atomic,
+)
 from autotrade.environment.artifacts import REVISION_MANIFEST_FILE
 from autotrade.environment.runtime import agent_trace_path
 from autotrade.environment.step_tree import StepTree
 
 from .config import BudgetUsed, EvaluationResult, SessionResume, StepResult
-from .ledger import RESEARCH_STAGE, recorded_path
+from .ledger import Stage, recorded_path
 
 # Host-only, beside the run markers: never mounted and never Agent-visible.
 STEP_SIDECAR_DIR = ".host/steps"
@@ -55,7 +59,7 @@ def revision_fingerprint(experiment_dir: str | Path, revision_id: str) -> str:
 
     path = Path(experiment_dir) / REVISIONS_DIR / revision_id / REVISION_MANIFEST_FILE
     try:
-        manifest = json.loads(path.read_text(encoding="utf-8"))
+        manifest = read_json_object(path)
     except FileNotFoundError as exc:
         raise FileNotFoundError(
             f"revision {revision_id} has no manifest ({path}): the bytes it "
@@ -107,7 +111,7 @@ def load_recorded_steps(experiment_dir: str | Path) -> tuple[StepResult, ...]:
                 f"step node {node_id} is recorded without its host sidecar; the "
                 "session cannot resume with a validation it cannot account for"
             )
-        record = json.loads(sidecar.read_text(encoding="utf-8"))
+        record = read_json_object(sidecar)
         steps.append(
             StepResult(
                 str(record["step_id"]),
@@ -136,7 +140,7 @@ def _recorded_nodes(experiment_dir: Path) -> list[Mapping[str, object]]:
     return [
         node
         for node in StepTree(tree_root).nodes()
-        if node.get("epoch_id") == RESEARCH_STAGE and node.get("complete_validation")
+        if node.get("epoch_id") == Stage.RESEARCH and node.get("complete_validation")
     ]
 
 
@@ -161,7 +165,7 @@ def resume_state(
         record
         for record in records
         if record.get("record_type") == "attempt_failed"
-        and record.get("phase") == RESEARCH_STAGE
+        and record.get("phase") == Stage.RESEARCH
     ]
     if not attempts:
         return None

@@ -3,40 +3,32 @@
 from __future__ import annotations
 
 import fcntl
-import json
 import os
 import threading
-import uuid
 from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 
-from autotrade.environment.broker import BrokerProfile
-from autotrade.environment.data.snapshot import SnapshotConfig
+from autotrade.common.records import read_json_object, write_json_atomic
 from autotrade.environment.gpu import (
     MIN_FREE_GPU_MEMORY_MIB,
     GpuUnavailableError,
     idle_gpus,
     shareable_gpus,
 )
-from autotrade.environment.llm.lighting import (
-    DEEPSEEK_FLASH_MODEL,
-    SHORT_TIER_MAX_COMPACTION_THRESHOLD,
-)
-from autotrade.environment.sandbox import SandboxSpec
 
-from .calendar import GEOMETRY_PARAMETERS
-from .config import (
-    ACCEPTANCE_KEYS,
-    DEFAULT_PIT_VIEWS_SEED,
-    DEFAULT_RESEARCH_GEOMETRY,
-    REQUIRED_ACCEPTANCE_KEYS,
-    acceptance_default,
-    rolling_default,
+from .arm_params import (
+    NON_PERSISTABLE_PARAMS,
+    PARAMETERS,
+    Surface,
+    console_defaults,
+    managed_values,
+    parameters,
 )
-from .ledger import FORWARD_SESSION_KEY, RESEARCH_SESSION_KEY
+from .ledger import SessionKind
 
 HITL_STATE_SCHEMA_VERSION = 1
 HITL_DIR_NAME = "hitl"
@@ -54,199 +46,44 @@ GPU_CLAIM_NAME = "gpu_claim.json"
 # lists it apart and never starts its worker again, and the derived-cache prunes
 # treat it as finished for good (``arm_is_archived``).
 ARCHIVED_NAME = "archived.json"
-LIVE_RUN_STATES = {"running_session"}
+
+
+class ArmState(StrEnum):
+    """An arm's ``state`` in ``status.json``, as its worker, the console and
+    the operator's tools write it, plus the two the console derives when it
+    reads one: ``interrupted`` (an active state whose worker died) and
+    ``unreadable`` (a status file it cannot read). The values are persisted."""
+
+    CREATED = "created"
+    LAUNCHING = "launching"
+    PREPARING = "preparing"
+    INITIALIZING = "initializing"
+    RUNNING_SESSION = "running_session"
+    PAUSED = "paused"
+    STOPPED = "stopped"
+    FAILED = "failed"
+    COMPLETED = "completed"
+    TERMINATED = "terminated"
+    INTERRUPTED = "interrupted"
+    UNREADABLE = "unreadable"
+
+
+LIVE_RUN_STATES = {ArmState.RUNNING_SESSION}
 # The states a worker ends in: an arm in one of them runs nothing.
-ENDED_STATES = frozenset({"completed", "failed", "stopped"})
+ENDED_STATES = frozenset({ArmState.COMPLETED, ArmState.FAILED, ArmState.STOPPED})
 
 
-# The console's own value of each required acceptance rule
-# (``config.REQUIRED_ACCEPTANCE_KEYS``), which the rules themselves leave
-# without a default. The sealed gate's level is one for the whole program, so
-# that every sealed reading is judged at the same level
-# (``_round.BASE_EXPECTED_DEFAULTS`` pins it). How many research years are
-# sealed depends on the arm's geometry and whether a freeze registers an
-# ablation on the round's research question, so the console has no value for
-# either: every create request states them (``WEB_REQUIRED_PARAMS``).
-_REQUIRED_ACCEPTANCE_DEFAULTS: dict[str, object] = {
-    "alpha": 0.05,
-    "sealed_years": None,
-    "ablation_required": None,
-}
-
-
-def _acceptance_defaults() -> dict[str, object]:
-    """The acceptance block of the creation defaults, read off the rules' own
-    declaration (``config.AcceptanceRules``) and, for a rule without a
-    default, the console's own value above.
-
-    The limits a request may leave blank come first: the tracking mandate,
-    which naming ``tracking_error_cap`` switches on (a blank beta band then
-    takes ``config.MANDATED_DEFAULTS``), and the two drawdowns, which stay the
-    rules' own 0.45 / 0.30 unless the request names them. Every other rule is
-    filled, so the form shows the values an empty request would stamp
-    (``config.acceptance_for``).
-    """
-
-    if set(_REQUIRED_ACCEPTANCE_DEFAULTS) != set(REQUIRED_ACCEPTANCE_KEYS):
-        raise RuntimeError("every required acceptance rule needs its console value")
-    rules = {
-        **{
-            name: _REQUIRED_ACCEPTANCE_DEFAULTS[name]
-            if name in REQUIRED_ACCEPTANCE_KEYS
-            else acceptance_default(name)
-            for name in ACCEPTANCE_KEYS
-        },
-        "max_drawdown": None,
-        "active_max_drawdown": None,
-    }
-    return {**{name: None for name, value in rules.items() if value is None}, **rules}
-
-
-# The persistent WebUI creation contract.  The form and manager both read
-# these defaults, while the worker retains its broader file-based/CLI contract.
-# Paths and capability-bearing switches are intentionally absent: they are
-# console-managed values below and can never be supplied by an HTTP client.
-# Every knob that is also a pipeline knob is read from its dataclass default
-# (``rolling_default``), so the console and a headless run can never drift; the
-# literals below are the values the console alone owns.
-WEB_CREATE_DEFAULTS: dict[str, object] = {
-    "experiment_id": None,
-    # Research, forward and Held-out dates (pipelines/calendar.ResearchGeometry).
-    **DEFAULT_RESEARCH_GEOMETRY.to_record(),
-    "research_directive": rolling_default("research_directive"),
-    "workspace_reference": rolling_default("workspace_reference"),
-    "operating_memory": rolling_default("operating_memory"),
-    "strategy_period": "day",
-    "inference_time": "08:30",
-    # Sets nothing since the approval mode was removed; still written because
-    # the round launcher pins it (scripts/experiments/_round.py).
-    "initial_control_mode": "auto",
-    "benchmark_index": rolling_default("benchmark_index"),
-    "window_months": rolling_default("window_months"),
-    "daily_window_months": None,
-    "fundamentals_window_months": None,
-    "events_window_months": None,
-    "macro_window_months": None,
-    "text_window_months": None,
-    "intraday_trade_days": SnapshotConfig().intraday_trade_days,
-    "include_fundamentals": True,
-    "include_macro": True,
-    "include_events": True,
-    "include_text": True,
-    "include_intraday": False,
-    "fundamental_datasets": (),
-    "macro_datasets": (),
-    "events_datasets": (),
-    "text_datasets": (),
-    # Which prebuilt PIT view tree this experiment hardlinks from. The default
-    # one carries the default dataset selection; an experiment that selects
-    # other datasets needs a tree prebuilt for exactly its own selection, and
-    # naming one that was not makes the create fail instead of cold-building.
-    "pit_views_seed": str(DEFAULT_PIT_VIEWS_SEED),
-    # The universe reaches the agent unfiltered (all boards, ST included, no
-    # new-listing exclusion); the strategy applies its own filters.
-    "screen_exclude_st": False,
-    "screen_exclude_new_listed_days": 0,
-    "screen_min_circ_mv_yi": None,
-    "screen_max_circ_mv_yi": None,
-    "screen_min_price": None,
-    "screen_max_price": None,
-    "screen_boards": (),
-    "max_replay_years": rolling_default("max_replay_years"),
-    "max_null_controls": rolling_default("max_null_controls"),
-    "batch_validate_max_concurrency": rolling_default("batch_validate_max_concurrency"),
-    "max_llm_calls": rolling_default("max_llm_calls"),
-    "max_api_spend_usd": rolling_default("max_api_spend_usd"),
-    "session_max_attempts": rolling_default("session_max_attempts"),
-    "max_research_minutes": rolling_default("max_research_minutes"),
-    "finalize_before_deadline_seconds": rolling_default("finalize_before_deadline_seconds"),
-    "per_call_timeout_seconds": rolling_default("per_call_timeout_seconds"),
-    "strategy_fit_timeout_seconds": rolling_default("strategy_fit_timeout_seconds"),
-    "strategy_inference_timeout_seconds": rolling_default("strategy_inference_timeout_seconds"),
-    "strategy_cpus": rolling_default("strategy_cpus"),
-    "strategy_memory": rolling_default("strategy_memory"),
-    "record_failed_attempts": rolling_default("record_failed_attempts"),
-    **_acceptance_defaults(),
-    "initial_cash": 1_000_000.0,
-    "max_total_holdings": None,
-    "max_single_name_weight": None,
-    "commission_bps": BrokerProfile().commission_bps,
-    "slippage_bps": BrokerProfile().slippage_bps,
-    # The boards the account may buy on. Left null, creation stamps the ones
-    # its initial cash qualifies for (``broker.default_permitted_boards``), so
-    # the stamped params.json always names them; an arm without the key is
-    # unrestricted.
-    "permitted_boards": None,
-    # The conversation roles run on the relay's DeepSeek-V4.1-Flash: hosted
-    # APIs are the operating default, the local model the fallback once the
-    # API quota is exhausted.
-    "model": DEEPSEEK_FLASH_MODEL,
-    "subagent_model": DEEPSEEK_FLASH_MODEL,
-    "compact_model": DEEPSEEK_FLASH_MODEL,
-    # Which relay credential the arm's calls start on (``primary`` or
-    # ``alternate``); the other is the fallback.
-    "llm_key": "primary",
-    "reasoning_effort": "xhigh",
-    "no_thinking": False,
-    "disable_context_compact": False,
-    # The value the local model's window derives (262,144 - 32,768 - 8,192),
-    # which is also the most a conversation touching the relay's gpt-6 tier may
-    # use: with the 1M-window default roles the derived bound would be 959,040.
-    # Null still derives it per role.
-    "compact_token_threshold": SHORT_TIER_MAX_COMPACTION_THRESHOLD,
-    "compact_keep_recent_messages": 10,
-    "compact_max_tokens": 10_000,
-    "compact_max_calls": 10,
-    "max_intraday_row_group_rows": 2_000_000,
-    "gpu_count": SandboxSpec().gpu_count,
-}
-
-# These values describe the only supported WebUI research environment.  The
-# manager stamps them into params.json and rejects attempts to submit them.
-WEB_INTERNAL_PARAMS: dict[str, object] = {
-    "strategy_path": "configs/agent_output_template/main.py",
-    "data_backend": "pit",
-    "raw_dir": "data/raw",
-    "fundamental_events_root": "data/pit/fundamental_events",
-    "fundamental_events_status": "results/data_quality/fundamental_events_status.json",
-    "execution_mode": "sandbox",
-    "developer_mode": "llm",
-}
-
+# The console's views of the arm parameters (``arm_params.ArmParams``): what a
+# create request may name and what each defaults to, the values the console
+# stamps for the parameters it manages, the keys it refuses (managed, host-only
+# and the never-persistable endpoint overrides) and the ones a request must
+# state. Every one is read off the record's fields.
+WEB_CREATE_DEFAULTS: dict[str, object] = console_defaults()
+WEB_INTERNAL_PARAMS: dict[str, object] = managed_values()
 WEB_CLOSED_PARAMS = frozenset(
-    {
-        *WEB_INTERNAL_PARAMS,
-        "baseline_strategy_path",
-        "daily_path",
-        "pit_cache_root",
-        "experiments_root",
-        "work_root",
-        "llm_api_key_env",
-        "llm_env_file",
-        "llm_base_url",
-        "llm_timeout_seconds",
-        "llm_max_retries",
-        "llm_retry_backoff_seconds",
-        "llm_model",
-        "llm_temperature",
-        "llm_max_response_tokens",
-        "agent_sandbox_image",
-        "agent_sandbox_cpus",
-        "agent_sandbox_memory",
-        "agent_sandbox_pids",
-        "agent_sandbox_tmpfs",
-        # Stamped from the host's pretrained store at creation, never requested.
-        "pretrained_manifest_sha256",
-    }
+    {*parameters(Surface.MANAGED), *parameters(Surface.HOST), *NON_PERSISTABLE_PARAMS}
 )
-
-WEB_REQUIRED_PARAMS = frozenset(
-    {
-        "experiment_id",
-        *GEOMETRY_PARAMETERS,
-        *(name for name, value in _REQUIRED_ACCEPTANCE_DEFAULTS.items() if value is None),
-    }
-)
+WEB_REQUIRED_PARAMS = frozenset(name for name, spec in PARAMETERS.items() if spec.required)
 
 
 @dataclass
@@ -290,7 +127,7 @@ class ControlState:
 
 
 def read_control(path: str | Path) -> ControlState:
-    payload = read_json(path)
+    payload = read_json_object(path, missing_ok=True)
     _require_version(payload, Path(path))
     if not payload:
         return ControlState()
@@ -314,7 +151,7 @@ def write_control(path: str | Path, state: ControlState) -> None:
     """Write the control file, stamping the state with this write's time."""
 
     state.updated_at = _now()
-    _write_json(Path(path), state.to_record())
+    write_json_atomic(Path(path), state.to_record())
 
 
 @contextmanager
@@ -364,24 +201,14 @@ def consume_restart_request(path: str | Path) -> bool:
         return True
 
 
-def read_json(path: str | Path) -> dict[str, object]:
-    target = Path(path)
-    if not target.exists():
-        return {}
-    payload = json.loads(target.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise TypeError(f"expected JSON object in {target}")
-    return payload
-
-
 def read_status(path: str | Path) -> dict[str, object]:
-    payload = read_json(path)
+    payload = read_json_object(path, missing_ok=True)
     _require_version(payload, Path(path))
     return payload
 
 
 def write_gpu_claim(hitl: str | Path, devices: list[int]) -> None:
-    _write_json(
+    write_json_atomic(
         Path(hitl) / GPU_CLAIM_NAME,
         {"devices": [int(device) for device in devices], "claimed_at": _now()},
     )
@@ -390,7 +217,7 @@ def write_gpu_claim(hitl: str | Path, devices: list[int]) -> None:
 def read_gpu_claim(hitl: str | Path) -> tuple[int, ...] | None:
     """The devices of an arm's GPU claim, or ``None`` when it has none."""
     path = Path(hitl) / GPU_CLAIM_NAME
-    payload = read_json(path)
+    payload = read_json_object(path, missing_ok=True)
     if not payload:
         return None
     devices = payload.get("devices")
@@ -422,8 +249,8 @@ def running_arms(experiments_root: str | Path) -> list[str]:
         if not directory.is_dir() or directory.name.startswith("."):
             continue
         try:
-            status = read_json(directory / HITL_DIR_NAME / STATUS_NAME)
-        except (OSError, TypeError, ValueError):
+            status = read_json_object(directory / HITL_DIR_NAME / STATUS_NAME, missing_ok=True)
+        except (OSError, ValueError):
             continue
         if status_pid_alive(status) and status.get("state") not in ENDED_STATES:
             running.append(directory.name)
@@ -548,7 +375,7 @@ class StatusReporter:
         self.heartbeat_seconds = heartbeat_seconds
         pid = os.getpid()
         self._state: dict[str, object] = {
-            "state": "initializing",
+            "state": ArmState.INITIALIZING,
             "pid": pid,
             "pid_start_ticks": proc_start_ticks(pid),
             "session_key": None,
@@ -610,7 +437,7 @@ class StatusReporter:
             self._write_locked()
 
     def _write_locked(self) -> None:
-        _write_json(
+        write_json_atomic(
             self.path,
             {
                 **self._state,
@@ -624,17 +451,16 @@ class StatusReporter:
 class PlannedSession:
     """One entry of the plan of record: the research session or the forward replay."""
 
-    session_key: str
-    # ``research`` or ``forward``.
-    kind: str
+    session_key: SessionKind
+    kind: SessionKind
 
 
 def planned_sessions() -> tuple[PlannedSession, ...]:
     """The arm's plan: its one research session, then the forward replay."""
 
     return (
-        PlannedSession(RESEARCH_SESSION_KEY, "research"),
-        PlannedSession(FORWARD_SESSION_KEY, "forward"),
+        PlannedSession(SessionKind.RESEARCH, SessionKind.RESEARCH),
+        PlannedSession(SessionKind.FORWARD, SessionKind.FORWARD),
     )
 
 
@@ -718,26 +544,6 @@ def _require_version(payload: dict[str, object], path: Path) -> None:
         or payload["schema_version"] != HITL_STATE_SCHEMA_VERSION
     ):
         raise ValueError(f"incompatible HITL state in {path}")
-
-
-def _write_json(path: Path, payload: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        temporary.write_text(
-            json.dumps(
-                payload,
-                ensure_ascii=False,
-                sort_keys=True,
-                allow_nan=False,
-                default=str,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        temporary.replace(path)
-    finally:
-        temporary.unlink(missing_ok=True)
 
 
 def _string_map(value: object) -> dict[str, str]:

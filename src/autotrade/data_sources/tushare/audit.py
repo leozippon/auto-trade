@@ -15,6 +15,7 @@ from typing import Any
 import pandas as pd
 import pyarrow.parquet as pq
 
+from autotrade.common.records import read_json_object
 from autotrade.common.time import CN_TZ
 from autotrade.data_quality import build_quality_report, write_quality_report
 from autotrade.environment.data.auction import AuctionCorrectionConfig, market_bucket
@@ -2407,7 +2408,7 @@ def audit_share_float_complete_union(raw_dir: Path, add) -> None:
     meta_error = ""
     if meta_path.exists():
         try:
-            meta_row_count = json.loads(meta_path.read_text(encoding="utf-8")).get("row_count")
+            meta_row_count = read_json_object(meta_path).get("row_count")
         except Exception as exc:  # noqa: BLE001 - unreadable sidecar is reported through meta_error
             meta_error = str(exc)
 

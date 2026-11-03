@@ -49,6 +49,7 @@ from autotrade.environment.sandbox import remove_sandbox_tree
 from autotrade.pipelines.hitl_state import (
     HITL_DIR_NAME,
     STATUS_NAME,
+    ArmState,
     arm_is_archived,
     read_status,
     status_pid_alive,
@@ -57,7 +58,7 @@ from autotrade.pipelines.ledger import ExperimentLedger, experiment_verdict
 from autotrade.pipelines.worker import pit_views_tree, release_pit_views
 from autotrade.webui.manager import ManagerDeleteError, _derived_sandbox_tree
 
-TERMINAL_STATES = ("completed", "stopped")
+TERMINAL_STATES = (ArmState.COMPLETED, ArmState.STOPPED)
 GIB = 1024**3
 
 
@@ -72,7 +73,7 @@ def kept_reason(directory: Path) -> str:
         return f"live worker (pid {status.get('pid')})"
     if arm_is_archived(directory):
         return ""
-    state = str(status.get("state") or "created")
+    state = str(status.get("state") or ArmState.CREATED)
     if state not in TERMINAL_STATES:
         return f"state {state!r} is not terminal"
     records = ExperimentLedger(directory / "ledgers" / "experiment_ledger.jsonl").read()

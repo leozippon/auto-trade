@@ -25,14 +25,12 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
+from autotrade.common.records import write_json_atomic
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm import LOCAL_QWEN_MODEL, MIMO_FLASH_MODEL, MODEL_CHOICES
-from autotrade.environment.runtime import (
-    TRACE_PAYLOAD_HEAD_CHARS,
-    AgentTraceWriter,
-    write_json_atomic,
-)
+from autotrade.environment.runtime import TRACE_PAYLOAD_HEAD_CHARS, AgentTraceWriter
 from autotrade.environment.tools.workspace import WORKSPACE_MIN_FREE_BYTES
+from autotrade.pipelines.arm_params import RETIRED_NL_PARAMS
 from autotrade.pipelines.config import (
     DEFAULT_RESEARCH_GEOMETRY,
     RETIRED_RULES,
@@ -48,7 +46,6 @@ from autotrade.pipelines.hitl_state import (
     status_pid_alive,
 )
 from autotrade.pipelines.ledger import ExperimentLedger
-from autotrade.pipelines.worker import RETIRED_NL_PARAMS
 from autotrade.webui.manager import (
     ARM_DISK_MARGIN_BYTES,
     MAX_RUNNING_EXPERIMENTS,
@@ -730,9 +727,9 @@ class WebuiBackendTest(unittest.TestCase):
         ):
             self.assertNotIn(retired, fields)
         # Every field is a parameter the worker accepts.
-        from autotrade.pipelines.worker import _ALLOWED_PARAMS
+        from autotrade.pipelines.arm_params import PARAMETERS
 
-        self.assertLessEqual(set(fields), _ALLOWED_PARAMS)
+        self.assertLessEqual(set(fields), set(PARAMETERS))
         self.assertEqual(fields["research_directive"]["type"], "text")
         self.assertEqual(fields["research_directive"]["default"], "")
         self.assertTrue(fields["research_directive"]["wide"])

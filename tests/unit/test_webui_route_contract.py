@@ -443,8 +443,8 @@ def test_every_reason_the_pipeline_records_has_a_console_label() -> None:
     that could not be measured -- and every session outcome too."""
 
     from autotrade.pipelines.config import SESSION_OUTCOMES
-    from autotrade.pipelines.verdict import CONDITIONS, UNMEASURABLE
-    recorded = {condition.reason for condition in CONDITIONS} | {UNMEASURABLE}
+    from autotrade.pipelines.verdict import CONDITIONS, ConditionReason
+    recorded = {condition.reason for condition in CONDITIONS} | {ConditionReason.UNMEASURABLE}
     assert {"sealed_residual_ir_below_bar", "replicate_strategy_error"} <= recorded
     labels = _reason_tokens()
     assert recorded <= labels, sorted(recorded - labels)
@@ -530,9 +530,9 @@ def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) ->
     assert (research["kind"], replay["kind"]) == ("research", "forward")
     frozen = set(detail["frozen"])
     record = set(research["record"])
-    # A recorded session's best, and the reading of its zero-skill panel that
-    # only a running session's best carries (registry._live_candidate).
-    best = set(research["record"]["best"]) | {"panel_return"}
+    # A recorded session's best (``registry.BestCandidate``, one shape for a
+    # running session's and a recorded one's).
+    best = set(research["record"]["best"])
     validation = set(research["record"]["validations"][0])
     gate = set(research["record"]["freeze_gate"])
     forward = set(detail["forward"])

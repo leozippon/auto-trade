@@ -10,7 +10,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from autotrade.environment.artifacts import ModificationConstraints
+from autotrade.common.ids import EXPERIMENT_ID, is_experiment_id
+from autotrade.environment.artifacts import (
+    ArtifactRevision,
+    FrozenArtifact,
+    ModificationConstraints,
+)
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.contracts import (
     DEFAULT_BENCHMARK_INDEX,
@@ -22,7 +27,7 @@ from autotrade.environment.strategy import StrategySchedule
 
 from . import verdict
 from .calendar import FULL_SPAN, ResearchGeometry
-from .ledger import ENVIRONMENT_BLOCKED, RESEARCH_SESSION_KEY
+from .ledger import ENVIRONMENT_BLOCKED, SessionKind
 from .skills import DEFAULT_OPERATING_MEMORY
 
 ExecutionMode = Literal["sandbox", "trusted"]
@@ -473,7 +478,7 @@ class AcceptanceRules:
         the nominee's replay summary. Only a summary from a completed
         evaluation reaches here; an aborted replay never produces one."""
 
-        return verdict.judge("nomination", summary, {"max_drawdown": self.max_drawdown})
+        return verdict.judge(verdict.ConditionStage.NOMINATION, summary, {"max_drawdown": self.max_drawdown})
 
 
 # Every rule's name, in declaration order: the keys of a rules record and of
@@ -659,10 +664,8 @@ class RollingExperimentConfig:
     )
 
     def __post_init__(self) -> None:
-        if not re.fullmatch(r"[A-Za-z0-9_-]+", self.experiment_id):
-            raise ValueError(
-                "experiment_id must contain only letters, digits, underscore, or dash"
-            )
+        if not is_experiment_id(self.experiment_id):
+            raise ValueError(f"experiment_id must match {EXPERIMENT_ID.pattern}")
         if not isinstance(self.geometry, ResearchGeometry):
             raise TypeError("geometry must be a ResearchGeometry")
         for name in (
@@ -772,31 +775,9 @@ class SnapshotProvider(Protocol):
     def prepare_decision(self, *, decision_time: datetime) -> SnapshotBundle: ...
 
 
-@dataclass(frozen=True)
-class ArtifactRevision:
-    revision_id: str
-    output_path: Path
-    models_path: Path | None = None
-
-
-@dataclass(frozen=True)
-class FrozenArtifact:
-    artifact_id: str
-    path: Path
-    model_path: Path | None
-    source_run_id: str
-    source_fold_id: str
-    source_step_id: str
-    revision_id: str = ""
-
-
 class ArtifactStore(Protocol):
-    """What the Pipeline may read off an artifact store's records.
-
-    Structural, not nominal: a store answers with its own record type (the
-    filesystem store returns a plain namespace), so these annotations name the
-    fields a caller may rely on, never an ``isinstance``.
-    """
+    """The artifact store the Pipeline freezes and reloads through
+    (``environment.artifacts.FilesystemArtifactStore``)."""
 
     def revision(self, revision_id: str) -> ArtifactRevision: ...
 
@@ -1120,7 +1101,7 @@ class ResearchSessionRequest:
         repr=False,
         compare=False,
     )
-    session_key: str = RESEARCH_SESSION_KEY
+    session_key: str = SessionKind.RESEARCH
     # Trusted host source for the current experiment-level skills snapshot.
     # The sandbox adapter copies it to workspace/skills but never exposes this
     # host path through Agent-visible facts or manifests.
@@ -1132,6 +1113,40 @@ class ResearchSessionRequest:
     budget_used: BudgetUsed = field(default_factory=BudgetUsed)
     steps_before: tuple[StepResult, ...] = ()
     resume: SessionResume | None = None
+
+    @classmethod
+    def for_arm(
+        cls,
+        config: RollingExperimentConfig,
+        *,
+        budgets: Mapping[str, float],
+        **session: Any,
+    ) -> ResearchSessionRequest:
+        """The request for one session of ``config``'s arm.
+
+        The arm-level fields come from the config, the five budgets
+        (``max_replay_years``, ``max_llm_calls``, ``max_api_spend_usd``,
+        ``deadline_seconds``, ``deadline_grace_seconds``) as given after any
+        HITL override, and every other field is the session's own.
+        """
+
+        return cls(
+            experiment_id=config.experiment_id,
+            window_months=config.window_months,
+            benchmark_index=config.benchmark_index,
+            acceptance_rules=config.acceptance.to_record(),
+            modification_constraints=config.step_constraints,
+            record_failed_attempts=config.record_failed_attempts,
+            finalize_before_deadline_seconds=config.finalize_before_deadline_seconds,
+            max_null_controls=config.max_null_controls,
+            batch_validate_max_concurrency=config.batch_validate_max_concurrency,
+            max_replay_years=int(budgets["max_replay_years"]),
+            max_llm_calls=int(budgets["max_llm_calls"]),
+            max_api_spend_usd=float(budgets["max_api_spend_usd"]),
+            deadline_seconds=float(budgets["deadline_seconds"]),
+            deadline_grace_seconds=float(budgets["deadline_grace_seconds"]),
+            **session,
+        )
 
     @property
     def validation(self) -> ReplaySpan:

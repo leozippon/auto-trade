@@ -20,10 +20,10 @@ from pathlib import Path
 
 import numpy as np
 
+from autotrade.common.records import write_json_atomic
 from autotrade.environment.artifacts import REVISION_MANIFEST_FILE
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME, STYLE_SCHEMA_VERSION
-from autotrade.environment.runtime import write_json_atomic
 from autotrade.pipelines.calendar import FULL_SPAN
 from autotrade.pipelines.config import DEFAULT_RESEARCH_GEOMETRY, AcceptanceRules
 from autotrade.pipelines.experiment import freeze_registration

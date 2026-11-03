@@ -9,7 +9,6 @@ into the Agent runner, so this module never imports it back.
 
 from __future__ import annotations
 
-import json
 import queue
 import shutil
 import time
@@ -21,9 +20,10 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 
 from autotrade.agent.compact import safe_error_summary
-from autotrade.common.records import redact_host_paths
+from autotrade.common.records import read_json_object, redact_host_paths
 from autotrade.environment.artifacts import (
     READONLY_FILES,
+    ArtifactRevision,
     ArtifactSnapshotUnstable,
     FilesystemArtifactStore,
     copy_artifact_snapshot,
@@ -71,7 +71,6 @@ from .config import (
     BATCH_VALIDATE_MIN_CANDIDATES,
     DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
     AcceptanceRules,
-    ArtifactRevision,
     EvaluationBackend,
     EvaluationRequest,
     EvaluationResult,
@@ -85,11 +84,11 @@ from .experiment import (
     null_control_seed,
     research_step_record,
 )
-from .ledger import RESEARCH_STAGE, ExperimentLedger
+from .ledger import ExperimentLedger, Stage
 from .session_resume import record_step_sidecar
 from .skills import _assert_skills_absent_from_formal
 from .verdict import (
-    NOT_A_SESSION_STEP,
+    ConditionReason,
     active_daily,
     graded_statistics,
     holder_readings,
@@ -106,7 +105,7 @@ def _step_analysis(step: StepResult) -> dict[str, object]:
     """The style sidecar beside one recorded Validation's result."""
 
     result_dir = Path(step.validation.result_ref).parent
-    return json.loads((result_dir / STYLE_ARTIFACT_NAME).read_text(encoding="utf-8"))
+    return read_json_object(result_dir / STYLE_ARTIFACT_NAME)
 
 
 def _active_excess_at_cost_stress(step: StepResult, multiplier: float) -> float | None:
@@ -553,7 +552,7 @@ def _smoke_pit(result_dir: Path) -> dict[str, object]:
     replay exposed under asof_dir and, for a smoke run, each one's date range
     on its last day (``pit_backend.asof_date_ranges``)."""
     try:
-        record = json.loads((result_dir / "result.json").read_text(encoding="utf-8"))
+        record = read_json_object(result_dir / "result.json")
     except (OSError, ValueError):
         return {}
     pit = record.get("pit")
@@ -590,7 +589,7 @@ def write_active_daily(result_ref: str) -> Path:
     """
 
     result_dir = Path(result_ref).parent
-    analysis = json.loads((result_dir / STYLE_ARTIFACT_NAME).read_text(encoding="utf-8"))
+    analysis = read_json_object(result_dir / STYLE_ARTIFACT_NAME)
     target = result_dir / PurePosixPath(VALIDATION_DAILY_ATTACHMENT).name
     staging = target.with_name(f".{target.name}.{uuid.uuid4().hex[:8]}.tmp")
     try:
@@ -744,7 +743,7 @@ class SessionValidations:
         }
         named = (node_id, *seed_replicates, *([ablation] if ablation else []))
         if any(step_id not in rows for step_id in named):
-            return {"passed": False, "reasons": [NOT_A_SESSION_STEP]}
+            return {"passed": False, "reasons": [ConditionReason.NOT_A_SESSION_STEP]}
         return freeze_registration(
             rows[node_id],
             experiment_dir=self.experiment_dir,
@@ -849,26 +848,19 @@ class SessionValidations:
         It also records the artifact it descends from, so the revisions the arm
         keeps form the same lineage the Step tree draws.
         """
-        revision = self.artifact_store.create_revision(
+        revision, snapshot = self.artifact_store.create_revision(
             source_output,
             models_path=self.models_dir,
             parent_revision_id=self._parent_revision_id(),
         )
-        if revision.fingerprint != fingerprint:
-            self.artifact_store.discard_revision(str(revision.revision_id))
+        if snapshot != fingerprint:
+            self.artifact_store.discard_revision(revision.revision_id)
             raise ArtifactSnapshotUnstable(
                 f"{label} changed between modification_check and the "
                 "Validation snapshot"
             )
-        typed = ArtifactRevision(
-            str(revision.revision_id),
-            Path(revision.output_path),
-            Path(revision.models_path)
-            if revision.models_path is not None
-            else None,
-        )
-        _assert_skills_absent_from_formal(typed.output_path, typed.models_path)
-        return typed
+        _assert_skills_absent_from_formal(revision.output_path, revision.models_path)
+        return revision
 
     def _parent_revision_id(self) -> str | None:
         """The revision the working artifact descends from.
@@ -906,7 +898,7 @@ class SessionValidations:
         committed bytes' (:meth:`commit_revision`)."""
         node_id = self.tree.record_step(
             revision.output_path,
-            epoch_id=RESEARCH_STAGE,
+            epoch_id=Stage.RESEARCH,
             # The session id is opaqued like every other Agent-visible id.
             session_ref=self.session_ref,
             run_id=self.ref_store.get_or_create("run", self.request.run_id),
@@ -2125,7 +2117,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
             # record_failed_attempt leaves the tree position alone by design,
             # so a dead end never becomes anybody's parent.
             self.backtest.tree.record_failed_attempt(
-                epoch_id=RESEARCH_STAGE,
+                epoch_id=Stage.RESEARCH,
                 session_ref=self.backtest.ref_store.get_or_create(
                     "session", request.session_key
                 ),

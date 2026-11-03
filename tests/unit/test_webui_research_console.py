@@ -19,8 +19,8 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
+from autotrade.common.records import write_json_atomic
 from autotrade.environment.identity import AgentRefStore
-from autotrade.environment.runtime import write_json_atomic
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools.report_issue import (
     append_issue_report,
@@ -713,7 +713,7 @@ def test_a_running_session_serves_its_best_candidate_and_the_record_keeps_it(tmp
     assert live["research_best"]["step_id"] == steps[1]["step_id"]
     assert live["research_best"]["session_key"] == "research"
     # No gate is read over a running session, and none is served.
-    assert not {"trials", "deflated_sharpe_probability"} & set(live["research_best"])
+    assert (live["research_best"]["trials"], live["research_best"]["deflated_sharpe_probability"]) == (None, None)
     assert live["research_best"]["panel_return"] is None  # these sidecars carry no panel
     assert live["research_result"] == Path(str(steps[1]["validation_result_ref"])).parent.name
     client = TestClient(create_app(tmp_path, tmp_path))
@@ -822,7 +822,7 @@ def test_an_ended_arm_is_read_off_its_ledger_and_never_judged_again(
     assert (unnominated.get("deflated_sharpe_probability"), unnominated.get("trials")) == (None, None)
     stopped = rows["stopped"]["research_best"]
     assert stopped["information_ratio"] is not None
-    assert not {"trials", "deflated_sharpe_probability"} & set(stopped)
+    assert (stopped["trials"], stopped["deflated_sharpe_probability"]) == (None, None)
     # The forward slices and verdict are the record's, key for key.
     for name in ("graduate", "refused"):
         forward = _records(root / name)[-1]
@@ -837,7 +837,7 @@ def test_an_ended_arm_is_read_off_its_ledger_and_never_judged_again(
     assert calls[:1] == ["panel_return"]
     running_best = next(row for row in live["experiments"] if row["experiment_id"] == "running")["research_best"]
     assert running_best["information_ratio"] is not None
-    assert "deflated_sharpe_probability" not in running_best
+    assert running_best["deflated_sharpe_probability"] is None
 
 
 def test_a_page_poll_keeps_one_request_in_flight() -> None:
@@ -1396,7 +1396,7 @@ def test_each_validation_shows_its_raw_excess_beside_its_active_figures(tmp_path
     record = next(entry for entry in detail["sessions"] if entry["kind"] == "research")["record"]
     assert {"excess_return", "plain_excess", "excess_at_cost_stress"} <= set(record["validations"][0])
     # The ledger holds no reading of the best candidate's panel.
-    assert "panel_return" not in record["best"]
+    assert record["best"]["panel_return"] is None
 
 
 def test_a_forward_record_without_the_holders_readings_shows_none(tmp_path: Path) -> None:
@@ -1560,3 +1560,27 @@ def test_every_sealed_reading_of_a_window_is_listed_with_its_p_value_and_count(t
     assert (pool["count"], pool["raised"]) == (2, 1)
     # An arm without a forward record has no readout.
     assert experiment_detail(tmp_path, "early")["readouts"] is None
+
+
+def test_a_best_candidate_has_one_shape_running_or_recorded() -> None:
+    """The listing's ``research_best`` and a research record's ``best`` are one
+    record: a figure a session does not have is served as None, never left
+    out, so the page reads the same keys from either."""
+
+    from dataclasses import fields
+
+    from autotrade.webui.registry import BestCandidate, ValidationView
+
+    view = ValidationView.of({"step_id": "s", "span": "full", "summary": {}, "graded": {}}, 2.0)
+    running = BestCandidate("research", view, "valid_001", panel_return=0.01).to_record()
+    recorded = BestCandidate("research", view, "valid_001", deflated_sharpe_probability=0.9, trials=4).to_record()
+
+    assert list(running) == list(recorded) == [
+        "session_key",
+        *(item.name for item in fields(ValidationView)),
+        "result",
+        "panel_return",
+        "deflated_sharpe_probability",
+        "trials",
+    ]
+    assert (running["trials"], recorded["panel_return"]) == (None, None)

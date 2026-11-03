@@ -37,7 +37,7 @@ add_repo_src(__file__)
 from autotrade.common.records import write_json_atomic
 from autotrade.paper.books import PAPER_STATE_DIR, experiment_books
 from autotrade.pipelines.hitl_state import ARCHIVED_NAME, HITL_DIR_NAME
-from autotrade.pipelines.ledger import experiment_verdict
+from autotrade.pipelines.ledger import VerdictStatus, experiment_verdict
 from autotrade.webui.registry import (
     experiment_state,
     read_ledger_records,
@@ -54,7 +54,7 @@ def refusal(directory: Path, paper_root: Path) -> str | None:
     if state.get("worker_alive") or state.get("state") == "launching":
         return "has a live worker; stop it first"
     verdict = experiment_verdict(read_ledger_records(directory))
-    if verdict is not None and verdict["status"] == "graduated":
+    if verdict is not None and verdict["status"] == VerdictStatus.GRADUATED:
         return "is a graduate; void the graduation first (void_graduation.py)"
     books = experiment_books(paper_root, directory.name)
     if books:

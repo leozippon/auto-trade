@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
+from autotrade.common.records import read_json_object
 from autotrade.common.time import CN_TZ
 
 # ---------------------------------------------------------------------------
@@ -53,8 +53,8 @@ def read_committed_raw_generation(raw_dir: str | Path | None) -> dict[str, objec
     if not path.exists():
         return None
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        payload = read_json_object(path)
+    except (OSError, ValueError) as exc:
         raise RuntimeError(f"invalid raw generation record: {path}: {exc}") from exc
     try:
         require_committed_generation(payload)

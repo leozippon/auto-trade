@@ -9,7 +9,6 @@ strategy content; it only prepares, freezes, replays and records.
 from __future__ import annotations
 
 import hashlib
-import json
 import math
 import re
 import sys
@@ -22,7 +21,10 @@ from tempfile import TemporaryDirectory
 
 import pandas as pd
 
+from autotrade.common.records import read_json_object
 from autotrade.environment.artifacts import (
+    ArtifactRevision,
+    FrozenArtifact,
     copy_artifact,
     copy_model_artifacts,
     model_artifact_delta,
@@ -55,13 +57,11 @@ from .agent_inbox import expire_experiment_session_inbox
 from .calendar import FULL_SPAN, Slot
 from .config import (
     AcceptanceRules,
-    ArtifactRevision,
     ArtifactStore,
     BudgetUsed,
     EvaluationBackend,
     EvaluationRequest,
     EvaluationResult,
-    FrozenArtifact,
     ReplaySpan,
     ResearchDeveloper,
     ResearchSessionRequest,
@@ -75,15 +75,14 @@ from .config import (
 )
 from .ledger import (
     ENVIRONMENT_BLOCKED,
-    FORWARD_SESSION_KEY,
-    FORWARD_STAGE,
-    RESEARCH_SESSION_KEY,
-    RESEARCH_STAGE,
     STRATEGY_ERROR,
     ExperimentLedger,
     FrozenArtifactMutated,
     FrozenArtifactRestoreFailed,
     RunMarkers,
+    SessionKind,
+    Stage,
+    VerdictStatus,
     assert_no_frozen_artifact_mutation,
     forward_record,
     frozen_record,
@@ -108,7 +107,8 @@ from .skills import (
     resolve_collected_skills_source,
 )
 from .verdict import (
-    UNMEASURABLE,
+    ConditionReason,
+    ConditionStage,
     ablation_increment,
     forward_mde,
     forward_slice,
@@ -335,42 +335,30 @@ class RollingExperimentPipeline:
         wrote_ledger_record = False
         attempt = {
             "experiment_id": self.config.experiment_id,
-            "epoch_id": RESEARCH_STAGE,
-            "fold_id": RESEARCH_SESSION_KEY,
+            "epoch_id": Stage.RESEARCH,
+            "fold_id": SessionKind.RESEARCH,
             "run_id": run_id,
-            "session_key": RESEARCH_SESSION_KEY,
-            "phase": RESEARCH_STAGE,
+            "session_key": SessionKind.RESEARCH,
+            "phase": Stage.RESEARCH,
         }
         # Evidence for a run that never gets to run its own except branch.
         self.run_markers.begin(attempt)
         try:
-            _publish_progress(progress, "pit_snapshot", run_id=run_id, phase=RESEARCH_STAGE)
+            _publish_progress(progress, "pit_snapshot", run_id=run_id, phase=Stage.RESEARCH)
             decision, years = self.research_inputs()
             _visible, sealed = self.config.geometry.split_sealed(self.config.acceptance.sealed_years)
             session = self.developer(
-                ResearchSessionRequest(
-                    experiment_id=self.config.experiment_id,
+                ResearchSessionRequest.for_arm(
+                    self.config,
+                    budgets=budgets,
                     run_id=run_id,
                     snapshot=decision,
                     decision_time=sealed[0].anchor,
                     research_years=years,
                     sealed_period=(sealed[0].start, sealed[-1].end),
-                    window_months=self.config.window_months,
-                    max_replay_years=int(budgets["max_replay_years"]),
-                    max_llm_calls=int(budgets["max_llm_calls"]),
-                    max_api_spend_usd=float(budgets["max_api_spend_usd"]),
-                    deadline_seconds=budgets["deadline_seconds"],
-                    deadline_grace_seconds=budgets["deadline_grace_seconds"],
-                    benchmark_index=self.config.benchmark_index,
                     directive=str(context.get("directive") or ""),
                     sandbox_gpu_count=_optional_gpu_count(context.get("sandbox_gpu_count")),
-                    acceptance_rules=self.config.acceptance.to_record(),
-                    modification_constraints=self.config.step_constraints,
                     snapshot_config=_snapshot_config_record(self.snapshots),
-                    record_failed_attempts=self.config.record_failed_attempts,
-                    finalize_before_deadline_seconds=self.config.finalize_before_deadline_seconds,
-                    max_null_controls=self.config.max_null_controls,
-                    batch_validate_max_concurrency=self.config.batch_validate_max_concurrency,
                     progress_hook=progress,
                     skills_source_ref=(
                         str(current_skills.root) if current_skills.root is not None else ""
@@ -431,11 +419,11 @@ class RollingExperimentPipeline:
                 else:
                     reasons = ", ".join(str(reason) for reason in gate["reasons"])
                     arm_end = {
-                        "status": "no_deliverable",
+                        "status": VerdictStatus.NO_DELIVERABLE,
                         "reason": f"freeze refused at registration ({reasons})",
                     }
             elif session.outcome == "no_edge":
-                arm_end = {"status": "no_deliverable", "reason": f"no_edge: {session.reason}"}
+                arm_end = {"status": VerdictStatus.NO_DELIVERABLE, "reason": f"no_edge: {session.reason}"}
             elif session.outcome == ENVIRONMENT_BLOCKED:
                 arm_end = {"status": ENVIRONMENT_BLOCKED, "reason": session.reason}
                 # The worker log is the operator's other place to see it.
@@ -447,7 +435,7 @@ class RollingExperimentPipeline:
                 )
             else:
                 arm_end = {
-                    "status": "no_deliverable",
+                    "status": VerdictStatus.NO_DELIVERABLE,
                     "reason": (
                         "research budget exhausted without a freeze "
                         f"({session.finish_reason})"
@@ -457,14 +445,14 @@ class RollingExperimentPipeline:
             skills = self._publish_or_keep_skills(
                 session.skills_source_ref,
                 current=current_skills,
-                generation_id=f"{RESEARCH_SESSION_KEY}_{run_id}",
+                generation_id=f"{SessionKind.RESEARCH}_{run_id}",
                 run_id=run_id,
             )
             trace = agent_trace_path(self.config.experiment_dir / "artifacts", run_id)
             record = {
                 "record_type": "research_session",
                 **{key: attempt[key] for key in ("experiment_id", "epoch_id", "fold_id", "run_id")},
-                "session_key": RESEARCH_SESSION_KEY,
+                "session_key": SessionKind.RESEARCH,
                 "conversation_id": session.conversation_id,
                 "finish_reason": session.finish_reason,
                 "outcome": session.outcome,
@@ -492,7 +480,7 @@ class RollingExperimentPipeline:
             self.ledger.append(record)
             wrote_ledger_record = True
             expire_experiment_session_inbox(
-                self.config.experiment_dir, RESEARCH_SESSION_KEY, expired_by=run_id
+                self.config.experiment_dir, SessionKind.RESEARCH, expired_by=run_id
             )
             # Every revision a Validation recorded stays: it is the arm's
             # artifact history, and the store shares the bytes between
@@ -580,7 +568,7 @@ class RollingExperimentPipeline:
                 start=visible[0].start,
                 end=visible[-1].end,
                 profile=self.config.broker_profile,
-                seed=null_control_seed(RESEARCH_SESSION_KEY, "frozen"),
+                seed=null_control_seed(SessionKind.RESEARCH, "frozen"),
             )
         )
         return {
@@ -630,18 +618,17 @@ class RollingExperimentPipeline:
         """Freeze one Step's revision as a new artifact: its id, its output
         tree and its models tree (``None`` when the store keeps none)."""
 
-        artifact_id = f"strategy_{RESEARCH_SESSION_KEY}_{uuid.uuid4().hex[:12]}"
+        artifact_id = f"strategy_{SessionKind.RESEARCH}_{uuid.uuid4().hex[:12]}"
         stored = self.artifacts.freeze_revision(
             revision_id,
             artifact_id=artifact_id,
             experiment_id=self.config.experiment_id,
-            epoch_id=RESEARCH_STAGE,
-            fold_id=RESEARCH_SESSION_KEY,
+            epoch_id=Stage.RESEARCH,
+            fold_id=SessionKind.RESEARCH,
             run_id=run_id,
             step_id=step_id,
         )
-        models = Path(stored.model_path) if stored.model_path is not None else None
-        return artifact_id, Path(stored.path), models
+        return artifact_id, stored.path, stored.model_path
 
     # ---- forward -------------------------------------------------------
 
@@ -680,16 +667,16 @@ class RollingExperimentPipeline:
         run_id = f"run_{uuid.uuid4().hex}"
         attempt = {
             "experiment_id": self.config.experiment_id,
-            "epoch_id": FORWARD_STAGE,
-            "fold_id": FORWARD_SESSION_KEY,
+            "epoch_id": Stage.FORWARD,
+            "fold_id": SessionKind.FORWARD,
             "run_id": run_id,
-            "session_key": FORWARD_SESSION_KEY,
-            "phase": FORWARD_STAGE,
+            "session_key": SessionKind.FORWARD,
+            "phase": Stage.FORWARD,
         }
         head = {
             "record_type": "forward",
             **{key: attempt[key] for key in ("experiment_id", "epoch_id", "fold_id", "run_id")},
-            "session_key": FORWARD_SESSION_KEY,
+            "session_key": SessionKind.FORWARD,
         }
         self.run_markers.begin(attempt)
         wrote_ledger_record = False
@@ -702,7 +689,7 @@ class RollingExperimentPipeline:
             wrote_ledger_record = True
 
         try:
-            _publish_progress(progress, "pit_snapshot", run_id=run_id, phase=FORWARD_STAGE)
+            _publish_progress(progress, "pit_snapshot", run_id=run_id, phase=Stage.FORWARD)
             record = {
                 **head,
                 **self.replay_frozen(
@@ -777,7 +764,7 @@ class RollingExperimentPipeline:
         forward_bundle = self._prepare_slot(forward)
         heldout_bundle = self._prepare_slot(heldout)
         span = ReplaySpan(
-            label=FORWARD_STAGE,
+            label=Stage.FORWARD,
             mode=FORWARD_PHASE,
             start=forward.start,
             end=heldout.end,
@@ -1080,19 +1067,10 @@ class RollingExperimentPipeline:
 
         if not isinstance(block, Mapping):
             raise TypeError("frozen record carries no frozen block")
-        stored = self.artifacts.frozen(
+        return self.artifacts.frozen(
             str(block["artifact_id"]),
             expected_path=recorded_path(self.config.experiment_dir, str(block["output_path"])),
             experiment_id=self.config.experiment_id,
-        )
-        return FrozenArtifact(
-            str(stored.artifact_id),
-            Path(stored.path),
-            Path(stored.model_path) if stored.model_path is not None else None,
-            str(stored.source_run_id),
-            str(stored.source_fold_id),
-            str(stored.source_step_id),
-            str(stored.revision_id),
         )
 
     # ---- shared --------------------------------------------------------
@@ -1253,7 +1231,7 @@ def freeze_registration(
     summary = nominee.get("summary")
     reasons = [
         *acceptance.evaluate(dict(summary) if isinstance(summary, Mapping) else {}),
-        *judge("registration", nominee, {}),
+        *judge(ConditionStage.REGISTRATION, nominee, {}),
     ]
     if reasons:
         return {"passed": False, "reasons": reasons}
@@ -1265,7 +1243,7 @@ def freeze_registration(
         # while the session is still open, never after the freeze.
         residual_reading(analysis, alpha=acceptance.alpha)
     except ValueError as exc:
-        return {"passed": False, "reasons": [UNMEASURABLE], "error": str(exc)}
+        return {"passed": False, "reasons": [ConditionReason.UNMEASURABLE], "error": str(exc)}
     mandate = registered_mandate(analysis, rules=acceptance)
     nominee = completed_rows(experiment_dir, [nominee])[0]
     replicates = completed_rows(experiment_dir, seed_replicates)
@@ -1287,7 +1265,7 @@ def freeze_registration(
             str(nominee["fingerprint"]): "the nominee",
         },
     )
-    reasons = [*mandate["reasons"], *judge("seeds", seeds, {}), *judge("ablation", control, {})]
+    reasons = [*mandate["reasons"], *judge(ConditionStage.SEEDS, seeds, {}), *judge(ConditionStage.ABLATION, control, {})]
     return {
         "passed": not reasons,
         "reasons": reasons,
@@ -1385,7 +1363,7 @@ def seed_change(experiment_dir: str | Path, nominee_revision: str, replicate_rev
 def _revision_files(directory: Path) -> dict[str, str]:
     """``path -> sha256`` of every file one recorded revision holds."""
 
-    manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+    manifest = read_json_object(directory / "manifest.json")
     return {str(entry["path"]): str(entry["sha256"]) for entry in manifest["files"]}
 
 
@@ -1508,7 +1486,7 @@ def _style_analysis(experiment_dir: str | Path, row: Mapping[str, object]) -> di
     (``ledger.recorded_path``)."""
 
     result = recorded_path(experiment_dir, str(row["validation_result_ref"]))
-    return json.loads((result.parent / STYLE_ARTIFACT_NAME).read_text(encoding="utf-8"))
+    return read_json_object(result.parent / STYLE_ARTIFACT_NAME)
 
 
 def null_control_seed(key: str, role: str) -> int:
@@ -1545,7 +1523,7 @@ def validation_statistics(result_ref: str) -> dict[str, object] | None:
     """
 
     path = Path(result_ref).parent / STYLE_ARTIFACT_NAME
-    return _measured_or_none(json.loads(path.read_text(encoding="utf-8")))
+    return _measured_or_none(read_json_object(path))
 
 
 def replay_and_analysis(result_ref: str) -> tuple[dict[str, object], dict[str, object]]:
@@ -1553,8 +1531,8 @@ def replay_and_analysis(result_ref: str) -> tuple[dict[str, object], dict[str, o
 
     path = Path(result_ref)
     return (
-        json.loads(path.read_text(encoding="utf-8")),
-        json.loads((path.parent / STYLE_ARTIFACT_NAME).read_text(encoding="utf-8")),
+        read_json_object(path),
+        read_json_object(path.parent / STYLE_ARTIFACT_NAME),
     )
 
 

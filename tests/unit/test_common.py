@@ -47,6 +47,22 @@ def test_a_missing_or_malformed_record_fails_unless_the_reader_tolerates_it(tmp_
         assert read_json_object_or_empty(path) == {}
 
 
+def test_a_record_the_host_cannot_read_is_no_malformed_record(tmp_path: Path) -> None:
+    """Permission denied (or any I/O error) is the OSError it is, missing_ok
+    or not: the file may hold a valid record, so a reader that tolerates
+    malformed records must not take it for one."""
+
+    path = tmp_path / "locked.json"
+    write_json_atomic(path, {"state": "running_session"})
+    path.chmod(0)
+    try:
+        for missing_ok in (False, True):
+            with pytest.raises(PermissionError):
+                read_json_object(path, missing_ok=missing_ok)
+    finally:
+        path.chmod(0o600)
+
+
 @dataclass(frozen=True)
 class _Pinned:
     name: str

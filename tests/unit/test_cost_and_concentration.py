@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from autotrade.environment.artifacts import ArtifactRevision
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.replay.stats import (
@@ -24,11 +25,7 @@ from autotrade.environment.replay.stats import (
     compute_return_stats,
 )
 from autotrade.environment.strategy import StrategySchedule
-from autotrade.pipelines.config import (
-    ArtifactRevision,
-    EvaluationRequest,
-    SnapshotBundle,
-)
+from autotrade.pipelines.config import EvaluationRequest, SnapshotBundle
 from autotrade.pipelines.local_backend import LocalDailyEvaluationBackend
 
 _CURVE = (

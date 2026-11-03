@@ -15,6 +15,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from autotrade.common.records import HOST_PATH_RE
+from autotrade.environment.artifacts import ArtifactRevision
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.data.snapshot import SnapshotConfig
@@ -28,7 +30,6 @@ from autotrade.environment.replay.null_control import (
 from autotrade.environment.replay.timeview import Timeview
 from autotrade.environment.runtime import (
     AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS,
-    HOST_PATH_RE,
     _agent_visible_backtest_summary,
     chmod_tree,
 )
@@ -36,7 +37,6 @@ from autotrade.environment.strategy import StrategySchedule
 from autotrade.pipelines import pit_backend
 from autotrade.pipelines.config import (
     SNAPSHOT_CACHE_FORMAT_VERSION,
-    ArtifactRevision,
     EvaluationRequest,
     SnapshotBundle,
 )

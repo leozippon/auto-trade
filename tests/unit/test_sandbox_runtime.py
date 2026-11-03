@@ -17,6 +17,7 @@ from unittest.mock import Mock, patch
 import pandas as pd
 import pytest
 
+from autotrade.common.records import write_json_atomic
 from autotrade.environment import artifacts, strategy_worker
 from autotrade.environment.artifacts import (
     ArtifactError,
@@ -46,7 +47,6 @@ from autotrade.environment.executor import (
 )
 from autotrade.environment.gpu import MIN_FREE_GPU_MEMORY_MIB, GpuUnavailableError
 from autotrade.environment.replay import DailyMarketData
-from autotrade.environment.runtime import write_json_atomic
 from autotrade.environment.sandbox import (
     EXPERIMENT_LABEL,
     SCREENING_TOOL_MOUNT,
@@ -84,7 +84,7 @@ from autotrade.pipelines.hitl_state import (
     select_gpus,
     write_gpu_claim,
 )
-from autotrade.pipelines.worker import _strategy_sandbox_from_spec
+from autotrade.pipelines.worker import strategy_sandbox_from_spec
 
 from .fixtures_sandbox import docker_available
 from .gpu_probe import gpu_roster, stubbed_gpu_probe
@@ -635,18 +635,18 @@ def test_experiment_gpu_request_reaches_the_formal_strategy_container() -> None:
     """The session spec is the single source of the experiment's GPU request;
     the strategy container of every formal replay carries the same one."""
 
-    requested = _strategy_sandbox_from_spec(
+    requested = strategy_sandbox_from_spec(
         SandboxSpec(gpu="auto", gpu_count=2, gpu_name_filter="L20"),
         fit_timeout_seconds=3600,
     )
     assert (requested.spec.gpu_count, requested.spec.gpu_name_filter) == (2, "L20")
     assert requested.fit_timeout_seconds == 3600.0
-    cpu_only = _strategy_sandbox_from_spec(
+    cpu_only = strategy_sandbox_from_spec(
         SandboxSpec(gpu=None, gpu_count=0), fit_timeout_seconds=3600
     )
     assert cpu_only.spec.gpu_count == 0
     assert (
-        _strategy_sandbox_from_spec(None, fit_timeout_seconds=3600).spec.gpu_count == 0
+        strategy_sandbox_from_spec(None, fit_timeout_seconds=3600).spec.gpu_count == 0
     )
 
 
@@ -655,7 +655,7 @@ def test_the_arms_boundary_reaches_the_strategy_containers_flags(tmp_path: Path)
     flags and thread variables of its strategy containers carry what the
     builder is given, and a builder given none keeps the executor's defaults."""
 
-    default = _strategy_sandbox_from_spec(SandboxSpec(gpu=None), fit_timeout_seconds=3600)
+    default = strategy_sandbox_from_spec(SandboxSpec(gpu=None), fit_timeout_seconds=3600)
     executor = SandboxConfig()
     assert (default.spec.cpus, default.spec.memory, default.timeout_seconds) == (
         executor.spec.cpus,
@@ -664,7 +664,7 @@ def test_the_arms_boundary_reaches_the_strategy_containers_flags(tmp_path: Path)
     )
     # The strategy container's own /tmp, not the session's.
     assert default.spec.tmpfs_size == executor.spec.tmpfs_size == STRATEGY_TMPFS_SIZE == "2g"
-    config = _strategy_sandbox_from_spec(
+    config = strategy_sandbox_from_spec(
         SandboxSpec(gpu=None),
         fit_timeout_seconds=10_800,
         inference_timeout_seconds=1_080,
@@ -695,10 +695,10 @@ def test_the_consoles_claim_pins_every_container_of_the_arm() -> None:
     from autotrade.pipelines.research_session import LLMResearchDeveloper
 
     claimed = SandboxSpec(gpu=(3, 6), gpu_count=2)
-    spec = _strategy_sandbox_from_spec(claimed, fit_timeout_seconds=60).spec
+    spec = strategy_sandbox_from_spec(claimed, fit_timeout_seconds=60).spec
     assert (spec.gpu_count, spec.gpu) == (2, (3, 6))
     assert spec.devices() == [3, 6]
-    unclaimed = _strategy_sandbox_from_spec(SandboxSpec(gpu_count=2), fit_timeout_seconds=60)
+    unclaimed = strategy_sandbox_from_spec(SandboxSpec(gpu_count=2), fit_timeout_seconds=60)
     assert unclaimed.spec.gpu == GpuMode.AUTO
     with pytest.raises(GpuUnavailableError, match="was given no device"):
         unclaimed.spec.devices()
@@ -726,7 +726,7 @@ def test_every_container_of_an_experiment_carries_its_label(tmp_path: Path):
     session = DockerSandbox(local, SandboxSpec(gpu=None), labels=labels).docker_command()
     assert "adm.experiment=exp_x" in session and "adm.run=run_1" in session
 
-    config = _strategy_sandbox_from_spec(
+    config = strategy_sandbox_from_spec(
         SandboxSpec(gpu=None, gpu_count=0), fit_timeout_seconds=60, experiment_id="exp_x"
     )
     assert dict(config.labels) == {EXPERIMENT_LABEL: "exp_x"}
@@ -737,7 +737,7 @@ def test_every_container_of_an_experiment_carries_its_label(tmp_path: Path):
     command = executor.docker_command()
     assert command[command.index("--label") + 1] == "adm.experiment=exp_x"
     # Without an experiment (a Paper book, the console preview) no label.
-    assert not _strategy_sandbox_from_spec(None, fit_timeout_seconds=60).labels
+    assert not strategy_sandbox_from_spec(None, fit_timeout_seconds=60).labels
     with patch.object(DockerStrategyExecutor, "_start"):
         unlabelled = DockerStrategyExecutor(_strategy(package)).docker_command()
     assert "--label" not in unlabelled
@@ -748,7 +748,7 @@ def test_filesystem_artifact_store_freezes_explicit_revision_identity(tmp_path: 
     output.mkdir()
     (output / "main.py").write_text("def generate_orders(context):\n    return []\n", encoding="utf-8")
     store = FilesystemArtifactStore(tmp_path / "store")
-    revision = store.create_revision(output, revision_id="revision_001")
+    revision, _fingerprint = store.create_revision(output, revision_id="revision_001")
     frozen = store.freeze_revision(
         revision.revision_id,
         artifact_id="artifact_001",
@@ -774,7 +774,7 @@ def test_frozen_artifacts_copy_to_writable_fold_workspace_without_mutating_sourc
     (source / "README.md").write_text("contract\n", encoding="utf-8")
     (models / "weights.bin").write_bytes(b"parent-model")
     store = FilesystemArtifactStore(tmp_path / "store")
-    revision = store.create_revision(source, models_path=models, revision_id="revision_parent")
+    revision, _fingerprint = store.create_revision(source, models_path=models, revision_id="revision_parent")
     frozen = store.freeze_revision(
         revision.revision_id,
         artifact_id="artifact_parent",
@@ -839,7 +839,7 @@ def test_real_inherited_fold_workspace_is_writable_only_inside_agent_boundary(tm
     (source / "README.md").write_text("read only\n", encoding="utf-8")
     (source_models / "weights.bin").write_bytes(b"parent")
     store = FilesystemArtifactStore(tmp_path / "store")
-    revision = store.create_revision(source, models_path=source_models, revision_id="revision_parent")
+    revision, _fingerprint = store.create_revision(source, models_path=source_models, revision_id="revision_parent")
     frozen = store.freeze_revision(
         revision.revision_id,
         artifact_id="artifact_parent",
@@ -1217,9 +1217,9 @@ def test_an_evaluation_snapshot_is_immutable_and_keeps_the_bytes_it_fingerprinte
     working copy but not this tree."""
     output, models = _working_artifact(tmp_path)
     store = FilesystemArtifactStore(tmp_path / "store")
-    revision = store.create_revision(output, models_path=models)
+    revision, fingerprint = store.create_revision(output, models_path=models)
 
-    assert revision.fingerprint == artifact_fingerprint(output, models)
+    assert fingerprint == artifact_fingerprint(output, models)
 
     # The Agent keeps working while the replay runs.
     (output / "main.py").write_text(STRATEGY_BODY + "# later\n", encoding="utf-8")
@@ -1229,9 +1229,9 @@ def test_an_evaluation_snapshot_is_immutable_and_keeps_the_bytes_it_fingerprinte
     assert (revision.models_path / "weights.bin").read_bytes() == b"parent"
     assert (
         artifact_fingerprint(revision.output_path, revision.models_path)
-        == revision.fingerprint
+        == fingerprint
     )
-    assert artifact_fingerprint(output, models) != revision.fingerprint
+    assert artifact_fingerprint(output, models) != fingerprint
 
     # uid 61000 owns nothing here and every path denies writes, so no process in
     # the session can reach the evaluated bytes even by path.
@@ -1260,10 +1260,10 @@ def test_a_write_during_the_snapshot_is_retaken_once(tmp_path: Path):
 
     store = FilesystemArtifactStore(tmp_path / "store")
     with patch.object(artifacts, "copy_model_artifacts", write_then_copy):
-        revision = store.create_revision(output, models_path=models)
+        revision, fingerprint = store.create_revision(output, models_path=models)
 
     assert (revision.output_path / "main.py").read_text(encoding="utf-8") == moved
-    assert revision.fingerprint == artifact_fingerprint(output, models)
+    assert fingerprint == artifact_fingerprint(output, models)
 
 
 def test_a_source_that_never_settles_fails_explicitly_and_leaves_no_revision(

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import re
 import warnings
@@ -15,6 +14,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from autotrade.common.records import read_json_object
 from autotrade.common.time import CN_TZ
 from autotrade.environment.data.contracts import LOCALLY_DERIVED_DATASETS
 
@@ -82,11 +82,9 @@ def parquet_meta(path: Path) -> dict[str, Any]:
     if not meta_path.exists():
         return {}
     try:
-        payload = json.loads(meta_path.read_text(encoding="utf-8"))
+        payload = read_json_object(meta_path)
     except (OSError, ValueError) as exc:
         raise CorruptSidecarError(f"unreadable parquet sidecar: {meta_path}: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise CorruptSidecarError(f"parquet sidecar is not a JSON object: {meta_path}")
     return payload
 
 

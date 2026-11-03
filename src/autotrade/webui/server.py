@@ -71,13 +71,12 @@ def _raw_generation_status(repo_root: Path) -> dict[str, object]:
     environment/data/contracts.py and is deliberately not reused here."""
     path = Path(repo_root) / "data" / "raw" / RAW_GENERATION_FILENAME
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = read_json_object(path)
     except FileNotFoundError:
         return {"state": "absent", "issues": []}  # dev/test roots without a stamped lake
     except (OSError, ValueError) as exc:
-        return {"state": "unreadable", "error": f"{type(exc).__name__}: {exc}", "issues": []}
-    if not isinstance(payload, dict):
-        return {"state": "unreadable", "error": "stamp is not a JSON object", "issues": []}
+        # The reader names the file by its host path, which the console omits.
+        return {"state": "unreadable", "error": omit_private_paths(str(exc)), "issues": []}
     info: dict[str, object] = {"state": str(payload.get("state") or "unreadable")}
     for key in ("generation_id", "updated_at", "completed_at"):
         if payload.get(key):

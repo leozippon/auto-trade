@@ -21,7 +21,6 @@ from autotrade.environment.replay.engine import BacktestError
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
 from autotrade.environment.runtime import utc_now_iso
 from autotrade.pipelines.config import (
-    ArtifactRevision,
     EvaluationRequest,
     EvaluationResult,
     ResearchSessionRequest,
@@ -181,8 +180,7 @@ class SeedDeveloper:
             directory = self.store.root.parent / "candidates" / f"candidate_{number}"
             directory.mkdir(parents=True)
             (directory / "main.py").write_text(source, encoding="utf-8")
-            revision = self.store.create_revision(directory)
-            typed = ArtifactRevision(str(revision.revision_id), Path(revision.output_path))
+            typed, _fingerprint = self.store.create_revision(directory)
             replayed = research_span(request.research_years, span)
             validation = self.evaluator.evaluate(
                 replayed.request(typed, schedule=CONFIG_SCHEDULE, broker_profile=CONFIG_PROFILE)
