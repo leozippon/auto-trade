@@ -2040,3 +2040,16 @@ def test_a_worker_that_dies_during_boot_reads_as_interrupted(tmp_path: Path) -> 
     # …and the console offers the researcher a way out of it.
     assert state["state"] in _TERMINAL_RESUMABLE_STATES
 
+
+
+def test_the_local_model_count_reads_the_roles_as_the_worker_runs_them() -> None:
+    """An empty main role runs on its hosted default and an empty sub-agent
+    role on the main model (``arm_params.session_models``), so the count
+    neither misses a local arm nor counts a hosted one."""
+
+    from autotrade.webui.manager import uses_local_model
+
+    assert uses_local_model({"model": LOCAL_QWEN_MODEL, "subagent_model": ""})
+    assert uses_local_model({"model": MIMO_FLASH_MODEL, "subagent_model": LOCAL_QWEN_MODEL})
+    assert not uses_local_model({"model": "", "subagent_model": ""})
+    assert not uses_local_model({})

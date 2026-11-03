@@ -26,6 +26,7 @@ from autotrade.environment.llm import (
 from autotrade.environment.tools import CommandResult
 from autotrade.pipelines.arm_params import RETIRED_NL_PARAMS
 from autotrade.pipelines.hitl_state import (
+    WEB_CREATE_DEFAULTS,
     ControlState,
     PlannedSession,
     read_control,
@@ -75,6 +76,10 @@ def _experiment(
                 "daily_path": "data/daily.parquet",
                 "execution_mode": "trusted",
                 "developer_mode": developer_mode,
+                # The local model the tests' VLLM credential serves; a file
+                # that leaves the roles out runs on the hosted default.
+                "model": LOCAL_QWEN_MODEL,
+                "compact_model": LOCAL_QWEN_MODEL,
                 "data_backend": "daily",
                 "initial_control_mode": "auto",
                 "strategy_period": "day",
@@ -91,6 +96,38 @@ def _experiment(
     )
     return repo, experiment
 
+
+
+def test_a_params_file_that_leaves_a_parameter_out_runs_on_its_console_default(
+    tmp_path: Path,
+) -> None:
+    """The worker keeps no fallback of its own: a key the file leaves out
+    reads the parameter's one declared default, the value a console create
+    stamps, so such a file runs as a console-created arm does."""
+    from autotrade.environment.llm import effective_max_output_tokens
+    from autotrade.pipelines.worker import resolve_worker_options
+
+    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    params = json.loads((experiment / "hitl/params.json").read_text(encoding="utf-8"))
+    for role in ("model", "compact_model"):
+        params.pop(role)
+    options = resolve_worker_options(params, experiment_dir=experiment, repo_root=repo, preflight=True)
+
+    llm = options.llm
+    defaults = WEB_CREATE_DEFAULTS
+    assert (llm.model, llm.subagent_model, llm.compact_model) == (
+        defaults["model"],
+        defaults["subagent_model"],
+        defaults["compact_model"],
+    )
+    assert llm.compact_token_threshold == defaults["compact_token_threshold"]
+    assert llm.compaction.keep_recent_messages == defaults["compact_keep_recent_messages"]
+    assert llm.compaction.max_calls == defaults["compact_max_calls"]
+    assert llm.compaction.max_response_tokens == effective_max_output_tokens(
+        llm.compact_model, defaults["compact_max_tokens"]
+    )
+    assert llm.reasoning_effort == defaults["reasoning_effort"]
+    assert options.snapshot_config.include_intraday is defaults["include_intraday"]
 
 
 def test_worker_rejects_llm_mode_without_provider_credentials(tmp_path: Path):
@@ -479,13 +516,20 @@ def test_worker_default_threshold_fits_deepseek_and_compaction_can_be_disabled(
     params = json.loads(path.read_text(encoding="utf-8"))
     params["model"] = "deepseek-flash"
     params["compact_model"] = "deepseek-flash"
-    params.pop("compact_token_threshold", None)
+    # Null derives the threshold per role.
+    params["compact_token_threshold"] = None
     path.write_text(json.dumps(params), encoding="utf-8")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-test-key")
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     options = load_worker_options(experiment, repo_root=repo)
     # 1,048,576 − 32,768 output ceiling − 8,192 margin: shipped defaults launch.
     assert options.llm.compaction.token_threshold == 1_007_616
+    # A file without the key reads the parameter's one default, the value a
+    # console create stamps, as a console-created arm does.
+    params.pop("compact_token_threshold")
+    path.write_text(json.dumps(params), encoding="utf-8")
+    stamped = WEB_CREATE_DEFAULTS["compact_token_threshold"]
+    assert load_worker_options(experiment, repo_root=repo).llm.compaction.token_threshold == stamped
     params["disable_context_compact"] = True
     path.write_text(json.dumps(params), encoding="utf-8")
     disabled = load_worker_options(experiment, repo_root=repo)
@@ -512,10 +556,11 @@ def test_worker_refuses_a_gpt6_conversation_that_could_outgrow_the_short_tier(
         path.write_text(json.dumps(params), encoding="utf-8")
         return load_worker_options(experiment, repo_root=repo).llm
 
-    # Derived from the windows: the local compaction model bounds the gpt-6
-    # parent at 262,144 - 1,600 - 8,192 = 252,352, past the priced tier.
-    with pytest.raises(ValueError, match=r"compact_token_threshold must be at most 221,184 .*main.*gpt-6\.1-sol.*252,352"):
-        load(model="gpt-6.1-sol", compact_model=LOCAL_QWEN_MODEL)
+    # Derived from the windows (null): the local compaction model, at the
+    # default 10,000-token compaction budget, bounds the gpt-6 parent at
+    # 262,144 - 10,000 - 8,192 = 243,952, past the priced tier.
+    with pytest.raises(ValueError, match=r"compact_token_threshold must be at most 221,184 .*main.*gpt-6\.1-sol.*243,952"):
+        load(model="gpt-6.1-sol", compact_model=LOCAL_QWEN_MODEL, compact_token_threshold=None)
     assert load(compact_token_threshold=221_184).compaction.token_threshold == 221_184
     with pytest.raises(ValueError, match="compact_token_threshold must be at most"):
         load(compact_token_threshold=221_185)
@@ -549,9 +594,10 @@ def test_worker_gives_subagents_their_own_gateway_and_compaction_budget(
             "subagent_model": LOCAL_QWEN_MODEL,
             "compact_model": LOCAL_QWEN_MODEL,
             "compact_max_tokens": 1_600,
+            # Null derives the threshold per role.
+            "compact_token_threshold": None,
         }
     )
-    params.pop("compact_token_threshold", None)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-test-key")
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
 
@@ -1290,11 +1336,11 @@ def test_worker_reasoning_effort_offers_exactly_the_wire_levels(
     """The console enum is exactly what the local Qwen template distinguishes;
     the shared-scale high/max are refused, not resolved."""
     from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
-    from autotrade.pipelines.worker import DEFAULT_REASONING_EFFORT, REASONING_EFFORTS
+    from autotrade.pipelines.worker import REASONING_EFFORTS
     from autotrade.webui.params_schema import _FIELDS
 
     assert REASONING_EFFORTS == ("low", "medium", "xhigh")
-    assert WEB_CREATE_DEFAULTS["reasoning_effort"] == DEFAULT_REASONING_EFFORT == "xhigh"
+    assert WEB_CREATE_DEFAULTS["reasoning_effort"] == "xhigh"
     field = next(item for item in _FIELDS if item["key"] == "reasoning_effort")
     assert set(field["choices"]) == set(REASONING_EFFORTS)
 

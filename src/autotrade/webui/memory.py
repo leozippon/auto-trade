@@ -28,8 +28,8 @@ from pathlib import Path
 
 from autotrade.common.records import read_json_object
 from autotrade.environment.runtime import chmod_tree
+from autotrade.pipelines.arm_params import read_param
 from autotrade.pipelines.calendar import GEOMETRY_PARAMETERS, ResearchGeometry
-from autotrade.pipelines.config import rolling_default
 from autotrade.pipelines.hitl_state import HITL_DIR_NAME, PARAMS_NAME
 from autotrade.pipelines.ledger import experiment_verdict
 from autotrade.pipelines.skills import (
@@ -291,10 +291,7 @@ def experiment_memory(experiments_root: Path, experiment_id: str) -> dict[str, o
     # by the end of the research years the session sees -- the visible years
     # of an arm that seals some, the whole research period of one created
     # before the sealed gate.
-    default_geometry = rolling_default("geometry")
-    geometry = ResearchGeometry(
-        **{name: params.get(name, getattr(default_geometry, name)) for name in GEOMETRY_PARAMETERS}
-    )
+    geometry = ResearchGeometry(**{name: read_param(params, name) for name in GEOMETRY_PARAMETERS})
     sealed_years = params.get("sealed_years")
     admitted_by = (
         geometry.research_end

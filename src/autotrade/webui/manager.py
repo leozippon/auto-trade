@@ -33,7 +33,7 @@ from autotrade.pipelines.agent_inbox import (
     InboxError,
     enqueue_inbox_message,
 )
-from autotrade.pipelines.arm_params import console_request
+from autotrade.pipelines.arm_params import console_request, read_param, session_models
 from autotrade.pipelines.config import acceptance_for
 from autotrade.pipelines.hitl_state import (
     LIVE_RUN_STATES,
@@ -279,28 +279,19 @@ def _signal_worker_group(pid: int, sig: signal.Signals) -> None:
 
 def uses_local_model(params: Mapping[str, object]) -> bool:
     """Whether an arm counts against MAX_RUNNING_LOCAL_EXPERIMENTS: its main
-    session or its sub-agents run on the local model.
+    session or its sub-agents run on the local model, as the worker resolves
+    the roles (``arm_params.session_models``)."""
 
-    Read the way the registry reads an arm's effective configuration, its
-    params over the create defaults. A role left empty counts as local: the
-    worker runs an empty main role on the local model and an empty sub-agent
-    role on the main model, so this can only over-count the local service's
-    load.
-    """
-
-    effective = {**WEB_CREATE_DEFAULTS, **params}
-    return any(
-        str(effective.get(role) or LOCAL_QWEN_MODEL) == LOCAL_QWEN_MODEL
-        for role in ("model", "subagent_model")
-    )
+    main, subagent, _compact = session_models(params)
+    return LOCAL_QWEN_MODEL in (main, subagent)
 
 
 def gpu_request(params: Mapping[str, object]) -> int:
-    """The GPUs an arm's worker attaches, read like :func:`uses_local_model`:
-    its params over the create defaults, so an unreadable params.json counts
-    as the default request."""
+    """The GPUs an arm's worker attaches: its stated ``gpu_count``, else the
+    declared default (``arm_params.read_param``), so an unreadable params.json
+    counts as the default request."""
 
-    return int({**WEB_CREATE_DEFAULTS, **params}.get("gpu_count") or 0)
+    return int(read_param(params, "gpu_count") or 0)  # type: ignore[call-overload]
 
 
 class ManagerError(RuntimeError):
