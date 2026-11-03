@@ -49,6 +49,7 @@ FIT = '''REFIT_PERIOD = "quarter"
 SEED_BASE = {seed}
 SEEDS_PER_HEAD = {heads}
 MAX_SWAPS = {swaps}
+MECHANISM = {mechanism}
 
 
 def fit(context):
@@ -61,6 +62,7 @@ def generate_orders(context):
 NO_FIT = '''SEED_BASE = {seed}
 SEEDS_PER_HEAD = {heads}
 MAX_SWAPS = {swaps}
+MECHANISM = {mechanism}
 
 
 def generate_orders(context):
@@ -82,10 +84,15 @@ ALPHAS = {
     ("heldout", 2000): 0.0002,
     ("heldout", 3000): -0.0014,
 }
+# A candidate with its mechanism switched off (``MECHANISM = False``, an
+# ablation) earns this daily active return whatever its seed.
+ABLATED = {"valid": 0.0003, "heldout": 0.0}
 
 
-def _source(seed: int, *, swaps: int = 4, heads: int = 2, fit: bool = True) -> str:
-    return (FIT if fit else NO_FIT).format(seed=seed, swaps=swaps, heads=heads)
+def _source(
+    seed: int, *, swaps: int = 4, heads: int = 2, fit: bool = True, mechanism: bool = True
+) -> str:
+    return (FIT if fit else NO_FIT).format(seed=seed, swaps=swaps, heads=heads, mechanism=mechanism)
 
 
 class SeedEvaluator:
@@ -107,12 +114,13 @@ class SeedEvaluator:
         seed = int(re.search(r"SEED_BASE = (\d+)", source)[1])  # type: ignore[index]
         if seed == self.fail_seed and request.mode == "heldout":
             raise TimeoutError("strategy inference exceeded 360s")
+        ablated = "MECHANISM = False" in source
         result = _write_result(
             self.root / f"{request.mode}_{len(self.requests):03d}",
             [day for day in DAYS if request.start <= day <= min(request.end, RELEASE_END)],
-            alpha=ALPHAS[(request.mode, seed)],
+            alpha=ABLATED[request.mode] if ablated else ALPHAS[(request.mode, seed)],
             # The draw is the seed's and the stage's, whatever replayed before.
-            seed=seed + (28 if request.mode == "heldout" else 0),
+            seed=seed + (28 if request.mode == "heldout" else 0) + (50 if ablated else 0),
         )
         sidecar = Path(result.result_ref).parent / STYLE_ARTIFACT_NAME
         analysis = json.loads(sidecar.read_text(encoding="utf-8"))
@@ -131,10 +139,19 @@ class SeedEvaluator:
 
 class SeedDeveloper:
     """Validates each scripted ``(source, span)`` and freezes ``nominee`` with
-    the candidates ``replicates`` names as its seed replicates."""
+    the candidates ``replicates`` names as its seed replicates and the one
+    ``ablation`` names as its ablation."""
 
     def __init__(
-        self, store, evaluator, candidates, *, nominee: int, replicates, deterministic: bool
+        self,
+        store,
+        evaluator,
+        candidates,
+        *,
+        nominee: int,
+        replicates,
+        deterministic: bool,
+        ablation: int | None = None,
     ):
         self.store = store
         self.evaluator = evaluator
@@ -142,6 +159,7 @@ class SeedDeveloper:
         self.nominee = nominee
         self.replicates = tuple(replicates)
         self.deterministic = deterministic
+        self.ablation = ablation
 
     def __call__(self, request: ResearchSessionRequest) -> ResearchSessionResult:
         steps = []
@@ -165,15 +183,26 @@ class SeedDeveloper:
             node_id=steps[self.nominee].step_id,
             seed_replicates=tuple(steps[index].step_id for index in self.replicates),
             deterministic=self.deterministic,
+            ablation=None if self.ablation is None else steps[self.ablation].step_id,
         )
 
 
-def _arm(tmp_path: Path, candidates, *, nominee=0, replicates=(), deterministic=False, **replays):
+def _arm(
+    tmp_path: Path,
+    candidates,
+    *,
+    nominee=0,
+    replicates=(),
+    deterministic=False,
+    ablation=None,
+    ablation_required=False,
+    **replays,
+):
     config = RollingExperimentConfig(
         experiment_id="arm",
         experiments_root=tmp_path / "experiments",
         geometry=GEOMETRY,
-        acceptance=acceptance_for(REQUIRED_RULES),
+        acceptance=acceptance_for({**REQUIRED_RULES, "ablation_required": ablation_required}),
     )
     store = FilesystemArtifactStore(config.experiment_dir / "artifacts" / "strategy")
     evaluator = SeedEvaluator(config.experiment_dir / "artifacts" / "results", **replays)
@@ -189,6 +218,7 @@ def _arm(tmp_path: Path, candidates, *, nominee=0, replicates=(), deterministic=
             nominee=nominee,
             replicates=replicates,
             deterministic=deterministic,
+            ablation=ablation,
         ),
         trading_days=DAYS,
         ledger=ExperimentLedger(config.ledger_path),

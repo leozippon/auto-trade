@@ -64,9 +64,14 @@ ENDED_STATES = frozenset({"completed", "failed", "stopped"})
 # without a default. The sealed gate's level is one for the whole program, so
 # that every sealed reading is judged at the same level
 # (``_round.BASE_EXPECTED_DEFAULTS`` pins it). How many research years are
-# sealed depends on the arm's geometry, so the console has no value for it:
-# every create request states it (``WEB_REQUIRED_PARAMS``).
-_REQUIRED_ACCEPTANCE_DEFAULTS: dict[str, object] = {"alpha": 0.05, "sealed_years": None}
+# sealed depends on the arm's geometry and whether a freeze registers an
+# ablation on the round's research question, so the console has no value for
+# either: every create request states them (``WEB_REQUIRED_PARAMS``).
+_REQUIRED_ACCEPTANCE_DEFAULTS: dict[str, object] = {
+    "alpha": 0.05,
+    "sealed_years": None,
+    "ablation_required": None,
+}
 
 
 def _acceptance_defaults() -> dict[str, object]:

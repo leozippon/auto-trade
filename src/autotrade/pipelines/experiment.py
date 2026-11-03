@@ -109,6 +109,7 @@ from .skills import (
 )
 from .verdict import (
     UNMEASURABLE,
+    ablation_increment,
     forward_mde,
     forward_slice,
     graded_statistics,
@@ -395,15 +396,16 @@ class RollingExperimentPipeline:
             arm_end: dict[str, object] | None = None
             if session.outcome == "freeze":
                 by_step = {str(row["step_id"]): row for row in step_rows}
+                named = (session.node_id, *session.seed_replicates)
                 missing = [
                     step_id
-                    for step_id in (session.node_id, *session.seed_replicates)
+                    for step_id in (*named, *([session.ablation] if session.ablation else []))
                     if step_id not in by_step
                 ]
                 if missing:
                     raise RuntimeError(
-                        f"the nominated node or seed replicate {missing[0]!r} is not a "
-                        "Step of this session"
+                        f"the nominated node, seed replicate or ablation {missing[0]!r} is "
+                        "not a Step of this session"
                     )
                 nominee = by_step[str(session.node_id)]
                 gate = freeze_registration(
@@ -412,6 +414,7 @@ class RollingExperimentPipeline:
                     acceptance=self.config.acceptance,
                     seed_replicates=[by_step[step_id] for step_id in session.seed_replicates],
                     deterministic=session.deterministic,
+                    ablation=by_step[session.ablation] if session.ablation else None,
                 )
                 if gate["passed"]:
                     _publish_progress(progress, "freezing", run_id=run_id)
@@ -422,6 +425,7 @@ class RollingExperimentPipeline:
                         run_id=run_id,
                         null_controls=session.null_controls,
                         seed_replicates=[steps[step_id] for step_id in session.seed_replicates],
+                        ablation=steps[session.ablation] if session.ablation else None,
                     )
                     frozen_id = str(frozen["artifact_id"])
                 else:
@@ -531,40 +535,39 @@ class RollingExperimentPipeline:
         run_id: str,
         null_controls: Mapping[str, Mapping[str, object]],
         seed_replicates: Sequence[StepResult] = (),
+        ablation: StepResult | None = None,
     ) -> dict[str, object]:
         """Freeze the nominee's immutable revision and state what it was frozen on.
 
-        The seed replicates the registration accepted are frozen beside it,
-        each as an artifact of its own, so the forward stage replays bytes no
-        later change can reach; ``seed_replicates`` in the block names them,
-        absent when there are none. The figures are the nominee's own over
-        its visible span, graded as it is and through the residual statistic
-        the sealed gate reads, which no session sees for the sealed years.
+        The seed replicates and the ablation the registration accepted are
+        frozen beside it, each as an artifact of its own, so the forward stage
+        replays bytes no later change can reach; ``seed_replicates`` and
+        ``ablation`` in the block name them, each absent when there is none.
+        The figures are the nominee's own over its visible span, graded as it
+        is and through the residual statistic the sealed gate reads, which no
+        session sees for the sealed years.
         """
 
         def freeze(step: StepResult) -> tuple[str, Path, Path | None]:
             return self._freeze_revision(step.step_id, step.revision_id, run_id)
 
+        def frozen_beside(step: StepResult) -> dict[str, object]:
+            item_id, item_output, item_models = freeze(step)
+            return {
+                "artifact_id": item_id,
+                "output_path": str(item_output),
+                "models_path": (
+                    str(item_models) if item_models is not None and item_models.is_dir() else None
+                ),
+                "source_step_id": step.step_id,
+                "revision_id": step.revision_id,
+                "research_result_ref": step.validation.result_ref,
+            }
+
         artifact_id, output, models = freeze(nominee)
         analysis = _result_analysis(nominee.validation.result_ref)
         statistics = graded_statistics(analysis)
-        replicates = []
-        for step in seed_replicates:
-            replicate_id, replicate_output, replicate_models = freeze(step)
-            replicates.append(
-                {
-                    "artifact_id": replicate_id,
-                    "output_path": str(replicate_output),
-                    "models_path": (
-                        str(replicate_models)
-                        if replicate_models is not None and replicate_models.is_dir()
-                        else None
-                    ),
-                    "source_step_id": step.step_id,
-                    "revision_id": step.revision_id,
-                    "research_result_ref": step.validation.result_ref,
-                }
-            )
+        replicates = [frozen_beside(step) for step in seed_replicates]
         forward = self.config.geometry.forward
         forward_days = sum(1 for day in self.trading_days if forward.start <= day <= forward.end)
         fit = validate_strategy_package(output / "main.py")
@@ -614,6 +617,11 @@ class RollingExperimentPipeline:
                 else {}
             ),
             **({"seed_replicates": replicates} if replicates else {}),
+            **(
+                {"ablation": {**frozen_beside(ablation), "line": gate["ablation"]["line"]}}  # type: ignore[index]
+                if ablation is not None
+                else {}
+            ),
         }
 
     def _freeze_revision(
@@ -664,6 +672,7 @@ class RollingExperimentPipeline:
             self._frozen_artifact(item)
             for item in block.get("seed_replicates") or ()  # type: ignore[union-attr]
         ]
+        ablation = self._frozen_artifact(block["ablation"]) if block.get("ablation") else None
         forward = self.config.geometry.forward
         heldout = self.config.geometry.heldout(self.trading_days)
         context = dict(session_context or {})
@@ -701,6 +710,7 @@ class RollingExperimentPipeline:
                     replicates,
                     progress,
                     run_id=run_id,
+                    ablation=ablation,
                     sealed=self.sealed_span(),
                     forward=forward,
                     heldout=heldout,
@@ -737,6 +747,7 @@ class RollingExperimentPipeline:
         forward: Slot,
         heldout: Slot,
         broker_profile: BrokerProfile,
+        ablation: FrozenArtifact | None = None,
         integrity_failure: Callable[[Mapping[str, object]], None] | None = None,
     ) -> dict[str, object]:
         """The forward stage of a frozen artifact and its seed replicates
@@ -746,8 +757,10 @@ class RollingExperimentPipeline:
 
         First the sealed reading: the artifact replayed over ``sealed``, the
         research span of the sealed years, as one book from the view at its
-        first year, read by ``verdict.sealed_slice``, and each seed replicate
-        replayed the same way and reported beside it. Then, whether or not
+        first year, read by ``verdict.sealed_slice``, each seed replicate
+        replayed the same way and reported beside it, and the ``ablation``,
+        when frozen, replayed the same way and reported as the increment of
+        the line it changes (:func:`judged_ablation`). Then, whether or not
         the sealed gate passed, one continuous replay over the ``forward`` and
         ``heldout`` slots and each replicate's, judged with the sealed block
         (:meth:`_judge`). The strategy's own exception in either replay is a
@@ -881,6 +894,30 @@ class RollingExperimentPipeline:
                 ),
                 slice=sealed_block,
             )
+            if ablation is not None:
+                _publish_progress(progress, "sealed_replay", run_id=run_id, ablation=ablation.source_step_id)
+                control, control_error = replay(ablation, sealed)
+                if control_error is not None:
+                    if not raised_by_strategy(control_error):
+                        raise control_error
+                    reading: dict[str, object] = {
+                        "result_ref": None,
+                        "strategy_error": True,
+                        "error": _error_text(control_error),
+                    }
+                else:
+                    assert control is not None
+                    reading = {
+                        "result_ref": control.result_ref,
+                        **judged_ablation(
+                            sealed_result.result_ref,
+                            control.result_ref,
+                            rules=self.config.acceptance,
+                            start=sealed.start,
+                            end=sealed.end,
+                        ),
+                    }
+                sealed_record["ablation"] = {**_replicate_identity(ablation), **reading}
         base["sealed"] = sealed_record
 
         _publish_progress(progress, "forward_replay", run_id=run_id)
@@ -1156,6 +1193,7 @@ def freeze_registration(
     acceptance: AcceptanceRules,
     seed_replicates: Sequence[Mapping[str, object]] = (),
     deterministic: bool = False,
+    ablation: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Whether one nominated Step registers for a freeze (docs/pipeline-design.md).
 
@@ -1165,9 +1203,11 @@ def freeze_registration(
     control, its series can be measured, the tracking mandate holds over its
     span where the rules set one (``verdict.registered_mandate``), and its
     ``seed_replicates`` are what a replicate must be (:func:`_seed_replicates`)
-    -- none owed by a nomination declared ``deterministic``. ``nominee`` and
-    the replicates are ledger rows (:func:`research_step_record`) of the arm
-    in ``experiment_dir``. The finish tool reads the same function in the
+    -- none owed by a nomination declared ``deterministic`` -- and its
+    ``ablation`` is named exactly where the rules require one and is what an
+    ablation must be (:func:`_ablation`). ``nominee``, the replicates and the
+    ablation are ledger rows (:func:`research_step_record`) of the arm in
+    ``experiment_dir``. The finish tool reads the same function in the
     session (``session_tools.SessionValidations.registration``) and the
     pipeline again before it freezes.
     """
@@ -1185,19 +1225,33 @@ def freeze_registration(
     except ValueError as exc:
         return {"passed": False, "reasons": [UNMEASURABLE], "error": str(exc)}
     mandate = registered_mandate(analysis, rules=acceptance)
+    nominee = completed_rows(experiment_dir, [nominee])[0]
+    replicates = completed_rows(experiment_dir, seed_replicates)
     seeds = _seed_replicates(
-        completed_rows(experiment_dir, [nominee])[0],
-        completed_rows(experiment_dir, seed_replicates),
+        nominee,
+        replicates,
         experiment_dir=experiment_dir,
         deterministic=deterministic,
         series=str(series),
     )
-    reasons = [*mandate["reasons"], *judge("seeds", seeds, {})]
+    control = _ablation(
+        nominee,
+        None if ablation is None else completed_rows(experiment_dir, [ablation])[0],
+        experiment_dir=experiment_dir,
+        required=acceptance.ablation_required,
+        series=str(series),
+        taken={
+            **{str(row["fingerprint"]): node_handle(str(row["step_id"])) for row in replicates},
+            str(nominee["fingerprint"]): "the nominee",
+        },
+    )
+    reasons = [*mandate["reasons"], *judge("seeds", seeds, {}), *judge("ablation", control, {})]
     return {
         "passed": not reasons,
         "reasons": reasons,
         "mandate": mandate["mandate"],
         "seed_replicates": seeds,
+        "ablation": control,
         "thresholds": {"max_drawdown": acceptance.max_drawdown, **acceptance.mandate},
     }
 
@@ -1211,45 +1265,66 @@ _SEED_LINE = re.compile(r"\s*([A-Za-z_]\w*)\s*(?::\s*int\s*)?=\s*([+-]?\d+)\s*(?
 _SEED_NAME = re.compile(r"(?:\w*_)?seed(?:_base)?", re.IGNORECASE)
 
 
-def seed_change(experiment_dir: str | Path, nominee_revision: str, replicate_revision: str) -> str:
-    """The one seed line by which a replicate's revision differs from the nominee's.
+def one_line_change(
+    experiment_dir: str | Path, nominee_revision: str, other_revision: str
+) -> tuple[str, str, str, int]:
+    """The one line by which another revision differs from the nominee's.
 
     Read off the two revisions' manifests (every ``output/`` and ``models/``
     file by SHA-256): exactly one file may differ, a ``.py`` file of the
-    strategy package, and in exactly one line, which on both sides assigns an
-    integer to the same seed name (``_SEED_NAME``), with two
-    different values. That is how a strategy changes its training seed and
-    nothing else -- the packs set it in one knob line -- and it is checked
-    on bytes, so a replicate cannot differ in anything a seed does not
-    explain. Returns ``"<path>: <line>"``; ``ValueError`` says what else
-    differs.
+    strategy package, in exactly one line, with as many lines on both sides.
+    It is checked on bytes, so the other revision cannot differ in anything
+    that line does not explain: how a seed replicate (:func:`seed_change`)
+    and an ablation (:func:`_ablation`) are told from the nominee. Returns
+    the file's path in the package, the nominee's line, the other's and its
+    1-based number; ``ValueError`` says what else differs.
     """
 
     root = Path(experiment_dir) / REVISIONS_DIR
     nominee = _revision_files(root / nominee_revision)
-    replicate = _revision_files(root / replicate_revision)
-    changed = sorted(
-        path for path in {*nominee, *replicate} if nominee.get(path) != replicate.get(path)
-    )
+    other = _revision_files(root / other_revision)
+    changed = sorted(path for path in {*nominee, *other} if nominee.get(path) != other.get(path))
     if not changed:
         raise ValueError("holds the nominee's own bytes")
     path = changed[0]
-    if len(changed) > 1 or path not in nominee or path not in replicate:
+    if len(changed) > 1 or path not in nominee or path not in other:
         raise ValueError(
             f"differs from the nominee in {len(changed)} file(s) "
-            f"({', '.join(changed[:5])}), not in one seed line"
+            f"({', '.join(changed[:5])}), not in exactly one line"
         )
     if not (path.startswith("output/") and path.endswith(".py")):
         raise ValueError(f"differs from the nominee in {path}, which is not strategy code")
     before = (root / nominee_revision / path).read_text(encoding="utf-8").splitlines()
-    after = (root / replicate_revision / path).read_text(encoding="utf-8").splitlines()
-    lines = [index for index, pair in enumerate(zip(before, after)) if pair[0] != pair[1]]
-    if len(before) != len(after) or len(lines) != 1:
+    after = (root / other_revision / path).read_text(encoding="utf-8").splitlines()
+    if len(before) != len(after):
         raise ValueError(
-            f"differs from the nominee in more than one line of {path}, not in one seed line"
+            f"changes the number of lines of {path} ({len(before)} to {len(after)}), "
+            "not exactly one line"
+        )
+    lines = [index for index, pair in enumerate(zip(before, after)) if pair[0] != pair[1]]
+    if len(lines) != 1:
+        raise ValueError(
+            f"differs from the nominee in more than one line of {path} "
+            f"({len(lines)} lines), not exactly one line"
         )
     line = lines[0]
-    old, new = _SEED_LINE.fullmatch(before[line]), _SEED_LINE.fullmatch(after[line])
+    return path.removeprefix("output/"), before[line], after[line], line + 1
+
+
+def seed_change(experiment_dir: str | Path, nominee_revision: str, replicate_revision: str) -> str:
+    """The one seed line by which a replicate's revision differs from the nominee's.
+
+    The one changed line (:func:`one_line_change`) must on both sides assign
+    an integer to the same seed name (``_SEED_NAME``), with two different
+    values. That is how a strategy changes its training seed and nothing
+    else -- the packs set it in one knob line. Returns ``"<path>: <line>"``;
+    ``ValueError`` says what else differs.
+    """
+
+    path, before, after, number = one_line_change(
+        experiment_dir, nominee_revision, replicate_revision
+    )
+    old, new = _SEED_LINE.fullmatch(before), _SEED_LINE.fullmatch(after)
     if (
         old is None
         or new is None
@@ -1258,11 +1333,11 @@ def seed_change(experiment_dir: str | Path, nominee_revision: str, replicate_rev
         or int(old[2]) == int(new[2])
     ):
         raise ValueError(
-            f"changes line {line + 1} of {path} to {after[line].strip()!r}, which does not "
+            f"changes line {number} of {path} to {after.strip()!r}, which does not "
             "give a seed name (SEED, SEED_BASE, or one ending in _SEED or _SEED_BASE) "
             "another integer value"
         )
-    return f"{path.removeprefix('output/')}: {after[line].strip()}"
+    return f"{path}: {after.strip()}"
 
 
 def _revision_files(directory: Path) -> dict[str, str]:
@@ -1335,6 +1410,54 @@ def _seed_replicates(
         **({"deterministic": True} if deterministic else {}),
         "replicates": entries,
     }
+
+
+def _ablation(
+    nominee: Mapping[str, object],
+    row: Mapping[str, object] | None,
+    *,
+    experiment_dir: str | Path,
+    required: bool,
+    series: str,
+    taken: Mapping[str, str],
+) -> dict[str, object]:
+    """What the registration reads of a nominee's ablation.
+
+    An ablation is the nominee with exactly one line changed
+    (:func:`one_line_change`), the line that switches off the mechanism the
+    nominee is built on: a full-span row of the session, a candidate or a
+    control, whose bytes are not the nominee's or a seed replicate's
+    (``taken``, fingerprint to name) and whose graded ``series`` is the
+    nominee's. One is named exactly where the rules require it
+    (``required``). The block records the rule and, for a named row, its
+    ``step_id`` with the changed ``line`` or a ``problem``; the ``ablation``
+    conditions of ``verdict.CONDITIONS`` judge it.
+    """
+
+    block: dict[str, object] = {"required": required}
+    if row is None:
+        return block
+    block["step_id"] = str(row["step_id"])
+    try:
+        if not required:
+            raise ValueError("is named, but this arm's rules ask for no ablation")
+        if row["step_id"] == nominee["step_id"]:
+            raise ValueError("is the nominee itself")
+        if row.get("span") != FULL_SPAN:
+            raise ValueError(f"replayed span {row.get('span')}, not {FULL_SPAN}")
+        fingerprint = str(row["fingerprint"])
+        if fingerprint in taken:
+            raise ValueError(f"holds the same bytes as {taken[fingerprint]}")
+        figures = row.get("graded")
+        if not (isinstance(figures, Mapping) and figures.get("series") == series):
+            raise ValueError(f"has no measured {series} series")
+        path, before, after, number = one_line_change(
+            experiment_dir, str(nominee["revision_id"]), str(row["revision_id"])
+        )
+        block["line"] = f"{path}:{number}: {before.strip()} -> {after.strip()}"
+    except ValueError as exc:
+        block["problem"] = str(exc)
+    return block
 
 
 def _style_analysis(experiment_dir: str | Path, row: Mapping[str, object]) -> dict[str, object]:
@@ -1428,6 +1551,27 @@ def judged_sealed(
             (identity, _result_analysis(reference)) for identity, reference in seed_replicates
         ],
     )
+
+
+def judged_ablation(
+    result_ref: str, ablation_ref: str, *, rules: AcceptanceRules, start: str, end: str
+) -> dict[str, object]:
+    """The increment of the frozen book over its ablation on one slice, read
+    off their two completed replays (``verdict.ablation_increment``):
+    reported, never judged, so a pair it cannot read records why under
+    ``unmeasured`` instead of failing the forward stage."""
+
+    try:
+        increment = ablation_increment(
+            _result_analysis(result_ref),
+            _result_analysis(ablation_ref),
+            start=start,
+            end=end,
+            alpha=rules.alpha,
+        )
+    except ValueError as exc:
+        return {"increment": {"unmeasured": str(exc)}}
+    return {"increment": increment}
 
 
 def judged_replay(
@@ -1533,9 +1677,9 @@ def _keep_frozen_artifact_ids(
     records: Sequence[Mapping[str, object]],
     extra_id: str | None = None,
 ) -> tuple[str, ...]:
-    """The arm's frozen artifact and its seed replicates, those an incubation
-    recorded before 2026-11-03 froze, any artifact an integrity row names,
-    and the freeze now being recorded."""
+    """The arm's frozen artifact, its seed replicates and its ablation, those
+    an incubation recorded before 2026-11-03 froze, any artifact an integrity
+    row names, and the freeze now being recorded."""
 
     keep = {str(extra_id)} if extra_id else set()
     for row in (frozen_record(records), incubation_record(records)):
@@ -1545,7 +1689,8 @@ def _keep_frozen_artifact_ids(
         keep.add(str(block["artifact_id"]))
         keep.update(
             str(item["artifact_id"])
-            for item in block.get("seed_replicates") or ()  # type: ignore[union-attr]
+            for item in (*(block.get("seed_replicates") or ()), block.get("ablation"))  # type: ignore[misc]
+            if item
         )
     for record in records:
         if is_frozen_artifact_mutation(record) and record.get("artifact_id"):
@@ -1717,9 +1862,11 @@ __all__ = [
     "RollingExperimentPipeline",
     "completed_rows",
     "freeze_registration",
+    "judged_ablation",
     "judged_replay",
     "judged_sealed",
     "null_control_seed",
+    "one_line_change",
     "replay_and_analysis",
     "research_step_record",
     "seed_change",

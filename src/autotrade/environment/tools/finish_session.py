@@ -27,13 +27,14 @@ REASON_MIN_CHARS = 40
 REASON_MAX_CHARS = AGENT_JUSTIFICATION_MAX_CHARS
 
 # Whether one node of this session registers for a freeze, with the nodes it
-# would register as its seed replicates and whether the nomination declares
-# its package deterministic: ``passed``, ``reasons`` (named in
-# ``pipelines/verdict.py`` and ``pipelines/experiment.py``) and what the
-# registration read of the replicates. Registration only, never a score. The
+# would register as its seed replicates, whether the nomination declares its
+# package deterministic and the node it would register as its ablation:
+# ``passed``, ``reasons`` (named in ``pipelines/verdict.py`` and
+# ``pipelines/experiment.py``) and what the registration read of the
+# replicates and the ablation. Registration only, never a score. The
 # Environment never imports the Pipeline, so the check is handed over as a
 # callable; the Pipeline checks again when it records the freeze.
-Registration = Callable[[str, tuple[str, ...], bool], Mapping[str, object]]
+Registration = Callable[[str, tuple[str, ...], bool, str | None], Mapping[str, object]]
 
 # The registration's reasons that concern a nominee's seed replicates: a
 # refusal that names one points to the fact that defines a replicate.
@@ -43,6 +44,8 @@ SEED_REASONS = frozenset(
         "freeze_too_few_seed_replicates",
     }
 )
+# Those that concern its ablation, which point to the fact that defines one.
+ABLATION_REASONS = frozenset({"freeze_ablation_invalid", "freeze_ablation_missing"})
 
 
 @dataclass(frozen=True)
@@ -78,6 +81,8 @@ _DESCRIPTION = (
     "package uses no randomness at all, so seed replicates would reproduce it "
     "exactly: registration then asks for none, and the declaration is recorded "
     "in the ledger for the operator's review before the strategy goes live. "
+    "ablation names the nominee's ablation exactly where "
+    "acceptance_rules.freeze_registration.ablation asks for one. "
     'outcome="no_edge" ends the arm without freezing a node and takes no node_id; '
     "it needs at least one complete Validation of this session and a reason "
     f"({REASON_MIN_CHARS}-{REASON_MAX_CHARS} chars), the evidence behind the "
@@ -125,6 +130,17 @@ class FinishSessionTool:
                         "main.py defines fit, unless deterministic is true."
                     ),
                 },
+                "ablation": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500,
+                    "description": (
+                        "freeze only: the nominee's ablation as "
+                        "acceptance_rules.freeze_registration.ablation defines it, "
+                        "a node id or short handle of this session; required "
+                        "exactly where that fact asks for one, refused otherwise."
+                    ),
+                },
                 "deterministic": {
                     "type": "boolean",
                     "description": (
@@ -170,10 +186,11 @@ class FinishSessionTool:
         reason = str(arguments.get("reason") or "").strip()
         node_id = str(arguments.get("node_id") or "")
         replicates = [str(item) for item in arguments.get("seed_replicates") or ()]  # type: ignore[union-attr]
+        ablation = str(arguments.get("ablation") or "")
         if outcome == "freeze":
             deterministic = arguments.get("deterministic") is True
-            return self._freeze(node_id, reason, replicates, deterministic)
-        return self._no_edge(node_id, reason, replicates)
+            return self._freeze(node_id, reason, replicates, deterministic, ablation)
+        return self._no_edge(node_id, reason, replicates, ablation)
 
     # ---- outcomes ----
 
@@ -183,6 +200,7 @@ class FinishSessionTool:
         reason: str,
         replicate_refs: list[str],
         deterministic: bool,
+        ablation_ref: str,
     ) -> ToolResult:
         node_id = (
             self._reference(reference) if reference else self._sole_candidate()
@@ -191,12 +209,16 @@ class FinishSessionTool:
         replicates = tuple(self._reference(item) for item in replicate_refs)
         for replicate in replicates:
             self._complete_node(replicate)
+        ablation = self._reference(ablation_ref) if ablation_ref else None
+        if ablation is not None:
+            self._complete_node(ablation)
         if reason:
             self._require_reason("freeze", reason)
-        registration = dict(self._registration(node_id, replicates, deterministic))
+        registration = dict(self._registration(node_id, replicates, deterministic, ablation))
         if not registration.get("passed"):
             reasons = [str(item) for item in registration.get("reasons") or ()]
             seeds = SEED_REASONS.intersection(reasons)
+            control = ABLATION_REASONS.intersection(reasons)
             raise ToolError(
                 f"finish_session refused: {self._named([node_id])[0]} does not register "
                 f"for a freeze ({', '.join(reasons) or 'no reason recorded'}). "
@@ -206,8 +228,15 @@ class FinishSessionTool:
                     if seeds
                     else ""
                 )
+                + (
+                    f"{self._ablation_text(registration)} An ablation is what "
+                    "acceptance_rules.freeze_registration.ablation defines. "
+                    if control
+                    else ""
+                )
                 + "Nominate a node that registers, validate what registration lacks "
-                "(a full-span validation, a seed replicate), or finish with no_edge.",
+                "(a full-span validation, a seed replicate, an ablation), or finish "
+                "with no_edge.",
                 error_type="freeze_registration_refused",
                 retry_hint=(
                     'finish_session({"outcome": "freeze", "node_id": "<nominee>", '
@@ -228,11 +257,13 @@ class FinishSessionTool:
                 "revision_id": str(node["revision_id"]),
                 **({"seed_replicates": list(replicates)} if replicates else {}),
                 "deterministic": deterministic,
+                **({"ablation": ablation} if ablation is not None else {}),
                 **({"reason": reason} if reason else {}),
                 **self._budget(),
                 "pipeline_outcome": (
                     f"The Pipeline freezes {node_id} as the arm's artifact"
                     + (" with its seed replicates" if replicates else "")
+                    + (" and its ablation" if ablation is not None else "")
                     + "; research ends, no further session runs, and the host reads "
                     "the frozen artifact once on the sealed years."
                 ),
@@ -240,12 +271,13 @@ class FinishSessionTool:
             finish=True,
         )
 
-    def _no_edge(self, node_id: str, reason: str, replicates: list[str]) -> ToolResult:
-        if node_id or replicates:
+    def _no_edge(
+        self, node_id: str, reason: str, replicates: list[str], ablation: str
+    ) -> ToolResult:
+        if node_id or replicates or ablation:
             raise ToolError(
-                'finish_session: outcome="no_edge" nominates nothing, so node_id must '
-                "be absent"
-                + (" and so must seed_replicates" if replicates else ""),
+                'finish_session: outcome="no_edge" nominates nothing, so node_id, '
+                "seed_replicates and ablation must be absent",
                 retry_hint='finish_session({"outcome": "no_edge", "reason": "<evidence>"})',
             )
         self._require_reason("no_edge", reason)
@@ -309,7 +341,27 @@ class FinishSessionTool:
                     for entry in block.get("replicates") or ()  # type: ignore[union-attr]
                 ],
             }
+        ablation = registration.get("ablation")
+        if isinstance(ablation, Mapping):
+            record["ablation"] = {
+                **ablation,
+                **(
+                    {"step_id": self._named([str(ablation["step_id"])])[0]}
+                    if "step_id" in ablation
+                    else {}
+                ),
+            }
         return record
+
+    def _ablation_text(self, registration: Mapping[str, object]) -> str:
+        """What registration read off the nominee's ablation, in one sentence."""
+
+        block = registration.get("ablation")
+        block = block if isinstance(block, Mapping) else {}
+        if "step_id" not in block:
+            return "Ablation: none named, and this arm requires one."
+        named = self._named([str(block["step_id"])])[0]
+        return f"Ablation: {named} {block.get('problem') or 'registers'}."
 
     def _seed_text(self, registration: Mapping[str, object]) -> str:
         """What registration read off the nominee's seed replicates, in one sentence."""
@@ -380,6 +432,7 @@ class FinishSessionTool:
 
 
 __all__ = [
+    "ABLATION_REASONS",
     "FINISH_OUTCOMES",
     "REASON_MAX_CHARS",
     "REASON_MIN_CHARS",

@@ -229,6 +229,50 @@ def test_the_residual_statistic_recovers_a_known_alpha_and_betas():
         verdict.residual_bar(5.0, 0.0)
 
 
+def test_the_ablation_increment_is_the_residual_statistic_of_the_difference():
+    """The increment reads the book's active series minus its ablation's on
+    the three legs, with its t-statistic, residual IR x sqrt(years), and no
+    bar: it is never judged. Two replays of different days have no
+    difference to read."""
+
+    rng = np.random.default_rng(9)
+    dates = [
+        stamp.strftime("%Y%m%d")
+        for stamp in pd.bdate_range("2021-01-04", periods=2 * TRADING_DAYS_PER_YEAR)
+    ]
+    days = len(dates)
+    market, size, value = (rng.normal(0.0, scale / SCALE, days) for scale in (0.20, 0.10, 0.08))
+    # The ablation's own active series, and what the changed line adds to it.
+    control = 0.5 * market + rng.normal(0.0, 0.15 / SCALE, days)
+    difference = 0.04 / TRADING_DAYS_PER_YEAR + 0.1 * size + rng.normal(0.0, 0.05 / SCALE, days)
+
+    def pairs(series):
+        return [[day, float(item)] for day, item in zip(dates, series, strict=True)]
+
+    def sidecar(active):
+        panel = rng.normal(0.0, 0.01, days)
+        return {
+            "strategy_daily": pairs(active + panel),
+            "panel_daily": pairs(panel),
+            "benchmark_daily": pairs(market),
+            "size_factor_daily": pairs(size),
+            "value_factor_daily": pairs(value),
+        }
+
+    book, ablation = sidecar(control + difference), sidecar(control)
+    increment = verdict.ablation_increment(book, ablation, start=dates[0], end=dates[-1], alpha=0.05)
+    expected = verdict.residual_statistics(difference, market, size, value, alpha=0.05)
+    assert increment["series"] == "active" and "bar" not in increment
+    for key in ("days", "years", "residual_excess", "residual_information_ratio", "size_beta"):
+        assert increment[key] == pytest.approx(expected[key], rel=1e-9), key
+    assert increment["t_statistic"] == pytest.approx(
+        expected["residual_information_ratio"] * math.sqrt(2.0), rel=1e-9
+    )
+    shorter = {key: series[1:] for key, series in ablation.items()}
+    with pytest.raises(ValueError, match="different days"):
+        verdict.ablation_increment(book, shorter, start=dates[0], end=dates[-1], alpha=0.05)
+
+
 def test_bootstrap_bound_is_fixed_by_the_artifact_id(monkeypatch):
     rng = np.random.default_rng(12)
     analysis = _analysis(_segment(FORWARD_DAYS, 0.05, rng))

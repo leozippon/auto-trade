@@ -56,6 +56,7 @@ from scripts.experiments._round import (
     Round,
     archived_ids,
 )
+from tests.unit.acceptance_fixture import CREATE_RULES
 from tests.unit.reference_pack_fixture import AFTER_RESEARCH
 from tests.unit.research_release_fixture import (
     BACKFILLED_HISTORY_START,
@@ -67,12 +68,15 @@ MODEL_ROLES = ("model", "subagent_model", "compact_model")
 # A four-digit calendar year, the shape every literal date in a directive takes.
 CALENDAR_YEAR = re.compile(r"(?<!\d)(?:19|20)\d{2}(?:\d{4})?(?!\d)")
 
-def _sealed_round(**fields: object) -> Round:
-    """A synthetic round that states how many research years it seals, as
-    every round must (``sealed_years`` has no console default)."""
 
-    overrides = {"sealed_years": 1, **dict(fields.pop("overrides", {}) or {})}  # type: ignore[call-overload]
+def _sealed_round(**fields: object) -> Round:
+    """A synthetic round that states how many research years it seals and
+    whether a freeze registers an ablation, as every round must (neither
+    rule has a console default)."""
+
+    overrides = {**CREATE_RULES, **dict(fields.pop("overrides", {}) or {})}  # type: ignore[call-overload]
     return Round(overrides=overrides, **fields)  # type: ignore[arg-type]
+
 
 ROUND_FILES = sorted((REPO_ROOT / "scripts" / "experiments").glob("create_round_*.py"))
 
@@ -908,7 +912,7 @@ def test_an_arm_is_tracked_only_when_it_names_a_tracking_error_cap() -> None:
     # The account decides nothing: two arms an order of magnitude apart, both
     # silent about the mandate, are judged by exactly the same rules.
     assert rules("large") == rules("small") == acceptance_for(
-        {"alpha": WEB_CREATE_DEFAULTS["alpha"], "sealed_years": 1}
+        {"alpha": WEB_CREATE_DEFAULTS["alpha"], "sealed_years": 1, "ablation_required": False}
     ).to_record()
     tracked = rules("tracked")
     assert (tracked["tracking_error_cap"], tracked["beta_min"], tracked["beta_max"]) == (
@@ -1181,18 +1185,25 @@ def test_the_200k_pack_carries_the_owner_note_and_keeps_no_earlier_quota() -> No
     assert not [word for word in ("臂", "席位", "零技能") if word in readme]
 
 
-def test_a_round_that_states_no_sealed_years_is_refused(
+def test_a_round_that_states_no_sealed_years_or_ablation_rule_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The console has no value for ``sealed_years`` and the launcher sets
-    none: a round that does not state it is refused before anything is sent,
-    and one that states it passes the same pre-flight."""
+    """The console has no value for ``sealed_years`` or ``ablation_required``
+    and the launcher sets neither: a round that does not state both is
+    refused before anything is sent, and one that states them passes the
+    same pre-flight."""
 
     rnd = Round(pit_views_seed="data/seed_probe")
     _synthetic_repo(tmp_path, monkeypatch, rnd)
-    assert "sealed_years" not in rnd.request_params(PROBE_ID) or rnd.request_params(PROBE_ID)["sealed_years"] is None
+    for key in CREATE_RULES:
+        assert rnd.request_params(PROBE_ID).get(key) is None
     params, reason = rnd.validated(PROBE_ID)
-    assert params is None and "missing required experiment parameters: sealed_years" in reason
+    assert params is None
+    assert "missing required experiment parameters: ablation_required, sealed_years" in reason
+    half = Round(pit_views_seed="data/seed_probe", overrides={"sealed_years": 1})
+    params, reason = half.validated(PROBE_ID)
+    assert params is None and reason.endswith("missing required experiment parameters: ablation_required")
     stated = _sealed_round(pit_views_seed="data/seed_probe")
     params, reason = stated.validated(PROBE_ID)
-    assert reason == "" and params is not None and params["sealed_years"] == 1
+    assert reason == "" and params is not None
+    assert (params["sealed_years"], params["ablation_required"]) == (1, False)

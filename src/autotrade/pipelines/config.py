@@ -249,6 +249,12 @@ class AcceptanceRules:
     sealed_years: int = _required(
         "Sealed gate: trailing research years sealed from the session and read once after the freeze."
     )
+    # Whether a freeze registers an ablation: the nominee with one line
+    # changed, whose sealed reading beside the nominee's is reported, never
+    # judged (``verdict.ablation_increment``).
+    ablation_required: bool = _required(
+        "Freeze registration: the nominee names an ablation, its own bytes with one line changed."
+    )
 
     def __post_init__(self) -> None:
         mandate = (self.tracking_error_cap, self.beta_min, self.beta_max)
@@ -283,6 +289,8 @@ class AcceptanceRules:
         object.__setattr__(self, "sealed_years", _whole_int(self.sealed_years, "sealed_years"))
         if self.sealed_years < 1:
             raise ValueError("sealed_years must be an integer >= 1")
+        if not isinstance(self.ablation_required, bool):
+            raise ValueError("ablation_required must be true or false")
         if any(value is None for value in mandate):
             if any(value is not None for value in mandate):
                 raise ValueError(
@@ -398,8 +406,8 @@ class AcceptanceRules:
                 ),
                 "read": (
                     "once, by the host, after the freeze has ended the session: the "
-                    "frozen node and its seed replicates replayed over the sealed years "
-                    "as one continuous book each. No session sees the "
+                    "frozen node, its seed replicates and its ablation replayed over the "
+                    "sealed years as one continuous book each. No session sees the "
                     "sealed years, their data or the reading, and there is no second "
                     "reading"
                 ),
@@ -430,6 +438,28 @@ class AcceptanceRules:
                     "nominee without fit needs none, and a nomination declared "
                     "deterministic in finish_session (its package uses no "
                     "randomness) owes none"
+                ),
+                "ablation": (
+                    {
+                        "required": True,
+                        "definition": (
+                            "the nominee names one ablation in finish_session's "
+                            "ablation: another complete full-span Validation of this "
+                            "session whose strategy is the nominee's bytes with exactly "
+                            "one line changed, the line that switches off the mechanism "
+                            "the nominee is built on (a constant flip such as "
+                            "MECHANISM = False), and whose bytes differ from the "
+                            "nominee's and its seed replicates'"
+                        ),
+                        "reading": (
+                            "frozen and replayed on the sealed years beside the nominee; "
+                            "the increment, the sealed_gate statistic of the nominee's "
+                            "daily active return minus the ablation's, is recorded with "
+                            "its t-statistic (increment x sqrt(years)) and never gates"
+                        ),
+                    }
+                    if self.ablation_required
+                    else "none for this arm: finish_session takes no ablation"
                 ),
                 "tracking_mandate": mandate,
                 "freezes_per_arm": "1: a freeze that registers ends the session",
@@ -1195,11 +1225,12 @@ class ResearchSessionResult:
     # never land in an older field's positional slot.
     _: KW_ONLY
     # ``freeze``: the nominated Step, the Steps it registered as its seed
-    # replicates, and whether it declared its package deterministic
-    # (``experiment.freeze_registration``).
+    # replicates, whether it declared its package deterministic and the Step
+    # it registered as its ablation (``experiment.freeze_registration``).
     node_id: str | None = None
     seed_replicates: tuple[str, ...] = ()
     deterministic: bool = False
+    ablation: str | None = None
     # The Agent's own account of its outcome.
     reason: str = ""
     finish_reason: str = ""

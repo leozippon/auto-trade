@@ -330,7 +330,10 @@ def test_a_freeze_registers_and_records_the_frozen_block(tmp_path: Path):
     gate = record["freeze_gate"]
     assert gate["passed"] is True and gate["reasons"] == []
     # Registration reads no score: no IR, no trial count, no bar.
-    assert set(gate) == {"passed", "reasons", "mandate", "seed_replicates", "thresholds"}
+    assert set(gate) == {"passed", "reasons", "mandate", "seed_replicates", "ablation", "thresholds"}
+    # This arm asks for no ablation and its nominee names none.
+    assert gate["ablation"] == {"required": False}
+    assert "ablation" not in record["frozen"]
     assert "trials_to_date" not in record and "terminal_offline_trials" not in record
     assert [row["control"] for row in record["steps"]] == [False, False]
     # It is judged under the arm's own rules -- here a tracking mandate,

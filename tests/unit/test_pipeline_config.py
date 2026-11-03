@@ -166,6 +166,8 @@ class AcceptanceRulesTest(unittest.TestCase):
             {"alpha": 1.0},
             {"sealed_years": 0},
             {"sealed_years": 2.5},
+            {"ablation_required": 1},
+            {"ablation_required": "true"},
             {"forward_confidence": 0.0},
             {"forward_confidence": 1.0},
             {"min_mean_gross": 0.0},
@@ -198,8 +200,6 @@ class AcceptanceRulesTest(unittest.TestCase):
             },
         )
         self.assertEqual(AcceptanceRules.from_record(rules.to_record()), rules)
-        # A params.json or run manifest written before a required rule existed
-        # is refused, never read under a value it did not state.
         # A params.json or run manifest written before the required rules
         # existed -- every arm created under the deflated-Sharpe gate -- is
         # refused, never read under a value it did not state.
@@ -296,8 +296,24 @@ class AcceptanceRulesTest(unittest.TestCase):
         registration = facts["freeze_registration"]
         self.assertEqual(
             sorted(registration),
-            ["control", "finite_metrics", "freezes_per_arm", "max_drawdown", "seed_replicates", "span", "tracking_mandate"],
+            [
+                "ablation",
+                "control",
+                "finite_metrics",
+                "freezes_per_arm",
+                "max_drawdown",
+                "seed_replicates",
+                "span",
+                "tracking_mandate",
+            ],
         )
+        # An arm that asks for no ablation says so; one that asks defines it.
+        self.assertIn("takes no ablation", registration["ablation"])
+        asked = AcceptanceRules(**{**REQUIRED_RULES, "ablation_required": True}).agent_facts()
+        ablation = asked["freeze_registration"]["ablation"]
+        self.assertTrue(ablation["required"])
+        self.assertIn("exactly one line changed", ablation["definition"])
+        self.assertIn("never gates", ablation["reading"])
         self.assertIn("span=full", registration["span"])
         self.assertIn("finite", registration["finite_metrics"])
         self.assertIn("0.2", registration["max_drawdown"])
@@ -455,12 +471,13 @@ class DefaultsDriftTest(unittest.TestCase):
         # A retired switch is no parameter a request can name.
         self.assertFalse(RETIRED_SWITCHES & set(WEB_CREATE_DEFAULTS))
         # Drawdowns and the mandate switch stay empty so the form does not pin
-        # a mandate onto every arm, and the sealed years have no console value:
-        # every request states them (WEB_REQUIRED_PARAMS). Every other rule
-        # shows what an empty request would stamp.
-        blank = {"max_drawdown", "active_max_drawdown", "tracking_error_cap", "beta_min", "beta_max", "sealed_years"}
+        # a mandate onto every arm, and the sealed years and the ablation have
+        # no console value: every request states them (WEB_REQUIRED_PARAMS).
+        # Every other rule shows what an empty request would stamp.
+        stated = {"sealed_years", "ablation_required"}
+        blank = {"max_drawdown", "active_max_drawdown", "tracking_error_cap", "beta_min", "beta_max", *stated}
         self.assertEqual(set(rules), set(ACCEPTANCE_KEYS))
-        self.assertIn("sealed_years", WEB_REQUIRED_PARAMS)
+        self.assertLessEqual(stated, WEB_REQUIRED_PARAMS)
         for key, value in rules.items():
             if key in blank:
                 self.assertIsNone(WEB_CREATE_DEFAULTS[key], key)

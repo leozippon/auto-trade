@@ -85,6 +85,8 @@ const REASON_LABELS = {
   freeze_unmeasurable: "研究期统计可算",
   freeze_too_few_seed_replicates: "训练模型的提名登记了种子副本",
   freeze_seed_replicate_invalid: "种子副本只改种子一行",
+  freeze_ablation_missing: "本实验要求的消融对照已登记",
+  freeze_ablation_invalid: "消融对照只改提名一行",
   freeze_seed_mean_information_ratio_below_threshold: "研究期种子均值主动 IR",
   sealed_strategy_error: "封存年份策略无报错",
   sealed_residual_ir_below_bar: "封存年份残差 IR",
@@ -3274,7 +3276,16 @@ function sealedReadingBlock(forward) {
     ...(s.seed_replicates || []).map((item) =>
       kvRow(`种子副本 ${item.source_step_id || "—"}`, `残差 IR ${fmtSharpe(item.residual_information_ratio)}`),
     ),
+    s.ablation ? kvRow(`消融增量 ${s.ablation.source_step_id || "—"}`, ablationIncrementText(s.ablation)) : null,
   );
+}
+
+/* The ablation's sealed reading: the increment of the one line it changes,
+   reported beside the gate and never judged. */
+function ablationIncrementText(a) {
+  if (a.strategy_error) return `消融策略报错：${a.error || "—"}`;
+  if (a.unmeasured) return `未测得：${a.unmeasured}`;
+  return `残差 IR ${fmtSharpe(a.residual_information_ratio)} · t = ${fmtSharpe(a.t_statistic)}（只报告，不参与裁决）`;
 }
 
 function forwardStagePanel(detail) {
@@ -3980,6 +3991,7 @@ function freezeGateChecklist(gate) {
     .filter((entry) => entry.problem)
     .map((entry) => `${String(entry.step_id).split("__").pop()}：${entry.problem}`)
     .join("\n");
+  const ablation = gate.ablation || {};
   const preconditions = [
     "freeze_needs_full_span_validation",
     "freeze_nominee_is_control",
@@ -3987,13 +3999,20 @@ function freezeGateChecklist(gate) {
     "freeze_deflated_sharpe_unavailable",
     "freeze_too_few_seed_replicates",
     "freeze_seed_replicate_invalid",
+    "freeze_ablation_missing",
+    "freeze_ablation_invalid",
   ].filter((token) => failed.has(token));
   const seedMean = "freeze_seed_mean_information_ratio_below_threshold";
   return checklist([
     ...preconditions.map((token) => ({
       ok: false,
       label: reasonLabel(token),
-      title: token === "freeze_seed_replicate_invalid" ? problems || null : null,
+      title:
+        token === "freeze_seed_replicate_invalid"
+          ? problems || null
+          : token === "freeze_ablation_invalid"
+            ? ablation.problem || null
+            : null,
     })),
     ...(t.min_full_span_validations === undefined
       ? []

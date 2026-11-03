@@ -702,13 +702,9 @@ def resolve_worker_options(
         strategy_cpus=_positive_float(knob("strategy_cpus"), "strategy_cpus"),
         strategy_memory=_memory_limit(knob("strategy_memory"), "strategy_memory"),
         # A tracking mandate exactly where the request named a cap; every
-        # limit absent or null takes its default (``config.acceptance_for``).
-        acceptance=acceptance_for(
-            {
-                name: None if params.get(name) is None else _finite_float(params[name], name)
-                for name in ACCEPTANCE_KEYS
-            }
-        ),
+        # limit absent or null takes its default, and the rules check each
+        # value's type and range (``config.acceptance_for``).
+        acceptance=acceptance_for(params),
         schedule=schedule,
         broker_profile=BrokerProfile(
             initial_cash=initial_cash,

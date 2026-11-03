@@ -40,7 +40,7 @@ from autotrade.pipelines.worker import (
     load_worker_options,
 )
 from autotrade.webui.manager import ExperimentManager
-from tests.unit.acceptance_fixture import REQUIRED_RULES
+from tests.unit.acceptance_fixture import CREATE_RULES, REQUIRED_RULES
 from tests.unit.gpu_probe import stubbed_gpu_probe
 
 
@@ -1044,7 +1044,7 @@ def test_webui_persistent_create_uses_available_worker_entrypoint(
             {
                 "experiment_id": "worker_smoke",
                 "initial_control_mode": "manual",
-                "sealed_years": REQUIRED_RULES["sealed_years"],
+                **CREATE_RULES,
             }
         )
     assert created["spawned"] is True
@@ -1185,8 +1185,8 @@ def _console_params(repo: Path, experiments_root: Path, **overrides) -> dict:
             "experiments_root": str(experiments_root),
             "work_root": str(repo / ".runtime/sandboxes"),
             "_creation_surface": "webui",
-            # The rule a create request must state (``WEB_REQUIRED_PARAMS``).
-            "sealed_years": REQUIRED_RULES["sealed_years"],
+            # The rules a create request must state (``WEB_REQUIRED_PARAMS``).
+            **CREATE_RULES,
         }
     )
     params.update(overrides)

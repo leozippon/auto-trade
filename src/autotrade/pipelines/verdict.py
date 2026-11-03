@@ -225,6 +225,42 @@ def residual_reading(
     return {"series": series, **residual_statistics(*rows.T, alpha=alpha)}
 
 
+def ablation_increment(
+    nominee: Mapping[str, object],
+    ablation: Mapping[str, object],
+    *,
+    start: str,
+    end: str,
+    alpha: float,
+) -> dict[str, object]:
+    """What the line an ablation changes adds, over a slice of two replays.
+
+    :func:`residual_statistics` of the frozen book's graded series minus its
+    ablation's, day by day, on the three legs of the book's sidecar, and its
+    t-statistic, the residual information ratio × √years. Reported, never
+    judged: no condition reads it, so it carries no bar. ``ValueError`` when
+    the two grade different series or replayed different days, or as
+    :func:`residual_statistics` raises.
+    """
+
+    start, end = _span(start, end)
+    (book, series), (control, other) = _graded(nominee), _graded(ablation)
+    if series != other:
+        raise ValueError(f"the book grades its {series} series and its ablation its {other} series")
+    mine = dict(_strategy_returns(book, start, end))
+    theirs = dict(_strategy_returns(control, start, end))
+    if mine.keys() != theirs.keys():
+        raise ValueError("the book and its ablation replayed different days")
+    difference = {**book, "strategy_daily": [[day, value - theirs[day]] for day, value in mine.items()]}
+    reading = residual_statistics(*_regression_rows(difference, start, end).T, alpha=alpha)
+    del reading["bar"]
+    return {
+        "series": series,
+        **reading,
+        "t_statistic": reading["residual_information_ratio"] * math.sqrt(reading["years"]),
+    }
+
+
 def _loadings(analysis: Mapping[str, object], start: str, end: str) -> dict[str, float] | None:
     """The factor regression of a span's ``strategy_daily`` on the market,
     size and value legs (``style.factor_ols``): its three loadings and its
@@ -650,6 +686,10 @@ CONDITIONS: tuple[Condition, ...] = (
     # none, unless the nomination declared its package deterministic.
     Condition("seeds", "freeze_seed_replicate_invalid", lambda m, t: not _refused_replicate(m)),
     Condition("seeds", "freeze_too_few_seed_replicates", lambda m, t: bool(m["replicates"]) or not m["trains_a_model"] or m.get("deterministic", False)),
+    # The nominee's ablation (``experiment._ablation``): named exactly where
+    # the rules require one, and then the nominee with one line changed.
+    Condition("ablation", "freeze_ablation_invalid", lambda m, t: "problem" not in m),
+    Condition("ablation", "freeze_ablation_missing", lambda m, t: "step_id" in m or not m["required"]),
     # The sealed gate (:func:`sealed_slice`): the frozen book's residual IR
     # over the sealed years against its bar, unread when the book raised.
     Condition("sealed", "sealed_strategy_error", lambda m, t: m.get("strategy_error") is not True, "S"),

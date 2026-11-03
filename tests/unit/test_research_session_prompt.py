@@ -417,7 +417,7 @@ def test_the_sealed_gate_is_stated_with_this_runs_years_and_numbers() -> None:
     from autotrade.pipelines.research_session import research_geometry_record
 
     geometry = ResearchGeometry("20150801", "20250731", "20260731", "20261031")
-    rules = AcceptanceRules(alpha=0.05, sealed_years=5)
+    rules = AcceptanceRules(alpha=0.05, sealed_years=5, ablation_required=False)
     visible, sealed = geometry.split_sealed(rules.sealed_years)
     facts = {
         "research_geometry": research_geometry_record(
@@ -445,5 +445,14 @@ def test_the_sealed_gate_is_stated_with_this_runs_years_and_numbers() -> None:
         assert clause in section, clause
     gate = facts["artifact_contract"]["acceptance_rules"]["sealed_gate"]
     assert (gate["alpha"], gate["sealed_years"], gate["bar_over_sealed_years"]) == (0.05, 5, 0.736)
+    # An ablation is stated exactly where the arm asks for one.
+    assert "消融" not in section
+    asked = AcceptanceRules(alpha=0.05, sealed_years=5, ablation_required=True)
+    prompt = prompts.build_system_prompt(
+        experiment_facts={**facts, "artifact_contract": {"acceptance_rules": asked.agent_facts()}}
+    )
+    section = prompt[prompt.index("## 封存检验") :]
+    assert "定版时还须登记一个消融对照（`finish_session` 的 `ablation`）" in section
+    assert "只记录，不参与裁决" in section
     # Facts without a sealed gate add no section.
     assert "## 封存检验" not in _full_prompt()

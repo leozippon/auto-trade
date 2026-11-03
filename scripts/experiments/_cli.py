@@ -298,6 +298,14 @@ def add_research_directive_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _boolean(text: str) -> bool:
+    """``true`` or ``false``, nothing else."""
+
+    if text not in ("true", "false"):
+        raise argparse.ArgumentTypeError(f"expected true or false, got {text!r}")
+    return text == "true"
+
+
 def add_acceptance_arguments(parser: argparse.ArgumentParser) -> None:
     """One flag per acceptance rule, read off the rules' own declaration.
 
@@ -310,7 +318,7 @@ def add_acceptance_arguments(parser: argparse.ArgumentParser) -> None:
     """
     for rule in fields(AcceptanceRules):
         # The module postpones annotations, so a rule's type is its name.
-        kind = int if rule.type == "int" else float
+        kind = {"int": int, "bool": _boolean}.get(str(rule.type), float)
         required = rule.name in REQUIRED_ACCEPTANCE_KEYS
         default = WEB_CREATE_DEFAULTS[rule.name] if required else None
         parser.add_argument(

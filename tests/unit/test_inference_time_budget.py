@@ -64,6 +64,7 @@ def _passing_gate(
     node_id: str,
     seed_replicates: tuple[str, ...] = (),
     deterministic: bool = False,
+    ablation: str | None = None,
 ) -> dict[str, object]:
     """A registration every node passes: these tests are about the Runner."""
     return {"passed": True, "reasons": []}
@@ -916,6 +917,7 @@ def test_hard_finalization_lists_every_candidate_without_a_gate_reading(
         node_id: str,
         seed_replicates: tuple[str, ...] = (),
         deterministic: bool = False,
+        ablation: str | None = None,
     ) -> dict[str, object]:
         if node_id == strong_id:
             return {"passed": True, "reasons": []}
