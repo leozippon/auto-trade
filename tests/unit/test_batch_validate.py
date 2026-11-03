@@ -51,7 +51,7 @@ from autotrade.environment.runtime import (
     utc_now_iso,
     write_json_atomic,
 )
-from autotrade.environment.sandbox import SandboxConfig, SandboxLimits
+from autotrade.environment.sandbox import SandboxConfig, SandboxSpec
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.environment.tools.base import ToolError, ToolRegistry
@@ -235,8 +235,8 @@ class _Evaluator:
             self.calls += 1
             self.requests.append(request)
             self._arrived += 1
-            self.fit_timeouts.append(self.sandbox.limits.fit_timeout_seconds)
-            self.inference_timeouts.append(self.sandbox.limits.timeout_seconds)
+            self.fit_timeouts.append(self.sandbox.fit_timeout_seconds)
+            self.inference_timeouts.append(self.sandbox.timeout_seconds)
             call_index = self.calls
             arrival = self._arrived
             self.active += 1
@@ -865,7 +865,7 @@ class BatchValidateRunTest(unittest.TestCase):
         them stays on the calling thread. The width is the arm's own
         ``batch_validate_max_concurrency``, and both strategy deadlines scale
         with exactly the width it produced."""
-        fit_base = SandboxConfig().limits.fit_timeout_seconds
+        fit_base = SandboxConfig().fit_timeout_seconds
         for width in (DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY, 5):
             with self.subTest(width=width), TemporaryDirectory() as tmp:
                 self._replay_full_width(Path(tmp), width, fit_base)
@@ -920,9 +920,9 @@ class BatchValidateRunTest(unittest.TestCase):
         lifetime.
         """
 
-        limits = SandboxConfig().limits
-        fit_base = limits.fit_timeout_seconds
-        inference_base = limits.timeout_seconds
+        config = SandboxConfig()
+        fit_base = config.fit_timeout_seconds
+        inference_base = config.timeout_seconds
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
             # A one-candidate round: nothing else is running, so nothing is scaled.
@@ -947,10 +947,10 @@ class BatchValidateRunTest(unittest.TestCase):
                 # Restored the moment the pool is done, so the next serial
                 # replay is not evaluated against a widened clock.
                 self.assertEqual(
-                    session.evaluator.sandbox.limits.fit_timeout_seconds, fit_base
+                    session.evaluator.sandbox.fit_timeout_seconds, fit_base
                 )
                 self.assertEqual(
-                    session.evaluator.sandbox.limits.timeout_seconds, inference_base
+                    session.evaluator.sandbox.timeout_seconds, inference_base
                 )
             # Everything else about the boundary is untouched.
             self.assertEqual(session.evaluator.sandbox, SandboxConfig())
@@ -1178,7 +1178,7 @@ class BatchValidateRunTest(unittest.TestCase):
         only the siblings that ran on its own card."""
 
         note = "of this batch replayed on the same GPU while this candidate ran"
-        cards = SandboxConfig(limits=SandboxLimits(gpu_count=2, gpu_devices=(1, 4)))
+        cards = SandboxConfig(spec=SandboxSpec(gpu=(1, 4), gpu_count=2))
 
         def card_of(session: _Session) -> dict[str, tuple[int, ...] | None]:
             return {
@@ -1229,10 +1229,10 @@ class BatchValidateRunTest(unittest.TestCase):
         self.assertEqual(leg_cards((1, 4), 2), [1, 4])
         self.assertEqual(leg_cards((1, 4), 3), [1, 4, 1])
         self.assertEqual(leg_cards((), 3), [])
-        config = SandboxConfig(limits=SandboxLimits(gpu_count=2, gpu_devices=(1, 4)))
+        config = SandboxConfig(spec=SandboxSpec(gpu=(1, 4), gpu_count=2))
         self.assertIs(config.on_devices(None), config)
-        leg = config.on_devices((4,)).limits
-        self.assertEqual((leg.gpu_count, leg.gpu_devices), (1, (4,)))
+        leg = config.on_devices((4,)).spec
+        self.assertEqual((leg.gpu_count, leg.gpu), (1, (4,)))
 
     def test_a_timeout_gives_its_replay_years_back(self) -> None:
         with TemporaryDirectory() as tmp:

@@ -13,8 +13,16 @@ import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from enum import StrEnum
 from pathlib import Path
 
+from autotrade.common.records import (
+    dataclass_from_record,
+    dataclass_record,
+    write_json_atomic,
+)
+
+from .commands import CommandResult
 from .gpu import GpuUnavailableError, device_request, host_gpu_name
 from .pretrained import pretrained_pin, require_pretrained_store
 from .runtime import (
@@ -25,7 +33,6 @@ from .runtime import (
     chmod_tree,
     new_id,
     utc_now_iso,
-    write_json_atomic,
 )
 
 DEFAULT_IMAGE = "autotrade-sandbox:latest"
@@ -161,12 +168,36 @@ def container_thread_env(cpus: float) -> dict[str, str]:
     }
 
 
-@dataclass(frozen=True)
-class SandboxLimits:
-    """Per-container resources and per-inference protocol limits."""
+class GpuMode(StrEnum):
+    """A GPU request that names no device yet: whoever starts the container
+    pins them first (an arm's worker the cards the console claimed,
+    ``pipelines.worker.load_worker_options``; anything else
+    ``pipelines.hitl_state.select_gpus``), and a container still on it
+    refuses to start."""
 
-    # The same CPU and memory boundary the Agent session container runs under
-    # (``SandboxSpec``). One size for both means a session that profiles its
+    AUTO = "auto"
+
+
+# Scratch inside the read-only strategy container: ``/tmp``. It was sized for
+# the single-threaded NumPy era (64 MB), which rules out multi-process training
+# inside ``fit`` altogether -- any spill or intermediate parquet fails on a
+# 64 MB ``/tmp``. The session container keeps its own, smaller default
+# (``SandboxSpec.tmpfs_size``) unless the arm's ``agent_sandbox_tmpfs`` names
+# another.
+STRATEGY_TMPFS_SIZE = "2g"
+
+
+@dataclass(frozen=True)
+class SandboxSpec:
+    """One sandbox container's boundary: the Agent session's persistent
+    container, or a strategy container (``SandboxConfig.spec``)."""
+
+    image: str = DEFAULT_IMAGE
+    build_generation_id: str = ""
+    user: str = "61000:61000"
+    network: str = "none"
+    # The same CPU and memory boundary for the session container and the
+    # strategy container. One size for both means a session that profiles its
     # ``fit`` under ``shell`` measures against the very ceiling the formal
     # replay enforces, instead of extrapolating from its own container to a
     # larger one; the pair is published as the run facts ``budgets.strategy_cpus``
@@ -196,90 +227,74 @@ class SandboxLimits:
     # CPU-derived thread cap plus PyArrow's own pool needs well over the 64
     # the single-threaded NumPy era allowed, and a vLLM engine run tensor
     # parallel across two cards peaked at 280 (its engine and two GPU worker
-    # processes), past the 256 this was before. The session container runs
-    # the same engines under ``vllm serve`` and has the same guard.
+    # processes), past the 256 this was before. Both containers run the same
+    # engines and have the same guard.
     pids: int = 1024
-    # Wall clock for one ``generate_orders(context)`` call (published as
-    # ``strategy_inference_timeout_seconds``) and for one ``fit(context)``
-    # call; the pipeline knob ``strategy_fit_timeout_seconds`` sets the latter.
-    # Both start only once the worker holds the decision inputs, so neither
-    # bills container scheduling or host-side request materialization to the
-    # strategy. Both are runaway guards rather than budgets: the inference
-    # cap is sized like the fit cap, at roughly 6x the heaviest measured call
-    # on record (a rebalance day of a cross-sectional LightGBM arm, median
-    # 60.7 s over 49 such days), so a genuine runaway still dies while host
-    # contention does not decide a verdict.
-    timeout_seconds: float = 360.0
-    fit_timeout_seconds: float = 3600.0
-    # Environment-side bound on bringing one strategy container up to its
-    # request loop: container scheduling, interpreter start and the strategy
-    # module import. Generous on purpose — a loaded host must not turn into a
-    # strategy timeout — but finite, so a wedged Docker daemon or container
-    # still fails explicitly instead of blocking the replay forever.
-    startup_timeout_seconds: float = 900.0
-    max_output_chars: int = 1_000_000
-    # Scratch inside the read-only container: ``/tmp`` and ``/dev/shm``. Both
-    # were sized for the single-threaded NumPy era (64 MB, and Docker's 64 MB
-    # default for shared memory), which rules out multi-process training inside
-    # ``fit`` altogether -- a torch ``DataLoader(num_workers>0)`` and joblib's
-    # memmapped parallel backend both fail on a 64 MB ``/dev/shm``, and any
-    # spill or intermediate parquet fails on a 64 MB ``/tmp``. They are charged
-    # to the container's own ``memory`` cap, and only what it actually writes.
-    tmpfs_size: str = "2g"
+    # ``/tmp``: the session's own default; a strategy container gets
+    # ``STRATEGY_TMPFS_SIZE``. Both are charged to the container's own
+    # ``memory`` cap, and only what it actually writes.
+    tmpfs_size: str = "1g"
+    # ``/dev/shm``, sized for multi-process training: a torch
+    # ``DataLoader(num_workers>0)`` and joblib's memmapped parallel backend
+    # both fail on Docker's 64 MB default, and so does a model server the
+    # session runs across its cards (``vllm serve`` with tensor parallel).
     shm_size: str = "2g"
-    # The experiment's own GPU request, carried over from its ``SandboxSpec``
-    # (``pipelines.worker._strategy_sandbox_from_spec``). ``fit(context)`` runs
-    # in THIS container rather than in the Agent session, so an experiment that
-    # asked for GPUs must reach it; 0 attaches no device and keeps the formal
-    # replay CPU-only, which is what ``gpu_count=0`` experiments get.
-    gpu_count: int = 0
-    gpu_name_filter: str | None = None
-    # The devices every container of this evaluation attaches: the arm's
-    # claimed cards, or the ones another caller took for this run
-    # (``pipelines.hitl_state.select_gpus``), or one of them for a leg of a
-    # concurrent batch (``SandboxConfig.on_devices``). The Environment chooses
-    # none, so a request for devices that names none here refuses to start.
-    gpu_devices: tuple[int, ...] = ()
+    # The GPU request: None runs CPU-only, ``GpuMode.AUTO`` asks for
+    # ``gpu_count`` devices and names none yet, a tuple pins exactly
+    # ``gpu_count`` devices. A strategy container carries its experiment's
+    # request, because ``fit(context)`` runs there rather than in the session.
+    gpu: GpuMode | tuple[int, ...] | None = GpuMode.AUTO
+    gpu_count: int = 1
+    gpu_name_filter: str | None = field(default_factory=host_gpu_name)
+    docker_executable: str = "docker"
+    # The pretrained store the arm pinned (``environment.pretrained``): set,
+    # the container mounts it read-only after comparing its manifest; empty,
+    # it mounts nothing.
+    pretrained_manifest_sha256: str = ""
 
     def __post_init__(self) -> None:
+        _validate_explicit_image_tag(self.image)
+        pretrained_pin(self.pretrained_manifest_sha256)
+        if self.build_generation_id:
+            try:
+                generation = uuid.UUID(self.build_generation_id)
+            except ValueError as exc:
+                raise ValueError("sandbox build_generation_id must be UUID4") from exc
+            if generation.version != 4 or str(generation) != self.build_generation_id:
+                raise ValueError("sandbox build_generation_id must be canonical UUID4")
+        if not self.user.strip() or not self.docker_executable.strip():
+            raise ValueError("sandbox user and Docker executable must be non-empty")
+        if self.network != "none":
+            raise ValueError("ordinary Agent sandboxes require network='none'")
         if isinstance(self.cpus, bool) or not math.isfinite(self.cpus) or self.cpus <= 0:
             raise ValueError("sandbox cpus must be a positive finite number")
-        if not _MEMORY_LIMIT.fullmatch(self.memory):
-            raise ValueError("sandbox memory must be a positive Docker memory limit")
+        if not all(
+            _MEMORY_LIMIT.fullmatch(value)
+            for value in (self.memory, self.tmpfs_size, self.shm_size)
+        ):
+            raise ValueError("invalid Docker memory limit")
         if isinstance(self.pids, bool) or not isinstance(self.pids, int) or self.pids <= 0:
             raise ValueError("sandbox pids must be a positive integer")
-        if not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
-            raise ValueError("sandbox timeout_seconds must be positive")
-        if not math.isfinite(self.fit_timeout_seconds) or self.fit_timeout_seconds <= 0:
-            raise ValueError("sandbox fit_timeout_seconds must be positive")
-        if (
-            not math.isfinite(self.startup_timeout_seconds)
-            or self.startup_timeout_seconds <= 0
-        ):
-            raise ValueError("sandbox startup_timeout_seconds must be positive")
-        if (
-            isinstance(self.max_output_chars, bool)
-            or not isinstance(self.max_output_chars, int)
-            or self.max_output_chars <= 0
-        ):
-            raise ValueError("sandbox max_output_chars must be a positive integer")
-        if not _MEMORY_LIMIT.fullmatch(self.tmpfs_size):
-            raise ValueError("sandbox tmpfs_size must be a positive Docker memory limit")
-        if not _MEMORY_LIMIT.fullmatch(self.shm_size):
-            raise ValueError("sandbox shm_size must be a positive Docker memory limit")
         if (
             isinstance(self.gpu_count, bool)
             or not isinstance(self.gpu_count, int)
             or self.gpu_count < 0
         ):
             raise ValueError("sandbox gpu_count must be a non-negative integer")
-        if not isinstance(self.gpu_devices, tuple) or any(
-            isinstance(index, bool) or not isinstance(index, int) or index < 0
-            for index in self.gpu_devices
+        if self.gpu is None:
+            # A CPU-only container holds no device, whatever count it was given.
+            object.__setattr__(self, "gpu_count", 0)
+            return
+        if self.gpu_count <= 0:
+            raise ValueError("gpu_count must be a positive integer when GPUs are requested")
+        if isinstance(self.gpu, str):
+            object.__setattr__(self, "gpu", GpuMode(self.gpu))
+        elif not isinstance(self.gpu, tuple) or any(
+            isinstance(index, bool) or not isinstance(index, int) or index < 0 for index in self.gpu
         ):
-            raise ValueError("sandbox gpu_devices must be a tuple of device indexes")
-        if self.gpu_devices and len(self.gpu_devices) != self.gpu_count:
-            raise ValueError("sandbox gpu_devices must pin exactly gpu_count devices")
+            raise ValueError("sandbox gpu must be None, 'auto' or a tuple of device indexes")
+        elif len(self.gpu) != self.gpu_count:
+            raise ValueError("sandbox gpu must pin exactly gpu_count devices")
 
     @property
     def memory_bytes(self) -> int:
@@ -291,6 +306,33 @@ class SandboxLimits:
         """
 
         return _memory_limit_bytes(self.memory)
+
+    def devices(self) -> list[int]:
+        """The devices this container attaches: the ones it was given.
+
+        Choosing a device is not the Environment's (``environment.gpu``). There
+        is no CPU fallback either -- ``fit(context)`` training on a device the
+        experiment did not get would be a different computation reported as the
+        same result -- so a request that names no device raises
+        ``GpuUnavailableError``.
+        """
+
+        if self.gpu is None:
+            return []
+        if self.gpu == GpuMode.AUTO:
+            raise GpuUnavailableError(
+                f"this container asks for {self.gpu_count} GPU(s) and was given no "
+                "device: an arm's worker attaches the cards the console claimed for it, "
+                "and anything else takes its cards from pipelines.hitl_state.select_gpus"
+            )
+        return list(self.gpu)
+
+    def to_record(self) -> dict[str, object]:
+        return dataclass_record(self)
+
+    @classmethod
+    def from_record(cls, record: object) -> SandboxSpec:
+        return dataclass_from_record(cls, record)
 
 
 _MEMORY_SUFFIX_BYTES = {"k": 1024, "m": 1024**2, "g": 1024**3}
@@ -320,127 +362,76 @@ def experiment_container_labels(
     return labels
 
 
+def _strategy_spec() -> SandboxSpec:
+    return SandboxSpec(gpu=None, tmpfs_size=STRATEGY_TMPFS_SIZE)
+
+
 @dataclass(frozen=True)
 class SandboxConfig:
-    """Fail-closed Docker strategy execution configuration."""
+    """A strategy container: its boundary and the worker protocol's limits."""
 
-    image: str = DEFAULT_IMAGE
-    limits: SandboxLimits = field(default_factory=SandboxLimits)
-    docker_executable: str = "docker"
+    spec: SandboxSpec = field(default_factory=_strategy_spec)
+    # Wall clock for one ``generate_orders(context)`` call (published as
+    # ``strategy_inference_timeout_seconds``) and for one ``fit(context)``
+    # call; the pipeline knob ``strategy_fit_timeout_seconds`` sets the latter.
+    # Both start only once the worker holds the decision inputs, so neither
+    # bills container scheduling or host-side request materialization to the
+    # strategy. Both are runaway guards rather than budgets: the inference
+    # cap is sized like the fit cap, at roughly 6x the heaviest measured call
+    # on record (a rebalance day of a cross-sectional LightGBM arm, median
+    # 60.7 s over 49 such days), so a genuine runaway still dies while host
+    # contention does not decide a verdict.
+    timeout_seconds: float = 360.0
+    fit_timeout_seconds: float = 3600.0
+    # Environment-side bound on bringing one strategy container up to its
+    # request loop: container scheduling, interpreter start and the strategy
+    # module import. Generous on purpose — a loaded host must not turn into a
+    # strategy timeout — but finite, so a wedged Docker daemon or container
+    # still fails explicitly instead of blocking the replay forever.
+    startup_timeout_seconds: float = 900.0
+    max_output_chars: int = 1_000_000
     # Rendered as ``--label`` on the strategy container; the experiment's
     # labels from ``experiment_container_labels``.
     labels: Mapping[str, str] = field(default_factory=dict)
-    # The pretrained store the arm pinned (``environment.pretrained``): set,
-    # every strategy container mounts it read-only after comparing its
-    # manifest; empty, none mounts anything.
-    pretrained_manifest_sha256: str = ""
 
     def __post_init__(self) -> None:
-        _validate_explicit_image_tag(self.image)
-        if not self.docker_executable.strip():
-            raise ValueError("docker_executable must be non-empty")
-        pretrained_pin(self.pretrained_manifest_sha256)
+        if not isinstance(self.spec, SandboxSpec):
+            raise TypeError("SandboxConfig.spec must be a SandboxSpec")
+        for name in ("timeout_seconds", "fit_timeout_seconds", "startup_timeout_seconds"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"sandbox {name} must be positive")
+        if (
+            isinstance(self.max_output_chars, bool)
+            or not isinstance(self.max_output_chars, int)
+            or self.max_output_chars <= 0
+        ):
+            raise ValueError("sandbox max_output_chars must be a positive integer")
 
     def on_devices(self, devices: tuple[int, ...] | None) -> SandboxConfig:
         """This boundary with its containers attaching exactly ``devices``.
 
         A leg of a concurrent batch replays on one card of the arm's claim
         (``pipelines.session_tools.leg_cards``); None keeps every device the
-        limits pin, which is what a replay running alone attaches.
+        spec pins, which is what a replay running alone attaches.
         """
 
         if devices is None:
             return self
         return replace(
-            self,
-            limits=replace(self.limits, gpu_count=len(devices), gpu_devices=tuple(devices)),
+            self, spec=replace(self.spec, gpu=tuple(devices) or None, gpu_count=len(devices))
         )
 
-
-@dataclass(frozen=True)
-class SandboxSpec:
-    """Resource and capability boundary for one persistent Agent session."""
-
-    image: str = DEFAULT_IMAGE
-    build_generation_id: str = ""
-    user: str = "61000:61000"
-    network: str = "none"
-    # One boundary with the strategy container: both must stay equal to
-    # ``SandboxLimits.cpus``/``memory``, whose rationale carries the sizing.
-    cpus: float = 8.0
-    memory: str = "32g"
-    # ``SandboxLimits.pids``, whose rationale carries the sizing.
-    pids_limit: int = 1024
-    tmpfs_size: str = "1g"
-    # /dev/shm, sized like the strategy container's (``SandboxLimits.shm_size``)
-    # for the same users: a model server the session runs across its cards
-    # (``vllm serve`` with tensor parallel) and multi-process data loading in
-    # a ``fit`` the session profiles. Docker's default is 64 MB.
-    shm_size: str = "2g"
-    # "auto" asks for gpu_count devices and names none yet: whoever starts the
-    # session pins them first (an arm's worker the cards the console claimed,
-    # ``pipelines.worker.load_worker_options``), and a session still on "auto"
-    # refuses to start. An integer or list pins devices; None runs CPU-only.
-    gpu: str | int | Sequence[int] | None = "auto"
-    gpu_count: int = 1
-    gpu_name_filter: str | None = field(default_factory=host_gpu_name)
-    docker_executable: str = "docker"
-    # The arm's pretrained-store pin; the session mounts the store at
-    # ``PRETRAINED_SESSION_MOUNT`` only when it is set (see ``SandboxConfig``).
-    pretrained_manifest_sha256: str = ""
-
-    def __post_init__(self) -> None:
-        _validate_explicit_image_tag(self.image)
-        pretrained_pin(self.pretrained_manifest_sha256)
-        if self.build_generation_id:
-            try:
-                generation = uuid.UUID(self.build_generation_id)
-            except ValueError as exc:
-                raise ValueError("sandbox build_generation_id must be UUID4") from exc
-            if generation.version != 4 or str(generation) != self.build_generation_id:
-                raise ValueError("sandbox build_generation_id must be canonical UUID4")
-        if not self.user.strip() or not self.docker_executable.strip():
-            raise ValueError("sandbox user and Docker executable must be non-empty")
-        if self.network != "none":
-            raise ValueError("ordinary Agent sandboxes require network='none'")
-        if isinstance(self.cpus, bool) or not math.isfinite(self.cpus) or self.cpus <= 0:
-            raise ValueError("sandbox cpus must be positive")
-        if not all(
-            _MEMORY_LIMIT.fullmatch(value)
-            for value in (self.memory, self.tmpfs_size, self.shm_size)
-        ):
-            raise ValueError("invalid Docker memory limit")
-        if (
-            isinstance(self.pids_limit, bool)
-            or not isinstance(self.pids_limit, int)
-            or self.pids_limit <= 0
-        ):
-            raise ValueError("pids_limit must be a positive integer")
-        if (
-            isinstance(self.gpu_count, bool)
-            or not isinstance(self.gpu_count, int)
-            or self.gpu_count < 0
-        ):
-            raise ValueError("gpu_count cannot be negative")
-        if self.gpu is not None and self.gpu_count <= 0:
-            raise ValueError("gpu_count must be a positive integer when GPUs are requested")
-
     def to_record(self) -> dict[str, object]:
-        return {
-            "image_ref": self.image,
-            "build_generation_id": self.build_generation_id or None,
-            "user": self.user,
-            "network": self.network,
-            "cpus": self.cpus,
-            "memory": self.memory,
-            "pids_limit": self.pids_limit,
-            "tmpfs_size": self.tmpfs_size,
-            "shm_size": self.shm_size,
-            "gpu": self.gpu,
-            "gpu_count": self.gpu_count,
-            "gpu_name_filter": self.gpu_name_filter,
-            "pretrained_manifest_sha256": self.pretrained_manifest_sha256 or None,
-        }
+        return dataclass_record(self)
+
+    @classmethod
+    def from_record(cls, record: object) -> SandboxConfig:
+        if not isinstance(record, Mapping):
+            raise TypeError("SandboxConfig record must be a JSON object")
+        return dataclass_from_record(
+            cls, {**record, "spec": SandboxSpec.from_record(record.get("spec"))}
+        )
 
 
 class LocalSandbox:
@@ -581,11 +572,11 @@ class DockerSandbox:
             # (``executor.DockerStrategyExecutor.docker_command``).
             "--read-only", "--tmpfs", f"/tmp:rw,exec,nosuid,nodev,size={self.spec.tmpfs_size}",
             "--shm-size", self.spec.shm_size,
-            # Swap ceiling equal to the memory cap: see ``SandboxLimits.memory``
+            # Swap ceiling equal to the memory cap: see ``SandboxSpec.memory``
             # for why the two are the same number.
             "--cpus", f"{self.spec.cpus:g}", "--memory", self.spec.memory,
             "--memory-swap", self.spec.memory,
-            "--pids-limit", str(self.spec.pids_limit), "--ulimit", "core=0:0",
+            "--pids-limit", str(self.spec.pids), "--ulimit", "core=0:0",
             "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
         ]
         for key, value in sorted(self.labels.items()):
@@ -622,19 +613,7 @@ class DockerSandbox:
     def start(self) -> str:
         if self._started:
             return self.container
-        if self.spec.gpu is not None:
-            if self.spec.gpu == "auto":
-                raise GpuUnavailableError(
-                    f"this session asks for {self.spec.gpu_count} GPU(s) and was given no "
-                    "device: an arm's worker attaches the cards the console claimed for it, "
-                    "and anything else takes its cards from pipelines.hitl_state.select_gpus"
-                )
-            if isinstance(self.spec.gpu, int):
-                self.gpu_indices = [self.spec.gpu]
-            elif isinstance(self.spec.gpu, str):
-                self.gpu_indices = [int(item) for item in self.spec.gpu.split(",") if item.strip()]
-            else:
-                self.gpu_indices = [int(item) for item in self.spec.gpu]
+        self.gpu_indices = self.spec.devices()
         if self.spec.pretrained_manifest_sha256:
             self.pretrained_dir = require_pretrained_store(self.spec.pretrained_manifest_sha256)
         self.image_runtime = probe_image_runtime(
@@ -684,7 +663,7 @@ class DockerSandbox:
         timeout_seconds: float = 30.0,
         max_output_chars: int,
         input_text: str | None = None,
-    ):
+    ) -> CommandResult:
         from .executor import (
             _HOST_TIMEOUT_BUFFER_SECONDS,
             _run_limited_capture,
@@ -820,9 +799,20 @@ def _validate_explicit_image_tag(image: str) -> None:
 
 
 __all__ = [
-    "DEFAULT_IMAGE", "EXPERIMENT_LABEL", "MAX_CONTAINER_THREADS", "PRETRAINED_SESSION_MOUNT",
+    "DEFAULT_IMAGE",
+    "EXPERIMENT_LABEL",
+    "MAX_CONTAINER_THREADS",
+    "PRETRAINED_SESSION_MOUNT",
     "SCREENING_TOOL_MOUNT",
-    "SCREENING_TOOL_SOURCE", "DockerSandbox", "LocalSandbox", "SandboxConfig", "SandboxLimits",
-    "SandboxSpec", "attached_stdin", "container_thread_env", "experiment_container_labels", "link_copytree",
+    "SCREENING_TOOL_SOURCE",
+    "DockerSandbox",
+    "GpuMode",
+    "LocalSandbox",
+    "SandboxConfig",
+    "SandboxSpec",
+    "attached_stdin",
+    "container_thread_env",
+    "experiment_container_labels",
+    "link_copytree",
     "probe_image_runtime",
 ]

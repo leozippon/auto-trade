@@ -32,7 +32,6 @@ from autotrade.environment.artifacts import (
 from autotrade.environment.container_stats import ContainerResourceMonitor
 from autotrade.environment.executor import (
     DockerStrategyExecutor,
-    ExecResult,
     GpuMemoryContention,
     PersistentCommandRunner,
     StrategyCall,
@@ -52,10 +51,11 @@ from autotrade.environment.sandbox import (
     EXPERIMENT_LABEL,
     SCREENING_TOOL_MOUNT,
     SCREENING_TOOL_SOURCE,
+    STRATEGY_TMPFS_SIZE,
     DockerSandbox,
+    GpuMode,
     LocalSandbox,
     SandboxConfig,
-    SandboxLimits,
     SandboxSpec,
     attached_stdin,
     experiment_container_labels,
@@ -128,14 +128,27 @@ def _wire_request(
     }
 
 
+def _strategy_config(**fields: object) -> SandboxConfig:
+    """A strategy sandbox from ``SandboxConfig`` and ``SandboxSpec`` fields alike,
+    on the strategy container's defaults."""
+
+    clocks = {
+        name: fields.pop(name)
+        for name in ("timeout_seconds", "fit_timeout_seconds", "startup_timeout_seconds", "max_output_chars")
+        if name in fields
+    }
+    spec = SandboxSpec(**{"gpu": None, "tmpfs_size": STRATEGY_TMPFS_SIZE, **fields})
+    return SandboxConfig(spec=spec, **clocks)
+
+
 def _executor_for_process(
     process: subprocess.Popen[bytes],
     *,
-    limits: SandboxLimits | None = None,
+    config: SandboxConfig | None = None,
     drain_stderr: bool = False,
 ) -> DockerStrategyExecutor:
     executor = object.__new__(DockerStrategyExecutor)
-    executor.config = SandboxConfig(limits=limits or SandboxLimits())
+    executor.config = config or SandboxConfig()
     executor.container_name = "test-container"
     executor._process = process
     executor._stdout_buffer = bytearray()
@@ -177,7 +190,7 @@ def test_persistent_sandbox_command_has_bounded_explicit_identity_mounts(tmp_pat
     assert command[command.index("--tmpfs") + 1] == "/tmp:rw,exec,nosuid,nodev,size=1g"
     # The strategy container's /dev/shm, for a model server the session runs
     # tensor parallel; Docker's 64 MB default is too small for it.
-    assert command[command.index("--shm-size") + 1] == SandboxLimits().shm_size
+    assert command[command.index("--shm-size") + 1] == SandboxSpec().shm_size
     assert command[command.index("--network") + 1] == "none"
     assert command[command.index("--cap-drop") + 1] == "ALL"
     assert command[command.index("--security-opt") + 1] == "no-new-privileges"
@@ -219,7 +232,7 @@ def test_both_containers_cap_numeric_threads_from_the_same_cpu_quota(tmp_path: P
     package.mkdir()
     strategy = _strategy(package)
     with patch.object(DockerStrategyExecutor, "_start"):
-        executor = DockerStrategyExecutor(strategy, SandboxConfig(limits=SandboxLimits(cpus=8.0)))
+        executor = DockerStrategyExecutor(strategy, _strategy_config(cpus=8.0))
     assert env_of(executor.docker_command()) == {
         key: value for key, value in session.items() if key.endswith("_NUM_THREADS")
     }
@@ -285,7 +298,7 @@ def test_both_containers_pin_swap_to_their_memory_cap(tmp_path: Path):
     strategy = _strategy(package)
     with patch.object(DockerStrategyExecutor, "_start"):
         executor = DockerStrategyExecutor(
-            strategy, SandboxConfig(limits=SandboxLimits(memory="5g"))
+            strategy, _strategy_config(memory="5g")
         )
     command = executor.docker_command()
     assert command[command.index("--memory") + 1] == "5g"
@@ -330,9 +343,15 @@ def test_bounded_capture_streams_output_without_a_communicate_buffer(tmp_path: P
         timeout_seconds=30.0,
         max_output_chars=64,
     )
-    assert result.exit_code == 0
+    assert result.exit_code == 0 and not result.timed_out
     assert len(result.stdout) == 64 and result.stdout_truncated
     assert len(result.stderr) == 64 and result.stderr_truncated
+    slow = _run_limited_capture(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        timeout_seconds=0.2,
+        max_output_chars=64,
+    )
+    assert (slow.exit_code, slow.timed_out) == (124, True)
 
 
 def test_persistent_sandbox_start_records_tag_session_and_runtime_probe(tmp_path: Path):
@@ -366,7 +385,7 @@ def test_persistent_sandbox_start_records_tag_session_and_runtime_probe(tmp_path
     # The spec record the run manifests carry names the image by tag and build
     # generation, never by a host-local image id or digest.
     spec_record = sandbox.spec.to_record()
-    assert spec_record["image_ref"] == sandbox.spec.image
+    assert spec_record["image"] == sandbox.spec.image
     assert spec_record["build_generation_id"] == generation_id
     assert "image_id" not in spec_record
     assert "image_repo_digests" not in spec_record
@@ -374,14 +393,15 @@ def test_persistent_sandbox_start_records_tag_session_and_runtime_probe(tmp_path
 
 def test_persistent_command_timeout_keeps_sandbox_for_followup_work():
     sandbox = Mock()
-    sandbox.exec_limited.return_value = ExecResult(124, "partial", "timed out")
+    timed_out = CommandResult(124, "partial", "timed out", timed_out=True)
+    sandbox.exec_limited.return_value = timed_out
     result = PersistentCommandRunner(sandbox).run(
         ["python", "-c", "pass"],
         cwd=".",
         timeout_seconds=1,
         max_output_chars=100,
     )
-    assert result == CommandResult(124, "partial", "timed out", timed_out=True)
+    assert result is timed_out
     sandbox.stop.assert_not_called()
 
 
@@ -413,7 +433,7 @@ def test_real_exec_input_reaches_the_payload_in_band_while_stdin_stays_open(tmp_
         pytest.skip(f"local sandbox image is unavailable: {image}")
     sandbox = DockerSandbox(
         LocalSandbox(tmp_path / "session"),
-        SandboxSpec(image=image, gpu=None, cpus=1, memory="1g", pids_limit=64, tmpfs_size="64m"),
+        SandboxSpec(image=image, gpu=None, cpus=1, memory="1g", pids=64, tmpfs_size="64m"),
     )
     sandbox.local.prepare_layout()
     sandbox.start()
@@ -456,7 +476,7 @@ def test_real_persistent_timeout_kills_command_only_and_preserves_session(tmp_pa
             gpu=None,
             cpus=1,
             memory="1g",
-            pids_limit=64,
+            pids=64,
             tmpfs_size="64m",
         ),
     )
@@ -619,14 +639,14 @@ def test_experiment_gpu_request_reaches_the_formal_strategy_container() -> None:
         SandboxSpec(gpu="auto", gpu_count=2, gpu_name_filter="L20"),
         fit_timeout_seconds=3600,
     )
-    assert (requested.limits.gpu_count, requested.limits.gpu_name_filter) == (2, "L20")
-    assert requested.limits.fit_timeout_seconds == 3600.0
+    assert (requested.spec.gpu_count, requested.spec.gpu_name_filter) == (2, "L20")
+    assert requested.fit_timeout_seconds == 3600.0
     cpu_only = _strategy_sandbox_from_spec(
         SandboxSpec(gpu=None, gpu_count=0), fit_timeout_seconds=3600
     )
-    assert cpu_only.limits.gpu_count == 0
+    assert cpu_only.spec.gpu_count == 0
     assert (
-        _strategy_sandbox_from_spec(None, fit_timeout_seconds=3600).limits.gpu_count == 0
+        _strategy_sandbox_from_spec(None, fit_timeout_seconds=3600).spec.gpu_count == 0
     )
 
 
@@ -635,13 +655,15 @@ def test_the_arms_boundary_reaches_the_strategy_containers_flags(tmp_path: Path)
     flags and thread variables of its strategy containers carry what the
     builder is given, and a builder given none keeps the executor's defaults."""
 
-    default = _strategy_sandbox_from_spec(SandboxSpec(gpu=None), fit_timeout_seconds=3600).limits
-    executor = SandboxLimits()
-    assert (default.cpus, default.memory, default.timeout_seconds) == (
-        executor.cpus,
-        executor.memory,
+    default = _strategy_sandbox_from_spec(SandboxSpec(gpu=None), fit_timeout_seconds=3600)
+    executor = SandboxConfig()
+    assert (default.spec.cpus, default.spec.memory, default.timeout_seconds) == (
+        executor.spec.cpus,
+        executor.spec.memory,
         executor.timeout_seconds,
     )
+    # The strategy container's own /tmp, not the session's.
+    assert default.spec.tmpfs_size == executor.spec.tmpfs_size == STRATEGY_TMPFS_SIZE == "2g"
     config = _strategy_sandbox_from_spec(
         SandboxSpec(gpu=None),
         fit_timeout_seconds=10_800,
@@ -649,8 +671,7 @@ def test_the_arms_boundary_reaches_the_strategy_containers_flags(tmp_path: Path)
         cpus=16,
         memory="64g",
     )
-    limits = config.limits
-    assert (limits.cpus, limits.memory, limits.timeout_seconds, limits.fit_timeout_seconds) == (
+    assert (config.spec.cpus, config.spec.memory, config.timeout_seconds, config.fit_timeout_seconds) == (
         16.0,
         "64g",
         1080.0,
@@ -671,17 +692,16 @@ def test_the_consoles_claim_pins_every_container_of_the_arm() -> None:
     strategy container, and a session that asks for fewer gets that many of
     the arm's own cards, never another one. A spec without a claim gives its
     strategy containers no device."""
-    from autotrade.environment.executor import _strategy_gpus
     from autotrade.pipelines.research_session import LLMResearchDeveloper
 
     claimed = SandboxSpec(gpu=(3, 6), gpu_count=2)
-    limits = _strategy_sandbox_from_spec(claimed, fit_timeout_seconds=60).limits
-    assert (limits.gpu_count, limits.gpu_devices) == (2, (3, 6))
-    assert _strategy_gpus(limits) == [3, 6]
+    spec = _strategy_sandbox_from_spec(claimed, fit_timeout_seconds=60).spec
+    assert (spec.gpu_count, spec.gpu) == (2, (3, 6))
+    assert spec.devices() == [3, 6]
     unclaimed = _strategy_sandbox_from_spec(SandboxSpec(gpu_count=2), fit_timeout_seconds=60)
-    assert unclaimed.limits.gpu_devices == ()
+    assert unclaimed.spec.gpu == GpuMode.AUTO
     with pytest.raises(GpuUnavailableError, match="was given no device"):
-        _strategy_gpus(unclaimed.limits)
+        unclaimed.spec.devices()
 
     def session(count: int) -> SandboxSpec:
         return LLMResearchDeveloper._session_sandbox_spec(
@@ -845,7 +865,7 @@ def test_real_inherited_fold_workspace_is_writable_only_inside_agent_boundary(tm
             gpu=None,
             cpus=1,
             memory="1g",
-            pids_limit=64,
+            pids=64,
             tmpfs_size="64m",
         ),
     )
@@ -925,7 +945,7 @@ def test_real_shell_created_workspace_files_stay_writable_for_the_typed_writers(
             gpu=None,
             cpus=1,
             memory="1g",
-            pids_limit=64,
+            pids=64,
             tmpfs_size="64m",
         ),
     )
@@ -1042,10 +1062,10 @@ def test_strategy_container_attaches_exactly_the_gpus_it_is_given(tmp_path: Path
     ):
         executor = DockerStrategyExecutor(
             strategy,
-            SandboxConfig(limits=SandboxLimits(gpu_count=1, gpu_devices=(2,))),
+            _strategy_config(gpu=(2,), gpu_count=1),
         )
         two = DockerStrategyExecutor(
-            strategy, SandboxConfig(limits=SandboxLimits(gpu_count=2, gpu_devices=(0, 1)))
+            strategy, _strategy_config(gpu=(0, 1), gpu_count=2)
         )
         cpu_only = DockerStrategyExecutor(strategy)
     command = executor.docker_command()
@@ -1072,7 +1092,7 @@ def test_strategy_container_gpu_request_fails_instead_of_falling_back_to_cpu(
         pytest.raises(GpuUnavailableError, match=r"asks for 1 GPU\(s\) and was given no device"),
     ):
         DockerStrategyExecutor(
-            strategy, SandboxConfig(limits=SandboxLimits(gpu_count=1))
+            strategy, _strategy_config(gpu=GpuMode.AUTO, gpu_count=1)
         )
     start.assert_not_called()
 
@@ -1084,7 +1104,7 @@ def test_strategy_thread_limit_tracks_fractional_cpus_and_stays_bounded(
     expected: str,
 ):
     strategy = _strategy(tmp_path)
-    config = SandboxConfig(limits=SandboxLimits(cpus=cpus))
+    config = _strategy_config(cpus=cpus)
     with patch.object(DockerStrategyExecutor, "_start"):
         executor = DockerStrategyExecutor(strategy, config)
     command = executor.docker_command()
@@ -1577,7 +1597,7 @@ def test_a_strategy_calling_the_removed_nl_interface_fails_as_its_own_error(
 
 
 def test_inference_timeout_aborts_and_closes_worker():
-    limits = SandboxLimits(timeout_seconds=0.05)
+    config = _strategy_config(timeout_seconds=0.05)
     process = subprocess.Popen(
         [
             sys.executable,
@@ -1588,7 +1608,7 @@ def test_inference_timeout_aborts_and_closes_worker():
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    executor = _executor_for_process(process, limits=limits, drain_stderr=True)
+    executor = _executor_for_process(process, config=config, drain_stderr=True)
     pipes = (process.stdin, process.stdout, process.stderr)
     with (
         patch.object(executor, "_remove_container") as remove,
@@ -1699,7 +1719,7 @@ def test_orders_over_the_protocol_cap_fail_with_a_message_naming_cap_and_remedy(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    executor = _executor_for_process(process, limits=SandboxLimits(max_output_chars=2_000))
+    executor = _executor_for_process(process, config=_strategy_config(max_output_chars=2_000))
     try:
         with (
             patch.object(executor, "_remove_container"),
@@ -1715,7 +1735,7 @@ def test_orders_over_the_protocol_cap_fail_with_a_message_naming_cap_and_remedy(
         executor.close()
     # Charging it is fair only because the contract states this very cap.
     readme = Path(__file__).resolve().parents[2] / "configs/agent_output_template/README.md"
-    stated = f"at most {SandboxLimits().max_output_chars:,} characters of JSON"
+    stated = f"at most {SandboxConfig().max_output_chars:,} characters of JSON"
     assert stated in readme.read_text(encoding="utf-8")
 
 
@@ -1828,14 +1848,14 @@ def test_a_cuda_out_of_memory_reply_on_a_taken_card_is_an_environment_failure(
 
 
 def test_request_write_timeout_aborts_worker_that_does_not_read_stdin():
-    limits = SandboxLimits(timeout_seconds=0.05)
+    config = _strategy_config(timeout_seconds=0.05)
     process = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(60)"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    executor = _executor_for_process(process, limits=limits)
+    executor = _executor_for_process(process, config=config)
     started = time.monotonic()
     with (
         patch.object(executor, "_context_record", return_value={"payload": "x" * 2_000_000}),
@@ -1938,7 +1958,7 @@ def test_a_worker_killed_before_a_response_names_the_memory_cap():
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    executor = _executor_for_process(process, limits=SandboxLimits(memory="5g"))
+    executor = _executor_for_process(process, config=_strategy_config(memory="5g"))
     try:
         with pytest.raises(BrokenPipeError) as error:
             executor._read_line(time.monotonic() + 5)
@@ -1963,7 +1983,7 @@ def test_a_call_killed_at_the_memory_cap_is_the_strategys_own_failure():
         stderr=subprocess.PIPE,
     )
     executor = _executor_for_process(
-        process, limits=SandboxLimits(memory="5g"), drain_stderr=True
+        process, config=_strategy_config(memory="5g"), drain_stderr=True
     )
     with (
         patch.object(executor, "_remove_container"),
@@ -1993,7 +2013,7 @@ def test_a_worker_killed_while_starting_stays_a_startup_failure(tmp_path: Path):
         _started_executor(
             strategy,
             [sys.executable, "-c", "import sys; sys.stdin.readline(); raise SystemExit(137)"],
-            SandboxLimits(),
+            _strategy_config(),
         )
     assert not raised_by_strategy(error.value)
 
@@ -2066,9 +2086,9 @@ def test_the_default_sandbox_spec_asks_for_one_matching_gpu():
     spec = SandboxSpec()
     assert (spec.gpu, spec.gpu_count, spec.gpu_name_filter) == ("auto", 1, "L20")
     record = spec.to_record()
-    assert record["image_ref"] == "autotrade-sandbox:latest"
-    assert record["build_generation_id"] is None
-    assert "image" not in record
+    assert record["image"] == "autotrade-sandbox:latest"
+    assert record["build_generation_id"] == ""
+    assert SandboxSpec.from_record(json.loads(json.dumps(record))) == spec
     assert record["gpu"] == "auto" and record["gpu_count"] == 1
     assert record["gpu_name_filter"] == "L20"
 
@@ -2272,18 +2292,18 @@ def test_a_paper_run_takes_free_cards_only_when_a_container_starts(
     monkeypatch.setattr(
         run_paper, "docker_executor", lambda path, sandbox, *rest: started.append(sandbox)
     )
-    book = SandboxConfig(limits=SandboxLimits(gpu_count=1, gpu_name_filter="L20"))
+    book = _strategy_config(gpu=GpuMode.AUTO, gpu_count=1, gpu_name_filter="L20")
 
     with stubbed_gpu_probe([0, 1]):
         run_paper._executor_on_free_gpus(tmp_path, book, None, None, None)
-    assert started[-1].limits.gpu_devices == (1,)
-    assert book.limits.gpu_devices == ()
+    assert started[-1].spec.gpu == (1,)
+    assert book.spec.gpu == GpuMode.AUTO
     # The only idle card is the arm's: the book cannot decide.
     with stubbed_gpu_probe([0]), pytest.raises(GpuUnavailableError, match="holder"):
         run_paper._executor_on_free_gpus(tmp_path, book, None, None, None)
     with patch("autotrade.environment.gpu.list_gpus", side_effect=AssertionError("probed")):
         run_paper._executor_on_free_gpus(tmp_path, SandboxConfig(), None, None, None)
-    assert len(started) == 2 and started[-1].limits.gpu_devices == ()
+    assert len(started) == 2 and started[-1].spec.gpu is None
 
 
 def test_persistent_sandbox_start_attaches_the_devices_it_is_given(tmp_path: Path):
@@ -2363,21 +2383,21 @@ def _worker_argv(strategy: Path, *, boot_delay: float = 0.0) -> list[str]:
     return [sys.executable, "-c", boot]
 
 
-def _started_executor(strategy: Path, argv: list[str], limits: SandboxLimits):
+def _started_executor(strategy: Path, argv: list[str], config: SandboxConfig):
     """A real DockerStrategyExecutor whose container is a local worker process."""
     with (
         patch.object(DockerStrategyExecutor, "docker_command", return_value=argv),
         patch("autotrade.environment.executor._require_local_image"),
     ):
-        return DockerStrategyExecutor(strategy, SandboxConfig(limits=limits))
+        return DockerStrategyExecutor(strategy, config)
 
 
 def test_worker_startup_is_not_charged_to_the_per_decision_clock(tmp_path: Path):
     strategy = _strategy(tmp_path)
-    limits = SandboxLimits(timeout_seconds=0.5, startup_timeout_seconds=30.0)
+    config = _strategy_config(timeout_seconds=0.5, startup_timeout_seconds=30.0)
     started = time.monotonic()
     executor = _started_executor(
-        strategy, _worker_argv(strategy, boot_delay=1.5), limits
+        strategy, _worker_argv(strategy, boot_delay=1.5), config
     )
     startup_seconds = time.monotonic() - started
     try:
@@ -2391,7 +2411,7 @@ def test_worker_startup_is_not_charged_to_the_per_decision_clock(tmp_path: Path)
 def test_host_side_request_materialization_is_not_charged_to_the_strategy(tmp_path: Path):
     strategy = _strategy(tmp_path)
     executor = _started_executor(
-        strategy, _worker_argv(strategy), SandboxLimits(timeout_seconds=0.5)
+        strategy, _worker_argv(strategy), _strategy_config(timeout_seconds=0.5)
     )
     prepare = executor._prepare_execute
 
@@ -2430,7 +2450,7 @@ def test_a_worker_that_never_becomes_ready_fails_as_a_host_side_error(tmp_path: 
         _started_executor(
             strategy,
             [sys.executable, "-c", "import time; time.sleep(60)"],
-            SandboxLimits(startup_timeout_seconds=0.2),
+            _strategy_config(startup_timeout_seconds=0.2),
         )
     assert time.monotonic() - started < 5
     assert process_holder and process_holder[0].poll() is not None
@@ -2451,7 +2471,7 @@ def test_a_worker_whose_strategy_import_fails_is_reported_as_a_startup_failure(
             StrategyExecutionError, match="failed to start: strategy import failed"
         ),
     ):
-        _started_executor(strategy, _worker_argv(strategy), SandboxLimits())
+        _started_executor(strategy, _worker_argv(strategy), _strategy_config())
 
 
 def test_container_peak_memory_is_reported_only_where_it_was_measured(tmp_path: Path):
@@ -2573,8 +2593,8 @@ def test_the_workers_reading_reaches_resources_only_for_answered_calls(tmp_path:
         f"worker.CGROUP_ROOT = Path({str(root)!r})\n"
         f"raise SystemExit(worker.main([{str(strategy)!r}]))\n"
     )
-    limits = SandboxLimits(timeout_seconds=1.0, startup_timeout_seconds=30.0)
-    executor = _started_executor(strategy, [sys.executable, "-c", boot], limits)
+    config = _strategy_config(timeout_seconds=1.0, startup_timeout_seconds=30.0)
+    executor = _started_executor(strategy, [sys.executable, "-c", boot], config)
     try:
         assert executor.execute(_context()) == []
         usage = executor.resource_usage()

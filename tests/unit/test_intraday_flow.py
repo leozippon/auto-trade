@@ -7,7 +7,8 @@ import unittest
 import numpy as np
 import pandas as pd
 
-from autotrade.environment.data.contracts import CN_TZ, INTRADAY_FLOW_CONTRACT
+from autotrade.common.time import CN_TZ
+from autotrade.environment.data.contracts import INTRADAY_FLOW_CONTRACT
 from autotrade.environment.data.intraday_flow import (
     BARS_PER_DAY,
     INTRADAY_FLOW_COLUMNS,

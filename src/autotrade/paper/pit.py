@@ -25,6 +25,7 @@ from pathlib import Path
 import pandas as pd
 import pyarrow.parquet as pq
 
+from autotrade.common.time import CN_TZ
 from autotrade.data_sources.tushare.cron_update import DEFAULT_CONFIG
 from autotrade.environment.data.contracts import (
     PIT_EVENT_NODE,
@@ -41,7 +42,6 @@ from autotrade.environment.data.snapshot import (
 from autotrade.environment.replay.engine import StrategyDataView
 from autotrade.environment.replay.market import DailyMarketData
 from autotrade.environment.replay.timeview import Timeview
-from autotrade.environment.strategy import CN_TZ
 from autotrade.paper.engine import PaperDataNotReady
 from autotrade.paper.freshness import require_fresh_release
 from autotrade.pipelines.calendar import load_sse_trading_days

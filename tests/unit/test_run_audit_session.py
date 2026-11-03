@@ -250,8 +250,8 @@ def test_the_assembled_session_mounts_the_image_refs_and_memory_it_was_given(
     build = _build(options)
 
     assert build.trading_days == ["20240102"]
-    assert build.pipeline.evaluator.sandbox.image == "audit-image:test"
-    assert build.pipeline.evaluator.sandbox.limits.fit_timeout_seconds == 1800
+    assert build.pipeline.evaluator.sandbox.spec.image == "audit-image:test"
+    assert build.pipeline.evaluator.sandbox.fit_timeout_seconds == 1800
     developer = captured["developer"]
     assert developer["sandbox_spec"] is options.agent_sandbox
     assert developer["evaluator"] is build.pipeline.evaluator

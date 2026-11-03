@@ -300,7 +300,7 @@ def test_the_listing_splits_the_reference_labels_the_session_and_scrubs_paths(
     assert labelled["origin"] == "curated"
     assert labelled["session_label"] == SESSION_KEY
     assert "/Data2" not in str(labelled["evidence"])
-    assert "[host path omitted]" in str(labelled["evidence"])
+    assert "[host_path]" in str(labelled["evidence"])
     assert rows["expB"]["claim"] == "wrong"
     assert rows["expB"]["source"] == "momentum_20260101"
     assert rows["expB"]["origin"] == "graduated"

@@ -22,7 +22,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from autotrade.environment.runtime import chmod_tree, utc_now_iso, write_json_atomic
+from autotrade.common.records import write_json_atomic
+from autotrade.environment.runtime import chmod_tree, utc_now_iso
 from autotrade.environment.tools.base import ToolError, ToolResult, ToolSpec
 from autotrade.environment.tools.skills_policy import (
     strict_transferable_content_violation,

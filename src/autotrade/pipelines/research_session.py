@@ -22,6 +22,7 @@ import pandas as pd
 
 from autotrade.agent.compact import ContextCompactionConfig
 from autotrade.agent.experiment_facts import build_experiment_facts
+from autotrade.common.records import read_json_object_or_empty, write_json_atomic
 from autotrade.environment.artifacts import (
     WORKSPACE_DIR_MODE,
     WORKSPACE_FILE_MODE,
@@ -51,12 +52,11 @@ from autotrade.environment.runtime import (
     agent_trace_path,
     agent_transcript_dir,
     chmod_tree,
-    write_json_atomic,
 )
 from autotrade.environment.sandbox import (
     DockerSandbox,
     LocalSandbox,
-    SandboxLimits,
+    SandboxConfig,
     SandboxSpec,
     experiment_container_labels,
     link_copytree,
@@ -292,8 +292,8 @@ class SessionBudgetLLM(SessionTimeBudgetAware):
         self.delegate = delegate
         self.budget = budget
         self.role = role
-        self.provider = str(getattr(delegate, "provider", ""))
-        self.model = str(getattr(delegate, "model", ""))
+        self.provider = str(delegate.provider)
+        self.model = str(delegate.model)
         # Resolved once from the configured model: a gateway outside the
         # catalog has no price and fails here, before the session's first call.
         self.prices = token_prices(self.provider, self.model)
@@ -416,6 +416,14 @@ def build_subagent_tools(
     ]
 
 
+
+def _strategy_sandbox(evaluator: object) -> SandboxConfig:
+    """The formal executor's strategy container: the evaluator's own, or the
+    executor's default for one that runs none (trusted mode, test doubles)."""
+
+    sandbox = getattr(evaluator, "sandbox", None)
+    return sandbox if isinstance(sandbox, SandboxConfig) else SandboxConfig()
+
 class LLMResearchDeveloper:
     """Adapter from the native Agent loop to ``ResearchDeveloper``."""
 
@@ -473,33 +481,25 @@ class LLMResearchDeveloper:
     def decision_timeout_seconds(self) -> float:
         """The formal executor's per-decision inference wall clock."""
 
-        sandbox = getattr(self.evaluator, "sandbox", None)
-        limits = getattr(sandbox, "limits", None) or SandboxLimits()
-        return float(limits.timeout_seconds)
+        return float(_strategy_sandbox(self.evaluator).timeout_seconds)
 
     @property
     def fit_timeout_seconds(self) -> float:
         """The formal executor's wall clock for one strategy ``fit(context)``."""
 
-        sandbox = getattr(self.evaluator, "sandbox", None)
-        limits = getattr(sandbox, "limits", None) or SandboxLimits()
-        return float(limits.fit_timeout_seconds)
+        return float(_strategy_sandbox(self.evaluator).fit_timeout_seconds)
 
     @property
     def strategy_cpus(self) -> float:
         """The formal strategy container's CPU quota, its thread variables' source."""
 
-        sandbox = getattr(self.evaluator, "sandbox", None)
-        limits = getattr(sandbox, "limits", None) or SandboxLimits()
-        return float(limits.cpus)
+        return float(_strategy_sandbox(self.evaluator).spec.cpus)
 
     @property
     def strategy_memory_bytes(self) -> int:
         """The formal strategy container's memory ceiling, in bytes."""
 
-        sandbox = getattr(self.evaluator, "sandbox", None)
-        limits = getattr(sandbox, "limits", None) or SandboxLimits()
-        return int(limits.memory_bytes)
+        return int(_strategy_sandbox(self.evaluator).spec.memory_bytes)
 
     @property
     def strategy_gpu_count(self) -> int:
@@ -512,9 +512,7 @@ class LLMResearchDeveloper:
         override may move on its own.
         """
 
-        sandbox = getattr(self.evaluator, "sandbox", None)
-        limits = getattr(sandbox, "limits", None) or SandboxLimits()
-        return int(limits.gpu_count)
+        return int(_strategy_sandbox(self.evaluator).spec.gpu_count)
 
     def __call__(self, request: ResearchSessionRequest) -> ResearchSessionResult:
         root, resume, attempt = self._resolve_resume(request)
@@ -824,11 +822,11 @@ class LLMResearchDeveloper:
                 "session_key": request.session_key,
                 "kind": RESEARCH_STAGE,
                 "llm": {
-                    "provider": str(getattr(self.llm, "provider", "")),
-                    "model": str(getattr(self.llm, "model", "")),
+                    "provider": str(self.llm.provider),
+                    "model": str(self.llm.model),
                     "subagent": {
-                        "provider": str(getattr(self.subagent_llm, "provider", "")),
-                        "model": str(getattr(self.subagent_llm, "model", "")),
+                        "provider": str(self.subagent_llm.provider),
+                        "model": str(self.subagent_llm.model),
                     },
                 },
                 "conversation_id": request.run_id,
@@ -1489,8 +1487,8 @@ class LLMResearchDeveloper:
             **build_experiment_facts(
                 manifest=dict(manifest.data),
                 ref_store=self.ref_store,
-                runtime_env=_read_json_if_exists(paths.runtime_env),
-                data_summary=_read_json_if_exists(paths.data_summary),
+                runtime_env=read_json_object_or_empty(paths.runtime_env),
+                data_summary=read_json_object_or_empty(paths.data_summary),
                 max_llm_calls=request.max_llm_calls,
                 context_compaction={
                     "enabled": self.compact_llm is not None,
@@ -1876,16 +1874,6 @@ def _agent_event_sink(
         progress_hook(stage, public)
 
     return emit
-
-
-def _read_json_if_exists(path: Path) -> dict[str, object]:
-    try:
-        if not path.exists():
-            return {}
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
 
 
 __all__ = [

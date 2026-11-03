@@ -15,18 +15,19 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, Self, runtime_checkable
+from typing import Protocol, Self, runtime_checkable
 
+from .commands import CommandResult
 from .container_stats import ContainerResourceMonitor
 from .contract_fingerprint import (
     SandboxImageContractMismatch,
     assert_image_contract_current,
     compute_runtime_fingerprint,
 )
-from .gpu import GpuUnavailableError, device_request, gpu_memory_contention
+from .gpu import device_request, gpu_memory_contention
 from .pretrained import PretrainedStoreError, require_pretrained_store
 from .runtime import chmod_tree
-from .sandbox import DockerSandbox, SandboxConfig, SandboxLimits, container_thread_env
+from .sandbox import DockerSandbox, SandboxConfig, container_thread_env
 from .strategy import (
     AccountSnapshot,
     BarTable,
@@ -36,9 +37,14 @@ from .strategy import (
     _require_cn_datetime,
 )
 from .strategy_loader import load_strategy_module, validate_strategy_package
-
-if TYPE_CHECKING:
-    from .tools.base import CommandResult
+from .strategy_worker import (
+    CALL_REPLIES,
+    CLOSE_REQUEST,
+    ERROR_REPLIES,
+    ERROR_REPLY,
+    PROTOCOL_ERROR_REPLY,
+    RESOURCE_KEYS,
+)
 
 _HOST_TIMEOUT_BUFFER_SECONDS = 15.0
 _PROCESS_STOP_TIMEOUT_SECONDS = 2.0
@@ -51,12 +57,8 @@ _PROCESS_STOP_TIMEOUT_SECONDS = 2.0
 # *before* reading anything is its import failure, which carries no sequence —
 # that is how a dead worker is told apart from a ready one.
 _READY_SEQUENCE = -1
-# The worker's two failure replies. Both may arrive without a sequence (an
-# import failure before the first read, a line the worker could not parse at
-# all), so neither is held to the sequence check that every other message is.
-_WORKER_ERROR_TYPES = frozenset({"error", "protocol_error"})
 # What ``docker run`` reports when the container's main process was SIGKILLed.
-# With swap pinned to the memory cap (``SandboxLimits.memory``) that is what
+# With swap pinned to the memory cap (``SandboxSpec.memory``) that is what
 # the container's own memory boundary looks like from here.
 _SIGKILL_EXIT_CODE = 137
 # Container-side path of the read-only strategy package (the directory that
@@ -112,7 +114,7 @@ class StrategyMemoryExceeded(StrategyRaised):
     """A ``fit`` or ``generate_orders`` call outgrew the container's memory cap.
 
     The cap is a budget published to the session (``budgets.strategy_memory_bytes``)
-    with swap pinned to it (``SandboxLimits.memory``), so the kernel killing the
+    with swap pinned to it (``SandboxSpec.memory``), so the kernel killing the
     worker there measured the strategy on this data exactly as an exception
     its own code raised does, and is charged the same way.
     """
@@ -171,12 +173,6 @@ def gpu_contended(exc: BaseException) -> bool:
 _STRATEGY_RESOURCES = "strategy_resources"
 
 
-# The figures a worker reads off its own container with every answer
-# (``strategy_worker.container_resources``), under the keys the host's own
-# monitor reports them in.
-_WORKER_RESOURCE_KEYS = ("peak_memory_bytes", "memory_limit_bytes", "peak_gpu_memory_bytes")
-
-
 def _worker_resources(value: object) -> dict[str, int]:
     """The well-formed part of a worker's ``resources`` reading.
 
@@ -189,7 +185,7 @@ def _worker_resources(value: object) -> dict[str, int]:
         return {}
     return {
         name: number
-        for name in _WORKER_RESOURCE_KEYS
+        for name in RESOURCE_KEYS
         if isinstance(number := value.get(name), int)
         and not isinstance(number, bool)
         and number >= 0
@@ -407,7 +403,7 @@ class DockerStrategyExecutor:
     inference worker binds the same directory read-only, so the kernel — not
     the strategy — decides that ``generate_orders`` cannot write state.
 
-    Both workers attach the experiment's GPU request (``SandboxLimits``): the
+    Both workers attach the experiment's GPU request (``SandboxSpec``): the
     inference container selects the devices once at start and the fit worker
     inherits exactly those, so one evaluation holds one allocation and a
     replay whose experiment asked for no GPU stays CPU-only. Both mount the
@@ -441,22 +437,23 @@ class DockerStrategyExecutor:
             )
         self.context_state_dir = CONTAINER_STATE_DIR if self.state_dir is not None else ""
         self.context_models_dir = CONTAINER_MODELS_DIR if self.models_dir is not None else ""
-        self.pretrained_dir = _pinned_store(self.config.pretrained_manifest_sha256)
+        self.pretrained_dir = _pinned_store(self.config.spec.pretrained_manifest_sha256)
         self.context_pretrained_dir = (
             CONTAINER_PRETRAINED_DIR if self.pretrained_dir is not None else ""
         )
         self._state_writable = state_writable
         self._fit_worker: DockerStrategyExecutor | None = None
         # Read before the container exists and rendered into its run arguments
-        # below. A request that was given no device fails right here, so a
-        # replay never silently trains on CPU instead of the GPU it asked for.
-        self.gpu_indices = _strategy_gpus(self.config.limits)
+        # below. A request that was given no device fails right here
+        # (``SandboxSpec.devices``), so a replay never silently trains on CPU
+        # instead of the GPU it asked for.
+        self.gpu_indices = self.config.spec.devices()
         self.container_name = f"autotrade-strategy-{uuid.uuid4().hex}"
         # Host-side telemetry of this container: what it actually cost, beside
         # the limits it was started with. Bound once the container is up.
         self._monitor = ContainerResourceMonitor(
             self.container_name,
-            docker_executable=self.config.docker_executable,
+            docker_executable=self.config.spec.docker_executable,
             sample_gpu=bool(self.gpu_indices),
         )
         # The worker's own reading of the same container, the largest of
@@ -480,12 +477,12 @@ class DockerStrategyExecutor:
     def docker_command(self) -> list[str]:
         """Render the complete container boundary for inspection and testing."""
 
-        limits = self.config.limits
+        spec = self.config.spec
         strategy_mount = (
             f"type=bind,src={self.strategy_path.parent},dst={CONTAINER_STRATEGY_DIR},readonly"
         )
         command = [
-            self.config.docker_executable,
+            self.config.spec.docker_executable,
             "run",
             "--pull",
             "never",
@@ -494,31 +491,31 @@ class DockerStrategyExecutor:
             "--name",
             self.container_name,
             "--network",
-            "none",
+            spec.network,
             "--user",
-            "61000:61000",
+            spec.user,
             "--read-only",
             # exec: Triton compiles the launcher modules of its kernels into
             # its cache under /tmp (the image's TRITON_CACHE_DIR) and loads
             # them from there; Docker mounts a tmpfs noexec unless told.
             "--tmpfs",
-            f"/tmp:rw,exec,nosuid,nodev,size={limits.tmpfs_size}",
+            f"/tmp:rw,exec,nosuid,nodev,size={spec.tmpfs_size}",
             # Shared memory for multi-process training inside fit(context):
             # without it Docker's 64 MB default makes a torch DataLoader with
             # workers or a joblib memmapped backend fail on a container that
             # otherwise has 8 CPUs to use.
             "--shm-size",
-            limits.shm_size,
+            spec.shm_size,
             "--cpus",
-            f"{limits.cpus:g}",
-            # Swap ceiling equal to the memory cap: see ``SandboxLimits.memory``
+            f"{spec.cpus:g}",
+            # Swap ceiling equal to the memory cap: see ``SandboxSpec.memory``
             # for why the two are the same number.
             "--memory",
-            limits.memory,
+            spec.memory,
             "--memory-swap",
-            limits.memory,
+            spec.memory,
             "--pids-limit",
-            str(limits.pids),
+            str(spec.pids),
             "--cap-drop",
             "ALL",
             "--security-opt",
@@ -528,7 +525,7 @@ class DockerStrategyExecutor:
             command.extend(["--label", f"{key}={value}"])
         if self.gpu_indices:
             command.extend(["--gpus", device_request(self.gpu_indices)])
-        for key, value in sorted(container_thread_env(limits.cpus).items()):
+        for key, value in sorted(container_thread_env(spec.cpus).items()):
             command.extend(["--env", f"{key}={value}"])
         command.extend(["--mount", strategy_mount])
         for source, target in (
@@ -547,7 +544,7 @@ class DockerStrategyExecutor:
         command.extend([
             "--workdir",
             CONTAINER_STRATEGY_DIR,
-            self.config.image,
+            self.config.spec.image,
             "python",
             "-m",
             "autotrade.environment.strategy_worker",
@@ -574,7 +571,7 @@ class DockerStrategyExecutor:
             )
         try:
             self._fit_worker._roundtrip(
-                context, kind="fit", timeout_seconds=self.config.limits.fit_timeout_seconds
+                context, kind="fit", timeout_seconds=self.config.fit_timeout_seconds
             )
         except StrategyExecutionError:
             self._abort()
@@ -582,7 +579,7 @@ class DockerStrategyExecutor:
 
     def execute(self, context: StrategyContext | StrategyCall) -> object:
         return self._roundtrip(
-            context, kind="execute", timeout_seconds=self.config.limits.timeout_seconds
+            context, kind="execute", timeout_seconds=self.config.timeout_seconds
         )
 
     def _roundtrip(
@@ -594,7 +591,7 @@ class DockerStrategyExecutor:
         label = "strategy fit" if kind == "fit" else "strategy inference"
         # The message a deadline miss reports, read by _write/_read_line.
         self._active_limit = f"{label} exceeded {timeout_seconds:g}s"
-        expected = "fitted" if kind == "fit" else "orders"
+        expected = CALL_REPLIES[kind]
         consumed = 0
         try:
             # Materializing and validating the request is the host's own work on
@@ -610,13 +607,16 @@ class DockerStrategyExecutor:
             while True:
                 message, size = self._read_message(deadline)
                 consumed += size
-                if consumed > self.config.limits.max_output_chars:
+                if consumed > self.config.max_output_chars:
                     raise StrategyRaised(
-                        _protocol_cap_message(self.config.limits.max_output_chars)
+                        _protocol_cap_message(self.config.max_output_chars)
                     )
                 message_type = message.get("type")
                 response_sequence = message.get("sequence")
-                if (message_type not in _WORKER_ERROR_TYPES or "sequence" in message) and (
+                # The worker's two failure replies may arrive without a sequence
+                # (an import failure before the first read, a line it could not
+                # parse at all), so neither is held to the sequence check.
+                if (message_type not in ERROR_REPLIES or "sequence" in message) and (
                     isinstance(response_sequence, bool)
                     or not isinstance(response_sequence, int)
                     or response_sequence != sequence
@@ -635,7 +635,7 @@ class DockerStrategyExecutor:
                     self._transport_table = call.bar_table
                     self._transport_last_available_at = last_available_at
                     return message.get("orders")
-                if message_type == "protocol_error":
+                if message_type == PROTOCOL_ERROR_REPLY:
                     # The worker could not speak to the message this host sent
                     # it. That measures the environment exactly as a timeout
                     # does, so the replay year is refunded rather than charged
@@ -645,7 +645,7 @@ class DockerStrategyExecutor:
                         f"Docker {label} failed: strategy worker rejected the host "
                         f"protocol: {detail}"
                     )
-                if message_type == "error":
+                if message_type == ERROR_REPLY:
                     # The worker's reply to a call whose strategy code raised.
                     text = str(message.get("error") or "strategy worker failed")
                     contention = gpu_memory_contention(text) if self.gpu_indices else None
@@ -755,7 +755,6 @@ class DockerStrategyExecutor:
         out rather than reported as zero.
         """
 
-        limits = self.config.limits
         worker = self._fit_worker
         containers = (self,) if worker is None else (self, worker)
         record: dict[str, object] = dict(
@@ -774,8 +773,8 @@ class DockerStrategyExecutor:
         if fit_seconds:
             record["fit_seconds"] = fit_seconds
         if self.fit_schedule is not None:
-            record["fit_timeout_seconds"] = limits.fit_timeout_seconds
-        record["decision_timeout_seconds"] = limits.timeout_seconds
+            record["fit_timeout_seconds"] = self.config.fit_timeout_seconds
+        record["decision_timeout_seconds"] = self.config.timeout_seconds
         return record
 
     def close(self) -> None:
@@ -795,7 +794,7 @@ class DockerStrategyExecutor:
                 try:
                     self._write(
                         process.stdin,
-                        {"type": "close"},
+                        {"type": CLOSE_REQUEST},
                         time.monotonic() + _PROCESS_STOP_TIMEOUT_SECONDS,
                     )
                 except (BrokenPipeError, OSError):
@@ -847,7 +846,7 @@ class DockerStrategyExecutor:
         generous environment-side budget and its own error.
         """
 
-        limit = self.config.limits.startup_timeout_seconds
+        limit = self.config.startup_timeout_seconds
         self._active_limit = f"strategy worker startup exceeded {limit:g}s"
         deadline = time.monotonic() + limit
         try:
@@ -888,7 +887,7 @@ class DockerStrategyExecutor:
 
     def _timeout_message(self) -> str:
         return self._active_limit or (
-            f"strategy inference exceeded {self.config.limits.timeout_seconds:g}s"
+            f"strategy inference exceeded {self.config.timeout_seconds:g}s"
         )
 
     def _write(self, stream, message: Mapping[str, object], deadline: float) -> None:
@@ -933,14 +932,14 @@ class DockerStrategyExecutor:
                     line = bytes(self._stdout_buffer[:newline])
                     del self._stdout_buffer[: newline + 1]
                     return line
-                if len(self._stdout_buffer) > self.config.limits.max_output_chars:
+                if len(self._stdout_buffer) > self.config.max_output_chars:
                     raise StrategyRaised(
-                        _protocol_cap_message(self.config.limits.max_output_chars)
+                        _protocol_cap_message(self.config.max_output_chars)
                     )
                 remaining = deadline - time.monotonic()
                 if remaining <= 0 or not selector.select(remaining):
                     raise TimeoutError(self._timeout_message())
-                chunk = os.read(fd, min(4096, self.config.limits.max_output_chars + 1))
+                chunk = os.read(fd, min(4096, self.config.max_output_chars + 1))
                 if not chunk:
                     # The pipe closes while ``docker run`` exits, a moment
                     # before its status can be collected, so a bare poll() can
@@ -960,7 +959,7 @@ class DockerStrategyExecutor:
                         # surviving container's figure.
                         raise _WorkerKilled(
                             f"strategy worker was killed before a response (exit {code}, "
-                            f"SIGKILL): the container's {self.config.limits.memory} memory "
+                            f"SIGKILL): the container's {self.config.spec.memory} memory "
                             "cap is what kills a worker this way, and its cgroup is gone "
                             "with the container, so this run reports no peak memory"
                         )
@@ -971,7 +970,7 @@ class DockerStrategyExecutor:
         process = self._process
         if process is None or process.stderr is None:
             return
-        limit = self.config.limits.max_output_chars
+        limit = self.config.max_output_chars
         while True:
             chunk = process.stderr.read(4096)
             if not chunk:
@@ -1056,7 +1055,7 @@ class DockerStrategyExecutor:
     def _remove_container(self) -> None:
         try:
             subprocess.run(
-                [self.config.docker_executable, "rm", "--force", self.container_name],
+                [self.config.spec.docker_executable, "rm", "--force", self.container_name],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -1082,34 +1081,15 @@ class PersistentCommandRunner:
         max_output_chars: int,
         input_text: str | None = None,
     ) -> CommandResult:
-        from .tools.base import CommandResult
-
         if not argv or any(not str(item) for item in argv):
             raise ValueError("argv must contain non-empty strings")
-        completed = self.sandbox.exec_limited(
+        return self.sandbox.exec_limited(
             tuple(map(str, argv)),
             cwd=cwd,
             timeout_seconds=timeout_seconds,
             max_output_chars=max_output_chars,
             input_text=input_text,
         )
-        return CommandResult(
-            completed.exit_code,
-            completed.stdout,
-            completed.stderr,
-            timed_out=completed.exit_code == 124,
-            stdout_truncated=completed.stdout_truncated,
-            stderr_truncated=completed.stderr_truncated,
-        )
-
-
-@dataclass(frozen=True)
-class ExecResult:
-    exit_code: int
-    stdout: str
-    stderr: str
-    stdout_truncated: bool = False
-    stderr_truncated: bool = False
 
 
 def _with_container_timeout(argv: Sequence[str], timeout_seconds: float) -> list[str]:
@@ -1130,11 +1110,13 @@ def _run_limited_capture(
     timeout_seconds: float,
     max_output_chars: int,
     stdin: int = subprocess.DEVNULL,
-) -> ExecResult:
+) -> CommandResult:
     """Run a command while bounding retained stdout and stderr.
 
     ``stdin`` is handed to the command as is; an attached Docker command gets
-    one that stays open while it runs (``sandbox.attached_stdin``).
+    one that stays open while it runs (``sandbox.attached_stdin``). Exit code
+    124 is a timeout, the host's own here or the container's ``timeout``
+    (``_with_container_timeout``).
     """
 
     if timeout_seconds <= 0:
@@ -1208,12 +1190,13 @@ def _run_limited_capture(
     else:
         return_code = process.wait()
     close_process_pipes(process)
-    return ExecResult(
+    return CommandResult(
         return_code,
         stdout.decode("utf-8", errors="replace"),
         stderr.decode("utf-8", errors="replace"),
-        stdout_truncated,
-        stderr_truncated,
+        timed_out=return_code == 124,
+        stdout_truncated=stdout_truncated,
+        stderr_truncated=stderr_truncated,
     )
 
 
@@ -1255,27 +1238,6 @@ def _pinned_store(pin: str) -> Path | None:
         raise StrategyExecutionError(str(exc)) from exc
 
 
-def _strategy_gpus(limits: SandboxLimits) -> list[int]:
-    """The devices this strategy container attaches: the ones it was given.
-
-    Choosing a device is not the Environment's (``environment.gpu``): whoever
-    builds the limits pins ``gpu_devices``. There is no CPU fallback either --
-    ``fit(context)`` training on a device the experiment did not get would be
-    a different computation reported as the same result -- so a request for
-    devices that names none raises ``GpuUnavailableError``.
-    """
-
-    if limits.gpu_count <= 0:
-        return []
-    if not limits.gpu_devices:
-        raise GpuUnavailableError(
-            f"this strategy container asks for {limits.gpu_count} GPU(s) and was given no "
-            "device: an arm's worker attaches the cards the console claimed for it, and "
-            "anything else takes its cards from pipelines.hitl_state.select_gpus"
-        )
-    return list(limits.gpu_devices)
-
-
 def _require_local_image(config: SandboxConfig) -> str:
     """Resolve Docker and reject an absent or stale image without any pull attempt.
 
@@ -1288,12 +1250,12 @@ def _require_local_image(config: SandboxConfig) -> str:
     ``contract_fingerprint``.
     """
 
-    executable = shutil.which(config.docker_executable)
+    executable = shutil.which(config.spec.docker_executable)
     if executable is None:
-        raise StrategyExecutionError(f"Docker executable is unavailable: {config.docker_executable}")
+        raise StrategyExecutionError(f"Docker executable is unavailable: {config.spec.docker_executable}")
     try:
         inspected = subprocess.run(
-            [executable, "image", "inspect", config.image],
+            [executable, "image", "inspect", config.spec.image],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
@@ -1305,12 +1267,12 @@ def _require_local_image(config: SandboxConfig) -> str:
     if inspected.returncode != 0:
         detail = _limited_text(inspected.stderr, 4000).strip()
         raise StrategyExecutionError(
-            f"sandbox image is unavailable locally: {config.image}"
+            f"sandbox image is unavailable locally: {config.spec.image}"
             + (f" ({detail})" if detail else "")
         )
     try:
         assert_image_contract_current(
-            config.image, runtime=IMPORTED_RUNTIME_FINGERPRINT, docker_executable=executable
+            config.spec.image, runtime=IMPORTED_RUNTIME_FINGERPRINT, docker_executable=executable
         )
     except SandboxImageContractMismatch as exc:
         raise StrategyExecutionError(str(exc)) from exc
@@ -1328,7 +1290,6 @@ __all__ = [
     "CONTAINER_STRATEGY_DIR",
     "IMPORTED_RUNTIME_FINGERPRINT",
     "DockerStrategyExecutor",
-    "ExecResult",
     "FittableStrategyExecutor",
     "GpuMemoryContention",
     "PersistentCommandRunner",

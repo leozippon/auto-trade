@@ -21,13 +21,13 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 
 from autotrade.agent.compact import safe_error_summary
+from autotrade.common.records import redact_host_paths
 from autotrade.environment.artifacts import (
     READONLY_FILES,
     ArtifactSnapshotUnstable,
     FilesystemArtifactStore,
     copy_artifact_snapshot,
 )
-from autotrade.environment.data.summary import HOST_PATH_RE
 from autotrade.environment.executor import (
     gpu_contended,
     raised_by_strategy,
@@ -40,7 +40,7 @@ from autotrade.environment.runtime import (
     AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS,
     RunManifest,
 )
-from autotrade.environment.sandbox import link_copytree
+from autotrade.environment.sandbox import SandboxConfig, link_copytree
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.time_budget import (
     InferenceTimeBudget,
@@ -125,7 +125,7 @@ def _active_excess_at_cost_stress(step: StepResult, multiplier: float) -> float 
 
 def _public_error_text(exc: Exception) -> str:
     """The exact failure text with host paths redacted."""
-    return HOST_PATH_RE.sub("[host_path]", safe_error_summary(exc))
+    return redact_host_paths(safe_error_summary(exc))
 
 
 def _public_validation_error(exc: Exception) -> str:
@@ -211,7 +211,7 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
     account, while the replay hands the strategy a rolling directory-per-domain
     as-of view and a real ``AccountSnapshot``. This tool removes the reason to
     hand-roll one: same executor, same per-decision wall clock
-    (``SandboxLimits.timeout_seconds``), same as-of layout, same account
+    (``SandboxConfig.timeout_seconds``), same as-of layout, same account
     object, same modification gate — only the window is short.
 
     It is deliberately NOT an evaluation: no revision is committed, no step-tree
@@ -1284,7 +1284,7 @@ def _fit_seconds_summary(fits: Sequence[float]) -> dict[str, float]:
 def _batch_replay_timeouts(evaluator: object, workers: int) -> Iterator[None]:
     """Widen both strategy deadlines to the replay width this batch creates.
 
-    ``SandboxLimits.fit_timeout_seconds`` and ``timeout_seconds`` are
+    ``SandboxConfig.fit_timeout_seconds`` and ``timeout_seconds`` are
     runaway guards measured on host wall clock. Fanning ``workers`` replays
     out over the same host makes the same ``fit(context)`` and the same
     ``generate_orders(context)`` take longer without the strategy doing
@@ -1306,22 +1306,18 @@ def _batch_replay_timeouts(evaluator: object, workers: int) -> Iterator[None]:
 
     The batch owns the evaluator for the pool's lifetime — a session runs
     one tool at a time — so mutating and restoring the shared config here is
-    safe. An evaluator without sandbox limits (trusted mode, test doubles) has
-    no clock to scale and is left alone.
+    safe. An evaluator without a strategy sandbox (trusted mode, test doubles)
+    has no clock to scale and is left alone.
     """
 
     config = getattr(evaluator, "sandbox", None)
-    limits = getattr(config, "limits", None)
-    if limits is None:
+    if not isinstance(config, SandboxConfig):
         yield
         return
     evaluator.sandbox = replace(  # type: ignore[attr-defined]
         config,
-        limits=replace(
-            limits,
-            fit_timeout_seconds=limits.fit_timeout_seconds * workers,
-            timeout_seconds=limits.timeout_seconds * workers,
-        ),
+        fit_timeout_seconds=config.fit_timeout_seconds * workers,
+        timeout_seconds=config.timeout_seconds * workers,
     )
     try:
         yield
@@ -1983,7 +1979,8 @@ class BatchValidateTool(SessionTimeBudgetAware):
         # holds while a free one waits.
         free_cards: queue.SimpleQueue[int] = queue.SimpleQueue()
         sandbox = getattr(self.backtest.evaluator, "sandbox", None)
-        devices = getattr(getattr(sandbox, "limits", None), "gpu_devices", ())
+        pinned = sandbox.spec.gpu if isinstance(sandbox, SandboxConfig) else None
+        devices = pinned if isinstance(pinned, tuple) else ()
         cards = leg_cards(devices, workers)
         for card in cards:
             free_cards.put(card)

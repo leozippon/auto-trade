@@ -1240,6 +1240,10 @@ def test_shared_session_llm_budget_counts_every_gateway_call():
 
 def test_compaction_failure_keeps_history_and_opens_failure_circuit():
     class BrokenLLM:
+        provider = "broken"
+        model = "broken"
+        context_window_tokens = None
+
         def complete(self, *args, **kwargs):
             raise RuntimeError("provider failed with Authorization: secret")
 
@@ -1641,6 +1645,10 @@ def test_forced_compaction_proceeds_past_the_call_cap_and_message_floor():
     assert compactor.compact(list(second.messages), force=True) is None
 
     class BrokenLLM:
+        provider = "broken"
+        model = "broken"
+        context_window_tokens = None
+
         def complete(self, *args, **kwargs):
             raise RuntimeError("compaction model down")
 

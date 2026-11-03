@@ -18,6 +18,7 @@ from autotrade.environment.artifacts import (
     REVISION_MANIFEST_FILE,
     FilesystemArtifactStore,
 )
+from autotrade.environment.llm.proxy import ScriptedLLM
 from autotrade.environment.runtime import append_versioned_jsonl
 from autotrade.pipelines import experiment as experiment_module
 from autotrade.pipelines import worker
@@ -1212,7 +1213,7 @@ def test_a_readme_edit_stops_a_new_session_and_not_one_already_seeded(
             ledger=ExperimentLedger(options.rolling.ledger_path),
             store=FilesystemArtifactStore(options.experiment_dir / "artifacts" / "strategy"),
             ref_store=AgentRefStore(options.experiment_dir),
-            llm=object(),
+            llm=ScriptedLLM([]),
         )
         return repo, build.pipeline
 

@@ -28,12 +28,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
+from autotrade.common.records import write_json_atomic
+
 from .runtime import (
     RUNTIME_CACHE_DIR_NAMES,
     RUNTIME_CACHE_SUFFIXES,
     chmod_tree,
     utc_now_iso,
-    write_json_atomic,
 )
 
 REQUIRED_FILES = ("main.py",)

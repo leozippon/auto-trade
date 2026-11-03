@@ -23,8 +23,9 @@ Until 2026-11-03 an operator could incubate one node of an arm whose research
 ended without a graduation, which appended ``incubation`` (the node's
 entry-screen reading, the artifact it froze, its forward and Held-out reading
 and the forward screen on it); nothing appends one any more, and the
-frozen-tree prune keeps what one froze (:func:`incubation_record`). An arm created before then with ``lineage_arms`` may also carry a
-``lineage`` record, which nothing reads.
+frozen-tree prune keeps what one froze (:func:`incubation_record`). An arm
+created before then with ``lineage_arms`` may also carry a ``lineage``
+record, which nothing reads.
 
 Every record carries the link keys ``experiment_id``, ``epoch_id``, ``fold_id``
 and ``run_id``: ``epoch_id`` names the stage (``research`` or ``forward``) and

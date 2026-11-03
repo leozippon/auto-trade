@@ -177,7 +177,7 @@ BASE_EXPECTED_DEFAULTS: dict[str, object] = {
     # Replay-years the research session may spend on validations; the packs
     # size their rounds against it.
     "max_replay_years": 96,
-    # Derived from SandboxLimits.fit_timeout_seconds; packs promise the Agent a
+    # Derived from SandboxConfig.fit_timeout_seconds; packs promise the Agent a
     # fit budget of this size.
     "strategy_fit_timeout_seconds": 3600,
     "operating_memory": "curated+graduated",

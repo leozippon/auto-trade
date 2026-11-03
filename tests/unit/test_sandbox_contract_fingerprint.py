@@ -43,7 +43,7 @@ from autotrade.environment.executor import (
     StrategyExecutionError,
     _require_local_image,
 )
-from autotrade.environment.sandbox import SandboxConfig
+from autotrade.environment.sandbox import SandboxConfig, SandboxSpec
 
 from .fixtures_sandbox import docker_available
 
@@ -87,7 +87,7 @@ def _container_start(tmp_path: Path) -> SandboxConfig:
     docker = tmp_path / "docker"
     docker.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     docker.chmod(0o755)
-    return SandboxConfig(image=IMAGE, docker_executable=str(docker))
+    return SandboxConfig(spec=SandboxSpec(image=IMAGE, docker_executable=str(docker), gpu=None))
 
 
 def test_both_fingerprints_are_stable_and_layout_independent(tmp_path: Path) -> None:
@@ -194,7 +194,7 @@ def test_a_readme_edit_is_refused_where_a_session_mounts_it_and_nowhere_else(
     monkeypatch.setattr(contract_fingerprint, "_repository_root", lambda: checkout)
 
     config = _container_start(tmp_path)
-    assert _require_local_image(config) == config.docker_executable
+    assert _require_local_image(config) == config.spec.docker_executable
     with pytest.raises(SandboxImageContractMismatch, match=AGENT_CONTRACT_PATHS[0]):
         assert_image_contract_current(
             IMAGE, runtime=IMPORTED_RUNTIME_FINGERPRINT, readme=readme

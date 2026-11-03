@@ -31,6 +31,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from autotrade.common.records import read_json_object
 from autotrade.environment.data.contracts import (
     DOMAIN_REFRESH_NODES,
     EVENING_NODE,
@@ -223,7 +224,7 @@ def assert_seed_timing_contract(seed: Path, snapshot_config: SnapshotConfig) -> 
     mix two timings). A seed built before seeds recorded the contract cannot
     prove it and is refused too."""
 
-    record = _load_json(Path(seed) / "provider.json")
+    record = read_json_object(Path(seed) / "provider.json")
     recorded = record.get("timing_contract")
     expected = snapshot_timing_contract(snapshot_config)
     if recorded == expected:
@@ -266,7 +267,7 @@ def assert_seed_snapshot_config(
     provider_path = Path(seed) / "provider.json"
     if not provider_path.is_file() or provider_path.is_symlink():
         raise ValueError(f"PIT view seed is missing provider.json: {provider_path}")
-    record = _load_json(provider_path)
+    record = read_json_object(provider_path)
     # The on-disk contract version is also known at create time: a seed built
     # under an older one holds views this code would never link, so naming it
     # would only fail at worker start after a misleading acceptance.
@@ -424,7 +425,7 @@ def seed_pit_views(
     provider_path = seed / "provider.json"
     if not provider_path.is_file() or provider_path.is_symlink():
         raise RuntimeError(f"PIT view seed is missing provider.json: {provider_path}")
-    seed_record = _load_json(provider_path)
+    seed_record = read_json_object(provider_path)
     if contract_identity(seed_record) != contract_identity(expected_provider):
         if required:
             raise RuntimeError(
@@ -563,16 +564,6 @@ def _assert_inside(path: Path, root: Path) -> None:
 def _skip_seed_name(name: str) -> bool:
     lowered = name.lower()
     return name.startswith(".") or lowered.endswith(".lock") or ".tmp" in lowered
-
-
-def _load_json(path: Path) -> dict[str, object]:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"invalid PIT cache record {path}: {exc}") from exc
-    if not isinstance(value, dict):
-        raise TypeError(f"PIT cache record is not an object: {path}")
-    return value
 
 
 __all__ = [

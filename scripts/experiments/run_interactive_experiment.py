@@ -39,8 +39,9 @@ from _bootstrap import add_repo_src
 
 REPO_ROOT = add_repo_src(__file__)
 
-from autotrade.environment.runtime import utc_now_iso, write_json_atomic
-from autotrade.pipelines.hitl_state import StatusReporter, read_json
+from autotrade.common.records import read_json_object, write_json_atomic
+from autotrade.environment.runtime import utc_now_iso
+from autotrade.pipelines.hitl_state import StatusReporter
 from autotrade.pipelines.worker import load_worker_options, run_local_interactive_worker
 
 
@@ -114,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
         # stopped survives; the ledger record of the interrupted session is
         # written by the pipeline while this unwinds.
         bootstrap.stop()
-        status = read_json(status_path)
+        status = read_json_object(status_path, missing_ok=True)
         status.update(
             {
                 "schema_version": 1,

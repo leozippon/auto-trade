@@ -27,16 +27,22 @@ from __future__ import annotations
 
 import shutil
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
+from autotrade.common.records import (
+    dataclass_from_record,
+    read_json_object,
+    write_json_atomic,
+)
+from autotrade.common.time import CN_TZ
 from autotrade.environment.artifacts import artifact_fingerprint
 from autotrade.environment.broker import BrokerProfile, default_permitted_boards
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.replay.curve import result_curve
-from autotrade.environment.sandbox import SandboxConfig, SandboxLimits
-from autotrade.environment.strategy import CN_TZ, StrategySchedule
+from autotrade.environment.sandbox import GpuMode, SandboxConfig, SandboxSpec
+from autotrade.environment.strategy import StrategySchedule
 from autotrade.environment.strategy_loader import validate_strategy_package
 from autotrade.pipelines.experiment import null_control_seed
 from autotrade.pipelines.ledger import (
@@ -52,12 +58,17 @@ from autotrade.pipelines.worker import (
 )
 
 from .pit import require_audited_fundamentals
-from .storage import read_json, read_jsonl, write_json_atomic
+from .storage import read_jsonl
 
 BOOK_NAME = "book.json"
 # 2: the track and the pinned verdict rules. An older book is refused, never
-# migrated: its verdict would be read by rules nobody pinned.
-BOOK_SCHEMA_VERSION = 2
+# migrated: its verdict would be read by rules nobody pinned. 3: the snapshot
+# configuration and the strategy sandbox as their own records
+# (``SnapshotConfig.to_record``, ``SandboxConfig.to_record``) where 2 stored
+# the configuration's fields and the sandbox's former image/limits layout; a
+# schema-2 book is read in 3's form (``_schema_2_upgraded``) and its file is
+# never rewritten.
+BOOK_SCHEMA_VERSION = 3
 STRATEGY_COPY_NAME = "strategy"
 TRACKS = ("graduated", "incubating")
 # Incubating books open at once; a killed book does not count.
@@ -163,7 +174,7 @@ def create_book(
     if not (source / "output" / "main.py").is_file():
         raise FileNotFoundError(f"frozen artifact has no output/main.py: {source}")
 
-    params = read_json(experiment / "hitl" / "params.json")
+    params = read_json_object(experiment / "hitl" / "params.json", missing_ok=True)
     if not params:
         raise ValueError(f"missing experiment params: {experiment / 'hitl' / 'params.json'}")
     if initial_cash is not None:
@@ -185,10 +196,10 @@ def create_book(
     sandbox = _strategy_sandbox_from_spec(
         options.agent_sandbox, **_strategy_boundary(options.rolling)
     )
-    image = read_json(experiment / "hitl" / "sandbox_image.json").get("image_ref")
+    image = read_json_object(experiment / "hitl" / "sandbox_image.json", missing_ok=True).get("image_ref")
     if image:
         # The image the experiment's formal replays actually ran.
-        sandbox = replace(sandbox, image=str(image))
+        sandbox = replace(sandbox, spec=replace(sandbox.spec, image=str(image)))
 
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     copy = root / STRATEGY_COPY_NAME
@@ -214,16 +225,9 @@ def create_book(
         # continues the copied out-of-sample curve against the same benchmark
         # instead of splicing two different indexes into one line.
         "benchmark_index": options.rolling.benchmark_index,
-        "profile": asdict(profile),
-        "sandbox": {
-            "image": sandbox.image,
-            "docker_executable": sandbox.docker_executable,
-            "limits": asdict(sandbox.limits),
-            # The arm's pretrained-store pin; a book created before the store
-            # existed has no key and mounts nothing.
-            "pretrained_manifest_sha256": sandbox.pretrained_manifest_sha256,
-        },
-        "snapshot_config": asdict(options.snapshot_config),
+        "profile": profile.to_record(),
+        "sandbox": sandbox.to_record(),
+        "snapshot_config": options.snapshot_config.to_record(),
         "max_intraday_row_group_rows": options.max_intraday_row_group_rows,
         "raw_dir": str(options.raw_dir),
         "fundamental_events_root": str(options.fundamental_events_root),
@@ -238,7 +242,7 @@ def create_book(
             "panel_seed": null_control_seed(artifact_id, "paper"),
         },
     }
-    write_json_atomic(root / BOOK_NAME, record)
+    write_json_atomic(root / BOOK_NAME, record, private=True, sort_keys=False)
     copy_source_history(root, experiment, source_record)
     return load_book(root)
 
@@ -281,6 +285,8 @@ def write_source_history(
             "series": curve["series"],
             "benchmark": curve["benchmark"],
         },
+        private=True,
+        sort_keys=False,
     )
     return target
 
@@ -323,16 +329,17 @@ def copy_source_history(
 
 def load_book(state_root: str | Path) -> Book:
     root = Path(state_root).resolve()
-    record = read_json(root / BOOK_NAME)
+    record = read_json_object(root / BOOK_NAME, missing_ok=True)
     if not record:
         raise FileNotFoundError(f"no Paper book at {root}; create one with `run_paper.py init`")
+    if record.get("schema_version") == 2:
+        record = _schema_2_upgraded(record)
     if record.get("schema_version") != BOOK_SCHEMA_VERSION:
         raise ValueError(
             f"unsupported Paper book schema {record.get('schema_version')!r} in {root / BOOK_NAME} "
-            f"(this code reads {BOOK_SCHEMA_VERSION}): a book without a track and pinned verdict "
+            f"(this code reads 2 and {BOOK_SCHEMA_VERSION}): a book without a track and pinned verdict "
             "rules is not migrated; delete it and create it again"
         )
-    sandbox = record["sandbox"]
     # A book created before the host NL interface was removed (2026-10-20) also
     # records ``nl_gateway``, ``nl_config`` and ``nl_failure_policy``. They
     # configured a service that no longer exists, so they are deliberately
@@ -346,14 +353,9 @@ def load_book(state_root: str | Path) -> Book:
         strategy_path=root / str(record["strategy_path"]),
         models_dir=root / str(record["models_dir"]) if record.get("models_dir") else None,
         schedule=StrategySchedule(**record["schedule"]),
-        profile=BrokerProfile(**record["profile"]),
-        sandbox=SandboxConfig(
-            image=str(sandbox["image"]),
-            docker_executable=str(sandbox["docker_executable"]),
-            limits=SandboxLimits(**_tuples(sandbox["limits"])),
-            pretrained_manifest_sha256=str(sandbox.get("pretrained_manifest_sha256") or ""),
-        ),
-        snapshot_config=SnapshotConfig(**_tuples(record["snapshot_config"])),
+        profile=BrokerProfile.from_record(record["profile"]),
+        sandbox=SandboxConfig.from_record(record["sandbox"]),
+        snapshot_config=SnapshotConfig.from_record(record["snapshot_config"]),
         max_intraday_row_group_rows=int(record["max_intraday_row_group_rows"]),
         raw_dir=Path(record["raw_dir"]),
         fundamental_events_root=Path(record["fundamental_events_root"]),
@@ -396,7 +398,7 @@ def open_incubating_books(paper_root: str | Path) -> list[str]:
         book.name
         for book in books
         if not book.name.startswith(".")
-        and read_json(book / BOOK_NAME).get("candidate_source") == "incubating"
+        and read_json_object(book / BOOK_NAME, missing_ok=True).get("candidate_source") == "incubating"
         and book_status(book) != "killed"
     ]
 
@@ -414,10 +416,67 @@ def require_incubating_place(paper_root: str | Path, book_id: str) -> None:
         )
 
 
-def _tuples(record: dict[str, object]) -> dict[str, object]:
-    """JSON arrays back to the tuples the frozen dataclasses hold."""
+def _schema_2_upgraded(record: dict[str, object]) -> dict[str, object]:
+    """A schema-2 book's record in schema 3's form.
 
-    return {key: tuple(value) if isinstance(value, list) else value for key, value in record.items()}
+    2 stored the snapshot configuration's fields, which come back strictly as
+    the configuration whose record 3 stores. Its sandbox kept the image,
+    Docker executable and pretrained-store pin (absent on a book created
+    before the store existed: it mounts nothing) beside a ``limits`` block of
+    the container's resources, the worker's clocks and the GPU request as a
+    count plus pinned devices (none pinned: the run takes its cards).
+    """
+
+    snapshot_config = dataclass_from_record(SnapshotConfig, record["snapshot_config"])
+    sandbox = record["sandbox"]
+    limits = sandbox["limits"]
+    if set(limits) != _SCHEMA_2_LIMIT_KEYS:
+        raise ValueError(f"schema-2 Paper sandbox limits must hold exactly {sorted(_SCHEMA_2_LIMIT_KEYS)}")
+    count = limits["gpu_count"]
+    spec = SandboxSpec(
+        image=str(sandbox["image"]),
+        docker_executable=str(sandbox["docker_executable"]),
+        pretrained_manifest_sha256=str(sandbox.get("pretrained_manifest_sha256") or ""),
+        cpus=limits["cpus"],
+        memory=limits["memory"],
+        pids=limits["pids"],
+        tmpfs_size=limits["tmpfs_size"],
+        shm_size=limits["shm_size"],
+        gpu=(tuple(limits["gpu_devices"]) or GpuMode.AUTO) if count else None,
+        gpu_count=count,
+        gpu_name_filter=limits["gpu_name_filter"],
+    )
+    config = SandboxConfig(
+        spec=spec,
+        timeout_seconds=limits["timeout_seconds"],
+        fit_timeout_seconds=limits["fit_timeout_seconds"],
+        startup_timeout_seconds=limits["startup_timeout_seconds"],
+        max_output_chars=limits["max_output_chars"],
+    )
+    return {
+        **record,
+        "schema_version": BOOK_SCHEMA_VERSION,
+        "snapshot_config": snapshot_config.to_record(),
+        "sandbox": config.to_record(),
+    }
+
+
+_SCHEMA_2_LIMIT_KEYS = frozenset(
+    {
+        "cpus",
+        "memory",
+        "pids",
+        "timeout_seconds",
+        "fit_timeout_seconds",
+        "startup_timeout_seconds",
+        "max_output_chars",
+        "tmpfs_size",
+        "shm_size",
+        "gpu_count",
+        "gpu_name_filter",
+        "gpu_devices",
+    }
+)
 
 
 __all__ = [

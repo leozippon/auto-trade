@@ -34,6 +34,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from autotrade.common.records import read_json_object, write_json_atomic
+from autotrade.common.time import CN_TZ
 from autotrade.environment.data.snapshot import load_snapshot_manifest
 from autotrade.environment.replay.null_control import run_null_control
 from autotrade.environment.replay.stats import (
@@ -47,7 +49,6 @@ from autotrade.environment.replay.style import (
     slot_benchmark,
     slot_membership,
 )
-from autotrade.environment.strategy import CN_TZ
 from autotrade.pipelines.pit_backend import _span_daily, load_slot_corporate_actions
 from autotrade.pipelines.verdict import BOOTSTRAP_BLOCK_DAYS, bootstrap_lower_bound
 
@@ -55,7 +56,7 @@ from .book import VERDICT_LOG_NAME, Book, book_status
 from .engine import PAPER_STATE_NAME, writer_lock
 from .fills import CORRECTIONS_NAME, key_text, mode, parse_key
 from .pit import newest_replay_slot
-from .storage import append_jsonl_once, read_json, read_jsonl, write_json_atomic
+from .storage import append_jsonl_once, read_jsonl
 
 VERDICT_NAME = "verdict.json"
 # 3: the plain reading alone; 2 carried a regressed one beside it.
@@ -70,7 +71,7 @@ def paper_reading(book: Book) -> dict[str, object]:
     """
 
     equity, executions = _journals(book.root)
-    previous = read_json(book.root / VERDICT_NAME)
+    previous = read_json_object(book.root / VERDICT_NAME, missing_ok=True)
     if not equity:
         return evidence_reading(book, equity, executions, None, {}, previous=previous)
     slot = newest_replay_slot(book.root)
@@ -197,7 +198,7 @@ def record_verdict_locked(book: Book) -> dict[str, object]:
     transition = reading["transition"]
     if transition is not None and book_status(book.root) == "observing":
         append_jsonl_once(book.root / VERDICT_LOG_NAME, transition)
-    write_json_atomic(book.root / VERDICT_NAME, reading)
+    write_json_atomic(book.root / VERDICT_NAME, reading, private=True, sort_keys=False)
     return reading
 
 
@@ -291,7 +292,7 @@ def _journals(root: Path) -> tuple[list[dict[str, object]], list[dict[str, objec
     if skipped:
         raise ValueError(f"{root.name} has {skipped} damaged journal lines; its verdict cannot be read")
     if corrections:
-        ledger = mode(read_json(root / PAPER_STATE_NAME))["sessions"]
+        ledger = mode(read_json_object(root / PAPER_STATE_NAME, missing_ok=True))["sessions"]
         executions = _corrected(executions, {(str(row["corrects"]), str(row["key"])) for row in corrections}, ledger)
     return sorted(equity, key=lambda row: str(row["trade_date"])), executions
 

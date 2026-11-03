@@ -15,13 +15,13 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 
+from autotrade.common.records import read_json_object
 from autotrade.environment.sandbox import remove_sandbox_tree
 from autotrade.pipelines.ledger import ExperimentLedger, paper_candidate
 
 from .book import BOOK_NAME, create_book
 from .engine import writer_lock
 from .fills import FILLS_NAME
-from .storage import read_json
 
 # The Paper state root, relative to the repository root.
 PAPER_STATE_DIR = Path("data/trading/paper")
@@ -65,7 +65,7 @@ def experiment_books(state_root: str | Path, experiment_id: str) -> list[str]:
     return [
         book_id
         for book_id in list_books(root)
-        if read_json(root / book_id / BOOK_NAME).get("experiment_id") == experiment_id
+        if read_json_object(root / book_id / BOOK_NAME, missing_ok=True).get("experiment_id") == experiment_id
     ]
 
 

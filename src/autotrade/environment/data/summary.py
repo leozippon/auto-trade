@@ -6,12 +6,13 @@ import json
 from collections.abc import Mapping
 from pathlib import Path
 
+from autotrade.common.records import redact_host_paths
 from autotrade.environment.data.units import (
     AGENT_UNIT_CONTRACT,
     build_unit_reference,
     snapshot_column_map,
 )
-from autotrade.environment.runtime import HOST_PATH_RE, utc_now_iso
+from autotrade.environment.runtime import utc_now_iso
 
 LARGE_TABLE_ROW_THRESHOLD = 1_000_000
 LARGE_TABLE_SIZE_THRESHOLD_BYTES = 100 * 1024 * 1024
@@ -278,7 +279,7 @@ def _metadata_error_message(exc: Exception, *, path: Path, root: Path, mount_pat
         message = message.replace(str(root.resolve()), str(Path(str(mount_path)).parent))
     except OSError:
         pass
-    return HOST_PATH_RE.sub("[host_path]", message)
+    return redact_host_paths(message)
 
 
 def _compact_domains(domains: object) -> dict[str, dict[str, object]]:

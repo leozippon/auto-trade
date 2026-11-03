@@ -18,7 +18,9 @@ from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
-from .runtime import utc_now_iso, write_json_atomic
+from autotrade.common.records import write_json_atomic
+
+from .runtime import utc_now_iso
 from .sandbox import SandboxSpec, probe_image_runtime
 
 SANDBOX_IMAGE_STATE_NAME = "sandbox_image.json"

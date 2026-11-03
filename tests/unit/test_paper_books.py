@@ -12,10 +12,17 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from autotrade.common.records import (
+    dataclass_record,
+    read_json_object,
+    write_json_atomic,
+)
 from autotrade.data_sources.tushare.cron_update import resolve_job_start_date
 from autotrade.environment.artifacts import artifact_fingerprint
-from autotrade.environment.broker import DailyBroker
+from autotrade.environment.broker import BrokerProfile, DailyBroker
 from autotrade.environment.broker_core import board_of
+from autotrade.environment.data.snapshot import SnapshotConfig
+from autotrade.environment.sandbox import GpuMode, SandboxConfig
 from autotrade.environment.strategy import CN_TZ
 from autotrade.paper import fills
 from autotrade.paper.book import (
@@ -39,7 +46,7 @@ from autotrade.paper.books import (
     validate_book_id,
 )
 from autotrade.paper.engine import PaperWriterBusy
-from autotrade.paper.storage import append_jsonl_once, read_json, write_json_atomic
+from autotrade.paper.storage import append_jsonl_once
 from autotrade.pipelines.ledger import ExperimentLedger, forward_record
 from tests.unit.paper_book_fixture import (
     FAILING_STRATEGY,
@@ -246,16 +253,16 @@ def _kill(root: Path, day: str = "20260105") -> None:
 
 def test_a_new_book_carries_its_track_and_pins_its_verdict_rules(tmp_path: Path):
     book = _graduated_book(tmp_path)
-    record = read_json(book.root / BOOK_NAME)
-    assert record["schema_version"] == 2 and record["candidate_source"] == book.candidate_source == "graduated"
+    record = read_json_object(book.root / BOOK_NAME)
+    assert record["schema_version"] == 3 and record["candidate_source"] == book.candidate_source == "graduated"
     rules = record["verdict_rules"]
     assert (rules["checkpoint_days"], rules["kill_confidence"], rules["confirm_confidence"]) == (126, 0.841, 0.977)
     assert (rules["max_drawdown"], rules["active_max_drawdown"]) == (0.45, 0.30)
     assert isinstance(rules["panel_seed"], int) and book.verdict_rules == rules
 
     incubating = _incubate(tmp_path, "inc")
-    assert read_json(incubating.root / BOOK_NAME)["candidate_source"] == "incubating"
-    assert read_json(incubating.root / "source_history.json")["series"]
+    assert read_json_object(incubating.root / BOOK_NAME)["candidate_source"] == "incubating"
+    assert read_json_object(incubating.root / "source_history.json")["series"]
     with pytest.raises(ValueError, match="source_record"):
         create_book(
             paper_root(tmp_path) / "other", experiment_dir=tmp_path / "experiments/inc",
@@ -280,7 +287,7 @@ def test_a_book_pins_the_boards_its_broker_and_its_verdict_panel_buy_on(tmp_path
         paper_root(tmp_path) / "small", experiment_dir=arm, artifact_id="strategy_research_abc",
         repo_root=tmp_path, track="graduated", initial_cash=100_000,
     )
-    assert read_json(small.root / BOOK_NAME)["profile"]["permitted_boards"] == ["main", "gem"]
+    assert read_json_object(small.root / BOOK_NAME)["profile"]["permitted_boards"] == ["main", "gem"]
 
     book = load_book(_incubate(tmp_path, "inc", boards=("main",)).root)
     assert book.profile.permitted_boards == ("main",)
@@ -338,7 +345,7 @@ def _pit_lake(repo: Path, *, first_month: str, audited_from: str, calendar: bool
 
 def _fundamentals_arm(tmp_path: Path, name: str, window_months: int) -> Path:
     arm = build_arm(tmp_path / "experiments", name, "graduated")
-    params = read_json(arm / "hitl/params.json")
+    params = read_json_object(arm / "hitl/params.json")
     write_json_atomic(
         arm / "hitl/params.json", {**params, "include_fundamentals": True, "window_months": window_months}
     )
@@ -390,9 +397,96 @@ def test_a_book_without_fundamentals_never_asks_the_audit(tmp_path: Path):
 
 def test_a_book_of_an_older_schema_is_refused(tmp_path: Path):
     book = _graduated_book(tmp_path)
-    record = read_json(book.root / BOOK_NAME)
+    record = read_json_object(book.root / BOOK_NAME)
     (book.root / BOOK_NAME).write_text(json.dumps({**record, "schema_version": 1}), encoding="utf-8")
     with pytest.raises(ValueError, match="unsupported Paper book schema 1"):
+        load_book(book.root)
+
+
+def schema_2_record(record: dict[str, object], book: Book) -> dict[str, object]:
+    """``record``, a schema-3 book.json of ``book``, in the layout schema 2
+    wrote and every live book predating schema 3 has."""
+
+    spec = book.sandbox.spec
+    return {
+        **record,
+        "schema_version": 2,
+        "snapshot_config": dataclass_record(book.snapshot_config),
+        "sandbox": {
+            "image": spec.image,
+            "docker_executable": spec.docker_executable,
+            "pretrained_manifest_sha256": spec.pretrained_manifest_sha256,
+            "limits": {
+                "cpus": spec.cpus,
+                "memory": spec.memory,
+                "pids": spec.pids,
+                "timeout_seconds": book.sandbox.timeout_seconds,
+                "fit_timeout_seconds": book.sandbox.fit_timeout_seconds,
+                "startup_timeout_seconds": book.sandbox.startup_timeout_seconds,
+                "max_output_chars": book.sandbox.max_output_chars,
+                "tmpfs_size": spec.tmpfs_size,
+                "shm_size": spec.shm_size,
+                "gpu_count": spec.gpu_count,
+                "gpu_name_filter": spec.gpu_name_filter,
+                "gpu_devices": list(spec.gpu) if isinstance(spec.gpu, tuple) else [],
+            },
+        },
+    }
+
+
+def test_a_schema_2_book_loads_as_the_book_it_was(tmp_path: Path):
+    """Schema 2 stored the snapshot configuration's fields and the sandbox's
+    image/limits layout (the live books predate schema 3); such a book loads
+    to the book schema 3 stores, and the profile, configuration and sandbox
+    records round-trip."""
+    book = _graduated_book(tmp_path)
+    record = read_json_object(book.root / BOOK_NAME)
+    assert BrokerProfile.from_record(record["profile"]) == book.profile
+    assert SnapshotConfig.from_record(record["snapshot_config"]).to_record() == record["snapshot_config"]
+    assert SandboxConfig.from_record(record["sandbox"]) == book.sandbox
+    legacy = schema_2_record(record, book)
+    (book.root / BOOK_NAME).write_text(json.dumps(legacy), encoding="utf-8")
+    assert load_book(book.root) == book
+    del legacy["snapshot_config"]["screen_boards"]
+    (book.root / BOOK_NAME).write_text(json.dumps(legacy), encoding="utf-8")
+    with pytest.raises(ValueError, match="missing keys \\['screen_boards'\\]"):
+        load_book(book.root)
+
+
+@pytest.mark.parametrize(
+    ("count", "devices", "gpu"),
+    [(0, [], None), (1, [], GpuMode.AUTO), (2, [3, 5], (3, 5))],
+    ids=["cpu", "unpinned", "pinned"],
+)
+def test_a_schema_2_books_gpu_request_reads_as_the_spec_it_named(
+    tmp_path: Path, count: int, devices: list[int], gpu: object
+):
+    """Schema 2 named the GPU request as a count and pinned devices. A count
+    with no devices, which two of the live books carry, is a request the run
+    pins (``GpuMode.AUTO``); pinned devices stay pinned; no count is CPU-only."""
+    book = _graduated_book(tmp_path)
+    legacy = schema_2_record(read_json_object(book.root / BOOK_NAME), book)
+    legacy["sandbox"]["limits"].update(gpu_count=count, gpu_devices=devices)
+    (book.root / BOOK_NAME).write_text(json.dumps(legacy), encoding="utf-8")
+    spec = load_book(book.root).sandbox.spec
+    assert (spec.gpu, spec.gpu_count) == (gpu, count)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda limits: limits.pop("pids"),
+        lambda limits: limits.update(pids_limit=limits.pop("pids")),
+        lambda limits: limits.update(extra=1),
+    ],
+    ids=["missing", "renamed", "unknown"],
+)
+def test_a_schema_2_book_with_other_limits_keys_is_refused(tmp_path: Path, change):
+    book = _graduated_book(tmp_path)
+    legacy = schema_2_record(read_json_object(book.root / BOOK_NAME), book)
+    change(legacy["sandbox"]["limits"])
+    (book.root / BOOK_NAME).write_text(json.dumps(legacy), encoding="utf-8")
+    with pytest.raises(ValueError, match="schema-2 Paper sandbox limits must hold exactly"):
         load_book(book.root)
 
 
@@ -401,7 +495,7 @@ def test_a_book_created_with_the_retired_nl_settings_loads_as_one_without_them(t
     settings into book.json, in the shape below. Such a book loads to exactly
     the book it would be without them, and a new book no longer writes them."""
     book = _graduated_book(tmp_path)
-    record = read_json(book.root / BOOK_NAME)
+    record = read_json_object(book.root / BOOK_NAME)
     retired = {"nl_gateway", "nl_config", "nl_failure_policy"}
     assert not retired & set(record)
     legacy = {

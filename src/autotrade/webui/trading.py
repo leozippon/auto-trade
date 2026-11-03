@@ -33,13 +33,14 @@ are already offset-aware and pass through as opaque display text.
 
 from __future__ import annotations
 
-import json
 import math
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 
 import pyarrow as pa
 
+from autotrade.common.records import read_json_object
+from autotrade.common.time import CN_TZ
 from autotrade.environment.data.contracts import benchmark_index_label
 from autotrade.environment.replay.curve import curve_entry
 from autotrade.environment.replay.stats import ReplayResult, compute_return_stats
@@ -48,7 +49,6 @@ from autotrade.environment.replay.style import (
     daily_returns_from_curve,
     slot_benchmark,
 )
-from autotrade.environment.strategy import CN_TZ
 from autotrade.paper import fills
 from autotrade.paper.book import (
     BOOK_NAME,
@@ -77,6 +77,8 @@ from autotrade.paper.orders import (
 from autotrade.paper.pit import newest_replay_slot
 from autotrade.paper.storage import read_jsonl
 from autotrade.paper.verdict import VERDICT_NAME
+
+from .public_identity import omit_private_paths
 
 TRADING_ENVS = ("paper",)
 # A snapshot older than this is served but flagged: the account data is the
@@ -155,16 +157,14 @@ def _age_seconds(moment: datetime | None) -> float | None:
 
 
 def _read_json(path: Path) -> tuple[dict[str, object] | None, str | None]:
-    """(payload, error): (None, None) = missing, (None, msg) = unreadable."""
+    """(payload, error): (None, None) = missing, (None, msg) = unreadable. The
+    reader names the file by its host path, which a console page omits."""
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        return read_json_object(path), None
     except FileNotFoundError:
         return None, None
-    except (OSError, json.JSONDecodeError) as exc:
-        return None, str(exc)
-    if not isinstance(value, dict):
-        return None, f"{path.name} must be a JSON object"
-    return value, None
+    except (OSError, ValueError) as exc:
+        return None, omit_private_paths(str(exc))
 
 
 def _mapping(value: object) -> dict[str, object]:

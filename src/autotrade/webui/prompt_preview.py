@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 
 from autotrade.agent.experiment_facts import build_experiment_facts
 from autotrade.agent.prompts import SESSION_DEFAULT_INSTRUCTION, build_system_prompt
+from autotrade.common.records import read_json_object
 from autotrade.environment.identity import AgentRefStore
 from autotrade.pipelines.config import BudgetUsed
 from autotrade.pipelines.hitl_state import (
@@ -31,13 +32,12 @@ from autotrade.pipelines.hitl_state import (
     HITL_DIR_NAME,
     SCHEDULE_NAME,
     read_control,
-    read_json,
 )
 
 from .registry import read_ledger_records
 
 if TYPE_CHECKING:
-    from autotrade.environment.sandbox import SandboxLimits
+    from autotrade.environment.sandbox import SandboxConfig
     from autotrade.pipelines.worker import InteractiveWorkerOptions
 
 # Marks a fact that exists only once the session starts. Short and unmistakable
@@ -98,7 +98,7 @@ class _SessionContext:
         return self.options.rolling
 
     @property
-    def strategy_limits(self) -> SandboxLimits:
+    def strategy_sandbox(self) -> SandboxConfig:
         """The formal executor's strategy boundary (wall clocks, CPUs, memory),
         from the worker's own sandbox derivation rather than a second copy of
         the defaults."""
@@ -110,7 +110,7 @@ class _SessionContext:
         return _strategy_sandbox_from_spec(
             self.options.agent_sandbox,
             **_strategy_boundary(self.rolling),
-        ).limits
+        )
 
     @property
     def context_compaction(self) -> dict[str, object] | None:
@@ -141,7 +141,7 @@ def _research_prompt(
     rolling = context.rolling
     geometry = rolling.geometry
     budgets = _session_budgets(rolling, resource_override)
-    limits = context.strategy_limits
+    sandbox = context.strategy_sandbox
     # The session sees the visible years, as ``experiment.research_inputs``
     # hands them to it.
     visible, sealed = geometry.split_sealed(rolling.acceptance.sealed_years)
@@ -179,11 +179,11 @@ def _research_prompt(
             "max_api_spend_usd": budgets["max_api_spend_usd"],
             "deadline_seconds": budgets["deadline_seconds"],
             "deadline_grace_seconds": budgets["deadline_grace_seconds"],
-            "strategy_inference_timeout_seconds": limits.timeout_seconds,
-            "strategy_fit_timeout_seconds": limits.fit_timeout_seconds,
-            "strategy_gpu_count": limits.gpu_count,
-            "strategy_cpus": limits.cpus,
-            "strategy_memory_bytes": limits.memory_bytes,
+            "strategy_inference_timeout_seconds": sandbox.timeout_seconds,
+            "strategy_fit_timeout_seconds": sandbox.fit_timeout_seconds,
+            "strategy_gpu_count": sandbox.spec.gpu_count,
+            "strategy_cpus": sandbox.spec.cpus,
+            "strategy_memory_bytes": sandbox.spec.memory_bytes,
             "batch_validate_max_concurrency": rolling.batch_validate_max_concurrency,
             "used_before_this_attempt": BudgetUsed().to_record(),
         },
@@ -212,7 +212,7 @@ def _research_prompt(
 
 
 def _require_research_session(experiment_dir: Path, session_key: str) -> None:
-    schedule_plan = read_json(experiment_dir / HITL_DIR_NAME / SCHEDULE_NAME)
+    schedule_plan = read_json_object(experiment_dir / HITL_DIR_NAME / SCHEDULE_NAME, missing_ok=True)
     raw_sessions = schedule_plan.get("sessions")
     sessions: list[object] = raw_sessions if isinstance(raw_sessions, list) else []
     for item in sessions:

@@ -17,7 +17,7 @@ from autotrade.environment.data.contracts import (
     benchmark_index_label,
 )
 from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR
-from autotrade.environment.sandbox import SandboxConfig, SandboxLimits
+from autotrade.environment.sandbox import SandboxConfig, SandboxSpec
 from autotrade.environment.strategy import StrategySchedule
 
 from . import verdict
@@ -85,7 +85,7 @@ BATCH_VALIDATE_MAX_CANDIDATES = 6
 # two when the candidate declares fit, whose read-write state bind needs a
 # second worker — and the Timeview stash serializes part publication across
 # evaluations, so the bound is host capacity (up to two containers per replay
-# at SandboxLimits.cpus, and on a GPU arm every one of them on the arm's own
+# at the strategy container's CPUs (SandboxSpec.cpus), and on a GPU arm every one of them on the arm's own
 # cards), not correctness — which only holds because both strategy deadlines
 # scale with the batch's own width (``session_tools._batch_replay_timeouts``);
 # a fixed clock made the outcome depend on how many siblings happened to share
@@ -624,16 +624,16 @@ class RollingExperimentConfig:
     per_call_timeout_seconds: int = 3600
     # Wall clock for one ``fit(context)`` invocation of the formal strategy;
     # the executor default is the single source. A slower fit fails the backtest.
-    strategy_fit_timeout_seconds: int = int(SandboxLimits().fit_timeout_seconds)
+    strategy_fit_timeout_seconds: int = int(SandboxConfig().fit_timeout_seconds)
     # The rest of the strategy container's boundary: the wall clock of one
     # ``generate_orders(context)`` call, the CPU quota its thread variables are
     # derived from, and its memory ceiling (a Docker limit). The executor's
     # defaults are the single source, so an arm whose params.json predates these
     # knobs replays exactly as before; the session container takes the same CPUs
     # and memory (``worker._llm_settings``).
-    strategy_inference_timeout_seconds: int = int(SandboxLimits().timeout_seconds)
-    strategy_cpus: float = SandboxLimits().cpus
-    strategy_memory: str = SandboxLimits().memory
+    strategy_inference_timeout_seconds: int = int(SandboxConfig().timeout_seconds)
+    strategy_cpus: float = SandboxConfig().spec.cpus
+    strategy_memory: str = SandboxConfig().spec.memory
     # Optional experiment-level exploration direction injected into every
     # research session prompt. Per-session directives are additive.
     research_directive: str = ""
@@ -679,7 +679,7 @@ class RollingExperimentConfig:
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
         # The executor's own checks on a CPU quota and a Docker memory limit.
-        SandboxLimits(cpus=self.strategy_cpus, memory=self.strategy_memory)
+        SandboxSpec(cpus=self.strategy_cpus, memory=self.strategy_memory, gpu=None)
         for name in (
             "max_null_controls",
             "deadline_grace_minutes",

@@ -15,7 +15,8 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from autotrade.environment.data.contracts import CN_TZ, LOCALLY_DERIVED_DATASETS
+from autotrade.common.time import CN_TZ
+from autotrade.environment.data.contracts import LOCALLY_DERIVED_DATASETS
 
 
 def concat_rows(frames: list[pd.DataFrame]) -> pd.DataFrame:

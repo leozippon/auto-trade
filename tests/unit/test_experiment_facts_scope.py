@@ -274,7 +274,7 @@ def test_a_cpu_only_experiment_still_states_its_strategy_gpu_count() -> None:
 
 
 # The strategy container's boundary as the run manifest carries it: the
-# evaluator's own SandboxLimits, which are the arm's (``strategy_cpus``,
+# evaluator's own strategy SandboxConfig, which is the arm's (``strategy_cpus``,
 # ``strategy_memory``), here at the executor's defaults.
 CONTAINER = {"strategy_cpus": 8.0, "strategy_memory_bytes": 32 * 1024**3}
 

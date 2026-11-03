@@ -17,9 +17,9 @@ from datetime import date, datetime, time
 import numpy as np
 import pandas as pd
 
+from autotrade.common.time import CN_TZ
 from autotrade.environment.distributions import Distribution, distribution_record_date
 from autotrade.environment.strategy import (
-    CN_TZ,
     BarTable,
     StrategyContractError,
     _BarPrefix,

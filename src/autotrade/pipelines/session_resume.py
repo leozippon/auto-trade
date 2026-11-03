@@ -28,12 +28,9 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 
+from autotrade.common.records import redact_host_paths, write_json_atomic
 from autotrade.environment.artifacts import REVISION_MANIFEST_FILE
-from autotrade.environment.runtime import (
-    agent_trace_path,
-    redact_host_paths,
-    write_json_atomic,
-)
+from autotrade.environment.runtime import agent_trace_path
 from autotrade.environment.step_tree import StepTree
 
 from .config import BudgetUsed, EvaluationResult, SessionResume, StepResult

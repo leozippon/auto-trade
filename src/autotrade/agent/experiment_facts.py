@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from autotrade.environment.broker_core import STAMP_DUTY_CUTOVER
 from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.dividend_tax import (
     BONUS_SHARE_PAR_CNY,
@@ -60,7 +61,7 @@ def strategy_container_note(cpus: float, memory_bytes: int) -> str:
 
     A fact, not advice: how to use the cores and cards is the session's call,
     which a reference pack may suggest. The CPU quota and memory cap are the
-    arm's strategy container's own (``SandboxLimits``, as the run manifest
+    arm's strategy container's own (``SandboxConfig.spec``, as the run manifest
     carries them) and the thread variables are rendered by
     ``container_thread_env``, the very code the executor builds each strategy
     container's flags from, so the passage cannot drift from what a replay
@@ -382,7 +383,7 @@ def _budget_facts(
             # CPU quota that same container is started with, from which its
             # OMP/MKL/OPENBLAS/NUMEXPR thread variables are derived. Read
             # from the run manifest, which carries the evaluator's own
-            # SandboxLimits -- the arm's, and the single source the executor
+            # strategy SandboxSpec -- the arm's, and the single source the executor
             # builds the `--cpus` flag from -- so a strategy that sets its own
             # thread count has the real number instead of a guess: a session
             # that guessed low spent two backtest slots on fit timeouts it had
@@ -472,7 +473,7 @@ def _broker_replay_facts(manifest: Mapping[str, object]) -> dict[str, object]:
                 {
                     "sell_bps_before_cutover": profile.get("stamp_duty_sell_bps_before_cutover"),
                     "sell_bps_from_cutover": profile.get("stamp_duty_sell_bps_from_cutover"),
-                    "cutover_date": profile.get("stamp_duty_cutover_date"),
+                    "cutover_date": STAMP_DUTY_CUTOVER,
                 }
             ),
             "slippage_bps": profile.get("slippage_bps"),

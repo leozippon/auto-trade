@@ -53,9 +53,11 @@ from _bootstrap import add_repo_src
 
 REPO_ROOT = add_repo_src(__file__)
 
+from autotrade.common.records import read_json_object
 from autotrade.environment.artifacts import FilesystemArtifactStore
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import utc_now_iso, write_json_atomic
+from autotrade.environment.sandbox import GpuMode
 from autotrade.environment.sandbox_images import (
     SANDBOX_IMAGE_STATE_NAME,
     prepare_experiment_sandbox_image,
@@ -63,7 +65,7 @@ from autotrade.environment.sandbox_images import (
 from autotrade.environment.step_tree import node_handle
 from autotrade.pipelines.config import ArtifactRevision, research_span
 from autotrade.pipelines.experiment import _SEED_LINE, _SEED_NAME
-from autotrade.pipelines.hitl_state import read_json, select_gpus
+from autotrade.pipelines.hitl_state import select_gpus
 from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.pipelines.session_resume import REVISIONS_DIR
 from autotrade.pipelines.session_tools import write_active_daily
@@ -198,7 +200,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--variant must be a directory holding main.py")
     arm = EXPERIMENTS_ROOT / args.experiment
     try:
-        params = read_json(arm / "hitl" / "params.json")
+        params = read_json_object(arm / "hitl" / "params.json", missing_ok=True)
         if not params:
             raise ValueError(f"missing experiment params: {arm / 'hitl' / 'params.json'}")
         row = session_step(ExperimentLedger(arm / "ledgers" / "experiment_ledger.jsonl").read(), args.node)
@@ -244,7 +246,7 @@ def main(argv: list[str] | None = None) -> int:
         options = resolve_worker_options({**params, **overrides}, experiment_dir=experiment_dir, repo_root=REPO_ROOT)
         spec = options.agent_sandbox
         if spec is not None:
-            if spec.gpu == "auto":
+            if spec.gpu == GpuMode.AUTO:
                 devices = select_gpus(EXPERIMENTS_ROOT, spec.gpu_count, require_name=spec.gpu_name_filter)
                 spec = replace(spec, gpu=tuple(devices))
             # The arm's own image tag, as its worker resolves it.
