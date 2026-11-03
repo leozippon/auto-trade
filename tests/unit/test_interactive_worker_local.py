@@ -24,6 +24,7 @@ from autotrade.environment.llm import (
     ToolCall,
 )
 from autotrade.environment.tools import CommandResult
+from autotrade.pipelines.arm_params import RETIRED_NL_PARAMS
 from autotrade.pipelines.hitl_state import (
     ControlState,
     PlannedSession,
@@ -35,10 +36,7 @@ from autotrade.pipelines.hitl_state import (
 from autotrade.pipelines.interactive import InteractiveExperimentRunner
 from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.pipelines.research_session import SessionBudgetLLM, SessionCallBudget
-from autotrade.pipelines.worker import (
-    RETIRED_NL_PARAMS,
-    load_worker_options,
-)
+from autotrade.pipelines.worker import load_worker_options
 from autotrade.webui.manager import ExperimentManager
 from tests.unit.acceptance_fixture import CREATE_RULES, REQUIRED_RULES
 from tests.unit.gpu_probe import stubbed_gpu_probe
@@ -953,7 +951,7 @@ def test_worker_params_reject_unknown_keys_fold_era_keys_and_a_bad_geometry(tmp_
     for key, value, message in (
         ("research_start", "20210101", "first of a month"),
         ("forward_end", "20261231", "twelve months after research"),
-        ("research_end", 20250630, "YYYYMMDD string"),
+        ("research_end", 20250630, "research_end must be a string, not int"),
         ("max_research_minutes", 0, "max_research_minutes must be a positive integer"),
     ):
         path.write_text(json.dumps({**params, key: value}), encoding="utf-8")

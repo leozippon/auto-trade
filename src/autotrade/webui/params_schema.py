@@ -1,17 +1,15 @@
 """Creation-form parameter schema for the HITL console.
 
-Field keys mirror ``autotrade.pipelines.hitl_state.WEB_CREATE_DEFAULTS`` (which
-in turn mirror the run_experiment.py CLI dests); defaults are read from there so
-this schema can never drift from the worker. Descriptions follow
+Every field is a console parameter of ``pipelines.arm_params.ArmParams`` and
+renders its default from ``hitl_state.WEB_CREATE_DEFAULTS`` (read off the
+record), so the form can never drift from what a create stamps. Each console
+parameter has a form field here or is named in ``_FORMLESS``; the check below
+refuses either list drifting from the record. Descriptions follow
 docs/parameters-reference.md.
 
-Deliberately NOT exposed in the form: ``experiments_root``/``work_root`` are
-force-overwritten with manager-owned values on creation (ExperimentManager);
-``workspace_reference`` is persisted and accepted by create/worker but has
-no form field, so a round file or a create request sets it; and
-``WEB_INTERNAL_PARAMS``
-describe the only supported research environment — the console API rejects them
-outright, so they can only be set in a worker-side ``params.json``.
+Deliberately NOT exposed in the form: the managed and host parameters, which
+the console API rejects outright, so they can only be set in a worker-side
+``params.json``; and the console parameters in ``_FORMLESS``.
 """
 
 from __future__ import annotations
@@ -22,6 +20,7 @@ from autotrade.common.records import read_json_object
 from autotrade.environment.data.contracts import BENCHMARK_INDEXES
 from autotrade.environment.data.snapshot import DEFAULT_DATASETS, SELECTABLE_DATASETS
 from autotrade.environment.llm.model_profiles import LLM_KEYS, MODEL_CHOICES
+from autotrade.pipelines.arm_params import Surface, parameters
 from autotrade.pipelines.config import (
     BATCH_VALIDATE_MAX_CANDIDATES,
     MANDATED_DEFAULTS,
@@ -649,6 +648,34 @@ _FIELDS: list[dict[str, object]] = [
     },
 ]
 
+# Console parameters a create request (a round file) may name but the form does
+# not offer: the reference pack, the retired approval mode, the attempt count,
+# the boards (stamped from the initial cash) and a snapshot-builder knob.
+_FORMLESS = frozenset(
+    {
+        "workspace_reference",
+        "initial_control_mode",
+        "session_max_attempts",
+        "permitted_boards",
+        "max_intraday_row_group_rows",
+    }
+)
+
+
+def _require_form_covers_the_console_parameters() -> None:
+    formed = [str(field["key"]) for field in _FIELDS]
+    console = set(parameters(Surface.CONSOLE))
+    stray = sorted(set(formed) - console)
+    missing = sorted(console - set(formed) - _FORMLESS)
+    if stray or missing or len(formed) != len(set(formed)) or _FORMLESS & set(formed):
+        raise RuntimeError(
+            f"creation form drifted from the arm parameters: fields {stray} are no "
+            f"console parameter and {missing} have no field"
+        )
+
+
+_require_form_covers_the_console_parameters()
+
 _GROUP_ORDER = (
     "基本与排程",
     "数据窗口",
@@ -667,14 +694,7 @@ def parameter_schema() -> dict[str, object]:
     groups: dict[str, list[dict[str, object]]] = {name: [] for name in _GROUP_ORDER}
     for field in _FIELDS:
         entry = dict(field)
-        key = str(entry["key"])
-        # The worker's accepted-parameter table is the single source of truth for
-        # what the form may offer: ExperimentManager rejects anything outside it,
-        # so rendering a field it does not accept would be a control that 400s on
-        # submit. A key that is not (yet) accepted is simply not shown.
-        if key not in WEB_CREATE_DEFAULTS:
-            continue
-        default = WEB_CREATE_DEFAULTS[key]
+        default = WEB_CREATE_DEFAULTS[str(entry["key"])]
         if isinstance(default, tuple):
             default = list(default)
         entry["default"] = default

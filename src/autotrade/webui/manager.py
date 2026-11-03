@@ -33,13 +33,11 @@ from autotrade.pipelines.agent_inbox import (
     InboxError,
     enqueue_inbox_message,
 )
+from autotrade.pipelines.arm_params import console_request
 from autotrade.pipelines.config import acceptance_for
 from autotrade.pipelines.hitl_state import (
     LIVE_RUN_STATES,
-    WEB_CLOSED_PARAMS,
     WEB_CREATE_DEFAULTS,
-    WEB_INTERNAL_PARAMS,
-    WEB_REQUIRED_PARAMS,
     ArmState,
     ControlState,
     arm_is_archived,
@@ -373,43 +371,23 @@ class ExperimentManager:
     def create_experiment(self, params: dict[str, object]) -> dict[str, object]:
         # Request-shape validation is a pure function of params and needs no
         # lock; only the id has to be valid before one can be taken.
-        console_managed = sorted(set(params) & WEB_CLOSED_PARAMS)
-        if console_managed:
-            raise ManagerError(
-                "console-managed parameters are not accepted: "
-                + ", ".join(console_managed)
+        try:
+            merged = console_request(
+                params,
+                defaults=WEB_CREATE_DEFAULTS,
+                experiments_root=str(self.experiments_root),
+                work_root=str(self.repo_root / ".runtime/sandboxes"),
             )
-        unknown = sorted(set(params) - set(WEB_CREATE_DEFAULTS))
-        if unknown:
-            raise ManagerError("unknown experiment parameters: " + ", ".join(unknown))
-        merged = {**WEB_CREATE_DEFAULTS, **params}
-        missing = sorted(
-            key for key in WEB_REQUIRED_PARAMS if merged.get(key) in (None, "")
-        )
-        if missing:
-            raise ManagerError(
-                "missing required experiment parameters: " + ", ".join(missing)
-            )
-        experiment_id = str(params.get("experiment_id") or "").strip()
-        if not is_experiment_id(experiment_id):
-            raise ManagerError(
-                "experiment_id must match [A-Za-z0-9][A-Za-z0-9_-]{0,99} (letters, digits, _ and -)"
-            )
+        except ValueError as exc:
+            raise ManagerError(str(exc)) from exc
+        experiment_id = str(merged["experiment_id"])
         with self._experiment_lock(experiment_id), self._slots:
             directory = self.experiments_root / experiment_id
             if directory.exists():
                 raise ManagerError(f"experiment {experiment_id!r} already exists")
             self._require_running_slot(local=uses_local_model(merged))
             self._require_free_space()
-            merged.update(
-                {
-                    **WEB_INTERNAL_PARAMS,
-                    "experiment_id": experiment_id,
-                    "experiments_root": str(self.experiments_root),
-                    "work_root": str(self.repo_root / ".runtime/sandboxes"),
-                    "_creation_surface": "webui",
-                }
-            )
+            merged["_creation_surface"] = "webui"
             self._preflight(merged, directory)
             # The pretrained store every container of this arm will mount,
             # pinned by its manifest's digest before anything is written: each

@@ -25,6 +25,7 @@ from autotrade.environment.data.contracts import BENCHMARK_INDEXES
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.llm import MODEL_CHOICES
 from autotrade.environment.sandbox import GpuMode
+from autotrade.pipelines.arm_params import NON_PERSISTABLE_PARAMS, ArmParams
 from autotrade.pipelines.calendar import GEOMETRY_PARAMETERS
 from autotrade.pipelines.config import REQUIRED_ACCEPTANCE_KEYS, AcceptanceRules
 from autotrade.pipelines.hitl_state import (
@@ -32,7 +33,6 @@ from autotrade.pipelines.hitl_state import (
     select_gpus,
 )
 from autotrade.pipelines.worker import (
-    NON_PERSISTABLE_PARAMS,
     InteractiveWorkerOptions,
     load_worker_options,
 )
@@ -426,6 +426,8 @@ def _build_worker_params(
         "permitted_boards",
         list(default_permitted_boards(float(stamped.get("initial_cash", WEB_CREATE_DEFAULTS["initial_cash"])))),  # type: ignore[arg-type]
     )
+    # Every key a parameter of the record, every value of its type.
+    ArmParams.from_record(stamped)
     return stamped
 
 

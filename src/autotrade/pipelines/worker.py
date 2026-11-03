@@ -61,6 +61,7 @@ from autotrade.environment.sandbox_images import prepare_experiment_sandbox_imag
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.environment.tools.base import CommandRunner
 
+from .arm_params import ArmParams
 from .calendar import (
     GEOMETRY_PARAMETERS,
     ResearchGeometry,
@@ -68,10 +69,7 @@ from .calendar import (
     yyyymmdd,
 )
 from .config import (
-    ACCEPTANCE_KEYS,
     DEFAULT_PIT_VIEWS_SEED,
-    RETIRED_RULES,
-    RETIRED_SWITCHES,
     RollingExperimentConfig,
     acceptance_for,
     rolling_default,
@@ -117,139 +115,11 @@ from .pit_views_seed import (
 from .research_session import LLMResearchDeveloper
 from .skills import latest_skills_snapshot, resolve_operating_memory
 
-# The parameters of the host NL interface (``context.nl()``), removed on
-# 2026-10-20 with the interface itself. Arms created before then carry some of
-# them in params.json; readers accept exactly these keys and derive nothing
-# from them, since nothing they configured still exists.
-RETIRED_NL_PARAMS = frozenset(
-    {
-        "nl_model",
-        "nl_failure_policy",
-        "nl_max_results",
-        "nl_max_calls_per_decision",
-        "nl_max_total_calls",
-        "nl_deadline_seconds",
-    }
-)
-
-_ALLOWED_PARAMS = {
-    "experiment_id",
-    *GEOMETRY_PARAMETERS,
-    "strategy_path",
-    "baseline_strategy_path",
-    "daily_path",
-    "data_backend",
-    "raw_dir",
-    "fundamental_events_root",
-    "fundamental_events_status",
-    "pit_cache_root",
-    "pit_views_seed",
-    "execution_mode",
-    "strategy_period",
-    "inference_time",
-    "initial_cash",
-    # Sets nothing since the approval mode was removed; every params.json
-    # carries it, and the creation defaults still write it.
-    "initial_control_mode",
-    "daily_window_months",
-    "fundamentals_window_months",
-    "events_window_months",
-    "macro_window_months",
-    "text_window_months",
-    "intraday_trade_days",
-    "include_fundamentals",
-    "include_macro",
-    "include_events",
-    "include_text",
-    "include_intraday",
-    "fundamental_datasets",
-    "macro_datasets",
-    "events_datasets",
-    "text_datasets",
-    "screen_exclude_st",
-    "screen_exclude_new_listed_days",
-    "screen_min_circ_mv_yi",
-    "screen_max_circ_mv_yi",
-    "screen_min_price",
-    "screen_max_price",
-    "screen_boards",
-    "max_intraday_row_group_rows",
-    "developer_mode",
-    "benchmark_index",
-    "window_months",
-    "max_replay_years",
-    "max_null_controls",
-    "batch_validate_max_concurrency",
-    "max_llm_calls",
-    "max_api_spend_usd",
-    "session_max_attempts",
-    "max_research_minutes",
-    *ACCEPTANCE_KEYS,
-    "research_directive",
-    "workspace_reference",
-    "operating_memory",
-    "record_failed_attempts",
-    "finalize_before_deadline_seconds",
-    "per_call_timeout_seconds",
-    "strategy_fit_timeout_seconds",
-    "strategy_inference_timeout_seconds",
-    "strategy_cpus",
-    "strategy_memory",
-    "commission_bps",
-    "slippage_bps",
-    "permitted_boards",
-    "max_total_holdings",
-    "max_single_name_weight",
-    "gpu_count",
-    "experiments_root",
-    "work_root",
-    "llm_env_file",
-    "llm_model",
-    "llm_timeout_seconds",
-    "llm_max_retries",
-    "llm_retry_backoff_seconds",
-    "llm_temperature",
-    "llm_max_response_tokens",
-    "model",
-    "subagent_model",
-    "compact_model",
-    "llm_key",
-    "reasoning_effort",
-    "no_thinking",
-    "disable_context_compact",
-    "compact_token_threshold",
-    "compact_keep_recent_messages",
-    "compact_max_tokens",
-    "compact_max_calls",
-    "agent_sandbox_image",
-    "agent_sandbox_cpus",
-    "agent_sandbox_memory",
-    "agent_sandbox_pids",
-    "agent_sandbox_tmpfs",
-    # Stamped by the console at creation (``environment.pretrained``).
-    "pretrained_manifest_sha256",
-    # Accepted so that an arm created before their retirement still lists in
-    # the console (and, but for the retired rules, still loads); nothing reads
-    # them (``config.RETIRED_SWITCHES``, ``config.RETIRED_RULES``,
-    # ``RETIRED_NL_PARAMS``).
-    *RETIRED_SWITCHES,
-    *RETIRED_RULES,
-    *RETIRED_NL_PARAMS,
-}
-
 # The experiment-level ``reasoning_effort`` offers exactly the levels that are
 # distinct on the wire for the local Qwen profile (its chat template knows
 # low/medium/xhigh; ``high`` was always sent as ``xhigh``).
 REASONING_EFFORTS = ("low", "medium", "xhigh")
 DEFAULT_REASONING_EFFORT = "xhigh"
-
-# Former operator overrides of the provider endpoint and credential. Endpoints
-# and credentials come only from the trusted model profile's fixed environment
-# keys, so no experiment parameter can redirect either: the allowed-parameter
-# check refuses these like any unknown key, and the CLI names them in its own
-# refusal.
-NON_PERSISTABLE_PARAMS = frozenset({"llm_api_key_env", "llm_base_url"})
-
 
 @dataclass(frozen=True)
 class LLMWorkerSettings:
@@ -465,11 +335,10 @@ def resolve_worker_options(
     # The deployment's template file is identical for every create on a host,
     # so its absence is not a property of the request.
     repo_file = _repo_path if preflight else _repo_file
-    unknown = sorted(
-        key for key in params if not key.startswith("_") and key not in _ALLOWED_PARAMS
-    )
-    if unknown:
-        raise ValueError(f"unknown experiment parameters: {unknown}")
+    # Every key a parameter, every value of its declared type
+    # (``arm_params.ArmParams``); the checks below read the file itself, so an
+    # arm created before a parameter existed keeps the worker's own fallback.
+    ArmParams.from_record(params)
     if params.get("_creation_surface") == "webui":
         altered = [
             key

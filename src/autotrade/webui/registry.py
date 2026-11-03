@@ -44,6 +44,7 @@ from autotrade.environment.tools.report_issue import (
     read_issue_reports,
 )
 from autotrade.pipelines.agent_inbox import INBOX_NAME, inbox_public_view
+from autotrade.pipelines.arm_params import PARAMETERS
 from autotrade.pipelines.calendar import FULL_SPAN
 from autotrade.pipelines.config import (
     acceptance_for,
@@ -91,7 +92,6 @@ from autotrade.pipelines.verdict import (
     residual_bar,
     summary_excess_at_cost_stress,
 )
-from autotrade.pipelines.worker import _ALLOWED_PARAMS
 
 from .public_identity import PublicIdentity
 from .traces import resolve_trace_path, trace_stats
@@ -235,7 +235,7 @@ class UnsupportedParamsError(ValueError):
 
 def _require_supported_params(params: Mapping[str, object]) -> None:
     unknown = sorted(
-        key for key in params if not str(key).startswith("_") and key not in _ALLOWED_PARAMS
+        key for key in params if not str(key).startswith("_") and key not in PARAMETERS
     )
     if unknown:
         raise UnsupportedParamsError(f"unsupported experiment parameters: {unknown}")

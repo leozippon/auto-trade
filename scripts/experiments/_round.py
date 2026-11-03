@@ -122,7 +122,6 @@ from _bootstrap import add_repo_src
 
 REPO_ROOT = add_repo_src(__file__)
 
-from autotrade.common.ids import is_experiment_id
 from autotrade.common.records import read_json_object
 from autotrade.environment import pretrained
 from autotrade.environment.artifacts import ArtifactRevision, FilesystemArtifactStore
@@ -130,6 +129,7 @@ from autotrade.environment.gpu import GpuUnavailableError, host_min_free_gpu_mem
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import rmtree_keeping_file_modes
 from autotrade.environment.sandbox import GpuMode
+from autotrade.pipelines.arm_params import Surface, console_request, parameters
 from autotrade.pipelines.calendar import FULL_SPAN
 from autotrade.pipelines.config import (
     SNAPSHOT_CACHE_FORMAT_VERSION,
@@ -137,10 +137,7 @@ from autotrade.pipelines.config import (
     research_span,
 )
 from autotrade.pipelines.hitl_state import (
-    WEB_CLOSED_PARAMS,
     WEB_CREATE_DEFAULTS,
-    WEB_INTERNAL_PARAMS,
-    WEB_REQUIRED_PARAMS,
     select_gpus,
 )
 from autotrade.pipelines.ledger import ExperimentLedger
@@ -232,6 +229,15 @@ BASE_OVERRIDES: dict[str, object] = {
     "max_research_minutes": 2400,
     "max_llm_calls": 6400,
 }
+
+# Both tables name console parameters of the arm record
+# (pipelines/arm_params.py): a pin or an override of anything else is a typo
+# that would otherwise surface only when a round runs.
+_NOT_CONSOLE = sorted(
+    {*BASE_EXPECTED_DEFAULTS, *BASE_OVERRIDES} - set(parameters(Surface.CONSOLE))
+)
+if _NOT_CONSOLE:
+    raise RuntimeError(f"not console parameters of the arm record: {_NOT_CONSOLE}")
 
 # Reported once per round on --dry-run: what every arm shares.
 ROUND_REPORT_KEYS: tuple[str, ...] = (
@@ -725,31 +731,16 @@ def normalize(params: dict[str, object]) -> dict[str, object]:
     resolve_worker_options pre-flight. The console's duplicate-directory and
     running-slot checks need the live deployment and stay at POST time.
     """
-    closed = sorted(set(params) & WEB_CLOSED_PARAMS)
-    if closed:
-        raise ValueError("console-managed parameters are not accepted: " + ", ".join(closed))
-    unknown = sorted(set(params) - set(WEB_CREATE_DEFAULTS))
-    if unknown:
-        raise ValueError("unknown experiment parameters: " + ", ".join(unknown))
-    merged = {**WEB_CREATE_DEFAULTS, **params}
-    missing = sorted(key for key in WEB_REQUIRED_PARAMS if merged.get(key) in (None, ""))
-    if missing:
-        raise ValueError("missing required experiment parameters: " + ", ".join(missing))
-    experiment_id = str(params.get("experiment_id") or "").strip()
-    if not is_experiment_id(experiment_id):
-        raise ValueError("experiment_id must match [A-Za-z0-9][A-Za-z0-9_-]{0,99}")
-    merged.update(
-        {
-            **WEB_INTERNAL_PARAMS,
-            "experiment_id": experiment_id,
-            "experiments_root": str(EXPERIMENTS_ROOT),
-            "work_root": str(REPO_ROOT / ".runtime/sandboxes"),
-            "_creation_surface": "webui",
-        }
+    merged = console_request(
+        params,
+        defaults=WEB_CREATE_DEFAULTS,
+        experiments_root=str(EXPERIMENTS_ROOT),
+        work_root=str(REPO_ROOT / ".runtime/sandboxes"),
     )
+    merged["_creation_surface"] = "webui"
     resolve_worker_options(
         merged,
-        experiment_dir=EXPERIMENTS_ROOT / experiment_id,
+        experiment_dir=EXPERIMENTS_ROOT / str(merged["experiment_id"]),
         repo_root=REPO_ROOT,
         preflight=True,
     )

@@ -734,7 +734,8 @@ class CreatePreflightTest(unittest.TestCase):
         asserts the persisted file survives the stricter pass -- every
         parameter check, only the deployment-state steps skipped.
         """
-        from autotrade.pipelines.worker import _ALLOWED_PARAMS, resolve_worker_options
+        from autotrade.pipelines.arm_params import PARAMETERS
+        from autotrade.pipelines.worker import resolve_worker_options
 
         response = self._create()
         self.assertEqual(response.status_code, 200, response.text)
@@ -742,7 +743,7 @@ class CreatePreflightTest(unittest.TestCase):
         directory = self.experiments_root / "preflight_demo"
         params = json.loads((directory / "hitl/params.json").read_text(encoding="utf-8"))
         self.assertTrue(
-            set(params) - {key for key in params if key.startswith("_")} <= set(_ALLOWED_PARAMS)
+            set(params) - {key for key in params if key.startswith("_")} <= set(PARAMETERS)
         )
         # preflight=False would additionally stat the data roots and pin a
         # research release, neither of which exists under a tmp repo root; the

@@ -631,7 +631,7 @@ class DefaultsDriftTest(unittest.TestCase):
                 ([], "must include the main board"),
                 (["gem"], "must include the main board"),
                 (["main", "nasdaq"], "unknown permitted_boards"),
-                ("main", "must be a list of board names"),
+                ("main", "permitted_boards must be a list of strings"),
             ):
                 with self.subTest(value=value), self.assertRaisesRegex(ValueError, message):
                     profile({**base, "permitted_boards": value})
@@ -783,11 +783,11 @@ class DefaultsDriftTest(unittest.TestCase):
                 self.assertEqual(actual, expected, key)
 
     def test_worker_accepts_exactly_the_console_parameters(self) -> None:
-        from autotrade.pipelines.worker import _ALLOWED_PARAMS
+        from autotrade.pipelines.arm_params import PARAMETERS
 
         # Every knob the console can write must be one the worker accepts,
         # otherwise creating an experiment produces a worker that refuses it.
-        unknown = sorted(set(WEB_CREATE_DEFAULTS) - set(_ALLOWED_PARAMS))
+        unknown = sorted(set(WEB_CREATE_DEFAULTS) - set(PARAMETERS))
         self.assertEqual(unknown, [])
 
     def test_cli_defaults_match_the_console_defaults(self) -> None:
@@ -850,24 +850,24 @@ class ConsoleParameterSurfaceTest(unittest.TestCase):
         }
 
     def test_every_restored_parameter_is_rendered_and_accepted(self) -> None:
-        from autotrade.pipelines.worker import _ALLOWED_PARAMS
+        from autotrade.pipelines.arm_params import PARAMETERS
 
         fields = self._schema_fields()
         for key in RESTORED_CONSOLE_PARAMETERS:
             with self.subTest(key=key):
                 self.assertIn(key, fields, f"{key} is not rendered on the create form")
                 self.assertIn(key, WEB_CREATE_DEFAULTS, f"{key} has no console default")
-                self.assertIn(key, _ALLOWED_PARAMS, f"the worker would reject {key}")
+                self.assertIn(key, set(PARAMETERS), f"the worker would reject {key}")
                 self.assertTrue(fields[key].get("label"))
                 self.assertTrue(fields[key].get("help"), f"{key} has no help text")
 
     def test_every_rendered_field_is_a_parameter_the_worker_accepts(self) -> None:
-        from autotrade.pipelines.worker import _ALLOWED_PARAMS
+        from autotrade.pipelines.arm_params import PARAMETERS
 
         fields = self._schema_fields()
         # Rendering a field the worker rejects is a control that 400s on submit.
         unaccepted = sorted(
-            set(fields) - set(_ALLOWED_PARAMS) - {"experiment_id"}
+            set(fields) - set(PARAMETERS) - {"experiment_id"}
         )
         self.assertEqual(unaccepted, [])
         # And every rendered field has a default the form can seed from.
