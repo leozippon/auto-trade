@@ -19,8 +19,9 @@ from collections.abc import Iterable, Mapping
 from datetime import date, datetime
 from pathlib import Path
 
+from autotrade.common.records import read_json_object
+from autotrade.common.time import CN_TZ
 from autotrade.environment.replay.engine import MARKET_CLOSE, MARKET_OPEN
-from autotrade.environment.strategy import CN_TZ
 
 from .book import Book
 from .engine import (
@@ -29,7 +30,7 @@ from .engine import (
     PaperAwaitingFills,
     PaperTitlesNotLanded,
 )
-from .storage import read_json, read_jsonl
+from .storage import read_jsonl
 
 WEEKDAYS = "一二三四五六日"
 LATEST_NAME = "latest_orders.md"
@@ -137,7 +138,7 @@ def order_sheet(
     """
 
     root = Path(root)
-    state = read_json(root / PAPER_STATE_NAME) if state is None else state
+    state = read_json_object(root / PAPER_STATE_NAME, missing_ok=True) if state is None else state
     decision = next(
         (row for row in state.get("decisions") or () if row.get("trade_date") == trade_date), None
     )
@@ -206,7 +207,7 @@ def order_sheet(
 
 
 def render_orders(book: Book, trade_date: str) -> str:
-    state = read_json(book.root / PAPER_STATE_NAME)
+    state = read_json_object(book.root / PAPER_STATE_NAME, missing_ok=True)
     sheet = order_sheet(book.root, trade_date, state=state)
     decision = sheet["decision"]
     cash, equity, rows = sheet["cash"], sheet["equity"], sheet["orders"]
@@ -301,7 +302,7 @@ def exit_holdings(state: Mapping[str, object]) -> list[dict[str, object]]:
 def render_killed(book: Book, trade_date: str, transition: Mapping[str, object]) -> str:
     """The sheet of a killed book: no decision, exit the settled holdings."""
 
-    state = read_json(book.root / PAPER_STATE_NAME)
+    state = read_json_object(book.root / PAPER_STATE_NAME, missing_ok=True)
     target = exit_holdings(state)
     lines = [f"# Paper 订单 · {_day(trade_date)} · 已终止（killed — exit these holdings by hand）", ""]
     if book.note:

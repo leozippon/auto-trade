@@ -31,12 +31,14 @@ from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
+from autotrade.common.records import read_json_object, write_json_atomic
+from autotrade.common.time import CN_TZ
 from autotrade.environment.artifacts import artifact_fingerprint
 from autotrade.environment.broker import BrokerProfile, default_permitted_boards
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.replay.curve import result_curve
 from autotrade.environment.sandbox import SandboxConfig, SandboxLimits
-from autotrade.environment.strategy import CN_TZ, StrategySchedule
+from autotrade.environment.strategy import StrategySchedule
 from autotrade.environment.strategy_loader import validate_strategy_package
 from autotrade.pipelines.experiment import null_control_seed
 from autotrade.pipelines.ledger import (
@@ -52,7 +54,7 @@ from autotrade.pipelines.worker import (
 )
 
 from .pit import require_audited_fundamentals
-from .storage import read_json, read_jsonl, write_json_atomic
+from .storage import read_jsonl
 
 BOOK_NAME = "book.json"
 # 2: the track and the pinned verdict rules. An older book is refused, never
@@ -163,7 +165,7 @@ def create_book(
     if not (source / "output" / "main.py").is_file():
         raise FileNotFoundError(f"frozen artifact has no output/main.py: {source}")
 
-    params = read_json(experiment / "hitl" / "params.json")
+    params = read_json_object(experiment / "hitl" / "params.json", missing_ok=True)
     if not params:
         raise ValueError(f"missing experiment params: {experiment / 'hitl' / 'params.json'}")
     if initial_cash is not None:
@@ -185,7 +187,7 @@ def create_book(
     sandbox = _strategy_sandbox_from_spec(
         options.agent_sandbox, **_strategy_boundary(options.rolling)
     )
-    image = read_json(experiment / "hitl" / "sandbox_image.json").get("image_ref")
+    image = read_json_object(experiment / "hitl" / "sandbox_image.json", missing_ok=True).get("image_ref")
     if image:
         # The image the experiment's formal replays actually ran.
         sandbox = replace(sandbox, image=str(image))
@@ -238,7 +240,7 @@ def create_book(
             "panel_seed": null_control_seed(artifact_id, "paper"),
         },
     }
-    write_json_atomic(root / BOOK_NAME, record)
+    write_json_atomic(root / BOOK_NAME, record, private=True, sort_keys=False)
     copy_source_history(root, experiment, source_record)
     return load_book(root)
 
@@ -281,6 +283,8 @@ def write_source_history(
             "series": curve["series"],
             "benchmark": curve["benchmark"],
         },
+        private=True,
+        sort_keys=False,
     )
     return target
 
@@ -323,7 +327,7 @@ def copy_source_history(
 
 def load_book(state_root: str | Path) -> Book:
     root = Path(state_root).resolve()
-    record = read_json(root / BOOK_NAME)
+    record = read_json_object(root / BOOK_NAME, missing_ok=True)
     if not record:
         raise FileNotFoundError(f"no Paper book at {root}; create one with `run_paper.py init`")
     if record.get("schema_version") != BOOK_SCHEMA_VERSION:
@@ -396,7 +400,7 @@ def open_incubating_books(paper_root: str | Path) -> list[str]:
         book.name
         for book in books
         if not book.name.startswith(".")
-        and read_json(book / BOOK_NAME).get("candidate_source") == "incubating"
+        and read_json_object(book / BOOK_NAME, missing_ok=True).get("candidate_source") == "incubating"
         and book_status(book) != "killed"
     ]
 

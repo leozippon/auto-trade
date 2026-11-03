@@ -11,11 +11,11 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pyarrow.parquet as pq
 
+from autotrade.common.time import CN_TZ
 from autotrade.data_quality import build_quality_report, write_quality_report
 from autotrade.environment.data.auction import AuctionCorrectionConfig, market_bucket
 from autotrade.environment.data.snapshot import SELECTABLE_DATASETS
@@ -223,10 +223,6 @@ def select_revision_sentinel_dates(trade_dates: list[str], sample_size: int, see
     offset = sum((index + 1) * ord(char) for index, char in enumerate(seed)) % len(ordered)
     ranked = ordered[offset:] + ordered[:offset]
     return sorted(ranked[:sample_size])
-
-# Trade dates are keyed on the exchange calendar, so "today" is a CN date --
-# using the host date would shift the audit window near UTC midnight.
-CN_TZ = ZoneInfo("Asia/Shanghai")
 
 def revision_sentinel_spec(dataset: str) -> Any:
     """Resolve a sentinel-probeable spec: daily-tier, board-tier or event-tier
@@ -2265,12 +2261,15 @@ def expected_event_paths(raw_dir: Path, spec: EventDataset, start_date: str, end
     raise RuntimeError(f"unsupported event/flow strategy {spec.strategy} for {spec.api_name}")
 
 def audit_as_of(value: str | None) -> datetime:
-    """The audit's clock: now, or an explicit time (naive means Asia/Shanghai)."""
-    tz = ZoneInfo("Asia/Shanghai")
+    """The audit's clock: now, or an explicit time (naive means Asia/Shanghai).
+
+    Trade dates are keyed on the exchange calendar, so "today" is a CN date:
+    the host date would shift the audit window near UTC midnight.
+    """
     if not value:
-        return datetime.now(tz)
+        return datetime.now(CN_TZ)
     parsed = datetime.fromisoformat(value)
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=tz)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=CN_TZ)
 
 def latest_published_trade_date(open_dates: list[str], through: str, rule: core.AvailabilityRule, as_of: datetime) -> str | None:
     """Newest open day <= ``through`` whose official publication has passed at ``as_of``.

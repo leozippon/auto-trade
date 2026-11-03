@@ -15,6 +15,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from autotrade.common.records import write_json_atomic
+
 from .gpu import GpuUnavailableError, device_request, host_gpu_name
 from .pretrained import pretrained_pin, require_pretrained_store
 from .runtime import (
@@ -25,7 +27,6 @@ from .runtime import (
     chmod_tree,
     new_id,
     utc_now_iso,
-    write_json_atomic,
 )
 
 DEFAULT_IMAGE = "autotrade-sandbox:latest"

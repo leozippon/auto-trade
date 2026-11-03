@@ -22,6 +22,7 @@ import pandas as pd
 
 from autotrade.agent.compact import ContextCompactionConfig
 from autotrade.agent.experiment_facts import build_experiment_facts
+from autotrade.common.records import read_json_object_or_empty, write_json_atomic
 from autotrade.environment.artifacts import (
     WORKSPACE_DIR_MODE,
     WORKSPACE_FILE_MODE,
@@ -51,7 +52,6 @@ from autotrade.environment.runtime import (
     agent_trace_path,
     agent_transcript_dir,
     chmod_tree,
-    write_json_atomic,
 )
 from autotrade.environment.sandbox import (
     DockerSandbox,
@@ -1499,8 +1499,8 @@ class LLMResearchDeveloper:
             **build_experiment_facts(
                 manifest=dict(manifest.data),
                 ref_store=self.ref_store,
-                runtime_env=_read_json_if_exists(paths.runtime_env),
-                data_summary=_read_json_if_exists(paths.data_summary),
+                runtime_env=read_json_object_or_empty(paths.runtime_env),
+                data_summary=read_json_object_or_empty(paths.data_summary),
                 max_llm_calls=request.max_llm_calls,
                 context_compaction={
                     "enabled": self.compact_llm is not None,
@@ -1911,16 +1911,6 @@ def _agent_event_sink(
         progress_hook(stage, public)
 
     return emit
-
-
-def _read_json_if_exists(path: Path) -> dict[str, object]:
-    try:
-        if not path.exists():
-            return {}
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
 
 
 __all__ = [

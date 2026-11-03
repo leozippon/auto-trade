@@ -16,12 +16,13 @@ import re
 from collections.abc import Mapping
 from pathlib import Path
 
+from autotrade.common.records import HOST_PATH_MARKER, read_json_object
 from autotrade.environment.identity import (
     LEGACY_EXPERIMENT_MESSAGE,
     AgentRefStore,
     LegacyExperimentError,
 )
-from autotrade.pipelines.hitl_state import HITL_DIR_NAME, SCHEDULE_NAME, read_json
+from autotrade.pipelines.hitl_state import HITL_DIR_NAME, SCHEDULE_NAME
 
 _PATH_KEYS = frozenset(
     {
@@ -95,7 +96,7 @@ class PublicIdentity:
             raise LegacyExperimentError(LEGACY_EXPERIMENT_MESSAGE)
         self.store = store
         self._text_replacements: dict[str, str] = {}
-        schedule = read_json(self.experiment_dir / HITL_DIR_NAME / SCHEDULE_NAME)
+        schedule = read_json_object(self.experiment_dir / HITL_DIR_NAME / SCHEDULE_NAME, missing_ok=True)
         raw_sessions = schedule.get("sessions")
         # The plan of record, in order; a Fold-era plan is refused here, so such
         # an experiment lists as unreadable instead of half-rendering.
@@ -228,7 +229,7 @@ class PublicIdentity:
             return [self._safe_value(item) for item in value]
         if isinstance(value, str):
             if _is_host_absolute_path(value):
-                return "[host path omitted]"
+                return HOST_PATH_MARKER
             safe = value
             for raw, public in sorted(
                 self._text_replacements.items(), key=lambda item: len(item[0]), reverse=True
@@ -237,20 +238,28 @@ class PublicIdentity:
             for root in self._host_roots:
                 if root and root != "/":
                     safe = safe.replace(root, "[host]")
-            return redact_host_paths(safe)
+            return omit_private_paths(safe)
         return value
 
 
-def redact_host_paths(text: str) -> str:
-    """Scrub host paths out of text that belongs to no single experiment.
+def omit_private_paths(text: str) -> str:
+    """Scrub every path a console reader may not see out of text that belongs
+    to no single experiment.
+
+    Stricter than ``common.records.redact_host_paths``, which the Agent's own
+    text goes through: that rule redacts only paths under the host's roots,
+    because the Agent must keep reading its sandbox's ``/tmp``, ``/opt`` and
+    ``/mnt`` paths verbatim. The console instead keeps only the public
+    prefixes above and omits every other absolute path, file URI and Windows
+    path, under the same marker.
 
     :class:`PublicIdentity` adds the experiment's own roots and reference
     mappings on top; repository-level content (the curated memory library) has
     neither, so this is the whole rule for it — and the same rule, not a second
     one, is what every experiment-scoped string ends with."""
 
-    safe = _FILE_URI.sub("[host path omitted]", text)
-    safe = _WINDOWS_PATH.sub("[host path omitted]", safe)
+    safe = _FILE_URI.sub(HOST_PATH_MARKER, text)
+    safe = _WINDOWS_PATH.sub(HOST_PATH_MARKER, safe)
     return _POSIX_PATH.sub(_redact_posix_path, safe)
 
 
@@ -277,7 +286,7 @@ def _is_host_absolute_path(value: str) -> bool:
 
 def _redact_posix_path(match: re.Match[str]) -> str:
     value = match.group(0)
-    return value if _allowed_public_path(value) else "[host path omitted]"
+    return value if _allowed_public_path(value) else HOST_PATH_MARKER
 
 
 def _required_text(value: object, label: str) -> str:

@@ -12,6 +12,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from autotrade.common.records import read_json_object, write_json_atomic
 from autotrade.data_sources.tushare.cron_update import resolve_job_start_date
 from autotrade.environment.artifacts import artifact_fingerprint
 from autotrade.environment.broker import DailyBroker
@@ -39,7 +40,7 @@ from autotrade.paper.books import (
     validate_book_id,
 )
 from autotrade.paper.engine import PaperWriterBusy
-from autotrade.paper.storage import append_jsonl_once, read_json, write_json_atomic
+from autotrade.paper.storage import append_jsonl_once
 from autotrade.pipelines.ledger import ExperimentLedger, forward_record
 from tests.unit.paper_book_fixture import (
     FAILING_STRATEGY,
@@ -246,7 +247,7 @@ def _kill(root: Path, day: str = "20260105") -> None:
 
 def test_a_new_book_carries_its_track_and_pins_its_verdict_rules(tmp_path: Path):
     book = _graduated_book(tmp_path)
-    record = read_json(book.root / BOOK_NAME)
+    record = read_json_object(book.root / BOOK_NAME)
     assert record["schema_version"] == 2 and record["candidate_source"] == book.candidate_source == "graduated"
     rules = record["verdict_rules"]
     assert (rules["checkpoint_days"], rules["kill_confidence"], rules["confirm_confidence"]) == (126, 0.841, 0.977)
@@ -254,8 +255,8 @@ def test_a_new_book_carries_its_track_and_pins_its_verdict_rules(tmp_path: Path)
     assert isinstance(rules["panel_seed"], int) and book.verdict_rules == rules
 
     incubating = _incubate(tmp_path, "inc")
-    assert read_json(incubating.root / BOOK_NAME)["candidate_source"] == "incubating"
-    assert read_json(incubating.root / "source_history.json")["series"]
+    assert read_json_object(incubating.root / BOOK_NAME)["candidate_source"] == "incubating"
+    assert read_json_object(incubating.root / "source_history.json")["series"]
     with pytest.raises(ValueError, match="source_record"):
         create_book(
             paper_root(tmp_path) / "other", experiment_dir=tmp_path / "experiments/inc",
@@ -280,7 +281,7 @@ def test_a_book_pins_the_boards_its_broker_and_its_verdict_panel_buy_on(tmp_path
         paper_root(tmp_path) / "small", experiment_dir=arm, artifact_id="strategy_research_abc",
         repo_root=tmp_path, track="graduated", initial_cash=100_000,
     )
-    assert read_json(small.root / BOOK_NAME)["profile"]["permitted_boards"] == ["main", "gem"]
+    assert read_json_object(small.root / BOOK_NAME)["profile"]["permitted_boards"] == ["main", "gem"]
 
     book = load_book(_incubate(tmp_path, "inc", boards=("main",)).root)
     assert book.profile.permitted_boards == ("main",)
@@ -338,7 +339,7 @@ def _pit_lake(repo: Path, *, first_month: str, audited_from: str, calendar: bool
 
 def _fundamentals_arm(tmp_path: Path, name: str, window_months: int) -> Path:
     arm = build_arm(tmp_path / "experiments", name, "graduated")
-    params = read_json(arm / "hitl/params.json")
+    params = read_json_object(arm / "hitl/params.json")
     write_json_atomic(
         arm / "hitl/params.json", {**params, "include_fundamentals": True, "window_months": window_months}
     )
@@ -390,7 +391,7 @@ def test_a_book_without_fundamentals_never_asks_the_audit(tmp_path: Path):
 
 def test_a_book_of_an_older_schema_is_refused(tmp_path: Path):
     book = _graduated_book(tmp_path)
-    record = read_json(book.root / BOOK_NAME)
+    record = read_json_object(book.root / BOOK_NAME)
     (book.root / BOOK_NAME).write_text(json.dumps({**record, "schema_version": 1}), encoding="utf-8")
     with pytest.raises(ValueError, match="unsupported Paper book schema 1"):
         load_book(book.root)
@@ -401,7 +402,7 @@ def test_a_book_created_with_the_retired_nl_settings_loads_as_one_without_them(t
     settings into book.json, in the shape below. Such a book loads to exactly
     the book it would be without them, and a new book no longer writes them."""
     book = _graduated_book(tmp_path)
-    record = read_json(book.root / BOOK_NAME)
+    record = read_json_object(book.root / BOOK_NAME)
     retired = {"nl_gateway", "nl_config", "nl_failure_policy"}
     assert not retired & set(record)
     legacy = {

@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 import os
-import re
 import shutil
 import signal
 import stat
@@ -15,6 +13,8 @@ import time
 from collections.abc import Mapping
 from pathlib import Path
 
+from autotrade.common.ids import EXPERIMENT_ID, is_experiment_id
+from autotrade.common.records import read_json_object_or_empty, write_json_atomic
 from autotrade.environment import pretrained
 from autotrade.environment.broker import default_permitted_boards
 from autotrade.environment.gpu import GpuUnavailableError, host_min_free_gpu_memory_mib
@@ -24,7 +24,7 @@ from autotrade.environment.identity import (
     LegacyExperimentError,
 )
 from autotrade.environment.llm.model_profiles import LOCAL_QWEN_MODEL
-from autotrade.environment.runtime import utc_now_iso, write_json_atomic
+from autotrade.environment.runtime import utc_now_iso
 from autotrade.environment.sandbox import EXPERIMENT_LABEL, SandboxSpec
 from autotrade.environment.sandbox_images import reclaim_experiment_sandbox_images
 from autotrade.environment.tools.workspace import WORKSPACE_MIN_FREE_BYTES
@@ -90,7 +90,9 @@ ARM_DISK_MARGIN_BYTES = 3 * 1024**3
 _TERMINATE_GRACE_SECONDS = 10.0
 _RESTART_GRACE_SECONDS = 30.0
 _SIGKILL_EXIT_SECONDS = 5.0
-_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$")
+# Read under this name by scripts/experiments/_round.py until it imports
+# autotrade.common.ids itself.
+_ID = EXPERIMENT_ID
 _TERMINAL_RESUMABLE_STATES = (
     "stopped",
     "failed",
@@ -264,7 +266,7 @@ def _await_worker_exit(status_path: Path, timeout: float) -> bool:
 
     deadline = time.monotonic() + timeout
     while True:
-        if not status_pid_alive(_read_json(status_path)):
+        if not status_pid_alive(read_json_object_or_empty(status_path)):
             return True
         if time.monotonic() >= deadline:
             return False
@@ -363,7 +365,7 @@ class ExperimentManager:
         the lock is taken before the directory is read: a delete racing a
         control call on the same experiment still resolves in one order.
         """
-        if not _ID.fullmatch(experiment_id):
+        if not is_experiment_id(experiment_id):
             raise ManagerError("invalid experiment ID")
         with self._locks_guard:
             lock = self._experiment_locks.get(experiment_id)
@@ -392,7 +394,7 @@ class ExperimentManager:
                 "missing required experiment parameters: " + ", ".join(missing)
             )
         experiment_id = str(params.get("experiment_id") or "").strip()
-        if not _ID.fullmatch(experiment_id):
+        if not is_experiment_id(experiment_id):
             raise ManagerError(
                 "experiment_id must match [A-Za-z0-9][A-Za-z0-9_-]{0,99} (letters, digits, _ and -)"
             )
@@ -566,7 +568,7 @@ class ExperimentManager:
             name
             for name in running
             if uses_local_model(
-                _read_json(self.experiments_root / name / "hitl/params.json")
+                read_json_object_or_empty(self.experiments_root / name / "hitl/params.json")
             )
         ]
 
@@ -616,12 +618,12 @@ class ExperimentManager:
                     f"experiment {experiment_id!r} is archived: an archived arm is never run again"
                 )
             status_path = directory / "hitl/status.json"
-            status = _read_json(status_path)
+            status = read_json_object_or_empty(status_path)
             if _worker_live(status):
                 raise ManagerError(
                     f"experiment {experiment_id!r} already has a live worker"
                 )
-            params = _read_json(directory / "hitl/params.json")
+            params = read_json_object_or_empty(directory / "hitl/params.json")
             self._require_running_slot(local=uses_local_model(params))
             if not self.worker_script.is_file():
                 raise ManagerError("interactive worker entrypoint is unavailable")
@@ -915,7 +917,7 @@ class ExperimentManager:
         SIGKILL the whole process group (the worker runs with
         start_new_session=True)."""
         status_path = directory / "hitl/status.json"
-        status = _read_json(status_path)
+        status = read_json_object_or_empty(status_path)
         if not status_pid_alive(status):
             raise ManagerError("no live worker to terminate")
         pid = int(status["pid"])
@@ -935,7 +937,7 @@ class ExperimentManager:
             # SIGKILL leaves no worker to stamp a terminal state; without this
             # the page shows a stale running state until pid-liveness kicks in
             # and the user cannot tell whether termination worked.
-            status = _read_json(status_path)
+            status = read_json_object_or_empty(status_path)
             status.update(
                 {"state": "terminated", "error": None, "terminated_at": utc_now_iso()}
             )
@@ -964,7 +966,7 @@ class ExperimentManager:
         if at is not None and at not in {"immediate", "session_boundary"}:
             raise ManagerError("restart at must be immediate or session_boundary")
         status_path = directory / "hitl/status.json"
-        status = _read_json(status_path)
+        status = read_json_object_or_empty(status_path)
         if at == "session_boundary":
             # Only a live worker can consume the flag; without one the
             # researcher would watch a request that never applies.
@@ -1026,7 +1028,7 @@ class ExperimentManager:
             # worker can leave it corrupt or inaccessible. The lenient reader
             # falls back to the deployment-derived sandbox path and, crucially,
             # never adopts an unreadable file's explicit work_root.
-            params = _read_json(directory / "hitl/params.json")
+            params = read_json_object_or_empty(directory / "hitl/params.json")
             work_root = params.get("work_root")
             # work_root is the shared sandbox root: the worker runs this
             # experiment under work_root/<experiment_id> (pipelines.worker), and
@@ -1073,7 +1075,7 @@ class ExperimentManager:
             }
 
     def _experiment_dir(self, experiment_id: str) -> Path:
-        if not _ID.fullmatch(experiment_id):
+        if not is_experiment_id(experiment_id):
             raise ManagerError("invalid experiment ID")
         candidate = self.experiments_root / experiment_id
         if candidate.is_symlink():
@@ -1085,14 +1087,6 @@ class ExperimentManager:
         ):
             raise ManagerError(f"unknown experiment: {experiment_id}")
         return directory
-
-
-def _read_json(path: Path) -> dict[str, object]:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
-        return {}
-    return value if isinstance(value, dict) else {}
 
 
 def _worker_live(status: Mapping[str, object]) -> bool:

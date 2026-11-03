@@ -41,12 +41,12 @@ from _bootstrap import add_repo_src
 
 add_repo_src(__file__)
 
+from autotrade.common.time import CN_TZ
 from autotrade.data_sources.tushare.audit import audit_summary_line
 from autotrade.data_sources.tushare.cron_update import DEFAULT_CONFIG, load_config
 from autotrade.environment.executor import StrategyExecutor
 from autotrade.environment.replay.engine import StrategyDataView
 from autotrade.environment.sandbox import SandboxConfig
-from autotrade.environment.strategy import CN_TZ
 from autotrade.paper.book import (
     SOURCE_HISTORY_NAME,
     VERDICT_LOG_NAME,

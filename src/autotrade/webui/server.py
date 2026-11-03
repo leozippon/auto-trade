@@ -28,14 +28,15 @@ from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 from starlette.middleware.gzip import GZipMiddleware
 
+from autotrade.common.records import read_json_object
+from autotrade.common.time import CN_TZ
 from autotrade.environment.data.contracts import RAW_GENERATION_FILENAME
+from autotrade.environment.gpu import list_gpus
 from autotrade.environment.llm.model_profiles import model_profile
-from autotrade.pipelines.hitl_state import (
-    HITL_DIR_NAME,
-    PARAMS_NAME,
-    read_json,
-    read_status,
-)
+from autotrade.paper import fills
+from autotrade.paper.books import delete_book, open_graduated_book
+from autotrade.paper.engine import PAPER_STATE_NAME, PaperWriterBusy
+from autotrade.pipelines.hitl_state import HITL_DIR_NAME, PARAMS_NAME, read_status
 
 from . import equity, issues, memory, registry, skill_feedback, steps, traces, trading
 from .manager import (
@@ -45,7 +46,7 @@ from .manager import (
 )
 from .params_schema import parameter_schema
 from .prompt_preview import build_prompt_preview
-from .public_identity import PublicIdentity, redact_host_paths
+from .public_identity import PublicIdentity, omit_private_paths
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -294,8 +295,6 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     @app.get("/api/gpus")
     def get_gpus() -> dict[str, object]:
         try:
-            from autotrade.environment.gpu import list_gpus
-
             return {"gpus": list_gpus()}
         except Exception as exc:  # noqa: BLE001 - CPU-only workstations retain the console
             return {"gpus": [], "error": f"{type(exc).__name__}: {exc}"}
@@ -349,7 +348,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     ) -> dict[str, object]:
         path, _raw_run_id, _trace_ref, _identity = _trace_target(experiment_id, run_id)
         payload: dict[str, object] = traces.trace_stats(path)
-        params = read_json(_experiment_dir(experiment_id) / HITL_DIR_NAME / PARAMS_NAME)
+        params = read_json_object(_experiment_dir(experiment_id) / HITL_DIR_NAME / PARAMS_NAME, missing_ok=True)
         model = str(params.get("model") or "")
         if model:
             try:
@@ -513,7 +512,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         try:
             strategy_dir = registry.frozen_strategy_dir(experiment_root, experiment_id)
         except FileNotFoundError as exc:
-            raise HTTPException(status_code=404, detail=redact_host_paths(str(exc))) from exc
+            raise HTTPException(status_code=404, detail=omit_private_paths(str(exc))) from exc
         except (KeyError, ValueError) as exc:
             raise HTTPException(status_code=404, detail="the experiment has no frozen artifact") from exc
         return _strategy_zip_response(strategy_dir, f"{experiment_id}__frozen.zip")
@@ -553,7 +552,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         try:
             return read()
         except FileNotFoundError as exc:
-            raise HTTPException(status_code=404, detail=redact_host_paths(str(exc))) from exc
+            raise HTTPException(status_code=404, detail=omit_private_paths(str(exc))) from exc
         except (KeyError, ValueError) as exc:
             raise HTTPException(status_code=404, detail=f"unknown result: {name}") from exc
 
@@ -613,16 +612,16 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             return action()
         except FileExistsError as exc:
             raise HTTPException(
-                status_code=409, detail=redact_host_paths(str(exc))
+                status_code=409, detail=omit_private_paths(str(exc))
             ) from exc
         except KeyError as exc:
             detail = str(exc.args[0]) if exc.args else "unknown curated memory entry"
             raise HTTPException(
-                status_code=404, detail=redact_host_paths(detail)
+                status_code=404, detail=omit_private_paths(detail)
             ) from exc
         except ValueError as exc:
             raise HTTPException(
-                status_code=400, detail=redact_host_paths(str(exc))
+                status_code=400, detail=omit_private_paths(str(exc))
             ) from exc
         except OSError as exc:
             raise HTTPException(
@@ -812,23 +811,18 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
 
     @app.post("/api/trading/{env}/books")
     def trading_open_book(env: str, payload: dict = Body(...)) -> dict[str, object]:
-        from autotrade.paper.books import open_graduated_book
-
         _trading_env(env)
         directory = _experiment_dir(str(payload.get("experiment_id") or ""))
         try:
             book_id = open_graduated_book(root, directory)
         except FileNotFoundError as exc:
-            raise HTTPException(status_code=404, detail=redact_host_paths(str(exc))) from exc
+            raise HTTPException(status_code=404, detail=omit_private_paths(str(exc))) from exc
         except (ValueError, OSError, RuntimeError) as exc:
-            raise HTTPException(status_code=400, detail=redact_host_paths(str(exc))) from exc
+            raise HTTPException(status_code=400, detail=omit_private_paths(str(exc))) from exc
         return {"env": env, "book_id": book_id}
 
     @app.delete("/api/trading/{env}/books/{book}")
     def trading_delete_book(env: str, book: str) -> dict[str, object]:
-        from autotrade.paper.books import delete_book
-        from autotrade.paper.engine import PaperWriterBusy
-
         state_root = trading.env_dir(root, _trading_env(env))
         try:
             delete_book(state_root, book)
@@ -841,7 +835,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
                 status_code=409, detail=f"Paper book {book} is running; delete it after the run"
             ) from exc
         except OSError as exc:
-            raise HTTPException(status_code=500, detail=redact_host_paths(str(exc))) from exc
+            raise HTTPException(status_code=500, detail=omit_private_paths(str(exc))) from exc
         return {"env": env, "deleted": book}
 
     @app.get("/api/trading/{env}/books/{book}/status")
@@ -888,13 +882,6 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
 
     @app.post("/api/trading/{env}/books/{book}/fills")
     def trading_record_fills(env: str, book: str, payload: dict = Body(...)) -> dict[str, object]:
-        from datetime import datetime
-
-        from autotrade.environment.strategy import CN_TZ
-        from autotrade.paper import fills
-        from autotrade.paper.engine import PAPER_STATE_NAME
-        from autotrade.paper.storage import read_json as read_paper_json
-
         directory = _book_root(env, book)
         entries = payload.get("fills") or []
         if not isinstance(entries, list) or not all(isinstance(item, dict) for item in entries):
@@ -902,25 +889,23 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         try:
             lines = fills.record(
                 directory,
-                read_paper_json(directory / PAPER_STATE_NAME),
+                read_json_object(directory / PAPER_STATE_NAME, missing_ok=True),
                 str(payload.get("trade_date") or ""),
                 outcome=payload.get("outcome"),
                 fills=entries,
                 today=datetime.now(CN_TZ).strftime("%Y%m%d"),
             )
         except (TypeError, ValueError) as exc:
-            raise HTTPException(status_code=400, detail=redact_host_paths(str(exc))) from exc
+            raise HTTPException(status_code=400, detail=omit_private_paths(str(exc))) from exc
         return {"env": env, "book_id": book, "recorded": len(lines)}
 
     @app.post("/api/trading/{env}/books/{book}/fills/enable")
     def trading_enable_fills(env: str, book: str) -> dict[str, object]:
-        from autotrade.paper import fills
-
         directory = _book_root(env, book)
         try:
             fills.enable(directory)
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=redact_host_paths(str(exc))) from exc
+            raise HTTPException(status_code=400, detail=omit_private_paths(str(exc))) from exc
         return {"env": env, "book_id": book, "real_fills": True}
 
     @app.get("/api/trading/{env}/health")

@@ -18,11 +18,8 @@ from pathlib import Path
 
 import pytest
 
-from autotrade.environment.runtime import (
-    HOST_PATH_PREFIXES,
-    redact_host_paths,
-    sanitize_for_log,
-)
+from autotrade.common.records import HOST_PATH_PREFIXES, redact_host_paths
+from autotrade.environment.runtime import sanitize_for_log
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 

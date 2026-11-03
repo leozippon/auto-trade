@@ -39,6 +39,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from autotrade.common.time import CN_TZ
 from autotrade.data_quality import read_quality_report
 from autotrade.environment.broker_core import BOARDS, board_of
 from autotrade.environment.data import PITDataStore, default_tushare_contracts
@@ -49,7 +50,6 @@ from autotrade.environment.data.auction import (
 )
 from autotrade.environment.data.contracts import (
     BOARD_TRADING_DATASETS,
-    CN_TZ,
     MACRO_DATASET_CONTRACTS,
     STK_AUCTION_PRICE_ABS_TOLERANCE,
     DatasetContract,

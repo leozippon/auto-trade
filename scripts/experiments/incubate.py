@@ -46,6 +46,7 @@ from _bootstrap import add_repo_src
 
 add_repo_src(__file__)
 
+from autotrade.common.records import read_json_object
 from autotrade.environment.artifacts import FilesystemArtifactStore
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.sandbox import SandboxSpec
@@ -57,7 +58,7 @@ from autotrade.paper.books import (
     validate_book_id,
 )
 from autotrade.pipelines.experiment import incubation_entry
-from autotrade.pipelines.hitl_state import assert_no_live_writer, read_json, select_gpus
+from autotrade.pipelines.hitl_state import assert_no_live_writer, select_gpus
 from autotrade.pipelines.incubation import incubation_boards
 from autotrade.pipelines.ledger import (
     ExperimentLedger,
@@ -134,7 +135,7 @@ def main() -> int:
             require_incubable(records)
             assert_no_live_writer(experiment_dir)
             params_path = experiment_dir / "hitl" / "params.json"
-            params = read_json(params_path)
+            params = read_json_object(params_path, missing_ok=True)
             if not params:
                 raise ValueError(f"missing experiment params: {params_path}")
             options = resolve_worker_options(params, experiment_dir=experiment_dir, repo_root=REPO_ROOT)

@@ -310,7 +310,7 @@ def test_the_listing_projects_labels_and_scrubs_host_paths(tmp_path: Path) -> No
     labelled = by_experiment["expA"]
     assert labelled["session_label"] == "s1"
     assert "/Data2" not in str(labelled["summary"])
-    assert "[host path omitted]" in str(labelled["summary"])
+    assert "[host_path]" in str(labelled["summary"])
     # A session key the plan no longer names still lists, just unlabelled.
     assert by_experiment["expB"]["session_label"] == ""
     assert by_experiment["expB"]["category"] == "docs"

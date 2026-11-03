@@ -40,6 +40,8 @@ from datetime import date, datetime, time
 from pathlib import Path
 from typing import Protocol
 
+from autotrade.common.records import read_json_object, write_json_atomic
+from autotrade.common.time import CN_TZ
 from autotrade.environment.broker import BrokerProfile, DailyBroker, Position
 from autotrade.environment.executor import (
     DockerStrategyExecutor,
@@ -54,7 +56,6 @@ from autotrade.environment.replay.engine import (
 from autotrade.environment.replay.market import DailyMarketData
 from autotrade.environment.sandbox import SandboxConfig
 from autotrade.environment.strategy import (
-    CN_TZ,
     AccountSnapshot,
     StrategyContext,
     StrategyOrder,
@@ -73,7 +74,7 @@ from .fills import (
     simulate,
     unresolved,
 )
-from .storage import append_jsonl_once, read_json, read_jsonl, write_json_atomic
+from .storage import append_jsonl_once, read_jsonl
 
 PAPER_SOURCE = "paper_engine"
 PAPER_STATE_SCHEMA_VERSION = 4
@@ -94,7 +95,7 @@ def write_run_status(root: Path, trade_date: str, error: BaseException | None = 
         "trade_date": trade_date,
         "ok": error is None,
         "error": f"{type(error).__name__}: {error}" if error is not None else None,
-    })
+    }, private=True, sort_keys=False)
 
 
 @contextmanager
@@ -283,7 +284,7 @@ class DailyPaperEngine:
                 raise PaperEngineError(f"cannot restore Paper account: {exc}") from exc
             # The owner switched the book to real fills since its last run.
             if adopt(state, records):
-                write_json_atomic(self.state_root / PAPER_STATE_NAME, state)
+                write_json_atomic(self.state_root / PAPER_STATE_NAME, state, private=True, sort_keys=False)
             real = RealFills(self.state_root, state, records) if mode(state) is not None else None
             decided = [str(row["trade_date"]) for row in state["decisions"]]
             if decided and trade_date == decided[-1]:
@@ -319,9 +320,9 @@ class DailyPaperEngine:
                 # there.
                 path = self.state_root / PAPER_STATE_NAME
                 if path.exists():
-                    persisted = read_json(path)
+                    persisted = read_json_object(path, missing_ok=True)
                     persisted["last_error"] = f"{type(exc).__name__}: {exc}"
-                    write_json_atomic(path, persisted)
+                    write_json_atomic(path, persisted, private=True, sort_keys=False)
                     self._write_snapshot(persisted, self._restore_broker(persisted), ok=False, error=str(exc))
                 if isinstance(exc, PaperEngineError):
                     raise
@@ -539,7 +540,7 @@ class DailyPaperEngine:
         warnings = self._prune_fit_states(state)
         if warnings:
             state["warnings"] = warnings
-            write_json_atomic(self.state_root / PAPER_STATE_NAME, state)
+            write_json_atomic(self.state_root / PAPER_STATE_NAME, state, private=True, sort_keys=False)
 
     def _context(
         self,
@@ -662,7 +663,7 @@ class DailyPaperEngine:
                 raise PaperEngineError(f"Paper journals exist but {PAPER_STATE_NAME} is missing; refusing to fabricate an account")
             return self._new_state()
         try:
-            state = read_json(path)
+            state = read_json_object(path, missing_ok=True)
         except (TypeError, ValueError) as exc:
             raise PaperEngineError(str(exc)) from exc
         if state.get("schema_version") != PAPER_STATE_SCHEMA_VERSION:
@@ -687,7 +688,7 @@ class DailyPaperEngine:
     def _checkpoint(self, state: dict[str, object], broker: DailyBroker, pending: list[StrategyOrder]) -> None:
         state["account"] = self._account_record(broker)
         state["pending_orders"] = [order.to_record() for order in pending]
-        write_json_atomic(self.state_root / PAPER_STATE_NAME, state)
+        write_json_atomic(self.state_root / PAPER_STATE_NAME, state, private=True, sort_keys=False)
 
     def _restore_broker(self, state: dict[str, object]) -> DailyBroker:
         broker = DailyBroker(self.profile)
@@ -765,7 +766,7 @@ class DailyPaperEngine:
             append_jsonl_once(self.state_root / name, payload)
         if emissions:
             state["emissions"] = []
-            write_json_atomic(self.state_root / PAPER_STATE_NAME, state)
+            write_json_atomic(self.state_root / PAPER_STATE_NAME, state, private=True, sort_keys=False)
 
     def _write_snapshot(self, state: dict[str, object], broker: DailyBroker, *, ok: bool, error: str | None) -> None:
         decisions = state.get("decisions") or []
@@ -782,7 +783,7 @@ class DailyPaperEngine:
         }
         if error:
             payload["error"] = error
-        write_json_atomic(self.state_root / SNAPSHOT_NAME, payload)
+        write_json_atomic(self.state_root / SNAPSHOT_NAME, payload, private=True, sort_keys=False)
 
     def _summary(self, state: dict[str, object]) -> dict[str, object]:
         account = state.get("account") if isinstance(state.get("account"), dict) else {}

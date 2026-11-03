@@ -4,9 +4,8 @@ import json
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
-CN_TZ = ZoneInfo("Asia/Shanghai")
+from autotrade.common.time import CN_TZ
 
 # ---------------------------------------------------------------------------
 # Raw-lake research contract. The environment owns these values (they define

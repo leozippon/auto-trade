@@ -25,9 +25,11 @@ host cannot know it.
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+
+from autotrade.common.ids import is_experiment_id
+from autotrade.common.records import read_json_object
 
 from .config import DEFAULT_RESEARCH_GEOMETRY
 from .experiment import (
@@ -38,7 +40,6 @@ from .experiment import (
     trial_family,
     trial_rows,
 )
-from .hitl_state import read_json
 from .ledger import (
     ENVIRONMENT_BLOCKED,
     LINEAGE_SERIES_NAME,
@@ -47,8 +48,6 @@ from .ledger import (
 )
 from .verdict import graded_daily
 
-_ARM_ID = re.compile(r"[A-Za-z0-9_-]+")
-
 
 def lineage_arm_ids(value: object, experiment_id: str) -> tuple[str, ...]:
     """The ``lineage_arms`` parameter as experiment ids, or ``ValueError``."""
@@ -56,7 +55,7 @@ def lineage_arm_ids(value: object, experiment_id: str) -> tuple[str, ...]:
     if not isinstance(value, (list, tuple)) or not all(isinstance(item, str) for item in value):
         raise ValueError("lineage_arms must be a list of experiment ids")
     arms = tuple(value)
-    malformed = [arm for arm in arms if not _ARM_ID.fullmatch(arm)]
+    malformed = [arm for arm in arms if not is_experiment_id(arm)]
     if malformed:
         raise ValueError(f"lineage_arms holds names that are not experiment ids: {malformed}")
     repeated = sorted({arm for arm in arms if arms.count(arm) > 1})
@@ -102,7 +101,7 @@ def extract_lineage(
         params_path = directory / "hitl" / "params.json"
         if not params_path.is_file():
             raise ValueError(f"lineage arm {arm} does not exist")
-        params = read_json(params_path)
+        params = read_json_object(params_path, missing_ok=True)
         period = (
             str(params.get("research_start", DEFAULT_RESEARCH_GEOMETRY.research_start)),
             str(params.get("research_end", DEFAULT_RESEARCH_GEOMETRY.research_end)),

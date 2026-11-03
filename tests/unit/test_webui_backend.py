@@ -558,7 +558,7 @@ def test_public_identity_keeps_cjk_slash_lists_and_redacts_host_paths(
         json.dumps({"schema_version": 1, "sessions": []}), encoding="utf-8"
     )
     identity = PublicIdentity(directory)
-    omitted = "[host path omitted]"
+    omitted = "[host_path]"
     chinese_list = (
         "原型 + 机械测试通过（30买/无churn/卖出路径/冷热同单/严格JSON）。"
     )
@@ -2026,7 +2026,7 @@ def test_public_worker_log_is_repo_relative_and_never_a_host_path(tmp_path: Path
     # exactly why it must never be stored.
     assert identity.public_status(
         {"worker_log": f"/Data2/lzp/ADMCubeQuant/{relative}"}
-    )["worker_log"] == "[host path omitted]"
+    )["worker_log"] == "[host_path]"
     assert "/" != json.dumps(public)[0]
     assert not any(
         isinstance(value, str) and Path(value).is_absolute()

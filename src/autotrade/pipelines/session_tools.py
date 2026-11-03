@@ -21,13 +21,13 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 
 from autotrade.agent.compact import safe_error_summary
+from autotrade.common.records import redact_host_paths
 from autotrade.environment.artifacts import (
     READONLY_FILES,
     ArtifactSnapshotUnstable,
     FilesystemArtifactStore,
     copy_artifact_snapshot,
 )
-from autotrade.environment.data.summary import HOST_PATH_RE
 from autotrade.environment.executor import (
     gpu_contended,
     raised_by_strategy,
@@ -129,7 +129,7 @@ def _active_excess_at_cost_stress(step: StepResult, multiplier: float) -> float 
 
 def _public_error_text(exc: Exception) -> str:
     """The exact failure text with host paths redacted."""
-    return HOST_PATH_RE.sub("[host_path]", safe_error_summary(exc))
+    return redact_host_paths(safe_error_summary(exc))
 
 
 def _public_validation_error(exc: Exception) -> str:

@@ -1,36 +1,15 @@
-"""Crash-tolerant storage primitives for the local Paper account."""
+"""Crash-tolerant journals of the local Paper account.
+
+Paper's JSON object files go through ``autotrade.common.records`` like every
+other record: ``read_json_object(missing_ok=True)`` and owner-only
+``write_json_atomic(private=True)``.
+"""
 
 from __future__ import annotations
 
 import json
 import os
-import uuid
 from pathlib import Path
-
-
-def read_json(path: Path) -> dict[str, object]:
-    try:
-        value = json.loads(Path(path).read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return {}
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"cannot read JSON {path}: {exc}") from exc
-    if not isinstance(value, dict):
-        raise TypeError(f"JSON file must contain an object: {path}")
-    return value
-
-
-def write_json_atomic(path: Path, payload: object, *, private: bool = True) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
-    try:
-        temporary.write_text(json.dumps(payload, ensure_ascii=False, default=str, allow_nan=False) + "\n", encoding="utf-8")
-        if private:
-            temporary.chmod(0o600)
-        temporary.replace(path)
-    finally:
-        temporary.unlink(missing_ok=True)
 
 
 def read_jsonl(path: Path) -> tuple[list[dict[str, object]], int]:
@@ -86,4 +65,4 @@ def append_jsonl_once(path: Path, payload: dict[str, object], *, identity_key: s
     path.chmod(0o600)
 
 
-__all__ = ["append_jsonl_once", "read_json", "read_jsonl", "write_json_atomic"]
+__all__ = ["append_jsonl_once", "read_jsonl"]

@@ -37,6 +37,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from autotrade.common.records import read_json_object
 from autotrade.environment.data.pit import complete_interrupted_commits
 from autotrade.environment.data.research_release import (
     pinned_generation,
@@ -51,7 +52,6 @@ from autotrade.pipelines.hitl_state import (
     PARAMS_NAME,
     STATUS_NAME,
     arm_is_archived,
-    read_json,
     read_status,
     status_pid_alive,
 )
@@ -217,7 +217,7 @@ def release_consumers(repo_root: Path, raw_dir: Path) -> dict[str, list[str]]:
             continue
         reason = f"experiment {directory.name} ({state})"
         keep(pinned_generation(directory), reason)
-        seed = read_json(hitl / PARAMS_NAME).get("pit_views_seed")
+        seed = read_json_object(hitl / PARAMS_NAME, missing_ok=True).get("pit_views_seed")
         if isinstance(seed, str) and seed.strip() and (repo_root / seed.strip() / "provider.json").is_file():
             keep(_seed_generation(repo_root / seed.strip()), reason)
     paper = repo_root / PAPER_STATE_DIR

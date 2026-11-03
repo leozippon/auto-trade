@@ -28,7 +28,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from autotrade.environment.data.contracts import CN_TZ
+from autotrade.common.time import CN_TZ
 from autotrade.environment.replay.style import MIN_REGRESSION_DAYS
 
 # Snapshot anchor time of day: close of business, not an intraday moment.

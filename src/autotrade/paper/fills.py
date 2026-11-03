@@ -46,9 +46,10 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, time
 from pathlib import Path
 
+from autotrade.common.time import CN_TZ
 from autotrade.environment.broker import DailyBroker, Execution, Lot, Position
 from autotrade.environment.broker_core import validate_buy_lot
-from autotrade.environment.strategy import CN_TZ, StrategyOrder
+from autotrade.environment.strategy import StrategyOrder
 
 from .storage import append_jsonl_once, read_jsonl
 

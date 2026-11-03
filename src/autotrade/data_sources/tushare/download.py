@@ -13,12 +13,12 @@ import time
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
+from autotrade.common.time import CN_TZ
 from autotrade.environment.data.pit import concat_rows
 
 from . import common as core
@@ -245,7 +245,7 @@ def merge_trade_cal_partition(path: Path, refreshed: pd.DataFrame) -> pd.DataFra
     # resolved cron end dates), so it must never merge silently. Refuse and
     # leave the decision to a human: verify against the exchange, then delete
     # the year partition to accept the correction.
-    today = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d")
+    today = datetime.now(CN_TZ).strftime("%Y%m%d")
     checked = [column for column in ("is_open", "pretrade_date") if column in existing.columns and column in refreshed.columns]
     if checked:
         # Each partition file is single-exchange by construction (exchange=
@@ -731,7 +731,7 @@ def _publish_auction_frame(
     # source response that only reorders rows must remain byte-identical and
     # keep the first observed availability instead of looking like a revision.
     captured = captured.sort_values(["trade_date", "ts_code"], kind="stable").reset_index(drop=True)
-    landed_at = datetime.now(UTC).astimezone(ZoneInfo("Asia/Shanghai")).isoformat()
+    landed_at = datetime.now(UTC).astimezone(CN_TZ).isoformat()
     path = raw_dir / "stk_auction" / f"trade_date={trade_date}.parquet"
     availability = {
         "matched_at": f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}T09:25:00+08:00",

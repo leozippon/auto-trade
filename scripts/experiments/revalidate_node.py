@@ -52,6 +52,7 @@ from _bootstrap import add_repo_src
 
 REPO_ROOT = add_repo_src(__file__)
 
+from autotrade.common.records import read_json_object
 from autotrade.environment.artifacts import FilesystemArtifactStore
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import utc_now_iso, write_json_atomic
@@ -62,7 +63,7 @@ from autotrade.environment.sandbox_images import (
 from autotrade.environment.step_tree import node_handle
 from autotrade.pipelines.config import ArtifactRevision, research_span
 from autotrade.pipelines.experiment import _SEED_LINE, _SEED_NAME
-from autotrade.pipelines.hitl_state import read_json, select_gpus
+from autotrade.pipelines.hitl_state import select_gpus
 from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.pipelines.session_resume import REVISIONS_DIR
 from autotrade.pipelines.session_tools import write_active_daily
@@ -197,7 +198,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--variant must be a directory holding main.py")
     arm = EXPERIMENTS_ROOT / args.experiment
     try:
-        params = read_json(arm / "hitl" / "params.json")
+        params = read_json_object(arm / "hitl" / "params.json", missing_ok=True)
         if not params:
             raise ValueError(f"missing experiment params: {arm / 'hitl' / 'params.json'}")
         row = session_step(ExperimentLedger(arm / "ledgers" / "experiment_ledger.jsonl").read(), args.node)

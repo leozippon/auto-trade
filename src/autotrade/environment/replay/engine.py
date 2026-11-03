@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time
 from time import perf_counter
 
+from autotrade.common.time import CN_TZ
 from autotrade.environment.broker import BrokerProfile, DailyBroker
 from autotrade.environment.executor import (
     DockerStrategyExecutor,
@@ -17,7 +18,6 @@ from autotrade.environment.executor import (
     StrategyRaised,
 )
 from autotrade.environment.strategy import (
-    CN_TZ,
     AccountSnapshot,
     StrategyContext,
     StrategyOrder,

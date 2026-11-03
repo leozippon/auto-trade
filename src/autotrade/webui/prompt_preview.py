@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 
 from autotrade.agent.experiment_facts import build_experiment_facts
 from autotrade.agent.prompts import SESSION_DEFAULT_INSTRUCTION, build_system_prompt
+from autotrade.common.records import read_json_object
 from autotrade.environment.identity import AgentRefStore
 from autotrade.pipelines.config import BudgetUsed
 from autotrade.pipelines.hitl_state import (
@@ -31,7 +32,6 @@ from autotrade.pipelines.hitl_state import (
     HITL_DIR_NAME,
     SCHEDULE_NAME,
     read_control,
-    read_json,
 )
 from autotrade.pipelines.ledger import lineage_record
 
@@ -217,7 +217,7 @@ def _research_prompt(
 
 
 def _require_research_session(experiment_dir: Path, session_key: str) -> None:
-    schedule_plan = read_json(experiment_dir / HITL_DIR_NAME / SCHEDULE_NAME)
+    schedule_plan = read_json_object(experiment_dir / HITL_DIR_NAME / SCHEDULE_NAME, missing_ok=True)
     raw_sessions = schedule_plan.get("sessions")
     sessions: list[object] = raw_sessions if isinstance(raw_sessions, list) else []
     for item in sessions:

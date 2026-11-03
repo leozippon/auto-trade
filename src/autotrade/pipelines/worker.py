@@ -14,6 +14,7 @@ from typing import Any, NamedTuple
 import pandas as pd
 
 from autotrade.agent.compact import ContextCompactionConfig
+from autotrade.common.records import read_json_object, write_json_atomic
 from autotrade.environment.artifacts import (
     FilesystemArtifactStore,
 )
@@ -46,7 +47,7 @@ from autotrade.environment.llm.lighting import (
     SHORT_TIER_MAX_COMPACTION_THRESHOLD,
 )
 from autotrade.environment.pretrained import pretrained_pin
-from autotrade.environment.runtime import utc_now_iso, write_json_atomic
+from autotrade.environment.runtime import utc_now_iso
 from autotrade.environment.sandbox import (
     DEFAULT_IMAGE,
     SandboxConfig,
@@ -81,7 +82,6 @@ from .hitl_state import (
     build_session_plan,
     planned_sessions,
     read_gpu_claim,
-    read_json,
     read_status,
 )
 from .interactive import InteractiveExperimentRunner
@@ -404,7 +404,7 @@ def load_worker_options(
 ) -> InteractiveWorkerOptions:
     directory = Path(experiment_dir).resolve(strict=True)
     params_path = directory / "hitl" / "params.json"
-    params = read_json(params_path)
+    params = read_json_object(params_path, missing_ok=True)
     if not params:
         raise ValueError(f"missing experiment params: {params_path}")
     options = resolve_worker_options(params, experiment_dir=directory, repo_root=repo_root)

@@ -1567,7 +1567,7 @@ class ToolResultContractTest(unittest.TestCase):
         return paths, registry
 
     def test_results_carry_no_host_path_or_raw_run_id(self) -> None:
-        from autotrade.environment.data.summary import HOST_PATH_RE
+        from autotrade.common.records import HOST_PATH_RE
 
         with tempfile.TemporaryDirectory() as tmp:
             _, registry = self._layout(tmp)

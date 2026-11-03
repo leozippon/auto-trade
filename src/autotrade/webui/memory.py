@@ -26,9 +26,10 @@ import threading
 from collections.abc import Mapping
 from pathlib import Path
 
+from autotrade.common.records import read_json_object
 from autotrade.environment.runtime import chmod_tree
 from autotrade.pipelines.config import rolling_default
-from autotrade.pipelines.hitl_state import HITL_DIR_NAME, PARAMS_NAME, read_json
+from autotrade.pipelines.hitl_state import HITL_DIR_NAME, PARAMS_NAME
 from autotrade.pipelines.ledger import experiment_verdict
 from autotrade.pipelines.skills import (
     CURATED_MEMORY_SOURCE,
@@ -283,7 +284,7 @@ def experiment_memory(experiments_root: Path, experiment_id: str) -> dict[str, o
     """
 
     directory = resolve_experiment_dir(Path(experiments_root), experiment_id)
-    params = read_json(directory / HITL_DIR_NAME / PARAMS_NAME)
+    params = read_json_object(directory / HITL_DIR_NAME / PARAMS_NAME, missing_ok=True)
     # The arm's research end, resolved as the worker resolves it: the mount
     # admits a graduated source only when its Held-out ended by this day.
     research_end = str(
