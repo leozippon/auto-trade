@@ -78,6 +78,8 @@ from autotrade.paper.pit import newest_replay_slot
 from autotrade.paper.storage import read_jsonl
 from autotrade.paper.verdict import VERDICT_NAME
 
+from .public_identity import omit_private_paths
+
 TRADING_ENVS = ("paper",)
 # A snapshot older than this is served but flagged: the account data is the
 # last one the engine wrote, not the current one. The book writes once per
@@ -155,13 +157,14 @@ def _age_seconds(moment: datetime | None) -> float | None:
 
 
 def _read_json(path: Path) -> tuple[dict[str, object] | None, str | None]:
-    """(payload, error): (None, None) = missing, (None, msg) = unreadable."""
+    """(payload, error): (None, None) = missing, (None, msg) = unreadable. The
+    reader names the file by its host path, which a console page omits."""
     try:
         return read_json_object(path), None
     except FileNotFoundError:
         return None, None
     except (OSError, ValueError) as exc:
-        return None, str(exc)
+        return None, omit_private_paths(str(exc))
 
 
 def _mapping(value: object) -> dict[str, object]:
