@@ -216,7 +216,13 @@ def test_the_residual_statistic_recovers_a_known_alpha_and_betas():
         "size_factor_daily": [[f"d{index:05d}", float(item)] for index, item in enumerate(size)],
         "value_factor_daily": [[f"d{index:05d}", float(item)] for index, item in enumerate(value)],
     }
-    assert verdict.residual_reading(analysis, alpha=0.05) == {"series": "absolute", **reading}
+    assert verdict.residual_reading(analysis, alpha=0.05) == {"series": "absolute", **reading, "dropped_days": 0}
+    # A non-finite day is dropped and counted, never read as a figure: a NaN
+    # does not pass for a series the legs explain exactly.
+    holed = {**analysis, "strategy_daily": [[day, math.nan if index == 7 else value] for index, (day, value) in enumerate(analysis["strategy_daily"])]}
+    patched = verdict.residual_reading(holed, alpha=0.05)
+    assert (patched["days"], patched["dropped_days"]) == (days - 1, 1)
+    assert math.isfinite(patched["residual_information_ratio"])
 
     with pytest.raises(ValueError, match="collinear"):
         verdict.residual_statistics(active, market, market * 2.0, value, alpha=0.05)
@@ -581,7 +587,7 @@ def _intercept(analysis, start="", end=""):
     legs: what a regressed grade would have read."""
 
     graded, _series = verdict._graded(analysis)
-    rows = verdict._regression_rows(graded, start, end)
+    rows, _dropped = verdict._regression_rows(graded, start, end)
     return float(factor_ols(rows[:, 0], rows[:, 1:])[0][0]) * TRADING_DAYS_PER_YEAR
 
 
@@ -826,6 +832,17 @@ def test_the_sealed_gate_holds_the_residual_ir_to_its_bar_and_leads_the_verdict(
     assert edge["thresholds"] == {"alpha": 0.05, "bar": edge["bar"], "sealed_years": 5}
     raised = verdict.sealed_strategy_error(start=sealed[0], end=sealed[-1], error="StrategyRaised: boom")
     assert raised["reasons"] == ["sealed_strategy_error"] and "residual_information_ratio" not in raised
+    # A book that earned exactly its panel's return (it stayed in cash) left
+    # nothing to read: its own doing, a failed gate rather than a retry.
+    cash = _analysis(_segment(sealed, 0.0, np.random.default_rng(9), te=0.05))
+    cash = {**_with_panel(cash, [value for _day, value in cash["strategy_daily"]])}
+    unread = verdict.sealed_slice(cash, rules=rules, start=sealed[0], end=sealed[-1])
+    assert unread["reasons"] == ["sealed_unmeasurable"] and unread["unmeasurable"] is True
+    assert "residual_information_ratio" not in unread
+    # The gate reads the active series alone: a replay without a panel
+    # measured nothing and raises.
+    with pytest.raises(ValueError, match="no zero-skill panel"):
+        verdict.sealed_slice(_analysis(_segment(sealed, 0.10, np.random.default_rng(9))), rules=rules, start=sealed[0], end=sealed[-1])
 
     forward = _forward(_selection_book(np.random.default_rng(3), 0.40))
     heldout = _heldout(

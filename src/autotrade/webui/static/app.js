@@ -89,6 +89,7 @@ const REASON_LABELS = {
   freeze_ablation_invalid: "消融对照只改提名一行",
   freeze_seed_mean_information_ratio_below_threshold: "研究期种子均值主动 IR",
   sealed_strategy_error: "封存年份策略无报错",
+  sealed_unmeasurable: "封存年份残差可读（不是全程空仓）",
   sealed_residual_ir_below_bar: "封存年份残差 IR",
   forward_strategy_error: "前推期策略无报错",
   heldout_strategy_error: "Held-out 期策略无报错",
@@ -3214,8 +3215,9 @@ function validityCriteria(verdict) {
 
 /* The verdict's performance condition, S, as a checklist row. */
 function sealedCriterion(s) {
-  return s.strategy_error
-    ? { ok: false, label: reasonLabel("sealed_strategy_error"), value: null }
+  if (s.strategy_error) return { ok: false, label: reasonLabel("sealed_strategy_error"), value: null };
+  return s.unmeasurable
+    ? { ok: false, label: reasonLabel("sealed_unmeasurable"), value: null }
     : {
         ok: Boolean(s.passed),
         label: reasonLabel("sealed_residual_ir_below_bar"),

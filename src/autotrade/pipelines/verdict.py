@@ -130,19 +130,31 @@ def _strategy_returns(
 
 def _regression_rows(
     analysis: Mapping[str, object], start: str, end: str
-) -> np.ndarray:
+) -> tuple[np.ndarray, int]:
     """``(strategy, market, size, value)`` rows of every day of the slice that
     carries all three legs (``style.FACTOR_SERIES``), joined exactly as
-    ``style._factor_regression`` joins them. A sidecar written before the
-    value leg existed carries none and yields no row."""
+    ``style._factor_regression`` joins them, and how many such days were
+    dropped for a non-finite value: a NaN is never read as a figure. A
+    sidecar written before the value leg existed carries none and yields no
+    row."""
 
     legs = [dict(_series_pairs(analysis.get(series))) for _name, series in FACTOR_SERIES]
-    rows = [
-        (value, *(leg[date] for leg in legs))
-        for date, value in _strategy_returns(analysis, start, end)
-        if all(date in leg for leg in legs)
-    ]
-    return np.asarray(rows, dtype=float).reshape(-1, 1 + len(FACTOR_SERIES))
+    rows = np.asarray(
+        [
+            (value, *(leg[date] for leg in legs))
+            for date, value in _strategy_returns(analysis, start, end)
+            if all(date in leg for leg in legs)
+        ],
+        dtype=float,
+    ).reshape(-1, 1 + len(FACTOR_SERIES))
+    finite = np.isfinite(rows).all(axis=1)
+    return rows[finite], int((~finite).sum())
+
+
+class ExactFit(ValueError):
+    """The factor legs explain a series exactly: no residual to read. The
+    series itself is degenerate -- a book that stayed in cash against an
+    empty panel -- rather than its data missing."""
 
 
 def residual_bar(years: float, alpha: float) -> float:
@@ -181,8 +193,9 @@ def residual_statistics(
     residual standard deviation annualised, ``intercept × √244 / σ̂`` with σ̂
     on n − 4 degrees of freedom. ``years`` is days / 244 and ``bar`` the
     :func:`residual_bar` at ``alpha`` for that length. ``ValueError`` on
-    series of unequal length, fewer than ``MIN_REGRESSION_DAYS`` days,
-    collinear legs or a series the legs explain exactly.
+    series of unequal length, fewer than ``MIN_REGRESSION_DAYS`` days or
+    collinear legs, and :class:`ExactFit` on a series the legs explain
+    exactly.
     """
 
     y = np.asarray(active, dtype=float)
@@ -197,7 +210,7 @@ def residual_statistics(
     coefficients, residual = factor_ols(y, legs)
     sigma = math.sqrt(float(residual @ residual) / (days - len(coefficients)))
     if not sigma > 0:
-        raise ValueError("the factor legs explain the series exactly: no residual to read")
+        raise ExactFit("the factor legs explain the series exactly: no residual to read")
     scale = math.sqrt(TRADING_DAYS_PER_YEAR)
     years = days / TRADING_DAYS_PER_YEAR
     return {
@@ -215,13 +228,14 @@ def residual_reading(
     analysis: Mapping[str, object], *, start: str = "", end: str = "", alpha: float
 ) -> dict[str, object]:
     """:func:`residual_statistics` of one sidecar's graded series over a
-    slice (empty bounds take the whole sidecar), with ``series`` naming it:
-    the active series where the sidecar carries a panel. ``ValueError`` where
-    it cannot be read (see :func:`residual_statistics`)."""
+    slice (empty bounds take the whole sidecar), with ``series`` naming it --
+    the active series where the sidecar carries a panel -- and
+    ``dropped_days``, the days left out for a non-finite value.
+    ``ValueError`` where it cannot be read (see :func:`residual_statistics`)."""
 
     graded, series = _graded(analysis)
-    rows = _regression_rows(graded, start, end)
-    return {"series": series, **residual_statistics(*rows.T, alpha=alpha)}
+    rows, dropped = _regression_rows(graded, start, end)
+    return {"series": series, **residual_statistics(*rows.T, alpha=alpha), "dropped_days": dropped}
 
 
 def ablation_increment(
@@ -251,11 +265,13 @@ def ablation_increment(
     if mine.keys() != theirs.keys():
         raise ValueError("the book and its ablation replayed different days")
     difference = {**book, "strategy_daily": [[day, value - theirs[day]] for day, value in mine.items()]}
-    reading = residual_statistics(*_regression_rows(difference, start, end).T, alpha=alpha)
+    rows, dropped = _regression_rows(difference, start, end)
+    reading = residual_statistics(*rows.T, alpha=alpha)
     del reading["bar"]
     return {
         "series": series,
         **reading,
+        "dropped_days": dropped,
         "t_statistic": reading["residual_information_ratio"] * math.sqrt(reading["years"]),
     }
 
@@ -320,7 +336,7 @@ def _loadings(analysis: Mapping[str, object], start: str, end: str) -> dict[str,
     graded series' loadings are a diagnostic, the strategy's own what a
     tracking mandate limits."""
 
-    rows = _regression_rows(analysis, start, end)
+    rows, _dropped = _regression_rows(analysis, start, end)
     if len(rows) < MIN_REGRESSION_DAYS:
         return None
     try:
@@ -741,9 +757,11 @@ CONDITIONS: tuple[Condition, ...] = (
     Condition("ablation", "freeze_ablation_invalid", lambda m, t: "problem" not in m),
     Condition("ablation", "freeze_ablation_missing", lambda m, t: "step_id" in m or not m["required"]),
     # The sealed gate (:func:`sealed_slice`): the frozen book's residual IR
-    # over the sealed years against its bar, unread when the book raised.
+    # over the sealed years against its bar, unread when the book raised or
+    # its own series left nothing to read.
     Condition("sealed", "sealed_strategy_error", lambda m, t: m.get("strategy_error") is not True, "S"),
-    Condition("sealed", "sealed_residual_ir_below_bar", lambda m, t: m.get("strategy_error") is True or m["residual_information_ratio"] >= m["bar"], "S"),
+    Condition("sealed", "sealed_unmeasurable", lambda m, t: m.get("unmeasurable") is not True, "S"),
+    Condition("sealed", "sealed_residual_ir_below_bar", lambda m, t: m.get("strategy_error") is True or m.get("unmeasurable") is True or m["residual_information_ratio"] >= m["bar"], "S"),
     # A frozen book that raised in its own code during a forward-stage replay
     # (:func:`graduation_verdict`): the frozen book's forward replay, in the
     # slice it raised in, or a seed replicate's sealed or forward replay. No
@@ -1011,27 +1029,31 @@ def sealed_slice(
 ) -> dict[str, object]:
     """The sealed gate on the frozen book's replay over the sealed years.
 
-    The book's graded series over ``start``..``end`` read through
+    The book's active series over ``start``..``end`` read through
     :func:`residual_reading` at the rules' ``alpha``: its residual
     information ratio against the bar for the slice's length, the one
-    performance condition of the verdict. The holder's readings ride beside
-    it; ``seed_replicates`` (what names each and its replay's sidecar) are
-    read the same way and reported, never judged.
+    performance condition of the verdict. A series the factor legs explain
+    exactly (:class:`ExactFit`: a book that stayed in cash) is the book's own
+    doing and fails the gate as ``unmeasurable``; a replay without a
+    zero-skill panel, or with too few days to read, measured nothing and
+    raises ``ValueError``. The holder's readings ride beside it;
+    ``seed_replicates`` (what names each and its replay's sidecar) are read
+    the same way and reported, never judged.
     """
 
     start, end = _span(start, end)
-    reading = residual_reading(analysis, start=start, end=end, alpha=rules.alpha)
-    measured = {
-        "start": start,
-        "end": end,
-        **reading,
+    if _graded(analysis)[1] != "active":
+        raise ValueError(
+            "the sealed gate reads the active series, and this replay carries no zero-skill panel"
+        )
+    readings = {
         "raw_readings": holder_readings(analysis, start=start, end=end),
         **(
             {
                 "seed_replicates": [
                     {
                         **identity,
-                        **residual_reading(sidecar, start=start, end=end, alpha=rules.alpha),
+                        **_reported_residual(sidecar, start=start, end=end, alpha=rules.alpha),
                     }
                     for identity, sidecar in seed_replicates
                 ]
@@ -1040,6 +1062,13 @@ def sealed_slice(
             else {}
         ),
     }
+    try:
+        reading = residual_reading(analysis, start=start, end=end, alpha=rules.alpha)
+    except ExactFit as exc:
+        measured = {"start": start, "end": end, "unmeasurable": True, "error": str(exc), **readings}
+        thresholds = {"alpha": rules.alpha, "sealed_years": rules.sealed_years}
+        return {**measured, "reasons": judge("sealed", measured, thresholds), "thresholds": thresholds}
+    measured = {"start": start, "end": end, **reading, **readings}
     thresholds = {"alpha": rules.alpha, "bar": reading["bar"], "sealed_years": rules.sealed_years}
     return {**measured, "reasons": judge("sealed", measured, thresholds), "thresholds": thresholds}
 

@@ -589,6 +589,7 @@ def _sealed_view(identity: PublicIdentity, block: object) -> dict[str, object] |
         "passed": not reading.get("reasons"),
         "reasons": [str(reason) for reason in reading.get("reasons") or ()],
         "strategy_error": bool(reading.get("strategy_error")),
+        "unmeasurable": bool(reading.get("unmeasurable")),
         "error": identity.public_text(str(reading.get("error") or "")) or None,
         "seed_replicates": [
             {

@@ -1237,7 +1237,8 @@ def freeze_registration(
     Registration only, never a score: the nominee's summary breaks no hard
     nomination rule (``AcceptanceRules.evaluate``: finite metrics, the
     drawdown limit), it replayed the whole visible period and is not a
-    control, its series can be measured, the tracking mandate holds over its
+    control, its series can be measured -- its residual reading included --
+    the tracking mandate holds over its
     span where the rules set one (``verdict.registered_mandate``), and its
     ``seed_replicates`` are what a replicate must be (:func:`_seed_replicates`)
     -- none owed by a nomination declared ``deterministic`` -- and its
@@ -1259,6 +1260,10 @@ def freeze_registration(
     try:
         analysis = _style_analysis(experiment_dir, nominee)
         series = graded_statistics(analysis)["series"]
+        # The reading the freeze records: a series it cannot read (one the
+        # factor legs explain exactly, an all-cash book) is refused here,
+        # while the session is still open, never after the freeze.
+        residual_reading(analysis, alpha=acceptance.alpha)
     except ValueError as exc:
         return {"passed": False, "reasons": [UNMEASURABLE], "error": str(exc)}
     mandate = registered_mandate(analysis, rules=acceptance)

@@ -123,13 +123,21 @@ class Evaluator:
         if self.raise_with is not None and self.raise_in in (None, request.mode):
             raise self.raise_with
         source = (Path(request.revision.output_path) / "main.py").read_text(encoding="utf-8")
-        alpha = float(source.split("# alpha=")[1].split()[0]) if "# alpha=" in source else 0.0
-        return _write_result(
+        marked = source.split("# alpha=")[1].split()[0] if "# alpha=" in source else "0.0"
+        result = _write_result(
             self.root / f"{request.mode}_{self.count:03d}_{uuid.uuid4().hex[:6]}",
             [day for day in DAYS if request.start <= day <= min(request.end, RELEASE_END)],
-            alpha=alpha,
+            alpha=0.0 if marked == "flat" else float(marked),
             seed=self.count,
         )
+        if marked == "flat":
+            # A book that earns exactly what its zero-skill panel earns, as
+            # one that stays in cash does against an empty panel.
+            sidecar = Path(result.result_ref).parent / "style_analysis.json"
+            analysis = json.loads(sidecar.read_text(encoding="utf-8"))
+            analysis["strategy_daily"] = analysis["panel_daily"]
+            sidecar.write_text(json.dumps(analysis), encoding="utf-8")
+        return result
 
 
 def _write_result(directory: Path, days: list[str], *, alpha: float, seed: int) -> EvaluationResult:
@@ -385,6 +393,20 @@ def test_a_nomination_that_does_not_register_ends_the_arm_without_a_deliverable(
     assert experiment_verdict(ledger.read())["status"] == "no_deliverable"
     with pytest.raises(RuntimeError, match="research is over"):
         pipeline.run_research_session()
+
+
+def test_a_nominee_with_nothing_to_read_is_refused_while_the_session_is_open(tmp_path: Path):
+    """An all-zero active series has a plain reading but no residual one,
+    which the freeze would record: registration refuses it as unmeasurable,
+    so a freeze that registers is never left half done."""
+
+    pipeline, *_rest, ledger = _pipeline(tmp_path, {1: (["flat"], "freeze", {})})
+    record = pipeline.run_research_session()
+    gate = record["freeze_gate"]
+    assert (gate["passed"], gate["reasons"]) == (False, ["freeze_unmeasurable"])
+    assert "explain the series exactly" in gate["error"]
+    assert record["frozen"] is None and record["arm_end"]["status"] == "no_deliverable"
+    assert [row["record_type"] for row in ledger.read()] == ["research_session"]
 
 
 def test_a_freeze_is_terminal_whatever_the_nominee_read(tmp_path: Path):
