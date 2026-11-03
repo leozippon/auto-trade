@@ -493,83 +493,6 @@ class ApiResult:
     fields: list[str]
     items: list[list[Any]]
 
-@dataclass
-class TradeDateDataset:
-    api_name: str
-    fields: str
-    start_date: str = "20100101"
-    zero_rows_ok: bool = False
-    key_columns: tuple[str, ...] = ("trade_date", "ts_code")
-    # Source-side page overlap can repeat identical rows (observed on the
-    # auction endpoints); dropping EXACT duplicates is information-preserving.
-    dedup_exact: bool = False
-
-@dataclass
-class FundamentalDataset:
-    api_name: str
-    strategy: str
-    key_columns: tuple[str, ...]
-    period_param: str = "period"
-    fields: str = ""
-    # Measured per-call cap for sources that silently truncate large requests
-    # (spec_page_limit clamps the tier default to it); None = no known cap.
-    page_limit: int | None = None
-
-@dataclass
-class TextDataset:
-    api_name: str
-    strategy: str
-    key_columns: tuple[str, ...]
-    fields: str
-    page_limit: int | None = None
-    start_date: str = "20100101"
-    zero_rows_ok: bool = True
-    time_column: str = ""
-    date_column: str = ""
-    # Last day this interface can ever cover, set when the vendor withdrew
-    # access. The lake keeps and audits the history it already holds, and a
-    # snapshot can still select it; nothing new will ever land, so the download
-    # default drops it and the audit expects no partition past this day.
-    frozen_through: str = ""
-    # Fetched from the official service with OFFICIAL_TOKEN_ENV instead of the
-    # relay (the relay's permission for it lapsed).
-    official: bool = False
-    # The business key names one record, so duplicate keys in an answer are
-    # artefacts and are dropped deterministically at ingest (versions.publish).
-    unique_key: bool = False
-
-@dataclass
-class MacroDataset:
-    api_name: str
-    strategy: str
-    key_columns: tuple[str, ...]
-    fields: str = ""
-    page_limit: int | None = None
-    date_column: str = ""
-    time_column: str = ""
-    start_date: str = "20100101"
-    start_month: str = "201001"
-    start_quarter: str = "2010Q1"
-    month_param: str = "m"  # month_loop query param name (broker_recommend uses "month")
-    # static_full registry pulls: one canonical file per loop value
-    # (e.g. exchange=CFFEX.parquet), or a single full.parquet when empty.
-    loop_param: str = ""
-    loop_values: tuple[str, ...] = ()
-    # Optional per-loop-value start dates (parallel to loop_values) for
-    # trade_date loops whose venues listed at different times.
-    loop_start_dates: tuple[str, ...] = ()
-
-    def loop_start_date(self, value: str) -> str:
-        if self.loop_start_dates:
-            if len(self.loop_start_dates) != len(self.loop_values):
-                raise ValueError(
-                    f"{self.api_name}: loop_start_dates ({len(self.loop_start_dates)}) "
-                    f"must parallel loop_values ({len(self.loop_values)})"
-                )
-            if value in self.loop_values:
-                return self.loop_start_dates[self.loop_values.index(value)]
-        return self.start_date
-
 @dataclass(frozen=True)
 class AvailabilityRule:
     """Official per-dataset PIT publication time.
@@ -608,18 +531,67 @@ OFFICIAL_LATEST_2230 = AvailabilityRule("22:30:00", "official_latest_2230_from:t
 # publish the day's full 涨跌停/炸板 list around 16:00 on the trade date.
 OFFICIAL_16 = AvailabilityRule("16:00:00", "official_16_from:trade_date")
 
-@dataclass
-class EventDataset:
+
+@dataclass(frozen=True)
+class DatasetSpec:
+    """How one vendor dataset is fetched, keyed and audited.
+
+    One type for every family. A family's registry (``DAILY_SPECS``,
+    ``FUNDAMENTAL_SPECS``, ``TEXT_SPECS``, ``MACRO_SPECS``,
+    ``EVENT_FLOW_SPECS``, ``BOARD_TRADING_SPECS`` and their kin) decides which
+    download and audit code reads a spec, and that code reads only the fields
+    its family sets; the rest keep their defaults.
+    """
+
     api_name: str
-    strategy: str
-    key_columns: tuple[str, ...]
-    fields: str
-    page_limit: int
-    date_column: str
+    # The fetch strategy (``trade_date``, ``period``, ``range_month``, ...);
+    # empty for the per-trade-date daily family, which has one.
+    strategy: str = ""
+    key_columns: tuple[str, ...] = ("trade_date", "ts_code")
+    fields: str = ""
+    # Measured per-call cap for sources that silently truncate large requests
+    # (spec_page_limit clamps the tier default to it); None = no known cap.
+    page_limit: int | None = None
     start_date: str = "20100101"
-    fallback_date_column: str = ""
     zero_rows_ok: bool = True
+    date_column: str = ""
+    time_column: str = ""
+    # ---- daily family ----
+    # Source-side page overlap can repeat identical rows (observed on the
+    # auction endpoints); dropping EXACT duplicates is information-preserving.
+    dedup_exact: bool = False
+    # ---- fundamental family ----
+    period_param: str = "period"
+    # ---- text family ----
+    # Last day this interface can ever cover, set when the vendor withdrew
+    # access. The lake keeps and audits the history it already holds, and a
+    # snapshot can still select it; nothing new will ever land, so the download
+    # default drops it and the audit expects no partition past this day.
+    frozen_through: str = ""
+    # Fetched from the official service with OFFICIAL_TOKEN_ENV instead of the
+    # relay (the relay's permission for it lapsed).
+    official: bool = False
+    # ---- text and event families ----
+    # The business key names one record, so duplicate keys in an answer are
+    # artefacts and are dropped deterministically at ingest (versions.publish).
+    # Off where rows legitimately share a key (block_trade repeats identical
+    # trades).
+    unique_key: bool = False
+    # ---- macro family ----
+    start_month: str = "201001"
+    start_quarter: str = "2010Q1"
+    month_param: str = "m"  # month_loop query param name (broker_recommend uses "month")
+    # static_full registry pulls: one canonical file per loop value
+    # (e.g. exchange=CFFEX.parquet), or a single full.parquet when empty.
+    loop_param: str = ""
+    loop_values: tuple[str, ...] = ()
+    # Optional per-loop-value start dates (parallel to loop_values) for
+    # trade_date loops whose venues listed at different times.
+    loop_start_dates: tuple[str, ...] = ()
+    # ---- event and board-trading families ----
     availability: AvailabilityRule | None = None
+    # ---- event family ----
+    fallback_date_column: str = ""
     # The column the supplier's start_date/end_date filter applies to, when it
     # is not date_column. A range_month refresh replaces exactly the rows its
     # request re-serves, so the merge must drop by this column: dropping by
@@ -632,37 +604,30 @@ class EventDataset:
     # Without it a 30-day nightly window never re-requested a quarter once 30
     # days had passed, and the 2026-06 top-10 tables held 444 of 59,204 rows.
     report_lag_days: int = 0
-    # The business key names one record, so duplicate keys in an answer are
-    # artefacts and are dropped deterministically at ingest (versions.publish).
-    # Off where rows legitimately share a key (block_trade repeats identical
-    # trades).
-    unique_key: bool = False
 
-@dataclass
-class BoardTradingDataset:
-    api_name: str
-    strategy: str
-    key_columns: tuple[str, ...]
-    fields: str
-    page_limit: int
-    date_column: str = "trade_date"
-    time_column: str = ""
-    start_date: str = RESEARCH_HISTORY_FLOOR
-    zero_rows_ok: bool = True
-    availability: AvailabilityRule | None = None
+    def loop_start_date(self, value: str) -> str:
+        if self.loop_start_dates:
+            if len(self.loop_start_dates) != len(self.loop_values):
+                raise ValueError(
+                    f"{self.api_name}: loop_start_dates ({len(self.loop_start_dates)}) "
+                    f"must parallel loop_values ({len(self.loop_values)})"
+                )
+            if value in self.loop_values:
+                return self.loop_start_dates[self.loop_values.index(value)]
+        return self.start_date
 
 FUNDAMENTAL_SPECS = {
-    "income_vip": FundamentalDataset(
+    "income_vip": DatasetSpec(
         api_name="income_vip",
         strategy="period",
         key_columns=("ts_code", "ann_date", "f_ann_date", "end_date", "report_type", "comp_type", "end_type"),
     ),
-    "balancesheet_vip": FundamentalDataset(
+    "balancesheet_vip": DatasetSpec(
         api_name="balancesheet_vip",
         strategy="period",
         key_columns=("ts_code", "ann_date", "f_ann_date", "end_date", "report_type", "comp_type", "end_type"),
     ),
-    "cashflow_vip": FundamentalDataset(
+    "cashflow_vip": DatasetSpec(
         api_name="cashflow_vip",
         strategy="period",
         key_columns=("ts_code", "ann_date", "f_ann_date", "end_date", "report_type", "comp_type", "end_type"),
@@ -673,37 +638,37 @@ FUNDAMENTAL_SPECS = {
         # 7,000 tier default.
         page_limit=6000,
     ),
-    "fina_indicator_vip": FundamentalDataset(
+    "fina_indicator_vip": DatasetSpec(
         api_name="fina_indicator_vip",
         strategy="period",
         key_columns=("ts_code", "ann_date", "end_date"),
     ),
-    "forecast_vip": FundamentalDataset(
+    "forecast_vip": DatasetSpec(
         api_name="forecast_vip",
         strategy="ann_month",
         key_columns=("ts_code", "ann_date", "end_date", "type", "first_ann_date", "update_flag"),
     ),
-    "express_vip": FundamentalDataset(
+    "express_vip": DatasetSpec(
         api_name="express_vip",
         strategy="ann_month",
         key_columns=("ts_code", "ann_date", "end_date"),
     ),
-    "dividend": FundamentalDataset(
+    "dividend": DatasetSpec(
         api_name="dividend",
         strategy="ts_code",
         key_columns=("ts_code", "end_date", "ann_date", "div_proc", "record_date", "ex_date", "pay_date"),
     ),
-    "fina_audit": FundamentalDataset(
+    "fina_audit": DatasetSpec(
         api_name="fina_audit",
         strategy="ts_code",
         key_columns=("ts_code", "ann_date", "end_date"),
     ),
-    "fina_mainbz_vip": FundamentalDataset(
+    "fina_mainbz_vip": DatasetSpec(
         api_name="fina_mainbz_vip",
         strategy="ts_code",
         key_columns=("ts_code", "end_date", "bz_item", "bz_code", "curr_type"),
     ),
-    "disclosure_date": FundamentalDataset(
+    "disclosure_date": DatasetSpec(
         api_name="disclosure_date",
         strategy="period",
         key_columns=("ts_code", "end_date", "ann_date", "pre_date", "actual_date"),
@@ -722,7 +687,7 @@ FUNDAMENTAL_SPECS = {
 TEXT_ACCESS_LOST_THROUGH = "20260813"
 
 TEXT_SPECS = {
-    "anns_d": TextDataset(
+    "anns_d": DatasetSpec(
         api_name="anns_d",
         official=True,
         strategy="range_month",
@@ -734,7 +699,7 @@ TEXT_SPECS = {
         date_column="ann_date",
         unique_key=True,
     ),
-    "major_news": TextDataset(
+    "major_news": DatasetSpec(
         api_name="major_news",
         frozen_through=TEXT_ACCESS_LOST_THROUGH,
         strategy="time_range_month",
@@ -744,7 +709,7 @@ TEXT_SPECS = {
         start_date="20170101",
         time_column="pub_time",
     ),
-    "cctv_news": TextDataset(
+    "cctv_news": DatasetSpec(
         api_name="cctv_news",
         frozen_through=TEXT_ACCESS_LOST_THROUGH,
         strategy="day",
@@ -753,7 +718,7 @@ TEXT_SPECS = {
         start_date="20170101",
         date_column="date",
     ),
-    "npr": TextDataset(
+    "npr": DatasetSpec(
         api_name="npr",
         frozen_through=TEXT_ACCESS_LOST_THROUGH,
         strategy="range_month",
@@ -763,7 +728,7 @@ TEXT_SPECS = {
         start_date="20100101",
         time_column="pubtime",
     ),
-    "research_report": TextDataset(
+    "research_report": DatasetSpec(
         api_name="research_report",
         frozen_through=TEXT_ACCESS_LOST_THROUGH,
         strategy="range_month",
@@ -773,7 +738,7 @@ TEXT_SPECS = {
         start_date="20170101",
         date_column="trade_date",
     ),
-    "report_rc": TextDataset(
+    "report_rc": DatasetSpec(
         api_name="report_rc",
         strategy="range_month",
         fields="ts_code,name,report_date,report_title,report_type,classify,org_name,author_name,quarter,op_rt,op_pr,tp,np,eps,pe,rd,roe,ev_ebitda,rating,max_price,min_price,imp_dg,create_time",
@@ -783,7 +748,7 @@ TEXT_SPECS = {
         time_column="create_time",
         date_column="report_date",
     ),
-    "irm_qa_sh": TextDataset(
+    "irm_qa_sh": DatasetSpec(
         api_name="irm_qa_sh",
         frozen_through=TEXT_ACCESS_LOST_THROUGH,
         strategy="day",
@@ -793,7 +758,7 @@ TEXT_SPECS = {
         time_column="pub_time",
         date_column="trade_date",
     ),
-    "irm_qa_sz": TextDataset(
+    "irm_qa_sz": DatasetSpec(
         api_name="irm_qa_sz",
         frozen_through=TEXT_ACCESS_LOST_THROUGH,
         strategy="day",
@@ -803,7 +768,7 @@ TEXT_SPECS = {
         time_column="pub_time",
         date_column="trade_date",
     ),
-    "news": TextDataset(
+    "news": DatasetSpec(
         api_name="news",
         frozen_through=TEXT_ACCESS_LOST_THROUGH,
         strategy="news_src_day",
@@ -824,7 +789,7 @@ TEXT_DATASETS = list(TEXT_SPECS)
 TEXT_FETCHABLE_DATASETS = [name for name, spec in TEXT_SPECS.items() if not spec.frozen_through]
 
 MACRO_SPECS = {
-    "cn_schedule": MacroDataset(
+    "cn_schedule": DatasetSpec(
         api_name="cn_schedule",
         strategy="month_loop",
         fields="month,publish_date,title,issuing_org,data_api",
@@ -835,7 +800,7 @@ MACRO_SPECS = {
         key_columns=("month", "publish_date", "title", "issuing_org", "data_api"),
         date_column="publish_date",
     ),
-    "cn_gdp": MacroDataset(
+    "cn_gdp": DatasetSpec(
         api_name="cn_gdp",
         strategy="quarter_once",
         fields="quarter,gdp,gdp_yoy,pi,pi_yoy,si,si_yoy,ti,ti_yoy",
@@ -843,49 +808,49 @@ MACRO_SPECS = {
         date_column="quarter",
         start_quarter="2010Q1",
     ),
-    "cn_cpi": MacroDataset(
+    "cn_cpi": DatasetSpec(
         api_name="cn_cpi",
         strategy="month_once",
         fields="month,nt_val,nt_yoy,nt_mom,nt_accu,town_val,town_yoy,town_mom,town_accu,cnt_val,cnt_yoy,cnt_mom,cnt_accu",
         key_columns=("month",),
         date_column="month",
     ),
-    "cn_ppi": MacroDataset(
+    "cn_ppi": DatasetSpec(
         api_name="cn_ppi",
         strategy="month_once",
         fields="month,ppi_yoy,ppi_mp_yoy,ppi_mp_qm_yoy,ppi_mp_rm_yoy,ppi_mp_p_yoy,ppi_cg_yoy,ppi_cg_f_yoy,ppi_cg_c_yoy,ppi_cg_adu_yoy,ppi_cg_dcg_yoy,ppi_mom,ppi_mp_mom,ppi_mp_qm_mom,ppi_mp_rm_mom,ppi_mp_p_mom,ppi_cg_mom,ppi_cg_f_mom,ppi_cg_c_mom,ppi_cg_adu_mom,ppi_cg_dcg_mom,ppi_accu,ppi_mp_accu,ppi_mp_qm_accu,ppi_mp_rm_accu,ppi_mp_p_accu,ppi_cg_accu,ppi_cg_f_accu,ppi_cg_c_accu,ppi_cg_adu_accu,ppi_cg_dcg_accu",
         key_columns=("month",),
         date_column="month",
     ),
-    "cn_pmi": MacroDataset(
+    "cn_pmi": DatasetSpec(
         api_name="cn_pmi",
         strategy="month_once",
         fields="month,pmi010000,pmi010400,pmi010500,pmi010900,pmi011000,pmi011200,pmi011300,pmi011600,pmi020100,pmi020200,pmi020300,pmi020400,pmi020600,pmi030000",
         key_columns=("month",),
         date_column="month",
     ),
-    "cn_m": MacroDataset(
+    "cn_m": DatasetSpec(
         api_name="cn_m",
         strategy="month_once",
         fields="month,m0,m0_yoy,m0_mom,m1,m1_yoy,m1_mom,m2,m2_yoy,m2_mom",
         key_columns=("month",),
         date_column="month",
     ),
-    "sf_month": MacroDataset(
+    "sf_month": DatasetSpec(
         api_name="sf_month",
         strategy="month_once",
         fields="month,inc_month,inc_cumval,stk_endval",
         key_columns=("month",),
         date_column="month",
     ),
-    "shibor": MacroDataset(
+    "shibor": DatasetSpec(
         api_name="shibor",
         strategy="date_year",
         fields="date,on,1w,2w,1m,3m,6m,9m,1y",
         key_columns=("date",),
         date_column="date",
     ),
-    "shibor_quote": MacroDataset(
+    "shibor_quote": DatasetSpec(
         api_name="shibor_quote",
         strategy="date_year",
         fields="date,bank,on_b,on_a,1w_b,1w_a,2w_b,2w_a,1m_b,1m_a,3m_b,3m_a,6m_b,6m_a,9m_b,9m_a,1y_b,1y_a",
@@ -895,14 +860,14 @@ MACRO_SPECS = {
         key_columns=("date", "bank"),
         date_column="date",
     ),
-    "shibor_lpr": MacroDataset(
+    "shibor_lpr": DatasetSpec(
         api_name="shibor_lpr",
         strategy="date_year",
         fields="date,1y,5y",
         key_columns=("date",),
         date_column="date",
     ),
-    "repo_daily": MacroDataset(
+    "repo_daily": DatasetSpec(
         api_name="repo_daily",
         strategy="date_year",
         fields="ts_code,trade_date,repo_maturity,pre_close,open,high,low,close,weight,weight_r,amount,num",
@@ -911,7 +876,7 @@ MACRO_SPECS = {
         key_columns=("trade_date", "ts_code"),
         date_column="trade_date",
     ),
-    "us_tycr": MacroDataset(
+    "us_tycr": DatasetSpec(
         api_name="us_tycr",
         strategy="date_year",
         # m4 (the 4-month CMT) has never been returned by the vendor for any
@@ -920,14 +885,14 @@ MACRO_SPECS = {
         key_columns=("date",),
         date_column="date",
     ),
-    "us_trycr": MacroDataset(
+    "us_trycr": DatasetSpec(
         api_name="us_trycr",
         strategy="date_year",
         fields="date,y5,y7,y10,y20,y30",
         key_columns=("date",),
         date_column="date",
     ),
-    "us_tbr": MacroDataset(
+    "us_tbr": DatasetSpec(
         api_name="us_tbr",
         strategy="date_year",
         # w17_bd/w17_ce (the 17-week tenor) have never been returned by the
@@ -936,21 +901,21 @@ MACRO_SPECS = {
         key_columns=("date",),
         date_column="date",
     ),
-    "us_tltr": MacroDataset(
+    "us_tltr": DatasetSpec(
         api_name="us_tltr",
         strategy="date_year",
         fields="date,ltc,cmt,e_factor",
         key_columns=("date",),
         date_column="date",
     ),
-    "index_daily": MacroDataset(
+    "index_daily": DatasetSpec(
         api_name="index_daily",
         strategy="date_year_by_ts_code",
         fields="ts_code,trade_date,open,close,high,low,pre_close,change,pct_chg,vol,amount",
         key_columns=("trade_date", "ts_code"),
         date_column="trade_date",
     ),
-    "broker_recommend": MacroDataset(
+    "broker_recommend": DatasetSpec(
         api_name="broker_recommend",
         strategy="month_loop",
         fields="month,broker,ts_code,name",
@@ -959,7 +924,7 @@ MACRO_SPECS = {
         date_column="month",
         month_param="month",
     ),
-    "ths_daily": MacroDataset(
+    "ths_daily": DatasetSpec(
         api_name="ths_daily",
         strategy="trade_date",
         fields="ts_code,trade_date,open,high,low,close,pre_close,avg_price,change,pct_change,vol,turnover_rate",
@@ -967,7 +932,7 @@ MACRO_SPECS = {
         key_columns=("trade_date", "ts_code"),
         date_column="trade_date",
     ),
-    "index_dailybasic": MacroDataset(
+    "index_dailybasic": DatasetSpec(
         api_name="index_dailybasic",
         strategy="date_year_by_ts_code",
         fields="ts_code,trade_date,total_mv,float_mv,total_share,float_share,free_share,turnover_rate,turnover_rate_f,pe,pe_ttm,pb",
@@ -975,7 +940,7 @@ MACRO_SPECS = {
         key_columns=("trade_date", "ts_code"),
         date_column="trade_date",
     ),
-    "sw_daily": MacroDataset(
+    "sw_daily": DatasetSpec(
         api_name="sw_daily",
         strategy="trade_date",
         fields="ts_code,trade_date,name,open,low,high,close,change,pct_change,vol,amount,pe,pb,float_mv,total_mv",
@@ -983,7 +948,7 @@ MACRO_SPECS = {
         key_columns=("trade_date", "ts_code"),
         date_column="trade_date",
     ),
-    "ci_daily": MacroDataset(
+    "ci_daily": DatasetSpec(
         api_name="ci_daily",
         strategy="trade_date",
         fields="ts_code,trade_date,open,low,high,close,pre_close,change,pct_change,vol,amount",
@@ -991,7 +956,7 @@ MACRO_SPECS = {
         key_columns=("trade_date", "ts_code"),
         date_column="trade_date",
     ),
-    "daily_info": MacroDataset(
+    "daily_info": DatasetSpec(
         api_name="daily_info",
         strategy="date_year",
         fields="trade_date,ts_code,ts_name,com_count,total_share,float_share,total_mv,float_mv,amount,vol,trans_count,pe,tr,exchange",
@@ -1001,7 +966,7 @@ MACRO_SPECS = {
         key_columns=("trade_date", "ts_code"),
         date_column="trade_date",
     ),
-    "sz_daily_info": MacroDataset(
+    "sz_daily_info": DatasetSpec(
         api_name="sz_daily_info",
         strategy="date_year",
         fields="trade_date,ts_code,count,amount,vol,total_share,total_mv,float_share,float_mv",
@@ -1011,7 +976,7 @@ MACRO_SPECS = {
         key_columns=("trade_date", "ts_code"),
         date_column="trade_date",
     ),
-    "moneyflow_mkt_dc": MacroDataset(
+    "moneyflow_mkt_dc": DatasetSpec(
         api_name="moneyflow_mkt_dc",
         strategy="date_year",
         fields="trade_date,close_sh,pct_change_sh,close_sz,pct_change_sz,net_amount,net_amount_rate,buy_elg_amount,buy_elg_amount_rate,buy_lg_amount,buy_lg_amount_rate,buy_md_amount,buy_md_amount_rate,buy_sm_amount,buy_sm_amount_rate",
@@ -1019,21 +984,21 @@ MACRO_SPECS = {
         key_columns=("trade_date",),
         date_column="trade_date",
     ),
-    "index_global": MacroDataset(
+    "index_global": DatasetSpec(
         api_name="index_global",
         strategy="date_year_by_ts_code",
         fields="ts_code,trade_date,open,close,high,low,pre_close,change,pct_chg,swing,vol,amount",
         key_columns=("trade_date", "ts_code"),
         date_column="trade_date",
     ),
-    "fx_daily": MacroDataset(
+    "fx_daily": DatasetSpec(
         api_name="fx_daily",
         strategy="date_year_by_ts_code",
         fields="ts_code,trade_date,bid_open,bid_close,bid_high,bid_low,ask_open,ask_close,ask_high,ask_low,tick_qty",
         key_columns=("trade_date", "ts_code"),
         date_column="trade_date",
     ),
-    "eco_cal": MacroDataset(
+    "eco_cal": DatasetSpec(
         api_name="eco_cal",
         strategy="eco_cal_month",
         fields="date,time,currency,country,event,value,pre_value,fore_value",
@@ -1050,7 +1015,7 @@ MACRO_SPECS = {
     # Daily tables ride the trade_date strategy and the evening Timeview node;
     # registries are small static_full re-pulls with PIT rows keyed by
     # list/announcement dates. ----
-    "fut_basic": MacroDataset(
+    "fut_basic": DatasetSpec(
         api_name="fut_basic",
         strategy="static_full",
         # ``trade_time_desc`` was dropped from the request on 2026-09-10: the
@@ -1062,7 +1027,7 @@ MACRO_SPECS = {
         loop_param="exchange",
         loop_values=("CFFEX", "DCE", "CZCE", "SHFE", "INE", "GFEX"),
     ),
-    "fut_mapping": MacroDataset(
+    "fut_mapping": DatasetSpec(
         api_name="fut_mapping",
         strategy="trade_date",
         fields="ts_code,trade_date,mapping_ts_code",
@@ -1070,7 +1035,7 @@ MACRO_SPECS = {
         key_columns=("trade_date", "ts_code"),
         date_column="trade_date",
     ),
-    "fut_daily": MacroDataset(
+    "fut_daily": DatasetSpec(
         api_name="fut_daily",
         strategy="trade_date",
         fields="ts_code,trade_date,pre_close,pre_settle,open,high,low,close,settle,change1,change2,vol,amount,oi,oi_chg,delv_settle",
@@ -1078,7 +1043,7 @@ MACRO_SPECS = {
         key_columns=("trade_date", "ts_code"),
         date_column="trade_date",
     ),
-    "opt_basic": MacroDataset(
+    "opt_basic": DatasetSpec(
         api_name="opt_basic",
         strategy="static_full",
         fields="ts_code,symbol,exchange,name,per_unit,opt_code,opt_type,call_put,exercise_type,exercise_price,s_month,maturity_date,list_price,list_date,delist_date,last_edate,last_ddate,quote_unit,min_price_chg",
@@ -1090,7 +1055,7 @@ MACRO_SPECS = {
         loop_param="exchange",
         loop_values=("SSE", "SZSE", "CFFEX"),
     ),
-    "opt_daily": MacroDataset(
+    "opt_daily": DatasetSpec(
         api_name="opt_daily",
         strategy="trade_date",
         fields="ts_code,trade_date,exchange,pre_settle,pre_close,open,high,low,close,settle,vol,amount,oi",
@@ -1106,7 +1071,7 @@ MACRO_SPECS = {
         loop_values=("SSE", "SZSE", "CFFEX"),
         loop_start_dates=("20150209", "20191223", "20191223"),
     ),
-    "cb_basic": MacroDataset(
+    "cb_basic": DatasetSpec(
         api_name="cb_basic",
         strategy="static_full",
         # conv_price/clauses are the fields the conversion-premium and
@@ -1116,7 +1081,7 @@ MACRO_SPECS = {
         key_columns=("ts_code",),
         date_column="list_date",
     ),
-    "cb_daily": MacroDataset(
+    "cb_daily": DatasetSpec(
         api_name="cb_daily",
         # bond_value/cb_value/cb_over_rate are non-default display fields and
         # must be requested explicitly.
@@ -1127,7 +1092,7 @@ MACRO_SPECS = {
         date_column="trade_date",
         start_date="20180102",
     ),
-    "cb_call": MacroDataset(
+    "cb_call": DatasetSpec(
         api_name="cb_call",
         strategy="static_full",
         fields="ts_code,call_type,is_call,ann_date,call_date,call_price,call_price_tax,call_vol,call_amount,payment_date,call_reg_date",
@@ -1139,7 +1104,7 @@ MACRO_SPECS = {
 }
 
 EVENT_FLOW_SPECS = {
-    "margin": EventDataset(
+    "margin": DatasetSpec(
         api_name="margin",
         strategy="trade_date",
         fields="trade_date,exchange_id,rzye,rzmre,rzche,rqye,rqmcl,rzrqye,rqyl",
@@ -1149,7 +1114,7 @@ EVENT_FLOW_SPECS = {
         zero_rows_ok=False,
         availability=OFFICIAL_NEXT_TRADING_DAY_09,
     ),
-    "margin_detail": EventDataset(
+    "margin_detail": DatasetSpec(
         api_name="margin_detail",
         strategy="trade_date",
         fields="trade_date,ts_code,name,rzye,rqye,rzmre,rqyl,rzche,rqchl,rqmcl,rzrqye",
@@ -1159,7 +1124,7 @@ EVENT_FLOW_SPECS = {
         zero_rows_ok=False,
         availability=OFFICIAL_NEXT_TRADING_DAY_09,
     ),
-    "margin_secs": EventDataset(
+    "margin_secs": DatasetSpec(
         api_name="margin_secs",
         strategy="trade_date",
         fields="trade_date,ts_code,name,exchange",
@@ -1169,7 +1134,7 @@ EVENT_FLOW_SPECS = {
         zero_rows_ok=False,
         availability=OFFICIAL_PREOPEN_09,
     ),
-    "moneyflow": EventDataset(
+    "moneyflow": DatasetSpec(
         api_name="moneyflow",
         strategy="trade_date",
         fields="ts_code,trade_date,buy_sm_vol,buy_sm_amount,sell_sm_vol,sell_sm_amount,buy_md_vol,buy_md_amount,sell_md_vol,sell_md_amount,buy_lg_vol,buy_lg_amount,sell_lg_vol,sell_lg_amount,buy_elg_vol,buy_elg_amount,sell_elg_vol,sell_elg_amount,net_mf_vol,net_mf_amount",
@@ -1179,7 +1144,7 @@ EVENT_FLOW_SPECS = {
         zero_rows_ok=False,
         availability=OFFICIAL_19,
     ),
-    "moneyflow_dc": EventDataset(
+    "moneyflow_dc": DatasetSpec(
         api_name="moneyflow_dc",
         strategy="trade_date",
         fields="trade_date,ts_code,name,pct_change,close,net_amount,net_amount_rate,buy_elg_amount,buy_elg_amount_rate,buy_lg_amount,buy_lg_amount_rate,buy_md_amount,buy_md_amount_rate,buy_sm_amount,buy_sm_amount_rate",
@@ -1189,7 +1154,7 @@ EVENT_FLOW_SPECS = {
         start_date="20231201",
         availability=OFFICIAL_19,
     ),
-    "moneyflow_ths": EventDataset(
+    "moneyflow_ths": DatasetSpec(
         api_name="moneyflow_ths",
         strategy="trade_date",
         fields="trade_date,ts_code,name,pct_change,latest,net_amount,net_d5_amount,buy_lg_amount,buy_lg_amount_rate,buy_md_amount,buy_md_amount_rate,buy_sm_amount,buy_sm_amount_rate",
@@ -1199,7 +1164,7 @@ EVENT_FLOW_SPECS = {
         start_date="20250101",
         availability=OFFICIAL_19,
     ),
-    "moneyflow_ind_dc": EventDataset(
+    "moneyflow_ind_dc": DatasetSpec(
         api_name="moneyflow_ind_dc",
         strategy="trade_date",
         fields="trade_date,content_type,ts_code,name,pct_change,close,net_amount,net_amount_rate,buy_elg_amount,buy_elg_amount_rate,buy_lg_amount,buy_lg_amount_rate,buy_md_amount,buy_md_amount_rate,buy_sm_amount,buy_sm_amount_rate,buy_sm_amount_stock,rank",
@@ -1209,7 +1174,7 @@ EVENT_FLOW_SPECS = {
         start_date="20231201",
         availability=OFFICIAL_19,
     ),
-    "moneyflow_ind_ths": EventDataset(
+    "moneyflow_ind_ths": DatasetSpec(
         api_name="moneyflow_ind_ths",
         strategy="trade_date",
         fields="trade_date,ts_code,industry,lead_stock,close,pct_change,company_num,pct_change_stock,close_price,net_buy_amount,net_sell_amount,net_amount",
@@ -1219,7 +1184,7 @@ EVENT_FLOW_SPECS = {
         start_date="20250101",
         availability=OFFICIAL_19,
     ),
-    "moneyflow_cnt_ths": EventDataset(
+    "moneyflow_cnt_ths": DatasetSpec(
         api_name="moneyflow_cnt_ths",
         strategy="trade_date",
         fields="trade_date,ts_code,name,lead_stock,close_price,pct_change,industry_index,company_num,pct_change_stock,net_buy_amount,net_sell_amount,net_amount",
@@ -1229,7 +1194,7 @@ EVENT_FLOW_SPECS = {
         start_date="20250101",
         availability=OFFICIAL_19,
     ),
-    "cyq_perf": EventDataset(
+    "cyq_perf": DatasetSpec(
         api_name="cyq_perf",
         strategy="trade_date",
         fields="ts_code,trade_date,his_low,his_high,cost_5pct,cost_15pct,cost_50pct,cost_85pct,cost_95pct,weight_avg,winner_rate",
@@ -1239,7 +1204,7 @@ EVENT_FLOW_SPECS = {
         start_date="20180102",
         availability=OFFICIAL_19,
     ),
-    "bak_daily": EventDataset(
+    "bak_daily": DatasetSpec(
         api_name="bak_daily",
         strategy="trade_date",
         fields="ts_code,trade_date,name,pct_change,close,change,open,high,low,pre_close,vol_ratio,turn_over,swing,vol,amount,selling,buying,total_share,float_share,pe,industry,area,float_mv,total_mv,avg_price,strength,activity,avg_turnover,attack,interval_3,interval_6",
@@ -1249,7 +1214,7 @@ EVENT_FLOW_SPECS = {
         start_date="20170103",
         availability=OFFICIAL_19,
     ),
-    "stk_holdernumber": EventDataset(
+    "stk_holdernumber": DatasetSpec(
         api_name="stk_holdernumber",
         strategy="range_month",
         fields="ts_code,ann_date,end_date,holder_num",
@@ -1259,7 +1224,7 @@ EVENT_FLOW_SPECS = {
         zero_rows_ok=True,
         unique_key=True,
     ),
-    "top10_holders": EventDataset(
+    "top10_holders": DatasetSpec(
         api_name="top10_holders",
         strategy="range_month",
         fields="ts_code,ann_date,end_date,holder_name,hold_amount,hold_ratio,hold_float_ratio,hold_change,holder_type",
@@ -1272,7 +1237,7 @@ EVENT_FLOW_SPECS = {
         report_lag_days=120,
         unique_key=True,
     ),
-    "top10_floatholders": EventDataset(
+    "top10_floatholders": DatasetSpec(
         api_name="top10_floatholders",
         strategy="range_month",
         fields="ts_code,ann_date,end_date,holder_name,hold_amount,hold_ratio,hold_float_ratio,hold_change,holder_type",
@@ -1285,7 +1250,7 @@ EVENT_FLOW_SPECS = {
         report_lag_days=120,
         unique_key=True,
     ),
-    "pledge_detail": EventDataset(
+    "pledge_detail": DatasetSpec(
         api_name="pledge_detail",
         strategy="range_month",
         fields="ts_code,ann_date,holder_name,pledge_amount,start_date,end_date,is_release,release_date,pledgor,holding_amount,pledged_amount,p_total_ratio,h_total_ratio,is_buyback",
@@ -1296,7 +1261,7 @@ EVENT_FLOW_SPECS = {
         key_columns=("ts_code", "ann_date", "holder_name", "start_date", "pledgor"),
         date_column="ann_date",
     ),
-    "stk_surv": EventDataset(
+    "stk_surv": DatasetSpec(
         api_name="stk_surv",
         strategy="trade_date",
         fields="ts_code,name,surv_date,fund_visitors,rece_place,rece_mode,rece_org,org_type,comp_rece",
@@ -1314,7 +1279,7 @@ EVENT_FLOW_SPECS = {
         # 2-trading-day window across weekends and ordinary holidays.
         availability=AvailabilityRule("23:59:59", "conservative_plus_5d_eod_from:surv_date", day_offset=5),
     ),
-    "new_share": EventDataset(
+    "new_share": DatasetSpec(
         api_name="new_share",
         strategy="range_month",
         fields="ts_code,sub_code,name,ipo_date,issue_date,amount,market_amount,price,pe,limit_amount,funds,ballot",
@@ -1330,7 +1295,7 @@ EVENT_FLOW_SPECS = {
             trading_day_offset=2,
         ),
     ),
-    "stk_holdertrade": EventDataset(
+    "stk_holdertrade": DatasetSpec(
         api_name="stk_holdertrade",
         strategy="range_month",
         fields="ts_code,ann_date,holder_name,holder_type,in_de,change_vol,change_ratio,after_share,after_ratio,avg_price,total_share,begin_date,close_date",
@@ -1341,7 +1306,7 @@ EVENT_FLOW_SPECS = {
         availability=AvailabilityRule("19:00:00", "official_19_from:ann_date"),
         unique_key=True,
     ),
-    "repurchase": EventDataset(
+    "repurchase": DatasetSpec(
         api_name="repurchase",
         strategy="range_month",
         fields="ts_code,ann_date,end_date,proc,exp_date,vol,amount,high_limit,low_limit",
@@ -1352,7 +1317,7 @@ EVENT_FLOW_SPECS = {
         zero_rows_ok=True,
         unique_key=True,
     ),
-    "share_float": EventDataset(
+    "share_float": DatasetSpec(
         api_name="share_float",
         strategy="day",
         fields=SHARE_FLOAT_FIELDS,
@@ -1362,7 +1327,7 @@ EVENT_FLOW_SPECS = {
         fallback_date_column="float_date",
         zero_rows_ok=True,
     ),
-    "block_trade": EventDataset(
+    "block_trade": DatasetSpec(
         api_name="block_trade",
         strategy="trade_date",
         fields="ts_code,trade_date,price,vol,amount,buyer,seller",
@@ -1375,15 +1340,17 @@ EVENT_FLOW_SPECS = {
 }
 
 BOARD_TRADING_SPECS = {
-    "kpl_list": BoardTradingDataset(
+    "kpl_list": DatasetSpec(
         api_name="kpl_list",
         strategy="trade_date_by_tag",
         fields="ts_code,name,trade_date,lu_time,ld_time,open_time,last_time,lu_desc,tag,theme,net_change,bid_amount,status,bid_change,bid_turnover,lu_bid_vol,pct_chg,bid_pct_chg,rt_pct_chg,limit_order,amount,turnover_rate,free_float,lu_limit_order",
         page_limit=8000,
         key_columns=("trade_date", "ts_code", "tag", "status", "lu_time", "open_time", "last_time"),
         availability=OFFICIAL_NEXT_DAY_0830,
+        start_date=RESEARCH_HISTORY_FLOOR,
+        date_column="trade_date",
     ),
-    "kpl_concept_cons": BoardTradingDataset(
+    "kpl_concept_cons": DatasetSpec(
         api_name="kpl_concept_cons",
         strategy="trade_date",
         fields="ts_code,name,con_name,con_code,trade_date,desc,hot_num",
@@ -1391,8 +1358,9 @@ BOARD_TRADING_SPECS = {
         key_columns=("trade_date", "con_code", "ts_code"),
         start_date="20250101",
         availability=OFFICIAL_NEXT_DAY_0830,
+        date_column="trade_date",
     ),
-    "dc_index": BoardTradingDataset(
+    "dc_index": DatasetSpec(
         api_name="dc_index",
         strategy="trade_date",
         fields="ts_code,trade_date,name,leading,leading_code,pct_change,leading_pct,total_mv,turnover_rate,up_num,down_num,idx_type,level",
@@ -1400,8 +1368,9 @@ BOARD_TRADING_SPECS = {
         key_columns=("trade_date", "ts_code"),
         start_date="20250101",
         availability=OFFICIAL_20,
+        date_column="trade_date",
     ),
-    "dc_member": BoardTradingDataset(
+    "dc_member": DatasetSpec(
         api_name="dc_member",
         strategy="trade_date",
         fields="trade_date,ts_code,con_code,name",
@@ -1409,30 +1378,37 @@ BOARD_TRADING_SPECS = {
         key_columns=("trade_date", "ts_code", "con_code"),
         start_date="20250101",
         availability=OFFICIAL_20,
+        date_column="trade_date",
     ),
-    "limit_step": BoardTradingDataset(
+    "limit_step": DatasetSpec(
         api_name="limit_step",
         strategy="trade_date",
         fields="ts_code,name,trade_date,nums",
         page_limit=2000,
         key_columns=("trade_date", "ts_code", "nums"),
+        start_date=RESEARCH_HISTORY_FLOOR,
+        date_column="trade_date",
     ),
-    "limit_cpt_list": BoardTradingDataset(
+    "limit_cpt_list": DatasetSpec(
         api_name="limit_cpt_list",
         strategy="trade_date",
         fields="ts_code,name,trade_date,days,up_stat,cons_nums,up_nums,pct_chg,rank",
         page_limit=2000,
         key_columns=("trade_date", "ts_code", "rank"),
+        start_date=RESEARCH_HISTORY_FLOOR,
+        date_column="trade_date",
     ),
-    "limit_list_d": BoardTradingDataset(
+    "limit_list_d": DatasetSpec(
         api_name="limit_list_d",
         strategy="trade_date",
         fields="trade_date,ts_code,industry,name,close,pct_chg,amount,limit_amount,float_mv,total_mv,turnover_ratio,fd_amount,first_time,last_time,open_times,up_stat,limit_times,limit",
         page_limit=5000,
         key_columns=("trade_date", "ts_code", "limit"),
         availability=OFFICIAL_16,
+        start_date=RESEARCH_HISTORY_FLOOR,
+        date_column="trade_date",
     ),
-    "limit_list_ths": BoardTradingDataset(
+    "limit_list_ths": DatasetSpec(
         api_name="limit_list_ths",
         strategy="trade_date_by_limit_type",
         fields="trade_date,ts_code,name,price,pct_chg,open_num,lu_desc,limit_type,tag,status,limit_order,limit_amount,turnover_rate,free_float,lu_limit_order,limit_up_suc_rate,turnover,market_type,rise_rate,sum_float,first_lu_time,last_lu_time,first_ld_time,last_ld_time",
@@ -1447,8 +1423,9 @@ BOARD_TRADING_SPECS = {
         key_columns=("trade_date", "ts_code", "limit_type", "tag", "status"),
         start_date="20231101",
         availability=OFFICIAL_16,
+        date_column="trade_date",
     ),
-    "top_list": BoardTradingDataset(
+    "top_list": DatasetSpec(
         api_name="top_list",
         strategy="trade_date",
         fields="trade_date,ts_code,name,close,pct_change,turnover_rate,amount,l_sell,l_buy,l_amount,net_amount,net_rate,amount_rate,float_values,reason",
@@ -1475,8 +1452,10 @@ BOARD_TRADING_SPECS = {
         ),
         zero_rows_ok=True,
         availability=OFFICIAL_20,
+        start_date=RESEARCH_HISTORY_FLOOR,
+        date_column="trade_date",
     ),
-    "top_inst": BoardTradingDataset(
+    "top_inst": DatasetSpec(
         api_name="top_inst",
         strategy="trade_date",
         fields="trade_date,ts_code,exalter,buy,buy_rate,sell,sell_rate,net_buy,side,reason",
@@ -1484,8 +1463,10 @@ BOARD_TRADING_SPECS = {
         key_columns=("trade_date", "ts_code", "exalter", "buy", "sell", "net_buy", "side", "reason"),
         zero_rows_ok=True,
         availability=OFFICIAL_20,
+        start_date=RESEARCH_HISTORY_FLOOR,
+        date_column="trade_date",
     ),
-    "hm_list": BoardTradingDataset(
+    "hm_list": DatasetSpec(
         api_name="hm_list",
         strategy="static_full",
         fields="name,desc,orgs",
@@ -1494,15 +1475,16 @@ BOARD_TRADING_SPECS = {
         date_column="",
         start_date="20220801",
     ),
-    "hm_detail": BoardTradingDataset(
+    "hm_detail": DatasetSpec(
         api_name="hm_detail",
         strategy="trade_date",
         fields="trade_date,ts_code,ts_name,buy_amount,sell_amount,net_amount,hm_name,hm_orgs",
         page_limit=10000,
         key_columns=("trade_date", "ts_code", "hm_name", "hm_orgs"),
         start_date="20220801",
+        date_column="trade_date",
     ),
-    "ths_hot": BoardTradingDataset(
+    "ths_hot": DatasetSpec(
         api_name="ths_hot",
         strategy="trade_date_by_market",
         fields="trade_date,data_type,ts_code,ts_name,rank,pct_change,current_price,hot,concept,rank_time,rank_reason",
@@ -1510,8 +1492,10 @@ BOARD_TRADING_SPECS = {
         key_columns=("trade_date", "data_type", "ts_code", "rank_time", "rank"),
         time_column="rank_time",
         availability=OFFICIAL_LATEST_2230,
+        start_date=RESEARCH_HISTORY_FLOOR,
+        date_column="trade_date",
     ),
-    "dc_hot": BoardTradingDataset(
+    "dc_hot": DatasetSpec(
         api_name="dc_hot",
         strategy="trade_date_by_market_hot_type",
         fields="trade_date,data_type,ts_code,ts_name,rank,pct_change,current_price,hot,concept,rank_time",
@@ -1519,10 +1503,12 @@ BOARD_TRADING_SPECS = {
         key_columns=("trade_date", "data_type", "ts_code", "rank_time", "rank"),
         time_column="rank_time",
         availability=OFFICIAL_LATEST_2230,
+        start_date=RESEARCH_HISTORY_FLOOR,
+        date_column="trade_date",
     ),
 }
 
-BAK_BASIC_SPEC = TradeDateDataset(
+BAK_BASIC_SPEC = DatasetSpec(
     api_name="bak_basic",
     fields=BAK_BASIC_FIELDS,
     start_date="20160101",
@@ -1531,23 +1517,27 @@ BAK_BASIC_SPEC = TradeDateDataset(
 )
 
 DAILY_SPECS = {
-    "daily": TradeDateDataset(
+    "daily": DatasetSpec(
         api_name="daily",
         fields="ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount",
+        zero_rows_ok=False,
     ),
-    "adj_factor": TradeDateDataset(
+    "adj_factor": DatasetSpec(
         api_name="adj_factor",
         fields="ts_code,trade_date,adj_factor",
+        zero_rows_ok=False,
     ),
-    "daily_basic": TradeDateDataset(
+    "daily_basic": DatasetSpec(
         api_name="daily_basic",
         fields="ts_code,trade_date,close,turnover_rate,turnover_rate_f,volume_ratio,pe,pe_ttm,pb,ps,ps_ttm,dv_ratio,dv_ttm,total_share,float_share,free_share,total_mv,circ_mv",
+        zero_rows_ok=False,
     ),
-    "stk_limit": TradeDateDataset(
+    "stk_limit": DatasetSpec(
         api_name="stk_limit",
         fields="trade_date,ts_code,pre_close,up_limit,down_limit",
+        zero_rows_ok=False,
     ),
-    "suspend_d": TradeDateDataset(
+    "suspend_d": DatasetSpec(
         api_name="suspend_d",
         fields="ts_code,trade_date,suspend_timing,suspend_type",
         zero_rows_ok=True,
@@ -1555,11 +1545,12 @@ DAILY_SPECS = {
     ),
     # Exact opening call-auction result. TuShare's usable history begins on
     # 2025-01-16; older replays retain the explicitly labelled minute proxy.
-    "stk_auction": TradeDateDataset(
+    "stk_auction": DatasetSpec(
         api_name="stk_auction",
         fields="ts_code,trade_date,vol,price,amount,pre_close,turnover_rate,volume_ratio,float_share",
         start_date="20250116",
         dedup_exact=True,
+        zero_rows_ok=False,
     ),
 }
 
@@ -2006,7 +1997,7 @@ def combine_date_time_available(date_value: str, time_value: str) -> str:
         return ""
     return f"{date_text[:4]}-{date_text[4:6]}-{date_text[6:8]} {hour:02d}:{minute:02d}:{second:02d}+08:00"
 
-def normalize_macro_columns(df: pd.DataFrame, spec: MacroDataset) -> pd.DataFrame:
+def normalize_macro_columns(df: pd.DataFrame, spec: DatasetSpec) -> pd.DataFrame:
     """Map one macro API response onto the dataset's declared field contract.
 
     ``spec.fields`` is the single source for a macro table's column names, but
@@ -2043,7 +2034,7 @@ def normalize_macro_columns(df: pd.DataFrame, spec: MacroDataset) -> pd.DataFram
     ))
     return df[keep].rename(columns=renamed)
 
-def augment_macro_frame(df: pd.DataFrame, spec: MacroDataset) -> pd.DataFrame:
+def augment_macro_frame(df: pd.DataFrame, spec: DatasetSpec) -> pd.DataFrame:
     out = normalize_macro_columns(df, spec).copy()
     if "available_at" not in out.columns:
         out["available_at"] = ""
@@ -2106,7 +2097,7 @@ def selected_eco_filter_values(args: argparse.Namespace, attr: str) -> list[str 
 def write_macro_result(
     path: Path,
     result: ApiResult,
-    spec: MacroDataset,
+    spec: DatasetSpec,
     params: dict[str, Any],
     revision_ledger: Path | str | None = None,
 ) -> int:
@@ -2257,7 +2248,7 @@ def official_available_at(
 
 def augment_event_frame(
     df: pd.DataFrame,
-    spec: EventDataset,
+    spec: DatasetSpec,
     *,
     trading_dates: Sequence[str] | None = None,
 ) -> pd.DataFrame:
@@ -2301,7 +2292,7 @@ def normalize_source_datetime(value: Any) -> str:
         return f"{text}+08:00"
     return text
 
-def augment_board_frame(df: pd.DataFrame, spec: BoardTradingDataset, params: dict[str, Any] | None = None) -> pd.DataFrame:
+def augment_board_frame(df: pd.DataFrame, spec: DatasetSpec, params: dict[str, Any] | None = None) -> pd.DataFrame:
     out = df.copy()
     if "available_at" not in out.columns:
         out["available_at"] = ""
@@ -2328,7 +2319,7 @@ def augment_board_frame(df: pd.DataFrame, spec: BoardTradingDataset, params: dic
 def write_board_result(
     path: Path,
     result: ApiResult,
-    spec: BoardTradingDataset,
+    spec: DatasetSpec,
     params: dict[str, Any],
     revision_ledger: Path | str | None = None,
 ) -> int:
@@ -2619,7 +2610,7 @@ def safe_partition_value(value: str) -> str:
 TEXT_TIME_PLAUSIBLE_BEFORE_DAYS = 1.0
 TEXT_TIME_PLAUSIBLE_AFTER_DAYS = 3.0
 
-def augment_text_frame(df: pd.DataFrame, spec: TextDataset) -> pd.DataFrame:
+def augment_text_frame(df: pd.DataFrame, spec: DatasetSpec) -> pd.DataFrame:
     df = df.copy()
     if "available_at" not in df.columns:
         df["available_at"] = ""

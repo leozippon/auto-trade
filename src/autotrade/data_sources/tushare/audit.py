@@ -59,12 +59,7 @@ from .common import (
     TEXT_EVIDENCE_STATUS_PATH,
     TEXT_SPECS,
     TRADE_DATE_PAGE_LIMIT,
-    BoardTradingDataset,
-    EventDataset,
-    FundamentalDataset,
-    MacroDataset,
-    TextDataset,
-    TradeDateDataset,
+    DatasetSpec,
     TuShareClient,
     active_year_windows,
     append_jsonl_unique,
@@ -147,7 +142,7 @@ def audit_summary_line(name: str, status: str, **fields: object) -> str:
 TRAILING_ZERO_RUN_WARN_PARTITIONS = 60
 
 
-def audit_trade_date_dataset(raw_dir: Path, spec: TradeDateDataset, expected_dates: set[str], add) -> None:
+def audit_trade_date_dataset(raw_dir: Path, spec: DatasetSpec, expected_dates: set[str], add) -> None:
     files = sorted((raw_dir / spec.api_name).glob("trade_date=*.parquet"))
     file_dates = {partition_date(path): path for path in files}
     row_counts = {trade_date: parquet_rows(path) for trade_date, path in file_dates.items()}
@@ -181,7 +176,7 @@ def audit_trade_date_dataset(raw_dir: Path, spec: TradeDateDataset, expected_dat
     add("error" if has_key_error else "info", f"{spec.api_name}_keys", f"{spec.api_name} key checks", key_details)
     audit_business_payload(files, spec.api_name, f"{spec.api_name}_payload", add, key_columns=tuple(spec.key_columns), expected_fields=spec_fields_tuple(spec))
 
-def audit_partition_keys(files: list[Path], spec: TradeDateDataset, row_counts: dict[str, int]) -> dict[str, Any]:
+def audit_partition_keys(files: list[Path], spec: DatasetSpec, row_counts: dict[str, int]) -> dict[str, Any]:
     duplicate_rows = 0
     blank_trade_date = 0
     blank_ts_code = 0
@@ -787,7 +782,7 @@ def fundamental_partition_value(path: Path, prefix: str) -> str:
     expected = f"{prefix}="
     return stem[len(expected):] if stem.startswith(expected) else ""
 
-def audit_fundamental_dataset(raw_dir: Path, spec: FundamentalDataset, expected: set[str], prefix: str, add) -> dict[str, int]:
+def audit_fundamental_dataset(raw_dir: Path, spec: DatasetSpec, expected: set[str], prefix: str, add) -> dict[str, int]:
     files = sorted((raw_dir / spec.api_name).glob(f"{prefix}=*.parquet"))
     file_values = {fundamental_partition_value(path, prefix): path for path in files}
     rows_by_path = {path: parquet_rows(path) for path in files}
@@ -839,7 +834,7 @@ def audit_fundamental_dataset(raw_dir: Path, spec: FundamentalDataset, expected:
     )
     return row_counts
 
-def audit_fundamental_keys(files: list[Path], spec: FundamentalDataset, rows_by_path: dict[Path, int]) -> dict[str, Any]:
+def audit_fundamental_keys(files: list[Path], spec: DatasetSpec, rows_by_path: dict[Path, int]) -> dict[str, Any]:
     duplicate_key_rows = 0
     duplicate_full_rows = 0
     blank_ts_code = 0
@@ -883,7 +878,7 @@ def blank_count(series: pd.Series) -> int:
 
 def spec_fields_tuple(spec: Any) -> tuple[str, ...]:
     """The request-contract column list; empty for specs that request all vendor fields."""
-    return tuple(field for field in str(getattr(spec, "fields", "")).split(",") if field)
+    return tuple(field for field in spec.fields.split(",") if field)
 
 def newest_nonzero_partition(files: list[Path]) -> Path | None:
     # Newest by date-encoded file name; today's partition may legitimately
@@ -1919,7 +1914,7 @@ def audit_domain_keys(files: list[Path], profile: DomainAuditProfile, row_counts
     return details
 
 
-def audit_text_dataset(raw_dir: Path, spec: TextDataset, expected_paths: set[Path], add) -> None:
+def audit_text_dataset(raw_dir: Path, spec: DatasetSpec, expected_paths: set[Path], add) -> None:
     audit_domain_dataset(raw_dir, spec, expected_paths, add, DomainAuditProfile(
         domain="text",
         # The generic web caps never matched any real text page limit
@@ -1957,7 +1952,7 @@ def text_pit_rules() -> dict[str, dict[str, str]]:
         "report_rc": {"available_at": "create_time if present, otherwise report_date 22:00+08 based on documented nightly update", "unit": "mixed forecast fields; do not mix directly with P2 actual statements"},
     }
 
-def expected_text_paths(raw_dir: Path, spec: TextDataset, start_date: str, end_date: str, args: argparse.Namespace) -> set[Path]:
+def expected_text_paths(raw_dir: Path, spec: DatasetSpec, start_date: str, end_date: str, args: argparse.Namespace) -> set[Path]:
     start = max(start_date, spec.start_date)
     # A frozen interface can never gain a partition past the day its access
     # was withdrawn. Expecting one turns an accepted, documented loss into a
@@ -2054,7 +2049,7 @@ def audit_text_only(args: argparse.Namespace) -> int:
 def selected_audit_macro_datasets(args: argparse.Namespace) -> list[str]:
     return select_datasets(getattr(args, "datasets", None), default=MACRO_DATASETS, allowed=MACRO_SPECS, label="macro/global")
 
-def expected_macro_paths(raw_dir: Path, spec: MacroDataset, start_date: str, end_date: str, args: argparse.Namespace) -> set[Path]:
+def expected_macro_paths(raw_dir: Path, spec: DatasetSpec, start_date: str, end_date: str, args: argparse.Namespace) -> set[Path]:
     start = max(start_date, spec.start_date)
     if spec.strategy in {"quarter_once", "month_once"}:
         # Mirrors the downloader's retained floor: range pulls always cover
@@ -2128,7 +2123,7 @@ def macro_unit_rules() -> dict[str, list[dict[str, object]]]:
     """Projection of the shared unit registry (environment/data/units.py) over all MACRO_SPECS datasets."""
     return dataset_rules_records(tuple(MACRO_SPECS))
 
-def audit_macro_dataset(raw_dir: Path, spec: MacroDataset, expected_paths: set[Path], add) -> None:
+def audit_macro_dataset(raw_dir: Path, spec: DatasetSpec, expected_paths: set[Path], add) -> None:
     audit_domain_dataset(raw_dir, spec, expected_paths, add, DomainAuditProfile(
         domain="macro",
         # 2000/4000 are the measured per-call caps of the date_year rate and
@@ -2248,7 +2243,7 @@ def audit_macro_only(args: argparse.Namespace) -> int:
     print(audit_summary_line("macro", status, errors=counts["error"], warnings=counts["warning"], unresolved_columns=unresolved_columns, output=output))
     return 1 if counts["error"] else 0
 
-def expected_event_paths(raw_dir: Path, spec: EventDataset, start_date: str, end_date: str) -> set[Path]:
+def expected_event_paths(raw_dir: Path, spec: DatasetSpec, start_date: str, end_date: str) -> set[Path]:
     start = max(start_date, spec.start_date)
     if spec.strategy == "trade_date":
         trade_end_date = min(end_date, latest_sse_calendar_date(raw_dir))
@@ -2322,7 +2317,7 @@ def event_pit_rules() -> dict[str, str]:
         "share_float": "available_at uses ann_date end-of-day; if ann_date is blank, raw layer falls back to float_date and snapshot layer must treat that as conservative event-date availability, not pre-event knowledge.",
     }
 
-def event_partition_prefix(spec: EventDataset) -> str:
+def event_partition_prefix(spec: DatasetSpec) -> str:
     if spec.strategy == "trade_date":
         return "trade_date"
     if spec.strategy == "range_month":
@@ -2358,7 +2353,7 @@ def audit_margin_exchange_completeness(raw_dir: Path, api_name: str, add) -> Non
         )
 
 
-def audit_event_dataset(raw_dir: Path, spec: EventDataset, expected_paths: set[Path], add) -> None:
+def audit_event_dataset(raw_dir: Path, spec: DatasetSpec, expected_paths: set[Path], add) -> None:
     audit_margin_exchange_completeness(raw_dir, spec.api_name, add)
     audit_domain_dataset(raw_dir, spec, expected_paths, add, DomainAuditProfile(
         domain="event",
@@ -2613,7 +2608,7 @@ def audit_event_flow_only(args: argparse.Namespace) -> int:
     print(audit_summary_line("event_flow", status, errors=counts["error"], warnings=counts["warning"], unresolved_columns=unresolved_columns, output=output))
     return 1 if counts["error"] else 0
 
-def expected_board_paths(raw_dir: Path, spec: BoardTradingDataset, start_date: str, end_date: str, args: argparse.Namespace) -> set[Path]:
+def expected_board_paths(raw_dir: Path, spec: DatasetSpec, start_date: str, end_date: str, args: argparse.Namespace) -> set[Path]:
     start = max(start_date, spec.start_date)
     if spec.strategy == "static_full":
         return {raw_dir / spec.api_name / f"{spec.api_name}.parquet"}
@@ -2651,7 +2646,7 @@ def expected_board_paths(raw_dir: Path, spec: BoardTradingDataset, start_date: s
         }
     raise RuntimeError(f"unsupported board-trading strategy {spec.strategy} for {spec.api_name}")
 
-def audit_board_dataset(raw_dir: Path, spec: BoardTradingDataset, expected_paths: set[Path], add) -> None:
+def audit_board_dataset(raw_dir: Path, spec: DatasetSpec, expected_paths: set[Path], add) -> None:
     audit_domain_dataset(raw_dir, spec, expected_paths, add, DomainAuditProfile(
         domain="board",
         exact_limit_rows=frozenset({spec.page_limit}),

@@ -61,13 +61,8 @@ from .common import (
     TRADE_DATE_PAGE_LIMIT,
     WRITTEN_OUTCOMES,
     ApiResult,
-    BoardTradingDataset,
+    DatasetSpec,
     DefectiveAnswer,
-    EventDataset,
-    FundamentalDataset,
-    MacroDataset,
-    TextDataset,
-    TradeDateDataset,
     TuShareClient,
     active_year_windows,
     answer_defects,
@@ -1048,7 +1043,7 @@ def write_window_merged_partition(
 def download_trade_date_dataset(
     client: TuShareClient,
     raw_dir: Path,
-    spec: TradeDateDataset,
+    spec: DatasetSpec,
     trade_dates: list[str],
     force: bool,
     page_limit: int,
@@ -1078,7 +1073,7 @@ def download_trade_date_dataset(
             except Exception as exc:
                 raise RuntimeError(f"{spec.api_name} trade_date={trade_date} failed: {exc}") from exc
             df = frame(result)
-            if getattr(spec, "dedup_exact", False) and not df.empty:
+            if spec.dedup_exact and not df.empty:
                 df = df.drop_duplicates().reset_index(drop=True)
             if df.empty and not spec.zero_rows_ok:
                 zero_skipped += 1
@@ -1144,7 +1139,7 @@ def download_macro(args: argparse.Namespace) -> int:
     print(f"{args.tier} download finished under {raw_dir}")
     return 0
 
-def download_macro_quarter_once(client: TuShareClient, raw_dir: Path, spec: MacroDataset, start_date: str, end_date: str, force: bool, revision_ledger: Path | str | None = None) -> None:
+def download_macro_quarter_once(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, start_date: str, end_date: str, force: bool, revision_ledger: Path | str | None = None) -> None:
     start_date = retained_range_start(raw_dir / spec.api_name, start_date)
     start_q = max(yyyymmdd_to_quarter(start_date), spec.start_quarter)
     end_q = yyyymmdd_to_quarter(end_date)
@@ -1159,7 +1154,7 @@ def download_macro_quarter_once(client: TuShareClient, raw_dir: Path, spec: Macr
         prune_stale_range_files(path)
         print(f"{spec.api_name} quarters {start_q}-{end_q} rows={rows}")
 
-def download_macro_month_once(client: TuShareClient, raw_dir: Path, spec: MacroDataset, start_date: str, end_date: str, force: bool, revision_ledger: Path | str | None = None) -> None:
+def download_macro_month_once(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, start_date: str, end_date: str, force: bool, revision_ledger: Path | str | None = None) -> None:
     start_date = retained_range_start(raw_dir / spec.api_name, start_date)
     start_m = max(yyyymmdd_to_month(start_date), spec.start_month)
     end_m = yyyymmdd_to_month(end_date)
@@ -1191,7 +1186,7 @@ def prune_stale_range_files(canonical: Path) -> None:
 def download_macro_static_full(
     client: TuShareClient,
     raw_dir: Path,
-    spec: MacroDataset,
+    spec: DatasetSpec,
     page_limit: int,
     revision_ledger: Path | str | None = None,
 ) -> None:
@@ -1220,7 +1215,7 @@ def download_macro_static_full(
             print(f"{spec.api_name} {name} rows={len(df)} outcome={outcome}")
 
 
-def download_macro_month_loop(client: TuShareClient, raw_dir: Path, spec: MacroDataset, start_date: str, end_date: str, force: bool, revision_ledger: Path | str | None = None) -> None:
+def download_macro_month_loop(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, start_date: str, end_date: str, force: bool, revision_ledger: Path | str | None = None) -> None:
     windows = month_windows(start_date, end_date)
     written = 0
     skipped = 0
@@ -1261,7 +1256,7 @@ def download_macro_month_loop(client: TuShareClient, raw_dir: Path, spec: MacroD
 def download_macro_trade_date(
     client: TuShareClient,
     raw_dir: Path,
-    spec: MacroDataset,
+    spec: DatasetSpec,
     start_date: str,
     end_date: str,
     force: bool,
@@ -1320,7 +1315,7 @@ def download_macro_trade_date(
     print(f"{spec.api_name} done tasks={len(tasks)} skipped={skipped} written={written} rows_written={total_rows}")
 
 
-def download_macro_date_year(client: TuShareClient, raw_dir: Path, spec: MacroDataset, start_date: str, end_date: str, force: bool, page_limit: int, revision_ledger: Path | str | None = None) -> None:
+def download_macro_date_year(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, start_date: str, end_date: str, force: bool, page_limit: int, revision_ledger: Path | str | None = None) -> None:
     written = 0
     skipped = 0
     total_rows = 0
@@ -1358,7 +1353,7 @@ def download_macro_date_year(client: TuShareClient, raw_dir: Path, spec: MacroDa
 def download_macro_date_year_by_ts_code(
     client: TuShareClient,
     raw_dir: Path,
-    spec: MacroDataset,
+    spec: DatasetSpec,
     start_date: str,
     end_date: str,
     force: bool,
@@ -1408,7 +1403,7 @@ def download_macro_date_year_by_ts_code(
 def download_macro_eco_cal_month(
     client: TuShareClient,
     raw_dir: Path,
-    spec: MacroDataset,
+    spec: DatasetSpec,
     start_date: str,
     end_date: str,
     force: bool,
@@ -1611,7 +1606,7 @@ def selected_event_flow_download_datasets(args: argparse.Namespace) -> list[str]
 def download_event_trade_date_dataset(
     client: TuShareClient,
     raw_dir: Path,
-    spec: EventDataset,
+    spec: DatasetSpec,
     trade_dates: list[str],
     force: bool,
     page_limit: int | None,
@@ -1685,7 +1680,7 @@ def download_event_trade_date_dataset(
 
 def query_event_window(
     client: TuShareClient,
-    spec: EventDataset,
+    spec: DatasetSpec,
     start_date: str,
     end_date: str,
     page_limit: int,
@@ -1730,7 +1725,7 @@ def query_event_window(
 def download_event_range_month(
     client: TuShareClient,
     raw_dir: Path,
-    spec: EventDataset,
+    spec: DatasetSpec,
     windows: list[tuple[str, str, str]],
     force: bool,
     page_limit: int,
@@ -1817,7 +1812,7 @@ def download_board_trading(args: argparse.Namespace) -> int:
     print(f"board-trading download finished under {raw_dir}")
     return 0
 
-def download_board_static_dataset(client: TuShareClient, raw_dir: Path, spec: BoardTradingDataset, revision_ledger: Path | str | None = None) -> None:
+def download_board_static_dataset(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, revision_ledger: Path | str | None = None) -> None:
     """Full-table refresh on every run; an empty answer for a non-empty
     partition is a defect and keeps the current version."""
     path = raw_dir / spec.api_name / f"{spec.api_name}.parquet"
@@ -1826,7 +1821,7 @@ def download_board_static_dataset(client: TuShareClient, raw_dir: Path, spec: Bo
         rows = write_board_result(path, result, spec, {}, revision_ledger)
         print(f"{spec.api_name} static rows={rows}")
 
-def download_board_trade_date_dataset(client: TuShareClient, raw_dir: Path, spec: BoardTradingDataset, trade_dates: list[str], force: bool, page_limit: int, revision_ledger: Path | str | None = None) -> None:
+def download_board_trade_date_dataset(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, trade_dates: list[str], force: bool, page_limit: int, revision_ledger: Path | str | None = None) -> None:
     written = 0
     skipped = 0
     total_rows = 0
@@ -1848,7 +1843,7 @@ def download_board_trade_date_dataset(client: TuShareClient, raw_dir: Path, spec
             print(f"{spec.api_name} {index}/{len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
     print(f"{spec.api_name} done dates={len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
 
-def download_board_kpl_list(client: TuShareClient, raw_dir: Path, spec: BoardTradingDataset, trade_dates: list[str], force: bool, page_limit: int, tags: list[str], revision_ledger: Path | str | None = None) -> None:
+def download_board_kpl_list(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, trade_dates: list[str], force: bool, page_limit: int, tags: list[str], revision_ledger: Path | str | None = None) -> None:
     total_tasks = len(trade_dates) * len(tags)
     task_index = 0
     written = 0
@@ -1876,7 +1871,7 @@ def download_board_kpl_list(client: TuShareClient, raw_dir: Path, spec: BoardTra
                 print(f"{spec.api_name} {task_index}/{total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
     print(f"{spec.api_name} done tasks={total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
 
-def download_board_limit_list_ths(client: TuShareClient, raw_dir: Path, spec: BoardTradingDataset, trade_dates: list[str], force: bool, page_limit: int, limit_types: list[str], revision_ledger: Path | str | None = None) -> None:
+def download_board_limit_list_ths(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, trade_dates: list[str], force: bool, page_limit: int, limit_types: list[str], revision_ledger: Path | str | None = None) -> None:
     total_tasks = len(trade_dates) * len(limit_types)
     task_index = 0
     written = 0
@@ -1907,7 +1902,7 @@ def download_board_limit_list_ths(client: TuShareClient, raw_dir: Path, spec: Bo
 def download_board_hot_by_market(
     client: TuShareClient,
     raw_dir: Path,
-    spec: BoardTradingDataset,
+    spec: DatasetSpec,
     trade_dates: list[str],
     force: bool,
     page_limit: int,
@@ -1946,7 +1941,7 @@ def download_board_hot_by_market(
 def download_board_dc_hot(
     client: TuShareClient,
     raw_dir: Path,
-    spec: BoardTradingDataset,
+    spec: DatasetSpec,
     trade_dates: list[str],
     force: bool,
     page_limit: int,
@@ -2781,7 +2776,7 @@ def probe_recent_dividend_codes(client: TuShareClient, end_date: str, days: int,
 def download_fundamental_period_dataset(
     client: TuShareClient,
     raw_dir: Path,
-    spec: FundamentalDataset,
+    spec: DatasetSpec,
     periods: list[str],
     force: bool,
     page_limit: int,
@@ -2822,7 +2817,7 @@ def download_fundamental_period_dataset(
 def download_fundamental_ann_month_dataset(
     client: TuShareClient,
     raw_dir: Path,
-    spec: FundamentalDataset,
+    spec: DatasetSpec,
     windows: list[tuple[str, str, str]],
     force: bool,
     page_limit: int,
@@ -2864,7 +2859,7 @@ def download_fundamental_ann_month_dataset(
 def download_fundamental_ts_code_dataset(
     client: TuShareClient,
     raw_dir: Path,
-    spec: FundamentalDataset,
+    spec: DatasetSpec,
     stock_codes: list[str],
     force: bool,
     page_limit: int,
@@ -3309,7 +3304,7 @@ def download_text(args: argparse.Namespace) -> int:
 def write_text_result(
     path: Path,
     result: ApiResult,
-    spec: TextDataset,
+    spec: DatasetSpec,
     params: dict[str, Any],
     revision_ledger: Path | str | None = None,
 ) -> int:
@@ -3326,7 +3321,7 @@ def write_text_result(
     )
     return len(df) if outcome in WRITTEN_OUTCOMES else 0
 
-def download_text_range_month(client: TuShareClient, raw_dir: Path, spec: TextDataset, windows: list[tuple[str, str, str]], force: bool, page_limit: int, revision_ledger: Path | str | None = None) -> None:
+def download_text_range_month(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, windows: list[tuple[str, str, str]], force: bool, page_limit: int, revision_ledger: Path | str | None = None) -> None:
     written = 0
     skipped = 0
     total_rows = 0
@@ -3369,7 +3364,7 @@ def download_text_range_month(client: TuShareClient, raw_dir: Path, spec: TextDa
 def download_text_time_range_month(
     client: TuShareClient,
     raw_dir: Path,
-    spec: TextDataset,
+    spec: DatasetSpec,
     windows: list[tuple[str, str, str]],
     force: bool,
     page_limit: int,
@@ -3418,7 +3413,7 @@ def download_text_time_range_month(
 def download_text_news_src_day(
     client: TuShareClient,
     raw_dir: Path,
-    spec: TextDataset,
+    spec: DatasetSpec,
     days: list[str],
     force: bool,
     page_limit: int,
@@ -3448,7 +3443,7 @@ def download_text_news_src_day(
                 print(f"{spec.api_name}/{source_suffix} days {index}/{len(days)} skipped={skipped} written={written} rows_written={total_rows}")
         print(f"{spec.api_name}/{source_suffix} done days={len(days)} skipped={skipped} written={written} rows_written={total_rows}")
 
-def download_text_day(client: TuShareClient, raw_dir: Path, spec: TextDataset, days: list[str], force: bool, revision_ledger: Path | str | None = None) -> None:
+def download_text_day(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, days: list[str], force: bool, revision_ledger: Path | str | None = None) -> None:
     written = 0
     skipped = 0
     total_rows = 0
