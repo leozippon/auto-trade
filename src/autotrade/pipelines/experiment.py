@@ -348,29 +348,17 @@ class RollingExperimentPipeline:
             decision, years = self.research_inputs()
             _visible, sealed = self.config.geometry.split_sealed(self.config.acceptance.sealed_years)
             session = self.developer(
-                ResearchSessionRequest(
-                    experiment_id=self.config.experiment_id,
+                ResearchSessionRequest.for_arm(
+                    self.config,
+                    budgets=budgets,
                     run_id=run_id,
                     snapshot=decision,
                     decision_time=sealed[0].anchor,
                     research_years=years,
                     sealed_period=(sealed[0].start, sealed[-1].end),
-                    window_months=self.config.window_months,
-                    max_replay_years=int(budgets["max_replay_years"]),
-                    max_llm_calls=int(budgets["max_llm_calls"]),
-                    max_api_spend_usd=float(budgets["max_api_spend_usd"]),
-                    deadline_seconds=budgets["deadline_seconds"],
-                    deadline_grace_seconds=budgets["deadline_grace_seconds"],
-                    benchmark_index=self.config.benchmark_index,
                     directive=str(context.get("directive") or ""),
                     sandbox_gpu_count=_optional_gpu_count(context.get("sandbox_gpu_count")),
-                    acceptance_rules=self.config.acceptance.to_record(),
-                    modification_constraints=self.config.step_constraints,
                     snapshot_config=_snapshot_config_record(self.snapshots),
-                    record_failed_attempts=self.config.record_failed_attempts,
-                    finalize_before_deadline_seconds=self.config.finalize_before_deadline_seconds,
-                    max_null_controls=self.config.max_null_controls,
-                    batch_validate_max_concurrency=self.config.batch_validate_max_concurrency,
                     progress_hook=progress,
                     skills_source_ref=(
                         str(current_skills.root) if current_skills.root is not None else ""

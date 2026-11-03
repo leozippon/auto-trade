@@ -17,6 +17,8 @@ from dataclasses import MISSING, fields, replace
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.gpu import host_min_free_gpu_memory_mib
 from autotrade.environment.strategy import StrategySchedule
@@ -1343,3 +1345,57 @@ class PitViewsSeedParameterTest(unittest.TestCase):
             )
             self.assertIsNone(options.pit_views_seed)
             self.assertFalse(options.pit_views_seed_required)
+
+
+def test_a_session_request_takes_every_arm_field_from_its_config(tmp_path: Path) -> None:
+    """The research session's request is derived from the arm's config in one
+    place: a value the arm sets reaches the session, and the budgets are the
+    ones handed over after the HITL override, not the config's."""
+
+    from datetime import UTC, datetime
+
+    from autotrade.environment.artifacts import ModificationConstraints
+    from autotrade.pipelines.config import ResearchSessionRequest, SnapshotBundle
+
+    config = make_config(
+        tmp_path,
+        experiment_id="arm_request",
+        window_months=36,
+        benchmark_index="000905.SH",
+        record_failed_attempts=False,
+        finalize_before_deadline_seconds=120,
+        max_null_controls=4,
+        batch_validate_max_concurrency=2,
+        step_constraints=ModificationConstraints(max_strategy_files=3),
+    )
+    budgets = {
+        "max_replay_years": 7,
+        "max_llm_calls": 11,
+        "max_api_spend_usd": 2.5,
+        "deadline_seconds": 600.0,
+        "deadline_grace_seconds": 60.0,
+    }
+    request = ResearchSessionRequest.for_arm(
+        config,
+        budgets=budgets,
+        run_id="run_1",
+        snapshot=SnapshotBundle("snap", "decision", "replay"),
+        decision_time=datetime(2025, 6, 30, tzinfo=UTC),
+        research_years=(),
+        sealed_period=("20250701", "20260630"),
+    )
+
+    assert (
+        request.experiment_id,
+        request.window_months,
+        request.benchmark_index,
+        request.record_failed_attempts,
+        request.finalize_before_deadline_seconds,
+        request.max_null_controls,
+        request.batch_validate_max_concurrency,
+        request.modification_constraints,
+    ) == ("arm_request", 36, "000905.SH", False, 120, 4, 2, config.step_constraints)
+    assert request.acceptance_rules == config.acceptance.to_record()
+    assert {name: getattr(request, name) for name in budgets} == budgets
+    with pytest.raises(TypeError):
+        ResearchSessionRequest.for_arm(config, budgets=budgets, window_months=12)

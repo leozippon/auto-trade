@@ -1114,6 +1114,40 @@ class ResearchSessionRequest:
     steps_before: tuple[StepResult, ...] = ()
     resume: SessionResume | None = None
 
+    @classmethod
+    def for_arm(
+        cls,
+        config: RollingExperimentConfig,
+        *,
+        budgets: Mapping[str, float],
+        **session: Any,
+    ) -> ResearchSessionRequest:
+        """The request for one session of ``config``'s arm.
+
+        The arm-level fields come from the config, the five budgets
+        (``max_replay_years``, ``max_llm_calls``, ``max_api_spend_usd``,
+        ``deadline_seconds``, ``deadline_grace_seconds``) as given after any
+        HITL override, and every other field is the session's own.
+        """
+
+        return cls(
+            experiment_id=config.experiment_id,
+            window_months=config.window_months,
+            benchmark_index=config.benchmark_index,
+            acceptance_rules=config.acceptance.to_record(),
+            modification_constraints=config.step_constraints,
+            record_failed_attempts=config.record_failed_attempts,
+            finalize_before_deadline_seconds=config.finalize_before_deadline_seconds,
+            max_null_controls=config.max_null_controls,
+            batch_validate_max_concurrency=config.batch_validate_max_concurrency,
+            max_replay_years=int(budgets["max_replay_years"]),
+            max_llm_calls=int(budgets["max_llm_calls"]),
+            max_api_spend_usd=float(budgets["max_api_spend_usd"]),
+            deadline_seconds=float(budgets["deadline_seconds"]),
+            deadline_grace_seconds=float(budgets["deadline_grace_seconds"]),
+            **session,
+        )
+
     @property
     def validation(self) -> ReplaySpan:
         """The whole visible research period as one span."""
