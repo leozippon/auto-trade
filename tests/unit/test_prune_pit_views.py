@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from autotrade.environment.runtime import write_json_atomic
+from autotrade.common.records import write_json_atomic
 from autotrade.pipelines.hitl_state import ARCHIVED_NAME
 from scripts.experiments import prune_pit_views as prune_tool
 from tests.unit.webui_research_arm import build_arm

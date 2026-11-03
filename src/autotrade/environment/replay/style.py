@@ -40,11 +40,12 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
+from autotrade.common.records import write_json_atomic
 from autotrade.environment.data.contracts import (
     DEFAULT_BENCHMARK_INDEX,
     benchmark_index_label,
 )
-from autotrade.environment.runtime import utc_now_iso, write_json_atomic
+from autotrade.environment.runtime import utc_now_iso
 
 from .stats import (
     TRADING_DAYS_PER_YEAR,

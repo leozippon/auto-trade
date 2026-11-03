@@ -19,8 +19,8 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
+from autotrade.common.records import write_json_atomic
 from autotrade.environment.identity import AgentRefStore
-from autotrade.environment.runtime import write_json_atomic
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools.report_issue import (
     append_issue_report,

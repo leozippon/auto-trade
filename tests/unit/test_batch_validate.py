@@ -28,6 +28,7 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 
+from autotrade.common.records import write_json_atomic
 from autotrade.environment.artifacts import (
     FilesystemArtifactStore,
     ModificationConstraints,
@@ -46,11 +47,7 @@ from autotrade.environment.replay.engine import BacktestError
 from autotrade.environment.replay.null_control import NullControlSetupError
 from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR
 from autotrade.environment.replay.style import active_analysis
-from autotrade.environment.runtime import (
-    agent_trace_path,
-    utc_now_iso,
-    write_json_atomic,
-)
+from autotrade.environment.runtime import agent_trace_path, utc_now_iso
 from autotrade.environment.sandbox import SandboxConfig, SandboxSpec
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.time_budget import InferenceTimeBudget

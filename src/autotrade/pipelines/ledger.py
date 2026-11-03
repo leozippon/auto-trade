@@ -48,11 +48,11 @@ import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+from autotrade.common.records import write_json_atomic
 from autotrade.environment.runtime import (
     append_versioned_jsonl,
     read_versioned_jsonl,
     utc_now_iso,
-    write_json_atomic,
 )
 
 # Stamped on every appended record; bump when the record shape changes.

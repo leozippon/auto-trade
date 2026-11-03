@@ -17,6 +17,7 @@ from unittest.mock import Mock, patch
 import pandas as pd
 import pytest
 
+from autotrade.common.records import write_json_atomic
 from autotrade.environment import artifacts, strategy_worker
 from autotrade.environment.artifacts import (
     ArtifactError,
@@ -46,7 +47,6 @@ from autotrade.environment.executor import (
 )
 from autotrade.environment.gpu import MIN_FREE_GPU_MEMORY_MIB, GpuUnavailableError
 from autotrade.environment.replay import DailyMarketData
-from autotrade.environment.runtime import write_json_atomic
 from autotrade.environment.sandbox import (
     EXPERIMENT_LABEL,
     SCREENING_TOOL_MOUNT,

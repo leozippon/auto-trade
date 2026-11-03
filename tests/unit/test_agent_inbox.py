@@ -11,8 +11,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from autotrade.common.records import write_json_atomic
 from autotrade.environment.identity import AgentRefStore
-from autotrade.environment.runtime import write_json_atomic
 from autotrade.pipelines.agent_inbox import (
     ALREADY_CONSUMED,
     CONSUMED,

@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from autotrade.common.records import redact_host_paths, write_json_atomic
 from autotrade.environment.identity import AgentRefStore
 
 SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -69,47 +70,6 @@ ARTIFACT_TOP_LEVEL = (
     "steps",
     "logs",
 )
-# Absolute host paths must never reach a model: the Agent sees only sandbox
-# mounts under /mnt. Shared by the data summary, error summaries, tool
-# tracebacks and the Agent-readable transcript.
-#
-# A match has to look like a path — a top-level directory this host keeps its
-# files under, then at least one more segment of ordinary path characters.
-# Redacting every ``/`` at a token boundary instead rewrote the transcript the
-# Agent reads its own work back from: 464 substitutions in one audited arm,
-# nearly all of them division, backquoted names, ``2>/dev/null`` and
-# ``<domain>/part_0000.parquet``.
-
-
-def _host_path_prefixes() -> tuple[str, ...]:
-    """The top-level directories an absolute host path can start with.
-
-    The home directories plus the top of this checkout: the data, snapshot,
-    experiment and sandbox work roots all live inside the repository, so one
-    prefix covers every host tree a session could name. ``/Data2`` is named
-    outright because that is where the worker runs from, and the derived one
-    keeps this correct for a checkout elsewhere. ``/mnt``, ``/tmp``, ``/opt``
-    and ``/usr`` are the Agent's view of its own sandbox, never host paths, so
-    they can never become a prefix.
-    """
-
-    tops = {"/Data2", "/home", "/root"}
-    repo = Path(__file__).resolve().parents[3]
-    if len(repo.parts) > 1:
-        tops.add("/" + repo.parts[1])
-    return tuple(sorted(tops - {"/mnt", "/tmp", "/opt", "/usr"}))
-
-
-HOST_PATH_PREFIXES = _host_path_prefixes()
-HOST_PATH_RE = re.compile(
-    r"(?<![A-Za-z0-9_.\-/])(?:"
-    + "|".join(re.escape(prefix) for prefix in HOST_PATH_PREFIXES)
-    + r")(?:/[A-Za-z0-9._\-+@~%]+)+"
-)
-
-
-def redact_host_paths(text: str) -> str:
-    return HOST_PATH_RE.sub("[host_path]", text)
 # Python bytecode-cache dirs/suffixes that are never experiment artifacts. Single
 # source for both the artifact-collection ignore list (sandbox._COLLECT_IGNORE, which
 # adds VCS/venv/tooling dirs on top) and the formal-file runtime-cache predicate
@@ -414,37 +374,6 @@ def _default_host_manifest_path(public_path: Path) -> Path:
     if public_path.parent.name == "artifacts":
         return public_path.parent.parent / "runtime" / "host_run_manifest.json"
     return public_path.with_name("host_run_manifest.json")
-
-
-def write_json_atomic(path: Path, payload: object, *, sort_keys: bool = True) -> None:
-    """Publish one JSON file atomically.
-
-    ``sort_keys`` defaults to True so manifests stay diffable. Pass False for a
-    file whose builder orders keys deliberately -- a long Agent-visible index
-    read in chunks needs its identifying keys at the top of each entry, and
-    alphabetical order buries them under whatever bulky block sorts first.
-    """
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Unique temp name: concurrent writers must never share a temp file, or
-    # interleaved chunks get os.replace'd into place.
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
-    try:
-        # allow_nan=False: a NaN in a run manifest is an upstream bug — fail here.
-        tmp.write_text(
-            json.dumps(
-                payload,
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=sort_keys,
-                default=str,
-                allow_nan=False,
-            ),
-            encoding="utf-8",
-        )
-        tmp.replace(path)
-    finally:
-        tmp.unlink(missing_ok=True)
 
 
 def append_versioned_jsonl(

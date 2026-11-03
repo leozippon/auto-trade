@@ -8,8 +8,8 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from autotrade.common.records import redact_host_paths
 from autotrade.environment.commands import CommandResult
-from autotrade.environment.runtime import redact_host_paths
 from autotrade.environment.time_budget import (
     SessionTimeBudgetAware,
     TimeBudgetBinding,

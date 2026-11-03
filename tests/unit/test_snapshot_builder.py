@@ -1836,7 +1836,7 @@ class SnapshotBuilderTest(unittest.TestCase):
             self.assertEqual(manifest["raw_generation"], identity)
             replay_manifest = builder.build_replay_slot("20211007", "20211011", Path(tmp) / "replay", label="valid", config=CONFIG)
             self.assertEqual(replay_manifest["raw_generation"], identity)
-            from autotrade.environment.runtime import HOST_PATH_RE
+            from autotrade.common.records import HOST_PATH_RE
 
             for written in (Path(tmp) / "snap" / "manifest.json", Path(tmp) / "replay" / "manifest.json"):
                 text = written.read_text(encoding="utf-8")

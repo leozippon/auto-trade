@@ -35,8 +35,8 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 import autotrade
+from autotrade.common.records import write_json_atomic
 from autotrade.environment.identity import AgentRefStore
-from autotrade.environment.runtime import write_json_atomic
 from autotrade.pipelines.config import DEFAULT_RESEARCH_GEOMETRY
 from autotrade.pipelines.hitl_state import (
     ARCHIVED_NAME,
