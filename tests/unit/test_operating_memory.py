@@ -188,7 +188,6 @@ def test_the_curated_library_is_a_valid_skill_tree_of_operational_entries() -> N
         "grid-plateau-selection",
         "offline-readings",
         "refit-snapshot-rescore",
-        "research-8y-data-surface",
         "residual-label-benchmark",
         "validation-readings",
     }
