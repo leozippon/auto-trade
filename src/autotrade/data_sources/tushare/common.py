@@ -88,6 +88,12 @@ INTRADAY_MINUTES_STATUS_PATH = "results/data_quality/" + DOMAIN_STATUS_FILES["in
 # dies. Anything faster than this must be a deliberate, supervised override.
 MIN_REQUEST_INTERVAL_SECONDS = 0.80
 
+# The largest offset the vendor serves: a request past it is refused (code
+# 50101, "offset不能大于100000"), so offset paging reaches at most this offset
+# plus one page. dc_member's whole-day answer outgrew it on 20261103 (105,452
+# rows at 8,000 a page); query_paged stops before requesting past it.
+VENDOR_MAX_OFFSET = 100_000
+
 REVISION_EVENTS_PATH = "results/data_quality/revision_events.jsonl"
 
 REVISION_SUMMARY_PATH = "results/data_quality/revision_summary.json"
@@ -546,6 +552,8 @@ class FetchStrategy(StrEnum):
     TRADE_DATE_BY_LIMIT_TYPE = "trade_date_by_limit_type"
     TRADE_DATE_BY_MARKET = "trade_date_by_market"
     TRADE_DATE_BY_MARKET_HOT_TYPE = "trade_date_by_market_hot_type"
+    # One request per board over a run of trade dates, landed per trade date.
+    BOARD_DATE_RANGE = "board_date_range"
     PERIOD = "period"
     ANN_MONTH = "ann_month"
     TS_CODE = "ts_code"
@@ -1404,9 +1412,12 @@ BOARD_TRADING_SPECS = {
         availability=OFFICIAL_20,
         date_column="trade_date",
     ),
+    # A whole trade date no longer fits under VENDOR_MAX_OFFSET (105,452 rows
+    # on 20261103), so the members are fetched per board (the vendor's
+    # documented "loop by date and code").
     "dc_member": DatasetSpec(
         api_name="dc_member",
-        strategy=FetchStrategy.TRADE_DATE,
+        strategy=FetchStrategy.BOARD_DATE_RANGE,
         fields="trade_date,ts_code,con_code,name",
         page_limit=8000,
         key_columns=("trade_date", "ts_code", "con_code"),
@@ -1726,7 +1737,7 @@ def query_paged(client: TuShareClient, api_name: str, params: dict[str, Any], fi
             # A repeated full page normally means broken pagination. Sources
             # that serve heavily duplicated rows (eco_cal repeats each event
             # many times) legitimately produce identical pages; callers that
-            # dedup by key opt out and rely on the offset safety limit below.
+            # dedup by key opt out and rely on the offset cap below.
             raise DefectiveAnswer(
                 f"{api_name} returned a repeated page while paging params={params}; "
                 f"offset={offset} page_limit={page_limit}"
@@ -1747,8 +1758,13 @@ def query_paged(client: TuShareClient, api_name: str, params: dict[str, Any], fi
                     )
             break
         offset += page_limit
-        if offset > 500000:
-            raise RuntimeError(f"{api_name} pagination exceeded safety limit for params={params}")
+        if offset > VENDOR_MAX_OFFSET:
+            # The vendor would refuse the next page and the rows past it are
+            # unreachable with these params: fail instead of retrying a refusal.
+            raise RuntimeError(
+                f"{api_name} answer for params={params} runs past the vendor's offset cap "
+                f"{VENDOR_MAX_OFFSET} (page_limit={page_limit}); narrow the request"
+            )
     return ApiResult(result_fields, all_items), pages
 
 def load_stock_codes(raw_dir: Path) -> list[str]:

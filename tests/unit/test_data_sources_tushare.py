@@ -314,6 +314,42 @@ class TieUnstablePagingClient:
         return common.ApiResult(names, [[row.get(name, "") for name in names] for row in page])
 
 
+class EndlessPagedClient:
+    """Serves a full page of distinct rows at every offset, refusing an offset
+    past the cap the way the vendor does (code 50101)."""
+
+    def __init__(self):
+        self.offsets = []
+
+    def query(self, api_name, params=None, fields="", retries=5):
+        offset, limit = params["offset"], params["limit"]
+        if offset > common.VENDOR_MAX_OFFSET:
+            raise RuntimeError(f"{api_name} answered code 50101: offset不能大于{common.VENDOR_MAX_OFFSET}")
+        self.offsets.append(offset)
+        return common.ApiResult(["trade_date", "ts_code"], [["20261103", str(offset + index)] for index in range(limit)])
+
+
+class BoardMemberClient:
+    """dc_member by board over a date range, as the vendor serves it."""
+
+    def __init__(self, members):
+        self.members = members  # {(board, trade_date): [con_code, ...]}
+        self.calls = []
+
+    def query(self, api_name, params=None, fields="", retries=5):
+        params = dict(params or {})
+        self.calls.append((api_name, params))
+        names = fields.split(",")
+        served = [
+            {"trade_date": day, "ts_code": board, "con_code": code, "name": "x"}
+            for (board, day), codes in sorted(self.members.items(), reverse=True)
+            if board == params["ts_code"] and params["start_date"] <= day <= params["end_date"]
+            for code in codes
+        ]
+        page = served[params["offset"]:params["offset"] + params["limit"]]
+        return common.ApiResult(names, [[row[name] for name in names] for row in page])
+
+
 class FetchStrategyTest(unittest.TestCase):
     def test_a_spec_holds_its_strategy_as_the_member_its_family_dispatches_on(self):
         spec = common.DatasetSpec("income_vip", strategy="period")
@@ -408,6 +444,62 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
     def test_query_paged_rejects_repeated_full_pages(self):
         with self.assertRaisesRegex(RuntimeError, "returned a repeated page"):
             common.query_paged(RepeatingPagedClient(), "daily", {"trade_date": "20200102"}, "trade_date,ts_code", page_limit=1)
+
+    def test_query_paged_never_requests_past_the_vendor_offset_cap(self):
+        # dc_member's 20261103 answer needed offset 104000 at 8,000 rows a
+        # page; the vendor refuses it, and five retries cannot change that.
+        client = EndlessPagedClient()
+        with self.assertRaisesRegex(RuntimeError, "runs past the vendor's offset cap 100000"):
+            common.query_paged(client, "dc_member", {"trade_date": "20261103"}, "trade_date,ts_code", page_limit=8000)
+        self.assertEqual(client.offsets, list(range(0, 96001, 8000)))
+
+    def _write_board_partition(self, dataset, trade_date, boards):
+        rows = pd.DataFrame([{"trade_date": trade_date, "ts_code": board, "con_code": code} for board, code in boards])
+        common.write_parquet(
+            self.raw_dir / dataset / f"trade_date={trade_date}.parquet",
+            rows, api_name=dataset, params={"trade_date": trade_date}, fields=list(rows.columns),
+        )
+
+    def test_dc_member_lands_every_board_per_trade_date_without_a_whole_day_request(self):
+        spec = common.BOARD_TRADING_SPECS["dc_member"]
+        self.assertIs(spec.strategy, common.FetchStrategy.BOARD_DATE_RANGE)
+        # dc_index quotes BK1 on both days and BK2 on the second; the lake's
+        # 20261102 partition also holds BK3, a board dc_index did not quote.
+        self._write_board_partition("dc_index", "20261102", [("BK1.DC", "")])
+        self._write_board_partition("dc_index", "20261103", [("BK1.DC", ""), ("BK2.DC", "")])
+        self._write_board_partition("dc_member", "20261102", [("BK1.DC", "000001.SZ"), ("BK3.DC", "000003.SZ")])
+        client = BoardMemberClient({
+            ("BK1.DC", "20261102"): [f"{index:06d}.SZ" for index in range(5)],
+            ("BK1.DC", "20261103"): [f"{index:06d}.SZ" for index in range(6)],
+            ("BK2.DC", "20261103"): ["600000.SH"],
+            ("BK3.DC", "20261102"): ["000003.SZ"],
+        })
+        with redirect_stdout(io.StringIO()):
+            download.download_board_members_by_board(
+                client, self.raw_dir, spec, ["20261102", "20261103"], True, 4, str(self.root / "ledger.jsonl"),
+            )
+
+        def landed(trade_date):
+            frame = pd.read_parquet(self.raw_dir / "dc_member" / f"trade_date={trade_date}.parquet")
+            self.assertTrue((frame["available_at"] == f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]} 20:00:00+08:00").all())
+            return sorted(zip(frame["ts_code"], frame["con_code"], strict=True))
+
+        self.assertEqual(landed("20261102"), [("BK1.DC", f"{index:06d}.SZ") for index in range(5)] + [("BK3.DC", "000003.SZ")])
+        self.assertEqual(landed("20261103"), [("BK1.DC", f"{index:06d}.SZ") for index in range(6)] + [("BK2.DC", "600000.SH")])
+        # One paged series per board over the whole run, never a whole-day request.
+        self.assertEqual(
+            sorted({(params["ts_code"], params["start_date"], params["end_date"]) for _, params in client.calls}),
+            [("BK1.DC", "20261102", "20261103"), ("BK2.DC", "20261102", "20261103"), ("BK3.DC", "20261102", "20261103")],
+        )
+        self.assertTrue(all("trade_date" not in params for _, params in client.calls))
+
+    def test_dc_member_refuses_a_trade_date_without_its_dc_index(self):
+        client = BoardMemberClient({})
+        with self.assertRaisesRegex(RuntimeError, "needs the dc_index partition for 20261103"):
+            download.download_board_members_by_board(
+                client, self.raw_dir, common.BOARD_TRADING_SPECS["dc_member"], ["20261103"], True, 4, None,
+            )
+        self.assertEqual(client.calls, [])
 
     def test_trade_cal_helpers_normalize_date_strings(self):
         path = self.raw_dir / "trade_cal" / "exchange=SSE" / "year=2026.parquet"

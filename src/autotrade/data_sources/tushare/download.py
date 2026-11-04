@@ -1801,6 +1801,8 @@ def download_board_trading(args: argparse.Namespace) -> int:
             download_board_static_dataset(client, raw_dir, spec, revision_ledger)
         elif spec.strategy == FetchStrategy.TRADE_DATE:
             download_board_trade_date_dataset(client, raw_dir, spec, dates, args.force, page_limit, revision_ledger)
+        elif spec.strategy == FetchStrategy.BOARD_DATE_RANGE:
+            download_board_members_by_board(client, raw_dir, spec, dates, args.force, page_limit, revision_ledger)
         elif spec.strategy == FetchStrategy.TRADE_DATE_BY_TAG:
             download_board_kpl_list(client, raw_dir, spec, dates, args.force, page_limit, selected_board_kpl_tags(args), revision_ledger)
         elif spec.strategy == FetchStrategy.TRADE_DATE_BY_LIMIT_TYPE:
@@ -1844,6 +1846,83 @@ def download_board_trade_date_dataset(client: TuShareClient, raw_dir: Path, spec
         if index % 250 == 0:
             print(f"{spec.api_name} {index}/{len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
     print(f"{spec.api_name} done dates={len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
+
+# Trade dates one dc_member request per board covers. At 8,000 rows a page
+# a request reaches 104,000 rows below VENDOR_MAX_OFFSET; the largest board
+# (融资融券, 3,890 members on 20261103) over 23 dates, the most the evening
+# job's 30-day window holds, is about 89,500, so the evening window takes one
+# request per board. query_paged refuses explicitly should a board outgrow it.
+BOARD_MEMBER_DATES_PER_REQUEST = 23
+
+
+def download_board_members_by_board(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, trade_dates: list[str], force: bool, page_limit: int, revision_ledger: Path | str | None = None) -> None:
+    """dc_member by board over runs of trade dates, landed per trade date.
+
+    The boards are those dc_index quotes on the run's dates plus those the
+    run's partitions already hold. A board dc_member lists before dc_index
+    first quotes it (a new board's first day or two) is missed until a run
+    covering that day reaches a date dc_index quotes it on; the evening
+    job's 30-day refresh does so the next evening and restates the day.
+    """
+    written = 0
+    skipped = 0
+    total_rows = 0
+    total_pages = 0
+    board_queries = 0
+    for block_start in range(0, len(trade_dates), BOARD_MEMBER_DATES_PER_REQUEST):
+        block = trade_dates[block_start:block_start + BOARD_MEMBER_DATES_PER_REQUEST]
+        paths = {trade_date: raw_dir / spec.api_name / f"trade_date={trade_date}.parquet" for trade_date in block}
+        todo = [trade_date for trade_date in block if not should_skip_existing_partition(paths[trade_date], force=force)]
+        skipped += len(block) - len(todo)
+        if not todo:
+            continue
+        boards: set[str] = set()
+        for trade_date in block:
+            index_path = raw_dir / "dc_index" / f"trade_date={trade_date}.parquet"
+            if index_path.exists():
+                boards.update(pd.read_parquet(index_path, columns=["ts_code"])["ts_code"].astype(str))
+            elif trade_date in todo:
+                raise RuntimeError(f"{spec.api_name} is fetched per board and needs the dc_index partition for {trade_date}; download dc_index first")
+            if paths[trade_date].exists():
+                boards.update(pd.read_parquet(paths[trade_date], columns=["ts_code"])["ts_code"].astype(str))
+        if not boards:
+            raise RuntimeError(f"{spec.api_name} has no boards to fetch for {todo[0]}-{todo[-1]}: dc_index and the partitions are empty")
+        params = {"start_date": todo[0], "end_date": todo[-1]}
+        rows: dict[str, list[list[Any]]] = {trade_date: [] for trade_date in todo}
+        fields: list[str] = []
+        block_pages = 0
+        try:
+            for index, board in enumerate(sorted(boards), start=1):
+                result, pages = query_paged(client, spec.api_name, {"ts_code": board, **params}, spec.fields, page_limit)
+                block_pages += pages
+                if index % 250 == 0:
+                    print(f"{spec.api_name} {todo[0]}-{todo[-1]} boards {index}/{len(boards)} pages={block_pages}")
+                if not result.items:
+                    continue
+                if fields and result.fields != fields:
+                    raise DefectiveAnswer(f"{spec.api_name} returned inconsistent fields across boards for {params}")
+                fields = result.fields
+                date_index = fields.index(spec.date_column)
+                for item in result.items:
+                    # Rows of a skipped date inside the range are dropped.
+                    rows.get(str(item[date_index]), []).append(item)
+        except DefectiveAnswer as exc:
+            for trade_date in todo:
+                print(f"defective answer for {paths[trade_date]}: {exc}")
+                record_defect(paths[trade_date], str(exc), ledger=revision_ledger, source="force_refresh")
+            continue
+        board_queries += len(boards)
+        total_pages += block_pages
+        for trade_date in todo:
+            meta_params = {
+                "trade_date": trade_date,
+                "boards": len(boards),
+                **params,
+                "pagination": {"page_limit": page_limit, "pages": block_pages},
+            }
+            total_rows += write_board_result(paths[trade_date], ApiResult(fields or spec.fields.split(","), rows[trade_date]), spec, meta_params, revision_ledger)
+            written += 1
+    print(f"{spec.api_name} done dates={len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows} board_queries={board_queries} pages={total_pages}")
 
 def download_board_kpl_list(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, trade_dates: list[str], force: bool, page_limit: int, tags: list[str], revision_ledger: Path | str | None = None) -> None:
     total_tasks = len(trade_dates) * len(tags)
