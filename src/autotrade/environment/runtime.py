@@ -452,7 +452,6 @@ def _agent_visible_manifest(
             "attempt",
             "record_failed_attempts",
             "budgets",
-            "finalize_before_deadline_seconds",
             "per_call_timeout_seconds",
             "sandbox_spec",
             "sandbox_runtime",

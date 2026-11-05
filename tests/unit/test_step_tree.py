@@ -232,10 +232,11 @@ RESEARCH_MANIFEST = {
         "decision_time": "2024-06-30T23:59:59+08:00",
         "input_window": "20220701..20240630",
         "research_period": "20210701..20240630",
-        "sealed_years": {
-            "period": "20240701..20250630",
-            "note": "the trailing research years the host reads once after the freeze",
-        },
+        "frontier": "20240630",
+        "validation_period": "20240701..20250630",
+        "step": "quarter",
+        "steps": 4,
+        "steps_tested": 0,
         "years": [
             {"label": "Y1", "start": "20210701", "end": "20220630"},
             {"label": "Y2", "start": "20220701", "end": "20230630"},
@@ -244,7 +245,7 @@ RESEARCH_MANIFEST = {
         "spans": "full (every year), one year such as Y1, or contiguous years such as Y1..Y3",
     },
     "start": {"kind": "step_node", "node_id": "research__session_ref_x__run_ref_y__valid_003"},
-    "arm": {"frozen": False, "freezes_per_arm": 1, "validations_to_date": 5, "full_span_validations_to_date": 2},
+    "arm": {"validations_to_date": 5, "full_span_validations_to_date": 2},
     "snapshot_config": {
         "decision_windows": {
             "daily_months": 24,
@@ -256,7 +257,7 @@ RESEARCH_MANIFEST = {
         }
     },
     "acceptance_rules": {"min_return": 0.0, **REQUIRED_RULES},
-    "budgets": {"max_replay_years": 24, "max_null_controls": 3, "deadline_seconds": 43800.0},
+    "budgets": {"max_null_controls": 3, "deadline_seconds": 43800.0, "validates_per_step": 6},
 }
 
 
@@ -283,10 +284,9 @@ class SessionFactsTest(unittest.TestCase):
         self.assertNotIn("session", facts["identity"])
         self.assertTrue(facts["identity"]["session_ref"].startswith("session_ref_"))
         self.assertEqual(facts["arm"]["validations_to_date"], 5)
-        self.assertIs(facts["arm"]["frozen"], False)
-        self.assertEqual(facts["budgets"]["max_replay_years"], 24)
-        self.assertIn("计回测年", facts["budgets"]["max_replay_years_note"])
-        self.assertIn("cause: environment", facts["budgets"]["max_replay_years_note"])
+        self.assertEqual(facts["arm"]["full_span_validations_to_date"], 2)
+        self.assertEqual(facts["budgets"]["max_null_controls"], 3)
+        self.assertIn("cause: environment", facts["budgets"]["validation_failure_note"])
         self.assertEqual(
             facts["artifact_contract"]["start"],
             {
@@ -295,7 +295,7 @@ class SessionFactsTest(unittest.TestCase):
                 "model_artifacts_empty": True,
             },
         )
-        self.assertIn("sealed_gate", facts["artifact_contract"]["acceptance_rules"])
+        self.assertIn("instrument", facts["artifact_contract"]["acceptance_rules"])
         self.assertIn("20210701..20240630", facts["research_scope"]["research"])
         self.assertIn("one research session", facts["research_scope"]["research"])
         # The periods after research end exist and are sealed: no date of them.
@@ -385,10 +385,8 @@ class PromptCompositionTest(unittest.TestCase):
 
     def test_the_step_tree_section_is_part_of_the_static_contract(self) -> None:
         prompt = build_system_prompt()
-        self.assertIn("# Step 产物树", prompt)
-        self.assertIn("step_rollback", prompt)
-        self.assertIn("finish_session", prompt)
-        self.assertLess(prompt.index("# Step 产物树"), prompt.index(self.MARKER))
+        self.assertIn("根 `steps` 的 Step 树（`tree.txt`）", prompt)
+        self.assertLess(prompt.index("Step 树"), prompt.index(self.MARKER))
 
     def test_the_session_directive_is_optional_and_framed_as_a_hypothesis(self) -> None:
         without = build_system_prompt()
@@ -426,18 +424,15 @@ class PromptCompositionTest(unittest.TestCase):
         second_prefix, second_context = second.split(self.MARKER, 1)
         self.assertEqual(first_prefix, second_prefix)
         self.assertNotEqual(first_context, second_context)
-        # Opening paragraph, harness, task, ending, strategy contract,
-        # prohibitions, tools, the Step tree, feedback -- then the environment.
+        # Opening paragraph, process, readings, strategy, prohibitions, how
+        # to work -- then the environment.
         order = [
-            first.index("你是 A 股量化策略研究会话的主 Agent"),
-            first.index("# 系统"),
-            first.index("# 研究任务"),
-            first.index("# 结束会话"),
-            first.index("# 策略合同"),
+            first.index("你是本研究框架的 AI 首席量化研究官"),
+            first.index("# 研究与回测流程"),
+            first.index("# 读数"),
+            first.index("# 策略"),
             first.index("# 禁止事项"),
-            first.index("# 使用工具"),
-            first.index("# Step 产物树"),
-            first.index("# 反馈通道"),
+            first.index("# 工作方式"),
             first.index(self.MARKER),
         ]
         self.assertEqual(order, sorted(order))

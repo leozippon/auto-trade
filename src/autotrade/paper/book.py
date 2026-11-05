@@ -11,11 +11,14 @@ named) into ``source_history.json``, so the book keeps the history its own days
 continue. A different capital, artifact or environment is a new book in a new
 state root.
 
-A book is on one of two tracks, recorded as its ``candidate_source``: a
-``graduated`` book trades an arm's Paper candidate; an ``incubating`` book
-trades a node an operator incubated, whose source history is the replay the
-incubation recorded, and at most ``INCUBATING_BOOK_CAP`` of those are open at
-once. Either way creation pins the rules its Paper verdict is read by
+A book's track is recorded as its ``candidate_source``. A ``frozen`` book
+trades the frozen strategy of an arm with its forward record (the arm's Paper
+candidate), opened by the operator from the console's ranking view; at most
+``BOOK_CAP`` operator-opened books are open at once. Two tracks from the
+sealed-gate rules stay readable: a ``graduated`` book traded a graduate's
+candidate, and an ``incubating`` book a node an operator incubated, whose
+source history is the replay the incubation recorded. Either way creation
+pins the rules its Paper verdict is read by
 (``paper/verdict.py``), so a later change cannot move a book already trading,
 and the boards its account may buy on, in its Broker profile: the boards its
 incubation replayed on, else the arm's stamp, else those the book's initial
@@ -70,9 +73,10 @@ BOOK_NAME = "book.json"
 # never rewritten.
 BOOK_SCHEMA_VERSION = 3
 STRATEGY_COPY_NAME = "strategy"
-TRACKS = ("graduated", "incubating")
-# Incubating books open at once; a killed book does not count.
-INCUBATING_BOOK_CAP = 4
+TRACKS = ("frozen", "graduated", "incubating")
+# Operator-opened books (frozen, and the retired incubating track) open at
+# once; a killed book does not count.
+BOOK_CAP = 4
 # The Paper verdict's rules, pinned into every new book. A statistical check
 # runs only every CHECKPOINT_DAYS settled Paper sessions (half a year): kill
 # when the KILL_CONFIDENCE upper bound of the plain active mean is below zero
@@ -95,7 +99,7 @@ class Book:
     root: Path
     experiment_id: str
     artifact_id: str
-    # The track: "graduated" or "incubating".
+    # The track: one of ``TRACKS``.
     candidate_source: str
     note: str
     strategy_path: Path
@@ -129,16 +133,17 @@ def create_book(
 ) -> Book:
     """Create the book at ``state_root`` (``<Paper state root>/<book id>``).
 
-    A ``graduated`` book trades the arm's Paper candidate and copies the
-    replay its forward record names; it buys on the arm's stamped boards, or
-    on those its initial cash qualifies for when the arm has none. An
+    A ``frozen`` book (and a ``graduated`` one, under the sealed-gate rules)
+    trades the arm's Paper candidate and copies the replay its forward record
+    names; it buys on the arm's stamped boards, or on those its initial cash
+    qualifies for when the arm has none. An
     ``incubating`` book trades the artifact the caller incubated -- the
     caller has checked it may -- copies the replay ``source_record`` names,
     in the forward record's shape (``result_ref`` inside the experiment
     directory and ``replay.heldout_start``), and buys on the
     ``permitted_boards`` that replay ran on; both are given exactly for that
-    track. It is refused while ``INCUBATING_BOOK_CAP`` other incubating
-    books beside it are not killed. Either track is refused, before anything
+    track. A frozen or incubating book is refused while ``BOOK_CAP`` other
+    operator-opened books beside it are not killed. Every track is refused, before anything
     is written, when the arm reads fundamentals and the PIT fundamental
     events audit does not cover the book's first decision view
     (``pit.require_audited_fundamentals``).
@@ -157,19 +162,19 @@ def create_book(
             "and only it: pass source_record and permitted_boards exactly for track 'incubating'"
         )
     experiment = Path(experiment_dir).resolve(strict=True)
-    if track == "graduated":
+    if track != "incubating":
         candidate = paper_candidate(
             ExperimentLedger(experiment / "ledgers" / "experiment_ledger.jsonl").read()
         )
         if candidate is None:
-            raise ValueError(f"{experiment.name} has no Paper candidate: it did not graduate")
+            raise ValueError(f"{experiment.name} has no Paper candidate: no frozen strategy with a forward record")
         if artifact_id != candidate["artifact_id"]:
             raise ValueError(
                 f"{artifact_id} is not the Paper candidate of {experiment.name}; "
                 f"choose {candidate['artifact_id']}"
             )
-    else:
-        require_incubating_place(root.parent, root.name)
+    if track != "graduated":
+        require_book_place(root.parent, root.name)
     source = experiment / "artifacts" / "strategy" / "frozen" / artifact_id
     if not (source / "output" / "main.py").is_file():
         raise FileNotFoundError(f"frozen artifact has no output/main.py: {source}")
@@ -387,8 +392,9 @@ def book_status(state_root: str | Path) -> str:
     return str(rows[0]["status"]) if rows else "observing"
 
 
-def open_incubating_books(paper_root: str | Path) -> list[str]:
-    """The ids of the incubating books under ``paper_root`` that are not killed.
+def open_capped_books(paper_root: str | Path) -> list[str]:
+    """The ids of the operator-opened books under ``paper_root`` that are not
+    killed: the frozen track and the retired incubating one.
 
     A hidden directory is a book being deleted (``books.delete_book``)."""
 
@@ -398,21 +404,21 @@ def open_incubating_books(paper_root: str | Path) -> list[str]:
         book.name
         for book in books
         if not book.name.startswith(".")
-        and read_json_object(book / BOOK_NAME, missing_ok=True).get("candidate_source") == "incubating"
+        and read_json_object(book / BOOK_NAME, missing_ok=True).get("candidate_source") in ("frozen", "incubating")
         and book_status(book) != "killed"
     ]
 
 
-def require_incubating_place(paper_root: str | Path, book_id: str) -> None:
-    """Refuse a new incubating book ``book_id`` while ``INCUBATING_BOOK_CAP``
-    other incubating books under ``paper_root`` are not killed; the book's
-    own id never counts against itself."""
+def require_book_place(paper_root: str | Path, book_id: str) -> None:
+    """Refuse a new operator-opened book ``book_id`` while ``BOOK_CAP`` other
+    such books under ``paper_root`` are not killed; the book's own id never
+    counts against itself."""
 
-    others = [book for book in open_incubating_books(paper_root) if book != book_id]
-    if len(others) >= INCUBATING_BOOK_CAP:
+    others = [book for book in open_capped_books(paper_root) if book != book_id]
+    if len(others) >= BOOK_CAP:
         raise ValueError(
-            f"{len(others)} incubating Paper books are open ({', '.join(others)}), "
-            f"the cap is {INCUBATING_BOOK_CAP}; a book frees its place when it is killed"
+            f"{len(others)} Paper books are open ({', '.join(others)}), "
+            f"the cap is {BOOK_CAP}; a book frees its place when it is killed"
         )
 
 
@@ -480,8 +486,8 @@ _SCHEMA_2_LIMIT_KEYS = frozenset(
 
 
 __all__ = [
+    "BOOK_CAP",
     "BOOK_NAME",
-    "INCUBATING_BOOK_CAP",
     "SOURCE_HISTORY_NAME",
     "TRACKS",
     "VERDICT_LOG_NAME",
@@ -490,8 +496,8 @@ __all__ = [
     "copy_source_history",
     "create_book",
     "load_book",
-    "open_incubating_books",
-    "require_incubating_place",
+    "open_capped_books",
+    "require_book_place",
     "verify_book_artifact",
     "write_source_history",
 ]

@@ -345,8 +345,11 @@ def test_no_page_appends_a_renderer_that_can_return_nothing() -> None:
 
     source = APP_JS.read_text(encoding="utf-8")
     nullable = (
-        "forwardTiles",
+        "rankingPanel",
         "evidenceTiles",
+        "recordPanel",
+        "validationWindowBlock",
+        "forwardPoolBlock",
         "cardEquityNode",
         "endingBadge",
         "endingReason",
@@ -431,7 +434,7 @@ def test_every_progress_stage_the_pipeline_publishes_has_a_console_label() -> No
     assert stages <= labels, sorted(stages - labels)
     # The forward replay runs with no Agent session at all.
     prep = _js_literal("const PREP_ENVIRONMENT_STAGES = new Set([", "\n]);")
-    assert '"forward_replay"' in prep and '"verdict"' in prep
+    assert '"forward_replay"' in prep and '"readout"' in prep
 
 
 def test_every_reason_the_pipeline_records_has_a_console_label() -> None:
@@ -443,7 +446,7 @@ def test_every_reason_the_pipeline_records_has_a_console_label() -> None:
     from autotrade.pipelines.config import SESSION_OUTCOMES
     from autotrade.pipelines.verdict import CONDITIONS, ConditionReason
     recorded = {condition.reason for condition in CONDITIONS} | {ConditionReason.UNMEASURABLE}
-    assert {"sealed_residual_ir_below_bar", "replicate_strategy_error"} <= recorded
+    assert {"freeze_nominee_is_control", "max_drawdown_above_limit"} <= recorded
     labels = _reason_tokens()
     assert recorded <= labels, sorted(recorded - labels)
     outcomes = set(
@@ -479,7 +482,9 @@ def test_every_track_status_and_verdict_reason_has_a_console_label() -> None:
     assert len(reasons) == 4, reasons
     assert reasons <= keys("const VERDICT_REASON_LABELS = {"), sorted(reasons)
     assert keys("const VERDICT_STATUS = {") == {"observing", "confirmed", "killed"}
-    assert keys("const TRACK_LABELS = {") == {"graduated", "incubating"}
+    from autotrade.paper.book import TRACKS
+
+    assert keys("const TRACK_LABELS = {") == set(TRACKS)
 
 
 def test_a_criterion_that_names_a_threshold_words_it_from_the_record() -> None:
@@ -496,13 +501,11 @@ def test_a_criterion_that_names_a_threshold_words_it_from_the_record() -> None:
         # A missing threshold reads as the console's own dash, not as a default.
         assert "fmtPct(" in line or '?? "—"' in line, token
     assert "加倍" not in labels + _js_literal("const SLICE_ROWS = [", "\n];")
-    # The home card's tile and the best-experiment trophy name the confidence in
-    # plain text: the listing does not carry the block, and the constant is a
-    # pipeline one. They must still read as the constant the pipeline uses.
-    from autotrade.pipelines.verdict import FORWARD_CONFIDENCE
-
+    # No surface names the confidence in plain text: the lower bound's label is
+    # worded from the slice's own parameters (``forward_confidence``), so a
+    # change to the pipeline constant cannot leave a page quoting the old one.
     written = set(re.findall(r"(\d+)% 下界", APP_JS.read_text(encoding="utf-8")))
-    assert written == {f"{FORWARD_CONFIDENCE:.0%}"[:-1]}, sorted(written)
+    assert written == set(), sorted(written)
     # The freeze gate is worded the same way: its record carries both limits, so
     # raising either one cannot leave the checklist quoting the old number.
     gate = _js_function_body("freezeGateChecklist")
@@ -514,24 +517,23 @@ def test_a_criterion_that_names_a_threshold_words_it_from_the_record() -> None:
 def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) -> None:
     """The panels read the registry's arm projections by field name; a renamed
     field would render an empty cell instead of failing. Checked against a
-    projection of a synthetic arm that carries its verdict, judged on plain
-    selection over its seed replicates so the fields only such an arm has are
-    served too."""
+    projection of a synthetic arm that carries its readout, frozen with seed
+    replicates so the fields only such an arm has are served too."""
 
     from autotrade.pipelines.ledger import VERDICT_VOID_FIELDS
     from autotrade.webui.registry import experiment_detail
     from tests.unit.webui_research_arm import build_arm
 
-    build_arm(tmp_path, "arm", "graduated", seeded=True)
+    build_arm(tmp_path, "arm", "frozen_with_record", seeded=True)
     detail = experiment_detail(tmp_path, "arm")
     [research, replay] = detail["sessions"]
     assert (research["kind"], replay["kind"]) == ("research", "forward")
     frozen = set(detail["frozen"])
     record = set(research["record"])
-    # A recorded session's best (``registry.BestCandidate``, one shape for a
-    # running session's and a recorded one's).
-    best = set(research["record"]["best"])
     validation = set(research["record"]["validations"][0])
+    rolling = set(detail["record"])
+    rolling_row = set(detail["record"]["rows"][0])
+    readout = set(detail["forward"]["readout"])
     gate = set(research["record"]["freeze_gate"])
     forward = set(detail["forward"])
     slices = detail["forward"]["slices"]
@@ -562,31 +564,34 @@ def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) ->
     for name, read, served in (
         ("frozenPanel", reads("frozenPanel", "frozen"), frozen),
         ("researchSessionPanel", reads("researchSessionPanel", "record"), record),
-        ("bestCandidateTiles", reads("bestCandidateTiles", "best"), best),
-        ("evidenceTiles", reads("evidenceTiles", "best"), set(detail["research_best"])),
+        ("evidenceTiles", reads("evidenceTiles", "record"), rolling),
+        ("recordPanel", reads("recordPanel", "record"), rolling),
+        ("recordPanel", reads("recordPanel", "row"), rolling_row),
+        ("readoutBlock", reads("readoutBlock", "readout"), readout),
+        ("readoutBlock", reads("readoutBlock", "record"), set(detail["forward"]["readout"]["record"])),
+        ("readoutBlock", reads("readoutBlock", "forward"), set(detail["forward"]["readout"]["forward"])),
         ("accountTiles", reads("accountTiles", "raw"), set(slices["forward"]["raw_readings"])),
-        ("verdictStagePanel", reads("verdictStagePanel", "withdrawn"), set(VERDICT_VOID_FIELDS)),
+        ("readoutStagePanel", reads("readoutStagePanel", "withdrawn"), set(VERDICT_VOID_FIELDS)),
         ("researchSessionPanel", reads("researchSessionPanel", "row"), validation),
         ("freezeGateChecklist", reads("freezeGateChecklist", "gate"), gate),
         ("forwardStagePanel", reads("forwardStagePanel", "forward"), forward),
         ("replayContext", reads("replayContext", "forward"), forward),
-        ("verdictStagePanel", reads("verdictStagePanel", "forward"), forward),
+        ("readoutStagePanel", reads("readoutStagePanel", "forward"), forward),
         ("sliceStats", slice_labelled, set(slices["forward"]["parameters"])),
-        ("sealedCriterion", reads("sealedCriterion", "s"), set(detail["forward"]["sealed"])),
-        ("sealedWindowBlock", reads("sealedWindowBlock", "w"), set(detail["readouts"]["sealed_window"])),
-        ("sealedWindowBlock", reads("sealedWindowBlock", "row"), set(detail["readouts"]["sealed_window"]["readings"][0])),
+        ("validationWindowBlock", reads("validationWindowBlock", "w"), set(detail["readouts"]["validation_window"])),
+        ("validationWindowBlock", reads("validationWindowBlock", "row"), set(detail["readouts"]["validation_window"]["readings"][0])),
         ("forwardPoolBlock", reads("forwardPoolBlock", "p"), set(detail["readouts"]["forward_pool"])),
-        ("verdictStagePanel", reads("verdictStagePanel", "attempts"), set(detail["replay_attempts"])),
-        ("verdictStagePanel", reads("verdictStagePanel", "validations"), set(detail["research_validation_failures"])),
-        ("verdictStagePanel", reads("verdictStagePanel", "research"), record),
+        ("readoutStagePanel", reads("readoutStagePanel", "attempts"), set(detail["replay_attempts"])),
+        ("readoutStagePanel", reads("readoutStagePanel", "validations"), set(detail["research_validation_failures"])),
+        ("readoutStagePanel", reads("readoutStagePanel", "research"), record),
         ("replaySpanBar", reads("replaySpanBar", "replay"), set(replay["replay"])),
         ("armEquityHost", reads("armEquityHost", "item"), set(detail)),
-        ("stepper", set(re.findall(r'^  (\w+): "', _js_literal("const STEP_LABELS = {", "\n};"), re.MULTILINE)), {"research", "frozen", "forward", "heldout", "verdict"}),
+        ("stepper", set(re.findall(r'^  (\w+): "', _js_literal("const STEP_LABELS = {", "\n};"), re.MULTILINE)), {"research", "frozen", "forward", "heldout", "readout"}),
     ):
         assert read, name
         assert read <= served, (name, sorted(read - served))
     # The same threshold keys are served before the replay, from the plan.
-    assert set(replay["thresholds"]) == set(detail["forward"]["verdict"]["thresholds"])
+    assert {"alpha", "bar"} <= set(replay["thresholds"])
     # The stage views' statistics rows are statistics their own slice carries,
     # and every row defined is one a view selects: two rows (残差跟踪误差, IR)
     # sat in the table definition that neither stage ever drew.
@@ -604,12 +609,6 @@ def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) ->
     assert forward_rows <= slice_served["forward"]
     assert heldout_rows <= slice_served["heldout"]
     assert slice_rows == forward_rows | heldout_rows, sorted(slice_rows ^ (forward_rows | heldout_rows))
-    # Every criterion the verdict can fail is a line of its checklist.
-    from autotrade.pipelines.verdict import CONDITIONS
-
-    checked = set(re.findall(r'"(sealed_[a-z_]+)"', _js_function_body("sealedCriterion")))
-    checked |= set(re.findall(r'"([a-z]+_strategy_error)"', _js_function_body("validityCriteria")))
-    assert {condition.reason for condition in CONDITIONS if condition.code} == checked
     # The budget bars read the keys both the totals and the usage block carry.
     bars = set(re.findall(r'^  \["([a-z_]+)",', _js_literal("const BUDGET_ROWS = [", "\n];"), re.MULTILINE))
     assert bars and bars <= budget, sorted(bars - budget)

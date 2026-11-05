@@ -26,7 +26,6 @@ from autotrade.environment.llm import (
 )
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools import (
-    FinishSessionTool,
     ToolRegistry,
     ToolResult,
     ToolSpec,
@@ -38,6 +37,7 @@ from autotrade.pipelines.agent_inbox import (
     list_unconsumed_messages,
 )
 from autotrade.webui.traces import project_trace_blocks
+from tests.unit.terminal_tool import TerminalTool
 
 SESSION_A = "epoch_001/fold_2022Q2"
 SESSION_B = "epoch_001/fold_2022Q1"
@@ -94,7 +94,7 @@ class RecordingTool:
         return ToolResult(True, value={"name": self.spec.name})
 
 
-def _finish_tool(root: Path) -> tuple[FinishSessionTool, str]:
+def _finish_tool(root: Path) -> tuple[TerminalTool, str]:
     output = root / "output"
     output.mkdir(parents=True, exist_ok=True)
     (output / "main.py").write_text(
@@ -110,7 +110,7 @@ def _finish_tool(root: Path) -> tuple[FinishSessionTool, str]:
         revision_id=new_revision_id("revision"),
         metrics={"total_return": 0.01},
     )
-    return FinishSessionTool(tree, session_ref="session_ref_ab", registration=_passing_gate), node_id
+    return TerminalTool(tree, session_ref="session_ref_ab", registration=_passing_gate), node_id
 
 
 def _user_texts(messages: list[ChatMessage]) -> list[str]:
@@ -128,7 +128,7 @@ def test_before_llm_applies_guidance_without_system_or_manifest(tmp_path: Path) 
     llm = ScriptedLLM(
         [
             ProviderResponse(
-                tool_calls=(ToolCall("f", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
+                tool_calls=(ToolCall("f", "test", {"outcome": "freeze", "node_id": node_id}),)
             )
         ]
     )
@@ -171,11 +171,11 @@ def test_interrupt_after_llm_skips_unstarted_tools_with_pairing(tmp_path: Path) 
             ProviderResponse(
                 tool_calls=(
                     ToolCall("w", "write_file", {"path": "output/main.py"}),
-                    ToolCall("f", "finish_session", {"outcome": "freeze", "node_id": node_id}),
+                    ToolCall("f", "test", {"outcome": "freeze", "node_id": node_id}),
                 )
             ),
             ProviderResponse(
-                tool_calls=(ToolCall("done", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
+                tool_calls=(ToolCall("done", "test", {"outcome": "freeze", "node_id": node_id}),)
             ),
         ]
     )
@@ -199,7 +199,7 @@ def test_interrupt_after_llm_skips_unstarted_tools_with_pairing(tmp_path: Path) 
         assert payload["observation"] == "interrupted_by_user"
         assert payload["error"] == "interrupted_by_user"
     skipped = [payload for event, payload in events if event == "tool_skipped"]
-    assert [item["tool"] for item in skipped] == ["write_file", "finish_session"]
+    assert [item["tool"] for item in skipped] == ["write_file", "test"]
     assert all(item["reason"] == "interrupted_by_user" for item in skipped)
     assert all(item["safe_point"] == INBOX_SAFE_AFTER_LLM_BEFORE_TOOLS for item in skipped)
     user_events = [payload for event, payload in events if event == "user_message"]
@@ -234,11 +234,11 @@ def test_started_mutating_tool_is_not_killed(tmp_path: Path) -> None:
                 tool_calls=(
                     ToolCall("w", "write_file", {}),
                     ToolCall("g", "grep", {}),
-                    ToolCall("f", "finish_session", {"outcome": "freeze", "node_id": node_id}),
+                    ToolCall("f", "test", {"outcome": "freeze", "node_id": node_id}),
                 )
             ),
             ProviderResponse(
-                tool_calls=(ToolCall("done", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
+                tool_calls=(ToolCall("done", "test", {"outcome": "freeze", "node_id": node_id}),)
             ),
         ]
     )
@@ -263,7 +263,7 @@ def test_started_mutating_tool_is_not_killed(tmp_path: Path) -> None:
     assert by_id["g"]["error"] == "interrupted_by_user"
     assert by_id["f"]["ok"] is False
     skipped = [payload for event, payload in events if event == "tool_skipped"]
-    assert [item["tool"] for item in skipped] == ["grep", "finish_session"]
+    assert [item["tool"] for item in skipped] == ["grep", "test"]
     assert skipped[0]["safe_point"] == INBOX_SAFE_BETWEEN_SERIAL_TOOLS
 
 
@@ -282,7 +282,7 @@ def test_non_interrupt_after_llm_waits_for_tool_pairing(tmp_path: Path) -> None:
         [
             ProviderResponse(tool_calls=(ToolCall("g", "grep", {}),)),
             ProviderResponse(
-                tool_calls=(ToolCall("f", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
+                tool_calls=(ToolCall("f", "test", {"outcome": "freeze", "node_id": node_id}),)
             ),
         ]
     )
@@ -320,7 +320,7 @@ def test_after_parallel_readonly_applies_before_next_llm(tmp_path: Path) -> None
                 tool_calls=(ToolCall("a", "glob", {}), ToolCall("b", "grep", {}))
             ),
             ProviderResponse(
-                tool_calls=(ToolCall("f", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
+                tool_calls=(ToolCall("f", "test", {"outcome": "freeze", "node_id": node_id}),)
             ),
         ]
     )
@@ -364,7 +364,7 @@ def test_subagent_does_not_consume_inbox_until_parent_returns(tmp_path: Path) ->
                 )
             ),
             ProviderResponse(
-                tool_calls=(ToolCall("f", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
+                tool_calls=(ToolCall("f", "test", {"outcome": "freeze", "node_id": node_id}),)
             ),
         ]
     )
@@ -400,7 +400,7 @@ def test_session_inbox_hook_isolates_sessions_and_run_ids(tmp_path: Path) -> Non
     llm = ScriptedLLM(
         [
             ProviderResponse(
-                tool_calls=(ToolCall("f", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
+                tool_calls=(ToolCall("f", "test", {"outcome": "freeze", "node_id": node_id}),)
             )
         ]
     )

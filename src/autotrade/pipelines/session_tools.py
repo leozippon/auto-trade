@@ -1,8 +1,9 @@
 """The research session's Validation engine and the Agent-facing backtest tools.
 
-``SessionValidations`` holds the session's replay-year budget, its Step list and
-its step tree; ``smoke_backtest``, ``batch_validate`` and ``run_null_control``
-are the three tools a research session hands the Agent on top of it. Nothing
+``SessionValidations`` holds the session's Step list, its step tree and its
+rolling record; ``smoke_backtest``, ``validate``, ``test`` and
+``run_null_control`` are the replay tools a research session hands the Agent
+on top of it. Nothing
 here composes a session: ``research_session`` builds these tools and wires them
 into the Agent runner, so this module never imports it back.
 """
@@ -53,7 +54,6 @@ from autotrade.environment.tools.base import (
     ToolResult,
     ToolSpec,
 )
-from autotrade.environment.tools.finish_session import SessionBudgetStatus
 from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.environment.tools.node_reference import (
     NODE_REFERENCE_DESCRIPTION,
@@ -66,7 +66,7 @@ from autotrade.environment.tools.workspace import SafeWorkspace
 from autotrade.environment.trace import TraceEvent
 
 from .agent_views import NULL_CONTROL_KEYS, allowed_keys
-from .calendar import FULL_SPAN, yyyymmdd
+from .calendar import FULL_SPAN, anchor_on, yyyymmdd
 from .config import (
     BATCH_VALIDATE_MAX_CANDIDATES,
     BATCH_VALIDATE_MIN_CANDIDATES,
@@ -77,15 +77,25 @@ from .config import (
     EvaluationResult,
     ReplaySpan,
     ResearchSessionRequest,
+    SnapshotBundle,
     StepResult,
     research_span,
 )
 from .experiment import (
     freeze_registration,
     null_control_seed,
+    replay_and_analysis,
     research_step_record,
 )
 from .ledger import ExperimentLedger, Stage
+from .rolling_record import (
+    SOURCE_TEST,
+    ValidationSteps,
+    month_table,
+    record_instrument,
+    step_entry,
+    test_step_record,
+)
 from .session_resume import record_step_sidecar
 from .skills import _assert_skills_absent_from_formal
 from .verdict import (
@@ -109,20 +119,6 @@ def _step_analysis(step: StepResult) -> dict[str, object]:
     return read_json_object(result_dir / STYLE_ARTIFACT_NAME)
 
 
-def _active_excess_at_cost_stress(step: StepResult, multiplier: float) -> float | None:
-    """``verdict.summary_excess_at_cost_stress`` of one Validation over its
-    own span: the reading F5 takes of the frozen book forward; ``None``
-    where the span or the replay's costs are not measured."""
-
-    try:
-        statistics = graded_statistics(_step_analysis(step))
-    except ValueError:
-        return None
-    return summary_excess_at_cost_stress(
-        statistics, step.validation.summary, cost_stress_multiplier=multiplier
-    )
-
-
 def _public_error_text(exc: Exception) -> str:
     """The exact failure text with host paths redacted."""
     return redact_host_paths(safe_error_summary(exc))
@@ -136,7 +132,7 @@ def _public_validation_error(exc: Exception) -> str:
 # A strategy directory a replay tool takes: ``output`` itself -- the working
 # copy as it stands -- or a workspace directory laid out like it, such as
 # ``candidates/<name>``. The other workspace roots are the working copy's own
-# trees or not strategy trees at all. ``smoke_backtest`` and ``batch_validate``
+# trees or not strategy trees at all. ``smoke_backtest`` and ``validate``
 # resolve a path through :func:`strategy_directory` and give it the read-only
 # template through :func:`supply_readonly_files`, so a directory one accepts is
 # one the other accepts. Every replay is a snapshot verified against the bytes
@@ -215,8 +211,7 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
     object, same modification gate — only the window is short.
 
     It is deliberately NOT an evaluation: no revision is committed, no step-tree
-    node is written, nothing here can be selected at freeze time, and it does
-    not consume the session's replay-year budget.
+    node is written and nothing here can be tested or frozen.
 
     Like every other replay tool it pauses the session's thinking clock. A
     5-day rehearsal is dominated by the same full ``fit`` a Validation runs,
@@ -234,7 +229,7 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
     spec = ToolSpec(
         "smoke_backtest",
         "UNOFFICIAL smoke run of the CURRENT output/ -- or of the candidate "
-        "directory path names, given exactly as a batch_validate candidate's path "
+        "directory path names, given exactly as a validate candidate's path "
         "(path=\"candidates/value\"; same rules, and the read-only README.md is "
         "supplied the same way) -- over a few trading days of "
         "the research period, on the real replay path: real rolling "
@@ -261,7 +256,7 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
         "fit timeout in force, and GPU memory for a GPU strategy), and the exact "
         "exception text on failure. It commits no revision, creates no Step, "
         "cannot be frozen, and consumes no replay-years. Use it before "
-        "batch_validate instead of hand-writing a shell smoke test against "
+        "validate instead of hand-writing a shell smoke test against "
         "/mnt/snapshot.",
         {
             "type": "object",
@@ -380,7 +375,7 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
                 scratch / "models" if models_source is not None else None,
             )
             evaluation = self.evaluator.evaluate(
-                self.request.validation.request(
+                self.request.full_span.request(
                     revision, schedule=self.schedule, broker_profile=self.broker_profile
                 ),
                 max_days=days,
@@ -396,7 +391,6 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
                     "path": path,
                     "days_requested": days,
                     "official": False,
-                    "counts_against_replay_budget": False,
                     "error": _public_error_text(exc),
                     "hint": _SMOKE_LAYOUT_HINT,
                     **({"start": start} if start is not None else {}),
@@ -460,9 +454,9 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
     def _start(self, arguments: Mapping[str, object]) -> str | None:
         """The probe date, refused unless it is inside the research period.
 
-        The session may measure a fit anywhere in the period it researches, and
-        nowhere else: a date past research end would replay sealed data, and a
-        date before it has no slot.
+        The session may measure a fit anywhere in the research years, and
+        nowhere else: a date past them would replay data the frontier may not
+        have revealed, and a date before them has no slot.
         """
 
         raw = arguments.get("start")
@@ -474,10 +468,10 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
             day = yyyymmdd(raw)
         except ValueError as exc:
             raise ToolError(f"smoke_backtest start is not a date: {raw}") from exc
-        span = self.request.validation
+        span = self.request.full_span
         if not span.start <= day <= span.end:
             raise ToolError(
-                f"smoke_backtest start {day} is outside the research period "
+                f"smoke_backtest start {day} is outside the research years "
                 f"{span.start}..{span.end}"
             )
         return day
@@ -509,7 +503,6 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
         report: dict[str, object] = {
             "status": "ok",
             "official": False,
-            "counts_against_replay_budget": False,
             "days_requested": days,
             "replayed_trade_days": replayed,
             "decision_calls": summary.get("decision_calls"),
@@ -628,10 +621,9 @@ def manifest_backtest_stats(summary: Mapping[str, object]) -> dict[str, object]:
 
 # What a row's residual reading is, and is not.
 RESIDUAL_READING_NOTE = (
-    "the sealed gate's statistic over this row's own visible span: bar is "
+    "the residual statistic over this row's own span: bar is "
     "z(1 - alpha) / sqrt(years) for this span's length, the same formula the "
-    "sealed gate applies to the sealed years; a reading of the visible years, "
-    "not a verdict"
+    "rolling record is read with; a reading, not a verdict"
 )
 # A row whose bytes and span repeat an earlier node of the arm.
 SAME_BYTES_NOTE = (
@@ -644,12 +636,12 @@ SAME_BYTES_NOTE = (
 
 
 class SessionValidations:
-    """The research session's Validation engine: one budget, one Step list, one tree.
+    """The research session's Validation engine: one Step list, one tree, one
+    rolling record.
 
-    Not an Agent tool: ``batch_validate`` commits and replays every candidate
-    through it, so no Validation can overspend or bypass the ledger behind
-    another's back. The budget is counted in replay-years: a candidate costs
-    one per research year its span covers.
+    Not an Agent tool: ``validate`` commits and replays every candidate
+    through it, and ``test`` records every step through it, so neither can
+    bypass the ledger behind the other's back.
     """
 
     def __init__(
@@ -685,17 +677,57 @@ class SessionValidations:
         # experiment's step tree and its host-only sidecar, so an attempt that
         # dies keeps the nodes it validated for the attempt that resumes it.
         self.experiment_dir = experiment_dir
-        # Continued from the earlier attempts' spend and Validations, which the
-        # request reconciles: a resume never gets back the replay-years its
-        # recorded Validations already cost.
-        self.replay_years_used = request.replay_years_spent
+        # Continued from the earlier attempts' Validations and tests: the
+        # rolling record's steps so far, the frontier they imply, and how
+        # many validate calls the current interval has already made.
         self.steps: list[StepResult] = list(request.steps_before)
+        self.tests: list[dict[str, object]] = [dict(row) for row in request.tests_before]
+        self.steps_plan = ValidationSteps.of(
+            [request.validation], self.rules.test_step_months
+        )
+        self.test_replays = int(request.budget_used.test_replays)
+        self.validates_in_interval = _validates_since(
+            tree, self.tests[-1].get("recorded_at") if self.tests else None
+        )
         # Candidates reserved so far, which names each result.
         self.candidates_started = 0
 
     @property
-    def replay_years_remaining(self) -> int:
-        return max(self.request.max_replay_years - self.replay_years_used, 0)
+    def frontier(self) -> str:
+        """The last day the session may read: the end of the last tested step."""
+
+        return self.steps_plan.frontier_after(len(self.tests))
+
+    @property
+    def validates_per_step(self) -> int:
+        return self.rules.validates_per_step
+
+    def ledger_head(self) -> dict[str, object]:
+        """The link keys every ledger record of this session carries."""
+
+        return {
+            "experiment_id": self.request.experiment_id,
+            "epoch_id": Stage.RESEARCH,
+            "fold_id": self.request.session_key,
+            "run_id": self.request.run_id,
+            "session_key": self.request.session_key,
+        }
+
+    def record_row(self, record: Mapping[str, object]) -> dict[str, object]:
+        """One rolling-record step as a test result lists it: the step, its
+        window and frontier, the candidate by handle and its entry without
+        the daily rows."""
+
+        candidate = dict(record["candidate"])  # type: ignore[arg-type]
+        entry = {key: _rounded(value) if isinstance(value, float) else value for key, value in dict(record["entry"]).items() if key != "daily"}  # type: ignore[arg-type]
+        return {
+            "step": record["step"],
+            "window": dict(record["window"]),  # type: ignore[arg-type]
+            "frontier": record["frontier"],
+            "candidate": {"node_id": candidate["step_id"], **self.handle(str(candidate["step_id"]))},
+            "source": record["source"],
+            **entry,
+        }
 
     @property
     def session_ref(self) -> str:
@@ -714,14 +746,35 @@ class SessionValidations:
         return session_handles(self.tree, node_ids, session_ref=self.session_ref)
 
     def span(self, label: object) -> ReplaySpan:
-        """The research span ``label`` names, or a schema error naming the valid ones."""
+        """The span ``label`` names, or a schema error naming the valid ones.
+
+        A span may reach past the research years only as far as the frontier:
+        one whose first year the frontier has not entered is refused, and one
+        the frontier cuts is replayed to it (``validate`` passes
+        :attr:`frontier` as the evaluator's ``end_day``).
+        """
 
         try:
-            return research_span(self.request.research_years, str(label))
+            span = research_span(
+                self.request.years, str(label), research_years=self.rules.research_years
+            )
         except ValueError as exc:
             raise ToolError(
                 str(exc), error_type="schema_error", blocked_target="span"
             ) from exc
+        if span.start > self.frontier:
+            raise ToolError(
+                f"span {span.label} begins at {span.start}, after the frontier {self.frontier}: "
+                "the validation years are revealed one test at a time",
+                error_type="schema_error",
+                blocked_target="span",
+            )
+        return span
+
+    def span_end_day(self, span: ReplaySpan) -> str | None:
+        """Where the frontier cuts ``span``; None for a span inside it."""
+
+        return self.frontier if span.end > self.frontier else None
 
     def registration(
         self,
@@ -729,12 +782,12 @@ class SessionValidations:
         seed_replicates: Sequence[str] = (),
         deterministic: bool = False,
     ) -> dict[str, object]:
-        """Whether one Step of this session registers for a freeze, as the
-        Pipeline reads it (``experiment.freeze_registration``), with
-        ``seed_replicates`` the Steps it would register as its seed
-        replicates and ``deterministic`` its declaration that the package
-        uses no randomness. Registration only, never a score. A node that is
-        not a Step of this session does not register.
+        """Whether one Step of this session registers, as the Pipeline reads
+        it (``experiment.freeze_registration``), with ``seed_replicates`` the
+        Steps it would register as its seed replicates and ``deterministic``
+        its declaration that the package uses no randomness. Registration
+        only, never a score. A node that is not a Step of this session does
+        not register.
         """
 
         rows = {
@@ -759,14 +812,21 @@ class SessionValidations:
         return AcceptanceRules.from_record(self.request.acceptance_rules)
 
     def residual_reading(self, step: StepResult) -> dict[str, object]:
-        """The sealed gate's statistic over one row's own span.
+        """:meth:`residual_reading_of` one recorded Validation's replay."""
 
-        ``verdict.residual_reading`` of the row's graded series at the arm's
-        ``alpha``: the residual IR, the three betas and the bar for the
+        return self.residual_reading_of(_step_analysis(step), step.validation.summary)
+
+    def residual_reading_of(
+        self, analysis: Mapping[str, object], summary: Mapping[str, object]
+    ) -> dict[str, object]:
+        """The residual statistic over one replay's own span.
+
+        ``verdict.residual_reading`` of the replay's graded series at the
+        arm's ``alpha``: the residual IR, the three betas and the bar for the
         span's length, beside the active excess after the cost stress on the
         span's turnover (``verdict.summary_excess_at_cost_stress``, the
-        reading F5 takes forward). No pass or fail: the session reads the
-        same statistic the sealed gate grades, on its visible years only.
+        reading the forward stage takes too). No pass or fail: the session
+        reads the same statistic the rolling record is read with.
         ``unmeasured`` names why a span the statistic cannot read has none.
         """
 
@@ -774,15 +834,19 @@ class SessionValidations:
         try:
             reading: dict[str, object] = {
                 key: _rounded(value) if isinstance(value, float) else value
-                for key, value in residual_reading(_step_analysis(step), alpha=rules.alpha).items()
+                for key, value in residual_reading(analysis, alpha=rules.alpha).items()
             }
         except ValueError as exc:
             reading = {"unmeasured": str(exc)}
+        try:
+            stressed = summary_excess_at_cost_stress(
+                graded_statistics(analysis), summary, cost_stress_multiplier=rules.cost_stress_multiplier
+            )
+        except ValueError:
+            stressed = None
         return {
             **reading,
-            "active_excess_at_cost_stress": _rounded(
-                _active_excess_at_cost_stress(step, rules.cost_stress_multiplier)
-            ),
+            "active_excess_at_cost_stress": _rounded(stressed),
             "cost_stress_multiplier": rules.cost_stress_multiplier,
             "note": RESIDUAL_READING_NOTE,
         }
@@ -816,9 +880,9 @@ class SessionValidations:
             **held(),
             "active_market_beta": _rounded(loading),  # type: ignore[arg-type]
         }
-        years = self.request.research_years
+        years = self.request.years[: self.rules.research_years]
         first = max(len(years) - 2, 0)
-        span = research_span(years, step.span)
+        span = research_span(self.request.years, step.span, research_years=len(years))
         if span.start <= years[first].start and span.end >= years[-1].end:
             readings["last_two_years"] = {
                 "span": f"Y{first + 1}..Y{len(years)}" if first + 1 < len(years) else "Y1",
@@ -865,7 +929,7 @@ class SessionValidations:
 
         A tree position the Agent set with ``step_rollback`` is the deliberate
         branch point and wins; otherwise the working copy descends from the last
-        Validation the arm recorded, across attempts. ``batch_validate`` commits
+        Validation the arm recorded, across attempts. ``validate`` commits
         a whole round before it records any of it, so a round's revisions all
         resolve to the same parent and stay siblings. ``None`` before the arm's
         first Validation, and at a position the arm's own Validations do not
@@ -891,7 +955,7 @@ class SessionValidations:
         metadata: Mapping[str, object] | None = None,
     ) -> str:
         """Append one completed Validation to the step tree under the current
-        position; ``batch_validate`` repositions the tree before each record so
+        position; ``validate`` repositions the tree before each record so
         its candidates are siblings of one parent. ``fingerprint`` is the
         committed bytes' (:meth:`commit_revision`)."""
         node_id = self.tree.record_step(
@@ -939,65 +1003,42 @@ class SessionValidations:
             revision, schedule=self.schedule, broker_profile=self.broker_profile
         )
 
-    def reserve(self, count: int, span: ReplaySpan) -> list[str]:
-        """Claim the replay-years of ``count`` candidates on ``span`` and name their results.
+    def reserve(self, count: int) -> list[str]:
+        """Name the results of ``count`` candidates about to replay.
 
-        A batch claims every replay-year before it commits anything, so a batch
-        that does not fit is refused whole instead of half-run.
+        A name is never reused: the attempt is recorded under it whether the
+        replay completes, fails or never starts.
         """
-        cost = count * span.slots
-        remaining = self.replay_years_remaining
-        if cost > remaining:
-            raise ToolError(
-                "the replay-year budget is spent"
-                if remaining <= 0
-                else f"the replay-year budget has {remaining} left and this batch "
-                f"needs {cost} ({count} candidate(s) x {span.slots} year(s) of "
-                f"span {span.label})",
-                error_type="budget_exhausted",
-            )
         names = [
             f"valid_{self.candidates_started + offset + 1:03d}" for offset in range(count)
         ]
-        self.replay_years_used += cost
         self.candidates_started += count
         return names
 
-    def refund(self, count: int, span: ReplaySpan) -> None:
-        """Give back the replay-years of ``count`` candidates that measured nothing.
-
-        A replay-year buys evidence about a strategy. A replay that ended in an
-        environment failure -- a timeout, a shared card taken by another
-        process, a sandbox that never started -- produced none, so the budget it
-        claimed goes back. The result names it already spent stay spent: the
-        attempt is still recorded, and a name is never reused.
-        """
-        self.replay_years_used = max(0, self.replay_years_used - count * span.slots)
-
-    def release(self, count: int, span: ReplaySpan) -> None:
-        """Refund candidates whose snapshot never held (no replay ran)."""
-        self.refund(count, span)
+    def release(self, count: int) -> None:
+        """Give back the names of candidates whose snapshot never held (no replay ran)."""
         self.candidates_started = max(0, self.candidates_started - count)
-
-    def charge_replay_year(self) -> bool:
-        """Spend one replay-year on something that produced no Step.
-
-        The only caller is ``batch_validate``'s repeated-rejection breaker, and
-        it is the whole bounding mechanism there: a refused batch is otherwise
-        free, so the budget is the only clock a retry loop can run down. False
-        means the budget is already spent and there is nothing left to charge.
-        """
-
-        if self.replay_years_remaining <= 0:
-            return False
-        self.replay_years_used += 1
-        return True
 
     def check_deadline(self) -> None:
         try:
             self.time_budget.check()
         except TimeoutError as exc:
             raise TimeoutError("research session deadline exceeded") from exc
+
+
+def _validates_since(tree: StepTree, since: object) -> int:
+    """How many validate calls the step tree records after ``since`` (the last
+    test's ledger stamp; None counts every call): the distinct batch ids of
+    the nodes, complete and failed, created after it. A resumed attempt
+    continues the interval's count from here."""
+
+    batches = set()
+    for node in tree.nodes():
+        metadata = node.get("metadata")
+        batch = metadata.get("batch_id") if isinstance(metadata, Mapping) else None
+        if batch and (since is None or str(node.get("created_at") or "") > str(since)):
+            batches.add(str(batch))
+    return len(batches)
 
 
 def recorded_step(
@@ -1024,7 +1065,7 @@ def recorded_step(
     )
 
 
-# ``batch_validate``'s candidate range and replay width live with the arm's
+# ``validate``'s candidate range and replay width live with the arm's
 # other budgets (``config.BATCH_VALIDATE_MAX_CANDIDATES``,
 # ``RollingExperimentConfig.batch_validate_max_concurrency``).
 BATCH_NAME_MAX_CHARS = 40
@@ -1033,47 +1074,42 @@ BATCH_NAME_MAX_CHARS = 40
 # every other Agent-written justification, by what one such statement needs
 # rather than by what one line is.
 BATCH_HYPOTHESIS_MAX_CHARS = AGENT_JUSTIFICATION_MAX_CHARS
-# Repeated identical rejections. A refused batch is free by design — nothing is
-# committed and no slot is spent — which is also why nothing bounded the retry
-# loop: one audited session spent 3.89 h of 10.17 h on 128 consecutive
-# rejections carrying the same error, 393 parent LLM calls apart. A rejection is
-# counted per session by its signature (error type plus the target it names,
-# never the message text, which carries digests and so changes with the file);
-# the third identical one says so and names the recovery for that signature, and
-# from the seventh on each identical attempt consumes one replay-year, so the
-# loop is bounded by the session's replay budget instead of by nothing.
+# Repeated identical rejections. A refused batch is free by design -- nothing
+# is committed and no interval call is spent -- so one audited session spent
+# 3.89 h of 10.17 h on 128 consecutive rejections carrying the same error, 393
+# parent LLM calls apart. A rejection is counted per session by its signature
+# (error type plus the target it names, never the message text, which carries
+# digests and so changes with the file); the third identical one says so and
+# names the recovery for that signature. The model-call and time budgets bound
+# the loop.
 BATCH_REJECTION_ESCALATE_AT = 3
-BATCH_REJECTION_CHARGE_AFTER = 6
-# What a failed candidate's replay measured, which decides whether its
-# replay-years bought anything. ``StrategyRaised`` (``environment.executor``,
-# read off the whole cause chain by ``raised_by_strategy``) is the strategy's
-# own failure -- its code raised, or (``StrategyMemoryExceeded``) its container
-# was killed at the published memory cap: the replay measured the strategy --
-# it cannot run on this data -- and the charge stands. Every other failure
-# measured the host: a strategy clock that ran out, a shared card another
-# process took, a sandbox that never started or broke protocol. That produced
-# no evidence about the candidate, so the batch gives its replay-years back
-# instead of charging research budget for the environment's own trouble.
+# What a failed candidate's replay measured. ``StrategyRaised``
+# (``environment.executor``, read off the whole cause chain by
+# ``raised_by_strategy``) is the strategy's own failure -- its code raised, or
+# (``StrategyMemoryExceeded``) its container was killed at the published memory
+# cap: the replay measured the strategy -- it cannot run on this data. Every
+# other failure measured the host: a strategy clock that ran out, a shared card
+# another process took, a sandbox that never started or broke protocol. That
+# produced no evidence about the candidate.
 BATCH_FAILURE_STRATEGY = "strategy"
 BATCH_FAILURE_ENVIRONMENT = "environment"
-# A span the host cannot replay. The refund makes a batch that failed on the
-# environment free to resend, which is right for a transient fault (a clock
-# lost to load, a card another process took) and leaves nothing to stop the
-# loop when the host fails the span every time: in round 20261015 every replay
-# crossing 2022-07-01 failed in the host's as-of merge, and two arms resent 6
-# and 4 such batches (2.1 h and 1.5 h of wall time) and ended ``no_edge``,
-# although nothing past that date had been tested.
-# A batch in which every candidate failed on the environment measured nothing;
-# the second such batch on the same span in one attempt ends the session
-# (outcome ``environment_blocked``). A batch in which any candidate completed or
-# raised in its own code proved the span runs, and does not count.
+# A span the host cannot replay. A batch that failed on the environment is free
+# to resend, which is right for a transient fault (a clock lost to load, a card
+# another process took) and leaves nothing to stop the loop when the host
+# fails the span every time: in round 20261015 every replay crossing
+# 2022-07-01 failed in the host's as-of merge, and two arms resent 6 and 4 such
+# batches (2.1 h and 1.5 h of wall time), although nothing past that date had
+# been tested. A batch in which every candidate failed on the environment
+# measured nothing; the second such batch on the same span in one attempt ends
+# the attempt (``EnvironmentBlocked``). A batch in which any candidate
+# completed or raised in its own code proved the span runs, and does not count.
 ENVIRONMENT_BLOCKED_BATCHES = 2
 
 
 class EnvironmentBlocked(SessionInterrupt):
     """The host failed every candidate of ``ENVIRONMENT_BLOCKED_BATCHES``
-    batches on one span: the research session ends here with outcome
-    ``environment_blocked`` and ``reason`` as the arm's ending reason."""
+    batches on one span: the attempt ends here with outcome
+    ``environment_blocked`` and ``reason`` as its ending reason."""
 
     def __init__(self, reason: str) -> None:
         super().__init__(f"environment_blocked: {reason}")
@@ -1324,7 +1360,7 @@ class _BatchCandidate:
     control: bool
 
 
-class BatchValidateTool(SessionTimeBudgetAware):
+class ValidateTool(SessionTimeBudgetAware):
     """The one Validation tool: pre-registered candidates as sibling Steps.
 
     Every candidate gets its own ``modification_check``, its own immutable
@@ -1334,58 +1370,57 @@ class BatchValidateTool(SessionTimeBudgetAware):
     hypothesis is registered before any result exists, at every width from one
     to six.
 
-    Selection is never automatic: the Agent reads the table and nominates a
-    winner with ``finish_session``.
+    Selection is never automatic: the Agent reads the table and tests a
+    candidate with ``test``.
     """
 
     spec = ToolSpec(
-        "batch_validate",
+        "validate",
         "Replay "
         f"{BATCH_VALIDATE_MIN_CANDIDATES}-{BATCH_VALIDATE_MAX_CANDIDATES} "
-        "PRE-REGISTERED candidates over one span of the visible research period in "
-        "one call; this is the only way to create a selectable node. span is full "
-        "(the whole visible research period, the default), one research year such "
+        "PRE-REGISTERED candidates over one span of the years the frontier has "
+        "revealed, in one call; this is the only way to create a node that test "
+        "can take. span is full (the research years, the default), one year such "
         "as Y2, or contiguous years such as Y2..Y4, as the research_geometry fact "
-        "lists them; the sealed years are never a span; "
-        "each span is replayed as one continuous book from the decision view at "
-        "its first year. Each candidate is {name, hypothesis, path, control}, as their "
+        "lists them; a span may name a validation year only once the frontier has "
+        "entered it, and is then replayed up to the frontier; each span is replayed "
+        "as one continuous book from the decision view at its first year. Calls are "
+        "counted per interval: at most acceptance_rules.validation.validates_per_step "
+        "before the first test and between two tests, after which the next call is "
+        "refused until a test advances the frontier. Each candidate is {name, "
+        "hypothesis, path, control}, as their "
         "parameters define them: path is a "
         "workspace directory laid out like output/ (main.py plus its sibling "
         "modules; the read-only template files such as README.md are supplied for "
         "you; models/ is shared with the working copy), or output itself to "
         "validate the working copy as it stands; build such a directory by copying "
         "output/, the code you have been editing, not refs/, which only holds the "
-        "pack this arm started from. The batch costs one "
-        "replay-year per candidate per year of the span, reserved before anything "
-        "runs; a candidate whose replay completes becomes its own immutable "
+        "pack this arm started from. A candidate whose replay completes becomes its own immutable "
         "revision and Step node under the CURRENT node as shared parent, recorded "
         "with its span. A candidate whose replay fails has no result_ref and, while "
         "record_failed_attempts is on, is recorded as a dead-end node, so later "
         "sessions see what was already tried; its row says which kind of failure it "
         "was: cause strategy means your own code raised or the strategy container "
         "was killed at its memory cap (budgets.strategy_memory_bytes; exit 137, no "
-        "peak reading), so the replay measured the strategy and keeps its "
-        "replay-years, while cause environment means the host "
-        "failed it (a strategy clock that ran out, a shared GPU taken by another "
-        "process, a sandbox that never started or broke protocol), which measured "
-        "nothing and gets its replay-years back, so resubmitting that candidate "
-        "unchanged is a reasonable move. The returned "
-        "replay_years_used/replay_years_remaining are the authoritative counters. "
-        "The whole batch is refused before anything runs if the span is not one of "
-        "the research years, if it does not fit the budget, if two candidates are "
-        "byte-identical, or if one fails modification_check. A refusal is free the "
-        "first times, but the same refusal repeated is not: the third identical one "
-        "states the recovery for it, and from the "
-        f"{BATCH_REJECTION_CHARGE_AFTER + 1}th on each identical attempt consumes "
-        "one replay-year, so fix what the error names instead of calling again "
-        "unchanged. The call waits briefly for background sub-agents that can "
+        "peak reading), so the replay measured the strategy, while cause environment "
+        "means the host failed it (a strategy clock that ran out, a shared GPU taken "
+        "by another process, a sandbox that never started or broke protocol), which "
+        "measured nothing, so resubmitting that candidate unchanged is a reasonable "
+        "move. The returned validates_in_step/validates_per_step are the interval's "
+        "counters. The whole batch is refused before anything runs if the span names "
+        "a year the frontier has not reached, if the interval's calls are used up, "
+        "if two candidates are byte-identical, or if one fails modification_check; "
+        "a refused batch is not counted. The same refusal repeated is answered the "
+        "same way: the third identical one states the recovery for it, so fix what "
+        "the error names instead of calling again unchanged. The call waits briefly "
+        "for background sub-agents that can "
         "write and is refused while one is still running; read-only audits keep "
         "running while the candidates replay concurrently. Returns one row per "
         "candidate: node id with its short handle (valid_002, which every tool "
         "taking a node_id accepts), headline metrics, the per-year return, "
         "benchmark_return, panel_return (the zero-skill panel's own), excess, "
-        "active excess and Sharpe of sub_windows, residual_reading (the sealed "
-        "gate's statistic over the row's own span, as acceptance_rules.sealed_gate "
+        "active excess and Sharpe of sub_windows, residual_reading (the residual "
+        "statistic over the row's own span, as acceptance_rules.residual_statistic "
         "defines it: residual_information_ratio, residual_excess, "
         "residual_tracking_error, market_beta, size_beta and value_beta of the "
         "active series regressed on the market, size and value legs, days and "
@@ -1430,9 +1465,8 @@ class BatchValidateTool(SessionTimeBudgetAware):
         "value_factor_return (the three legs residual_reading regresses it on); "
         "the annualised mean of active_return over its annualised volatility is "
         "the active IR. "
-        "Selection stays yours: finish_session nominates a row as it "
-        "is, and step_rollback(node_id) restores one as the working copy to build "
-        "on.",
+        "Selection stays yours: test takes a row as it is, and "
+        "step_rollback(node_id) restores one as the working copy to build on.",
         {
             "type": "object",
             "properties": {
@@ -1441,9 +1475,9 @@ class BatchValidateTool(SessionTimeBudgetAware):
                     "minLength": 1,
                     "maxLength": 20,
                     "description": (
-                        "full (default: every visible research year), one research "
-                        "year Yk, or contiguous years Yi..Yj. Iterate on years; a "
-                        "freeze needs a full-span validation."
+                        "full (default: the research years), one year Yk, or "
+                        "contiguous years Yi..Yj up to the frontier. Iterate on "
+                        "years; test takes a full-span validation."
                     ),
                 },
                 "candidates": {
@@ -1552,7 +1586,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
         # A host condition, not the Agent's input: refused before anything is
         # reserved and outside the repeated-rejection counter, so it is never
         # charged however often it repeats.
-        self.workspace.require_free_space("batch_validate")
+        self.workspace.require_free_space("validate")
         with self.backtest.time_budget.pause():
             return self._invoke_exempt(arguments)
 
@@ -1561,6 +1595,18 @@ class BatchValidateTool(SessionTimeBudgetAware):
         # replay-year is spent, so a rejected batch costs nothing and the Agent
         # can fix the offending input and call again. Because it costs nothing,
         # the same rejection can also repeat forever: ``_rejected`` counts it.
+        if self.backtest.validates_in_interval >= self.backtest.validates_per_step:
+            raise ToolError(
+                f"validate refused: acceptance_rules.validation.validates_per_step allows "
+                f"{self.backtest.validates_per_step} validate call(s) before the first test and "
+                f"between two tests, and this interval has made {self.backtest.validates_in_interval}; "
+                "0 remain until a test advances the frontier",
+                error_type="validates_per_step_exhausted",
+                details={
+                    "validates_in_step": self.backtest.validates_in_interval,
+                    "validates_per_step": self.backtest.validates_per_step,
+                },
+            )
         try:
             span = self.backtest.span(arguments.get("span", FULL_SPAN))
             candidates = self._parse(arguments)
@@ -1577,29 +1623,25 @@ class BatchValidateTool(SessionTimeBudgetAware):
             if escalated is exc:
                 raise
             raise escalated from exc
-        result_names = self.backtest.reserve(len(candidates), span)
+        result_names = self.backtest.reserve(len(candidates))
         batch_id = uuid.uuid4().hex[:12]
         parent_node_id = self.backtest.tree.current_node_id
         revisions = self._commit(candidates, checks, span)
+        # Counted once the batch runs: a refusal above costs nothing.
+        self.backtest.validates_in_interval += 1
         outcomes = self._replay(revisions, span)
-        # The one place the batch settles its reservation. Every candidate was
-        # charged before anything ran; those whose replay measured the host and
-        # not the strategy bought no evidence, so their claim goes back here,
-        # before anything is recorded (a recording that fails cannot keep a
-        # charge that bought nothing) and before this call's result and its
-        # budget block reach the trace.
+        # How many candidates the host, not the strategy, failed: measured
+        # nothing, so the row says the candidate may be resent unchanged.
         refunded = sum(
             1
             for replayed in outcomes
             if replayed.evaluation is None
             and _failure_cause(replayed.error) == BATCH_FAILURE_ENVIRONMENT
         )
-        if refunded:
-            self.backtest.refund(refunded, span)
-        # A batch does not re-check the deadline here: every replay is already
-        # paid for, and dropping N completed Validations because the clock ran
-        # out during them would destroy real evidence. The session deadline is
-        # enforced at the next dispatch and LLM call.
+        # A batch does not re-check the deadline here: dropping N completed
+        # Validations because the clock ran out during them would destroy real
+        # evidence. The session deadline is enforced at the next dispatch and
+        # LLM call.
         rows: list[dict[str, object]] = []
         recorded: list[tuple[dict[str, object], StepResult]] = []
         try:
@@ -1625,6 +1667,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
                     "control": candidate.control,
                     "source_path": candidate.path,
                     "span": span.label,
+                    **({"end": end_day} if (end_day := self.backtest.span_end_day(span)) else {}),
                 }
                 if evaluation is None:
                     shared = (
@@ -1666,17 +1709,11 @@ class BatchValidateTool(SessionTimeBudgetAware):
             if refunded == len(rows):
                 self._environment_blocked(span, rows)
             raise ToolError(
-                f"batch_validate: all {len(rows)} candidates failed their "
-                f"Validation; {charged} of them raised in their own code and "
-                f"kept the replay-years, {refunded} failed on the environment "
-                "and got them back. No Validation was recorded",
+                f"validate: all {len(rows)} candidates failed their "
+                f"Validation; {charged} of them raised in their own code, "
+                f"{refunded} failed on the environment. No Validation was recorded",
                 error_type="validation_failed",
-                details={
-                    "batch_id": batch_id,
-                    "candidates": rows,
-                    "replay_years_used": self.backtest.replay_years_used,
-                    "replay_years_remaining": self.backtest.replay_years_remaining,
-                },
+                details={"batch_id": batch_id, "candidates": rows},
             )
         return ToolResult(
             True,
@@ -1689,20 +1726,15 @@ class BatchValidateTool(SessionTimeBudgetAware):
                 "span": {
                     "label": span.label,
                     "start": span.start,
-                    "end": span.end,
+                    "end": self.backtest.span_end_day(span) or span.end,
                     "years": span.slots,
                 },
                 "candidates": rows,
                 "complete_validations": len(recorded),
                 "failed": len(rows) - len(recorded),
-                "replay_years_used": self.backtest.replay_years_used,
-                "replay_years_remaining": self.backtest.replay_years_remaining,
                 "result_root": STEP_TREE_SEARCH_ROOT,
-                **(
-                    {"budget_spent": BUDGET_SPENT_NOTE}
-                    if self.backtest.replay_years_remaining < 1
-                    else {}
-                ),
+                "validates_in_step": self.backtest.validates_in_interval,
+                "validates_per_step": self.backtest.validates_per_step,
             },
         )
 
@@ -1723,7 +1755,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
         if self._trace_emit is not None:
             self._trace_emit(
                 TraceEvent.ENVIRONMENT_BLOCKED,
-                {"tool": "batch_validate", "span": span.label, "batches": count, "reason": reason},
+                {"tool": "validate", "span": span.label, "batches": count, "reason": reason},
             )
         raise EnvironmentBlocked(reason)
 
@@ -1733,7 +1765,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
         raw = arguments.get("candidates")
         if not isinstance(raw, list):
             raise ToolError(
-                "batch_validate candidates must be an array",
+                "validate candidates must be an array",
                 error_type="schema_error",
             )
         if not (
@@ -1742,7 +1774,7 @@ class BatchValidateTool(SessionTimeBudgetAware):
             <= BATCH_VALIDATE_MAX_CANDIDATES
         ):
             raise ToolError(
-                f"batch_validate takes {BATCH_VALIDATE_MIN_CANDIDATES} to "
+                f"validate takes {BATCH_VALIDATE_MIN_CANDIDATES} to "
                 f"{BATCH_VALIDATE_MAX_CANDIDATES} candidates, got {len(raw)}",
                 error_type="schema_error",
             )
@@ -1847,51 +1879,23 @@ class BatchValidateTool(SessionTimeBudgetAware):
         self._rejections[signature] = count
         if count < BATCH_REJECTION_ESCALATE_AT:
             return exc
-        charged = (
-            self.backtest.charge_replay_year()
-            if count > BATCH_REJECTION_CHARGE_AFTER
-            else False
-        )
-        remaining = self.backtest.replay_years_remaining
-        if count > BATCH_REJECTION_CHARGE_AFTER:
-            cost = (
-                f"This attempt consumed one replay-year ({remaining} left); "
-                "so does every further identical one."
-                if charged
-                else "The replay-year budget is already spent; nothing is left "
-                "to charge and no further batch can run."
-            )
-        else:
-            cost = (
-                f"From the {BATCH_REJECTION_CHARGE_AFTER + 1}th identical "
-                "attempt on, each one consumes a replay-year."
-            )
         recovery = _rejection_recovery(exc.error_type)
         message = (
-            f"{exc}\n[repeated rejection] batch_validate has now refused this "
+            f"{exc}\n[repeated rejection] validate has now refused this "
             f"exact rejection {count} times; calling it again unchanged returns "
-            f"the same refusal. {recovery} {cost}"
+            f"the same refusal. {recovery}"
         )
         if self._trace_emit is not None:
             self._trace_emit(
                 TraceEvent.BATCH_REJECTION_ESCALATED,
                 {
-                    "tool": "batch_validate",
+                    "tool": "validate",
                     "error_type": exc.error_type,
                     "blocked_target": signature[1],
                     "repeat_count": count,
-                    "charged_replay_year": charged,
-                    "replay_years_used": self.backtest.replay_years_used,
                 },
             )
-        details = dict(exc.details)
-        details.update(
-            {
-                "repeat_count": count,
-                "charged_replay_year": charged,
-                "replay_years_remaining": remaining,
-            }
-        )
+        details = {**exc.details, "repeat_count": count}
         return ToolError(
             message,
             error_type=exc.error_type,
@@ -1923,10 +1927,10 @@ class BatchValidateTool(SessionTimeBudgetAware):
             raise
         except Exception as exc:
             # No replay ran, so the batch is infrastructure, not a Validation:
-            # every revision and every reserved replay-year goes back.
+            # every revision and every reserved name goes back.
             for revision in revisions:
                 self.backtest.artifact_store.discard_revision(revision.revision_id)
-            self.backtest.release(len(candidates), span)
+            self.backtest.release(len(candidates))
             public_error = _public_error_text(exc)
             # Recorded as what it was: every attempt reaches the run manifest.
             self.backtest.append_manifest_summary(
@@ -1939,13 +1943,13 @@ class BatchValidateTool(SessionTimeBudgetAware):
                 }
             )
             raise ToolError(
-                "batch_validate could not start: " + public_error,
+                "validate could not start: " + public_error,
                 error_type="infrastructure_error",
                 retry_hint=(
                     "A candidate directory was still being written when its "
                     "snapshot was taken and nothing ran; no budget was "
                     "consumed. Let any in-container job finish, then call "
-                    "batch_validate again."
+                    "validate again."
                 ),
             ) from exc
         return revisions
@@ -1980,9 +1984,14 @@ class BatchValidateTool(SessionTimeBudgetAware):
             request = self.backtest.validation_request(revisions[index], span)
             if card is not None:
                 request = replace(request, gpu_devices=(card,))
+            end_day = self.backtest.span_end_day(span)
             started = time.perf_counter()
             try:
-                evaluation = self.backtest.evaluator.evaluate(request)
+                evaluation = (
+                    self.backtest.evaluator.evaluate(request, end_day=end_day)
+                    if end_day is not None
+                    else self.backtest.evaluator.evaluate(request)
+                )
             except SessionInterrupt:
                 raise
             except Exception as exc:  # noqa: BLE001 - the text IS this row's result
@@ -2148,28 +2157,264 @@ class BatchValidateTool(SessionTimeBudgetAware):
         return row
 
 
-# What a batch result says beyond its rows, and only once no batch fits the
-# replay-year budget: the next call cannot be another batch. Which row to build
-# on or nominate is the Agent's reading; the host ranks none.
-BUDGET_SPENT_NOTE = (
-    "The replay-year budget is spent, so no further batch can run: finish_session, "
-    "with the arm's conclusion in its reason."
+TEST_DESCRIPTION = (
+    "Advance the validation period by one step with candidate: a complete full-span "
+    "validate node of this session (full id or short handle). The candidate must "
+    "register: not a control, finite metrics, equity drawdown within acceptance_rules' "
+    "limit and, when its main.py defines fit, at least one seed replicate in "
+    "seed_replicates (another full-span node of this session whose bytes differ from "
+    "the candidate's in exactly one integer seed assignment, e.g. SEED_BASE = 1000 -> "
+    "2000), unless deterministic=true declares that the package uses no randomness, "
+    "which is recorded for the operator. Registration reads no performance; a "
+    "candidate that does not register is refused with named reasons and the frontier "
+    "does not move. A registered candidate is replayed with its random panel as one "
+    "fresh continuous book from the validation start to the end of the next step; "
+    "nothing carries over from earlier tests, so switching candidates costs only this "
+    "replay. Its result over the newest step becomes that step's entry in the arm's "
+    "rolling record and is never rewritten. The step always runs to completion; a "
+    "candidate whose own code raises during the replay is refused with the error and "
+    "the frontier does not move. Then the frontier advances: the session container "
+    "restarts on the decision view at the new frontier with the same workspace, and "
+    "the validate allowance starts again. Returns: the new frontier and the steps left; "
+    "the candidate's whole-replay statistics (stats, raw_readings and residual_reading "
+    "as a validate row carries them); months, a per-month table from the validation "
+    "start to the frontier (return, max_drawdown, turnover, fees, active_return against "
+    "the panel, index_return); record, the record to date, one row per step with the "
+    "candidate that produced it; and instrument, the record's residual information "
+    "ratio of the stitched daily active series on the market, size and value legs, the "
+    "betas, the one-sided p_value and the bar for the record's current length. These "
+    "are readings, never a pass or a fail. When this call tests the last step, the "
+    "session ends and this candidate is the frozen strategy. The call starts only "
+    "after every background sub-agent has finished."
 )
 
 
-def session_budget_status(backtest: SessionValidations) -> SessionBudgetStatus:
-    """What this session still has when ``finish_session`` is called: the
-    replay-years and the main window's inference time, the grace reserve
-    behind the deadline being wrap-up time, not budget left unused."""
+class TestTool(SessionTimeBudgetAware):
+    """``test(candidate)``: one step of the validation period, lived through.
 
-    request = backtest.request
-    return SessionBudgetStatus(
-        replay_years_remaining=backtest.replay_years_remaining,
-        replay_years_total=request.max_replay_years,
-        inference_seconds_remaining=(
-            backtest.time_budget.remaining() - request.deadline_grace_seconds
-        ),
+    The session's only way forward and the only way it ends: the frontier
+    advances one step per call, the step's entry is appended to the arm's
+    rolling record in the ledger as the call completes, and the call that
+    tests the last step finishes the session with its candidate as the frozen
+    strategy. Nothing here ranks or selects: the agent chooses the candidate,
+    the host replays and records.
+    """
+
+    spec = ToolSpec(
+        "test",
+        TEST_DESCRIPTION,
+        {
+            "type": "object",
+            "properties": {
+                "candidate": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500,
+                    "description": NODE_REFERENCE_DESCRIPTION,
+                },
+                "seed_replicates": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1, "maxLength": 500},
+                    "description": (
+                        "The candidate's seed replicates as acceptance_rules.registration."
+                        "seed_replicates defines them, each a node id or short handle of this "
+                        "session; required (at least one) when the candidate's main.py defines "
+                        "fit, unless deterministic is true."
+                    ),
+                },
+                "deterministic": {
+                    "type": "boolean",
+                    "description": (
+                        "true declares that the candidate's package uses no randomness at all, "
+                        "so seed replicates would reproduce it exactly; registration then asks "
+                        "for none, and the declaration is recorded in the ledger for the "
+                        "operator's review. Default false."
+                    ),
+                },
+            },
+            "required": ["candidate"],
+            "additionalProperties": False,
+        },
+        mutating=True,
+        example={"candidate": NODE_REFERENCE_EXAMPLE},
     )
+
+    def __init__(
+        self,
+        backtest: SessionValidations,
+        *,
+        advance_view: Callable[[SnapshotBundle, str], None],
+        trace_emit: Callable[[TraceEvent, dict[str, object]], object] | None = None,
+    ) -> None:
+        self.backtest = backtest
+        self._advance_view = advance_view
+        self._trace_emit = trace_emit
+        # Consecutive test replays the host, not the strategy, failed: the
+        # second ends the attempt, as ``validate`` does for one span.
+        self._environment_failed = 0
+
+    @property
+    def session_time_budget(self) -> InferenceTimeBudget:
+        return self.backtest.time_budget
+
+    def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
+        self.backtest.check_deadline()
+        backtest = self.backtest
+        candidates = [item.step_id for item in backtest.steps]
+        node_id = session_node_reference(
+            "test", backtest.tree, str(arguments.get("candidate") or ""),
+            session_ref=backtest.session_ref, offered=candidates,
+        )
+        replicates = tuple(
+            session_node_reference(
+                "test", backtest.tree, str(item), session_ref=backtest.session_ref, offered=candidates
+            )
+            for item in arguments.get("seed_replicates") or ()  # type: ignore[union-attr]
+        )
+        deterministic = arguments.get("deterministic") is True
+        registration = dict(backtest.registration(node_id, replicates, deterministic))
+        if not registration.get("passed"):
+            reasons = [str(item) for item in registration.get("reasons") or ()]
+            raise ToolError(
+                f"test refused: {backtest.named([node_id])[0]} does not register "
+                f"({', '.join(reasons) or 'no reason recorded'}); the frontier did not move. "
+                "Name a node that registers, or validate what registration lacks (a full-span "
+                "validation, a seed replicate). A seed replicate is what "
+                "acceptance_rules.registration.seed_replicates defines.",
+                error_type="test_registration_refused",
+                details={
+                    "registration": {
+                        "passed": False,
+                        "reasons": reasons,
+                        **({"seed_replicates": registration["seed_replicates"]} if "seed_replicates" in registration else {}),
+                    }
+                },
+            )
+        steps = backtest.steps_plan
+        step = len(backtest.tests) + 1
+        if step > steps.count:
+            raise ToolError("test refused: the validation period is complete", error_type="validation_complete")
+        frontier = steps.frontier_after(step)
+        candidate = next(item for item in backtest.steps if item.step_id == node_id)
+        with backtest.time_budget.pause():
+            # The view the session mounts next must exist before the replay
+            # runs, and so must the warm start the replay opens on: a seed
+            # that lacks either ends the attempt by name.
+            try:
+                bundle = backtest.request.decision_view_at(anchor_on(frontier))
+                require_warm = getattr(backtest.evaluator, "require_warm_start", None)
+                request = backtest.validation_request(
+                    backtest.artifact_store.revision(candidate.revision_id),
+                    backtest.request.validation,
+                )
+                if callable(require_warm):
+                    require_warm(request)
+            except (FileNotFoundError, RuntimeError) as exc:
+                raise EnvironmentBlocked(f"test step {step}: {_public_error_text(exc)}") from exc
+            started = time.perf_counter()
+            try:
+                evaluation = backtest.evaluator.evaluate(request, end_day=frontier)
+            except SessionInterrupt:
+                raise
+            except Exception as exc:
+                backtest.test_replays += 1
+                cause = _failure_cause(exc)
+                if cause == BATCH_FAILURE_ENVIRONMENT:
+                    self._environment_failed += 1
+                    if self._environment_failed >= ENVIRONMENT_BLOCKED_BATCHES:
+                        raise EnvironmentBlocked(
+                            f"test step {step}: {self._environment_failed} replays failed on the "
+                            f"environment; last error: {_public_error_text(exc)}"
+                        ) from exc
+                raise ToolError(
+                    f"test step {step} did not complete; the frontier did not move. "
+                    + (
+                        "The candidate's own code raised on the validation data: "
+                        if cause == BATCH_FAILURE_STRATEGY
+                        else "The host failed the replay (cause environment), so the same "
+                        "call may be resent unchanged: "
+                    )
+                    + _public_error_text(exc),
+                    error_type="test_replay_failed",
+                    details={"cause": cause, **batch_candidate_resources(strategy_resources_of(exc))},
+                ) from exc
+            self._environment_failed = 0
+            backtest.test_replays += 1
+            replay, analysis = replay_and_analysis(evaluation.result_ref)
+            window = steps.window(step)
+            entry = step_entry(replay, analysis, start=window[0], end=window[1])
+            record = test_step_record(
+                head=backtest.ledger_head(),
+                steps=steps,
+                step=step,
+                candidate={
+                    "step_id": node_id,
+                    "revision_id": candidate.revision_id,
+                    "fingerprint": candidate.fingerprint,
+                    "seed_replicates": list(replicates),
+                    "deterministic": deterministic,
+                },
+                replay={"start": steps.start, "end": frontier, "result_ref": evaluation.result_ref},
+                entry=entry,
+                registration=registration,
+                source=SOURCE_TEST,
+            )
+            # Durable before anything is returned or mounted: a resumed
+            # attempt continues from this frontier.
+            backtest.ledger.append(record)
+            backtest.tests.append(record)
+            backtest.validates_in_interval = 0
+            finished = step == steps.count
+            if not finished:
+                self._advance_view(bundle, frontier)
+        if self._trace_emit is not None:
+            self._trace_emit(
+                TraceEvent.TOOL_CALL_STARTED,
+                {"tool": "test", "status": "step_recorded", "step": step, "frontier": frontier},
+            )
+        value: dict[str, object] = {
+            "status": "step_recorded",
+            "step": step,
+            "steps": steps.count,
+            "steps_left": steps.count - step,
+            "frontier": frontier,
+            "candidate": {
+                "node_id": node_id,
+                **backtest.handle(node_id),
+                **({"seed_replicates": list(replicates)} if replicates else {}),
+                "deterministic": deterministic,
+            },
+            "replay": {"start": steps.start, "end": frontier, "wall_seconds": round(time.perf_counter() - started, 1)},
+            "stats": batch_candidate_stats(evaluation.summary),
+            **batch_candidate_resources(evaluation.summary.get("resources")),
+            "raw_readings": {name: _rounded(v) for name, v in holder_readings(analysis).items()},
+            "residual_reading": backtest.residual_reading_of(analysis, evaluation.summary),
+            "months": [_rounded_row(row) for row in month_table(replay, analysis, start=steps.start, end=frontier)],
+            "record": [backtest.record_row(row) for row in backtest.tests],
+            "instrument": _rounded_row(record_instrument([row["entry"] for row in backtest.tests], alpha=backtest.rules.alpha)),
+            "test_replays": backtest.test_replays,
+            "validates_per_step": backtest.rules.validates_per_step,
+        }
+        if finished:
+            value.update(
+                outcome="completed",
+                pipeline_outcome=(
+                    f"The validation period is complete: {backtest.named([node_id])[0]} is the frozen "
+                    "strategy; the host replays it over the Forward year and the Held-out months and "
+                    "records the readings. The session ends here."
+                ),
+            )
+        return ToolResult(True, value=value, finish=finished)
+
+
+def _rounded_row(row: Mapping[str, object]) -> dict[str, object]:
+    """A result row with its floats at six decimals and no daily rows."""
+
+    return {
+        key: _rounded(value) if isinstance(value, float) else value
+        for key, value in row.items()
+        if key != "daily"
+    }
 
 
 NULL_CONTROL_NOTE = (
@@ -2193,7 +2438,7 @@ class NullControlTool(SessionTimeBudgetAware):
     """
 
     spec = ToolSpec(
-        # The tool is a verb (like ``batch_validate``): ``null_control`` alone
+        # The tool is a verb (like ``validate``): ``null_control`` alone
         # is the result/ledger block it produces, and one name for both made
         # every mention of the block read as a tool reference.
         "run_null_control",
@@ -2241,11 +2486,11 @@ class NullControlTool(SessionTimeBudgetAware):
             "(benchmark.active_*), which is the series the verdict grades; this "
             "percentile is a second, descriptive reading of it. Costs well under a "
             "minute of host replay per research year (the session clock pauses like a "
-            f"formal backtest), consumes no replay-years and is capped at {max_calls} per "
+            f"formal backtest) and is capped at {max_calls} per "
             "session (max_null_controls in the budgets fact; every result reports "
             "null_controls_remaining); a node's block is cached, and the frozen node's "
             "block is reused at freeze instead of being drawn again. Use it on "
-            "full-span finalists before finish_session, not on every candidate. "
+            "full-span finalists before a test, not on every candidate. "
             "Refused for a node that is not a complete Validation of this session, "
             "once the cap is spent, and while a background sub-agent that can write "
             "is still running; it is also unavailable once the session enters hard "
@@ -2290,7 +2535,11 @@ class NullControlTool(SessionTimeBudgetAware):
         runner = getattr(self.backtest.evaluator, "null_control", None)
         if not callable(runner):
             raise ToolError("run_null_control is not available on this evaluation backend")
-        span = research_span(self.backtest.request.research_years, step.span)
+        span = research_span(
+            self.backtest.request.years,
+            step.span,
+            research_years=self.backtest.rules.research_years,
+        )
         # The attempt is charged before it runs: the compute is spent either way.
         self.used += 1
         with self.backtest.time_budget.pause():
@@ -2309,7 +2558,7 @@ class NullControlTool(SessionTimeBudgetAware):
                 if isinstance(exc, NullControlSetupError):
                     # It never reached its first draw, so none of the host
                     # compute the charge stands for was spent: give the call
-                    # back, as batch_validate refunds an environment failure.
+                    # back, as validate refunds an environment failure.
                     self.used -= 1
                 raise ToolError(
                     "run_null_control failed: " + _public_error_text(exc),
@@ -2337,7 +2586,7 @@ class NullControlTool(SessionTimeBudgetAware):
 
 
 def _rejection_recovery(error_type: str) -> str:
-    """What to actually do about a ``batch_validate`` rejection that repeats.
+    """What to actually do about a ``validate`` rejection that repeats.
 
     The first rejection already names the offending candidate; what it does not
     name is the remedy, which is why the audited loop kept re-sending the same
@@ -2349,7 +2598,7 @@ def _rejection_recovery(error_type: str) -> str:
             "Recovery: call modification_check on that candidate directory and "
             "read delta.readonly_violations — the named file no longer holds "
             "the bytes this session was seeded with. Delete your copy of it "
-            "from the candidate directory; batch_validate supplies the "
+            "from the candidate directory; validate supplies the "
             "read-only template itself."
         )
     if error_type == "permission_denied":

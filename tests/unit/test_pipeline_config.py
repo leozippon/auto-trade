@@ -29,7 +29,7 @@ from autotrade.pipelines.config import (
     BATCH_VALIDATE_MAX_CANDIDATES,
     DEFAULT_RESEARCH_GEOMETRY,
     MANDATED_DEFAULTS,
-    RETIRED_ABLATION_RULES,
+    OBSOLETE_KEYS,
     RETIRED_SWITCHES,
     AcceptanceRules,
     RollingExperimentConfig,
@@ -60,9 +60,8 @@ _CONSOLE_CREATE_PRESET: dict[str, object] = {
     "inference_time": "08:00",
     "initial_cash": 1_000_000.0,
     "initial_control_mode": "auto",
-    # The research session's budgets: replay-years of batch_validate, minutes
-    # and calls, spent across every attempt of the arm's one session.
-    "max_replay_years": 96,
+    # The research session's budgets: minutes and calls, spent across every
+    # attempt of the arm's one session.
     "max_research_minutes": 2400,
     "max_llm_calls": 6400,
     "model": "gpt-6-astra",
@@ -116,6 +115,29 @@ class AcceptanceRulesTest(unittest.TestCase):
             rules.evaluate({**summary, "total_return": True}),
         )
 
+    def test_the_sealed_gates_rules_and_the_replay_year_budget_have_no_place_in_the_rules(self) -> None:
+        """The rolling validation's rules carry no sealed years, no ablation and
+        no replay-year budget: a rules object built with one is refused, and
+        the budget record has no replay-year counter, so neither can come back
+        through a round file or a create request unnoticed."""
+
+        from dataclasses import fields
+
+        from autotrade.pipelines.config import BudgetUsed
+
+        for key in sorted(OBSOLETE_KEYS):
+            with self.subTest(key=key), self.assertRaises(TypeError):
+                AcceptanceRules(**REQUIRED_RULES, **{key: 1})
+        names = {field.name for field in fields(AcceptanceRules)}
+        self.assertFalse(names & OBSOLETE_KEYS)
+        self.assertEqual(
+            {"alpha", "research_years", "test_step_months", "validates_per_step"} - names, set()
+        )
+        self.assertNotIn("replay_years", {field.name for field in fields(BudgetUsed)})
+        self.assertIn("test_replays", {field.name for field in fields(BudgetUsed)})
+        for name in ("max_replay_years", "finalize_before_deadline_seconds"):
+            self.assertFalse(hasattr(RollingExperimentConfig, name), name)
+
     def test_finite_metrics_keep_threshold_semantics(self) -> None:
         rules = AcceptanceRules(**REQUIRED_RULES, max_drawdown=0.25)
         ok = {"total_return": 0.02, "sharpe": 0.5, "max_drawdown": 0.1}
@@ -167,8 +189,11 @@ class AcceptanceRulesTest(unittest.TestCase):
             {"alpha": math.nan},
             {"alpha": 0.0},
             {"alpha": 1.0},
-            {"sealed_years": 0},
-            {"sealed_years": 2.5},
+            {"research_years": 0},
+            {"research_years": 2.5},
+            {"test_step_months": 2},
+            {"test_step_months": True},
+            {"validates_per_step": 0},
             {"forward_confidence": 0.0},
             {"forward_confidence": 1.0},
         ):
@@ -274,83 +299,71 @@ class AcceptanceRulesTest(unittest.TestCase):
                 acceptance_for(overrides)
 
     def test_the_agent_facts_state_the_rules_from_their_single_sources(self) -> None:
-        """The ``acceptance_rules`` fact is derived, never retyped: the sealed
-        gate's statistic and bar come from ``verdict`` and this experiment's
-        own rules, registration lists only what it checks, and no date of any
-        period appears in it."""
+        """The ``acceptance_rules`` fact is derived, never retyped: the
+        residual statistic and its bar come from ``verdict`` and this
+        experiment's own rules, registration lists only what it checks, the
+        validation block states the arm's steps, and no date of any period
+        appears in it."""
 
-        rules = AcceptanceRules(**{**REQUIRED_RULES, "sealed_years": 5},
+        rules = AcceptanceRules(
+            **{**REQUIRED_RULES, "research_years": 5, "test_step_months": 1, "validates_per_step": 4},
             max_drawdown=0.2, cost_stress_multiplier=3.0, active_max_drawdown=0.11
         )
-        facts = rules.agent_facts()
-        self.assertEqual(sorted(facts), ["freeze_registration", "graded_series", "graduation", "sealed_gate"])
+        facts = rules.agent_facts(validation_years=5)
+        self.assertEqual(
+            sorted(facts), ["forward", "graded_series", "instrument", "registration", "validation"]
+        )
         self.assertIn(str(verdict.PANEL_DRAWS), facts["graded_series"])
         self.assertIn("benchmark.active_information_ratio", facts["graded_series"])
-        sealed = facts["sealed_gate"]
-        self.assertIn("intercept times sqrt(244) over the residual standard deviation", sealed["statistic"])
-        self.assertIn("the size leg and the value leg", sealed["statistic"])
-        self.assertEqual(sealed["bar"], "z(1 - alpha) / sqrt(years)")
-        self.assertEqual((sealed["alpha"], sealed["sealed_years"]), (0.05, 5))
-        self.assertEqual(sealed["bar_over_sealed_years"], round(verdict.residual_bar(5.0, 0.05), 3))
-        self.assertEqual(sealed["bar_over_one_year"], 1.645)
-        self.assertIn("there is no second reading", sealed["read"])
-        self.assertIn("residual_reading", sealed["on_visible_spans"])
-        registration = facts["freeze_registration"]
+        statistic = facts["instrument"]
+        self.assertIn("intercept times sqrt(244) over the residual standard deviation", statistic["statistic"])
+        self.assertIn("the size leg and the value leg", statistic["statistic"])
+        self.assertIn("z(1 - alpha) / sqrt(years)", statistic["bar"])
+        self.assertEqual(statistic["alpha"], 0.05)
+        self.assertEqual(statistic["bar_over_one_year"], 1.645)
+        self.assertEqual(statistic["bar_over_validation_period"], round(verdict.residual_bar(5.0, 0.05), 3))
+        with self.assertRaises(ValueError):
+            rules.agent_facts(validation_years=0)
+        validation = facts["validation"]
+        self.assertEqual(
+            (validation["research_years"], validation["test_step_months"], validation["validates_per_step"]),
+            (5, 1, 4),
+        )
+        self.assertIn("at most 4 validate calls", validation["validates_per_step_rule"])
+        self.assertIn("no action that ends the session earlier", validation["end"])
+        registration = facts["registration"]
         self.assertEqual(
             sorted(registration),
-            [
-                "control",
-                "finite_metrics",
-                "freezes_per_arm",
-                "max_drawdown",
-                "seed_replicates",
-                "span",
-                "tracking_mandate",
-            ],
+            ["checked", "control", "finite_metrics", "max_drawdown", "seed_replicates", "span", "tracking_mandate"],
         )
         self.assertIn("span=full", registration["span"])
-        self.assertIn("finite", registration["finite_metrics"])
-        self.assertIn("0.2", registration["max_drawdown"])
-        self.assertIn("ends the session", registration["freezes_per_arm"])
-        self.assertIn(
-            "declared deterministic in finish_session (its package uses no randomness) owes none",
-            registration["seed_replicates"],
-        )
-        # No mandate is said in words; a mandate states its two limits and that
-        # meeting them is not evidence.
+        self.assertIn("<= 0.2", registration["max_drawdown"])
+        self.assertIn("at every test", registration["checked"])
         self.assertIn("reported, not graded", registration["tracking_mandate"])
-        mandate = acceptance_for({**REQUIRED_RULES, "tracking_error_cap": 0.08}).agent_facts()[
-            "freeze_registration"
-        ]["tracking_mandate"]
-        self.assertIn("<= 0.08", mandate["tracking_error"])
-        self.assertIn("0.85..1.15", mandate["market_beta"])
-        self.assertIn("not evidence", mandate["role"])
-        # The forward readings are stated with what they are taken at, and no
-        # bar: none is judged.
-        self.assertIn("slippage multiplied by 3.0", facts["graduation"]["reported"])
-        self.assertNotIn("<=", json.dumps(facts["graduation"]))
-        rendered = json.dumps(facts)
-        self.assertIsNone(re.search(r"20\d{6}", rendered))
-        for retired in ("deflated", "trials", "offline", "positive_years", "information_ratio_bar"):
-            self.assertNotIn(retired, rendered)
+        self.assertIn("multiplied by 3.0", facts["forward"]["reported"])
+        self.assertIn("deciding nothing", facts["forward"]["reported"])
+        text = json.dumps(facts)
+        self.assertNotRegex(text, r"20\d{6}")
 
-    def test_one_series_is_stated_and_the_sealed_gate_alone_admits(self) -> None:
+    def test_one_series_is_stated_and_nothing_gates(self) -> None:
         """Every reading is of the active series: the facts name it once and
-        no neutralized figure. Graduation is the sealed gate's alone; the
-        forward bound and the cost stress are stated as readings, over the
-        frozen book and its seed replicates, that decide nothing."""
+        no neutralized figure. The forward bound and the cost stress are
+        stated as readings, over the frozen book and its seed replicates, that
+        decide nothing; no fact names a gate."""
 
-        facts = AcceptanceRules(**REQUIRED_RULES).agent_facts()
+        facts = AcceptanceRules(**REQUIRED_RULES).agent_facts(validation_years=1)
         graded = facts["graded_series"]
         for field in ("benchmark.active_excess", "sub_windows[].active_excess_return", "daily_series"):
             self.assertIn(field, graded)
-        self.assertNotIn("neutral", json.dumps(facts).lower())
-        graduation = facts["graduation"]
-        self.assertEqual(sorted(graduation), ["admits", "reported"])
-        self.assertIn("exactly when the sealed gate passes", graduation["admits"])
-        self.assertIn("80% block-bootstrap lower bound", graduation["reported"])
-        self.assertIn("frozen book and its seed replicates", graduation["reported"])
-        self.assertIn("none decides the verdict", graduation["reported"])
+        text = json.dumps(facts).lower()
+        self.assertNotIn("neutral", text)
+        self.assertNotIn("graduat", text)
+        self.assertNotIn("sealed", text)
+        forward = facts["forward"]
+        self.assertEqual(sorted(forward), ["reported"])
+        self.assertIn("80% block-bootstrap lower bound", forward["reported"])
+        self.assertIn("frozen book and its seed replicates", forward["reported"])
+        self.assertIn("deciding nothing", forward["reported"])
 
     def test_a_record_with_a_retired_key_still_rebuilds_the_rules(self) -> None:
         rules = AcceptanceRules.from_record(
@@ -379,8 +392,8 @@ class RollingExperimentConfigValidationTest(unittest.TestCase):
         self.assertEqual(config.research_directive, "")
         self.assertEqual(config.max_research_minutes, 2400)
         self.assertEqual(
-            (config.max_replay_years, config.max_llm_calls, config.max_null_controls),
-            (96, 6400, 12),
+            (config.max_llm_calls, config.max_null_controls),
+            (6400, 12),
         )
         self.assertEqual(config.experiment_dir, Path("/tmp/experiments/exp"))
         self.assertEqual(
@@ -392,7 +405,6 @@ class RollingExperimentConfigValidationTest(unittest.TestCase):
         for name in (
             "session_max_attempts",
             "window_months",
-            "max_replay_years",
             "max_llm_calls",
             "max_research_minutes",
         ):
@@ -407,7 +419,6 @@ class RollingExperimentConfigValidationTest(unittest.TestCase):
         for name in (
             "max_null_controls",
             "deadline_grace_minutes",
-            "finalize_before_deadline_seconds",
         ):
             self.assertEqual(getattr(make_config(Path("/tmp"), **{name: 0}), name), 0)
             for value in (-1, 1.5, True, math.inf):
@@ -461,10 +472,10 @@ class DefaultsDriftTest(unittest.TestCase):
         # A retired switch is no parameter a request can name.
         self.assertFalse(RETIRED_SWITCHES & set(WEB_CREATE_DEFAULTS))
         # Drawdowns and the mandate switch stay empty so the form does not pin
-        # a mandate onto every arm, and the sealed years have no console
+        # a mandate onto every arm, and the research years have no console
         # value: every request states them (WEB_REQUIRED_PARAMS). Every other
         # rule shows what an empty request would stamp.
-        stated = {"sealed_years"}
+        stated = {"research_years"}
         blank = {"max_drawdown", "active_max_drawdown", "tracking_error_cap", "beta_min", "beta_max", *stated}
         self.assertEqual(set(rules), set(ACCEPTANCE_KEYS))
         self.assertLessEqual(stated, WEB_REQUIRED_PARAMS)
@@ -595,7 +606,7 @@ class DefaultsDriftTest(unittest.TestCase):
         from autotrade.pipelines.arm_params import console_request
         from autotrade.pipelines.worker import resolve_worker_options
 
-        self.assertEqual(RETIRED_ABLATION_RULES, {"ablation_required"})
+        self.assertIn("ablation_required", OBSOLETE_KEYS)
         self.assertNotIn("ablation_required", ACCEPTANCE_KEYS)
         base = {
             "experiment_id": "sealed_demo",
@@ -779,14 +790,14 @@ class DefaultsDriftTest(unittest.TestCase):
         )
         moved = {
             "model": "deepseek-flash",
-            "max_replay_years": 7,
+            "max_null_controls": 7,
             "screen_boards": ("gem", "star"),
             "research_start": "20190701",
         }
         with patch.dict(WEB_CREATE_DEFAULTS, moved):
             after = rendered()
         self.assertEqual(after["model"], "deepseek-flash")
-        self.assertEqual(after["max_replay_years"], 7)
+        self.assertEqual(after["max_null_controls"], 7)
         self.assertEqual(after["screen_boards"], ["gem", "star"])
         self.assertEqual(after["research_start"], "20190701")
         self.assertEqual(rendered(), baseline, "the schema retained a mutated default")
@@ -872,7 +883,6 @@ RESTORED_CONSOLE_PARAMETERS = (
     "gpu_count",
     "per_call_timeout_seconds",
     "record_failed_attempts",
-    "finalize_before_deadline_seconds",
     "max_total_holdings",
     "max_single_name_weight",
 )
@@ -937,7 +947,6 @@ class ConsoleParameterSurfaceTest(unittest.TestCase):
         config = make_config(Path("/tmp"))
         for key in (
             "record_failed_attempts",
-            "finalize_before_deadline_seconds",
             "per_call_timeout_seconds",
         ):
             with self.subTest(key=key):
@@ -958,7 +967,6 @@ class ConsoleParameterSurfaceTest(unittest.TestCase):
             "gpu_count": 2,
             "per_call_timeout_seconds": 120,
             "record_failed_attempts": False,
-            "finalize_before_deadline_seconds": 60,
             "max_total_holdings": 12,
             "max_single_name_weight": 0.15,
         }
@@ -1401,7 +1409,11 @@ def test_a_session_request_takes_every_arm_field_from_its_config(tmp_path: Path)
     from datetime import UTC, datetime
 
     from autotrade.environment.artifacts import ModificationConstraints
-    from autotrade.pipelines.config import ResearchSessionRequest, SnapshotBundle
+    from autotrade.pipelines.config import (
+        ReplaySpan,
+        ResearchSessionRequest,
+        SnapshotBundle,
+    )
 
     config = make_config(
         tmp_path,
@@ -1409,13 +1421,11 @@ def test_a_session_request_takes_every_arm_field_from_its_config(tmp_path: Path)
         window_months=36,
         benchmark_index="000905.SH",
         record_failed_attempts=False,
-        finalize_before_deadline_seconds=120,
         max_null_controls=4,
         batch_validate_max_concurrency=2,
         step_constraints=ModificationConstraints(max_strategy_files=3),
     )
     budgets = {
-        "max_replay_years": 7,
         "max_llm_calls": 11,
         "max_api_spend_usd": 2.5,
         "deadline_seconds": 600.0,
@@ -1427,8 +1437,9 @@ def test_a_session_request_takes_every_arm_field_from_its_config(tmp_path: Path)
         run_id="run_1",
         snapshot=SnapshotBundle("snap", "decision", "replay"),
         decision_time=datetime(2025, 6, 30, tzinfo=UTC),
-        research_years=(),
-        sealed_period=("20250701", "20260630"),
+        years=(),
+        validation=ReplaySpan("validation", "valid", "20250701", "20260630", SnapshotBundle("v", "d", "r")),
+        decision_view_at=lambda _anchor: SnapshotBundle("snap", "decision", ""),
     )
 
     assert (
@@ -1436,11 +1447,10 @@ def test_a_session_request_takes_every_arm_field_from_its_config(tmp_path: Path)
         request.window_months,
         request.benchmark_index,
         request.record_failed_attempts,
-        request.finalize_before_deadline_seconds,
         request.max_null_controls,
         request.batch_validate_max_concurrency,
         request.modification_constraints,
-    ) == ("arm_request", 36, "000905.SH", False, 120, 4, 2, config.step_constraints)
+    ) == ("arm_request", 36, "000905.SH", False, 4, 2, config.step_constraints)
     assert request.acceptance_rules == config.acceptance.to_record()
     assert {name: getattr(request, name) for name in budgets} == budgets
     with pytest.raises(TypeError):

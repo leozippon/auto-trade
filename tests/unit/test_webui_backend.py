@@ -33,7 +33,7 @@ from autotrade.environment.trace import TRACE_PAYLOAD_HEAD_CHARS, AgentTraceWrit
 from autotrade.pipelines.arm_params import RETIRED_NL_PARAMS
 from autotrade.pipelines.config import (
     DEFAULT_RESEARCH_GEOMETRY,
-    RETIRED_ABLATION_RULES,
+    OBSOLETE_KEYS,
     RETIRED_RULES,
     AcceptanceRules,
     acceptance_for,
@@ -100,11 +100,12 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
     assert fields["active_max_drawdown"]["placeholder"] == "留空：0.30"
     assert "mandate_paired" not in fields["max_drawdown"]
     assert fields["beta_min"]["mandate_paired"] is True
-    for key in ("sealed_years", "alpha", "forward_confidence"):
+    for key in ("research_years", "test_step_months", "validates_per_step", "alpha", "forward_confidence"):
         assert key in fields
         assert fields[key]["default"] == WEB_CREATE_DEFAULTS[key]
-    # The retired bars and the retired ablation rule are no form field.
-    assert not (RETIRED_RULES | RETIRED_ABLATION_RULES) & set(fields)
+    # The retired bars and the obsolete rules (the ablation's, the sealed
+    # gate's) are no form field.
+    assert not (RETIRED_RULES | OBSOLETE_KEYS) & set(fields)
     assert [group["name"] for group in schema["groups"]] == [
         "基本与排程",
         "数据窗口",
@@ -194,7 +195,6 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
     for key in (
         "max_research_minutes",
         "window_months",
-        "max_replay_years",
         "max_null_controls",
         "max_llm_calls",
     ):

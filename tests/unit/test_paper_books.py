@@ -26,21 +26,21 @@ from autotrade.environment.sandbox import GpuMode, SandboxConfig
 from autotrade.environment.strategy import CN_TZ
 from autotrade.paper import fills
 from autotrade.paper.book import (
+    BOOK_CAP,
     BOOK_NAME,
-    INCUBATING_BOOK_CAP,
     STRATEGY_COPY_NAME,
     VERDICT_LOG_NAME,
     Book,
     book_status,
     create_book,
     load_book,
-    require_incubating_place,
+    require_book_place,
 )
 from autotrade.paper.books import (
     delete_book,
     follows_real_fills,
     list_books,
-    open_graduated_book,
+    open_frozen_book,
     run_books,
     run_order,
     validate_book_id,
@@ -156,22 +156,23 @@ def _book_files(root: Path) -> dict[str, bytes]:
     return {str(path.relative_to(root)): path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
 
 
-def test_a_graduate_opens_its_book_once_and_a_non_graduate_opens_none(tmp_path: Path):
+def test_a_frozen_strategy_opens_its_book_once_and_an_arm_without_one_opens_none(tmp_path: Path):
     experiments = tmp_path / "elsewhere"  # any experiments root, not only <repo>/experiments
-    arm = build_arm(experiments, "exp", "graduated")
+    arm = build_arm(experiments, "exp", "frozen_with_record")
     root = paper_root(tmp_path)
-    assert open_graduated_book(tmp_path, arm) == "exp"
+    assert open_frozen_book(tmp_path, arm) == "exp"
     record = json.loads((root / "exp" / "book.json").read_text(encoding="utf-8"))
     assert (record["experiment_id"], record["artifact_id"], record["note"]) == (
-        "exp", "strategy_research_abc", "graduated"
+        "exp", "strategy_research_abc", "frozen"
     )
+    assert record["candidate_source"] == "frozen"
     opened = _book_files(root / "exp")
-    assert open_graduated_book(tmp_path, arm) == "exp"  # an open book is left as it is
+    assert open_frozen_book(tmp_path, arm) == "exp"  # an open book is left as it is
     assert _book_files(root / "exp") == opened
 
     loser = build_arm(experiments, "loser", "discarded")
-    with pytest.raises(ValueError, match="did not graduate"):
-        open_graduated_book(tmp_path, loser)
+    with pytest.raises(ValueError, match="no frozen strategy with a forward record"):
+        open_frozen_book(tmp_path, loser)
     assert list_books(root) == ["exp"] and not (root / "loser").exists()
 
 
@@ -182,7 +183,7 @@ def test_deleting_a_book_removes_its_read_only_tree_and_frees_its_id(tmp_path: P
 
     arm = build_arm(tmp_path / "experiments", "exp", "graduated")
     engine_book(tmp_path, book="other")
-    open_graduated_book(tmp_path, arm)
+    open_frozen_book(tmp_path, arm)
     root = paper_root(tmp_path)
     output = root / "exp" / STRATEGY_COPY_NAME / "output"
     (output / "lib").mkdir()
@@ -198,7 +199,7 @@ def test_deleting_a_book_removes_its_read_only_tree_and_frees_its_id(tmp_path: P
     delete_book(root, "exp")
     assert sorted(entry.name for entry in root.iterdir()) == ["other"]  # nothing left behind
     assert stat.S_IMODE(shared.stat().st_mode) == 0o444 and shared.read_bytes() == b"release"
-    assert open_graduated_book(tmp_path, arm) == "exp"
+    assert open_frozen_book(tmp_path, arm) == "exp"
     with pytest.raises(KeyError):
         delete_book(root, "missing")
     with pytest.raises(ValueError):
@@ -311,20 +312,24 @@ def test_a_book_pins_the_boards_its_broker_and_its_verdict_panel_buy_on(tmp_path
         )
 
 
-def test_the_incubating_cap_refuses_a_book_and_a_killed_book_frees_its_place(tmp_path: Path):
+def test_the_book_cap_refuses_a_book_and_a_killed_book_frees_its_place(tmp_path: Path):
     root = paper_root(tmp_path)
-    for index in range(INCUBATING_BOOK_CAP):
+    # Operator-opened books of both tracks count toward the one cap.
+    write_book_record(root / "fz0", experiment_id="fz0", candidate_source="frozen")
+    for index in range(1, BOOK_CAP):
         write_book_record(root / f"inc{index}", experiment_id=f"inc{index}", candidate_source="incubating")
-    write_book_record(root / "grad", experiment_id="grad")  # a graduated book never counts
-    with pytest.raises(ValueError, match=f"the cap is {INCUBATING_BOOK_CAP}"):
+    write_book_record(root / "grad", experiment_id="grad")  # a retired graduated book never counts
+    with pytest.raises(ValueError, match=f"the cap is {BOOK_CAP}"):
         _incubate(tmp_path, "late")
-    assert not (root / "late").exists()
-    require_incubating_place(root, "inc0")  # an open book is never a second book of its own arm
-    _kill(root / "inc0")
-    assert book_status(root / "inc0") == "killed"
+    with pytest.raises(ValueError, match=f"the cap is {BOOK_CAP}"):
+        open_frozen_book(tmp_path, build_arm(tmp_path / "experiments", "late_frozen", "frozen_with_record"))
+    assert not (root / "late").exists() and not (root / "late_frozen").exists()
+    require_book_place(root, "fz0")  # an open book is never a second book of its own arm
+    _kill(root / "fz0")
+    assert book_status(root / "fz0") == "killed"
     assert _incubate(tmp_path, "late").candidate_source == "incubating"
-    with pytest.raises(ValueError, match=f"the cap is {INCUBATING_BOOK_CAP}"):
-        require_incubating_place(root, "later")
+    with pytest.raises(ValueError, match=f"the cap is {BOOK_CAP}"):
+        require_book_place(root, "later")
 
 
 FUNDAMENTALS_STATUS = Path("results/data_quality/fundamental_events_status.json")
@@ -367,11 +372,11 @@ def test_a_book_reading_fundamentals_opens_only_on_an_audit_covering_its_view(tm
 
     first, audited = f"{YEAR - 6}01", f"{YEAR - 3}0101"
     _pit_lake(tmp_path, first_month=first, audited_from=audited)
-    assert open_graduated_book(tmp_path, _fundamentals_arm(tmp_path, "short", 24)) == "short"
+    assert open_frozen_book(tmp_path, _fundamentals_arm(tmp_path, "short", 24)) == "short"
 
     arm = _fundamentals_arm(tmp_path, "long", 108)
     with pytest.raises(ValueError, match="cannot open") as refused:
-        open_graduated_book(tmp_path, arm)
+        open_frozen_book(tmp_path, arm)
     message = str(refused.value)
     assert f"loads PIT fundamental events from {first}, but their audit" in message
     assert f"starts at {audited}" in message
@@ -390,14 +395,14 @@ def test_a_book_reading_fundamentals_opens_only_on_an_audit_covering_its_view(tm
 
     # The nightly run the refusal configures audits from that month: the book opens.
     write_fundamental_status(tmp_path / FUNDAMENTALS_STATUS, scope_start_date=f"{first}01")
-    assert open_graduated_book(tmp_path, arm) == "long"
+    assert open_frozen_book(tmp_path, arm) == "long"
 
 
 def test_a_book_without_fundamentals_never_asks_the_audit(tmp_path: Path):
     # An audit that covers nothing and no exchange calendar: either one read
     # would refuse the book.
     _pit_lake(tmp_path, first_month="201501", audited_from="20990101", calendar=False)
-    assert open_graduated_book(tmp_path, build_arm(tmp_path / "experiments", "exp", "graduated")) == "exp"
+    assert open_frozen_book(tmp_path, build_arm(tmp_path / "experiments", "exp", "graduated")) == "exp"
 
 
 def test_a_book_of_an_older_schema_is_refused(tmp_path: Path):

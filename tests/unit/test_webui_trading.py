@@ -443,9 +443,9 @@ def test_env_and_book_whitelists_reject_everything_else(tmp_path: Path):
     assert trading.book_dir(tmp_path, BOOK) == tmp_path / "data/trading/paper" / BOOK
 
 
-def test_the_console_opens_a_graduate_book_and_deletes_it_between_runs(tmp_path: Path):
+def test_the_console_opens_a_frozen_strategys_book_and_deletes_it_between_runs(tmp_path: Path):
     experiments = tmp_path / "elsewhere"  # the console's experiments root
-    build_arm(experiments, "exp", "graduated")
+    build_arm(experiments, "exp", "frozen_with_record")
     build_arm(experiments, "loser", "discarded")
     client = TestClient(create_app(tmp_path, experiments))
 
@@ -455,7 +455,7 @@ def test_the_console_opens_a_graduate_book_and_deletes_it_between_runs(tmp_path:
     assert open_book("exp", env="live").status_code == 404
     assert open_book("missing").status_code == 404
     refused = open_book("loser")
-    assert refused.status_code == 400 and "did not graduate" in refused.json()["detail"]
+    assert refused.status_code == 400 and "no frozen strategy with a forward record" in refused.json()["detail"]
     assert open_book("exp").json() == {"env": "paper", "book_id": "exp"}
     assert [row["book_id"] for row in client.get("/api/trading/paper/books").json()["books"]] == ["exp"]
 

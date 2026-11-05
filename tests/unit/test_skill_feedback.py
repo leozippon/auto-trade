@@ -40,7 +40,7 @@ CURATED = "curated/grid-plateau-selection"
 OTHER_CURATED = "curated/validation-readings"
 # A real report: what was tried, what the reading was, what it contradicts.
 EVIDENCE = (
-    "条目要求单参数网格不超过四点；本会话把 5 点网格一次提交 batch_validate（node_7f3a），"
+    "条目要求单参数网格不超过四点；本会话把 5 点网格一次提交 validate（node_7f3a），"
     "replay-year 与单日耗时都在限额内，四点上限来自已废弃的 daily_backtest。"
 )
 

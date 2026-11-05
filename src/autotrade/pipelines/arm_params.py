@@ -56,8 +56,8 @@ from .config import (
     ACCEPTANCE_KEYS,
     DEFAULT_PIT_VIEWS_SEED,
     DEFAULT_RESEARCH_GEOMETRY,
+    OBSOLETE_KEYS,
     REQUIRED_ACCEPTANCE_KEYS,
-    RETIRED_ABLATION_RULES,
     RETIRED_RULES,
     RETIRED_SWITCHES,
     AcceptanceRules,
@@ -198,14 +198,12 @@ class DataParams:
 class BudgetParams:
     """The research session's budgets and attempts (``RollingExperimentConfig``)."""
 
-    max_replay_years: int = _param(rolling_default("max_replay_years"))
     max_null_controls: int = _param(rolling_default("max_null_controls"))
     batch_validate_max_concurrency: int = _param(rolling_default("batch_validate_max_concurrency"))
     max_llm_calls: int = _param(rolling_default("max_llm_calls"))
     max_api_spend_usd: float = _param(rolling_default("max_api_spend_usd"))
     session_max_attempts: int = _param(rolling_default("session_max_attempts"))
     max_research_minutes: int = _param(rolling_default("max_research_minutes"))
-    finalize_before_deadline_seconds: int = _param(rolling_default("finalize_before_deadline_seconds"))
     per_call_timeout_seconds: int = _param(rolling_default("per_call_timeout_seconds"))
     record_failed_attempts: bool = _param(rolling_default("record_failed_attempts"))
 
@@ -317,14 +315,14 @@ class EnvironmentParams:
 
 # The console's own value of each required acceptance rule
 # (``config.REQUIRED_ACCEPTANCE_KEYS``), which the rules themselves leave
-# without a default. The sealed gate's level is one for the whole program, so
-# that every sealed reading is judged at the same level
-# (``_round.BASE_EXPECTED_DEFAULTS`` pins it). How many research years are
-# sealed depends on the arm's geometry, so the console has no value for it:
-# every create request states it.
+# without a default. The residual statistic's level is one for the whole
+# program, so that every reading is stated against the same bar
+# (``_round.BASE_EXPECTED_DEFAULTS`` pins it). How many of the geometry's years
+# a session researches on is the arm's experimental choice, so the console has
+# no value for it: every create request states it.
 _REQUIRED_ACCEPTANCE_DEFAULTS: dict[str, object] = {
     "alpha": 0.05,
-    "sealed_years": None,
+    "research_years": None,
 }
 
 
@@ -374,19 +372,15 @@ RetiredParams = make_dataclass(
     "RetiredParams",
     [
         (name, object, _param(surface=Surface.RETIRED))
-        for name in sorted(
-            RETIRED_SWITCHES | RETIRED_RULES | RETIRED_ABLATION_RULES | RETIRED_NL_PARAMS
-        )
+        for name in sorted(RETIRED_SWITCHES | RETIRED_RULES | OBSOLETE_KEYS | RETIRED_NL_PARAMS)
     ],
     frozen=True,
     kw_only=True,
-
 )
 RetiredParams.__module__ = __name__
 RetiredParams.__doc__ = (
     "Parameters no reader uses any more (``config.RETIRED_SWITCHES``, "
-    "``config.RETIRED_RULES``, ``config.RETIRED_ABLATION_RULES``, "
-    "``RETIRED_NL_PARAMS``)."
+    "``config.RETIRED_RULES``, ``config.OBSOLETE_KEYS``, ``RETIRED_NL_PARAMS``)."
 )
 
 

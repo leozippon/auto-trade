@@ -4,7 +4,7 @@ This tool fans a pre-registered set out under one shared parent and one span
 of the research period, so the numbers are comparable; it is the only
 Validation tool, so one candidate is a round too: same static gate, same
 immutable revision, same replay-year budget, same selection path through
-``step_rollback`` plus ``finish_session`` at every width.
+``step_rollback`` plus ``test`` at every width.
 
 These tests cover the refusals that must happen before anything runs, the
 spans a batch may replay on a multi-year research period, the per-candidate
@@ -47,12 +47,10 @@ from autotrade.environment.replay.engine import BacktestError
 from autotrade.environment.replay.null_control import NullControlSetupError
 from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR
 from autotrade.environment.replay.style import active_analysis
-from autotrade.environment.runtime import utc_now_iso
 from autotrade.environment.sandbox import SandboxConfig, SandboxSpec
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.environment.tools.base import ToolError, ToolRegistry
-from autotrade.environment.tools.finish_session import FinishSessionTool
 from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.environment.tools.step_rollback import StepRollbackTool
 from autotrade.environment.tools.workspace import (
@@ -60,7 +58,6 @@ from autotrade.environment.tools.workspace import (
     WORKSPACE_MIN_FREE_BYTES,
     SafeWorkspace,
 )
-from autotrade.environment.trace import agent_trace_path
 from autotrade.pipelines.config import (
     DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
     BrokerProfile,
@@ -78,20 +75,17 @@ from autotrade.pipelines.experiment import (
     research_step_record,
     validation_statistics,
 )
-from autotrade.pipelines.ledger import ExperimentLedger, Stage
-from autotrade.pipelines.session_resume import load_recorded_steps, resume_state
+from autotrade.pipelines.ledger import ExperimentLedger
+from autotrade.pipelines.session_resume import load_recorded_steps
 from autotrade.pipelines.session_tools import (
     BATCH_HYPOTHESIS_MAX_CHARS,
-    BATCH_REJECTION_CHARGE_AFTER,
     BATCH_REJECTION_ESCALATE_AT,
     BATCH_VALIDATE_MAX_CANDIDATES,
-    BUDGET_SPENT_NOTE,
-    BatchValidateTool,
     EnvironmentBlocked,
     NullControlTool,
     SessionValidations,
+    ValidateTool,
     leg_cards,
-    session_budget_status,
 )
 from autotrade.pipelines.verdict import (
     ACTIVE_DAILY_COLUMNS,
@@ -101,7 +95,8 @@ from autotrade.pipelines.verdict import (
     residual_reading,
     residual_statistics,
 )
-from tests.unit.acceptance_fixture import REQUIRED_RULES, SEALED_PERIOD
+from tests.unit.acceptance_fixture import REQUIRED_RULES
+from tests.unit.terminal_tool import TerminalTool
 
 PARENT_SOURCE ="def generate_orders(context):\n    return []\n"
 # A four-year research period, one slot per July-June year.
@@ -111,6 +106,9 @@ YEARS = (
     ("Y3", "20230701", "20240630"),
     ("Y4", "20240701", "20250630"),
 )
+# The validation year the frontier reveals one test at a time; a span may
+# name it only once the frontier has entered it.
+VALIDATION_YEAR = ("Y5", "20250701", "20260630")
 TEMPLATE_README = "# Strategy output contract\n\nRead-only template text.\n"
 
 
@@ -323,7 +321,6 @@ class _Session:
         self,
         root: Path,
         *,
-        max_replay_years: int = 48,
         fail_markers: tuple[str, ...] = (),
         contention_markers: tuple[str, ...] = (),
         strategy_fail_markers: tuple[str, ...] = (),
@@ -369,7 +366,7 @@ class _Session:
             run_id="run_batch",
             snapshot=snapshot,
             decision_time=moment,
-            research_years=tuple(
+            years=tuple(
                 ReplaySpan(
                     label,
                     "valid",
@@ -377,17 +374,23 @@ class _Session:
                     end,
                     SnapshotBundle(f"snap_{label}", f"decision_{label}", f"replay_{label}"),
                 )
-                for label, start, end in YEARS
+                for label, start, end in (*YEARS, VALIDATION_YEAR)
             ),
+            validation=ReplaySpan(
+                "validation", "valid", VALIDATION_YEAR[1], VALIDATION_YEAR[2], SnapshotBundle("snap_v", "decision_v", "replay_v")
+            ),
+            decision_view_at=lambda _anchor: snapshot,
             window_months=60,
-            max_replay_years=max_replay_years,
             max_llm_calls=10,
             deadline_seconds=deadline_seconds,
             deadline_grace_seconds=60.0,
-            finalize_before_deadline_seconds=30,
             record_failed_attempts=record_failed_attempts,
-            acceptance_rules={**REQUIRED_RULES, **(acceptance_rules or {"max_drawdown": 0.25})},
-            sealed_period=SEALED_PERIOD,
+            # Every year of the fixture is a research year: ``full`` is all of them.
+            acceptance_rules={
+                **REQUIRED_RULES,
+                "research_years": len(YEARS),
+                **(acceptance_rules or {"max_drawdown": 0.25}),
+            },
             budget_used=budget_used or BudgetUsed(),
             steps_before=steps_before,
             resume=resume,
@@ -423,7 +426,7 @@ class _Session:
             experiment_dir=experiment_dir,
         )
         self.workspace = SafeWorkspace(self.workspace_root)
-        self.batch = BatchValidateTool(
+        self.batch = ValidateTool(
             backtest=self.backtest,
             workspace=self.workspace,
             modification_check_factory=self._check,
@@ -440,11 +443,10 @@ class _Session:
             self.models,
             session_ref=self.backtest.ref_store.get_or_create("session", "research"),
         )
-        self.finish = FinishSessionTool(
+        self.finish = TerminalTool(
             self.tree,
             session_ref=self.backtest.ref_store.get_or_create("session", "research"),
             registration=self.backtest.registration,
-            budget_status=lambda: session_budget_status(self.backtest),
         )
 
     def _check(self, directory: Path) -> ModificationCheckTool:
@@ -502,11 +504,10 @@ class BatchValidateRefusalTest(unittest.TestCase):
             with self.assertRaises(ToolError) as caught:
                 session.call("a", "b")
             self.assertIn("byte-identical", str(caught.exception))
-            self.assertEqual(session.backtest.replay_years_used, 0)
             self.assertEqual(session.evaluator.calls, 0)
             self.assertEqual(session.tree.nodes(), [])
 
-    def test_a_batch_is_refused_below_the_free_space_floor_and_never_charged(self) -> None:
+    def test_a_batch_is_refused_below_the_free_space_floor_however_often(self) -> None:
         """A host condition, not the Agent's input: refused before anything is
         reserved, however often it repeats, and lifted once space is back."""
 
@@ -518,19 +519,17 @@ class BatchValidateRefusalTest(unittest.TestCase):
             session = _Session(Path(tmp))
             session.candidate("a", _strategy("low_disk"))
             with free(WORKSPACE_MIN_FREE_BYTES - 1):
-                for _ in range(BATCH_REJECTION_CHARGE_AFTER + 2):
+                for _ in range(8):
                     with self.assertRaises(ToolError) as caught:
                         session.call("a", span="Y1")
                     self.assertEqual(caught.exception.error_type, LOW_DISK_SPACE)
                     self.assertIn("GiB free, below the 50 GiB floor", str(caught.exception))
                     self.assertIn("delete intermediate files", str(caught.exception))
-            self.assertEqual(session.backtest.replay_years_used, 0)
             self.assertEqual(session.evaluator.calls, 0)
             self.assertEqual(session.tree.nodes(), [])
             with free(WORKSPACE_MIN_FREE_BYTES):
                 result = session.call("a", span="Y1")
             self.assertTrue(result.ok, result.error)
-            self.assertEqual(session.backtest.replay_years_used, 1)
 
     def test_a_candidate_with_the_start_logic_is_a_legal_candidate(self) -> None:
         """A session may re-validate its start: on another span, or on the full
@@ -553,23 +552,6 @@ class BatchValidateRefusalTest(unittest.TestCase):
             with self.assertRaises(ToolError) as caught:
                 session.call("a", "b")
             self.assertIn("failed modification_check", str(caught.exception))
-            self.assertEqual(session.backtest.replay_years_used, 0)
-
-    def test_a_batch_larger_than_the_remaining_budget_is_refused_whole(self) -> None:
-        with TemporaryDirectory() as tmp:
-            session = _Session(Path(tmp), max_replay_years=8)
-            for index, name in enumerate("abc"):
-                session.candidate(name, _strategy(str(index)))
-            # Three candidates on the full four-year period need twelve.
-            with self.assertRaises(ToolError) as caught:
-                session.call("a", "b", "c")
-            self.assertIn("has 8 left and this batch needs 12", str(caught.exception))
-            self.assertEqual(caught.exception.error_type, "budget_exhausted")
-            self.assertEqual(session.backtest.replay_years_used, 0)
-            self.assertEqual(session.evaluator.calls, 0)
-            # The same three on one year fit.
-            self.assertTrue(session.call("a", "b", "c", span="Y2").ok)
-            self.assertEqual(session.backtest.replay_years_used, 3)
 
     def test_the_working_copy_is_a_candidate_but_other_reserved_roots_are_not(
         self,
@@ -599,10 +581,9 @@ class BatchValidateRefusalTest(unittest.TestCase):
                 session.call()
             with self.assertRaises(ToolError):
                 session.call(*[f"c{index}" for index in range(BATCH_VALIDATE_MAX_CANDIDATES + 1)])
-            self.assertEqual(session.backtest.replay_years_used, 0)
 
     def test_a_hypothesis_over_the_cap_is_refused_and_the_schema_states_it(self) -> None:
-        field = BatchValidateTool.spec.input_schema["properties"]["candidates"]["items"][
+        field = ValidateTool.spec.input_schema["properties"]["candidates"]["items"][
             "properties"
         ]["hypothesis"]
         # The cap has to hold a pre-registration with its falsification clause.
@@ -630,7 +611,6 @@ class BatchValidateRefusalTest(unittest.TestCase):
                 str(caught.exception),
             )
             self.assertEqual(caught.exception.error_type, "schema_error")
-            self.assertEqual(session.backtest.replay_years_used, 0)
             self.assertEqual(session.evaluator.calls, 0)
 
     def test_a_duplicate_path_is_refused(self) -> None:
@@ -670,8 +650,6 @@ class BatchValidateSpanTest(unittest.TestCase):
                 self.assertEqual(request.snapshot.replay_ref, "replay_Y2")
                 self.assertEqual(request.continuation, ("replay_Y3",))
             # Two candidates on two years cost four replay-years.
-            self.assertEqual(value["replay_years_used"], 4)
-            self.assertEqual(value["replay_years_remaining"], 44)
             for row, step in zip(value["candidates"], session.backtest.steps, strict=True):
                 self.assertEqual(step.span, "Y2..Y3")
                 node = session.tree.get_node(str(row["node_id"]))
@@ -687,21 +665,22 @@ class BatchValidateSpanTest(unittest.TestCase):
             self.assertEqual((request.start, request.end), ("20210701", "20250630"))
             self.assertEqual(request.snapshot.decision_ref, "decision_Y1")
             self.assertEqual(request.continuation, ("replay_Y2", "replay_Y3", "replay_Y4"))
-            self.assertEqual(session.backtest.replay_years_used, 8)
 
     def test_a_span_outside_the_research_years_is_refused_before_anything_runs(self) -> None:
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
             session.candidate("a", _strategy("1"))
-            # Six refusals: the seventh identical one would start costing
-            # replay-years (RepeatedRejectionTest).
-            for label in ("Y0", "Y5", "Y3..Y2", "Y2..Y5", "F", "heldout"):
+            for label in ("Y0", "Y6", "Y3..Y2", "Y2..Y6", "F", "heldout"):
                 with self.assertRaises(ToolError) as caught:
                     session.call("a", span=label)
                 self.assertIn("span must be full", str(caught.exception))
                 self.assertEqual(caught.exception.error_type, "schema_error")
+            # The validation year is a year of the geometry, but the frontier
+            # has not entered it: refused by name until a test moves it.
+            with self.assertRaises(ToolError) as caught:
+                session.call("a", span="Y5")
+            self.assertIn("after the frontier 20250630", str(caught.exception))
             self.assertEqual(session.evaluator.calls, 0)
-            self.assertEqual(session.backtest.replay_years_used, 0)
 
     def test_the_null_control_ranks_a_node_over_its_own_span(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -713,30 +692,29 @@ class BatchValidateSpanTest(unittest.TestCase):
             self.assertEqual((calls[0]["start"], calls[0]["end"]), ("20230701", "20240630"))
 
 
-class FreezeThroughTheRegistrationTest(unittest.TestCase):
-    """The finish tool reads the Pipeline's own registration over the session's
-    Steps, and a freeze that registers ends the session whatever it read."""
+class RegistrationTest(unittest.TestCase):
+    """``test`` reads the Pipeline's own registration over the session's Steps
+    (its refusal is pinned in test_rolling_validation); here, what registers."""
 
     def test_a_sub_span_node_does_not_register_and_a_lone_full_span_one_does(self) -> None:
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
             year = session.validate_one("year", _strategy("1"), span="Y2")["node_id"]
-            with self.assertRaises(ToolError) as sub_span:
-                session.finish.invoke({"outcome": "freeze", "node_id": year})
-            self.assertIn("freeze_needs_full_span_validation", str(sub_span.exception))
-            self.assertEqual(sub_span.exception.error_type, "freeze_registration_refused")
+            registration = session.backtest.registration(year)
+            self.assertFalse(registration["passed"])
+            self.assertIn("freeze_needs_full_span_validation", registration["reasons"])
             # One full-span validation is enough: no count of validations, no
-            # score and no other node's reading stands between it and a freeze.
+            # score and no other node's reading stands between it and a test.
             full = session.validate_one("full", _strategy("22"))["node_id"]
-            finished = session.finish.invoke({"outcome": "freeze", "node_id": full})
-            self.assertTrue(finished.finish)
+            registration = session.backtest.registration(full)
+            self.assertEqual((registration["passed"], registration["reasons"]), (True, []))
 
-    def test_a_full_span_winner_among_two_freezes_without_restoring_the_working_copy(
+    def test_a_full_span_winner_among_two_is_tested_without_restoring_the_working_copy(
         self,
     ) -> None:
-        """The Pipeline freezes the nominated revision, not output/, so a
-        winner is nominated as it is: the working copy still holds the start
-        and no step_rollback comes first."""
+        """The Pipeline tests the nominated revision, not output/, so a winner
+        is tested as it is: the working copy still holds the start and no
+        step_rollback comes first."""
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
             session.evaluator.summary_extra = COSTED
@@ -746,19 +724,8 @@ class FreezeThroughTheRegistrationTest(unittest.TestCase):
             winner = value["candidates"][1]["node_id"]
             registration = session.backtest.registration(str(winner))
             self.assertTrue(registration["passed"], registration)
-            finished = session.finish.invoke(
-                {
-                    "outcome": "freeze",
-                    "node_id": winner,
-                    "reason": "both full-period candidates resolve the only hypothesis this test registers",
-                }
-            )
-            self.assertTrue(finished.finish)
-            self.assertEqual(finished.value["node_id"], winner)
-            self.assertEqual(
-                finished.value["revision_id"],
-                str(session.tree.get_node(winner)["revision_id"]),
-            )
+            tested = session.finish.invoke({"candidate": winner})
+            self.assertEqual(tested.value["candidate"]["node_id"], winner)
             self.assertEqual(
                 (session.output / "main.py").read_text(encoding="utf-8"),
                 PARENT_SOURCE,
@@ -766,8 +733,7 @@ class FreezeThroughTheRegistrationTest(unittest.TestCase):
 
 
 class ControlsTest(unittest.TestCase):
-    """A registered control is recorded, costs its replay-years and never
-    nominates."""
+    """A registered control is recorded and never registers for a test."""
 
     def test_a_control_is_recorded_and_can_never_be_nominated(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -777,7 +743,6 @@ class ControlsTest(unittest.TestCase):
             session.candidate("c_base", _strategy("1"))
             value = session.call("cand", "c_base", controls=("c_base",)).value
             # Charged like any candidate: two candidates x four years.
-            self.assertEqual(session.backtest.replay_years_used, 8)
             cand, control = value["candidates"]
             self.assertEqual((cand["control"], control["control"]), (False, True))
             for row, step in zip(value["candidates"], session.backtest.steps, strict=True):
@@ -789,19 +754,16 @@ class ControlsTest(unittest.TestCase):
                     (ledger_row["control"], ledger_row["batch_id"]),
                     (row["control"], value["batch_id"]),
                 )
-            with self.assertRaises(ToolError) as refused:
-                session.finish.invoke(
-                    {"outcome": "freeze", "node_id": control["node_id"], "reason": "x" * 40}
-                )
-            self.assertEqual(refused.exception.error_type, "freeze_registration_refused")
-            self.assertIn("freeze_nominee_is_control", str(refused.exception))
+            registration = session.backtest.registration(str(control["node_id"]))
+            self.assertFalse(registration["passed"])
+            self.assertIn("freeze_nominee_is_control", registration["reasons"])
             # Rows name a node by the short handle the tools accept.
             self.assertEqual(cand["handle"], cand["result_name"])
 
     def test_a_registration_without_its_control_flag_is_refused_before_anything_runs(
         self,
     ) -> None:
-        schema = BatchValidateTool.spec.input_schema
+        schema = ValidateTool.spec.input_schema
         # Offline screens are no longer declared: nothing in the schema asks.
         self.assertNotIn("offline_trials", schema["properties"])
         self.assertEqual(schema["required"], ["candidates"])
@@ -818,7 +780,6 @@ class ControlsTest(unittest.TestCase):
                     session.batch.invoke(arguments)
                 self.assertEqual(caught.exception.error_type, "schema_error")
                 self.assertEqual(caught.exception.blocked_target, "control")
-            self.assertEqual(session.backtest.replay_years_used, 0)
             self.assertEqual(session.evaluator.calls, 0)
 
 
@@ -854,7 +815,6 @@ class BatchValidateRunTest(unittest.TestCase):
             # The batch never touched the working copy, so the tree position
             # comes back to where it branched from.
             self.assertEqual(session.tree.current_node_id, branch_point)
-            self.assertEqual(session.backtest.replay_years_used, 16)
             self.assertEqual(len(session.backtest.steps), 4)
 
     def test_candidates_replay_concurrently_up_to_the_arms_width(self) -> None:
@@ -953,23 +913,6 @@ class BatchValidateRunTest(unittest.TestCase):
             # Everything else about the boundary is untouched.
             self.assertEqual(session.evaluator.sandbox, SandboxConfig())
 
-    def test_each_candidate_costs_the_years_of_its_span(self) -> None:
-        with TemporaryDirectory() as tmp:
-            session = _Session(Path(tmp), max_replay_years=10)
-            for index, name in enumerate(("a", "b")):
-                session.candidate(name, _strategy(str(index)))
-            value = session.call("a", "b").value
-            self.assertEqual(value["replay_years_used"], 8)
-            self.assertEqual(value["replay_years_remaining"], 2)
-            # The next round continues the same numbering.
-            self.assertEqual(
-                sorted(row["result_name"] for row in value["candidates"]),
-                ["valid_001", "valid_002"],
-            )
-            span = session.backtest.span("Y1")
-            self.assertEqual(session.backtest.reserve(1, span), ["valid_003"])
-            self.assertEqual(session.backtest.replay_years_remaining, 1)
-
     def test_one_failing_candidate_does_not_hide_the_others(self) -> None:
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp), strategy_fail_markers=("999",))
@@ -1008,7 +951,6 @@ class BatchValidateRunTest(unittest.TestCase):
             self.assertEqual(failed[0]["metadata"]["candidate"], "bad")
             self.assertEqual(failed[0]["metadata"]["batch_id"], result.value["batch_id"])
             self.assertEqual(failed[0]["metadata"]["span"], "full")
-            self.assertEqual(session.backtest.replay_years_used, 12)
             self.assertEqual(len(session.backtest.steps), 2)
 
     def test_every_row_says_what_the_replay_cost_its_container(self) -> None:
@@ -1092,35 +1034,7 @@ class BatchValidateRunTest(unittest.TestCase):
             # Honest accounting: both strategies raised, so the replays measured
             # them and the replay-years are gone. The counters ride back on the
             # refusal, which is the only place this batch reports them.
-            self.assertEqual(session.backtest.replay_years_used, 8)
-            self.assertEqual(error.details["replay_years_used"], 8)
-            self.assertEqual(error.details["replay_years_remaining"], 40)
             self.assertEqual(session.backtest.steps, [])
-
-    def test_an_environment_failure_gives_its_replay_years_back(self) -> None:
-        """A shared card taken by another process measured nothing."""
-
-        with TemporaryDirectory() as tmp:
-            session = _Session(Path(tmp), contention_markers=("999",))
-            session.candidate("gpu", _strategy("999"))
-            with self.assertRaises(ToolError) as caught:
-                session.call("gpu", span="Y2")
-            error = caught.exception
-            self.assertIn("1 failed on the environment", str(error))
-            row = error.details["candidates"][0]
-            self.assertEqual(row["cause"], "environment")
-            self.assertIn("other processes on the card held the rest", row["error"])
-            self.assertEqual(session.backtest.replay_years_used, 0)
-            self.assertEqual(error.details["replay_years_used"], 0)
-            # The result name it spent is not reused: the dead end keeps it.
-            self.assertEqual(row["result_name"], "valid_001")
-            session.candidate("retry", _strategy("1"))
-            retried = session.call("retry", span="Y2")
-            self.assertTrue(retried.ok)
-            self.assertEqual(
-                retried.value["candidates"][0]["result_name"], "valid_002"
-            )
-            self.assertEqual(session.backtest.replay_years_used, 1)
 
     def test_a_leg_the_shared_card_failed_names_the_siblings_beside_it(self) -> None:
         """Legs of a batch that are not pinned to a card of their own (here the
@@ -1152,7 +1066,6 @@ class BatchValidateRunTest(unittest.TestCase):
             self.assertNotIn(note, own["error"])
             self.assertEqual(ok["status"], "ok")
             # The contended leg is refunded; the strategy's own failure is not.
-            self.assertEqual(session.backtest.replay_years_used, 2)
             [dead_end] = [
                 node
                 for node in session.tree.nodes()
@@ -1232,15 +1145,7 @@ class BatchValidateRunTest(unittest.TestCase):
         leg = config.on_devices((4,)).spec
         self.assertEqual((leg.gpu_count, leg.gpu), (1, (4,)))
 
-    def test_a_timeout_gives_its_replay_years_back(self) -> None:
-        with TemporaryDirectory() as tmp:
-            session = _Session(Path(tmp), fail_markers=("999",))
-            session.candidate("slow", _strategy("999"))
-            with self.assertRaises(ToolError):
-                session.call("slow", span="Y1")
-            self.assertEqual(session.backtest.replay_years_used, 0)
-
-    def test_a_mixed_batch_charges_only_what_it_measured(self) -> None:
+    def test_a_mixed_batch_records_each_candidates_cause(self) -> None:
         """One completed, one strategy exception, one environment failure."""
 
         with TemporaryDirectory() as tmp:
@@ -1260,9 +1165,6 @@ class BatchValidateRunTest(unittest.TestCase):
             self.assertEqual(rows["raised"]["cause"], "strategy")
             self.assertEqual(rows["contended"]["cause"], "environment")
             # Reserved 12 for three full-span candidates, 4 refunded.
-            self.assertEqual(result.value["replay_years_used"], 8)
-            self.assertEqual(result.value["replay_years_remaining"], 40)
-            self.assertEqual(session.backtest.replay_years_used, 8)
             # Both dead ends are still recorded, each carrying what it was.
             dead_ends = {
                 node["metadata"]["candidate"]: node["metadata"]["cause"]
@@ -1273,7 +1175,7 @@ class BatchValidateRunTest(unittest.TestCase):
                 dead_ends, {"raised": "strategy", "contended": "environment"}
             )
 
-    def test_environment_failures_are_refunded_when_recording_a_candidate_fails(
+    def test_environment_failures_are_recorded_when_recording_a_candidate_fails(
         self,
     ) -> None:
         """Host IO failing while one completed candidate is recorded aborts the
@@ -1294,10 +1196,9 @@ class BatchValidateRunTest(unittest.TestCase):
                 session.call("contended", "good", "late_contended")
             # Reserved 12 for three full-span candidates; both contended ones
             # are refunded, the completed one stays charged.
-            self.assertEqual(session.backtest.replay_years_used, 4)
             self.assertEqual(session.backtest.steps, [])
 
-    def test_a_memory_cap_kill_is_charged_like_a_strategy_exception(self) -> None:
+    def test_a_memory_cap_kill_is_the_strategys_own_failure(self) -> None:
         """The memory cap is a budget the session was told about, with swap
         pinned to it, so a candidate killed there measured itself: no refund."""
 
@@ -1310,258 +1211,6 @@ class BatchValidateRunTest(unittest.TestCase):
             rows = {row["name"]: row for row in result.value["candidates"]}
             self.assertEqual(rows["big"]["cause"], "strategy")
             self.assertIn("32g memory cap", rows["big"]["error"])
-            self.assertEqual(result.value["replay_years_used"], 2)
-            self.assertEqual(session.backtest.replay_years_used, 2)
-
-    def test_a_resumed_attempt_starts_from_the_refunded_counter(self) -> None:
-        """The refund is settled before the call returns, so the budget block
-        the trace writes for it already carries it, and the next attempt of an
-        interrupted session seeds from that block rather than from the reservation."""
-
-        with TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            experiment = root / "experiment_dir"
-            session = _Session(
-                root,
-                contention_markers=("999",),
-                strategy_fail_markers=("777",),
-            )
-            session.candidate("raised", _strategy("777"))
-            session.candidate("contended", _strategy("999"))
-            with self.assertRaises(ToolError):
-                session.call("raised", "contended", span="Y1..Y2")
-            # 4 reserved, the contended one's 2 given back.
-            self.assertEqual(session.backtest.replay_years_used, 2)
-            # What the attempt's trace carries: the cumulative block rides on
-            # the tool_call event, emitted after the tool settled.
-            trace = agent_trace_path(experiment / "artifacts", "run_batch")
-            trace.parent.mkdir(parents=True, exist_ok=True)
-            trace.write_text(
-                "".join(
-                    json.dumps(event) + "\n"
-                    for event in (
-                        {
-                            "event_type": "llm_call",
-                            "ts": "2026-09-15T01:00:00+00:00",
-                            "budget_used": BudgetUsed(
-                                llm_calls=1, replay_years=0
-                            ).to_record(),
-                        },
-                        {
-                            "event_type": "tool_call",
-                            "ts": "2026-09-15T01:40:00+00:00",
-                            "tool": "batch_validate",
-                            "budget_used": BudgetUsed(
-                                llm_calls=1,
-                                replay_years=session.backtest.replay_years_used,
-                            ).to_record(),
-                        },
-                    )
-                ),
-                encoding="utf-8",
-            )
-            resume = resume_state(
-                experiment,
-                [
-                    {
-                        "record_type": "attempt_failed",
-                        "phase": Stage.RESEARCH,
-                        "run_id": "run_batch",
-                        "error": "RuntimeError: session container died",
-                    }
-                ],
-            )
-            assert resume is not None
-            self.assertEqual(resume.budget_used.replay_years, 2)
-            resumed = _Session(root / "next", budget_used=resume.budget_used)
-            self.assertEqual(resumed.backtest.replay_years_used, 2)
-            self.assertEqual(resumed.backtest.replay_years_remaining, 46)
-
-    def test_a_resume_keeps_the_replay_years_of_a_validation_the_trace_never_saw(
-        self,
-    ) -> None:
-        """A batch records its candidates one at a time and each one is durable
-        at once, while the cumulative budget block only reaches the trace when
-        the whole call settles. An attempt killed between the two leaves Steps
-        the trace does not account for, and the session that resumes it must
-        still treat their replay-years as spent instead of handing them back."""
-
-        with TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            experiment = root / "experiment_dir"
-            session = _Session(root, experiment_dir=experiment)
-            session.candidate("a", _strategy("1"))
-            session.candidate("b", _strategy("22"))
-            record_validation = session.backtest.record_validation
-            recorded: list[str] = []
-
-            def killed_after_the_first_record(*args: object, **kwargs: object) -> str:
-                if recorded:
-                    raise MemoryError("the attempt was killed inside batch_validate")
-                recorded.append(record_validation(*args, **kwargs))
-                return recorded[-1]
-
-            session.backtest.record_validation = killed_after_the_first_record
-            with self.assertRaises(MemoryError):
-                session.call("a", "b", span="Y1..Y2")
-            # Four replay-years were reserved and one candidate is durable.
-            self.assertEqual(session.backtest.replay_years_used, 4)
-            steps = load_recorded_steps(experiment)
-            self.assertEqual([step.span for step in steps], ["Y1..Y2"])
-            # The trace of a killed attempt stops at its last settled call, so
-            # the batch it charged is nowhere in it.
-            trace = agent_trace_path(experiment / "artifacts", "run_batch")
-            trace.parent.mkdir(parents=True, exist_ok=True)
-            trace.write_text(
-                json.dumps(
-                    {
-                        "event_type": "llm_call",
-                        "ts": "2026-09-15T01:00:00+00:00",
-                        "budget_used": BudgetUsed(llm_calls=1).to_record(),
-                    }
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            resume = resume_state(
-                experiment,
-                [
-                    {
-                        "record_type": "attempt_failed",
-                        "phase": Stage.RESEARCH,
-                        "run_id": "run_batch",
-                        "error": "the run marker of a killed attempt",
-                    }
-                ],
-            )
-            assert resume is not None
-            self.assertEqual(resume.budget_used.replay_years, 0)
-            self.assertEqual(resume.unseen_step_ids, (steps[0].step_id,))
-            resumed = _Session(
-                root / "next",
-                budget_used=resume.budget_used,
-                steps_before=steps,
-                resume=resume,
-            )
-            self.assertEqual(resumed.backtest.replay_years_used, 2)
-            self.assertEqual(resumed.backtest.replay_years_remaining, 46)
-
-    def test_a_resume_adds_the_unseen_validations_to_what_the_trace_counted(
-        self,
-    ) -> None:
-        """The trace's last block holds every charge up to the last settled
-        call, the ones that leave no Step included, and the batch the attempt
-        died inside recorded a Step after it. The resumed counter is the block
-        plus that Step: taking the larger of the block and the recorded Steps
-        would hand the dying batch's years back whenever an earlier candidate
-        failed in its own code. A block written after the Step already counts
-        it, so it is never charged twice."""
-
-        with TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            experiment = root / "experiment_dir"
-            session = _Session(
-                root, experiment_dir=experiment, strategy_fail_markers=("777",)
-            )
-            session.candidate("a", _strategy("1"))
-            session.candidate("raised", _strategy("777"))
-            self.assertTrue(session.call("a", "raised", span="Y1..Y2").ok)
-            # Both candidates' years stay spent; only one of them left a Step.
-            self.assertEqual(session.backtest.replay_years_used, 4)
-            settled = {
-                "event_type": "tool_call",
-                "ts": utc_now_iso(),
-                "tool": "batch_validate",
-                "budget_used": BudgetUsed(llm_calls=2, replay_years=4).to_record(),
-            }
-            session.candidate("b", _strategy("22"))
-            session.candidate("c", _strategy("333"))
-            record_validation = session.backtest.record_validation
-            recorded: list[str] = []
-
-            def killed_after_the_first_record(*args: object, **kwargs: object) -> str:
-                if recorded:
-                    raise MemoryError("the attempt was killed inside batch_validate")
-                recorded.append(record_validation(*args, **kwargs))
-                return recorded[-1]
-
-            session.backtest.record_validation = killed_after_the_first_record
-            with self.assertRaises(MemoryError):
-                session.call("b", "c", span="Y1..Y2")
-            self.assertEqual(session.backtest.replay_years_used, 8)
-            steps = load_recorded_steps(experiment)
-            self.assertEqual(len(steps), 2)
-            trace = agent_trace_path(experiment / "artifacts", "run_batch")
-            trace.parent.mkdir(parents=True, exist_ok=True)
-            failed = [
-                {
-                    "record_type": "attempt_failed",
-                    "phase": Stage.RESEARCH,
-                    "run_id": "run_batch",
-                    "error": "the run marker of a killed attempt",
-                }
-            ]
-
-            def resumed(name: str, *events: Mapping[str, object]) -> _Session:
-                trace.write_text(
-                    "".join(json.dumps(event) + "\n" for event in events),
-                    encoding="utf-8",
-                )
-                resume = resume_state(experiment, failed)
-                assert resume is not None
-                return _Session(
-                    root / name,
-                    budget_used=resume.budget_used,
-                    steps_before=steps,
-                    resume=resume,
-                )
-
-            # Killed outright: the trace ends at the settled batch, whose 4
-            # include the own-code failure, and b's 2 come on top.
-            killed = resumed("killed", settled)
-            self.assertEqual(killed.backtest.request.resume.unseen_step_ids, (steps[1].step_id,))
-            self.assertEqual(killed.backtest.replay_years_used, 6)
-            self.assertEqual(killed.backtest.replay_years_remaining, 42)
-            # Unwound instead: the error block written after b already holds
-            # it with the whole reservation, and nothing is added.
-            unwound = resumed(
-                "unwound",
-                settled,
-                {
-                    "event_type": "session_error",
-                    "ts": utc_now_iso(),
-                    "budget_used": BudgetUsed(llm_calls=2, replay_years=8).to_record(),
-                },
-            )
-            self.assertEqual(unwound.backtest.request.resume.unseen_step_ids, ())
-            self.assertEqual(unwound.backtest.replay_years_used, 8)
-
-    def test_a_budget_block_without_a_time_refuses_the_resume(self) -> None:
-        """Without the block's time the resume cannot tell which recorded
-        Validations it already counts, so it refuses rather than guess."""
-
-        with TemporaryDirectory() as tmp:
-            experiment = Path(tmp) / "experiment_dir"
-            trace = agent_trace_path(experiment / "artifacts", "run_batch")
-            trace.parent.mkdir(parents=True, exist_ok=True)
-            trace.write_text(
-                json.dumps(
-                    {"event_type": "llm_call", "budget_used": BudgetUsed().to_record()}
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            with self.assertRaisesRegex(RuntimeError, "no aware ISO time"):
-                resume_state(
-                    experiment,
-                    [
-                        {
-                            "record_type": "attempt_failed",
-                            "phase": Stage.RESEARCH,
-                            "run_id": "run_batch",
-                        }
-                    ],
-                )
 
     def test_each_row_carries_the_sub_window_table_and_a_readable_result_ref(
         self,
@@ -1754,9 +1403,9 @@ class BatchValidateRunTest(unittest.TestCase):
                     "span",
                     "complete_validations",
                     "failed",
-                    "replay_years_used",
-                    "replay_years_remaining",
                     "result_root",
+                    "validates_in_step",
+                    "validates_per_step",
                 },
             )
             # The working copy is untouched by the batch.
@@ -1807,7 +1456,6 @@ class EnvironmentBlockedTest(unittest.TestCase):
             )
             self.assertIn("generate_orders exceeded 30s (999)", reason)
             # The batch that ended it settled first: refunded, dead end kept.
-            self.assertEqual(session.backtest.replay_years_used, 4)
             dead_ends = [node for node in session.tree.nodes() if node.get("status") == "failed"]
             self.assertEqual(
                 [node["metadata"]["span"] for node in dead_ends], ["full", "Y1", "full", "full"]
@@ -1815,7 +1463,7 @@ class EnvironmentBlockedTest(unittest.TestCase):
             self.assertEqual({node["metadata"]["cause"] for node in dead_ends}, {"environment"})
             self.assertEqual(
                 [payload for event, payload in trace if event == "environment_blocked"],
-                [{"tool": "batch_validate", "span": "full", "batches": 2, "reason": reason}],
+                [{"tool": "validate", "span": "full", "batches": 2, "reason": reason}],
             )
 
     def test_a_batch_with_a_candidate_that_raised_in_its_own_code_never_counts(self) -> None:
@@ -1828,7 +1476,6 @@ class EnvironmentBlockedTest(unittest.TestCase):
             for _ in range(3):
                 with self.assertRaises(ToolError):
                     session.call("slow", "raised")
-            self.assertEqual(session.backtest.replay_years_used, 12)
 
 
 class DailySeriesTest(unittest.TestCase):
@@ -1964,24 +1611,6 @@ class BudgetSpentNoteTest(unittest.TestCase):
     true: the batch that spends the replay-year budget says no further batch
     can run."""
 
-    def test_only_the_batch_that_spends_the_budget_says_so(self) -> None:
-        with TemporaryDirectory() as tmp:
-            session = _Session(Path(tmp), max_replay_years=2)
-            session.candidate("a", _strategy("1"))
-            session.candidate("b", _strategy("22"))
-            first = session.call("a", span="Y1").value
-            self.assertEqual(first["replay_years_remaining"], 1)
-            self.assertNotIn("budget_spent", first)
-            last = session.call("b", span="Y1").value
-            self.assertEqual(last["replay_years_remaining"], 0)
-            self.assertEqual(last["budget_spent"], BUDGET_SPENT_NOTE)
-            self.assertIn("no further batch can run", last["budget_spent"])
-            # It says what the next refusal would.
-            session.candidate("c", _strategy("333"))
-            with self.assertRaises(ToolError) as refused:
-                session.call("c", span="Y1")
-            self.assertIn("replay-year budget is spent", str(refused.exception))
-
 
 class BatchValidateContractTest(unittest.TestCase):
     def test_the_tool_is_sequential_phase_gated_and_in_the_session_set(self) -> None:
@@ -1991,18 +1620,18 @@ class BatchValidateContractTest(unittest.TestCase):
         )
         from autotrade.environment.tools.base import is_sequential_tool
 
-        name = BatchValidateTool.spec.name
-        self.assertTrue(BatchValidateTool.spec.mutating)
-        self.assertTrue(is_sequential_tool(BatchValidateTool.spec))
+        name = ValidateTool.spec.name
+        self.assertTrue(ValidateTool.spec.mutating)
+        self.assertTrue(is_sequential_tool(ValidateTool.spec))
         self.assertIn(name, _PHASE_GATE_TOOLS)
         self.assertIn(name, _SESSION_TOOLS)
 
     def test_the_description_states_the_selection_path(self) -> None:
-        description = BatchValidateTool.spec.description
+        description = ValidateTool.spec.description
         self.assertIn("step_rollback", description)
-        self.assertIn("finish_session", description)
+        self.assertIn("test", description)
         self.assertIn("hypothesis", description)
-        self.assertIn("span", BatchValidateTool.spec.input_schema["properties"])
+        self.assertIn("span", ValidateTool.spec.input_schema["properties"])
         for retired in ("Fold", "parent strategy", "backtest budget", "Step budget"):
             self.assertNotIn(retired, description)
 
@@ -2010,7 +1639,7 @@ class BatchValidateContractTest(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
             registry = ToolRegistry([session.batch])
-            result = registry.invoke("batch_validate", {"candidate": []})
+            result = registry.invoke("validate", {"candidate": []})
             self.assertFalse(result.ok)
             self.assertIn("unknown argument", result.error)
             self.assertIn("correct call example", result.error)
@@ -2096,7 +1725,6 @@ class BatchTemplateFilesTest(unittest.TestCase):
             with self.assertRaises(ToolError) as caught:
                 session.call("a", "b")
             self.assertIn("readonly files modified", str(caught.exception))
-            self.assertEqual(session.backtest.replay_years_used, 0)
 
 
 class RepeatedRejectionTest(unittest.TestCase):
@@ -2146,33 +1774,11 @@ class RepeatedRejectionTest(unittest.TestCase):
             self.assertIn("modification_check", escalated)
             self.assertIn("delta.readonly_violations", escalated)
             # An escalation is not a charge: the budget is still untouched.
-            self.assertEqual(session.backtest.replay_years_used, 0)
             self.assertEqual([event for event, _ in trace], ["batch_rejection_escalated"])
             payload = trace[0][1]
             self.assertEqual(payload["error_type"], "readonly_baseline")
             self.assertEqual(payload["blocked_target"], "candidates/a")
             self.assertEqual(payload["repeat_count"], BATCH_REJECTION_ESCALATE_AT)
-            self.assertIs(payload["charged_replay_year"], False)
-
-    def test_every_attempt_past_the_sixth_consumes_a_replay_year(self) -> None:
-        with TemporaryDirectory() as tmp:
-            session = self._readonly_loop(tmp)
-            for _ in range(BATCH_REJECTION_CHARGE_AFTER):
-                self._refuse(session)
-            self.assertEqual(session.backtest.replay_years_used, 0)
-            charged = self._refuse(session)
-            self.assertEqual(session.backtest.replay_years_used, 1)
-            self.assertIn("consumed one replay-year", charged)
-            self._refuse(session)
-            self.assertEqual(session.backtest.replay_years_used, 2)
-            # The bound is the budget: once it is gone, so is any further batch.
-            while session.backtest.replay_years_remaining > 0:
-                self._refuse(session)
-            self.assertIn("replay-year budget is already spent", self._refuse(session))
-            self.assertEqual(
-                session.backtest.replay_years_used,
-                session.backtest.request.max_replay_years,
-            )
 
     def test_a_different_signature_is_counted_on_its_own(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -2196,7 +1802,6 @@ class RepeatedRejectionTest(unittest.TestCase):
             self.assertIn("reserved workspace root", escalated)
             self.assertIn("repeated rejection", escalated)
             self.assertIn("change the input it names", escalated)
-            self.assertEqual(session.backtest.replay_years_used, 0)
 
 
 def _canned_null(calls: list[dict[str, object]]):
@@ -2349,7 +1954,6 @@ class RecordedValidationDurabilityTest(unittest.TestCase):
     to freeze it, so an attempt that dies keeps them for its resumed attempt."""
 
     def test_a_recorded_validation_is_published_with_its_host_sidecar(self) -> None:
-        from autotrade.pipelines.session_resume import load_recorded_steps
 
         with TemporaryDirectory() as tmp:
             experiment = Path(tmp) / "experiment"

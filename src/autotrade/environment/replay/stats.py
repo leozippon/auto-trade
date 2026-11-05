@@ -311,6 +311,19 @@ def window_activity(
     }
 
 
+def window_fees(executions: Sequence[Mapping[str, object]], *, start: str, end: str) -> float:
+    """Commission and stamp duty of the fills inside ``start..end`` (``YYYYMMDD``,
+    inclusive): the trading costs one slice of a continuous replay paid."""
+
+    start = _window_bound(start, "start")
+    end = _window_bound(end, "end")
+    return sum(
+        float(order.get("commission") or 0.0) + float(order.get("stamp_duty") or 0.0)
+        for order in executions
+        if str(order.get("status") or "") == "filled" and start <= _fill_date(order) <= end
+    )
+
+
 def _filled_notional(order: Mapping[str, object]) -> float:
     price = order.get("price")
     if not isinstance(price, (int, float)) or isinstance(price, bool):

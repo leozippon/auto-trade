@@ -313,12 +313,12 @@ class InteractiveRunnerTest(RunnerTestCase):
         executor = RecordingExecutor(self.ledger, outcomes={"research": NO_EDGE})
         self.set_control(
             directives={"research": "try momentum"},
-            resource_overrides={"research": {"max_replay_years": 2}},
+            resource_overrides={"research": {"max_llm_calls": 2}},
         )
         self.runner(PLAN, executor).run()
         _key, context = executor.calls[0]
         self.assertEqual(context["directive"], "try momentum")
-        self.assertEqual(context["resource_override"], {"max_replay_years": 2})
+        self.assertEqual(context["resource_override"], {"max_llm_calls": 2})
         self.assertEqual(context["session_key"], "research")
         for hook in ("progress_hook", "session_timing"):
             self.assertTrue(callable(context[hook]), hook)

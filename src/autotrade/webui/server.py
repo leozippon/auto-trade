@@ -34,7 +34,7 @@ from autotrade.environment.data.contracts import RAW_GENERATION_FILENAME
 from autotrade.environment.gpu import list_gpus
 from autotrade.environment.llm.model_profiles import model_profile
 from autotrade.paper import fills
-from autotrade.paper.books import delete_book, open_graduated_book
+from autotrade.paper.books import delete_book, open_frozen_book
 from autotrade.paper.engine import PAPER_STATE_NAME, PaperWriterBusy
 from autotrade.pipelines.hitl_state import HITL_DIR_NAME, PARAMS_NAME, read_status
 
@@ -784,7 +784,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         _trading_env(env)
         directory = _experiment_dir(str(payload.get("experiment_id") or ""))
         try:
-            book_id = open_graduated_book(root, directory)
+            book_id = open_frozen_book(root, directory)
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=omit_private_paths(str(exc))) from exc
         except (ValueError, OSError, RuntimeError) as exc:

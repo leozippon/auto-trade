@@ -80,7 +80,7 @@ MAX_RUNNING_LOCAL_EXPERIMENTS = 4
 # and as-of stash its seed does not carry, measured at 0.5-2.5 GiB of unique
 # bytes per arm. A create is refused unless the experiments filesystem keeps the
 # Agent tools' free-space floor after that, so an arm never builds its views
-# only to have its shell and batch_validate calls refused below the floor.
+# only to have its shell and validate calls refused below the floor.
 ARM_DISK_MARGIN_BYTES = 3 * 1024**3
 # SIGTERM graces before the worker's process group is SIGKILLed. Terminate is
 # an explicit stop, so it stays short; restart has to outwait the in-flight
@@ -684,7 +684,7 @@ class ExperimentManager:
                 f"not enough free disk space to create an arm: {free / 1024**3:.1f} GiB "
                 f"free on the experiments filesystem, {needed / 1024**3:g} GiB needed "
                 f"(the {WORKSPACE_MIN_FREE_BYTES / 1024**3:g} GiB floor below which "
-                "shell and batch_validate are refused, plus "
+                "shell and validate are refused, plus "
                 f"{ARM_DISK_MARGIN_BYTES / 1024**3:g} GiB for the arm's own PIT views)"
             )
 

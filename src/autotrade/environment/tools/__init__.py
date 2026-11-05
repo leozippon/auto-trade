@@ -22,7 +22,6 @@ from .base import (
 )
 from .compact import CompactTool
 from .files import EditFileTool, WriteFileTool
-from .finish_session import FinishSessionTool
 from .modification_check import ModificationCheckTool
 from .report_issue import ReportIssueTool
 from .search import (
@@ -48,7 +47,6 @@ __all__ = [
     "CompactTool",
     "DeleteSkillTool",
     "EditFileTool",
-    "FinishSessionTool",
     "GlobTool",
     "GrepTool",
     "ModificationCheckTool",

@@ -44,7 +44,7 @@ from tests.unit.gpu_probe import stubbed_gpu_probe
 
 
 def _experiment(
-    tmp_path: Path, *, developer_mode: str = "baseline", max_replay_years: int = 1
+    tmp_path: Path, *, developer_mode: str = "baseline"
 ) -> tuple[Path, Path]:
     repo = tmp_path / "repo"
     experiment = repo / "experiments" / "smoke"
@@ -86,7 +86,6 @@ def _experiment(
                 "strategy_period": "day",
                 "inference_time": "08:30",
                 "initial_cash": 100_000,
-                "max_replay_years": max_replay_years,
                 **REQUIRED_RULES,
             }
         ),
@@ -857,11 +856,11 @@ class _NoShellRunner:
 
 
 
-# The working copy as a one-candidate batch_validate round: the scripted
+# The working copy as a one-candidate validate round: the scripted
 # sessions write output/ through a child and validate it as it stands.
 VALIDATE_WORKING_COPY = ToolCall(
     "valid",
-    "batch_validate",
+    "validate",
     {
         "candidates": [
             {
@@ -876,9 +875,12 @@ VALIDATE_WORKING_COPY = ToolCall(
 
 
 
-# A scripted finish that names the working-copy row it has just read: node ids
+# A scripted test that names the working-copy row it has just read: node ids
 # carry the session's opaque run ref, which a script cannot know in advance.
 LAST_WORKING_COPY_NODE = "<working copy node>"
+TEST_WORKING_COPY = ToolCall("test", "test", {"candidate": LAST_WORKING_COPY_NODE})
+# The arguments a scripted call may name the last working-copy node in.
+_NODE_ARGUMENTS = ("candidate", "node_id")
 
 
 
@@ -886,8 +888,9 @@ class _NominatingLLM(ScriptedLLM):
     def complete(self, messages, **kwargs):
         response = super().complete(messages, **kwargs)
         if not any(
-            call.arguments.get("node_id") == LAST_WORKING_COPY_NODE
+            call.arguments.get(key) == LAST_WORKING_COPY_NODE
             for call in response.tool_calls
+            for key in _NODE_ARGUMENTS
         ):
             return response
         rows = re.findall(
@@ -897,9 +900,14 @@ class _NominatingLLM(ScriptedLLM):
         )
         return ProviderResponse(
             tool_calls=tuple(
-                ToolCall(call.id, call.name, {**call.arguments, "node_id": rows[-1]})
-                if call.arguments.get("node_id") == LAST_WORKING_COPY_NODE
-                else call
+                ToolCall(
+                    call.id,
+                    call.name,
+                    {
+                        key: rows[-1] if value == LAST_WORKING_COPY_NODE and key in _NODE_ARGUMENTS else value
+                        for key, value in call.arguments.items()
+                    },
+                )
                 for call in response.tool_calls
             )
         )
@@ -1186,7 +1194,6 @@ _REMOVED_BROWSER_BOUNDS = (
     ("tracking_error_cap", -0.08, "tracking_error_cap must be positive"),
     # This arm's capital derives no tracking mandate, so a band has no cap.
     ("beta_min", 0.9, "are set together or not at all"),
-    ("max_replay_years", 0, "max_replay_years must be a positive integer"),
     ("max_llm_calls", 0, "max_llm_calls must be a positive integer"),
     ("initial_cash", 0.0, "initial_cash must be a positive finite number"),
     (

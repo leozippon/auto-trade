@@ -126,12 +126,14 @@ class LocalDailyEvaluationBackend:
         *,
         max_days: int | None = None,
         start_day: str | None = None,
+        end_day: str | None = None,
     ) -> EvaluationResult:
-        """``start_day``/``max_days`` truncate the replay (``calendar.replay_window``).
+        """``start_day``/``max_days``/``end_day`` truncate the replay
+        (``calendar.replay_window``).
 
         Same contract as the PIT backend: an unofficial smoke run gets the real
         replay path over a short window, never a short window dressed up as a
-        full Validation.
+        full Validation, and a test replays its span up to the frontier.
         """
         if max_days is not None and max_days <= 0:
             raise ValueError("max_days must be a positive integer")
@@ -149,9 +151,9 @@ class LocalDailyEvaluationBackend:
             frame = self.frame_between(request.start, request.end)
             replay_start = str(request.start)
             replay_end = str(request.end)
-            if max_days is not None or start_day is not None:
+            if max_days is not None or start_day is not None or end_day is not None:
                 kept = replay_window(
-                    set(frame["trade_date"]), start=start_day, max_days=max_days
+                    set(frame["trade_date"]), start=start_day, max_days=max_days, end=end_day
                 )
                 frame = frame[frame["trade_date"].isin(set(kept))].copy()
                 # A truncated replay must not claim it covered the whole span.
@@ -256,7 +258,7 @@ class DeterministicBaselineDeveloper:
                 source, models_path=None
             )
             validation = self.evaluator.evaluate(
-                request.validation.request(
+                request.full_span.request(
                     typed_revision, schedule=self.schedule, broker_profile=self.broker_profile
                 )
             )
@@ -265,14 +267,16 @@ class DeterministicBaselineDeveloper:
                     f"{prefix}__valid_{index:03d}",
                     typed_revision.revision_id,
                     validation,
-                    span=request.validation.label,
+                    span=request.full_span.label,
                 )
             )
+        # No agent tests anything here: the session ends as one whose budget
+        # ran out before a test, and the host freezes the baseline's last
+        # Validation and completes the record with it.
         return ResearchSessionResult(
             f"deterministic_baseline_{request.run_id}",
             tuple(steps),
-            "freeze",
-            node_id=steps[-1].step_id,
+            "deadline",
             finish_reason="deterministic_baseline_replay_no_agent_improvement",
         )
 

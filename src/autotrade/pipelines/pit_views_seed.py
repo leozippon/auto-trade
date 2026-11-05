@@ -47,7 +47,12 @@ from autotrade.environment.data.contracts import (
 )
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.runtime import chmod_tree, rmtree_keeping_file_modes
-from autotrade.pipelines.calendar import ResearchGeometry, Slot
+from autotrade.pipelines.calendar import (
+    ResearchGeometry,
+    Slot,
+    anchor_before,
+    step_windows,
+)
 from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION
 
 # What a finished view carries: a snapshot restates its manifest and a bundle
@@ -64,36 +69,80 @@ UNFINISHED_BUILD_MARKER = "prebuild_unfinished.json"
 # are validation replays, and the forward replay reads F and H as held-out data.
 RESEARCH_PHASE = "valid"
 FORWARD_PHASE = "heldout"
+# The research_years an arm may choose on a seed: the seed carries a warm as-of
+# start at each, and step-boundary decision views from the earliest validation
+# start on. A choice the geometry cannot take (it must leave at least one
+# validation year) is planned for nothing.
+DEFAULT_RESEARCH_YEARS_CHOICES = (5, 6, 7)
+# The finest test step (``config.TEST_STEP_MONTHS``): a decision view at every
+# month boundary of the validation years serves monthly and quarterly steps.
+_STEP_VIEW_MONTHS = 1
 
 
 @dataclass(frozen=True)
 class SeedPlan:
     """The views a seed carries for one research geometry and one release.
 
-    Research reads the decision views at each research year's anchor and at
-    research end -- the latter is the Agent's only data mount and the data
-    summary bundle describes it -- plus the research-year slots. The forward
-    and Held-out slots belong to the pipeline's forward replay alone, so no
+    Research reads the decision views at each research year's anchor, at
+    every step boundary of the validation years (the view a session mounts
+    after each test; the earliest validation start is the smallest
+    ``research_years_choices`` entry) and at research end -- the data summary
+    bundle describes that one -- plus the research-year slots. The forward and
+    Held-out slots belong to the pipeline's forward replay alone, so no
     research item is stamped after research end. The as-of stash follows the
-    two continuous replays: the full research chain from the first year's
-    anchor, and the forward chain from research end.
+    continuous replays: the full research chain from the first year's anchor,
+    one validation chain per research-years choice (the span a test replays
+    from its first day), and the forward chain from research end.
     """
 
     geometry: ResearchGeometry
     research_slots: tuple[Slot, ...]
     forward_slots: tuple[Slot, ...]
+    research_years_choices: tuple[int, ...] = ()
+
+    def __post_init__(self) -> None:
+        count = len(self.research_slots)
+        wrong = [choice for choice in self.research_years_choices if not 1 <= choice < count]
+        if wrong:
+            raise ValueError(
+                f"research_years_choices must leave at least one validation year of {count}, got {wrong}"
+            )
+
+    @property
+    def step_decision_times(self) -> tuple[datetime, ...]:
+        """The month-boundary views of the validation years that are not a
+        year anchor, from the earliest validation start to research end."""
+
+        if not self.research_years_choices:
+            return ()
+        validation = self.research_slots[min(self.research_years_choices) :]
+        anchors = {slot.anchor for slot in self.research_slots} | {self.geometry.research_decision_time}
+        return tuple(
+            anchor_before(start)
+            for start, _end in step_windows(validation[0].start, validation[-1].end, _STEP_VIEW_MONTHS)
+            if anchor_before(start) not in anchors
+        )
 
     @property
     def decision_times(self) -> tuple[datetime, ...]:
-        return (
-            *(slot.anchor for slot in self.research_slots),
-            self.geometry.research_decision_time,
+        return tuple(
+            sorted(
+                {
+                    *(slot.anchor for slot in self.research_slots),
+                    *self.step_decision_times,
+                    self.geometry.research_decision_time,
+                }
+            )
         )
 
     @property
     def stash_chains(self) -> tuple[tuple[datetime, tuple[Slot, ...]], ...]:
         return (
             (self.research_slots[0].anchor, self.research_slots),
+            *(
+                (self.research_slots[choice].anchor, self.research_slots[choice:])
+                for choice in sorted(set(self.research_years_choices))
+            ),
             (self.geometry.research_decision_time, self.forward_slots),
         )
 
@@ -109,7 +158,9 @@ class SeedPlan:
     def to_record(self) -> dict[str, object]:
         return {
             "geometry": self.geometry.to_record(),
+            "research_years_choices": list(self.research_years_choices),
             "decision_views": [value.isoformat() for value in self.decision_times],
+            "step_decision_views": [value.isoformat() for value in self.step_decision_times],
             "research_slots": [slot.to_record() for slot in self.research_slots],
             "forward_slots": [slot.to_record() for slot in self.forward_slots],
             "bundle": self.geometry.research_decision_time.isoformat(),
@@ -120,13 +171,24 @@ class SeedPlan:
         }
 
 
-def plan_seed(geometry: ResearchGeometry, trading_days: Sequence[str]) -> SeedPlan:
-    """The seed plan of ``geometry`` over a release's daily trading dates."""
+def plan_seed(
+    geometry: ResearchGeometry,
+    trading_days: Sequence[str],
+    *,
+    research_years_choices: Sequence[int] = DEFAULT_RESEARCH_YEARS_CHOICES,
+) -> SeedPlan:
+    """The seed plan of ``geometry`` over a release's daily trading dates, with
+    a warm validation start for each of ``research_years_choices`` the
+    geometry can take (``SeedPlan.research_years_choices``)."""
 
+    years = len(geometry.research_years)
     return SeedPlan(
         geometry=geometry,
         research_slots=geometry.research_years,
         forward_slots=(geometry.forward, geometry.heldout(trading_days)),
+        research_years_choices=tuple(
+            sorted({int(choice) for choice in research_years_choices if 1 <= int(choice) < years})
+        ),
     )
 
 
@@ -567,6 +629,7 @@ def _skip_seed_name(name: str) -> bool:
 
 
 __all__ = [
+    "DEFAULT_RESEARCH_YEARS_CHOICES",
     "FORWARD_PHASE",
     "RESEARCH_PHASE",
     "UNFINISHED_BUILD_MARKER",

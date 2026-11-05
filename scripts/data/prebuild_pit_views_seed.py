@@ -24,10 +24,13 @@ rerun reuses the same pin.
 
 Each slot is prepared at its own anchor, which also builds the decision view at
 that anchor, so the Held-out slot leaves one decision view (at forward end)
-that no stage reads. The as-of stash is encoded for the first slot of each
-chain; a later slot of a chain continues the as-of tree of the slots before
-it, which this backend cannot encode offline, so those parts are built on
-first use.
+that no stage reads; the step-boundary views of the validation years (the
+view a session mounts after each test, one per month from the earliest
+validation start ``--research-years`` allows) are built on their own. The
+as-of stash is encoded for the first slot of each chain -- the research chain,
+one validation chain per research-years choice and the forward chain; a later
+slot of a chain continues the as-of tree of the slots before it, which this
+backend cannot encode offline, so those parts are built on first use.
 
 A build writes ``UNFINISHED_BUILD_MARKER`` into the seed root before the
 provider binds the tree and removes it only after its last step, right before
@@ -76,6 +79,7 @@ from autotrade.pipelines.pit_backend import (
     prebuild_asof_stash,
 )
 from autotrade.pipelines.pit_views_seed import (
+    DEFAULT_RESEARCH_YEARS_CHOICES,
     UNFINISHED_BUILD_MARKER,
     assert_seed_views_share_types,
     plan_seed,
@@ -117,6 +121,12 @@ SNAPSHOT_PARAMETERS = (*DATASET_DOMAINS, *DOMAIN_TOGGLES, *WINDOW_PARAMETERS)
 
 def _flag(name: str) -> str:
     return "--" + name.replace("_", "-")
+
+
+def _int_list(text: str) -> tuple[int, ...]:
+    """A comma-separated list of research-years choices."""
+
+    return tuple(int(item.strip()) for item in text.split(","))
 
 
 def _dataset_list(text: str) -> tuple[str, ...]:
@@ -196,6 +206,16 @@ def build_parser() -> argparse.ArgumentParser:
         )
     for name in WINDOW_PARAMETERS:
         snapshot.add_argument(_flag(name), type=int, default=None)
+    parser.add_argument(
+        "--research-years",
+        type=_int_list,
+        default=DEFAULT_RESEARCH_YEARS_CHOICES,
+        metavar="N,N",
+        help="the research_years an arm may choose on this seed: a decision view at every "
+        "month boundary of the validation years from the earliest choice on, and a warm "
+        "as-of start at each choice; a choice the geometry cannot take is planned for "
+        f"nothing. Default: {','.join(map(str, DEFAULT_RESEARCH_YEARS_CHOICES))}",
+    )
     parser.add_argument(
         "--asof-stash",
         action=argparse.BooleanOptionalAction,
@@ -279,7 +299,7 @@ def main(argv: list[str] | None = None) -> int:
         cache_root=cache_root,
         generation_id=args.generation_id,
     )
-    plan = plan_seed(geometry, provider.trading_days)
+    plan = plan_seed(geometry, provider.trading_days, research_years_choices=args.research_years)
     jobs = plan.jobs
     print(
         json.dumps(
@@ -290,6 +310,7 @@ def main(argv: list[str] | None = None) -> int:
                 "release_raw_dir": str(provider.release.raw_dir),
                 "dry_run": bool(args.dry_run),
                 "jobs": len(jobs),
+                "step_decision_views": len(plan.step_decision_times),
                 "asof_stash": bool(args.asof_stash),
                 "schedule": schedule.to_record(),
                 "plan": plan.to_record(),
@@ -322,6 +343,16 @@ def main(argv: list[str] | None = None) -> int:
                 decision_time=slot.anchor,
             ),
         )
+        print(f"    prepared in {perf_counter() - started:.1f}s", flush=True)
+    for index, decision in enumerate(plan.step_decision_times, start=1):
+        print(
+            f"[step view {index}/{len(plan.step_decision_times)}] decision={decision.isoformat()}",
+            flush=True,
+        )
+        if args.dry_run:
+            continue
+        started = perf_counter()
+        provider.prepare_decision(decision_time=decision)
         print(f"    prepared in {perf_counter() - started:.1f}s", flush=True)
     if args.asof_stash:
         for decision, (head, *rest) in plan.stash_chains:

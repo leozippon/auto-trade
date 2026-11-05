@@ -50,7 +50,7 @@ from autotrade.environment.tools.workspace import (
     LOW_DISK_SPACE,
     WORKSPACE_MIN_FREE_BYTES,
 )
-from tests.unit.acceptance_fixture import RULES, SEALED_PERIOD
+from tests.unit.acceptance_fixture import RULES
 
 from .fixtures_sandbox import PassingModificationCheck
 
@@ -1244,7 +1244,7 @@ class TerminalToolWriteLockTest(unittest.TestCase):
     def _finish_tool(self, root: Path):
         from autotrade.environment.artifacts import new_revision_id
         from autotrade.environment.step_tree import StepTree
-        from autotrade.environment.tools import FinishSessionTool
+        from tests.unit.terminal_tool import TerminalTool
 
         paths, roots, workspace = build_sandbox(root)
         (paths.agent / "output" / "main.py").write_text(
@@ -1260,7 +1260,7 @@ class TerminalToolWriteLockTest(unittest.TestCase):
             revision_id=new_revision_id("revision"),
             metrics={},
         )
-        finish = FinishSessionTool(tree, session_ref="session_ref_ab", registration=_passing_gate)
+        finish = TerminalTool(tree, session_ref="session_ref_ab", registration=_passing_gate)
         return workspace, roots, finish, node_id
 
     def test_finish_locks_mutating_tools_and_leaves_reads_open(self) -> None:
@@ -1271,7 +1271,7 @@ class TerminalToolWriteLockTest(unittest.TestCase):
             )
             # Before finishing, writes go through.
             assert registry.invoke("write_file", {"path": "draft.txt", "content": "x"}).ok
-            finished = registry.invoke("finish_session", {"outcome": "freeze", "node_id": node_id})
+            finished = registry.invoke("test", {"outcome": "freeze", "node_id": node_id})
             assert finished.ok, finished.error
             assert finished.finish
 
@@ -1294,7 +1294,7 @@ class TerminalToolWriteLockTest(unittest.TestCase):
             runner = FakeRunner()
             registry = ToolRegistry([SandboxShellTool(workspace, runner), finish])
             assert registry.invoke("shell", {"argv": ["echo", "before"]}).ok
-            assert registry.invoke("finish_session", {"outcome": "freeze", "node_id": node_id}).ok
+            assert registry.invoke("test", {"outcome": "freeze", "node_id": node_id}).ok
             denied = registry.invoke("shell", {"argv": ["echo", "after"]})
             assert not denied.ok
             assert "locked" in denied.error
@@ -1457,11 +1457,11 @@ class SequentialDispatchClassificationTest(unittest.TestCase):
             SEQUENTIAL_TOOL_NAMES,
             is_sequential_tool,
         )
-        from autotrade.pipelines.session_tools import BatchValidateTool
+        from autotrade.pipelines.session_tools import ValidateTool
 
-        self.assertTrue(BatchValidateTool.spec.mutating)
-        self.assertTrue(is_sequential_tool(BatchValidateTool.spec))
-        self.assertNotIn("batch_validate", SEQUENTIAL_TOOL_NAMES)
+        self.assertTrue(ValidateTool.spec.mutating)
+        self.assertTrue(is_sequential_tool(ValidateTool.spec))
+        self.assertNotIn("validate", SEQUENTIAL_TOOL_NAMES)
 
     def test_read_only_specs_are_concurrent_and_unknown_names_are_not(self) -> None:
         from autotrade.environment.tools import (
@@ -1936,10 +1936,10 @@ class SpillAndRootContractTest(unittest.TestCase):
             self.assertFalse(absolute.ok)
             self.assertNotIn(tmp, absolute.error + json.dumps(absolute.value))
             unavailable = registry.invoke(
-                "glob", {"pattern": "*"}, allowed_names={"read_file", "finish_session"}
+                "glob", {"pattern": "*"}, allowed_names={"read_file", "test"}
             )
             self.assertFalse(unavailable.ok)
-            self.assertIn("available now: finish_session, read_file", unavailable.error)
+            self.assertIn("available now: read_file, test", unavailable.error)
             unknown = registry.invoke("shell", {"argv": ["ls"]})
             self.assertIn("tools in this session: glob, read_file", unknown.error)
 
@@ -1965,7 +1965,7 @@ def _fold_backtest_tool(
         StrategySchedule,
     )
     from autotrade.pipelines.ledger import ExperimentLedger
-    from autotrade.pipelines.session_tools import BatchValidateTool, SessionValidations
+    from autotrade.pipelines.session_tools import SessionValidations, ValidateTool
 
     from .test_batch_validate import _write_style_sidecar
 
@@ -2015,14 +2015,14 @@ def _fold_backtest_tool(
         run_id="run_budget",
         snapshot=snapshot,
         decision_time=datetime(2021, 12, 31, 23, 59, 59, tzinfo=UTC),
-        research_years=(ReplaySpan("Y1", "valid", "20210701", "20220630", snapshot),),
+        years=(ReplaySpan("Y1", "valid", "20210701", "20220630", snapshot),),
+        validation=ReplaySpan("validation", "valid", "20220701", "20230630", snapshot),
+        decision_view_at=lambda _anchor: snapshot,
         window_months=24,
-        max_replay_years=3,
         max_llm_calls=3,
         deadline_seconds=600.0,
         benchmark_index=DEFAULT_BENCHMARK_INDEX,
         acceptance_rules=RULES.to_record(),
-        sealed_period=SEALED_PERIOD,
     )
     # The experiment the worker roots a session in: the freeze gate reads a
     # nominee's strategy from its revision store.
@@ -2042,7 +2042,7 @@ def _fold_backtest_tool(
         manifest=manifest,
         experiment_dir=experiment,
     )
-    tool = BatchValidateTool(
+    tool = ValidateTool(
         backtest=backtest,
         workspace=SafeWorkspace(paths.agent),
         modification_check_factory=lambda directory: PassingModificationCheck(
@@ -2073,7 +2073,7 @@ class FoldBacktestResultBudgetTest(unittest.TestCase):
     def test_inline_result_stays_in_budget_and_the_reference_reads_back(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             paths, tool, summary = _fold_backtest_tool(Path(tmp), 5000)
-            result = ToolRegistry([tool]).invoke("batch_validate", WORKING_COPY)
+            result = ToolRegistry([tool]).invoke("validate", WORKING_COPY)
             self.assertTrue(result.ok, result.error)
             rendered = json.dumps(result.value, ensure_ascii=False, default=str)
             self.assertLessEqual(len(rendered), search_module.MAX_RESULT_CHARS, len(rendered))
@@ -2110,7 +2110,7 @@ class FoldBacktestResultBudgetTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             _, tool, _ = _fold_backtest_tool(Path(tmp), 5, tree=TreeWithoutAttachments)
-            result = ToolRegistry([tool]).invoke("batch_validate", WORKING_COPY)
+            result = ToolRegistry([tool]).invoke("validate", WORKING_COPY)
             self.assertFalse(result.ok)
             self.assertIn("attachment is missing", result.error)
 
@@ -2158,13 +2158,12 @@ class FoldBacktestSnapshotAccountingTest(unittest.TestCase):
             drifting = DriftingCheck()
             tool.modification_check_factory = lambda _directory: drifting
             registry = ToolRegistry([tool])
-            result = registry.invoke("batch_validate", WORKING_COPY)
+            result = registry.invoke("validate", WORKING_COPY)
             self.assertFalse(result.ok)
             self.assertEqual(result.value["error_type"], "infrastructure_error")
             self.assertIn("could not start", result.error)
             self.assertIn("changed", result.error)
             # Nothing was evaluated: no slot, no Step, no dead-end node.
-            self.assertEqual(tool.backtest.replay_years_used, 0)
             self.assertEqual(tool.backtest.steps, [])
             self.assertEqual(tool.backtest.tree.nodes(), [])
             # The manifest still records the attempt, as what it was.
@@ -2174,10 +2173,8 @@ class FoldBacktestSnapshotAccountingTest(unittest.TestCase):
             )
             # The slot survives for the retry, which numbers itself 001.
             drifting.drift = False
-            retried = registry.invoke("batch_validate", WORKING_COPY)
+            retried = registry.invoke("validate", WORKING_COPY)
             self.assertTrue(retried.ok, retried.error)
-            self.assertEqual(tool.backtest.replay_years_used, 1)
-            self.assertEqual(retried.value["replay_years_used"], 1)
             self.assertEqual(manifest.summaries[-1]["result_name"], "valid_001")
 
     def test_a_write_during_the_replay_cannot_reach_the_evaluated_bytes(self) -> None:
@@ -2206,7 +2203,7 @@ class FoldBacktestSnapshotAccountingTest(unittest.TestCase):
             tool.backtest.evaluator = WritingEvaluator(
                 tool.backtest.evaluator, paths.agent / "output" / "main.py"
             )
-            result = ToolRegistry([tool]).invoke("batch_validate", WORKING_COPY)
+            result = ToolRegistry([tool]).invoke("validate", WORKING_COPY)
             self.assertTrue(result.ok, result.error)
             # The replay read the approved bytes...
             self.assertEqual(replayed, [approved])
@@ -2237,7 +2234,7 @@ class FoldBacktestSnapshotAccountingTest(unittest.TestCase):
             # The registry re-raises a session interrupt instead of turning it
             # into an observation the Agent would answer with another attempt.
             with self.assertRaises(SessionInterrupt):
-                ToolRegistry([tool]).invoke("batch_validate", WORKING_COPY)
+                ToolRegistry([tool]).invoke("validate", WORKING_COPY)
             self.assertEqual(tool.backtest.steps, [])
             self.assertEqual(tool.backtest.tree.nodes(), [])
             self.assertEqual(manifest.summaries, [])

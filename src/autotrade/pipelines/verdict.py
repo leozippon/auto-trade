@@ -1,5 +1,5 @@
-"""Verdict statistics of one arm: the sealed gate, and the forward and
-Held-out readings reported beside it.
+"""Readout statistics of one arm: the residual-IR instrument, the forward
+and Held-out readings, and the registration conditions.
 
 Pure functions over frozen replay data (docs/PIPELINE_DESIGN.md). Every
 statistic grades one series, the ACTIVE one: the strategy's daily return
@@ -9,15 +9,15 @@ in an account's own shape is a property of the window and the pool, so the
 panel removes what the universe construction hands any zero-skill book (lot
 affordability, boards, equal weighting, the book's own schedule and cash).
 
-The sealed gate reads the factor residual of that series: OLS on the arm's
+The instrument reads the factor residual of that series: OLS on the arm's
 benchmark (market), the size and the value legs of the replay's own
 cross-section (``style.FACTOR_SERIES``) removes style, and the residual
-information ratio over the sealed research years is held to
-``z(1 − alpha) / √years`` (:func:`residual_statistics`, :func:`residual_bar`).
-It is the verdict's one performance condition (:func:`sealed_slice`,
-:func:`graduation_verdict`); the other is that no frozen book raised in its
-own code during the forward stage. The forward and Held-out slices are reported,
-never judged: they read the series as it is -- its annualised mean is its
+information ratio is read against ``z(1 − alpha) / √years`` for the
+series' length (:func:`residual_statistics`, :func:`residual_bar`), with
+its one-sided null p-value (:func:`null_p_value`). The rolling record is
+read this way (``rolling_record.record_instrument``), and so is every
+forward and Held-out slice. Nothing is judged: the slices read the
+series as it is -- its annualised mean is its
 plain excess, its annualised standard deviation its tracking error and their
 ratio its IR (``stats.plain_statistics``) -- and its residual reading, which
 :func:`pooled_reading` pools across frozen strategies. The holder's readings
@@ -31,8 +31,10 @@ The rules are the arm's create-time rules, which every stage function takes
 whole (``rules``: a ``config.AcceptanceRules``); the module constants below
 are the defaults those fields take, and nothing here falls back to them. A
 slice that cannot be measured (fewer than two days, a slice shorter than one
-bootstrap block) raises ``ValueError``: a verdict must never be read off a
-number that was not measured.
+bootstrap block) raises ``ValueError``: a reading is never recorded off a
+number that was not measured. The registration conditions
+(:data:`CONDITIONS`, :func:`judge`) are the one place something is judged:
+whether a Step may be tested and frozen at all.
 """
 
 from __future__ import annotations
@@ -64,7 +66,6 @@ from autotrade.environment.replay.style import (
 )
 
 from .calendar import FULL_SPAN
-from .ledger import VerdictStatus
 
 if TYPE_CHECKING:
     # ``config`` reads this module's constants for its defaults.
@@ -183,7 +184,7 @@ def residual_statistics(
     alpha: float,
 ) -> dict[str, float]:
     """The factor-residual reading of one daily series: the one statistic
-    the sealed gate grades and every validation reports.
+    the rolling record, every validation and every forward slice is read with.
 
     ``active`` is the daily active series (the strategy's return minus its
     zero-skill panel composite, ``series: active``) and ``market``, ``size``
@@ -336,7 +337,7 @@ def _measured(
 
 
 def _graded(analysis: Mapping[str, object]) -> tuple[Mapping[str, object], str]:
-    """The analysis of the series a verdict grades, and that series' name."""
+    """The analysis of the series a reading grades, and that series' name."""
 
     active = active_analysis(analysis)
     return (analysis, "absolute") if active is None else (active, "active")
@@ -648,14 +649,13 @@ class ConditionStage(StrEnum):
     REGISTRATION = "registration"
     FREEZE = "freeze"
     SEEDS = "seeds"
-    SEALED = "sealed"
-    VALIDITY = "validity"
 
 
 class ConditionReason(StrEnum):
-    """Every reason token a freeze registration or a verdict records: one per
-    condition of :data:`CONDITIONS`, and the two a registration records when
-    it never read a nominee. The values are persisted in ledger records."""
+    """Every reason token a freeze registration records: one per condition of
+    :data:`CONDITIONS`, and the two a registration records when it never read
+    a nominee. The values are persisted in ledger records; a ledger judged
+    under the sealed-gate rules also carries that gate's retired tokens."""
 
     NON_FINITE_TOTAL_RETURN = "non_finite_total_return"
     NON_FINITE_MAX_DRAWDOWN = "non_finite_max_drawdown"
@@ -667,12 +667,6 @@ class ConditionReason(StrEnum):
     FREEZE_BETA_OUTSIDE_BAND = "freeze_beta_outside_band"
     FREEZE_SEED_REPLICATE_INVALID = "freeze_seed_replicate_invalid"
     FREEZE_TOO_FEW_SEED_REPLICATES = "freeze_too_few_seed_replicates"
-    SEALED_STRATEGY_ERROR = "sealed_strategy_error"
-    SEALED_UNMEASURABLE = "sealed_unmeasurable"
-    SEALED_RESIDUAL_IR_BELOW_BAR = "sealed_residual_ir_below_bar"
-    FORWARD_STRATEGY_ERROR = "forward_strategy_error"
-    HELDOUT_STRATEGY_ERROR = "heldout_strategy_error"
-    REPLICATE_STRATEGY_ERROR = "replicate_strategy_error"
     # Not a condition's: what a registration that was never read off a
     # nominee records. The session read a node that is not one of its Steps;
     # the nominee's statistics could not be measured.
@@ -687,14 +681,12 @@ class Condition(NamedTuple):
     its record states; a condition that does not hold records ``reason``.
     ``requires`` names the rule that turns a condition on, the tracking
     mandate's cap (empty: every arm is held to it); an arm without a mandate
-    is not judged on it. ``code`` is the graduation criterion a forward or
-    Held-out condition belongs to (docs/PIPELINE_DESIGN.md).
+    is not judged on it.
     """
 
     stage: ConditionStage
     reason: ConditionReason
     holds: Callable[[Mapping[str, Any], Mapping[str, Any]], bool]
-    code: str = ""
     requires: str = ""
 
 
@@ -721,20 +713,19 @@ def _refused_replicate(measured: Mapping[str, Any]) -> bool:
 
 _CAP = "tracking_error_cap"
 
-# Every condition the freeze registration and the graduation verdict judge,
-# by stage and, within a stage, in the order its failures are recorded. The
-# one list of the reason tokens a record can carry: each stage reads its
-# failures off it (:func:`judge`), and the console's criterion codes and
-# labels, the Agent's facts and the tests are checked against it.
+# Every condition the registration judges (``experiment.freeze_registration``,
+# read at every test), by stage and, within a stage, in the order its
+# failures are recorded. The one list of the reason tokens a record can
+# carry: each stage reads its failures off it (:func:`judge`), and the
+# console's labels, the Agent's facts and the tests are checked against it.
 CONDITIONS: tuple[Condition, ...] = (
     # The hard nomination rules, on the nominee's replay summary
     # (``config.AcceptanceRules.evaluate``). A non-finite metric, because every
     # IEEE comparison against NaN is False, so it would otherwise pass every
     # threshold; and an equity drawdown over ``max_drawdown`` across the
     # nominee's span, the account limit Paper also kills a running book at.
-    # It is the only drawdown this table judges: forward and Held-out
-    # drawdowns are recorded, and the verdict's one performance condition is
-    # the sealed residual information ratio (the SEALED stage below).
+    # It is the only drawdown this table judges: the rolling record's and
+    # the forward slices' drawdowns are recorded, never judged.
     # ``sharpe`` is read only for finiteness.
     Condition(ConditionStage.NOMINATION, ConditionReason.NON_FINITE_TOTAL_RETURN, lambda m, t: _finite(m.get("total_return"))),
     Condition(ConditionStage.NOMINATION, ConditionReason.NON_FINITE_MAX_DRAWDOWN, lambda m, t: _finite(m.get("max_drawdown"))),
@@ -751,19 +742,6 @@ CONDITIONS: tuple[Condition, ...] = (
     # none, unless the nomination declared its package deterministic.
     Condition(ConditionStage.SEEDS, ConditionReason.FREEZE_SEED_REPLICATE_INVALID, lambda m, t: not _refused_replicate(m)),
     Condition(ConditionStage.SEEDS, ConditionReason.FREEZE_TOO_FEW_SEED_REPLICATES, lambda m, t: bool(m["replicates"]) or not m["trains_a_model"] or m.get("deterministic", False)),
-    # The sealed gate (:func:`sealed_slice`): the frozen book's residual IR
-    # over the sealed years against its bar, unread when the book raised or
-    # its own series left nothing to read.
-    Condition(ConditionStage.SEALED, ConditionReason.SEALED_STRATEGY_ERROR, lambda m, t: m.get("strategy_error") is not True, "S"),
-    Condition(ConditionStage.SEALED, ConditionReason.SEALED_UNMEASURABLE, lambda m, t: m.get("unmeasurable") is not True, "S"),
-    Condition(ConditionStage.SEALED, ConditionReason.SEALED_RESIDUAL_IR_BELOW_BAR, lambda m, t: m.get("strategy_error") is True or m.get("unmeasurable") is True or m["residual_information_ratio"] >= m["bar"], "S"),
-    # A frozen book that raised in its own code during a forward-stage replay
-    # (:func:`graduation_verdict`): the frozen book's forward replay, in the
-    # slice it raised in, or a seed replicate's sealed or forward replay. No
-    # reading of such a book is complete, so it is never admitted.
-    Condition(ConditionStage.VALIDITY, ConditionReason.FORWARD_STRATEGY_ERROR, lambda m, t: "forward" not in m["strategy_errors"], "F1"),
-    Condition(ConditionStage.VALIDITY, ConditionReason.HELDOUT_STRATEGY_ERROR, lambda m, t: "heldout" not in m["strategy_errors"], "H1"),
-    Condition(ConditionStage.VALIDITY, ConditionReason.REPLICATE_STRATEGY_ERROR, lambda m, t: "replicate" not in m["strategy_errors"], "R1"),
 )
 
 
@@ -863,10 +841,10 @@ def forward_slice(
     seed_replicates: Sequence[tuple[Mapping[str, object], Mapping[str, object]]] = (),
 ) -> dict[str, object]:
     """The forward slice's readings under the arm's ``rules``: reported,
-    never judged (docs/PIPELINE_DESIGN.md, the graduation verdict).
+    never judged (docs/PIPELINE_DESIGN.md, the readout).
 
     The graded series is read as it is (:func:`graded_statistics`) and
-    through the sealed gate's statistic (``residual_reading``, what
+    through the residual-IR instrument (``residual_reading``, what
     :func:`pooled_reading` pools across frozen strategies). F2 is
     ``lower_bound``, the ``forward_confidence`` lower bound of its plain
     excess over the book and the seed replicates the freeze registered
@@ -957,7 +935,7 @@ def heldout_slice(
     seed_replicates: Sequence[tuple[Mapping[str, object], Mapping[str, object]]] = (),
 ) -> dict[str, object]:
     """The Held-out slice's readings under the arm's ``rules``: reported,
-    never judged (docs/PIPELINE_DESIGN.md, the graduation verdict).
+    never judged (docs/PIPELINE_DESIGN.md, the readout).
 
     The graded series' statistics and its residual reading, the equity and
     the graded series' drawdowns and the mean gross exposure, the holder's
@@ -990,135 +968,3 @@ def heldout_slice(
     }
 
 
-def _signed(value: object, unit: str, *, scale: float = 100.0, digits: int = 1) -> str:
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
-        return "n/a"
-    return f"{float(value) * scale:+.{digits}f}{unit}"
-
-
-def holder_line(block: Mapping[str, Any]) -> str:
-    """One slice in words, the holder's reading first: the book against the
-    benchmark, then against its zero-skill panel, then the graded series the
-    verdict read, with its IR and its market loading."""
-
-    raw = block.get("raw_readings") or {}
-    return (
-        f"{block['start']}..{block['end']}: book {_signed(raw.get('strategy_return'), '%')} "
-        f"against benchmark {_signed(raw.get('benchmark_return'), '%')} "
-        f"(raw excess {_signed(raw.get('raw_excess'), ' points')}); "
-        f"zero-skill panel {_signed(raw.get('panel_return'), '%')} "
-        f"(plain selection {_signed(raw.get('plain_selection'), ' points')}); "
-        f"{block.get('series')} series {_signed(block.get('plain_excess'), '%/yr')} "
-        f"(IR {_signed(block.get('information_ratio'), '', scale=1.0, digits=2)}, "
-        f"market loading {_signed(block.get('market_beta'), '', scale=1.0, digits=2)})"
-    )
-
-
-def sealed_slice(
-    analysis: Mapping[str, object],
-    *,
-    rules: AcceptanceRules,
-    start: str,
-    end: str,
-    seed_replicates: Sequence[tuple[Mapping[str, object], Mapping[str, object]]] = (),
-) -> dict[str, object]:
-    """The sealed gate on the frozen book's replay over the sealed years.
-
-    The book's active series over ``start``..``end`` read through
-    :func:`residual_reading` at the rules' ``alpha``: its residual
-    information ratio against the bar for the slice's length, the one
-    performance condition of the verdict. A series the factor legs explain
-    exactly (:class:`ExactFit`: a book that stayed in cash) is the book's own
-    doing and fails the gate as ``unmeasurable``; a replay without a
-    zero-skill panel, or with too few days to read, measured nothing and
-    raises ``ValueError``. The holder's readings ride beside it;
-    ``seed_replicates`` (what names each and its replay's sidecar) are read
-    the same way and reported, never judged.
-    """
-
-    start, end = _span(start, end)
-    if _graded(analysis)[1] != "active":
-        raise ValueError(
-            "the sealed gate reads the active series, and this replay carries no zero-skill panel"
-        )
-    readings = {
-        "raw_readings": holder_readings(analysis, start=start, end=end),
-        **(
-            {
-                "seed_replicates": [
-                    {
-                        **identity,
-                        **_reported_residual(sidecar, start=start, end=end, alpha=rules.alpha),
-                    }
-                    for identity, sidecar in seed_replicates
-                ]
-            }
-            if seed_replicates
-            else {}
-        ),
-    }
-    try:
-        reading = residual_reading(analysis, start=start, end=end, alpha=rules.alpha)
-    except ExactFit as exc:
-        measured = {"start": start, "end": end, "unmeasurable": True, "error": str(exc), **readings}
-        thresholds = {"alpha": rules.alpha, "sealed_years": rules.sealed_years}
-        return {**measured, "reasons": judge(ConditionStage.SEALED, measured, thresholds), "thresholds": thresholds}
-    measured = {"start": start, "end": end, **reading, **readings}
-    thresholds = {"alpha": rules.alpha, "bar": reading["bar"], "sealed_years": rules.sealed_years}
-    return {**measured, "reasons": judge(ConditionStage.SEALED, measured, thresholds), "thresholds": thresholds}
-
-
-def sealed_strategy_error(*, start: str, end: str, error: str) -> dict[str, object]:
-    """The sealed gate on a frozen book that raised during its replay over
-    the sealed years: no reading, and the gate fails."""
-
-    start, end = _span(start, end)
-    measured = {"start": start, "end": end, "strategy_error": True, "error": error}
-    return {**measured, "reasons": judge(ConditionStage.SEALED, measured, {}), "thresholds": {}}
-
-
-# Where a frozen book can raise in its own code during the forward stage.
-STRATEGY_ERROR_PLACES = ("forward", "heldout", "replicate")
-
-
-def graduation_verdict(
-    *,
-    sealed: Mapping[str, Any],
-    forward: Mapping[str, Any] | None = None,
-    heldout: Mapping[str, Any] | None = None,
-    strategy_errors: Sequence[str] = (),
-) -> dict[str, object]:
-    """``graduated`` exactly when the sealed gate passes and no frozen book
-    raised, else ``discarded``.
-
-    ``sealed`` is the sealed gate's block (:func:`sealed_slice`, or
-    :func:`sealed_strategy_error`), whose reasons come first.
-    ``strategy_errors`` names where a frozen book raised in its own code
-    (``STRATEGY_ERROR_PLACES``): the frozen book's forward replay in its
-    ``forward`` or ``heldout`` slice, or a seed ``replicate``'s sealed or
-    forward replay; each adds its ``validity`` reason. The forward and
-    Held-out slices (:func:`forward_slice`, :func:`heldout_slice`) are
-    reported, never judged -- a forward replay in which the frozen book
-    raised has none -- and a measured verdict states each slice's
-    :func:`holder_line`, so the ledger says in words what the holder's
-    account did beside the codes that decided it.
-    """
-
-    unknown = sorted(set(strategy_errors) - set(STRATEGY_ERROR_PLACES))
-    if unknown:
-        raise ValueError(f"strategy_errors must name {STRATEGY_ERROR_PLACES}, got {unknown}")
-    reasons = [
-        *sealed["reasons"],
-        *judge(ConditionStage.VALIDITY, {"strategy_errors": frozenset(strategy_errors)}, {}),
-    ]
-    lines = {
-        name: holder_line(block)
-        for name, block in (("forward", forward), ("heldout", heldout))
-        if block is not None
-    }
-    return {
-        "status": VerdictStatus.DISCARDED if reasons else VerdictStatus.GRADUATED,
-        "reasons": reasons,
-        "thresholds": dict(sealed["thresholds"]),
-        **({"holder_line": lines} if lines else {}),
-    }

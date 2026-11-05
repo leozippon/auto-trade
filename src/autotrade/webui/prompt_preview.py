@@ -142,19 +142,21 @@ def _research_prompt(
     geometry = rolling.geometry
     budgets = _session_budgets(rolling, resource_override)
     sandbox = context.strategy_sandbox
-    # The session sees the visible years, as ``experiment.research_inputs``
-    # hands them to it.
-    visible, sealed = geometry.split_sealed(rolling.acceptance.sealed_years)
+    # The session opens at the validation start, as ``experiment.research_inputs``
+    # hands it the geometry.
+    _research, validation = geometry.split_research(rolling.acceptance.research_years)
     manifest: dict[str, object] = {
         "experiment_id": rolling.experiment_id,
         "epoch_id": "research",
         "fold_id": context.session_key,
         "kind": "research",
         "research": research_geometry_record(
-            visible,
+            geometry.research_years,
+            research_years=rolling.acceptance.research_years,
+            test_step_months=rolling.acceptance.test_step_months,
+            steps_tested=0,
             window_months=rolling.window_months,
-            decision_time=sealed[0].anchor.isoformat(),
-            sealed=(sealed[0].start, sealed[-1].end),
+            decision_time=validation[0].anchor.isoformat(),
         ),
         "benchmark_index": rolling.benchmark_index,
         "snapshot_config": context.options.snapshot_config.to_record(),
@@ -166,14 +168,13 @@ def _research_prompt(
         "broker_profile": rolling.broker_profile.to_record(),
         "record_failed_attempts": rolling.record_failed_attempts,
         "attempt": 1,
-        "finalize_before_deadline_seconds": rolling.finalize_before_deadline_seconds,
         "sandbox_spec": (
             context.options.agent_sandbox.to_record()
             if context.options.agent_sandbox is not None
             else None
         ),
         "budgets": {
-            "max_replay_years": budgets["max_replay_years"],
+            "validates_per_step": rolling.acceptance.validates_per_step,
             "max_null_controls": rolling.max_null_controls,
             "max_llm_calls": budgets["max_llm_calls"],
             "max_api_spend_usd": budgets["max_api_spend_usd"],

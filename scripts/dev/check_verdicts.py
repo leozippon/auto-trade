@@ -1,25 +1,23 @@
 #!/usr/bin/env python3
 """Judge every stored reading of the current-rule arms again and compare.
 
-The consistency check of the gate code (``pipelines/verdict.py``,
-``config.py``, ``experiment.py``). An arm keeps everything its readings were
+The consistency check of the reading code (``pipelines/verdict.py``,
+``rolling_record.py``, ``config.py``, ``experiment.py``). An arm keeps everything its readings were
 read from -- ``hitl/params.json``, the ledger's Steps with their style
 sidecars and revisions, the replays' results -- so each reading of an arm
 created under the current rules is judged again by this code, CPU only, and
 compared with the ledger key for key:
 
 - a research session's freeze registration (``experiment.freeze_registration``),
-- a forward record's sealed reading (``experiment.judged_sealed``) and,
-  where its forward replay completed, its slices and verdict
-  (``experiment.judged_replay``).
+- a forward record's slices, where its forward replay completed
+  (``experiment.judged_replay``), and its readout off the ledger's rolling
+  record and that forward slice (``rolling_record.readout``).
 
-An arm whose rules state no ``sealed_years`` was judged under rules since
-retired and is never judged again: its readings are what its ledger says. An
-arm frozen before the ablation was retired recorded one in its registration
-(``ledger.RETIRED_ABLATION_KEY``) and an increment beside its sealed reading:
-the registration is compared without it, and the increment is not judged.
+An arm whose rules state no ``research_years`` was judged under rules since
+retired (the sealed gate) and is never judged again: its readings are what
+its ledger says.
 
-Run it by hand before landing a change to the gate code, from a checkout
+Run it by hand before landing a change to the reading code, from a checkout
 whose ``experiments/`` holds the arms, or with ``--experiments``:
 
     python scripts/dev/check_verdicts.py
@@ -51,11 +49,11 @@ from autotrade.pipelines.config import AcceptanceRules, acceptance_for
 from autotrade.pipelines.experiment import (
     freeze_registration,
     judged_replay,
-    judged_sealed,
     replay_and_analysis,
 )
 from autotrade.pipelines.hitl_state import HITL_DIR_NAME, PARAMS_NAME
-from autotrade.pipelines.ledger import RETIRED_ABLATION_KEY, recorded_path
+from autotrade.pipelines.ledger import recorded_path
+from autotrade.pipelines.rolling_record import readout
 
 
 class Judgement(NamedTuple):
@@ -69,16 +67,16 @@ class Judgement(NamedTuple):
 
 def current_arms(experiments: Path) -> list[Path]:
     """The arms under ``experiments`` judged under the current rules: those
-    whose rules state ``sealed_years`` (the sealed gate's, which the session
-    sees the visible research years under, a freeze registers and the
-    frozen artifact's sealed reading judges). An arm created before then was
-    judged under rules since retired, so its stored readings differ by the
-    rule, not by a defect."""
+    whose rules state ``research_years`` (the rolling validation's, which the
+    session sees the research years under, every test registers against and
+    the readout reads). An arm created before then was judged under rules
+    since retired, so its stored readings differ by the rule, not by a
+    defect."""
 
     arms = []
     for path in sorted(Path(experiments).iterdir()):
         params = path / HITL_DIR_NAME / PARAMS_NAME
-        if params.is_file() and read_json_object(params).get("sealed_years") is not None:
+        if params.is_file() and read_json_object(params).get("research_years") is not None:
             arms.append(path)
     return arms
 
@@ -116,35 +114,10 @@ def differences(stored: object, now: object, path: str = "") -> list[str]:
     return [] if type(stored) is type(now) and (stored == now or nan) else [path or "the reading"]
 
 
-def _sealed(arm: Path, record: Mapping[str, Any], rules: AcceptanceRules) -> dict[str, object]:
-    """The sealed block of one stored forward record of ``arm``, judged again."""
-
-    sealed = record["sealed"]
-    return judged_sealed(
-        str(recorded_path(arm, str(sealed["result_ref"]))),
-        rules=rules,
-        start=str(sealed["start"]),
-        end=str(sealed["end"]),
-        seed_replicates=[
-            (
-                {key: row[key] for key in ("artifact_id", "source_step_id")},
-                str(recorded_path(arm, str(row["result_ref"]))),
-            )
-            for row in sealed.get("seed_replicates") or ()
-            if row.get("result_ref")
-        ],
-    )
-
-
 def _replayed(
-    arm: Path,
-    record: Mapping[str, Any],
-    rules: AcceptanceRules,
-    slippage_bps: float,
-    sealed: Mapping[str, object],
+    arm: Path, record: Mapping[str, Any], rules: AcceptanceRules, slippage_bps: float
 ) -> dict[str, object]:
-    """The slices and verdict of one stored forward replay of ``arm``,
-    judged again with its ``sealed`` block."""
+    """The slices of one stored forward replay of ``arm``, read again."""
 
     replay, analysis = replay_and_analysis(str(recorded_path(arm, str(record["result_ref"]))))
     spans = record["replay"]
@@ -152,7 +125,6 @@ def _replayed(
         replay,
         analysis,
         rules=rules,
-        sealed=sealed,
         forward=(spans["start"], spans["forward_end"]),
         heldout=(spans["heldout_start"], spans["replay_end"]),
         seed_key=str(record["artifact_id"]),
@@ -165,15 +137,7 @@ def _replayed(
             for row in record.get("seed_replicates") or ()
             if row.get("result_ref")
         ],
-        strategy_errors=(
-            ("replicate",)
-            if any(
-                row.get("strategy_error")
-                for row in (*(record["sealed"].get("seed_replicates") or ()), *(record.get("seed_replicates") or ()))
-            )
-            else ()
-        ),
-    )
+    )["slices"]
 
 
 def check_arm(arm: Path) -> list[Judgement]:
@@ -195,11 +159,10 @@ def check_arm(arm: Path) -> list[Judgement]:
         if kind == "research_session" and isinstance(record.get("freeze_gate"), dict):
             steps = {str(row["step_id"]): row for row in record["steps"]}
             nominee = steps[str(record["nominated_step_id"])]
-            gate = {key: value for key, value in record["freeze_gate"].items() if key != RETIRED_ABLATION_KEY}
-            seeds = gate.get("seed_replicates") or {}
+            seeds = record["freeze_gate"].get("seed_replicates") or {}
             judge(
                 "freeze_registration",
-                gate,
+                record["freeze_gate"],
                 freeze_registration(
                     nominee,
                     experiment_dir=arm,
@@ -208,16 +171,17 @@ def check_arm(arm: Path) -> list[Judgement]:
                     deterministic=bool(seeds.get("deterministic")),
                 ),
             )
-        elif kind == "forward" and isinstance(record.get("sealed"), Mapping):
-            stored = record["sealed"]["slice"]
-            sealed = stored if stored.get("strategy_error") else _sealed(arm, record, rules)
-            judge("sealed", stored, sealed)
+        elif kind == "forward" and isinstance(record.get("readout"), Mapping):
+            # The readout reads the ledger as it stood when the record was
+            # written: the test steps before it, and the record's own slice.
+            before = records[: records.index(record)]
             if record.get("status") == "ok":
-                judge(
-                    "forward",
-                    {key: record[key] for key in ("slices", "verdict")},
-                    _replayed(arm, record, rules, slippage, sealed),
-                )
+                slices = _replayed(arm, record, rules, slippage)
+                judge("forward", record["slices"], slices)
+                now = readout(before, alpha=rules.alpha, forward=slices["forward"])
+            else:
+                now = readout(before, alpha=rules.alpha, strategy_error=record["readout"]["forward"]["strategy_error"])
+            judge("readout", record["readout"], now)
     return found
 
 
@@ -238,7 +202,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             detail = f": differs at {item.differences[:20]}" if item.differences else ""
             print(f"{'different' if item.differences else 'identical':<10} {item.reading:<27} {item.arm}{detail}")
     print(
-        f"{len(arms)} arms under the sealed gate: "
+        f"{len(arms)} arms under the rolling validation: "
         f"{count} stored readings, {count - failed} identical, {failed} different"
     )
     return 1 if failed else 0

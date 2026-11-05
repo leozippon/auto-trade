@@ -921,14 +921,14 @@ def test_trace_stats_carries_the_last_budget_block(tmp_path: Path) -> None:
         tmp_path / "run.jsonl",
         [
             {"event_type": "session_start"},
-            {"event_type": "llm_call", "budget_used": {"inference_seconds": 10.0, "llm_calls": 1, "replay_years": 0, "null_controls": 0}},
-            {"event_type": "tool_call", "tool": "shell", "budget_used": {"inference_seconds": 25.5, "llm_calls": 2, "replay_years": 4, "null_controls": 0}},
+            {"event_type": "llm_call", "budget_used": {"inference_seconds": 10.0, "llm_calls": 1, "test_replays": 0, "null_controls": 0}},
+            {"event_type": "tool_call", "tool": "shell", "budget_used": {"inference_seconds": 25.5, "llm_calls": 2, "test_replays": 4, "null_controls": 0}},
         ],
     )
     first = trace_stats(path)
-    assert first["budget_used"] == {"inference_seconds": 25.5, "llm_calls": 2, "replay_years": 4, "null_controls": 0}
+    assert first["budget_used"] == {"inference_seconds": 25.5, "llm_calls": 2, "test_replays": 4, "null_controls": 0}
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps({"event_type": "llm_call", "budget_used": {"inference_seconds": 30.0, "llm_calls": 3, "replay_years": 4, "null_controls": 1}}) + "\n")
+        handle.write(json.dumps({"event_type": "llm_call", "budget_used": {"inference_seconds": 30.0, "llm_calls": 3, "test_replays": 4, "null_controls": 1}}) + "\n")
     assert trace_stats(path)["budget_used"]["llm_calls"] == 3
     assert trace_stats(_write_trace(tmp_path / "bare.jsonl", [{"event_type": "session_start"}]))["budget_used"] is None
 
@@ -1132,7 +1132,7 @@ def test_a_dead_runs_open_tool_calls_read_as_interrupted(tmp_path: Path) -> None
         {"event_type": "llm_call", "content": "plan"},
         {"event_type": "tool_call_started", "tool": "read_file", "tool_call_id": "c1"},
         {"event_type": "tool_call", "tool": "read_file", "tool_call_id": "c1", "result": {"ok": True}},
-        {"event_type": "tool_call_started", "tool": "batch_validate", "tool_call_id": "c2"},
+        {"event_type": "tool_call_started", "tool": "validate", "tool_call_id": "c2"},
         # A content-free round: an event after the open call that draws no block.
         {"event_type": "llm_call"},
     ]
@@ -1152,7 +1152,7 @@ def test_a_dead_runs_open_tool_calls_read_as_interrupted(tmp_path: Path) -> None
     ended = group(dead)
     assert (ended["count"], ended["ok"], ended["running"], ended["interrupted"]) == (2, 1, 0, 1)
     rows = {row["name"]: row for row in ended["tools"]}
-    assert (rows["batch_validate"]["running"], rows["batch_validate"]["interrupted"]) == (0, 1)
+    assert (rows["validate"]["running"], rows["validate"]["interrupted"]) == (0, 1)
     assert "interrupted" not in rows["read_file"]
     partial = traces.read_trace_blocks(trace, offset=0, max_bytes=short, writer_alive=False)
     assert partial["eof"] is False and group(partial)["running"] == 1

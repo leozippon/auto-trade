@@ -172,9 +172,6 @@ BASE_EXPECTED_DEFAULTS: dict[str, object] = {
     # Both the packs and the directives promise the Agent this many host null
     # controls over the research session.
     "max_null_controls": 12,
-    # Replay-years the research session may spend on validations; the packs
-    # size their rounds against it.
-    "max_replay_years": 96,
     # Derived from SandboxConfig.fit_timeout_seconds; packs promise the Agent a
     # fit budget of this size.
     "strategy_fit_timeout_seconds": 3600,
@@ -196,8 +193,8 @@ BASE_EXPECTED_DEFAULTS: dict[str, object] = {
     # qualifies for (`broker.default_permitted_boards`); a round that wants
     # others names them.
     "permitted_boards": None,
-    # The sealed gate's one-sided level, one for every round so that every
-    # sealed reading is judged at the same level.
+    # The residual statistic's one-sided level, one for every round so that
+    # every reading is stated against the same bar.
     "alpha": 0.05,
 }
 
@@ -260,7 +257,6 @@ ROUND_REPORT_KEYS: tuple[str, ...] = (
     "include_intraday",
     "operating_memory",
     "max_research_minutes",
-    "max_replay_years",
     "max_llm_calls",
     "max_null_controls",
     "strategy_fit_timeout_seconds",

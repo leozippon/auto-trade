@@ -114,26 +114,28 @@ def test_the_audit_parser_exposes_every_create_time_gate() -> None:
     add_acceptance_arguments(parser)
     with pytest.raises(SystemExit):
         parser.parse_args([])
-    unset = vars(parser.parse_args(["--sealed-years=5"]))
+    unset = vars(parser.parse_args(["--research-years=5"]))
     assert unset == {
         rule.name: WEB_CREATE_DEFAULTS[rule.name] if rule.name in REQUIRED_ACCEPTANCE_KEYS else None
         for rule in fields(AcceptanceRules)
-    } | {"sealed_years": 5}
+    } | {"research_years": 5}
     assert all(action.help for action in parser._actions)
 
-    chosen = parser.parse_args(["--sealed-years=2", "--max-drawdown=0.3", "--tracking-error-cap=0.08"])
+    chosen = parser.parse_args(
+        ["--research-years=2", "--test-step-months=1", "--max-drawdown=0.3", "--tracking-error-cap=0.08"]
+    )
     named = {
         key: value
         for key, value in vars(chosen).items()
         if value is not None and key not in REQUIRED_ACCEPTANCE_KEYS
     }
-    assert named == {"max_drawdown": 0.3, "tracking_error_cap": 0.08}
-    assert type(chosen.sealed_years) is int and type(chosen.max_drawdown) is float
+    assert named == {"test_step_months": 1, "max_drawdown": 0.3, "tracking_error_cap": 0.08}
+    assert type(chosen.research_years) is int and type(chosen.max_drawdown) is float
     # The rules accept what the parser hands them.
     AcceptanceRules(**REQUIRED_RULES, **{"beta_min": 0.85, "beta_max": 1.15, **named})
-    for wrong in ("--sealed-years=2.5", "--ablation-required=false"):
+    for wrong in ("--research-years=2.5", "--validates-per-step=x", "--ablation-required=false"):
         with pytest.raises(SystemExit):
-            parser.parse_args(["--sealed-years=1", wrong])
+            parser.parse_args(["--research-years=1", wrong])
 
 
 def test_an_arm_created_from_the_command_line_holds_the_consoles_creation_rules(
@@ -154,7 +156,7 @@ def test_an_arm_created_from_the_command_line_holds_the_consoles_creation_rules(
         _cli.add_model_arguments(parser)
         add_acceptance_arguments(parser)
         args = parser.parse_args(
-            ["--experiment-id", "audit", "--sealed-years=1", *flags]
+            ["--experiment-id", "audit", "--research-years=1", *flags]
         )
         return _cli._build_worker_params(args, repo_root=tmp_path)
 

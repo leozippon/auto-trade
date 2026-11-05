@@ -29,7 +29,7 @@ EXPERIMENT_FACTS_SCHEMA_VERSION = 2
 # while shell and sub-agent waits do not and must not be named here.
 DEADLINE_SECONDS_NOTE = (
     "`deadline_seconds` 统计可暂停的有效推理时间；"
-    "`smoke_backtest`、`batch_validate` 和 `run_null_control` "
+    "`smoke_backtest`、`validate` 和 `run_null_control` "
     "调用期间暂停计时，"
     "因此会话总墙钟可能更长。"
 )
@@ -38,21 +38,18 @@ DEADLINE_SECONDS_NOTE = (
 # environment, not the strategy, creates the contention a batch adds, so both
 # caps move with it (pipelines.session_tools._batch_replay_timeouts).
 BATCH_VALIDATE_FIT_TIMEOUT_NOTE = (
-    "`batch_validate` 并发回测期间，`strategy_fit_timeout_seconds` 与单次推断上限"
+    "`validate` 并发回测期间，`strategy_fit_timeout_seconds` 与单次推断上限"
     "`strategy_inference_timeout_seconds` 都按本批实际并发路数成倍放大（路数取本批候选数与 "
     "`batch_validate_max_concurrency` 中较小的一个，3 路即 3 倍），"
     "因为并发是环境引入的、不该记到策略头上；单个候选的调用两者都用基准值。"
 )
 
-# How ``budgets.max_replay_years`` is spent, including the one case a claimed
-# replay-year comes back (pipelines.session_tools.BatchValidateTool).
-REPLAY_YEARS_NOTE = (
-    "一个候选按其 span 覆盖的研究年份计回测年：一年的 span 计 1，完整研究期计研究年数；"
-    "一批的花费是候选数乘年数，开跑前整批预留；`smoke_backtest` 与 `run_null_control` 不计。"
-    "回测失败的候选按失败归属结算：策略自身抛错，以及策略容器越过内存上限 `strategy_memory_bytes` "
-    "被 OOM kill（exit 137，那次回测没有峰值读数），都是策略自己的失败（行内 `cause: strategy`），照样花掉；"
-    "环境失败（行内 `cause: environment`，如策略超时、共享 GPU 被别的进程占走、沙箱没起来）退还其回测年，"
-    "因为它没有测出候选的任何信息——原样重投是合理的。"
+# How a failed candidate's replay is read (pipelines.session_tools.ValidateTool).
+VALIDATION_FAILURE_NOTE = (
+    "回测失败的候选按失败归属记录：策略自身抛错，以及策略容器越过内存上限 `strategy_memory_bytes` "
+    "被 OOM kill（exit 137，那次回测没有峰值读数），都是策略自己的失败（行内 `cause: strategy`）；"
+    "环境失败（行内 `cause: environment`，如策略超时、共享 GPU 被别的进程占走、沙箱没起来）"
+    "没有测出候选的任何信息——原样重投是合理的。"
 )
 
 
@@ -82,7 +79,7 @@ def strategy_container_note(cpus: float, memory_bytes: int) -> str:
         f"内存上限 {memory_gib:g} GiB（`strategy_memory_bytes`），"
         "并挂本实验的 `strategy_gpu_count` 张卡（为 0 时全在 CPU 上）：卡型与每张的显存在会话里用 `nvidia-smi` 看，"
         "显存与同卡的其他腿、会话里起的进程共用。"
-        "一次 `batch_validate` 至多同时回测 `batch_validate_max_concurrency` 个候选，各有自己的容器；"
+        "一次 `validate` 至多同时回测 `batch_validate_max_concurrency` 个候选，各有自己的容器；"
         "单独的回测挂全部卡，并排回测的候选轮流各挂一张，多于卡数时几条腿同卡。"
     )
 
@@ -98,13 +95,14 @@ SEARCH_ROOT_SHELL_NOTE = (
     "transcript 只能用 `read_file`/`grep` 读。"
 )
 
-# What a session knows about the years it does not see: the sealed research
-# years by their dates (``research_geometry.sealed_years``), the periods after
-# research end only as sealed, never their dates, slots or results.
-SEALED_PERIODS_NOTE = (
-    "可见研究期之后是封存研究年（research_geometry.sealed_years），研究期末之后是前推期与 Held-out："
-    "定版产物先在封存研究年上被宿主读一次，再在前推期与 Held-out 上被连续回测并裁决；"
-    "这些年份的数据、回测区间与结果不进入任何会话，前推期与 Held-out 的日期也不进入。"
+# What a session knows about the data past its frontier: the validation years
+# by their dates (``research_geometry.validation_years``), revealed one test
+# step at a time; the periods after the geometry's last year only as hidden,
+# never their dates, slots or results.
+HIDDEN_PERIODS_NOTE = (
+    "研究年之后是验证年（research_geometry.validation_years）：它们的数据只随每次 `test` 推进的前沿逐步可见，"
+    "前沿之后的数据、回测区间与结果不进入会话；验证年之后是前推期与 Held-out，由宿主在会话结束后回测，"
+    "其日期与读数不进入任何会话。"
 )
 
 
@@ -174,7 +172,7 @@ def build_experiment_facts(
         },
         "visibility_policy": {
             "visible_research_period": True,
-            "after_visible_research_period": SEALED_PERIODS_NOTE,
+            "after_the_frontier": HIDDEN_PERIODS_NOTE,
             "formal_strategy_read_roots": ["snapshot_dir", "asof_dir"],
         },
         "research_geometry": _as_mapping(manifest.get("research")) or None,
@@ -244,11 +242,12 @@ def _research_scope(
     period = research.get("research_period")
     research_sentence = (
         f"The experiment's one research session researches the period {period}, one "
-        "complete year per label, and ends by freezing one full-period node that "
-        "registers or by ending the experiment without one; no other session "
-        "follows, and the frozen artifact is judged only on sealed data: the "
-        "sealed research years after this period (research_geometry.sealed_years), "
-        "then the periods after research end."
+        "complete year per label, then lives through the validation years "
+        "(research_geometry.validation_years) one test step at a time; it ends when "
+        "the frontier reaches their end, and the candidate of the last test is the "
+        "frozen strategy. No other session follows; the host then replays the frozen "
+        "strategy over the periods after the geometry's last year and records the "
+        "readings."
         if period
         else None
     )
@@ -352,13 +351,13 @@ def _budget_facts(
             "deadline_seconds": budgets.get("deadline_seconds"),
             "deadline_seconds_note": DEADLINE_SECONDS_NOTE,
             "deadline_grace_seconds": budgets.get("deadline_grace_seconds"),
-            "finalize_before_deadline_seconds": manifest.get("finalize_before_deadline_seconds"),
             "max_llm_calls": max_llm_calls or budgets.get("max_llm_calls"),
             "max_api_spend_usd": budgets.get("max_api_spend_usd"),
-            "max_replay_years": budgets.get("max_replay_years"),
-            "max_replay_years_note": (
-                REPLAY_YEARS_NOTE if budgets.get("max_replay_years") is not None else None
-            ),
+            # The validate allowance of one interval between tests
+            # (``AcceptanceRules.validates_per_step``), which the prompt's run
+            # section reads from here.
+            "validates_per_step": budgets.get("validates_per_step"),
+            "validation_failure_note": VALIDATION_FAILURE_NOTE,
             # Host null controls the session may request before it selects,
             # minutes of replay each; every run_null_control result says what is left.
             "max_null_controls": budgets.get("max_null_controls"),
@@ -402,7 +401,7 @@ def _budget_facts(
                 if cpus is not None and memory_bytes is not None
                 else None
             ),
-            # Replays one batch_validate call runs at once (the arm's
+            # Replays one validate call runs at once (the arm's
             # ``batch_validate_max_concurrency``), each with its own strategy
             # container (two when the candidate declares fit). The host is
             # shared with the other running experiments, so wall clock per
@@ -428,10 +427,19 @@ def _artifact_contract_facts(
 
     start = dict(_as_mapping(manifest.get("start")))
     start["model_artifacts_empty"] = model_artifacts_empty
-    # The registration the finish tool enforces, the sealed gate and the
-    # graduation rules the frozen artifact is judged by later, all derived
-    # from the run's own rules. Rules only: no date after research end.
+    # The registration every test enforces, the validation protocol and the
+    # readings the frozen artifact is reported on later, all derived from the
+    # run's own rules and the count of validation years the manifest's
+    # geometry leaves after the research years. No date after the geometry's
+    # last year.
     acceptance = _as_mapping(manifest.get("acceptance_rules"))
+    research = _as_mapping(manifest.get("research"))
+    years = research.get("years")
+    validation_years = (
+        len(years) - int(acceptance["research_years"])  # type: ignore[call-overload]
+        if acceptance and isinstance(years, list)
+        else None
+    )
     return compact_mapping(
         {
             "required_entry": "output/main.py",
@@ -442,7 +450,9 @@ def _artifact_contract_facts(
             "start": compact_mapping(start),
             "modification_constraints": manifest.get("modification_constraints"),
             "acceptance_rules": (
-                AcceptanceRules.from_record(acceptance).agent_facts() if acceptance else None
+                AcceptanceRules.from_record(acceptance).agent_facts(validation_years=validation_years)
+                if validation_years is not None
+                else None
             ),
             "record_failed_attempts": manifest.get("record_failed_attempts"),
         }

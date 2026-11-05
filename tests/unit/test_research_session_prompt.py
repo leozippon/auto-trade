@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from autotrade.agent import prompts
-from autotrade.agent.runner import _FINALIZATION_TOOLS, _SESSION_TOOLS, _TERMINAL_TOOLS
+from autotrade.agent.runner import _SESSION_TOOLS, _TERMINAL_TOOLS
 from autotrade.agent.subagent import (
     AGENT_TOOL_DESCRIPTION,
     SUBAGENT_ROLES,
@@ -91,7 +91,6 @@ def _tool_descriptions() -> dict[str, str]:
     from autotrade.environment.tools import (
         CompactTool,
         EditFileTool,
-        FinishSessionTool,
         GlobTool,
         GrepTool,
         ModificationCheckTool,
@@ -105,9 +104,10 @@ def _tool_descriptions() -> dict[str, str]:
         WriteFileTool,
     )
     from autotrade.pipelines.session_tools import (
-        BatchValidateTool,
         NullControlTool,
         SmokeBacktestTool,
+        TestTool,
+        ValidateTool,
     )
     from autotrade.pipelines.skills import DeleteSkillTool, WriteSkillTool
 
@@ -125,8 +125,8 @@ def _tool_descriptions() -> dict[str, str]:
             StepRollbackTool,
             ReportIssueTool,
             SkillFeedbackTool,
-            FinishSessionTool,
-            BatchValidateTool,
+            ValidateTool,
+            TestTool,
             SmokeBacktestTool,
             WriteSkillTool,
             DeleteSkillTool,
@@ -145,7 +145,6 @@ def _tool_descriptions() -> dict[str, str]:
         "system_prompt",
         "default_instruction",
         "wrap_up",
-        "hard_finalization",
         *(f"subagent:{role}" for role in SUBAGENT_ROLES),
     ],
 )
@@ -154,7 +153,6 @@ def test_no_session_surface_carries_fold_or_meta_vocabulary(surface: str) -> Non
         "system_prompt": _full_prompt(),
         "default_instruction": prompts.SESSION_DEFAULT_INSTRUCTION,
         "wrap_up": prompts.WRAP_UP_PROMPT,
-        "hard_finalization": prompts.HARD_FINALIZATION_SYSTEM_PROMPT,
     }.get(surface) or subagent_system_prompt(surface.split(":", 1)[1])
     assert retired_vocabulary(text) == [], surface
 
@@ -168,22 +166,21 @@ def test_retired_tools_are_absent_from_every_role() -> None:
     surfaces = {
         "session": _SESSION_TOOLS,
         "terminal": _TERMINAL_TOOLS,
-        "finalization": _FINALIZATION_TOOLS,
         "sequential": SEQUENTIAL_TOOL_NAMES,
         **{f"subagent:{role}": allowed_subagent_tools(role) for role in SUBAGENT_ROLES},
     }
     for surface, names in surfaces.items():
         for retired in RETIRED_TOOLS:
             assert retired not in names, (surface, retired)
-    assert _TERMINAL_TOOLS == _FINALIZATION_TOOLS == {"finish_session"}
-    # The finish and the Agent's own compaction rebuild or end the turn, so
-    # neither runs beside other calls.
-    assert SEQUENTIAL_TOOL_NAMES == {"finish_session", "compact"}
+    assert _TERMINAL_TOOLS == {"test"}
+    # The Agent's own compaction rebuilds the turn, so it never runs beside
+    # other calls; test is mutating and so sequential by its spec.
+    assert SEQUENTIAL_TOOL_NAMES == {"compact"}
     # Sub-agents never finish, validate, roll back or compact the parent.
     for role in SUBAGENT_ROLES:
         assert not allowed_subagent_tools(role) & {
-            "finish_session",
-            "batch_validate",
+            "test",
+            "validate",
             "run_null_control",
             "step_rollback",
             "agent",
@@ -195,55 +192,73 @@ def test_retired_tools_are_absent_from_every_role() -> None:
         assert not hasattr(tools_package, retired)
 
 
-def test_the_prompt_states_the_research_session_contract() -> None:
+def test_the_prompt_states_the_research_and_backtesting_process() -> None:
+    """The static part says who the Agent is, the process it is engaged in and
+    the rules that matter, each once; the numbers are the run section's."""
+
     prompt = _full_prompt()
     stable = prompt.split("# 环境")[0]
-    role = prompt[: prompt.index("# 结束会话")]
-    # Purpose: one mechanism on the research period; graduation is decided on
-    # later sealed data; adaptation lives inside the artifact.
+    process = stable[stable.index("# 研究与回测流程") : stable.index("# 读数")]
+    readings = stable[stable.index("# 读数") : stable.index("# 策略")]
+    assert "AI 首席量化研究官（AI Chief Quantitative Research Officer）" in stable
+    # Research on the visible years, each test extends the backtest one step,
+    # then the host-run Forward and Held-out stages, then Paper.
     for clause in (
-        "这个研究实验只有这一个研究会话",
-        "只看定版产物在会话看不到的封存研究年上被宿主读的那一次",
-        "之后它还会在研究期之后的前推期与 Held-out 上被连续回测，读数只报告",
-        "滚动重拟合",
-        "用多长的历史、多快的节奏由策略自己决定",
-        # The direction binds what is researched, not how: a pack's advice on
-        # method, models and compute is optional, and beyond it a pack binds
-        # only the data boundary, costs and resource limits.
-        "每个候选都属于这个方向",
-        "方向之外的想法记进收尾 `reason` 的未测项",
-        "包里关于方法、模型与算力的建议可以不采纳",
-        "包的其余文字只在 PIT 与数据边界、交易成本与资源上限上约束本实验",
-        "参考包、研究方向与研究者指令都不能放宽下面的结束条件、策略合同或禁止事项",
+        "研究期分两段：研究年一开始就可见，验证期由 `test` 逐步揭开",
+        "你能读到的数据止于当前的前沿日期",
+        "用 `validate` 回测",
+        "`test` 把一个候选从验证期起点回测到下一步的终点，这一步的结果记入本实验的滚动记录",
+        "随后前沿推进一步",
+        "已记入滚动记录的条目不会改写",
+        "验证期最后一步测试完，会话结束，最后测试的候选被冻结",
+        "会话不能主动结束",
+        "宿主用最后测试的候选跑完剩下的步",
+        "运行 Forward 与 Held-out 两个阶段，读数不回到会话",
+        "是否进入 Paper（每日出单、人工交易）由运营者决定",
+        "`fit` 与 `REFIT_PERIOD`",
     ):
-        assert clause in role, clause
+        assert clause in process, clause
+    # The host reads the record; the statistic and its bar; no pass or fail.
+    for clause in (
+        "宿主读的是滚动记录",
+        "随机选股对照组合",
+        "残差信息比率",
+        "z(1−α)/√年数",
+        "会话里没有通过或不通过",
+        "是读数，不是判决",
+    ):
+        assert clause in readings, clause
+    assert "参考包、研究方向与研究者指令都不能放宽它们" in stable
+    assert "读取前沿之后的数据" in stable and "模型自身的知识" in stable
     assert "## 本实验的研究方向（用户注入）\n方向约束研究什么，不约束怎样做" in prompt
-    contract = prompt[prompt.index("# 结束会话") : prompt.index("# 策略合同")]
-    for clause in (
-        "`freeze`",
-        "`no_edge`",
-        "之后没有别的会话接手",
-        '`span="full"`',
-        "`deadline`",
-        "一个实验只定版一次",
-        "会话随即结束",
-        # Which conditions bind is the sealed gate section and the
-        # acceptance_rules fact alone.
-        "「封存检验」与运行事实 `acceptance_rules`",
-        "`freeze_registration` 是 `finish_session` 提名时只做的登记检查",
-        "`graded_series` 定义的主动序列",
-        "没列出的条件本实验没有",
-        "登记不看业绩",
-        "种子的写法见 `output/README.md`",
-        # Only a package with randomness owes seed replicates; one without is
-        # nominated deterministic, which the ledger keeps for the operator.
-        "策略包含随机性（训练、采样）的提名要带种子复现",
-        "完全不含随机性的包以 `deterministic` 提名，不需要种子复现",
-        "这一声明记入账本，供运营者在上线前终审",
-        # Budget use is observed, never an objective.
-        "研究里用多少回测年、跑多少候选，只是记录，不进验收",
-    ):
-        assert clause in contract, clause
+    # The retired action set and its wording are gone from every surface the
+    # session reads under this contract: no freeze or finishing action, no
+    # "no excess" outcome, no pass/fail verdict, no replay-year budget.
+    surfaces = {
+        "system_prompt": prompt,
+        "default_instruction": prompts.SESSION_DEFAULT_INSTRUCTION,
+        "wrap_up": prompts.WRAP_UP_PROMPT,
+        "resume": prompts.RESUME_INSTRUCTION,
+    }
+    for name, text in surfaces.items():
+        for retired in (
+            "freeze",
+            "finish_session",
+            "定版",
+            "no_edge",
+            "未发现超额",
+            "没有超额",
+            "deadline",
+            "验收",
+            "即通过",
+            "封存",
+            "sealed",
+            "回测年",
+            "replay_year",
+            "batch_validate",
+            "step_rollback",
+        ):
+            assert retired not in text, (name, retired)
     # Nothing of the retired deflation, its trial count or its incubation
     # route survives anywhere the session reads.
     for retired in (
@@ -255,76 +270,52 @@ def test_the_prompt_states_the_research_session_contract() -> None:
         "passes_freeze_gate",
         "模拟观察",
     ):
-        for surface in (prompt, prompts.HARD_FINALIZATION_SYSTEM_PROMPT, prompts.WRAP_UP_PROMPT):
+        for surface in (prompt, prompts.WRAP_UP_PROMPT):
             assert retired not in surface, retired
     # How to research is the Agent's own call, which a reference pack may
     # suggest: the stable prompt carries no research protocol, evidence
-    # recipe, process quota, delegation style or compute advice, and none of
-    # the rules that bound a session to its pack's axes or a fixed refit pace.
+    # recipe, process quota, delegation style or compute advice.
     for retired in (
         "# 研究协议",
         "# 证据标准",
         "# 原则",
         "至少跑完两轮",
         "比过对照",
-        "不得再以这个假设冻结",
         "核心打分器",
         "向量化",
         "这是建议，不是要求",
         "示例（只示形式）",
-        "诚实指的是",
-        "下一根登记轴",
-        "让位于包",
-        "不换家族",
-        "只在这些轴上",
         "以包为准",
-        "尽早让第一个真正的候选",
         "开放搜索（",
         "默认探索方向",
         "按季重训",
     ):
         assert retired not in prompt, retired
-    # Each kind of statement has one home. Which conditions bind and at what
-    # threshold is the arm's acceptance_rules fact: the prompt enumerates none
-    # and carries no sentence that holds only for arms whose rules list an
-    # optional condition, which a resumed older arm would misread.
+    # Operational detail is the tools' and the contract's: no registration
+    # field, row field, threshold or mount path is restated here.
     for statement in (
-        "列有",
         "raw_excess_at_cost_stress",
         "plain_selection",
         "seed_replicates",
-        "arm.lineage",
         "SEED_BASE",
-        "研究期权益回撤与主动回撤",
-        "按字节认",
+        "residual_reading",
+        "/mnt/",
+        "500 字符",
     ):
         assert statement not in stable, statement
-    # A registration field is defined by its parameter, not here.
-    from autotrade.environment.tools.finish_session import FinishSessionTool
-    from autotrade.pipelines.session_tools import BatchValidateTool
+    from autotrade.pipelines.session_tools import ValidateTool
 
-    assert "offline_trials" not in BatchValidateTool.spec.input_schema["properties"]
-    assert "**没有**提交" not in stable and "不重复申报" not in stable
-    # Budget use is observed: no tool asks for an account of an early finish.
-    assert "more than a third" not in FinishSessionTool.spec.description
-    assert "三分之一" not in prompt
+    assert "offline_trials" not in ValidateTool.spec.input_schema["properties"]
     # Round 20260927 wrote 296 skills, most re-deriving one data contract,
     # because every finishing text asked for them first; none does now.
-    for surface in (prompt, prompts.SESSION_DEFAULT_INSTRUCTION, prompts.WRAP_UP_PROMPT):
+    for surface in surfaces.values():
         assert "写好 skills" not in surface and "写进 skills" not in surface
-    feedback = prompt[prompt.index("# 反馈通道") : prompt.index("# 环境")]
-    assert "只写挂载的运行记忆与数据引用里还没有的可复用做法" in feedback
-    assert "本实验的结论与证据写进 `finish_session` 的 `reason`，不另写成 skill" in feedback
-    assert "`continue`" not in contract and "PRIOR" not in prompt
-    # The run facts open the environment block with an index of their keys,
-    # and say they are a snapshot the session does not see updated.
+    # The run facts open their block with an index of their keys, and say
+    # they are a snapshot the session does not see updated.
     facts = prompt[prompt.index("## 运行事实") : prompt.index("```json")]
     assert "会话中不更新" in facts
-    for fact in ("`budgets`", "`research_geometry`", "`arm`", "`artifact_contract`"):
+    for fact in ("`budgets`", "`research_geometry`", "`artifact_contract`"):
         assert fact in facts, fact
-    # Enforced limits and mount paths sit in the schema and the facts.
-    assert "500 字符" not in prompt
-    assert "/mnt/tools/screen.py" not in stable
 
 
 # What the session surfaces call the experiment, its control portfolio, its
@@ -339,7 +330,6 @@ def test_the_session_surfaces_word_the_experiment_the_current_way() -> None:
         "system_prompt": _full_prompt(),
         "default_instruction": prompts.SESSION_DEFAULT_INSTRUCTION,
         "wrap_up": prompts.WRAP_UP_PROMPT,
-        "hard_finalization": prompts.HARD_FINALIZATION_SYSTEM_PROMPT,
         **{f"subagent:{role}": subagent_system_prompt(role) for role in SUBAGENT_ROLES},
         **_tool_descriptions(),
     }
@@ -347,9 +337,9 @@ def test_the_session_surfaces_word_the_experiment_the_current_way() -> None:
         for retired in RETIRED_NARRATION:
             assert retired not in text, (name, retired)
     # The wording the surfaces do use, stated once where each is defined.
-    assert "这个研究实验只有这一个研究会话" in surfaces["system_prompt"]
-    assert "随机选股对照组合（简称随机对照）" in surfaces["system_prompt"]
-    assert "定版" in surfaces["system_prompt"]
+    assert "AI 首席量化研究官" in surfaces["system_prompt"]
+    assert "随机选股对照组合" in surfaces["system_prompt"]
+    assert "冻结" in surfaces["system_prompt"]
 
 
 # Forward and Held-out results never enter a session (agent-design §1.2): the
@@ -371,7 +361,6 @@ def _contract_texts() -> dict[str, str]:
         "system_prompt": prompts.PROTOCOL_INSTRUCTION,
         "default_instruction": prompts.SESSION_DEFAULT_INSTRUCTION,
         "wrap_up": prompts.WRAP_UP_PROMPT,
-        "hard_finalization": prompts.HARD_FINALIZATION_SYSTEM_PROMPT,
         **{
             f"memory:{path.parent.name}": path.read_text(encoding="utf-8")
             for path in sorted(library.glob("*/SKILL.md"))
@@ -405,47 +394,67 @@ def test_the_contract_quotes_no_forward_figure_and_names_only_real_row_fields() 
             node = node[key]
 
 
-def test_the_sealed_gate_is_stated_with_this_runs_years_and_numbers() -> None:
-    """The rule paragraph tells the session, concretely: which years it sees
-    and which are sealed, the statistic, the bar as a number for the sealed
-    span (and for one year), that validation shows the same statistic on
-    visible spans, that one freeze ends the session and that there is no
-    second reading. Its numbers are the facts' own."""
+def _run_facts(**geometry: object) -> dict[str, object]:
+    """Facts carrying what the run section reads, at a five-year research and
+    five-year validation geometry with quarterly steps."""
 
-    from autotrade.pipelines.calendar import ResearchGeometry
-    from autotrade.pipelines.config import AcceptanceRules
-    from autotrade.pipelines.research_session import research_geometry_record
+    from autotrade.pipelines.verdict import residual_bar
 
-    geometry = ResearchGeometry("20150801", "20250731", "20260731", "20261031")
-    rules = AcceptanceRules(alpha=0.05, sealed_years=5)
-    visible, sealed = geometry.split_sealed(rules.sealed_years)
-    facts = {
-        "research_geometry": research_geometry_record(
-            visible,
-            window_months=132,
-            decision_time=sealed[0].anchor.isoformat(),
-            sealed=(sealed[0].start, sealed[-1].end),
-        ),
-        "artifact_contract": {"acceptance_rules": rules.agent_facts()},
+    return {
+        "research_geometry": {
+            "frontier": "20200731",
+            "research_period": "20150801..20200731",
+            "years": [{"label": f"Y{index}"} for index in range(1, 6)],
+            "validation_period": "20200801..20250731",
+            "step": "quarter",
+            "steps": 20,
+            "steps_tested": 0,
+            **geometry,
+        },
+        "artifact_contract": {
+            "acceptance_rules": {
+                "instrument": {
+                    "alpha": 0.05,
+                    "bar_over_one_year": round(residual_bar(1.0, 0.05), 3),
+                    "bar_over_validation_period": round(residual_bar(5.0, 0.05), 3),
+                }
+            }
+        },
+        "budgets": {"validates_per_step": 6},
     }
+
+
+def test_the_run_section_states_this_runs_frontier_steps_and_bar() -> None:
+    """The environment tells the session, concretely, the frontier date, the
+    research years, the number and length of the steps, the bar and the
+    validate allowance, read off the facts the prompt also carries."""
+
+    facts = _run_facts()
     prompt = prompts.build_system_prompt(experiment_facts=facts)
-    section = prompt[prompt.index("## 封存检验") :]
+    section = prompt[prompt.index("## 本次运行") : prompt.index("## 运行事实")]
+    assert prompt.index("# 环境") < prompt.index("## 本次运行")
     for clause in (
-        "会话只看得到前 5 个研究年 20150801..20200731",
-        "之后的 5 个研究年 20200801..20250731 被封存",
-        "对市场（`benchmark_index` 收益）、规模与价值三条因子腿做 OLS 后的残差信息比率",
-        "截距 × √244 ÷ 残差标准差",
-        "α = 0.05",
-        "封存的 5 年约 0.736",
-        "一年区间约 1.645",
-        "`batch_validate` 在每个可见区间上报告同一个统计量（`residual_reading`）",
-        "一次 `freeze` 即结束会话",
-        "会话拿不到封存读数，也没有第二次读取",
+        "- 前沿：20200731；会话里的数据止于这一天。",
+        "- 研究年：5 个，20150801..20200731。",
+        "- 验证期：20200801..20250731，共 20 步，每步一个季度；本次尝试开始时已测试 0 步。",
+        "- 门槛：α = 0.05；一年区间约 1.645，整个验证期约 0.736。",
+        "- `validate`：第一次 `test` 之前、以及相邻两次 `test` 之间，各至多 6 次。",
     ):
         assert clause in section, clause
-    gate = facts["artifact_contract"]["acceptance_rules"]["sealed_gate"]
-    assert (gate["alpha"], gate["sealed_years"], gate["bar_over_sealed_years"]) == (0.05, 5, 0.736)
-    # The retired ablation is asked of no arm.
-    assert "消融" not in section and "ablation" not in section
-    # Facts without a sealed gate add no section.
-    assert "## 封存检验" not in _full_prompt()
+    # A resumed attempt reads where its predecessor stopped; monthly steps
+    # read as months.
+    later = prompts.build_run_section(
+        _run_facts(frontier="20211031", step="month", steps=60, steps_tested=15)
+    )
+    assert "- 前沿：20211031；" in later
+    assert "共 60 步，每步一个月；本次尝试开始时已测试 15 步" in later
+    # A geometry that states a frontier must state the rest: a missing key or
+    # an unknown step length fails the prompt instead of dropping the line.
+    broken = _run_facts()
+    del broken["budgets"]["validates_per_step"]  # type: ignore[attr-defined]
+    with pytest.raises(KeyError):
+        prompts.build_run_section(broken)
+    with pytest.raises(KeyError):
+        prompts.build_run_section(_run_facts(step="week"))
+    # Facts without a frontier add no section.
+    assert "## 本次运行" not in _full_prompt()

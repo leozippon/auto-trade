@@ -26,7 +26,7 @@ from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools import ModificationCheckTool, ToolRegistry
 from autotrade.pipelines.config import RollingExperimentConfig
 from autotrade.pipelines.ledger import ExperimentLedger
-from tests.unit.acceptance_fixture import RULES, SEALED_PERIOD
+from tests.unit.acceptance_fixture import RULES
 
 from .fixtures_sandbox import PassingModificationCheck
 
@@ -105,8 +105,8 @@ class RecordFailedAttemptsTest(unittest.TestCase):
             SnapshotBundle,
         )
         from autotrade.pipelines.session_tools import (
-            BatchValidateTool,
             SessionValidations,
+            ValidateTool,
         )
 
         output = _artifact(root / "output")
@@ -119,15 +119,15 @@ class RecordFailedAttemptsTest(unittest.TestCase):
             run_id="run_x",
             snapshot=snapshot,
             decision_time=datetime(2025, 6, 30, 23, 59, 59, tzinfo=UTC),
-            research_years=(ReplaySpan("Y1", "valid", "20210701", "20220630", snapshot),),
+            years=(ReplaySpan("Y1", "valid", "20210701", "20220630", snapshot),),
+            validation=ReplaySpan("validation", "valid", "20220701", "20230630", snapshot),
+            decision_view_at=lambda _anchor: snapshot,
             window_months=24,
-            max_replay_years=30,
             max_llm_calls=200,
             deadline_seconds=1200.0,
             record_failed_attempts=record_failed_attempts,
             benchmark_index=DEFAULT_BENCHMARK_INDEX,
             acceptance_rules=RULES.to_record(),
-            sealed_period=SEALED_PERIOD,
         )
 
         raised = error or RuntimeError(f"validation blew up at {HOST_RESULT_PATH}")
@@ -149,7 +149,7 @@ class RecordFailedAttemptsTest(unittest.TestCase):
             ref_store=AgentRefStore(root / "experiment"),
             ledger=ExperimentLedger(root / "ledger.jsonl"),
         )
-        batch = BatchValidateTool(
+        batch = ValidateTool(
             backtest=backtest,
             workspace=SafeWorkspace(root),
             modification_check_factory=lambda directory: PassingModificationCheck(

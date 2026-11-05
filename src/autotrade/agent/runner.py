@@ -49,11 +49,6 @@ from autotrade.environment.llm import (
     malformed_tool_call_messages,
 )
 from autotrade.environment.runtime import sanitize_for_log, utc_now_iso
-from autotrade.environment.step_tree import (
-    NodeReferenceError,
-    resolve_node_reference,
-    unique_handles,
-)
 from autotrade.environment.time_budget import (
     InferenceTimeBudget,
     SessionTimeBudgetAware,
@@ -78,7 +73,6 @@ from .compact import (
     safe_error_summary,
 )
 from .prompts import (
-    HARD_FINALIZATION_SYSTEM_PROMPT,
     WRAP_UP_PROMPT,
 )
 from .subagent import (
@@ -137,8 +131,10 @@ class AgentSessionBudgetExhausted(SessionInterrupt):
         self.llm_calls = llm_calls
 
 
-_TERMINAL_TOOLS = frozenset({"finish_session"})
-_FINALIZATION_TOOLS = frozenset({"finish_session"})
+# ``test`` advances the validation frontier and, on the last step, ends the
+# session: it waits for every sub-agent (the container restarts behind it) and
+# a finishing call ends the turn.
+_TERMINAL_TOOLS = frozenset({"test"})
 # The Agent's own compaction: the tool validates the summary, the runner
 # rebuilds the conversation once the turn's tool results are in.
 _COMPACT_TOOL = "compact"
@@ -147,11 +143,9 @@ _COMPACT_TOOL = "compact"
 # compaction, so a long session hears it once per context window.
 COMPACT_ADVISORY_FRACTION = 0.75
 # The tool that produces complete Validation nodes: one per finished candidate.
-_VALIDATION_TOOLS = frozenset({"batch_validate"})
-# A completed Validation can switch the session into hard finalization, and
-# the documented contract is that the remaining research calls of that same
-# turn are then refused. That only holds when the batch runs in order, so the
-# backtest gate is sequential by name regardless of how its spec is declared.
+_VALIDATION_TOOLS = frozenset({"validate"})
+# A batch runs in order whatever its spec declares, so its rows are recorded
+# before the turn's later calls read the tree.
 _PHASE_GATE_TOOLS = _VALIDATION_TOOLS
 # Host jobs that pause the session clock like a formal backtest take the same
 # writer barrier: the null control is a multi-minute host replay of a recorded
@@ -159,11 +153,11 @@ _PHASE_GATE_TOOLS = _VALIDATION_TOOLS
 _WRITER_BARRIER_TOOLS = _PHASE_GATE_TOOLS | frozenset({"run_null_control"})
 _SESSION_TOOLS = frozenset(
     {
-        "batch_validate",
+        "validate",
+        "test",
         "run_null_control",
         "agent",
         "compact",
-        "finish_session",
         "glob",
         "grep",
         "modification_check",
@@ -190,7 +184,7 @@ _INTERRUPTED_BY_USER = "interrupted_by_user"
 # ``time_budget_notice`` observation states the remaining minutes and how many
 # backtests have run so far.
 TIME_BUDGET_NOTICE_FRACTIONS = (0.5, 0.75, 0.9)
-_BACKTEST_TOOLS = ("smoke_backtest", "batch_validate")
+_BACKTEST_TOOLS = ("smoke_backtest", "validate", "test")
 # The trace events that carry one tool outcome. The session_end tool_failures
 # scalar and the Agent Trace summary must count the same events, or an audit
 # that reads only the scalar undercounts a session whose children did the work.
@@ -213,12 +207,8 @@ class AgentInboxHook(Protocol):
 def _candidate_entry(
     value: Mapping[str, object], *, index: int
 ) -> dict[str, object] | None:
-    """One selectable Validation node as the finalization list carries it.
-
-    ``stats`` keeps only bounded scalars: the finalization context replaces
-    the conversation, so it must not be able to grow with the size of a
-    backtest summary.
-    """
+    """One complete Validation node as the runner counts it (the time-budget
+    notice and ``steps_used``). ``stats`` keeps only bounded scalars."""
 
     node_id = value.get("node_id")
     revision_id = value.get("revision_id")
@@ -257,7 +247,6 @@ def _inbox_trace_text(text: str) -> str:
 
 @dataclass(frozen=True)
 class AgentSessionConfig:
-    finalize_before_deadline_seconds: float = 300.0
     # Trailing wrap-up grace reserved from the end of the handed session
     # budget. The main deadline sits grace seconds before the budget end:
     # reaching it never interrupts the model; exhausting the budget does.
@@ -276,10 +265,7 @@ class AgentSessionConfig:
         ):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive")
-        if (
-            self.finalize_before_deadline_seconds < 0
-            or self.deadline_grace_seconds < 0
-        ):
+        if self.deadline_grace_seconds < 0:
             raise ValueError("session reserve cannot be negative")
 
 
@@ -386,8 +372,6 @@ class AgentSessionRunner:
         self.event_sink = event_sink
         self.inbox = inbox
         self._complete_validation_nodes: list[dict[str, object]] = []
-        self._hard_finalization = False
-        self._hard_finalization_context_initialized = False
         self._wrap_up_sent = False
         self._subagent_attempts = 0
         self._subagent_roles: set[str] = set()
@@ -489,8 +473,6 @@ class AgentSessionRunner:
         self._complete_validation_nodes = []
         for row in complete_validations:
             self._record_complete_validation(row)
-        self._hard_finalization = False
-        self._hard_finalization_context_initialized = False
         self._wrap_up_sent = False
         self._subagent_attempts = 0
         self._subagent_roles = set()
@@ -523,33 +505,28 @@ class AgentSessionRunner:
                     conversation_id=self.conversation_id,
                     llm_calls=llm_calls,
                 )
-            self._activate_hard_finalization_if_ready(remaining)
-            provider_tools = self._provider_tools()
-            if self._hard_finalization:
-                if not self._hard_finalization_context_initialized:
-                    messages = self._hard_finalization_messages(remaining)
-            else:
-                if (
-                    not self._wrap_up_sent
-                    and remaining <= self.config.deadline_grace_seconds
-                ):
-                    messages.append(ChatMessage("user", WRAP_UP_PROMPT))
-                    self._wrap_up_sent = True
-                    self._emit(
-                        TraceEvent.WRAP_UP_STARTED,
-                        {
-                            "remaining_seconds": round(remaining, 6),
-                            "grace_seconds": self.config.deadline_grace_seconds,
-                        },
-                    )
-                if not self._wrap_up_sent:
-                    notice_index = self._time_budget_notice(
-                        messages, remaining, budget_total, notice_index, backtests
-                    )
-                messages, _ = self._compact_if_needed(
-                    messages, remaining, provider_tools
+            provider_tools = self.tools.provider_tools()
+            if (
+                not self._wrap_up_sent
+                and remaining <= self.config.deadline_grace_seconds
+            ):
+                messages.append(ChatMessage("user", WRAP_UP_PROMPT))
+                self._wrap_up_sent = True
+                self._emit(
+                    TraceEvent.WRAP_UP_STARTED,
+                    {
+                        "remaining_seconds": round(remaining, 6),
+                        "grace_seconds": self.config.deadline_grace_seconds,
+                    },
                 )
-                messages = self._context_notice(messages, provider_tools)
+            if not self._wrap_up_sent:
+                notice_index = self._time_budget_notice(
+                    messages, remaining, budget_total, notice_index, backtests
+                )
+            messages, _ = self._compact_if_needed(
+                messages, remaining, provider_tools
+            )
+            messages = self._context_notice(messages, provider_tools)
             messages = self._append_subagent_observations(messages)
             messages = self._apply_inbox(
                 messages, safe_point=INBOX_SAFE_BEFORE_LLM
@@ -560,7 +537,6 @@ class AgentSessionRunner:
                     messages,
                     provider_tools,
                     max(time_budget.remaining(), 0.0),
-                    allow_semantic_compaction=not self._hard_finalization,
                 )
                 self._emit(
                     TraceEvent.LLM_CALL_STARTED,
@@ -607,7 +583,6 @@ class AgentSessionRunner:
                             messages,
                             provider_tools,
                             max(time_budget.remaining(), 0.0),
-                            allow_semantic_compaction=not self._hard_finalization,
                         )
                         if progressed:
                             context_overflow_recovery_used = True
@@ -869,16 +844,17 @@ class AgentSessionRunner:
         complete = len(self._complete_validation_nodes)
         payload.update(
             smoke_backtests=backtests["smoke_backtest"],
-            batch_validates=backtests["batch_validate"],
+            validates=backtests["validate"],
+            tests=backtests["test"],
             complete_validations=complete,
         )
         payload["message"] = (
             f"推理时间预算已用去 {crossed:.0%}，剩余约 {remaining_minutes:g} 分钟；"
             f"至今 smoke_backtest {backtests['smoke_backtest']} 次、"
-            f"batch_validate {backtests['batch_validate']} 次、"
+            f"validate {backtests['validate']} 次、test {backtests['test']} 次、"
             f"完整 Validation {complete} 个。"
-            "一次验证的耗时随其 span 覆盖的研究年数增长，为仍要跑的正式回测预留时间；"
-            "到达主截止时宿主另行注入收尾提示。"
+            "一次回测的耗时随其区间覆盖的年数增长，为仍要跑的 validate 与 test 预留时间；"
+            "预算耗尽时宿主以最近一次 test 的候选补完记录。"
         )
         messages.append(ChatMessage("user", json.dumps(payload, ensure_ascii=False)))
         self._emit(
@@ -891,72 +867,12 @@ class AgentSessionRunner:
         )
         return notice_index
 
-    def _provider_tools(self) -> tuple[dict[str, object], ...]:
-        if self._hard_finalization:
-            names = self._finalization_tool_names()
-            records = json.loads(
-                json.dumps(
-                    self.tools.provider_tools(names),
-                    ensure_ascii=False,
-                    allow_nan=False,
-                )
-            )
-            candidate_ids = [
-                str(candidate["node_id"])
-                for candidate in self._finalization_candidates()
-            ]
-            for record in records:
-                # node_id stays optional: continue and no_edge name no node.
-                # Each node may be named by its full id or its unique handle.
-                record["function"]["parameters"]["properties"]["node_id"]["enum"] = [
-                    *candidate_ids,
-                    *unique_handles(candidate_ids).values(),
-                ]
-            return tuple(records)
-        return self.tools.provider_tools()
-
-    def _active_tool_names(self) -> frozenset[str]:
-        if self._hard_finalization:
-            return self._finalization_tool_names()
-        return frozenset(spec.name for spec in self.tools.specs())
-
-    def _finalization_tool_names(self) -> frozenset[str]:
-        registered = {spec.name for spec in self.tools.specs()}
-        if "finish_session" not in registered:
-            raise RuntimeError("hard finalization requires finish_session")
-        return frozenset(registered.intersection(_FINALIZATION_TOOLS))
-
-    def _finalization_call_error(self, call: ToolCall) -> str:
-        if not self._hard_finalization:
-            return ""
-        if call.name not in self._active_tool_names():
-            return f"tool is unavailable at this point of the session: {call.name}"
-        node_id = call.arguments.get("node_id")
-        if call.arguments.get("outcome") == "no_edge" and not node_id:
-            # Ending the arm names no node, and is a legal finish in the
-            # finalize window too.
-            return ""
-        candidates = [
-            str(candidate["node_id"]) for candidate in self._finalization_candidates()
-        ]
-        try:
-            if not isinstance(node_id, str):
-                raise NodeReferenceError("node_id is not a string", offered=())
-            resolve_node_reference(node_id, candidates, offered=candidates)
-        except NodeReferenceError:
-            return (
-                f"{call.name} requires one node_id (or its short handle) from the "
-                "session's complete Validation candidates (or outcome=\"no_edge\" "
-                "with a reason)"
-            )
-        return ""
-
     def _record_complete_validations(self, record: dict[str, object]) -> None:
         """Register every complete Validation node one tool result carries.
 
-        ``batch_validate`` reports one row per candidate and only the rows that
-        finished are nodes; they feed the candidate list the finalization phase
-        draws its ``node_id`` enum from.
+        ``validate`` reports one row per candidate and only the rows that
+        finished are nodes: the complete Validations the budget notices count
+        and a resumed attempt is handed.
         """
         value = record.get("value")
         rows = value.get("candidates") if isinstance(value, Mapping) else None
@@ -978,95 +894,6 @@ class AgentSessionRunner:
         )
         if entry is not None:
             self._complete_validation_nodes.append(entry)
-
-    def _finalization_candidates(self) -> list[dict[str, object]]:
-        """The nodes hard finalization may name, each with its short handle
-        where it is unambiguous. No gate reading rides on them: the only
-        performance reading is the sealed one, which no session sees."""
-
-        handles = unique_handles(
-            str(candidate["node_id"]) for candidate in self._complete_validation_nodes
-        )
-        return [
-            {
-                **candidate,
-                **(
-                    {"handle": handles[str(candidate["node_id"])]}
-                    if str(candidate["node_id"]) in handles
-                    else {}
-                ),
-            }
-            for candidate in self._complete_validation_nodes
-        ]
-
-    def _activate_hard_finalization_if_ready(self, remaining: float) -> bool:
-        """Switch to the restricted finalization view inside the finalize window.
-
-        The window is anchored to the MAIN deadline (budget end minus the
-        wrap-up grace): ``finalize_before_deadline_seconds`` before it, exactly
-        as before the grace existed. Once the main deadline has passed the
-        session keeps its full capability surface through the grace window — a
-        Validation completing during grace does not yank the context anymore;
-        the wrap-up prompt (injected at the next loop top, and possibly not yet
-        sent when a turn is still in flight) already asks the model to finish
-        on its own.
-        """
-        if (
-            self._hard_finalization
-            or self._wrap_up_sent
-            or not self._complete_validation_nodes
-        ):
-            return False
-        main_remaining = remaining - self.config.deadline_grace_seconds
-        if (
-            main_remaining <= 0
-            or main_remaining > self.config.finalize_before_deadline_seconds
-        ):
-            return False
-        tool_names = self._finalization_tool_names()
-        self._hard_finalization = True
-        self._hard_finalization_context_initialized = False
-        self._emit(
-            TraceEvent.HARD_FINALIZATION_STARTED,
-            {
-                "remaining_seconds": round(max(remaining, 0.0), 6),
-                "main_deadline_remaining_seconds": round(main_remaining, 6),
-                "reserve_seconds": self.config.finalize_before_deadline_seconds,
-                "grace_seconds": self.config.deadline_grace_seconds,
-                "candidate_node_ids": [
-                    str(candidate["node_id"])
-                    for candidate in self._finalization_candidates()
-                ],
-                "available_tools": sorted(tool_names),
-            },
-        )
-        return True
-
-    def _hard_finalization_messages(self, remaining: float) -> list[ChatMessage]:
-        self._hard_finalization_context_initialized = True
-        payload = {
-            "observation": "session_hard_finalization",
-            "remaining_inference_seconds": round(max(remaining, 0.0), 6),
-            "selection_contract": (
-                "Decide yourself: finish_session with outcome=\"freeze\" and a "
-                "listed node_id that registers (acceptance_rules."
-                "freeze_registration: a full-span, non-control node, with its seed "
-                "replicates in seed_replicates when it trains a model, or "
-                "deterministic=true if its package uses no randomness), or "
-                "outcome=\"no_edge\" with a reason. The Runner does not rank or "
-                "auto-submit candidates; finish_session refuses a node that does "
-                "not register and names why."
-            ),
-            "complete_validation_candidates": self._finalization_candidates(),
-            "available_tools": sorted(self._finalization_tool_names()),
-        }
-        return [
-            ChatMessage("system", HARD_FINALIZATION_SYSTEM_PROMPT),
-            ChatMessage(
-                "user",
-                json.dumps(payload, ensure_ascii=False, allow_nan=False),
-            ),
-        ]
 
     def _dispatch_tool_calls(
         self, calls: tuple[ToolCall, ...], time_budget: InferenceTimeBudget
@@ -1091,9 +918,6 @@ class AgentSessionRunner:
                 # candidates, hypotheses, controls and span now.
                 started["arguments"] = sanitize_for_log(dict(call.arguments))
             self._emit(TraceEvent.TOOL_CALL_STARTED, started)
-            phase_error = self._finalization_call_error(call)
-            if phase_error:
-                return call, {"ok": False, "error": phase_error}
             if time_budget.remaining() <= 0:
                 return call, {
                     "ok": False,
@@ -1137,13 +961,11 @@ class AgentSessionRunner:
             record = self.tools.invoke(
                 call.name,
                 call.arguments,
-                allowed_names=self._active_tool_names(),
             ).to_record()
             if call.name in _VALIDATION_TOOLS and record.get("ok") is True:
                 # A successful backtest result is a complete Validation node;
                 # a batch result carries one per candidate that finished.
                 self._record_complete_validations(record)
-                self._activate_hard_finalization_if_ready(time_budget.remaining())
             return call, record
 
         if self._is_parallel_batch(calls):
@@ -1566,19 +1388,14 @@ class AgentSessionRunner:
         return [job for job in self._subagent_jobs if job.record is None]
 
     def _child_time_reserve_seconds(self) -> float:
-        """The tail of the session budget that belongs to the parent alone.
-
-        The finalize reserve plus the wrap-up grace: the window in which the
-        parent has to enter hard finalization, pick an outcome and call
-        finish_session. Nothing else may consume it — neither the parent's own
-        wait for a child nor the child's own loop, which the engine bounds with
-        the same figure.
+        """The tail of the session budget that belongs to the parent alone:
+        the wrap-up grace, in which the parent writes up what it knows while
+        the host completes the record. Nothing else may consume it -- neither
+        the parent's own wait for a child nor the child's own loop, which the
+        engine bounds with the same figure.
         """
 
-        return (
-            self.config.finalize_before_deadline_seconds
-            + self.config.deadline_grace_seconds
-        )
+        return self.config.deadline_grace_seconds
 
     def _child_reserve_for_budget(self) -> float:
         """The tail to withhold from the children of THIS session.
@@ -1609,7 +1426,7 @@ class AgentSessionRunner:
         without ever reaching the loop top, and ended selecting none of them.
         """
 
-        if self._hard_finalization or self._wrap_up_sent:
+        if self._wrap_up_sent:
             return None
         return self._child_reserve_seconds
 
@@ -2074,8 +1891,8 @@ class AgentSessionRunner:
         if unsupported:
             raise ValueError(f"Agent session received unsupported tools: {unsupported}")
         producing = sorted(names & _VALIDATION_TOOLS)
-        if producing and "finish_session" not in names:
-            raise ValueError(f"a session with {producing[0]} requires finish_session")
+        if producing and "test" not in names:
+            raise ValueError(f"a session with {producing[0]} requires test")
 
     def _locked_event_sink(self, event: TraceEvent, payload: dict[str, object]) -> None:
         with self._event_lock:

@@ -29,10 +29,11 @@ from autotrade.environment.llm.model_profiles import LOCAL_QWEN_MODEL, MIMO_FLAS
 from autotrade.environment.replay.style import MIN_REGRESSION_DAYS
 from autotrade.environment.sandbox import SandboxSpec
 from autotrade.environment.strategy_loader import validate_strategy_package
-from autotrade.pipelines.calendar import GEOMETRY_PARAMETERS, ResearchGeometry
 from autotrade.pipelines.config import (
     DEFAULT_RESEARCH_GEOMETRY,
+    OBSOLETE_KEYS,
     SNAPSHOT_CACHE_FORMAT_VERSION,
+    acceptance_for,
 )
 from autotrade.pipelines.hitl_state import WEB_CLOSED_PARAMS, WEB_CREATE_DEFAULTS
 from autotrade.pipelines.pit_backend import required_release_raw_datasets
@@ -56,7 +57,6 @@ from scripts.experiments._round import (
     archived_ids,
 )
 from tests.unit.acceptance_fixture import CREATE_RULES
-from tests.unit.reference_pack_fixture import AFTER_RESEARCH
 from tests.unit.research_release_fixture import (
     BACKFILLED_HISTORY_START,
     HELDOUT_REACHING_DAYS,
@@ -69,8 +69,8 @@ CALENDAR_YEAR = re.compile(r"(?<!\d)(?:19|20)\d{2}(?:\d{4})?(?!\d)")
 
 
 def _sealed_round(**fields: object) -> Round:
-    """A synthetic round that states how many research years it seals, as
-    every round must (the rule has no console default)."""
+    """A synthetic round that states how many research years its sessions see,
+    as every round must (the rule has no console default)."""
 
     overrides = {**CREATE_RULES, **dict(fields.pop("overrides", {}) or {})}  # type: ignore[call-overload]
     return Round(overrides=overrides, **fields)  # type: ignore[arg-type]
@@ -88,7 +88,13 @@ def _rounds() -> dict[str, Round]:
 
 
 ROUNDS = _rounds()
-ROUND_IDS = sorted(name for name, rnd in ROUNDS.items() if not rnd.closed)
+# A round written under rules since retired (``config.OBSOLETE_KEYS``) is
+# history: the console refuses its request, so it is read but never dry-run.
+ROUND_IDS = sorted(
+    name
+    for name, rnd in ROUNDS.items()
+    if not rnd.closed and not OBSOLETE_KEYS & set(rnd.common_overrides)
+)
 ARMS = [(name, arm) for name in ROUND_IDS for arm in ROUNDS[name].arms]
 # The packs the open rounds' arms mount: every research attempt copies its
 # pack from the repository, so these are the packs a session can still read.
@@ -881,7 +887,6 @@ def test_an_arm_is_tracked_only_when_it_names_a_tracking_error_cap() -> None:
     carries the optional drawdown and mandate limits as null, and a null cap
     is no mandate at any account size. An arm that wants one names the cap,
     which fills a blank beta band; drawdowns stay 0.45 / 0.30 unless named."""
-    from autotrade.pipelines.config import acceptance_for
 
     optional = (
         "max_drawdown",
@@ -910,7 +915,7 @@ def test_an_arm_is_tracked_only_when_it_names_a_tracking_error_cap() -> None:
     # The account decides nothing: two arms an order of magnitude apart, both
     # silent about the mandate, are judged by exactly the same rules.
     assert rules("large") == rules("small") == acceptance_for(
-        {"alpha": WEB_CREATE_DEFAULTS["alpha"], "sealed_years": 1}
+        {"alpha": WEB_CREATE_DEFAULTS["alpha"], "research_years": 1}
     ).to_record()
     tracked = rules("tracked")
     assert (tracked["tracking_error_cap"], tracked["beta_min"], tracked["beta_max"]) == (
@@ -1126,67 +1131,13 @@ def test_a_starter_carries_the_canonical_book_byte_for_byte(pack: Path) -> None:
     )
 
 
-# Round 20261103, the first under the sealed gate: two gpt-6-astra experiments
-# on the ten-year geometry with its last five years sealed, on a pack that
-# frames no mechanism. Its two memory arms left the file with the memory
-# machinery.
-ROUND_SEALED = "create_round_20261103"
-SEALED_PACK = "configs/workspace_refs/open_200k_sealed_20261103"
-# The curated operating memory retired with the sealed gate: it described the
-# data surface of the whole research window, sealed years included.
-RETIRED_SKILL = "research-8y-data-surface"
-# A literal date: a year, with its month where one follows it (2020-08,
-# 20200801, 2020 年 8 月).
-LITERAL_DATE = re.compile(
-    r"(?<!\d)((?:19|20)\d{2})(?:[-/.]?(0[1-9]|1[0-2])(?:\d{2})?|\s*年\s*(\d{1,2})\s*月)?(?!\d)"
-)
-
-
-def test_the_sealed_round_runs_two_identical_experiments_on_the_open_pack() -> None:
-    """Two experiments that send one request but for their ids, five of the
-    ten research years sealed at the program's alpha."""
-    rnd = ROUNDS[ROUND_SEALED]
-    first, second = (rnd.request_params(arm) for arm in rnd.arms)
-    assert second == {**first, "experiment_id": second["experiment_id"]}
-    assert first["workspace_reference"] == SEALED_PACK
-    assert (first["research_start"], first["research_end"]) == ("20150801", "20250731")
-    assert (first["sealed_years"], first["alpha"]) == (5, BASE_EXPECTED_DEFAULTS["alpha"])
-    assert (first["model"], first["reasoning_effort"]) == ("gpt-6-astra", "xhigh")
-
-
-def _sealed_months(params: dict[str, object]) -> tuple[tuple[int, int], tuple[int, int]]:
-    """The first and last (year, month) of the research years ``params`` seals."""
-    geometry = ResearchGeometry(**{name: str(params[name]) for name in GEOMETRY_PARAMETERS})
-    _, sealed = geometry.split_sealed(int(params["sealed_years"]))  # type: ignore[call-overload]
-    return (int(sealed[0].start[:4]), int(sealed[0].start[4:6])), (int(sealed[-1].end[:4]), int(sealed[-1].end[4:6]))
-
-
-def test_the_sealed_pack_dates_nothing_inside_the_sealed_years() -> None:
-    """A session must learn nothing of the sealed years: no file of its pack
-    names a date inside them (a bare year counts when any of it is sealed),
-    cites the retired operating memory that described them or quotes a
-    post-research reading, and none asks for novelty, which the gate does not
-    read."""
-    first, last = _sealed_months(ROUNDS[ROUND_SEALED].request_params(PROBE_ID))
-    files = [path for path in sorted((REPO_ROOT / SEALED_PACK).rglob("*")) if path.is_file()]
-    assert files
-    for path in files:
-        text = path.read_text(encoding="utf-8")
-        for match in LITERAL_DATE.finditer(text):
-            year, month = int(match.group(1)), match.group(2) or match.group(3)
-            inside = first <= (year, int(month)) <= last if month else first[0] <= year <= last[0]
-            assert not inside, (path.name, match.group(0))
-        assert RETIRED_SKILL not in text, path.name
-        assert not [word for word in (*AFTER_RESEARCH, "新意", "创新") if word in text], path.name
-
-
-def test_a_round_that_states_no_sealed_years_is_refused(
+def test_a_round_that_states_no_research_years_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The console has no value for ``sealed_years`` and the launcher sets
+    """The console has no value for ``research_years`` and the launcher sets
     none: a round that does not state it is refused before anything is sent,
-    one that states it passes the same pre-flight, and one that still names
-    the retired ``ablation_required`` is refused."""
+    one naming a retired rule is refused as unknown, and one that states it
+    passes the same pre-flight."""
 
     rnd = Round(pit_views_seed="data/seed_probe")
     _synthetic_repo(tmp_path, monkeypatch, rnd)
@@ -1194,11 +1145,11 @@ def test_a_round_that_states_no_sealed_years_is_refused(
         assert rnd.request_params(PROBE_ID).get(key) is None
     params, reason = rnd.validated(PROBE_ID)
     assert params is None
-    assert reason.endswith("missing required experiment parameters: sealed_years")
+    assert "missing required experiment parameters: research_years" in reason
+    retired = Round(pit_views_seed="data/seed_probe", overrides={"research_years": 1, "sealed_years": 1})
+    params, reason = retired.validated(PROBE_ID)
+    assert params is None and reason.endswith("unknown experiment parameters: sealed_years")
     stated = _sealed_round(pit_views_seed="data/seed_probe")
     params, reason = stated.validated(PROBE_ID)
     assert reason == "" and params is not None
-    assert params["sealed_years"] == 1 and "ablation_required" not in params
-    retired = _sealed_round(pit_views_seed="data/seed_probe", overrides={"ablation_required": False})
-    params, reason = retired.validated(PROBE_ID)
-    assert params is None and reason.endswith("unknown experiment parameters: ablation_required")
+    assert (params["research_years"], params["test_step_months"], params["validates_per_step"]) == (1, 3, 6)

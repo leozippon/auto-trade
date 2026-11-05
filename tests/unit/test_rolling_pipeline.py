@@ -23,7 +23,8 @@ from autotrade.environment.executor import StrategyMemoryExceeded, StrategyRaise
 from autotrade.environment.replay.engine import BacktestError
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
 from autotrade.environment.strategy import CN_TZ
-from autotrade.pipelines.calendar import FULL_SPAN, ResearchGeometry
+from autotrade.pipelines import rolling_record
+from autotrade.pipelines.calendar import FULL_SPAN, ResearchGeometry, anchor_on
 from autotrade.pipelines.config import (
     EvaluationRequest,
     EvaluationResult,
@@ -36,13 +37,16 @@ from autotrade.pipelines.config import (
     research_span,
 )
 from autotrade.pipelines.experiment import (
+    EnvironmentBlockedAttempt,
     RollingExperimentPipeline,
     _session_budgets,
     null_control_seed,
+    replay_and_analysis,
     research_step_record,
 )
 from autotrade.pipelines.ledger import (
     INTERRUPTED_RUN_ERROR,
+    TEST_STEP_RECORD_TYPE,
     UNKNOWN_MARKER_LINK_KEY,
     UNREADABLE_RUN_MARKER_ERROR,
     ExperimentLedger,
@@ -227,14 +231,14 @@ class Developer:
             (source / "main.py").write_text(f"{MAIN}# alpha={alpha}\n", encoding="utf-8")
             typed, _fingerprint = self.store.create_revision(source)
             validation = self.evaluator.evaluate(
-                request.validation.request(typed, schedule=CONFIG_SCHEDULE, broker_profile=CONFIG_PROFILE)
+                request.full_span.request(typed, schedule=CONFIG_SCHEDULE, broker_profile=CONFIG_PROFILE)
             )
             steps.append(
                 StepResult(
                     f"{request.session_key}_step_{number}",
                     typed.revision_id,
                     validation,
-                    span=request.validation.label,
+                    span=request.full_span.label,
                     control=number in extra.get("controls", ()),
                 )
             )
@@ -244,6 +248,9 @@ class Developer:
         node_id = extra.get("node_id")
         if outcome == "freeze" and node_id is None:
             node_id = steps[extra.get("nominee", 0)].step_id
+        # The plan's ``freeze`` in the session's own terms: a session whose
+        # last test took the nominee.
+        outcome = {"freeze": "completed"}.get(outcome, outcome)
         return ResearchSessionResult(
             f"conversation_{request.run_id}",
             tuple(steps),
@@ -295,39 +302,47 @@ def _pipeline(
     return pipeline, snapshots, evaluator, developer, ledger
 
 
+def _completed(tmp_path: Path):
+    """An arm whose session's budget ran out after two full-span Validations:
+    the host freezes the last and fills the whole rolling record from one
+    replay of it."""
+
+    return _pipeline(tmp_path, {1: ([0.0012, 0.0002], "deadline", {"finish_reason": "llm_call_budget_exhausted"})})
+
+
 def _freezing(tmp_path: Path):
     """A session that validates two full-span candidates and nominates the first."""
 
     return _pipeline(tmp_path, {1: ([0.0012, 0.0002], "freeze", {"nominee": 0})})
 
 
-def test_the_research_session_sees_only_the_visible_years(tmp_path: Path):
-    """The arm seals its trailing research year: the Agent's view is the
-    decision view at the end of the visible year, every span the session can
-    replay ends before the first sealed day, and the request names the sealed
-    year's dates and nothing to replay them with."""
+def test_the_research_session_opens_at_the_validation_start(tmp_path: Path):
+    """The arm researches on its first year and validates through its second:
+    the Agent's view is the decision view at the end of the research year,
+    ``full`` is the research year alone, and the request carries every year
+    of the geometry so a test can replay the validation year."""
 
     pipeline, snapshots, evaluator, developer, _ledger = _freezing(tmp_path)
     pipeline.run_research_session()
 
-    visible, sealed = GEOMETRY.split_sealed(CONFIG_ACCEPTANCE.sealed_years)
-    assert [slot.label for slot in visible] == ["Y1"] and [slot.label for slot in sealed] == ["Y2"]
-    first_sealed = sealed[0].start
-    assert snapshots.decisions == [sealed[0].anchor]
+    research, validation = GEOMETRY.split_research(CONFIG_ACCEPTANCE.research_years)
+    assert [slot.label for slot in research] == ["Y1"] and [slot.label for slot in validation] == ["Y2"]
+    validation_start = validation[0].start
+    assert snapshots.decisions == [validation[0].anchor]
     [request] = developer.requests
     assert request.session_key == "research"
-    assert request.decision_time == sealed[0].anchor < datetime(2023, 7, 1, tzinfo=CN_TZ)
+    assert request.decision_time == validation[0].anchor < datetime(2023, 7, 1, tzinfo=CN_TZ)
     assert request.snapshot.decision_ref == "decision/20230630"
-    assert request.sealed_period == (sealed[0].start, sealed[-1].end)
-    assert [year.label for year in request.research_years] == ["Y1"]
-    assert (request.validation.label, request.validation.mode) == ("full", "valid")
-    assert (request.validation.start, request.validation.end) == ("20220701", "20230630")
-    # Every span a Validation may name resolves inside the visible years.
+    assert [year.label for year in request.years] == ["Y1", "Y2"]
+    assert request.research_years == 1
+    assert (request.full_span.label, request.full_span.mode) == ("full", "valid")
+    assert (request.full_span.start, request.full_span.end) == ("20220701", "20230630")
+    # ``full`` and the research year end before the validation start; the
+    # validation year parses but is the frontier's to allow.
     for label in ("full", "Y1"):
-        assert research_span(request.research_years, label).end < first_sealed
-    with pytest.raises(ValueError):
-        research_span(request.research_years, "Y2")
-    assert all(item.end < first_sealed for item in evaluator.requests)
+        assert research_span(request.years, label, research_years=1).end < validation_start
+    assert research_span(request.years, "Y2", research_years=1).start == validation_start
+    assert all(item.end < validation_start for item in evaluator.requests)
     replayed = {(item.start, item.end, item.continuation) for item in evaluator.requests}
     assert replayed == {("20220701", "20230630", ())}
 
@@ -373,35 +388,22 @@ def test_a_freeze_registers_and_records_the_frozen_block(tmp_path: Path):
         pipeline.run_research_session()
 
 
-def test_a_nomination_that_does_not_register_ends_the_arm_without_a_deliverable(tmp_path: Path):
-    pipeline, *_rest, ledger = _pipeline(
-        tmp_path, {1: ([0.0012, 0.0002], "freeze", {"nominee": 1, "controls": (1,)})}
-    )
-    record = pipeline.run_research_session()
-    assert record["frozen"] is None
-    assert record["freeze_gate"] == {"passed": False, "reasons": ["freeze_nominee_is_control"]}
-    assert record["arm_end"] == {
-        "status": "no_deliverable",
-        "reason": "freeze refused at registration (freeze_nominee_is_control)",
-    }
-    assert research_over(ledger.read())
-    assert experiment_verdict(ledger.read())["status"] == "no_deliverable"
-    with pytest.raises(RuntimeError, match="research is over"):
-        pipeline.run_research_session()
+def test_a_completed_session_whose_candidate_does_not_register_fails_the_attempt(tmp_path: Path):
+    """``test`` refused every candidate that does not register, so a completed
+    session names one that does; a candidate that no longer registers is a
+    broken invariant, failed loudly and recorded as a failed attempt rather
+    than frozen or quietly ended."""
 
-
-def test_a_nominee_with_nothing_to_read_is_refused_while_the_session_is_open(tmp_path: Path):
-    """An all-zero active series has a plain reading but no residual one,
-    which the freeze would record: registration refuses it as unmeasurable,
-    so a freeze that registers is never left half done."""
-
-    pipeline, *_rest, ledger = _pipeline(tmp_path, {1: (["flat"], "freeze", {})})
-    record = pipeline.run_research_session()
-    gate = record["freeze_gate"]
-    assert (gate["passed"], gate["reasons"]) == (False, ["freeze_unmeasurable"])
-    assert "explain the series exactly" in gate["error"]
-    assert record["frozen"] is None and record["arm_end"]["status"] == "no_deliverable"
-    assert [row["record_type"] for row in ledger.read()] == ["research_session"]
+    for reason, plan in (
+        ("freeze_nominee_is_control", {1: ([0.0012, 0.0002], "freeze", {"nominee": 1, "controls": (1,)})}),
+        # An all-zero active series has a plain reading but no residual one.
+        ("freeze_unmeasurable", {1: (["flat"], "freeze", {})}),
+    ):
+        pipeline, *_rest, ledger = _pipeline(tmp_path / reason, plan)
+        with pytest.raises(RuntimeError, match=f"no longer registers: {reason}"):
+            pipeline.run_research_session()
+        assert [row["record_type"] for row in ledger.read()] == ["attempt_failed"]
+        assert not research_over(ledger.read())
 
 
 def test_a_freeze_is_terminal_whatever_the_nominee_read(tmp_path: Path):
@@ -425,31 +427,42 @@ def test_the_ledger_refuses_a_second_freeze(tmp_path: Path):
         ledger.append({**frozen, "run_id": "run_again"})
 
 
-def test_no_edge_ends_the_arm_without_a_deliverable(tmp_path: Path):
-    pipeline, *_rest, ledger = _pipeline(
-        tmp_path, {1: ([0.0], "no_edge", {"reason": "the pack's termination rule fired"})}
-    )
-    record = pipeline.run_research_session()
-    assert record["arm_end"] == {
-        "status": "no_deliverable",
-        "reason": "no_edge: the pack's termination rule fired",
-    }
-    assert research_over(ledger.read())
-    assert experiment_verdict(ledger.read()) == {
-        "status": "no_deliverable",
-        "reasons": ["no_edge: the pack's termination rule fired"],
-    }
-    with pytest.raises(RuntimeError, match="needs a frozen artifact"):
-        pipeline.run_forward()
+def test_a_budget_that_ends_before_any_test_freezes_the_last_registrable_candidate(tmp_path: Path):
+    """The host completes what the session did not: the last full-span,
+    non-control Step that registers is frozen, and the rolling record is
+    filled from one replay of it over the whole validation period, each step
+    read off that replay's window and marked as the host's completion."""
+
+    for name, plan, frozen_step in (
+        ("last", {1: ([0.0012, 0.0002], "deadline", {"finish_reason": "llm_call_budget_exhausted"})}, 1),
+        ("control_skipped", {1: ([0.0012, 0.0002], "deadline", {"controls": (1,)})}, 0),
+    ):
+        pipeline, _snapshots, evaluator, _developer, ledger = _pipeline(tmp_path / name, plan)
+        record = pipeline.run_research_session()
+        assert (record["outcome"], record["arm_end"]) == ("deadline", None)
+        assert record["frozen"]["source_step_id"] == f"research_step_{frozen_step}"
+        assert record["freeze_gate"]["passed"] is True
+        steps = pipeline.validation_steps()
+        rows = [row for row in ledger.read() if row["record_type"] == TEST_STEP_RECORD_TYPE]
+        assert [row["step"] for row in rows] == list(range(1, steps.count + 1))
+        assert [row["frontier"] for row in rows] == [steps.frontier_after(k) for k in range(1, steps.count + 1)]
+        assert {row["source"] for row in rows} == {"host_completion"}
+        assert {row["candidate"]["step_id"] for row in rows} == {f"research_step_{frozen_step}"}
+        assert (record["frontier"], record["steps_tested"]) == (steps.end, steps.count)
+        # One replay filled every entry, over the validation span as one book.
+        completion = evaluator.requests[-1]
+        assert (completion.start, completion.end) == (steps.start, steps.end)
+        assert len({row["replay"]["result_ref"] for row in rows}) == 1
+        assert research_over(ledger.read())
+        assert experiment_verdict(ledger.read()) is None
 
 
-# The host tree a dead session container is named after, as the worker sees it.
 HOST_WORK_ROOT = f"{Path(__file__).resolve().parents[2]}/.runtime/sandboxes/arm/research"
 
 
 def _interrupted_attempt(
-    pipeline, ledger, *, summary: str | None, replay_years: int, node: bool, capped: bool = False
-) -> str:
+    pipeline, ledger, *, summary: str | None, test_replays: int, node: bool, capped: bool = False
+) -> str | None:
     """Leave what an interrupted attempt leaves: an attempt_failed row, a
     trace with budget checkpoints (and a compaction), a published tree node
     with its host sidecar and its revision in the store.
@@ -482,7 +495,7 @@ def _interrupted_attempt(
             "event_type": "llm_call",
             "ts": "2026-09-15T01:10:00+00:00",
             "run_id": "run_ref_first",
-            "budget_used": {"inference_seconds": 600.0, "llm_calls": 7, "main_calls": 5, "subagent_calls": 2, "compact_calls": 0, "replay_years": replay_years, "null_controls": 1},
+            "budget_used": {"inference_seconds": 600.0, "llm_calls": 7, "main_calls": 5, "subagent_calls": 2, "compact_calls": 0, "test_replays": test_replays, "null_controls": 1},
         },
     ]
     if summary is not None:
@@ -490,10 +503,10 @@ def _interrupted_attempt(
     if capped:
         events.append({"event_type": "trace_limit_reached", "ts": "2026-09-15T01:25:00+00:00", "run_id": "run_ref_first", "max_bytes": 33554432})
     else:
-        events.append({"event_type": "session_error", "ts": "2026-09-15T01:30:00+00:00", "run_id": "run_ref_first", "budget_used": {"inference_seconds": 900.0, "llm_calls": 9, "main_calls": 7, "subagent_calls": 2, "compact_calls": 0, "replay_years": replay_years, "null_controls": 1}})
+        events.append({"event_type": "session_error", "ts": "2026-09-15T01:30:00+00:00", "run_id": "run_ref_first", "budget_used": {"inference_seconds": 900.0, "llm_calls": 9, "main_calls": 7, "subagent_calls": 2, "compact_calls": 0, "test_replays": test_replays, "null_controls": 1}})
     trace.write_text("".join(json.dumps(event) + "\n" for event in events) + "{torn", encoding="utf-8")
     if not node:
-        return run_id
+        return None
     source = pipeline.config.experiment_dir.parent / "candidates" / "earlier"
     source.mkdir(parents=True)
     (source / "main.py").write_text(f"{MAIN}# alpha=0.0011\n", encoding="utf-8")
@@ -517,7 +530,7 @@ def _interrupted_attempt(
         pipeline.config.experiment_dir,
         StepResult(node_id, typed.revision_id, validation, span="full"),
     )
-    return run_id
+    return node_id
 
 
 def _request_span(pipeline):
@@ -533,7 +546,7 @@ def test_a_resumed_attempt_continues_from_the_trace_and_the_recorded_node(tmp_pa
     pipeline, _snapshots, _evaluator, developer, ledger = _pipeline(
         tmp_path, {1: ([0.0012], "freeze", {"nominee": 1})}
     )
-    _interrupted_attempt(pipeline, ledger, summary="## 目标\n继续动量腿", replay_years=2, node=True)
+    _interrupted_attempt(pipeline, ledger, summary="## 目标\n继续动量腿", test_replays=2, node=True)
     revisions = pipeline.artifacts.root / "revisions"
     assert len(list(revisions.iterdir())) == 1, "a failed attempt keeps its revisions"
 
@@ -548,7 +561,7 @@ def test_a_resumed_attempt_continues_from_the_trace_and_the_recorded_node(tmp_pa
     assert request.resume.transcripts == ("run_ref_first.txt",)
     assert request.budget_used.to_record() == {
         "inference_seconds": 900.0, "llm_calls": 9, "main_calls": 7, "subagent_calls": 2,
-        "compact_calls": 0, "replay_years": 2, "null_controls": 1, "api_spend_usd": 0.0,
+        "compact_calls": 0, "test_replays": 2, "null_controls": 1, "api_spend_usd": 0.0,
     }
     [earlier] = request.steps_before
     assert earlier.span == "full" and earlier.validation.summary["order_count"] > 0
@@ -563,14 +576,97 @@ def test_a_resumed_attempt_continues_from_the_trace_and_the_recorded_node(tmp_pa
 
 def test_a_resumed_attempt_without_a_summary_starts_from_the_note_alone(tmp_path: Path):
     pipeline, _snapshots, _evaluator, developer, ledger = _pipeline(
-        tmp_path, {1: ([0.0], "no_edge", {"reason": "nothing survived the second look"})}
+        tmp_path, {1: ([], "deadline", {"finish_reason": "llm_call_budget_exhausted"})}
     )
-    _interrupted_attempt(pipeline, ledger, summary=None, replay_years=0, node=False)
+    _interrupted_attempt(pipeline, ledger, summary=None, test_replays=0, node=False)
     record = pipeline.run_research_session()
     request = developer.requests[-1]
     assert request.resume is not None and request.resume.compaction_summary is None
     assert request.steps_before == () and request.budget_used.llm_calls == 9
     assert record["attempts"] == 2 and record["arm_end"]["status"] == "no_deliverable"
+
+
+def test_a_resumed_attempt_continues_from_the_frontier_and_the_record(tmp_path: Path):
+    """An attempt interrupted after a test leaves the step in the ledger. The
+    next attempt opens at the frontier that step reached, with the record so
+    far; when its budget ends before another test, the host freezes the tested
+    candidate -- not the Validation the attempt added -- and completes only the
+    record's remaining steps."""
+
+    pipeline, snapshots, evaluator, developer, ledger = _pipeline(
+        tmp_path, {1: ([0.0012], "deadline", {"finish_reason": "llm_call_budget_exhausted"})}
+    )
+    from autotrade.pipelines.session_resume import load_recorded_steps
+
+    node_id = _interrupted_attempt(pipeline, ledger, summary=None, test_replays=1, node=True)
+    [earlier] = load_recorded_steps(pipeline.config.experiment_dir)
+    steps = pipeline.validation_steps()
+    first, frontier = steps.window(1)
+    # The step the interrupted attempt tested: its candidate replayed from the
+    # validation start to the first frontier.
+    replayed = evaluator.evaluate(
+        pipeline.validation_span().request(
+            pipeline.artifacts.revision(earlier.revision_id), schedule=CONFIG_SCHEDULE, broker_profile=CONFIG_PROFILE
+        )
+    )
+    replay, analysis = replay_and_analysis(replayed.result_ref)
+    ledger.append(
+        rolling_record.test_step_record(
+            head={"experiment_id": "arm", "epoch_id": "research", "fold_id": "research", "run_id": "run_ref_first", "session_key": "research"},
+            steps=steps,
+            step=1,
+            candidate={
+                "step_id": node_id,
+                "revision_id": earlier.revision_id,
+                "fingerprint": earlier.fingerprint,
+                "seed_replicates": [],
+                "deterministic": False,
+            },
+            replay={"start": steps.start, "end": frontier, "result_ref": replayed.result_ref},
+            entry=rolling_record.step_entry(replay, analysis, start=first, end=frontier),
+            registration={"passed": True, "reasons": []},
+            source=rolling_record.SOURCE_TEST,
+        )
+    )
+
+    record = pipeline.run_research_session()
+
+    request = developer.requests[-1]
+    assert request.resume is not None and request.resume.attempt == 2
+    assert [row["step"] for row in request.tests_before] == [1]
+    assert request.frontier == frontier == "20230930"
+    assert request.decision_time == anchor_on(frontier) and snapshots.decisions[-1] == anchor_on(frontier)
+    assert [step.step_id for step in request.steps_before] == [node_id]
+    # The tested candidate is frozen, not the Validation this attempt added.
+    assert record["frozen"]["source_step_id"] == node_id != record["steps"][-1]["step_id"]
+    rows = [row for row in ledger.read() if row["record_type"] == TEST_STEP_RECORD_TYPE]
+    assert [(row["step"], row["source"]) for row in rows] == [
+        (1, "test"), (2, "host_completion"), (3, "host_completion"), (4, "host_completion"),
+    ]
+    assert {row["candidate"]["step_id"] for row in rows} == {node_id}
+    assert (record["frontier"], record["steps_tested"], record["attempts"]) == (steps.end, 4, 2)
+
+
+def test_an_environment_block_ends_the_attempt_and_the_third_ends_the_arm(tmp_path: Path):
+    """A session the host ended on its environment ends the attempt, not the
+    research: the next attempt resumes from the frontier and the record. Only
+    when the attempts are spent does the arm end ``environment_blocked``, with
+    nothing frozen and no replay to follow."""
+
+    reason = "span full: 2 batches failed on the environment in every candidate; last error: ArrowTypeError"
+    plan = {attempt: ([], "environment_blocked", {"reason": reason}) for attempt in (1, 2, 3)}
+    pipeline, *_rest, ledger = _pipeline(tmp_path, plan)
+    for attempt in (1, 2):
+        with pytest.raises(EnvironmentBlockedAttempt, match="2 batches failed"):
+            pipeline.run_research_session()
+        rows = ledger.read()
+        assert [row["record_type"] for row in rows] == ["attempt_failed"] * attempt
+        assert "EnvironmentBlockedAttempt" in str(rows[-1]["error"]) and not research_over(rows)
+    record = pipeline.run_research_session()
+    assert (record["outcome"], record["attempts"], record["frozen"]) == ("environment_blocked", 3, None)
+    assert record["arm_end"] == {"status": "environment_blocked", "reason": reason}
+    assert research_over(ledger.read())
+    assert experiment_verdict(ledger.read()) == {"status": "environment_blocked", "reasons": [reason]}
 
 
 def test_a_resume_refuses_a_trace_that_stopped_at_its_size_cap(tmp_path: Path):
@@ -581,7 +677,7 @@ def test_a_resume_refuses_a_trace_that_stopped_at_its_size_cap(tmp_path: Path):
     pipeline, _snapshots, _evaluator, developer, ledger = _pipeline(
         tmp_path, {1: ([0.0012], "freeze", {"nominee": 1})}
     )
-    _interrupted_attempt(pipeline, ledger, summary=None, replay_years=2, node=False, capped=True)
+    _interrupted_attempt(pipeline, ledger, summary=None, test_replays=2, node=False, capped=True)
     with pytest.raises(RuntimeError, match="reached its size cap"):
         pipeline.run_research_session()
     assert developer.requests == []
@@ -615,7 +711,7 @@ def test_a_moved_arm_resumes_from_the_recorded_node_where_it_now_lives(tmp_path:
 
     plan = {1: ([0.0012], "freeze", {"nominee": 1})}
     old, _snapshots, old_evaluator, _developer, old_ledger = _pipeline(tmp_path / "old", plan)
-    _interrupted_attempt(old, old_ledger, summary=None, replay_years=2, node=True)
+    _interrupted_attempt(old, old_ledger, summary=None, test_replays=2, node=True)
     (tmp_path / "old").rename(tmp_path / "new")
     pipeline, _snapshots, evaluator, developer, _ledger = _pipeline(tmp_path / "new", plan)
     # The fixture names results by count: number on after the moved ones.
@@ -640,15 +736,20 @@ def test_a_moved_arm_resumes_from_the_recorded_node_where_it_now_lives(tmp_path:
             load_recorded_steps(experiment)
 
 
-def test_an_exhausted_budget_ends_the_arm_without_a_deliverable(tmp_path: Path):
+def test_an_exhausted_budget_without_a_registrable_candidate_ends_the_arm_without_a_deliverable(
+    tmp_path: Path,
+):
     pipeline, *_rest, ledger = _pipeline(
-        tmp_path, {1: ([0.0], "deadline", {"finish_reason": "llm_call_budget_exhausted"})}
+        tmp_path, {1: ([], "deadline", {"finish_reason": "llm_call_budget_exhausted"})}
     )
     record = pipeline.run_research_session()
     assert (record["outcome"], record["frozen"]) == ("deadline", None)
     assert record["arm_end"] == {
         "status": "no_deliverable",
-        "reason": "research budget exhausted without a freeze (llm_call_budget_exhausted)",
+        "reason": (
+            "research budget exhausted before any test, with no registrable full-span "
+            "candidate (llm_call_budget_exhausted)"
+        ),
     }
     assert research_over(ledger.read())
     assert experiment_verdict(ledger.read())["status"] == "no_deliverable"
@@ -681,33 +782,22 @@ def test_a_failed_attempt_is_recorded_and_the_session_runs_again(tmp_path: Path)
 
 
 def test_the_forward_replay_is_one_span_from_forward_start_to_the_release(tmp_path: Path):
-    pipeline, snapshots, evaluator, _developer, ledger = _freezing(tmp_path)
+    pipeline, snapshots, evaluator, _developer, ledger = _completed(tmp_path)
     frozen = pipeline.run_research_session()["frozen"]
     snapshots.prepared.clear()
     evaluator.requests.clear()
 
     record = pipeline.run_forward()
 
-    # The research years' slots are prepared again for the sealed reading,
-    # then the forward and Held-out slots.
-    assert snapshots.prepared[-2:] == [
+    # The forward and Held-out slots, and nothing of the research years.
+    assert snapshots.prepared == [
         ("heldout", "20240701", "20250630", GEOMETRY.forward.anchor),
         ("heldout", "20250701", RELEASE_END, GEOMETRY.heldout(DAYS).anchor),
     ]
-    # First the sealed year, as one book from the view at its start, then the
-    # one continuous forward and Held-out replay.
-    sealed_request, request = evaluator.requests
-    assert (sealed_request.mode, sealed_request.start, sealed_request.end) == ("valid", "20230701", "20240630")
-    assert sealed_request.revision.revision_id == frozen["artifact_id"]
-    sealed = record["sealed"]
-    assert (sealed["label"], sealed["start"], sealed["end"]) == ("Y2", "20230701", "20240630")
-    assert sealed["result_ref"] == str(Path(sealed["result_ref"]))
-    reading = sealed["slice"]
-    assert reading["series"] == "active" and reading["years"] == pytest.approx(reading["days"] / 244)
-    assert reading["bar"] == pytest.approx(1.6449 / (reading["days"] / 244) ** 0.5, abs=1e-3)
-    assert reading["reasons"] == (
-        [] if reading["residual_information_ratio"] >= reading["bar"] else ["sealed_residual_ir_below_bar"]
-    )
+    # One continuous forward and Held-out replay; the validation years are
+    # not replayed again.
+    [request] = evaluator.requests
+    assert "sealed" not in record
     assert (request.mode, request.start, request.end) == ("heldout", "20240701", RELEASE_END)
     assert request.continuation == (f"replay/heldout/20250701_{RELEASE_END}",)
     assert request.revision.revision_id == frozen["artifact_id"]
@@ -724,29 +814,42 @@ def test_the_forward_replay_is_one_span_from_forward_start_to_the_release(tmp_pa
     assert (forward["start"], forward["end"]) == ("20240701", "20250630")
     assert (heldout["start"], heldout["end"]) == ("20250701", RELEASE_END)
     assert forward["activity"]["round_trips"] > 0
-    # Both slices are read and reported, their residual reading beside them.
+    # Both slices are read and reported, their residual reading beside them;
+    # nothing in the record judges.
     for block in (forward, heldout):
         assert "reasons" not in block and block["residual_reading"]["series"] == "active"
-    # The verdict is the sealed gate's alone, under the arm's own rules, and
-    # the record states them.
+    assert "verdict" not in record
     rules = CONFIG_ACCEPTANCE.to_record()
     assert record["initial_cash"] == CONFIG_PROFILE.initial_cash
     assert record["acceptance_rules"] == rules
-    assert record["verdict"]["thresholds"] == reading["thresholds"]
-    assert record["verdict"]["reasons"] == reading["reasons"]
     assert forward["parameters"]["cost_stress_multiplier"] == rules["cost_stress_multiplier"]
     assert set(forward["mandate"]) == {"tracking_error", "market_beta"}
     assert record["refits_executed"] == {"forward": 0, "heldout": 0}
-    assert record["verdict"]["status"] == ("discarded" if reading["reasons"] else "graduated")
-    assert experiment_verdict(ledger.read())["status"] == record["verdict"]["status"]
+    # The readout: the rolling record the host completed, read as one series
+    # with its one-sided p-value, and the forward reading beside it.
+    readout = record["readout"]
+    assert readout["state"] == "frozen_with_record"
+    steps = pipeline.validation_steps()
+    assert (readout["record"]["steps"], readout["record"]["candidate_changes"]) == (steps.count, 0)
+    assert (readout["record"]["start"], readout["record"]["end"]) == (steps.start, steps.end)
+    assert readout["record"]["years"] == pytest.approx(readout["record"]["days"] / 244)
+    assert readout["record"]["bar"] == pytest.approx(1.6449 / readout["record"]["years"] ** 0.5, abs=1e-3)
+    assert 0.0 <= readout["record"]["p_value"] <= 1.0
+    assert readout["forward"] == {
+        "lower_bound": forward["lower_bound"],
+        "residual_reading": forward["residual_reading"],
+        "strategy_error": None,
+    }
+    assert experiment_verdict(ledger.read()) == {"status": "frozen_with_record", "reasons": []}
+    assert paper_candidate(ledger.read())["artifact_id"] == frozen["artifact_id"]
     assert forward_record(ledger.read())["run_id"] == record["run_id"]
     with pytest.raises(RuntimeError, match="already recorded"):
         pipeline.run_forward()
 
 
 def test_the_forward_replay_trades_under_the_arms_own_cost_model(tmp_path: Path):
-    """The verdict replays the frozen book on the Broker profile its arm was
-    created with, the dividend tax included, not on today's defaults."""
+    """The forward stage replays the frozen book on the Broker profile its arm
+    was created with, the dividend tax included, not on today's defaults."""
 
     taxed = replace(CONFIG_PROFILE, dividend_tax=True)
     pipeline, _snapshots, evaluator, _developer, _ledger = _pipeline(
@@ -757,9 +860,8 @@ def test_the_forward_replay_trades_under_the_arms_own_cost_model(tmp_path: Path)
     pipeline.run_research_session()
     evaluator.requests.clear()
     pipeline.run_forward()
-    # The sealed reading and the forward replay alike.
-    assert len(evaluator.requests) == 2
-    assert all(request.broker_profile == taxed for request in evaluator.requests)
+    [request] = evaluator.requests
+    assert request.broker_profile == taxed
 
 
 def test_a_moved_arm_replays_the_artifact_its_frozen_block_names(tmp_path: Path):
@@ -830,9 +932,14 @@ def test_the_forward_replay_writes_nothing_a_session_can_read(tmp_path: Path):
     [StrategyRaised("boom"), StrategyMemoryExceeded("killed at the 32g memory cap")],
     ids=["raised", "memory_cap"],
 )
-def test_a_strategy_error_names_the_slice_it_raised_in_and_discards(
+def test_a_strategy_error_names_the_slice_it_raised_in_and_is_a_reading(
     tmp_path: Path, cause: StrategyRaised
 ):
+    """The frozen book's own exception during the forward replay is a reading:
+    the record names the slice it raised in, the readout's forward block
+    carries it in place of a lower bound, the rolling record stands, and no
+    Paper book can continue a replay that did not complete."""
+
     pipeline, _snapshots, evaluator, _developer, ledger = _freezing(tmp_path)
     pipeline.run_research_session()
     failure = BacktestError(
@@ -845,37 +952,21 @@ def test_a_strategy_error_names_the_slice_it_raised_in_and_discards(
     record = pipeline.run_forward()
 
     assert (record["status"], record["strategy_error"]) == ("strategy_error", "heldout")
-    assert record["slices"] is None
-    # The book raised in its sealed replay too: no reading there, a failed
-    # sealed gate, and the forward replay still ran and raised.
-    assert record["sealed"]["result_ref"] is None
-    assert record["sealed"]["slice"]["strategy_error"] is True
-    assert record["verdict"] == {
-        "status": "discarded",
-        "reasons": ["sealed_strategy_error", "heldout_strategy_error"],
-        "thresholds": {},
-    }
-    assert experiment_verdict(ledger.read())["status"] == "discarded"
-    assert paper_candidate(ledger.read()) is None
-
-    # A book that passed its sealed gate and raised only in Held-out is
-    # discarded too, and no Paper book is opened for it.
-    pipeline, _snapshots, evaluator, _developer, ledger = _freezing(tmp_path / "late")
-    pipeline.run_research_session()
-    evaluator.raise_with, evaluator.raise_in = failure, "heldout"
-    record = pipeline.run_forward()
-    assert (record["status"], record["strategy_error"]) == ("strategy_error", "heldout")
-    assert record["sealed"]["slice"]["reasons"] == []
-    assert record["verdict"]["status"] == "discarded"
-    assert record["verdict"]["reasons"] == ["heldout_strategy_error"]
-    assert experiment_verdict(ledger.read())["status"] == "discarded"
+    assert record["slices"] is None and "sealed" not in record and "verdict" not in record
+    readout = record["readout"]
+    assert readout["state"] == "frozen_with_record"
+    assert readout["forward"]["strategy_error"]["slice"] == "heldout"
+    assert str(cause) in readout["forward"]["strategy_error"]["error"]
+    assert readout["forward"]["lower_bound"] is None and readout["forward"]["residual_reading"] is None
+    assert readout["record"]["steps"] == 0 and readout["record"]["unmeasured"]
+    assert experiment_verdict(ledger.read()) == {"status": "frozen_with_record", "reasons": []}
     assert paper_candidate(ledger.read()) is None
 
 
-def test_an_environment_failure_fails_the_attempt_and_leaves_no_verdict(tmp_path: Path):
-    """A host failure of the sealed replay is a forward-stage failure: the
+def test_an_environment_failure_fails_the_attempt_and_leaves_no_readout(tmp_path: Path):
+    """A host failure of the forward replay is a forward-stage failure: the
     research session stays finished and is never run again, and the retry
-    reads the sealed years afresh."""
+    replays forward afresh."""
 
     pipeline, _snapshots, evaluator, developer, ledger = _freezing(tmp_path)
     research = pipeline.run_research_session()
@@ -885,9 +976,9 @@ def test_an_environment_failure_fails_the_attempt_and_leaves_no_verdict(tmp_path
     with pytest.raises(TimeoutError):
         pipeline.run_forward()
 
-    # The first replay the stage asked for was the sealed year's.
-    [sealed_request] = evaluator.requests
-    assert (sealed_request.start, sealed_request.end) == ("20230701", "20240630")
+    # The one replay the stage asked for was the forward span's.
+    [request] = evaluator.requests
+    assert (request.start, request.end) == ("20240701", RELEASE_END)
     [failed] = [row for row in ledger.read() if row["record_type"] == "attempt_failed"]
     assert (failed["phase"], failed["session_key"]) == ("forward", "forward")
     assert forward_record(ledger.read()) is None
@@ -901,7 +992,7 @@ def test_an_environment_failure_fails_the_attempt_and_leaves_no_verdict(tmp_path
     with pytest.raises(RuntimeError, match="research is over"):
         pipeline.run_research_session()
     assert len(developer.requests) == 1
-    # The retry reads the sealed year again and records the verdict.
+    # The retry replays forward again and records the readout.
     evaluator.raise_with = None
     assert pipeline.run_forward()["status"] == "ok"
 
