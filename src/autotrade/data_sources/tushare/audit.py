@@ -1943,7 +1943,7 @@ def audit_text_dataset(raw_dir: Path, spec: DatasetSpec, expected_paths: set[Pat
 
 def text_pit_rules() -> dict[str, dict[str, str]]:
     return {
-        "anns_d": {"available_at": "rec_time; if missing, treat ann_date as visible only after close or next session", "unit": "text/url, no numeric unit"},
+        "anns_d": {"available_at": "rec_time within -1..+3 days of ann_date and not a bare midnight date; otherwise ann_date 23:59:59", "unit": "text/url, no numeric unit"},
         "major_news": {"available_at": "pub_time", "unit": "text"},
         "news": {"available_at": "datetime", "unit": "text"},
         "cctv_news": {"available_at": "date at 23:59:59+08:00 conservative fallback", "unit": "text"},

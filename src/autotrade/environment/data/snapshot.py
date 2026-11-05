@@ -37,6 +37,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from autotrade.common.records import read_json_object
@@ -2201,19 +2202,25 @@ class SnapshotBuilder:
             for key in body_columns[1:]:
                 bodies = bodies + "\n" + rows[key].fillna("").astype(str)
             bodies = bodies.str.slice(0, config.text_body_chars)
-            # Same-document duplicates collapse to the earliest copy BEFORE
-            # text_id assignment: re-ingested rows otherwise get distinct
-            # text_ids that occupy bounded retrieval slots and inflate evidence
-            # counts (measured over a 21-month window: anns_d 38%, major_news
-            # 9% duplicate rows). Only datasets with a measured duplication
-            # mechanism and a safe identity are deduplicated.
+            # Same-document duplicates collapse to one copy BEFORE text_id
+            # assignment: re-ingested rows otherwise get distinct text_ids that
+            # occupy bounded retrieval slots and inflate evidence counts
+            # (anns_d: 1.5-1.9 rows per filing in 2015-2024; major_news: 9 %
+            # duplicate rows over a 21-month window). Only datasets with a
+            # measured duplication mechanism and a safe identity are
+            # deduplicated. Copies of one filing go first (_anns_filing_rows);
+            # the earliest-copy rule below takes what remains.
+            if dataset == "anns_d":
+                filings = _anns_filing_rows(rows)
+                rows, titles, bodies = rows[filings], titles[filings], bodies[filings]
             if dataset == "news":
                 # Cross-source duplicate flashes; identity is the truncated
                 # body content compared directly.
                 identity = bodies
             elif dataset == "anns_d":
-                # body = title + url (the url carries the filing id; measured
-                # 0 blank urls); ts_code keeps joint announcements distinct.
+                # body = title + url; ts_code keeps joint announcements
+                # distinct. Left after the filing identity: an id-less
+                # title and url repeated on another ann_date.
                 identity = rows["ts_code"].fillna("").astype(str) + "|" + bodies
             elif dataset == "major_news":
                 # body = title + content; literal re-ingested pushes.
@@ -2438,6 +2445,68 @@ class SnapshotBuilder:
 
 
 SW2021_EFFECTIVE_DAY = "20211213"  # Shenwan indices switched to the 2021 classification on this day
+
+
+# The cninfo announcement id in an anns_d url: ``announcementId=N`` on the
+# detail page, ``finalpage/<date>/N.PDF`` (also .pdf/.JPG) on the file server.
+# The dataclouds/obs copies hold a uuid instead and have none.
+_ANNS_ID = r"(?:announcementId=|finalpage/\d{4}-\d{2}-\d{2}/)(\d+)"
+# What a copy prepends to a title: a short ``[临时公告]``/``【...】`` tag, then
+# a ``简称：`` prefix. Both widths are spelled out, so the patterns read a raw
+# title and an NFKC-folded one alike.
+_TITLE_TAG = r"^\s*(?:[\[［][^\]］]{0,10}[\]］]|【[^】]{0,10}】)"
+_TITLE_PREFIX = r"^[^:：]{1,15}[:：]"
+
+
+def _anns_filing_rows(rows: pd.DataFrame) -> pd.Series:
+    """Mask keeping one ``anns_d`` row per filing.
+
+    Before 2025 the vendor sends most filings two or three times on one
+    ann_date: a plain and a ``简称：``/``[临时公告]XX:``-prefixed title, an
+    ``announcementId=N`` and a ``finalpage/.../N.PDF`` url, and from 2021 a
+    dataclouds copy whose url holds a uuid (from 2025-01 one row each;
+    ``logs/research_audit_20261102/audit_anns_titles.md``). A filing is the
+    ts_code plus the cninfo id. A row without an id joins the id row of its
+    ts_code, ann_date and normalised title (the smallest id when several share
+    it), else groups with the id-less rows of that title. Normalising folds
+    NFKC and strips the tag, the prefix and every non-word character, but no
+    摘要/英文版 suffix: those are separate documents. Of a filing's copies the
+    unprefixed title is kept, then the shorter one without edge whitespace (a
+    plain title with its own colon, ``H股公告：...``, beside its ``简称：``
+    copy), then the earliest available_at, then a url with the id, then the
+    smallest url.
+    """
+    code = rows["ts_code"].fillna("").astype(str)
+    title = rows["title"].fillna("").astype(str)
+    url = rows["url"].fillna("").astype(str)
+    filing = code + "|" + url.str.extract(_ANNS_ID, expand=False)
+    idless = filing.isna()
+    if idless.any():
+        # Only the stock-days holding an id-less row need the normalised title.
+        day = code + "|" + rows["ann_date"].astype(str)
+        near = day.isin(day[idless])
+        folded = title[near].str.normalize("NFKC")
+        bare = folded.str.replace(_TITLE_TAG, "", regex=True).str.replace(_TITLE_PREFIX, "", regex=True)
+        same = day[near] + "|" + bare.str.replace(r"[\W_]+", "", regex=True)
+        twins = pd.DataFrame({"same": same, "filing": filing[near]}).dropna().sort_values("filing")
+        twins = twins.drop_duplicates("same")
+        alone = same[idless[near]]
+        joined = alone.map(pd.Series(twins["filing"].to_numpy(), index=twins["same"].to_numpy()))
+        filing[idless] = joined.fillna("~" + alone)
+    keys = pa.table({
+        "filing": filing.to_numpy(dtype=object),
+        "prefixed": title.str.contains(f"{_TITLE_TAG}|{_TITLE_PREFIX}", regex=True).to_numpy(),
+        "length": title.str.strip().str.len().to_numpy(),
+        "available_at": rows["available_at"].astype(str).to_numpy(dtype=object),
+        "idless": idless.to_numpy(),
+        "url": url.to_numpy(dtype=object),
+    })
+    # Arrow's stable multi-key sort; pandas sorts these string keys ~7x slower.
+    order = pc.sort_indices(keys, sort_keys=[(name, "ascending") for name in keys.column_names]).to_numpy()
+    ranked = filing.to_numpy(dtype=object)[order]
+    keep = np.zeros(len(rows), dtype=bool)
+    keep[order[np.r_[True, ranked[1:] != ranked[:-1]]]] = True
+    return pd.Series(keep, index=rows.index)
 
 
 def _require_event_months(

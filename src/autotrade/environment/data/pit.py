@@ -310,13 +310,11 @@ def _first_seen_cn(stamps: pd.Series) -> pd.Series:
     return pd.to_datetime(stamps, utc=True, format="ISO8601").dt.ceil("s").dt.tz_convert(CN_TZ)
 
 
-def first_seen_later(path: Path, frame: pd.DataFrame, available_at: pd.Series) -> pd.Series | None:
+def first_seen_at(path: Path, frame: pd.DataFrame) -> pd.Series | None:
     """When the lake first held each row of ``frame``, the visible partition at
-    ``path``, where that is later than the row's vendor-rule ``available_at``.
-
-    A CN timestamp per row, NaT where the key was visible before versioning
-    started (no observation row) or was first seen no later than its stamp:
-    such a row keeps the vendor rule. ``None`` when no row is first seen later."""
+    ``path``: a CN timestamp per row, NaT where the key was visible before
+    versioning started (no observation row). ``None`` when the partition keeps
+    no first-seen rows."""
     observed = read_observations(path)
     if observed.empty:
         return None
@@ -324,7 +322,19 @@ def first_seen_later(path: Path, frame: pd.DataFrame, available_at: pd.Series) -
     seen_at = _first_seen_cn(observed[FIRST_SEEN_COLUMN]).set_axis(
         pd.Index(join_columns(observed[keys].astype(str), keys))
     )
-    seen = key_strings(frame, keys).map(seen_at)
+    return key_strings(frame, keys).map(seen_at)
+
+
+def first_seen_later(path: Path, frame: pd.DataFrame, available_at: pd.Series) -> pd.Series | None:
+    """When the lake first held each row of ``frame``, the visible partition at
+    ``path``, where that is later than the row's vendor-rule ``available_at``.
+
+    A CN timestamp per row, NaT where the key was visible before versioning
+    started (no observation row) or was first seen no later than its stamp:
+    such a row keeps the vendor rule. ``None`` when no row is first seen later."""
+    seen = first_seen_at(path, frame)
+    if seen is None:
+        return None
     later = seen > to_cn_timestamps(available_at)
     return seen.where(later) if later.any() else None
 
